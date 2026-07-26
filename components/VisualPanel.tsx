@@ -3,7 +3,7 @@
 import { getMethod } from "@/lib/methods";
 import { finePublicationGateDiagnostics } from "@/lib/octree-fine-publication-diagnostics";
 import { isOctreeTechniqueOverlayMode } from "@/lib/octree-technique-debug";
-import { PAPER_VISUAL_PRESETS, paperPipelineStages, paperSection5SpatialFailures, paperVisualAuthority } from "@/lib/paper-pipeline-diagnostics";
+import { PAPER_VISUAL_PRESETS, paperPipelineStages, paperVisualAuthority } from "@/lib/paper-pipeline-diagnostics";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore } from "@/lib/stores/method-store";
 import { useUIStore } from "@/lib/stores/ui-store";
@@ -53,7 +53,6 @@ export function VisualPanel() {
   const paperVolumeCapable = paperTechniqueMode && gridOverlayMode !== "global-fine-phi";
   const paperStages = paperPipelineStages(gpuInfo, waterSurfacePresentation);
   const activePaperVisual = paperVisualAuthority(gridOverlayMode, gridOverlayAxis, paperStages, gpuInfo);
-  const section5SpatialFailures = paperSection5SpatialFailures(gpuInfo);
   const encodedSteps = gpuInfo?.encodedSteps ?? 0;
   const t0SceneReady = gpuInfo?.initialSparseAuthorityReady === true
     && gpuInfo?.initialRasterSurfaceReady === true;
@@ -85,12 +84,7 @@ export function VisualPanel() {
     transportCommitted: gpuInfo?.globalFineTransportCommitted,
     transportOutside: gpuInfo?.globalFineTransportDepartureOutsideBand,
     transportUnavailable: gpuInfo?.globalFineTransportVelocityUnavailable,
-    transportFaceBandUnavailable: gpuInfo?.globalFineTransportFaceBandUnavailable,
-    faceBandFlags: gpuInfo?.globalFineFaceBandFlags,
-    faceBandTransitionFlags: gpuInfo?.globalFineFaceBandTransitionFlags,
-    faceBandPowerFlags: gpuInfo?.globalFineFaceBandPowerPublicationFlags,
-    faceBandTransientFlags: gpuInfo?.globalFineFaceBandTransientPowerFlags,
-    faceBandPointFlags: gpuInfo?.globalFineFaceBandPointFieldFlags,
+    transportStructuredAuthorityUnavailable: gpuInfo?.globalFineTransportStructuredAuthorityUnavailable,
   });
   const selectOverlayMode = (mode: Parameters<typeof setGridOverlayMode>[0]) => {
     // Full-volume drawing is intentionally limited to the compact paper
@@ -115,10 +109,6 @@ export function VisualPanel() {
     setGridOverlayAxis(preset.axis);
     if (preset.renderer) setSvoRenderMode(preset.renderer);
     if (preset.voxels) setVoxelRenderMode(preset.voxels);
-  };
-  const inspectSection5Failure = (mode: Parameters<typeof setGridOverlayMode>[0]) => {
-    setGridOverlayMode(mode);
-    setGridOverlayAxis(isOctreeTechniqueOverlayMode(mode) ? "volume" : "z");
   };
 
   return <aside className="right-panel panel-scroll visual-panel" data-testid="visual-panel">
@@ -209,14 +199,6 @@ export function VisualPanel() {
           <strong>{preset.label}</strong><small>{preset.description}</small>
         </button>)}
       </div>
-      <div className="section-heading technique-heading"><h2>Section 5 spatial audit</h2><span>BOUNDED CONTROL + LIVE OVERLAYS</span></div>
-      <div className="paper-spatial-audit" role="list" aria-label="Section 5 spatial failure audit">
-        {section5SpatialFailures.map((item) => <div className={`paper-spatial-row spatial-${item.state.toLowerCase()}`} role="listitem" key={item.id} data-spatial-stage={item.id}>
-          <div><strong>{item.label}</strong><small>{item.counts}{item.first ? ` · ${item.first}` : ""}</small></div>
-          <span>{item.state}</span>
-          <button onClick={() => inspectSection5Failure(item.inspectMode)} disabled={item.state === "WAITING"}>Inspect</button>
-        </div>)}
-      </div>
       <small className="control-hint">Green is current GPU authority. Amber is provisional. Purple STALE and red REJECTED products are never presented as current. These views reuse exact solver publications and add no dense readback.</small>
     </section>}
 
@@ -267,7 +249,6 @@ export function VisualPanel() {
             <button className={gridOverlayMode === "octree-lifecycle" ? "active" : ""} onClick={() => selectOverlayMode("octree-lifecycle")}>Octree lifecycle</button>
             <button className={gridOverlayMode === "fine-band-lifecycle" ? "active" : ""} aria-label="Inspect fine band and interface seeds" onClick={() => selectOverlayMode("fine-band-lifecycle")}>Fine band</button>
             <button className={gridOverlayMode === "global-fine-phi" ? "active" : ""} aria-label="Inspect global fine phi values and Eikonal residual" onClick={() => { setGridOverlayMode("global-fine-phi"); if (gridOverlayAxis === "volume") setGridOverlayAxis("z"); }}>Fine φ values</button>
-            <button className={gridOverlayMode === "section5-face-band" ? "active" : ""} aria-label="Inspect Section 5 closest-point extension" onClick={() => selectOverlayMode("section5-face-band")}>Closest points</button>
           </div>
           <small className="control-hint" data-testid="fine-publication-gates">{finePublicationGates.map((gate) =>
             `${gate.state === "ready" ? "✓" : gate.state === "failed" ? "✕" : gate.state === "not-required" ? "–" : "…"} ${gate.label}${gate.state === "failed" ? ` (${gate.detail})` : ""}`
@@ -287,7 +268,7 @@ export function VisualPanel() {
     </section>
 
     {overlayActive && <section className="panel-section grid-key" data-testid="grid-legend">
-      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {volumeOverlay ? "FULL VOLUME" : `${gridOverlayAxis.toUpperCase()} SLICE`}{gridOverlayMode !== "structure" ? ` · ${{ resolution: "COMPACT LEAF LEVEL", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: octree ? "PRESSURE POTENTIAL dt·p/ρ" : "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU", "power-cells": "POWER SITES / CELLS", "power-faces": "POWER PRIMAL-DUAL GEOMETRY", "delaunay-tetrahedra": "LOCAL DELAUNAY TETRAHEDRA", "transition-band": "BOUNDARY / LEVEL TRANSITIONS", "power-operator": "POWER LAPLACIAN COEFFICIENTS", "octree-lifecycle": "OCTREE REBUILD LIFECYCLE", "fine-band-lifecycle": "FINE-BAND PUBLICATION LIFECYCLE", "global-fine-phi": "PAPER FINE φ / |∇φ|−1", "section5-face-band": "SECTION 5 CLOSEST-POINT EXTENSION", "operator-diagonal": "OPERATOR DIAGONAL", "operator-rhs": "OPERATOR RIGHT-HAND SIDE", "operator-reciprocity": "FACE RECIPROCITY AUDIT", "operator-open-fraction": "FACE OPEN FRACTION", "tetra-validity": "TETRAHEDRON VALIDITY" }[gridOverlayMode]}` : ""}</strong>
+      <strong>{gridKind === "restricted-tall-cell" ? "TALL-CELL GRID" : gridKind === "quadtree-tall-cell" ? "QUADTREE TALL-CELL GRID" : gridKind === "octree" ? "OCTREE GRID" : "UNIFORM GRID"} · {volumeOverlay ? "FULL VOLUME" : `${gridOverlayAxis.toUpperCase()} SLICE`}{gridOverlayMode !== "structure" ? ` · ${{ resolution: "COMPACT LEAF LEVEL", optical: "OPTICAL LAYER", cfl: "CFL LOAD", speed: "SPEED", representation: "PRESSURE COVERAGE", phi: "LEVEL SET φ", divergence: "POST-PROJECTION DIVERGENCE", pressure: octree ? "PRESSURE POTENTIAL dt·p/ρ" : "MAPPED PRESSURE", projection: "PRESSURE UPDATE ΔU", "power-cells": "POWER SITES / CELLS", "power-faces": "POWER PRIMAL-DUAL GEOMETRY", "delaunay-tetrahedra": "LOCAL DELAUNAY TETRAHEDRA", "transition-band": "BOUNDARY / LEVEL TRANSITIONS", "power-operator": "POWER LAPLACIAN COEFFICIENTS", "octree-lifecycle": "OCTREE REBUILD LIFECYCLE", "fine-band-lifecycle": "FINE-BAND PUBLICATION LIFECYCLE", "global-fine-phi": "FINE φ / |∇φ|−1", "operator-diagonal": "OPERATOR DIAGONAL", "operator-rhs": "OPERATOR RIGHT-HAND SIDE", "operator-reciprocity": "FACE RECIPROCITY AUDIT", "operator-open-fraction": "FACE OPEN FRACTION", "tetra-validity": "TETRAHEDRON VALIDITY" }[gridOverlayMode]}` : ""}</strong>
       {gridOverlayMode === "structure" && <>
         {tall && <span><i className="sw sw-tall" />tall cell · liquid</span>}
         {tall && <span><i className="sw sw-tall-dry" />tall cell · air</span>}
@@ -359,16 +340,6 @@ export function VisualPanel() {
         <span><i className="sw" style={{ background: "#ffffff" }} />white · φ=0 crossing</span>
         <span><i className="sw" style={{ background: "#ff0610" }} />red · stale/rejected redistance or missing stencil neighbor inside resident support</span>
         <span>Direct factor-m Section 5 signed-distance samples. Residual next to the white zero crossing audits redistancing; interior equal-distance ridges are nondifferentiable. This slice does not show the separate engineering volume-correction estimate.</span>
-      </>}
-      {gridOverlayMode === "section5-face-band" && <>
-        <span><i className="sw" style={{ background: "#f51680" }} />pink · interface-core owner row</span>
-        <span><i className="sw" style={{ background: "#f5610c" }} />orange · first support closure</span>
-        <span><i className="sw" style={{ background: "#8a34c2" }} />violet · deeper Delaunay support</span>
-        <span><i className="sw" style={{ background: "#297ae0" }} />blue · terminal endpoint with committed parent-edge φ</span>
-        <span><i className="sw" style={{ background: "#15c8b0" }} />cyan · closest-point-resolved face velocity</span>
-        <span><i className="sw" style={{ background: "#e31fb8" }} />magenta · unresolved or invalid-φ face</span>
-        <span><i className="sw" style={{ background: "#ff0610" }} />red · first reported row/face key or malformed publication</span>
-        <span>Direct GPU view of the regular-face rows, incidence list, φ ordering and closest-point extension used before republishing to power faces. The spatial audit reports closest-point and liquid-only interpolation failures directly.</span>
       </>}
       {gridOverlayMode === "operator-diagonal" && <>
         <span><i className="sw" style={{ background: "linear-gradient(90deg,#15489a,#18bf8c,#ed2d12)" }} />positive pressure diagonal · blue low, teal mid, red high</span>

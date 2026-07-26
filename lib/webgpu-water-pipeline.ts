@@ -1237,7 +1237,7 @@ export class RasterWaterPipeline {
       const bytes = new ArrayBuffer(112); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
       u32.set([...source.sampleDimensions, source.brickResolution], 0);
       u32.set([...source.brickDimensions, source.samplesPerBrick], 4);
-      u32.set([source.pageCapacity, 5, source.pageCapacity, source.generation], 8);
+      u32.set([source.pageCapacity, 7, source.pageCapacity, source.generation], 8);
       f32.set([...source.domainOrigin, source.fineCellWidth], 12); f32[16] = source.fineFactor;
       this.device.queue.writeBuffer(this.globalFineRenderParams, 0, bytes);
     }

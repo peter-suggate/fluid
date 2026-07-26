@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { octreeMethod, octreeSolverOptions } from "../lib/methods/octree";
+import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
 import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES } from "../lib/webgpu-octree";
@@ -65,7 +66,10 @@ test("Dawn constructs the exact production power UI graph at the portable storag
 
   const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
   requiredLimits.maxStorageBuffersPerShaderStage = PORTABLE_STORAGE_BUFFER_LIMIT;
-  const device = await adapter.requestDevice({ requiredLimits });
+  const requiredFeatures = fluidExecutionDeviceFeatures(adapter.features);
+  assert.ok(requiredFeatures.includes("subgroups"),
+    "the production construction gate requires the M1 Max subgroup feature");
+  const device = await adapter.requestDevice({ requiredLimits, requiredFeatures });
   retainedDevices.push(device);
   assert.equal(device.limits.maxStorageBuffersPerShaderStage, PORTABLE_STORAGE_BUFFER_LIMIT,
     "the regression must not inherit a non-portable adapter storage-buffer limit");
@@ -141,11 +145,12 @@ test("Dawn constructs the exact production power UI graph at the portable storag
       [24, 18, 16],
       "the construction gate must retain the exact browser dam-break lattice",
     );
-    assert.ok(solver.powerFaceSource, "production power-face authority was not constructed");
+    assert.ok(solver.structuredVelocityControl,
+      "production structured velocity authority was not constructed");
+    assert.ok(solver.structuredBoundaryControl,
+      "production structured boundary authority was not constructed");
     assert.ok(solver.globalFineLevelSetSource, "production global-fine authority was not constructed");
     assert.equal(solver.globalFineLevelSetSource.plan.fineFactor, 4);
-    assert.ok(solver.globalFineFaceBandControl,
-      "production Section 5 face-band authority was not constructed");
     assert.equal(solver.initialSparseAuthorityReady, false,
       "a no-submit construction audit must not claim published t=0 authority");
   } finally {

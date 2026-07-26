@@ -31,9 +31,11 @@ test("worldless allocation owns one scheduler and exposes compact inspection ins
   assert.match(source, /if \(this\.sparseBrickWorld\) this\.sparseBrickWorld\.destroy\(\); else this\.topologyResidency\.destroy\(\);/);
 });
 
-test("post-bootstrap topology scheduling comes directly from adaptive candidates", () => {
+test("post-bootstrap topology scheduling comes only from adaptive candidates", () => {
   assert.match(source, /this\.topologyResidency\.encodeFineSeedCandidates\([\s\S]*source\.leaves, source\.candidates\.candidates, source\.candidates\.countAndDispatch/);
-  assert.match(source, /if \(!this\.sparseBrickWorld\) \{[\s\S]*this\.topologyResidency\.encode\(encoder, this\.levelSetTexture/);
+  const recurring = source.slice(source.indexOf("encodeSparseBrickWorld"), source.indexOf("destroy()", source.indexOf("encodeSparseBrickWorld")));
+  assert.doesNotMatch(recurring, /topologyResidency\.encode\(encoder/,
+    "the dense bootstrap classifier must not survive as a recurring fallback");
 });
 
 test("deep-liquid residency is explicit and the retired dense atlas cannot be selected", () => {

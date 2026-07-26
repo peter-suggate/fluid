@@ -64,10 +64,10 @@ test("piecewise trace resamples injected octree velocity once per fine-ratio seg
   assert.ok(Math.abs(trace.departure[0] - 0.31640625) < 1e-12);
 });
 
-test("WebGPU transport publishes the physical transport band in parameter word 26", () => {
+test("WebGPU transport publishes the fine-cell transport band in parameter word 22", () => {
   const source = WebGPUFineLevelSetTransport.prototype.encode.toString();
-  assert.match(source, /floats\[26\]\s*=\s*transportBandCells\s*\*\s*this\.source\.plan\.fineCellWidth/);
-  assert.doesNotMatch(source, /floats\[25\]\s*=\s*transportBandCells/);
+  assert.match(source, /u\[22\]\s*=\s*band/);
+  assert.doesNotMatch(source, /floats\[26\]/);
 });
 
 test("fine advection uses at least factor segments and commits atomically", () => {

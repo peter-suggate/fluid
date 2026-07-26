@@ -36,15 +36,13 @@ function firstLoop(fn: string): string {
   assert.fail("unterminated WGSL loop");
 }
 
-test("octree owner fallback loops do not append unreachable tail returns", () => {
+test("octree owner synthesis loops are deleted", () => {
   for (const [label, source] of [
     ["projection", octreeProjectionShader],
     ["diagnostic overlay", octreeDiagnosticShader],
   ] as const) {
-    const fn = wgslFunction(source, "canonicalOwner");
-    assert.match(fn, /loop\s*\{/);
-    assert.doesNotMatch(firstLoop(fn), /\breturn\b/, `${label} canonicalOwner loop must exit with break`);
-    assert.equal(occurrences(fn, "return Owner("), 1, `${label} canonicalOwner must have one reachable tail return`);
+    assert.doesNotMatch(source, /fn canonicalOwner|canonicalOwner\(/,
+      `${label} must reject missing owner pages instead of synthesizing an owner`);
   }
 });
 

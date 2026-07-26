@@ -18,6 +18,11 @@ const validationErrors: string[] = [];
 device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
 
 const scene = createPaperScenario("dam-break-boxes");
+const containerTop = process.env.FLUID_CONTAINER_TOP;
+if (containerTop !== undefined && containerTop !== "open" && containerTop !== "closed") {
+  throw new Error("FLUID_CONTAINER_TOP must be open or closed");
+}
+if (containerTop !== undefined) scene.container.top = containerTop;
 const dt = scene.numerics.fixedDt_s;
 const target_s = Number(process.env.FLUID_TARGET_S ?? 0.3);
 const bodies = initializeRigidBodies(scene.rigidBodies);
@@ -40,7 +45,9 @@ const bodyMotion_m = bodies.map((_body, index) => {
   const offset = index * GPU_RIGID_RENDER_FLOATS, initial = initialCenters[index];
   return Math.hypot(records[offset] - initial.x, records[offset + 1] - initial.y, records[offset + 2] - initial.z);
 });
-const result = { scenario: "octree-resident-rigid-feedback", target_s, dt, bodyMotion_m, pressurePasses: info.quadtreePressureIterationsUsed, nonFiniteVelocityCount: info.nonFiniteCount ?? 0, validationErrors };
+const result = { scenario: "octree-resident-rigid-feedback", containerTop: scene.container.top,
+  target_s, dt, bodyMotion_m, pressurePasses: info.quadtreePressureIterationsUsed,
+  nonFiniteVelocityCount: info.nonFiniteCount ?? 0, validationErrors };
 console.log(JSON.stringify(result));
 assert.deepEqual(validationErrors, [], `WebGPU validation errors: ${validationErrors.join("; ")}`);
 assert.ok(Math.max(...bodyMotion_m) > 1e-4, "at least one resident dynamic body must move");

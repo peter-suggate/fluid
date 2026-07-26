@@ -57,6 +57,7 @@ function singletonOwnerPageArena(d: readonly [number, number, number]): Uint32Ar
   arena[OCTREE_OWNER_PAGE_CONTROL_WORDS.magic] = OCTREE_OWNER_ARENA_MAGIC;
   arena[plan.ownerRecordKeyOffsetWords] = 1;
   arena[plan.ownerRecordPageOffsetWords] = 1;
+  arena[plan.ownerDirectoryOffsetWords] = 1;
   for (let z = 0; z < 8; z += 1) {
     for (let y = 0; y < 8; y += 1) {
       for (let x = 0; x < 8; x += 1) {
@@ -258,7 +259,7 @@ test("paged descriptor decoding fails closed on missing and reserved owner words
     /encoded==0u\|\|encoded==INVALID\|\|encoded>capacity/,
     "a missing, reserved, or out-of-range page must invalidate descriptor publication");
   assert.match(octreePowerDescriptorShader,
-    /fn pagedOwnerPublicationValid\(\)->bool\{[\s\S]*accepted!=0u&&owners\[OWNER_PUBLICATION_STATUS\]==OWNER_PUBLICATION_READY[\s\S]*owners\[OWNER_OBSERVED_GENERATION\]==accepted&&owners\[OWNER_CANDIDATE_ERROR\]==0u[\s\S]*owners\[OWNER_INVALID_ENTRY_COUNT\]==0u&&resident<=capacity[\s\S]*owners\[OWNER_FREE_COUNT\]==capacity-resident/,
+    /fn pagedOwnerPublicationValid\(\)->bool\{[\s\S]*accepted!=0u&&\(owners\[OWNER_PUBLICATION_STATUS\]&0x7fffffffu\)==OWNER_PUBLICATION_READY[\s\S]*owners\[OWNER_OBSERVED_GENERATION\]==accepted&&owners\[OWNER_CANDIDATE_ERROR\]==0u[\s\S]*owners\[OWNER_INVALID_ENTRY_COUNT\]==0u&&resident<=capacity[\s\S]*owners\[OWNER_FREE_COUNT\]==capacity-resident/,
     "paged lookup admits only one internally complete immutable owner publication");
   assert.doesNotMatch(octreePowerDescriptorShader,
     /owners\[OWNER_ACCEPTED_GENERATION\]\s*[!=]=\s*generation\(\)|generation\(\)\s*[!=]=\s*owners\[OWNER_ACCEPTED_GENERATION\]|owners\[OWNER_ACCEPTED_GENERATION\]\s*[+-]\s*1u/,
@@ -305,10 +306,17 @@ test("paged descriptor authority is the owner arena's exact self-publication", (
     "truncated control cannot fall back to dense or a prior generation");
 });
 
-test("descriptor WGSL has bounded 18-slot queries and exact delta publication", () => {
+test("descriptor WGSL has bounded direct-owner queries and exact delta publication", () => {
+  assert.match(octreePowerDescriptorShader,
+    /let requested=rowDelta\[params\.delta\.x\]/,
+    "candidate rows must come from the immutable row-delta transaction");
+  assert.doesNotMatch(octreePowerDescriptorShader, /rowCountSource|@binding\(6\)/,
+    "the reused compaction arena must not remain a second candidate-count authority");
   assert.match(octreePowerDescriptorShader, /const DIRECTIONS:array<vec3i,18>/);
   assert.match(octreePowerDescriptorShader, /for\(var bit=0u;bit<18u;bit\+=1u\)/);
-  assert.match(octreePowerDescriptorShader, /while\(low<high\)/);
+  assert.match(octreePowerDescriptorShader,
+    /let encoded=owners\[directoryOffset\+logical\]/);
+  assert.doesNotMatch(octreePowerDescriptorShader, /while\(low<high\)/);
   assert.doesNotMatch(octreePowerDescriptorShader, /fn structuralChange\(\)->bool/);
   assert.match(octreePowerDescriptorShader, /fn stagePowerDescriptorDelta/);
   assert.match(octreePowerDescriptorShader, /fn prefixPowerDescriptorDelta/);
@@ -369,7 +377,7 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   const cold = createColdPowerRowPublication(device, 2, 2, 7);
   generator.encode(broker, headers, owners,
     {
-      dimensions: d, maximumLeafSize: 4, rowCountBuffer: cold.rowCount,
+      dimensions: d, maximumLeafSize: 4,
       generation: 7, rowDelta: cold.rowDelta,
     });
   broker.fence();
@@ -387,8 +395,6 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   // Poison the current header after a valid publication. The exact row-delta
   // carries row zero from the immutable generation and resolves no dirty row:
   // the reused descriptor must remain immutable while its generation advances.
-  const gpuCount = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(gpuCount, 0, new Uint32Array([1]));
   const deltaWords = new Uint32Array(24);
   deltaWords.set([1, 2, 1, 0, 1, 0, 0, 9, 0x5244_4c54, 0, 1, 1, 0, 1, 1, 0], 0);
   deltaWords[16] = 1;
@@ -401,7 +407,7 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   const reuseEncoder = device.createCommandEncoder();
   const reuseBroker = new PassBroker(reuseEncoder);
   generator.encode(reuseBroker, headers, owners, {
-    dimensions: d, maximumLeafSize: 4, rowCountBuffer: gpuCount, generation: 9,
+    dimensions: d, maximumLeafSize: 4, generation: 9,
     rowDelta: {
       rows: rowDelta, rowCapacity: 2, controlOffsetWords: 0, newToOldOffsetWords: 16,
       oldToNewOffsetWords: 18, dirtyRowsOffsetWords: 20, affectedRowsOffsetWords: 22,
@@ -424,10 +430,11 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   const capacityEncoder = device.createCommandEncoder();
   const capacityBroker = new PassBroker(capacityEncoder);
   const overflowingCold = createColdPowerRowPublication(device, 1, 1, 0);
-  device.queue.writeBuffer(overflowingCold.rowCount, 0, new Uint32Array([2]));
+  device.queue.writeBuffer(overflowingCold.rowDelta.rows,
+    overflowingCold.rowDelta.controlOffsetWords * 4, new Uint32Array([2]));
   capacityGenerator.encode(capacityBroker, headers, owners,
     {
-      dimensions: d, maximumLeafSize: 4, rowCountBuffer: overflowingCold.rowCount,
+      dimensions: d, maximumLeafSize: 4,
       rowDelta: overflowingCold.rowDelta,
     });
   capacityBroker.fence();
@@ -436,8 +443,10 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   device.queue.submit([capacityEncoder.finish()]); await device.queue.onSubmittedWorkDone();
   await capacityReadback.mapAsync(GPUMapMode.READ);
   const capacity = new Uint32Array(capacityReadback.getMappedRange().slice(0)); capacityReadback.unmap();
-  assert.equal(capacity[2], 1);
-  assert.equal(capacity[3], 1);
+  assert.ok(capacity[2] >= 1,
+    "every detected capacity/publication violation is counted; the candidate must fail closed");
+  assert.ok(capacity[3] < 2,
+    "the first rejected row must identify a row in the requested publication");
   assert.ok((capacity[4] & OCTREE_POWER_DESCRIPTOR_ERROR.capacity) !== 0);
   assert.deepEqual([...capacity.slice(8, 11)], [0, 1, 1]);
 
@@ -450,7 +459,7 @@ test("Dawn matches the CPU descriptor, preserves boundary metadata, and fails ca
   const malformedCold = createColdPowerRowPublication(device, 1, 1, 0);
   capacityGenerator.encode(malformedBroker, headers, paged,
     {
-      dimensions: d, maximumLeafSize: 4, rowCountBuffer: malformedCold.rowCount,
+      dimensions: d, maximumLeafSize: 4,
       rowDelta: malformedCold.rowDelta,
     });
   malformedBroker.fence();

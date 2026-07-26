@@ -46,6 +46,8 @@ test("launcher owns the child-process timeout and worker owns exclusive GPU clea
   assert.match(launcher, /leaving the exclusive GPU lock in place/);
   assert.match(launcher, /Never run Dawn and browser GPU validation concurrently/);
   assert.match(worker, /fluid-webgpu-exclusive\.lock/);
+  assert.match(worker, /fluidExecutionDeviceFeatures\(adapter\.features\)/,
+    "bring-up must request the same target execution features, including subgroups, as production");
   assert.match(worker, /stoppedBeforeTask: "solver\.warmup"/);
   assert.match(worker, /boundary = snapshot\.completed > lastInitializationCompleted \? "completed" : "starting"/,
     "every fenced warmup subphase must be visibly identified before and after submission");

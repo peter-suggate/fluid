@@ -1,393 +1,254 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP,
-  fineLevelSetFusedTransportPublicationWGSL,
+  FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS,
   planFineLevelSetGPUTransport,
+  planFineLevelSetGPUTransportPasses,
+  structuredFineLevelSetTransportWGSL,
   WebGPUFineLevelSetTransport,
 } from "../lib/webgpu-octree-fine-levelset-transport";
-import {
-  makeFineLevelSetProductionFusedTransportWGSL,
-} from "../lib/webgpu-octree-fine-levelset-fused-transport";
 
-function wgslFunction(source: string, name: string): string {
-  const shader = source.replace(/\s+/g, "");
-  const start = shader.indexOf(`fn${name}(`);
-  assert.notEqual(start, -1, `missing WGSL function ${name}`);
-  const open = shader.indexOf("{", start);
-  assert.notEqual(open, -1, `missing WGSL body for ${name}`);
-  let depth = 0;
-  for (let cursor = open; cursor < shader.length; cursor += 1) {
-    if (shader[cursor] === "{") depth += 1;
-    else if (shader[cursor] === "}" && --depth === 0) return shader.slice(start, cursor + 1);
-  }
-  assert.fail(`unterminated WGSL function ${name}`);
-}
+function compact(source: string) { return source.replace(/\s+/g, ""); }
 
-test("fused air transport consumes the retained power-generation clock", () => {
-  const source = WebGPUFineLevelSetTransport.prototype.encode.toString().replace(/\s+/g, "");
-  assert.match(source,
-    /fineGeneration:this\.source\.generation/,
-    "air-side extrapolation must validate the retained Section 5 face band, not the successor fine generation");
-});
-
-test("fine GPU timestamps attribute authorities, tracing, summaries, and commits separately", () => {
-  const source = WebGPUFineLevelSetTransport.prototype.encode.toString().replace(/\s+/g, "");
-  assert.match(source,
-    /PublishgroupedStage-Bandface-bandtransportauthorities.*encodeFusedAuthority.*encodeFusedAuthority.*groupedtransportauthoritiespublished.*Validateandpublishliveglobalfinedispatches.*finetransportdispatchesvalidated.*Publishcompleteglobalfinevelocitycache.*completefinevelocitycachepublished.*Tracecachedglobalfinecharacteristic.*cachedfinecharacteristictraced.*Traceexactbrick-classifiedfinecharacteristicfallback.*finecharacteristictraced.*Summarizeglobalfinedeparturechunk.*finedeparturechunksummarized.*Publishglobalfinetransport.*finetransportstatuspublished.*Commitglobalfinetransportphasemasks.*finetransportphasemaskscommitted/s,
-    "each expensive transport substage must own an independently timestampable compute pass");
-});
-
-test("cached fine tracing protects the interface and falls back on mixed velocity modes", () => {
-  const shader = makeFineLevelSetProductionFusedTransportWGSL();
-  const publish = wgslFunction(shader, "publishFineVelocityCache");
-  const interpolate = wgslFunction(shader, "trilinearCachedVelocity");
-  const trace = wgslFunction(shader, "transportFineCharacteristicCached");
-  const exactLane = wgslFunction(shader, "transportFineCharacteristicExact");
-  const exact = wgslFunction(shader, "transportFineCharacteristic");
-  assert.match(publish,
-    /interfaceGuard=f32\(params\.fineFactor\)\*params\.fineCellWidth.*sourcePhi=phi\[index\].*sourcePhi<=interfaceGuard\|\|sourcePhi>=pack\.transportBandDistance\+interfaceGuard.*cachedVelocity\[index\]\.w=bitcast<f32>\(0u\).*return/s,
-    "the cache must not run the exact sampler for protected samples the cached trace cannot consume");
-  assert.doesNotMatch(shader, /cachedVelocityStatus/,
-    "cached velocity and its exact mode/status must share one packed vec4 arena");
-  assert.match(wgslFunction(shader, "loadCachedVelocity"),
-    /packed=cachedVelocity\[i\].*status=bitcast<u32>\(packed\.w\)/s,
-    "cached status must be recovered bit-exactly from the packed velocity word");
-  assert.match(interpolate, /sampleMode=sampled\.status&STATUS_EXTRAPOLATED.*sampleMode!=mode/s,
-    "direct and extrapolated complete-velocity modes must never be blended");
-  assert.match(trace,
-    /interfaceGuard=f32\(params\.fineFactor\)\*params\.fineCellWidth.*sourcePhi<=interfaceGuard.*deferExact\(local,0u\)/s);
-  assert.match(trace,
-    /value\.x<=interfaceGuard.*deferExact\(local,0u\)/s,
-    "cached transport must not author liquid or the protected air-side zero-level-set neighborhood");
-  assert.match(trace,
-    /VELOCITY_VALID\)==0u.*deferExact\(local,status\)/s,
-    "cache misses and mixed velocity modes must publish an exact-lane marker");
-  assert.match(exact, /transportFineCharacteristicExact\(local,index,sourcePhi,origin\)/,
-    "cache-disabled and multi-chunk devices must retain the standalone exact entry point");
-  assert.match(exact,
-    /trajectoryPending\(lane\).*exactGroupPending=pending.*workgroupUniformLoad\(&exactGroupPending\)==0u.*return.*prepareFinePageCache/s,
-    "brick groups with no exact lanes must return before the 27-page cache is prepared");
-  assert.match(exact,
-    /pack\.pad0!=0u&&trajectoryPending\(local\)==0u.*return/s,
-    "a classified exact brick must still run only its marked lanes");
-  assert.match(exactLane,
-    /segment>=params\.fineFactor.*sampleCompleteVelocity\(position,directHint,&ownerCache\)/s,
-    "the hybrid helper must retain the exact m-segment Section 5 trace");
-  assert.match(wgslFunction(shader, "deferExact"),
-    /writeTrajectoryPending\(local,1u\).*writeTrajectoryOutcome\(local,PENDING_EXACT,status\)/s,
-    "pending state and the brick marker must share the packed trajectory arena");
-});
-
-test("fine departure diagnostics use a deterministic parallel two-level reduction", () => {
-  const queryCapacity = 24 * 18 * 16 * 4 ** 3;
-  const plan = planFineLevelSetGPUTransport(queryCapacity, queryCapacity);
+test("direct fine transport has one page-bounded structured authority path", () => {
+  const plan = planFineLevelSetGPUTransport(16_777_216, 4_096, 262_144);
+  assert.deepEqual(plan, {
+    queryCapacity: 16_777_216,
+    velocityChunkCapacity: 16_777_216,
+    chunkCount: 1,
+    topologyDeltaBytes: (8 + 2 * 262_144) * 4,
+    pageStatusBytes: 262_144 * 12,
+    worksetBytes: 128 + 262_144 * 4,
+    controlBytes: 64,
+    allocatedBytes: 256 + 262_144 * 12 + 128 + 262_144 * 4
+      + (8 + 2 * 262_144) * 4 + 64 + 2 * 512,
+  });
+  assert.deepEqual(planFineLevelSetGPUTransportPasses(plan, 8), {
+    chunkCount: 1, segmentCount: 64, passesPerSegment: 0, passesPerChunk: 1, encodedPasses: 10,
+  });
   assert.equal(FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP, 4_096);
-  assert.equal(plan.partialSummaryGroupsPerChunk, 108);
-  assert.equal(plan.partialSummaryBytes, 108 * 64);
-  const partial = wgslFunction(fineLevelSetFusedTransportPublicationWGSL,
-    "summarizeFineTransportChunk");
-  const finalize = wgslFunction(fineLevelSetFusedTransportPublicationWGSL,
-    "finalizeFineTransportChunkSummary");
-  assert.match(partial, /begin=wg\.x\*4096u.*partialSummaries/s);
-  assert.match(finalize, /for\(vargroup=lid;group<groups;group\+=64u\).*chunkSummaries/s);
-  assert.doesNotMatch(partial + finalize, /atomic/,
-    "summary ordering and first-error payload selection must remain deterministic");
 });
 
-test("production fused transport accepts only the physical input clock or its exact band predecessor", () => {
-  const shader = makeFineLevelSetProductionFusedTransportWGSL();
-  const clock = wgslFunction(shader, "fusedBandGenerationValid");
-  assert.match(clock,
-    /fine=sp\.fineGeneration&mask.*paramsFine=p\.generation&mask.*band=bandControl\(5u\)&mask.*power=p\.powerGeneration&mask.*predecessor=\(fine\+mask\)&mask.*returnparamsFine==fine&&\(band==fine\|\|\(power==fine&&band==predecessor\)\)/s,
-    "the packed production sampler must use the retained physical source clock and one exact predecessor");
-  assert.doesNotMatch(clock, /band[<>]=?|fine-band|predecessor-[1-9]/,
-    "two-old and arbitrary older face bands must remain rejected");
-
-  const sample = wgslFunction(shader, "sampleCompleteVelocity");
-  assert.match(sample,
-    /!fusedBandGenerationValid\(\)\|\|pointWord\(3u\)!=sp\.fineGeneration.*0x01000004u/s,
-    "a stale clock must retain the exact generation-failure diagnostic");
-  assert.match(sample,
-    /bandControl\(6u\)==VELOCITY_VALID&&fusedBandGenerationValid\(\).*pointWord\(3u\)==sp\.fineGeneration/s,
-    "extrapolated publication must recheck the bounded clock predicate");
+test("fine transport consumes the shared positive-air tag and vector authority", () => {
+  const construction = compact(WebGPUFineLevelSetTransport.toString());
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  assert.match(construction,
+    /air\.layout\.rowCapacity!==structured\.plan\.rowCapacity.*air\.arena\.size<air\.layout\.totalBytes/s);
+  assert.match(shader, /fntaggedVelocity\(tag:u32\)->vec4f/);
+  assert.match(shader, /\(tag&SUPPORT_TAG\)==0u.*canonicalVelocity\(tag\)/s);
+  assert.match(shader, /supportVectorOffset\/4u\+support/);
+  assert.doesNotMatch(shader, /@binding\(19\).*cpt|cpt\[/,
+    "the retired row-only extension must not bypass the support publication");
 });
 
-test("fused characteristic transport writes only live terminal outputs", () => {
-  const trace = wgslFunction(makeFineLevelSetProductionFusedTransportWGSL(),
-    "transportFineCharacteristicExact");
-  assert.doesNotMatch(trace, /writeTrajectoryPosition\(local,vec3f\(0\)/,
-    "trajectory positions must not be initialized or rewritten when diagnostics never consume them");
-  assert.equal(trace.match(/writeTrajectoryPosition\(local,position\)/g)?.length, 2,
-    "only invalid-status and departure terminals may publish a diagnostic position");
-  assert.match(trace,
-    /INVALID_STATUS\|VELOCITY_UNAVAILABLE.*writeTrajectoryOutcome\(local,.*writeTrajectoryPosition\(local,position\);return/s);
-  assert.match(trace,
-    /flags\|=DEPARTURE;workA\[index\]=sourcePhi;writeTrajectoryOutcome\(local,.*writeTrajectoryPosition\(local,position\);return/s);
-  assert.doesNotMatch(trace,
-    /letsourcePhi=phi\[index\];workA\[index\]=sourcePhi/,
-    "the transported narrow band must not write source phi before overwriting it at a terminal");
-});
-
-test("production fused transport maps exact owners through the direct identity table", () => {
-  const shader = makeFineLevelSetProductionFusedTransportWGSL();
-  const owner = wgslFunction(shader, "directOwner");
-  assert.match(owner,
-    /ownerAtCached\(q,ownerCache\).*ownerContains\(owner,q\).*directIdentityRow\(cell\(owner\.origin\),owner\.size\)/s,
-    "the independently published owner payload must provide the exact row origin and size");
-  assert.doesNotMatch(owner, /loop|while|directFind|maximumLeafSize\)\{break/,
-    "direct owner resolution must not retry every leaf size or search the sorted row directory");
-
-  const identity = wgslFunction(shader, "directIdentityRow");
-  assert.match(identity,
-    /rowOfIdentity\(cellKey,size\).*bandControl\(11u\).*published\.globalRow.*ROW_CORE.*direct\.cell==cellKey&&direct\.size==size/s,
-    "the dense band identity table must map only core rows to an exact packed direct descriptor");
-  assert.doesNotMatch(identity, /while|loop|directFind|directDirectory/,
-    "exact identity resolution must remain O(1)");
-  assert.doesNotMatch(shader, /fn directFind|fn directMorton|loadDirectDirectory/,
-    "the recurring transport shader must not retain its obsolete binary direct-row directory");
-
-  assert.match(wgslFunction(shader, "directNeighbor"), /directIdentityRow\(/,
-    "Delaunay neighbor vectors must use the exact direct identity path");
-  assert.match(wgslFunction(shader, "sampleDirectDescriptor"), /letnr=directIdentityRow\(/,
-    "uniform-cube corners must use the exact direct identity path");
-});
-
-test("direct identity transport validates owner and power publications on independent clocks", () => {
-  const shader = makeFineLevelSetProductionFusedTransportWGSL();
-  const authority = wgslFunction(shader, "directIdentityAuthorityValid");
-  assert.match(authority,
-    /dp\.generation==p\.powerGeneration.*pagedOwnerPublicationValid\(\).*bandControl\(0u\)==0u.*bandControl\(6u\)==VALID.*fusedBandGenerationValid\(\).*transitionWord\(5u\)==VALID.*transitionWord\(6u\)==VALID/s,
-    "the direct map must validate every authority using that authority's own publication contract");
-  assert.doesNotMatch(authority, /owners\[[^\]]+\]==p\.powerGeneration|p\.powerGeneration==owners\[/,
-    "the independently advancing owner epoch must never be compared with the power-face epoch");
-  assert.match(wgslFunction(shader, "ownerAtCached"),
-    /if\(\(\*cache\)\.y==key\).*else\{.*while\(low<high\)/s,
-    "the owner-page ABI may search only when a trajectory enters another 8-cubed page");
-});
-
-test("Dawn accepts the direct-identity fused transport pipeline", {
-  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for WGSL validation",
-}, () => {
-  const script = `
-    import {pathToFileURL} from "node:url";
-    import {makeFineLevelSetProductionFusedTransportWGSL} from
-      "./lib/webgpu-octree-fine-levelset-fused-transport.ts";
-    const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE).href);
-    Object.assign(globalThis,dawn.globals);
-    const gpu=dawn.create(["backend="+(process.env.WEBGPU_BACKEND??"metal")]);
-    const adapter=await gpu.requestAdapter();
-    if(!adapter)throw new Error("Dawn adapter unavailable");
-    const device=await adapter.requestDevice({
-      requiredLimits:{maxStorageBuffersPerShaderStage:10},
-    });
-    device.pushErrorScope("validation");
-    const module=device.createShaderModule({code:makeFineLevelSetProductionFusedTransportWGSL()});
-    const info=await module.getCompilationInfo();
-    const errors=info.messages.filter((message)=>message.type==="error");
-    if(errors.length)throw new Error(errors.map((message)=>
-      message.lineNum+":"+message.linePos+" "+message.message).join("\\n"));
-    for(const entryPoint of [
-      "publishFineVelocityCache",
-      "transportFineCharacteristicCached",
-      "transportFineCharacteristic",
-    ])device.createComputePipeline({layout:"auto",compute:{module,entryPoint}});
-    const validation=await device.popErrorScope();
-    if(validation)throw validation;
-    device.destroy();
-  `;
-  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-    cwd: process.cwd(), env: process.env, encoding: "utf8",
+test("recurring transport publishes two validity classes before atomic commit", () => {
+  const encode = compact(WebGPUFineLevelSetTransport.prototype.encode.toString());
+  const construction = compact(WebGPUFineLevelSetTransport.toString());
+  for (const label of [
+    "PlanGPU-residentfinetransportsubsteps",
+    "Classifydirectstructuredfinetransportblocks",
+    "Publishdirectstructuredfinetransportworksets",
+    "Publishstructuredfinetransportstatus",
+    "Commitstructuredfinephiandphasedelta",
+    "Compactstructuredfinetopologydelta",
+  ]) assert.match(encode, new RegExp(label));
+  assert.match(encode,
+    /classNames=\["common","rare"\].*label:`Advectfinephi\$\{classNames\[index\]\}`/,
+    "common and validity-aware rare trajectories must receive attributable passes");
+  assert.match(encode,
+    /classifyPipeline.*publishWorksetsPipeline.*fence\("structuredfinetransportworksetspublished"\).*transportPipelines.*summarizePipeline.*commitPipeline.*deltaPipeline/,
+    "dependent storage dispatches share a pass; only the storage-to-indirect copy closes it");
+  for (const obsoleteFence of [
+    "directfineownerrowspublished",
+    "structuredfinetransportclassesmarked",
+    "structuredfinetrajectoriescomplete",
+    "structuredfinetransportaccepted",
+    "structuredfinephicommitted",
+  ]) assert.doesNotMatch(encode, new RegExp(`fence\\(\"${obsoleteFence}\\"\\)`),
+    `${obsoleteFence} must not split a storage-only dependency chain`);
+  assert.doesNotMatch(encode, /ownerPipeline|ownerGroup|Publishdirectfinesampleownerrows/,
+    "per-trajectory owner selection must not retain a page-anchor publication dispatch");
+  assert.match(encode, /classify\.dispatchWorkgroupsIndirect\(this\.indirectDispatch,160\)/);
+  assert.match(encode, /transport\.dispatchWorkgroupsIndirect\(this\.indirectDispatch,\(4\+7\*FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES\[index\]\+4\)\*4\)/);
+  assert.match(compact(structuredFineLevelSetTransportWGSL),
+    /state\[base\+4u\]=counts\[cls\]/,
+    "one transport workgroup owns one page; the 64 lanes cover its samples rather than 64 pages");
+  assert.doesNotMatch(compact(structuredFineLevelSetTransportWGSL),
+    /state\[base\+4u\]=u32\(ceil\(f32\(counts\[cls\]\)\/64\.\)\)/,
+    "the class page count must not be divided by the within-page workgroup width");
+  assert.match(encode, /commit\.dispatchWorkgroupsIndirect\(this\.indirectDispatch,160\)/);
+  assert.doesNotMatch(encode, /dispatchWorkgroupsIndirect\(this\.governor/,
+    "the writable governor must never also be consumed as INDIRECT in a compute scope");
+  assert.doesNotMatch(encode, /faceBand|powerFace|velocityPrepass|fallback|legacy|createBindGroup/i);
+  assert.match(construction,
+    /this\.transportGroups=this\.transportPipelines\.map\(\(pipeline,index\)=>group\(pipeline,FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS\[index\]\)\)/);
+  assert.match(construction, /this\.classifyGroup=group\(this\.classifyPipeline,\[0,1,2,3,4,13\]\)/,
+    "classification must remain independent of the per-trajectory air-owner authority");
+  FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS.forEach((bindings, index) => {
+    assert.ok(bindings.filter((binding) => binding !== 0).length <= 10,
+      `class ${index} exceeds Dawn's portable storage-buffer ceiling`);
+    assert.ok(bindings.includes(20), `class ${index} does not bind air support`);
   });
-  assert.equal(result.status, 0, `signal=${result.signal}\n${result.stdout}\n${result.stderr}`);
+  assert.equal(FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS[1].length - 1, 9);
+  assert.equal(FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS.length, 2,
+    "per-trajectory owner selection eliminates page-anchor regular/transition dispatch multiplication");
+  assert.ok(FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS.every((bindings) => !bindings.includes(11)),
+    "dense air-owner publication must eliminate the transport row-geometry binding");
 });
 
-test("transport reconstructs both old and new interface-page membership", () => {
-  const source = fineLevelSetFusedTransportPublicationWGSL.replace(/\s+/g, "");
-  assert.match(source, /pageOldInterface/,
-    "transport must not trust a carried page-interface bit after topology reuse");
-  assert.match(source, /interfaceBefore=\(previous&PAGE_INTERFACE\)!=0u\|\|pageOldInterface\[0\]!=0u/,
-    "the exact delta must retain pages crossed by the old fine field");
-  assert.match(source,
-    /membershipChanged=pageChanged\[0\]!=0u\|\|interfaceBefore\|\|interfaceNow/,
-    "interface and sample-phase changes must enter the same bounded dirty-halo transaction");
+test("WGSL fails closed unless generation, epoch, and accepted A\/B bank agree", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  assert.match(shader, /fnactiveBank\(\)->u32\{returnaccepted\[4\]&1u/);
+  assert.match(shader,
+    /fnstructuredValid\(\)->bool\{returnarrayLength\(&accepted\)>=6u&&accepted\[0\]==0u&&accepted\[2\]>0u&&accepted\[3\]!=0u&&accepted\[4\]<=1u/);
+  assert.match(shader,
+    /fnairPublicationValid\(\)->bool.*boundary\[4\]!=accepted\[3\].*airWord\(at\+2u\)==accepted\[3\].*airWord\(at\+3u\)==activeBank\(\).*airWord\(at\+5u\)==accepted\[2\].*airWord\(at\+13u\)==SUPPORT_VALID.*airWord\(at\+14u\)==SUPPORT_VERSION.*airWord\(at\+15u\)==p\.generation/s,
+    "transport must consume a committed support transaction for its exact fine generation");
+  assert.doesNotMatch(shader, /airWord\(at\+12u\)>=p\.maxBacktrace/,
+    "face-graph hops must not be compared numerically with fine-cell displacement");
+  const encode = compact(WebGPUFineLevelSetTransport.prototype.encode.toString());
+  assert.match(encode,
+    /maximumBacktraceFineCells>plan\.fineFactor.*Finetransportdisplacementboundexceedsitsconfiguredsupportdepth/s,
+    "the host API must reject a backtrace bound larger than its single configured fine-factor maximum");
+  assert.match(shader,
+    /letvalid=structuredValid\(\)&&airPublicationValid\(\).*scheduleValid=valid&&governorInvalid\[0\]==0u&&required<=64u&&displacement<=p\.maxBacktrace.*activeSteps=select\(0u,required,scheduleValid\)/s,
+    "invalid velocity or an over-bound characteristic must publish zero work");
+  assert.match(shader,
+    /state\[32\]=select\(0u,accepted\[2\],scheduleValid\).*state\[33\]=select\(0u,activeBank\(\),scheduleValid\).*state\[34\]=select\(0u,accepted\[3\],scheduleValid\)/s,
+    "the plan must snapshot row count, bank, and accepted epoch");
+  assert.match(shader,
+    /letvalid=state\[0\]==0u&&accepted\[2\]==state\[32\]&&activeBank\(\)==state\[33\]&&accepted\[3\]==state\[34\]/,
+    "class worksets must be empty when the accepted A/B publication changes");
+  assert.match(shader, /fnairOwner\(cell:u32\)->AirOwner/);
+  assert.match(shader, /fnairOwnerAtPosition\(x:vec3f\)->AirOwner/);
+  assert.doesNotMatch(shader, /publicationRow|rowGeometry|@binding\(11\)/,
+    "fine transport must consume the coalesced dense owner directory without a row-directory chase");
+  assert.match(shader, /fncanonicalVelocity\(row:u32\)->vec4f/);
+  assert.match(shader,
+    /maximum=max\(maximum,length\(v\.xyz\)\).*ceil\(d\.maximumSpeed\*p\.dt\/p\.h\)/s,
+    "transport displacement telemetry must measure the sampled speed times dt over fine-cell width");
+  assert.doesNotMatch(shader, /rowDirectory|powerFaceControl|faceBandControl|velocitySampleControl|fallback|legacy/i);
 });
 
-interface FineGenerationJSON {
-  generation: number;
-  publicationValid: boolean;
-  activePages: number;
-  validSamples: number;
-  finiteValidSamples: number;
-  negativeValidSamples: number;
-  positiveValidSamples: number;
-  phiBitXor: number;
-  phiBitSum: number;
-  transportDepartureOutsideBand?: number;
-  transportNonfiniteVelocity?: number;
-  transportProcessed?: number;
-  transportCommitted?: boolean;
-  transportExtrapolatedVelocity?: number;
-  transportFaceBandUnavailable?: number;
-  transportVelocityUnavailable?: number;
-}
+test("sparse-page classification ignores unowned sample slots but rejects corrupt owned phi", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  const start = shader.indexOf("fnclassifyStructuredFineTransportBlocks");
+  const end = shader.indexOf("@compute@workgroup_size(1)fnpublishStructuredFineTransportWorksets", start);
+  assert.ok(start >= 0 && end > start, "transport classifier must have a bounded WGSL region");
+  const classify = shader.slice(start, end);
+  assert.match(classify, /letvalid=id!=INVALID&&classifyInvalid\[0\]==0u/,
+    "page classification must remain independent of an arbitrary page-anchor owner");
+  assert.doesNotMatch(classify, /ownerRequired|!ownerRequired\|\|owner\.tag!=INVALID/,
+    "the actual owner at each trajectory point, not the page anchor, gates velocity support");
+  assert.match(classify,
+    /letsampleValid=\(flags\[index\]&VALID\)!=0u;if\(sampleValid\)\{letvalue=phi\[index\];invalid\|=select\(1u,0u,finite\(value\)\)/,
+    "only owned fine samples require finite phi");
+  assert.match(classify, /else\{rare=1u;\}/,
+    "a sparse page with unowned slots must use the validity-aware rare kernel");
+  assert.doesNotMatch(classify,
+    /\(flags\[index\]&VALID\)!=0u&&finite\(phi\[index\]\)&&row<state\[32\]/,
+    "an unowned sparse slot must not reject its whole resident page");
+});
 
-interface FineRasterJSON {
-  frontInterfacePixels: number;
-  backInterfacePixels: number;
-  frontInterfaceHash: number;
-  backInterfaceHash: number;
-  rendererValidationErrorCount?: number;
-  rendererUncapturedErrorCount?: number;
-  surfaceGeometrySource?: string;
-  globalFineAuthorityLatch?: number;
-  globalFineCrossingPublished?: boolean;
-  presentationFallbackActive?: boolean;
-  frontInterfaceBounds_m?: [[number, number, number], [number, number, number]];
-  globalFineAuthorityTransition?: {
-    validGeneration: number;
-    cleanFineCoarseRequired: boolean;
-    retainedGeometrySource?: string;
-    retainedFrontInterfacePixels: number;
-    retainedBackInterfacePixels: number;
-    retainedFrontInterfaceHash: number;
-    retainedBackInterfaceHash: number;
-  };
-}
+test("outer redistance support is copied without velocity and failures retain bounded page diagnostics", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  assert.match(shader, /fninTransportBand\(value:f32\)->bool\{returnfinite\(value\)&&abs\(value\)<=f32\(p\.bandCells\)\*p\.h;\}/,
+    "the host-published transport band must define the characteristic domain");
+  for (const name of ["runRegularCommon", "runRegularRare", "runTransitionCommon", "runTransitionRare"]) {
+    const start = shader.indexOf(`fn${name}`);
+    const end = shader.indexOf("fn", start + 2);
+    const run = shader.slice(start, end);
+    assert.match(run, /if\(!inTransportBand\(old\)\)\{nextPhi\[index\]=old;continue;\}/,
+      `${name} must preserve outer support without requesting velocity`);
+    assert.match(run, /firstBad=min\(firstBad,select\(INVALID,local,s\.bad!=0u\)\)/,
+      `${name} must retain the first true in-band miss`);
+  }
+  assert.match(shader,
+    /state\[base\+2u\]=\(reduceDisplacement\[0\]&65535u\)\|\(min\(reduceFirstBad\[0\],65535u\)<<16u\)/,
+    "the existing per-page status word must pack displacement and first failure without a new buffer");
+  assert.match(shader,
+    /if\(work==INVALID\)\{control\.nonfinite\+=1u;control\.invalidStatus\+=1u;continue;\}/,
+    "classification rejection must fail closed without decoding the INVALID marker as two 65535 counters");
+  assert.match(shader, /state\[base\+2u\]&65535u/,
+    "summary displacement must ignore the packed first-failure half-word");
+});
 
-interface SmokeResultJSON {
-  phase: string;
-  steps?: number;
-  globalFineLevelSetFactor?: number;
-  nonFiniteCount?: number;
-  validationErrors?: unknown[];
-  globalFineGenerationCheckpoints?: Array<{
-    time_s: number;
-    globalFineGeneration?: FineGenerationJSON;
-    raster?: FineRasterJSON;
-  }>;
-}
+test("every trajectory reselects regular or transition interpolation m times and gathers phi once", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  const regularCommon = shader.slice(shader.indexOf("fnregularCommonDeparture"), shader.indexOf("fnregularRareDeparture"));
+  const regularRare = shader.slice(shader.indexOf("fnregularRareDeparture"), shader.indexOf("fntransitionCommonDeparture"));
+  const transitionCommon = shader.slice(shader.indexOf("fntransitionCommonDeparture"), shader.indexOf("fntransitionRareDeparture"));
+  const transitionRare = shader.slice(shader.indexOf("fntransitionRareDeparture"), shader.indexOf("fnfinishSample"));
+  for (const path of [regularCommon, regularRare, transitionCommon, transitionRare]) {
+    assert.match(path, /for\(varstage=0u;stage<state\[1\];stage\+=1u\)/,
+      "each class must execute exactly the GPU-selected Section 5 substeps");
+    assert.doesNotMatch(path, /stage<64u|if\(stage<state\[1\]\)/,
+      "the validated runtime count must not retain a masked 64-iteration loop");
+    assert.doesNotMatch(path, /sampleFine\(/, "departure integration must not gather phi per segment");
+  }
+  assert.match(regularCommon, /letv=transitionSample\(x\)/);
+  assert.match(regularRare, /letv=transitionSample\(x\).*extended\+=select\(0u,1u,air\)/s);
+  assert.match(shader,
+    /fntransitionSample\(x:vec3f\)->vec4f.*if\(caseId==0u\)\{letregular=regularSampleExact\(x,owner\);if\(regular\.exact!=0u\)\{returnregular\.value;\}\}.*letweights=tetraWeights/s,
+    "each Euler step fuses its eight exact cube-owner proofs with the trilinear gather and otherwise retains case-zero tetrahedra");
+  assert.doesNotMatch(shader, /regularCubeExact|fnregularSample\(/,
+    "the regular path must not repeat owner-directory lookups in a proof pass and a gather pass");
+  assert.match(transitionCommon, /letv=transitionSample\(x\)/);
+  assert.match(transitionRare, /letv=transitionSample\(x\).*extended\+=select\(0u,1u,air\)/s);
+  assert.equal([...shader.matchAll(/sampleFine\(/g)].length, 2,
+    "WGSL must contain one sampleFine declaration and one final-trajectory invocation");
+  assert.match(shader, /fnfinishSample.*if\(d\.good!=0u\)\{sampled=sampleFine\(x\);\}/s);
+});
 
-function resultRecord(stdout: string): SmokeResultJSON | undefined {
-  return stdout.split("\n").flatMap(line => {
-    try {
-      const value = JSON.parse(line) as SmokeResultJSON;
-      return value.phase === "result" ? [value] : [];
-    } catch {
-      return [];
-    }
-  }).at(-1);
-}
+test("transition interpolation rejects missing positive-weight support", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  assert.match(shader,
+    /fnselectorVelocity\(owner:AirOwner,selectorIndex:u32,selector:vec4f\)->vec4f.*if\(all\(selectorCenter>=lower-vec3f\(tolerance\)\)&&all\(selectorCenter<=upper\+vec3f\(tolerance\)\)\)\{letother=airOwnerAtPosition\(selectorCenter\);if\(other\.tag==INVALID.*returnvec4f\(0,0,0,-1\).*returntaggedVelocity\(other\.tag\);\}returntaggedVelocity\(owner\.tag\)/s,
+    "an absent in-domain selector must carry invalidity instead of a zero vector");
+  assert.match(shader,
+    /varw=max\(weights,vec4f\(0\)\).*w\/=total.*if\(w\.x>0\.\).*if\(w\.y>0\.\).*if\(v\.w<0\.\|\|!finite3\(v\.xyz\)\)\{returninvalid;\}/s,
+    "only zero-weight vertices may be skipped; every positive contributor remains strict");
+  assert.match(shader,
+    /fnregularSampleExact.*letowner=airOwnerAtPosition\(samplePoint\).*owner\.tag==INVALID\|\|owner\.size!=anchor\.size.*returnRegularAttempt\(vec4f\(0,0,0,-1\),0u\).*if\(w==0\.\)\{continue;\}letvalue=taggedVelocity\(owner\.tag\)/s,
+    "regular interpolation must distinguish a non-cube topology fallback from invalid selected-cube velocity");
+  assert.match(shader, /fnselectorGeometryValid.*length\(selector\.xyz\)>=1e-7\|\|\(all\(selector\.xyz==vec3f\(0\.\)\)&&selector\.w==1\.\)/s,
+    "only the exact zero/unit selector may alias the anchor owner");
+  assert.match(shader,
+    /p\.tetraVertexCount>\(words-p\.tetraVertexOffset\)\/4u.*words-thAt<3u.*first>words-p\.tetraOffset.*count>words-p\.tetraOffset-first/s,
+    "tetra header, payload, and neighbor-selector table must validate before indexed catalog reads");
+  assert.doesNotMatch(shader, /anchor=vec4f\(bitsf\(p\.tetraVertexOffset\)/,
+    "the current-cell anchor is implicit and must not be read from the neighbor-selector table");
+  assert.match(shader, /fntetraWeights.*!finite\(d\)\|\|abs\(d\)<1e-10/,
+    "a non-finite or degenerate tetrahedron determinant must fail closed");
+  assert.doesNotMatch(shader, /returnselect\(vec3f\(0\),rowV\(other\),other!=INVALID\)/,
+    "fine transport must not retain the retired zero substitute");
+});
 
-function assertPublishedSignedGeneration(label: string, value: FineGenerationJSON | undefined):
-asserts value is FineGenerationJSON {
-  assert.ok(value, `${label} generation diagnostics are absent`);
-  assert.equal(value.publicationValid, true, `${label} generation is not published`);
-  assert.ok(value.generation > 0 && value.activePages > 0, `${label} generation has no indexed pages`);
-  assert.ok(value.validSamples > 0, `${label} generation has no valid phi samples`);
-  assert.equal(value.finiteValidSamples, value.validSamples, `${label} generation contains non-finite phi`);
-  assert.ok(value.negativeValidSamples > 0 && value.positiveValidSamples > 0,
-    `${label} generation does not retain both signed sides of the interface`);
-}
+test("fine phi commit publishes old and new interface membership atomically", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  assert.match(shader,
+    /fncommitStructuredFineTransport.*oldInterface.*newInterface.*membership=pageChanged\[0\]!=0u\|\|before\|\|after.*phi\[index\]=nextPhi\[index\]/s);
+  assert.match(shader,
+    /fnpublishStructuredFineDelta.*delta\[0\]=count.*delta\[1\]=p\.generation.*delta\[2\]=control\.committed/s);
+  assert.doesNotMatch(shader, /atomic/,
+    "page-owned reductions and deterministic compaction must not revive an append race");
+});
 
-function assertCleanFineCoarseVisible(label: string, generation: FineGenerationJSON,
-  raster: FineRasterJSON | undefined): asserts raster is FineRasterJSON {
-  assert.ok(raster, `${label} fine raster diagnostics are absent`);
-  assert.ok(raster.frontInterfacePixels > 0 && raster.backInterfacePixels > 0,
-    `${label} fine-authoritative front/back interface is not visible`);
-  assert.equal(raster.surfaceGeometrySource, "global-fine-coarse",
-    `${label} raster did not use the clean fine/coarse publication`);
-  assert.equal(raster.globalFineCrossingPublished, true,
-    `${label} raster did not publish a current global crossing`);
-  assert.equal(raster.presentationFallbackActive, false,
-    `${label} raster used a presentation fallback`);
-  assert.ok((raster.globalFineAuthorityLatch ?? 0) > 0,
-    `${label} raster did not latch global fine/coarse authority`);
-  assert.ok(raster.frontInterfaceBounds_m?.flat(2).every(Number.isFinite),
-    `${label} raster bounds are absent or non-finite`);
-  assert.equal(raster.globalFineAuthorityTransition?.cleanFineCoarseRequired, true,
-    `${label} raster did not require the compact coarse member of the publication`);
-  assert.equal(raster.globalFineAuthorityTransition?.validGeneration, generation.generation,
-    `${label} raster did not consume its published fine generation`);
-  assert.equal(raster.globalFineAuthorityTransition?.retainedGeometrySource, "retained-previous",
-    `${label} unpublished generation did not select retained presentation geometry`);
-  assert.equal(raster.globalFineAuthorityTransition?.retainedFrontInterfacePixels, raster.frontInterfacePixels,
-    `${label} unpublished-generation probe did not retain the published front interface`);
-  assert.equal(raster.globalFineAuthorityTransition?.retainedBackInterfacePixels, raster.backInterfacePixels,
-    `${label} unpublished-generation probe did not retain the published back interface`);
-  assert.equal(raster.globalFineAuthorityTransition?.retainedFrontInterfaceHash, raster.frontInterfaceHash,
-    `${label} unpublished-generation probe changed the published front content`);
-  assert.equal(raster.globalFineAuthorityTransition?.retainedBackInterfaceHash, raster.backInterfaceHash,
-    `${label} unpublished-generation probe changed the published back content`);
-}
-
-function assertCommittedTransport(label: string, generation: FineGenerationJSON, requireFaceBand = false): void {
-  assert.equal(generation.transportDepartureOutsideBand, 0,
-    `${label} transport departed the resident narrow band`);
-  assert.equal(generation.transportNonfiniteVelocity, 0,
-    `${label} transport sampled a non-finite reconstructed velocity`);
-  assert.equal(generation.transportFaceBandUnavailable, 0,
-    `${label} transport could not resolve a containing owner/regular-face band row`);
-  assert.equal(generation.transportVelocityUnavailable, 0,
-    `${label} transport received an unavailable Stage-B or air-band velocity`);
-  assert.ok((generation.transportProcessed ?? 0) > 0, `${label} transport processed no fine samples`);
-  if (requireFaceBand) assert.ok((generation.transportExtrapolatedVelocity ?? 0) > 0,
-    `${label} did not consume the regular-face closest-point-extended positive-air band`);
-  assert.equal(generation.transportCommitted, true, `${label} transport did not commit its published generation`);
-}
-
-for (const factor of [4, 8] as const) {
-  const gate = `FLUID_FINE_DAM_BREAK_FACTOR${factor}_ACCEPTANCE`;
-  test(`production dam-break publishes transported factor-${factor} fine phi into moving fine/coarse rasters`, {
-    skip: !process.env.WEBGPU_NODE_MODULE
-      ? "set WEBGPU_NODE_MODULE for the production fine-transport acceptance"
-      : process.env[gate] !== "1" && `set ${gate}=1 to run this memory-intensive production gate`,
-    timeout: 180_000,
-  }, () => {
-    const child = spawnSync(process.execPath, ["--import", "tsx", "tools/run-webgpu-smoke.ts"], {
-      cwd: process.cwd(), encoding: "utf8", timeout: 150_000, killSignal: "SIGKILL",
-      maxBuffer: 32 * 1024 * 1024,
-      env: { ...process.env, FLUID_SCENE: "dam-break-ui", FLUID_METHOD: "octree",
-        FLUID_TARGET_S: "0.008", FLUID_MAX_DT: "0.004", FLUID_EXPECT_EXACT_STEPS: "2",
-        FLUID_ORACLE_STEPS: "2", FLUID_VOXEL_CELL_SIZE: "0.05", FLUID_EXPECT_GRID: "24,18,16",
-        FLUID_STABILITY_ENVELOPE: "1", FLUID_CPU_ORACLE: "0",
-        FLUID_FIELD_STATS: "0",
-        FLUID_OCTREE_GLOBAL_FINE_FACTOR: String(factor),
-        FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1", FLUID_CHECKPOINT_EVERY_S: "0.004",
-        FLUID_RASTER_CHECKPOINTS: "1" },
-    });
-    assert.equal(child.error, undefined,
-      `factor-${factor} production transport process failed: ${child.error?.message ?? "unknown"}`);
-    assert.equal(child.status, 0,
-      `factor-${factor} production transport smoke failed:\n${child.stderr}\n${child.stdout.slice(-8_000)}`);
-    const result = resultRecord(child.stdout);
-    assert.ok(result, `factor-${factor} production transport emitted no result JSON`);
-    assert.equal(result.globalFineLevelSetFactor, factor, `factor-${factor} request was not honored`);
-    assert.equal(result.steps, 2, `factor-${factor} acceptance must execute exactly two production steps`);
-    assert.equal(result.nonFiniteCount, 0, `factor-${factor} production state contains non-finite values`);
-    assert.deepEqual(result.validationErrors ?? [], [], `factor-${factor} production smoke raised validation errors`);
-
-    const checkpoints = result.globalFineGenerationCheckpoints ?? [];
-    assert.equal(checkpoints.length, 2, "two-step production run did not emit exactly two publication checkpoints");
-    const [firstCheckpoint, secondCheckpoint] = checkpoints;
-    const first = firstCheckpoint.globalFineGeneration;
-    const second = secondCheckpoint.globalFineGeneration;
-    assertPublishedSignedGeneration("step-1", first);
-    assertPublishedSignedGeneration("step-2", second);
-    assert.ok(second.generation > first.generation, "two production steps did not publish a newer generation");
-    assert.notDeepEqual([second.phiBitXor, second.phiBitSum], [first.phiBitXor, first.phiBitSum],
-      "published phi fingerprint did not change; topology publication alone is insufficient");
-    // Step 1 is the bootstrap publication. It must already be signed,
-    // indexable, and fine-authoritative, but intentionally has no transport
-    // control record. Step 2 is the first transported publication.
-    assertCommittedTransport("step-2", second, factor === 4);
-
-    assertCleanFineCoarseVisible("step-1", first, firstCheckpoint.raster);
-    assertCleanFineCoarseVisible("step-2", second, secondCheckpoint.raster);
-    assert.notEqual(secondCheckpoint.raster.frontInterfaceHash,
-      firstCheckpoint.raster.frontInterfaceHash, "fine-authoritative front raster content did not move");
-    assert.notEqual(secondCheckpoint.raster.backInterfaceHash,
-      firstCheckpoint.raster.backInterfaceHash, "fine-authoritative back raster content did not move");
-  });
-}
+test("WGSL declares exactly the ten direct specialized production entry points", () => {
+  const entries = [...structuredFineLevelSetTransportWGSL.matchAll(
+    /@compute\s*@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
+  )].map((match) => match[1]);
+  assert.deepEqual(entries, [
+    "planStructuredFineTransportSubsteps",
+    "classifyStructuredFineTransportBlocks",
+    "publishStructuredFineTransportWorksets",
+    "transportRegularCommonPhi",
+    "transportTransitionCommonPhi",
+    "transportRegularRarePhi",
+    "transportTransitionRarePhi",
+    "summarizeStructuredFineTransport",
+    "commitStructuredFineTransport",
+    "publishStructuredFineDelta",
+  ]);
+});

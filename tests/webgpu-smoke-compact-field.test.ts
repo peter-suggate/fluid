@@ -31,7 +31,8 @@ function snapshot(): CompactOctreeFieldSnapshot {
     metadata: new Uint32Array(plan.maximumResidentBricks * 10),
     flags: new Uint32Array(plan.maximumResidentBricks * plan.samplesPerBrick),
     phi: new Float32Array(plan.maximumResidentBricks * plan.samplesPerBrick),
-    worklist: new Uint32Array(5 + plan.maximumResidentBricks), coarseDirectory,
+    worklist: new Uint32Array(7 + plan.maximumResidentBricks + plan.logicalBrickCount
+      + (plan.includeHalo27 ? 27 * plan.maximumResidentBricks : 0)), coarseDirectory,
     coarseControl: new Uint32Array([0, 0xffff_ffff, 1, 1, 0, 0, 8, 0, 1, 0, generation, OCTREE_POWER_COARSE_LEVELSET_VALID, 0, 0, 0, 0]),
     topologyControl: new Uint32Array([0, 1, 1, 1, 1, 0, 1, 0]),
   };
@@ -49,7 +50,8 @@ test("current valid fine page overrides compact coarse phi for its base cell", (
   const current = snapshot();
   const key = 0, physicalId = 0;
   current.metadata.set([physicalId, key, generation], physicalId * 10);
-  current.worklist.set([1, generation, 1, 1, 1, physicalId]);
+  current.worklist.set([generation, 1, plan.maximumResidentBricks, 3, 1, 1, 1, physicalId]);
+  current.worklist[7 + plan.maximumResidentBricks + key] = physicalId;
   current.flags.fill(FINE_LEVELSET_SAMPLE_FLAGS.valid, 0, plan.samplesPerBrick);
   current.phi.fill(0.5, 0, plan.samplesPerBrick);
   const result = reconstructCompactOctreeOccupancyField(current, [2, 1, 1]);
@@ -80,23 +82,6 @@ test("required compact validation rejects and exposes a downstream publication r
       2_388, 26_436_288, 5_804, 0, 4, 13_337, 188_108, 4_096, 4_072,
     ]),
     volumeControl,
-    faceBandControl: new Uint32Array([
-      0, 0xffff_ffff, 41, 82, 164, generation, 0x8000_0000, 4, 2, 82, 0, 41, 7, 0, 0, 0,
-    ]),
-    faceBandTransitionControl: new Uint32Array([
-      4, 17, 41, 9, 33, 0, 0, 36,
-    ]),
-    faceBandTransientPowerControl: new Uint32Array([
-      8, 19, 41, 1_230, 301, 300, 40, generation, 0, 0, 0, 0, 0, 0, 0, 0,
-    ]),
-    faceBandPointFieldControl: new Uint32Array([
-      8, 21, 41, generation, 40, 0, 7, 17,
-    ]),
-    faceBandPowerPublicationControl: new Uint32Array([
-      0, 0xffff_ffff, 82, 17, 17, 17, generation, 9, 0x8000_0000, 0, 0, 0, 0, 0, 0, 0,
-    ]),
-    powerVelocityControl: new Uint32Array([0x8000_0000, 0xffff_ffff, 41, 82, 164, 41, 0, 9]),
-    powerVelocitySampleControl: new Uint32Array([0x8000_0000, 0xffff_ffff, 42, 42, 20, 22, 0, 9]),
   };
   rejected.coarseDirectory[1] = generation - 1;
   rejected.coarseControl![10] = generation - 1;
@@ -120,17 +105,6 @@ test("required compact validation rejects and exposes a downstream publication r
   assert.equal(redistanceEvidence.redistanceInitialPages, 4_096);
   assert.equal(redistanceEvidence.redistanceFinalPages, 4_072);
   assert.equal(compactOctreePublicationHeaderEvidence(rejected).volumeControl?.length, 16);
-  assert.equal(compactOctreePublicationHeaderEvidence(rejected).faceBandControl?.length, 16);
-  assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).faceBandTransitionControl,
-    [4, 17, 41, 9, 33, 0, 0, 36]);
-  assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).faceBandTransientPowerControl,
-    [8, 19, 41, 1_230, 301, 300, 40, generation, 0, 0, 0, 0, 0, 0, 0, 0]);
-  assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).faceBandPointFieldControl,
-    [8, 21, 41, generation, 40, 0, 7, 17]);
-  assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).faceBandPowerPublicationControl,
-    [0, 0xffff_ffff, 82, 17, 17, 17, generation, 9, 0x8000_0000, 0, 0, 0, 0, 0, 0, 0]);
-  assert.equal(compactOctreePublicationHeaderEvidence(rejected).powerVelocityControl?.length, 8);
-  assert.equal(compactOctreePublicationHeaderEvidence(rejected).powerVelocitySampleControl?.length, 8);
 });
 
 test("compact smoke reconstruction rejects a stale coarse/fine generation pair", () => {
@@ -156,7 +130,8 @@ test("compact smoke reconstruction rejects every rollback epoch", () => {
   rolledBack.topologyControl!.set([16, 1, 1, 1, 1, 1, 1, 2]);
   const key = 0, physicalId = 0;
   rolledBack.metadata.set([physicalId, key, generation], physicalId * 10);
-  rolledBack.worklist.set([1, generation, 1, 1, 1, physicalId]);
+  rolledBack.worklist.set([generation, 1, plan.maximumResidentBricks, 3, 1, 1, 1, physicalId]);
+  rolledBack.worklist[7 + plan.maximumResidentBricks + key] = physicalId;
   rolledBack.flags.fill(FINE_LEVELSET_SAMPLE_FLAGS.valid, 0, plan.samplesPerBrick);
   rolledBack.phi.fill(-0.5, 0, plan.samplesPerBrick / 2);
   rolledBack.phi.fill(0.5, plan.samplesPerBrick / 2, plan.samplesPerBrick);
@@ -198,7 +173,7 @@ test("compact smoke reconstruction distinguishes invalid coarse state from gener
 
 test("compact smoke reconstruction rejects a stale GPU fine worklist against matching host/coarse tags", () => {
   const stale = snapshot();
-  stale.worklist.set([1, generation - 1, 1, 1, 1, 0]);
+  stale.worklist.set([generation - 1, 1, plan.maximumResidentBricks, 3, 1, 1, 1, 0]);
   assert.throws(() => reconstructCompactOctreeOccupancyField(stale, [2, 1, 1]), (error: unknown) => {
     assert.ok(error instanceof Error);
     assert.match(error.message, /fine publication is not valid\/current/);

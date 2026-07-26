@@ -33,7 +33,7 @@ test("analytic cold topology publishes the resident worklist ABI entirely on GPU
   const ownerEncode = WebGPUOctreeSimulationOwnerPages.prototype.encodeAnalyticBootstrap.toString();
   assert.doesNotMatch(ownerEncode, /mapAsync|getMappedRange|copyBufferToBuffer/,
     "production owner bootstrap remains GPU-only");
-  assert.equal((ownerEncode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 3);
+  assert.equal((ownerEncode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 2);
   assert.doesNotMatch(ownerEncode, /dispatchWorkgroupsIndirect|sortCandidates|indirect/);
 });
 
@@ -71,7 +71,8 @@ test("Dawn emits deterministic clipped analytic tile indices and resident dispat
   encoder.copyBufferToBuffer(tileWorklist, 0, readback, 0, (16 + 12) * 4);
   encoder.copyBufferToBuffer(tileStates, 0, readback, (16 + 12) * 4, tileCapacity * 4);
   device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-  const validationError = await device.popErrorScope(); assert.equal(validationError, null);
+  const validationError = await device.popErrorScope();
+  assert.equal(validationError, null, validationError?.message);
   await readback.mapAsync(GPUMapMode.READ);
   const words = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
   if (words.slice(0, 16).every((value) => value === 0)) {
@@ -110,7 +111,8 @@ test("Dawn analytic bootstrap publishes sparse key-plus-one tile membership", {
   encoder.copyBufferToBuffer(tileWorklist, 0, readback, 0, 20 * 4);
   encoder.copyBufferToBuffer(tileStates, 0, readback, 20 * 4, 8 * 4);
   device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-  const validationError = await device.popErrorScope(); assert.equal(validationError, null);
+  const validationError = await device.popErrorScope();
+  assert.equal(validationError, null, validationError?.message);
   await readback.mapAsync(GPUMapMode.READ);
   const words = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
   if (words.slice(0, 16).every((value) => value === 0)) {
@@ -148,18 +150,27 @@ test("Dawn analytic cold bootstrap publishes genuine max-leaf-16/32 owner census
       tileSizeCells: maximumLeaf, activeTileCount: 1,
     });
     const pageCount = (maximumLeaf / 8) ** 3;
+    const frontier = device.createBuffer({ size: 10 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(frontier, 0, Uint32Array.from([
+      0, 1, 0, 0, 0, 0, 1, 1, 1, 0,
+    ]));
     const pages = new WebGPUOctreeSimulationOwnerPages(device, dimensions,
       { maximumPages: pageCount }, {
         tileWorklist, tileSizeCells: maximumLeaf,
         activeTileLimits: [1, 1, 1], activeTileCount: 1,
+      }, {
+        tileWorklist, tileSizeCells: maximumLeaf, tileListCapacity: 1,
+        candidateGeneration: { buffer: frontier, offsetWords: 3, frontierListCapacity: 1 },
       });
     const readback = device.createBuffer({ size: pages.plan.allocatedBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
     builder.encode(encoder);
     const broker = new PassBroker(encoder); pages.encodeAnalyticBootstrap(broker);
-    assert.equal(broker.computePassCount, 3,
-      "analytic scan, exclusive payload publication, and generation commit remain separate runtime passes");
+    pages.encodeReadyCommit(broker);
+    assert.equal(broker.computePassCount, 2,
+      "candidate preparation and the coupled owner/frontier boundary commit are distinct passes");
     broker.copyBufferToBuffer(pages.arena, 0, readback, 0, pages.plan.allocatedBytes);
     device.queue.submit([broker.finish()]); await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ);
@@ -170,22 +181,24 @@ test("Dawn analytic cold bootstrap publishes genuine max-leaf-16/32 owner census
       assert.equal(words[0], 0, `max-leaf ${maximumLeaf} consumes its exact bounded page capacity`);
       assert.equal(words[1], pageCount);
       assert.equal(words[2], 0, "owner-page bootstrap must not overflow");
-      const payload = words.slice(pages.plan.ownerPagesOffsetWords);
+      const payload = words.slice(pages.plan.ownerPagesBOffsetWords,
+        pages.plan.ownerPagesBOffsetWords + pageCount * pages.plan.pageVoxels);
       const cellCensus = new Map<number, number>();
       for (const word of payload) {
         if (word === 0) continue;
-        const size = (word & 0x8000_0000) !== 0 ? 1 : 1 << (word & 7);
+        const size = 1 << ((word >>> 18) & 7);
         cellCensus.set(size, (cellCensus.get(size) ?? 0) + 1);
       }
       assert.deepEqual([...cellCensus], [[maximumLeaf, maximumLeaf ** 3]]);
       assert.equal((cellCensus.get(maximumLeaf) ?? 0) / maximumLeaf ** 3, 1,
         `the cold owner census contains one genuine ${maximumLeaf}-cubed leaf`);
     }
-    readback.destroy(); pages.destroy(); builder.destroy();
+    readback.destroy(); pages.destroy(); builder.destroy(); frontier.destroy();
     tileStates.destroy(); tileWorklist.destroy();
     if (poisoned) break;
   }
-  const validationError = await device.popErrorScope(); assert.equal(validationError, null);
+  const validationError = await device.popErrorScope();
+  assert.equal(validationError, null, validationError?.message);
   device.destroy();
   if (poisoned) t.skip("local Dawn Metal runtime completed a validated compute submission as a no-op");
 });

@@ -66,7 +66,11 @@ export class WebGPUOctreeCoarseLevelSet {
   }
 
   /** One-time bootstrap from the compact surface-leaf affine state. */
-  encodeBootstrapFromSurfaceLeaves(broker: PassBroker, leaves: GPUBuffer): void {
+  encodeBootstrapFromSurfaceLeaves(
+    broker: PassBroker,
+    leaves: GPUBuffer,
+    liveRowDispatch: GPUBuffer,
+  ): void {
     this.assertLive();
     const pass = broker.compute({ label: "Bootstrap compact coarse phi from fine-seed leaves" });
     pass.setPipeline(this.bootstrapPipeline);
@@ -77,7 +81,7 @@ export class WebGPUOctreeCoarseLevelSet {
         { binding: 1, resource: { buffer: this.records } },
       ],
     }));
-    pass.dispatchWorkgroups(Math.ceil(this.plan.rowCapacity / 64));
+    pass.dispatchWorkgroupsIndirect(liveRowDispatch, 0);
   }
 
   destroy(): void {

@@ -4,6 +4,7 @@ import {
   acquireBrowserGPULease,
   automaticGPURecoveryEnabled,
   BROWSER_GPU_LOCK_NAME,
+  fluidExecutionDeviceFeatures,
   performanceTraceDeviceFeatures,
   resolveGPUStartupMode,
   safeBrowserGPUBringupEnabled,
@@ -43,9 +44,15 @@ test("safe browser bring-up fails closed when the bounded workload drifts", () =
     diagnosticsOpen: false,
     rightPanel: null,
     gridOverlayAxis: "off",
+    activeTool: "select",
     search: "?gpu=safe",
   } as const;
   assert.deepEqual(safeBrowserGPUBringupViolations(valid), []);
+  assert.deepEqual(
+    safeBrowserGPUBringupViolations({ ...valid, activeTool: "body-place" }),
+    ["editor tools must remain on select"],
+    "an armed authoring tool can mutate the pinned workload mid-session",
+  );
   const violations = safeBrowserGPUBringupViolations({
     ...valid,
     quality: "ultra",
@@ -174,6 +181,7 @@ test("renderer destroys a requested device when the WebGPU canvas context is abs
   let deviceDestroyed = 0;
   const device = { destroy: () => { deviceDestroyed += 1; } } as GPUDevice;
   const adapter = {
+    info: { vendor: "Apple", architecture: "M1 Max" },
     features: new Set<GPUFeatureName>(),
     limits: { maxStorageBuffersPerShaderStage: 10, maxStorageBufferBindingSize: 128 * 1024 * 1024, maxBufferSize: 256 * 1024 * 1024, maxTextureDimension3D: 2048 },
     requestDevice: async () => device,
@@ -222,6 +230,15 @@ test("browser requests timestamp queries whenever exhaustive traces are supporte
   const supported = new Set(["timestamp-query"]);
   assert.deepEqual(performanceTraceDeviceFeatures(supported), ["timestamp-query"]);
   assert.deepEqual(performanceTraceDeviceFeatures(new Set()), []);
+});
+
+test("device setup requests every advertised target execution feature", () => {
+  assert.deepEqual(
+    fluidExecutionDeviceFeatures(new Set(["timestamp-query", "shader-f16", "subgroups"])),
+    ["timestamp-query", "shader-f16", "subgroups"],
+  );
+  assert.deepEqual(fluidExecutionDeviceFeatures(new Set(["shader-f16"])), ["shader-f16"]);
+  assert.deepEqual(fluidExecutionDeviceFeatures(new Set()), []);
 });
 
 test("gpu=off returns before requesting a WebGPU adapter", async (t) => {

@@ -28,15 +28,15 @@ test("a published zero crossing always refines while absent coverage can never a
   assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, minimumPhi: -1, maximumPhi: 1,
     brickCount: 1, sampleCount: 64 }, lookup, 0.5), "refine",
   "even a partial node's observed sign crossing is sufficient evidence");
-  assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, brickCount: 63 }, lookup, 0.5), "fallback");
-  assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, published: false }, lookup, 0.5), "fallback");
-  assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, directoryFlags: 1 }, lookup, 0.5), "fallback");
+  assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, brickCount: 63 }, lookup, 0.5), "invalid");
+  assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, published: false }, lookup, 0.5), "invalid");
+  assert.equal(fineLevelSetSummaryRefinementSignal({ ...base, directoryFlags: 1 }, lookup, 0.5), "invalid");
   assert.equal(fineLevelSetSummaryRefinementSignal({ ...base,
     entryFlags: FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY, brickCount: 0, sampleCount: 0,
   }, lookup, 0.5), "complete-no-crossing", "coarse authority is an ABI flag, not an entry error");
   assert.equal(fineLevelSetSummaryRefinementSignal({ ...base,
     entryFlags: FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY | 1,
-  }, lookup, 0.5), "fallback", "low entry-flag bits remain fail-closed errors");
+  }, lookup, 0.5), "invalid", "low entry-flag bits remain fail-closed errors");
   assert.equal(fineLevelSetSummaryRefinementSignal({ ...base,
     entryFlags: FINE_LEVELSET_SUMMARY_CENTER_COMPLETE,
   }, lookup, 0.5), "complete-no-crossing",
@@ -69,6 +69,11 @@ test("summary sizing aliases binding 4 without adding storage bindings or pressu
   assert.equal((callGraph.match(/pressureIn\[/g) ?? []).length, 1,
     "the only pressureIn access reachable from summary-bound refinement is the raw bitcast reader");
   assert.doesNotMatch(callGraph, /pressureOut\[/);
+  assert.match(callGraph,
+    /let pageRankPlusOne = fineSummaryWord\(16u \+ key \/ 32u\);[\s\S]*let rankPlusOne = fineSummaryWord\(pageWord\);[\s\S]*let base = entryOffset \+ \(rankPlusOne - 1u\) \* 8u/,
+    "simulation topology uses bounded direct page/rank loads followed by one compact mip entry load");
+  assert.doesNotMatch(callGraph, /while \(lo < hi\)|while\(low<high\)|recordLowerBound/,
+    "fine-summary physics consumers must not search the active mip");
   assert.match(callGraph,
     /result\.centerPhi = bitcast<f32>\(fineSummaryWord\(base \+ 7u\)\);[\s\S]*result\.centerValid = \(entryFlags & 0x3fc00000u\) == 0x3fc00000u/,
     "word 7 is the exact current fine phi at every dyadic summary node centre");
@@ -112,7 +117,7 @@ test("incremental topology separates structural refinement from wet frontier dec
   assert.doesNotMatch(dirty, /deltaWord|fineDelta|finePageTopologyTile/,
     "fine payload-refresh deltas must not masquerade as structural dirtiness");
 
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString().replace(/\s+/g, "");
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString().replace(/\s+/g, "");
   assert.match(rebuild,
     /this\.topologyDecisionGroup/);
   assert.match(rebuild,

@@ -5,10 +5,7 @@
  */
 
 import { PassBroker } from "./webgpu-pass-broker";
-import {
-  OCTREE_POWER_VELOCITY_VALID,
-  type OctreePowerVelocitySource,
-} from "./webgpu-octree-power-velocity";
+import type { DirectStructuredVelocitySource } from "./webgpu-octree-structured-velocity-gpu";
 import {
   OCTREE_FINE_SEED_CANDIDATE_BYTES,
   OCTREE_FINE_SEED_INVALID,
@@ -31,6 +28,7 @@ export const OCTREE_FINE_SEED_ADAPTER_PUBLICATION = Object.freeze({
   count: 0, dispatch: 1, generation: 4, published: 5, error: 6, capacity: 7, delta: 8,
 } as const);
 export const OCTREE_FINE_SEED_ADAPTER_PARAMETER_BYTES = 64;
+export const OCTREE_FINE_SEED_ADAPTER_DISPATCH_BYTES = 24;
 
 export interface OctreeFineSeedAdapterPlan {
   readonly rowCapacity: number;
@@ -51,7 +49,8 @@ export function planOctreeFineSeedAdapter(rowCapacity: number): OctreeFineSeedAd
     candidateBytes,
     allocatedBytes: leafBytes + candidateBytes
       + leafBytes + 128
-      + OCTREE_FINE_SEED_ADAPTER_CONTROL_BYTES + OCTREE_FINE_SEED_ADAPTER_PARAMETER_BYTES,
+      + OCTREE_FINE_SEED_ADAPTER_CONTROL_BYTES + OCTREE_FINE_SEED_ADAPTER_PARAMETER_BYTES
+      + 2 * OCTREE_FINE_SEED_ADAPTER_DISPATCH_BYTES,
   };
 }
 
@@ -115,11 +114,13 @@ struct Params { dimsCapacity:vec4u,selection:vec4u,cellHalo:vec4f,change:vec4u }
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read> fineSeedLeaves:array<FineSeedLeaf>;
 @group(0) @binding(3) var<storage,read_write> candidateControl:array<u32>;
-@group(0) @binding(4) var<storage,read> rowControl:array<u32>;
+@group(0) @binding(4) var<storage,read> structuredControl:array<u32>;
 @group(0) @binding(5) var<storage,read> frontier:array<u32>;
 @group(0) @binding(6) var<storage,read> compaction:array<u32>;
 @group(0) @binding(7) var<storage,read_write> compactCandidates:array<Candidate>;
 @group(0) @binding(9) var<storage,read_write> previousFineSeedLeaves:array<FineSeedLeaf>;
+@group(0) @binding(10) var<storage,read> sourceRowCount:array<u32>;
+@group(0) @binding(11) var<storage,read_write> dispatchMetadata:array<u32>;
 const CORE=${OCTREE_FINE_SEED_STATE.core}u;const HALO=${OCTREE_FINE_SEED_STATE.halo}u;const LIVE=${OCTREE_FINE_SEED_STATE.live}u;
 fn deltaMode()->bool{return params.change.z!=0xffffffffu&&params.change.z<arrayLength(&compaction)&&compaction[params.change.z]==1u;}
 fn dirtyLeaf(leaf:FineSeedLeaf)->bool{if(!deltaMode()){return true;}let tileSize=params.change.x;let limits=(params.dimsCapacity.xyz+vec3u(tileSize-1u))/tileSize;let tile=vec3u(leaf.originX,leaf.originY,leaf.originZ)/tileSize;let index=tile.x+limits.x*(tile.y+limits.y*tile.z);return index<params.change.y&&params.change.w+index<arrayLength(&compaction)&&compaction[params.change.w+index]==frontier[3];}
@@ -133,8 +134,26 @@ fn selectedCandidate(row:u32)->Candidate{
 }
 var<workgroup> candidateCounts:array<u32,256>;
 var<workgroup> publicationValid:u32;
+@compute @workgroup_size(1) fn publishFineSeedAdapterDispatch(){
+  let rawSourceRows=select(0u,sourceRowCount[0],arrayLength(&sourceRowCount)>0u);
+  let sourceRows=min(rawSourceRows,params.dimsCapacity.w);
+  let validStructured=arrayLength(&structuredControl)>=6u&&structuredControl[0]==0u
+    &&structuredControl[3]!=0u&&structuredControl[4]<=1u;
+  let sourceValid=validStructured&&rawSourceRows<=params.dimsCapacity.w
+    &&sourceRows==structuredControl[2];
+  let rows=select(0u,sourceRows,sourceValid);
+  dispatchMetadata[0]=(rows+63u)/64u;dispatchMetadata[1]=1u;dispatchMetadata[2]=1u;
+  dispatchMetadata[3]=select(0u,1u,rows>0u);dispatchMetadata[4]=1u;dispatchMetadata[5]=1u;
+  if(rows==0u){
+    let generation=select(0u,frontier[3],arrayLength(&frontier)>3u);
+    candidateControl[0]=0u;candidateControl[1]=0u;candidateControl[2]=1u;candidateControl[3]=1u;
+    candidateControl[4]=generation;candidateControl[5]=select(0u,1u,sourceValid&&generation!=0u);
+    candidateControl[6]=select(1u,0u,sourceValid);candidateControl[7]=0u;
+    candidateControl[8]=select(0u,1u,deltaMode());
+  }
+}
 @compute @workgroup_size(256) fn publishFineSeedCandidates(@builtin(local_invocation_index) lid:u32){
-  let rows=params.dimsCapacity.w;let width=rows/256u;let remainder=rows%256u;
+  let rows=min(params.dimsCapacity.w,structuredControl[2]);let width=rows/256u;let remainder=rows%256u;
   let begin=lid*width+min(lid,remainder);let end=begin+width+select(0u,1u,lid<remainder);
   var localCount=0u;for(var row=begin;row<end;row+=1u){
     localCount+=select(0u,1u,selectedCandidate(row).row!=${OCTREE_FINE_SEED_INVALID}u);
@@ -153,7 +172,8 @@ var<workgroup> publicationValid:u32;
   }
   storageBarrier();workgroupBarrier();
   let count=candidateCounts[255u];let capacity=arrayLength(&compactCandidates);
-  let pressureControl=arrayLength(&rowControl)-8u;let topologyError=select(1u,rowControl[pressureControl],arrayLength(&rowControl)>=8u);
+  let topologyError=select(1u,structuredControl[0],arrayLength(&structuredControl)>=6u
+    &&structuredControl[0]==0u&&structuredControl[2]>0u&&structuredControl[3]!=0u);
   let generation=select(0u,frontier[3],arrayLength(&frontier)>3u);
   let error=select(topologyError,2u,count>capacity);
   if(lid==0u){
@@ -182,20 +202,26 @@ export class WebGPUOctreeFineSeedAdapter {
   readonly candidates: GPUBuffer;
   readonly countAndDispatch: GPUBuffer;
   private readonly previousFineSeedLeaves:GPUBuffer;
-  private readonly coarseFallback:GPUBuffer;
+  /** Fail-closed placeholder used only until all mandatory GPU authorities are wired. */
+  private readonly bindingSentinel:GPUBuffer;
   private readonly params: GPUBuffer;
+  /** Writable planner output is copied to an INDIRECT-only buffer between
+   * passes, so no storage/indirect alias survives validation or scheduling. */
+  private readonly dispatchMetadata: GPUBuffer;
+  private readonly indirectDispatch: GPUBuffer;
   private bindGroup: GPUBindGroup;
   private readonly layout:GPUBindGroupLayout;
   private readonly device:GPUDevice;
   private readonly topology:OctreeFineSeedAdapterTopology;
-  private powerVelocity?:OctreePowerVelocitySource;
+  private structuredVelocity?:DirectStructuredVelocitySource;
   private coarsePhi?:OctreeFineSeedAdapterCoarsePhiSource;
   private readonly buildPipeline: GPUComputePipeline;
+  private readonly planDispatchPipeline: GPUComputePipeline;
   private readonly publishCandidatesPipeline: GPUComputePipeline;
-  private readonly selectBindGroup: GPUBindGroup;
-  private readonly workgroups: number;
+  private selectBindGroup: GPUBindGroup;
+  private readonly selectLayout:GPUBindGroupLayout;
   private coarsePhiBindings=false;
-  private powerVelocityBindings=false;
+  private structuredVelocityBindings=false;
   private destroyed = false;
 
   constructor(
@@ -222,14 +248,23 @@ export class WebGPUOctreeFineSeedAdapter {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.leaves = device.createBuffer({ label: "Octree fine-seed leaf records", size: this.plan.leafBytes, usage: storage });
     this.previousFineSeedLeaves=device.createBuffer({label:"Previous octree fine-seed leaves",size:this.plan.leafBytes,usage:storage});
-    this.coarseFallback=device.createBuffer({label:"Octree fine-seed adapter coarse-phi sentinel",size:128,usage:GPUBufferUsage.STORAGE});
+    this.bindingSentinel=device.createBuffer({label:"Octree fine-seed adapter unpublished-authority sentinel",size:128,usage:GPUBufferUsage.STORAGE});
     this.candidates = device.createBuffer({ label: "Compact octree fine-seed candidates", size: this.plan.candidateBytes, usage: storage });
     this.countAndDispatch = device.createBuffer({
       label: "Octree fine-seed candidate count and dispatch",
       size: OCTREE_FINE_SEED_ADAPTER_CONTROL_BYTES,
       usage: storage | GPUBufferUsage.COPY_SRC,
     });
-    this.workgroups = Math.ceil(rowCapacity / 64);
+    this.dispatchMetadata = device.createBuffer({
+      label: "Octree fine-seed exact dispatch metadata",
+      size: OCTREE_FINE_SEED_ADAPTER_DISPATCH_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    this.indirectDispatch = device.createBuffer({
+      label: "Octree fine-seed immutable indirect dispatch",
+      size: OCTREE_FINE_SEED_ADAPTER_DISPATCH_BYTES,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
+    });
     this.params = device.createBuffer({
       label: "Octree fine-seed adapter parameters",
       size: OCTREE_FINE_SEED_ADAPTER_PARAMETER_BYTES,
@@ -275,7 +310,7 @@ export class WebGPUOctreeFineSeedAdapter {
       layout: pipelineLayout,
       compute: { module: shaderModule, entryPoint: "buildFineSeedLeaves" },
     });
-    const selectLayout = device.createBindGroupLayout({ label: "Octree fine-seed candidate selection layout", entries: [
+    this.selectLayout = device.createBindGroupLayout({ label: "Octree fine-seed candidate selection layout", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
@@ -284,48 +319,62 @@ export class WebGPUOctreeFineSeedAdapter {
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
+    const candidateModule = device.createShaderModule({
+      label: "Octree fine-seed candidate publication",
+      code: octreeFineSeedCandidateShader,
+    });
+    const candidatePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.selectLayout] });
+    this.planDispatchPipeline = device.createComputePipeline({
+      label: "Publish exact octree fine-seed dispatch",
+      layout: candidatePipelineLayout,
+      compute: { module: candidateModule, entryPoint: "publishFineSeedAdapterDispatch" },
+    });
     this.publishCandidatesPipeline = device.createComputePipeline({
       label: "Publish exact octree fine-seed candidates",
-      layout: device.createPipelineLayout({ bindGroupLayouts: [selectLayout] }),
+      layout: candidatePipelineLayout,
       compute: {
-        module: device.createShaderModule({
-          label: "Octree fine-seed candidate publication",
-          code: octreeFineSeedCandidateShader,
-        }),
+        module: candidateModule,
         entryPoint: "publishFineSeedCandidates",
       },
     });
-    this.selectBindGroup = device.createBindGroup({ label: "Octree fine-seed candidate selection bindings", layout: selectLayout, entries: [
+    this.selectBindGroup = this.createSelectBindGroup();
+    this.bindGroup = this.createBindGroup();
+  }
+
+  private createSelectBindGroup(){return this.device.createBindGroup({ label: "Octree fine-seed candidate selection bindings", layout: this.selectLayout, entries: [
       { binding: 0, resource: { buffer: this.params } },
       { binding: 1, resource: { buffer: this.leaves } },
       { binding: 3, resource: { buffer: this.countAndDispatch } },
-      { binding: 4, resource: { buffer: this.topology.publicationControl ?? this.topology.rowCount } },
+      { binding: 4, resource: { buffer: this.structuredVelocity?.control ?? this.bindingSentinel } },
       { binding: 5, resource: { buffer: this.topology.frontier } },
-      { binding: 6, resource: { buffer: this.topology.changeTracking?.compaction ?? this.coarseFallback } },
+      { binding: 6, resource: { buffer: this.topology.changeTracking?.compaction ?? this.bindingSentinel } },
       { binding: 7, resource: { buffer: this.candidates } },
       { binding: 9, resource: { buffer: this.previousFineSeedLeaves } },
-    ] });
-    this.bindGroup = this.createBindGroup();
-  }
+      { binding: 10, resource: { buffer: this.topology.rowCount } },
+      { binding: 11, resource: { buffer: this.dispatchMetadata } },
+    ] });}
 
   private createBindGroup(){return this.device.createBindGroup({ label: "Octree power fields to fine-seed-leaf bindings", layout:this.layout, entries: [
       { binding: 0, resource: { buffer:this.topology.leafHeaders } },
       { binding: 1, resource: { buffer:this.topology.rowCount } },
-      { binding: 3, resource: { buffer:this.powerVelocity?.control??this.coarseFallback } },
-      { binding: 4, resource: { buffer:this.powerVelocity?.velocities??this.coarseFallback } },
+      { binding: 3, resource: { buffer:this.structuredVelocity?.control??this.bindingSentinel } },
+      { binding: 4, resource: { buffer:this.structuredVelocity?.rowVelocities??this.bindingSentinel } },
       { binding: 6, resource: { buffer: this.params } },
       { binding: 7, resource: { buffer: this.leaves } },
-      {binding:10,resource:{buffer:this.coarsePhi?.values??this.coarseFallback}},
-      {binding:11,resource:{buffer:this.coarsePhi?.control??this.coarseFallback}},
+      {binding:10,resource:{buffer:this.coarsePhi?.values??this.bindingSentinel}},
+      {binding:11,resource:{buffer:this.coarsePhi?.control??this.bindingSentinel}},
     ] });}
 
-  /** Routes leaf motion to the native Section 5 power-cell publication. */
-  setPowerVelocitySource(source:OctreePowerVelocitySource):void{
+  /** Routes leaf motion to the accepted packed structured-velocity bank. */
+  setStructuredVelocitySource(source:DirectStructuredVelocitySource):void{
     if(source.plan.rowCapacity!==this.plan.rowCapacity){
-      throw new RangeError("Octree fine-seed adapter and power-velocity row capacities must match");
+      throw new RangeError("Octree fine-seed adapter and structured-velocity row capacities must match");
     }
-    this.powerVelocity=source;this.powerVelocityBindings=true;this.bindGroup=this.createBindGroup();
+    this.structuredVelocity=source;this.structuredVelocityBindings=true;this.bindGroup=this.createBindGroup();
+    this.selectBindGroup=this.createSelectBindGroup();
   }
 
   /** Routes recurring leaf classification to the paper's coarse-octree phi. */
@@ -336,19 +385,25 @@ export class WebGPUOctreeFineSeedAdapter {
   /** True only after the adapter no longer depends on bootstrap phi. */
   get hasCoarsePhiBindings(){return this.coarsePhiBindings;}
 
-  /** True only after leaf motion consumes native power-cell velocities. */
-  get hasPowerVelocityBindings(){return this.powerVelocityBindings;}
+  /** True only after leaf motion consumes the accepted structured authority. */
+  get hasStructuredVelocityBindings(){return this.structuredVelocityBindings;}
 
   encode(broker: PassBroker): void {
     if (this.destroyed) return;
+    const planner = broker.compute({ label: "Publish exact octree fine-seed dispatch" });
+    planner.setPipeline(this.planDispatchPipeline);
+    planner.setBindGroup(0, this.selectBindGroup);
+    planner.dispatchWorkgroups(1);
+    broker.updateIndirectBuffer(this.dispatchMetadata, 0, this.indirectDispatch, 0,
+      OCTREE_FINE_SEED_ADAPTER_DISPATCH_BYTES);
     const pass = broker.compute({ label: "Publish compact octree fine-seed leaves" });
     pass.setPipeline(this.buildPipeline);
     pass.setBindGroup(0, this.bindGroup);
-    pass.dispatchWorkgroups(this.workgroups);
+    pass.dispatchWorkgroupsIndirect(this.indirectDispatch, 0);
     const publish = broker.compute({ label: "Publish exact octree fine-seed candidates" });
     publish.setPipeline(this.publishCandidatesPipeline);
     publish.setBindGroup(0, this.selectBindGroup);
-    publish.dispatchWorkgroups(1);
+    publish.dispatchWorkgroupsIndirect(this.indirectDispatch, 12);
   }
 
   get source(): OctreeFineSeedAdapterSource {
@@ -365,10 +420,12 @@ export class WebGPUOctreeFineSeedAdapter {
     this.destroyed = true;
     this.leaves.destroy();
     this.previousFineSeedLeaves.destroy();
-    this.coarseFallback.destroy();
+    this.bindingSentinel.destroy();
     this.candidates.destroy();
     this.countAndDispatch.destroy();
     this.params.destroy();
+    this.dispatchMetadata.destroy();
+    this.indirectDispatch.destroy();
   }
 }
 
@@ -377,9 +434,8 @@ struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32
 struct FineSeedLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
 struct Params { dimsCapacity:vec4u, selection:vec4u, cellHalo:vec4f, change:vec4u }
 @group(0) @binding(0) var<storage,read> leafHeaders:array<LeafHeader>;
-@group(0) @binding(1) var<storage,read> rowControl:array<u32>;
-@group(0) @binding(3) var<storage,read> powerVelocityControl:array<u32>;
-@group(0) @binding(4) var<storage,read> powerVelocities:array<vec4f>;
+@group(0) @binding(3) var<storage,read> structuredVelocityControl:array<u32>;
+@group(0) @binding(4) var<storage,read> structuredRowVelocities:array<vec4f>;
 @group(0) @binding(6) var<uniform> params:Params;
 @group(0) @binding(7) var<storage,read_write> fineSeedLeaves:array<FineSeedLeaf>;
 struct CoarsePhi { phi:f32, minimumPhi:f32, maximumPhi:f32, flags:u32 }
@@ -387,7 +443,6 @@ struct CoarsePhi { phi:f32, minimumPhi:f32, maximumPhi:f32, flags:u32 }
 @group(0) @binding(11) var<storage,read> coarseControl:array<u32>;
 const INVALID=0xffffffffu;const CORE=${OCTREE_FINE_SEED_STATE.core}u;const HALO=${OCTREE_FINE_SEED_STATE.halo}u;const LIVE=${OCTREE_FINE_SEED_STATE.live}u;
 const COARSE_VALID=${OCTREE_COARSE_PHI_FLAG.valid}u;const COARSE_FINITE=${OCTREE_COARSE_PHI_FLAG.finite}u;
-const POWER_VELOCITY_VALID=${OCTREE_POWER_VELOCITY_VALID}u;
 fn dims()->vec3u{return params.dimsCapacity.xyz;}
 fn cellCount()->u32{return dims().x*dims().y*dims().z;}
 fn coord(cell:u32)->vec3u{return vec3u(cell%dims().x,(cell/dims().x)%dims().y,cell/(dims().x*dims().y));}
@@ -405,19 +460,22 @@ fn coarseRowValid(row:u32)->bool{return coarsePublicationValid()&&row<coarseCont
   &&row<arrayLength(&coarsePhi)&&(coarsePhi[row].flags&(COARSE_VALID|COARSE_FINITE))==(COARSE_VALID|COARSE_FINITE)
   &&finite(coarsePhi[row].phi)&&finite(coarsePhi[row].minimumPhi)&&finite(coarsePhi[row].maximumPhi);}
 fn liveRow(row:u32,header:LeafHeader)->bool{
-  return header.cell<cellCount()&&row<rowControl[0];
+  return header.cell<cellCount()&&structuredVelocityPublicationValid()
+    &&row<structuredVelocityControl[2];
 }
-fn powerVelocityPublicationValid()->bool{
-  return arrayLength(&powerVelocityControl)>=8u&&powerVelocityControl[0]==POWER_VELOCITY_VALID
-    &&powerVelocityControl[2]>0u&&powerVelocityControl[5]==powerVelocityControl[2]
-    &&powerVelocityControl[7]!=0u;
+fn structuredVelocityPublicationValid()->bool{
+  return arrayLength(&structuredVelocityControl)>=6u&&structuredVelocityControl[0]==0u
+    &&structuredVelocityControl[2]>0u&&structuredVelocityControl[3]!=0u
+    &&structuredVelocityControl[4]<=1u;
 }
-fn powerVelocityRowValid(row:u32)->bool{
-  if(!powerVelocityPublicationValid()||row>=powerVelocityControl[2]||row>=arrayLength(&powerVelocities)){return false;}
-  let velocity=powerVelocities[row];
+fn structuredVelocityRowIndex(row:u32)->u32{return structuredVelocityControl[4]*params.dimsCapacity.w+row;}
+fn structuredVelocityRowValid(row:u32)->bool{
+  let at=structuredVelocityRowIndex(row);
+  if(!structuredVelocityPublicationValid()||row>=structuredVelocityControl[2]||at>=arrayLength(&structuredRowVelocities)){return false;}
+  let velocity=structuredRowVelocities[at];
   return velocity.w==1.0&&finite(velocity.x)&&finite(velocity.y)&&finite(velocity.z);
 }
 @compute @workgroup_size(64) fn buildFineSeedLeaves(@builtin(global_invocation_id) gid:vec3u){
-  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&fineSeedLeaves)){return;}let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!powerVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){return;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;}else{let sampleCell=vec3i(clamp(vec3u(centre),vec3u(0),dims()-vec3u(1)));centrePhi=analyticInitialPhi(vec3f(sampleCell)+vec3f(0.5));gradient=vec3f(0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(1,0,0))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(1,0,0))+vec3f(0.5))),0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(0,1,0))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(0,1,0))+vec3f(0.5))),0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(0,0,1))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(0,0,1))+vec3f(0.5))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let core=minimumPhi<=0.0&&maximumPhi>=0.0;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=powerVelocities[row].xyz;fineSeedLeaves[row]=FineSeedLeaf(origin.x,origin.y,origin.z,header.size,flags,fineSeedLeaves[row].pad0,0u,0u,vec4f(centrePhi,gradient),vec4f(motion,length(motion)));
+  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&fineSeedLeaves)){return;}let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!structuredVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){return;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;}else{let sampleCell=vec3i(clamp(vec3u(centre),vec3u(0),dims()-vec3u(1)));centrePhi=analyticInitialPhi(vec3f(sampleCell)+vec3f(0.5));gradient=vec3f(0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(1,0,0))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(1,0,0))+vec3f(0.5))),0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(0,1,0))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(0,1,0))+vec3f(0.5))),0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(0,0,1))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(0,0,1))+vec3f(0.5))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let core=minimumPhi<=0.0&&maximumPhi>=0.0;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=structuredRowVelocities[structuredVelocityRowIndex(row)].xyz;fineSeedLeaves[row]=FineSeedLeaf(origin.x,origin.y,origin.z,header.size,flags,fineSeedLeaves[row].pad0,0u,0u,vec4f(centrePhi,gradient),vec4f(motion,length(motion)));
 }
 `;

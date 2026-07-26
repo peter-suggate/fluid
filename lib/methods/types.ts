@@ -8,9 +8,7 @@ import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
 import type { SparseVoxelRenderSource, SparseVoxelSceneRenderSource } from "../webgpu-voxel-debug";
 import type { WebGPUFineLevelSetBrickSource } from "../webgpu-octree-fine-levelset-bricks";
 import type { GPUInitializationPhase } from "../gpu-initialization";
-import type { OctreeFaceBandGPUPlan } from "../webgpu-octree-face-closest-point";
 import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
-import type { OctreeEnergyLedgerSnapshot } from "../webgpu-octree-energy-ledger";
 
 /**
  * Method plugin contract.
@@ -91,10 +89,6 @@ export interface GPUSolverInstance {
   readonly powerPressureBuffer?: GPUBuffer;
   /** QA-only compact leaf headers; 48 bytes per pressure row. */
   readonly powerLeafHeaders?: GPUBuffer;
-  /** QA-only reconstructed vec4 velocity, indexed by power-leaf row. */
-  readonly powerCellVelocityBuffer?: GPUBuffer;
-  /** QA-only compact pressure CSR entries; `(neighborRow:u32, coefficient:f32)`. */
-  readonly powerLeafEntries?: GPUBuffer;
   /** True only after the complete t=0 sparse authority has passed its queue fence. */
   readonly initialSparseAuthorityReady?: boolean;
   /** Row-independent, globally indexed sparse fine level-set bricks. */
@@ -103,6 +97,7 @@ export interface GPUSolverInstance {
   readonly globalFineTransportControl?: GPUBuffer;
   readonly globalFineRedistanceControl?: GPUBuffer;
   readonly globalFineVolumeControl?: GPUBuffer;
+  readonly structuredProjectionEnergyStats?: GPUBuffer;
   /** QA-only compact topology-delta streams for rejection forensics. */
   readonly globalFinePageDeltaDebug?: {
     readonly buffer: GPUBuffer;
@@ -114,12 +109,6 @@ export interface GPUSolverInstance {
     readonly dirtyPagesOffsetWords: number;
     readonly supportPagesOffsetWords: number;
   };
-  readonly globalFinePowerVelocityControl?: GPUBuffer;
-  readonly globalFinePowerProjectionControl?: GPUBuffer;
-  /** Explicit final/read-on-demand access to the opt-in GPU energy ring. */
-  readPowerEnergyLedger?(): Promise<OctreeEnergyLedgerSnapshot> | undefined;
-  /** QA-only exact power-face endpoint queries; never affects publication. */
-  readonly powerBoundaryPhiQueries?: GPUBuffer;
   /** QA-only sparse owner-page arena readback for topology forensics. */
   readonly ownerLatticeDebug?: {
     buffer: GPUBuffer;
@@ -130,39 +119,8 @@ export interface GPUSolverInstance {
   readonly powerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
   /** QA-only exact sparse source sampled by the last power boundary build. */
   readonly powerBoundaryFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
-  /** Diagnostic-only Stage-B point-sampler transaction used by fine transport. */
-  readonly globalFinePowerVelocitySampleControl?: GPUBuffer;
   readonly globalFineCoarseLevelSetControl?: GPUBuffer;
   readonly globalFineRestrictionControl?: GPUBuffer;
-  /** Diagnostic-only Section 5 regular-face extrapolation header and exact capacity plan. */
-  readonly globalFineFaceBandControl?: GPUBuffer;
-  /** Rejection-only Section 5 candidate header; never selected as authority. */
-  readonly globalFineFaceBandCandidateControl?: GPUBuffer;
-  /** Diagnostic-only catalog-Delaunay transition gate preceding regular-face emission. */
-  readonly globalFineFaceBandTransitionControl?: GPUBuffer;
-  /** Rejection-only Section 5 candidate transition header. */
-  readonly globalFineFaceBandCandidateTransitionControl?: GPUBuffer;
-  /** Diagnostic-only transactional cell-vector field reconstructed after closest-point extension. */
-  readonly globalFineFaceBandPointFieldControl?: GPUBuffer;
-  /** Diagnostic-only all-band transient physical generalized-face graph transaction. */
-  readonly globalFineFaceBandTransientPowerControl?: GPUBuffer;
-  /** Diagnostic-only regular-face to power-face publication transaction. */
-  readonly globalFineFaceBandPowerPublicationControl?: GPUBuffer;
-  readonly globalFineFaceBandPlan?: OctreeFaceBandGPUPlan;
-  /** Failure-only bounded readback for a retained Section-5 interpolation row. */
-  readGlobalFineBandRowFailure?(index: number): Promise<unknown> | undefined;
-  /** Failure-only bounded readback for a rejected, unpublished Section-5 row. */
-  readGlobalFineCandidateBandRowFailure?(index: number): Promise<unknown> | undefined;
-  /** Failure-only bounded readback for a directly identified Section-5 face slot. */
-  readGlobalFineBandFaceFailure?(slot: number): Promise<unknown> | undefined;
-  /** Failure-only bounded readback for a rejected, unpublished Section-5 face slot. */
-  readGlobalFineCandidateBandFaceFailure?(slot: number): Promise<unknown> | undefined;
-  /** Failure-only exact audit of rejected candidate incidence reciprocity. */
-  readGlobalFineCandidateBandIncidenceFailure?(rowCount: number): Promise<unknown> | undefined;
-  /** Failure-only exact readback for a transient physical generalized-face slot. */
-  readGlobalFineTransientPowerFaceFailure?(slot: number): Promise<unknown> | undefined;
-  /** Failure-only bounded readback for a tagged nonobtuse-tetra realization fault. */
-  readGlobalFineBandAcuteTetraFailure?(tagged: number): Promise<unknown> | undefined;
   /** GPU-authored rigid records matching the renderer's four-vec4 body ABI. */
   readonly rigidRenderBuffer?: GPUBuffer;
   /** GPU-authored 128-byte primitive-motion sidecars, including conservative swept bounds. */

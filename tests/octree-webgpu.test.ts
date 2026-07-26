@@ -3,18 +3,24 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { simulationMethods } from "../lib/methods";
 import { octreeMethod } from "../lib/methods/octree";
-import { OCTREE_FACE_FRAGMENT_MAX_FINE_NEIGHBORS } from "../lib/octree-face-fragments";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
-import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "../lib/generated/octree-power-catalog";
 import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
 import { enumerateOctreeFrontierCandidateLattice, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
-import { octreeMGPCGShader, WebGPUOctreeMGPCG } from "../lib/webgpu-octree-mgpcg";
-import { octreePowerSolidImpulseShader } from "../lib/webgpu-octree-power-solid-faces";
+import {
+  octreePipelinedMGPCGShader,
+  WebGPUOctreePipelinedMGPCG,
+} from "../lib/webgpu-octree-pipelined-mgpcg";
 import { quadtreeSurfaceShader, WebGPUQuadtreeSurfaceState } from "../lib/webgpu-quadtree-builder";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+const structuredVelocitySource = readFileSync(
+  new URL("../lib/webgpu-octree-structured-velocity-gpu.ts", import.meta.url), "utf8");
+const structuredBoundarySource = readFileSync(
+  new URL("../lib/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
+const spgridVCycleSource = readFileSync(
+  new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
 const uniformSolverSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
 const smokeSource = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
 const packageManifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -33,7 +39,6 @@ test("row-indexed octree startup skips the unreachable dense Jacobi specializati
   }), true, "terrain and rigid scenes retain solid rasterization");
   assert.equal(octreeProjectionPipelineRequired("jacobi", product), true,
     "unknown entry points are not part of the production list");
-  assert.equal(octreeProjectionPipelineRequired("assembleSystem", product), true);
   const productionEntryPoints = octreeSource.slice(
     octreeSource.indexOf("private static readonly pipelineEntryPoints"),
     octreeSource.indexOf("private assignPipelines"),
@@ -41,6 +46,7 @@ test("row-indexed octree startup skips the unreachable dense Jacobi specializati
   for (const retired of [
     "jacobi", "project", "reconstructSmallGradients", "reconstructGradients",
     "projectLeaves", "passThroughPressureOverflow", "extrapolate",
+    "assembleSystem", "assembleCoarseSystem",
   ]) {
     assert.doesNotMatch(productionEntryPoints, new RegExp(`"${retired}"`),
       `${retired} must not return to the production pipeline tuple`);
@@ -86,12 +92,8 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.showQualityControl, false,
     "legacy quality tiers must not obscure the explicit power-method controls");
   assert.deepEqual(octreeMethod.params.map((spec) => spec.key), [
-    "powerPressureSolver", "globalFineLevelSetFactor", "maximumLeafSize", "interfaceRefinementBandCells",
-  ], "the product UI must expose the immutable pressure choice without compatibility or bring-up switches");
-  const pressureSolver = octreeMethod.params.find((spec) => spec.key === "powerPressureSolver");
-  assert.ok(pressureSolver && pressureSolver.kind === "select");
-  assert.equal(pressureSolver.default, "galerkin");
-  assert.deepEqual(pressureSolver.options.map((option) => option.value), ["galerkin", "section43-mgpcg"]);
+    "globalFineLevelSetFactor", "maximumLeafSize", "interfaceRefinementBandCells",
+  ], "the product UI must not expose a retired pressure path");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "surfaceColumns"), false,
     "scene voxelDomain is the sole spatial-resolution authority");
   const layout = createTallCellLayout(defaultScene, "balanced", 2_048);
@@ -105,9 +107,9 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.equal(octreeMethod.params.some((spec) => spec.key === "secondaryParticles"), false,
     "unsupported spray must not be exposed by compact power-face authority");
   assert.match(octreeMethod.detail, /no topology readbacks/);
-  assert.match(octreeMethod.detail, /Section 4\.3 sparse-pyramid hybrid PCG/);
+  assert.match(octreeMethod.detail, /Section 4\.3 hybrid MGPCG/);
   assert.match(octreeMethod.detail, /rigid-body coupling/);
-  assert.match(octreeMethod.description, /sparse-pyramid pressure solve/);
+  assert.match(octreeMethod.description, /sparse-pyramid hybrid MGPCG pressure solve/);
   const maximumLeaf = octreeMethod.params.find((spec) => spec.key === "maximumLeafSize");
   assert.ok(maximumLeaf && maximumLeaf.kind === "select");
   assert.equal(maximumLeaf.default, "16");
@@ -144,7 +146,11 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeSource, /bulkResidency: true,[\s\S]*brickPreActivation: true/,
     "production power-octree sparse residency always uses preactivation");
   const encode = WebGPUOctreeProjection.prototype.encode.toString();
-  assert.match(encode.replace(/\s+/g, ""), /constremapGroup=this\.latestPressureInA\?this\.groups\.ab:this\.groups\.ba/);
+  const candidate = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
+  assert.match(candidate, /this\.encodeFrontierRows\(/,
+    "row compaction belongs exclusively to the inactive next-epoch transaction");
+  assert.doesNotMatch(encode, /this\.encodeFrontierRows\(/,
+    "the active solve must consume the beginning-of-substep committed rows without remapping them");
   assert.doesNotMatch(encode.slice(encode.indexOf("else")), /clearBuffer\(this\.pressure[AB]\)/,
     "compact cold starts are initialized row-by-row during emission, not by clearing capacity-sized buffers");
 });
@@ -186,13 +192,13 @@ test("regular dam Dawn regression matches the UI cadence through two seconds", (
     "the default regression must run the browser cadence through the full requested interval");
 });
 
-test("native power pressure capacity includes closed-wall and catalog bounds", () => {
+test("native power pressure capacity reserves rows without a variable-entry arena", () => {
   const dims = { nx: 288, ny: 96, nz: 64 };
   const count = dims.nx * dims.ny * dims.nz;
   const plan = planOctreePressureCapacity(dims, 16, 4);
   assert.equal(plan.rowCapacity, 643_840);
-  assert.equal(plan.entryCapacity, plan.rowCapacity * Math.max(
-    6 * OCTREE_FACE_FRAGMENT_MAX_FINE_NEIGHBORS, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumNeighborRows));
+  assert.deepEqual(Object.keys(plan).sort(), ["headerBytes", "pressureBytes", "rowCapacity"],
+    "resolved case-local handles replace the retired variable-entry capacity");
   assert.ok(plan.rowCapacity < count / 2, "the widened ocean must not reserve one pressure slot per finest cell");
   assert.equal(planOctreePressureCapacity(dims, 16, 4, 1024).rowCapacity, 1024);
 });
@@ -205,14 +211,14 @@ test("compact frontier retains only the immutable public row-delta ABI", () => {
   assert.deepEqual(compact, {
     cellCount: 2_457_600,
     listCapacity: 779_776,
-    candidateOffsetWords: 1_559_558,
-    rowDeltaControlOffsetWords: 2_339_334,
-    rowDeltaNewToOldOffsetWords: 2_339_350,
-    rowDeltaOldToNewOffsetWords: 3_119_126,
-    rowDeltaDirtyRowsOffsetWords: 3_898_902,
-    rowDeltaAffectedRowsOffsetWords: 4_678_678,
+    candidateOffsetWords: 1_559_562,
+    rowDeltaControlOffsetWords: 2_339_338,
+    rowDeltaNewToOldOffsetWords: 2_339_354,
+    rowDeltaOldToNewOffsetWords: 3_119_130,
+    rowDeltaDirtyRowsOffsetWords: 3_898_906,
+    rowDeltaAffectedRowsOffsetWords: 4_678_682,
     candidateBytes: 3_119_104,
-    allocatedBytes: 21_833_816,
+    allocatedBytes: 21_833_832,
   });
   assert.throws(() => planOctreeLeafFrontierAllocation(0, rowCapacity), /positive integer/);
   assert.throws(() => planOctreeLeafFrontierAllocation(cellCount, 0), /positive integer/);
@@ -232,23 +238,7 @@ test("cold dam-UI frontier candidates cover every finest cell exactly once", () 
     "rounded indirect workgroups must reject the invalid lane base before octant addition can wrap");
 });
 
-test("Dawn smoke audits native Power velocity without a dense octree texture", () => {
-  assert.match(smokeSource, /const usesNativePowerVelocity = method\.id === "octree"/);
-  assert.match(smokeSource, /if \(!texture \|\| usesNativePowerVelocity\) return Promise\.resolve\(undefined\)/);
-  assert.match(smokeSource, /velocityTexture && final && method\.id !== "octree"/);
-  assert.match(smokeSource, /result\.info\.powerDiagramAuthoritative === true/);
-  assert.match(smokeSource, /faces\?\.valid === true && faces\.flags === 0/);
-  assert.match(smokeSource, /Power transport reported invalid or zero CFL/);
-  assert.match(smokeSource,
-    /fineDisplacementLimit = Math\.max\(1, octree\.info\.globalFineLevelSetFactor \?\? 1\)/,
-    "factor-f fine transport uses the already-gated one-power-cell CFL, not a hidden 1/f timestep");
-  assert.match(smokeSource,
-    /transport\.maximumDisplacementFineCells \?\? Infinity\) <= fineDisplacementLimit/,
-    "the Section 5 gate retains a finite characteristic bound in fine-sample units");
-  assert.doesNotMatch(smokeSource, /adaptiveFaceTransportedCount === faces\?\.faceCount/);
-});
-
-test("compact scan and coarse-task scratch follows pressure and active-tile bounds", () => {
+test("compact scan scratch feeds the class-specialized structured authority", () => {
   const dims = { nx: 640, ny: 192, nz: 160 };
   const pressure = planOctreePressureCapacity(dims, 16, 4);
   const activeTileCapacity = 4_800;
@@ -258,7 +248,6 @@ test("compact scan and coarse-task scratch follows pressure and active-tile boun
   );
   assert.deepEqual(compact, {
     scanBlockCapacity: 12_403,
-    coarseTaskCapacity: 38_400,
     candidateBlockCapacity: 76_800,
     scanAndTaskBytes: 763_296,
     activeTileBytes: 269_476,
@@ -275,14 +264,18 @@ test("compact scan and coarse-task scratch follows pressure and active-tile boun
   });
   assert.throws(() => planOctreeCompactionAllocation(dims, 0, 0, 0, 16), /positive integer/);
   assert.throws(() => planOctreeCompactionAllocation(dims, 1, -1, 0, 16), /active-tile bounds/);
-  assert.match(octreeProjectionShader, /return params\.pressureCapacity\.z/,
-    "the publication guard must consume the exact host-planned task capacity");
-  assert.match(octreeProjectionShader, /total\.z > coarseTaskCapacity\(\)/,
-    "a corrupted or oversized coarse task publication must fail closed before indirect dispatch");
-  assert.match(octreeProjectionShader, /coarseTasks = select\(tiles \* tiles \* tiles, 1u, rowIndexedPressure\)/,
-    "compact authority must publish one cooperative task per coarse pressure row");
-  assert.match(octreeProjectionShader, /coarseTaskIndex\(wid\)/,
-    "coarse indirect work must retain every row through a two-dimensional dispatch");
+  assert.match(octreeSource,
+    /this\.resolvedLinearOperator\s*=\s*this\.firstOrderVCycle\.accurateOperator/,
+    "production must cut directly from compact rows to rediscretized A2");
+  assert.match(structuredVelocitySource,
+    /for\(var family=0u;family<6u;family\+=1u\)/,
+    "the direct publication must materialize all six velocity families");
+  assert.match(structuredVelocitySource,
+    /section63Coefficients:\s*array<f32>[\s\S]*fn publishSection63Rows/,
+    "the same transaction must publish the fixed 19-channel Section 6.3 operator");
+  assert.match(spgridVCycleSource,
+    /SPGrid accurate A2 convergence-gated class records[\s\S]*dispatchWorkgroupsIndirect\(this\.accurateClassDispatch/,
+    "the A2 gather must consume exact class records without host-sized row dispatches");
   assert.match(octreeProjectionShader,
     /fn classifyTopologyTileSignature[\s\S]*currentPressureOwnerWet\(owner\)[\s\S]*TILE_SIGNATURE_VALID_MAGIC/,
     "structural dirtiness must compare persistent discrete owner/wet decisions");
@@ -344,7 +337,7 @@ test("compact scan and coarse-task scratch follows pressure and active-tile boun
   assert.doesNotMatch(octreeSource, /advanceFrontierCandidateSort/,
     "the deleted mutable stage-counter dispatch must not return");
   assert.match(octreeProjectionShader,
-    /fn classifyFrontierCarry[\s\S]*rowAuthorityDirtyGeneration\(cell,frontierGeneration\(\)\+1u\)/,
+    /fn classifyFrontierCarry[\s\S]*rowAuthorityDirtyGeneration\(cell,frontier\[8u\]\)/,
     "carried identity is exact and a carried row remains dirty when its fine-summary or mask tile ring changed");
   assert.match(octreeProjectionShader,
     /@compute @workgroup_size\(256\)\s*fn scanDirtyRowDeltaBlocks[\s\S]*fn prefixDirtyRowDeltaBlocks/,
@@ -374,7 +367,7 @@ test("compact scan and coarse-task scratch follows pressure and active-tile boun
 });
 
 test("unchanged octree generations zero every bulk topology and frontier schedule", () => {
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
   const rows = octreeSource.slice(
     octreeSource.indexOf("private encodeFrontierRows("),
     octreeSource.indexOf("\n  encode(", octreeSource.indexOf("private encodeFrontierRows(")),
@@ -412,6 +405,47 @@ test("unchanged octree generations zero every bulk topology and frontier schedul
     "malformed structural authority must fail closed with zero indirect work");
 });
 
+test("topology attempt generations are stamped in GPU invocation order", () => {
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
+  assert.match(rebuild,
+    /stampFrontierAttemptPipeline[\s\S]*dispatchWorkgroups\(1\)[\s\S]*topology attempt generation stamped/,
+    "every candidate must stamp its generation before any candidate publisher consumes it");
+  assert.doesNotMatch(rebuild,
+    /queue\.writeBuffer\(this\.(?:leafFrontier\s*,\s*32|params\s*,\s*136)/,
+    "host writes to shared generation words collapse multiple encoded substeps onto the last stamp");
+  assert.match(octreeProjectionShader,
+    /fn stampFrontierAttempt\(\)[\s\S]*frontier\[8\] \+ 1u[\s\S]*frontier\[8\] = next/);
+  assert.doesNotMatch(octreeProjectionShader, /frontier\[8\]\s*=\s*params\.pressureCapacity\.z/,
+    "begin/finalize must preserve the invocation-stable GPU attempt stamp");
+});
+
+test("cold pressure-row emission dereferences the inactive owner table", () => {
+  const candidateView = (WebGPUOctreeProjection.prototype as unknown as {
+    topologyCandidateEntryPoint: (entryPoint: string) => boolean;
+  }).topologyCandidateEntryPoint;
+  for (const entryPoint of ["planLeaves", "emitLeaves", "markRowDeltaRing"]) {
+    assert.equal(candidateView.call(WebGPUOctreeProjection.prototype, entryPoint), true,
+      `${entryPoint} must see generation-N owner pages before the coupled commit`);
+  }
+  assert.equal(candidateView.call(WebGPUOctreeProjection.prototype, "scanLeafBlocks"), false,
+    "owner-independent scans must not acquire an unnecessary candidate-table specialization");
+});
+
+test("owner-page misses reject instead of synthesizing topology", () => {
+  assert.doesNotMatch(octreeProjectionShader, /canonicalOwner|fallback|legacy|compatibility/,
+    "production topology WGSL must contain no synthesized-owner or retired-path branch");
+  assert.match(octreeProjectionShader,
+    /fn rejectOwnerAuthority\(\) -> Owner \{[\s\S]*atomicStore\(&owners\[2\], 1u\);[\s\S]*return invalidOwner\(\);/,
+    "every malformed recurring owner lookup must propagate candidate/solve rejection");
+  assert.match(octreeProjectionShader,
+    /if \(word == 0xffffffffu \|\| word == 0u\) \{ return rejectOwnerAuthority\(\); \}/,
+    "a missing owner payload is an invalid authority, never an inferred leaf");
+  assert.doesNotMatch(octreeDiagnosticShader, /canonicalOwner|fallback|legacy|compatibility/);
+  assert.match(octreeDiagnosticShader,
+    /if\(!ownerValid\(owner\)\)\{[\s\S]*textureStore\(topologyOut,vec3i\(gid\),vec4u\(0xffffffffu\)\)/,
+    "diagnostic materialization must expose an invalid owner instead of fabricating one");
+});
+
 test("exact power-row merge retires a same-origin size change and dirties carried authority changes", () => {
   const previous = [
     { cell: 0, size: 2, morton: 0 },
@@ -447,38 +481,6 @@ test("retired fixed-reference hydrostatic A/B and its backing kernels are delete
     "uniform occupancy retains one canonical top-down scan");
 });
 
-test("compact pressure rows publish origin ranks and feed exactly one fail-closed solver", () => {
-  assert.match(octreeProjectionShader, /override rowIndexedPressure: bool = true/);
-  assert.match(octreeProjectionShader, /fn frontierRowIdentity\(cell:u32,size:u32\)[\s\S]*while\(lo<hi\)/);
-  assert.doesNotMatch(octreeProjectionShader,
-    /frontierHash|frontierClaim|firstTombstone|atomicAdd\(&frontier/,
-    "sorted frontier lookup and publication must not retain the open-hash append path");
-  assert.match(octreeProjectionShader, /fn frontierListCapacity\(\) -> u32/);
-  assert.match(octreeProjectionShader, /required>frontierListCapacity\(\)/);
-  assert.match(octreeProjectionShader, /compaction\[control\]=4u/,
-    "frontier-list overflow must carry a distinct fail-closed diagnostic bit");
-  assert.match(octreeProjectionShader, /pressureOut\[row\] = select\(0\.0, warm/);
-  assert.match(octreeProjectionShader, /LeafEntry \{ row: u32, coefficient: f32 \}/);
-  assert.match(octreeProjectionShader, /total\.x > params\.pressureCapacity\.x \|\| total\.y > params\.pressureCapacity\.y/);
-  const solve = WebGPUOctreeProjection.prototype.encode.toString();
-  assert.match(solve,
-    /if\s*\(this\.galerkin\)[\s\S]*this\.galerkin\.encode\([\s\S]*leafHeaders:\s*this\.leafHeaders[\s\S]*leafEntries:\s*this\.leafEntries[\s\S]*authorityControl:\s*this\.powerOperator\.control[\s\S]*initialCorrection:\s*pressureIn[\s\S]*correction:\s*pressureOut[\s\S]*else if\s*\(this\.mgpcg\)[\s\S]*this\.mgpcg\.encode\([^;]*pressureIn,\s*pressureOut,\s*this\.powerOperator\.control\)/,
-    "the selected pressure authority must consume compact native-L2 rows directly");
-  assert.doesNotMatch(solve, /catch[\s\S]*(?:mgpcg|galerkin)\.encode/,
-    "solver rejection must not schedule the unselected implementation as a fallback");
-  assert.doesNotMatch(solve, /pressureOverflowDispatch|passThroughPressureOverflow/,
-    "overflow must not resurrect the retired dense projection dispatch");
-  assert.match(octreeMGPCGShader,
-    /counts\[countWords-8u\]!=0u\)\{report\(INVALID_ROW_ERROR\)/,
-    "MGPCG must reject a failed compact-row publication before arithmetic");
-  assert.match(octreeMGPCGShader,
-    /pressureOut\[row\]=select\(seed,pressure\[row\],success&&finite\(pressure\[row\]\)\)/,
-    "a failed solve must publish only the finite warm seed");
-  assert.doesNotMatch(octreeSource, /octreePressureCouplingShader/,
-    "the standalone pressure-coupling shader was superseded by compact power-face impulses");
-  assert.match(octreeDiagnosticShader, /fn pressureRow\(owner: Owner\)/);
-});
-
 test("octree owns two-way immersed-body coupling without the dense compatibility graph", () => {
   const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
   assert.match(methodSource, /values, onRigidLoads\) => new WebGPUUniformEulerianSolver\(device, scene, quality, onRigidLoads/);
@@ -509,39 +511,24 @@ test("octree voxelizes partial solid volume and reports liquid-displaced volume"
     "overlapping bodies must not double-count displaced volume");
 });
 
-test("octree pressure solve uses the variational solid face constraint", () => {
-  const assemble = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn assembleSystem"));
-  assert.match(assemble, /let open = 1\.0 - clamp\(solid\.fraction/);
-  assert.match(assemble, /let coefficient = open \* area \/ max\(distance/);
-  assert.doesNotMatch(assemble, /constrainedFaceVelocity|velocityAt|solidVelocity/,
-    "the L1 preconditioner must not reconstruct a second velocity/RHS authority");
-  assert.equal(assemble.match(/header\.rhs = 0\.0/g)?.length, 2,
-    "both L1 assembly lanes leave RHS ownership to the native power operator");
+test("structured boundary publication owns the variational solid constraint", () => {
+  assert.match(structuredBoundarySource,
+    /aperture=clamp\(\.5\+sdf\/max\(p\.physical\.x,1e-20\),0\.,1\.\)/,
+    "solid SDF samples must produce the open-area fraction in the structured slot transaction");
+  assert.match(structuredBoundarySource,
+    /let coefficient=bitcast<f32>\(a\[abase\(\)\+p\.offset0\.z\+h\]\)\*bitcast<f32>\(a\[abase\(\)\+p\.offset0\.w\+h\]\)\*aperture\*scale/,
+    "resolved rows must use area times inverse distance times aperture and free-surface scale");
+  assert.match(structuredBoundarySource,
+    /candidateSolidVelocity\[h\]=normalVelocity[\s\S]*solidVelocity\[sbase\(\)\+h\]=candidateSolidVelocity\[h\]/,
+    "the sole variational moving-solid channel must commit u_solid with aperture and pressure scale");
+  assert.doesNotMatch(structuredBoundarySource,
+    /constrainedFaceVelocity|fullVector|divergenceRhs/,
+    "the boundary transaction must not introduce a second full-vector or RHS authority");
+  assert.doesNotMatch(octreeProjectionShader, /fn assembleSystem|fn assembleCoarseSystem/,
+    "the deleted variable-row assembly shader must remain absent");
   assert.match(octreeProjectionShader,
     /if \(crossesSolidBoundary\) \{ return true; \}/,
     "solid interfaces must force finest octree leaves");
-});
-
-test("octree retains exact rank-six coupling and publishes impulses after the selected solve", () => {
-  assert.match(octreePowerSolidImpulseShader,
-    /face\.area\*\(pressureAt\(face\.negativeRow\)-pressureAt\(face\.positiveRow\)\)/,
-    "the compact generalized face owns the pressure reaction");
-  assert.match(octreePowerSolidImpulseShader, /cross\(world-bodies\[owner\]\.positionShape\.xyz,sampleForce\)/,
-    "compact power-face reactions retain the exact torque arm");
-  assert.match(octreePowerSolidImpulseShader,
-    /fn reducePowerSolidBodyImpulses[\s\S]*sampleOwner\(aperture,sample\)!=owner[\s\S]*impulses\[base\]=fx\.value/,
-    "one invocation must own and deterministically reduce each rigid body's exact sample reactions");
-  assert.doesNotMatch(octreePowerSolidImpulseShader, /\batomic(?:Add|Load|Or|Store)\b|atomic<[ui]32>/,
-    "rank-six solid coupling must not retain its face-parallel atomic accumulation");
-  assert.doesNotMatch(octreeProjectionShader,
-    /leafBodyCoupling|gatherBodyCoupling|applyBodyCoupling|bodyCouplingScratch/,
-    "the deleted dense rank-six ladder must not remain in the projection shader");
-  const encode = WebGPUOctreeProjection.prototype.encode.toString().replace(/\s+/g, "");
-  assert.match(encode,
-    /if\(this\.galerkin\)[\s\S]*elseif\(this\.mgpcg\)[\s\S]*this\.encodeNativePowerProjection\(projectionBroker,finalInA\?this\.pressureA:this\.pressureB\)[\s\S]*this\.powerSolidFaces\?\.encodePressureImpulses\(projectionTailBroker,finalInA\)/,
-    "the converged compact pressure must drive projection before rigid impulses are published");
-  assert.doesNotMatch(encode, /leafSolver|gatherBodyCoupling|iterateChebyshevPipeline/,
-    "the deleted A/B compatibility ladder must not schedule a second pressure authority");
 });
 
 test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
@@ -550,7 +537,7 @@ test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
     "owner identity is the exact full-domain linear cell index");
   assert.doesNotMatch(octreeProjectionShader, /p\.z << 20u/,
     "owner identity must not retain the legacy 10:10:10 coordinate cap");
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
   assert.match(rebuild, /this\.balanceRounds/);
   assert.match(rebuild, /this\.refinementSizes/);
   assert.doesNotMatch(rebuild, /Math\.ceil\(Math\.log2\(this\.maxLeafSize\)\)/,
@@ -586,7 +573,10 @@ test("coarse topology loops remain runtime-bounded at maximum leaf 16 and 32", (
 });
 
 test("power topology has no surface-driven compatibility refinement", () => {
-  assert.match(octreeProjectionShader, /levelSetIn: texture_3d<f32>/);
+  assert.doesNotMatch(octreeProjectionShader, /levelSetIn: texture_3d<f32>/,
+    "the sparse octree topology must not bind a box-sized level-set texture");
+  assert.match(octreeProjectionShader, /fn correctedCoarsePhi\(point:vec3f\)->CorrectedCoarsePhi/,
+    "topology classification must consume the compact corrected coarse-phi authority");
   assert.doesNotMatch(octreeProjectionShader, /volumeIn/, "the octree solve must not bind the diagnostic VOF field");
   assert.match(octreeProjectionShader, /if \(minimumSolid >= 1\.0 - 1e-5\) \{ return false; \}/,
     "fully solid bulk leaves should be allowed to stay coarse");
@@ -670,7 +660,10 @@ test("octree shared fine-grid dynamics use the resident level set as their sole 
 });
 
 test("octree rebuild and solve stay resident on the GPU", () => {
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
+  const coupledCandidate = (WebGPUOctreeProjection.prototype as unknown as {
+    encodeInactiveCoupledPowerCandidate: () => void;
+  }).encodeInactiveCoupledPowerCandidate.toString();
   const solve = WebGPUOctreeProjection.prototype.encode.toString();
   const frontierRows = (WebGPUOctreeProjection.prototype as unknown as {
     encodeFrontierRows: () => void;
@@ -680,12 +673,14 @@ test("octree rebuild and solve stay resident on the GPU", () => {
     "the rebuild must cut over completely to broker-owned compute passes");
   assert.doesNotMatch(solve, /projectionParity|clearBuffer/,
     "the retired face-projection parity reset must not survive the clean cut");
-  assert.doesNotMatch(`${rebuild}\n${solve}`, /mapAsync|getMappedRange/);
+  assert.doesNotMatch(`${rebuild}\n${coupledCandidate}\n${solve}`, /mapAsync|getMappedRange/);
   // Device-local copies publish row-parallel indirect args and stage the
   // residual/count telemetry before the next rebuild can reuse compaction;
   // none of these copies is a CPU readback or dense-field transfer.
-  assert.match(solve, /this\.encodeFrontierRows\(/,
-    "the solve must refresh compact indirect dispatch arguments before assembly");
+  assert.match(rebuild, /this\.encodeFrontierRows\(/,
+    "the inactive candidate must publish compact indirect arguments before its coupled validation");
+  assert.doesNotMatch(solve, /this\.encodeFrontierRows\(/,
+    "the solve graph must not mutate or recompact its accepted epoch");
   const copies = (`${frontierRows}\n${solve}`.match(/copyBufferToBuffer\([^)]*\)/g) ?? [])
     .map((copy) => copy.replace(/\s+/g, ""));
   assert.deepEqual(copies, [
@@ -696,8 +691,8 @@ test("octree rebuild and solve stay resident on the GPU", () => {
     "the retired dense overflow dispatch must not survive as device-local backing");
   assert.match(octreeProjectionShader, /var<storage, read_write> owners/);
   assert.match(octreeProjectionShader, /pressureIn: array<f32>/);
-  assert.match(uniformSolverSource, /if \(substep > 0 && this\.octreeProjection\) \{[\s\S]*this\.octreeProjection\.encodeInlineRebuild\(encoder\)[\s\S]*completePhysicsPhase\(encoder, \{ id: "coarse-grid", label: "CFL substep topology refresh" \}\)[\s\S]*\}/,
-    "CFL subdivision must rebuild from the level set transported by the preceding substep and include that work in topology timing");
+  assert.match(uniformSolverSource, /encodeReadyTopologyFlip\(encoder\)[\s\S]*this\.octreeProjection\.encodeSurface\(encoder, dt[\s\S]*this\.octreeProjection\.encode\([\s\S]*this\.octreeProjection\.encodeInactiveTopologyCandidate\(encoder\)/,
+    "every substep must consume one immutable epoch and build its successor only at the tail");
 });
 
 test("octree telemetry samples the live compacted pressure-row count", () => {
@@ -712,89 +707,33 @@ test("octree telemetry samples the live compacted pressure-row count", () => {
     "octree diagnostics must publish the measured PCG residual instead of retaining the solver-info zero default");
   assert.match(diagnostics, /this\.relativeResidual\s*=\s*Math\.sqrt\(rr\s*\/\s*Math\.max\(bb,\s*1e-30\)\)/);
   assert.match(diagnostics,
-    /const solverControl\s*=\s*this\.galerkin\?\.control\s*\?\?\s*this\.mgpcg\?\.control[\s\S]*copyBufferToBuffer\(solverControl,\s*0,\s*readback,\s*32,\s*64\)/,
-    "diagnostics must sample the selected solver authority in the same readback");
+    /const solverControl\s*=\s*this\.pipelinedMGPCG\.control[\s\S]*copyBufferToBuffer\(solverControl,\s*0,\s*readback,\s*32,\s*64\)/,
+    "diagnostics must sample MGPCG authority in the same readback");
   assert.match(diagnostics, /this\.applyMGPCGDiagnostics\(new Uint32Array\(mapped,\s*32,\s*16\)\)/,
     "iteration and convergence telemetry must come from MGPCG control");
   assert.doesNotMatch(diagnostics, /updateSolveBudget/,
     "CPU residual feedback must not alter the immutable recorded solve");
 });
 
-test("octree compacted leaf publication scans and assembles once for the sole MGPCG authority", () => {
-  assert.match(octreeProjectionShader, /fn beginFrontier/);
-  assert.match(octreeProjectionShader, /fn classifyFrontierCandidatesDelta/);
-  assert.doesNotMatch(octreeProjectionShader, /fn classifyFrontierCandidates(?:Active|Retired)/);
-  assert.match(octreeProjectionShader, /fn mergeFrontierRows/);
-  assert.match(octreeProjectionShader, /fn finalizeFrontier/);
-  assert.match(octreeProjectionShader, /fn planLeaves/);
-  assert.match(octreeProjectionShader, /fn scanLeafBlocks/);
-  assert.match(octreeProjectionShader, /fn emitLeaves/);
-  const candidates = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn currentPressureOwnerWet"),
-    octreeProjectionShader.indexOf("fn cellCoord"));
-  assert.match(candidates, /fineLeafSummary\(origin,owner\.size\)[\s\S]*fine\.centerValid[\s\S]*fine\.centerPhi<0\.0/,
-    "dirty candidate publication uses current fine-centre evidence");
-  assert.doesNotMatch(candidates, /atomicAdd|CompareExchange|frontierClaim|frontierAppend/);
-  const finalize = octreeProjectionShader.slice(
-    octreeProjectionShader.indexOf("fn finalizeFrontier"),
-    octreeProjectionShader.indexOf("fn classifyRowDelta"),
-  );
-  const beforeReduction = finalize.slice(0, finalize.indexOf("rowDeltaReduce[lid]"));
-  assert.doesNotMatch(beforeReduction,
-    /if\s*\(\s*compaction\[11\]\s*==\s*FRONTIER_FAILED_MAGIC\s*\)\s*\{\s*return/,
-    "storage-derived frontier rejection must not let any lane exit before workgroup barriers");
-  assert.match(finalize,
-    /let frontierRejected=compaction\[11\]==FRONTIER_FAILED_MAGIC;[\s\S]*let frontierReused=compaction\[11\]==FRONTIER_REUSE_MAGIC;[\s\S]*rowDeltaReduce\[lid\]=[\s\S]*workgroupBarrier\(\);[\s\S]*if\(frontierRejected\)\{return;\}[\s\S]*if\(frontierReused\)\{[\s\S]*compaction\[1\]=blocks;/,
-    "all lanes must cross the row-delta reduction before lane zero publishes the identity-reuse schedule");
-  assert.match(octreeProjectionShader, /var running = scanPairs\[lid\] - sum;/);
-  const emit = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn emitLeaves"), octreeProjectionShader.indexOf("fn compactRowIndex"));
-  assert.match(emit, /frontierCell\(current, slot\)/);
-  assert.doesNotMatch(emit, /liquidOwner|ownerPhi|textureLoad/,
-    "row emission must not reclassify the finest lattice or resample phi");
-  // Assembly caches only the L1 matrix and merged neighbor table. The native
-  // power operator is the sole RHS/velocity authority.
-  const assemble = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn assembleSystem"));
-  assert.match(assemble, /neighborCoefficients\[j\] \+= coefficient/);
-  assert.doesNotMatch(assemble, /flux|velocityAt|constrainedFaceVelocity/);
-  assert.equal(assemble.match(/header\.rhs = 0\.0/g)?.length, 2);
-  assert.match(octreeProjectionShader, /fn pressureVariableExists\(owner: Owner\)[\s\S]*pressureIndex\(owner\) < compaction\[0\]/,
-    "the captured L1 operator must use the exact compact pressure-variable set shared with L2");
-  assert.doesNotMatch(assemble, /liquidOwner\(neighbor\)/,
-    "pressure assembly must not reclassify a neighbor after the compact frontier has been published");
-  assert.equal(assemble.match(/pressureVariableExists\(neighbor\)/g)?.length, 3,
-    "serial and cooperative L1 assembly must share the published pressure-variable authority");
-  assert.doesNotMatch(octreeProjectionShader, /fn iterateLeaves|fn solveLeaves|fn iterateChebyshev/,
-    "the projection program must stop after assembly instead of retaining a second solver");
-});
-
-test("octree assembles coarse leaf faces cooperatively with deterministic quadrants", () => {
-  const start = octreeProjectionShader.indexOf("fn assembleCoarseSystem");
-  const coarse = octreeProjectionShader.slice(start);
-  assert.ok(start >= 0);
-  assert.match(octreeProjectionShader, /if \(owner\.size >= 8u\)[\s\S]*coarseTasks = select\(tiles \* tiles \* tiles, 1u, rowIndexedPressure\)/);
-  assert.match(coarse, /@builtin\(local_invocation_index\) lid/);
-  assert.match(coarse, /workgroupUniformLoad\(&coarseTaskEligible\) == 0u/);
-  assert.match(coarse, /sample = lid; sample < faceSamples; sample \+= 64u/);
-  assert.match(coarse, /quadrant \* 64u \+ lid/);
-  assert.match(coarse, /header\.entryStart \+ face \* 4u \+ quadrant/);
-  assert.match(coarse, /header\.entryCount = 24u/);
-  assert.doesNotMatch(coarse, /atomicAdd/,
-    "coarse face coefficients must reduce deterministically rather than accumulate atomically");
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString().replace(/\s+/g, "");
+test("octree has no executable variable-row assembly before the structured operator", () => {
+  assert.doesNotMatch(octreeProjectionShader, /LeafEntry|leafEntries|assembleSystem|assembleCoarseSystem/);
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString().replace(/\s+/g, "");
   assert.match(rebuild, /candidates\.setBindGroup\(0,active\?this\.fineSummarySizingGroup:this\.groups\.ab\)/,
     "recurring candidate publication must bind the current fine-summary directory");
   const encode = WebGPUOctreeProjection.prototype.encode.toString().replace(/\s+/g, "");
-  assert.match(encode, /this\.assemblePipeline[\s\S]*dispatchWorkgroupsIndirect\(this\.solveDispatch,0\)[\s\S]*this\.assembleCoarsePipeline[\s\S]*dispatchWorkgroupsIndirect\(this\.solveDispatch,12\)/);
+  assert.doesNotMatch(encode, /assemblePipeline|assembleCoarsePipeline|leafEntries/);
+  assert.match(encode, /encodeNativePowerAssembly/);
 });
 
-test("octree delegates immutable persistent and staged PCG lanes to MGPCG", () => {
-  const encode = WebGPUOctreeMGPCG.prototype.encode.toString();
-  assert.match(encode, /this\.executionMode\s*===\s*"persistent-small-domain"/);
-  assert.match(encode, /persistentMGPCG(?:!)?\.encodeSolve\(broker/);
-  assert.match(encode,
-    /iteration\s*<\s*OCTREE_SECTION43_LARGE_DOMAIN_PCG_ITERATIONS/);
-  assert.match(encode, /single\(this\.stages\.updatePCGState\)/);
-  assert.doesNotMatch(encode, /Chebyshev|Spectrum|beginSpectrum/,
-    "bounded PCG is the sole large-domain solver");
+test("octree delegates every capacity to the direct-curvature PCG authority", () => {
+  const encode = WebGPUOctreePipelinedMGPCG.prototype.encode.toString();
+  assert.doesNotMatch(encode, /executionMode|persistentMGPCG|WebGPUOctreeMGPCG/);
+  assert.match(encode, /iteration\s*<\s*this\.plan\.maximumIterations/);
+  assert.match(encode, /"reduceMergedPartials"/);
+  assert.match(encode, /"finishMergedReduction"/);
+  assert.match(encode, /"updateDirections"/);
+  assert.doesNotMatch(encode, /Chebyshev|Spectrum|beginSpectrum|fallback/i,
+    "direct-curvature PCG is the sole outer solver");
   assert.doesNotMatch(WebGPUOctreeProjection.prototype.encode.toString(),
     /iterateChebyshevPipeline|leafSolver|Math\.ceil\(this\.iterations\s*\/\s*4\)/,
     "the projection host must not retain a second solver schedule");
@@ -803,52 +742,52 @@ test("octree delegates immutable persistent and staged PCG lanes to MGPCG", () =
 test("compact face authority keeps the selected solver's immutable budget", () => {
   const encode = WebGPUOctreeProjection.prototype.encode.toString();
   assert.match(encode,
-    /const solveBudget\s*=\s*this\.mgpcg\?\.iterationBudget\s*\?\?\s*this\.galerkin\?\.plan\.cycles\s*\?\?\s*0/);
+    /const solveBudget\s*=\s*this\.pipelinedMGPCG\.iterationBudget/);
   assert.match(encode,
-    /this\.info\.pressureIterationBudget\s*=\s*solveBudget[\s\S]*this\.info\.pressureIterationHardBudget\s*=\s*solveBudget/);
+    /this\.info\.pressureIterationBudget\s*=\s*solveBudget[\s\S]*this\.info\.pressureIterationHardBudget\s*=\s*this\.solveTailPolicy\.hardOuterIterationCeiling/);
   assert.doesNotMatch(encode, /faceTransport\)\s*return|updateSolveBudget/,
     "face transport and CPU diagnostics must not shorten the recorded pressure solve");
 });
 
-test("projection WGSL contains only topology and assembly authority", () => {
+test("projection WGSL contains only topology and compact-row publication authority", () => {
   assert.doesNotMatch(octreeProjectionShader,
     /fn (?:iterateLeaves|iterateChebyshev|solveLeaves|reduceResidualPartials|projectSmallLeaves|projectLeaves|passThroughPressureOverflow|extrapolateSeed|extrapolateSparse)/,
     "retired solver, dense projector, overflow, and extrapolation entry points must stay deleted");
-  assert.match(octreeMGPCGShader, /fn updatePCGStateAndReduceResidual/);
-  assert.doesNotMatch(octreeMGPCGShader,
+  assert.match(octreePipelinedMGPCGShader, /fn reduceMergedPartials/);
+  assert.match(octreePipelinedMGPCGShader, /fn finishMergedReduction/);
+  assert.doesNotMatch(octreePipelinedMGPCGShader,
     /fn (?:iterateChebyshev|updateChebyshevState|beginChebyshevSpectrum)/);
 });
 
-test("octree pressure traverses coarse-fine faces by finest subfaces", () => {
-  const face = octreeProjectionShader.slice(
-    octreeProjectionShader.indexOf("fn assembleSystem"),
-    octreeProjectionShader.indexOf("var<workgroup> coarseDiagonalScratch"),
-  );
-  assert.match(face, /for \(var b = 0u; b < size/);
-  assert.match(face, /for \(var a = 0u; a < size/);
-  assert.match(face, /ownerAt\(outside\)/);
-  assert.match(face, /let distance = (?:pressureDistance\(ownerAt\(vec3i\(origin\)\), neighbor, axis\)|0\.5 \* f32\(size \+ neighbor\.size\) \* h)/);
-  if (octreeProjectionShader.includes("fn pressureDistance")) {
-    assert.match(octreeProjectionShader, /let full = 0\.5 \* f32\(a\.size \+ b\.size\) \* cellWidth\(axis\)/);
-  }
-  assert.match(face, /area \/ max\(distance/);
+test("rediscretized A2 owns coarse-fine contacts through spatial pages", () => {
+  assert.match(spgridVCycleSource,
+    /fn rebuildCandidateGhostsFor[\s\S]*catalogCoefficients\[base\+1u\+channel\][\s\S]*cLookup\(l\+1u,vec3u\(targetQ\)\/2u\)/,
+    "catalog directions must spawn fine aliases only when the physical target resolves to a coarse active owner");
+  assert.match(spgridVCycleSource,
+    /fn finerAdjoint[\s\S]*pageSlot\(fine,ghostPage,ghostQ,vec3u\(activeQ\)\)[\s\S]*coefficientForDirection\(other,otherMetric,delta\)/,
+    "destination-owned E^T must gather coarse-fine contacts through physical page adjacency");
+  assert.match(spgridVCycleSource,
+    /fn applyRow[\s\S]*section63Coefficients\[base\+1u\+channel\][\s\S]*value\+=c\*\(x-inputVector\[encoded-1u\]\)/,
+    "each destination row must own its dynamically published Section 6.3 coefficient gather");
+  assert.match(spgridVCycleSource,
+    /applyRegularInterior[\s\S]*applyTransitionInterior[\s\S]*applyPhysicalBoundary[\s\S]*applyTransitionBoundary/,
+    "accurate A2 must execute the four topology-published row classes separately");
 });
 
-test("octree assembly uses exact level-set crossings and leaves projection to power faces", () => {
-  assert.match(octreeProjectionShader, /fn ownerPhi\(owner: Owner\)/);
-  assert.match(octreeProjectionShader, /0\.5 \* f32\(owner\.size - 1u\)/,
-    "even-sized leaf pressure samples must use the geometric centre rather than an upper fine cell");
-  assert.match(octreeProjectionShader, /fn pressureDistance\(a: Owner, b: Owner, axis: u32\)/);
-  assert.match(octreeProjectionShader, /abs\(liquidPhi\) \/ max\(abs\(liquidPhi\) \+ abs\(airPhi\)/,
-    "the free-surface pressure boundary must lie at phi=0");
+test("structured boundary rows use exact fine-over-coarse level-set crossings", () => {
+  assert.match(structuredBoundarySource,
+    /let loPoint=x-half\*n;let hiPoint=x\+half\*n[\s\S]*let plo=fineSample\(loPoint,clo\.x\);let phi=fineSample\(hiPoint,chi\.x\)/,
+    "each structured contact must sample both sides from fine phi with coarse phi as its explicit authority");
+  assert.match(structuredBoundarySource,
+    /let theta=clamp\(-liquidPhi\/max\(airPhi-liquidPhi,1e-20\),\.01,1\.\);scale=1\.\/theta/,
+    "the pressure boundary must be placed at the signed-distance zero crossing");
   assert.doesNotMatch(octreeProjectionShader,
     /fn reconstructGradients|fn storeReconstructedGradient|fn projectedComponentCached/,
     "affine dense projection was superseded by the compact power-face operator");
-  const assembly = octreeProjectionShader.slice(octreeProjectionShader.indexOf("fn assembleSystem"));
-  assert.equal(assembly.match(/header\.gradient = vec4f\(0\.0\)/g)?.length, 2,
-    "both serial and cooperative assembly keep deleted gradient padding inert");
-  assert.doesNotMatch(assembly, /ownerPhiGradient\(owner\)/,
-    "assembly must not compile the expensive level-set gradient sampler into either entry point");
+  assert.doesNotMatch(octreeProjectionShader, /fn assembleSystem|fn assembleCoarseSystem/,
+    "the topology shader must not retain variable-row pressure assembly");
+  assert.doesNotMatch(structuredBoundarySource, /ownerPhiGradient/,
+    "the structured boundary transaction must use direct crossing samples, not a reconstructed phi gradient");
   assert.match(octreeDiagnosticShader,
     /textureStore\(pressureOut, vec3i\(gid\), vec4f\(select\(0\.0, centrePressure, wet\)\)\)/,
     "the pressure overlay must expose the compact row value without dead affine-gradient storage");
@@ -861,73 +800,12 @@ test("octree assembly uses exact level-set crossings and leaves projection to po
     "compact velocity diagnostics belong to the native technique overlay");
 });
 
-test("power descriptors bind the shared octree topology rather than the phase-row index", () => {
-  const assembly = octreeSource.slice(
-    octreeSource.indexOf("private encodeNativePowerAssembly"),
-    octreeSource.indexOf("private encodeNativePowerProjection"),
-  );
-  assert.match(assembly, /let broker = sharedBroker \?\? new PassBroker\(encoder\)/);
-  assert.match(assembly,
-    /descriptor\.encode\(broker, this\.leafHeaders, this\.ownerPages\.arena,/,
-    "descriptor bits must consume the explicit sorted owner-page authority inside the production broker");
-  assert.match(assembly,
-    /descriptor\.encode\(broker,[\s\S]*topology\.encode\(broker,[\s\S]*faces\.encode\(broker,/,
-    "descriptor, topology, and faces must share one pass broker");
-  assert.doesNotMatch(assembly, /faces\.encodeRowDirectory/,
-    "the retired duplicate face-directory prepass must stay deleted");
-  assert.match(assembly, /rowDelta:\s*this\.powerRowDelta/,
-    "the shared face publication must consume the exact row-delta transaction");
-  assert.doesNotMatch(assembly, /ownerMode|"dense"/,
-    "the Power descriptor must consume the sole sorted owner-page authority");
-  assert.doesNotMatch(assembly, /siteIndex|siteHashCapacity|encodeSiteIndex/,
-    "the retired face-site hash ABI must be absent from production orchestration");
-});
-
 test("retired dense affine-gradient projection remains deleted", () => {
   assert.doesNotMatch(octreeProjectionShader,
     /gradientPartials|coarseGradientContribution|reconstructSmallGradients|reconstructedAxisGradient/,
     "compact generalized faces are the only projection authority");
   assert.doesNotMatch(octreeSource,
     /reconstructSmallGradientsPipeline|reconstructGradientsPipeline|projectSmallLeavesPipeline|projectLeavesPipeline/);
-});
-
-test("octree projection consumes selected solver output through the power-face operator", () => {
-  const encode = WebGPUOctreeProjection.prototype.encode.toString();
-  const projection = octreeSource.slice(
-    octreeSource.indexOf("private encodeNativePowerProjection"),
-    octreeSource.indexOf("private encodePowerVelocityPublication"),
-  );
-  assert.match(encode,
-    /if\s*\(this\.galerkin\)[\s\S]*else if\s*\(this\.mgpcg\)[\s\S]*this\.encodeNativePowerProjection\(\s*projectionBroker,\s*finalInA\s*\?\s*this\.pressureA\s*:\s*this\.pressureB\)/,
-    "projection must consume the selected solver output buffer");
-  assert.match(projection,
-    /const solverControl\s*=\s*this\.galerkin\?\.control\s*\?\?\s*this\.mgpcg\?\.control[\s\S]*encodeProjectionFromControl\(broker,\s*this\.powerFaces\.faces,\s*this\.powerFaces\.source,[\s\S]*solverControl\)/,
-    "the generalized-face projection must be gated by successful selected-solver control");
-  assert.doesNotMatch(encode,
-    /projectSmallLeavesPipeline|projectLeavesPipeline|passThroughPressureOverflow/,
-    "the dense leaf projector must not remain schedulable");
-});
-
-test("octree velocity extension uses the Section 5 closest-point face band", () => {
-  const encode = WebGPUOctreeProjection.prototype.encode.toString();
-  const faceBand = octreeSource.slice(
-    octreeSource.indexOf("private encodeGlobalFineFaceBand("),
-    octreeSource.indexOf("private encodeGlobalFineFaceBandPhase"),
-  );
-  const faceBandPhaseStart = octreeSource.indexOf("private encodeGlobalFineFaceBandPhase");
-  const faceBandPhase = octreeSource.slice(
-    faceBandPhaseStart,
-    octreeSource.indexOf("\n  encodeInlineRebuild(", faceBandPhaseStart),
-  );
-  assert.match(encode, /this\.encodePowerVelocityPublication\(projectionBroker\)[\s\S]*this\.encodeGlobalFineFaceBand\(encoder,/,
-    "projected power velocities must be published before Section 5 extension");
-  assert.match(faceBand, /for \(const phase of OCTREE_FACE_BAND_ENCODE_PHASES\)/);
-  assert.match(faceBand, /phase === "closest-point-extension"/);
-  assert.match(faceBandPhase, /this\.globalFineFaceExtension\.encodePhase\(broker,[\s\S]*\}, phase\)/,
-    "the dedicated face-band authority must own closest-point extension");
-  assert.doesNotMatch(encode,
-    /FLUID_BRICK_ACTIVE_CELL64_DISPATCH_OFFSET_BYTES|extrapolateSeedSparse|copyExtrapolatedSparsePipeline/,
-    "the retired dense/sparse texture extrapolation ladder must not be scheduled");
 });
 
 test("octree materializes adaptive overlay fields without a readback", () => {
@@ -950,50 +828,34 @@ test("octree dense diagnostic textures are allocated only on overlay demand", ()
   assert.match(rendererSource, /gridOverlay\?\.axis !== "off"[\s\S]{0,100}ensureGridDiagnosticTextures/);
 });
 
-test("octree compact solve dispatches cover rows with two-dimensional tiles", () => {
-  assert.match(octreeProjectionShader, /compaction\[2\] = x; compaction\[3\] = y/);
-  assert.match(octreeProjectionShader, /fn compactRowIndex\(gid: vec3u\)/);
-  assert.match(octreeProjectionShader, /gid\.x \+ gid\.y \* compaction\[2\] \* 256u/);
-  assert.doesNotMatch(octreeProjectionShader, /compaction\[2\] = min\(/);
+test("structured solve dispatches are class-exact and convergence gated", () => {
+  assert.match(structuredVelocitySource,
+    /if\(clean&&cls<4u\)\{let dispatch=6u\+3u\*cls;publicationDispatch\[dispatch\]=groups/,
+    "the accepted structured epoch must publish one exact indirect record per resolved row class");
+  assert.match(spgridVCycleSource,
+    /classDispatch\[destination\]=select\(0u,worksets\[source\],solveLive&&valid\)/,
+    "the convergence gate must zero future class work without host intervention");
+  assert.match(spgridVCycleSource,
+    /pass\.dispatchWorkgroupsIndirect\(this\.accurateClassDispatch, index \* 12\)/,
+    "every class-specialized E^T gather must consume its gated indirect record");
+  assert.doesNotMatch(octreeProjectionShader, /fn compactRowIndex\(gid: vec3u\)/,
+    "the deleted variable-row executor must not return to the topology shader");
 });
 
-test("octree always fences the ordered t=0 authority publication", () => {
-  assert.deepEqual(OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.map(({ id }) => id), [
-    "cold-topology", "power-operator-authority", "surface-global-fine",
-    "section5-face-band-topology", "section5-face-band-transitions",
-    "section5-face-band-closest-point", "section5-face-band-power-publication",
-    "sparse-render-world",
-  ]);
-  const phaseEncoder = WebGPUOctreeProjection.prototype.encodeInitialSparseAuthorityPhase.toString().replace(/\s+/g, "");
-  assert.match(phaseEncoder,
-    /case"cold-topology":this\.encodeColdBootstrapRebuild\(encoder\)[\s\S]*case"power-operator-authority":this\.encode\(encoder[\s\S]*case"surface-global-fine":this\.encodeSurface\(encoder,0\)[\s\S]*case"section5-face-band-topology":\{constbroker=newPassBroker\(encoder\);this\.encodeGlobalFineFaceBandPhase\(broker,"topology-build"\)[\s\S]*case"section5-face-band-transitions":\{constbroker=newPassBroker\(encoder\);this\.encodeGlobalFineFaceBandPhase\(broker,"transition-adjacency"\)[\s\S]*case"section5-face-band-closest-point":\{constbroker=newPassBroker\(encoder\);this\.encodeGlobalFineFaceBandPhase\(broker,"closest-point-extension"\)[\s\S]*case"section5-face-band-power-publication":\{constbroker=newPassBroker\(encoder\);this\.encodeGlobalFineFaceBandPhase\(broker,"power-publication"\)[\s\S]*case"sparse-render-world":this\.encodeSparseBrickWorld\(encoder\)/,
-    "phase encoder must retain topology -> power/operator -> fine redistance -> Section 5 rows -> Delaunay adjacency -> closest-point extension -> power publication -> render-world order");
-  const warmupTasks = uniformSolverSource.slice(
-    uniformSolverSource.indexOf("private initializationTasks"),
-    uniformSolverSource.indexOf("private async publishInitialSparseScenePhase"),
-  );
-  assert.match(warmupTasks, /OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES\.forEach/);
-  assert.match(warmupTasks, /const id = index === 0 \? "solver\.warmup" : `solver\.warmup\.\$\{authorityPhase\.id\}`/,
-    "the first warmup task must remain the safe pre-submit resource boundary");
-  assert.match(warmupTasks, /dependencies: \[previousTaskId\]/,
-    "safe bring-up phases must depend on their fenced predecessor");
-  const phaseWarmup = uniformSolverSource.slice(
-    uniformSolverSource.indexOf("private async publishInitialSparseScenePhase"),
-    uniformSolverSource.indexOf("/** Publish a complete t=0 scene"),
-  );
-  assert.match(phaseWarmup, /Initial sparse authority: \$\{descriptor\.label\}/,
-    "each bounded command buffer needs a log-friendly phase label");
-  const submit = phaseWarmup.indexOf("this.device.queue.submit([initialSparseScene.finish()])");
-  const fence = phaseWarmup.indexOf("await this.device.queue.onSubmittedWorkDone()", submit);
-  const ready = phaseWarmup.indexOf("this.initialSparseAuthorityPublished = true", fence);
-  assert.ok(submit >= 0 && fence > submit && ready > fence,
-    "each task must submit then fence, and readiness must follow the final task fence");
-  assert.match(phaseWarmup,
-    /if \(phase === "sparse-render-world"\) \{[\s\S]*this\.initialSparseAuthorityPublished = true/,
-    "only the sparse-render-world task may publish initial readiness");
-  assert.doesNotMatch(uniformSolverSource,
-    /fencedInitialSparseAuthority|initialSparseAuthorityFencesEnabled|publishInitialSparseSceneBatched|combined Section 4\/5 publication/);
-  assert.doesNotMatch(octreeSource, /encodeInitialSparseAuthority\(encoder/,
-    "the retired combined-command-buffer authority API must stay deleted");
-  assert.match(octreeSource, /reset-time grid[\s\S]{0,120}zero-initialized topology storage as finest 1\^3/);
+test("pressure topology unions evidence with decaying three-generation protection", () => {
+  assert.match(octreeProjectionShader,
+    /fn pressureRefinementEvidence\(origin: vec3u, size: u32\)[\s\S]*inflowProtectionIntersects[\s\S]*fineLeafSummary[\s\S]*minimumAbsolutePhi <= protectionWidth/,
+    "current evidence must follow transported interface and authored inflow support");
+  assert.match(octreeProjectionShader,
+    /classifyTopologyTileSignature[\s\S]*pressureRefinementEvidence\(unpackOrigin\(owner\.packedOrigin\), owner\.size\)[\s\S]*priorRetention - 1u[\s\S]*PRESSURE_RETENTION_GENERATIONS[\s\S]*retention << 24u/,
+    "the structural signature must refresh only from evidence and otherwise decay retention");
+  assert.match(octreeProjectionShader,
+    /fn pressureRefinementProtected[\s\S]*pressureRefinementEvidence\(origin, size\) \|\| pressureRetentionAt\(origin\) > 0u/,
+    "refinement protection must union current evidence with retained history without self-refresh");
+  assert.match(octreeProjectionShader,
+    /fn leafNeedsRefinement[\s\S]*pressureRefinementProtected\(origin, size\)[\s\S]*if \(!denseSolidField\) \{ return false; \}/,
+    "solid-free dam scenes must refine interface support before the cheap solid-free exit");
+  assert.match(octreeProjectionShader,
+    /fn refineCoarseBlock[\s\S]*pressureRefinementProtected\(origin, size\)/,
+    "large dyadic leaves must use the same protection predicate as fine leaves");
 });

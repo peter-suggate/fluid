@@ -169,11 +169,11 @@ export function correctCoarsePhiFromFine(
   return { rows, correctedRows, interfaceRows, unownedFineSamples };
 }
 
-/** Resolve fine authority when present and the compact coarse fallback otherwise. */
+/** Resolve fine authority when present and the independent compact coarse authority otherwise. */
 export function resolveTwoResolutionPhi(finePhi: number | undefined, coarse: OctreeCoarsePhiRecord): number {
   if (finePhi !== undefined) return finite(finePhi, "Resolved fine phi");
   if ((coarse.flags & OCTREE_COARSE_PHI_FLAG.valid) === 0) {
-    throw new RangeError("Missing fine phi requires a valid coarse phi fallback");
+    throw new RangeError("Missing fine phi requires a valid coarse phi authority");
   }
   return finite(coarse.phi, "Resolved coarse phi");
 }

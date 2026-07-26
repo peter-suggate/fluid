@@ -1,10 +1,10 @@
 import {
-  OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY,
-  OCTREE_PERSISTENT_MGPCG_STATE_CHANNELS,
+  OCTREE_FIRST_ORDER_CHEBYSHEV_DEGREES,
+  OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION,
   type OctreeFirstOrderSPDVCycle,
-  type OctreePersistentMGPCGExecutor,
-} from "./webgpu-octree-mgpcg";
+} from "./webgpu-octree-section43-contract";
 import { PassBroker } from "./webgpu-pass-broker";
+import type { OctreePipelinedWorksetLinearOperator } from "./webgpu-octree-pipelined-mgpcg";
 
 /** Native sparse-level cell roles from Setaluri et al., section 5. */
 export const SPGRID_CELL_FLAG = Object.freeze({
@@ -381,6 +381,9 @@ export interface OctreeSPGridVCyclePlan {
   readonly levelDeltaBytes: number;
   readonly brickCount: number;
   readonly directoryBytes: number;
+  /** Dense logical-page directory plus immutable key+27-neighbour records. */
+  readonly pageDirectoryBytes: number;
+  readonly pageRecordWords: 28;
   /** Exact 64-row L1 page transaction: twelve publication words followed by
    * four exclusive words per page (generation/change/validation/copy). */
   readonly capturePageStateBytes: number;
@@ -397,6 +400,61 @@ export interface SPGridBrickRankDirectory {
   readonly masks: readonly (readonly [number, number])[];
   readonly bases: readonly number[];
   readonly slots: readonly number[];
+}
+
+export interface SPGridPhysicalPageAdjacency {
+  readonly dimensions: readonly [number, number, number];
+  readonly pageShape: readonly [8, 8, 4];
+  /** Stable physical IDs are assigned in dense logical-page order. */
+  readonly origins: readonly (readonly [number, number, number])[];
+  /** Twenty-seven physical IDs in z/y/x order, with -1 outside/empty. */
+  readonly neighbours: readonly (readonly number[])[];
+  readonly logicalToPhysical: readonly number[];
+}
+
+/** CPU oracle for the pressure/MG page publication. A page is present iff it
+ * owns at least one sparse slot. Its 27-entry record contains physical page
+ * IDs, never coordinates or search keys, and is therefore directly usable by
+ * halo staging after the epoch is accepted. */
+export function buildSPGridPhysicalPageAdjacency(
+  dimensions: readonly [number, number, number],
+  coordinates: readonly (readonly [number, number, number])[],
+): SPGridPhysicalPageAdjacency {
+  dimensions.forEach((value) => positiveInteger(value, "SPGrid page dimension"));
+  const pageShape = [8, 8, 4] as const;
+  const pageDimensions = dimensions.map((value, axis) =>
+    Math.ceil(value / pageShape[axis])) as [number, number, number];
+  const logicalCount = pageDimensions[0] * pageDimensions[1] * pageDimensions[2];
+  const occupied = new Uint8Array(logicalCount);
+  for (const coordinate of coordinates) {
+    if (coordinate.some((value, axis) => !Number.isSafeInteger(value)
+      || value < 0 || value >= dimensions[axis])) {
+      throw new RangeError("Malformed SPGrid page coordinate");
+    }
+    const page = coordinate.map((value, axis) => Math.floor(value / pageShape[axis]));
+    occupied[page[0] + pageDimensions[0] * (page[1] + pageDimensions[1] * page[2])] = 1;
+  }
+  const logicalToPhysical = new Array<number>(logicalCount).fill(-1);
+  const origins: Array<readonly [number, number, number]> = [];
+  for (let logical = 0; logical < logicalCount; logical += 1) if (occupied[logical] !== 0) {
+    const x = logical % pageDimensions[0];
+    const yz = Math.floor(logical / pageDimensions[0]);
+    const y = yz % pageDimensions[1], z = Math.floor(yz / pageDimensions[1]);
+    logicalToPhysical[logical] = origins.length;
+    origins.push([x * pageShape[0], y * pageShape[1], z * pageShape[2]]);
+  }
+  const neighbours = origins.map((origin) => {
+    const page = origin.map((value, axis) => value / pageShape[axis]);
+    const result: number[] = [];
+    for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1) for (let dx = -1; dx <= 1; dx += 1) {
+      const q = [page[0] + dx, page[1] + dy, page[2] + dz];
+      result.push(q.some((value, axis) => value < 0 || value >= pageDimensions[axis])
+        ? -1 : logicalToPhysical[q[0] + pageDimensions[0] * (q[1] + pageDimensions[1] * q[2])]);
+    }
+    return Object.freeze(result);
+  });
+  return Object.freeze({ dimensions, pageShape, origins: Object.freeze(origins),
+    neighbours: Object.freeze(neighbours), logicalToPhysical: Object.freeze(logicalToPhysical) });
 }
 
 /** Exhaustive CPU oracle for the authoritative 4^3 mask/rank directory. */
@@ -499,7 +557,53 @@ export interface OctreeSPGridVCycleOptions {
   readonly preSmoothingIterations?: number;
   readonly postSmoothingIterations?: number;
   readonly bottomIterations?: number;
-  readonly damping?: number;
+}
+
+export interface SPGridScaledSpectralBounds {
+  readonly lower: number;
+  readonly upper: number;
+}
+
+/**
+ * CPU oracle for the bound published transactionally by the GPU hierarchy.
+ * A first-order M-matrix has D^-1 A Gershgorin discs centred at one.  The
+ * small outward pad covers f32 accumulation/rounding at publication.
+ */
+export function computeSPGridScaledSpectralBounds(
+  rows: readonly { readonly diagonal: number; readonly offDiagonalSum: number }[],
+): SPGridScaledSpectralBounds {
+  if (rows.length === 0) throw new RangeError("SPGrid spectral publication requires at least one row");
+  let upper = 1;
+  for (const [index, row] of rows.entries()) {
+    if (!(row.diagonal > 0) || !Number.isFinite(row.diagonal)
+      || !(row.offDiagonalSum >= 0) || !Number.isFinite(row.offDiagonalSum)
+      || row.offDiagonalSum > row.diagonal * (1 + 1e-4)) {
+      throw new RangeError(`SPGrid scaled operator row ${index} is not a valid first-order M-matrix row`);
+    }
+    upper = Math.max(upper, 1 + row.offDiagonalSum / row.diagonal);
+  }
+  upper *= 1.0005;
+  return Object.freeze({
+    lower: upper * OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION,
+    upper,
+  });
+}
+
+/** Fixed roots of the degree-2/4 Chebyshev error polynomial. */
+export function spgridChebyshevRelaxationWeight(
+  bounds: SPGridScaledSpectralBounds,
+  degree: 2 | 4,
+  phase: number,
+): number {
+  if (!OCTREE_FIRST_ORDER_CHEBYSHEV_DEGREES.includes(degree)
+    || !Number.isSafeInteger(phase) || phase < 0 || phase >= degree
+    || !(bounds.lower > 0) || !(bounds.upper > bounds.lower)
+    || !Number.isFinite(bounds.lower) || !Number.isFinite(bounds.upper)) {
+    throw new RangeError("Invalid SPGrid Chebyshev schedule");
+  }
+  const centre = 0.5 * (bounds.upper + bounds.lower);
+  const radius = 0.5 * (bounds.upper - bounds.lower);
+  return 1 / (centre - radius * Math.cos(Math.PI * (2 * phase + 1) / (2 * degree)));
 }
 
 export interface OctreeSPGridL1DeltaSource {
@@ -511,27 +615,66 @@ export interface OctreeSPGridL1DeltaSource {
   readonly dirtyRowsOffsetWords: number;
 }
 
+export type OctreeSPGridWorksetBinding = GPUBuffer | Readonly<{
+  buffer: GPUBuffer;
+  offset?: number;
+  size?: number;
+}>;
+
 export interface OctreeSPGridVCycleSource {
-  readonly leafHeaders: GPUBuffer;
-  readonly leafEntries: GPUBuffer;
+  readonly rowCapacity: number;
+  readonly control: GPUBuffer;
+  readonly worksets: Readonly<Record<
+    "regularInterior" | "transitionInterior" | "physicalBoundary" | "transitionBoundary",
+    OctreeSPGridWorksetBinding
+  >>;
+  /** Fixed vec4u per row: cell-linear, size-in-finest-cells, physical page, local cell. */
+  readonly rowGeometry: GPUBuffer;
   readonly rowDelta: OctreeSPGridL1DeltaSource;
+  readonly classDispatch?: GPUBuffer;
+  readonly classDispatchOffsetBytes?: number;
+  readonly worksetStrideWords?: number;
+  readonly worksetBankStrideWords?: number;
+  /** Accepted per-row case/transform metrics and immutable §6.3 table. */
+  readonly topologyMetrics: GPUBuffer;
+  readonly catalogCoefficients: GPUBuffer;
+  /** Accepted banked dynamic diagonal + eighteen canonical coefficients. */
+  readonly coefficients: GPUBuffer;
+  readonly coefficientBankStrideWords: number;
 }
 
 // Key/class/diagonal, six Cartesian and twelve octree-edge coefficients, three
-// vectors, and the adaptive owner of active/ghost storage. Resolved stencil
-// slots live in the topology arena so neither portable storage binding exceeds
-// 128 MiB at the 24x18x16 UI capacity.
-const STATE_CHANNELS = 25;
+// vectors, the adaptive owner of active/ghost storage, and one transactional
+// scaled-operator spectral publication per level. Accurate A2 reads the
+// accepted case/transform plus the immutable 19-channel catalog directly; it
+// is not duplicated in this first-order rediscretized MG state.
+const STATE_CHANNELS = 26;
 const TOPOLOGY_HEADER_WORDS = 16;
-const DISPATCH_RECORD_BYTES_PER_LEVEL = 32;
+const DISPATCH_RECORD_WORDS_PER_LEVEL = 12;
+const DISPATCH_RECORD_BYTES_PER_LEVEL = DISPATCH_RECORD_WORDS_PER_LEVEL * 4;
 // Only valid + published-row-count remain. The deleted six-word tail encoded
 // the former full-capacity recovery dispatch.
 const DISPATCH_LIFECYCLE_BYTES = 8;
 const CAPTURE_PAGE_ROWS = 64;
 const CAPTURE_PUBLICATION_WORDS = 12;
 const LEVEL_DELTA_WORDS = 8;
+const PAGE_RECORD_WORDS = 28;
 /** Explicit row bound; the constructor also fails closed on device limits. */
 export const SPGRID_MAXIMUM_ROW_CAPACITY = 16_384;
+export const OCTREE_SPGRID_CAPTURE_CONTROL_WORD = Object.freeze({
+  readyGeneration: 4,
+  error: 8,
+  sourceGeneration: 10,
+} as const);
+
+type OctreeSPGridSourceMode = "accepted" | "candidate";
+type OctreeSPGridSetupSource = {
+  readonly solverControl: GPUBuffer;
+  readonly rowCount: GPUBuffer;
+  readonly sourceControl?: GPUBuffer;
+  readonly topologyMetrics?: GPUBuffer;
+  readonly sourceMode: OctreeSPGridSourceMode;
+};
 
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);
@@ -586,6 +729,14 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
     transferWords += transferCapacities[level] * 4 + 4 * levelCapacities[level];
   }
   const rowMapWords = levelCount * rowCapacity, worklistWords = totalLevelSlots;
+  const pageWorklistWords = PAGE_RECORD_WORDS * totalLevelSlots;
+  let pageDirectoryWords = 0;
+  for (let level = 0; level < levelCount; level += 1) {
+    const scale = 2 ** level;
+    const levelDimensions = options.dimensions.map((value) => Math.ceil(value / scale));
+    pageDirectoryWords += Math.ceil(levelDimensions[0] / 8)
+      * Math.ceil(levelDimensions[1] / 8) * Math.ceil(levelDimensions[2] / 4);
+  }
   // Four immutable words per transfer (fine, coarse, weight, next), followed
   // by parent head/tail slots for deterministic restriction and fine
   // head/count slots for direct indexed prolongation.
@@ -598,10 +749,10 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   // Sixteen publication words, four words per 4^3 brick (generation, two
   // occupancy masks, ranked base), and one compact ranked slot vector/level.
   const directoryWords = 16 + 4 * brickCount + totalLevelSlots;
-  const stencilNeighbourWords = 18 * totalLevelSlots;
   const directoryBytes = directoryWords * 4;
   const topologyBytes = (TOPOLOGY_HEADER_WORDS + rowMapWords + worklistWords
-    + transferWords + directoryWords + stencilNeighbourWords) * 4;
+    + pageWorklistWords + pageDirectoryWords
+    + transferWords + directoryWords) * 4;
   const stateBytes = STATE_CHANNELS * totalLevelSlots * 4;
   const dispatchBytes = levelCount * DISPATCH_RECORD_BYTES_PER_LEVEL + DISPATCH_LIFECYCLE_BYTES;
   const levelDeltaBytes = levelCount * LEVEL_DELTA_WORDS * 4;
@@ -618,6 +769,7 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
     allocatedBytes: topologyBytes + stateBytes + 2 * dispatchBytes
       + capturePageStateBytes + levelDeltaBytes + levelCount * 80,
     levelDeltaBytes, brickCount, directoryBytes,
+    pageDirectoryBytes: pageDirectoryWords * 4, pageRecordWords: PAGE_RECORD_WORDS,
     capturePageStateBytes, capturePageCount,
     rowDispatch: dispatchFor(rowCapacity), slotDispatch: dispatchFor(levelStride), transferDispatch: dispatchFor(transferStride),
     brickDispatch: dispatchFor(brickCount) };
@@ -625,35 +777,51 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
 
 export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "planL1CaptureDelta" | "commitChangedL1" | "finalizeL1CapturePublication"
-  | "buildCandidateLevelDeltas" | "validateCandidateHierarchy" | "commitCandidateLevels"
-  | "finalizeLifecycle" | "clearCorrection"
-  | "zeroVectors" | "seedRhs" | "smoothAtoB" | "smoothBtoA"
+  | "buildCandidateLevelSetsAndGhosts" | "buildCandidateLevelDeltas"
+  | "validateCandidateHierarchy" | "commitCandidateLevels"
+  | "finalizeLifecycle" | "prepareCorrectionDispatches" | "clearCorrection"
+  | "zeroVectors" | "seedRhs"
+  | "smoothPageChebyshevForward" | "smoothPageChebyshevReverse"
   | "restrictAndGhostAccumulate" | "exactBottom"
   | "prolongAndGhostPropagate" | "publish";
 
 export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
   beginL1CapturePlan: [0, 3, 6, 13, 14, 18],
-  planL1CaptureDelta: [0, 1, 2, 3, 11, 12, 13, 14, 18],
-  commitChangedL1: [0, 1, 2, 3, 11, 12, 13, 18],
+  planL1CaptureDelta: [0, 1, 3, 11, 13, 14, 18, 20, 21],
+  commitChangedL1: [0, 1, 3, 11, 13, 18],
   finalizeL1CapturePublication: [0, 3, 13, 18],
-  buildCandidateLevelDeltas: [0, 3, 4, 5, 6, 11, 12, 14, 15, 16, 17],
-  validateCandidateHierarchy: [0, 6, 7, 13, 14, 17],
+  buildCandidateLevelSetsAndGhosts: [0, 1, 3, 14, 15, 16, 17, 20, 21],
+  buildCandidateLevelDeltas: [0, 1, 3, 4, 5, 6, 14, 15, 16, 17],
+  validateCandidateHierarchy: [0, 6, 13, 14, 17],
   commitCandidateLevels: [0, 4, 5, 6, 13, 14, 15, 16, 17],
   finalizeLifecycle: [0, 3, 6, 7, 13],
+  prepareCorrectionDispatches: [0, 6, 7, 19],
   clearCorrection: [0, 3, 7, 9],
-  zeroVectors: [0, 4, 5, 6, 7], seedRhs: [0, 1, 3, 4, 5, 7, 8],
-  smoothAtoB: [0, 4, 5, 6, 7], smoothBtoA: [0, 4, 5, 6, 7],
+  zeroVectors: [0, 4, 5, 6, 7], seedRhs: [0, 3, 4, 5, 7, 8, 11],
+  smoothPageChebyshevForward: [0, 4, 5, 6, 7],
+  smoothPageChebyshevReverse: [0, 4, 5, 6, 7],
   restrictAndGhostAccumulate: [0, 4, 5, 6, 7],
   exactBottom: [0, 4, 5, 6, 7],
   prolongAndGhostPropagate: [0, 4, 5, 6, 7],
-  publish: [0, 1, 3, 4, 5, 7, 9],
+  publish: [0, 3, 4, 5, 7, 9, 11],
 });
 
-type CachedGroup = { rowCount: GPUBuffer; control: GPUBuffer; rhs?: GPUBuffer; correction?: GPUBuffer; group: GPUBindGroup };
-type PersistentSolveInput = Parameters<OctreePersistentMGPCGExecutor["encodeSolve"]>[1];
-type CachedPersistentGroup = {
-  readonly input: PersistentSolveInput;
-  readonly group: GPUBindGroup;
+type CachedGroup = { rowCount: GPUBuffer; control: GPUBuffer; geometry: GPUBuffer;
+  sourceControl: GPUBuffer; topologyMetrics: GPUBuffer;
+  rhs?: GPUBuffer; correction?: GPUBuffer; group: GPUBindGroup };
+type AccurateClass = "regularInterior" | "transitionInterior"
+  | "physicalBoundary" | "transitionBoundary";
+type CachedAccurateApply = {
+  readonly input: GPUBuffer;
+  readonly output: GPUBuffer;
+  readonly solverControl: GPUBuffer;
+  readonly worksets: GPUBuffer;
+  readonly worksetOffset: number;
+  readonly worksetSize?: number;
+  readonly worksetLayout: GPUBuffer;
+  readonly gateGroup: GPUBindGroup;
+  readonly classGroups: Readonly<Record<AccurateClass, GPUBindGroup>>;
+  mergedBandGroup?: GPUBindGroup;
 };
 
 /**
@@ -665,21 +833,25 @@ type CachedPersistentGroup = {
 export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   readonly operatorOrder = 1 as const;
   readonly isSymmetricPositiveDefinite = true as const;
+  readonly convergenceTail = "gpu-zero-indirect" as const;
   readonly plan: OctreeSPGridVCyclePlan;
   readonly allocatedBytes: number;
   readonly encodedPassTransitionCount = 1;
   readonly encodedCorrectionPassTransitionCount = 1;
   readonly encodedSetupDispatchCount: number;
   readonly encodedCorrectionDispatchCount: number;
-  readonly persistentMGPCG?: OctreePersistentMGPCGExecutor;
+  /** Accurate second-order executor over four disjoint topology classes. */
+  readonly accurateOperator: OctreePipelinedWorksetLinearOperator;
+  readonly smootherContract;
   readonly diagnostics: Readonly<{ levelCount: number; coarsestCapacity: number; maximumTransferRecordsPerLevel: number;
     correctionDispatchCount: number; correctionPassTransitions: number; restrictionScatterDispatchCount: number;
     restrictionAtomicAddUpperBound: number; parentGatherDispatchCount: number; parentGatherAtomicAddCount: 0;
     bottomOperation: "exact-single-cell"; coarsestDegreesOfFreedom: 1;
     directoryLookup: "brick-mask-rank"; lookupProbeUpperBound: 1; directoryBytes: number;
-    directoryBrickCount: number; directoryBuildDispatchCount: number }>;
-  private readonly capturedHeaders: GPUBuffer;
-  private readonly capturedEntries: GPUBuffer;
+    directoryBrickCount: number; directoryBuildDispatchCount: number;
+    pageAdjacency: "physical-27"; smootherLookup: "adjacent-page-mask-rank" }>;
+  private readonly capturedGeometry: GPUBuffer;
+  private readonly candidateCapturedGeometry: GPUBuffer;
   private readonly topology: GPUBuffer;
   private readonly state: GPUBuffer;
   private readonly dispatchMeta: GPUBuffer;
@@ -689,31 +861,67 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly candidateTopology: GPUBuffer;
   private readonly candidateState: GPUBuffer;
   private readonly candidateDispatch: GPUBuffer;
+  private readonly accurateWorksetLayout: GPUBuffer;
+  private readonly accurateGatePipeline: GPUComputePipeline;
+  private readonly accurateClassDispatch: GPUBuffer;
+  private readonly accurateClassPipelines: Readonly<Record<AccurateClass, GPUComputePipeline>>;
+  private readonly accurateMergedBandPipeline: GPUComputePipeline;
+  private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
+  private readonly candidateParams: readonly GPUBuffer[];
   private readonly pipelines: Readonly<Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>>;
   private readonly groups = new Map<string, CachedGroup>();
   private readonly pre: number;
   private readonly post: number;
-  private readonly dimensions: readonly [number, number, number];
-  private readonly persistentState?: GPUBuffer;
-  private readonly persistentParams?: GPUBuffer;
-  private readonly persistentPipeline?: GPUComputePipeline;
-  private persistentGroup?: CachedPersistentGroup;
-  private persistentConfiguration?: readonly [number, number];
   private lastSetupInput?: { readonly solverControl: GPUBuffer; readonly rowCount: GPUBuffer };
-  private preparedCaptureRowCount?: GPUBuffer;
+  private preparedCaptureSource?: OctreeSPGridSetupSource;
+  private candidateSetupInput?: OctreeSPGridSetupSource;
   private destroyed = false;
+
+  /** GPU-authored controls suitable for the runtime's diagnostics readback. */
+  get workAccountingBuffers(): Readonly<{ dispatch: GPUBuffer; capture: GPUBuffer }> {
+    return Object.freeze({ dispatch: this.dispatchMeta, capture: this.capturePageState });
+  }
+
+  /** Candidate hierarchy/capture report consumed by the coupled epoch reduction. */
+  get candidateControl(): GPUBuffer { return this.capturePageState; }
+
+  /** Accepted physical pages and ghost ownership shared with the Section 4.3 shell. */
+  get section63Topology(): Readonly<{
+    topology: GPUBuffer; state: GPUBuffer; geometry: GPUBuffer; layout: GPUBuffer;
+    dispatch: GPUBuffer;
+  }> {
+    return Object.freeze({ topology: this.topology, state: this.state,
+      geometry: this.capturedGeometry, layout: this.accurateWorksetLayout,
+      dispatch: this.dispatchMeta });
+  }
+
+  get workAccountingPlan(): Readonly<{ levelCount: number; levelCapacities: readonly number[];
+    encodedCorrectionDispatches: number; persistentEnabled: boolean;
+    persistentMaximumIterations: number }> {
+    return Object.freeze({ levelCount: this.plan.levelCount,
+      levelCapacities: this.plan.levelCapacities,
+      encodedCorrectionDispatches: this.encodedCorrectionDispatchCount,
+      persistentEnabled: false,
+      persistentMaximumIterations: 12 });
+  }
 
   constructor(private readonly device: GPUDevice, private readonly source: OctreeSPGridVCycleSource,
     options: OctreeSPGridVCycleOptions) {
     this.plan = planOctreeSPGridVCycle(options);
-    this.dimensions = options.dimensions;
     if (!(options.finestCellWidth > 0) || !Number.isFinite(options.finestCellWidth)) throw new RangeError("SPGrid finest cell width must be positive");
-    if (source.leafHeaders.size < this.plan.rowCapacity * 48 || source.leafEntries.size < 8) throw new RangeError("SPGrid L1 source capacity is too small");
+    if (source.rowGeometry.size < this.plan.rowCapacity * 32
+      || source.control.size < 24
+      || source.coefficients.size < 2 * this.plan.rowCapacity * 19 * 4
+      || source.coefficientBankStrideWords < this.plan.rowCapacity * 19
+      || source.rowCapacity !== this.plan.rowCapacity) {
+      throw new RangeError("SPGrid fixed Section 6.3 source capacity is too small");
+    }
     const captureUsage = GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE;
-    if ((source.leafHeaders.usage & captureUsage) !== captureUsage
-      || (source.leafEntries.usage & captureUsage) !== captureUsage) {
-      throw new RangeError("SPGrid L1 source buffers require COPY_SRC and STORAGE capture usage");
+    if ((source.rowGeometry.usage & captureUsage) !== captureUsage
+      || (source.topologyMetrics.usage & GPUBufferUsage.STORAGE) === 0
+      || (source.catalogCoefficients.usage & GPUBufferUsage.STORAGE) === 0) {
+      throw new RangeError("SPGrid Section 6.3 buffers require publication storage usage");
     }
     const delta = source.rowDelta;
     if (!Number.isSafeInteger(delta.rowCapacity) || delta.rowCapacity !== this.plan.rowCapacity
@@ -736,17 +944,26 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.post = Math.max(1, Math.min(8, Math.round(options.postSmoothingIterations ?? this.pre)));
     if (this.pre !== this.post) throw new RangeError("SPGrid pre/post smoothing must match to retain symmetry");
     if ((this.pre & 1) !== 0) throw new RangeError("SPGrid smoothing count must be even");
+    if (!OCTREE_FIRST_ORDER_CHEBYSHEV_DEGREES.includes(this.pre as 2 | 4)) {
+      throw new RangeError("SPGrid smoothing degree must be exactly 2 or 4");
+    }
+    this.smootherContract = Object.freeze({
+      kind: "chebyshev" as const,
+      degree: this.pre as 2 | 4,
+      spectralBounds: "transactional-scaled-gershgorin" as const,
+      lowerFraction: OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION,
+    });
     // COPY_SRC supports bounded lifecycle verification and preserves the
     // existing cold capture path; it does not add storage or bind stages.
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-    this.capturedHeaders = device.createBuffer({ label: "SPGrid captured L1 headers", size: this.plan.rowCapacity * 48, usage: storage });
-    this.capturedEntries = device.createBuffer({ label: "SPGrid captured L1 entries", size: source.leafEntries.size, usage: storage });
+    this.capturedGeometry = device.createBuffer({ label: "SPGrid captured fixed row geometry", size: this.plan.rowCapacity * 16, usage: storage });
+    this.candidateCapturedGeometry = device.createBuffer({ label: "SPGrid candidate fixed row geometry", size: this.plan.rowCapacity * 16, usage: storage });
     this.topology = device.createBuffer({ label: "SPGrid native sparse topology/worklists/transfers", size: this.plan.topologyBytes, usage: storage });
     this.state = device.createBuffer({ label: "SPGrid six-face stencils and vectors", size: this.plan.stateBytes, usage: storage });
     this.dispatchMeta = device.createBuffer({ label: "SPGrid worklist counts and published dispatches", size: this.plan.dispatchBytes,
       usage: storage | GPUBufferUsage.COPY_SRC });
     this.indirectDispatch = device.createBuffer({ label: "SPGrid live indirect dispatches", size: this.plan.dispatchBytes,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.capturePageState = device.createBuffer({ label: "SPGrid exact L1 page generations",
       size: this.plan.capturePageStateBytes, usage: storage });
     this.levelDelta = device.createBuffer({ label: "SPGrid exact per-level setup delta",
@@ -757,53 +974,111 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: this.plan.stateBytes, usage: storage });
     this.candidateDispatch = device.createBuffer({ label: "SPGrid immutable candidate dispatch records",
       size: this.plan.dispatchBytes, usage: storage });
-    const damping = Math.max(0.05, Math.min(0.95, options.damping ?? 2 / 3));
-    this.params = Object.freeze(Array.from({ length: this.plan.levelCount }, (_, level) => {
-      const buffer = device.createBuffer({ label: `SPGrid level ${level} parameters`, size: 80,
+    this.accurateWorksetLayout = device.createBuffer({
+      label: "SPGrid Section 6.3 page operator layout", size: 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const accurateLayout = new ArrayBuffer(64), accurateWords = new Uint32Array(accurateLayout);
+    accurateWords.set([source.worksetStrideWords ?? this.plan.rowCapacity + 7,
+      source.worksetBankStrideWords ?? 4 * (this.plan.rowCapacity + 7), 0, 0,
+      options.dimensions[0], options.dimensions[1], options.dimensions[2], this.plan.rowCapacity,
+      this.plan.levelCount, this.plan.levelStride, this.plan.totalLevelSlots,
+      source.coefficientBankStrideWords]);
+    device.queue.writeBuffer(this.accurateWorksetLayout, 0, accurateLayout);
+    const makeParams = (level: number, sourceMode: OctreeSPGridSourceMode) => {
+      const buffer = device.createBuffer({
+        label: `SPGrid level ${level} ${sourceMode} parameters`, size: 80,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const words = new Uint32Array(20), floats = new Float32Array(words.buffer);
       words.set([options.dimensions[0], options.dimensions[1], options.dimensions[2], level,
         this.plan.rowCapacity, this.plan.levelCount, this.plan.levelStride, this.plan.transferStride,
         this.plan.rowDispatch[0], this.plan.slotDispatch[0], this.plan.transferDispatch[0], this.pre]);
-      words[12] = this.post; words[13] = 1; floats[14] = damping; floats[15] = options.finestCellWidth;
+      words[12] = this.post;
+      words[13] = sourceMode === "candidate" ? 1 : 0;
+      floats[15] = options.finestCellWidth;
       words.set([delta.rowCapacity, delta.controlOffsetWords, delta.newToOldOffsetWords,
         delta.dirtyRowsOffsetWords], 16);
       device.queue.writeBuffer(buffer, 0, words); return buffer;
-    }));
+    };
+    this.params = Object.freeze(Array.from(
+      { length: this.plan.levelCount }, (_, level) => makeParams(level, "accepted")));
+    this.candidateParams = Object.freeze(Array.from(
+      { length: this.plan.levelCount }, (_, level) => makeParams(level, "candidate")));
     const shaderModule = device.createShaderModule({ label: "Paper native sparse SPGrid V-cycle", code: octreeSPGridVCycleShader });
     const make = (entryPoint: OctreeSPGridVCyclePipelineName) => device.createComputePipeline({ label: `SPGrid V-cycle · ${entryPoint}`,
       layout: "auto", compute: { module: shaderModule, entryPoint } });
     this.pipelines = Object.freeze(Object.fromEntries((Object.keys(OCTREE_SPGRID_VCYCLE_BINDINGS) as OctreeSPGridVCyclePipelineName[]).map((name) => [name, make(name)])) as Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>);
-    if (this.plan.rowCapacity <= OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY) {
-      this.persistentState = device.createBuffer({ label: "SPGrid persistent MGPCG packed state",
-        size: this.plan.rowCapacity * OCTREE_PERSISTENT_MGPCG_STATE_CHANNELS * 4, usage: storage });
-      this.persistentParams = device.createBuffer({ label: "SPGrid persistent MGPCG parameters", size: 64,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const persistentModule = device.createShaderModule({ label: "SPGrid persistent small-domain MGPCG",
-        code: octreeSPGridPersistentMGPCGShader });
-      this.persistentPipeline = device.createComputePipeline({ label: "SPGrid persistent small-domain MGPCG",
-        layout: "auto", compute: { module: persistentModule, entryPoint: "persistentMGPCG" } });
-      this.persistentMGPCG = Object.freeze({
-        maximumRowCapacity: this.plan.rowCapacity,
-        encodedDispatchCount: 1 as const,
-        dispatchShape: [1, 1, 1] as const,
-        invariantProof: Object.freeze({ ghostRows: "spgrid-identical" as const,
-          transfers: "validated-adjoint-pair" as const,
-          invalidRows: "uniform-fail-closed-before-arithmetic" as const }),
-        encodeSolve: (broker: PassBroker, input: PersistentSolveInput) => this.encodePersistentSolve(broker, input),
-      });
-    }
+    const accurateModule = device.createShaderModule({
+      label: "SPGrid accurate A2 class-specialized row apply", code: octreeSPGridAccurateOperatorShader,
+    });
+    const accurateGateModule = device.createShaderModule({
+      label: "SPGrid accurate A2 convergence-tail publisher",
+      code: octreeSPGridAccurateDispatchGateShader,
+    });
+    this.accurateGatePipeline = device.createComputePipeline({
+      label: "SPGrid accurate A2 · convergence-tail publisher", layout: "auto",
+      compute: { module: accurateGateModule, entryPoint: "prepareAccurateDispatches" },
+    });
+    this.accurateClassDispatch = device.createBuffer({
+      label: "SPGrid accurate A2 convergence-gated class records",
+      size: 4 * 12,
+      usage: storage | GPUBufferUsage.INDIRECT,
+    });
+    const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
+      regularInterior: "applyRegularInterior",
+      transitionInterior: "applyTransitionInterior",
+      physicalBoundary: "applyPhysicalBoundary",
+      transitionBoundary: "applyTransitionBoundary",
+    });
+    this.accurateClassPipelines = Object.freeze(Object.fromEntries(
+      (Object.keys(accurateEntries) as AccurateClass[]).map((rowClass) => [rowClass,
+        device.createComputePipeline({ label: `SPGrid accurate A2 · ${rowClass}`, layout: "auto",
+          compute: { module: accurateModule, entryPoint: accurateEntries[rowClass] } })]),
+    ) as Record<AccurateClass, GPUComputePipeline>);
+    this.accurateMergedBandPipeline = device.createComputePipeline({
+      label: "SPGrid Section 6.3 · destination-owned merged band", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "applyMergedBand" },
+    });
+    this.accurateOperator = Object.freeze({
+      convergenceTail: "gpu-zero-indirect" as const,
+      encodedDispatchCount: 5,
+      encodedMergedBandDispatchCount: 1 as const,
+      encode: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer, solverControl: GPUBuffer) => {
+        if (!this.source.classDispatch) {
+          throw new Error("SPGrid accurate A2 requires accepted class dispatch publication");
+        }
+        const canonical = this.source.worksets.regularInterior;
+        const binding = "buffer" in canonical ? canonical : { buffer: canonical };
+        this.encodeAccurateWorksets(broker, input, output, solverControl,
+          { buffer: binding.buffer }, this.source.classDispatch, this.accurateWorksetLayout,
+          this.source.classDispatchOffsetBytes ?? 0);
+      },
+      encodeWorksets: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer,
+        solverControl: GPUBuffer, worksets: GPUBuffer, classDispatch: GPUBuffer,
+        worksetLayout: GPUBuffer, classDispatchOffsetBytes = 0) => {
+        this.encodeAccurateWorksets(broker, input, output, solverControl,
+          { buffer: worksets }, classDispatch, worksetLayout, classDispatchOffsetBytes);
+      },
+      encodeMergedBandWorkset: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer,
+        solverControl: GPUBuffer, worksets: GPUBuffer, mergedDispatch: GPUBuffer,
+        worksetLayout: GPUBuffer, mergedDispatchOffsetBytes: number) => {
+        this.encodeAccurateMergedBandWorkset(broker, input, output, solverControl,
+          { buffer: worksets }, mergedDispatch, worksetLayout, mergedDispatchOffsetBytes);
+      },
+    });
     const l = this.plan.levelCount;
-    // Two exact L1-capture dispatches plus one ordered singleton builder and
+    // Two exact L1-capture dispatches plus two ordered singleton builders and
     // five transactional publication dispatches. This is the complete encoded
     // setup schedule consumed by MGPCG telemetry.
-    this.encodedSetupDispatchCount = 8;
-    // Each Jacobi sweep evaluates its stencil and publishes the opposite
-    // ping/pong vector in one dispatch.  The final pre-smoothing stencil
-    // evaluation is likewise consumed directly by restriction.  These are
-    // row-local fusions: the dispatch boundary between successive ping/pong
-    // sweeps (and therefore the symmetric V-cycle operator) is unchanged.
-    this.encodedCorrectionDispatchCount = l + 4 + (l - 1) * (this.pre + this.post + 2);
+    // Candidate capture/build owns six singleton launches and the deferred
+    // coupled ready-commit owns four more. Keep this exact for command and
+    // active/scheduled accounting.
+    this.encodedSetupDispatchCount = 10;
+    // One compact 8x8x4 page dispatch stages the one-cell halo and executes
+    // the complete even-degree Chebyshev polynomial in workgroup memory.
+    // Post-smoothing consumes the weights in reverse order, retaining the
+    // fixed symmetric V-cycle schedule without pointwise dispatches.
+    this.encodedCorrectionDispatchCount = l + 5 + (l - 1) * 4;
     this.diagnostics = Object.freeze({ levelCount: l,
       coarsestCapacity: this.plan.levelCapacities[this.plan.levelCount - 1],
       maximumTransferRecordsPerLevel: Math.max(...this.plan.transferCapacities),
@@ -814,10 +1089,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       bottomOperation: "exact-single-cell" as const, coarsestDegreesOfFreedom: 1 as const,
       directoryLookup: "brick-mask-rank" as const, lookupProbeUpperBound: 1 as const,
       directoryBytes: this.plan.directoryBytes, directoryBrickCount: this.plan.brickCount,
-      directoryBuildDispatchCount: 1 });
-    this.allocatedBytes = this.plan.allocatedBytes + this.capturedHeaders.size + this.capturedEntries.size
+      directoryBuildDispatchCount: 1,
+      pageAdjacency: "physical-27" as const,
+      smootherLookup: "adjacent-page-mask-rank" as const });
+    this.allocatedBytes = this.plan.allocatedBytes + this.capturedGeometry.size + this.candidateCapturedGeometry.size
       + this.candidateTopology.size + this.candidateState.size + this.candidateDispatch.size
-      + (this.persistentState?.size ?? 0) + (this.persistentParams?.size ?? 0);
+      + this.accurateWorksetLayout.size + this.accurateClassDispatch.size
+      + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0);
   }
 
   encodeCapture(broker: PassBroker): void {
@@ -825,24 +1103,46 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // The first capture is deferred until encodeSetup supplies the authoritative
     // row-count buffer. There is deliberately no capacity-copy bootstrap.
     if (!this.lastSetupInput) return;
-    this.encodeCaptureDelta(broker, this.lastSetupInput);
+    this.encodeCaptureDelta(broker, { ...this.lastSetupInput, sourceMode: "accepted" });
   }
 
   private encodeCaptureDelta(broker: PassBroker,
-    input: { readonly solverControl: GPUBuffer; readonly rowCount: GPUBuffer }): void {
+    input: OctreeSPGridSetupSource): void {
     const pass = broker.compute({ label: "SPGrid V-cycle · select setup delta and capture changed L1" });
     this.run(pass, "beginL1CapturePlan", 0, input, [1, 1, 1]);
     this.run(pass, "planL1CaptureDelta", 0, input, [1, 1, 1]);
-    this.preparedCaptureRowCount = input.rowCount;
+    this.preparedCaptureSource = input;
   }
 
-  encodeSetup(broker: PassBroker, input: { solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
+  encodeCandidateSetup(broker: PassBroker, input: { solverControl: GPUBuffer; rowCount: GPUBuffer;
+    sourceControl: GPUBuffer; topologyMetrics: GPUBuffer }): void {
+    this.encodeSetupCandidate(broker, { ...input, sourceMode: "candidate" });
+  }
+
+  private encodeSetupCandidate(broker: PassBroker, input: OctreeSPGridSetupSource): void {
     this.assertLive();
-    if (this.preparedCaptureRowCount !== input.rowCount) this.encodeCaptureDelta(broker, input);
-    const pass = broker.compute({ label: "SPGrid V-cycle · build and publish exact level deltas" });
-    this.run(pass, "buildCandidateLevelDeltas", 0, input, [1, 1, 1]);
+    const prepared = this.preparedCaptureSource;
+    if (!prepared || prepared.rowCount !== input.rowCount
+      || prepared.sourceControl !== input.sourceControl
+      || prepared.topologyMetrics !== input.topologyMetrics
+      || prepared.sourceMode !== input.sourceMode) this.encodeCaptureDelta(broker, input);
+    const pass = broker.compute({ label: "SPGrid V-cycle · build inactive exact level deltas" });
+    this.run(pass, "commitChangedL1", 0, input, [1, 1, 1], this.candidateCapturedGeometry);
+    this.run(pass, "buildCandidateLevelSetsAndGhosts", 0, input, [1, 1, 1], this.candidateCapturedGeometry);
+    this.run(pass, "buildCandidateLevelDeltas", 0, input, [1, 1, 1], this.candidateCapturedGeometry);
     this.run(pass, "validateCandidateHierarchy", 0, input, [1, 1, 1]);
-    this.run(pass, "commitChangedL1", 0, input, [1, 1, 1]);
+    this.candidateSetupInput = input;
+    this.preparedCaptureSource = undefined;
+  }
+
+  encodeReadySetupCommit(broker: PassBroker, input: { solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
+    this.assertLive();
+    if (!this.candidateSetupInput || this.candidateSetupInput.rowCount !== input.rowCount
+      || this.candidateSetupInput.solverControl !== input.solverControl) {
+      throw new Error("SPGrid ready commit requires the matching inactive hierarchy candidate");
+    }
+    const pass = broker.compute({ label: "SPGrid V-cycle · publish validated exact level deltas" });
+    this.run(pass, "commitChangedL1", 0, input, [1, 1, 1], this.capturedGeometry);
     this.run(pass, "finalizeL1CapturePublication", 0, input, [1, 1, 1]);
     this.run(pass, "commitCandidateLevels", 0, input,
       dispatchFor(Math.max(this.plan.levelStride, this.plan.brickCount,
@@ -853,351 +1153,440 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // INDIRECT-only source and avoids a whole-pass storage/indirect conflict.
     broker.updateIndirectBuffer(this.dispatchMeta, 0, this.indirectDispatch, 0, this.plan.dispatchBytes);
     this.lastSetupInput = input;
-    this.preparedCaptureRowCount = undefined;
+    this.candidateSetupInput = undefined;
+  }
+
+  encodeSetup(broker: PassBroker, input: { solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
+    if (!this.candidateSetupInput && this.lastSetupInput?.rowCount === input.rowCount
+      && this.lastSetupInput.solverControl === input.solverControl) return;
+    if (!this.candidateSetupInput) {
+      this.encodeSetupCandidate(broker, { ...input, sourceMode: "accepted" });
+    }
+    this.encodeReadySetupCommit(broker, input);
   }
 
   encodeCorrection(broker: PassBroker, input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
-    const pass = broker.compute({ label: "SPGrid V-cycle · one-pass symmetric correction" });
-    this.run(pass, "clearCorrection", 0, input, this.plan.rowDispatch);
+    let pass = broker.compute({ label: "SPGrid V-cycle · publish convergence-gated level records" });
+    this.run(pass, "prepareCorrectionDispatches", 0, input, [1, 1, 1]);
+    broker.fence("SPGrid V-cycle convergence-gated indirect publication");
+    pass = broker.compute({ label: "SPGrid V-cycle · one-pass symmetric correction" });
+    this.runIndirect(pass, "clearCorrection", 0, input, false);
     for (let level = 0; level < this.plan.levelCount; level += 1) this.runIndirect(pass, "zeroVectors", level, input, false);
-    this.run(pass, "seedRhs", 0, input, this.plan.rowDispatch);
+    this.runIndirect(pass, "seedRhs", 0, input, false);
     for (let level = 0; level < this.plan.levelCount - 1; level += 1) {
-      this.smooth(pass, level, this.pre, input);
+      this.smooth(pass, level, false, input);
       this.runIndirect(pass, "restrictAndGhostAccumulate", level, input, true);
     }
     this.runIndirect(pass, "exactBottom", this.plan.levelCount - 1, input, false);
     for (let level = this.plan.levelCount - 2; level >= 0; level -= 1) {
       this.runIndirect(pass, "prolongAndGhostPropagate", level, input, false);
-      this.smooth(pass, level, this.post, input);
+      this.smooth(pass, level, true, input);
     }
-    this.run(pass, "publish", 0, input, this.plan.rowDispatch);
+    this.runIndirect(pass, "publish", 0, input, false);
   }
 
-  private smooth(pass: GPUComputePassEncoder, level: number, iterations: number,
+  private smooth(pass: GPUComputePassEncoder, level: number, reverse: boolean,
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
-    for (let iteration = 0; iteration < iterations; iteration += 1) {
-      const b = (iteration & 1) !== 0;
-      this.runIndirect(pass, b ? "smoothBtoA" : "smoothAtoB", level, input, false);
-    }
+    this.bind(pass, reverse
+      ? "smoothPageChebyshevReverse"
+      : "smoothPageChebyshevForward", level, input);
+    pass.dispatchWorkgroupsIndirect(
+      this.indirectDispatch,
+      level * DISPATCH_RECORD_BYTES_PER_LEVEL + 9 * 4,
+    );
   }
 
   private runIndirect(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }, transfer: boolean): void {
     this.bind(pass, name, level, input);
-    pass.dispatchWorkgroupsIndirect(this.indirectDispatch, level * 32 + (transfer ? 20 : 8));
+    pass.dispatchWorkgroupsIndirect(this.indirectDispatch,
+      level * DISPATCH_RECORD_BYTES_PER_LEVEL + (transfer ? 20 : 8));
   }
   private run(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
-    input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer },
-    dispatch: readonly [number, number, number]): void {
-    this.bind(pass, name, level, input); pass.dispatchWorkgroups(...dispatch);
+    input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
+      sourceControl?: GPUBuffer; topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode },
+    dispatch: readonly [number, number, number], geometry = this.capturedGeometry): void {
+    this.bind(pass, name, level, input, geometry); pass.dispatchWorkgroups(...dispatch);
   }
   private bind(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
-    input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
-    const pipeline = this.pipelines[name], key = `${name}:${level}`, cached = this.groups.get(key);
+    input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
+      sourceControl?: GPUBuffer; topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode },
+    geometry = this.capturedGeometry): void {
+    const pipeline = this.pipelines[name];
+    const sourceMode = input.sourceMode ?? "accepted";
+    const key = `${name}:${level}:${geometry === this.candidateCapturedGeometry ? "candidate" : "accepted"}:${sourceMode}`;
+    const cached = this.groups.get(key);
     let group = cached?.group;
     if (!cached || cached.rowCount !== input.rowCount || cached.control !== input.solverControl
-      || cached.rhs !== input.rhs || cached.correction !== input.correction) {
+      || cached.rhs !== input.rhs || cached.correction !== input.correction || cached.geometry !== geometry
+      || cached.sourceControl !== (input.sourceControl ?? this.source.control)
+      || cached.topologyMetrics !== (input.topologyMetrics ?? this.source.topologyMetrics)) {
       const buffers = new Map<number, GPUBuffer | undefined>([
-        [0, this.params[level]], [1, this.capturedHeaders], [2, this.capturedEntries], [3, input.rowCount],
+        [0, sourceMode === "candidate" ? this.candidateParams[level] : this.params[level]],
+        [1, geometry], [3, input.sourceControl ?? this.source.control],
         [4, this.topology], [5, this.state], [6, this.dispatchMeta], [7, input.solverControl],
-        [8, input.rhs], [9, input.correction], [11, this.source.leafHeaders], [12, this.source.leafEntries],
+        [8, input.rhs], [9, input.correction],
+        [11, this.source.rowGeometry],
         [13, this.capturePageState], [14, this.levelDelta], [15, this.candidateTopology],
         [16, this.candidateState], [17, this.candidateDispatch], [18, this.source.rowDelta.rows],
+        [19, this.indirectDispatch],
+        [20, input.topologyMetrics ?? this.source.topologyMetrics], [21, this.source.catalogCoefficients],
       ]);
       group = this.device.createBindGroup({ label: `SPGrid V-cycle · ${name} · level ${level}`,
         layout: pipeline.getBindGroupLayout(0), entries: OCTREE_SPGRID_VCYCLE_BINDINGS[name].map((binding) => ({
         binding, resource: { buffer: buffers.get(binding)! },
       })) });
-      this.groups.set(key, { rowCount: input.rowCount, control: input.solverControl, rhs: input.rhs, correction: input.correction, group });
+      this.groups.set(key, { rowCount: input.rowCount, control: input.solverControl, geometry,
+        sourceControl: input.sourceControl ?? this.source.control,
+        topologyMetrics: input.topologyMetrics ?? this.source.topologyMetrics,
+        rhs: input.rhs, correction: input.correction, group });
     }
     pass.setPipeline(pipeline); pass.setBindGroup(0, group!);
   }
-  private encodePersistentSolve(broker: PassBroker, input: PersistentSolveInput): void {
+
+  private encodeAccurateWorksets(
+    broker: PassBroker,
+    input: GPUBuffer,
+    output: GPUBuffer,
+    solverControl: GPUBuffer,
+    worksets: GPUBufferBinding,
+    _classDispatch: GPUBuffer,
+    worksetLayout: GPUBuffer,
+    _classDispatchOffsetBytes: number,
+  ): void {
+    void _classDispatchOffsetBytes;
     this.assertLive();
-    if (!this.persistentState || !this.persistentParams || !this.persistentPipeline) {
-      throw new Error("persistent MGPCG is unavailable for this immutable row capacity");
+    if (input.size < this.plan.rowCapacity * 4 || output.size < this.plan.rowCapacity * 4) {
+      throw new RangeError("SPGrid accurate A2 vectors are smaller than row capacity");
     }
-    const configuration = [input.boundarySmoothingIterations, input.relativeTolerance] as const;
-    if (this.persistentConfiguration === undefined) {
-      const words = new Uint32Array(16), floats = new Float32Array(words.buffer);
-      words.set([this.dimensions[0], this.dimensions[1], this.dimensions[2], this.plan.rowCapacity,
-        this.plan.levelCount, this.plan.levelStride, 0, input.boundarySmoothingIterations]);
-      floats[8] = input.relativeTolerance; floats[9] = 1e-30; floats[10] = 2 / 3;
-      words[12] = this.pre;
-      this.device.queue.writeBuffer(this.persistentParams, 0, words);
-      this.persistentConfiguration = configuration;
-    } else if (this.persistentConfiguration[0] !== configuration[0]
-      || this.persistentConfiguration[1] !== configuration[1]) {
-      throw new Error("persistent MGPCG solver configuration is immutable after first encode");
-    }
-    const previous = this.persistentGroup?.input;
-    if (!previous || previous.leafHeaders !== input.leafHeaders || previous.leafEntries !== input.leafEntries
-      || previous.rowCount !== input.rowCount || previous.pressureIn !== input.pressureIn
-      || previous.pressureOut !== input.pressureOut || previous.solverControl !== input.solverControl) {
-      // L2 publication replaces coefficients/RHS in the shared live rows but
-      // preserves cell/size topology. The persistent outer solve must bind
-      // those live L2 rows; its L1 correction reads coefficients exclusively
-      // from the captured SPGrid stencil state built during encodeSetup.
-      const buffers = [this.persistentParams, input.leafHeaders, input.leafEntries, input.rowCount,
-        this.topology, this.state, this.dispatchMeta, input.solverControl, input.pressureIn,
-        input.pressureOut, this.persistentState];
-      this.persistentGroup = { input, group: this.device.createBindGroup({
-        label: "SPGrid persistent MGPCG bindings", layout: this.persistentPipeline.getBindGroupLayout(0),
-        entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })),
-      }) };
-    }
-    const pass = broker.compute({ label: "SPGrid persistent small-domain MGPCG" });
-    pass.setPipeline(this.persistentPipeline); pass.setBindGroup(0, this.persistentGroup!.group);
+    const cached = this.accurateBinding(input, output, solverControl, worksets, worksetLayout);
+    let pass = broker.compute({ label: "SPGrid accurate A2 · publish convergence-gated records" });
+    pass.setPipeline(this.accurateGatePipeline);
+    pass.setBindGroup(0, cached.gateGroup);
     pass.dispatchWorkgroups(1, 1, 1);
+    broker.fence("SPGrid accurate A2 convergence-gated indirect publication");
+    pass = broker.compute({ label: "SPGrid accurate A2 · four disjoint row classes" });
+    const classes = Object.keys(this.accurateClassPipelines) as AccurateClass[];
+    for (const [index, rowClass] of classes.entries()) {
+      pass.setPipeline(this.accurateClassPipelines[rowClass]);
+      pass.setBindGroup(0, cached.classGroups[rowClass]);
+      pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch, index * 12);
+    }
   }
+
+  private encodeAccurateMergedBandWorkset(
+    broker: PassBroker,
+    input: GPUBuffer,
+    output: GPUBuffer,
+    solverControl: GPUBuffer,
+    worksets: GPUBufferBinding,
+    mergedDispatch: GPUBuffer,
+    worksetLayout: GPUBuffer,
+    mergedDispatchOffsetBytes: number,
+  ): void {
+    this.assertLive();
+    if (input.size < this.plan.rowCapacity * 4 || output.size < this.plan.rowCapacity * 4) {
+      throw new RangeError("SPGrid accurate A2 vectors are smaller than row capacity");
+    }
+    if (!Number.isSafeInteger(mergedDispatchOffsetBytes) || mergedDispatchOffsetBytes < 0
+      || (mergedDispatchOffsetBytes & 3) !== 0
+      || mergedDispatchOffsetBytes + 12 > mergedDispatch.size) {
+      throw new RangeError("SPGrid accurate A2 merged-band dispatch offset is invalid");
+    }
+    const cached = this.accurateBinding(input, output, solverControl, worksets, worksetLayout);
+    if (!cached.mergedBandGroup) {
+      const shared = new Map<number, GPUBufferBinding>([
+        [0, { buffer: input }], [1, { buffer: output }], [2, { buffer: solverControl }],
+        [3, { buffer: this.source.control }],
+        [4, { buffer: cached.worksets, offset: cached.worksetOffset,
+          ...(cached.worksetSize === undefined ? {} : { size: cached.worksetSize }) }],
+        [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
+        [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
+        [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
+        [11, { buffer: this.accurateWorksetLayout }],
+      ]);
+      cached.mergedBandGroup = this.device.createBindGroup({
+        label: "SPGrid Section 6.3 · destination-owned merged band bindings",
+        layout: this.accurateMergedBandPipeline.getBindGroupLayout(0),
+        entries: [...shared].map(([binding, resource]) => ({ binding, resource })),
+      });
+    }
+    const pass = broker.compute({ label: "SPGrid Section 6.3 · destination-owned merged band" });
+    pass.setPipeline(this.accurateMergedBandPipeline); pass.setBindGroup(0, cached.mergedBandGroup);
+    pass.dispatchWorkgroupsIndirect(mergedDispatch, mergedDispatchOffsetBytes);
+  }
+
+  private accurateBinding(
+    input: GPUBuffer,
+    output: GPUBuffer,
+    solverControl: GPUBuffer,
+    worksets: GPUBufferBinding,
+    worksetLayout: GPUBuffer,
+  ): CachedAccurateApply {
+    const worksetOffset = Number(worksets.offset ?? 0);
+    const worksetSize = worksets.size === undefined ? undefined : Number(worksets.size);
+    let cached = this.accurateBindings.find((candidate) =>
+      candidate.input === input && candidate.output === output
+      && candidate.solverControl === solverControl
+      && candidate.worksets === worksets.buffer
+      && candidate.worksetOffset === worksetOffset
+      && candidate.worksetSize === worksetSize
+      && candidate.worksetLayout === worksetLayout);
+    if (!cached) {
+      const shared = new Map<number, GPUBufferBinding>([
+        [0, { buffer: input }], [1, { buffer: output }], [2, { buffer: solverControl }],
+        [3, { buffer: this.source.control }],
+        [4, { buffer: worksets.buffer, offset: worksetOffset,
+          ...(worksetSize === undefined ? {} : { size: worksetSize }) }],
+        [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
+        [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
+        [9, { buffer: this.source.topologyMetrics }],
+        [10, { buffer: this.source.coefficients }],
+        [11, { buffer: this.accurateWorksetLayout }],
+      ]);
+      const makeGroup = (pipeline: GPUComputePipeline, bindings: readonly number[], label: string) => this.device.createBindGroup({
+        label, layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding) => ({
+          binding, resource: shared.get(binding)!,
+        })),
+      });
+      const classGroups = Object.freeze(Object.fromEntries(
+        (Object.keys(this.accurateClassPipelines) as AccurateClass[]).map((rowClass) => [
+          rowClass, makeGroup(this.accurateClassPipelines[rowClass],
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            `SPGrid Section 6.3 · ${rowClass} bindings`),
+        ]),
+      ) as Record<AccurateClass, GPUBindGroup>);
+      const gateGroup = this.device.createBindGroup({
+        label: "SPGrid accurate A2 · convergence-tail bindings",
+        layout: this.accurateGatePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: solverControl } },
+          { binding: 1, resource: { buffer: worksets.buffer, offset: worksetOffset,
+            ...(worksetSize === undefined ? {} : { size: worksetSize }) } },
+          { binding: 2, resource: { buffer: worksetLayout } },
+          { binding: 3, resource: { buffer: this.source.control } },
+          { binding: 4, resource: { buffer: this.accurateClassDispatch } },
+        ],
+      });
+      cached = { input, output, solverControl, worksets: worksets.buffer,
+        worksetOffset, worksetSize, worksetLayout, gateGroup, classGroups };
+      this.accurateBindings.push(cached);
+    }
+    return cached;
+  }
+
   private assertLive(): void { if (this.destroyed) throw new Error("SPGrid V-cycle is destroyed"); }
   destroy(): void {
-    if (this.destroyed) return; this.destroyed = true; this.groups.clear();
-    this.capturedHeaders.destroy(); this.capturedEntries.destroy(); this.topology.destroy(); this.state.destroy(); this.dispatchMeta.destroy();
+    if (this.destroyed) return; this.destroyed = true; this.groups.clear(); this.accurateBindings.length = 0;
+    this.capturedGeometry.destroy(); this.candidateCapturedGeometry.destroy();
+    this.topology.destroy(); this.state.destroy(); this.dispatchMeta.destroy();
     this.indirectDispatch.destroy();
     this.capturePageState.destroy(); this.levelDelta.destroy();
     this.candidateTopology.destroy(); this.candidateState.destroy(); this.candidateDispatch.destroy();
-    this.persistentState?.destroy(); this.persistentParams?.destroy(); this.persistentGroup = undefined;
-    for (const buffer of this.params) buffer.destroy();
+    this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy();
+    for (const buffer of [...this.params, ...this.candidateParams]) buffer.destroy();
   }
 }
 
-/** One-workgroup implementation of the complete Section 4.3 MGPCG solve.
- * The SPGrid operator helpers below use the validated relaxJacobi/applied and
- * correctionTransfer bodies verbatim. */
-export const octreeSPGridPersistentMGPCGShader = /* wgsl */ `
-struct PersistentParams{dimsCapacity:vec4u,hierarchySolve:vec4u,numerics:vec4f,vcycle:vec4u}
-struct LeafHeader{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f}
-struct LeafEntry{row:u32,coefficient:f32}
-struct TransferTarget{coarse:u32,weight:f32}
-@group(0) @binding(0) var<uniform> p:PersistentParams;
-@group(0) @binding(1) var<storage,read> headers:array<LeafHeader>;
-@group(0) @binding(2) var<storage,read> entries:array<LeafEntry>;
-@group(0) @binding(3) var<storage,read_write> rowCounts:array<u32>;
-@group(0) @binding(4) var<storage,read> topology:array<u32>;
-@group(0) @binding(5) var<storage,read_write> state:array<u32>;
-@group(0) @binding(6) var<storage,read> dispatchMeta:array<u32>;
-@group(0) @binding(7) var<storage,read_write> control:array<u32>;
-@group(0) @binding(8) var<storage,read> pressureSeed:array<f32>;
-@group(0) @binding(9) var<storage,read_write> pressureOut:array<f32>;
-@group(0) @binding(10) var<storage,read_write> packed:array<f32>;
-const ACTIVE=1u;const GHOST=2u;const INVALID=0xffffffffu;const ROW_BOUNDARY=1u;
-const INVALID_ROW_ERROR=1u;const OVERFLOW=2u;const NONFINITE=4u;const NONPOSITIVE=8u;const NONCONVERGENCE=16u;
-const PERSISTENT_LANES=64u;
-const KEY=0u;const FLAGS=1u;const DIAG=2u;const XP=3u;const XM=4u;const YP=5u;const YM=6u;const ZP=7u;const ZM=8u;
-const XYPP=9u;const XYPM=10u;const XYMP=11u;const XYMM=12u;const XZPP=13u;const XZPM=14u;const XZMP=15u;const XZMM=16u;
-const YZPP=17u;const YZPM=18u;const YZMP=19u;const YZMM=20u;
-const RHS=21u;const A=22u;const B=23u;const OWNER=24u;
-const STATE_CHANNELS=25u;
-const PX=0u;const PR=1u;const PZ=2u;const PD=3u;const PQ=4u;const HA=5u;const HB=6u;const HRHS=7u;const HCORR=8u;const BAND_A=9u;const BAND_B=10u;
+/** Accurate second-order matrix-free apply over four accepted row classes. */
+export const octreeSPGridAccurateDispatchGateShader = /* wgsl */ `
+@group(0) @binding(0) var<storage,read> solverControl:array<u32>;
+@group(0) @binding(1) var<storage,read> worksets:array<u32>;
+@group(0) @binding(2) var<uniform> worksetLayout:vec4u;
+@group(0) @binding(3) var<storage,read> accepted:array<u32>;
+@group(0) @binding(4) var<storage,read_write> classDispatch:array<u32>;
+fn activeSolve()->bool{return arrayLength(&solverControl)>=2u
+ &&solverControl[0]==0u&&solverControl[1]==0u;}
+@compute @workgroup_size(1)
+fn prepareAccurateDispatches(){
+ let solveLive=activeSolve();
+ let bank=select(0u,accepted[4]&1u,arrayLength(&accepted)>4u);
+ for(var cls=0u;cls<4u;cls+=1u){
+  let source=bank*worksetLayout.y+cls*worksetLayout.x+4u;let destination=cls*3u;
+  let valid=source+2u<arrayLength(&worksets);
+  classDispatch[destination]=select(0u,worksets[source],solveLive&&valid);
+  classDispatch[destination+1u]=select(1u,worksets[source+1u],valid);
+  classDispatch[destination+2u]=select(1u,worksets[source+2u],valid);
+ }
+}
+`;
+
+export const octreeSPGridAccurateOperatorShader = /* wgsl */ `
+struct Layout{workset:vec4u,dimsCapacity:vec4u,hierarchy:vec4u,numerics:vec4f}
+struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
+@group(0) @binding(0) var<storage,read> inputVector:array<f32>;
+@group(0) @binding(1) var<storage,read_write> outputVector:array<f32>;
+@group(0) @binding(2) var<storage,read_write> solverControl:array<atomic<u32>>;
+@group(0) @binding(3) var<storage,read> accepted:array<u32>;
+@group(0) @binding(4) var<storage,read> worksets:array<u32>;
+@group(0) @binding(5) var<uniform> worksetLayout:vec4u;
+@group(0) @binding(6) var<storage,read> topology:array<u32>;
+@group(0) @binding(7) var<storage,read> state:array<u32>;
+@group(0) @binding(8) var<storage,read> geometry:array<vec4u>;
+@group(0) @binding(9) var<storage,read> metrics:array<Metric>;
+@group(0) @binding(10) var<storage,read> section63Coefficients:array<f32>;
+@group(0) @binding(11) var<uniform> p:Layout;
+const INVALID=0xffffffffu;const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
+const KEY=0u;const FLAGS=1u;const OWNER=24u;const STATE_CHANNELS=26u;
+const WORKSET_HEADER_WORDS=7u;const PAGE_RECORD_WORDS=28u;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
-fn capacity()->u32{return p.dimsCapacity.w;}fn rows()->u32{return min(select(0u,rowCounts[0],arrayLength(&rowCounts)>0u),capacity());}
-fn levels()->u32{return p.hierarchySolve.x;}fn maxStride()->u32{return p.hierarchySolve.y;}
-fn boundarySweeps()->u32{return p.hierarchySolve.w;}fn tolerance()->f32{return p.numerics.x;}fn epsilon()->f32{return p.numerics.y;}
-fn failed()->bool{return control[0]!=0u;}fn stopped()->bool{return failed()||control[1]!=0u;}
-var<private> persistentLane:u32;
-var<workgroup> persistentErrors:array<vec4u,64>;
-var<workgroup> persistentStop:u32;
-fn report(flag:u32){if(persistentErrors[persistentLane].x==0u){persistentErrors[persistentLane]=vec4u(flag,0u,INVALID,0u);}
- else{persistentErrors[persistentLane].x|=flag;}}
-fn reportAt(flag:u32,stage:u32,row:u32,value:f32){if(persistentErrors[persistentLane].x==0u){
- persistentErrors[persistentLane]=vec4u(flag,stage,row,bitcast<u32>(value));}else{persistentErrors[persistentLane].x|=flag;}}
-fn sync(){storageBarrier();workgroupBarrier();if(persistentLane==0u){var flags=0u;var chosen=INVALID;
- for(var lane=0u;lane<PERSISTENT_LANES;lane+=1u){let record=persistentErrors[lane];flags|=record.x;
-  if(record.x!=0u&&(chosen==INVALID||record.y<persistentErrors[chosen].y
-   ||(record.y==persistentErrors[chosen].y&&record.z<persistentErrors[chosen].z))){chosen=lane;}}
- control[0]|=flags;if(control[10]==0u&&chosen!=INVALID){let record=persistentErrors[chosen];
-  control[10]=record.y;control[11]=record.z;control[12]=record.w;}}storageBarrier();workgroupBarrier();}
-fn pv(channel:u32,row:u32)->f32{return packed[channel*capacity()+row];}fn storePV(channel:u32,row:u32,value:f32){packed[channel*capacity()+row]=value;}
-fn pu(channel:u32,row:u32)->u32{return bitcast<u32>(pv(channel,row));}fn storePU(channel:u32,row:u32,value:u32){storePV(channel,row,bitcast<f32>(value));}
-fn dims(l:u32)->vec3u{let scale=1u<<l;return(p.dimsCapacity.xyz+vec3u(scale-1u))/scale;}
+fn stopped()->bool{return arrayLength(&solverControl)<2u||atomicLoad(&solverControl[0])!=0u||atomicLoad(&solverControl[1])!=0u;}
+fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
+ atomicOr(&solverControl[0],flag);
+ if(arrayLength(&solverControl)>7u){let claim=atomicCompareExchangeWeak(&solverControl[6],0u,stage);
+  if(claim.exchanged){atomicStore(&solverControl[7],row);}}
+}}
+fn acceptedBank()->u32{return accepted[4]&1u;}
+fn worksetBase(cls:u32)->u32{return acceptedBank()*worksetLayout.y+cls*worksetLayout.x;}
+fn linearLane(wg:vec3u,groups:vec3u,lane:u32)->u32{return((wg.z*groups.y+wg.y)*groups.x+wg.x)*64u+lane;}
+fn workRow(item:u32,cls:u32)->u32{let base=worksetBase(cls);if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)
+ ||worksets[base]!=accepted[3]||worksets[base+1u]>worksets[base+2u]||item>=worksets[base+1u]
+ ||base+WORKSET_HEADER_WORDS+item>=arrayLength(&worksets)){return INVALID;}return worksets[base+WORKSET_HEADER_WORDS+item];}
+fn levels()->u32{return p.hierarchy.x;}fn maxStride()->u32{return p.hierarchy.y;}fn capacity()->u32{return p.dimsCapacity.w;}
+fn dims(l:u32)->vec3u{let s=1u<<l;return(p.dimsCapacity.xyz+vec3u(s-1u))/s;}
 fn levelCapacity(l:u32)->u32{let d=dims(l);let threshold=maxStride()/2u;var cells=d.x;
  if(cells>=threshold||d.y>threshold/cells){return maxStride();}cells*=d.y;
  if(cells>=threshold||d.z>threshold/cells){return maxStride();}cells*=d.z;
  var result=1u;let limit=2u*cells;while(result<limit){result<<=1u;}return result;}
 fn levelBase(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=levelCapacity(k);}return result;}
-fn totalLevelSlots()->u32{return levelBase(levels());}
-fn at(channel:u32,l:u32,slot:u32)->u32{return channel*totalLevelSlots()+levelBase(l)+slot;}
-fn loadf(channel:u32,l:u32,slot:u32)->f32{return bitcast<f32>(state[at(channel,l,slot)]);}
-fn storef(channel:u32,l:u32,slot:u32,value:f32){state[at(channel,l,slot)]=bitcast<u32>(value);}
+fn totalLevelSlots()->u32{return p.hierarchy.z;}
+fn at(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
 fn rowMapBase()->u32{return 16u;}fn workBase()->u32{return rowMapBase()+levels()*capacity();}
-fn rowMap(l:u32,row:u32)->u32{return topology[rowMapBase()+l*capacity()+row];}
-fn workSlot(l:u32,index:u32)->u32{return topology[workBase()+levelBase(l)+index];}
-fn count(l:u32)->u32{return dispatchMeta[l*8u];}
-fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
-fn coordKey(q:vec3u,l:u32)->u32{let d=dims(l);return q.x+d.x*(q.y+d.y*q.z)+1u;}
-fn transferBase()->u32{return workBase()+totalLevelSlots();}fn transferStride()->u32{return capacity()*8u;}
-fn transferCapacity(l:u32)->u32{return min(transferStride(),levelCapacity(l)*8u);}
-fn transferLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){
- result+=transferCapacity(k)*4u+4u*levelCapacity(k);}return result;}
-fn transferCount(l:u32)->u32{return dispatchMeta[l*8u+1u];}
-fn transferWord(l:u32,i:u32,w:u32)->u32{return transferBase()+transferLevelOffset(l)+i*4u+w;}
-fn parentHeadBase(l:u32)->u32{return transferBase()+transferLevelOffset(l)+transferCapacity(l)*4u;}
-fn fineHeadBase(l:u32)->u32{return parentHeadBase(l)+2u*levelCapacity(l);}
-fn fineCountBase(l:u32)->u32{return fineHeadBase(l)+levelCapacity(l);}
+fn pageWorkBase()->u32{return workBase()+totalLevelSlots();}
+fn logicalPageDims(l:u32)->vec3u{return(dims(l)+vec3u(7u,7u,3u))/vec3u(8u,8u,4u);}
+fn logicalPageCount(l:u32)->u32{let d=logicalPageDims(l);return d.x*d.y*d.z;}
+fn pageLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=logicalPageCount(k);}return result;}
+fn pageDirectoryBase()->u32{return pageWorkBase()+PAGE_RECORD_WORDS*totalLevelSlots();}
+fn transferCapacity(l:u32)->u32{return min(capacity()*8u,levelCapacity(l)*8u);}
+fn transferLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=transferCapacity(k)*4u+4u*levelCapacity(k);}return result;}
+fn transferBase()->u32{return pageDirectoryBase()+pageLevelOffset(levels());}
 fn directoryBase()->u32{return transferBase()+transferLevelOffset(levels()-1u);}
-fn brickDims(l:u32)->vec3u{return(dims(l)+vec3u(3u))/4u;}fn brickCount(l:u32)->u32{let d=brickDims(l);return d.x*d.y*d.z;}
+fn brickDims(l:u32)->vec3u{return(dims(l)+vec3u(3u))/4u;}
+fn brickCount(l:u32)->u32{let d=brickDims(l);return d.x*d.y*d.z;}
 fn brickLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=brickCount(k);}return result;}
-fn totalBrickCount()->u32{return brickLevelOffset(levels());}fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
-fn neighbourBase()->u32{return rankedSlotsBase()+totalLevelSlots();}
-fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+k*totalLevelSlots()+levelBase(l)+s;}
-fn find(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}
- let generation=topology[directoryBase()+2u+l];if(generation==0u){report(OVERFLOW);return INVALID;}let d=brickDims(l);let b=q/4u;
- let record=directoryBase()+16u+(brickLevelOffset(l)+b.x+d.x*(b.y+d.y*b.z))*4u;if(topology[record]!=generation){report(OVERFLOW);return INVALID;}
- let local=q&vec3u(3u);let bit=local.x+4u*local.y+16u*local.z;let word=topology[record+1u+(bit>>5u)];if((word&(1u<<(bit&31u)))==0u){return INVALID;}
- let low=topology[record+1u];let high=topology[record+2u];let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);
- var rank=countOneBits(low&lower);if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}let ranked=topology[record+3u]+rank;
- if(ranked>=count(l)||ranked>=levelCapacity(l)){report(OVERFLOW);return INVALID;}let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
- if(slot>=levelCapacity(l)||state[at(KEY,l,slot)]!=coordKey(q,l)){report(OVERFLOW);return INVALID;}return slot;}
-fn smoothable(l:u32,slot:u32)->bool{return(state[at(FLAGS,l,slot)]&GHOST)==0u;}
-// Verbatim staged stencil semantics, with level passed explicitly because one
-// persistent invocation traverses the entire pyramid.
-fn persistentApplied(l:u32,slot:u32,source:u32)->f32{var value=loadf(DIAG,l,slot)*loadf(source,l,slot);
- for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let other=topology[neighbourAt(k,l,slot)];if(other>=levelCapacity(l)){report(OVERFLOW);continue;}
-  value-=c*loadf(source,l,other);}return value;}
-fn persistentRelaxJacobi(l:u32,slot:u32,src:u32,dst:u32){if(!smoothable(l,slot)){storef(dst,l,slot,loadf(src,l,slot));return;}
- let d=loadf(DIAG,l,slot);if(!(d>0.0)){report(NONPOSITIVE);return;}let x=loadf(src,l,slot)+p.numerics.z*(loadf(RHS,l,slot)-persistentApplied(l,slot,src))/d;
- if(!finite(x)){report(NONFINITE);}else{storef(dst,l,slot,x);}}
-fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{
- if(l+1u>=levels()||fine>=levelCapacity(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
- let first=topology[fineHeadBase(l)+fine];let n=topology[fineCountBase(l)+fine];
- if(first==INVALID||corner>=n||first+corner>=transferCount(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
- let record=first+corner;if(topology[transferWord(l,record,0u)]!=fine){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
- let coarse=topology[transferWord(l,record,1u)];let weight=bitcast<f32>(topology[transferWord(l,record,2u)]);
- if(coarse>=levelCapacity(l+1u)||!finite(weight)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
- return TransferTarget(coarse,weight);}
-fn l2Value(row:u32,channel:u32)->f32{return pv(channel,row);}
-fn applyL2(row:u32,channel:u32)->f32{let h=headers[row];var value=h.diagonal*l2Value(row,channel);for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];value-=e.coefficient*l2Value(e.row,channel);}return value;}
-fn smoothHybrid(row:u32,src:u32)->f32{let current=pv(src,row);if(pu(BAND_B,row)==0u){return current;}
- let next=current+p.numerics.z*(pv(PR,row)-applyL2(row,src))/headers[row].diagonal;if(!finite(next)){reportAt(NONFINITE,3u,row,next);return current;}return next;}
-fn applyOuter(row:u32,channel:u32)->f32{let h=headers[row];var value=h.diagonal*pv(channel,row);for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];value-=e.coefficient*pv(channel,e.row);}return value;}
-fn applyPersistentVCycle(lid:u32){
- for(var l=0u;l<levels();l+=1u){for(var i=lid;i<count(l);i+=PERSISTENT_LANES){let s=workSlot(l,i);for(var c=RHS;c<=B;c+=1u){storef(c,l,s,0.0);}}}sync();
- if(!stopped()){for(var row=lid;row<rows();row+=PERSISTENT_LANES){let value=pv(HRHS,row);let native=firstTrailingBit(headers[row].size);storef(RHS,native,rowMap(native,row),value);}}sync();
- for(var l=0u;l+1u<levels();l+=1u){
-  for(var iteration=0u;iteration<p.vcycle.x;iteration+=1u){if(!stopped()){let src=select(A,B,(iteration&1u)!=0u);let dst=select(B,A,(iteration&1u)!=0u);
-    for(var i=lid;i<count(l);i+=PERSISTENT_LANES){persistentRelaxJacobi(l,workSlot(l,i),src,dst);}}sync();}
-  if(!stopped()){for(var i=lid;i<count(l+1u);i+=PERSISTENT_LANES){let coarse=workSlot(l+1u,i);var sum=0.0;
-    var record=topology[parentHeadBase(l)+coarse];for(var visited=0u;record!=INVALID&&visited<transferCount(l);visited+=1u){
-     let fine=topology[transferWord(l,record,0u)];let parent=topology[transferWord(l,record,1u)];
-     if(parent!=coarse){report(OVERFLOW);break;}let ghost=!smoothable(l,fine);let product=persistentApplied(l,fine,A);
-     let residualValue=select(-product,loadf(RHS,l,fine)-product,!ghost);
-     sum+=bitcast<f32>(topology[transferWord(l,record,2u)])*residualValue;
-     record=topology[transferWord(l,record,3u)];}
-    if(record!=INVALID||!finite(sum)){report(OVERFLOW);}else{storef(RHS,l+1u,coarse,sum);}}}sync();
- }
- if(lid==0u&&!stopped()){let bottom=levels()-1u;if(count(bottom)!=1u){report(NONPOSITIVE);}else{let s=workSlot(bottom,0u);let d=loadf(DIAG,bottom,s);
-  if(!(d>0.0)){report(NONPOSITIVE);}else{let value=loadf(RHS,bottom,s)/d;if(!finite(value)){report(NONFINITE);}else{storef(A,bottom,s,value);}}}}sync();
- for(var reverse=1u;reverse<levels();reverse+=1u){let l=levels()-1u-reverse;
-  if(!stopped()){for(var i=lid;i<count(l);i+=PERSISTENT_LANES){let fine=workSlot(l,i);let ghost=!smoothable(l,fine);let targetCount=select(8u,1u,ghost);var value=select(loadf(A,l,fine),0.0,ghost);
-    for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse!=INVALID){value+=transfer.weight*loadf(A,l+1u,transfer.coarse);}}
-    if(!finite(value)){report(NONFINITE);}else{storef(A,l,fine,value);}}}sync();
-  for(var iteration=0u;iteration<p.vcycle.x;iteration+=1u){if(!stopped()){let src=select(A,B,(iteration&1u)!=0u);let dst=select(B,A,(iteration&1u)!=0u);
-    for(var i=lid;i<count(l);i+=PERSISTENT_LANES){persistentRelaxJacobi(l,workSlot(l,i),src,dst);}}sync();}
- }
- if(!stopped()){for(var row=lid;row<rows();row+=PERSISTENT_LANES){let native=firstTrailingBit(headers[row].size);let value=loadf(A,native,rowMap(native,row));
-  if(!finite(value)){report(NONFINITE);}else{storePV(HCORR,row,value);}}}sync();
-}
-fn applyHybridPreconditioner(lid:u32){
- if(!stopped()){for(var row=lid;row<rows();row+=PERSISTENT_LANES){storePV(HA,row,0.0);storePV(HB,row,0.0);storePV(HRHS,row,0.0);storePV(HCORR,row,0.0);}}sync();
- for(var iteration=0u;iteration<boundarySweeps();iteration+=1u){if(!stopped()){let src=select(HA,HB,(iteration&1u)!=0u);let dst=select(HB,HA,(iteration&1u)!=0u);
-   for(var row=lid;row<rows();row+=PERSISTENT_LANES){storePV(dst,row,smoothHybrid(row,src));}}sync();}
- if(!stopped()){for(var row=lid;row<rows();row+=PERSISTENT_LANES){let next=pv(PR,row)-applyL2(row,HA);if(!finite(next)){reportAt(NONFINITE,4u,row,next);}else{storePV(HRHS,row,next);}}}sync();
- applyPersistentVCycle(lid);
- if(!stopped()){for(var row=lid;row<rows();row+=PERSISTENT_LANES){let next=pv(HA,row)+pv(HCORR,row);if(!finite(next)){reportAt(NONFINITE,5u,row,next);}else{storePV(HB,row,next);}}}sync();
- for(var iteration=0u;iteration<boundarySweeps();iteration+=1u){if(!stopped()){let src=select(HB,HA,(iteration&1u)!=0u);let dst=select(HA,HB,(iteration&1u)!=0u);
-   for(var row=lid;row<rows();row+=PERSISTENT_LANES){storePV(dst,row,smoothHybrid(row,src));}}sync();}
- if(!stopped()){for(var row=lid;row<rows();row+=PERSISTENT_LANES){let value=pv(HB,row);if(!finite(value)){reportAt(NONFINITE,6u,row,value);}else{storePV(PZ,row,value);}}}sync();
-}
-var<workgroup> sums:array<vec4f,64>;
-fn reduce(lid:u32,value:vec4f)->vec4f{sums[lid]=value;for(var width=32u;width>0u;width>>=1u){workgroupBarrier();if(lid<width){sums[lid]+=sums[lid+width];}}workgroupBarrier();return sums[0];}
-fn persistentPCGIteration(lid:u32){let n=rows();
- if(!stopped()){for(var row=lid;row<n;row+=PERSISTENT_LANES){storePV(PQ,row,applyOuter(row,PD));}}sync();
- var localDQ=0.0;if(!stopped()){for(var row=lid;row<n;row+=PERSISTENT_LANES){localDQ+=pv(PD,row)*pv(PQ,row);}}let dq=reduce(lid,vec4f(localDQ,0.0,0.0,0.0)).x;
- if(lid==0u&&!stopped()){let rz=bitcast<f32>(control[6]);if(!finite(dq)||!finite(rz)){reportAt(NONFINITE,8u,INVALID,dq);}else if(dq<=epsilon()||rz<0.0){report(NONPOSITIVE);}else{control[7]=bitcast<u32>(rz/dq);control[9]=bitcast<u32>(dq);}}sync();
- if(!stopped()){let alpha=bitcast<f32>(control[7]);for(var row=lid;row<n;row+=PERSISTENT_LANES){let x=pv(PX,row)+alpha*pv(PD,row);let r=pv(PR,row)-alpha*pv(PQ,row);
-   if(!finite(x)||!finite(r)){reportAt(NONFINITE,9u,row,r);}else{storePV(PX,row,x);storePV(PR,row,r);}}}sync();
- var localRR=0.0;if(!stopped()){for(var row=lid;row<n;row+=PERSISTENT_LANES){let r=pv(PR,row);localRR+=r*r;}}let rr=reduce(lid,vec4f(localRR,0.0,0.0,0.0)).x;
- if(lid==0u&&!stopped()){let bb=bitcast<f32>(control[5]);if(!finite(rr)){reportAt(NONFINITE,10u,INVALID,rr);}else{control[4]=bitcast<u32>(rr);control[2]+=1u;if(rr<=tolerance()*tolerance()*max(bb,epsilon())){control[1]=1u;}}}sync();
- applyHybridPreconditioner(lid);
- var localRZ=0.0;if(!stopped()){for(var row=lid;row<n;row+=PERSISTENT_LANES){localRZ+=pv(PR,row)*pv(PZ,row);}}let nextRZ=reduce(lid,vec4f(localRZ,0.0,0.0,0.0)).x;
- if(lid==0u&&!stopped()){let previous=bitcast<f32>(control[6]);if(!finite(nextRZ)||nextRZ<0.0||previous<=epsilon()){reportAt(NONFINITE,13u,INVALID,nextRZ);}else{control[8]=bitcast<u32>(nextRZ/previous);control[6]=bitcast<u32>(nextRZ);}}sync();
- if(!stopped()){let beta=bitcast<f32>(control[8]);for(var row=lid;row<n;row+=PERSISTENT_LANES){let next=pv(PZ,row)+beta*pv(PD,row);if(!finite(next)){reportAt(NONFINITE,11u,row,next);}else{storePV(PD,row,next);}}}sync();
-}
-fn persistentInitialize(lid:u32){let n=rows();
- // Uniform fail-closed gate: every structural row and entry is checked before
- // any pressure, residual, smoother, transfer, or Krylov arithmetic executes.
- for(var row=lid;row<n;row+=PERSISTENT_LANES){let h=headers[row];if(h.entryStart>arrayLength(&entries)||h.entryCount>arrayLength(&entries)-h.entryStart||!finite(h.diagonal)||h.diagonal<=0.0||!finite(h.rhs)){report(INVALID_ROW_ERROR);}else{
-  for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];if(e.row>=n||!finite(e.coefficient)){report(INVALID_ROW_ERROR);}}}
-  if(!finite(pressureSeed[row])){reportAt(NONFINITE,1u,row,pressureSeed[row]);}}
- if(lid==0u){let words=arrayLength(&rowCounts);if(words<8u||rowCounts[words-8u]!=0u){report(INVALID_ROW_ERROR);}}sync();
- if(!failed()){for(var row=lid;row<n;row+=PERSISTENT_LANES){storePV(PX,row,pressureSeed[row]);storePV(PR,row,0.0);storePV(PZ,row,0.0);storePV(PD,row,0.0);storePV(PQ,row,0.0);}}sync();
- if(!failed()){for(var row=lid;row<n;row+=PERSISTENT_LANES){storePV(PD,row,applyOuter(row,PX));}}sync();
- if(!failed()){for(var row=lid;row<n;row+=PERSISTENT_LANES){let value=-headers[row].rhs-pv(PD,row);if(!finite(value)){reportAt(NONFINITE,2u,row,value);}else{storePV(PR,row,value);}}}sync();
- if(!failed()){for(var row=lid;row<n;row+=PERSISTENT_LANES){let h=headers[row];var offDiagonalSum=0.0;var transition=false;for(var j=0u;j<h.entryCount;j+=1u){let e=entries[h.entryStart+j];offDiagonalSum+=e.coefficient;transition=transition||headers[e.row].size!=h.size;}
-   let boundaryGap=h.diagonal-offDiagonalSum;let boundary=(h.pad0&ROW_BOUNDARY)!=0u||boundaryGap>1e-5*max(1.0,h.diagonal);storePU(BAND_A,row,select(0u,1u,boundary||transition));}}sync();
- for(var layer=0u;layer<3u;layer+=1u){if(!failed()){let src=select(BAND_A,BAND_B,(layer&1u)!=0u);let dst=select(BAND_B,BAND_A,(layer&1u)!=0u);
-   for(var row=lid;row<n;row+=PERSISTENT_LANES){var band=pu(src,row);let h=headers[row];for(var j=0u;j<h.entryCount&&band==0u;j+=1u){band=max(band,pu(src,entries[h.entryStart+j].row));}storePU(dst,row,band);}}sync();}
- applyHybridPreconditioner(lid);
- var initial=vec4f(0.0);if(!stopped()){for(var row=lid;row<n;row+=PERSISTENT_LANES){let r=pv(PR,row);let z=pv(PZ,row);let b=-headers[row].rhs;initial+=vec4f(r*r,b*b,r*z,0.0);storePV(PD,row,z);}}
- let initialTotal=reduce(lid,initial);if(lid==0u&&!failed()){control[3]=n;control[4]=bitcast<u32>(initialTotal.x);control[5]=bitcast<u32>(initialTotal.y);control[6]=bitcast<u32>(initialTotal.z);
-  if(!finite(initialTotal.x)||!finite(initialTotal.y)||!finite(initialTotal.z)||initialTotal.z<0.0){reportAt(NONFINITE,7u,INVALID,initialTotal.z);}else if(initialTotal.x<=tolerance()*tolerance()*max(initialTotal.y,epsilon())){control[1]=1u;}}sync();
-}
-fn persistentFinalize(lid:u32){let n=rows();
- if(lid==0u){if(control[1]==0u&&control[0]==0u){report(NONCONVERGENCE);}if(arrayLength(&rowCounts)>=2u){let tail=arrayLength(&rowCounts);let success=!failed()&&control[1]!=0u;
-   rowCounts[tail-2u]=select(0x7fc00000u,control[4],success);rowCounts[tail-1u]=select(0x7fc00000u,control[5],success);}}sync();
- for(var row=lid;row<n;row+=PERSISTENT_LANES){let success=!failed()&&control[1]!=0u;let seed=select(0.0,pressureSeed[row],finite(pressureSeed[row]));pressureOut[row]=select(seed,pv(PX,row),success&&finite(pv(PX,row)));}
-}
-@compute @workgroup_size(64) fn persistentMGPCG(@builtin(local_invocation_index) lid:u32){
- persistentLane=lid;persistentErrors[lid]=vec4u(0u);workgroupBarrier();
- persistentInitialize(lid);
- for(var iteration=0u;iteration<12u;iteration+=1u){
-  if(lid==0u){persistentStop=select(0u,1u,stopped());}
-  let stop=workgroupUniformLoad(&persistentStop);if(stop!=0u){break;}
-  persistentPCGIteration(lid);
- }
- persistentFinalize(lid);
-}
+fn totalBrickCount()->u32{return brickLevelOffset(levels());}
+fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
+fn brickRecord(l:u32,q:vec3u)->u32{let d=brickDims(l);let b=q/4u;let dense=b.x+d.x*(b.y+d.y*b.z);
+ return directoryBase()+16u+(brickLevelOffset(l)+dense)*4u;}
+fn pageRecord(l:u32,page:u32)->u32{return pageWorkBase()+(levelBase(l)+page)*PAGE_RECORD_WORDS;}
+fn pageNeighbour(l:u32,page:u32,ordinal:u32)->u32{return topology[pageRecord(l,page)+1u+ordinal];}
+fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
+fn localBit(q:vec3u)->u32{let local=q&vec3u(3u);return local.x+4u*local.y+16u*local.z;}
+fn pageFor(l:u32,q:vec3u)->u32{let pages=logicalPageDims(l);let v=q/vec3u(8u,8u,4u);return topology[pageDirectoryBase()+pageLevelOffset(l)+v.x+pages.x*(v.y+pages.y*v.z)];}
+fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32)->u32{
+ let shape=vec3u(8u,8u,4u);let delta=vec3i(q/shape)-vec3i(origin/shape);
+ if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportAt(2u,21u,row);return INVALID;}
+ let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));let physical=pageNeighbour(l,page,ordinal);
+ if(physical==INVALID){return INVALID;}let physicalOrigin=decode(topology[pageRecord(l,physical)],l);
+ if(any(physicalOrigin/shape!=q/shape)){reportAt(2u,22u,row);return INVALID;}
+ let record=brickRecord(l,q);let bit=localBit(q);let low=topology[record+1u];let high=topology[record+2u];
+ if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return INVALID;}
+ let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
+ if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
+ let slot=topology[rankedSlotsBase()+levelBase(l)+topology[record+3u]+rank];
+ if(slot>=levelCapacity(l)){reportAt(2u,23u,row);return INVALID;}return slot;}
+fn originOf(h:vec4u)->vec3u{return vec3u(h.x%p.dimsCapacity.x,(h.x/p.dimsCapacity.x)%p.dimsCapacity.y,h.x/(p.dimsCapacity.x*p.dimsCapacity.y));}
+fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(
+ vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),
+ vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),
+ vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}
+fn worldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1,(code&1u)!=0u),select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let q=value*signs;let permutation=(code/8u)%6u;
+ if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}
+ if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;}
+fn coefficientBase(row:u32)->u32{return acceptedBank()*p.hierarchy.w+row*19u;}
+fn coefficientForDirection(row:u32,metric:Metric,direction:vec3i)->f32{let base=coefficientBase(row);for(var channel=0u;channel<18u;channel+=1u){
+ if(all(worldDirection(canonicalDirection(channel),metric.transformAndFlags&63u)==direction)){return section63Coefficients[base+1u+channel];}}return 0.0;}
+// Destination-owned GhostValueAccumulate. A 2:1 coarse leaf has at most
+// eight fine-level aliases. Each alias gathers the (at most eighteen) active
+// page neighbours that point to it. This is E^T by construction: it reads the
+// same owner incidence used by propagation and performs no scatter atomic.
+fn finerAdjoint(row:u32,h:vec4u,q:vec3u,l:u32,x:f32)->f32{if(l==0u){return 0.0;}let fine=l-1u;var result=0.0;
+ for(var child=0u;child<8u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
+  let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}if(ghostPage>=levelCapacity(fine)){reportAt(2u,31u,row);continue;}
+  let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);
+  if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}
+  for(var candidateDirection=0u;candidateDirection<18u;candidateDirection+=1u){let delta=canonicalDirection(candidateDirection);let activeQ=vec3i(ghostQ)-delta;
+   if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
+   if(activeSlot==INVALID||(state[at(FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[at(OWNER,fine,activeSlot)];
+   if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);continue;}let other=encoded-1u;let otherMetric=metrics[other];
+   let c=coefficientForDirection(other,otherMetric,delta);
+   if(c>0.0){result+=c*(x-inputVector[other]);}
+  }
+ }return result;}
+fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
+ let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
+ if(page==INVALID||page>=levelCapacity(l)){reportAt(2u,31u,row);return;}
+ let x=inputVector[row];var sum=0.0;
+ for(var channel=0u;channel<18u;channel+=1u){sum+=section63Coefficients[base+1u+channel];}
+ var value=max(0.0,section63Coefficients[base]-sum)*x;
+ for(var channel=0u;channel<18u;channel+=1u){let c=section63Coefficients[base+1u+channel];if(c==0.0){continue;}
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(2u,27u,row);continue;}
+  let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);continue;}let flags=state[at(FLAGS,l,slot)];
+  if((flags&MG_ONLY)!=0u){continue;}let encoded=state[at(OWNER,l,slot)];if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);continue;}
+  value+=c*(x-inputVector[encoded-1u]);}
+ value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}}
+@compute @workgroup_size(64) fn applyRegularInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),0u);if(!stopped()&&row!=INVALID){applyRow(row);}}
+@compute @workgroup_size(64) fn applyTransitionInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),1u);if(!stopped()&&row!=INVALID){applyRow(row);}}
+@compute @workgroup_size(64) fn applyPhysicalBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),2u);if(!stopped()&&row!=INVALID){applyRow(row);}}
+@compute @workgroup_size(64) fn applyTransitionBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),3u);if(!stopped()&&row!=INVALID){applyRow(row);}}
+@compute @workgroup_size(64) fn applyMergedBand(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),4u);if(!stopped()&&row!=INVALID){applyRow(row);}}
 `;
 
 export const octreeSPGridVCycleShader = /* wgsl */ `
-struct Params{dimsLevel:vec4u,capacity:vec4u,dispatchSmooth:vec4u,solve:vec2u,weights:vec2f,delta:vec4u}
-struct LeafHeader{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f}
-struct LeafEntry{row:u32,coefficient:f32}
+struct Params{dimsLevel:vec4u,capacity:vec4u,dispatchSmooth:vec4u,solve:vec2u,reserved:vec2f,delta:vec4u}
+struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 struct TransferTarget{coarse:u32,weight:f32}
 struct CapturePageRecord{generation:u32,changeStamp:u32,validationStamp:u32,copyStamp:u32}
 struct CapturePageState{generation:u32,expectedPages:u32,validatedPages:u32,changedPages:u32,
  readyGeneration:u32,copiedPages:u32,publishedGeneration:u32,publishedRows:u32,
  error:u32,bootstrap:u32,sourceGeneration:u32,publishedSourceGeneration:u32,pages:array<CapturePageRecord>}
 @group(0) @binding(0) var<uniform> p:Params;
-@group(0) @binding(1) var<storage,read_write> headers:array<LeafHeader>;
-@group(0) @binding(2) var<storage,read_write> entries:array<LeafEntry>;
-@group(0) @binding(3) var<storage,read> rowCounts:array<u32>;
+@group(0) @binding(1) var<storage,read_write> capturedGeometry:array<vec4u>;
+@group(0) @binding(3) var<storage,read> acceptedRows:array<u32>;
 @group(0) @binding(4) var<storage,read_write> topology:array<u32>;
 @group(0) @binding(5) var<storage,read_write> state:array<u32>;
 @group(0) @binding(6) var<storage,read_write> dispatchMeta:array<u32>;
 @group(0) @binding(7) var<storage,read_write> control:array<atomic<u32>>;
 @group(0) @binding(8) var<storage,read> inputRhs:array<f32>;
 @group(0) @binding(9) var<storage,read_write> outputCorrection:array<f32>;
-@group(0) @binding(11) var<storage,read> sourceHeaders:array<LeafHeader>;
-@group(0) @binding(12) var<storage,read> sourceEntries:array<LeafEntry>;
+@group(0) @binding(11) var<storage,read> sourceGeometry:array<vec4u>;
 @group(0) @binding(13) var<storage,read_write> capturePages:CapturePageState;
 @group(0) @binding(14) var<storage,read_write> levelDelta:array<u32>;
 @group(0) @binding(15) var<storage,read_write> candidateTopology:array<u32>;
 @group(0) @binding(16) var<storage,read_write> candidateState:array<u32>;
 @group(0) @binding(17) var<storage,read_write> candidateDispatch:array<u32>;
 @group(0) @binding(18) var<storage,read> sourceDelta:array<u32>;
+@group(0) @binding(19) var<storage,read_write> correctionDispatch:array<u32>;
+@group(0) @binding(20) var<storage,read> topologyMetrics:array<Metric>;
+@group(0) @binding(21) var<storage,read> catalogCoefficients:array<f32>;
 const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;const INVALID=0xffffffffu;
 const OVERFLOW=2u;const NONFINITE=4u;const NONPOSITIVE=8u;
 const KEY=0u;const FLAGS=1u;const DIAG=2u;const XP=3u;const XM=4u;const YP=5u;const YM=6u;const ZP=7u;const ZM=8u;
 const XYPP=9u;const XYPM=10u;const XYMP=11u;const XYMM=12u;const XZPP=13u;const XZPM=14u;const XZMP=15u;const XZMM=16u;
 const YZPP=17u;const YZPM=18u;const YZMP=19u;const YZMM=20u;
-const RHS=21u;const A=22u;const B=23u;const OWNER=24u;
-const STATE_CHANNELS=25u;
+const RHS=21u;const A=22u;const B=23u;const OWNER=24u;const SPECTRAL=25u;
+const STATE_CHANNELS=26u;
+const PAGE_X=8u;const PAGE_Y=8u;const PAGE_Z=4u;
+const HALO_X=10u;const HALO_Y=10u;const HALO_Z=6u;
+const PAGE_ELEMENTS=256u;const HALO_ELEMENTS=600u;
+var<workgroup> pageSlots:array<u32,600>;
+var<workgroup> pageA:array<f32,600>;
+var<workgroup> pageB:array<f32,600>;
+var<workgroup> pageRhs:array<f32,600>;
+var<workgroup> pageDiagonal:array<f32,600>;
+const STRUCTURED_CANDIDATE_READY=0x5356454cu;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn stopped()->bool{return atomicLoad(&control[0])!=0u||atomicLoad(&control[1])!=0u;}
-fn report(flag:u32){atomicOr(&control[0],flag);}fn rows()->u32{return min(rowCounts[0],p.capacity.x);}fn level()->u32{return p.dimsLevel.w;}
+fn sourceControlReady()->bool{if(arrayLength(&acceptedRows)<6u){return false;}if(p.solve.y==0u){return acceptedRows[0]==0u&&acceptedRows[3]!=0u;}if(p.solve.y==1u){return acceptedRows[0]==STRUCTURED_CANDIDATE_READY&&acceptedRows[4]!=0u;}return false;}
+fn sourceGeneration()->u32{return select(0u,select(acceptedRows[3],acceptedRows[4],p.solve.y==1u),sourceControlReady());}
+fn reportAt(flag:u32,stage:u32,index:u32){atomicOr(&control[0],flag);for(var retry=0u;retry<16u;retry+=1u){
+ let claim=atomicCompareExchangeWeak(&control[6],0u,stage);if(claim.exchanged){atomicStore(&control[7],index);return;}
+ if(claim.old_value!=0u){return;}}}
+fn report(flag:u32){reportAt(flag,60u,INVALID);}fn rows()->u32{return min(select(0u,acceptedRows[2],sourceControlReady()),p.capacity.x);}fn level()->u32{return p.dimsLevel.w;}
+fn acceptedBank()->u32{return select(acceptedRows[4],acceptedRows[5],p.solve.y==1u)&1u;}
+fn geometry(row:u32)->vec4u{return capturedGeometry[row];}
+fn sourceRowGeometry(row:u32)->vec4u{return sourceGeometry[acceptedBank()*p.capacity.x+row];}
 fn maxStride()->u32{return p.capacity.z;}fn levels()->u32{return p.capacity.y;}fn transferStride()->u32{return p.capacity.w;}
 fn dims(l:u32)->vec3u{let s=1u<<l;return (p.dimsLevel.xyz+vec3u(s-1u))/s;}
 fn levelCapacity(l:u32)->u32{let d=dims(l);let threshold=maxStride()/2u;var cells=d.x;
@@ -1214,7 +1603,15 @@ fn boundedLinearIndex(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
 fn transferIndex(g:vec3u)->u32{return g.x+g.y*p.dispatchSmooth.z*64u;}fn at(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
 fn loadf(c:u32,l:u32,s:u32)->f32{return bitcast<f32>(state[at(c,l,s)]);}fn storef(c:u32,l:u32,s:u32,v:f32){state[at(c,l,s)]=bitcast<u32>(v);}
 fn rowMapBase()->u32{return 16u;}fn workBase()->u32{return rowMapBase()+levels()*p.capacity.x;}
-fn transferBase()->u32{return workBase()+totalLevelSlots();}fn rowMap(l:u32,r:u32)->u32{return topology[rowMapBase()+l*p.capacity.x+r];}
+fn pageWorkBase()->u32{return workBase()+totalLevelSlots();}
+fn logicalPageDims(l:u32)->vec3u{return(dims(l)+vec3u(7u,7u,3u))/vec3u(8u,8u,4u);}
+fn logicalPageCount(l:u32)->u32{let d=logicalPageDims(l);return d.x*d.y*d.z;}
+fn pageLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=logicalPageCount(k);}return result;}
+fn pageDirectoryBase()->u32{return pageWorkBase()+28u*totalLevelSlots();}
+fn pageRecord(l:u32,i:u32)->u32{return pageWorkBase()+(levelBase(l)+i)*28u;}
+fn pageKey(l:u32,i:u32)->u32{return topology[pageRecord(l,i)];}
+fn pageNeighbour(l:u32,i:u32,ordinal:u32)->u32{return topology[pageRecord(l,i)+1u+ordinal];}
+fn transferBase()->u32{return pageDirectoryBase()+pageLevelOffset(levels());}fn rowMap(l:u32,r:u32)->u32{return topology[rowMapBase()+l*p.capacity.x+r];}
 fn workSlot(l:u32,i:u32)->u32{return topology[workBase()+levelBase(l)+i];}
 fn transferWord(l:u32,i:u32,w:u32)->u32{return transferBase()+transferLevelOffset(l)+i*4u+w;}
 fn parentHeadBase(l:u32)->u32{return transferBase()+transferLevelOffset(l)+transferCapacity(l)*4u;}
@@ -1228,11 +1625,11 @@ fn totalBrickCount()->u32{return brickLevelOffset(levels());}
 fn brickRecord(l:u32,q:vec3u)->u32{let d=brickDims(l);let b=q/4u;let dense=b.x+d.x*(b.y+d.y*b.z);
  return directoryBase()+16u+(brickLevelOffset(l)+dense)*4u;}
 fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
-fn neighbourBase()->u32{return rankedSlotsBase()+totalLevelSlots();}
-fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+k*totalLevelSlots()+levelBase(l)+s;}
 fn localBit(q:vec3u)->u32{let local=q&vec3u(3u);return local.x+4u*local.y+16u*local.z;}
-fn count(l:u32)->u32{return dispatchMeta[l*8u];}fn transferCount(l:u32)->u32{return dispatchMeta[l*8u+1u];}
-fn lifecycleBase()->u32{return levels()*8u;}fn previousValid()->bool{return dispatchMeta[lifecycleBase()]==1u;}
+const DISPATCH_WORDS=12u;
+fn count(l:u32)->u32{return dispatchMeta[l*DISPATCH_WORDS];}fn transferCount(l:u32)->u32{return dispatchMeta[l*DISPATCH_WORDS+1u];}
+fn pageCount(l:u32)->u32{return dispatchMeta[l*DISPATCH_WORDS+8u];}
+fn lifecycleBase()->u32{return levels()*DISPATCH_WORDS;}fn previousValid()->bool{return dispatchMeta[lifecycleBase()]==1u;}
 fn previousRows()->u32{return dispatchMeta[lifecycleBase()+1u];}
 const DELTA_WORDS=8u;const DELTA_TOPOLOGY=1u;const DELTA_STENCIL=2u;const DELTA_ERROR=4u;
 fn deltaAt(l:u32,w:u32)->u32{return l*DELTA_WORDS+w;}
@@ -1272,14 +1669,19 @@ fn captureWorkPage(work:u32)->u32{return select(deltaDirtyRow(work)/CAPTURE_PAGE
 fn captureWorkUnique(work:u32,page:u32)->bool{
  return captureBootstrap()||work==0u||deltaDirtyRow(work-1u)/CAPTURE_PAGE_ROWS!=page;
 }
-fn sameL1Topology(a:LeafHeader,b:LeafHeader)->bool{
- // RHS, diagonal, and diagnostic gradients do not define sparse identity.
- return a.cell==b.cell&&a.entryCount==b.entryCount&&a.size==b.size;
-}
-fn validEntryRange(h:LeafHeader)->bool{
- let sourceLength=arrayLength(&sourceEntries);let targetLength=arrayLength(&entries);
- return h.entryStart<=sourceLength&&h.entryCount<=sourceLength-h.entryStart
-  &&h.entryStart<=targetLength&&h.entryCount<=targetLength-h.entryStart;
+fn sameL1Topology(a:vec4u,b:vec4u)->bool{return a.x==b.x&&a.y==b.y;}
+fn validSection63Row(row:u32)->bool{if(row>=rows()||row>=arrayLength(&topologyMetrics)){return false;}let m=topologyMetrics[row];
+ if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||m.caseId>=arrayLength(&catalogCoefficients)/19u){return false;}
+ let base=m.caseId*19u;for(var channel=0u;channel<19u;channel+=1u){let c=catalogCoefficients[base+channel];if(!finite(c)||c<0.0){return false;}}
+ return catalogCoefficients[base]>0.0;}
+@compute @workgroup_size(1)
+fn prepareCorrectionDispatches(){
+ let noRows=stopped();let words=levels()*DISPATCH_WORDS+2u;
+ for(var word=0u;word<words;word+=1u){
+  var value=dispatchMeta[word];let local=word%DISPATCH_WORDS;
+  if(noRows&&(local==2u||local==5u||local==9u)){value=0u;}
+  correctionDispatch[word]=value;
+ }
 }
 var<workgroup> captureLaneFlags:array<u32,64>;
 var<workgroup> captureLaneFirst:array<u32,64>;
@@ -1289,38 +1691,57 @@ fn coordKey(q:vec3u,l:u32)->u32{let d=dims(l);return q.x+d.x*(q.y+d.y*q.z)+1u;}
 fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
 fn insertionHash(key:u32,l:u32)->u32{var h=key*0x9e3779b1u;h=(h^(h>>16u))*0x7feb352du;return(h^(h>>15u))&(levelCapacity(l)-1u);}
 fn directoryLookup(l:u32,q:vec3u,requirePublication:bool)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}
- let generation=topology[directoryBase()+2u+l];if(generation==0u){report(OVERFLOW);return INVALID;}
- let record=brickRecord(l,q);if(topology[record]!=generation){report(OVERFLOW);return INVALID;}let bit=localBit(q);let word=topology[record+1u+(bit>>5u)];
+ let generation=topology[directoryBase()+2u+l];if(generation==0u){reportAt(OVERFLOW,61u,l);return INVALID;}
+ let record=brickRecord(l,q);if(topology[record]!=generation){reportAt(OVERFLOW,62u,record);return INVALID;}let bit=localBit(q);let word=topology[record+1u+(bit>>5u)];
  let flag=1u<<(bit&31u);if((word&flag)==0u){return INVALID;}let low=topology[record+1u];let high=topology[record+2u];
  let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
  if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}let ranked=topology[record+3u]+rank;
- if(ranked>=count(l)||ranked>=levelCapacity(l)){report(OVERFLOW);return INVALID;}let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
- if(slot>=levelCapacity(l)||state[at(KEY,l,slot)]!=coordKey(q,l)){report(OVERFLOW);return INVALID;}return slot;}
+ if(ranked>=count(l)||ranked>=levelCapacity(l)){reportAt(OVERFLOW,63u,ranked);return INVALID;}let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
+ if(slot>=levelCapacity(l)||state[at(KEY,l,slot)]!=coordKey(q,l)){reportAt(OVERFLOW,64u,slot);return INVALID;}return slot;}
 fn find(l:u32,q:vec3u)->u32{return directoryLookup(l,q,true);}
-fn originOf(h:LeafHeader)->vec3u{return vec3u(h.cell%p.dimsLevel.x,(h.cell/p.dimsLevel.x)%p.dimsLevel.y,h.cell/(p.dimsLevel.x*p.dimsLevel.y));}
-fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;let begin=originOf(own);let finish=begin+vec3u(own.size);
- let otherBegin=originOf(other);let otherFinish=otherBegin+vec3u(other.size);var result=vec3u(0u);
+// Page hot loops consume the immutable physical adjacency record. The only
+// mask/rank operation is against the selected neighbouring page's four 4^3
+// bricks; no global directory lookup or generation read is repeated for the
+// 600 staged halo values.
+fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u)->u32{
+ let shape=vec3u(PAGE_X,PAGE_Y,PAGE_Z);let ownPage=origin/shape;let qPage=q/shape;
+ let delta=vec3i(qPage)-vec3i(ownPage);if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportAt(OVERFLOW,65u,page);return INVALID;}
+ let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));let physical=pageNeighbour(l,page,ordinal);
+ if(physical==INVALID){return INVALID;}if(physical>=pageCount(l)){reportAt(OVERFLOW,66u,physical);return INVALID;}
+ let physicalOrigin=decode(pageKey(l,physical),l);if(any(physicalOrigin/shape!=qPage)){reportAt(OVERFLOW,67u,physical);return INVALID;}
+ let record=brickRecord(l,q);let bit=localBit(q);let word=topology[record+1u+(bit>>5u)];
+ if((word&(1u<<(bit&31u)))==0u){return INVALID;}let low=topology[record+1u];let high=topology[record+2u];
+ let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
+ if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}let ranked=topology[record+3u]+rank;
+ if(ranked>=count(l)||ranked>=levelCapacity(l)){reportAt(OVERFLOW,68u,ranked);return INVALID;}
+ let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
+ if(slot>=levelCapacity(l)||state[at(KEY,l,slot)]!=coordKey(q,l)){reportAt(OVERFLOW,69u,slot);return INVALID;}return slot;
+}
+fn originOf(h:vec4u)->vec3u{return vec3u(h.x%p.dimsLevel.x,(h.x/p.dimsLevel.x)%p.dimsLevel.y,h.x/(p.dimsLevel.x*p.dimsLevel.y));}
+fn contactCoord(own:vec4u,other:vec4u,l:u32)->vec3u{let scale=1u<<l;let begin=originOf(own);let finish=begin+vec3u(own.y);
+ let otherBegin=originOf(other);let otherFinish=otherBegin+vec3u(other.y);var result=vec3u(0u);
  for(var axis=0u;axis<3u;axis+=1u){if(otherBegin[axis]>=finish[axis]){result[axis]=(finish[axis]-1u)/scale;}
-  else if(otherFinish[axis]<=begin[axis]){result[axis]=begin[axis]/scale;}else{let centre=(2u*otherBegin[axis]+other.size)/(2u*scale);
+  else if(otherFinish[axis]<=begin[axis]){result[axis]=begin[axis]/scale;}else{let centre=(2u*otherBegin[axis]+other.y)/(2u*scale);
    result[axis]=clamp(centre,begin[axis]/scale,(finish[axis]-1u)/scale);}}return result;}
 // Cold bootstrap validates every L1 page once. Recurring generations consume
 // only the producer's compact, sorted dirty-row authority; the first dirty row
 // in each page exclusively validates and stamps that complete page. No warm
 // kernel scans the row publication, entry arena, or page table globally.
 @compute @workgroup_size(1) fn beginL1CapturePlan(){
- var generation=capturePages.generation+1u;if(generation==0u){generation=1u;}
+ var generation=capturePages.publishedGeneration+1u;if(generation==0u){generation=1u;}
  let n=rows();let expected=(n+CAPTURE_PAGE_ROWS-1u)/CAPTURE_PAGE_ROWS;
  capturePages.generation=generation;capturePages.expectedPages=expected;
  capturePages.validatedPages=0u;capturePages.changedPages=0u;
  capturePages.readyGeneration=0u;capturePages.copiedPages=0u;
  capturePages.error=0u;
  capturePages.bootstrap=select(0u,1u,capturePages.publishedGeneration==0u);
- capturePages.sourceGeneration=select(0u,deltaControl(7u),p.delta.y+8u<arrayLength(&sourceDelta));
+ capturePages.sourceGeneration=sourceGeneration();
  for(var l=0u;l<levels();l+=1u){for(var w=0u;w<DELTA_WORDS;w+=1u){levelDelta[deltaAt(l,w)]=0u;}
   levelDelta[deltaAt(l,2u)]=0xffffffffu;}
  let publishedGeneration=capturePages.publishedGeneration;let publishedRows=capturePages.publishedRows;
- if(arrayLength(&rowCounts)==0u||rowCounts[0]>p.capacity.x||expected>capturePageCount()
+ if(!sourceControlReady()||acceptedRows[2]>p.capacity.x||expected>capturePageCount()
   ||publishedRows>p.capacity.x||(publishedGeneration==0u&&publishedRows!=0u)
+  ||capturePages.sourceGeneration==0u||capturePages.sourceGeneration!=deltaControl(7u)
   ||!deltaAccepted(n)){captureReport(OVERFLOW);}
  if(!previousValid()&&publishedGeneration!=0u){captureReport(OVERFLOW);}
 }
@@ -1332,31 +1753,20 @@ fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;le
   if(!captureWorkUnique(work,page)){continue;}
   var pageFlags=1u;var pageFirst=levels();
   let begin=page*CAPTURE_PAGE_ROWS;let end=min(rows(),begin+CAPTURE_PAGE_ROWS);
-  for(var r=begin;r<end;r+=1u){let source=sourceHeaders[r];let volume=p.dimsLevel.x*p.dimsLevel.y*p.dimsLevel.z;
-   if(!validEntryRange(source)||source.cell>=volume||source.size==0u||(source.size&(source.size-1u))!=0u
-    ||!finite(source.diagonal)||source.diagonal<=0.0){pageFlags|=2u;continue;}
+  for(var r=begin;r<end;r+=1u){let source=sourceRowGeometry(r);let volume=p.dimsLevel.x*p.dimsLevel.y*p.dimsLevel.z;
+   if(!validSection63Row(r)||source.x>=volume||source.y==0u||(source.y&(source.y-1u))!=0u){pageFlags|=2u;continue;}
    let old=select(deltaOldRow(r),INVALID,captureBootstrap());
-   var topologyChanged=old==INVALID||old>=capturePages.publishedRows;
-   var stencilChanged=topologyChanged;
-   if(!topologyChanged){let captured=headers[old];topologyChanged=!sameL1Topology(source,captured);
-    stencilChanged=topologyChanged||bitcast<u32>(source.diagonal)!=bitcast<u32>(captured.diagonal);
-    if(topologyChanged){pageFirst=min(pageFirst,min(firstTrailingBit(source.size),firstTrailingBit(captured.size)));}
-    if(captured.entryStart>arrayLength(&entries)||captured.entryCount>arrayLength(&entries)-captured.entryStart){
-     pageFlags|=2u;topologyChanged=true;stencilChanged=true;pageFirst=0u;
-    }else if(!topologyChanged){for(var j=0u;j<source.entryCount;j+=1u){let a=sourceEntries[source.entryStart+j];
-      let b=entries[captured.entryStart+j];var oldNeighbor=INVALID;
-      if(a.row<rows()){oldNeighbor=deltaOldRow(a.row);}
-      if(a.row>=rows()||!finite(a.coefficient)||oldNeighbor!=b.row){topologyChanged=true;}
-      if(bitcast<u32>(a.coefficient)!=bitcast<u32>(b.coefficient)){stencilChanged=true;}
-      if(topologyChanged||stencilChanged){pageFirst=min(pageFirst,firstTrailingBit(source.size));
-       if(a.row<rows()){pageFirst=min(pageFirst,firstTrailingBit(sourceHeaders[a.row].size));}
-       if(b.row<capturePages.publishedRows){pageFirst=min(pageFirst,firstTrailingBit(headers[b.row].size));}}
-    }}
-   }else{pageFirst=0u;}
+   // The direct resolved-row producer's compact dirty list is the sparse-identity
+   // authority. A dirty fixed row can change a neighbor handle without moving
+   // its cell, so rebuild its dependent sparse suffix instead of comparing a
+   // second adjacency representation.
+   var topologyChanged=true;
+   var stencilChanged=true;
+   if(!topologyChanged){let captured=capturedGeometry[old];topologyChanged=!sameL1Topology(source,captured);
+    if(topologyChanged){pageFirst=min(pageFirst,min(firstTrailingBit(source.y),firstTrailingBit(captured.y)));}}
+   else{pageFirst=0u;}
    if(topologyChanged){pageFlags|=4u;stencilChanged=true;}
-   if(stencilChanged){pageFlags|=8u;pageFirst=min(pageFirst,firstTrailingBit(source.size));}
-   for(var j=0u;j<source.entryCount;j+=1u){let a=sourceEntries[source.entryStart+j];
-    if(a.row>=rows()||!finite(a.coefficient)){pageFlags|=2u;}}
+   if(stencilChanged){pageFlags|=8u;pageFirst=min(pageFirst,firstTrailingBit(source.y));}
   }
   capturePages.pages[page].changeStamp=generation;
   capturePages.pages[page].validationStamp=generation;
@@ -1386,8 +1796,7 @@ fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;le
   if(page>=captureExpectedPages()||!captureWorkUnique(work,page)||capturePageStamp(page)!=generation
    ||capturePages.readyGeneration!=generation||captureFailed()){continue;}
   let end=min(rows(),(page+1u)*CAPTURE_PAGE_ROWS);
-  for(var r=page*CAPTURE_PAGE_ROWS;r<end;r+=1u){let h=sourceHeaders[r];headers[r]=h;
-   for(var j=0u;j<h.entryCount;j+=1u){entries[h.entryStart+j]=sourceEntries[h.entryStart+j];}}
+  for(var r=page*CAPTURE_PAGE_ROWS;r<end;r+=1u){capturedGeometry[r]=sourceRowGeometry(r);}
   capturePages.pages[page].generation=generation;capturePages.pages[page].copyStamp=generation;
  }
 }
@@ -1410,7 +1819,7 @@ fn contactCoord(own:LeafHeader,other:LeafHeader,l:u32)->vec3u{let scale=1u<<l;le
 }
 @compute @workgroup_size(64) fn clearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){outputCorrection[r]=0.0;}}
 fn cAt(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
-fn cCount(l:u32)->u32{return candidateDispatch[l*8u];}
+fn cCount(l:u32)->u32{return candidateDispatch[l*DISPATCH_WORDS];}
 fn cWorkSlot(l:u32,i:u32)->u32{return candidateTopology[workBase()+levelBase(l)+i];}
 fn cRowMap(l:u32,r:u32)->u32{return candidateTopology[rowMapBase()+l*p.capacity.x+r];}
 fn cLoadf(c:u32,l:u32,s:u32)->f32{return bitcast<f32>(candidateState[cAt(c,l,s)]);}
@@ -1423,7 +1832,7 @@ fn cInsert(l:u32,q:vec3u,flags:u32)->u32{let key=coordKey(min(q,dims(l)-vec3u(1u
  for(var probe=0u;probe<256u;probe+=1u){let index=cAt(KEY,l,slot);let old=candidateState[index];
   if(old==key){cMergeClass(cAt(FLAGS,l,slot),flags);return slot;}if(old==0u){candidateState[index]=key;
    cMergeClass(cAt(FLAGS,l,slot),flags);let w=cCount(l);if(w>=levelCapacity(l)){candidateReport(l);return INVALID;}
-   candidateDispatch[l*8u]=w+1u;candidateTopology[workBase()+levelBase(l)+w]=slot;return slot;}
+   candidateDispatch[l*DISPATCH_WORDS]=w+1u;candidateTopology[workBase()+levelBase(l)+w]=slot;return slot;}
   slot=(slot+1u)&(levelCapacity(l)-1u);}candidateReport(l);return INVALID;}
 fn cInsertOwned(l:u32,q:vec3u,flags:u32,owner:u32)->u32{let slot=cInsert(l,q,flags);if(slot==INVALID){return INVALID;}
  let encoded=owner+1u;let old=candidateState[cAt(OWNER,l,slot)];if(old==encoded){return slot;}
@@ -1432,8 +1841,8 @@ fn selectedCount(l:u32)->u32{return select(count(l),cCount(l),topologyDirty(l));
 fn selectedWorkSlot(l:u32,i:u32)->u32{return select(workSlot(l,i),cWorkSlot(l,i),topologyDirty(l));}
 fn selectedRowMap(l:u32,r:u32)->u32{return select(rowMap(l,r),cRowMap(l,r),topologyDirty(l));}
 fn selectedState(c:u32,l:u32,s:u32)->u32{return select(state[at(c,l,s)],candidateState[cAt(c,l,s)],topologyDirty(l));}
-fn cAppendTransfer(l:u32,fine:u32,coarse:u32,weight:f32){let i=candidateDispatch[l*8u+1u];
- if(i>=transferCapacity(l)){candidateReport(l);return;}candidateDispatch[l*8u+1u]=i+1u;
+fn cAppendTransfer(l:u32,fine:u32,coarse:u32,weight:f32){let i=candidateDispatch[l*DISPATCH_WORDS+1u];
+ if(i>=transferCapacity(l)){candidateReport(l);return;}candidateDispatch[l*DISPATCH_WORDS+1u]=i+1u;
  candidateTopology[transferWord(l,i,0u)]=fine;candidateTopology[transferWord(l,i,1u)]=coarse;
  candidateTopology[transferWord(l,i,2u)]=bitcast<u32>(weight);candidateTopology[transferWord(l,i,3u)]=INVALID;
  let fineHead=fineHeadBase(l)+fine;let fineCount=fineCountBase(l)+fine;let owned=candidateTopology[fineCount];
@@ -1449,19 +1858,11 @@ fn cDirectoryLookup(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return 
  let ranked=candidateTopology[record+3u]+rank;if(ranked>=cCount(l)||ranked>=levelCapacity(l)){candidateReport(l);return INVALID;}
  let slot=candidateTopology[rankedSlotsBase()+levelBase(l)+ranked];
  if(slot>=levelCapacity(l)||candidateState[cAt(KEY,l,slot)]!=coordKey(q,l)){candidateReport(l);return INVALID;}return slot;}
-fn cOwnedContactSlot(l:u32,row:u32,other:u32)->u32{let h=sourceHeaders[row];let native=firstTrailingBit(h.size);
- if(l>=native){return cRowMap(l,row);}let slot=cDirectoryLookup(l,contactCoord(h,sourceHeaders[other],l));
- if(slot==INVALID||candidateState[cAt(OWNER,l,slot)]!=row+1u){return INVALID;}return slot;}
-fn cAddFace(l:u32,own:u32,other:u32,a:vec3u,b:vec3u,c:f32)->bool{let d=vec3i(b)-vec3i(a);var ch=0u;
- if(all(d==vec3i(1,0,0))){ch=XP;}else if(all(d==vec3i(-1,0,0))){ch=XM;}
- else if(all(d==vec3i(0,1,0))){ch=YP;}else if(all(d==vec3i(0,-1,0))){ch=YM;}
- else if(all(d==vec3i(0,0,1))){ch=ZP;}else if(all(d==vec3i(0,0,-1))){ch=ZM;}
- else if(all(d==vec3i(1,1,0))){ch=XYPP;}else if(all(d==vec3i(1,-1,0))){ch=XYPM;}else if(all(d==vec3i(-1,1,0))){ch=XYMP;}else if(all(d==vec3i(-1,-1,0))){ch=XYMM;}
- else if(all(d==vec3i(1,0,1))){ch=XZPP;}else if(all(d==vec3i(1,0,-1))){ch=XZPM;}else if(all(d==vec3i(-1,0,1))){ch=XZMP;}else if(all(d==vec3i(-1,0,-1))){ch=XZMM;}
- else if(all(d==vec3i(0,1,1))){ch=YZPP;}else if(all(d==vec3i(0,1,-1))){ch=YZPM;}else if(all(d==vec3i(0,-1,1))){ch=YZMP;}else if(all(d==vec3i(0,-1,-1))){ch=YZMM;}else{return false;}
- let neighbourIndex=neighbourAt(ch-XP,l,own);let previous=candidateTopology[neighbourIndex];
- if(previous!=INVALID&&previous!=other){return false;}candidateTopology[neighbourIndex]=other;
- cStoref(ch,l,own,cLoadf(ch,l,own)+c);return true;}
+fn cLookup(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}let wanted=coordKey(q,l);var slot=insertionHash(wanted,l);
+ for(var probe=0u;probe<256u;probe+=1u){let old=candidateState[cAt(KEY,l,slot)];if(old==wanted){return slot;}if(old==0u){return INVALID;}slot=(slot+1u)&(levelCapacity(l)-1u);}return INVALID;}
+fn section63Direction(k:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[k];}
+fn section63WorldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1,(code&1u)!=0u),select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let q=value*signs;let permutation=(code/8u)%6u;
+ if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;}
 
 fn rebuildCandidateLevelSetFor(l:u32){
  if(!topologyDirty(l)){return;}levelDelta[deltaAt(l,4u)]=0u;
@@ -1469,23 +1870,29 @@ fn rebuildCandidateLevelSetFor(l:u32){
   candidateState[cAt(FLAGS,l,s)]=0u;candidateState[cAt(OWNER,l,s)]=0u;
   candidateTopology[workBase()+levelBase(l)+s]=INVALID;}
  for(var r=0u;r<p.capacity.x;r+=1u){candidateTopology[rowMapBase()+l*p.capacity.x+r]=INVALID;}
- for(var w=0u;w<8u;w+=1u){candidateDispatch[l*8u+w]=0u;}
- for(var r=0u;r<rows();r+=1u){let h=sourceHeaders[r];let native=firstTrailingBit(h.size);
+ for(var w=0u;w<DISPATCH_WORDS;w+=1u){candidateDispatch[l*DISPATCH_WORDS+w]=0u;}
+ for(var r=0u;r<rows();r+=1u){let h=geometry(r);let native=firstTrailingBit(h.y);
   if(l>=native){let q=originOf(h)/(1u<<l);var slot=INVALID;if(l==native){slot=cInsertOwned(l,q,ACTIVE,r);}else{slot=cInsert(l,q,MG_ONLY);}
    if(slot!=INVALID){candidateTopology[rowMapBase()+l*p.capacity.x+r]=slot;}}
-  if(l<native){for(var j=0u;j<h.entryCount;j+=1u){let other=sourceEntries[h.entryStart+j].row;if(other>=rows()){candidateReport(l);continue;}
-    if(l>=firstTrailingBit(sourceHeaders[other].size)){_ = cInsertOwned(l,contactCoord(h,sourceHeaders[other],l),GHOST,r);}}}
  }
 }
+fn rebuildCandidateGhostsFor(l:u32){if(!topologyDirty(l)||l+1u>=levels()){return;}
+ for(var r=0u;r<rows();r+=1u){let h=geometry(r);if(firstTrailingBit(h.y)!=l){continue;}let m=topologyMetrics[r];let q=originOf(h)/(1u<<l);let base=m.caseId*19u;
+  for(var channel=0u;channel<18u;channel+=1u){if(catalogCoefficients[base+1u+channel]==0.0){continue;}let targetQ=vec3i(q)+section63WorldDirection(section63Direction(channel),m.transformAndFlags&63u);
+   if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))||cLookup(l,vec3u(targetQ))!=INVALID){continue;}
+   let coarse=cLookup(l+1u,vec3u(targetQ)/2u);if(coarse==INVALID||(candidateState[cAt(FLAGS,l+1u,coarse)]&ACTIVE)==0u){continue;}
+   let owner=candidateState[cAt(OWNER,l+1u,coarse)];if(owner==0u||owner>rows()){candidateReport(l);continue;}
+   _=cInsertOwned(l,vec3u(targetQ),GHOST,owner-1u);}
+ }}
 fn rebuildCandidateTransferFor(l:u32){
  if(l+1u>=levels()||!(topologyDirty(l)||topologyDirty(l+1u))){return;}
- candidateDispatch[l*8u+1u]=0u;for(var s=0u;s<levelCapacity(l);s+=1u){
+ candidateDispatch[l*DISPATCH_WORDS+1u]=0u;for(var s=0u;s<levelCapacity(l);s+=1u){
   candidateTopology[parentHeadBase(l)+s]=INVALID;candidateTopology[parentTailBase(l)+s]=INVALID;
   candidateTopology[fineHeadBase(l)+s]=INVALID;candidateTopology[fineCountBase(l)+s]=0u;}
  for(var i=0u;i<selectedCount(l);i+=1u){let fine=selectedWorkSlot(l,i);let q=decode(selectedState(KEY,l,fine),l);
   let flags=selectedState(FLAGS,l,fine);if((flags&GHOST)!=0u){let encodedOwner=selectedState(OWNER,l,fine);
    if(encodedOwner==0u||encodedOwner>rows()){candidateReport(l);continue;}let owner=encodedOwner-1u;
-   let native=firstTrailingBit(sourceHeaders[owner].size);var coarse=INVALID;
+   let native=firstTrailingBit(geometry(owner).y);var coarse=INVALID;
    if(l+1u==native){coarse=selectedRowMap(l+1u,owner);}else{coarse=cInsertOwned(l+1u,q/2u,GHOST,owner);}
    if(coarse!=INVALID){cAppendTransfer(l,fine,coarse,1.0);}}
   else{let base=q/2u;let side=vec3i(select(-1,1,(q.x&1u)!=0u),select(-1,1,(q.y&1u)!=0u),select(-1,1,(q.z&1u)!=0u));
@@ -1512,49 +1919,92 @@ fn rebuildCandidateDirectoryFor(l:u32){
   candidateTopology[rankedSlotsBase()+levelBase(l)+candidateTopology[record+3u]+rank]=slot;}
  candidateTopology[directoryBase()+2u+l]=generation;
 }
+fn rebuildCandidatePageWorksetFor(l:u32){
+ if(!topologyDirty(l)){return;}
+ let pageShape=vec3u(8u,8u,4u);let pageDims=logicalPageDims(l);
+ let logicalPages=pageDims.x*pageDims.y*pageDims.z;var pageCount=0u;
+ for(var dense=0u;dense<logicalPages;dense+=1u){candidateTopology[pageDirectoryBase()+pageLevelOffset(l)+dense]=INVALID;}
+ for(var dense=0u;dense<logicalPages;dense+=1u){let px=dense%pageDims.x;let yz=dense/pageDims.x;
+  let origin=vec3u(px,yz%pageDims.y,yz/pageDims.y)*pageShape;var occupied=false;
+  for(var by=0u;by<2u;by+=1u){for(var bx=0u;bx<2u;bx+=1u){let q=origin+vec3u(4u*bx,4u*by,0u);
+    if(any(q>=dims(l))){continue;}let record=brickRecord(l,q);
+    occupied=occupied||candidateTopology[record+1u]!=0u||candidateTopology[record+2u]!=0u;}}
+  if(occupied){if(pageCount>=levelCapacity(l)){candidateReport(l);return;}
+   candidateTopology[pageRecord(l,pageCount)]=coordKey(origin,l);
+   candidateTopology[pageDirectoryBase()+pageLevelOffset(l)+dense]=pageCount;pageCount+=1u;}
+ }
+ for(var page=0u;page<pageCount;page+=1u){let origin=decode(candidateTopology[pageRecord(l,page)],l)/pageShape;
+  for(var ordinal=0u;ordinal<27u;ordinal+=1u){let dx=i32(ordinal%3u)-1;let yz=ordinal/3u;
+   let neighbour=vec3i(origin)+vec3i(dx,i32(yz%3u)-1,i32(yz/3u)-1);var physical=INVALID;
+   if(all(neighbour>=vec3i(0))&&all(neighbour<vec3i(pageDims))){let q=vec3u(neighbour);
+    physical=candidateTopology[pageDirectoryBase()+pageLevelOffset(l)+q.x+pageDims.x*(q.y+pageDims.y*q.z)];}
+   candidateTopology[pageRecord(l,page)+1u+ordinal]=physical;
+  }
+ }
+ candidateDispatch[l*DISPATCH_WORDS+8u]=pageCount;
+}
 fn rebuildCandidateStencilFor(l:u32){
  if(!stencilDirty(l)){return;}for(var i=0u;i<cCount(l);i+=1u){let s=cWorkSlot(l,i);
-  for(var c=DIAG;c<=YZMM;c+=1u){candidateState[cAt(c,l,s)]=0u;}
-  for(var k=0u;k<18u;k+=1u){candidateTopology[neighbourAt(k,l,s)]=INVALID;}}
- for(var r=0u;r<rows();r+=1u){let h=sourceHeaders[r];var sum=0.0;
-  for(var j=0u;j<h.entryCount;j+=1u){let e=sourceEntries[h.entryStart+j];if(e.row>=rows()||!finite(e.coefficient)||e.coefficient<0.0){candidateReport(l);continue;}sum+=e.coefficient;}
-  let native=firstTrailingBit(h.size);if(l>=native){let canonical=cRowMap(l,r);
-   cStoref(DIAG,l,canonical,cLoadf(DIAG,l,canonical)+max(0.0,h.diagonal-sum));}
-  for(var j=0u;j<h.entryCount;j+=1u){let e=sourceEntries[h.entryStart+j];if(e.row>=rows()){continue;}
-   let otherNative=firstTrailingBit(sourceHeaders[e.row].size);if(l<native&&l<otherNative){continue;}
-   let own=cOwnedContactSlot(l,r,e.row);let other=cOwnedContactSlot(l,e.row,r);
-   if(own==INVALID||other==INVALID){candidateReport(l);continue;}if(other!=own){cStoref(DIAG,l,own,cLoadf(DIAG,l,own)+e.coefficient);
-    let ownQ=decode(candidateState[cAt(KEY,l,own)],l);let otherQ=decode(candidateState[cAt(KEY,l,other)],l);
-    if(!cAddFace(l,own,other,ownQ,otherQ,e.coefficient)){candidateReport(l);}}}
- }
- for(var i=0u;i<cCount(l);i+=1u){let s=cWorkSlot(l,i);if(cLoadf(DIAG,l,s)<=1e-20){cStoref(DIAG,l,s,1.0);}}
+  for(var c=DIAG;c<=YZMM;c+=1u){candidateState[cAt(c,l,s)]=0u;}}
+ let coefficient=f32(1u<<l)*p.reserved.y;
+ for(var i=0u;i<cCount(l);i+=1u){let s=cWorkSlot(l,i);let q=decode(candidateState[cAt(KEY,l,s)],l);let flags=candidateState[cAt(FLAGS,l,s)];var diagonal=0.0;
+  for(var k=0u;k<6u;k+=1u){let targetQ=vec3i(q)+section63Direction(k);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){continue;}
+   let other=cDirectoryLookup(l,vec3u(targetQ));if(other==INVALID){if((flags&GHOST)==0u){diagonal+=coefficient;}continue;}
+   diagonal+=coefficient;cStoref(XP+k,l,s,coefficient);}
+  if(!(diagonal>1e-20)||!finite(diagonal)){diagonal=1.0;}cStoref(DIAG,l,s,diagonal);}
 }
-// Exact dependencies are ordered inside one singleton: every row set exists
-// before transfers can insert coarse MG-only cells; all transfers exist before
-// directories and stencils consume the immutable candidate identity. Dirty
-// predicates remain per-level, so unchanged publications are never touched.
-@compute @workgroup_size(1) fn buildCandidateLevelDeltas(){
+// The singleton candidate builder sees the complete rediscretized stencil.
+// It validates the M-matrix row and publishes a padded Gershgorin upper bound
+// for D^-1 A in the same transaction as the stencil generation.
+fn publishCandidateSpectralBoundFor(l:u32){
+ if(!stencilDirty(l)){return;}var upper=1.0;
+ for(var i=0u;i<cCount(l);i+=1u){let s=cWorkSlot(l,i);let d=cLoadf(DIAG,l,s);var off=0.0;
+  for(var k=0u;k<18u;k+=1u){let c=cLoadf(XP+k,l,s);
+   if(!finite(c)||c<0.0){candidateReport(l);}off+=abs(c);}
+  if(!finite(d)||!(d>0.0)||!finite(off)||off>d*(1.0+1e-4)){candidateReport(l);}
+  else{upper=max(upper,1.0+off/d);}
+ }
+ upper*=1.0005;levelDelta[deltaAt(l,7u)]=bitcast<u32>(upper);
+}
+// Split the cold publication at the ten-storage-buffer portability ceiling.
+// Every native row set exists before catalog-owned ghost aliases are inserted.
+@compute @workgroup_size(1) fn buildCandidateLevelSetsAndGhosts(){
  for(var l=0u;l<levels();l+=1u){rebuildCandidateLevelSetFor(l);}
+ for(var l=0u;l<levels();l+=1u){rebuildCandidateGhostsFor(l);}
+}
+// The second ordered singleton consumes the completed row identity. Transfers
+// may then insert coarse MG-only cells before directories/pages/stencils are
+// published. Dirty predicates remain per-level, so unchanged epochs do no work.
+@compute @workgroup_size(1) fn buildCandidateLevelDeltas(){
  for(var l=0u;l+1u<levels();l+=1u){rebuildCandidateTransferFor(l);}
  for(var l=0u;l<levels();l+=1u){rebuildCandidateDirectoryFor(l);}
+ for(var l=0u;l<levels();l+=1u){rebuildCandidatePageWorksetFor(l);}
  for(var l=0u;l<levels();l+=1u){rebuildCandidateStencilFor(l);}
+ for(var l=0u;l<levels();l+=1u){publishCandidateSpectralBoundFor(l);}
 }
 @compute @workgroup_size(1) fn validateCandidateHierarchy(){
- if(captureFailed()){report(OVERFLOW);return;}for(var l=0u;l<levels();l+=1u){
+ if(captureFailed()){return;}for(var l=0u;l<levels();l+=1u){
+  let spectral=bitcast<f32>(levelDelta[deltaAt(l,7u)]);
   if((levelDirty(l)&&levelDelta[deltaAt(l,4u)]!=0u)
-   ||(topologyDirty(l)&&(levelDelta[deltaAt(l,6u)]!=captureGeneration()||cCount(l)>levelCapacity(l)))){
-   captureReport(OVERFLOW);report(OVERFLOW);return;}}
- if(selectedCount(levels()-1u)!=1u){captureReport(OVERFLOW);report(OVERFLOW);}
+   ||(stencilDirty(l)&&(!(spectral>0.0)||!finite(spectral)))
+   ||(topologyDirty(l)&&(levelDelta[deltaAt(l,6u)]!=captureGeneration()
+    ||cCount(l)>levelCapacity(l)||candidateDispatch[l*DISPATCH_WORDS+8u]>levelCapacity(l)))){
+   captureReport(OVERFLOW);return;}}
+ if(selectedCount(levels()-1u)!=1u){captureReport(OVERFLOW);}
 }
 fn commitCandidateLevelAt(l:u32,i:u32){
- let topologyChanged=topologyDirty(l);let transferChanged=topologyChanged||(l+1u<levels()&&topologyDirty(l+1u));
+ let topologyChanged=topologyDirty(l);
+ let transferChanged=topologyChanged||(l+1u<levels()&&topologyDirty(l+1u));
  if(!topologyChanged&&!stencilDirty(l)&&!transferChanged){return;}
  if(captureFailed()||levelDelta[deltaAt(l,4u)]!=0u){return;}
- if(stencilDirty(l)&&i<levelCapacity(l)){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
-  for(var k=0u;k<18u;k+=1u){topology[neighbourAt(k,l,i)]=candidateTopology[neighbourAt(k,l,i)];}}
+ if(stencilDirty(l)&&i<levelCapacity(l)){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}}
  if(topologyChanged&&i<levelCapacity(l)){for(var c=0u;c<STATE_CHANNELS;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
   topology[workBase()+levelBase(l)+i]=candidateTopology[workBase()+levelBase(l)+i];
   topology[rankedSlotsBase()+levelBase(l)+i]=candidateTopology[rankedSlotsBase()+levelBase(l)+i];}
+ if(topologyChanged&&i<candidateDispatch[l*DISPATCH_WORDS+8u]){let page=pageRecord(l,i);
+  for(var word=0u;word<28u;word+=1u){topology[page+word]=candidateTopology[page+word];}}
+ if(topologyChanged&&i<logicalPageCount(l)){let pageIndex=pageDirectoryBase()+pageLevelOffset(l)+i;
+  topology[pageIndex]=candidateTopology[pageIndex];}
  if(topologyChanged&&i<p.capacity.x){topology[rowMapBase()+l*p.capacity.x+i]=candidateTopology[rowMapBase()+l*p.capacity.x+i];}
  if(transferChanged&&l+1u<levels()&&i<levelCapacity(l)){topology[parentHeadBase(l)+i]=candidateTopology[parentHeadBase(l)+i];
   topology[parentTailBase(l)+i]=candidateTopology[parentTailBase(l)+i];
@@ -1564,14 +2014,20 @@ fn commitCandidateLevelAt(l:u32,i:u32){
   topology[transferWord(l,i,w)]=candidateTopology[transferWord(l,i,w)];}}
  if(topologyChanged&&i<brickCount(l)){let record=directoryBase()+16u+(brickLevelOffset(l)+i)*4u;
   for(var w=0u;w<4u;w+=1u){topology[record+w]=candidateTopology[record+w];}}
- if(i==0u){if(topologyChanged){dispatchMeta[l*8u]=candidateDispatch[l*8u];topology[directoryBase()+2u+l]=candidateTopology[directoryBase()+2u+l];
+ if(i==0u){if(stencilDirty(l)){state[at(SPECTRAL,l,0u)]=levelDelta[deltaAt(l,7u)];}
+  if(topologyChanged){dispatchMeta[l*DISPATCH_WORDS]=candidateDispatch[l*DISPATCH_WORDS];
+   dispatchMeta[l*DISPATCH_WORDS+8u]=candidateDispatch[l*DISPATCH_WORDS+8u];
+   topology[directoryBase()+2u+l]=candidateTopology[directoryBase()+2u+l];
    levelDelta[deltaAt(l,5u)]=captureGeneration();}
-  if(transferChanged&&l+1u<levels()){dispatchMeta[l*8u+1u]=candidateDispatch[l*8u+1u];}
-  let blocks=(selectedCount(l)+63u)/64u;dispatchMeta[l*8u+2u]=min(65535u,blocks);
-  dispatchMeta[l*8u+3u]=select(1u,(blocks+65534u)/65535u,blocks>0u);dispatchMeta[l*8u+4u]=1u;
+  if(transferChanged&&l+1u<levels()){dispatchMeta[l*DISPATCH_WORDS+1u]=candidateDispatch[l*DISPATCH_WORDS+1u];}
+  let blocks=(selectedCount(l)+63u)/64u;dispatchMeta[l*DISPATCH_WORDS+2u]=min(65535u,blocks);
+  dispatchMeta[l*DISPATCH_WORDS+3u]=select(1u,(blocks+65534u)/65535u,blocks>0u);dispatchMeta[l*DISPATCH_WORDS+4u]=1u;
   var parentBlocks=0u;if(l+1u<levels()){parentBlocks=(selectedCount(l+1u)+63u)/64u;}
-  dispatchMeta[l*8u+5u]=min(65535u,parentBlocks);dispatchMeta[l*8u+6u]=select(1u,(parentBlocks+65534u)/65535u,parentBlocks>0u);
-  dispatchMeta[l*8u+7u]=1u;}
+  dispatchMeta[l*DISPATCH_WORDS+5u]=min(65535u,parentBlocks);
+  dispatchMeta[l*DISPATCH_WORDS+6u]=select(1u,(parentBlocks+65534u)/65535u,parentBlocks>0u);
+  dispatchMeta[l*DISPATCH_WORDS+7u]=1u;
+  let pages=dispatchMeta[l*DISPATCH_WORDS+8u];dispatchMeta[l*DISPATCH_WORDS+9u]=pages;
+  dispatchMeta[l*DISPATCH_WORDS+10u]=1u;dispatchMeta[l*DISPATCH_WORDS+11u]=1u;}
 }
 @compute @workgroup_size(64) fn commitCandidateLevels(@builtin(global_invocation_id) g:vec3u){
  let i=boundedLinearIndex(g);for(var l=0u;l<levels();l+=1u){commitCandidateLevelAt(l,i);}
@@ -1583,48 +2039,105 @@ fn commitCandidateLevelAt(l:u32,i:u32){
 }
 @compute @workgroup_size(64) fn zeroVectors(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}let s=workSlot(l,i);
  for(var c=RHS;c<=B;c+=1u){storef(c,l,s,0.0);}}
-@compute @workgroup_size(64) fn seedRhs(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let v=inputRhs[r];let native=firstTrailingBit(headers[r].size);
- if(!finite(v)){report(NONFINITE);}else{storef(RHS,native,rowMap(native,r),v);}}}
-fn applied(slot:u32,source:u32)->f32{let l=level();var value=loadf(DIAG,l,slot)*loadf(source,l,slot);
- for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let other=topology[neighbourAt(k,l,slot)];if(other>=levelCapacity(l)){report(OVERFLOW);continue;}
-  value-=c*loadf(source,l,other);}return value;}
+@compute @workgroup_size(64) fn seedRhs(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let v=inputRhs[r];let native=firstTrailingBit(sourceRowGeometry(r).y);
+ if(!finite(v)){reportAt(NONFINITE,73u,r);}else{storef(RHS,native,rowMap(native,r),v);}}}
+fn stencilDirection(k:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[k];}
+fn applied(slot:u32,source:u32)->f32{let l=level();var value=loadf(DIAG,l,slot)*loadf(source,l,slot);let q=decode(state[at(KEY,l,slot)],l);
+ for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}let neighborCoord=vec3i(q)+stencilDirection(k);
+  if(any(neighborCoord<vec3i(0))||any(neighborCoord>=vec3i(dims(l)))){reportAt(OVERFLOW,74u,slot);continue;}let other=find(l,vec3u(neighborCoord));
+  if(other==INVALID){reportAt(OVERFLOW,75u,slot);continue;}value-=c*loadf(source,l,other);}return value;}
 fn smoothable(l:u32,s:u32)->bool{return(state[at(FLAGS,l,s)]&GHOST)==0u;}
-fn relaxJacobi(slot:u32,src:u32,dst:u32){let l=level();if(!smoothable(l,slot)){storef(dst,l,slot,loadf(src,l,slot));return;}
- let d=loadf(DIAG,l,slot);if(!(d>0.0)){report(NONPOSITIVE);return;}
- let x=loadf(src,l,slot)+p.weights.x*(loadf(RHS,l,slot)-applied(slot,src))/d;
- if(!finite(x)){report(NONFINITE);}else{storef(dst,l,slot,x);}}
-@compute @workgroup_size(64) fn smoothAtoB(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){relaxJacobi(workSlot(l,i),A,B);}}
-@compute @workgroup_size(64) fn smoothBtoA(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i<count(l)&&!stopped()){relaxJacobi(workSlot(l,i),B,A);}}
+fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
+ let upper=loadf(SPECTRAL,l,0u);let lower=upper/30.0;
+ if(!(lower>0.0)||!(upper>lower)||!finite(upper)){reportAt(NONPOSITIVE,76u,l);return 0.0;}
+ let centre=0.5*(upper+lower);let radius=0.5*(upper-lower);
+ return 1.0/(centre-radius*cos(3.141592653589793*(2.0*f32(phase)+1.0)/(2.0*f32(degree))));
+}
+fn pageInteriorHaloIndex(local:u32)->u32{let x=local%PAGE_X;let yz=local/PAGE_X;
+ return x+1u+HALO_X*((yz%PAGE_Y)+1u+HALO_Y*((yz/PAGE_Y)+1u));}
+fn pageAppliedA(l:u32,slot:u32,origin:vec3u,halo:u32)->f32{
+ var value=pageDiagonal[halo]*pageA[halo];
+ for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
+  let relative=vec3i(decode(state[at(KEY,l,slot)],l))+stencilDirection(k)-vec3i(origin)+vec3i(1);
+  if(any(relative<vec3i(0))||any(relative>=vec3i(i32(HALO_X),i32(HALO_Y),i32(HALO_Z)))){reportAt(OVERFLOW,77u,slot);continue;}
+  let neighbourHalo=u32(relative.x)+HALO_X*(u32(relative.y)+HALO_Y*u32(relative.z));
+  if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}value-=c*pageA[neighbourHalo];}
+ return value;
+}
+fn pageAppliedB(l:u32,slot:u32,origin:vec3u,halo:u32)->f32{
+ var value=pageDiagonal[halo]*pageB[halo];
+ for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
+  let relative=vec3i(decode(state[at(KEY,l,slot)],l))+stencilDirection(k)-vec3i(origin)+vec3i(1);
+  if(any(relative<vec3i(0))||any(relative>=vec3i(i32(HALO_X),i32(HALO_Y),i32(HALO_Z)))){reportAt(OVERFLOW,77u,slot);continue;}
+  let neighbourHalo=u32(relative.x)+HALO_X*(u32(relative.y)+HALO_Y*u32(relative.z));
+  if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}value-=c*pageB[neighbourHalo];}
+ return value;
+}
+fn pageSweepAtoB(l:u32,origin:vec3u,lid:u32,phase:u32,degree:u32){
+ let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
+  let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageA[halo];if(!smoothable(l,slot)){pageB[halo]=source;continue;}
+  let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageB[halo]=source;continue;}
+  let next=source+weight*(pageRhs[halo]-pageAppliedA(l,slot,origin,halo))/d;
+  if(!finite(next)){reportAt(NONFINITE,80u,slot);pageB[halo]=source;}else{pageB[halo]=next;}}
+}
+fn pageSweepBtoA(l:u32,origin:vec3u,lid:u32,phase:u32,degree:u32){
+ let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
+  let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageB[halo];if(!smoothable(l,slot)){pageA[halo]=source;continue;}
+  let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageA[halo]=source;continue;}
+  let next=source+weight*(pageRhs[halo]-pageAppliedB(l,slot,origin,halo))/d;
+  if(!finite(next)){reportAt(NONFINITE,80u,slot);pageA[halo]=source;}else{pageA[halo]=next;}}
+}
+fn pagePhase(step:u32,degree:u32,reverse:bool)->u32{return select(step,degree-1u-step,reverse);}
+fn smoothPage(reverse:bool,page:u32,lid:u32){let l=level();let pageLive=page<pageCount(l)&&!stopped();var origin=vec3u(0u);
+ if(pageLive){origin=decode(pageKey(l,page),l);}let d=dims(l);
+ for(var halo=lid;halo<HALO_ELEMENTS;halo+=128u){let x=halo%HALO_X;let yz=halo/HALO_X;
+  let relative=vec3i(i32(x)-1,i32(yz%HALO_Y)-1,i32(yz/HALO_Y)-1);let q=vec3i(origin)+relative;var slot=INVALID;
+  if(pageLive&&all(q>=vec3i(0))&&all(q<vec3i(d))){slot=pageSlot(l,page,origin,vec3u(q));}pageSlots[halo]=slot;
+  var value=0.0;var rhs=0.0;var diagonal=1.0;if(slot!=INVALID){value=loadf(A,l,slot);rhs=loadf(RHS,l,slot);diagonal=loadf(DIAG,l,slot);}
+  pageA[halo]=value;pageB[halo]=value;pageRhs[halo]=rhs;pageDiagonal[halo]=diagonal;}
+ workgroupBarrier();
+ pageSweepAtoB(l,origin,lid,pagePhase(0u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
+ pageSweepBtoA(l,origin,lid,pagePhase(1u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
+ if(p.solve.x==4u){pageSweepAtoB(l,origin,lid,pagePhase(2u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
+ if(p.solve.x==4u){pageSweepBtoA(l,origin,lid,pagePhase(3u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
+ if(pageLive){for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);let slot=pageSlots[halo];
+   if(slot!=INVALID){storef(A,l,slot,pageA[halo]);}}}
+}
+@compute @workgroup_size(128) fn smoothPageChebyshevForward(@builtin(workgroup_id) page:vec3u,@builtin(local_invocation_index) lid:u32){
+ smoothPage(false,page.x,lid);
+}
+@compute @workgroup_size(128) fn smoothPageChebyshevReverse(@builtin(workgroup_id) page:vec3u,@builtin(local_invocation_index) lid:u32){
+ smoothPage(true,page.x,lid);
+}
 // Return the immutable transfer target owned by one fine slot/corner.
 // Restriction consumes the same records through its parent-owned chains, so
 // E and E^T cannot diverge.
 fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{
- if(l+1u>=levels()||fine>=levelCapacity(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+ if(l+1u>=levels()||fine>=levelCapacity(l)){reportAt(OVERFLOW,81u,fine);return TransferTarget(INVALID,0.0);}
  let first=topology[fineHeadBase(l)+fine];let n=topology[fineCountBase(l)+fine];
- if(first==INVALID||corner>=n||first+corner>=transferCount(l)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
- let record=first+corner;if(topology[transferWord(l,record,0u)]!=fine){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+ if(first==INVALID||corner>=n||first+corner>=transferCount(l)){reportAt(OVERFLOW,82u,fine);return TransferTarget(INVALID,0.0);}
+ let record=first+corner;if(topology[transferWord(l,record,0u)]!=fine){reportAt(OVERFLOW,83u,fine);return TransferTarget(INVALID,0.0);}
  let coarse=topology[transferWord(l,record,1u)];let weight=bitcast<f32>(topology[transferWord(l,record,2u)]);
- if(coarse>=levelCapacity(l+1u)||!finite(weight)){report(OVERFLOW);return TransferTarget(INVALID,0.0);}
+ if(coarse>=levelCapacity(l+1u)||!finite(weight)){reportAt(OVERFLOW,84u,fine);return TransferTarget(INVALID,0.0);}
  return TransferTarget(coarse,weight);}
 // Section 4.2 GhostValueAccumulate is E^T: one coarse owner traverses its
 // immutable fine-major chain, so no destination synchronization is required.
 @compute @workgroup_size(64) fn restrictAndGhostAccumulate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();
  if(l+1u>=levels()||i>=count(l+1u)||stopped()){return;}let coarse=workSlot(l+1u,i);var sum=0.0;var record=topology[parentHeadBase(l)+coarse];
- for(var visited=0u;record!=INVALID&&visited<transferCount(l);visited+=1u){if(record>=transferCount(l)){report(OVERFLOW);return;}
-  let fine=topology[transferWord(l,record,0u)];let parent=topology[transferWord(l,record,1u)];if(parent!=coarse){report(OVERFLOW);return;}
+ for(var visited=0u;record!=INVALID&&visited<transferCount(l);visited+=1u){if(record>=transferCount(l)){reportAt(OVERFLOW,85u,coarse);return;}
+  let fine=topology[transferWord(l,record,0u)];let parent=topology[transferWord(l,record,1u)];if(parent!=coarse){reportAt(OVERFLOW,86u,coarse);return;}
   let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=applied(fine,A);let residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
   sum+=bitcast<f32>(topology[transferWord(l,record,2u)])*residual;record=topology[transferWord(l,record,3u)];}
- if(record!=INVALID||!finite(sum)){report(OVERFLOW);return;}storef(RHS,l+1u,coarse,sum);}
-@compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}if(count(l)!=1u){report(NONPOSITIVE);return;}
- let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){report(NONPOSITIVE);return;}let x=loadf(RHS,l,s)/d;if(!finite(x)){report(NONFINITE);}else{storef(A,l,s,x);}}
+ if(record!=INVALID||!finite(sum)){reportAt(OVERFLOW,87u,coarse);return;}storef(RHS,l+1u,coarse,sum);}
+@compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}if(count(l)!=1u){reportAt(NONPOSITIVE,88u,l);return;}
+ let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){reportAt(NONPOSITIVE,89u,s);return;}let x=loadf(RHS,l,s)/d;if(!finite(x)){reportAt(NONFINITE,90u,s);}else{storef(A,l,s,x);}}
 // One fine invocation owns the complete interpolation sum, deleting all
 // prolongation atomics. GhostValuePropagate is the unit-copy branch of the
 // same E mapping rather than a second dispatch.
 @compute @workgroup_size(64) fn prolongAndGhostPropagate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}
  let fine=workSlot(l,i);let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let targetCount=select(8u,1u,ghost);var value=select(loadf(A,l,fine),0.0,ghost);
  for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse==INVALID){return;}
-  value+=transfer.weight*loadf(A,l+1u,transfer.coarse);}if(!finite(value)){report(NONFINITE);}else{storef(A,l,fine,value);}}
-@compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let native=firstTrailingBit(headers[r].size);
- let v=loadf(A,native,rowMap(native,r));if(!finite(v)){report(NONFINITE);}else{outputCorrection[r]=v;}}}
+  value+=transfer.weight*loadf(A,l+1u,transfer.coarse);}if(!finite(value)){reportAt(NONFINITE,91u,fine);}else{storef(A,l,fine,value);}}
+@compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let native=firstTrailingBit(sourceRowGeometry(r).y);
+ let v=loadf(A,native,rowMap(native,r));if(!finite(v)){reportAt(NONFINITE,92u,r);}else{outputCorrection[r]=v;}}}
 `;

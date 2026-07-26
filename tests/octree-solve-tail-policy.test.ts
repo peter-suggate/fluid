@@ -1,0 +1,233 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+  OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
+  countOctreePressureCommands,
+  planOctreeSolveTail,
+  type OctreeSolveTailSceneProfile,
+} from "../lib/octree-solve-tail-policy";
+import { solveOctreePipelinedPCG } from "../lib/octree-pipelined-pcg";
+
+const PROFILES = Object.freeze({
+  miniDam: {
+    finestDimensions: [16, 16, 16], maximumLeafSize: 2,
+    initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
+    movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
+  },
+  uiDam: {
+    finestDimensions: [24, 18, 16], maximumLeafSize: 16,
+    initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
+    movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
+  },
+  quiescent: {
+    finestDimensions: [48, 24, 24], maximumLeafSize: 16,
+    initialCondition: "tank-fill", hasInflow: false, hasTerrain: false,
+    movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-6,
+  },
+  river: {
+    finestDimensions: [96, 16, 16], maximumLeafSize: 16,
+    initialCondition: "tank-fill", hasInflow: true, hasTerrain: true,
+    movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
+  },
+} satisfies Record<string, OctreeSolveTailSceneProfile>);
+
+test("solve-tail policy encodes the paper upper envelope and keeps scene score as telemetry", () => {
+  const mini = planOctreeSolveTail(PROFILES.miniDam);
+  const quiescent = planOctreeSolveTail(PROFILES.quiescent);
+  const river = planOctreeSolveTail(PROFILES.river);
+  assert.deepEqual([
+    mini.encodedOuterIterations,
+    quiescent.encodedOuterIterations,
+    river.encodedOuterIterations,
+  ], [10, 10, 10]);
+  for (const policy of [mini, quiescent, river,
+    planOctreeSolveTail(PROFILES.uiDam)]) {
+    assert.ok(policy.encodedOuterIterations >= 4
+      && policy.encodedOuterIterations <= 10);
+    assert.equal(policy.hardOuterIterationCeiling, 16);
+    assert.equal(policy.boundarySmoothingIterations,
+      OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH);
+    assert.ok(policy.relativeTolerance >= OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE);
+  }
+  assert.equal(quiescent.relativeTolerance, 1e-4,
+    "production retains the established f32 residual acceptance floor");
+});
+
+test("paper k=8 shell has deterministic five-level command counts", () => {
+  const expectedCounts = new Map<OctreeSolveTailSceneProfile, number>([
+    [PROFILES.miniDam, 871],
+    [PROFILES.uiDam, 871],
+    [PROFILES.quiescent, 871],
+    [PROFILES.river, 871],
+  ]);
+  for (const profile of Object.values(PROFILES)) {
+    const policy = planOctreeSolveTail(profile);
+    const commands = countOctreePressureCommands({
+      encodedOuterIterations: policy.encodedOuterIterations,
+      fullOperatorDispatches: 5,
+      mergedBandOperatorDispatches: 1,
+      firstOrderSetupDispatches: 10,
+      firstOrderCorrectionDispatches: 26,
+      boundarySmoothingIterations: policy.boundarySmoothingIterations,
+    });
+    assert.equal(commands.encodedPressureDispatches, expectedCounts.get(profile),
+      profile.finestDimensions.join("x"));
+  }
+  assert.equal(countOctreePressureCommands({
+    encodedOuterIterations: 10,
+    fullOperatorDispatches: 5,
+    mergedBandOperatorDispatches: 1,
+    firstOrderSetupDispatches: 10,
+    firstOrderCorrectionDispatches: 26,
+    boundarySmoothingIterations: OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+  }).encodedPressureDispatches, 871,
+  "the maximum encoded envelope includes the paper k=8 matching shell");
+});
+
+type Matrix = readonly (readonly number[])[];
+
+function fixtureMatrix(length: number, coupling: (edge: number) => number,
+  anchor: (row: number) => number): Matrix {
+  const matrix = Array.from({ length }, () => new Array<number>(length).fill(0));
+  for (let edge = 0; edge + 1 < length; edge += 1) {
+    const weight = coupling(edge);
+    matrix[edge]![edge] += weight;
+    matrix[edge + 1]![edge + 1] += weight;
+    matrix[edge]![edge + 1] -= weight;
+    matrix[edge + 1]![edge] -= weight;
+  }
+  for (let row = 0; row < length; row += 1) matrix[row]![row] += anchor(row);
+  return matrix;
+}
+
+function apply(matrix: Matrix, input: Readonly<Float64Array>): Float64Array {
+  return Float64Array.from(matrix, (row) => row.reduce(
+    (sum, coefficient, column) => sum + coefficient * input[column]!, 0));
+}
+
+function solve(matrix: Matrix, rightHandSide: Readonly<Float64Array>): Float64Array {
+  const size = matrix.length;
+  const rows = matrix.map((row, index) => [...row, rightHandSide[index]!]);
+  for (let pivot = 0; pivot < size; pivot += 1) {
+    let selected = pivot;
+    for (let row = pivot + 1; row < size; row += 1) {
+      if (Math.abs(rows[row]![pivot]!) > Math.abs(rows[selected]![pivot]!)) selected = row;
+    }
+    [rows[pivot], rows[selected]] = [rows[selected]!, rows[pivot]!];
+    const diagonal = rows[pivot]![pivot]!;
+    assert.ok(Math.abs(diagonal) > 1e-14);
+    for (let column = pivot; column <= size; column += 1) rows[pivot]![column]! /= diagonal;
+    for (let row = 0; row < size; row += 1) {
+      if (row === pivot) continue;
+      const factor = rows[row]![pivot]!;
+      for (let column = pivot; column <= size; column += 1) {
+        rows[row]![column]! -= factor * rows[pivot]![column]!;
+      }
+    }
+  }
+  return Float64Array.from(rows, (row) => row[size]!);
+}
+
+interface NumericalFixture {
+  readonly name: "miniDam" | "quiescent" | "river";
+  readonly accurate: Matrix;
+  readonly firstOrder: Matrix;
+  readonly rhs: Float64Array;
+}
+
+function fixtures(): readonly NumericalFixture[] {
+  return [
+    { name: "miniDam",
+      accurate: fixtureMatrix(18, (edge) => 0.55 + 0.7 * ((edge * 7) % 5) / 4,
+        (row) => 0.08 + 0.02 * (row % 3)),
+      firstOrder: fixtureMatrix(18, () => 0.72, () => 0.22),
+      rhs: Float64Array.from({ length: 18 }, (_, row) => Math.sin(0.71 * row) + 0.2),
+    },
+    { name: "quiescent",
+      accurate: fixtureMatrix(24, () => 0.9, () => 0.16),
+      firstOrder: fixtureMatrix(24, () => 0.86, () => 0.2),
+      rhs: Float64Array.from({ length: 24 }, (_, row) => Math.cos(0.31 * row) * 0.1),
+    },
+    { name: "river",
+      accurate: fixtureMatrix(32, (edge) => edge % 6 === 0 ? 1.5 : 0.48,
+        (row) => row === 0 || row === 31 ? 0.5 : 0.055),
+      firstOrder: fixtureMatrix(32, () => 0.62, (row) => row % 8 === 0 ? 0.35 : 0.12),
+      rhs: Float64Array.from({ length: 32 }, (_, row) => 1 + 0.35 * Math.sin(row * 0.4)),
+    },
+  ];
+}
+
+/**
+ * CPU-only shell model: each matched pair adds one accurate residual
+ * correction around the fixed first-order solve. It is deliberately used
+ * only to select the immutable command policy, never as runtime authority.
+ */
+function shellPreconditioner(fixture: NumericalFixture, depth: number) {
+  return (rightHandSide: Readonly<Float64Array>) => {
+    let result = solve(fixture.firstOrder, rightHandSide);
+    const damping = 0.5;
+    for (let sweep = 0; sweep < depth; sweep += 1) {
+      const image = apply(fixture.accurate, result);
+      const residual = Float64Array.from(rightHandSide,
+        (value, row) => value - image[row]!);
+      const correction = solve(fixture.firstOrder, residual);
+      result = Float64Array.from(result,
+        (value, row) => value + damping * correction[row]!);
+    }
+    return result;
+  };
+}
+
+test("CPU shell-depth sweep keeps the paper k=8 production shell inside acceptance", () => {
+  const depths = [2, 4, 6, 8] as const;
+  for (const fixture of fixtures()) {
+    const policy = planOctreeSolveTail(PROFILES[fixture.name]);
+    const results = depths.map((depth) => solveOctreePipelinedPCG({
+      rightHandSide: fixture.rhs,
+      applyOperator: (input) => apply(fixture.accurate, input),
+      applyPreconditioner: shellPreconditioner(fixture, depth),
+    }, {
+      maximumIterations: policy.encodedOuterIterations,
+      relativeTolerance: OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
+    }));
+    const selected = results[depths.indexOf(OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH)]!;
+    assert.equal(selected.accepted, true,
+      `${fixture.name} k=${OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH} acceptance`);
+    assert.ok(selected.diagnostics.relativeResidualNorm <= 1e-4);
+    assert.ok(selected.diagnostics.iterations <= policy.encodedOuterIterations);
+    const shallowCommands = countOctreePressureCommands({
+      encodedOuterIterations: policy.encodedOuterIterations,
+      fullOperatorDispatches: 5,
+      mergedBandOperatorDispatches: 1,
+      firstOrderSetupDispatches: 10,
+      firstOrderCorrectionDispatches: 26,
+      boundarySmoothingIterations: 2,
+    }).encodedPressureDispatches;
+    const selectedCommands = countOctreePressureCommands({
+      encodedOuterIterations: policy.encodedOuterIterations,
+      fullOperatorDispatches: 5,
+      mergedBandOperatorDispatches: 1,
+      firstOrderSetupDispatches: 10,
+      firstOrderCorrectionDispatches: 26,
+      boundarySmoothingIterations: OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+    }).encodedPressureDispatches;
+    assert.ok(selectedCommands > shallowCommands,
+      "the paper shell must account for all additional fixed command bodies");
+  }
+});
+
+test("solve-tail policy rejects malformed or out-of-envelope command inputs", () => {
+  assert.throws(() => planOctreeSolveTail({ ...PROFILES.miniDam,
+    finestDimensions: [24, 0, 16] }), /dimensions/);
+  assert.throws(() => countOctreePressureCommands({
+    encodedOuterIterations: 11, fullOperatorDispatches: 5,
+    mergedBandOperatorDispatches: 1, firstOrderSetupDispatches: 10,
+    firstOrderCorrectionDispatches: 26, boundarySmoothingIterations: 2,
+  }), /outside the paper envelope/);
+  assert.throws(() => countOctreePressureCommands({
+    encodedOuterIterations: 4, fullOperatorDispatches: 5,
+    mergedBandOperatorDispatches: 1, firstOrderSetupDispatches: 10,
+    firstOrderCorrectionDispatches: 26, boundarySmoothingIterations: 3,
+  }), /must be even/);
+});

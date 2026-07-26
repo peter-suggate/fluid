@@ -71,12 +71,13 @@ test("format-only phi placeholder remains live until solver destruction", async 
   assert.equal(state.presentationTextureReleased, false);
 });
 
-test("solver retires bootstrap phi only after compact cutover and exposes the 1x1 fallback", () => {
+test("solver retires bootstrap phi only after compact cutover and exposes no fallback authority", () => {
   const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
   assert.match(uniform, /queue\.submit\(\[encoder\.finish\(\)\]\);[\s\S]*?releaseDenseBootstrapPhi\(\)/,
     "the dense bootstrap texture must remain alive through submission");
-  assert.match(octree, /get levelSetTexture\(\) \{ return this\.denseBootstrapPhiReleased \? this\.levelSetFallbackTexture! : this\.surfaceState\.texture; \}/);
+  assert.match(octree, /get levelSetTexture\(\) \{ return this\.surfaceState\.texture; \}/);
+  assert.doesNotMatch(octree, /levelSetFallbackTexture|fallback phi|fallback authority/i);
   assert.match(octree, /incompatibleDenseConsumer: Boolean\(this\.diagnosticGroups[\s\S]*!this\.globalFineBootstrapped[\s\S]*this\.scene\.rigidBodies\.length > 0 \|\| sceneHasTerrain\(this\.scene\)/,
     "dense-only diagnostics and solid coupling must retain their publication");
   assert.match(octree,

@@ -108,139 +108,6 @@ fn ownerAt(point:vec3f)->u32 {
 }
 `;
 
-export const octreeTechniqueOperatorAuditShader = /* wgsl */ `
-${auditSharedWGSL}
-struct PowerFace {
-  negativeRow:u32, positiveRow:u32, geometryCode:u32, flags:u32,
-  normalVelocity:f32, area:f32, inverseDistance:f32, openFraction:f32,
-}
-struct RowWork { faceCount:u32, incidenceCount:u32, faceOffset:u32, incidenceOffset:u32 }
-struct Incidence { face:u32, sign:i32 }
-@group(0) @binding(0) var<uniform> u:Uniforms;
-@group(0) @binding(1) var ownerRows:texture_3d<u32>;
-@group(0) @binding(2) var<storage,read> headers:array<LeafHeader>;
-@group(0) @binding(3) var<storage,read> faces:array<PowerFace>;
-@group(0) @binding(4) var<storage,read> rows:array<RowWork>;
-@group(0) @binding(5) var<storage,read> incidences:array<Incidence>;
-@group(0) @binding(6) var<storage,read> control:array<u32>;
-const INVALID:u32=0xffffffffu;
-const FACE_VALID:u32=0x80000000u;
-
-fn reciprocalError(row:u32,work:RowWork)->vec2f {
-  var checked=0u;
-  var failed=0u;
-  let count=min(work.incidenceCount,48u);
-  for(var local=0u;local<count;local+=1u){
-    let offset=work.incidenceOffset+local;
-    if(offset>=arrayLength(&incidences)){failed+=1u;continue;}
-    let incidence=incidences[offset];
-    if(incidence.face>=arrayLength(&faces)){failed+=1u;continue;}
-    let face=faces[incidence.face];
-    checked+=1u;
-    let endpoint=face.negativeRow==row||face.positiveRow==row;
-    let expected=select(-1,1,face.negativeRow==row);
-    if((face.flags&FACE_VALID)==0u||!endpoint||incidence.sign!=expected){failed+=1u;continue;}
-    let other=select(face.negativeRow,face.positiveRow,face.negativeRow==row);
-    if(other==INVALID){continue;}
-    if(other>=arrayLength(&rows)){failed+=1u;continue;}
-    let reverse=rows[other];
-    if(reverse.incidenceOffset>arrayLength(&incidences)||reverse.incidenceCount>arrayLength(&incidences)-reverse.incidenceOffset){failed+=1u;continue;}
-    var found=false;
-    for(var candidate=0u;candidate<min(reverse.incidenceCount,48u);candidate+=1u){
-      let reverseItem=incidences[reverse.incidenceOffset+candidate];
-      found=found||(reverseItem.face==incidence.face&&reverseItem.sign==-incidence.sign);
-    }
-    if(!found){failed+=1u;}
-  }
-  return vec2f(f32(failed),f32(checked));
-}
-
-fn auditRow(row:u32,volume:bool)->AuditSample {
-  if(arrayLength(&control)<=8u||control[8]!=FACE_VALID||row>=arrayLength(&headers)||row>=arrayLength(&rows)){return invalidSample();}
-  let header=headers[row];
-  let mode=i32(round(u.debug.w));
-  let sliceOpacity=0.80;
-  if(mode==19){
-    if(!finite(header.diagonal)||header.diagonal<=0.0){return invalidSample();}
-    let scaled=1.0-exp(-header.diagonal/max(f32(header.size),1.0));
-    return AuditSample(displayColor(heat(scaled)),select(sliceOpacity,0.075+0.18*scaled,volume));
-  }
-  if(mode==20){
-    if(!finite(header.rhs)||!finite(header.diagonal)){return invalidSample();}
-    let ratio=header.rhs/max(abs(header.diagonal),1e-7);
-    let scaled=ratio/(1.0+abs(ratio));
-    return AuditSample(displayColor(signedHeat(scaled)),select(sliceOpacity,0.055+0.24*abs(scaled),volume));
-  }
-  let work=rows[row];
-  if(work.incidenceOffset>arrayLength(&incidences)||work.incidenceCount>arrayLength(&incidences)-work.incidenceOffset){return invalidSample();}
-  if(mode==21){
-    let audit=reciprocalError(row,work);
-    let error=select(1.0,audit.x/max(audit.y,1.0),audit.y>0.0);
-    let color=mix(vec3f(0.04,0.72,0.42),vec3f(1.0,0.015,0.08),clamp(error*4.0,0.0,1.0));
-    return AuditSample(displayColor(color),select(sliceOpacity,0.065+0.35*min(1.0,error*8.0),volume));
-  }
-  if(mode==22){
-    var area=0.0;
-    var openArea=0.0;
-    for(var local=0u;local<min(work.incidenceCount,48u);local+=1u){
-      let item=incidences[work.incidenceOffset+local];
-      if(item.face>=arrayLength(&faces)){return invalidSample();}
-      let face=faces[item.face];
-      if((face.flags&FACE_VALID)==0u||!finite(face.area)||!finite(face.openFraction)||face.area<0.0||face.openFraction<0.0||face.openFraction>1.0){return invalidSample();}
-      area+=face.area;
-      openArea+=face.area*face.openFraction;
-    }
-    if(area<=0.0){return invalidSample();}
-    let openness=clamp(openArea/area,0.0,1.0);
-    let blocked=1.0-openness;
-    let color=mix(vec3f(0.04,0.72,0.86),vec3f(1.0,0.06,0.20),blocked);
-    return AuditSample(displayColor(color),select(sliceOpacity,0.055+0.28*blocked,volume));
-  }
-  return AuditSample(vec3f(0.0),0.0);
-}
-
-@fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f {
-  let minimum=worldMinimum();
-  let maximum=minimum+u.container.xyz;
-  let volume=i32(round(u.debug.x))==4;
-  if(!volume){
-    let hit=slicePoint(input.uv);
-    if(hit.w<=0.0||any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}
-    let row=ownerAt(hit.xyz);
-    if(row==INVALID||row>=arrayLength(&headers)||!headerContains(headers[row],worldToFine(hit.xyz))){return vec4f(invalidSample().color,0.94);}
-    let sample=auditRow(row,false);
-    if(sample.opacity<=0.0){discard;}
-    return vec4f(sample.color,sample.opacity);
-  }
-  let ray=cameraRay(input.uv);
-  let interval=boxInterval(ray,minimum,maximum);
-  if(interval.y<=interval.x){discard;}
-  let minimumStep=max(1e-5,min(min(u.container.x/u.gridInfo.x,u.container.y/u.gridInfo.y),u.container.z/u.gridInfo.z)*0.08);
-  var distance=interval.x+minimumStep;
-  var accumulated=vec4f(0.0);
-  let visitLimit=min(1024u,u32(ceil(u.gridInfo.x+u.gridInfo.y+u.gridInfo.z))+4u);
-  for(var step=0u;step<visitLimit&&distance<interval.y&&accumulated.a<0.94;step+=1u){
-    let point=ray.origin+ray.direction*distance;
-    let row=ownerAt(point);
-    var nextDistance=distance+minimumStep;
-    if(row!=INVALID&&row<arrayLength(&headers)){
-      let header=headers[row];
-      let pointFine=worldToFine(point);
-      if(headerContains(header,pointFine)){
-        let origin=cellCoord(header.cell);
-        let leafInterval=boxInterval(ray,fineToWorld(vec3f(origin)),fineToWorld(vec3f(origin+vec3u(header.size))));
-        nextDistance=max(nextDistance,leafInterval.y+minimumStep);
-        let sample=auditRow(row,true);
-        let contribution=(1.0-accumulated.a)*sample.opacity*clamp(u.debug.y,0.05,1.0);
-        accumulated=vec4f(accumulated.rgb+sample.color*contribution,accumulated.a+contribution);
-      }
-    }
-    distance=nextDistance;
-  }
-  if(accumulated.a<=0.002){discard;}
-  return vec4f(accumulated.rgb/accumulated.a,accumulated.a);
-}`;
-
 export const octreeTechniqueTetraValidityShader = /* wgsl */ `
 ${auditSharedWGSL}
 struct Metric { topologyCode:u32, transformAndFlags:u32, volume:f32, reserved:u32 }
@@ -330,11 +197,9 @@ fn auditRow(row:u32,volume:bool)->AuditSample {
 }`;
 
 export class OctreeTechniqueAuditOverlayPipeline {
-  private operatorPipeline?: GPURenderPipeline;
   private tetraPipeline?: GPURenderPipeline;
   private source?: OctreeTechniqueDebugSource;
   private ownerRows?: GPUTexture;
-  private operatorGroup?: GPUBindGroup;
   private tetraGroup?: GPUBindGroup;
 
   constructor(
@@ -365,10 +230,8 @@ export class OctreeTechniqueAuditOverlayPipeline {
   }
 
   async initialize(): Promise<void> {
-    [this.operatorPipeline,this.tetraPipeline]=await Promise.all([
-      this.createPipeline("Octree power-operator audit overlay",octreeTechniqueOperatorAuditShader),
-      this.createPipeline("Octree tetrahedron-validity audit overlay",octreeTechniqueTetraValidityShader),
-    ]);
+    this.tetraPipeline=await this.createPipeline(
+      "Octree tetrahedron-validity audit overlay",octreeTechniqueTetraValidityShader);
     this.rebuildGroups();
   }
 
@@ -387,18 +250,6 @@ export class OctreeTechniqueAuditOverlayPipeline {
   private rebuildGroups(): void {
     const source=this.source,ownerRows=this.ownerRows;
     if(!source||!ownerRows)return;
-    if(this.operatorPipeline)this.operatorGroup=this.device.createBindGroup({
-      layout:this.operatorPipeline.getBindGroupLayout(0),
-      entries:[
-        {binding:0,resource:{buffer:this.uniformBuffer}},
-        {binding:1,resource:ownerRows.createView({dimension:"3d"})},
-        {binding:2,resource:source.leafHeaders},
-        {binding:3,resource:source.powerFaces},
-        {binding:4,resource:source.incidenceRows},
-        {binding:5,resource:source.incidence},
-        {binding:6,resource:source.faceControl},
-      ],
-    });
     if(this.tetraPipeline)this.tetraGroup=this.device.createBindGroup({
       layout:this.tetraPipeline.getBindGroupLayout(0),
       entries:[
@@ -415,9 +266,9 @@ export class OctreeTechniqueAuditOverlayPipeline {
 
   encode(encoder: GPUCommandEncoder, target: GPUTextureView, modeCode: number): boolean {
     const tetra=modeCode===23;
-    const pipeline=tetra?this.tetraPipeline:this.operatorPipeline;
-    const group=tetra?this.tetraGroup:this.operatorGroup;
-    if(!pipeline||!group||modeCode<19||modeCode>23)return false;
+    const pipeline=tetra?this.tetraPipeline:undefined;
+    const group=tetra?this.tetraGroup:undefined;
+    if(!pipeline||!group)return false;
     const pass=encoder.beginRenderPass({
       label:"Octree paper-technique audit overlay",
       colorAttachments:[{view:target,loadOp:"load",storeOp:"store"}],

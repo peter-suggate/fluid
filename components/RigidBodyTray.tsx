@@ -2,8 +2,9 @@
 
 import { useRef, useState } from "react";
 import { RangeControl } from "./controls";
-import { add, cameraBasis, dot, normalize, scale, sub } from "@/lib/math";
+import { add, cameraBasis, dot, scale, sub } from "@/lib/math";
 import type { RigidShape } from "@/lib/model";
+import { viewportRayForPointer } from "@/lib/webgpu-camera";
 import { simulation } from "@/lib/simulation/controller";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
@@ -21,10 +22,9 @@ function dropPosition(clientX: number, clientY: number, canvas: HTMLCanvasElemen
   const rect = canvas.getBoundingClientRect();
   if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return undefined;
   const scene = useSceneStore.getState().scene;
-  const basis = cameraBasis(useUIStore.getState().camera);
-  const ndcX = ((clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1;
-  const ndcY = 1 - ((clientY - rect.top) / Math.max(rect.height, 1)) * 2;
-  const direction = normalize(add(basis.forward, add(scale(basis.right, ndcX * rect.width / Math.max(rect.height, 1) * 0.72), scale(basis.up, ndcY * 0.72))));
+  const camera = useUIStore.getState().camera;
+  const basis = cameraBasis(camera);
+  const { direction } = viewportRayForPointer(camera, clientX, clientY, rect);
   const planePoint = { x: 0, y: scene.container.height_m / 2, z: 0 };
   const denominator = dot(direction, basis.forward);
   if (Math.abs(denominator) < 1e-6) return planePoint;

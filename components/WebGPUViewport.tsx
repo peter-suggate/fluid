@@ -4,9 +4,20 @@ import { useEffect, useRef, useState } from "react";
 import { FluidLabRenderer } from "@/lib/webgpu-renderer";
 import { getMethod } from "@/lib/methods";
 import { canonicalScene } from "@/lib/model";
-import { add, cameraBasis, dot, length, normalize, orbit, pan, scale, sub, zoom } from "@/lib/math";
-import { boundingRadius, type RigidBodyState } from "@/lib/rigid-body";
+import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
+import { boundingRadius, createBodyDescription, type RigidBodyState } from "@/lib/rigid-body";
 import { simulation } from "@/lib/simulation/controller";
+import { projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
+import {
+  closestPointOnAxis,
+  gizmoAxisDragPosition,
+  gizmoHandleAtPointer,
+  projectGizmo,
+  GIZMO_AXIS_DIRECTIONS,
+  type GizmoAxis,
+} from "@/lib/editor-gizmo";
+import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
+import { SelectionFlyout } from "./SelectionFlyout";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
@@ -45,13 +56,27 @@ export function WebGPUViewport() {
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
   const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
   const svoMaximumNodeVisits = useUIStore((state) => state.svoMaximumNodeVisits);
+  const activeTool = useUIStore((state) => state.activeTool);
+  const selection = useUIStore((state) => state.selection);
+  const bodies = useDiagnosticsStore((state) => state.bodies);
+  const [hover, setHover] = useState<EditorHover | null>(null);
   const pointerRef = useRef<
     | { id: number; x: number; y: number; action: "orbit" | "pan" }
     | { id: number; x: number; y: number; action: "pick" }
     | { id: number; action: "body"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
+    // Editor gizmo drags preview on runtime state only and commit on release.
+    | { id: number; action: "gizmo-axis"; bodyId: string; axis: GizmoAxis; axisOrigin: Vec3; grabOffset: Vec3; lastPosition: Vec3 }
+    | { id: number; action: "gizmo-free"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3 }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
+  const selectedBody = selection?.kind === "body"
+    ? bodies.find((body) => body.description.id === selection.id)
+    : undefined;
+  const gizmo = selectedBody && activeTool === "select"
+    ? projectGizmo(selectedBody.position_m, camera, viewportSize.width, viewportSize.height)
+    : undefined;
+  const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -154,6 +179,7 @@ export function WebGPUViewport() {
         diagnosticsOpen: ui.diagnosticsOpen,
         rightPanel: ui.rightPanel,
         gridOverlayAxis: ui.gridOverlayAxis,
+        activeTool: ui.activeTool,
         search: window.location.search,
       });
     };
@@ -300,12 +326,8 @@ export function WebGPUViewport() {
     return () => { alive = false; running = false; window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization); window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop); window.removeEventListener("pagehide", pageHide); unsubscribeAutomaticStart(); unsubscribeSafeScene(); unsubscribeSafeMethod(); unsubscribeSafeUI(); unsubscribeRunState(); cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; void stopGPU("WebGPU stopped during component cleanup", false); };
   }, []);
 
-  const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect(), basis = cameraBasis(useUIStore.getState().camera);
-    const ndcX = ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1;
-    const ndcY = 1 - ((event.clientY - rect.top) / Math.max(rect.height, 1)) * 2;
-    return { origin: basis.position, direction: normalize(add(basis.forward, add(scale(basis.right, ndcX * rect.width / Math.max(rect.height, 1) * 0.72), scale(basis.up, ndcY * 0.72)))) };
-  };
+  const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) =>
+    viewportRayForPointer(useUIStore.getState().camera, event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
   const planeHit = (origin: Vec3, direction: Vec3, point: Vec3, normal: Vec3) => {
     const denominator = dot(direction, normal); if (Math.abs(denominator) < 1e-6) return point;
     return add(origin, scale(direction, dot(sub(point, origin), normal) / denominator));
@@ -341,10 +363,68 @@ export function WebGPUViewport() {
     simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation);
   };
 
+  /**
+   * Gizmo handles own the click before anything else so that dragging an axis
+   * next to the body cannot be misread as a throw. Returns true when the
+   * gesture was claimed.
+   */
+  const beginGizmoDrag = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
+    const ui = useUIStore.getState();
+    if (ui.activeTool !== "select" || ui.selection?.kind !== "body") return false;
+    const body = useDiagnosticsStore.getState().bodies.find((candidate) => candidate.description.id === ui.selection?.id);
+    if (!body) return false;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const projected = projectGizmo(body.position_m, ui.camera, rect.width, rect.height);
+    const handle = gizmoHandleAtPointer(projected, { x: event.clientX - rect.left, y: event.clientY - rect.top }, rect.width, rect.height);
+    if (!handle) return false;
+    if (handle === "free") {
+      const basis = cameraBasis(ui.camera);
+      const dragPoint = planeHit(ray.origin, ray.direction, body.position_m, basis.forward);
+      pointerRef.current = {
+        id: event.pointerId, action: "gizmo-free", bodyId: body.description.id,
+        planePoint: body.position_m, planeNormal: basis.forward,
+        grabOffset: sub(body.position_m, dragPoint), lastPosition: body.position_m,
+      };
+    } else {
+      const grabPoint = closestPointOnAxis(ray.origin, ray.direction, body.position_m, GIZMO_AXIS_DIRECTIONS[handle]);
+      if (!grabPoint) return false;
+      pointerRef.current = {
+        id: event.pointerId, action: "gizmo-axis", bodyId: body.description.id, axis: handle,
+        axisOrigin: body.position_m, grabOffset: sub(body.position_m, grabPoint), lastPosition: body.position_m,
+      };
+    }
+    simulation.beginEdit(`Moved ${body.description.name}`);
+    simulation.manipulateBody(body.description.id, body.position_m, "start", body.orientation);
+    return true;
+  };
+
+  /** Drop the armed placement shape onto whatever the cursor is over. */
+  const placeBodyAt = (ray: { origin: Vec3; direction: Vec3 }) => {
+    const ui = useUIStore.getState();
+    const scene = useSceneStore.getState().scene;
+    const shape = ui.placementShape;
+    const template = createBodyDescription(shape, 1, scene.container.height_m);
+    const radius_m = boundingRadius(template);
+    const target = hoverSceneAt(scene, useDiagnosticsStore.getState().bodies, ray);
+    // Without a surface under the cursor, fall back to the camera-facing plane
+    // through the container centre — the same target the tray drop uses.
+    const position = target
+      ? restOnHover(target, radius_m, scene)
+      : planeHit(ray.origin, ray.direction, { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(ui.camera).forward);
+    simulation.addBodyAt(shape, position, { autoRun: false });
+  };
+
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
+    // pointerRef is a ref, so clearing hover here is what actually re-renders
+    // the chip away for the duration of the gesture.
+    setHover(null);
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
+      if (beginGizmoDrag(event, ray)) return;
+      // Armed tools claim the click before the slice/pick/orbit fallback so a
+      // placement never orbits the camera instead.
+      if (useUIStore.getState().activeTool === "body-place") { placeBodyAt(ray); return; }
       const grab = sliceGrabHit(ray.origin, ray.direction);
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
       if (simulation.backend === "webgpu" && rendererRef.current) {
@@ -377,8 +457,26 @@ export function WebGPUViewport() {
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const active = pointerRef.current;
-    if (!active || active.id !== event.pointerId) return;
+    if (!active) {
+      // Analytic hover: no GPU readback, so it is safe at pointer-move rate.
+      const ray = pointerRay(event);
+      setHover(hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray) ?? null);
+      return;
+    }
+    if (active.id !== event.pointerId) return;
     if (active.action === "pick") return;
+    if (active.action === "gizmo-axis" || active.action === "gizmo-free") {
+      const ray = pointerRay(event);
+      const position = active.action === "gizmo-axis"
+        ? gizmoAxisDragPosition(ray.origin, ray.direction, active.axis, active.axisOrigin, active.grabOffset)
+        : add(planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal), active.grabOffset);
+      // A ray nearly parallel to the constrained axis has no stable solution;
+      // holding the last pose beats letting the body shoot to infinity.
+      if (!position) return;
+      pointerRef.current = { ...active, lastPosition: position };
+      simulation.manipulateBody(active.bodyId, position, "move");
+      return;
+    }
     if (active.action === "slice") {
       if (active.axis === "y") {
         const rect = event.currentTarget.getBoundingClientRect();
@@ -409,9 +507,14 @@ export function WebGPUViewport() {
   };
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const active = pointerRef.current;
-    if (active?.id === event.pointerId) {
-      if (active.action === "body") simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end");
-      pointerRef.current = null;
+    if (active?.id !== event.pointerId) return;
+    pointerRef.current = null;
+    if (active.action === "body") { simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end"); return; }
+    if (active.action === "gizmo-axis" || active.action === "gizmo-free") {
+      // Commit-on-release: one document write and one undo entry per gesture.
+      simulation.manipulateBody(active.bodyId, active.lastPosition, "end");
+      simulation.updateBody(active.bodyId, { position_m: active.lastPosition, linearVelocity_m_s: { x: 0, y: 0, z: 0 } });
+      simulation.commitEdit();
     }
   };
 
@@ -427,9 +530,49 @@ export function WebGPUViewport() {
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
+      onPointerLeave={() => setHover(null)}
       onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
       onContextMenu={(event) => event.preventDefault()}
     />
+    {gizmo && gizmo.origin.depth_m > 1e-6 && <svg
+      className="editor-gizmo"
+      data-testid="editor-gizmo"
+      width={viewportSize.width}
+      height={viewportSize.height}
+      aria-hidden="true"
+    >
+      {gizmo.handles.filter((handle) => handle.tip.depth_m > 1e-6).map((handle) => (
+        <g key={handle.axis} className={`gizmo-axis axis-${handle.axis}`}>
+          <line
+            x1={gizmo.origin.leftFraction * viewportSize.width}
+            y1={gizmo.origin.topFraction * viewportSize.height}
+            x2={handle.tip.leftFraction * viewportSize.width}
+            y2={handle.tip.topFraction * viewportSize.height}
+          />
+          <circle cx={handle.tip.leftFraction * viewportSize.width} cy={handle.tip.topFraction * viewportSize.height} r={4} />
+        </g>
+      ))}
+      <circle
+        className="gizmo-center"
+        cx={gizmo.origin.leftFraction * viewportSize.width}
+        cy={gizmo.origin.topFraction * viewportSize.height}
+        r={5}
+      />
+    </svg>}
+    {selectedBody && gizmo?.origin.visible && <SelectionFlyout
+      body={selectedBody}
+      leftFraction={gizmo.origin.leftFraction}
+      topFraction={gizmo.origin.topFraction}
+    />}
+    {hover && hoverProjection?.visible && !pointerRef.current && <div
+      className={`editor-hover-chip kind-${hover.kind}`}
+      data-testid="editor-hover-chip"
+      style={{ left: `${hoverProjection.leftFraction * 100}%`, top: `${hoverProjection.topFraction * 100}%` }}
+      aria-hidden="true"
+    >
+      <i /><span>{hover.label}</span>
+      <small>{hover.position_m.x.toFixed(2)} · {hover.position_m.y.toFixed(2)} · {hover.position_m.z.toFixed(2)} m</small>
+    </div>}
     {failure && <div
       className={`viewport-failure-alert tone-${failure.tone}`}
       data-testid="viewport-failure-alert"

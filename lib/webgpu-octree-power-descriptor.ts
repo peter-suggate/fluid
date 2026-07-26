@@ -135,8 +135,8 @@ export interface OctreePowerRowDescriptor {
 export interface OctreePowerDescriptorEncodeOptions {
   readonly dimensions: readonly [number, number, number];
   readonly maximumLeafSize: number;
-  /** First u32 is the live compact row count (for example compaction[0]). */
-  readonly rowCountBuffer: GPUBuffer;
+  /** Owner lifecycle scratch naming the complete inactive page table. */
+  readonly ownerCandidateControl?: GPUBuffer;
   readonly generation?: number;
   /** Exact old/new row mapping and dirty plus one-ring work publication. */
   readonly rowDelta: OctreePowerRowDeltaSource;
@@ -193,7 +193,7 @@ export function octreePowerOwnerArenaPublicationIsValid(words: ArrayLike<number>
   const control = unpackOctreeOwnerPageControl(words);
   return control.magic === OCTREE_OWNER_ARENA_MAGIC
     && control.acceptedGeneration !== 0
-    && control.status === OCTREE_OWNER_PAGE_PUBLICATION_STATUS.ready
+    && (control.status & 0x7fff_ffff) === OCTREE_OWNER_PAGE_PUBLICATION_STATUS.ready
     && control.observedGeneration === control.acceptedGeneration
     && control.candidateError === 0
     && control.invalidEntryCount === 0
@@ -311,7 +311,8 @@ export function describeOctreePowerRow(
 export class WebGPUOctreePowerDescriptor {
   readonly plan: OctreePowerDescriptorPlan;
   readonly descriptors: GPUBuffer;
-  private readonly candidateDescriptors: GPUBuffer;
+  /** Complete inactive candidate; never visible to active consumers before commit. */
+  readonly candidateDescriptors: GPUBuffer;
   readonly control: GPUBuffer;
   readonly dispatch: GPUBuffer;
   private readonly workDispatch: GPUBuffer;
@@ -324,6 +325,13 @@ export class WebGPUOctreePowerDescriptor {
   private readonly commitPipeline: GPUComputePipeline;
   private readonly finalizePipeline: GPUComputePipeline;
   private readonly layout: GPUBindGroupLayout;
+  private cachedGroup?: {
+    leafHeaders: GPUBuffer;
+    owners: GPUBuffer;
+    rowDelta: GPUBuffer;
+    ownerCandidate: GPUBuffer;
+    group: GPUBindGroup;
+  };
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, rowCapacity: number) {
@@ -348,9 +356,9 @@ export class WebGPUOctreePowerDescriptor {
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
     const shaderModule = device.createShaderModule({ label: "Octree power descriptor generation", code: octreePowerDescriptorShader });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
@@ -368,8 +376,8 @@ export class WebGPUOctreePowerDescriptor {
       compute: { module: shaderModule, entryPoint: "finalizePowerDescriptors" } });
   }
 
-  encode(broker: PassBroker, leafHeaders: GPUBuffer, owners: GPUBuffer,
-    options: OctreePowerDescriptorEncodeOptions): void {
+  encodeCandidate(broker: PassBroker, leafHeaders: GPUBuffer, owners: GPUBuffer,
+    options: OctreePowerDescriptorEncodeOptions, candidateOwnerView = true): void {
     if (this.destroyed) throw new Error("Octree power descriptor generator is destroyed");
     options.dimensions.forEach((value, axis) => positiveInteger(value, `Power descriptor dimension ${axis}`));
     if (options.dimensions.some((value) => value > 0x7fff_ffff)
@@ -384,16 +392,26 @@ export class WebGPUOctreePowerDescriptor {
     assertOctreePowerRowDeltaLayout(delta, this.plan.rowCapacity, "Power descriptor");
     this.device.queue.writeBuffer(this.params, 0, new Uint32Array([
       ...options.dimensions, options.maximumLeafSize, this.plan.rowCapacity, generation, this.plan.rowCapacity, 0,
-      delta.controlOffsetWords, delta.newToOldOffsetWords, delta.affectedRowsOffsetWords, 1,
+      delta.controlOffsetWords, delta.newToOldOffsetWords, delta.affectedRowsOffsetWords,
+      candidateOwnerView ? 1 : 0,
     ]));
-    const group = this.device.createBindGroup({ label: "Octree power descriptor bindings", layout: this.layout, entries: [
-      { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: { buffer: leafHeaders } },
-      { binding: 2, resource: { buffer: owners } }, { binding: 3, resource: { buffer: this.candidateDescriptors } },
-      { binding: 4, resource: { buffer: this.control } }, { binding: 5, resource: { buffer: this.dispatch } },
-      { binding: 6, resource: { buffer: options.rowCountBuffer } },
-      { binding: 7, resource: { buffer: delta.rows } },
-      { binding: 8, resource: { buffer: this.descriptors } },
-    ] });
+    let cached = this.cachedGroup;
+    if (!cached || cached.leafHeaders !== leafHeaders || cached.owners !== owners
+      || cached.rowDelta !== delta.rows
+      || cached.ownerCandidate !== (options.ownerCandidateControl ?? owners)) {
+      cached = { leafHeaders, owners, rowDelta: delta.rows,
+        ownerCandidate: options.ownerCandidateControl ?? owners,
+        group: this.device.createBindGroup({ label: "Octree power descriptor bindings", layout: this.layout, entries: [
+          { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: { buffer: leafHeaders } },
+          { binding: 2, resource: { buffer: owners } }, { binding: 3, resource: { buffer: this.candidateDescriptors } },
+          { binding: 4, resource: { buffer: this.control } }, { binding: 5, resource: { buffer: this.dispatch } },
+          { binding: 7, resource: { buffer: delta.rows } },
+          { binding: 8, resource: { buffer: this.descriptors } },
+          { binding: 9, resource: { buffer: options.ownerCandidateControl ?? owners } },
+        ] }) };
+      this.cachedGroup = cached;
+    }
+    const group = cached.group;
     let pass = broker.compute({ label: "Prepare power descriptor control" });
     pass.setPipeline(this.preparePipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1);
     broker.copyBufferToBuffer(delta.rows, (delta.controlOffsetWords + 12) * 4,
@@ -409,10 +427,23 @@ export class WebGPUOctreePowerDescriptor {
     pass.setPipeline(this.scatterPipeline);
     pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
     broker.copyBufferToBuffer(this.control, 80, this.workDispatch, 0, this.plan.dispatchBytes);
-    pass = broker.compute({ label: "Commit power descriptor publication" });
+  }
+
+  /** Publish the previously validated inactive descriptor candidate. */
+  encodeReadyCommit(broker: PassBroker): void {
+    if (this.destroyed) throw new Error("Octree power descriptor generator is destroyed");
+    const group = this.cachedGroup?.group;
+    if (!group) throw new Error("Power descriptor candidate has not been encoded");
+    let pass = broker.compute({ label: "Commit power descriptor publication" });
     pass.setPipeline(this.commitPipeline); pass.setBindGroup(0, group);
     pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
     pass.setPipeline(this.finalizePipeline); pass.dispatchWorkgroups(1);
+  }
+
+  encode(broker: PassBroker, leafHeaders: GPUBuffer, owners: GPUBuffer,
+    options: OctreePowerDescriptorEncodeOptions): void {
+    this.encodeCandidate(broker, leafHeaders, owners, options, false);
+    this.encodeReadyCommit(broker);
   }
 
   /** Rejection-only readback for the exact candidate descriptor/status named
@@ -487,9 +518,9 @@ struct ControlArena {
 @group(0) @binding(3) var<storage,read_write> descriptors:array<u32>;
 @group(0) @binding(4) var<storage,read_write> controlArena:ControlArena;
 @group(0) @binding(5) var<storage,read_write> indirectDispatch:array<u32>;
-@group(0) @binding(6) var<storage,read> rowCountSource:array<u32>;
 @group(0) @binding(7) var<storage,read> rowDelta:array<u32>;
 @group(0) @binding(8) var<storage,read_write> committedDescriptors:array<u32>;
+@group(0) @binding(9) var<storage,read> ownerCandidate:array<u32>;
 const INVALID:u32=0xffffffffu;
 const ROW_DELTA_VALID:u32=${OCTREE_POWER_ROW_DELTA_VALID}u;
 const ROW_DELTA_AFFECTED:u32=0x80000000u;
@@ -525,7 +556,7 @@ const DIRECTIONS:array<vec3i,18>=array<vec3i,18>(
   vec3i(-1,-1,0),vec3i(-1,0,-1),vec3i(-1,0,1),vec3i(-1,1,0),vec3i(0,-1,-1),vec3i(0,-1,1),
   vec3i(0,1,-1),vec3i(0,1,1),vec3i(1,-1,0),vec3i(1,0,-1),vec3i(1,0,1),vec3i(1,1,0));
 fn dims()->vec3u{return params.dimensionsMaximumLeaf.xyz;}
-fn generation()->u32{return params.rowCountGenerationCapacityReserved.y;}
+fn generation()->u32{let base=params.delta.x;return select(0u,rowDelta[base+7u],base+7u<arrayLength(&rowDelta));}
 fn deltaAccepted(requested:u32)->bool{
   if(params.delta.x>arrayLength(&rowDelta)||arrayLength(&rowDelta)-params.delta.x<16u){return false;}
   let base=params.delta.x;let previous=rowDelta[base+1u];let carried=rowDelta[base+2u];
@@ -554,29 +585,33 @@ fn decodePagedOwner(word:u32,cell:vec3u)->Owner{
 fn pagedOwnerPublicationValid()->bool{
   if(arrayLength(&owners)<OWNER_CONTROL_WORDS||owners[OWNER_ARENA_MAGIC]!=OWNER_MAGIC){return false;}
   let capacity=owners[OWNER_CAPACITY];let resident=owners[OWNER_RESIDENT_COUNT];
+  if(params.delta.w!=0u){return arrayLength(&ownerCandidate)>28u&&ownerCandidate[28u]==OWNER_VALID
+    &&ownerCandidate[23u]==0u&&ownerCandidate[24u]==generation()&&ownerCandidate[27u]<=capacity;}
   let accepted=owners[OWNER_ACCEPTED_GENERATION];
-  return accepted!=0u&&owners[OWNER_PUBLICATION_STATUS]==OWNER_PUBLICATION_READY
+  return accepted!=0u&&(owners[OWNER_PUBLICATION_STATUS]&0x7fffffffu)==OWNER_PUBLICATION_READY
     &&owners[OWNER_OBSERVED_GENERATION]==accepted&&owners[OWNER_CANDIDATE_ERROR]==0u
     &&owners[OWNER_INVALID_ENTRY_COUNT]==0u&&resident<=capacity
     &&owners[OWNER_FREE_COUNT]==capacity-resident;
 }
 fn pagedOwner(cell:vec3u)->Owner{
   if(!pagedOwnerPublicationValid()){return Owner(cell,1u,1u);}
-  let capacity=owners[OWNER_CAPACITY];let resident=min(owners[OWNER_RESIDENT_COUNT],capacity);
+  let capacity=owners[OWNER_CAPACITY];let logicalCount=owners[4u];
   let recordKeyOffset=OWNER_CONTROL_WORDS;let recordPageOffset=owners[OWNER_RECORD_PAGE_OFFSET];
-  let payloadOffset=owners[OWNER_PAGES_OFFSET];
-  if(capacity==0u||recordPageOffset!=recordKeyOffset+capacity||payloadOffset!=recordPageOffset+capacity
+  let table=select(owners[OWNER_PUBLICATION_STATUS]>>31u,1u-(owners[OWNER_PUBLICATION_STATUS]>>31u),params.delta.w!=0u);
+  let directoryOffset=recordPageOffset+3u*capacity+table*logicalCount;
+  let payloadOffset=owners[OWNER_PAGES_OFFSET]+table*capacity*OWNER_PAGE_VOXELS;
+  if(capacity==0u||recordPageOffset!=recordKeyOffset+capacity
+      ||owners[OWNER_PAGES_OFFSET]!=recordPageOffset+3u*capacity+2u*logicalCount
       ||recordKeyOffset>arrayLength(&owners)||capacity>arrayLength(&owners)-recordKeyOffset
       ||recordPageOffset>arrayLength(&owners)||capacity>arrayLength(&owners)-recordPageOffset
+      ||directoryOffset>arrayLength(&owners)||logicalCount>arrayLength(&owners)-directoryOffset
       ||payloadOffset>=arrayLength(&owners)){return Owner(cell,1u,1u);}
   let bd=(dims()+vec3u(7u))/8u;let brick=cell/8u;
   if(any(brick>=bd)||bd.x>0xffffffffu/bd.y){return Owner(cell,1u,1u);}
   let layer=bd.x*bd.y;if(brick.z>0xffffffffu/layer){return Owner(cell,1u,1u);}
-  let logical=brick.x+brick.y*bd.x+brick.z*layer;let key=logical+1u;
-  var low=0u;var high=resident;
-  while(low<high){let middle=low+(high-low)/2u;let observed=owners[recordKeyOffset+middle];if(observed<key){low=middle+1u;}else{high=middle;}}
-  if(low>=resident||owners[recordKeyOffset+low]!=key){return Owner(cell,1u,1u);}
-  let encoded=owners[recordPageOffset+low];
+  let logical=brick.x+brick.y*bd.x+brick.z*layer;
+  if(logical>=logicalCount){return Owner(cell,1u,1u);}
+  let encoded=owners[directoryOffset+logical];
   if(encoded==0u||encoded==INVALID||encoded>capacity){return Owner(cell,1u,1u);}
   let physical=encoded-1u;let local=cell%vec3u(8u);let localIndex=local.x+local.y*8u+local.z*64u;
   if(physical>(arrayLength(&owners)-payloadOffset-1u)/OWNER_PAGE_VOXELS){return Owner(cell,1u,1u);}
@@ -619,7 +654,7 @@ var<workgroup> publicationScan:array<u32,256>;
 var<workgroup> publicationCounts:array<vec4u,256>;
 var<workgroup> publicationFailures:array<vec4u,256>;
 @compute @workgroup_size(1) fn preparePowerDescriptors(){
-  let requested=select(0u,rowCountSource[0],arrayLength(&rowCountSource)>0u);
+  let requested=rowDelta[params.delta.x];
   controlArena.candidate=Control(requested,0u,0u,INVALID,0u,0u,0u,generation());
   controlArena.blockDispatch=vec3u(0u,1u,1u);
   controlArena.commitDispatch=vec3u(0u,1u,1u);

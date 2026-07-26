@@ -1,10 +1,9 @@
 /**
  * GPU secondary-liquid particles shared by the Eulerian solvers.
  *
- * Particles are one-way by default. An explicitly enabled, bounded correction
- * can union only near-interface particles back into the resident level set;
- * it never injects particle momentum into the pressure solve. A fixed ring
- * keeps both paths allocation- and readback-free.
+ * Particles are strictly one-way presentation data: they sample the resident
+ * surface and velocity but cannot write phi, momentum, pressure, or topology.
+ * A fixed ring keeps the presentation path allocation- and readback-free.
  */
 
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
@@ -366,87 +365,6 @@ fn spawnParticles(@builtin(global_invocation_id) gid: vec3u) {
 `;
 
 /**
- * Optional particle-level-set correction. The atomic field stores the nearest
- * particle sphere SDF at each touched cell. Correction is deliberately narrow:
- * detached spray is ignored, the interface can move by at most 0.2h per
- * substep, and no corrected sample is pushed deeper than -0.5h. This preserves
- * thin protrusions without turning the spray ring into an unbounded mass source.
- */
-export const secondaryParticleCorrectionShader = /* wgsl */ `
-struct Particle {
-  positionRadius: vec4f,
-  velocityAge: vec4f,
-  birthNormalLifetime: vec4f,
-  shape: vec4f,
-}
-struct Params {
-  gridAndDt: vec4f,
-  cellAndMinimum: vec4f,
-  containerAndTop: vec4f,
-  gravityAndSeed: vec4f,
-  controls: vec4f,
-  fieldModes: vec4f,
-  material: vec4f,
-}
-@group(0) @binding(0) var surfaceField: texture_3d<f32>;
-@group(0) @binding(1) var<storage, read> particles: array<Particle>;
-@group(0) @binding(2) var<storage, read_write> nearestParticlePhi: array<atomic<u32>>;
-@group(0) @binding(3) var<uniform> params: Params;
-@group(0) @binding(4) var correctedSurface: texture_storage_3d<r32float, write>;
-
-fn dims() -> vec3u { return vec3u(params.gridAndDt.xyz); }
-fn cellSize() -> vec3f { return params.cellAndMinimum.xyz; }
-fn hMin() -> f32 { return params.cellAndMinimum.w; }
-fn capacity() -> u32 { return u32(params.controls.x); }
-fn correctionStrength() -> f32 { return clamp(params.controls.w, 0.0, 1.0); }
-fn index3(q: vec3u) -> u32 { return q.x + dims().x * (q.y + dims().y * q.z); }
-fn domainOrigin() -> vec3f { return vec3f(-0.5 * params.containerAndTop.x, 0.0, -0.5 * params.containerAndTop.z); }
-fn cellCentre(q: vec3i) -> vec3f { return domainOrigin() + (vec3f(q) + vec3f(0.5)) * cellSize(); }
-fn cellAt(world: vec3f) -> vec3i { return vec3i(floor((world - domainOrigin()) / cellSize())); }
-
-@compute @workgroup_size(4, 4, 4)
-fn resetParticleCorrection(@builtin(global_invocation_id) gid: vec3u) {
-  if (all(gid < dims())) { atomicStore(&nearestParticlePhi[index3(gid)], 0x7f800000u); }
-}
-
-@compute @workgroup_size(64)
-fn splatParticleCorrection(@builtin(global_invocation_id) gid: vec3u) {
-  if (gid.x >= capacity() || correctionStrength() <= 0.0) { return; }
-  let particle = particles[gid.x];
-  if (particle.shape.z < 0.5 || particle.positionRadius.w <= 0.0) { return; }
-  let centreCell = clamp(cellAt(particle.positionRadius.xyz), vec3i(0), vec3i(dims()) - vec3i(1));
-  let residentPhi = textureLoad(surfaceField, centreCell, 0).x;
-  // A genuinely detached droplet remains render-only. Feedback is restricted
-  // to particles still close enough to represent an under-resolved sheet.
-  if (abs(residentPhi) > 2.0 * hMin()) { return; }
-  for (var dz = -2; dz <= 2; dz += 1) { for (var dy = -2; dy <= 2; dy += 1) { for (var dx = -2; dx <= 2; dx += 1) {
-    let q = centreCell + vec3i(dx, dy, dz);
-    if (any(q < vec3i(0)) || any(q >= vec3i(dims()))) { continue; }
-    let particlePhi = length(cellCentre(q) - particle.positionRadius.xyz) - particle.positionRadius.w;
-    if (particlePhi > 2.0 * hMin()) { continue; }
-    // Shift the bounded signed value into the non-negative float range, where
-    // IEEE-754 bit order permits an atomic integer minimum.
-    let encoded = bitcast<u32>(clamp(particlePhi, -hMin(), 2.0 * hMin()) + 2.0 * hMin());
-    atomicMin(&nearestParticlePhi[index3(vec3u(q))], encoded);
-  } } }
-}
-
-@compute @workgroup_size(4, 4, 4)
-fn applyParticleCorrection(@builtin(global_invocation_id) gid: vec3u) {
-  if (any(gid >= dims())) { return; }
-  let residentPhi = textureLoad(surfaceField, vec3i(gid), 0).x;
-  let encoded = atomicLoad(&nearestParticlePhi[index3(gid)]);
-  var result = residentPhi;
-  if (encoded != 0x7f800000u && residentPhi > -0.5 * hMin() && residentPhi < 2.0 * hMin()) {
-    let particlePhi = bitcast<f32>(encoded) - 2.0 * hMin();
-    let maximumShift = 0.2 * hMin() * correctionStrength();
-    result = max(-0.5 * hMin(), residentPhi - min(max(residentPhi - particlePhi, 0.0), maximumShift));
-  }
-  textureStore(correctedSurface, vec3i(gid), vec4f(result, 0.0, 0.0, 0.0));
-}
-`;
-
-/**
  * Exact ellipsoid interfaces for the raster water buffers. New sheet and
  * ligament fragments retain their birth deformation, then relax toward a
  * sphere on their capillary time scale. The optical composite cannot
@@ -614,19 +532,8 @@ export class WebGPUSecondaryParticleSystem {
   private readonly bindGroup: GPUBindGroup;
   private readonly shaderModule: GPUShaderModule;
   private readonly pipelineLayout: GPUPipelineLayout;
-  private readonly correction?: {
-    candidates: GPUBuffer;
-    texture: GPUTexture;
-    shaderModule: GPUShaderModule;
-    pipelineLayout: GPUPipelineLayout;
-    bindGroup: GPUBindGroup;
-    surfaceTexture: GPUTexture;
-  };
   private updatePipeline?: GPUComputePipeline;
   private spawnPipeline?: GPUComputePipeline;
-  private resetCorrectionPipeline?: GPUComputePipeline;
-  private splatCorrectionPipeline?: GPUComputePipeline;
-  private applyCorrectionPipeline?: GPUComputePipeline;
   private step = 0;
 
   constructor(
@@ -635,8 +542,7 @@ export class WebGPUSecondaryParticleSystem {
     private readonly domain: SecondaryParticleDomain,
     source: SecondaryParticleSamplingSource,
     capacityValue = DEFAULT_SECONDARY_PARTICLE_CAPACITY,
-    deferPipelineCompilation = false,
-    private readonly surfaceCorrectionStrength = 0
+    deferPipelineCompilation = false
   ) {
     const capacity = secondaryParticleCapacity(capacityValue);
     this.particles = device.createBuffer({
@@ -648,9 +554,7 @@ export class WebGPUSecondaryParticleSystem {
     this.params = device.createBuffer({ label: "Secondary particle parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.state, 0, new Uint32Array([6, 0, 0, 0, 0, 0, 0, 0]));
     this.renderSource = { buffer: this.particles, capacity, strideBytes: SECONDARY_PARTICLE_STRIDE_BYTES, indirectBuffer: this.state, indirectOffset: 0 };
-    const correctionEnabled = source.surfaceEncoding === "level-set" && surfaceCorrectionStrength > 0;
-    const correctionBytes = correctionEnabled ? grid.nx * grid.ny * grid.nz * 8 : 0;
-    this.allocatedBytes = capacity * SECONDARY_PARTICLE_STRIDE_BYTES + 144 + correctionBytes;
+    this.allocatedBytes = capacity * SECONDARY_PARTICLE_STRIDE_BYTES + 144;
 
     this.shaderModule = device.createShaderModule({ label: "Secondary liquid particle kernels", code: secondaryParticleComputeShader });
     const layout = device.createBindGroupLayout({ label: "Secondary particle simulation bindings", entries: [
@@ -670,37 +574,6 @@ export class WebGPUSecondaryParticleSystem {
       { binding: 4, resource: { buffer: this.state } },
       { binding: 5, resource: { buffer: this.params } }
     ] });
-    if (correctionEnabled) {
-      const correctionLayout = device.createBindGroupLayout({ label: "Secondary particle surface-correction bindings", entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } }
-      ] });
-      const candidates = device.createBuffer({
-        label: "Secondary particle nearest-surface candidates",
-        size: Math.max(4, grid.nx * grid.ny * grid.nz * 4),
-        usage: GPUBufferUsage.STORAGE
-      });
-      const texture = device.createTexture({
-        label: "Secondary particle corrected level set",
-        size: [grid.nx, grid.ny, grid.nz],
-        dimension: "3d",
-        format: "r32float",
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC
-      });
-      const shaderModule = device.createShaderModule({ label: "Secondary particle surface-correction kernels", code: secondaryParticleCorrectionShader });
-      const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [correctionLayout] });
-      const bindGroup = device.createBindGroup({ label: "Secondary particle surface-correction resources", layout: correctionLayout, entries: [
-        { binding: 0, resource: source.surfaceTexture.createView({ dimension: "3d" }) },
-        { binding: 1, resource: { buffer: this.particles } },
-        { binding: 2, resource: { buffer: candidates } },
-        { binding: 3, resource: { buffer: this.params } },
-        { binding: 4, resource: texture.createView({ dimension: "3d" }) }
-      ] });
-      this.correction = { candidates, texture, shaderModule, pipelineLayout, bindGroup, surfaceTexture: source.surfaceTexture };
-    }
     this.writeParameters(1 / 60, source);
     if (!deferPipelineCompilation) this.createPipelinesSync();
   }
@@ -709,33 +582,22 @@ export class WebGPUSecondaryParticleSystem {
     return { layout: this.pipelineLayout, compute: { module: this.shaderModule, entryPoint } };
   }
 
-  private correctionDescriptor(entryPoint: "resetParticleCorrection" | "splatParticleCorrection" | "applyParticleCorrection"): GPUComputePipelineDescriptor {
-    if (!this.correction) throw new Error("Secondary particle surface correction is disabled");
-    return { layout: this.correction.pipelineLayout, compute: { module: this.correction.shaderModule, entryPoint } };
-  }
-
   private createPipelinesSync() {
     this.updatePipeline = this.device.createComputePipeline(this.descriptor("updateParticles"));
     this.spawnPipeline = this.device.createComputePipeline(this.descriptor("spawnParticles"));
-    if (this.correction) {
-      this.resetCorrectionPipeline = this.device.createComputePipeline(this.correctionDescriptor("resetParticleCorrection"));
-      this.splatCorrectionPipeline = this.device.createComputePipeline(this.correctionDescriptor("splatParticleCorrection"));
-      this.applyCorrectionPipeline = this.device.createComputePipeline(this.correctionDescriptor("applyParticleCorrection"));
-    }
     let cache = secondaryParticlePipelineCache.get(this.device);
     if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); }
-    cache.set(this.correction ? "corrected" : "one-way", [this.updatePipeline, this.spawnPipeline, ...(this.correction ? [this.resetCorrectionPipeline!, this.splatCorrectionPipeline!, this.applyCorrectionPipeline!] : [])]);
+    cache.set("one-way", [this.updatePipeline, this.spawnPipeline]);
   }
 
-  get pipelineCount() { return this.correction ? 5 : 2; }
+  get pipelineCount() { return 2; }
 
   initializationTasks(): GPUInitializationTask[] {
-    const cacheKey = this.correction ? "corrected" : "one-way";
+    const cacheKey = "one-way";
     const cached = secondaryParticlePipelineCache.get(this.device)?.get(cacheKey);
     if (cached) return [{
       id: "secondary-particles.pipeline-cache", phase: "secondary-particles", label: "Reuse compiled secondary-liquid programs", run: () => {
         this.updatePipeline = cached[0]; this.spawnPipeline = cached[1];
-        if (this.correction) { this.resetCorrectionPipeline = cached[2]; this.splatCorrectionPipeline = cached[3]; this.applyCorrectionPipeline = cached[4]; }
       },
     }];
     const definitions = [["Advecting secondary particles", "updateParticles"], ["Seeding escaped spray", "spawnParticles"]] as const;
@@ -749,28 +611,9 @@ export class WebGPUSecondaryParticleSystem {
         else this.spawnPipeline = pipeline;
       },
     }));
-    if (this.correction) {
-      const correctionDefinitions = [
-        ["Clearing particle surface correction", "resetParticleCorrection"],
-        ["Splatting near-surface particles", "splatParticleCorrection"],
-        ["Applying bounded particle surface correction", "applyParticleCorrection"]
-      ] as const;
-      tasks.push(...correctionDefinitions.map(([label, entryPoint]) => ({
-        id: `secondary-particles.pipeline.${entryPoint}`,
-        phase: "secondary-particles" as const,
-        label,
-        run: async () => {
-          const pipeline = await this.device.createComputePipelineAsync(this.correctionDescriptor(entryPoint));
-          if (entryPoint === "resetParticleCorrection") this.resetCorrectionPipeline = pipeline;
-          else if (entryPoint === "splatParticleCorrection") this.splatCorrectionPipeline = pipeline;
-          else { this.applyCorrectionPipeline = pipeline; let cache = secondaryParticlePipelineCache.get(this.device); if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); } cache.set(cacheKey, [this.updatePipeline!, this.spawnPipeline!, this.resetCorrectionPipeline!, this.splatCorrectionPipeline!, this.applyCorrectionPipeline]); }
-        },
-      })));
-    } else {
-      const last = tasks[tasks.length - 1];
-      const run = last.run;
-      last.run = async (signal) => { await run(signal); let cache = secondaryParticlePipelineCache.get(this.device); if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); } cache.set(cacheKey, [this.updatePipeline!, this.spawnPipeline!]); };
-    }
+    const last = tasks[tasks.length - 1];
+    const run = last.run;
+    last.run = async (signal) => { await run(signal); let cache = secondaryParticlePipelineCache.get(this.device); if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); } cache.set(cacheKey, [this.updatePipeline!, this.spawnPipeline!]); };
     return tasks;
   }
 
@@ -795,7 +638,7 @@ export class WebGPUSecondaryParticleSystem {
       hx, hy, hz, h,
       this.domain.width_m, this.domain.height_m, this.domain.depth_m, this.domain.topOpen ? 1 : 0,
       this.domain.gravity_m_s2.x, this.domain.gravity_m_s2.y, this.domain.gravity_m_s2.z, this.domain.randomSeed,
-      this.renderSource.capacity, outwardThreshold, 0.22, Math.max(0, Math.min(1, this.surfaceCorrectionStrength)),
+      this.renderSource.capacity, outwardThreshold, 0.22, 0,
       source.fieldLayout === "restricted-tall-cell" ? 1 : 0, source.surfaceEncoding === "occupancy" ? 1 : 0, 7, this.step,
       this.domain.density_kg_m3, this.domain.surfaceTension_N_m, 0, 0
     ]));
@@ -818,30 +661,12 @@ export class WebGPUSecondaryParticleSystem {
     spawn.setBindGroup(0, this.bindGroup);
     spawn.dispatchWorkgroups(Math.ceil(this.grid.nx / 4), Math.ceil(this.grid.ny / 4), Math.ceil(this.grid.nz / 4));
     spawn.end();
-    if (this.correction && this.resetCorrectionPipeline && this.splatCorrectionPipeline && this.applyCorrectionPipeline) {
-      const correction = encoder.beginComputePass({ label: "Bounded particle-to-level-set correction" });
-      correction.setBindGroup(0, this.correction.bindGroup);
-      correction.setPipeline(this.resetCorrectionPipeline);
-      correction.dispatchWorkgroups(Math.ceil(this.grid.nx / 4), Math.ceil(this.grid.ny / 4), Math.ceil(this.grid.nz / 4));
-      correction.setPipeline(this.splatCorrectionPipeline);
-      correction.dispatchWorkgroups(Math.ceil(this.renderSource.capacity / 64));
-      correction.setPipeline(this.applyCorrectionPipeline);
-      correction.dispatchWorkgroups(Math.ceil(this.grid.nx / 4), Math.ceil(this.grid.ny / 4), Math.ceil(this.grid.nz / 4));
-      correction.end();
-      encoder.copyTextureToTexture(
-        { texture: this.correction.texture },
-        { texture: this.correction.surfaceTexture },
-        [this.grid.nx, this.grid.ny, this.grid.nz]
-      );
-    }
   }
 
   destroy() {
     this.particles.destroy();
     this.state.destroy();
     this.params.destroy();
-    this.correction?.candidates.destroy();
-    this.correction?.texture.destroy();
   }
 }
 

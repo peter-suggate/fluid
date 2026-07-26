@@ -189,17 +189,12 @@ test("reset replacement attaches only after complete t=0 sparse authority is res
   const cold = compactAuthority.indexOf("encodeColdBootstrapRebuild(encoder)");
   const csr = compactAuthority.indexOf("this.encode(encoder", cold);
   const surface = compactAuthority.indexOf("this.encodeSurface(encoder,0)", csr);
-  const faceTopology = compactAuthority.indexOf('this.encodeGlobalFineFaceBandPhase(broker,"topology-build")', surface);
-  const faceTransitions = compactAuthority.indexOf('this.encodeGlobalFineFaceBandPhase(broker,"transition-adjacency")', faceTopology);
-  const faceClosestPoint = compactAuthority.indexOf('this.encodeGlobalFineFaceBandPhase(broker,"closest-point-extension")', faceTransitions);
-  const facePowerPublication = compactAuthority.indexOf(
-    'this.encodeGlobalFineFaceBandPhase(broker,"power-publication")', faceClosestPoint,
-  );
-  const residency = compactAuthority.indexOf("this.encodeSparseBrickWorld(encoder)", facePowerPublication);
-  assert.ok(cold >= 0 && csr > cold && surface > csr && faceTopology > surface
-    && faceTransitions > faceTopology && faceClosestPoint > faceTransitions
-    && facePowerPublication > faceClosestPoint && residency > facePowerPublication,
-  "reset warmup must publish topology, power/operator, fine authority, the four paper-ordered Section 5 phases, and render world in dependency order");
+  const residency = compactAuthority.indexOf("this.encodeSparseBrickWorld(encoder)", surface);
+  const nextCandidate = compactAuthority.indexOf("this.encodeInactiveTopologyCandidate(encoder)", residency);
+  assert.ok(cold >= 0 && csr > cold && surface > csr && residency > surface && nextCandidate > residency,
+    "reset warmup must publish cold topology, structured authority, fine authority, render world, then the next inactive candidate in dependency order");
+  assert.doesNotMatch(compactAuthority, /encodeGlobalFineFaceBandPhase|closest-point-extension|power-publication/,
+    "deleted face-band warmup phases must not remain reachable");
 
   const transaction = renderer.slice(
     renderer.indexOf("private beginGPUFluidInitialization"),

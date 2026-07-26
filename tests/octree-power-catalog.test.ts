@@ -5,11 +5,18 @@ import { join } from "node:path";
 import { constructOctreePowerCell, createOctreePowerSite, type OctreePowerSite } from "../lib/octree-power-geometry";
 import {
   OCTREE_POWER_CATALOG_FACE_FLOATS,
+  OCTREE_POWER_RECONSTRUCTION_FLOATS,
+  OCTREE_POWER_ROW_TEMPLATE_FLAGS,
+  OCTREE_POWER_ROW_TEMPLATE_FLOATS,
+  OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS,
+  OCTREE_POWER_ROW_TEMPLATE_INVALID_SELECTOR,
+  OCTREE_POWER_TRANSFER_RELATION,
   OCTREE_POWER_CATALOG_TARGET_BYTES,
   OCTREE_POWER_CATALOG_WARNING_BYTES,
   buildOctreePowerCatalog,
   canonicalizeOctreePowerConfiguration,
   resolveOctreePowerCatalogDescriptor,
+  unpackOctreePowerRowTemplateSlot,
 } from "../lib/octree-power-catalog";
 import {
   OCTREE_CUBE_TRANSFORMS,
@@ -18,6 +25,7 @@ import {
 } from "../lib/octree-power-topology";
 import {
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
+  OCTREE_POWER_SAME_OR_FINER_MASK,
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
 } from "../lib/octree-power-descriptor";
@@ -82,6 +90,11 @@ test("catalog emits deterministic compact typed arrays and geometry manifest", (
   assert.deepEqual([...a.faceData], [...b.faceData]);
   assert.deepEqual([...a.tetrahedronHeaders], [...b.tetrahedronHeaders]);
   assert.deepEqual([...a.tetrahedronData], [...b.tetrahedronData]);
+  assert.deepEqual([...a.rowTemplateHeaders], [...b.rowTemplateHeaders]);
+  assert.deepEqual([...a.rowTemplateSlots], [...b.rowTemplateSlots]);
+  assert.deepEqual([...a.rowTemplateData], [...b.rowTemplateData]);
+  assert.deepEqual([...a.rowTemplateDiagonals], [...b.rowTemplateDiagonals]);
+  assert.deepEqual([...a.reconstructionData], [...b.reconstructionData]);
   assert.deepEqual(a.manifest, b.manifest);
   assert.equal(a.faceData.length % OCTREE_POWER_CATALOG_FACE_FLOATS, 0);
   assert.ok(a.manifest.maximumFaceIncidence >= 6);
@@ -90,6 +103,47 @@ test("catalog emits deterministic compact typed arrays and geometry manifest", (
   assert.ok(a.manifest.byteCount < OCTREE_POWER_CATALOG_TARGET_BYTES);
   assert.equal(resolveOctreePowerCatalogDescriptor(a, 0)?.descriptor, 0);
   assert.equal(resolveOctreePowerCatalogDescriptor(a, 0xdead_beef), undefined);
+});
+
+test("dense case zero is the implicit regular 7-point row with exact structured selectors", () => {
+  const descriptor = OCTREE_POWER_SAME_OR_FINER_MASK;
+  const catalog = buildOctreePowerCatalog([{
+    descriptor,
+    anchorKey: "0,0,0/2",
+    sites: sitesForSameOrFinerPowerDescriptor(descriptor),
+  }]);
+  assert.equal(catalog.manifest.regularCaseId, 0);
+  assert.deepEqual([...catalog.rowTemplateHeaders.slice(0, OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS)],
+    [0, 6, OCTREE_POWER_ROW_TEMPLATE_FLAGS.regularInterior, 6]);
+  assert.equal(catalog.rowTemplateDiagonals[0], 6);
+  assert.equal(catalog.rowTemplateSlots.length, 6);
+  const observedFamilies = new Set<number>();
+  for (let slot = 0; slot < 6; slot += 1) {
+    const packed = unpackOctreePowerRowTemplateSlot(catalog.rowTemplateSlots[slot]);
+    observedFamilies.add(packed.family);
+    assert.ok(packed.family < 3);
+    assert.ok(packed.orientation < 2);
+    assert.equal(packed.transferRelation, OCTREE_POWER_TRANSFER_RELATION.same);
+    assert.equal(packed.dynamicBoundarySlot, slot);
+    assert.equal(packed.worldBoundary, false);
+    assert.notEqual(packed.neighborSelector, OCTREE_POWER_ROW_TEMPLATE_INVALID_SELECTOR);
+    assert.deepEqual(
+      [...catalog.rowTemplateData.slice(
+        slot * OCTREE_POWER_ROW_TEMPLATE_FLOATS,
+        (slot + 1) * OCTREE_POWER_ROW_TEMPLATE_FLOATS,
+      )],
+      [1, 1, 1],
+    );
+    const faceOffset = slot * OCTREE_POWER_CATALOG_FACE_FLOATS;
+    const normal = [...catalog.faceData.slice(faceOffset + 8, faceOffset + 11)];
+    const reconstruction = [...catalog.reconstructionData.slice(
+      slot * OCTREE_POWER_RECONSTRUCTION_FLOATS,
+      (slot + 1) * OCTREE_POWER_RECONSTRUCTION_FLOATS,
+    )];
+    reconstruction.forEach((value, axis) => assert.equal(value, normal[axis] * 0.5));
+  }
+  assert.deepEqual([...observedFamilies].sort(), [0, 1, 2]);
+  assert.ok(catalog.manifest.worstReconstructionResidual < 1e-6);
 });
 
 test("catalog rejects duplicate descriptors and unbounded configurations", () => {
@@ -140,6 +194,22 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
   assert.equal(views.sameOrCoarserDirect.length, 1 << 9);
   assert.equal(views.tetrahedronHeaders.length, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount * 3);
   assert.equal(views.coefficientData.length, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount * 19);
+  assert.equal(views.rowTemplateHeaders.length,
+    OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount * OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS);
+  assert.equal(views.rowTemplateSlots.length,
+    views.faceData.length / OCTREE_POWER_CATALOG_FACE_FLOATS);
+  assert.equal(views.rowTemplateData.length,
+    views.rowTemplateSlots.length * OCTREE_POWER_ROW_TEMPLATE_FLOATS);
+  assert.equal(views.rowTemplateDiagonals.length,
+    OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
+  assert.equal(views.reconstructionData.length,
+    views.rowTemplateSlots.length * OCTREE_POWER_RECONSTRUCTION_FLOATS);
+  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.regularCaseId, 0);
+  assert.equal(
+    views.sameOrFinerDirect[OCTREE_POWER_SAME_OR_FINER_MASK] & 0xffff,
+    0,
+    "the rebuild map must stamp regular rows with dense case zero",
+  );
   assert.ok(views.tetrahedronData.length > 0);
   assert.equal(views.tetrahedronVertexData.length, 75 * 4);
   assert.ok([...views.sameOrFinerDirect].every((packed) => packed !== 0xffff_ffff

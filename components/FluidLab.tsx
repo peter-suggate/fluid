@@ -10,6 +10,7 @@ import { useMethodStore } from "@/lib/stores/method-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { WebGPUViewport } from "./WebGPUViewport";
+import { EditorToolbar } from "./EditorToolbar";
 import { ScenePanel } from "./ScenePanel";
 import { SceneConfigPopover } from "./SceneConfigPopover";
 import { MethodPanel } from "./MethodPanel";
@@ -25,6 +26,7 @@ import { getScenePreset } from "@/lib/scenes";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { requestManualGPUStart } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
+import { useEditorShortcuts } from "@/lib/use-editor-shortcuts";
 import { MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH } from "@/lib/stores/ui-store";
 import { paperPipelineHealthFlags } from "@/lib/paper-pipeline-diagnostics";
 
@@ -124,6 +126,7 @@ export function FluidLab() {
     : [...(fluidState?.nanCount ? ["non-finite-values"] : []), ...(fluidState && !fluidState.pressureConverged ? ["pressure-not-converged"] : [])];
 
   useLayoutEffect(() => startQueryStateSync(() => simulation.reset()), []);
+  useEditorShortcuts();
 
   useEffect(() => {
     let frame = 0;
@@ -149,6 +152,7 @@ export function FluidLab() {
 
       <section className="viewport-shell" aria-busy={gpuStatus.state === "initializing"} data-gpu-transition={gpuStatus.state === "initializing" ? gpuStatus.kind ?? "startup" : gpuStatus.state}>
         <WebGPUViewport />
+        <EditorToolbar />
         <div className="viewport-topline">
           <div className="topline-left">
             <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>

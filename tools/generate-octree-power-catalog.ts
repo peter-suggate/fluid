@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import {
   buildOctreePowerCatalog,
   OCTREE_POWER_CATALOG_FACE_FLOATS,
+  OCTREE_POWER_RECONSTRUCTION_FLOATS,
+  OCTREE_POWER_ROW_TEMPLATE_FLOATS,
+  OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS,
+  OCTREE_POWER_ROW_TEMPLATE_VERSION,
   type OctreePowerTopologyConfiguration,
 } from "../lib/octree-power-catalog";
 import {
@@ -28,9 +32,11 @@ const outputDirectory = join(root, "lib", "generated");
 const binaryPath = join(outputDirectory, "octree-power-catalog.bin");
 const modulePath = join(outputDirectory, "octree-power-catalog.ts");
 const MAGIC = 0x504f_5743;
-const HEADER_WORDS = 26;
-const GENERATOR_VERSION = 5;
+const HEADER_WORDS = 40;
+const GENERATOR_VERSION = 7;
 const COEFFICIENT_CHANNELS = 19;
+const INTERPOLATION_SELECTOR_VERSION = 1;
+const TRANSFER_SELECTOR_VERSION = 1;
 
 const interiorConfigurations: OctreePowerTopologyConfiguration[] = enumerateCanonicalSameOrFinerPowerDescriptors().map((descriptor) => ({
   descriptor,
@@ -145,6 +151,9 @@ for (let low = 0; low < 512; low += 1) {
 }
 
 const catalog = buildOctreePowerCatalog([...interiorConfigurations, ...boundaryConfigurations]);
+if (catalog.manifest.regularCaseId !== 0) {
+  throw new Error("Generated dense power case zero must be the regular Cartesian 7-point row");
+}
 const lookupByDescriptor = new Map(catalog.lookup.map((record) => [record.descriptor, record]));
 const boundaryLookupRecords = [...boundaryPairByKey.values()].map((pair) => {
   const base = baseRecord(pair.rawDescriptor);
@@ -160,10 +169,10 @@ for (let index = 1; index < boundaryLookupRecords.length; index += 1) {
 }
 const lookup = new Uint32Array(boundaryLookupRecords.length * 3);
 boundaryLookupRecords.forEach((record, index) => lookup.set([record.key, record.entry, 0], index * 3));
-// Runtime descriptors are deliberately emitted in world orientation. A dense
-// packed quotient map avoids 48-way shader canonicalization and still costs
-// only one fixed MiB, independent of scene dimensions. Low 16 bits are the
-// catalog entry; bits 16..21 are the complete world-to-catalog transform.
+// Rebuild descriptors are deliberately emitted in world orientation. These
+// maps are publication-only: hot kernels retain the low-16-bit dense case ID
+// and never perform descriptor lookup. Bits 16..21 carry the complete
+// world-to-catalog transform used while stamping the resolved row.
 const packLookup = (entry: number, transform: number) => {
   if (entry >= 0x1_0000 || transform >= 48) throw new Error("Power catalog direct lookup packing overflow");
   return (entry | (transform << 16)) >>> 0;
@@ -184,23 +193,35 @@ for (let descriptor = 0; descriptor < 512; descriptor += 1) {
   if (record) sameOrCoarserDirect[descriptor] = packLookup(record.entry, record.transform);
 }
 // Paper Section 6.3: channel zero is the canonical diagonal and channels
-// 1..18 are catalog-face coefficients in the exact canonical face order.
-// Float32 products and accumulation are forced here in the same left-to-right
-// order used by the GPU assembly. Entries with more than eighteen faces still
-// receive their exact diagonal, but are deliberately ineligible for the fixed
-// width bulk path and remain on dynamic cut-row assembly.
+// 1..18 are the six face and twelve edge directions. A power cell can expose
+// as many as thirty geometric facets, but several facets address the same
+// native-level neighbour/ghost. Aggregate those facets here; truncating to the
+// first eighteen was a resolved-row convention and is not a valid §6.3 table.
+const section63Directions = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+  [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0],
+  [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1],
+  [0, 1, 1], [0, 1, -1], [0, -1, 1], [0, -1, -1],
+] as const;
 const coefficientData = new Float32Array(catalog.entries.length * COEFFICIENT_CHANNELS);
 for (let entry = 0; entry < catalog.entries.length; entry += 1) {
   const firstFace = catalog.entryHeaders[entry * 2];
   const faceCount = catalog.entryHeaders[entry * 2 + 1];
   let diagonal = Math.fround(0);
   for (let slot = 0; slot < faceCount; slot += 1) {
-    const face = (firstFace + slot) * OCTREE_POWER_CATALOG_FACE_FLOATS;
-    const coefficient = Math.fround(Math.fround(catalog.faceData[face + 4])
-      * Math.fround(catalog.faceData[face + 11]));
+    const coefficient = catalog.rowTemplateData[
+      (firstFace + slot) * OCTREE_POWER_ROW_TEMPLATE_FLOATS
+    ];
     diagonal = Math.fround(diagonal + coefficient);
-    if (slot < COEFFICIENT_CHANNELS - 1) {
-      coefficientData[entry * COEFFICIENT_CHANNELS + 1 + slot] = coefficient;
+    const face = catalog.entries[entry]!.faces[slot]!;
+    if (face.neighborSizeRatio !== 0) {
+      const direction = face.centroid.map((value, axis) =>
+        Math.round(value + 0.5 * face.normal[axis]!));
+      const channel = section63Directions.findIndex((candidate) => candidate.every(
+        (value, axis) => value === direction[axis]));
+      if (channel < 0) throw new Error(`Catalog entry ${entry} face ${slot} has no Section 6.3 direction (${direction})`);
+      const offset = entry * COEFFICIENT_CHANNELS + 1 + channel;
+      coefficientData[offset] = Math.fround(coefficientData[offset]! + coefficient);
     }
   }
   coefficientData[entry * COEFFICIENT_CHANNELS] = diagonal;
@@ -216,7 +237,12 @@ const tetrahedronHeadersOffset = sameOrCoarserDirectOffset + sameOrCoarserDirect
 const tetrahedronDataOffset = tetrahedronHeadersOffset + catalog.tetrahedronHeaders.byteLength;
 const tetrahedronVertexDataOffset = tetrahedronDataOffset + catalog.tetrahedronData.byteLength;
 const coefficientDataOffset = tetrahedronVertexDataOffset + catalog.tetrahedronVertexData.byteLength;
-const byteLength = coefficientDataOffset + coefficientData.byteLength;
+const rowTemplateHeadersOffset = coefficientDataOffset + coefficientData.byteLength;
+const rowTemplateSlotsOffset = rowTemplateHeadersOffset + catalog.rowTemplateHeaders.byteLength;
+const rowTemplateDataOffset = rowTemplateSlotsOffset + catalog.rowTemplateSlots.byteLength;
+const rowTemplateDiagonalsOffset = rowTemplateDataOffset + catalog.rowTemplateData.byteLength;
+const reconstructionDataOffset = rowTemplateDiagonalsOffset + catalog.rowTemplateDiagonals.byteLength;
+const byteLength = reconstructionDataOffset + catalog.reconstructionData.byteLength;
 const binary = new Uint8Array(byteLength);
 const header = new Uint32Array(binary.buffer, 0, HEADER_WORDS);
 header.set([
@@ -228,6 +254,12 @@ header.set([
   catalog.manifest.maximumTetrahedra, HEADER_WORDS,
   tetrahedronVertexDataOffset, catalog.tetrahedronVertexData.length / 4, 4,
   coefficientDataOffset, COEFFICIENT_CHANNELS,
+  OCTREE_POWER_ROW_TEMPLATE_VERSION, rowTemplateHeadersOffset, OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS,
+  rowTemplateSlotsOffset, catalog.rowTemplateSlots.length,
+  rowTemplateDataOffset, OCTREE_POWER_ROW_TEMPLATE_FLOATS,
+  rowTemplateDiagonalsOffset, reconstructionDataOffset, OCTREE_POWER_RECONSTRUCTION_FLOATS,
+  catalog.manifest.regularCaseId, catalog.manifest.maximumDynamicBoundarySlots,
+  INTERPOLATION_SELECTOR_VERSION, TRANSFER_SELECTOR_VERSION,
 ]);
 binary.set(new Uint8Array(catalog.entryHeaders.buffer), entryHeadersOffset);
 binary.set(new Uint8Array(catalog.entryVolumes.buffer), entryVolumesOffset);
@@ -239,6 +271,11 @@ binary.set(new Uint8Array(catalog.tetrahedronHeaders.buffer), tetrahedronHeaders
 binary.set(new Uint8Array(catalog.tetrahedronData.buffer), tetrahedronDataOffset);
 binary.set(new Uint8Array(catalog.tetrahedronVertexData.buffer), tetrahedronVertexDataOffset);
 binary.set(new Uint8Array(coefficientData.buffer), coefficientDataOffset);
+binary.set(new Uint8Array(catalog.rowTemplateHeaders.buffer), rowTemplateHeadersOffset);
+binary.set(new Uint8Array(catalog.rowTemplateSlots.buffer), rowTemplateSlotsOffset);
+binary.set(new Uint8Array(catalog.rowTemplateData.buffer), rowTemplateDataOffset);
+binary.set(new Uint8Array(catalog.rowTemplateDiagonals.buffer), rowTemplateDiagonalsOffset);
+binary.set(new Uint8Array(catalog.reconstructionData.buffer), reconstructionDataOffset);
 
 const hash = createHash("sha256");
 for (const relative of [
@@ -259,9 +296,9 @@ export interface GeneratedOctreePowerCatalogViews {
   readonly faceData: Float32Array;
   /** (interior entry * 64 + canonical boundary mask), boundary entry, zero. */
   readonly lookup: Uint32Array;
-  /** Packed entry/transform indexed by the raw 18-bit runtime descriptor. */
+  /** Rebuild-only packed dense-case/transform indexed by the raw 18-bit descriptor. */
   readonly sameOrFinerDirect: Uint32Array;
-  /** Packed entry/transform indexed by the low nine same/coarser bits. */
+  /** Rebuild-only packed dense-case/transform indexed by the low nine same/coarser bits. */
   readonly sameOrCoarserDirect: Uint32Array;
   /** first tetrahedron, count, flags triples indexed by catalog entry. */
   readonly tetrahedronHeaders: Uint32Array;
@@ -271,6 +308,16 @@ export interface GeneratedOctreePowerCatalogViews {
   readonly tetrahedronVertexData: Float32Array;
   /** Section 6.3: diagonal followed by eighteen canonical face-slot coefficients per entry. */
   readonly coefficientData: Float32Array;
+  /** Versioned dense-case row templates: first slot, count, flags, dynamic-slot count. */
+  readonly rowTemplateHeaders: Uint32Array;
+  /** Packed neighbor/family/orientation/transfer/dynamic selectors for every template slot. */
+  readonly rowTemplateSlots: Uint32Array;
+  /** Normalized coefficient, area, inverse-distance triples for every template slot. */
+  readonly rowTemplateData: Float32Array;
+  /** Exact normalized diagonal indexed by dense case ID. */
+  readonly rowTemplateDiagonals: Float32Array;
+  /** xyz weighted least-squares pseudoinverse columns for every template slot. */
+  readonly reconstructionData: Float32Array;
 }
 
 export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedOctreePowerCatalogViews {
@@ -283,7 +330,13 @@ export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedO
     || h[3] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount || h[7] !== data.byteLength
     || h[13] !== ${OCTREE_POWER_SAME_OR_FINER_MASK + 1} || h[15] !== 512
     || h[19] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra || h[20] !== ${HEADER_WORDS}
-    || h[22] > 256 || h[23] !== 4 || h[25] !== ${COEFFICIENT_CHANNELS}) {
+    || h[22] > 256 || h[23] !== 4 || h[25] !== ${COEFFICIENT_CHANNELS}
+    || h[26] !== ${OCTREE_POWER_ROW_TEMPLATE_VERSION} || h[28] !== ${OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS}
+    || h[30] !== h[4] || h[32] !== ${OCTREE_POWER_ROW_TEMPLATE_FLOATS}
+    || h[35] !== ${OCTREE_POWER_RECONSTRUCTION_FLOATS}
+    || h[36] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.regularCaseId
+    || h[37] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumDynamicBoundarySlots
+    || h[38] !== ${INTERPOLATION_SELECTOR_VERSION} || h[39] !== ${TRANSFER_SELECTOR_VERSION}) {
     throw new Error("Generated power catalog manifest mismatch");
   }
   return {
@@ -297,6 +350,11 @@ export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedO
     tetrahedronData: new Uint32Array(data, h[17], h[18]),
     tetrahedronVertexData: new Float32Array(data, h[21], h[22] * h[23]),
     coefficientData: new Float32Array(data, h[24], h[2] * h[25]),
+    rowTemplateHeaders: new Uint32Array(data, h[27], h[2] * h[28]),
+    rowTemplateSlots: new Uint32Array(data, h[29], h[30]),
+    rowTemplateData: new Float32Array(data, h[31], h[30] * h[32]),
+    rowTemplateDiagonals: new Float32Array(data, h[33], h[2]),
+    reconstructionData: new Float32Array(data, h[34], h[30] * h[35]),
   };
 }
 

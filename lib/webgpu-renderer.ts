@@ -31,7 +31,10 @@ import { isGPUInitializationAbort } from "./gpu-initialization";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
 import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { OctreeTechniqueOverlayPipeline } from "./webgpu-octree-technique-overlay";
-import { automaticGPURecoveryEnabled, performanceTraceDeviceFeatures } from "./gpu-startup";
+import {
+  automaticGPURecoveryEnabled,
+  fluidExecutionDeviceFeatures,
+} from "./gpu-startup";
 import { OctreeTechniqueAuditOverlayPipeline } from "./webgpu-octree-technique-audit-overlay";
 import { initialRasterPresentationReadiness, requiresFencedInitialRasterPresentation } from "./gpu-t0-presentation";
 import { WebGPUStaticSvoScene } from "./webgpu-static-svo-scene";
@@ -643,9 +646,7 @@ export class FluidLabRenderer {
       return;
     }
     progress("Requesting GPU device",1);
-    const requiredFeatures: GPUFeatureName[] = [
-      ...performanceTraceDeviceFeatures(adapter.features),
-    ];
+    const requiredFeatures = fluidExecutionDeviceFeatures(adapter.features);
     const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
     const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
     if (this.disposed) { device.destroy(); return; }

@@ -12,9 +12,9 @@ const viewport = source("../components/WebGPUViewport.tsx");
 test("authoritative power work maps onto semantic adjacent-boundary phases", () => {
   for (const mapping of [
     'mgpcgSolve: { id: "pressure-solve", label: "Selected power pressure solve" }',
-    'powerDescriptorTopologyFaces: { id: "power-topology", label: "Power topology + physical faces" }',
-    'powerProjectionPublication: { id: "velocity-projection", label: "Power-face pressure projection" }',
-    'faceBandClosestPointExtension: { id: "velocity-extrapolation", label: "Closest-point velocity extension" }',
+    'powerDescriptorTopology: { id: "power-topology", label: "Power topology publication" }',
+    'structuredAdvectionBoundaryRhs: { id: "velocity-advection", label: "Structured advection + boundary RHS" }',
+    'structuredProjection: { id: "velocity-projection", label: "Structured pressure projection + CPT seeds" }',
     'fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" }',
     'fineRedistance: { id: "fine-sdf-redistance", label: "Fine SDF redistance" }',
   ]) assert.ok(solver.includes(mapping), mapping);
@@ -45,9 +45,9 @@ test("all seven collapsed engine phases map to timestamp categories", () => {
   );
 });
 
-test("topology, every CFL rebuild, and adaptive surface publication close generic phases", () => {
-  assert.match(solver, /encodeInlineRebuild\(encoder\)[^]*completePhysicsPhase\(encoder, this\.adaptiveProjection/);
-  assert.match(solver, /substep > 0[^]*encodeInlineRebuild\(encoder\)[^]*CFL substep topology refresh/);
+test("next-epoch topology and adaptive surface publication close generic phases", () => {
+  assert.match(solver,
+    /encodeReadyTopologyFlip\(encoder\)[^]*encodeSurface\(encoder, dt[^]*encodeInactiveTopologyCandidate\(encoder\)[^]*Inactive next-substep topology candidate/);
   assert.match(solver,
     /encodeSurface\(encoder, dt, surfaceInflow[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
   assert.doesNotMatch(solver + octree, /timing start|timing end|beginRange\(|endRange\(/);

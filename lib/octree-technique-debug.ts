@@ -12,12 +12,10 @@ export interface OctreeTechniqueDebugSource {
   readonly tetrahedronHeaders: GPUBufferBinding;
   readonly tetrahedra: GPUBufferBinding;
   readonly tetrahedronVertices: GPUBufferBinding;
-  readonly powerFaces: GPUBufferBinding;
-  readonly faceNormals: GPUBufferBinding;
-  readonly faceCentroids: GPUBufferBinding;
-  readonly incidenceRows: GPUBufferBinding;
-  readonly incidence: GPUBufferBinding;
-  readonly faceControl: GPUBufferBinding;
+  readonly structuredAuthority: GPUBufferBinding;
+  readonly structuredRowGeometry: GPUBufferBinding;
+  readonly structuredRowVelocities: GPUBufferBinding;
+  readonly structuredControl: GPUBufferBinding;
   /** Published pressure rows; diagonal and RHS stay live entirely on GPU. */
   readonly leafHeaders: GPUBufferBinding;
   /**
@@ -47,17 +45,6 @@ export interface OctreeTechniqueDebugSource {
     readonly topologyControl: GPUBufferBinding;
     readonly redistanceControl: GPUBufferBinding;
   };
-  /** Paper Section 5 closest-point face extension, exposed from the already-live band.
-   * The dedicated overlay reads these buffers directly and remains
-   * below the portable storage-binding limit. */
-  readonly section5FaceBand?: {
-    readonly rowDirectory: GPUBufferBinding;
-    readonly rows: GPUBufferBinding;
-    readonly faces: GPUBufferBinding;
-    readonly incidence: GPUBufferBinding;
-    readonly control: GPUBufferBinding;
-    readonly transitionControl: GPUBufferBinding;
-  };
   readonly generation: number;
 }
 
@@ -74,7 +61,6 @@ export const OCTREE_TECHNIQUE_OVERLAY_MODES = [
   "operator-reciprocity",
   "operator-open-fraction",
   "tetra-validity",
-  "section5-face-band",
   "global-fine-phi",
 ] as const;
 
@@ -97,6 +83,5 @@ export const OCTREE_TECHNIQUE_OVERLAY_CODES: Readonly<Record<OctreeTechniqueOver
   "operator-reciprocity": 21,
   "operator-open-fraction": 22,
   "tetra-validity": 23,
-  "section5-face-band": 24,
   "global-fine-phi": 25,
 };

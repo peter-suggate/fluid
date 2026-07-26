@@ -12,33 +12,30 @@ test("fine-to-coarse restriction rejects an unpublished or stale fine source", (
   const shader = fineToCoarseLevelSetWGSL.replace(/\s+/g, "");
   const encode = WebGPUFineToCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode, /^encode\(broker,fine,input\)/);
-  assert.doesNotMatch(encode, /newPassBroker|broker\.fence/,
-    "restriction must not terminate its caller-owned publication pass");
+  assert.doesNotMatch(encode, /newPassBroker|broker\.finish/,
+    "restriction must retain the caller-owned encoder");
+  assert.match(encode, /run\("publish"\);broker\.fence/,
+    "restriction must close its final compute pass before caller readback or downstream copies");
   assert.equal(FINE_TO_COARSE_LEVELSET_ERROR.unpublishedSource, 8);
   assert.match(shader,
-    /if\(arrayLength\(&worklist\)<5u\|\|arrayLength\(&topologyControl\)<8u\)[\s\S]*topologyControl\[0\]!=0u\|\|topologyControl\[4\]!=1u\|\|topologyControl\[5\]!=0u\|\|topologyControl\[7\]!=0u/,
-    "restriction must consume only an accepted, non-rollback fine transaction");
+    /letcommitted=topologyControl\[4\]==1u;letprovisional=p\.reserved!=0u&&topologyControl\[3\]>0u&&topologyControl\[4\]==0u;topologyReady=topologyControl\[0\]==0u&&\(committed\|\|provisional\)&&topologyControl\[5\]==0u&&topologyControl\[7\]==0u/,
+    "restriction accepts only committed input or the explicit validated/deferred same-command candidate");
+  assert.match(encode, /input\.allowValidatedProvisional\?1:0/,
+    "pre-force correction must opt into provisional input rather than weakening the default publication gate");
   assert.match(shader,
     /fnpublishRestriction[\s\S]*if\(control\.flags==0u\)[\s\S]*else\{control\.count=0xffffffffu/,
     "a rejected fine source must poison the downstream coarse correction rather than publish an empty correction");
-  assert.match(encode, /prepare:\[0,2,7,9,13,14\]/,
+  assert.match(shader,
+    /control\.rowCount=min\(rowCountSource\[0\],p\.rowCapacity\);if\(control\.rowCount<arrayLength\(&rowOffsets\)\)\{rowOffsets\[control\.rowCount\]=control\.rowCount;\}else\{control\.flags\|=CAPACITY;\}/,
+    "the CSR sentinel must terminate the live row prefix consumed by the coarse correction");
+  assert.doesNotMatch(shader, /rowOffsets\[p\.rowCapacity\]=p\.rowCapacity/,
+    "allocation capacity is not the terminal offset when fewer rows are live");
+  assert.match(encode, /prepare:\[0,2,7,9,13,14,15\]/,
     "the scalar prepare pass must bind the fine worklist and topology transaction it validates");
   assert.doesNotMatch(encode, /finalizeRestrictionRows|run\("finalize"/,
     "row owners publish accepted aggregates directly without a second capacity-wide pass");
-  assert.match(encode, /if\(input\.diagnoseUnownedFineSamples\)run\("diagnose",1\)/,
-    "the capacity-wide unowned-sample scan must remain an explicit QA opt-in");
-});
-
-test("resident fine-band samples may lead the compact liquid-row set", () => {
-  const diagnose = fineToCoarseLevelSetWGSL.match(
-    /fn diagnoseUnownedFineSamples[\s\S]*?control\.flags\|=diagnosticErrors\[0\];}/,
-  )?.[0] ?? "";
-  assert.match(diagnose, /unowned\+=1u/,
-    "one deterministic workgroup keeps unowned fine samples observable");
-  assert.match(diagnose, /maximumUnownedLiquidMagnitude/,
-    "advancing non-positive misses retain a magnitude diagnostic");
-  assert.doesNotMatch(diagnose, /control\.flags\|=UNOWNED/,
-    "a resident fine sample does not require a compact pressure-row fallback");
+  assert.doesNotMatch(encode, /diagnose|unowned/i,
+    "the removed capacity-wide diagnostic path must not remain in production encoding");
 });
 
 test("fine-to-coarse restriction evaluates phi at the octree cell center", () => {
@@ -66,13 +63,15 @@ test("fine-to-coarse restriction is row-owned and synchronization-atomic-free", 
     /fnrestrictCoarseRows[\s\S]*letr=fineLinearWorkgroup\(w,n\)[\s\S]*aggregates\[r\]=Aggregate/,
     "one workgroup exclusively owns each coarse-row reduction");
   assert.match(shader,
-    /fnfinePage\(key:u32\)[\s\S]*directoryBase=5u\+p\.pageCapacity[\s\S]*worklist\[directoryBase\+key\]/,
+    /fnfinePage\(key:u32\)[\s\S]*directoryBase=7u\+p\.pageCapacity[\s\S]*worklist\[directoryBase\+key\]/,
     "row-owned gathers use the generation-validated direct fine-page publication");
   assert.doesNotMatch(shader, /fnfinePage\(key:u32\)[\s\S]*while\(low<high\)/,
     "row-owned gathers must not binary-search the compact worklist for every covered brick");
   assert.match(encode,
-    /run\("restrict",rows\.x,rows\.y\)[\s\S]*if\(input\.diagnoseUnownedFineSamples\)run\("diagnose",1\)/,
-    "production schedules only row-owned restriction; the deterministic capacity scan is opt-in");
+    /run\("prepare"\)[\s\S]*dispatchWorkgroupsIndirect\(this\.dispatch,0\)[\s\S]*run\("publish"\)/,
+    "production schedules only singleton preparation/publication around the exact row-owned indirect dispatch");
+  assert.doesNotMatch(encode, /planFineLevelSetDispatch2D|this\.plan\.rowCapacity,\s*this\.device\.limits/,
+    "recurring restriction must never schedule the row-capacity bound from the host");
   assert.doesNotMatch(encode, /aggregateRestriction|fallback/i,
     "the legacy atomic scatter and fallback selector are deleted");
 });
@@ -85,7 +84,10 @@ test("Dawn builds deterministic factor-4/factor-8 cell-center aggregates with O(
   };
   Object.assign(globalThis, dawn.globals);
   const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
-  const adapter = await gpu.requestAdapter(); assert.ok(adapter); const device = await adapter.requestDevice();
+  const adapter = await gpu.requestAdapter(); assert.ok(adapter);
+  assert.ok(adapter.limits.maxStorageBuffersPerShaderStage >= 10,
+    "production fine restriction requires the M1-class ten-storage binding budget");
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   for (const factor of [4, 8] as const) {
     const brickDimensions = factor / 4; const residentBricks = brickDimensions ** 3;
@@ -98,19 +100,19 @@ test("Dawn builds deterministic factor-4/factor-8 cell-center aggregates with O(
     oracle.publishInterfaceAndRing(keys, ([x]) => x - 0.5);
     const owner = new WebGPUFineLevelSetBricks(device, plan);
     const source = owner.uploadGeneration(oracle.exportGPUGeneration());
-    const restriction = new WebGPUFineToCoarseLevelSet(device, 1, plan.maximumResidentBricks * plan.samplesPerBrick);
+    // Keep allocation capacity above the single live row. The CSR terminal is
+    // rowOffsets[liveRows], not rowOffsets[rowCapacity].
+    const restriction = new WebGPUFineToCoarseLevelSet(device, 2, plan.maximumResidentBricks * plan.samplesPerBrick);
     const headers = device.createBuffer({ size: 48, usage: storage });
     const header = new Uint32Array(12); header[3] = 1; device.queue.writeBuffer(headers, 0, header);
-    const rowDirectory = device.createBuffer({ size: 32, usage: storage });
-    device.queue.writeBuffer(rowDirectory, 0, new Uint32Array([1, 1, 0, 0]));
     const rowCount = device.createBuffer({ size: 4, usage: storage }); device.queue.writeBuffer(rowCount, 0, new Uint32Array([1]));
     const topologyControl = device.createBuffer({ size: 32, usage: storage });
     device.queue.writeBuffer(topologyControl, 0, new Uint32Array([0, 0, 0, 0, 1, 0, 0, 0]));
     const expected = factor ** 3, readBytes = 32;
     const readback = device.createBuffer({ size: readBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
-    const result = restriction.encode(new PassBroker(encoder), source, { headers, rowDirectory, rowCount, topologyControl,
-      dimensions: [1, 1, 1], physicalCellSize: 1, maximumLeafSize: 1, rowDirectoryCapacity: 1 });
+    const result = restriction.encode(new PassBroker(encoder), source, { headers, rowCount, topologyControl,
+      dimensions: [1, 1, 1], physicalCellSize: 1, maximumLeafSize: 1 });
     encoder.copyBufferToBuffer(result.counts, 0, readback, 0, 8);
     encoder.copyBufferToBuffer(result.rowOffsets, 0, readback, 8, 8);
     encoder.copyBufferToBuffer(result.contributions, 0, readback, 16, 16);
@@ -122,12 +124,12 @@ test("Dawn builds deterministic factor-4/factor-8 cell-center aggregates with O(
       `factor-${factor} restriction must evaluate the plane at cell center, got ${center}`);
     assert.equal(words[7], 1);
     assert.ok(minimum < 0 && maximum > 0, "restriction interval must retain the plane zero crossing");
-    readback.destroy(); topologyControl.destroy(); rowCount.destroy(); rowDirectory.destroy(); headers.destroy(); restriction.destroy(); owner.destroy();
+    readback.destroy(); topologyControl.destroy(); rowCount.destroy(); headers.destroy(); restriction.destroy(); owner.destroy();
   }
   {
-    // The fresh fine generation includes an air safety ring.  Positive samples
-    // in that ring can legitimately lie beyond the compact wet/live rows; they
-    // are counted but must not invalidate restriction of the owned interface.
+    // The fresh fine generation includes an air safety ring. Restriction is
+    // row-owned, so resident samples outside compact wet/live rows are neither
+    // scanned nor reported as skipped work.
     const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [2, 1, 1],
       finestCellWidth: 1, fineFactor: 4, brickResolution: 4, maximumResidentBricks: 2 });
     const oracle = new FineLevelSetBrickOracle(plan);
@@ -137,21 +139,19 @@ test("Dawn builds deterministic factor-4/factor-8 cell-center aggregates with O(
     const restriction = new WebGPUFineToCoarseLevelSet(device, 1, 2 * plan.samplesPerBrick);
     const headers = device.createBuffer({ size: 48, usage: storage });
     const header = new Uint32Array(12); header[3] = 1; device.queue.writeBuffer(headers, 0, header);
-    const rowDirectory = device.createBuffer({ size: 32, usage: storage });
-    device.queue.writeBuffer(rowDirectory, 0, new Uint32Array([1, 1, 0, 0]));
     const rowCount = device.createBuffer({ size: 4, usage: storage });
     device.queue.writeBuffer(rowCount, 0, new Uint32Array([1]));
     const topologyControl = device.createBuffer({ size: 32, usage: storage });
     device.queue.writeBuffer(topologyControl, 0, new Uint32Array([0, 0, 0, 0, 1, 0, 0, 0]));
     const readback = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
-    const result = restriction.encode(new PassBroker(encoder), source, { headers, rowDirectory, rowCount, topologyControl,
-      dimensions: [2, 1, 1], physicalCellSize: 1, maximumLeafSize: 1, rowDirectoryCapacity: 1 });
+    const result = restriction.encode(new PassBroker(encoder), source, { headers, rowCount, topologyControl,
+      dimensions: [2, 1, 1], physicalCellSize: 1, maximumLeafSize: 1 });
     encoder.copyBufferToBuffer(result.counts, 0, readback, 0, 24);
     device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ); const words = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
-    assert.deepEqual([...words], [1, 1, 0, plan.samplesPerBrick, 1, 0x8000_0000]);
-    readback.destroy(); topologyControl.destroy(); rowCount.destroy(); rowDirectory.destroy(); headers.destroy(); restriction.destroy(); owner.destroy();
+    assert.deepEqual([...words], [1, 1, 0, 0, 1, 0x8000_0000]);
+    readback.destroy(); topologyControl.destroy(); rowCount.destroy(); headers.destroy(); restriction.destroy(); owner.destroy();
   }
   device.destroy();
 });

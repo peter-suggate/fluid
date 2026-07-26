@@ -71,7 +71,12 @@ test("Dawn bootstraps compact coarse phi from adapter-style live rows", {
   });
   const encoder = device.createCommandEncoder();
   const broker = new PassBroker(encoder);
-  coarse.encodeBootstrapFromSurfaceLeaves(broker, leaves);
+  const liveRowDispatch = device.createBuffer({
+    size: 12,
+    usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(liveRowDispatch, 0, new Uint32Array([1, 1, 1]));
+  coarse.encodeBootstrapFromSurfaceLeaves(broker, leaves, liveRowDispatch);
   broker.fence("coarse phi bootstrap readback");
   encoder.copyBufferToBuffer(coarse.records, 0, readback, 0, coarse.plan.recordBytes);
   device.queue.submit([encoder.finish()]);
@@ -90,6 +95,7 @@ test("Dawn bootstraps compact coarse phi from adapter-style live rows", {
 
   coarse.destroy();
   leaves.destroy();
+  liveRowDispatch.destroy();
   readback.destroy();
   device.destroy();
 });

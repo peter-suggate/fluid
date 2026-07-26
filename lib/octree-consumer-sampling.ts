@@ -4,7 +4,7 @@
  * A caller resolves the leaf containing a query point and gathers the two
  * bounded incidence slabs that surround it. The routines below then perform
  * the same resolution-aware reconstruction for rendering, particles,
- * diagnostics, and face transport. No dense 3D compatibility texture is part
+ * diagnostics, and face transport. No dense 3D texture is part
  * of this ABI.
  */
 
@@ -52,7 +52,7 @@ export function sampleOctreeFaceComponent(
   pointFine: OctreeConsumerPoint,
   axis: 0 | 1 | 2,
   candidates: readonly OctreeConsumerFaceSample[],
-  fallback = 0,
+  defaultValue = 0,
 ): number {
   finitePoint(pointFine, "Octree velocity query");
   if (candidates.length > OCTREE_CONSUMER_MAX_FACE_CANDIDATES) {
@@ -60,7 +60,7 @@ export function sampleOctreeFaceComponent(
   }
   let weighted = 0;
   let weights = 0;
-  let nearest = fallback;
+  let nearest = defaultValue;
   let nearestDistanceSquared = Number.POSITIVE_INFINITY;
   for (const face of candidates) {
     if (face.axis !== axis) continue;
@@ -86,10 +86,10 @@ export function sampleOctreeFaceComponent(
 export function sampleOctreeFaceVelocity(
   pointFine: OctreeConsumerPoint,
   candidates: readonly OctreeConsumerFaceSample[],
-  fallback: OctreeConsumerPoint = [0, 0, 0],
+  defaultValue: OctreeConsumerPoint = [0, 0, 0],
 ): [number, number, number] {
   return [0, 1, 2].map((axis) => sampleOctreeFaceComponent(
-    pointFine, axis as 0 | 1 | 2, candidates, component(fallback, axis),
+    pointFine, axis as 0 | 1 | 2, candidates, component(defaultValue, axis),
   )) as [number, number, number];
 }
 
@@ -105,7 +105,7 @@ export interface GlobalFineLevelSetConsumerSource {
   readonly topologyControl?: GPUBufferBinding;
   readonly sampleDimensions: readonly [number, number, number];
   readonly brickDimensions: readonly [number, number, number];
-  readonly brickResolution: 4 | 8;
+  readonly brickResolution: 4;
   readonly samplesPerBrick: number;
   readonly pageCapacity: number;
   readonly fineFactor: 4 | 8;
@@ -252,10 +252,10 @@ fn octreeConsumerOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&102
 fn octreeConsumerAxis(face:OctreeConsumerFaceSample)->u32{return face.axisSpan&3u;}
 fn octreeConsumerSpan(face:OctreeConsumerFaceSample)->u32{return face.axisSpan>>2u;}
 fn octreeConsumerCentre(face:OctreeConsumerFaceSample)->vec3f{let axis=octreeConsumerAxis(face);var p=vec3f(vec3u(face.originX,face.originY,face.originZ));let span=0.5*f32(octreeConsumerSpan(face));p[(axis+1u)%3u]+=span;p[(axis+2u)%3u]+=span;return p;}
-fn octreeConsumerComponent(point:vec3f,axis:u32,candidates:array<OctreeConsumerFaceSample,48>,count:u32,fallback:f32)->f32{
-  var weighted=0.0;var weights=0.0;var nearest=fallback;var nearestD2=3.402823e38;
+fn octreeConsumerComponent(point:vec3f,axis:u32,candidates:array<OctreeConsumerFaceSample,48>,count:u32,defaultValue:f32)->f32{
+  var weighted=0.0;var weights=0.0;var nearest=defaultValue;var nearestD2=3.402823e38;
   for(var i=0u;i<min(count,OCTREE_CONSUMER_MAX_FACES);i+=1u){let face=candidates[i];if(octreeConsumerAxis(face)!=axis){continue;}let delta=point-octreeConsumerCentre(face);let d2=dot(delta,delta);if(d2<nearestD2){nearestD2=d2;nearest=face.normalVelocity;}let support=max(1.0,f32(octreeConsumerSpan(face)));let tent=max(vec3f(0.0),vec3f(1.0)-abs(delta)/support);let weight=tent.x*tent.y*tent.z;weighted+=weight*face.normalVelocity;weights+=weight;}
   return select(nearest,weighted/weights,weights>0.0);
 }
-fn octreeConsumerVelocity(point:vec3f,candidates:array<OctreeConsumerFaceSample,48>,count:u32,fallback:vec3f)->vec3f{return vec3f(octreeConsumerComponent(point,0u,candidates,count,fallback.x),octreeConsumerComponent(point,1u,candidates,count,fallback.y),octreeConsumerComponent(point,2u,candidates,count,fallback.z));}
+fn octreeConsumerVelocity(point:vec3f,candidates:array<OctreeConsumerFaceSample,48>,count:u32,defaultValue:vec3f)->vec3f{return vec3f(octreeConsumerComponent(point,0u,candidates,count,defaultValue.x),octreeConsumerComponent(point,1u,candidates,count,defaultValue.y),octreeConsumerComponent(point,2u,candidates,count,defaultValue.z));}
 `;

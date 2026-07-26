@@ -1,6 +1,6 @@
-import { cameraBasis, dot, sub } from "./math";
 import type { CameraState, SceneDescription, Vec3 } from "./model";
 import { paperPipelineStages } from "./paper-pipeline-diagnostics";
+import { projectToViewport } from "./webgpu-camera";
 import type { GPUEulerianInfo } from "./webgpu-eulerian";
 import type { WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 
@@ -20,38 +20,12 @@ export interface ViewportProjection {
   readonly visible: boolean;
 }
 
-function finiteTriple(value: readonly number[] | undefined): value is readonly [number, number, number] {
-  return value?.length === 3 && value.every(Number.isFinite);
-}
-
-function gridPointToWorld(
-  point: readonly [number, number, number],
-  info: GPUEulerianInfo,
-  scene: SceneDescription,
-): Vec3 | undefined {
-  if (info.nx <= 0 || info.ny <= 0 || info.nz <= 0) return undefined;
-  const { width_m, height_m, depth_m } = scene.container;
-  return {
-    x: -0.5 * width_m + point[0] * width_m / info.nx,
-    y: point[1] * height_m / info.ny,
-    z: -0.5 * depth_m + point[2] * depth_m / info.nz,
-  };
-}
-
 /** Best bounded spatial witness already present in GPUEulerianInfo. No new
  * readback is requested solely for this viewport marker. */
 export function viewportFailureLocation(
   info: GPUEulerianInfo,
   scene: SceneDescription,
 ): Pick<ViewportFailureIndicator, "location_m" | "locationLabel"> {
-  const phiFailure = info.globalFineFaceBandPhiFailure;
-  if (phiFailure && finiteTriple(phiFailure.centroid)) {
-    return {
-      location_m: gridPointToWorld(phiFailure.centroid, info, scene),
-      locationLabel: `first failed face ${phiFailure.globalFace.toLocaleString()}`,
-    };
-  }
-
   const transport = info.globalFineTransportFirstInvalidVelocityPosition_m;
   if (transport && [transport.x, transport.y, transport.z].every(Number.isFinite)) {
     return {
@@ -115,24 +89,15 @@ export function viewportFailureIndicator(
   return undefined;
 }
 
-/** Project a world-space diagnostic to the same 0.72-tangent camera used by
- * the raster water shaders. Off-screen/behind-camera witnesses stay in the
- * alert text but do not create a misleading marker. */
+/** Project a world-space diagnostic through the shared camera used by the
+ * raster water shaders. Off-screen/behind-camera witnesses stay in the alert
+ * text but do not create a misleading marker. */
 export function projectViewportFailure(
   position_m: Vec3,
   camera: CameraState,
   width: number,
   height: number,
 ): ViewportProjection {
-  const basis = cameraBasis(camera);
-  const relative = sub(position_m, basis.position);
-  const depth = dot(relative, basis.forward);
-  const aspect = Math.max(1, width) / Math.max(1, height);
-  const ndcX = depth > 1e-6 ? dot(relative, basis.right) / (depth * aspect * 0.72) : Number.POSITIVE_INFINITY;
-  const ndcY = depth > 1e-6 ? dot(relative, basis.up) / (depth * 0.72) : Number.POSITIVE_INFINITY;
-  return {
-    leftFraction: 0.5 * (ndcX + 1),
-    topFraction: 0.5 * (1 - ndcY),
-    visible: depth > 1e-6 && Math.abs(ndcX) <= 1 && Math.abs(ndcY) <= 1,
-  };
+  const { leftFraction, topFraction, visible } = projectToViewport(position_m, camera, width, height);
+  return { leftFraction, topFraction, visible };
 }

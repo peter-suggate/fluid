@@ -23,16 +23,6 @@ import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundar
 import { quadtreeChebyshevSpectrum, WebGPUQuadtreeTallCellProjection, type QuadtreeTallCellProjectionOptions } from "./webgpu-quadtree-tall-cell";
 import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection,
   type OctreeSemanticPhase, type OctreeProjectionOptions } from "./webgpu-octree";
-import { buildFixedAdaptiveOctreePowerGalerkinHierarchy } from "./octree-power-galerkin";
-import {
-  OCTREE_FACE_BAND_ACUTE_TETRA_FAILURE,
-  OCTREE_FACE_BAND_OWNER_FAILURE_STAGE,
-  unpackOctreeFaceBandControl,
-  unpackOctreeFaceBandPointFieldControl,
-  unpackOctreeFaceBandPowerPublication,
-  unpackOctreeFaceBandTransientPowerControl,
-  unpackOctreeFaceBandTransitionControl,
-} from "./webgpu-octree-face-closest-point";
 import {
   OCTREE_POWER_COARSE_LEVELSET_ERROR,
   OCTREE_POWER_COARSE_LEVELSET_VALID,
@@ -43,6 +33,7 @@ import {
   FINE_LEVELSET_TOPOLOGY_FINALIZE_REASON,
   unpackFineLevelSetGPUTopologyControl,
 } from "./webgpu-octree-fine-levelset-topology";
+import { readFineLevelSetWorksetHeader } from "./octree-fine-levelset-bricks";
 import { unpackFineLevelSetGPURedistanceControl } from "./webgpu-octree-fine-levelset-redistance";
 import { unpackFineLevelSetGPUTransportControl } from "./webgpu-octree-fine-levelset-transport";
 import { FINE_TO_COARSE_LEVELSET_ERROR, unpackFineToCoarseGPUControl } from "./webgpu-octree-fine-to-coarse-levelset";
@@ -54,9 +45,15 @@ import {
   FINE_LEVELSET_VOLUME_VALID,
   unpackFineLevelSetGPUVolumeControl,
 } from "./webgpu-octree-fine-levelset-volume";
+import { supportsFluidM1MaxReduction } from "./webgpu-device-limits";
+import {
+  decodeStructuredProjectionEnergy,
+  STRUCTURED_PROJECTION_ENERGY_WORDS,
+} from "./webgpu-octree-structured-dynamics";
+import { decodeOctreeStructuredRejectCarry } from "./octree-structured-reject-carry";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
-export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; /** Bounded near-interface particle-to-level-set correction; zero keeps spray strictly one-way. */ secondaryParticleSurfaceCorrection?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
 
 // Pipeline objects are immutable and device-scoped. Rebuilding buffers or
 // textures for a settings change must not ask the browser/driver to compile
@@ -67,23 +64,19 @@ const uniformPipelineCache = new WeakMap<GPUDevice, Map<UniformVelocityTransport
 const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimestampPhase>> = {
   structureEpoch: { id: "coarse-grid", label: "[engine:structure-epoch] Structure epoch" },
   rowEngineA: { id: "velocity-advection", label: "[engine:row-a] Coarse values + face completion" },
-  solveEngine: { id: "pressure-solve", label: "[engine:solve] Galerkin pressure solve" },
+  solveEngine: { id: "pressure-solve", label: "[engine:solve] Pipelined MGPCG pressure solve" },
   rowEngineB: { id: "velocity-extrapolation", label: "[engine:row-b] Projection + velocity extension" },
   brickEngineA: { id: "fine-sdf-advection", label: "[engine:brick-a] Fine transport + topology" },
   closestPointWaves: { id: "fine-sdf-redistance", label: "[engine:cpt-waves] Closest-point waves" },
   brickEngineB: { id: "adaptive-publication", label: "[engine:brick-b] Fine harvest + epoch gate" },
   pressureLeafCompactionL1Capture: { id: "pressure-system", label: "Liquid rows + L1 capture" },
-  powerDescriptorTopologyFaces: { id: "power-topology", label: "Power topology + physical faces" },
-  powerFaceRegularCompletion: { id: "velocity-advection", label: "Generalized-face velocity completion" },
-  powerOperatorRhsAssembly: { id: "pressure-system", label: "Power operator + divergence RHS" },
+  powerDescriptorTopology: { id: "power-topology", label: "Power topology publication" },
+  structuredAdvectionBoundaryRhs: { id: "velocity-advection", label: "Structured advection + boundary RHS" },
+  structuredVolumeCapture: { id: "pressure-system", label: "Structured physical-volume capture" },
   finalPressureRowAssembly: { id: "pressure-system", label: "Final pressure row assembly" },
   mgpcgSolve: { id: "pressure-solve", label: "Selected power pressure solve" },
-  powerProjectionPublication: { id: "velocity-projection", label: "Power-face pressure projection" },
-  faceBandTopologyBuild: { id: "velocity-extrapolation", label: "Extrapolation face-band topology" },
-  faceBandTransitionAdjacency: { id: "velocity-extrapolation", label: "Transition Delaunay adjacency" },
-  faceBandClosestPointExtension: { id: "velocity-extrapolation", label: "Closest-point velocity extension" },
-  faceBandPowerPublicationCapture: { id: "velocity-extrapolation", label: "Extended power-face publication" },
-  powerProjectionTail: { id: "velocity-projection", label: "Solid impulse + projection publication" },
+  structuredProjection: { id: "velocity-projection", label: "Structured pressure projection + CPT seeds" },
+  structuredProjectionTail: { id: "velocity-projection", label: "Structured projection publication" },
   finePreparation: { id: "fine-sdf-advection", label: "Fine SDF seed + transport preparation" },
   fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" },
   fineTopology: { id: "coarse-grid", label: "Fine narrow-band topology" },
@@ -144,56 +137,26 @@ export function quadtreeRebuildRetryDelay(failureCount: number) {
 }
 
 export interface GlobalFineVolumePublicationDiagnostics {
-  readonly published: boolean;
-  readonly rolledBack: boolean;
-  readonly downstreamFinalizeReason: number;
-  readonly generation: number;
-  readonly volumeControl: readonly number[];
+  readonly published?: boolean;
+  readonly rolledBack?: boolean;
+  readonly downstreamFinalizeReason?: number;
+  readonly generation?: number;
+  readonly volumeControl?: readonly number[];
 }
 
 export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumePublicationDiagnostics {
-  readonly seedControl?: readonly number[];
-  readonly topologyControl?: readonly number[];
-  readonly worklistHeader?: readonly number[];
-  readonly coarseDirectoryHeader?: readonly number[];
-  readonly coarseControl?: readonly number[];
-  readonly fineRestrictionControl?: readonly number[];
-  readonly seedCount: number;
-  readonly seedError: number;
-  readonly topologyFlags: number;
-  readonly interfaceBricks: number;
-  readonly interfaceSeedBricks: number;
-  readonly desiredBricks: number;
-  readonly activatedBricks: number;
-  readonly activeBricks: number;
+  readonly seedControl: readonly number[];
+  readonly topologyControl: readonly number[];
+  readonly fineVolumeControl: readonly number[];
+  readonly worklistHeader: readonly number[];
+  readonly coarseControl: readonly number[];
+  readonly fineRestrictionControl: readonly number[];
+  readonly structuredVelocityControl: readonly number[];
+  readonly structuredBoundaryControl: readonly number[];
   readonly configuredFineGeneration: number;
+  readonly fineGenerationSlot: 0 | 1;
   readonly scheduledFineGeneration: number;
-  readonly coarseDirectoryState: number;
-  readonly coarseDirectoryGeneration: number;
-  readonly coarseControlFlags: number;
-  readonly coarseControlGeneration: number;
-  readonly coarseControlValid: number;
-  readonly fineRestrictionFlags: number;
-  readonly fineRestrictionUnowned: number;
-  readonly fineRestrictionRows: number;
-  readonly fineRestrictionValid: number;
-  readonly transportControl: readonly number[];
-  readonly redistanceControl: readonly number[];
-  readonly redistanceControlDetailed?: readonly number[];
-  readonly powerVelocityControl?: readonly number[];
-  readonly powerFaceControl?: readonly number[];
-  readonly powerFaceCandidateControl?: readonly number[];
-  readonly powerRowDeltaControl?: readonly number[];
-  readonly powerDescriptorControl?: readonly number[];
-  readonly powerTopologyControl?: readonly number[];
-  readonly faceBandControl: readonly number[];
-  readonly faceBandCandidateControl?: readonly number[];
-  readonly faceBandTransitionControl: readonly number[];
-  readonly faceBandCandidateTransitionControl?: readonly number[];
-  readonly faceBandTransitionOwnerFailure?: readonly number[];
-  readonly faceBandPointFieldControl: readonly number[];
-  readonly faceBandTransientPowerControl: readonly number[];
-  readonly faceBandPowerPublicationControl: readonly number[];
+  readonly currentFineIsA: boolean;
 }
 
 /** Publish the bounded fine-transport control into the shared UI snapshot.
@@ -208,7 +171,7 @@ export function applyGlobalFineTransportDiagnostics(
   info.globalFineTransportDepartureOutsideBand = transport.departureOutsideBand;
   info.globalFineTransportNonfiniteVelocity = transport.nonfiniteVelocity;
   info.globalFineTransportCommitted = transport.committed;
-  info.globalFineTransportFaceBandUnavailable = transport.faceBandUnavailable;
+  info.globalFineTransportStructuredAuthorityUnavailable = transport.structuredAuthorityUnavailable;
   info.globalFineTransportVelocityUnavailable = transport.velocityUnavailable;
   info.globalFineTransportInvalidVelocityStatus = transport.invalidVelocityStatus;
   info.globalFineTransportNonpositiveVelocityResult = transport.nonpositiveVelocityResult;
@@ -237,61 +200,21 @@ function namedControlBits(bits: number, values: Readonly<Record<string, number>>
  * include this object verbatim, so evidence remains available after the
  * renderer releases the failed GPU device. */
 export function initialGlobalFineAuthorityEvidence(value: InitialGlobalFineAuthorityDiagnostics) {
-  const topologyWords=value.topologyControl??[
-    value.topologyFlags,value.interfaceBricks,value.desiredBricks,value.activatedBricks,
-    value.published?1:0,value.rolledBack?1:0,0,value.downstreamFinalizeReason,
-    value.interfaceSeedBricks,
-  ];
-  const redistanceWords=value.redistanceControlDetailed??value.redistanceControl;
-  const volumeBytes=new ArrayBuffer(64);new Uint32Array(volumeBytes).set(value.volumeControl.slice(0,16));
-  const coarseWords=value.coarseControl??[
-    value.coarseControlFlags,0,0,0,0,0,0,0,0,0,value.coarseControlGeneration,
-    value.coarseControlValid,0,0,0,0,
-  ];
-  const restrictionWords=value.fineRestrictionControl??[
-    0,0,value.fineRestrictionFlags,value.fineRestrictionUnowned,
-    value.fineRestrictionRows,value.fineRestrictionValid,0,0,
-  ];
-  const topology=unpackFineLevelSetGPUTopologyControl(topologyWords);
-  const redistance=unpackFineLevelSetGPURedistanceControl(redistanceWords);
-  const volume=unpackFineLevelSetGPUVolumeControl(volumeBytes);
-  const transitionWords = [...value.faceBandTransitionControl,
-    ...(value.faceBandTransitionOwnerFailure ?? [])];
-  const coarse=unpackOctreePowerCoarseLevelSetControl(coarseWords);
-  const restriction=unpackFineToCoarseGPUControl(restrictionWords);
+  const topology=unpackFineLevelSetGPUTopologyControl(value.topologyControl);
+  const coarse=unpackOctreePowerCoarseLevelSetControl(value.coarseControl);
+  const restriction=unpackFineToCoarseGPUControl(value.fineRestrictionControl);
   return {
-    generation:{current:value.generation,configured:value.configuredFineGeneration,
+    generation:{configured:value.configuredFineGeneration,
       scheduled:value.scheduledFineGeneration},
-    seeds:{count:value.seedCount,flags:value.seedError,raw:value.seedControl},
+    seeds:{count:value.seedControl[0] ?? 0,flags:value.seedControl[1] ?? 0,raw:value.seedControl},
     topology:{...topology,
       errors:namedControlBits(topology.flags,FINE_LEVELSET_TOPOLOGY_ERROR),
       downstream:namedControlBits(topology.downstreamFinalizeReason,FINE_LEVELSET_TOPOLOGY_FINALIZE_REASON)},
     worklist:value.worklistHeader,
-    redistance:{...redistance,errors:namedControlBits(redistance.flags,
-      {capacity:1,hashProbe:2,staleGeneration:4,nonfinite:8,conflictingRequest:16})},
-    volume,
-    coarseDirectory:value.coarseDirectoryHeader??{
-      state:value.coarseDirectoryState,generation:value.coarseDirectoryGeneration,
-    },
     coarse:{...coarse,errors:namedControlBits(coarse.flags,OCTREE_POWER_COARSE_LEVELSET_ERROR)},
     restriction:{...restriction,errors:namedControlBits(restriction.flags,FINE_TO_COARSE_LEVELSET_ERROR)},
-    powerFaces:value.powerFaceControl,
-    powerFaceCandidate:value.powerFaceCandidateControl,
-    powerRowDelta:value.powerRowDeltaControl,
-    powerDescriptor:value.powerDescriptorControl,
-    powerTopology:value.powerTopologyControl,
-    powerVelocity:value.powerVelocityControl,
-    section5:{
-      faceBand:unpackOctreeFaceBandControl(value.faceBandControl),
-      candidateFaceBand:value.faceBandCandidateControl
-        ? unpackOctreeFaceBandControl(value.faceBandCandidateControl) : undefined,
-      transition:unpackOctreeFaceBandTransitionControl(transitionWords),
-      candidateTransition:value.faceBandCandidateTransitionControl
-        ? unpackOctreeFaceBandTransitionControl(value.faceBandCandidateTransitionControl) : undefined,
-      pointField:unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl),
-      transientPower:unpackOctreeFaceBandTransientPowerControl(value.faceBandTransientPowerControl),
-      powerPublication:unpackOctreeFaceBandPowerPublication(value.faceBandPowerPublicationControl),
-    },
+    structuredVelocity:value.structuredVelocityControl,
+    structuredBoundary:value.structuredBoundaryControl,
   };
 }
 
@@ -306,29 +229,24 @@ export function initialGlobalFineAuthorityReadiness(
   const generation = value.configuredFineGeneration & 0x3fff_ffff;
   const rejected = (reason: string): InitialSparseAuthorityReadiness => ({ ready: false,
     label: `${reason}: ${JSON.stringify(initialGlobalFineAuthorityEvidence(value))}` });
-  if (value.seedCount === 0 || value.seedError !== 0) {
-    return rejected(`global-fine interface seeds are invalid (${value.seedCount}, fault ${value.seedError})`);
+  const topology=unpackFineLevelSetGPUTopologyControl(value.topologyControl);
+  const coarse=unpackOctreePowerCoarseLevelSetControl(value.coarseControl);
+  const restriction=unpackFineToCoarseGPUControl(value.fineRestrictionControl);
+  if ((value.seedControl[0] ?? 0) === 0 || (value.seedControl[1] ?? 0) !== 0) {
+    return rejected("global-fine interface seeds are invalid");
   }
-  // Aanjaneya et al. Section 5 constructs a fresh SPGrid from copied
-  // interface values. The cold predecessor is deliberately empty, so its
-  // resident-page discovery count is zero; external seeds are the explicit
-  // cold-only interface proof. Recurring generations must still discover an
-  // interface from their transported predecessor.
-  if (!value.published || value.rolledBack || value.topologyFlags !== 0
-    || value.downstreamFinalizeReason !== 0 || value.desiredBricks === 0
-    || value.activatedBricks === 0 || value.activeBricks === 0
-    || (!options.externallySeededColdBootstrap && value.interfaceBricks === 0)) {
+  if (!topology.published || topology.rolledBack || topology.flags !== 0
+    || topology.downstreamFinalizeReason !== 0 || topology.desiredBricks === 0
+    || topology.activatedBricks === 0
+    || (readFineLevelSetWorksetHeader(value.worklistHeader)?.generation ?? 0) === 0
+    || (!options.externallySeededColdBootstrap && topology.interfaceBricks === 0)) {
     return rejected("global-fine topology rejected");
   }
-  if (generation === 0 || (value.generation & 0x3fff_ffff) !== generation
-    || (value.scheduledFineGeneration & 0x3fff_ffff) !== generation) {
+  if (generation === 0 || (value.scheduledFineGeneration & 0x3fff_ffff) !== generation) {
     return rejected("global-fine topology generation is stale");
   }
-  if (value.coarseDirectoryState !== OCTREE_POWER_COARSE_LEVELSET_VALID
-    || value.coarseControlValid !== OCTREE_POWER_COARSE_LEVELSET_VALID
-    || value.coarseControlFlags !== 0
-    || (value.coarseDirectoryGeneration & 0x3fff_ffff) !== generation
-    || (value.coarseControlGeneration & 0x3fff_ffff) !== generation) {
+  if (coarse.valid !== OCTREE_POWER_COARSE_LEVELSET_VALID || coarse.flags !== 0
+    || (coarse.generation & 0x3fff_ffff) !== generation) {
     return rejected("compact coarse level set is not paired with the fine generation");
   }
   // Fine-band samples need not own a liquid pressure row: after an advective
@@ -336,62 +254,52 @@ export function initialGlobalFineAuthorityReadiness(
   // subcell distance. Restriction counts these misses observationally while
   // consumers sample fine before coarse fallback. Therefore validity/flags,
   // not the raw miss count, are the authority predicate.
-  if (value.fineRestrictionFlags !== 0 || value.fineRestrictionRows === 0
-    || value.fineRestrictionValid !== OCTREE_POWER_COARSE_LEVELSET_VALID) {
+  if (restriction.flags !== 0 || restriction.rowCount === 0 || !restriction.valid) {
     return rejected("fine-to-coarse level-set restriction did not publish");
   }
-  const faceBand = unpackOctreeFaceBandControl(value.faceBandControl);
-  const transition = unpackOctreeFaceBandTransitionControl(value.faceBandTransitionControl);
-  const pointField = unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl);
-  const transientPower = unpackOctreeFaceBandTransientPowerControl(value.faceBandTransientPowerControl);
-  const powerPublication = unpackOctreeFaceBandPowerPublication(value.faceBandPowerPublicationControl);
-  if (!faceBand.valid || faceBand.rowCount === 0 || faceBand.generation !== generation
-    || !transition.ready || !transition.transferReady || transition.rowCount === 0
-    || !pointField.valid || pointField.rowCount === 0 || pointField.generation !== generation
-    || !transientPower.valid || transientPower.rowCount === 0 || transientPower.generation !== generation
-    || !powerPublication.valid || powerPublication.fineGeneration !== generation) {
-    return rejected("Section 5 velocity-band round trip did not publish");
+  const velocity=value.structuredVelocityControl,boundary=value.structuredBoundaryControl;
+  if (velocity.length<6||velocity[0]!==0||velocity[2]===0||velocity[3]!==generation||velocity[4]>1
+    ||boundary.length<7||boundary[0]!==0||boundary[2]!==velocity[2]
+    ||boundary[4]!==generation||boundary[5]!==velocity[4]||boundary[6]!==generation) {
+    return rejected("structured velocity/boundary authority did not publish");
   }
-  return { ready: true, label: `global fine/coarse and Section 5 generation ${generation} published` };
+  return { ready: true, label: `global fine/coarse and structured generation ${generation} published` };
 }
 
 export interface InitialPowerPressureDiagnostics {
   readonly authoritative: boolean;
   readonly solverLabel: string;
   readonly pressureRows: number;
-  readonly pressureEntries: number;
   readonly capacityOverflow: boolean;
   readonly mgpcgControl?: Uint32Array;
 }
 
-/** Both explicitly selectable power solvers use the same fail-closed control
- * ABI and 1e-4 native-L2 residual gate. A zero-RHS t=0 solve is valid when the
- * selected GPU authority marks it converged and publishes finite data. */
+/** The sole production pressure solver uses this fail-closed control ABI and
+ * 1e-4 native-L2 residual gate. */
 export function initialPowerPressureReadiness(
   value: InitialPowerPressureDiagnostics,
 ): InitialSparseAuthorityReadiness {
   const section43 = value.solverLabel.includes("Section 4.3 hybrid");
-  const fixedGalerkin = value.solverLabel.includes("fixed native-L2 Galerkin");
-  if (!value.authoritative || (!section43 && !fixedGalerkin)) {
-    return { ready: false, label: "selected power pressure authority is unavailable" };
+  if (!value.authoritative || !section43) {
+    return { ready: false, label: "power MGPCG authority is unavailable" };
   }
-  if (value.capacityOverflow || value.pressureRows === 0 || value.pressureEntries === 0) {
-    return { ready: false, label: "power pressure CSR did not publish" };
+  if (value.capacityOverflow || value.pressureRows === 0) {
+    return { ready: false, label: "resolved power rows did not publish" };
   }
   const words = value.mgpcgControl;
   if (!words || words.length < 16) return { ready: false, label: "selected pressure control is unavailable" };
   const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
-  const residualSquared = floats[4], rhsSquared = floats[5];
+  const residualSquared = floats[10] + floats[11];
+  const rhsSquared = floats[8] + floats[9];
   const relativeSquared = residualSquared / Math.max(rhsSquared, 1e-30);
-  const residualAccepted = relativeSquared <= 1e-8
-    || (fixedGalerkin && residualSquared <= value.pressureRows * 1e-14);
-  if (words[0] !== 0 || words[1] === 0 || words[3] !== value.pressureRows
+  const residualAccepted = relativeSquared <= 1e-8;
+  if (words[0] !== 0 || words[1] === 0 || words[4] !== value.pressureRows
     || !Number.isFinite(residualSquared) || residualSquared < 0
     || !Number.isFinite(rhsSquared) || rhsSquared < 0
     || !Number.isFinite(relativeSquared) || !residualAccepted) {
     return { ready: false, label: "selected pressure solver did not converge through its residual gate" };
   }
-  return { ready: true, label: `${fixedGalerkin ? "fixed Galerkin" : "Section 4.3"} power pressure published (${value.pressureRows} rows)` };
+  return { ready: true, label: `Section 4.3 power pressure published (${value.pressureRows} rows)` };
 }
 
 /**
@@ -404,7 +312,7 @@ export function publishedGlobalFineVolumeCells(
   baseCellVolume_m3: number,
 ) {
   if (!diagnostics.published || diagnostics.rolledBack || diagnostics.downstreamFinalizeReason !== 0
-    || diagnostics.volumeControl.length < 16 || !(baseCellVolume_m3 > 0)
+    || !diagnostics.volumeControl || diagnostics.volumeControl.length < 16 || !(baseCellVolume_m3 > 0)
     || !Number.isFinite(baseCellVolume_m3)) return undefined;
   const bytes = new ArrayBuffer(64);
   new Uint32Array(bytes).set(diagnostics.volumeControl.slice(0, 16));
@@ -527,6 +435,13 @@ export class WebGPUUniformEulerianSolver {
     private onRigidLoads?: (loads: GPURigidLoad[]) => void,
     options: WebGPUUniformEulerianOptions = {}
   ) {
+    // The octree has one measured executable profile. Reject it before the
+    // first texture or buffer allocation so unsupported adapters cannot leave
+    // a partially constructed graph or trigger compilation of another lane.
+    if (options.octree && (!device.features.has("subgroups")
+      || !supportsFluidM1MaxReduction(device.limits))) {
+      throw new Error("Power octree requires the M1 Max 128-lane subgroup profile");
+    }
     const c = scene.container, matched = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, options.tallCellSettings);
     const nx = matched.nx, ny = matched.fineNy, nz = matched.nz;
     this.velocityTransport = options.velocityTransport ?? "maccormack";
@@ -674,26 +589,12 @@ export class WebGPUUniformEulerianSolver {
       this.octreeProjection = new WebGPUOctreeProjection(device, scene, { nx, ny, nz }, {
         rigidBodies: this.rigidBuffer, rigidExchange: this.rigidExchangeBuffer, terrain: this.terrainTexture,
       }, {
-        powerPressureSolver: options.octree.powerPressureSolver,
-        powerGalerkinHierarchy: options.octree.powerPressureSolver === "galerkin"
-          ? buildFixedAdaptiveOctreePowerGalerkinHierarchy(
-            [nx, ny, nz],
-            options.octree.maximumLeafSize ?? 16,
-            {
-            transfer: "trilinear",
-            coarsestNodeLimit: 64,
-            },
-          )
-          : undefined,
-        powerBoundarySmoothingIterations: options.octree.powerBoundarySmoothingIterations,
         maximumLeafSize: options.octree.maximumLeafSize ?? 16,
         adaptivity: options.octree.adaptivity ?? 1,
         interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
         globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor ?? 4,
         globalFineLevelSetMaximumBricks: options.octree.globalFineLevelSetMaximumBricks,
         pressureRowCapacity: options.octree.pressureRowCapacity,
-        energyLedger: options.octree.energyLedger,
-        energyLedgerStepCapacity: options.octree.energyLedgerStepCapacity,
       }, options.deferPipelineCompilation);
       this.applyOctreeInfo(this.octreeProjection);
     }
@@ -826,7 +727,7 @@ export class WebGPUUniformEulerianSolver {
       if (selector >= 2 || (frontier[3] ?? 0) === 0 || count === 0) {
         throw new Error(`Initial sparse authority cold-topology published no liquid-row frontier: ${JSON.stringify(failure)}`);
       }
-      this.octreeProjection.finishInlineRebuild();
+      this.octreeProjection.finishTopologyCandidate();
     }
     if (phase === "sparse-render-world") {
       await this.validateInitialSparseAuthority();
@@ -839,219 +740,106 @@ export class WebGPUUniformEulerianSolver {
   }
 
   private applyGlobalFineDiagnostics(value: InitialGlobalFineAuthorityDiagnostics) {
-    const coarse=unpackOctreePowerCoarseLevelSetControl(value.coarseControl ?? [
-      value.coarseControlFlags,0,0,0,0,0,0,0,0,0,value.coarseControlGeneration,
-      value.coarseControlValid,0,0,0,0,
-    ]);
-    const faceBand=unpackOctreeFaceBandControl(value.faceBandControl);
-    const transition=unpackOctreeFaceBandTransitionControl([...value.faceBandTransitionControl,
-      ...(value.faceBandTransitionOwnerFailure ?? [])]);
-    const pointField=unpackOctreeFaceBandPointFieldControl(value.faceBandPointFieldControl);
-    const transientPower=unpackOctreeFaceBandTransientPowerControl(value.faceBandTransientPowerControl);
-    const powerPublication=unpackOctreeFaceBandPowerPublication(value.faceBandPowerPublicationControl);
-    this.info.globalFineSeedCount=value.seedCount;this.info.globalFineSeedError=value.seedError;
-    this.info.globalFineTopologyFlags=value.topologyFlags;
-    this.info.globalFineDownstreamFinalizeReason=value.downstreamFinalizeReason;
-    this.info.globalFineInterfaceBricks=value.interfaceBricks;this.info.globalFineDesiredBricks=value.desiredBricks;
-    this.info.globalFineActivatedBricks=value.activatedBricks;this.info.globalFinePublished=value.published;
-    this.info.globalFineRolledBack=value.rolledBack;this.info.globalFineActiveBricks=value.activeBricks;
-    this.info.globalFineGeneration=value.generation;
-    this.info.globalFineRedistanceUnresolvedCells=value.redistanceControl[0];
-    this.info.globalFineRedistanceSeeds=value.redistanceControl[2];
-    this.info.globalFineRedistanceCommitted=value.redistanceControl[3]!==0;
-    this.info.globalFineVolumeFlags=value.volumeControl[0];
-    applyGlobalFineTransportDiagnostics(this.info,value.transportControl);
-    this.info.globalFineFaceBandFlags=value.faceBandControl[0];
-    this.info.globalFineFaceBandTransitionFlags=value.faceBandTransitionControl[0];
-    this.info.globalFineFaceBandPowerPublicationFlags=value.faceBandPowerPublicationControl[0];
-    this.info.globalFineFaceBandTransientPowerFlags=value.faceBandTransientPowerControl[0];
-    this.info.globalFineFaceBandPointFieldFlags=value.faceBandPointFieldControl[0];
-    this.info.globalFineCoarseLevelSetFlags=coarse.flags;
-    this.info.globalFineCoarseLevelSetFirstErrorRow=coarse.firstErrorRow;
-    this.info.globalFineFaceBandFirstError=faceBand.firstError;
-    this.info.globalFineFaceBandRowCount=faceBand.rowCount;
-    this.info.globalFineFaceBandFaceCount=faceBand.faceCount;
-    this.info.globalFineFaceBandIncidenceCount=faceBand.incidenceCount;
-    this.info.globalFineFaceBandSeedCount=faceBand.seedCount;
-    this.info.globalFineFaceBandAcceptedCount=faceBand.acceptedCount;
-    this.info.globalFineFaceBandUnresolvedCount=faceBand.unresolvedCount;
-    this.info.globalFineFaceBandSampleFailures=faceBand.sampleFailures;
-    this.info.globalFineFaceBandCoarsePhiSamples=faceBand.coarsePhiSamples;
-    this.info.globalFineFaceBandCoarsePhiFailures=faceBand.coarsePhiFailures;
-    this.info.globalFineFaceBandPhiExtensions=faceBand.bandPhiExtensions;
-    this.info.globalFineFaceBandClosestPointFaces=faceBand.closestPointFaces;
-    this.info.globalFineFaceBandClosestPointFailures=faceBand.closestPointFailures;
-    this.info.globalFineFaceBandLiquidInterpolationFailures=faceBand.liquidInterpolationFailures;
-    this.info.globalFineFaceBandCptNoOwnerFailures=faceBand.cptNoOwnerFailures;
-    this.info.globalFineFaceBandCptSupportOwnerFailures=faceBand.cptSupportOwnerFailures;
-    this.info.globalFineFaceBandCptNoContainingSimplexFailures=faceBand.cptNoContainingSimplexFailures;
-    this.info.globalFineFaceBandCptMissingLiquidVertexFailures=faceBand.cptMissingLiquidVertexFailures;
-    this.info.globalFineFaceBandTransitionFirstError=transition.firstError;
-    this.info.globalFineFaceBandTransitionRowCount=transition.rowCount;
-    this.info.globalFineFaceBandTransitionRows=transition.transitionRows;
-    this.info.globalFineFaceBandTransitionAdjacencyCount=transition.adjacencyCount;
-    this.info.globalFineFaceBandTransitionCoreRows=transition.coreRowCount;
-    this.info.globalFineFaceBandTransitionSupport1Rows=transition.support1RowCount;
-    this.info.globalFineFaceBandTransitionSupport2Rows=transition.support2RowCount;
-    this.info.globalFineFaceBandTransitionSupport3Rows=transition.support3NodeRowCount;
-    this.info.globalFineFaceBandTransitionEndpointRows=transition.endpointRowCount;
-    this.info.globalFineFaceBandBoundaryGhostRequests=transition.boundaryGhostRequests;
-    this.info.globalFineFaceBandPhiFailureCounts=transition.phiFailureCounts;
-    this.info.globalFineFaceBandPhiFailure=transition.phiFailure;
-    this.info.globalFineFaceBandTransientPowerFirstError=transientPower.firstError;
-    this.info.globalFineFaceBandTransientPowerRows=transientPower.rowCount;
-    this.info.globalFineFaceBandTransientPowerEmitted=transientPower.emittedCount;
-    this.info.globalFineFaceBandTransientPowerSampled=transientPower.sampledCount;
-    this.info.globalFineFaceBandTransientPowerValidated=transientPower.validatedCount;
-    this.info.globalFineFaceBandPointFieldFirstError=pointField.firstError;
-    this.info.globalFineFaceBandPointFieldRows=pointField.rowCount;
-    this.info.globalFineFaceBandPointFieldSolved=pointField.solvedCount;
-    this.info.globalFineFaceBandPointFieldWallContributions=pointField.wallContributions;
-    this.info.globalFineFaceBandPowerPublicationFirstError=powerPublication.firstError;
-    this.info.globalFineFaceBandPowerPublicationFaces=powerPublication.faceCount;
-    this.info.globalFineFaceBandPowerPublicationTargets=powerPublication.targetCount;
-    this.info.globalFineFaceBandPowerPublicationInterpolated=powerPublication.interpolatedCount;
-    this.info.globalFineFaceBandPowerPublicationCommitted=powerPublication.committedCount;
-    this.info.globalFineFaceBandGeneration=faceBand.generation;
-    this.info.globalFineFaceBandValid=faceBand.valid;
-    this.info.globalFineFaceBandTransitionValid=transition.ready&&transition.transferReady&&transition.flags===0;
-    this.info.globalFineFaceBandPointFieldValid=pointField.valid;
-    this.info.globalFineFaceBandTransientPowerValid=transientPower.valid;
-    this.info.globalFineFaceBandPowerPublicationValid=powerPublication.valid;
-    this.info.globalFineFaceBandPowerFineGeneration=powerPublication.fineGeneration;
-    this.info.globalFineFaceBandPowerGeneration=powerPublication.powerGeneration;
+    const topology = unpackFineLevelSetGPUTopologyControl(value.topologyControl);
+    const coarse = unpackOctreePowerCoarseLevelSetControl(value.coarseControl);
+    this.info.globalFineSeedCount = value.seedControl[0] ?? 0;
+    this.info.globalFineSeedError = value.seedControl[1] ?? 0;
+    this.info.globalFineTopologyFlags = topology.flags;
+    this.info.globalFineDownstreamFinalizeReason = topology.downstreamFinalizeReason;
+    this.info.globalFineInterfaceBricks = topology.interfaceBricks;
+    this.info.globalFineDesiredBricks = topology.desiredBricks;
+    this.info.globalFineActivatedBricks = topology.activatedBricks;
+    this.info.globalFinePublished = topology.published;
+    this.info.globalFineRolledBack = topology.rolledBack;
+    // Word one is the active count; word zero is the generation. Reading word
+    // zero here reported the generation as a brick count, which is why fine
+    // band occupancy never appeared in a benchmark.
+    this.info.globalFineActiveBricks =
+      readFineLevelSetWorksetHeader(value.worklistHeader)?.activeCount ?? 0;
+    this.info.globalFineGeneration = value.configuredFineGeneration;
+    this.info.globalFineCoarseLevelSetFlags = coarse.flags;
+    this.info.globalFineCoarseLevelSetFirstErrorRow = coarse.firstErrorRow;
+    const velocity = value.structuredVelocityControl;
+    const boundary = value.structuredBoundaryControl;
+    this.info.structuredVelocityValid = velocity.length >= 6 && velocity[0] === 0
+      && (velocity[2] ?? 0) > 0 && (velocity[3] ?? 0) > 0 && (velocity[4] ?? 2) <= 1;
+    this.info.structuredVelocityRows = velocity[2] ?? 0;
+    this.info.structuredVelocityGeneration = velocity[3] ?? 0;
+    this.info.structuredVelocitySlots = velocity[5] ?? 0;
+    // Word 1 is the GPU reject carry and was previously read back and dropped.
+    // Naming the stage here is what separates "a face was rejected in the
+    // divergence gather" from the silent freeze it otherwise becomes.
+    const reject = decodeOctreeStructuredRejectCarry(velocity);
+    this.info.structuredRejectStage = reject.stage;
+    this.info.structuredRejectIndex = reject.index;
+    this.info.structuredRejectSummary = reject.clean ? undefined : reject.summary;
+    this.info.structuredBoundaryGeneration = boundary[4] ?? 0;
+    this.info.structuredBoundaryValid = boundary.length >= 7 && boundary[0] === 0
+      && boundary[2] === velocity[2] && boundary[4] === velocity[3]
+      && boundary[5] === velocity[4] && boundary[6] === velocity[3];
+    // Accepted structured control is the GPU-owned coupled-epoch receipt.
+    // Never relabel the host's newer attempt stamp as a published generation.
+    this.info.powerDiagramGeneration = this.info.structuredVelocityValid
+      && this.info.structuredBoundaryValid ? velocity[3] : undefined;
   }
 
   /** The paper path must be complete before the first trajectory can be
    * requested. These are one-time post-fence readbacks for UI readiness and
    * diagnostics; recurring frame scheduling remains GPU-resident. */
   private async validateInitialSparseAuthority() {
-    const projection=this.octreeProjection;
-    if(!projection)throw new Error("Initial sparse authority requires an octree projection");
-    const [,fine,mgpcg]=await Promise.all([
-      projection.readSolveDiagnostics(),
-      projection.readGlobalFineLevelSetDiagnostics(),
+    const projection = this.octreeProjection;
+    if (!projection) throw new Error("Initial sparse authority requires an octree projection");
+    const [, fine, mgpcg] = await Promise.all([
+      projection.readSolveDiagnostics(), projection.readGlobalFineLevelSetDiagnostics(),
       projection.readMGPCGDiagnostics(),
     ]);
     this.applyOctreeInfo(projection);
-    if(projection.globalFineLevelSetSource){
-      const readiness=initialGlobalFineAuthorityReadiness(fine,
-        { externallySeededColdBootstrap: true });
-      if(!readiness.ready){
-        const failureRow=await projection.readPowerCoarseFailureRow(fine?.coarseControl?.[1]??0xffff_ffff);
-        const candidate=fine?.powerFaceCandidateControl;
-        const reciprocalPair=candidate&&((candidate[3]??0)&16)!==0
-          ? await projection.readPowerFaceCandidateFailurePair(
-            candidate[4]??0xffff_ffff,candidate[13]??0xffff_ffff)
-          : undefined;
-        const powerFailure=await projection.readGlobalFinePowerPublicationFailure(
-          fine?.faceBandPowerPublicationControl?.[1]??0xffff_ffff);
-        const powerFrontierFailure=await projection.readPowerFrontierFailure();
-        const ownerPageControl=await projection.readOwnerPageControl();
-        const faceBandWords=fine?.faceBandCandidateControl??fine?.faceBandControl;
-        const faceBand=faceBandWords
-          ? unpackOctreeFaceBandControl(faceBandWords) : undefined;
-        const candidateTransition=fine?.faceBandCandidateTransitionControl
-          ? unpackOctreeFaceBandTransitionControl(fine.faceBandCandidateTransitionControl)
-          : undefined;
-        const transientPower=fine?.faceBandTransientPowerControl
-          ? unpackOctreeFaceBandTransientPowerControl(fine.faceBandTransientPowerControl)
-          : undefined;
-        const transientPowerFailure=transientPower
-          &&transientPower.firstError!==0xffff_ffff
-          ? transientPower.failureDomain==="face"
-            ? {
-                domain:"face",
-                face:await projection.readGlobalFineTransientPowerFaceFailure(transientPower.firstError),
-              }
-            : transientPower.firstError<transientPower.rowCount
-              ? {
-                  domain:"row",
-                  row:await projection.readGlobalFineBandRowFailure(transientPower.firstError),
-                  diagnostic:transientPower.diagnostic,
-                }
-              : {domain:"invalid",firstError:transientPower.firstError}
-          : undefined;
-        const ownerPageFailure=await projection.readOwnerPageForPowerRow(faceBand?.firstError??0);
-        const faceBandCoarseRow=await projection.readPowerCoarseFailureRow(faceBand?.firstError??0);
-        const powerSeedChain=await projection.readPowerSeedChainControls();
-        const descriptorFailure=await projection.readPowerDescriptorCandidateFailure(
-          fine?.powerDescriptorControl?.[3]??0xffff_ffff);
-        const faceBandFailures: { cause: string; detail: unknown }[]=[];
-        if(faceBand){
-          const faceEmission=faceBand.stageFirstFailures.faceEmission;
-          if(faceEmission!==0xffff_ffff){
-            const producerReason=(faceBandWords?.[7]??0)&0xfff;
-            const detail=producerReason===34
-              ? await projection.readGlobalFineCandidateBandIncidenceFailure(faceBand.rowCount)
-              : await projection.readGlobalFineCandidateBandRowFailure(faceEmission);
-            if(detail)faceBandFailures.push({cause:"faceEmission",detail});
-          }
-          if(faceBand.firstPhiFailureSlot!==0xffff_ffff){
-            const detail=await projection.readGlobalFineCandidateBandFaceFailure(faceBand.firstPhiFailureSlot);
-            if(detail)faceBandFailures.push({cause:"phiClosestPoint",detail});
-          }
-          const phiStage=faceBand.stageFirstFailures.phi;
-          if((phiStage&OCTREE_FACE_BAND_ACUTE_TETRA_FAILURE)!==0){
-            const detail=await projection.readGlobalFineCandidateBandAcuteTetraFailure(phiStage);
-            if(detail)faceBandFailures.push({cause:"acuteTetraRealization",detail});
-          }else if(faceBand.firstPhiFailureSlot===0xffff_ffff
-            &&candidateTransition?.ownerFailure?.stage===OCTREE_FACE_BAND_OWNER_FAILURE_STAGE.bandPhi){
-            const detail=await projection.readGlobalFineCandidateBandRowFailure(
-              candidateTransition.ownerFailure.band);
-            if(detail)faceBandFailures.push({cause:"phiRow",detail});
-          }
-          const vectorRow=faceBand.stageFirstFailures.vectorReconstruction;
-          if(vectorRow!==0xffff_ffff&&vectorRow<faceBand.rowCount){
-            const detail=await projection.readGlobalFineCandidateBandRowFailure(vectorRow);
-            if(detail)faceBandFailures.push({cause:"vectorReconstruction",detail});
-          }
-          for(const [cause,slot] of Object.entries(faceBand.firstClosestPointFailureSlotByCause)){
-            if(slot!==0xffff_ffff){
-              const detail=await projection.readGlobalFineCandidateBandFaceFailure(slot);
-              if(detail)faceBandFailures.push({cause,detail});
-            }
-          }
-        }
-        throw new Error(`Paused t=0 authority rejected: ${readiness.label}${failureRow
-          ? `; coarseFailureRow=${JSON.stringify(failureRow)}`:""}${powerFailure
-          ? `; powerPublicationFailure=${JSON.stringify(powerFailure)}`:""}${reciprocalPair
-          ? `; powerFaceReciprocalPair=${JSON.stringify(reciprocalPair)}`:""}${faceBandFailures.length
-          ? `; faceBandFailures=${JSON.stringify(faceBandFailures)}`:""}; ownerPageControl=${JSON.stringify(ownerPageControl)}`
-          + `${transientPowerFailure
-            ? `; transientPowerFailure=${JSON.stringify(transientPowerFailure)}`:""}`
-          + `${ownerPageFailure?`; ownerPageFailure=${JSON.stringify(ownerPageFailure)}`:""}`
-          + `${faceBandCoarseRow?`; faceBandCoarseRow=${JSON.stringify(faceBandCoarseRow)}`:""}`
-          + `; faceBandProducerFailure=${faceBandWords?.[7]??0xffff_ffff}`
-          + `; powerProjectionControl=${JSON.stringify(fine?.powerProjectionControl??[])}`
-          + `; powerFrontierFailure=${JSON.stringify(powerFrontierFailure)}`
-          + `${descriptorFailure?`; powerDescriptorFailure=${JSON.stringify(descriptorFailure)}`:""}`
-          + `; mgpcg=${JSON.stringify(mgpcg)}`
-          + `${powerSeedChain?`; powerSeedChain=${JSON.stringify(powerSeedChain)}`:""}`);
-      }
-      this.applyGlobalFineDiagnostics(fine!);
-      const c=this.scene.container;
-      const baseCellVolume_m3=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);
-      const volume=publishedGlobalFineVolumeCells(fine!,baseCellVolume_m3);
-      if(!volume)throw new Error("Paused t=0 authority rejected: global-fine volume publication is invalid");
-      this.info.referenceLiquidVolume_cells=volume.referenceVolumeCells;
-      this.info.volumeCellSum=volume.volumeCells;this.info.representedVolumeCellSum=volume.volumeCells;
-      this.info.volumeDrift=volume.drift;this.info.representedVolumeDrift=volume.drift;
-      this.info.volumeTelemetrySource="global-fine";
+    const velocity = fine?.structuredVelocityControl ?? [];
+    const boundary = fine?.structuredBoundaryControl ?? [];
+    const structuredReady = velocity.length >= 6 && velocity[0] === 0 && velocity[2] > 0
+      && velocity[3] !== 0 && velocity[4] <= 1;
+    const boundaryReady = boundary.length >= 7 && boundary[0] === 0
+      && boundary[2] === velocity[2] && boundary[4] === velocity[3]
+      && boundary[5] === velocity[4] && boundary[6] === velocity[3];
+    if (!structuredReady || !boundaryReady) {
+      const packedStructuredFailure = Number(velocity[1] ?? 0xffff_ffff) >>> 0;
+      const structuredFailureStage = packedStructuredFailure >>> 24;
+      const structuredFailureIndex = packedStructuredFailure & 0x00ff_ffff;
+      const structuredFailureRow = (structuredFailureStage >= 20 && structuredFailureStage < 24)
+        || (structuredFailureStage >= 40 && structuredFailureStage < 60)
+        ? await projection.readPowerCoarseFailureRow(structuredFailureIndex) : undefined;
+      const frontier = await projection.readPowerFrontierFailure();
+      const owner = await projection.readOwnerPageControl();
+      throw new Error("Paused t=0 structured authority rejected: velocity=" + JSON.stringify(velocity)
+        + "; boundary=" + JSON.stringify(boundary) + "; coarse=" + JSON.stringify(fine?.coarseControl ?? [])
+        + "; restriction=" + JSON.stringify(fine?.fineRestrictionControl ?? [])
+        + "; seedAdapter=" + JSON.stringify(fine?.fineSeedAdapterControl ?? [])
+        + "; firstSeed=" + JSON.stringify(fine?.firstFineSeedLeaf ?? [])
+        + "; firstVelocityA=" + JSON.stringify(fine?.firstStructuredVelocityA ?? [])
+        + "; firstVelocityB=" + JSON.stringify(fine?.firstStructuredVelocityB ?? [])
+        + "; firstCoarse=" + JSON.stringify(fine?.firstCoarsePhi ?? [])
+        + "; compactPrefix=" + JSON.stringify(fine?.compactRowPrefix ?? [])
+        + "; firstApertureAB=" + JSON.stringify(fine?.firstStructuredApertureAB ?? [])
+        + "; firstSolidNormalVelocityAB=" + JSON.stringify(fine?.firstStructuredSolidNormalVelocityAB ?? [])
+        + "; structuredFailureRow=" + JSON.stringify(structuredFailureRow)
+        + "; mgpcg=" + JSON.stringify(mgpcg ? Array.from(mgpcg) : [])
+        + "; frontier=" + JSON.stringify(frontier)
+        + "; owner=" + JSON.stringify(owner));
     }
-    const pressure=initialPowerPressureReadiness({
-        authoritative:projection.info.powerDiagramAuthoritative,
-        solverLabel:projection.pressureSolverLabel,
-        pressureRows:projection.info.pressureRequiredRows??0,
-        pressureEntries:projection.info.pressureRequiredEntries??0,
-        capacityOverflow:projection.info.pressureCapacityOverflow??false,
-        mgpcgControl:mgpcg,
-      });
-      if(!pressure.ready)throw new Error(`Paused t=0 authority rejected: ${pressure.label}`);
-      const floats=new Float32Array(mgpcg!.buffer,mgpcg!.byteOffset,mgpcg!.length);
-      this.info.quadtreePressureConverged=true;this.info.quadtreePressureIterationsUsed=mgpcg![2];
-      this.info.pressureResidual=Math.sqrt(Math.max(0,floats[4]));
-    this.info.pressureRelativeResidual=Math.sqrt(floats[4]/Math.max(floats[5],1e-30));
+    const pressure = initialPowerPressureReadiness({ authoritative: projection.info.powerDiagramAuthoritative,
+      solverLabel: projection.pressureSolverLabel, pressureRows: projection.info.pressureRequiredRows ?? 0,
+      capacityOverflow: projection.info.pressureCapacityOverflow ?? false, mgpcgControl: mgpcg });
+    if (!pressure.ready) {
+      const frontier = await projection.readPowerFrontierFailure();
+      throw new Error("Paused t=0 authority rejected: " + pressure.label
+        + "; mgpcg=" + JSON.stringify(mgpcg ? Array.from(mgpcg) : [])
+        + "; frontier=" + JSON.stringify(frontier));
+    }
+    const floats = new Float32Array(mgpcg!.buffer, mgpcg!.byteOffset, mgpcg!.length);
+    this.info.quadtreePressureConverged = true; this.info.quadtreePressureIterationsUsed = mgpcg![2];
+    const residualSquared = floats[10] + floats[11], rhsSquared = floats[8] + floats[9];
+    this.info.pressureResidual = Math.sqrt(Math.max(0, residualSquared));
+    this.info.pressureRelativeResidual = Math.sqrt(residualSquared / Math.max(rhsSquared, 1e-30));
   }
 
   /** Publish a complete t=0 scene after rigid-solid raster pipelines exist. */
@@ -1089,21 +877,21 @@ export class WebGPUUniformEulerianSolver {
     if (this.octreeProjection) this.applyOctreeInfo(this.octreeProjection);
     return source;
   }
-  get powerFaceSeedControl() { return this.octreeProjection?.powerFaceSeedControl; }
-  get powerFaceAdvectionControl() { return this.octreeProjection?.powerFaceAdvectionControl; }
-  get powerSolidFaceControl() { return this.octreeProjection?.powerSolidFaceControl; }
-  get powerOperatorControl() { return this.octreeProjection?.powerOperatorControl; }
+  get structuredVelocityControl() { return this.octreeProjection?.structuredVelocityControl; }
+  get structuredBoundaryControl() { return this.octreeProjection?.structuredBoundaryControl; }
+  get structuredRowVelocities() { return this.octreeProjection?.structuredRowVelocities; }
+  get structuredAuthority() { return this.octreeProjection?.structuredAuthority; }
+  get structuredWorksets() { return this.octreeProjection?.structuredWorksets; }
+  /** Post-submit diagnostics only; never consumed by the simulation schedule. */
+  get workAccounting() { return this.octreeProjection?.workAccounting; }
+  get workAccountingBuffers() { return this.octreeProjection?.workAccountingBuffers; }
+  get workAccountingPlan() { return this.octreeProjection?.workAccountingPlan; }
+  captureWorkAccounting() { return this.octreeProjection?.captureWorkAccounting(); }
   /** QA-only passthrough for the authoritative Section 4.3 solver status. */
   get mgpcgControl() { return this.octreeProjection?.mgpcgControl; }
-  get powerFaceControl() { return this.octreeProjection?.powerFaceControl; }
-  get powerFaceCandidateControl() { return this.octreeProjection?.powerFaceCandidateControl; }
-  get powerFaceSource() { return this.octreeProjection?.powerFaceSource; }
-  readPowerEnergyLedger() { return this.octreeProjection?.readEnergyLedger(); }
-  get powerBoundaryPhiQueries() { return this.octreeProjection?.powerBoundaryPhiQueries; }
   get ownerLatticeDebug() { return this.octreeProjection?.ownerLatticeDebug; }
   get powerBoundaryFineSource() { return this.octreeProjection?.powerBoundaryFineSource; }
   get powerBoundaryFineLevelSetSource() { return this.octreeProjection?.powerBoundaryFineLevelSetSource; }
-  get powerFaceRowDirectory() { return this.octreeProjection?.powerFaceRowDirectory; }
   get powerDescriptorControl() { return this.octreeProjection?.powerDescriptorControl; }
   get powerTopologyControl() { return this.octreeProjection?.powerTopologyControl; }
   get powerDescriptorRows() { return this.octreeProjection?.powerDescriptorRows; }
@@ -1111,9 +899,6 @@ export class WebGPUUniformEulerianSolver {
   get powerCatalogEntryHeaders() { return this.octreeProjection?.powerCatalogEntryHeaders; }
   get powerCatalogFaces() { return this.octreeProjection?.powerCatalogFaces; }
   get powerLeafHeaders() { return this.octreeProjection?.powerLeafHeaders; }
-  /** QA-only passthrough for compact reconstructed-velocity readback. */
-  get powerCellVelocityBuffer() { return this.octreeProjection?.powerCellVelocityBuffer; }
-  get powerLeafEntries() { return this.octreeProjection?.powerLeafEntries; }
   get powerPressureBuffer() { return this.octreeProjection?.powerPressureBuffer; }
   get powerLeafFrontier() { return this.octreeProjection?.powerLeafFrontier; }
   get powerCompactionControl() { return this.octreeProjection?.powerCompactionControl; }
@@ -1140,62 +925,10 @@ export class WebGPUUniformEulerianSolver {
   get globalFinePageDeltaDebug() { return this.octreeProjection?.globalFinePageDeltaDebug; }
   get globalFinePageDeltaDebugPair() { return this.octreeProjection?.globalFinePageDeltaDebugPair; }
   get globalFineVolumeControl() { return this.octreeProjection?.globalFineVolumeControl; }
-  get globalFinePowerVelocityControl() { return this.octreeProjection?.globalFinePowerVelocityControl; }
-  get globalFinePowerProjectionControl() { return this.octreeProjection?.globalFinePowerProjectionControl; }
-  get globalFinePowerVelocitySampleControl() { return this.octreeProjection?.globalFinePowerVelocitySampleControl; }
+  get structuredProjectionEnergyStats() { return this.octreeProjection?.structuredProjectionEnergyStats; }
   get globalFineCoarseLevelSetControl() { return this.octreeProjection?.globalFineCoarseLevelSetControl; }
   readPowerCoarseFailureRow(row: number) { return this.octreeProjection?.readPowerCoarseFailureRow(row); }
-  readPowerFaceCandidateFailurePair(row: number, neighbor: number) {
-    return this.octreeProjection?.readPowerFaceCandidateFailurePair(row, neighbor);
-  }
-  readPowerFaceCandidateFailure(faceIndex: number) {
-    return this.octreeProjection?.readPowerFaceCandidateFailure(faceIndex);
-  }
   get globalFineRestrictionControl() { return this.octreeProjection?.globalFineRestrictionControl; }
-  get globalFineFaceBandControl() { return this.octreeProjection?.globalFineFaceBandControl; }
-  get globalFineFaceBandCandidateControl() {
-    return this.octreeProjection?.globalFineFaceBandCandidateControl;
-  }
-  get globalFineFaceBandTransitionControl() {
-    return this.octreeProjection?.globalFineFaceBandTransitionControl;
-  }
-  get globalFineFaceBandCandidateTransitionControl() {
-    return this.octreeProjection?.globalFineFaceBandCandidateTransitionControl;
-  }
-  get globalFineFaceBandPointFieldControl() {
-    return this.octreeProjection?.globalFineFaceBandPointFieldControl;
-  }
-  get globalFineFaceBandTransientPowerControl() {
-    return this.octreeProjection?.globalFineFaceBandTransientPowerControl;
-  }
-  get globalFineFaceBandPowerPublicationControl() {
-    return this.octreeProjection?.globalFineFaceBandPowerPublicationControl;
-  }
-  get globalFineFaceBandPlan() { return this.octreeProjection?.globalFineFaceBandPlan; }
-  readGlobalFineBandRowFailure(index: number) {
-    return this.octreeProjection?.readGlobalFineBandRowFailure(index);
-  }
-  readGlobalFineCandidateBandRowFailure(index: number) {
-    return this.octreeProjection?.readGlobalFineCandidateBandRowFailure(index);
-  }
-  readGlobalFineBandFaceFailure(slot: number) {
-    return this.octreeProjection?.readGlobalFineBandFaceFailure(slot);
-  }
-  readGlobalFineCandidateBandFaceFailure(slot: number) {
-    return this.octreeProjection?.readGlobalFineCandidateBandFaceFailure(slot);
-  }
-  readGlobalFineCandidateBandIncidenceFailure(rowCount: number) {
-    return this.octreeProjection?.readGlobalFineCandidateBandIncidenceFailure(rowCount);
-  }
-  readGlobalFineTransientPowerFaceFailure(slot: number) {
-    return this.octreeProjection?.readGlobalFineTransientPowerFaceFailure(slot);
-  }
-  readGlobalFineBandAcuteTetraFailure(tagged: number) {
-    return this.octreeProjection?.readGlobalFineBandAcuteTetraFailure(tagged);
-  }
-  readGlobalFineCandidateBandAcuteTetraFailure(tagged: number) {
-    return this.octreeProjection?.readGlobalFineCandidateBandAcuteTetraFailure(tagged);
-  }
   get columnBaseTexture() { return this.hostAllocation ? this.heightA : undefined; }
   get gridCellTexture() { return this.adaptiveProjection?.topologyTexture; }
   get velocityTexture() { return this.octreeProjection ? undefined : this.velocityA; }
@@ -1343,13 +1076,12 @@ export class WebGPUUniformEulerianSolver {
       quadtreePressureIterationHardBudget: octree.pressureIterationHardBudget,
       quadtreePressureConverged: octree.pressureConverged,
       pressureRowCapacity: octree.pressureRowCapacity,
-      pressureEntryCapacity: octree.pressureEntryCapacity,
       pressureRequiredRows: octree.pressureRequiredRows,
-      pressureRequiredEntries: octree.pressureRequiredEntries,
       pressureCapacityOverflow: octree.pressureCapacityOverflow,
       powerDiagramReady: octree.powerDiagramReady,
       powerDiagramAuthoritative: octree.powerDiagramAuthoritative,
-      powerDiagramGeneration: projection.powerPublicationGeneration,
+      ...(projection.powerPublicationGeneration === undefined ? {}
+        : { powerDiagramGeneration: projection.powerPublicationGeneration }),
       powerDiagramAllocatedBytes: octree.powerDiagramAllocatedBytes,
       globalFineLevelSetAllocatedBytes: octree.globalFineLevelSetAllocatedBytes,
       globalFineLevelSetResidentBrickCapacity: octree.globalFineLevelSetResidentBrickCapacity,
@@ -1373,14 +1105,18 @@ export class WebGPUUniformEulerianSolver {
       quadtreeTopologyReadbackBytes: 0,
       hostFluidAuthority: "gpu-resident",
       hostSimulationSizedWorkItems: 0,
-      hostSchedulingUsesReadback: true,
+      // The octree outer graph is encoded exactly once per fixed controller
+      // step.  Its fine characteristic kernel owns the fixed maximum segment
+      // schedule and derives the active segment count on the GPU from the
+      // accepted structured velocity publication.
+      hostSchedulingUsesReadback: false,
     });
   }
   private statsReadback() {
     // readbackPending guarantees that this buffer is never copied while mapped.
     return this.statsReadbackBuffer ??= this.device.createBuffer({
       label: "Uniform pooled statistics readback",
-      size: 16,
+      size: 16 + STRUCTURED_PROJECTION_ENERGY_WORDS * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
     });
   }
@@ -1498,21 +1234,19 @@ export class WebGPUUniformEulerianSolver {
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
     this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
-    // Proactive CFL control. The latest completed reduction is the previous
-    // projected maximum; gravity is the only unbounded explicit acceleration
-    // before the next solve, so prevMax + |g| dt is a conservative readback-
-    // free bound for choosing this frame's subdivisions.
+    // The quadtree backend still uses its host-side outer subdivision.  The
+    // octree does not: its outer command graph is one fixed controller step,
+    // while direct fine transport encodes a fixed maximum characteristic
+    // schedule and selects active segments from GPU-resident structured
+    // velocity state.  This keeps scheduling decisions off the host and
+    // preserves the exact displacement used by support-closure validation.
     const coarseHMin = Math.min(c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz);
     // Sparse phi advection is semi-Lagrangian and does not force the global
     // pressure solve onto the fine geometric timestep. Preserve the coarse
     // Chebyshev cadence unless explicit fine dynamics is enabled.
     const hMin = coarseHMin;
     const inflowSpeed = this.scene.fluid.inflow ? Math.hypot(this.scene.fluid.inflow.velocity_m_s.x, this.scene.fluid.inflow.velocity_m_s.y, this.scene.fluid.inflow.velocity_m_s.z) : 0;
-    // Remaining residency exception: the latest asynchronous speed reduction
-    // still selects the bounded host substep count. Section 5 requires the
-    // full backtrace, so this must not be replaced by trajectory clamping.
-    // Migrate it to a fixed maximum encoded schedule with GPU no-op stages.
-    const substeps = this.adaptiveProjection ? proactiveQuadtreeSubsteps(
+    const substeps = this.quadtreeProjection ? proactiveQuadtreeSubsteps(
       this.info.maxSpeed_m_s ?? 0,
       inflowSpeed,
       Math.hypot(this.scene.fluid.gravity_m_s2.x, this.scene.fluid.gravity_m_s2.y, this.scene.fluid.gravity_m_s2.z),
@@ -1522,10 +1256,13 @@ export class WebGPUUniformEulerianSolver {
       rho,
       sigma
     ) : 1;
-    const dt = delta / substeps; this.info.lastDt_s = dt; this.info.lastSubsteps = substeps;
+    const dt = delta / substeps;
+    this.info.lastDt_s = this.octreeProjection ? undefined : dt;
+    this.info.lastSubsteps = this.octreeProjection ? undefined : substeps;
     this.octreeProjection?.setTimestep(dt);
     const activeBodies = bodies.slice(0, 12);
-    this.rigidSystem.syncBodies(activeBodies); this.info.encodedSteps = (this.info.encodedSteps ?? 0) + substeps;
+    this.rigidSystem.syncBodies(activeBodies);
+    this.info.encodedSteps = (this.info.encodedSteps ?? 0) + (this.octreeProjection ? 1 : substeps);
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
     const timestampTraceUnavailable = !GPUPerformanceTraceRecorder.supported(this.device)
@@ -1580,28 +1317,20 @@ export class WebGPUUniformEulerianSolver {
       return segmentedPhysicsTrace?.completePhase(completedEncoder, phase) ?? completedEncoder;
     };
     encoder.clearBuffer(this.rigidExchangeBuffer);
-    // Narita Algorithm 1: regenerate the quadtree at the top of every step.
-    // The fully GPU-resident rebuild encodes ahead of advection in the same
-    // command stream (queue order = algorithm order) with zero staleness;
-    // the asynchronous pipeline below remains the warmup/regrow/rigid path.
+    // Narita's quadtree path regenerates at the top of the step. The octree
+    // path publishes only a previously validated candidate here; candidate
+    // construction itself runs at the tail of each substep.
     let inlineRebuildEncoded = false;
     if (this.quadtreeProjection && this.rebuildQuadtreeEachStep && this.quadtreeInlineRebuild && !this.quadtreeRebuildPending && !this.quadtreeReadyProjection && this.quadtreeProjection.canEncodeInlineRebuild) {
       inlineRebuildEncoded = this.quadtreeProjection.encodeInlineRebuild(encoder);
-    } else if (this.octreeProjection) {
-      inlineRebuildEncoded = this.octreeProjection.encodeInlineRebuild(encoder);
     }
     encoder = completePhysicsPhase(encoder, this.adaptiveProjection
       ? { id: "coarse-grid", label: "Adaptive coarse-grid topology" }
       : { id: "other", label: "Advance setup" });
     for (let substep = 0; substep < substeps; substep += 1) {
-      // The first rebuild was encoded above so topology is ready before any
-      // dynamics. If CFL control subdivides this advance, phi moves after each
-      // projection; rebuild again before the next substep so a newly exposed
-      // interface can never remain inside a coarse pressure leaf.
-      if (substep > 0 && this.octreeProjection) {
-        this.octreeProjection.encodeInlineRebuild(encoder);
-        encoder = completePhysicsPhase(encoder, { id: "coarse-grid", label: "CFL substep topology refresh" });
-      }
+      // The active epoch is immutable for the entire substep. A ready
+      // candidate from the prior tail may flip only at this boundary.
+      this.octreeProjection?.encodeReadyTopologyFlip(encoder);
       // U3 compact-face authority owns advection, forces, divergence, and
       // projection inside WebGPUOctreeProjection. The shared dense kernels are
       // not merely redundant here: dispatching them would address the 1x1
@@ -1650,6 +1379,15 @@ export class WebGPUUniformEulerianSolver {
           strength: inflowStepStrength
         } : undefined;
         if (this.octreeProjection) {
+          // Advect both fine and coarse phi with the previous substep's
+          // projected + closest-point-extended velocity. Current-substep
+          // gravity/forces enter below, after surface transport; using that
+          // unprojected predictor here creates systematic boundary volume
+          // error.
+          encoder = this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
+            physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
+              return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
+            } : undefined);
           encoder = this.octreeProjection.encode(
             encoder,
             this.info.nx,
@@ -1661,21 +1399,18 @@ export class WebGPUUniformEulerianSolver {
               } : undefined,
             }
           );
+          // The current surface and pressure solve consumed one immutable
+          // active epoch. Build the next epoch only after both are complete;
+          // its validated selector remains pending until the next substep.
+          inlineRebuildEncoded =
+            this.octreeProjection.encodeInactiveTopologyCandidate(encoder);
+          encoder = completePhysicsPhase(
+            encoder,
+            { id: "coarse-grid", label: "Inactive next-substep topology candidate" },
+          );
         } else if (this.quadtreeProjection) {
           this.quadtreeProjection.encode(encoder, this.info.nx, this.info.ny, this.info.nz);
           encoder = completePhysicsPhase(encoder, { id: "pressure-solve", label: "Adaptive pressure + projection" });
-        }
-        // Transport phi from the freshly projected, narrow-band-extrapolated
-        // velocity. Sampling the previous frame here was the one-frame lag
-        // that froze crests and newly exposed interface cells.
-        if (this.octreeProjection) {
-          // Segmented boundary callbacks finish the encoder they are handed;
-          // continuing on the stale reference would finish it a second time.
-          encoder = this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
-            physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
-              return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
-            } : undefined);
-        } else {
           this.adaptiveProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s);
         }
         if (!this.octreeProjection) {
@@ -1785,7 +1520,9 @@ export class WebGPUUniformEulerianSolver {
     // Solver residuals are sampled only through the opt-in telemetry path.
     // Physics submission itself must not initiate a GPU-to-CPU map.
     if (this.octreeProjection && inlineRebuildEncoded) {
-      for (let rebuild = 0; rebuild < substeps; rebuild += 1) this.octreeProjection.finishInlineRebuild();
+      for (let rebuild = 0; rebuild < substeps; rebuild += 1) {
+        this.octreeProjection.finishTopologyCandidate();
+      }
       this.applyOctreeInfo(this.octreeProjection);
       this.info.quadtreeRebuildCompletedCount = (this.info.quadtreeRebuildCompletedCount ?? 0) + substeps;
     }
@@ -1824,6 +1561,10 @@ export class WebGPUUniformEulerianSolver {
     this.readbackPending = true;
     const buffer = this.statsReadback(), encoder = this.device.createCommandEncoder();
     if (this.reductionBuffer) encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16);
+    const structuredProjectionEnergy = this.octreeProjection?.structuredProjectionEnergyStats;
+    if (structuredProjectionEnergy) encoder.copyBufferToBuffer(
+      structuredProjectionEnergy, 0, buffer, 16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4,
+    );
     this.device.queue.submit([encoder.finish()]);
     const mapPromise = buffer.mapAsync(GPUMapMode.READ);
     const compactFineExpected = Boolean(this.octreeProjection?.globalFineLevelSetSource);
@@ -1847,10 +1588,37 @@ export class WebGPUUniformEulerianSolver {
     const words = this.reductionBuffer
       ? new Uint32Array(buffer.getMappedRange(0, 16))
       : new Uint32Array(4);
+    const structuredEnergy = structuredProjectionEnergy
+      ? decodeStructuredProjectionEnergy(new Uint32Array(
+        buffer.getMappedRange(16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4),
+      ))
+      : undefined;
+    if (structuredEnergy?.sample) {
+      this.info.structuredPreProjectionKineticEnergyProxy =
+        structuredEnergy.sample.preProjectionKineticEnergyProxy;
+      this.info.structuredPostProjectionKineticEnergyProxy =
+        structuredEnergy.sample.postProjectionKineticEnergyProxy;
+      this.info.structuredProjectionEnergyRatio = structuredEnergy.sample.projectionEnergyRatio;
+      this.info.structuredProjectionEnergySampleCount = 1;
+    } else {
+      this.info.structuredPreProjectionKineticEnergyProxy = undefined;
+      this.info.structuredPostProjectionKineticEnergyProxy = undefined;
+      this.info.structuredProjectionEnergyRatio = undefined;
+      this.info.structuredProjectionEnergySampleCount = undefined;
+    }
     const initial = Math.max(1, this.info.initialVolumeCellSum ?? 1);
     const conservativeVolumeCells=words[3]/2048;this.info.rawVolumeDrift=this.transportConservativeVolume?(conservativeVolumeCells-initial)/initial:undefined;
     const c=this.scene.container,baseCellVolume_m3=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);
-    const compactVolume=compactFineExpected&&globalFineDiagnostics?publishedGlobalFineVolumeCells(globalFineDiagnostics,baseCellVolume_m3):undefined;
+    const compactVolumeTopology=compactFineExpected&&globalFineDiagnostics
+      ? unpackFineLevelSetGPUTopologyControl(globalFineDiagnostics.topologyControl) : undefined;
+    const compactVolume=compactFineExpected&&globalFineDiagnostics&&compactVolumeTopology
+      ? publishedGlobalFineVolumeCells({
+        published:compactVolumeTopology.published,
+        rolledBack:compactVolumeTopology.rolledBack,
+        downstreamFinalizeReason:compactVolumeTopology.downstreamFinalizeReason,
+        generation:globalFineDiagnostics.configuredFineGeneration,
+        volumeControl:globalFineDiagnostics.fineVolumeControl,
+      },baseCellVolume_m3) : undefined;
     if(compactVolume){
       this.info.referenceLiquidVolume_cells=compactVolume?.referenceVolumeCells;
       this.info.volumeCellSum=compactVolume?.volumeCells;
@@ -1892,9 +1660,7 @@ export class WebGPUUniformEulerianSolver {
       this.info.quadtreePressureIterationBudget = this.octreeProjection.info.pressureIterationBudget;
           this.info.quadtreePressureIterationHardBudget = this.octreeProjection.info.pressureIterationHardBudget;
           this.info.pressureRowCapacity = this.octreeProjection.info.pressureRowCapacity;
-          this.info.pressureEntryCapacity = this.octreeProjection.info.pressureEntryCapacity;
           this.info.pressureRequiredRows = this.octreeProjection.info.pressureRequiredRows;
-          this.info.pressureRequiredEntries = this.octreeProjection.info.pressureRequiredEntries;
           this.info.pressureCapacityOverflow = this.octreeProjection.info.pressureCapacityOverflow;
           this.info.frontierListCapacity = this.octreeProjection.info.frontierListCapacity;
           this.info.frontierRequiredLeaves = this.octreeProjection.info.frontierRequiredLeaves;

@@ -5,6 +5,7 @@ import {
   type PerformanceTrace,
 } from "../lib/performance-trace";
 import type { GPUDataFlowManifest } from "./webgpu-data-flow-manifest";
+import type { OctreeWorkSnapshot } from "../lib/webgpu-octree-work-accounting";
 
 export interface PowerDamCommandBucket {
   readonly calls: number;
@@ -43,11 +44,51 @@ export interface PowerDamResultRecord {
   readonly phase: "result";
   readonly steps: number;
   readonly simulationWall_ms: number;
+  readonly simulatedTime_s?: number;
+  readonly pressureRelativeResidual?: number;
+  readonly volumeDrift?: number;
+  readonly stabilityEnvelope?: {
+    readonly maximumPressureRelativeResidual?: number;
+    readonly maximumExactVolumeDrift?: number;
+    readonly maximumProjectionEnergyRatio?: number;
+    /** Number of paired pre/post projection energy observations behind the maximum. */
+    readonly projectionEnergySampleCount?: number;
+  };
+  readonly octreeWorkAccounting?: OctreeWorkSnapshot;
+  readonly compactMechanicalEnergyCheckpoints?: readonly {
+    readonly time_s: number;
+    readonly mechanicalEnergyRetentionRatio: number;
+    readonly publicationValid: boolean;
+    readonly rowCount: number;
+    readonly reconstructedRows: number;
+    readonly invalidRows: number;
+    readonly liquidCellCount: number;
+    readonly finiteLiquidCellCount: number;
+  }[];
   readonly validationErrors?: readonly string[];
   readonly gpuCommandAudit?: PowerDamCommandAudit;
   readonly gpuFineTimestamps?: PowerDamFineTimestampReport;
   readonly gpuDataFlowManifest?: GPUDataFlowManifest;
   readonly physicsTrace?: PerformanceTrace;
+  /** Terminal state counters already published by the smoke runner. These are
+   * snapshots, not sums, so a differential window retains the later value. */
+  readonly activeSampleCount?: number;
+  readonly globalFineActiveBricks?: number;
+  readonly globalFineDesiredBricks?: number;
+  /** Physical page capacity and the logical brick domain. Their ratio against
+   * the active count is the fine-band occupancy the narrow-band design exists
+   * to keep small; see docs/FINE_BAND_DENSITY_PLAN.md. */
+  readonly globalFineLevelSetResidentBrickCapacity?: number;
+  readonly globalFineLevelSetLogicalBrickCount?: number;
+  readonly globalFineTransportSegmentCount?: number;
+  readonly quadtreePressureIterationsUsed?: number;
+  readonly quadtreePressureIterationBudget?: number;
+  readonly quadtreePressureIterationHardBudget?: number;
+  readonly measurementWindow?: {
+    readonly kind: "paired-prefix-difference";
+    readonly startStep: number;
+    readonly endStep: number;
+  };
 }
 
 export interface PowerDamPerformanceSummary {
@@ -57,6 +98,22 @@ export interface PowerDamPerformanceSummary {
   readonly simulationWall_ms: number;
   readonly advanceWall_ms: number;
   readonly validationErrorCount: number;
+  readonly measurementWindow?: PowerDamResultRecord["measurementWindow"];
+  /** Existing runner telemetry available without another GPU readback. Active
+   * sets and pressure counts describe the terminal measured advance. */
+  readonly terminalCounters?: {
+    readonly activeSamples?: number;
+    readonly activeFineBricks?: number;
+    readonly desiredFineBricks?: number;
+    readonly fineBrickCapacity?: number;
+    readonly logicalFineBricks?: number;
+    /** activeFineBricks / logicalFineBricks. See docs/FINE_BAND_DENSITY_PLAN.md. */
+    readonly fineBandOccupancy?: number;
+    readonly transportSegments?: number;
+    readonly pressureIterationsExecuted?: number;
+    readonly pressureIterationsScheduled?: number;
+    readonly pressureIterationsHardLimit?: number;
+  };
   readonly commands?: {
     readonly dispatchesPerAdvance: number;
     readonly indirectDispatchesPerAdvance: number;
@@ -110,6 +167,159 @@ export interface PowerDamPerformanceLimits {
 
 const perAdvance = (value: number | undefined, steps: number): number => (value ?? 0) / steps;
 
+const finiteCounter = (value: number | undefined): number | undefined =>
+  value !== undefined && Number.isFinite(value) && value >= 0 ? value : undefined;
+
+/** Active fine bricks as a fraction of the logical brick lattice. The paper's
+ * narrow band sits near 0.06; anything approaching 1.0 means the "sparse"
+ * lattice has been materialized densely. */
+const fineBandOccupancy = (
+  active: number | undefined,
+  logical: number | undefined,
+): number | undefined => {
+  const activeBricks = finiteCounter(active);
+  const logicalBricks = finiteCounter(logical);
+  if (activeBricks === undefined || logicalBricks === undefined || logicalBricks === 0) {
+    return undefined;
+  }
+  return activeBricks / logicalBricks;
+};
+
+function subtractCounter(
+  later: number | undefined,
+  earlier: number | undefined,
+  label: string,
+): number | undefined {
+  if (later === undefined && earlier === undefined) return undefined;
+  if (later === undefined || earlier === undefined) {
+    throw new Error(`Power dam window cannot subtract ${label}: counter availability differs`);
+  }
+  const difference = later - earlier;
+  if (!Number.isFinite(difference) || difference < 0) {
+    throw new Error(`Power dam window cannot subtract ${label}: cumulative counter decreased`);
+  }
+  return difference;
+}
+
+function subtractBucket(
+  later: PowerDamCommandBucket | undefined,
+  earlier: PowerDamCommandBucket | undefined,
+  label: string,
+): PowerDamCommandBucket | undefined {
+  if (!later && !earlier) return undefined;
+  return {
+    calls: subtractCounter(later?.calls, earlier?.calls, `${label} calls`)!,
+    bytes: subtractCounter(later?.bytes, earlier?.bytes, `${label} bytes`)!,
+  };
+}
+
+function subtractBucketMap(
+  later: Readonly<Record<string, PowerDamCommandBucket>> | undefined,
+  earlier: Readonly<Record<string, PowerDamCommandBucket>> | undefined,
+  label: string,
+): Readonly<Record<string, PowerDamCommandBucket>> | undefined {
+  if (!later && !earlier) return undefined;
+  if (!later || !earlier) {
+    throw new Error(`Power dam window cannot subtract ${label}: bucket availability differs`);
+  }
+  const result: Record<string, PowerDamCommandBucket> = {};
+  for (const key of new Set([...Object.keys(later), ...Object.keys(earlier)])) {
+    const bucket = subtractBucket(later[key] ?? { calls: 0, bytes: 0 },
+      earlier[key] ?? { calls: 0, bytes: 0 }, `${label} ${key}`)!;
+    if (bucket.calls !== 0 || bucket.bytes !== 0) result[key] = bucket;
+  }
+  return result;
+}
+
+function subtractCommandAudit(
+  later: PowerDamCommandAudit | undefined,
+  earlier: PowerDamCommandAudit | undefined,
+): PowerDamCommandAudit | undefined {
+  if (!later && !earlier) return undefined;
+  if (!later || !earlier) {
+    throw new Error("Power dam window cannot subtract command audit: availability differs");
+  }
+  return {
+    clearBuffer: subtractBucket(later.clearBuffer, earlier.clearBuffer, "clearBuffer"),
+    copyBufferToBuffer: subtractBucket(later.copyBufferToBuffer, earlier.copyBufferToBuffer,
+      "copyBufferToBuffer"),
+    computePasses: subtractCounter(later.computePasses, earlier.computePasses, "computePasses"),
+    dispatches: subtractCounter(later.dispatches, earlier.dispatches, "dispatches"),
+    indirectDispatches: subtractCounter(later.indirectDispatches, earlier.indirectDispatches,
+      "indirectDispatches"),
+    computePassesByLabel: subtractBucketMap(later.computePassesByLabel,
+      earlier.computePassesByLabel, "computePassesByLabel"),
+    dispatchesByPassLabel: subtractBucketMap(later.dispatchesByPassLabel,
+      earlier.dispatchesByPassLabel, "dispatchesByPassLabel"),
+  };
+}
+
+/**
+ * Isolate a trailing benchmark window when the smoke runner only exposes
+ * cumulative counters. Both records start from the same deterministic scene;
+ * subtracting the settle-prefix run from the longer run excludes warmup work.
+ *
+ * Fine timestamps and data-flow manifests are intentionally not subtracted:
+ * their current reports contain distributions/identities that cannot be
+ * reconstructed exactly from two cumulative aggregates.
+ */
+export function powerDamResultWindow(
+  settlePrefix: PowerDamResultRecord,
+  complete: PowerDamResultRecord,
+): PowerDamResultRecord {
+  if (settlePrefix.scenario !== complete.scenario || settlePrefix.method !== complete.method) {
+    throw new Error("Power dam window records must have the same scenario and method");
+  }
+  if (settlePrefix.steps < 1 || complete.steps <= settlePrefix.steps) {
+    throw new Error("Power dam window requires a non-empty suffix after the settle prefix");
+  }
+  const simulationWall_ms = complete.simulationWall_ms - settlePrefix.simulationWall_ms;
+  if (!Number.isFinite(simulationWall_ms) || simulationWall_ms < 0) {
+    throw new Error("Power dam window wall time decreased across cumulative runs");
+  }
+  return {
+    scenario: complete.scenario,
+    method: complete.method,
+    phase: "result",
+    steps: complete.steps - settlePrefix.steps,
+    simulationWall_ms,
+    simulatedTime_s: complete.simulatedTime_s === undefined || settlePrefix.simulatedTime_s === undefined
+      ? undefined : complete.simulatedTime_s - settlePrefix.simulatedTime_s,
+    validationErrors: [
+      ...(settlePrefix.validationErrors ?? []),
+      ...(complete.validationErrors ?? []),
+    ],
+    gpuCommandAudit: subtractCommandAudit(
+      complete.gpuCommandAudit,
+      settlePrefix.gpuCommandAudit,
+    ),
+    // A generic trace is one terminal sampled advance, so the complete run's
+    // trace belongs to the suffix even though it is not a window average.
+    physicsTrace: complete.physicsTrace,
+    pressureRelativeResidual: complete.pressureRelativeResidual,
+    volumeDrift: complete.volumeDrift,
+    stabilityEnvelope: complete.stabilityEnvelope,
+    octreeWorkAccounting: complete.octreeWorkAccounting,
+    compactMechanicalEnergyCheckpoints: complete.compactMechanicalEnergyCheckpoints?.filter(
+      (sample) => sample.time_s > (settlePrefix.simulatedTime_s ?? Number.POSITIVE_INFINITY),
+    ),
+    activeSampleCount: complete.activeSampleCount,
+    globalFineActiveBricks: complete.globalFineActiveBricks,
+    globalFineDesiredBricks: complete.globalFineDesiredBricks,
+    globalFineLevelSetResidentBrickCapacity: complete.globalFineLevelSetResidentBrickCapacity,
+    globalFineLevelSetLogicalBrickCount: complete.globalFineLevelSetLogicalBrickCount,
+    globalFineTransportSegmentCount: complete.globalFineTransportSegmentCount,
+    quadtreePressureIterationsUsed: complete.quadtreePressureIterationsUsed,
+    quadtreePressureIterationBudget: complete.quadtreePressureIterationBudget,
+    quadtreePressureIterationHardBudget: complete.quadtreePressureIterationHardBudget,
+    measurementWindow: {
+      kind: "paired-prefix-difference",
+      startStep: settlePrefix.steps,
+      endStep: complete.steps,
+    },
+  };
+}
+
 interface PowerDamComputePassOwnershipRule {
   readonly stage: string;
   readonly label: RegExp;
@@ -123,38 +333,33 @@ const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRul
   { stage: "Octree owner pages", label: /owner[- ]page|owner pages|analytic octree owner generation/i },
   { stage: "Power energy ledger", label: /^Power energy ledger\b/i },
   { stage: "Fine seed adapter", label: /octree fine-seed|octree interface candidates|FineSeedLeaf to global fine seeds|Seed global fine bricks from (?:FineSeedLeaf candidates|every interface leaf)|fine-seed brick residency/i },
-  { stage: "Section 5 face band · catalog adjacency", label: /^(?:Classify exact Section 5 catalog-adjacency delta|Resolve (?:exact affected )?Section 5 catalog adjacency|Validate and publish Section 5 catalog adjacency)$/i },
-  { stage: "Section 5 face band · topology", label: /^(?:Build exact Section 5 support-row delta|Publish Section 5 regular-face topology)$/i },
-  { stage: "Section 5 face band · extrapolation", label: /^(?:Extrapolate Section 5 regular-face velocities|Publish grouped face-band transport authority)$/i },
-  { stage: "Section 5 face band · power publication", label: /^(?:Publish Section 5 regular velocities to power faces|Prepare mandatory Section 5 regular-face completion|Complete power-face advection from Section 5 regular band|Publish completed Section 5 power-face advection)$/i },
-  { stage: "Section 5 old-mesh face advection", label: /(?:Section 5 old-mesh|old-mesh face advection|old power interpolation|live old power interpolation|2017 old-mesh)/i },
+  { stage: "Structured velocity publication", label: /(?:direct structured|structured velocity publication|structured cell velocities|six structured velocity families)/i },
+  { stage: "Structured boundary coefficients", label: /structured boundary/i },
+  { stage: "Structured velocity dynamics", label: /structured dynamics/i },
   { stage: "Fine transport · prepare trajectory chunks", label: /^Prepare global fine trajectory chunk \d+\/\d+$/i },
   { stage: "Fine transport · advance trajectories", label: /^Advance global fine trajectories \d+\/\d+$/i },
   { stage: "Fine transport · sample departure chunks", label: /^Sample global fine departure chunk \d+\/\d+$/i },
   { stage: "Fine transport · summarize departure chunks", label: /^Summarize global fine departure chunk \d+\/\d+$/i },
   { stage: "Fine transport · finalize departure summaries", label: /^Finalize global fine departure chunk \d+\/\d+$/i },
-  { stage: "Fine transport · grouped authorities", label: /^Publish grouped Stage-B and face-band transport authorities$/i },
   { stage: "Fine transport · velocity cache", label: /^Publish complete global fine velocity cache \d+\/\d+$/i },
-  { stage: "Fine transport", label: /(?:fine characteristic|fine trajector|fine departure|global fine (?:transport|dispatches)|direct Stage-B transport|grouped direct Stage-B|power trajectory Stage-B)/i },
+  { stage: "Fine transport", label: /(?:fine characteristic|fine trajector|fine departure|global fine (?:transport|dispatches)|structured velocity transport)/i },
   { stage: "Fine summaries", label: /fine summar/i },
   { stage: "Fine redistance / volume", label: /(?:Fine redistance|fine level-set JFA|JFA closest-point redistance|global (?:fine )?volume|compact coarse volume|fine overlap|Fine volume correction)/i },
   { stage: "Fine restriction", label: /(?:Fine-to-coarse restriction|fine restriction)/i },
   { stage: "Fine topology", label: /(?:global fine (?:topology|interface|seed|page|changed|publication|rollback|lifecycle)|dirty and support pages|fine topology candidate|fine seed expansion|added global fine samples|Finalize global fine publication|Settle deferred global fine publication)/i },
   { stage: "Power descriptors / topology", label: /(?:power (?:topology|descriptor)|power descriptors)/i },
-  { stage: "Power faces", label: /(?:power[- ]face|Power faces|power face control|power site index|power boundary phi)/i },
-  { stage: "Power velocity", label: /(?:power velocity|Stage-B row descriptors|direct Stage-B catalog authority)/i },
   { stage: "Power coarse level set", label: /(?:Power coarse level set|power coarse phi|coarse phi from fine-seed)/i },
-  { stage: "Power operator / pressure rows", label: /(?:power operator|leaf pressure assembly|projected divergence|physical power-cell volumes|physical octree power volumes|preparePowerRows)/i },
-  { stage: "MGPCG solve", label: /(?:MGPCG|Chebyshev|Power Galerkin)/i },
+  { stage: "Structured pressure rows", label: /(?:structured pressure|leaf pressure assembly|projected divergence|prepareStructuredRows)/i },
+  { stage: "MGPCG solve", label: /(?:MGPCG|Chebyshev)/i },
   { stage: "SPGrid V-cycle", label: /^SPGrid V-cycle\b/i },
   { stage: "Octree topology / frontier", label: /(?:octree reset and refinement|compact topology-tile|topology-tile refinement signatures|wet-frontier tile|persistent octree leaf frontier|dirty-tile frontier|dirty frontier candidates|old\/new frontier merge|octree leaf compaction|analytic octree bootstrap worklist|topology lifecycle membership|Cold octree topology)/i },
-  { stage: "Power solid coupling", label: /(?:power solid|solid pressure reactions|owner-vertex solid SDF)/i },
+  { stage: "Structured solid coupling", label: /(?:structured solid|solid pressure reactions|owner-vertex solid SDF)/i },
   { stage: "Sparse octree publication", label: /(?:octree raw voxel records|octree sparse brick records|sparse voxel structural|sparse brick records)/i },
   { stage: "Diagnostics / overlays", label: /(?:octree overlay|voxel inspection|QA diagnostics|diagnostic fields)/i },
   { stage: "Uniform compatibility transport", label: /^Uniform (?:occupancy and transport preparation|velocity prediction|predicted transport preparation|reverse advection|MacCormack correction|density sharpening|sharpened-mass scatter|sharpened-mass resolve)$/i },
   { stage: "Uniform compatibility solids", label: /^Uniform (?:solid level-set relaxation|rigid-body coupling)$/i },
   // Stable fixture/category labels are part of the report's public test ABI.
-  { stage: "Power faces", label: /^Power faces$/ },
+  { stage: "Structured velocity publication", label: /^Structured velocity publication$/ },
   { stage: "Fine redistance / volume", label: /^Fine redistance$/ },
 ];
 
@@ -228,6 +433,30 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
     simulationWall_ms: result.simulationWall_ms,
     advanceWall_ms: perAdvance(result.simulationWall_ms, result.steps),
     validationErrorCount: result.validationErrors?.length ?? 0,
+    measurementWindow: result.measurementWindow,
+    ...([
+      result.activeSampleCount,
+      result.globalFineActiveBricks,
+      result.globalFineDesiredBricks,
+      result.globalFineLevelSetResidentBrickCapacity,
+      result.globalFineLevelSetLogicalBrickCount,
+      result.globalFineTransportSegmentCount,
+      result.quadtreePressureIterationsUsed,
+      result.quadtreePressureIterationBudget,
+      result.quadtreePressureIterationHardBudget,
+    ].some((value) => finiteCounter(value) !== undefined) ? { terminalCounters: {
+      activeSamples: finiteCounter(result.activeSampleCount),
+      activeFineBricks: finiteCounter(result.globalFineActiveBricks),
+      desiredFineBricks: finiteCounter(result.globalFineDesiredBricks),
+      fineBrickCapacity: finiteCounter(result.globalFineLevelSetResidentBrickCapacity),
+      logicalFineBricks: finiteCounter(result.globalFineLevelSetLogicalBrickCount),
+      fineBandOccupancy: fineBandOccupancy(
+        result.globalFineActiveBricks, result.globalFineLevelSetLogicalBrickCount),
+      transportSegments: finiteCounter(result.globalFineTransportSegmentCount),
+      pressureIterationsExecuted: finiteCounter(result.quadtreePressureIterationsUsed),
+      pressureIterationsScheduled: finiteCounter(result.quadtreePressureIterationBudget),
+      pressureIterationsHardLimit: finiteCounter(result.quadtreePressureIterationHardBudget),
+    } } : {}),
     ...(audit ? { commands: {
       dispatchesPerAdvance: perAdvance(dispatches, result.steps),
       indirectDispatchesPerAdvance: perAdvance(audit.indirectDispatches, result.steps),

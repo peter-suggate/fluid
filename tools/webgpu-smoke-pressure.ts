@@ -13,14 +13,14 @@ export interface OctreeMGPCGDiagnostics {
 export function decodeOctreeMGPCGDiagnostics(words: Uint32Array): OctreeMGPCGDiagnostics {
   if (words.length < 16) throw new RangeError("Octree MGPCG diagnostics require sixteen words");
   const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
-  const residualSquared = floats[4];
-  const rhsSquared = floats[5];
+  const residualSquared = floats[10] + floats[11];
+  const rhsSquared = floats[8] + floats[9];
   const relativeResidualSquared = residualSquared / Math.max(rhsSquared, 1e-30);
   return {
     flags: words[0],
     converged: words[1] !== 0,
     iterations: words[2],
-    rows: words[3],
+    rows: words[4],
     residualSquared,
     rhsSquared,
     relativeResidualSquared,
@@ -43,50 +43,42 @@ export function octreeMGPCGDiagnosticsAreAcceptable(
     && Number.isFinite(value.relativeResidual) && value.relativeResidual <= Math.sqrt(maximumRelativeResidualSquared);
 }
 
-/**
- * Both selectable pressure solvers publish the same control ABI, but the
- * Galerkin lane also has the production absolute-RMS floor used for nearly
- * zero right-hand sides. Do not make Dawn QA reinterpret an accepted
- * Galerkin solve as an MGPCG relative-residual failure.
- */
+/** The production pressure authority has one residual policy. */
 export function octreePowerPressureDiagnosticsAreAcceptable(
-  solverLabel: string | undefined,
+  _solverLabel: string | undefined,
   value: OctreeMGPCGDiagnostics | undefined,
   maximumRelativeResidualSquared = 1e-8,
-  galerkinAbsoluteRmsTolerance = 1e-7,
 ): value is OctreeMGPCGDiagnostics {
-  if (octreeMGPCGDiagnosticsAreAcceptable(value, maximumRelativeResidualSquared)) return true;
-  const candidate = value as OctreeMGPCGDiagnostics | undefined;
-  return solverLabel?.includes("fixed native-L2 Galerkin") === true
-    && candidate !== undefined
-    && candidate.flags === 0
-    && candidate.converged
-    && candidate.rows > 0
-    && Number.isFinite(candidate.residualSquared)
-    && candidate.residualSquared >= 0
-    && candidate.residualSquared <= candidate.rows * galerkinAbsoluteRmsTolerance * galerkinAbsoluteRmsTolerance
-    && Number.isFinite(candidate.rhsSquared)
-    && candidate.rhsSquared >= 0;
+  return octreeMGPCGDiagnosticsAreAcceptable(value, maximumRelativeResidualSquared);
+}
+
+/** Solver-aware form of the per-step stability-envelope residual gate. */
+export function octreePowerPressureEnvelopeIsAcceptable(
+  _solverLabel: string | undefined,
+  maximumRelativeResidual: number | undefined,
+  _maximumResidualRms: number | undefined,
+  relativeTolerance = 1e-4,
+): boolean {
+  return Number.isFinite(maximumRelativeResidual)
+    && maximumRelativeResidual! >= 0
+    && maximumRelativeResidual! <= relativeTolerance;
 }
 
 /**
- * Solver-aware form of the per-step stability-envelope residual gate.
- * `maximumResidualRms` is the compact live-row RMS published by the octree
- * projection, so it uses the same 1e-7 Galerkin floor as the GPU control.
+ * Convert the algebraic pressure residual to the residual flux left by the
+ * projection. Aanjaneya et al. Eq. (3)/(4) gives
+ * `fluxAfter = (dt / rho) * (b - A p)` for the production sign convention.
+ * This is a units conversion of existing diagnostics, not a looser solve gate.
  */
-export function octreePowerPressureEnvelopeIsAcceptable(
-  solverLabel: string | undefined,
-  maximumRelativeResidual: number | undefined,
-  maximumResidualRms: number | undefined,
-  relativeTolerance = 1e-4,
-  galerkinAbsoluteRmsTolerance = 1e-7,
-): boolean {
-  const relativeAccepted = Number.isFinite(maximumRelativeResidual)
-    && maximumRelativeResidual! >= 0
-    && maximumRelativeResidual! <= relativeTolerance;
-  if (relativeAccepted) return true;
-  return solverLabel?.includes("fixed native-L2 Galerkin") === true
-    && Number.isFinite(maximumResidualRms)
-    && maximumResidualRms! >= 0
-    && maximumResidualRms! <= galerkinAbsoluteRmsTolerance;
+export function octreeProjectedVariationalResidualRms(
+  algebraicResidualRms: number | undefined,
+  dt_s: number,
+  density_kg_m3: number,
+): number | undefined {
+  if (algebraicResidualRms === undefined
+    || !Number.isFinite(algebraicResidualRms) || algebraicResidualRms < 0
+    || !Number.isFinite(dt_s) || dt_s < 0
+    || !Number.isFinite(density_kg_m3) || density_kg_m3 <= 0) return undefined;
+  const residual = algebraicResidualRms * dt_s / density_kg_m3;
+  return Number.isFinite(residual) && residual >= 0 ? residual : undefined;
 }

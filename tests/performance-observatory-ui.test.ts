@@ -25,14 +25,11 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
     "resolution",
     "global-fine-phi",
     "power-cells",
-    "power-faces",
     "octree-lifecycle",
     "pressure",
     "speed",
     "projection",
     "divergence",
-    "section5-face-band",
-    "power-operator",
   ]) assert.match(panel, new RegExp(`mode: "${mode}"`), mode);
 
   assert.match(panel, /paper-view-controls/);

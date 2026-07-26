@@ -59,6 +59,27 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   assert.match(shader,
     /fnbalancedReductionRange\(count:u32,lid:u32\)->vec2u\{letwidth=count\/256u;letremainder=count%256u;letbegin=lid\*width\+min\(lid,remainder\)/,
     "final reductions must partition the partial arena into deterministic contiguous lane ranges");
+  assert.match(shader,
+    /fnprepareFineVolumeDispatch[\s\S]*letpages=min\(worklist\[1\],p\.pageCapacity\)[\s\S]*letgroups=\(samples\+63u\)\/64u[\s\S]*for\(varword=groups\*8u\+lid;word<c\.p1\*8u;word\+=256u\)\{partials\[word\]=0u;\}[\s\S]*if\(groups==0u\)\{fineDispatch\[0\]=0u;fineDispatch\[1\]=1u;fineDispatch\[2\]=1u;\}/,
+    "fine passes must dispatch compact resident samples while retaining a zero-padded capacity reduction tree");
+  const encodePasses = (WebGPUFineLevelSetVolumeCorrection.prototype as unknown as {
+    encodePasses(broker: PassBroker, applyCorrection: boolean): void;
+  }).encodePasses.toString().replace(/\s+/g, "");
+  assert.match(encodePasses, /dispatchWorkgroupsIndirect\(this\.fineDispatch,0\)/,
+    "fine reductions and correction sweeps must consume GPU-authored active dispatch arguments");
+  assert.match(encodePasses, /dispatchWorkgroupsIndirect\(this\.coarseDispatch,0\)/,
+    "coarse reduction must consume the exact accepted compact-row dispatch rather than its capacity bound");
+  assert.match(shader,
+    /fnprepareCoarseVolumeDispatch[\s\S]*count=select\(0u,min\(coarseDirectory\.rowCount,c\.rowCapacity\),validDirectory\(\)\)[\s\S]*coarseDispatch\[0\]=x/,
+    "the authoritative coarse publication must author its own fail-closed indirect extent");
+  assert.match(encodePasses,
+    /run\(this\.prepareFineDispatchPipeline[\s\S]*broker\.fence\("activefinevolumedispatchpublished"\)[\s\S]*runFine\(this\.finePartialPipeline/,
+    "storage-authored indirect arguments must be consumed after a compute-pass boundary");
+  assert.doesNotMatch(encodePasses,
+    /maximumResidentBricks\*this\.source\.plan\.samplesPerBrick\/64/,
+    "fine passes must not retain a full-capacity direct dispatch");
+  assert.doesNotMatch(encodePasses, /createBindGroup/,
+    "recurring volume passes must consume constructor-cached bindings");
   for (const entryPoint of ["finalizeCoarseVolume", "finalizeFineVolume",
     "finalizeCorrectedFineVolume", "finalizeMeasuredFineVolume"]) {
     assert.match(shader, new RegExp(`@compute@workgroup_size\\(256\\)fn${entryPoint}\\(`),

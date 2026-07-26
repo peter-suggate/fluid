@@ -274,7 +274,7 @@ All stages, one command buffer, no CPU readbacks on the hot path — the cost is
 The codebase already contains the correct pattern in two places, proving each fix shape works here:
 
 - **Power-topology** `resolveDescriptor` is O(1) via `sameOrFinerDirect` (2^18) / `sameOrCoarserDirect` (2^9) direct tables, delta-driven indirect.
-- **MGPCG persistent-small-domain executor** (`webgpu-octree-mgpcg.ts:97-117`) — why solve inner iterations are as cheap as they are.
+- **MGPCG persistent-small-domain executor** (`webgpu-octree-spgrid-vcycle.ts`) — why solve inner iterations are as cheap as they are.
 
 The miss is that the rest of the pipeline was never converted to that shape.
 

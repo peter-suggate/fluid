@@ -77,7 +77,7 @@ export interface GPUEulerianInfo {
   /** Global, uniformly indexed sparse fine narrow-band level set. */
   globalFineLevelSetEnabled?: boolean;
   globalFineLevelSetFactor?: 4 | 8;
-  /** Static Section 5 transport schedule; these host-known values require no readback. */
+  /** Static sparse fine-transport schedule; these host-known values require no readback. */
   globalFineTransportQueryCapacity?: number;
   globalFineTransportChunkCapacity?: number;
   globalFineTransportChunkCount?: number;
@@ -98,7 +98,7 @@ export interface GPUEulerianInfo {
   globalFineTransportDepartureOutsideBand?: number;
   globalFineTransportNonfiniteVelocity?: number;
   globalFineTransportCommitted?: boolean;
-  globalFineTransportFaceBandUnavailable?: number;
+  globalFineTransportStructuredAuthorityUnavailable?: number;
   globalFineTransportVelocityUnavailable?: number;
   /** Invalid Stage-B velocity statuses observed while tracing the fine band. */
   globalFineTransportInvalidVelocityStatus?: number;
@@ -112,90 +112,28 @@ export interface GPUEulerianInfo {
   /** Exact solver-local position in metres at which that status was observed.
    * Solver-local x/z begin at the negative-world container walls. */
   globalFineTransportFirstInvalidVelocityPosition_m?: GPUFieldLocation;
-  globalFineFaceBandFlags?: number;
-  globalFineFaceBandTransitionFlags?: number;
-  globalFineFaceBandPowerPublicationFlags?: number;
-  globalFineFaceBandTransientPowerFlags?: number;
-  globalFineFaceBandPointFieldFlags?: number;
+  /** Accepted structured velocity publication sampled by fine transport. */
+  structuredVelocityGeneration?: number;
+  structuredVelocityRows?: number;
+  structuredVelocitySlots?: number;
+  structuredVelocityValid?: boolean;
+  /** Decoded structured-dynamics reject carry. A rejection zeroes every class
+   * dispatch, so the step silently freezes; these name the responsible stage
+   * instead of leaving it to surface as a step-count or volume-drift failure. */
+  structuredRejectStage?: number;
+  structuredRejectIndex?: number;
+  structuredRejectSummary?: string;
+  structuredBoundaryGeneration?: number;
+  structuredBoundaryValid?: boolean;
+  /** Exact same-generation face-weighted kinetic-energy pair around projection. */
+  structuredPreProjectionKineticEnergyProxy?: number;
+  structuredPostProjectionKineticEnergyProxy?: number;
+  structuredProjectionEnergyRatio?: number;
+  structuredProjectionEnergySampleCount?: number;
   /** Power-coarse φ authority failure bits and first compact row. Bit 512
    * identifies a missing causal non-obtuse Delaunay simplex. */
   globalFineCoarseLevelSetFlags?: number;
   globalFineCoarseLevelSetFirstErrorRow?: number;
-  /** Bounded, observational Section 5 transaction details. These values come
-   * from the control headers already read for authority validation; exposing
-   * them does not add a simulation-sized readback. */
-  globalFineFaceBandFirstError?: number;
-  globalFineFaceBandRowCount?: number;
-  globalFineFaceBandFaceCount?: number;
-  globalFineFaceBandIncidenceCount?: number;
-  globalFineFaceBandSeedCount?: number;
-  globalFineFaceBandAcceptedCount?: number;
-  globalFineFaceBandUnresolvedCount?: number;
-  globalFineFaceBandSampleFailures?: number;
-  globalFineFaceBandCoarsePhiSamples?: number;
-  globalFineFaceBandCoarsePhiFailures?: number;
-  globalFineFaceBandPhiExtensions?: number;
-  globalFineFaceBandClosestPointFaces?: number;
-  globalFineFaceBandClosestPointFailures?: number;
-  globalFineFaceBandLiquidInterpolationFailures?: number;
-  globalFineFaceBandCptNoOwnerFailures?: number;
-  globalFineFaceBandCptSupportOwnerFailures?: number;
-  globalFineFaceBandCptNoContainingSimplexFailures?: number;
-  globalFineFaceBandCptMissingLiquidVertexFailures?: number;
-  globalFineFaceBandTransitionFirstError?: number;
-  globalFineFaceBandTransitionRowCount?: number;
-  globalFineFaceBandTransitionRows?: number;
-  globalFineFaceBandTransitionAdjacencyCount?: number;
-  globalFineFaceBandTransitionCoreRows?: number;
-  globalFineFaceBandTransitionSupport1Rows?: number;
-  globalFineFaceBandTransitionSupport2Rows?: number;
-  globalFineFaceBandTransitionSupport3Rows?: number;
-  globalFineFaceBandTransitionEndpointRows?: number;
-  globalFineFaceBandBoundaryGhostRequests?: number;
-  globalFineFaceBandPhiFailureCounts?: {
-    readonly missingRow: number;
-    readonly exactCoarseMiss: number;
-    readonly invalidMetric: number;
-    readonly invalidSelector: number;
-  };
-  globalFineFaceBandPhiFailure?: {
-    readonly cause: number;
-    readonly faceIndex: number;
-    readonly globalFace: number;
-    readonly negativeRow: number;
-    readonly positiveRow: number;
-    readonly anchorRow: number;
-    readonly centroid: readonly [number, number, number];
-    readonly interpolantPath: number;
-    readonly missingOrigin: readonly [number, number, number];
-    readonly missingSize: number;
-    readonly selectorOrCorner: number;
-    readonly detail: number;
-  };
-  globalFineFaceBandTransientPowerFirstError?: number;
-  globalFineFaceBandTransientPowerRows?: number;
-  globalFineFaceBandTransientPowerEmitted?: number;
-  globalFineFaceBandTransientPowerSampled?: number;
-  globalFineFaceBandTransientPowerValidated?: number;
-  globalFineFaceBandPointFieldFirstError?: number;
-  globalFineFaceBandPointFieldRows?: number;
-  globalFineFaceBandPointFieldSolved?: number;
-  globalFineFaceBandPointFieldWallContributions?: number;
-  globalFineFaceBandPowerPublicationFirstError?: number;
-  globalFineFaceBandPowerPublicationFaces?: number;
-  globalFineFaceBandPowerPublicationTargets?: number;
-  globalFineFaceBandPowerPublicationInterpolated?: number;
-  globalFineFaceBandPowerPublicationCommitted?: number;
-  /** Exact live Section 5 transaction identities and validity, decoded from
-   * the existing bounded diagnostics readback. These never steer authority. */
-  globalFineFaceBandGeneration?: number;
-  globalFineFaceBandValid?: boolean;
-  globalFineFaceBandTransitionValid?: boolean;
-  globalFineFaceBandPointFieldValid?: boolean;
-  globalFineFaceBandTransientPowerValid?: boolean;
-  globalFineFaceBandPowerPublicationValid?: boolean;
-  globalFineFaceBandPowerFineGeneration?: number;
-  globalFineFaceBandPowerGeneration?: number;
   globalFineInterfaceBricks?: number;
   globalFineDesiredBricks?: number;
   globalFineActivatedBricks?: number;
@@ -227,9 +165,7 @@ export interface GPUEulerianInfo {
   pressureResidual?: number;
   pressureRelativeResidual?: number;
   pressureRowCapacity?: number;
-  pressureEntryCapacity?: number;
   pressureRequiredRows?: number;
-  pressureRequiredEntries?: number;
   pressureCapacityOverflow?: boolean;
   frontierListCapacity?: number;
   frontierRequiredLeaves?: number;

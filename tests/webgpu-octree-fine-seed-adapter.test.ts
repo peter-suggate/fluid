@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import type { OctreePowerVelocitySource } from "../lib/webgpu-octree-power-velocity";
+import type { DirectStructuredVelocitySource } from "../lib/webgpu-octree-structured-velocity-gpu";
 import {
   OCTREE_FINE_SEED_ADAPTER_PUBLICATION,
   WebGPUOctreeFineSeedAdapter,
@@ -18,7 +18,7 @@ test("fine-seed adapter allocation follows compact rows, not domain depth", () =
     rowCapacity: 100,
     leafBytes: 6_400,
     candidateBytes: 800,
-    allocatedBytes: 13_828,
+    allocatedBytes: 13_876,
   });
   assert.equal(planOctreeFineSeedAdapter(100).allocatedBytes, plan.allocatedBytes);
   assert.throws(() => planOctreeFineSeedAdapter(0), /must be positive/);
@@ -26,14 +26,14 @@ test("fine-seed adapter allocation follows compact rows, not domain depth", () =
 
 test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", () => {
   assert.match(octreeFineSeedAdapterShader, /struct FineSeedLeaf \{ originX:u32,originY:u32,originZ:u32,size:u32,flags:u32/);
-  assert.match(octreeFineSeedAdapterShader, /row<rowControl\[0\]/,
-    "surface indexing must consume the compact pressure row count directly");
-  assert.match(octreeFineSeedAdapterShader, /fn powerVelocityPublicationValid/);
-  assert.match(octreeFineSeedAdapterShader, /let motion=powerVelocities\[row\]\.xyz/,
-    "leaf motion must consume native power-cell velocity without Cartesian reconstruction");
+  assert.match(octreeFineSeedAdapterShader, /row<structuredVelocityControl\[2\]/,
+    "surface indexing must consume the epoch-stable accepted structured row count");
+  assert.match(octreeFineSeedAdapterShader, /fn structuredVelocityPublicationValid/);
+  assert.match(octreeFineSeedAdapterShader, /let motion=structuredRowVelocities\[structuredVelocityRowIndex\(row\)\]\.xyz/,
+    "leaf motion must consume the accepted structured row velocity without Cartesian reconstruction");
   assert.match(octreeFineSeedAdapterShader,
-    /powerVelocityControl\[0\]==POWER_VELOCITY_VALID[\s\S]*powerVelocityControl\[5\]==powerVelocityControl\[2\]/,
-    "missing, failed, or partial native velocity publications must fail closed");
+    /structuredVelocityControl\[0\]==0u[\s\S]*structuredVelocityControl\[3\]!=0u[\s\S]*structuredVelocityControl\[4\]<=1u/,
+    "missing, failed, or partial structured publications must fail closed");
   assert.doesNotMatch(octreeFineSeedAdapterShader,
     /FaceRecord|faceControl|incidence|sampleMotionComponent|MAX_FACE_CANDIDATES/,
     "the Cartesian face mirror and bounded-incidence reconstruction are deleted");
@@ -44,8 +44,9 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
     "surface deltas consume current-generation interface-membership dirty stamps");
   assert.match(octreeFineSeedCandidateShader, /generation!=0u&&error==0u/,
     "publication validity is independent of a possibly-zero candidate count");
-  assert.match(octreeFineSeedCandidateShader, /rowControl\[pressureControl\]/,
-    "pressure/topology overflow must reject the candidate generation");
+  assert.match(octreeFineSeedCandidateShader,
+    /structuredControl\[0\]==0u&&structuredControl\[2\]>0u&&structuredControl\[3\]!=0u/,
+    "a missing or rejected structured authority must reject the candidate generation");
   assert.match(octreeFineSeedAdapterShader, /let flags=LIVE\|candidateFlags/,
     "all live leaves must remain directory-addressable even when they have no fine page");
   assert.match(octreeFineSeedAdapterShader, /struct CoarsePhi \{ phi:f32, minimumPhi:f32, maximumPhi:f32, flags:u32 \}/);
@@ -60,8 +61,10 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
     "one bounded workgroup must count, prefix, and scatter the exact selected-row stream");
   assert.deepEqual([...octreeFineSeedCandidateShader.matchAll(
     /@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
-  )].map((match) => match[1]), ["publishFineSeedCandidates"],
-  "the five-stage candidate compaction and snapshot pipeline must stay deleted");
+  )].map((match) => match[1]), [
+    "publishFineSeedAdapterDispatch",
+    "publishFineSeedCandidates",
+  ], "one exact-work planner plus candidate publication replace the deleted five-stage pipeline");
   assert.doesNotMatch(octreeFineSeedCandidateShader, /\branks\b|candidateRecords|rankFineSeed|prefixFineSeed|scatterFineSeed|finalizeFineSeed|snapshotDirty/,
     "the retired full-row candidate and rank arenas have no backing WGSL");
   assert.doesNotMatch(octreeFineSeedCandidateShader, /for\(var row=0u;row<capacity;row\+=1u\)/,
@@ -74,8 +77,20 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
   const encode = WebGPUOctreeFineSeedAdapter.prototype.encode.toString();
   assert.doesNotMatch(encode, /copyBufferToBuffer/,
     "recurring fine-seed adaptation must not copy the full leaf-capacity arena");
-  assert.equal((encode.match(/dispatchWorkgroups/g) ?? []).length, 2,
-    "leaf rebuild plus persistent candidate publication are the only recurring adapter dispatches");
+  assert.equal((encode.match(/dispatchWorkgroupsIndirect/g) ?? []).length, 2,
+    "leaf rebuild and candidate publication consume separate immutable indirect records");
+  assert.equal((encode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 1,
+    "only the exact-work planner is a direct singleton dispatch");
+  assert.match(encode, /updateIndirectBuffer/,
+    "writable dispatch metadata must cross a copy boundary before INDIRECT consumption");
+  assert.doesNotMatch(encode, /this\.workgroups|rowCapacity/,
+    "no capacity-derived recurring launch survives behind an alias");
+  assert.match(octreeFineSeedCandidateShader,
+    /dispatchMetadata\[0\]=\(rows\+63u\)\/64u[\s\S]*dispatchMetadata\[3\]=select\(0u,1u,rows>0u\)/,
+    "empty live-row and candidate work must publish zero x dimensions");
+  assert.match(octreeFineSeedCandidateShader,
+    /rawSourceRows<=params\.dimsCapacity\.w[\s\S]*sourceRows==structuredControl\[2\][\s\S]*let rows=select\(0u,sourceRows,sourceValid\)/,
+    "cold bootstrap must build the complete accepted compact row stream, never a truncated interface prefix");
   assert.doesNotMatch(encode,
     /selectPipeline|rankCandidatesPipeline|prefixCandidateBlocksPipeline|scatterCandidatesPipeline|finalizeCandidatesPipeline|snapshotDirtyLeavesPipeline/,
     "the old host-staged candidate graph must stay deleted");
@@ -143,20 +158,21 @@ test("Dawn adapts live compact rows into global-fine seed candidates without den
   coarseControlWords[10] = 1;
   coarseControlWords[11] = 0x80000000;
   const coarseControl = make(coarseControlWords);
-  const powerVelocityControlWords = new Uint32Array(8);
-  powerVelocityControlWords.set([0x80000000, 0xffffffff, 2, 1, 2, 2, 0, 1]);
-  const powerVelocityControl = make(powerVelocityControlWords);
-  const powerVelocities = make(new Float32Array([3, 0, 0, 1, 3, 0, 0, 1]));
-  const powerVelocitySource: OctreePowerVelocitySource = {
-    plan: { rowCapacity: 2, velocityBytes: 32, statusBytes: 8, allocatedBytes: 104 },
-    control: powerVelocityControl, velocities: powerVelocities,
-  };
+  const structuredVelocityControl = make(new Uint32Array([0, 0xffffffff, 2, 1, 0, 2]));
+  const structuredRowVelocities = make(new Float32Array([
+    3, 0, 0, 1, 3, 0, 0, 1,
+    0, 0, 0, 0, 0, 0, 0, 0,
+  ]));
+  const structuredVelocitySource = {
+    plan: { rowCapacity: 2 }, control: structuredVelocityControl,
+    rowVelocities: structuredRowVelocities,
+  } as unknown as DirectStructuredVelocitySource;
   device.pushErrorScope("validation"); device.pushErrorScope("internal");
   const surfaceAdapter = new WebGPUOctreeFineSeedAdapter(device, {
     leafHeaders, rowCount, publicationControl, frontier,
     dimensions: [4, 1, 1], cellSize: [1, 1, 1],
   }, 2, { finestLeafSize: 1, haloCells: 3 });
-  surfaceAdapter.setPowerVelocitySource(powerVelocitySource);
+  surfaceAdapter.setStructuredVelocitySource(structuredVelocitySource);
   surfaceAdapter.setCoarsePhiSource({ values: coarsePhi, control: coarseControl });
   try {
     const info = await device.createShaderModule({ code: octreeFineSeedAdapterShader }).getCompilationInfo();

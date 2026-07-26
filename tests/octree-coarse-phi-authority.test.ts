@@ -57,58 +57,48 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
   assert.match(octreeProjectionShader,
     /let fine=fineLeafSummary\(origin,owner\.size\);[\s\S]*if\(fine\.found\)\{[\s\S]*fine\.centerValid[\s\S]*else if\(fine\.complete&&!fine\.coarseAuthority\)/,
     "recurring frontier phase selection consumes a current centre stencil independently of complete sparse coverage");
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
   assert.match(rebuild,
     /setBindGroup\(0,\s*active\s*\?\s*this\.fineSummarySizingGroup\s*:\s*this\.groups\.ab\)[\s\S]*classifyFrontierCandidates[\s\S]*emitFrontierCandidates/,
     "frontier filtering and insertion both consume current fine-summary authority");
   assert.match(fineLevelSetSummaryWGSL,
-    /fn emitFineSummaryDelta[\s\S]*let row=index-fineRecords;let key=coarseHierarchyKey\(coarseDirtyIdentity\(row\)\)/,
-    "the persistent exact transaction builder consumes corrected-coarse delta rows directly");
-  assert.match(fineLevelSetSummaryWGSL,
     /fn coarseAuthoritative[\s\S]*coarse\.state==PUBLISHED[\s\S]*coarseControl\[2\]/,
     "coarse live-prefix work is admitted only from the immutable current publication");
-  assert.match(fineLevelSetSummaryWGSL, /Entry\(key,ordered\(e\.minimumPhi\)[\s\S]*COARSE_AUTHORITY/,
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn coarseEntryAt[\s\S]*value\.minimumPhi=ordered\(e\.minimumPhi\)[\s\S]*COARSE_AUTHORITY/,
     "an exact corrected-coarse leaf marks the unified summary authoritative");
   assert.match(octreeProjectionShader, /result\.coarseAuthority = \(entryFlags & 0x80000000u\) != 0u/);
   assert.match(octreeProjectionShader,
     /else if\(fine\.complete&&!fine\.coarseAuthority\)\{/,
     "coarse-only summaries must preserve the exact coarse cell-centre phase used by power-boundary sampling");
   assert.match(fineLevelSetSummaryWGSL,
-    /fn publicDirtySummary[\s\S]*committedFineAt\(key\)[\s\S]*coarseSummaryAt\(key\)[\s\S]*combineSummary/,
-    "public dirty rows combine the exact private fine tree with current corrected-coarse contributions");
+    /fn publishFineSummaryDirect[\s\S]*let coarseValue=coarseEntryAt\(key,rank\)[\s\S]*value=combine\(value,coarseValue\)/,
+    "public active-mip rows combine current fine values with corrected-coarse authority");
   assert.match(fineLevelSetSummaryWGSL,
-    /fn stageFineOnlyCarry[\s\S]*fineDirtyContains[\s\S]*fn stageFineOnlyDirty/,
-    "the private fine-only tree carries untouched rows and compacts changed ancestors independently");
-  assert.match(fineLevelSetSummaryWGSL,
-    /fn stageFineOnlyDirty[\s\S]*let fineDirty=first&&key!=INVALID&&fineDirtyContains\(key\)[\s\S]*dirtySummaryAt\(key\)/,
-    "duplicate fine/coarse delta keys must query fine authority instead of trusting unstable equal-key sort order");
-  assert.match(fineLevelSetSummaryWGSL,
-    /fn coarseDirtyIdentity[\s\S]*coarseDelta\.items\[row\][\s\S]*fn emitFineSummaryDelta[\s\S]*records\[index\]=Entry/,
-    "recurring corrected coarse work emits only the compact value/phase delta");
+    /fn ensureFineSummaryCoarseDirectoryPages[\s\S]*coarseHierarchyKey[\s\S]*fn ensureFineSummaryCoarseRanks/,
+    "corrected-coarse rows allocate through the same sparse direct directory as fine ancestors");
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
-    /sourceSlot|hashCapacity|maximumHashProbes/,
-    "summary merging must consume the exact published row count, never scan unused directory capacity");
+    /sourceSlot|hashCapacity|maximumHashProbes|recordLowerBound|sortFineSummary|mergeFineSummary/,
+    "summary publication must never scan, probe, sort, or merge a capacity-sized record arena");
   const summaryEncodeOrder = WebGPUFineLevelSetSummaries.prototype.encode.toString();
-  assert.ok(
-    summaryEncodeOrder.indexOf('run("prepareFineSummaryDelta"')
-      < summaryEncodeOrder.indexOf("broker.updateIndirectBuffer"),
-    "fine and coarse delta records are built persistently before the exact recompute extent is published",
-  );
-  assert.match(summaryEncodeOrder, /runIndirect\("recomputeFineSummaryBase"/);
+  assert.match(summaryEncodeOrder,
+    /removeFineSummaryPages[\s\S]*ensureFineSummaryDirectoryPages[\s\S]*ensureFineSummaryRanks[\s\S]*addFineSummaryPages/,
+    "retirement precedes staged sparse-page/rank allocation and exact reference mutation");
+  assert.match(summaryEncodeOrder, /indirect\("recomputeFineSummaryBase"/);
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
     /prepareFineSummaryWork|summarizeFineBricks|mergeCoarsePhiSummaries|scanFineSummarySegments/);
   assert.match(fineLevelSetSummaryWGSL,
-    /fn entryPresent[\s\S]*COARSE_AUTHORITY\|CENTER_COMPLETE[\s\S]*fn centerSampleAt[\s\S]*let span=\(1u<<p\.level\)\*resolution[\s\S]*index>=arrayLength\(&c\)\|\|index>=arrayLength\(&d\)[\s\S]*fn finishCenterSummary[\s\S]*mask==0xffu[\s\S]*CENTER_COMPLETE/,
+    /fn centerSampleAt[\s\S]*let span=\(1u<<p\.level\)\*resolution[\s\S]*index>=arrayLength\(&sampleFlags\)\|\|index>=arrayLength\(&finePhi\)[\s\S]*fn finishCenter[\s\S]*mask==0xffu[\s\S]*CENTER_COMPLETE/,
     "every dyadic node retains an exact finite eight-sample centre phase independently of narrow-band membership");
+  assert.match(fineLevelSetSummaryWGSL,
+    /fn coarseEntryAt[\s\S]*COARSE_AUTHORITY\|CENTER_COMPLETE/,
+    "corrected coarse entries publish complete centre authority without pretending to own fine samples");
   const summaryEncode = WebGPUFineLevelSetSummaries.prototype.encode.toString();
   for (const field of ["source.metadata", "source.worklist", "source.flags", "source.phi"]) {
     assert.ok(summaryEncode.includes(field), `summary update must bind current fine ${field}`);
   }
-  assert.doesNotMatch(fineLevelSetSummaryWGSL, /pageHash|finePageHash|hashProbe/,
-    "fine summary lookup must use the canonical sorted worklist");
-  assert.doesNotMatch(fineLevelSetSummaryWGSL,
-    /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
-    "fine-summary construction and publication must be fully atomic-free");
+  assert.doesNotMatch(fineLevelSetSummaryWGSL, /pageHash|finePageHash|hashProbe|while\(low<high\)/,
+    "fine summary consumer lookup must use bounded sparse page/rank addressing without probing");
   assert.doesNotMatch(octreeProjectionShader, /legacyPhi|pagedSurface|surfacePagePhi/,
     "missing compact authority must fail closed instead of reviving a deleted page/dense fallback");
   assert.match(octreeProjectionShader, /coarseWord\(0u\)!=0x80000000u[\s\S]*coarseWord\(1u\)&0x3fffffffu\)!=expected/);
@@ -116,9 +106,9 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
 
 test("published-directory miss is air only after every requested sorted row publishes successfully", () => {
   assert.match(octreePowerCoarseLevelSetShader,
-    /fn publishPowerCoarsePhi[\s\S]*slot>=requested\(\)[\s\S]*descriptor=rowDirectory\[slot\][\s\S]*candidateDirectory\.entries\[slot\]=SampleEntry/);
+    /fn publishPowerCoarsePhi[\s\S]*slot>=requested\(\)[\s\S]*descriptor=geometry\(slot\)[\s\S]*candidateDirectory\.entries\[slot\]=SampleEntry/);
   assert.match(octreePowerCoarseLevelSetShader,
-    /descriptor\.morton==morton\(header\.cell\)[\s\S]*directoryLess\(level\(prior\.size\),prior\.morton,level\(descriptor\.size\),descriptor\.morton\)/);
+    /descriptor\.x==header\.cell&&descriptor\.y==header\.size[\s\S]*directoryLess\(level\(prior\.y\),morton\(prior\.x\),level\(descriptor\.y\),morton\(descriptor\.x\)\)/);
   assert.match(octreePowerCoarseLevelSetShader,
     /fn finalizePowerCoarsePhi[\s\S]*reduceAdvected\[0\]==count&&reduceDirectoryRows\[0\]==count[\s\S]*candidateDirectory\.state=VALID[\s\S]*candidateDirectory\.state=0u[\s\S]*publishPowerCoarsePhiDeltaAndCommit[\s\S]*sampleDirectory\.state=VALID/,
     "a malformed candidate must leave the prior coarse directory immutable");

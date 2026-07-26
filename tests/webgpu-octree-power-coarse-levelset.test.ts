@@ -19,50 +19,25 @@ import { OCTREE_POWER_TOPOLOGY_VALID, WebGPUOctreePowerTopology } from "../lib/w
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
 test("WP8 planner is compact-row bounded and exposes independent coarse/fine diagnostics", () => {
-  const plan = planOctreePowerCoarseLevelSet(32, 6);
+  const plan = planOctreePowerCoarseLevelSet(32);
   const source = readFileSync(new URL("../lib/webgpu-octree-power-coarse-levelset.ts", import.meta.url), "utf8");
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode, /^encode\(broker,input,options\)/);
   assert.doesNotMatch(encode, /newPassBroker/);
   assert.match(encode, /broker\.fence\("powercoarselevel-setschedulecomplete"\)/,
-    "redistance passes require command-buffer ordering before a later caller resumes the broker");
+    "the immutable coarse publication must complete before a later caller resumes the broker");
   assert.match(encode, /broker\.copyBufferToBuffer/,
     "GPU-authored counts must use the broker's required copy boundary");
-  assert.equal(plan.scratchBytes, 32 * 16 * 2);
+  assert.equal(plan.scratchBytes, 32 * 16);
   assert.equal(plan.selectorRowBytes, 32 * 256 * 4);
   assert.ok(plan.allocatedBytes < 128_000,
     "the aligned encoder-local parameter arena remains a small row-independent allocation");
-  assert.match(octreePowerCoarseLevelSetShader, /redistancePowerCoarsePhi/);
   assert.match(octreePowerCoarseLevelSetShader, /validatePowerCoarseFineCorrection/);
-  assert.match(octreePowerCoarseLevelSetShader, /nonobtuseAnchorSolidAngle|fn nonobtuse/);
-  assert.match(octreePowerCoarseLevelSetShader, /NO_CAUSAL_SIMPLEX/);
-  assert.equal(OCTREE_POWER_COARSE_LEVELSET_ERROR.noCausalSimplex, 512,
-    "the WGSL no-causal-simplex failure must have a named host diagnostic bit");
-  assert.doesNotMatch(octreePowerCoarseLevelSetShader, /nearestFallback|bestKnown|nearestKnown/,
-    "Section 4.2 redistance must fail closed when no causal Delaunay simplex exists");
-  assert.match(octreePowerCoarseLevelSetShader, /causalTetraCandidate/);
-  assert.match(octreePowerCoarseLevelSetShader, /causalTriangleCandidate/);
-  assert.match(octreePowerCoarseLevelSetShader, /causalEdgeCandidate/,
-    "transition redistance must include lower-dimensional causal simplex updates");
-  assert.match(octreePowerCoarseLevelSetShader,
-    /fn causalAvailableSubsimplexCandidate[\s\S]*causalNeighborMagnitude\(selectorRow\(row,s\.x\),fromA\)[\s\S]*if\(nx\.y!=0\.0\)\{candidate=min\(candidate,causalEdgeCandidate[\s\S]*if\(nx\.y!=0\.0&&ny\.y!=0\.0\)\{candidate=min\(candidate,causalTriangleCandidate[\s\S]*nx\.y!=0\.0&&ny\.y!=0\.0&&nz\.y!=0\.0&&nonobtuse[\s\S]*causalTetraCandidate/,
-    "Section 5 boundary rows must minimize over the available causal subsimplices of the local Delaunay tetrahedron");
-  assert.match(octreePowerCoarseLevelSetShader,
-    /var axes=vec3f\(1e30\)[\s\S]*inverseTransform\(v\.xyz,metric\.transformAndFlags&63u\)[\s\S]*if\(all\(axes<vec3f\(1e29\)\)\)\{magnitude=eikonal3\(axes,size\(row\)\);used=true;\}[\s\S]*if\(\(header\.flags&UNIFORM\)!=0u\)/,
-    "the paper's regular-grid update is selected from the actual Cartesian cell-centre neighbors before wall-clipped pressure-catalog classification");
   assert.doesNotMatch(octreePowerCoarseLevelSetShader,
-    /any\(rows==vec3u\(INVALID\)\)[\s\S]{0,120}\{continue;\}/,
-    "a virtual vertex outside the physical domain must not discard its available boundary edge or triangle");
-  assert.doesNotMatch(octreePowerCoarseLevelSetShader, /atomicAdd\(&control\.nearest/,
-    "the boundary causal update is not a nearest-cell fallback");
+    /redistance|eikonal|causal(?:Tetra|Triangle|Edge)|NO_CAUSAL_SIMPLEX/i,
+    "fine restriction plus the coarse collar is the sole distance authority; no second Eikonal representation remains");
   assert.match(octreePowerCoarseLevelSetShader,
     /source\.flags&\(PHI_VALID\|PHI_FINITE\)\)\!=\(PHI_VALID\|PHI_FINITE\)[\s\S]*fail\(row,INVALID_SOURCE\)/);
-  assert.match(octreePowerCoarseLevelSetShader,
-    /source\.flags&\(PHI_CORRECTED\|PHI_INTERFACE\)\)\!=0u/,
-    "advected coarse interface rows remain fixed redistance seeds when no fine correction exists");
-  assert.match(octreePowerCoarseLevelSetShader,
-    /seedPhi[\s\S]*source\.phi<0\.0&&seedPhi>=0\.0[\s\S]*fixedSeed=true/,
-    "coarse-only redistance must refresh fixed seeds from current sign-crossing neighbors");
   assert.match(octreePowerCoarseLevelSetShader,
     /shiftedMinimum=min\(value,source\.minimumPhi\+shift\)[\s\S]*shiftedMaximum=max\(value,source\.maximumPhi\+shift\)/,
     "advection must keep phi inside its shifted extrema despite one-ULP cancellation");
@@ -81,6 +56,20 @@ test("WP8 planner is compact-row bounded and exposes independent coarse/fine dia
   assert.doesNotMatch(source,
     /retireSubmittedEncoder[\s\S]{0,300}arena\.params\.destroy\(\)/,
     "retirement must return ordered queue storage to the pool rather than churn GPU allocations");
+  assert.match(encode, /updateIndirectBuffer\(this\.dispatchMetadata,0,this\.indirectDispatch,0/,
+    "writable exact-work metadata must cross a copy boundary before INDIRECT consumption");
+  assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirectDispatch,offset\)/,
+    "row-parallel phases consume the compact GPU-published live-row extent");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /dispatchMetadata\[0\]=groups;dispatchMetadata\[3\]=select\(0u,groups,rebuild\)/,
+    "selector work is zero when the exact adjacency cache is current");
+  assert.match(octreePowerCoarseLevelSetShader,
+    /structuredControl\[2\]==params\.countsGeneration\.x[\s\S]*fn sourceRequested\(\)->u32\{return select\(0u,params\.countsGeneration\.x,structuredValid\(\)\);\}/,
+    "coarse bootstrap accepts the complete compact row authority or zero rows, never a partial prefix");
+  assert.doesNotMatch(encode, /createBindGroup/,
+    "recurring encode uses cached immutable bindings with dynamic uniform offsets");
+  assert.doesNotMatch(encode, /Math\.ceil\(maximumRows/,
+    "the host cannot recover a capacity-shaped row dispatch");
 });
 
 test("rejected fine correction preserves every byte of the prior coarse authority", () => {
@@ -90,7 +79,7 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
   assert.match(octreePowerCoarseLevelSetShader,
     /fn rejectedFine\(\)->bool\{return params\.hasFine!=0u&&\(arrayLength\(&fineControl\)<6u\|\|fineControl\[0\]==INVALID\|\|fineControl\[5\]!=VALID\);\}/);
   assert.match(octreePowerCoarseLevelSetShader,
-    /fn preparePowerCoarsePhiSchedule[\s\S]{0,260}coarseScheduleEnabled=select\(0u,1u,!rejectedFine\(\)\)[\s\S]*workgroupUniformLoad\(&coarseScheduleEnabled\)[\s\S]*if\(enabled==0u\)\{if\(lid==0u\)\{control\.pad0=0u;\}return;\}/,
+    /fn preparePowerCoarsePhiSchedule[\s\S]{0,380}let accepted=!rejectedFine\(\);coarseScheduleEnabled=select\(0u,1u,accepted\)[\s\S]*dispatchMetadata\[0\]=0u[\s\S]*workgroupUniformLoad\(&coarseScheduleEnabled\)[\s\S]*if\(enabled==0u\)\{if\(lid==0u\)\{control\.pad0=0u;\}return;\}/,
     "the first portable phase must broadcast rejected fine authority and disable every later transaction phase");
   assert.deepEqual([...octreePowerCoarseLevelSetShader.matchAll(
     /@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
@@ -99,7 +88,6 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     "buildPowerCoarseSelectorRows",
     "advectPowerCoarsePhiSchedule",
     "correctPowerCoarsePhiSchedule",
-    "redistancePowerCoarsePhiPass",
     "publishPowerCoarsePhiSchedule",
     "commitPowerCoarsePhiSchedule",
   ], "portable ownership kernels replace the deleted eighteen-stage host schedule");
@@ -114,10 +102,12 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     "storage-derived authority must not let any lane bypass a later commit barrier");
   const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
   assert.match(encode,
-    /constrowWorkgroups=Math\.max\(1,Math\.ceil\(maximumRows\/256\)\);constselectorWorkgroups=Math\.max\(1,Math\.ceil\(maximumRows\*this\.selectorCount\/64\)\);run\(this\.buildSelectorRowsPipeline,phaseBindings\[1\],selectorWorkgroups\);run\(this\.advectPipeline,phaseBindings\[2\],rowWorkgroups\);run\(this\.correctPipeline,phaseBindings\[3\],rowWorkgroups\);for\(constredistanceofthis\.redistancePipelines\)\{run\(redistance,phaseBindings\[4\],rowWorkgroups\)\}/,
-    "each fixed redistance pass must occupy the full row-parallel device schedule");
-  assert.equal((encode.match(/run\(this\.(?:prepare|advect|correct|publish|commit)Pipeline/g) ?? []).length, 5,
-    "the non-iterative ownership phases remain explicit and fixed");
+    /if\(!this\.airSupportLayout\)runRows\(this\.buildSelectorRowsPipeline,1,12\);runRows\(this\.advectPipeline,2,0\);runRows\(this\.correctPipeline,3,0\);runRows\(this\.publishPipeline,4,0\)/,
+    "the support producer exclusively owns live tags while standalone coarse selectors retain their compact schedule");
+  assert.equal((encode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 2,
+    "the bounded prepare and commit reductions remain explicit and fixed");
+  assert.equal((encode.match(/runRows\(this\.(?:buildSelectorRows|advect|correct|publish)Pipeline/g) ?? []).length, 4,
+    "all row-parallel ownership phases use the compact indirect schedule");
   assert.doesNotMatch(encode,
     /dispatch\("(?:migrate|prepare|clearStatus|advect|validateFine|applyFine|redistance|publish|finalize|publishDelta)"/,
     "the legacy string-addressed host stage machine must stay deleted");
@@ -125,21 +115,18 @@ test("rejected fine correction preserves every byte of the prior coarse authorit
     /migratePowerCoarsePhiSource[\s\S]*previousSampleAtCurrentLeaf\(header\)/,
     "recurring coarse phi must be sampled by spatial leaf identity before row-indexed advection");
   assert.match(octreePowerCoarseLevelSetShader,
-    /output\.flags&MIGRATED_AIR[\s\S]*params\.hasFine!=0u[\s\S]*fail\(row,INVALID_SOURCE\)[\s\S]*output\.flags&=~MIGRATED_AIR/,
-    "fine mode must reject an uncorrected migrated row while coarse-only mode publishes its explicit positive-air complement");
+    /output\.flags&=~MIGRATED_AIR;output\.minimumPhi=min/,
+    "the explicit coarse positive-air complement must publish where the narrow fine band has no valid correction");
+  assert.doesNotMatch(octreePowerCoarseLevelSetShader,
+    /output\.flags&MIGRATED_AIR[\s\S]*fail\(row,INVALID_SOURCE\)/,
+    "Section 5 corrects coarse phi only wherever fine phi is valid");
   assert.match(octreePowerCoarseLevelSetShader,
-    /applyExactFineCorrection[\s\S]*output\.flags=.*PHI_CORRECTED[\s\S]*redistancePowerCoarsePhi[\s\S]*source\.flags&\(PHI_CORRECTED\|PHI_INTERFACE\)[\s\S]*return;/,
-    "valid cell-center fine aggregates are fixed coarse seeds during the local Delaunay sweep");
-  assert.match(octreePowerCoarseLevelSetShader,
-    /let metric=metrics\[row\];if\(\(metric\.transformAndFlags&VALID\)==0u\)\{fail\(row,INVALID_ROW\);return;\}var fixedSeed=/,
-    "a fine correction cannot bypass invalid topology validation");
+    /applyExactFineCorrection[\s\S]*output\.flags=.*PHI_CORRECTED[\s\S]*publishPowerCoarsePhi/,
+    "valid cell-center restriction is published directly without a second distance solve");
   const scheduleEncode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString();
-  assert.match(octreePowerCoarseLevelSetShader,
-    /validatePowerCoarseFineCorrection\(gid\.x\);applyExactFineCorrection\(gid\.x\);[\s\S]*override REDISTANCE_ITERATION:u32=0u;[\s\S]*redistancePowerCoarsePhi\(gid\.x,REDISTANCE_ITERATION\)/,
-    "fine correction validation and seeding must precede the inter-dispatch Delaunay redistance passes");
-  assert.match(scheduleEncode,
-    /run\(this\.correctPipeline[\s\S]*for\s*\(const redistance of this\.redistancePipelines\)/,
-    "the host must preserve correction-before-redistance command ordering");
+  assert.ok(scheduleEncode.indexOf("runRows(this.correctPipeline")
+    < scheduleEncode.indexOf("runRows(this.publishPipeline"),
+  "fine restriction must precede direct coarse publication");
   assert.match(scheduleEncode, /Power coarse level set [^"]*persistent schedule/,
     "command attribution must identify the single persistent coarse transaction");
 });
@@ -184,34 +171,49 @@ test("every coarse schedule bind group equals transitive WGSL reachability", () 
   const device = {
     queue: { writeBuffer() {} },
     createBuffer: () => ({ id: id += 1 }), createShaderModule: () => ({}),
-    createComputePipeline: ({ compute }: GPUComputePipelineDescriptor) => ({ entryPoint: compute.entryPoint,
-      getBindGroupLayout: () => ({ entryPoint: compute.entryPoint }) }),
+    createBindGroupLayout: ({ entries }: GPUBindGroupLayoutDescriptor) => ({ entries }),
+    createPipelineLayout: ({ bindGroupLayouts }: GPUPipelineLayoutDescriptor) => ({ bindGroupLayouts }),
+    createComputePipeline: ({ compute, layout }: GPUComputePipelineDescriptor) => {
+      const explicit = layout as unknown as { bindGroupLayouts: { entryPoint?: string }[] };
+      explicit.bindGroupLayouts[0]!.entryPoint = compute.entryPoint;
+      return { entryPoint: compute.entryPoint };
+    },
     createBindGroup: ({ layout, entries }: { layout: { entryPoint: string }; entries: { binding: number }[] }) => {
       observed.set(layout.entryPoint, entries.map(({ binding }) => binding).sort((a, b) => a - b)); return {};
     },
   } as unknown as GPUDevice;
   const buffer = {} as GPUBuffer;
   const coarse = { plan: { rowCapacity: 1 }, records: buffer } as unknown as WebGPUOctreeCoarseLevelSet;
-  const topology = { metrics: buffer, catalogTetrahedronHeaders: buffer, catalogTetrahedra: buffer,
-    catalogTetrahedronVertices: buffer };
-  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} };
+  const topology = { metrics: buffer, control: buffer, catalogTetrahedronHeaders: buffer,
+    catalogTetrahedra: buffer, catalogTetrahedronVertices: buffer };
+  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {},
+    dispatchWorkgroupsIndirect() {}, end() {} };
   const encoder = { beginComputePass: () => pass, copyBufferToBuffer() {} } as unknown as GPUCommandEncoder;
   const previousUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
+  const previousStage = Object.getOwnPropertyDescriptor(globalThis, "GPUShaderStage");
   Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true,
-    value: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8 } });
+    value: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8, INDIRECT: 16 } });
+  Object.defineProperty(globalThis, "GPUShaderStage", { configurable: true,
+    value: { COMPUTE: 1 } });
   try {
     const schedule = new WebGPUOctreePowerCoarseLevelSet(device, coarse,
-      topology as unknown as ConstructorParameters<typeof WebGPUOctreePowerCoarseLevelSet>[2], 1);
-    schedule.encode(new PassBroker(encoder), { headers: buffer, cellVelocities: buffer, rowDirectory: buffer, rowCount: 1 },
-      { dimensions: [1, 1, 1], physicalCellSize: 1, dt: 0, rowDirectoryCapacity: 1, generation: 1 });
+      topology as unknown as ConstructorParameters<typeof WebGPUOctreePowerCoarseLevelSet>[2]);
+    schedule.encode(new PassBroker(encoder), { headers: buffer,
+      structured: { control: buffer, rowVelocities: buffer, rowGeometry: buffer,
+        rowBankStrideWords: 1, liveRowDispatch: buffer }, rowCount: 1 },
+      { dimensions: [1, 1, 1], physicalCellSize: 1, dt: 0, generation: 1 });
     const secondEncoder = { beginComputePass: () => pass, copyBufferToBuffer() {} } as unknown as GPUCommandEncoder;
     assert.doesNotThrow(() => schedule.encode(new PassBroker(secondEncoder),
-      { headers: buffer, cellVelocities: buffer, rowDirectory: buffer, rowCount: 1 },
-      { dimensions: [1, 1, 1], physicalCellSize: 1, dt: 0, rowDirectoryCapacity: 1, generation: 2 }),
+      { headers: buffer,
+        structured: { control: buffer, rowVelocities: buffer, rowGeometry: buffer,
+          rowBankStrideWords: 1, liveRowDispatch: buffer }, rowCount: 1 },
+      { dimensions: [1, 1, 1], physicalCellSize: 1, dt: 0, generation: 2 }),
     "a second command buffer must be encodable before the first is submitted or retired");
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
+    if (previousStage) Object.defineProperty(globalThis, "GPUShaderStage", previousStage);
+    else Reflect.deleteProperty(globalThis, "GPUShaderStage");
   }
   const entryPoints = [...octreePowerCoarseLevelSetShader.matchAll(
     /@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
@@ -220,7 +222,7 @@ test("every coarse schedule bind group equals transitive WGSL reachability", () 
   for (const entryPoint of entryPoints) assert.deepEqual(observed.get(entryPoint), reachable(entryPoint), entryPoint);
 });
 
-test("Dawn runs live-row advection, redistance, and cell-center fine correction without readback dependencies", {
+test("Dawn runs live-row advection and cell-center fine restriction without readback dependencies", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for WP8 GPU checks",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
@@ -246,29 +248,36 @@ test("Dawn runs live-row advection, redistance, and cell-center fine correction 
   const headerData = new ArrayBuffer(rowCount * 48), headerWords = new Uint32Array(headerData);
   for (let row = 0; row < rowCount; row += 1) { headerWords[row * 12] = row; headerWords[row * 12 + 3] = 1; }
   const velocities = new Float32Array(rowCount * 4); for (let row = 0; row < rowCount; row += 1) velocities[row * 4 + 3] = 1;
-  const rowDirectoryCapacity = rowCount;
-  const rowDirectoryWords = new Uint32Array(rowDirectoryCapacity * 4);
-  for (let row = 0; row < rowCount; row += 1) {
-    rowDirectoryWords.set([row + 1, 1, row, row], row * 4);
-  }
   const upload = (data: ArrayBufferView) => { const buffer = device.createBuffer({ size: Math.max(4, data.byteLength),
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
     new Uint8Array(buffer.getMappedRange()).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)); buffer.unmap(); return buffer; };
-  const headers = upload(new Uint8Array(headerData)), velocityBuffer = upload(velocities);
-  const rowDirectory = upload(rowDirectoryWords);
+  const headers = upload(new Uint8Array(headerData));
+  const packedVelocities = new Float32Array(rowCount * 8); packedVelocities.set(velocities);
+  const velocityBuffer = upload(packedVelocities);
+  const rowGeometryWords = new Uint32Array(rowCount * 8);
+  for (let bank = 0; bank < 2; bank += 1) for (let row = 0; row < rowCount; row += 1) {
+    rowGeometryWords.set([row, 1, 0, row], (bank * rowCount + row) * 4);
+  }
+  const rowGeometry = upload(rowGeometryWords);
+  const structuredControl = upload(new Uint32Array([0, 0xffff_ffff, rowCount, 41, 0, rowCount]));
+  const liveRowDispatch = device.createBuffer({ size: 12,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
+  device.queue.writeBuffer(liveRowDispatch, 0, new Uint32Array([Math.ceil(rowCount / 64), 1, 1]));
+  const structured = { control: structuredControl, rowVelocities: velocityBuffer,
+    rowGeometry, rowBankStrideWords: rowCount, liveRowDispatch };
   const offsets = upload(new Uint32Array([0, 1, 2, 3, 4, 5, 6, 7, 8]));
   const aggregateData = new ArrayBuffer(rowCount * 16), aggregateFloats = new Float32Array(aggregateData);
   const aggregateWords = new Uint32Array(aggregateData);
   aggregateFloats.set([-0.05, -0.05, 0.05]); aggregateWords[3] = 1;
   const contributions = upload(new Uint8Array(aggregateData));
-  const schedule = new WebGPUOctreePowerCoarseLevelSet(device, coarse, topology.source, 2);
+  const schedule = new WebGPUOctreePowerCoarseLevelSet(device, coarse, topology.source);
   const directoryOffset = OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES + coarse.plan.recordBytes;
   const readback = device.createBuffer({ size: directoryOffset + schedule.plan.sampleDirectoryBytes,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const encoder = device.createCommandEncoder(); schedule.encode(new PassBroker(encoder), { headers, cellVelocities: velocityBuffer, rowDirectory,
+  const encoder = device.createCommandEncoder(); schedule.encode(new PassBroker(encoder), { headers, structured,
     rowCount, fineCorrection: { rowOffsets: offsets, contributions, contributionCount: rowCount,
       maximumContributionsPerRow: 1, aggregated: true } },
-  { dimensions: [2, 2, 2], physicalCellSize: 1, dt: 0, rowDirectoryCapacity, generation: 41 });
+  { dimensions: [2, 2, 2], physicalCellSize: 1, dt: 0, generation: 41 });
   encoder.copyBufferToBuffer(schedule.control, 0, readback, 0, OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES);
   encoder.copyBufferToBuffer(coarse.records, 0, readback, OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES, coarse.plan.recordBytes);
   encoder.copyBufferToBuffer(schedule.sampleDirectory, 0, readback, directoryOffset, schedule.plan.sampleDirectoryBytes);
@@ -277,11 +286,10 @@ test("Dawn runs live-row advection, redistance, and cell-center fine correction 
   const decoded = unpackOctreePowerCoarseLevelSetControl(new Uint32Array(result, 0, 16));
   assert.deepEqual(decoded, {
     flags: 0, firstErrorRow: 0xffff_ffff, rowCount, advectedRows: rowCount, uniformUpdates: 0,
-    transitionUpdates: 0, redistancePasses: 2, correctedRows: 1, interfaceRows: 1,
+    transitionUpdates: 0, representationPasses: 0, correctedRows: 1, interfaceRows: 1,
     contributionCount: rowCount, generation: 41, valid: OCTREE_POWER_COARSE_LEVELSET_VALID,
   });
-  assert.equal(decoded.uniformUpdates, 0,
-    "the checkerboard fixture makes every row a sign-change seed, so the paper's redistance sweep must retain all rows");
+  assert.equal(decoded.uniformUpdates, 0);
   const output = new Float32Array(result, OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES, rowCount * 4);
   assert.ok(Math.abs(output[0] + 0.05) < 1e-6); assert.ok(Math.abs(output[1] + 0.05) < 1e-6);
   assert.ok(Math.abs(output[2] - 0.05) < 1e-6);
@@ -305,11 +313,13 @@ test("Dawn runs live-row advection, redistance, and cell-center fine correction 
   // strictly invalid and publication remains fail-closed.
   device.queue.writeBuffer(velocityBuffer, 0, new Float32Array(rowCount * 4));
   const runVelocityGuard = async (dt: number, generation: number) => {
+    device.queue.writeBuffer(structuredControl, 0,
+      new Uint32Array([0, 0xffff_ffff, rowCount, generation, 0, rowCount]));
     const guardReadback = device.createBuffer({ size: OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES + 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const guardEncoder = device.createCommandEncoder();
-    schedule.encode(new PassBroker(guardEncoder), { headers, cellVelocities: velocityBuffer, rowDirectory, rowCount },
-      { dimensions: [2, 2, 2], physicalCellSize: 1, dt, rowDirectoryCapacity, generation });
+    schedule.encode(new PassBroker(guardEncoder), { headers, structured, rowCount },
+      { dimensions: [2, 2, 2], physicalCellSize: 1, dt, generation });
     guardEncoder.copyBufferToBuffer(schedule.control, 0, guardReadback, 0,
       OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES);
     guardEncoder.copyBufferToBuffer(schedule.sampleDirectory, 0, guardReadback,
@@ -335,8 +345,10 @@ test("Dawn runs live-row advection, redistance, and cell-center fine correction 
   const invalidReadback = device.createBuffer({ size: OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES + 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const invalidEncoder = device.createCommandEncoder();
-  schedule.encode(new PassBroker(invalidEncoder), { headers, cellVelocities: velocityBuffer, rowDirectory, rowCount },
-    { dimensions: [2, 2, 2], physicalCellSize: 1, dt: 0, rowDirectoryCapacity, generation: 44 });
+  device.queue.writeBuffer(structuredControl, 0,
+    new Uint32Array([0, 0xffff_ffff, rowCount, 44, 0, rowCount]));
+  schedule.encode(new PassBroker(invalidEncoder), { headers, structured, rowCount },
+    { dimensions: [2, 2, 2], physicalCellSize: 1, dt: 0, generation: 44 });
   invalidEncoder.copyBufferToBuffer(schedule.control, 0, invalidReadback, 0,
     OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES);
   invalidEncoder.copyBufferToBuffer(schedule.sampleDirectory, 0, invalidReadback,
@@ -350,6 +362,8 @@ test("Dawn runs live-row advection, redistance, and cell-center fine correction 
   assert.ok(invalidControl.firstErrorRow < rowCount);
   assert.equal(invalidControl.valid, 0);
   assert.equal(new Uint32Array(invalidResult)[16], 0, "invalid source cannot publish an authoritative directory");
-  schedule.destroy(); headers.destroy(); velocityBuffer.destroy(); rowDirectory.destroy(); offsets.destroy(); contributions.destroy();
+  schedule.destroy(); headers.destroy(); velocityBuffer.destroy(); rowGeometry.destroy(); structuredControl.destroy();
+  liveRowDispatch.destroy();
+  offsets.destroy(); contributions.destroy();
   readback.destroy(); invalidReadback.destroy(); coarse.destroy(); topology.destroy(); device.destroy();
 });

@@ -30,7 +30,11 @@ test("power topology planner accounts only compact rows and fixed catalog", () =
   assert.equal(shallow.entryCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount);
   assert.equal(shallow.lookupCount, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount);
   assert.equal(shallow.metricBytes, 1_600);
-  assert.equal(shallow.catalogBytes, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount - 26 * 4);
+  assert.equal(shallow.catalogBytes, OCTREE_GENERATED_POWER_CATALOG_MANIFEST.byteCount - 40 * 4);
+  assert.equal(shallow.rowTemplateBytes,
+    catalog.rowTemplateHeaders.byteLength + catalog.rowTemplateSlots.byteLength
+    + catalog.rowTemplateData.byteLength + catalog.rowTemplateDiagonals.byteLength
+    + catalog.reconstructionData.byteLength);
   assert.ok(shallow.allocatedBytes < 16 * 1024 * 1024);
 });
 
@@ -39,6 +43,18 @@ test("power topology planner rejects malformed catalog lookup metadata", () => {
   const lookup = catalog.lookup.slice();
   lookup[3] = lookup[0];
   assert.throws(() => planOctreePowerTopology(1, { ...catalog, lookup }), /lookup is invalid/);
+  assert.throws(() => planOctreePowerTopology(1, {
+    ...catalog,
+    rowTemplateHeaders: catalog.rowTemplateHeaders.slice(1),
+  }), /typed-array shape is invalid/);
+  const rowTemplateSlots = catalog.rowTemplateSlots.slice();
+  rowTemplateSlots[0] |= 0x8000_0000;
+  assert.throws(() => planOctreePowerTopology(1, { ...catalog, rowTemplateSlots }),
+    /packed row-template selector is invalid/);
+  const reconstructionData = catalog.reconstructionData.slice();
+  reconstructionData[0] = Number.NaN;
+  assert.throws(() => planOctreePowerTopology(1, { ...catalog, reconstructionData }),
+    /reconstruction pseudoinverse is invalid/);
 });
 
 test("power authority accepts only physically isotropic finest cells", () => {
@@ -49,7 +65,19 @@ test("power authority accepts only physically isotropic finest cells", () => {
 });
 
 test("power topology WGSL resolves affected rows and compacts exact publication rows in parallel", () => {
+  assert.match(octreePowerTopologyShader,
+    /fn requestedRows\(\)->u32\{return rowDelta\[params\.delta\.x\];\}/,
+    "resolved topology must consume the same row-delta count as its descriptor publication");
+  assert.doesNotMatch(octreePowerTopologyShader, /rowCountSource|@binding\(8\)/,
+    "the row delta coalesces the redundant candidate row-count storage binding");
   assert.match(octreePowerTopologyShader, /fn resolveDescriptor/);
+  assert.match(octreePowerTopologyShader, /fn rowTemplateValid/);
+  assert.match(octreePowerTopologyShader,
+    /if\(!rowTemplateValid\(found\.x\)\)\{fail\(row,CATALOG_VERSION\);return;\}/);
+  assert.match(octreePowerTopologyShader,
+    /@group\(0\) @binding\(5\) var<storage,read> denseCatalog:array<u32>/);
+  assert.doesNotMatch(octreePowerTopologyShader, /@binding\(1[1-5]\)/,
+    "packed row templates must share the dense-case arena within the portable storage-binding limit");
   assert.match(octreePowerTopologyShader,
     /geometry==REGULAR_DESCRIPTOR&&boundary==0u\)\{return vec2u\(params\.regularPacked&0xffffu,params\.regularPacked>>16u\)/);
   assert.match(octreePowerTopologyShader, /index<arrayLength\(&sameOrCoarserDirect\)/);
@@ -60,12 +88,20 @@ test("power topology WGSL resolves affected rows and compacts exact publication 
   assert.match(octreePowerTopologyShader, /fn stagePowerTopologyDelta/);
   assert.match(octreePowerTopologyShader, /fn prefixPowerTopologyDelta/);
   assert.match(octreePowerTopologyShader, /fn scatterPowerTopologyDelta/);
-  assert.doesNotMatch(octreePowerTopologyShader, /fn commitPowerTopology/);
   assert.match(octreePowerTopologyShader,
-    /lookupArena\[publicationBase\(\)\+output\]=row;committedMetrics\[row\]=metrics\[row\]/,
-    "row-owned scatter must commit the same changed row without a redundant compact dispatch");
+    /lookupArena\[publicationBase\(\)\+output\]=row/,
+    "candidate scatter must publish only the compact changed-row list");
+  assert.match(octreePowerTopologyShader,
+    /fn commitPowerTopologyDelta[\s\S]*committedMetrics\[row\]=metrics\[row\]/,
+    "accepted metrics may change only in the separately scheduled ready-commit phase");
   assert.match(octreePowerTopologyShader,
     /candidate\.resolvedCount!=requestedRows\(\)\|\|candidate\.version!=params\.catalogVersion/);
+  assert.match(octreePowerTopologyShader,
+    /totals\.x\+totals\.y!=requestedRows\(\)/,
+    "processed-row accounting must include intentional invalid rows without inventing capacity loss");
+  assert.match(octreePowerTopologyShader,
+    /lane==0u&&controlArena\.candidate\.invalidCount==0u&&controlArena\.candidate\.flags==0u/,
+    "a rejected generation must not fold stale block summaries into its diagnostics");
   assert.doesNotMatch(octreePowerTopologyShader,
     /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
     "row-owned metric status and singleton publication replace recurring topology atomics");
@@ -79,6 +115,9 @@ test("power topology WGSL resolves affected rows and compacts exact publication 
     /if\(old!=row\)\{metrics\[row\]=metric;status\|=STATUS_PUBLISH;\}/);
   assert.match(octreePowerTopologyShader,
     /commitDispatch=dispatchFor\(published\)/);
+  assert.match(octreePowerTopologyShader,
+    /@compute @workgroup_size\(256\) fn commitPowerTopologyDelta[\s\S]*\*256u\+lane/,
+    "the compact commit consumes the same 256-row block dispatch that staged its publication list");
   assert.doesNotMatch(octreePowerTopologyShader,
     /carryPowerTopology|summarizePowerTopology|publishPowerTopology|controlArena\.moved/);
   assert.doesNotMatch(octreePowerTopologyShader, /for\(var row=0u;row<requested/);
@@ -126,7 +165,8 @@ test("Dawn resolves generated catalog descriptors and rejects misses/anisotropy"
     .find((descriptor) => !canonicalDescriptors.has(descriptor))!;
   // Geometry 961's canonical entry has the reflected -X boundary selector in
   // the immutable catalog (entry 1021, canonical mask 32).
-  const validDescriptors = [(961 | 0x0100_0000) >>> 0, nonCanonicalDescriptor, OCTREE_POWER_REGULAR_DESCRIPTOR];
+  const validDescriptors = [(961 | 0x0100_0000) >>> 0,
+    nonCanonicalDescriptor, OCTREE_POWER_REGULAR_DESCRIPTOR];
   const missingDescriptor = 0x7fff_ffff;
   const cold = createColdPowerRowPublication(device, 4, 4, 1);
   assert.equal(validDescriptors.includes(missingDescriptor), false);
@@ -134,7 +174,7 @@ test("Dawn resolves generated catalog descriptors and rejects misses/anisotropy"
     const readback = device.createBuffer({ size: 96, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = device.createCommandEncoder();
     const broker = new PassBroker(encoder);
-    topology.encode(broker, descriptors, cold.rowCount, spacing, cold.rowDelta);
+    topology.encode(broker, descriptors, spacing, cold.rowDelta);
     broker.fence();
     encoder.copyBufferToBuffer(topology.control, 0, readback, 0, 32);
     encoder.copyBufferToBuffer(topology.metrics, 0, readback, 32, 64);

@@ -32,8 +32,8 @@ export interface CompactVelocityRaster {
 }
 
 /**
- * Expand one xyz velocity per adaptive power leaf onto the finest cubic QA
- * lattice. `headers` uses the live 48-byte power-leaf ABI: word 0 is the
+ * Expand one xyz velocity per adaptive structured row onto the finest cubic QA
+ * lattice. `headers` uses the live 48-byte row ABI: word 0 is the
  * linear finest-cell origin and word 3 is the cubic leaf size. `velocities`
  * uses the live vec4 ABI whose w lane is one only for a solved reconstruction.
  *
@@ -41,19 +41,19 @@ export interface CompactVelocityRaster {
  * publication. Missing, overlapping, out-of-bounds, or unsolved leaves write
  * NaNs so the parity gate fails closed instead of silently scoring zeros.
  */
-export function rasterizeCompactPowerCellVelocities(
+export function rasterizeStructuredCellVelocities(
   headers: ArrayLike<number>,
   velocities: ArrayLike<number>,
   rowCount: number,
   dimensions: readonly [number, number, number],
 ): CompactVelocityRaster {
   const [nx, ny, nz] = dimensions;
-  if (!Number.isSafeInteger(rowCount) || rowCount < 0) throw new RangeError("Power velocity row count must be non-negative");
+  if (!Number.isSafeInteger(rowCount) || rowCount < 0) throw new RangeError("Structured velocity row count must be non-negative");
   if (![nx, ny, nz].every((value) => Number.isSafeInteger(value) && value > 0)) {
-    throw new RangeError("Power velocity dimensions must be positive integers");
+    throw new RangeError("Structured velocity dimensions must be positive integers");
   }
   if (headers.length < rowCount * 12 || velocities.length < rowCount * 4) {
-    throw new RangeError("Power velocity buffers do not contain every declared row");
+    throw new RangeError("Structured velocity buffers do not contain every declared row");
   }
   const cellCount = nx * ny * nz;
   const field = new Float32Array(cellCount * 3);

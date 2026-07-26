@@ -10,83 +10,76 @@ import { OCTREE_POWER_COARSE_LEVELSET_VALID } from "../lib/webgpu-octree-power-c
 const VALID = 0x8000_0000;
 
 function fineAuthority(): InitialGlobalFineAuthorityDiagnostics {
-  const faceBand = new Uint32Array(16);
-  faceBand.set([0, 0xffff_ffff, 12, 21, 42, 2, VALID, 4, 7, 21, 0, 0, 0]);
-  const transition = new Uint32Array(16);
-  transition.set([0, 0xffff_ffff, 12, 3, 9, VALID, VALID, 0]);
-  const point = new Uint32Array([0, 0xffff_ffff, 12, 2, 12, VALID, 4, 7]);
-  const transient = new Uint32Array(16);
-  transient.set([0, 0xffff_ffff, 12, 360, 90, 90, 12, 2, VALID]);
-  const publication = new Uint32Array(16);
-  publication.set([0, 0xffff_ffff, 21, 7, 7, 7, 2, 3, VALID]);
   return {
-    seedCount: 8, seedError: 0, topologyFlags: 0,
-    interfaceBricks: 4, interfaceSeedBricks: 4,
-    desiredBricks: 20, activatedBricks: 20, activeBricks: 20,
-    published: true, rolledBack: false, downstreamFinalizeReason: 0,
-    generation: 2, configuredFineGeneration: 2, scheduledFineGeneration: 2,
-    coarseDirectoryState: OCTREE_POWER_COARSE_LEVELSET_VALID, coarseDirectoryGeneration: 2,
-    coarseControlFlags: 0, coarseControlGeneration: 2,
-    coarseControlValid: OCTREE_POWER_COARSE_LEVELSET_VALID,
-    fineRestrictionFlags: 0, fineRestrictionUnowned: 0, fineRestrictionRows: 12,
-    fineRestrictionValid: OCTREE_POWER_COARSE_LEVELSET_VALID,
-    transportControl: Array(8).fill(0), redistanceControl: [0, 0, 8, 1],
-    volumeControl: Array(16).fill(0), faceBandControl: Array.from(faceBand),
-    faceBandTransitionControl: Array.from(transition),
-    faceBandPointFieldControl: Array.from(point),
-    faceBandTransientPowerControl: Array.from(transient),
-    faceBandPowerPublicationControl: Array.from(publication),
+    seedControl: [8, 0],
+    topologyControl: [0, 4, 20, 20, 1, 0, 1, 0, 4],
+    fineVolumeControl: new Array(16).fill(0),
+    worklistHeader: [2, 20, 32, 3, 1, 1, 1],
+    coarseControl: [0, 0xffff_ffff, 12, 12, 0, 0, 8, 0, 4, 0, 2,
+      OCTREE_POWER_COARSE_LEVELSET_VALID, 0, 0, 0, 0],
+    fineRestrictionControl: [42, 8, 0, 0, 12, OCTREE_POWER_COARSE_LEVELSET_VALID],
+    structuredVelocityControl: [0, 0xffff_ffff, 12, 2, 0, 12],
+    structuredBoundaryControl: [0, 0xffff_ffff, 12, 12, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    configuredFineGeneration: 2,
+    fineGenerationSlot: 0,
+    scheduledFineGeneration: 2,
+    currentFineIsA: true,
   };
 }
 
-test("t=0 fine authority requires the complete paper Section 5 publication", () => {
+test("t=0 fine authority requires one coherent fine/coarse/structured publication", () => {
   assert.equal(initialGlobalFineAuthorityReadiness(fineAuthority()).ready, true);
-  assert.equal(initialGlobalFineAuthorityReadiness({ ...fineAuthority(), interfaceBricks: 0 }).ready, false,
+  const noInterface = { ...fineAuthority(), topologyControl: [...fineAuthority().topologyControl] };
+  noInterface.topologyControl[1] = 0;
+  assert.equal(initialGlobalFineAuthorityReadiness(noInterface).ready, false,
     "a recurring generation cannot replace transported-interface discovery with old external seeds");
-  assert.equal(initialGlobalFineAuthorityReadiness({ ...fineAuthority(), interfaceBricks: 0 },
+  assert.equal(initialGlobalFineAuthorityReadiness(noInterface,
     { externallySeededColdBootstrap: true }).ready, true,
-    "the empty predecessor discovers no fine interface; external affine seeds author the first fresh SPGrid");
-  assert.equal(initialGlobalFineAuthorityReadiness({ ...fineAuthority(), interfaceBricks: 0,
-    activatedBricks: 0 }, { externallySeededColdBootstrap: true }).ready, false,
-    "external seeds must still produce a nonempty activated and published transaction");
-  assert.match(initialGlobalFineAuthorityReadiness({ ...fineAuthority(), published: false }).label,
-    /global-fine topology rejected/);
-  assert.match(initialGlobalFineAuthorityReadiness({ ...fineAuthority(), coarseDirectoryGeneration: 1 }).label,
-    /coarse level set/);
-  const failedBand = fineAuthority();
-  const failedPublication = [...failedBand.faceBandPowerPublicationControl];
-  failedPublication[5] = 6;
-  assert.match(initialGlobalFineAuthorityReadiness({ ...failedBand,
-    faceBandPowerPublicationControl: failedPublication }).label, /Section 5/);
+    "the empty predecessor may use explicit seeds only for the cold bootstrap");
+  const noActivation = { ...fineAuthority(), topologyControl: [...fineAuthority().topologyControl] };
+  noActivation.topologyControl[1] = 0; noActivation.topologyControl[3] = 0;
+  assert.equal(initialGlobalFineAuthorityReadiness(noActivation,
+    { externallySeededColdBootstrap: true }).ready, false);
+  const unpublished = { ...fineAuthority(), topologyControl: [...fineAuthority().topologyControl] };
+  unpublished.topologyControl[4] = 0;
+  assert.match(initialGlobalFineAuthorityReadiness(unpublished).label, /global-fine topology rejected/);
+  const staleCoarse = { ...fineAuthority(), coarseControl: [...fineAuthority().coarseControl] };
+  staleCoarse.coarseControl[10] = 1;
+  assert.match(initialGlobalFineAuthorityReadiness(staleCoarse).label, /coarse level set/);
+  const staleVelocity = { ...fineAuthority(), structuredVelocityControl: [...fineAuthority().structuredVelocityControl] };
+  staleVelocity.structuredVelocityControl[3] = 1;
+  assert.match(initialGlobalFineAuthorityReadiness(staleVelocity).label,
+    /structured velocity\/boundary authority/);
+  const staleBoundary = { ...fineAuthority(), structuredBoundaryControl: [...fineAuthority().structuredBoundaryControl] };
+  staleBoundary.structuredBoundaryControl[6] = 1;
+  assert.match(initialGlobalFineAuthorityReadiness(staleBoundary).label,
+    /structured velocity\/boundary authority/);
 });
 
 test("t=0 rejection preserves named downstream evidence after device disposal", () => {
-  const failed = fineAuthority();
-  const topologyControl = [16, 4, 20, 20, 0, 1, 0, 2 | 4, 4];
-  const redistanceControlDetailed = [1, 900_000, 8, 0, 16, 123, 2, 40, 1];
-  const outcome = initialGlobalFineAuthorityReadiness({
-    ...failed,
-    topologyFlags: 16,
-    topologyControl,
-    downstreamFinalizeReason: 2 | 4,
-    redistanceControlDetailed,
-  });
+  const failed = { ...fineAuthority(), topologyControl: [...fineAuthority().topologyControl] };
+  failed.topologyControl[0] = 16;
+  failed.topologyControl[4] = 0;
+  failed.topologyControl[5] = 1;
+  failed.topologyControl[7] = 2 | 4;
+  const outcome = initialGlobalFineAuthorityReadiness(failed);
   assert.equal(outcome.ready, false);
   assert.match(outcome.label, /"errors":\["downstreamPublication"\]/);
   assert.match(outcome.label, /"downstream":\["redistance","volume"\]/);
-  assert.match(outcome.label, /"conflictingRequest"/);
-  assert.match(outcome.label, /"firstError":123/);
+  assert.match(outcome.label, /"structuredVelocity"/);
+  assert.match(outcome.label, /"structuredBoundary"/);
 });
 
-test("t=0 power pressure requires nonempty CSR and Section 4.3 convergence", () => {
+test("t=0 power pressure requires nonempty resolved rows and Section 4.3 convergence", () => {
   const control = new Uint32Array(16);
-  control.set([0, 1, 6, 12]);
+  control.set([0, 1, 6, 7, 12]);
   const floats = new Float32Array(control.buffer);
-  floats[4] = 1e-10; floats[5] = 1;
+  floats[10] = 1e-10; floats[11] = 1e-18;
+  floats[8] = 1; floats[9] = 1e-9;
   const accepted = { authoritative: true, solverLabel: "Octree power PCG · Section 4.3 hybrid",
-    pressureRows: 12, pressureEntries: 48, capacityOverflow: false, mgpcgControl: control };
+    pressureRows: 12, capacityOverflow: false, mgpcgControl: control };
   assert.equal(initialPowerPressureReadiness(accepted).ready, true);
-  assert.match(initialPowerPressureReadiness({ ...accepted, pressureRows: 0 }).label, /CSR/);
+  assert.match(initialPowerPressureReadiness({ ...accepted, pressureRows: 0 }).label, /resolved power rows/);
   control[1] = 0;
   assert.match(initialPowerPressureReadiness(accepted).label, /did not converge/);
 });

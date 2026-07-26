@@ -1,0 +1,89 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  STRUCTURED_GENERATION_AUDIT_SNAPSHOT,
+  exactStructuredGenerationAuditFailures,
+  finalPerformanceAuthorityFailures,
+  unpackStructuredBoundaryControl,
+  unpackStructuredGenerationAuditSnapshot,
+  unpackStructuredVelocityControl,
+  type ExactStructuredGenerationAudit,
+} from "../tools/webgpu-smoke-structured-audit";
+
+function coherentAudit(): ExactStructuredGenerationAudit {
+  return {
+    publishedFineGeneration: 8,
+    expectedStructuredEpoch: 7,
+    previousFineGeneration: 7,
+    previousStructuredEpoch: 6,
+    structured: { flags: 0, firstError: 0xffff_ffff, rowCount: 21,
+      epoch: 7, activeBank: 1, slotCount: 73 },
+    boundary: { flags: 0, firstError: 0xffff_ffff, rowCount: 21, slotCount: 73,
+      epoch: 7, activeBank: 1, publishedEpoch: 7 },
+  };
+}
+
+test("structured control decoders expose the packed accepted transaction", () => {
+  assert.deepEqual(unpackStructuredVelocityControl([0, 0xffff_ffff, 21, 7, 1, 73]),
+    coherentAudit().structured);
+  assert.deepEqual(unpackStructuredBoundaryControl([0, 0xffff_ffff, 21, 73, 7, 1, 7]),
+    coherentAudit().boundary);
+  assert.throws(() => unpackStructuredVelocityControl([0, 1]), /six words/);
+  assert.throws(() => unpackStructuredBoundaryControl([0, 1]), /seven words/);
+});
+
+test("packed per-step audit snapshots retain every authority control", () => {
+  const layout = STRUCTURED_GENERATION_AUDIT_SNAPSHOT;
+  assert.equal(layout.strideBytes, 240);
+  const bytes = new Uint8Array(2 * layout.strideBytes);
+  const write = (record: number, offsetBytes: number, values: readonly number[]) => {
+    new Uint32Array(bytes.buffer, record * layout.strideBytes + offsetBytes, values.length).set(values);
+  };
+  write(1, layout.structuredOffsetBytes, [0, 0xffff_ffff, 21, 8, 0, 73]);
+  write(1, layout.boundaryOffsetBytes, [0, 0xffff_ffff, 21, 73, 8, 0, 8]);
+  write(1, layout.fineOffsetBytes, [9, 65, 128, 3, 2, 1, 1]);
+  const mgpcg = new Uint32Array(16); mgpcg[2] = 7;
+  write(1, layout.mgpcgOffsetBytes, Array.from(mgpcg));
+  const volume = new Uint32Array(16); volume[13] = 9;
+  write(1, layout.fineVolumeOffsetBytes, Array.from(volume));
+  write(1, layout.projectionEnergyOffsetBytes, [0, 8, 0, 21, 21, 1, 1, 8]);
+  const decoded = unpackStructuredGenerationAuditSnapshot(bytes, 1);
+  assert.deepEqual(decoded.structured,
+    { flags: 0, firstError: 0xffff_ffff, rowCount: 21, epoch: 8, activeBank: 0, slotCount: 73 });
+  assert.deepEqual(decoded.boundary,
+    { flags: 0, firstError: 0xffff_ffff, rowCount: 21, slotCount: 73,
+      epoch: 8, activeBank: 0, publishedEpoch: 8 });
+  assert.deepEqual(Array.from(decoded.fineHeader), [9, 65, 128, 3, 2, 1, 1]);
+  assert.equal(decoded.mgpcgControl[2], 7);
+  assert.equal(decoded.fineVolumeControl[13], 9);
+  assert.deepEqual(Array.from(decoded.projectionEnergyControl), [0, 8, 0, 21, 21, 1, 1, 8]);
+  assert.throws(() => unpackStructuredGenerationAuditSnapshot(bytes, 2), /truncated/);
+});
+
+test("exact structured generation audit accepts only one coherent successor", () => {
+  assert.deepEqual(exactStructuredGenerationAuditFailures(coherentAudit()), []);
+  const stale = coherentAudit();
+  const failures = exactStructuredGenerationAuditFailures({ ...stale,
+    structured: { ...stale.structured, epoch: 6 },
+    boundary: { ...stale.boundary, activeBank: 0 },
+  });
+  assert.ok(failures.includes("structured velocity publication is invalid"));
+  assert.ok(failures.includes("structured boundary publication is invalid or incoherent"));
+});
+
+test("final performance authority validates seven-word fine and structured publications", () => {
+  const coherent = coherentAudit();
+  assert.deepEqual(finalPerformanceAuthorityFailures({
+    expectedSteps: 6, observedSteps: 6, expectedTime_s: 2, targetTime_s: 2,
+    submittedTime_s: 2, fineSourceGeneration: 8,
+    fineWorklistHeader: [8, 65, 128, 3, 2, 1, 1], finePageCapacity: 128,
+    structured: coherent.structured, boundary: coherent.boundary,
+  }), []);
+  const failures = finalPerformanceAuthorityFailures({
+    expectedSteps: 6, observedSteps: 5, expectedTime_s: 2, targetTime_s: 2,
+    submittedTime_s: 1.9, fineSourceGeneration: 7,
+    fineWorklistHeader: [6, 129, 128, 0, 1, 0, 1], finePageCapacity: 128,
+    structured: { ...coherent.structured, flags: 1 }, boundary: coherent.boundary,
+  });
+  assert.ok(failures.length >= 6);
+});

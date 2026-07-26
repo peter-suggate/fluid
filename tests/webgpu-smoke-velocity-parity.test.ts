@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { compareVelocityFields, rasterizeCompactPowerCellVelocities,
+import { compareVelocityFields, rasterizeStructuredCellVelocities,
   velocityParityFailures } from "../tools/webgpu-smoke-velocity-parity";
 
-test("compact power-leaf velocities rasterize over coarse and fine cubic ownership", () => {
+test("compact structured velocities rasterize over coarse and fine cubic ownership", () => {
   const headers = new Uint32Array(24);
   headers[0] = 0; headers[3] = 2;
   headers[12] = 2; headers[15] = 2;
@@ -12,7 +12,7 @@ test("compact power-leaf velocities rasterize over coarse and fine cubic ownersh
     1, 2, 3, 1,
     -1, -2, -3, 1,
   ]);
-  const raster = rasterizeCompactPowerCellVelocities(headers, velocities, 2, [4, 2, 2]);
+  const raster = rasterizeStructuredCellVelocities(headers, velocities, 2, [4, 2, 2]);
   assert.equal(raster.coveredCells, 16);
   assert.equal(raster.overlapCells, 0);
   assert.equal(raster.invalidRows, 0);
@@ -31,7 +31,7 @@ test("compact velocity raster fails closed on overlaps and unsolved rows", () =>
     2, 0, 0, 1,
     3, 0, 0, 0,
   ]);
-  const raster = rasterizeCompactPowerCellVelocities(headers, velocities, 3, [2, 1, 1]);
+  const raster = rasterizeStructuredCellVelocities(headers, velocities, 3, [2, 1, 1]);
   assert.equal(raster.coveredCells, 2);
   assert.equal(raster.overlapCells, 1);
   assert.equal(raster.invalidRows, 1);
@@ -50,7 +50,7 @@ test("the 2.2 second octree/tall-cell command gates final vector-field parity", 
   assert.match(smoke, /phase: "velocity-parity"/);
   assert.match(smoke, /velocityParityFailures\(velocityMetrics\)/);
   assert.match(smoke, /readCompactOctreeVelocityField3D/);
-  assert.match(smoke, /powerCellVelocityBuffer/);
+  assert.match(smoke, /structuredRowVelocities/);
 });
 
 test("matched liquid vector fields pass the tall-cell parity gate", () => {

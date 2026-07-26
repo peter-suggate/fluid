@@ -39,14 +39,11 @@ export function DiagnosticsPanel() {
   const selectedBody = bodies.find((body) => body.description.id === selectedBodyId);
   const requestedGlobalFineFactor = Number(methodValues.globalFineLevelSetFactor);
   const globalFineRequested = requestedGlobalFineFactor === 4 || requestedGlobalFineFactor === 8;
-  const powerCSRPublished = Boolean(gpuInfo?.powerDiagramAuthoritative)
-    && (gpuInfo?.pressureRequiredRows ?? 0) > 0
-    && (gpuInfo?.pressureRequiredEntries ?? 0) > 0;
+  const resolvedPowerPublished = Boolean(gpuInfo?.powerDiagramAuthoritative)
+    && (gpuInfo?.pressureRequiredRows ?? 0) > 0;
   const publishedPowerSolver = gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid")
     ? "POWER + SECTION 4.3"
-    : gpuInfo?.pressureSolver?.includes("fixed native-L2 Galerkin")
-      ? "POWER + FIXED GALERKIN"
-    : gpuInfo?.pressureSolver?.includes("Chebyshev") ? "POWER + CHEBYSHEV" : "POWER PUBLISHED";
+    : "POWER PUBLISHED";
   const octreePressurePotential = gpuInfo?.gridKind === "octree";
   const globalFineVolumeEstimate = gpuInfo?.volumeTelemetrySource === "global-fine";
   const representedVolumeAliasesPrimary = gpuInfo?.volumeDrift !== undefined
@@ -74,7 +71,7 @@ export function DiagnosticsPanel() {
         {gpuInfo?.gridKind === "octree" && gpuInfo.frontierListCapacity !== undefined && <MetricCard
           label="Octree frontier publication"
           value={`${gpuInfo.frontierRequiredLeaves?.toLocaleString() ?? "—"} / ${gpuInfo.frontierListCapacity.toLocaleString()}`}
-          unit={`${gpuInfo.frontierCapacityOverflow ? "FRONTIER OVERFLOW" : "frontier capacity clear"} · ${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} / ${gpuInfo.pressureRowCapacity?.toLocaleString() ?? "—"} rows · ${gpuInfo.pressureRequiredEntries?.toLocaleString() ?? "—"} / ${gpuInfo.pressureEntryCapacity?.toLocaleString() ?? "—"} entries · ${gpuInfo.pressureCapacityOverflow ? "CSR OVERFLOW" : "CSR capacity clear"}`}
+          unit={`${gpuInfo.frontierCapacityOverflow ? "FRONTIER OVERFLOW" : "frontier capacity clear"} · ${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} / ${gpuInfo.pressureRowCapacity?.toLocaleString() ?? "—"} resolved rows · ${gpuInfo.pressureCapacityOverflow ? "ROW OVERFLOW" : "row capacity clear"}`}
           tone={gpuInfo.frontierCapacityOverflow || gpuInfo.pressureCapacityOverflow
             ? "warn"
             : gpuInfo.frontierRequiredLeaves !== undefined ? "good" : "neutral"}
@@ -91,7 +88,7 @@ export function DiagnosticsPanel() {
             ? `${gpuInfo.globalFineLevelSetFactor ?? requestedGlobalFineFactor}× INDEXED`
             : globalFineRequested ? `${requestedGlobalFineFactor}× PENDING` : "OFF"}
           unit={gpuInfo.globalFineLevelSetEnabled
-            ? `${gpuInfo.globalFineSeedCount ?? 0} seeds / fault ${gpuInfo.globalFineSeedError ?? 0} · ${gpuInfo.globalFineInterfaceBricks ?? 0} interface → ${gpuInfo.globalFineDesiredBricks ?? 0} desired → ${gpuInfo.globalFineActiveBricks ?? 0} active · gen ${gpuInfo.globalFineGeneration ?? 0} ${gpuInfo.globalFinePublished ? (gpuInfo.globalFineRolledBack ? "ROLLBACK" : "PUBLISHED") : "PROVISIONAL"} · topology fault ${gpuInfo.globalFineTopologyFlags ?? 0} / downstream ${gpuInfo.globalFineDownstreamFinalizeReason ?? 0} · redistance ${gpuInfo.globalFineRedistanceCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineRedistanceUnresolvedCells ?? 0} unresolved / ${gpuInfo.globalFineRedistanceSeeds ?? 0} seeds)`} · volume 0x${(gpuInfo.globalFineVolumeFlags ?? 0).toString(16)} · transport ${gpuInfo.globalFineTransportCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineTransportDepartureOutsideBand ?? 0} outside / ${gpuInfo.globalFineTransportVelocityUnavailable ?? 0} unavailable / ${gpuInfo.globalFineTransportFaceBandUnavailable ?? 0} face-band)`} · Section 5 faults band/transition/power/transient/point ${gpuInfo.globalFineFaceBandFlags ?? 0}/${gpuInfo.globalFineFaceBandTransitionFlags ?? 0}/${gpuInfo.globalFineFaceBandPowerPublicationFlags ?? 0}/${gpuInfo.globalFineFaceBandTransientPowerFlags ?? 0}/${gpuInfo.globalFineFaceBandPointFieldFlags ?? 0} · ${gpuInfo.globalFineLevelSetResidentBrickCapacity?.toLocaleString() ?? "—"} capacity · ${((gpuInfo.globalFineLevelSetAllocatedBytes ?? 0) / 1048576).toFixed(1)} MiB`
+            ? `${gpuInfo.globalFineSeedCount ?? 0} seeds / fault ${gpuInfo.globalFineSeedError ?? 0} · ${gpuInfo.globalFineInterfaceBricks ?? 0} interface → ${gpuInfo.globalFineDesiredBricks ?? 0} desired → ${gpuInfo.globalFineActiveBricks ?? 0} active · gen ${gpuInfo.globalFineGeneration ?? 0} ${gpuInfo.globalFinePublished ? (gpuInfo.globalFineRolledBack ? "ROLLBACK" : "PUBLISHED") : "PROVISIONAL"} · topology fault ${gpuInfo.globalFineTopologyFlags ?? 0} / downstream ${gpuInfo.globalFineDownstreamFinalizeReason ?? 0} · redistance ${gpuInfo.globalFineRedistanceCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineRedistanceUnresolvedCells ?? 0} unresolved / ${gpuInfo.globalFineRedistanceSeeds ?? 0} seeds)`} · volume 0x${(gpuInfo.globalFineVolumeFlags ?? 0).toString(16)} · transport ${gpuInfo.globalFineTransportCommitted ? "OK" : `REJECTED (${gpuInfo.globalFineTransportDepartureOutsideBand ?? 0} outside / ${gpuInfo.globalFineTransportVelocityUnavailable ?? 0} unavailable / ${gpuInfo.globalFineTransportStructuredAuthorityUnavailable ?? 0} structured-authority)`} · structured ${gpuInfo.structuredVelocityValid && gpuInfo.structuredBoundaryValid ? "OK" : "REJECTED"} gen ${gpuInfo.structuredVelocityGeneration ?? 0} · ${gpuInfo.structuredVelocityRows ?? 0} rows / ${gpuInfo.structuredVelocitySlots ?? 0} slots · ${gpuInfo.globalFineLevelSetResidentBrickCapacity?.toLocaleString() ?? "—"} capacity · ${((gpuInfo.globalFineLevelSetAllocatedBytes ?? 0) / 1048576).toFixed(1)} MiB`
             : globalFineRequested ? "awaiting first valid sparse generation" : "not requested"}
           tone={gpuInfo.globalFineLevelSetEnabled && ((gpuInfo.globalFineSeedError ?? 0) !== 0
             || (gpuInfo.globalFineTopologyFlags ?? 0) !== 0 || gpuInfo.globalFinePublished === false)
@@ -133,13 +130,13 @@ export function DiagnosticsPanel() {
         <MetricCard label="GPU pressure residual" value={gpuInfo?.pressureRelativeResidual !== undefined ? gpuInfo.pressureRelativeResidual.toExponential(2) : "—"} unit={`relative L∞ · raw ${gpuInfo?.pressureResidual?.toExponential(2) ?? "—"} at ${formatGridLocation(gpuInfo?.maxPressureResidualLocation)}`} tone={gpuInfo?.pressureRelativeResidual !== undefined && gpuInfo.pressureRelativeResidual <= 0.1 ? "good" : "warn"} />
         {gpuInfo?.gridKind === "octree" && <MetricCard
           label="Power pressure authority"
-          value={powerCSRPublished
+          value={resolvedPowerPublished
             ? publishedPowerSolver
             : (gpuInfo.encodedSteps ?? 0) > 0
               ? "POWER PUBLICATION FAILED"
               : "POWER PENDING"}
-          unit={`${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} CSR rows · ${gpuInfo.pressureRequiredEntries?.toLocaleString() ?? "—"} entries · ${gpuInfo.pressureSolver ?? "solver pending"}`}
-          tone={powerCSRPublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"}
+          unit={`${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} resolved rows · fixed case-local handles · ${gpuInfo.pressureSolver ?? "solver pending"}`}
+          tone={resolvedPowerPublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"}
         />}
         <MetricCard label={octreePressurePotential ? "GPU pressure-potential maximum" : "GPU pressure maximum"} value={gpuInfo?.maxPressure_Pa !== undefined ? gpuInfo.maxPressure_Pa.toExponential(2) : "—"} unit={`${octreePressurePotential ? "m²/s · stored dt·p/ρ" : "Pa"} at ${formatGridLocation(gpuInfo?.maxPressureLocation)}`} />
         <MetricCard label="GPU component CFL" value={gpuInfo?.maxComponentCfl !== undefined ? gpuInfo.maxComponentCfl.toFixed(3) : "—"} unit={`${gpuInfo?.highCflCellCount ?? 0} wet samples above 1`} tone={gpuInfo?.maxComponentCfl !== undefined && gpuInfo.maxComponentCfl <= 4 && (gpuInfo.highCflCellCount ?? 0) < 32 ? "good" : "warn"} />

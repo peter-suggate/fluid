@@ -1,35 +1,3 @@
-/**
- * Integrated flux represented by a compact power face.
- *
- * `normalVelocity` is already the aperture-weighted face unknown published by
- * the solid-face constraint pass.  The discrete divergence therefore applies
- * the geometric power-face area exactly once and must not multiply by the
- * stored aperture a second time.
- */
-export function compactPowerFaceIntegratedFlux(area: number, normalVelocity: number): number {
-  return area * normalVelocity;
-}
-
-/**
- * Quadratic velocity norm induced by the compact pressure operators.
- *
- * With D = B^T A and G = F L^-1 B, the diagonal metric H satisfying
- * H G = D^T is H = A L F^-1. `inverseDistance` stores L^-1. This is a
- * discrete projection-energy proxy, not a reconstructed cell kinetic energy.
- * Closed faces are constrained rather than projected and contribute zero.
- */
-export function compactPowerFaceMetricKineticEnergy(
-  area: number,
-  inverseDistance: number,
-  openFraction: number,
-  normalVelocity: number,
-): number {
-  if (![area, inverseDistance, openFraction, normalVelocity].every(Number.isFinite)
-    || area <= 0 || inverseDistance <= 0 || openFraction < 0 || openFraction > 1) return Number.NaN;
-  if (openFraction === 0) return 0;
-  return 0.5 * area / (openFraction * inverseDistance) * normalVelocity * normalVelocity;
-}
-
 export interface CompactMechanicalEnergyDiagnostic {
   readonly gravitationalPotentialEnergyProxy: number;
   readonly reconstructedKineticEnergyProxy: number;
@@ -41,7 +9,7 @@ export interface CompactMechanicalEnergyDiagnostic {
 }
 
 /**
- * Conservation diagnostic for the compact power path.
+ * Conservation diagnostic for the compact structured path.
  *
  * Both inputs are volume-weighted specific-energy integrals (density is
  * omitted), so their sum and every ratio remain physically comparable for a
@@ -80,30 +48,44 @@ export interface CompactLiquidVelocityDiagnostic {
   readonly finiteLiquidVolumeCellSum: number;
   readonly nonFiniteLiquidComponentCount: number;
   readonly maximumLiquidComponentSpeed_m_s: number;
+  readonly maximumLiquidComponentCfl: number;
 }
 
-/** Score only represented liquid cells; uncovered air is intentionally NaN. */
+/** Score only represented liquid cells. The compact row reconstruction uses
+ * an all-NaN vector as its explicit unrepresented-cell sentinel; partially
+ * wet air-centre cells in the exact volume field therefore do not masquerade
+ * as non-finite accepted row velocities. */
 export function compactLiquidVelocityDiagnostic(
   velocity: ArrayLike<number>,
   volume: ArrayLike<number>,
   cellVolume_m3: number,
+  componentCellWidths_m: readonly [number, number, number],
+  dt_s: number,
 ): CompactLiquidVelocityDiagnostic {
-  if (velocity.length !== volume.length * 3 || !(cellVolume_m3 > 0) || !Number.isFinite(cellVolume_m3)) {
+  if (velocity.length !== volume.length * 3 || !(cellVolume_m3 > 0) || !Number.isFinite(cellVolume_m3)
+    || !componentCellWidths_m.every((width) => Number.isFinite(width) && width > 0)
+    || !Number.isFinite(dt_s) || dt_s < 0) {
     throw new RangeError("Compact velocity and occupancy dimensions are inconsistent");
   }
   let kineticEnergyProxy = 0, liquidCellCount = 0, finiteLiquidCellCount = 0;
   let liquidVolumeCellSum = 0, finiteLiquidVolumeCellSum = 0;
   let nonFiniteLiquidComponentCount = 0, maximumLiquidComponentSpeed_m_s = 0;
+  let maximumLiquidComponentCfl = 0;
   for (let cell = 0; cell < volume.length; cell += 1) {
     const alpha = Math.max(0, Math.min(1, Number(volume[cell])));
     if (!(alpha > 1e-4)) continue;
+    const components = [Number(velocity[3 * cell]), Number(velocity[3 * cell + 1]),
+      Number(velocity[3 * cell + 2])] as const;
+    if (components.every(Number.isNaN)) continue;
     liquidCellCount += 1; liquidVolumeCellSum += alpha;
     let speedSquared = 0, finiteCell = true;
     for (let axis = 0; axis < 3; axis += 1) {
-      const value = Number(velocity[3 * cell + axis]);
+      const value = components[axis]!;
       if (!Number.isFinite(value)) { nonFiniteLiquidComponentCount += 1; finiteCell = false; continue; }
       speedSquared += value * value;
       maximumLiquidComponentSpeed_m_s = Math.max(maximumLiquidComponentSpeed_m_s, Math.abs(value));
+      maximumLiquidComponentCfl = Math.max(maximumLiquidComponentCfl,
+        Math.abs(value) * dt_s / componentCellWidths_m[axis]!);
     }
     if (!finiteCell) continue;
     finiteLiquidCellCount += 1; finiteLiquidVolumeCellSum += alpha;
@@ -111,5 +93,5 @@ export function compactLiquidVelocityDiagnostic(
   }
   return { kineticEnergyProxy, liquidCellCount, finiteLiquidCellCount,
     liquidVolumeCellSum, finiteLiquidVolumeCellSum,
-    nonFiniteLiquidComponentCount, maximumLiquidComponentSpeed_m_s };
+    nonFiniteLiquidComponentCount, maximumLiquidComponentSpeed_m_s, maximumLiquidComponentCfl };
 }

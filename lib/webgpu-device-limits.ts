@@ -21,3 +21,18 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
     maxTextureDimension3D: limits.maxTextureDimension3D,
   };
 }
+
+export const FLUID_REDUCTION_BYTES_PER_LANE = 32;
+export const FLUID_M1_MAX_REDUCTION_LANES = 128;
+
+/**
+ * Fail-closed capability gate for the sole measured M1 Max reduction shape.
+ */
+export function supportsFluidM1MaxReduction(
+  limits: Pick<GPUSupportedLimits,
+    "maxComputeInvocationsPerWorkgroup" | "maxComputeWorkgroupStorageSize">,
+): boolean {
+  return FLUID_M1_MAX_REDUCTION_LANES <= limits.maxComputeInvocationsPerWorkgroup
+    && FLUID_M1_MAX_REDUCTION_LANES * FLUID_REDUCTION_BYTES_PER_LANE
+      <= limits.maxComputeWorkgroupStorageSize;
+}

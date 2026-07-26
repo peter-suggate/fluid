@@ -136,6 +136,7 @@ test("nonzero solver origin remaps active and retired bricks into the structural
     if (encodedPage === 0) continue;
     arena[plan.ownerRecordKeyOffsetWords + record] = logical + 1;
     arena[plan.ownerRecordPageOffsetWords + record] = encodedPage;
+    arena[plan.ownerDirectoryOffsetWords + logical] = encodedPage;
     record += 1;
   }
   const cell = [16, 8, 8] as const; // structural brick (2,1,1), logical 32

@@ -21,8 +21,8 @@ const exactEnvironment = {
 test("browser failures map to the smallest serialized exact Dawn case", () => {
   for (const message of [
     "GPU initialization failed: invalid compute pipeline",
-    "Initial sparse authority section5-face-band-transitions validation failed",
-    "Paused t=0 authority rejected: Section 5 did not publish",
+    "Initial sparse authority structured publication validation failed",
+    "Paused t=0 authority rejected: structured boundary did not publish",
   ]) {
     assert.deepEqual(dawnReproductionForGPUFailure(message), DAM_UI_T0_DAWN_REPRODUCTION);
   }
@@ -50,9 +50,9 @@ test("the isolated smoke identifies the same case only from the exact UI contrac
   }
   assert.deepEqual(dawnReproductionForSmokeEnvironment({
     ...exactEnvironment,
-    FLUID_TARGET_S: "0.496",
-    FLUID_ORACLE_STEPS: "62",
-    FLUID_EXPECT_EXACT_STEPS: "62",
+    FLUID_TARGET_S: "1.52",
+    FLUID_ORACLE_STEPS: "190",
+    FLUID_EXPECT_EXACT_STEPS: "190",
   }), DAM_UI_RUNTIME_DAWN_REPRODUCTION);
 });
 
@@ -68,7 +68,7 @@ test("the UI and isolated launcher expose the shared case without a debug switch
   assert.match(launcher, /\.\.\.\(reproduction \? \{ reproduction \} : \{\}\)/);
   const packageJson = readFileSync(new URL("../package.json", import.meta.url), "utf8");
   assert.match(packageJson,
-    /"test:webgpu:dam-ui-runtime":\s*"[^"]*FLUID_TARGET_S=0\.496[^"]*FLUID_EXPECT_EXACT_STEPS=62/);
+    /"test:webgpu:dam-ui-runtime":\s*"[^"]*FLUID_TARGET_S=1\.52[^"]*FLUID_EXPECT_EXACT_STEPS=190/);
   assert.doesNotMatch(packageJson.match(/"test:webgpu:dam-ui-runtime":[^\n]*/)?.[0] ?? "",
     /skip_validation/,
     "the UI runtime reproducer must retain Dawn validation");

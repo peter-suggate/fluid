@@ -68,9 +68,9 @@ const isSvoConePresentationTrace = (trace: PerformanceTrace) =>
 const stabilizePhaseLayout = (trace: PerformanceTrace | undefined) => {
   if (!trace) return undefined;
   // Physics producers already emit stable, command-adjacent semantic labels.
-  // Preserve those checkpoints instead of folding distinct work such as
-  // face-band topology, closest-point extension, and publication into one
-  // broad category. The single-phase queue fallback remains normalized below.
+  // Preserve those checkpoints instead of folding distinct structured
+  // transport, projection, and publication work into one broad category. The
+  // single-phase queue fallback remains normalized below.
   if (trace.lane === "physics" && trace.measurementSource !== "gpu-queue-wall") {
     return trace;
   }
@@ -300,15 +300,13 @@ const PAPER_VIEWS: readonly PaperView[] = [
     legend: [{ swatch: "linear-gradient(90deg,#1548df,#f5f5f5,#e21a14)", label: "compression (−) · zero · expansion (+)" }],
   },
   {
-    id: "extrapolation", figure: "§5", label: "Velocity extrapolation",
-    description: "Regular-face support closure, terminal endpoints, and closest-point-resolved velocities.",
-    source: "Live Section 5 face rows, incidences, φ ordering, and closest points",
-    mode: "section5-face-band", axis: "volume",
+    id: "extrapolation", figure: "§5", label: "Structured velocity",
+    description: "Projected full-vector reconstruction over the direct six-family authority.",
+    source: "Live structured rows, family slots, and projected CPT seeds",
+    mode: "speed", axis: "z",
     legend: [
-      { swatch: "#f51680", label: "interface-core owner" },
-      { swatch: "#f5610c", label: "first support closure" },
-      { swatch: "#15c8b0", label: "closest-point-resolved face" },
-      { swatch: "#e31fb8", label: "unresolved or invalid-φ face" },
+      { swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "zero → live projected speed" },
+      { swatch: "#ff1738", label: "invalid structured publication" },
     ],
   },
   {

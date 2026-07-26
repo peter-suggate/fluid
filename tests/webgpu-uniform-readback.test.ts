@@ -84,8 +84,27 @@ test("compact octree readback never reports the cleared dense volume reduction",
   assert.match(stats,
     /surfaceDiagnosticsPromise\s*=\s*compactFineExpected\s*\?\s*undefined\s*:/,
     "committed compact-fine telemetry must not also submit the obsolete adaptive-surface readback");
-  assert.match(stats, /publishedGlobalFineVolumeCells\(globalFineDiagnostics/);
+  assert.match(stats, /compactVolumeTopology=compactFineExpected/);
+  assert.match(stats, /published:compactVolumeTopology\.published/);
+  assert.match(stats, /volumeControl:globalFineDiagnostics\.fineVolumeControl/,
+    "compact volume telemetry must decode the actual shared GPU publication controls");
+  assert.doesNotMatch(stats, /as unknown as GlobalFineVolumePublicationDiagnostics/,
+    "a type assertion cannot synthesize the publication fields at runtime");
   assert.match(stats, /this\.info\.volumeCellSum=compactVolume\?\.volumeCells/);
   assert.match(stats, /if\(!this\.octreeProjection\)\{this\.info\.front_m/,
     "compact transport must not publish the cleared dense front reduction");
+});
+
+test("power generation telemetry comes from the accepted GPU epoch receipt", () => {
+  const applyFine = source.slice(source.indexOf("private applyGlobalFineDiagnostics"),
+    source.indexOf("private async validateInitialSparseAuthority"));
+  const applyOctreeStart = source.indexOf("private applyOctreeInfo");
+  const applyOctree = source.slice(applyOctreeStart,
+    source.indexOf("private statsReadback", applyOctreeStart));
+  assert.match(applyFine,
+    /powerDiagramGeneration = this\.info\.structuredVelocityValid[\s\S]*velocity\[3\]/,
+    "the accepted structured generation, not the host attempt stamp, owns telemetry");
+  assert.match(applyOctree,
+    /\.\.\.\(projection\.powerPublicationGeneration === undefined \? \{\}/,
+    "an unavailable host generation must preserve the last observed GPU receipt");
 });

@@ -20,14 +20,6 @@ export interface CompactOctreeFieldSnapshot {
   readonly transportControl?: Uint32Array;
   readonly redistanceControl?: Uint32Array;
   readonly volumeControl?: Uint32Array;
-  readonly faceBandControl?: Uint32Array;
-  readonly faceBandTransitionControl?: Uint32Array;
-  readonly faceBandTransientPowerControl?: Uint32Array;
-  readonly faceBandPointFieldControl?: Uint32Array;
-  readonly faceBandPowerPublicationControl?: Uint32Array;
-  readonly powerVelocityControl?: Uint32Array;
-  readonly powerProjectionControl?: Uint32Array;
-  readonly powerVelocitySampleControl?: Uint32Array;
   readonly mgpcgControl?: Uint32Array;
 }
 
@@ -61,14 +53,6 @@ export interface CompactOctreeFieldEvidence {
   readonly redistanceInitialPages?: number;
   readonly redistanceFinalPages?: number;
   readonly volumeControl?: readonly number[];
-  readonly faceBandControl?: readonly number[];
-  readonly faceBandTransitionControl?: readonly number[];
-  readonly faceBandTransientPowerControl?: readonly number[];
-  readonly faceBandPointFieldControl?: readonly number[];
-  readonly faceBandPowerPublicationControl?: readonly number[];
-  readonly powerVelocityControl?: readonly number[];
-  readonly powerProjectionControl?: readonly number[];
-  readonly powerVelocitySampleControl?: readonly number[];
   readonly mgpcgControl?: readonly number[];
 }
 
@@ -121,14 +105,6 @@ export interface CompactOctreePublicationHeaderEvidence {
   readonly redistanceInitialPages?: number;
   readonly redistanceFinalPages?: number;
   readonly volumeControl?: readonly number[];
-  readonly faceBandControl?: readonly number[];
-  readonly faceBandTransitionControl?: readonly number[];
-  readonly faceBandTransientPowerControl?: readonly number[];
-  readonly faceBandPointFieldControl?: readonly number[];
-  readonly faceBandPowerPublicationControl?: readonly number[];
-  readonly powerVelocityControl?: readonly number[];
-  readonly powerProjectionControl?: readonly number[];
-  readonly powerVelocitySampleControl?: readonly number[];
   readonly mgpcgControl?: readonly number[];
 }
 
@@ -151,10 +127,7 @@ export function compactOctreeFieldEvidenceIsAcceptable(evidence: CompactOctreeFi
 export function compactOctreePublicationHeaderEvidence(
   snapshot: Pick<CompactOctreeFieldSnapshot, "generation" | "worklist" | "coarseDirectory" | "coarseControl"
     | "fineRestrictionControl" | "topologyControl" | "transportControl" | "redistanceControl" | "volumeControl"
-    | "faceBandControl" | "faceBandTransitionControl" | "faceBandTransientPowerControl"
-    | "faceBandPointFieldControl"
-    | "faceBandPowerPublicationControl"
-    | "powerVelocityControl" | "powerProjectionControl" | "powerVelocitySampleControl" | "mgpcgControl">,
+    | "mgpcgControl">,
 ): CompactOctreePublicationHeaderEvidence {
   const worklist = snapshot.worklist, coarse = snapshot.coarseDirectory;
   const coarseControl = snapshot.coarseControl, restriction = snapshot.fineRestrictionControl,
@@ -164,9 +137,9 @@ export function compactOctreePublicationHeaderEvidence(
     : undefined;
   return {
     fineGeneration: snapshot.generation,
-    ...(worklist.length >= 5 ? {
-      worklistActivePages: worklist[0], worklistGeneration: worklist[1],
-      worklistInitialized: worklist[3], worklistPublished: worklist[4],
+    ...(worklist.length >= 7 ? {
+      worklistActivePages: worklist[1], worklistGeneration: worklist[0],
+      worklistInitialized: worklist[3] & 1, worklistPublished: (worklist[3] >>> 1) & 1,
     } : {}),
     ...(coarse.length >= 4 ? {
       coarseState: coarse[0], coarseGeneration: coarse[1], coarseRowCount: coarse[2],
@@ -209,19 +182,6 @@ export function compactOctreePublicationHeaderEvidence(
       redistanceFinalPages: redistance.finalPages,
     } : {}),
     ...(snapshot.volumeControl ? { volumeControl: Array.from(snapshot.volumeControl) } : {}),
-    ...(snapshot.faceBandControl ? { faceBandControl: Array.from(snapshot.faceBandControl) } : {}),
-    ...(snapshot.faceBandTransitionControl
-      ? { faceBandTransitionControl: Array.from(snapshot.faceBandTransitionControl) } : {}),
-    ...(snapshot.faceBandTransientPowerControl
-      ? { faceBandTransientPowerControl: Array.from(snapshot.faceBandTransientPowerControl) } : {}),
-    ...(snapshot.faceBandPointFieldControl
-      ? { faceBandPointFieldControl: Array.from(snapshot.faceBandPointFieldControl) } : {}),
-    ...(snapshot.faceBandPowerPublicationControl
-      ? { faceBandPowerPublicationControl: Array.from(snapshot.faceBandPowerPublicationControl) } : {}),
-    ...(snapshot.powerVelocityControl ? { powerVelocityControl: Array.from(snapshot.powerVelocityControl) } : {}),
-    ...(snapshot.powerProjectionControl ? { powerProjectionControl: Array.from(snapshot.powerProjectionControl) } : {}),
-    ...(snapshot.powerVelocitySampleControl
-      ? { powerVelocitySampleControl: Array.from(snapshot.powerVelocitySampleControl) } : {}),
     ...(snapshot.mgpcgControl ? { mgpcgControl: Array.from(snapshot.mgpcgControl) } : {}),
   };
 }
@@ -249,7 +209,9 @@ function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: read
   if (metadata.length !== plan.maximumResidentBricks * 10) throw new Error("Compact octree QA fine metadata has the wrong length");
   const sampleCapacity = plan.maximumResidentBricks * plan.samplesPerBrick;
   if (flags.length !== sampleCapacity || phi.length !== sampleCapacity) throw new Error("Compact octree QA fine payload has the wrong length");
-  if (worklist.length !== 5 + plan.maximumResidentBricks) throw new Error("Compact octree QA worklist has the wrong length");
+  const expectedWorklistWords = 7 + plan.maximumResidentBricks + plan.logicalBrickCount
+    + (plan.includeHalo27 ? 27 * plan.maximumResidentBricks : 0);
+  if (worklist.length !== expectedWorklistWords) throw new Error("Compact octree QA worklist has the wrong length");
   if (coarseControl !== undefined && coarseControl.length < 16) throw new Error("Compact octree QA coarse control has the wrong length");
   if (topologyControl !== undefined && topologyControl.length < 8) throw new Error("Compact octree QA topology control has the wrong length");
   if (coarseDirectory.length < 8) throw new Error("Compact octree QA coarse directory is missing its header");
@@ -283,23 +245,25 @@ function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: read
       ...publication, malformedCoarseRows,
     })}`);
   }
-  const worklistClaimsPublication = worklist[0] !== 0 || worklist[1] !== 0
-    || worklist[3] !== 0 || worklist[4] !== 0;
+  const worklistClaimsPublication = worklist[0] !== 0 || worklist[1] !== 0 || worklist[3] !== 0;
   if (worklistClaimsPublication
-    && (worklist[1] !== generation || worklist[3] !== 1 || worklist[4] !== 1)) {
+    && (worklist[0] !== generation || worklist[2] !== plan.maximumResidentBricks
+      || (worklist[3] & 3) !== 3 || worklist[5] !== 1 || worklist[6] !== 1)) {
     throw new Error(`Compact octree QA fine publication is not valid/current: ${JSON.stringify(publication)}`);
   }
-  const active = Math.min(worklist[0], plan.maximumResidentBricks);
-  if (5 + active > worklist.length) throw new Error("Compact octree QA fine directory exceeds its worklist");
-  let previousKey = -1;
+  const active = Math.min(worklist[1], plan.maximumResidentBricks);
+  if (7 + active > worklist.length) throw new Error("Compact octree QA fine directory exceeds its worklist");
   for (let index = 0; index < active; index += 1) {
-    const physicalId = worklist[5 + index], base = physicalId * 10;
+    const physicalId = worklist[7 + index], base = physicalId * 10;
     if (physicalId >= plan.maximumResidentBricks || base + 2 >= metadata.length
       || metadata[base] !== physicalId || metadata[base + 2] !== generation
-      || metadata[base + 1] <= previousKey) {
-      throw new Error("Compact octree QA fine directory is malformed or not strictly key-sorted");
+      || physicalId !== index) {
+      throw new Error("Compact octree QA fine directory is malformed or not compact-ranked");
     }
-    previousKey = metadata[base + 1];
+    const key = metadata[base + 1], directoryBase = 7 + plan.maximumResidentBricks;
+    if (key >= plan.logicalBrickCount || worklist[directoryBase + key] !== physicalId) {
+      throw new Error("Compact octree QA fine direct directory is malformed");
+    }
   }
   const rowCapacity = (coarseDirectory.length - 8) / 8;
   if (!Number.isSafeInteger(rowCapacity) || rowCount < 1 || rowCount > rowCapacity) {
@@ -342,20 +306,14 @@ function finePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [num
   const brick = q.map((value) => Math.floor(value / plan.brickResolution));
   const local = q.map((value, axis) => value - brick[axis] * plan.brickResolution);
   const key = brick[0] + plan.brickDimensions[0] * (brick[1] + plan.brickDimensions[1] * brick[2]);
-  if (worklist.length < 5 || worklist[1] !== generation || worklist[3] !== 1 || worklist[4] !== 1) return undefined;
-  const count = Math.min(worklist[0], plan.maximumResidentBricks);
-  let low = 0, high = count;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2), physicalId = worklist[5 + middle];
-    const base = physicalId * 10;
-    if (physicalId >= plan.maximumResidentBricks || base + 2 >= metadata.length
-      || metadata[base] !== physicalId || metadata[base + 2] !== generation) return undefined;
-    if (metadata[base + 1] < key) low = middle + 1;
-    else high = middle;
-  }
-  if (low >= count) return undefined;
-  const physicalId = worklist[5 + low], base = physicalId * 10;
-  if (metadata[base + 1] !== key) return undefined;
+  if (worklist.length < 7 || worklist[0] !== generation || worklist[2] !== plan.maximumResidentBricks
+    || (worklist[3] & 3) !== 3 || worklist[5] !== 1 || worklist[6] !== 1) return undefined;
+  const directoryBase = 7 + plan.maximumResidentBricks;
+  if (key >= plan.logicalBrickCount || directoryBase + key >= worklist.length) return undefined;
+  const physicalId = worklist[directoryBase + key], base = physicalId * 10;
+  if (physicalId >= plan.maximumResidentBricks || base + 2 >= metadata.length
+    || metadata[base] !== physicalId || metadata[base + 1] !== key
+    || metadata[base + 2] !== generation) return undefined;
   const localIndex = local[0] + plan.brickResolution * (local[1] + plan.brickResolution * local[2]);
   const sampleIndex = physicalId * plan.samplesPerBrick + localIndex;
   const value = phi[sampleIndex];
@@ -411,11 +369,11 @@ export function reconstructCompactOctreeOccupancyField(
   validateSnapshot(snapshot, dimensions);
   const field = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
   const h = snapshot.plan.finestCellWidth, factor = snapshot.plan.fineFactor;
-  const activePages = Math.min(snapshot.worklist[0], snapshot.plan.maximumResidentBricks);
+  const activePages = Math.min(snapshot.worklist[1], snapshot.plan.maximumResidentBricks);
   let malformedActivePages = 0, validSamples = 0, finiteValidSamples = 0;
   let negativeValidSamples = 0, positiveValidSamples = 0;
   for (let work = 0; work < activePages; work += 1) {
-    const id = snapshot.worklist[5 + work];
+    const id = snapshot.worklist[7 + work];
     if (id >= snapshot.plan.maximumResidentBricks || snapshot.metadata[id * 10] !== id
       || snapshot.metadata[id * 10 + 2] !== snapshot.generation) {
       malformedActivePages += 1; continue;
@@ -456,8 +414,8 @@ export function reconstructCompactOctreeOccupancyField(
   return { field, fineSamples, coarseSamples, positiveAirSamples, generation: snapshot.generation,
     activePages, malformedActivePages, validSamples, finiteValidSamples,
     negativeValidSamples, positiveValidSamples,
-    publicationValid: snapshot.worklist[1] === snapshot.generation
-      && snapshot.worklist[3] === 1 && snapshot.worklist[4] === 1
+    publicationValid: snapshot.worklist[0] === snapshot.generation
+      && (snapshot.worklist[3] & 3) === 3 && snapshot.worklist[5] === 1 && snapshot.worklist[6] === 1
       && activePages > 0 && malformedActivePages === 0
       && validSamples > 0 && finiteValidSamples === validSamples,
     ...(topology ? { topologyFlags: topology[0], topologyPublished: topology[4] !== 0,

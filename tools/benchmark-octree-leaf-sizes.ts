@@ -5,7 +5,13 @@ import { octreeMethod } from "../lib/methods/octree";
 import type { GPUSolverInstance } from "../lib/methods/types";
 import type { PaperPhaseId, PerformanceTrace } from "../lib/performance-trace";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import {
+  acquireWebGPUExclusiveLock,
+  releaseWebGPUExclusiveLock,
+} from "./webgpu-smoke-isolation";
 
+await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-octree-leaf-sizes.ts");
+try {
 const modulePath = process.env.WEBGPU_NODE_MODULE
   ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
 const { create, globals } = await import(pathToFileURL(modulePath).href) as {
@@ -158,3 +164,6 @@ console.log(JSON.stringify({
 }));
 assert.deepEqual(validationErrors, [], `WebGPU validation errors: ${validationErrors.join("; ")}`);
 device.destroy();
+} finally {
+  await releaseWebGPUExclusiveLock();
+}

@@ -13,11 +13,30 @@ import {
   type CubeTransform,
 } from "./octree-power-topology";
 
-export const OCTREE_POWER_CATALOG_VERSION = 4;
+export const OCTREE_POWER_CATALOG_VERSION = 5;
+export const OCTREE_POWER_ROW_TEMPLATE_VERSION = 1;
+export const OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS = 4;
+/** normalized coefficient, normalized area, normalized inverse distance. */
+export const OCTREE_POWER_ROW_TEMPLATE_FLOATS = 3;
+/** One xyz pseudoinverse column per row-template face slot. */
+export const OCTREE_POWER_RECONSTRUCTION_FLOATS = 3;
 /** Neighbor geometry, area/centroid, and normal/inverse-distance vec4s. */
 export const OCTREE_POWER_CATALOG_FACE_FLOATS = 12;
 export const OCTREE_POWER_CATALOG_TETRAHEDRON_BYTES = 4;
 export const OCTREE_POWER_CATALOG_ENTRY_UNIFORM = 1;
+export const OCTREE_POWER_ROW_TEMPLATE_FLAGS = Object.freeze({
+  regularInterior: 1 << 0,
+  transition: 1 << 1,
+  physicalBoundary: 1 << 2,
+  transitionBoundary: 1 << 3,
+} as const);
+export const OCTREE_POWER_TRANSFER_RELATION = Object.freeze({
+  same: 0,
+  finer: 1,
+  coarser: 2,
+  boundary: 3,
+} as const);
+export const OCTREE_POWER_ROW_TEMPLATE_INVALID_SELECTOR = 0xff;
 export const OCTREE_POWER_CATALOG_TARGET_BYTES = 8 * 1024 * 1024;
 export const OCTREE_POWER_CATALOG_WARNING_BYTES = 16 * 1024 * 1024;
 export const OCTREE_POWER_CATALOG_STOP_BYTES = 32 * 1024 * 1024;
@@ -73,6 +92,10 @@ export interface OctreePowerCatalogManifest {
   readonly maximumTetrahedra: number;
   readonly byteCount: number;
   readonly worstFloat32GeometryError: number;
+  readonly rowTemplateVersion: number;
+  readonly regularCaseId: number;
+  readonly maximumDynamicBoundarySlots: number;
+  readonly worstReconstructionResidual: number;
 }
 
 export interface OctreePowerCatalog {
@@ -87,7 +110,69 @@ export interface OctreePowerCatalog {
   readonly tetrahedronData: Uint32Array;
   /** Global byte-selector table: canonical offset xyz and size ratio. */
   readonly tetrahedronVertexData: Float32Array;
+  /** first slot, count, case flags, dynamic-slot count for each dense case ID. */
+  readonly rowTemplateHeaders: Uint32Array;
+  /** Packed neighbor selector, face family/orientation, transfer relation, and dynamic slot. */
+  readonly rowTemplateSlots: Uint32Array;
+  /** Coefficient, area, inverse distance triples paired with rowTemplateSlots. */
+  readonly rowTemplateData: Float32Array;
+  /** Normalized diagonal indexed directly by dense case ID. */
+  readonly rowTemplateDiagonals: Float32Array;
+  /** xyz least-squares pseudoinverse columns paired with rowTemplateSlots. */
+  readonly reconstructionData: Float32Array;
   readonly manifest: OctreePowerCatalogManifest;
+}
+
+export interface OctreePowerRowTemplateSlot {
+  readonly neighborSelector: number;
+  readonly family: number;
+  readonly orientation: number;
+  readonly transferRelation: number;
+  readonly dynamicBoundarySlot: number;
+  readonly worldBoundary: boolean;
+}
+
+/**
+ * Packed row-slot ABI:
+ *  0..7 neighbor selector, 8..10 family, 11..13 orientation,
+ *  14..15 transfer relation, 16..20 dynamic-boundary slot,
+ *  21 world-boundary bit. Remaining bits are reserved and must be zero.
+ */
+export function packOctreePowerRowTemplateSlot(slot: OctreePowerRowTemplateSlot): number {
+  const fields = [
+    [slot.neighborSelector, 0xff, "neighbor selector"],
+    [slot.family, 7, "face family"],
+    [slot.orientation, 7, "face orientation"],
+    [slot.transferRelation, 3, "transfer relation"],
+    [slot.dynamicBoundarySlot, 31, "dynamic boundary slot"],
+  ] as const;
+  for (const [value, maximum, label] of fields) {
+    if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+      throw new RangeError(`Power row-template ${label} is outside its packed range`);
+    }
+  }
+  return (slot.neighborSelector
+    | (slot.family << 8)
+    | (slot.orientation << 11)
+    | (slot.transferRelation << 14)
+    | (slot.dynamicBoundarySlot << 16)
+    | (slot.worldBoundary ? 1 << 21 : 0)) >>> 0;
+}
+
+export function unpackOctreePowerRowTemplateSlot(wordValue: number): OctreePowerRowTemplateSlot {
+  if (!Number.isSafeInteger(wordValue) || wordValue < 0 || wordValue > 0xffff_ffff) {
+    throw new RangeError("Power row-template slot word must fit uint32");
+  }
+  const word = wordValue >>> 0;
+  if ((word & 0xffc0_0000) !== 0) throw new RangeError("Power row-template slot uses reserved bits");
+  return {
+    neighborSelector: word & 0xff,
+    family: (word >>> 8) & 7,
+    orientation: (word >>> 11) & 7,
+    transferRelation: (word >>> 14) & 3,
+    dynamicBoundarySlot: (word >>> 16) & 31,
+    worldBoundary: ((word >>> 21) & 1) !== 0,
+  };
 }
 
 const scalar = (value: number) => Object.is(value, -0) ? 0 : Number(value.toPrecision(15));
@@ -380,6 +465,103 @@ function entriesEquivalent(a: OctreePowerCatalogEntry, b: OctreePowerCatalogEntr
   });
 }
 
+const rowDirectionKey = (value: PowerVec3) =>
+  value.map((component) => Math.abs(component) <= 1e-10 ? 0 : Math.sign(component)).join(",");
+
+function rowFaceFamily(face: OctreePowerCatalogFace): readonly [number, number] {
+  const direction = face.neighborSizeRatio === 0 ? face.normal : face.neighborOffset;
+  const touched = face.neighborSizeRatio === 0
+    ? direction.flatMap((value, axis) => Math.abs(value) <= 1e-10 ? [] : [axis])
+    : direction.flatMap((value, axis) =>
+      Math.abs(Math.abs(value) - (1 + face.neighborSizeRatio) / 2) <= 1e-10 ? [axis] : []);
+  if (touched.length === 1) {
+    const axis = touched[0];
+    const tangentAxes = [0, 1, 2].filter((candidate) => candidate !== axis);
+    const orientation = (direction[axis] > 0 ? 1 : 0)
+      | (direction[tangentAxes[0]] > 0 ? 2 : 0)
+      | (direction[tangentAxes[1]] > 0 ? 4 : 0);
+    return [axis, orientation];
+  }
+  if (touched.length === 2) {
+    const pair = touched.join(",");
+    const family = pair === "0,1" ? 3 : pair === "0,2" ? 4 : pair === "1,2" ? 5 : -1;
+    if (family < 0) throw new Error(`Unsupported structured power-face pair ${pair}`);
+    const tangentAxis = [0, 1, 2].find((axis) => !touched.includes(axis))!;
+    const orientation = (direction[touched[0]] > 0 ? 1 : 0)
+      | (direction[touched[1]] > 0 ? 2 : 0)
+      | (direction[tangentAxis] > 0 ? 4 : 0);
+    return [family, orientation];
+  }
+  throw new Error(`Power face ${direction.join(",")} has ${touched.length} touching axes outside the six-family ABI`);
+}
+
+function rowTransferRelation(sizeRatio: number): number {
+  if (sizeRatio === 0) return OCTREE_POWER_TRANSFER_RELATION.boundary;
+  if (Math.abs(sizeRatio - 1) <= 1e-10) return OCTREE_POWER_TRANSFER_RELATION.same;
+  if (sizeRatio < 1) return OCTREE_POWER_TRANSFER_RELATION.finer;
+  return OCTREE_POWER_TRANSFER_RELATION.coarser;
+}
+
+function regularInteriorEntry(entry: OctreePowerCatalogEntry): boolean {
+  if (!entry.uniform || Math.abs(entry.volume - 1) > 1e-10 || entry.faces.length !== 6) return false;
+  const expected = new Set(["-1,0,0", "1,0,0", "0,-1,0", "0,1,0", "0,0,-1", "0,0,1"]);
+  return entry.faces.every((face) => face.neighborSizeRatio === 1
+    && expected.delete(rowDirectionKey(face.neighborOffset))
+    && Math.abs(face.area - 1) <= 1e-10
+    && Math.abs(face.inverseDistance - 1) <= 1e-10)
+    && expected.size === 0;
+}
+
+function invertSymmetric3x3(matrix: readonly number[]): readonly number[] {
+  const [a, b, c, , d, e, , , f] = matrix;
+  const cofactor00 = d * f - e * e;
+  const cofactor01 = c * e - b * f;
+  const cofactor02 = b * e - c * d;
+  const cofactor11 = a * f - c * c;
+  const cofactor12 = b * c - a * e;
+  const cofactor22 = a * d - b * b;
+  const determinant = a * cofactor00 + b * cofactor01 + c * cofactor02;
+  if (!(Math.abs(determinant) > 1e-12)) {
+    throw new Error("Power velocity reconstruction normals do not span three dimensions");
+  }
+  return [
+    cofactor00 / determinant, cofactor01 / determinant, cofactor02 / determinant,
+    cofactor01 / determinant, cofactor11 / determinant, cofactor12 / determinant,
+    cofactor02 / determinant, cofactor12 / determinant, cofactor22 / determinant,
+  ];
+}
+
+function reconstructionColumns(faces: readonly OctreePowerCatalogFace[]): {
+  readonly columns: readonly PowerVec3[];
+  readonly residual: number;
+} {
+  const normalMatrix = new Array<number>(9).fill(0);
+  for (const face of faces) {
+    const weight = face.area;
+    for (let row = 0; row < 3; row += 1) for (let column = 0; column < 3; column += 1) {
+      normalMatrix[row * 3 + column] += weight * face.normal[row] * face.normal[column];
+    }
+  }
+  const inverse = invertSymmetric3x3(normalMatrix);
+  const columns = faces.map((face): PowerVec3 => {
+    const weighted = face.normal.map((value) => value * face.area);
+    return [
+      inverse[0] * weighted[0] + inverse[1] * weighted[1] + inverse[2] * weighted[2],
+      inverse[3] * weighted[0] + inverse[4] * weighted[1] + inverse[5] * weighted[2],
+      inverse[6] * weighted[0] + inverse[7] * weighted[1] + inverse[8] * weighted[2],
+    ];
+  });
+  let residual = 0;
+  for (let row = 0; row < 3; row += 1) for (let column = 0; column < 3; column += 1) {
+    let value = 0;
+    for (let face = 0; face < faces.length; face += 1) {
+      value += columns[face][row] * faces[face].normal[column];
+    }
+    residual = Math.max(residual, Math.abs(value - (row === column ? 1 : 0)));
+  }
+  return { columns, residual };
+}
+
 /**
  * Builds immutable typed arrays. Generation is intentionally explicit and is
  * never called by ordinary runtime construction.
@@ -412,7 +594,8 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
   sortedVertexGeometries.forEach(([, geometry], selector) => tetrahedronVertexData.set(geometry, selector * 4));
   const candidates = prepared.map(({ configuration, canonical }) => ({
     configuration, canonical, entry: normalizedEntry(configuration, canonical, selectorByGeometry),
-  })).sort((a, b) => a.entry.key.localeCompare(b.entry.key) || a.configuration.descriptor - b.configuration.descriptor);
+  })).sort((a, b) => Number(regularInteriorEntry(b.entry)) - Number(regularInteriorEntry(a.entry))
+    || a.entry.key.localeCompare(b.entry.key) || a.configuration.descriptor - b.configuration.descriptor);
   const entries: OctreePowerCatalogEntry[] = [];
   const entryByKey = new Map<string, number>();
   const lookup: OctreePowerCatalogLookup[] = [];
@@ -426,6 +609,7 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
     lookup.push({ descriptor: candidate.configuration.descriptor, entry, transform: candidate.canonical.transform.code });
   }
   lookup.sort((a, b) => a.descriptor - b.descriptor);
+  const regularCaseId = entries.findIndex(regularInteriorEntry);
   const entryHeaders = new Uint32Array(entries.length * 2);
   const entryVolumes = new Float32Array(entries.length);
   const faceCount = entries.reduce((sum, entry) => sum + entry.faces.length, 0);
@@ -433,13 +617,33 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
   const tetrahedronHeaders = new Uint32Array(entries.length * 3);
   const tetrahedronCount = entries.reduce((sum, entry) => sum + entry.tetrahedra.length, 0);
   const tetrahedronData = new Uint32Array(tetrahedronCount);
+  const rowTemplateHeaders = new Uint32Array(entries.length * OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS);
+  const rowTemplateSlots = new Uint32Array(faceCount);
+  const rowTemplateData = new Float32Array(faceCount * OCTREE_POWER_ROW_TEMPLATE_FLOATS);
+  const rowTemplateDiagonals = new Float32Array(entries.length);
+  const reconstructionData = new Float32Array(faceCount * OCTREE_POWER_RECONSTRUCTION_FLOATS);
   let faceCursor = 0, worstFloat32GeometryError = 0;
   let tetrahedronCursor = 0;
+  let worstReconstructionResidual = 0;
   entries.forEach((entry, entryIndex) => {
     entryHeaders.set([faceCursor, entry.faces.length], entryIndex * 2);
+    const physicalBoundary = entry.faces.some((face) => face.neighborSizeRatio === 0);
+    const transition = !entry.uniform;
+    const regularInterior = entryIndex === regularCaseId;
+    const caseFlags = (regularInterior ? OCTREE_POWER_ROW_TEMPLATE_FLAGS.regularInterior : 0)
+      | (transition ? OCTREE_POWER_ROW_TEMPLATE_FLAGS.transition : 0)
+      | (physicalBoundary ? OCTREE_POWER_ROW_TEMPLATE_FLAGS.physicalBoundary : 0)
+      | (transition && physicalBoundary ? OCTREE_POWER_ROW_TEMPLATE_FLAGS.transitionBoundary : 0);
+    rowTemplateHeaders.set(
+      [faceCursor, entry.faces.length, caseFlags, entry.faces.length],
+      entryIndex * OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS,
+    );
     entryVolumes[entryIndex] = entry.volume;
     worstFloat32GeometryError = Math.max(worstFloat32GeometryError, Math.abs(entry.volume - entryVolumes[entryIndex]));
-    for (const face of entry.faces) {
+    const reconstruction = reconstructionColumns(entry.faces);
+    let diagonal = Math.fround(0);
+    for (let localFace = 0; localFace < entry.faces.length; localFace += 1) {
+      const face = entry.faces[localFace];
       const values = [
         ...face.neighborOffset, face.neighborSizeRatio, face.area,
         ...face.centroid, ...face.normal, face.inverseDistance,
@@ -449,7 +653,44 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
         worstFloat32GeometryError = Math.max(worstFloat32GeometryError,
           Math.abs(value - faceData[faceCursor * OCTREE_POWER_CATALOG_FACE_FLOATS + index]));
       });
+      const worldBoundary = face.neighborSizeRatio === 0;
+      const geometryKey = JSON.stringify([...face.neighborOffset, face.neighborSizeRatio]);
+      const neighborSelector = worldBoundary
+        ? OCTREE_POWER_ROW_TEMPLATE_INVALID_SELECTOR
+        : selectorByGeometry.get(geometryKey);
+      if (neighborSelector === undefined) {
+        throw new Error(`Power row-template neighbor ${geometryKey} has no global selector`);
+      }
+      const [family, orientation] = rowFaceFamily(face);
+      rowTemplateSlots[faceCursor] = packOctreePowerRowTemplateSlot({
+        neighborSelector,
+        family,
+        orientation,
+        transferRelation: rowTransferRelation(face.neighborSizeRatio),
+        dynamicBoundarySlot: localFace,
+        worldBoundary,
+      });
+      const coefficient = Math.fround(Math.fround(face.area) * Math.fround(face.inverseDistance));
+      rowTemplateData.set([coefficient, face.area, face.inverseDistance],
+        faceCursor * OCTREE_POWER_ROW_TEMPLATE_FLOATS);
+      diagonal = Math.fround(diagonal + coefficient);
+      reconstructionData.set(reconstruction.columns[localFace],
+        faceCursor * OCTREE_POWER_RECONSTRUCTION_FLOATS);
       faceCursor += 1;
+    }
+    rowTemplateDiagonals[entryIndex] = diagonal;
+    // Measure the actual packed-f32 pseudoinverse, not the higher precision
+    // construction, because this is the error bound consumers inherit.
+    const firstSlot = rowTemplateHeaders[entryIndex * OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS];
+    for (let row = 0; row < 3; row += 1) for (let column = 0; column < 3; column += 1) {
+      let value = 0;
+      for (let localFace = 0; localFace < entry.faces.length; localFace += 1) {
+        value += reconstructionData[(firstSlot + localFace) * 3 + row] * entry.faces[localFace].normal[column];
+      }
+      worstReconstructionResidual = Math.max(
+        worstReconstructionResidual,
+        Math.abs(value - (row === column ? 1 : 0)),
+      );
     }
     tetrahedronHeaders.set([tetrahedronCursor, entry.tetrahedra.length,
       entry.uniform ? OCTREE_POWER_CATALOG_ENTRY_UNIFORM : 0], entryIndex * 3);
@@ -462,7 +703,9 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
   });
   // GPU lookup uses three u32 words: descriptor, entry, transform.
   const byteCount = entryHeaders.byteLength + entryVolumes.byteLength + faceData.byteLength + lookup.length * 12
-    + tetrahedronHeaders.byteLength + tetrahedronData.byteLength + tetrahedronVertexData.byteLength;
+    + tetrahedronHeaders.byteLength + tetrahedronData.byteLength + tetrahedronVertexData.byteLength
+    + rowTemplateHeaders.byteLength + rowTemplateSlots.byteLength + rowTemplateData.byteLength
+    + rowTemplateDiagonals.byteLength + reconstructionData.byteLength;
   if (byteCount > OCTREE_POWER_CATALOG_STOP_BYTES) throw new Error(`Power catalog exceeds the ${OCTREE_POWER_CATALOG_STOP_BYTES}-byte stop gate`);
   return {
     entries,
@@ -482,7 +725,12 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
       maximumTetrahedra: Math.max(...entries.map((entry) => entry.tetrahedra.length)),
       byteCount,
       worstFloat32GeometryError,
+      rowTemplateVersion: OCTREE_POWER_ROW_TEMPLATE_VERSION,
+      regularCaseId: regularCaseId < 0 ? 0xffff_ffff : regularCaseId,
+      maximumDynamicBoundarySlots: Math.max(...entries.map((entry) => entry.faces.length)),
+      worstReconstructionResidual,
     }, tetrahedronHeaders, tetrahedronData, tetrahedronVertexData,
+    rowTemplateHeaders, rowTemplateSlots, rowTemplateData, rowTemplateDiagonals, reconstructionData,
   };
 }
 

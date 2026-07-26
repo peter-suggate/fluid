@@ -33,6 +33,7 @@ test("isolated smoke timeout is validated in the 60-240 second safety envelope",
 });
 
 test("isolated smoke records its owner and releases only on ordinary worker completion", async () => {
+  const isolation = await readFile(new URL("../tools/webgpu-smoke-isolation.ts", import.meta.url), "utf8");
   const launcher = await readFile(new URL("../tools/run-webgpu-smoke-isolated.ts", import.meta.url), "utf8");
   const worker = await readFile(new URL("../tools/run-webgpu-smoke-isolated-worker.ts", import.meta.url), "utf8");
   assert.match(launcher, /parseWebGPUSmokeTimeout\(process\.env\.FLUID_WEBGPU_SMOKE_TIMEOUT_MS\)/,
@@ -42,13 +43,94 @@ test("isolated smoke records its owner and releases only on ordinary worker comp
   assert.match(launcher, /child\.kill\("SIGKILL"\)/);
   assert.match(launcher, /process\.exit\(124\)/);
   assert.match(launcher, /leaving \$\{WEBGPU_EXCLUSIVE_LOCK\} as owner evidence/);
-  assert.match(worker, /await mkdir\(WEBGPU_EXCLUSIVE_LOCK\)/,
+  assert.match(isolation, /await mkdir\(WEBGPU_EXCLUSIVE_LOCK\)/,
     "mkdir is the atomic exclusive-lock acquisition");
-  assert.match(worker, /pid: process\.pid/);
-  assert.match(worker, /writeFile\(`\$\{WEBGPU_EXCLUSIVE_LOCK\}\/owner\.json`/);
+  assert.match(isolation, /pid: process\.pid/);
+  assert.match(isolation, /writeFile\(`\$\{WEBGPU_EXCLUSIVE_LOCK\}\/owner\.json`/);
+  assert.match(worker, /acquireWebGPUExclusiveLock\(/);
   assert.match(worker, /await import\("\.\/run-webgpu-smoke"\)/);
-  assertContainsInOrder(normalizeWhitespace(worker), ["finally {", "await rm(WEBGPU_EXCLUSIVE_LOCK"],
+  assertContainsInOrder(normalizeWhitespace(worker), ["finally {", "await releaseWebGPUExclusiveLock()"],
     "success and ordinary smoke failures must not leave a stale lock");
+});
+
+test("all standalone octree GPU benchmarks share the process-wide exclusive lock", async () => {
+  const benchmarks = [
+    "benchmark-octree-leaf-sizes.ts",
+    "benchmark-octree-pressure-page-shapes.ts",
+    "benchmark-octree-section63-bandwidth.ts",
+  ];
+  for (const file of benchmarks) {
+    const source = normalizeWhitespace(await readFile(new URL(`../tools/${file}`, import.meta.url), "utf8"));
+    assertContainsInOrder(source, [
+      "await acquireWebGPUExclusiveLock(",
+      "try {",
+      "await import(pathToFileURL(modulePath)",
+      "finally {",
+      "await releaseWebGPUExclusiveLock()",
+    ], `${file} must own the shared lock for its complete Dawn lifetime`);
+  }
+});
+
+test("minimal dam acceptance and capture pin the exact 500-step, 2-second contract", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const command = packageJson.scripts["test:webgpu:minimal-power-dam-break"];
+  assert.ok(command);
+  for (const setting of [
+    "FLUID_SCENE=minimal-power-dam-break",
+    "FLUID_TARGET_S=2",
+    "FLUID_MAX_DT=0.004",
+    "FLUID_ORACLE_STEPS=500",
+    "FLUID_EXPECT_EXACT_STEPS=500",
+  ]) assert.match(command, new RegExp(setting.replaceAll(".", "\\.")));
+  assert.match(command, /run-webgpu-smoke-isolated\.ts$/,
+    "the exact acceptance lane must acquire the exclusive GPU lock");
+
+  const benchmark = normalizeWhitespace(await readFile(
+    new URL("../tools/benchmark-power-dam.ts", import.meta.url), "utf8"));
+  assertContainsInOrder(benchmark, [
+    'mini: { FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "2"',
+    'FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500"',
+  ], "the regression capture mini lane must retain the exact acceptance contract");
+  assert.match(benchmark, /run-webgpu-smoke-isolated\.ts/,
+    "every regression capture subprocess must acquire the exclusive GPU lock");
+});
+
+test("M1 cutover suite does not name deleted page-pool fallback tests", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const command = packageJson.scripts["test:webgpu:octree-m1-cutover"];
+  assert.ok(command);
+  assert.doesNotMatch(command, /webgpu-octree-page-pool\.test\.ts/);
+  assert.match(command, /run-webgpu-exclusive\.ts/,
+    "the complete Dawn cutover suite must hold one process-wide GPU lock");
+});
+
+test("direct octree Dawn test and smoke commands run beneath one lock-owning parent", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  for (const name of [
+    "test:webgpu:octree-power",
+    "test:webgpu:octree-runtime",
+    "test:webgpu:octree-m1-cutover",
+    "test:webgpu:octree-displacement",
+    "test:webgpu:octree-lagged-rigid",
+  ]) {
+    assert.match(packageJson.scripts[name] ?? "", /run-webgpu-exclusive\.ts/,
+      `${name} must not create Dawn outside the shared lock`);
+  }
+
+  const runner = normalizeWhitespace(await readFile(
+    new URL("../tools/run-webgpu-exclusive.ts", import.meta.url), "utf8"));
+  assertContainsInOrder(runner, [
+    "await acquireWebGPUExclusiveLock(",
+    "child = spawn(process.execPath, nodeArguments",
+    "finally {",
+    "await releaseWebGPUExclusiveLock()",
+  ], "the generic GPU command wrapper must retain its lock until its child is reaped");
 });
 
 test("one-step power/fine comparison pins exact time, spatial readback, and motion evidence", async () => {
@@ -70,7 +152,7 @@ test("one-step power/fine comparison pins exact time, spatial readback, and moti
     "the exact correctness smoke must validate every pipeline and bind group before submission");
 });
 
-test("compact publication rejection reports header and control evidence before abort", async () => {
+test("compact and structured publication rejection reports exact authority evidence before abort", async () => {
   const smoke = await readFile(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
   const functionStart = smoke.indexOf("async function readCubicVolumeField(");
   const functionEnd = smoke.indexOf("\ntype GPUCommandAuditBucket", functionStart);
@@ -83,13 +165,6 @@ test("compact publication rejection reports header and control evidence before a
     ["solver.globalFineTransportControl", "64"],
     ["solver.globalFineRedistanceControl", "FINE_LEVELSET_REDISTANCE_CONTROL_BYTES"],
     ["solver.globalFineVolumeControl", "64"],
-    ["solver.globalFineFaceBandControl", "128"],
-    ["solver.globalFineFaceBandTransitionControl", "160"],
-    ["solver.globalFineFaceBandTransientPowerControl", "64"],
-    ["solver.globalFineFaceBandPointFieldControl", "32"],
-    ["solver.globalFineFaceBandPowerPublicationControl", "64"],
-    ["solver.globalFinePowerVelocityControl", "32"],
-    ["solver.globalFinePowerVelocitySampleControl", "32"],
   ] as const;
   for (const [control, byteLength] of expectedControlReadbacks) {
     assert.ok(readback.includes(`readBufferBinding(device, { buffer: ${control} }, ${byteLength})`),
@@ -103,21 +178,43 @@ test("compact publication rejection reports header and control evidence before a
     "throw error",
   ], "publication evidence must be emitted before the acceptance error is rethrown");
 
-  assert.match(readback,
-    /!faceBandCandidate\.valid[\s\S]*firstErrorRow = faceBandCandidate\.firstError[\s\S]*failedFaceReason === 34[\s\S]*faceBandCandidate\.stageFirstFailures\.faceEmission/,
-    "an invalid candidate must distinguish an exact face slot from the incidence-count failure word");
-  assert.match(readback,
-    /Math\.floor\(failedFaceSlot \/ OCTREE_REGULAR_BAND_OWNED_FACES_PER_ROW\)/,
-    "the failed candidate face must name its deterministic owner row");
-  assert.match(readback, /failedFaceReason = faceBandCandidateControl\[7\] & 0x0fff/,
-    "the packed candidate producer failure must retain the exact face-emission reason");
-  assert.match(readback,
-    /failedFaceSlot === 0xffff_ffff && failedFaceReason !== 34[\s\S]*faceBandCandidateControl\[28\][\s\S]*faceBandCandidateControl\[24\][\s\S]*faceBandCandidateControl\[29\][\s\S]*faceBandCandidateControl\[25\][\s\S]*faceBandCandidateControl\[30\][\s\S]*faceBandCandidateControl\[26\][\s\S]*faceBandCandidateControl\[31\][\s\S]*faceBandCandidateControl\[27\][\s\S]*count !== 0 && slot < failedFaceSlot[\s\S]*failedFaceReason = reason/,
-    "a post-emission CPT rejection must identify the first exact face slot and its cause");
-  assert.match(readback,
-    /readGlobalFineCandidateBandRowFailure\?\.\(firstErrorRow\)[\s\S]*readGlobalFineCandidateBandFaceFailure\?\.\(failedFaceSlot\)[\s\S]*readGlobalFineCandidateBandRowFailure\?\.\(failedFaceOwnerRow\)/,
-    "candidate diagnostics must read the unpublished row, face, and owner-row arenas");
-  assert.match(readback,
-    /failedFaceReason === 34[\s\S]*readGlobalFineCandidateBandIncidenceFailure\?\.\(faceBandCandidate\.rowCount\)/,
-    "incidence-count rejection must run the exact candidate reciprocity audit");
+  const generationAudit = normalizeWhitespace(smoke.slice(
+    smoke.indexOf("if (captureCompactPowerStep)"),
+    smoke.indexOf("if (steps === oracleSteps)", smoke.indexOf("if (captureCompactPowerStep)")),
+  ));
+  assertContainsInOrder(generationAudit, [
+    "auditEncoder.copyBufferToBuffer",
+    "audited.structuredVelocityControl",
+    "audited.structuredBoundaryControl",
+    "fine.worklist",
+    "audited.globalFineVolumeControl",
+    "audited.structuredProjectionEnergyStats",
+    "device.queue.submit",
+  ], "every accepted step must enqueue one exact structured/fine generation snapshot");
+  assert.doesNotMatch(generationAudit, /await awaitAdvanceCompletion|readBufferBinding|mapAsync/,
+    "the recurring structured audit must not fence or map the GPU queue");
+  const terminalAudit = normalizeWhitespace(smoke.slice(
+    smoke.indexOf("if (powerGenerationAuditSnapshot)",
+      smoke.indexOf("await awaitAdvanceCompletion();", smoke.indexOf("const simulationWall_ms"))),
+    smoke.indexOf("const gpuFineTimestamps", smoke.indexOf("const simulationWall_ms")),
+  ));
+  assertContainsInOrder(terminalAudit, [
+    "powerGenerationAuditSnapshot.mapAsync",
+    "unpackStructuredGenerationAuditSnapshot",
+    "exactStructuredGenerationAuditFailures",
+    "unpackFineLevelSetGPUVolumeControl",
+    "decodeStructuredProjectionEnergy",
+    'phase: "structured-generation-audit"',
+    "readPowerFrontierFailure",
+    "throw new Error",
+  ], "terminal audit must validate every queued structured/fine generation transaction before accepting");
+  assert.match(smoke,
+    /const shouldSampleDetailedFields = method\.id === "octree"[\s\S]*?\? shouldSampleEnergy[\s\S]*?: shouldReport \|\| shouldSampleEnergy \|\| collectStabilityEnvelope/,
+    "octree stability must not force a full spatial readback on every step");
+  assert.match(smoke,
+    /if \(checkpointEvery_s > 0[\s\S]*stabilityEnvelope\.spatialSampledSteps \+= 1/,
+    "octree reconstructed connectivity must remain a checkpoint audit");
+  for (const retired of ["globalFineFaceBand", "globalFinePowerVelocity", "powerFaceControl"]) {
+    assert.doesNotMatch(smoke, new RegExp(retired), `${retired} must stay out of the smoke authority graph`);
+  }
 });

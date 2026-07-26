@@ -2,6 +2,7 @@ import {
   makeFineLevelSetSortedWorklistLookupWGSL,
   type WebGPUFineLevelSetBrickSource,
 } from "./webgpu-octree-fine-levelset-bricks";
+import { FINE_LEVELSET_WORKSET_HEADER_WORDS } from "./octree-fine-levelset-bricks";
 import { fineLevelSetLinearWorkgroupWGSL } from "./webgpu-fine-levelset-dispatch";
 import { PassBroker } from "./webgpu-pass-broker";
 
@@ -152,8 +153,8 @@ export class WebGPUFineLevelSetRedistance {
     if (delta.pageDeltaLayout.headerWords !== 16
       || delta.pageDeltaLayout.dirtyPagesOffsetWords !== 16 + 2 * pageCapacity
       || delta.pageDeltaLayout.supportPagesOffsetWords !== 16 + 3 * pageCapacity
-      || delta.redistanceDispatches.dirtyOffsetBytes !== 7 * 12
-      || delta.redistanceDispatches.supportOffsetBytes !== 5 * 12) {
+      || delta.redistanceDispatches.dirtyOffsetBytes !== 84
+      || delta.redistanceDispatches.supportOffsetBytes !== 60) {
       throw new RangeError("Fine JFA-CPT requires the exact topology page-delta ABI");
     }
     this.control = device.createBuffer({ label: "fine-levelset JFA-CPT control",
@@ -207,7 +208,7 @@ export class WebGPUFineLevelSetRedistance {
     const bytes = new ArrayBuffer(80); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
     u32.set([...this.source.plan.brickDimensions, this.source.plan.brickResolution,
       ...this.source.plan.sampleDimensions, this.source.plan.samplesPerBrick,
-      this.source.plan.maximumResidentBricks, 5,
+      this.source.plan.maximumResidentBricks, FINE_LEVELSET_WORKSET_HEADER_WORDS,
       this.source.plan.maximumResidentBricks, this.source.generation, options.bandCells], 0);
     f32[13] = this.source.plan.fineCellWidth; f32[14] = tolerance;
     u32[15] = this.source.plan.maximumResidentBricks * this.source.plan.samplesPerBrick;
@@ -237,7 +238,7 @@ export class WebGPUFineLevelSetRedistance {
       [8, this.control], [9, this.reductions], [10, this.supportMask]] as const;
     const pass = broker.compute({ label: "Fine level-set JFA closest-point redistance" });
     const run = (pipeline: GPUComputePipeline, params: GPUBuffer, wanted: readonly number[],
-      dispatch: "support" | "dirty" | "single" | "capacity") => {
+      dispatch: "support" | "dirty" | "single") => {
       pass.setPipeline(pipeline);
       let bindGroup = this.bindGroups.get(pipeline);
       if (!bindGroup) {
@@ -253,9 +254,6 @@ export class WebGPUFineLevelSetRedistance {
       }
       pass.setBindGroup(0, bindGroup);
       if (dispatch === "single") pass.dispatchWorkgroups(1);
-      else if (dispatch === "capacity") {
-        pass.dispatchWorkgroups(Math.ceil(this.source.plan.maximumResidentBricks / 64));
-      }
       else pass.dispatchWorkgroupsIndirect(this.delta.redistanceDispatches.buffer,
         dispatch === "dirty"
           ? this.delta.redistanceDispatches.dirtyOffsetBytes

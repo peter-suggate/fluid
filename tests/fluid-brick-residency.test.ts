@@ -120,8 +120,8 @@ test("GPU residency derives a topology-tile worklist so leaves never straddle a 
 });
 
 test("pressure topology rebuild consumes the shared topology-tile worklist indirectly", () => {
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
-  assert.match(rebuild, /else if\(active\)\{this\.ownerPages\.encode\(new PassBroker\(encoder\)\)\}/,
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
+  assert.match(rebuild, /else if\(residencyReady\)\{this\.ownerPages\.encodeInactiveCandidate\(new PassBroker\(encoder\)\)\}/,
     "owner-page publication must consume every ready topology generation");
   assert.doesNotMatch(rebuild, /&&this\.ownerPages/,
     "the sparse owner authority must not retain runtime optionality");
@@ -151,7 +151,7 @@ test("pressure topology residency covers refinement and 2:1 grading support", ()
 });
 
 test("retired topology tiles rebuild before leaving the active domain", () => {
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString();
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
   assert.match(rebuild, /copyBufferToBuffer\(this\.compaction,20,this\.solveDispatch,48,12\)/);
   assert.match(rebuild, /dispatch\(this\.resetPipeline,this\.resetDeltaPipeline\)/);
   assert.match(rebuild, /dispatchCandidates\(level\.full,level\.delta/);

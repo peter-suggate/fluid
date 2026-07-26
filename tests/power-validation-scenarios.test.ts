@@ -157,7 +157,7 @@ test("isolated Dawn commands pin the authored adaptive power configurations", ()
   }
 });
 
-test("moving dam Dawn regression crosses the rejected generation and checks open-surface peeling", () => {
+test("moving dam Dawn regression crosses the former rejection and checks structured authority plus open-surface peeling", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
     scripts: Record<string, string>;
   };
@@ -167,14 +167,11 @@ test("moving dam Dawn regression crosses the rejected generation and checks open
   assert.match(command, /FLUID_CHECKPOINT_EVERY_S=0\.016/,
     "the rejected generation must be bracketed by fenced raster/publication checkpoints");
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  assert.match(smoke, /powerTransitionWitness = await readPowerTransitionWitness/,
-    "the long dynamic run retains historical topology only for failure localization");
+  assert.match(smoke, /exactStructuredGenerationAuditFailures\(\{/,
+    "every audited moving generation must use the direct structured authority contract");
   assert.match(smoke,
-    /expectedLeafSizes\.every\(\(size\) => \(sizes\[size\] \?\? 0\) > 0\)/,
-    "the regression must require both leaf scales in the live final topology");
-  assert.doesNotMatch(smoke,
-    /dynamicTransitionWitness\?\.(?:leafSizeHistogram|transitionFaceCount|obliqueTransitionFaceCount|maximumTransitionSizeRatio|transitionRowCount|transitionTetrahedronCount)\s*\?\?/,
-    "a historical transition must never replace final topology diagnostics");
+    /structuredVelocityControl\?: GPUBuffer;[\s\S]*structuredBoundaryControl\?: GPUBuffer;/,
+    "the long dynamic run must retain exact velocity and boundary controls for attribution");
   assert.match(smoke, /maximumProjectedVariationalResidual[\s\S]*?<= 1e-6/,
     "moving free-surface incompressibility must be gated by the Eq. (3)-form operator residual");
   assert.doesNotMatch(smoke, /minimal dam per-step power-cell divergence/,
@@ -196,20 +193,17 @@ test("moving dam Dawn regression crosses the rejected generation and checks open
     "an uncapped liquid\/air surface must not be judged as a closed wall-capped solid");
 });
 
-test("per-generation Dawn audit records the owner arena's independent self-publication clock", () => {
+test("per-generation Dawn audit records one coherent structured epoch", () => {
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
   assert.match(smoke,
-    /readBufferBinding\(device,\s*\{ buffer: audited\.powerOwnerArena \}, 64\)/,
-    "each audited step must read the complete 16-word owner control packet");
+    /auditEncoder\.copyBufferToBuffer\(audited\.structuredVelocityControl,[\s\S]*layout\.structuredBytes\)/,
+    "each audited step must enqueue the exact six-word structured velocity control");
   assert.match(smoke,
-    /const ownerControl = unpackOctreeOwnerPageControl\(ownerArena\)[\s\S]*ownerArena: \{[\s\S]*\.\.\.ownerControl/,
-    "the result must decode the complete owner control packet through its canonical ABI");
+    /auditEncoder\.copyBufferToBuffer\(audited\.structuredBoundaryControl,[\s\S]*layout\.boundaryBytes\)/,
+    "each audited step must enqueue the exact seven-word structured boundary control");
   assert.match(smoke,
-    /publicationValid: octreePowerOwnerArenaPublicationIsValid\(ownerArena\)[\s\S]*powerGeneration: face\[7\][\s\S]*generationMatchesPowerClock: ownerControl\.acceptedGeneration === face\[7\]/,
-    "owner self-publication and its relationship to the independent power clock remain separately visible");
-  assert.match(smoke, /ownerArenaAudit: lastOwnerArenaAudit/,
-    "the final result record must preserve successful owner evidence even when verbose generation logging is disabled");
-  assert.match(smoke,
-    /Owner topology has an independent generation namespace[\s\S]*!audit\.ownerArena\.publicationValid/,
-    "admission validates the owner transaction itself and never requires equality with the power clock");
+    /expectedStructuredEpoch: snapshot\.structured\.epoch,[\s\S]*structured: snapshot\.structured,[\s\S]*boundary: snapshot\.boundary/,
+    "admission must validate velocity, boundary, and fine publication as one coherent epoch");
+  assert.match(smoke, /previousAuditedPowerGeneration = snapshot\.structured\.epoch/,
+    "the next audit must advance from the accepted structured epoch");
 });

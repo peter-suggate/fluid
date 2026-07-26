@@ -1,0 +1,784 @@
+DCGrid: An Adaptive Grid Structure for
+Memory-Constrained Fluid Simulation on the GPU
+WOUTER RAATELAND, TU Delft, Netherlands
+TORSTEN HÄDRICH, KAUST, KSA
+JORGE ALEJANDRO AMADOR HERRERA, KAUST, KSA
+DANIEL T. BANUTI, UNM, USA
+WOJCIECH PAŁUBICKI, AMU, Poland
+SÖREN PIRK, Google Research, USA
+KLAUS HILDEBRANDT, TU Delft, Netherlands
+DOMINIK L. MICHELS, KAUST, KSA
+                                                                                                                            3
+
+
+
+
+Fig. 1. Clouds simulation using DCGrid. The checkerboard pattern shows the automatically adapting grid
+resolution.
+
+We introduce Dynamic Constrained Grid (DCGrid), a hierarchical and adaptive grid structure for fluid
+simulation combined with a scheme for effectively managing the grid adaptations. DCGrid is designed to be
+implemented on the GPU and used in high-performance simulations. Specifically, it allows us to efficiently vary
+and adjust the grid resolution across the spatial domain and to rapidly evaluate local stencils and individual
+cells in a GPU implementation. A special feature of DCGrid is that the control of the grid adaption is modeled
+as an optimization under a constraint on the maximum available memory, which addresses the memory
+limitations in GPU-based simulation. To further advance the use of DCGrid in high-performance simulations,
+we complement DCGrid with an efficient scheme for approximating collisions between fluids and static solids
+on cells with different resolutions. We demonstrate the effectiveness of DCGrid for smoke flows and complex
+cloud simulations in which terrain-atmosphere interaction requires working with cells of varying resolution
+and rapidly changing conditions. Finally, we compare the performance of DCGrid to that of alternative adaptive
+grid structures.
+
+
+Authors’ addresses: Wouter Raateland, TU Delft, Netherlands, wouterraateland@gmail.com; Torsten Hädrich, KAUST, KSA,
+torsten.haedrich@gmail.com; Jorge Alejandro Amador Herrera, KAUST, KSA, jorge.amadorherrere@kaust.edu.sa; Daniel
+T. Banuti, UNM, USA, daniel@banuti.de; Wojciech Pałubicki, AMU, Poland, wp06@amu.edu.pl; Sören Pirk, Google Research,
+USA, soeren.pirk@gmail.com; Klaus Hildebrandt, TU Delft, Netherlands, k.a.hildebrandt@tudelft.nl; Dominik L. Michels,
+KAUST, KSA, dominik.michels@kaust.edu.sa.
+
+
+© 2022 Copyright held by the owner/author(s).
+This is the author’s version of the work. It is posted here for your personal use. Not for redistribution. The definitive
+Version of Record was published in Proceedings of the ACM on Computer Graphics and Interactive Techniques, https:
+//doi.org/10.1145/3522608.
+
+
+
+                          Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+3:2                                                                                               W. Raateland et al.
+
+
+CCS Concepts: • Computing methodologies → Animation; • Information systems → Record and
+block layout.
+
+Additional Key Words and Phrases: Fluid simulation, Adaptive grid, Hierarchical solver, Real-time simulation
+
+ACM Reference Format:
+Wouter Raateland, Torsten Hädrich, Jorge Alejandro Amador Herrera, Daniel T. Banuti, Wojciech Pałubicki,
+Sören Pirk, Klaus Hildebrandt, and Dominik L. Michels. 2022. DCGrid: An Adaptive Grid Structure for Memory-
+Constrained Fluid Simulation on the GPU. Proc. ACM Comput. Graph. Interact. Tech. 5, 1, Article 3 (May 2022),
+14 pages. https://doi.org/10.1145/3522608
+
+
+1     INTRODUCTION
+Grid-based fluid simulations are widely used in the entertainment and advertising industries to
+create detailed and physically plausible visual effects such as splashes, sprays, smoke, and fire. These
+simulations require finely resolved grids to achieve the desired level of detail. In other areas, such
+as the simulation of weather phenomena, high-resolution grids are needed to adequately resolve
+the interaction with geometrically modeled environments in the simulation. The grid resolutions
+needed for these simulations lead to high-dimensional and complex computations and therefore
+place high demands on the performance of the simulation frameworks.
+In this paper, we introduce Dynamic Constrained Grid (DCGrid), a novel GPU-based multigrid data
+structure for high-performance fluid simulation that supports adaptive topology. Our approach
+increases computational and memory savings compared to regular static grids, and requires less a
+priori knowledge with respect to the temporal evolution of the solution. It respects key defining
+properties and characteristic global features of the fluid flow resulting in physically plausible results.
+Supporting adaptive topology, maintaining a multigrid structure, and being GPU-based sets DCGrid
+apart from alternative grid data structures such as SPGrid [Setaluri et al. 2014], which is an adaptive
+multigrid but not GPU-based, and GDVB [Hoetzlein 2016; Wu et al. 2018], which is GPU-based and
+adaptive but does not maintain a multigrid structure.
+   DCGrid stores the whole simulation domain on the GPU and is designed to allow for fast execu-
+tion of operations important for fluid simulation, such as accessing values at individual cells and
+on local stencils. In our comparisons to CPU-based data structures, we observe a speedup of more
+than an order of magnitude. As a multigrid structure, DCGrid manages a hierarchy of uniform
+grids and allows for efficient access to values and stencils at different levels of the hierarchy. The
+hierarchical structure of DCGrid facilitates the use of multigrid solvers for the pressure projection
+in fluids simulations. Since the memory required to store grids grows quickly with their resolution,
+large-scale simulations can easily exceed memory limits on the GPU. To use memory efficiently,
+DCGrid is an adaptive grid structure where the grid resolution varies spatially. The uniform grids
+in DCGrid’s hierarchy are all sparsely populated, so that storage demand depends on the number of
+populated cells rather than the resolution of the grid. During simulations, grid topology is adapted
+at each timestep in an efficient way. The grid adaption is controlled by an algorithm that optimizes
+the grid topology based on the maximum available memory.
+Comparisons to the alternative adaptive grid structures SPGrid and GDVB demonstrate that DCGrid
+can execute stencil and streaming operations substantially faster. We extend this comparison by
+benchmarking the performance of the grids on smoke simulations. Furthermore, we include a
+supplementary material in which we extend the suitability of DCGrid in high-performance simula-
+tion, especially real-time simulation, by proposing a scheme for the approximation of collisions
+between fluids and static solids on cells with different resolutions. This scheme does not enforce
+high-resolution cells at boundaries so that more cells can be used elsewhere. As an application, we
+
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+DCGrid                                                                                                             3:3
+
+
+use DCGrid in complex cloud simulations where the interaction between terrain and atmosphere
+requires working with cells of varying resolution and quickly changing conditions.
+   In summary, we present a hierarchical, adaptive, and GPU-based grid structure for high-performance
+fluid simulations and make the following main contributions:
+      • a memory-efficient data structure based on a hierarchy of sparsely populated uniform grids,
+        highly suitable for fluid simulation;
+      • an efficient, optimization-based, local topology adaptation method that respects memory
+        constraints.
+In addition, we demonstrate in the supplementary material the applicability of DCGrid to complex
+simulation scenarios by integrating DCGrid into a framework for meteorological simulations.
+
+2     BACKGROUND
+In this section, we review closely related work and discuss the SPGrid structure, which is the basis
+for DCGrid.
+
+2.1    Related Work
+Fluid simulations solve a discretization of the Navier–Stokes equations, usually by finite differ-
+ences [Foster and Metaxas 1996], and need to deal with velocity advection and pressure projection.
+An unconditionally stable semi-Lagrangian scheme for solving velocity advection was introduced
+in by Stam [1999] and has been the basis for grid-based fluid solvers for phenomena such as
+smoke [Fedkiw et al. 2001] and water [Foster and Fedkiw 2001]. Fluid Implicit Particle (FLIP)
+and Point in Cell (PIC) methods combine particle and grid representations of the fluids and solve
+advection using the particles and the pressure projection on the grid [Boyd and Bridson 2012; Ferstl
+et al. 2016; Zhu and Bridson 2005]. The pressure projection is in many cases the bottleneck of fluid
+solvers since a large linear system needs to be solved at every time step. These systems can be solved
+by the preconditioned conjugate gradient method [Bridson 2008; Foster and Fedkiw 2001]. Due to
+the regular structure of the lattices, multigrid methods, which are particularly effective for large
+systems, can be used to directly solve the pressure projection [Molemaker et al. 2008] or to build
+effective preconditioners for conjugate gradients schemes [McAdams et al. 2010]. Multigrid solvers
+are also effective for real-time fluid simulation [Chentanez and Müller 2011] and the simulation
+of viscous liquids [Aanjaneya et al. 2019]. An alternative to grid-based simulations are purely
+particle-based methods such as Smoothed Particle Hydrodynamics [Cornelis et al. 2014; Gissler
+et al. 2019].
+   The structured nature of uniform grids offers benefits when used in fluid simulations, such as fast
+stencil access and simple memory management. On the other hand, their uniform nature dictates a
+uniform distribution of computational resources over the fluid domain. This uniform distribution is
+often an inaccurate representation of the distribution of interesting features in a fluid domain (e.g.
+areas with high vorticity). To simulate features of high interest in the most accurate way possible,
+we would like to focus computational resources on these features. Multiple works have presented
+different alternations to the uniform grid that achieve this. Losasso et al. [2004] was the first to
+introduce a fluid simulation on an octree structure. Museth [2013] introduced OpenVDB, a sparse
+data structure organized as a tree with a high branching factor. OpenVDB is especially suited for
+simulating values at a uniform resolution. A GPU implementation of OpenVDB, GVDB has been
+developed by Hoetzlein [2016]. Wu et al. [2018] developed a FLIP simulation on GVDB, capable
+of simulating and rendering scenes with tens of millions of particles, where the scene topology
+automatically adapts to the FLIP particles. Recently, Museth [2021] introduced NanoVDB, a port of
+OpenVDB that can be instantiated in both CPU and GPU contexts. It currently only supports static
+
+                       Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+3:4                                                                                                  W. Raateland et al.
+
+
+topology and is able to perform tasks like rendering and collision handling very efficiently. Setaluri
+et al. [2014] introduced SPGrid a sparse paged grid structure. They also introduce the SPGrid
+pyramid, which achieves spatial adaptivity by combining multiple SPGrids in a hierarchy. SPGrid
+has been used in multiple large-scale fluid simulations [Aanjaneya et al. 2017; Liu et al. 2016] and
+also in an MPM context [Hu et al. 2018]. Gao et al. [2019] used a non-hierarchical, modified version
+of SPGrid in a GPU context. Recently, Xiao et al. [2020] has designed an alternative approach to
+adaptivity based on an Adaptive Staggered-Tilted (AST) grid. This method augments a primary
+grid with a secondary, overlapping grid with tilted cells (i.e., rotated by 45◦ in 2D). By scaling each
+tilted cell individually, they achieve fine-grained adaptation on a uniform grid. The secondary
+grid typically imposes a runtime penalty of only a few percent. Nielsen et al. [2020] proposed an
+automatic optimization-based grid refinement algorithm for smoke simulations. Their algorithm
+uses a global voxel limit and runs in O (𝑛) time, with respect to the number of allocated voxels.
+Because we focus on a high-performance grid structure to be implemented on the GPU, we have to
+be more restrictive and use voxel limits per mipmap level, requiring a different adaptation algorithm.
+The widely used application OpenFOAM includes an Adaptive Mesh Refinement (AMR) module.
+The module is not yet optimization-based. Nevertheless, it has enabled simulations with improved
+accuracy using less computational resources [Cooke et al. 2014; Lapointe et al. 2020].
+
+2.2   SPGrid
+SPGrid is a data structure for sparse Cartesian grids. A SPGrid
+pyramid uses a hierarchy of SPGrids to model a grid with cells
+of varying resolution. It supports voxels at each hierarchy level
+and thereby enables different levels of detail (LOD). SPGrid
+allocates all grids in the hierarchy in virtual memory. It achieves
+adaptivity by only allocating the active parts of the grids in
+physical memory. To do so, SPGrid relies on specific properties
+of Haswell processors.
+   SPGrid structures each grid in a hierarchy in blocks of cells
+such that one block occupies exactly one 4KB memory page.
+This results in blocks of 43 or 42 × 8 cells, depending on the
+number of values simulated per cell. SPGrid allocates blocks in
+virtual memory following a Morton encoding (Z-order curve)                       Fig. 2. Example of ghost cells and
+for optimal data locality. This structure enables constant time                  additional blocks allocated in a SP-
+translations between a block’s memory address and its location                   Grid hierarchy with an irregular do-
+in the grid. These constant time translations allow for the effi-                main. Red dashed squares indicate
+                                                                                 required ghost cells. Blue, green and
+cient execution of random and stencil accesses. To efficiently
+                                                                                 yellow rectangles indicate allocated
+compute gradients and Laplacians, SPGrid introduces ghost cells.
+                                                                                 blocks on different levels of the hier-
+Let cell 𝐶𝐼𝑙 be a cell with index 𝐼 located at grid 𝑙 in the hierarchy.          archy.
+Then 𝐶𝐼𝑙 is a ghost cell when:
+     • 𝐶𝐼𝑙 is not active at level 𝑙,
+     • 𝐶𝐼𝑙 neighbors a cell that is active at level 𝑠 ≤ 𝑙,
+     • and there exists a coarse parent of 𝐶𝐼𝑙 at level 𝑙 ∗ > 𝑙 that is
+       active.
+   Before computing a gradient or a Laplacian, SPGrid upsamples values from coarse parent cells
+into their corresponding ghost cells. With these values in place, it computes gradients and stencils
+as if the grid were uniform. After performing the computations, values in the ghost cells are copied
+back into their coarse parent cells. This way, all grid cells are updated without computing values
+
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+DCGrid                                                                                                            3:5
+
+
+multiple times. While ghost cells are an effective means for fast computations, they do come with a
+problem. The problem is that SPGrid allocates cells in blocks. Consequently, allocating only a few
+ghost cells may require the allocation of multiple complete blocks. This problem is most visible
+in irregular domains. Figure 2 shows a possible SPGrid hierarchy. In this configuration, SPGrid
+allocates 6 blocks for active cells. It also allocates 6 extra blocks just for ghost cells. Adapting
+topology in a SPGrid hierarchy works by instantiating a new instance with the desired topology
+and copying values accordingly. This workflow is necessary because some architectures are unable
+to forget that memory pages have been touched.
+
+
+3   DATA STRUCTURE
+Grid-based fluid simulations rely on random
+and stencil access for most of their operations,
+including Semi-Lagrangian advection, diffu-
+sion, and projection. Therefore, to achieve high-
+performance simulations, our data structure
+should perform well on these types of access.
+The regularity of Cartesian grids gives us the
+potential to perform fluid operations in parallel.
+To utilize this potential, our structure should be
+usable in a GPU context. Additionally, fluid sim-
+ulations often operate on multiple data chan-
+nels, such as densities, velocities, and auxil- (a) Hierarchy of (b) Flattened grid hierarchy
+iaries and so our structure should support this. sparse uniform grids. into one dense multi-
+                                                      Colored cells are resolution grid, showing only
+   We propose DCGrid, a data structure based
+                                                      active.                active cells.
+on a hierarchy of 𝐿 sparsely populated uniform
+grids 𝐺 0, . . . , 𝐺 𝐿−1 (Figure 3). To achieve cache Fig. 3. Two-dimensional slice of the same hierarchy
+coherency, we store cell data in blocks. Each of sparsely populated uniform grids. The thicker lines
+block consists of 23 subblocks, which in turn indicate block boundaries.
+consist of 23 cells each. The resolution between
+two adjacent levels in the grid hierarchy differs
+by a factor of 2. Thus, a block allocated on grid 𝐺𝑙 spans the same volume as a subblock on grid
+𝐺𝑙+1 . As this scaling factor resembles a mipmap, we call grid 𝐺𝑙 mipmap level 𝑙.
+   To satisfy memory constraints, we define a global limit on the number of blocks that can be
+allocated simultaneously 𝐵 max . To improve read  Í performance, we also impose a similar limits 𝐵 max,𝑙
+on each mipmap level 0 ≤ 𝑙 < 𝐿, such that 𝑙 ≤0<𝐿 𝐵 max,𝑙 = 𝐵 max .
+
+
+   Random Access. DCGrid allocates blocks of cells in a linear span of memory. A simple GPU hash
+table h links the position of blocks in the grid to their index in this linear memory span. Let 𝑏
+be a block located at p𝑏 , then the hash used by h is the 32 bit Morton encoding [Morton 1966] of
+p𝑏 = ⌊p/4⌋. This way of hashing means that a DCGrid instance can have a maximum resolution
+of 211 × 211 × 210 blocks, which is equivalent to 8192 × 8192 × 4096 cells. We use a key space of
+h.size = 4𝐵 max,𝑙 entries for each grid 𝐺𝑙 . With this size, we can find the index of the block in the
+linear memory span 𝐼𝑏 in O (1) time using a hash table lookup.
+   DCGrid stores data for subblocks and cells in separate linear memory spans. These memory
+spans are ordered equivalently to the memory span used for block data. To illustrate this, let 𝑏
+be the block stored at index 𝐼𝑏 . DCGrid stores data for the 8 subblocks contained in 𝑏 at indices
+
+
+                      Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+3:6                                                                                                  W. Raateland et al.
+
+
+{23 𝐼𝑏 , 23 𝐼𝑏 + 1, . . . , 23 𝐼𝑏 + (23 − 1)} in the following order:
+                               j p.𝑥 k                    j p.𝑦 k               j p.𝑧 k             
+   𝐼𝑠 = 23 𝐼𝑏 + 0x100                    mod 2 + 0x010               mod 2 + 0x001               mod 2 . (1)
+                                   2                            2                       2
+DCGrid stores data for the cells contained in subblock 𝑠 at indices {23 𝐼𝑠 , 23 𝐼𝑠 + 1, . . . , 23 𝐼𝑠 + (23 − 1)}
+in a similar order:
+            𝐼𝑐 = 23 𝐼𝑠 + 0x100(p.𝑥        mod 2) + 0x010(p.𝑦          mod 2) + 0x001(p.𝑧          mod 2) .          (2)
+In summary, to find the index 𝐼𝑐 of cell 𝑐 located at position p in grid 𝐺𝑙 , we perform three
+transformations. We first find the index 𝐼𝑏 of the block containing 𝑐 using a hash table lookup.
+Then, we find the index 𝐼𝑠 of the subblock containing 𝑐 using a simple transformation. Finally, we
+find the index 𝐼𝑐 of cell 𝑐 using a similar transformation.
+   Stencil Access. The stencil operations that we focus on are
+stencils with dimension 33 . The logical ordering of cells within 16 17 20 21 32 33 36 37 80 81 84 85
+blocks makes it trivial to compute stencils for cells in the in- 18 19 22 23 34 35 38 39 82 83 86 87
+terior of blocks. Computing stencils for cells on the border of 24 25 28 29 40 41 44 45 88 89 92 93
+blocks, however, requires accessing neighboring blocks. Naively, 26 27 30 31 42 43 46 47 90 91 94 95
+                                                                                   109 0   1     4  5 48 49 52 53
+this would require multiple random access operations and thus              108 109
+                                                                                   109 2   3     6  7 50 51 54 55
+multiple hash table lookup operations for each stencil operation.
+                                                                                   111 8   9    12 13 56 57 60 61
+   To more efficiently access adjacent cells in different blocks,          110 111
+                                                                                   111 10 11 14 15 58 59 62 63
+we pre-compute an apron of cell indices directly neighboring 64 65 68 69 128 128 128 128 129
+each block (Figure 4). Pre-computing of apron cell indices is 66 67 70 71
+                                                                                                           129
+performed once, during grid initialization. As the higher reso- 72 73 76 77                  128
+
+lution mipmap levels will be sparsely occupied, not all blocks 74 75 78 79
+will have direct neighbors at the same mipmap level. We could
+directly include neighbors on other mipmap levels in the apron. Fig. 4. Apron cell indices as calcu-
+Doing so would lead to a different amount of cells neighbor- lated for the central block.
+ing each block. Consequently, we get in non-uniform stencils.
+Non-uniform stencil computations on a GPU might lead to thread divergence, which reduces their
+efficiency. Therefore, we want to avoid non-uniform stencils. Instead, we implement an approach
+that retains the benefit of uniform stencils and works with sparsely occupied grids. To do so, we
+restrict the layout of the grids in the hierarchy using two rules:
+   (1) For mipmap levels 0 ≤ 𝑙 < 𝐿 − 1 and for each cell 𝑐 ∈ 𝐺𝑙 , there must exist a parent cell 𝑐 𝑝 at
+       position 2⌊p/2⌋ on grid 𝐺𝑙+1 . We also call 𝑐 a child cell of 𝑐 𝑝 .
+   (2) The lowest resolution grid, 𝐺 𝐿−1 , should be densely allocated.
+These restrictions ensure that 𝐺 0 ⊆ 𝐺 1 ⊆ · · · ⊆ 𝐺 𝐿−2 ⊆ 𝐺 𝐿−1 . To compute the apron cell indices for
+a block at grid 𝐺𝑙 , we iterate over all positions directly adjacent to that block. At each position p, if
+p lies inside the domain, we search for a cell in 𝐺𝑙 first. If this cell does not exist, we search for
+a cell at position p in increasingly coarser mipmap levels. As 𝐺 𝐿−1 covers the complete domain,
+this process always finds a cell at some level. We now treat all cell indices in aprons as if they
+originate from the same mipmap level. This process yields a uniform, and thus a performant stencil
+operation.
+   Restriction and Prolongation. By restricting the layout of the grid hierarchy, most of the do-
+main will be covered by multiple cells. Specifically, if cell 𝑐 covers point p in the domain, then
+its parent cell also covers that point. Performing fluid simulation operations on multiple cells
+covering the same point would be a waste of computational resources. Therefore operations are
+only performed on the highest resolution cell that covers any point. This cell is called active.
+
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+DCGrid                                                                                                             3:7
+
+
+Any cell that is the parent cell of another cell
+is called inactive. To get the correct values in
+the inactive cells, we perform a simple down-
+sampling routine called restriction (Figure 5a).
+Starting at mipmap level 𝐺 0 , we average the
+values of cells sharing the same coarse parent
+cell. We store this average in the parent cell
+and repeat on each coarser grid until all cells
+have values. The inverse operation of restric-
+tion is prolongation (Figure 5b). This operation
+traverses the grid hierarchy in the other direc- (a) Restriction operation                (b) Prolongation of re-
+tion, from low to high resolution, and transfers updating cell values by av-              stricted values back to
+values from parent cells into their children.    eraging the values of their              high-resolution grid.
+                                                         fine child cells.
+4   TOPOLOGY ADAPTATION
+We developed an optimization-based local Fig. 5. Restriction and prolongation operations per-
+                                                      formed after each other on the same data.
+topology adaptation method. Our method dis-
+tributes computing power and memory usage
+over the simulation domain by distributing ac-
+tive cells over mipmap levels. In particular, our method distributes active cells according to each
+cell’s priority score 𝑝 (𝑐), such that active cells on higher-resolution mipmap levels have higher
+priority scores than active cells on lower-resolution levels. In other words:
+       ∀𝑐 1, 𝑐 2 : (is_active(𝑐 1 ) ∧ is_active(𝑐 2 ) ∧ mipmap_level(𝑐 1 ) < mipmap_level(𝑐 2 ))
+                                                                                                 (3)
+                   ⇔ 𝑝 (𝑐 1 ) > 𝑝 (𝑐 2 ) .
+When distributing cells, we need to account for the block limit 𝐵 max,𝑙 per mipmap level and the
+restricted grid layout. A cell’s priority score 𝑝 (𝑐) can be any user-defined function. Potentially
+useful priority scores include the velocity gradient, proximity to the camera, or proximity to a
+boundary. Unless stated otherwise, we use the vorticity magnitude of a cell as its priority score.
+  Basic Operations. Before introducing our algorithm for topology adaptation, we need to establish
+the basic operations that constitute the algorithm: subblock refinement and block coarsening. To
+
+
+
+
+(a) Uniform,         (b) DCGrid,             (c) DCGrid,             (d) DCGrid,             (e) DCGrid,
+16.8M cells.         16.8M active cells.     4.2M active cells.      840K active cells.      168K active cells.
+
+Fig. 6. Smoke simulation run for 150 timesteps under different memory limits. Effective resolution is 2563 .
+Each checkerboard square represents one cell.
+
+
+                       Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+3:8                                                                                               W. Raateland et al.
+
+
+refine subblock 𝑠 located at mipmap level 𝐺𝑙 , we insert a new block 𝑏 refined at mipmap level 𝐺𝑙−1
+spanning the same volume as 𝑠. This insertion uses CUDA atomic operations (atomicCAS) to allow
+for parallel insertions. When a block already exists at position p, or if there is no space left at
+mipmap level 𝐺𝑙−1 , the operation is canceled. Otherwise, subblock 𝑠 is marked as inactive, and
+block 𝑏 refined is marked as active and positioned in the grid. Finally, the values in block 𝑏 refined
+are initialized by prolonging the values from subblock 𝑠.
+   To coarsen a block 𝑏 located at mipmap level 𝐺𝑙 , we first check
+if block 𝑏 is active. If not, then there exists a higher-resolution
+                                                                      0 0 0 0              0 0 0 0
+block at the same position. In this case, we cannot delete 𝑏, as
+that would leave a gap in the grid hierarchy. If 𝑏 is active, we 0 1 2 0                   0 1 2 0
+look up the subblock 𝑠 that resides at mipmap level 𝑙 + 1 at the 3 2 1 0                   3 2 1 0
+same position. Because of our restricted grid hierarchy layout, 2 1 0 0                    2 1 0 0
+𝑠 always exists when 𝑙 < 𝐿 − 1. We mark 𝑠 as active and delete 𝑏
+from the hash table. Again, this hash table deletion uses CUDA Fig. 7. Adaptation setup. First, a
+atomic operations and can be run in parallel.                        coarse grid is initialized. Then after
+   A hash table deletion does not clear the previously occupied each timestep, the subblocks with
+key in the hash table, leaving the key unusable. After many the highest priority scores are re-
+insertions and deletions, this will slow down lookups in the hash fined, until the finest grid is allo-
+table. Eventually, the hash table will run out of space. To ensure cated.
+that the hash table performs well, we can refill it periodically.
+The time required for refilling is insignificant compared to the total time topology adaptation takes.
+   Adaptation Setup. To initialize a DCGrid instance with 𝐿
+mipmap levels, we define a global block limit 𝐵 max and use that to
+                                                                            0 0 8 6            0 0 8 6
+determine the block limits 𝐵 max,𝑙 for each level 𝑙 ∈ {0, . . . , 𝐿 − 1}.
+In our experiments we used the following division:                          0 4 4 5            0 4 4 5
+   (1) Set the remaining block budget 𝐵 to be 𝐵 max .                       2 4 5 0            2 4 5 0
+   (2) For each hierarchy level grid 𝑙 = 𝐿 − 1 down to 0:                   1 3 0 0            1 3 0 0
+   (3) Set 𝐵 max,𝑙 to the smallest value of 𝐵/(𝑙 + 1) or the number
+       of blocks required to densely allocate 𝐺𝑙 .                        Fig. 8. Block re-arrangement. After
+   (4) Subtract 𝐵 max,𝑙 from the remaining budget 𝐵.                      each timestep, for each adjacent pair
+With this division, some mipmap levels are always densely allo- of grids in the hierarchy is consid-
+                                                                          ered. Fine blocks with low prior-
+cated. In particular, let 𝐺 0, . . . , 𝐺 𝐿−1 be a DCGrid instance with
+                                                                          ity scores are matched with coarse
+𝐿 mipmap levels, then there is a mipmap level 𝑙, so that for each subblocks with high priority scores.
+𝑙 ≤ 𝑙 ′ < 𝐿, block limit 𝐵 max,𝑙 ′ is such that 𝐺𝑙 ′ can be densely Then the fine blocks with low scores
+allocated. When initializing a DCGrid instance, we immediately moved to the locations of the coarse
+allocate these mipmap levels densely.                                     subblocks with high scores.
+   Cells on the other mipmap levels (𝐺 0, . . . , 𝐺𝑙−1 ) are allocated
+iteratively by refining subblocks from 𝐺 1, . . . , 𝐺𝑙 respectively.
+Let 𝐺𝑙 , 1 ≤ 𝑙 < 𝐿 − 1 be a mipmap level on which some blocks are allocated already, i.e., 𝐵𝑙 > 0. If
+𝐵𝑙−1 < 𝐵 max,𝑙−1 , then there still space for 𝑁𝑙−1 = 𝐵 max,𝑙−1 − 𝐵𝑙−1 > 0 blocks on mipmap level 𝐺𝑙−1 .
+We can now allocate 𝑅𝑙 = min{𝑁𝑙−1, 23 𝐵𝑙 } blocks on 𝐺𝑙−1 be refining 𝑅𝑙 subblocks from 𝐺𝑙 . To
+select subblocks from 𝐺𝑙 , we perform this refinement step only once after each timestep. We first
+calculate the priority score of each subblock on 𝐺𝑙 using a simple CUDA kernel that averages the
+priority scores of each cell in the subblock. We select the 𝑅𝑙 subblocks with the highest priority
+scores for refinement. Selecting these subblocks is an instance of the 𝑘-selection problem. For this
+problem, an O (𝑛) algorithms exists [Blum et al. 1973]. We solve this problem using the Quick Select
+algorithm, as this has expected runtime O (𝑛) and is often faster in practice.
+
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+DCGrid                                                                                                             3:9
+
+
+   Re-arrangement. In a typical fluid simulation, the distribution of values throughout the domain
+changes over time. Hence, the parts of the domain that deserve the most attention also change over
+time. To account for these changes, we allow for re-arrangement of blocks via Algorithm 1.
+   We determine which blocks should be rearranged per mipmap level 𝐺𝑙 , starting at the highest
+resolution mipmap level 𝐺 0 . First, we calculate the priority scores of each block in 𝐺𝑙 and each
+subblock in 𝐺𝑙+1 using a single CUDA kernel. We then find the set of active blocks 𝐵 coarsen ⊆ 𝐺𝑙
+and the set of active subblocks 𝑆 refine ⊆ 𝐺𝑙+1 . On the CPU, we sort 𝐵 coarsen ascending and 𝑆 refine
+descending by their priority scores, and iterate over each pair in order. For each pair, we check if
+the priority score of the block is lower than the priority score of the subblock. If this is the case,
+then this pair violates our adaptation objective (Equation 3). To move closer towards fulfilling the
+adaptation objective, we now coarsen the block and refine the subblock. The actual coarsening and
+refinement happen in parallel via a CUDA kernel.
+   Sorting all blocks and subblocks is an ex-
+pensive operation, especially as the number of
+                                                    ALGORITHM 1: Block re-arrangement.
+blocks grows. Optimally, we would only sort
+                                                      Input: Grids 𝐺 0, . . . , 𝐺 𝐿−1 , move limit per grid
+the 𝑣𝑙 objective violating pairs. To reduce the
+                                                              𝑚𝑙 .
+number of blocks and subblocks to sort, intro-        for 𝑙 = 0 . . . 𝐿 − 2 do
+duce a move limit 𝑚𝑙 , per mipmap level. Move             ∀𝑠 ∈ 𝐺𝑙+1, 𝑝𝑠 ← calc_subblock_score(𝑠)
+limit 𝑚𝑙 indicates that at most 𝑚𝑙 subblocks              ∀𝑏 ∈ 𝐺𝑙 , 𝑝𝑏 ← calc_block_score(𝑏)
+can be refined and 𝑚𝑙 blocks can be coarsened             𝐵 coarsen ← {𝑏 ∈ 𝐺𝑙 |is_active(𝑏)}
+at mipmap level 𝑙 in one execution of the re-             𝑆 refine ← {𝑠 ∈ 𝐺𝑙+1 |is_active(𝑠)}
+arrangement algorithm. To find the blocks and              partial_sortascending (𝐵 un_refine, 𝑚𝑙 )
+subblocks that have to be coarsened and refined,           partial_sortdescending (𝑆 refine, 𝑚𝑙 )
+we now only need to find the 𝑚𝑙 blocks with               𝑣 𝑙 ←0
+                                                           for (𝑏, 𝑠) ∈ zip(𝐵 coarsen, 𝑆 refine ) do
+the lowest priority scores and the 𝑚𝑙 subblocks
+                                                               if 𝑝𝑏 < 𝑝𝑠 then
+with the highest priority scores. This only re-                       coarsen(𝑏)
+quires partial sorting of 𝐵 coarsen and 𝑆 refine                      refine(𝑠)
+up to 𝑚𝑙 elements, which can be performed                             𝑣𝑙 ← 𝑣𝑙 + 1
+in 𝑂 (max{|𝐵 coarsen |, |𝑆 refine |} log 𝑚𝑙 ) time.
+                                                          𝑚𝑙 ← next_move_limit(𝑚𝑙 , 𝑣𝑙 )
+   To find reasonable limits 𝑚𝑙 , we make three
+observations:
+
+
+    • If 𝑚𝑙 > 𝑣𝑙 , we sort more blocks and subblocks than necessary, which is a waste of time.
+    • If 𝑚𝑙 < 𝑣𝑙 , we sort fewer blocks and subblocks than there are objective violating pairs. Doing
+      so leaves some objective violating pairs unchanged, which is undesirable.
+    • The number of objective violating pairs 𝑣𝑙 in one timestep is often similar to 𝑣𝑙 in the next
+      timestep.
+
+
+From these observations, we conclude that the move limit 𝑚𝑙 should be larger than the number
+of objective violating pairs 𝑣𝑙 , but the difference 𝑚𝑙 − 𝑣𝑙 should be as small as possible. We also
+see that we can predict reasonable limits 𝑚𝑙 for the next timestep using the number of objective
+violating pairs 𝑣𝑙 in the current timestep. In our experiments, we found that the simple prediction
+next_move_limit(𝑚𝑙 , 𝑣𝑙 ) = max{.8𝑚𝑙 , 1.5𝑣𝑙 } gave good results.
+   After the re-arrangement step, we ensure that all apron cell indices point to the correct cells
+again. To do so, we calculate the apron cell indices for each newly inserted block and refresh the
+apron cell indices that pointed to refined or coarsened blocks.
+
+
+                       Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+3:10                                                                                                W. Raateland et al.
+
+
+
+
+    (a) Domain setup.      (b) DCGrid (5%).       (c) DCGrid (10%).       (d) DCGrid (25%).         (e) Uniform.
+
+
+
+
+    (f) DCGrid (10%).      (g) DCGrid (30%).      (h) DCGrid (50%).        (i) DCGrid (80%).      (j) Uniform grid.
+
+Fig. 9. Smoke flow performed on a uniform grid and on DCGrid with various block limits and thus different
+amounts of active cells. All percentages are relative to their respective values in the simulation on the uniform
+grid.
+
+
+5      RESULTS
+In this section, we present results evaluating our simulation framework and comparing it to other
+approaches. We evaluate the distinct features of DCGrid, compare DCGrid against a uniform grid
+and benchmark the performance of DCGrid against SPGrid and GVDB on single kernels and using
+end-to-end tests. We implemented DCGrid and our simulation framework on the GPU using CUDA.
+Unless stated otherwise, we performed all simulations on an NVIDIA○   R
+                                                                        GeForce GTX 1070.
+
+                   Table 1. Timings and memory usage of experiments included in this work.
+
+    Scene      Structure     Domain       Memory     Floats                  Avg. Time / Timestep (ms)
+                                            (MB)     / Cell   Advect     Project Topology Render Rest         Total
+    Fig. 6a    Uniform        2563            537         8        34        24             –     2.0   16       76
+    Fig. 6b    DCGrid          2563          1177         8        50        39           8.6     9.5   22      130
+    Fig. 6c    DCGrid          2563           294         8        13        9.7          7.3     12    5.7      47
+    Fig. 6d    DCGrid          2563             59        8        3.9       2.5          2.8     10    1.8      21
+    Fig. 6e    DCGrid          2563             12        8        1.4       0.9          1.6     7.1   1.4      12
+    Fig. 1     DCGrid       512 × 1282        193        17        11        4.8          6.4     25    13       60
+    N/A        SPGrid∗     10242 × 2048     23 GB        16       26 s     525 s            –       ?   24     575 s
+    Fig. 12    DCGrid      10242 × 2048      6872         8       507       430          303      41      –    1280
+    Fig. 13a   GVDB            2563             97        8        15       102           9.3     1.4   15      142
+    Fig. 13b   DCGrid          2563             97        8        5.2       9.1          3.5     9.2   2.2      29
+∗ Data for the SPGrid result is sourced from [Setaluri et al. 2014]. Rendering time is not included. Experiments
+                                           run on an Intel Xeon E5-2670.
+
+
+   Topology Adaptation. To evaluate the topology adaption scheme, we compare results of four runs
+of the same simulation with different memory bounds on adaptive grids of effective resolution 2563
+(Figure 6). As a baseline, we also show the results obtained on the corresponding uniform grid. In
+all cases, the high-resolution areas in the adaptive grids follow the smoke flow. The simulation
+with the lowest cell limit (Figure 6e) allocates less than 1.5% of the cells used by the simulation on
+a uniform domain (Figure 6a). Still, it faithfully captures the global features of the smoke flow. The
+
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+DCGrid                                                                                                                                                                                                                     3:11
+
+
+highest resolution adaptive simulation (Figure 6c) uses one quarter of the cells that the non-adaptive
+simulations use (Figure 6a, 6b). This adaptive simulation reproduces almost all the details visible in
+the non-adaptive simulations.
+   Comparison to a Uniform Grid. To evaluate the performance of the adaptivity of DCGrid, we
+compare memory usage and average access times against a uniform grid by performing similar
+simulations in both settings. In general, fluid operations on DCGrid require extra time, because they
+require pointer indirection. Also, after each update, DCGrid requires some extra time to accumulate
+changed values. The apron cell indices are the main contributor to the memory overhead. Since
+their size only depends on the number of cells allocated, not on the amount of data stored per cell,
+the memory overhead is lower in more complex simulations.
+Figure 10 shows plots of memory usage and the
+average computation time per frame over the                 8 floats / cell     17 floats / cell        8 floats / cell     17 floats / cell
+
+number of active cells in the grid. We report           250%                                        200%
+
+
+
+
+                                                                                                                                               Average simulation time
+                                                        200%                                        150%
+
+
+                                                                       Memory usage
+results for two types of simulations: smoke sim-        150%
+                                                                                                    100%
+                                                        100%
+ulation with 8 floating-point channels per cell          50%                                         50%
+
+(blue graphs) and simulations of weatherscapes            0%
+                                                             0%        25%      50%        75%
+                                                                                                      0%
+                                                                                                         0%        25%      50%        75%
+
+with 17 floating-point channels (red graphs).                            Amount of active cells                      Amount of active cells
+
+While when densely allocated, DCGrid requires
+more memory and yields slower runtimes than Fig. 10. Performance of DCGrid relative to a uniform
+a uniform grid, this changes when not all cells grid under different configurations.
+are allocated. The break-even is reached when
+about 50% of the cells are used for 8 channels
+and about 60% for 17 channels. When 25% of the cells are used, DCGrid is about twice as fast and
+requires only half of the memory space.
+   The number of active cells used in a simulation varies for different simulations. In Figure 9, we
+show two examples that illustrate how simulations can benefit from the adaptivity of DCGrid.
+The upper row shows a simulation that is lo-
+calized in the simulation domain. In this case,                                               DCGrid     SPGrid             GVDB                                                 DCGrid     SPGrid             GVDB
+
+
+DCGrid reaches a similar quality simulation us-                                       1000
+                                                                                       100
+                                                                                                                                                                          100
+
+                                                                                                                                                                           10
+
+ing only 0.25 times as many cells as a uniform                                          10
+
+
+                                                                       Runtime (ms)                                                            Runtime (ms)
+                                                                                                                                                                             1
+                                                                                          1
+
+grid would use, requiring only half the compu-                                          0,1
+                                                                                                                                                                           0,1
+
+                                                                                                                                                                          0,01
+                                                                                       0,01
+tation time and the memory that the uniform                                           0,001
+                                                                                              32   64   128      256       512   1024   2048
+                                                                                                                                                                         0,001
+                                                                                                                                                                                 32   64   128      256       512   1024   2048
+
+grid requires. The lower row shows a setting in                                                               Resolution                                                                         Resolution
+
+which most of the scene is occupied by some
+fluid. Even in this case, DCGrid can reach a           (a) Stencil operation.                    (b) Streaming operation.
+simulation of similar quality using fewer cells.
+DCGrid reaches a similar quality simulation as Fig. 11. Performance of DCGrid compared to SPGrid
+                                                    and GVDB on a stencil and streaming kernel. The
+the simulation in the uniform grid using 0.5
+                                                    kernels are performed on a narrow-band domain con-
+times as many cells as the uniform grid uses, sisting of a spherical shell. SPGrid operations are per-
+requiring only slightly more memory and com- formed on an Intel i7-3820 (4 cores).
+putation time compared to the uniform simu-
+lation. This indicates that DCGrid can be used
+even in non-sparse settings without sacrificing performance or quality.
+   Benchmark Comparisons. We performed two benchmark tests, streaming and stencil operations,
+to compare the performance of DCGrid with SPGrid [Setaluri et al. 2014] and GVDB [Hoetzlein
+2016; Wu et al. 2018]. A Saxpby operation was computed for the streaming kernel and a Laplacian
+for the stencil kernel. The benchmarks were performed on the same sparse domain for each data
+
+                              Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+3:12                                                                                               W. Raateland et al.
+
+
+
+
+                (a) GVDB, brick size 83 .                                            (b) DCGrid.
+
+Fig. 13. Smoke simulation run in GVDB and DCGrid on a 2563 grid. Middle and right scene both use 97MB
+memory at most.
+
+
+structure. This sparse domain consists of a narrow band set of a spherical shell. Results are plotted
+in Figure 11. DCGrid is faster than GVDB and SPGrid at all resolutions tested.
+   Comparison to SPGrid. To compare DCGrid
+with SPGrid, we recreated one of the scenes
+showcased in [Setaluri et al. 2014] in a best-
+effort manner as not all input parameters, such
+as emission velocity, were available. Also, we
+used our own rendering engine, because SP-
+Grid did not specify exactly how they rendered
+the original scene. Our results are shown in
+Figure 12. Due to limited GPU memory, we can
+only allocate 112M cells in the DCGrid instance
+compared to the 135M used by SPGrid. Even Fig. 12. Smoke flow along sphere, 112M cells allocated.
+with fewer cells, our automatic topology adap- Domain size is 10242 × 2048, each checkerboard square
+tation scheme produces a more detailed simu- represents a 43 cells.
+lation. Because DCGrid uses cell-centric advec-
+tion, reuses temporary channels, and does not
+require ghost cells, DCGrid requires only about one-third of the memory compared to SPGrid for a
+similar simulation. Even when rendering time is included, the experiment with DCGrid runs about
+449 times faster than the original experiment with SPGrid (Table 1). Since DCGrid and SPGrid run
+on different systems, and our DCGrid experiment only uses about 82% of the cells that the SPGrid
+experiment used, the performance difference might be less significant in other scenarios.
+   Comparison to GVDB. To compare DCGrid to GVDB end-to-end, we set up a smoke simulation
+in GVDB, shown in Figure 13. Performance data is included to Table 1. In the experiment, we
+used cell-centered semi-Lagrangian advection, vorticity confinement, and non-multigrid projection
+using 10 Jacobi iterations for both DCGrid and GVDB. We set up GVDB such that the domain
+automatically expands around the smoke, using bricks of 83 cells. To get a fair comparison between
+GVDB and DCGrid, we configured the memory limit for the DCGrid instance to be equal to the
+memory used by the GVDB instance. Using the same amount of memory, DCGrid allocated 1.57M
+cells (of which 1.38M active cells), while GVDB allocated only 1.18M cells. Also, DCGrid performed
+the fluid simulation about 4.8 times as fast as GVDB overall. We attribute a large part of the
+performance difference between GVDB and DCGrid to the projection operation, where GVDB has
+to synchronize its apron cells after each iteration. On advection, DCGrid performed faster than
+
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+DCGrid                                                                                                               3:13
+
+
+GVDB. We expect that DCGrid performed faster here because it samples from plain arrays, whereas
+GVDB samples from textures and surfaces, which may cause overhead.
+  A major difference between DCGrid and GVDB is that GVDB only allocates cells on the highest
+resolution. In the simulation shown, this benefits the amount of detail visible in the result. GVDB
+only has to use memory for the high-resolution cells and can thus allocate more of them than
+DCGrid, using the same amount of memory. As a result, it preserves some more details in the
+simulation. In general, only allowing cells on the highest resolution can be a limitation for GVDB.
+Due to this restriction, for example, we have to resort to a non-multigrid solver for velocity
+projection.
+
+6   CONCLUSION AND FUTURE WORK
+We present a memory-efficient adaptive multigrid structure tailored for fluid simulations on the GPU
+that features an optimization-based algorithm for automatic local grid refinement. Our experiments
+demonstrate that compared to SPGrid and GVDB, DCGrid performs important stencil and streaming
+operations faster. Moreover, performance comparisons on smoke simulation indicate the benefits
+of DCGrid over SPGrid and GDVB. In supplementary material, we develop a scheme for handling
+solid-fluid interactions approximately for cells of different resolutions and integrate DCGrid into a
+framework for terrain atmosphere interaction.
+   For the design of DCGrid, we chose to manage memory explicitly. For a simpler implementation,
+one could explore CUDA’s virtual memory management APIs. Using these APIs, it might be possible
+to implement random access using the native memory page table instead of a GPU hash table.
+The drawback of this approach could be that memory needs to be fetched more often during a
+simulation. Additionally, one could explore the approach used in [Wu et al. 2018] and store cell data
+in textures. Using textures could potentially improve the performance of advection and rendering,
+as it would enable hardware-accelerated interpolation.
+   Our structure is currently limited in two ways. First, we use fixed-size blocks of 43 cells. Allowing
+users to vary the block size could be beneficial to simulations. Larger blocks, for example, would
+require fewer apron cell indices per cell, which would reduce memory overhead. Second, we limit
+the maximum number of blocks per mipmap level. This limit does not appear to restrict the scenarios
+we explored. However, one could explore using an overall block limit instead. Such a limit would
+allow for more flexible grid layouts, which could help in highly dynamic scenarios.
+
+ACKNOWLEDGEMENTS
+We thank the authors of SPGrid and GVDB for partially making their code publicly available,
+and the anonymous reviewers for their constructive feedback and suggestions that improved the
+manuscript. The helpful discussions with Miłosz Makowski are gratefully acknowledged. This work
+has been supported by KAUST (individual baseline funding).
+
+REFERENCES
+Mridul Aanjaneya, Ming Gao, Haixiang Liu, Christopher Batty, and Eftychios Sifakis. 2017. Power diagrams and sparse
+   paged grids for high resolution adaptive liquids. ACM Transactions on Graphics 36, 4 (2017), 1–12.
+Mridul Aanjaneya, Chengguizi Han, Ryan Goldade, and Christopher Batty. 2019. An Efficient Geometric Multigrid Solver
+   for Viscous Liquids. ACM Computer Graphics and Interactive Techniques 2, 2 (2019), 1–21.
+Manuel Blum, Robert W. Floyd, Vaughan R. Pratt, Ronald L. Rivest, Robert Endre Tarjan, et al. 1973. Time bounds for
+   selection. J. Comput. Syst. Sci. 7, 4 (1973), 448–461.
+Landon Boyd and Robert Bridson. 2012. MultiFLIP for energetic two-phase fluid simulation. ACM Trans. Graph. 31, 2 (2012),
+  16:1–16:12.
+Robert Bridson. 2008. Fluid Simulation for Computer Graphics. Taylor & Francis.
+
+
+                          Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+3:14                                                                                                     W. Raateland et al.
+
+
+Nuttapong Chentanez and Matthias Müller. 2011. Real-time Eulerian Water Simulation Using a Restricted Tall Cell Grid.
+     ACM Trans. Graph. 30, 4 (2011), 82:1–82:10.
+J. J. Cooke, L. M. Armstrong, K. H. Luo, and S. Gu. 2014. Adaptive mesh refinement of gas–liquid flow on an inclined plane.
+     Computers & Chemical Engineering 60 (2014), 297–306.
+Jens Cornelis, Markus Ihmsen, Andreas Peer, and Matthias Teschner. 2014. IISPH-FLIP for incompressible fluids. Computer
+     Graphics Forum 33, 2 (2014), 255–262.
+Ronald Fedkiw, Jos Stam, and Henrik Wann Jensen. 2001. Visual simulation of smoke. ACM SIGGRAPH (2001).
+Florian Ferstl, Ryoichi Ando, Chris Wojtan, Rüdiger Westermann, and Nils Thuerey. 2016. Narrow Band FLIP for Liquid
+     Simulations. Computer Graphics Forum 35, 2 (2016), 225–232.
+Nick Foster and Ronald Fedkiw. 2001. Practical animation of liquids. In ACM SIGGRAPH. 23–30.
+Nick Foster and Dimitris N. Metaxas. 1996. Realistic Animation of Liquids. In Proceedings of the Graphics Interface. 204–212.
+Ming Gao, Xinlei Wang, Kui Wu, Andre Pradhana, Eftychios Sifakis, Cem Yuksel, and Chenfanfu Jiang. 2019. GPU
+     optimization of material point methods. ACM Transactions on Graphics 37, 6 (2019), 1–12.
+Christoph Gissler, Andreas Peer, Stefan Band, Jan Bender, and Matthias Teschner. 2019. Interlinked SPH Pressure Solvers
+     for Strong Fluid-Rigid Coupling. ACM Transactions on Graphics 38, 1 (2019), 1–13.
+Rama Karl Hoetzlein. 2016. GVDB: Raytracing Sparse Voxel Database Structures on the GPU. In High Performance Graphics.
+Yuanming Hu, Yu Fang, Ziheng Ge, Ziyin Qu, Yixin Zhu, Andre Pradhana, and Chenfanfu Jiang. 2018. A moving least
+     squares material point method with displacement discontinuity and two-way rigid body coupling. ACM Transactions on
+     Graphics 37, 4 (2018), 1–14.
+Caelan Lapointe, Nicholas T. Wimer, Jeffrey F. Glusman, Amanda S. Makowiecki, John W. Daily, Gregory B. Rieker, and
+     Peter E. Hamlington. 2020. Efficient simulation of turbulent diffusion flames in OpenFOAM using adaptive mesh
+     refinement. Fire Safety Journal 111 (2020), 102934.
+Haixiang Liu, Nathan Mitchell, Mridul Aanjaneya, and Eftychios Sifakis. 2016. A Scalable Schur-Complement Fluids Solver
+     for Heterogeneous Compute Platforms. ACM Trans. Graph. 35, 6, Article 201 (Nov. 2016), 12 pages.
+Frank Losasso, Frédéric Gibou, and Ron Fedkiw. 2004. Simulating water and smoke with an octree data structure. ACM
+     Transactions on Graphics 23, 3 (2004), 457–462.
+Aleka McAdams, Eftychios Sifakis, and Joseph Teran. 2010. A Parallel Multigrid Poisson Solver for Fluids Simulation on
+     Large Grids. In Symposium on Computer Animation. 65–73.
+Jeroen Molemaker, Jonathan M. Cohen, Sanjit Patel, and Jonyong Noh. 2008. Low Viscosity Flow Simulations for Animation.
+     In Symposium on Computer Animation. 9–18.
+G. M. Morton. 1966. A computer oriented geodetic data base and a new technique in file sequencing. International Business
+     Machines Co. (1966).
+Ken Museth. 2013. VDB: High-Resolution Sparse Volumes with Dynamic Topology. ACM Transactions on Graphics 32, 3
+     (2013), 1–22.
+Ken Museth. 2021. NanoVDB: A GPU-friendly and portable VDB data structure for real-time rendering and simulation. In
+     ACM SIGGRAPH 2021 Talks. 1–2.
+Michael B. Nielsen, Konstantinos Stamatelos, Morten Bojsen-Hansen, and Robert Bridson. 2020. Auto-Adaptivity: An
+     Optimization-Based Approach to Spatial Adaptivity for Smoke Simulations. SIGGRAPH Talks (2020).
+Rajsekhar Setaluri, Mridul Aanjaneya, Sean Bauer, and Eftychios Sifakis. 2014. SPGrid: A Sparse Paged Grid structure
+     applied to adaptive smoke simulation. ACM Transactions on Graphics 33, 6 (2014), 1–12.
+Jos Stam. 1999. Stable Fluids. In ACM SIGGRAPH. 121–128.
+Kui Wu, Nghia Truong, Cem Yuksel, and Rama Hoetzlein. 2018. Fast Fluid Simulations with Sparse Volumes on the GPU.
+     Computer Graphics Forum 37, 2 (2018), 157–167.
+Yuwei Xiao, Szeyu Chan, Siqi Wang, Bo Zhu, and Xubo Yang. 2020. An adaptive staggered-tilted grid for incompressible
+     flow simulation. ACM Transactions on Graphics 39, 6 (2020), 1–15.
+Yongning Zhu and Robert Bridson. 2005. Animating sand as a fluid. ACM Transactions on Graphics 24, 3 (2005), 965–972.
+
+
+
+
+Proc. ACM Comput. Graph. Interact. Tech., Vol. 5, No. 1, Article 3. Publication date: May 2022.
+

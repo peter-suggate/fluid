@@ -37,14 +37,16 @@ test("raw voxel and brick-grid inspection retain the GPU sparse source", () => {
   assert.match(uniformEulerianSource, /Initial sparse authority: \$\{descriptor\.label\}/);
   assert.match(uniformEulerianSource, /this\.octreeProjection\.encodeInitialSparseAuthorityPhase\(initialSparseScene, phase\)/);
   assert.deepEqual(OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.map(({ id }) => id), [
-    "cold-topology", "power-operator-authority", "surface-global-fine",
-    "section5-face-band-topology", "section5-face-band-transitions",
-    "section5-face-band-closest-point", "section5-face-band-power-publication",
-    "sparse-render-world",
-  ], "t=0 must publish compact topology, coarse power phi, global fine, transition face band, and indexed narrow-band authority in dependency order");
+    "cold-topology", "structured-authority", "surface-global-fine", "sparse-render-world",
+  ], "t=0 must publish compact topology, direct structured velocity/boundary, global fine, and render authority in dependency order");
+  assert.match(octreeProjectionSource, /case "cold-topology": this\.encodeColdBootstrapRebuild\(encoder\)/);
   assert.match(octreeProjectionSource,
-    /case "cold-topology": this\.encodeColdBootstrapRebuild\(encoder\)[\s\S]*case "power-operator-authority": this\.encode\(\s*encoder[\s\S]*case "surface-global-fine": this\.encodeSurface\(encoder, 0\)[\s\S]*case "section5-face-band-topology":[\s\S]*this\.encodeGlobalFineFaceBandPhase\(broker, "topology-build"\)[\s\S]*case "section5-face-band-power-publication":[\s\S]*this\.encodeGlobalFineFaceBandPhase\(broker, "power-publication"\)[\s\S]*case "sparse-render-world": this\.encodeSparseBrickWorld\(encoder\)/,
-    "each ordered checkpoint must dispatch its corresponding sparse-authority stage");
+    /case "structured-authority":[\s\S]*?this\.encode\([\s\S]*?"power-operator-only"/,
+    "the structured checkpoint must publish the sole direct velocity/pressure authority");
+  assert.match(octreeProjectionSource, /case "surface-global-fine": this\.encodeSurface\(encoder, 0\)/);
+  assert.match(octreeProjectionSource,
+    /case "sparse-render-world":[\s\S]*?this\.encodeSparseBrickWorld\(encoder\)[\s\S]*?this\.encodeInactiveTopologyCandidate\(encoder\)/,
+    "the final t=0 checkpoint must publish render data before preparing the next inactive epoch");
   assert.doesNotMatch(rendererSource, /mode: "smooth", colorTarget/,
     "the renderer must never send smooth mode through the cube inspection pipeline");
 });

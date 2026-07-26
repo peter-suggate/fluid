@@ -6,6 +6,7 @@ import {
   powerDamComputePassStage,
   powerDamPerformanceFailures,
   powerDamResultFromLine,
+  powerDamResultWindow,
   summarizePowerDamPerformance,
 } from "../tools/power-dam-performance-report";
 
@@ -31,6 +32,8 @@ test("UI throughput command enforces the final Power Liquids authority gates", (
     "the throughput command has no sampled physics trace; profile acceptance owns the pressure-system gate");
   assert.match(packageJson.scripts["profile:power-dam-ui"],
     /FLUID_MAX_PRESSURE_NON_SOLVE_MS=\$\{FLUID_MAX_PRESSURE_NON_SOLVE_MS:-4\}/);
+  assert.equal(packageJson.scripts["benchmark:power-dam-quiescent"],
+    "node --import tsx tools/benchmark-power-dam.ts --lane=quiescent");
   assert.match(packageJson.scripts["test:power-liquids-structure"],
     /^npx tsc --noEmit && npm run test:water-shaders && node --import tsx --test .*power-liquids-clean-cut\.test\.ts.*webgpu-pass-broker\.test\.ts.*power-dam-performance-report\.test\.ts$/,
     "phase acceptance must fail before Dawn on type, WGSL, clean-cut, pass-broker, or budget-contract regressions");
@@ -111,15 +114,125 @@ test("fine GPU pass timestamps normalize by sampled advances, not the full smoke
   assert.equal(summary.fineTimestamps?.byLabel["Fine topology"]?.totalPerAdvance_ms, 12);
 });
 
+test("quiescent paired-prefix window subtracts cumulative work and retains terminal counters", () => {
+  const prefix = {
+    scenario: "minimal-power-dam-break",
+    method: "octree",
+    phase: "result" as const,
+    steps: 500,
+    simulatedTime_s: 2,
+    simulationWall_ms: 27_500,
+    validationErrors: [],
+    gpuCommandAudit: {
+      dispatches: 250_000,
+      indirectDispatches: 100_000,
+      computePasses: 25_000,
+      clearBuffer: { calls: 1_000, bytes: 500_000_000 },
+      copyBufferToBuffer: { calls: 2_000, bytes: 1_000_000_000 },
+      computePassesByLabel: {
+        "Octree MGPCG solve": { calls: 20_000, bytes: 0 },
+        "Fine redistance": { calls: 5_000, bytes: 0 },
+      },
+      dispatchesByPassLabel: {
+        "Octree MGPCG solve": { calls: 200_000, bytes: 0 },
+      },
+    },
+  };
+  const complete = {
+    ...prefix,
+    steps: 560,
+    simulatedTime_s: 2.24,
+    simulationWall_ms: 30_620,
+    activeSampleCount: 60_000,
+    globalFineActiveBricks: 118,
+    globalFineDesiredBricks: 120,
+    globalFineLevelSetResidentBrickCapacity: 200,
+    globalFineLevelSetLogicalBrickCount: 1_000,
+    globalFineTransportSegmentCount: 2,
+    quadtreePressureIterationsUsed: 4,
+    quadtreePressureIterationBudget: 20,
+    quadtreePressureIterationHardBudget: 20,
+    compactMechanicalEnergyCheckpoints: [
+      { time_s: 2, mechanicalEnergyRetentionRatio: 0.96, publicationValid: true,
+        rowCount: 20, reconstructedRows: 20, invalidRows: 0,
+        liquidCellCount: 100, finiteLiquidCellCount: 100 },
+      { time_s: 2.04, mechanicalEnergyRetentionRatio: 0.95, publicationValid: true,
+        rowCount: 20, reconstructedRows: 20, invalidRows: 0,
+        liquidCellCount: 100, finiteLiquidCellCount: 100 },
+    ],
+    gpuCommandAudit: {
+      dispatches: 277_000,
+      indirectDispatches: 110_800,
+      computePasses: 27_880,
+      clearBuffer: { calls: 1_120, bytes: 560_000_000 },
+      copyBufferToBuffer: { calls: 2_240, bytes: 1_120_000_000 },
+      computePassesByLabel: {
+        "Octree MGPCG solve": { calls: 22_400, bytes: 0 },
+        "Fine redistance": { calls: 5_480, bytes: 0 },
+      },
+      dispatchesByPassLabel: {
+        "Octree MGPCG solve": { calls: 221_600, bytes: 0 },
+      },
+    },
+  };
+  const result = powerDamResultWindow(prefix, complete);
+  const summary = summarizePowerDamPerformance(result);
+  assert.equal(result.steps, 60);
+  assert.equal(summary.advanceWall_ms, 52);
+  assert.deepEqual(summary.measurementWindow, {
+    kind: "paired-prefix-difference", startStep: 500, endStep: 560,
+  });
+  assert.equal(summary.commands?.dispatchesPerAdvance, 450);
+  assert.equal(summary.commands?.indirectDispatchesPerAdvance, 180);
+  assert.equal(summary.commands?.computePassesPerAdvance, 48);
+  assert.equal(summary.commands?.mgpcgDispatchesPerAdvance, 360);
+  assert.equal(summary.commands?.clearBytesPerAdvance, 1_000_000);
+  assert.deepEqual(summary.terminalCounters, {
+    activeSamples: 60_000,
+    activeFineBricks: 118,
+    desiredFineBricks: 120,
+    fineBrickCapacity: 200,
+    logicalFineBricks: 1_000,
+    // Terminal snapshots survive the window difference, so occupancy is the
+    // suffix's active count over the logical lattice, not a differenced rate.
+    fineBandOccupancy: 0.118,
+    transportSegments: 2,
+    pressureIterationsExecuted: 4,
+    pressureIterationsScheduled: 20,
+    pressureIterationsHardLimit: 20,
+  });
+  assert.equal(result.gpuFineTimestamps, undefined,
+    "cumulative timestamp distributions cannot be differenced exactly");
+  assert.deepEqual(result.compactMechanicalEnergyCheckpoints?.map(({ time_s }) => time_s), [2.04],
+    "quiescent dissipation evidence must belong to the measured suffix");
+});
+
+test("quiescent paired-prefix window fails closed when cumulative counters regress", () => {
+  const common = {
+    scenario: "minimal-power-dam-break",
+    method: "octree",
+    phase: "result" as const,
+    simulationWall_ms: 100,
+    gpuCommandAudit: { dispatches: 10 },
+  };
+  assert.throws(() => powerDamResultWindow(
+    { ...common, steps: 5 },
+    { ...common, steps: 6, simulationWall_ms: 110, gpuCommandAudit: { dispatches: 9 } },
+  ), /cumulative counter decreased/);
+  assert.throws(() => powerDamResultWindow(
+    { ...common, steps: 5 },
+    { ...common, scenario: "dam-break-ui", steps: 6, simulationWall_ms: 110 },
+  ), /same scenario and method/);
+});
+
 test("compute-pass attribution aggregates indexed native labels into stable owning stages", () => {
   const computePassesByLabel: Record<string, { calls: number; bytes: number }> = {
-    "Resolve Section 5 catalog adjacency": { calls: 2, bytes: 0 },
-    "Validate and publish Section 5 catalog adjacency": { calls: 2, bytes: 0 },
+    "Begin direct structured publication": { calls: 2, bytes: 0 },
+    "Finalize direct structured publication": { calls: 2, bytes: 0 },
+    "Publish structured boundary coefficients": { calls: 2, bytes: 0 },
   };
   computePassesByLabel["Prepare global fine trajectory chunk 1/4"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Prepare global fine trajectory chunk 2/4"] = { calls: 2, bytes: 0 };
-  computePassesByLabel["Publish grouped Stage-B and face-band transport authorities"] =
-    { calls: 2, bytes: 0 };
   computePassesByLabel["Publish complete global fine velocity cache 1/1"] =
     { calls: 2, bytes: 0 };
   computePassesByLabel["Summarize global fine departure chunk 1/1"] = { calls: 2, bytes: 0 };
@@ -131,15 +244,15 @@ test("compute-pass attribution aggregates indexed native labels into stable owni
     simulationWall_ms: 100, gpuCommandAudit: { computePasses: 60, computePassesByLabel },
   });
   assert.deepEqual(summary.commands?.computePassesByStage, {
-    "Section 5 face band · catalog adjacency": 2,
+    "Structured velocity publication": 2,
+    "Structured boundary coefficients": 1,
     "Fine transport · prepare trajectory chunks": 2,
-    "Fine transport · grouped authorities": 1,
     "Fine transport · velocity cache": 1,
     "Fine transport · summarize departure chunks": 1,
     "Fine transport · finalize departure summaries": 1,
     "Fine seed adapter": 2,
   });
-  assert.equal(summary.commands?.computePassesByLabel["Resolve Section 5 catalog adjacency"], 1);
+  assert.equal(summary.commands?.computePassesByLabel["Begin direct structured publication"], 1);
 });
 
 test("compute-pass attribution is a closed ownership table", () => {
@@ -198,7 +311,7 @@ test("performance limits gate throughput and generic pressure-system attribution
     simulationWall_ms: 120,
     gpuCommandAudit: {
       dispatches: 300, computePasses: 50,
-      computePassesByLabel: { "Power faces": { calls: 50, bytes: 0 } },
+      computePassesByLabel: { "Structured velocity publication": { calls: 50, bytes: 0 } },
     },
     physicsTrace: physicsTrace([
       { id: "pressure-system", label: "Pressure operator", duration_ms: 22 },

@@ -26,8 +26,11 @@ test("authored t=0 topology keeps one analytic SDF authority through its first s
     /const analyticBootstrapSelector = !this\.analyticSparseBootstrap[\s\S]*initialCondition === "dam-break" \? -20 : -10/,
     "dam/tank scenes select their analytic bootstrap sentinel while other scenes publish zero");
   assert.match(projectionSource,
-    /const analyticBootstrapSelector = !useCurrentFineBoundary && !useCurrentCoarseBoundary[\s\S]*queue\.writeBuffer\(this\.params, 124/,
-    "the first completed solve retires analytic classification with the same lifecycle decision used by Power faces");
+    /case "structured-authority":[\s\S]*analyticBootstrapRetirementByEncoder\.add\(encoder\)[\s\S]*retireSubmittedEncoder\(encoder[\s\S]*analyticBootstrapRetirementByEncoder\.delete\(encoder\)[\s\S]*queue\.writeBuffer\(this\.params, 124/,
+    "the analytic selector must retire only after submission of the first structured solve");
+  assert.match(projectionSource,
+    /analyticBootstrapRetirementByEncoder\.delete\(encoder\)[\s\S]*structuredBoundary\?\.retireAnalyticBootstrap\(\)/,
+    "the boundary authored t=0 selector must retire with the invocation-stable bootstrap encoder");
   assert.doesNotMatch(octreeProjectionShader,
     /analyticInitialPhi\(point: vec3f\)[\s\S]{0,800}textureLoad/,
     "analytic initial classification must not sample the dense level-set texture");
@@ -47,15 +50,15 @@ test("first fine-seed leaves and indexed global-fine generation share analytic b
 
 test("eligible analytic scenes use the GPU-authored resident cold worklist", () => {
   assert.match(projectionSource,
-    /if \(this\.analyticBootstrapWorklist\)[\s\S]*\.encode\(encoder\)[\s\S]*this\.topologyWorklistReady = true[\s\S]*this\.encodeInlineRebuild\(encoder\)/,
+    /if \(this\.analyticBootstrapWorklist\)[\s\S]*\.encode\(encoder\)[\s\S]*this\.topologyWorklistReady = true[\s\S]*this\.encodeInactiveTopologyCandidate\(encoder/,
     "analytic bootstrap must enter the resident rebuild without a finest-domain cold dispatch");
   assert.match(projectionSource,
     /const analyticBootstrapPlan = analyticSparseBootstrap \? planOctreeAnalyticBootstrapBounds/);
   assert.match(projectionSource,
     /if \(analyticBootstrapPlan\)[\s\S]*new WebGPUOctreeAnalyticBootstrapWorklist/);
   assert.match(projectionSource,
-    /const topologyWorklistReady = this\.topologyWorklistReady[\s\S]*this\.topologyWorklistReady = false/,
-    "non-analytic compatibility bootstrap must retain the existing full-domain fallback");
+    /this\.topologyResidency\.encode\(encoder, this\.surfaceState\.texture\)[\s\S]*this\.topologyWorklistReady = true[\s\S]*this\.encodeInactiveTopologyCandidate\(encoder, false, true\)/,
+    "non-analytic t=0 must explicitly publish dense-SDF tile residency before its cold topology and owner-page transaction");
 });
 
 test("global fine bootstrap accepts interface seeds from coarse octree leaves", () => {

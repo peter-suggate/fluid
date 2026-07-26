@@ -30,12 +30,13 @@ ${makeOctreePowerCoarseLevelSetSampleWGSL(16)}
 const INVALID:u32=0xffffffffu;
 const SHARP_CORNER_HALF_CELL_EPSILON:f32=${GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON};
 fn validCurrentPublication()->bool{
-  if(arrayLength(&fineTopologyControl)<8u||arrayLength(&fineWorklist)<5u){return false;}
+  if(arrayLength(&fineTopologyControl)<8u||arrayLength(&fineWorklist)<7u){return false;}
   let clean=fineTopologyControl[0]==0u&&fineTopologyControl[4]==1u&&fineTopologyControl[5]==0u&&fineTopologyControl[7]==0u;
-  let count=fineWorklist[0];let generation=params.table.w&0x3fffffffu;
-  let finePublished=params.table.y==5u&&count<=params.table.x&&count<=params.table.z
-    &&5u+count<=arrayLength(&fineWorklist)&&(fineWorklist[1]&0x3fffffffu)==generation
-    &&fineWorklist[2]==(count+63u)/64u&&fineWorklist[3]==1u&&fineWorklist[4]==1u;
+  let count=fineWorklist[1];let generation=params.table.w&0x3fffffffu;
+  let finePublished=params.table.y==7u&&count<=params.table.x&&count<=params.table.z
+    &&7u+count<=arrayLength(&fineWorklist)&&(fineWorklist[0]&0x3fffffffu)==generation
+    &&fineWorklist[2]==params.table.z&&(fineWorklist[3]&3u)==3u
+    &&fineWorklist[4]==(count+63u)/64u&&fineWorklist[5]==1u&&fineWorklist[6]==1u;
   let rowCount=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));
   let expectedWidth=params.settings.w*max(1.0,params.cellAndDt.x);
   let coarsePublished=powerCoarseSamples.state==0x80000000u
@@ -48,18 +49,12 @@ fn validCurrentPublication()->bool{
   return clean&&finePublished&&coarsePublished;
 }
 fn pageLookup(key:u32)->u32{
-  if(params.table.y!=5u||arrayLength(&fineWorklist)<5u||fineWorklist[1]!=params.table.w
-    ||fineWorklist[3]!=1u||fineWorklist[4]!=1u){return INVALID;}
-  let count=min(fineWorklist[0],min(params.table.x,params.table.z));
-  if(5u+count>arrayLength(&fineWorklist)){return INVALID;}
-  var low=0u;var high=count;
-  for(var step=0u;step<32u&&low<high;step+=1u){
-    let middle=low+(high-low)/2u;let id=fineWorklist[5u+middle];let base=id*10u;
-    if(id>=params.table.z||base+2u>=arrayLength(&metadata)||metadata[base]!=id
-      ||metadata[base+2u]!=params.table.w){return INVALID;}
-    if(metadata[base+1u]<key){low=middle+1u;}else{high=middle;}
-  }
-  if(low>=count){return INVALID;}let id=fineWorklist[5u+low];let base=id*10u;
+  if(params.table.y!=7u||arrayLength(&fineWorklist)<7u||fineWorklist[0]!=params.table.w
+    ||fineWorklist[2]!=params.table.z||(fineWorklist[3]&3u)!=3u||fineWorklist[5]!=1u||fineWorklist[6]!=1u){return INVALID;}
+  let logicalCount=params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;
+  let directoryBase=7u+params.table.z;
+  if(key>=logicalCount||directoryBase+key>=arrayLength(&fineWorklist)){return INVALID;}
+  let id=fineWorklist[directoryBase+key];let base=id*10u;
   return select(INVALID,id,id<params.table.z&&base+2u<arrayLength(&metadata)
     &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
 }
@@ -160,7 +155,7 @@ fn classifyScaled(base:vec3i,scale:i32){
 fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!validCurrentPublication()){return;}
   let stream=gid.x+gid.y*65535u*256u;let samples=params.samplesPerBrick;let work=stream/max(1u,samples);
-  if(work>=fineWorklist[0]){return;}let id=fineWorklist[5u+work];let metadataBase=id*10u;
+  if(work>=fineWorklist[1]){return;}let id=fineWorklist[7u+work];let metadataBase=id*10u;
   if(id>=params.table.z||metadataBase+2u>=arrayLength(&metadata)||metadata[metadataBase]!=id||metadata[metadataBase+2u]!=params.table.w){return;}
   let key=metadata[id*10u+1u];let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;let bx=rem-by*params.brickDimensions.x;
   let localIndex=stream-work*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));let q=vec3u(bx,by,bz)*r+local;

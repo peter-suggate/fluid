@@ -1,4 +1,4 @@
-import { BUILD_ID, cloneScene, parseScene, type SceneDescription } from "../model";
+import { BUILD_ID, canonicalScene, cloneScene, parseScene, type SceneDescription } from "../model";
 import { EulerianFluidSolver } from "../eulerian-solver";
 import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
@@ -8,6 +8,7 @@ import type { RendererFrameMetrics, SimulationBackend } from "../webgpu-renderer
 import { getMethod } from "../methods";
 import { cameraForPreset, getScenePreset } from "../scenes";
 import { useSceneStore } from "../stores/scene-store";
+import { useEditorHistoryStore, type EditorHistorySnapshot } from "../stores/history-store";
 import { useMethodStore, resolvedMethodValues } from "../stores/method-store";
 import type { MethodParamValue } from "../methods";
 import { useRuntimeStore } from "../stores/runtime-store";
@@ -61,6 +62,8 @@ class SimulationController {
   private pendingCpuTickTrace?: PerformanceTrace;
   private lastPerformanceReportAt_ms = 0;
   private lastPerformanceReportContext = "";
+  /** Document captured when a direct-manipulation gesture opened. */
+  private pendingEdit?: { label: string; snapshot: EditorHistorySnapshot };
 
   private safeBrowserBringup(): boolean {
     return typeof location !== "undefined" && safeBrowserGPUBringupEnabled(location.search);
@@ -285,6 +288,7 @@ class SimulationController {
 
   loadPreset(presetId: string) {
     const preset = getScenePreset(presetId);
+    this.recordHistory(`load ${preset.name}`);
     if (preset.methodProfile) useMethodStore.getState().applyProfile(preset.methodProfile);
     const scene = preset.create();
     this.reset(scene, preset.id);
@@ -344,12 +348,84 @@ class SimulationController {
     if (structural) this.reset();
   }
 
+  // ---- authoring: draft/commit, history ----------------------------------
+
+  /** The live document, cloned so history never aliases store state. */
+  private documentSnapshot(label: string): EditorHistorySnapshot {
+    const sceneStore = useSceneStore.getState();
+    return { label, scene: cloneScene(sceneStore.scene), presetId: sceneStore.presetId };
+  }
+
+  /**
+   * Push the pre-edit document onto the undo stack. `coalesceKey` groups a
+   * continuing gesture — a held slider, a repeated nudge — into one entry.
+   * An open `beginEdit` gesture already holds the pre-gesture snapshot, so
+   * document writes made during one record nothing until it commits.
+   */
+  private recordHistory(label: string, coalesceKey?: string) {
+    if (this.pendingEdit) return;
+    useEditorHistoryStore.getState().record(this.documentSnapshot(label), { coalesceKey });
+  }
+
+  /**
+   * Direct manipulation is a live-preview / commit-on-release split: the drag
+   * touches only runtime state the renderer already owns (`manipulateBody`),
+   * and the document changes once, here, when the pointer is released. That
+   * keeps one undo entry per gesture and one solver invalidation per edit.
+   *
+   * Committing currently takes the renderer's existing solver-key rebuild
+   * path; Phase 1 of docs/WYSIWYG_EDITOR_PLAN.md replaces it with a warm
+   * re-seed so the edit is simulating again in ~100 ms.
+   */
+  beginEdit(label: string) {
+    this.pendingEdit = { label, snapshot: this.documentSnapshot(label) };
+  }
+
+  /** Close the gesture; a patch that changed nothing records no undo entry. */
+  commitEdit(patch?: Partial<SceneDescription>) {
+    const pending = this.pendingEdit;
+    this.pendingEdit = undefined;
+    const sceneStore = useSceneStore.getState();
+    if (patch) sceneStore.patchScene(patch);
+    if (!pending) return false;
+    const changed = canonicalScene(useSceneStore.getState().scene) !== canonicalScene(pending.snapshot.scene);
+    if (!changed) return false;
+    useEditorHistoryStore.getState().record(pending.snapshot);
+    useRuntimeStore.getState().setNotice(pending.label);
+    return true;
+  }
+
+  /** Abandon a gesture without recording it; runtime preview state is kept. */
+  cancelEdit() { this.pendingEdit = undefined; }
+
+  private applyHistorySnapshot(entry: EditorHistorySnapshot, verb: string) {
+    this.reset(cloneScene(entry.scene), entry.presetId);
+    useRuntimeStore.getState().setNotice(entry.label ? `${verb} ${entry.label}` : `${verb} last edit`);
+  }
+
+  undo(): boolean {
+    this.pendingEdit = undefined;
+    const entry = useEditorHistoryStore.getState().undo(this.documentSnapshot(""));
+    if (!entry) { useRuntimeStore.getState().setNotice("Nothing to undo"); return false; }
+    this.applyHistorySnapshot(entry, "Undid");
+    return true;
+  }
+
+  redo(): boolean {
+    this.pendingEdit = undefined;
+    const entry = useEditorHistoryStore.getState().redo(this.documentSnapshot(""));
+    if (!entry) { useRuntimeStore.getState().setNotice("Nothing to redo"); return false; }
+    this.applyHistorySnapshot(entry, "Redid");
+    return true;
+  }
+
   // ---- rigid-body roster ------------------------------------------------
 
   addBody(shape: RigidShape) {
     const sceneStore = useSceneStore.getState();
     const scene = sceneStore.scene;
     if (scene.rigidBodies.length >= MAX_BODIES) { useRuntimeStore.getState().setNotice(`Renderer limit is ${MAX_BODIES} bodies in this verified increment`, "warn"); return; }
+    this.recordHistory(`add ${shape}`);
     let bodyIndex = 1;
     while (scene.rigidBodies.some((body) => body.id === `body-${shape}-${bodyIndex}`)) bodyIndex += 1;
     const description = createBodyDescription(shape, bodyIndex, scene.container.height_m);
@@ -360,11 +436,16 @@ class SimulationController {
     useRuntimeStore.getState().setNotice(`${description.name} added above the container`);
   }
 
-  /** Spawn a body at a specific point, e.g. dropped from the viewport tray. */
-  addBodyAt(shape: RigidShape, position: RigidBodyState["position_m"]) {
+  /**
+   * Spawn a body at a specific point, e.g. dropped from the viewport tray.
+   * Tray drops start the clock so the body visibly falls; editor placement
+   * passes `autoRun: false` because authoring geometry is an edit, not a throw.
+   */
+  addBodyAt(shape: RigidShape, position: RigidBodyState["position_m"], options: { autoRun?: boolean } = {}) {
     const sceneStore = useSceneStore.getState();
     const scene = sceneStore.scene;
     if (scene.rigidBodies.length >= MAX_BODIES) { useRuntimeStore.getState().setNotice(`Renderer limit is ${MAX_BODIES} bodies in this verified increment`, "warn"); return; }
+    this.recordHistory(`place ${shape}`);
     let bodyIndex = 1;
     while (scene.rigidBodies.some((body) => body.id === `body-${shape}-${bodyIndex}`)) bodyIndex += 1;
     const template = createBodyDescription(shape, bodyIndex, scene.container.height_m);
@@ -378,12 +459,14 @@ class SimulationController {
     this.bodies = [...this.bodies, initializeRigidBody(description)];
     this.publishBodies();
     useUIStore.getState().selectBody(description.id);
-    useRuntimeStore.getState().setRunState("running");
-    useRuntimeStore.getState().setNotice(`${description.name} dropped into the scene`);
+    if (options.autoRun !== false) useRuntimeStore.getState().setRunState("running");
+    useRuntimeStore.getState().setNotice(`${description.name} ${options.autoRun === false ? "placed" : "dropped into the scene"}`);
   }
 
   removeBody(bodyId: string) {
     const sceneStore = useSceneStore.getState();
+    if (!sceneStore.scene.rigidBodies.some((body) => body.id === bodyId)) return;
+    this.recordHistory("remove body");
     const descriptions = sceneStore.scene.rigidBodies.filter((body) => body.id !== bodyId);
     sceneStore.patchScene({ rigidBodies: descriptions });
     this.bodies = this.bodies.filter((body) => body.description.id !== bodyId);
@@ -393,8 +476,14 @@ class SimulationController {
     useRuntimeStore.getState().setNotice("Body removed");
   }
 
-  updateBody(bodyId: string, patch: Partial<RigidBodyDescription>) {
+  /**
+   * Held numeric controls fire per input event, so the default coalesce key is
+   * the edited field: one undo entry per property the user swept, not one per
+   * pixel of slider travel.
+   */
+  updateBody(bodyId: string, patch: Partial<RigidBodyDescription>, coalesceKey = `body:${bodyId}:${Object.keys(patch).sort().join(",")}`) {
     const sceneStore = useSceneStore.getState();
+    this.recordHistory("body edit", coalesceKey);
     const descriptions = sceneStore.scene.rigidBodies.map((body) => body.id === bodyId ? { ...body, ...patch } : body);
     sceneStore.patchScene({ rigidBodies: descriptions });
     const description = descriptions.find((item) => item.id === bodyId);
@@ -425,20 +514,33 @@ class SimulationController {
     useRuntimeStore.getState().setNotice("Body released with buoyancy, drag, torque, and fluid reaction enabled");
   }
 
-  dragBody(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"]) {
+  /** Kinematic constraint shared by the physics drag and the editor gizmo. */
+  private applyBodyManipulation(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"]) {
     if (phase === "end") this.kinematicDrag = null;
     else this.kinematicDrag = { bodyId, position: { ...position }, velocity: { ...velocity } };
     const body = this.bodies.find((candidate) => candidate.description.id === bodyId);
-    if (body) {
-      body.position_m = { ...position };
-      if (orientation) body.orientation = { ...orientation };
-      body.linearVelocity_m_s = phase === "end" ? { x: 0, y: 0, z: 0 } : { ...velocity };
-      body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 };
-      this.publishBodies();
-    }
+    if (!body) return;
+    body.position_m = { ...position };
+    if (orientation) body.orientation = { ...orientation };
+    body.linearVelocity_m_s = phase === "end" ? { x: 0, y: 0, z: 0 } : { ...velocity };
+    body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 };
+    this.publishBodies();
+  }
+
+  dragBody(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"]) {
+    this.applyBodyManipulation(bodyId, position, velocity, phase, orientation);
     const runtime = useRuntimeStore.getState();
     if (phase === "start") { runtime.setRunState("running"); runtime.setNotice("Kinematic drag active · GPU immersed boundary coupling"); }
     if (phase === "end") runtime.setNotice("Body released to buoyancy, drag, and collision response");
+  }
+
+  /**
+   * Gizmo manipulation. Same kinematic constraint as `dragBody`, but authoring
+   * never starts the clock: placing geometry is an edit, not a throw. The pose
+   * lives in runtime state only until `commitEdit` writes the document.
+   */
+  manipulateBody(bodyId: string, position: RigidBodyState["position_m"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"]) {
+    this.applyBodyManipulation(bodyId, position, { x: 0, y: 0, z: 0 }, phase, orientation);
   }
 
   // ---- renderer callbacks ------------------------------------------------
@@ -521,7 +623,7 @@ class SimulationController {
   }
 
   importScene(name: string, contents: string) {
-    try { const loaded = parseScene(contents); this.reset(loaded); useRuntimeStore.getState().setNotice(`Loaded ${name}`); }
+    try { const loaded = parseScene(contents); this.recordHistory(`import ${name}`); this.reset(loaded); useRuntimeStore.getState().setNotice(`Loaded ${name}`); }
     catch (error) { useRuntimeStore.getState().setNotice(error instanceof Error ? error.message : "Scene import failed", "warn"); }
   }
 

@@ -37,13 +37,13 @@ test("compact inspection stays lazy and republishes with global-fine simulation 
   assert.match(projection, /this\.encodeFrontierRows\(encoder, "Octree inspection frontier rows"[\s\S]*this\.compactVoxelInspection\.encode\(encoder\);/,
     "the first inspection captures the current immutable pressure rows in one submission");
   assert.doesNotMatch(projection,
-    /get sparseVoxelRenderSource[\s\S]*this\.topologyWorklistReady = false;[\s\S]*this\.encodeInlineRebuild\(encoder\)/,
+    /get sparseVoxelRenderSource[\s\S]*this\.topologyWorklistReady = false;[\s\S]*this\.encodeInactiveTopologyCandidate\(encoder\)/,
     "diagnostic inspection must not revive the cold full-domain topology path");
-  const globalFineBranch = projection.slice(
-    projection.indexOf("if (this.globalFineBootstrapped && this.fineSeedAdapter)"),
-    projection.indexOf("if (!this.sparseBrickWorld)", projection.indexOf("if (this.globalFineBootstrapped && this.fineSeedAdapter)")),
+  const publication = projection.slice(
+    projection.indexOf("  encodeSparseBrickWorld(encoder:"),
+    projection.indexOf("\n  destroy()", projection.indexOf("  encodeSparseBrickWorld(encoder:")),
   );
-  assert.match(globalFineBranch, /this\.compactVoxelInspection\?\.encode\(encoder\)/,
+  assert.match(publication, /this\.compactVoxelInspection\?\.encode\(encoder\)/,
     "running fluid updates the raw view from the same compact generation");
 });
 

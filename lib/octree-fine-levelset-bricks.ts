@@ -10,6 +10,46 @@
 export const FINE_LEVELSET_INVALID = 0xffff_ffff;
 export const FINE_LEVELSET_CHANNELS = 4;
 export const FINE_LEVELSET_NEIGHBOR_COUNT = 6;
+export const FINE_LEVELSET_HALO_COUNT = 27;
+export const FINE_LEVELSET_WORKSET_HEADER_WORDS = 7;
+
+/** Word offsets in the common workset header written by `exportGPUGeneration`
+ * and by every GPU publication kernel. Named because the first two words are
+ * easy to transpose: word zero is the generation, not the active count. A
+ * host reader that took word zero for the count reported the generation as a
+ * brick count for the whole life of the fine-band work. */
+export const FINE_LEVELSET_WORKSET_HEADER = Object.freeze({
+  generation: 0,
+  activeCount: 1,
+  capacity: 2,
+  flags: 3,
+  dispatchX: 4,
+  dispatchY: 5,
+  dispatchZ: 6,
+} as const);
+
+export interface FineLevelSetWorksetHeaderValues {
+  readonly generation: number;
+  readonly activeCount: number;
+  readonly capacity: number;
+  readonly flags: number;
+}
+
+/** Reads the four identity words of a workset header. Callers may hold a
+ * truncated prefix (the QA readback copies five words), so the dispatch
+ * triple is deliberately not part of this contract. */
+export function readFineLevelSetWorksetHeader(
+  words: ArrayLike<number>,
+): FineLevelSetWorksetHeaderValues | undefined {
+  if (words.length < 4) return undefined;
+  const word = (index: number): number => Number(words[index]) >>> 0;
+  return {
+    generation: word(FINE_LEVELSET_WORKSET_HEADER.generation),
+    activeCount: word(FINE_LEVELSET_WORKSET_HEADER.activeCount),
+    capacity: word(FINE_LEVELSET_WORKSET_HEADER.capacity),
+    flags: word(FINE_LEVELSET_WORKSET_HEADER.flags),
+  };
+}
 
 export const FINE_LEVELSET_SAMPLE_FLAGS = Object.freeze({
   valid: 1 << 0,
@@ -20,7 +60,7 @@ export const FINE_LEVELSET_SAMPLE_FLAGS = Object.freeze({
 } as const);
 
 export type FineLevelSetFactor = 4 | 8;
-export type FineLevelSetBrickResolution = 4 | 8;
+export type FineLevelSetBrickResolution = 4;
 export type FineLevelSetVec3 = readonly [number, number, number];
 
 export interface FineLevelSetBrickPlanOptions {
@@ -31,6 +71,8 @@ export interface FineLevelSetBrickPlanOptions {
   fineFactor: FineLevelSetFactor;
   brickResolution: FineLevelSetBrickResolution;
   maximumResidentBricks: number;
+  /** Cache the exact x-fastest 3x3x3 physical-page halo in each topology table. */
+  includeHalo27?: boolean;
 }
 
 export interface FineLevelSetBrickPlan {
@@ -44,6 +86,7 @@ export interface FineLevelSetBrickPlan {
   brickDimensions: FineLevelSetVec3;
   logicalBrickCount: number;
   maximumResidentBricks: number;
+  includeHalo27: boolean;
   samplesPerBrick: number;
   payloadBytesPerBrick: number;
   payloadCapacityBytes: number;
@@ -89,8 +132,10 @@ export interface FineLevelSetGPUGenerationData {
   activeCount: number;
   /** physical ID, key, generation, flags, then six cached neighbors. */
   metadataWords: Uint32Array;
-  /** count, generation, dispatch, published, valid, then IDs sorted by metadata key. */
+  /** Common seven-word workset header followed by IDs in Morton-key order. */
   worklistWords: Uint32Array;
+  /** Optional x-fastest 3x3x3 physical-page halo, indexed by compact physical ID. */
+  haloIds?: Uint32Array;
   flags: Uint32Array;
   phi: Float32Array;
   workA: Float32Array;
@@ -121,10 +166,11 @@ export function planFineLevelSetBricks(options: FineLevelSetBrickPlanOptions): F
   if (options.fineFactor !== 4 && options.fineFactor !== 8) {
     throw new RangeError("Fine level-set factor must be 4 or 8");
   }
-  if (options.brickResolution !== 4 && options.brickResolution !== 8) {
-    throw new RangeError("Fine level-set brick resolution must be 4 or 8");
+  if (options.brickResolution !== 4) {
+    throw new RangeError("Fine level-set brick resolution must be the production 4x4x4 shape");
   }
   const maximumResidentBricks = positiveInteger(options.maximumResidentBricks, "Fine level-set resident capacity");
+  const includeHalo27 = options.includeHalo27 ?? true;
   const sampleDimensions = finestCellDimensions.map((value) => value * options.fineFactor) as unknown as FineLevelSetVec3;
   if (sampleDimensions.some((value) => !Number.isSafeInteger(value))) {
     throw new RangeError("Fine level-set sample dimensions exceed exact integer range");
@@ -143,14 +189,17 @@ export function planFineLevelSetBricks(options: FineLevelSetBrickPlanOptions): F
   const payloadCapacityBytes = maximumResidentBricks * payloadBytesPerBrick;
   // Two generation-specific metadata copies: id/key/generation/state + six neighbors.
   const metadataCapacityBytes = 2 * maximumResidentBricks * 10 * 4;
-  // count/generation/dispatch/published/valid followed by key-sorted physical IDs, for both generations.
-  const worklistBytes = 2 * (5 + maximumResidentBricks) * 4;
+  // Each topology table owns the common workset, direct logical directory,
+  // and optional exact 3x3x3 physical-page halo used by interpolation kernels.
+  const topologyWords = FINE_LEVELSET_WORKSET_HEADER_WORDS + maximumResidentBricks
+    + logicalBrickCount + (includeHalo27 ? maximumResidentBricks * FINE_LEVELSET_HALO_COUNT : 0);
+  const worklistBytes = 2 * topologyWords * 4;
   const allocatedBytes = payloadCapacityBytes + metadataCapacityBytes + worklistBytes;
   return {
     domainOrigin, finestCellDimensions, finestCellWidth: options.finestCellWidth,
     fineFactor: options.fineFactor, fineCellWidth: options.finestCellWidth / options.fineFactor,
     brickResolution: options.brickResolution, sampleDimensions, brickDimensions, logicalBrickCount,
-    maximumResidentBricks, samplesPerBrick, payloadBytesPerBrick,
+    maximumResidentBricks, includeHalo27, samplesPerBrick, payloadBytesPerBrick,
     payloadCapacityBytes, metadataCapacityBytes, worklistBytes, allocatedBytes,
   };
 }
@@ -267,7 +316,7 @@ export class FineLevelSetBrickOracle {
           ];
           const position = q.map((value, axis) => this.plan.domainOrigin[axis] + (value + 0.5) * this.plan.fineCellWidth) as unknown as FineLevelSetVec3;
           const value = coarsePhi(position);
-          if (!Number.isFinite(value)) throw new RangeError("Coarse phi fallback returned a non-finite value");
+          if (!Number.isFinite(value)) throw new RangeError("Coarse phi authority returned a non-finite value");
           page.phi[local] = value;
           page.workA[local] = value;
           page.workB[local] = value;
@@ -412,9 +461,9 @@ export class FineLevelSetBrickOracle {
         return page.phi[address.localIndex];
       }
     }
-    const fallback = coarsePhi(position);
-    if (!Number.isFinite(fallback)) throw new RangeError("Coarse phi fallback returned a non-finite value");
-    return fallback;
+    const coarseAuthority = coarsePhi(position);
+    if (!Number.isFinite(coarseAuthority)) throw new RangeError("Coarse phi authority returned a non-finite value");
+    return coarseAuthority;
   }
 
   sampleResidentAtCoordinate(fineCoord: FineLevelSetVec3): number | undefined {
@@ -464,22 +513,59 @@ export class FineLevelSetBrickOracle {
     const phi = new Float32Array(capacity * samplesPerBrick);
     const workA = new Float32Array(capacity * samplesPerBrick);
     const workB = new Float32Array(capacity * samplesPerBrick);
-    const ordered = [...this.pagesByKey.values()].sort((a, b) => a.key - b.key);
-    const worklistWords = new Uint32Array(5 + capacity);
-    worklistWords.set([ordered.length, this.generationValue, Math.ceil(ordered.length / 64), 1, 1]);
-    ordered.forEach((page, workIndex) => {
-      const metadataOffset = page.physicalId * 10;
-      metadataWords.set([page.physicalId, page.key, page.generation, 1, ...page.neighborIds], metadataOffset);
-      const payloadOffset = page.physicalId * samplesPerBrick;
+    const morton = (key: number): bigint => {
+      const [x, y, z] = unpackFineLevelSetBrickKey(this.plan, key);
+      let code = 0n;
+      for (let bit = 0; bit < 21; bit += 1) {
+        code |= BigInt((x >>> bit) & 1) << BigInt(3 * bit);
+        code |= BigInt((y >>> bit) & 1) << BigInt(3 * bit + 1);
+        code |= BigInt((z >>> bit) & 1) << BigInt(3 * bit + 2);
+      }
+      return code;
+    };
+    const ordered = [...this.pagesByKey.values()].sort((a, b) => {
+      const am = morton(a.key), bm = morton(b.key);
+      return am < bm ? -1 : am > bm ? 1 : a.key - b.key;
+    });
+    const physicalByKey = new Map(ordered.map((page, rank) => [page.key, rank]));
+    const haloIds = this.plan.includeHalo27
+      ? new Uint32Array(capacity * FINE_LEVELSET_HALO_COUNT).fill(FINE_LEVELSET_INVALID)
+      : undefined;
+    const worklistWords = new Uint32Array(FINE_LEVELSET_WORKSET_HEADER_WORDS + capacity)
+      .fill(FINE_LEVELSET_INVALID);
+    const dispatchX = Math.ceil(ordered.length / 64);
+    worklistWords.set([this.generationValue, ordered.length, capacity, 3, dispatchX, 1, 1]);
+    ordered.forEach((page, physicalId) => {
+      const metadataOffset = physicalId * 10;
+      const neighborIds = [...page.neighborIds].map((oldId) => {
+        if (oldId === FINE_LEVELSET_INVALID) return FINE_LEVELSET_INVALID;
+        const neighbor = this.pagesById[oldId];
+        return neighbor ? physicalByKey.get(neighbor.key) ?? FINE_LEVELSET_INVALID : FINE_LEVELSET_INVALID;
+      });
+      metadataWords.set([physicalId, page.key, page.generation, 1, ...neighborIds], metadataOffset);
+      const payloadOffset = physicalId * samplesPerBrick;
       flags.set(page.flags, payloadOffset);
       phi.set(page.phi, payloadOffset);
       workA.set(page.workA, payloadOffset);
       workB.set(page.workB, payloadOffset);
-      worklistWords[5 + workIndex] = page.physicalId;
+      worklistWords[FINE_LEVELSET_WORKSET_HEADER_WORDS + physicalId] = physicalId;
+      if (haloIds) {
+        const center = unpackFineLevelSetBrickKey(this.plan, page.key);
+        let slot = 0;
+        for (let z = -1; z <= 1; z += 1) for (let y = -1; y <= 1; y += 1) for (let x = -1; x <= 1; x += 1) {
+          const q: [number, number, number] = [center[0] + x, center[1] + y, center[2] + z];
+          if (q.every((value, axis) => value >= 0 && value < this.plan.brickDimensions[axis])) {
+            haloIds[physicalId * FINE_LEVELSET_HALO_COUNT + slot] = physicalByKey.get(
+              packFineLevelSetBrickKey(this.plan, q),
+            ) ?? FINE_LEVELSET_INVALID;
+          }
+          slot += 1;
+        }
+      }
     });
     return {
       generation: this.generationValue, activeCount: ordered.length,
-      metadataWords, worklistWords, flags, phi, workA, workB,
+      metadataWords, worklistWords, haloIds, flags, phi, workA, workB,
     };
   }
 }

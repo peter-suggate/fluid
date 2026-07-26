@@ -68,6 +68,14 @@ test("interface publication deterministically builds a six-neighbor ring and cac
   const minusX = oracle.pageForKey(packFineLevelSetBrickKey(configured, [2, 3, 3])); assert.ok(minusX);
   assert.equal(minusX.neighborIds[1], center.physicalId);
   assert.equal(publication.activePhysicalIds.length, 7);
+  const gpu = oracle.exportGPUGeneration(); assert.ok(gpu.haloIds);
+  const centerPhysical = Array.from({ length: gpu.activeCount }, (_, id) => id)
+    .find((id) => gpu.metadataWords[id * 10 + 1] === centerKey); assert.notEqual(centerPhysical, undefined);
+  const haloBase = centerPhysical! * 27;
+  assert.equal(gpu.haloIds[haloBase + 13], centerPhysical, "halo slot 13 owns the destination page");
+  for (const [haloSlot, neighborSlot] of [[12, 0], [14, 1], [10, 2], [16, 3], [4, 4], [22, 5]] as const) {
+    assert.equal(gpu.haloIds[haloBase + haloSlot], gpu.metadataWords[centerPhysical! * 10 + 4 + neighborSlot]);
+  }
 });
 
 test("two generations reuse stable keys, retire old-only pages, and initialize new pages from coarse phi", () => {
@@ -140,10 +148,14 @@ test("memory accounting separates active payload, sorted directories, and fragme
   assert.equal(memory.allocatedBytes, configured.allocatedBytes);
   const gpu = oracle.exportGPUGeneration();
   assert.equal(gpu.metadataWords.length, configured.maximumResidentBricks * 10);
-  assert.equal(gpu.worklistWords[0], 4);
-  const ids = [...gpu.worklistWords.slice(5, 5 + gpu.worklistWords[0])];
+  assert.equal(gpu.worklistWords[0], gpu.generation);
+  assert.equal(gpu.worklistWords[1], 4);
+  assert.equal(gpu.worklistWords[2], configured.maximumResidentBricks);
+  assert.deepEqual([...gpu.worklistWords.slice(3, 7)], [3, 1, 1, 1]);
+  const ids = [...gpu.worklistWords.slice(7, 7 + gpu.worklistWords[1])];
   const keys = ids.map((id) => gpu.metadataWords[id * 10 + 1]);
-  assert.deepEqual(keys, [...keys].sort((a, b) => a - b));
+  assert.deepEqual(ids, [0, 1, 2, 3], "Morton worklist rank is the compact physical identity");
+  assert.equal(new Set(keys).size, keys.length);
 });
 
 test("publication fails closed before mutating the current generation", () => {

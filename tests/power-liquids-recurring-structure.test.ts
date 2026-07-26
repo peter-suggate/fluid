@@ -6,7 +6,7 @@ import {
 } from "../lib/webgpu-octree-fine-levelset-summary";
 import {
   WebGPUFineLevelSetTransport,
-  fineLevelSetFusedTransportPublicationWGSL,
+  structuredFineLevelSetTransportWGSL,
 } from "../lib/webgpu-octree-fine-levelset-transport";
 import {
   WebGPUFineLevelSetVolumeCorrection,
@@ -34,38 +34,25 @@ import {
   octreePowerDescriptorShader,
 } from "../lib/webgpu-octree-power-descriptor";
 import {
-  WebGPUOctreePowerFaces,
-  octreePowerBoundaryCoarsePhiShader,
-  octreePowerBoundaryPhiShader,
-  octreePowerFaceShader,
-} from "../lib/webgpu-octree-power-faces";
+  WebGPUDirectStructuredVelocityAuthority,
+  directStructuredVelocityPublicationWGSL,
+} from "../lib/webgpu-octree-structured-velocity-gpu";
 import {
-  makePowerVelocityPrepassBuilderWGSL,
-  powerVelocityFusedAuthorityWGSL,
-} from "../lib/webgpu-octree-power-velocity-prepass";
+  WebGPUStructuredBoundaryCoefficients,
+  structuredBoundaryCoefficientWGSL,
+} from "../lib/webgpu-octree-structured-boundary";
 import {
-  octreePowerVelocityPrepareFromFaceControlShader,
-  octreePowerVelocityPublishShader,
-  octreePowerVelocityShader,
-} from "../lib/webgpu-octree-power-velocity";
+  WebGPUStructuredVelocityDynamics,
+  structuredVelocityDynamicsWGSL,
+} from "../lib/webgpu-octree-structured-dynamics";
 import {
   WebGPUOctreeSPGridVCycle,
-  octreeSPGridPersistentMGPCGShader,
   octreeSPGridVCycleShader,
 } from "../lib/webgpu-octree-spgrid-vcycle";
 import {
   WebGPUOctreePowerTopology,
   octreePowerTopologyShader,
 } from "../lib/webgpu-octree-power-topology";
-import {
-  WebGPUOctreePowerOperator,
-  octreePowerOperatorShader,
-} from "../lib/webgpu-octree-power-operator";
-import {
-  octreePowerSolidExchangeShader,
-  octreePowerSolidFaceShader,
-  octreePowerSolidImpulseShader,
-} from "../lib/webgpu-octree-power-solid-faces";
 import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
 
 interface WgslGraph {
@@ -148,33 +135,23 @@ function allComputeEntries(source: string): string[] {
   return [...parseWgslGraph(source).computeEntries].sort();
 }
 
-test("recurring Power Liquids publication entry graphs contain no synchronization atomics", () => {
+test("recurring Power Liquids entry graphs contain only reviewed transaction atomics", () => {
   const allEntries = (name: string, source: string) => ({ name, source, entries: allComputeEntries(source) });
   const recurringGraphs = [
     allEntries("deterministic owner-page lifecycle", octreeDeterministicOwnerPageLifecycleShader),
     allEntries("power descriptors", octreePowerDescriptorShader),
     allEntries("power topology", octreePowerTopologyShader),
-    allEntries("power operator", octreePowerOperatorShader),
-    allEntries("power faces", octreePowerFaceShader),
-    allEntries("power solid face classification", octreePowerSolidFaceShader),
-    allEntries("power solid pressure reaction", octreePowerSolidImpulseShader),
-    allEntries("power solid rigid exchange", octreePowerSolidExchangeShader),
-    allEntries("fine boundary phi", octreePowerBoundaryPhiShader),
-    allEntries("coarse boundary phi", octreePowerBoundaryCoarsePhiShader),
+    allEntries("direct structured velocity publication", directStructuredVelocityPublicationWGSL),
+    allEntries("structured boundary coefficients", structuredBoundaryCoefficientWGSL),
+    allEntries("structured velocity dynamics", structuredVelocityDynamicsWGSL),
     allEntries("coarse level set", octreePowerCoarseLevelSetShader),
-    allEntries("power velocity", octreePowerVelocityShader),
-    allEntries("power velocity face-control preparation", octreePowerVelocityPrepareFromFaceControlShader),
-    allEntries("power velocity publication", octreePowerVelocityPublishShader),
-    allEntries("fused power velocity authority", powerVelocityFusedAuthorityWGSL),
-    allEntries("direct power velocity sampler", makePowerVelocityPrepassBuilderWGSL()),
-    allEntries("fused fine transport publication", fineLevelSetFusedTransportPublicationWGSL),
+    allEntries("structured fine transport publication", structuredFineLevelSetTransportWGSL),
     allEntries("fine volume correction", fineLevelSetVolumeCorrectionWGSL),
     allEntries("fine level-set summaries", fineLevelSetSummaryWGSL),
     allEntries("fine-to-coarse level-set restriction", fineToCoarseLevelSetWGSL),
     allEntries("fine-seed dense residency publication", fineSeedCandidateResidencyShader),
     allEntries("fine-seed sparse residency publication", sparseFineSeedCandidateResidencyShader),
     allEntries("fine-seed residency commit", fineSeedCandidateCommitShader),
-    allEntries("persistent small-domain MGPCG", octreeSPGridPersistentMGPCGShader),
     {
       name: "SPGrid recurring structural publication",
       source: octreeSPGridVCycleShader,
@@ -193,6 +170,26 @@ test("recurring Power Liquids publication entry graphs contain no synchronizatio
     const expected = graph.name === "fine-seed dense residency publication"
       ? ["commitCandidateGeneration", "markFineSeedCandidateResidency", "markTileRing", "prepareFineSeedCandidateResidency",
         "publishFineSeedCandidateResidency", "recordDenseError", "resolveFineSeedCandidateResidency"]
+      : graph.name === "direct structured velocity publication"
+        ? ["acceptStructuredPublication", "beginStructuredPublication", "fail", "finalizeStructuredPublication",
+          "publishSection63Rows", "reconstructStructuredCellVelocity", "scatterStructuredFamilySlots"]
+      : graph.name === "structured boundary coefficients"
+        ? ["acceptStructuredBoundary", "commitStructuredBoundarySlots", "fail", "publishStructuredBoundarySetup",
+          "publishStructuredBoundaryWorksets", "rebuildStructuredBoundaryRows", "resolveStructuredBoundarySlots",
+          "resolveStructuredSolidSlots"]
+      : graph.name === "structured velocity dynamics"
+        ? ["acc", "rejectSample", "rejectVector"]
+      : graph.name === "fine level-set summaries"
+        ? ["addFineBase", "addFineSummaryPages", "changedKey", "coarseEntryAt", "dirLoad", "dirStore",
+          "ensureDirectoryPage", "ensureFineSummaryCoarseDirectoryPages", "ensureFineSummaryCoarseRanks",
+          "ensureFineSummaryDirectoryPages", "ensureFineSummaryRanks", "ensureRank", "popDirectoryPage",
+          "popRank", "prepareFineSummaryDirect", "prepareFineSummaryPageReclamation",
+          "prepareFineSummaryRecompute",
+          "publishFineSummaryCoarseRows", "publishFineSummaryDirect",
+          "reclaimFineSummaryDirectoryPages", "recomputeFineSummaryBase", "recomputeFineSummaryParents",
+          "releaseKey", "removeFineBase",
+          "removeFineSummaryPages", "retireFineSummaryCoarse", "setError", "validateFineSummaryCoarse",
+          "validateFineSummaryDelta", "writeDispatch"]
       : [];
     assert.deepEqual(
       reachableAtomicFunctions(graph.source, graph.entries),
@@ -203,30 +200,31 @@ test("recurring Power Liquids publication entry graphs contain no synchronizatio
 });
 
 test("the atomic gate distinguishes recurring SPGrid publication from setup diagnostics", () => {
-  const setupAndDiagnosticEntries = [
-    "validateCandidateHierarchy",
-    "finalizeLifecycle",
-  ] as const;
-  for (const entryPoint of setupAndDiagnosticEntries) {
-    assert.ok(
-      reachableAtomicFunctions(octreeSPGridVCycleShader, [entryPoint]).length > 0,
-      `${entryPoint} must demonstrate that the gate follows entry-point reachability`,
-    );
-  }
+  assert.deepEqual(reachableAtomicFunctions(octreeSPGridVCycleShader,
+    ["validateCandidateHierarchy"]), [],
+  "the serialized candidate validator uses its private non-atomic transaction report");
+  assert.ok(reachableAtomicFunctions(octreeSPGridVCycleShader,
+    ["finalizeLifecycle"]).length > 0,
+  "the accepted lifecycle diagnostic still demonstrates entry-point atomic reachability");
 });
 
-test("fine-summary builder publishes an exact indirect extent for parallel sorting", () => {
-  const prepare = parseWgslGraph(fineLevelSetSummaryWGSL).functions.get("prepareFineSummaryDelta");
-  const tiles = parseWgslGraph(fineLevelSetSummaryWGSL).functions.get("sortFineSummaryTiles");
-  assert.notEqual(prepare, undefined); assert.notEqual(tiles, undefined);
+test("fine-summary builder publishes one exact indirect extent for the rank-indexed mip", () => {
+  const graph = parseWgslGraph(fineLevelSetSummaryWGSL);
+  const prepare = graph.functions.get("prepareFineSummaryRecompute");
+  assert.notEqual(prepare, undefined);
   assert.match(prepare!,
-    /workState\[3\]=count;workState\[4\]=padded[\s\S]*publishSortDispatch\(padded\)/,
-    "the serial transaction decision publishes both the exact record and padded sort extents");
-  assert.match(tiles!,
-    /sortTile\[lid\][\s\S]*for\(var width=2u;width<=256u;width<<=1u\)[\s\S]*workgroupBarrier/,
-    "each indirectly dispatched tile has a fixed, workgroup-uniform shared-memory sort network");
-  assert.match(tiles!, /for\(var width=2u;width<=256u/,
-    "tile barrier reachability is controlled only by a compile-time workgroup width");
+    /writeDispatch\(28u,select\(0u,atomicLoad\(&state\[7\]\),atomicLoad\(&state\[0\]\)==0u\),1u\)/,
+    "the transaction publishes one workgroup per allocated active-mip rank and zero work on rejection");
+  for (const retired of ["prepareFineSummaryDelta", "sortFineSummaryTiles", "mergeFineSummary",
+    "recordLowerBound", "committedFineAt"]) {
+    assert.equal(graph.functions.has(retired), false, `${retired} must stay deleted from the recurring summary graph`);
+  }
+  const encode = WebGPUFineLevelSetSummaries.prototype.encode.toString();
+  assert.match(encode, /updateIndirectBuffer\(this\.workState,\s*28\s*\*\s*4,\s*this\.indirect,\s*36,\s*12\)/,
+    "the active-rank dispatch must be copied once into the immutable indirect arena");
+  assert.match(encode,
+    /indirect\("recomputeFineSummaryBase"[\s\S]*for\s*\(let level\s*=\s*1;level\s*<=\s*this\.plan\.maximumLevel[\s\S]*indirect\("recomputeFineSummaryParents"/,
+    "the base and every parent mip level must share the exact active-rank extent");
 });
 
 test("coarse-phi delta commit broadcasts authority and bounds before every barrier", () => {
@@ -275,20 +273,17 @@ test("recurring host encoders add no CPU readback, queue submission, or host fen
   const methods: readonly [string, Function][] = [
     ["octree projection encode", prototypeMethod(WebGPUOctreeProjection, "encode")],
     ["octree projection surface encode", prototypeMethod(WebGPUOctreeProjection, "encodeSurface")],
-    ["octree projection inline rebuild", prototypeMethod(WebGPUOctreeProjection, "encodeInlineRebuild")],
-    ["octree projection inline rebuild completion", prototypeMethod(WebGPUOctreeProjection, "finishInlineRebuild")],
-    ["Section 5 face-band encode", prototypeMethod(WebGPUOctreeProjection, "encodeGlobalFineFaceBand")],
-    ["Section 5 face-band phase", prototypeMethod(WebGPUOctreeProjection, "encodeGlobalFineFaceBandPhase")],
-    ["native power assembly", prototypeMethod(WebGPUOctreeProjection, "encodeNativePowerAssembly")],
-    ["native power projection", prototypeMethod(WebGPUOctreeProjection, "encodeNativePowerProjection")],
-    ["power velocity publication", prototypeMethod(WebGPUOctreeProjection, "encodePowerVelocityPublication")],
+    ["octree inactive topology candidate", prototypeMethod(WebGPUOctreeProjection, "encodeInactiveTopologyCandidate")],
+    ["octree topology epoch flip", prototypeMethod(WebGPUOctreeProjection, "encodeReadyTopologyFlip")],
+    ["octree topology candidate completion", prototypeMethod(WebGPUOctreeProjection, "finishTopologyCandidate")],
+    ["direct structured publication", prototypeMethod(WebGPUDirectStructuredVelocityAuthority, "encode")],
+    ["structured boundary coefficients", prototypeMethod(WebGPUStructuredBoundaryCoefficients, "encode")],
+    ["structured velocity dynamics", prototypeMethod(WebGPUStructuredVelocityDynamics, "encodeAdvection")],
     ["frontier-row publication", prototypeMethod(WebGPUOctreeProjection, "encodeFrontierRows")],
-    ["owner-page publication", prototypeMethod(WebGPUOctreeSimulationOwnerPages, "encode")],
+    ["inactive owner-page preparation", prototypeMethod(WebGPUOctreeSimulationOwnerPages, "encodeInactiveCandidate")],
+    ["ready owner-page commit", prototypeMethod(WebGPUOctreeSimulationOwnerPages, "encodeReadyCommit")],
     ["power descriptor publication", prototypeMethod(WebGPUOctreePowerDescriptor, "encode")],
     ["power topology publication", prototypeMethod(WebGPUOctreePowerTopology, "encode")],
-    ["power operator assembly", prototypeMethod(WebGPUOctreePowerOperator, "encodeAssemblyFromControl")],
-    ["power operator projection", prototypeMethod(WebGPUOctreePowerOperator, "encodeProjectionFromControl")],
-    ["power face publication", prototypeMethod(WebGPUOctreePowerFaces, "encode")],
     ["coarse level-set publication", prototypeMethod(WebGPUOctreePowerCoarseLevelSet, "encode")],
     ["SPGrid capture", prototypeMethod(WebGPUOctreeSPGridVCycle, "encodeCapture")],
     ["SPGrid setup", prototypeMethod(WebGPUOctreeSPGridVCycle, "encodeSetup")],

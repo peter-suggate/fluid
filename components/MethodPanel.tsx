@@ -88,10 +88,6 @@ export function MethodPanel() {
         <strong>{gpuInfo.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo.quadtreePressureIterationBudget ?? "—"}</strong>
         <span>PCG iterations executed / cap · {gpuInfo.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo.quadtreePressureConverged ? "converged" : "cap exhausted"} · {gpuInfo.quadtreeMultigridLevelCount ?? "—"} pyramid levels · {gpuInfo.quadtreeMultigridCoarsestDofs ?? "—"} coarse DOFs</span>
       </div>}
-      {methodId === "octree" && gpuInfo?.pressureSolver?.includes("fixed native-L2 Galerkin") && <div className="grid-readout" title="Fixed-hierarchy native-L2 solve work; a rejected solve is never handed to another solver">
-        <strong>{gpuInfo.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo.quadtreePressureIterationBudget ?? "—"}</strong>
-        <span>Galerkin V-cycles executed / fixed cap · {gpuInfo.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo.quadtreePressureConverged ? "converged" : "publication rejected"} · no fallback</span>
-      </div>}
       {fine.length > 0 && <details className="advanced-params">
         <summary>Advanced</summary>
         {fine.map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}

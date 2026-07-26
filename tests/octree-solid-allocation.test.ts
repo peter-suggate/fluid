@@ -36,7 +36,7 @@ test("solid-free topology and publication never index beyond the fallback", () =
 test("compact surface authority deletes the topology phi snapshot binding and backing code", () => {
   assert.match(octreeSource,
     /allocatedBytes: this\.ownerPages\.allocatedBytes \+ this\.solidCells\.size\s*\+ surfaceStateAllocation\.allocatedBytes/);
-  assert.match(octreeSource, /if \(active && !analyticColdBootstrap\) \{[\s\S]*Build exact compact topology-tile delta/,
+  assert.match(octreeSource, /if \(active && !analyticColdBootstrap\) \{[\s\S]*Build exact structural topology-tile delta/,
     "paged power authority must always consume its compact generation-tagged delta");
   assert.doesNotMatch(octreeSource, /changeDrivenEligible/,
     "compact authority must not retain a recurring full-list selector");

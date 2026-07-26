@@ -4,27 +4,7 @@ import test from "node:test";
 import {
   compactLiquidVelocityDiagnostic,
   compactMechanicalEnergyDiagnostic,
-  compactPowerFaceIntegratedFlux,
-  compactPowerFaceMetricKineticEnergy,
 } from "../tools/webgpu-smoke-power-diagnostics";
-
-test("compact projected flux uses the already aperture-weighted face velocity", () => {
-  assert.equal(compactPowerFaceIntegratedFlux(3, 2), 6);
-
-  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  assert.match(smoke, /compactPowerFaceIntegratedFlux\(area, normalVelocity\)/);
-  assert.doesNotMatch(smoke, /const flux = area \* openFraction \* normalVelocity/,
-    "the compact residual must not apply the solid aperture twice");
-});
-
-test("compact projection-energy proxy uses the pressure operator's dual metric", () => {
-  // H = area / (openFraction * inverseDistance), and E = 1/2 u^T H u.
-  assert.equal(compactPowerFaceMetricKineticEnergy(4, 0.5, 0.25, 3), 144);
-  assert.equal(compactPowerFaceMetricKineticEnergy(4, 0.5, 0, 3), 0,
-    "fully constrained faces are outside the projected velocity space");
-  assert.ok(Number.isNaN(compactPowerFaceMetricKineticEnergy(4, 0, 1, 3)));
-  assert.ok(Number.isNaN(compactPowerFaceMetricKineticEnergy(4, 0.5, 1.1, 3)));
-});
 
 test("compact mechanical-energy diagnostic measures potential-to-kinetic conversion and loss", () => {
   assert.deepEqual(compactMechanicalEnergyDiagnostic(10, 7, 2), {
@@ -46,37 +26,54 @@ test("compact mechanical-energy diagnostic measures potential-to-kinetic convers
     "checkpoint QA must derive energy from the authoritative compact velocity publication");
 });
 
-test("compact velocity energy ignores deliberately uncovered air but fails visible liquid gaps", () => {
-  const clean = compactLiquidVelocityDiagnostic([3, 4, 0, NaN, NaN, NaN], [0.5, 0], 2);
+test("compact velocity energy ignores unrepresented cells but fails partial row corruption", () => {
+  const clean = compactLiquidVelocityDiagnostic(
+    [3, 4, 0, NaN, NaN, NaN], [0.5, 0], 2, [2, 4, 8], 0.5,
+  );
   assert.deepEqual(clean, { kineticEnergyProxy: 12.5, liquidCellCount: 1, finiteLiquidCellCount: 1,
     liquidVolumeCellSum: 0.5, finiteLiquidVolumeCellSum: 0.5,
-    nonFiniteLiquidComponentCount: 0, maximumLiquidComponentSpeed_m_s: 4 });
-  const gap = compactLiquidVelocityDiagnostic([3, 4, 0, NaN, NaN, NaN], [0.5, 0.25], 2);
-  assert.equal(gap.liquidCellCount, 2);
-  assert.equal(gap.finiteLiquidCellCount, 1);
-  assert.equal(gap.nonFiniteLiquidComponentCount, 3);
+    nonFiniteLiquidComponentCount: 0, maximumLiquidComponentSpeed_m_s: 4,
+    maximumLiquidComponentCfl: 0.75 });
+  const uncovered = compactLiquidVelocityDiagnostic(
+    [3, 4, 0, NaN, NaN, NaN], [0.5, 0.25], 2, [2, 4, 8], 0.5,
+  );
+  assert.equal(uncovered.liquidCellCount, 1);
+  assert.equal(uncovered.finiteLiquidCellCount, 1);
+  assert.equal(uncovered.nonFiniteLiquidComponentCount, 0);
+  const corrupt = compactLiquidVelocityDiagnostic(
+    [3, 4, 0, 2, NaN, 0], [0.5, 0.25], 2, [2, 4, 8], 0.5,
+  );
+  assert.equal(corrupt.liquidCellCount, 2);
+  assert.equal(corrupt.finiteLiquidCellCount, 1);
+  assert.equal(corrupt.nonFiniteLiquidComponentCount, 1);
+  assert.throws(() => compactLiquidVelocityDiagnostic([0, 0, 0], [1], 1, [1, 0, 1], 0.1),
+    /dimensions are inconsistent/);
+});
+
+test("exact octree QA reuses compact GPU velocity evidence for speed and CFL", () => {
+  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  assert.match(smoke,
+    /compactLiquidVelocityDiagnostic\(compact\.field, cubic\.field,[\s\S]*?\[spacing\.x, spacing\.y, spacing\.z\], stepDt\)/,
+    "component CFL must retain axis-specific fine spacing");
+  assert.match(smoke,
+    /checkpoints\.findLast[\s\S]*?info\.maxSpeed_m_s = compactVelocity\.maximumLiquidComponentSpeed_m_s;[\s\S]*?info\.maxComponentCfl = compactVelocity\.maximumLiquidComponentCfl;/,
+    "the exact gate must consume already-read compact GPU QA evidence");
 });
 
 test("2017 pressure comments do not attribute ICCG or the QA tolerance to the paper", () => {
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
   const pressure = readFileSync(new URL("../tools/webgpu-smoke-pressure.ts", import.meta.url), "utf8");
   assert.doesNotMatch(smoke, /paper example uses ICCG|paper.*relative residual\s+1e-4/i);
-  assert.match(smoke, /float32 QA relative-residual limit 1e-4/);
-  assert.match(smoke, /Eq\. \(3\)-form projected residual[\s\S]*1e-6 QA gate/);
+  assert.match(smoke, /1e-4 relative-residual limit is this regression's float32 QA/);
+  assert.match(smoke, /projected residual[\s\S]*exceeds 1e-6/);
   assert.doesNotMatch(pressure, /Paper-result acceptance|ICCG\/PCG solves use a 1e-4/);
   assert.match(pressure, /2017 paper reports iteration counts, not this tolerance/);
 });
 
-test("power-stage audit exposes only native seed and acceleration diagnostics", () => {
+test("structured-stage audit exposes only accepted velocity, boundary, and fine generations", () => {
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  assert.match(smoke, /postAccelerationPowerFaceMaximum:\s*floatBits\(seed\[8\]\)/);
-  assert.match(smoke, /initialSeedFlags:\s*seed\[12\]/);
-  assert.match(smoke, /initialSeedFirstError:\s*seed\[13\]/);
-  assert.match(smoke, /initialSeededCount:\s*seed\[14\]/);
-  assert.match(smoke, /initialSeedValid:\s*seed\[15\]/);
-  assert.match(smoke, /postAccelerationFlags:\s*seed\[0\]/);
-  assert.match(smoke, /postAccelerationValid:\s*seed\[6\]/);
-  assert.doesNotMatch(smoke,
-    /axisRowInputMaximum|axisToPowerSeedMaximum|projectedRowMaximum|powerToAxisOutputMaximum|reverseFlags|reverseValid/,
-    "padding and deleted Cartesian transfer stages must not reappear as public diagnostics");
+  assert.match(smoke, /unpackStructuredVelocityControl/);
+  assert.match(smoke, /unpackStructuredBoundaryControl/);
+  assert.match(smoke, /exactStructuredGenerationAuditFailures/);
+  assert.doesNotMatch(smoke, /powerFaceControl|globalFinePowerVelocityControl|globalFineFaceBandControl/);
 });

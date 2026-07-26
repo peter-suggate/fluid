@@ -37,10 +37,9 @@ test("renderer presentation source reaches the diagnostics store and panel with 
   assert.match(panel, /presentation fallback only · solver authority unchanged/);
   assert.match(panel, /pressureSolver\?\.includes\("Section 4\.3 hybrid"\)/);
   assert.match(panel, /POWER \+ SECTION 4\.3/,
-    "the separately selected paper solver must not be mislabeled as Chebyshev");
-  assert.match(panel, /pressureSolver\?\.includes\("fixed native-L2 Galerkin"\)/);
-  assert.match(panel, /POWER \+ FIXED GALERKIN/,
-    "the default fixed hierarchy must be visible as its own pressure authority");
+    "the sole production paper solver must be visible");
+  assert.doesNotMatch(panel, /Galerkin|POWER \+ CHEBYSHEV/,
+    "retired pressure authorities must not remain selectable or labeled");
   assert.match(panel, /authoritative global-fine field/);
   assert.match(panel, /unavailable — no authoritative field published/);
   assert.match(panel, /frontTelemetrySource/);

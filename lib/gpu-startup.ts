@@ -50,6 +50,8 @@ export interface SafeBrowserGPUBringupConfig {
   readonly diagnosticsOpen: boolean;
   readonly rightPanel: string | null;
   readonly gridOverlayAxis: string;
+  /** Armed WYSIWYG editor tool; authoring gestures mutate the pinned workload. */
+  readonly activeTool: string;
   readonly search: string;
 }
 
@@ -80,6 +82,7 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     config.diagnosticsOpen && "diagnostics panel must remain closed",
     config.rightPanel !== null && "all right-side panels must remain closed",
     config.gridOverlayAxis !== "off" && "grid overlays must remain off",
+    config.activeTool !== "select" && "editor tools must remain on select",
     unapprovedQueryKeys.length > 0 && `unapproved safe-mode query flags: ${unapprovedQueryKeys.join(", ")}`,
     query.get("gpuRecovery") === "1" && "automatic GPU recovery must be off",
   ].filter((value): value is string => typeof value === "string");
@@ -160,6 +163,21 @@ export function performanceTraceDeviceFeatures(
   features: { has(feature: string): boolean },
 ): GPUFeatureName[] {
   return features.has("timestamp-query") ? ["timestamp-query"] : [];
+}
+
+/**
+ * Request target execution features only when the adapter advertises them.
+ * The production octree solver separately rejects devices without subgroups;
+ * this function never asks WebGPU for an unsupported feature.
+ */
+export function fluidExecutionDeviceFeatures(
+  features: { has(feature: string): boolean },
+): GPUFeatureName[] {
+  const requested = performanceTraceDeviceFeatures(features);
+  for (const feature of ["shader-f16", "subgroups"] as const) {
+    if (features.has(feature)) requested.push(feature as GPUFeatureName);
+  }
+  return requested;
 }
 
 export const GPU_MANUAL_START_EVENT = "fluid-lab:start-gpu";

@@ -12,13 +12,17 @@ test("dynamic solid occupancy emits compact old/new transform bounds", () => {
   assert.match(octreeProjectionShader,
     /if \(body < previousBodies\) \{ appendRigidBounds\(snapshotRigidBody\(body\)[\s\S]*if \(body < currentBodies\) \{ appendRigidBounds\(rigidBodies\[body\]/,
     "a changed body must dirty both its old and new compact bounds");
-  assert.doesNotMatch(octreeProjectionShader,
-    /dynamicSolidOccupancyChanged|for \(var flat[\s\S]*currentSolidAt/,
+  assert.doesNotMatch(octreeProjectionShader, /dynamicSolidOccupancyChanged/);
+  const dirtyBuilder = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn buildDirtyTileDelta"),
+    octreeProjectionShader.indexOf("fn rasterizeSolidsAt"),
+  );
+  assert.doesNotMatch(dirtyBuilder, /for \(var flat|currentSolidAt/,
     "recurring solid dirtiness must not rescan cells");
 });
 
 test("the exact dirty 1-ring owns recurring solid rasterization", () => {
-  const rebuild = WebGPUOctreeProjection.prototype.encodeInlineRebuild.toString().replace(/\s+/g, "");
+  const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString().replace(/\s+/g, "");
   assert.match(rebuild,
     /mark\.setPipeline\(this\.buildDirtyTileDeltaPipeline\).*if\(this\.hasDenseSolidCells\)\{dispatch\(this\.rasterizeSolidsPipeline,this\.rasterizeSolidsDeltaPipeline\)/,
     "compact transform bounds must precede exact dirty-tile rasterization");
@@ -29,7 +33,7 @@ test("the exact dirty 1-ring owns recurring solid rasterization", () => {
     /fn appendDirtyTile\([\s\S]*tileChangeFlagsBase\(\) \+ tileIndex/,
     "one generation stamp must deduplicate page, retirement, and rigid-body evidence");
   assert.match(source,
-    /const dispatch = \(full: GPUComputePipeline, delta: GPUComputePipeline\)[\s\S]*if \(active\) pass\.dispatchWorkgroupsIndirect\(this\.solveDispatch, 0\);[\s\S]*else pass\.dispatchWorkgroups\(\.\.\.this\.workgroups\)/,
+    /const dispatch = \(full: GPUComputePipeline, delta: GPUComputePipeline\)[\s\S]*if \(active\) pass\.dispatchWorkgroupsIndirect\(this\.solveDispatch, 0\);[\s\S]*else pass\.dispatchWorkgroupsIndirect\(this\.coldDispatch, 0\)/,
     "full-domain solid rasterization is cold-only, not a recurring fallback");
 });
 

@@ -255,7 +255,7 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     /fineTopologyControl\[0\]==0u&&fineTopologyControl\[4\]==1u&&fineTopologyControl\[5\]==0u&&fineTopologyControl\[7\]==0u/,
     "global publication requires a clean current-slot transaction");
   assert.match(globalFineSurfaceClassificationShader,
-    /fineWorklist\[2\]==\(count\+63u\)\/64u&&fineWorklist\[3\]==1u&&fineWorklist\[4\]==1u/,
+    /fineWorklist\[2\]==params\.table\.z&&\(fineWorklist\[3\]&3u\)==3u[\s\S]*fineWorklist\[4\]==\(count\+63u\)\/64u&&fineWorklist\[5\]==1u&&fineWorklist\[6\]==1u/,
     "global publication requires the selected fine worklist to be complete and published");
   assert.match(globalFineSurfaceClassificationShader,
     /\(powerCoarseSamples\.generation&0x3fffffffu\)==generation/,
@@ -402,7 +402,7 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
   for (const factor of [4, 8] as const satisfies readonly FineLevelSetFactor[]) {
     const plan = planFineLevelSetBricks({
       domainOrigin: [0, 0, 0], finestCellDimensions: [2, 2, 2], finestCellWidth: 1,
-      fineFactor: factor, brickResolution: factor, maximumResidentBricks: 8,
+      fineFactor: factor, brickResolution: 4, maximumResidentBricks: 8,
     });
     const oracle = new FineLevelSetBrickOracle(plan);
     oracle.publishInterfaceAndRing([packFineLevelSetBrickKey(plan, [0, 0, 0])], ([, y]) => (y - 0.75) * plan.fineCellWidth);
@@ -423,7 +423,7 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
     const paramU32 = new Uint32Array(renderParamBytes), paramF32 = new Float32Array(renderParamBytes);
     paramU32.set([...source.sampleDimensions, source.brickResolution], 0);
     paramU32.set([...source.brickDimensions, source.samplesPerBrick], 4);
-    paramU32.set([source.pageCapacity, 5, source.pageCapacity, source.generation], 8);
+    paramU32.set([source.pageCapacity, 7, source.pageCapacity, source.generation], 8);
     paramF32.set([...source.domainOrigin, source.fineCellWidth], 12); paramF32[16] = source.fineFactor;
     const renderParams = initializedBuffer(device, new Uint8Array(renderParamBytes), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     const volume = device.createTexture({

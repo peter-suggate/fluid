@@ -12,40 +12,29 @@ import {
 } from "../lib/webgpu-water-pipeline";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
 import {
-  octreeTechniqueFaceShader,
   octreeTechniqueFineLifecycleShader,
   octreeTechniqueLifecycleShader,
-  octreeTechniqueSection5FaceBandShader,
   octreeTechniqueTopologyShader,
 } from "../lib/webgpu-octree-technique-overlay";
-import { octreeTechniqueOperatorAuditShader, octreeTechniqueTetraValidityShader } from "../lib/webgpu-octree-technique-audit-overlay";
-import { secondaryParticleComputeShader, secondaryParticleCorrectionShader, secondaryParticleOpticalShader } from "../lib/webgpu-secondary-particles";
+import { octreeTechniqueTetraValidityShader } from "../lib/webgpu-octree-technique-audit-overlay";
+import { secondaryParticleComputeShader, secondaryParticleOpticalShader } from "../lib/webgpu-secondary-particles";
 import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
 import { octreeProjectionShader } from "../lib/webgpu-octree";
-import { octreeMGPCGShader } from "../lib/webgpu-octree-mgpcg";
-import { octreeSPGridPersistentMGPCGShader, octreeSPGridVCycleShader } from "../lib/webgpu-octree-spgrid-vcycle";
-import { octreeFaceBandFusedAuthorityWGSL, octreeFaceBandWGSL } from "../lib/webgpu-octree-face-closest-point";
-import { powerVelocityFusedAuthorityWGSL } from "../lib/webgpu-octree-power-velocity-prepass";
-import {
-  octreePowerVelocityPrepareFromFaceControlShader,
-  octreePowerVelocityShader,
-} from "../lib/webgpu-octree-power-velocity";
+import { octreeSPGridAccurateDispatchGateShader, octreeSPGridAccurateOperatorShader,
+  octreeSPGridVCycleShader } from "../lib/webgpu-octree-spgrid-vcycle";
+import { directStructuredVelocityPublicationWGSL } from "../lib/webgpu-octree-structured-velocity-gpu";
+import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
+import { structuredVelocityDynamicsWGSL } from "../lib/webgpu-octree-structured-dynamics";
+import { octreeSection43HybridPreconditionerShader } from "../lib/webgpu-octree-section43-preconditioner";
 import { octreeCoarsePhiBootstrapShader } from "../lib/webgpu-octree-coarse-levelset";
-import { octreeEnergyLedgerWGSL } from "../lib/webgpu-octree-energy-ledger";
 import { octreePowerCoarseLevelSetShader } from "../lib/webgpu-octree-power-coarse-levelset";
 import { octreePowerDescriptorShader } from "../lib/webgpu-octree-power-descriptor";
-import { octreePowerBoundaryPhiShader, octreePowerFaceShader } from "../lib/webgpu-octree-power-faces";
-import {
-  octreePowerSolidExchangeShader,
-  octreePowerSolidFaceShader,
-  octreePowerSolidImpulseShader,
-} from "../lib/webgpu-octree-power-solid-faces";
 import { octreePowerTopologyShader } from "../lib/webgpu-octree-power-topology";
-import { octreePowerOperatorShader } from "../lib/webgpu-octree-power-operator";
 import { octreeSolidVertexSdfShader } from "../lib/webgpu-octree-solid-vertex-sdf";
 import { octreeAnalyticBootstrapWorklistShader } from "../lib/webgpu-octree-analytic-bootstrap";
 import { octreeDeterministicOwnerPageLifecycleShader } from "../lib/webgpu-octree-owner-pages";
+import { octreeTopologyEpochWGSL } from "../lib/webgpu-octree-topology-epoch";
 import {
   sparseFineSeedCandidateResidencyShader,
   fineSeedCandidateCommitShader,
@@ -58,12 +47,13 @@ import { svoThickGlassWGSL } from "../lib/svo-thick-glass";
 import { sparseVoxelTemporalAccumulatorShader } from "../lib/webgpu-svo-temporal-accumulator";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
-import { fineLevelSetFusedTransportPublicationWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
+import { structuredFineLevelSetTransportWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
 import { fineLevelSetVolumeCorrectionWGSL } from "../lib/webgpu-octree-fine-levelset-volume";
 import { fineLevelSetJFACPTWGSL } from "../lib/webgpu-octree-fine-levelset-redistance";
 import { fineLevelSetSummaryWGSL } from "../lib/webgpu-octree-fine-levelset-summary";
 import { makeFineLevelSetTopologyWGSL } from "../lib/webgpu-octree-fine-levelset-topology";
 import { globalFineSurfaceClassificationShader } from "../lib/webgpu-water-global-fine-classify";
+import { octreeAirVelocitySupportPublicationWGSL } from "../lib/webgpu-octree-air-velocity-support-gpu";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
@@ -72,7 +62,7 @@ const shaders = {
   "global-fine-classified-scan": globalFineClassifiedScanShader,
   ...Object.fromEntries(globalFineClassifiedEmitShaders.map((source, index) => [`global-fine-classified-tetra-${index}`, source])),
   "global-fine-classified-tetrahedra": globalFineClassifiedEmitShader,
-  "global-fine-transport-publication": fineLevelSetFusedTransportPublicationWGSL,
+  "global-fine-structured-transport": structuredFineLevelSetTransportWGSL,
   "global-fine-volume-correction": fineLevelSetVolumeCorrectionWGSL,
   "global-fine-jfa-cpt": fineLevelSetJFACPTWGSL,
   "global-fine-summary": fineLevelSetSummaryWGSL,
@@ -86,40 +76,30 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   composite: compositeShader,
   "grid-overlay": gridOverlayShader,
   "octree-technique-topology-overlay": octreeTechniqueTopologyShader,
-  "octree-technique-face-overlay": octreeTechniqueFaceShader,
-  "octree-technique-section5-face-band-overlay": octreeTechniqueSection5FaceBandShader,
   "octree-technique-lifecycle-overlay": octreeTechniqueLifecycleShader,
   "octree-technique-fine-lifecycle-overlay": octreeTechniqueFineLifecycleShader,
-  "octree-technique-operator-audit-overlay": octreeTechniqueOperatorAuditShader,
   "octree-technique-tetra-validity-overlay": octreeTechniqueTetraValidityShader,
   "secondary-liquid-particle-optics": secondaryParticleOpticalShader,
   "secondary-liquid-particle-compute": secondaryParticleComputeShader,
-  "secondary-liquid-particle-correction": secondaryParticleCorrectionShader,
   "sparse-brick-dense-field": sparseBrickDenseFieldShader,
   "sparse-brick-debug-publication": octreeSparseBrickDebugPublicationShader,
   "octree-projection": octreeProjectionShader,
-  "octree-pcg-section43-hybrid": octreeMGPCGShader,
   "octree-spgrid-vcycle": octreeSPGridVCycleShader,
-  "octree-spgrid-persistent-mgpcg": octreeSPGridPersistentMGPCGShader,
-  "octree-face-band-closest-point": octreeFaceBandWGSL,
-  "octree-face-band-fused-authority": octreeFaceBandFusedAuthorityWGSL,
-  "octree-power-velocity-fused-authority": powerVelocityFusedAuthorityWGSL,
-  "octree-power-velocity-face-authority-gate": octreePowerVelocityPrepareFromFaceControlShader,
-  "octree-power-velocity-reconstruction": octreePowerVelocityShader,
+  "octree-section63-operator": octreeSPGridAccurateOperatorShader,
+  "octree-section63-dispatch-gate": octreeSPGridAccurateDispatchGateShader,
+  "octree-direct-structured-velocity": directStructuredVelocityPublicationWGSL,
+  "octree-structured-boundary": structuredBoundaryCoefficientWGSL,
+  "octree-structured-dynamics": structuredVelocityDynamicsWGSL,
+  "octree-air-velocity-support": octreeAirVelocitySupportPublicationWGSL,
+  "octree-section43-hybrid": octreeSection43HybridPreconditionerShader,
   "octree-coarse-level-set-bootstrap": octreeCoarsePhiBootstrapShader,
-  "octree-energy-ledger": octreeEnergyLedgerWGSL,
   "octree-power-coarse-level-set": octreePowerCoarseLevelSetShader,
   "octree-power-descriptor": octreePowerDescriptorShader,
-  "octree-power-faces": octreePowerFaceShader,
-  "octree-power-boundary-phi": octreePowerBoundaryPhiShader,
   "octree-power-topology": octreePowerTopologyShader,
-  "octree-power-operator": octreePowerOperatorShader,
   "octree-power-solid-vertex-sdf": octreeSolidVertexSdfShader,
-  "octree-power-solid-faces": octreePowerSolidFaceShader,
-  "octree-power-solid-impulses": octreePowerSolidImpulseShader,
-  "octree-power-solid-exchange": octreePowerSolidExchangeShader,
   "octree-analytic-bootstrap-worklist": octreeAnalyticBootstrapWorklistShader,
   "octree-owner-page-lifecycle": octreeDeterministicOwnerPageLifecycleShader,
+  "octree-coupled-topology-epoch": octreeTopologyEpochWGSL,
   "octree-fine-seed-candidate-residency": fineSeedCandidateResidencyShader,
   "octree-sparse-fine-seed-candidate-residency": sparseFineSeedCandidateResidencyShader,
   "octree-fine-seed-candidate-commit": fineSeedCandidateCommitShader,
