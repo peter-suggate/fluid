@@ -15,7 +15,7 @@ test("Section 4.3 row domain follows the accepted structured authority", () => {
     "the mutable candidate compaction count is not the accepted pressure-row ABI");
 });
 
-test("Section 4.3 hybrid publishes the shell once and schedules one persistent correction", () => {
+test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4.3 correction", () => {
   Object.assign(globalThis, {
     GPUBufferUsage: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8, INDIRECT: 16 },
   });
@@ -69,7 +69,7 @@ test("Section 4.3 hybrid publishes the shell once and schedules one persistent c
     },
     section63: { coefficients: buffer(2 * 64 * 19 * 4), control: buffer(32),
       topology: buffer(4), state: buffer(4), geometry: buffer(64 * 16),
-      metrics: buffer(64 * 16), layout: buffer(64), dispatch: buffer(12) },
+      metrics: buffer(64 * 16), layout: buffer(64) },
   }, {
     rowCapacity: 64,
   });
@@ -95,6 +95,15 @@ test("Section 4.3 hybrid publishes the shell once and schedules one persistent c
   };
   hybrid.encodeCorrection(broker, correction);
 
+  // Every band sweep consumes a precomputed L2 image of the state it reads, so
+  // the merged compact-band apply must immediately precede each smooth and
+  // target the same source. Sweep parity is the paper's alternating schedule.
+  const bandSweep = (fromB: boolean) =>
+    ["L2-band-merged", fromB ? "smoothBtoA" : "smoothAtoB"];
+  const preHalf = Array.from({ length: 7 },
+    (_unused, index) => bandSweep(((index + 1) & 1) === 1)).flat();
+  const postHalf = Array.from({ length: 8 },
+    (_unused, index) => bandSweep((index & 1) === 0)).flat();
   assert.deepEqual(order, [
     "resetBandWorksets",
     "prepareCorrectionDispatches",
@@ -105,13 +114,26 @@ test("Section 4.3 hybrid publishes the shell once and schedules one persistent c
     "compactBandIntersections",
     "finalizeBandWorksets",
     "L1-setup",
-    "persistentCorrection",
+    // §4.3(1) J^k(0, q) -> p1, leaving p1 in hybridA.
+    "prepareCorrectionDispatches",
+    "smoothZeroToB",
+    ...preHalf,
+    // §4.3(2) r1 = q - L2 p1 over every accepted row, then M1 r1.
+    "L2-apply",
+    "formInnerResidual",
+    "L1-correction",
+    // §4.3(3) p2 = p1 + M1 r1, then the matching k sweeps ending in hybridB.
+    "addInnerCorrection",
+    ...postHalf,
+    "publishCorrection",
   ]);
   assert.equal(hybrid.boundarySmoothingIterations, 8);
   assert.equal(hybrid.encodedSetupDispatchCount, 10);
-  assert.equal(hybrid.encodedPassTransitionCount, 2,
-    "setup retains only accepted-row and compact-band publication boundaries");
-  assert.equal(hybrid.encodedCorrectionDispatchCount, 1);
+  assert.equal(hybrid.encodedPassTransitionCount, 4,
+    "setup keeps two publication boundaries; correction adds its own gate and the L2 apply gate");
+  // Gate, four row stages, 15 band smooths, 15 merged band applies, one exact
+  // four-class L2 apply, and the inner page-parallel V-cycle.
+  assert.equal(hybrid.encodedCorrectionDispatchCount, 5 + 2 * 15 + 4 + 3);
   assert.equal(hybrid.workAccountingPlan.mergedBandApplies, 15);
   assert.equal(hybrid.workAccountingPlan.avoidedBandDispatches, 45);
   assert.equal(order.includes("L2-band-apply"), false,
@@ -169,6 +191,12 @@ test("Section 4.3 hybrid shader keeps a race-free zero sweep and shared shell op
   assert.match(octreeSection43HybridPreconditionerShader,
     /fn smoothBtoA[\s\S]*bandRow\(global\.x\)/,
     "repeated shell smooths dispatch only compact band rows");
+  assert.doesNotMatch(octreeSection43HybridPreconditionerShader,
+    /persistentCorrection|persistentArena|pSmoothLevel|pApplyM1/,
+    "the serial one-workgroup transcription must not remain a hidden alternate authority");
+  assert.doesNotMatch(octreeSection43HybridPreconditionerShader,
+    /fn finalizeBandWorksets[\s\S]*for \(var row/,
+    "band publication must not walk every accepted row from a single lane");
 });
 
 test("Dawn executes compact Section 4.3 band publication and shell bindings", {
@@ -214,8 +242,8 @@ test("Dawn executes compact Section 4.3 band publication and shell bindings", {
     secondOrderOperator: operator,
     section63: { coefficients: make(152, new Float32Array([1])), control: accepted,
       topology: make(4), state: make(4), geometry: make(16), metrics: make(16),
-      layout: make(64, new Uint32Array(16), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
-      dispatch: make(12) },
+      layout: make(64, new Uint32Array(16),
+        GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST) },
   }, { rowCapacity: 1,
   });
   const encoder = device.createCommandEncoder();

@@ -34,8 +34,7 @@ type HybridStage =
   | "smoothAtoB"
   | "formInnerResidual"
   | "addInnerCorrection"
-  | "publishCorrection"
-  | "persistentCorrection";
+  | "publishCorrection";
 
 const HYBRID_BINDINGS: Readonly<Record<HybridStage, readonly number[]>> = Object.freeze({
   resetBandWorksets: [0, 12, 15, 16, 17],
@@ -43,7 +42,7 @@ const HYBRID_BINDINGS: Readonly<Record<HybridStage, readonly number[]>> = Object
   dilateBandAtoB: [0, 1, 2, 10, 11, 12, 13, 17, 21, 22, 23],
   dilateBandBtoA: [0, 1, 2, 10, 11, 12, 13, 17, 21, 22, 23],
   compactBandIntersections: [0, 1, 11, 12, 13, 15, 17, 23],
-  finalizeBandWorksets: [0, 11, 12, 15, 16, 17, 24],
+  finalizeBandWorksets: [0, 12, 15, 16, 17],
   prepareCorrectionDispatches: [0, 12, 16, 17, 19, 20],
   smoothZeroToB: [0, 1, 4, 6, 7, 11, 12, 13, 17],
   smoothBtoA: [0, 1, 4, 6, 7, 11, 12, 13, 14, 15, 17],
@@ -51,8 +50,10 @@ const HYBRID_BINDINGS: Readonly<Record<HybridStage, readonly number[]>> = Object
   formInnerResidual: [0, 4, 8, 12, 14, 17],
   addInnerCorrection: [0, 6, 7, 9, 12, 17],
   publishCorrection: [0, 5, 7, 12, 17],
-  persistentCorrection: [0, 1, 2, 4, 5, 12, 13, 17, 21, 22, 24, 26],
 });
+
+/** Byte offset of the fifth (union) compact class record. */
+const BAND_UNION_DISPATCH_OFFSET_BYTES = 4 * 12;
 
 export interface OctreeSection43HybridPreconditionerSource {
   readonly rowCount: GPUBuffer;
@@ -66,7 +67,6 @@ export interface OctreeSection43HybridPreconditionerSource {
     readonly geometry: GPUBuffer;
     readonly metrics: GPUBuffer;
     readonly layout: GPUBuffer;
-    readonly dispatch: GPUBuffer;
   };
 }
 
@@ -107,8 +107,6 @@ implements OctreeFirstOrderSPDVCycle {
   private readonly bandA: GPUBuffer;
   private readonly bandB: GPUBuffer;
   private readonly operatorImage: GPUBuffer;
-  /** Four row-capacity channels: paper p1 ping/pong, r1, and fixed shell mask. */
-  private readonly persistentArena: GPUBuffer;
   /** Compact four-class intersections of the fixed three-layer L2 shell. */
   private readonly bandWorksets: GPUBuffer;
   private readonly bandDispatch: GPUBuffer;
@@ -188,11 +186,6 @@ implements OctreeFirstOrderSPDVCycle {
     this.bandA = vector("Section 4.3 hybrid boundary band A");
     this.bandB = vector("Section 4.3 hybrid boundary band B");
     this.operatorImage = vector("Section 4.3 hybrid resolved L2 image");
-    this.persistentArena = device.createBuffer({
-      label: "Section 4.3 persistent correction arena",
-      size: 4 * vectorBytes,
-      usage: storage,
-    });
     this.bandWorksets = device.createBuffer({
       label: "Section 4.3 compact A/B class-intersection worksets",
       size: 2 * worksetBankStrideWords * 4,
@@ -238,7 +231,7 @@ implements OctreeFirstOrderSPDVCycle {
     if (!smoother || smoother.kind !== "chebyshev"
       || (smoother.degree !== 2 && smoother.degree !== 4)
       || smoother.spectralBounds !== "transactional-scaled-gershgorin") {
-      throw new Error("Section 4.3 persistent correction requires the exact symmetric SPGrid Chebyshev contract");
+      throw new Error("Section 4.3 hybrid correction requires the exact symmetric SPGrid Chebyshev contract");
     }
     words[6] = smoother.degree;
     device.queue.writeBuffer(this.params, 0, words);
@@ -259,13 +252,21 @@ implements OctreeFirstOrderSPDVCycle {
     ) as Record<HybridStage, GPUComputePipeline>);
     this.encodedSetupDispatchCount = (inner.encodedSetupDispatchCount ?? 0)
       + 5 + OCTREE_SECTION43_BOUNDARY_BAND_LAYERS;
-    this.encodedCorrectionDispatchCount = 1;
-    this.encodedPassTransitionCount = (inner.encodedPassTransitionCount ?? 0) + 2;
+    const mergedBandApplies = 2 * this.boundarySmoothingIterations - 1;
+    // One convergence-gate publisher, four row-wide stages (zero sweep, inner
+    // residual, M1 seeding, publication), one compact band smooth and one
+    // merged band L2 apply per matched sweep after the zero sweep, one exact
+    // row-wide L2 apply, and the page-parallel first-order V-cycle.
+    this.encodedCorrectionDispatchCount = 5 + 2 * mergedBandApplies
+      + source.secondOrderOperator.encodedDispatchCount
+      + inner.encodedCorrectionDispatchCount;
+    // Setup keeps its accepted-row and compact-band boundaries. Correction
+    // adds its own gate boundary plus the exact L2 apply's gate boundary; the
+    // inner V-cycle reports its own.
+    this.encodedPassTransitionCount = (inner.encodedPassTransitionCount ?? 0) + 4;
     this.allocatedBytes = this.params.size + 7 * vectorBytes
       + this.bandWorksets.size + this.bandDispatch.size
-      + this.gatedRowDispatch.size + this.gatedBandDispatch.size
-      + this.persistentArena.size;
-    const mergedBandApplies = 2 * this.boundarySmoothingIterations - 1;
+      + this.gatedRowDispatch.size + this.gatedBandDispatch.size;
     this.workAccountingPlan = Object.freeze({ boundarySweeps: this.boundarySmoothingIterations,
       encodedSetupDispatches: this.encodedSetupDispatchCount,
       encodedCorrectionDispatches: this.encodedCorrectionDispatchCount,
@@ -287,11 +288,11 @@ implements OctreeFirstOrderSPDVCycle {
     this.runDirect(pass, "prepareCorrectionDispatches", resources);
     broker.fence("Section 4.3 accepted-row dispatch publication");
     pass = broker.compute({ label: "Section 4.3 hybrid boundary-band publication" });
-    this.runAccepted(pass, "classifyBand", resources);
-    this.runAccepted(pass, "dilateBandAtoB", resources);
-    this.runAccepted(pass, "dilateBandBtoA", resources);
-    this.runAccepted(pass, "dilateBandAtoB", resources);
-    this.runAccepted(pass, "compactBandIntersections", resources);
+    this.runRows(pass, "classifyBand", resources);
+    this.runRows(pass, "dilateBandAtoB", resources);
+    this.runRows(pass, "dilateBandBtoA", resources);
+    this.runRows(pass, "dilateBandAtoB", resources);
+    this.runRows(pass, "compactBandIntersections", resources);
     this.runDirect(pass, "finalizeBandWorksets", resources);
     broker.fence("Section 4.3 compact band dispatch publication");
     this.source.firstOrderVCycle.encodeSetup(broker, input);
@@ -314,8 +315,68 @@ implements OctreeFirstOrderSPDVCycle {
     const resources = this.resources(
       input.solverControl, input.rowCount, input.rhs, input.correction,
     );
-    const pass = broker.compute({ label: "Section 4.3 paper-exact persistent correction" });
-    this.runDirect(pass, "persistentCorrection", resources);
+    // Republish the convergence-gated accepted-row and compact-class records.
+    // A converged or failed solve publishes zero groups, so every stage below
+    // remains encoded and dispatches no workgroups.
+    let pass = broker.compute({ label: "Section 4.3 convergence-gated correction records" });
+    this.runDirect(pass, "prepareCorrectionDispatches", resources);
+    broker.fence("Section 4.3 correction dispatch publication");
+
+    // §4.3(1): J^k(0, q) -> p1. The first sweep starts from the exact zero
+    // vector and needs no operator image; every later sweep consumes a
+    // band-restricted L2 apply of the state it reads.
+    pass = broker.compute({ label: "Section 4.3 hybrid pre-smoothing shell" });
+    this.runRows(pass, "smoothZeroToB", resources);
+    for (let iteration = 1; iteration < this.boundarySmoothingIterations; iteration += 1) {
+      this.encodeBandSweep(broker, resources, (iteration & 1) === 1, input.solverControl);
+    }
+
+    // §4.3(2): r1 = q - L2 p1 over every accepted row, then the page-parallel
+    // symmetric first-order V-cycle. p1 now lives in hybridA.
+    this.source.secondOrderOperator.encode(
+      broker, this.hybridA, this.operatorImage, input.solverControl,
+    );
+    pass = broker.compute({ label: "Section 4.3 hybrid inner residual" });
+    this.runRows(pass, "formInnerResidual", resources);
+    this.source.firstOrderVCycle.encodeCorrection(broker, {
+      rhs: this.innerRhs,
+      correction: this.innerCorrection,
+      solverControl: input.solverControl,
+      rowCount: input.rowCount,
+    });
+
+    // §4.3(3): p2 = p1 + M1 r1 seeds both ping-pong states, then the identical
+    // matched k sweeps leave z in hybridB.
+    pass = broker.compute({ label: "Section 4.3 hybrid post-smoothing shell" });
+    this.runRows(pass, "addInnerCorrection", resources);
+    for (let iteration = 0; iteration < this.boundarySmoothingIterations; iteration += 1) {
+      this.encodeBandSweep(broker, resources, (iteration & 1) === 0, input.solverControl);
+    }
+    this.runRows(broker.compute(), "publishCorrection", resources);
+  }
+
+  /**
+   * One damped-Jacobi shell sweep. The band smoother consumes a precomputed
+   * L2 image of the state it reads, so the merged compact-band apply must
+   * immediately precede it and target the same source state.
+   */
+  private encodeBandSweep(
+    broker: PassBroker,
+    resources: readonly (GPUBuffer | undefined)[],
+    fromB: boolean,
+    solverControl: GPUBuffer,
+  ): void {
+    this.source.secondOrderOperator.encodeMergedBandWorkset(
+      broker,
+      fromB ? this.hybridB : this.hybridA,
+      this.operatorImage,
+      solverControl,
+      this.bandWorksets,
+      this.gatedBandDispatch,
+      this.bandOperatorLayout,
+      BAND_UNION_DISPATCH_OFFSET_BYTES,
+    );
+    this.runBand(broker.compute(), fromB ? "smoothBtoA" : "smoothAtoB", resources);
   }
 
   private resources(
@@ -350,43 +411,11 @@ implements OctreeFirstOrderSPDVCycle {
       section63.state,
       section63.geometry,
       section63.metrics,
-      this.persistentArena,
-      undefined,
-      section63.dispatch,
     ];
   }
 
-  private run(
-    pass: GPUComputePassEncoder,
-    name: HybridStage,
-    resources: readonly (GPUBuffer | undefined)[],
-  ): void {
-    const pipeline = this.pipelines[name];
-    const bindings = HYBRID_BINDINGS[name];
-    const variants = this.groups.get(name);
-    const cached = variants?.find((candidate) =>
-      bindings.every((binding) => candidate.resources[binding] === resources[binding]));
-    const group = cached?.group ?? this.device.createBindGroup({
-      label: `Section 4.3 hybrid · ${name} bindings`,
-      layout: pipeline.getBindGroupLayout(0),
-      entries: bindings.map((binding) => ({
-        binding,
-        resource: { buffer: resources[binding]! },
-      })),
-    });
-    if (!cached) {
-      const next = { resources: [...resources], group };
-      if (variants) variants.push(next); else this.groups.set(name, [next]);
-    }
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, group);
-    pass.dispatchWorkgroupsIndirect(
-      this.gatedRowDispatch,
-      0,
-    );
-  }
-
-  private runAccepted(
+  /** Accepted-row stage over the convergence-gated row record. */
+  private runRows(
     pass: GPUComputePassEncoder,
     name: HybridStage,
     resources: readonly (GPUBuffer | undefined)[],
@@ -424,58 +453,27 @@ implements OctreeFirstOrderSPDVCycle {
     pass.setBindGroup(0, group);
   }
 
+  /** Singleton publisher stage. Its own record is what the others consume. */
   private runDirect(
     pass: GPUComputePassEncoder,
     name: HybridStage,
     resources: readonly (GPUBuffer | undefined)[],
   ): void {
-    const pipeline = this.pipelines[name];
-    const bindings = HYBRID_BINDINGS[name];
-    const variants = this.groups.get(name);
-    const cached = variants?.find((candidate) =>
-      bindings.every((binding) => candidate.resources[binding] === resources[binding]));
-    const group = cached?.group ?? this.device.createBindGroup({
-      label: `Section 4.3 hybrid · ${name} bindings`,
-      layout: pipeline.getBindGroupLayout(0),
-      entries: bindings.map((binding) => ({
-        binding,
-        resource: { buffer: resources[binding]! },
-      })),
-    });
-    if (!cached) {
-      const next = { resources: [...resources], group };
-      if (variants) variants.push(next); else this.groups.set(name, [next]);
-    }
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, group);
+    this.bindCached(pass, name, resources);
     pass.dispatchWorkgroups(1);
   }
 
+  /** Compact shell stage over the convergence-gated union class record. */
   private runBand(
     pass: GPUComputePassEncoder,
     name: "smoothBtoA" | "smoothAtoB",
     resources: readonly (GPUBuffer | undefined)[],
   ): void {
-    const pipeline = this.pipelines[name];
-    const bindings = HYBRID_BINDINGS[name];
-    const variants = this.groups.get(name);
-    const cached = variants?.find((candidate) =>
-      bindings.every((binding) => candidate.resources[binding] === resources[binding]));
-    const group = cached?.group ?? this.device.createBindGroup({
-      label: `Section 4.3 hybrid · ${name} bindings`,
-      layout: pipeline.getBindGroupLayout(0),
-      entries: bindings.map((binding) => ({
-        binding,
-        resource: { buffer: resources[binding]! },
-      })),
-    });
-    if (!cached) {
-      const next = { resources: [...resources], group };
-      if (variants) variants.push(next); else this.groups.set(name, [next]);
-    }
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, group);
-    pass.dispatchWorkgroupsIndirect(this.gatedBandDispatch, 4 * 12);
+    this.bindCached(pass, name, resources);
+    pass.dispatchWorkgroupsIndirect(
+      this.gatedBandDispatch,
+      BAND_UNION_DISPATCH_OFFSET_BYTES,
+    );
   }
 
   private assertRowCount(rowCount: GPUBuffer): void {
@@ -500,7 +498,6 @@ implements OctreeFirstOrderSPDVCycle {
     this.bandA.destroy();
     this.bandB.destroy();
     this.operatorImage.destroy();
-    this.persistentArena.destroy();
     this.bandWorksets.destroy();
     this.bandDispatch.destroy();
     this.gatedRowDispatch.destroy();
@@ -545,22 +542,12 @@ struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 @group(0) @binding(21) var<storage, read_write> state: array<u32>;
 @group(0) @binding(22) var<storage, read> geometry: array<vec4u>;
 @group(0) @binding(23) var<storage, read> metrics: array<Metric>;
-@group(0) @binding(24) var<storage, read_write> persistentArena: array<f32>;
-@group(0) @binding(26) var<storage, read> spgridDispatch: array<u32>;
 
 const INVALID_ROW_ERROR = 2u;
 const NONFINITE_ERROR = 4u;
 const INVALID = 0xffffffffu;
-const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;const KEY=0u;const FLAGS=1u;
-const DIAG=2u;const XP=3u;const RHS_CHANNEL=21u;const A_CHANNEL=22u;const B_CHANNEL=23u;
-const OWNER=24u;const SPECTRAL=25u;const STATE_CHANNELS=26u;const PAGE_RECORD_WORDS=28u;
-const DISPATCH_WORDS=12u;const PAGE_X=8u;const PAGE_Y=8u;const PAGE_Z=4u;
-const HALO_X=10u;const HALO_Y=10u;const HALO_Z=6u;const PAGE_ELEMENTS=256u;const HALO_ELEMENTS=600u;
-var<workgroup> persistentPageSlots: array<u32,600>;
-var<workgroup> persistentPageA: array<f32,600>;
-var<workgroup> persistentPageB: array<f32,600>;
-var<workgroup> persistentPageRhs: array<f32,600>;
-var<workgroup> persistentPageDiagonal: array<f32,600>;
+const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;const FLAGS=1u;
+const OWNER=24u;const PAGE_RECORD_WORDS=28u;
 
 fn finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
@@ -739,11 +726,6 @@ fn finalizeBandWorksets() {
     atomicStore(&bandWorksets[base + 4u], groups);
     bandDispatch[3u * cls] = groups;
   }
-  // Persist the immutable three-layer shell mask in the correction arena so
-  // the hot fused kernel does not need an eleventh storage binding.
-  for (var row = 0u; row < rows(); row += 1u) {
-    persistentArena[3u * params.rowCapacity + row] = select(0.0, 1.0, bandB[row] != 0u);
-  }
 }
 @compute @workgroup_size(64)
 fn smoothZeroToB(@builtin(global_invocation_id) global: vec3u) {
@@ -790,198 +772,4 @@ fn publishCorrection(@builtin(global_invocation_id) global: vec3u) {
   else { correction[row] = value; }
 }
 
-// Persistent paper §4.3 executor. One 128-lane workgroup owns every ordering
-// boundary that was formerly expressed as a host dispatch. The arithmetic is
-// unchanged: exact destination-owned L2, matched Jacobi halves, and the
-// symmetric rediscretized SPGrid M1 with reversed Chebyshev phases.
-fn pArena(channel:u32,row:u32)->u32{return channel*params.rowCapacity+row;}
-fn pValue(channel:u32,row:u32)->f32{return persistentArena[pArena(channel,row)];}
-fn pSet(channel:u32,row:u32,value:f32){persistentArena[pArena(channel,row)]=value;}
-fn pBand(row:u32)->bool{return pValue(3u,row)>0.5;}
-fn pLoad(channel:u32,l:u32,slot:u32)->f32{return bitcast<f32>(state[at(channel,l,slot)]);}
-fn pStore(channel:u32,l:u32,slot:u32,value:f32){state[at(channel,l,slot)]=bitcast<u32>(value);}
-fn pCount(l:u32)->u32{return spgridDispatch[l*DISPATCH_WORDS];}
-fn pPageCount(l:u32)->u32{return spgridDispatch[l*DISPATCH_WORDS+8u];}
-fn pWorkSlot(l:u32,item:u32)->u32{return topology[workBase()+levelBase(l)+item];}
-fn pRowMap(l:u32,row:u32)->u32{return topology[rowMapBase()+l*capacity()+row];}
-fn pTransferWord(l:u32,item:u32,word:u32)->u32{return transferBase()+transferLevelOffset(l)+4u*item+word;}
-fn pParentHeadBase(l:u32)->u32{return transferBase()+transferLevelOffset(l)+4u*transferCapacity(l);}
-fn pParentTailBase(l:u32)->u32{return pParentHeadBase(l)+levelCapacity(l);}
-fn pFineHeadBase(l:u32)->u32{return pParentTailBase(l)+levelCapacity(l);}
-fn pFineCountBase(l:u32)->u32{return pFineHeadBase(l)+levelCapacity(l);}
-fn pTransferCount(l:u32)->u32{return spgridDispatch[l*DISPATCH_WORDS+1u];}
-fn pSync(){storageBarrier();workgroupBarrier();}
-fn pFind(l:u32,q:vec3u)->u32{
-  if(l>=levels()||any(q>=dims(l))){return INVALID;}
-  let record=brickRecord(l,q);let bit=localBit(q);let low=topology[record+1u];let high=topology[record+2u];
-  if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return INVALID;}
-  let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
-  if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
-  let slot=topology[rankedSlotsBase()+levelBase(l)+topology[record+3u]+rank];
-  if(slot>=levelCapacity(l)||state[at(KEY,l,slot)]!=1u+q.x+dims(l).x*(q.y+dims(l).y*q.z)){
-    reportAt(INVALID_ROW_ERROR,40u,slot);return INVALID;
-  }
-  return slot;
-}
-fn pFinerAdjoint(row:u32,q:vec3u,l:u32,x:f32,source:u32)->f32{
-  if(l==0u){return 0.0;}let fine=l-1u;var result=0.0;
-  for(var child=0u;child<8u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
-    let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID||ghostPage>=levelCapacity(fine)){continue;}
-    let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ);
-    if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}
-    for(var candidate=0u;candidate<18u;candidate+=1u){let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;
-      if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}
-      let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ));
-      if(activeSlot==INVALID||(state[at(FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}
-      let encoded=state[at(OWNER,fine,activeSlot)];if(encoded==0u||encoded>rows()){reportAt(INVALID_ROW_ERROR,41u,row);continue;}
-      let other=encoded-1u;var c=0.0;let transform=geometry[other].w&63u;let base=coefficientBase(other);
-      for(var channel=0u;channel<18u;channel+=1u){if(all(worldDirection(canonicalDirection(channel),transform)==delta)){c=section63Coefficients[base+1u+channel];}}
-      if(c>0.0){result+=c*(x-pValue(source,other));}
-    }
-  }
-  return result;
-}
-fn pApplyL2(row:u32,source:u32)->f32{
-  if(row>=rows()||row>=arrayLength(&geometry)){reportAt(INVALID_ROW_ERROR,42u,row);return 0.0;}
-  let h=geometry[row];let base=coefficientBase(row);
-  if((h.w&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(INVALID_ROW_ERROR,43u,row);return 0.0;}
-  let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
-  if(page==INVALID||page>=levelCapacity(l)){reportAt(INVALID_ROW_ERROR,44u,row);return 0.0;}
-  let x=pValue(source,row);var sum=0.0;for(var channel=0u;channel<18u;channel+=1u){sum+=section63Coefficients[base+1u+channel];}
-  var value=max(0.0,section63Coefficients[base]-sum)*x;
-  for(var channel=0u;channel<18u;channel+=1u){let c=section63Coefficients[base+1u+channel];if(c==0.0){continue;}
-    let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),h.w&63u);
-    if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(INVALID_ROW_ERROR,45u,row);continue;}
-    let slot=pageSlot(l,page,q,vec3u(targetQ));if(slot==INVALID){reportAt(INVALID_ROW_ERROR,46u,row);continue;}
-    if((state[at(FLAGS,l,slot)]&MG_ONLY)!=0u){continue;}let encoded=state[at(OWNER,l,slot)];
-    if(encoded==0u||encoded>rows()){reportAt(INVALID_ROW_ERROR,47u,row);continue;}
-    value+=c*(x-pValue(source,encoded-1u));
-  }
-  value+=pFinerAdjoint(row,q,l,x,source);
-  if(!finite(value)){reportAt(NONFINITE_ERROR,48u,row);return 0.0;}return value;
-}
-fn pStencilDirection(k:u32)->vec3i{return canonicalDirection(k);}
-fn pApplied(l:u32,slot:u32,source:u32)->f32{
-  var value=pLoad(DIAG,l,slot)*pLoad(source,l,slot);let q=decode(state[at(KEY,l,slot)],l);
-  for(var k=0u;k<18u;k+=1u){let c=pLoad(XP+k,l,slot);if(c==0.0){continue;}
-    let targetQ=vec3i(q)+pStencilDirection(k);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(INVALID_ROW_ERROR,49u,slot);continue;}
-    let other=pFind(l,vec3u(targetQ));if(other==INVALID){reportAt(INVALID_ROW_ERROR,50u,slot);continue;}value-=c*pLoad(source,l,other);
-  }
-  return value;
-}
-fn pChebyshevWeight(l:u32,phase:u32)->f32{
-  let upper=pLoad(SPECTRAL,l,0u);let lower=upper/30.0;
-  if(!(lower>0.0)||!(upper>lower)||!finite(upper)){reportAt(INVALID_ROW_ERROR,51u,l);return 0.0;}
-  let centre=0.5*(upper+lower);let radius=0.5*(upper-lower);let degree=params.m1SmoothingDegree;
-  return 1.0/(centre-radius*cos(3.141592653589793*(2.0*f32(phase)+1.0)/(2.0*f32(degree))));
-}
-fn pInteriorHalo(local:u32)->u32{let x=local%PAGE_X;let yz=local/PAGE_X;return x+1u+HALO_X*((yz%PAGE_Y)+1u+HALO_Y*((yz/PAGE_Y)+1u));}
-fn pPageApplied(l:u32,slot:u32,origin:vec3u,halo:u32,useB:bool)->f32{
-  var value=persistentPageDiagonal[halo]*select(persistentPageA[halo],persistentPageB[halo],useB);
-  for(var k=0u;k<18u;k+=1u){let c=pLoad(XP+k,l,slot);if(c==0.0){continue;}
-    let relative=vec3i(decode(state[at(KEY,l,slot)],l))+pStencilDirection(k)-vec3i(origin)+vec3i(1);
-    if(any(relative<vec3i(0))||any(relative>=vec3i(i32(HALO_X),i32(HALO_Y),i32(HALO_Z)))){reportAt(INVALID_ROW_ERROR,52u,slot);continue;}
-    let neighbour=u32(relative.x)+HALO_X*(u32(relative.y)+HALO_Y*u32(relative.z));
-    if(persistentPageSlots[neighbour]==INVALID){reportAt(INVALID_ROW_ERROR,53u,slot);continue;}
-    value-=c*select(persistentPageA[neighbour],persistentPageB[neighbour],useB);
-  }
-  return value;
-}
-fn pSmoothLevel(l:u32,reverse:bool,lane:u32){
-  // The full-level B snapshot makes page execution true block Jacobi. It also
-  // makes the reverse half the exact transpose schedule independent of page order.
-  for(var item=lane;item<pCount(l);item+=128u){let slot=pWorkSlot(l,item);pStore(B_CHANNEL,l,slot,pLoad(A_CHANNEL,l,slot));}
-  pSync();
-  for(var page=0u;page<pPageCount(l);page+=1u){let origin=decode(topology[pageRecord(l,page)],l);let d=dims(l);
-    for(var halo=lane;halo<HALO_ELEMENTS;halo+=128u){let x=halo%HALO_X;let yz=halo/HALO_X;
-      let q=vec3i(origin)+vec3i(i32(x)-1,i32(yz%HALO_Y)-1,i32(yz/HALO_Y)-1);var slot=INVALID;
-      if(all(q>=vec3i(0))&&all(q<vec3i(d))){slot=pageSlot(l,page,origin,vec3u(q));}persistentPageSlots[halo]=slot;
-      var value=0.0;var rv=0.0;var diagonal=1.0;if(slot!=INVALID){value=pLoad(B_CHANNEL,l,slot);rv=pLoad(RHS_CHANNEL,l,slot);diagonal=pLoad(DIAG,l,slot);}
-      persistentPageA[halo]=value;persistentPageB[halo]=value;persistentPageRhs[halo]=rv;persistentPageDiagonal[halo]=diagonal;
-    }
-    workgroupBarrier();
-    for(var step=0u;step<params.m1SmoothingDegree;step+=1u){let useB=(step&1u)!=0u;
-      let phase=select(step,params.m1SmoothingDegree-1u-step,reverse);let weight=pChebyshevWeight(l,phase);
-      for(var local=lane;local<PAGE_ELEMENTS;local+=128u){let halo=pInteriorHalo(local);let slot=persistentPageSlots[halo];if(slot==INVALID){continue;}
-        let source=select(persistentPageA[halo],persistentPageB[halo],useB);var next=source;
-        if((state[at(FLAGS,l,slot)]&GHOST)==0u){let diagonal=persistentPageDiagonal[halo];
-          if(!(diagonal>0.0)){reportAt(INVALID_ROW_ERROR,54u,slot);}else{next=source+weight*(persistentPageRhs[halo]-pPageApplied(l,slot,origin,halo,useB))/diagonal;}}
-        if(!finite(next)){reportAt(NONFINITE_ERROR,55u,slot);next=source;}
-        if(useB){persistentPageA[halo]=next;}else{persistentPageB[halo]=next;}
-      }
-      workgroupBarrier();
-    }
-    for(var local=lane;local<PAGE_ELEMENTS;local+=128u){let halo=pInteriorHalo(local);let slot=persistentPageSlots[halo];
-      if(slot!=INVALID){pStore(A_CHANNEL,l,slot,persistentPageA[halo]);}}
-    pSync();
-  }
-}
-fn pRestrict(l:u32,lane:u32){
-  for(var item=lane;item<pCount(l+1u);item+=128u){let coarse=pWorkSlot(l+1u,item);var sum=0.0;var record=topology[pParentHeadBase(l)+coarse];
-    for(var visited=0u;record!=INVALID&&visited<pTransferCount(l);visited+=1u){if(record>=pTransferCount(l)){reportAt(INVALID_ROW_ERROR,56u,coarse);break;}
-      let fine=topology[pTransferWord(l,record,0u)];let parent=topology[pTransferWord(l,record,1u)];if(parent!=coarse){reportAt(INVALID_ROW_ERROR,57u,coarse);break;}
-      let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=pApplied(l,fine,A_CHANNEL);
-      let residual=select(-product,pLoad(RHS_CHANNEL,l,fine)-product,!ghost);
-      sum+=bitcast<f32>(topology[pTransferWord(l,record,2u)])*residual;record=topology[pTransferWord(l,record,3u)];
-    }
-    if(record!=INVALID||!finite(sum)){reportAt(INVALID_ROW_ERROR,58u,coarse);}else{pStore(RHS_CHANNEL,l+1u,coarse,sum);}
-  }
-}
-fn pProlong(l:u32,lane:u32){
-  for(var item=lane;item<pCount(l);item+=128u){let fine=pWorkSlot(l,item);let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;
-    let targets=select(8u,1u,ghost);var value=select(pLoad(A_CHANNEL,l,fine),0.0,ghost);var valid=true;
-    let first=topology[pFineHeadBase(l)+fine];let owned=topology[pFineCountBase(l)+fine];
-    for(var corner=0u;corner<targets;corner+=1u){if(first==INVALID||corner>=owned||first+corner>=pTransferCount(l)){reportAt(INVALID_ROW_ERROR,59u,fine);valid=false;break;}
-      let record=first+corner;if(topology[pTransferWord(l,record,0u)]!=fine){reportAt(INVALID_ROW_ERROR,60u,fine);valid=false;break;}
-      let coarse=topology[pTransferWord(l,record,1u)];let weight=bitcast<f32>(topology[pTransferWord(l,record,2u)]);
-      if(coarse>=levelCapacity(l+1u)||!finite(weight)){reportAt(INVALID_ROW_ERROR,61u,fine);valid=false;break;}
-      value+=weight*pLoad(A_CHANNEL,l+1u,coarse);
-    }
-    if(valid&&finite(value)){pStore(A_CHANNEL,l,fine,value);}else if(valid){reportAt(NONFINITE_ERROR,62u,fine);}
-  }
-}
-fn pApplyM1(lane:u32){
-  for(var l=0u;l<levels();l+=1u){for(var item=lane;item<pCount(l);item+=128u){let slot=pWorkSlot(l,item);
-    pStore(RHS_CHANNEL,l,slot,0.0);pStore(A_CHANNEL,l,slot,0.0);pStore(B_CHANNEL,l,slot,0.0);}}
-  pSync();
-  for(var row=lane;row<rows();row+=128u){let native=countTrailingZeros(geometry[row].y);let slot=pRowMap(native,row);
-    if(slot>=levelCapacity(native)){reportAt(INVALID_ROW_ERROR,63u,row);}else{pStore(RHS_CHANNEL,native,slot,pValue(2u,row));}}
-  pSync();
-  for(var l=0u;l+1u<levels();l+=1u){pSmoothLevel(l,false,lane);pRestrict(l,lane);pSync();}
-  if(lane==0u){let bottom=levels()-1u;if(pCount(bottom)!=1u){reportAt(INVALID_ROW_ERROR,64u,bottom);}else{let slot=pWorkSlot(bottom,0u);let d=pLoad(DIAG,bottom,slot);
-    if(!(d>0.0)){reportAt(INVALID_ROW_ERROR,65u,slot);}else{let value=pLoad(RHS_CHANNEL,bottom,slot)/d;if(finite(value)){pStore(A_CHANNEL,bottom,slot,value);}else{reportAt(NONFINITE_ERROR,66u,slot);}}}}
-  pSync();
-  var l=levels()-1u;while(l>0u){l-=1u;pProlong(l,lane);pSync();pSmoothLevel(l,true,lane);}
-}
-
-var<workgroup> persistentStopped:atomic<u32>;
-@compute @workgroup_size(128)
-fn persistentCorrection(@builtin(local_invocation_index) lane:u32){
-  if(lane==0u){atomicStore(&persistentStopped,select(0u,1u,stopped()));}
-  workgroupBarrier();
-  if(workgroupUniformLoad(&persistentStopped)!=0u){return;}
-  // §4.3(1): J^k(0,q) -> p1. k is the immutable matching shell count.
-  for(var row=lane;row<rows();row+=128u){pSet(0u,row,0.0);var first=0.0;if(pBand(row)){
-    let diagonal=diagonalAt(row);if(!(diagonal>0.0)){reportAt(INVALID_ROW_ERROR,67u,row);}else{first=params.damping*rhs[row]/diagonal;}}
-    pSet(1u,row,first);}
-  pSync();
-  for(var sweep=1u;sweep<params.smoothingIterations;sweep+=1u){let source=select(0u,1u,(sweep&1u)==1u);let destination=1u-source;
-    for(var row=lane;row<rows();row+=128u){if(pBand(row)){let current=pValue(source,row);let next=current+params.damping*(rhs[row]-pApplyL2(row,source))/diagonalAt(row);
-      if(finite(next)){pSet(destination,row,next);}else{reportAt(NONFINITE_ERROR,68u,row);}}}
-    pSync();
-  }
-  // §4.3(2): r1=q-L2p1 and the exact symmetric first-order V-cycle.
-  for(var row=lane;row<rows();row+=128u){let value=rhs[row]-pApplyL2(row,0u);if(finite(value)){pSet(2u,row,value);}else{reportAt(NONFINITE_ERROR,69u,row);}}
-  pSync();pApplyM1(lane);pSync();
-  // §4.3(3): p2=p1+M1r1, followed by the identical k sweeps.
-  for(var row=lane;row<rows();row+=128u){let native=countTrailingZeros(geometry[row].y);let slot=pRowMap(native,row);let value=pValue(0u,row)+pLoad(A_CHANNEL,native,slot);
-    if(finite(value)){pSet(0u,row,value);pSet(1u,row,value);}else{reportAt(NONFINITE_ERROR,70u,row);}}
-  pSync();
-  for(var sweep=0u;sweep<params.smoothingIterations;sweep+=1u){let source=select(0u,1u,(sweep&1u)==0u);let destination=1u-source;
-    for(var row=lane;row<rows();row+=128u){if(pBand(row)){let current=pValue(source,row);let next=current+params.damping*(rhs[row]-pApplyL2(row,source))/diagonalAt(row);
-      if(finite(next)){pSet(destination,row,next);}else{reportAt(NONFINITE_ERROR,71u,row);}}}
-    pSync();
-  }
-  if(!stopped()){for(var row=lane;row<rows();row+=128u){let value=pValue(1u,row);if(finite(value)){correction[row]=value;}else{reportAt(NONFINITE_ERROR,72u,row);}}}
-}
 `;

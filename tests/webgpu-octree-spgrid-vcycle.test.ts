@@ -228,9 +228,14 @@ test("compact SPGrid addressing and commit dispatch cover every variable arena",
     assert.match(shader, /fn levelBase\(l:u32\)->u32/);
     assert.match(shader, /fn transferLevelOffset\(l:u32\)->u32/);
     assert.match(shader,
-      /threshold=maxStride\(\)\/2u[\s\S]*d\.y>threshold\/cells[\s\S]*d\.z>threshold\/cells/,
-      "host-equivalent capped multiplication must prevent dense-domain u32 overflow");
+      /fn levelCapacity\(l:u32\)->u32\{let t=levelTable\(l\);return p\.levelCaps\[t\.x\]\[t\.y\];\}/,
+      "variable-arena addressing must read the memoized host table, not a per-address loop");
+    assert.doesNotMatch(shader, /for\(var k=0u;k<l;k\+=1u\)/,
+      "no address helper may re-derive a level prefix on every access");
   }
+  assert.match(WebGPUOctreeSPGridVCycle.prototype.constructor.toString(),
+    /SPGrid level tables disagree with the allocated plan/,
+    "the memoized level tables must fail closed against the exact allocation plan");
   assert.match(WebGPUOctreeSPGridVCycle.prototype.encodeReadySetupCommit.toString(),
     /Math\.max\(this\.plan\.levelStride,this\.plan\.brickCount,\.\.\.this\.plan\.transferCapacities\)/,
     "ready publication must cover the largest validated level, brick, or transfer arena");
@@ -282,7 +287,7 @@ test("8x8x4 pressure pages publish exact stable physical 27-neighbour adjacency"
 
 test("smoother halo staging consumes physical page adjacency without directory lookup", () => {
   assert.match(octreeSPGridVCycleShader,
-    /fn rebuildCandidatePageWorksetFor[\s\S]*pageDirectoryBase\(\)[\s\S]*pageRecord\(l,page\)\+1u\+ordinal/,
+    /fn linkCandidatePageNeighbours[\s\S]*pageDirectoryBase\(\)[\s\S]*candidateTopology\[record\+1u\+ordinal\]=physical/,
     "candidate publication must resolve all 27 physical neighbours before commit");
   const smoother = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn smoothPage("),
@@ -339,7 +344,10 @@ test("V-cycle lookup is authoritative mask/popcount rank with no hash-probe fall
   const publishedFind = octreeSPGridVCycleShader.slice(octreeSPGridVCycleShader.indexOf("fn directoryLookup("),
     octreeSPGridVCycleShader.indexOf("fn originOf("));
   assert.doesNotMatch(publishedFind, /probe|hash/);
-  assert.match(octreeSPGridVCycleShader, /fn rebuildCandidateDirectoryFor[\s\S]*candidateTopology\[record\]=generation/);
+  assert.match(octreeSPGridVCycleShader,
+    /fn markCandidateBrickOccupancy[\s\S]*candidateTopology\[record\]=levelDelta\[deltaAt\(l,0u\)\]/);
+  assert.match(octreeSPGridVCycleShader,
+    /fn rankCandidateBricks[\s\S]*candidateTopology\[directoryBase\(\)\+2u\+l\]=generation/);
   assert.doesNotMatch(octreeSPGridVCycleShader, /setupDispatch|prepareSetupDispatch/,
     "the redundant per-level indirect setup fabric must stay deleted");
 });
@@ -472,7 +480,7 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
   assert.match(octreeSPGridVCycleShader, /fn cMergeClass/);
   assert.match(octreeSPGridVCycleShader, /fn contactCoord/);
   assert.match(octreeSPGridVCycleShader, /fn cInsertOwned/);
-  assert.match(octreeSPGridVCycleShader, /fn rebuildCandidateLevelSet/);
+  assert.match(octreeSPGridVCycleShader, /fn buildCandidateLevelSets\(/);
   assert.match(octreeSPGridVCycleShader, /const XYPP=9u.*const YZPP=17u/s,
     "the production stencil retains all twelve directed octree-edge contacts");
   assert.match(octreeSPGridVCycleShader,
@@ -480,8 +488,8 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
   assert.doesNotMatch(octreeSPGridVCycleShader, /ACCURATE_DIAG|rebuildCandidateAccurateStencil|ownerHeadBase|ownerNextBase/,
     "the first-order hierarchy must not retain the deleted page-image A2 path");
   assert.match(octreeSPGridVCycleShader,
-    /fn publishCandidateSpectralBoundFor[\s\S]*off>d\*\(1\.0\+1e-4\)[\s\S]*upper\*=1\.0005[\s\S]*deltaAt\(l,7u\)/,
-    "spectral safety must be derived and validated from the candidate first-order stencil");
+    /fn publishCandidateSpectralBounds[\s\S]*off>d\*\(1\.0\+1e-4\)[\s\S]*total=max\(total,spectralLane\[i\]\)[\s\S]*total\*=1\.0005[\s\S]*deltaAt\(l,7u\)/,
+    "spectral safety must be an exact order-independent maximum over the candidate stencil");
   assert.match(octreeSPGridVCycleShader,
     /if\(stencilDirty\(l\)\)\{state\[at\(SPECTRAL,l,0u\)\]=levelDelta\[deltaAt\(l,7u\)\];\}/,
     "the smoother bound must commit atomically with its stencil generation");
@@ -535,12 +543,14 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.planL1CaptureDelta, [0, 1, 3, 11, 13, 14, 18, 20, 21]);
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.commitChangedL1, [0, 1, 3, 11, 13, 18]);
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.finalizeL1CapturePublication, [0, 3, 13, 18]);
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.buildCandidateLevelSetsAndGhosts,
-    [0, 1, 3, 14, 15, 16, 17, 20, 21],
-    "catalog-owned ghost publication stays under the portable storage-binding ceiling");
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.detectCandidateGhosts,
+    [0, 1, 3, 14, 16, 20, 21, 22],
+    "catalog-owned ghost detection stays under the portable storage-binding ceiling");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.buildCandidateLevelDeltas,
     [0, 1, 3, 4, 5, 6, 14, 15, 16, 17],
     "the ordered hierarchy builder stays under the portable storage-binding ceiling");
+  assert.equal("buildCandidateLevelSetsAndGhosts" in OCTREE_SPGRID_VCYCLE_BINDINGS, false,
+    "the serialized whole-hierarchy candidate builder must not remain in the pipeline ABI");
   assert.equal("resetInvalidBuffers" in OCTREE_SPGRID_VCYCLE_BINDINGS, false,
     "the deleted all-capacity recovery path must not remain in the pipeline ABI");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.clearCorrection, [0, 3, 7, 9],
@@ -706,8 +716,8 @@ test("setup retires the prior live generation without unconditional full-buffer 
   cycle.encodeSetup(broker, input);
   assert.equal(dispatches, cycle.encodedSetupDispatchCount,
     "cold setup owns exact page planning plus transactional candidate publication");
-  assert.deepEqual(events.slice(0, 4), ["begin", "direct:beginL1CapturePlan", "direct:planL1CaptureDelta",
-    "direct:commitChangedL1"]);
+  assert.deepEqual(events.slice(0, 6), ["begin", "direct:beginL1CapturePlan", "direct:planL1CaptureDelta",
+    "direct:probeCandidateSkip", "direct:applyCandidateSkip", "direct:commitChangedL1"]);
   assert.ok(events.some((event) => event === "direct:validateCandidateHierarchy"));
   assert.ok(events.some((event) => event === "direct:commitChangedL1"));
   assert.ok(events.some((event) => event === "direct:finalizeL1CapturePublication"));
@@ -738,14 +748,42 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.match(octreeSPGridVCycleShader,
     /fn markDirtyFrom\(first:u32,flags:u32,firstRow:u32,rowEnd:u32\)[\s\S]*for\(var l=first;l<levels\(\);l\+=1u\)[\s\S]*deltaAt\(l,2u\)[\s\S]*deltaAt\(l,3u\)/,
     "a changed L1 contribution publishes an affected-row record for its dependent coarse-level suffix");
+  // The candidate hierarchy is now a chain of data-parallel dispatches whose
+  // ordering is carried by dispatch boundaries, not by statement order in one
+  // invocation. Only the two genuinely order-defining phases keep a serial
+  // owner, and each owns one level rather than the whole hierarchy.
+  const candidatePhases = ["clearCandidateLevels", "buildCandidateLevelSets", "detectCandidateGhosts",
+    "insertCandidateGhosts", "buildCandidateLevelDeltas", "markCandidateBrickOccupancy",
+    "rankCandidateBricks", "scatterCandidateRankedSlots", "markCandidatePageOccupancy",
+    "compactCandidatePages", "linkCandidatePageNeighbours", "buildCandidateStencils",
+    "publishCandidateSpectralBounds"];
+  for (const phase of candidatePhases) {
+    assert.match(octreeSPGridVCycleShader, new RegExp(`@compute @workgroup_size\\(\\d+\\)[\\s\\S]{0,80}fn ${phase}\\(`),
+      `${phase} must be its own dispatched phase`);
+    assert.ok(phase in OCTREE_SPGRID_VCYCLE_BINDINGS, `${phase} must publish an exact bind group`);
+  }
+  const candidateOrder = candidatePhases.map((phase) =>
+    (WebGPUOctreeSPGridVCycle.prototype as unknown as { encodeSetupCandidate: Function })
+      .encodeSetupCandidate.toString().indexOf(`"${phase}"`));
+  assert.deepEqual(candidateOrder, [...candidateOrder].sort((a, b) => a - b),
+    "the encoded phase order must match the derived dependency order");
+  assert.ok(candidateOrder.every((index) => index > 0), "every candidate phase must be encoded");
+  for (const parallel of ["clearCandidateLevels", "detectCandidateGhosts", "markCandidateBrickOccupancy",
+    "scatterCandidateRankedSlots", "markCandidatePageOccupancy", "linkCandidatePageNeighbours",
+    "buildCandidateStencils"]) {
+    assert.match(octreeSPGridVCycleShader, new RegExp(`@compute @workgroup_size\\(64\\)[\\s\\S]{0,80}fn ${parallel}\\(`),
+      `${parallel} must iterate a real work domain, not one invocation`);
+  }
+  assert.doesNotMatch(octreeSPGridVCycleShader,
+    /fn rebuildCandidateLevelSetFor|fn rebuildCandidateDirectoryFor|fn rebuildCandidatePageWorksetFor|fn rebuildCandidateStencilFor|fn publishCandidateSpectralBoundFor/,
+    "the serialized per-level rebuild helpers must be deleted");
+  assert.match(octreeSPGridVCycleShader, /fn rebuildCandidateGhostsFor\(r:u32\)/,
+    "the retained ghost predicate must own exactly one row, not a whole level");
   assert.match(octreeSPGridVCycleShader,
-    /fn buildCandidateLevelSetsAndGhosts\(\)[\s\S]*rebuildCandidateLevelSetFor\(l\)[\s\S]*rebuildCandidateGhostsFor\(l\)[\s\S]*fn buildCandidateLevelDeltas\(\)[\s\S]*rebuildCandidateTransferFor\(l\)[\s\S]*rebuildCandidateDirectoryFor\(l\)[\s\S]*rebuildCandidateStencilFor\(l\)/,
-    "the two portable singleton stages preserve the exact dependency order");
-  assert.match(octreeSPGridVCycleShader,
-    /rebuildCandidateStencilFor[\s\S]*for\(var i=0u;i<cCount\(l\);i\+=1u\)\{let s=cWorkSlot\(l,i\)/,
+    /fn buildCandidateStencils[\s\S]*if\(!stencilDirty\(l\)\|\|i>=cCount\(l\)\)\{continue;\}/,
     "rediscretized stencil initialization must scale with live slots, not sparse capacity");
   const levelSetBuild = octreeSPGridVCycleShader.slice(
-    octreeSPGridVCycleShader.indexOf("fn rebuildCandidateLevelSetFor"),
+    octreeSPGridVCycleShader.indexOf("fn clearCandidateLevels"),
     octreeSPGridVCycleShader.indexOf("fn rebuildCandidateTransferFor"),
   );
   assert.doesNotMatch(levelSetBuild, /for\(var c=0u;c<STATE_CHANNELS/,
@@ -782,9 +820,9 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   }).encodeSetupCandidate.toString();
   const readyCommit = WebGPUOctreeSPGridVCycle.prototype.encodeReadySetupCommit.toString();
   assert.match(candidateSetup,
-    /commitChangedL1[\s\S]*buildCandidateLevelSetsAndGhosts[\s\S]*buildCandidateLevelDeltas[\s\S]*validateCandidateHierarchy/);
+    /probeCandidateSkip[\s\S]*applyCandidateSkip[\s\S]*commitChangedL1[\s\S]*clearCandidateLevels[\s\S]*buildCandidateLevelSets[\s\S]*buildCandidateLevelDeltas[\s\S]*validateCandidateHierarchy/);
   assert.match(readyCommit,
-    /commitChangedL1[\s\S]*finalizeL1CapturePublication[\s\S]*commitCandidateLevels[\s\S]*finalizeLifecycle/,
+    /commitChangedL1[\s\S]*finalizeL1CapturePublication[\s\S]*commitCandidateLevels[\s\S]*finalizeLifecycle[\s\S]*publishCommittedInputs/,
     "accepted L1 geometry and dependent levels publish only after the coupled ready gate");
   assert.doesNotMatch(`${candidateSetup}\n${readyCommit}`, /dispatchWorkgroupsIndirect|setupIndirect|prepareSetup/,
     "candidate publication must not retain redundant per-level indirect commands");
@@ -890,7 +928,12 @@ test("Dawn accepts the native sparse V-cycle shader", {
   assert.deepEqual(errors.map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
   for (const entryPoint of ["beginL1CapturePlan", "planL1CaptureDelta",
     "commitChangedL1", "finalizeL1CapturePublication",
-    "buildCandidateLevelSetsAndGhosts", "buildCandidateLevelDeltas", "validateCandidateHierarchy", "commitCandidateLevels",
+    "probeCandidateSkip", "applyCandidateSkip", "publishCommittedInputs",
+    "clearCandidateLevels", "buildCandidateLevelSets", "detectCandidateGhosts", "insertCandidateGhosts",
+    "buildCandidateLevelDeltas", "markCandidateBrickOccupancy", "rankCandidateBricks",
+    "scatterCandidateRankedSlots", "markCandidatePageOccupancy", "compactCandidatePages",
+    "linkCandidatePageNeighbours", "buildCandidateStencils", "publishCandidateSpectralBounds",
+    "validateCandidateHierarchy", "commitCandidateLevels",
     "finalizeLifecycle", "prepareCorrectionDispatches", "clearCorrection", "zeroVectors", "seedRhs",
     "restrictAndGhostAccumulate", "exactBottom",
     "smoothPageChebyshevForward", "smoothPageChebyshevReverse",

@@ -683,7 +683,10 @@ function decodeOctreePressureSolveWorkUnchecked(
     estimatedBytesMoved: classRows * classBytesPerRow * fullOperatorApplications
       + bandRows * classBytesPerRow * bandOperatorApplications,
   });
-  const hybridRowPasses = 2 * plan.hybridBoundarySweeps + 3;
+  // Four row-wide stages (zero sweep, inner residual, M1 seeding, publication),
+  // 2k-1 compact shell smooths, and the singleton convergence-gate publisher
+  // that republishes the row and union-class records for this application.
+  const hybridRowPasses = 2 * plan.hybridBoundarySweeps + 4;
   const capacityRowLanes = Math.ceil(plan.rowCapacity / 64) * 64;
   const liveRowLanes = Math.ceil(liveRows / 64) * 64;
   const fullHybridPasses = 4;

@@ -190,7 +190,7 @@ test("pressure solve telemetry decodes all fixed layers and a zero-work converge
   assert.equal(report.layers["hybrid-shell"]?.encodedIterations, 3);
   assert.equal(report.layers["hybrid-shell"]?.executedIterations, 2);
   assert.equal(report.layers["hybrid-shell"]?.worksets, 2);
-  assert.equal(report.layers["hybrid-shell"]?.executedDispatches, 14);
+  assert.equal(report.layers["hybrid-shell"]?.executedDispatches, 16);
   assert.equal(report.layers["spgrid-vcycle"]?.encodedIterations, 3);
   assert.equal(report.layers["spgrid-vcycle"]?.executedIterations, 2);
   assert.equal(report.layers["spgrid-vcycle"]?.worksets, 4);
@@ -228,7 +228,7 @@ test("pressure telemetry gives an initially converged solve no nested tail credi
   assert.equal(hybrid.executedIterations, 1);
   assert.equal(hybrid.worksets, 1);
   assert.equal(hybrid.scheduledLanes, 448);
-  assert.equal(hybrid.executedDispatches, 7);
+  assert.equal(hybrid.executedDispatches, 8);
   assert.equal(spgrid.encodedIterations, 3);
   assert.equal(spgrid.executedIterations, 1);
   assert.equal(spgrid.worksets, 2);

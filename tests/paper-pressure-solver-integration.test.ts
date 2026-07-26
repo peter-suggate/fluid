@@ -126,7 +126,7 @@ test("the pipelined preconditioner remains one fixed proof-carrying V-cycle", ()
     /export type OctreePipelinedFixedPreconditioner = OctreeFirstOrderSPDVCycle/);
   assert.equal(pipelinedSource.match(/preconditioner\.encodeCorrection\(broker/g)?.length, 2);
   assert.match(hybridSource,
-    /this\.run\(pass, "formInnerResidual", resources\);[\s\S]*firstOrderVCycle\.encodeCorrection[\s\S]*this\.run\(pass, "addInnerCorrection", resources\)/,
+    /this\.runRows\(pass, "formInnerResidual", resources\);[\s\S]*firstOrderVCycle\.encodeCorrection[\s\S]*this\.runRows\(pass, "addInnerCorrection", resources\)/,
     "the L1 correction must remain between the matching L2 halves");
   assert.match(hybridSource,
     /iteration < this\.boundarySmoothingIterations[\s\S]*formInnerResidual[\s\S]*iteration < this\.boundarySmoothingIterations/,

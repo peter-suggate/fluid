@@ -15,23 +15,23 @@ import {
 import { PassBroker } from "../lib/webgpu-pass-broker";
 
 type MockBuffer = GPUBuffer & { readonly label: string; destroyed?: boolean };
+type IndirectDispatch = { readonly label: string; readonly offset: number };
 
-function wgslFunctionBody(shader: string, entryPoint: string): string {
-  const signature = new RegExp(`\\bfn\\s+${entryPoint}\\s*\\(`);
-  const match = signature.exec(shader);
-  assert.ok(match, `WGSL entry point ${entryPoint} must exist`);
-  const open = shader.indexOf("{", match.index);
-  assert.ok(open >= 0, `WGSL entry point ${entryPoint} must have a body`);
-  let depth = 0;
-  for (let index = open; index < shader.length; index += 1) {
-    if (shader[index] === "{") depth += 1;
-    if (shader[index] === "}") depth -= 1;
-    if (depth === 0) return shader.slice(open + 1, index);
-  }
-  assert.fail(`WGSL entry point ${entryPoint} has an unterminated body`);
-}
+test("the serial one-workgroup §4.3 transcription is deleted, not merely unused", () => {
+  assert.doesNotMatch(octreeSection43HybridPreconditionerShader,
+    /fn persistentCorrection/,
+    "the 128-lane serial executor must not remain as an alternate authority");
+  assert.doesNotMatch(octreeSection43HybridPreconditionerShader,
+    /var<workgroup> persistentPage/,
+    "its page-resident scratch must not keep an eleventh storage-class reservation");
+  assert.doesNotMatch(octreeSection43HybridPreconditionerShader,
+    /for\(var page=0u;page<pPageCount/,
+    "no shell kernel may walk SPGrid pages serially");
+  assert.doesNotMatch(WebGPUOctreeSection43HybridPreconditioner
+    .prototype.encodeCorrection.toString(), /persistentCorrection/);
+});
 
-test("Section 4.3 correction is one persistent dispatch with no host-side numerical loop", () => {
+test("Section 4.3 correction encodes the paper's parallel schedule", () => {
   Object.assign(globalThis, {
     GPUBufferUsage: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8, INDIRECT: 16 },
   });
@@ -40,10 +40,11 @@ test("Section 4.3 correction is one persistent dispatch with no host-side numeri
   const groupDescriptors = new Map<object, GPUBindGroupDescriptor>();
   const correctionGroups: object[] = [];
   const correctionEntryPoints: string[] = [];
+  const indirect: IndirectDispatch[] = [];
+  const bandApplySources: string[] = [];
   let innerCorrections = 0;
   let outerOperatorApplies = 0;
-  let mergedBandApplies = 0;
-  let correctionDispatches = 0;
+  let directDispatches = 0;
   let observingCorrection = false;
   const buffer = (size: number, label = "external") => ({
     size, label, destroy() { this.destroyed = true; },
@@ -77,36 +78,49 @@ test("Section 4.3 correction is one persistent dispatch with no host-side numeri
     },
   } as unknown as GPUDevice;
   const rowCount = buffer(4);
+  const firstOrderVCycle = {
+    operatorOrder: 1 as const,
+    isSymmetricPositiveDefinite: true as const,
+    convergenceTail: "gpu-zero-indirect" as const,
+    allocatedBytes: 0,
+    encodedSetupDispatchCount: 0,
+    encodedCorrectionDispatchCount: 1,
+    smootherContract: {
+      kind: "chebyshev" as const,
+      degree: 2 as const,
+      spectralBounds: "transactional-scaled-gershgorin" as const,
+      lowerFraction: 1 / 30,
+    },
+    encodeSetup() {},
+    encodeCorrection() { innerCorrections += 1; },
+  };
   const hybrid = new WebGPUOctreeSection43HybridPreconditioner(device, {
     rowCount,
-    firstOrderVCycle: {
-      operatorOrder: 1,
-      isSymmetricPositiveDefinite: true,
-      convergenceTail: "gpu-zero-indirect",
-      allocatedBytes: 0,
-      encodedSetupDispatchCount: 0,
-      encodedCorrectionDispatchCount: 1,
-      smootherContract: {
-        kind: "chebyshev",
-        degree: 2,
-        spectralBounds: "transactional-scaled-gershgorin",
-        lowerFraction: 1 / 30,
-      },
-      encodeSetup() {},
-      encodeCorrection() { innerCorrections += 1; },
-    },
+    firstOrderVCycle,
     secondOrderOperator: {
       convergenceTail: "gpu-zero-indirect",
       encodedDispatchCount: 1,
       encodedMergedBandDispatchCount: 1,
       encode() { outerOperatorApplies += 1; },
-      encodeWorksets() { assert.fail("persistent correction must not schedule class work on host"); },
-      encodeMergedBandWorkset() { mergedBandApplies += 1; },
+      encodeWorksets() { assert.fail("the compact shell must not schedule four-class band work"); },
+      encodeMergedBandWorkset(
+        _broker: PassBroker, input: GPUBuffer, output: GPUBuffer,
+        _control: GPUBuffer, _worksets: GPUBuffer, mergedDispatch: GPUBuffer,
+        _layout: GPUBuffer, mergedDispatchOffsetBytes: number,
+      ) {
+        bandApplySources.push((input as MockBuffer).label);
+        assert.equal((output as MockBuffer).label,
+          "Section 4.3 hybrid resolved L2 image");
+        assert.equal((mergedDispatch as MockBuffer).label,
+          "Section 4.3 convergence-gated compact class dispatches");
+        assert.equal(mergedDispatchOffsetBytes, 4 * 12,
+          "the shell smooths over the fifth union class record");
+      },
     },
     section63: {
       coefficients: buffer(2 * 64 * 19 * 4), control: buffer(32),
       topology: buffer(4), state: buffer(4), geometry: buffer(64 * 16),
-      metrics: buffer(64 * 16), layout: buffer(64), dispatch: buffer(12),
+      metrics: buffer(64 * 16), layout: buffer(64),
     },
   }, { rowCapacity: 64 });
   const encoder = {
@@ -119,10 +133,10 @@ test("Section 4.3 correction is one persistent dispatch with no host-side numeri
           if (observingCorrection) correctionGroups.push(group);
         },
         dispatchWorkgroups() {
-          if (observingCorrection) correctionDispatches += 1;
+          if (observingCorrection) directDispatches += 1;
         },
-        dispatchWorkgroupsIndirect() {
-          if (observingCorrection) correctionDispatches += 1;
+        dispatchWorkgroupsIndirect(target: MockBuffer, offset: number) {
+          if (observingCorrection) indirect.push({ label: target.label, offset });
         },
         end() {},
       };
@@ -136,74 +150,75 @@ test("Section 4.3 correction is one persistent dispatch with no host-side numeri
   });
   observingCorrection = false;
 
+  const sweeps = hybrid.boundarySmoothingIterations;
   assert.equal(OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS, 8);
-  assert.equal(hybrid.boundarySmoothingIterations, 8,
-    "the persistent correction must use the production k=8 matched halves");
+  assert.equal(sweeps, 8, "the correction must use the production k=8 matched halves");
   assert.ok(parameterWrites.some((words) => words[1] === 8),
     "the GPU correction parameters must receive the exact k=8 policy");
-  assert.equal(hybrid.encodedCorrectionDispatchCount, 1);
-  assert.equal(correctionDispatches, 1,
-    "one preconditioner application must encode one GPU correction dispatch");
-  assert.equal(innerCorrections, 0,
-    "the host must not enter the first-order V-cycle during correction encoding");
-  assert.equal(outerOperatorApplies, 0,
-    "the host must not enter a full L2 operator during correction encoding");
-  assert.equal(mergedBandApplies, 0,
-    "the host must not enter a smoothing loop during correction encoding");
-  const hostCorrection = WebGPUOctreeSection43HybridPreconditioner
-    .prototype.encodeCorrection.toString();
-  assert.doesNotMatch(hostCorrection, /\b(?:for|while)\s*\(/,
-    "the persistent correction's numerical loops belong in WGSL");
 
-  assert.equal(correctionEntryPoints.length, 1);
-  const correctionBody = wgslFunctionBody(
-    octreeSection43HybridPreconditionerShader,
-    correctionEntryPoints[0]!,
-  );
-  const markers = [
-    "§4.3(1)",
-    "§4.3(2)",
-    "§4.3(3)",
-  ] as const;
-  let previous = -1;
-  for (const marker of markers) {
-    assert.equal(correctionBody.split(marker).length - 1, 1,
-      `${marker} must mark exactly one phase boundary`);
-    const index = correctionBody.indexOf(marker);
-    assert.ok(index > previous,
-      `${marker} must occur in exact pre-smooth, L1, post-smooth order`);
-    previous = index;
-  }
-  const preSmooth = correctionBody.slice(
-    correctionBody.indexOf(markers[0]), correctionBody.indexOf(markers[1]),
-  );
-  const postSmooth = correctionBody.slice(
-    correctionBody.indexOf(markers[2]),
-  );
-  assert.match(preSmooth,
-    /for\s*\(var sweep\s*=\s*1u;\s*sweep\s*<\s*params\.smoothingIterations;/,
-    "the explicit zero-vector first sweep plus seven loop sweeps must produce pre k=8");
-  assert.match(postSmooth,
-    /for\s*\(var sweep\s*=\s*0u;\s*sweep\s*<\s*params\.smoothingIterations;/,
-    "the post half must execute all eight matching sweeps");
+  // The zero-vector first sweep needs no operator image; every later sweep in
+  // both halves consumes one, so the shell performs exactly 2k-1 band applies.
+  assert.equal(bandApplySources.length, 2 * sweeps - 1);
+  assert.equal(hybrid.workAccountingPlan.mergedBandApplies, 2 * sweeps - 1);
+  assert.deepEqual(bandApplySources, [
+    ...Array.from({ length: sweeps - 1 }, (_unused, index) =>
+      (((index + 1) & 1) === 1 ? "B" : "A")),
+    ...Array.from({ length: sweeps }, (_unused, index) =>
+      ((index & 1) === 0 ? "B" : "A")),
+  ].map((state) => `Section 4.3 hybrid L2 iterate ${state}`),
+  "each apply must target the state its following smooth reads");
+  assert.equal(innerCorrections, 1,
+    "the page-parallel first-order V-cycle runs once between the matched halves");
+  assert.equal(outerOperatorApplies, 1,
+    "the inner residual needs one exact row-wide L2 apply of p1");
+
+  assert.deepEqual(correctionEntryPoints, [
+    "prepareCorrectionDispatches",
+    "smoothZeroToB",
+    ...Array.from({ length: sweeps - 1 }, (_unused, index) =>
+      (((index + 1) & 1) === 1 ? "smoothBtoA" : "smoothAtoB")),
+    "formInnerResidual",
+    "addInnerCorrection",
+    ...Array.from({ length: sweeps }, (_unused, index) =>
+      ((index & 1) === 0 ? "smoothBtoA" : "smoothAtoB")),
+    "publishCorrection",
+  ]);
+  assert.equal(directDispatches, 1,
+    "only the convergence-gate publisher is a direct singleton dispatch");
+  assert.equal(indirect.length, 2 * sweeps + 3);
+  const rowRecord = "Section 4.3 convergence-gated row dispatch";
+  const bandRecord = "Section 4.3 convergence-gated compact class dispatches";
+  assert.deepEqual(indirect.filter((entry) => entry.label === rowRecord),
+    Array.from({ length: 4 }, () => ({ label: rowRecord, offset: 0 })),
+    "the four row-wide stages consume the convergence-gated accepted-row record");
+  assert.deepEqual(indirect.filter((entry) => entry.label === bandRecord),
+    Array.from({ length: 2 * sweeps - 1 },
+      () => ({ label: bandRecord, offset: 4 * 12 })),
+    "every shell smooth consumes the convergence-gated union class record");
+  // Gate + four row stages + 2k-1 smooths + 2k-1 merged applies + one exact
+  // apply + the inner V-cycle. A converged solve encodes all of them and
+  // dispatches zero workgroups.
+  assert.equal(hybrid.encodedCorrectionDispatchCount,
+    5 + 2 * (2 * sweeps - 1) + 1 + 1);
+  assert.equal(hybrid.encodedCorrectionDispatchCount,
+    directDispatches + indirect.length + bandApplySources.length
+      + outerOperatorApplies + innerCorrections);
 
   const storageBindings = new Set(Array.from(
     octreeSection43HybridPreconditionerShader.matchAll(
       /@group\(0\)\s*@binding\((\d+)\)\s*var<storage\b/g,
     ), (match) => Number(match[1])));
-  const usedGroups = [...new Set(correctionGroups)];
-  assert.equal(usedGroups.length, 1,
-    "the persistent correction dispatch must bind one fused resource set");
-  const storageBindingCount = usedGroups.reduce((count, group) => count
-    + [...groupDescriptors.get(group)!.entries]
-      .filter((entry) => storageBindings.has(entry.binding)).length, 0);
-  assert.ok(storageBindingCount <= 10,
-    `persistent correction uses ${storageBindingCount} storage bindings; target limit is 10`);
+  for (const group of new Set(correctionGroups)) {
+    const used = [...groupDescriptors.get(group)!.entries]
+      .filter((entry) => storageBindings.has(entry.binding)).length;
+    assert.ok(used <= 10,
+      `a correction stage uses ${used} storage bindings; the portable limit is 10`);
+  }
   hybrid.destroy();
   assert.ok(buffers.every((candidate) => candidate.destroyed));
 });
 
-test("persistent Section 4.3 correction does not change the ten-step outer convergence gate", () => {
+test("the parallel Section 4.3 correction does not change the ten-step outer convergence gate", () => {
   const plan = planOctreePipelinedMGPCG({ rowCapacity: 64, maximumIterations: 10 });
   assert.equal(plan.maximumIterations, 10);
   assert.equal(plan.dispatchRecordCount,
