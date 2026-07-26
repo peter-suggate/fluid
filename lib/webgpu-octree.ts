@@ -2675,11 +2675,12 @@ export class WebGPUOctreeProjection {
     // departure sampler here can only reject boundary stencils that no
     // positive-time characteristic ever requested.
     if (this.powerTimestep_s > 0) dynamics.encodeAdvection(broker, this.powerTimestep_s);
-    dynamics.encodeForcesAndDivergence(broker, this.powerTimestep_s, [
-      this.scene.fluid.gravity_m_s2.x,
-      this.scene.fluid.gravity_m_s2.y,
-      this.scene.fluid.gravity_m_s2.z,
-    ]);
+    dynamics.encodeForcesAndDivergence(
+      broker, this.powerTimestep_s, this.scene.fluid.density_kg_m3, [
+        this.scene.fluid.gravity_m_s2.x,
+        this.scene.fluid.gravity_m_s2.y,
+        this.scene.fluid.gravity_m_s2.z,
+      ]);
     splitProductionPhase(undefined, "structuredAdvectionBoundaryRhs");
     const pass = broker.compute({ label: "Publish physical power-cell volumes" });
     pass.setPipeline(volumePipeline); pass.setBindGroup(0, volumeGroup);

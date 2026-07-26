@@ -82,7 +82,10 @@ export interface StructuredDynamicsResources {
   readonly divergenceRhs: GPUBuffer;
   /** Accepted dynamic-boundary classification, one u32 liquid bit per banked row. */
   readonly liquidMask: GPUBuffer;
-  /** Required normal velocity of the solid boundary, one f32 per family handle. */
+  /** Required normal velocity of the solid boundary, one f32 per family handle
+   * in each of the two structured banks. The boundary producer writes the bank
+   * named by the accepted structured publication, so every read here must apply
+   * the same `bank()*slotCapacity` base. */
   readonly solidNormalVelocities: GPUBuffer;
   /** Current-step boundary-class worksets and their fail-closed publication. */
   readonly boundaryWorksets: GPUBuffer;
@@ -141,7 +144,7 @@ export class WebGPUStructuredVelocityDynamics {
       || resources.pressure.size < structured.plan.rowCapacity * 4
       || resources.divergenceRhs.size < structured.plan.rowCapacity * 4
       || resources.liquidMask.size < structured.plan.rowCapacity * 2 * 4
-      || resources.solidNormalVelocities.size < structured.plan.slotCapacity * 4
+      || resources.solidNormalVelocities.size < structured.plan.slotCapacity * 2 * 4
       || !Number.isSafeInteger(resources.selectorStride) || resources.selectorStride < 1
       || !Number.isSafeInteger(resources.selectorOffsetWords) || resources.selectorOffsetWords < 0
       || resources.selectorRows.size < (resources.selectorOffsetWords
@@ -287,10 +290,16 @@ export class WebGPUStructuredVelocityDynamics {
       "Advect structured family class");
   }
 
-  encodeForcesAndDivergence(broker: PassBroker, dt: number,
+  // The divergence RHS is dimensional: rhs = rho*flux/dt. `encodeProjection`
+  // undoes it as v -= dt*grad(p)/rho, so both halves must be given the SAME
+  // density. Passing 1 here while the projection received the scene density
+  // scaled every pressure gradient by 1/rho, so the projection removed ~0.1%
+  // of the divergence: the column free-fell under gravity but no horizontal
+  // momentum was ever generated and the dam front did not advance.
+  encodeForcesAndDivergence(broker: PassBroker, dt: number, density: number,
     gravity: readonly [number, number, number]): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
-    const params = this.update(1, dt, 1, gravity); this.encodePrepare(broker, params);
+    const params = this.update(1, dt, density, gravity); this.encodePrepare(broker, params);
     this.encodeClasses(broker, this.force, FAMILY_CLASSES, [0, 1, 2, 11, 17, 22], params,
       "Force and constrain structured family class");
     this.encodeProjectionEnergy(broker, params, "pre");
@@ -368,6 +377,7 @@ fn bank()->u32{return acc(4u)&1u;}
 fn abase()->u32{return bank()*p.authorityWords;}
 fn rbase()->u32{return bank()*p.rowCapacity;}
 fn lbase()->u32{return bank()*p.rowCapacity;}
+fn sbase()->u32{return bank()*p.slotCapacity;}
 fn wbase(cls:u32)->u32{return bank()*p.worksetBankStride+cls*p.worksetStride;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<=vec3f(3.402823e38));}
@@ -403,6 +413,7 @@ fn normal(handle:u32)->vec3f{let at=abase()+p.normalOffset+4u*handle;return vec3
 fn centroid(handle:u32)->vec3f{let at=abase()+p.centroidOffset+4u*handle;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}
 fn rowSlotCount(row:u32)->u32{return caseHeader(metrics[row].caseId).y;}
 fn liquidAt(row:u32)->u32{return liquid[lbase()+row];}
+fn solidVelocityAt(handle:u32)->f32{return solidNormalVelocities[sbase()+handle];}
 fn velocitySample(row:u32)->vec4f{
   if(row>=acc(2u)){return invalidVector();}
   // Section 5 advection consumes the previous projected and extended field.
@@ -578,7 +589,7 @@ fn advect(cls:u32,index:u32,transition:bool){
   // A fully prescribed face has no transported degree of freedom. Publish
   // the exact solid boundary value before any characteristic sampling.
   if(aperture==0.){
-    let solid=solidNormalVelocities[handle];
+    let solid=solidVelocityAt(handle);
     let n=normal(handle);
     let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
     if(!finite(solid)||!finite3(n)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
@@ -691,7 +702,7 @@ fn forceFamily(cls:u32,index:u32){
   let handle=workItem(cls,index);
   if(handle==INVALID||handle>=acc(5u)){return;}
   let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
-  let solid=solidNormalVelocities[handle];
+  let solid=solidVelocityAt(handle);
   if(!finite(aperture)||aperture<0.||aperture>1.||!finite(solid)){rejectSample(10u,handle);return;}
   if(aperture==0.){setValue(handle,solid);return;}
   let forced=value(handle)+p.physical.y*dot(p.gravity.xyz,normal(handle));
@@ -717,7 +728,7 @@ fn divergenceRow(cls:u32,index:u32){
     let sign=f32(bitcast<i32>(a[abase()+p.rowSignOffset+at]));
     let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
     let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
-    let solid=solidNormalVelocities[handle];
+    let solid=solidVelocityAt(handle);
     let sample=value(handle);
     if(!finite(sign)||!finite(area)||!finite(aperture)||aperture<0.||aperture>1.||!finite(solid)||!finite(sample)){rhs[row]=0.;rejectSample(22u,row);return;}
     flux+=sign*area*(aperture*sample+(1.-aperture)*solid);
@@ -750,7 +761,7 @@ fn projectFamily(cls:u32,index:u32){
   let n=normal(handle);
   if(!finite3(n)){rejectSample(31u,handle);return;}
   let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
-  let solid=solidNormalVelocities[handle];
+  let solid=solidVelocityAt(handle);
   if(!finite(aperture)||aperture<0.||aperture>1.||!finite(solid)){rejectSample(32u,handle);return;}
   var projected=solid;
   if(aperture>0.){

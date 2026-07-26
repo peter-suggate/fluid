@@ -4,6 +4,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { unpackOctreePowerRowTemplateSlot } from "../lib/octree-power-catalog";
 import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
+import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
 import {
   decodeStructuredProjectionEnergy,
   STRUCTURED_PROJECTION_ENERGY_WORDS,
@@ -12,6 +13,33 @@ import {
 
 const dynamicsSource = readFileSync(new URL("../lib/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
 const dynamicsHost = dynamicsSource.slice(0, dynamicsSource.indexOf("export const structuredVelocityDynamicsWGSL"));
+
+/** Every `name[...]` subscript expression in a WGSL source, in source order. */
+function indexExpressions(wgsl: string, name: string): readonly string[] {
+  const found: string[] = [];
+  const opening = new RegExp(String.raw`(?<![A-Za-z0-9_])${name}\[`, "g");
+  for (let match = opening.exec(wgsl); match; match = opening.exec(wgsl)) {
+    let depth = 0, end = opening.lastIndex;
+    while (end < wgsl.length && !(wgsl[end] === "]" && depth === 0)) {
+      if (wgsl[end] === "[") depth += 1; else if (wgsl[end] === "]") depth -= 1;
+      end += 1;
+    }
+    found.push(wgsl.slice(opening.lastIndex, end));
+  }
+  return found;
+}
+
+/** Evaluate a stage's `sbase()` body with its own uniform names resolved, so a
+ * reader and a writer that disagree about the slot bank stride cannot both pass. */
+function slotBankBase(wgsl: string, bank: number, slotCapacity: number): number {
+  const body = /fn sbase\(\)->u32\{return ([^;]+);\}/.exec(wgsl);
+  assert.ok(body, "both structured stages must name the slot bank base `sbase()`");
+  const resolved = body[1]!.replace(/control\.bank|bank\(\)/g, String(bank))
+    .replace(/p\.counts\.y|p\.slotCapacity/g, String(slotCapacity));
+  assert.match(resolved, /^[0-9* ]+$/,
+    `the slot bank base must be a pure bank-times-slot-capacity product, got ${body[1]}`);
+  return resolved.split("*").reduce((product, term) => product * Number(term), 1);
+}
 
 const entries = ["prepareStructuredDynamics",
   "summarizeStructuredPreProjectionEnergy", "summarizeStructuredPostProjectionEnergy",
@@ -206,7 +234,9 @@ test("moving-solid flux is mandatory and liquid classification follows the accep
   assert.doesNotMatch(structuredVelocityDynamicsWGSL, /liquid\[(?!lbase\(\)\+row)/);
   assert.match(structuredVelocityDynamicsWGSL,
     /binding\(22\)var<storage,read>solidNormalVelocities:array<f32>/);
-  assert.match(dynamicsHost, /resources\.solidNormalVelocities\.size < structured\.plan\.slotCapacity \* 4/);
+  assert.match(dynamicsHost,
+    /resources\.solidNormalVelocities\.size < structured\.plan\.slotCapacity \* 2 \* 4/,
+    "the reader must require both banks, because bank 1 is the one it reads on odd generations");
   assert.match(dynamicsHost, /resources\.liquidMask\.size < structured\.plan\.rowCapacity \* 2 \* 4/);
   assert.match(structuredVelocityDynamicsWGSL, /if\(aperture==0\.\)\{setValue\(handle,solid\);return;\}/);
   assert.match(structuredVelocityDynamicsWGSL,
@@ -216,6 +246,32 @@ test("moving-solid flux is mandatory and liquid classification follows the accep
   assert.doesNotMatch(structuredVelocityDynamicsWGSL,
     /pressureHi-pressureLo\)[^;\n]*\*aperture/,
     "aperture belongs in the flux, not twice in the pressure-gradient projection");
+});
+
+test("prescribed solid normal velocities are read from the bank the boundary wrote", () => {
+  // `beginStructuredPublication` alternates the active bank on every accepted
+  // publication (webgpu-octree-structured-velocity-gpu.ts, activeBank =
+  // 1u-acceptedControl[4]), so an unbanked read silently consumes the previous
+  // generation's slot numbering. A static container hides it because bank 0 is
+  // all zeros and zero is the correct prescribed value; a moving solid does not.
+  assert.deepEqual(indexExpressions(structuredBoundaryCoefficientWGSL, "solidVelocity"),
+    ["sbase()+h"], "the boundary producer must publish into the active structured bank");
+  assert.deepEqual(indexExpressions(structuredVelocityDynamicsWGSL, "solidNormalVelocities"),
+    ["sbase()+handle"],
+    "every prescribed-solid read must go through the single banked accessor, not a raw handle");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn solidVelocityAt\(handle:u32\)->f32\{return solidNormalVelocities\[sbase\(\)\+handle\];\}/,
+    "advection, forcing, divergence, and projection must share one banked accessor");
+  assert.equal((structuredVelocityDynamicsWGSL.match(/solidVelocityAt\(handle\)/g) ?? []).length, 4);
+  for (const bank of [0, 1]) {
+    assert.equal(slotBankBase(structuredVelocityDynamicsWGSL, bank, 4096),
+      slotBankBase(structuredBoundaryCoefficientWGSL, bank, 4096),
+      "reader and writer must derive the solid-velocity slot base from the same expression");
+  }
+  assert.equal(slotBankBase(structuredVelocityDynamicsWGSL, 1, 4096), 4096,
+    "bank 1 must be one whole slot capacity away, never aliased onto bank 0");
+  assert.match(structuredVelocityDynamicsWGSL, /fn sbase\(\)->u32\{return bank\(\)\*p\.slotCapacity;\}/,
+    "the reader's bank must be the accepted structured bank that boundaryValid() pins");
 });
 
 test("invalid divergence inputs publish a finite neutral RHS and invalidate the authority", () => {
@@ -245,6 +301,30 @@ test("invalid divergence inputs publish a finite neutral RHS and invalidate the 
   const operatorImage = -density * flux / dt;
   const projectedFlux = flux + dt * operatorImage / density;
   assert.equal(projectedFlux, 0);
+});
+
+test("the divergence RHS and the projection are given the same density", () => {
+  // The cancellation above only holds when BOTH halves receive the same rho.
+  // A literal density in either `update` call silently rescales every pressure
+  // gradient: with rhs built at rho=1 and the projection dividing by the scene
+  // density, the projection removed 1/rho of the divergence, so the dam column
+  // free-fell but its bottom front never advanced. Pin the plumbing, not just
+  // the arithmetic.
+  assert.match(dynamicsHost,
+    /encodeForcesAndDivergence\(broker: PassBroker, dt: number, density: number,/,
+    "encodeForcesAndDivergence must take the density from its caller");
+  for (const stage of [1, 2]) {
+    assert.match(dynamicsHost, new RegExp(`this\\.update\\(${stage}, dt, density,`),
+      `stage ${stage} must forward the caller's density, never a literal`);
+  }
+
+  const host = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  for (const call of ["encodeForcesAndDivergence", "encodeProjection"]) {
+    const at = host.indexOf(`dynamics.${call}(`);
+    assert.ok(at > 0, `${call} must be called from the production encode path`);
+    assert.match(host.slice(at, at + 240), /this\.scene\.fluid\.density_kg_m3/,
+      `${call} must be passed the scene density`);
+  }
 });
 
 test("structured sampling rejects incomplete selectors, neighbors, and tetrahedra", () => {
