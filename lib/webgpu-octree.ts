@@ -761,8 +761,14 @@ type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
     persistentEnabled: boolean; persistentMaximumIterations: number }>;
   encodeCapture(broker: PassBroker): void;
   readonly candidateControl: GPUBuffer;
+  // `dispatch` is the per-level dispatch metadata the Section 4.3 shell reads as
+  // `spgridDispatch` (binding 26) for pCount/pPageCount/pTransferCount. The
+  // implementation already returns it; omitting it here narrowed it away from
+  // the spread below, so the preconditioner's source was missing a member it
+  // declares as required.
   readonly section63Topology: Readonly<{
     topology: GPUBuffer; state: GPUBuffer; geometry: GPUBuffer; layout: GPUBuffer;
+    dispatch: GPUBuffer;
   }>;
   encodeCandidateSetup(broker: PassBroker, input: { solverControl: GPUBuffer; rowCount: GPUBuffer;
     sourceControl: GPUBuffer; topologyMetrics: GPUBuffer }): void;

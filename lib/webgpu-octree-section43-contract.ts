@@ -39,6 +39,13 @@ export interface OctreePersistentMGPCGExecutor {
 export interface OctreeFirstOrderSPDVCycle {
   readonly operatorOrder: 1;
   readonly isSymmetricPositiveDefinite: true;
+  /**
+   * Post-convergence iterations must dispatch zero workgroups rather than be
+   * skipped at encode time. The preconditioner enforces this on its inner
+   * cycle; declaring it here is what lets that check read the member directly
+   * instead of casting the contract away.
+   */
+  readonly convergenceTail: "gpu-zero-indirect";
   readonly allocatedBytes: number;
   readonly encodedCorrectionDispatchCount: number;
   readonly encodedSetupDispatchCount?: number;
