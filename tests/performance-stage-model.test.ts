@@ -5,7 +5,7 @@ import {
   CPUPerformanceTrace,
   decodeGPUTimestampPartition,
   GPUQueueWallPerformanceTraceRecorder,
-  GPUSegmentedQueueWallPerformanceTraceRecorder,
+  GPUStageTimestampRecorder,
   averagePerformanceTraces,
   partitionPerformanceTrace,
   performanceTraceAccounting,
@@ -156,44 +156,98 @@ test("GPU queue-wall fallback publishes an exact sample when timestamps are unav
   assert.equal(performanceTraceMatchesLane(trace, "gpu", "presentation"), true);
 });
 
-test("segmented queue-wall fallback measures every semantic phase", async () => {
-  let encoderId = 0;
-  const commandBuffers: Array<{ id: number }> = [];
-  const makeEncoder = () => {
-    const id = ++encoderId;
-    return { finish: () => ({ id }) } as unknown as GPUCommandEncoder;
-  };
+/** Minimal recording device: enough for the stage recorder's query set, its
+ * staging buffers, the marker pipeline, and a scripted resolved timestamp set. */
+function stageTimestampHarness(resolvedTimestamps_ns: readonly bigint[]) {
+  const scope = globalThis as Record<string, unknown>;
+  scope.GPUBufferUsage ??= { QUERY_RESOLVE: 1, COPY_SRC: 2, COPY_DST: 4, MAP_READ: 8 };
+  scope.GPUMapMode ??= { READ: 1 };
+  const passes: Array<{ label?: string; timestampWrites?: { beginningOfPassWriteIndex?: number } }> = [];
+  const encoderBreaks: number[] = [];
+  const resolves: Array<{ first: number; count: number }> = [];
+  const pass = { setPipeline() {}, dispatchWorkgroups() {}, end() {} };
+  const buffer = () => ({
+    destroy() {},
+    mapState: "unmapped" as GPUBufferMapState,
+    mapAsync: async () => undefined,
+    getMappedRange: () => BigUint64Array.from(resolvedTimestamps_ns).buffer,
+    unmap() {},
+  });
   const device = {
-    createCommandEncoder: () => makeEncoder(),
+    features: new Set(["timestamp-query"]),
+    createQuerySet: () => ({ destroy() {} }),
+    createBuffer: buffer,
+    createShaderModule: () => ({}),
+    createComputePipeline: () => ({}),
   } as unknown as GPUDevice;
-  const times = [10, 13, 18];
-  const recorder = new GPUSegmentedQueueWallPerformanceTraceRecorder(
-    device,
-    14,
-    "physics",
-    "octree:balanced",
-    () => times.shift()!,
-  );
-  let encoder = recorder.completePhase(makeEncoder(), {
-    id: "coarse-grid",
-    label: "Adaptive coarse-grid topology",
-  });
-  encoder = recorder.completePhase(encoder, {
-    id: "pressure-solve",
-    label: "Pressure solve",
-  });
-  const trace = await recorder.read({
-    submit: ([commandBuffer]) => {
-      commandBuffers.push(commandBuffer as unknown as { id: number });
+  const encoder = {
+    beginComputePass(descriptor?: GPUComputePassDescriptor) { passes.push({ ...descriptor }); return pass; },
+    beginRenderPass(descriptor: GPURenderPassDescriptor) { passes.push({ ...descriptor }); return pass; },
+    copyBufferToBuffer(_source: GPUBuffer, _sourceOffset: number, _destination: GPUBuffer, _destinationOffset: number, size: number) {
+      encoderBreaks.push(size);
     },
-    onSubmittedWorkDone: async () => undefined,
-  });
-  assert.equal(trace.measurementSource, "gpu-segmented-queue-wall");
+    resolveQuerySet(_set: GPUQuerySet, first: number, count: number) { resolves.push({ first, count }); },
+  } as unknown as GPUCommandEncoder;
+  return { device, encoder, passes, encoderBreaks, resolves };
+}
+
+test("stage boundaries ride the frame's own passes and add one marker in total", async () => {
+  const harness = stageTimestampHarness([1_000_000n, 4_000_000n, 9_000_000n]);
+  const recorder = new GPUStageTimestampRecorder(harness.device, 14, "physics", "octree:balanced");
+  const encoder = recorder.instrument(harness.encoder);
+  recorder.begin();
+  encoder.beginComputePass({ label: "Structured advection" }).end();
+  recorder.completePhase(encoder, { id: "velocity-advection", label: "Velocity advection" });
+  // A stage that encoded nothing must not consume a boundary of its own.
+  recorder.completePhase(encoder, { id: "pressure-system", label: "Row assembly" });
+  encoder.beginComputePass({ label: "MGPCG" }).end();
+  recorder.completePhase(encoder, { id: "pressure-solve", label: "Pressure solve" });
+  recorder.resolve(encoder);
+
+  assert.deepEqual(harness.passes.map((entry) => entry.label),
+    ["Structured advection", "MGPCG", "GPU stage trace close"],
+    "only the closing boundary needs a pass of its own");
+  assert.deepEqual(harness.passes.map((entry) => entry.timestampWrites?.beginningOfPassWriteIndex), [0, 1, 2]);
+  assert.deepEqual(harness.encoderBreaks, [4, 4, 4, 24],
+    "one 4-byte blit forces each boundary's encoder break, then one staging copy of the resolved set");
+  assert.deepEqual(harness.resolves, [{ first: 0, count: 3 }]);
+
+  const trace = await recorder.read();
+  assert.ok(trace);
+  assert.equal(trace.measurementSource, "gpu-hardware-timestamp");
   assert.equal(trace.total_ms, 8);
-  assert.deepEqual(trace.phases.map((phase) => phase.duration_ms), [3, 5]);
-  assert.equal(commandBuffers.length, 2);
+  assert.deepEqual(trace.phases.map((phase) => [phase.id, phase.duration_ms]),
+    [["velocity-advection", 3], ["pressure-solve", 5]],
+    "the empty stage closes at exactly zero and is dropped from the partition");
   assert.equal(performanceTraceClosureError_ms(trace), 0);
   assert.equal(performanceTraceMatchesLane(trace, "gpu", "physics"), true);
+});
+
+test("a pass that already carries timestamp writes is never displaced", async () => {
+  const harness = stageTimestampHarness([2_000_000n, 5_000_000n]);
+  const recorder = new GPUStageTimestampRecorder(harness.device, 15, "presentation", "svo");
+  const encoder = recorder.instrument(harness.encoder);
+  recorder.begin();
+  const foreign = { querySet: undefined as unknown as GPUQuerySet, beginningOfPassWriteIndex: 7 };
+  encoder.beginComputePass({ label: "Owned elsewhere", timestampWrites: foreign }).end();
+  encoder.beginComputePass({ label: "Dry scene" }).end();
+  recorder.completePhase(encoder, { id: "dry-scene", label: "Dry scene" });
+  recorder.resolve(encoder);
+  assert.equal(harness.passes[0].timestampWrites?.beginningOfPassWriteIndex, 7);
+  assert.equal(harness.passes[1].timestampWrites?.beginningOfPassWriteIndex, 0);
+  const trace = await recorder.read();
+  assert.equal(trace?.total_ms, 3);
+});
+
+test("an unusable hardware sample yields no trace instead of a wrong one", async () => {
+  const harness = stageTimestampHarness([0n, 5_000_000n]);
+  const recorder = new GPUStageTimestampRecorder(harness.device, 16, "physics", "octree");
+  const encoder = recorder.instrument(harness.encoder);
+  recorder.begin();
+  encoder.beginComputePass({ label: "Folded to nothing" }).end();
+  recorder.completePhase(encoder, { id: "pressure-solve", label: "Pressure solve" });
+  recorder.resolve(encoder);
+  assert.equal(await recorder.read(), undefined);
 });
 
 test("averaging never invents a negative phase from floating-point dust", () => {

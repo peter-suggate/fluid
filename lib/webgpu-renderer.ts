@@ -42,9 +42,8 @@ import { planSceneRuntime } from "./scene-runtime";
 import type { GPUFailureReproduction } from "./webgpu-failure-reproduction";
 import {
   CPUPerformanceTrace,
-  DynamicGPUPerformanceTraceRecorder,
-  GPUPerformanceTraceRecorder,
   GPUQueueWallPerformanceTraceRecorder,
+  GPUStageTimestampRecorder,
   type GPUTimestampPhase,
   type PerformanceTrace,
 } from "./performance-trace";
@@ -470,6 +469,9 @@ export class FluidLabRenderer {
   private presentationTraceSampleId = 0;
   private lastPresentationTraceAt_ms = -Infinity;
   private presentationTracePending = false;
+  /** One unusable hardware sample retires the stage recorder for this device;
+   * the non-invasive queue-wall observation takes over. */
+  private hardwarePresentationTraceInvalid = false;
   private latestPresentationTrace?: PerformanceTrace;
   /** Polled by the paused viewport; each successful transactional source attach requests one repaint. */
   private pausedPresentationRevision = 0;
@@ -880,6 +882,19 @@ export class FluidLabRenderer {
     this.preparedGPUBodies = [];
   }
 
+  /**
+   * In-flight advances the queue should hold. Without a measured step this is
+   * the documented bootstrap of two, which is exactly enough to keep one
+   * advance executing while the next waits — so completion-callback latency
+   * never reaches the device, with or without instrumentation.
+   */
+  private preparedGPUQueueDepth(fluid: GPUSolverInstance) {
+    return presentationPhysicsQueueDepth(
+      observedGPUAdvanceTime_ms(fluid.info.physicsTrace),
+      this.latestPresentationTrace?.total_ms ?? 0,
+    );
+  }
+
   /** Begin a new controller timeline before any old GPU completion can commit. */
   resetSimulationTimeline(): void {
     if (this.disposed || this.deviceLost) return;
@@ -1138,13 +1153,12 @@ export class FluidLabRenderer {
     // here can put hundreds of milliseconds of GPU work between presentations.
     if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches, maximumPendingAdvances)) return fluid.info;
     const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
-    const advanceCompletion = fluid.pendingAdvanceCompletion;
     if (submittedTime > previousSubmittedTime) {
       const generation = this.gpuFluidGeneration;
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
       fluid.info.gpuInFlightSimulation_s = Math.max(0, submittedTime - (fluid.info.completedTime_s ?? 0));
-      void (advanceCompletion ?? device.queue.onSubmittedWorkDone()).then(() => {
+      void device.queue.onSubmittedWorkDone().then(() => {
         if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
         this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
         fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
@@ -1161,13 +1175,23 @@ export class FluidLabRenderer {
     return fluid.info;
   }
 
-  /** Keep the GPU occupied with a rolling advance, but yield at the 60 Hz presentation boundary. */
+  /**
+   * Refill the queue back to its rolling in-flight ceiling.
+   *
+   * An empty queue is never the right state for a GPU-limited solver: the next
+   * refill would then have to wait for an animation-frame callback, which is
+   * most of the gap between this lane and the Dawn harness. This used to gate
+   * on presentation slack, but slack is a presentation-deadline guard, not
+   * evidence about the queue — and it is unsatisfiable until a physics trace
+   * exists, so an uninstrumented session never refilled at all. The ceiling
+   * still bounds Reset's drain to the same depth the presentation path admits.
+   */
   private continuePreparedGPUWork(fluid: GPUSolverInstance, generation: number) {
     if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
-    if (!this.simulationRunning || this.gpuPendingBatches > 0 || this.presentationPending) return;
-    const observedStep_ms=observedGPUAdvanceTime_ms(fluid.info.physicsTrace);
-    if (!presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, this.latestPresentationTrace?.total_ms ?? 0)) return;
-    this.submitPreparedGPUFluid(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
+    if (!this.simulationRunning) return;
+    const depth = this.preparedGPUQueueDepth(fluid);
+    if (this.gpuPendingBatches >= depth) return;
+    this.submitPreparedGPUFluid(fluid, this.preparedGPUTime_s, this.preparedGPUBodies, depth);
   }
 
   private uploadFluid(fluid?: EulerianRenderState) {
@@ -1271,9 +1295,19 @@ export class FluidLabRenderer {
       this.voxelDebugSourceGeneration = requestedVoxelDebugGeneration;
     }
     if (readyGPUFluid) { this.preparedGPUTime_s = Math.max(this.preparedGPUTime_s, time_s); this.preparedGPUBodies = bodies; }
-    if (this.presentationPending) return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
-    const observedStep_ms=measurementInstrumentationEnabled?observedGPUAdvanceTime_ms(readyGPUFluid?.info.physicsTrace):undefined;
-    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, measurementInstrumentationEnabled ? this.latestPresentationTrace?.total_ms ?? 0 : 0);
+    if (this.presentationPending) {
+      // One presentation at a time, but physics keeps flowing. Returning here
+      // without admitting work used to leave the device idle for the rest of
+      // the interval, because the presentation fence covers the whole queue.
+      if (readyGPUFluid) {
+        if (pausedTargetRequiresGPUAdvance(this.simulationRunning, time_s, readyGPUFluid.info.submittedTime_s ?? 0)) {
+          this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
+        } else this.continuePreparedGPUWork(readyGPUFluid, this.gpuFluidGeneration);
+      }
+      return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
+    }
+    const observedStep_ms=observedGPUAdvanceTime_ms(readyGPUFluid?.info.physicsTrace);
+    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, this.latestPresentationTrace?.total_ms ?? 0);
     let gpuInfo = readyGPUFluid?.info;
     const explicitPausedAdvance = readyGPUFluid && pausedTargetRequiresGPUAdvance(this.simulationRunning, time_s, readyGPUFluid.info.submittedTime_s ?? 0);
     if (readyGPUFluid && (explicitPausedAdvance || !renderBeforePhysics)) gpuInfo = this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
@@ -1390,7 +1424,6 @@ export class FluidLabRenderer {
     this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: 0.5 });
     cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
-    const encoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     const shouldTracePresentation = measurementInstrumentationEnabled
       && !this.presentationTracePending
       && traceRequestedAt_ms - this.lastPresentationTraceAt_ms >= 250;
@@ -1401,25 +1434,14 @@ export class FluidLabRenderer {
       && voxelRenderMode === "smooth"
       && svoLightingMode === "cone";
     const presentationTrace = shouldTracePresentation
-      && !traceDetailedSvoRenderPath
-      && GPUPerformanceTraceRecorder.supported(this.device)
-      ? new GPUPerformanceTraceRecorder(
+      && !this.hardwarePresentationTraceInvalid
+      && GPUStageTimestampRecorder.supported(this.device)
+      ? new GPUStageTimestampRecorder(
         this.device,
         presentationTraceSampleId,
         "presentation",
         presentationContext,
-        PRESENTATION_TRACE_PHASES,
-      )
-      : undefined;
-    const detailedPresentationTrace = shouldTracePresentation
-      && traceDetailedSvoRenderPath
-      && GPUPerformanceTraceRecorder.supported(this.device)
-      ? new DynamicGPUPerformanceTraceRecorder(
-        this.device,
-        presentationTraceSampleId,
-        "presentation",
-        presentationContext,
-        32,
+        64,
       )
       : undefined;
     const presentationQueueTrace = shouldTracePresentation
@@ -1429,8 +1451,20 @@ export class FluidLabRenderer {
         presentationContext,
       )
       : undefined;
-    presentationTrace?.boundary(encoder, "Presentation trace start");
-    detailedPresentationTrace?.begin(encoder);
+    // Boundaries ride the presentation's own passes, so the traced frame and
+    // the untraced frame submit the same command graph.
+    const rawEncoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
+    const encoder = presentationTrace?.instrument(rawEncoder) ?? rawEncoder;
+    presentationTrace?.begin();
+    const detailedPresentationTrace = traceDetailedSvoRenderPath ? presentationTrace : undefined;
+    // The SVO cone path names its own stages; every other path walks the fixed
+    // presentation partition in encode order.
+    let fixedPresentationPhase = 0;
+    const closeFixedPresentationPhase = () => {
+      const phase = PRESENTATION_TRACE_PHASES[fixedPresentationPhase];
+      fixedPresentationPhase += 1;
+      if (phase && !traceDetailedSvoRenderPath) presentationTrace?.completePhase(encoder, phase);
+    };
     const completeDetailedPresentationPhase = (phase: GPUTimestampPhase) =>
       detailedPresentationTrace?.completePhase(encoder, phase);
     // A raw/brick toggle while paused still needs one fresh materialization;
@@ -1475,7 +1509,7 @@ export class FluidLabRenderer {
       gpuInfo?.gridKind === "restricted-tall-cell", gpuInfo?.maximumNeighborDelta ?? 0,
       gpuInfo?.encodedSteps ?? fluid?.revision ?? 0,
       drySceneReplacement,
-      () => presentationTrace?.boundary(encoder, "Presentation trace boundary"),
+      closeFixedPresentationPhase,
       detailedPresentationTrace ? completeDetailedPresentationPhase : undefined,
     );
     if (!rasterResult) throw new Error("Raster optics pipeline is not ready");
@@ -1556,21 +1590,34 @@ export class FluidLabRenderer {
     if (inspectionOverlayEncoded) {
       completeDetailedPresentationPhase({ id: "inspection-overlay", label: "Inspection overlays" });
     }
-    presentationTrace?.boundary(encoder, "Presentation overlays complete");
+    closeFixedPresentationPhase();
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}]});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
     completeDetailedPresentationPhase({ id: "present", label: "Final upscale + present" });
-    presentationTrace?.boundary(encoder, "Presentation trace end");
-    presentationTrace?.resolve(encoder);
-    detailedPresentationTrace?.resolve(encoder);
+    closeFixedPresentationPhase();
+    // A frame that skipped part of the raster path would leave the remaining
+    // stages named by position rather than by the work they contain. Drop that
+    // sample to the queue-wall observation instead of publishing a mislabelled
+    // partition — and without retiring the recorder, which is still healthy.
+    const hardwarePresentationTrace = traceDetailedSvoRenderPath
+      || fixedPresentationPhase === PRESENTATION_TRACE_PHASES.length
+      ? presentationTrace
+      : undefined;
+    if (hardwarePresentationTrace) hardwarePresentationTrace.resolve(encoder);
+    else presentationTrace?.destroy();
     presentationQueueTrace?.begin();
     this.device.queue.submit([encoder.finish()]);
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
-    const hardwarePresentationTrace = detailedPresentationTrace ?? presentationTrace;
     const presentationTraceRead = hardwarePresentationTrace
       ? hardwarePresentationTrace.read()
-        .then((trace) => trace ?? presentationQueueTraceRead)
-        .catch(() => presentationQueueTraceRead)
+        .then((trace) => {
+          this.hardwarePresentationTraceInvalid = !trace;
+          return trace ?? presentationQueueTraceRead;
+        })
+        .catch(() => {
+          this.hardwarePresentationTraceInvalid = true;
+          return presentationQueueTraceRead;
+        })
       : presentationQueueTraceRead;
     if (presentationTraceRead) {
       this.lastPresentationTraceAt_ms = traceRequestedAt_ms;
@@ -1605,8 +1652,7 @@ export class FluidLabRenderer {
     }).catch(()=>{this.presentationPending=false;});
     if(readyGPUFluid&&this.simulationRunning){
       cpuTrace?.transition({ id: "other", label: "Post-submit physics scheduling" });
-      const observedPostPresentationStep_ms=measurementInstrumentationEnabled?observedGPUAdvanceTime_ms(readyGPUFluid.info.physicsTrace):undefined;
-      const postPresentationDepth=presentationPhysicsQueueDepth(observedPostPresentationStep_ms,measurementInstrumentationEnabled?this.latestPresentationTrace?.total_ms??0:0);
+      const postPresentationDepth=this.preparedGPUQueueDepth(readyGPUFluid);
       // postPresentationDepth is a ceiling, not an increment. Adding the
       // current pending count here admitted another full window every frame,
       // so slow 16/32-leaf solvers accumulated seconds of work that Reset then

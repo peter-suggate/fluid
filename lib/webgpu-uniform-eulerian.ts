@@ -1,9 +1,7 @@
 import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
 import {
-  DynamicGPUPerformanceTraceRecorder,
-  GPUPerformanceTraceRecorder,
   GPUQueueWallPerformanceTraceRecorder,
-  GPUSegmentedQueueWallPerformanceTraceRecorder,
+  GPUStageTimestampRecorder,
   type GPUTimestampPhase,
 } from "./performance-trace";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
@@ -83,10 +81,9 @@ const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimes
   fineRestriction: { id: "adaptive-publication", label: "Fine-to-coarse restriction" },
 };
 
-/** Serial queue probes are deliberately sparse because they trade throughput
- * for portable, per-phase measurements when timestamp queries fail. */
+/** Stage boundaries are free, but the trace's query set, resolve and map are
+ * not. Sample at a debugging cadence rather than every advance. */
 const PHYSICS_TRACE_CADENCE_MS = 100;
-const SEGMENTED_QUEUE_TRACE_CADENCE_MS = 1_000;
 
 /** Explicit capillary-wave stability bound for a finest cell. */
 export function capillaryStableDt_s(
@@ -396,9 +393,7 @@ export class WebGPUUniformEulerianSolver {
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
   private lastPhysicsTraceAt_ms = -Infinity;
-  private lastSegmentedPhysicsTraceAt_ms = -Infinity;
   private hardwarePhysicsTraceInvalid = false;
-  private profiledAdvanceCompletion?: Promise<void>;
   private validationChecked = false;
   private validationPromise?: Promise<void>;
   // Not readonly: a warm re-seed rebuilds the boundary for the new nozzle.
@@ -866,7 +861,6 @@ export class WebGPUUniformEulerianSolver {
   }
 
   get volumeTexture() { return this.octreeProjection?.levelSetTexture ?? this.volumeA; }
-  get pendingAdvanceCompletion() { return this.profiledAdvanceCompletion; }
   get rigidRenderBuffer() { return this.rigidSystem.renderBuffer; }
   get rigidMotionBuffer() { return this.rigidSystem.motionBuffer; }
   setSelectedRigidBody(index: number) { this.rigidSystem.setSelectedIndex(index); }
@@ -1274,7 +1268,7 @@ export class WebGPUUniformEulerianSolver {
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []) {
-    if (this.disposed || this.profiledAdvanceCompletion) return false;
+    if (this.disposed) return false;
     // Deterministic bounded-staleness rebuild pipeline. Algorithm 1 wants the
     // quadtree constructed before advection and pressure, but a synchronous
     // handshake costs one full GPU-readback + worker-pack round trip per
@@ -1340,17 +1334,9 @@ export class WebGPUUniformEulerianSolver {
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + (this.octreeProjection ? 1 : substeps);
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
-    const timestampTraceUnavailable = !GPUPerformanceTraceRecorder.supported(this.device)
-      || this.hardwarePhysicsTraceInvalid;
-    const shouldSegmentPhysics = measurementInstrumentationEnabled
-      && Boolean(this.octreeProjection)
-      && !this.physicsTracePending
-      && timestampTraceUnavailable
-      && traceRequestedAt_ms - this.lastSegmentedPhysicsTraceAt_ms >= SEGMENTED_QUEUE_TRACE_CADENCE_MS;
     const shouldTracePhysics = measurementInstrumentationEnabled
       && !this.physicsTracePending
-      && (shouldSegmentPhysics
-        || traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= PHYSICS_TRACE_CADENCE_MS);
+      && traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= PHYSICS_TRACE_CADENCE_MS;
     this.octreeProjection?.setCouplingBodies(activeBodies.length, activeBodies.some((body) => body.inverseMass_kg > 0));
     const inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;
     if(this.adaptiveProjection&&this.inflowBoundary){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.adaptiveProjection.addSurfaceReferenceVolumeCells(this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume);}
@@ -1359,38 +1345,32 @@ export class WebGPUUniformEulerianSolver {
     let encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" });
     const physicsTraceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
     const physicsTrace = shouldTracePhysics
-      && !shouldSegmentPhysics
-      && GPUPerformanceTraceRecorder.supported(this.device)
-      ? new DynamicGPUPerformanceTraceRecorder(
-        this.device,
-        physicsTraceSampleId,
-        "physics",
-        `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
-        2048,
-      )
-      : undefined;
-    const segmentedPhysicsTrace = shouldSegmentPhysics
-      ? new GPUSegmentedQueueWallPerformanceTraceRecorder(
+      && !this.hardwarePhysicsTraceInvalid
+      && GPUStageTimestampRecorder.supported(this.device)
+      ? new GPUStageTimestampRecorder(
         this.device,
         physicsTraceSampleId,
         "physics",
         `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
       )
       : undefined;
-    const physicsQueueTrace = shouldTracePhysics && !segmentedPhysicsTrace
+    const physicsQueueTrace = shouldTracePhysics
       ? new GPUQueueWallPerformanceTraceRecorder(
         physicsTraceSampleId,
         "physics",
         `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
       )
       : undefined;
-    physicsTrace?.begin(encoder);
+    // Every stage boundary rides the next pass this encoder already encodes,
+    // so the traced step submits the same command graph as the untraced one.
+    if (physicsTrace) encoder = physicsTrace.instrument(encoder);
+    physicsTrace?.begin();
     const completePhysicsPhase = (
       completedEncoder: GPUCommandEncoder,
       phase: GPUTimestampPhase,
     ): GPUCommandEncoder => {
       physicsTrace?.completePhase(completedEncoder, phase);
-      return segmentedPhysicsTrace?.completePhase(completedEncoder, phase) ?? completedEncoder;
+      return completedEncoder;
     };
     encoder.clearBuffer(this.rigidExchangeBuffer);
     // Narita's quadtree path regenerates at the top of the step. The octree
@@ -1467,7 +1447,7 @@ export class WebGPUUniformEulerianSolver {
           // unprojected predictor here creates systematic boundary volume
           // error.
           encoder = this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
-            physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
+            physicsTrace ? (phase, completedEncoder) => {
               return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
             } : undefined);
           encoder = this.octreeProjection.encode(
@@ -1476,7 +1456,7 @@ export class WebGPUUniformEulerianSolver {
             this.info.ny,
             this.info.nz,
             {
-              productionBoundary: physicsTrace || segmentedPhysicsTrace ? (phase, completedEncoder) => {
+              productionBoundary: physicsTrace ? (phase, completedEncoder) => {
                 return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
               } : undefined,
             }
@@ -1558,58 +1538,42 @@ export class WebGPUUniformEulerianSolver {
         { id: "other", label: "Diagnostics reduction" },
       );
     }
-    if (segmentedPhysicsTrace) {
+    physicsTrace?.resolve(encoder);
+    const submittedEncoder = encoder;
+    physicsQueueTrace?.begin();
+    this.device.queue.submit([submittedEncoder.finish()]);
+    this.octreeProjection?.retireSubmittedEncoder(submittedEncoder);
+    const physicsQueueTraceRead = physicsQueueTrace?.read(this.device.queue);
+    const physicsTraceRead = physicsTrace
+      ? physicsTrace.read()
+        .then((trace) => {
+          // One unusable hardware sample retires the stage recorder for this
+          // solver; the non-invasive queue-wall observation takes over rather
+          // than paying for boundaries that resolve to nothing.
+          this.hardwarePhysicsTraceInvalid = !trace;
+          return trace ?? physicsQueueTraceRead;
+        })
+        .catch(() => {
+          this.hardwarePhysicsTraceInvalid = true;
+          return physicsQueueTraceRead;
+        })
+      : physicsQueueTraceRead;
+    if (physicsTraceRead) {
       this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
-      this.lastSegmentedPhysicsTraceAt_ms = traceRequestedAt_ms;
       this.physicsTracePending = true;
-      const completion = segmentedPhysicsTrace.read(
-        this.device.queue,
-        (submittedEncoder) => this.octreeProjection?.retireSubmittedEncoder(submittedEncoder),
-      ).then((trace) => {
+      void physicsTraceRead.then((trace) => {
         const instrumentation = usePerformanceInstrumentationStore.getState();
         if (trace && !this.disposed && instrumentation.enabled
           && instrumentation.enabledAt_ms <= traceRequestedAt_ms) this.info.physicsTrace = trace;
+      }).catch(() => {
+        physicsTrace?.destroy();
       }).finally(() => {
-        this.octreeProjection?.releaseDenseBootstrapPhi();
         this.physicsTracePending = false;
-        this.profiledAdvanceCompletion = undefined;
       });
-      this.profiledAdvanceCompletion = completion;
-    } else {
-      physicsTrace?.resolve(encoder);
-      const submittedEncoder = encoder;
-      physicsQueueTrace?.begin();
-      this.device.queue.submit([submittedEncoder.finish()]);
-      this.octreeProjection?.retireSubmittedEncoder(submittedEncoder);
-      const physicsQueueTraceRead = physicsQueueTrace?.read(this.device.queue);
-      const physicsTraceRead = physicsTrace
-        ? physicsTrace.read()
-          .then((trace) => {
-            this.hardwarePhysicsTraceInvalid = !trace;
-            return trace ?? physicsQueueTraceRead;
-          })
-          .catch(() => {
-            this.hardwarePhysicsTraceInvalid = true;
-            return physicsQueueTraceRead;
-          })
-        : physicsQueueTraceRead;
-      if (physicsTraceRead) {
-        this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
-        this.physicsTracePending = true;
-        void physicsTraceRead.then((trace) => {
-          const instrumentation = usePerformanceInstrumentationStore.getState();
-          if (trace && !this.disposed && instrumentation.enabled
-            && instrumentation.enabledAt_ms <= traceRequestedAt_ms) this.info.physicsTrace = trace;
-        }).catch(() => {
-          physicsTrace?.destroy();
-        }).finally(() => {
-          this.physicsTracePending = false;
-        });
-      }
-      // The submitted bootstrap command retains its own reference. Later
-      // submissions use global-fine phi, so the final box-sized level set can die now.
-      this.octreeProjection?.releaseDenseBootstrapPhi();
     }
+    // The submitted bootstrap command retains its own reference. Later
+    // submissions use global-fine phi, so the final box-sized level set can die now.
+    this.octreeProjection?.releaseDenseBootstrapPhi();
     // Solver residuals are sampled only through the opt-in telemetry path.
     // Physics submission itself must not initiate a GPU-to-CPU map.
     if (this.octreeProjection && inlineRebuildEncoded) {

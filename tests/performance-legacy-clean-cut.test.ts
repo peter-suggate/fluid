@@ -36,15 +36,37 @@ test("production source contains no legacy timing, readback, or performance visu
   }
 });
 
+/**
+ * The generic recorders own every timestamp query the app can encode. The Dawn
+ * smoke keeps its own per-pass audit: it is a diagnostic harness with no
+ * wall-clock target, and it deliberately measures each labelled pass rather
+ * than the semantic stages the product reports.
+ */
+const timestampQueryOwners = ["/lib/performance-trace.ts", "/tools/run-webgpu-smoke.ts"];
+
 test("the generic recorder exclusively owns GPU timestamp queries", () => {
   for (const file of productionRoots.flatMap(productionSourceFiles)) {
-    if (file.endsWith("/lib/performance-trace.ts")) continue;
+    if (timestampQueryOwners.some((owner) => file.endsWith(owner))) continue;
     assert.doesNotMatch(
       readFileSync(file, "utf8"),
       /\b(?:timestampWrites|GPUComputePassTimestampWrites|createQuerySet|resolveQuerySet)\b/,
       `standalone timestamp instrumentation survived in ${file}`,
     );
   }
+});
+
+test("measurement never changes the command graph the frame would submit anyway", () => {
+  const recorder = readFileSync(new URL("../lib/performance-trace.ts", import.meta.url), "utf8");
+  const start = recorder.indexOf("export class GPUStageTimestampRecorder");
+  const stage = recorder.slice(start, recorder.indexOf("\nexport ", start + 1));
+  assert.ok(start >= 0 && stage.length > 0);
+  assert.match(stage, /instrument\(encoder: GPUCommandEncoder\): GPUCommandEncoder/);
+  assert.match(stage, /beginningOfPassWriteIndex/);
+  assert.doesNotMatch(stage, /onSubmittedWorkDone/,
+    "a stage recorder must never introduce a queue fence");
+  // The proxy forwards real passes; only the closing boundary needs a pass.
+  assert.equal((stage.match(/encoder\.beginComputePass|target\.beginComputePass/g) ?? []).length, 2,
+    "one forwarded compute pass and exactly one marker pass of the recorder's own");
 });
 
 test("retired performance modules remain physically deleted", () => {

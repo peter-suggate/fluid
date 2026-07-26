@@ -11,7 +11,6 @@ export type PerformanceLane = "main-thread" | "physics" | "presentation";
 export type PerformanceMeasurementSource =
   | "cpu-active-wall"
   | "gpu-hardware-timestamp"
-  | "gpu-segmented-queue-wall"
   | "gpu-queue-wall";
 
 export type PaperPhaseId =
@@ -631,68 +630,193 @@ export class DynamicGPUPerformanceTraceRecorder {
 }
 
 /**
- * Portable, intrusive fallback for devices that cannot return usable hardware
- * timestamps. Each semantic phase becomes its own command buffer and is
- * submitted only after the previous phase's queue-completion fence resolves.
+ * Stage boundaries carried by the frame's own passes.
  *
- * This measures real completion wall time per phase. It intentionally runs
- * only as a sparse diagnostic probe: submission and callback latency are part
- * of each observation, so it is not presented as hardware execution time.
+ * The recorders above buy each boundary with a whole extra compute pass. This
+ * one buys it with nothing: the boundary is *armed* by `completePhase` and then
+ * spliced into the `timestampWrites` of the next real pass the frame encodes,
+ * through a proxy over the command encoder. A traced advance therefore adds one
+ * marker pass in total — for the closing boundary, which by definition has no
+ * following work — instead of one per stage, and adds no queue fence at all.
+ *
+ * Stages that encode no pass share their successor's boundary slot and close at
+ * exactly zero, so the partition stays complete and the reported source remains
+ * genuine hardware execution time.
  */
-export class GPUSegmentedQueueWallPerformanceTraceRecorder {
-  private readonly segments: Array<{
-    encoder: GPUCommandEncoder;
-    commandBuffer: GPUCommandBuffer;
-    phase: GPUTimestampPhase;
-  }> = [];
+export class GPUStageTimestampRecorder {
+  private readonly querySet: GPUQuerySet;
+  private readonly resolveBuffer: GPUBuffer;
+  private readonly readBuffer: GPUBuffer;
+  /** See DynamicGPUPerformanceTraceRecorder: Dawn/Metal folds adjacent compute
+   * passes, and a folded pass never receives its counter sample. A 4-byte blit
+   * ahead of a boundary-carrying pass forces the encoder break that makes the
+   * sample observable. It is the only command this recorder adds per stage. */
+  private readonly encoderBreakSource: GPUBuffer;
+  private readonly encoderBreakTarget: GPUBuffer;
+  private readonly markerPipeline: GPUComputePipeline;
+  private readonly phases: GPUTimestampPhase[] = [];
+  /** Query slot each boundary landed on; repeats mark an empty stage. */
+  private readonly boundarySlots: number[] = [];
+  private armedBoundaries = 0;
+  private queryCount = 0;
+  private started = false;
+  private resolved = false;
+  private overflowed = false;
+  private disposed = false;
+
+  static supported(device: GPUDevice): boolean {
+    return device.features.has("timestamp-query");
+  }
 
   constructor(
     private readonly device: GPUDevice,
     private readonly sampleId: number,
     private readonly lane: "physics" | "presentation",
     private readonly context: string,
-    private readonly clock: () => number = () => performance.now(),
-  ) {}
-
-  completePhase(encoder: GPUCommandEncoder, phase: GPUTimestampPhase): GPUCommandEncoder {
-    this.segments.push({ encoder, commandBuffer: encoder.finish(), phase });
-    return this.device.createCommandEncoder({
-      label: `${this.lane} segmented queue probe · ${phase.label} complete`,
+    private readonly capacity = 256,
+  ) {
+    this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
+    this.resolveBuffer = device.createBuffer({
+      label: `${lane} stage trace resolve`,
+      size: capacity * 8,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
     });
+    this.readBuffer = device.createBuffer({
+      label: `${lane} stage trace read`,
+      size: capacity * 8,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    this.encoderBreakSource = device.createBuffer({
+      label: `${lane} stage trace encoder break source`,
+      size: 4,
+      usage: GPUBufferUsage.COPY_SRC,
+    });
+    this.encoderBreakTarget = device.createBuffer({
+      label: `${lane} stage trace encoder break target`,
+      size: 4,
+      usage: GPUBufferUsage.COPY_DST,
+    });
+    this.markerPipeline = dynamicTraceMarkerPipeline(device);
   }
 
-  async read(
-    queue: Pick<GPUQueue, "submit" | "onSubmittedWorkDone">,
-    afterSubmit?: (encoder: GPUCommandEncoder) => void,
-  ): Promise<PerformanceTrace> {
-    if (this.segments.length === 0) throw new Error("Segmented GPU trace has no phases");
-    // Establish an empty-queue origin so older physics or presentation work
-    // cannot be charged to the first semantic phase.
-    await queue.onSubmittedWorkDone();
-    const phases: PerformancePhaseSample[] = [];
-    let previousCompletedAt_ms = this.clock();
-    for (const segment of this.segments) {
-      queue.submit([segment.commandBuffer]);
-      afterSubmit?.(segment.encoder);
-      await queue.onSubmittedWorkDone();
-      const completedAt_ms = Math.max(previousCompletedAt_ms, this.clock());
-      phases.push({
-        ...segment.phase,
-        duration_ms: completedAt_ms - previousCompletedAt_ms,
-      });
-      previousCompletedAt_ms = completedAt_ms;
+  /**
+   * Wrap the frame's encoder. Every pass created through the returned encoder
+   * can carry a boundary; everything else forwards untouched. Callers must use
+   * this object everywhere the raw encoder went, because solver bookkeeping
+   * keys off encoder identity.
+   */
+  instrument(encoder: GPUCommandEncoder): GPUCommandEncoder {
+    const claimBoundary = (target: GPUCommandEncoder, occupied: boolean) => this.claimBoundary(target, occupied);
+    return new Proxy(encoder, {
+      get(target, property) {
+        if (property === "beginComputePass") {
+          return (descriptor?: GPUComputePassDescriptor) => {
+            const writes = claimBoundary(target, descriptor?.timestampWrites !== undefined);
+            return target.beginComputePass(writes ? { ...descriptor, timestampWrites: writes } : descriptor);
+          };
+        }
+        if (property === "beginRenderPass") {
+          return (descriptor: GPURenderPassDescriptor) => {
+            const writes = claimBoundary(target, descriptor.timestampWrites !== undefined);
+            return target.beginRenderPass(writes ? { ...descriptor, timestampWrites: writes } : descriptor);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as GPUCommandEncoder;
+  }
+
+  /** Open the first stage. Its boundary lands on the frame's first pass. */
+  begin(): void {
+    if (this.started) throw new Error("GPU stage trace already started");
+    this.started = true;
+    this.armedBoundaries = 1;
+  }
+
+  /**
+   * Close the named stage. The encoder is accepted so call sites read as the
+   * command-adjacent seam they are, but nothing is written into it: the
+   * boundary deliberately waits for the next pass that does real work.
+   */
+  completePhase(_encoder: GPUCommandEncoder, phase: GPUTimestampPhase): void {
+    if (!this.started) throw new Error("GPU stage trace has not started");
+    if (this.phases.length + 1 >= this.capacity) { this.overflowed = true; return; }
+    this.phases.push(phase);
+    this.armedBoundaries += 1;
+  }
+
+  /**
+   * Assign every armed boundary to the pass about to begin. A descriptor that
+   * already carries timestamp writes belongs to another recorder and is never
+   * displaced; its boundaries stay armed for the pass after it.
+   */
+  private claimBoundary(encoder: GPUCommandEncoder, occupied: boolean) {
+    if (this.armedBoundaries === 0 || this.disposed || this.overflowed || occupied) return undefined;
+    if (this.queryCount >= this.capacity) { this.overflowed = true; return undefined; }
+    const beginningOfPassWriteIndex = this.queryCount;
+    this.queryCount += 1;
+    for (let boundary = 0; boundary < this.armedBoundaries; boundary += 1) {
+      this.boundarySlots.push(beginningOfPassWriteIndex);
     }
-    const total_ms = phases.reduce((sum, phase) => sum + phase.duration_ms, 0);
-    return {
-      sampleId: this.sampleId,
-      domain: "gpu",
-      lane: this.lane,
-      context: `${this.context}:segmented-queue-wall`,
-      capturedAt_ms: previousCompletedAt_ms,
-      measurementSource: "gpu-segmented-queue-wall",
-      total_ms,
-      phases,
-    };
+    this.armedBoundaries = 0;
+    encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
+    return { querySet: this.querySet, beginningOfPassWriteIndex };
+  }
+
+  /**
+   * Close the chain and stage the readback. The trailing boundary has no
+   * following work to attach to, so this is the one marker pass the recorder
+   * ever encodes.
+   */
+  resolve(encoder: GPUCommandEncoder): void {
+    if (!this.started || this.resolved) throw new Error("GPU stage trace is not open");
+    this.resolved = true;
+    if (this.phases.length === 0) { this.overflowed = true; return; }
+    // The last completed stage already armed the closing boundary. It has no
+    // following work to ride, so this is the one pass the recorder encodes.
+    if (this.armedBoundaries > 0) {
+      const closing = this.claimBoundary(encoder, false);
+      if (!closing) { this.overflowed = true; return; }
+      const marker = encoder.beginComputePass({ label: "GPU stage trace close", timestampWrites: closing });
+      marker.setPipeline(this.markerPipeline);
+      marker.dispatchWorkgroups(1);
+      marker.end();
+    }
+    if (this.boundarySlots.length !== this.phases.length + 1) { this.overflowed = true; return; }
+    const bytes = this.queryCount * 8;
+    encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.resolveBuffer, 0);
+    encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
+  }
+
+  async read(): Promise<PerformanceTrace | undefined> {
+    try {
+      if (!this.resolved || this.overflowed) return undefined;
+      const bytes = this.queryCount * 8;
+      await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
+      const resolved = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
+      return decodeGPUTimestampPartition({
+        sampleId: this.sampleId,
+        lane: this.lane,
+        context: this.context,
+        capturedAt_ms: performance.now(),
+        timestamps: this.boundarySlots.map((slot) => resolved[slot] ?? 0n),
+        phases: this.phases,
+      });
+    } finally {
+      if (this.readBuffer.mapState === "mapped") this.readBuffer.unmap();
+      this.destroy();
+    }
+  }
+
+  destroy(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.querySet.destroy();
+    this.resolveBuffer.destroy();
+    this.readBuffer.destroy();
+    this.encoderBreakSource.destroy();
+    this.encoderBreakTarget.destroy();
   }
 }
 

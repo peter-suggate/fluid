@@ -2920,12 +2920,9 @@ async function runGPU(
     authoredMethodProfile: authoredProfile, resolvedMethodValues: values, dawnOptions,
     grid: [solver.info.nx, solver.info.storedNy, solver.info.nz],
     cubicGrid: [solver.info.nx, solver.info.ny, solver.info.nz] }));
-  /** Match the renderer's admission boundary. A profiled octree advance
-   * submits its phases asynchronously; queue.onSubmittedWorkDone() alone can
-   * resolve between those submissions and expose a torn generation. */
+  /** Match the renderer's admission boundary. Every advance now submits one
+   * command buffer synchronously, so the queue fence alone is exact. */
   const awaitAdvanceCompletion = async () => {
-    const pending = (solver as GPUSolverInstance).pendingAdvanceCompletion;
-    if (pending) await pending;
     await device.queue.onSubmittedWorkDone();
   };
   // Raw voxel/brick records are a lazy inspection product. Merely reading the
@@ -3271,19 +3268,6 @@ async function runGPU(
     const captureCompactPowerStep = method.id === "octree"
       && (collectStabilityEnvelope || powerGenerationAuditRequested && auditThisPowerStep);
     if (captureCompactPowerStep) {
-      // A profiled advance submits its phases asynchronously, so on those steps
-      // `advanceTo` returns before any of the step's own command buffers reach
-      // the queue. Copying now would order the snapshot ahead of the work it is
-      // meant to observe and latch the previous step's generation, both on the
-      // GPU and in `fine.generation` (which only flips in retireSubmittedEncoder).
-      // Fence on the same admission boundary every other consumer uses, and
-      // charge the wait to sampling so per-advance timings stay comparable.
-      const pendingAdvance = (solver as GPUSolverInstance).pendingAdvanceCompletion;
-      if (pendingAdvance) {
-        const fencedAt_ms = performance.now();
-        await pendingAdvance;
-        samplingWall_ms += performance.now() - fencedAt_ms;
-      }
       const audited = solver as GPUSolverInstance & {
         structuredVelocityControl?: GPUBuffer;
         structuredBoundaryControl?: GPUBuffer;
@@ -3704,6 +3688,17 @@ async function runGPU(
             phase: "structured-generation-audit", step,
             structured: snapshot.structured, boundary: snapshot.boundary,
             fine: { generation: expectedFineGeneration, header: Array.from(fineHeader) },
+            pressure: {
+              iterations: diagnostics.iterations,
+              relativeResidual: diagnostics.relativeResidual,
+              projectedVariationalResidual: projectedResidual,
+            },
+            projectionEnergy: energy.sample,
+            volume: volumeValid ? {
+              reference: volume.referenceVolume,
+              current: volume.currentVolume,
+              relativeDrift: volumeDrift,
+            } : null,
             failures: generationFailures }));
         }
         if (generationFailures.length !== 0) {

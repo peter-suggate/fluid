@@ -101,13 +101,10 @@ const averagedLane = (traces: PerformanceTrace[], windowSize: number) => {
   ])).values()];
   const latest = unique.at(-1);
   if (!latest) return { trace: undefined, sampleCount: 0 };
-  const latestSegmented = unique.findLast((trace) => trace.measurementSource === "gpu-segmented-queue-wall");
   const latestHardware = unique.findLast((trace) => trace.measurementSource === "gpu-hardware-timestamp");
-  const source = latestSegmented && latest.capturedAt_ms - latestSegmented.capturedAt_ms <= 10_000
-    ? "gpu-segmented-queue-wall"
-    : latestHardware && latest.capturedAt_ms - latestHardware.capturedAt_ms <= 2_000
-      ? "gpu-hardware-timestamp"
-      : latest.measurementSource;
+  const source = latestHardware && latest.capturedAt_ms - latestHardware.capturedAt_ms <= 2_000
+    ? "gpu-hardware-timestamp"
+    : latest.measurementSource;
   const window = unique.filter((trace) => trace.measurementSource === source).slice(-windowSize);
   return {
     trace: stabilizePhaseLayout(averagePerformanceTraces(window)),
@@ -124,8 +121,6 @@ function TraceLane({ trace, title, sampleCount }: { trace?: PerformanceTrace; ti
   const exact = accounting.exact;
   const sourceLabel = trace.measurementSource === "gpu-hardware-timestamp"
     ? "HARDWARE TIMESTAMPS"
-    : trace.measurementSource === "gpu-segmented-queue-wall"
-      ? "INTRUSIVE QUEUE CHECKPOINT PROBE"
     : trace.measurementSource === "gpu-queue-wall"
       ? "QUEUE COMPLETION FALLBACK"
       : "ACTIVE CPU WALL";
@@ -157,9 +152,6 @@ function TraceLane({ trace, title, sampleCount }: { trace?: PerformanceTrace; ti
     </header>
     {trace.measurementSource === "gpu-queue-wall" && <p className="trace-source-warning">
       Hardware timestamps were unavailable or invalid for this sample. Total queue wall time is measured exactly; semantic GPU phase attribution requires a valid timestamp sample.
-    </p>}
-    {trace.measurementSource === "gpu-segmented-queue-wall" && <p className="trace-source-warning trace-source-measured">
-      Hardware timestamps were unavailable or invalid. Each row is an intrusive submit-to-queue-callback wall-time checkpoint, not GPU execution time. Submission, synchronization, and browser callback latency make these values upper bounds; use them to locate expensive steps, not to estimate normal simulation throughput.
     </p>}
     <div className="trace-stack" aria-label={`${title}: ${formatMs(trace.total_ms)} total`}>
       {trace.phases.filter((phase) => phase.duration_ms > 0).map((phase, index) => <span
@@ -389,7 +381,7 @@ export function PerformancePanel() {
           role="switch"
           aria-checked={instrumentationEnabled}
           onClick={toggleInstrumentation}
-          title="Disable timestamp queries, marker passes, trace readbacks, and measurement-only queue fences"
+          title="Disable timestamp queries, trace readbacks, and the stage-boundary encoder breaks they need"
         >
           <span>MEASUREMENT LOAD</span><b>{instrumentationEnabled ? "ON" : "OFF"}</b><i />
         </button>
@@ -415,7 +407,7 @@ export function PerformancePanel() {
     <TraceLane trace={cpu} title="CPU · MAIN-THREAD FRAME WORK" sampleCount={lanes.cpu.sampleCount} />
     </> : <div className="trace-disabled-notice">
       <strong>Running without measurement instrumentation</strong>
-      <span>Timestamp queries, marker dispatches, forced encoder breaks, trace-buffer resolves/readbacks, and measurement-only queue fences are bypassed. Correctness synchronization remains active.</span>
+      <span>Timestamp queries, stage-boundary encoder breaks, and trace-buffer resolves/readbacks are bypassed. Correctness synchronization remains active. Measuring adds no queue fence and no dispatch: a sampled step submits the same command graph plus one marker pass, which the Dawn lane prices at about 2%.</span>
     </div>}
 
     <section className="paper-observatory">

@@ -18,7 +18,7 @@ test("authoritative power work maps onto semantic adjacent-boundary phases", () 
     'fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" }',
     'fineRedistance: { id: "fine-sdf-redistance", label: "Fine SDF redistance" }',
   ]) assert.ok(solver.includes(mapping), mapping);
-  assert.match(solver, /productionBoundary: physicsTrace \|\| segmentedPhysicsTrace \? \(phase, completedEncoder\) => \{[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
+  assert.match(solver, /productionBoundary: physicsTrace \? \(phase, completedEncoder\) => \{[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
   assert.match(solver, /physicsTrace\?\.resolve\(encoder\)/);
 });
 
@@ -67,24 +67,31 @@ test("physics checkpoints follow performed command stages at their trailing seam
     /Uniform diagnostics reduction[^]*Diagnostics reduction/);
 });
 
-test("physics sampling is enabled by default and runs at debugging cadence", () => {
+test("physics sampling is opt-in and runs at debugging cadence", () => {
   const store = source("../lib/stores/performance-instrumentation-store.ts");
   const tall = source("../lib/webgpu-eulerian.ts");
   assert.match(store, /enabled: false/,
     "the default UI simulation path must match the uninstrumented Dawn lane");
   assert.match(solver, /const PHYSICS_TRACE_CADENCE_MS = 100/);
-  assert.match(solver, /const SEGMENTED_QUEUE_TRACE_CADENCE_MS = 1_000/);
   assert.match(tall, /lastPhysicsTraceAt_ms>=100/);
   assert.match(tall, /Substep planning \+ advance setup/);
 });
 
-test("invalid timestamps fall back to sparse measured phase probes", () => {
-  assert.match(solver, /GPUSegmentedQueueWallPerformanceTraceRecorder/);
+test("a traced physics step submits the same command graph as an untraced one", () => {
+  assert.match(solver, /if \(physicsTrace\) encoder = physicsTrace\.instrument\(encoder\)/,
+    "boundaries must ride the step's own passes, not marker passes of their own");
+  assert.doesNotMatch(solver, /GPUSegmentedQueueWallPerformanceTraceRecorder|SEGMENTED_QUEUE_TRACE_CADENCE_MS/,
+    "the intrusive fence-per-phase probe is exactly the UI wall-clock tax this lane removes");
+  assert.doesNotMatch(solver, /profiledAdvanceCompletion/,
+    "every advance now submits one command buffer synchronously");
+});
+
+test("an unusable hardware sample falls back without paying for boundaries again", () => {
   assert.match(solver, /hardwarePhysicsTraceInvalid = !trace/);
-  assert.match(solver, /SEGMENTED_QUEUE_TRACE_CADENCE_MS/);
-  assert.match(panel, /INTRUSIVE QUEUE CHECKPOINT PROBE/);
-  assert.match(panel, /not GPU execution time/);
-  assert.match(panel, /upper bounds/);
+  assert.match(solver, /!this\.hardwarePhysicsTraceInvalid[^]*GPUStageTimestampRecorder\.supported/);
+  assert.match(solver, /GPUQueueWallPerformanceTraceRecorder/);
+  assert.match(panel, /QUEUE COMPLETION FALLBACK/);
+  assert.doesNotMatch(panel, /INTRUSIVE QUEUE CHECKPOINT PROBE/);
 });
 
 test("physics timing does not create known empty queue segments", () => {
