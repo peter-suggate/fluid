@@ -236,8 +236,44 @@ test("binding session binds registered pipelines at dispatch and caches their gr
     assert.deepEqual(harness.calls.bindings.map(([group]) => group), [3, 3, 3, 3]);
     assert.deepEqual(harness.calls.dispatchArguments, [[1], [2, 3], [4, 5, 6]],
       "the proxy must preserve optional WebIDL argument arity for native Dawn bindings");
+    assert.deepEqual(session.diagnostics, {
+      computeDispatchCount: 4,
+      instrumentedComputeDispatchCount: 4,
+      unregisteredComputeDispatchCount: 0,
+      unregisteredComputePipelineCount: 0,
+      unregisteredComputePipelineLabels: [],
+    });
     session.finish();
     assert.equal(harness.calls.copies, 1);
+    session.destroy();
+  } finally { harness.restore(); }
+});
+
+test("binding session reports every dispatch through unregistered compute pipelines", () => {
+  const harness = bindingHarness();
+  try {
+    const activity = createGPULogicalActivityAdoptionContext({
+      moduleId: "coverage", profile: { enabled: true, generation: 5 },
+    });
+    const unregistered = {
+      label: "Legacy unprofiled pressure",
+      getBindGroupLayout: () => ({} as GPUBindGroupLayout),
+    } as unknown as GPUComputePipeline;
+    const session = activity.bindingSession(harness.device, harness.encoder, {
+      capacity: 4,
+      captureId: 22,
+    });
+    const pass = session.encoder.beginComputePass();
+    pass.setPipeline(unregistered);
+    pass.dispatchWorkgroups(1);
+    pass.dispatchWorkgroupsIndirect({} as GPUBuffer, 0);
+    assert.deepEqual(session.diagnostics, {
+      computeDispatchCount: 2,
+      instrumentedComputeDispatchCount: 0,
+      unregisteredComputeDispatchCount: 2,
+      unregisteredComputePipelineCount: 1,
+      unregisteredComputePipelineLabels: ["Legacy unprofiled pressure"],
+    });
     session.destroy();
   } finally { harness.restore(); }
 });

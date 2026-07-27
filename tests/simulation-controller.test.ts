@@ -1,14 +1,108 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { cloneScene } from "../lib/model";
 import { createBodyDescription } from "../lib/rigid-body";
-import { simulation } from "../lib/simulation/controller";
+import {
+  matchingPhysicsCPUTrace,
+  performanceReportCPUTrace,
+  simulation,
+} from "../lib/simulation/controller";
 import { useRuntimeStore } from "../lib/stores/runtime-store";
 import { useSceneStore } from "../lib/stores/scene-store";
 import { useDiagnosticsStore } from "../lib/stores/diagnostics-store";
 import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
 import { useMethodStore } from "../lib/stores/method-store";
 import { resolvedMethodValues } from "../lib/stores/method-store";
+import type { PerformanceTrace } from "../lib/performance-trace";
+import { gpuPhysicsPerformanceActivityFrameId } from "../lib/performance-activity";
+
+const exactTrace = (
+  domain: PerformanceTrace["domain"],
+  lane: PerformanceTrace["lane"],
+  sampleId: number,
+  context: string,
+): PerformanceTrace => ({
+  sampleId,
+  domain,
+  lane,
+  context,
+  capturedAt_ms: 10,
+  total_ms: 1,
+  phases: [{ id: "other", label: "test", duration_ms: 1 }],
+});
+
+test("CPU encoding joins only the exact sampled GPU physics advance", () => {
+  const physics = exactTrace("gpu", "physics", 7, "octree:sim-0.004000");
+  const matching = exactTrace("cpu", "main-thread", 7, "octree:sim-0.004000");
+  const capture = {
+    sampleId: physics.sampleId,
+    context: physics.context,
+    frameId: gpuPhysicsPerformanceActivityFrameId(physics),
+  };
+  assert.equal(matchingPhysicsCPUTrace(physics, matching, capture), matching);
+  assert.equal(matchingPhysicsCPUTrace(physics, matching, undefined), undefined,
+    "report cadence and coincident sample numbers are not a capture identity");
+  assert.equal(matchingPhysicsCPUTrace(physics,
+    exactTrace("cpu", "main-thread", 8, matching.context), capture), undefined);
+  assert.equal(matchingPhysicsCPUTrace(physics,
+    exactTrace("cpu", "main-thread", 7, "octree:sim-0.008000"), capture), undefined);
+  assert.equal(matchingPhysicsCPUTrace(physics, matching,
+    { ...capture, frameId: "gpu-physics:unrelated:7" }), undefined);
+
+  const fallback = { ...physics, context: `${physics.context}:queue-wall-fallback` };
+  assert.equal(matchingPhysicsCPUTrace(fallback, matching, capture), matching,
+    "hardware fallback retains the sampled advance identity even though its GPU timing is inexact");
+});
+
+test("a GPU physics report never borrows latest controller or renderer CPU traces", () => {
+  const physics = exactTrace("gpu", "physics", 11, "octree:sim-0.044000");
+  const controllerCPU = exactTrace("cpu", "main-thread", 100, "controller:later-frame");
+  const rendererCPU = exactTrace("cpu", "main-thread", 101, "renderer:later-frame");
+  assert.equal(performanceReportCPUTrace({
+    physics,
+    controllerCPU,
+    rendererCPU,
+    context: "octree",
+  }), undefined, "latest callbacks are not rebased into an asynchronously completed GPU frame");
+
+  const physicsCPU = exactTrace("cpu", "main-thread", 11, physics.context);
+  const physicsCaptureIdentity = {
+    sampleId: physics.sampleId,
+    context: physics.context,
+    frameId: gpuPhysicsPerformanceActivityFrameId(physics),
+  };
+  assert.equal(performanceReportCPUTrace({
+    physics,
+    physicsCPU,
+    physicsCaptureIdentity,
+    controllerCPU,
+    rendererCPU,
+    context: "octree",
+  }), physicsCPU);
+
+  const cpuOnly = performanceReportCPUTrace({ controllerCPU, rendererCPU, context: "octree" });
+  assert.ok(cpuOnly);
+  assert.equal(cpuOnly.total_ms, controllerCPU.total_ms + rendererCPU.total_ms,
+    "latest callbacks remain valid for a CPU-only report");
+});
+
+test("controller source has no reporting-cadence correlation fallback", () => {
+  const source = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
+  const recordFrame = source.slice(source.indexOf("  recordFrame("),
+    source.indexOf("  // ---- persistence", source.indexOf("  recordFrame(")));
+  assert.match(recordFrame,
+    /physicsCaptureIdentity: diagnostics\.gpuInfo\?\.physicsCaptureIdentity/);
+  assert.match(recordFrame, /activityStore\.publish\(!report\.physics/,
+    "detailed controller CPU spans may only be rebased into CPU-owned frames");
+  assert.doesNotMatch(recordFrame, /combineMainThreadPerformanceTraces\(/,
+    "recordFrame must route correlation through the fail-closed selector");
+  const selector = source.slice(source.indexOf("export function performanceReportCPUTrace"),
+    source.indexOf("function rebasePerformanceActivityAddition"));
+  assert.match(selector,
+    /if \(input\.physics\) \{[\s\S]*return matchingPhysicsCPUTrace\([\s\S]*\);[\s\S]*\}[\s\S]*return combineMainThreadPerformanceTraces\(/,
+    "latest CPU callbacks are combined only after the GPU-physics branch has returned");
+});
 
 test("adding a rigid body does not pause a running simulation", () => {
   const originalScene = cloneScene(useSceneStore.getState().scene);

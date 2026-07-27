@@ -85,6 +85,8 @@ export interface ActivityTask {
   label: string;
   color: string;
   lane: ActivityLane;
+  /** Stable semantic stage used to group dynamically registered tasks in the UI. */
+  stageId?: string;
   parentId?: string;
 }
 
@@ -157,6 +159,33 @@ export interface PerformanceActivityFrame {
   spans: ActivitySpan[];
   events: ActivityEvent[];
   rows: ActivityRow[];
+  /**
+   * End-to-end capture validation. Absence means the asynchronous recorder has
+   * not supplied a verdict yet; it must not be interpreted as complete.
+   */
+  captureDiagnostics?: PerformanceActivityCaptureDiagnostics;
+}
+
+export type PerformanceActivityCaptureReason =
+  | "recorder-overflow"
+  | "missing-frame-begin"
+  | "missing-frame-end"
+  | "unprofiled-dispatch"
+  | "row-limit"
+  | "unprojected-event"
+  | "timestamp-fallback"
+  | (string & {});
+
+/** Capture-level diagnostics are retained with the frame, not only returned to the producer. */
+export interface PerformanceActivityCaptureDiagnostics {
+  /** A capture is complete exactly when this collection is empty. */
+  reasons: readonly PerformanceActivityCaptureReason[];
+  recorderOverflowed?: boolean;
+  droppedEventCount?: number;
+  droppedRowCount?: number;
+  unprojectedEventCount?: number;
+  unprofiledDispatchCount?: number;
+  unprofiledPipelineLabels?: readonly string[];
 }
 
 export interface ActivityRowWindow {
@@ -271,6 +300,8 @@ export interface PerformanceActivityFrameAddition {
   events?: readonly ActivityEvent[];
   /** Explicit full row windows keep unobserved buckets unknown instead of cropping them away. */
   windows?: readonly ActivityRowWindow[];
+  /** Capture verdict may arrive asynchronously with GPU readback evidence. */
+  captureDiagnostics?: PerformanceActivityCaptureDiagnostics;
 }
 
 export type PerformanceActivityEvidenceIngestResult = "merged" | "buffered" | "rejected";
@@ -311,6 +342,10 @@ export function mergePerformanceActivityFrame(
   const tasks = byId(frame.tasks, addition.tasks);
   const spans = byId(frame.spans, addition.spans);
   const events = byId(frame.events, addition.events);
+  const captureDiagnostics = mergePerformanceActivityCaptureDiagnostics(
+    frame.captureDiagnostics,
+    addition.captureDiagnostics,
+  );
   const windows = new Map(frame.rows.map((row) => [row.resource.id, {
     resourceId: row.resource.id,
     start_ms: row.windowStart_ms,
@@ -346,6 +381,31 @@ export function mergePerformanceActivityFrame(
     spans,
     events,
     rows: slicePerformanceActivityRows({ resources, spans, events, windows: [...windows.values()] }),
+    ...(captureDiagnostics ? { captureDiagnostics } : {}),
+  };
+}
+
+/**
+ * Capture diagnostics are capture-level totals. Maxima make repeated evidence
+ * ingestion idempotent while reason union preserves every failed invariant.
+ */
+export function mergePerformanceActivityCaptureDiagnostics(
+  current?: PerformanceActivityCaptureDiagnostics,
+  incoming?: PerformanceActivityCaptureDiagnostics,
+): PerformanceActivityCaptureDiagnostics | undefined {
+  if (!current) return incoming ? { ...incoming, reasons: [...new Set(incoming.reasons)] } : undefined;
+  if (!incoming) return current;
+  return {
+    reasons: [...new Set([...current.reasons, ...incoming.reasons])],
+    recorderOverflowed: Boolean(current.recorderOverflowed || incoming.recorderOverflowed),
+    droppedEventCount: Math.max(current.droppedEventCount ?? 0, incoming.droppedEventCount ?? 0),
+    droppedRowCount: Math.max(current.droppedRowCount ?? 0, incoming.droppedRowCount ?? 0),
+    unprojectedEventCount: Math.max(current.unprojectedEventCount ?? 0, incoming.unprojectedEventCount ?? 0),
+    unprofiledDispatchCount: Math.max(current.unprofiledDispatchCount ?? 0, incoming.unprofiledDispatchCount ?? 0),
+    unprofiledPipelineLabels: [...new Set([
+      ...current.unprofiledPipelineLabels ?? [],
+      ...incoming.unprofiledPipelineLabels ?? [],
+    ])],
   };
 }
 
@@ -456,6 +516,7 @@ function appendTraceEvidence(
       label: phase.label,
       color: performanceActivityTaskColor(taskId),
       lane,
+      stageId: phase.id,
     });
     const spanId = `${resourceId}.${trace.sampleId}.${index}.${phase.id}`;
     if (phaseEnd_ms > cursor_ms) spans.push({
@@ -590,6 +651,8 @@ export function synthesizePerformanceActivityFrame(
     ...(clockEpochOrigins.has(id) ? { epochOrigin_ms: clockEpochOrigins.get(id) } : {}),
     status: alignmentStatus(id, alignments),
   }));
+  const timestampFallback = traces.some((trace) => trace.domain === "gpu"
+    && trace.measurementSource === "gpu-queue-wall");
   return {
     identity: { ...options.identity },
     context: options.context,
@@ -602,6 +665,9 @@ export function synthesizePerformanceActivityFrame(
     spans,
     events,
     rows: slicePerformanceActivityRows({ resources, spans, events, windows }),
+    ...(timestampFallback ? {
+      captureDiagnostics: { reasons: ["timestamp-fallback"] },
+    } : {}),
   };
 }
 

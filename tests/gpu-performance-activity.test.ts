@@ -6,7 +6,11 @@ import {
   publishDecodedGPULogicalActivity,
 } from "../lib/gpu-performance-activity";
 import type { GPULogicalActivityCapture } from "../lib/gpu-logical-activity";
-import { mergePerformanceActivityFrame, synthesizePerformanceActivityFrame } from "../lib/performance-activity";
+import {
+  mergePerformanceActivityFrame,
+  performanceActivityTaskColor,
+  synthesizePerformanceActivityFrame,
+} from "../lib/performance-activity";
 import { createPerformanceActivityStore } from "../lib/stores/performance-activity-store";
 
 const capture: GPULogicalActivityCapture = {
@@ -60,6 +64,11 @@ test("GPU heartbeat capture becomes real workgroup/subgroup rows over the horizo
         checkpoints: { enter: 1, exit: 2 },
       },
       8: { id: "gpu.physics.pressure", label: "Pressure solve", color: "#9b4fe0" },
+      9: {
+        id: "gpu.physics.registered-only",
+        label: "Registered but not observed",
+        phaseId: "pressure-system",
+      },
     },
   });
 
@@ -69,6 +78,20 @@ test("GPU heartbeat capture becomes real workgroup/subgroup rows over the horizo
   assert.equal(addition.unknownTimeEventCount, 1);
   assert.equal(addition.captureOverflowed, false);
   assert.equal(addition.droppedEventCount, 0);
+  assert.deepEqual(addition.captureDiagnostics, {
+    reasons: ["unprojected-event"],
+    recorderOverflowed: false,
+    droppedEventCount: 0,
+    droppedRowCount: 0,
+    unprojectedEventCount: 1,
+  });
+  assert.deepEqual(addition.tasks?.find((task) => task.id === "gpu.physics.registered-only"), {
+    id: "gpu.physics.registered-only",
+    label: "Registered but not observed",
+    color: performanceActivityTaskColor("gpu.physics.registered-only"),
+    lane: "gpu-physics",
+    stageId: "pressure-system",
+  });
   assert.deepEqual(addition.windows?.map((window) => [window.start_ms, window.end_ms]),
     [[0, 4], [0, 4], [0, 4]]);
 
@@ -79,6 +102,8 @@ test("GPU heartbeat capture becomes real workgroup/subgroup rows over the horizo
     cpuTimeOrigin_ms: 1_000,
   });
   const merged = mergePerformanceActivityFrame(frame, addition);
+  assert.deepEqual(merged.captureDiagnostics, addition.captureDiagnostics,
+    "capture completeness diagnostics survive retention");
   const rows = merged.rows.filter((row) => row.resource.kind === "gpu-logical-capacity");
   assert.equal(rows.length, 3);
   assert.deepEqual(rows.map((row) => row.slices.length), [4, 4, 4]);
@@ -87,6 +112,25 @@ test("GPU heartbeat capture becomes real workgroup/subgroup rows over the horizo
   assert.equal(rows[0].slices[1].taskId, "gpu.physics.advect");
   assert.equal(rows[1].slices[1].taskId, "gpu.physics.pressure");
   assert.ok(rows[2].slices.every((slice) => slice.evidence === "unknown"));
+});
+
+test("overflow and display truncation remain explicit capture-level failures", () => {
+  const addition = gpuLogicalActivityMatrixAddition({
+    capture: { ...capture, overflowed: true, droppedEventCount: 17 },
+    identity: { frameId: "overflow", generation: 3 },
+    lane: "gpu-physics",
+    clockDomain: "gpu-physics-timestamp",
+    windowStart_ms: 0,
+    windowEnd_ms: 4,
+    maximumRows: 1,
+    locateTime: () => undefined,
+  });
+
+  assert.equal(addition.captureDiagnostics?.recorderOverflowed, true);
+  assert.equal(addition.captureDiagnostics?.droppedEventCount, 17);
+  assert.ok((addition.captureDiagnostics?.droppedRowCount ?? 0) > 0);
+  assert.deepEqual(addition.captureDiagnostics?.reasons,
+    ["recorder-overflow", "row-limit", "unprojected-event"]);
 });
 
 test("solver-facing decoded capture ingestion correlates before and after base publication", () => {

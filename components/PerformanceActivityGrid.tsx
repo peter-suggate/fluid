@@ -5,6 +5,8 @@ import type {
   ActivityEvidence,
   ActivityLane,
   ActivityRow,
+  PerformanceActivityCaptureDiagnostics,
+  PerformanceActivityCaptureReason,
   PerformanceActivityFrame,
 } from "@/lib/performance-activity";
 import {
@@ -90,6 +92,23 @@ export interface PerformanceActivityView {
   resources: readonly PerformanceActivityResource[];
   /** Raw logical GPU rows retained by the source frame, before display projection. */
   logicalGpuResourceCount: number;
+  captureState: "complete" | "incomplete" | "verifying";
+  captureDiagnostics?: PerformanceActivityCaptureDiagnostics;
+}
+
+export interface PerformanceActivityTaskLegendEntry {
+  id: string;
+  label: string;
+  color: string;
+  lane: ActivityLane;
+  stageId: string;
+  observed: boolean;
+}
+
+export interface PerformanceActivityTaskLegendGroup {
+  id: string;
+  label: string;
+  entries: readonly PerformanceActivityTaskLegendEntry[];
 }
 
 /** React output is bounded while the retained frame keeps every captured workgroup row. */
@@ -248,12 +267,19 @@ export function buildPerformanceActivityView(input: Pick<PerformanceActivityGrid
   const traces = [input.cpu, input.physics, input.presentation]
     .filter((trace): trace is PerformanceTrace => trace !== undefined);
   const lanes = traces.map(traceLane);
+  const timestampFallback = traces.some((trace) => trace.domain === "gpu"
+    && trace.measurementSource === "gpu-queue-wall");
+  const captureDiagnostics = timestampFallback
+    ? { reasons: ["timestamp-fallback" as const] }
+    : undefined;
   return {
     duration_ms: Math.max(0.000001, ...traces.map((trace) => finiteNonNegative(trace.total_ms))),
     synchronized: false,
     lanes,
     resources: traces.map((trace, index) => traceResource(trace, lanes[index])),
     logicalGpuResourceCount: 0,
+    captureState: captureDiagnostics ? "incomplete" : "verifying",
+    ...(captureDiagnostics ? { captureDiagnostics } : {}),
   };
 }
 
@@ -263,8 +289,9 @@ function canonicalRowResource(input: {
   row: ActivityRow;
   taskById: ReadonlyMap<string, CanonicalTask>;
   relativeTime: (time_ms: number, resourceId: string, clockDomain: string) => number;
+  trustIdle: boolean;
 }): PerformanceActivityResource {
-  const { row, taskById, relativeTime } = input;
+  const { row, taskById, relativeTime, trustIdle } = input;
   return {
     id: row.resource.id,
     label: row.resource.label,
@@ -275,12 +302,13 @@ function canonicalRowResource(input: {
     segments: row.slices.map((slice) => ({
       start_ms: relativeTime(slice.start_ms, row.resource.id, row.resource.clockDomain),
       end_ms: relativeTime(slice.end_ms, row.resource.id, row.resource.clockDomain),
-      evidence: canonicalEvidence(slice.evidence),
+      evidence: slice.evidence === "idle" && !trustIdle ? "unknown" : canonicalEvidence(slice.evidence),
       color: slice.taskId ? taskById.get(slice.taskId)?.color : undefined,
       activeFraction: slice.end_ms > slice.start_ms
         ? Math.min(1, slice.active_ms / (slice.end_ms - slice.start_ms))
         : 0,
-      label: slice.taskId ? taskById.get(slice.taskId)?.label : slice.evidence === "idle" ? "Measured idle" : "Unknown activity",
+      label: slice.taskId ? taskById.get(slice.taskId)?.label
+        : slice.evidence === "idle" && trustIdle ? "Measured idle" : "Unknown activity",
       detail: `${slice.active_ms.toFixed(3)} ms active · ${slice.spanIds.length} span${slice.spanIds.length === 1 ? "" : "s"}`,
     })),
   };
@@ -295,6 +323,7 @@ export function coalesceGpuLogicalRows(input: {
   taskById: ReadonlyMap<string, CanonicalTask>;
   relativeTime: (time_ms: number, resourceId: string, clockDomain: string) => number;
   limit?: number;
+  trustIdle?: boolean;
 }): PerformanceActivityResource[] {
   const { taskById, relativeTime } = input;
   const limit = Math.max(1, Math.floor(input.limit ?? GPU_ACTIVITY_DISPLAY_BAND_LIMIT));
@@ -346,7 +375,7 @@ export function coalesceGpuLogicalRows(input: {
       const occupancy = activeResourceCount / members.length;
       const evidence: PerformanceActivityEvidence = activeResourceCount > 0
         ? active.some(({ slice }) => slice.evidence === "reconstructed") ? "reconstructed" : "measured-progress"
-        : slices.length === members.length && slices.every(({ slice }) => slice.evidence === "idle") ? "idle" : "unknown";
+        : input.trustIdle && slices.length === members.length && slices.every(({ slice }) => slice.evidence === "idle") ? "idle" : "unknown";
       const dominantTask = dominantTaskId ? taskById.get(dominantTaskId) : undefined;
       return {
         start_ms: Number.isFinite(start_ms) ? start_ms : sliceIndex,
@@ -372,6 +401,10 @@ export function coalesceGpuLogicalRows(input: {
 }
 
 function canonicalFrameView(frame: PerformanceActivityFrame): PerformanceActivityView {
+  const captureState = frame.captureDiagnostics
+    ? frame.captureDiagnostics.reasons.length === 0 ? "complete" : "incomplete"
+    : "verifying";
+  const trustIdle = captureState === "complete";
   const clockById = new Map(frame.clocks.map((clock) => [clock.id, clock]));
   const synchronized = frame.clocks.length > 0
     && frame.clocks.every((clock) => clock.status.state !== "unsynchronized");
@@ -422,10 +455,97 @@ function canonicalFrameView(frame: PerformanceActivityFrame): PerformanceActivit
   const logicalRows = frame.rows.filter((row) => row.resource.kind === "gpu-logical-capacity");
   const resources = [
     ...frame.rows.filter((row) => row.resource.kind !== "gpu-logical-capacity")
-      .map((row) => canonicalRowResource({ row, taskById, relativeTime })),
-    ...coalesceGpuLogicalRows({ rows: logicalRows, taskById, relativeTime }),
+      .map((row) => canonicalRowResource({ row, taskById, relativeTime, trustIdle })),
+    ...coalesceGpuLogicalRows({ rows: logicalRows, taskById, relativeTime, trustIdle }),
   ];
-  return { duration_ms, synchronized, lanes, resources, logicalGpuResourceCount: logicalRows.length };
+  return {
+    duration_ms,
+    synchronized,
+    lanes,
+    resources,
+    logicalGpuResourceCount: logicalRows.length,
+    captureState,
+    ...(frame.captureDiagnostics ? { captureDiagnostics: frame.captureDiagnostics } : {}),
+  };
+}
+
+const CAPTURE_REASON_LABELS: Readonly<Partial<Record<PerformanceActivityCaptureReason, string>>> = {
+  "recorder-overflow": "RECORDER OVERFLOW",
+  "missing-frame-begin": "MISSING FRAME BEGIN",
+  "missing-frame-end": "MISSING FRAME END",
+  "phase-marker-mismatch": "PHASE MARKER MISMATCH",
+  "unprofiled-dispatch": "UNPROFILED DISPATCH",
+  "row-limit": "ROW LIMIT",
+  "unprojected-event": "UNPROJECTED EVENT",
+  "timestamp-fallback": "TIMESTAMP FALLBACK",
+};
+
+function captureStatusLabel(view: PerformanceActivityView): { short: string; detail: string } {
+  if (view.captureState === "verifying") return {
+    short: "CAPTURE VERIFYING",
+    detail: "Completeness verdict is awaiting recorder readback",
+  };
+  if (view.captureState === "complete") return {
+    short: "CAPTURE COMPLETE",
+    detail: "Frame boundaries and retained recorder evidence passed validation",
+  };
+  const diagnostics = view.captureDiagnostics;
+  const reasons = diagnostics?.reasons.map((reason) => CAPTURE_REASON_LABELS[reason] ?? reason.toUpperCase()) ?? [];
+  const dropped = (diagnostics?.droppedEventCount ?? 0) + (diagnostics?.droppedRowCount ?? 0);
+  const unprofiled = diagnostics?.unprofiledDispatchCount ?? 0;
+  const unprofiledLabels = diagnostics?.unprofiledPipelineLabels?.join(", ");
+  return {
+    short: `CAPTURE INCOMPLETE${dropped > 0 ? ` · ${dropped} DROPPED` : ""}`,
+    detail: [
+      ...reasons,
+      ...(unprofiled > 0 ? [`${unprofiled} unprofiled dispatch${unprofiled === 1 ? "" : "es"}`] : []),
+      ...(unprofiledLabels ? [unprofiledLabels] : []),
+    ].join(" · ") || "Capture validation failed",
+  };
+}
+
+const humanizeStage = (stageId: string) => stageId
+  .replace(/[._]/g, "-")
+  .split("-")
+  .filter(Boolean)
+  .map((part) => part[0]?.toUpperCase() + part.slice(1))
+  .join(" ");
+
+/** Dynamic generation-scoped catalog, with observation state from raw frame evidence. */
+export function performanceActivityTaskLegend(
+  frame: PerformanceActivityFrame | undefined,
+): PerformanceActivityTaskLegendGroup[] {
+  if (!frame) return [];
+  const observed = new Set<string>();
+  for (const span of frame.spans) if (span.taskId) observed.add(span.taskId);
+  for (const event of frame.events) if (event.taskId) observed.add(event.taskId);
+  for (const row of frame.rows) for (const slice of row.slices) {
+    if (slice.taskId) observed.add(slice.taskId);
+  }
+  const groups = new Map<string, PerformanceActivityTaskLegendEntry[]>();
+  for (const task of frame.tasks) {
+    const stageId = task.stageId ?? task.parentId ?? task.lane;
+    const entries = groups.get(stageId) ?? [];
+    entries.push({
+      id: task.id,
+      label: task.label,
+      color: task.color,
+      lane: task.lane,
+      stageId,
+      observed: observed.has(task.id),
+    });
+    groups.set(stageId, entries);
+  }
+  return [...groups.entries()].map(([id, entries]) => ({
+    id,
+    label: humanizeStage(id),
+    entries: entries.sort((left, right) => Number(right.observed) - Number(left.observed)
+      || left.label.localeCompare(right.label)),
+  })).sort((left, right) => {
+    const leftObserved = left.entries.some((entry) => entry.observed);
+    const rightObserved = right.entries.some((entry) => entry.observed);
+    return Number(rightObserved) - Number(leftObserved) || left.label.localeCompare(right.label);
+  });
 }
 
 function niceTickStep(duration_ms: number): number {
@@ -550,12 +670,19 @@ export function PerformanceActivityGrid({
   const queueWallFallback = ledgers.some((trace) => trace.measurementSource === "gpu-queue-wall");
   const selectedCaptureLabel = captureLabel ?? frame?.identity.frameId;
   const resolvedReferenceLabel = referenceLabel ?? referenceFrame?.identity.frameId;
+  const taskLegend = useMemo(() => performanceActivityTaskLegend(frame), [frame]);
+  const observedLegendTasks = taskLegend.reduce((count, group) =>
+    count + group.entries.filter((entry) => entry.observed).length, 0);
+  const registeredLegendTasks = taskLegend.reduce((count, group) => count + group.entries.length, 0);
+  const captureStatus = captureStatusLabel(view);
+  const completeUtilization = view.captureState === "complete";
 
   return <section
     className={`performance-activity-grid ${className}`.trim()}
     data-clock-alignment={view.synchronized ? "synchronized" : "independent"}
     data-accounting-ledgers="cpu-gpu-independent"
     data-queue-wall-fallback={queueWallFallback}
+    data-capture-completeness={view.captureState}
     aria-label="Frame resource activity matrix"
   >
     <header className="activity-grid-header">
@@ -575,6 +702,9 @@ export function PerformanceActivityGrid({
           <output>{millisecondsWidth_px} PX/MS</output>
         </label>
         {statusLabel && <span>{statusLabel}</span>}
+        <span className="activity-capture-status" data-state={view.captureState} title={captureStatus.detail}>
+          {captureStatus.short}
+        </span>
         <span className={view.synchronized ? "synchronized" : "independent"}>
           {view.synchronized ? "CORRELATED FRAME CLOCK" : "INDEPENDENT LANE ORIGINS"}
         </span>
@@ -584,8 +714,10 @@ export function PerformanceActivityGrid({
       <span><small>FRAME WINDOW</small><strong>{formatMs(view.duration_ms)}</strong></span>
       <span><small>CPU ROWS</small><strong>{stats.cpuRows}</strong></span>
       <span><small>GPU WG / DISPLAY BANDS</small><strong>{stats.logicalGpuRows > 0 ? `${stats.logicalGpuRows} / ${stats.logicalGpuBands}` : stats.gpuRows}</strong></span>
-      <span><small>ACTIVE OBSERVED CELLS</small><strong>{stats.activeCellRatio === undefined ? "—" : `${(stats.activeCellRatio * 100).toFixed(1)}%`}</strong></span>
-      <span><small>MAPPED TASKS</small><strong>{stats.taskCount}</strong></span>
+      <span><small>{completeUtilization ? "ACTIVE OBSERVED CELLS" : "UTILIZATION"}</small><strong>{completeUtilization
+        ? stats.activeCellRatio === undefined ? "—" : `${(stats.activeCellRatio * 100).toFixed(1)}%`
+        : "WITHHELD"}</strong></span>
+      <span><small>TASKS OBS / REG</small><strong>{registeredLegendTasks > 0 ? `${observedLegendTasks} / ${registeredLegendTasks}` : stats.taskCount}</strong></span>
       <span><small>ACCOUNTING LEDGERS</small><strong>{ledgers.length === 0 ? "—" : `${closedLedgers}/${ledgers.length} CLOSED`}</strong></span>
     </div>
     {(captureOptions.length > 0 || referenceView) && <div className="activity-matrix-capture" aria-label="Retained performance captures">
@@ -608,6 +740,20 @@ export function PerformanceActivityGrid({
         </output>{onClearReference && <button type="button" onClick={onClearReference} aria-label="Clear reference capture">×</button>}</> : onSetReference && <button className="activity-set-reference" type="button" onClick={onSetReference}>SET REFERENCE</button>}
       </div>}
     </div>}
+    {taskLegend.length > 0 && <section className="activity-task-legend" aria-label="Dynamically registered task and stage legend">
+      <header><span>TASK / STAGE LEGEND</span><small>{observedLegendTasks} OBSERVED · {registeredLegendTasks} REGISTERED</small></header>
+      <div className="activity-task-legend-groups">
+        {taskLegend.map((group) => <div className="activity-task-legend-group" key={group.id}>
+          <strong>{group.label}</strong>
+          <div>{group.entries.map((entry) => <span
+            data-observed={entry.observed}
+            data-lane={entry.lane}
+            key={entry.id}
+            title={`${entry.label} · ${entry.stageId} · ${entry.observed ? "observed in this capture" : "registered, not observed in this capture"}`}
+          ><i style={{ background: entry.color }} />{entry.label}</span>)}</div>
+        </div>)}
+      </div>
+    </section>}
     {!hasData ? <div className="activity-grid-empty">Waiting for a complete measured activity sample.</div> : <>
       <div className="activity-scrollport">
         <div className="activity-timeline" style={{
@@ -615,7 +761,9 @@ export function PerformanceActivityGrid({
           "--activity-ms-width": `${millisecondsWidth_px}px`,
         } as CSSProperties}>
           <Ruler duration_ms={view.duration_ms} ticks={ticks} />
-          <div className="activity-section-label"><span>Resource × 1 ms activity matrix</span><small>TASK COLOR · ONE CELL PER RESOURCE PER TIME SLICE</small></div>
+          <div className="activity-section-label"><span>Resource × 1 ms activity matrix</span><small>{completeUtilization
+            ? "TASK COLOR · ONE CELL PER RESOURCE PER TIME SLICE"
+            : "PARTIAL EVIDENCE · IDLE AND UTILIZATION NOT ASSERTED"}</small></div>
           <div className="activity-resource-lanes">
             {MATRIX_GROUPS.map(({ kind, label, group }) => {
               const resources = matrixResources.filter((resource) => resource.matrixKind === kind);
@@ -653,7 +801,7 @@ export function PerformanceActivityGrid({
       <footer className="activity-evidence-legend" aria-label="Activity evidence legend">
         <span data-evidence="measured-progress"><i />Measured progress</span>
         <span data-evidence="reconstructed"><i />Reconstructed</span>
-        <span data-evidence="idle"><i />Measured idle</span>
+        <span data-evidence="idle"><i />Measured idle · complete capture only</span>
         <span data-evidence="unknown"><i />Unknown</span>
       </footer>
     </>}

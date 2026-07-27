@@ -8,6 +8,7 @@ import {
   DEFAULT_ACTIVITY_MILLISECONDS_WIDTH_PX,
   GPU_ACTIVITY_DISPLAY_BAND_LIMIT,
   PerformanceActivityGrid,
+  performanceActivityTaskLegend,
   performanceActivityTicks,
 } from "../components/PerformanceActivityGrid";
 import type { ActivityEvidence, PerformanceActivityFrame } from "../lib/performance-activity";
@@ -39,6 +40,7 @@ const activityFrame = (
     start_ms: 2, end_ms: Math.min(7, duration_ms), evidence: "measured", identity: { frameId: `frame-${duration_ms}`, generation: 1 },
   }],
   events: [],
+  captureDiagnostics: { reasons: [] },
   rows: [{
     resource: { id: "cpu.main", label: "CPU · main thread", kind: "cpu-main", lane: "cpu-main", clockDomain: "cpu-performance" },
     windowStart_ms: 0,
@@ -177,6 +179,37 @@ test("rendered GPU matrix output is bounded by display bands rather than raw wor
   assert.match(markup, /data-active-resources="4"/);
 });
 
+test("task legend is populated from the registered catalog and distinguishes observed tasks", () => {
+  const base = activityFrameWithGpuRows(8);
+  const frame: PerformanceActivityFrame = {
+    ...base,
+    tasks: [
+      ...base.tasks.map((task) => task.id === "gpu-solve"
+        ? { ...task, stageId: "pressure-solve" }
+        : { ...task, stageId: "frame-control" }),
+      {
+        id: "gpu-future",
+        label: "Registered future stage",
+        color: "#a079be",
+        lane: "gpu-physics",
+        stageId: "adaptive-publication",
+      },
+    ],
+  };
+  const legend = performanceActivityTaskLegend(frame);
+  const entries = legend.flatMap((group) => group.entries);
+  assert.equal(entries.find((entry) => entry.id === "gpu-solve")?.observed, true);
+  assert.equal(entries.find((entry) => entry.id === "gpu-future")?.observed, false);
+  assert.ok(legend.some((group) => group.id === "pressure-solve"));
+
+  const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, { frame }));
+  assert.match(markup, /Dynamically registered task and stage legend/);
+  assert.match(markup, /TASK \/ STAGE LEGEND/);
+  assert.match(markup, /2 OBSERVED · 3 REGISTERED/);
+  assert.match(markup, /Registered future stage/);
+  assert.match(markup, /data-observed="false"/);
+});
+
 test("the matrix defaults to a compact adjustable horizontal millisecond scale", () => {
   const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, {
     frame: activityFrame(250),
@@ -234,6 +267,33 @@ test("the component labels clock and resource evidence honestly", () => {
   assert.match(component, /UNIFIED FRAME ACCOUNTING/);
   assert.match(component, /ACCOUNTING LEDGERS/);
   assert.doesNotMatch(component, /activity-clock-notice/);
+});
+
+test("an incomplete retained capture withholds utilization and never renders idle as proven", () => {
+  const base = activityFrame(4, ["measured", "idle", "idle", "unknown"]);
+  const frame: PerformanceActivityFrame = {
+    ...base,
+    captureDiagnostics: {
+      reasons: ["recorder-overflow", "missing-frame-end", "unprofiled-dispatch"],
+      recorderOverflowed: true,
+      droppedEventCount: 23,
+      unprofiledDispatchCount: 37,
+      unprofiledPipelineLabels: ["fine transport", "pressure apply"],
+    },
+  };
+  const view = buildPerformanceActivityView({ frame });
+  assert.equal(view.captureState, "incomplete");
+  assert.deepEqual(view.resources[0].segments.map((segment) => segment.evidence),
+    ["measured-progress", "unknown", "unknown", "unknown"]);
+
+  const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, { frame }));
+  assert.match(markup, /data-capture-completeness="incomplete"/);
+  assert.match(markup, /CAPTURE INCOMPLETE · 23 DROPPED/);
+  assert.match(markup, /RECORDER OVERFLOW · MISSING FRAME END · UNPROFILED DISPATCH/);
+  assert.match(markup, /37 unprofiled dispatches · fine transport, pressure apply/);
+  assert.match(markup, /UTILIZATION/);
+  assert.match(markup, /WITHHELD/);
+  assert.match(markup, /IDLE AND UTILIZATION NOT ASSERTED/);
 });
 
 test("the rendered central view is matrix-first with individually addressable time cells", () => {

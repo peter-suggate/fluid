@@ -101,6 +101,27 @@ test("CPU transitions share one boundary with no gaps", () => {
   assert.equal(performanceTraceIsExact(trace), true);
 });
 
+test("CPU completed-phase seams label work discovered at the trailing boundary", () => {
+  const times = [2, 5, 9, 11];
+  const cpu = new CPUPerformanceTrace(
+    14,
+    "octree:sim-1",
+    { id: "command-encoding", label: "Encoding" },
+    () => times.shift()!,
+  );
+  cpu.completePhase({ id: "coarse-grid", label: "Topology encoding" });
+  cpu.completePhase({ id: "pressure-solve", label: "Pressure encoding" });
+  const trace = cpu.finish({ id: "other", label: "Capture closure" });
+  assert.equal(trace.sampleId, 14);
+  assert.equal(trace.context, "octree:sim-1");
+  assert.deepEqual(trace.phases.map((phase) => [phase.id, phase.duration_ms]), [
+    ["coarse-grid", 3],
+    ["pressure-solve", 4],
+    ["other", 2],
+  ]);
+  assert.equal(performanceTraceClosureError_ms(trace), 0);
+});
+
 test("disjoint controller and renderer callbacks close one active CPU ledger", () => {
   const controller = partitionPerformanceTrace({
     sampleId: 7,

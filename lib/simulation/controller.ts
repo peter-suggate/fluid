@@ -52,6 +52,58 @@ export type BodyDragPhase = "start" | "move" | "end";
 
 const MAX_BODIES = 12;
 
+/** Only CPU work recorded while encoding this exact GPU advance may share its
+ * retained frame. Reporting cadence is not a join key: the renderer and
+ * controller traces observed when readback completes can belong to later
+ * animation frames. */
+export function matchingPhysicsCPUTrace(
+  physics: PerformanceTrace | undefined,
+  cpu: PerformanceTrace | undefined,
+  capture: Readonly<{ sampleId: number; context: string; frameId: string }> | undefined,
+): PerformanceTrace | undefined {
+  if (!physics || !cpu
+    || !capture
+    || !performanceTraceMatchesLane(physics, "gpu", "physics")
+    || !performanceTraceMatchesLane(cpu, "cpu", "main-thread")
+    || physics.sampleId !== cpu.sampleId
+    || capture.sampleId !== physics.sampleId) return undefined;
+  const fallbackSuffix = ":queue-wall-fallback";
+  const physicsContext = physics.context.endsWith(fallbackSuffix)
+    ? physics.context.slice(0, -fallbackSuffix.length)
+    : physics.context;
+  if (capture.context !== physicsContext || cpu.context !== physicsContext) return undefined;
+  const expectedFrameId = gpuPhysicsPerformanceActivityFrameId({
+    sampleId: physics.sampleId,
+    context: physicsContext,
+  });
+  return capture.frameId === expectedFrameId ? cpu : undefined;
+}
+
+/** A completed GPU sample may only use its encoding trace. Latest controller
+ * and renderer callbacks remain useful for CPU-only reports, but are never a
+ * fallback join for an asynchronously completed physics frame. */
+export function performanceReportCPUTrace(input: Readonly<{
+  physics?: PerformanceTrace;
+  physicsCPU?: PerformanceTrace;
+  physicsCaptureIdentity?: Readonly<{ sampleId: number; context: string; frameId: string }>;
+  controllerCPU?: PerformanceTrace;
+  rendererCPU?: PerformanceTrace;
+  context: string;
+}>): PerformanceTrace | undefined {
+  if (input.physics) {
+    return matchingPhysicsCPUTrace(
+      input.physics,
+      input.physicsCPU,
+      input.physicsCaptureIdentity,
+    );
+  }
+  return combineMainThreadPerformanceTraces(
+    [input.controllerCPU, input.rendererCPU]
+      .filter((trace): trace is PerformanceTrace => trace !== undefined),
+    input.context,
+  );
+}
+
 function rebasePerformanceActivityAddition(
   addition: PerformanceActivityFrameAddition,
   identity: ActivityFrameIdentity,
@@ -706,17 +758,22 @@ class SimulationController {
     this.pendingCpuTickTrace = undefined;
     const detailedCPU = this.pendingCpuActivity;
     this.pendingCpuActivity = undefined;
-    const cpu = combineMainThreadPerformanceTraces(
-      [controllerCPU, rendererCPU].filter((trace): trace is PerformanceTrace => trace !== undefined),
+    const physics = physicsTrace && physicsTrace.capturedAt_ms >= instrumentation.enabledAt_ms
+      && performanceTraceMatchesLane(physicsTrace, "gpu", "physics") ? physicsTrace : undefined;
+    const cpu = performanceReportCPUTrace({
+      physics,
+      physicsCPU: diagnostics.gpuInfo?.physicsCPUTrace,
+      physicsCaptureIdentity: diagnostics.gpuInfo?.physicsCaptureIdentity,
+      controllerCPU,
+      rendererCPU,
       context,
-    );
+    });
     const report = {
       methodId,
       context,
       capturedAt_ms,
       cpu,
-      physics: physicsTrace && physicsTrace.capturedAt_ms >= instrumentation.enabledAt_ms
-        && performanceTraceMatchesLane(physicsTrace, "gpu", "physics") ? physicsTrace : undefined,
+      physics,
       presentation: metrics.presentation && metrics.presentation.capturedAt_ms >= instrumentation.enabledAt_ms
         && performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined,
     };
@@ -742,7 +799,7 @@ class SimulationController {
         physics: report.physics,
         presentation: report.presentation,
       });
-      activityStore.publish(detailedCPU?.identity.generation === identity.generation
+      activityStore.publish(!report.physics && detailedCPU?.identity.generation === identity.generation
         ? mergePerformanceActivityFrame(baseFrame, rebasePerformanceActivityAddition({
           resources: detailedCPU.output.resource ? [detailedCPU.output.resource] : [],
           clocks: detailedCPU.output.clock ? [detailedCPU.output.clock] : [],

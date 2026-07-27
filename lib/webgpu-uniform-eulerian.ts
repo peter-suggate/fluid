@@ -1,5 +1,6 @@
 import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
 import {
+  CPUPerformanceTrace,
   GPUQueueWallPerformanceTraceRecorder,
   GPUStageTimestampRecorder,
   type GPUTimestampPhase,
@@ -16,12 +17,14 @@ import {
   stableGPULogicalActivityId,
   type GPULogicalActivityAdoptionContext,
   type GPULogicalActivityBindingSession,
+  type GPULogicalActivityBindingSessionDiagnostics,
   type GPULogicalActivityTaskDescription,
 } from "./gpu-logical-activity-adoption";
 import {
   GPU_LOGICAL_ACTIVITY_HEADER_WORDS,
   GPU_LOGICAL_ACTIVITY_MAX_CAPACITY,
   GPU_LOGICAL_ACTIVITY_RECORD_BYTES,
+  GPU_LOGICAL_ACTIVITY_UNKNOWN_U32,
   type GPULogicalActivityCapture,
   type GPULogicalActivityRecorder,
   type GPULogicalActivityTimeLocator,
@@ -133,6 +136,23 @@ export function physicsLogicalActivityCaptureCapacity(
   ));
 }
 
+/** Maximum one-shot ledger permitted by both the activity ABI and adapter.
+ * Captures start at the smaller sampled budget above and grow toward this only
+ * after an observed overflow. */
+export function maximumPhysicsLogicalActivityCaptureCapacity(
+  limits: Pick<GPUSupportedLimits, "maxStorageBufferBindingSize" | "maxBufferSize">,
+): number {
+  const headerBytes = GPU_LOGICAL_ACTIVITY_HEADER_WORDS * 4;
+  const bytes = Math.min(
+    Number(limits.maxStorageBufferBindingSize),
+    Number(limits.maxBufferSize),
+  );
+  return Math.max(1, Math.min(
+    GPU_LOGICAL_ACTIVITY_MAX_CAPACITY,
+    Math.floor((bytes - headerBytes) / GPU_LOGICAL_ACTIVITY_RECORD_BYTES),
+  ));
+}
+
 const activityTaskId = (moduleId: string, task: string) =>
   stableGPULogicalActivityId(`task\0${moduleId}\0${task}`);
 const activityCheckpointId = (moduleId: string, task: string, checkpoint: string) =>
@@ -140,6 +160,12 @@ const activityCheckpointId = (moduleId: string, task: string, checkpoint: string
 
 export const PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID =
   activityTaskId("physics/phase-boundaries", "physics-frame");
+export const PHYSICS_ACTIVITY_FRAME_BEGIN_CHECKPOINT_ID =
+  activityCheckpointId("physics/phase-boundaries", "physics-frame", "frame-begin");
+export const PHYSICS_ACTIVITY_PHASE_BOUNDARY_CHECKPOINT_ID =
+  activityCheckpointId("physics/phase-boundaries", "physics-frame", "phase-boundary");
+export const PHYSICS_ACTIVITY_FRAME_END_CHECKPOINT_ID =
+  activityCheckpointId("physics/phase-boundaries", "physics-frame", "frame-end");
 export const PHYSICS_ACTIVITY_POWER_VOLUME_TASK_ID =
   activityTaskId("octree/power-volume", "publish-power-cell-volumes");
 
@@ -150,7 +176,10 @@ export interface GPUPhysicsLogicalActivityTaskDescriptor extends GPULogicalActiv
 
 const PHYSICS_ACTIVITY_TASKS: Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>> = {
   [PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID]:
-    { id: "gpu.physics.phase-boundary", label: "Physics phase boundary" },
+    {
+      id: "gpu.physics.frame-contract",
+      label: "Physics frame contract",
+    },
   [activityTaskId("octree/fine-redistance-jfa", "jump-flood-a-to-b")]:
     {
       id: "gpu.physics.fine-redistance-jfa-a-b",
@@ -198,6 +227,107 @@ export interface GPUPhysicsLogicalActivitySample {
   readonly phaseBoundaries_ms: readonly number[];
   readonly locateTime: GPULogicalActivityTimeLocator;
   readonly tasks: Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>>;
+  /** Whole-frame acceptance result. Partial evidence remains useful, but no
+   * consumer may interpret it as a complete utilization ledger when false. */
+  readonly captureDiagnostics: GPUPhysicsLogicalActivityCaptureDiagnostics;
+}
+
+export type GPUPhysicsLogicalActivityIncompleteReason =
+  | "recorder-overflow"
+  | "missing-frame-begin"
+  | "missing-frame-end"
+  | "phase-marker-mismatch"
+  | "unprofiled-dispatch"
+  | "timestamp-fallback";
+
+export interface GPUPhysicsLogicalActivityCaptureDiagnostics {
+  readonly complete: boolean;
+  readonly reasons: readonly GPUPhysicsLogicalActivityIncompleteReason[];
+  readonly captureId: number;
+  readonly retainedEventCount: number;
+  readonly attemptedEventCount: number;
+  readonly overflowed: boolean;
+  readonly droppedEventCount: number;
+  readonly computeDispatchCount: number;
+  readonly instrumentedComputeDispatchCount: number;
+  readonly unregisteredComputeDispatchCount: number;
+  readonly unregisteredComputePipelineCount: number;
+  readonly unregisteredComputePipelineLabels: readonly string[];
+  readonly frameBeginObserved: boolean;
+  readonly frameEndObserved: boolean;
+  readonly expectedPhaseMarkerCount: number;
+  readonly observedPhaseMarkerCount: number;
+  readonly measurementSource: PerformanceTrace["measurementSource"];
+}
+
+const EMPTY_BINDING_SESSION_DIAGNOSTICS: GPULogicalActivityBindingSessionDiagnostics = {
+  computeDispatchCount: 0,
+  instrumentedComputeDispatchCount: 0,
+  unregisteredComputeDispatchCount: 0,
+  unregisteredComputePipelineCount: 0,
+  unregisteredComputePipelineLabels: [],
+};
+
+/** Validate that retained evidence brackets exactly the owned physics command
+ * graph and that every compute dispatch had an instrumented pipeline. */
+export function validateGPUPhysicsLogicalActivityCapture(
+  capture: GPULogicalActivityCapture,
+  trace: Pick<PerformanceTrace, "measurementSource" | "phases">,
+  dispatches: GPULogicalActivityBindingSessionDiagnostics = EMPTY_BINDING_SESSION_DIAGNOSTICS,
+  expectedPhaseMarkerCount = trace.phases.length,
+): GPUPhysicsLogicalActivityCaptureDiagnostics {
+  const first = capture.events[0];
+  const last = capture.events.at(-1);
+  const frameBeginCount = capture.events.filter((candidate) =>
+    candidate.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID
+    && candidate.checkpointId === PHYSICS_ACTIVITY_FRAME_BEGIN_CHECKPOINT_ID).length;
+  const frameEndCount = capture.events.filter((candidate) =>
+    candidate.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID
+    && candidate.checkpointId === PHYSICS_ACTIVITY_FRAME_END_CHECKPOINT_ID).length;
+  const frameBeginObserved = first?.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID
+    && first.checkpointId === PHYSICS_ACTIVITY_FRAME_BEGIN_CHECKPOINT_ID
+    && frameBeginCount === 1;
+  const frameEndObserved = last?.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID
+    && last.checkpointId === PHYSICS_ACTIVITY_FRAME_END_CHECKPOINT_ID
+    && frameEndCount === 1;
+  const phaseMarkers = capture.events.filter((candidate) =>
+    candidate.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID
+    && candidate.checkpointId === PHYSICS_ACTIVITY_PHASE_BOUNDARY_CHECKPOINT_ID);
+  const observedPhaseMarkerCount = phaseMarkers.length;
+  const phaseMarkerChainMatches = observedPhaseMarkerCount === expectedPhaseMarkerCount
+    && phaseMarkers.every((marker, index) => marker.tick === index);
+  const reasons: GPUPhysicsLogicalActivityIncompleteReason[] = [];
+  if (capture.overflowed || capture.droppedEventCount > 0) reasons.push("recorder-overflow");
+  if (!frameBeginObserved) reasons.push("missing-frame-begin");
+  if (!frameEndObserved) reasons.push("missing-frame-end");
+  if (!phaseMarkerChainMatches) {
+    reasons.push("phase-marker-mismatch");
+  }
+  if (dispatches.unregisteredComputeDispatchCount > 0) {
+    reasons.push("unprofiled-dispatch");
+  }
+  if (trace.measurementSource === "gpu-queue-wall") reasons.push("timestamp-fallback");
+  return Object.freeze({
+    complete: reasons.length === 0,
+    reasons: Object.freeze(reasons),
+    captureId: capture.captureId,
+    retainedEventCount: capture.events.length,
+    attemptedEventCount: capture.events.length + capture.droppedEventCount,
+    overflowed: capture.overflowed,
+    droppedEventCount: capture.droppedEventCount,
+    computeDispatchCount: dispatches.computeDispatchCount,
+    instrumentedComputeDispatchCount: dispatches.instrumentedComputeDispatchCount,
+    unregisteredComputeDispatchCount: dispatches.unregisteredComputeDispatchCount,
+    unregisteredComputePipelineCount: dispatches.unregisteredComputePipelineCount,
+    unregisteredComputePipelineLabels: Object.freeze([
+      ...dispatches.unregisteredComputePipelineLabels,
+    ]),
+    frameBeginObserved,
+    frameEndObserved,
+    expectedPhaseMarkerCount,
+    observedPhaseMarkerCount,
+    measurementSource: trace.measurementSource,
+  });
 }
 
 /**
@@ -223,6 +353,7 @@ export function physicsPhaseBoundaryTimeProjection(
   const phaseBoundaries_ms = phaseRanges.map((phase) => phase.end_ms);
   const markers = (capture?.events ?? [])
     .filter((event) => event.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID
+      && event.checkpointId === PHYSICS_ACTIVITY_PHASE_BOUNDARY_CHECKPOINT_ID
       && event.tick !== undefined)
     .sort((left, right) => left.sequence - right.sequence);
   const maximumMarkerTick = markers.reduce(
@@ -242,6 +373,15 @@ export function physicsPhaseBoundaryTimeProjection(
     phaseBoundaries_ms,
     locateTime: (event) => {
       if (event.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID) {
+        if (event.checkpointId === PHYSICS_ACTIVITY_FRAME_BEGIN_CHECKPOINT_ID) {
+          return { time_ms: 0, evidence: "reconstructed" };
+        }
+        if (event.checkpointId === PHYSICS_ACTIVITY_FRAME_END_CHECKPOINT_ID) {
+          return { time_ms: trace.total_ms, evidence: "reconstructed" };
+        }
+        if (event.checkpointId !== PHYSICS_ACTIVITY_PHASE_BOUNDARY_CHECKPOINT_ID) {
+          return undefined;
+        }
         const boundary_ms = event.tick === undefined ? undefined : markerBoundary_ms(event.tick);
         return boundary_ms === undefined
           ? undefined
@@ -345,6 +485,9 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   readonly fineRestrictionControl: readonly number[];
   readonly structuredVelocityControl: readonly number[];
   readonly structuredBoundaryControl: readonly number[];
+  /** Full 11-word reject carry (control words 0..10) including the stage-1/2
+   * detail vec4 and workset class; absent on older readback layouts. */
+  readonly structuredRejectCarry?: readonly number[];
   readonly configuredFineGeneration: number;
   readonly fineGenerationSlot: 0 | 1;
   readonly scheduledFineGeneration: number;
@@ -606,7 +749,9 @@ export class WebGPUUniformEulerianSolver {
   /** Permanent overflow-safe sink that keeps instrumented pipelines valid between retained samples. */
   private logicalActivityDiscardRecorder?: GPULogicalActivityRecorder;
   private logicalActivityCaptureId = 0;
+  private logicalActivityCaptureCapacity = PHYSICS_ACTIVITY_RECORD_CAPACITY;
   private latestLogicalActivity?: GPUPhysicsLogicalActivitySample;
+  private latestLogicalActivityCaptureDiagnostics?: GPUPhysicsLogicalActivityCaptureDiagnostics;
   private validationChecked = false;
   private validationPromise?: Promise<void>;
   // Not readonly: a warm re-seed rebuilds the boundary for the new nozzle.
@@ -862,12 +1007,18 @@ export class WebGPUUniformEulerianSolver {
 
   private createLogicalActivityMarker(): void {
     if (this.logicalActivityMarkerPipeline) return;
-    const heartbeat = this.logicalActivity.workgroup("physics-frame", "phase-boundary", {
+    const frameBeginHeartbeat = this.logicalActivity.workgroup("physics-frame", "frame-begin", {
+      workgroupLaneCount: 1,
+    });
+    const phaseBoundaryHeartbeat = this.logicalActivity.workgroup("physics-frame", "phase-boundary", {
       tick: "marker.tick",
       workgroupLaneCount: 1,
     });
+    const frameEndHeartbeat = this.logicalActivity.workgroup("physics-frame", "frame-end", {
+      workgroupLaneCount: 1,
+    });
     const markerShader = this.logicalActivity.module(/* wgsl */ `
-struct PhysicsActivityMarker { tick: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
+struct PhysicsActivityMarker { tick: u32, kind: u32, _pad0: u32, _pad1: u32 }
 @group(0) @binding(0) var<uniform> marker: PhysicsActivityMarker;
 
 @compute @workgroup_size(1)
@@ -875,7 +1026,13 @@ fn recordPhysicsPhaseBoundary(
   @builtin(workgroup_id) workgroupId: vec3u,
   @builtin(local_invocation_index) localInvocationIndex: u32,
 ) {
-  ${heartbeat}
+  if (marker.kind == 0u) {
+    ${frameBeginHeartbeat}
+  } else if (marker.kind == 1u) {
+    ${phaseBoundaryHeartbeat}
+  } else {
+    ${frameEndHeartbeat}
+  }
 }
 `, "physics-phase-boundary-marker");
     const activityModule = this.device.createShaderModule({
@@ -891,13 +1048,22 @@ fn recordPhysicsPhaseBoundary(
     );
     this.logicalActivityMarkerTickSource = this.device.createBuffer({
       label: "Physics logical activity phase ticks",
-      size: PHYSICS_ACTIVITY_PHASE_CAPACITY * 4,
+      size: (PHYSICS_ACTIVITY_PHASE_CAPACITY + 2) * 8,
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
+    const markerRecords = new Uint32Array((PHYSICS_ACTIVITY_PHASE_CAPACITY + 2) * 2);
+    markerRecords.set([GPU_LOGICAL_ACTIVITY_UNKNOWN_U32, 0], 0);
+    for (let index = 0; index < PHYSICS_ACTIVITY_PHASE_CAPACITY; index += 1) {
+      markerRecords.set([index, 1], (index + 1) * 2);
+    }
+    markerRecords.set(
+      [GPU_LOGICAL_ACTIVITY_UNKNOWN_U32, 2],
+      (PHYSICS_ACTIVITY_PHASE_CAPACITY + 1) * 2,
+    );
     this.device.queue.writeBuffer(
       this.logicalActivityMarkerTickSource,
       0,
-      Uint32Array.from({ length: PHYSICS_ACTIVITY_PHASE_CAPACITY }, (_, index) => index),
+      markerRecords,
     );
     this.logicalActivityMarkerTick = this.device.createBuffer({
       label: "Physics logical activity current phase tick",
@@ -911,27 +1077,56 @@ fn recordPhysicsPhaseBoundary(
     });
   }
 
-  private encodeLogicalActivityPhaseBoundary(encoder: GPUCommandEncoder, phaseIndex: number): void {
+  private encodeLogicalActivityMarker(
+    encoder: GPUCommandEncoder,
+    recordIndex: number,
+    label: string,
+  ): void {
     if (!this.logicalActivityMarkerPipeline || !this.logicalActivityMarkerTickSource
-      || !this.logicalActivityMarkerTick || !this.logicalActivityMarkerGroup
-      || phaseIndex < 0 || phaseIndex >= PHYSICS_ACTIVITY_PHASE_CAPACITY) return;
+      || !this.logicalActivityMarkerTick || !this.logicalActivityMarkerGroup) return;
     encoder.copyBufferToBuffer(
       this.logicalActivityMarkerTickSource,
-      phaseIndex * 4,
+      recordIndex * 8,
       this.logicalActivityMarkerTick,
       0,
-      4,
+      8,
     );
-    const pass = encoder.beginComputePass({ label: `Physics activity boundary ${phaseIndex}` });
+    const pass = encoder.beginComputePass({ label });
     pass.setPipeline(this.logicalActivityMarkerPipeline);
     pass.setBindGroup(0, this.logicalActivityMarkerGroup);
     pass.dispatchWorkgroups(1);
     pass.end();
   }
 
+  private encodeLogicalActivityFrameBegin(encoder: GPUCommandEncoder): void {
+    this.encodeLogicalActivityMarker(encoder, 0, "Physics activity frame begin");
+  }
+
+  private encodeLogicalActivityPhaseBoundary(encoder: GPUCommandEncoder, phaseIndex: number): void {
+    if (phaseIndex < 0 || phaseIndex >= PHYSICS_ACTIVITY_PHASE_CAPACITY) return;
+    this.encodeLogicalActivityMarker(
+      encoder,
+      phaseIndex + 1,
+      `Physics activity boundary ${phaseIndex}`,
+    );
+  }
+
+  private encodeLogicalActivityFrameEnd(encoder: GPUCommandEncoder): void {
+    this.encodeLogicalActivityMarker(
+      encoder,
+      PHYSICS_ACTIVITY_PHASE_CAPACITY + 1,
+      "Physics activity frame end",
+    );
+  }
+
   /** Latest completed, generation-checked capture; retained until superseded. */
   get physicsLogicalActivity(): GPUPhysicsLogicalActivitySample | undefined {
     return this.latestLogicalActivity;
+  }
+
+  /** Latest whole-frame acceptance verdict, including incomplete captures. */
+  get physicsLogicalActivityCaptureDiagnostics(): GPUPhysicsLogicalActivityCaptureDiagnostics | undefined {
+    return this.latestLogicalActivityCaptureDiagnostics;
   }
 
   private nextLogicalActivityCaptureId(): number {
@@ -1078,7 +1273,8 @@ fn recordPhysicsPhaseBoundary(
     // Word 1 is the GPU reject carry and was previously read back and dropped.
     // Naming the stage here is what separates "a face was rejected in the
     // divergence gather" from the silent freeze it otherwise becomes.
-    const reject = decodeOctreeStructuredRejectCarry(velocity);
+    const reject = decodeOctreeStructuredRejectCarry(
+      (value.structuredRejectCarry?.length ?? 0) >= 2 ? value.structuredRejectCarry! : velocity);
     this.info.structuredRejectStage = reject.stage;
     this.info.structuredRejectIndex = reject.index;
     this.info.structuredRejectSummary = reject.clean ? undefined : reject.summary;
@@ -1624,7 +1820,24 @@ fn recordPhysicsPhaseBoundary(
     }
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
-    this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
+    this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s;
+    const instrumentationSnapshot = usePerformanceInstrumentationStore.getState();
+    const measurementInstrumentationEnabled = instrumentationSnapshot.enabled;
+    const activityStoreSnapshot = usePerformanceActivityStore.getState();
+    const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
+    const shouldTracePhysics = measurementInstrumentationEnabled
+      && !this.physicsTracePending
+      && traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= PHYSICS_TRACE_CADENCE_MS;
+    const physicsTraceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
+    const physicsTraceContext = `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`;
+    const physicsCPUTrace = shouldTracePhysics
+      ? new CPUPerformanceTrace(
+        physicsTraceSampleId,
+        physicsTraceContext,
+        { id: "command-encoding", label: "Physics advance planning + command encoding" },
+      )
+      : undefined;
+    const c = this.scene.container, rho = this.scene.fluid.density_kg_m3, sigma = this.scene.fluid.surfaceTension_N_m;
     // The quadtree backend still uses its host-side outer subdivision.  The
     // octree does not: its outer command graph is one fixed controller step,
     // while direct fine transport encodes a fixed maximum characteristic
@@ -1654,21 +1867,12 @@ fn recordPhysicsPhaseBoundary(
     const activeBodies = bodies.slice(0, 12);
     this.rigidSystem.syncBodies(activeBodies);
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + (this.octreeProjection ? 1 : substeps);
-    const instrumentationSnapshot = usePerformanceInstrumentationStore.getState();
-    const measurementInstrumentationEnabled = instrumentationSnapshot.enabled;
-    const activityStoreSnapshot = usePerformanceActivityStore.getState();
-    const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
-    const shouldTracePhysics = measurementInstrumentationEnabled
-      && !this.physicsTracePending
-      && traceRequestedAt_ms - this.lastPhysicsTraceAt_ms >= PHYSICS_TRACE_CADENCE_MS;
     this.octreeProjection?.setCouplingBodies(activeBodies.length, activeBodies.some((body) => body.inverseMass_kg > 0));
     const inflow=this.scene.fluid.inflow,outlet=this.inflowBoundary?.outletCenter_m,inflowStepStrength=inflow?averageInflowStrength(inflow,this.lastTime-delta,this.lastTime):0;
     if(this.adaptiveProjection&&this.inflowBoundary){const cellVolume=c.width_m*c.height_m*c.depth_m/(this.info.nx*this.info.ny*this.info.nz);this.adaptiveProjection.addSurfaceReferenceVolumeCells(this.inflowBoundary.flowRate_m3_s*inflowStepStrength*delta/cellVolume);}
     if (this.params) this.device.queue.writeBuffer(this.params, 0, new Float32Array([this.info.nx, this.info.ny, this.info.nz, dt, c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y, c.width_m, c.height_m, c.depth_m, sceneHasTerrain(this.scene) ? 1 : 0, rho, this.scene.fluid.dynamicViscosity_Pa_s, this.transportConservativeVolume ? 1 : 0, this.adaptiveProjection ? 1 : 0, sigma, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodies.length, c.top === "open" ? 1 : 0,outlet?.x??0,outlet?.y??0,outlet?.z??0,inflow?.radius_m??0,inflow?.velocity_m_s.x??0,inflow?.velocity_m_s.y??0,inflow?.velocity_m_s.z??0,this.inflowBoundary?.apertureScale??0,inflowStepStrength,0,c.fillFraction*this.info.ny,0]));
     if (!this.validationChecked) this.device.pushErrorScope("validation");
     let encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" });
-    const physicsTraceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
-    const physicsTraceContext = `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`;
     const physicsTrace = shouldTracePhysics
       && !this.hardwarePhysicsTraceInvalid
       && GPUStageTimestampRecorder.supported(this.device)
@@ -1707,7 +1911,10 @@ fn recordPhysicsPhaseBoundary(
       logicalActivityCaptureId = shouldCaptureLogicalActivity ? this.nextLogicalActivityCaptureId() : 0;
       logicalActivitySession = this.logicalActivity.bindingSession(this.device, encoder, {
         capacity: shouldCaptureLogicalActivity
-          ? physicsLogicalActivityCaptureCapacity(this.device.limits)
+          ? Math.min(
+            this.logicalActivityCaptureCapacity,
+            maximumPhysicsLogicalActivityCaptureCapacity(this.device.limits),
+          )
           : 1,
         captureId: logicalActivityCaptureId,
         label: shouldCaptureLogicalActivity
@@ -1718,11 +1925,13 @@ fn recordPhysicsPhaseBoundary(
       encoder = logicalActivitySession.encoder;
     }
     physicsTrace?.begin();
+    if (shouldCaptureLogicalActivity) this.encodeLogicalActivityFrameBegin(encoder);
     let logicalPhaseIndex = 0;
     const completePhysicsPhase = (
       completedEncoder: GPUCommandEncoder,
       phase: GPUTimestampPhase,
     ): GPUCommandEncoder => {
+      physicsCPUTrace?.completePhase(phase);
       if (shouldCaptureLogicalActivity) {
         this.encodeLogicalActivityPhaseBoundary(completedEncoder, logicalPhaseIndex);
         logicalPhaseIndex += 1;
@@ -1928,11 +2137,31 @@ fn recordPhysicsPhaseBoundary(
         })) this.stepSequenceRecorder.record("step-snapshot");
       }
     }
+    if (shouldCaptureLogicalActivity) this.encodeLogicalActivityFrameEnd(encoder);
+    // Freeze application dispatch coverage before timestamp-recorder closure
+    // can append profiler infrastructure to the same proxied encoder.
+    const logicalActivityDispatchDiagnostics = shouldCaptureLogicalActivity
+      ? logicalActivitySession?.diagnostics
+      : undefined;
     physicsTrace?.resolve(encoder);
     logicalActivitySession?.finish();
     const submittedEncoder = encoder;
     physicsQueueTrace?.begin();
     this.device.queue.submit([submittedEncoder.finish()]);
+    if (physicsCPUTrace) {
+      this.info.physicsCPUTrace = physicsCPUTrace.finish({
+        id: "other",
+        label: "Capture closure + command submission",
+      });
+      this.info.physicsCaptureIdentity = {
+        sampleId: physicsTraceSampleId,
+        context: physicsTraceContext,
+        frameId: gpuPhysicsPerformanceActivityFrameId({
+          sampleId: physicsTraceSampleId,
+          context: physicsTraceContext,
+        }),
+      };
+    }
     this.octreeProjection?.retireSubmittedEncoder(submittedEncoder);
     // Driver-independent sequence conformance: every advance, traced or not,
     // must have encoded exactly the declared step program. A deviation is a
@@ -1965,29 +2194,67 @@ fn recordPhysicsPhaseBoundary(
           return physicsQueueTraceRead;
         })
       : physicsQueueTraceRead;
+    const physicsPublicationId = `physics-publication:${this.info.encodedSteps ?? 0}`;
+    const physicsActivityIdentity = (trace: Pick<PerformanceTrace, "sampleId" | "context">): ActivityWorkIdentity => ({
+      frameId: gpuPhysicsPerformanceActivityFrameId(trace),
+      generation: activityStoreSnapshot.generation,
+      submissionId: `gpu-physics:${encodeURIComponent(physicsTraceContext)}:${physicsTraceSampleId}`,
+      publicationId: physicsPublicationId,
+    });
+    const publishCaptureDiagnosticsOnly = (
+      trace: Pick<PerformanceTrace, "sampleId" | "context">,
+      reasons: readonly string[],
+    ) => usePerformanceActivityStore.getState().ingestEvidence(
+      physicsActivityIdentity(trace),
+      { captureDiagnostics: { reasons } },
+    );
     if (shouldCaptureLogicalActivity && logicalActivitySession && physicsTraceRead) {
       const session = logicalActivitySession;
       const activityGeneration = activityStoreSnapshot.generation;
       const shaderGeneration = this.logicalActivity.generation;
-      const publicationId = `physics-publication:${this.info.encodedSteps ?? 0}`;
       void Promise.all([session.read(), physicsTraceRead]).then(([decoded, trace]) => {
         const instrumentation = usePerformanceInstrumentationStore.getState();
         const activityStore = usePerformanceActivityStore.getState();
-        if (!decoded?.ok || !trace || this.disposed
-          || decoded.capture.captureId !== logicalActivityCaptureId
+        if (!trace || this.disposed
           || !instrumentation.shaderActivityEnabled
           || instrumentation.shaderGeneration !== shaderGeneration
           || activityStore.generation !== activityGeneration) return;
-        const identity: ActivityWorkIdentity = {
-          frameId: gpuPhysicsPerformanceActivityFrameId(trace),
-          generation: activityGeneration,
-          submissionId: `gpu-physics:${encodeURIComponent(physicsTraceContext)}:${physicsTraceSampleId}`,
-          publicationId,
-        };
+        if (!decoded?.ok) {
+          this.latestLogicalActivity = undefined;
+          this.latestLogicalActivityCaptureDiagnostics = undefined;
+          publishCaptureDiagnosticsOnly(trace, ["logical-readback-failed"]);
+          return;
+        }
+        if (decoded.capture.captureId !== logicalActivityCaptureId) {
+          this.latestLogicalActivity = undefined;
+          this.latestLogicalActivityCaptureDiagnostics = undefined;
+          publishCaptureDiagnosticsOnly(trace, ["logical-capture-id-mismatch"]);
+          return;
+        }
+        const identity = physicsActivityIdentity(trace);
         const tasks = Object.freeze({
           ...gpuLogicalActivityTaskDescriptions(shaderGeneration),
           ...PHYSICS_ACTIVITY_TASKS,
         }) as Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>>;
+        const captureDiagnostics = validateGPUPhysicsLogicalActivityCapture(
+          decoded.capture,
+          trace,
+          logicalActivityDispatchDiagnostics,
+          logicalPhaseIndex,
+        );
+        this.latestLogicalActivityCaptureDiagnostics = captureDiagnostics;
+        if (decoded.capture.overflowed) {
+          const maximumCapacity = maximumPhysicsLogicalActivityCaptureCapacity(this.device.limits);
+          const attemptedEventCount = decoded.capture.events.length
+            + decoded.capture.droppedEventCount;
+          this.logicalActivityCaptureCapacity = Math.min(
+            maximumCapacity,
+            Math.max(
+              this.logicalActivityCaptureCapacity,
+              Math.ceil(attemptedEventCount * 1.25),
+            ),
+          );
+        }
         const projection = physicsPhaseBoundaryTimeProjection(trace, decoded.capture, tasks);
         const sample: GPUPhysicsLogicalActivitySample = {
           identity,
@@ -2000,6 +2267,7 @@ fn recordPhysicsPhaseBoundary(
           windowEnd_ms: trace.total_ms,
           ...projection,
           tasks,
+          captureDiagnostics,
         };
         this.latestLogicalActivity = sample;
         publishDecodedGPULogicalActivity({
@@ -2014,10 +2282,31 @@ fn recordPhysicsPhaseBoundary(
           granularity: "workgroup",
           tasks: sample.tasks,
           maximumRows: 128,
+          captureDiagnostics: {
+            reasons: sample.captureDiagnostics.reasons,
+            recorderOverflowed: sample.captureDiagnostics.overflowed,
+            droppedEventCount: sample.captureDiagnostics.droppedEventCount,
+            unprofiledDispatchCount:
+              sample.captureDiagnostics.unregisteredComputeDispatchCount,
+            unprofiledPipelineLabels:
+              sample.captureDiagnostics.unregisteredComputePipelineLabels,
+          },
         });
       }).catch(() => {
         // Device loss and stale captures fail closed; aggregate timing remains.
       }).finally(() => session.destroy());
+    } else if (shouldTracePhysics && physicsTraceRead && activityStoreSnapshot.enabled) {
+      const activityGeneration = activityStoreSnapshot.generation;
+      void physicsTraceRead.then((trace) => {
+        const activityStore = usePerformanceActivityStore.getState();
+        if (!trace || this.disposed || !activityStore.enabled
+          || activityStore.generation !== activityGeneration) return;
+        this.latestLogicalActivity = undefined;
+        this.latestLogicalActivityCaptureDiagnostics = undefined;
+        publishCaptureDiagnosticsOnly(trace, ["logical-capture-disabled"]);
+      }).catch(() => {
+        // Device loss is reported by the aggregate trace path.
+      });
     }
     if (physicsTraceRead) {
       this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;

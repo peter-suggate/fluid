@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   cpuPerformanceClockSnapshot,
   gpuPhysicsPerformanceActivityFrameId,
+  mergePerformanceActivityCaptureDiagnostics,
   mergePerformanceActivityFrame,
   performanceActivityTaskColor,
   slicePerformanceActivityRows,
@@ -166,6 +167,32 @@ test("detailed evidence can be merged without losing the synthesized frame", () 
   assert.throws(() => mergePerformanceActivityFrame(frame, {
     events: [{ ...detailed.events.at(-1)!, identity: { frameId: "other", generation: 4 } }],
   }), /Cannot merge activity/);
+});
+
+test("capture completeness reasons and counts merge idempotently", () => {
+  const first = {
+    reasons: ["recorder-overflow" as const],
+    recorderOverflowed: true,
+    droppedEventCount: 19,
+    unprofiledDispatchCount: 3,
+    unprofiledPipelineLabels: ["transport"],
+  };
+  const merged = mergePerformanceActivityCaptureDiagnostics(first, {
+    reasons: ["recorder-overflow", "missing-frame-end"],
+    droppedEventCount: 19,
+    unprojectedEventCount: 2,
+    unprofiledDispatchCount: 3,
+    unprofiledPipelineLabels: ["transport", "projection"],
+  });
+  assert.deepEqual(merged, {
+    reasons: ["recorder-overflow", "missing-frame-end"],
+    recorderOverflowed: true,
+    droppedEventCount: 19,
+    droppedRowCount: 0,
+    unprojectedEventCount: 2,
+    unprofiledDispatchCount: 3,
+    unprofiledPipelineLabels: ["transport", "projection"],
+  });
 });
 
 test("task colors are deterministic and independent of display labels", () => {

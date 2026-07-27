@@ -207,10 +207,23 @@ export class CPUPerformanceTrace {
     this.phaseStartedAt_ms = boundary_ms;
   }
 
-  finish(): PerformanceTrace {
+  /** Close the interval since the previous boundary using the phase which was
+   * just completed. This is useful for command encoders where the honest phase
+   * identity is known at the trailing seam rather than before work begins. */
+  completePhase(completed: Pick<PerformancePhaseSample, "id" | "label">): void {
+    const boundary_ms = this.clock();
+    this.intervals.push({
+      ...completed,
+      start_ms: this.phaseStartedAt_ms,
+      end_ms: boundary_ms,
+    });
+    this.phaseStartedAt_ms = boundary_ms;
+  }
+
+  finish(final: Pick<PerformancePhaseSample, "id" | "label"> = this.current): PerformanceTrace {
     const completedAt_ms = this.clock();
     this.intervals.push({
-      ...this.current,
+      ...final,
       start_ms: this.phaseStartedAt_ms,
       end_ms: completedAt_ms,
     });

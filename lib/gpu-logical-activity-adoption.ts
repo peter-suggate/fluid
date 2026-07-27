@@ -149,6 +149,18 @@ export interface GPULogicalActivityBindingSessionOptions {
   sharedRecorder?: GPULogicalActivityRecorder;
 }
 
+/** Host-observed coverage of compute dispatches encoded through one session.
+ * This is deliberately independent from shader heartbeats: a pipeline that was
+ * never registered cannot write a heartbeat, but its dispatch must still make
+ * the frame's completeness contract fail closed. */
+export interface GPULogicalActivityBindingSessionDiagnostics {
+  readonly computeDispatchCount: number;
+  readonly instrumentedComputeDispatchCount: number;
+  readonly unregisteredComputeDispatchCount: number;
+  readonly unregisteredComputePipelineCount: number;
+  readonly unregisteredComputePipelineLabels: readonly string[];
+}
+
 /**
  * Frame-scoped compute-pass binding proxy.
  *
@@ -162,6 +174,11 @@ export class GPULogicalActivityBindingSession {
   readonly recorder?: GPULogicalActivityRecorder;
   private readonly ownsRecorder: boolean;
   private readonly bindGroups = new WeakMap<GPUComputePipeline, GPUBindGroup>();
+  private computeDispatchCount = 0;
+  private instrumentedComputeDispatchCount = 0;
+  private unregisteredComputeDispatchCount = 0;
+  private readonly unregisteredPipelines = new WeakSet<GPUComputePipeline>();
+  private readonly unregisteredPipelineLabels: string[] = [];
 
   constructor(
     private readonly activity: GPULogicalActivityAdoptionContext,
@@ -192,6 +209,21 @@ export class GPULogicalActivityBindingSession {
   private wrapEncoder(encoder: GPUCommandEncoder): GPUCommandEncoder {
     const wrapPass = (pass: GPUComputePassEncoder) => {
       let activityBindGroup: GPUBindGroup | undefined;
+      let currentPipeline: GPUComputePipeline | undefined;
+      let currentPipelineIsRegistered = false;
+      const recordDispatch = () => {
+        this.computeDispatchCount += 1;
+        if (currentPipelineIsRegistered) {
+          this.instrumentedComputeDispatchCount += 1;
+          return;
+        }
+        this.unregisteredComputeDispatchCount += 1;
+        if (currentPipeline && !this.unregisteredPipelines.has(currentPipeline)) {
+          this.unregisteredPipelines.add(currentPipeline);
+          const label = currentPipeline.label?.trim();
+          this.unregisteredPipelineLabels.push(label || "Unlabelled compute pipeline");
+        }
+      };
       const bindActivity = () => {
         if (activityBindGroup) {
           pass.setBindGroup(GPU_LOGICAL_ACTIVITY_BIND_GROUP, activityBindGroup);
@@ -203,6 +235,8 @@ export class GPULogicalActivityBindingSession {
           return (pipeline: GPUComputePipeline) => {
             target.setPipeline(pipeline);
             const registration = instrumentedComputePipelines.get(pipeline);
+            currentPipeline = pipeline;
+            currentPipelineIsRegistered = registration !== undefined;
             activityBindGroup = undefined;
             if (!registration) return;
             if (registration.generation !== this.activity.generation) {
@@ -220,6 +254,7 @@ export class GPULogicalActivityBindingSession {
         }
         if (property === "dispatchWorkgroups") {
           return (workgroupCountX: GPUSize32, workgroupCountY?: GPUSize32, workgroupCountZ?: GPUSize32) => {
+            recordDispatch();
             bindActivity();
             // Preserve the caller's arity. Dawn's native binding does not
             // accept explicit `undefined` values for omitted WebIDL arguments.
@@ -234,6 +269,7 @@ export class GPULogicalActivityBindingSession {
         }
         if (property === "dispatchWorkgroupsIndirect") {
           return (indirectBuffer: GPUBuffer, indirectOffset: GPUSize64) => {
+            recordDispatch();
             bindActivity();
             target.dispatchWorkgroupsIndirect(indirectBuffer, indirectOffset);
           };
@@ -254,6 +290,18 @@ export class GPULogicalActivityBindingSession {
         return typeof value === "function" ? value.bind(target) : value;
       },
     }) as GPUCommandEncoder;
+  }
+
+  /** Immutable point-in-time coverage; callers should snapshot this at their
+   * owned frame-end marker, before any profiler infrastructure is appended. */
+  get diagnostics(): GPULogicalActivityBindingSessionDiagnostics {
+    return Object.freeze({
+      computeDispatchCount: this.computeDispatchCount,
+      instrumentedComputeDispatchCount: this.instrumentedComputeDispatchCount,
+      unregisteredComputeDispatchCount: this.unregisteredComputeDispatchCount,
+      unregisteredComputePipelineCount: this.unregisteredPipelineLabels.length,
+      unregisteredComputePipelineLabels: Object.freeze([...this.unregisteredPipelineLabels]),
+    });
   }
 
   /** Append readback to this session's encoder before its command buffer is finished. */

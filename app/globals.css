@@ -549,6 +549,10 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .activity-header-meta { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px; }
 .activity-header-meta > span { flex: none; padding: 5px 7px; border: 1px solid rgba(225,171,104,.25); color: #d6a86d; background: rgba(225,171,104,.055); font: 700 6px/1 var(--mono); letter-spacing: .08em; white-space: nowrap; }
 .activity-header-meta > span.synchronized { border-color: rgba(98,205,176,.27); color: #82d5c1; background: rgba(98,205,176,.06); }
+.activity-header-meta > .activity-capture-status[data-state="complete"] { border-color: rgba(98,205,176,.27); color: #82d5c1; background: rgba(98,205,176,.06); }
+.activity-header-meta > .activity-capture-status[data-state="verifying"] { border-color: rgba(133,158,152,.22); color: #849b95; background: rgba(133,158,152,.045); }
+.activity-header-meta > .activity-capture-status[data-state="incomplete"] { border-color: rgba(226,104,132,.38); color: #ee8aa2; background: rgba(226,104,132,.075); }
+.performance-activity-grid[data-capture-completeness="incomplete"] .activity-matrix-summary strong { color: #d6a1ad; }
 .activity-density-control { height: 25px; padding: 0 7px; display: grid; grid-template-columns: auto 62px auto; align-items: center; gap: 6px; border: 1px solid var(--line); background: rgba(0,0,0,.12); color: var(--dim); font: 700 5px/1 var(--mono); letter-spacing: .07em; white-space: nowrap; }
 .activity-density-control input { width: 62px; margin: 0; accent-color: var(--accent); cursor: ew-resize; }
 .activity-density-control output { min-width: 34px; color: #a9bfba; font-variant-numeric: tabular-nums; text-align: right; }
@@ -570,6 +574,16 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .activity-capture-comparison button { width: 22px; height: 21px; padding: 0; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
 .activity-capture-comparison button:hover { color: var(--ink); background: rgba(255,255,255,.04); }
 .activity-capture-comparison .activity-set-reference { width: auto; padding: 0 7px; color: #8ca59f; letter-spacing: .05em; }
+.activity-task-legend { border-bottom: 1px solid var(--line); background: rgba(255,255,255,.009); }
+.activity-task-legend > header { min-height: 21px; padding: 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #91aaa4; font: 750 6px/1 var(--mono); letter-spacing: .08em; }
+.activity-task-legend > header small { color: var(--dim); font: inherit; }
+.activity-task-legend-groups { max-height: 92px; overflow-y: auto; padding: 0 10px 7px; display: grid; gap: 5px; scrollbar-width: thin; scrollbar-color: #24403a transparent; }
+.activity-task-legend-group { min-width: 0; display: grid; grid-template-columns: 92px minmax(0,1fr); align-items: start; gap: 7px; }
+.activity-task-legend-group > strong { padding-top: 3px; overflow: hidden; color: #607a74; font: 700 5px/1.1 var(--mono); letter-spacing: .055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.activity-task-legend-group > div { min-width: 0; display: flex; flex-wrap: wrap; gap: 3px; }
+.activity-task-legend-group span { min-width: 0; max-width: 210px; height: 14px; padding: 0 5px 0 3px; display: flex; align-items: center; gap: 4px; overflow: hidden; border: 1px solid rgba(168,226,215,.08); background: rgba(255,255,255,.014); color: #849d97; font: 600 5px/1 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.activity-task-legend-group span[data-observed="false"] { opacity: .38; }
+.activity-task-legend-group span i { width: 7px; height: 7px; flex: none; box-shadow: 0 0 5px color-mix(in srgb, currentColor, transparent 60%); }
 .activity-grid-empty { min-height: 120px; padding: 28px 15px; display: grid; place-items: center; color: var(--dim); font: 700 7px/1.4 var(--mono); letter-spacing: .08em; text-align: center; text-transform: uppercase; }
 .activity-scrollport { min-width: 0; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #24403a transparent; }
 .activity-timeline { min-width: max(640px, calc(var(--activity-label-width) + var(--activity-slice-count) * var(--activity-ms-width))); }

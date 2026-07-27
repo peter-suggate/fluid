@@ -278,6 +278,18 @@ export interface GPUEulerianInfo {
   hostSchedulingUsesReadback?: boolean;
   /** Latest exhaustive, exclusive GPU physics partition. */
   physicsTrace?: PerformanceTrace;
+  /** Main-thread command-encoding partition captured under the exact same
+   * sample ID and context as `physicsTrace`. It deliberately excludes the
+   * controller/render ticks which merely happen to report the completed GPU
+   * sample later. */
+  physicsCPUTrace?: PerformanceTrace;
+  /** Stable join identity published when the sampled advance finishes
+   * encoding, before asynchronous GPU trace readback completes. */
+  physicsCaptureIdentity?: {
+    sampleId: number;
+    context: string;
+    frameId: string;
+  };
 }
 
 export interface WebGPUEulerianSolverOptions {

@@ -1,4 +1,5 @@
 import {
+  mergePerformanceActivityCaptureDiagnostics,
   performanceActivityTaskColor,
   type ActivityFrameIdentity,
   type ActivityClockDescriptor,
@@ -11,6 +12,7 @@ import {
   type ActivityTask,
   type ActivityWorkIdentity,
   type PerformanceActivityFrameAddition,
+  type PerformanceActivityCaptureDiagnostics,
   type PerformanceActivityEvidenceIngestResult,
 } from "./performance-activity";
 import type {
@@ -26,6 +28,8 @@ export interface GPUMatrixTaskDescriptor {
   label: string;
   color?: string;
   parentId?: string;
+  /** Semantic timestamp phase which owns this shader task. */
+  phaseId?: string;
   /** Optional semantic pairing; only explicit enter/exit roles create occupied spans. */
   checkpoints?: Readonly<{ enter: number; exit: number }>;
 }
@@ -43,6 +47,8 @@ export interface GPULogicalActivityMatrixOptions {
   tasks?: Readonly<Record<number, GPUMatrixTaskDescriptor>>;
   clock?: ActivityClockDescriptor;
   maximumRows?: number;
+  /** Producer-owned frame-boundary/dispatch validation merged with matrix-local failures. */
+  captureDiagnostics?: PerformanceActivityCaptureDiagnostics;
 }
 
 export interface GPULogicalActivityMatrixAddition extends PerformanceActivityFrameAddition {
@@ -108,6 +114,21 @@ export function gpuLogicalActivityMatrixAddition(
   let droppedRowCount = 0;
   let unknownTimeEventCount = 0;
 
+  const registerTask = (descriptor: GPUMatrixTaskDescriptor) => {
+    if (tasks.has(descriptor.id)) return;
+    tasks.set(descriptor.id, {
+      id: descriptor.id,
+      label: descriptor.label,
+      color: descriptor.color ?? performanceActivityTaskColor(descriptor.id),
+      lane: options.lane,
+      ...(descriptor.phaseId ? { stageId: descriptor.phaseId } : {}),
+      ...(descriptor.parentId ? { parentId: descriptor.parentId } : {}),
+    });
+  };
+  // The frame owns the complete generation-scoped task catalog, not just the
+  // subset which happened to append before this capture ended or overflowed.
+  for (const descriptor of Object.values(options.tasks ?? {})) registerTask(descriptor);
+
   for (const heartbeat of [...options.capture.events].sort((left, right) => left.sequence - right.sequence)) {
     const key = rowKey(heartbeat, granularity);
     let row = rows.get(key);
@@ -131,13 +152,7 @@ export function gpuLogicalActivityMatrixAddition(
       id: `${prefix}.task.${heartbeat.taskId.toString(16).padStart(8, "0")}`,
       label: `GPU task 0x${heartbeat.taskId.toString(16).padStart(8, "0")}`,
     };
-    if (!tasks.has(descriptor.id)) tasks.set(descriptor.id, {
-      id: descriptor.id,
-      label: descriptor.label,
-      color: descriptor.color ?? performanceActivityTaskColor(descriptor.id),
-      lane: options.lane,
-      ...(descriptor.parentId ? { parentId: descriptor.parentId } : {}),
-    });
+    registerTask(descriptor);
     const location = options.locateTime(heartbeat);
     if (!location || !Number.isFinite(location.time_ms)) {
       unknownTimeEventCount += 1;
@@ -199,6 +214,18 @@ export function gpuLogicalActivityMatrixAddition(
   }
 
   const resources = [...rows.values()].map((row) => row.resource);
+  const captureReasons = [
+    ...(options.capture.overflowed ? ["recorder-overflow" as const] : []),
+    ...(droppedRowCount > 0 ? ["row-limit" as const] : []),
+    ...(unknownTimeEventCount > 0 ? ["unprojected-event" as const] : []),
+  ];
+  const captureDiagnostics = mergePerformanceActivityCaptureDiagnostics({
+    reasons: captureReasons,
+    recorderOverflowed: options.capture.overflowed,
+    droppedEventCount: options.capture.droppedEventCount,
+    droppedRowCount,
+    unprojectedEventCount: unknownTimeEventCount,
+  }, options.captureDiagnostics)!;
   return {
     resources,
     clocks: [options.clock ?? {
@@ -219,6 +246,7 @@ export function gpuLogicalActivityMatrixAddition(
     unknownTimeEventCount,
     captureOverflowed: options.capture.overflowed,
     droppedEventCount: options.capture.droppedEventCount,
+    captureDiagnostics,
   };
 }
 
