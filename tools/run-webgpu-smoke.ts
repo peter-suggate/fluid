@@ -3057,6 +3057,7 @@ async function runGPU(
   passTimestampAudit?.start();
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
+  let flipCensusPrevious: { field: Float32Array; time_s: number } | undefined;
   // Retry accounting for the advance loop below. `rejectedAdvanceAttempts` is
   // monotone, so the exponential warning gate rides on it: a wedge drives it up
   // continuously and still costs only log2(n) lines, whereas gating on the
@@ -3383,6 +3384,61 @@ async function runGPU(
           phase: "height-profile", time_s: solver.info.submittedTime_s,
           wetPerLayer: layers, wallWetPerLayer: wallLayers }));
       }
+      if (process.env.FLUID_WET_FLIP_CENSUS === "1") {
+        // Interface motion is bounded by the interval CFL: a cell that turns
+        // wet with no previously wet cell within the reachable Chebyshev
+        // radius received liquid the velocity field could not have delivered
+        // there — creation by the interface machinery, not advection. At
+        // per-step cadence (dt 0.004 s, dx 0.05 m) distance >= 2 needs
+        // sustained speed >= 12.5 m/s.
+        const { nx: fx, ny: fy, nz: fz } = sample;
+        const previous = flipCensusPrevious;
+        if (previous && previous.field.length === exact.field.length) {
+          const wetBefore = (i: number, j: number, k: number) =>
+            (previous.field[i + fx * (j + fy * k)] ?? 0) > 0.5;
+          const nearestWetBefore = (i: number, j: number, k: number, limit: number) => {
+            for (let d = 1; d <= limit; d += 1) {
+              for (let dk = -d; dk <= d; dk += 1) for (let dj = -d; dj <= d; dj += 1) for (let di = -d; di <= d; di += 1) {
+                if (Math.max(Math.abs(di), Math.abs(dj), Math.abs(dk)) !== d) continue;
+                const qi = i + di, qj = j + dj, qk = k + dk;
+                if (qi < 0 || qj < 0 || qk < 0 || qi >= fx || qj >= fy || qk >= fz) continue;
+                if (wetBefore(qi, qj, qk)) return d;
+              }
+            }
+            return limit + 1;
+          };
+          const byDistance = [0, 0, 0, 0];
+          const createdHeights: number[] = [];
+          let totalWet = 0, createdPotentialProxy = 0;
+          const gravityMagnitude = Math.hypot(
+            scene.fluid.gravity_m_s2.x,
+            scene.fluid.gravity_m_s2.y,
+            scene.fluid.gravity_m_s2.z,
+          );
+          const spacingForCensus = { x: scene.container.width_m / fx,
+            y: scene.container.height_m / fy, z: scene.container.depth_m / fz };
+          const cellVolume = spacingForCensus.x * spacingForCensus.y * spacingForCensus.z;
+          for (let k = 0; k < fz; k += 1) for (let j = 0; j < fy; j += 1) for (let i = 0; i < fx; i += 1) {
+            const fraction = exact.field[i + fx * (j + fy * k)] ?? 0;
+            if (fraction <= 0.5) continue;
+            totalWet += 1;
+            if (wetBefore(i, j, k)) continue;
+            const distance = Math.min(nearestWetBefore(i, j, k, 3), byDistance.length);
+            byDistance[distance - 1] += 1;
+            if (distance >= 2) {
+              createdHeights.push(j);
+              createdPotentialProxy += fraction * cellVolume * gravityMagnitude * (j + 0.5) * spacingForCensus.y;
+            }
+          }
+          console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+            phase: "wet-flip-census", time_s: solver.info.submittedTime_s,
+            elapsed_s: (solver.info.submittedTime_s ?? 0) - previous.time_s,
+            totalWet, newWetByChebyshevDistance: byDistance,
+            createdHeights, createdPotentialProxy }));
+        }
+        flipCensusPrevious = { field: exact.field.slice(),
+          time_s: solver.info.submittedTime_s ?? 0 };
+      }
       const stagedSolver = solver as GPUSolverInstance & {
         preProjectionVelocityTexture?: GPUTexture;
         velocityTexture?: GPUTexture;
@@ -3585,6 +3641,35 @@ async function runGPU(
             maximumLiquidComponentCfl: velocity.maximumLiquidComponentCfl,
             nonFiniteLiquidComponentCount: velocity.nonFiniteLiquidComponentCount,
           };
+          if (process.env.FLUID_SPEED_MAP === "1") {
+            // Locate the kinetic energy: the leading edge of a wall/ceiling
+            // sheet running away distinguishes velocity-inheritance runaway
+            // from a pressure-driven jet concentrated at the impact base.
+            const { nx, ny, nz } = solver.info;
+            const speedAt = (cell: number) => Math.hypot(compact.field[3 * cell] ?? NaN,
+              compact.field[3 * cell + 1] ?? NaN, compact.field[3 * cell + 2] ?? NaN);
+            const cells: { cell: number; speed: number; alpha: number }[] = [];
+            const layerMax: number[] = Array.from({ length: ny }, () => 0);
+            for (let cell = 0; cell < nx * ny * nz; cell += 1) {
+              const alpha = cubic.field[cell] ?? 0;
+              if (!(alpha > 1e-4)) continue;
+              const speed = speedAt(cell);
+              if (!Number.isFinite(speed)) continue;
+              const j = Math.floor(cell / nx) % ny;
+              layerMax[j] = Math.max(layerMax[j]!, speed);
+              cells.push({ cell, speed, alpha });
+            }
+            cells.sort((a, b) => b.speed - a.speed);
+            console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+              phase: "speed-map", time_s: solver.info.submittedTime_s,
+              layerMaxSpeed: layerMax.map((value) => Number(value.toFixed(2))),
+              top: cells.slice(0, 12).map(({ cell, speed, alpha }) => ({
+                i: cell % nx, j: Math.floor(cell / nx) % ny, k: Math.floor(cell / (nx * ny)),
+                speed: Number(speed.toFixed(2)), alpha: Number(alpha.toFixed(3)),
+                vx: Number((compact.field[3 * cell] ?? NaN).toFixed(2)),
+                vy: Number((compact.field[3 * cell + 1] ?? NaN).toFixed(2)),
+                vz: Number((compact.field[3 * cell + 2] ?? NaN).toFixed(2)) })) }));
+          }
           if (stabilityEnvelope) {
             stabilityEnvelope.peakLiquidSpeed_m_s = Math.max(
               stabilityEnvelope.peakLiquidSpeed_m_s, velocity.maximumLiquidComponentSpeed_m_s,

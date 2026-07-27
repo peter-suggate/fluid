@@ -3,6 +3,12 @@
 import { fineLevelSetLinearWorkgroupWGSL } from "./webgpu-fine-levelset-dispatch";
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
 import { PassBroker } from "./webgpu-pass-broker";
+import {
+  createGPULogicalActivityAdoptionContext,
+  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
+  type GPULogicalActivityAdoptionContext,
+} from "./gpu-logical-activity-adoption";
+import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 
 export const FINE_TO_COARSE_LEVELSET_ERROR = Object.freeze({
   capacity: 1, unowned: 2, nonfinite: 4, unpublishedSource: 8,
@@ -88,10 +94,35 @@ export class WebGPUFineToCoarseLevelSet {
     this.dispatch = device.createBuffer({ label: "Fine-to-coarse exact row dispatch", size: 12,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.result = { rowOffsets, contributions, counts: this.control, aggregated: true };
+    const activityProfile = performanceShaderVariant();
+    const activity = createGPULogicalActivityAdoptionContext({
+      moduleId: "octree/fine-to-coarse-levelset",
+      profile: activityProfile,
+    });
+    activity.describeTask("prepare-restriction", {
+      id: "gpu.physics.fine-restriction.prepare",
+      label: "Fine restriction · prepare rows",
+      phaseId: "adaptive-publication",
+    });
+    activity.describeTask("restrict-coarse-rows", {
+      id: "gpu.physics.fine-restriction.rows",
+      label: "Fine restriction · restrict coarse rows",
+      phaseId: "adaptive-publication",
+    });
+    activity.describeTask("publish-restriction", {
+      id: "gpu.physics.fine-restriction.publish",
+      label: "Fine restriction · publish",
+      phaseId: "adaptive-publication",
+    });
+    const variant = activity.module(
+      fineToCoarseLevelSetActivityShader(activity),
+      `octree/fine-to-coarse-levelset/${activityProfile.cacheKey}`,
+    );
     const shaderModule = device.createShaderModule({ label: "Fine-to-coarse row restriction",
-      code: fineToCoarseLevelSetWGSL });
-    const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
-      compute: { module: shaderModule, entryPoint } });
+      code: variant.code });
+    const pipeline = (entryPoint: string) => activity.registerPipeline(device.createComputePipeline({
+      label: entryPoint, layout: "auto", compute: { module: shaderModule, entryPoint },
+    }));
     this.pipelines = {
       prepare: pipeline("prepareRestriction"),
       restrict: pipeline("restrictCoarseRows"),
@@ -221,3 +252,40 @@ var<workgroup> diagnosticMagnitude:array<f32,64>;var<workgroup> diagnosticErrors
 // row workgroups, so the aggregates it would read belong to a prior command.
 @compute @workgroup_size(64)fn publishRestriction(@builtin(local_invocation_index)lid:u32){let sourceRejected=control.flags!=0u;var errors=0u;var unaccepted=0u;for(var r=lid;r<control.rowCount;r+=64u){errors|=aggregates[r].error;unaccepted+=select(1u,0u,aggregates[r].valid!=0u);}diagnosticErrors[lid]=errors;diagnosticCounts[lid]=unaccepted;workgroupBarrier();var width=32u;loop{if(width==0u){break;}if(lid<width){diagnosticErrors[lid]|=diagnosticErrors[lid+width];diagnosticCounts[lid]+=diagnosticCounts[lid+width];}workgroupBarrier();width>>=1u;}if(lid==0u){control.flags|=diagnosticErrors[0];control.unacceptedRows=select(diagnosticCounts[0],0u,sourceRejected);if(control.flags==0u){control.count=control.rowCount;control.maximumPerRow=1u;control.valid=0x80000000u;}else{control.count=0xffffffffu;control.maximumPerRow=1u;}}}
 `;
+
+/** Conditional activity variant. Each checkpoint is placed after the entry
+ * point has enough state to identify useful work; disabled mode returns the
+ * production source byte-for-byte. */
+export function fineToCoarseLevelSetActivityShader(
+  activity: GPULogicalActivityAdoptionContext,
+): string {
+  const prepare = activity.workgroup("prepare-restriction", "progress", {
+    workgroupId: "vec3u(0u)",
+    localInvocationIndex: "g.x",
+    workgroupLaneCount: 64,
+  });
+  const restrict = activity.workgroup("restrict-coarse-rows", "active-row", {
+    workgroupId: "w",
+    localInvocationIndex: "lid",
+    workgroupLaneCount: 64,
+    recordWhen: `r < min(control.rowCount, ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u)`,
+  });
+  const publish = activity.workgroup("publish-restriction", "progress", {
+    workgroupId: "vec3u(0u)",
+    localInvocationIndex: "lid",
+    workgroupLaneCount: 64,
+  });
+  if (!prepare && !restrict && !publish) return fineToCoarseLevelSetWGSL;
+  const replacements = [
+    ["@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){",
+      `@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){${prepare}`],
+    ["@compute @workgroup_size(64)fn restrictCoarseRows(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let r=fineLinearWorkgroup(w,n);",
+      `@compute @workgroup_size(64)fn restrictCoarseRows(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let r=fineLinearWorkgroup(w,n);${restrict}`],
+    ["@compute @workgroup_size(64)fn publishRestriction(@builtin(local_invocation_index)lid:u32){",
+      `@compute @workgroup_size(64)fn publishRestriction(@builtin(local_invocation_index)lid:u32){${publish}`],
+  ] as const;
+  return replacements.reduce((source, [needle, replacement]) => {
+    if (!source.includes(needle)) throw new Error(`Fine-restriction activity entry point is missing: ${needle}`);
+    return source.replace(needle, replacement);
+  }, fineToCoarseLevelSetWGSL);
+}

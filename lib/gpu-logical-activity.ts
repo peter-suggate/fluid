@@ -498,6 +498,10 @@ export interface GPULogicalActivityEvent {
 export interface GPULogicalActivityCapture {
   captureId: number;
   capacity: number;
+  /** True when the recorder filled and only its complete prefix was retained. */
+  overflowed: boolean;
+  /** Number of append attempts beyond the retained prefix. */
+  droppedEventCount: number;
   events: readonly GPULogicalActivityEvent[];
 }
 
@@ -531,7 +535,12 @@ function maskHasBitsBeyond(mask: readonly number[], laneCount: number): boolean 
   return (((mask[fullWords] ?? 0) & ~allowed) >>> 0) !== 0;
 }
 
-/** Decode only a complete, internally consistent capture; never return partial events. */
+/**
+ * Decode the complete records retained by the recorder. An overflowing append
+ * counter does not invalidate the already-written prefix: sequence numbers
+ * reserve unique slots, and readback occurs only after queue completion. The
+ * returned capture explicitly reports truncation so later time remains unknown.
+ */
 export function decodeGPULogicalActivity(
   source: ArrayBuffer | ArrayBufferView | ArrayLike<number>,
 ): GPULogicalActivityDecodeResult {
@@ -561,11 +570,12 @@ export function decodeGPULogicalActivity(
   if (words.length !== expectedWords) {
     return { ok: false, code: "bad-size", message: "Capture size does not match its declared capacity" };
   }
-  if (overflow !== 0 || writeCount > capacity) {
-    return { ok: false, code: "overflow", message: "Capture overflowed; no partial activity is trustworthy" };
+  if (overflow > 1 || (overflow === 0) !== (writeCount <= capacity)) {
+    return { ok: false, code: "bad-header", message: "Capture overflow state is inconsistent" };
   }
+  const retainedCount = Math.min(writeCount, capacity);
   const events: GPULogicalActivityEvent[] = [];
-  for (let index = 0; index < writeCount; index += 1) {
+  for (let index = 0; index < retainedCount; index += 1) {
     const offset = GPU_LOGICAL_ACTIVITY_HEADER_WORDS + index * GPU_LOGICAL_ACTIVITY_RECORD_WORDS;
     const record = words.subarray(offset, offset + GPU_LOGICAL_ACTIVITY_RECORD_WORDS);
     const [sequence, taskId, checkpointId, tick, wx, wy, wz, subgroupId, laneId,
@@ -621,7 +631,16 @@ export function decodeGPULogicalActivity(
       activeLaneEvidence: activeMeasured ? "measured" : "unknown",
     });
   }
-  return { ok: true, capture: { captureId, capacity, events } };
+  return {
+    ok: true,
+    capture: {
+      captureId,
+      capacity,
+      overflowed: overflow !== 0,
+      droppedEventCount: Math.max(0, writeCount - retainedCount),
+      events,
+    },
+  };
 }
 
 export interface GPULogicalActivityTimeLocation {

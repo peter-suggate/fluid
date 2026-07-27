@@ -7,6 +7,12 @@ import {
   packOctreeCoarsePhiRecords,
 } from "./octree-coarse-levelset";
 import { OCTREE_FINE_SEED_STATE } from "./octree-fine-seed-leaves";
+import {
+  createGPULogicalActivityAdoptionContext,
+  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
+  type GPULogicalActivityAdoptionContext,
+} from "./gpu-logical-activity-adoption";
+import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 import { PassBroker } from "./webgpu-pass-broker";
 
 /** Fine-to-coarse aggregate record ABI consumed by the production power schedule. */
@@ -49,15 +55,29 @@ export class WebGPUOctreeCoarseLevelSet {
       size: this.plan.recordBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
+    const activityProfile = performanceShaderVariant();
+    const activity = createGPULogicalActivityAdoptionContext({
+      moduleId: "octree/coarse-levelset",
+      profile: activityProfile,
+    });
+    activity.describeTask("bootstrap-coarse-phi", {
+      id: "gpu.physics.coarse-phi.bootstrap",
+      label: "Coarse phi · bootstrap surface rows",
+      phaseId: "fine-sdf-advection",
+    });
+    const variant = activity.module(
+      octreeCoarsePhiBootstrapActivityShader(activity),
+      `octree/coarse-levelset/${activityProfile.cacheKey}`,
+    );
     const shaderModule = device.createShaderModule({
       label: "Octree coarse phi bootstrap",
-      code: octreeCoarsePhiBootstrapShader,
+      code: variant.code,
     });
-    this.bootstrapPipeline = device.createComputePipeline({
+    this.bootstrapPipeline = activity.registerPipeline(device.createComputePipeline({
       label: "Bootstrap compact coarse phi",
       layout: "auto",
       compute: { module: shaderModule, entryPoint: "bootstrapCoarsePhiFromSurfaceLeaves" },
-    });
+    }));
   }
 
   upload(records: ReadonlyMap<number, OctreeCoarsePhiRecord>): void {
@@ -131,3 +151,22 @@ fn finite(value:f32)->bool{return (bitcast<u32>(value)&0x7f800000u)!=0x7f800000u
   coarse[row]=CoarsePhi(value,minimum,maximum,flags);
 }
 `;
+
+/** Conditional workgroup activity for the compact coarse-phi bootstrap.
+ * Disabled mode returns the production source byte-for-byte. */
+export function octreeCoarsePhiBootstrapActivityShader(
+  activity: GPULogicalActivityAdoptionContext,
+): string {
+  const progress = activity.workgroup("bootstrap-coarse-phi", "active-row-block", {
+    workgroupId: "vec3u(gid.x / 64u, 0u, 0u)",
+    localInvocationIndex: "gid.x & 63u",
+    workgroupLaneCount: 64,
+    recordWhen: `row < arrayLength(&coarse) && gid.x / 64u < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  if (!progress) return octreeCoarsePhiBootstrapShader;
+  const needle = "  let row=gid.x;";
+  if (!octreeCoarsePhiBootstrapShader.includes(needle)) {
+    throw new Error("Coarse-phi bootstrap activity entry point is missing");
+  }
+  return octreeCoarsePhiBootstrapShader.replace(needle, `${needle}${progress}`);
+}

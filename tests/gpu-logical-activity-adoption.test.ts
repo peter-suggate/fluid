@@ -6,8 +6,42 @@ import {
   GPU_LOGICAL_ACTIVITY_BIND_GROUP,
   GPU_LOGICAL_ACTIVITY_BINDING,
   createGPULogicalActivityAdoptionContext,
+  gpuLogicalActivityTaskDescriptions,
   stableGPULogicalActivityId,
 } from "../lib/gpu-logical-activity-adoption";
+
+test("module-owned task descriptions are isolated by shader generation", () => {
+  const generation = 0x6a31;
+  const activity = createGPULogicalActivityAdoptionContext({
+    moduleId: "octree/test-catalog",
+    profile: { enabled: true, generation },
+  });
+  const taskId = activity.describeTask("advance", {
+    id: "gpu.physics.test-catalog.advance",
+    label: "Test catalog advance",
+    phaseId: "pressure-solve",
+  });
+  assert.deepEqual(gpuLogicalActivityTaskDescriptions(generation)[taskId], {
+    id: "gpu.physics.test-catalog.advance",
+    label: "Test catalog advance",
+    phaseId: "pressure-solve",
+  });
+  assert.equal(gpuLogicalActivityTaskDescriptions(generation + 1)[taskId], undefined);
+
+  const duplicate = createGPULogicalActivityAdoptionContext({
+    moduleId: "octree/test-catalog",
+    profile: { enabled: true, generation },
+  });
+  assert.equal(duplicate.describeTask("advance", {
+    id: "gpu.physics.test-catalog.advance",
+    label: "Test catalog advance",
+    phaseId: "pressure-solve",
+  }), taskId);
+  assert.throws(() => duplicate.describeTask("advance", {
+    id: "gpu.physics.test-catalog.advance",
+    label: "Conflicting label",
+  }), /conflicts/);
+});
 
 function typeScriptFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

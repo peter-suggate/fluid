@@ -448,6 +448,47 @@ Aggregate CPU/GPU phase envelopes are displayed in a separate section and are
 never labeled as logical workgroup rows. Until heartbeat readback arrives, the
 GPU logical matrix explicitly says that its rows are awaiting data.
 
+### Octree shader rollout and binding policy
+
+Heartbeat adoption is entrypoint-reachability based, not module-declaration
+based. `auditWGSLComputeBindingReachability` follows the transitive WGSL call
+graph and counts only resources reachable by a specific compute entrypoint.
+`assertWGSLActivityBindingEligibility` then enforces the hard rule:
+
+```text
+reachable production storage bindings + 1 activity binding <= 10
+```
+
+For explicit layouts, the same assertion is made against the compute-visible
+layout entries. A module-wide count is insufficient because unrelated kernels
+often share a large source string while using disjoint buffer sets.
+
+The rollout order is:
+
+1. Adopt activity-safe recurring families first: power-volume publication,
+   fine-volume/JFA work, structured velocity publication, coarse-phi bootstrap,
+   fine-to-coarse restriction, and all pipelined MGPCG stages.
+2. Split broad explicit layouts by reachability. The projection/topology shader
+   now keeps its common family at nine storage bindings and isolates frontier
+   merge-sort scratch in a four-storage layout, leaving one recorder slot in
+   both families without changing dispatch order or WGSL algorithms.
+3. Continue through fine bricks/transport/topology, owner and power-topology
+   publication, structured dynamics/boundary/air support, and the
+   SPGrid/Section 4.3 preconditioner families. Each entrypoint receives a stable
+   task descriptor beside its shader and an explicit capability test.
+4. Keep a ten-storage entrypoint timestamp-only until one of these safe changes
+   is proven: remove a genuinely unreachable legacy layout entry, split a
+   mixed-purpose layout, alias buffers whose lifetimes and access modes are
+   mutually exclusive, or reserve a telemetry region inside an already-owned
+   diagnostics arena. Never add an eleventh storage binding or silently omit
+   the entrypoint from the capability audit.
+
+Repeated solver kernels use bounded logical-workgroup sampling; cold singleton
+publication kernels emit one progress checkpoint. The shared recorder reports
+overflow and the number of dropped appends while retaining its complete,
+sequence-validated prefix. Truncation therefore leaves the unrecorded tail
+unknown instead of erasing the entire matrix or presenting it as idle.
+
 ## 10. Central timeline UI
 
 The current `PerformancePanel` lays additive duration segments and cannot

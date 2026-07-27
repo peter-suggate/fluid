@@ -12,6 +12,12 @@ import {
   FLUID_M1_MAX_REDUCTION_LANES,
   supportsFluidM1MaxReduction,
 } from "./webgpu-device-limits";
+import {
+  createGPULogicalActivityAdoptionContext,
+  stableGPULogicalActivityId,
+  type GPULogicalActivityAdoptionContext,
+} from "./gpu-logical-activity-adoption";
+import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 
 export const OCTREE_PIPELINED_PCG_WORKGROUP_SIZE =
   FLUID_M1_MAX_REDUCTION_LANES;
@@ -27,6 +33,9 @@ export const OCTREE_PIPELINED_PCG_CONTROL_BYTES = 128;
 export const OCTREE_PIPELINED_PCG_PARTIAL_BYTES = 32;
 export const OCTREE_PIPELINED_PCG_INDIRECT_STRIDE_BYTES = 16;
 export const OCTREE_PIPELINED_PCG_DISPATCHES_PER_ITERATION = 4;
+export const OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID = "octree/pipelined-mgpcg";
+/** The solver repeats several dispatches per iteration; keep its shared-recorder load bounded. */
+export const OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT = 16;
 
 export const OCTREE_PIPELINED_PCG_ERROR = Object.freeze({
   invalidAuthority: 1 << 0,
@@ -276,7 +285,7 @@ export interface OctreePipelinedMGPCGSolve {
   readonly pressureOut: GPUBuffer;
 }
 
-type PipelineName =
+export type OctreePipelinedMGPCGPipelineName =
   | "initializeControlAndDispatch"
   | "validateAuthority"
   | "initializeState"
@@ -289,6 +298,61 @@ type PipelineName =
   | "advancePCGState"
   | "updateDirections"
   | "finalizeAndPublish";
+
+type PipelineName = OctreePipelinedMGPCGPipelineName;
+
+export interface OctreePipelinedMGPCGActivityTaskDescriptor {
+  readonly entryPoint: PipelineName;
+  readonly task: string;
+  readonly taskId: number;
+  readonly id: string;
+  readonly label: string;
+  readonly checkpoints: Readonly<{ enter: number; exit: number }>;
+}
+
+const mgpcgActivityId = (kind: "task" | "checkpoint", task: string, checkpoint?: string) =>
+  stableGPULogicalActivityId([
+    kind,
+    OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
+    task,
+    ...(checkpoint ? [checkpoint] : []),
+  ].join("\0"));
+
+function mgpcgActivityTask(
+  entryPoint: PipelineName,
+  task: string,
+  label: string,
+): OctreePipelinedMGPCGActivityTaskDescriptor {
+  return Object.freeze({
+    entryPoint,
+    task,
+    taskId: mgpcgActivityId("task", task),
+    id: `gpu.physics.pipelined-mgpcg.${task}`,
+    label,
+    checkpoints: Object.freeze({
+      enter: mgpcgActivityId("checkpoint", task, "enter"),
+      exit: mgpcgActivityId("checkpoint", task, "exit"),
+    }),
+  });
+}
+
+/** Stable descriptors consumed by shader generation and the frame activity task map. */
+export const OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS: Readonly<
+Record<PipelineName, OctreePipelinedMGPCGActivityTaskDescriptor>
+> = Object.freeze({
+  initializeControlAndDispatch: mgpcgActivityTask("initializeControlAndDispatch", "prepare-control", "MGPCG · prepare solve control"),
+  validateAuthority: mgpcgActivityTask("validateAuthority", "validate-authority", "MGPCG · validate structured authority"),
+  initializeState: mgpcgActivityTask("initializeState", "initialize-state", "MGPCG · initialize pressure state"),
+  formInitialResidual: mgpcgActivityTask("formInitialResidual", "form-initial-residual", "MGPCG · form initial residual"),
+  reduceMergedPartials: mgpcgActivityTask("reduceMergedPartials", "reduce-merged-partials", "MGPCG · reduce residual scalars"),
+  finishMergedReduction: mgpcgActivityTask("finishMergedReduction", "finish-merged-reduction", "MGPCG · finish residual reduction"),
+  reduceDirectionCurvaturePartials: mgpcgActivityTask("reduceDirectionCurvaturePartials", "reduce-direction-curvature", "MGPCG · reduce direction curvature"),
+  finishDirectionCurvature: mgpcgActivityTask("finishDirectionCurvature", "finish-direction-curvature", "MGPCG · finish direction curvature"),
+  initializeDirections: mgpcgActivityTask("initializeDirections", "initialize-directions", "MGPCG · initialize search direction"),
+  advancePCGState: mgpcgActivityTask("advancePCGState", "advance-pcg-state", "MGPCG · advance pressure and residual"),
+  updateDirections: mgpcgActivityTask("updateDirections", "update-directions", "MGPCG · update search direction"),
+  finalizeAndPublish: mgpcgActivityTask("finalizeAndPublish", "finalize-pressure", "MGPCG · publish pressure"),
+});
 
 const PIPELINE_BINDINGS: Readonly<Record<PipelineName, readonly number[]>> = Object.freeze({
   initializeControlAndDispatch: [0, 2, 13, 15],
@@ -304,6 +368,10 @@ const PIPELINE_BINDINGS: Readonly<Record<PipelineName, readonly number[]>> = Obj
   updateDirections: [0, 2, 9, 11, 13],
   finalizeAndPublish: [0, 2, 5, 6, 7, 13],
 });
+
+export const OCTREE_PIPELINED_MGPCG_MAX_PRODUCTION_STORAGE_BINDINGS = Math.max(
+  ...Object.values(PIPELINE_BINDINGS).map((bindings) => bindings.filter((binding) => binding !== 0).length),
+);
 
 interface CachedGroup {
   readonly resources: readonly (GPUBuffer | undefined)[];
@@ -422,18 +490,36 @@ export class WebGPUOctreePipelinedMGPCG {
     floats[6] = 1e-30;
     device.queue.writeBuffer(this.params, 0, words);
 
+    const activityProfile = performanceShaderVariant();
+    const activity = createGPULogicalActivityAdoptionContext({
+      moduleId: OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
+      profile: activityProfile,
+      subgroupsAlreadyEnabled: true,
+    });
+    for (const descriptor of Object.values(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS)) {
+      activity.describeTask(descriptor.task, {
+        id: descriptor.id,
+        label: descriptor.label,
+        phaseId: "pressure-solve",
+        checkpoints: descriptor.checkpoints,
+      });
+    }
+    const shaderVariant = activity.module(
+      octreePipelinedMGPCGActivityShader(activity),
+      `${OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`,
+    );
     const shaderModule = device.createShaderModule({
       label: "Octree pipelined MGPCG · M1 Max 128-lane subgroups",
-      code: octreePipelinedMGPCGShader,
+      code: shaderVariant.code,
     });
     this.pipelines = Object.freeze(Object.fromEntries(
       (Object.keys(PIPELINE_BINDINGS) as PipelineName[]).map((entryPoint) => [
         entryPoint,
-        device.createComputePipeline({
+        activity.registerPipeline(device.createComputePipeline({
           label: `Pipelined MGPCG · ${entryPoint} · target-128-subgroups`,
           layout: "auto",
           compute: { module: shaderModule, entryPoint },
-        }),
+        })),
       ]),
     ) as Record<PipelineName, GPUComputePipeline>);
     this.allocatedBytes = this.plan.ownedBytes;
@@ -1102,3 +1188,122 @@ fn finalizeAndPublish(@builtin(global_invocation_id) global: vec3u) {
   if (global.x == 0u && success) { atomicStore(&control[20], 1u); }
 }
 `;
+
+interface MGPCGActivityEntry {
+  readonly entryPoint: PipelineName;
+  readonly workgroupLaneCount: 1 | 64 | 128;
+  readonly workgroupId: string;
+  readonly localInvocationIndex: string;
+  readonly injectWorkgroupId?: boolean;
+  readonly injectLocalInvocationIndex?: boolean;
+  /** Uniform logical-work predicate; it does not claim physical execution-unit residency. */
+  readonly meaningfulWhen: string;
+}
+
+const MGPCG_ACTIVITY_ENTRIES: readonly MGPCGActivityEntry[] = [
+  { entryPoint: "initializeControlAndDispatch", workgroupLaneCount: 1,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true, meaningfulWhen: "true" },
+  { entryPoint: "validateAuthority", workgroupLaneCount: 1,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true, meaningfulWhen: "true" },
+  { entryPoint: "initializeState", workgroupLaneCount: 64,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !failed()" },
+  { entryPoint: "formInitialResidual", workgroupLaneCount: 64,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !failed()" },
+  { entryPoint: "reduceMergedPartials", workgroupLaneCount: 128,
+    workgroupId: "workgroup", localInvocationIndex: "lane",
+    meaningfulWhen: "workgroup.x * REDUCTION_LANES < rows() && !stopped()" },
+  { entryPoint: "finishMergedReduction", workgroupLaneCount: 128,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
+    injectWorkgroupId: true, meaningfulWhen: "true" },
+  { entryPoint: "initializeDirections", workgroupLaneCount: 64,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()" },
+  { entryPoint: "advancePCGState", workgroupLaneCount: 64,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()" },
+  { entryPoint: "updateDirections", workgroupLaneCount: 64,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()" },
+  { entryPoint: "reduceDirectionCurvaturePartials", workgroupLaneCount: 128,
+    workgroupId: "workgroup", localInvocationIndex: "lane",
+    meaningfulWhen: "workgroup.x * REDUCTION_LANES < rows() && !stopped()" },
+  { entryPoint: "finishDirectionCurvature", workgroupLaneCount: 128,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
+    injectWorkgroupId: true, meaningfulWhen: "!stopped()" },
+  { entryPoint: "finalizeAndPublish", workgroupLaneCount: 64,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows()" },
+] as const;
+
+function matchingWGSLDelimiter(source: string, start: number, open: string, close: string): number {
+  let depth = 0;
+  for (let index = start; index < source.length; index += 1) {
+    if (source[index] === open) depth += 1;
+    else if (source[index] === close && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function instrumentMGPCGActivityEntry(
+  source: string,
+  activity: GPULogicalActivityAdoptionContext,
+  spec: MGPCGActivityEntry,
+): string {
+  const descriptor = OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS[spec.entryPoint];
+  const sampleWhen = `${spec.workgroupId}.x < ${OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT}u`;
+  const meaningful = `let fluidMGPCGActivityMeaningful = ${sampleWhen} && (${spec.meaningfulWhen});`;
+  const site = {
+    tick: "atomicLoad(&control[2])",
+    workgroupId: spec.workgroupId,
+    localInvocationIndex: spec.localInvocationIndex,
+    workgroupLaneCount: spec.workgroupLaneCount,
+    recordWhen: "fluidMGPCGActivityMeaningful",
+  } as const;
+  const entry = activity.workgroup(descriptor.task, "enter", site);
+  const exit = activity.workgroup(descriptor.task, "exit", site);
+  if (!entry && !exit) return source;
+
+  const signature = `fn ${spec.entryPoint}(`;
+  const signatureStart = source.indexOf(signature);
+  if (signatureStart < 0) throw new Error(`MGPCG activity entry point ${spec.entryPoint} is missing`);
+  const paramsStart = source.indexOf("(", signatureStart + 3);
+  const paramsEnd = matchingWGSLDelimiter(source, paramsStart, "(", ")");
+  if (paramsStart < 0 || paramsEnd < 0) throw new Error(`MGPCG activity signature ${spec.entryPoint} is malformed`);
+  const additions = [
+    ...(spec.injectWorkgroupId ? ["@builtin(workgroup_id) activityWorkgroupId: vec3u"] : []),
+    ...(spec.injectLocalInvocationIndex ? ["@builtin(local_invocation_index) activityLocalInvocationIndex: u32"] : []),
+  ];
+  const existing = source.slice(paramsStart + 1, paramsEnd);
+  const separator = existing.trim().length > 0 && additions.length > 0
+    ? existing.trimEnd().endsWith(",") ? "\n  " : ",\n  "
+    : "";
+  let instrumented = `${source.slice(0, paramsEnd)}${separator}${additions.join(",\n  ")}${source.slice(paramsEnd)}`;
+  const bodyStart = instrumented.indexOf("{", paramsEnd + separator.length + additions.join(",\n  ").length);
+  const bodyEnd = matchingWGSLDelimiter(instrumented, bodyStart, "{", "}");
+  if (bodyStart < 0 || bodyEnd < 0) throw new Error(`MGPCG activity body ${spec.entryPoint} is malformed`);
+  const body = instrumented.slice(bodyStart + 1, bodyEnd)
+    .replace(/\breturn;/g, `${exit}\n  return;`);
+  instrumented = `${instrumented.slice(0, bodyStart + 1)}\n  ${meaningful}\n  ${entry}\n${body}\n  ${exit}\n${instrumented.slice(bodyEnd)}`;
+  return instrumented;
+}
+
+/** Activity-only solver variant; disabled mode returns the production shader byte-for-byte. */
+export function octreePipelinedMGPCGActivityShader(
+  activity: GPULogicalActivityAdoptionContext,
+): string {
+  if (!activity.enabled) return octreePipelinedMGPCGShader;
+  return MGPCG_ACTIVITY_ENTRIES.reduce(
+    (source, spec) => instrumentMGPCGActivityEntry(source, activity, spec),
+    octreePipelinedMGPCGShader,
+  );
+}

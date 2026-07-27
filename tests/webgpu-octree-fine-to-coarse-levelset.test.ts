@@ -5,8 +5,40 @@ import { FineLevelSetBrickOracle, packFineLevelSetBrickKey,
   planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
 import { FINE_TO_COARSE_LEVELSET_ERROR, fineToCoarseLevelSetWGSL,
-  unpackFineToCoarseGPUControl, WebGPUFineToCoarseLevelSet } from "../lib/webgpu-octree-fine-to-coarse-levelset";
+  fineToCoarseLevelSetActivityShader, unpackFineToCoarseGPUControl,
+  WebGPUFineToCoarseLevelSet } from "../lib/webgpu-octree-fine-to-coarse-levelset";
 import { PassBroker } from "../lib/webgpu-pass-broker";
+import { createGPULogicalActivityAdoptionContext,
+  gpuLogicalActivityTaskDescriptions } from "../lib/gpu-logical-activity-adoption";
+
+test("fine-to-coarse activity is conditional and describes all three stages", () => {
+  const disabled = createGPULogicalActivityAdoptionContext({
+    moduleId: "octree/fine-to-coarse-levelset",
+    profile: { enabled: false, generation: 0x4300 },
+  });
+  assert.equal(fineToCoarseLevelSetActivityShader(disabled), fineToCoarseLevelSetWGSL);
+
+  const generation = 0x4301;
+  const enabled = createGPULogicalActivityAdoptionContext({
+    moduleId: "octree/fine-to-coarse-levelset",
+    profile: { enabled: true, generation },
+  });
+  for (const [task, id, label] of [
+    ["prepare-restriction", "gpu.physics.fine-restriction.prepare", "Fine restriction · prepare rows"],
+    ["restrict-coarse-rows", "gpu.physics.fine-restriction.rows", "Fine restriction · restrict coarse rows"],
+    ["publish-restriction", "gpu.physics.fine-restriction.publish", "Fine restriction · publish"],
+  ] as const) enabled.describeTask(task, { id, label, phaseId: "adaptive-publication" });
+  const shader = enabled.module(fineToCoarseLevelSetActivityShader(enabled)).code;
+  assert.match(shader, /@group\(3\) @binding\(0\)/);
+  assert.equal((shader.match(/fluidGpuLogicalActivityWorkgroup\(/g) ?? []).length, 4,
+    "one helper definition and three stage checkpoints are generated");
+  const labels = Object.values(gpuLogicalActivityTaskDescriptions(generation)).map(({ label }) => label);
+  assert.deepEqual(labels.sort(), [
+    "Fine restriction · prepare rows",
+    "Fine restriction · publish",
+    "Fine restriction · restrict coarse rows",
+  ]);
+});
 
 test("fine-to-coarse restriction rejects an unpublished or stale fine source", () => {
   const shader = fineToCoarseLevelSetWGSL.replace(/\s+/g, "");

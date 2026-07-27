@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { octreeProjectionShader, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import {
+  OCTREE_PROJECTION_CORE_BUFFER_LAYOUT,
+  octreeProjectionShader,
+  WebGPUOctreeProjection,
+} from "../lib/webgpu-octree";
 import {
   FINE_LEVELSET_SUMMARY_CENTER_COMPLETE,
   FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY,
@@ -49,7 +53,9 @@ test("summary sizing aliases binding 4 without adding storage bindings or pressu
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const layout = source.slice(source.indexOf("this.layout = device.createBindGroupLayout"),
     source.indexOf("this.pipelineLayout =", source.indexOf("this.layout = device.createBindGroupLayout")));
-  assert.equal((layout.match(/buffer: \{ type: \"(?:read-only-)?storage\" \}/g) ?? []).length, 10);
+  assert.equal(OCTREE_PROJECTION_CORE_BUFFER_LAYOUT.filter(({ type }) => type !== "uniform").length, 9,
+    "summary-bound refinement must retain one storage slot for activity instrumentation");
+  assert.match(layout, /projectionBufferLayoutEntries\(OCTREE_PROJECTION_CORE_BUFFER_LAYOUT\)/);
   assert.doesNotMatch(layout, /binding: 16/);
   assert.match(octreeProjectionShader,
     /fn fineSummaryWord\(index: u32\) -> u32 \{ return bitcast<u32>\(pressureIn\[index\]\); \}/);

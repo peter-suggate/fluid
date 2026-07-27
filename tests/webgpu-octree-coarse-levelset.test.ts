@@ -4,12 +4,26 @@ import { pathToFileURL } from "node:url";
 import {
   OCTREE_FINE_PHI_CONTRIBUTION_BYTES,
   WebGPUOctreeCoarseLevelSet,
+  octreeCoarsePhiBootstrapActivityShader,
   octreeCoarsePhiBootstrapShader,
   planOctreeCoarsePhi,
 } from "../lib/webgpu-octree-coarse-levelset";
 import { OCTREE_COARSE_PHI_BYTES, OCTREE_COARSE_PHI_FLAG } from "../lib/octree-coarse-levelset";
 import { OCTREE_FINE_SEED_STATE } from "../lib/octree-fine-seed-leaves";
+import {
+  createGPULogicalActivityAdoptionContext,
+  gpuLogicalActivityTaskDescriptions,
+} from "../lib/gpu-logical-activity-adoption";
+import {
+  assertWGSLActivityBindingEligibility,
+  auditWGSLComputeBindingReachability,
+} from "../lib/wgsl-binding-reachability";
+import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 import { PassBroker } from "../lib/webgpu-pass-broker";
+
+// Standalone Dawn execution below does not install the frame-owned recorder.
+// Activity source and compilation are exercised explicitly in the focused test.
+usePerformanceInstrumentationStore.getState().setMode("timeline");
 
 test("coarse phi owns only compact row records", () => {
   const small = planOctreeCoarsePhi(16);
@@ -32,6 +46,53 @@ test("bootstrap shader contains no recurring correction machinery", () => {
     /FineContribution|Control|correctCoarsePhi|finalizeCoarsePhi|rowStatus|atomic/);
 });
 
+test("coarse-phi bootstrap activity is conditional and within the storage-binding budget", () => {
+  const audit = auditWGSLComputeBindingReachability(
+    octreeCoarsePhiBootstrapShader,
+    "bootstrapCoarsePhiFromSurfaceLeaves",
+  );
+  assert.deepEqual(audit.reachableFunctions, ["bootstrapCoarsePhiFromSurfaceLeaves", "finite"]);
+  assert.deepEqual(audit.storage.map(({ binding, name }) => ({ binding, name })), [
+    { binding: 0, name: "fineSeedLeaves" },
+    { binding: 1, name: "coarse" },
+  ]);
+  assert.deepEqual(assertWGSLActivityBindingEligibility(audit), {
+    entryPoint: "bootstrapCoarsePhiFromSurfaceLeaves",
+    productionStorageCount: 2,
+    activityStorageCount: 1,
+    totalStorageCount: 3,
+    maximumStorageCount: 10,
+  });
+
+  const disabled = createGPULogicalActivityAdoptionContext({
+    moduleId: "octree/coarse-levelset",
+    profile: { enabled: false, generation: 0x4400 },
+  });
+  assert.equal(octreeCoarsePhiBootstrapActivityShader(disabled), octreeCoarsePhiBootstrapShader);
+
+  const generation = 0x4401;
+  const enabled = createGPULogicalActivityAdoptionContext({
+    moduleId: "octree/coarse-levelset",
+    profile: { enabled: true, generation },
+  });
+  enabled.describeTask("bootstrap-coarse-phi", {
+    id: "gpu.physics.coarse-phi.bootstrap",
+    label: "Coarse phi · bootstrap surface rows",
+    phaseId: "fine-sdf-advection",
+  });
+  const shader = enabled.module(octreeCoarsePhiBootstrapActivityShader(enabled)).code;
+  assert.match(shader, /@group\(3\) @binding\(0\)/);
+  assert.equal((shader.match(/fluidGpuLogicalActivityWorkgroup\(/g) ?? []).length, 2,
+    "one helper definition and one bootstrap checkpoint are generated");
+  assert.deepEqual(gpuLogicalActivityTaskDescriptions(generation), {
+    [enabled.taskId("bootstrap-coarse-phi")]: {
+      id: "gpu.physics.coarse-phi.bootstrap",
+      label: "Coarse phi · bootstrap surface rows",
+      phaseId: "fine-sdf-advection",
+    },
+  });
+});
+
 test("Dawn bootstraps compact coarse phi from adapter-style live rows", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for coarse-phi GPU checks",
 }, async () => {
@@ -46,6 +107,14 @@ test("Dawn bootstraps compact coarse phi from adapter-style live rows", {
   const device = await adapter.requestDevice();
   const compilation = await device.createShaderModule({ code: octreeCoarsePhiBootstrapShader }).getCompilationInfo();
   assert.deepEqual(compilation.messages.filter((message) => message.type === "error"), []);
+  const activity = createGPULogicalActivityAdoptionContext({
+    moduleId: "octree/coarse-levelset/dawn",
+    profile: { enabled: true, generation: 0x4402 },
+  });
+  const activityCompilation = await device.createShaderModule({
+    code: activity.module(octreeCoarsePhiBootstrapActivityShader(activity)).code,
+  }).getCompilationInfo();
+  assert.deepEqual(activityCompilation.messages.filter((message) => message.type === "error"), []);
 
   const coarse = new WebGPUOctreeCoarseLevelSet(device, 2);
   const leafData = new ArrayBuffer(2 * 64);

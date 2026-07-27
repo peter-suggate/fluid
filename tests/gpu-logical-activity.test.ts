@@ -102,6 +102,8 @@ test("CPU decoder preserves measured and reconstructed logical evidence", () => 
   assert.equal(decoded.ok, true);
   if (!decoded.ok) return;
   assert.equal(decoded.capture.captureId, 91);
+  assert.equal(decoded.capture.overflowed, false);
+  assert.equal(decoded.capture.droppedEventCount, 0);
   assert.equal(decoded.capture.events[0].logicalLaneCountEvidence, "reconstructed");
   assert.equal(decoded.capture.events[0].activeLaneEvidence, "unknown");
   assert.equal(decoded.capture.events[1].subgroupEvidence, "measured");
@@ -111,13 +113,25 @@ test("CPU decoder preserves measured and reconstructed logical evidence", () => 
   assert.equal(gpuLogicalActivityBufferByteSize(4), image.byteLength);
 });
 
-test("overflow and malformed records fail closed without partial events", () => {
+test("overflow preserves its complete prefix and malformed records still fail closed", () => {
   const overflow = createGPULogicalActivityBufferImage(1, 1);
   overflow[4] = 2;
   overflow[5] = 1;
-  assert.deepEqual(decodeGPULogicalActivity(overflow), {
-    ok: false, code: "overflow", message: "Capture overflowed; no partial activity is trustworthy",
-  });
+  writeRecord(overflow, 0, [
+    0, 1, 2, 0, 0, 0, 0,
+    GPU_LOGICAL_ACTIVITY_UNKNOWN_U32, 0, 32, GPU_LOGICAL_ACTIVITY_UNKNOWN_U32,
+    0, 0, 0, 0,
+    GPU_LOGICAL_ACTIVITY_FLAGS.workgroupIdPresent
+      | GPU_LOGICAL_ACTIVITY_FLAGS.laneIdPresent
+      | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountReconstructed,
+  ]);
+  const truncated = decodeGPULogicalActivity(overflow);
+  assert.equal(truncated.ok, true);
+  if (truncated.ok) {
+    assert.equal(truncated.capture.events.length, 1);
+    assert.equal(truncated.capture.overflowed, true);
+    assert.equal(truncated.capture.droppedEventCount, 1);
+  }
 
   const malformed = createGPULogicalActivityBufferImage(1, 2);
   malformed[4] = 1;

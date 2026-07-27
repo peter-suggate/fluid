@@ -12,9 +12,11 @@ import {
 import { usePerformanceActivityStore } from "./stores/performance-activity-store";
 import {
   createGPULogicalActivityAdoptionContext,
+  gpuLogicalActivityTaskDescriptions,
   stableGPULogicalActivityId,
   type GPULogicalActivityAdoptionContext,
   type GPULogicalActivityBindingSession,
+  type GPULogicalActivityTaskDescription,
 } from "./gpu-logical-activity-adoption";
 import {
   GPU_LOGICAL_ACTIVITY_HEADER_WORDS,
@@ -141,12 +143,9 @@ export const PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID =
 export const PHYSICS_ACTIVITY_POWER_VOLUME_TASK_ID =
   activityTaskId("octree/power-volume", "publish-power-cell-volumes");
 
-export interface GPUPhysicsLogicalActivityTaskDescriptor {
-  readonly id: string;
-  readonly label: string;
+export interface GPUPhysicsLogicalActivityTaskDescriptor extends GPULogicalActivityTaskDescription {
   /** Measured timestamp phase which encloses this task; placement inside it is reconstructed. */
   readonly phaseId?: GPUTimestampPhase["id"];
-  readonly checkpoints?: Readonly<Record<"enter" | "exit", number>>;
 }
 
 const PHYSICS_ACTIVITY_TASKS: Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>> = {
@@ -210,6 +209,7 @@ export interface GPUPhysicsLogicalActivitySample {
 export function physicsPhaseBoundaryTimeProjection(
   trace: PerformanceTrace,
   capture?: GPULogicalActivityCapture,
+  tasks: Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>> = PHYSICS_ACTIVITY_TASKS,
 ): {
   phaseBoundaries_ms: readonly number[];
   locateTime: GPULogicalActivityTimeLocator;
@@ -264,7 +264,7 @@ export function physicsPhaseBoundaryTimeProjection(
           return { time_ms: (start_ms + end_ms) / 2, evidence: "reconstructed" };
         }
       }
-      const descriptor = PHYSICS_ACTIVITY_TASKS[event.taskId];
+      const descriptor = tasks[event.taskId];
       if (!descriptor?.phaseId) return undefined;
       // A shader heartbeat proves progress somewhere inside its measured
       // enclosing phase, but WGSL supplies no clock. Put the point at the
@@ -1984,7 +1984,11 @@ fn recordPhysicsPhaseBoundary(
           submissionId: `gpu-physics:${encodeURIComponent(physicsTraceContext)}:${physicsTraceSampleId}`,
           publicationId,
         };
-        const projection = physicsPhaseBoundaryTimeProjection(trace, decoded.capture);
+        const tasks = Object.freeze({
+          ...gpuLogicalActivityTaskDescriptions(shaderGeneration),
+          ...PHYSICS_ACTIVITY_TASKS,
+        }) as Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>>;
+        const projection = physicsPhaseBoundaryTimeProjection(trace, decoded.capture, tasks);
         const sample: GPUPhysicsLogicalActivitySample = {
           identity,
           shaderGeneration,
@@ -1995,7 +1999,7 @@ fn recordPhysicsPhaseBoundary(
           windowStart_ms: 0,
           windowEnd_ms: trace.total_ms,
           ...projection,
-          tasks: PHYSICS_ACTIVITY_TASKS,
+          tasks,
         };
         this.latestLogicalActivity = sample;
         publishDecodedGPULogicalActivity({

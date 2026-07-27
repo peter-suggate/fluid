@@ -49,6 +49,8 @@ export interface GPULogicalActivityMatrixAddition extends PerformanceActivityFra
   rowCount: number;
   droppedRowCount: number;
   unknownTimeEventCount: number;
+  captureOverflowed: boolean;
+  droppedEventCount: number;
 }
 
 export interface PerformanceActivityEvidenceSink {
@@ -215,6 +217,8 @@ export function gpuLogicalActivityMatrixAddition(
     rowCount: resources.length,
     droppedRowCount,
     unknownTimeEventCount,
+    captureOverflowed: options.capture.overflowed,
+    droppedEventCount: options.capture.droppedEventCount,
   };
 }
 

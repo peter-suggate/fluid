@@ -82,6 +82,8 @@ test("known shader heartbeats become reconstructed points inside their measured 
   const capture = {
     captureId: 1,
     capacity: 4,
+    overflowed: false,
+    droppedEventCount: 0,
     events: [event(0, 5), heartbeat, event(1, 15)],
   };
   const projection = physicsPhaseBoundaryTimeProjection(trace, capture);
@@ -94,6 +96,36 @@ test("known shader heartbeats become reconstructed points inside their measured 
     ...heartbeat,
     taskId: 0x12345678,
   }), undefined);
+});
+
+test("module-owned task descriptors place newly adopted shaders in their measured parent phase", () => {
+  const trace: PerformanceTrace = {
+    sampleId: 12,
+    domain: "gpu",
+    lane: "physics",
+    context: "octree:dynamic-task",
+    capturedAt_ms: 80,
+    measurementSource: "gpu-hardware-timestamp",
+    total_ms: 8,
+    phases: [
+      { id: "fine-sdf-advection", label: "Fine transport", duration_ms: 3 },
+      { id: "adaptive-publication", label: "Fine restriction", duration_ms: 5 },
+    ],
+  };
+  const taskId = stableGPULogicalActivityId(
+    "task\0octree/fine-to-coarse-levelset\0restrict-coarse-rows",
+  );
+  const projection = physicsPhaseBoundaryTimeProjection(trace, undefined, {
+    [taskId]: {
+      id: "gpu.physics.fine-restriction.rows",
+      label: "Fine restriction · restrict coarse rows",
+      phaseId: "adaptive-publication",
+    },
+  });
+  assert.deepEqual(projection.locateTime({ ...event(undefined, 1), taskId }), {
+    time_ms: 5.5,
+    evidence: "reconstructed",
+  });
 });
 
 test("queue-wall fallback reconstructs shader points from explicit command-ordered phase markers", () => {
@@ -111,6 +143,8 @@ test("queue-wall fallback reconstructs shader points from explicit command-order
   const capture = {
     captureId: 2,
     capacity: 5,
+    overflowed: false,
+    droppedEventCount: 0,
     events: [event(0, 5), heartbeat, event(1, 15), event(2, 20)],
   };
   const projection = physicsPhaseBoundaryTimeProjection(trace, capture);

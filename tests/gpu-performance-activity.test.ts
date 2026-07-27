@@ -12,6 +12,8 @@ import { createPerformanceActivityStore } from "../lib/stores/performance-activi
 const capture: GPULogicalActivityCapture = {
   captureId: 19,
   capacity: 8,
+  overflowed: false,
+  droppedEventCount: 0,
   events: [
     {
       sequence: 0, taskId: 7, checkpointId: 1, tick: 100, workgroupId: [0, 0, 0],
@@ -65,6 +67,8 @@ test("GPU heartbeat capture becomes real workgroup/subgroup rows over the horizo
   assert.equal(addition.events?.length, 3, "events without a time projection never get invented positions");
   assert.equal(addition.spans?.length, 1, "explicit enter/exit semantics create an occupied interval");
   assert.equal(addition.unknownTimeEventCount, 1);
+  assert.equal(addition.captureOverflowed, false);
+  assert.equal(addition.droppedEventCount, 0);
   assert.deepEqual(addition.windows?.map((window) => [window.start_ms, window.end_ms]),
     [[0, 4], [0, 4], [0, 4]]);
 

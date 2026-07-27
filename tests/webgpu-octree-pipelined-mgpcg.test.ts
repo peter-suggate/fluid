@@ -5,15 +5,25 @@ import {
   OCTREE_PIPELINED_PCG_CONTROL_BYTES,
   OCTREE_PIPELINED_PCG_DISPATCHES_PER_ITERATION,
   OCTREE_PIPELINED_PCG_INDIRECT_STRIDE_BYTES,
+  OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
+  OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS,
+  OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT,
+  OCTREE_PIPELINED_MGPCG_MAX_PRODUCTION_STORAGE_BINDINGS,
   WebGPUOctreePipelinedMGPCG,
   addCompensatedF32,
   compensatedF32Value,
   type CompensatedF32,
   mergeCompensatedF32,
   octreeCompensatedF32WGSL,
+  octreePipelinedMGPCGActivityShader,
   octreePipelinedMGPCGShader,
   planOctreePipelinedMGPCG,
 } from "../lib/webgpu-octree-pipelined-mgpcg";
+import {
+  createGPULogicalActivityAdoptionContext,
+  gpuLogicalActivityPipelineRegistration,
+  gpuLogicalActivityTaskDescriptions,
+} from "../lib/gpu-logical-activity-adoption";
 import { PassBroker } from "../lib/webgpu-pass-broker";
 import { decodeOctreePressureSolveWork } from "../lib/webgpu-octree-work-accounting";
 
@@ -104,6 +114,44 @@ test("sole target shader is 128-lane subgroup f32 and fail-closed", () => {
   assert.doesNotMatch(octreePipelinedMGPCGShader, /\bf16\b|portable|fallback|legacy/i);
 });
 
+test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-safe", () => {
+  const disabled = createGPULogicalActivityAdoptionContext({
+    moduleId: OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
+    profile: { enabled: false, generation: 4 },
+    subgroupsAlreadyEnabled: true,
+  });
+  const disabledSource = octreePipelinedMGPCGActivityShader(disabled);
+  assert.equal(disabledSource, octreePipelinedMGPCGShader);
+  assert.equal(disabled.module(disabledSource, "mgpcg-test").code, octreePipelinedMGPCGShader);
+
+  const enabled = createGPULogicalActivityAdoptionContext({
+    moduleId: OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
+    profile: { enabled: true, generation: 5 },
+    subgroupsAlreadyEnabled: true,
+  });
+  const activitySource = octreePipelinedMGPCGActivityShader(enabled);
+  const descriptors = Object.values(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS);
+  assert.equal(descriptors.length, 12);
+  assert.ok((activitySource.match(/fluidGpuLogicalActivityWorkgroup\(/g) ?? []).length
+    >= 2 * descriptors.length,
+  "every compute entry point has an enter and all-control-path exit checkpoints");
+  assert.match(activitySource, new RegExp(`< ${OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT}u`));
+  assert.match(activitySource, /< rows\(\) && !stopped\(\)/,
+    "recurring row work records only meaningful live dispatch groups");
+  for (const descriptor of descriptors) {
+    assert.equal(descriptor.taskId, enabled.taskId(descriptor.task));
+    assert.equal(descriptor.checkpoints.enter, enabled.checkpointId(descriptor.task, "enter"));
+    assert.equal(descriptor.checkpoints.exit, enabled.checkpointId(descriptor.task, "exit"));
+    assert.match(activitySource, new RegExp(`${descriptor.taskId}u`));
+  }
+  const variant = enabled.module(activitySource, "mgpcg-test");
+  assert.equal((variant.code.match(/enable subgroups;/g) ?? []).length, 1);
+  assert.match(variant.code, /@group\(3\) @binding\(0\)/);
+  assert.equal(OCTREE_PIPELINED_MGPCG_MAX_PRODUCTION_STORAGE_BINDINGS, 7);
+  assert.ok(OCTREE_PIPELINED_MGPCG_MAX_PRODUCTION_STORAGE_BINDINGS + 1 <= 10,
+    "the activity buffer must keep every MGPCG entry point within the storage limit");
+});
+
 test("construction rejects an unproven preconditioner before allocating GPU state", () => {
   Object.assign(globalThis, {
     GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
@@ -166,6 +214,7 @@ test("orchestrator encodes direct direction curvature after every live update", 
   type MockBuffer = GPUBuffer & { label: string; destroyed?: boolean };
   const buffers: MockBuffer[] = [];
   const pipelines: string[] = [];
+  const createdPipelines: GPUComputePipeline[] = [];
   const modules: string[] = [];
   const stageBindings = new Map<string, number[]>();
   const buffer = (size: number, label = "external") =>
@@ -188,7 +237,9 @@ test("orchestrator encodes direct direction curvature after every live update", 
     },
     createComputePipeline(descriptor: GPUComputePipelineDescriptor) {
       const entryPoint = String(descriptor.compute.entryPoint);
-      return { entryPoint, getBindGroupLayout() { return {}; } };
+      const pipeline = { entryPoint, getBindGroupLayout() { return {}; } } as unknown as GPUComputePipeline;
+      createdPipelines.push(pipeline);
+      return pipeline;
     },
     createBindGroup(descriptor: GPUBindGroupDescriptor) {
       stageBindings.set(
@@ -227,6 +278,21 @@ test("orchestrator encodes direct direction curvature after every live update", 
   const solver = new WebGPUOctreePipelinedMGPCG(
     device, source, { rowCapacity: 64, maximumIterations: 4 },
   );
+  assert.equal(createdPipelines.length, Object.keys(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS).length);
+  assert.ok(createdPipelines.every((pipeline) =>
+    gpuLogicalActivityPipelineRegistration(pipeline)?.moduleId
+      === OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID),
+  "every MGPCG compute pipeline must be registered to the activity binding context");
+  const generation = gpuLogicalActivityPipelineRegistration(createdPipelines[0])!.generation;
+  const taskDescriptions = gpuLogicalActivityTaskDescriptions(generation);
+  for (const descriptor of Object.values(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS)) {
+    assert.deepEqual(taskDescriptions[descriptor.taskId], {
+      id: descriptor.id,
+      label: descriptor.label,
+      phaseId: "pressure-solve",
+      checkpoints: descriptor.checkpoints,
+    });
+  }
   let current = "";
   let passIndex = 0;
   const pipelinePasses: Array<{ name: string; pass: number }> = [];

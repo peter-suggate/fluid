@@ -32,6 +32,50 @@ export interface GPULogicalActivityAdoptionOptions {
   subgroupsAlreadyEnabled?: boolean;
 }
 
+export interface GPULogicalActivityTaskDescription {
+  /** Stable UI/data identity; independent of the numeric shader ABI ID. */
+  readonly id: string;
+  readonly label: string;
+  readonly color?: string;
+  readonly parentId?: string;
+  /** Measured host timestamp phase used to place clockless shader progress. */
+  readonly phaseId?: string;
+  /** Numeric checkpoint roles are populated by modules that can bracket work honestly. */
+  readonly checkpoints?: Readonly<{ enter: number; exit: number }>;
+}
+
+interface RegisteredTaskDescription {
+  readonly identity: string;
+  readonly descriptor: GPULogicalActivityTaskDescription;
+}
+
+function sameTaskDescription(
+  left: GPULogicalActivityTaskDescription,
+  right: GPULogicalActivityTaskDescription,
+): boolean {
+  return left.id === right.id
+    && left.label === right.label
+    && left.color === right.color
+    && left.parentId === right.parentId
+    && left.phaseId === right.phaseId
+    && left.checkpoints?.enter === right.checkpoints?.enter
+    && left.checkpoints?.exit === right.checkpoints?.exit;
+}
+
+/** Shader variants are generation-scoped, so stale compiled modules cannot
+ * silently lend their labels to a later capture generation. */
+const taskDescriptionsByGeneration = new Map<number, Map<number, RegisteredTaskDescription>>();
+
+export function gpuLogicalActivityTaskDescriptions(
+  generation: number,
+): Readonly<Record<number, GPULogicalActivityTaskDescription>> {
+  const descriptions = taskDescriptionsByGeneration.get(checkedGeneration(generation));
+  if (!descriptions) return Object.freeze({});
+  return Object.freeze(Object.fromEntries(
+    [...descriptions.entries()].map(([taskId, registered]) => [taskId, registered.descriptor]),
+  ));
+}
+
 export interface GPULogicalActivityWorkgroupSite {
   tick?: string;
   workgroupId?: string;
@@ -278,6 +322,34 @@ export class GPULogicalActivityAdoptionContext {
   taskId(task: string): number { return this.id("task", [task]); }
   checkpointId(task: string, checkpoint: string): number {
     return this.id("checkpoint", [task, checkpoint]);
+  }
+
+  /** Register presentation metadata next to the module that owns the shader.
+   * Repeated solver construction is allowed only when the semantic descriptor
+   * is identical; numeric ID or label drift fails before a capture is decoded. */
+  describeTask(task: string, descriptor: GPULogicalActivityTaskDescription): number {
+    checkedName(descriptor.id, "task descriptor ID");
+    checkedName(descriptor.label, "task descriptor label");
+    const taskId = this.taskId(task);
+    const identity = `${this.moduleId}\0${task}`;
+    let generation = taskDescriptionsByGeneration.get(this.generation);
+    if (!generation) {
+      generation = new Map();
+      taskDescriptionsByGeneration.set(this.generation, generation);
+    }
+    const normalized = Object.freeze({
+      ...descriptor,
+      ...(descriptor.checkpoints
+        ? { checkpoints: Object.freeze({ ...descriptor.checkpoints }) }
+        : {}),
+    });
+    const existing = generation.get(taskId);
+    if (existing && (existing.identity !== identity
+      || !sameTaskDescription(existing.descriptor, normalized))) {
+      throw new Error(`GPU logical activity task ${taskId} conflicts with ${existing.identity}`);
+    }
+    generation.set(taskId, { identity, descriptor: normalized });
+    return taskId;
   }
 
   workgroup(task: string, checkpoint: string, site: GPULogicalActivityWorkgroupSite): string {
