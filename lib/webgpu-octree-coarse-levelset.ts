@@ -9,7 +9,6 @@ import {
 import { OCTREE_FINE_SEED_STATE } from "./octree-fine-seed-leaves";
 import {
   createGPULogicalActivityAdoptionContext,
-  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
@@ -158,15 +157,21 @@ export function octreeCoarsePhiBootstrapActivityShader(
   activity: GPULogicalActivityAdoptionContext,
 ): string {
   const progress = activity.workgroup("bootstrap-coarse-phi", "active-row-block", {
-    workgroupId: "vec3u(gid.x / 64u, 0u, 0u)",
-    localInvocationIndex: "gid.x & 63u",
+    workgroupId: "activityWorkgroupId",
+    numWorkgroups: "activityNumWorkgroups",
+    localInvocationIndex: "activityLocalInvocationIndex",
     workgroupLaneCount: 64,
-    recordWhen: `row < arrayLength(&coarse) && gid.x / 64u < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+    recordWhen: "row < arrayLength(&coarse)",
   });
   if (!progress) return octreeCoarsePhiBootstrapShader;
+  const signature = "  @builtin(global_invocation_id) gid:vec3u\n)";
+  const instrumentedSignature = "  @builtin(global_invocation_id) gid:vec3u,\n  @builtin(workgroup_id) activityWorkgroupId:vec3u,\n  @builtin(local_invocation_index) activityLocalInvocationIndex:u32,\n  @builtin(num_workgroups) activityNumWorkgroups:vec3u\n)";
   const needle = "  let row=gid.x;";
-  if (!octreeCoarsePhiBootstrapShader.includes(needle)) {
+  if (!octreeCoarsePhiBootstrapShader.includes(signature)
+    || !octreeCoarsePhiBootstrapShader.includes(needle)) {
     throw new Error("Coarse-phi bootstrap activity entry point is missing");
   }
-  return octreeCoarsePhiBootstrapShader.replace(needle, `${needle}${progress}`);
+  return octreeCoarsePhiBootstrapShader
+    .replace(signature, instrumentedSignature)
+    .replace(needle, `${needle}${progress}`);
 }

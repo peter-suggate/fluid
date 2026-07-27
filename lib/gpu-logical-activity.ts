@@ -10,10 +10,10 @@ export type GPULogicalActivityMode = "disabled" | "workgroup" | "subgroup";
 export type GPULogicalActivityEvidence = "measured" | "reconstructed" | "unknown";
 
 export const GPU_LOGICAL_ACTIVITY_MAGIC = 0x464c4143; // "FLAC"
-export const GPU_LOGICAL_ACTIVITY_VERSION = 1;
+export const GPU_LOGICAL_ACTIVITY_VERSION = 2;
 export const GPU_LOGICAL_ACTIVITY_UNKNOWN_U32 = 0xffffffff;
 export const GPU_LOGICAL_ACTIVITY_HEADER_WORDS = 8;
-export const GPU_LOGICAL_ACTIVITY_RECORD_WORDS = 16;
+export const GPU_LOGICAL_ACTIVITY_RECORD_WORDS = 18;
 export const GPU_LOGICAL_ACTIVITY_RECORD_BYTES = GPU_LOGICAL_ACTIVITY_RECORD_WORDS * 4;
 export const GPU_LOGICAL_ACTIVITY_MAX_CAPACITY = 1_000_000;
 
@@ -25,6 +25,7 @@ export const GPU_LOGICAL_ACTIVITY_FLAGS = {
   laneCountMeasured: 1 << 4,
   laneCountReconstructed: 1 << 5,
   activeMaskMeasured: 1 << 6,
+  stratifiedSamplePresent: 1 << 7,
 } as const;
 
 const GPU_LOGICAL_ACTIVITY_KNOWN_FLAGS = Object.values(GPU_LOGICAL_ACTIVITY_FLAGS)
@@ -46,6 +47,8 @@ export interface GPULogicalActivityWorkgroupCall {
   /** A caller-defined logical tick expression. Omit to retain sequence only. */
   tick?: string;
   workgroupId: string;
+  /** Full dispatch dimensions from `@builtin(num_workgroups)`. */
+  numWorkgroups?: string;
   localInvocationIndex: string;
   workgroupLaneCount: string;
 }
@@ -56,12 +59,37 @@ export interface GPULogicalActivitySubgroupCall {
   /** A caller-defined logical tick expression. Omit to retain sequence only. */
   tick?: string;
   workgroupId: string;
+  /** Full dispatch dimensions from `@builtin(num_workgroups)`. */
+  numWorkgroups?: string;
   subgroupId: string;
   subgroupIdEvidence: "measured" | "reconstructed";
   subgroupLane: string;
   subgroupSize: string;
   /** Must be evaluated by every lane in uniform subgroup control flow. */
   active: string;
+}
+
+export const GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT = 16;
+
+/** Midpoint sample from each of up to sixteen equal contiguous dispatch strata. */
+export function gpuLogicalActivityStratifiedSampleOrdinals(
+  totalWorkgroups: number,
+  sampleLimit = GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT,
+): readonly number[] {
+  if (!Number.isSafeInteger(totalWorkgroups) || totalWorkgroups <= 0 || totalWorkgroups > 0xffffffff) {
+    throw new RangeError("GPU logical activity dispatch population must be a positive u32");
+  }
+  if (!Number.isSafeInteger(sampleLimit) || sampleLimit <= 0 || sampleLimit > 0xffffffff) {
+    throw new RangeError("GPU logical activity sample limit must be a positive u32");
+  }
+  const count = Math.min(totalWorkgroups, sampleLimit);
+  const base = Math.floor(totalWorkgroups / count);
+  const remainder = totalWorkgroups % count;
+  return Object.freeze(Array.from({ length: count }, (_, sampleIndex) => {
+    const start = sampleIndex * base + Math.min(sampleIndex, remainder);
+    const width = base + (sampleIndex < remainder ? 1 : 0);
+    return start + Math.floor(width / 2);
+  }));
 }
 
 function checkedBinding(value: number | undefined, name: string): number {
@@ -88,12 +116,15 @@ fn fluidGpuLogicalActivitySubgroup(
   checkpointId: u32,
   tick: u32,
   workgroupId: vec3u,
+  numWorkgroups: vec3u,
   subgroupId: u32,
   subgroupIdReconstructed: bool,
   subgroupLane: u32,
   subgroupSize: u32,
   activePredicate: bool,
 ) {
+  let sampleIndex = fluidGpuLogicalActivityStratifiedSampleIndex(workgroupId, numWorkgroups);
+  if (sampleIndex == FLUID_GPU_ACTIVITY_UNKNOWN) { return; }
   let activeMask = subgroupBallot(activePredicate);
   if (subgroupLane != 0u) { return; }
   let activeLaneCount = countOneBits(activeMask.x) + countOneBits(activeMask.y)
@@ -105,8 +136,11 @@ fn fluidGpuLogicalActivitySubgroup(
     | FLUID_GPU_ACTIVITY_ACTIVE_MASK_MEASURED;
   if (subgroupIdReconstructed) { flags |= FLUID_GPU_ACTIVITY_SUBGROUP_ID_RECONSTRUCTED; }
   fluidGpuLogicalActivityAppend(
-    taskId, checkpointId, tick, workgroupId, subgroupId, subgroupLane,
-    subgroupSize, activeLaneCount, activeMask, flags,
+    taskId, checkpointId, tick, workgroupId,
+    sampleIndex, fluidGpuLogicalActivityDispatchCount(numWorkgroups),
+    subgroupId, subgroupLane,
+    subgroupSize, activeLaneCount, activeMask,
+    flags | FLUID_GPU_ACTIVITY_STRATIFIED_SAMPLE_PRESENT,
   );
 }
 ` : "";
@@ -119,6 +153,8 @@ const FLUID_GPU_ACTIVITY_LANE_ID_PRESENT: u32 = 8u;
 const FLUID_GPU_ACTIVITY_LANE_COUNT_MEASURED: u32 = 16u;
 const FLUID_GPU_ACTIVITY_LANE_COUNT_RECONSTRUCTED: u32 = 32u;
 const FLUID_GPU_ACTIVITY_ACTIVE_MASK_MEASURED: u32 = 64u;
+const FLUID_GPU_ACTIVITY_STRATIFIED_SAMPLE_PRESENT: u32 = 128u;
+const FLUID_GPU_ACTIVITY_STRATIFIED_SAMPLE_COUNT: u32 = ${GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT}u;
 
 struct FluidGpuLogicalActivityRecord {
   sequence: u32,
@@ -128,6 +164,8 @@ struct FluidGpuLogicalActivityRecord {
   workgroupX: u32,
   workgroupY: u32,
   workgroupZ: u32,
+  sampleIndex: u32,
+  dispatchWorkgroupCount: u32,
   subgroupId: u32,
   laneId: u32,
   logicalLaneCount: u32,
@@ -159,6 +197,8 @@ fn fluidGpuLogicalActivityAppend(
   checkpointId: u32,
   tick: u32,
   workgroupId: vec3u,
+  sampleIndex: u32,
+  dispatchWorkgroupCount: u32,
   subgroupId: u32,
   laneId: u32,
   logicalLaneCount: u32,
@@ -175,9 +215,40 @@ fn fluidGpuLogicalActivityAppend(
   fluidGpuLogicalActivity.records[sequence] = FluidGpuLogicalActivityRecord(
     sequence, taskId, checkpointId, tick,
     workgroupId.x, workgroupId.y, workgroupId.z,
+    sampleIndex, dispatchWorkgroupCount,
     subgroupId, laneId, logicalLaneCount, activeLaneCount,
     activeMask.x, activeMask.y, activeMask.z, activeMask.w, flags,
   );
+}
+
+fn fluidGpuLogicalActivityCheckedProduct(left: u32, right: u32) -> u32 {
+  if (left != 0u && right > 0xffffffffu / left) { return FLUID_GPU_ACTIVITY_UNKNOWN; }
+  return left * right;
+}
+
+fn fluidGpuLogicalActivityDispatchCount(numWorkgroups: vec3u) -> u32 {
+  let xy = fluidGpuLogicalActivityCheckedProduct(numWorkgroups.x, numWorkgroups.y);
+  if (xy == FLUID_GPU_ACTIVITY_UNKNOWN) { return FLUID_GPU_ACTIVITY_UNKNOWN; }
+  return fluidGpuLogicalActivityCheckedProduct(xy, numWorkgroups.z);
+}
+
+fn fluidGpuLogicalActivityStratifiedSampleIndex(
+  workgroupId: vec3u,
+  numWorkgroups: vec3u,
+) -> u32 {
+  let total = fluidGpuLogicalActivityDispatchCount(numWorkgroups);
+  if (total == 0u || total == FLUID_GPU_ACTIVITY_UNKNOWN) { return FLUID_GPU_ACTIVITY_UNKNOWN; }
+  let linearId = workgroupId.x
+    + numWorkgroups.x * (workgroupId.y + numWorkgroups.y * workgroupId.z);
+  let sampleCount = min(FLUID_GPU_ACTIVITY_STRATIFIED_SAMPLE_COUNT, total);
+  let base = total / sampleCount;
+  let remainder = total % sampleCount;
+  for (var sampleIndex = 0u; sampleIndex < sampleCount; sampleIndex += 1u) {
+    let start = sampleIndex * base + min(sampleIndex, remainder);
+    let width = base + select(0u, 1u, sampleIndex < remainder);
+    if (linearId == start + width / 2u) { return sampleIndex; }
+  }
+  return FLUID_GPU_ACTIVITY_UNKNOWN;
 }
 
 fn fluidGpuLogicalActivityWorkgroup(
@@ -185,17 +256,22 @@ fn fluidGpuLogicalActivityWorkgroup(
   checkpointId: u32,
   tick: u32,
   workgroupId: vec3u,
+  numWorkgroups: vec3u,
   localInvocationIndex: u32,
   workgroupLaneCount: u32,
 ) {
   if (localInvocationIndex != 0u) { return; }
+  let sampleIndex = fluidGpuLogicalActivityStratifiedSampleIndex(workgroupId, numWorkgroups);
+  if (sampleIndex == FLUID_GPU_ACTIVITY_UNKNOWN) { return; }
   fluidGpuLogicalActivityAppend(
     taskId, checkpointId, tick, workgroupId,
+    sampleIndex, fluidGpuLogicalActivityDispatchCount(numWorkgroups),
     FLUID_GPU_ACTIVITY_UNKNOWN, 0u, workgroupLaneCount,
     FLUID_GPU_ACTIVITY_UNKNOWN, vec4u(0u),
     FLUID_GPU_ACTIVITY_WORKGROUP_ID_PRESENT
       | FLUID_GPU_ACTIVITY_LANE_ID_PRESENT
-      | FLUID_GPU_ACTIVITY_LANE_COUNT_RECONSTRUCTED,
+      | FLUID_GPU_ACTIVITY_LANE_COUNT_RECONSTRUCTED
+      | FLUID_GPU_ACTIVITY_STRATIFIED_SAMPLE_PRESENT,
   );
 }
 ${subgroupHelper}`.trimStart();
@@ -208,7 +284,8 @@ export function gpuLogicalActivityWorkgroupCallWGSL(
 ): string {
   if (config.mode === "disabled") return "";
   const tick = call.tick ?? "FLUID_GPU_ACTIVITY_UNKNOWN";
-  return `fluidGpuLogicalActivityWorkgroup(${call.taskId}, ${call.checkpointId}, ${tick}, ${call.workgroupId}, ${call.localInvocationIndex}, ${call.workgroupLaneCount});`;
+  const numWorkgroups = call.numWorkgroups ?? "vec3u(1u)";
+  return `fluidGpuLogicalActivityWorkgroup(${call.taskId}, ${call.checkpointId}, ${tick}, ${call.workgroupId}, ${numWorkgroups}, ${call.localInvocationIndex}, ${call.workgroupLaneCount});`;
 }
 
 /** Disabled and workgroup-only variants emit no subgroup call expression. */
@@ -219,7 +296,8 @@ export function gpuLogicalActivitySubgroupCallWGSL(
   if (config.mode !== "subgroup") return "";
   const tick = call.tick ?? "FLUID_GPU_ACTIVITY_UNKNOWN";
   const reconstructed = call.subgroupIdEvidence === "reconstructed" ? "true" : "false";
-  return `fluidGpuLogicalActivitySubgroup(${call.taskId}, ${call.checkpointId}, ${tick}, ${call.workgroupId}, ${call.subgroupId}, ${reconstructed}, ${call.subgroupLane}, ${call.subgroupSize}, ${call.active});`;
+  const numWorkgroups = call.numWorkgroups ?? "vec3u(1u)";
+  return `fluidGpuLogicalActivitySubgroup(${call.taskId}, ${call.checkpointId}, ${tick}, ${call.workgroupId}, ${numWorkgroups}, ${call.subgroupId}, ${reconstructed}, ${call.subgroupLane}, ${call.subgroupSize}, ${call.active});`;
 }
 
 /** A stable cache-key suffix forces separately compiled pipeline variants. */
@@ -485,6 +563,11 @@ export interface GPULogicalActivityEvent {
   tick?: number;
   workgroupId: readonly [number, number, number];
   workgroupEvidence: "measured";
+  /** Stable stratum within this dispatch's bounded sample. */
+  sampleIndex: number;
+  sampleCount: number;
+  /** N in the reported `sampleCount / N workgroups sampled`. */
+  dispatchWorkgroupCount: number;
   subgroupId?: number;
   subgroupEvidence: GPULogicalActivityEvidence;
   laneId?: number;
@@ -578,8 +661,9 @@ export function decodeGPULogicalActivity(
   for (let index = 0; index < retainedCount; index += 1) {
     const offset = GPU_LOGICAL_ACTIVITY_HEADER_WORDS + index * GPU_LOGICAL_ACTIVITY_RECORD_WORDS;
     const record = words.subarray(offset, offset + GPU_LOGICAL_ACTIVITY_RECORD_WORDS);
-    const [sequence, taskId, checkpointId, tick, wx, wy, wz, subgroupId, laneId,
-      logicalLaneCount, activeLaneCount, mask0, mask1, mask2, mask3, flags] = record;
+    const [sequence, taskId, checkpointId, tick, wx, wy, wz, sampleIndex,
+      dispatchWorkgroupCount, subgroupId, laneId, logicalLaneCount, activeLaneCount,
+      mask0, mask1, mask2, mask3, flags] = record;
     const malformed = (message: string): GPULogicalActivityDecodeResult => ({
       ok: false, code: "malformed-record", message: `Record ${index}: ${message}`,
     });
@@ -587,6 +671,13 @@ export function decodeGPULogicalActivity(
     if ((flags & ~GPU_LOGICAL_ACTIVITY_KNOWN_FLAGS) !== 0
       || (flags & GPU_LOGICAL_ACTIVITY_FLAGS.workgroupIdPresent) === 0) {
       return malformed("identity flags are invalid");
+    }
+    const stratifiedSamplePresent = (flags & GPU_LOGICAL_ACTIVITY_FLAGS.stratifiedSamplePresent) !== 0;
+    const sampleCount = Math.min(GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT, dispatchWorkgroupCount);
+    if (!stratifiedSamplePresent || dispatchWorkgroupCount === 0
+      || dispatchWorkgroupCount === GPU_LOGICAL_ACTIVITY_UNKNOWN_U32
+      || sampleIndex === GPU_LOGICAL_ACTIVITY_UNKNOWN_U32 || sampleIndex >= sampleCount) {
+      return malformed("stratified dispatch sample is invalid");
     }
     const subgroupPresent = (flags & GPU_LOGICAL_ACTIVITY_FLAGS.subgroupIdPresent) !== 0;
     const subgroupReconstructed = (flags & GPU_LOGICAL_ACTIVITY_FLAGS.subgroupIdReconstructed) !== 0;
@@ -621,6 +712,9 @@ export function decodeGPULogicalActivity(
       tick: tick === GPU_LOGICAL_ACTIVITY_UNKNOWN_U32 ? undefined : tick,
       workgroupId: [wx, wy, wz],
       workgroupEvidence: "measured",
+      sampleIndex,
+      sampleCount,
+      dispatchWorkgroupCount,
       subgroupId: subgroupPresent ? subgroupId : undefined,
       subgroupEvidence: subgroupPresent ? (subgroupReconstructed ? "reconstructed" : "measured") : "unknown",
       laneId,

@@ -61,7 +61,13 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
   assert.match(panel, /latest\.capturedAt_ms - latestHardware\.capturedAt_ms <= 2_000/);
   assert.match(panel, /PERFORMANCE_AVERAGE_WINDOW/);
   assert.match(panel, /runState !== "paused"/);
-  assert.match(panel, /PAUSED · LAST COMPLETE CAPTURE/);
+  assert.match(panel, /PAUSED · LAST SETTLED CAPTURE/);
+  assert.match(panel, /activityHistory\.filter\(performanceActivityFrameHasSettledEvidence\)/);
+  assert.match(panel, /WAITING FOR COMPLETE CAPTURE/);
+  assert.match(panel, /instrumentationMode === "timeline" \? cpu : undefined/);
+  assert.match(panel, /role="switch"/);
+  assert.match(panel, /instrumentationMode === "activity" \? "off" : "activity"/);
+  assert.doesNotMatch(panel, /<select[\s\S]*Performance capture mode|Timeline only/);
   assert.match(grid, /data-accounting-ledgers="cpu-gpu-independent"/);
   assert.doesNotMatch(panel, /cpu\.total_ms\s*\+\s*physics\.total_ms|physics\.total_ms\s*\+\s*presentation\.total_ms/);
 });

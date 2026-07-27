@@ -33,6 +33,7 @@ import { planOctreeAirVelocitySupport } from "./webgpu-octree-air-velocity-suppo
 import { WebGPUOctreeAirVelocitySupportProducer } from "./webgpu-octree-air-velocity-support-gpu";
 import { WebGPUOctreeSolidVertexSdf } from "./webgpu-octree-solid-vertex-sdf";
 import {
+  OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
   type OctreeFirstOrderSPDVCycle,
 } from "./webgpu-octree-section43-contract";
 import {
@@ -40,6 +41,7 @@ import {
   type OctreePipelinedWorksetLinearOperator,
   type OctreePipelinedMGPCGVectors,
 } from "./webgpu-octree-pipelined-mgpcg";
+import { WebGPUOctreePersistentMGPCG } from "./webgpu-octree-persistent-mgpcg";
 import { WebGPUOctreeSection43HybridPreconditioner } from "./webgpu-octree-section43-preconditioner";
 import { WebGPUOctreeSPGridVCycle } from "./webgpu-octree-spgrid-vcycle";
 import { WebGPUOctreeTopologyEpoch } from "./webgpu-octree-topology-epoch";
@@ -73,7 +75,6 @@ import {
 import { WebGPUFineLevelSetVolumeCorrection } from "./webgpu-octree-fine-levelset-volume";
 import {
   createGPULogicalActivityAdoptionContext,
-  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
@@ -290,6 +291,31 @@ export function octreeFineEngineSplitsEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_ENGINE_SPLIT !== "collapsed";
+}
+
+/**
+ * Part D executor selection, read at encode time so an A/B can switch paths
+ * without reconstructing anything.
+ *
+ * **Default OFF, on measurement.** The persistent executor works — it collapses
+ * the solve from 1,125 to 413 dispatches and 168 to 78 compute passes per
+ * advance, with identical executed iterations and zero validation errors — but
+ * it is SLOWER, and stably so. Interleaved A/B on the mini churn lane
+ * (2026-07-27): hierarchical 79.74 / 79.68 / 79.68, persistent 94.79 / 94.90 /
+ * 94.79, i.e. **+15.1 ms**. One workgroup is one GPU core, so the solve gives up
+ * ~31/32 of the machine to buy dispatch overhead that this frame does not pay
+ * (independently established: deleting 231 dispatches/advance measured as a
+ * 2 ms regression). Keep the implementation — it is correct, it is the
+ * large-domain question mark, and it is the only way to test the premise again
+ * cheaply — but do not select it by default.
+ * `FLUID_OCTREE_PERSISTENT_MGPCG=1` opts in.
+ */
+export function octreePersistentMGPCGEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG === "1";
 }
 
 export function octreeSparseWorldRequired(
@@ -837,6 +863,8 @@ type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
     persistentEnabled: boolean; persistentMaximumIterations: number }>;
   encodeCapture(broker: PassBroker): void;
   readonly candidateControl: GPUBuffer;
+  /** Copy source for the step-snapshot ring (A4). Never bound by this file. */
+  readonly levelDelta: GPUBuffer;
   // `dispatch` is the per-level dispatch metadata the Section 4.3 shell reads as
   // `spgridDispatch` (binding 26) for pCount/pPageCount/pTransferCount. The
   // implementation already returns it; omitting it here narrowed it away from
@@ -995,6 +1023,12 @@ export class WebGPUOctreeProjection {
    * after projection/extension has published. */
   private pendingFinePublication?: PendingFinePublication;
   private globalFineBootstrapped = false;
+  /** Monotone host mirror of the topology shader's `currentFinePopulated()`
+   * (POWER_LIQUIDS_ULTIMATE_M1MAX.md B1 / P1.1). Set once a delta publication
+   * has been encoded, i.e. after the cold bootstrap and its retry step. Only
+   * the seed-chain encode consults it; a stale `false` merely re-encodes the
+   * chain harmlessly, and it is never cleared short of teardown. */
+  private finePopulated = false;
   private globalFineGeneration = 2;
   private lastPowerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
   private powerTimestep_s = 0;
@@ -1085,6 +1119,12 @@ export class WebGPUOctreeProjection {
   private readonly adaptivity: number;
   private readonly interfaceRefinementBandCells: number;
   private pipelinedMGPCG!: WebGPUOctreePipelinedMGPCG;
+  /**
+   * Single-dispatch executor for small domains (Part D). Present only when the
+   * ALLOCATED row capacity is inside the authored threshold; the hierarchical
+   * `pipelinedMGPCG` remains constructed and selectable either way.
+   */
+  private persistentMGPCG?: WebGPUOctreePersistentMGPCG;
   private firstOrderVCycle!: OctreeFirstOrderVCycleImplementation;
   private section43HybridPreconditioner!: WebGPUOctreeSection43HybridPreconditioner;
   private resolvedLinearOperator!: OctreePipelinedWorksetLinearOperator;
@@ -1162,8 +1202,10 @@ export class WebGPUOctreeProjection {
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
     // Analytic dam/tank scenes can construct compact topology and first fine seeds
     // phi without allocating or uploading a box-sized bootstrap texture.
-    // Explicit seeded/imported shapes require the bounded sparse voxelizer and
-    // are rejected below until that native bootstrap producer is available.
+    // Explicitly seeded brick geometry is not one of those closed-form shapes,
+    // so it joins terrain and rigid bodies on the dense bootstrap path: the
+    // host rasterizes `initialOctreeLevelSet` once and `topologyResidency`
+    // publishes exact t=0 residency from that imported SDF.
     const analyticSparseBootstrap = (scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
       && scene.rigidBodies.length === 0 && !sceneHasTerrain(scene);
     this.analyticSparseBootstrap = analyticSparseBootstrap;
@@ -1181,9 +1223,6 @@ export class WebGPUOctreeProjection {
     if (spacing.some((value) => !Number.isFinite(value) || value <= 0)
       || Math.max(...spacing) / Math.min(...spacing) > 1 + 1e-5) {
       throw new RangeError("Power catalog requires isotropic finest cells");
-    }
-    if ((scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0) {
-      throw new RangeError("Power projection does not support imported or explicitly seeded bootstrap geometry");
     }
     this.pressureCapacity = planOctreePressureCapacity(
       dims, this.maxLeafSize, this.interfaceRefinementBandCells,
@@ -2110,6 +2149,39 @@ export class WebGPUOctreeProjection {
       maximumIterations: this.solveTailPolicy.encodedOuterIterations,
       hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
     });
+    // Part D: the same iteration, one dispatch, one 256-lane workgroup. The
+    // gate is the ALLOCATED row capacity, which is known here at construction;
+    // it is deliberately not a GPU-side live row count, because shaping the
+    // encode from a readback would break the step-sequencing contract. Both
+    // executors stay constructed, so the env flag can A/B them at any time.
+    if (WebGPUOctreePersistentMGPCG.selects(rowCapacity)) {
+      const smootherDegree = this.firstOrderVCycle.smootherContract?.degree;
+      if (smootherDegree === undefined) {
+        throw new Error("Persistent MGPCG requires the published V-cycle smoother contract");
+      }
+      const spgrid = this.firstOrderVCycle.section63Topology;
+      this.persistentMGPCG = new WebGPUOctreePersistentMGPCG(this.device, {
+        dimensions: [this.dims.nx, this.dims.ny, this.dims.nz], rowCapacity,
+        state: spgrid.state, topology: spgrid.topology, geometry: spgrid.geometry,
+        dispatchMeta: spgrid.dispatch,
+        coefficients: section63Source.coefficients,
+        coefficientBankStrideWords: section63Source.coefficientBankStrideWords,
+        metrics: section63Source.topologyMetrics,
+        acceptedAuthority: structuredSource.control,
+        worksets: section63Source.worksets.regularInterior.buffer,
+        worksetStrideWords: section63Source.worksetStrideWords,
+        worksetBankStrideWords: section63Source.worksetBankStrideWords,
+        rhs: this.structuredDivergenceRhs,
+        control: this.pipelinedMGPCG.control,
+      }, {
+        maximumIterations: this.solveTailPolicy.encodedOuterIterations,
+        boundarySmoothingIterations:
+          this.section43HybridPreconditioner.boundarySmoothingIterations,
+        chebyshevDegree: smootherDegree,
+        boundaryBandLayers: OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
+        relativeTolerance: this.solveTailPolicy.relativeTolerance,
+      });
+    }
     // The paper evolves coarse octree phi regardless of whether the optional
     // factor-4/factor-8 interface band exists. It is also the complete
     // inside/outside and cell-centre boundary authority in coarse-only mode.
@@ -2369,7 +2441,8 @@ export class WebGPUOctreeProjection {
     this.workAccounting.setAuthorityBytes("power", powerAllocated);
     this.workAccounting.setAuthorityBytes("fine-level-set", fineAllocated);
     this.workAccounting.setScratchBytes("pressure-mgpcg",
-      this.pipelinedMGPCG.plan.ownedBytes + this.section43HybridPreconditioner.allocatedBytes);
+      this.pipelinedMGPCG.plan.ownedBytes + this.section43HybridPreconditioner.allocatedBytes
+      + (this.persistentMGPCG?.allocatedBytes ?? 0));
     this.workAccounting.setScratchBytes("multigrid", this.firstOrderVCycle.allocatedBytes);
     this.workAccounting.sealAllocationInventory();
     this.info.powerDiagramReady = true;
@@ -3042,10 +3115,29 @@ export class WebGPUOctreeProjection {
     const pressureOut = initialInA ? this.pressureB : this.pressureA;
     if (!this.structuredVelocity) throw new Error("Pressure solve requires the accepted structured authority");
     const solveBroker = new PassBroker(encoder);
-    this.pipelinedMGPCG.encode(solveBroker, {
-      pressureSeed: pressureIn,
-      pressureOut,
-    });
+    // Part D executor selection. It lives here, in the projection host, and
+    // never inside the hierarchical executor's own encode — that encode is the
+    // single-schedule authority and a test stringifies it to prove it.
+    const persistent = octreePersistentMGPCGEnabled() ? this.persistentMGPCG : undefined;
+    if (persistent) {
+      persistent.encodeSolve(solveBroker, {
+        pressureSeed: pressureIn,
+        pressureOut,
+      }, (setupBroker) => {
+        // The Section 4.3 band setup is transcribed inside the kernel, but the
+        // SPGrid topology setup/commit is NOT: it still publishes the level
+        // worklists and dispatch words the kernel then reads, so it must run —
+        // and must run before the dispatchMeta staging copy.
+        this.firstOrderVCycle.encodeSetup(setupBroker, {
+          solverControl: this.pipelinedMGPCG.control, rowCount: this.compaction,
+        });
+      });
+    } else {
+      this.pipelinedMGPCG.encode(solveBroker, {
+        pressureSeed: pressureIn,
+        pressureOut,
+      });
+    }
     this.latestPressureInA = !initialInA;
     // Stage solve feedback (residual sums + row/entry counts) while this
     // encoder still owns write ordering on compaction; the async diagnostics
@@ -3242,13 +3334,23 @@ export class WebGPUOctreeProjection {
         // decides whether the first sparse authority exists. A rejected cold
         // generation can therefore retry on the next encoded step.
         const seedBroker = preparationBroker;
+        // Once a delta publication has been encoded the 8-dispatch seed chain
+        // is provably unread (POWER_LIQUIDS_ULTIMATE_M1MAX.md B1 / P1.1):
+        // `insertExternalSeeds` and `externalAffineInterfaceBrick` are only
+        // dispatched by the `kind: "bootstrap"` branch of the topology encode,
+        // and the sole remaining reader, `externalSeedPhi` inside
+        // `initializeDesiredSamples`, returns its non-finite sentinel whenever
+        // `currentFinePopulated()`. The buffer identity is unchanged, so the
+        // publication still binds the same affine seed source.
         const seeds = this.globalFineBootstrapped
-          ? this.globalFineSeeds.encode(
-            seedBroker,
-            { buffer: this.fineSeedAdapter.leaves },
-            { buffer: this.fineSeedAdapter.source.candidates.candidates },
-            { buffer: this.fineSeedAdapter.source.candidateCount },
-          )
+          ? (this.finePopulated
+            ? { buffer: this.globalFineSeeds.buffer, affineValues: true }
+            : this.globalFineSeeds.encode(
+              seedBroker,
+              { buffer: this.fineSeedAdapter.leaves },
+              { buffer: this.fineSeedAdapter.source.candidates.candidates },
+              { buffer: this.fineSeedAdapter.source.candidateCount },
+            ))
           : this.globalFineSeeds.encodeFromAllInterfaceLeaves(
             seedBroker, { buffer: this.fineSeedAdapter.leaves }, { buffer: this.compaction },
           );
@@ -3335,6 +3437,11 @@ export class WebGPUOctreeProjection {
           splitProductionPhase("brickEngineA", "fineTopology");
         }
         const wasBootstrapped = this.globalFineBootstrapped;
+        // Latch after the seed decision above, so the first delta publication
+        // still carries a freshly emitted chain: that is the pre-acceptance
+        // retry window the comment above describes. From the next step on the
+        // chain is skipped (B1 / P1.1).
+        if (wasBootstrapped) this.finePopulated = true;
         this.pendingFinePublication = {
           topology: publicationTopology,
           redistance: publicationRedistance,
@@ -3906,6 +4013,14 @@ export class WebGPUOctreeProjection {
     return Boolean(this.structuredVelocity && this.structuredBoundary
       && this.structuredDynamics);
   }
+  // Copy sources for the step-snapshot ring (POWER_LIQUIDS_ULTIMATE_M1MAX A4).
+  // The ring appends these copies after every producer in the step's own
+  // encoder, so a mapped record shows the step's own verdicts. Absent is not
+  // zero: a missing source decodes as absent and refuses to authorize a skip.
+  get topologyEpochState(): GPUBuffer | undefined { return this.topologyEpoch?.state; }
+  get airSupportScratch(): GPUBuffer | undefined { return this.airVelocitySupport?.scratch; }
+  get spgridLevelDelta(): GPUBuffer | undefined { return this.firstOrderVCycle?.levelDelta; }
+
   /** Exact GPU-authored controls consumed only by post-submit diagnostics. */
   get workAccountingBuffers(): OctreeProjectionWorkAccountingBuffers | undefined {
     const structured = this.structuredVelocity?.source;
@@ -4271,7 +4386,7 @@ export class WebGPUOctreeProjection {
     const fine = this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB;
     const topology = this.globalFinePublishedIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
     if (!fine || !topology || !this.globalFineSeeds) return undefined;
-    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 672,
+    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 728,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine structured QA diagnostics" });
     encoder.copyBufferToBuffer(this.globalFineSeeds.buffer, 0, readback, 0, 8);
@@ -4285,6 +4400,10 @@ export class WebGPUOctreeProjection {
     }
     if (this.structuredVelocity) {
       encoder.copyBufferToBuffer(this.structuredVelocity.control, 0, readback, 160, 24);
+      // Full 11-word reject carry (words 0..10): the stage-1/2 detail vec4
+      // lives in words 6..9 and the workset class in word 10, which the
+      // 6-word control slice above cannot carry.
+      encoder.copyBufferToBuffer(this.structuredVelocity.control, 0, readback, 672, 44);
     }
     if (this.structuredBoundary) {
       encoder.copyBufferToBuffer(this.structuredBoundary.control, 0, readback, 184, 64);
@@ -4331,6 +4450,10 @@ export class WebGPUOctreeProjection {
       // measured simulation, and never feeds scheduling.
       encoder.copyBufferToBuffer(this.airVelocitySupport.scratch, 32 * 4,
         readback, 576, 32);
+      // Stationary-air fallback latch: unreached-patch count and the first
+      // (cell<<3)|axis identity from the most recent march.
+      encoder.copyBufferToBuffer(this.airVelocitySupport.scratch, 41 * 4,
+        readback, 720, 8);
     }
     encoder.copyBufferToBuffer(topology.pageDelta, 0, readback, 608, 64);
     this.device.queue.submit([encoder.finish()]);
@@ -4358,6 +4481,8 @@ export class WebGPUOctreeProjection {
         fineVolumeControl: Array.from(words.slice(128, 144)),
         airSupportTerminalScratch: Array.from(words.slice(144, 152)),
         finePageDeltaHeader: Array.from(words.slice(152, 168)),
+        structuredRejectCarry: Array.from(words.slice(168, 179)),
+        airSupportFallbacks: Array.from(words.slice(180, 182)),
         configuredFineGeneration: fine.generation, fineGenerationSlot: fine.generationSlot,
         scheduledFineGeneration: this.globalFineGeneration, currentFineIsA: this.globalFinePublishedIsA };
     } finally {
@@ -4391,10 +4516,15 @@ export class WebGPUOctreeProjection {
 
   destroy() {
     this.powerLifecycleDisposed = true;
-    this.pipelinedMGPCG.destroy();
+    // These three are built by an initialization task rather than the
+    // constructor, so a failure during initialization reaches this cleanup
+    // with them still unassigned. Destroying them unconditionally throws a
+    // TypeError that replaces the failure the caller is about to rethrow.
+    this.pipelinedMGPCG?.destroy();
+    this.persistentMGPCG?.destroy();
     for (const buffer of Object.values(this.pipelinedMGPCGVectors)) buffer.destroy();
-    this.section43HybridPreconditioner.destroy();
-    this.firstOrderVCycle.destroy();
+    this.section43HybridPreconditioner?.destroy();
+    this.firstOrderVCycle?.destroy();
     this.topologyEpoch?.destroy();
     this.structuredDynamics?.destroy();
     this.structuredBoundary?.destroy(); this.structuredVelocity?.destroy();
@@ -4459,16 +4589,16 @@ export function octreePowerVolumeActivityShader(activity: GPULogicalActivityAdop
     // phase two, so it begins at boundary one and closes at boundary two.
     tick: fineSemanticTicks ? `${phaseIndex - 1}u` : undefined,
     workgroupId: "activityWorkgroupId",
+    numWorkgroups: "activityNumWorkgroups",
     localInvocationIndex: "activityLocalInvocationIndex",
     workgroupLaneCount: 64,
-    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
   });
   const exit = activity.workgroup("publish-power-cell-volumes", "exit", {
     tick: fineSemanticTicks ? `${phaseIndex}u` : undefined,
     workgroupId: "activityWorkgroupId",
+    numWorkgroups: "activityNumWorkgroups",
     localInvocationIndex: "activityLocalInvocationIndex",
     workgroupLaneCount: 64,
-    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
   });
   if (!entry && !exit) return octreePowerVolumeShader;
   const signature = "fn publishPowerVolumes(@builtin(global_invocation_id) gid:vec3u)";
@@ -6879,9 +7009,9 @@ export function octreeProjectionActivityShader(
     const descriptor = OCTREE_PROJECTION_ACTIVITY_TASKS[entryPoint];
     const progress = activity.workgroup(descriptor.task, "progress", {
       workgroupId,
+      numWorkgroups,
       localInvocationIndex,
       workgroupLaneCount,
-      recordWhen: `${workgroupId}.x + ${numWorkgroups}.x * (${workgroupId}.y + ${numWorkgroups}.y * ${workgroupId}.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
     });
     edits.push({ start: bodyOpen + 1, end: bodyOpen + 1, replacement: progress });
   }

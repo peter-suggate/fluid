@@ -5,6 +5,7 @@ import {
   gpuPhysicsPerformanceActivityFrameId,
   mergePerformanceActivityCaptureDiagnostics,
   mergePerformanceActivityFrame,
+  performanceActivityFrameHasSettledEvidence,
   performanceActivityTaskColor,
   slicePerformanceActivityRows,
   synthesizePerformanceActivityFrame,
@@ -41,6 +42,28 @@ const gpuTrace: PerformanceTrace = {
     { id: "pressure-solve", label: "Pressure solve", duration_ms: 1.5 },
   ],
 };
+
+test("only settled logical readback evidence is ready for detailed presentation", () => {
+  const frame = synthesizePerformanceActivityFrame({
+    identity: { frameId: "atomic", generation: 1 }, context: "test", cpu: cpuTrace,
+  });
+  assert.equal(performanceActivityFrameHasSettledEvidence(frame), false,
+    "a base frame awaiting asynchronous evidence is not visible");
+  assert.equal(performanceActivityFrameHasSettledEvidence({
+    ...frame, captureDiagnostics: { reasons: ["unprofiled-dispatch"] },
+  }), false, "a verdict without logical rows is still the base-frame intermediate");
+  assert.equal(performanceActivityFrameHasSettledEvidence({
+    ...frame,
+    captureDiagnostics: { reasons: ["unprofiled-dispatch"] },
+    resources: [...frame.resources, {
+      id: "gpu.physics.logical.sample.0",
+      label: "Stratified sample 1",
+      kind: "gpu-logical-capacity",
+      lane: "gpu-physics",
+      clockDomain: "gpu-physics-timestamp",
+    }],
+  }), true, "settled fail-closed evidence is useful and must remain visible");
+});
 
 test("CPU performance clock exposes the exact time-origin alignment", () => {
   const snapshot = cpuPerformanceClockSnapshot({ timeOrigin: 1_700_000_000_000, now: () => 12.5 });

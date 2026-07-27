@@ -91,6 +91,13 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
     FLUID_RASTER_CHECKPOINTS: "0", FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000",
     ...laneEnvironment[lane],
     ...overrides,
+    // Silent-failure tripwires are unconditional on every benchmark lane and
+    // cannot be switched off by a lane table or a caller override: a run that
+    // gets faster while rolling back topology, leaving restriction rows
+    // unaccepted, overflowing the fine band, or publishing the seed pressure
+    // is not a speedup. `FLUID_TRIPWIRES=1` also makes an *unevaluable*
+    // counter a failure. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3.
+    FLUID_TRIPWIRES: "1",
 });
 
 const runBenchmark = async (overrides: Record<string, string> = {}): Promise<PowerDamResultRecord> => {
@@ -115,6 +122,10 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
 
 const movingResult = await runBenchmark();
 let artifactResult: OctreeRegressionResultRecord = movingResult;
+// The raw record of the run whose FINAL advance the terminal gates describe.
+// `powerDamResultWindow` rebuilds a differenced record from an explicit field
+// list, so per-run tripwire counters must come from the unwindowed record.
+let terminalResult: PowerDamResultRecord = movingResult;
 let summary = summarizePowerDamPerformance(movingResult);
 if (quiescent) {
   const settleSteps = 500;
@@ -126,6 +137,7 @@ if (quiescent) {
   });
   const settlePrefix = await runBenchmark(environmentForSteps(settleSteps));
   const complete = await runBenchmark(environmentForSteps(settleSteps + measuredSteps));
+  terminalResult = complete;
   artifactResult = powerDamResultWindow(settlePrefix, complete);
   const quiescentSummary = summarizePowerDamPerformance(artifactResult);
   if (!jsonOnly) {
@@ -175,26 +187,93 @@ const failures = [...powerDamPerformanceFailures(summary, {
   maximumComputePassesPerAdvance: numericLimit("FLUID_MAX_PASSES_PER_ADVANCE"),
   maximumPressureNonSolve_ms: numericLimit("FLUID_MAX_PRESSURE_NON_SOLVE_MS"),
 })];
-// A fine band that overflows its capacity degrades the resident-brick count to
-// the INVALID sentinel and leaves the pressure solve executing zero iterations
-// -- yet every gate above still reports success, because a solver that computes
-// nothing also produces no validation errors. Assert the run actually solved.
+// ---- Per-run silent-failure tripwires -------------------------------------
+// docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3 (P0.3). A fine band that overflows
+// its capacity degrades the resident-brick count to the INVALID sentinel and
+// leaves the pressure solve executing zero iterations -- yet every gate above
+// still reports success, because a solver that computes nothing also produces
+// no validation errors. These gates are unconditional, and a counter that is
+// *unavailable* fails just as loudly as a counter that is out of range: an
+// unevaluable tripwire is the failure mode this item exists to kill.
+//
+// (The per-generation topology-rollback / unaccepted-restriction-row and the
+// per-step MGPCG convergence tripwires are enforced inside the smoke harness,
+// which is the only place with per-step access to those control words.)
 {
   const terminal = summary.terminalCounters;
   const active = terminal?.activeFineBricks;
   const logical = terminal?.logicalFineBricks;
-  if (active !== undefined && logical !== undefined && active > logical) {
+  const FINE_BAND_INVALID_SENTINEL = 0xffff_ffff;
+  // Tripwire 4: the worklist header's active count degraded to INVALID. The
+  // count is header word ONE; a prior consumer read word zero (the generation)
+  // and printed nonsense, so this reads the decoded counter, not a raw word.
+  if (active === undefined) {
+    failures.push("tripwire could not be evaluated: terminal fine-band active-brick count is"
+      + " unavailable (globalFineActiveBricks missing from the smoke result record)");
+  } else if (active === FINE_BAND_INVALID_SENTINEL) {
+    failures.push(`fine band active-brick count is the INVALID sentinel ${FINE_BAND_INVALID_SENTINEL}`
+      + ` (0xFFFFFFFF) -- the band overflowed its ${terminal?.fineBrickCapacity ?? "unknown"}-brick`
+      + " capacity, which silently no-ops the solver while the run still reports PASS");
+  }
+  if (logical === undefined) {
+    failures.push("tripwire could not be evaluated: logical fine-brick count is unavailable"
+      + " (globalFineLevelSetLogicalBrickCount missing from the smoke result record)");
+  } else if (active !== undefined && active !== FINE_BAND_INVALID_SENTINEL && active > logical) {
     failures.push(`fine band active-brick count ${active} exceeds the ${logical}-brick logical`
       + " lattice -- the band overflowed capacity and the publication is invalid");
   }
-  if (terminal?.pressureIterationsExecuted === 0) {
-    failures.push("pressure solve executed zero iterations -- the solver did no work");
+  // Tripwire 3: terminal pressure iterations. Read from two independent
+  // sources -- the solver telemetry counter and the GPU MGPCG control word the
+  // harness decodes after the final advance -- because the telemetry counter
+  // is only as fresh as the last solve-diagnostics readback.
+  const terminalMgpcg = (terminalResult as {
+    octreeMGPCGDiagnostics?: {
+      flags?: number; converged?: boolean; iterations?: number; rows?: number;
+      relativeResidual?: number;
+    };
+  }).octreeMGPCGDiagnostics;
+  const executed = terminal?.pressureIterationsExecuted;
+  if (executed === undefined) {
+    failures.push(`tripwire could not be evaluated on lane ${requestedLane}: terminal pressure`
+      + " iteration count is unavailable (quadtreePressureIterationsUsed missing from the"
+      + " smoke result record)");
+  } else if (executed === 0) {
+    failures.push(`pressure solve executed zero iterations on lane ${requestedLane}`
+      + ` (scheduled ${terminal?.pressureIterationsScheduled ?? "unknown"}, hard limit`
+      + ` ${terminal?.pressureIterationsHardLimit ?? "unknown"}) -- the solver did no work.`
+      + " On a churn lane (mini/moving-interface/ui) this is the tripwire firing. On the"
+      + " settled quiescent window a seed pressure that is already inside tolerance can"
+      + " legitimately converge in zero iterations; confirm against the churn lanes before"
+      + " treating it as a solver fault");
+  }
+  if (terminalMgpcg === undefined) {
+    failures.push(`tripwire could not be evaluated on lane ${requestedLane}: the terminal MGPCG`
+      + " control readback (octreeMGPCGDiagnostics) is missing from the smoke result record");
+  } else {
+    if (terminalMgpcg.iterations === undefined) {
+      failures.push(`tripwire could not be evaluated on lane ${requestedLane}: the terminal MGPCG`
+        + ` control carries no iteration count: ${JSON.stringify(terminalMgpcg)}`);
+    } else if (terminalMgpcg.iterations === 0) {
+      failures.push(`terminal MGPCG control reports zero executed iterations on lane`
+        + ` ${requestedLane}: ${JSON.stringify(terminalMgpcg)}. See the note on the`
+        + " telemetry counter above for the settled-window caveat");
+    }
+    // Non-convergence publishes the SEED pressure and fails nothing today.
+    if (terminalMgpcg.converged !== true && (terminalMgpcg.iterations ?? 0) > 0) {
+      failures.push(`terminal pressure solve did not converge on lane ${requestedLane}:`
+        + ` ${JSON.stringify(terminalMgpcg)}`);
+    }
   }
 }
-if (jsonOnly) console.log(JSON.stringify(quiescent
-  ? { lane: "quiescent", moving: summarizePowerDamPerformance(movingResult), quiescent: summary }
-  : summary));
-else {
+// Gate failures always reach stderr, including under --json: a tripwire whose
+// counter values are only visible after a rerun is a tripwire that costs a GPU
+// session to triage.
+if (jsonOnly) {
+  for (const failure of failures) console.error(`performance gate: ${failure}`);
+  console.log(JSON.stringify(quiescent
+    ? { lane: "quiescent", moving: summarizePowerDamPerformance(movingResult), quiescent: summary }
+    : summary));
+} else {
   const authority = quiescent ? "quiescent paired-prefix window"
     : traceProfile ? "generic trace sample" : "throughput authority";
   console.log(`${summary.scenario}: ${summary.advanceWall_ms.toFixed(2)} ms/advance (${summary.steps} advances, ${authority})`);

@@ -64,6 +64,8 @@ export interface PowerDamResultRecord {
     readonly projectionEnergySampleCount?: number;
   };
   readonly octreeWorkAccounting?: OctreeWorkSnapshot;
+  /** Exact cause when a work-accounting stage failed its validity gate. */
+  readonly octreeWorkAccountingBlocker?: string;
   readonly compactMechanicalEnergyCheckpoints?: readonly {
     readonly time_s: number;
     readonly mechanicalEnergyRetentionRatio: number;
@@ -345,32 +347,54 @@ interface PowerDamComputePassOwnershipRule {
  * deliberately no raw-label fallback: a newly introduced label must register
  * its owning module here or the pass-budget audit fails closed. */
 const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRule[] = [
+  // GPUDynamicTracePhaseRecorder (`lib/performance-trace.ts` writeBoundary)
+  // emits one single-dispatch marker pass per semantic phase while a segmented
+  // profile is captured: exactly "GPU trace start" and `${phase.label} complete`.
+  // Matched first so a marker never lands in the physics stage it names.
+  { stage: "Profiler phase boundaries", label: /^(?:GPU trace start|.+ complete)$/ },
   { stage: "Octree owner pages", label: /owner[- ]page|owner pages|analytic octree owner generation/i },
   { stage: "Power energy ledger", label: /^Power energy ledger\b/i },
+  { stage: "Power cell volumes", label: /power-cell volumes/i },
   { stage: "Fine seed adapter", label: /octree fine-seed|octree interface candidates|FineSeedLeaf to global fine seeds|Seed global fine bricks from (?:FineSeedLeaf candidates|every interface leaf)|fine-seed brick residency/i },
-  { stage: "Structured velocity publication", label: /(?:direct structured|structured velocity publication|structured cell velocities|six structured velocity families)/i },
-  { stage: "Structured boundary coefficients", label: /structured boundary/i },
-  { stage: "Structured velocity dynamics", label: /structured dynamics/i },
+  { stage: "Structured velocity publication", label: /(?:direct structured|structured velocity publication|structured cell velocities|six structured velocity families|direct Section 6\.3 rows)/i },
+  { stage: "Structured boundary coefficients", label: /(?:structured boundary|Classify fine-over-coarse liquid rows|Resolve canonical (?:free-surface|solid) boundary slots)/i },
+  // `lib/webgpu-octree-structured-dynamics.ts` suffixes a class index onto its
+  // per-family advect/commit/force/project/RHS/reconstruct labels.
+  { stage: "Structured velocity dynamics", label: /(?:structured dynamics|structured family class|structured divergence RHS class|Reconstruct projected structured rows|Transfer accepted velocity to changed topology faces)/i },
+  // Emitted only while a trace is active: one single-dispatch marker pass per
+  // physics phase (lib/webgpu-uniform-eulerian.ts). Owned so a --profile capture
+  // does not report them as unattributed work.
+  { stage: "Profiler phase boundaries", label: /^Physics activity (?:boundary \d+|frame (?:begin|end))$/i },
+  { stage: "Structured velocity dynamics", label: /^Mark structured overhead separation row class/i },
+  // C2 widened the single-workgroup cubic band scatter into an indirect
+  // (seed x halo-cell) dispatch; the new pass needs the same owner.
+  { stage: "Fine topology", label: /^Scatter recurring fine-band seed halos$/i },
+  { stage: "Section 5 air-velocity support", label: /(?:air-support|Section 5 closest faces|Extrapolate structured ordinary faces)/i },
   { stage: "Fine transport · prepare trajectory chunks", label: /^Prepare global fine trajectory chunk \d+\/\d+$/i },
   { stage: "Fine transport · advance trajectories", label: /^Advance global fine trajectories \d+\/\d+$/i },
   { stage: "Fine transport · sample departure chunks", label: /^Sample global fine departure chunk \d+\/\d+$/i },
   { stage: "Fine transport · summarize departure chunks", label: /^Summarize global fine departure chunk \d+\/\d+$/i },
   { stage: "Fine transport · finalize departure summaries", label: /^Finalize global fine departure chunk \d+\/\d+$/i },
   { stage: "Fine transport · velocity cache", label: /^Publish complete global fine velocity cache \d+\/\d+$/i },
-  { stage: "Fine transport", label: /(?:fine characteristic|fine trajector|fine departure|global fine (?:transport|dispatches)|structured velocity transport)/i },
-  { stage: "Fine summaries", label: /fine summar/i },
+  { stage: "Fine transport", label: /(?:fine characteristic|fine trajector|fine departure|global fine (?:transport|dispatches)|structured (?:velocity|fine) transport|fine transport substeps|Advect fine phi|Commit structured fine phi and phase delta|Compact structured fine topology delta)/i },
+  // Both hyphenated ("fine-summary delta") and spaced ("coarse summary ranks")
+  // forms are authored by webgpu-octree-fine-levelset-summary-direct.ts.
+  { stage: "Fine summaries", label: /(?:fine|coarse)[- ]summar/i },
   { stage: "Fine redistance / volume", label: /(?:Fine redistance|fine level-set JFA|JFA closest-point redistance|global (?:fine )?volume|compact coarse volume|fine overlap|Fine volume correction)/i },
   { stage: "Fine restriction", label: /(?:Fine-to-coarse restriction|fine restriction)/i },
-  { stage: "Fine topology", label: /(?:global fine (?:topology|interface|seed|page|changed|publication|rollback|lifecycle)|dirty and support pages|fine topology candidate|fine seed expansion|added global fine samples|Finalize global fine publication|Settle deferred global fine publication)/i },
+  { stage: "Fine topology", label: /(?:global fine (?:topology|interface|seed|page|changed|publication|rollback|lifecycle|flags)|dirty and support pages|fine topology candidate|fine seed expansion|added global fine samples|Finalize global fine publication|Settle deferred (?:global fine publication|rejected fine work payload)|sparse fine band|fine-band logical identity)/i },
   { stage: "Power descriptors / topology", label: /(?:power (?:topology|descriptor)|power descriptors)/i },
   { stage: "Power coarse level set", label: /(?:Power coarse level set|power coarse phi|coarse phi from fine-seed)/i },
   { stage: "Structured pressure rows", label: /(?:structured pressure|leaf pressure assembly|projected divergence|prepareStructuredRows)/i },
   { stage: "MGPCG solve", label: /(?:MGPCG|Chebyshev)/i },
+  { stage: "Section 4.3 preconditioner", label: /^Section 4\.3\b/i },
   { stage: "SPGrid V-cycle", label: /^SPGrid V-cycle\b/i },
-  { stage: "Octree topology / frontier", label: /(?:octree reset and refinement|compact topology-tile|topology-tile refinement signatures|wet-frontier tile|persistent octree leaf frontier|dirty-tile frontier|dirty frontier candidates|old\/new frontier merge|octree leaf compaction|analytic octree bootstrap worklist|topology lifecycle membership|Cold octree topology)/i },
+  { stage: "SPGrid accurate A2", label: /^SPGrid accurate A2\b/i },
+  { stage: "SPGrid Section 6.3 apply", label: /^SPGrid Section 6\.3\b/i },
+  { stage: "Octree topology / frontier", label: /(?:octree reset and refinement|compact topology-tile|topology-tile refinement signatures|wet-frontier tile|persistent octree leaf frontier|dirty-tile frontier|dirty frontier candidates|old\/new frontier merge|octree leaf compaction|analytic octree bootstrap worklist|topology lifecycle membership|Cold octree topology|inactive topology epoch|topology ready-commit gate|accepted topology row|topology attempt generation|octree pressure-row candidate)/i },
   { stage: "Structured solid coupling", label: /(?:structured solid|solid pressure reactions|owner-vertex solid SDF)/i },
   { stage: "Sparse octree publication", label: /(?:octree raw voxel records|octree sparse brick records|sparse voxel structural|sparse brick records)/i },
-  { stage: "Diagnostics / overlays", label: /(?:octree overlay|voxel inspection|QA diagnostics|diagnostic fields)/i },
+  { stage: "Diagnostics / overlays", label: /(?:octree overlay|voxel inspection|QA diagnostics|diagnostic fields|octree inspection)/i },
   { stage: "Uniform compatibility transport", label: /^Uniform (?:occupancy and transport preparation|velocity prediction|predicted transport preparation|reverse advection|MacCormack correction|density sharpening|sharpened-mass scatter|sharpened-mass resolve)$/i },
   { stage: "Uniform compatibility solids", label: /^Uniform (?:solid level-set relaxation|rigid-body coupling)$/i },
   // Stable fixture/category labels are part of the report's public test ABI.
@@ -378,10 +402,23 @@ const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRul
   { stage: "Fine redistance / volume", label: /^Fine redistance$/ },
 ];
 
+/** Placeholder the command audit substitutes for a descriptor-less pass. Every
+ * site that opens one today is inside `OctreePipelinedMGPCG.encode`
+ * (`lib/webgpu-octree-pipelined-mgpcg.ts`: the `broker.compute()` after the
+ * live-dispatch fence, after the initial indirect-tail fence, and after each
+ * iteration's convergence-tail fence). `PassBroker.compute` drops a descriptor
+ * when a pass is already open, so only those post-fence calls actually open an
+ * unlabeled pass. Bucketed as its own stage rather than folded into "MGPCG
+ * solve": if any other module ever opens an unlabeled pass the count still
+ * shows up here instead of silently inflating the solve. Delete this stage
+ * once those three calls carry labels. */
+const POWER_DAM_UNLABELED_PASS_STAGE = "MGPCG solve · unlabeled broker pass";
+
 /** Resolve a raw descriptor label to its registered owning stage. */
 export function powerDamComputePassStage(label: string): string | undefined {
   const value = label.trim();
-  if (!value || value === "<unlabeled compute pass>") return undefined;
+  if (!value) return undefined;
+  if (value === "<unlabeled compute pass>") return POWER_DAM_UNLABELED_PASS_STAGE;
   if (/owner[- ]page/i.test(value)) return "Octree owner pages";
   if (/^Propagate global fine summaries level \d+$/i.test(value)) {
     return "Fine summaries · propagate hierarchy";
@@ -389,6 +426,32 @@ export function powerDamComputePassStage(label: string): string | undefined {
   const spgridLevel = /^(SPGrid V-cycle\s*·\s*.+?)\s*·\s*level \d+$/i.exec(value);
   if (spgridLevel) return spgridLevel[1];
   return POWER_DAM_COMPUTE_PASS_OWNERSHIP.find((rule) => rule.label.test(value))?.stage;
+}
+
+/** Owning stages that together are the pressure solve: the pipelined MGPCG
+ * driver, its Section 4.3 hybrid preconditioner shell, and the SPGrid V-cycle /
+ * accurate-A2 / Section 6.3 operator applies those drive. Keyed on the resolved
+ * stage so the ownership table above stays the single label registry — the old
+ * key ("Octree MGPCG solve") had not been emitted for several refactors and
+ * silently reported a 0.0 solve while the solve owned most of the frame. */
+const POWER_DAM_MGPCG_SOLVE_STAGE =
+  /^(?:MGPCG solve|Section 4\.3 preconditioner|SPGrid (?:V-cycle|accurate A2|Section 6\.3 apply))\b/;
+
+/** True when a resolved owning stage belongs to the pressure solve. */
+export function powerDamIsMgpcgSolveStage(stage: string): boolean {
+  return POWER_DAM_MGPCG_SOLVE_STAGE.test(stage);
+}
+
+/** Dispatches recorded inside compute passes owned by the pressure solve. */
+function mgpcgSolveDispatches(
+  labels: Readonly<Record<string, PowerDamCommandBucket>> | undefined,
+): number {
+  let calls = 0;
+  for (const [label, bucket] of Object.entries(labels ?? {})) {
+    const stage = powerDamComputePassStage(label);
+    if (stage !== undefined && powerDamIsMgpcgSolveStage(stage)) calls += bucket.calls;
+  }
+  return calls;
 }
 
 function normalizedPassCounts(
@@ -428,8 +491,7 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
   }
   const audit = result.gpuCommandAudit;
   const dispatches = audit?.dispatches ?? 0;
-  const mgpcgDispatches = (audit?.dispatchesByPassLabel?.["Octree MGPCG solve"]?.calls ?? 0)
-    + (audit?.dispatchesByPassLabel?.["SPGrid persistent small-domain MGPCG"]?.calls ?? 0);
+  const mgpcgDispatches = mgpcgSolveDispatches(audit?.dispatchesByPassLabel);
   const trace = result.physicsTrace;
   const phaseTotals_ms: Partial<Record<PaperPhaseId, number>> = {};
   for (const phase of trace?.phases ?? []) {

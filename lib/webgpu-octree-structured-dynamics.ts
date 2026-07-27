@@ -27,6 +27,48 @@ const FAMILY_CLASSES = [5, 6, 7, 8] as const;
 export const STRUCTURED_VELOCITY_EXTENSION_LAYERS = 6;
 export const STRUCTURED_PROJECTION_ENERGY_WORDS = 32;
 
+/**
+ * Whether the four-stage kinetic-energy probe is encoded this run.
+ *
+ * The probe is a diagnostic but it is NOT write-only, so it cannot simply be
+ * deleted or gated on `FLUID_ALGORITHM_DIAGNOSTICS` alone. `run-webgpu-smoke`
+ * promotes an invalid or generation-incoherent energy record into a hard
+ * `generationFailures` entry ("structured projection energy is invalid or
+ * generation-incoherent") for every captured audit snapshot, and it captures
+ * those snapshots whenever `FLUID_POWER_GENERATION_AUDIT=1` or
+ * `FLUID_STABILITY_ENVELOPE=1`. The 500-step acceptance lane
+ * (`test:webgpu:minimal-power-dam-break`) sets both, with
+ * `FLUID_POWER_AUDIT_EVERY_STEPS=1`, so the probe must stay on for every step
+ * there. `FLUID_ENERGY_EVERY_STEPS>0` additionally logs the four stage
+ * energies through `readStats`.
+ *
+ * The throughput lanes read none of it: `tools/benchmark-power-dam.ts` sets
+ * `FLUID_ALGORITHM_DIAGNOSTICS=0` and `FLUID_STABILITY_ENVELOPE=0` unless
+ * `--algorithm-diagnostics` / `--artifact` is given, and never sets
+ * `FLUID_POWER_GENERATION_AUDIT`. There the four `@workgroup_size(128)`
+ * summarizers -- each dispatched as a fixed one-workgroup grid that sweeps the
+ * entire class 5-8 face workset, the stage-1 one also running a full
+ * `staggeredSample` per wet face -- are pure cost.
+ *
+ * When the probe is off, `projectionEnergyStats` keeps its zero-initialized
+ * (or stale) contents and `decodeStructuredProjectionEnergy` fails closed on
+ * `epoch === 0`, so no host ever observes a fabricated zero-energy sample.
+ * `FLUID_STRUCTURED_ENERGY_PROBE=1|0` forces the decision either way.
+ */
+export function structuredProjectionEnergyProbeEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const forced = resolved?.FLUID_STRUCTURED_ENERGY_PROBE;
+  if (forced === "1") return true;
+  if (forced === "0") return false;
+  return octreeAlgorithmDiagnosticsEnabled(resolved)
+    || resolved?.FLUID_STABILITY_ENVELOPE === "1"
+    || resolved?.FLUID_POWER_GENERATION_AUDIT === "1"
+    || Number(resolved?.FLUID_ENERGY_EVERY_STEPS ?? 0) > 0;
+}
+
 export interface StructuredProjectionEnergySample {
   readonly epoch: number;
   readonly activeBank: 0 | 1;
@@ -40,7 +82,14 @@ export interface StructuredProjectionEnergySample {
   readonly wetPreProjectionKineticEnergyProxy: number;
   readonly wetPostProjectionKineticEnergyProxy: number;
   readonly wetFaceCount: number;
-  readonly transitionPathCount: number;
+  /** Wet energies re-weighted by the face liquid fraction theta (1/pressure
+   * scale): the variational face mass, the closest face-based analogue of the
+   * physical rho/2 integral |u|^2 over liquid. The unweighted proxies above
+   * charge a barely-wet surface face its full dual volume. */
+  readonly wetStartThetaEnergyProxy: number;
+  readonly wetPostAdvectionThetaEnergyProxy: number;
+  readonly wetPreProjectionThetaEnergyProxy: number;
+  readonly wetPostProjectionThetaEnergyProxy: number;
   readonly staggeredPathCount: number;
   readonly projectionEnergyRatio: number;
 }
@@ -66,7 +115,7 @@ export function decodeStructuredProjectionEnergy(
     energyBits: Number(words[8 * stage + 3]) >>> 0,
     wetCount: Number(words[8 * stage + 4]) >>> 0,
     wetEnergyBits: Number(words[8 * stage + 5]) >>> 0,
-    transitionPathCount: Number(words[8 * stage + 6]) >>> 0,
+    wetThetaEnergyBits: Number(words[8 * stage + 6]) >>> 0,
     staggeredPathCount: Number(words[8 * stage + 7]) >>> 0,
   }));
   const failed = stages.find((stage) => stage.flags !== 0);
@@ -82,26 +131,30 @@ export function decodeStructuredProjectionEnergy(
     return Object.freeze({ sample: null,
       blocker: "structured projection-energy stages have incomplete family coverage" });
   }
-  const bits = new Uint32Array(stages.flatMap((stage) => [stage.energyBits, stage.wetEnergyBits]));
+  const bits = new Uint32Array(stages.flatMap((stage) =>
+    [stage.energyBits, stage.wetEnergyBits, stage.wetThetaEnergyBits]));
   const energy = new Float32Array(bits.buffer);
   if (Array.from(energy).some((value) => !Number.isFinite(value) || value < 0)) {
     return Object.freeze({ sample: null,
       blocker: "structured projection-energy stages contain invalid energy" });
   }
-  const pre = energy[4]!;
-  const post = energy[6]!;
+  const pre = energy[6]!;
+  const post = energy[9]!;
   return Object.freeze({ sample: Object.freeze({
     epoch, activeBank: activeBank as 0 | 1, familySampleCount: stages[0]!.count,
     startKineticEnergyProxy: energy[0]!,
-    postAdvectionKineticEnergyProxy: energy[2]!,
+    postAdvectionKineticEnergyProxy: energy[3]!,
     preProjectionKineticEnergyProxy: pre,
     postProjectionKineticEnergyProxy: post,
     wetStartKineticEnergyProxy: energy[1]!,
-    wetPostAdvectionKineticEnergyProxy: energy[3]!,
-    wetPreProjectionKineticEnergyProxy: energy[5]!,
-    wetPostProjectionKineticEnergyProxy: energy[7]!,
+    wetPostAdvectionKineticEnergyProxy: energy[4]!,
+    wetPreProjectionKineticEnergyProxy: energy[7]!,
+    wetPostProjectionKineticEnergyProxy: energy[10]!,
+    wetStartThetaEnergyProxy: energy[2]!,
+    wetPostAdvectionThetaEnergyProxy: energy[5]!,
+    wetPreProjectionThetaEnergyProxy: energy[8]!,
+    wetPostProjectionThetaEnergyProxy: energy[11]!,
     wetFaceCount: stages[1]!.wetCount,
-    transitionPathCount: stages[1]!.transitionPathCount,
     staggeredPathCount: stages[1]!.staggeredPathCount,
     projectionEnergyRatio: pre === 0 ? 1 : post / pre,
   }), blocker: null });
@@ -176,6 +229,8 @@ export class WebGPUStructuredVelocityDynamics {
   private readonly summarizePostAdvectionEnergy: GPUComputePipeline;
   private readonly groups = new WeakMap<GPUComputePipeline,
     WeakMap<GPUBuffer, WeakMap<GPUBuffer, GPUBindGroup>>>();
+  /** Encode the four energy summarizers only when a host actually reads them. */
+  private readonly projectionEnergyProbe = structuredProjectionEnergyProbeEnabled();
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly resources: StructuredDynamicsResources) {
@@ -328,6 +383,11 @@ export class WebGPUStructuredVelocityDynamics {
 
   private encodeProjectionEnergy(broker: PassBroker, params: GPUBuffer,
     phase: "start" | "advected" | "pre" | "post"): void {
+    // Diagnostic-only work, but consumed by a hard smoke gate whenever the
+    // audit/stability-envelope lanes ask for it -- see
+    // `structuredProjectionEnergyProbeEnabled`. The four call sites keep their
+    // exact substep positions so the stage ordering stays authored here.
+    if (!this.projectionEnergyProbe) return;
     const pipeline = { start: this.summarizeStartEnergy,
       advected: this.summarizePostAdvectionEnergy,
       pre: this.summarizePreProjectionEnergy,
@@ -492,7 +552,21 @@ fn rejectVector(stage:u32,index:u32,detail:vec4f,cls:u32){
     atomicStore(&accepted[10],cls);
   }
 }
-fn bank()->u32{return acc(4u)&1u;}
+// The active authority bank, resolved once per invocation.
+//
+// The ONLY writes to the accepted control anywhere in this module are
+// rejectSample and rejectVector, which target indices 0, 1 and 6..10 -- see the
+// two functions directly above. Indices 2 (pressure-row count), 3 (generation),
+// 4 (active bank) and 5 (family handle count) are republished between
+// dispatches, behind a fence, and are read-only for the whole lifetime of an
+// invocation. The compiler cannot hoist this itself because accepted is an
+// atomic read_write binding, so every acc() had to be re-issued as a
+// device-scope atomic load: bank() alone was recomputed inside every
+// abase()/rbase()/lbase()/sbase()/wbase() -- about seven per slot in
+// divergenceRow and one per binary-search step in acceptedDirectoryFind.
+var<private> bankWord:u32;
+var<private> bankResolved:bool;
+fn bank()->u32{if(!bankResolved){bankWord=acc(4u)&1u;bankResolved=true;}return bankWord;}
 fn abase()->u32{return bank()*p.authorityWords;}
 fn rbase()->u32{return bank()*p.rowCapacity;}
 fn lbase()->u32{return bank()*p.rowCapacity;}
@@ -509,7 +583,21 @@ fn inverseTransform(v:vec3f,code:u32)->vec3f{let q=v*signs(code);let k=(code/8u)
 fn powerTransform(v:vec3f,code:u32)->vec3f{let k=(code/8u)%6u;var q=v;if(k==1u){q=v.xzy;}else if(k==2u){q=v.yxz;}else if(k==3u){q=v.yzx;}else if(k==4u){q=v.zxy;}else if(k==5u){q=v.zyx;}return q*signs(code);}
 fn caseHeader(caseId:u32)->vec2u{let at=p.denseOffset+p.templateHeaderOffset+4u*caseId;return vec2u(catalog[at],catalog[at+1u]);}
 fn geom(global:u32)->SlotGeometry{let at=p.slotGeometryOffset+12u*global;return SlotGeometry(vec4f(bitsf(at),bitsf(at+1u),bitsf(at+2u),bitsf(at+3u)),vec4f(bitsf(at+4u),bitsf(at+5u),bitsf(at+6u),bitsf(at+7u)),vec4f(bitsf(at+8u),bitsf(at+9u),bitsf(at+10u),bitsf(at+11u)));}
-fn boundaryValid()->bool{return arrayLength(&boundaryControl)>=7u&&boundaryControl[0]==0u&&boundaryControl[2]==acc(2u)&&boundaryControl[4]==acc(3u)&&boundaryControl[5]==bank()&&boundaryControl[6]==acc(3u);}
+// boundaryControl is a read-only binding and the accepted words this reads
+// (2, 3, 4) are never written here, so the publication header is settled for
+// the whole invocation. It was being re-derived from five storage loads plus
+// four device atomics on every sample tap, because supportPublicationValid
+// calls it and taggedVelocity calls that first -- 8x per cellSample and up to
+// 48x per staggeredSample.
+var<private> boundaryValidWord:bool;
+var<private> boundaryValidResolved:bool;
+fn boundaryValid()->bool{
+  if(!boundaryValidResolved){
+    boundaryValidWord=arrayLength(&boundaryControl)>=7u&&boundaryControl[0]==0u&&boundaryControl[2]==acc(2u)&&boundaryControl[4]==acc(3u)&&boundaryControl[5]==bank()&&boundaryControl[6]==acc(3u);
+    boundaryValidResolved=true;
+  }
+  return boundaryValidWord;
+}
 fn workItem(cls:u32,index:u32)->u32{let base=wbase(cls);if(!boundaryValid()||worksets[base]!=acc(3u)||index>=worksets[base+1u]){return INVALID;}return worksets[base+7u+index];}
 
 @compute @workgroup_size(1)
@@ -548,18 +636,36 @@ fn supportWord(word:u32)->u32{
   return bitcast<vec4u>(transportMetrics[word/4u])[word&3u];
 }
 fn supportCount()->u32{return supportWord(p.supportControlOffsetWords+6u);}
+// Fifteen supportWord loads plus boundaryValid(), previously re-evaluated on
+// every single sample tap. The sixteen control words it reads live at
+// p.supportControlOffsetWords, which the air-support arena places AFTER the
+// whole slotCapacity*16-byte transport-metric region (planOctreeAirVelocity-
+// Support sets selectorTagOffsetBytes = transportMetricBytes and puts the
+// control block after the selector and regular tag regions). The only writes
+// this module makes to transportMetrics are transportMetrics[handle] for
+// handle < acc(5u) <= slotCapacity, strictly inside that first region -- the
+// same disjointness the existing code already relies on, or advection would
+// corrupt the support header it validates. So the publication header is
+// invariant for the whole invocation.
+var<private> supportValidWord:bool;
+var<private> supportValidResolved:bool;
 fn supportPublicationValid()->bool{
+  if(supportValidResolved){return supportValidWord;}
   let base=p.supportControlOffsetWords;
-  if(base+16u>4u*arrayLength(&transportMetrics)||!boundaryValid()){return false;}
-  let count=supportWord(base+6u);let capacity=supportWord(base+7u);
-  let faces=supportWord(base+10u);let seeds=supportWord(base+11u);
-  return supportWord(base)==0u&&supportWord(base+1u)==INVALID
-    &&supportWord(base+2u)==acc(3u)&&supportWord(base+3u)==bank()
-    &&supportWord(base+4u)==boundaryControl[4u]&&supportWord(base+5u)==acc(2u)
-    &&capacity==p.supportCapacity&&count<=capacity
-    &&supportWord(base+13u)==SUPPORT_VALID
-    &&supportWord(base+14u)==SUPPORT_LAYOUT_VERSION
-    &&seeds<=faces&&(count==0u||(supportWord(base+8u)>0u&&faces>0u&&seeds>0u));
+  var valid=false;
+  if(base+16u<=4u*arrayLength(&transportMetrics)&&boundaryValid()){
+    let count=supportWord(base+6u);let capacity=supportWord(base+7u);
+    let faces=supportWord(base+10u);let seeds=supportWord(base+11u);
+    valid=supportWord(base)==0u&&supportWord(base+1u)==INVALID
+      &&supportWord(base+2u)==acc(3u)&&supportWord(base+3u)==bank()
+      &&supportWord(base+4u)==boundaryControl[4u]&&supportWord(base+5u)==acc(2u)
+      &&capacity==p.supportCapacity&&count<=capacity
+      &&supportWord(base+13u)==SUPPORT_VALID
+      &&supportWord(base+14u)==SUPPORT_LAYOUT_VERSION
+      &&seeds<=faces&&(count==0u||(supportWord(base+8u)>0u&&faces>0u&&seeds>0u));
+  }
+  supportValidWord=valid;supportValidResolved=true;
+  return valid;
 }
 fn taggedVelocity(tag:u32)->vec4f{
   if(tag==INVALID||!supportPublicationValid()){return invalidVector();}
@@ -893,9 +999,41 @@ fn acceptedDirectoryFind(cell:u32,size:u32)->u32{
   if(low<acc(2u)){let entry=rowGeometry[rbase()+low];if(entry.x==cell&&entry.y==size){return low;}}
   return INVALID;
 }
+// Single-entry memoization of the leaf walk. This is a PURE memoization: it
+// must return the identical row id, never a cheaper predicate.
+//
+// The walk is a function of the finest cell containing the clamped point and
+// of nothing else -- every level keys on floor(grid/size)*size, which is
+// constant across a finest cell for every size, so two points in the same
+// finest cell issue the identical (cell,size) probe sequence and reach the
+// identical answer. Caching the FOUND row's own box therefore also answers
+// every point inside it: a hit at (origin,size) can only differ from a fresh
+// walk if some accepted row lay strictly inside that one, and accepted rows are
+// octree leaves, hence disjoint -- this function's contract is "the accepted
+// leaf containing a physical point". A miss caches only the single finest cell
+// it was proven for.
+//
+// Nothing can invalidate the entry mid-invocation: rowGeometry is a read-only
+// binding and the accepted row count that bounds the directory is never
+// written here.
+//
+// The caller that pays for this is rowTouchesDry -- advect runs it for both
+// incident rows, up to twelve walks per face, purely to decide the carry gate
+// -- followed by characteristicSample's midpoint/departure pair and oldAnchor's
+// bounded 5^3 neighbourhood sweep. The carry, carriedMarker and wall-row
+// eligibility SEMANTICS are untouched; only the cost of reaching the same
+// answer changes.
+var<private> containedResolved:bool;
+var<private> containedOrigin:vec3u;
+var<private> containedSize:u32;
+var<private> containedRow:u32;
 fn acceptedRowContaining(point:vec3f)->u32{
-  if(!finite3(point)){return INVALID;}let d=dimensions();let upper=max(vec3f(d)-vec3f(1e-4),vec3f(0.));let grid=clamp(point/p.physical.x,vec3f(0.),upper);let maximum=max(d.x,max(d.y,d.z));var size=1u;
-  for(var level=0u;level<31u;level+=1u){if(size>maximum){break;}let origin=vec3u(floor(grid/f32(size)))*size;let cell=origin.x+d.x*(origin.y+d.y*origin.z);let row=acceptedDirectoryFind(cell,size);if(row!=INVALID){return row;}size<<=1u;}
+  if(!finite3(point)){return INVALID;}let d=dimensions();let upper=max(vec3f(d)-vec3f(1e-4),vec3f(0.));let grid=clamp(point/p.physical.x,vec3f(0.),upper);
+  let finest=vec3u(floor(grid));
+  if(containedResolved&&all(finest>=containedOrigin)&&all(finest<containedOrigin+vec3u(containedSize))){return containedRow;}
+  let maximum=max(d.x,max(d.y,d.z));var size=1u;
+  for(var level=0u;level<31u;level+=1u){if(size>maximum){break;}let origin=vec3u(floor(grid/f32(size)))*size;let cell=origin.x+d.x*(origin.y+d.y*origin.z);let row=acceptedDirectoryFind(cell,size);if(row!=INVALID){containedResolved=true;containedOrigin=origin;containedSize=size;containedRow=row;return row;}size<<=1u;}
+  containedResolved=true;containedOrigin=finest;containedSize=1u;containedRow=INVALID;
   return INVALID;
 }
 fn candidateRowCenter(candidateBank:u32,row:u32)->vec3f{
@@ -943,14 +1081,25 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
   if(!finite3(point)||!finite3(n)){_ = rejectCandidateTransfer(handle);return;}
   if(candidateClosedWorld(point,n)){a[base+p.valuesOffset+handle]=bitcast<u32>(0.);return;}
   let candidateOwner=a[base+p.ownerOffset+handle];let candidateNeighbor=a[base+p.neighborOffset+handle];
-  let ownerAnchor=oldAnchor(candidateBank,candidateOwner,n);let ownerField=oldFieldAt(ownerAnchor,point);var neighborAnchor=INVALID;var neighborField=invalidVector();
-  if(candidateNeighbor!=INVALID){neighborAnchor=oldAnchor(candidateBank,candidateNeighbor,-n);if(neighborAnchor!=ownerAnchor){neighborField=oldFieldAt(neighborAnchor,point);}}
-  // Resolve the two-sided ambiguity the way main's sampleOldIncident did:
-  // one interpolated sample through the incident owner-side element, never a
-  // mean of two independent closures — averaging both sides low-passes every
-  // newly created interface face on every topology change.
-  var old=ownerField;if(!vectorValid(ownerField)){old=neighborField;}
-  if(!vectorValid(old)){old=extendedOwnerVelocity(point);}
+  // Paper Section 5 frontier discipline: a face whose owner centre lies
+  // beyond the old liquid is newly wetted and takes the extrapolated field —
+  // a COPY of the closest projected face value — never an interpolant
+  // evaluated outside its element (which extends the frontier velocity
+  // gradient one cell and ratchets the corner jet, measured at +45% ME).
+  let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;
+  var old=invalidVector();
+  if(!ownerInsideOld){old=extendedOwnerVelocity(point);}
+  var ownerAnchor=INVALID;var neighborAnchor=INVALID;
+  if(!vectorValid(old)){
+    ownerAnchor=oldAnchor(candidateBank,candidateOwner,n);let ownerField=oldFieldAt(ownerAnchor,point);var neighborField=invalidVector();
+    if(candidateNeighbor!=INVALID){neighborAnchor=oldAnchor(candidateBank,candidateNeighbor,-n);if(neighborAnchor!=ownerAnchor){neighborField=oldFieldAt(neighborAnchor,point);}}
+    // Resolve the two-sided ambiguity the way main's sampleOldIncident did:
+    // one interpolated sample through the incident owner-side element, never a
+    // mean of two independent closures — averaging both sides low-passes every
+    // newly created interface face on every topology change.
+    old=ownerField;if(!vectorValid(ownerField)){old=neighborField;}
+    if(!vectorValid(old)){old=extendedOwnerVelocity(point);}
+  }
   if(!vectorValid(old)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=dot(old.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);
 }
 
@@ -1105,15 +1254,15 @@ var<workgroup> projectionEnergyCount:array<u32,128>;
 var<workgroup> projectionEnergyInvalid:array<u32,128>;
 var<workgroup> projectionEnergyWetPartial:array<f32,128>;
 var<workgroup> projectionEnergyWetCount:array<u32,128>;
-var<workgroup> projectionEnergyTransitionPath:array<u32,128>;
+var<workgroup> projectionEnergyWetTheta:array<f32,128>;
 var<workgroup> projectionEnergyStaggeredPath:array<u32,128>;
 fn summarizeProjectionEnergy(lane:u32,stage:u32){
   var energy=0.;
   var wetEnergy=0.;
+  var wetThetaEnergy=0.;
   var count=0u;
   var wetCount=0u;
   var invalid=0u;
-  var transitionPathCount=0u;
   var staggeredPathCount=0u;
   if(acc(0u)!=0u||acc(3u)==0u||!boundaryValid()){invalid=1u;}
   for(var cls=5u;cls<9u;cls+=1u){
@@ -1141,12 +1290,18 @@ fn summarizeProjectionEnergy(lane:u32,stage:u32){
       if(lo<acc(2u)&&(liquidAt(lo)!=0u||(hi!=INVALID&&hi<acc(2u)&&liquidAt(hi)!=0u))){
         wetEnergy+=contribution;
         wetCount+=1u;
+        // Physical-norm attribution: weight the face by its liquid fraction
+        // theta (the GFM pressure scale is 1/theta; interior faces carry
+        // scale 1). The unweighted proxy charges a barely-wet surface face
+        // its full dual volume, which hid where mechanical energy actually
+        // enters during the dam wall impact.
+        let scale=bitcast<f32>(a[abase()+p.pressureScaleOffset+handle]);
+        if(finite(scale)&&scale>=1.){wetThetaEnergy+=contribution/scale;}
+        else{wetThetaEnergy+=contribution;}
         // Stage 1 also takes a sampler-path census at the face centroid:
         // which basis would this face's advection have used?
-        if(stage==1u&&lo<acc(2u)){
-          if(regularTag(lo,vec3i(0))!=lo){transitionPathCount+=1u;}
-          else if(vectorValid(staggeredSample(lo,centroid(handle)))){staggeredPathCount+=1u;}
-        }
+        if(stage==1u&&lo<acc(2u)&&regularTag(lo,vec3i(0))==lo
+          &&vectorValid(staggeredSample(lo,centroid(handle)))){staggeredPathCount+=1u;}
       }
     }
   }
@@ -1155,7 +1310,7 @@ fn summarizeProjectionEnergy(lane:u32,stage:u32){
   projectionEnergyInvalid[lane]=invalid;
   projectionEnergyWetPartial[lane]=wetEnergy;
   projectionEnergyWetCount[lane]=wetCount;
-  projectionEnergyTransitionPath[lane]=transitionPathCount;
+  projectionEnergyWetTheta[lane]=wetThetaEnergy;
   projectionEnergyStaggeredPath[lane]=staggeredPathCount;
   workgroupBarrier();
   for(var width=64u;width>0u;width>>=1u){
@@ -1165,7 +1320,7 @@ fn summarizeProjectionEnergy(lane:u32,stage:u32){
       projectionEnergyInvalid[lane]|=projectionEnergyInvalid[lane+width];
       projectionEnergyWetPartial[lane]+=projectionEnergyWetPartial[lane+width];
       projectionEnergyWetCount[lane]+=projectionEnergyWetCount[lane+width];
-      projectionEnergyTransitionPath[lane]+=projectionEnergyTransitionPath[lane+width];
+      projectionEnergyWetTheta[lane]+=projectionEnergyWetTheta[lane+width];
       projectionEnergyStaggeredPath[lane]+=projectionEnergyStaggeredPath[lane+width];
     }
     workgroupBarrier();
@@ -1185,7 +1340,7 @@ fn summarizeProjectionEnergy(lane:u32,stage:u32){
     projectionEnergyStats[base+3u]=bitcast<u32>(projectionEnergyPartial[0]);
     projectionEnergyStats[base+4u]=projectionEnergyWetCount[0];
     projectionEnergyStats[base+5u]=bitcast<u32>(projectionEnergyWetPartial[0]);
-    projectionEnergyStats[base+6u]=projectionEnergyTransitionPath[0];
+    projectionEnergyStats[base+6u]=bitcast<u32>(projectionEnergyWetTheta[0]);
     projectionEnergyStats[base+7u]=projectionEnergyStaggeredPath[0];
   }
 }

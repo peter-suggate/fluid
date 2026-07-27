@@ -3,6 +3,7 @@
 import { useMemo, useState, type CSSProperties } from "react";
 import type {
   ActivityEvidence,
+  ActivityEvent,
   ActivityLane,
   ActivityRow,
   PerformanceActivityCaptureDiagnostics,
@@ -52,6 +53,10 @@ export interface PerformanceActivitySegment {
   activeResourceCount?: number;
   /** Logical resources represented by a coalesced display bin. */
   resourceCount?: number;
+  /** Measured active shader lanes across ballot-bearing heartbeat events. */
+  activeLaneCount?: number;
+  /** Measured logical shader lanes represented by those ballots. */
+  logicalLaneCount?: number;
   label?: string;
   detail?: string;
 }
@@ -183,8 +188,8 @@ const CANONICAL_LANE_META: Readonly<Record<ActivityLane, { label: string; group:
 
 const MATRIX_GROUPS = [
   { kind: "cpu-context", label: "CPU SOFTWARE RESOURCES", group: "cpu" },
+  { kind: "aggregate", label: "TIMED TASK / STAGE ENVELOPES", group: "gpu" },
   { kind: "gpu-logical", label: "GPU LOGICAL WORKGROUP BINS", group: "gpu" },
-  { kind: "aggregate", label: "AGGREGATE FALLBACK", group: "mixed" },
 ] as const satisfies readonly {
   kind: PerformanceActivityResource["matrixKind"];
   label: string;
@@ -322,6 +327,7 @@ export function coalesceGpuLogicalRows(input: {
   rows: readonly ActivityRow[];
   taskById: ReadonlyMap<string, CanonicalTask>;
   relativeTime: (time_ms: number, resourceId: string, clockDomain: string) => number;
+  eventById?: ReadonlyMap<string, ActivityEvent>;
   limit?: number;
   trustIdle?: boolean;
 }): PerformanceActivityResource[] {
@@ -344,9 +350,18 @@ export function coalesceGpuLogicalRows(input: {
     const members = ordered.slice(firstIndex, lastIndex).map(({ row }) => row);
     const sliceCount = members.reduce((maximum, row) => Math.max(maximum, row.slices.length), 0);
     const slots = members.map((row) => row.resource.capacitySlot).filter((slot): slot is number => slot !== undefined);
-    const memberRange = slots.length === members.length
-      ? `slots ${Math.min(...slots)}–${Math.max(...slots)}`
-      : `${members.length} sampled workgroups`;
+    const sampleCounts = members.map((row) => row.resource.sampleCount)
+      .filter((count): count is number => count !== undefined);
+    const dispatchCounts = [...new Set(members.flatMap((row) => row.resource.dispatchWorkgroupCounts ?? []))]
+      .sort((left, right) => left - right);
+    const dispatchRange = dispatchCounts.length === 0 ? undefined
+      : dispatchCounts.length === 1 ? `${dispatchCounts[0]}`
+      : `${dispatchCounts[0]}–${dispatchCounts.at(-1)}`;
+    const memberRange = sampleCounts.length === members.length && dispatchRange
+      ? `${Math.max(...sampleCounts)} / ${dispatchRange} workgroups sampled`
+      : slots.length === members.length
+        ? `strata ${Math.min(...slots) + 1}–${Math.max(...slots) + 1}`
+        : `${members.length} sampled strata`;
     const firstMemberId = members[0]?.resource.id ?? bandIndex.toString();
     const lastMemberId = members.at(-1)?.resource.id ?? bandIndex.toString();
     const segments = Array.from({ length: sliceCount }, (_, sliceIndex): PerformanceActivitySegment => {
@@ -373,6 +388,18 @@ export function coalesceGpuLogicalRows(input: {
         relativeTime(slice.end_ms, row.resource.id, row.resource.clockDomain)));
       const activeResourceCount = active.length;
       const occupancy = activeResourceCount / members.length;
+      const laneObservations = slices.flatMap(({ slice }) => slice.eventIds.flatMap((eventId) => {
+        const metadata = input.eventById?.get(eventId)?.metadata;
+        const activeLaneCount = metadata?.activeLaneCount;
+        const logicalLaneCount = metadata?.logicalLaneCount;
+        return typeof activeLaneCount === "number" && typeof logicalLaneCount === "number"
+          && logicalLaneCount > 0 && activeLaneCount >= 0 && activeLaneCount <= logicalLaneCount
+          ? [{ activeLaneCount, logicalLaneCount }]
+          : [];
+      }));
+      const activeLaneCount = laneObservations.reduce((sum, sample) => sum + sample.activeLaneCount, 0);
+      const logicalLaneCount = laneObservations.reduce((sum, sample) => sum + sample.logicalLaneCount, 0);
+      const sampledLaneUtilization = logicalLaneCount > 0 ? activeLaneCount / logicalLaneCount : undefined;
       const evidence: PerformanceActivityEvidence = activeResourceCount > 0
         ? active.some(({ slice }) => slice.evidence === "reconstructed") ? "reconstructed" : "measured-progress"
         : input.trustIdle && slices.length === members.length && slices.every(({ slice }) => slice.evidence === "idle") ? "idle" : "unknown";
@@ -382,16 +409,19 @@ export function coalesceGpuLogicalRows(input: {
         end_ms: Number.isFinite(end_ms) ? end_ms : sliceIndex + 1,
         evidence,
         color: dominantTask?.color,
-        activeFraction: occupancy,
+        activeFraction: sampledLaneUtilization ?? occupancy,
         activeResourceCount,
         resourceCount: members.length,
+        ...(sampledLaneUtilization !== undefined ? { activeLaneCount, logicalLaneCount } : {}),
         label: dominantTask?.label ?? (evidence === "idle" ? "Measured idle" : evidence === "unknown" ? "Unknown activity" : "Observed GPU progress"),
-        detail: `${activeResourceCount}/${members.length} logical workgroups reported progress · ${(occupancy * 100).toFixed(1)}% observed occupancy · display bin, not a physical execution unit`,
+        detail: sampledLaneUtilization === undefined
+          ? `${activeResourceCount}/${members.length} sampled strata reported progress · ${(occupancy * 100).toFixed(1)}% sample coverage · ${memberRange} · no active-lane ballot · not a physical execution unit`
+          : `${activeLaneCount}/${logicalLaneCount} active shader lanes · ${(sampledLaneUtilization * 100).toFixed(1)}% sampled logical utilization · ${activeResourceCount}/${members.length} strata reported · ${memberRange} · not hardware occupancy`,
       };
     });
     return {
       id: `gpu-logical-bin-${bandIndex}-${firstMemberId}-${lastMemberId}`,
-      label: `Logical WG bin ${String(bandIndex + 1).padStart(2, "0")} · ${memberRange}`,
+      label: `Stratified WG bin ${String(bandIndex + 1).padStart(2, "0")} · ${memberRange}`,
       group: "gpu",
       matrixKind: "gpu-logical",
       sourceResourceCount: members.length,
@@ -453,10 +483,11 @@ function canonicalFrameView(frame: PerformanceActivityFrame): PerformanceActivit
     return [{ id: lane, label: meta.label, group: meta.group, clockOrigin: synchronized ? "frame" : "local", tasks }];
   });
   const logicalRows = frame.rows.filter((row) => row.resource.kind === "gpu-logical-capacity");
+  const eventById = new Map(frame.events.map((event) => [event.id, event]));
   const resources = [
     ...frame.rows.filter((row) => row.resource.kind !== "gpu-logical-capacity")
       .map((row) => canonicalRowResource({ row, taskById, relativeTime, trustIdle })),
-    ...coalesceGpuLogicalRows({ rows: logicalRows, taskById, relativeTime, trustIdle }),
+    ...coalesceGpuLogicalRows({ rows: logicalRows, taskById, relativeTime, eventById, trustIdle }),
   ];
   return {
     duration_ms,
@@ -585,9 +616,10 @@ const cellStyle = (
 ): CSSProperties => ({
   ...geometry(segment.start_ms, segment.end_ms, duration_ms),
   "--activity-cell-color": segment.color ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length],
-  "--activity-cell-opacity": segment.evidence === "measured-progress" && segment.activeFraction === 0
-    ? 0.72
-    : 0.1 + 0.9 * Math.max(0, Math.min(1, segment.activeFraction ?? 1)),
+  // A measured zero-lane ballot is progress evidence but zero sampled logical
+  // utilization; keep it barely visible rather than painting it as busy.
+  "--activity-cell-opacity": 0.06
+    + 0.94 * Math.max(0, Math.min(1, segment.activeFraction ?? 1)),
 } as CSSProperties);
 
 function matrixStats(view: PerformanceActivityView) {
@@ -659,14 +691,27 @@ export function PerformanceActivityGrid({
   );
   const ticks = useMemo(() => performanceActivityTicks(view.duration_ms), [view.duration_ms]);
   const sliceCount = Math.max(1, Math.ceil(view.duration_ms));
-  const detailedResources = view.resources.filter((resource) => resource.matrixKind !== "aggregate");
-  const matrixResources = detailedResources.length > 0 ? detailedResources : view.resources;
+  // The aggregate lane and logical samples answer different questions and
+  // must remain visible together. The envelope is continuous task context
+  // from hardware-timestamped stage boundaries; logical rows are sparse,
+  // stratified shader progress observations. Hiding the envelope when samples
+  // exist makes honest point evidence look like an almost-empty GPU timeline.
+  const matrixResources = view.resources;
   const hasData = matrixResources.length > 0;
   const stats = useMemo(() => matrixStats(view), [view]);
   const ledgers = [cpu, physics, presentation].filter(
     (trace): trace is PerformanceTrace => trace !== undefined,
   );
-  const closedLedgers = ledgers.filter((trace) => performanceTraceAccounting(trace).exact).length;
+  const retainedLedgerResourceIds = new Set(frame?.spans
+    .filter((span) => span.kind === "observation")
+    .map((span) => span.resourceId) ?? []);
+  const retainedLedgerCount = retainedLedgerResourceIds.size;
+  const ledgerCount = ledgers.length > 0 ? ledgers.length : retainedLedgerCount;
+  // Canonical retained frames are produced only after each source trace has
+  // closed; asynchronous shader evidence is merged into that immutable base.
+  const closedLedgers = ledgers.length > 0
+    ? ledgers.filter((trace) => performanceTraceAccounting(trace).exact).length
+    : retainedLedgerCount;
   const queueWallFallback = ledgers.some((trace) => trace.measurementSource === "gpu-queue-wall");
   const selectedCaptureLabel = captureLabel ?? frame?.identity.frameId;
   const resolvedReferenceLabel = referenceLabel ?? referenceFrame?.identity.frameId;
@@ -718,7 +763,7 @@ export function PerformanceActivityGrid({
         ? stats.activeCellRatio === undefined ? "—" : `${(stats.activeCellRatio * 100).toFixed(1)}%`
         : "WITHHELD"}</strong></span>
       <span><small>TASKS OBS / REG</small><strong>{registeredLegendTasks > 0 ? `${observedLegendTasks} / ${registeredLegendTasks}` : stats.taskCount}</strong></span>
-      <span><small>ACCOUNTING LEDGERS</small><strong>{ledgers.length === 0 ? "—" : `${closedLedgers}/${ledgers.length} CLOSED`}</strong></span>
+      <span><small>ACCOUNTING LEDGERS</small><strong>{ledgerCount === 0 ? "—" : `${closedLedgers}/${ledgerCount} CLOSED`}</strong></span>
     </div>
     {(captureOptions.length > 0 || referenceView) && <div className="activity-matrix-capture" aria-label="Retained performance captures">
       <label>
@@ -740,10 +785,15 @@ export function PerformanceActivityGrid({
         </output>{onClearReference && <button type="button" onClick={onClearReference} aria-label="Clear reference capture">×</button>}</> : onSetReference && <button className="activity-set-reference" type="button" onClick={onSetReference}>SET REFERENCE</button>}
       </div>}
     </div>}
-    {taskLegend.length > 0 && <section className="activity-task-legend" aria-label="Dynamically registered task and stage legend">
+    <section
+      className="activity-task-legend"
+      data-empty={taskLegend.length === 0}
+      aria-label="Dynamically registered task and stage legend"
+    >
       <header><span>TASK / STAGE LEGEND</span><small>{observedLegendTasks} OBSERVED · {registeredLegendTasks} REGISTERED</small></header>
       <div className="activity-task-legend-groups">
-        {taskLegend.map((group) => <div className="activity-task-legend-group" key={group.id}>
+        {taskLegend.length === 0 ? <div className="activity-task-legend-empty">TASK CATALOG AWAITING CAPTURE</div>
+          : taskLegend.map((group) => <div className="activity-task-legend-group" key={group.id}>
           <strong>{group.label}</strong>
           <div>{group.entries.map((entry) => <span
             data-observed={entry.observed}
@@ -753,7 +803,7 @@ export function PerformanceActivityGrid({
           ><i style={{ background: entry.color }} />{entry.label}</span>)}</div>
         </div>)}
       </div>
-    </section>}
+    </section>
     {!hasData ? <div className="activity-grid-empty">Waiting for a complete measured activity sample.</div> : <>
       <div className="activity-scrollport">
         <div className="activity-timeline" style={{
@@ -768,26 +818,33 @@ export function PerformanceActivityGrid({
             {MATRIX_GROUPS.map(({ kind, label, group }) => {
               const resources = matrixResources.filter((resource) => resource.matrixKind === kind);
               if (resources.length === 0) return null;
+              const hasBallotUtilization = kind === "gpu-logical" && resources.some(
+                (resource) => resource.segments.some((segment) => segment.logicalLaneCount !== undefined),
+              );
               return <div className="activity-resource-group" data-group={group} data-kind={kind} key={kind}>
                 <div className="activity-resource-group-label">
                   <span>{label}</span>
                   <small>{kind === "gpu-logical"
-                    ? `${resources.length} BAND${resources.length === 1 ? "" : "S"} · ${stats.logicalGpuRows} WORKGROUP${stats.logicalGpuRows === 1 ? "" : "S"}`
+                    ? `${resources.length} BAND${resources.length === 1 ? "" : "S"} · ${stats.logicalGpuRows} STRATIFIED SAMPLE${stats.logicalGpuRows === 1 ? "" : "S"} · ${hasBallotUtilization ? "ACTIVE-LANE INTENSITY" : "SAMPLE COVERAGE"}`
+                    : kind === "aggregate"
+                      ? `${resources.length} TIMESTAMPED QUEUE LANE${resources.length === 1 ? "" : "S"}`
                     : `${resources.length} ROW${resources.length === 1 ? "" : "S"}`}</small>
                 </div>
                 {resources.map((resource, resourceIndex) => <div className="activity-resource-row" key={resource.id} data-group={resource.group}>
                   <div className="activity-resource-label"><b>{String(resourceIndex).padStart(2, "0")}</b><span>{resource.label}</span><small>{formatMs(Math.max(0, ...resource.segments.map((segment) => segment.end_ms)))}</small></div>
                   <div className="activity-plot activity-resource-plot">
                     <GridLines duration_ms={view.duration_ms} ticks={ticks} />
-                    {resource.segments.map((segment, index) => <span
+                    {resource.segments.flatMap((segment, index) => segment.evidence === "unknown" ? [] : [<span
                       className="activity-cell"
                       data-evidence={segment.evidence}
                       data-active-resources={segment.activeResourceCount}
                       data-resource-count={segment.resourceCount}
+                      data-active-lanes={segment.activeLaneCount}
+                      data-logical-lanes={segment.logicalLaneCount}
                       key={`${segment.start_ms}-${segment.end_ms}-${index}`}
                       style={cellStyle(segment, index, view.duration_ms)}
                       title={`${segment.label ?? segment.evidence} · ${formatMs(segment.end_ms - segment.start_ms)} · ${segment.detail ?? segment.evidence}`}
-                    />)}
+                    />])}
                   </div>
                 </div>)}
               </div>;

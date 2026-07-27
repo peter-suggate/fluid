@@ -20,13 +20,17 @@ interface PerformanceInstrumentationStore {
  * and presentation completion tracking are intentionally outside this switch.
  */
 export const usePerformanceInstrumentationStore = create<PerformanceInstrumentationStore>((set) => ({
-  // Detailed profiling is the product default. Users can explicitly select
-  // timeline-only or off when they need an uninstrumented throughput run.
-  mode: "activity",
-  enabled: true,
-  shaderActivityEnabled: true,
+  // Uninstrumented is the product default (POWER_LIQUIDS_ULTIMATE_M1MAX P0.1).
+  // "activity" compiles per-workgroup atomics into every MGPCG entry point and
+  // rewrites each entry point's returns, so leaving it on by default charged
+  // the browser product for measurement it had not asked for. Users opt in
+  // through the performance panel; the Dawn harness opts in through
+  // FLUID_PERFORMANCE_TRACES.
+  mode: "off",
+  enabled: false,
+  shaderActivityEnabled: false,
   shaderGeneration: 1,
-  enabledAt_ms: performance.now(),
+  enabledAt_ms: Infinity,
   setMode: (mode) => set((state) => {
     if (mode === state.mode) return state;
     const enabled = mode !== "off";

@@ -4,12 +4,14 @@
   "driverContract": [
     "A driver requests whole advances only; stage selection, ordering, and substepping belong to the solver.",
     "One advance encodes exactly one command buffer and one queue.submit; drivers never split or merge steps.",
-    "Drivers may choose only WHEN to request an advance and how many advances are in flight; both are forbidden from affecting stage order or step content.",
+    "Drivers may choose only WHEN to request an advance and how many advances are in flight; both are forbidden from affecting the VALUES the physics reads.",
+    "Launch-shape carve-out (P0.5): a driver may delete an encode it can prove does zero work, declared as a conductor-conditional stage whose predicate the driver records per step. It may never delete a live encode, and every predicate must be conservative under staleness (a stale read encodes more, never less).",
     "dt policy: the target clock advances in whole fixed steps (controller collapse / harness checkpoint), so every advance sees dt = maxDt exactly.",
     "Diagnostics consume the end-of-step snapshot record (step-snapshot stage); no consumer may race live solver buffers with an independent readback encoder.",
     "No host scheduling decision inside the step may depend on a GPU readback (hostSchedulingUsesReadback = false).",
     "Performance instrumentation must be sequence-neutral: traced and untraced advances submit the same command graph, and scheduling inputs must exist identically whether instrumentation is on or off."
   ],
+  "predicates": [],
   "stages": [
     {
       "id": "ready-topology-flip",
@@ -110,14 +112,18 @@
     },
     {
       "id": "step-snapshot",
-      "label": "Copy the accepted structured/boundary controls, fine worklist header, and stats words into the step-coherent snapshot ring (the only sanctioned diagnostics source)",
+      "label": "Copy the accepted structured/boundary controls, fine worklist header, stats words, topology-epoch state, SPGrid per-level setup delta, air-support failure words, and fine-transport governor schedule into the step-coherent snapshot ring (the only sanctioned diagnostics source)",
       "phase": "other",
       "reads": [
         "accepted-structured-velocity",
         "accepted-boundary-controls",
         "fine-generation",
         "solve-stats",
-        "projection-energy-stats"
+        "projection-energy-stats",
+        "accepted-epoch",
+        "candidate-epoch",
+        "air-support",
+        "fine-level-set"
       ],
       "carriedReads": [],
       "writes": [

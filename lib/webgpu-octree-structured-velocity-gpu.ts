@@ -10,7 +10,6 @@ import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { PassBroker } from "./webgpu-pass-broker";
 import {
   createGPULogicalActivityAdoptionContext,
-  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
@@ -334,14 +333,17 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 9, resource: resource(this.candidateControl) },
     ]));
     pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 0);
-    // NOTE: WebGPU already orders dispatches inside one pass, so on paper these
-    // authority/control hand-offs need no boundary and only the storage-write
-    // -> indirect-read of `liveRowDispatch` in `begin`/`finalize` does.
-    // Collapsing them measured under 1 ms on a 96 ms frame and coincided with
-    // an authoritative resolved-row publication being rejected in-app, so the
-    // fences stay until that is understood. Launch structure is not this
-    // frame's cost -- see docs/OCTREE_PHASE0_BASELINE.md.
-    broker.fence("structured catalog slots classified");
+    // No fence: `classify` -> `prefix` -> `scatter` hand off only `authority`
+    // (binding 8) and `candidateControl` (binding 9). Both are bound at the
+    // same binding index to the same buffer in all three bind groups, neither
+    // is ever read as indirect arguments, and WebGPU orders dispatches within
+    // one pass. `liveRowDispatch` -- the sole indirect source here -- is bound
+    // (binding 25) only by `begin` and `finalize`, so nothing between them
+    // feeds an indirect read. The previous note kept these two fences after a
+    // collapse attempt "coincided with" an in-app publication rejection; that
+    // was a coincidence, and the attempt measured under 1 ms on a 96 ms frame.
+    // The `scatter` -> `section63` fence stays so the Section 6.3 publication
+    // keeps its own pass label (PassBroker drops labels on an open pass).
     pass = broker.compute({ label: "Prefix six structured velocity families" });
     pass.setPipeline(this.prefixPipeline);
     pass.setBindGroup(0, this.group(this.prefixPipeline, [
@@ -350,7 +352,6 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 9, resource: resource(this.candidateControl) },
     ]));
     pass.dispatchWorkgroups(1);
-    broker.fence("structured family prefix published");
     pass = broker.compute({ label: "Scatter direct structured velocity slots" });
     pass.setPipeline(this.scatterPipeline);
     pass.setBindGroup(0, this.group(this.scatterPipeline, [
@@ -642,15 +643,15 @@ export function directStructuredVelocityPublicationActivityShader(
 ): string {
   const entry = activity.workgroup("classify-structured-catalog-slots", "enter", {
     workgroupId: "activityWorkgroupId",
+    numWorkgroups: "activityNumWorkgroups",
     localInvocationIndex: "activityLocalInvocationIndex",
     workgroupLaneCount: 64,
-    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
   });
   const exit = activity.workgroup("classify-structured-catalog-slots", "exit", {
     workgroupId: "activityWorkgroupId",
+    numWorkgroups: "activityNumWorkgroups",
     localInvocationIndex: "activityLocalInvocationIndex",
     workgroupLaneCount: 64,
-    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
   });
   if (!entry && !exit) return directStructuredVelocityPublicationWGSL;
   const signature = "fn classifyStructuredCatalogSlots(@builtin(global_invocation_id)g:vec3u)";

@@ -16,7 +16,9 @@ export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | n
 
 export const DEFAULT_RIGHT_PANEL_WIDTH = 620;
 export const MIN_RIGHT_PANEL_WIDTH = 300;
-export const MAX_RIGHT_PANEL_WIDTH = 960;
+/** The shell keeps a 360 px viewport floor, so the observatory can claim the
+ *  width the removed left sidebar used to hold on a wide display. */
+export const MAX_RIGHT_PANEL_WIDTH = 1400;
 
 export function normalizeRightPanelWidth(width: number) {
   if (!Number.isFinite(width)) return DEFAULT_RIGHT_PANEL_WIDTH;

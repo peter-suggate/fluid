@@ -75,9 +75,22 @@ export function exactStructuredGenerationAuditFailures(
   return failures;
 }
 
+/** Words per SPGrid level in the exact setup-delta publication
+ * (`LEVEL_DELTA_WORDS` in `webgpu-octree-spgrid-vcycle.ts`). */
+export const SPGRID_LEVEL_DELTA_WORDS_PER_LEVEL = 8;
+/** `planOctreeSPGridVCycle` rejects deeper hierarchies, so reserving twelve
+ * levels makes the record segment a fixed ABI even though the live buffer is
+ * sized to the scene's level count. */
+export const SPGRID_LEVEL_DELTA_RECORD_LEVELS = 12;
+
 /** Fixed queue-copy ABI for one accepted-step authority snapshot. Keeping the
  * record tightly packed lets a long smoke run enqueue copies without mapping
- * or allocating a staging buffer per step. */
+ * or allocating a staging buffer per step.
+ *
+ * P0.4 (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A4) appended the four segments
+ * below the projection-energy block. They are the GPU's own verdict words for
+ * the subsystems Part B intends to gate: without them a host-side skip has no
+ * step-coherent evidence that the work it deleted was actually zero. */
 export const STRUCTURED_GENERATION_AUDIT_SNAPSHOT = Object.freeze({
   structuredOffsetBytes: 0,
   structuredBytes: 24,
@@ -91,7 +104,19 @@ export const STRUCTURED_GENERATION_AUDIT_SNAPSHOT = Object.freeze({
   fineVolumeBytes: 64,
   projectionEnergyOffsetBytes: 208,
   projectionEnergyBytes: 128,
-  strideBytes: 336,
+  /** `WebGPUOctreeTopologyEpoch.state`: the whole 16-word Epoch struct. */
+  topologyEpochOffsetBytes: 336,
+  topologyEpochBytes: 64,
+  /** SPGrid per-level setup delta, twelve reserved levels of eight words. */
+  spgridLevelDeltaOffsetBytes: 400,
+  spgridLevelDeltaBytes: SPGRID_LEVEL_DELTA_RECORD_LEVELS * SPGRID_LEVEL_DELTA_WORDS_PER_LEVEL * 4,
+  /** Air-support producer `scratch[0..1]`: error flags + first failing item. */
+  airSupportFailureOffsetBytes: 784,
+  airSupportFailureBytes: 8,
+  /** Fine-transport `governor` words 0..3: schedule validity + substeps. */
+  fineTransportGovernorOffsetBytes: 792,
+  fineTransportGovernorBytes: 16,
+  strideBytes: 808,
 } as const);
 
 export interface StructuredGenerationAuditSnapshot {
@@ -101,6 +126,13 @@ export interface StructuredGenerationAuditSnapshot {
   readonly mgpcgControl: Uint32Array;
   readonly fineVolumeControl: Uint32Array;
   readonly projectionEnergyControl: Uint32Array;
+  /** P0.4 segments. Absent sources leave these all-zero; the producer reports
+   * which segments it actually copied out of band (see the snapshot ring's
+   * `presentSegments`), so a zero is never mistaken for evidence. */
+  readonly topologyEpochState: Uint32Array;
+  readonly spgridLevelDelta: Uint32Array;
+  readonly airSupportFailure: Uint32Array;
+  readonly fineTransportGovernor: Uint32Array;
 }
 
 /** Live control buffers one record is copied from. The optional members are
@@ -113,30 +145,72 @@ export interface StructuredAuditRecordSources {
   readonly mgpcgControl?: GPUBuffer;
   readonly fineVolumeControl?: GPUBuffer;
   readonly projectionEnergyStats?: GPUBuffer;
+  /** P0.4: `WebGPUOctreeTopologyEpoch.state`. */
+  readonly topologyEpochState?: GPUBuffer;
+  /** P0.4: the SPGrid V-cycle's per-level setup delta buffer. */
+  readonly spgridLevelDelta?: GPUBuffer;
+  /** P0.4: `WebGPUOctreeAirVelocitySupportProducer.scratch`. */
+  readonly airSupportScratch?: GPUBuffer;
+  /** P0.4: `WebGPUFineLevelSetTransport.governor`. */
+  readonly fineTransportGovernor?: GPUBuffer;
 }
+
+/** Segment ids a producer reports as actually copied for one record. */
+export type StructuredAuditRecordSegment =
+  | "structured" | "boundary" | "fine" | "mgpcg" | "fineVolume" | "projectionEnergy"
+  | "topologyEpoch" | "spgridLevelDelta" | "airSupportFailure" | "fineTransportGovernor";
 
 /** The ONE writer of the record ABI. Both consumers — the smoke harness's
  * per-step capacity buffer and the browser's step-coherent snapshot ring —
- * enqueue exactly these copies, so layout drift is structurally impossible. */
+ * enqueue exactly these copies, so layout drift is structurally impossible.
+ *
+ * Every copy reads a producer's end-of-step value because the whole record is
+ * encoded as the advance's last commands; appending a segment here is only
+ * legal while that stays true (`step-snapshot` is the final program stage).
+ * Returns the segments it copied so a consumer can tell an absent segment
+ * from a genuinely zero one.
+ */
 export function encodeStructuredAuditRecordCopies(
   encoder: GPUCommandEncoder,
   sources: StructuredAuditRecordSources,
   target: GPUBuffer,
   recordBaseBytes: number,
-): void {
+): readonly StructuredAuditRecordSegment[] {
   const layout = STRUCTURED_GENERATION_AUDIT_SNAPSHOT;
-  encoder.copyBufferToBuffer(sources.structuredVelocityControl, 0,
-    target, recordBaseBytes + layout.structuredOffsetBytes, layout.structuredBytes);
-  encoder.copyBufferToBuffer(sources.structuredBoundaryControl, 0,
-    target, recordBaseBytes + layout.boundaryOffsetBytes, layout.boundaryBytes);
-  encoder.copyBufferToBuffer(sources.fineWorklist, 0,
-    target, recordBaseBytes + layout.fineOffsetBytes, layout.fineBytes);
-  if (sources.mgpcgControl) encoder.copyBufferToBuffer(sources.mgpcgControl, 0,
-    target, recordBaseBytes + layout.mgpcgOffsetBytes, layout.mgpcgBytes);
-  if (sources.fineVolumeControl) encoder.copyBufferToBuffer(sources.fineVolumeControl, 0,
-    target, recordBaseBytes + layout.fineVolumeOffsetBytes, layout.fineVolumeBytes);
-  if (sources.projectionEnergyStats) encoder.copyBufferToBuffer(sources.projectionEnergyStats, 0,
-    target, recordBaseBytes + layout.projectionEnergyOffsetBytes, layout.projectionEnergyBytes);
+  const copied: StructuredAuditRecordSegment[] = [];
+  const copy = (
+    segment: StructuredAuditRecordSegment,
+    source: GPUBuffer | undefined,
+    offsetBytes: number,
+    segmentBytes: number,
+  ) => {
+    if (!source) return;
+    // A variable-length producer (the SPGrid delta is sized by the scene's
+    // level count) copies only what it owns; the reserved tail stays zero.
+    const bytes = Math.min(segmentBytes, Math.floor((source.size ?? segmentBytes) / 4) * 4);
+    if (bytes <= 0) return;
+    encoder.copyBufferToBuffer(source, 0, target, recordBaseBytes + offsetBytes, bytes);
+    copied.push(segment);
+  };
+  copy("structured", sources.structuredVelocityControl,
+    layout.structuredOffsetBytes, layout.structuredBytes);
+  copy("boundary", sources.structuredBoundaryControl,
+    layout.boundaryOffsetBytes, layout.boundaryBytes);
+  copy("fine", sources.fineWorklist, layout.fineOffsetBytes, layout.fineBytes);
+  copy("mgpcg", sources.mgpcgControl, layout.mgpcgOffsetBytes, layout.mgpcgBytes);
+  copy("fineVolume", sources.fineVolumeControl,
+    layout.fineVolumeOffsetBytes, layout.fineVolumeBytes);
+  copy("projectionEnergy", sources.projectionEnergyStats,
+    layout.projectionEnergyOffsetBytes, layout.projectionEnergyBytes);
+  copy("topologyEpoch", sources.topologyEpochState,
+    layout.topologyEpochOffsetBytes, layout.topologyEpochBytes);
+  copy("spgridLevelDelta", sources.spgridLevelDelta,
+    layout.spgridLevelDeltaOffsetBytes, layout.spgridLevelDeltaBytes);
+  copy("airSupportFailure", sources.airSupportScratch,
+    layout.airSupportFailureOffsetBytes, layout.airSupportFailureBytes);
+  copy("fineTransportGovernor", sources.fineTransportGovernor,
+    layout.fineTransportGovernorOffsetBytes, layout.fineTransportGovernorBytes);
+  return copied;
 }
 
 /** Decode one record copied by the smoke harness after an accepted step. */
@@ -167,6 +241,174 @@ export function unpackStructuredGenerationAuditSnapshot(
     fineVolumeControl: words(layout.fineVolumeOffsetBytes, layout.fineVolumeBytes).slice(),
     projectionEnergyControl:
       words(layout.projectionEnergyOffsetBytes, layout.projectionEnergyBytes).slice(),
+    topologyEpochState:
+      words(layout.topologyEpochOffsetBytes, layout.topologyEpochBytes).slice(),
+    spgridLevelDelta:
+      words(layout.spgridLevelDeltaOffsetBytes, layout.spgridLevelDeltaBytes).slice(),
+    airSupportFailure:
+      words(layout.airSupportFailureOffsetBytes, layout.airSupportFailureBytes).slice(),
+    fineTransportGovernor:
+      words(layout.fineTransportGovernorOffsetBytes, layout.fineTransportGovernorBytes).slice(),
+  });
+}
+
+/** Word map of the copied fine workset publication header.
+ *
+ * The active-brick count is word ONE. Word zero is the generation; reading it
+ * as a count is the decode bug called out in A3/A4.3 — it silently reported a
+ * monotonically rising "brick count" and hid both an empty band and the
+ * 0xFFFFFFFF capacity-overflow sentinel. */
+export const STRUCTURED_FINE_WORKLIST_HEADER = Object.freeze({
+  generation: 0, activeBricks: 1, capacity: 2, flags: 3,
+  dispatchX: 4, dispatchY: 5, dispatchZ: 6,
+} as const);
+
+/** Sentinel the fine band writes when the active set overflows its capacity.
+ * A run that reports it is not a fast run: the solver silently no-ops. */
+export const FINE_WORKLIST_CAPACITY_OVERFLOW = 0xffff_ffff;
+
+export interface FineWorklistHeaderSnapshot {
+  readonly generation: number;
+  readonly activeBricks: number;
+  readonly capacity: number;
+  readonly flags: number;
+  /** True when the count is the overflow sentinel rather than a real count. */
+  readonly capacityOverflow: boolean;
+  /** Both publication bits set and the count inside capacity. */
+  readonly published: boolean;
+}
+
+export function unpackFineWorklistHeader(
+  words: ArrayLike<number>,
+): FineWorklistHeaderSnapshot {
+  const word = (index: number): number => Number(words[index] ?? 0) >>> 0;
+  const activeBricks = word(STRUCTURED_FINE_WORKLIST_HEADER.activeBricks);
+  const capacity = word(STRUCTURED_FINE_WORKLIST_HEADER.capacity);
+  const flags = word(STRUCTURED_FINE_WORKLIST_HEADER.flags);
+  const capacityOverflow = activeBricks === FINE_WORKLIST_CAPACITY_OVERFLOW;
+  return Object.freeze({
+    generation: word(STRUCTURED_FINE_WORKLIST_HEADER.generation),
+    activeBricks, capacity, flags, capacityOverflow,
+    published: (flags & 3) === 3 && !capacityOverflow
+      && activeBricks > 0 && activeBricks <= capacity,
+  });
+}
+
+/** Word map of the `Epoch` struct in `octreeTopologyEpochWGSL`. */
+export const OCTREE_TOPOLOGY_EPOCH_RECORD = Object.freeze({
+  activeEpoch: 0, activeGeneration: 1, readyEpoch: 2, readyGeneration: 3,
+  error: 4, ready: 5, rowCount: 6, topologyHash: 7,
+} as const);
+
+export interface TopologyEpochStateSnapshot {
+  readonly activeEpoch: number;
+  readonly activeGeneration: number;
+  readonly readyEpoch: number;
+  readonly readyGeneration: number;
+  /** Non-zero poisons the next flip; the accepted epoch is then retained. */
+  readonly error: number;
+  /** The clean-commit token: the next `ready-topology-flip` will adopt. */
+  readonly flipReady: boolean;
+  readonly rowCount: number;
+  readonly topologyHash: number;
+}
+
+export function unpackTopologyEpochState(
+  words: ArrayLike<number>,
+): TopologyEpochStateSnapshot {
+  const word = (index: number): number => Number(words[index] ?? 0) >>> 0;
+  return Object.freeze({
+    activeEpoch: word(OCTREE_TOPOLOGY_EPOCH_RECORD.activeEpoch),
+    activeGeneration: word(OCTREE_TOPOLOGY_EPOCH_RECORD.activeGeneration),
+    readyEpoch: word(OCTREE_TOPOLOGY_EPOCH_RECORD.readyEpoch),
+    readyGeneration: word(OCTREE_TOPOLOGY_EPOCH_RECORD.readyGeneration),
+    error: word(OCTREE_TOPOLOGY_EPOCH_RECORD.error),
+    flipReady: word(OCTREE_TOPOLOGY_EPOCH_RECORD.ready) !== 0,
+    rowCount: word(OCTREE_TOPOLOGY_EPOCH_RECORD.rowCount),
+    topologyHash: word(OCTREE_TOPOLOGY_EPOCH_RECORD.topologyHash),
+  });
+}
+
+/** Per-level SPGrid setup delta: word 0 is the level's capture generation and
+ * word 1 its dirty flags. A settled step rebuilds no level, so every level's
+ * dirty word is zero — the exact evidence a Part-B rebuild skip needs. */
+export const SPGRID_LEVEL_DELTA_RECORD = Object.freeze({
+  generation: 0, dirtyFlags: 1, firstRow: 2, rowEnd: 3,
+  candidateError: 4, commitGeneration: 5, topologyGeneration: 6, spectralBits: 7,
+} as const);
+
+export interface SPGridLevelDeltaSnapshot {
+  readonly level: number;
+  readonly generation: number;
+  readonly dirtyFlags: number;
+  readonly candidateError: number;
+  readonly topologyGeneration: number;
+}
+
+/** Decode `levelCount` levels out of the reserved twelve-level segment. */
+export function unpackSPGridLevelDeltas(
+  words: ArrayLike<number>,
+  levelCount = SPGRID_LEVEL_DELTA_RECORD_LEVELS,
+): readonly SPGridLevelDeltaSnapshot[] {
+  const levels = Math.max(0, Math.min(SPGRID_LEVEL_DELTA_RECORD_LEVELS, Math.floor(levelCount)));
+  const word = (level: number, offset: number): number =>
+    Number(words[level * SPGRID_LEVEL_DELTA_WORDS_PER_LEVEL + offset] ?? 0) >>> 0;
+  return Object.freeze(Array.from({ length: levels }, (_, level) => Object.freeze({
+    level,
+    generation: word(level, SPGRID_LEVEL_DELTA_RECORD.generation),
+    dirtyFlags: word(level, SPGRID_LEVEL_DELTA_RECORD.dirtyFlags),
+    candidateError: word(level, SPGRID_LEVEL_DELTA_RECORD.candidateError),
+    topologyGeneration: word(level, SPGRID_LEVEL_DELTA_RECORD.topologyGeneration),
+  })));
+}
+
+export interface AirSupportFailureSnapshot {
+  /** `scratch[0]`: OR of every producer error flag raised this step. */
+  readonly errorFlags: number;
+  /** `scratch[1]`: `(stage << 24) | item` of the first failing item. */
+  readonly firstFailure: number;
+  readonly failed: boolean;
+  readonly stage: number;
+  readonly item: number;
+}
+
+export function unpackAirSupportFailure(
+  words: ArrayLike<number>,
+): AirSupportFailureSnapshot {
+  const errorFlags = Number(words[0] ?? 0) >>> 0;
+  const firstFailure = Number(words[1] ?? 0) >>> 0;
+  return Object.freeze({
+    errorFlags, firstFailure, failed: errorFlags !== 0,
+    stage: firstFailure >>> 24, item: firstFailure & 0x00ff_ffff,
+  });
+}
+
+/**
+ * Fine-transport governor words 0..3, written by
+ * `planStructuredFineTransportSubsteps`. Word 0 is a REJECT word, not a valid
+ * word: the kernel stores `select(1u, 0u, scheduleValid)` and every consumer
+ * gates on `state[0] == 0u`. Word 1 is the active substep count, word 2 the
+ * per-substep dt as f32 bits, word 3 the CFL displacement in cells.
+ */
+export interface FineTransportGovernorSnapshot {
+  readonly words: readonly number[];
+  readonly scheduleValid: boolean;
+  readonly activeSubsteps: number;
+  readonly substepDt_s: number;
+  readonly displacementCells: number;
+}
+
+export function unpackFineTransportGovernor(
+  words: ArrayLike<number>,
+): FineTransportGovernorSnapshot {
+  const word = (index: number): number => Number(words[index] ?? 0) >>> 0;
+  const bits = Uint32Array.of(word(2));
+  return Object.freeze({
+    words: Object.freeze([word(0), word(1), word(2), word(3)]),
+    scheduleValid: word(0) === 0,
+    activeSubsteps: word(1),
+    substepDt_s: new Float32Array(bits.buffer)[0] ?? 0,
+    displacementCells: word(3),
   });
 }
 

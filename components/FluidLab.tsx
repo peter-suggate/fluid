@@ -11,10 +11,8 @@ import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { EditorToolbar } from "./EditorToolbar";
-import { ScenePanel } from "./ScenePanel";
-import { SceneLibraryPanel } from "./SceneLibraryPanel";
+import { SceneOverlay } from "./SceneOverlay";
 import { SceneConfigPopover } from "./SceneConfigPopover";
-import { MethodPanel } from "./MethodPanel";
 import { RigidBodyPanel } from "./RigidBodyTray";
 import { VisualPanel } from "./VisualPanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
@@ -145,31 +143,27 @@ export function FluidLab() {
 
   return (
     <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"}>
-      <aside className="left-panel panel-scroll">
-        <div className="brand"><span className="brand-mark">FL</span><div><strong>Fluid Lab</strong><small>WEBGPU CFD WORKBENCH</small></div></div>
-        <ScenePanel />
-        <SceneLibraryPanel />
-        <MethodPanel />
-      </aside>
-
       <section className="viewport-shell" aria-busy={gpuStatus.state === "initializing"} data-gpu-transition={gpuStatus.state === "initializing" ? gpuStatus.kind ?? "startup" : gpuStatus.state}>
         <WebGPUViewport />
         <EditorToolbar />
         <div className="viewport-topline">
           <div className="topline-left">
-            <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
-            {runState === "running" && gpuStatus.state === "ready" && (
-              <button
-                className={`health-chip${healthFlags.length ? " alert" : ""}`}
-                onClick={() => setDiagnosticsOpen(true)}
-                title={healthFlags.length ? "Instrumented stability gates are firing — click for live diagnostics" : "All instrumented stability gates clear — click for live diagnostics"}
-                data-testid="health-chip"
-              >
-                <span className={`status-dot ${healthFlags.length ? "warning" : "online"}`} />
-                <strong>{healthFlags.length ? "ALERT" : "STABLE"}</strong>
-                {healthFlags.length > 0 && <span>{healthFlags.join(" · ")}</span>}
-              </button>
-            )}
+            <SceneOverlay />
+            <div className="topline-status">
+              <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
+              {runState === "running" && gpuStatus.state === "ready" && (
+                <button
+                  className={`health-chip${healthFlags.length ? " alert" : ""}`}
+                  onClick={() => setDiagnosticsOpen(true)}
+                  title={healthFlags.length ? "Instrumented stability gates are firing — click for live diagnostics" : "All instrumented stability gates clear — click for live diagnostics"}
+                  data-testid="health-chip"
+                >
+                  <span className={`status-dot ${healthFlags.length ? "warning" : "online"}`} />
+                  <strong>{healthFlags.length ? "ALERT" : "STABLE"}</strong>
+                  {healthFlags.length > 0 && <span>{healthFlags.join(" · ")}</span>}
+                </button>
+              )}
+            </div>
           </div>
           <div className="environment-chip" title={`${environment.name} · fixed by the selected scene`}>
             <span aria-hidden="true">{environment.swatch.map((color) => <i key={color} style={{ background: color }} />)}</span>

@@ -7,7 +7,6 @@ import { fineLevelSetLinearWorkgroupWGSL } from "./webgpu-fine-levelset-dispatch
 import { PassBroker } from "./webgpu-pass-broker";
 import {
   createGPULogicalActivityAdoptionContext,
-  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
@@ -62,9 +61,17 @@ export function planFineLevelSetJFAStrides(
   let stride = 1;
   const repairRadius = Math.min(bandCells, maximumDisplacementFineCells);
   if (maximumDisplacementFineCells >= bandCells) {
-    // A cold publication has no transported closest-point field to repair.
-    // Round up so its first jump spans the complete signed band.
-    while (stride < repairRadius) stride *= 2;
+    // A cold publication has no transported closest-point field to repair, so
+    // the ladder must reach every cell of the signed band. Reach is the SUM of
+    // the descending strides, not the first stride: a schedule starting at P
+    // sums to P + P/2 + ... + 1 = 2P - 1, and the binary decomposition of any
+    // offset below that sum is exactly what the descending passes walk.
+    // Choosing the smallest power of two with 2P - 1 >= band therefore covers
+    // the band with one flood fewer than rounding the band itself up to a
+    // power of two (band 23: 16 covers via 16+8+4+2+1 = 31, where the old rule
+    // picked 32 and spent its first pass gathering entirely outside the band).
+    // POWER_LIQUIDS_ULTIMATE_M1MAX change E1, step 1.
+    while (stride * 2 - 1 < repairRadius) stride *= 2;
   } else {
     while (stride * 2 <= repairRadius) stride *= 2;
   }
@@ -243,8 +250,10 @@ export class WebGPUFineLevelSetRedistance {
     // The compact topology currently carries phi but not the materialized
     // closest-point seed index into a newly allocated A/B page. Span the
     // maintained band until that cache becomes part of the page transaction.
-    // A 16-cell band starts at stride 16 (one pass less than the former
-    // 23-cell/stride-32 schedule), and dispatch remains page-delta bounded.
+    // The 23-cell band starts at stride 16 — sum-covered (16+8+4+2+1 = 31 >= 23)
+    // rather than round-up-covered — so the ladder is 16,8,4,2,1 plus the two
+    // +1 collar repairs: 7 floods, one fewer than the former stride-32
+    // schedule. Dispatch remains page-delta bounded.
     const strides = planFineLevelSetJFAStrides(bandCells, bandCells);
     if (strides.length > FINE_LEVELSET_JFA_MAX_PASSES) throw new RangeError("Fine JFA pass budget exceeded");
     this.device.queue.writeBuffer(this.params, 0, baseBytes);
@@ -438,9 +447,9 @@ function instrumentFineLevelSetJFAEntry(
 export function fineLevelSetJFAActivityShader(activity: GPULogicalActivityAdoptionContext): string {
   const checkpoint = (task: string, name: "enter" | "exit") => activity.workgroup(task, name, {
     workgroupId: "wid",
+    numWorkgroups: "nw",
     localInvocationIndex: "lid",
     workgroupLaneCount: 64,
-    recordWhen: `wid.x + nw.x * (wid.y + nw.y * wid.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
   });
   const abEntry = checkpoint("jump-flood-a-to-b", "enter");
   const abExit = checkpoint("jump-flood-a-to-b", "exit");

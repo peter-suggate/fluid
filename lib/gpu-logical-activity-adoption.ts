@@ -13,8 +13,6 @@ import {
 /** Reserved globally for opt-in shader activity variants. Production has no such binding. */
 export const GPU_LOGICAL_ACTIVITY_BIND_GROUP = 3;
 export const GPU_LOGICAL_ACTIVITY_BINDING = 0;
-/** Bounded logical-slot sample used by the initial matrix adoption. */
-export const GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT = 128;
 
 export interface GPULogicalActivityPipelineSnapshot {
   /** Snapshot `shaderActivityEnabled`, rather than reading a live store later. */
@@ -79,15 +77,19 @@ export function gpuLogicalActivityTaskDescriptions(
 export interface GPULogicalActivityWorkgroupSite {
   tick?: string;
   workgroupId?: string;
+  /** `@builtin(num_workgroups)` expression; defaults to a single-workgroup dispatch. */
+  numWorkgroups?: string;
   localInvocationIndex?: string;
   workgroupLaneCount: number | string;
-  /** Uniform WGSL predicate used to bound recording without changing dispatched work. */
+  /** Additional uniform eligibility predicate; stratified sampling is automatic. */
   recordWhen?: string;
 }
 
 export interface GPULogicalActivitySubgroupSite {
   tick?: string;
   workgroupId?: string;
+  /** `@builtin(num_workgroups)` expression; defaults to a single-workgroup dispatch. */
+  numWorkgroups?: string;
   subgroupId?: string;
   subgroupIdEvidence?: "measured" | "reconstructed";
   subgroupLane?: string;
@@ -406,6 +408,7 @@ export class GPULogicalActivityAdoptionContext {
       checkpointId: u32WGSL(this.checkpointId(task, checkpoint)),
       tick: site.tick,
       workgroupId: site.workgroupId ?? "workgroupId",
+      numWorkgroups: site.numWorkgroups,
       localInvocationIndex: site.localInvocationIndex ?? "localInvocationIndex",
       workgroupLaneCount: expression(site.workgroupLaneCount),
     });
@@ -418,6 +421,7 @@ export class GPULogicalActivityAdoptionContext {
       checkpointId: u32WGSL(this.checkpointId(task, checkpoint)),
       tick: site.tick,
       workgroupId: site.workgroupId ?? "workgroupId",
+      numWorkgroups: site.numWorkgroups,
       subgroupId: site.subgroupId ?? "subgroupId",
       subgroupIdEvidence: site.subgroupIdEvidence ?? "measured",
       subgroupLane: site.subgroupLane ?? "subgroupLane",

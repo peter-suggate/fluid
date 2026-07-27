@@ -7,7 +7,6 @@ import {
   OCTREE_PIPELINED_PCG_INDIRECT_STRIDE_BYTES,
   OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
   OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS,
-  OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT,
   OCTREE_PIPELINED_MGPCG_MAX_PRODUCTION_STORAGE_BINDINGS,
   WebGPUOctreePipelinedMGPCG,
   addCompensatedF32,
@@ -26,6 +25,7 @@ import {
 } from "../lib/gpu-logical-activity-adoption";
 import { PassBroker } from "../lib/webgpu-pass-broker";
 import { decodeOctreePressureSolveWork } from "../lib/webgpu-octree-work-accounting";
+import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 
 test("pipelined planner exposes residual and direct-curvature reductions", () => {
   const plan = planOctreePipelinedMGPCG({ rowCapacity: 6_912, maximumIterations: 10 });
@@ -109,7 +109,14 @@ test("sole target shader is 128-lane subgroup f32 and fail-closed", () => {
     /@compute @workgroup_size\(128\)\nfn reduceMergedPartials/);
   assert.match(octreePipelinedMGPCGShader,
     /@compute @workgroup_size\(128\)\nfn finishMergedReduction/);
-  assert.match(octreePipelinedMGPCGShader, /subgroupAdd\(local\.gamma\.hi\)/);
+  // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md Part D item 4: the reduction is an
+  // explicit width-halving shared-memory tree in BOTH the hierarchical and the
+  // persistent executor, because `subgroupAdd`'s association order is
+  // implementation-defined and a pinned tree is what makes the Gate A
+  // bit-exact comparison applicable across the executor selection.
+  assert.doesNotMatch(octreePipelinedMGPCGShader, /subgroupAdd\(/);
+  assert.match(octreePipelinedMGPCGShader,
+    /merged\[lane\] = local;\n\s*for \(var width = REDUCTION_LANES \/ 2u; width > 0u; width >>= 1u\) \{\n\s*workgroupBarrier\(\);\n\s*if \(lane < width\) \{\n\s*merged\[lane\] = mergeScalars\(merged\[lane\], merged\[lane \+ width\]\);/);
   assert.match(octreePipelinedMGPCGShader, /fn zeroRemainingAfterUpdate\(iteration: u32\)/);
   assert.doesNotMatch(octreePipelinedMGPCGShader, /\bf16\b|portable|fallback|legacy/i);
 });
@@ -118,6 +125,7 @@ test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-sa
   const disabled = createGPULogicalActivityAdoptionContext({
     moduleId: OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
     profile: { enabled: false, generation: 4 },
+    identity: "subgroup",
     subgroupsAlreadyEnabled: true,
   });
   const disabledSource = octreePipelinedMGPCGActivityShader(disabled);
@@ -127,17 +135,29 @@ test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-sa
   const enabled = createGPULogicalActivityAdoptionContext({
     moduleId: OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
     profile: { enabled: true, generation: 5 },
+    identity: "subgroup",
     subgroupsAlreadyEnabled: true,
   });
   const activitySource = octreePipelinedMGPCGActivityShader(enabled);
   const descriptors = Object.values(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS);
   assert.equal(descriptors.length, 12);
+  assert.equal((activitySource.match(/fluidGpuLogicalActivitySubgroup\(/g) ?? []).length,
+    descriptors.length,
+  "every compute entry point has one uniform active-lane ballot at entry");
   assert.ok((activitySource.match(/fluidGpuLogicalActivityWorkgroup\(/g) ?? []).length
-    >= 2 * descriptors.length,
-  "every compute entry point has an enter and all-control-path exit checkpoints");
-  assert.match(activitySource, new RegExp(`< ${OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT}u`));
+    >= descriptors.length,
+  "every compute entry point retains scalar all-control-path exit checkpoints");
+  assert.equal((activitySource.match(/@builtin\(num_workgroups\) activityNumWorkgroups/g) ?? []).length,
+    descriptors.length, "every activity entry point exposes its complete dispatch population");
+  assert.doesNotMatch(activitySource, /activityWorkgroupId\.x < 16u/,
+    "the shader must not retain prefix-only workgroup sampling");
   assert.match(activitySource, /< rows\(\) && !stopped\(\)/,
     "recurring row work records only meaningful live dispatch groups");
+  assert.match(activitySource,
+    /activityWorkgroupId\.x \* 64u \+ activityLocalInvocationIndex < rows\(\)/,
+    "row kernels ballot the actual active invocation population, including partial tails");
+  assert.match(activitySource, /subgroupLane, subgroupSize/,
+    "existing subgroup builtins are reused by reduction entry points");
   for (const descriptor of descriptors) {
     assert.equal(descriptor.taskId, enabled.taskId(descriptor.task));
     assert.equal(descriptor.checkpoints.enter, enabled.checkpointId(descriptor.task, "enter"));
@@ -146,6 +166,8 @@ test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-sa
   }
   const variant = enabled.module(activitySource, "mgpcg-test");
   assert.equal((variant.code.match(/enable subgroups;/g) ?? []).length, 1);
+  assert.match(variant.code, /subgroupBallot\(activePredicate\)/);
+  assert.match(variant.code, /@builtin\(subgroup_invocation_id\) activitySubgroupLane/);
   assert.match(variant.code, /@group\(3\) @binding\(0\)/);
   assert.equal(OCTREE_PIPELINED_MGPCG_MAX_PRODUCTION_STORAGE_BINDINGS, 7);
   assert.ok(OCTREE_PIPELINED_MGPCG_MAX_PRODUCTION_STORAGE_BINDINGS + 1 <= 10,
@@ -275,9 +297,11 @@ test("orchestrator encodes direct direction curvature after every live update", 
       encodeCorrection() { corrections += 1; },
     },
   };
+  usePerformanceInstrumentationStore.getState().setMode("activity");
   const solver = new WebGPUOctreePipelinedMGPCG(
     device, source, { rowCapacity: 64, maximumIterations: 4 },
   );
+  usePerformanceInstrumentationStore.getState().setMode("off");
   assert.equal(createdPipelines.length, Object.keys(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS).length);
   assert.ok(createdPipelines.every((pipeline) =>
     gpuLogicalActivityPipelineRegistration(pipeline)?.moduleId

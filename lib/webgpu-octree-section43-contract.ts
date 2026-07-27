@@ -4,9 +4,15 @@ export const OCTREE_SECTION43_BOUNDARY_SMOOTHING_ITERATIONS = 8;
 export const OCTREE_SECTION43_BOUNDARY_BAND_LAYERS = 3;
 export const OCTREE_FIRST_ORDER_CHEBYSHEV_DEGREES = Object.freeze([2, 4] as const);
 export const OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION = 1 / 30;
-/** The persistent lane assigns exactly one compact row to each workgroup lane.
- * Larger domains must use the production row-parallel pipelined solver. */
-export const OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY = 64;
+/**
+ * Row-capacity ceiling for the single-dispatch persistent executor
+ * (`WebGPUOctreePersistentMGPCG`). The kernel is row-striped —
+ * `for (row = lane; row < rowCount; row += 256)` — so capacity is bounded by
+ * how much work one workgroup (one GPU core) can absorb before the
+ * row-parallel hierarchical path saturates the device, not by the lane count.
+ * Above this, the production row-parallel pipelined solver is selected.
+ */
+export const OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY = 8_192;
 /** x, r, z, d, A*d, four hybrid f32 fields, and two band u32 fields. */
 export const OCTREE_PERSISTENT_MGPCG_STATE_CHANNELS = 11;
 
@@ -19,16 +25,21 @@ export interface OctreePersistentMGPCGExecutor {
     transfers: "validated-adjoint-pair";
     invalidRows: "uniform-fail-closed-before-arithmetic";
   }>;
+  /**
+   * The seed/publication pair is the entire per-solve input. Geometry,
+   * topology, coefficients, the RHS, the accepted authority and the shared
+   * solve-control buffer are all constructor-time bindings, and the row count
+   * is read GPU-side from the accepted structured control — the executor
+   * never shapes its encode from a readback.
+   *
+   * `encodeInnerSetup` runs before the executor stages any authority word, so
+   * a caller whose SPGrid topology setup/commit has not yet been encoded this
+   * step can supply it.
+   */
   encodeSolve(broker: PassBroker, input: {
-    readonly leafHeaders: GPUBuffer;
-    readonly leafEntries: GPUBuffer;
-    readonly rowCount: GPUBuffer;
-    readonly pressureIn: GPUBuffer;
+    readonly pressureSeed: GPUBuffer;
     readonly pressureOut: GPUBuffer;
-    readonly solverControl: GPUBuffer;
-    readonly boundarySmoothingIterations: number;
-    readonly relativeTolerance: number;
-  }): void;
+  }, encodeInnerSetup?: (broker: PassBroker) => void): void;
 }
 
 /**

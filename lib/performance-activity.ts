@@ -123,6 +123,11 @@ export interface ActivityResource {
   clockDomain: ActivityClockDomain;
   /** Logical capacity index only. It is never presented as a physical GPU core ID. */
   capacitySlot?: number;
+  /** Stable stratum index for bounded whole-dispatch GPU sampling. */
+  sampleIndex?: number;
+  sampleCount?: number;
+  /** Dispatch populations observed on this stratum; each is reported as sampleCount / N. */
+  dispatchWorkgroupCounts?: readonly number[];
 }
 
 export interface ActivitySlice {
@@ -186,6 +191,16 @@ export interface PerformanceActivityCaptureDiagnostics {
   unprojectedEventCount?: number;
   unprofiledDispatchCount?: number;
   unprofiledPipelineLabels?: readonly string[];
+}
+
+/** Detailed captures become visible only after logical readback has supplied
+ * both its verdict and rows. A settled fail-closed capture remains useful;
+ * only the earlier base-frame intermediate is withheld. */
+export function performanceActivityFrameHasSettledEvidence(
+  frame: Pick<PerformanceActivityFrame, "captureDiagnostics" | "resources">,
+): boolean {
+  return frame.captureDiagnostics !== undefined
+    && frame.resources.some((resource) => resource.kind === "gpu-logical-capacity");
 }
 
 export interface ActivityRowWindow {

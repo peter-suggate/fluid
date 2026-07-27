@@ -77,10 +77,19 @@ test("WGSL performs deterministic mark, parallel scan, scatter, and tag resoluti
 
 test("producer proves generations and exact owner identities before admitting air support", () => {
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
-  assert.match(shader, /accepted\.epoch!=p\.expectedEpoch/);
+  // The producer proves internal coherence against the ACCEPTED epoch, not
+  // the host's attempt stamp: when the newest candidate is rejected but a
+  // clean older accepted authority survives, support deliberately rebuilds
+  // against that epoch so Section 5 continues on one coherent (temporarily
+  // reused) topology. Downstream consumers (supportPublicationValid) then
+  // require the support epoch to equal the accepted epoch they run under.
+  assert.match(shader, /if\(atomicLoad\(&accepted\.flags\)!=0u&&existingReady\)/,
+    "a rejected candidate over a clean prior receipt must early-out, preserving that receipt");
   assert.match(shader, /accepted\.bank>1u/);
-  assert.match(shader, /ownerPageArena\[7u\]!=p\.expectedEpoch/);
-  assert.match(shader, /boundary!=p\.expectedEpoch/);
+  assert.match(shader, /ownerPageArena\[7u\]!=accepted\.epoch/);
+  assert.match(shader, /boundary!=accepted\.epoch/);
+  assert.match(shader, /sw\(3u,accepted\.epoch\)/,
+    "the publication must be stamped with the accepted epoch it was built from");
   assert.match(shader, /octreeOwnerPageLookup\(vec3i\(origin\)\)/);
   assert.match(shader, /if\(resolvedCell!=u32\(cell\)\|\|resolvedSize!=size\)/,
     "cube and tetrahedron vertices must both retain their exact octree-cell identity");
@@ -183,9 +192,14 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
     "the face march must be a pure indexed gather over published adjacency");
   assert.match(shader,
     /fnbetterFace\(candidate:vec4u,best:vec4u\).*candidateDistance=bitcast<f32>\(candidate\.y\).*candidateDistance<bestDistance.*candidateDistance==bestDistance&&candidate\.z<best\.z/s);
+  // The carrier metric is the true Euclidean distance to the ORIGINAL seed
+  // patch (candidate.z, preserved verbatim through every copy) — the
+  // closest-point-transform ranking. Accumulating per-hop path length made
+  // the metric an axis-graph geodesic (Manhattan-like), which under-drives
+  // diagonal spreading and squares off the dam front.
   assert.match(march,
-    /distance=bitcast<f32>\(candidate\.y\)\+length\(faceCenter\(item\)-faceCenter\(source\)\)/,
-    "the fast-marching-like relaxation must rank sources by geometric distance, not hop count");
+    /distance=length\(faceCenter\(item\)-faceCenter\(candidate\.z\)\)/,
+    "the fast-marching-like relaxation must rank sources by Euclidean distance to the original seed, not accumulated hop length");
   assert.match(shader, /clean=errors==0u&&\(s\(35u\)\|s\(36u\)\|s\(37u\)\)==0u/,
     "publication requires a deliberate GPU-observed no-change wave");
   assert.match(march,
@@ -213,9 +227,17 @@ test("direct air rows and support identities share one fail-closed face transact
   assert.doesNotMatch(reconstruct, /rowVelocities\[/,
     "reconstruction may not expose partial direct-air vectors in the accepted bank");
   assert.match(shader, /supportVectors\[support\]=result[\s\S]*p\.recordVectorOffset\+4u\*support/);
+  // An axis with no marched value on either side is a demand island (a cell
+  // the degenerately dense fine band demanded with no demanded path to any
+  // seeded liquid face). It takes stationary air with a counted, identified
+  // provenance latch instead of rejecting: failing closed froze the whole
+  // epoch on the first island (measured at dam wall contact, far air 5+
+  // cells above the liquid, flags fineBandDemand|extensionClosure).
   assert.match(shader,
-    /if\(positive\.w==0u&&negative\.w==0u\)\{returnvec4f\(f32\(axis\),f32\(quadrant\),f32\(\(positive\.w&1u\)\|\(\(negative\.w&1u\)<<1u\)\),-1\.\);\}/,
-    "a rejected interpolation must retain its exact axis, quadrant, and signed-face validity");
+    /if\(positive\.w==0u&&negative\.w==0u\)\{[\s\S]*?atomicAdd\(&scratch\[41u\],1u\);[\s\S]*?atomicMin\(&scratch\[42u\],\(\(\(cell\.w>>6u\)&0xffu\)<<16u\)\|\(cell\.x<<3u\)\|axis\);[\s\S]*?result\[axis\]=0\.;continue;\}/,
+    "an unreached axis must take latched stationary air, never reject the publication");
+  assert.match(shader, /if\(!validVector\(interpolated\)\)\{failTopology\(8u,faceRow\);/,
+    "genuinely invalid interpolation results must still fail the face transaction closed");
   assert.match(shader,
     /if\(!validVector\(interpolated\)\)\{failTopology\(8u,faceRow\);[\s\S]*atomicCompareExchangeWeak\(&recordArena\[14u\],0u,detail\)[\s\S]*returnvec4f\(f32\(local\),interpolated\.x,interpolated\.y\+16\.\*interpolated\.z,-1\.\);\}/,
     "a rejected reconstruction must retain the local catalog face in the existing vector slot");
@@ -262,7 +284,7 @@ test("host schedule uses a parallel occupancy prefix and a persistent fixed-poin
 test("entry bind sets exactly match the reachable staging transaction", () => {
   assert.deepEqual(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS, {
     beginAirSupportPublication: [0,1,3,7,8,9,10],
-    clearAirSupportDirectory: [0,7], clearAirSupportCandidates: [0,7],
+    clearAirSupportDirectory: [0,7], clearAirSupportCandidates: [0,2,7],
     clearAirSupportTags: [0,7,9],
     emitAirSupportCandidates: [0,2,3,4,5,6,7,9,11,18],
     markAndScanAirSupportCandidates: [0,7], prefixAirSupportBlocks: [0,7],
@@ -277,6 +299,7 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
     seedAirSupportFaces: [0,1,2,7,8,15,16,18,19,21,23],
     extendAirSupportFacesAtoB: [0,2,7,8,19,20,23],
     extendAirSupportFacesBtoA: [0,2,7,8,19,20,23],
+    advanceAirSupportMarchWave: [7],
     marchAirSupportFacesToFixedPoint: [0,2,7,8,19,20,23],
     reconstructAirSupportVectors: [0,2,7,8,15,16,19,22,23,24],
     finalizeAirSupportMetadata: [0,2,7,8,9,22],
@@ -318,12 +341,12 @@ test("Dawn compiles every Section 5 producer entry point at the M1 storage-buffe
   const adapter = await gpu.requestAdapter(); assert.ok(adapter);
   assert.ok(adapter.limits.maxStorageBuffersPerShaderStage >= 10);
   const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
-  const module = device.createShaderModule({ code: octreeAirVelocitySupportPublicationWGSL });
-  const errors = (await module.getCompilationInfo()).messages.filter((message) => message.type === "error");
+  const shaderModule = device.createShaderModule({ code: octreeAirVelocitySupportPublicationWGSL });
+  const errors = (await shaderModule.getCompilationInfo()).messages.filter((message) => message.type === "error");
   assert.deepEqual(errors, []);
   device.pushErrorScope("validation");
   for (const entryPoint of Object.keys(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS)) {
-    device.createComputePipeline({ layout: "auto", compute: { module, entryPoint } });
+    device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
   }
   const error = await device.popErrorScope(); assert.equal(error, null, error?.message);
   device.destroy();

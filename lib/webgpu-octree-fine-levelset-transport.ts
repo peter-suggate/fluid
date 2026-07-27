@@ -158,20 +158,38 @@ export class WebGPUFineLevelSetTransport {
   private readonly indirectDispatch: GPUBuffer;
   private readonly planPipeline: GPUComputePipeline;
   private readonly classifyPipeline: GPUComputePipeline;
+  private readonly reduceWorksetsPipeline: GPUComputePipeline;
+  private readonly scanWorksetsPipeline: GPUComputePipeline;
   private readonly publishWorksetsPipeline: GPUComputePipeline;
+  private readonly compactWorksetsPipeline: GPUComputePipeline;
   private readonly transportPipelines: readonly GPUComputePipeline[];
+  private readonly reduceStatusPipeline: GPUComputePipeline;
   private readonly summarizePipeline: GPUComputePipeline;
   private readonly commitPipeline: GPUComputePipeline;
+  private readonly clearDeltaPipeline: GPUComputePipeline;
+  private readonly reduceDeltaPipeline: GPUComputePipeline;
   private readonly deltaPipeline: GPUComputePipeline;
+  private readonly compactDeltaPipeline: GPUComputePipeline;
   private readonly samplingCatalog: GPUBuffer;
   private readonly samplingOffsets: readonly number[];
   private readonly planGroup: GPUBindGroup;
   private readonly classifyGroup: GPUBindGroup;
+  private readonly reduceWorksetsGroup: GPUBindGroup;
+  private readonly scanWorksetsGroup: GPUBindGroup;
   private readonly publishWorksetsGroup: GPUBindGroup;
+  private readonly compactWorksetsGroup: GPUBindGroup;
   private readonly transportGroups: readonly GPUBindGroup[];
+  private readonly reduceStatusGroup: GPUBindGroup;
   private readonly summarizeGroup: GPUBindGroup;
   private readonly commitGroup: GPUBindGroup;
+  private readonly clearDeltaGroup: GPUBindGroup;
+  private readonly reduceDeltaGroup: GPUBindGroup;
   private readonly deltaGroup: GPUBindGroup;
+  private readonly compactDeltaGroup: GPUBindGroup;
+  /** 256-page blocks the widened publication trio classifies and scatters. */
+  private readonly scanBlocks: number;
+  /** 256-word blocks covering the interface delta's cleared header and stream. */
+  private readonly deltaClearBlocks: number;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
@@ -218,8 +236,16 @@ export class WebGPUFineLevelSetTransport {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.control = device.createBuffer({ label: "Structured fine transport control",
       size: FINE_LEVELSET_TRANSPORT_CONTROL_BYTES, usage: storage });
+    this.scanBlocks = Math.ceil(source.plan.maximumResidentBricks / 256);
+    this.deltaClearBlocks = Math.ceil((8 + 2 * source.plan.maximumResidentBricks) / 256);
+    // Block-scan scratch for the widened workset, status, and delta
+    // publications: SCAN_BLOCK_WORDS (16) per 256-page block, one global
+    // record, then one prefix word per scanned item so the scatters carry the
+    // reduce dispatch's prefix instead of recomputing it. Addressed past the
+    // class payload by the shader's scanBase().
+    const scanScratchBytes = 4 * (16 * (this.scanBlocks + 1) + 256 * this.scanBlocks);
     this.governor = device.createBuffer({ label: "Structured fine transport GPU substep governor",
-      size: 512 + this.plan.pageStatusBytes + this.plan.worksetBytes,
+      size: 512 + this.plan.pageStatusBytes + this.plan.worksetBytes + scanScratchBytes,
       usage: storage });
     this.indirectDispatch = device.createBuffer({ label: "Structured fine transport indirect dispatch publication",
       size: 512, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
@@ -233,14 +259,21 @@ export class WebGPUFineLevelSetTransport {
       compute: { module, entryPoint } });
     this.planPipeline = make("planStructuredFineTransportSubsteps");
     this.classifyPipeline = make("classifyStructuredFineTransportBlocks");
+    this.reduceWorksetsPipeline = make("reduceStructuredFineTransportWorksetBlocks");
+    this.scanWorksetsPipeline = make("scanStructuredFineTransportWorksetGroups");
     this.publishWorksetsPipeline = make("publishStructuredFineTransportWorksets");
+    this.compactWorksetsPipeline = make("compactStructuredFineTransportWorksets");
     // transitionSample dynamically selects trilinear or tetrahedral sampling
     // at every trajectory point. Only validity-aware common/rare variants are
     // required; page-anchor transition specialization would be unsound.
     this.transportPipelines = ["transportRegularCommonPhi", "transportRegularRarePhi"].map(make);
+    this.reduceStatusPipeline = make("reduceStructuredFineTransportStatus");
     this.summarizePipeline = make("summarizeStructuredFineTransport");
     this.commitPipeline = make("commitStructuredFineTransport");
+    this.clearDeltaPipeline = make("clearStructuredFineDelta");
+    this.reduceDeltaPipeline = make("reduceStructuredFineDeltaBlocks");
     this.deltaPipeline = make("publishStructuredFineDelta");
+    this.compactDeltaPipeline = make("compactStructuredFineDelta");
     const all = new Map<number, GPUBuffer>([
       [0, this.params], [1, source.metadata], [2, source.worklist], [3, source.flags], [4, source.phi],
       [5, source.workA], [6, this.samplingCatalog], [7, this.control], [8, this.topologyDelta.buffer],
@@ -258,17 +291,26 @@ export class WebGPUFineLevelSetTransport {
       })) });
     this.planGroup = group(this.planPipeline, [0,2,6,9,12,13,14,20,21]);
     this.classifyGroup = group(this.classifyPipeline, [0,1,2,3,4,13]);
-    this.publishWorksetsGroup = group(this.publishWorksetsPipeline, [0,2,9,13]);
-    this.transportGroups = this.transportPipelines.map((pipeline, index) => group(pipeline,
-      FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS[index]!));
     // Bindings must match what the entry point statically uses: these
     // pipelines are created with `layout: "auto"`, so the derived layout omits
     // any binding the entry point does not reference, and supplying an extra
-    // one makes the whole bind group invalid. Summary uses metadata only to
-    // retain the first rejected sample's stable fine-lattice position.
+    // one makes the whole bind group invalid. The group scan touches only the
+    // governor, and the header publication no longer walks the worklist.
+    this.reduceWorksetsGroup = group(this.reduceWorksetsPipeline, [0,2,9,13]);
+    this.scanWorksetsGroup = group(this.scanWorksetsPipeline, [0,13]);
+    this.publishWorksetsGroup = group(this.publishWorksetsPipeline, [0,9,13]);
+    this.compactWorksetsGroup = group(this.compactWorksetsPipeline, [0,2,9,13]);
+    this.transportGroups = this.transportPipelines.map((pipeline, index) => group(pipeline,
+      FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS[index]!));
+    // Summary uses metadata only to retain the first rejected sample's stable
+    // fine-lattice position; only the final reduction publishes the control.
+    this.reduceStatusGroup = group(this.reduceStatusPipeline, [0,1,2,13]);
     this.summarizeGroup = group(this.summarizePipeline, [0,1,2,7,13]);
     this.commitGroup = group(this.commitPipeline, [0,1,2,3,4,5,7,8]);
-    this.deltaGroup = group(this.deltaPipeline, [0,2,7,8]);
+    this.clearDeltaGroup = group(this.clearDeltaPipeline, [0,8]);
+    this.reduceDeltaGroup = group(this.reduceDeltaPipeline, [0,2,8,13]);
+    this.deltaGroup = group(this.deltaPipeline, [0,2,7,8,13]);
+    this.compactDeltaGroup = group(this.compactDeltaPipeline, [0,2,8,13]);
   }
 
   encode(broker: PassBroker, options: FineLevelSetGPUTransportOptions): PassBroker {
@@ -322,8 +364,16 @@ export class WebGPUFineLevelSetTransport {
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after fine transport block classification");
     }
+    // Classify -> block prefix -> scatter, keyed by page index so the class
+    // streams keep the ascending order the retired serial loops produced.
+    run(this.reduceWorksetsPipeline, this.reduceWorksetsGroup,
+      "Reduce direct structured fine transport workset blocks", this.scanBlocks);
+    run(this.scanWorksetsPipeline, this.scanWorksetsGroup,
+      "Scan direct structured fine transport workset groups", 1);
     run(this.publishWorksetsPipeline, this.publishWorksetsGroup,
       "Publish direct structured fine transport worksets", 1);
+    run(this.compactWorksetsPipeline, this.compactWorksetsGroup,
+      "Compact direct structured fine transport worksets", this.scanBlocks);
     // Storage dependencies are ordered between dispatches in one compute pass.
     // End the pass only for the storage-write -> INDIRECT-only copy below.
     broker.fence("structured fine transport worksets published");
@@ -338,9 +388,11 @@ export class WebGPUFineLevelSetTransport {
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after fine characteristic transport");
     }
+    run(this.reduceStatusPipeline, this.reduceStatusGroup,
+      "Reduce structured fine transport status blocks", this.scanBlocks);
     run(this.summarizePipeline, this.summarizeGroup, "Publish structured fine transport status", 1);
     if (octreeAlgorithmDiagnosticsEnabled()) {
-      broker.fence("algorithm diagnostic after serial fine transport summary");
+      broker.fence("algorithm diagnostic after fine transport summary");
     }
     const commit = broker.compute({ label: "Commit structured fine phi and phase delta" });
     commit.setPipeline(this.commitPipeline); commit.setBindGroup(0, this.commitGroup);
@@ -348,7 +400,13 @@ export class WebGPUFineLevelSetTransport {
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after fine transport commit");
     }
-    run(this.deltaPipeline, this.deltaGroup, "Compact structured fine topology delta", 1);
+    run(this.clearDeltaPipeline, this.clearDeltaGroup,
+      "Clear structured fine transport delta", this.deltaClearBlocks);
+    run(this.reduceDeltaPipeline, this.reduceDeltaGroup,
+      "Reduce structured fine transport delta blocks", this.scanBlocks);
+    run(this.deltaPipeline, this.deltaGroup, "Publish structured fine transport delta", 1);
+    run(this.compactDeltaPipeline, this.compactDeltaGroup,
+      "Compact structured fine topology delta", this.scanBlocks);
     return broker;
   }
 

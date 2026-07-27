@@ -93,6 +93,8 @@ export interface OctreeRegressionResultRecord extends PowerDamResultRecord {
     readonly projectionEnergySampleCount?: number;
   };
   readonly octreeWorkAccounting?: OctreeWorkSnapshot;
+  /** Exact cause when a work-accounting stage failed its validity gate. */
+  readonly octreeWorkAccountingBlocker?: string;
 }
 
 export const OCTREE_REGRESSION_CONTRACTS: Readonly<Record<OctreeRegressionLane, {
@@ -149,45 +151,93 @@ export function octreeRegressionRevision(repositoryRoot: string): OctreeRegressi
   });
 }
 
+/** A metric together with the precise reason it could not be published. The
+ * reason is what the blocker records, so a capture names its own defect
+ * instead of restating the generic failure class. */
+interface OctreeRegressionAttempt<T> {
+  readonly value: T | null;
+  readonly reason: string;
+}
+
+const attempt = <T>(value: T): OctreeRegressionAttempt<T> => ({ value, reason: "" });
+const rejected = <T>(reason: string): OctreeRegressionAttempt<T> => ({ value: null, reason });
+
+/** Keep blocker reasons bounded when a whole family of labels/stages fails. */
+function listed(names: readonly string[], limit = 6): string {
+  return names.length <= limit
+    ? names.join(", ")
+    : `${names.slice(0, limit).join(", ")} (+${names.length - limit} more)`;
+}
+
 function dispatchAttribution(
   result: OctreeRegressionResultRecord,
-): OctreeRegressionArtifact["metrics"]["dispatchesPerAdvance"] {
+): OctreeRegressionAttempt<OctreeRegressionArtifact["metrics"]["dispatchesPerAdvance"]> {
   const audit = result.gpuCommandAudit;
   if (!audit || !Number.isSafeInteger(audit.dispatches) || audit.dispatches! < 0
     || !Number.isSafeInteger(result.steps) || result.steps < 1
-    || !audit.dispatchesByPassLabel) return null;
+    || !audit.dispatchesByPassLabel) {
+    return rejected("dispatch audit is absent or malformed; capture with the command audit enabled");
+  }
   const byStage: Record<string, number> = {};
+  const unowned: string[] = [];
+  const malformed: string[] = [];
   let attributed = 0;
   for (const [label, bucket] of Object.entries(audit.dispatchesByPassLabel)) {
+    if (!Number.isSafeInteger(bucket.calls) || bucket.calls < 0) { malformed.push(label); continue; }
     const stage = powerDamComputePassStage(label);
-    if (!stage || !Number.isSafeInteger(bucket.calls) || bucket.calls < 0) return null;
+    if (!stage) { unowned.push(label); continue; }
     attributed += bucket.calls;
     byStage[stage] = (byStage[stage] ?? 0) + bucket.calls / result.steps;
   }
-  if (attributed !== audit.dispatches) return null;
-  return Object.freeze({
+  if (malformed.length > 0) {
+    return rejected(`dispatch audit bucket is not a counter for pass label(s): ${listed(malformed.sort())}`);
+  }
+  if (unowned.length > 0) {
+    return rejected("dispatch audit contains pass label(s) with no owning stage in "
+      + `POWER_DAM_COMPUTE_PASS_OWNERSHIP: ${listed(unowned.sort())}`);
+  }
+  if (attributed !== audit.dispatches) {
+    return rejected(`dispatch label buckets sum to ${attributed} of ${audit.dispatches} audited dispatches`);
+  }
+  return attempt(Object.freeze({
     total: audit.dispatches / result.steps,
     byStage: Object.freeze(Object.fromEntries(Object.entries(byStage).sort(([a], [b]) =>
       a.localeCompare(b)))),
-  });
+  }));
 }
 
 function activeRatios(
   work: OctreeWorkSnapshot | undefined,
-): OctreeRegressionArtifact["metrics"]["activeScheduledRatio"] {
-  if (!work || !work.stagesComplete || work.activeLaneRatio === null
-    || work.activeLanes === null || work.scheduledLanes === null) return null;
+): OctreeRegressionAttempt<OctreeRegressionArtifact["metrics"]["activeScheduledRatio"]> {
+  if (!work) return rejected("work accounting was not published by the runtime");
+  // Name the unobserved counters. Every stage record is authored by one
+  // fail-closed decode in `recordOctreeRuntimeGPUWork`, so a null stage means
+  // that stage's GPU validity gate rejected — not that it did no work.
+  const missingLanes = OCTREE_WORK_STAGES.filter((stage) =>
+    work.stages[stage]?.activeLanes === null || work.stages[stage]?.scheduledLanes === null);
+  if (missingLanes.length > 0) {
+    return rejected(`work-accounting active/scheduled lanes are null for stage(s): ${listed(missingLanes)}`);
+  }
+  if (!work.stagesComplete) {
+    const incomplete = OCTREE_WORK_STAGES.flatMap((stage) =>
+      (work.missingStageMetrics[stage] ?? []).map((metric) => `${stage}.${metric}`));
+    return rejected(`work-accounting stage metrics are incomplete: ${listed(incomplete)}`);
+  }
+  if (work.activeLaneRatio === null || work.activeLanes === null || work.scheduledLanes === null) {
+    return rejected("work-accounting lane totals are null while every stage published counters");
+  }
   const byStage: Partial<Record<OctreeWorkStage, number>> = {};
   let active = 0;
   let scheduled = 0;
   for (const stage of OCTREE_WORK_STAGES) {
     const counters = work.stages[stage];
-    if (!counters) return null;
     const stageActive = counters.activeLanes;
     const stageScheduled = counters.scheduledLanes;
     if (!Number.isSafeInteger(stageActive) || stageActive === null || stageActive < 0
       || !Number.isSafeInteger(stageScheduled) || stageScheduled === null || stageScheduled < 0
-      || stageActive > stageScheduled) return null;
+      || stageActive > stageScheduled) {
+      return rejected(`work-accounting lane counters for stage ${stage} are not an active<=scheduled pair`);
+    }
     active += stageActive;
     scheduled += stageScheduled;
     byStage[stage] = stageScheduled === 0 ? 1 : stageActive / stageScheduled;
@@ -195,8 +245,10 @@ function activeRatios(
   const overall = scheduled === 0 ? 1 : active / scheduled;
   if (active !== work.activeLanes || scheduled !== work.scheduledLanes
     || !Number.isFinite(work.activeLaneRatio)
-    || Math.abs(overall - work.activeLaneRatio) > 1e-12) return null;
-  return Object.freeze({ overall, byStage: Object.freeze(byStage) });
+    || Math.abs(overall - work.activeLaneRatio) > 1e-12) {
+    return rejected("work-accounting stage lane sums do not reconcile with the published totals");
+  }
+  return attempt(Object.freeze({ overall, byStage: Object.freeze(byStage) }));
 }
 
 /** Compact reconstruction is the surviving end-to-end dissipation authority.
@@ -287,10 +339,8 @@ export function buildOctreeRegressionArtifact(input: {
   const blockers: OctreeRegressionBlocker[] = [];
   blocker(blockers, "stageTime_ms", stages,
     "exact physics stage timing was not published; capture with --profile");
-  blocker(blockers, "dispatchesPerAdvance", dispatches,
-    "dispatch audit is absent, incomplete, or contains an unowned pass label");
-  blocker(blockers, "activeScheduledRatio", ratios,
-    "work-accounting active/scheduled counters are null for at least one stage");
+  blocker(blockers, "dispatchesPerAdvance", dispatches.value, dispatches.reason);
+  blocker(blockers, "activeScheduledRatio", ratios.value, ratios.reason);
   blocker(blockers, "authorityBytes", authorityBytes,
     "work-accounting authority allocation inventory is absent or incomplete");
   blocker(blockers, "residual", residual,
@@ -326,8 +376,8 @@ export function buildOctreeRegressionArtifact(input: {
     metrics: Object.freeze({
       wallTime_ms: result.simulationWall_ms,
       stageTime_ms: stages,
-      dispatchesPerAdvance: dispatches,
-      activeScheduledRatio: ratios,
+      dispatchesPerAdvance: dispatches.value,
+      activeScheduledRatio: ratios.value,
       authorityBytes,
       residual,
       volumeDrift,

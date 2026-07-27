@@ -9,6 +9,7 @@ import {
   type PerformanceTrace,
 } from "@/lib/performance-trace";
 import { isOctreeTechniqueOverlayMode } from "@/lib/octree-technique-debug";
+import { performanceActivityFrameHasSettledEvidence } from "@/lib/performance-activity";
 import { emptyPerformanceReport, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { simulation } from "@/lib/simulation/controller";
 import { usePerformanceActivityStore } from "@/lib/stores/performance-activity-store";
@@ -304,12 +305,19 @@ export function PerformancePanel() {
   const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
   const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
   const holdingPausedMeasurements = lanes.cpu.held || lanes.physics.held || lanes.presentation.held;
-  const selectedActivityFrame = activityHistory.find((frame) =>
-    frame.identity.frameId === selectedActivityFrameId) ?? activityHistory.at(-1);
-  const referenceActivityFrame = activityHistory.find((frame) =>
+  // Base traces and shader readback arrive independently. Keep the base-only
+  // intermediate internal; once logical rows and their verdict arrive, expose
+  // the settled evidence even when validation correctly marks it incomplete.
+  const settledActivityHistory = useMemo(
+    () => activityHistory.filter(performanceActivityFrameHasSettledEvidence),
+    [activityHistory],
+  );
+  const selectedActivityFrame = settledActivityHistory.find((frame) =>
+    frame.identity.frameId === selectedActivityFrameId) ?? settledActivityHistory.at(-1);
+  const referenceActivityFrame = settledActivityHistory.find((frame) =>
     frame.identity.frameId === referenceActivityFrameId);
   const selectedActivityIndex = selectedActivityFrame
-    ? activityHistory.findIndex((frame) => frame.identity.frameId === selectedActivityFrame.identity.frameId)
+    ? settledActivityHistory.findIndex((frame) => frame.identity.frameId === selectedActivityFrame.identity.frameId)
     : -1;
   const changeInstrumentationMode = (mode: PerformanceInstrumentationMode) => {
     if (mode === instrumentationMode) return;
@@ -336,29 +344,32 @@ export function PerformancePanel() {
     <header className="performance-panel-header">
       <div><span>POWER LIQUIDS OBSERVATORY</span><h2>Measured work + live fields</h2></div>
       <div className="performance-panel-header-actions">
-        <label className="measurement-mode">
+        <button
+          className="measurement-mode"
+          type="button"
+          role="switch"
+          aria-checked={instrumentationMode === "activity"}
+          aria-label="Detailed performance capture"
+          data-enabled={instrumentationMode === "activity"}
+          onClick={() => changeInstrumentationMode(
+            instrumentationMode === "activity" ? "off" : "activity",
+          )}
+        >
           <span>CAPTURE</span>
-          <select
-            value={instrumentationMode}
-            onChange={(event) => changeInstrumentationMode(event.currentTarget.value as PerformanceInstrumentationMode)}
-            aria-label="Performance capture mode"
-          >
-            <option value="activity">Detailed</option>
-            <option value="timeline">Timeline only</option>
-            <option value="off">Off</option>
-          </select>
-        </label>
+          <strong>{instrumentationMode === "activity" ? "DETAILED" : "OFF"}</strong>
+          <i aria-hidden="true" />
+        </button>
       </div>
     </header>
 
     {instrumentationEnabled ? <>
     <PerformanceActivityGrid
       frame={selectedActivityFrame}
-      cpu={cpu}
-      physics={physics}
-      presentation={presentation}
-      captureLabel={selectedActivityIndex >= 0 ? `CAPTURE ${selectedActivityIndex + 1}/${activityHistory.length}` : undefined}
-      captureOptions={activityHistory.map((frame, index) => ({
+      cpu={instrumentationMode === "timeline" ? cpu : undefined}
+      physics={instrumentationMode === "timeline" ? physics : undefined}
+      presentation={instrumentationMode === "timeline" ? presentation : undefined}
+      captureLabel={selectedActivityIndex >= 0 ? `CAPTURE ${selectedActivityIndex + 1}/${settledActivityHistory.length}` : undefined}
+      captureOptions={settledActivityHistory.map((frame, index) => ({
         id: frame.identity.frameId,
         label: `#${index + 1} · ${frame.context}`,
       }))}
@@ -371,9 +382,11 @@ export function PerformancePanel() {
         ? () => pinActivityReference(selectedActivityFrame.identity.frameId)
         : undefined}
       onClearReference={referenceActivityFrame ? () => pinActivityReference(undefined) : undefined}
-      statusLabel={holdingPausedMeasurements
-        ? "PAUSED · LAST COMPLETE CAPTURE"
-        : instrumentationMode === "activity" ? "DETAILED ACTIVITY" : "TIMELINE ONLY"}
+      statusLabel={instrumentationMode === "activity" && !selectedActivityFrame
+        ? "WAITING FOR COMPLETE CAPTURE"
+        : holdingPausedMeasurements
+          ? "PAUSED · LAST SETTLED CAPTURE"
+          : instrumentationMode === "activity" ? "DETAILED ACTIVITY" : "TIMELINE ONLY"}
     />
     </> : <div className="performance-disabled-notice">
       <strong>Running without measurement instrumentation</strong>

@@ -78,8 +78,34 @@ import {
   STRUCTURED_PROJECTION_ENERGY_WORDS,
 } from "./webgpu-octree-structured-dynamics";
 import { decodeOctreeStructuredRejectCarry } from "./octree-structured-reject-carry";
-import { StructuredStepSnapshotRing, structuredAuthorityStepHealth } from "./structured-step-snapshot";
-import { OCTREE_STEP_PROGRAM, StepSequenceRecorder } from "./physics-step-program";
+import {
+  MAXIMUM_PENDING_PHYSICS_ADVANCES,
+  StructuredStepSnapshotRing,
+  structuredAuthorityStepHealth,
+  structuredStepSnapshotSlotCount,
+  structuredStepWorkObservation,
+  type StructuredStepSnapshotRecord,
+} from "./structured-step-snapshot";
+import {
+  OCTREE_STEP_PROGRAM,
+  PhysicsStepPredictionLedger,
+  StepSequenceRecorder,
+  physicsStepPredictionFailures,
+} from "./physics-step-program";
+
+/**
+ * Step-snapshot record sources that `WebGPUOctreeProjection` does not expose
+ * yet (P0.4 item 1). Adding `topologyEpochState`, `spgridLevelDelta`, and
+ * `airSupportScratch` getters to `lib/webgpu-octree.ts` — each a one-line
+ * delegation to `topologyEpoch.state`, `firstOrderVCycle` and
+ * `airVelocitySupport.scratch` — completes the widened record; until then the
+ * ring copies the segments it can reach and reports the rest absent.
+ */
+interface PendingStepSnapshotSources {
+  readonly topologyEpochState?: GPUBuffer;
+  readonly spgridLevelDelta?: GPUBuffer;
+  readonly airSupportScratch?: GPUBuffer;
+}
 
 export type UniformVelocityTransport = GPUVelocityTransport;
 export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
@@ -488,6 +514,17 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   /** Full 11-word reject carry (control words 0..10) including the stage-1/2
    * detail vec4 and workset class; absent on older readback layouts. */
   readonly structuredRejectCarry?: readonly number[];
+  /** Section 5 air-support publication control (16 words, arena layout). */
+  readonly airSupportControl?: readonly number[];
+  /** recordArena[13..14]: identity/detail of the first stage-8 support
+   * reconstruction failure, when one was recorded. */
+  readonly firstAirSupportFailure?: readonly number[];
+  /** recordArena[13..15] captured one-shot by the NEXT begin: the preceding
+   * failed transaction's terminal flags/detail/layout. */
+  readonly precedingAirSupportTerminal?: readonly number[];
+  /** scratch[41..42]: stationary-air fallback patch count and first
+   * (cell<<3)|axis identity from the most recent march. */
+  readonly airSupportFallbacks?: readonly number[];
   readonly configuredFineGeneration: number;
   readonly fineGenerationSlot: 0 | 1;
   readonly scheduledFineGeneration: number;
@@ -729,6 +766,8 @@ export class WebGPUUniformEulerianSolver {
   private lastTime = 0;
   private readbackPending = false;
   private structuredFreezeDumpedEpoch = -1;
+  private airSupportFailureLoggedWord: number | undefined;
+  private airSupportFallbackLoggedCount: number | undefined;
   private structuredProbeCounter = 0;
   private structuredRowCounterRaces = 0;
   private structuredLagLoggedFine = -1;
@@ -741,6 +780,15 @@ export class WebGPUUniformEulerianSolver {
   private stepSnapshotRing?: StructuredStepSnapshotRing;
   private readonly stepSequenceRecorder = new StepSequenceRecorder();
   private stepSequenceFaulted = false;
+  /**
+   * P0.5 lag-k audit: what each step's encode predicted, resolved when that
+   * step's own snapshot maps. Sized past the maximum pipeline depth so a
+   * prediction is still held when its record arrives.
+   */
+  private readonly stepPredictions =
+    new PhysicsStepPredictionLedger(2 * MAXIMUM_PENDING_PHYSICS_ADVANCES);
+  private stepPredictionFaulted = false;
+  private stepSnapshotFaulted = false;
   private readonly logicalActivity: GPULogicalActivityAdoptionContext;
   private logicalActivityMarkerPipeline?: GPUComputePipeline;
   private logicalActivityMarkerTickSource?: GPUBuffer;
@@ -1278,6 +1326,41 @@ fn recordPhysicsPhaseBoundary(
     this.info.structuredRejectStage = reject.stage;
     this.info.structuredRejectIndex = reject.index;
     this.info.structuredRejectSummary = reject.clean ? undefined : reject.summary;
+    // A failed Section 5 air-support publication rejects EVERY advect lane
+    // next step (supportPublicationValid gate) and freezes the epoch; name
+    // the producer's own error record once per distinct failure word.
+    const support = value.airSupportControl;
+    const latched = value.firstAirSupportFailure ?? [];
+    const liveFailure = !!support && support.length >= 16
+      && (support[0] !== 0 || (support[1] ?? 0xffff_ffff) !== 0xffff_ffff);
+    const latchedFailure = (latched[0] ?? 0) !== 0;
+    const failureWord = liveFailure ? support![1] : latchedFailure ? latched[1] : undefined;
+    if ((liveFailure || latchedFailure)
+      && this.airSupportFailureLoggedWord !== failureWord) {
+      this.airSupportFailureLoggedWord = failureWord;
+      console.error("[air-support-failure]", JSON.stringify({
+        live: liveFailure, errors: support?.[0], firstError: support?.[1],
+        directRows: support?.[5], supportCount: support?.[6],
+        faceItems: support?.[10], seeds: support?.[11], maxWaves: support?.[12],
+        latchedFlags: latched[0], latchedFirstError: latched[1],
+        precedingTerminal: value.precedingAirSupportTerminal }));
+    }
+    const fallbacks = value.airSupportFallbacks;
+    if (fallbacks && (fallbacks[0] ?? 0) > 0
+      && this.airSupportFallbackLoggedCount !== fallbacks[0]) {
+      this.airSupportFallbackLoggedCount = fallbacks[0];
+      const packed = fallbacks[1] ?? 0xffff_ffff;
+      const cell = packed === 0xffff_ffff ? undefined : (packed >>> 3) & 0x1fff;
+      console.error("[air-support-fallback]", JSON.stringify({
+        patches: fallbacks[0], firstAxis: packed === 0xffff_ffff ? undefined : packed & 7,
+        firstCell: cell, firstCoordinate: cell === undefined ? undefined
+          : [cell % this.info.nx, Math.floor(cell / this.info.nx) % this.info.ny,
+            Math.floor(cell / (this.info.nx * this.info.ny))],
+        // STRUCTURED_AIR_SUPPORT_RECORD_FLAGS bits: 4=interfaceSource,
+        // 8=transitionSelector, 16=fineBandDemand, 64=interpolationStencil,
+        // 128=extensionClosure — the demand provenance of the first patch.
+        firstDemandFlags: packed === 0xffff_ffff ? undefined : (packed >>> 16) & 0xff }));
+    }
     this.info.structuredBoundaryGeneration = boundary[4] ?? 0;
     this.info.structuredBoundaryValid = boundary.length >= 7 && boundary[0] === 0
       && boundary[2] === velocity[2] && boundary[4] === velocity[3]
@@ -1286,6 +1369,42 @@ fn recordPhysicsPhaseBoundary(
     // Never relabel the host's newer attempt stamp as a published generation.
     this.info.powerDiagramGeneration = this.info.structuredVelocityValid
       && this.info.structuredBoundaryValid ? velocity[3] : undefined;
+  }
+
+  /**
+   * P0.5 lag-k check: step N's own snapshot has mapped, so compare the GPU's
+   * counters against the prediction the driver recorded when it shaped step
+   * N's encode. The comparison is pure audit — the step is long submitted —
+   * but a mismatch means a launch-shape predicate deleted live work, which is
+   * the one thing the carve-out in the driver contract forbids.
+   *
+   * Latched per run like the sequence check: one dishonest step invalidates
+   * the predicate, so later conforming steps must not clear it.
+   */
+  private resolveStepPrediction(record: StructuredStepSnapshotRecord) {
+    const prediction = this.stepPredictions.take(record.stamp.step);
+    if (!prediction) return;
+    const observation = structuredStepWorkObservation(record);
+    const failures = physicsStepPredictionFailures(prediction, {
+      step: observation.step,
+      executedSolveIterations: observation.executedSolveIterations,
+      solveConverged: observation.solveConverged,
+      topologyFlipReady: observation.topologyFlipReady,
+      topologyEpochError: observation.topologyEpochError,
+      spgridLevelDirty: observation.spgridLevelDirty,
+      fineActiveBricks: observation.fineActiveBricks,
+      airSupportErrorFlags: observation.airSupportErrorFlags,
+    }, OCTREE_STEP_PROGRAM);
+    this.info.structuredSnapshotExecutedSolveIterations = observation.executedSolveIterations;
+    this.info.structuredSnapshotSolveConverged = observation.solveConverged;
+    if (failures.length === 0 || this.stepPredictionFaulted) return;
+    this.stepPredictionFaulted = true;
+    this.info.stepPredictionFailures = [...failures];
+    console.error("[step-prediction]", JSON.stringify({
+      step: prediction.step, encodedSolveBudget: prediction.encodedSolveBudget,
+      skipped: prediction.skippedStageIds, conditions: prediction.conditions,
+      failures,
+    }));
   }
 
   /** The paper path must be complete before the first trajectory can be
@@ -2121,7 +2240,21 @@ fn recordPhysicsPhaseBoundary(
       const boundaryControl = this.structuredBoundaryControl;
       const fine = this.globalFineLevelSetSource;
       if (velocityControl && boundaryControl && fine) {
-        this.stepSnapshotRing ??= new StructuredStepSnapshotRing(this.device);
+        // Slot count derives from the in-flight ceiling: an under-sized ring
+        // makes `encode` skip the record when every slot is mapping, and a
+        // missing `step-snapshot` stage latches a permanent sequence fault
+        // (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A4.2).
+        this.stepSnapshotRing ??= new StructuredStepSnapshotRing(
+          this.device, structuredStepSnapshotSlotCount());
+        // P0.4: the topology-epoch state, the SPGrid per-level setup delta,
+        // and the air-support failure scratch are the GPU's own verdict words
+        // for the subsystems Part B intends to gate. They are private fields
+        // of WebGPUOctreeProjection today (`lib/webgpu-octree.ts`); adding one
+        // getter each is the remaining half of A4.1. Reading them structurally
+        // lights the segments up the moment those accessors land, and until
+        // then the ring reports the segments absent rather than copying zeros
+        // that a skip predicate could mistake for evidence.
+        const pending = this.octreeProjection as unknown as PendingStepSnapshotSources;
         if (this.stepSnapshotRing.encode(encoder, {
           structuredVelocityControl: velocityControl,
           structuredBoundaryControl: boundaryControl,
@@ -2129,12 +2262,28 @@ fn recordPhysicsPhaseBoundary(
           mgpcgControl: this.mgpcgControl,
           fineVolumeControl: this.globalFineVolumeControl,
           projectionEnergyStats: this.structuredProjectionEnergyStats,
+          topologyEpochState: pending.topologyEpochState,
+          spgridLevelDelta: pending.spgridLevelDelta,
+          airSupportScratch: pending.airSupportScratch,
+          fineTransportGovernor: this.workAccountingBuffers?.fineTransportGovernor?.buffer,
         }, {
           step: this.info.encodedSteps ?? 0,
           dt_s: dt,
           submittedTime_s: this.lastTime,
           hostFineGeneration: fine.generation,
         })) this.stepSequenceRecorder.record("step-snapshot");
+        else if (!this.stepSnapshotFaulted) {
+          // The producer must never skip. It is not a lost diagnostic: the
+          // step encodes no `step-snapshot` stage, which is a step-sequence
+          // deviation, and the lag-k prediction for this step can never be
+          // resolved.
+          this.stepSnapshotFaulted = true;
+          console.error("[step-snapshot]", JSON.stringify({
+            step: this.info.encodedSteps, slots: this.stepSnapshotRing.slotCount,
+            skipped: this.stepSnapshotRing.skippedRecords,
+            reason: "every ring slot was mapping; raise the slot count",
+          }));
+        }
       }
     }
     if (shouldCaptureLogicalActivity) this.encodeLogicalActivityFrameEnd(encoder);
@@ -2167,6 +2316,16 @@ fn recordPhysicsPhaseBoundary(
     // must have encoded exactly the declared step program. A deviation is a
     // first-class error published on the info record, not a silent drift.
     if (this.octreeProjection) {
+      // P0.5: record what this encode predicted BEFORE the recorder resets.
+      // Nothing in the step reads this back; it is resolved against step N's
+      // own snapshot when that record maps (see `resolveStepPrediction`).
+      this.stepPredictions.record({
+        step: this.info.encodedSteps ?? 0,
+        encodedSolveBudget:
+          this.workAccountingPlan?.pressure.maximumOuterIterations ?? 0,
+        conditions: [...this.stepSequenceRecorder.recordedConditions],
+        skippedStageIds: [...this.stepSequenceRecorder.skippedStageIds(OCTREE_STEP_PROGRAM)],
+      });
       const sequenceDeviations = this.stepSequenceRecorder.finishStep(OCTREE_STEP_PROGRAM);
       // Latched per run: one bad step is a broken driver contract even if
       // later steps conform, so gates always observe it.
@@ -2411,7 +2570,14 @@ fn recordPhysicsPhaseBoundary(
       if (stepHealth) {
         this.info.structuredSnapshotStep = stepHealth.step;
         this.info.structuredAuthorityLagSteps = stepHealth.authorityLagSteps;
+        // Active-brick count is worklist header word ONE (A3/A4.3). Word zero
+        // is the generation; decoding it as a count reported a rising
+        // generation as band occupancy and hid the capacity-overflow
+        // sentinel, which silently no-ops the solver.
+        this.info.structuredSnapshotActiveFineBricks = stepHealth.activeFineBricks;
+        this.info.structuredSnapshotFineBandOverflow = stepHealth.fineBandCapacityOverflow;
       }
+      if (stepRecord) this.resolveStepPrediction(stepRecord);
       const frozenEpoch = stepHealth?.acceptedEpoch ?? this.info.structuredVelocityGeneration ?? 0;
       const liveFine = stepHealth?.publishedFineGeneration ?? this.info.globalFineGeneration ?? 0;
       const lag = stepHealth ? stepHealth.authorityLagSteps : liveFine - frozenEpoch;
@@ -2493,6 +2659,11 @@ fn recordPhysicsPhaseBoundary(
           flags.push("structured-publication-invalid");
         }
         if (this.info.stepSequenceDeviations?.length) flags.push("step-sequence-deviation");
+        // P0.5 ALERT: the browser surfaces a broken launch-shape prediction on
+        // the stability card; harness lanes read the same info field and fail
+        // the run. A skip may only ever delete work the GPU reports as zero.
+        if (this.info.stepPredictionFailures?.length) flags.push("step-prediction-mismatch");
+        if (stepHealth?.fineBandCapacityOverflow) flags.push("fine-band-capacity-overflow");
         this.info.stabilityFlags = flags;
       }
     }
@@ -2527,7 +2698,14 @@ fn recordPhysicsPhaseBoundary(
       this.info.structuredWetPostProjectionKineticEnergyProxy =
         structuredEnergy.sample.wetPostProjectionKineticEnergyProxy;
       this.info.structuredWetFaceCount = structuredEnergy.sample.wetFaceCount;
-      this.info.structuredTransitionPathCount = structuredEnergy.sample.transitionPathCount;
+      this.info.structuredWetStartThetaEnergyProxy =
+        structuredEnergy.sample.wetStartThetaEnergyProxy;
+      this.info.structuredWetPostAdvectionThetaEnergyProxy =
+        structuredEnergy.sample.wetPostAdvectionThetaEnergyProxy;
+      this.info.structuredWetPreProjectionThetaEnergyProxy =
+        structuredEnergy.sample.wetPreProjectionThetaEnergyProxy;
+      this.info.structuredWetPostProjectionThetaEnergyProxy =
+        structuredEnergy.sample.wetPostProjectionThetaEnergyProxy;
       this.info.structuredStaggeredPathCount = structuredEnergy.sample.staggeredPathCount;
       this.info.structuredProjectionEnergyRatio = structuredEnergy.sample.projectionEnergyRatio;
       this.info.structuredProjectionEnergySampleCount = 1;
@@ -2538,6 +2716,10 @@ fn recordPhysicsPhaseBoundary(
       this.info.structuredWetPostAdvectionKineticEnergyProxy = undefined;
       this.info.structuredWetPreProjectionKineticEnergyProxy = undefined;
       this.info.structuredWetPostProjectionKineticEnergyProxy = undefined;
+      this.info.structuredWetStartThetaEnergyProxy = undefined;
+      this.info.structuredWetPostAdvectionThetaEnergyProxy = undefined;
+      this.info.structuredWetPreProjectionThetaEnergyProxy = undefined;
+      this.info.structuredWetPostProjectionThetaEnergyProxy = undefined;
       this.info.structuredPreProjectionKineticEnergyProxy = undefined;
       this.info.structuredPostProjectionKineticEnergyProxy = undefined;
       this.info.structuredProjectionEnergyRatio = undefined;

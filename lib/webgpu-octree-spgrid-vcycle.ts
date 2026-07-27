@@ -6,6 +6,11 @@ import {
 import { PassBroker } from "./webgpu-pass-broker";
 import type { OctreePipelinedWorksetLinearOperator } from "./webgpu-octree-pipelined-mgpcg";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
+import {
+  OCTREE_CUBE_TRANSFORMS,
+  inverseCubeTransform,
+  transformPowerVector,
+} from "./octree-power-topology";
 
 /** Native sparse-level cell roles from Setaluri et al., section 5. */
 export const SPGRID_CELL_FLAG = Object.freeze({
@@ -858,8 +863,15 @@ type CachedAccurateApply = {
   readonly worksetLayout: GPUBuffer;
   readonly gateGroup: GPUBindGroup;
   readonly classGroups: Readonly<Record<AccurateClass, GPUBindGroup>>;
+  readonly unionGroup: GPUBindGroup;
   mergedBandGroup?: GPUBindGroup;
 };
+
+/**
+ * Byte offset of the fifth accurate indirect record: the union of the four
+ * accepted row classes, which `applyAcceptedUnion` consumes as one dispatch.
+ */
+const ACCURATE_UNION_DISPATCH_OFFSET_BYTES = 4 * 12;
 
 /**
  * Paper-style native sparse pyramid with an authoritative brick-rank lookup.
@@ -894,7 +906,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly dispatchMeta: GPUBuffer;
   private readonly indirectDispatch: GPUBuffer;
   private readonly capturePageState: GPUBuffer;
-  private readonly levelDelta: GPUBuffer;
+  /** Read by the step-snapshot ring (POWER_LIQUIDS_ULTIMATE_M1MAX A4). Copy
+   * source only; no caller may bind or write it. */
+  readonly levelDelta: GPUBuffer;
   private readonly candidateTopology: GPUBuffer;
   private readonly candidateState: GPUBuffer;
   private readonly candidateDispatch: GPUBuffer;
@@ -910,6 +924,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateClassDispatch: GPUBuffer;
   private readonly accurateClassPipelines: Readonly<Record<AccurateClass, GPUComputePipeline>>;
   private readonly accurateMergedBandPipeline: GPUComputePipeline;
+  private readonly accurateUnionPipeline: GPUComputePipeline;
   private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
@@ -1115,7 +1130,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     });
     this.accurateClassDispatch = device.createBuffer({
       label: "SPGrid accurate A2 convergence-gated class records",
-      size: 4 * 12,
+      // Four per-class records, then the union record the single accepted-row
+      // dispatch consumes. The class records stay published so the four-way
+      // encode remains a one-line A/B against the union encode.
+      size: ACCURATE_UNION_DISPATCH_OFFSET_BYTES + 12,
       usage: storage | GPUBufferUsage.INDIRECT,
     });
     const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
@@ -1133,9 +1151,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       label: "SPGrid Section 6.3 · destination-owned merged band", layout: "auto",
       compute: { module: accurateModule, entryPoint: "applyMergedBand" },
     });
+    this.accurateUnionPipeline = device.createComputePipeline({
+      label: "SPGrid accurate A2 · accepted row union", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "applyAcceptedUnion" },
+    });
     this.accurateOperator = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
-      encodedDispatchCount: 5,
+      // One convergence gate plus one indirect dispatch over the union of the
+      // four accepted class lists; see encodeAccurateWorksets.
+      encodedDispatchCount: 2,
       encodedMergedBandDispatchCount: 1 as const,
       encode: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer, solverControl: GPUBuffer) => {
         if (!this.source.classDispatch) {
@@ -1398,13 +1422,14 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     pass.setBindGroup(0, cached.gateGroup);
     pass.dispatchWorkgroups(1, 1, 1);
     broker.fence("SPGrid accurate A2 convergence-gated indirect publication");
-    pass = broker.compute({ label: "SPGrid accurate A2 · four disjoint row classes" });
-    const classes = Object.keys(this.accurateClassPipelines) as AccurateClass[];
-    for (const [index, rowClass] of classes.entries()) {
-      pass.setPipeline(this.accurateClassPipelines[rowClass]);
-      pass.setBindGroup(0, cached.classGroups[rowClass]);
-      pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch, index * 12);
-    }
+    // One indirect dispatch over the concatenation of the four disjoint class
+    // lists. The four class records stay published beside the union record, so
+    // restoring the four-way encode is a local edit for A/B measurement.
+    pass = broker.compute({ label: "SPGrid accurate A2 · accepted row union" });
+    pass.setPipeline(this.accurateUnionPipeline);
+    pass.setBindGroup(0, cached.unionGroup);
+    pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch,
+      ACCURATE_UNION_DISPATCH_OFFSET_BYTES);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after accurate A2 class apply");
     }
@@ -1510,8 +1535,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
           { binding: 4, resource: { buffer: this.accurateClassDispatch } },
         ],
       });
+      const unionGroup = makeGroup(this.accurateUnionPipeline,
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "SPGrid Section 6.3 · accepted row union bindings");
       cached = { input, output, solverControl, worksets: worksets.buffer,
-        worksetOffset, worksetSize, worksetLayout, gateGroup, classGroups };
+        worksetOffset, worksetSize, worksetLayout, gateGroup, classGroups, unionGroup };
       this.accurateBindings.push(cached);
     }
     return cached;
@@ -1544,15 +1572,162 @@ fn activeSolve()->bool{return arrayLength(&solverControl)>=2u
 fn prepareAccurateDispatches(){
  let solveLive=activeSolve();
  let bank=select(0u,accepted[4]&1u,arrayLength(&accepted)>4u);
+ var unionRows=0u;var unionValid=true;
  for(var cls=0u;cls<4u;cls+=1u){
   let source=bank*worksetLayout.y+cls*worksetLayout.x+4u;let destination=cls*3u;
   let valid=source+2u<arrayLength(&worksets);
   classDispatch[destination]=select(0u,worksets[source],solveLive&&valid);
   classDispatch[destination+1u]=select(1u,worksets[source+1u],valid);
   classDispatch[destination+2u]=select(1u,worksets[source+2u],valid);
+  // The union record covers the same rows as the four class records. Its lane
+  // count is the exact sum of the published class counts, so the concatenated
+  // walk in applyAcceptedUnion lands on every accepted row and on no other.
+  let base=source-4u;
+  if(!valid||base+2u>=arrayLength(&worksets)||worksets[base+1u]>worksets[base+2u]){unionValid=false;}
+  else{unionRows+=worksets[base+1u];}
  }
+ classDispatch[12]=select(0u,(unionRows+63u)/64u,solveLive&&unionValid);
+ classDispatch[13]=1u;classDispatch[14]=1u;
 }
 `;
+
+/**
+ * The eighteen canonical Section 6.3 channel directions. This is the exact
+ * table both operator shaders carry as `canonicalDirection`; it exists on the
+ * host only so the inverse channel lookup below can be *derived from the
+ * shader's own scan* instead of transcribed.
+ */
+const SECTION63_CANONICAL_DIRECTIONS: readonly (readonly [number, number, number])[]
+  = Object.freeze(([
+    [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+    [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0], [1, 0, 1], [1, 0, -1],
+    [-1, 0, 1], [-1, 0, -1], [0, 1, 1], [0, 1, -1], [0, -1, 1], [0, -1, -1],
+  ] as [number, number, number][]).map((direction) => Object.freeze(direction)));
+
+/**
+ * Literal transliteration of the WGSL `worldDirection`: the transform code's
+ * three sign bits scale the *source* components, then `(code / 8) % 6` selects
+ * the component permutation. Kept statement-for-statement identical to the
+ * shader so the generated table cannot drift from the scan it replaces.
+ */
+function section63WorldDirectionOnHost(
+  value: readonly [number, number, number], code: number,
+): [number, number, number] {
+  const q: [number, number, number] = [
+    ((code & 1) !== 0 ? -1 : 1) * value[0],
+    ((code & 2) !== 0 ? -1 : 1) * value[1],
+    ((code & 4) !== 0 ? -1 : 1) * value[2],
+  ];
+  const permutation = Math.floor(code / 8) % 6;
+  if (permutation === 0) return [q[0], q[1], q[2]];
+  if (permutation === 1) return [q[0], q[2], q[1]];
+  if (permutation === 2) return [q[1], q[0], q[2]];
+  if (permutation === 3) return [q[2], q[0], q[1]];
+  if (permutation === 4) return [q[1], q[2], q[0]];
+  return [q[2], q[1], q[0]];
+}
+
+/** 64 transform codes x 27 direction slots, one byte each. */
+const SECTION63_CHANNEL_TABLE_SLOTS = 27;
+const SECTION63_CHANNEL_TABLE_ENTRIES = 64 * SECTION63_CHANNEL_TABLE_SLOTS;
+const SECTION63_CHANNEL_TABLE_WORDS = SECTION63_CHANNEL_TABLE_ENTRIES / 4;
+/** Sentinel for "no stored channel points this way" — the scan's `return 0.0`. */
+const SECTION63_CHANNEL_NONE = 255;
+
+/**
+ * Inverts `worldDirection` once, on the host, by *running the shader's own
+ * linear scan* over all 64 transform codes and all 27 directions in
+ * {-1,0,1}^3. The result is the identical answer the scan would return, so the
+ * replacement is a pure lookup with no arithmetic change.
+ *
+ * Four self-checks fail closed at import rather than on the GPU:
+ *  1. an independently authored authority — the cube-symmetry group in
+ *     `octree-power-topology`, whose `transformPowerVector`/`inverseCubeTransform`
+ *     were written for the catalog generator and share no code with the shader —
+ *     must reproduce `worldDirection` on every (code, canonical direction) pair;
+ *  2. every canonical direction must resolve to a channel;
+ *  3. each code's canonical map must be a bijection over the 18 channels
+ *     (no channel claimed twice, so the scan's first-match rule is unambiguous);
+ *  4. the nine non-canonical slots must stay unmatched, mirroring the scan's
+ *     fall-through to 0.0.
+ */
+function buildSection63DirectionChannelTable(): Uint8Array {
+  const table = new Uint8Array(SECTION63_CHANNEL_TABLE_ENTRIES).fill(SECTION63_CHANNEL_NONE);
+  for (let code = 0; code < 64; code += 1) {
+    for (let slot = 0; slot < SECTION63_CHANNEL_TABLE_SLOTS; slot += 1) {
+      const wanted: [number, number, number] = [
+        (slot % 3) - 1, (Math.floor(slot / 3) % 3) - 1, Math.floor(slot / 9) - 1,
+      ];
+      // This loop *is* `coefficientForDirection`'s scan, first match wins.
+      for (let channel = 0; channel < 18; channel += 1) {
+        const world = section63WorldDirectionOnHost(SECTION63_CANONICAL_DIRECTIONS[channel]!, code);
+        if (world[0] === wanted[0] && world[1] === wanted[1] && world[2] === wanted[2]) {
+          table[code * SECTION63_CHANNEL_TABLE_SLOTS + slot] = channel;
+          break;
+        }
+      }
+    }
+  }
+  for (let code = 0; code < 64; code += 1) {
+    const transform = OCTREE_CUBE_TRANSFORMS[(Math.floor(code / 8) % 6) * 8 + (code & 7)]!;
+    const inverse = inverseCubeTransform(transform);
+    const claimed = new Set<number>();
+    for (let channel = 0; channel < 18; channel += 1) {
+      const direction = SECTION63_CANONICAL_DIRECTIONS[channel]!;
+      const mine = section63WorldDirectionOnHost(direction, code);
+      const theirs = transformPowerVector([direction[0], direction[1], direction[2]], inverse);
+      if (mine[0] !== theirs[0] || mine[1] !== theirs[1] || mine[2] !== theirs[2]) {
+        throw new Error("Section 6.3 world direction disagrees with the cube-transform group");
+      }
+      const slot = (direction[0] + 1) + 3 * (direction[1] + 1) + 9 * (direction[2] + 1);
+      const resolved = table[code * SECTION63_CHANNEL_TABLE_SLOTS + slot]!;
+      if (resolved >= 18) throw new Error("Section 6.3 channel table left a canonical direction unmatched");
+      claimed.add(resolved);
+    }
+    if (claimed.size !== 18) throw new Error("Section 6.3 channel table is not a per-code bijection");
+    for (const slot of [0, 2, 6, 8, 13, 18, 20, 24, 26]) {
+      if (table[code * SECTION63_CHANNEL_TABLE_SLOTS + slot] !== SECTION63_CHANNEL_NONE) {
+        throw new Error("Section 6.3 channel table matched a non-canonical direction");
+      }
+    }
+  }
+  return table;
+}
+
+/**
+ * The packed table plus its accessor, shared verbatim by the accurate A2
+ * operator and the Section 4.3 band dilation. Four one-byte entries per word.
+ */
+export const octreeSection63DirectionChannelWGSL: string = (() => {
+  const table = buildSection63DirectionChannelTable();
+  const words = new Uint32Array(SECTION63_CHANNEL_TABLE_WORDS);
+  for (let entry = 0; entry < SECTION63_CHANNEL_TABLE_ENTRIES; entry += 1) {
+    words[entry >> 2] |= table[entry]! << ((entry & 3) * 8);
+  }
+  for (let entry = 0; entry < SECTION63_CHANNEL_TABLE_ENTRIES; entry += 1) {
+    if (((words[entry >> 2]! >>> ((entry & 3) * 8)) & 0xff) !== table[entry]!) {
+      throw new Error("Section 6.3 channel table packing is not lossless");
+    }
+  }
+  const literals: string[] = [];
+  for (let word = 0; word < words.length; word += 6) {
+    literals.push([...words.slice(word, word + 6)]
+      .map((value) => `0x${value.toString(16).padStart(8, "0")}u`).join(","));
+  }
+  return `
+// Generated by buildSection63DirectionChannelTable: for every transform code
+// (transformAndFlags & 63) and every direction in {-1,0,1}^3, the stored
+// Section 6.3 channel whose worldDirection equals it, or 255 when none does.
+// This is the memoized result of the eighteen-step scan it replaces.
+const S63_CHANNEL_TABLE:array<u32,${SECTION63_CHANNEL_TABLE_WORDS}>=array<u32,${SECTION63_CHANNEL_TABLE_WORDS}>(
+ ${literals.join(",\n ")});
+fn section63ChannelForDirection(code:u32,direction:vec3i)->u32{
+ if(any(direction<vec3i(-1))||any(direction>vec3i(1))){return ${SECTION63_CHANNEL_NONE}u;}
+ let index=code*${SECTION63_CHANNEL_TABLE_SLOTS}u
+  +u32(direction.x+1)+3u*u32(direction.y+1)+9u*u32(direction.z+1);
+ return(S63_CHANNEL_TABLE[index>>2u]>>((index&3u)*8u))&0xffu;}
+`;
+})();
 
 export const octreeSPGridAccurateOperatorShader = /* wgsl */ `
 struct Layout{workset:vec4u,dimsCapacity:vec4u,hierarchy:vec4u,numerics:vec4f}
@@ -1637,8 +1812,13 @@ fn worldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1,(code
  if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}
  if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;}
 fn coefficientBase(row:u32)->u32{return acceptedBank()*p.hierarchy.w+row*19u;}
-fn coefficientForDirection(row:u32,metric:Metric,direction:vec3i)->f32{let base=coefficientBase(row);for(var channel=0u;channel<18u;channel+=1u){
- if(all(worldDirection(canonicalDirection(channel),metric.transformAndFlags&63u)==direction)){return section63Coefficients[base+1u+channel];}}return 0.0;}
+${octreeSection63DirectionChannelWGSL}
+// One indexed load replaces the eighteen-step scan that re-evaluated
+// worldDirection per candidate. The table is the memoized scan result.
+fn coefficientForDirection(row:u32,metric:Metric,direction:vec3i)->f32{
+ let channel=section63ChannelForDirection(metric.transformAndFlags&63u,direction);
+ if(channel>=18u){return 0.0;}
+ return section63Coefficients[coefficientBase(row)+1u+channel];}
 // Destination-owned GhostValueAccumulate. A 2:1 coarse leaf has at most
 // eight fine-level aliases. Each alias gathers the (at most eighteen) active
 // page neighbours that point to it. This is E^T by construction: it reads the
@@ -1674,6 +1854,25 @@ fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=array
 @compute @workgroup_size(64) fn applyPhysicalBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),2u);if(!stopped()&&row!=INVALID){applyRow(row);}}
 @compute @workgroup_size(64) fn applyTransitionBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),3u);if(!stopped()&&row!=INVALID){applyRow(row);}}
 @compute @workgroup_size(64) fn applyMergedBand(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),4u);if(!stopped()&&row!=INVALID){applyRow(row);}}
+// The four published class lists are disjoint and jointly cover every accepted
+// row, so walking them back to back enumerates each accepted row exactly once,
+// with no duplicate and no omission. applyRow never branches on class - the
+// class literal only chose which list a row was read from - so one dispatch
+// over the concatenation performs byte-identical per-row work to the four class
+// dispatches it replaces. Every guard below is workRow's, term for term; a
+// header that fails any of them retires the whole union, which is strictly more
+// fail-closed than retiring one class.
+fn unionRow(item:u32)->u32{var remaining=item;
+ for(var cls=0u;cls<4u;cls+=1u){let base=worksetBase(cls);
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+   ||worksets[base+1u]>worksets[base+2u]){return INVALID;}
+  let count=worksets[base+1u];
+  if(remaining<count){
+   if(base+WORKSET_HEADER_WORDS+remaining>=arrayLength(&worksets)){return INVALID;}
+   return worksets[base+WORKSET_HEADER_WORDS+remaining];}
+  remaining-=count;}
+ return INVALID;}
+@compute @workgroup_size(64) fn applyAcceptedUnion(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=unionRow(linearLane(wg,groups,lane));if(!stopped()&&row!=INVALID){applyRow(row);}}
 `;
 
 export const octreeSPGridVCycleShader = /* wgsl */ `
@@ -2037,6 +2236,55 @@ fn section63Direction(k:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,
 fn section63WorldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1,(code&1u)!=0u),select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let q=value*signs;let permutation=(code/8u)%6u;
  if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;}
 
+// Cooperative 256-lane primitives for the ordered candidate phases. Every
+// barrier reached from here sits in unconditional control flow whose governing
+// bound is a literal or a value laundered through workgroupUniformLoad, so the
+// per-lane barrier count is identical on every path through a workgroup and no
+// barrier is ever predicated on a raw storage read.
+const CHUNK=256u;
+var<workgroup> chunkBound:u32;
+var<workgroup> chunkCarry:u32;
+var<workgroup> chunkKey:array<u32,256>;
+var<workgroup> chunkAux:array<u32,256>;
+var<workgroup> chunkFlag:array<u32,256>;
+var<workgroup> chunkMask:array<u32,8>;
+var<workgroup> chunkScan:array<u32,256>;
+// Publish one storage-derived word as a workgroup-uniform value. Lane 0 owns
+// the write; the uniform load is what lets every loop below carry a barrier in
+// provably uniform control flow.
+fn uniformWord(lane:u32,value:u32)->u32{
+ if(lane==0u){chunkBound=value;}
+ workgroupBarrier();
+ let published=workgroupUniformLoad(&chunkBound);
+ workgroupBarrier();
+ return published;
+}
+// Inclusive prefix sum across the 256 lanes. Integer addition is associative,
+// so a block scan publishes exactly the value the serial running counter did.
+fn blockInclusiveSum(lane:u32,value:u32)->u32{
+ chunkScan[lane]=value;
+ workgroupBarrier();
+ for(var span=1u;span<CHUNK;span=span<<1u){
+  var addend=0u;
+  if(lane>=span){addend=chunkScan[lane-span];}
+  workgroupBarrier();
+  chunkScan[lane]=chunkScan[lane]+addend;
+  workgroupBarrier();
+ }
+ return chunkScan[lane];
+}
+// Reduce the per-lane replay flags to eight ascending bit words with no atomic:
+// each of the first eight lanes owns a disjoint 32-lane span. The storage
+// barrier retires the lanes' parallel probe of the hash arena before the single
+// ordered owner starts writing that same arena.
+fn packChunkFlags(lane:u32){
+ storageBarrier();workgroupBarrier();
+ if(lane<8u){var bits=0u;
+  for(var b=0u;b<32u;b+=1u){if(chunkFlag[lane*32u+b]!=0u){bits|=1u<<b;}}
+  chunkMask[lane]=bits;}
+ workgroupBarrier();
+}
+
 // Phase 1 (slot/row parallel). Every capacity-wide reset the singleton used to
 // walk serially. Pure constant stores, so the published bytes cannot depend on
 // scheduling. The transfer-chain reset moves here too: nothing between this
@@ -2062,17 +2310,43 @@ fn section63WorldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1
   }
  }
 }
-// Phase 2 (one invocation per level). Open-address insertion is the only
+// Phase 2 (one 256-lane workgroup per level). Open-address insertion is the only
 // order-defining step left, and levels are disjoint: an insert touches one
 // level's key arena, its workset, its count and its own delta word. The row
 // sequence inside a level is unchanged, so slots and workset order are
-// identical to the serial builder.
-@compute @workgroup_size(1) fn buildCandidateLevelSets(@builtin(workgroup_id) wg:vec3u){
- let l=wg.x;if(l>=levels()||!topologyDirty(l)){return;}
- let n=rows();let rowBase=rowMapBase()+l*p.capacity.x;
- for(var r=0u;r<n;r+=1u){let h=geometry(r);let native=firstTrailingBit(h.y);
-  if(l>=native){let q=originOf(h)/(1u<<l);var slot=INVALID;if(l==native){slot=cInsertOwned(l,q,ACTIVE,r);}else{slot=cInsert(l,q,MG_ONLY);}
-   if(slot!=INVALID){candidateTopology[rowBase+r]=slot;}}
+// identical to the serial builder: the lanes only pre-resolve rows whose
+// coordinate is already resident, and the single ordered owner replays the rest
+// in the identical ascending-row sequence. Retiring a resident row is a
+// provable no-op, not a reordering - cInsert returns the slot cLookup just
+// found and cMergeClass(existing,MG_ONLY) is the identity on ACTIVE, GHOST and
+// MG_ONLY alike, so the only remaining effect is the row-map write the lane
+// performs itself. Rows at their native level are never retired because
+// cInsertOwned also claims ownership.
+@compute @workgroup_size(256) fn buildCandidateLevelSets(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=wg.x;
+ let live=uniformWord(lane,select(0u,1u,l<levels()&&topologyDirty(l)));
+ if(live==0u){return;}
+ let n=uniformWord(lane,rows());
+ let rowBase=rowMapBase()+l*p.capacity.x;
+ for(var base=0u;base<n;base+=CHUNK){
+  let r=base+lane;
+  var key=0u;var encoded=0u;var flag=0u;
+  if(r<n){let h=geometry(r);let native=firstTrailingBit(h.y);
+   if(l>=native){let q=min(originOf(h)/(1u<<l),dims(l)-vec3u(1u));key=coordKey(q,l);
+    if(l==native){encoded=r+1u;flag=1u;}
+    else{let resident=cLookup(l,q);
+     if(resident==INVALID){flag=1u;}else{candidateTopology[rowBase+r]=resident;}}}}
+  chunkKey[lane]=key;chunkAux[lane]=encoded;chunkFlag[lane]=flag;
+  packChunkFlags(lane);
+  if(lane==0u){
+   for(var word=0u;word<8u;word+=1u){var bits=chunkMask[word];
+    loop{if(bits==0u){break;}
+     let t=word*32u+firstTrailingBit(bits);bits&=bits-1u;
+     let q=decode(chunkKey[t],l);let owner=chunkAux[t];var slot=INVALID;
+     if(owner!=0u){slot=cInsertOwned(l,q,ACTIVE,owner-1u);}else{slot=cInsert(l,q,MG_ONLY);}
+     if(slot!=INVALID){candidateTopology[rowBase+base+t]=slot;}}}}
+  storageBarrier();workgroupBarrier();
  }
 }
 const GHOST_STRIDE=20u;
@@ -2101,20 +2375,36 @@ fn rebuildCandidateGhostsFor(r:u32){
 @compute @workgroup_size(64) fn detectCandidateGhosts(@builtin(global_invocation_id) g:vec3u){
  let r=rowIndex(g);if(r<p.capacity.x){rebuildCandidateGhostsFor(r);}
 }
-// Phase 4 (one invocation per level). Replays the surviving proposals in the
-// original (row,channel) order. A repeat proposal at an already-aliased
+// Phase 4 (one 256-lane workgroup per level). Replays the surviving proposals in
+// the original (row,channel) order. A repeat proposal at an already-aliased
 // coordinate merges GHOST into GHOST with the identical owner and appends
-// nothing, which is exactly what the live presence test used to skip.
-@compute @workgroup_size(1) fn insertCandidateGhosts(@builtin(workgroup_id) wg:vec3u){
- let l=wg.x;if(l+1u>=levels()||!topologyDirty(l)){return;}
- let n=rows();
- for(var r=0u;r<n;r+=1u){let base=r*GHOST_STRIDE;let mask=ghostScratch[base];if(mask==0u){continue;}
-  let h=geometry(r);if(firstTrailingBit(h.y)!=l){continue;}
-  let m=topologyMetrics[r];let q=originOf(h)/(1u<<l);
-  for(var channel=0u;channel<18u;channel+=1u){if((mask&(1u<<channel))==0u){continue;}
-   let owner=ghostScratch[base+2u+channel];
-   let targetQ=vec3i(q)+section63WorldDirection(section63Direction(channel),m.transformAndFlags&63u);
-   _=cInsertOwned(l,vec3u(targetQ),GHOST,owner-1u);}
+// nothing, which is exactly what the live presence test used to skip. The lanes
+// only evaluate the serial sweep's own two continue predicates - an empty
+// catalog mask and a row whose native level is not this one - both pure reads,
+// so the ordered owner visits exactly the rows the serial sweep visited, in the
+// same ascending order, and performs the identical channel sequence per row.
+@compute @workgroup_size(256) fn insertCandidateGhosts(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=wg.x;
+ let live=uniformWord(lane,select(0u,1u,l+1u<levels()&&topologyDirty(l)));
+ if(live==0u){return;}
+ let n=uniformWord(lane,rows());
+ for(var base=0u;base<n;base+=CHUNK){
+  let r=base+lane;var flag=0u;
+  if(r<n&&ghostScratch[r*GHOST_STRIDE]!=0u&&firstTrailingBit(geometry(r).y)==l){flag=1u;}
+  chunkFlag[lane]=flag;
+  packChunkFlags(lane);
+  if(lane==0u){
+   for(var word=0u;word<8u;word+=1u){var bits=chunkMask[word];
+    loop{if(bits==0u){break;}
+     let t=word*32u+firstTrailingBit(bits);bits&=bits-1u;
+     let row=base+t;let record=row*GHOST_STRIDE;let mask=ghostScratch[record];
+     let m=topologyMetrics[row];let q=originOf(geometry(row))/(1u<<l);
+     for(var channel=0u;channel<18u;channel+=1u){if((mask&(1u<<channel))==0u){continue;}
+      let owner=ghostScratch[record+2u+channel];
+      let targetQ=vec3i(q)+section63WorldDirection(section63Direction(channel),m.transformAndFlags&63u);
+      _=cInsertOwned(l,vec3u(targetQ),GHOST,owner-1u);}}}}
+  storageBarrier();workgroupBarrier();
  }
 }
 struct CoarseCorner{coordinate:vec3u,weight:f32}
@@ -2145,20 +2435,56 @@ fn transferLive(l:u32)->bool{return l+1u<levels()&&(topologyDirty(l)||topologyDi
 // coarse aliases into level l+1, and that insertion order defines level l+1's
 // workset order, which in turn fixes every downstream summation order. It keeps
 // one ordered owner, but now performs only the hash insertion - no record
-// stores, no chain updates, no capacity counter.
-fn rebuildCandidateTransferFor(l:u32){
- if(!transferLive(l)){return;}
- let selected=selectedCount(l);
- for(var i=0u;i<selected;i+=1u){let fine=selectedWorkSlot(l,i);
-  let flags=selectedState(FLAGS,l,fine);let q=decode(selectedState(KEY,l,fine),l);
-  if((flags&GHOST)!=0u){let encodedOwner=selectedState(OWNER,l,fine);
-   if(encodedOwner==0u||encodedOwner>rows()){candidateReport(l);continue;}let owner=encodedOwner-1u;
-   if(l+1u!=firstTrailingBit(geometry(owner).y)){_=cInsertOwned(l+1u,q/2u,GHOST,owner);}}
-  else{for(var corner=0u;corner<8u;corner+=1u){_=cInsert(l+1u,cornerTarget(q,corner).coordinate,MG_ONLY);}}
+// stores, no chain updates, no capacity counter - and 256 lanes pre-resolve
+// which proposals the owner can skip.
+//
+// Determinism. The proposal sequence is addressed by its exact serial rank
+// i*8+corner, so the owner still visits proposals in ascending
+// (fine workset index, corner) order and the slot each new key claims, the
+// workset index it appends at, and every level's count are byte-identical to
+// the serial builder. Only proposals whose coarse key is already resident are
+// retired, and cInsert of a resident key is a provable no-op: it merges
+// MG_ONLY into an entry that already carries ACTIVE, GHOST or MG_ONLY (the
+// identity of cMergeClass), appends nothing, advances no counter, and its
+// discarded return value is the only other effect. A key that becomes resident
+// mid-chunk is still replayed and still no-ops. Ghost proposals are never
+// retired: their GHOST merge and owner claim are not idempotent.
+fn rebuildCandidateTransferFor(l:u32,lane:u32){
+ let live=uniformWord(lane,select(0u,1u,transferLive(l)));
+ if(live==0u){return;}
+ let selected=uniformWord(lane,selectedCount(l));
+ let total=selected*8u;
+ let coarseLimit=dims(l+1u)-vec3u(1u);
+ for(var base=0u;base<total;base+=CHUNK){
+  let rank=base+lane;
+  var key=0u;var encoded=0u;var flag=0u;
+  if(rank<total){
+   let i=rank/8u;let corner=rank%8u;let fine=selectedWorkSlot(l,i);
+   let flags=selectedState(FLAGS,l,fine);let q=decode(selectedState(KEY,l,fine),l);
+   if((flags&GHOST)!=0u){
+    if(corner==0u){let encodedOwner=selectedState(OWNER,l,fine);
+     if(encodedOwner==0u||encodedOwner>rows()){encoded=INVALID;flag=1u;}
+     else if(l+1u!=firstTrailingBit(geometry(encodedOwner-1u).y)){
+      key=coordKey(min(q/2u,coarseLimit),l+1u);encoded=encodedOwner;flag=1u;}}}
+   else{let parent=min(cornerTarget(q,corner).coordinate,coarseLimit);
+    key=coordKey(parent,l+1u);
+    if(cLookup(l+1u,parent)==INVALID){flag=1u;}}}
+  chunkKey[lane]=key;chunkAux[lane]=encoded;chunkFlag[lane]=flag;
+  packChunkFlags(lane);
+  if(lane==0u){
+   for(var word=0u;word<8u;word+=1u){var bits=chunkMask[word];
+    loop{if(bits==0u){break;}
+     let t=word*32u+firstTrailingBit(bits);bits&=bits-1u;
+     let owner=chunkAux[t];
+     if(owner==INVALID){candidateReport(l);continue;}
+     let q=decode(chunkKey[t],l+1u);
+     if(owner!=0u){_=cInsertOwned(l+1u,q,GHOST,owner-1u);}
+     else{_=cInsert(l+1u,q,MG_ONLY);}}}}
+  storageBarrier();workgroupBarrier();
  }
 }
-@compute @workgroup_size(1) fn buildCandidateLevelDeltas(){
- for(var l=0u;l+1u<levels();l+=1u){rebuildCandidateTransferFor(l);}
+@compute @workgroup_size(256) fn buildCandidateLevelDeltas(@builtin(local_invocation_index) lane:u32){
+ for(var l=0u;l+1u<levels();l+=1u){rebuildCandidateTransferFor(l,lane);}
 }
 // Phase 5b (slot parallel). Publish the exact per-fine record fan-out.
 @compute @workgroup_size(64) fn countCandidateTransfers(@builtin(global_invocation_id) g:vec3u){
@@ -2169,17 +2495,35 @@ fn rebuildCandidateTransferFor(l:u32){
   candidateTopology[fineCountBase(l)+fine]=transferFanOut(l,fine,selectedState(FLAGS,l,fine),
    decode(selectedState(KEY,l,fine),l));}
 }
-// Phase 5c (one invocation per level). Exclusive prefix sum over the fan-out in
-// workset order. This reproduces the former append counter exactly, and the
-// capacity rejection stays fail closed instead of writing past the arena.
-@compute @workgroup_size(1) fn scanCandidateTransfers(@builtin(workgroup_id) wg:vec3u){
- let l=wg.x;if(!transferLive(l)){return;}
- let selected=selectedCount(l);let capacity=transferCapacity(l);var base=0u;
- for(var i=0u;i<selected;i+=1u){let fine=selectedWorkSlot(l,i);
-  let owned=candidateTopology[fineCountBase(l)+fine];if(owned==0u){continue;}
-  if(base+owned>capacity){candidateReport(l);candidateTopology[fineCountBase(l)+fine]=0u;continue;}
-  candidateTopology[fineHeadBase(l)+fine]=base;base+=owned;}
- candidateDispatch[l*DISPATCH_WORDS+1u]=base;
+// Phase 5c (one 256-lane workgroup per level). Exclusive prefix sum over the
+// fan-out in workset order. This reproduces the former append counter exactly:
+// the block scan is integer addition only, which is associative, so every
+// published record base is bit-identical to the serial running counter. The
+// capacity rejection stays fail closed instead of writing past the arena; it is
+// also the only path on which the two running totals can diverge, and it
+// rejects the whole candidate epoch.
+@compute @workgroup_size(256) fn scanCandidateTransfers(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=wg.x;
+ let live=uniformWord(lane,select(0u,1u,transferLive(l)));
+ if(live==0u){return;}
+ let selected=uniformWord(lane,selectedCount(l));
+ let capacity=transferCapacity(l);
+ if(lane==0u){chunkCarry=0u;}
+ workgroupBarrier();
+ for(var block=0u;block<selected;block+=CHUNK){
+  let i=block+lane;var fine=INVALID;var owned=0u;
+  if(i<selected){fine=selectedWorkSlot(l,i);owned=candidateTopology[fineCountBase(l)+fine];}
+  let inclusive=blockInclusiveSum(lane,owned);
+  let base=chunkCarry+inclusive-owned;
+  if(i<selected&&owned!=0u){
+   if(base+owned>capacity){candidateReport(l);candidateTopology[fineCountBase(l)+fine]=0u;}
+   else{candidateTopology[fineHeadBase(l)+fine]=base;}}
+  storageBarrier();workgroupBarrier();
+  if(lane==0u){chunkCarry=chunkCarry+chunkScan[CHUNK-1u];}
+  workgroupBarrier();
+ }
+ if(lane==0u){candidateDispatch[l*DISPATCH_WORDS+1u]=chunkCarry;}
 }
 // Phase 5d (slot parallel). Each fine slot owns a disjoint contiguous record
 // range, so the immutable records are written without contention.
@@ -2204,18 +2548,43 @@ fn rebuildCandidateTransferFor(l:u32){
     cAppendTransfer(l,base+corner,fine,coarse,parent.weight);}}
  }
 }
-// Phase 5e (one invocation per level). The parent chain is the ascending record
-// order restricted to one coarse slot; walking the published records in index
-// order reproduces it exactly, and the levels run concurrently.
-@compute @workgroup_size(1) fn linkCandidateParentChains(@builtin(workgroup_id) wg:vec3u){
- let l=wg.x;if(!transferLive(l)){return;}
- let n=min(candidateDispatch[l*DISPATCH_WORDS+1u],transferCapacity(l));let limit=levelCapacity(l+1u);
- for(var j=0u;j<n;j+=1u){let coarse=candidateTopology[transferWord(l,j,1u)];
-  if(coarse>=limit){candidateReport(l);continue;}
-  let tail=candidateTopology[parentTailBase(l)+coarse];
-  if(tail==INVALID){candidateTopology[parentHeadBase(l)+coarse]=j;}
-  else{candidateTopology[transferWord(l,tail,3u)]=j;}
-  candidateTopology[parentTailBase(l)+coarse]=j;}
+// Phase 5e (one 256-lane workgroup per level). The parent chain is the ascending
+// record order restricted to one coarse slot, so it is a grouping problem, not
+// an accumulation: each record's predecessor is the largest smaller record
+// index carrying the same coarse slot. A 256-record block resolves that
+// relation exactly - inside the block from the staged coarse ids, and across
+// blocks from the running per-coarse tail the serial owner already maintained -
+// so head, next and tail are the identical words the serial walk published.
+// Writes are partitioned by coarse slot: at most one lane per block opens a
+// coarse chain, at most one closes it, and a link target is the immediate
+// predecessor of exactly one record, so no two lanes address the same word.
+@compute @workgroup_size(256) fn linkCandidateParentChains(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=wg.x;
+ let live=uniformWord(lane,select(0u,1u,transferLive(l)));
+ if(live==0u){return;}
+ let n=uniformWord(lane,min(candidateDispatch[l*DISPATCH_WORDS+1u],transferCapacity(l)));
+ let limit=levelCapacity(l+1u);
+ for(var block=0u;block<n;block+=CHUNK){
+  let j=block+lane;var coarse=INVALID;
+  if(j<n){coarse=candidateTopology[transferWord(l,j,1u)];
+   if(coarse>=limit){candidateReport(l);coarse=INVALID;}}
+  chunkKey[lane]=coarse;
+  workgroupBarrier();
+  var predecessor=INVALID;var last=true;
+  for(var t=0u;t<CHUNK;t+=1u){
+   if(coarse==INVALID||chunkKey[t]!=coarse){continue;}
+   if(t<lane){predecessor=block+t;}
+   if(t>lane){last=false;}}
+  var link=predecessor;
+  if(coarse!=INVALID&&predecessor==INVALID){link=candidateTopology[parentTailBase(l)+coarse];}
+  storageBarrier();workgroupBarrier();
+  if(coarse!=INVALID){
+   if(link==INVALID){candidateTopology[parentHeadBase(l)+coarse]=j;}
+   else{candidateTopology[transferWord(l,link,3u)]=j;}
+   if(last){candidateTopology[parentTailBase(l)+coarse]=j;}}
+  storageBarrier();workgroupBarrier();
+ }
 }
 fn brickOfIndex(index:u32)->vec2u{
  var l=levels();var local=0u;
@@ -2241,17 +2610,33 @@ fn brickCell(origin:vec3u,bit:u32)->vec3u{return origin+vec3u(bit%4u,(bit/4u)%4u
  candidateTopology[record]=levelDelta[deltaAt(l,0u)];
  candidateTopology[record+1u]=low;candidateTopology[record+2u]=high;candidateTopology[record+3u]=0u;
 }
-// Phase 7 (one invocation per level). The ranked base is a prefix sum over the
-// level's bricks in dense order; keeping one owner per level preserves it
-// exactly while the levels run concurrently.
-@compute @workgroup_size(1) fn rankCandidateBricks(@builtin(workgroup_id) wg:vec3u){
- let l=wg.x;if(l>=levels()||!topologyDirty(l)){return;}
- let generation=levelDelta[deltaAt(l,0u)];levelDelta[deltaAt(l,6u)]=generation;
- let first=directoryBase()+16u+brickLevelOffset(l)*4u;let n=brickCount(l);var base=0u;
- for(var b=0u;b<n;b+=1u){let record=first+b*4u;candidateTopology[record+3u]=base;
-  base+=countOneBits(candidateTopology[record+1u])+countOneBits(candidateTopology[record+2u]);}
- if(base!=cCount(l)){candidateReport(l);}
- candidateTopology[directoryBase()+2u+l]=generation;
+// Phase 7 (one 256-lane workgroup per level). The ranked base is a prefix sum
+// over the level's bricks in dense order; the block scan reproduces it exactly
+// because integer addition is associative, and the levels still run
+// concurrently as one workgroup each.
+@compute @workgroup_size(256) fn rankCandidateBricks(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=wg.x;
+ let live=uniformWord(lane,select(0u,1u,l<levels()&&topologyDirty(l)));
+ if(live==0u){return;}
+ let generation=levelDelta[deltaAt(l,0u)];
+ let first=directoryBase()+16u+brickLevelOffset(l)*4u;
+ let n=uniformWord(lane,brickCount(l));
+ if(lane==0u){levelDelta[deltaAt(l,6u)]=generation;chunkCarry=0u;}
+ workgroupBarrier();
+ for(var block=0u;block<n;block+=CHUNK){
+  let b=block+lane;var occupancy=0u;var record=0u;
+  if(b<n){record=first+b*4u;
+   occupancy=countOneBits(candidateTopology[record+1u])+countOneBits(candidateTopology[record+2u]);}
+  let inclusive=blockInclusiveSum(lane,occupancy);
+  if(b<n){candidateTopology[record+3u]=chunkCarry+inclusive-occupancy;}
+  storageBarrier();workgroupBarrier();
+  if(lane==0u){chunkCarry=chunkCarry+chunkScan[CHUNK-1u];}
+  workgroupBarrier();
+ }
+ if(lane==0u){
+  if(chunkCarry!=cCount(l)){candidateReport(l);}
+  candidateTopology[directoryBase()+2u+l]=generation;}
 }
 // Phase 8 (brick parallel). Each brick owns a disjoint ranked range, so the
 // compact slot vector is written without contention and in mask-rank order.
@@ -2286,20 +2671,39 @@ fn logicalPageOrigin(l:u32,dense:u32)->vec3u{let d=logicalPageDims(l);
    occupied=occupied||candidateTopology[record+1u]!=0u||candidateTopology[record+2u]!=0u;}}
  candidateTopology[pageDirectoryBase()+pageLevelOffset(l)+located.y]=select(0u,1u,occupied);
 }
-// Phase 10 (one invocation per level). Physical page identifiers stay assigned
-// in dense logical order, which is the identity the halo staging depends on.
-@compute @workgroup_size(1) fn compactCandidatePages(@builtin(workgroup_id) wg:vec3u){
- let l=wg.x;if(l>=levels()||!topologyDirty(l)){return;}
- let logicalPages=logicalPageCount(l);let directory=pageDirectoryBase()+pageLevelOffset(l);
- var pageTotal=0u;var overflow=false;
- for(var dense=0u;dense<logicalPages;dense+=1u){
-  let occupied=candidateTopology[directory+dense]!=0u;
-  if(!occupied||overflow){candidateTopology[directory+dense]=INVALID;continue;}
-  if(pageTotal>=levelCapacity(l)){candidateReport(l);overflow=true;
-   candidateTopology[directory+dense]=INVALID;continue;}
-  candidateTopology[pageRecord(l,pageTotal)]=coordKey(logicalPageOrigin(l,dense),l);
-  candidateTopology[directory+dense]=pageTotal;pageTotal+=1u;}
- candidateDispatch[l*DISPATCH_WORDS+8u]=select(pageTotal,0u,overflow);
+// Phase 10 (one 256-lane workgroup per level). Physical page identifiers stay
+// assigned in dense logical order - the block scan publishes exactly the serial
+// running counter - which is the identity the halo staging depends on. The
+// overflow branch is unchanged in outcome: the occupied-page running total is
+// monotone, so every rank at or beyond the level capacity is invalidated just
+// as the serial sticky flag did, and the published count is zeroed on the same
+// predicate (some occupied page reached rank levelCapacity).
+@compute @workgroup_size(256) fn compactCandidatePages(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=wg.x;
+ let live=uniformWord(lane,select(0u,1u,l<levels()&&topologyDirty(l)));
+ if(live==0u){return;}
+ let logicalPages=uniformWord(lane,logicalPageCount(l));
+ let directory=pageDirectoryBase()+pageLevelOffset(l);
+ let limit=levelCapacity(l);
+ if(lane==0u){chunkCarry=0u;}
+ workgroupBarrier();
+ for(var block=0u;block<logicalPages;block+=CHUNK){
+  let dense=block+lane;var occupied=0u;
+  if(dense<logicalPages&&candidateTopology[directory+dense]!=0u){occupied=1u;}
+  let inclusive=blockInclusiveSum(lane,occupied);
+  let pageTotal=chunkCarry+inclusive-occupied;
+  if(dense<logicalPages){
+   if(occupied==0u||pageTotal>=limit){
+    if(occupied!=0u){candidateReport(l);}
+    candidateTopology[directory+dense]=INVALID;}
+   else{candidateTopology[pageRecord(l,pageTotal)]=coordKey(logicalPageOrigin(l,dense),l);
+    candidateTopology[directory+dense]=pageTotal;}}
+  storageBarrier();workgroupBarrier();
+  if(lane==0u){chunkCarry=chunkCarry+chunkScan[CHUNK-1u];}
+  workgroupBarrier();
+ }
+ if(lane==0u){candidateDispatch[l*DISPATCH_WORDS+8u]=select(chunkCarry,0u,chunkCarry>limit);}
 }
 // Phase 11 (page parallel). The immutable 27-entry physical record is a pure
 // read of the compacted directory.

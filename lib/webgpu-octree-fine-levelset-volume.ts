@@ -3,7 +3,6 @@ import { fineLevelSetLinearWorkgroupWGSL, planFineLevelSetDispatch2D } from "./w
 import { PassBroker } from "./webgpu-pass-broker";
 import {
   createGPULogicalActivityAdoptionContext,
-  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
@@ -329,15 +328,15 @@ fn finalizeCorrectedMeasurement(updateCorrection:bool,lid:u32){let result=reduce
 export function fineLevelSetVolumeActivityShader(activity: GPULogicalActivityAdoptionContext): string {
   const entry = activity.workgroup("apply-fine-volume-correction", "enter", {
     workgroupId: "w",
+    numWorkgroups: "n",
     localInvocationIndex: "lid",
     workgroupLaneCount: 64,
-    recordWhen: `w.x + n.x * (w.y + n.y * w.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
   });
   const exit = activity.workgroup("apply-fine-volume-correction", "exit", {
     workgroupId: "w",
+    numWorkgroups: "n",
     localInvocationIndex: "lid",
     workgroupLaneCount: 64,
-    recordWhen: `w.x + n.x * (w.y + n.y * w.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
   });
   if (!entry && !exit) return fineLevelSetVolumeCorrectionWGSL;
   const signature = "fn applyFineVolumeCorrection(";

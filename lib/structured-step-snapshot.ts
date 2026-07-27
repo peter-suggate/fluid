@@ -19,12 +19,38 @@
 import {
   STRUCTURED_GENERATION_AUDIT_SNAPSHOT,
   encodeStructuredAuditRecordCopies,
+  unpackAirSupportFailure,
+  unpackFineTransportGovernor,
+  unpackFineWorklistHeader,
+  unpackSPGridLevelDeltas,
   unpackStructuredGenerationAuditSnapshot,
+  unpackTopologyEpochState,
+  type StructuredAuditRecordSegment,
   type StructuredAuditRecordSources,
   type StructuredGenerationAuditSnapshot,
 } from "./structured-authority-audit";
 
 export type StructuredStepSnapshotSources = StructuredAuditRecordSources;
+
+/**
+ * Ceiling on advances a driver may keep in flight. `presentationPhysicsQueueDepth`
+ * (`lib/webgpu-renderer.ts`) clamps the browser's measured depth to this, and the
+ * Dawn harness fences well inside it. The ring is sized from this rather than
+ * from a literal because an under-sized ring is not a diagnostics degradation:
+ * every slot can legally be mapping, `encode` then SKIPS the record, and a
+ * missing `step-snapshot` stage latches a permanent step-sequence fault
+ * (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A4.2).
+ */
+export const MAXIMUM_PENDING_PHYSICS_ADVANCES = 8;
+
+/** One slot per in-flight advance plus one for the consumer's mapped record. */
+export function structuredStepSnapshotSlotCount(
+  maxPendingAdvances = MAXIMUM_PENDING_PHYSICS_ADVANCES,
+): number {
+  const bound = Number.isFinite(maxPendingAdvances)
+    ? Math.floor(maxPendingAdvances) : MAXIMUM_PENDING_PHYSICS_ADVANCES;
+  return Math.max(2, Math.min(MAXIMUM_PENDING_PHYSICS_ADVANCES, Math.max(1, bound)) + 1);
+}
 
 /** Host clock captured at encode time for the step the record describes. */
 export interface StructuredStepSnapshotStamp {
@@ -37,6 +63,14 @@ export interface StructuredStepSnapshotStamp {
 export interface StructuredStepSnapshotRecord {
   readonly stamp: StructuredStepSnapshotStamp;
   readonly snapshot: StructuredGenerationAuditSnapshot;
+  /**
+   * Segments the step's encoder actually copied. A segment that is absent
+   * decodes as zero, which is indistinguishable from a real zero counter —
+   * and a zero counter is exactly what a Part-B skip predicate wants to see.
+   * Consumers must therefore require presence before treating a zero as
+   * evidence.
+   */
+  readonly presentSegments: readonly StructuredAuditRecordSegment[];
 }
 
 type SlotState = "free" | "encoded" | "mapping";
@@ -50,6 +84,7 @@ const MAP_MODE_READ = 0x0001;
 interface SnapshotSlot {
   readonly buffer: GPUBuffer;
   stamp?: StructuredStepSnapshotStamp;
+  segments: readonly StructuredAuditRecordSegment[];
   sequence: number;
   state: SlotState;
 }
@@ -64,18 +99,33 @@ export class StructuredStepSnapshotRing {
   private readonly slots: SnapshotSlot[];
   private sequence = 0;
   private disposed = false;
+  private skipped = 0;
 
-  constructor(private readonly device: GPUDevice, slotCount = 3) {
+  constructor(
+    private readonly device: GPUDevice,
+    slotCount = structuredStepSnapshotSlotCount(),
+  ) {
     this.slots = Array.from({ length: Math.max(2, slotCount) }, (_, index) => ({
       buffer: device.createBuffer({
         label: `Structured step snapshot slot ${index}`,
         size: STRUCTURED_GENERATION_AUDIT_SNAPSHOT.strideBytes,
         usage: BUFFER_USAGE_COPY_DST | BUFFER_USAGE_MAP_READ,
       }),
+      segments: Object.freeze([]),
       sequence: 0,
       state: "free",
     }));
   }
+
+  get slotCount() { return this.slots.length; }
+
+  /**
+   * Records the producer had to drop because every slot was mapping. The ring
+   * is sized so this stays zero; a non-zero value is a contract break, not a
+   * diagnostics gap, because the skipped step encodes no `step-snapshot`
+   * stage and therefore latches a step-sequence deviation.
+   */
+  get skippedRecords() { return this.skipped; }
 
   /** Encode this step's record into the step's own command encoder. */
   encode(
@@ -89,8 +139,8 @@ export class StructuredStepSnapshotRing {
       if (candidate.state === "mapping") continue;
       if (!slot || candidate.sequence < slot.sequence) slot = candidate;
     }
-    if (!slot) return false;
-    encodeStructuredAuditRecordCopies(encoder, sources, slot.buffer, 0);
+    if (!slot) { this.skipped += 1; return false; }
+    slot.segments = encodeStructuredAuditRecordCopies(encoder, sources, slot.buffer, 0);
     slot.stamp = stamp;
     slot.sequence = ++this.sequence;
     slot.state = "encoded";
@@ -110,7 +160,11 @@ export class StructuredStepSnapshotRing {
     try {
       await slot.buffer.mapAsync(MAP_MODE_READ);
       const bytes = new Uint8Array(slot.buffer.getMappedRange().slice(0));
-      return { stamp: slot.stamp, snapshot: unpackStructuredGenerationAuditSnapshot(bytes, 0) };
+      return {
+        stamp: slot.stamp,
+        snapshot: unpackStructuredGenerationAuditSnapshot(bytes, 0),
+        presentSegments: slot.segments,
+      };
     } catch {
       // Device loss invalidates the ring; the renderer owns recovery.
       return undefined;
@@ -148,13 +202,32 @@ export interface StructuredAuthorityStepHealth {
   readonly velocityValid: boolean;
   readonly boundaryValid: boolean;
   readonly receiptValid: boolean;
+  /**
+   * Fine active-brick count, worklist header word ONE. Word zero is the
+   * generation; decoding it as a count is the bug named in A3/A4.3 — it
+   * reported a rising generation as band occupancy and masked the
+   * 0xFFFFFFFF capacity-overflow sentinel, which no-ops the solver while the
+   * run still prints PASS.
+   */
+  readonly activeFineBricks: number;
+  readonly fineBandCapacityOverflow: boolean;
+  /** Non-zero epoch error poisons the NEXT flip: the accepted epoch is
+   * retained and transport keeps consuming the old velocity bank. */
+  readonly topologyEpochError: number;
+  readonly topologyFlipReady: boolean;
+  readonly airSupportFailed: boolean;
+  readonly transportScheduleValid: boolean;
 }
 
 export function structuredAuthorityStepHealth(
   record: StructuredStepSnapshotRecord,
 ): StructuredAuthorityStepHealth {
   const { structured, boundary, fineHeader } = record.snapshot;
-  const publishedFineGeneration = fineHeader[0] ?? 0;
+  const fine = unpackFineWorklistHeader(fineHeader);
+  const epochState = unpackTopologyEpochState(record.snapshot.topologyEpochState);
+  const airSupport = unpackAirSupportFailure(record.snapshot.airSupportFailure);
+  const governor = unpackFineTransportGovernor(record.snapshot.fineTransportGovernor);
+  const publishedFineGeneration = fine.generation;
   const velocityValid = structured.flags === 0 && structured.rowCount > 0
     && structured.epoch > 0 && structured.activeBank <= 1;
   const boundaryValid = boundary.flags === 0
@@ -162,6 +235,8 @@ export function structuredAuthorityStepHealth(
     && boundary.epoch === structured.epoch
     && boundary.activeBank === structured.activeBank
     && boundary.publishedEpoch === structured.epoch;
+  const has = (segment: StructuredAuditRecordSegment) =>
+    record.presentSegments.includes(segment);
   return Object.freeze({
     step: record.stamp.step,
     submittedTime_s: record.stamp.submittedTime_s,
@@ -172,5 +247,75 @@ export function structuredAuthorityStepHealth(
     velocityValid,
     boundaryValid,
     receiptValid: velocityValid && boundaryValid,
+    activeFineBricks: fine.capacityOverflow ? 0 : fine.activeBricks,
+    fineBandCapacityOverflow: fine.capacityOverflow,
+    topologyEpochError: epochState.error,
+    topologyFlipReady: epochState.flipReady,
+    // An absent segment must never read as "healthy zero": the producer only
+    // reports failure words it actually copied.
+    airSupportFailed: has("airSupportFailure") && airSupport.failed,
+    transportScheduleValid: !has("fineTransportGovernor") || governor.scheduleValid,
+  });
+}
+
+/**
+ * GPU counters for one step, decoded from that step's own record — the
+ * evidence side of the P0.5 predicted-work check. Every field is `undefined`
+ * when its record segment was not copied, so a conductor can never mistake an
+ * uncopied segment for a zero-work verdict.
+ */
+export interface StructuredStepWorkObservation {
+  readonly step: number;
+  /** MGPCG control word 2: outer iterations the GPU actually executed. */
+  readonly executedSolveIterations?: number;
+  /** MGPCG control word 1. */
+  readonly solveConverged?: boolean;
+  readonly acceptedEpoch: number;
+  /** Topology-epoch verdict: the flip token and its poison word. */
+  readonly topologyFlipReady?: boolean;
+  readonly topologyEpochError?: number;
+  /** Per-level SPGrid setup-delta dirty words; all zero means no rebuilt level. */
+  readonly spgridLevelDirty?: readonly number[];
+  readonly airSupportErrorFlags?: number;
+  readonly fineActiveBricks?: number;
+  readonly fineBandCapacityOverflow: boolean;
+  /** Fine-transport governor: schedule validity and the substeps it planned. */
+  readonly transportScheduleValid?: boolean;
+  readonly transportActiveSubsteps?: number;
+}
+
+const MGPCG_CONTROL = Object.freeze({ flags: 0, converged: 1, iterations: 2, rows: 4 } as const);
+
+export function structuredStepWorkObservation(
+  record: StructuredStepSnapshotRecord,
+): StructuredStepWorkObservation {
+  const has = (segment: StructuredAuditRecordSegment) =>
+    record.presentSegments.includes(segment);
+  const fine = unpackFineWorklistHeader(record.snapshot.fineHeader);
+  const epochState = unpackTopologyEpochState(record.snapshot.topologyEpochState);
+  const airSupport = unpackAirSupportFailure(record.snapshot.airSupportFailure);
+  const governor = unpackFineTransportGovernor(record.snapshot.fineTransportGovernor);
+  const mgpcg = record.snapshot.mgpcgControl;
+  return Object.freeze({
+    step: record.stamp.step,
+    executedSolveIterations: has("mgpcg")
+      ? Number(mgpcg[MGPCG_CONTROL.iterations] ?? 0) >>> 0 : undefined,
+    solveConverged: has("mgpcg")
+      ? Number(mgpcg[MGPCG_CONTROL.converged] ?? 0) !== 0 : undefined,
+    acceptedEpoch: record.snapshot.structured.epoch,
+    topologyFlipReady: has("topologyEpoch") ? epochState.flipReady : undefined,
+    topologyEpochError: has("topologyEpoch") ? epochState.error : undefined,
+    spgridLevelDirty: has("spgridLevelDelta")
+      ? unpackSPGridLevelDeltas(record.snapshot.spgridLevelDelta)
+        .map((level) => level.dirtyFlags)
+      : undefined,
+    airSupportErrorFlags: has("airSupportFailure") ? airSupport.errorFlags : undefined,
+    fineActiveBricks: has("fine")
+      ? (fine.capacityOverflow ? 0 : fine.activeBricks) : undefined,
+    fineBandCapacityOverflow: has("fine") && fine.capacityOverflow,
+    transportScheduleValid: has("fineTransportGovernor")
+      ? governor.scheduleValid : undefined,
+    transportActiveSubsteps: has("fineTransportGovernor")
+      ? governor.activeSubsteps : undefined,
   });
 }

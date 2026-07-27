@@ -159,10 +159,10 @@ test("projection energy uses one coherent face-weighted pair around projection",
 test("projection energy decoder fails closed on partial pairs", () => {
   const energyBits = (value: number) => new Uint32Array(new Float32Array([value]).buffer)[0]!;
   const epochAndBank = (11 << 1) | 1;
-  const stage = (all: number, wet: number, census: [number, number] = [0, 0]) =>
-    [0, epochAndBank, 24, energyBits(all), 20, energyBits(wet), census[0], census[1]];
+  const stage = (all: number, wet: number, theta: number, census = 0) =>
+    [0, epochAndBank, 24, energyBits(all), 20, energyBits(wet), energyBits(theta), census];
   const coherent = new Uint32Array([
-    ...stage(5, 4.5), ...stage(4.75, 4.25, [3, 17]), ...stage(4, 3.5), ...stage(3, 2.75),
+    ...stage(5, 4.5, 4), ...stage(4.75, 4.25, 3.75, 17), ...stage(4, 3.5, 3), ...stage(3, 2.75, 2.5),
   ]);
   assert.deepEqual(decodeStructuredProjectionEnergy(coherent), {
     sample: {
@@ -175,8 +175,11 @@ test("projection energy decoder fails closed on partial pairs", () => {
       wetPostAdvectionKineticEnergyProxy: 4.25,
       wetPreProjectionKineticEnergyProxy: 3.5,
       wetPostProjectionKineticEnergyProxy: 2.75,
+      wetStartThetaEnergyProxy: 4,
+      wetPostAdvectionThetaEnergyProxy: 3.75,
+      wetPreProjectionThetaEnergyProxy: 3,
+      wetPostProjectionThetaEnergyProxy: 2.5,
       wetFaceCount: 20,
-      transitionPathCount: 3,
       staggeredPathCount: 17,
       projectionEnergyRatio: 0.75,
     },

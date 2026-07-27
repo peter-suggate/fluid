@@ -19,7 +19,7 @@ function savedLabel(savedAt_ms: number): string {
   return `${Math.floor(elapsed_s / 86_400)}d ago`;
 }
 
-/** Save/load/rename/delete for authored scenes, kept beside the preset list. */
+/** Save/load/rename/delete for authored scenes, as a configuration section. */
 export function SceneLibraryPanel() {
   const sceneId = useSceneStore((state) => state.scene.sceneId);
   const [entries, setEntries] = useState<SceneLibraryEntry[]>([]);
@@ -35,8 +35,8 @@ export function SceneLibraryPanel() {
   };
 
   return (
-    <section className="panel-section scene-library" data-testid="scene-library">
-      <div className="section-heading"><h2>My scenes</h2><span>{entries.length} SAVED</span></div>
+    <section className="scene-library" data-testid="scene-library">
+      <div className="popover-section-heading"><h3>My scenes</h3><span>{entries.length} SAVED</span></div>
       <div className="scene-library-save">
         <input
           value={name}

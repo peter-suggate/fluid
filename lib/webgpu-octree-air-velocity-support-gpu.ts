@@ -55,7 +55,21 @@ export const OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS =
   3 * OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra;
 export const OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE =
   OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE + OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS;
-export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 41;
+/** `{cell, size, tagWord}`. The demand flags a candidate used to carry were
+ * write-only: every reader (mark, scatter, tag resolution) takes the flags from
+ * the per-cell `directoryFlags` word, which is the deduplicated authority. */
+export const OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS = 3;
+/** Wide indirect march waves encoded between the occupancy prefix and the
+ * persistent convergence tail, and the number of waves that share one
+ * convergence observation. Neither is a propagation bound: the publication
+ * still requires a GPU-observed no-change wave over every face slot. */
+export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES = 32;
+export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP = 4;
+/** Words 41/42 are the stationary-air fallback latch: count of face patches
+ * the march never reached, and the first such (cell<<3)|axis identity.
+ * Words 43-46 are the wide-march wave ledger: accumulated change, the observed
+ * fixed-point latch, the wave-group index, and the executed wide-wave count. */
+export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 47;
 export const OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS = 6;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_WORDS = 4;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE =
@@ -92,7 +106,7 @@ export function decodeOctreeAirSupportGPUFirstError(packed: number) {
 export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   beginAirSupportPublication: Object.freeze([0,1,3,7,8,9,10]),
   clearAirSupportDirectory: Object.freeze([0,7]),
-  clearAirSupportCandidates: Object.freeze([0,7]),
+  clearAirSupportCandidates: Object.freeze([0,2,7]),
   clearAirSupportTags: Object.freeze([0,7,9]),
   emitAirSupportCandidates: Object.freeze([0,2,3,4,5,6,7,9,11,18]),
   markAndScanAirSupportCandidates: Object.freeze([0,7]),
@@ -109,6 +123,10 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   seedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,19,21,23]),
   extendAirSupportFacesAtoB: Object.freeze([0,2,7,8,19,20,23]),
   extendAirSupportFacesBtoA: Object.freeze([0,2,7,8,19,20,23]),
+  // The ledger entry point reaches only scratch through s/sw. The persistent
+  // tail also calls extendFace, so it retains that helper's full transitive
+  // bind set even though its own convergence bookkeeping is scratch-only.
+  advanceAirSupportMarchWave: Object.freeze([7]),
   marchAirSupportFacesToFixedPoint: Object.freeze([0,2,7,8,19,20,23]),
   reconstructAirSupportVectors: Object.freeze([0,2,7,8,15,16,19,22,23,24]),
   finalizeAirSupportMetadata: Object.freeze([0,2,7,8,9,22]),
@@ -142,6 +160,9 @@ export interface OctreeAirVelocitySupportGPUPlan {
     ranks: number;
     directoryWinners: number;
     directoryFlags: number;
+    /** Dense cell -> published-row slot. Derived in WGSL as
+     * `directoryFlags + domainVolume`, so it costs no uniform word. */
+    rowIndex: number;
     blockCounts: number;
     blockOffsets: number;
   }>;
@@ -199,13 +220,18 @@ export function planOctreeAirVelocitySupportGPU(
     ranks: 0,
     directoryWinners: 0,
     directoryFlags: 0,
+    rowIndex: 0,
     blockCounts: 0,
     blockOffsets: 0,
   };
-  offsets.ranks = offsets.candidates + 4 * candidateCapacity;
+  offsets.ranks = offsets.candidates + OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS * candidateCapacity;
   offsets.directoryWinners = offsets.ranks + candidateCapacity;
   offsets.directoryFlags = offsets.directoryWinners + domainVolume;
-  offsets.blockCounts = offsets.directoryFlags + domainVolume;
+  // Kept adjacent to directoryFlags on purpose: the shader addresses it as
+  // `directoryFlagOffset + domainVolume` instead of spending a uniform word,
+  // and the uniform block's vec3u members stay 16-byte aligned.
+  offsets.rowIndex = offsets.directoryFlags + domainVolume;
+  offsets.blockCounts = offsets.rowIndex + domainVolume;
   offsets.blockOffsets = offsets.blockCounts + candidateBlockCapacity;
   const scratchWords = offsets.blockOffsets + candidateBlockCapacity;
   const scratchBytes = scratchWords * 4;
@@ -366,10 +392,10 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       ownerPlan.ownerDirectoryOffsetWords, ownerPlan.ownerPagesOffsetWords,
       ownerPlan.capacity, ownerPlan.pageVoxels,
     ]));
-    const module = device.createShaderModule({ label: "Structured positive-air identity publication",
+    const shaderModule = device.createShaderModule({ label: "Structured positive-air identity publication",
       code: octreeAirVelocitySupportPublicationWGSL });
     const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-      layout: "auto", compute: { module, entryPoint } });
+      layout: "auto", compute: { module: shaderModule, entryPoint } });
     const entries = Object.keys(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS) as OctreeAirSupportGPUEntryPoint[];
     this.pipelines = Object.freeze(Object.fromEntries(entries.map((entry) => [entry, make(entry)])));
     const buffers = new Map<number, GPUBuffer>([
@@ -440,7 +466,11 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       this.plan.support.controlOffsetWords, this.plan.support.supportVectorOffsetWords,
       this.plan.records.recordOffsetWords, this.plan.records.vectorOffsetWords,
       this.inputs.boundaryEpoch.offsetWords, this.inputs.topology.catalogTetrahedronVertexCount!,
-      ...Object.values(this.plan.offsets),
+      // Explicit, not `Object.values(offsets)`: `rowIndex` is derived in WGSL
+      // and adding a word here would break the uniform block's vec3u alignment.
+      this.plan.offsets.control, this.plan.offsets.candidates, this.plan.offsets.ranks,
+      this.plan.offsets.directoryWinners, this.plan.offsets.directoryFlags,
+      this.plan.offsets.blockCounts, this.plan.offsets.blockOffsets,
       this.plan.records.allocatedWords, this.plan.support.totalBytes / 4,
       this.plan.faceCellCapacity, this.plan.faceCapacity,
       this.inputs.topology.plan.lookupCount, this.inputs.topology.plan.entryCount,
@@ -541,12 +571,33 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       pass.dispatchWorkgroupsIndirect(this.indirect, 48);
     }
     broker.fence("Section 5 ordinary-face seeds published");
+    pass = broker.compute({ label: "March Section 5 closest faces to a fixed point" });
+    // Wide sweeps carry the relaxation at full occupancy: one lane per face
+    // slot over the same face-row worklist the prefix uses, rather than the
+    // three persistent workgroups (768 threads) that used to own the entire
+    // march. A one-thread ledger pass between wave groups turns the sweeps'
+    // accumulated change flag into a fixed-point latch, so sweeps past
+    // convergence retire immediately instead of re-relaxing a settled graph.
+    // betterFace's min-(distance, seed patch) copy rule makes the relaxation a
+    // monotone, idempotent meet whose least fixed point is independent of how
+    // work is distributed, so widening cannot change the marched field.
+    for (let wave = 0; wave < OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES; wave += 1) {
+      if (wave % OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP === 0) {
+        pass.setPipeline(this.pipelines.advanceAirSupportMarchWave!);
+        pass.setBindGroup(0, groups.advanceAirSupportMarchWave!);
+        pass.dispatchWorkgroups(1);
+      }
+      const name = ((OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX + wave) & 1) === 0
+        ? "extendAirSupportFacesAtoB" : "extendAirSupportFacesBtoA";
+      pass.setPipeline(this.pipelines[name]!);
+      pass.setBindGroup(0, groups[name]!);
+      pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+    }
     // One persistent workgroup owns each independent velocity-axis face graph.
     // That gives WGSL a real global barrier between relaxation waves without host-unrolling
     // a scene/domain bound into thousands of empty passes. It terminates only
     // on a GPU-observed no-change wave; |V| is the Bellman-Ford simple-path
     // bound and therefore a fail-closed proof bound, not a widened band.
-    pass = broker.compute({ label: "March Section 5 closest faces to a fixed point" });
     pass.setPipeline(this.pipelines.marchAirSupportFacesToFixedPoint!);
     pass.setBindGroup(0, groups.marchAirSupportFacesToFixedPoint!);
     pass.dispatchWorkgroups(3);
@@ -603,7 +654,9 @@ struct P {
   maxDisplacementFineCells:u32,expectedFineGeneration:u32,fineWidth:f32,closedBoundaryMask:u32,
 }
 struct Accepted {flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,epoch:u32,bank:u32,slotCount:u32}
-struct Candidate {cell:u32,size:u32,flags:u32,tagWord:u32}
+// No demand-flags word: every consumer reads the deduplicated per-cell
+// directoryFlags entry instead, so a per-candidate copy was write-only.
+struct Candidate {cell:u32,size:u32,tagWord:u32}
 @group(0)@binding(0)var<uniform>p:P;
 @group(0)@binding(1)var<storage,read_write>accepted:Accepted;
 @group(0)@binding(2)var<storage,read>rowGeometry:array<vec4u>;
@@ -684,18 +737,24 @@ fn powerTransformVector(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1
   select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let permutation=(code/8u)%6u;var q=value;
   if(permutation==1u){q=value.xzy;}else if(permutation==2u){q=value.yxz;}else if(permutation==3u){q=value.yzx;}
   else if(permutation==4u){q=value.zxy;}else if(permutation==5u){q=value.zyx;}return q*signs;}
-fn mortonPart10(v:u32)->u32{var x=v&1023u;x=(x|(x<<16u))&0x030000ffu;x=(x|(x<<8u))&0x0300f00fu;
-  x=(x|(x<<4u))&0x030c30c3u;x=(x|(x<<2u))&0x09249249u;return x;}
-fn morton(cell:u32)->u32{let q=coord(cell);return mortonPart10(q.x)|(mortonPart10(q.y)<<1u)|(mortonPart10(q.z)<<2u);}
 fn level(size:u32)->u32{return 31u-countLeadingZeros(size);}
-fn lessGeometry(a:vec4u,b:vec4u)->bool{let al=level(a.y);let bl=level(b.y);let am=morton(a.x);let bm=morton(b.x);
-  return al<bl||(al==bl&&am<bm);}
-fn publishedRow(cell:u32,size:u32)->u32{let wanted=vec4u(cell,size,0u,0u);var lo=0u;var hi=s(2u);
-  let base=s(4u)*p.rowCapacity;while(lo<hi){let mid=lo+(hi-lo)/2u;let g=rowGeometry[base+mid];
-    if(lessGeometry(g,wanted)){lo=mid+1u;}else{hi=mid;}}if(lo<s(2u)){let g=rowGeometry[base+lo];
-    if(g.x==cell&&g.y==size){return lo;}}return INVALID;}
-fn candidateAt(item:u32)->Candidate{let at=p.candidateOffset+4u*item;return Candidate(s(at),s(at+1u),s(at+2u),s(at+3u));}
-fn setCandidate(item:u32,value:Candidate){let at=p.candidateOffset+4u*item;sw(at,value.cell);sw(at+1u,value.size);sw(at+2u,value.flags);sw(at+3u,value.tagWord);}
+// Dense cell -> published-row slot, authored once per publication immediately
+// after the directory clear. It replaces a 12-iteration ordered binary search
+// over rowGeometry that this producer performed ~1.5M times per encode (every
+// demand, every fine-band closure, every face-adjacency identity). Because it
+// still verifies the complete (cell,size) identity against rowGeometry it
+// returns exactly the row the search returned; the only way the two could
+// disagree is two rows claiming one origin cell, which is not an octree and is
+// failed closed where the slot is authored.
+fn rowIndexAt(cell:u32)->u32{return p.directoryFlagOffset+p.domainVolume+cell;}
+fn publishedRow(cell:u32,size:u32)->u32{if(cell>=p.domainVolume){return INVALID;}
+  let row=s(rowIndexAt(cell));if(row>=s(2u)){return INVALID;}
+  let g=rowGeometry[s(4u)*p.rowCapacity+row];
+  return select(INVALID,row,g.x==cell&&g.y==size);}
+fn candidateAt(item:u32)->Candidate{let at=p.candidateOffset+${OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS}u*item;
+  return Candidate(s(at),s(at+1u),s(at+2u));}
+fn setCandidate(item:u32,value:Candidate){let at=p.candidateOffset+${OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS}u*item;
+  sw(at,value.cell);sw(at+1u,value.size);sw(at+2u,value.tagWord);}
 fn recordAt(index:u32)->vec4u{let at=p.recordOffset+index*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
   return vec4u(r(at),r(at+1u),r(at+2u),r(at+3u));}
 fn recordCell(index:u32)->u32{return cellOf(recordAt(index).xyz);}
@@ -721,7 +780,7 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   // remote air rows present in the sparse topology.
   atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],flags);
   let direct=publishedRow(resolvedCell,resolvedSize);if(direct!=INVALID){atomicStore(&supportArena[tagWord],direct);return;}
-  setCandidate(item,Candidate(resolvedCell,resolvedSize,flags,tagWord));
+  setCandidate(item,Candidate(resolvedCell,resolvedSize,tagWord));
   atomicMin(&scratch[p.directoryWinnerOffset+resolvedCell],item);
 }
 
@@ -768,6 +827,7 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   sw(4u,accepted.bank);var boundary=0u;if(p.boundaryEpochOffset<arrayLength(&boundaryEpoch)){boundary=boundaryEpoch[p.boundaryEpochOffset];}sw(5u,boundary);
   let candidates=p.candidateCapacity;let blocks=p.blockCapacity;sw(6u,candidates);sw(7u,blocks);sw(8u,0u);sw(9u,p.supportCapacity);
   sw(25u,0u);sw(26u,0u);sw(27u,0u);sw(28u,0u);sw(40u,p.expectedFineGeneration);
+  sw(41u,0u);sw(42u,INVALID);
   if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.bank>1u
       ||accepted.rowCount==0u||accepted.rowCount>p.rowCapacity||accepted.slotCount>p.slotCapacity){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
   let ownerStatus=ownerPageArena[${OCTREE_OWNER_PAGE_CONTROL_WORDS.status}u];
@@ -780,7 +840,7 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   atomicStore(&recordArena[5u],0u);atomicStore(&recordArena[3u],0u);
   atomicStore(&supportArena[p.airControlOffset],ERROR_SOURCE);atomicStore(&supportArena[p.airControlOffset+1u],0u);
   atomicStore(&supportArena[p.airControlOffset+13u],0u);
-  let clean=s(0u)==0u;writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(2u*p.domainVolume,256u),clean));
+  let clean=s(0u)==0u;writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(3u*p.domainVolume,256u),clean));
   writeDispatch(13u,select(vec3u(0u,1u,1u),dispatchFor(rows*(${OCTREE_AIR_SUPPORT_SELECTOR_STRIDE}u+${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u),256u),clean));
   // One workgroup owns one structured row. Its lanes cooperatively prove the
   // 27-site cube closure once before emitting either cube or tetra candidates.
@@ -790,10 +850,17 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
 
 @compute @workgroup_size(256)fn clearAirSupportDirectory(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(item<p.domainVolume){sw(p.directoryWinnerOffset+item,INVALID);}else if(item<2u*p.domainVolume){sw(p.directoryFlagOffset+item-p.domainVolume,0u);}}
+  if(item<p.domainVolume){sw(p.directoryWinnerOffset+item,INVALID);}else if(item<2u*p.domainVolume){sw(p.directoryFlagOffset+item-p.domainVolume,0u);}
+  else if(item<3u*p.domainVolume){sw(rowIndexAt(item-2u*p.domainVolume),INVALID);}}
+// The dense row index is authored here, in the dispatch after the clear above,
+// so the atomicMin below never races that clear. One accepted row owns one
+// origin cell; a second claimant is a topology fault, not a tie to resolve.
 @compute @workgroup_size(256)fn clearAirSupportCandidates(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(item<p.candidateCapacity){setCandidate(item,Candidate(INVALID,0u,0u,INVALID));}}
+  if(item<p.candidateCapacity){setCandidate(item,Candidate(INVALID,0u,INVALID));}
+  if(item<s(2u)){let g=rowGeometry[s(4u)*p.rowCapacity+item];
+    if(g.x>=p.domainVolume){fail(item,ERROR_SOURCE);}
+    else if(atomicMin(&scratch[rowIndexAt(g.x)],item)!=INVALID){fail(item,ERROR_TOPOLOGY);}}}
 
 @compute @workgroup_size(256)fn clearAirSupportTags(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
@@ -900,22 +967,41 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
 
 @compute @workgroup_size(256)fn emitFineBandAirSupportCandidates(@builtin(global_invocation_id)g:vec3u){let item=g.x;
   if(item>=p.domainVolume||s(0u)!=0u){return;}let output=p.fineCandidateOffset+item;
-  setCandidate(output,Candidate(INVALID,0u,0u,INVALID));let demanded=s(p.directoryFlagOffset+item);
+  setCandidate(output,Candidate(INVALID,0u,INVALID));let demanded=s(p.directoryFlagOffset+item);
   if((demanded&RECORD_FINE)==0u){return;}let owner=octreeOwnerPageLookup(vec3i(coord(item)));
   if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){failTopology(4u,output);return;}let resolvedCell=cellOf(owner.origin);
   atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],demanded);let direct=publishedRow(resolvedCell,owner.size);
-  if(direct!=INVALID){return;}setCandidate(output,Candidate(resolvedCell,owner.size,demanded,INVALID));
+  if(direct!=INVALID){return;}setCandidate(output,Candidate(resolvedCell,owner.size,INVALID));
   atomicMin(&scratch[p.directoryWinnerOffset+resolvedCell],output);}
 
 var<workgroup> emitRowActive:atomic<u32>;
 var<workgroup> emitRowRegular:atomic<u32>;
+var<workgroup> emitRowDemand:atomic<u32>;
 var<workgroup> emitRowGeometry:array<u32,4>;
 var<workgroup> emitRowTetraHeader:array<u32,2>;
 @compute @workgroup_size(256)fn emitAirSupportCandidates(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
   let row=wid.x+wid.y*groups.x;let itemBase=row*p.candidateStride;
+  // Transport demand is a disjunction over the row's own liquid bit and the
+  // liquid bits of its 18 logical neighbours. Every probe is a pure read and
+  // OR is associative and commutative, so spreading the 18 probes over 18
+  // lanes yields the same predicate the serial short-circuit produced — it
+  // only stops one lane from running ~18 dependent owner-page walks while the
+  // other 255 wait at the barrier below.
+  if(lane==0u){atomicStore(&emitRowDemand,0u);
+    atomicStore(&emitRowActive,select(0u,1u,row<s(2u)&&s(0u)==0u));}
+  workgroupBarrier();
+  let inRange=workgroupUniformLoad(&emitRowActive)!=0u;
+  if(inRange&&lane<18u){let anchor=rowGeometry[s(4u)*p.rowCapacity+row];
+    var demanded=lane==0u&&liquidRow(row);
+    if(!demanded){let identity=neighborIdentity(anchor,DIRECTIONS[lane]);
+      if(identity.x!=INVALID){let other=publishedRow(identity.x,identity.y);
+        demanded=other!=INVALID&&liquidRow(other);}}
+    if(demanded){atomicStore(&emitRowDemand,1u);}}
+  workgroupBarrier();
+  let demandRow=workgroupUniformLoad(&emitRowDemand)!=0u;
   if(lane==0u){
-    var enabled=row<s(2u)&&s(0u)==0u&&transportDemandRow(row);var g=vec4u(0u);
+    var enabled=inRange&&demandRow;var g=vec4u(0u);
     if(enabled){g=rowGeometry[s(4u)*p.rowCapacity+row];if(g.y==0u||g.x>=p.domainVolume){fail(itemBase,ERROR_SOURCE);enabled=false;}}
     emitRowGeometry[0]=g.x;emitRowGeometry[1]=g.y;emitRowGeometry[2]=g.z;emitRowGeometry[3]=g.w;
     // Regular-closure eligibility is geometric: any row whose boundary-clamped
@@ -1057,12 +1143,9 @@ fn faceCell(faceRow:u32)->vec4u{if(faceRow<s(2u)){return rowGeometry[s(4u)*p.row
   let at=p.recordOffset+support*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;return vec4u(cellOf(identity.xyz),identity.w,r(at+4u),r(at+5u));}
 fn liquidRow(row:u32)->bool{if(row>=s(2u)){return false;}let at=s(4u)*p.rowCapacity+row;
   if(at>=arrayLength(&liquidMask)){return false;}return liquidMask[at]!=0u;}
-fn transportDemandRow(row:u32)->bool{if(row>=s(2u)){return false;}if(liquidRow(row)){return true;}
-  let cell=rowGeometry[s(4u)*p.rowCapacity+row];
-  for(var direction=0u;direction<18u;direction+=1u){let identity=neighborIdentity(cell,DIRECTIONS[direction]);
-    if(identity.x==INVALID){continue;}let other=publishedRow(identity.x,identity.y);
-    if(other!=INVALID&&liquidRow(other)){return true;}}
-  return false;}
+// The serial 18-direction transport-demand walk that used to live here is now
+// evaluated by 18 lanes of the emitting row's own workgroup; see the comment in
+// emitAirSupportCandidates for why the disjunction is order-free.
 fn publishedLiquidRow(row:u32)->bool{if(row>=s(2u)){return false;}let cell=faceCell(row).x;
   return (s(p.directoryFlagOffset+cell)&0x80000000u)!=0u;}
 fn publishedDirectLiquidRow(row:u32)->bool{if(row>=s(2u)){return false;}let geometry=s(4u)*p.rowCapacity+row;
@@ -1130,6 +1213,7 @@ fn catalogNeighbor(cell:vec4u,global:u32)->vec2u{if(global>=arrayLength(&catalog
 
 @compute @workgroup_size(1)fn prepareAirSupportFaces(){var clean=s(0u)==0u;let faceRows=s(2u)+s(8u);let count=faceRows*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
   if(faceRows>p.faceCellCapacity||count>p.faceCapacity){fail(faceRows,ERROR_CAPACITY);clean=false;}sw(29u,select(0u,count,clean));sw(25u,0u);sw(28u,0u);sw(30u,0u);sw(32u,0u);sw(37u,0u);
+  sw(43u,0u);sw(44u,0u);sw(45u,0u);sw(46u,0u);
   writeDispatch(32u,select(vec3u(0u,1u,1u),dispatchFor(count,256u),clean));
   writeDispatch(35u,select(vec3u(0u,1u,1u),dispatchFor(faceRows,256u),clean));}
 
@@ -1210,23 +1294,60 @@ fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[it
       if(betterFace(candidate,best)){best=candidate;}}}
   let changed=any(best!=current);if(readA){faceB[item]=best;}else{faceA[item]=best;}return changed;}
 
+// The wide sweeps own every face slot of every axis at once, one lane per
+// slot, so a full sweep that changes nothing IS the fixed-point observation the
+// persistent tail otherwise has to make three narrow workgroups at a time.
+// Word 43 accumulates "some slot changed" for the current wave group; word 44
+// latches the observed fixed point. Once latched, later sweeps and the tail
+// skip: a no-change wave writes best==current into the destination bank, so at
+// that point BOTH banks already hold the fixed point and skipping a write
+// leaves faceA — the only bank reconstruction reads — exactly correct.
+var<workgroup> sweepChanged:atomic<u32>;
 @compute @workgroup_size(256)fn extendAirSupportFacesAtoB(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
-  let item=linearItem(wid,lane,groups,256u);if(item<s(29u)&&s(0u)==0u){_ = extendFace(item,true);}}
+  if(lane==0u){atomicStore(&sweepChanged,0u);}
+  workgroupBarrier();
+  let item=linearItem(wid,lane,groups,256u);
+  if(item<s(29u)&&s(0u)==0u&&s(44u)==0u&&extendFace(item,true)){atomicStore(&sweepChanged,1u);}
+  workgroupBarrier();
+  if(lane==0u&&atomicLoad(&sweepChanged)!=0u){atomicOr(&scratch[43u],1u);}}
 @compute @workgroup_size(256)fn extendAirSupportFacesBtoA(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
-  let item=linearItem(wid,lane,groups,256u);if(item<s(29u)&&s(0u)==0u){_ = extendFace(item,false);}}
+  if(lane==0u){atomicStore(&sweepChanged,0u);}
+  workgroupBarrier();
+  let item=linearItem(wid,lane,groups,256u);
+  if(item<s(29u)&&s(0u)==0u&&s(44u)==0u&&extendFace(item,false)){atomicStore(&sweepChanged,1u);}
+  workgroupBarrier();
+  if(lane==0u&&atomicLoad(&sweepChanged)!=0u){atomicOr(&scratch[43u],1u);}}
+
+// One thread between wide wave groups. Word 45 is the group index (group 0
+// only clears the prefix's accumulated flag, it cannot conclude anything), word
+// 46 counts the wide waves that actually ran so the published march depth stays
+// a real wave count.
+@compute @workgroup_size(1)fn advanceAirSupportMarchWave(){let group=s(45u);
+  if(group>0u&&s(43u)==0u){sw(44u,1u);}
+  sw(43u,0u);sw(45u,group+1u);
+  if(s(44u)==0u){sw(46u,s(46u)+${OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP}u);}}
 
 var<workgroup> relaxationChanged:atomic<u32>;
 var<workgroup> relaxationFaceRows:atomic<u32>;
 var<workgroup> relaxationFailed:atomic<u32>;
+// Residual convergence tail. The wide sweeps above usually reach the fixed
+// point; when they publish that observation (word 44) this returns without
+// marching, and the publication gate below still reads a clean no-change
+// record because s(35u..37u) stay zero. When they do not, every wide wave ran,
+// so the ping-pong parity here is exactly PREFIX+WIDE and this is the same
+// persistent march it always was, with the same |V| simple-path proof bound.
 @compute @workgroup_size(256)fn marchAirSupportFacesToFixedPoint(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u){
-  if(lane==0u){atomicStore(&relaxationFaceRows,s(2u)+s(8u));atomicStore(&relaxationFailed,select(0u,1u,s(0u)!=0u));}
+  if(lane==0u){atomicStore(&relaxationFaceRows,s(2u)+s(8u));
+    atomicStore(&relaxationFailed,select(0u,1u,s(0u)!=0u||s(44u)!=0u));
+    if(s(0u)==0u){sw(32u+wid.x,${OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX}u+s(46u));}}
   workgroupBarrier();let faceRows=workgroupUniformLoad(&relaxationFaceRows);
   let failed=workgroupUniformLoad(&relaxationFailed);if(failed!=0u){return;}
   let axis=wid.x;let count=4u*faceRows;
-  var readA=${(OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX & 1) === 0 ? "true" : "false"};
+  var readA=${((OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX
+    + OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES) & 1) === 0 ? "true" : "false"};
   var tailWave=0u;
   loop{
     if(lane==0u){atomicStore(&relaxationChanged,0u);}workgroupBarrier();
@@ -1234,7 +1355,7 @@ var<workgroup> relaxationFailed:atomic<u32>;
       let item=faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant;
       if(extendFace(item,readA)){atomicStore(&relaxationChanged,1u);}}
     storageBarrier();workgroupBarrier();let changed=workgroupUniformLoad(&relaxationChanged);tailWave+=1u;
-    if(lane==0u){sw(32u+axis,${OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX}u+tailWave);sw(35u+axis,changed);}workgroupBarrier();
+    if(lane==0u){sw(32u+axis,${OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX}u+s(46u)+tailWave);sw(35u+axis,changed);}workgroupBarrier();
     if(changed==0u||tailWave>=max(1u,count)){break;}readA=!readA;
   }}
 
@@ -1252,7 +1373,20 @@ fn regularVectorAt(faceRow:u32,point:vec3f)->vec4f{let cell=faceCell(faceRow);le
     if(negativeRow!=INVALID){negative=ownedFace(negativeRow,axis,point);}
     else if(u32(origin[axis])==0u&&(p.closedBoundaryMask&(1u<<(2u*axis)))!=0u){negative=vec4u(bitcast<u32>(0.),0u,INVALID,1u);}
     if(positive.w==0u&&negative.w==0u){
-      return vec4f(f32(axis),f32(quadrant),f32((positive.w&1u)|((negative.w&1u)<<1u)),-1.);}
+      // No marched value on either side: this cell's face-graph component
+      // holds no seeded liquid face. Measured provenance (mini dam, first
+      // wall contact): the demand flags were fineBandDemand|extensionClosure
+      // on far-air cells 5+ coarse cells above any liquid — the degenerately
+      // dense fine band demands high air whose support subset forms ISLANDS
+      // with no demanded path down to the liquid. The paper's extension
+      // domain is a contiguous distance band and cannot island; ours breaks
+      // that invariant upstream (docs/FINE_BAND_DENSITY_PLAN.md is the real
+      // fix). Far air with band-clamped static phi needs no meaningful
+      // velocity, so stationary air is correct-by-content here; failing
+      // closed instead froze the whole epoch on the first island.
+      atomicAdd(&scratch[41u],1u);
+      atomicMin(&scratch[42u],(((cell.w>>6u)&0xffu)<<16u)|(cell.x<<3u)|axis);
+      result[axis]=0.;continue;}
     let positiveValue=bitcast<f32>(select(negative.x,positive.x,positive.w!=0u));let negativeValue=bitcast<f32>(select(positive.x,negative.x,negative.w!=0u));
     let t=clamp((point[axis]-origin[axis])/f32(cell.y),0.,1.);result[axis]=mix(negativeValue,positiveValue,t);}
   return vec4f(result,1.);}

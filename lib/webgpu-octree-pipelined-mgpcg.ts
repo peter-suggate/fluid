@@ -35,7 +35,6 @@ export const OCTREE_PIPELINED_PCG_INDIRECT_STRIDE_BYTES = 16;
 export const OCTREE_PIPELINED_PCG_DISPATCHES_PER_ITERATION = 4;
 export const OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID = "octree/pipelined-mgpcg";
 /** The solver repeats several dispatches per iteration; keep its shared-recorder load bounded. */
-export const OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT = 16;
 
 export const OCTREE_PIPELINED_PCG_ERROR = Object.freeze({
   invalidAuthority: 1 << 0,
@@ -427,6 +426,11 @@ export class WebGPUOctreePipelinedMGPCG {
       || preconditioner.encodedCorrectionDispatchCount < 1) {
       throw new Error("Pipelined MGPCG requires an explicit fixed-schedule SPD first-order V-cycle");
     }
+    // The reduction is now the pinned shared-memory tree (Part D item 4), so
+    // no `subgroupAdd` remains. The feature gate, the `enable subgroups;`
+    // directive and the `subgroup_invocation_id`/`subgroup_size` parameters
+    // stay because the GPU logical-activity variant still emits subgroup
+    // ballots through those same builtins.
     if (!device.features.has("subgroups")) {
       throw new Error("Pipelined MGPCG requires the target subgroup feature");
     }
@@ -494,6 +498,7 @@ export class WebGPUOctreePipelinedMGPCG {
     const activity = createGPULogicalActivityAdoptionContext({
       moduleId: OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
       profile: activityProfile,
+      identity: "subgroup",
       subgroupsAlreadyEnabled: true,
     });
     for (const descriptor of Object.values(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS)) {
@@ -551,7 +556,7 @@ export class WebGPUOctreePipelinedMGPCG {
     // The singleton has now authored exact row and live-partial records. End
     // the STORAGE usage scope before any record is consumed as INDIRECT.
     broker.fence("pipelined MGPCG live dispatch publication");
-    pass = broker.compute();
+    pass = broker.compute({ label: "Pipelined MGPCG state initialization" });
     this.runOuterIndirect(pass, "initializeState", 0, 0, resources);
     this.source.operator.encode(
       broker, this.source.vectors.pressure, this.source.vectors.directionImage,
@@ -584,7 +589,7 @@ export class WebGPUOctreePipelinedMGPCG {
     // dispatch buffer from being STORAGE and INDIRECT in one usage scope, and
     // lets an initially converged or failed solve zero the direction copy.
     broker.fence("pipelined MGPCG initial indirect-tail publication");
-    pass = broker.compute();
+    pass = broker.compute({ label: "Pipelined MGPCG direction initialization" });
     this.runOuterIndirect(pass, "initializeDirections", 0, 3, resources);
 
     for (let iteration = 0; iteration < this.plan.maximumIterations; iteration += 1) {
@@ -596,7 +601,7 @@ export class WebGPUOctreePipelinedMGPCG {
         solverControl: this.control,
         rowCount: this.source.rowCount,
       });
-      pass = broker.compute();
+      pass = broker.compute({ label: "Pipelined MGPCG merged partial reduction" });
       this.runIndirect(pass, "reduceMergedPartials", iteration, 2, resources);
       // The finishing workgroup reads every partial and mutates future
       // indirect records, so it owns the single global reduction boundary.
@@ -604,7 +609,7 @@ export class WebGPUOctreePipelinedMGPCG {
       pass = broker.compute({ label: "Pipelined MGPCG merged reduction finish" });
       this.runDirect(pass, "finishMergedReduction", [1, 1, 1], resources);
       broker.fence("pipelined MGPCG convergence-tail publication");
-      pass = broker.compute();
+      pass = broker.compute({ label: "Pipelined MGPCG direction update" });
       this.runIndirect(pass, "updateDirections", iteration, 3, resources);
       this.source.operator.encode(
         broker, this.source.vectors.direction, this.source.vectors.directionImage,
@@ -746,9 +751,15 @@ fn compensatedValue(a: CompensatedF32) -> f32 { return a.hi + a.lo; }
 `;
 
 /**
- * Sole measured reduction implementation: 128 workgroup lanes with subgroup
- * intrinsics, followed by a subgroup-partial workgroup merge. Correctness does
- * not assume a subgroup width; the runtime builtin defines the partial count.
+ * REVERTED 2026-07-27. This was replaced by an explicit width-halving tree so
+ * the persistent Part D executor could be compared bit-for-bit against this
+ * path. Measurement killed that motive: the persistent executor is +15.1 ms on
+ * the mini churn lane and is no longer selected by default, and the tree swap
+ * is a Gate B regression on its own -- it reddened the peak-speed gate
+ * (7.827 -> 8.046 m/s), raised the projected residual (3.10e-6 -> 3.69e-6), and
+ * added a fine-transport-invalid failure plus two top-two-layer-wet failures at
+ * t=1.60 and t=2.00. Restore the tree only alongside a persistent path that has
+ * been measured to win. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md Part D.
  */
 const targetSubgroupReductionWGSL = /* wgsl */ `
   merged[lane] = zeroMergedScalars();
@@ -1198,51 +1209,65 @@ interface MGPCGActivityEntry {
   readonly injectLocalInvocationIndex?: boolean;
   /** Uniform logical-work predicate; it does not claim physical execution-unit residency. */
   readonly meaningfulWhen: string;
+  /** Per-invocation predicate retained by the activity-only subgroup ballot. */
+  readonly activeWhen: string;
 }
 
 const MGPCG_ACTIVITY_ENTRIES: readonly MGPCGActivityEntry[] = [
   { entryPoint: "initializeControlAndDispatch", workgroupLaneCount: 1,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
-    injectWorkgroupId: true, injectLocalInvocationIndex: true, meaningfulWhen: "true" },
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "true", activeWhen: "true" },
   { entryPoint: "validateAuthority", workgroupLaneCount: 1,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
-    injectWorkgroupId: true, injectLocalInvocationIndex: true, meaningfulWhen: "true" },
+    injectWorkgroupId: true, injectLocalInvocationIndex: true,
+    meaningfulWhen: "true", activeWhen: "true" },
   { entryPoint: "initializeState", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,
-    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !failed()" },
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !failed()",
+    activeWhen: "activityWorkgroupId.x * 64u + activityLocalInvocationIndex < rows() && !failed()" },
   { entryPoint: "formInitialResidual", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,
-    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !failed()" },
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !failed()",
+    activeWhen: "activityWorkgroupId.x * 64u + activityLocalInvocationIndex < rows() && !failed()" },
   { entryPoint: "reduceMergedPartials", workgroupLaneCount: 128,
     workgroupId: "workgroup", localInvocationIndex: "lane",
-    meaningfulWhen: "workgroup.x * REDUCTION_LANES < rows() && !stopped()" },
+    meaningfulWhen: "workgroup.x * REDUCTION_LANES < rows() && !stopped()",
+    activeWhen: "workgroup.x * REDUCTION_LANES + lane < rows() && !stopped()" },
   { entryPoint: "finishMergedReduction", workgroupLaneCount: 128,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
-    injectWorkgroupId: true, meaningfulWhen: "true" },
+    injectWorkgroupId: true, meaningfulWhen: "true",
+    activeWhen: "lane < livePartialCount()" },
   { entryPoint: "initializeDirections", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,
-    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()" },
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()",
+    activeWhen: "activityWorkgroupId.x * 64u + activityLocalInvocationIndex < rows() && !stopped()" },
   { entryPoint: "advancePCGState", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,
-    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()" },
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()",
+    activeWhen: "activityWorkgroupId.x * 64u + activityLocalInvocationIndex < rows() && !stopped()" },
   { entryPoint: "updateDirections", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,
-    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()" },
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows() && !stopped()",
+    activeWhen: "activityWorkgroupId.x * 64u + activityLocalInvocationIndex < rows() && !stopped()" },
   { entryPoint: "reduceDirectionCurvaturePartials", workgroupLaneCount: 128,
     workgroupId: "workgroup", localInvocationIndex: "lane",
-    meaningfulWhen: "workgroup.x * REDUCTION_LANES < rows() && !stopped()" },
+    meaningfulWhen: "workgroup.x * REDUCTION_LANES < rows() && !stopped()",
+    activeWhen: "workgroup.x * REDUCTION_LANES + lane < rows() && !stopped()" },
   { entryPoint: "finishDirectionCurvature", workgroupLaneCount: 128,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
-    injectWorkgroupId: true, meaningfulWhen: "!stopped()" },
+    injectWorkgroupId: true, meaningfulWhen: "!stopped()",
+    activeWhen: "lane < livePartialCount() && !stopped()" },
   { entryPoint: "finalizeAndPublish", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,
-    meaningfulWhen: "activityWorkgroupId.x * 64u < rows()" },
+    meaningfulWhen: "activityWorkgroupId.x * 64u < rows()",
+    activeWhen: "activityWorkgroupId.x * 64u + activityLocalInvocationIndex < rows()" },
 ] as const;
 
 function matchingWGSLDelimiter(source: string, start: number, open: string, close: string): number {
@@ -1260,30 +1285,54 @@ function instrumentMGPCGActivityEntry(
   spec: MGPCGActivityEntry,
 ): string {
   const descriptor = OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS[spec.entryPoint];
-  const sampleWhen = `${spec.workgroupId}.x < ${OCTREE_PIPELINED_MGPCG_ACTIVITY_WORKGROUP_SAMPLE_LIMIT}u`;
-  const meaningful = `let fluidMGPCGActivityMeaningful = ${sampleWhen} && (${spec.meaningfulWhen});`;
-  const site = {
-    tick: "atomicLoad(&control[2])",
-    workgroupId: spec.workgroupId,
-    localInvocationIndex: spec.localInvocationIndex,
-    workgroupLaneCount: spec.workgroupLaneCount,
-    recordWhen: "fluidMGPCGActivityMeaningful",
-  } as const;
-  const entry = activity.workgroup(descriptor.task, "enter", site);
-  const exit = activity.workgroup(descriptor.task, "exit", site);
-  if (!entry && !exit) return source;
-
   const signature = `fn ${spec.entryPoint}(`;
   const signatureStart = source.indexOf(signature);
   if (signatureStart < 0) throw new Error(`MGPCG activity entry point ${spec.entryPoint} is missing`);
   const paramsStart = source.indexOf("(", signatureStart + 3);
   const paramsEnd = matchingWGSLDelimiter(source, paramsStart, "(", ")");
   if (paramsStart < 0 || paramsEnd < 0) throw new Error(`MGPCG activity signature ${spec.entryPoint} is malformed`);
+  const existing = source.slice(paramsStart + 1, paramsEnd);
+  const builtinName = (builtin: string): string | undefined => new RegExp(
+    `@builtin\\(${builtin}\\)\\s*([A-Za-z_]\\w*)\\s*:`,
+  ).exec(existing)?.[1];
+  const existingSubgroupLane = builtinName("subgroup_invocation_id");
+  const existingSubgroupSize = builtinName("subgroup_size");
+  const subgroupLane = existingSubgroupLane ?? "activitySubgroupLane";
+  const subgroupSize = existingSubgroupSize ?? "activitySubgroupSize";
+  const meaningful = `let fluidMGPCGActivityMeaningful = ${spec.meaningfulWhen};`;
+  const entry = activity.subgroup(descriptor.task, "enter", {
+    tick: "atomicLoad(&control[2])",
+    workgroupId: spec.workgroupId,
+    numWorkgroups: "activityNumWorkgroups",
+    // WebGPU exposes subgroup lane and size, but not a portable subgroup ID.
+    // Workgroup-local invocation indices are contiguous, so retain this as
+    // explicitly reconstructed evidence rather than claiming it was measured.
+    subgroupId: `(${spec.localInvocationIndex} / ${subgroupSize})`,
+    subgroupIdEvidence: "reconstructed",
+    subgroupLane,
+    subgroupSize,
+    active: spec.activeWhen,
+  });
+  // Exit checkpoints remain scalar heartbeats. Unlike subgroupBallot, this
+  // helper is legal on divergent early-return paths and preserves the existing
+  // enter/exit task accounting without pretending to measure a second ballot.
+  const exit = activity.workgroup(descriptor.task, "exit", {
+    tick: "atomicLoad(&control[2])",
+    workgroupId: spec.workgroupId,
+    numWorkgroups: "activityNumWorkgroups",
+    localInvocationIndex: spec.localInvocationIndex,
+    workgroupLaneCount: spec.workgroupLaneCount,
+    recordWhen: "fluidMGPCGActivityMeaningful",
+  });
+  if (!entry && !exit) return source;
+
   const additions = [
     ...(spec.injectWorkgroupId ? ["@builtin(workgroup_id) activityWorkgroupId: vec3u"] : []),
     ...(spec.injectLocalInvocationIndex ? ["@builtin(local_invocation_index) activityLocalInvocationIndex: u32"] : []),
+    ...(existingSubgroupLane ? [] : ["@builtin(subgroup_invocation_id) activitySubgroupLane: u32"]),
+    ...(existingSubgroupSize ? [] : ["@builtin(subgroup_size) activitySubgroupSize: u32"]),
+    "@builtin(num_workgroups) activityNumWorkgroups: vec3u",
   ];
-  const existing = source.slice(paramsStart + 1, paramsEnd);
   const separator = existing.trim().length > 0 && additions.length > 0
     ? existing.trimEnd().endsWith(",") ? "\n  " : ",\n  "
     : "";

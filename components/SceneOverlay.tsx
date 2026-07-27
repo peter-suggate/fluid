@@ -8,16 +8,23 @@ import { planSceneRuntime } from "@/lib/scene-runtime";
 
 const groups = [...new Set(scenePresets.map((preset) => preset.group))];
 
-export function ScenePanel() {
+/**
+ * The only always-visible scene affordances: which preset is loaded, and the
+ * way into its configuration. Everything else authored per-scene lives in the
+ * configuration panel, so this rides over the viewport instead of costing a
+ * sidebar column.
+ */
+export function SceneOverlay() {
   const presetId = useSceneStore((state) => state.presetId);
   const scene = useSceneStore((state) => state.scene);
   const sceneModalOpen = useUIStore((state) => state.sceneModalOpen);
   const setSceneModalOpen = useUIStore((state) => state.setSceneModalOpen);
   const active = scenePresets.find((preset) => preset.id === presetId);
+  const runtime = planSceneRuntime(scene).fluidSolver ? `seed ${scene.randomSeed}` : "static SVO · no fluid";
   return (
-    <section className="panel-section scene-title" data-testid="scene-panel">
-      <p className="eyebrow">SCENE · SI</p>
-      <label className="select-control" title={active?.description}>
+    <div className="scene-overlay" data-testid="scene-panel">
+      <span className="brand-mark" title="Fluid Lab · WebGPU CFD workbench">FL</span>
+      <label className="scene-overlay-preset" title={active?.description}>
         <span className="visually-hidden">Scene preset</span>
         <select aria-label="Scene preset" value={presetId} onChange={(event) => simulation.loadPreset(event.target.value)}>
           {groups.map((group) => (
@@ -28,9 +35,17 @@ export function ScenePanel() {
             </optgroup>
           ))}
         </select>
+        <small>{scene.sceneId} · {runtime}</small>
       </label>
-      <div className="scene-meta"><span>{scene.sceneId}</span><span>{!planSceneRuntime(scene).fluidSolver ? "static SVO · no fluid" : `seed ${scene.randomSeed}`}</span></div>
-      <button className={`drop-button${sceneModalOpen ? " active" : ""}`} onClick={() => setSceneModalOpen(!sceneModalOpen)} data-testid="configure-scene" aria-expanded={sceneModalOpen}>Configure scene…</button>
-    </section>
+      <button
+        className={`scene-overlay-configure${sceneModalOpen ? " active" : ""}`}
+        onClick={() => setSceneModalOpen(!sceneModalOpen)}
+        data-testid="configure-scene"
+        aria-expanded={sceneModalOpen}
+        title="Scene, method, container, fluid, numerics, and saved scenes"
+      >
+        <i aria-hidden="true" />CONFIGURE
+      </button>
+    </div>
   );
 }

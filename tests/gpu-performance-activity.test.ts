@@ -21,23 +21,27 @@ const capture: GPULogicalActivityCapture = {
   events: [
     {
       sequence: 0, taskId: 7, checkpointId: 1, tick: 100, workgroupId: [0, 0, 0],
+      sampleIndex: 0, sampleCount: 16, dispatchWorkgroupCount: 128,
       workgroupEvidence: "measured", subgroupId: 0, subgroupEvidence: "measured", laneId: 0,
       logicalLaneCount: 32, logicalLaneCountEvidence: "measured", activeLaneCount: 23,
       activeLaneMask: [0x007fffff, 0, 0, 0], activeLaneEvidence: "measured",
     },
     {
       sequence: 1, taskId: 8, checkpointId: 1, tick: 101, workgroupId: [1, 0, 0],
+      sampleIndex: 1, sampleCount: 16, dispatchWorkgroupCount: 128,
       workgroupEvidence: "measured", subgroupId: 0, subgroupEvidence: "measured", laneId: 0,
       logicalLaneCount: 32, logicalLaneCountEvidence: "measured", activeLaneCount: 12,
       activeLaneMask: [0x00000fff, 0, 0, 0], activeLaneEvidence: "measured",
     },
     {
       sequence: 2, taskId: 7, checkpointId: 2, workgroupId: [2, 0, 0],
+      sampleIndex: 2, sampleCount: 16, dispatchWorkgroupCount: 128,
       workgroupEvidence: "measured", subgroupEvidence: "unknown",
       logicalLaneCountEvidence: "unknown", activeLaneEvidence: "unknown",
     },
     {
       sequence: 3, taskId: 7, checkpointId: 2, tick: 102, workgroupId: [0, 0, 0],
+      sampleIndex: 0, sampleCount: 16, dispatchWorkgroupCount: 128,
       workgroupEvidence: "measured", subgroupId: 0, subgroupEvidence: "measured", laneId: 0,
       logicalLaneCount: 32, logicalLaneCountEvidence: "measured", activeLaneCount: 23,
       activeLaneMask: [0x007fffff, 0, 0, 0], activeLaneEvidence: "measured",
@@ -73,6 +77,17 @@ test("GPU heartbeat capture becomes real workgroup/subgroup rows over the horizo
   });
 
   assert.equal(addition.rowCount, 3, "one logical row exists for every observed subgroup/workgroup identity");
+  assert.deepEqual(addition.resources?.map((resource) => ({
+    label: resource.label,
+    sampleIndex: resource.sampleIndex,
+    sampleCount: resource.sampleCount,
+    dispatchWorkgroupCounts: resource.dispatchWorkgroupCounts,
+  })), [
+    { label: "Stratified WG sample 01/16 · SG 0", sampleIndex: 0, sampleCount: 16, dispatchWorkgroupCounts: [128] },
+    { label: "Stratified WG sample 02/16 · SG 0", sampleIndex: 1, sampleCount: 16, dispatchWorkgroupCounts: [128] },
+    { label: "Stratified WG sample 03/16", sampleIndex: 2, sampleCount: 16, dispatchWorkgroupCounts: [128] },
+  ]);
+  assert.equal(addition.events?.[0]?.metadata?.dispatchWorkgroupCount, 128);
   assert.equal(addition.events?.length, 3, "events without a time projection never get invented positions");
   assert.equal(addition.spans?.length, 1, "explicit enter/exit semantics create an occupied interval");
   assert.equal(addition.unknownTimeEventCount, 1);
@@ -186,7 +201,8 @@ test("solver-facing decoded capture ingestion correlates before and after base p
   const late = publish(lateCapture);
   assert.equal(late.result, "merged");
   assert.equal(store.getState().history.length, 1);
-  const lateRow = store.getState().latest?.rows.find((row) => row.resource.label === "WG 3,0,0 · SG 0");
+  const lateRow = store.getState().latest?.rows.find((row) =>
+    row.resource.label === "Stratified WG sample 01/16 · SG 0");
   assert.deepEqual([lateRow?.windowStart_ms, lateRow?.windowEnd_ms, lateRow?.slices.length], [0, 6, 6]);
   assert.equal(lateRow?.slices[4].taskId, "gpu.physics.advect");
 

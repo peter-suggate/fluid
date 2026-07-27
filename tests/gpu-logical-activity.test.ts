@@ -6,6 +6,7 @@ import {
   GPU_LOGICAL_ACTIVITY_FLAGS,
   GPU_LOGICAL_ACTIVITY_HEADER_WORDS,
   GPU_LOGICAL_ACTIVITY_RECORD_WORDS,
+  GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT,
   GPU_LOGICAL_ACTIVITY_UNKNOWN_U32,
   binGPULogicalActivity1ms,
   buildGPULogicalActivityShaderVariant,
@@ -13,6 +14,7 @@ import {
   decodeGPULogicalActivity,
   gpuLogicalActivityBufferByteSize,
   gpuLogicalActivitySubgroupCallWGSL,
+  gpuLogicalActivityStratifiedSampleOrdinals,
   gpuLogicalActivityWGSL,
   gpuLogicalActivityWorkgroupCallWGSL,
   reconstructGPULogicalActivityTicks,
@@ -45,6 +47,7 @@ test("enabled variants emit bounded atomics, logical helpers, calls, and distinc
   const subgroupVariant = buildGPULogicalActivityShaderVariant({ source, baseKey: "main", config: subgroup });
   assert.match(workgroupVariant.code, /@group\(3\) @binding\(0\)/);
   assert.match(workgroupVariant.code, /atomicAdd/);
+  assert.match(workgroupVariant.code, /fluidGpuLogicalActivityStratifiedSampleIndex/);
   assert.match(workgroupVariant.code, /sequence >= fluidGpuLogicalActivity\.capacity/);
   assert.doesNotMatch(workgroupVariant.code, /subgroupBallot/);
   assert.match(subgroupVariant.code, /enable subgroups;/);
@@ -55,11 +58,26 @@ test("enabled variants emit bounded atomics, logical helpers, calls, and distinc
   assert.match(gpuLogicalActivityWorkgroupCallWGSL(workgroup, {
     taskId: "7u", checkpointId: "9u", tick: "tick", workgroupId: "wid",
     localInvocationIndex: "lane", workgroupLaneCount: "64u",
-  }), /fluidGpuLogicalActivityWorkgroup\(7u, 9u, tick, wid, lane, 64u\)/);
+    numWorkgroups: "dispatchSize",
+  }), /fluidGpuLogicalActivityWorkgroup\(7u, 9u, tick, wid, dispatchSize, lane, 64u\)/);
   assert.match(gpuLogicalActivitySubgroupCallWGSL(subgroup, {
     taskId: "7u", checkpointId: "9u", workgroupId: "wid", subgroupId: "sid",
     subgroupIdEvidence: "reconstructed", subgroupLane: "slane", subgroupSize: "ssize", active: "eligible",
-  }), /sid, true, slane, ssize, eligible/);
+    numWorkgroups: "dispatchSize",
+  }), /wid, dispatchSize, sid, true, slane, ssize, eligible/);
+});
+
+test("sixteen midpoint strata cover the whole dispatch without prefix bias", () => {
+  assert.deepEqual(gpuLogicalActivityStratifiedSampleOrdinals(1), [0]);
+  assert.deepEqual(gpuLogicalActivityStratifiedSampleOrdinals(16),
+    Array.from({ length: GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT }, (_, index) => index));
+  assert.deepEqual(gpuLogicalActivityStratifiedSampleOrdinals(17),
+    Array.from({ length: 16 }, (_, index) => index + 1));
+  const large = gpuLogicalActivityStratifiedSampleOrdinals(1_000);
+  assert.equal(large.length, 16);
+  assert.ok(large[0]! > 0, "sampling must not begin at dispatch prefix zero");
+  assert.ok(large.at(-1)! > 900, "sampling must reach the final dispatch stratum");
+  assert.equal(new Set(large).size, 16);
 });
 
 test("instrumentation declarations follow existing WGSL directives", () => {
@@ -82,21 +100,25 @@ test("CPU decoder preserves measured and reconstructed logical evidence", () => 
   image[4] = 2;
   writeRecord(image, 0, [
     0, 10, 20, 3, 1, 2, 3,
+    0, 64,
     GPU_LOGICAL_ACTIVITY_UNKNOWN_U32, 0, 64, GPU_LOGICAL_ACTIVITY_UNKNOWN_U32,
     0, 0, 0, 0,
     GPU_LOGICAL_ACTIVITY_FLAGS.workgroupIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.laneIdPresent
-      | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountReconstructed,
+      | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountReconstructed
+      | GPU_LOGICAL_ACTIVITY_FLAGS.stratifiedSamplePresent,
   ]);
   writeRecord(image, 1, [
     1, 10, 21, 4, 1, 2, 3,
+    1, 64,
     2, 0, 32, 3,
     0b1011, 0, 0, 0,
     GPU_LOGICAL_ACTIVITY_FLAGS.workgroupIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.subgroupIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.laneIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountMeasured
-      | GPU_LOGICAL_ACTIVITY_FLAGS.activeMaskMeasured,
+      | GPU_LOGICAL_ACTIVITY_FLAGS.activeMaskMeasured
+      | GPU_LOGICAL_ACTIVITY_FLAGS.stratifiedSamplePresent,
   ]);
   const decoded = decodeGPULogicalActivity(image);
   assert.equal(decoded.ok, true);
@@ -110,6 +132,8 @@ test("CPU decoder preserves measured and reconstructed logical evidence", () => 
   assert.equal(decoded.capture.events[1].activeLaneEvidence, "measured");
   assert.deepEqual(decoded.capture.events[1].activeLaneMask, [0b1011, 0, 0, 0]);
   assert.equal(decoded.capture.events[1].activeLaneCount, 3);
+  assert.equal(decoded.capture.events[1].sampleCount, 16);
+  assert.equal(decoded.capture.events[1].dispatchWorkgroupCount, 64);
   assert.equal(gpuLogicalActivityBufferByteSize(4), image.byteLength);
 });
 
@@ -119,11 +143,13 @@ test("overflow preserves its complete prefix and malformed records still fail cl
   overflow[5] = 1;
   writeRecord(overflow, 0, [
     0, 1, 2, 0, 0, 0, 0,
+    0, 1,
     GPU_LOGICAL_ACTIVITY_UNKNOWN_U32, 0, 32, GPU_LOGICAL_ACTIVITY_UNKNOWN_U32,
     0, 0, 0, 0,
     GPU_LOGICAL_ACTIVITY_FLAGS.workgroupIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.laneIdPresent
-      | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountReconstructed,
+      | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountReconstructed
+      | GPU_LOGICAL_ACTIVITY_FLAGS.stratifiedSamplePresent,
   ]);
   const truncated = decodeGPULogicalActivity(overflow);
   assert.equal(truncated.ok, true);
@@ -136,13 +162,14 @@ test("overflow preserves its complete prefix and malformed records still fail cl
   const malformed = createGPULogicalActivityBufferImage(1, 2);
   malformed[4] = 1;
   writeRecord(malformed, 0, [
-    0, 1, 2, 0, 0, 0, 0, 0, 0, 32, 2,
+    0, 1, 2, 0, 0, 0, 0, 0, 1, 0, 0, 32, 2,
     1, 0, 0, 0,
     GPU_LOGICAL_ACTIVITY_FLAGS.workgroupIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.subgroupIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.laneIdPresent
       | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountMeasured
-      | GPU_LOGICAL_ACTIVITY_FLAGS.activeMaskMeasured,
+      | GPU_LOGICAL_ACTIVITY_FLAGS.activeMaskMeasured
+      | GPU_LOGICAL_ACTIVITY_FLAGS.stratifiedSamplePresent,
   ]);
   const result = decodeGPULogicalActivity(malformed);
   assert.equal(result.ok, false);
@@ -160,9 +187,10 @@ test("1 ms bins never invent time and retain time/activity evidence", () => {
     | GPU_LOGICAL_ACTIVITY_FLAGS.subgroupIdPresent
     | GPU_LOGICAL_ACTIVITY_FLAGS.laneIdPresent
     | GPU_LOGICAL_ACTIVITY_FLAGS.laneCountMeasured
-    | GPU_LOGICAL_ACTIVITY_FLAGS.activeMaskMeasured;
-  writeRecord(image, 0, [0, 1, 1, 10, 0, 0, 0, 0, 0, 4, 2, 3, 0, 0, 0, measuredFlags]);
-  writeRecord(image, 1, [1, 1, 2, 11, 1, 0, 0, 0, 0, 4, 1, 1, 0, 0, 0, measuredFlags]);
+    | GPU_LOGICAL_ACTIVITY_FLAGS.activeMaskMeasured
+    | GPU_LOGICAL_ACTIVITY_FLAGS.stratifiedSamplePresent;
+  writeRecord(image, 0, [0, 1, 1, 10, 0, 0, 0, 0, 2, 0, 0, 4, 2, 3, 0, 0, 0, measuredFlags]);
+  writeRecord(image, 1, [1, 1, 2, 11, 1, 0, 0, 1, 2, 0, 0, 4, 1, 1, 0, 0, 0, measuredFlags]);
   const decoded = decodeGPULogicalActivity(image);
   assert.equal(decoded.ok, true);
   if (!decoded.ok) return;

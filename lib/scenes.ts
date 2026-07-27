@@ -155,6 +155,77 @@ export function createBrickQuadDamBreakScene(): SceneDescription {
   return scene;
 }
 
+/** Brick tiers occupied by each reservoir of the twin-dam scene: two bricks in
+ * x, one in y, one in z, anchored at diagonally opposite floor corners. */
+const TWIN_DAM_BRICK_TIERS = Object.freeze({
+  x: Object.freeze([[0, 1], [5, 6]] as const),
+  y: Object.freeze([0] as const),
+  z: Object.freeze([0, 1] as const),
+});
+
+/**
+ * A wide tank holding two reservoirs on diagonally opposite floor corners.
+ * The finest solver grid is exactly 56x16x16 cells of 0.05 m (7x2x2 fluid
+ * bricks); each dam is a 2x1x1-brick slab (0.8 x 0.4 x 0.4 m) leaving three
+ * bricks — 1.2 m — of dry floor between them and one brick of headroom under
+ * the closed lid. Released together they run down the long axis, and because
+ * they are offset in z the fronts meet mid-tank at an angle rather than
+ * head-on, so the collision produces an oblique churn instead of a symmetric
+ * standing wall.
+ *
+ * The reservoirs are authored as explicit brick seeds rather than the analytic
+ * `dam-break` initializer, which only ever builds one corner-anchored box.
+ * Seeded geometry therefore takes the dense host bootstrap that terrain and
+ * rigid-body scenes already use.
+ *
+ * Both extents are solver limits rather than taste, and both are pinned by
+ * tests:
+ *  - 14336 cells keeps the octree lane under the bounded 16384-row SPGrid
+ *    V-cycle. At this domain size `planOctreePressureCapacity` saturates at
+ *    the cell count, so a wider tank on the same lattice fails octree solver
+ *    construction outright.
+ *  - Eight-cell reservoirs stay inside the tall-cell method's default twelve
+ *    regular layers. Columns taller than that band are compressed by the
+ *    remesh, which loses most of their volume over half a second.
+ */
+export function createTwinDamCollisionScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "twin-dam-collision";
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: 2.8,
+    height_m: 0.8,
+    depth_m: 0.8,
+    // Both reservoirs together: 2 x (0.8 x 0.4 x 0.4 m) of 2.8 x 0.8 x 0.8 m.
+    // Seeds replace the base condition, so this only keeps fill-derived
+    // diagnostics consistent with the water actually present.
+    fillFraction: 1 / 7,
+    top: "closed",
+    fluidWallMode: "no-slip",
+  };
+  scene.fluid.initialCondition = "dam-break";
+  // The authored lattice gives exactly 56x16x16 cells of 0.05 m.
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  const brick = 8 * scene.voxelDomain.finestCellSize_m;
+  const seeds: { x: number; y: number; z: number }[] = [];
+  // One seed per occupied brick, placed at the brick centre so the solver's
+  // own rounding resolves it to the intended tier.
+  TWIN_DAM_BRICK_TIERS.x.forEach((xTiers, dam) => {
+    for (const xTier of xTiers) for (const yTier of TWIN_DAM_BRICK_TIERS.y) {
+      seeds.push({
+        x: -0.5 * scene.container.width_m + (xTier + 0.5) * brick,
+        y: (yTier + 0.5) * brick,
+        z: -0.5 * scene.container.depth_m + (TWIN_DAM_BRICK_TIERS.z[dam] + 0.5) * brick,
+      });
+    }
+  });
+  scene.fluid.initialBrickSeeds_m = seeds;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  return scene;
+}
+
 /**
  * A wide ocean tank sized so the finest solver grid is exactly 320x96x80
  * cells of 0.025 m (40x12x10 fluid bricks). The pool fills to 72 cells
@@ -274,6 +345,15 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
       scene.fluid.initialCondition = "tank-fill";
       return scene;
     }
+  },
+  {
+    id: "twin-dam-collision",
+    name: "Twin dams · corner collision",
+    group: "Interactive",
+    description: "A wide tank with a reservoir on each diagonally opposite floor corner. Both release at once, run 1.2 m down the long axis, and meet mid-tank at an angle.",
+    background: "default",
+    create: createTwinDamCollisionScene,
+    camera: { azimuth_rad: 0.5, elevation_rad: 0.32, distance_m: 4.1, target_m: { x: 0, y: 0.2, z: 0 } }
   },
   {
     id: "garden-pond",

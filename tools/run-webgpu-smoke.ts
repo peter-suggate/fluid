@@ -25,6 +25,11 @@ import {
 } from "../lib/webgpu-octree-fine-levelset-redistance";
 import { FINE_LEVELSET_VOLUME_VALID, unpackFineLevelSetGPUVolumeControl }
   from "../lib/webgpu-octree-fine-levelset-volume";
+import { unpackFineLevelSetGPUTopologyControl }
+  from "../lib/webgpu-octree-fine-levelset-topology";
+import { unpackFineToCoarseGPUControl }
+  from "../lib/webgpu-octree-fine-to-coarse-levelset";
+import { readFineLevelSetWorksetHeader } from "../lib/octree-fine-levelset-bricks";
 import { decodeStructuredProjectionEnergy }
   from "../lib/webgpu-octree-structured-dynamics";
 import { unpackFineLevelSetGPUTransportControl }
@@ -292,6 +297,44 @@ const powerStageAuditLog = process.env.FLUID_POWER_STAGE_AUDIT === "1";
 const powerAuditEverySteps = Number(process.env.FLUID_POWER_AUDIT_EVERY_STEPS ?? 1);
 if (!Number.isSafeInteger(powerAuditEverySteps) || powerAuditEverySteps < 1) {
   throw new Error("FLUID_POWER_AUDIT_EVERY_STEPS must be a positive integer");
+}
+/** Silent-failure tripwires (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md, A3/P0.3).
+ *
+ * Each of these was previously observable only through a ~250 ms telemetry
+ * poll or not at all, so a build could get faster by deleting physics and
+ * still print PASS — a silent topology rollback once manufactured a fake
+ * 1.66x win. They are captured per accepted step by GPU-side copies into a
+ * harness-owned ring (never a mid-run map, which would drain the pipeline and
+ * corrupt the wall measurement) and evaluated after the measured window.
+ *
+ * `FLUID_TRIPWIRES=1` additionally *requires* every counter to be readable:
+ * a counter that cannot be evaluated fails the run rather than passing
+ * silently. That is the failure mode this work item exists to kill.
+ * `FLUID_TRIPWIRE_ALLOW=topology-rollback,restriction-unaccepted,...`
+ * downgrades named tripwires to loud warnings for triage only. */
+/** Coverage envelope for the restriction tripwire. Coarse rows whose centre
+ * falls outside the fine narrow band are legitimately uncorrected, so the
+ * absolute count is never an error; what must not regress is the FRACTION.
+ * Calibrated against the measured mini-lane peak of 11.8% (177/1500 at step 12,
+ * decaying to 2.0% by step 500) with better than 2x headroom. A band-width
+ * narrowing -- the silent failure this signal exists to catch, per
+ * lib/webgpu-octree-fine-to-coarse-levelset.ts -- moves this far past 25%. */
+const TRIPWIRE_MAXIMUM_UNCOVERED_ROW_FRACTION = 0.25;
+const TRIPWIRE_IDS = ["topology-rollback", "restriction-unaccepted",
+  "mgpcg-nonconvergence", "fine-band-sentinel"] as const;
+type TripwireId = (typeof TRIPWIRE_IDS)[number];
+const tripwireMode = process.env.FLUID_TRIPWIRES;
+if (tripwireMode !== undefined && tripwireMode !== "0" && tripwireMode !== "1") {
+  throw new Error("FLUID_TRIPWIRES must be 0 or 1");
+}
+const tripwiresDisabled = tripwireMode === "0";
+const tripwiresForcedRequired = tripwireMode === "1";
+const tripwireAllowList = new Set((process.env.FLUID_TRIPWIRE_ALLOW ?? "")
+  .split(",").map((entry) => entry.trim()).filter(Boolean));
+for (const entry of tripwireAllowList) {
+  if (!TRIPWIRE_IDS.includes(entry as TripwireId)) {
+    throw new Error(`FLUID_TRIPWIRE_ALLOW contains unknown tripwire "${entry}"; known ids: ${TRIPWIRE_IDS.join(", ")}`);
+  }
 }
 const powerBoundaryQueryAuditKeys = (process.env.FLUID_POWER_BOUNDARY_QUERY_AUDIT_KEYS ?? "")
   .split(",").filter(Boolean).map(Number);
@@ -2487,6 +2530,8 @@ interface GPUSmokeResult {
   octreeMGPCGDiagnostics?: OctreeMGPCGDiagnostics;
   stabilityEnvelope?: StabilityEnvelope;
   octreeWorkAccounting?: OctreeWorkSnapshot;
+  /** Exact cause when a work-accounting stage failed its validity gate. */
+  octreeWorkAccountingBlocker?: string;
   energyTrace: MechanicalEnergySample[];
   checkpoints: Array<{
     time_s: number;
@@ -2736,6 +2781,7 @@ function reportResult(scenario: SmokeScenarioId, result: GPUSmokeResult) {
     octreeMGPCGDiagnostics: result.octreeMGPCGDiagnostics,
     stabilityEnvelope: result.stabilityEnvelope,
     octreeWorkAccounting: result.octreeWorkAccounting,
+    octreeWorkAccountingBlocker: result.octreeWorkAccountingBlocker,
     energyTraceSummary: energyTraceSummary(result.energyTrace),
     validationErrors: result.validationErrors
   }));
@@ -3163,6 +3209,71 @@ async function runGPU(
   const powerGenerationAuditSteps: number[] = [];
   const powerGenerationAuditFineGenerations: number[] = [];
   const powerGenerationAuditDts: number[] = [];
+  // ---- Silent-failure tripwires (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3) --
+  // Per accepted step: the fine topology rollback word, the restriction
+  // transaction's unaccepted-row count, the MGPCG converged word, and the
+  // fine worklist header. All four are copied GPU-side by a tiny encoder that
+  // rides after the advance's own submission and is mapped exactly once,
+  // after the measured window closes; nothing here drains the pipeline.
+  const TRIPWIRE_RECORD = Object.freeze({
+    topologyOffsetBytes: 0, topologyBytes: 48,
+    restrictionOffsetBytes: 48, restrictionBytes: 32,
+    mgpcgOffsetBytes: 80, mgpcgBytes: 64,
+    fineHeaderOffsetBytes: 144, fineHeaderBytes: 28,
+    strideBytes: 176,
+  });
+  /** The benchmark and acceptance lanes must evaluate every tripwire. Any
+   * other octree run captures them opportunistically: a trip still fails, but
+   * a scene with no compact fine authority is "not applicable" rather than a
+   * wiring failure. */
+  const tripwiresRequired = !tripwiresDisabled && method.id === "octree"
+    && (tripwiresForcedRequired
+      || scenarioId === "minimal-power-dam-break" || scenarioId === "dam-break-ui");
+  const tripwireCapacity = !tripwiresDisabled && method.id === "octree"
+    ? Math.max(1, exactStepCount ?? 0, oracleSteps,
+      Math.ceil(target_s / Math.max(scene.numerics.maxDt_s, Number.EPSILON)) + 1)
+    : 0;
+  const tripwireSnapshot = tripwireCapacity > 0
+    ? device.createBuffer({
+      label: "Per-step silent-failure tripwire snapshots",
+      size: tripwireCapacity * TRIPWIRE_RECORD.strideBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    })
+    : undefined;
+  const tripwireSteps: number[] = [];
+  const tripwireFineGenerations: number[] = [];
+  if (tripwiresDisabled) {
+    console.error("[tripwires] DISABLED by FLUID_TRIPWIRES=0: topology rollback,"
+      + " unaccepted restriction rows, MGPCG non-convergence and the fine-band"
+      + " capacity sentinel are NOT gated in this run");
+  }
+  if (tripwireAllowList.size !== 0) {
+    console.error(`[tripwires] downgraded to warnings by FLUID_TRIPWIRE_ALLOW: ${
+      Array.from(tripwireAllowList).join(", ")}`);
+  }
+  /** Live control buffers the tripwire record is copied from.
+   *
+   * The fine topology control has no dedicated accessor, but the solver's
+   * public `workAccountingBuffers` already publishes it under exactly the
+   * selection `readGlobalFineLevelSetDiagnostics` uses
+   * (`globalFinePublishedIsA ? topologyBA : topologyAB`, i.e. the direction
+   * that produced the currently published source). Reusing it keeps one
+   * selection rule in the codebase instead of a second copy that could drift.
+   * A missing source is a hard failure on a required lane, never a silent
+   * skip -- an unevaluable tripwire is what this work item exists to kill. */
+  const tripwireSources = () => {
+    const authority = solver as GPUSolverInstance & {
+      mgpcgControl?: GPUBuffer;
+      globalFineRestrictionControl?: GPUBuffer;
+      workAccountingBuffers?: { fineTopologyControl?: GPUBufferBinding };
+    };
+    return {
+      topology: authority.workAccountingBuffers?.fineTopologyControl,
+      restriction: authority.globalFineRestrictionControl,
+      mgpcg: authority.mgpcgControl,
+      fineWorklist: authority.globalFineLevelSetSource?.worklist,
+    };
+  };
   let topologyTransitionDeepCell: number | undefined;
   let lastLoggedPhysicsTraceSampleId = 0;
   let lastAttributedPhysicsTraceSampleId = 0;
@@ -3303,6 +3414,54 @@ async function runGPU(
       powerGenerationAuditFineGenerations.push(fine.generation);
       powerGenerationAuditDts.push(stepDt);
     }
+    if (tripwireSnapshot) {
+      // These copies are QA evidence, not simulation work: charge their host
+      // cost to samplingWall_ms exactly as every other QA readback is charged,
+      // so the throughput lanes stay comparable across builds.
+      const tripwireCaptureStartedAt_ms = performance.now();
+      const sources = tripwireSources();
+      const missing = Object.entries(sources)
+        .filter(([, buffer]) => !buffer).map(([name]) => name);
+      // A narrowed topology binding would silently truncate the record rather
+      // than surface the rollback word, so treat it as an unreadable counter.
+      if (sources.topology && (sources.topology.size ?? TRIPWIRE_RECORD.topologyBytes)
+        < TRIPWIRE_RECORD.topologyBytes) {
+        missing.push(`topology (binding exposes ${sources.topology.size} bytes,`
+          + ` the control ABI needs ${TRIPWIRE_RECORD.topologyBytes})`);
+      }
+      if (missing.length !== 0) {
+        // An unevaluable tripwire is the exact failure mode A3 exists to kill:
+        // fail loudly instead of quietly capturing nothing.
+        if (tripwiresRequired) {
+          throw new Error(`tripwires could not be evaluated at step ${steps}: missing control`
+            + ` buffers ${missing.join(", ")} (see docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3)`);
+        }
+      } else {
+        const record = tripwireSteps.length;
+        if (record >= tripwireCapacity) {
+          throw new Error(`tripwire capture exceeded its ${tripwireCapacity}-step snapshot capacity`);
+        }
+        const base = record * TRIPWIRE_RECORD.strideBytes;
+        // One constant label: the command audit buckets encoders by label, and
+        // a per-step unique label would add one map entry per advance to every
+        // report and regression artifact.
+        const encoder = device.createCommandEncoder({ label: "Queue tripwire snapshot" });
+        encoder.copyBufferToBuffer(sources.topology!.buffer, sources.topology!.offset ?? 0,
+          tripwireSnapshot, base + TRIPWIRE_RECORD.topologyOffsetBytes,
+          TRIPWIRE_RECORD.topologyBytes);
+        encoder.copyBufferToBuffer(sources.restriction!, 0, tripwireSnapshot,
+          base + TRIPWIRE_RECORD.restrictionOffsetBytes, TRIPWIRE_RECORD.restrictionBytes);
+        encoder.copyBufferToBuffer(sources.mgpcg!, 0, tripwireSnapshot,
+          base + TRIPWIRE_RECORD.mgpcgOffsetBytes, TRIPWIRE_RECORD.mgpcgBytes);
+        encoder.copyBufferToBuffer(sources.fineWorklist!, 0, tripwireSnapshot,
+          base + TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes);
+        device.queue.submit([encoder.finish()]);
+        tripwireSteps.push(steps);
+        tripwireFineGenerations.push(
+          (solver as GPUSolverInstance).globalFineLevelSetSource?.generation ?? 0);
+      }
+      samplingWall_ms += performance.now() - tripwireCaptureStartedAt_ms;
+    }
     if (steps === oracleSteps) {
       const samplingStartedAt = performance.now();
       await awaitAdvanceCompletion();
@@ -3336,7 +3495,10 @@ async function runGPU(
           wetPreProjection: sample.structuredWetPreProjectionKineticEnergyProxy,
           wetPostProjection: sample.structuredWetPostProjectionKineticEnergyProxy,
           wetFaces: sample.structuredWetFaceCount,
-          transitionPath: sample.structuredTransitionPathCount,
+          wetThetaStart: sample.structuredWetStartThetaEnergyProxy,
+          wetThetaPostAdvection: sample.structuredWetPostAdvectionThetaEnergyProxy,
+          wetThetaPreProjection: sample.structuredWetPreProjectionThetaEnergyProxy,
+          wetThetaPostProjection: sample.structuredWetPostProjectionThetaEnergyProxy,
           staggeredPath: sample.structuredStaggeredPathCount }));
       }
       const isRestrictedTall = sample.gridKind === "restricted-tall-cell";
@@ -3438,6 +3600,39 @@ async function runGPU(
         }
         flipCensusPrevious = { field: exact.field.slice(),
           time_s: solver.info.submittedTime_s ?? 0 };
+      }
+      if (process.env.FLUID_PROBE_CELL) {
+        // Local liquid-fraction neighborhood around one cell, per sampled
+        // step: the ground truth for whether an air-support march fallback
+        // there was a genuinely sealed component or a seeding gap next to
+        // reachable liquid.
+        const probe = process.env.FLUID_PROBE_CELL.split(",").map(Number);
+        const { nx: fx, ny: fy, nz: fz } = sample;
+        if (probe.length === 3 && probe.every((v) => Number.isInteger(v) && v >= 0)) {
+          const [pi, pj, pk] = probe as [number, number, number];
+          const planes: string[] = [];
+          for (let dj = 2; dj >= -2; dj -= 1) {
+            const j = pj + dj;
+            if (j < 0 || j >= fy) continue;
+            const rows: string[] = [];
+            for (let dk = -2; dk <= 2; dk += 1) {
+              const k = pk + dk;
+              if (k < 0 || k >= fz) continue;
+              let row = "";
+              for (let di = -2; di <= 2; di += 1) {
+                const i = pi + di;
+                if (i < 0 || i >= fx) { row += " ."; continue; }
+                const alpha = exact.field[i + fx * (j + fy * k)] ?? 0;
+                row += alpha > 0.99 ? " F" : alpha > 0.5 ? " O" : alpha > 0.01 ? " o" : " -";
+              }
+              rows.push(row);
+            }
+            planes.push(`j=${j}:` + rows.join(" |"));
+          }
+          console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+            phase: "probe-cell", time_s: solver.info.submittedTime_s,
+            cell: probe, planes }));
+        }
       }
       const stagedSolver = solver as GPUSolverInstance & {
         preProjectionVelocityTexture?: GPUTexture;
@@ -3878,6 +4073,144 @@ async function runGPU(
       powerGenerationAuditedSteps = powerGenerationAuditSteps.length;
     }
   }
+  // ---- Silent-failure tripwires: evaluation ---------------------------------
+  // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3 (P0.3). Every one of these fails
+  // the run. A change that gets faster while tripping one is not a speedup.
+  if (tripwireSnapshot) {
+    const tripped: {
+      id: TripwireId; step: number; fineGeneration: number; detail: Record<string, unknown>;
+    }[] = [];
+    if (tripwireSteps.length === 0) {
+      tripwireSnapshot.destroy();
+      if (tripwiresRequired) {
+        throw new Error("tripwires could not be evaluated: no accepted step captured a"
+          + " tripwire record (see docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3)");
+      }
+    } else {
+      const snapshotBytes = tripwireSteps.length * TRIPWIRE_RECORD.strideBytes;
+      try {
+        await tripwireSnapshot.mapAsync(GPUMapMode.READ, 0, snapshotBytes);
+        const mapped = new Uint8Array(tripwireSnapshot.getMappedRange(0, snapshotBytes));
+        const words = (record: number, offsetBytes: number, byteLength: number) => new Uint32Array(
+          mapped.buffer, mapped.byteOffset + record * TRIPWIRE_RECORD.strideBytes + offsetBytes,
+          byteLength / 4,
+        );
+        for (let record = 0; record < tripwireSteps.length; record += 1) {
+          const step = tripwireSteps[record]!;
+          const fineGeneration = tripwireFineGenerations[record]!;
+          const trip = (id: TripwireId, detail: Record<string, unknown>) =>
+            tripped.push({ id, step, fineGeneration, detail });
+          // 1. Topology rollback. `settleFinePublication` returns early on the
+          //    clean path and writes control[5]=1 only on the rollback branch;
+          //    the host re-zeroes control words 0..7 at the start of every
+          //    topology encode, so a set word is always this generation's own
+          //    verdict, never a stale latch.
+          const topologyControl = words(record, TRIPWIRE_RECORD.topologyOffsetBytes,
+            TRIPWIRE_RECORD.topologyBytes);
+          const topology = unpackFineLevelSetGPUTopologyControl(topologyControl);
+          if (topology.rolledBack) {
+            trip("topology-rollback", { rolledBack: true,
+              flags: topology.flags, published: topology.published,
+              downstreamFinalizeReason: topology.downstreamFinalizeReason,
+              interfaceBricks: topology.interfaceBricks,
+              desiredBricks: topology.desiredBricks,
+              activatedBricks: topology.activatedBricks,
+              control: Array.from(topologyControl) });
+          }
+          // 2. Restriction coverage. NOTE: the plan document specifies this
+          //    tripwire as `unacceptedRows == 0`, and that is wrong. The
+          //    producer documents the field as "Never an error: a row outside
+          //    the fine narrow band is legitimately uncorrected"
+          //    (lib/webgpu-octree-fine-to-coarse-levelset.ts). Measured on the
+          //    mini lane at HEAD: 144/1500 rows unaccepted at step 1 decaying
+          //    to 30/1473 by step 500, peak 177/1500 = 11.8%, with flags 0 and
+          //    valid true throughout. An == 0 gate fires on 439 of 500 steps.
+          //    What the field is actually for is the coverage-regression signal
+          //    for a band-width change, which is otherwise silent because an
+          //    unaccepted row raises no flag and writes no contribution. So the
+          //    gate tests that instead: the source must be accepted, and the
+          //    uncovered FRACTION must stay inside an authored envelope that a
+          //    real band narrowing would blow through.
+          const restrictionWords = words(record, TRIPWIRE_RECORD.restrictionOffsetBytes,
+            TRIPWIRE_RECORD.restrictionBytes);
+          const restriction = unpackFineToCoarseGPUControl(restrictionWords);
+          const uncoveredFraction = restriction.rowCount > 0
+            ? restriction.unacceptedRows / restriction.rowCount : undefined;
+          if (restriction.flags !== 0 || !restriction.valid) {
+            trip("restriction-unaccepted", { unevaluable: true,
+              reason: "restriction source rejected; unaccepted-row count is masked to zero",
+              flags: restriction.flags, rowCount: restriction.rowCount,
+              valid: restriction.valid, control: Array.from(restrictionWords) });
+          } else if (uncoveredFraction === undefined) {
+            trip("restriction-unaccepted", { unevaluable: true,
+              reason: "restriction published a zero row count; coverage is not evaluable",
+              control: Array.from(restrictionWords) });
+          } else if (uncoveredFraction > TRIPWIRE_MAXIMUM_UNCOVERED_ROW_FRACTION) {
+            trip("restriction-unaccepted", {
+              reason: "fine-band coverage regressed: more coarse rows are outside the"
+                + " band than the authored envelope allows",
+              unacceptedRows: restriction.unacceptedRows, rowCount: restriction.rowCount,
+              uncoveredFraction: Number(uncoveredFraction.toFixed(4)),
+              envelope: TRIPWIRE_MAXIMUM_UNCOVERED_ROW_FRACTION,
+              flags: restriction.flags, valid: restriction.valid,
+              control: Array.from(restrictionWords) });
+          }
+          // 3. Solver convergence. Non-convergence at the encoded budget
+          //    publishes the SEED pressure and fails nothing today; this is the
+          //    guard for that cliff. Steps that executed no iterations are
+          //    exempt by construction (nothing to converge); a terminal count of
+          //    zero is gated per run by tools/benchmark-power-dam.ts.
+          const mgpcgWords = words(record, TRIPWIRE_RECORD.mgpcgOffsetBytes,
+            TRIPWIRE_RECORD.mgpcgBytes);
+          const mgpcg = decodeOctreeMGPCGDiagnostics(mgpcgWords);
+          if (mgpcg.flags !== 0) {
+            trip("mgpcg-nonconvergence", { unevaluable: true,
+              reason: "MGPCG control reports error flags; the converged word is not meaningful",
+              flags: mgpcg.flags, converged: mgpcg.converged, iterations: mgpcg.iterations,
+              rows: mgpcg.rows });
+          } else if (mgpcg.iterations > 0 && !mgpcg.converged) {
+            trip("mgpcg-nonconvergence", { converged: false, iterations: mgpcg.iterations,
+              rows: mgpcg.rows, relativeResidual: mgpcg.relativeResidual,
+              residualSquared: mgpcg.residualSquared, rhsSquared: mgpcg.rhsSquared });
+          }
+          // 4. Fine-band capacity overflow. The active count degrades to the
+          //    INVALID sentinel, which silently no-ops the solver and still
+          //    prints PASS. The count is worklist header word ONE; a prior
+          //    consumer read word zero (the generation) and printed nonsense.
+          const header = readFineLevelSetWorksetHeader(words(record,
+            TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes));
+          if (header === undefined) {
+            trip("fine-band-sentinel", { unevaluable: true,
+              reason: "fine worklist header could not be decoded" });
+          } else if (header.activeCount === 0xffff_ffff) {
+            trip("fine-band-sentinel", { activeCount: header.activeCount,
+              sentinel: "0xFFFFFFFF", capacity: header.capacity,
+              generation: header.generation, flags: header.flags });
+          }
+        }
+      } finally {
+        if (tripwireSnapshot.mapState === "mapped") tripwireSnapshot.unmap();
+        tripwireSnapshot.destroy();
+      }
+    }
+    const allowed = tripped.filter((entry) => tripwireAllowList.has(entry.id));
+    const failing = tripped.filter((entry) => !tripwireAllowList.has(entry.id));
+    for (const entry of allowed) {
+      console.error(`[tripwire ${entry.id} ALLOWED] ${JSON.stringify(entry)}`);
+    }
+    if (failing.length !== 0) {
+      const byId: Record<string, number> = {};
+      for (const entry of failing) byId[entry.id] = (byId[entry.id] ?? 0) + 1;
+      throw new Error(`silent-failure tripwire(s) tripped over ${tripwireSteps.length}`
+        + ` captured steps: ${JSON.stringify({ counts: byId,
+          firstTrips: failing.slice(0, 12), lastTrip: failing[failing.length - 1] })}`
+        + " (see docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3)");
+    }
+    console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
+      phase: "tripwires", capturedSteps: tripwireSteps.length,
+      required: tripwiresRequired, allowed: Array.from(tripwireAllowList),
+      tripped: tripped.length }));
+  }
   const gpuFineTimestamps: GPUFineTimestampReport | undefined = genericPhaseTraceRequested ? {
     measuredAdvances: attributedTraceSamples,
     measuredPasses: Array.from(attributedPhaseBuckets.values())
@@ -3960,6 +4293,20 @@ async function runGPU(
   }
   solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
   solver.info.simulatedTime_s = solver.info.submittedTime_s;
+  // The octree projection's pressure counters (`pressureIterationsUsed`,
+  // `pressureConverged`, the residuals) are refreshed ONLY by an explicit
+  // solve-diagnostics readback, and the recurring `readStats()` path never
+  // issues one -- so without this the reported "terminal pressure iterations"
+  // is the t=0 bootstrap solve's count, forever, and the benchmark's
+  // zero-iteration tripwire can never observe the terminal step. This runs
+  // after the measured window closes (simulationWall_ms is already computed),
+  // so it costs the wall nothing. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3.
+  if (method.id === "octree") {
+    const projection = (solver as unknown as {
+      octreeProjection?: { readSolveDiagnostics(): Promise<void> };
+    }).octreeProjection;
+    if (projection) await projection.readSolveDiagnostics();
+  }
   const info = { ...await solver.readStats() };
   // The compact paper path never dispatches the dense velocity reduction.
   // Exact QA checkpoints already reconstruct the accepted structured rows on
@@ -4136,7 +4483,14 @@ async function runGPU(
     : undefined;
   await device.queue.onSubmittedWorkDone();
   const accountingOwner = solver as GPUSolverInstance & {
-    captureWorkAccounting?: () => Promise<{ snapshot: OctreeWorkSnapshot }>;
+    // `captureWorkAccounting` already computes an exact English cause when a
+    // stage's active/scheduled lanes come back null, and it was being thrown
+    // away here -- leaving the regression artifact to report only the generic
+    // "counters are null for at least one stage". Carry the cause out so a
+    // blocked capture is triageable without a rerun.
+    captureWorkAccounting?: () => Promise<{
+      snapshot: OctreeWorkSnapshot; pressure?: { blocker?: string };
+    }>;
     workAccounting?: { snapshot(): OctreeWorkSnapshot };
   };
   const capturedWorkAccounting = accountingOwner.captureWorkAccounting
@@ -4209,6 +4563,7 @@ async function runGPU(
     stabilityEnvelope,
     octreeWorkAccounting: capturedWorkAccounting?.snapshot
       ?? accountingOwner.workAccounting?.snapshot(),
+    octreeWorkAccountingBlocker: capturedWorkAccounting?.pressure?.blocker,
     energyTrace, checkpoints
   };
   reportResult(scenarioId, result);

@@ -5,7 +5,6 @@ import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelse
 import { PassBroker } from "./webgpu-pass-broker";
 import {
   createGPULogicalActivityAdoptionContext,
-  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
@@ -266,9 +265,10 @@ export function fineToCoarseLevelSetActivityShader(
   });
   const restrict = activity.workgroup("restrict-coarse-rows", "active-row", {
     workgroupId: "w",
+    numWorkgroups: "n",
     localInvocationIndex: "lid",
     workgroupLaneCount: 64,
-    recordWhen: `r < min(control.rowCount, ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u)`,
+    recordWhen: "r < control.rowCount",
   });
   const publish = activity.workgroup("publish-restriction", "progress", {
     workgroupId: "vec3u(0u)",

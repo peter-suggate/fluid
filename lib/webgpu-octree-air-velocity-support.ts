@@ -131,6 +131,10 @@ function align(value: number, alignment: number): number {
  * The selector map retains its current offset immediately after transport
  * metrics. New support state is suffix-only, so the coarse-phi selector writer
  * cannot overwrite it and existing transport handle indices remain unchanged.
+ *
+ * `ownerDirectoryCellCapacityValue` is the finest-cell count of the domain.
+ * When it is supplied it also bounds the support capacity — see the derivation
+ * on `supportCapacity` below.
  */
 export function planOctreeAirVelocitySupport(
   rowCapacityValue: number,
@@ -146,8 +150,23 @@ export function planOctreeAirVelocitySupport(
   if ((alignment & (alignment - 1)) !== 0 || alignment % 16 !== 0) {
     throw new RangeError("Air-support alignment must be a vec4-aligned power of two");
   }
-  const supportCapacity = checkedProduct("Air-support capacity",
-    rowCapacity, OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS);
+  // Derivation of the support capacity bound.
+  //
+  // `rowCapacity * OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS` is the
+  // no-deduplication worst case: every row demanding a full, disjoint,
+  // never-shared selector fan. The producer does not allocate that way. A
+  // support record exists for exactly one *distinct finest cell*: every
+  // candidate is the origin of an accepted owner-page leaf, published-row
+  // owners are dropped before a candidate exists, and the survivor of each
+  // cell is chosen by `atomicMin(directoryWinner[cell], item)` — one record
+  // per cell index in [0, ownerDirectoryCellCapacity). The domain's finest
+  // cell count is therefore a hard upper bound on the number of support
+  // records, independent of the row count, and the smaller of the two bounds
+  // is still provably >= the true maximum. (Both are conservative: rows are
+  // themselves disjoint leaves, so the real bound is cells minus rows.)
+  const supportCapacity = Math.min(
+    checkedProduct("Air-support capacity", rowCapacity, OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS),
+    ownerDirectoryCellCapacity > 0 ? ownerDirectoryCellCapacity : Number.POSITIVE_INFINITY);
   if (supportCapacity > SUPPORT_INDEX_MASK) throw new RangeError("Air-support tag payload exceeds 31 bits");
   const transportMetricBytes = checkedProduct("Air-support transport metrics", slotCapacity, 16);
   const selectorTagOffsetBytes = transportMetricBytes;

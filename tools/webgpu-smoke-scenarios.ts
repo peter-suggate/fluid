@@ -5,6 +5,7 @@ import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "../lib/garden-scene";
 import {
   createBrickQuadDamBreakScene,
   createOceanSeicheScene,
+  createTwinDamCollisionScene,
   getScenePreset,
 } from "../lib/scenes";
 
@@ -18,6 +19,7 @@ export const smokeScenarioIds = [
   "garden-pond",
   "garden-dam-break",
   "brick-quad-dam-break",
+  "twin-dam-collision",
   "hydrostatic-power-two-level",
   "hydrostatic-power-large-offset",
   "minimal-power-dam-break",
@@ -104,6 +106,25 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
       id,
       description: "four-brick tank whose dam break carries water across every fluid brick boundary",
       scene, oracleSteps: 2, target_s: 1.5
+    };
+  }
+
+  if (id === "twin-dam-collision") {
+    // Two seeded 2x1x1-brick reservoirs on opposite floor corners of a
+    // 56x16x16-cell tank. This is the seeded-geometry scenario for the power
+    // octree: its bootstrap is the dense imported SDF rather than the
+    // closed-form analytic dam.
+    const scene = createTwinDamCollisionScene();
+    scene.environment = "default";
+    scene.sceneId = "smoke-twin-dam-collision";
+    scene.fluid.surfaceTension_N_m = 0;
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+    return {
+      id,
+      description: "wide tank whose two diagonally opposed reservoirs collapse and collide mid-tank",
+      // The fronts need ~0.5 s to cross the 1.2 m of dry floor between them,
+      // so a shorter target would only observe two independent dam breaks.
+      scene, oracleSteps: 2, target_s: 1.0
     };
   }
 

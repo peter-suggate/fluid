@@ -24,6 +24,9 @@ const event = (tick: number | undefined, sequence: number): GPULogicalActivityEv
   ...(tick === undefined ? {} : { tick }),
   workgroupId: [0, 0, 0],
   workgroupEvidence: "measured",
+  sampleIndex: 0,
+  sampleCount: 1,
+  dispatchWorkgroupCount: 1,
   laneId: 0,
   logicalLaneCount: 1,
   logicalLaneCountEvidence: "reconstructed",
@@ -202,7 +205,7 @@ test("physics activity capacity is bounded by both the sampled budget and adapte
   assert.equal(physicsLogicalActivityCaptureCapacity({
     maxStorageBufferBindingSize: 65_536,
     maxBufferSize: 1 << 30,
-  } as GPUSupportedLimits), 1_023);
+  } as GPUSupportedLimits), 909);
   assert.equal(maximumPhysicsLogicalActivityCaptureCapacity({
     maxStorageBufferBindingSize: 1 << 30,
     maxBufferSize: 1 << 30,
@@ -210,7 +213,7 @@ test("physics activity capacity is bounded by both the sampled budget and adapte
   assert.equal(maximumPhysicsLogicalActivityCaptureCapacity({
     maxStorageBufferBindingSize: 65_536,
     maxBufferSize: 1 << 30,
-  } as GPUSupportedLimits), 1_023);
+  } as GPUSupportedLimits), 909);
 });
 
 test("whole-frame validation requires ordered sentinels, no overflow, registered dispatches, and hardware time", () => {
@@ -284,7 +287,7 @@ test("sampled physics owns one submission bracketed by logical frame sentinels a
     "logical begin/end and same-encoder readback must bracket the sole submission");
 });
 
-test("adopted shader samples flatten multidimensional workgroup grids", () => {
+test("adopted shaders delegate whole-dispatch stratification to the shared ABI", () => {
   const sources = [
     "../lib/webgpu-octree-fine-levelset-redistance.ts",
     "../lib/webgpu-octree-fine-levelset-volume.ts",
@@ -293,7 +296,8 @@ test("adopted shader samples flatten multidimensional workgroup grids", () => {
   ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8"));
 
   for (const source of sources) {
-    assert.match(source, /\.x \+ .*\.x \* \(.*\.y \+ .*\.y \* .*\.z\) < \$\{GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT\}u/);
+    assert.match(source, /numWorkgroups:/);
+    assert.doesNotMatch(source, /GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT/);
     assert.doesNotMatch(source, /\.y == 0u && .*\.z == 0u/);
   }
   assert.match(sources[2], /@builtin\(num_workgroups\)activityNumWorkgroups:vec3u/);

@@ -133,7 +133,10 @@ export interface GPUEulerianInfo {
   structuredPostProjectionKineticEnergyProxy?: number;
   /** Sampler-path census over wet faces (transition / staggered / cell). */
   structuredWetFaceCount?: number;
-  structuredTransitionPathCount?: number;
+  structuredWetStartThetaEnergyProxy?: number;
+  structuredWetPostAdvectionThetaEnergyProxy?: number;
+  structuredWetPreProjectionThetaEnergyProxy?: number;
+  structuredWetPostProjectionThetaEnergyProxy?: number;
   structuredStaggeredPathCount?: number;
   /** Same stages restricted to faces with a liquid incident row. */
   structuredWetStartKineticEnergyProxy?: number;
@@ -195,6 +198,19 @@ export interface GPUEulerianInfo {
    * diagnostics, and its exact whole-step authority lag (0 = current). */
   structuredSnapshotStep?: number;
   structuredAuthorityLagSteps?: number;
+  /** Fine active-brick count from the same record: worklist header word ONE.
+   * Word zero is the generation; the overflow flag is the 0xFFFFFFFF sentinel
+   * that silently no-ops the solver (P0.4 / docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md
+   * A3, A4.3). */
+  structuredSnapshotActiveFineBricks?: number;
+  structuredSnapshotFineBandOverflow?: boolean;
+  /** MGPCG counters from the same record: outer iterations the GPU executed
+   * and whether it converged inside the encoded budget. */
+  structuredSnapshotExecutedSolveIterations?: number;
+  structuredSnapshotSolveConverged?: boolean;
+  /** Nonempty when a step's encode predicted zero work for a stage it deleted
+   * and the GPU's own counters for that step disagreed (P0.5 lag-k check). */
+  stepPredictionFailures?: string[];
   maxSpeedLocation?: GPUFieldLocation;
   maxDivergenceBeforeLocation?: GPUFieldLocation;
   maxDivergenceAfterLocation?: GPUFieldLocation;

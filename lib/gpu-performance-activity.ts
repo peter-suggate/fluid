@@ -75,7 +75,7 @@ export interface PublishedGPULogicalActivity {
   addition: GPULogicalActivityMatrixAddition;
 }
 
-const workgroupKey = (event: GPULogicalActivityEvent) => event.workgroupId.join(".");
+const workgroupKey = (event: GPULogicalActivityEvent) => `sample.${event.sampleIndex}`;
 
 function rowKey(event: GPULogicalActivityEvent, granularity: "workgroup" | "subgroup") {
   const workgroup = workgroupKey(event);
@@ -85,7 +85,7 @@ function rowKey(event: GPULogicalActivityEvent, granularity: "workgroup" | "subg
 }
 
 function rowLabel(event: GPULogicalActivityEvent, granularity: "workgroup" | "subgroup") {
-  const workgroup = `WG ${event.workgroupId.join(",")}`;
+  const workgroup = `Stratified WG sample ${String(event.sampleIndex + 1).padStart(2, "0")}/${event.sampleCount}`;
   return granularity === "subgroup" && event.subgroupId !== undefined
     ? `${workgroup} · SG ${event.subgroupId}`
     : workgroup;
@@ -102,7 +102,11 @@ export function gpuLogicalActivityMatrixAddition(
   const granularity = options.granularity ?? "subgroup";
   const maximumRows = Math.max(1, Math.floor(options.maximumRows ?? 512));
   const prefix = options.lane === "gpu-physics" ? "gpu.physics" : "gpu.presentation";
-  const rows = new Map<string, { resource: ActivityResource; first: GPULogicalActivityEvent }>();
+  const rows = new Map<string, {
+    resource: ActivityResource;
+    first: GPULogicalActivityEvent;
+    dispatchWorkgroupCounts: Set<number>;
+  }>();
   const tasks = new Map<string, ActivityTask>();
   const events: ActivityEvent[] = [];
   const spans: ActivitySpan[] = [];
@@ -143,11 +147,14 @@ export function gpuLogicalActivityMatrixAddition(
         kind: "gpu-logical-capacity",
         lane: options.lane,
         clockDomain: options.clockDomain,
-        capacitySlot: rows.size,
+        capacitySlot: heartbeat.sampleIndex,
+        sampleIndex: heartbeat.sampleIndex,
+        sampleCount: heartbeat.sampleCount,
       };
-      row = { resource, first: heartbeat };
+      row = { resource, first: heartbeat, dispatchWorkgroupCounts: new Set() };
       rows.set(key, row);
     }
+    row.dispatchWorkgroupCounts.add(heartbeat.dispatchWorkgroupCount);
     const descriptor = options.tasks?.[heartbeat.taskId] ?? {
       id: `${prefix}.task.${heartbeat.taskId.toString(16).padStart(8, "0")}`,
       label: `GPU task 0x${heartbeat.taskId.toString(16).padStart(8, "0")}`,
@@ -171,6 +178,9 @@ export function gpuLogicalActivityMatrixAddition(
         checkpointId: heartbeat.checkpointId,
         workgroup: heartbeat.workgroupId.join(","),
         ...(heartbeat.subgroupId !== undefined ? { subgroupId: heartbeat.subgroupId } : {}),
+        sampleIndex: heartbeat.sampleIndex,
+        sampleCount: heartbeat.sampleCount,
+        dispatchWorkgroupCount: heartbeat.dispatchWorkgroupCount,
         ...(heartbeat.logicalLaneCount !== undefined ? { logicalLaneCount: heartbeat.logicalLaneCount } : {}),
         ...(heartbeat.activeLaneCount !== undefined ? { activeLaneCount: heartbeat.activeLaneCount } : {}),
         ...(heartbeat.tick !== undefined ? { logicalTick: heartbeat.tick } : {}),
@@ -213,7 +223,10 @@ export function gpuLogicalActivityMatrixAddition(
     }
   }
 
-  const resources = [...rows.values()].map((row) => row.resource);
+  const resources = [...rows.values()].map((row): ActivityResource => ({
+    ...row.resource,
+    dispatchWorkgroupCounts: Object.freeze([...row.dispatchWorkgroupCounts].sort((a, b) => a - b)),
+  }));
   const captureReasons = [
     ...(options.capture.overflowed ? ["recorder-overflow" as const] : []),
     ...(droppedRowCount > 0 ? ["row-limit" as const] : []),

@@ -20,6 +20,7 @@ import {
 } from "./webgpu-octree-section43-contract";
 import type { OctreePipelinedWorksetLinearOperator } from "./webgpu-octree-pipelined-mgpcg";
 import { PassBroker } from "./webgpu-pass-broker";
+import { octreeSection63DirectionChannelWGSL } from "./webgpu-octree-spgrid-vcycle";
 
 type HybridStage =
   | "resetBandWorksets"
@@ -590,7 +591,13 @@ fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u)->u32{let shape=vec3u(8u,8u,4u);
 fn originOf(h:vec4u)->vec3u{return vec3u(h.x%section63.dimsCapacity.x,(h.x/section63.dimsCapacity.x)%section63.dimsCapacity.y,h.x/(section63.dimsCapacity.x*section63.dimsCapacity.y));}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}
 fn worldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1,(code&1u)!=0u),select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let q=value*signs;let permutation=(code/8u)%6u;if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;}
-fn coefficientForDirection(row:u32,direction:vec3i)->f32{let m=metrics[row];let base=coefficientBase(row);for(var channel=0u;channel<18u;channel+=1u){if(all(worldDirection(canonicalDirection(channel),m.transformAndFlags&63u)==direction)){return section63Coefficients[base+1u+channel];}}return 0.0;}
+${octreeSection63DirectionChannelWGSL}
+// One indexed load replaces the eighteen-step scan that re-evaluated
+// worldDirection per candidate. The table is the memoized scan result.
+fn coefficientForDirection(row:u32,direction:vec3i)->f32{
+ let channel=section63ChannelForDirection(metrics[row].transformAndFlags&63u,direction);
+ if(channel>=18u){return 0.0;}
+ return section63Coefficients[coefficientBase(row)+1u+channel];}
 fn bandAt(row:u32,useB:bool)->u32{return select(bandA[row],bandB[row],useB);}
 fn dilatedBand(row:u32,useB:bool)->u32{var value=bandAt(row,useB);let h=geometry[row];let m=metrics[row];let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);let base=coefficientBase(row);for(var channel=0u;channel<18u&&value==0u;channel+=1u){if(section63Coefficients[base+1u+channel]==0.0){continue;}let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){continue;}let slot=pageSlot(l,page,q,vec3u(targetQ));if(slot==INVALID||(state[at(FLAGS,l,slot)]&MG_ONLY)!=0u){continue;}let encoded=state[at(OWNER,l,slot)];if(encoded>0u&&encoded<=rows()){value=max(value,bandAt(encoded-1u,useB));}}
  if(l>0u&&value==0u){let fine=l-1u;for(var child=0u;child<8u&&value==0u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ);if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}for(var candidate=0u;candidate<18u&&value==0u;candidate+=1u){let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ));if(activeSlot==INVALID||(state[at(FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[at(OWNER,fine,activeSlot)];if(encoded>0u&&encoded<=rows()&&coefficientForDirection(encoded-1u,delta)>0.0){value=max(value,bandAt(encoded-1u,useB));}}}}

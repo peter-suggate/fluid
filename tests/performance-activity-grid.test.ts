@@ -62,6 +62,29 @@ const activityFrame = (
 const activityFrameWithGpuRows = (rowCount: number, duration_ms = 4): PerformanceActivityFrame => {
   const base = activityFrame(duration_ms, Array.from({ length: duration_ms }, () => "idle"));
   const gpuTask = { id: "gpu-solve", label: "GPU solve", color: "#32a9b8", lane: "gpu-physics" as const };
+  const aggregateResource: PerformanceActivityFrame["resources"][number] = {
+    id: "gpu.physics.aggregate",
+    label: "GPU · physics queue aggregate",
+    kind: "gpu-aggregate",
+    lane: "gpu-physics",
+    clockDomain: "cpu-performance",
+  };
+  const aggregateRow: PerformanceActivityFrame["rows"][number] = {
+    resource: aggregateResource,
+    windowStart_ms: 0,
+    windowEnd_ms: duration_ms,
+    slice_ms: 1,
+    slices: Array.from({ length: duration_ms }, (_, index) => ({
+      index,
+      start_ms: index,
+      end_ms: index + 1,
+      evidence: "reconstructed" as const,
+      taskId: gpuTask.id,
+      active_ms: 1,
+      spanIds: ["gpu-stage-span"],
+      eventIds: [],
+    })),
+  };
   const gpuRows = Array.from({ length: rowCount }, (_, capacitySlot) => {
     const resource: PerformanceActivityFrame["resources"][number] = {
       id: `gpu.wg.${capacitySlot}`,
@@ -94,8 +117,18 @@ const activityFrameWithGpuRows = (rowCount: number, duration_ms = 4): Performanc
   return {
     ...base,
     tasks: [...base.tasks, gpuTask],
-    resources: [...base.resources, ...gpuRows.map((row) => row.resource)],
-    rows: [...base.rows, ...gpuRows],
+    resources: [...base.resources, aggregateResource, ...gpuRows.map((row) => row.resource)],
+    spans: [...base.spans, {
+      id: "gpu-observation",
+      kind: "observation",
+      resourceId: aggregateResource.id,
+      clockDomain: aggregateResource.clockDomain,
+      start_ms: 0,
+      end_ms: duration_ms,
+      evidence: "measured",
+      identity: base.identity,
+    }],
+    rows: [...base.rows, aggregateRow, ...gpuRows],
   };
 };
 
@@ -154,27 +187,59 @@ test("logical GPU workgroups are projected into at most sixteen utilization band
   const view = buildPerformanceActivityView({ frame });
   const gpuBands = view.resources.filter((resource) => resource.matrixKind === "gpu-logical");
 
-  assert.equal(frame.rows.length, 129, "the exhaustive source frame remains unchanged");
+  assert.equal(frame.rows.length, 130, "the exhaustive source frame remains unchanged");
   assert.equal(view.logicalGpuResourceCount, 128);
   assert.equal(gpuBands.length, GPU_ACTIVITY_DISPLAY_BAND_LIMIT);
   assert.deepEqual(gpuBands.map((band) => band.sourceResourceCount), Array(16).fill(8));
-  assert.match(gpuBands[0].label, /Logical WG bin 01 · slots 0–7/);
+  assert.match(gpuBands[0].label, /Stratified WG bin 01 · strata 1–8/);
   assert.equal(gpuBands[0].segments[0].activeResourceCount, 4);
   assert.equal(gpuBands[0].segments[0].resourceCount, 8);
   assert.equal(gpuBands[0].segments[0].activeFraction, 0.5);
   assert.equal(gpuBands[0].segments[0].evidence, "measured-progress");
   assert.equal(gpuBands[0].segments[0].color, "#32a9b8");
-  assert.match(gpuBands[0].segments[0].detail ?? "", /display bin, not a physical execution unit/);
+  assert.match(gpuBands[0].segments[0].detail ?? "", /not a physical execution unit/);
   assert.equal(view.resources.filter((resource) => resource.matrixKind === "cpu-context").length, 1);
+});
+
+test("active-lane ballots drive logical workgroup intensity instead of binary sample coverage", () => {
+  const base = activityFrameWithGpuRows(1, 1);
+  const logicalResource = base.resources.find((resource) => resource.kind === "gpu-logical-capacity");
+  assert.ok(logicalResource);
+  const frame: PerformanceActivityFrame = {
+    ...base,
+    events: [{
+      id: "heartbeat-0-0",
+      kind: "instant",
+      taskId: "gpu-solve",
+      resourceId: logicalResource.id,
+      clockDomain: logicalResource.clockDomain,
+      at_ms: 0.5,
+      evidence: "measured",
+      identity: base.identity,
+      metadata: { activeLaneCount: 8, logicalLaneCount: 32 },
+    }],
+  };
+  const view = buildPerformanceActivityView({ frame });
+  const segment = view.resources.find((resource) => resource.matrixKind === "gpu-logical")?.segments[0];
+  assert.ok(segment);
+  assert.equal(segment.activeLaneCount, 8);
+  assert.equal(segment.logicalLaneCount, 32);
+  assert.equal(segment.activeFraction, 0.25);
+  assert.match(segment.detail ?? "", /25\.0% sampled logical utilization/);
+
+  const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, { frame }));
+  assert.match(markup, /data-active-lanes="8"/);
+  assert.match(markup, /data-logical-lanes="32"/);
+  assert.match(markup, /ACTIVE-LANE INTENSITY/);
 });
 
 test("rendered GPU matrix output is bounded by display bands rather than raw workgroup rows", () => {
   const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, {
     frame: activityFrameWithGpuRows(128),
   }));
-  assert.equal((markup.match(/class="activity-cell"/g) ?? []).length, 4 + 16 * 4);
+  assert.equal((markup.match(/class="activity-cell"/g) ?? []).length, 4 + 4 + 16 * 4);
   assert.match(markup, /GPU LOGICAL WORKGROUP BINS/);
-  assert.match(markup, /128 WORKGROUPS/);
+  assert.match(markup, /128 STRATIFIED SAMPLES/);
   assert.match(markup, /128 \/ 16/);
   assert.match(markup, /data-active-resources="4"/);
 });
@@ -259,6 +324,9 @@ test("the component labels clock and resource evidence honestly", () => {
   assert.match(component, /Resource × 1 ms activity matrix/);
   assert.doesNotMatch(component, /Task accounting/);
   assert.match(css, /\.activity-resource-row \{ min-height: 13px/);
+  assert.match(css, /\.activity-task-legend \{ height: 114px; min-height: 114px;/,
+    "the dynamic task catalog must not vertically reflow the matrix between captures");
+  assert.match(css, /\.activity-task-legend-groups \{ height: 92px;/);
   for (const state of ["measured-progress", "reconstructed", "idle", "unknown"]) {
     assert.match(css, new RegExp(`data-evidence=\\"${state}\\"`));
   }
@@ -267,6 +335,12 @@ test("the component labels clock and resource evidence honestly", () => {
   assert.match(component, /UNIFIED FRAME ACCOUNTING/);
   assert.match(component, /ACCOUNTING LEDGERS/);
   assert.doesNotMatch(component, /activity-clock-notice/);
+});
+
+test("the task legend retains its fixed slot while the catalog is awaiting capture", () => {
+  const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, {}));
+  assert.match(markup, /class="activity-task-legend" data-empty="true"/);
+  assert.match(markup, /TASK CATALOG AWAITING CAPTURE/);
 });
 
 test("an incomplete retained capture withholds utilization and never renders idle as proven", () => {
@@ -294,17 +368,22 @@ test("an incomplete retained capture withholds utilization and never renders idl
   assert.match(markup, /UTILIZATION/);
   assert.match(markup, /WITHHELD/);
   assert.match(markup, /IDLE AND UTILIZATION NOT ASSERTED/);
+  assert.equal((markup.match(/class="activity-cell"/g) ?? []).length, 1,
+    "unknown buckets use the row's fail-closed grid paint instead of inert DOM nodes");
 });
 
 test("the rendered central view is matrix-first with individually addressable time cells", () => {
   const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, {
-    frame: activityFrame(4),
+    frame: activityFrameWithGpuRows(1),
   }));
   assert.match(markup, /Resource × 1 ms activity matrix/);
-  assert.equal((markup.match(/class="activity-cell"/g) ?? []).length, 4);
-  assert.match(markup, /--activity-cell-color:#e8bf5e/);
+  assert.equal((markup.match(/class="activity-cell"/g) ?? []).length, 12,
+    "the measured stage envelope remains visible alongside logical workgroup cells");
+  assert.match(markup, /--activity-cell-color:#32a9b8/);
   assert.match(markup, /GPU LOGICAL CAPACITY|CPU SOFTWARE RESOURCES/);
   assert.match(markup, /Resource activity matrix/);
+  assert.match(markup, /TIMED TASK \/ STAGE ENVELOPES/);
+  assert.match(markup, /1\/1 CLOSED/);
   assert.doesNotMatch(markup, /AGGREGATE FALLBACK/);
   assert.doesNotMatch(markup, /Task map/);
 });

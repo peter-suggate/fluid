@@ -81,7 +81,7 @@ test("storage-saturated shaders fail closed to byte-identical timestamp-only cov
   assert.equal(activity.timestampOnly, true);
   assert.equal(activity.module(source).code, source);
   assert.equal(activity.module(source).cacheKey,
-    "saturated|production|gpu-logical-activity:v1:disabled");
+    "saturated|production|gpu-logical-activity:v2:disabled");
   assert.equal(activity.recorder({} as GPUDevice, { capacity: 4, captureId: 1 }), undefined);
 });
 
@@ -102,17 +102,20 @@ test("enabled adoption reserves group 3 binding 0 and emits concise named checkp
     moduleId: "solver/advection", profile: { enabled: true, generation: 12 },
   });
   const heartbeat = activity.workgroup("advect", "enter", {
-    tick: "params.step", workgroupLaneCount: 64, recordWhen: "workgroupId.x < 128u",
+    tick: "params.step", workgroupLaneCount: 64, numWorkgroups: "numWorkgroups",
+    recordWhen: "hasMeaningfulWork",
   });
   const body = `@compute @workgroup_size(64) fn advect(
   @builtin(workgroup_id) workgroupId: vec3u,
+  @builtin(num_workgroups) numWorkgroups: vec3u,
   @builtin(local_invocation_index) localInvocationIndex: u32,
 ) { ${heartbeat} }`;
   const variant = activity.module(body, "advection-pipeline");
   assert.match(activity.preludeWGSL, /@group\(3\) @binding\(0\)/);
   assert.match(heartbeat, /fluidGpuLogicalActivityWorkgroup\(\d+u, \d+u, params\.step/);
-  assert.match(heartbeat, /^if \(workgroupId\.x < 128u\)/,
-    "a uniform predicate bounds telemetry without changing dispatched work");
+  assert.match(heartbeat, /^if \(hasMeaningfulWork\)/,
+    "an additional uniform predicate can exclude semantically empty work");
+  assert.match(heartbeat, /workgroupId, numWorkgroups, localInvocationIndex/);
   assert.equal(variant.code.indexOf(activity.preludeWGSL), 0);
   assert.equal(variant.code.match(/struct FluidGpuLogicalActivityBuffer/g)?.length, 1);
   assert.match(variant.cacheKey, /activity-generation:12/);

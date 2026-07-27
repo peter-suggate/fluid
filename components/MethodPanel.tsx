@@ -36,6 +36,7 @@ function ParamControl({ spec, methodId }: { spec: MethodParamSpec; methodId: str
   );
 }
 
+/** Solver choice, quality, and the per-method parameters, as a configuration section. */
 export function MethodPanel() {
   const methodId = useMethodStore((state) => state.methodId);
   const quality = useMethodStore((state) => state.quality);
@@ -46,8 +47,8 @@ export function MethodPanel() {
   const coarse = method.params.filter((spec) => spec.tier === "coarse");
   const fine = method.params.filter((spec) => spec.tier === "fine");
   return (
-    <section className="panel-section" data-testid="method-panel" aria-busy={gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild"}>
-      <div className="section-heading"><h2>Method</h2><span>{method.backend === "webgpu" ? "WebGPU f32" : "CPU binary64"}</span></div>
+    <section data-testid="method-panel" aria-busy={gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild"}>
+      <div className="popover-section-heading"><h3>Method</h3><span>{method.backend === "webgpu" ? "WebGPU f32" : "CPU binary64"}</span></div>
       {gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild" && <div className="method-apply-state" role="status"><i aria-hidden="true" /><span><strong>APPLYING</strong>{gpuStatus.operation ?? gpuStatus.label}</span></div>}
       <Segmented
         ariaLabel="Simulation method"
@@ -63,14 +64,17 @@ export function MethodPanel() {
         <strong>{method.label}{methodId === "tall-cell" ? " · Experimental" : ""}</strong>
         <span>{method.description}</span>
       </div>
-      {method.showQualityControl !== false && <label className="select-control" title={method.pressureMapping}>
-        <span>Quality</span>
-        <select aria-label="Simulation quality" value={quality} onChange={(event) => simulation.setQuality(event.target.value as GPUQuality)}>
-          {(["balanced", "high", "ultra"] as const).map((level) => (
-            <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)} · {method.qualityLabels[level]}</option>
-          ))}
-        </select>
-      </label>}
+      <div className="field-grid">
+        {method.showQualityControl !== false && <label className="select-control" title={method.pressureMapping}>
+          <span>Quality</span>
+          <select aria-label="Simulation quality" value={quality} onChange={(event) => simulation.setQuality(event.target.value as GPUQuality)}>
+            {(["balanced", "high", "ultra"] as const).map((level) => (
+              <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)} · {method.qualityLabels[level]}</option>
+            ))}
+          </select>
+        </label>}
+        {coarse.filter((spec) => spec.kind === "select").map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
+      </div>
       {method.backend === "webgpu" && gpuInfo && <div className="grid-readout" title="The grid the selected quality and parameters actually allocated" data-testid="grid-readout">
         <strong>{gpuInfo.nx} × {gpuInfo.ny} × {gpuInfo.nz}</strong>
         <span>{gpuInfo.cellCount.toLocaleString()} samples · {(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB</span>
@@ -83,7 +87,7 @@ export function MethodPanel() {
         <strong>{fluidRenderState.nx} × {fluidRenderState.ny} × {fluidRenderState.nz}</strong>
         <span>{(fluidRenderState.nx * fluidRenderState.ny * fluidRenderState.nz).toLocaleString()} cells · binary64</span>
       </div>}
-      {coarse.map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
+      {coarse.filter((spec) => spec.kind !== "select").map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
       {methodId === "octree" && gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid") && <div className="grid-readout" title="Actual GPU convergence work compared with the currently encoded safety cap">
         <strong>{gpuInfo.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo.quadtreePressureIterationBudget ?? "—"}</strong>
         <span>PCG iterations executed / cap · {gpuInfo.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo.quadtreePressureConverged ? "converged" : "cap exhausted"} · {gpuInfo.quadtreeMultigridLevelCount ?? "—"} pyramid levels · {gpuInfo.quadtreeMultigridCoarsestDofs ?? "—"} coarse DOFs</span>
