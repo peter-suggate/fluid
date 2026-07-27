@@ -1798,7 +1798,9 @@ async function readCubicVolumeField(device: GPUDevice, solver: GPUSolverInstance
         ? readBufferBinding(device, { buffer: solver.globalFineRestrictionControl }, 32)
         : Promise.resolve(undefined),
       source.topologyControl
-        ? readBufferBinding(device, { buffer: source.topologyControl }, 32)
+        // 48 bytes, not 32: words 9..11 latch the finalize rejection that
+        // clearDesiredGeneration wipes from words 0..8 every generation.
+        ? readBufferBinding(device, { buffer: source.topologyControl }, 48)
         : Promise.resolve(undefined),
       solver.globalFineTransportControl
         ? readBufferBinding(device, { buffer: solver.globalFineTransportControl }, 64)

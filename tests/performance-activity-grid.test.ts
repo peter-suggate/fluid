@@ -10,6 +10,7 @@ import {
   PerformanceActivityGrid,
   performanceActivityTaskLegend,
   performanceActivityTicks,
+  projectGpuStageEnvelopes,
 } from "../components/PerformanceActivityGrid";
 import type { ActivityEvidence, PerformanceActivityFrame } from "../lib/performance-activity";
 import type { PerformanceTrace } from "../lib/performance-trace";
@@ -231,6 +232,85 @@ test("active-lane ballots drive logical workgroup intensity instead of binary sa
   assert.match(markup, /data-active-lanes="8"/);
   assert.match(markup, /data-logical-lanes="32"/);
   assert.match(markup, /ACTIVE-LANE INTENSITY/);
+});
+
+test("timestamped stages bridge sparse shader checkpoints only on rows which sampled that stage", () => {
+  const aggregateTask = {
+    id: "gpu.physics.pressure-solve",
+    label: "Pressure solve",
+    color: "#e8bf5e",
+    lane: "gpu-physics" as const,
+    stageId: "pressure-solve",
+  };
+  const shaderTask = {
+    id: "gpu.physics.persistent-mgpcg.whole-solve",
+    label: "Persistent MGPCG · whole solve",
+    color: "#32a9b8",
+    lane: "gpu-physics" as const,
+    stageId: "pressure-solve",
+  };
+  const unknown = (index: number) => ({
+    start_ms: index,
+    end_ms: index + 1,
+    evidence: "unknown" as const,
+    activeFraction: 0,
+  });
+  const resources = projectGpuStageEnvelopes({
+    taskById: new Map([[aggregateTask.id, aggregateTask], [shaderTask.id, shaderTask]]),
+    resources: [{
+      id: "aggregate",
+      label: "GPU physics queue",
+      group: "gpu",
+      matrixKind: "aggregate",
+      segments: [{
+        start_ms: 0,
+        end_ms: 5,
+        evidence: "reconstructed",
+        taskId: aggregateTask.id,
+        stageId: aggregateTask.stageId,
+        color: aggregateTask.color,
+        activeFraction: 1,
+        label: aggregateTask.label,
+      }],
+    }, {
+      id: "sampled-band",
+      label: "Sampled band",
+      group: "gpu",
+      matrixKind: "gpu-logical",
+      segments: [unknown(0), {
+        start_ms: 1,
+        end_ms: 2,
+        evidence: "measured-progress",
+        taskId: shaderTask.id,
+        stageId: shaderTask.stageId,
+        color: shaderTask.color,
+        activeFraction: 0.25,
+        activeLaneCount: 8,
+        logicalLaneCount: 32,
+        label: shaderTask.label,
+      }, unknown(2), unknown(3), unknown(4)],
+    }, {
+      id: "unsampled-band",
+      label: "Unsampled band",
+      group: "gpu",
+      matrixKind: "gpu-logical",
+      segments: [unknown(0), unknown(1), unknown(2), unknown(3), unknown(4)],
+    }],
+  });
+
+  const sampled = resources.find((resource) => resource.id === "sampled-band");
+  const unsampled = resources.find((resource) => resource.id === "unsampled-band");
+  assert.ok(sampled);
+  assert.ok(unsampled);
+  assert.deepEqual(sampled.segments.map((segment) => [segment.start_ms, segment.end_ms, segment.evidence]), [
+    [0, 1, "reconstructed"],
+    [1, 2, "measured-progress"],
+    [2, 5, "reconstructed"],
+  ]);
+  assert.equal(sampled.segments[0].projection, "stage-envelope");
+  assert.equal(sampled.segments[0].activeFraction, 0.25);
+  assert.match(sampled.segments[0].detail ?? "", /inferred time, excluded from utilization, not hardware occupancy/);
+  assert.ok(unsampled.segments.every((segment) => segment.evidence === "unknown"));
 });
 
 test("rendered GPU matrix output is bounded by display bands rather than raw workgroup rows", () => {

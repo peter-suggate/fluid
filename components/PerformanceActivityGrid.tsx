@@ -46,6 +46,12 @@ export interface PerformanceActivitySegment {
   start_ms: number;
   end_ms: number;
   evidence: PerformanceActivityEvidence;
+  /** Registered task identity retained so sampled rows can join timestamped stage envelopes. */
+  taskId?: string;
+  /** Stable semantic stage shared by aggregate timestamps and shader checkpoints. */
+  stageId?: string;
+  /** Present only when point evidence has been extended by an independent stage envelope. */
+  projection?: "stage-envelope";
   color?: string;
   /** Temporal coverage for a raw row, or observed member occupancy for a coalesced display bin. */
   activeFraction?: number;
@@ -246,6 +252,8 @@ function traceResource(trace: PerformanceTrace, lane: PerformanceActivityLane): 
       start_ms,
       end_ms,
       evidence: dominant?.evidence === "unknown" ? "unknown" : "reconstructed",
+      taskId: dominant?.id,
+      stageId: dominant?.stageId,
       color: dominant
         ? PHASE_COLORS[dominant.stageId as PaperPhaseId]
           ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length]
@@ -304,18 +312,23 @@ function canonicalRowResource(input: {
     matrixKind: row.resource.kind === "gpu-logical-capacity"
       ? "gpu-logical"
       : row.resource.kind === "gpu-aggregate" ? "aggregate" : "cpu-context",
-    segments: row.slices.map((slice) => ({
-      start_ms: relativeTime(slice.start_ms, row.resource.id, row.resource.clockDomain),
-      end_ms: relativeTime(slice.end_ms, row.resource.id, row.resource.clockDomain),
-      evidence: slice.evidence === "idle" && !trustIdle ? "unknown" : canonicalEvidence(slice.evidence),
-      color: slice.taskId ? taskById.get(slice.taskId)?.color : undefined,
-      activeFraction: slice.end_ms > slice.start_ms
-        ? Math.min(1, slice.active_ms / (slice.end_ms - slice.start_ms))
-        : 0,
-      label: slice.taskId ? taskById.get(slice.taskId)?.label
-        : slice.evidence === "idle" && trustIdle ? "Measured idle" : "Unknown activity",
-      detail: `${slice.active_ms.toFixed(3)} ms active · ${slice.spanIds.length} span${slice.spanIds.length === 1 ? "" : "s"}`,
-    })),
+    segments: row.slices.map((slice) => {
+      const task = slice.taskId ? taskById.get(slice.taskId) : undefined;
+      return {
+        start_ms: relativeTime(slice.start_ms, row.resource.id, row.resource.clockDomain),
+        end_ms: relativeTime(slice.end_ms, row.resource.id, row.resource.clockDomain),
+        evidence: slice.evidence === "idle" && !trustIdle ? "unknown" : canonicalEvidence(slice.evidence),
+        taskId: slice.taskId,
+        stageId: task ? task.stageId ?? task.parentId ?? task.id : undefined,
+        color: task?.color,
+        activeFraction: slice.end_ms > slice.start_ms
+          ? Math.min(1, slice.active_ms / (slice.end_ms - slice.start_ms))
+          : 0,
+        label: task?.label
+          ?? (slice.evidence === "idle" && trustIdle ? "Measured idle" : "Unknown activity"),
+        detail: `${slice.active_ms.toFixed(3)} ms active · ${slice.spanIds.length} span${slice.spanIds.length === 1 ? "" : "s"}`,
+      };
+    }),
   };
 }
 
@@ -408,6 +421,10 @@ export function coalesceGpuLogicalRows(input: {
         start_ms: Number.isFinite(start_ms) ? start_ms : sliceIndex,
         end_ms: Number.isFinite(end_ms) ? end_ms : sliceIndex + 1,
         evidence,
+        taskId: dominantTaskId,
+        stageId: dominantTask
+          ? dominantTask.stageId ?? dominantTask.parentId ?? dominantTask.id
+          : undefined,
         color: dominantTask?.color,
         activeFraction: sampledLaneUtilization ?? occupancy,
         activeResourceCount,
@@ -427,6 +444,132 @@ export function coalesceGpuLogicalRows(input: {
       sourceResourceCount: members.length,
       segments,
     };
+  });
+}
+
+interface LogicalStageProfile {
+  taskIds: Set<string>;
+  activeLaneCount: number;
+  logicalLaneCount: number;
+  weightedActiveFraction: number;
+  weight: number;
+}
+
+function mergeProjectedSegments(
+  segments: readonly PerformanceActivitySegment[],
+): PerformanceActivitySegment[] {
+  const merged: PerformanceActivitySegment[] = [];
+  for (const segment of segments) {
+    const previous = merged.at(-1);
+    const canMerge = segment.projection === "stage-envelope"
+      && previous?.projection === "stage-envelope"
+      && Math.abs(previous.end_ms - segment.start_ms) < 0.000001
+      && previous.taskId === segment.taskId
+      && previous.stageId === segment.stageId
+      && previous.activeFraction === segment.activeFraction
+      && previous.color === segment.color
+      && previous.detail === segment.detail;
+    if (canMerge && previous) previous.end_ms = segment.end_ms;
+    else merged.push({ ...segment });
+  }
+  return merged;
+}
+
+/**
+ * Horizontally bridge shader point samples with independently timestamped GPU
+ * stage envelopes. Projection is deliberately row-local: an envelope is only
+ * painted on a display band which sampled that semantic stage. It therefore
+ * adds temporal context without inventing hardware-core occupancy.
+ */
+export function projectGpuStageEnvelopes(input: {
+  resources: readonly PerformanceActivityResource[];
+  taskById: ReadonlyMap<string, CanonicalTask>;
+}): PerformanceActivityResource[] {
+  const envelopes = input.resources
+    .filter((resource) => resource.group === "gpu" && resource.matrixKind === "aggregate")
+    .flatMap((resource) => resource.segments)
+    .filter((segment) => segment.evidence !== "unknown" && segment.evidence !== "idle" && segment.stageId);
+  if (envelopes.length === 0) return [...input.resources];
+  // Index the one-millisecond aggregate slices once. This keeps opening the
+  // panel proportional to painted evidence instead of bands × slices².
+  const envelopesByBucket = new Map<number, PerformanceActivitySegment[]>();
+  for (const envelope of envelopes) {
+    const firstBucket = Math.floor(envelope.start_ms);
+    const lastBucket = Math.max(firstBucket, Math.ceil(envelope.end_ms) - 1);
+    for (let bucket = firstBucket; bucket <= lastBucket; bucket += 1) {
+      const candidates = envelopesByBucket.get(bucket) ?? [];
+      candidates.push(envelope);
+      envelopesByBucket.set(bucket, candidates);
+    }
+  }
+
+  return input.resources.map((resource) => {
+    if (resource.matrixKind !== "gpu-logical") return resource;
+    const profiles = new Map<string, LogicalStageProfile>();
+    for (const segment of resource.segments) {
+      if (!segment.taskId || !segment.stageId
+        || (segment.evidence !== "measured-progress" && segment.evidence !== "reconstructed")) continue;
+      const profile = profiles.get(segment.stageId) ?? {
+        taskIds: new Set<string>(),
+        activeLaneCount: 0,
+        logicalLaneCount: 0,
+        weightedActiveFraction: 0,
+        weight: 0,
+      };
+      profile.taskIds.add(segment.taskId);
+      if (segment.logicalLaneCount && segment.activeLaneCount !== undefined) {
+        profile.activeLaneCount += segment.activeLaneCount;
+        profile.logicalLaneCount += segment.logicalLaneCount;
+      }
+      const weight = Math.max(Number.EPSILON, segment.end_ms - segment.start_ms);
+      profile.weightedActiveFraction += (segment.activeFraction ?? 1) * weight;
+      profile.weight += weight;
+      profiles.set(segment.stageId, profile);
+    }
+    if (profiles.size === 0) return resource;
+
+    const segments = resource.segments.map((segment): PerformanceActivitySegment => {
+      if (segment.evidence !== "unknown") return segment;
+      let envelope: PerformanceActivitySegment | undefined;
+      let envelopeOverlap_ms = 0;
+      const seen = new Set<PerformanceActivitySegment>();
+      for (let bucket = Math.floor(segment.start_ms);
+        bucket <= Math.max(Math.floor(segment.start_ms), Math.ceil(segment.end_ms) - 1);
+        bucket += 1) {
+        for (const candidate of envelopesByBucket.get(bucket) ?? []) {
+          if (seen.has(candidate) || !candidate.stageId || !profiles.has(candidate.stageId)) continue;
+          seen.add(candidate);
+          const overlap_ms = Math.max(0,
+            Math.min(segment.end_ms, candidate.end_ms) - Math.max(segment.start_ms, candidate.start_ms));
+          if (overlap_ms > envelopeOverlap_ms) {
+            envelope = candidate;
+            envelopeOverlap_ms = overlap_ms;
+          }
+        }
+      }
+      if (!envelope?.stageId) return segment;
+      const profile = profiles.get(envelope.stageId);
+      if (!profile) return segment;
+      const ballotFraction = profile.logicalLaneCount > 0
+        ? profile.activeLaneCount / profile.logicalLaneCount
+        : profile.weight > 0 ? profile.weightedActiveFraction / profile.weight : 0;
+      const anchorLabels = [...profile.taskIds]
+        .map((taskId) => input.taskById.get(taskId)?.label ?? taskId)
+        .sort()
+        .join(", ");
+      return {
+        ...segment,
+        evidence: "reconstructed",
+        taskId: envelope.taskId,
+        stageId: envelope.stageId,
+        projection: "stage-envelope",
+        color: envelope.color,
+        activeFraction: ballotFraction,
+        label: `${envelope.label ?? envelope.stageId} · projected context`,
+        detail: `Timestamped stage envelope, anchored by sampled shader checkpoint${profile.taskIds.size === 1 ? "" : "s"}: ${anchorLabels} · intensity held from ${profile.logicalLaneCount > 0 ? `${profile.activeLaneCount}/${profile.logicalLaneCount} active-lane ballots` : "sample coverage"} · inferred time, excluded from utilization, not hardware occupancy`,
+      };
+    });
+    return { ...resource, segments: mergeProjectedSegments(segments) };
   });
 }
 
@@ -484,11 +627,11 @@ function canonicalFrameView(frame: PerformanceActivityFrame): PerformanceActivit
   });
   const logicalRows = frame.rows.filter((row) => row.resource.kind === "gpu-logical-capacity");
   const eventById = new Map(frame.events.map((event) => [event.id, event]));
-  const resources = [
+  const resources = projectGpuStageEnvelopes({ resources: [
     ...frame.rows.filter((row) => row.resource.kind !== "gpu-logical-capacity")
       .map((row) => canonicalRowResource({ row, taskById, relativeTime, trustIdle })),
     ...coalesceGpuLogicalRows({ rows: logicalRows, taskById, relativeTime, eventById, trustIdle }),
-  ];
+  ], taskById });
   return {
     duration_ms,
     synchronized,
@@ -628,7 +771,9 @@ function matrixStats(view: PerformanceActivityView) {
   let activeCells = 0;
   let observedCells = 0;
   for (const resource of resources) for (const segment of resource.segments) {
-    if (segment.evidence === "unknown") continue;
+    // Projected bars explain when an observed stage could have occupied this
+    // sampled stratum. They are visual context, never utilization evidence.
+    if (segment.evidence === "unknown" || segment.projection) continue;
     observedCells += 1;
     if (segment.evidence === "measured-progress" || segment.evidence === "reconstructed") {
       activeCells += Math.max(0, Math.min(1, segment.activeFraction ?? 1));
@@ -821,11 +966,14 @@ export function PerformanceActivityGrid({
               const hasBallotUtilization = kind === "gpu-logical" && resources.some(
                 (resource) => resource.segments.some((segment) => segment.logicalLaneCount !== undefined),
               );
+              const hasStageProjection = kind === "gpu-logical" && resources.some(
+                (resource) => resource.segments.some((segment) => segment.projection === "stage-envelope"),
+              );
               return <div className="activity-resource-group" data-group={group} data-kind={kind} key={kind}>
                 <div className="activity-resource-group-label">
                   <span>{label}</span>
                   <small>{kind === "gpu-logical"
-                    ? `${resources.length} BAND${resources.length === 1 ? "" : "S"} · ${stats.logicalGpuRows} STRATIFIED SAMPLE${stats.logicalGpuRows === 1 ? "" : "S"} · ${hasBallotUtilization ? "ACTIVE-LANE INTENSITY" : "SAMPLE COVERAGE"}`
+                    ? `${resources.length} BAND${resources.length === 1 ? "" : "S"} · ${stats.logicalGpuRows} STRATIFIED SAMPLE${stats.logicalGpuRows === 1 ? "" : "S"} · ${hasBallotUtilization ? "ACTIVE-LANE INTENSITY" : "SAMPLE COVERAGE"}${hasStageProjection ? " · TIMESTAMP-PROJECTED CONTEXT" : ""}`
                     : kind === "aggregate"
                       ? `${resources.length} TIMESTAMPED QUEUE LANE${resources.length === 1 ? "" : "S"}`
                     : `${resources.length} ROW${resources.length === 1 ? "" : "S"}`}</small>
@@ -837,6 +985,7 @@ export function PerformanceActivityGrid({
                     {resource.segments.flatMap((segment, index) => segment.evidence === "unknown" ? [] : [<span
                       className="activity-cell"
                       data-evidence={segment.evidence}
+                      data-projection={segment.projection}
                       data-active-resources={segment.activeResourceCount}
                       data-resource-count={segment.resourceCount}
                       data-active-lanes={segment.activeLaneCount}

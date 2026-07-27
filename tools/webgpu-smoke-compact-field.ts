@@ -40,6 +40,9 @@ export interface CompactOctreeFieldEvidence {
   readonly topologyRolledBack?: boolean;
   /** `FineLevelSetTopologyControl.control[7]`: rejected downstream stage bits. */
   readonly downstreamFinalizeReason?: number;
+  readonly latchedFinalizeReason?: number;
+  readonly latchedFirstRejectedGeneration?: number;
+  readonly latchedRejectionCount?: number;
   /** Complete raw downstream transaction controls, retained for rejection telemetry. */
   readonly transportControl?: readonly number[];
   readonly redistanceControl?: readonly number[];
@@ -92,6 +95,9 @@ export interface CompactOctreePublicationHeaderEvidence {
   /** Dilation rings on success; required desired pages on capacity failure. */
   readonly topologyCapacityOrDilation?: number;
   readonly downstreamFinalizeReason?: number;
+  readonly latchedFinalizeReason?: number;
+  readonly latchedFirstRejectedGeneration?: number;
+  readonly latchedRejectionCount?: number;
   /** Complete raw downstream transaction controls, retained for rejection telemetry. */
   readonly transportControl?: readonly number[];
   readonly redistanceControl?: readonly number[];
@@ -158,6 +164,12 @@ export function compactOctreePublicationHeaderEvidence(
       topologyPublished: topology[4], topologyRolledBack: topology[5],
       topologyCapacityOrDilation: topology[6],
       downstreamFinalizeReason: topology[7],
+      ...(topology.length >= 12 ? {
+        // Sticky across generations; words 0..8 are cleared per generation.
+        latchedFinalizeReason: topology[10],
+        latchedFirstRejectedGeneration: topology[11] >>> 16,
+        latchedRejectionCount: topology[11] & 0xffff,
+      } : {}),
     } : {}),
     ...(restriction && restriction.length >= 6 ? {
       fineRestrictionCount: restriction[0], fineRestrictionMaximumPerRow: restriction[1],

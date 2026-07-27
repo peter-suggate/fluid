@@ -107,11 +107,24 @@ test("fine-seed candidates cut over from analytic t=0 to compact coarse phi", ()
   assert.match(octreeFineSeedAdapterShader, /if\(!coarse&&params\.selection\.z==0u\)\{return;\}/,
     "a missing recurring coarse publication preserves the prior compact leaf generation");
   assert.match(octreeFineSeedAdapterShader,
-    /if\(coarse\)\{let sample=coarsePhi\[row\];centrePhi=sample\.phi;minimumPhi=sample\.minimumPhi;maximumPhi=sample\.maximumPhi;\}else\{let sampleCell=[\s\S]*analyticInitialPhi/,
-    "analytic phi is a cold-start seed only; recurring classification comes from compact coarse phi");
+    /if\(coarse\)\{let sample=coarsePhi\[row\];centrePhi=sample\.phi;minimumPhi=sample\.minimumPhi;maximumPhi=sample\.maximumPhi;\}else\{let sampleCell=[\s\S]*bootstrapPhi/,
+    "bootstrap phi is a cold-start seed only; recurring classification comes from compact coarse phi");
+  // The cold-start seed dispatches over both bootstrap authorities: scenes
+  // with no closed-form surface read the imported dense level set instead.
+  assert.match(octreeFineSeedAdapterShader,
+    /fn bootstrapPhi\(point:vec3f\)->f32\{\s*if\(params\.selection\.z==3u\)\{return bootstrapTexturePhi\(point\);\}\s*return analyticInitialPhi\(point\);\}/,
+    "mode 3 selects the imported dense level set; every other mode keeps the analytic form");
   assert.doesNotMatch(octreeFineSeedAdapterShader,
-    /pagedPhiAvailable|previousPhi|textureLoad|surfacePagePhi|pageArena/,
-    "the adapter has no page, dense-texture, or synthetic page fallback");
+    /pagedPhiAvailable|previousPhi|surfacePagePhi|pageArena/,
+    "the adapter has no page or synthetic page fallback");
+  // The imported dense level set is a cold-start authority, never a recurring
+  // fallback: it is reachable only through the mode-gated bootstrapPhi above,
+  // so exactly one sample site may exist and it must live in that helper.
+  assert.equal(octreeFineSeedAdapterShader.match(/textureLoad/g)?.length, 1,
+    "the dense bootstrap level set has exactly one sample site");
+  assert.match(octreeFineSeedAdapterShader,
+    /fn bootstrapTexturePhi\(point:vec3f\)->f32\{\s*return textureLoad\(/,
+    "the only textureLoad belongs to the mode-gated cold-start helper");
 });
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -168,10 +181,17 @@ test("Dawn adapts live compact rows into global-fine seed candidates without den
     rowVelocities: structuredRowVelocities,
   } as unknown as DirectStructuredVelocitySource;
   device.pushErrorScope("validation"); device.pushErrorScope("internal");
+  // The seed kernel always binds a bootstrap level set; this fixture drives
+  // the coarse-phi authority, so the texture is present but never sampled.
+  const bootstrapLevelSet = device.createTexture({
+    label: "Fine-seed adapter test bootstrap level set",
+    size: [4, 1, 1], dimension: "3d", format: "r32float",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
   const surfaceAdapter = new WebGPUOctreeFineSeedAdapter(device, {
     leafHeaders, rowCount, publicationControl, frontier,
     dimensions: [4, 1, 1], cellSize: [1, 1, 1],
-  }, 2, { finestLeafSize: 1, haloCells: 3 });
+  }, 2, { finestLeafSize: 1, haloCells: 3, bootstrapLevelSet });
   surfaceAdapter.setStructuredVelocitySource(structuredVelocitySource);
   surfaceAdapter.setCoarsePhiSource({ values: coarsePhi, control: coarseControl });
   try {

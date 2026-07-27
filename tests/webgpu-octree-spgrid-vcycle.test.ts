@@ -72,6 +72,28 @@ const spgridSource = (
   };
 };
 
+/** Executable model of scanCandidateTransfers: a Hillis-Steele inclusive block
+ * scan of the per-fine fan-out with a lane-0 carry, read back as the exclusive
+ * prefix. Integer addition is associative, so this must equal the serial running
+ * counter the transfer arena is defined by. */
+function blockScannedRecordBases(fanOut: readonly number[], chunk: number): { bases: number[]; total: number } {
+  const bases = new Array<number>(fanOut.length).fill(0);
+  let carry = 0;
+  for (let block = 0; block < fanOut.length; block += chunk) {
+    const owned = Array.from({ length: chunk }, (_, lane) => fanOut[block + lane] ?? 0);
+    const inclusive = owned.slice();
+    for (let span = 1; span < chunk; span <<= 1) {
+      const staged = inclusive.slice();
+      for (let lane = span; lane < chunk; lane += 1) inclusive[lane] = staged[lane] + staged[lane - span];
+    }
+    for (let lane = 0; lane < chunk && block + lane < fanOut.length; lane += 1) {
+      bases[block + lane] = carry + inclusive[lane] - owned[lane];
+    }
+    carry += inclusive[chunk - 1];
+  }
+  return { bases, total: carry };
+}
+
 function reachableWGSLBindings(shader: string, entryPoint: string): number[] {
   const globals = [...shader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var(?:<[^>]+>)?\s+(\w+)/g)]
     .map((match) => ({ binding: Number(match[1]), name: match[2] }));
@@ -213,15 +235,22 @@ test("compact SPGrid level and transfer arenas preserve exact layout and hash he
       transferPrefix += 4 * plan.transferCapacities[level] + 4 * plan.levelCapacities[level];
     }
     const directoryWords = 16 + 4 * plan.brickCount + plan.totalLevelSlots;
+    // Eighteen published column indices per cell, one per stencil channel.
+    const stencilNeighbourWords = 18 * plan.totalLevelSlots;
+    assert.equal(plan.stencilNeighbourBytes, stencilNeighbourWords * 4,
+      "the published column indices must be exactly one word per cell per stencil channel");
     const expectedTopologyWords = 16 + plan.levelCount * rowCapacity + plan.totalLevelSlots
       + 28 * plan.totalLevelSlots + plan.pageDirectoryBytes / 4
-      + transferPrefix + directoryWords;
+      + transferPrefix + directoryWords + stencilNeighbourWords;
     assert.equal(plan.topologyBytes, expectedTopologyWords * 4);
   }
 });
 
 test("compact SPGrid addressing and commit dispatch cover every variable arena", () => {
-  for (const shader of [octreeSPGridVCycleShader]) {
+  // The rule was written for the V-cycle alone, so the accurate operator went
+  // on violating it in four helpers. The worst was reached from pageSlot, which
+  // applyRow calls eighteen times per row and finerAdjoint up to 144 more.
+  for (const shader of [octreeSPGridVCycleShader, octreeSPGridAccurateOperatorShader]) {
     assert.doesNotMatch(shader,
       /\(c\*levels\(\)\+l\)\*(?:maxS|s)tride\(\)|l\*transferLevelWords\(\)|rankedSlotsBase\(\)\+l\*(?:maxS|s)tride\(\)/,
       "no shader may retain fixed finest-level padding in state, transfer, or rank addressing");
@@ -230,8 +259,16 @@ test("compact SPGrid addressing and commit dispatch cover every variable arena",
     assert.match(shader,
       /fn levelCapacity\(l:u32\)->u32\{let t=levelTable\(l\);return p\.levelCaps\[t\.x\]\[t\.y\];\}/,
       "variable-arena addressing must read the memoized host table, not a per-address loop");
+    for (const helper of ["levelBase", "pageLevelOffset", "transferLevelOffset",
+      "brickLevelOffset"]) {
+      assert.match(shader,
+        new RegExp(`fn ${helper}\\(l:u32\\)->u32\\{let t=levelTable\\(l\\);return p\\.\\w+\\[t\\.x\\]\\[t\\.y\\];\\}`),
+        `${helper} must read the memoized host table, not a per-address prefix loop`);
+    }
     assert.doesNotMatch(shader, /for\(var k=0u;k<l;k\+=1u\)/,
       "no address helper may re-derive a level prefix on every access");
+    assert.doesNotMatch(shader, /while\(result<limit\)/,
+      "no address helper may re-derive a level capacity on every access");
   }
   assert.match(WebGPUOctreeSPGridVCycle.prototype.constructor.toString(),
     /SPGrid level tables disagree with the allocated plan/,
@@ -456,9 +493,74 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     "every WGSL binding must have exactly one module-scope declaration");
   assert.match(octreeSPGridVCycleShader, /cAppendTransfer\(l,base\+corner,fine,coarse,parent\.weight\)/);
   assert.match(octreeSPGridVCycleShader, /fn correctionTransfer/);
-  assert.match(octreeSPGridVCycleShader,
-    /fn scanCandidateTransfers[\s\S]*fineCountBase\(l\)\+fine[\s\S]*candidateTopology\[fineHeadBase\(l\)\+fine\]=base;base\+=owned/,
-    "the record index must be the exclusive prefix sum of the per-fine fan-out");
+  // The record index of a fine slot is the exclusive prefix sum of the per-fine
+  // fan-out taken in workset order. That property - not any one spelling of the
+  // running counter - is what makes E and E^T address one arena. It is pinned in
+  // three parts: the narrow scan body publishes a block-scanned exclusive
+  // prefix; that block scan provably equals the serial running counter; and the
+  // two addressings the GPU actually uses over the resulting arena are exact
+  // transposes.
+  const scan = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn scanCandidateTransfers("),
+    octreeSPGridVCycleShader.indexOf("fn writeCandidateTransfers("));
+  assert.match(scan, /owned=candidateTopology\[fineCountBase\(l\)\+fine\]/,
+    "the scanned quantity must be the published per-fine fan-out");
+  assert.match(scan, /let inclusive=blockInclusiveSum\(lane,owned\);\s*let base=chunkCarry\+inclusive-owned;/,
+    "the record base must be the exclusive prefix of the inclusive block scan");
+  assert.match(scan, /chunkCarry=chunkCarry\+chunkScan\[CHUNK-1u\]/,
+    "each block must carry its whole total into the next block");
+  assert.match(scan, /candidateTopology\[fineHeadBase\(l\)\+fine\]=base;/,
+    "the exclusive prefix must be published unmodified as that fine slot's record base");
+  assert.match(scan, /candidateDispatch\[l\*DISPATCH_WORDS\+1u\]=chunkCarry/,
+    "the level's record count must be the final carry");
+  const linkChains = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn linkCandidateParentChains("),
+    octreeSPGridVCycleShader.indexOf("fn brickOfIndex("));
+  assert.match(linkChains, /if\(t<lane\)\{predecessor=block\+t;\}/,
+    "a record's chain predecessor is the largest smaller record index sharing its coarse slot");
+  const adjointLeaves: Array<{ origin: [number, number, number]; size: number }> = [
+    { origin: [0, 4, 0], size: 2 }, { origin: [4, 4, 4], size: 4 }];
+  for (let x = 0; x < 4; x += 1) for (let y = 0; y < 3; y += 1) adjointLeaves.push({ origin: [x, y, 0], size: 1 });
+  const adjointOracle = buildSPGridPyramidOracle(adjointLeaves, 4);
+  const arena = adjointOracle.transfers[0];
+  const arenaFineCount = adjointOracle.levels[0].coordinates.length;
+  const arenaCoarseCount = adjointOracle.levels[1].coordinates.length;
+  const fanOut = new Array<number>(arenaFineCount).fill(0);
+  for (const record of arena) fanOut[record.fine] += 1;
+  assert.ok(fanOut.includes(1) && fanOut.includes(8) && arena.length > 64,
+    "the adjoint fixture must span both fan-outs and more than one staged record chunk");
+  const scanned = blockScannedRecordBases(fanOut, 256);
+  assert.equal(scanned.total, arena.length, "the published record count is the level's whole fan-out");
+  // The arena is the fine-major concatenation of the fan-out taken in workset
+  // order, so its fine column is exactly the run-length expansion of fanOut and
+  // the block-scanned base of every fine slot is the serial running counter.
+  assert.deepEqual(arena.map((record) => record.fine),
+    fanOut.flatMap((owned, fine) => new Array<number>(owned).fill(fine)),
+    "the record arena is the fine-major concatenation of the per-fine fan-out");
+  let running = 0;
+  for (let fine = 0; fine < arenaFineCount; fine += 1) {
+    assert.equal(scanned.bases[fine], running, `fine slot ${fine} owns the serial running record base`);
+    running += fanOut[fine];
+  }
+  const arenaFine = Array.from({ length: arenaFineCount }, (_, index) => 0.25 + 0.7 * index);
+  const arenaCoarse = Array.from({ length: arenaCoarseCount }, (_, index) => -1.1 + 0.31 * index);
+  // E as prolongAndGhostPropagate reads it: fineHead(fine) + corner.
+  const arenaProlonged = arenaFine.map((_, fine) => {
+    let value = 0;
+    for (let corner = 0; corner < fanOut[fine]; corner += 1) {
+      const record = arena[scanned.bases[fine] + corner];
+      value += record.weight * arenaCoarse[record.coarse];
+    }
+    return value;
+  });
+  // E^T as the restriction reads it: ascending record index restricted to one coarse slot.
+  const arenaRestricted = arenaCoarse.map((_, coarse) => {
+    let sum = 0;
+    for (const record of arena) if (record.coarse === coarse) sum += record.weight * arenaFine[record.fine];
+    return sum;
+  });
+  assert.ok(Math.abs(dot(arenaRestricted, arenaCoarse) - dot(arenaFine, arenaProlonged)) < 1e-12,
+    "fineHead+corner prolongation and ascending parent-chain restriction stay exact transposes");
   const correctionTransfer = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn correctionTransfer("),
     octreeSPGridVCycleShader.indexOf("fn restrictAndGhostAccumulate"),
@@ -475,7 +577,23 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     octreeSPGridVCycleShader.indexOf("fn publish", octreeSPGridVCycleShader.indexOf("fn prolongAndGhostPropagate")));
   assert.doesNotMatch(prolong, /atomicAddF/,
     "one fine invocation owns its complete prolongation sum");
-  assert.match(octreeSPGridVCycleShader, /bitcast<f32>\(topology\[transferWord\(l,record,2u\)\]\)\*residual/);
+  // E^T's matrix entry must be the record's stored weight - the same word E
+  // reads - multiplied by the ghost-aware level residual, and folded in
+  // ascending record order. Pin those three properties rather than one
+  // statement's spelling, and forbid outright the reassociating shapes.
+  const restrictBody = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn restrictAndGhostAccumulate"),
+    octreeSPGridVCycleShader.indexOf("fn exactBottom"));
+  assert.equal(restrictBody.match(/bitcast<f32>\(topology\[transferWord\(l,\w+,2u\)\]\)/g)?.length, 1,
+    "restriction reads exactly one transfer-arena float: the record's stored weight");
+  assert.doesNotMatch(restrictBody, /bitcast<f32>\(topology\[transferWord\(l,\w+,(?:0u|1u|3u)\)\]\)/,
+    "no other transfer word may be reinterpreted as a weight");
+  assert.match(restrictBody, /residual=select\(-product,loadf\(RHS,l,fine\)-product,!ghost\)/,
+    "restriction restricts the ghost-aware level residual, never a raw value");
+  assert.match(restrictBody, /[Ww]eight\w*(?:\[\w+\])?\*\w*[Rr]esidual\w*(?:\[\w+\])?/,
+    "each accumulated term is that record's stored weight times its residual");
+  assert.doesNotMatch(restrictBody, /subgroup\w*\(|span<<|>>1u/,
+    "restriction must fold in ascending record order, never by a reassociating tree");
   assert.match(octreeSPGridVCycleShader, /transfer\.weight\*loadf\(A,l\+1u,transfer\.coarse\)/);
   assert.match(octreeSPGridVCycleShader, /const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u/);
   assert.match(octreeSPGridVCycleShader, /fn cMergeClass/);
@@ -501,11 +619,23 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     octreeSPGridVCycleShader.indexOf("fn applied("),
     octreeSPGridVCycleShader.indexOf("fn smoothable", octreeSPGridVCycleShader.indexOf("fn applied(")),
   );
-  assert.match(applied,
-    /stencilDirection\(k\)[\s\S]*find\(l,vec3u\(neighborCoord\)\)/,
-    "non-page correction resolves the fixed 19-channel stencil without stored neighbour IDs");
-  assert.doesNotMatch(applied, /neighbourAt|neighbourBase/,
-    "the retired per-cell neighbour-index arena must not survive");
+  // Section 4.6 restores the published column-index vector. The recurring
+  // correction reads the slot setup already resolved; it does not re-walk the
+  // global brick/rank directory once per spoke per lane.
+  assert.match(applied, /if\(c==0\.0\)\{continue;\}/,
+    "the zero-coefficient early-out guards the neighbour fetch and must be retained");
+  assert.match(applied, /neighbourBase\(\)|neighbourAt\(/,
+    "non-page correction consumes the setup-published column index for each stencil channel");
+  assert.doesNotMatch(applied, /\bfind\(|\bdirectoryLookup\(/,
+    "the recurring correction must not re-derive a neighbour slot per spoke");
+  assert.match(applied, /reportAt\(OVERFLOW,75u,slot\)/,
+    "an unresolvable column must remain fail-closed on the same overflow stage");
+  assert.match(octreeSPGridVCycleShader,
+    /candidateTopology\[neighbourAt\(k,l,s\)\]=other;cStoref\(XP\+k,l,s,coefficient\)/,
+    "a coefficient and the slot it was accumulated against must publish together");
+  assert.match(octreeSPGridVCycleShader,
+    /if\(\(stencilDirty\(l\)\|\|topologyChanged\)&&i<levelCapacity\(l\)\)\{[\s\S]{0,160}?topology\[neighbourAt\(k,l,i\)\]=candidateTopology\[neighbourAt\(k,l,i\)\]/,
+    "the column indices must commit on the union of the gates that publish their coefficients");
   assert.doesNotMatch(octreeSPGridVCycleShader, /select\([^\n]*insert\([^\n]*insertOwned/,
     "WGSL select eagerly evaluates both insertion paths");
   assert.match(octreeSPGridVCycleShader, /fn smoothable/);

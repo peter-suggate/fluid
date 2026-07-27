@@ -85,6 +85,12 @@ export interface OctreeFineSeedAdapterOptions {
   /** Authored analytic SDF used only before the first fine generation. */
   readonly analyticInitialCondition?: "dam-break" | "tank-fill";
   readonly initialFillFraction?: number;
+  /**
+   * Imported dense t=0 level set for scenes with no closed-form surface. It is
+   * always bound; `analyticInitialCondition` decides which authority the seed
+   * kernel actually samples.
+   */
+  readonly bootstrapLevelSet: GPUTexture;
 }
 
 export interface OctreeFineSeedAdapterSource extends OctreeFineSeedLeafResources {
@@ -213,6 +219,7 @@ export class WebGPUOctreeFineSeedAdapter {
   private readonly layout:GPUBindGroupLayout;
   private readonly device:GPUDevice;
   private readonly topology:OctreeFineSeedAdapterTopology;
+  private readonly bootstrapLevelSet:GPUTexture;
   private structuredVelocity?:DirectStructuredVelocitySource;
   private coarsePhi?:OctreeFineSeedAdapterCoarsePhiSource;
   private readonly buildPipeline: GPUComputePipeline;
@@ -228,9 +235,10 @@ export class WebGPUOctreeFineSeedAdapter {
     device: GPUDevice,
     topology: OctreeFineSeedAdapterTopology,
     rowCapacity: number,
-    options: OctreeFineSeedAdapterOptions = {},
+    options: OctreeFineSeedAdapterOptions,
   ) {
     this.device=device;this.topology=topology;
+    this.bootstrapLevelSet=options.bootstrapLevelSet;
     this.plan=planOctreeFineSeedAdapter(rowCapacity);
     const dimensions = topology.dimensions;
     dimensions.forEach((value, axis) => {
@@ -272,7 +280,7 @@ export class WebGPUOctreeFineSeedAdapter {
     });
     const parameterData = new ArrayBuffer(OCTREE_FINE_SEED_ADAPTER_PARAMETER_BYTES);
     const analyticMode = options.analyticInitialCondition === "dam-break" ? 2
-      : options.analyticInitialCondition === "tank-fill" ? 1 : 0;
+      : options.analyticInitialCondition === "tank-fill" ? 1 : 3;
     const initialFillFraction = options.initialFillFraction ?? 0;
     if (!Number.isFinite(initialFillFraction) || initialFillFraction < 0 || initialFillFraction > 1) {
       throw new RangeError("Octree analytic initial fill fraction must lie in [0, 1]");
@@ -302,6 +310,8 @@ export class WebGPUOctreeFineSeedAdapter {
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 12, visibility: GPUShaderStage.COMPUTE,
+        texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     ] });
     const shaderModule = device.createShaderModule({ label: "Octree topology to fine-level-set seeds", code: octreeFineSeedAdapterShader });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
@@ -366,6 +376,7 @@ export class WebGPUOctreeFineSeedAdapter {
       { binding: 7, resource: { buffer: this.leaves } },
       {binding:10,resource:{buffer:this.coarsePhi?.values??this.bindingSentinel}},
       {binding:11,resource:{buffer:this.coarsePhi?.control??this.bindingSentinel}},
+      {binding:12,resource:this.bootstrapLevelSet.createView({dimension:"3d"})},
     ] });}
 
   /** Routes leaf motion to the accepted packed structured-velocity bank. */
@@ -448,6 +459,14 @@ fn cellCount()->u32{return dims().x*dims().y*dims().z;}
 fn coord(cell:u32)->vec3u{return vec3u(cell%dims().x,(cell/dims().x)%dims().y,cell/(dims().x*dims().y));}
 fn leafOrigin(leaf:FineSeedLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn valid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(dims()));}
+@group(0) @binding(12) var bootstrapLevelSetIn:texture_3d<f32>;
+// Cell-unit sample of the imported dense t=0 level set. Mode 3 scenes have no
+// closed-form surface, so this replaces analyticInitialPhi for them.
+fn bootstrapTexturePhi(point:vec3f)->f32{
+  return textureLoad(bootstrapLevelSetIn,clamp(vec3i(floor(point)),vec3i(0),vec3i(dims())-vec3i(1)),0).x;}
+fn bootstrapPhi(point:vec3f)->f32{
+  if(params.selection.z==3u){return bootstrapTexturePhi(point);}
+  return analyticInitialPhi(point);}
 fn analyticInitialPhi(point:vec3f)->f32{
   let fill=bitcast<f32>(params.selection.w);let world=vec3f((point.x/f32(dims().x)-0.5)*params.cellHalo.x*f32(dims().x),point.y*params.cellHalo.y,(point.z/f32(dims().z)-0.5)*params.cellHalo.z*f32(dims().z));
   if(params.selection.z==1u){return world.y-fill*params.cellHalo.y*f32(dims().y);}
@@ -476,6 +495,6 @@ fn structuredVelocityRowValid(row:u32)->bool{
   return velocity.w==1.0&&finite(velocity.x)&&finite(velocity.y)&&finite(velocity.z);
 }
 @compute @workgroup_size(64) fn buildFineSeedLeaves(@builtin(global_invocation_id) gid:vec3u){
-  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&fineSeedLeaves)){return;}let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!structuredVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){return;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;}else{let sampleCell=vec3i(clamp(vec3u(centre),vec3u(0),dims()-vec3u(1)));centrePhi=analyticInitialPhi(vec3f(sampleCell)+vec3f(0.5));gradient=vec3f(0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(1,0,0))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(1,0,0))+vec3f(0.5))),0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(0,1,0))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(0,1,0))+vec3f(0.5))),0.5*(analyticInitialPhi(vec3f(sampleCell+vec3i(0,0,1))+vec3f(0.5))-analyticInitialPhi(vec3f(sampleCell-vec3i(0,0,1))+vec3f(0.5))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let core=minimumPhi<=0.0&&maximumPhi>=0.0;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=structuredRowVelocities[structuredVelocityRowIndex(row)].xyz;fineSeedLeaves[row]=FineSeedLeaf(origin.x,origin.y,origin.z,header.size,flags,fineSeedLeaves[row].pad0,0u,0u,vec4f(centrePhi,gradient),vec4f(motion,length(motion)));
+  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&fineSeedLeaves)){return;}let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!structuredVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){return;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;}else{let sampleCell=vec3i(clamp(vec3u(centre),vec3u(0),dims()-vec3u(1)));centrePhi=bootstrapPhi(vec3f(sampleCell)+vec3f(0.5));gradient=vec3f(0.5*(bootstrapPhi(vec3f(sampleCell+vec3i(1,0,0))+vec3f(0.5))-bootstrapPhi(vec3f(sampleCell-vec3i(1,0,0))+vec3f(0.5))),0.5*(bootstrapPhi(vec3f(sampleCell+vec3i(0,1,0))+vec3f(0.5))-bootstrapPhi(vec3f(sampleCell-vec3i(0,1,0))+vec3f(0.5))),0.5*(bootstrapPhi(vec3f(sampleCell+vec3i(0,0,1))+vec3f(0.5))-bootstrapPhi(vec3f(sampleCell-vec3i(0,0,1))+vec3f(0.5))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let core=minimumPhi<=0.0&&maximumPhi>=0.0;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=structuredRowVelocities[structuredVelocityRowIndex(row)].xyz;fineSeedLeaves[row]=FineSeedLeaf(origin.x,origin.y,origin.z,header.size,flags,fineSeedLeaves[row].pad0,0u,0u,vec4f(centrePhi,gradient),vec4f(motion,length(motion)));
 }
 `;

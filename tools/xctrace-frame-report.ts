@@ -1,0 +1,1079 @@
+/**
+ * Reduce an exported Metal System Trace into a per-frame CPU+GPU breakdown of
+ * one simulation advance, with throughput and occupancy attributed to
+ * individual tasks and shaders.
+ *
+ * Three things make that attribution possible, and each has a catch:
+ *
+ *  - GPU *intervals* time the work but their label text is not a usable
+ *    grouping key: Instruments concatenates the labels of every encoder it drew
+ *    as one interval, so the same task yields a different string whenever the
+ *    merge grouping shifts, and 128 real tasks explode into thousands of
+ *    one-off keys. The CPU-side encoder list is stable, so `encoder-id` is the
+ *    join key and its label is the authority. Dawn packs several WebGPU compute
+ *    passes into one Metal encoder, so an encoder is the finest unit with a
+ *    real GPU timestamp; its constituent passes are listed, not discarded.
+ *
+ *  - GPU *counters* (occupancy, ALU, bandwidth) are device-wide. They cannot
+ *    be filtered by process, so they are only sampled inside windows where no
+ *    other process had GPU work in flight. The share of our GPU time that
+ *    qualifies is reported as `exclusiveCoverage` -- occupancy numbers are
+ *    only as trustworthy as that number is large.
+ *
+ *  - The trace has no notion of a simulation step, so frame boundaries are
+ *    recovered by finding a pass that fires exactly once per advance.
+ */
+import { readTraceRows, durationMicroseconds, timestampMicroseconds } from "./xctrace-trace-tables";
+
+export interface Interval {
+  readonly start: number;
+  readonly duration: number;
+  readonly label: string;
+  readonly encoders: readonly string[];
+  readonly channel: string;
+  readonly merged: boolean;
+  occupancy?: number | null;
+  alu?: number | null;
+}
+
+export interface PassCost {
+  readonly label: string;
+  readonly callsPerFrame: number;
+  readonly gpuMsPerFrame: number;
+  readonly meanMicroseconds: number;
+  readonly share: number;
+  readonly merged: boolean;
+  readonly exclusiveShare: number;
+  readonly counterSamples: number;
+  readonly occupancy?: number;
+  readonly alu?: number;
+  readonly readGBs?: number;
+  readonly writeGBs?: number;
+  readonly limiter?: string;
+  /** Measured occupancy on each GPU partition, 0..1, index = hardware stream. */
+  readonly partitions?: readonly number[];
+  /** Every counter measured inside this task, percent or native units. */
+  readonly counters?: Readonly<Record<string, number>>;
+  /** Resident SIMD groups implied by the measured occupancy. */
+  readonly residentSlots?: number;
+  readonly residentThreads?: number;
+  /** Peak partition occupancy divided by the mean: 1 is balanced. */
+  readonly imbalance?: number;
+  readonly shaders?: readonly { name: string; samples: number }[];
+}
+
+export interface FlameNode {
+  readonly name: string;
+  value: number;
+  children: FlameNode[];
+}
+
+/**
+ * One advance, measured on its own. The averages elsewhere in the report are
+ * these reduced; keeping them separate is what lets a reader check that every
+ * advance has the same shape -- and compare an early one against a late one.
+ */
+export interface FrameSample {
+  /** Position in the analysed window, 0-based. */
+  readonly index: number;
+  /** Milliseconds from the start of the analysed window. */
+  readonly startMs: number;
+  readonly durationMs: number;
+  readonly busyMs: number;
+  readonly gapMs: number;
+  readonly encoders: number;
+  readonly passes: number;
+  readonly occupancy?: number;
+  readonly counterSamples: number;
+  /** GPU ms in this advance, aligned to `frames.taskLabels`. */
+  readonly tasks: readonly number[];
+}
+
+/** A frame retained in full, so the timeline can be drawn for it. */
+export interface FrameCapture {
+  readonly index: number;
+  readonly durationUs: number;
+  readonly intervals: readonly Interval[];
+}
+
+export interface FrameReport {
+  readonly lane: string;
+  readonly scene: string;
+  readonly grid: string;
+  readonly capturedAt: string;
+  readonly wall: {
+    readonly baselineMsPerAdvance?: number;
+    readonly tracedMsPerAdvance?: number;
+    readonly distortion?: number;
+    readonly steps?: number;
+  };
+  readonly frames: {
+    readonly count: number; readonly anchor: string;
+    readonly medianMs: number; readonly p10Ms: number; readonly p90Ms: number;
+    /** Task labels the per-frame `tasks` arrays are aligned to, costliest first. */
+    readonly taskLabels: readonly string[];
+    /** Every analysed advance, in capture order. */
+    readonly samples: readonly FrameSample[];
+    /**
+     * Frames whose interval list is retained in full. Capped and evenly spread
+     * -- always including the first, the last and the representative -- so a
+     * 500-advance capture stays a file you can open.
+     */
+    readonly captures: readonly FrameCapture[];
+    /** Index into `captures` of the frame the timeline shows by default. */
+    readonly representative: number;
+    /** Advance number in the run of `samples[0]`, when it can be recovered. */
+    readonly firstAdvance?: number;
+  };
+  readonly gpu: {
+    readonly busyMsPerFrame: number; readonly wallMsPerFrame: number;
+    readonly occupancy: number; readonly intervalsPerFrame: number;
+    readonly encodersPerFrame: number; readonly passesPerFrame: number;
+    readonly gapMsPerFrame: number;
+    readonly largestGapsUs: readonly number[];
+    readonly mergedShare: number;
+  };
+  readonly counters: {
+    readonly available: boolean;
+    readonly partitionCount: number;
+    readonly partitionOccupancy: readonly number[];
+    /** Scheduler slots per partition, recovered from counter quantisation. */
+    readonly slotsPerPartition: number;
+    readonly slotConfidence: number;
+    /** Threads per slot: an Apple GPU SIMD group. */
+    readonly threadsPerSlot: number;
+    readonly totalSlots: number;
+    readonly totalThreads: number;
+    readonly exclusiveCoverage: number;
+    readonly meanOccupancy?: number;
+    readonly meanAlu?: number;
+    readonly meanReadGBs?: number;
+    readonly meanWriteGBs?: number;
+    readonly frameSeries: readonly { name: string; points: { t: number; v: number }[] }[];
+    /**
+     * Every occupancy sample inside the representative advance: microseconds
+     * from frame start, occupancy 0..1 on each partition, and the task that
+     * owned the GPU. This is the finest true occupancy-over-time the hardware
+     * reports -- one SIMD group out of 768 per partition, every 10 us.
+     * Slots are anonymous: the counter says how many were resident, never
+     * which, because Apple exposes no per-wave thread trace.
+     */
+    readonly occupancyTrace: readonly {
+      t: number; p: readonly number[]; label: string | null;
+    }[];
+  };
+  readonly passes: readonly PassCost[];
+  readonly occupancyGrid: Record<string, (number | null)[]>;
+  readonly shaders: readonly { name: string; samples: number; share: number; pipelines: number }[];
+  readonly channels: readonly { channel: string; msPerFrame: number; count: number }[];
+  readonly contention: readonly { process: string; gpuMs: number; intervals: number }[];
+  readonly cpu: {
+    readonly samples: number; readonly runningSamples: number;
+    readonly threads: readonly { thread: string; samples: number; running: number }[];
+    readonly flame: FlameNode;
+    readonly hotLeaves: readonly { symbol: string; samples: number; share: number }[];
+  };
+  readonly timeline: {
+    readonly frameStart: number; readonly frameDuration: number;
+    readonly intervals: readonly Interval[];
+  };
+  readonly console: readonly string[];
+}
+
+// ---- Labels ----------------------------------------------------------------
+
+const TRAILER = /\s{2,}\(\s*[^)]*\)\s*0x[0-9a-f]+\s*$/i;
+
+/**
+ * Split a GPU interval label into its encoder names. Instruments formats these
+ * as `<command buffer>:<encoder>[ & <encoder>…]` plus a process/handle trailer,
+ * and joins encoders it merged into one interval with " & ".
+ */
+export const parseEncoderLabel = (raw: string | null | undefined): {
+  encoders: string[]; merged: boolean;
+} => {
+  if (!raw) return { encoders: ["(unlabelled)"], merged: false };
+  const withoutTrailer = raw.replace(TRAILER, "").trim();
+  const colon = withoutTrailer.indexOf(":");
+  const body = colon === -1 ? withoutTrailer : withoutTrailer.slice(colon + 1);
+  const encoders = body.split(" & ")
+    .map((part) => part.trim().replace(/^Dawn_(?:Compute|Render|Blit)PassEncoder_/, "").trim())
+    .filter((part) => part.length > 0);
+  if (encoders.length === 0) return { encoders: ["(unlabelled)"], merged: false };
+  return { encoders, merged: encoders.length > 1 };
+};
+
+const quantile = (sorted: readonly number[], q: number): number => {
+  if (sorted.length === 0) return 0;
+  const position = (sorted.length - 1) * q;
+  const low = Math.floor(position);
+  const high = Math.ceil(position);
+  return low === high ? sorted[low] : sorted[low] + (sorted[high] - sorted[low]) * (position - low);
+};
+
+const mergeSpans = (spans: { start: number; end: number }[]): { start: number; end: number }[] => {
+  spans.sort((left, right) => left.start - right.start);
+  const merged: { start: number; end: number }[] = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    else merged.push({ ...span });
+  }
+  return merged;
+};
+
+/** Index of the last span starting at or before `time`, or -1. */
+const findSpan = (spans: readonly { start: number; end: number }[], time: number): number => {
+  let low = 0;
+  let high = spans.length - 1;
+  let hit = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (spans[mid].start <= time) { hit = mid; low = mid + 1; } else high = mid - 1;
+  }
+  return hit;
+};
+
+// ---- Frame segmentation ----------------------------------------------------
+
+/**
+ * Recover advance boundaries from the interval stream. A pass that fires once
+ * per advance has tight inter-arrival times; many passes qualify and they all
+ * agree on the count, so the modal count across low-variance labels IS the
+ * frame count, and the tightest label at that count is the anchor.
+ */
+export const detectFrames = (intervals: readonly Interval[]): {
+  boundaries: number[]; anchor: string;
+} => {
+  const occurrences = new Map<string, number[]>();
+  for (const interval of intervals) {
+    for (const encoder of interval.encoders) {
+      const list = occurrences.get(encoder);
+      if (list) list.push(interval.start); else occurrences.set(encoder, [interval.start]);
+    }
+  }
+  interface Candidate { label: string; count: number; cv: number; starts: number[] }
+  const candidates: Candidate[] = [];
+  for (const [label, raw] of occurrences) {
+    if (raw.length < 5) continue;
+    const starts = [...raw].sort((left, right) => left - right);
+    const deltas: number[] = [];
+    for (let index = 1; index < starts.length; index += 1) {
+      deltas.push(starts[index] - starts[index - 1]);
+    }
+    const mean = deltas.reduce((sum, value) => sum + value, 0) / deltas.length;
+    if (!(mean > 0)) continue;
+    const variance = deltas.reduce((sum, value) => sum + (value - mean) ** 2, 0) / deltas.length;
+    const cv = Math.sqrt(variance) / mean;
+    if (cv > 0.35) continue;
+    candidates.push({ label, count: starts.length, cv, starts });
+  }
+  if (candidates.length === 0) return { boundaries: [], anchor: "(no repeating pass found)" };
+  const tally = new Map<number, number>();
+  for (const candidate of candidates) tally.set(candidate.count, (tally.get(candidate.count) ?? 0) + 1);
+  const frameCount = [...tally.entries()]
+    .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0][0];
+  const anchor = candidates.filter((candidate) => candidate.count === frameCount)
+    .sort((left, right) => left.cv - right.cv)[0];
+  return { boundaries: anchor.starts, anchor: anchor.label };
+};
+
+// ---- Flame graph -----------------------------------------------------------
+
+const foldStacks = (stacks: readonly (readonly string[])[]): FlameNode => {
+  const root: FlameNode = { name: "all", value: 0, children: [] };
+  for (const leafFirst of stacks) {
+    let node = root;
+    node.value += 1;
+    for (let index = leafFirst.length - 1; index >= 0; index -= 1) {
+      const name = leafFirst[index];
+      let child = node.children.find((candidate) => candidate.name === name);
+      if (!child) { child = { name, value: 0, children: [] }; node.children.push(child); }
+      child.value += 1;
+      node = child;
+    }
+  }
+  const prune = (node: FlameNode): void => {
+    node.children = node.children.filter((child) => child.value >= 2)
+      .sort((left, right) => right.value - left.value);
+    for (const child of node.children) prune(child);
+  };
+  prune(root);
+  return root;
+};
+
+
+/**
+ * Recover the GPU's scheduler-slot count per partition from the quantisation of
+ * the occupancy counter. Readings land on exact multiples of 100/slots, so the
+ * divisor that explains the most readings is the hardware's slot count.
+ * Verified on an M1 Max: 768 slots per partition explains 98.3% of the
+ * commonest readings, and 4 partitions x 768 slots x 32 threads per SIMD group
+ * reproduces Apple's published 98,304 concurrent threads exactly.
+ */
+export const detectPartitionSlots = (histogram: ReadonlyMap<number, number>): {
+  slots: number; confidence: number;
+} => {
+  // Weighted accumulation leaves a long tail of one-off fractional readings
+  // that fit no quantum. Score only the readings that actually recur, exactly
+  // as a human would eyeballing the histogram.
+  const common = [...histogram.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 60);
+  const total = common.reduce((sum, [, count]) => sum + count, 0);
+  if (total === 0) return { slots: 0, confidence: 0 };
+
+  const candidates = [64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072];
+  const scored = candidates.map((slots) => {
+    const quantum = 100 / slots;
+    let hit = 0;
+    for (const [value, count] of common) {
+      const units = value / quantum;
+      if (Math.abs(units - Math.round(units)) < 0.02) hit += count;
+    }
+    return { slots, confidence: hit / total };
+  });
+  // Every multiple of a true quantum is also a multiple of its subdivisions, so
+  // the coarsest divisor that still explains the readings is the real one.
+  const bestConfidence = Math.max(...scored.map((entry) => entry.confidence));
+  return scored.find((entry) => entry.confidence >= bestConfidence - 0.02)
+    ?? { slots: 0, confidence: 0 };
+};
+
+// ---- Report ----------------------------------------------------------------
+
+export interface BuildFrameReportInput {
+  readonly tables: Record<string, string>;
+  readonly lane: string;
+  readonly environment: Record<string, string>;
+  readonly traced?: { simulationWall_ms?: number; steps?: number };
+  readonly baseline?: { simulationWall_ms?: number; steps?: number };
+  /**
+   * The traced process, when the profiler attached to one it spawned itself.
+   * Identifying us by pid beats inferring it from whoever encoded the most:
+   * an attached recording only sees the encoders created inside its window, so
+   * a busy neighbour can out-encode the solver.
+   */
+  readonly tracedPid?: number;
+}
+
+const GRID_BINS = 90;
+/** Apple GPU SIMD group width. */
+const SIMD_WIDTH = 32;
+
+export const buildFrameReport = async (input: BuildFrameReportInput): Promise<FrameReport> => {
+  // ---- Encoder identity ----
+  // The GPU track's own label text is unusable as a grouping key: Instruments
+  // concatenates the labels of every encoder it drew as one interval, so the
+  // same work yields a different string whenever the merge grouping shifts,
+  // and 128 real tasks explode into thousands of one-off keys. The CPU-side
+  // encoder list is stable, so encoder-id is the join key and its label is the
+  // authority. Every GPU interval of ours resolves through it.
+  const encoderLabels = new Map<string, string>();
+  const encoderProcess = new Map<string, string>();
+  const processEncoderTally = new Map<string, number>();
+  if (input.tables.encoders) {
+    for await (const row of readTraceRows(input.tables.encoders)) {
+      const id = String(row["encoder-id"] ?? "");
+      if (!id) continue;
+      encoderLabels.set(id, String(row["encoder-label"] ?? "(unlabelled)"));
+      const process = String(row.process ?? "(unknown)");
+      encoderProcess.set(id, process);
+      processEncoderTally.set(process, (processEncoderTally.get(process) ?? 0) + 1);
+    }
+  }
+  const busiestEncoder = [...processEncoderTally.entries()]
+    .sort((left, right) => right[1] - left[1])[0]?.[0] ?? "(unknown)";
+  // Instruments spells a process "node (69273)", so the pid identifies us even
+  // when the encoder metadata stream never carried a row of ours.
+  const pidSuffix = input.tracedPid === undefined ? undefined : `(${input.tracedPid})`;
+  const isOurs = (process: string): boolean => (pidSuffix === undefined
+    ? process === busiestEncoder : process.endsWith(pidSuffix));
+  let ourProcess = pidSuffix === undefined
+    ? busiestEncoder : [...processEncoderTally.keys()].find(isOurs) ?? "(unknown)";
+
+  const ours: Interval[] = [];
+  const byProcess = new Map<string, Interval[]>();
+  const intervalTally = new Map<string, number>();
+  // Ours, but arriving before the encoder metadata stream warmed up, so with no
+  // usable grouping key. Reported rather than dropped in silence -- and kept out
+  // of the contention set, since contending with ourselves is not contention.
+  let unlabelledCount = 0;
+  let unlabelledMicroseconds = 0;
+  for await (const row of readTraceRows(input.tables["gpu-intervals"])) {
+    const id = String(row["encoder-id"] ?? "");
+    const canonical = encoderLabels.get(id);
+    const owner = canonical !== undefined
+      ? encoderProcess.get(id) ?? "(unknown)" : String(row.process ?? "(unknown)");
+    intervalTally.set(owner, (intervalTally.get(owner) ?? 0) + 1);
+    const { encoders, merged } = parseEncoderLabel(
+      canonical !== undefined ? canonical : (row["event-label"] as string),
+    );
+    const interval: Interval = {
+      start: timestampMicroseconds(row.start as string),
+      duration: durationMicroseconds(row.duration as string),
+      label: encoders.join(" · "),
+      encoders,
+      channel: String(row["channel-name"] ?? "?"),
+      merged,
+    };
+    if (isOurs(owner)) {
+      if (ourProcess === "(unknown)") ourProcess = owner;
+      if (canonical !== undefined) ours.push(interval);
+      else { unlabelledCount += 1; unlabelledMicroseconds += interval.duration; }
+    } else {
+      const list = byProcess.get(owner);
+      if (list) list.push(interval); else byProcess.set(owner, [interval]);
+    }
+  }
+  ours.sort((left, right) => left.start - right.start);
+  if (ours.length === 0) {
+    const seen = [...intervalTally.entries()].sort((left, right) => right[1] - left[1])
+      .slice(0, 5).map(([process, count]) => `${process} ${count}`).join(", ");
+    throw new Error("no GPU intervals resolved to the traced process"
+      + `${pidSuffix === undefined ? "" : ` node ${input.tracedPid}`}.`
+      + ` The trace holds ${[...intervalTally.values()].reduce((sum, n) => sum + n, 0)}`
+      + ` intervals from ${seen || "nobody"}`
+      + (unlabelledCount > 0
+        ? `, plus ${unlabelledCount} of ours that the encoder metadata stream never labelled`
+        : "")
+      + ". An attached counter run that misses the stepping phase looks exactly like this:"
+      + " raise --steps, or lower --counter-seconds / --counter-warmup.");
+  }
+
+  const { boundaries, anchor } = detectFrames(ours);
+  // Clip the first and last anchors: those frames are cut by the recording and
+  // would drag every per-frame average down.
+  const usable = boundaries.length >= 4 ? boundaries.slice(1, -1) : boundaries;
+  const windowStart = usable[0] ?? ours[0].start;
+  const windowEnd = usable[usable.length - 1]
+    ?? ours[ours.length - 1].start + ours[ours.length - 1].duration;
+  const frameCount = Math.max(usable.length - 1, 1);
+  const frameDurations: number[] = [];
+  for (let index = 1; index < usable.length; index += 1) {
+    frameDurations.push(usable[index] - usable[index - 1]);
+  }
+  frameDurations.sort((left, right) => left - right);
+
+  const windowed = ours.filter((interval) => interval.start >= windowStart
+    && interval.start < windowEnd);
+
+  // ---- Per-frame series ----
+  // Averages cannot answer "is this a whole advance" or "does advance 480 look
+  // like advance 20". Every frame is therefore accumulated separately: same
+  // boundaries as the averages, so the two can never disagree.
+  interface FrameAccumulator {
+    start: number; end: number; busy: number; encoders: number; passes: number;
+    tasks: Map<string, number>; occupancySum: number; occupancySamples: number;
+  }
+  const frameAccumulators: FrameAccumulator[] = [];
+  for (let index = 1; index < usable.length; index += 1) {
+    frameAccumulators.push({
+      start: usable[index - 1], end: usable[index], busy: 0, encoders: 0, passes: 0,
+      tasks: new Map(), occupancySum: 0, occupancySamples: 0,
+    });
+  }
+  /** Index of the frame containing `time`, or -1 outside the analysed window. */
+  const frameAt = (time: number): number => {
+    const index = findSpan(frameAccumulators, time);
+    return index >= 0 && time < frameAccumulators[index].end ? index : -1;
+  };
+  for (const interval of windowed) {
+    const index = frameAt(interval.start);
+    if (index < 0) continue;
+    const frame = frameAccumulators[index];
+    frame.busy += interval.duration;
+    frame.encoders += 1;
+    frame.passes += interval.encoders.length;
+    frame.tasks.set(interval.label, (frame.tasks.get(interval.label) ?? 0) + interval.duration);
+  }
+
+  // ---- Contention and exclusive windows ----
+  const foreignSpans: { start: number; end: number }[] = [];
+  const contentionTally = new Map<string, { gpuMs: number; intervals: number }>();
+  for (const [process, list] of byProcess) {
+    for (const interval of list) {
+      if (interval.start + interval.duration < windowStart || interval.start >= windowEnd) continue;
+      foreignSpans.push({ start: interval.start, end: interval.start + interval.duration });
+      const entry = contentionTally.get(process) ?? { gpuMs: 0, intervals: 0 };
+      entry.gpuMs += interval.duration / 1e3;
+      entry.intervals += 1;
+      contentionTally.set(process, entry);
+    }
+  }
+  const foreign = mergeSpans(foreignSpans);
+  const contendedMicroseconds = (start: number, end: number): number => {
+    let total = 0;
+    let index = Math.max(findSpan(foreign, start), 0);
+    for (; index < foreign.length && foreign[index].start < end; index += 1) {
+      total += Math.max(0, Math.min(end, foreign[index].end) - Math.max(start, foreign[index].start));
+    }
+    return total;
+  };
+
+  // ---- Per-pass GPU cost ----
+  interface PassAccumulator {
+    us: number; calls: number; merged: boolean; exclusiveUs: number;
+    counters: Map<string, { sum: number; n: number }>;
+    partitionSum: number[]; partitionCount: number[];
+  }
+  const passes = new Map<string, PassAccumulator>();
+  let busyMicroseconds = 0;
+  let mergedMicroseconds = 0;
+  let exclusiveMicroseconds = 0;
+  for (const interval of windowed) {
+    busyMicroseconds += interval.duration;
+    if (interval.merged) mergedMicroseconds += interval.duration;
+    const end = interval.start + interval.duration;
+    const exclusive = interval.duration - contendedMicroseconds(interval.start, end);
+    exclusiveMicroseconds += Math.max(0, exclusive);
+    const entry = passes.get(interval.label)
+      ?? {
+        us: 0, calls: 0, merged: interval.merged, exclusiveUs: 0, counters: new Map(),
+        partitionSum: [], partitionCount: [],
+      };
+    entry.us += interval.duration;
+    entry.calls += 1;
+    entry.exclusiveUs += Math.max(0, exclusive);
+    passes.set(interval.label, entry);
+  }
+
+  // ---- GPU gaps ----
+  const gaps: number[] = [];
+  let cursor = windowStart;
+  for (const interval of windowed) {
+    if (interval.start > cursor) gaps.push(interval.start - cursor);
+    cursor = Math.max(cursor, interval.start + interval.duration);
+  }
+  if (windowEnd > cursor) gaps.push(windowEnd - cursor);
+  const gapMicroseconds = gaps.reduce((sum, value) => sum + value, 0);
+  const wallMicroseconds = Math.max(windowEnd - windowStart, 1);
+
+  const channelTotals = new Map<string, { us: number; count: number }>();
+  for (const interval of windowed) {
+    const entry = channelTotals.get(interval.channel) ?? { us: 0, count: 0 };
+    entry.us += interval.duration;
+    entry.count += 1;
+    channelTotals.set(interval.channel, entry);
+  }
+
+  // ---- Representative frame ----
+  let timelineStart = windowStart;
+  let representativeIndex = 0;
+  let timelineDuration = frameDurations.length > 0
+    ? quantile(frameDurations, 0.5) : wallMicroseconds;
+  if (usable.length >= 2) {
+    const median = quantile(frameDurations, 0.5);
+    let best = Number.POSITIVE_INFINITY;
+    for (let index = 1; index < usable.length; index += 1) {
+      const duration = usable[index] - usable[index - 1];
+      if (Math.abs(duration - median) < best) {
+        best = Math.abs(duration - median);
+        timelineStart = usable[index - 1];
+        timelineDuration = duration;
+        representativeIndex = index - 1;
+      }
+    }
+  }
+  const timelineIntervals = ours.filter((interval) => interval.start >= timelineStart
+    && interval.start < timelineStart + timelineDuration);
+
+  // ---- GPU counters -> per-pass occupancy ----
+  const counterNames = new Map<string, { name: string; type: string; interval: number }>();
+  if (input.tables["counter-info"]) {
+    try {
+      for await (const row of readTraceRows(input.tables["counter-info"])) {
+        counterNames.set(String(row["counter-id"]), {
+          name: String(row.name ?? ""), type: String(row.type ?? ""),
+          interval: Number(String(row["sample-interval"] ?? "10000").replace(/,/g, "")),
+        });
+      }
+    } catch { /* optional */ }
+  }
+  // Every counter is retained: the export already paid for them, and which one
+  // explains a task is not knowable in advance.
+  const OCCUPANCY = "Compute Occupancy";
+  const globalCounters = new Map<string, { sum: number; n: number }>();
+  const devicePartitionSum: number[] = [];
+  const devicePartitionCount: number[] = [];
+  /**
+   * Occupancy readings are quantised: on an M1 Max 98.3% of the commonest
+   * values are exact integer multiples of 100/768, i.e. the counter resolves
+   * one scheduler slot out of 768 per partition. Detecting the divisor from
+   * the data rather than hardcoding it keeps this correct on other parts
+   * (M1 Pro has half the partitions, Ultra twice).
+   */
+  const occupancyHistogram = new Map<number, number>();
+  const frameSeriesRaw = new Map<string, { t: number; v: number }[]>();
+  const occupancyTrace: { t: number; p: number[]; label: string | null }[] = [];
+  let counterSampleCount = 0;
+  let usableSampleCount = 0;
+
+  // Interval lookup for attribution: our windowed intervals, sorted.
+  const spans = windowed.map((interval) => ({
+    start: interval.start, end: interval.start + interval.duration, label: interval.label,
+  }));
+
+  if (input.tables["counter-value"] && counterNames.size > 0) {
+    // Ring buffers report the same counter from several accelerator slices;
+    // average them per (timestamp, counter).
+    // Instruments splits every counter across several hardware streams
+    // (`ring-buffer-index`). They are NOT redundant copies: inside a
+    // wide dispatch all four read within 1-2% of each other, while inside a
+    // single-workgroup dispatch stream 0 sustains 1.00% against 0.12-0.17% on
+    // the rest for milliseconds at a time -- far too long to be a sampling
+    // lag. They behave as the four GPU partitions, so their spread is the
+    // placement of work across the machine, and their mean is the device
+    // figure.
+    let pendingTime = -1;
+    const pending = new Map<string, { sum: number; n: number; rings: number[] }>();
+    const flush = (): void => {
+      if (pendingTime < 0 || pending.size === 0) return;
+      const time = pendingTime;
+      if (time >= windowStart && time < windowEnd) {
+        counterSampleCount += 1;
+        const index = findSpan(spans, time);
+        const span = index >= 0 ? spans[index] : undefined;
+        const inOurWork = span !== undefined && time < span.end;
+        const foreignIndex = findSpan(foreign, time);
+        const contended = foreignIndex >= 0 && time < foreign[foreignIndex].end;
+        if (inOurWork && !contended) {
+          usableSampleCount += 1;
+          const accumulator = passes.get(span.label);
+          const frame = frameAccumulators[frameAt(time)];
+          for (const [name, value] of pending) {
+            const mean = value.sum / value.n;
+            const global = globalCounters.get(name) ?? { sum: 0, n: 0 };
+            global.sum += mean; global.n += 1;
+            globalCounters.set(name, global);
+            if (frame && name === OCCUPANCY) {
+              frame.occupancySum += mean; frame.occupancySamples += 1;
+            }
+            if (accumulator) {
+              const bucket = accumulator.counters.get(name) ?? { sum: 0, n: 0 };
+              bucket.sum += mean; bucket.n += 1;
+              accumulator.counters.set(name, bucket);
+            }
+            if (name === OCCUPANCY) {
+              value.rings.forEach((reading) => {
+                if (reading === undefined || reading <= 0) return;
+                occupancyHistogram.set(reading, (occupancyHistogram.get(reading) ?? 0) + 1);
+              });
+              value.rings.forEach((reading, ring) => {
+                if (reading === undefined) return;
+                devicePartitionSum[ring] = (devicePartitionSum[ring] ?? 0) + reading;
+                devicePartitionCount[ring] = (devicePartitionCount[ring] ?? 0) + 1;
+                if (!accumulator) return;
+                accumulator.partitionSum[ring] = (accumulator.partitionSum[ring] ?? 0) + reading;
+                accumulator.partitionCount[ring] = (accumulator.partitionCount[ring] ?? 0) + 1;
+              });
+            }
+          }
+        }
+        if (time >= timelineStart && time < timelineStart + timelineDuration) {
+          const occupancy = pending.get(OCCUPANCY);
+          if (occupancy && occupancy.rings.length > 0) {
+            const index = findSpan(spans, time);
+            occupancyTrace.push({
+              t: time - timelineStart,
+              p: occupancy.rings.map((reading) => (reading ?? 0) / 100),
+              label: index >= 0 && time < spans[index].end ? spans[index].label : null,
+            });
+          }
+          for (const [name, value] of pending) {
+            if (name !== "Compute Occupancy" && name !== "ALU Utilization"
+              && name !== "GPU Last Level Cache Utilization") continue;
+            const series = frameSeriesRaw.get(name) ?? [];
+            series.push({ t: time - timelineStart, v: value.sum / value.n });
+            frameSeriesRaw.set(name, series);
+          }
+        }
+      }
+      pending.clear();
+    };
+    for await (const row of readTraceRows(input.tables["counter-value"])) {
+      const time = timestampMicroseconds(row.timestamp as string);
+      if (time !== pendingTime) { flush(); pendingTime = time; }
+      const meta = counterNames.get(String(row["counter-id"]));
+      if (!meta) continue;
+      const value = Number(String(row.value ?? "0").replace(/,/g, ""));
+      if (!Number.isFinite(value)) continue;
+      const bucket = pending.get(meta.name) ?? { sum: 0, n: 0, rings: [] };
+      bucket.sum += value; bucket.n += 1;
+      const ring = Number(String(row["ring-buffer-index"] ?? "0").replace(/,/g, ""));
+      if (Number.isInteger(ring) && ring >= 0 && ring < 16) bucket.rings[ring] = value;
+      pending.set(meta.name, bucket);
+    }
+    flush();
+  }
+
+  // ---- Shader profiler ----
+  const shaderTally = new Map<string, { samples: number; pipelines: Set<string> }>();
+  const shadersByPass = new Map<string, Map<string, number>>();
+  if (input.tables["shader-profile"]) {
+    try {
+      for await (const row of readTraceRows(input.tables["shader-profile"])) {
+        const label = row.label ? String(row.label).replace(/^Dawn_ShaderModule_/, "") : undefined;
+        if (!label) continue;
+        const time = timestampMicroseconds(row.start as string);
+        const entry = shaderTally.get(label) ?? { samples: 0, pipelines: new Set<string>() };
+        entry.samples += 1;
+        entry.pipelines.add(String(row["pso-label"] ?? "?").replace(/^Dawn_ComputePipeline_/, ""));
+        shaderTally.set(label, entry);
+        const index = findSpan(spans, time);
+        if (index >= 0 && time < spans[index].end) {
+          const perPass = shadersByPass.get(spans[index].label) ?? new Map<string, number>();
+          perPass.set(label, (perPass.get(label) ?? 0) + 1);
+          shadersByPass.set(spans[index].label, perPass);
+        }
+      }
+    } catch { /* optional */ }
+  }
+
+  // ---- CPU sampling ----
+  const stacks: string[][] = [];
+  const threadTally = new Map<string, { samples: number; running: number }>();
+  const leafTally = new Map<string, number>();
+  let samples = 0;
+  let runningSamples = 0;
+  try {
+    for await (const row of readTraceRows(input.tables["time-profile"])) {
+      if (String(row.process ?? "") !== ourProcess) continue;
+      const time = timestampMicroseconds(row.time as string);
+      if (time < windowStart || time >= windowEnd) continue;
+      samples += 1;
+      const thread = String(row.thread ?? "?").replace(/\s*\(node, pid: \d+\)/, "");
+      const entry = threadTally.get(thread) ?? { samples: 0, running: 0 };
+      entry.samples += 1;
+      if (String(row["thread-state"] ?? "") === "Running") { entry.running += 1; runningSamples += 1; }
+      threadTally.set(thread, entry);
+      const frames = row.frames as string[] | undefined;
+      if (frames && frames.length > 0) {
+        stacks.push(frames);
+        leafTally.set(frames[0], (leafTally.get(frames[0]) ?? 0) + 1);
+      }
+    }
+  } catch { /* optional */ }
+
+  // ---- Assemble ----
+  const counterMean = (map: Map<string, { sum: number; n: number }>, name: string):
+  number | undefined => {
+    const entry = map.get(name);
+    return entry && entry.n > 0 ? entry.sum / entry.n : undefined;
+  };
+  /** Percentage counters arrive as 0..100; the report speaks in 0..1. */
+  const asFraction = (value: number | undefined): number | undefined => (value === undefined
+    ? undefined : value / 100);
+  // Instruments already reports the bandwidth counters as a rate in GB/s --
+  // observed peak ~78 on a part with ~400 GB/s of memory bandwidth -- so these
+  // pass through rather than being divided by the sample interval.
+  const toGigabytesPerSecond = (value: number | undefined): number | undefined => value;
+
+  const slotModel = detectPartitionSlots(occupancyHistogram);
+  const passList: PassCost[] = [...passes.entries()].map(([label, entry]) => {
+    const limiterCandidates = [...entry.counters.entries()]
+      .filter(([name]) => name.endsWith("Limiter"))
+      .sort((left, right) => (right[1].sum / right[1].n) - (left[1].sum / left[1].n));
+    const shaders = [...(shadersByPass.get(label) ?? new Map<string, number>()).entries()]
+      .map(([name, count]) => ({ name, samples: count }))
+      .sort((left, right) => right.samples - left.samples).slice(0, 12);
+    const counterSamples = entry.counters.get("Compute Occupancy")?.n ?? 0;
+    return {
+      label,
+      callsPerFrame: entry.calls / frameCount,
+      gpuMsPerFrame: entry.us / 1e3 / frameCount,
+      meanMicroseconds: entry.us / entry.calls,
+      share: busyMicroseconds > 0 ? entry.us / busyMicroseconds : 0,
+      merged: entry.merged,
+      exclusiveShare: entry.us > 0 ? entry.exclusiveUs / entry.us : 0,
+      counterSamples,
+      ...(() => {
+        const partitions = entry.partitionSum
+          .map((sum, ring) => sum / Math.max(entry.partitionCount[ring] ?? 1, 1) / 100);
+        if (partitions.length === 0) return {};
+        const mean = partitions.reduce((sum, value) => sum + value, 0) / partitions.length;
+        return {
+          partitions,
+          imbalance: mean > 0 ? Math.max(...partitions) / mean : 1,
+        };
+      })(),
+      counters: Object.fromEntries([...entry.counters.entries()]
+        .map(([name, bucket]) => [name, bucket.sum / bucket.n])),
+      ...(() => {
+        const occ = counterMean(entry.counters, OCCUPANCY);
+        if (occ === undefined || slotModel.slots === 0) return {};
+        const slots = (occ / 100) * slotModel.slots * devicePartitionCount.length;
+        return { residentSlots: slots, residentThreads: slots * SIMD_WIDTH };
+      })(),
+      occupancy: asFraction(counterMean(entry.counters, OCCUPANCY)),
+      alu: asFraction(counterMean(entry.counters, "ALU Utilization")),
+      readGBs: toGigabytesPerSecond(counterMean(entry.counters, "GPU Read Bandwidth")),
+      writeGBs: toGigabytesPerSecond(counterMean(entry.counters, "GPU Write Bandwidth")),
+      limiter: limiterCandidates.length > 0 && limiterCandidates[0][1].n > 0
+        ? `${limiterCandidates[0][0].replace(/ Limiter$/, "")}`
+          + ` ${(limiterCandidates[0][1].sum / limiterCandidates[0][1].n).toFixed(0)}%`
+        : undefined,
+      shaders,
+    };
+  }).sort((left, right) => right.gpuMsPerFrame - left.gpuMsPerFrame);
+
+  // ---- Per-frame samples and retained frames ----
+  const taskLabels = passList.slice(0, 24).map((pass) => pass.label);
+  const frameSamples: FrameSample[] = frameAccumulators.map((frame, index) => {
+    const duration = frame.end - frame.start;
+    return {
+      index,
+      startMs: (frame.start - windowStart) / 1e3,
+      durationMs: duration / 1e3,
+      busyMs: frame.busy / 1e3,
+      gapMs: Math.max(0, duration - frame.busy) / 1e3,
+      encoders: frame.encoders,
+      passes: frame.passes,
+      occupancy: frame.occupancySamples > 0
+        ? frame.occupancySum / frame.occupancySamples / 100 : undefined,
+      counterSamples: frame.occupancySamples,
+      tasks: taskLabels.map((label) => (frame.tasks.get(label) ?? 0) / 1e3),
+    };
+  });
+  // Retaining every frame's intervals would make a 500-advance capture a file
+  // no browser will open, so keep an evenly spread subset -- with the two ends
+  // and the representative always in it, since those are what get compared.
+  const CAPTURE_LIMIT = 96;
+  const wanted = new Set<number>();
+  if (frameAccumulators.length > 0) {
+    wanted.add(0);
+    wanted.add(frameAccumulators.length - 1);
+    wanted.add(Math.min(representativeIndex, frameAccumulators.length - 1));
+    const stride = Math.max(1, Math.ceil(frameAccumulators.length / CAPTURE_LIMIT));
+    for (let index = 0; index < frameAccumulators.length; index += stride) wanted.add(index);
+  }
+  const captures: FrameCapture[] = [...wanted].sort((left, right) => left - right)
+    .map((index) => {
+      const frame = frameAccumulators[index];
+      return {
+        index,
+        durationUs: frame.end - frame.start,
+        intervals: windowed
+          .filter((interval) => interval.start >= frame.start && interval.start < frame.end)
+          .map((interval) => ({ ...interval, start: interval.start - frame.start })),
+      };
+    });
+  const capturedRepresentative = Math.max(0,
+    captures.findIndex((capture) => capture.index === representativeIndex));
+  // Advance numbering is only knowable when the trace spans the whole run; the
+  // analysed window drops the first anchor, so frame 0 is the second advance.
+  const coversWholeRun = input.traced?.steps !== undefined
+    && boundaries.length >= input.traced.steps * 0.9;
+  const firstAdvance = coversWholeRun ? 2 : undefined;
+
+  // Per-task occupancy across the representative frame, binned for the grid.
+  const occupancyGrid: Record<string, (number | null)[]> = {};
+  const binWidth = timelineDuration / GRID_BINS;
+  for (const pass of passList.slice(0, 18)) {
+    const bins: (number | null)[] = new Array(GRID_BINS).fill(null);
+    for (const interval of timelineIntervals) {
+      if (interval.label !== pass.label) continue;
+      const from = Math.max(0, Math.floor((interval.start - timelineStart) / binWidth));
+      const to = Math.min(GRID_BINS - 1,
+        Math.floor((interval.start - timelineStart + interval.duration) / binWidth));
+      // A task with no counter samples has unknown occupancy; leaving it null
+      // renders it as idle-grey rather than inventing a mid-scale green.
+      for (let bin = from; bin <= to; bin += 1) bins[bin] = pass.occupancy ?? null;
+    }
+    occupancyGrid[pass.label] = bins;
+  }
+  // Annotate every drawable interval with its pass occupancy -- the
+  // representative frame and each retained frame alike, so switching frames in
+  // the report does not switch colouring rules.
+  const occupancyByLabel = new Map(passList.map((pass) => [pass.label, pass]));
+  const annotate = (interval: Interval): void => {
+    const pass = occupancyByLabel.get(interval.label);
+    interval.occupancy = pass?.occupancy ?? null;
+    interval.alu = pass?.alu ?? null;
+  };
+  for (const interval of timelineIntervals) annotate(interval);
+  for (const capture of captures) for (const interval of capture.intervals) annotate(interval);
+
+  const baselineMsPerAdvance = input.baseline?.simulationWall_ms && input.baseline.steps
+    ? input.baseline.simulationWall_ms / input.baseline.steps : undefined;
+  const tracedMsPerAdvance = input.traced?.simulationWall_ms && input.traced.steps
+    ? input.traced.simulationWall_ms / input.traced.steps : undefined;
+  const busyMsPerFrame = busyMicroseconds / 1e3 / frameCount;
+  const wallMsPerFrame = wallMicroseconds / 1e3 / frameCount;
+  const contention = [...contentionTally.entries()]
+    .map(([process, entry]) => ({ process, ...entry }))
+    .sort((left, right) => right.gpuMs - left.gpuMs);
+  const exclusiveCoverage = busyMicroseconds > 0 ? exclusiveMicroseconds / busyMicroseconds : 0;
+
+  const lines: string[] = [];
+  lines.push(`frames analysed: ${frameCount} (anchor "${anchor}")`);
+  // Whether a "frame" here is really one advance is checkable rather than
+  // assumable, and it is a separate question from whether every advance does
+  // the same work. The boundary is validated against the step count the
+  // harness reports; the shape census then describes the run, and a varying
+  // shape is a finding about the solver, not a fault in the segmentation.
+  {
+    const anchors = boundaries.length;
+    const steps = input.traced?.steps;
+    const perAdvance = steps === undefined || steps === 0 ? undefined : anchors / steps;
+    lines.push(`frame boundary:  "${anchor}" fired ${anchors}x`
+      + (perAdvance === undefined ? " (no step count to check it against)"
+        : perAdvance > 1.15 || perAdvance < 0.85
+          ? ` for the ${steps} advances the harness ran = ${perAdvance.toFixed(2)} per advance`
+            + (perAdvance < 0.85
+              ? `, so this capture covers ${(100 * perAdvance).toFixed(0)}% of the run`
+              : " -- A FRAME HERE IS NOT AN ADVANCE")
+          : ` for the ${steps} advances the harness ran -- one per advance`));
+    const shapeTally = new Map<string, number>();
+    for (const frame of frameSamples) {
+      const shape = `${frame.encoders}/${frame.passes}`;
+      shapeTally.set(shape, (shapeTally.get(shape) ?? 0) + 1);
+    }
+    const [modal, modalCount] = [...shapeTally.entries()]
+      .sort((left, right) => right[1] - left[1])[0] ?? ["0/0", 0];
+    lines.push(`frame shape:     ${shapeTally.size === 1
+      ? `all ${frameCount} advances carry ${modal.replace("/", " encoders / ")} passes`
+      : `${modalCount} of ${frameCount} advances carry ${modal.replace("/", " encoders / ")} passes;`
+        + ` ${frameCount - modalCount} do more or less work`
+        + ` (${Math.min(...frameSamples.map((frame) => frame.encoders))}-`
+        + `${Math.max(...frameSamples.map((frame) => frame.encoders))} encoders,`
+        + ` ${Math.min(...frameSamples.map((frame) => frame.passes))}-`
+        + `${Math.max(...frameSamples.map((frame) => frame.passes))} passes),`
+        + " so the per-advance figures describe the modal advance"}`);
+  }
+  lines.push(`frame wall:      ${wallMsPerFrame.toFixed(2)} ms/advance`
+    + ` (p10 ${(quantile(frameDurations, 0.1) / 1e3).toFixed(2)},`
+    + ` p90 ${(quantile(frameDurations, 0.9) / 1e3).toFixed(2)})`);
+  if (baselineMsPerAdvance !== undefined) {
+    lines.push(`untraced wall:   ${baselineMsPerAdvance.toFixed(2)} ms/advance`
+      + (tracedMsPerAdvance !== undefined
+        ? ` -> traced ${tracedMsPerAdvance.toFixed(2)} ms`
+        + ` (${(tracedMsPerAdvance / baselineMsPerAdvance).toFixed(2)}x)` : ""));
+  }
+  lines.push(`GPU busy:        ${busyMsPerFrame.toFixed(2)} ms/advance`
+    + ` = ${(100 * busyMsPerFrame / wallMsPerFrame).toFixed(1)}% of frame wall`);
+  lines.push(`GPU idle gaps:   ${(gapMicroseconds / 1e3 / frameCount).toFixed(2)} ms/advance`
+    + ` across ${Math.round(gaps.length / frameCount)} gaps`);
+  lines.push(`GPU encoders:    ${Math.round(windowed.length / frameCount)}/advance`
+    + ` carrying ${Math.round(windowed.reduce((sum, i) => sum + i.encoders.length, 0) / frameCount)}`
+    + " labelled compute passes");
+  if (unlabelledCount > 0) {
+    // These sit before the analysis window, which opens at the first labelled
+    // anchor, so they cost coverage rather than accuracy. Worth seeing: a large
+    // share means the window is mostly encoder-stream warm-up.
+    lines.push(`unlabelled:      ${unlabelledCount} of our intervals`
+      + ` (${(unlabelledMicroseconds / 1e3).toFixed(0)} ms) arrived before the encoder`
+      + " metadata stream started and are outside the analysed window");
+  }
+  const occupancy = counterMean(globalCounters, "Compute Occupancy");
+  if (occupancy !== undefined) {
+    lines.push(`compute occupancy: ${occupancy.toFixed(1)}% mean`
+      + ` (ALU ${(counterMean(globalCounters, "ALU Utilization") ?? 0).toFixed(1)}%,`
+      + ` ${usableSampleCount}/${counterSampleCount} counter samples uncontended)`);
+  } else {
+    lines.push("compute occupancy: not captured (rerun with --counters)");
+  }
+  if (contention.length > 0) {
+    lines.push(`contention:      ${contention[0].process} used`
+      + ` ${contention[0].gpuMs.toFixed(0)} ms of GPU in the window;`
+      + ` ${(100 * exclusiveCoverage).toFixed(1)}% of our GPU time was uncontended`);
+  }
+  lines.push("");
+  lines.push("top GPU tasks (ms per advance):");
+  for (const pass of passList.slice(0, 15)) {
+    lines.push(`  ${pass.gpuMsPerFrame.toFixed(3).padStart(8)} ms`
+      + ` ${(100 * pass.share).toFixed(1).padStart(5)}%`
+      + ` ${pass.callsPerFrame.toFixed(1).padStart(6)}x`
+      + ` ${pass.meanMicroseconds.toFixed(0).padStart(6)} µs`
+      + ` occ ${pass.occupancy === undefined ? "  n/a" : `${(100 * pass.occupancy).toFixed(0).padStart(3)}%`}`
+      + `  ${pass.merged ? "[merged] " : ""}${pass.label.slice(0, 70)}`);
+  }
+
+  return {
+    lane: input.lane,
+    scene: input.environment.FLUID_SCENE ?? "?",
+    grid: input.environment.FLUID_EXPECT_GRID ?? "?",
+    capturedAt: new Date().toISOString(),
+    wall: {
+      baselineMsPerAdvance,
+      tracedMsPerAdvance,
+      distortion: baselineMsPerAdvance && tracedMsPerAdvance
+        ? tracedMsPerAdvance / baselineMsPerAdvance : undefined,
+      steps: input.traced?.steps,
+    },
+    frames: {
+      count: frameCount, anchor,
+      medianMs: quantile(frameDurations, 0.5) / 1e3,
+      p10Ms: quantile(frameDurations, 0.1) / 1e3,
+      p90Ms: quantile(frameDurations, 0.9) / 1e3,
+      taskLabels,
+      samples: frameSamples,
+      captures,
+      representative: capturedRepresentative,
+      firstAdvance,
+    },
+    gpu: {
+      busyMsPerFrame, wallMsPerFrame,
+      occupancy: busyMsPerFrame / wallMsPerFrame,
+      intervalsPerFrame: windowed.length / frameCount,
+      encodersPerFrame: windowed.length / frameCount,
+      passesPerFrame: windowed.reduce((sum, i) => sum + i.encoders.length, 0) / frameCount,
+      gapMsPerFrame: gapMicroseconds / 1e3 / frameCount,
+      largestGapsUs: [...gaps].sort((left, right) => right - left).slice(0, 10),
+      mergedShare: busyMicroseconds > 0 ? mergedMicroseconds / busyMicroseconds : 0,
+    },
+    counters: {
+      available: globalCounters.size > 0,
+      partitionCount: devicePartitionCount.length,
+      partitionOccupancy: devicePartitionSum
+        .map((sum, ring) => sum / Math.max(devicePartitionCount[ring] ?? 1, 1) / 100),
+      slotsPerPartition: slotModel.slots,
+      slotConfidence: slotModel.confidence,
+      threadsPerSlot: SIMD_WIDTH,
+      totalSlots: slotModel.slots * devicePartitionCount.length,
+      totalThreads: slotModel.slots * devicePartitionCount.length * SIMD_WIDTH,
+      exclusiveCoverage,
+      meanOccupancy: occupancy === undefined ? undefined : occupancy / 100,
+      meanAlu: counterMean(globalCounters, "ALU Utilization") === undefined
+        ? undefined : (counterMean(globalCounters, "ALU Utilization") as number) / 100,
+      meanReadGBs: toGigabytesPerSecond(counterMean(globalCounters, "GPU Read Bandwidth")),
+      meanWriteGBs: toGigabytesPerSecond(counterMean(globalCounters, "GPU Write Bandwidth")),
+      occupancyTrace: occupancyTrace.sort((left, right) => left.t - right.t),
+      frameSeries: [...frameSeriesRaw.entries()].map(([name, points]) => ({
+        name, points: points.sort((left, right) => left.t - right.t),
+      })),
+    },
+    passes: passList,
+    occupancyGrid,
+    shaders: [...shaderTally.entries()]
+      .map(([name, entry]) => ({
+        name, samples: entry.samples, pipelines: entry.pipelines.size,
+        share: entry.samples / Math.max([...shaderTally.values()]
+          .reduce((sum, value) => sum + value.samples, 0), 1),
+      }))
+      .sort((left, right) => right.samples - left.samples),
+    channels: [...channelTotals.entries()].map(([channel, entry]) => ({
+      channel, msPerFrame: entry.us / 1e3 / frameCount, count: entry.count,
+    })).sort((left, right) => right.msPerFrame - left.msPerFrame),
+    contention,
+    cpu: {
+      samples, runningSamples,
+      threads: [...threadTally.entries()].map(([thread, entry]) => ({ thread, ...entry }))
+        .sort((left, right) => right.samples - left.samples),
+      flame: foldStacks(stacks),
+      hotLeaves: [...leafTally.entries()]
+        .map(([symbol, count]) => ({ symbol, samples: count, share: count / Math.max(samples, 1) }))
+        .sort((left, right) => right.samples - left.samples).slice(0, 30),
+    },
+    timeline: {
+      frameStart: timelineStart,
+      frameDuration: timelineDuration,
+      intervals: timelineIntervals.map((interval) => ({
+        ...interval, start: interval.start - timelineStart,
+      })),
+    },
+    console: lines,
+  };
+};
+
+export { renderFrameReportHtml } from "./xctrace-frame-report-html";

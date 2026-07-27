@@ -39,6 +39,14 @@ export interface StructuredBoundaryResources {
     initialCondition: "dam-break" | "tank-fill";
     fillFraction: number;
   }>;
+  /**
+   * The imported dense t=0 level set, used by scenes whose surface has no
+   * closed form (terrain, rigid bodies, explicitly seeded bricks). It plays
+   * exactly the same one-shot role as `analyticBootstrap` and retires through
+   * the same hook; without either, coarse phi has no authority at t=0 and the
+   * boundary coefficients fail closed on positivity.
+   */
+  readonly bootstrapLevelSet?: GPUTexture;
 }
 
 export class WebGPUStructuredBoundaryCoefficients {
@@ -129,7 +137,8 @@ export class WebGPUStructuredBoundaryCoefficients {
       o.rowNeighbors, o.rowSlotHandles, o.rowSlotSigns, o.rowCatalogSlots], 16);
     words.set([this.worksetStrideWords, this.worksetBankStrideWords,
       resources.analyticBootstrap?.initialCondition === "tank-fill" ? 1
-        : resources.analyticBootstrap?.initialCondition === "dam-break" ? 2 : 0], 28);
+        : resources.analyticBootstrap?.initialCondition === "dam-break" ? 2
+          : resources.bootstrapLevelSet ? 3 : 0], 28);
     floats[31] = resources.analyticBootstrap?.fillFraction ?? 0;
     device.queue.writeBuffer(this.params, 0, words.buffer);
     const module = device.createShaderModule({ label: "Structured boundary coefficients",
@@ -177,15 +186,23 @@ export class WebGPUStructuredBoundaryCoefficients {
       21: this.candidateSolidNormalVelocities, 22: this.control,
       23: section63.topologyMetrics, 24: section63.catalogFaces,
       25: this.resources.separationMask };
+    // Binding 26 is the only texture in this layout; every other entry is a
+    // buffer from the map above.
+    // `coarseValue` references the texture unconditionally, so the auto layout
+    // always contains binding 26 regardless of which bootstrap mode is live.
+    if (!this.resources.bootstrapLevelSet) {
+      throw new Error("Structured boundary coefficients require a bootstrap level-set binding");
+    }
+    const bootstrapView = this.resources.bootstrapLevelSet.createView({ dimension: "3d" });
     const group = (pipeline: GPUComputePipeline, bindings: readonly number[]) => this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding) => ({ binding,
-        resource: { buffer: buffers[binding]! } })),
+        resource: binding === 26 ? bootstrapView! : { buffer: buffers[binding]! } })),
     });
     const prepare = authority === "candidate-ready" ? this.prepareCandidate : this.prepareAccepted;
     const groups = Object.freeze([
       group(prepare, [0, 1, 16, 17]),
-      group(this.classify, [0, 3, 4, 5, 6, 7, 8, 9, 12, 16]),
-      group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 25]),
+      group(this.classify, [0, 3, 4, 5, 6, 7, 8, 9, 12, 16, 26]),
+      group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 25, 26]),
       group(this.resolveSolid, [0, 2, 3, 10, 11, 16, 19, 21]),
       group(this.commit, [0, 2, 11, 16, 20, 21]),
       group(this.rebuild, [0, 2, 12, 13, 14, 16, 24]),
@@ -281,6 +298,9 @@ struct CatalogSlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInv
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>accepted:array<u32>;@group(0)@binding(2)var<storage,read_write>a:array<u32>;@group(0)@binding(3)var<storage,read>geometry:array<vec4u>;@group(0)@binding(5)var<uniform>fp:FineP;@group(0)@binding(6)var<storage,read>fineWork:array<u32>;@group(0)@binding(7)var<storage,read>fineMeta:array<u32>;@group(0)@binding(8)var<storage,read>fineFlags:array<u32>;@group(0)@binding(9)var<storage,read>finePhi:array<f32>;@group(0)@binding(10)var<storage,read>solid:VertexArena;@group(0)@binding(11)var<storage,read_write>candidates:array<vec2f>;@group(0)@binding(12)var<storage,read_write>candidateLiquid:array<u32>;@group(0)@binding(13)var<storage,read_write>liquid:array<u32>;@group(0)@binding(14)var<storage,read_write>rows:array<u32>;@group(0)@binding(15)var<storage,read_write>diagonal:array<f32>;@group(0)@binding(16)var<storage,read_write>control:C;@group(0)@binding(17)var<storage,read_write>dispatch:array<u32>;@group(0)@binding(18)var<storage,read_write>dynamicWorksets:array<u32>;@group(0)@binding(19)var<storage,read>rigidBodies:array<RigidBody>;@group(0)@binding(20)var<storage,read_write>solidVelocity:array<f32>;@group(0)@binding(21)var<storage,read_write>candidateSolidVelocity:array<f32>;
 @group(0)@binding(22)var<storage,read_write>acceptedBoundary:C;@group(0)@binding(23)var<storage,read>metrics:array<Metric>;@group(0)@binding(24)var<storage,read>catalogSlots:array<CatalogSlotGeometry>;
 @group(0)@binding(25)var<storage,read>separationMask:array<u32>;
+// Host-rasterized t=0 level set, authoritative only while pad.z==3. Analytic
+// and post-bootstrap lanes bind a placeholder here and never sample it.
+@group(0)@binding(26)var bootstrapLevelSetIn:texture_3d<f32>;
 ${makeOctreePowerCoarseLevelSetSampleWGSL(4)}
 const INVALID:u32=0xffffffffu;const SOLID_VALID:u32=0x80000000u;fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn fail(i:u32,f:u32){atomicOr(&control.flags,f);atomicMin(&control.firstError,i);}
 fn abase()->u32{return control.bank*p.counts.w;}fn rbase()->u32{return control.bank*p.counts.x;}fn section63Base()->u32{return control.bank*p.resolved.y;}
@@ -289,7 +309,10 @@ fn finePage(key:u32)->u32{if(fp.worklistHeaderWords!=7u||arrayLength(&fineWork)<
 fn loadFine(q:vec3i)->vec2f{if(any(q<vec3i(0))||any(q>=vec3i(fp.sampleDimensions))){return vec2f(0.);}let u=vec3u(q);let brick=u/fp.brickResolution;let local=u-brick*fp.brickResolution;let key=brick.x+fp.brickDimensions.x*(brick.y+fp.brickDimensions.y*brick.z);let id=finePage(key);if(id==INVALID){return vec2f(0.);}let li=local.x+fp.brickResolution*(local.y+fp.brickResolution*local.z);let at=id*fp.samplesPerBrick+li;if(at>=arrayLength(&finePhi)||at>=arrayLength(&fineFlags)||(fineFlags[at]&1u)==0u||!finite(finePhi[at])){return vec2f(0.);}return vec2f(finePhi[at],1.);}
 fn fineSample(x:vec3f,coarsePhi:f32)->vec2f{if(!(fp.width>0.)||fp.brickResolution==0u){return vec2f(coarsePhi,0.);}let lattice=(x-fp.origin)/fp.width-vec3f(.5);let maximum=vec3f(fp.sampleDimensions)-vec3f(1.);if(any(lattice<vec3f(0.))||any(lattice>maximum)){return vec2f(coarsePhi,0.);}let base=vec3i(floor(lattice));let fraction=fract(lattice);var value=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let weight=select(1.-fraction.x,fraction.x,o.x==1)*select(1.-fraction.y,fraction.y,o.y==1)*select(1.-fraction.z,fraction.z,o.z==1);if(weight==0.){continue;}let sample=loadFine(base+o);if(sample.y==0.){return vec2f(coarsePhi,0.);}value+=weight*sample.x;}return vec2f(value,1.);}
 fn analyticInitialPhi(point:vec3f)->f32{let extent=vec3f(p.dimensions.xyz)*p.physical.x;let world=point-vec3f(.5*extent.x,0.,.5*extent.z);let fill=bitcast<f32>(p.pad.w);if(p.pad.z==1u){return world.y-fill*extent.y;}let heightFraction=max(.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let exposedMaximum=vec3f(-.5*extent.x+footprintFraction*extent.x,heightFraction*extent.y,-.5*extent.z+footprintFraction*extent.z);let q=world-exposedMaximum;return length(max(q,vec3f(0.)))+min(max(q.x,max(q.y,q.z)),0.);}
-fn coarseValue(point:vec3f)->vec2f{if(p.pad.z!=0u){return vec2f(analyticInitialPhi(point),1.);}let generation=powerCoarseSamples.generation&0x3fffffffu;let expected=control.epoch&0x3fffffffu;if(powerCoarseSamples.state!=0x80000000u||generation!=expected||any(powerCoarseSamples.dimensions!=p.dimensions.xyz)||abs(powerCoarseSamples.physicalCellSize-p.physical.x)>1e-5*max(powerCoarseSamples.physicalCellSize,p.physical.x)){return vec2f(1.,0.);}let value=sampleCoarseOctreePhi(point);let valid=finite(value)&&value<3.402823e38;return vec2f(value,select(0.,1.,valid));}
+fn bootstrapTexturePhi(point:vec3f)->f32{let c=vec3i(floor(point/p.physical.x));
+ return textureLoad(bootstrapLevelSetIn,clamp(c,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)),0).x;}
+fn coarseValue(point:vec3f)->vec2f{if(p.pad.z==3u){return vec2f(bootstrapTexturePhi(point),1.);}
+ if(p.pad.z!=0u){return vec2f(analyticInitialPhi(point),1.);}let generation=powerCoarseSamples.generation&0x3fffffffu;let expected=control.epoch&0x3fffffffu;if(powerCoarseSamples.state!=0x80000000u||generation!=expected||any(powerCoarseSamples.dimensions!=p.dimensions.xyz)||abs(powerCoarseSamples.physicalCellSize-p.physical.x)>1e-5*max(powerCoarseSamples.physicalCellSize,p.physical.x)){return vec2f(1.,0.);}let value=sampleCoarseOctreePhi(point);let valid=finite(value)&&value<3.402823e38;return vec2f(value,select(0.,1.,valid));}
 fn publishStructuredBoundarySetup(rowCount:u32,slotCount:u32,generation:u32,bank:u32,valid:bool){atomicStore(&control.flags,select(1u,0u,valid));atomicStore(&control.firstError,select(0u,INVALID,valid));control.rows=select(0u,rowCount,valid);control.slots=select(0u,slotCount,valid);control.epoch=select(0u,generation,valid);control.bank=select(0u,bank,valid);control.published=0u;dispatch[0]=(control.rows+63u)/64u;dispatch[1]=1u;dispatch[2]=1u;dispatch[3]=(control.slots+63u)/64u;dispatch[4]=1u;dispatch[5]=1u;}
 @compute @workgroup_size(1)fn prepareStructuredBoundaryCandidate(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let slotCount=accepted[3];let generation=accepted[4];let bank=accepted[5];let valid=accepted[0]==${OCTREE_STRUCTURED_GPU_VALID}u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);}
 @compute @workgroup_size(1)fn prepareStructuredBoundaryAccepted(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let generation=accepted[3];let bank=accepted[4];let slotCount=accepted[5];let valid=accepted[0]==0u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);}

@@ -63,8 +63,8 @@ export const OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS = 3;
  * persistent convergence tail, and the number of waves that share one
  * convergence observation. Neither is a propagation bound: the publication
  * still requires a GPU-observed no-change wave over every face slot. */
-export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES = 32;
-export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP = 4;
+export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES = 48;
+export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP = 2;
 /** Words 41/42 are the stationary-air fallback latch: count of face patches
  * the march never reached, and the first such (cell<<3)|axis identity.
  * Words 43-46 are the wide-march wave ledger: accumulated change, the observed
@@ -581,6 +581,15 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     // betterFace's min-(distance, seed patch) copy rule makes the relaxation a
     // monotone, idempotent meet whose least fixed point is independent of how
     // work is distributed, so widening cannot change the marched field.
+    //
+    // Each sweep is a pure Jacobi ping-pong — every lane reads only the source
+    // bank and writes only the destination bank — so no lane ever consumes a
+    // value another lane produced in the same dispatch. That is what makes the
+    // partition between these sweeps and the tail below a free choice, and it
+    // is why the budget belongs here (up to 65,535 workgroups) rather than
+    // there (exactly three). The group size is the convergence-observation
+    // latency: with a group of G, up to ~1.5G sweeps re-relax an already
+    // settled graph at full price before the latch fires.
     for (let wave = 0; wave < OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES; wave += 1) {
       if (wave % OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP === 0) {
         pass.setPipeline(this.pipelines.advanceAirSupportMarchWave!);
@@ -593,11 +602,28 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       pass.setBindGroup(0, groups[name]!);
       pass.dispatchWorkgroupsIndirect(this.indirect, 48);
     }
+    // Terminal ledger. Without it the final wave group's change flag is written
+    // and never read, so a march that reaches its fixed point inside the last
+    // group is never observed to have converged and the three-workgroup tail
+    // below marches an already-settled graph at 2.3 % occupancy.
+    pass.setPipeline(this.pipelines.advanceAirSupportMarchWave!);
+    pass.setBindGroup(0, groups.advanceAirSupportMarchWave!);
+    pass.dispatchWorkgroups(1);
     // One persistent workgroup owns each independent velocity-axis face graph.
     // That gives WGSL a real global barrier between relaxation waves without host-unrolling
     // a scene/domain bound into thousands of empty passes. It terminates only
     // on a GPU-observed no-change wave; |V| is the Bellman-Ford simple-path
     // bound and therefore a fail-closed proof bound, not a widened band.
+    //
+    // Three is not a tuning choice and cannot be raised. extendFace reads only
+    // sources at `otherRow*SLOTS + 4*axis + quadrant`, so the axis face graphs
+    // are exactly three independent fixed-point problems; a fourth workgroup
+    // would have to share one graph, and the only barrier WGSL offers inside a
+    // persistent loop is workgroup-wide. Two workgroups sharing a graph would
+    // drift out of ping-pong phase and race a bank. So this dispatch is not
+    // widened — it is emptied: it is reached only when the wide budget above
+    // failed to observe a fixed point, and it keeps the |V| proof bound that
+    // an encoded budget cannot provide.
     pass.setPipeline(this.pipelines.marchAirSupportFacesToFixedPoint!);
     pass.setBindGroup(0, groups.marchAirSupportFacesToFixedPoint!);
     pass.dispatchWorkgroups(3);
@@ -1138,9 +1164,17 @@ fn descriptorForIdentity(origin:vec3u,size:u32)->u32{var sizes:array<u32,18>;var
   atomicStore(&supportArena[output],tag);atomicStore(&supportArena[output+1u],originCell);
   atomicStore(&supportArena[output+2u],size);atomicStore(&supportArena[output+3u],packed);}
 
-fn faceCell(faceRow:u32)->vec4u{if(faceRow<s(2u)){return rowGeometry[s(4u)*p.rowCapacity+faceRow];}
-  let support=faceRow-s(2u);if(support>=s(8u)){return vec4u(INVALID);}let identity=recordAt(support);
+// directRows/bank/supportRows are the dispatch-uniform scratch control words
+// s(2u)/s(4u)/s(8u). They are authored before the face passes and never
+// written during them, so a caller may read them once and pass them down; the
+// resolved cell is identical either way. That matters because s() is an
+// atomicLoad the compiler may not hoist, and the march's 30x4 candidate scan
+// used to re-issue all three on every candidate of every lane of every sweep.
+fn faceCellIn(faceRow:u32,directRows:u32,bank:u32,supportRows:u32)->vec4u{
+  if(faceRow<directRows){return rowGeometry[bank*p.rowCapacity+faceRow];}
+  let support=faceRow-directRows;if(support>=supportRows){return vec4u(INVALID);}let identity=recordAt(support);
   let at=p.recordOffset+support*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;return vec4u(cellOf(identity.xyz),identity.w,r(at+4u),r(at+5u));}
+fn faceCell(faceRow:u32)->vec4u{return faceCellIn(faceRow,s(2u),s(4u),s(8u));}
 fn liquidRow(row:u32)->bool{if(row>=s(2u)){return false;}let at=s(4u)*p.rowCapacity+row;
   if(at>=arrayLength(&liquidMask)){return false;}return liquidMask[at]!=0u;}
 // The serial 18-direction transport-demand walk that used to live here is now
@@ -1249,11 +1283,13 @@ fn adjacencyPositive(faceRow:u32,axis:u32,quadrant:u32)->u32{
     faceAdjacency[base+${1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence + STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+patchIndex]=faceRowForIdentity(positive);
   }}}
 
-fn faceCenter(item:u32)->vec3f{let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+fn faceCenterIn(item:u32,directRows:u32,bank:u32,supportRows:u32)->vec3f{
+  let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
   let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let quadrant=local%4u;
-  let cell=faceCell(faceRow);let origin=vec3f(coord(cell.x));let extent=f32(cell.y);var center=origin+vec3f(.5*extent);
+  let cell=faceCellIn(faceRow,directRows,bank,supportRows);let origin=vec3f(coord(cell.x));let extent=f32(cell.y);var center=origin+vec3f(.5*extent);
   center[axis]=origin[axis]+extent;var transverse=0u;for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
     center[a]=origin[a]+select(.25,.75,(quadrant&(1u<<transverse))!=0u)*extent;transverse+=1u;}return center;}
+fn faceCenter(item:u32)->vec3f{return faceCenterIn(item,s(2u),s(4u),s(8u));}
 
 var<workgroup> seedCounts:array<u32,256>;
 @compute @workgroup_size(256)fn seedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
@@ -1277,19 +1313,29 @@ var<workgroup> seedCounts:array<u32,256>;
 fn betterFace(candidate:vec4u,best:vec4u)->bool{let candidateDistance=bitcast<f32>(candidate.y);let bestDistance=bitcast<f32>(best.y);
   return candidate.w!=0u&&finiteValue(candidateDistance)&&(best.w==0u||candidateDistance<bestDistance
     ||(candidateDistance==bestDistance&&candidate.z<best.z));}
+// Everything the 30x4 candidate scan needs about the marching patch itself is
+// loop-invariant: the published face count, the three dispatch-uniform scratch
+// control words, and this patch's own centre. They used to be re-derived on
+// every candidate — up to 119 redundant repeats per lane per sweep of an
+// atomic load, a faceCell gather, and coord()'s emulated integer divisions.
+// Hoisting recomputes nothing and reorders nothing, so the marched field is
+// bit-identical; it only removes work from the single hottest loop in Section 5.
 fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[item],readA);
   let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;var best=current;
+  let faceCount=s(29u);let directRows=s(2u);let bank=s(4u);let supportRows=s(8u);
+  let center=faceCenterIn(item,directRows,bank,supportRows);
   let incidence=adjacencyIncidentCount(faceRow);if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(item,ERROR_CAPACITY);return false;}
   for(var localFace=0u;localFace<incidence;localFace+=1u){let otherRow=adjacencyIncident(faceRow,localFace);
-    if(otherRow==INVALID){continue;}for(var quadrant=0u;quadrant<4u;quadrant+=1u){let source=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant;
-      if(source>=s(29u)){continue;}var candidate=select(faceB[source],faceA[source],readA);if(candidate.w!=0u){
+    if(otherRow==INVALID){continue;}let sourceBase=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis;
+    for(var quadrant=0u;quadrant<4u;quadrant+=1u){let source=sourceBase+quadrant;
+      if(source>=faceCount){continue;}var candidate=select(faceB[source],faceA[source],readA);if(candidate.w!=0u){
         // candidate.z is the ORIGINAL seed patch, preserved verbatim through
         // every copy, so the carrier metric is the true Euclidean distance to
         // the free surface — the reference lane's closest-point transform.
         // Accumulating per-hop path length instead made the metric an
         // axis-graph geodesic (Manhattan-like), which under-drives diagonal
         // spreading and squares off the dam front.
-        let distance=length(faceCenter(item)-faceCenter(candidate.z));
+        let distance=length(center-faceCenterIn(candidate.z,directRows,bank,supportRows));
         if(!finiteValue(distance)){fail(item,ERROR_SOURCE);continue;}candidate.y=bitcast<u32>(distance);}
       if(betterFace(candidate,best)){best=candidate;}}}
   let changed=any(best!=current);if(readA){faceB[item]=best;}else{faceA[item]=best;}return changed;}
@@ -1302,32 +1348,50 @@ fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[it
 // skip: a no-change wave writes best==current into the destination bank, so at
 // that point BOTH banks already hold the fixed point and skipping a write
 // leaves faceA — the only bank reconstruction reads — exactly correct.
+// The sweep gate (s(0u), the fixed-point latch s(44u)) and the published face
+// count are all dispatch-uniform, so lane 0 collapses them into one
+// workgroup-uniform bound: zero retires the whole workgroup on a comparison.
+// Every one of the other 255 lanes used to issue those three atomic loads for
+// itself, on every sweep. This is also what makes a sweep encoded past the
+// observed fixed point nearly free, which is what lets the encoded budget own
+// the march at full width instead of handing the residual to the three
+// persistent workgroups. No barrier moves and none becomes conditional.
 var<workgroup> sweepChanged:atomic<u32>;
+var<workgroup> sweepFaceCount:u32;
 @compute @workgroup_size(256)fn extendAirSupportFacesAtoB(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
-  if(lane==0u){atomicStore(&sweepChanged,0u);}
+  if(lane==0u){atomicStore(&sweepChanged,0u);
+    sweepFaceCount=select(0u,s(29u),s(0u)==0u&&s(44u)==0u);}
   workgroupBarrier();
+  let faceCount=workgroupUniformLoad(&sweepFaceCount);
   let item=linearItem(wid,lane,groups,256u);
-  if(item<s(29u)&&s(0u)==0u&&s(44u)==0u&&extendFace(item,true)){atomicStore(&sweepChanged,1u);}
+  if(item<faceCount&&extendFace(item,true)){atomicStore(&sweepChanged,1u);}
   workgroupBarrier();
   if(lane==0u&&atomicLoad(&sweepChanged)!=0u){atomicOr(&scratch[43u],1u);}}
 @compute @workgroup_size(256)fn extendAirSupportFacesBtoA(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
-  if(lane==0u){atomicStore(&sweepChanged,0u);}
+  if(lane==0u){atomicStore(&sweepChanged,0u);
+    sweepFaceCount=select(0u,s(29u),s(0u)==0u&&s(44u)==0u);}
   workgroupBarrier();
+  let faceCount=workgroupUniformLoad(&sweepFaceCount);
   let item=linearItem(wid,lane,groups,256u);
-  if(item<s(29u)&&s(0u)==0u&&s(44u)==0u&&extendFace(item,false)){atomicStore(&sweepChanged,1u);}
+  if(item<faceCount&&extendFace(item,false)){atomicStore(&sweepChanged,1u);}
   workgroupBarrier();
   if(lane==0u&&atomicLoad(&sweepChanged)!=0u){atomicOr(&scratch[43u],1u);}}
 
 // One thread between wide wave groups. Word 45 is the group index (group 0
 // only clears the prefix's accumulated flag, it cannot conclude anything), word
 // 46 counts the wide waves that actually ran so the published march depth stays
-// a real wave count.
+// a real wave count. This dispatch is the *only* place the accumulated change
+// flag can be read and reset: no lane of a multi-workgroup sweep can observe
+// what the other workgroups of its own sweep did, so folding the ledger into a
+// sweep's lid==0 block would race the reset against the accumulate.
 @compute @workgroup_size(1)fn advanceAirSupportMarchWave(){let group=s(45u);
-  if(group>0u&&s(43u)==0u){sw(44u,1u);}
-  sw(43u,0u);sw(45u,group+1u);
-  if(s(44u)==0u){sw(46u,s(46u)+${OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP}u);}}
+  if(group>0u){if(s(43u)==0u){sw(44u,1u);}
+    // Charge depth only for a group that actually moved the field. The
+    // terminal ledger then closes the final group instead of inventing one.
+    else if(s(44u)==0u){sw(46u,s(46u)+${OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP}u);}}
+  sw(43u,0u);sw(45u,group+1u);}
 
 var<workgroup> relaxationChanged:atomic<u32>;
 var<workgroup> relaxationFaceRows:atomic<u32>;

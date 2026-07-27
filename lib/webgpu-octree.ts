@@ -1467,6 +1467,8 @@ export class WebGPUOctreeProjection {
       ...projectionBufferLayoutEntries(OCTREE_PROJECTION_CORE_BUFFER_LAYOUT),
       { binding: 12, visibility: GPUShaderStage.COMPUTE,
         texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
+      { binding: 14, visibility: GPUShaderStage.COMPUTE,
+        texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     ] });
     this.frontierSortLayout = device.createBindGroupLayout({
       entries: projectionBufferLayoutEntries(OCTREE_PROJECTION_FRONTIER_SORT_BUFFER_LAYOUT),
@@ -1623,6 +1625,10 @@ export class WebGPUOctreeProjection {
           // pressure degree of freedom spans more than one finest cell.
           finestLeafSize: this.maxLeafSize,
           haloCells: this.interfaceRefinementBandCells,
+          // Always bound; the analytic condition below selects the authority.
+          // Without one of the two, no leaf seeds the band at all and every
+          // downstream fine/coarse publication is empty.
+          bootstrapLevelSet: this.surfaceState.texture,
           ...(analyticSparseBootstrap ? {
             analyticInitialCondition: scene.fluid.initialCondition,
             initialFillFraction: scene.container.fillFraction,
@@ -1749,6 +1755,8 @@ export class WebGPUOctreeProjection {
       { binding: 11, resource: { buffer: this.solidCells } },
       { binding: 12, resource: this.resources.terrain.createView() },
       { binding: 13, resource: { buffer: this.leafFrontier } },
+      // Re-seeding rewrites this texture in place, so the view stays valid.
+      { binding: 14, resource: this.surfaceState.texture.createView({ dimension: "3d" }) },
       { binding: 15, resource: { buffer: binding15Override
         ?? this.sparseBrickWorld?.bulkResidencyWorklist
         ?? this.topologyResidency.worklist } },
@@ -2277,6 +2285,9 @@ export class WebGPUOctreeProjection {
       dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
       physicalCellSize: this.scene.container.width_m / this.dims.nx,
       closedBoundaryMask: structuredClosedBoundaryMask(this.scene.container.top === "closed"),
+      // Always bound; `analyticBootstrap` above decides whether it is ever
+      // sampled, exactly as the projection layout does.
+      bootstrapLevelSet: this.surfaceState.texture,
       ...(this.analyticSparseBootstrap ? { analyticBootstrap: {
         initialCondition: this.scene.fluid.initialCondition,
         fillFraction: this.scene.container.fillFraction,
@@ -2540,9 +2551,14 @@ export class WebGPUOctreeProjection {
       speed > 0 ? inflow!.velocity_m_s.z / speed : 0,
       inflow?.length_m ?? 0
     ]);
-    const analyticBootstrapSelector = !this.analyticSparseBootstrap || this.analyticBootstrapRetired
+    // Every scene needs a t=0 phi authority, not just the analytic ones.
+    // Non-analytic scenes read the imported dense level set until the same
+    // retirement hands over to published coarse rows.
+    const analyticBootstrapSelector = this.analyticBootstrapRetired
       ? 0
-      : this.scene.fluid.initialCondition === "dam-break" ? -20 : -10;
+      : !this.analyticSparseBootstrap
+        ? -30
+        : this.scene.fluid.initialCondition === "dam-break" ? -20 : -10;
     new Float32Array(data, 112, 4).set([
       this.scene.fluid.density_kg_m3,
       this.scene.fluid.surfaceTension_N_m,
@@ -2617,13 +2633,13 @@ export class WebGPUOctreeProjection {
           encoder, this.dims.nx, this.dims.ny, this.dims.nz,
           undefined, "power-operator-only",
         );
-        // The analytic selector remains invocation-stable throughout the
+        // The bootstrap selector remains invocation-stable throughout the
         // first structured solve. The submission-retirement hook writes zero
         // selector only after this encoder is submitted, so no command buffer
-        // can observe a mixture of analytic and published sparse phi.
-        if (this.analyticSparseBootstrap) {
-          this.analyticBootstrapRetirementByEncoder.add(encoder);
-        }
+        // can observe a mixture of bootstrap and published sparse phi. Both
+        // bootstrap authorities hand over here: the imported dense level set
+        // is exactly as stale as the analytic form once coarse rows publish.
+        this.analyticBootstrapRetirementByEncoder.add(encoder);
         break;
       case "surface-global-fine": this.encodeSurface(encoder, 0); break;
       case "sparse-render-world":
@@ -4665,6 +4681,11 @@ struct SolidCell { fraction: f32, owner: i32 }
 @group(0) @binding(10) var<storage, read_write> rigidBodies: array<RigidBody, 12>;
 @group(0) @binding(11) var<storage, read_write> solidCells: array<u32>;
 @group(0) @binding(12) var terrainIn: texture_2d<f32>;
+// The host-rasterized t=0 level set. Authoritative only while the -30
+// bootstrap sentinel is live; analytic scenes bind a 1-cubed placeholder here
+// and never sample it. A sampled texture does not consume the storage-buffer
+// budget this layout is already at.
+@group(0) @binding(14) var bootstrapLevelSetIn: texture_3d<f32>;
 // [0..1] immutable A/B counts, [2] active selector, [3] active generation,
 // [4..5] candidate count/carry scratch, [6] candidate ready,
 // [7] candidate selector, [8] candidate generation, [9] rejection reason,
@@ -4821,10 +4842,28 @@ fn requireLeafOwnerPages(origin: vec3u, size: u32, lane: u32, lanes: u32) {
     _ = requireOwnerPageEncoded(logical);
   }
 }
-// Negative sentinels encode the bootstrap-only analytic initial condition:
-// tank = -10, dam-break = -20.
-fn analyticInitialPhiEnabled() -> bool { return params.physical.w < 0.0; }
-fn analyticInitialDamBreak() -> bool { return params.physical.w < -15.0; }
+// Negative sentinels encode the bootstrap-only initial phi authority:
+// tank = -10, dam-break = -20, imported dense level set = -30.
+//
+// One of these must be live during cold bootstrap. The coarse rows that phi()
+// ordinarily reads are produced downstream of the topology this stage builds,
+// so with no bootstrap sentinel correctedCoarsePhi has no authority and every
+// cell reads air -- the frontier then publishes zero liquid rows.
+// Analytic dam/tank scenes answer from closed form; every other scene
+// (terrain, rigid bodies, explicitly seeded bricks) answers from the dense
+// SDF the host already rasterized and uploaded for topology residency.
+fn bootstrapPhiEnabled() -> bool { return params.physical.w < 0.0; }
+fn analyticInitialPhiEnabled() -> bool {
+  return params.physical.w < 0.0 && params.physical.w > -25.0;
+}
+fn bootstrapTexturePhiEnabled() -> bool { return params.physical.w <= -25.0; }
+fn analyticInitialDamBreak() -> bool {
+  return params.physical.w < -15.0 && params.physical.w > -25.0;
+}
+fn bootstrapTexturePhi(p: vec3i) -> f32 {
+  return textureLoad(bootstrapLevelSetIn,
+    clamp(p, vec3i(0), vec3i(dims()) - vec3i(1)), 0).x;
+}
 fn analyticInitialPhi(point: vec3f) -> f32 {
   let fill = clamp(params.hydrostatic.w / f32(max(1u, dims().y)), 0.0, 1.0);
   let world = vec3f(-0.5 * params.container.x + point.x * params.cellRelax.x,
@@ -4845,6 +4884,7 @@ fn phi(p: vec3i) -> f32 {
   if(analyticInitialPhiEnabled()){
     return analyticInitialPhi(vec3f(p)+vec3f(0.5));
   }
+  if(bootstrapTexturePhiEnabled()){return bootstrapTexturePhi(p);}
   let coarse=correctedCoarsePhi(vec3f(p)+vec3f(0.5));
   if(coarse.authority){return coarseClassificationPhi(coarse);}
   return 3.402823e38;
@@ -4858,6 +4898,9 @@ fn liquidOwner(owner: Owner) -> bool {
   if (!ownerValid(owner)) { return false; }
   let centre=vec3f(unpackOrigin(owner.packedOrigin))+vec3f(0.5*f32(owner.size));
   if(analyticInitialPhiEnabled()){return analyticInitialPhi(centre)<0.0;}
+  // Sample the leaf centre exactly as the analytic branch above does, so both
+  // bootstrap authorities classify a leaf by the same rule.
+  if(bootstrapTexturePhiEnabled()){return bootstrapTexturePhi(vec3i(floor(centre)))<0.0;}
   let coarse=correctedCoarsePhi(centre);
   if(coarse.authority&&coarse.leafSize==owner.size){return coarse.phi<0.0;}
   if(coarse.authority&&coarse.leafSize==0u){return false;}
@@ -6018,7 +6061,9 @@ fn beginFrontier() {
 fn currentPressureOwnerWet(owner: Owner) -> bool {
   let origin=unpackOrigin(owner.packedOrigin);let fine=fineLeafSummary(origin,owner.size);
   var wet=liquidOwner(owner);
-  if(analyticInitialPhiEnabled()){return wet;}
+  // Neither bootstrap authority may be second-guessed by a fine summary that
+  // does not exist yet at t=0.
+  if(bootstrapPhiEnabled()){return wet;}
   if(fine.found){
     if(fine.centerValid){wet=fine.centerPhi<0.0;}
     // A coarse-only summary is the paper's separate octree level set, not a

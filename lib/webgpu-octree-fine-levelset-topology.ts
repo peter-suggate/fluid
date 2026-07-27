@@ -1792,7 +1792,18 @@ fn publishFineSettlementDispatch(){writeIndirectDispatch(0u,fineSettlementWorkgr
  let topologyValid=control[0]==0u;let redistanceValid=arrayLength(&redistanceControl)>=4u&&redistanceControl[0]==0u&&(redistanceControl[2]>0u||pageDelta[2]==0u)&&redistanceControl[3]!=0u;
  let volumeValid=arrayLength(&volumeControl)>0u&&volumeControl[0]==0x80000000u;let transportValid=arrayLength(&transportControl)>=4u&&transportControl[3]!=0u;
  if(topologyValid&&redistanceValid&&volumeValid&&transportValid){control[4]=1u;}
- else{control[0]|=16u;control[7]=select(0u,1u,!topologyValid)|select(0u,2u,!redistanceValid)|select(0u,4u,!volumeValid)|select(0u,8u,!transportValid);}
+ else{control[0]|=16u;
+  let reason=select(0u,1u,!topologyValid)|select(0u,2u,!redistanceValid)|select(0u,4u,!volumeValid)|select(0u,8u,!transportValid);
+  control[7]=reason;
+  // clearDesiredGeneration zeroes words 0..8 at the head of every generation,
+  // so control[0], control[4] and control[7] are already gone by the time any
+  // consumer reads them: a rejected publication is indistinguishable from one
+  // that never ran. Words 10 and 11 are outside that clear and have no other
+  // writer (word 9 carries a count), so latch the verdict there: sticky reason
+  // bits, and a rejection count paired with the first rejected generation.
+  control[10]|=reason;
+  if((control[11]>>16u)==0u){control[11]=(params.nextGeneration<<16u)|(control[11]&65535u);}
+  control[11]=(control[11]&0xffff0000u)|min((control[11]&65535u)+1u,65535u);}
  publishFineSettlementDispatch();
 }
 @compute @workgroup_size(64) fn settleFinePublication(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){

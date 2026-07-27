@@ -18,21 +18,24 @@ test("authored t=0 topology keeps one analytic SDF authority through its first s
     /fn phi\(p: vec3i\)[\s\S]*if\(analyticInitialPhiEnabled\(\)\)\{[\s\S]*return analyticInitialPhi[\s\S]*if\(coarse\.authority\)\{return coarseClassificationPhi\(coarse\);\}/,
     "the first advancing frontier cannot mix corrected-coarse rows with analytic Power-face samples");
   assert.match(octreeProjectionShader,
-    /fn currentPressureOwnerWet\(owner: Owner\)[\s\S]*var wet=liquidOwner\(owner\);[\s\S]*if\(analyticInitialPhiEnabled\(\)\)\{return wet;\}/,
+    /fn currentPressureOwnerWet\(owner: Owner\)[\s\S]*var wet=liquidOwner\(owner\);[\s\S]*if\(bootstrapPhiEnabled\(\)\)\{return wet;\}/,
     "fine summaries cannot override frontier membership while the face builder still samples t=0");
   assert.doesNotMatch(octreeProjectionShader, /legacyPhi|pagedSurface|surfacePagePhi/,
     "the deleted page authority must not remain as a bootstrap branch");
   assert.match(projectionSource,
-    /const analyticBootstrapSelector = !this\.analyticSparseBootstrap[\s\S]*initialCondition === "dam-break" \? -20 : -10/,
-    "dam/tank scenes select their analytic bootstrap sentinel while other scenes publish zero");
+    /const analyticBootstrapSelector = this\.analyticBootstrapRetired[\s\S]*\? -30[\s\S]*initialCondition === "dam-break" \? -20 : -10/,
+    "dam/tank scenes select their analytic sentinel, every other scene selects the imported dense level set, and only retirement publishes zero");
   assert.match(projectionSource,
     /case "structured-authority":[\s\S]*analyticBootstrapRetirementByEncoder\.add\(encoder\)[\s\S]*retireSubmittedEncoder\(encoder[\s\S]*analyticBootstrapRetirementByEncoder\.delete\(encoder\)[\s\S]*queue\.writeBuffer\(this\.params, 124/,
     "the analytic selector must retire only after submission of the first structured solve");
   assert.match(projectionSource,
     /analyticBootstrapRetirementByEncoder\.delete\(encoder\)[\s\S]*structuredBoundary\?\.retireAnalyticBootstrap\(\)/,
     "the boundary authored t=0 selector must retire with the invocation-stable bootstrap encoder");
-  assert.doesNotMatch(octreeProjectionShader,
-    /analyticInitialPhi\(point: vec3f\)[\s\S]{0,800}textureLoad/,
+  assert.match(octreeProjectionShader,
+    /fn analyticInitialPhiEnabled\(\) -> bool \{\s*return params\.physical\.w < 0\.0 && params\.physical\.w > -25\.0;\s*\}/,
+    "the analytic sentinel range must exclude the dense bootstrap selector");
+  assert.match(octreeProjectionShader,
+    /fn analyticInitialPhi\(point: vec3f\)(?:(?!textureLoad)[\s\S])*?\n\}/,
     "analytic initial classification must not sample the dense level-set texture");
 });
 
@@ -42,7 +45,7 @@ test("first fine-seed leaves and indexed global-fine generation share analytic b
   assert.match(octreeFineSeedAdapterShader, /let exposedMaximum=vec3f[\s\S]*let q=world-exposedMaximum/,
     "fine seed phi must share the coarse closed-wall extension");
   assert.match(octreeFineSeedAdapterShader,
-    /if\(!coarse&&params\.selection\.z==0u\)\{return;\}[\s\S]*else\{[\s\S]*centrePhi=analyticInitialPhi/);
+    /if\(!coarse&&params\.selection\.z==0u\)\{return;\}[\s\S]*else\{[\s\S]*centrePhi=bootstrapPhi/);
   assert.match(projectionSource,
     /analyticSparseBootstrap[\s\S]*new Float32Array\(\[Math\.max\(cell\.x, cell\.y, cell\.z\) \* this\.maxLeafSize\]\)[\s\S]*analyticInitialCondition/,
     "eligible analytic scenes must bind only one format texel while global fine is bootstrapped");

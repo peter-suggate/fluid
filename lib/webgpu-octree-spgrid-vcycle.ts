@@ -387,6 +387,10 @@ export interface OctreeSPGridVCyclePlan {
   readonly levelDeltaBytes: number;
   readonly brickCount: number;
   readonly directoryBytes: number;
+  /** Eighteen published stencil-neighbour slot indices per cell. Written by the
+   * same builder statement that publishes the coefficient they belong to, so a
+   * coefficient can never be paired with a neighbour from another epoch. */
+  readonly stencilNeighbourBytes: number;
   /** Dense logical-page directory plus immutable key+27-neighbour records. */
   readonly pageDirectoryBytes: number;
   readonly pageRecordWords: 28;
@@ -671,6 +675,11 @@ const PAGE_RECORD_WORDS = 28;
 // read and are the exact values the CPU plan already allocated for.
 const PARAMS_LEVEL_TABLE_SLOTS = 16;
 const PARAMS_BYTES = 80 + 16 + 5 * PARAMS_LEVEL_TABLE_SLOTS * 4;
+// The accurate Section 6.3 operator addresses the same five variable arenas
+// from the same plan, so it carries the same five tables after its four
+// existing vec4 header rows. Its own helpers were the last per-address prefix
+// loops in the file, and pageSlot alone evaluated three of them per channel.
+const ACCURATE_LAYOUT_BYTES = 64 + 5 * PARAMS_LEVEL_TABLE_SLOTS * 4;
 /** Per-row ghost-alias detection record: one channel mask plus 18 owners. */
 const GHOST_SCRATCH_WORDS_PER_ROW = 20;
 /** valid/rows/mismatch-generation header plus the per-row build fingerprint. */
@@ -767,9 +776,14 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   // occupancy masks, ranked base), and one compact ranked slot vector/level.
   const directoryWords = 16 + 4 * brickCount + totalLevelSlots;
   const directoryBytes = directoryWords * 4;
+  // Eighteen resolved neighbour slots per cell, channel-major exactly like the
+  // eighteen coefficients they index. The setup builder already resolves every
+  // one of them to accumulate the coefficient; publishing the slot it resolved
+  // is what stops the recurring correction from re-deriving it per spoke.
+  const stencilNeighbourWords = 18 * totalLevelSlots;
   const topologyBytes = (TOPOLOGY_HEADER_WORDS + rowMapWords + worklistWords
     + pageWorklistWords + pageDirectoryWords
-    + transferWords + directoryWords) * 4;
+    + transferWords + directoryWords + stencilNeighbourWords) * 4;
   const stateBytes = STATE_CHANNELS * totalLevelSlots * 4;
   const dispatchBytes = levelCount * DISPATCH_RECORD_BYTES_PER_LEVEL + DISPATCH_LIFECYCLE_BYTES;
   const levelDeltaBytes = levelCount * LEVEL_DELTA_WORDS * 4;
@@ -786,6 +800,7 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
     allocatedBytes: topologyBytes + stateBytes + 2 * dispatchBytes
       + capturePageStateBytes + levelDeltaBytes + levelCount * PARAMS_BYTES,
     levelDeltaBytes, brickCount, directoryBytes,
+    stencilNeighbourBytes: stencilNeighbourWords * 4,
     pageDirectoryBytes: pageDirectoryWords * 4, pageRecordWords: PAGE_RECORD_WORDS,
     capturePageStateBytes, capturePageCount,
     rowDispatch: dispatchFor(rowCapacity), slotDispatch: dispatchFor(levelStride), transferDispatch: dispatchFor(transferStride),
@@ -1042,17 +1057,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.clearDispatch = dispatchFor(Math.max(this.plan.levelStride, this.plan.rowCapacity,
       DISPATCH_RECORD_WORDS_PER_LEVEL));
     this.pageDispatch = dispatchFor(Math.max(1, this.plan.pageDirectoryBytes / 4));
-    this.accurateWorksetLayout = device.createBuffer({
-      label: "SPGrid Section 6.3 page operator layout", size: 64,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    const accurateLayout = new ArrayBuffer(64), accurateWords = new Uint32Array(accurateLayout);
-    accurateWords.set([source.worksetStrideWords ?? this.plan.rowCapacity + 7,
-      source.worksetBankStrideWords ?? 4 * (this.plan.rowCapacity + 7), 0, 0,
-      options.dimensions[0], options.dimensions[1], options.dimensions[2], this.plan.rowCapacity,
-      this.plan.levelCount, this.plan.levelStride, this.plan.totalLevelSlots,
-      source.coefficientBankStrideWords]);
-    device.queue.writeBuffer(this.accurateWorksetLayout, 0, accurateLayout);
     // Memoized level tables. Entries below levelCount are the exact allocation
     // authority (plan.levelCapacities/levelOffsets); the padding entries repeat
     // the same closed form so an out-of-range probe cannot read stale storage.
@@ -1087,6 +1091,25 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       || pageOffsets[this.plan.levelCount] !== this.plan.pageDirectoryBytes / 4) {
       throw new RangeError("SPGrid level tables disagree with the allocated plan");
     }
+    this.accurateWorksetLayout = device.createBuffer({
+      label: "SPGrid Section 6.3 page operator layout", size: ACCURATE_LAYOUT_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const accurateLayout = new ArrayBuffer(ACCURATE_LAYOUT_BYTES);
+    const accurateWords = new Uint32Array(accurateLayout);
+    accurateWords.set([source.worksetStrideWords ?? this.plan.rowCapacity + 7,
+      source.worksetBankStrideWords ?? 4 * (this.plan.rowCapacity + 7), 0, 0,
+      options.dimensions[0], options.dimensions[1], options.dimensions[2], this.plan.rowCapacity,
+      this.plan.levelCount, this.plan.levelStride, this.plan.totalLevelSlots,
+      source.coefficientBankStrideWords]);
+    // Words 12-15 stay the unread `numerics` padding row, so the four header
+    // rows every existing accessor reads keep their byte offsets exactly.
+    accurateWords.set(levelCaps, 16);
+    accurateWords.set(levelBases, 16 + PARAMS_LEVEL_TABLE_SLOTS);
+    accurateWords.set(brickOffsets, 16 + 2 * PARAMS_LEVEL_TABLE_SLOTS);
+    accurateWords.set(pageOffsets, 16 + 3 * PARAMS_LEVEL_TABLE_SLOTS);
+    accurateWords.set(transferOffsets, 16 + 4 * PARAMS_LEVEL_TABLE_SLOTS);
+    device.queue.writeBuffer(this.accurateWorksetLayout, 0, accurateLayout);
     const makeParams = (level: number, sourceMode: OctreeSPGridSourceMode) => {
       const buffer = device.createBuffer({
         label: `SPGrid level ${level} ${sourceMode} parameters`, size: PARAMS_BYTES,
@@ -1730,7 +1753,13 @@ fn section63ChannelForDirection(code:u32,direction:vec3i)->u32{
 })();
 
 export const octreeSPGridAccurateOperatorShader = /* wgsl */ `
-struct Layout{workset:vec4u,dimsCapacity:vec4u,hierarchy:vec4u,numerics:vec4f}
+// The five sixteen-entry tables are the same memoized allocation authority the
+// V-cycle uniform already carries. They replace this shader's four remaining
+// per-address prefix loops; pageSlot alone used to run three of them - two of
+// them full depth - on every one of applyRow's eighteen channels.
+struct Layout{workset:vec4u,dimsCapacity:vec4u,hierarchy:vec4u,numerics:vec4f,
+ levelCaps:array<vec4u,4>,levelBases:array<vec4u,4>,brickOffsets:array<vec4u,4>,
+ pageOffsets:array<vec4u,4>,transferOffsets:array<vec4u,4>}
 struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 @group(0) @binding(0) var<storage,read> inputVector:array<f32>;
 @group(0) @binding(1) var<storage,read_write> outputVector:array<f32>;
@@ -1761,34 +1790,51 @@ fn workRow(item:u32,cls:u32)->u32{let base=worksetBase(cls);if(base+WORKSET_HEAD
  ||worksets[base]!=accepted[3]||worksets[base+1u]>worksets[base+2u]||item>=worksets[base+1u]
  ||base+WORKSET_HEADER_WORDS+item>=arrayLength(&worksets)){return INVALID;}return worksets[base+WORKSET_HEADER_WORDS+item];}
 fn levels()->u32{return p.hierarchy.x;}fn maxStride()->u32{return p.hierarchy.y;}fn capacity()->u32{return p.dimsCapacity.w;}
-fn dims(l:u32)->vec3u{let s=1u<<l;return(p.dimsCapacity.xyz+vec3u(s-1u))/s;}
-fn levelCapacity(l:u32)->u32{let d=dims(l);let threshold=maxStride()/2u;var cells=d.x;
- if(cells>=threshold||d.y>threshold/cells){return maxStride();}cells*=d.y;
- if(cells>=threshold||d.z>threshold/cells){return maxStride();}cells*=d.z;
- var result=1u;let limit=2u*cells;while(result<limit){result<<=1u;}return result;}
-fn levelBase(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=levelCapacity(k);}return result;}
+// The level stride is 2^l by construction, so the ceiling division is a shift.
+// Apple GPUs emulate integer division; this is the identical u32 result.
+fn dims(l:u32)->vec3u{let s=1u<<l;return(p.dimsCapacity.xyz+vec3u(s-1u))>>vec3u(l);}
+// Every level index this shader can form is in range. levels() is at most the
+// twelve planOctreeSPGridVCycle admits, and applyRow's countTrailingZeros(h.y)
+// reads a LeafHeader.size that only decodePagedOwner writes, from a three-bit
+// exponent it rejects above 5 - so l is at most 5 whenever h.y is non-zero, and
+// h.y==0 already makes dims(l) and 1u<<l shifts of 32, which WGSL leaves
+// indeterminate, so the loops defined nothing there to preserve.
+fn levelTable(l:u32)->vec2u{let clamped=min(l,15u);return vec2u(clamped>>2u,clamped&3u);}
+fn levelCapacity(l:u32)->u32{let t=levelTable(l);return p.levelCaps[t.x][t.y];}
+fn levelBase(l:u32)->u32{let t=levelTable(l);return p.levelBases[t.x][t.y];}
 fn totalLevelSlots()->u32{return p.hierarchy.z;}
-fn at(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
+// levelBase(l) was an O(l) prefix loop whose body was itself a loop, which no
+// compiler would lift out of a hot channel loop; it is now one uniform read.
+// Callers that address many slots at one fixed level evaluate the prefix once
+// and use atBase; at() is that same expression with the prefix inlined, so the
+// two agree by construction and every existing call site is unchanged.
+fn atBase(c:u32,base:u32,s:u32)->u32{return c*totalLevelSlots()+base+s;}
+fn at(c:u32,l:u32,s:u32)->u32{return atBase(c,levelBase(l),s);}
 fn rowMapBase()->u32{return 16u;}fn workBase()->u32{return rowMapBase()+levels()*capacity();}
 fn pageWorkBase()->u32{return workBase()+totalLevelSlots();}
 fn logicalPageDims(l:u32)->vec3u{return(dims(l)+vec3u(7u,7u,3u))/vec3u(8u,8u,4u);}
 fn logicalPageCount(l:u32)->u32{let d=logicalPageDims(l);return d.x*d.y*d.z;}
-fn pageLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=logicalPageCount(k);}return result;}
+fn pageLevelOffset(l:u32)->u32{let t=levelTable(l);return p.pageOffsets[t.x][t.y];}
 fn pageDirectoryBase()->u32{return pageWorkBase()+PAGE_RECORD_WORDS*totalLevelSlots();}
 fn transferCapacity(l:u32)->u32{return min(capacity()*8u,levelCapacity(l)*8u);}
-fn transferLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=transferCapacity(k)*4u+4u*levelCapacity(k);}return result;}
+fn transferLevelOffset(l:u32)->u32{let t=levelTable(l);return p.transferOffsets[t.x][t.y];}
 fn transferBase()->u32{return pageDirectoryBase()+pageLevelOffset(levels());}
 fn directoryBase()->u32{return transferBase()+transferLevelOffset(levels()-1u);}
 fn brickDims(l:u32)->vec3u{return(dims(l)+vec3u(3u))/4u;}
 fn brickCount(l:u32)->u32{let d=brickDims(l);return d.x*d.y*d.z;}
-fn brickLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=brickCount(k);}return result;}
+fn brickLevelOffset(l:u32)->u32{let t=levelTable(l);return p.brickOffsets[t.x][t.y];}
 fn totalBrickCount()->u32{return brickLevelOffset(levels());}
 fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
 fn brickRecord(l:u32,q:vec3u)->u32{let d=brickDims(l);let b=q/4u;let dense=b.x+d.x*(b.y+d.y*b.z);
  return directoryBase()+16u+(brickLevelOffset(l)+dense)*4u;}
 fn pageRecord(l:u32,page:u32)->u32{return pageWorkBase()+(levelBase(l)+page)*PAGE_RECORD_WORDS;}
 fn pageNeighbour(l:u32,page:u32,ordinal:u32)->u32{return topology[pageRecord(l,page)+1u+ordinal];}
-fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
+// Two divisions, not three: floor(floor(v/dx)/dy) == floor(v/(dx*dy)) exactly
+// over the unsigned integers, and each remainder is recovered by one
+// multiply-subtract from the quotient already in hand. Bit-identical to the
+// modulo form, and it never forms the dx*dy product.
+fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;let row=v/d.x;let plane=row/d.y;
+ return vec3u(v-row*d.x,row-plane*d.y,plane);}
 fn localBit(q:vec3u)->u32{let local=q&vec3u(3u);return local.x+4u*local.y+16u*local.z;}
 fn pageFor(l:u32,q:vec3u)->u32{let pages=logicalPageDims(l);let v=q/vec3u(8u,8u,4u);return topology[pageDirectoryBase()+pageLevelOffset(l)+v.x+pages.x*(v.y+pages.y*v.z)];}
 fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32)->u32{
@@ -1824,13 +1870,17 @@ fn coefficientForDirection(row:u32,metric:Metric,direction:vec3i)->f32{
 // page neighbours that point to it. This is E^T by construction: it reads the
 // same owner incidence used by propagation and performs no scatter atomic.
 fn finerAdjoint(row:u32,h:vec4u,q:vec3u,l:u32,x:f32)->f32{if(l==0u){return 0.0;}let fine=l-1u;var result=0.0;
+ // Both depend only on the fine level, and the inner candidate loop runs up to
+ // 8x18 times per row. Lifting them past the l==0 guard keeps the evaluation
+ // set identical; both are pure and total, so no report or float moves.
+ let fineDims=vec3i(dims(fine));let fineBase=levelBase(fine);
  for(var child=0u;child<8u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
   let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}if(ghostPage>=levelCapacity(fine)){reportAt(2u,31u,row);continue;}
   let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);
   if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}
   for(var candidateDirection=0u;candidateDirection<18u;candidateDirection+=1u){let delta=canonicalDirection(candidateDirection);let activeQ=vec3i(ghostQ)-delta;
-   if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
-   if(activeSlot==INVALID||(state[at(FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[at(OWNER,fine,activeSlot)];
+   if(any(activeQ<vec3i(0))||any(activeQ>=fineDims)){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
+   if(activeSlot==INVALID||(state[atBase(FLAGS,fineBase,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[atBase(OWNER,fineBase,activeSlot)];
    if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);continue;}let other=encoded-1u;let otherMetric=metrics[other];
    let c=coefficientForDirection(other,otherMetric,delta);
    if(c>0.0){result+=c*(x-inputVector[other]);}
@@ -1840,13 +1890,18 @@ fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=array
  let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
  let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
  if(page==INVALID||page>=levelCapacity(l)){reportAt(2u,31u,row);return;}
+ // Every channel resolved the same three level-invariant quantities. dims(l)
+ // and the transform code are cheap; levelBase(l) is not, and it was evaluated
+ // twice per surviving channel. All three are pure functions of l and m, so
+ // lifting them changes no address, no report, and no float.
+ let levelDims=vec3i(dims(l));let transform=m.transformAndFlags&63u;let slotBase=levelBase(l);
  let x=inputVector[row];var sum=0.0;
  for(var channel=0u;channel<18u;channel+=1u){sum+=section63Coefficients[base+1u+channel];}
  var value=max(0.0,section63Coefficients[base]-sum)*x;
  for(var channel=0u;channel<18u;channel+=1u){let c=section63Coefficients[base+1u+channel];if(c==0.0){continue;}
-  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(2u,27u,row);continue;}
-  let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);continue;}let flags=state[at(FLAGS,l,slot)];
-  if((flags&MG_ONLY)!=0u){continue;}let encoded=state[at(OWNER,l,slot)];if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);continue;}
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),transform);if(any(targetQ<vec3i(0))||any(targetQ>=levelDims)){reportAt(2u,27u,row);continue;}
+  let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);continue;}let flags=state[atBase(FLAGS,slotBase,slot)];
+  if((flags&MG_ONLY)!=0u){continue;}let encoded=state[atBase(OWNER,slotBase,slot)];if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);continue;}
   value+=c*(x-inputVector[encoded-1u]);}
  value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}}
 @compute @workgroup_size(64) fn applyRegularInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),0u);if(!stopped()&&row!=INVALID){applyRow(row);}}
@@ -1936,7 +1991,9 @@ fn acceptedBank()->u32{return select(acceptedRows[4],acceptedRows[5],p.solve.y==
 fn geometry(row:u32)->vec4u{return capturedGeometry[row];}
 fn sourceRowGeometry(row:u32)->vec4u{return sourceGeometry[acceptedBank()*p.capacity.x+row];}
 fn maxStride()->u32{return p.capacity.z;}fn levels()->u32{return p.capacity.y;}fn transferStride()->u32{return p.capacity.w;}
-fn dims(l:u32)->vec3u{let s=1u<<l;return (p.dimsLevel.xyz+vec3u(s-1u))/s;}
+// The level stride is 2^l by construction, so the ceiling division is a shift.
+// Apple GPUs emulate integer division; this is the identical u32 result.
+fn dims(l:u32)->vec3u{let s=1u<<l;return (p.dimsLevel.xyz+vec3u(s-1u))>>vec3u(l);}
 fn levelTable(l:u32)->vec2u{let clamped=min(l,15u);return vec2u(clamped>>2u,clamped&3u);}
 fn levelCapacity(l:u32)->u32{let t=levelTable(l);return p.levelCaps[t.x][t.y];}
 fn levelBase(l:u32)->u32{let t=levelTable(l);return p.levelBases[t.x][t.y];}
@@ -1970,6 +2027,14 @@ fn totalBrickCount()->u32{return p.totals.y;}
 fn brickRecord(l:u32,q:vec3u)->u32{let d=brickDims(l);let b=q/4u;let dense=b.x+d.x*(b.y+d.y*b.z);
  return directoryBase()+16u+(brickLevelOffset(l)+dense)*4u;}
 fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
+// Published stencil-neighbour column indices: the eighteen slots the setup
+// builder resolved while it accumulated the eighteen coefficients, stored
+// channel-major so channel k of a level is contiguous across slots exactly like
+// the coefficient channel XP+k it belongs to. This is the CSR column-index
+// vector for the rediscretized operator; the recurring correction reads it
+// instead of re-walking the global brick/rank directory once per spoke.
+fn neighbourBase()->u32{return rankedSlotsBase()+totalLevelSlots();}
+fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+k*totalLevelSlots()+levelBase(l)+s;}
 fn localBit(q:vec3u)->u32{let local=q&vec3u(3u);return local.x+4u*local.y+16u*local.z;}
 const DISPATCH_WORDS=12u;
 fn count(l:u32)->u32{return dispatchMeta[l*DISPATCH_WORDS];}fn transferCount(l:u32)->u32{return dispatchMeta[l*DISPATCH_WORDS+1u];}
@@ -2033,8 +2098,18 @@ var<workgroup> captureLaneFirst:array<u32,64>;
 var<workgroup> captureLaneRange:array<vec2u,64>;
 var<workgroup> captureLaneChanged:array<u32,64>;
 fn coordKey(q:vec3u,l:u32)->u32{let d=dims(l);return q.x+d.x*(q.y+d.y*q.z)+1u;}
-fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
+// Two divisions, not three: floor(floor(v/dx)/dy) == floor(v/(dx*dy)) exactly
+// over the unsigned integers, and each remainder is recovered by one
+// multiply-subtract from the quotient already in hand. Bit-identical to the
+// modulo form, and it never forms the dx*dy product.
+fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;let row=v/d.x;let plane=row/d.y;
+ return vec3u(v-row*d.x,row-plane*d.y,plane);}
 fn insertionHash(key:u32,l:u32)->u32{var h=key*0x9e3779b1u;h=(h^(h>>16u))*0x7feb352du;return(h^(h>>15u))&(levelCapacity(l)-1u);}
+// The published-arena definition of a coordinate's slot. Since Section 4.6 it
+// has no recurring caller: buildCandidateStencils resolves the same relation
+// once per epoch through its candidate-side twin cDirectoryLookup and publishes
+// the answer, and commitCandidateLevelAt copies every word this reads from that
+// same candidate arena, so the two agree term for term on an accepted epoch.
 fn directoryLookup(l:u32,q:vec3u,requirePublication:bool)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}
  let generation=topology[directoryBase()+2u+l];if(generation==0u){reportAt(OVERFLOW,61u,l);return INVALID;}
  let record=brickRecord(l,q);if(topology[record]!=generation){reportAt(OVERFLOW,62u,record);return INVALID;}let bit=localBit(q);let word=topology[record+1u+(bit>>5u)];
@@ -2729,11 +2804,16 @@ fn logicalPageOrigin(l:u32,dense:u32)->vec3u{let d=logicalPageDims(l);
   if(!stencilDirty(l)||i>=cCount(l)){continue;}
   let s=cWorkSlot(l,i);
   for(var c=DIAG;c<=YZMM;c+=1u){candidateState[cAt(c,l,s)]=0u;}
+  // A channel keeps INVALID unless this owner publishes both its coefficient
+  // and the slot that coefficient was accumulated against, in the same
+  // iteration. The pair is therefore always same-epoch and same-direction, and
+  // a zero coefficient is always paired with an unresolvable neighbour.
+  for(var k=0u;k<18u;k+=1u){candidateTopology[neighbourAt(k,l,s)]=INVALID;}
   let coefficient=f32(1u<<l)*p.reserved.y;
   let q=decode(candidateState[cAt(KEY,l,s)],l);let flags=candidateState[cAt(FLAGS,l,s)];var diagonal=0.0;
   for(var k=0u;k<6u;k+=1u){let targetQ=vec3i(q)+section63Direction(k);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){continue;}
    let other=cDirectoryLookup(l,vec3u(targetQ));if(other==INVALID){if((flags&GHOST)==0u){diagonal+=coefficient;}continue;}
-   diagonal+=coefficient;cStoref(XP+k,l,s,coefficient);}
+   diagonal+=coefficient;candidateTopology[neighbourAt(k,l,s)]=other;cStoref(XP+k,l,s,coefficient);}
   if(!(diagonal>1e-20)||!finite(diagonal)){diagonal=1.0;}cStoref(DIAG,l,s,diagonal);
  }
 }
@@ -2772,6 +2852,13 @@ fn commitCandidateLevelAt(l:u32,i:u32){
  if(!topologyChanged&&!stencilDirty(l)&&!transferChanged){return;}
  if(captureFailed()||levelDelta[deltaAt(l,4u)]!=0u){return;}
  if(stencilDirty(l)&&i<levelCapacity(l)){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}}
+ // The eighteen coefficients publish under the stencil gate above and again
+ // inside the whole-channel topology copy below, so their column indices
+ // publish under the union of both, at the identical index and dispatch. A
+ // coefficient and the slot it was accumulated against can then never reach an
+ // accepted epoch apart, whichever gate carried them.
+ if((stencilDirty(l)||topologyChanged)&&i<levelCapacity(l)){
+  for(var k=0u;k<18u;k+=1u){topology[neighbourAt(k,l,i)]=candidateTopology[neighbourAt(k,l,i)];}}
  if(topologyChanged&&i<levelCapacity(l)){for(var c=0u;c<STATE_CHANNELS;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
   topology[workBase()+levelBase(l)+i]=candidateTopology[workBase()+levelBase(l)+i];
   topology[rankedSlotsBase()+levelBase(l)+i]=candidateTopology[rankedSlotsBase()+levelBase(l)+i];}
@@ -2796,9 +2883,11 @@ fn commitCandidateLevelAt(l:u32,i:u32){
   if(transferChanged&&l+1u<levels()){dispatchMeta[l*DISPATCH_WORDS+1u]=candidateDispatch[l*DISPATCH_WORDS+1u];}
   let blocks=(selectedCount(l)+63u)/64u;dispatchMeta[l*DISPATCH_WORDS+2u]=min(65535u,blocks);
   dispatchMeta[l*DISPATCH_WORDS+3u]=select(1u,(blocks+65534u)/65535u,blocks>0u);dispatchMeta[l*DISPATCH_WORDS+4u]=1u;
-  var parentBlocks=0u;if(l+1u<levels()){parentBlocks=(selectedCount(l+1u)+63u)/64u;}
-  dispatchMeta[l*DISPATCH_WORDS+5u]=min(65535u,parentBlocks);
-  dispatchMeta[l*DISPATCH_WORDS+6u]=select(1u,(parentBlocks+65534u)/65535u,parentBlocks>0u);
+  // The parent record is now one workgroup per coarse slot, not one per
+  // sixty-four: the whole workgroup cooperates on that slot's transfer chain.
+  var parentSlots=0u;if(l+1u<levels()){parentSlots=selectedCount(l+1u);}
+  dispatchMeta[l*DISPATCH_WORDS+5u]=min(65535u,parentSlots);
+  dispatchMeta[l*DISPATCH_WORDS+6u]=select(1u,(parentSlots+65534u)/65535u,parentSlots>0u);
   dispatchMeta[l*DISPATCH_WORDS+7u]=1u;
   let pages=dispatchMeta[l*DISPATCH_WORDS+8u];dispatchMeta[l*DISPATCH_WORDS+9u]=pages;
   dispatchMeta[l*DISPATCH_WORDS+10u]=1u;dispatchMeta[l*DISPATCH_WORDS+11u]=1u;}
@@ -2830,10 +2919,32 @@ fn commitCandidateLevelAt(l:u32,i:u32){
 @compute @workgroup_size(64) fn seedRhs(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let v=inputRhs[r];let native=firstTrailingBit(sourceRowGeometry(r).y);
  if(!finite(v)){reportAt(NONFINITE,73u,r);}else{storef(RHS,native,rowMap(native,r),v);}}}
 fn stencilDirection(k:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[k];}
-fn applied(slot:u32,source:u32)->f32{let l=level();var value=loadf(DIAG,l,slot)*loadf(source,l,slot);let q=decode(state[at(KEY,l,slot)],l);
- for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}let neighborCoord=vec3i(q)+stencilDirection(k);
-  if(any(neighborCoord<vec3i(0))||any(neighborCoord>=vec3i(dims(l)))){reportAt(OVERFLOW,74u,slot);continue;}let other=find(l,vec3u(neighborCoord));
-  if(other==INVALID){reportAt(OVERFLOW,75u,slot);continue;}value-=c*loadf(source,l,other);}return value;}
+// Section 4.6. The eighteen spokes consume the column indices setup published
+// beside the coefficients instead of re-deriving each one through the global
+// brick/rank directory. Every retained term is bit-identical: a spoke is taken
+// exactly when its coefficient is non-zero, and buildCandidateStencils writes a
+// non-zero coefficient only in the iteration where cDirectoryLookup resolved
+// that same direction to a slot, publishing that slot into the same k channel.
+// An unresolved or out-of-domain direction leaves the coefficient at zero and
+// the column at INVALID, so the c==0 early-out still skips exactly the spokes
+// the recomputed find() used to skip - and it now skips them without paying for
+// the lookup first.
+fn applied(slot:u32,source:u32)->f32{let l=level();
+ // Section 4.5, independent of the column-index change: every address term the
+ // eighteen iterations used to re-derive per spoke is a dispatch invariant.
+ // levelCapacity and levelBase are memoized-table reads and neighbourBase is a
+ // whole arena-prefix chain. Hoisting is integer identity, because at(c,l,s) is
+ // c*totalLevelSlots()+levelBase(l)+s and neighbourAt(k,l,s) is
+ // neighbourBase()+k*totalLevelSlots()+levelBase(l)+s, so base+k*span addresses
+ // exactly the word the helper addressed. Reverting these four lines to the
+ // loadf/neighbourAt/levelCapacity calls restores the unhoisted form.
+ let span=totalLevelSlots();let capacity=levelCapacity(l);let base=levelBase(l);
+ let coefficientBase=XP*span+base+slot;let columnBase=neighbourBase()+base+slot;
+ let sourceBase=source*span+base;
+ var value=loadf(DIAG,l,slot)*bitcast<f32>(state[sourceBase+slot]);
+ for(var k=0u;k<18u;k+=1u){let c=bitcast<f32>(state[coefficientBase+k*span]);if(c==0.0){continue;}
+  let other=topology[columnBase+k*span];if(other>=capacity){reportAt(OVERFLOW,75u,slot);continue;}
+  value-=c*bitcast<f32>(state[sourceBase+other]);}return value;}
 fn smoothable(l:u32,s:u32)->bool{return(state[at(FLAGS,l,s)]&GHOST)==0u;}
 fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
  let upper=loadf(SPECTRAL,l,0u);let lower=upper/30.0;
@@ -2843,36 +2954,57 @@ fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
 }
 fn pageInteriorHaloIndex(local:u32)->u32{let x=local%PAGE_X;let yz=local/PAGE_X;
  return x+1u+HALO_X*((yz%PAGE_Y)+1u+HALO_Y*((yz/PAGE_Y)+1u));}
-fn pageAppliedA(l:u32,slot:u32,origin:vec3u,halo:u32)->f32{
+// The staged halo is a dense 10x10x6 lattice in row-major order, so a unit step
+// along an axis is a constant stride in the flat index. stencilDirection(k)
+// dotted with (1, HALO_X, HALO_X*HALO_Y) is therefore the entire neighbour
+// address, transcribed here in stencilDirection's channel order.
+//
+// This is exact, not an approximation. smoothPage stages halo h only after
+// proving 0 <= origin+haloCoord(h)-1 < dims(l), and pageSlot returns a slot
+// only when state[at(KEY,l,slot)] == coordKey(q,l) for that same q. So for every
+// staged slot, decode(state[at(KEY,l,slot)],l) == q == origin + haloCoord(h) - 1,
+// and the old per-iteration expression
+//   decode(key) + stencilDirection(k) - origin + 1
+// reduces to haloCoord(h) + stencilDirection(k), with origin cancelling. The
+// linearisation of that is h + HALO_STEP[k]: one add, no divide, no reload of
+// the loop-invariant key.
+//
+// The bounds test the old form needed is likewise dead. The only callers walk
+// pageInteriorHaloIndex(local) for local < 256, whose halo coordinates lie in
+// [1,8]x[1,8]x[1,4], so every one-step neighbour stays inside [0,9]x[0,9]x[0,5]
+// and the flat index stays inside [0,600).
+const HALO_SX:i32=1;const HALO_SY:i32=i32(HALO_X);const HALO_SZ:i32=i32(HALO_X*HALO_Y);
+const HALO_STEP=array<i32,18>(
+ HALO_SX,-HALO_SX,HALO_SY,-HALO_SY,HALO_SZ,-HALO_SZ,
+ HALO_SX+HALO_SY,HALO_SX-HALO_SY,HALO_SY-HALO_SX,-HALO_SX-HALO_SY,
+ HALO_SX+HALO_SZ,HALO_SX-HALO_SZ,HALO_SZ-HALO_SX,-HALO_SX-HALO_SZ,
+ HALO_SY+HALO_SZ,HALO_SY-HALO_SZ,HALO_SZ-HALO_SY,-HALO_SY-HALO_SZ);
+fn pageAppliedA(l:u32,slot:u32,halo:u32)->f32{
  var value=pageDiagonal[halo]*pageA[halo];
  for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let relative=vec3i(decode(state[at(KEY,l,slot)],l))+stencilDirection(k)-vec3i(origin)+vec3i(1);
-  if(any(relative<vec3i(0))||any(relative>=vec3i(i32(HALO_X),i32(HALO_Y),i32(HALO_Z)))){reportAt(OVERFLOW,77u,slot);continue;}
-  let neighbourHalo=u32(relative.x)+HALO_X*(u32(relative.y)+HALO_Y*u32(relative.z));
+  let neighbourHalo=u32(i32(halo)+HALO_STEP[k]);
   if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}value-=c*pageA[neighbourHalo];}
  return value;
 }
-fn pageAppliedB(l:u32,slot:u32,origin:vec3u,halo:u32)->f32{
+fn pageAppliedB(l:u32,slot:u32,halo:u32)->f32{
  var value=pageDiagonal[halo]*pageB[halo];
  for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let relative=vec3i(decode(state[at(KEY,l,slot)],l))+stencilDirection(k)-vec3i(origin)+vec3i(1);
-  if(any(relative<vec3i(0))||any(relative>=vec3i(i32(HALO_X),i32(HALO_Y),i32(HALO_Z)))){reportAt(OVERFLOW,77u,slot);continue;}
-  let neighbourHalo=u32(relative.x)+HALO_X*(u32(relative.y)+HALO_Y*u32(relative.z));
+  let neighbourHalo=u32(i32(halo)+HALO_STEP[k]);
   if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}value-=c*pageB[neighbourHalo];}
  return value;
 }
-fn pageSweepAtoB(l:u32,origin:vec3u,lid:u32,phase:u32,degree:u32){
+fn pageSweepAtoB(l:u32,lid:u32,phase:u32,degree:u32){
  let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
   let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageA[halo];if(!smoothable(l,slot)){pageB[halo]=source;continue;}
   let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageB[halo]=source;continue;}
-  let next=source+weight*(pageRhs[halo]-pageAppliedA(l,slot,origin,halo))/d;
+  let next=source+weight*(pageRhs[halo]-pageAppliedA(l,slot,halo))/d;
   if(!finite(next)){reportAt(NONFINITE,80u,slot);pageB[halo]=source;}else{pageB[halo]=next;}}
 }
-fn pageSweepBtoA(l:u32,origin:vec3u,lid:u32,phase:u32,degree:u32){
+fn pageSweepBtoA(l:u32,lid:u32,phase:u32,degree:u32){
  let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
   let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageB[halo];if(!smoothable(l,slot)){pageA[halo]=source;continue;}
   let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageA[halo]=source;continue;}
-  let next=source+weight*(pageRhs[halo]-pageAppliedB(l,slot,origin,halo))/d;
+  let next=source+weight*(pageRhs[halo]-pageAppliedB(l,slot,halo))/d;
   if(!finite(next)){reportAt(NONFINITE,80u,slot);pageA[halo]=source;}else{pageA[halo]=next;}}
 }
 fn pagePhase(step:u32,degree:u32,reverse:bool)->u32{return select(step,degree-1u-step,reverse);}
@@ -2884,10 +3016,10 @@ fn smoothPage(reverse:bool,page:u32,lid:u32){let l=level();let pageLive=page<pag
   var value=0.0;var rhs=0.0;var diagonal=1.0;if(slot!=INVALID){value=loadf(A,l,slot);rhs=loadf(RHS,l,slot);diagonal=loadf(DIAG,l,slot);}
   pageA[halo]=value;pageB[halo]=value;pageRhs[halo]=rhs;pageDiagonal[halo]=diagonal;}
  workgroupBarrier();
- pageSweepAtoB(l,origin,lid,pagePhase(0u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
- pageSweepBtoA(l,origin,lid,pagePhase(1u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
- if(p.solve.x==4u){pageSweepAtoB(l,origin,lid,pagePhase(2u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
- if(p.solve.x==4u){pageSweepBtoA(l,origin,lid,pagePhase(3u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
+ pageSweepAtoB(l,lid,pagePhase(0u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
+ pageSweepBtoA(l,lid,pagePhase(1u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
+ if(p.solve.x==4u){pageSweepAtoB(l,lid,pagePhase(2u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
+ if(p.solve.x==4u){pageSweepBtoA(l,lid,pagePhase(3u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
  if(pageLive){for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);let slot=pageSlots[halo];
    if(slot!=INVALID){storef(A,l,slot,pageA[halo]);}}}
 }
@@ -2908,15 +3040,65 @@ fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{
  let coarse=topology[transferWord(l,record,1u)];let weight=bitcast<f32>(topology[transferWord(l,record,2u)]);
  if(coarse>=levelCapacity(l+1u)||!finite(weight)){reportAt(OVERFLOW,84u,fine);return TransferTarget(INVALID,0.0);}
  return TransferTarget(coarse,weight);}
-// Section 4.2 GhostValueAccumulate is E^T: one coarse owner traverses its
-// immutable fine-major chain, so no destination synchronization is required.
-@compute @workgroup_size(64) fn restrictAndGhostAccumulate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();
- if(l+1u>=levels()||i>=count(l+1u)||stopped()){return;}let coarse=workSlot(l+1u,i);var sum=0.0;var record=topology[parentHeadBase(l)+coarse];
- for(var visited=0u;record!=INVALID&&visited<transferCount(l);visited+=1u){if(record>=transferCount(l)){reportAt(OVERFLOW,85u,coarse);return;}
-  let fine=topology[transferWord(l,record,0u)];let parent=topology[transferWord(l,record,1u)];if(parent!=coarse){reportAt(OVERFLOW,86u,coarse);return;}
-  let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=applied(fine,A);let residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
-  sum+=bitcast<f32>(topology[transferWord(l,record,2u)])*residual;record=topology[transferWord(l,record,3u)];}
- if(record!=INVALID||!finite(sum)){reportAt(OVERFLOW,87u,coarse);return;}storef(RHS,l+1u,coarse,sum);}
+// Record-parallel staging for E^T. The parent chain is the ascending record
+// order restricted to one coarse slot, so a chunk of it is a contiguous
+// ascending run that can be evaluated in any order and folded back in index
+// order. Sixty-four staged indices, their eighteen-channel stencil residual and
+// their immutable weight are the only workgroup state; the weight and residual
+// stay separate so the fold keeps the source-level multiply-add of the
+// single-lane walk.
+const RESTRICT_LANES=64u;
+var<workgroup> restrictRecord:array<u32,64>;
+var<workgroup> restrictWeight:array<f32,64>;
+var<workgroup> restrictResidual:array<f32,64>;
+var<workgroup> restrictStaged:u32;
+var<workgroup> restrictNext:u32;
+var<workgroup> restrictFailed:u32;
+var<workgroup> restrictSum:f32;
+// Section 4.2 GhostValueAccumulate is E^T: one coarse owner still owns each sum
+// and no destination synchronization exists, but the owner is now a whole
+// workgroup instead of a lane. Lane 0 walks the immutable chain and stages up to
+// sixty-four record indices - applying exactly the bounds and parent-identity
+// checks the serial walk applied, in the same order, so the visited record set
+// and every reportAt is unchanged - then all sixty-four lanes evaluate one
+// record each, and lane 0 folds the staged terms in ascending record index.
+// The per-record expression, the operand values and the accumulation order are
+// the serial walk's, so the published sum is bit-identical; only the
+// eighteen-channel gather stops being serialized behind the pointer chase.
+@compute @workgroup_size(64) fn restrictAndGhostAccumulate(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=level();let i=wg.x+wg.y*65535u;
+ let live=uniformWord(lane,select(0u,1u,l+1u<levels()&&i<count(l+1u)&&!stopped()));
+ if(live==0u){return;}
+ let coarse=workSlot(l+1u,i);let limit=uniformWord(lane,transferCount(l));
+ if(lane==0u){restrictNext=topology[parentHeadBase(l)+coarse];
+  restrictSum=0.0;restrictFailed=0u;restrictStaged=0u;}
+ workgroupBarrier();
+ for(var visited=0u;visited<limit;visited+=RESTRICT_LANES){
+  if(lane==0u){var record=restrictNext;var staged=0u;let span=min(RESTRICT_LANES,limit-visited);
+   loop{if(staged>=span||record==INVALID){break;}
+    if(record>=limit){reportAt(OVERFLOW,85u,coarse);restrictFailed=1u;record=INVALID;break;}
+    if(topology[transferWord(l,record,1u)]!=coarse){reportAt(OVERFLOW,86u,coarse);restrictFailed=1u;record=INVALID;break;}
+    restrictRecord[staged]=record;staged+=1u;record=topology[transferWord(l,record,3u)];}
+   restrictStaged=staged;restrictNext=record;}
+  workgroupBarrier();
+  let staged=workgroupUniformLoad(&restrictStaged);
+  if(staged==0u){break;}
+  var weight=0.0;var residual=0.0;
+  if(lane<staged){let record=restrictRecord[lane];let fine=topology[transferWord(l,record,0u)];
+   let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=applied(fine,A);
+   residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
+   weight=bitcast<f32>(topology[transferWord(l,record,2u)]);}
+  restrictWeight[lane]=weight;restrictResidual[lane]=residual;
+  workgroupBarrier();
+  if(lane==0u){var folded=restrictSum;
+   for(var t=0u;t<staged;t+=1u){folded+=restrictWeight[t]*restrictResidual[t];}
+   restrictSum=folded;}
+  workgroupBarrier();
+ }
+ if(lane==0u&&restrictFailed==0u){let sum=restrictSum;
+  if(restrictNext!=INVALID||!finite(sum)){reportAt(OVERFLOW,87u,coarse);}
+  else{storef(RHS,l+1u,coarse,sum);}}}
 @compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}if(count(l)!=1u){reportAt(NONPOSITIVE,88u,l);return;}
  let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){reportAt(NONPOSITIVE,89u,s);return;}let x=loadf(RHS,l,s)/d;if(!finite(x)){reportAt(NONFINITE,90u,s);}else{storef(A,l,s,x);}}
 // One fine invocation owns the complete interpolation sum, deleting all

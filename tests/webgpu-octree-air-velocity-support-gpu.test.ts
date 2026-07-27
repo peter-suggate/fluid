@@ -198,8 +198,19 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   // the metric an axis-graph geodesic (Manhattan-like), which under-drives
   // diagonal spreading and squares off the dam front.
   assert.match(march,
-    /distance=length\(faceCenter\(item\)-faceCenter\(candidate\.z\)\)/,
+    /distance=length\(center-faceCenterIn\(candidate\.z,directRows,bank,supportRows\)\)/,
     "the fast-marching-like relaxation must rank sources by Euclidean distance to the original seed, not accumulated hop length");
+  // `center` is the marching patch's own centre and every scratch control word
+  // the metric needs, read once per lane. They were previously re-derived on
+  // each of up to 120 candidates, which is where Section 5's per-lane cost went.
+  assert.match(march,
+    /letcenter=faceCenterIn\(item,directRows,bank,supportRows\);/,
+    "the marching patch's own centre is loop-invariant and must leave the candidate scan");
+  const candidateScan = march.slice(march.indexOf("for(varlocalFace"),
+    march.indexOf("letchanged=any(best!=current)"));
+  assert.ok(candidateScan.length > 0);
+  assert.doesNotMatch(candidateScan, /s\(29u\)|s\(2u\)|s\(4u\)|s\(8u\)|faceCenterIn\(item/,
+    "no dispatch-uniform scratch word or invariant centre may be re-read inside the candidate scan");
   assert.match(shader, /clean=errors==0u&&\(s\(35u\)\|s\(36u\)\|s\(37u\)\)==0u/,
     "publication requires a deliberate GPU-observed no-change wave");
   assert.match(march,

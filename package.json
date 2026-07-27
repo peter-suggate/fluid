@@ -67,6 +67,8 @@
     "benchmark:power-dam-moving-interface": "node --import tsx tools/benchmark-power-dam.ts --lane=moving-interface",
     "benchmark:power-dam-quiescent": "node --import tsx tools/benchmark-power-dam.ts --lane=quiescent",
     "benchmark:power-dam-ui": "FLUID_MAX_ADVANCE_MS=${FLUID_MAX_ADVANCE_MS:-15} FLUID_MAX_DISPATCHES_PER_ADVANCE=${FLUID_MAX_DISPATCHES_PER_ADVANCE:-300} FLUID_MAX_PASSES_PER_ADVANCE=${FLUID_MAX_PASSES_PER_ADVANCE:-60} node --import tsx tools/benchmark-power-dam.ts --lane=ui",
+    "profile:mini-dam-xctrace": "node --import tsx tools/profile-mini-dam-xctrace.ts",
+    "profile:mini-dam-xctrace:occupancy": "node --import tsx tools/profile-mini-dam-xctrace.ts --counters --steps=125 --no-baseline",
     "profile:power-dam-mini": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --profile",
     "profile:power-dam-mini:fine": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --fine-timestamps",
     "profile:power-dam-ui": "FLUID_MAX_PRESSURE_NON_SOLVE_MS=${FLUID_MAX_PRESSURE_NON_SOLVE_MS:-4} node --import tsx tools/benchmark-power-dam.ts --lane=ui --profile",

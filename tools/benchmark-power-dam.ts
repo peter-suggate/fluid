@@ -15,8 +15,10 @@ import {
   type OctreeRegressionLane,
   type OctreeRegressionResultRecord,
 } from "./octree-regression-artifact";
-
-type RuntimeLane = "mini" | "ui" | "moving-interface";
+import {
+  POWER_DAM_LANE_ENVIRONMENT,
+  type PowerDamRuntimeLane as RuntimeLane,
+} from "./power-dam-lane-environment";
 
 const args = new Set(process.argv.slice(2));
 const requestedLane = process.argv.find((argument) => argument.startsWith("--lane="))
@@ -44,25 +46,7 @@ const diagnosticArtifactPath = process.argv.find((argument) =>
 const root = fileURLToPath(new URL("..", import.meta.url));
 const runner = fileURLToPath(new URL("./run-webgpu-smoke-isolated.ts", import.meta.url));
 
-const laneEnvironment: Record<RuntimeLane, Record<string, string>> = {
-  mini: {
-    FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "2",
-    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500",
-    FLUID_EXPECT_GRID: "16,16,16", FLUID_MAXIMUM_LEAF_SIZE: "2",
-    FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
-  },
-  "moving-interface": {
-    FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "0.248",
-    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
-    FLUID_EXPECT_GRID: "16,16,16", FLUID_MAXIMUM_LEAF_SIZE: "2",
-    FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
-  },
-  ui: {
-    FLUID_SCENE: "dam-break-ui", FLUID_TARGET_S: "0.496",
-    FLUID_MAX_DT: "0.008", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
-    FLUID_EXPECT_GRID: "24,18,16",
-  },
-};
+const laneEnvironment = POWER_DAM_LANE_ENVIRONMENT;
 
 const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.ProcessEnv => ({
     ...process.env,
