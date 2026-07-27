@@ -34,7 +34,9 @@ test("structured control decoders expose the packed accepted transaction", () =>
 
 test("packed per-step audit snapshots retain every authority control", () => {
   const layout = STRUCTURED_GENERATION_AUDIT_SNAPSHOT;
-  assert.equal(layout.strideBytes, 240);
+  // 24 structured + 28 boundary + 28 fine worklist + 64 mgpcg + 64 fine volume
+  // + 128 projection energy (32-word per-stage layout).
+  assert.equal(layout.strideBytes, 336);
   const bytes = new Uint8Array(2 * layout.strideBytes);
   const write = (record: number, offsetBytes: number, values: readonly number[]) => {
     new Uint32Array(bytes.buffer, record * layout.strideBytes + offsetBytes, values.length).set(values);
@@ -46,7 +48,9 @@ test("packed per-step audit snapshots retain every authority control", () => {
   write(1, layout.mgpcgOffsetBytes, Array.from(mgpcg));
   const volume = new Uint32Array(16); volume[13] = 9;
   write(1, layout.fineVolumeOffsetBytes, Array.from(volume));
-  write(1, layout.projectionEnergyOffsetBytes, [0, 8, 0, 21, 21, 1, 1, 8]);
+  const projectionEnergy = new Uint32Array(32);
+  projectionEnergy.set([0, 8, 0, 21, 21, 1, 1, 8]);
+  write(1, layout.projectionEnergyOffsetBytes, Array.from(projectionEnergy));
   const decoded = unpackStructuredGenerationAuditSnapshot(bytes, 1);
   assert.deepEqual(decoded.structured,
     { flags: 0, firstError: 0xffff_ffff, rowCount: 21, epoch: 8, activeBank: 0, slotCount: 73 });
@@ -56,7 +60,7 @@ test("packed per-step audit snapshots retain every authority control", () => {
   assert.deepEqual(Array.from(decoded.fineHeader), [9, 65, 128, 3, 2, 1, 1]);
   assert.equal(decoded.mgpcgControl[2], 7);
   assert.equal(decoded.fineVolumeControl[13], 9);
-  assert.deepEqual(Array.from(decoded.projectionEnergyControl), [0, 8, 0, 21, 21, 1, 1, 8]);
+  assert.deepEqual(Array.from(decoded.projectionEnergyControl), Array.from(projectionEnergy));
   assert.throws(() => unpackStructuredGenerationAuditSnapshot(bytes, 2), /truncated/);
 });
 

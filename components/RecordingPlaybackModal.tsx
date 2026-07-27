@@ -26,17 +26,16 @@ export function RecordingPlaybackModal() {
   const playbackAnchorRef = useRef<{ wall_ms: number; media_s: number } | null>(null);
   const [mode, setMode] = useState<PlaybackMode>("real-time");
   const [mediaDuration_s, setMediaDuration_s] = useState(0);
-  const simulationPaced = recording?.timingMode === "simulation-frames";
+  const simulationPaced = recording?.timingMode === "simulation-time";
   const sourceDuration_s = useMemo(() => recording
     ? sourceDurationForPlayback(mediaDuration_s, recording.recordedDuration_s)
     : 0, [mediaDuration_s, recording]);
   const playbackRate = useMemo(() => recording
     ? simulationPaced ? 1 : realTimePlaybackRate(sourceDuration_s, recording.simulationDuration_s)
-    : 1, [sourceDuration_s, recording]);
+    : 1, [sourceDuration_s, recording, simulationPaced]);
 
   useEffect(() => {
     if (!open) return;
-    setMode("real-time");
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") simulationRecording.close();
     };
@@ -88,7 +87,7 @@ export function RecordingPlaybackModal() {
         <header>
           <div>
             <p className="eyebrow">SIMULATION-TIME CAPTURE</p>
-            <h2 id="recording-title">Real-time playback{simulationPaced ? " · 30 fps" : ""}</h2>
+            <h2 id="recording-title">Real-time playback{simulationPaced ? ` · ${recording.frameRate} fps` : ""}</h2>
           </div>
           <button className="icon-button" onClick={() => simulationRecording.close()} aria-label="Close recording playback" autoFocus>×</button>
         </header>
@@ -100,6 +99,7 @@ export function RecordingPlaybackModal() {
             autoPlay
             playsInline
             onLoadedMetadata={(event) => {
+              setMode("real-time");
               const duration = event.currentTarget.duration;
               setMediaDuration_s(Number.isFinite(duration) && duration > 0 ? duration : 0);
               anchorPlayback(event.currentTarget);
@@ -112,24 +112,24 @@ export function RecordingPlaybackModal() {
             onPause={() => { playbackAnchorRef.current = null; }}
             onSeeked={(event) => anchorPlayback(event.currentTarget)}
           />
-          <span className="recording-time-badge">{simulationPaced ? "SIMULATION-SAMPLED · 30 FPS · NATIVE ×1" : "1 VIDEO SECOND = 1 SIMULATION SECOND"}</span>
+          <span className="recording-time-badge">1 VIDEO SECOND = 1 SIMULATION SECOND</span>
         </div>
         <div className="recording-playback-controls">
           <div className="segmented" aria-label="Playback timing">
             {simulationPaced
-              ? <button className="active">Real time · 30 fps · ×1</button>
+              ? <button className="active">Real time · {recording.frameRate} fps · ×1</button>
               : <><button className={mode === "real-time" ? "active" : ""} onClick={() => setMode("real-time")}>Real time · ×{playbackRate.toFixed(2)}</button><button className={mode === "source" ? "active" : ""} onClick={() => setMode("source")}>Original capture · ×1</button></>}
           </div>
-          <button className="quiet-button" onClick={() => simulationRecording.download()} title={simulationPaced ? "Download the simulation-paced MP4" : "Download the original wall-clock-paced WebM"}>Download {simulationPaced ? "MP4" : "source"}</button>
+          <button className="quiet-button" onClick={() => simulationRecording.download()} title={simulationPaced ? "Download the simulation-time MP4" : "Download the original wall-clock-paced WebM"}>Download {simulationPaced ? "MP4" : "source"}</button>
         </div>
         <dl className="recording-stats">
           <div><dt>Simulation interval</dt><dd>{recording.simulationStart_s.toFixed(2)}–{recording.simulationEnd_s.toFixed(2)} s</dd></div>
-          <div><dt>Real-time result</dt><dd>{recording.simulationDuration_s.toFixed(2)} s</dd></div>
+          <div><dt>Playback length</dt><dd>{(simulationPaced ? recording.recordedDuration_s : recording.simulationDuration_s).toFixed(2)} s</dd></div>
           <div><dt>{simulationPaced ? "Captured frames" : "Source capture"}</dt><dd>{simulationPaced ? recording.frameCount?.toLocaleString() : `${sourceDuration_s.toFixed(2)} s`}</dd></div>
           <div><dt>{simulationPaced ? "Frame pacing" : "Timing correction"}</dt><dd>{simulationPaced ? `${recording.frameRate} fps · ×1` : `×${playbackRate.toFixed(2)}`}</dd></div>
         </dl>
         <p className="recording-note">{simulationPaced
-          ? "Each frame was sampled at a 0.033 s simulation-time boundary and encoded consecutively at 30 fps. Playback and the downloaded MP4 therefore run natively at real-world speed without frame skipping or timeline seeking."
+          ? "Fine presented states are sampled on 1/60-second simulation-time boundaries and encoded at 60 fps. Playback and the downloaded MP4 therefore preserve one watch second per simulated second."
           : "This browser used compatibility capture. In-app playback is calibrated from simulated seconds; the downloaded WebM preserves its original wall-clock timing."}</p>
       </section>
     </div>

@@ -5,6 +5,12 @@ import {
 import { FINE_LEVELSET_WORKSET_HEADER_WORDS } from "./octree-fine-levelset-bricks";
 import { fineLevelSetLinearWorkgroupWGSL } from "./webgpu-fine-levelset-dispatch";
 import { PassBroker } from "./webgpu-pass-broker";
+import {
+  createGPULogicalActivityAdoptionContext,
+  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
+  type GPULogicalActivityAdoptionContext,
+} from "./gpu-logical-activity-adoption";
+import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 
 export interface FineLevelSetGPURedistanceOptions {
   /** Required signed-distance width, measured in fine cells. */
@@ -168,8 +174,17 @@ export class WebGPUFineLevelSetRedistance {
     this.allocatedBytes = fineLevelSetRedistanceAllocatedBytes(source.plan.maximumResidentBricks);
     this.params = device.createBuffer({ label: "fine-levelset JFA-CPT parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const jfaProfile = performanceShaderVariant();
+    const jfaActivity = createGPULogicalActivityAdoptionContext({
+      moduleId: "octree/fine-redistance-jfa",
+      profile: jfaProfile,
+    });
+    const jfaVariant = jfaActivity.module(
+      fineLevelSetJFAActivityShader(jfaActivity),
+      `octree/fine-redistance-jfa/${jfaProfile.cacheKey}`,
+    );
     const jfaModule = device.createShaderModule({ label: "fine-levelset JFA closest-point transform",
-      code: fineLevelSetJFACPTWGSL });
+      code: jfaVariant.code });
     const jfaPipeline = (entryPoint: string, stride?: number) => device.createComputePipeline({
       label: `fine JFA-CPT ${entryPoint}${stride === undefined ? "" : ` stride ${stride}`}`,
       layout: "auto",
@@ -183,9 +198,9 @@ export class WebGPUFineLevelSetRedistance {
     this.jfaSeedPipeline = jfaPipeline("seedClosestPoints");
     const immutableStrides = Array.from({ length: 9 }, (_, index) => 1 << index);
     this.jfaABPipelines = new Map(immutableStrides.map((stride) =>
-      [stride, jfaPipeline("jumpFloodAToB", stride)]));
+      [stride, jfaActivity.registerPipeline(jfaPipeline("jumpFloodAToB", stride))]));
     this.jfaBAPipelines = new Map(immutableStrides.map((stride) =>
-      [stride, jfaPipeline("jumpFloodBToA", stride)]));
+      [stride, jfaActivity.registerPipeline(jfaPipeline("jumpFloodBToA", stride))]));
     this.jfaResolveAToBPipeline = jfaPipeline("resolveClosestPointsAToB");
     this.jfaResolveBToCanonicalPipeline = jfaPipeline("resolveClosestPointsBToCanonical");
     this.jfaValidatePipeline = jfaPipeline("validateJFADistances");
@@ -398,3 +413,42 @@ fn resolvedSeed(index:u32)->u32{return workA[index];}
   let index=id*p.samplesPerBrick+lid;let transported=bitcast<f32>(phi[index]);let d=distanceValue(index);let negative=transported<0.;let closestPointCode=flags[index]&~((1u<<SAMPLE_FLAG_BITS)-1u);let isInterface=closestPointCode!=0u;phi[index]=bitcast<u32>(select(d,-d,negative));if(resolvedSeed(index)==INVALID||d>bandDistance()){flags[index]=0u;}else{flags[index]=closestPointCode|VALID|select(0u,INTERFACE,isInterface)|select(0u,NEGATIVE,negative);}
 }
 `;
+
+function instrumentFineLevelSetJFAEntry(
+  source: string,
+  entryPoint: string,
+  entry: string,
+  exit: string,
+): string {
+  const signature = `fn ${entryPoint}(`;
+  const start = source.indexOf(signature);
+  if (start < 0) throw new Error(`Fine JFA activity entry point ${entryPoint} is missing`);
+  const bodyStart = source.indexOf("{", start + signature.length);
+  let depth = 0, bodyEnd = -1;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}" && --depth === 0) { bodyEnd = index; break; }
+  }
+  if (bodyStart < 0 || bodyEnd < 0) throw new Error(`Fine JFA activity body ${entryPoint} is malformed`);
+  const body = source.slice(bodyStart + 1, bodyEnd).replace(/\breturn;/g, `${exit}return;`);
+  return `${source.slice(0, bodyStart + 1)}${entry}${body}${exit}${source.slice(bodyEnd)}`;
+}
+
+/** Activity-only flood variants; production keeps the exported WGSL byte-for-byte. */
+export function fineLevelSetJFAActivityShader(activity: GPULogicalActivityAdoptionContext): string {
+  const checkpoint = (task: string, name: "enter" | "exit") => activity.workgroup(task, name, {
+    workgroupId: "wid",
+    localInvocationIndex: "lid",
+    workgroupLaneCount: 64,
+    recordWhen: `wid.x + nw.x * (wid.y + nw.y * wid.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  const abEntry = checkpoint("jump-flood-a-to-b", "enter");
+  const abExit = checkpoint("jump-flood-a-to-b", "exit");
+  const baEntry = checkpoint("jump-flood-b-to-a", "enter");
+  const baExit = checkpoint("jump-flood-b-to-a", "exit");
+  if (!abEntry && !abExit && !baEntry && !baExit) return fineLevelSetJFACPTWGSL;
+  const withAB = instrumentFineLevelSetJFAEntry(
+    fineLevelSetJFACPTWGSL, "jumpFloodAToB", abEntry, abExit,
+  );
+  return instrumentFineLevelSetJFAEntry(withAB, "jumpFloodBToA", baEntry, baExit);
+}

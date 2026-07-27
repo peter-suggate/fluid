@@ -5,12 +5,17 @@ import { pathToFileURL } from "node:url";
 import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
 import { PassBroker } from "../lib/webgpu-pass-broker";
 import { WebGPUOctreePowerTopology } from "../lib/webgpu-octree-power-topology";
+import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 import {
   OCTREE_STRUCTURED_GPU_ERROR,
   WebGPUDirectStructuredVelocityAuthority,
   directStructuredVelocityPublicationWGSL,
   planStructuredVelocityGPU,
 } from "../lib/webgpu-octree-structured-velocity-gpu";
+
+// Numerical harnesses submit their own raw encoders; exercise the production
+// shader variant instead of the solver-owned activity binding session.
+usePerformanceInstrumentationStore.getState().setMode("timeline");
 
 test("direct structured authority has six fixed families and nine disjoint worksets", () => {
   const plan = planStructuredVelocityGPU(128, 30, 256);
@@ -88,14 +93,14 @@ test("Dawn Metal compiles every direct structured publication stage", {
   const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
   const adapter = await gpu.requestAdapter(); assert.ok(adapter);
   const device = await adapter.requestDevice();
-  const module = device.createShaderModule({ code: directStructuredVelocityPublicationWGSL });
-  const errors = (await module.getCompilationInfo()).messages.filter((message) => message.type === "error");
+  const shaderModule = device.createShaderModule({ code: directStructuredVelocityPublicationWGSL });
+  const errors = (await shaderModule.getCompilationInfo()).messages.filter((message) => message.type === "error");
   assert.deepEqual(errors, []);
   device.pushErrorScope("validation");
   for (const entryPoint of ["beginStructuredPublication", "classifyStructuredCatalogSlots", "prefixStructuredFamilies",
     "scatterStructuredFamilySlots", "publishSection63Rows", "finalizeStructuredPublication",
     "reconstructStructuredCellVelocity", "acceptStructuredPublication"]) {
-    device.createComputePipeline({ layout: "auto", compute: { module, entryPoint } });
+    device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
   }
   const error = await device.popErrorScope();
   assert.equal(error, null, error?.message);

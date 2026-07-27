@@ -6,6 +6,7 @@ const source = (path: string) => readFileSync(new URL(path, import.meta.url), "u
 const octree = source("../lib/webgpu-octree.ts");
 const solver = source("../lib/webgpu-uniform-eulerian.ts");
 const panel = source("../components/PerformancePanel.tsx");
+const activityGrid = source("../components/PerformanceActivityGrid.tsx");
 const renderer = source("../lib/webgpu-renderer.ts");
 const viewport = source("../components/WebGPUViewport.tsx");
 
@@ -18,7 +19,7 @@ test("authoritative power work maps onto semantic adjacent-boundary phases", () 
     'fineTransport: { id: "fine-sdf-advection", label: "Factor-m fine SDF advection" }',
     'fineRedistance: { id: "fine-sdf-redistance", label: "Fine SDF redistance" }',
   ]) assert.ok(solver.includes(mapping), mapping);
-  assert.match(solver, /productionBoundary: physicsTrace \? \(phase, completedEncoder\) => \{[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
+  assert.match(solver, /productionBoundary: physicsTrace \|\| shouldCaptureLogicalActivity \? \(phase, completedEncoder\) => \{[^]*completePhysicsPhase\(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE\[phase\]\)/);
   assert.match(solver, /physicsTrace\?\.resolve\(encoder\)/);
 });
 
@@ -67,11 +68,12 @@ test("physics checkpoints follow performed command stages at their trailing seam
     /Uniform diagnostics reduction[^]*Diagnostics reduction/);
 });
 
-test("physics sampling is opt-in and runs at debugging cadence", () => {
+test("physics sampling defaults to detailed capture and remains cadence-bounded", () => {
   const store = source("../lib/stores/performance-instrumentation-store.ts");
   const tall = source("../lib/webgpu-eulerian.ts");
-  assert.match(store, /enabled: false/,
-    "the default UI simulation path must match the uninstrumented Dawn lane");
+  assert.match(store, /mode: "activity"/);
+  assert.match(store, /enabled: true/,
+    "the default UI simulation path captures detailed profiling evidence");
   assert.match(solver, /const PHYSICS_TRACE_CADENCE_MS = 100/);
   assert.match(tall, /lastPhysicsTraceAt_ms>=100/);
   assert.match(tall, /Substep planning \+ advance setup/);
@@ -90,8 +92,15 @@ test("an unusable hardware sample falls back without paying for boundaries again
   assert.match(solver, /hardwarePhysicsTraceInvalid = !trace/);
   assert.match(solver, /!this\.hardwarePhysicsTraceInvalid[^]*GPUStageTimestampRecorder\.supported/);
   assert.match(solver, /GPUQueueWallPerformanceTraceRecorder/);
-  assert.match(panel, /QUEUE COMPLETION FALLBACK/);
+  assert.match(activityGrid, /data-queue-wall-fallback=/);
   assert.doesNotMatch(panel, /INTRUSIVE QUEUE CHECKPOINT PROBE/);
+});
+
+test("logical workgroup capture survives hardware timestamp fallback", () => {
+  assert.match(solver, /const shouldCaptureLogicalActivity = shouldTracePhysics[^]*this\.logicalActivity\.enabled/);
+  assert.match(solver, /shouldCaptureLogicalActivity && logicalActivitySession && physicsTraceRead/);
+  assert.match(solver, /Promise\.all\(\[session\.read\(\), physicsTraceRead\]\)/);
+  assert.doesNotMatch(solver, /const shouldCaptureLogicalActivity = Boolean\(physicsTrace\)/);
 });
 
 test("physics timing does not create known empty queue segments", () => {
@@ -105,14 +114,12 @@ test("physics UI preserves command-adjacent step labels", () => {
   assert.match(panel, /return trace;/);
 });
 
-test("performance UI exposes three independent closed ledgers and no combined total", () => {
-  assert.match(panel, /TraceLane trace=\{physics\}/);
-  assert.match(panel, /TraceLane trace=\{presentation\}/);
-  assert.match(panel, /TraceLane trace=\{cpu\}/);
-  assert.match(panel, /OBSERVED TOTAL/);
-  assert.match(panel, /ACCOUNTED PHASE SUM/);
-  assert.match(panel, /CLOSURE ERROR/);
-  assert.match(panel, /CPU and GPU are independent ledgers and are never added together/);
+test("performance UI exposes one matrix with three independent closed ledgers and no combined total", () => {
+  assert.equal((panel.match(/<PerformanceActivityGrid/g) ?? []).length, 1);
+  assert.doesNotMatch(panel, /TraceLane|trace-summary|trace-stack/);
+  assert.match(activityGrid, /ACCOUNTING LEDGERS/);
+  assert.match(activityGrid, /performanceTraceAccounting\(trace\)\.exact/);
+  assert.match(activityGrid, /data-accounting-ledgers="cpu-gpu-independent"/);
   assert.doesNotMatch(panel, /cpu\.total_ms\s*\+|physics\.total_ms\s*\+|presentation\.total_ms\s*\+/);
 });
 

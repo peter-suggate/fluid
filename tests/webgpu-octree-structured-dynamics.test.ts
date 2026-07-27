@@ -47,7 +47,7 @@ const entries = ["prepareStructuredDynamics",
     `commitAdvectedStructuredClass${value}`, `forceStructuredClass${value}`,
     `projectStructuredClass${value}`]),
   ...[0, 1, 2, 3].flatMap((value) => [`divergenceStructuredClass${value}`,
-    `reconstructStructuredClass${value}`]),
+    `separateStructuredClass${value}`, `reconstructStructuredClass${value}`]),
 ];
 
 test("structured dynamics owns destination writes and has no general face/incidence graph", () => {
@@ -128,42 +128,71 @@ test("transition barycentric sampling requires non-face selector adjacency", () 
 });
 
 test("projection energy uses one coherent face-weighted pair around projection", () => {
-  assert.equal(STRUCTURED_PROJECTION_ENERGY_WORDS, 8);
+  // Four eight-word stage records: start-of-step (post-remap), post-advection,
+  // post-force (pre-projection), post-projection; each also carries the
+  // wet-only sum and the stage-1 sampler-path census. The host cross-checks
+  // generation, bank, and family coverage across all four.
+  assert.equal(STRUCTURED_PROJECTION_ENERGY_WORDS, 32);
   assert.match(structuredVelocityDynamicsWGSL,
     /binding\(23\)var<storage,read_write>projectionEnergyStats:array<u32>/);
   assert.match(structuredVelocityDynamicsWGSL,
     /dualVolume=area\/inverseDistance[\s\S]*\.5\*aperture\*dualVolume\*sample\*sample/,
-    "pre and post reductions must use the identical open-face kinetic-energy measure");
+    "all stage reductions must use the identical open-face kinetic-energy measure");
+  const startAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "start")');
+  const advectAt = dynamicsHost.indexOf("Advect structured family class");
+  const advectedAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "advected")');
   const forceAt = dynamicsHost.indexOf("Force and constrain structured family class");
   const preAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "pre")');
   const divergenceAt = dynamicsHost.indexOf("Fuse structured divergence RHS class");
   const projectionAt = dynamicsHost.indexOf("Project structured family class");
   const postAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "post")');
   const reconstructAt = dynamicsHost.indexOf("Reconstruct projected structured rows");
-  assert.ok(forceAt >= 0 && preAt > forceAt && divergenceAt > preAt);
+  assert.ok(startAt >= 0 && advectAt > startAt && advectedAt > advectAt,
+    "the start probe precedes advection and the advected probe follows its commit");
+  assert.ok(forceAt > advectedAt && preAt > forceAt && divergenceAt > preAt);
   assert.ok(projectionAt >= 0 && postAt > projectionAt && reconstructAt > postAt);
   assert.match(structuredVelocityDynamicsWGSL,
-    /projectionEnergyStats\[7\]=select\(generation,0u,failed\|\|!pairMatches\)/,
-    "the pair publishes only after post energy matches the pre generation, bank, and coverage");
+    /let base=8u\*stage;[\s\S]*projectionEnergyStats\[base\+1u\]=\(generation<<1u\)\|bank\(\)/,
+    "every stage record self-identifies with its generation and bank for host cross-checking");
 });
 
 test("projection energy decoder fails closed on partial pairs", () => {
-  const bits = new Uint32Array(new Float32Array([4, 3]).buffer);
-  const coherent = new Uint32Array([0, 11, 1, 24, 24, bits[0]!, bits[1]!, 11]);
+  const energyBits = (value: number) => new Uint32Array(new Float32Array([value]).buffer)[0]!;
+  const epochAndBank = (11 << 1) | 1;
+  const stage = (all: number, wet: number, census: [number, number] = [0, 0]) =>
+    [0, epochAndBank, 24, energyBits(all), 20, energyBits(wet), census[0], census[1]];
+  const coherent = new Uint32Array([
+    ...stage(5, 4.5), ...stage(4.75, 4.25, [3, 17]), ...stage(4, 3.5), ...stage(3, 2.75),
+  ]);
   assert.deepEqual(decodeStructuredProjectionEnergy(coherent), {
     sample: {
       epoch: 11, activeBank: 1, familySampleCount: 24,
+      startKineticEnergyProxy: 5,
+      postAdvectionKineticEnergyProxy: 4.75,
       preProjectionKineticEnergyProxy: 4,
       postProjectionKineticEnergyProxy: 3,
+      wetStartKineticEnergyProxy: 4.5,
+      wetPostAdvectionKineticEnergyProxy: 4.25,
+      wetPreProjectionKineticEnergyProxy: 3.5,
+      wetPostProjectionKineticEnergyProxy: 2.75,
+      wetFaceCount: 20,
+      transitionPathCount: 3,
+      staggeredPathCount: 17,
       projectionEnergyRatio: 0.75,
     },
     blocker: null,
   });
+  const mismatchedCount = new Uint32Array(coherent);
+  mismatchedCount[8 * 3 + 2] = 23;
+  const mismatchedEpoch = new Uint32Array(coherent);
+  mismatchedEpoch[8 * 2 + 1] = (10 << 1) | 1;
+  const failedStage = new Uint32Array(coherent);
+  failedStage[8 * 1] = 2;
   for (const words of [
-    coherent.subarray(0, 7),
-    new Uint32Array([...coherent.slice(0, 7), 10]),
-    new Uint32Array([...coherent.slice(0, 4), 23, ...coherent.slice(5)]),
-    new Uint32Array([1, ...coherent.slice(1)]),
+    coherent.subarray(0, 31),
+    mismatchedCount,
+    mismatchedEpoch,
+    failedStage,
   ]) {
     const decoded = decodeStructuredProjectionEnergy(words);
     assert.equal(decoded.sample, null);
@@ -242,8 +271,17 @@ test("momentum advection consumes the projected extended field on air rows", () 
   const advection = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn advect("),
     structuredVelocityDynamicsWGSL.indexOf("fn forceFamily("));
-  assert.doesNotMatch(advection, /rowCpt|liquidAt/,
-    "the hot advection call graph must not add separate CPT/liquid storage bindings");
+  assert.doesNotMatch(advection, /rowCpt/,
+    "the hot advection call graph must not add a separate CPT storage binding");
+  // The liquid classification IS part of the advection graph now: the carry
+  // gate re-traces the interface band and carries deep-interior liquid, the
+  // way main's geometryCode-keyed DELTA_CARRIED identity behaves. The stage
+  // stays within WebGPU's ten-storage-buffer limit because advection no
+  // longer reads the prescribed solid-normal field (aperture-0 faces keep
+  // their staged prior; forceFamily re-imposes the solid value first).
+  assert.match(dynamicsHost,
+    /this\.advection, FAMILY_CLASSES, \[0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18\]/,
+    "advection binds exactly ten storage buffers including the liquid mask");
 });
 
 test("regular advection sampling is per-axis face-based with the cube basis as fallback", () => {
@@ -264,14 +302,27 @@ test("regular advection sampling is per-axis face-based with the cube basis as f
   const advection = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn advect("),
     structuredVelocityDynamicsWGSL.indexOf("fn forceFamily("));
-  for (const site of ["adv=regularSample(row,x)", "middle=regularSample(row,midpoint)",
-    "transported=regularSample(row,departure)"]) {
+  // The face-centre sample stays on the owner's closure (the staggered basis
+  // reproduces the face's own value there); the midpoint and departure
+  // re-resolve the containing row first, as main's sampleOld resolved
+  // owner(x) per sample point, with the pinned owner row as the fallback.
+  assert.ok(advection.includes("adv=regularSample(row,x)"),
+    "the face-centre sample must route regular rows through the staggered-first sampler");
+  for (const site of ["middle=characteristicSample(row,midpoint)",
+    "transported=characteristicSample(row,departure)"]) {
     assert.ok(advection.includes(site),
-      `all three characteristic samples must route regular rows through the staggered-first sampler (${site})`);
+      `trace samples must resolve the containing element per point (${site})`);
   }
+  const characteristic = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn characteristicSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn rowTouchesDry("));
+  assert.match(characteristic, /acceptedRowContaining\(point\)/,
+    "per-point resolution must consult the accepted row directory");
+  assert.match(characteristic, /regularSample\(row,point\)/,
+    "the pinned incident row remains the fallback when the directory misses");
   assert.match(advection,
-    /let centerTag=regularTag\(row,vec3i\(0\)\);[\s\S]*let useTransition=metrics\[row\]\.caseId!=0u\|\|centerTag!=row/,
-    "the owner must consume the cube or Delaunay closure that the Section 5 producer actually published");
+    /let centerTag=regularTag\(row,vec3i\(0\)\);[\s\S]*let useTransition=centerTag!=row/,
+    "the producer's published closure marker alone selects the basis: a wall-touching row has a nonzero caseId but keeps axis-normal cube faces and must stay staggered");
   // (row, axis, side) resolves through the publisher's O(1) family-slot map,
   // never a per-slot scan: classifyStructuredCatalogSlots writes
   // rowFamilyHandles[6*row+family] and publishSection63Rows fills
@@ -289,8 +340,11 @@ test("regular advection sampling is per-axis face-based with the cube basis as f
   const planeResolver = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn staggeredPlaneValue("),
     structuredVelocityDynamicsWGSL.indexOf("fn staggeredComponent("));
-  assert.match(planeResolver, /metrics\[tag\]\.caseId!=0u\|\|rowGeometry\[rbase\(\)\+tag\]\.y!=rg\.y\)\{return vec2f\(0\.,0\.\);\}/,
-    "a transition row or size mismatch anywhere in the stencil disqualifies the staggered basis");
+  // A neighbour qualifies by same size, not caseId==0: wall rows carry a
+  // nonzero caseId yet keep exact axis-normal cube faces, and faceAxisValue
+  // rejects any genuinely non-axis-normal face below.
+  assert.match(planeResolver, /rowGeometry\[rbase\(\)\+tag\]\.y!=rg\.y\)\{return vec2f\(0\.,0\.\);\}/,
+    "a size mismatch anywhere in the stencil disqualifies the staggered basis");
   assert.match(planeResolver, /taggedVelocity\(tag\)/,
     "an air support cell contributes its published Section 5 extended vector");
   assert.match(planeResolver, /if\(!vectorValid\(extended\)\)\{return vec2f\(0\.,0\.\);\}/,
@@ -394,7 +448,10 @@ test("advection destinations stage into the inactive bank and commit after a fen
     structuredVelocityDynamicsWGSL.indexOf("fn commitAdvected("));
   assert.doesNotMatch(advection, /setValue\(/,
     "advect must never write the accepted value bank it samples from");
-  for (const staged of ["setNextValue(handle,prior);", "setNextValue(handle,solid);",
+  // Aperture-0 faces keep the staged prior (forceFamily re-imposes the exact
+  // solid value before any divergence consumer), which keeps advection inside
+  // the ten-storage-buffer stage limit.
+  for (const staged of ["setNextValue(handle,prior);",
     "setNextValue(handle,projected);"]) {
     assert.ok(advection.includes(staged), `every advect outcome must stage (${staged})`);
   }
@@ -468,7 +525,10 @@ test("prescribed solid normal velocities are read from the bank the boundary wro
   assert.match(structuredVelocityDynamicsWGSL,
     /fn solidVelocityAt\(handle:u32\)->f32\{return solidNormalVelocities\[sbase\(\)\+handle\];\}/,
     "advection, forcing, divergence, and projection must share one banked accessor");
-  assert.equal((structuredVelocityDynamicsWGSL.match(/solidVelocityAt\(handle\)/g) ?? []).length, 4);
+  // Forcing, divergence, and projection read the prescribed solid value;
+  // advection no longer does (aperture-0 faces keep their staged prior and
+  // forceFamily constrains them before the divergence integrates anything).
+  assert.equal((structuredVelocityDynamicsWGSL.match(/solidVelocityAt\(handle\)/g) ?? []).length, 3);
   for (const bank of [0, 1]) {
     assert.equal(slotBankBase(structuredVelocityDynamicsWGSL, bank, 4096),
       slotBankBase(structuredBoundaryCoefficientWGSL, bank, 4096),
@@ -553,8 +613,8 @@ test("structured boundary advection is explicit and each class runs once", () =>
     /if\(all\(selectorCenter>=lower-vec3f\(tolerance\)\)[\s\S]*return vec4f\(f32\(selectorIndex\),3\.,f32\(other\),-1\.\);[\s\S]*return velocitySample\(row\);/,
     "only catalog selectors proven exterior may use the boundary extension");
   assert.match(dynamicsHost,
-    /this\.advection[\s\S]*\[0, 1, 2, 3, 4, 5, 6, 11, 17, 18, 22\]/,
-    "advection must bind the prescribed solid-normal field and complete selector adjacency");
+    /this\.advection[\s\S]*\[0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18\]/,
+    "advection binds the liquid mask for the carry gate; the solid-normal field belongs to forcing/divergence/projection");
   const encodeClasses = dynamicsHost.slice(dynamicsHost.indexOf("private encodeClasses"),
     dynamicsHost.indexOf("encodeAdvection"));
   assert.equal((encodeClasses.match(/dispatchWorkgroupsIndirect/g) ?? []).length, 1,

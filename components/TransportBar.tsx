@@ -87,10 +87,10 @@ export function TransportBar() {
     event.target.value = "";
   };
   const toggleRecording = () => {
-    if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
+    if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
     else {
       setRunState("running");
-      simulationRecording.start(simulation.time());
+      simulationRecording.start(simulationTime);
     }
   };
   return (
@@ -99,7 +99,7 @@ export function TransportBar() {
         <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : staticRenderScene ? "Fluid simulation is disabled for this renderer validation scene" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
         <button disabled={browserPolicyPending || transportLocked || safeStepLocked} onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : transportLocked ? "Single step unavailable until the initial GPU scene is ready" : safeStepLocked ? "The bounded browser GPU step has already been requested" : "Single fluid clock step"}>STEP</button>
         <button disabled={browserSafetyLocked} onClick={() => {
-          if (recordingStatus === "recording") simulationRecording.stop(simulation.time());
+          if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
           simulation.reset();
         }}>RESET</button>
         <button

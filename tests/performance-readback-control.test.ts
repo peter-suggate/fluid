@@ -22,14 +22,16 @@ test("performance panel can bypass every trace producer without disabling correc
   const renderer = read("../lib/webgpu-renderer.ts");
   const uniform = read("../lib/webgpu-uniform-eulerian.ts");
   const tall = read("../lib/webgpu-eulerian.ts");
-  assert.match(panel, /role="switch"/);
-  assert.match(panel, /MEASUREMENT LOAD/);
+  assert.equal((panel.match(/aria-label="Performance capture mode"/g) ?? []).length, 1,
+    "capture mode has one control, not a select plus redundant switch");
+  assert.doesNotMatch(panel, /MEASUREMENT LOAD|role="switch"/);
   assert.match(panel, /Correctness synchronization remains active/);
-  assert.match(store, /enabled: false/,
-    "measurement work is opt-in so ordinary UI simulation keeps Dawn's lean submission path");
-  assert.match(store, /enabledAt_ms: -Infinity/);
+  assert.match(store, /mode: "activity"/);
+  assert.match(store, /enabled: true/,
+    "detailed trace and activity capture are enabled by default");
+  assert.match(store, /shaderActivityEnabled: true/);
   for (const source of [controller, renderer, uniform, tall]) {
-    assert.match(source, /usePerformanceInstrumentationStore\.getState\(\)\.enabled/);
+    assert.match(source, /usePerformanceInstrumentationStore\.getState\(\)/);
   }
   assert.match(renderer, /measurementInstrumentationEnabled[\s\S]*shouldTracePresentation/);
   assert.match(uniform, /measurementInstrumentationEnabled[\s\S]*shouldTracePhysics/);

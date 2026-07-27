@@ -71,6 +71,12 @@ import {
   WebGPUFineLevelSetTransport,
 } from "./webgpu-octree-fine-levelset-transport";
 import { WebGPUFineLevelSetVolumeCorrection } from "./webgpu-octree-fine-levelset-volume";
+import {
+  createGPULogicalActivityAdoptionContext,
+  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
+  type GPULogicalActivityAdoptionContext,
+} from "./gpu-logical-activity-adoption";
+import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 import { FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, planFineLevelSetGPUSummaries,
   WebGPUFineLevelSetSummaries } from "./webgpu-octree-fine-levelset-summary";
 import {
@@ -894,6 +900,12 @@ export class WebGPUOctreeProjection {
   private globalFinePublishedIsA = true;
   private readonly globalFinePublicationByEncoder = new WeakMap<GPUCommandEncoder, boolean>();
   private readonly analyticBootstrapRetirementByEncoder = new WeakSet<GPUCommandEncoder>();
+  /** Once the t=0 authority is retired, scalar scene revisions must never
+   * re-arm the analytic selector: `writeParams` runs on every
+   * `applySceneUniforms`, and a re-armed selector silently rebuilds all
+   * later topology candidates from the authored t=0 surface. Only a re-seed
+   * (which re-runs the fenced bootstrap phases) may arm it again. */
+  private analyticBootstrapRetired = false;
   /** Recurring fine generation transported before forces and settled only
    * after projection/extension has published. */
   private pendingFinePublication?: PendingFinePublication;
@@ -992,6 +1004,7 @@ export class WebGPUOctreeProjection {
   private structuredDynamics?: WebGPUStructuredVelocityDynamics;
   private airVelocitySupport?: WebGPUOctreeAirVelocitySupportProducer;
   private structuredDivergenceRhs?: GPUBuffer;
+  private structuredSeparationMask?: GPUBuffer;
   private readonly pressureCapacity: OctreePressureCapacityPlan;
   private readonly frontierAllocation: OctreeLeafFrontierAllocationPlan;
   /** A 4096-word shared sort occupies exactly WebGPU's portable 16 KiB floor. */
@@ -1476,8 +1489,12 @@ export class WebGPUOctreeProjection {
           // An unreachable cutoff sentinel is still rejected by seed identity.
           const redistanceBandFineCells = Math.min(256,
             transportBandFineCells + 2 * globalFineFactor + 3);
+          // The regular UI lane advances by 0.008 s. Its characteristic can
+          // cross more than one finest octree cell once the dam accelerates,
+          // while the redistance residency above already reserves two.
+          const maximumBacktraceFineCells = 2 * globalFineFactor;
           const physicalBand = planFineLevelSetTopologyBand(brickResolution, {
-            maximumBacktraceFineCells: globalFineFactor,
+            maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
             redistanceBandFineCells,
             safetyBrickRings: 1,
@@ -2032,8 +2049,18 @@ export class WebGPUOctreeProjection {
         this.resources.rigidBodies, structuredSource.control,
       );
     }
+    // One-step-lagged unilateral-contact active set: the projection stage
+    // marks liquid rows holding tension against the closed ceiling; the next
+    // step's boundary rebuild opens those rows' world faces so the solve
+    // itself computes the separation with consistent divergence.
+    this.structuredSeparationMask = this.device.createBuffer({
+      label: "Structured ceiling separation mask",
+      size: this.dims.nx * this.dims.ny * this.dims.nz * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
     this.structuredBoundary = new WebGPUStructuredBoundaryCoefficients(this.device, {
       structured: structuredSource,
+      separationMask: this.structuredSeparationMask,
       coarse: this.powerCoarseLevelSetSchedule.sampleSource,
       solid: this.powerSolidVertices?.source,
       rigidBodies: this.resources.rigidBodies,
@@ -2096,6 +2123,7 @@ export class WebGPUOctreeProjection {
     }
     this.structuredDynamics = new WebGPUStructuredVelocityDynamics(this.device, {
       structured: structuredSource, topology: this.powerTopology!.source, pressure: this.pressureA,
+      separationMask: this.structuredSeparationMask,
       divergenceRhs: this.structuredDivergenceRhs,
       liquidMask: this.structuredBoundary!.liquidMask,
       solidNormalVelocities: this.structuredBoundary!.solidNormalVelocities,
@@ -2152,9 +2180,23 @@ export class WebGPUOctreeProjection {
       * (this.scene.container.depth_m / this.dims.nz);
     const data = new Float32Array(4); data[0] = cellVolume;
     this.device.queue.writeBuffer(this.powerVolumeParams, 0, data);
-    const shaderModule = this.device.createShaderModule({ label: "Publish physical octree power volumes", code: octreePowerVolumeShader });
-    this.powerVolumePipeline = this.device.createComputePipeline({ label: "Publish physical octree power volumes", layout: "auto",
-      compute: { module: shaderModule, entryPoint: "publishPowerVolumes" } });
+    const powerVolumeProfile = performanceShaderVariant();
+    const powerVolumeActivity = createGPULogicalActivityAdoptionContext({
+      moduleId: "octree/power-volume",
+      profile: powerVolumeProfile,
+    });
+    const powerVolumeVariant = powerVolumeActivity.module(
+      octreePowerVolumeActivityShader(powerVolumeActivity),
+      `octree/power-volume/${powerVolumeProfile.cacheKey}`,
+    );
+    const shaderModule = this.device.createShaderModule({
+      label: "Publish physical octree power volumes",
+      code: powerVolumeVariant.code,
+    });
+    this.powerVolumePipeline = powerVolumeActivity.registerPipeline(this.device.createComputePipeline({
+      label: "Publish physical octree power volumes", layout: "auto",
+      compute: { module: shaderModule, entryPoint: "publishPowerVolumes" },
+    }));
     this.powerVolumeGroup = this.device.createBindGroup({ layout: this.powerVolumePipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: this.powerVolumeParams } }, { binding: 1, resource: { buffer: this.powerTopology.metrics } },
       { binding: 2, resource: { buffer: this.leafHeaders } }, { binding: 3, resource: { buffer: this.compaction } },
@@ -2242,6 +2284,9 @@ export class WebGPUOctreeProjection {
     const phi = initialOctreeLevelSet(scene, this.dims, cell);
     if (!surfaceState.reseedLevelSet(this.device, phi)) return false;
     this.scene = scene;
+    // The caller re-runs the fenced cold-bootstrap phases, whose
+    // structured-authority submission retires the selector again.
+    this.analyticBootstrapRetired = false;
     this.writeParams();
     return true;
   }
@@ -2285,7 +2330,7 @@ export class WebGPUOctreeProjection {
       speed > 0 ? inflow!.velocity_m_s.z / speed : 0,
       inflow?.length_m ?? 0
     ]);
-    const analyticBootstrapSelector = !this.analyticSparseBootstrap
+    const analyticBootstrapSelector = !this.analyticSparseBootstrap || this.analyticBootstrapRetired
       ? 0
       : this.scene.fluid.initialCondition === "dam-break" ? -20 : -10;
     new Float32Array(data, 112, 4).set([
@@ -2391,6 +2436,7 @@ export class WebGPUOctreeProjection {
       this.globalFinePublicationByEncoder.delete(encoder);
     }
     if (this.analyticBootstrapRetirementByEncoder.delete(encoder)) {
+      this.analyticBootstrapRetired = true;
       this.device.queue.writeBuffer(this.params, 124, new Float32Array([0]));
       this.structuredBoundary?.retireAnalyticBootstrap();
     }
@@ -2770,7 +2816,11 @@ export class WebGPUOctreeProjection {
     if (!dynamics || pressure !== this.pressureA && pressure !== this.pressureB) {
       throw new Error("Structured projection pressure buffer is not an accepted solve target");
     }
-    dynamics.encodeProjection(broker, this.powerTimestep_s, this.scene.fluid.density_kg_m3, pressure);
+    dynamics.encodeProjection(broker, this.powerTimestep_s, this.scene.fluid.density_kg_m3, [
+      this.scene.fluid.gravity_m_s2.x,
+      this.scene.fluid.gravity_m_s2.y,
+      this.scene.fluid.gravity_m_s2.z,
+    ], pressure);
     if (!this.airVelocitySupport || this.activePowerGeneration === 0) {
       throw new Error("Structured projection requires an accepted Section 5 air-support epoch");
     }
@@ -3072,6 +3122,7 @@ export class WebGPUOctreeProjection {
         // complete 3-D trilinear stencil and its centre on the closed cutoff.
         const redistanceBandCells = Math.min(256,
           bandCells + 2 * this.globalFineLevelSet!.plan.fineFactor + 3);
+        const maximumBacktraceFineCells = 2 * this.globalFineLevelSet!.plan.fineFactor;
         const transport = this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB;
         let transportEncoded = false;
         // Adapter publication, coarse bootstrap and compact interface seeding
@@ -3088,7 +3139,7 @@ export class WebGPUOctreeProjection {
             openTopBoundary: this.scene.container.top !== "closed",
             transportBandCells: Math.min(256, Math.max(4,
               this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4))),
-            maximumBacktraceFineCells: this.globalFineLevelSet!.plan.fineFactor,
+            maximumBacktraceFineCells,
           });
           // Topology may reuse the shared physical payload pool. Capture the
           // transported old phi by logical sample before that reuse, then
@@ -3116,9 +3167,8 @@ export class WebGPUOctreeProjection {
           publicationTarget = this.globalFineSourceB!;
           const topologyBroker = new PassBroker(encoder);
           publicationTopology.encode(topologyBroker, seeds, [compactCoarseEntry], {
-            // The octree timestep is bounded at one finest effective cell.
-            // Express that same physical displacement on the fine lattice.
-            maximumBacktraceFineCells: this.globalFineLevelSet!.plan.fineFactor,
+            // Match the two-finest-cell residency reserved at allocation.
+            maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
             redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
@@ -3136,7 +3186,7 @@ export class WebGPUOctreeProjection {
           publicationTarget = this.globalFineSourceA!;
           const topologyBroker = new PassBroker(encoder);
           publicationTopology.encode(topologyBroker, seeds, [compactCoarseEntry], {
-            maximumBacktraceFineCells: this.globalFineLevelSet!.plan.fineFactor,
+            maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
             redistanceBandFineCells: redistanceBandCells,
             safetyBrickRings: 1,
@@ -4211,6 +4261,7 @@ export class WebGPUOctreeProjection {
     this.structuredDynamics?.destroy();
     this.structuredBoundary?.destroy(); this.structuredVelocity?.destroy();
     this.structuredDivergenceRhs?.destroy();
+    this.structuredSeparationMask?.destroy();
     this.ownerPages.destroy();
     this.pressureA.destroy(); this.pressureB.destroy(); this.params.destroy();
     this.topologyCandidateDispatch.destroy();
@@ -4255,6 +4306,48 @@ struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32
   volumes[row]=select(0.0,volume,volume==volume&&volume>0.0&&abs(volume)<=3.402823e38);
 }
 `;
+
+/** Activity-only variant; the exported production shader above is never rewritten. */
+export function octreePowerVolumeActivityShader(activity: GPULogicalActivityAdoptionContext): string {
+  // Fine semantic phase 2 is bracketed exactly by the completion seams at
+  // encodeNativePowerAssembly: structuredAdvectionBoundaryRhs ->
+  // structuredVolumeCapture -> finalPressureRowAssembly. The hardware trace
+  // arms those boundaries onto this pass and its immediate successor.
+  const phaseIndex = OCTREE_FINE_SEMANTIC_PHASES.indexOf("structuredVolumeCapture");
+  if (phaseIndex < 0) throw new Error("Structured-volume semantic phase is missing");
+  const fineSemanticTicks = octreeFineEngineSplitsEnabled();
+  const entry = activity.workgroup("publish-power-cell-volumes", "enter", {
+    // Logical boundary tick zero closes trace phase zero. This dispatch is
+    // phase two, so it begins at boundary one and closes at boundary two.
+    tick: fineSemanticTicks ? `${phaseIndex - 1}u` : undefined,
+    workgroupId: "activityWorkgroupId",
+    localInvocationIndex: "activityLocalInvocationIndex",
+    workgroupLaneCount: 64,
+    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  const exit = activity.workgroup("publish-power-cell-volumes", "exit", {
+    tick: fineSemanticTicks ? `${phaseIndex}u` : undefined,
+    workgroupId: "activityWorkgroupId",
+    localInvocationIndex: "activityLocalInvocationIndex",
+    workgroupLaneCount: 64,
+    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  if (!entry && !exit) return octreePowerVolumeShader;
+  const signature = "fn publishPowerVolumes(@builtin(global_invocation_id) gid:vec3u)";
+  const instrumentedSignature = "fn publishPowerVolumes(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) activityWorkgroupId:vec3u,@builtin(local_invocation_index) activityLocalInvocationIndex:u32,@builtin(num_workgroups) activityNumWorkgroups:vec3u)";
+  const start = octreePowerVolumeShader.indexOf(signature);
+  if (start < 0) throw new Error("Power-volume activity entry point is missing");
+  const bodyStart = octreePowerVolumeShader.indexOf("{", start + signature.length);
+  let depth = 0, bodyEnd = -1;
+  for (let index = bodyStart; index < octreePowerVolumeShader.length; index += 1) {
+    if (octreePowerVolumeShader[index] === "{") depth += 1;
+    else if (octreePowerVolumeShader[index] === "}" && --depth === 0) { bodyEnd = index; break; }
+  }
+  if (bodyStart < 0 || bodyEnd < 0) throw new Error("Power-volume activity body is malformed");
+  const body = octreePowerVolumeShader.slice(bodyStart + 1, bodyEnd)
+    .replace(/\breturn;/g, `${exit}return;`);
+  return `${octreePowerVolumeShader.slice(0, start)}${instrumentedSignature}{${entry}${body}${exit}${octreePowerVolumeShader.slice(bodyEnd)}`;
+}
 
 function initialOctreeLevelSet(
   scene: SceneDescription,

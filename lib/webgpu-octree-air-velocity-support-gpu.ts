@@ -918,11 +918,17 @@ var<workgroup> emitRowTetraHeader:array<u32,2>;
     var enabled=row<s(2u)&&s(0u)==0u&&transportDemandRow(row);var g=vec4u(0u);
     if(enabled){g=rowGeometry[s(4u)*p.rowCapacity+row];if(g.y==0u||g.x>=p.domainVolume){fail(itemBase,ERROR_SOURCE);enabled=false;}}
     emitRowGeometry[0]=g.x;emitRowGeometry[1]=g.y;emitRowGeometry[2]=g.z;emitRowGeometry[3]=g.w;
-    atomicStore(&emitRowActive,select(0u,1u,enabled));atomicStore(&emitRowRegular,select(0u,1u,enabled&&g.z==0u));
+    // Regular-closure eligibility is geometric: any row whose boundary-clamped
+    // 27-neighbourhood is uniform owns axis-normal cube faces, including rows
+    // whose caseId is nonzero only because a domain wall enters the descriptor.
+    // The paper's per-axis face interpolation covers exactly these regular
+    // regions; keying the closure off caseId==0 disabled it for every
+    // wall-touching row, which is where a dam break keeps its kinetic energy.
+    atomicStore(&emitRowActive,select(0u,1u,enabled));atomicStore(&emitRowRegular,select(0u,1u,enabled));
   }
   workgroupBarrier();if(workgroupUniformLoad(&emitRowActive)==0u){return;}
   let g=vec4u(emitRowGeometry[0],emitRowGeometry[1],emitRowGeometry[2],emitRowGeometry[3]);
-  if(g.z==0u&&lane<${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u){
+  if(lane<${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u){
     let dx=i32(lane%3u)-1;let dy=i32((lane/3u)%3u)-1;let dz=i32(lane/9u)-1;
     let center=vec3f(coord(g.x))+.5*f32(g.y);let half=.5*f32(g.y);
     let expectedCenter=clamp(center+vec3f(f32(dx),f32(dy),f32(dz))*f32(g.y),
@@ -930,21 +936,24 @@ var<workgroup> emitRowTetraHeader:array<u32,2>;
     if(!fineResolvedOwnerMatches(expectedCenter,g.y,itemBase+lane)){atomicStore(&emitRowRegular,0u);}
   }
   workgroupBarrier();let regular=workgroupUniformLoad(&emitRowRegular)!=0u;let q=vec3i(coord(g.x));
-  if(lane==0u&&!regular){var valid=g.z<=0xffffffffu/3u;let headerAt=select(0u,3u*g.z,valid);
+  // Transition consumers (fine transport, tet-fan sampling) still address the
+  // selector tags of every nonzero-case row, so a regular wall row publishes
+  // BOTH closures: cube tags for the staggered basis and its retained tet fan.
+  let needsSelectors=!regular||g.z!=0u;
+  if(lane==0u&&needsSelectors){var valid=g.z<=0xffffffffu/3u;let headerAt=select(0u,3u*g.z,valid);
     valid=valid&&headerAt<=arrayLength(&tetraHeaders)&&arrayLength(&tetraHeaders)-headerAt>=3u;
     var first=0u;var count=0u;if(valid){first=tetraHeaders[headerAt];count=tetraHeaders[headerAt+1u];
       valid=first<=arrayLength(&tetrahedra)&&count<=arrayLength(&tetrahedra)-first
         &&count<=${OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS / 3}u;}
-    if(!valid){fail(itemBase,ERROR_CATALOG);}emitRowTetraHeader[0]=first;emitRowTetraHeader[1]=count;
+    if(!valid&&!regular){fail(itemBase,ERROR_CATALOG);}emitRowTetraHeader[0]=first;emitRowTetraHeader[1]=count;
     atomicStore(&emitRowActive,select(0u,1u,valid));}
   workgroupBarrier();let transitionActive=workgroupUniformLoad(&emitRowActive)!=0u;
   if(regular&&lane<${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u){let local=lane;let dx=i32(local%3u)-1;let dy=i32((local/3u)%3u)-1;let dz=i32(local/9u)-1;
     let requestedOrigin=q+vec3i(dx,dy,dz)*i32(g.y);let inDomain=all(requestedOrigin>=vec3i(0))&&all(requestedOrigin+vec3i(i32(g.y))<=vec3i(p.dimensions));
     let tag=p.regularTagOffset+row*${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u+local;
-    if(!inDomain){atomicStore(&supportArena[tag],INVALID);return;}let cell=cellOf(vec3u(requestedOrigin));atomicAdd(&scratch[27u],1u);
-    demand(row,i32(cell),g.y,RECORD_REGULAR|RECORD_EXTENSION,tag,itemBase+local);return;}
-  if(regular){return;}
-  if(!transitionActive){return;}
+    if(!inDomain){atomicStore(&supportArena[tag],INVALID);}else{let cell=cellOf(vec3u(requestedOrigin));atomicAdd(&scratch[27u],1u);
+    demand(row,i32(cell),g.y,RECORD_REGULAR|RECORD_EXTENSION,tag,itemBase+local);}}
+  if(!needsSelectors||!transitionActive){return;}
   let occurrence=lane;let first=emitRowTetraHeader[0];let count=emitRowTetraHeader[1];if(occurrence>=3u*count){return;}
   let item=itemBase+${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u+occurrence;
   let packed=tetrahedra[first+occurrence/3u];let selector=(packed>>(8u*(occurrence%3u)))&255u;
@@ -1190,7 +1199,13 @@ fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[it
   for(var localFace=0u;localFace<incidence;localFace+=1u){let otherRow=adjacencyIncident(faceRow,localFace);
     if(otherRow==INVALID){continue;}for(var quadrant=0u;quadrant<4u;quadrant+=1u){let source=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant;
       if(source>=s(29u)){continue;}var candidate=select(faceB[source],faceA[source],readA);if(candidate.w!=0u){
-        let distance=bitcast<f32>(candidate.y)+length(faceCenter(item)-faceCenter(source));
+        // candidate.z is the ORIGINAL seed patch, preserved verbatim through
+        // every copy, so the carrier metric is the true Euclidean distance to
+        // the free surface — the reference lane's closest-point transform.
+        // Accumulating per-hop path length instead made the metric an
+        // axis-graph geodesic (Manhattan-like), which under-drives diagonal
+        // spreading and squares off the dam front.
+        let distance=length(faceCenter(item)-faceCenter(candidate.z));
         if(!finiteValue(distance)){fail(item,ERROR_SOURCE);continue;}candidate.y=bitcast<u32>(distance);}
       if(betterFace(candidate,best)){best=candidate;}}}
   let changed=any(best!=current);if(readA){faceB[item]=best;}else{faceA[item]=best;}return changed;}

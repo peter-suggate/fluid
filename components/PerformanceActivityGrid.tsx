@@ -1,0 +1,661 @@
+"use client";
+
+import { useMemo, useState, type CSSProperties } from "react";
+import type {
+  ActivityEvidence,
+  ActivityLane,
+  ActivityRow,
+  PerformanceActivityFrame,
+} from "@/lib/performance-activity";
+import {
+  performanceTraceAccounting,
+  type PaperPhaseId,
+  type PerformanceTrace,
+} from "@/lib/performance-trace";
+
+export type PerformanceActivityEvidence =
+  | "measured-progress"
+  | "reconstructed"
+  | "idle"
+  | "unknown";
+
+export interface PerformanceActivityTask {
+  id: string;
+  label: string;
+  stageId?: string;
+  start_ms: number;
+  end_ms: number;
+  evidence: PerformanceActivityEvidence;
+  detail?: string;
+  color?: string;
+}
+
+export interface PerformanceActivityLane {
+  id: string;
+  label: string;
+  group: "cpu" | "gpu";
+  /** `frame` means start/end share the capture's clock; `local` does not. */
+  clockOrigin: "frame" | "local";
+  tasks: readonly PerformanceActivityTask[];
+}
+
+export interface PerformanceActivitySegment {
+  start_ms: number;
+  end_ms: number;
+  evidence: PerformanceActivityEvidence;
+  color?: string;
+  /** Temporal coverage for a raw row, or observed member occupancy for a coalesced display bin. */
+  activeFraction?: number;
+  /** Logical resources reporting progress in a coalesced display bin. */
+  activeResourceCount?: number;
+  /** Logical resources represented by a coalesced display bin. */
+  resourceCount?: number;
+  label?: string;
+  detail?: string;
+}
+
+export interface PerformanceActivityResource {
+  id: string;
+  label: string;
+  group: "cpu" | "gpu";
+  matrixKind: "cpu-context" | "gpu-logical" | "aggregate";
+  /** Number of raw logical resources represented by this display row. */
+  sourceResourceCount?: number;
+  segments: readonly PerformanceActivitySegment[];
+}
+
+export interface PerformanceActivityGridProps {
+  cpu?: PerformanceTrace;
+  physics?: PerformanceTrace;
+  presentation?: PerformanceTrace;
+  frame?: PerformanceActivityFrame;
+  /** Store-owned label for the selected retained capture. */
+  captureLabel?: string;
+  captureOptions?: readonly { id: string; label: string }[];
+  selectedCaptureId?: string;
+  onSelectCapture?: (frameId: string) => void;
+  /** A retained store frame used for the compact duration comparison. */
+  referenceFrame?: PerformanceActivityFrame;
+  referenceLabel?: string;
+  onSetReference?: () => void;
+  onClearReference?: () => void;
+  statusLabel?: string;
+  className?: string;
+}
+
+export interface PerformanceActivityView {
+  duration_ms: number;
+  synchronized: boolean;
+  lanes: readonly PerformanceActivityLane[];
+  resources: readonly PerformanceActivityResource[];
+  /** Raw logical GPU rows retained by the source frame, before display projection. */
+  logicalGpuResourceCount: number;
+}
+
+/** React output is bounded while the retained frame keeps every captured workgroup row. */
+export const GPU_ACTIVITY_DISPLAY_BAND_LIMIT = 16 as const;
+export const DEFAULT_ACTIVITY_MILLISECONDS_WIDTH_PX = 2 as const;
+export const MIN_ACTIVITY_MILLISECONDS_WIDTH_PX = 1 as const;
+export const MAX_ACTIVITY_MILLISECONDS_WIDTH_PX = 8 as const;
+
+const LANE_META: Readonly<Record<PerformanceTrace["lane"], {
+  id: string;
+  label: string;
+  resourceLabel: string;
+  group: "cpu" | "gpu";
+}>> = {
+  "main-thread": {
+    id: "cpu-main-thread",
+    label: "CPU · main thread",
+    resourceLabel: "Main-thread envelope",
+    group: "cpu",
+  },
+  physics: {
+    id: "gpu-physics",
+    label: "GPU · physics queue",
+    resourceLabel: "Physics queue envelope",
+    group: "gpu",
+  },
+  presentation: {
+    id: "gpu-presentation",
+    label: "GPU · presentation queue",
+    resourceLabel: "Presentation queue envelope",
+    group: "gpu",
+  },
+};
+
+const PHASE_COLORS: Partial<Record<PaperPhaseId, string>> = {
+  "frame-control": "#728f88",
+  "scene-upload": "#4f94a4",
+  "command-encoding": "#789a91",
+  "coarse-grid": "#9b74c2",
+  "power-topology": "#b478bd",
+  "velocity-advection": "#32a9b8",
+  "pressure-system": "#df9960",
+  "pressure-solve": "#e8bf5e",
+  "velocity-projection": "#d36972",
+  "velocity-extrapolation": "#67b682",
+  "fine-sdf-advection": "#39a8b1",
+  "fine-sdf-redistance": "#66b684",
+  "adaptive-publication": "#4d91a3",
+  "surface-extraction": "#45a6cf",
+  "water-caustics": "#52c4b0",
+  "svo-cone-lighting": "#d2a55a",
+  "svo-primary": "#667dd0",
+  "svo-temporal": "#8571d8",
+  "dry-scene": "#657dcd",
+  "water-front-interface": "#48a8ce",
+  "water-back-interface": "#348fb9",
+  "water-interfaces": "#45a6cf",
+  "optical-composite": "#b56cc1",
+  "inspection-overlay": "#ca8499",
+  present: "#8ba5b0",
+  other: "#9a7b55",
+};
+
+const FALLBACK_COLORS = ["#46a6c8", "#a079be", "#d79a61", "#62b68b", "#cf7180", "#7389cf"] as const;
+
+const CANONICAL_LANE_META: Readonly<Record<ActivityLane, { label: string; group: "cpu" | "gpu" }>> = {
+  "cpu-main": { label: "CPU · main thread", group: "cpu" },
+  "cpu-worker": { label: "CPU · workers", group: "cpu" },
+  "gpu-physics": { label: "GPU · physics", group: "gpu" },
+  "gpu-presentation": { label: "GPU · presentation", group: "gpu" },
+};
+
+const MATRIX_GROUPS = [
+  { kind: "cpu-context", label: "CPU SOFTWARE RESOURCES", group: "cpu" },
+  { kind: "gpu-logical", label: "GPU LOGICAL WORKGROUP BINS", group: "gpu" },
+  { kind: "aggregate", label: "AGGREGATE FALLBACK", group: "mixed" },
+] as const satisfies readonly {
+  kind: PerformanceActivityResource["matrixKind"];
+  label: string;
+  group: "cpu" | "gpu" | "mixed";
+}[];
+
+const finiteNonNegative = (value: number) => Number.isFinite(value) ? Math.max(0, value) : 0;
+
+const phaseEvidence = (trace: PerformanceTrace): PerformanceActivityEvidence =>
+  trace.measurementSource === "gpu-queue-wall" ? "unknown" : "reconstructed";
+
+const canonicalEvidence = (evidence: ActivityEvidence): PerformanceActivityEvidence =>
+  evidence === "measured" ? "measured-progress" : evidence;
+
+function traceLane(trace: PerformanceTrace): PerformanceActivityLane {
+  const meta = LANE_META[trace.lane];
+  let cursor_ms = 0;
+  const evidence = phaseEvidence(trace);
+  const tasks = trace.phases.flatMap((phase, index) => {
+    const duration_ms = finiteNonNegative(phase.duration_ms);
+    const start_ms = cursor_ms;
+    cursor_ms += duration_ms;
+    if (duration_ms === 0) return [];
+    return [{
+      id: `${meta.id}-${trace.sampleId}-${index}`,
+      label: phase.label,
+      stageId: phase.id,
+      start_ms,
+      end_ms: cursor_ms,
+      evidence,
+      detail: trace.measurementSource === "gpu-queue-wall"
+        ? "Queue-completion duration; semantic phase timing is unavailable"
+        : "Measured duration reconstructed on this lane's local origin",
+    }];
+  });
+  return { id: meta.id, label: meta.label, group: meta.group, clockOrigin: "local", tasks };
+}
+
+function traceResource(trace: PerformanceTrace, lane: PerformanceActivityLane): PerformanceActivityResource {
+  const meta = LANE_META[trace.lane];
+  const duration_ms = finiteNonNegative(trace.total_ms);
+  const segments = Array.from({ length: Math.max(1, Math.ceil(duration_ms)) }, (_, index) => {
+    const start_ms = index;
+    const end_ms = Math.min(duration_ms, index + 1);
+    const candidates = lane.tasks.map((task) => ({
+      task,
+      overlap_ms: Math.max(0, Math.min(end_ms, task.end_ms) - Math.max(start_ms, task.start_ms)),
+    })).filter((candidate) => candidate.overlap_ms > 0)
+      .sort((left, right) => right.overlap_ms - left.overlap_ms);
+    const dominant = candidates[0]?.task;
+    const active_ms = Math.min(end_ms - start_ms,
+      candidates.reduce((total, candidate) => total + candidate.overlap_ms, 0));
+    return {
+      start_ms,
+      end_ms,
+      evidence: dominant?.evidence === "unknown" ? "unknown" : "reconstructed",
+      color: dominant
+        ? PHASE_COLORS[dominant.stageId as PaperPhaseId]
+          ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length]
+        : undefined,
+      activeFraction: end_ms > start_ms ? active_ms / (end_ms - start_ms) : 0,
+      label: dominant?.label ?? "Unknown activity",
+      detail: dominant?.evidence === "unknown"
+        ? "No resource activity attribution is available"
+        : "Reconstructed from adjacent phase boundaries; not a physical core measurement",
+    } satisfies PerformanceActivitySegment;
+  });
+  return {
+    id: `${lane.id}-envelope`,
+    label: meta.resourceLabel,
+    group: meta.group,
+    matrixKind: "aggregate",
+    segments,
+  };
+}
+
+/** Pure adapter used by the UI and its contract tests. */
+export function buildPerformanceActivityView(input: Pick<PerformanceActivityGridProps, "cpu" | "physics" | "presentation" | "frame">): PerformanceActivityView {
+  if (input.frame) return canonicalFrameView(input.frame);
+  const traces = [input.cpu, input.physics, input.presentation]
+    .filter((trace): trace is PerformanceTrace => trace !== undefined);
+  const lanes = traces.map(traceLane);
+  return {
+    duration_ms: Math.max(0.000001, ...traces.map((trace) => finiteNonNegative(trace.total_ms))),
+    synchronized: false,
+    lanes,
+    resources: traces.map((trace, index) => traceResource(trace, lanes[index])),
+    logicalGpuResourceCount: 0,
+  };
+}
+
+type CanonicalTask = PerformanceActivityFrame["tasks"][number];
+
+function canonicalRowResource(input: {
+  row: ActivityRow;
+  taskById: ReadonlyMap<string, CanonicalTask>;
+  relativeTime: (time_ms: number, resourceId: string, clockDomain: string) => number;
+}): PerformanceActivityResource {
+  const { row, taskById, relativeTime } = input;
+  return {
+    id: row.resource.id,
+    label: row.resource.label,
+    group: row.resource.lane.startsWith("cpu") ? "cpu" : "gpu",
+    matrixKind: row.resource.kind === "gpu-logical-capacity"
+      ? "gpu-logical"
+      : row.resource.kind === "gpu-aggregate" ? "aggregate" : "cpu-context",
+    segments: row.slices.map((slice) => ({
+      start_ms: relativeTime(slice.start_ms, row.resource.id, row.resource.clockDomain),
+      end_ms: relativeTime(slice.end_ms, row.resource.id, row.resource.clockDomain),
+      evidence: canonicalEvidence(slice.evidence),
+      color: slice.taskId ? taskById.get(slice.taskId)?.color : undefined,
+      activeFraction: slice.end_ms > slice.start_ms
+        ? Math.min(1, slice.active_ms / (slice.end_ms - slice.start_ms))
+        : 0,
+      label: slice.taskId ? taskById.get(slice.taskId)?.label : slice.evidence === "idle" ? "Measured idle" : "Unknown activity",
+      detail: `${slice.active_ms.toFixed(3)} ms active · ${slice.spanIds.length} span${slice.spanIds.length === 1 ? "" : "s"}`,
+    })),
+  };
+}
+
+/**
+ * Project exhaustive logical GPU rows into a bounded number of display bins.
+ * This never mutates or replaces the raw rows retained by PerformanceActivityFrame.
+ */
+export function coalesceGpuLogicalRows(input: {
+  rows: readonly ActivityRow[];
+  taskById: ReadonlyMap<string, CanonicalTask>;
+  relativeTime: (time_ms: number, resourceId: string, clockDomain: string) => number;
+  limit?: number;
+}): PerformanceActivityResource[] {
+  const { taskById, relativeTime } = input;
+  const limit = Math.max(1, Math.floor(input.limit ?? GPU_ACTIVITY_DISPLAY_BAND_LIMIT));
+  const ordered = input.rows.map((row, originalIndex) => ({ row, originalIndex })).sort((left, right) => {
+    const leftSlot = left.row.resource.capacitySlot;
+    const rightSlot = right.row.resource.capacitySlot;
+    if (leftSlot !== undefined && rightSlot !== undefined && leftSlot !== rightSlot) return leftSlot - rightSlot;
+    if (leftSlot !== undefined && rightSlot === undefined) return -1;
+    if (leftSlot === undefined && rightSlot !== undefined) return 1;
+    return left.row.resource.id.localeCompare(right.row.resource.id) || left.originalIndex - right.originalIndex;
+  });
+  const bandCount = Math.min(limit, ordered.length);
+  if (bandCount === 0) return [];
+
+  return Array.from({ length: bandCount }, (_, bandIndex): PerformanceActivityResource => {
+    const firstIndex = Math.floor(bandIndex * ordered.length / bandCount);
+    const lastIndex = Math.floor((bandIndex + 1) * ordered.length / bandCount);
+    const members = ordered.slice(firstIndex, lastIndex).map(({ row }) => row);
+    const sliceCount = members.reduce((maximum, row) => Math.max(maximum, row.slices.length), 0);
+    const slots = members.map((row) => row.resource.capacitySlot).filter((slot): slot is number => slot !== undefined);
+    const memberRange = slots.length === members.length
+      ? `slots ${Math.min(...slots)}–${Math.max(...slots)}`
+      : `${members.length} sampled workgroups`;
+    const firstMemberId = members[0]?.resource.id ?? bandIndex.toString();
+    const lastMemberId = members.at(-1)?.resource.id ?? bandIndex.toString();
+    const segments = Array.from({ length: sliceCount }, (_, sliceIndex): PerformanceActivitySegment => {
+      const slices = members.flatMap((row) => {
+        const slice = row.slices[sliceIndex];
+        return slice ? [{ row, slice }] : [];
+      });
+      const active = slices.filter(({ slice }) => slice.evidence === "measured" || slice.evidence === "reconstructed");
+      const taskScores = new Map<string, { count: number; active_ms: number }>();
+      for (const { slice } of active) {
+        if (!slice.taskId) continue;
+        const current = taskScores.get(slice.taskId) ?? { count: 0, active_ms: 0 };
+        current.count += 1;
+        current.active_ms += slice.active_ms;
+        taskScores.set(slice.taskId, current);
+      }
+      const dominantTaskId = [...taskScores.entries()].sort((left, right) =>
+        right[1].count - left[1].count
+        || right[1].active_ms - left[1].active_ms
+        || left[0].localeCompare(right[0]))[0]?.[0];
+      const start_ms = Math.min(...slices.map(({ row, slice }) =>
+        relativeTime(slice.start_ms, row.resource.id, row.resource.clockDomain)));
+      const end_ms = Math.max(...slices.map(({ row, slice }) =>
+        relativeTime(slice.end_ms, row.resource.id, row.resource.clockDomain)));
+      const activeResourceCount = active.length;
+      const occupancy = activeResourceCount / members.length;
+      const evidence: PerformanceActivityEvidence = activeResourceCount > 0
+        ? active.some(({ slice }) => slice.evidence === "reconstructed") ? "reconstructed" : "measured-progress"
+        : slices.length === members.length && slices.every(({ slice }) => slice.evidence === "idle") ? "idle" : "unknown";
+      const dominantTask = dominantTaskId ? taskById.get(dominantTaskId) : undefined;
+      return {
+        start_ms: Number.isFinite(start_ms) ? start_ms : sliceIndex,
+        end_ms: Number.isFinite(end_ms) ? end_ms : sliceIndex + 1,
+        evidence,
+        color: dominantTask?.color,
+        activeFraction: occupancy,
+        activeResourceCount,
+        resourceCount: members.length,
+        label: dominantTask?.label ?? (evidence === "idle" ? "Measured idle" : evidence === "unknown" ? "Unknown activity" : "Observed GPU progress"),
+        detail: `${activeResourceCount}/${members.length} logical workgroups reported progress · ${(occupancy * 100).toFixed(1)}% observed occupancy · display bin, not a physical execution unit`,
+      };
+    });
+    return {
+      id: `gpu-logical-bin-${bandIndex}-${firstMemberId}-${lastMemberId}`,
+      label: `Logical WG bin ${String(bandIndex + 1).padStart(2, "0")} · ${memberRange}`,
+      group: "gpu",
+      matrixKind: "gpu-logical",
+      sourceResourceCount: members.length,
+      segments,
+    };
+  });
+}
+
+function canonicalFrameView(frame: PerformanceActivityFrame): PerformanceActivityView {
+  const clockById = new Map(frame.clocks.map((clock) => [clock.id, clock]));
+  const synchronized = frame.clocks.length > 0
+    && frame.clocks.every((clock) => clock.status.state !== "unsynchronized");
+  const offsetFor = (clockDomain: string) => {
+    const status = clockById.get(clockDomain)?.status;
+    return status?.state === "synchronized" ? status.offset_ms : 0;
+  };
+  const domainStarts = new Map<string, number>();
+  for (const row of frame.rows) domainStarts.set(
+    row.resource.clockDomain,
+    Math.min(domainStarts.get(row.resource.clockDomain) ?? Infinity, row.windowStart_ms),
+  );
+  const alignedStarts = frame.rows.map((row) => row.windowStart_ms + offsetFor(row.resource.clockDomain));
+  const commonStart_ms = synchronized && alignedStarts.length > 0 ? Math.min(...alignedStarts) : 0;
+  const relativeTime = (time_ms: number, resourceId: string, clockDomain: string) => synchronized
+    ? time_ms + offsetFor(clockDomain) - commonStart_ms
+    : time_ms - (domainStarts.get(clockDomain) ?? frame.rows.find((row) => row.resource.id === resourceId)?.windowStart_ms ?? 0);
+  const rowDurations = frame.rows.map((row) => synchronized
+    ? row.windowEnd_ms + offsetFor(row.resource.clockDomain) - commonStart_ms
+    : row.windowEnd_ms - (domainStarts.get(row.resource.clockDomain) ?? row.windowStart_ms));
+  const duration_ms = Math.max(0.000001, ...rowDurations.map(finiteNonNegative));
+  const taskById = new Map(frame.tasks.map((task) => [task.id, task]));
+  const laneTasks = new Map<ActivityLane, PerformanceActivityTask[]>();
+  for (const span of frame.spans) {
+    if (span.kind !== "task" || !span.taskId) continue;
+    const task = taskById.get(span.taskId);
+    if (!task) continue;
+    const tasks = laneTasks.get(task.lane) ?? [];
+    tasks.push({
+      id: span.id,
+      label: task.label,
+      stageId: task.id,
+      start_ms: relativeTime(span.start_ms, span.resourceId, span.clockDomain),
+      end_ms: relativeTime(span.end_ms, span.resourceId, span.clockDomain),
+      evidence: canonicalEvidence(span.evidence),
+      detail: `${span.evidence === "measured" ? "Measured" : "Reconstructed"} activity · ${span.clockDomain}`,
+      color: task.color,
+    });
+    laneTasks.set(task.lane, tasks);
+  }
+  const laneOrder: readonly ActivityLane[] = ["cpu-main", "cpu-worker", "gpu-physics", "gpu-presentation"];
+  const lanes = laneOrder.flatMap((lane): PerformanceActivityLane[] => {
+    const tasks = laneTasks.get(lane);
+    if (!tasks?.length) return [];
+    const meta = CANONICAL_LANE_META[lane];
+    return [{ id: lane, label: meta.label, group: meta.group, clockOrigin: synchronized ? "frame" : "local", tasks }];
+  });
+  const logicalRows = frame.rows.filter((row) => row.resource.kind === "gpu-logical-capacity");
+  const resources = [
+    ...frame.rows.filter((row) => row.resource.kind !== "gpu-logical-capacity")
+      .map((row) => canonicalRowResource({ row, taskById, relativeTime })),
+    ...coalesceGpuLogicalRows({ rows: logicalRows, taskById, relativeTime }),
+  ];
+  return { duration_ms, synchronized, lanes, resources, logicalGpuResourceCount: logicalRows.length };
+}
+
+function niceTickStep(duration_ms: number): number {
+  const rough = Math.max(duration_ms / 8, Number.EPSILON);
+  const magnitude = 10 ** Math.floor(Math.log10(rough));
+  const normalized = rough / magnitude;
+  const unit = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return unit * magnitude;
+}
+
+export function performanceActivityTicks(duration_ms: number): number[] {
+  const safeDuration = Math.max(0.000001, finiteNonNegative(duration_ms));
+  const step = niceTickStep(safeDuration);
+  const ticks: number[] = [];
+  for (let value = 0; value <= safeDuration + step * 0.0001; value += step) ticks.push(value);
+  if (ticks.length === 1) ticks.push(safeDuration);
+  return ticks;
+}
+
+const formatMs = (value: number) => {
+  if (value === 0) return "0 ms";
+  if (value < 0.01) return `${value.toFixed(4)} ms`;
+  if (value < 1) return `${value.toFixed(3)} ms`;
+  return `${value.toFixed(value < 10 ? 2 : 1)} ms`;
+};
+
+const geometry = (start_ms: number, end_ms: number, duration_ms: number): CSSProperties => {
+  const start = Math.min(duration_ms, finiteNonNegative(start_ms));
+  const end = Math.min(duration_ms, Math.max(start, finiteNonNegative(end_ms)));
+  return { left: `${start / duration_ms * 100}%`, width: `${(end - start) / duration_ms * 100}%` };
+};
+
+const cellStyle = (
+  segment: PerformanceActivitySegment,
+  index: number,
+  duration_ms: number,
+): CSSProperties => ({
+  ...geometry(segment.start_ms, segment.end_ms, duration_ms),
+  "--activity-cell-color": segment.color ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length],
+  "--activity-cell-opacity": segment.evidence === "measured-progress" && segment.activeFraction === 0
+    ? 0.72
+    : 0.1 + 0.9 * Math.max(0, Math.min(1, segment.activeFraction ?? 1)),
+} as CSSProperties);
+
+function matrixStats(view: PerformanceActivityView) {
+  const detailed = view.resources.filter((resource) => resource.matrixKind !== "aggregate");
+  const resources = detailed.length > 0 ? detailed : view.resources;
+  let activeCells = 0;
+  let observedCells = 0;
+  for (const resource of resources) for (const segment of resource.segments) {
+    if (segment.evidence === "unknown") continue;
+    observedCells += 1;
+    if (segment.evidence === "measured-progress" || segment.evidence === "reconstructed") {
+      activeCells += Math.max(0, Math.min(1, segment.activeFraction ?? 1));
+    }
+  }
+  return {
+    cpuRows: resources.filter((resource) => resource.group === "cpu").length,
+    gpuRows: resources.filter((resource) => resource.group === "gpu").length,
+    logicalGpuBands: resources.filter((resource) => resource.matrixKind === "gpu-logical").length,
+    logicalGpuRows: view.logicalGpuResourceCount,
+    activeCellRatio: observedCells > 0 ? activeCells / observedCells : undefined,
+    taskCount: new Set(view.lanes.flatMap((lane) => lane.tasks.map((task) => task.stageId ?? task.id))).size,
+  };
+}
+
+function Ruler({ duration_ms, ticks }: { duration_ms: number; ticks: readonly number[] }) {
+  return <div className="activity-ruler" aria-label={`Shared time ruler, ${formatMs(duration_ms)}`}>
+    <div className="activity-axis-label">TIME</div>
+    <div className="activity-ruler-plot">
+      {ticks.map((tick) => <span key={tick} style={{ left: `${tick / duration_ms * 100}%` }}><i />{formatMs(tick)}</span>)}
+    </div>
+  </div>;
+}
+
+function GridLines({ duration_ms, ticks }: { duration_ms: number; ticks: readonly number[] }) {
+  return <>{ticks.map((tick) => <i
+    className="activity-grid-line"
+    key={tick}
+    style={{ left: `${tick / duration_ms * 100}%` }}
+    aria-hidden="true"
+  />)}</>;
+}
+
+export function PerformanceActivityGrid({
+  cpu,
+  physics,
+  presentation,
+  frame,
+  captureLabel,
+  captureOptions = [],
+  selectedCaptureId,
+  onSelectCapture,
+  referenceFrame,
+  referenceLabel,
+  onSetReference,
+  onClearReference,
+  statusLabel,
+  className = "",
+}: PerformanceActivityGridProps) {
+  const [millisecondsWidth_px, setMillisecondsWidth_px] = useState<number>(
+    DEFAULT_ACTIVITY_MILLISECONDS_WIDTH_PX,
+  );
+  const view = useMemo(
+    () => buildPerformanceActivityView({ cpu, physics, presentation, frame }),
+    [cpu, physics, presentation, frame],
+  );
+  const referenceView = useMemo(
+    () => referenceFrame ? buildPerformanceActivityView({ frame: referenceFrame }) : undefined,
+    [referenceFrame],
+  );
+  const ticks = useMemo(() => performanceActivityTicks(view.duration_ms), [view.duration_ms]);
+  const sliceCount = Math.max(1, Math.ceil(view.duration_ms));
+  const detailedResources = view.resources.filter((resource) => resource.matrixKind !== "aggregate");
+  const matrixResources = detailedResources.length > 0 ? detailedResources : view.resources;
+  const hasData = matrixResources.length > 0;
+  const stats = useMemo(() => matrixStats(view), [view]);
+  const ledgers = [cpu, physics, presentation].filter(
+    (trace): trace is PerformanceTrace => trace !== undefined,
+  );
+  const closedLedgers = ledgers.filter((trace) => performanceTraceAccounting(trace).exact).length;
+  const queueWallFallback = ledgers.some((trace) => trace.measurementSource === "gpu-queue-wall");
+  const selectedCaptureLabel = captureLabel ?? frame?.identity.frameId;
+  const resolvedReferenceLabel = referenceLabel ?? referenceFrame?.identity.frameId;
+
+  return <section
+    className={`performance-activity-grid ${className}`.trim()}
+    data-clock-alignment={view.synchronized ? "synchronized" : "independent"}
+    data-accounting-ledgers="cpu-gpu-independent"
+    data-queue-wall-fallback={queueWallFallback}
+    aria-label="Frame resource activity matrix"
+  >
+    <header className="activity-grid-header">
+      <div><small>UNIFIED FRAME ACCOUNTING</small><h3>Resource activity matrix</h3></div>
+      <div className="activity-header-meta">
+        <label className="activity-density-control">
+          <span>TIME SCALE</span>
+          <input
+            type="range"
+            min={MIN_ACTIVITY_MILLISECONDS_WIDTH_PX}
+            max={MAX_ACTIVITY_MILLISECONDS_WIDTH_PX}
+            step={1}
+            value={millisecondsWidth_px}
+            onChange={(event) => setMillisecondsWidth_px(Number(event.currentTarget.value))}
+            aria-label="Matrix horizontal scale in pixels per millisecond"
+          />
+          <output>{millisecondsWidth_px} PX/MS</output>
+        </label>
+        {statusLabel && <span>{statusLabel}</span>}
+        <span className={view.synchronized ? "synchronized" : "independent"}>
+          {view.synchronized ? "CORRELATED FRAME CLOCK" : "INDEPENDENT LANE ORIGINS"}
+        </span>
+      </div>
+    </header>
+    <div className="activity-matrix-summary" aria-label="Matrix summary">
+      <span><small>FRAME WINDOW</small><strong>{formatMs(view.duration_ms)}</strong></span>
+      <span><small>CPU ROWS</small><strong>{stats.cpuRows}</strong></span>
+      <span><small>GPU WG / DISPLAY BANDS</small><strong>{stats.logicalGpuRows > 0 ? `${stats.logicalGpuRows} / ${stats.logicalGpuBands}` : stats.gpuRows}</strong></span>
+      <span><small>ACTIVE OBSERVED CELLS</small><strong>{stats.activeCellRatio === undefined ? "—" : `${(stats.activeCellRatio * 100).toFixed(1)}%`}</strong></span>
+      <span><small>MAPPED TASKS</small><strong>{stats.taskCount}</strong></span>
+      <span><small>ACCOUNTING LEDGERS</small><strong>{ledgers.length === 0 ? "—" : `${closedLedgers}/${ledgers.length} CLOSED`}</strong></span>
+    </div>
+    {(captureOptions.length > 0 || referenceView) && <div className="activity-matrix-capture" aria-label="Retained performance captures">
+      <label>
+        <span>FRAME</span>
+        <select
+          value={selectedCaptureId ?? ""}
+          disabled={captureOptions.length === 0}
+          onChange={(event) => onSelectCapture?.(event.currentTarget.value)}
+          aria-label="Selected performance frame"
+        >
+          {captureOptions.length === 0 && <option value="">Waiting for capture</option>}
+          {captureOptions.map((capture) => <option key={capture.id} value={capture.id}>{capture.label}</option>)}
+        </select>
+      </label>
+      {(selectedCaptureLabel || referenceView) && <div className="activity-capture-comparison" aria-label="Capture comparison">
+        <span title={selectedCaptureLabel ?? "Selected capture"}>{selectedCaptureLabel ?? "SELECTED"}</span>
+        {referenceView ? <><b>VS</b><span title={resolvedReferenceLabel}>{resolvedReferenceLabel}</span><output className={view.duration_ms <= referenceView.duration_ms ? "faster" : "slower"}>
+          {view.duration_ms === referenceView.duration_ms ? "±0.00 ms" : `${view.duration_ms > referenceView.duration_ms ? "+" : "−"}${formatMs(Math.abs(view.duration_ms - referenceView.duration_ms))}`}
+        </output>{onClearReference && <button type="button" onClick={onClearReference} aria-label="Clear reference capture">×</button>}</> : onSetReference && <button className="activity-set-reference" type="button" onClick={onSetReference}>SET REFERENCE</button>}
+      </div>}
+    </div>}
+    {!hasData ? <div className="activity-grid-empty">Waiting for a complete measured activity sample.</div> : <>
+      <div className="activity-scrollport">
+        <div className="activity-timeline" style={{
+          "--activity-slice-count": sliceCount,
+          "--activity-ms-width": `${millisecondsWidth_px}px`,
+        } as CSSProperties}>
+          <Ruler duration_ms={view.duration_ms} ticks={ticks} />
+          <div className="activity-section-label"><span>Resource × 1 ms activity matrix</span><small>TASK COLOR · ONE CELL PER RESOURCE PER TIME SLICE</small></div>
+          <div className="activity-resource-lanes">
+            {MATRIX_GROUPS.map(({ kind, label, group }) => {
+              const resources = matrixResources.filter((resource) => resource.matrixKind === kind);
+              if (resources.length === 0) return null;
+              return <div className="activity-resource-group" data-group={group} data-kind={kind} key={kind}>
+                <div className="activity-resource-group-label">
+                  <span>{label}</span>
+                  <small>{kind === "gpu-logical"
+                    ? `${resources.length} BAND${resources.length === 1 ? "" : "S"} · ${stats.logicalGpuRows} WORKGROUP${stats.logicalGpuRows === 1 ? "" : "S"}`
+                    : `${resources.length} ROW${resources.length === 1 ? "" : "S"}`}</small>
+                </div>
+                {resources.map((resource, resourceIndex) => <div className="activity-resource-row" key={resource.id} data-group={resource.group}>
+                  <div className="activity-resource-label"><b>{String(resourceIndex).padStart(2, "0")}</b><span>{resource.label}</span><small>{formatMs(Math.max(0, ...resource.segments.map((segment) => segment.end_ms)))}</small></div>
+                  <div className="activity-plot activity-resource-plot">
+                    <GridLines duration_ms={view.duration_ms} ticks={ticks} />
+                    {resource.segments.map((segment, index) => <span
+                      className="activity-cell"
+                      data-evidence={segment.evidence}
+                      data-active-resources={segment.activeResourceCount}
+                      data-resource-count={segment.resourceCount}
+                      key={`${segment.start_ms}-${segment.end_ms}-${index}`}
+                      style={cellStyle(segment, index, view.duration_ms)}
+                      title={`${segment.label ?? segment.evidence} · ${formatMs(segment.end_ms - segment.start_ms)} · ${segment.detail ?? segment.evidence}`}
+                    />)}
+                  </div>
+                </div>)}
+              </div>;
+            })}
+            {!view.resources.some((resource) => resource.matrixKind === "gpu-logical") &&
+              view.resources.some((resource) => resource.group === "gpu") &&
+              <div className="activity-matrix-missing">GPU LOGICAL ROWS AWAITING SHADER HEARTBEAT READBACK</div>}
+          </div>
+        </div>
+      </div>
+      <footer className="activity-evidence-legend" aria-label="Activity evidence legend">
+        <span data-evidence="measured-progress"><i />Measured progress</span>
+        <span data-evidence="reconstructed"><i />Reconstructed</span>
+        <span data-evidence="idle"><i />Measured idle</span>
+        <span data-evidence="unknown"><i />Unknown</span>
+      </footer>
+    </>}
+  </section>;
+}

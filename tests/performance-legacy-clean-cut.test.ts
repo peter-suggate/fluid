@@ -38,11 +38,14 @@ test("production source contains no legacy timing, readback, or performance visu
 
 /**
  * The generic recorders own every timestamp query the app can encode. The Dawn
- * smoke keeps its own per-pass audit: it is a diagnostic harness with no
- * wall-clock target, and it deliberately measures each labelled pass rather
- * than the semantic stages the product reports.
+ * smoke and atomic-clock feasibility tool keep isolated timestamp queries:
+ * they are diagnostic harnesses, not application instrumentation.
  */
-const timestampQueryOwners = ["/lib/performance-trace.ts", "/tools/run-webgpu-smoke.ts"];
+const timestampQueryOwners = [
+  "/lib/performance-trace.ts",
+  "/tools/run-webgpu-smoke.ts",
+  "/tools/experiment-webgpu-atomic-clock.ts",
+];
 
 test("the generic recorder exclusively owns GPU timestamp queries", () => {
   for (const file of productionRoots.flatMap(productionSourceFiles)) {

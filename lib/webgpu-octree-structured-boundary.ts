@@ -20,6 +20,10 @@ interface StructuredBoundaryGroupCache {
 
 export interface StructuredBoundaryResources {
   readonly structured: DirectStructuredVelocitySource;
+  /** One u32 per finest cell: (generation << 1) | ceiling-tension flag,
+   * written by the dynamics projection stage. A fresh flag opens the row's
+   * closed world faces this rebuild (unilateral ceiling contact). */
+  readonly separationMask: GPUBuffer;
   /** Identity-keyed coarse phi from the accepted pre-adaptation topology.
    * Candidate rows may be inserted or reordered, so row-indexed values are
    * not a valid source for the inactive structured generation. */
@@ -74,6 +78,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     const { structured } = resources;
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || resources.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
+      || resources.separationMask.size < resources.dimensions[0]! * resources.dimensions[1]! * resources.dimensions[2]! * 4
       || resources.coarse.rowCapacity !== structured.plan.rowCapacity
       || resources.coarse.directory.size < 32 + structured.plan.rowCapacity * 32
       || !Number.isSafeInteger(resources.bodyCount) || resources.bodyCount < 0 || resources.bodyCount > 12
@@ -170,7 +175,8 @@ export class WebGPUStructuredBoundaryCoefficients {
       14: section63.coefficients, 16: this.candidateControl, 17: this.dispatch,
       18: this.worksets, 19: this.resources.rigidBodies, 20: this.solidNormalVelocities,
       21: this.candidateSolidNormalVelocities, 22: this.control,
-      23: section63.topologyMetrics, 24: section63.catalogFaces };
+      23: section63.topologyMetrics, 24: section63.catalogFaces,
+      25: this.resources.separationMask };
     const group = (pipeline: GPUComputePipeline, bindings: readonly number[]) => this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding) => ({ binding,
         resource: { buffer: buffers[binding]! } })),
@@ -179,7 +185,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     const groups = Object.freeze([
       group(prepare, [0, 1, 16, 17]),
       group(this.classify, [0, 3, 4, 5, 6, 7, 8, 9, 12, 16]),
-      group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16]),
+      group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 25]),
       group(this.resolveSolid, [0, 2, 3, 10, 11, 16, 19, 21]),
       group(this.commit, [0, 2, 11, 16, 20, 21]),
       group(this.rebuild, [0, 2, 12, 13, 14, 16, 24]),
@@ -274,6 +280,7 @@ struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 struct CatalogSlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDistance:vec4f}
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>accepted:array<u32>;@group(0)@binding(2)var<storage,read_write>a:array<u32>;@group(0)@binding(3)var<storage,read>geometry:array<vec4u>;@group(0)@binding(5)var<uniform>fp:FineP;@group(0)@binding(6)var<storage,read>fineWork:array<u32>;@group(0)@binding(7)var<storage,read>fineMeta:array<u32>;@group(0)@binding(8)var<storage,read>fineFlags:array<u32>;@group(0)@binding(9)var<storage,read>finePhi:array<f32>;@group(0)@binding(10)var<storage,read>solid:VertexArena;@group(0)@binding(11)var<storage,read_write>candidates:array<vec2f>;@group(0)@binding(12)var<storage,read_write>candidateLiquid:array<u32>;@group(0)@binding(13)var<storage,read_write>liquid:array<u32>;@group(0)@binding(14)var<storage,read_write>rows:array<u32>;@group(0)@binding(15)var<storage,read_write>diagonal:array<f32>;@group(0)@binding(16)var<storage,read_write>control:C;@group(0)@binding(17)var<storage,read_write>dispatch:array<u32>;@group(0)@binding(18)var<storage,read_write>dynamicWorksets:array<u32>;@group(0)@binding(19)var<storage,read>rigidBodies:array<RigidBody>;@group(0)@binding(20)var<storage,read_write>solidVelocity:array<f32>;@group(0)@binding(21)var<storage,read_write>candidateSolidVelocity:array<f32>;
 @group(0)@binding(22)var<storage,read_write>acceptedBoundary:C;@group(0)@binding(23)var<storage,read>metrics:array<Metric>;@group(0)@binding(24)var<storage,read>catalogSlots:array<CatalogSlotGeometry>;
+@group(0)@binding(25)var<storage,read>separationMask:array<u32>;
 ${makeOctreePowerCoarseLevelSetSampleWGSL(4)}
 const INVALID:u32=0xffffffffu;const SOLID_VALID:u32=0x80000000u;fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn fail(i:u32,f:u32){atomicOr(&control.flags,f);atomicMin(&control.firstError,i);}
 fn abase()->u32{return control.bank*p.counts.w;}fn rbase()->u32{return control.bank*p.counts.x;}fn section63Base()->u32{return control.bank*p.resolved.y;}
@@ -290,8 +297,59 @@ fn publishStructuredBoundarySetup(rowCount:u32,slotCount:u32,generation:u32,bank
 fn handleOwner(h:u32)->u32{return a[abase()+p.offset0.x+h];}fn handleNeighbor(h:u32)->u32{return a[abase()+p.offset0.y+h];}fn handleNormal(h:u32)->vec3f{let at=abase()+p.offset1.z+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn handleCenter(h:u32)->vec3f{let at=abase()+p.offset1.w+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn sbase()->u32{return control.bank*p.counts.y;}fn lbase()->u32{return control.bank*p.counts.x;}fn liquidAt(row:u32)->u32{return liquid[lbase()+row];}
 fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.*(q.x*uv+uuv);}fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f(q.x,-q.yzw),v);}fn rigidSdf(body:RigidBody,world:vec3f)->f32{let q=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));if(shape==0){return length(q)-d.x;}if(shape==1){let b=abs(q)-.5*d;return length(max(b,vec3f(0)))+min(max(b.x,max(b.y,b.z)),0.);}if(shape==2){let cy=clamp(q.y,-.5*d.y,.5*d.y);return length(vec3f(q.x,q.y-cy,q.z))-d.x;}let radial=length(q.xz)-d.x;let axial=abs(q.y)-.5*d.y;return length(max(vec2f(radial,axial),vec2f(0)))+min(max(radial,axial),0.);}
 fn worldBoundaryBit(h:u32)->u32{if(handleNeighbor(h)!=INVALID){return 0u;}let x=handleCenter(h)/p.physical.x;let n=handleNormal(h);for(var axis=0u;axis<3u;axis+=1u){if(n[axis]<-.5&&x[axis]<=1e-4){return 1u<<(2u*axis);}if(n[axis]>.5&&x[axis]>=f32(p.dimensions[axis])-1e-4){return 1u<<(2u*axis+1u);}}return 0u;}fn closedWorld(h:u32)->bool{let bit=worldBoundaryBit(h);return bit!=0u&&(p.resolved.z&bit)!=0u;}
+// Unilateral overhead contact: the previous projection marked rows holding
+// tension against gravity-opposed closed world faces, storing the exact
+// face bits. A fresh mark opens those faces for this epoch, so the solve
+// resolves the separation itself (p = 0 ghost past the face) instead of
+// pinning the liquid with suction.
+fn separationFresh(row:u32,faceBit:u32)->bool{
+  let at=rbase()+row;
+  if(at>=arrayLength(&geometry)){return false;}
+  let cell=geometry[at].x;
+  if(cell>=arrayLength(&separationMask)){return false;}
+  let word=separationMask[cell];
+  if((word&faceBit)==0u){return false;}
+  let marked=word>>6u;
+  let epoch=(control.epoch&0x3fffffffu)&0x3ffffffu;
+  let age=(epoch-marked)&0x3ffffffu;
+  return age<=2u;
+}
 fn solidAt(row:u32,x:vec3f)->f32{if(p.resolved.w==0u||solid.header[5]!=SOLID_VALID||row>=solid.header[2]){return 1e20;}let rg=geometry[rbase()+row];let q=vec3u(rg.x%p.dimensions.x,(rg.x/p.dimensions.x)%p.dimensions.y,rg.x/(p.dimensions.x*p.dimensions.y));let t=clamp((x/p.physical.x-vec3f(q))/f32(rg.y),vec3f(0),vec3f(1));var v=0.;for(var corner=0u;corner<8u;corner+=1u){let w=select(1.-t.x,t.x,(corner&1u)!=0u)*select(1.-t.y,t.y,(corner&2u)!=0u)*select(1.-t.z,t.z,(corner&4u)!=0u);v+=w*bitcast<f32>(solid.values[row*8u+corner]);}return v;}
-@compute @workgroup_size(64)fn resolveStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}let lo=handleOwner(h);let hi=handleNeighbor(h);if(lo>=control.rows){fail(h,4u);return;}let loPoint=rowCenter(lo);let world=worldBoundaryBit(h)!=0u;var hiPoint=handleCenter(h);if(hi!=INVALID){hiPoint=rowCenter(hi);}else if(!world){let inv=bitcast<f32>(a[abase()+p.offset0.w+h]);hiPoint=loPoint+handleNormal(h)/max(inv,1e-20);}let clo=coarseValue(loPoint);let chi=coarseValue(hiPoint);let plo=fineSample(loPoint,clo.x);let phi=fineSample(hiPoint,chi.x);if((clo.y==0.&&plo.y==0.)||(!world&&chi.y==0.&&phi.y==0.)){fail(h,8u);return;}var scale=1.;if(!world&&(hi==INVALID||((plo.x<0.)!=(phi.x<0.)))){if(!(plo.x<0.)||phi.x<0.){fail(h,8u);return;}let theta=-plo.x/(phi.x-plo.x);if(!finite(theta)||!(theta>0.)||theta>1.){fail(h,8u);return;}scale=1./theta;}else if(hi!=INVALID&&plo.x>=0.&&phi.x>=0.){scale=0.;}else if(world&&plo.x>=0.){scale=0.;}candidates[h]=vec2f(select(1.,0.,closedWorld(h)),scale);}
+@compute @workgroup_size(64)fn resolveStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}let lo=handleOwner(h);let hi=handleNeighbor(h);if(lo>=control.rows){fail(h,4u);return;}let loPoint=rowCenter(lo);let world=worldBoundaryBit(h)!=0u;var hiPoint=handleCenter(h);if(hi!=INVALID){hiPoint=rowCenter(hi);}else if(!world){let inv=bitcast<f32>(a[abase()+p.offset0.w+h]);hiPoint=loPoint+handleNormal(h)/max(inv,1e-20);}let clo=coarseValue(loPoint);let chi=coarseValue(hiPoint);let plo=fineSample(loPoint,clo.x);let phi=fineSample(hiPoint,chi.x);if((clo.y==0.&&plo.y==0.)||(!world&&chi.y==0.&&phi.y==0.)){fail(h,8u|128u);return;}var scale=1.;
+// Ghost-fluid crossing handling covers every orientation the moving front
+// produces. A band row's centre may legitimately sit on the dry side of its
+// own surface face for a step (the frontier admits rows the interface has
+// not reached yet); hard-failing that geometry poisoned the whole topology
+// epoch, permanently freezing the accepted velocity authority the first time
+// an off-cadence step produced it. theta is measured from whichever side is
+// wet, with the reference lane's floor so a sliver crossing cannot blow up
+// the gradient; a topologically open face with no wet side simply decouples.
+if(!world&&(hi==INVALID||((plo.x<0.)!=(phi.x<0.)))){
+  if(plo.x<0.&&!(phi.x<0.)){
+    let theta=max(-plo.x/(phi.x-plo.x),1e-2);
+    if(!finite(theta)||theta>1.){fail(h,8u|1024u);return;}
+    scale=1./theta;
+  }else if(hi!=INVALID&&phi.x<0.&&!(plo.x<0.)){
+    let theta=max(-phi.x/(plo.x-phi.x),1e-2);
+    if(!finite(theta)||theta>1.){fail(h,8u|1024u);return;}
+    scale=1./theta;
+  }else if(plo.x<0.&&phi.x<0.){
+    // Open face whose ghost point is still wet: plain liquid gradient.
+    scale=1.;
+  }else{
+    // No wet side: the face carries extended air velocity, no coupling.
+    scale=0.;
+  }
+}else if(hi!=INVALID&&plo.x>=0.&&phi.x>=0.){scale=0.;}else if(world&&plo.x>=0.){scale=0.;}
+let boundaryBit=worldBoundaryBit(h);
+var aperture=1.;
+if(boundaryBit!=0u&&(p.resolved.z&boundaryBit)!=0u){
+  // Closed world face. A face carrying a fresh separation mark for exactly
+  // this face bit opens for this epoch; every other closed face stays a
+  // prescribed solid.
+  aperture=select(0.,1.,separationFresh(lo,boundaryBit));
+}
+candidates[h]=vec2f(aperture,scale);}
 @compute @workgroup_size(64)fn resolveStructuredSolidSlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}let lo=handleOwner(h);let hi=handleNeighbor(h);if(lo>=control.rows){fail(h,4u);return;}let x=handleCenter(h);let n=handleNormal(h);let inv=bitcast<f32>(a[abase()+p.offset0.w+h]);let half=.5/max(inv,1e-20);var aperture=candidates[h].x;if(aperture>0.&&p.resolved.w!=0u){let sdf=min(solidAt(lo,x),select(1e20,solidAt(hi,x),hi!=INVALID));if(!finite(sdf)){fail(h,16u);return;}aperture=clamp(.5+sdf/max(p.physical.x,1e-20),0.,1.);}var best=1e20;var normalVelocity=0.;for(var body=0u;body<p.dimensions.w;body+=1u){if(body>=arrayLength(&rigidBodies)){fail(h,32u);return;}let rb=rigidBodies[body];let sdf=rigidSdf(rb,x);if(sdf<half&&sdf<best){best=sdf;normalVelocity=dot(rb.linearVelocity.xyz+cross(rb.angularVelocity.xyz,x-rb.positionShape.xyz),n);}}candidateSolidVelocity[h]=normalVelocity;candidates[h]=vec2f(aperture,candidates[h].y);}
 @compute @workgroup_size(64)fn commitStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}a[abase()+p.offset1.x+h]=bitcast<u32>(candidates[h].x);a[abase()+p.offset1.y+h]=bitcast<u32>(candidates[h].y);solidVelocity[sbase()+h]=candidateSolidVelocity[h];}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}

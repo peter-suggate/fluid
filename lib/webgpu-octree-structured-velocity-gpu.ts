@@ -8,6 +8,12 @@ import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "./generated/octree-powe
 import type { OctreePowerRowDeltaSource } from "./webgpu-octree-power-descriptor";
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { PassBroker } from "./webgpu-pass-broker";
+import {
+  createGPULogicalActivityAdoptionContext,
+  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
+  type GPULogicalActivityAdoptionContext,
+} from "./gpu-logical-activity-adoption";
+import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 
 export const OCTREE_SECTION63_CHANNELS = 19 as const;
 
@@ -217,12 +223,23 @@ export class WebGPUDirectStructuredVelocityAuthority {
     this.liveRowDispatch = device.createBuffer({ label: "Structured publication and accepted class dispatches", size: 72,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE
         | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    const module = device.createShaderModule({ label: "Direct six-family structured velocity publication",
-      code: directStructuredVelocityPublicationWGSL });
+    const publicationProfile = performanceShaderVariant();
+    const publicationActivity = createGPULogicalActivityAdoptionContext({
+      moduleId: "octree/structured-publication",
+      profile: publicationProfile,
+    });
+    const publicationVariant = publicationActivity.module(
+      directStructuredVelocityPublicationActivityShader(publicationActivity),
+      `octree/structured-publication/${publicationProfile.cacheKey}`,
+    );
+    const activityModule = device.createShaderModule({ label: "Direct six-family structured velocity publication",
+      code: publicationVariant.code });
     const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-      layout: "auto", compute: { module, entryPoint } });
+      layout: "auto", compute: { module: activityModule, entryPoint } });
     this.beginPipeline = pipeline("beginStructuredPublication");
-    this.classifyPipeline = pipeline("classifyStructuredCatalogSlots");
+    this.classifyPipeline = publicationActivity.registerPipeline(
+      pipeline("classifyStructuredCatalogSlots"),
+    );
     this.prefixPipeline = pipeline("prefixStructuredFamilies");
     this.scatterPipeline = pipeline("scatterStructuredFamilySlots");
     this.section63Pipeline = pipeline("publishSection63Rows");
@@ -618,3 +635,36 @@ var<workgroup> finalCounts:array<u32,576>;
 
 @compute @workgroup_size(1)fn acceptStructuredPublication(){if(atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}atomicStore(&acceptedControl[1],INVALID);atomicStore(&acceptedControl[2],control.rowCount);atomicStore(&acceptedControl[3],control.epoch);atomicStore(&acceptedControl[4],control.activeBank);atomicStore(&acceptedControl[5],control.slotCount);atomicStore(&acceptedControl[0],0u);}
 `;
+
+/** Activity-only classification variant; disabled mode returns the exact production bytes. */
+export function directStructuredVelocityPublicationActivityShader(
+  activity: GPULogicalActivityAdoptionContext,
+): string {
+  const entry = activity.workgroup("classify-structured-catalog-slots", "enter", {
+    workgroupId: "activityWorkgroupId",
+    localInvocationIndex: "activityLocalInvocationIndex",
+    workgroupLaneCount: 64,
+    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  const exit = activity.workgroup("classify-structured-catalog-slots", "exit", {
+    workgroupId: "activityWorkgroupId",
+    localInvocationIndex: "activityLocalInvocationIndex",
+    workgroupLaneCount: 64,
+    recordWhen: `activityWorkgroupId.x + activityNumWorkgroups.x * (activityWorkgroupId.y + activityNumWorkgroups.y * activityWorkgroupId.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  if (!entry && !exit) return directStructuredVelocityPublicationWGSL;
+  const signature = "fn classifyStructuredCatalogSlots(@builtin(global_invocation_id)g:vec3u)";
+  const instrumentedSignature = "fn classifyStructuredCatalogSlots(@builtin(global_invocation_id)g:vec3u,@builtin(workgroup_id)activityWorkgroupId:vec3u,@builtin(local_invocation_index)activityLocalInvocationIndex:u32,@builtin(num_workgroups)activityNumWorkgroups:vec3u)";
+  const start = directStructuredVelocityPublicationWGSL.indexOf(signature);
+  if (start < 0) throw new Error("Structured-classification activity entry point is missing");
+  const bodyStart = directStructuredVelocityPublicationWGSL.indexOf("{", start + signature.length);
+  let depth = 0, bodyEnd = -1;
+  for (let index = bodyStart; index < directStructuredVelocityPublicationWGSL.length; index += 1) {
+    if (directStructuredVelocityPublicationWGSL[index] === "{") depth += 1;
+    else if (directStructuredVelocityPublicationWGSL[index] === "}" && --depth === 0) { bodyEnd = index; break; }
+  }
+  if (bodyStart < 0 || bodyEnd < 0) throw new Error("Structured-classification activity body is malformed");
+  const body = directStructuredVelocityPublicationWGSL.slice(bodyStart + 1, bodyEnd)
+    .replace(/\breturn;/g, `${exit}return;`);
+  return `${directStructuredVelocityPublicationWGSL.slice(0, start)}${instrumentedSignature}{${entry}${body}${exit}${directStructuredVelocityPublicationWGSL.slice(bodyEnd)}`;
+}

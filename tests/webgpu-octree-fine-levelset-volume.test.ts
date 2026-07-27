@@ -9,6 +9,11 @@ import { WebGPUFineLevelSetVolumeCorrection,
   fineLevelSetVolumeCorrectionWGSL,
   unpackFineLevelSetGPUVolumeControl } from "../lib/webgpu-octree-fine-levelset-volume";
 import { PassBroker } from "../lib/webgpu-pass-broker";
+import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
+
+// Numerical harnesses submit their own raw encoders; exercise the production
+// shader variant instead of the solver-owned activity binding session.
+usePerformanceInstrumentationStore.getState().setMode("timeline");
 
 test("fine volume classifies compact-air overlap only through the authoritative coarse directory", () => {
   const shader = fineLevelSetVolumeCorrectionWGSL.replace(/\s+/g, "");

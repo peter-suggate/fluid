@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   combineMainThreadPerformanceTraces,
@@ -248,6 +249,44 @@ test("an unusable hardware sample yields no trace instead of a wrong one", async
   recorder.completePhase(encoder, { id: "pressure-solve", label: "Pressure solve" });
   recorder.resolve(encoder);
   assert.equal(await recorder.read(), undefined);
+});
+
+const webgpuModulePath = process.env.WEBGPU_NODE_MODULE;
+test("stage timestamp recorder resolves real Metal timestamps", {
+  skip: !webgpuModulePath && "set WEBGPU_NODE_MODULE for native timestamp validation",
+}, async () => {
+  const { create, globals } = await import(pathToFileURL(webgpuModulePath!).href) as {
+    create(options: string[]): GPU;
+    globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, globals);
+  const gpu = create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+  assert.ok(adapter);
+  assert.equal(adapter.features.has("timestamp-query"), true);
+  const device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
+  const recorder = new GPUStageTimestampRecorder(device, 17, "physics", "native-stage-recorder");
+  const encoder = recorder.instrument(device.createCommandEncoder());
+  const shaderModule = device.createShaderModule({ code: "@compute @workgroup_size(1) fn main() {}" });
+  const pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: shaderModule, entryPoint: "main" },
+  });
+  recorder.begin();
+  for (const [id, label] of [["velocity-advection", "First"], ["pressure-solve", "Second"]] as const) {
+    const pass = encoder.beginComputePass({ label });
+    pass.setPipeline(pipeline);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    recorder.completePhase(encoder, { id, label });
+  }
+  recorder.resolve(encoder);
+  device.queue.submit([encoder.finish()]);
+  const trace = await recorder.read();
+  assert.ok(trace);
+  assert.equal(trace.measurementSource, "gpu-hardware-timestamp");
+  assert.equal(trace.phases.length, 2);
+  device.destroy();
 });
 
 test("averaging never invents a negative phase from floating-point dust", () => {

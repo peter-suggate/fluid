@@ -8,6 +8,11 @@ import { createInflowGridBoundary, inflowBoundaryWGSL, inflowOutletCenter } from
 import { WebGPUQuadtreePackBuilder, type GPUQuadtreeResidentResources } from "./webgpu-quadtree-pack-builder";
 import { sceneHasTerrain, terrainCellSolidFraction, terrainColumnHeights } from "./terrain";
 import { buildQuadtreeMultigridHierarchy, type QuadtreeMultigridHierarchy } from "./quadtree-multigrid";
+import {
+  CPU_QUADTREE_WORKER_ACTIVITY_TASKS,
+  NOOP_CPU_PERFORMANCE_ACTIVITY_PROFILER,
+  type CPUPerformanceActivityProfiler,
+} from "./cpu-performance-activity";
 
 export interface QuadtreeRigidCoupling {
   bodies: RigidBodyState[];
@@ -2156,8 +2161,8 @@ export class WebGPUQuadtreeTallCellProjection {
         { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
       ] });
-      const module = device.createShaderModule({ label: "Quadtree CFL safety clamp", code: quadtreeVelocityClampShader });
-      this.gpuCache.velocityClampPipeline = device.createComputePipeline({ label: "Quadtree CFL safety clamp", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.velocityClampLayout] }), compute: { module, entryPoint: "clampVelocity" } });
+      const clampModule = device.createShaderModule({ label: "Quadtree CFL safety clamp", code: quadtreeVelocityClampShader });
+      this.gpuCache.velocityClampPipeline = device.createComputePipeline({ label: "Quadtree CFL safety clamp", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.velocityClampLayout] }), compute: { module: clampModule, entryPoint: "clampVelocity" } });
     }
     this.velocityClampPipeline = this.gpuCache.velocityClampPipeline;
     this.velocityClampBindGroup = device.createBindGroup({ layout: this.gpuCache.velocityClampLayout, entries: [
@@ -2174,8 +2179,8 @@ export class WebGPUQuadtreeTallCellProjection {
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
         { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
       ] });
-      const module = device.createShaderModule({ label: "Quadtree surface transport velocity", code: quadtreeSurfaceTransportShader });
-      this.gpuCache.surfaceTransportPipeline = device.createComputePipeline({ label: "Quadtree surface transport velocity", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.surfaceTransportLayout] }), compute: { module, entryPoint: "buildSurfaceTransport" } });
+      const surfaceTransportModule = device.createShaderModule({ label: "Quadtree surface transport velocity", code: quadtreeSurfaceTransportShader });
+      this.gpuCache.surfaceTransportPipeline = device.createComputePipeline({ label: "Quadtree surface transport velocity", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.surfaceTransportLayout] }), compute: { module: surfaceTransportModule, entryPoint: "buildSurfaceTransport" } });
     }
     this.surfaceTransportPipeline = this.gpuCache.surfaceTransportPipeline;
     this.surfaceTransportBindGroup = device.createBindGroup({ layout: this.gpuCache.surfaceTransportLayout, entries: [
@@ -2193,8 +2198,8 @@ export class WebGPUQuadtreeTallCellProjection {
         { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
       ] });
-      const module = device.createShaderModule({ label: "Quadtree divergence diagnostic", code: quadtreeDivergenceShader });
-      this.gpuCache.divergencePipeline = device.createComputePipeline({ label: "Quadtree divergence diagnostic", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.divergenceLayout] }), compute: { module, entryPoint: "computeDivergence" } });
+      const divergenceModule = device.createShaderModule({ label: "Quadtree divergence diagnostic", code: quadtreeDivergenceShader });
+      this.gpuCache.divergencePipeline = device.createComputePipeline({ label: "Quadtree divergence diagnostic", layout: device.createPipelineLayout({ bindGroupLayouts: [this.gpuCache.divergenceLayout] }), compute: { module: divergenceModule, entryPoint: "computeDivergence" } });
     }
     this.divergencePipeline = this.gpuCache.divergencePipeline;
     this.divergenceBindGroup = device.createBindGroup({ layout: this.gpuCache.divergenceLayout, entries: [
@@ -3404,16 +3409,23 @@ export class WebGPUQuadtreeTallCellProjection {
   destroy() { for (const buffer of this.buffers) buffer.destroy(); this.params.destroy(); this.bodyExchangeIndices?.destroy(); this.cellProjection.destroy(); this.cellTopology.destroy(); this.factorAux.destroy(); this.cellPressureSamples.destroy(); this.mappedPressure.destroy(); this.mappedPressureStorageFallback.destroy(); this.mappedPressureSampledFallback.destroy(); this.divergence.destroy(); this.inlineMonitorBuffer?.destroy(); this.solveFeedbackReadback?.destroy(); }
 }
 
-export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput): PreparedProjectionCPU {
+export function prepareQuadtreeProjectionCPU(
+  input: QuadtreeCPUPreparationInput,
+  activity: CPUPerformanceActivityProfiler = NOOP_CPU_PERFORMANCE_ACTIVITY_PROFILER,
+): PreparedProjectionCPU {
   const { nx, ny, nz } = input.dims;
   const h = { x: input.scene.container.width_m / nx, y: input.scene.container.height_m / ny, z: input.scene.container.depth_m / nz };
-  const quadtree = quadtreeFromPackedCells(input.packedCells, nx, nz);
+  const quadtree = activity.measure(CPU_QUADTREE_WORKER_ACTIVITY_TASKS.unpack,
+    () => quadtreeFromPackedCells(input.packedCells, nx, nz));
   const opticalDefaults = adaptiveOpticalLayerDefaults(ny, { alpha: input.options.opticalAlpha });
   const adaptiveOpticalLayer: AdaptiveOpticalLayerField | undefined = input.options.opticalLayerMode === "adaptive-motion" && input.opticalColumns?.length === nx * nz * 4
     ? { columns: input.opticalColumns, surfaceOffsetCells: opticalDefaults.surfaceOffsetCells, airborneCells: opticalDefaults.airborneCells }
     : undefined;
-  const pressureGrid = populateTallPressureGridFromLeafProfiles(quadtree, input.columnProfiles, ny, h, input.options.opticalDepthFraction, adaptiveOpticalLayer);
-  const topologyWords = pressureTopologyWords(pressureGrid);
+  const pressureGrid = activity.measure(CPU_QUADTREE_WORKER_ACTIVITY_TASKS.pressureGrid,
+    () => populateTallPressureGridFromLeafProfiles(quadtree, input.columnProfiles, ny, h,
+      input.options.opticalDepthFraction, adaptiveOpticalLayer));
+  const topologyWords = activity.measure(CPU_QUADTREE_WORKER_ACTIVITY_TASKS.topologyIdentity,
+    () => pressureTopologyWords(pressureGrid));
   if (input.reuseTopologyWords && sameWords(input.reuseTopologyWords, topologyWords)) {
     return {
       topologyWords, reusedTopology: true,
@@ -3426,7 +3438,8 @@ export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput)
   }
   const preconditioner = input.options.preconditioner ?? "ic0";
   if (!input.coupling && preconditioner !== "ic0" && preconditioner !== "blockic") {
-    const direct = WebGPUQuadtreeTallCellProjection.packUncoupledGrid(pressureGrid, nx, ny, nz, preconditioner);
+    const direct = activity.measure(CPU_QUADTREE_WORKER_ACTIVITY_TASKS.pack,
+      () => WebGPUQuadtreeTallCellProjection.packUncoupledGrid(pressureGrid, nx, ny, nz, preconditioner));
     return {
       leafCount: quadtree.leaves.length,
       pressureSampleCount: pressureGrid.samples.length,
@@ -3437,12 +3450,16 @@ export function prepareQuadtreeProjectionCPU(input: QuadtreeCPUPreparationInput)
       tallSegmentCount: direct.tallSegmentCount,
     };
   }
-  const solidFields = solidFieldsFromBodies(input.scene, input.coupling?.bodies ?? [], nx, ny, nz, h);
+  const solidFields = activity.measure(CPU_QUADTREE_WORKER_ACTIVITY_TASKS.solidFields,
+    () => solidFieldsFromBodies(input.scene, input.coupling?.bodies ?? [], nx, ny, nz, h));
   const variationalBodies = input.coupling ? variationalBodiesFrom(input.scene, input.coupling) : [];
-  const system = buildVariationalSystem(pressureGrid, {
-    solidFraction: solidFields?.solidFraction, solidOwner: solidFields?.solidOwner, bodies: variationalBodies
-  }, { assembleDense: false });
-  const packed = WebGPUQuadtreeTallCellProjection.packSystem(system, nx, ny, nz, input.coupling?.dynamic ? variationalBodies : [], input.options.preconditioner);
+  const system = activity.measure(CPU_QUADTREE_WORKER_ACTIVITY_TASKS.variationalSystem,
+    () => buildVariationalSystem(pressureGrid, {
+      solidFraction: solidFields?.solidFraction, solidOwner: solidFields?.solidOwner, bodies: variationalBodies
+    }, { assembleDense: false }));
+  const packed = activity.measure(CPU_QUADTREE_WORKER_ACTIVITY_TASKS.pack,
+    () => WebGPUQuadtreeTallCellProjection.packSystem(system, nx, ny, nz,
+      input.coupling?.dynamic ? variationalBodies : [], input.options.preconditioner));
   return {
     leafCount: quadtree.leaves.length,
     pressureSampleCount: pressureGrid.samples.length,

@@ -51,8 +51,14 @@ export function paperPipelineStages(
       ? { id: "authority", section: "t=0", label: "Sparse authority fence", state: "READY", tone: "healthy", detail: "Queue-fenced compact topology, fine field, pressure authority, and render world are live." }
       : pending("authority", "t=0", "Sparse authority fence", info.initialRasterSurfaceDiagnostic ?? "Publishing the initial GPU authority before the first step."));
 
+  // The row counter (pressureRequiredRows) is copied from the LIVE solve
+  // stats buffer and races in-flight steps in the browser: a mid-step sample
+  // legally reads the cleared phase as 0 rows. Authority truth is the
+  // queue-fenced structured receipt (powerDiagramGeneration is only defined
+  // while the fenced velocity+boundary controls validate). Use the receipt to
+  // judge health; keep the racing counter for display only.
   const powerHealthy = info.powerDiagramAuthoritative === true
-    && (info.pressureRequiredRows ?? 0) > 0
+    && (powerGeneration !== undefined || (info.pressureRequiredRows ?? 0) > 0)
     && info.pressureCapacityOverflow !== true;
   stages.push(powerHealthy
     ? { id: "power", section: "§4.1–4.2/§6", label: "Resolved implicit power rows", state: "AUTHORITATIVE", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureRequiredRows?.toLocaleString()} rows · fixed case-local handles · six structured families` }

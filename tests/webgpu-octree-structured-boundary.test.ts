@@ -38,7 +38,10 @@ function reachableStorageBindings(entryPoint: string): number[] {
       if (!reachable.has(candidate) && new RegExp(`\\b${candidate}\\s*\\(`).test(body)) pending.push(candidate);
     }
   }
-  const bodies = [...reachable].map((name) => functions.get(name)!);
+  // Strip comments before matching: binding names appearing in prose
+  // ("accepted", "rows", "liquid", "solid") are not shader references.
+  const bodies = [...reachable].map((name) => functions.get(name)!
+    .replace(/\/\/[^\n]*/g, ""));
   return globals.filter(({ name }) => bodies.some((body) =>
     new RegExp(`(?<![.\\w])${name}\\b`).test(body)))
     .map(({ binding }) => binding).sort((a, b) => a - b);
@@ -52,8 +55,8 @@ test("structured boundary update is canonical, transactional, and face-graph fre
     "face pressure must use complete trilinear samples on the cell-centred fine lattice");
   assert.match(structuredBoundaryCoefficientWGSL, /fn solidAt\(/);
   assert.match(structuredBoundaryCoefficientWGSL,
-    /if\(!world&&\(hi==INVALID\|\|\(\(plo\.x<0\.\)!=\(phi\.x<0\.\)\)\)\)[\s\S]*let theta=-plo\.x\/\(phi\.x-plo\.x\);[\s\S]*scale=1\.\/theta/,
-    "the ghost-fluid pressure scale must use main's exact dual-edge crossing");
+    /if\(!world&&\(hi==INVALID\|\|\(\(plo\.x<0\.\)!=\(phi\.x<0\.\)\)\)\)[\s\S]*let theta=max\(-plo\.x\/\(phi\.x-plo\.x\),1e-2\);[\s\S]*scale=1\.\/theta/,
+    "the ghost-fluid pressure scale must use the dual-edge crossing with the Gibou robustness floor");
   assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /clamp\([^;]*theta|theta=clamp/,
     "the wall-impact pressure impulse must not be capped by a minimum theta");
   assert.match(structuredBoundaryCoefficientWGSL,
@@ -114,7 +117,7 @@ test("every structured boundary entry point fits the hard ten-storage-buffer con
       `${entryPoint} reaches ${bindings.length} storage buffers: ${bindings.join(", ")}`);
   }
   assert.deepEqual(reachableStorageBindings("resolveStructuredBoundarySlots"),
-    [2, 3, 4, 6, 7, 8, 9, 11, 16]);
+    [2, 3, 4, 6, 7, 8, 9, 11, 16, 25]);
   assert.deepEqual(reachableStorageBindings("resolveStructuredSolidSlots"),
     [2, 3, 10, 11, 16, 19, 21]);
 });

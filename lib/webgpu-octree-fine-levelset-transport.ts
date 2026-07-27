@@ -283,7 +283,7 @@ export class WebGPUFineLevelSetTransport {
     const { structured } = this.resources, plan = this.source.plan;
     const maximumBacktraceFineCells = options.maximumBacktraceFineCells ?? plan.fineFactor;
     if (!Number.isSafeInteger(maximumBacktraceFineCells) || maximumBacktraceFineCells < 1
-      || maximumBacktraceFineCells > plan.fineFactor) {
+      || maximumBacktraceFineCells > 2 * plan.fineFactor) {
       throw new RangeError("Fine transport displacement bound exceeds its configured support depth");
     }
     const bytes = new ArrayBuffer(256), u = new Uint32Array(bytes), f = new Float32Array(bytes);

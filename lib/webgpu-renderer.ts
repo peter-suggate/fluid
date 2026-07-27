@@ -28,6 +28,7 @@ import {
 import type { SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { isGPUInitializationAbort } from "./gpu-initialization";
+import { GPUAdvanceWallEstimator } from "./gpu-advance-pacing";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
 import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { OctreeTechniqueOverlayPipeline } from "./webgpu-octree-technique-overlay";
@@ -78,7 +79,9 @@ export function presentationHasPhysicsSlack(lastFrameAt_ms: number, now_ms: numb
   return elapsed_ms + physics_ms + Math.max(0, presentation_ms) + 0.5 < MAX_PRESENTATION_GAP_MS;
 }
 
-/** Use the exact generic physics partition as the rolling scheduler estimate. */
+/** Telemetry-only physics partition total. Scheduling deliberately does NOT
+ * consume this: it exists only while instrumentation is enabled, and admission
+ * must be identical with the profiler on or off (see GPUAdvanceWallEstimator). */
 export function observedGPUAdvanceTime_ms(trace: PerformanceTrace | undefined) {
   return trace?.lane === "physics" && Number.isFinite(trace.total_ms) && trace.total_ms > 0
     ? trace.total_ms
@@ -446,6 +449,13 @@ export class FluidLabRenderer {
   private svoShadowStableFrames = 0;
   private svoRenderDiagnosticsKey = "";
   private gpuPendingBatches = 0;
+  /** Instrumentation-independent per-advance wall cost; the only scheduling
+   * input. The hardware physics trace is telemetry and must never feed
+   * admission, or toggling the profiler changes the simulation's driver. */
+  private readonly advanceWallEstimator = new GPUAdvanceWallEstimator();
+  /** Same contract for presentation cost: the traced presentation total is
+   * instrumentation-gated, so scheduling reads this fence-derived estimate. */
+  private readonly presentationWallEstimator = new GPUAdvanceWallEstimator();
   private lastPresentationCompletedAt_ms = -Infinity;
   private presentationPending = false;
   private simulationRunning = true;
@@ -880,6 +890,7 @@ export class FluidLabRenderer {
     this.gpuPendingBatches = 0;
     this.preparedGPUTime_s = 0;
     this.preparedGPUBodies = [];
+    this.advanceWallEstimator.reset();
   }
 
   /**
@@ -888,10 +899,10 @@ export class FluidLabRenderer {
    * advance executing while the next waits — so completion-callback latency
    * never reaches the device, with or without instrumentation.
    */
-  private preparedGPUQueueDepth(fluid: GPUSolverInstance) {
+  private preparedGPUQueueDepth(_fluid: GPUSolverInstance) {
     return presentationPhysicsQueueDepth(
-      observedGPUAdvanceTime_ms(fluid.info.physicsTrace),
-      this.latestPresentationTrace?.total_ms ?? 0,
+      this.advanceWallEstimator.estimate_ms,
+      this.presentationWallEstimator.estimate_ms ?? 0,
     );
   }
 
@@ -1155,11 +1166,14 @@ export class FluidLabRenderer {
     const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
     if (submittedTime > previousSubmittedTime) {
       const generation = this.gpuFluidGeneration;
+      const pendingAtSubmit = this.gpuPendingBatches;
+      const submittedAt_ms = performance.now();
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
       fluid.info.gpuInFlightSimulation_s = Math.max(0, submittedTime - (fluid.info.completedTime_s ?? 0));
       void device.queue.onSubmittedWorkDone().then(() => {
         if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
+        this.advanceWallEstimator.observeCompletion(performance.now(), submittedAt_ms, pendingAtSubmit);
         this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
         fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
         fluid.info.gpuPendingBatches = this.gpuPendingBatches;
@@ -1306,8 +1320,8 @@ export class FluidLabRenderer {
       }
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
-    const observedStep_ms=observedGPUAdvanceTime_ms(readyGPUFluid?.info.physicsTrace);
-    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, this.latestPresentationTrace?.total_ms ?? 0);
+    const observedStep_ms=this.advanceWallEstimator.estimate_ms;
+    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, this.presentationWallEstimator.estimate_ms ?? 0);
     let gpuInfo = readyGPUFluid?.info;
     const explicitPausedAdvance = readyGPUFluid && pausedTargetRequiresGPUAdvance(this.simulationRunning, time_s, readyGPUFluid.info.submittedTime_s ?? 0);
     if (readyGPUFluid && (explicitPausedAdvance || !renderBeforePhysics)) gpuInfo = this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
@@ -1639,9 +1653,11 @@ export class FluidLabRenderer {
     const surfaceDiagnosticsCompletion = this.waterPipeline.completeSurfaceDiagnostics();
     this.presentationPending=true;
     const presentationDevice=this.device;
+    const presentationSubmittedAt_ms=performance.now();
     void this.device.queue.onSubmittedWorkDone().then(async()=>{
       if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
       const completedAt_ms=performance.now();
+      this.presentationWallEstimator.observeCompletion(completedAt_ms,presentationSubmittedAt_ms,0);
       this.presentationPending=false;this.lastPresentationCompletedAt_ms=completedAt_ms;
       if(initialStaticSvoSubmission)this.settleStaticSvoPresentation(initialStaticSvoSubmission);
       if(initialRasterSubmission){

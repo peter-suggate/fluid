@@ -1,0 +1,128 @@
+{
+  "id": "octree-structured-step",
+  "description": "One fixed-dt advance of the octree structured lane. The active topology epoch is immutable for the whole step: the previous step's validated candidate is committed at the head, and this step's candidate is built at the tail for the next step to commit.",
+  "driverContract": [
+    "A driver requests whole advances only; stage selection, ordering, and substepping belong to the solver.",
+    "One advance encodes exactly one command buffer and one queue.submit; drivers never split or merge steps.",
+    "Drivers may choose only WHEN to request an advance and how many advances are in flight; both are forbidden from affecting stage order or step content.",
+    "dt policy: the target clock advances in whole fixed steps (controller collapse / harness checkpoint), so every advance sees dt = maxDt exactly.",
+    "Diagnostics consume the end-of-step snapshot record (step-snapshot stage); no consumer may race live solver buffers with an independent readback encoder.",
+    "No host scheduling decision inside the step may depend on a GPU readback (hostSchedulingUsesReadback = false).",
+    "Performance instrumentation must be sequence-neutral: traced and untraced advances submit the same command graph, and scheduling inputs must exist identically whether instrumentation is on or off."
+  ],
+  "stages": [
+    {
+      "id": "ready-topology-flip",
+      "label": "Commit the previous tail's validated topology candidate (or retain the accepted epoch on rejection) and rebuild Section 5 air support against the committed epoch",
+      "phase": "power-topology",
+      "reads": [],
+      "carriedReads": [
+        "candidate-epoch",
+        "candidate-structured-velocity",
+        "candidate-boundary-controls"
+      ],
+      "writes": [
+        "accepted-epoch",
+        "accepted-structured-velocity",
+        "accepted-boundary-controls",
+        "air-support"
+      ]
+    },
+    {
+      "id": "surface-transport",
+      "label": "Fine and coarse level-set advection with the previous substep's projected, closest-point-extended velocity; fine narrow-band topology, redistance, restriction; fine generation advances",
+      "phase": "fine-sdf-advection",
+      "reads": [
+        "accepted-epoch",
+        "accepted-structured-velocity",
+        "air-support"
+      ],
+      "carriedReads": [
+        "projected-velocity"
+      ],
+      "writes": [
+        "fine-level-set",
+        "fine-generation",
+        "coarse-level-set"
+      ]
+    },
+    {
+      "id": "pressure-projection",
+      "label": "Power descriptor topology, structured advection + boundary RHS, physical-volume capture, pressure row assembly, MGPCG solve, structured projection + CPT seeds, projection tail publication",
+      "phase": "pressure-solve",
+      "reads": [
+        "accepted-epoch",
+        "accepted-structured-velocity",
+        "accepted-boundary-controls",
+        "fine-level-set",
+        "coarse-level-set"
+      ],
+      "carriedReads": [],
+      "writes": [
+        "projected-velocity",
+        "pressure",
+        "projection-energy-stats",
+        "solve-stats"
+      ]
+    },
+    {
+      "id": "inactive-topology-candidate",
+      "label": "Build and cross-validate the next step's coupled topology/velocity/boundary candidate from this step's surface and projection; a poisoned candidate leaves the next flip retaining the current epoch",
+      "phase": "coarse-grid",
+      "reads": [
+        "fine-level-set",
+        "projected-velocity",
+        "pressure"
+      ],
+      "carriedReads": [],
+      "writes": [
+        "candidate-epoch",
+        "candidate-structured-velocity",
+        "candidate-boundary-controls"
+      ]
+    },
+    {
+      "id": "rigid-exchange",
+      "label": "Rigid-body impulse exchange and integration",
+      "phase": "other",
+      "reads": [
+        "projected-velocity",
+        "pressure"
+      ],
+      "carriedReads": [],
+      "writes": [
+        "rigid-state"
+      ],
+      "optional": true
+    },
+    {
+      "id": "sparse-brick-world",
+      "label": "Publish the final substep's resident fields into the shared sparse-brick render world",
+      "phase": "adaptive-publication",
+      "reads": [
+        "fine-level-set",
+        "projected-velocity"
+      ],
+      "carriedReads": [],
+      "writes": [
+        "render-world"
+      ]
+    },
+    {
+      "id": "step-snapshot",
+      "label": "Copy the accepted structured/boundary controls, fine worklist header, and stats words into the step-coherent snapshot ring (the only sanctioned diagnostics source)",
+      "phase": "other",
+      "reads": [
+        "accepted-structured-velocity",
+        "accepted-boundary-controls",
+        "fine-generation",
+        "solve-stats",
+        "projection-energy-stats"
+      ],
+      "carriedReads": [],
+      "writes": [
+        "step-snapshot-record"
+      ]
+    }
+  ]
+}

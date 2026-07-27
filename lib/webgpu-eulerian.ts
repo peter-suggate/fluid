@@ -124,9 +124,22 @@ export interface GPUEulerianInfo {
   structuredRejectSummary?: string;
   structuredBoundaryGeneration?: number;
   structuredBoundaryValid?: boolean;
-  /** Exact same-generation face-weighted kinetic-energy pair around projection. */
+  /** Exact same-generation face-weighted kinetic-energy stages across the
+   * substep: start-of-step (post-remap), post-advection, post-force
+   * (pre-projection), post-projection. */
+  structuredStartKineticEnergyProxy?: number;
+  structuredPostAdvectionKineticEnergyProxy?: number;
   structuredPreProjectionKineticEnergyProxy?: number;
   structuredPostProjectionKineticEnergyProxy?: number;
+  /** Sampler-path census over wet faces (transition / staggered / cell). */
+  structuredWetFaceCount?: number;
+  structuredTransitionPathCount?: number;
+  structuredStaggeredPathCount?: number;
+  /** Same stages restricted to faces with a liquid incident row. */
+  structuredWetStartKineticEnergyProxy?: number;
+  structuredWetPostAdvectionKineticEnergyProxy?: number;
+  structuredWetPreProjectionKineticEnergyProxy?: number;
+  structuredWetPostProjectionKineticEnergyProxy?: number;
   structuredProjectionEnergyRatio?: number;
   structuredProjectionEnergySampleCount?: number;
   /** Power-coarse φ authority failure bits and first compact row. Bit 512
@@ -175,6 +188,13 @@ export interface GPUEulerianInfo {
   highCflCellCount?: number;
   nonFiniteCount?: number;
   stabilityFlags?: string[];
+  /** Nonempty when the last advance's encoded stage order deviated from the
+   * declared physics step program (lib/physics-step-program.ts). */
+  stepSequenceDeviations?: string[];
+  /** Step index of the latest step-coherent structured snapshot consumed by
+   * diagnostics, and its exact whole-step authority lag (0 = current). */
+  structuredSnapshotStep?: number;
+  structuredAuthorityLagSteps?: number;
   maxSpeedLocation?: GPUFieldLocation;
   maxDivergenceBeforeLocation?: GPUFieldLocation;
   maxDivergenceAfterLocation?: GPUFieldLocation;

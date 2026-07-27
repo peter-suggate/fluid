@@ -9,8 +9,8 @@ const MIME_CANDIDATES = [
   "video/webm"
 ];
 
-/** Records the presentation canvas while keeping enough clock information to
- * replay the result in SI/simulation time, independent of solver throughput. */
+/** Records the presentation canvas on a 60 Hz simulation-time timeline, with
+ * a wall-clock compatibility path calibrated against simulation time. */
 class SimulationRecordingController {
   private recorder: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
@@ -24,8 +24,8 @@ class SimulationRecordingController {
   private frameQueue: Promise<void> = Promise.resolve();
   private frameError: unknown = null;
   private frameCount = 0;
+  private latestPresentedSimulation_s = 0;
   private nextFrameSimulation_s = 0;
-  private frameLoop = 0;
 
   get supported(): boolean {
     if (typeof window === "undefined") return false;
@@ -76,25 +76,16 @@ class SimulationRecordingController {
     this.frameError = null;
     this.frameCount = 0;
     this.startedAtSimulation_s = simulationTime_s;
+    this.latestPresentedSimulation_s = simulationTime_s;
     this.nextFrameSimulation_s = simulationTime_s + SIMULATION_VIDEO_FRAME_DURATION_S;
-    const capture = () => {
-      if (!this.frameOutput || !this.frameSource) return;
-      const currentSimulation_s = useRuntimeStore.getState().simulationTime;
-      const due = simulationFramesDue(currentSimulation_s, this.nextFrameSimulation_s);
-      for (let index = 0; index < due; index += 1) {
-        this.enqueueSimulationFrame(canvas);
-      }
-      this.nextFrameSimulation_s += due * SIMULATION_VIDEO_FRAME_DURATION_S;
-      this.frameLoop = requestAnimationFrame(capture);
-    };
-    this.frameLoop = requestAnimationFrame(capture);
+    this.enqueueSimulationFrame(canvas);
     useRecordingStore.getState().set({
       status: "recording",
       startedAtSimulation_s: simulationTime_s,
       modalOpen: false,
       error: null
     });
-    useRuntimeStore.getState().setNotice("Capturing one frame every 0.033 simulated seconds · native 30 fps output");
+    useRuntimeStore.getState().setNotice("Capturing fine states at 60 frames per simulated second");
   }
 
   private enqueueSimulationFrame(canvas: HTMLCanvasElement) {
@@ -115,6 +106,15 @@ class SimulationRecordingController {
         sample.close();
       }
     }).catch((error) => { this.frameError = error; });
+  }
+
+  capturePresentedState(canvas: HTMLCanvasElement, currentSimulation_s: number): void {
+    if (!this.frameOutput || !this.frameSource) return;
+    if (currentSimulation_s <= this.latestPresentedSimulation_s + 1e-9) return;
+    this.latestPresentedSimulation_s = currentSimulation_s;
+    const due = simulationFramesDue(currentSimulation_s, this.nextFrameSimulation_s);
+    for (let index = 0; index < due; index += 1) this.enqueueSimulationFrame(canvas);
+    this.nextFrameSimulation_s += due * SIMULATION_VIDEO_FRAME_DURATION_S;
   }
 
   private startWallClockCapture(canvas: HTMLCanvasElement, simulationTime_s: number): boolean {
@@ -213,28 +213,29 @@ class SimulationRecordingController {
     const output = this.frameOutput;
     const source = this.frameSource;
     if (!output || !source) return;
-    cancelAnimationFrame(this.frameLoop);
-    this.frameLoop = 0;
     useRecordingStore.getState().set({ status: "processing", startedAtSimulation_s: null, error: null });
     try {
       await this.frameQueue;
       if (this.frameError) throw this.frameError;
-      if (this.frameCount === 0) throw new Error("Record at least 0.033 simulation seconds before stopping.");
+      if (this.frameCount < 2 || this.latestPresentedSimulation_s <= this.startedAtSimulation_s + 1e-9) {
+        throw new Error("Record at least 0.017 simulation seconds before stopping.");
+      }
       source.close();
       await output.finalize();
       const buffer = output.target.buffer;
-      if (!buffer) throw new Error("The 30 fps video encoder returned no data.");
+      if (!buffer) throw new Error("The 60 fps video encoder returned no data.");
       const mimeType = await output.getMimeType();
-      const duration_s = this.frameCount / SIMULATION_VIDEO_FRAME_RATE;
+      const recordedDuration_s = this.frameCount / SIMULATION_VIDEO_FRAME_RATE;
+      const simulationDuration_s = this.latestPresentedSimulation_s - this.startedAtSimulation_s;
       const recording: SimulationRecordingResult = {
         url: "",
         blob: new Blob([buffer], { type: mimeType }),
         mimeType,
         simulationStart_s: this.startedAtSimulation_s,
-        simulationEnd_s: this.startedAtSimulation_s + duration_s,
-        simulationDuration_s: duration_s,
-        recordedDuration_s: duration_s,
-        timingMode: "simulation-frames",
+        simulationEnd_s: this.latestPresentedSimulation_s,
+        simulationDuration_s,
+        recordedDuration_s,
+        timingMode: "simulation-time",
         frameRate: SIMULATION_VIDEO_FRAME_RATE,
         frameCount: this.frameCount,
         fileExtension: "mp4",
@@ -245,10 +246,10 @@ class SimulationRecordingController {
       if (previous) URL.revokeObjectURL(previous.url);
       await this.releaseFrameCapture(false);
       useRecordingStore.getState().set({ status: "ready", recording, modalOpen: true, error: null });
-      useRuntimeStore.getState().setNotice(`Encoded ${recording.frameCount} simulation frames · ${duration_s.toFixed(2)} s at 30 fps`);
+      useRuntimeStore.getState().setNotice(`Encoded ${recording.frameCount} frames · 1 video second per simulated second`);
     } catch (error) {
       await this.releaseFrameCapture(true);
-      this.fail(error instanceof Error ? error.message : "Unable to encode the 30 fps simulation video.");
+      this.fail(error instanceof Error ? error.message : "Unable to encode the 60 fps simulation video.");
     }
   }
 
@@ -284,8 +285,6 @@ class SimulationRecordingController {
   }
 
   private async releaseFrameCapture(cancel: boolean): Promise<void> {
-    cancelAnimationFrame(this.frameLoop);
-    this.frameLoop = 0;
     const output = this.frameOutput;
     this.frameOutput = null;
     this.frameSource = null;

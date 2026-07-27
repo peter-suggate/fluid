@@ -1,22 +1,27 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
+import { PerformanceActivityGrid } from "./PerformanceActivityGrid";
 import {
   averagePerformanceTraces,
-  performanceTraceAccounting,
   performanceTraceIsExact,
   type PaperPhaseId,
   type PerformanceTrace,
 } from "@/lib/performance-trace";
 import { isOctreeTechniqueOverlayMode } from "@/lib/octree-technique-debug";
 import { emptyPerformanceReport, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
+import { simulation } from "@/lib/simulation/controller";
+import { usePerformanceActivityStore } from "@/lib/stores/performance-activity-store";
 import { useMethodStore } from "@/lib/stores/method-store";
-import { usePerformanceInstrumentationStore } from "@/lib/stores/performance-instrumentation-store";
+import {
+  usePerformanceInstrumentationStore,
+  type PerformanceInstrumentationMode,
+} from "@/lib/stores/performance-instrumentation-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import type { GridOverlayConfig, GridOverlayMode } from "@/lib/webgpu-renderer";
 
-const formatMs = (value: number) => value < 1 ? `${value.toFixed(3)} ms` : `${value.toFixed(2)} ms`;
+const PERFORMANCE_AVERAGE_WINDOW = 30;
 const PHASE_LAYOUT: Readonly<Record<PerformanceTrace["lane"], readonly [PaperPhaseId, string][]>> = {
   "main-thread": [
     ["frame-control", "Frame control + simulation admission"],
@@ -94,88 +99,20 @@ const stabilizePhaseLayout = (trace: PerformanceTrace | undefined) => {
   };
 };
 
-const averagedLane = (traces: PerformanceTrace[], windowSize: number) => {
+const averagedTrace = (traces: PerformanceTrace[], windowSize: number) => {
   const unique = [...new Map(traces.map((trace) => [
     `${trace.domain}\0${trace.lane}\0${trace.context}\0${trace.sampleId}\0${trace.capturedAt_ms}`,
     trace,
   ])).values()];
   const latest = unique.at(-1);
-  if (!latest) return { trace: undefined, sampleCount: 0 };
+  if (!latest) return undefined;
   const latestHardware = unique.findLast((trace) => trace.measurementSource === "gpu-hardware-timestamp");
   const source = latestHardware && latest.capturedAt_ms - latestHardware.capturedAt_ms <= 2_000
     ? "gpu-hardware-timestamp"
     : latest.measurementSource;
   const window = unique.filter((trace) => trace.measurementSource === source).slice(-windowSize);
-  return {
-    trace: stabilizePhaseLayout(averagePerformanceTraces(window)),
-    sampleCount: window.length,
-  };
+  return stabilizePhaseLayout(averagePerformanceTraces(window));
 };
-
-function TraceLane({ trace, title, sampleCount }: { trace?: PerformanceTrace; title: string; sampleCount: number }) {
-  if (!trace) {
-    return <section className="trace-lane trace-empty"><header><h3>{title}</h3><span>WAITING FOR COMPLETE SAMPLE</span></header></section>;
-  }
-  const scale = Math.max(trace.total_ms, 0.000001);
-  const accounting = performanceTraceAccounting(trace);
-  const exact = accounting.exact;
-  const sourceLabel = trace.measurementSource === "gpu-hardware-timestamp"
-    ? "HARDWARE TIMESTAMPS"
-    : trace.measurementSource === "gpu-queue-wall"
-      ? "QUEUE COMPLETION FALLBACK"
-      : "ACTIVE CPU WALL";
-  const sumLabel = trace.measurementSource === "gpu-hardware-timestamp"
-    ? "GPU EXECUTION SUM"
-    : trace.measurementSource === "cpu-active-wall"
-      ? "ACTIVE WALL SUM"
-      : "QUEUE-WALL SUM";
-  return <section
-    className="trace-lane"
-    data-domain={trace.domain}
-    data-lane={trace.lane}
-    data-observed-total-ms={accounting.observedTotal_ms}
-    data-accounted-ms={accounting.accounted_ms}
-    data-closure-error-ms={accounting.closureError_ms}
-    data-exact={exact}
-    data-measurement-source={trace.measurementSource}
-  >
-    <header>
-      <div className="trace-title-block">
-        <h3>{title}</h3>
-        <div className="trace-meta">
-          <span>AVG {sampleCount} · LATEST {trace.sampleId}</span>
-          <code title={trace.context}>{trace.context}</code>
-          <span>{sourceLabel}</span>
-        </div>
-      </div>
-      <div className="trace-total"><strong>{formatMs(trace.total_ms)}</strong><span>{exact ? sumLabel : "INVALID"}</span></div>
-    </header>
-    {trace.measurementSource === "gpu-queue-wall" && <p className="trace-source-warning">
-      Hardware timestamps were unavailable or invalid for this sample. Total queue wall time is measured exactly; semantic GPU phase attribution requires a valid timestamp sample.
-    </p>}
-    <div className="trace-stack" aria-label={`${title}: ${formatMs(trace.total_ms)} total`}>
-      {trace.phases.filter((phase) => phase.duration_ms > 0).map((phase, index) => <span
-        key={`${phase.id}-${index}`}
-        className={`trace-segment phase-${phase.id}`}
-        style={{ width: `${phase.duration_ms / scale * 100}%` }}
-        title={`${phase.label}: ${formatMs(phase.duration_ms)}`}
-      />)}
-    </div>
-    <div className="trace-rows">
-      {trace.phases.map((phase, index) => <div className="trace-row" key={`${phase.id}-${index}`}>
-        <i className={`phase-${phase.id}`} />
-        <span>{phase.label}</span>
-        <div><b className={`phase-${phase.id}`} style={{ width: `${phase.duration_ms > 0 ? Math.max(1, phase.duration_ms / scale * 100) : 0}%` }} /></div>
-        <output>{formatMs(phase.duration_ms)}</output>
-      </div>)}
-    </div>
-    <div className="trace-accounting" aria-label={`${title} accounting closure`}>
-      <span><small>OBSERVED TOTAL</small><output>{formatMs(accounting.observedTotal_ms)}</output></span>
-      <span><small>ACCOUNTED PHASE SUM</small><output>{formatMs(accounting.accounted_ms)}</output></span>
-      <span><small>CLOSURE ERROR</small><output>{accounting.closureError_ms === 0 ? "0.000 ms" : formatMs(accounting.closureError_ms)}</output></span>
-    </div>
-  </section>;
-}
 
 type PaperView = {
   id: string;
@@ -321,15 +258,20 @@ export function PerformancePanel() {
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const methodId = useMethodStore((state) => state.methodId);
   const instrumentationEnabled = usePerformanceInstrumentationStore((state) => state.enabled);
-  const setInstrumentationEnabled = usePerformanceInstrumentationStore((state) => state.setEnabled);
+  const instrumentationMode = usePerformanceInstrumentationStore((state) => state.mode);
+  const setInstrumentationMode = usePerformanceInstrumentationStore((state) => state.setMode);
   const runState = useRuntimeStore((state) => state.runState);
+  const activityHistory = usePerformanceActivityStore((state) => state.history);
+  const selectedActivityFrameId = usePerformanceActivityStore((state) => state.selectedFrameId);
+  const referenceActivityFrameId = usePerformanceActivityStore((state) => state.referenceFrameId);
+  const selectActivityFrame = usePerformanceActivityStore((state) => state.selectFrame);
+  const pinActivityReference = usePerformanceActivityStore((state) => state.pinReference);
   const overlayMode = useUIStore((state) => state.gridOverlayMode);
   const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
   const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
   const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const setOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
-  const [windowSize, setWindowSize] = useState(30);
   const lanes = useMemo(() => {
     const matching = reports.filter((candidate) =>
       candidate.methodId === methodId && candidate.context === report.context);
@@ -344,11 +286,11 @@ export function PerformancePanel() {
     const physicsSamples = samples("physics");
     const presentationSamples = samples("presentation");
     return {
-      cpu: { ...averagedLane(cpuSamples.traces, windowSize), held: cpuSamples.held },
-      physics: { ...averagedLane(physicsSamples.traces, windowSize), held: physicsSamples.held },
-      presentation: { ...averagedLane(presentationSamples.traces, windowSize), held: presentationSamples.held },
+      cpu: { trace: averagedTrace(cpuSamples.traces, PERFORMANCE_AVERAGE_WINDOW), held: cpuSamples.held },
+      physics: { trace: averagedTrace(physicsSamples.traces, PERFORMANCE_AVERAGE_WINDOW), held: physicsSamples.held },
+      presentation: { trace: averagedTrace(presentationSamples.traces, PERFORMANCE_AVERAGE_WINDOW), held: presentationSamples.held },
     };
-  }, [reports, methodId, report.context, runState, windowSize]);
+  }, [reports, methodId, report.context, runState]);
   const cpu = lanes.cpu.trace;
   const physics = lanes.physics.trace;
   const presentation = lanes.presentation.trace;
@@ -362,50 +304,78 @@ export function PerformancePanel() {
   const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
   const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
   const holdingPausedMeasurements = lanes.cpu.held || lanes.physics.held || lanes.presentation.held;
-  const toggleInstrumentation = () => {
-    const enabled = !instrumentationEnabled;
-    setInstrumentationEnabled(enabled);
+  const selectedActivityFrame = activityHistory.find((frame) =>
+    frame.identity.frameId === selectedActivityFrameId) ?? activityHistory.at(-1);
+  const referenceActivityFrame = activityHistory.find((frame) =>
+    frame.identity.frameId === referenceActivityFrameId);
+  const selectedActivityIndex = selectedActivityFrame
+    ? activityHistory.findIndex((frame) => frame.identity.frameId === selectedActivityFrame.identity.frameId)
+    : -1;
+  const changeInstrumentationMode = (mode: PerformanceInstrumentationMode) => {
+    if (mode === instrumentationMode) return;
+    const shaderVariantChanged = (instrumentationMode === "activity") !== (mode === "activity");
+    setInstrumentationMode(mode);
+    const activityStore = usePerformanceActivityStore.getState();
+    if (mode === "off") activityStore.setEnabled(false);
+    else if (activityStore.enabled) activityStore.beginGeneration();
+    else activityStore.setEnabled(true);
     useDiagnosticsStore.getState().set({
       performanceReport: emptyPerformanceReport,
       performanceReports: [],
     });
+    if (shaderVariantChanged) {
+      simulation.reset();
+      useRuntimeStore.getState().setNotice(
+        mode === "activity"
+          ? "Activity profiler enabled · rebuilding heartbeat-capable GPU pipeline variants"
+          : "Activity profiler disabled · rebuilding production WGSL with profiling fragments omitted",
+      );
+    }
   };
-
   return <aside id="performance-panel" className="right-panel panel-scroll performance-panel performance-v2" aria-label="Performance and paper field observatory" data-testid="performance-panel" data-method={methodId} data-traces-exact={allExact}>
-    <header className="trace-header">
+    <header className="performance-panel-header">
       <div><span>POWER LIQUIDS OBSERVATORY</span><h2>Measured work + live fields</h2></div>
-      <div className="trace-header-actions">
-        <button
-          type="button"
-          className={`measurement-toggle ${instrumentationEnabled ? "active" : ""}`}
-          role="switch"
-          aria-checked={instrumentationEnabled}
-          onClick={toggleInstrumentation}
-          title="Disable timestamp queries, trace readbacks, and the stage-boundary encoder breaks they need"
-        >
-          <span>MEASUREMENT LOAD</span><b>{instrumentationEnabled ? "ON" : "OFF"}</b><i />
-        </button>
+      <div className="performance-panel-header-actions">
+        <label className="measurement-mode">
+          <span>CAPTURE</span>
+          <select
+            value={instrumentationMode}
+            onChange={(event) => changeInstrumentationMode(event.currentTarget.value as PerformanceInstrumentationMode)}
+            aria-label="Performance capture mode"
+          >
+            <option value="activity">Detailed</option>
+            <option value="timeline">Timeline only</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
       </div>
     </header>
 
-    {instrumentationEnabled ? <><section className="trace-summary">
-      <div><small>CPU MAIN THREAD</small><strong>{cpu ? formatMs(cpu.total_ms) : "—"}</strong></div>
-      <div><small>GPU PHYSICS</small><strong>{physics ? formatMs(physics.total_ms) : "—"}</strong></div>
-      <div><small>GPU PRESENTATION</small><strong>{presentation ? formatMs(presentation.total_ms) : "—"}</strong></div>
-      <label><small>AVERAGE</small><select value={windowSize} onChange={(event) => setWindowSize(Number(event.currentTarget.value))}><option value={1}>1 sample</option><option value={10}>10 samples</option><option value={30}>30 samples</option><option value={60}>60 samples</option></select></label>
-    </section>
-
-    <div className="trace-notice">
-      CPU and GPU are independent ledgers and are never added together. Each lane is one adjacent-boundary partition; phase rows sum exactly to that lane&apos;s measured total.
-    </div>
-    {holdingPausedMeasurements && <div className="trace-notice">
-      PAUSED · Holding the last completed measurements until a fresh sample for this view is available.
-    </div>}
-
-    <TraceLane trace={physics} title="GPU · POWER LIQUIDS ADVANCE" sampleCount={lanes.physics.sampleCount} />
-    <TraceLane trace={presentation} title="GPU · PRESENTATION" sampleCount={lanes.presentation.sampleCount} />
-    <TraceLane trace={cpu} title="CPU · MAIN-THREAD FRAME WORK" sampleCount={lanes.cpu.sampleCount} />
-    </> : <div className="trace-disabled-notice">
+    {instrumentationEnabled ? <>
+    <PerformanceActivityGrid
+      frame={selectedActivityFrame}
+      cpu={cpu}
+      physics={physics}
+      presentation={presentation}
+      captureLabel={selectedActivityIndex >= 0 ? `CAPTURE ${selectedActivityIndex + 1}/${activityHistory.length}` : undefined}
+      captureOptions={activityHistory.map((frame, index) => ({
+        id: frame.identity.frameId,
+        label: `#${index + 1} · ${frame.context}`,
+      }))}
+      selectedCaptureId={selectedActivityFrame?.identity.frameId}
+      onSelectCapture={(frameId) => selectActivityFrame(frameId)}
+      referenceFrame={referenceActivityFrame}
+      referenceLabel={referenceActivityFrame ? "PINNED REFERENCE" : undefined}
+      onSetReference={selectedActivityFrame
+        && selectedActivityFrame.identity.frameId !== referenceActivityFrameId
+        ? () => pinActivityReference(selectedActivityFrame.identity.frameId)
+        : undefined}
+      onClearReference={referenceActivityFrame ? () => pinActivityReference(undefined) : undefined}
+      statusLabel={holdingPausedMeasurements
+        ? "PAUSED · LAST COMPLETE CAPTURE"
+        : instrumentationMode === "activity" ? "DETAILED ACTIVITY" : "TIMELINE ONLY"}
+    />
+    </> : <div className="performance-disabled-notice">
       <strong>Running without measurement instrumentation</strong>
       <span>Timestamp queries, stage-boundary encoder breaks, and trace-buffer resolves/readbacks are bypassed. Correctness synchronization remains active. Measuring adds no queue fence and no dispatch: a sampled step submits the same command graph plus one marker pass, which the Dawn lane prices at about 2%.</span>
     </div>}

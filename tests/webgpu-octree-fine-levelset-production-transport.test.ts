@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP,
@@ -10,6 +11,16 @@ import {
 } from "../lib/webgpu-octree-fine-levelset-transport";
 
 function compact(source: string) { return source.replace(/\s+/g, ""); }
+
+test("octree allocation and recurring publication share the two-cell transport closure", () => {
+  const source = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
+  assert.match(source,
+    /constmaximumBacktraceFineCells=2\*globalFineFactor;constphysicalBand=planFineLevelSetTopologyBand\(brickResolution,\{maximumBacktraceFineCells,/,
+    "allocation must reserve the same two-finest-cell trajectory that the UI runtime can request");
+  assert.match(source,
+    /constmaximumBacktraceFineCells=2\*this\.globalFineLevelSet!\.plan\.fineFactor;.*transport\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,/s,
+    "transport and both recurring A/B topology publishers must consume the allocation bound");
+});
 
 test("direct fine transport has one page-bounded structured authority path", () => {
   const plan = planFineLevelSetGPUTransport(16_777_216, 4_096, 262_144);
@@ -109,8 +120,8 @@ test("WGSL fails closed unless generation, epoch, and accepted A\/B bank agree",
     "face-graph hops must not be compared numerically with fine-cell displacement");
   const encode = compact(WebGPUFineLevelSetTransport.prototype.encode.toString());
   assert.match(encode,
-    /maximumBacktraceFineCells>plan\.fineFactor.*Finetransportdisplacementboundexceedsitsconfiguredsupportdepth/s,
-    "the host API must reject a backtrace bound larger than its single configured fine-factor maximum");
+    /maximumBacktraceFineCells>2\*plan\.fineFactor.*Finetransportdisplacementboundexceedsitsconfiguredsupportdepth/s,
+    "the host API must admit the two-finest-cell UI trajectory but reject anything beyond its reserved support");
   assert.match(shader,
     /letvalid=structuredValid\(\)&&airPublicationValid\(\).*scheduleValid=valid&&governorInvalid\[0\]==0u&&required<=64u&&displacement<=p\.maxBacktrace.*activeSteps=select\(0u,required,scheduleValid\)/s,
     "invalid velocity or an over-bound characteristic must publish zero work");

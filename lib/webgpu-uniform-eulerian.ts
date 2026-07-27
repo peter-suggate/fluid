@@ -3,8 +3,32 @@ import {
   GPUQueueWallPerformanceTraceRecorder,
   GPUStageTimestampRecorder,
   type GPUTimestampPhase,
+  type PerformanceTrace,
 } from "./performance-trace";
-import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
+import {
+  performanceShaderVariant,
+  usePerformanceInstrumentationStore,
+} from "./stores/performance-instrumentation-store";
+import { usePerformanceActivityStore } from "./stores/performance-activity-store";
+import {
+  createGPULogicalActivityAdoptionContext,
+  stableGPULogicalActivityId,
+  type GPULogicalActivityAdoptionContext,
+  type GPULogicalActivityBindingSession,
+} from "./gpu-logical-activity-adoption";
+import {
+  GPU_LOGICAL_ACTIVITY_HEADER_WORDS,
+  GPU_LOGICAL_ACTIVITY_MAX_CAPACITY,
+  GPU_LOGICAL_ACTIVITY_RECORD_BYTES,
+  type GPULogicalActivityCapture,
+  type GPULogicalActivityRecorder,
+  type GPULogicalActivityTimeLocator,
+} from "./gpu-logical-activity";
+import {
+  gpuPhysicsPerformanceActivityFrameId,
+  type ActivityWorkIdentity,
+} from "./performance-activity";
+import { publishDecodedGPULogicalActivity } from "./gpu-performance-activity";
 import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import {
   GPU_RIGID_EXCHANGE_BYTES,
@@ -49,6 +73,8 @@ import {
   STRUCTURED_PROJECTION_ENERGY_WORDS,
 } from "./webgpu-octree-structured-dynamics";
 import { decodeOctreeStructuredRejectCarry } from "./octree-structured-reject-carry";
+import { StructuredStepSnapshotRing, structuredAuthorityStepHealth } from "./structured-step-snapshot";
+import { OCTREE_STEP_PROGRAM, StepSequenceRecorder } from "./physics-step-program";
 
 export type UniformVelocityTransport = GPUVelocityTransport;
 export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; quadtreeTallCells?: Partial<QuadtreeTallCellProjectionOptions>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; quadtreeRebuildTopology?: boolean; quadtreeRebuildIntervalSteps?: number; quadtreeTopologyStaleSteps?: number; /** Fully GPU-resident every-step topology regeneration (Algorithm 1); default on for uncoupled parallel preconditioners. */ quadtreeInlineRebuild?: boolean; deferPipelineCompilation?: boolean }
@@ -84,6 +110,175 @@ const OCTREE_SEMANTIC_TRACE_PHASE: Readonly<Record<OctreeSemanticPhase, GPUTimes
 /** Stage boundaries are free, but the trace's query set, resolve and map are
  * not. Sample at a debugging cadence rather than every advance. */
 const PHYSICS_TRACE_CADENCE_MS = 100;
+const PHYSICS_ACTIVITY_PHASE_CAPACITY = 256;
+const PHYSICS_ACTIVITY_RECORD_CAPACITY = 4_096;
+const PHYSICS_ACTIVITY_TARGET_BYTES = GPU_LOGICAL_ACTIVITY_HEADER_WORDS * 4
+  + PHYSICS_ACTIVITY_RECORD_CAPACITY * GPU_LOGICAL_ACTIVITY_RECORD_BYTES;
+
+/** Bounded sampled ledger (plus one equal staging buffer), adapter-limited. */
+export function physicsLogicalActivityCaptureCapacity(
+  limits: Pick<GPUSupportedLimits, "maxStorageBufferBindingSize" | "maxBufferSize">,
+): number {
+  const headerBytes = GPU_LOGICAL_ACTIVITY_HEADER_WORDS * 4;
+  const bytes = Math.min(
+    PHYSICS_ACTIVITY_TARGET_BYTES,
+    Number(limits.maxStorageBufferBindingSize),
+    Number(limits.maxBufferSize),
+  );
+  return Math.max(1, Math.min(
+    GPU_LOGICAL_ACTIVITY_MAX_CAPACITY,
+    Math.floor((bytes - headerBytes) / GPU_LOGICAL_ACTIVITY_RECORD_BYTES),
+  ));
+}
+
+const activityTaskId = (moduleId: string, task: string) =>
+  stableGPULogicalActivityId(`task\0${moduleId}\0${task}`);
+const activityCheckpointId = (moduleId: string, task: string, checkpoint: string) =>
+  stableGPULogicalActivityId(`checkpoint\0${moduleId}\0${task}\0${checkpoint}`);
+
+export const PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID =
+  activityTaskId("physics/phase-boundaries", "physics-frame");
+export const PHYSICS_ACTIVITY_POWER_VOLUME_TASK_ID =
+  activityTaskId("octree/power-volume", "publish-power-cell-volumes");
+
+export interface GPUPhysicsLogicalActivityTaskDescriptor {
+  readonly id: string;
+  readonly label: string;
+  /** Measured timestamp phase which encloses this task; placement inside it is reconstructed. */
+  readonly phaseId?: GPUTimestampPhase["id"];
+  readonly checkpoints?: Readonly<Record<"enter" | "exit", number>>;
+}
+
+const PHYSICS_ACTIVITY_TASKS: Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>> = {
+  [PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID]:
+    { id: "gpu.physics.phase-boundary", label: "Physics phase boundary" },
+  [activityTaskId("octree/fine-redistance-jfa", "jump-flood-a-to-b")]:
+    {
+      id: "gpu.physics.fine-redistance-jfa-a-b",
+      label: "Fine redistance · jump flood A→B",
+      phaseId: "fine-sdf-redistance",
+    },
+  [activityTaskId("octree/fine-redistance-jfa", "jump-flood-b-to-a")]:
+    {
+      id: "gpu.physics.fine-redistance-jfa-b-a",
+      label: "Fine redistance · jump flood B→A",
+      phaseId: "fine-sdf-redistance",
+    },
+  [activityTaskId("octree/fine-volume-correction", "apply-fine-volume-correction")]:
+    {
+      id: "gpu.physics.fine-volume-correction",
+      label: "Fine volume correction",
+      phaseId: "adaptive-publication",
+    },
+  [PHYSICS_ACTIVITY_POWER_VOLUME_TASK_ID]: {
+    id: "gpu.physics.power-cell-volumes",
+    label: "Power-cell volume publication",
+    checkpoints: {
+      enter: activityCheckpointId("octree/power-volume", "publish-power-cell-volumes", "enter"),
+      exit: activityCheckpointId("octree/power-volume", "publish-power-cell-volumes", "exit"),
+    },
+  },
+  [activityTaskId("octree/structured-publication", "classify-structured-catalog-slots")]:
+    {
+      id: "gpu.physics.structured-catalog-classification",
+      label: "Structured catalog classification",
+      phaseId: "coarse-grid",
+    },
+};
+
+export interface GPUPhysicsLogicalActivitySample {
+  readonly identity: ActivityWorkIdentity;
+  readonly shaderGeneration: number;
+  readonly capture: GPULogicalActivityCapture;
+  readonly trace: PerformanceTrace;
+  readonly lane: "gpu-physics";
+  readonly clockDomain: "gpu-physics-timestamp";
+  readonly windowStart_ms: 0;
+  readonly windowEnd_ms: number;
+  /** Cumulative measured phase durations. Tick n denotes the end of phase n. */
+  readonly phaseBoundaries_ms: readonly number[];
+  readonly locateTime: GPULogicalActivityTimeLocator;
+  readonly tasks: Readonly<Record<number, GPUPhysicsLogicalActivityTaskDescriptor>>;
+}
+
+/**
+ * Project explicit shader phase ticks into the timestamp trace's local clock.
+ * The timestamp durations are measured; placement within that partition is
+ * reconstructed. Append sequence is used only to bracket a heartbeat between
+ * explicit command-ordered marker passes, never as a duration or shader clock.
+ */
+export function physicsPhaseBoundaryTimeProjection(
+  trace: PerformanceTrace,
+  capture?: GPULogicalActivityCapture,
+): {
+  phaseBoundaries_ms: readonly number[];
+  locateTime: GPULogicalActivityTimeLocator;
+} {
+  let cursor_ms = 0;
+  const phaseRanges = trace.phases.map((phase) => {
+    const start_ms = cursor_ms;
+    cursor_ms = Math.min(trace.total_ms, cursor_ms + Math.max(0, phase.duration_ms));
+    return { id: phase.id, start_ms, end_ms: cursor_ms };
+  });
+  const phaseBoundaries_ms = phaseRanges.map((phase) => phase.end_ms);
+  const markers = (capture?.events ?? [])
+    .filter((event) => event.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID
+      && event.tick !== undefined)
+    .sort((left, right) => left.sequence - right.sequence);
+  const maximumMarkerTick = markers.reduce(
+    (maximum, marker) => Math.max(maximum, marker.tick ?? -1),
+    -1,
+  );
+  const markerBoundary_ms = (tick: number): number | undefined => {
+    if (trace.measurementSource !== "gpu-queue-wall") return phaseBoundaries_ms[tick];
+    // Queue completion has no semantic subphase timestamps. Preserve only the
+    // command-ordered marker partition and label it reconstructed; equal
+    // spacing is an explicit visualization fallback, never measured duration.
+    return maximumMarkerTick >= 0
+      ? trace.total_ms * (tick + 1) / (maximumMarkerTick + 1)
+      : undefined;
+  };
+  return {
+    phaseBoundaries_ms,
+    locateTime: (event) => {
+      if (event.taskId === PHYSICS_ACTIVITY_PHASE_MARKER_TASK_ID) {
+        const boundary_ms = event.tick === undefined ? undefined : markerBoundary_ms(event.tick);
+        return boundary_ms === undefined
+          ? undefined
+          : { time_ms: boundary_ms, evidence: "reconstructed" };
+      }
+      if (event.taskId === PHYSICS_ACTIVITY_POWER_VOLUME_TASK_ID && event.tick !== undefined) {
+        const boundary_ms = markerBoundary_ms(event.tick);
+        if (boundary_ms !== undefined) {
+          return { time_ms: boundary_ms, evidence: "reconstructed" };
+        }
+      }
+      const nextMarker = markers.find((marker) => marker.sequence > event.sequence);
+      const previousMarker = markers.findLast((marker) => marker.sequence < event.sequence);
+      const enclosingTick = nextMarker?.tick
+        ?? (previousMarker?.tick === undefined ? undefined : previousMarker.tick + 1);
+      if (enclosingTick !== undefined) {
+        const end_ms = markerBoundary_ms(enclosingTick);
+        const start_ms = enclosingTick === 0 ? 0 : markerBoundary_ms(enclosingTick - 1);
+        if (start_ms !== undefined && end_ms !== undefined && end_ms >= start_ms) {
+          return { time_ms: (start_ms + end_ms) / 2, evidence: "reconstructed" };
+        }
+      }
+      const descriptor = PHYSICS_ACTIVITY_TASKS[event.taskId];
+      if (!descriptor?.phaseId) return undefined;
+      // A shader heartbeat proves progress somewhere inside its measured
+      // enclosing phase, but WGSL supplies no clock. Put the point at the
+      // phase midpoint and keep reconstructed evidence; do not turn an
+      // enter/exit pair into a full-phase occupancy claim.
+      const enclosing = phaseRanges
+        .filter((phase) => phase.id === descriptor.phaseId && phase.end_ms > phase.start_ms)
+        .sort((left, right) => (right.end_ms - right.start_ms) - (left.end_ms - left.start_ms))[0];
+      return enclosing
+        ? { time_ms: (enclosing.start_ms + enclosing.end_ms) / 2, evidence: "reconstructed" }
+        : undefined;
+    },
+  };
+}
 
 /** Explicit capillary-wave stability bound for a finest cell. */
 export function capillaryStableDt_s(
@@ -390,10 +585,28 @@ export class WebGPUUniformEulerianSolver {
   private transportFromPredictedGroup?: GPUBindGroup;
   private lastTime = 0;
   private readbackPending = false;
+  private structuredFreezeDumpedEpoch = -1;
+  private structuredProbeCounter = 0;
+  private structuredRowCounterRaces = 0;
+  private structuredLagLoggedFine = -1;
+  private structuredPublicationFailureDumped = false;
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
   private lastPhysicsTraceAt_ms = -Infinity;
   private hardwarePhysicsTraceInvalid = false;
+  /** Step-coherent structured diagnostics; written by the step's own encoder. */
+  private stepSnapshotRing?: StructuredStepSnapshotRing;
+  private readonly stepSequenceRecorder = new StepSequenceRecorder();
+  private stepSequenceFaulted = false;
+  private readonly logicalActivity: GPULogicalActivityAdoptionContext;
+  private logicalActivityMarkerPipeline?: GPUComputePipeline;
+  private logicalActivityMarkerTickSource?: GPUBuffer;
+  private logicalActivityMarkerTick?: GPUBuffer;
+  private logicalActivityMarkerGroup?: GPUBindGroup;
+  /** Permanent overflow-safe sink that keeps instrumented pipelines valid between retained samples. */
+  private logicalActivityDiscardRecorder?: GPULogicalActivityRecorder;
+  private logicalActivityCaptureId = 0;
+  private latestLogicalActivity?: GPUPhysicsLogicalActivitySample;
   private validationChecked = false;
   private validationPromise?: Promise<void>;
   // Not readonly: a warm re-seed rebuilds the boundary for the new nozzle.
@@ -439,6 +652,12 @@ export class WebGPUUniformEulerianSolver {
       || !supportsFluidM1MaxReduction(device.limits))) {
       throw new Error("Power octree requires the M1 Max 128-lane subgroup profile");
     }
+    this.logicalActivity = createGPULogicalActivityAdoptionContext({
+      moduleId: "physics/phase-boundaries",
+      profile: performanceShaderVariant(),
+      identity: "workgroup",
+    });
+    if (this.logicalActivity.enabled) this.createLogicalActivityMarker();
     const c = scene.container, matched = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, options.tallCellSettings);
     const nx = matched.nx, ny = matched.fineNy, nz = matched.nz;
     this.velocityTransport = options.velocityTransport ?? "maccormack";
@@ -641,6 +860,86 @@ export class WebGPUUniformEulerianSolver {
     if (this.octreeProjection && !options.deferPipelineCompilation) this.publishInitialSparseScene();
   }
 
+  private createLogicalActivityMarker(): void {
+    if (this.logicalActivityMarkerPipeline) return;
+    const heartbeat = this.logicalActivity.workgroup("physics-frame", "phase-boundary", {
+      tick: "marker.tick",
+      workgroupLaneCount: 1,
+    });
+    const markerShader = this.logicalActivity.module(/* wgsl */ `
+struct PhysicsActivityMarker { tick: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
+@group(0) @binding(0) var<uniform> marker: PhysicsActivityMarker;
+
+@compute @workgroup_size(1)
+fn recordPhysicsPhaseBoundary(
+  @builtin(workgroup_id) workgroupId: vec3u,
+  @builtin(local_invocation_index) localInvocationIndex: u32,
+) {
+  ${heartbeat}
+}
+`, "physics-phase-boundary-marker");
+    const activityModule = this.device.createShaderModule({
+      label: "Physics logical activity phase marker",
+      code: markerShader.code,
+    });
+    this.logicalActivityMarkerPipeline = this.logicalActivity.registerPipeline(
+      this.device.createComputePipeline({
+        label: "Physics logical activity phase marker",
+        layout: "auto",
+        compute: { module: activityModule, entryPoint: "recordPhysicsPhaseBoundary" },
+      }),
+    );
+    this.logicalActivityMarkerTickSource = this.device.createBuffer({
+      label: "Physics logical activity phase ticks",
+      size: PHYSICS_ACTIVITY_PHASE_CAPACITY * 4,
+      usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(
+      this.logicalActivityMarkerTickSource,
+      0,
+      Uint32Array.from({ length: PHYSICS_ACTIVITY_PHASE_CAPACITY }, (_, index) => index),
+    );
+    this.logicalActivityMarkerTick = this.device.createBuffer({
+      label: "Physics logical activity current phase tick",
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.logicalActivityMarkerGroup = this.device.createBindGroup({
+      label: "Physics logical activity phase marker",
+      layout: this.logicalActivityMarkerPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: this.logicalActivityMarkerTick } }],
+    });
+  }
+
+  private encodeLogicalActivityPhaseBoundary(encoder: GPUCommandEncoder, phaseIndex: number): void {
+    if (!this.logicalActivityMarkerPipeline || !this.logicalActivityMarkerTickSource
+      || !this.logicalActivityMarkerTick || !this.logicalActivityMarkerGroup
+      || phaseIndex < 0 || phaseIndex >= PHYSICS_ACTIVITY_PHASE_CAPACITY) return;
+    encoder.copyBufferToBuffer(
+      this.logicalActivityMarkerTickSource,
+      phaseIndex * 4,
+      this.logicalActivityMarkerTick,
+      0,
+      4,
+    );
+    const pass = encoder.beginComputePass({ label: `Physics activity boundary ${phaseIndex}` });
+    pass.setPipeline(this.logicalActivityMarkerPipeline);
+    pass.setBindGroup(0, this.logicalActivityMarkerGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+  }
+
+  /** Latest completed, generation-checked capture; retained until superseded. */
+  get physicsLogicalActivity(): GPUPhysicsLogicalActivitySample | undefined {
+    return this.latestLogicalActivity;
+  }
+
+  private nextLogicalActivityCaptureId(): number {
+    this.logicalActivityCaptureId = (this.logicalActivityCaptureId + 1) >>> 0;
+    if (this.logicalActivityCaptureId === 0) this.logicalActivityCaptureId = 1;
+    return this.logicalActivityCaptureId;
+  }
+
   private pipelineDescriptor(entryPoint:string,prep=false):GPUComputePipelineDescriptor{return{layout:prep?this.prepPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
   private assignPipelines(compiled:GPUComputePipeline[]){this.advectPipeline=compiled[0];this.reversePipeline=compiled[1];this.correctPipeline=compiled[2];this.jacobiPipeline=compiled[3];this.projectPipeline=compiled[4];this.rigidPipeline=compiled[5];this.relaxSolidPhiPipeline=compiled[6];this.reductionPipeline=compiled[7];this.buildOccupancyPipeline=compiled[8];this.buildTransportPipeline=compiled[9];this.buildFluxScalesPipeline=compiled[10];this.sharpenComputePipeline=compiled[11];this.sharpenScatterPipeline=compiled[12];this.sharpenResolvePipeline=compiled[13];}
   private createPipelinesSync(){const pipeline=(entryPoint:string,prep=false)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint,prep));const compiled=[pipeline(this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection"),pipeline("reverseAdvection"),pipeline("correctAdvection"),pipeline("jacobi"),pipeline("project"),pipeline("coupleRigid"),pipeline("relaxSolidPhi"),pipeline("reduceDiagnostics"),pipeline("buildOccupancy"),pipeline("buildTransport",true),pipeline("buildFluxScales",true),pipeline("sharpenCompute"),pipeline("sharpenScatter"),pipeline("sharpenResolve")];this.assignPipelines(compiled);let cache=uniformPipelineCache.get(this.device);if(!cache){cache=new Map();uniformPipelineCache.set(this.device,cache);}cache.set(this.velocityTransport,compiled);}
@@ -693,20 +992,33 @@ export class WebGPUUniformEulerianSolver {
     const descriptor = OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.find((candidate) => candidate.id === phase)!;
     this.device.pushErrorScope("validation");
     let validationScopeOpen = true;
-    const initialSparseScene = this.device.createCommandEncoder({
+    const rawInitialSparseScene = this.device.createCommandEncoder({
       label: `Initial sparse authority: ${descriptor.label}`,
     });
+    const discardActivity = this.logicalActivity.enabled
+      ? this.logicalActivity.bindingSession(this.device, rawInitialSparseScene, {
+        capacity: 1,
+        captureId: this.nextLogicalActivityCaptureId(),
+        label: `Discarded startup activity: ${descriptor.label}`,
+      })
+      : undefined;
+    const initialSparseScene = discardActivity?.encoder ?? rawInitialSparseScene;
     try {
       this.octreeProjection.encodeInitialSparseAuthorityPhase(initialSparseScene, phase);
+      discardActivity?.finish();
       this.device.queue.submit([initialSparseScene.finish()]);
       this.octreeProjection.retireSubmittedEncoder(initialSparseScene);
+      const discardRead = discardActivity?.read();
       await this.device.queue.onSubmittedWorkDone();
+      await discardRead?.catch(() => undefined);
+      discardActivity?.destroy();
       const validationError = await this.device.popErrorScope();
       validationScopeOpen = false;
       if (validationError) {
         throw new Error(`Initial sparse authority ${phase} validation failed: ${validationError.message}`);
       }
     } catch (error) {
+      discardActivity?.destroy();
       if (validationScopeOpen) {
         const validationError = await this.device.popErrorScope().catch(() => null);
         validationScopeOpen = false;
@@ -1008,9 +1320,19 @@ export class WebGPUUniformEulerianSolver {
   get gridDivergenceTexture() { return this.octreeProjection ? undefined : this.quadtreeProjection?.divergenceTexture; }
   ensureGridDiagnosticTextures() {
     if (!this.octreeProjection?.ensureDiagnosticTextures()) return;
-    const encoder = this.device.createCommandEncoder({ label: "Initialize lazy octree diagnostic fields" });
+    const rawEncoder = this.device.createCommandEncoder({ label: "Initialize lazy octree diagnostic fields" });
+    const discardActivity = this.logicalActivity.enabled
+      ? this.logicalActivity.bindingSession(this.device, rawEncoder, {
+        capacity: 1,
+        captureId: this.nextLogicalActivityCaptureId(),
+        label: "Discarded diagnostic materialization activity",
+      })
+      : undefined;
+    const encoder = discardActivity?.encoder ?? rawEncoder;
     this.octreeProjection.encodeOverlayMaterialization(encoder);
+    discardActivity?.finish();
     this.device.queue.submit([encoder.finish()]);
+    if (discardActivity) void discardActivity.read().finally(() => discardActivity.destroy());
     this.applyOctreeInfo(this.octreeProjection);
   }
   /** Instrumentation view: velocity after advection/forces and before quadtree projection. */
@@ -1332,7 +1654,9 @@ export class WebGPUUniformEulerianSolver {
     const activeBodies = bodies.slice(0, 12);
     this.rigidSystem.syncBodies(activeBodies);
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + (this.octreeProjection ? 1 : substeps);
-    const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
+    const instrumentationSnapshot = usePerformanceInstrumentationStore.getState();
+    const measurementInstrumentationEnabled = instrumentationSnapshot.enabled;
+    const activityStoreSnapshot = usePerformanceActivityStore.getState();
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
     const shouldTracePhysics = measurementInstrumentationEnabled
       && !this.physicsTracePending
@@ -1344,6 +1668,7 @@ export class WebGPUUniformEulerianSolver {
     if (!this.validationChecked) this.device.pushErrorScope("validation");
     let encoder = this.device.createCommandEncoder({ label: "Uniform GPU fluid step" });
     const physicsTraceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
+    const physicsTraceContext = `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`;
     const physicsTrace = shouldTracePhysics
       && !this.hardwarePhysicsTraceInvalid
       && GPUStageTimestampRecorder.supported(this.device)
@@ -1351,24 +1676,57 @@ export class WebGPUUniformEulerianSolver {
         this.device,
         physicsTraceSampleId,
         "physics",
-        `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
+        physicsTraceContext,
       )
       : undefined;
     const physicsQueueTrace = shouldTracePhysics
       ? new GPUQueueWallPerformanceTraceRecorder(
         physicsTraceSampleId,
         "physics",
-        `${this.info.gridKind}:sim-${this.lastTime.toFixed(6)}`,
+        physicsTraceContext,
       )
       : undefined;
     // Every stage boundary rides the next pass this encoder already encodes,
     // so the traced step submits the same command graph as the untraced one.
     if (physicsTrace) encoder = physicsTrace.instrument(encoder);
+    const shouldCaptureLogicalActivity = shouldTracePhysics
+      && this.logicalActivity.enabled
+      && instrumentationSnapshot.shaderActivityEnabled
+      && instrumentationSnapshot.shaderGeneration === this.logicalActivity.generation
+      && activityStoreSnapshot.enabled;
+    let logicalActivitySession: GPULogicalActivityBindingSession | undefined;
+    let logicalActivityCaptureId = 0;
+    if (this.logicalActivity.enabled) {
+      const sharedRecorder = shouldCaptureLogicalActivity
+        ? undefined
+        : this.logicalActivityDiscardRecorder ??= this.logicalActivity.recorder(this.device, {
+          capacity: 1,
+          captureId: this.nextLogicalActivityCaptureId(),
+          label: "Discarded unsampled physics activity",
+        });
+      logicalActivityCaptureId = shouldCaptureLogicalActivity ? this.nextLogicalActivityCaptureId() : 0;
+      logicalActivitySession = this.logicalActivity.bindingSession(this.device, encoder, {
+        capacity: shouldCaptureLogicalActivity
+          ? physicsLogicalActivityCaptureCapacity(this.device.limits)
+          : 1,
+        captureId: logicalActivityCaptureId,
+        label: shouldCaptureLogicalActivity
+          ? `Physics activity ${physicsTraceSampleId}`
+          : "Discarded unsampled physics activity",
+        sharedRecorder,
+      });
+      encoder = logicalActivitySession.encoder;
+    }
     physicsTrace?.begin();
+    let logicalPhaseIndex = 0;
     const completePhysicsPhase = (
       completedEncoder: GPUCommandEncoder,
       phase: GPUTimestampPhase,
     ): GPUCommandEncoder => {
+      if (shouldCaptureLogicalActivity) {
+        this.encodeLogicalActivityPhaseBoundary(completedEncoder, logicalPhaseIndex);
+        logicalPhaseIndex += 1;
+      }
       physicsTrace?.completePhase(completedEncoder, phase);
       return completedEncoder;
     };
@@ -1388,6 +1746,7 @@ export class WebGPUUniformEulerianSolver {
       // candidate from the prior tail may flip only at this boundary.
       this.octreeProjection?.encodeReadyTopologyFlip(encoder);
       if (this.octreeProjection) {
+        this.stepSequenceRecorder.record("ready-topology-flip");
         encoder = completePhysicsPhase(
           encoder,
           { id: "power-topology", label: "Accepted topology epoch + Section 5 air support" },
@@ -1447,25 +1806,28 @@ export class WebGPUUniformEulerianSolver {
           // unprojected predictor here creates systematic boundary volume
           // error.
           encoder = this.octreeProjection.encodeSurface(encoder, dt, surfaceInflow, this.scene.numerics.maxDt_s,
-            physicsTrace ? (phase, completedEncoder) => {
+            physicsTrace || shouldCaptureLogicalActivity ? (phase, completedEncoder) => {
               return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
             } : undefined);
+          this.stepSequenceRecorder.record("surface-transport");
           encoder = this.octreeProjection.encode(
             encoder,
             this.info.nx,
             this.info.ny,
             this.info.nz,
             {
-              productionBoundary: physicsTrace ? (phase, completedEncoder) => {
+              productionBoundary: physicsTrace || shouldCaptureLogicalActivity ? (phase, completedEncoder) => {
                 return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
               } : undefined,
             }
           );
+          this.stepSequenceRecorder.record("pressure-projection");
           // The current surface and pressure solve consumed one immutable
           // active epoch. Build the next epoch only after both are complete;
           // its validated selector remains pending until the next substep.
           inlineRebuildEncoded =
             this.octreeProjection.encodeInactiveTopologyCandidate(encoder);
+          this.stepSequenceRecorder.record("inactive-topology-candidate");
           encoder = completePhysicsPhase(
             encoder,
             { id: "coarse-grid", label: "Inactive next-substep topology candidate" },
@@ -1514,6 +1876,7 @@ export class WebGPUUniformEulerianSolver {
       this.quadtreeProjection?.encodeBodyImpulseExchange(encoder, this.rigidExchangeBuffer);
       const cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz);
       this.rigidSystem.encode(encoder, delta, cellVolume, substeps, c.height_m / this.info.ny);
+      if (this.octreeProjection) this.stepSequenceRecorder.record("rigid-exchange");
       encoder = completePhysicsPhase(
         encoder,
         { id: "other", label: "Rigid-body impulse exchange + integration" },
@@ -1524,6 +1887,7 @@ export class WebGPUUniformEulerianSolver {
     // compact debug records and subsequent voxel kernels consume the same ABI.
     if (this.octreeProjection) {
       this.octreeProjection.encodeSparseBrickWorld(encoder, dt);
+      this.stepSequenceRecorder.record("sparse-brick-world");
       encoder = completePhysicsPhase(
         encoder,
         { id: "adaptive-publication", label: "Sparse-brick residency + publication" },
@@ -1538,14 +1902,57 @@ export class WebGPUUniformEulerianSolver {
         { id: "other", label: "Diagnostics reduction" },
       );
     }
+    // Step-coherent diagnostics: the step's last commands copy the accepted
+    // structured receipt + fine worklist header into the snapshot ring, so a
+    // mapped record always describes exactly one completed step. Shared ABI
+    // with the Dawn harness audit (structured-authority-audit); readStats
+    // consumes the record instead of racing the live control buffers.
+    if (this.octreeProjection) {
+      const velocityControl = this.structuredVelocityControl;
+      const boundaryControl = this.structuredBoundaryControl;
+      const fine = this.globalFineLevelSetSource;
+      if (velocityControl && boundaryControl && fine) {
+        this.stepSnapshotRing ??= new StructuredStepSnapshotRing(this.device);
+        if (this.stepSnapshotRing.encode(encoder, {
+          structuredVelocityControl: velocityControl,
+          structuredBoundaryControl: boundaryControl,
+          fineWorklist: fine.worklist,
+          mgpcgControl: this.mgpcgControl,
+          fineVolumeControl: this.globalFineVolumeControl,
+          projectionEnergyStats: this.structuredProjectionEnergyStats,
+        }, {
+          step: this.info.encodedSteps ?? 0,
+          dt_s: dt,
+          submittedTime_s: this.lastTime,
+          hostFineGeneration: fine.generation,
+        })) this.stepSequenceRecorder.record("step-snapshot");
+      }
+    }
     physicsTrace?.resolve(encoder);
+    logicalActivitySession?.finish();
     const submittedEncoder = encoder;
     physicsQueueTrace?.begin();
     this.device.queue.submit([submittedEncoder.finish()]);
     this.octreeProjection?.retireSubmittedEncoder(submittedEncoder);
+    // Driver-independent sequence conformance: every advance, traced or not,
+    // must have encoded exactly the declared step program. A deviation is a
+    // first-class error published on the info record, not a silent drift.
+    if (this.octreeProjection) {
+      const sequenceDeviations = this.stepSequenceRecorder.finishStep(OCTREE_STEP_PROGRAM);
+      // Latched per run: one bad step is a broken driver contract even if
+      // later steps conform, so gates always observe it.
+      if (sequenceDeviations.length > 0 && !this.stepSequenceFaulted) {
+        this.stepSequenceFaulted = true;
+        this.info.stepSequenceDeviations = [...sequenceDeviations];
+        console.error("[step-sequence]", JSON.stringify({
+          step: this.info.encodedSteps, deviations: sequenceDeviations,
+        }));
+      }
+    }
     const physicsQueueTraceRead = physicsQueueTrace?.read(this.device.queue);
-    const physicsTraceRead = physicsTrace
-      ? physicsTrace.read()
+    const hardwarePhysicsTraceRead = physicsTrace?.read();
+    const physicsTraceRead = hardwarePhysicsTraceRead
+      ? hardwarePhysicsTraceRead
         .then((trace) => {
           // One unusable hardware sample retires the stage recorder for this
           // solver; the non-invasive queue-wall observation takes over rather
@@ -1558,6 +1965,56 @@ export class WebGPUUniformEulerianSolver {
           return physicsQueueTraceRead;
         })
       : physicsQueueTraceRead;
+    if (shouldCaptureLogicalActivity && logicalActivitySession && physicsTraceRead) {
+      const session = logicalActivitySession;
+      const activityGeneration = activityStoreSnapshot.generation;
+      const shaderGeneration = this.logicalActivity.generation;
+      const publicationId = `physics-publication:${this.info.encodedSteps ?? 0}`;
+      void Promise.all([session.read(), physicsTraceRead]).then(([decoded, trace]) => {
+        const instrumentation = usePerformanceInstrumentationStore.getState();
+        const activityStore = usePerformanceActivityStore.getState();
+        if (!decoded?.ok || !trace || this.disposed
+          || decoded.capture.captureId !== logicalActivityCaptureId
+          || !instrumentation.shaderActivityEnabled
+          || instrumentation.shaderGeneration !== shaderGeneration
+          || activityStore.generation !== activityGeneration) return;
+        const identity: ActivityWorkIdentity = {
+          frameId: gpuPhysicsPerformanceActivityFrameId(trace),
+          generation: activityGeneration,
+          submissionId: `gpu-physics:${encodeURIComponent(physicsTraceContext)}:${physicsTraceSampleId}`,
+          publicationId,
+        };
+        const projection = physicsPhaseBoundaryTimeProjection(trace, decoded.capture);
+        const sample: GPUPhysicsLogicalActivitySample = {
+          identity,
+          shaderGeneration,
+          capture: decoded.capture,
+          trace,
+          lane: "gpu-physics",
+          clockDomain: "gpu-physics-timestamp",
+          windowStart_ms: 0,
+          windowEnd_ms: trace.total_ms,
+          ...projection,
+          tasks: PHYSICS_ACTIVITY_TASKS,
+        };
+        this.latestLogicalActivity = sample;
+        publishDecodedGPULogicalActivity({
+          sink: usePerformanceActivityStore.getState(),
+          capture: sample.capture,
+          identity: sample.identity,
+          lane: sample.lane,
+          clockDomain: sample.clockDomain,
+          windowStart_ms: sample.windowStart_ms,
+          windowEnd_ms: sample.windowEnd_ms,
+          locateTime: sample.locateTime,
+          granularity: "workgroup",
+          tasks: sample.tasks,
+          maximumRows: 128,
+        });
+      }).catch(() => {
+        // Device loss and stale captures fail closed; aggregate timing remains.
+      }).finally(() => session.destroy());
+    }
     if (physicsTraceRead) {
       this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;
       this.physicsTracePending = true;
@@ -1618,7 +2075,12 @@ export class WebGPUUniformEulerianSolver {
     this.readbackPending = true;
     const buffer = this.statsReadback(), encoder = this.device.createCommandEncoder();
     if (this.reductionBuffer) encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16);
-    const structuredProjectionEnergy = this.octreeProjection?.structuredProjectionEnergyStats;
+    // With the step-coherent ring active, projection energy comes from the
+    // step's own record; the racing mid-pipeline copy exists only as the
+    // pre-first-advance fallback.
+    const structuredProjectionEnergy = this.stepSnapshotRing
+      ? undefined
+      : this.octreeProjection?.structuredProjectionEnergyStats;
     if (structuredProjectionEnergy) encoder.copyBufferToBuffer(
       structuredProjectionEnergy, 0, buffer, 16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4,
     );
@@ -1633,31 +2095,156 @@ export class WebGPUUniformEulerianSolver {
       ? undefined
       : this.adaptiveProjection?.readSurfaceDiagnostics();
     const globalFineDiagnosticsPromise = this.octreeProjection?.readGlobalFineLevelSetDiagnostics();
+    // The step-coherent record supersedes the racing live-buffer sample for
+    // authority health: its words were copied by the step's own encoder.
+    const stepSnapshotPromise = this.stepSnapshotRing?.readLatest();
     try {
       await mapPromise;
-      const [, , surfaceDiagnostics, globalFineDiagnostics, fluidBrickStats, fluidBulkBrickStats] = await Promise.all([
-        this.validationPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, globalFineDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readFluidBulkBrickResidencyStats(),
+      const [, , surfaceDiagnostics, globalFineDiagnostics, fluidBrickStats, fluidBulkBrickStats, stepRecord] = await Promise.all([
+        this.validationPromise, quadtreeDiagnostics, surfaceDiagnosticsPromise, globalFineDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readFluidBulkBrickResidencyStats(), stepSnapshotPromise,
       ]);
     if(globalFineDiagnostics)this.applyGlobalFineDiagnostics(globalFineDiagnostics);
+    // One-shot forensic dump: a structured epoch that stalls while the fine
+    // generation keeps advancing is the browser-only candidate freeze
+    // (accepted epoch retained "valid" while every new candidate poisons).
+    // Capture the coupled candidate controls the first time it is observable.
+    {
+      // Prefer the step-coherent record: acceptedEpoch and the published fine
+      // generation were copied at the SAME step boundary, so the lag is exact
+      // whole-step staleness and cannot be inflated by pipeline depth or
+      // diagnostics cadence (the legacy pair mixes a fenced GPU word with the
+      // live host counter and legally over-reads by the in-flight depth).
+      const stepHealth = stepRecord ? structuredAuthorityStepHealth(stepRecord) : undefined;
+      if (stepHealth) {
+        this.info.structuredSnapshotStep = stepHealth.step;
+        this.info.structuredAuthorityLagSteps = stepHealth.authorityLagSteps;
+      }
+      const frozenEpoch = stepHealth?.acceptedEpoch ?? this.info.structuredVelocityGeneration ?? 0;
+      const liveFine = stepHealth?.publishedFineGeneration ?? this.info.globalFineGeneration ?? 0;
+      const lag = stepHealth ? stepHealth.authorityLagSteps : liveFine - frozenEpoch;
+      this.structuredProbeCounter = (this.structuredProbeCounter ?? 0) + 1;
+      if (this.structuredProbeCounter % 20 === 1) {
+        console.debug("[structured-probe]", JSON.stringify({ frozenEpoch, liveFine, lag,
+          source: stepHealth ? "step-snapshot" : "live-race",
+          step: stepHealth?.step,
+          rows: stepHealth?.acceptedRows ?? this.info.structuredVelocityRows ?? -1,
+          valid: this.info.structuredVelocityValid,
+          boundaryValid: this.info.structuredBoundaryValid,
+          reject: this.info.structuredRejectSummary,
+          pressureRows: this.info.pressureRequiredRows,
+          counterRaces: this.structuredRowCounterRaces }));
+      }
+      // Episodic lag telemetry: any authority lag beyond normal pipeline depth
+      // is logged (throttled to once per 8 fine generations) so the transient
+      // stall episodes that visually damp the browser run are measurable.
+      if (frozenEpoch > 0 && (stepHealth ? lag >= 2 : lag >= 4) && liveFine >= this.structuredLagLoggedFine + 8) {
+        this.structuredLagLoggedFine = liveFine;
+        console.warn("[structured-lag]", JSON.stringify({ frozenEpoch, liveFine, lag,
+          source: stepHealth ? "step-snapshot" : "live-race",
+          rows: stepHealth?.acceptedRows ?? this.info.structuredVelocityRows ?? 0,
+          valid: this.info.structuredVelocityValid ?? false,
+          reject: this.info.structuredRejectSummary }));
+      }
+      // Deep-freeze forensics, re-armed per frozen epoch so every distinct
+      // stall episode gets one frontier dump, not just the first.
+      if (this.octreeProjection && frozenEpoch > 0 && lag > 8
+        && this.structuredFreezeDumpedEpoch !== frozenEpoch) {
+        this.structuredFreezeDumpedEpoch = frozenEpoch;
+        void this.octreeProjection.readPowerFrontierFailure().then((failure) => {
+          console.error("[structured-epoch-freeze]",
+            JSON.stringify({ frozenEpoch, liveFine, failure }));
+        }).catch(() => { /* diagnostic only */ });
+      }
+      // Publication collapse ("0 live pressure rows"): the browser-only
+      // failure is the POWER ROW publication intermittently resolving zero
+      // rows while velocity/boundary controls stay valid and gen-current.
+      // Dump the frontier decode once per episode, re-arm on recovery.
+      const rows = this.info.structuredVelocityRows ?? 0;
+      const valid = this.info.structuredVelocityValid ?? false;
+      const pressureRows = this.info.pressureRequiredRows ?? -1;
+      // The live row counter races in-flight steps (mid-step samples read the
+      // cleared phase as 0). Count those separately; only the queue-fenced
+      // receipt going invalid is a real publication collapse. The step-coherent
+      // record is authoritative when available.
+      const receiptHealthy = stepHealth?.receiptValid
+        ?? (valid && (this.info.structuredBoundaryValid ?? false) && rows > 0);
+      if (pressureRows === 0 && receiptHealthy) {
+        this.structuredRowCounterRaces += 1;
+      }
+      const publicationCollapsed = !receiptHealthy;
+      if (this.octreeProjection && publicationCollapsed
+        && (this.info.encodedSteps ?? 0) > 0
+        && !this.structuredPublicationFailureDumped) {
+        this.structuredPublicationFailureDumped = true;
+        void this.octreeProjection.readPowerFrontierFailure().then((failure) => {
+          console.error("[structured-publication-failure]",
+            JSON.stringify({ frozenEpoch, liveFine, rows, valid, pressureRows,
+              interfaceBricks: this.info.globalFineInterfaceBricks,
+              activeBricks: this.info.globalFineActiveBricks,
+              rejectStage: this.info.structuredRejectStage,
+              rejectSummary: this.info.structuredRejectSummary, failure }));
+        }).catch(() => { /* diagnostic only */ });
+      } else if (!publicationCollapsed && this.structuredPublicationFailureDumped) {
+        console.warn("[structured-publication-recovered]",
+          JSON.stringify({ frozenEpoch, liveFine, pressureRows }));
+        this.structuredPublicationFailureDumped = false;
+      }
+      // Generation desync and publication collapse are first-class errors:
+      // publish them on the stability card instead of only the console.
+      if (this.octreeProjection) {
+        const flags: string[] = [];
+        // Exact snapshot lag flags real whole-step staleness; the legacy pair
+        // keeps the old pipeline-depth allowance to avoid phantom alerts.
+        if (stepHealth ? lag >= 2 : lag > 4) flags.push(`structured-authority-lag ${lag} gen`);
+        if (publicationCollapsed && (this.info.encodedSteps ?? 0) > 0) {
+          flags.push("structured-publication-invalid");
+        }
+        if (this.info.stepSequenceDeviations?.length) flags.push("step-sequence-deviation");
+        this.info.stabilityFlags = flags;
+      }
+    }
     if(fluidBrickStats){this.info.fluidBrickCapacity=fluidBrickStats.capacity;this.info.fluidBrickResidentCount=fluidBrickStats.resident;this.info.fluidBrickCoreCount=fluidBrickStats.core;this.info.fluidBrickHaloCount=fluidBrickStats.halo;this.info.fluidBrickActivatedCount=fluidBrickStats.activated;this.info.fluidBrickRetiredCount=fluidBrickStats.retired;this.info.fluidBrickGeneration=fluidBrickStats.generation;}
     if(fluidBulkBrickStats){this.info.fluidBulkBrickResidentCount=fluidBulkBrickStats.resident;this.info.fluidBulkBrickHaloCount=fluidBulkBrickStats.halo;this.info.fluidBulkBrickActivatedCount=fluidBulkBrickStats.activated;this.info.fluidBulkBrickRetiredCount=fluidBulkBrickStats.retired;}
     if (this.quadtreeProjection) this.info.quadtreeVelocityClampCount = this.quadtreeProjection.info.velocityClampCount ?? 0;
     const words = this.reductionBuffer
       ? new Uint32Array(buffer.getMappedRange(0, 16))
       : new Uint32Array(4);
-    const structuredEnergy = structuredProjectionEnergy
-      ? decodeStructuredProjectionEnergy(new Uint32Array(
-        buffer.getMappedRange(16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4),
-      ))
-      : undefined;
+    const structuredEnergy = stepRecord
+      ? decodeStructuredProjectionEnergy(stepRecord.snapshot.projectionEnergyControl)
+      : structuredProjectionEnergy
+        ? decodeStructuredProjectionEnergy(new Uint32Array(
+          buffer.getMappedRange(16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4),
+        ))
+        : undefined;
     if (structuredEnergy?.sample) {
+      this.info.structuredStartKineticEnergyProxy =
+        structuredEnergy.sample.startKineticEnergyProxy;
+      this.info.structuredPostAdvectionKineticEnergyProxy =
+        structuredEnergy.sample.postAdvectionKineticEnergyProxy;
       this.info.structuredPreProjectionKineticEnergyProxy =
         structuredEnergy.sample.preProjectionKineticEnergyProxy;
       this.info.structuredPostProjectionKineticEnergyProxy =
         structuredEnergy.sample.postProjectionKineticEnergyProxy;
+      this.info.structuredWetStartKineticEnergyProxy =
+        structuredEnergy.sample.wetStartKineticEnergyProxy;
+      this.info.structuredWetPostAdvectionKineticEnergyProxy =
+        structuredEnergy.sample.wetPostAdvectionKineticEnergyProxy;
+      this.info.structuredWetPreProjectionKineticEnergyProxy =
+        structuredEnergy.sample.wetPreProjectionKineticEnergyProxy;
+      this.info.structuredWetPostProjectionKineticEnergyProxy =
+        structuredEnergy.sample.wetPostProjectionKineticEnergyProxy;
+      this.info.structuredWetFaceCount = structuredEnergy.sample.wetFaceCount;
+      this.info.structuredTransitionPathCount = structuredEnergy.sample.transitionPathCount;
+      this.info.structuredStaggeredPathCount = structuredEnergy.sample.staggeredPathCount;
       this.info.structuredProjectionEnergyRatio = structuredEnergy.sample.projectionEnergyRatio;
       this.info.structuredProjectionEnergySampleCount = 1;
     } else {
+      this.info.structuredStartKineticEnergyProxy = undefined;
+      this.info.structuredPostAdvectionKineticEnergyProxy = undefined;
+      this.info.structuredWetStartKineticEnergyProxy = undefined;
+      this.info.structuredWetPostAdvectionKineticEnergyProxy = undefined;
+      this.info.structuredWetPreProjectionKineticEnergyProxy = undefined;
+      this.info.structuredWetPostProjectionKineticEnergyProxy = undefined;
       this.info.structuredPreProjectionKineticEnergyProxy = undefined;
       this.info.structuredPostProjectionKineticEnergyProxy = undefined;
       this.info.structuredProjectionEnergyRatio = undefined;
@@ -1736,6 +2323,8 @@ export class WebGPUUniformEulerianSolver {
 
   destroy() {
     this.disposed = true;
+    this.stepSnapshotRing?.destroy();
+    this.stepSnapshotRing = undefined;
     if (this.quadtreeReadyProjection && this.quadtreeReadyProjection !== this.quadtreeProjection) this.quadtreeReadyProjection.destroy();
     this.quadtreeReadyProjection = undefined;
     this.quadtreeProjection?.destroySharedSurface();
@@ -1751,5 +2340,9 @@ export class WebGPUUniformEulerianSolver {
       : [this.terrainTexture];
     for (const texture of new Set(textures)) texture.destroy();
     this.params?.destroy(); this.reductionBuffer?.destroy(); this.sharpenBuffer?.destroy(); this.rigidSystem.destroy(); this.rigidExchangeBuffer.destroy(); this.statsReadbackBuffer?.destroy();
+    this.logicalActivityDiscardRecorder?.destroy();
+    this.logicalActivityDiscardRecorder = undefined;
+    this.logicalActivityMarkerTickSource?.destroy();
+    this.logicalActivityMarkerTick?.destroy();
   }
 }

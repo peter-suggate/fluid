@@ -13,6 +13,21 @@ import { useMethodStore, resolvedMethodValues } from "../stores/method-store";
 import type { MethodParamValue } from "../methods";
 import { useRuntimeStore } from "../stores/runtime-store";
 import { useDiagnosticsStore, emptyPerformanceReport } from "../stores/diagnostics-store";
+import {
+  gpuPhysicsPerformanceActivityFrameId,
+  mergePerformanceActivityFrame,
+  synthesizePerformanceActivityFrame,
+  type ActivityFrameIdentity,
+  type ActivityWorkIdentity,
+  type PerformanceActivityFrameAddition,
+} from "../performance-activity";
+import {
+  CPU_PHYSICS_ACTIVITY_TASKS,
+  createCPUPerformanceActivityProfiler,
+  type CPUPerformanceActivityOutput,
+  type CPUPerformanceActivityProfiler,
+} from "../cpu-performance-activity";
+import { usePerformanceActivityStore } from "../stores/performance-activity-store";
 import { usePerformanceInstrumentationStore } from "../stores/performance-instrumentation-store";
 import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
@@ -36,6 +51,22 @@ import {
 export type BodyDragPhase = "start" | "move" | "end";
 
 const MAX_BODIES = 12;
+
+function rebasePerformanceActivityAddition(
+  addition: PerformanceActivityFrameAddition,
+  identity: ActivityFrameIdentity,
+): PerformanceActivityFrameAddition {
+  const rebase = (work: ActivityWorkIdentity): ActivityWorkIdentity => ({
+    ...work,
+    frameId: identity.frameId,
+    generation: identity.generation,
+  });
+  return {
+    ...addition,
+    spans: addition.spans?.map((span) => ({ ...span, identity: rebase(span.identity) })),
+    events: addition.events?.map((event) => ({ ...event, identity: rebase(event.identity) })),
+  };
+}
 
 /** O(1) host-clock collapse for GPU authority; no intermediate host state exists. */
 export function collapseGPUFixedSteps(accumulator_s: number, dt_s: number) {
@@ -68,6 +99,7 @@ class SimulationController {
   private safeBrowserStepConsumed = false;
   private cpuTickTraceSampleId = 0;
   private pendingCpuTickTrace?: PerformanceTrace;
+  private pendingCpuActivity?: { identity: ActivityWorkIdentity; output: CPUPerformanceActivityOutput };
   private lastPerformanceReportAt_ms = 0;
   private lastPerformanceReportContext = "";
   /** Document captured when a direct-manipulation gesture opened. */
@@ -132,16 +164,43 @@ class SimulationController {
     useDiagnosticsStore.getState().set({ bodies: cloneRigidBodies(this.bodies), rigidState: diagnostics ?? rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2) });
   }
 
+  /** One profiler object per tick keeps call sites to a single expression; disabled returns the shared no-op. */
+  private cpuPhysicsActivity(context: string, sampleId: number): {
+    identity: ActivityWorkIdentity;
+    profiler: CPUPerformanceActivityProfiler;
+  } {
+    const activity = usePerformanceActivityStore.getState();
+    const identity: ActivityWorkIdentity = {
+      frameId: `cpu-tick:${context}:${sampleId}`,
+      generation: activity.generation,
+      submissionId: `cpu:${sampleId}`,
+    };
+    return {
+      identity,
+      profiler: createCPUPerformanceActivityProfiler({
+        enabled: activity.enabled,
+        identity,
+        resourceId: "cpu.main",
+        resourceLabel: "Main thread",
+        resourceKind: "cpu-main",
+      }),
+    };
+  }
+
   /** Prepare every fixed step owed by the wall clock. GPU admission is renderer-budgeted. */
   tick(now: number) {
     const method = useMethodStore.getState();
-    const cpuTrace = usePerformanceInstrumentationStore.getState().enabled
+    const instrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
+    const captureEnabled = instrumentationEnabled || usePerformanceActivityStore.getState().enabled;
+    const sampleId = captureEnabled ? ++this.cpuTickTraceSampleId : this.cpuTickTraceSampleId;
+    const cpuTrace = instrumentationEnabled
       ? new CPUPerformanceTrace(
-        ++this.cpuTickTraceSampleId,
+        sampleId,
         `${method.methodId}:${method.quality}`,
         { id: "frame-control", label: "Simulation clock + admission" },
       )
       : undefined;
+    const cpuActivity = this.cpuPhysicsActivity(`${method.methodId}:${method.quality}`, sampleId);
     try {
     if (this.lastClock === null) this.lastClock = now;
     const elapsed = Math.max(0, (now - this.lastClock) / 1000);
@@ -198,13 +257,20 @@ class SimulationController {
     } else {
       const fluid = this.cpuFluid(scene);
       while (this.accumulator + 1e-12 >= dt) {
-        this.applyDragConstraint();
-        const coupling = computeFluidLoads(scene, fluid, this.bodies);
-        latestCoupling = applyFluidReactions(fluid, this.bodies, coupling.loads, dt);
-        diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads);
-        this.applyDragConstraint();
+        cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.rigidIntegration,
+          () => this.applyDragConstraint());
+        const coupling = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.couplingLoads,
+          () => computeFluidLoads(scene, fluid, this.bodies));
+        latestCoupling = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.couplingReactions,
+          () => applyFluidReactions(fluid, this.bodies, coupling.loads, dt));
+        diagnostics = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.rigidIntegration, () => {
+          const result = advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads);
+          this.applyDragConstraint();
+          return result;
+        });
         this.cpuOracleStep += 1;
-        fluidDiagnostics = fluid.step(dt);
+        fluidDiagnostics = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.fluidStep,
+          () => fluid.step(dt, cpuActivity.profiler));
         this.accumulator -= dt;
         this.simulationTime += dt;
         steps += 1;
@@ -229,6 +295,10 @@ class SimulationController {
     }
     } finally {
       this.pendingCpuTickTrace = cpuTrace?.finish();
+      const output = cpuActivity.profiler.output();
+      this.pendingCpuActivity = output.spans.length > 0 || output.events.length > 0
+        ? { identity: cpuActivity.identity, output }
+        : undefined;
     }
   }
 
@@ -253,13 +323,25 @@ class SimulationController {
     let couplingDiagnostics: CouplingDiagnostics | undefined;
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
+    const instrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
+    const captureEnabled = instrumentationEnabled || usePerformanceActivityStore.getState().enabled;
+    const sampleId = captureEnabled ? ++this.cpuTickTraceSampleId : this.cpuTickTraceSampleId;
+    const cpuActivity = this.cpuPhysicsActivity(`${useMethodStore.getState().methodId}:single-step`, sampleId);
     if (backend === "cpu-reference") {
       const fluid = this.cpuFluid(scene);
-      const coupling = computeFluidLoads(scene, fluid, this.bodies);
-      couplingDiagnostics = applyFluidReactions(fluid, this.bodies, coupling.loads, dt);
-      diagnostics = advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads);
-      fluidDiagnostics = fluid.step(dt);
+      const coupling = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.couplingLoads,
+        () => computeFluidLoads(scene, fluid, this.bodies));
+      couplingDiagnostics = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.couplingReactions,
+        () => applyFluidReactions(fluid, this.bodies, coupling.loads, dt));
+      diagnostics = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.rigidIntegration,
+        () => advanceRigidBodies(this.bodies, scene, dt, 6, coupling.loads));
+      fluidDiagnostics = cpuActivity.profiler.measure(CPU_PHYSICS_ACTIVITY_TASKS.fluidStep,
+        () => fluid.step(dt, cpuActivity.profiler));
     }
+    const cpuActivityOutput = cpuActivity.profiler.output();
+    this.pendingCpuActivity = cpuActivityOutput.spans.length > 0 || cpuActivityOutput.events.length > 0
+      ? { identity: cpuActivity.identity, output: cpuActivityOutput }
+      : undefined;
     this.simulationTime += dt;
     if (backend === "cpu-reference") runtime.setSimulationTime(this.simulationTime);
     if (backend === "cpu-reference") {
@@ -278,6 +360,8 @@ class SimulationController {
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
     this.rateWallClock = 0; this.rateSimTime = 0;
     this.cpuOracleStep = 0;
+    this.pendingCpuTickTrace = undefined;
+    this.pendingCpuActivity = undefined;
     this.kinematicDrag = null;
     if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
     this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
@@ -602,6 +686,7 @@ class SimulationController {
     const instrumentation = usePerformanceInstrumentationStore.getState();
     if (!instrumentation.enabled) {
       this.pendingCpuTickTrace = undefined;
+      this.pendingCpuActivity = undefined;
       return;
     }
     const capturedAt_ms = performance.now();
@@ -619,6 +704,8 @@ class SimulationController {
       ? this.pendingCpuTickTrace
       : undefined;
     this.pendingCpuTickTrace = undefined;
+    const detailedCPU = this.pendingCpuActivity;
+    this.pendingCpuActivity = undefined;
     const cpu = combineMainThreadPerformanceTraces(
       [controllerCPU, rendererCPU].filter((trace): trace is PerformanceTrace => trace !== undefined),
       context,
@@ -634,6 +721,37 @@ class SimulationController {
         && performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined,
     };
     diagnostics.pushPerformanceReport(report);
+    const activityStore = usePerformanceActivityStore.getState();
+    if (activityStore.enabled && (cpu || report.physics || report.presentation)) {
+      const identity: ActivityFrameIdentity = report.physics
+        ? {
+          frameId: gpuPhysicsPerformanceActivityFrameId(report.physics),
+          generation: activityStore.generation,
+        }
+        : detailedCPU?.identity.generation === activityStore.generation
+          ? { frameId: detailedCPU.identity.frameId, generation: detailedCPU.identity.generation }
+          : {
+          frameId: `${methodId}:${context}:${capturedAt_ms.toFixed(3)}`,
+          generation: activityStore.generation,
+        };
+      const baseFrame = synthesizePerformanceActivityFrame({
+        identity,
+        context,
+        capturedAt_cpu_ms: capturedAt_ms,
+        cpu,
+        physics: report.physics,
+        presentation: report.presentation,
+      });
+      activityStore.publish(detailedCPU?.identity.generation === identity.generation
+        ? mergePerformanceActivityFrame(baseFrame, rebasePerformanceActivityAddition({
+          resources: detailedCPU.output.resource ? [detailedCPU.output.resource] : [],
+          clocks: detailedCPU.output.clock ? [detailedCPU.output.clock] : [],
+          tasks: detailedCPU.output.tasks,
+          spans: detailedCPU.output.spans,
+          events: detailedCPU.output.events,
+        }, identity))
+        : baseFrame);
+    }
   }
 
   // ---- persistence -------------------------------------------------------
@@ -660,6 +778,7 @@ class SimulationController {
     this.recordHistory("remove prop");
     const remaining = removeProp(sceneStore.scene, id);
     const { props: _dropped, ...rest } = sceneStore.scene;
+    void _dropped;
     sceneStore.setScene(remaining ? { ...rest, props: remaining } : rest, sceneStore.presetId);
     useUIStore.getState().select(undefined);
     useRuntimeStore.getState().setNotice("Prop removed");

@@ -1,5 +1,10 @@
 import type { SceneDescription, Vec3 } from "./model";
 import { combineInitialBrickWet, damBreakFractions, inflowStrength, initialFluidBrickContainsCell } from "./initial-fluid";
+import {
+  CPU_PHYSICS_ACTIVITY_TASKS,
+  NOOP_CPU_PERFORMANCE_ACTIVITY_PROFILER,
+  type CPUPerformanceActivityProfiler,
+} from "./cpu-performance-activity";
 
 export interface EulerianDiagnostics {
   step: number;
@@ -312,17 +317,37 @@ export class EulerianFluidSolver {
   private damFront() { let front = -this.scene.container.width_m / 2; for (let p = 0; p < this.markers.length; p += 3) front = Math.max(front, this.markers[p]); return front; }
   private collectDiagnostics(dt: number, limit: EulerianDiagnostics["limitingCondition"], adv: number, visc: number, before: number, after: number, residual: number, iterations: number, converged: boolean, penetrations: number): EulerianDiagnostics { const markerVolume = this.markerVolume_m3 * (this.markers.length / 3); const occupied = this.countFluidCells() * this.cellVolume; let nanCount = 0; for (const array of [this.u, this.v, this.w, this.pressure]) for (const value of array) if (!Number.isFinite(value)) nanCount += 1; return { step: this.stepIndex, time_s: this.time, dt_s: dt, limitingCondition: limit, advectiveLimit_s: adv, viscousLimit_s: visc, divergenceBefore_s: before, divergenceAfter_s: after, pressureResidual: residual, pressureRelativeResidual: 0, pressureIterations: iterations, pressureConverged: converged, markerVolume_m3: markerVolume, markerVolumeDrift: (markerVolume - this.initialMarkerVolume_m3) / Math.max(this.initialMarkerVolume_m3, 1e-30), occupiedVolume_m3: occupied, occupiedVolumeDrift: (occupied - this.initialOccupiedVolume_m3) / Math.max(this.initialOccupiedVolume_m3, 1e-30), maxSpeed_m_s: this.maxSpeed(), kineticEnergy_J: this.kineticEnergy(), damFront_m: this.damFront(), boundaryPenetrationCount: penetrations, nanCount }; }
 
-  step(requestedDt?: number): EulerianDiagnostics {
-    const maxSpeed = this.maxSpeed(), minH = Math.min(this.hx, this.hy, this.hz), nu = this.scene.fluid.dynamicViscosity_Pa_s / this.scene.fluid.density_kg_m3;
-    const advective = maxSpeed > 1e-12 ? 0.75 * minH / maxSpeed : Infinity;
-    const viscous = nu > 0 ? minH * minH / (6 * nu) : Infinity;
-    let dt: number, limiting: EulerianDiagnostics["limitingCondition"];
-    if (requestedDt !== undefined) { dt = requestedDt; limiting = "fixed"; }
-    else { dt = Math.min(this.scene.numerics.maxDt_s, advective, viscous); limiting = dt === advective ? "advective-cfl" : dt === viscous ? "viscous" : "user-max"; }
-    this.applyInflow(dt); this.applyExternalForces(dt); this.advectVelocity(dt); this.applyViscosity(dt);
-    const before = this.computeDivergenceNorm(); const pressure = this.project(dt); const after = this.computeDivergenceNorm(); const penetrations = this.advectMarkers(dt);
+  step(
+    requestedDt?: number,
+    activity: CPUPerformanceActivityProfiler = NOOP_CPU_PERFORMANCE_ACTIVITY_PROFILER,
+  ): EulerianDiagnostics {
+    const timing = activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.timestep, () => {
+      const maxSpeed = this.maxSpeed(), minH = Math.min(this.hx, this.hy, this.hz);
+      const nu = this.scene.fluid.dynamicViscosity_Pa_s / this.scene.fluid.density_kg_m3;
+      const advective = maxSpeed > 1e-12 ? 0.75 * minH / maxSpeed : Infinity;
+      const viscous = nu > 0 ? minH * minH / (6 * nu) : Infinity;
+      if (requestedDt !== undefined) return { dt: requestedDt, limiting: "fixed" as const, advective, viscous };
+      const dt = Math.min(this.scene.numerics.maxDt_s, advective, viscous);
+      const limiting: EulerianDiagnostics["limitingCondition"] = dt === advective
+        ? "advective-cfl" : dt === viscous ? "viscous" : "user-max";
+      return { dt, limiting, advective, viscous };
+    });
+    const { dt, limiting, advective, viscous } = timing;
+    activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.inflow, () => this.applyInflow(dt));
+    activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.forces, () => this.applyExternalForces(dt));
+    activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.velocityAdvection, () => this.advectVelocity(dt));
+    activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.viscosity, () => this.applyViscosity(dt));
+    const before = activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.divergenceBefore,
+      () => this.computeDivergenceNorm());
+    const pressure = activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.pressure, () => this.project(dt));
+    const after = activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.divergenceAfter,
+      () => this.computeDivergenceNorm());
+    const penetrations = activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.markerAdvection,
+      () => this.advectMarkers(dt));
     this.stepIndex += 1; this.time += dt;
-    this.diagnostics = this.collectDiagnostics(dt, limiting, advective, viscous, before, after, pressure.residual, pressure.iterations, pressure.converged, penetrations);
+    this.diagnostics = activity.measure(CPU_PHYSICS_ACTIVITY_TASKS.diagnostics,
+      () => this.collectDiagnostics(dt, limiting, advective, viscous, before, after,
+        pressure.residual, pressure.iterations, pressure.converged, penetrations));
     this.diagnostics.pressureRelativeResidual = pressure.relativeResidual;
     return this.diagnostics;
   }

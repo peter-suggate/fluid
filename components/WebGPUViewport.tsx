@@ -7,6 +7,7 @@ import { canonicalScene } from "@/lib/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
 import { boundingRadius, createBodyDescription, type RigidBodyState } from "@/lib/rigid-body";
 import { simulation } from "@/lib/simulation/controller";
+import { simulationRecording } from "@/lib/simulation/recording";
 import { projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
 import {
   closestPointOnAxis,
@@ -342,6 +343,7 @@ export function WebGPUViewport() {
           return;
         }
         simulation.recordFrame(metrics, renderer.presentationResolution);
+        if (metrics.presentationSubmitted) simulationRecording.capturePresentedState(canvas, runtime.simulationTime);
         // Retry a pending paused presentation instead of considering it
         // painted before a command buffer was submitted.
         if (pausedPresentation && metrics.presentationSubmitted) lastPausedPresentation = pausedPresentation;

@@ -1,6 +1,12 @@
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
 import { fineLevelSetLinearWorkgroupWGSL, planFineLevelSetDispatch2D } from "./webgpu-fine-levelset-dispatch";
 import { PassBroker } from "./webgpu-pass-broker";
+import {
+  createGPULogicalActivityAdoptionContext,
+  GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT,
+  type GPULogicalActivityAdoptionContext,
+} from "./gpu-logical-activity-adoption";
+import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 
 export const FINE_LEVELSET_VOLUME_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_VOLUME_VALID = 0x8000_0000;
@@ -121,7 +127,19 @@ export class WebGPUFineLevelSetVolumeCorrection {
     u[7] = this.plan.coarsePartialCount; u[8] = this.plan.finePartialCount;
     u[9] = device.limits.maxComputeWorkgroupsPerDimension;
     device.queue.writeBuffer(this.coarseParams, 0, bytes);
-    const shaderModule = device.createShaderModule({ label: "global fine total-volume correction", code: fineLevelSetVolumeCorrectionWGSL });
+    const volumeProfile = performanceShaderVariant();
+    const volumeActivity = createGPULogicalActivityAdoptionContext({
+      moduleId: "octree/fine-volume-correction",
+      profile: volumeProfile,
+    });
+    const volumeVariant = volumeActivity.module(
+      fineLevelSetVolumeActivityShader(volumeActivity),
+      `octree/fine-volume-correction/${volumeProfile.cacheKey}`,
+    );
+    const shaderModule = device.createShaderModule({
+      label: "global fine total-volume correction",
+      code: volumeVariant.code,
+    });
     const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
       compute: { module: shaderModule, entryPoint } });
     this.resetPipeline = pipeline("resetVolumeControl");
@@ -131,7 +149,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
     this.prepareFineDispatchPipeline = pipeline("prepareFineVolumeDispatch");
     this.finePartialPipeline = pipeline("reduceFineOverlapPartials");
     this.fineFinalizePipeline = pipeline("finalizeFineVolume");
-    this.applyPipeline = pipeline("applyFineVolumeCorrection");
+    this.applyPipeline = volumeActivity.registerPipeline(pipeline("applyFineVolumeCorrection"));
     this.correctedFinalizePipeline = pipeline("finalizeCorrectedFineVolume");
     this.measuredFinalizePipeline = pipeline("finalizeMeasuredFineVolume");
     const cache = (pipeline: GPUComputePipeline, entries: readonly [number, GPUBuffer][]) => {
@@ -306,3 +324,33 @@ fn finalizeCorrectedMeasurement(updateCorrection:bool,lid:u32){let result=reduce
 @compute @workgroup_size(256)fn finalizeCorrectedFineVolume(@builtin(local_invocation_index)lid:u32){finalizeCorrectedMeasurement(true,lid);}
 @compute @workgroup_size(256)fn finalizeMeasuredFineVolume(@builtin(local_invocation_index)lid:u32){finalizeCorrectedMeasurement(false,lid);}
 `;
+
+/** Activity-only correction variant; disabled mode returns the production shader itself. */
+export function fineLevelSetVolumeActivityShader(activity: GPULogicalActivityAdoptionContext): string {
+  const entry = activity.workgroup("apply-fine-volume-correction", "enter", {
+    workgroupId: "w",
+    localInvocationIndex: "lid",
+    workgroupLaneCount: 64,
+    recordWhen: `w.x + n.x * (w.y + n.y * w.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  const exit = activity.workgroup("apply-fine-volume-correction", "exit", {
+    workgroupId: "w",
+    localInvocationIndex: "lid",
+    workgroupLaneCount: 64,
+    recordWhen: `w.x + n.x * (w.y + n.y * w.z) < ${GPU_LOGICAL_ACTIVITY_DEFAULT_WORKGROUP_SAMPLE_LIMIT}u`,
+  });
+  if (!entry && !exit) return fineLevelSetVolumeCorrectionWGSL;
+  const signature = "fn applyFineVolumeCorrection(";
+  const start = fineLevelSetVolumeCorrectionWGSL.indexOf(signature);
+  if (start < 0) throw new Error("Fine-volume activity entry point is missing");
+  const bodyStart = fineLevelSetVolumeCorrectionWGSL.indexOf("{", start + signature.length);
+  let depth = 0, bodyEnd = -1;
+  for (let index = bodyStart; index < fineLevelSetVolumeCorrectionWGSL.length; index += 1) {
+    if (fineLevelSetVolumeCorrectionWGSL[index] === "{") depth += 1;
+    else if (fineLevelSetVolumeCorrectionWGSL[index] === "}" && --depth === 0) { bodyEnd = index; break; }
+  }
+  if (bodyStart < 0 || bodyEnd < 0) throw new Error("Fine-volume activity body is malformed");
+  const body = fineLevelSetVolumeCorrectionWGSL.slice(bodyStart + 1, bodyEnd)
+    .replace(/\breturn;/g, `${exit}return;`);
+  return `${fineLevelSetVolumeCorrectionWGSL.slice(0, bodyStart + 1)}${entry}${body}${exit}${fineLevelSetVolumeCorrectionWGSL.slice(bodyEnd)}`;
+}

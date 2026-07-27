@@ -127,14 +127,23 @@ test("fine-band support closes over the exact regular or transition interpolatio
 test("transition and regular demand slots are fixed and physical exterior stays invalid", () => {
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
   assert.match(shader, /var<workgroup>emitRowRegular:atomic<u32>/);
+  // The 27-site proof runs for EVERY enabled row: eligibility is geometric
+  // (boundary-clamped uniformity), not caseId==0, so wall-touching rows keep
+  // the exact per-axis staggered face basis. Nonzero-case regular rows also
+  // publish their retained tet fan for transition consumers.
   assert.match(shader,
-    /if\(g\.z==0u&&lane<27u\).*fineResolvedOwnerMatches\(expectedCenter,g\.y,itemBase\+lane\).*workgroupBarrier\(\);letregular=workgroupUniformLoad\(&emitRowRegular\)!=0u/s,
+    /if\(lane<27u\).*fineResolvedOwnerMatches\(expectedCenter,g\.y,itemBase\+lane\).*workgroupBarrier\(\);letregular=workgroupUniformLoad\(&emitRowRegular\)!=0u/s,
     "one row-owned workgroup must cooperatively prove the 27-site cube exactly once");
+  assert.match(shader, /letneedsSelectors=!regular\|\|g\.z!=0u;/,
+    "a regular wall row publishes both closures so transition sampling keeps its selectors");
   assert.match(shader, /if\(regular&&lane<27u\)\{letlocal=lane/);
   assert.match(shader, /letoccurrence=lane.*letitem=itemBase\+27u\+occurrence/s);
   assert.match(shader, /occurrence>=3u\*count/);
   assert.match(shader, /letselector=\(packed>>\(8u\*\(occurrence%3u\)\)\)&255u/);
-  assert.match(shader, /if\(!inDomain\)\{atomicStore\(&supportArena\[tag\],INVALID\);return;\}/);
+  // No early return: a regular wall row's lane may still owe a selector
+  // occurrence for the dual-closure publication after stamping its
+  // out-of-domain cube tag INVALID.
+  assert.match(shader, /if\(!inDomain\)\{atomicStore\(&supportArena\[tag\],INVALID\);\}else\{/);
   assert.match(shader, /any\(origin<vec3i\(0\)\).*atomicStore\(&supportArena\[tag\],INVALID\)/);
   assert.match(shader, /writeDispatch\(16u,select\(vec3u\(0u,1u,1u\),dispatchFor\(rows,1u\),clean\)\)/,
     "the indirect schedule must dispatch one 2-D-safe workgroup per row");

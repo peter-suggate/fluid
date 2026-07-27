@@ -25,14 +25,23 @@ const FAMILY_CLASSES = [5, 6, 7, 8] as const;
  * the publication rather than admitted through a wider numerical stencil.
  */
 export const STRUCTURED_VELOCITY_EXTENSION_LAYERS = 6;
-export const STRUCTURED_PROJECTION_ENERGY_WORDS = 8;
+export const STRUCTURED_PROJECTION_ENERGY_WORDS = 32;
 
 export interface StructuredProjectionEnergySample {
   readonly epoch: number;
   readonly activeBank: 0 | 1;
   readonly familySampleCount: number;
+  readonly startKineticEnergyProxy: number;
+  readonly postAdvectionKineticEnergyProxy: number;
   readonly preProjectionKineticEnergyProxy: number;
   readonly postProjectionKineticEnergyProxy: number;
+  readonly wetStartKineticEnergyProxy: number;
+  readonly wetPostAdvectionKineticEnergyProxy: number;
+  readonly wetPreProjectionKineticEnergyProxy: number;
+  readonly wetPostProjectionKineticEnergyProxy: number;
+  readonly wetFaceCount: number;
+  readonly transitionPathCount: number;
+  readonly staggeredPathCount: number;
   readonly projectionEnergyRatio: number;
 }
 
@@ -41,37 +50,59 @@ export interface StructuredProjectionEnergyDecode {
   readonly blocker: string | null;
 }
 
-/** Decode the one-generation paired reduction. An initialized/partial buffer
- * never becomes a zero-energy observation. */
+/** Decode the one-generation four-stage reduction (start-of-step, post-
+ * advection, post-force/pre-projection, post-projection). An initialized or
+ * partial buffer never becomes a zero-energy observation. */
 export function decodeStructuredProjectionEnergy(
   words: ArrayLike<number>,
 ): StructuredProjectionEnergyDecode {
   if (words.length < STRUCTURED_PROJECTION_ENERGY_WORDS) {
     return Object.freeze({ sample: null, blocker: "structured projection-energy report is truncated" });
   }
-  const flags = Number(words[0]) >>> 0;
-  const epoch = Number(words[1]) >>> 0;
-  const activeBank = Number(words[2]) >>> 0;
-  const preCount = Number(words[3]) >>> 0;
-  const postCount = Number(words[4]) >>> 0;
-  const pairedEpoch = Number(words[7]) >>> 0;
-  if (flags !== 0) return Object.freeze({ sample: null,
-    blocker: `structured projection-energy reduction failed with flags ${flags}` });
-  if (epoch === 0 || pairedEpoch !== epoch || activeBank > 1) return Object.freeze({ sample: null,
-    blocker: "structured projection-energy pair is unpublished or generation-incoherent" });
-  if (preCount === 0 || postCount !== preCount) return Object.freeze({ sample: null,
-    blocker: "structured projection-energy pair has incomplete family coverage" });
-  const bits = new Uint32Array([Number(words[5]) >>> 0, Number(words[6]) >>> 0]);
+  const stages = [0, 1, 2, 3].map((stage) => ({
+    flags: Number(words[8 * stage]) >>> 0,
+    epochAndBank: Number(words[8 * stage + 1]) >>> 0,
+    count: Number(words[8 * stage + 2]) >>> 0,
+    energyBits: Number(words[8 * stage + 3]) >>> 0,
+    wetCount: Number(words[8 * stage + 4]) >>> 0,
+    wetEnergyBits: Number(words[8 * stage + 5]) >>> 0,
+    transitionPathCount: Number(words[8 * stage + 6]) >>> 0,
+    staggeredPathCount: Number(words[8 * stage + 7]) >>> 0,
+  }));
+  const failed = stages.find((stage) => stage.flags !== 0);
+  if (failed) return Object.freeze({ sample: null,
+    blocker: `structured projection-energy reduction failed with flags ${failed.flags}` });
+  const epoch = stages[0]!.epochAndBank >>> 1;
+  const activeBank = stages[0]!.epochAndBank & 1;
+  if (epoch === 0 || stages.some((stage) => stage.epochAndBank !== stages[0]!.epochAndBank)) {
+    return Object.freeze({ sample: null,
+      blocker: "structured projection-energy stages are unpublished or generation-incoherent" });
+  }
+  if (stages[0]!.count === 0 || stages.some((stage) => stage.count !== stages[0]!.count)) {
+    return Object.freeze({ sample: null,
+      blocker: "structured projection-energy stages have incomplete family coverage" });
+  }
+  const bits = new Uint32Array(stages.flatMap((stage) => [stage.energyBits, stage.wetEnergyBits]));
   const energy = new Float32Array(bits.buffer);
-  const pre = energy[0]!;
-  const post = energy[1]!;
-  if (!Number.isFinite(pre) || pre < 0 || !Number.isFinite(post) || post < 0
-    || (pre === 0 && post !== 0)) return Object.freeze({ sample: null,
-    blocker: "structured projection-energy pair contains invalid energy" });
+  if (Array.from(energy).some((value) => !Number.isFinite(value) || value < 0)) {
+    return Object.freeze({ sample: null,
+      blocker: "structured projection-energy stages contain invalid energy" });
+  }
+  const pre = energy[4]!;
+  const post = energy[6]!;
   return Object.freeze({ sample: Object.freeze({
-    epoch, activeBank: activeBank as 0 | 1, familySampleCount: preCount,
+    epoch, activeBank: activeBank as 0 | 1, familySampleCount: stages[0]!.count,
+    startKineticEnergyProxy: energy[0]!,
+    postAdvectionKineticEnergyProxy: energy[2]!,
     preProjectionKineticEnergyProxy: pre,
     postProjectionKineticEnergyProxy: post,
+    wetStartKineticEnergyProxy: energy[1]!,
+    wetPostAdvectionKineticEnergyProxy: energy[3]!,
+    wetPreProjectionKineticEnergyProxy: energy[5]!,
+    wetPostProjectionKineticEnergyProxy: energy[7]!,
+    wetFaceCount: stages[1]!.wetCount,
+    transitionPathCount: stages[1]!.transitionPathCount,
+    staggeredPathCount: stages[1]!.staggeredPathCount,
     projectionEnergyRatio: pre === 0 ? 1 : post / pre,
   }), blocker: null });
 }
@@ -81,6 +112,10 @@ export interface StructuredDynamicsResources {
   readonly topology: OctreePowerTopologySource;
   readonly pressure: GPUBuffer;
   readonly divergenceRhs: GPUBuffer;
+  /** One u32 per finest cell: (generation << 1) | ceiling-tension flag,
+   * published at projection time and consumed by the NEXT step's boundary
+   * rebuild as the unilateral-contact active set. */
+  readonly separationMask: GPUBuffer;
   /** Accepted dynamic-boundary classification, one u32 liquid bit per banked row. */
   readonly liquidMask: GPUBuffer;
   /** Required normal velocity of the solid boundary, one f32 per family handle
@@ -110,7 +145,7 @@ export interface StructuredDynamicsResources {
 export class WebGPUStructuredVelocityDynamics {
   readonly encodedAdvectionDispatchCount = 9;
   readonly encodedForceDivergenceDispatchCount = 10;
-  readonly encodedProjectionDispatchCount = 9;
+  readonly encodedProjectionDispatchCount = 13;
   readonly allocatedBytes: number;
   /** Per-slot vec4f: transported momentum xyz and kinetic dissipation w. */
   readonly transportMetrics: GPUBuffer;
@@ -132,10 +167,13 @@ export class WebGPUStructuredVelocityDynamics {
   private readonly advectionCommit: readonly GPUComputePipeline[];
   private readonly force: readonly GPUComputePipeline[];
   private readonly divergence: readonly GPUComputePipeline[];
+  private readonly separation: readonly GPUComputePipeline[];
   private readonly projection: readonly GPUComputePipeline[];
   private readonly reconstruct: readonly GPUComputePipeline[];
   private readonly summarizePreProjectionEnergy: GPUComputePipeline;
   private readonly summarizePostProjectionEnergy: GPUComputePipeline;
+  private readonly summarizeStartEnergy: GPUComputePipeline;
+  private readonly summarizePostAdvectionEnergy: GPUComputePipeline;
   private readonly groups = new WeakMap<GPUComputePipeline,
     WeakMap<GPUBuffer, WeakMap<GPUBuffer, GPUBindGroup>>>();
   private destroyed = false;
@@ -146,6 +184,7 @@ export class WebGPUStructuredVelocityDynamics {
       || resources.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
       || resources.pressure.size < structured.plan.rowCapacity * 4
       || resources.divergenceRhs.size < structured.plan.rowCapacity * 4
+      || resources.separationMask.size < resources.dimensions[0] * resources.dimensions[1] * resources.dimensions[2] * 4
       || resources.liquidMask.size < structured.plan.rowCapacity * 2 * 4
       || resources.solidNormalVelocities.size < structured.plan.slotCapacity * 2 * 4
       || !Number.isSafeInteger(resources.selectorStride) || resources.selectorStride < 1
@@ -220,10 +259,13 @@ export class WebGPUStructuredVelocityDynamics {
     this.advectionCommit = FAMILY_CLASSES.map((value) => make(`commitAdvectedStructuredClass${value}`));
     this.force = FAMILY_CLASSES.map((value) => make(`forceStructuredClass${value}`));
     this.divergence = ROW_CLASSES.map((value) => make(`divergenceStructuredClass${value}`));
+    this.separation = ROW_CLASSES.map((value) => make(`separateStructuredClass${value}`));
     this.projection = FAMILY_CLASSES.map((value) => make(`projectStructuredClass${value}`));
     this.reconstruct = ROW_CLASSES.map((value) => make(`reconstructStructuredClass${value}`));
     this.summarizePreProjectionEnergy = make("summarizeStructuredPreProjectionEnergy");
     this.summarizePostProjectionEnergy = make("summarizeStructuredPostProjectionEnergy");
+    this.summarizeStartEnergy = make("summarizeStructuredStartEnergy");
+    this.summarizePostAdvectionEnergy = make("summarizeStructuredPostAdvectionEnergy");
     this.allocatedBytes = catalogBytes + this.dispatch.size
       + this.projectionEnergyStats.size
       + 3 * 256;
@@ -244,7 +286,7 @@ export class WebGPUStructuredVelocityDynamics {
     return { 0: params, 1: structured.control, 2: structured.authority,
       3: structured.rowGeometry, 4: structured.rowVelocities, 5: topology.metrics,
       6: this.catalog, 11: this.resources.boundaryWorksets,
-      12: this.dispatch, 13: pressure, 14: divergenceRhs, 16: liquidMask,
+      12: this.dispatch, 13: pressure, 14: divergenceRhs, 15: this.resources.separationMask, 16: liquidMask,
       17: this.resources.boundaryControl, 18: this.transportMetrics,
       22: this.resources.solidNormalVelocities, 23: this.projectionEnergyStats,
       24: structured.candidateControl };
@@ -285,14 +327,14 @@ export class WebGPUStructuredVelocityDynamics {
   }
 
   private encodeProjectionEnergy(broker: PassBroker, params: GPUBuffer,
-    phase: "pre" | "post"): void {
-    const pipeline = phase === "pre"
-      ? this.summarizePreProjectionEnergy : this.summarizePostProjectionEnergy;
-    const pass = broker.compute({ label: phase === "pre"
-      ? "Structured dynamics report pre-projection kinetic energy"
-      : "Structured dynamics report post-projection kinetic energy" });
+    phase: "start" | "advected" | "pre" | "post"): void {
+    const pipeline = { start: this.summarizeStartEnergy,
+      advected: this.summarizePostAdvectionEnergy,
+      pre: this.summarizePreProjectionEnergy,
+      post: this.summarizePostProjectionEnergy }[phase];
+    const pass = broker.compute({ label: `Structured dynamics report ${phase} kinetic energy` });
     pass.setPipeline(pipeline);
-    pass.setBindGroup(0, this.group(pipeline, [0, 1, 2, 11, 17, 23], params));
+    pass.setBindGroup(0, this.group(pipeline, [0, 1, 2, 3, 4, 5, 11, 16, 17, 18, 23], params));
     pass.dispatchWorkgroups(1);
   }
 
@@ -308,7 +350,8 @@ export class WebGPUStructuredVelocityDynamics {
   encodeAdvection(broker: PassBroker, dt: number): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
     const params = this.update(0, dt, 1, [0, 0, 0]); this.encodePrepare(broker, params);
-    this.encodeClasses(broker, this.advection, FAMILY_CLASSES, [0, 1, 2, 3, 4, 5, 6, 11, 17, 18, 22], params,
+    this.encodeProjectionEnergy(broker, params, "start");
+    this.encodeClasses(broker, this.advection, FAMILY_CLASSES, [0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18], params,
       "Advect structured family class");
     // The staggered regular sampler reads neighbouring face degrees of
     // freedom while every lane produces its own destination, so destinations
@@ -317,6 +360,8 @@ export class WebGPUStructuredVelocityDynamics {
     broker.fence("structured advected destinations staged");
     this.encodeClasses(broker, this.advectionCommit, FAMILY_CLASSES, [0, 1, 2, 11, 17, 18], params,
       "Commit advected structured family class");
+    broker.fence("structured advected destinations committed");
+    this.encodeProjectionEnergy(broker, params, "advected");
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after structured advection commit");
     }
@@ -334,7 +379,7 @@ export class WebGPUStructuredVelocityDynamics {
     const pass = broker.compute({ label: "Transfer accepted velocity to changed topology faces" });
     pass.setPipeline(this.topologyTransfer);
     pass.setBindGroup(0, this.group(this.topologyTransfer,
-      [0, 1, 2, 3, 4, 5, 6, 17, 18, 24], params));
+      [0, 1, 2, 3, 4, 5, 6, 16, 17, 18, 24], params));
     pass.dispatchWorkgroups(Math.ceil(this.resources.structured.plan.slotCapacity / 64));
     broker.fence("changed topology face velocities transferred");
   }
@@ -363,9 +408,19 @@ export class WebGPUStructuredVelocityDynamics {
   }
 
   encodeProjection(broker: PassBroker, dt: number, density: number,
+    gravity: readonly [number, number, number] = [0, 0, 0],
     pressure = this.resources.pressure): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
-    const params = this.update(2, dt, density, [0, 0, 0]); this.encodePrepare(broker, params);
+    const params = this.update(2, dt, density, gravity); this.encodePrepare(broker, params);
+    // Publish the lagged unilateral-contact active set from the solved
+    // pressure: rows holding tension against gravity-opposed closed world
+    // faces are marked, and the NEXT step's boundary rebuild opens exactly
+    // those faces. The solved pressure itself is never mutated, so this
+    // step's projection and divergence bookkeeping stay exactly the
+    // variational solution.
+    this.encodeClasses(broker, this.separation, ROW_CLASSES,
+      [0, 1, 2, 3, 5, 6, 11, 13, 15, 16, 17], params,
+      "Mark structured overhead separation row class", pressure);
     this.encodeClasses(broker, this.projection, FAMILY_CLASSES,
       [0, 1, 2, 11, 13, 16, 17, 22], params,
       "Project structured family class", pressure);
@@ -405,6 +460,7 @@ struct SlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDis
 @group(0)@binding(12)var<storage,read_write>indirect:array<u32>;
 @group(0)@binding(13)var<storage,read>pressure:array<f32>;
 @group(0)@binding(14)var<storage,read_write>rhs:array<f32>;
+@group(0)@binding(15)var<storage,read_write>separationMask:array<u32>;
 @group(0)@binding(16)var<storage,read>liquid:array<u32>;
 @group(0)@binding(17)var<storage,read>boundaryControl:array<u32>;
 @group(0)@binding(18)var<storage,read_write>transportMetrics:array<vec4f>;
@@ -604,7 +660,22 @@ fn staggeredPlaneValue(anchor:u32,rg:vec4u,origin:vec3f,h:f32,axis:u32,plane:i32
       if(!supportFound){support=extended[axis];supportFound=true;}
       continue;
     }
-    if(tag>=acc(2u)||metrics[tag].caseId!=0u||rowGeometry[rbase()+tag].y!=rg.y){return vec2f(0.,0.);}
+    // A same-size live neighbour qualifies regardless of caseId — its face
+    // handle is validated axis-normal and finite below, which is the real
+    // requirement. A genuinely irregular neighbour fails that check instead.
+    if(tag>=acc(2u)||rowGeometry[rbase()+tag].y!=rg.y){return vec2f(0.,0.);}
+    // A dry live row's face degrees of freedom receive no gravity, no
+    // projection update, and are never rewritten by the Section 5 march, so
+    // they lag the liquid by a full substep at exactly the free surface.
+    // Contribute the row's committed Section 5 extended vector instead, the
+    // same closest-interface copy a support cell supplies; a wet incident
+    // cell on the same plane still wins with its exact face value below.
+    if(liquidAt(tag)==0u){
+      let extended=taggedVelocity(tag);
+      if(!vectorValid(extended)){return vec2f(0.,0.);}
+      if(!supportFound){support=extended[axis];supportFound=true;}
+      continue;
+    }
     let resolved=faceAxisValue(regularFaceHandle(tag,axis,candidate==1u),axis);
     if(resolved.y==0.){return vec2f(0.,0.);}
     if(!faceFound){face=resolved.x;faceFound=true;}
@@ -668,7 +739,10 @@ fn staggeredComponent(anchor:u32,rg:vec4u,origin:vec3f,h:f32,x:vec3f,axis:u32)->
   return vec2f(result,1.);
 }
 fn staggeredSample(anchor:u32,x:vec3f)->vec4f{
-  if(anchor>=acc(2u)||metrics[anchor].caseId!=0u||!finite3(x)){return invalidVector();}
+  // Eligibility is the producer's published regular closure (centre cube tag
+  // = the row id), not caseId==0: a wall-touching row keeps axis-normal cube
+  // faces and must stay on the exact per-axis face basis.
+  if(anchor>=acc(2u)||regularTag(anchor,vec3i(0))!=anchor||!finite3(x)){return invalidVector();}
   let rg=rowGeometry[rbase()+anchor];
   let h=f32(rg.y)*p.physical.x;
   if(!finite(h)||h<=0.){return invalidVector();}
@@ -830,7 +904,7 @@ fn candidateRowCenter(candidateBank:u32,row:u32)->vec3f{
   return (vec3f(q)+.5*f32(rg.y))*p.physical.x;
 }
 fn oldFieldAt(anchor:u32,point:vec3f)->vec4f{
-  if(anchor==INVALID){return invalidVector();}var sample=invalidVector();if(metrics[anchor].caseId!=0u){sample=transitionSample(anchor,point);}else{sample=regularSample(anchor,point);}
+  if(anchor==INVALID){return invalidVector();}var sample=invalidVector();if(regularTag(anchor,vec3i(0))!=anchor){sample=transitionSample(anchor,point);}else{sample=regularSample(anchor,point);}
   // Interpolation can leave its local closure at a newly exposed face. The
   // already projected row vector is the bounded piecewise-constant fallback;
   // zero is never presented as a successful topology transfer.
@@ -871,7 +945,11 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
   let candidateOwner=a[base+p.ownerOffset+handle];let candidateNeighbor=a[base+p.neighborOffset+handle];
   let ownerAnchor=oldAnchor(candidateBank,candidateOwner,n);let ownerField=oldFieldAt(ownerAnchor,point);var neighborAnchor=INVALID;var neighborField=invalidVector();
   if(candidateNeighbor!=INVALID){neighborAnchor=oldAnchor(candidateBank,candidateNeighbor,-n);if(neighborAnchor!=ownerAnchor){neighborField=oldFieldAt(neighborAnchor,point);}}
-  var old=ownerField;if(vectorValid(ownerField)&&vectorValid(neighborField)){old=vec4f(.5*(ownerField.xyz+neighborField.xyz),1.);}else if(!vectorValid(ownerField)){old=neighborField;}
+  // Resolve the two-sided ambiguity the way main's sampleOldIncident did:
+  // one interpolated sample through the incident owner-side element, never a
+  // mean of two independent closures — averaging both sides low-passes every
+  // newly created interface face on every topology change.
+  var old=ownerField;if(!vectorValid(ownerField)){old=neighborField;}
   if(!vectorValid(old)){old=extendedOwnerVelocity(point);}
   if(!vectorValid(old)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=dot(old.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);
 }
@@ -885,6 +963,49 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
 // kernels copy the staged words back bit-exactly.
 fn nextValueAt(handle:u32)->u32{return (1u-bank())*p.authorityWords+p.valuesOffset+handle;}
 fn setNextValue(handle:u32,v:f32){a[nextValueAt(handle)]=bitcast<u32>(v);}
+// Sample the accepted field at an arbitrary characteristic point. Main's
+// old-mesh advection re-resolved the containing leaf for every sample point
+// (owner(x)); pinning one face's owner closure for the whole midpoint trace
+// evaluates the interpolant outside its own element once the departure leaves
+// the incident cell, and the clamped/renormalized basis then acts as a
+// nearest-hull projection — a speed-proportional energy sink measured at
+// -0.8%/step (slow) to -4.6%/step (post-impact) on the mini dam. Resolve the
+// element containing the point first; the pinned incident row remains the
+// fallback so a point on a directory seam never rejects a face that the
+// owner-local closure could serve.
+fn characteristicSample(row:u32,point:vec3f)->vec4f{
+  var anchor=acceptedRowContaining(point);
+  if(anchor!=INVALID&&anchor<acc(2u)){
+    var sample=invalidVector();
+    if(regularTag(anchor,vec3i(0))!=anchor){sample=transitionSample(anchor,point);}else{sample=regularSample(anchor,point);}
+    if(vectorValid(sample)){return sample;}
+  }
+  if(regularTag(row,vec3i(0))!=row){return transitionSample(row,point);}
+  return regularSample(row,point);
+}
+// A row is "dynamic" when it is dry or borders air: exactly the band whose
+// power-cell geometry main's identity key would have invalidated, forcing a
+// re-trace. The accepted row set holds ONLY liquid rows, so "borders air"
+// means an in-domain six-neighbour probe that resolves to no accepted row
+// (or, defensively, to a non-liquid one). A probe outside the closed domain
+// is a wall, not air; a deep column against a wall still carries.
+fn rowTouchesDry(row:u32)->bool{
+  if(row>=acc(2u)||liquidAt(row)==0u){return true;}
+  let rg=rowGeometry[rbase()+row];
+  let h=f32(rg.y)*p.physical.x;
+  let d=dimensions();
+  let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
+  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
+  let extent=vec3f(d)*p.physical.x;
+  for(var direction=0u;direction<6u;direction+=1u){
+    var probe=center;
+    probe[direction/2u]+=select(-h,h,(direction&1u)==1u);
+    if(any(probe<vec3f(0.))||any(probe>=extent)){continue;}
+    let other=acceptedRowContaining(probe);
+    if(other==INVALID||other>=acc(2u)||liquidAt(other)==0u){return true;}
+  }
+  return false;
+}
 fn advect(cls:u32,index:u32){
   let handle=workItem(cls,index);
   if(handle==INVALID||handle>=acc(5u)){return;}
@@ -897,21 +1018,47 @@ fn advect(cls:u32,index:u32){
   // retained case-zero Delaunay fan. The centre cube tag is the producer's
   // unambiguous marker: every complete regular closure publishes the row id.
   let centerTag=regularTag(row,vec3i(0));
-  let useTransition=metrics[row].caseId!=0u||centerTag!=row;
+  let useTransition=centerTag!=row;
   let x=centroid(handle);
   let prior=value(handle);
   setNextValue(handle,prior);
   let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
   if(!finite(aperture)||aperture<0.||aperture>1.){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
-  // A fully prescribed face has no transported degree of freedom. Publish
-  // the exact solid boundary value before any characteristic sampling.
+  // A fully prescribed face has no transported degree of freedom. Keep the
+  // staged prior value: forceFamily re-imposes the exact solid boundary value
+  // immediately after this commit and before any divergence consumer, and
+  // dropping the solid-velocity read here keeps this kernel inside WebGPU's
+  // ten-storage-buffer per-stage limit.
   if(aperture==0.){
-    let solid=solidVelocityAt(handle);
     let n=normal(handle);
     let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
-    if(!finite(solid)||!finite3(n)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
-    setNextValue(handle,solid);
-    transportMetrics[handle]=vec4f(solid*n*area,.5*area*max(0.,prior*prior-solid*solid));
+    if(!finite3(n)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
+    transportMetrics[handle]=vec4f(prior*n*area,0.);
+    return;
+  }
+  // Main's carry semantics, translated to this lane's identity model. Main's
+  // DELTA_CARRIED key includes the power-cell geometryCode, which changes
+  // whenever the liquid configuration around a face changes — so main
+  // re-traces the whole dynamic interface band every step and carries ONLY
+  // faces whose local liquid neighbourhood is static. This lane's carry
+  // marker keys on structural octree identity alone, which survives interface
+  // motion; using it unconditionally froze the momentum field (a corner
+  // reservoir stopped sliding down its wall). Gate the carry on the face
+  // being deep interior: both incident rows liquid and no six-neighbour of
+  // either incident row dry. Interface-band faces always trace, paying the
+  // semi-Lagrangian cost exactly where main pays it; deep-interior faces
+  // carry exactly, removing the dt-independent whole-field resampling loss
+  // measured at up to ~3.5%/step of kinetic energy at the dam-break impact.
+  let carriedMarker=bitcast<f32>(a[abase()+p.centroidOffset+4u*handle+3u]);
+  // The accepted row set is liquid-only, so a face with no neighbour row is a
+  // free-surface (or wall) face: never carried. Closed-wall faces already
+  // returned through the aperture==0 branch above.
+  let hiRow=neighbor(handle);
+  if(carriedMarker>.5&&hiRow!=INVALID&&!rowTouchesDry(row)&&!rowTouchesDry(hiRow)){
+    let n=normal(handle);
+    let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
+    if(!finite3(n)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
+    transportMetrics[handle]=vec4f(prior*n*area,0.);
     return;
   }
   var adv=invalidVector();
@@ -923,12 +1070,10 @@ fn advect(cls:u32,index:u32){
   // mechanical-energy retention decaying to 0.83 by t=0.24 s on the mini dam
   // while the midpoint scheme holds ~0.99.
   let midpoint=x-.5*p.physical.y*adv.xyz;
-  var middle=invalidVector();
-  if(useTransition){middle=transitionSample(row,midpoint);}else{middle=regularSample(row,midpoint);}
+  let middle=characteristicSample(row,midpoint);
   if(!vectorValid(middle)){transportMetrics[handle]=middle;rejectVector(1u,handle,middle,cls);return;}
   let departure=x-p.physical.y*middle.xyz;
-  var transported=invalidVector();
-  if(useTransition){transported=transitionSample(row,departure);}else{transported=regularSample(row,departure);}
+  let transported=characteristicSample(row,departure);
   if(!vectorValid(transported)){transportMetrics[handle]=transported;rejectVector(2u,handle,transported,cls);return;}
   let n=normal(handle);
   let projected=dot(transported.xyz,n);
@@ -958,10 +1103,18 @@ fn commitAdvected(cls:u32,index:u32){
 var<workgroup> projectionEnergyPartial:array<f32,128>;
 var<workgroup> projectionEnergyCount:array<u32,128>;
 var<workgroup> projectionEnergyInvalid:array<u32,128>;
-fn summarizeProjectionEnergy(lane:u32,post:bool){
+var<workgroup> projectionEnergyWetPartial:array<f32,128>;
+var<workgroup> projectionEnergyWetCount:array<u32,128>;
+var<workgroup> projectionEnergyTransitionPath:array<u32,128>;
+var<workgroup> projectionEnergyStaggeredPath:array<u32,128>;
+fn summarizeProjectionEnergy(lane:u32,stage:u32){
   var energy=0.;
+  var wetEnergy=0.;
   var count=0u;
+  var wetCount=0u;
   var invalid=0u;
+  var transitionPathCount=0u;
+  var staggeredPathCount=0u;
   if(acc(0u)!=0u||acc(3u)==0u||!boundaryValid()){invalid=1u;}
   for(var cls=5u;cls<9u;cls+=1u){
     let base=wbase(cls);
@@ -981,50 +1134,76 @@ fn summarizeProjectionEnergy(lane:u32,post:bool){
       if(!finite(contribution)||contribution<0.){invalid=1u;continue;}
       energy+=contribution;
       count+=1u;
+      // Attribution needs the liquid's energy separately: dry faces carry
+      // Section 5 extension copies whose decay is not a physical loss.
+      let lo=owner(handle);
+      let hi=neighbor(handle);
+      if(lo<acc(2u)&&(liquidAt(lo)!=0u||(hi!=INVALID&&hi<acc(2u)&&liquidAt(hi)!=0u))){
+        wetEnergy+=contribution;
+        wetCount+=1u;
+        // Stage 1 also takes a sampler-path census at the face centroid:
+        // which basis would this face's advection have used?
+        if(stage==1u&&lo<acc(2u)){
+          if(regularTag(lo,vec3i(0))!=lo){transitionPathCount+=1u;}
+          else if(vectorValid(staggeredSample(lo,centroid(handle)))){staggeredPathCount+=1u;}
+        }
+      }
     }
   }
   projectionEnergyPartial[lane]=energy;
   projectionEnergyCount[lane]=count;
   projectionEnergyInvalid[lane]=invalid;
+  projectionEnergyWetPartial[lane]=wetEnergy;
+  projectionEnergyWetCount[lane]=wetCount;
+  projectionEnergyTransitionPath[lane]=transitionPathCount;
+  projectionEnergyStaggeredPath[lane]=staggeredPathCount;
   workgroupBarrier();
   for(var width=64u;width>0u;width>>=1u){
     if(lane<width){
       projectionEnergyPartial[lane]+=projectionEnergyPartial[lane+width];
       projectionEnergyCount[lane]+=projectionEnergyCount[lane+width];
       projectionEnergyInvalid[lane]|=projectionEnergyInvalid[lane+width];
+      projectionEnergyWetPartial[lane]+=projectionEnergyWetPartial[lane+width];
+      projectionEnergyWetCount[lane]+=projectionEnergyWetCount[lane+width];
+      projectionEnergyTransitionPath[lane]+=projectionEnergyTransitionPath[lane+width];
+      projectionEnergyStaggeredPath[lane]+=projectionEnergyStaggeredPath[lane+width];
     }
     workgroupBarrier();
   }
   if(lane==0u){
+    // Four independent per-stage records; the host cross-checks generation,
+    // bank, and family coverage across stages. Stage order in the substep:
+    // 0 start-of-step (post-remap), 1 post-advection, 2 post-force
+    // (pre-projection), 3 post-projection.
     let generation=acc(3u);
     let failed=projectionEnergyInvalid[0]!=0u||projectionEnergyCount[0]==0u
       ||!finite(projectionEnergyPartial[0]);
-    if(!post){
-      projectionEnergyStats[0]=select(0u,1u,failed);
-      projectionEnergyStats[1]=generation;
-      projectionEnergyStats[2]=bank();
-      projectionEnergyStats[3]=projectionEnergyCount[0];
-      projectionEnergyStats[4]=0u;
-      projectionEnergyStats[5]=bitcast<u32>(projectionEnergyPartial[0]);
-      projectionEnergyStats[6]=0u;
-      projectionEnergyStats[7]=0u;
-    }else{
-      let pairMatches=projectionEnergyStats[0]==0u&&projectionEnergyStats[1]==generation
-        &&projectionEnergyStats[2]==bank()&&projectionEnergyStats[3]==projectionEnergyCount[0];
-      projectionEnergyStats[0]=select(0u,2u,failed||!pairMatches);
-      projectionEnergyStats[4]=projectionEnergyCount[0];
-      projectionEnergyStats[6]=bitcast<u32>(projectionEnergyPartial[0]);
-      projectionEnergyStats[7]=select(generation,0u,failed||!pairMatches);
-    }
+    let base=8u*stage;
+    projectionEnergyStats[base]=select(0u,1u+stage,failed);
+    projectionEnergyStats[base+1u]=(generation<<1u)|bank();
+    projectionEnergyStats[base+2u]=projectionEnergyCount[0];
+    projectionEnergyStats[base+3u]=bitcast<u32>(projectionEnergyPartial[0]);
+    projectionEnergyStats[base+4u]=projectionEnergyWetCount[0];
+    projectionEnergyStats[base+5u]=bitcast<u32>(projectionEnergyWetPartial[0]);
+    projectionEnergyStats[base+6u]=projectionEnergyTransitionPath[0];
+    projectionEnergyStats[base+7u]=projectionEnergyStaggeredPath[0];
   }
 }
 @compute @workgroup_size(128)
 fn summarizeStructuredPreProjectionEnergy(@builtin(local_invocation_index)lane:u32){
-  summarizeProjectionEnergy(lane,false);
+  summarizeProjectionEnergy(lane,2u);
 }
 @compute @workgroup_size(128)
 fn summarizeStructuredPostProjectionEnergy(@builtin(local_invocation_index)lane:u32){
-  summarizeProjectionEnergy(lane,true);
+  summarizeProjectionEnergy(lane,3u);
+}
+@compute @workgroup_size(128)
+fn summarizeStructuredStartEnergy(@builtin(local_invocation_index)lane:u32){
+  summarizeProjectionEnergy(lane,0u);
+}
+@compute @workgroup_size(128)
+fn summarizeStructuredPostAdvectionEnergy(@builtin(local_invocation_index)lane:u32){
+  summarizeProjectionEnergy(lane,1u);
 }
 
 fn closedWorld(handle:u32)->bool{
@@ -1101,6 +1280,69 @@ fn divergenceRow(cls:u32,index:u32){
 @compute @workgroup_size(64)fn divergenceStructuredClass1(@builtin(global_invocation_id)g:vec3u){divergenceRow(1u,g.x);}
 @compute @workgroup_size(64)fn divergenceStructuredClass2(@builtin(global_invocation_id)g:vec3u){divergenceRow(2u,g.x);}
 @compute @workgroup_size(64)fn divergenceStructuredClass3(@builtin(global_invocation_id)g:vec3u){divergenceRow(3u,g.x);}
+
+// The paper's cut-cell solid coupling (Batty-style apertures) constrains
+// u.n on solid faces bilaterally, so the solve balances a liquid sheet on
+// the tank ceiling with sustained suction: the sheet hangs instead of
+// falling away. A free-surface liquid in contact with a solid it may leave
+// is a unilateral constraint -- contact pressure obeys p >= 0, with p < 0
+// replaced by separation. Post-solve pressure clamping enforces neither
+// side: clamped rows stop conserving mass and measured as sinks that pulled
+// MORE liquid onto the ceiling. Instead this stage only MARKS liquid rows
+// that hold tension against the closed ceiling (one-step-lagged active set
+// of the contact LCP); the next step's boundary rebuild opens the marked
+// rows' world faces so the solve itself resolves the separation with a
+// p = 0 ghost and fully consistent divergence. The mask stores the exact
+// world-face bits in tension-against-gravity, so a marked row stays
+// released while its tension persists and re-closes the step after the
+// tension clears. Authored terrain/rigid overhangs are still bilateral;
+// extending the mask to SDF-cut faces is the known follow-up.
+fn worldContactBit(handle:u32)->u32{
+  if(neighbor(handle)!=INVALID){return 0u;}
+  let x=centroid(handle)/p.physical.x;
+  let n=normal(handle);
+  for(var axis=0u;axis<3u;axis+=1u){
+    if(n[axis]<-.5&&x[axis]<=1e-4){return 1u<<(2u*axis);}
+    if(n[axis]>.5&&x[axis]>=f32(dimensions()[axis])-1e-4){return 1u<<(2u*axis+1u);}
+  }
+  return 0u;
+}
+fn markSeparationRow(cls:u32,index:u32){
+  let row=workItem(cls,index);
+  if(row==INVALID||row>=acc(2u)){return;}
+  let rg=rowGeometry[rbase()+row];
+  let cell=rg.x;
+  if(cell>=arrayLength(&separationMask)){return;}
+  var faceBits=0u;
+  let weight=length(p.gravity.xyz);
+  if(liquidAt(row)!=0u&&weight>1e-6){
+    let solved=pressure[row];
+    let count=rowSlotCount(row);
+    if(finite(solved)&&solved<0.&&count<=p.maxSlots){
+      // Gravity-relative, axis-free: a closed world face separates when its
+      // outward normal opposes gravity within 60 degrees (overhead
+      // contact), whichever axis and sign the scene's gravity and closed
+      // boundaries use. Wider active sets measured strictly worse: freeing
+      // vertical walls during the impact transient turns every released
+      // face into a p = 0 ghost that compressed liquid accelerates
+      // through (2x the late ceiling residue), and freeing floor-like
+      // contact let the whole pool trampoline off the tank floor.
+      let up=-p.gravity.xyz/weight;
+      for(var local=0u;local<count;local+=1u){
+        let handle=a[abase()+p.rowHandleOffset+row*p.maxSlots+local];
+        if(handle==INVALID||handle>=acc(5u)){continue;}
+        let bit=worldContactBit(handle);
+        if(bit==0u||(p.closedMask&bit)==0u){continue;}
+        if(dot(normal(handle),up)>.5){faceBits|=bit;}
+      }
+    }
+  }
+  separationMask[cell]=(acc(3u)<<6u)|faceBits;
+}
+@compute @workgroup_size(64)fn separateStructuredClass0(@builtin(global_invocation_id)g:vec3u){markSeparationRow(0u,g.x);}
+@compute @workgroup_size(64)fn separateStructuredClass1(@builtin(global_invocation_id)g:vec3u){markSeparationRow(1u,g.x);}
+@compute @workgroup_size(64)fn separateStructuredClass2(@builtin(global_invocation_id)g:vec3u){markSeparationRow(2u,g.x);}
+@compute @workgroup_size(64)fn separateStructuredClass3(@builtin(global_invocation_id)g:vec3u){markSeparationRow(3u,g.x);}
 
 fn projectFamily(cls:u32,index:u32){
   let handle=workItem(cls,index);

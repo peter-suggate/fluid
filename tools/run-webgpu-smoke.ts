@@ -49,9 +49,10 @@ import {
   type GPUDataFlowManifest,
   type GPUDataFlowPassRecorder,
 } from "./webgpu-data-flow-manifest";
-import { exactStructuredGenerationAuditFailures, finalPerformanceAuthorityFailures,
-  STRUCTURED_GENERATION_AUDIT_SNAPSHOT, unpackStructuredBoundaryControl,
-  unpackStructuredGenerationAuditSnapshot, unpackStructuredVelocityControl }
+import { encodeStructuredAuditRecordCopies, exactStructuredGenerationAuditFailures,
+  finalPerformanceAuthorityFailures, STRUCTURED_GENERATION_AUDIT_SNAPSHOT,
+  unpackStructuredBoundaryControl, unpackStructuredGenerationAuditSnapshot,
+  unpackStructuredVelocityControl }
   from "./webgpu-smoke-structured-audit";
 import { decodeOctreeMGPCGDiagnostics, octreePowerPressureDiagnosticsAreAcceptable,
   octreePowerPressureEnvelopeIsAcceptable, octreeProjectedVariationalResidualRms,
@@ -3283,24 +3284,19 @@ async function runGPU(
       if (record >= powerGenerationAuditCapacity) {
         throw new Error(`structured generation audit exceeded its ${powerGenerationAuditCapacity}-step snapshot capacity`);
       }
-      const layout = STRUCTURED_GENERATION_AUDIT_SNAPSHOT;
-      const base = record * layout.strideBytes;
       const auditEncoder = device.createCommandEncoder({
         label: `Queue structured generation audit snapshot ${record + 1}`,
       });
-      auditEncoder.copyBufferToBuffer(audited.structuredVelocityControl, 0,
-        powerGenerationAuditSnapshot, base + layout.structuredOffsetBytes, layout.structuredBytes);
-      auditEncoder.copyBufferToBuffer(audited.structuredBoundaryControl, 0,
-        powerGenerationAuditSnapshot, base + layout.boundaryOffsetBytes, layout.boundaryBytes);
-      auditEncoder.copyBufferToBuffer(fine.worklist, 0,
-        powerGenerationAuditSnapshot, base + layout.fineOffsetBytes, layout.fineBytes);
-      auditEncoder.copyBufferToBuffer(audited.mgpcgControl, 0,
-        powerGenerationAuditSnapshot, base + layout.mgpcgOffsetBytes, layout.mgpcgBytes);
-      auditEncoder.copyBufferToBuffer(audited.globalFineVolumeControl, 0,
-        powerGenerationAuditSnapshot, base + layout.fineVolumeOffsetBytes, layout.fineVolumeBytes);
-      auditEncoder.copyBufferToBuffer(audited.structuredProjectionEnergyStats, 0,
-        powerGenerationAuditSnapshot, base + layout.projectionEnergyOffsetBytes,
-        layout.projectionEnergyBytes);
+      // The shared ABI writer also feeds the browser's step-coherent snapshot
+      // ring, so the harness and the UI copy byte-identical records.
+      encodeStructuredAuditRecordCopies(auditEncoder, {
+        structuredVelocityControl: audited.structuredVelocityControl,
+        structuredBoundaryControl: audited.structuredBoundaryControl,
+        fineWorklist: fine.worklist,
+        mgpcgControl: audited.mgpcgControl,
+        fineVolumeControl: audited.globalFineVolumeControl,
+        projectionEnergyStats: audited.structuredProjectionEnergyStats,
+      }, powerGenerationAuditSnapshot, record * STRUCTURED_GENERATION_AUDIT_SNAPSHOT.strideBytes);
       device.queue.submit([auditEncoder.finish()]);
       powerGenerationAuditSteps.push(steps);
       powerGenerationAuditFineGenerations.push(fine.generation);
@@ -3326,6 +3322,22 @@ async function runGPU(
       await awaitAdvanceCompletion();
       solver.info.simulatedTime_s = solver.info.submittedTime_s;
       const sample = await solver.readStats();
+      if (sample.structuredStartKineticEnergyProxy !== undefined) {
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "structured-stage-energy", steps,
+          time_s: solver.info.submittedTime_s,
+          start: sample.structuredStartKineticEnergyProxy,
+          postAdvection: sample.structuredPostAdvectionKineticEnergyProxy,
+          preProjection: sample.structuredPreProjectionKineticEnergyProxy,
+          postProjection: sample.structuredPostProjectionKineticEnergyProxy,
+          wetStart: sample.structuredWetStartKineticEnergyProxy,
+          wetPostAdvection: sample.structuredWetPostAdvectionKineticEnergyProxy,
+          wetPreProjection: sample.structuredWetPreProjectionKineticEnergyProxy,
+          wetPostProjection: sample.structuredWetPostProjectionKineticEnergyProxy,
+          wetFaces: sample.structuredWetFaceCount,
+          transitionPath: sample.structuredTransitionPathCount,
+          staggeredPath: sample.structuredStaggeredPathCount }));
+      }
       const isRestrictedTall = sample.gridKind === "restricted-tall-cell";
       let tallCellActivity: ReturnType<typeof inspectColumnBases> | undefined, tallVolumeGaps: ReturnType<typeof inspectTallVolumeGaps> | undefined;
       let bases: Float32Array | undefined;
@@ -3336,6 +3348,41 @@ async function runGPU(
       }
       const exact = await readCubicVolumeField(device, solver);
       if (steps === oracleSteps) matched = exact;
+      {
+        // Dam-front footprint isotropy: radial wetted extents on the floor
+        // layer measured from the reservoir corner. A gravity current spreads
+        // as a circular arc (circularity ~1); an axis-biased velocity
+        // extension squares the front off toward the L1 diamond (~0.71).
+        const { nx: fx, ny: fy, nz: fz } = sample;
+        const wet = (i: number, k: number) => (exact.field[i + fx * (0 + fy * k)] ?? 0) > 0.5;
+        let rx = 0, rz = 0, rd = 0;
+        for (let i = 0; i < fx; i += 1) if (wet(i, 0)) rx = Math.max(rx, i);
+        for (let k = 0; k < fz; k += 1) if (wet(0, k)) rz = Math.max(rz, k);
+        for (let d = 0; d < Math.min(fx, fz); d += 1) if (wet(d, d)) rd = Math.max(rd, d);
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "front-footprint", time_s: solver.info.submittedTime_s,
+          rx, rz, rdiag: rd,
+          circularity: rx > 0 ? (rd * Math.SQRT2) / Math.max(rx, rz) : 0 }));
+      }
+      if (process.env.FLUID_HEIGHT_PROFILE === "1") {
+        // Wet-cell census per horizontal layer, plus how many of those wet
+        // cells touch a domain side wall: separates "fluid still airborne"
+        // from "fluid pinned to the ceiling/walls" while settling.
+        const { nx: fx, ny: fy, nz: fz } = sample;
+        const layers: number[] = [], wallLayers: number[] = [];
+        for (let j = 0; j < fy; j += 1) {
+          let count = 0, wall = 0;
+          for (let k = 0; k < fz; k += 1) for (let i = 0; i < fx; i += 1) {
+            if ((exact.field[i + fx * (j + fy * k)] ?? 0) <= 0.5) continue;
+            count += 1;
+            if (i === 0 || i === fx - 1 || k === 0 || k === fz - 1) wall += 1;
+          }
+          layers.push(count); wallLayers.push(wall);
+        }
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "height-profile", time_s: solver.info.submittedTime_s,
+          wetPerLayer: layers, wallWetPerLayer: wallLayers }));
+      }
       const stagedSolver = solver as GPUSolverInstance & {
         preProjectionVelocityTexture?: GPUTexture;
         velocityTexture?: GPUTexture;
@@ -3845,6 +3892,13 @@ async function runGPU(
   if (info.gpuValidationError && !validationErrors.includes(info.gpuValidationError)) {
     validationErrors.push(info.gpuValidationError);
   }
+  // The solver validates every advance's encoded stage order against the
+  // declared step program (lib/physics-step-program.ts). Any deviation is a
+  // broken driver contract and fails the gate, exactly as the UI raises its
+  // step-sequence-deviation stability flag.
+  if (info.stepSequenceDeviations?.length) {
+    throw new Error(`physics step program deviation: ${info.stepSequenceDeviations.join("; ")}`);
+  }
   matched ??= performanceProfileRequested
     ? { field: new Float32Array(info.nx * info.ny * info.nz),
       summary: summarizeScalarField(new Float32Array(info.nx * info.ny * info.nz), info.nx, info.ny, info.nz) }
@@ -3885,7 +3939,10 @@ async function runGPU(
   const hybridPresentationStats = sparseStatsRequested && method.id === "octree"
     ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies)
     : undefined;
-  const finalGlobalFineGeneration = globalFineGenerationTransitionRequested && method.id === "octree"
+  // Always captured for octree: the structured-validation gates require the
+  // final generation diagnostics, and a gate that reads `undefined` reports
+  // a wiring failure rather than evaluating the solver's actual state.
+  const finalGlobalFineGeneration = method.id === "octree"
     ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
   const finalGlobalFineRaster = globalFineGenerationTransitionRequested && method.id === "octree"
     ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true) : undefined;
@@ -4445,8 +4502,46 @@ function invariantFailures(scenarioId: SmokeScenarioId, results: GPUSmokeResult[
           checkpoint.compactMechanicalEnergy ? [checkpoint.compactMechanicalEnergy] : []);
         if ((octree.info.simulatedTime_s ?? 0) >= 1 && checkpointEvery_s > 0) {
           fail(mechanical.length > 0, "minimal dam emitted no mechanical-energy checkpoints");
-          fail(Math.max(0, ...mechanical.map((sample) => sample.mechanicalEnergyRetentionRatio)) <= 1.75,
-            "minimal dam mechanical energy exceeded the regression envelope");
+          // Physical benchmark: a closed, inviscid, source-free box cannot
+          // gain mechanical energy; every checkpoint must satisfy
+          // E(t) <= E(0) within a 5% discretization tolerance.
+          const worstRetention = Math.max(0,
+            ...mechanical.map((sample) => sample.mechanicalEnergyRetentionRatio));
+          fail(worstRetention <= 1.05,
+            `minimal dam gained mechanical energy: peak retention ${worstRetention} exceeds the physical bound 1 (+5% tolerance)`);
+          // Physical benchmark: the fastest liquid is bounded by the Ritter
+          // dam-break front celerity 2*sqrt(g*h0) for the authored column
+          // height h0, with 25% headroom for discrete impact jets.
+          const damScene = createSmokeScenario(scenarioId).scene;
+          const gravityMagnitude = Math.hypot(damScene.fluid.gravity_m_s2.x,
+            damScene.fluid.gravity_m_s2.y, damScene.fluid.gravity_m_s2.z);
+          const columnHeight_m = Math.max(0.92, damScene.container.fillFraction)
+            * damScene.container.height_m;
+          const frontCelerity = 2 * Math.sqrt(gravityMagnitude * columnHeight_m);
+          const peakSpeed = Math.max(0,
+            ...mechanical.map((sample) => sample.maximumLiquidComponentSpeed_m_s));
+          fail(peakSpeed <= 1.25 * frontCelerity,
+            `minimal dam liquid reached ${peakSpeed} m/s; the Ritter celerity bound for the ${columnHeight_m} m column is ${frontCelerity} m/s`);
+        }
+        // Physical benchmark: with unilateral (separating) ceiling contact,
+        // no liquid stays pinned to the lid once the impact transient has
+        // passed; only spray-level counts are allowed in the top two cell
+        // layers from t = 1.5 s on.
+        if ((octree.info.simulatedTime_s ?? 0) >= 2 - 1e-9 && checkpointEvery_s > 0) {
+          const [gx, gy, gz] = octree.grid;
+          for (const checkpoint of octree.checkpoints) {
+            if (checkpoint.time_s < 1.5 - 1e-9 || !checkpoint.field) continue;
+            let topWet = 0;
+            for (let k = 0; k < gz; k += 1) {
+              for (let j = Math.max(0, gy - 2); j < gy; j += 1) {
+                for (let i = 0; i < gx; i += 1) {
+                  if ((checkpoint.field[i + gx * (j + gy * k)] ?? 0) > 0.5) topWet += 1;
+                }
+              }
+            }
+            fail(topWet <= 6,
+              `minimal dam holds ${topWet} wet cells in its top two layers at t=${checkpoint.time_s.toFixed(2)} s; a separating ceiling leaves only spray`);
+          }
         }
       }
     }
