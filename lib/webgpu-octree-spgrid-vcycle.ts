@@ -1791,51 +1791,37 @@ fn section63ChannelForDirection(code:u32,direction:vec3i)->u32{
 `;
 })();
 
-export const octreeSPGridAccurateOperatorShader = /* wgsl */ `
-// The five sixteen-entry tables are the same memoized allocation authority the
-// V-cycle uniform already carries. They replace this shader's four remaining
-// per-address prefix loops; pageSlot alone used to run three of them - two of
-// them full depth - on every one of applyRow's eighteen channels.
+/**
+ * The Section 6.3 page-operator uniform. Declared once because the accurate A2
+ * operator and the Section 4.3 shell bind the SAME buffer
+ * (`WebGPUOctreeSPGridVCycle.section63Topology.layout`) and must agree on every
+ * memoized level table it carries.
+ */
+export const octreeSection63OperatorLayoutWGSL = /* wgsl */ `
 struct Layout{workset:vec4u,dimsCapacity:vec4u,hierarchy:vec4u,numerics:vec4f,
  levelCaps:array<vec4u,4>,levelBases:array<vec4u,4>,brickOffsets:array<vec4u,4>,
  pageOffsets:array<vec4u,4>,transferOffsets:array<vec4u,4>}
-struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
-@group(0) @binding(0) var<storage,read> inputVector:array<f32>;
-@group(0) @binding(1) var<storage,read_write> outputVector:array<f32>;
-@group(0) @binding(2) var<storage,read_write> solverControl:array<atomic<u32>>;
-@group(0) @binding(3) var<storage,read> accepted:array<u32>;
-@group(0) @binding(4) var<storage,read> worksets:array<u32>;
-@group(0) @binding(5) var<uniform> worksetLayout:vec4u;
-@group(0) @binding(6) var<storage,read> topology:array<u32>;
-@group(0) @binding(7) var<storage,read> state:array<u32>;
-@group(0) @binding(8) var<storage,read> geometry:array<vec4u>;
-@group(0) @binding(9) var<storage,read> metrics:array<Metric>;
-@group(0) @binding(10) var<storage,read> section63Coefficients:array<f32>;
-@group(0) @binding(11) var<uniform> p:Layout;
-const INVALID=0xffffffffu;const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
-const KEY=0u;const FLAGS=1u;const OWNER=24u;const STATE_CHANNELS=26u;
-const WORKSET_HEADER_WORDS=7u;const PAGE_RECORD_WORDS=28u;
-fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
-fn stopped()->bool{return arrayLength(&solverControl)<2u||atomicLoad(&solverControl[0])!=0u||atomicLoad(&solverControl[1])!=0u;}
-fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
- atomicOr(&solverControl[0],flag);
- if(arrayLength(&solverControl)>7u){let claim=atomicCompareExchangeWeak(&solverControl[6],0u,stage);
-  if(claim.exchanged){atomicStore(&solverControl[7],row);}}
-}}
-fn acceptedBank()->u32{return accepted[4]&1u;}
-fn worksetBase(cls:u32)->u32{return acceptedBank()*worksetLayout.y+cls*worksetLayout.x;}
-fn linearLane(wg:vec3u,groups:vec3u,lane:u32)->u32{return((wg.z*groups.y+wg.y)*groups.x+wg.x)*64u+lane;}
-fn workRow(item:u32,cls:u32)->u32{let base=worksetBase(cls);if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)
- ||worksets[base]!=accepted[3]||worksets[base+1u]>worksets[base+2u]||item>=worksets[base+1u]
- ||base+WORKSET_HEADER_WORDS+item>=arrayLength(&worksets)){return INVALID;}return worksets[base+WORKSET_HEADER_WORDS+item];}
+`;
+
+/**
+ * Section 6.3 row addressing over the accepted SPGrid hierarchy.
+ *
+ * Shared verbatim by the accurate A2 operator and by the Section 4.3 shell,
+ * which used to carry its own prefix-loop transcription of the same arithmetic.
+ * The includer supplies `p` (the layout uniform above), `topology`, `accepted`,
+ * `acceptedBank()`, `section63Coefficients`, `reportRowAt()` and the
+ * `INVALID`/`FLAGS`/`OWNER`/`PAGE_RECORD_WORDS` constants.
+ */
+export const octreeSection63RowAddressWGSL = /* wgsl */ `
 fn levels()->u32{return p.hierarchy.x;}fn maxStride()->u32{return p.hierarchy.y;}fn capacity()->u32{return p.dimsCapacity.w;}
 // The level stride is 2^l by construction, so the ceiling division is a shift.
 // Apple GPUs emulate integer division; this is the identical u32 result.
 fn dims(l:u32)->vec3u{let s=1u<<l;return(p.dimsCapacity.xyz+vec3u(s-1u))>>vec3u(l);}
 // Every level index this shader can form is in range. levels() is at most the
 // twelve planOctreeSPGridVCycle admits, and applyRow's countTrailingZeros(h.y)
-// reads a LeafHeader.size that only decodePagedOwner writes, from a three-bit
-// exponent it rejects above 5 - so l is at most 5 whenever h.y is non-zero, and
+// reads the leaf-header size word that only decodePagedOwner writes, from a
+// three-bit exponent it rejects above 5 - so l is at most 5 whenever h.y is
+// non-zero, and
 // h.y==0 already makes dims(l) and 1u<<l shifts of 32, which WGSL leaves
 // indeterminate, so the loops defined nothing there to preserve.
 fn levelTable(l:u32)->vec2u{let clamped=min(l,15u);return vec2u(clamped>>2u,clamped&3u);}
@@ -1887,16 +1873,16 @@ fn pageFor(l:u32,q:vec3u)->u32{let pages=logicalPageDims(l);let v=q/vec3u(8u,8u,
 // scattered loads that no ordinal memo can remove.
 fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32)->u32{
  let shape=vec3u(8u,8u,4u);let delta=vec3i(q/shape)-vec3i(origin/shape);
- if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportAt(2u,21u,row);return INVALID;}
+ if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportRowAt(2u,21u,row);return INVALID;}
  let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));let physical=pageNeighbour(l,page,ordinal);
  if(physical==INVALID){return INVALID;}let physicalOrigin=decode(topology[pageRecord(l,physical)],l);
- if(any(physicalOrigin/shape!=q/shape)){reportAt(2u,22u,row);return INVALID;}
+ if(any(physicalOrigin/shape!=q/shape)){reportRowAt(2u,22u,row);return INVALID;}
  let record=brickRecord(l,q);let bit=localBit(q);let low=topology[record+1u];let high=topology[record+2u];
  if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return INVALID;}
  let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
  if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
  let slot=topology[rankedSlotsBase()+levelBase(l)+topology[record+3u]+rank];
- if(slot>=levelCapacity(l)){reportAt(2u,23u,row);return INVALID;}return slot;}
+ if(slot>=levelCapacity(l)){reportRowAt(2u,23u,row);return INVALID;}return slot;}
 fn originOf(h:vec4u)->vec3u{return vec3u(h.x%p.dimsCapacity.x,(h.x/p.dimsCapacity.x)%p.dimsCapacity.y,h.x/(p.dimsCapacity.x*p.dimsCapacity.y));}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(
  vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),
@@ -1906,7 +1892,23 @@ fn worldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1,(code
  if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}
  if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;}
 fn coefficientBase(row:u32)->u32{return acceptedBank()*p.hierarchy.w+row*19u;}
-${octreeSection63DirectionChannelWGSL}
+`;
+
+/**
+ * The Section 6.3 operator's per-row image, `A2 x` restricted to one row.
+ *
+ * Shared so the Section 4.3 shell can evaluate a band row's image INSIDE its
+ * damped-Jacobi sweep instead of staging it through a second indirect dispatch
+ * and a device-memory round trip (POWER_LIQUIDS_ULTIMATE_M1MAX: the shell's
+ * apply+smooth pair was 22 label brackets and 330 dispatches per advance). A
+ * second transcription of this arithmetic would be a correctness landmine, so
+ * there is exactly one.
+ *
+ * The includer supplies `operandAt(row)` - the source vector the image is taken
+ * of - and `operandCount()`, its row count. Everything else is the addressing
+ * block above.
+ */
+export const octreeSection63RowImageWGSL = /* wgsl */ `
 // One indexed load replaces the eighteen-step scan that re-evaluated
 // worldDirection per candidate. The table is the memoized scan result.
 fn coefficientForDirection(row:u32,metric:Metric,direction:vec3i)->f32{
@@ -1923,35 +1925,90 @@ fn finerAdjoint(row:u32,h:vec4u,q:vec3u,l:u32,x:f32)->f32{if(l==0u){return 0.0;}
  // set identical; both are pure and total, so no report or float moves.
  let fineDims=vec3i(dims(fine));let fineBase=levelBase(fine);
  for(var child=0u;child<8u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
-  let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}if(ghostPage>=levelCapacity(fine)){reportAt(2u,31u,row);continue;}
+  let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}if(ghostPage>=levelCapacity(fine)){reportRowAt(2u,31u,row);continue;}
   let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);
   if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}
   for(var candidateDirection=0u;candidateDirection<18u;candidateDirection+=1u){let delta=canonicalDirection(candidateDirection);let activeQ=vec3i(ghostQ)-delta;
    if(any(activeQ<vec3i(0))||any(activeQ>=fineDims)){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
    if(activeSlot==INVALID||(state[atBase(FLAGS,fineBase,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[atBase(OWNER,fineBase,activeSlot)];
-   if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);continue;}let other=encoded-1u;let otherMetric=metrics[other];
+   if(encoded==0u||encoded>capacity()){reportRowAt(2u,24u,row);continue;}let other=encoded-1u;let otherMetric=metrics[other];
    let c=coefficientForDirection(other,otherMetric,delta);
-   if(c>0.0){result+=c*(x-inputVector[other]);}
+   if(c>0.0){result+=c*(x-operandAt(other));}
   }
  }return result;}
-fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
- let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
+// Exactly the body applyRow used to inline, returning the image instead of
+// storing it. \`valid\` is false on every path that reported and stored nothing,
+// so a caller that keeps the value in a register fails closed identically.
+struct RowImage{value:f32,valid:bool}
+fn applyRowImage(row:u32)->RowImage{if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)||row>=operandCount()){reportRowAt(2u,25u,row);return RowImage(0.0,false);}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportRowAt(1u,26u,row);return RowImage(0.0,false);}
  let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
- if(page==INVALID||page>=levelCapacity(l)){reportAt(2u,31u,row);return;}
+ if(page==INVALID||page>=levelCapacity(l)){reportRowAt(2u,31u,row);return RowImage(0.0,false);}
  // Every channel resolved the same three level-invariant quantities. dims(l)
  // and the transform code are cheap; levelBase(l) is not, and it was evaluated
  // twice per surviving channel. All three are pure functions of l and m, so
  // lifting them changes no address, no report, and no float.
  let levelDims=vec3i(dims(l));let transform=m.transformAndFlags&63u;let slotBase=levelBase(l);
- let x=inputVector[row];var sum=0.0;
+ let x=operandAt(row);var sum=0.0;
  for(var channel=0u;channel<18u;channel+=1u){sum+=section63Coefficients[base+1u+channel];}
  var value=max(0.0,section63Coefficients[base]-sum)*x;
  for(var channel=0u;channel<18u;channel+=1u){let c=section63Coefficients[base+1u+channel];if(c==0.0){continue;}
-  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),transform);if(any(targetQ<vec3i(0))||any(targetQ>=levelDims)){reportAt(2u,27u,row);continue;}
-  let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);continue;}let flags=state[atBase(FLAGS,slotBase,slot)];
-  if((flags&MG_ONLY)!=0u){continue;}let encoded=state[atBase(OWNER,slotBase,slot)];if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);continue;}
-  value+=c*(x-inputVector[encoded-1u]);}
- value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}}
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),transform);if(any(targetQ<vec3i(0))||any(targetQ>=levelDims)){reportRowAt(2u,27u,row);continue;}
+  let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportRowAt(2u,28u,row);continue;}let flags=state[atBase(FLAGS,slotBase,slot)];
+  if((flags&MG_ONLY)!=0u){continue;}let encoded=state[atBase(OWNER,slotBase,slot)];if(encoded==0u||encoded>capacity()){reportRowAt(2u,29u,row);continue;}
+  value+=c*(x-operandAt(encoded-1u));}
+ value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportRowAt(4u,30u,row);return RowImage(0.0,false);}
+ return RowImage(value,true);}
+`;
+
+export const octreeSPGridAccurateOperatorShader = /* wgsl */ `
+// The five sixteen-entry tables are the same memoized allocation authority the
+// V-cycle uniform already carries. They replace this shader's four remaining
+// per-address prefix loops; pageSlot alone used to run three of them - two of
+// them full depth - on every one of applyRow's eighteen channels.
+${octreeSection63OperatorLayoutWGSL}
+struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
+@group(0) @binding(0) var<storage,read> inputVector:array<f32>;
+@group(0) @binding(1) var<storage,read_write> outputVector:array<f32>;
+@group(0) @binding(2) var<storage,read_write> solverControl:array<atomic<u32>>;
+@group(0) @binding(3) var<storage,read> accepted:array<u32>;
+@group(0) @binding(4) var<storage,read> worksets:array<u32>;
+@group(0) @binding(5) var<uniform> worksetLayout:vec4u;
+@group(0) @binding(6) var<storage,read> topology:array<u32>;
+@group(0) @binding(7) var<storage,read> state:array<u32>;
+@group(0) @binding(8) var<storage,read> geometry:array<vec4u>;
+@group(0) @binding(9) var<storage,read> metrics:array<Metric>;
+@group(0) @binding(10) var<storage,read> section63Coefficients:array<f32>;
+@group(0) @binding(11) var<uniform> p:Layout;
+const INVALID=0xffffffffu;const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
+const KEY=0u;const FLAGS=1u;const OWNER=24u;const STATE_CHANNELS=26u;
+const WORKSET_HEADER_WORDS=7u;const PAGE_RECORD_WORDS=28u;
+fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
+fn stopped()->bool{return arrayLength(&solverControl)<2u||atomicLoad(&solverControl[0])!=0u||atomicLoad(&solverControl[1])!=0u;}
+// Named apart from the shell's own reportAt so the shared row-image block below
+// keeps THIS claim policy wherever it is included. The two differ only in how a
+// spuriously-failed weak compare-exchange is retried, which decides nothing but
+// the diagnostic (stage, row) pair on an already-failed solve.
+fn reportRowAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
+ atomicOr(&solverControl[0],flag);
+ if(arrayLength(&solverControl)>7u){let claim=atomicCompareExchangeWeak(&solverControl[6],0u,stage);
+  if(claim.exchanged){atomicStore(&solverControl[7],row);}}
+}}
+fn acceptedBank()->u32{return accepted[4]&1u;}
+// The operand of the row image. The accurate operator applies A2 to its own
+// dedicated input vector; the Section 4.3 shell applies it to one half of its
+// ping-pong arena. See octreeSection63RowImageWGSL.
+fn operandAt(row:u32)->f32{return inputVector[row];}
+fn operandCount()->u32{return arrayLength(&inputVector);}
+fn worksetBase(cls:u32)->u32{return acceptedBank()*worksetLayout.y+cls*worksetLayout.x;}
+fn linearLane(wg:vec3u,groups:vec3u,lane:u32)->u32{return((wg.z*groups.y+wg.y)*groups.x+wg.x)*64u+lane;}
+fn workRow(item:u32,cls:u32)->u32{let base=worksetBase(cls);if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)
+ ||worksets[base]!=accepted[3]||worksets[base+1u]>worksets[base+2u]||item>=worksets[base+1u]
+ ||base+WORKSET_HEADER_WORDS+item>=arrayLength(&worksets)){return INVALID;}return worksets[base+WORKSET_HEADER_WORDS+item];}
+${octreeSection63RowAddressWGSL}
+${octreeSection63DirectionChannelWGSL}
+${octreeSection63RowImageWGSL}
+fn applyRow(row:u32){let image=applyRowImage(row);if(image.valid){outputVector[row]=image.value;}}
 @compute @workgroup_size(64) fn applyRegularInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),0u);if(!stopped()&&row!=INVALID){applyRow(row);}}
 @compute @workgroup_size(64) fn applyTransitionInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),1u);if(!stopped()&&row!=INVALID){applyRow(row);}}
 @compute @workgroup_size(64) fn applyPhysicalBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),2u);if(!stopped()&&row!=INVALID){applyRow(row);}}

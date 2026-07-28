@@ -103,18 +103,11 @@ test("Section 4.3 correction encodes the paper's parallel schedule", () => {
       encodedMergedBandDispatchCount: 1,
       encode() { outerOperatorApplies += 1; },
       encodeWorksets() { assert.fail("the compact shell must not schedule four-class band work"); },
-      encodeMergedBandWorkset(
-        _broker: PassBroker, input: GPUBuffer, output: GPUBuffer,
-        _control: GPUBuffer, _worksets: GPUBuffer, mergedDispatch: GPUBuffer,
-        _layout: GPUBuffer, mergedDispatchOffsetBytes: number,
-      ) {
+      // POWER_LIQUIDS_ULTIMATE_M1MAX: the shell's band sweeps resolve the row
+      // image inline, from the operator's own shared applyRowImage, so the
+      // separate merged-band apply is no longer encoded at all.
+      encodeMergedBandWorkset(_broker: PassBroker, input: GPUBuffer) {
         bandApplySources.push((input as MockBuffer).label);
-        assert.equal((output as MockBuffer).label,
-          "Section 4.3 hybrid resolved L2 image");
-        assert.equal((mergedDispatch as MockBuffer).label,
-          "Section 4.3 convergence-gated compact class dispatches");
-        assert.equal(mergedDispatchOffsetBytes, 4 * 12,
-          "the shell smooths over the fifth union class record");
       },
     },
     section63: {
@@ -157,16 +150,12 @@ test("Section 4.3 correction encodes the paper's parallel schedule", () => {
     "the GPU correction parameters must receive the exact k=8 policy");
 
   // The zero-vector first sweep needs no operator image; every later sweep in
-  // both halves consumes one, so the shell performs exactly 2k-1 band applies.
-  assert.equal(bandApplySources.length, 2 * sweeps - 1);
-  assert.equal(hybrid.workAccountingPlan.mergedBandApplies, 2 * sweeps - 1);
-  assert.deepEqual(bandApplySources, [
-    ...Array.from({ length: sweeps - 1 }, (_unused, index) =>
-      (((index + 1) & 1) === 1 ? "B" : "A")),
-    ...Array.from({ length: sweeps }, (_unused, index) =>
-      ((index & 1) === 0 ? "B" : "A")),
-  ].map((state) => `Section 4.3 hybrid L2 iterate ${state}`),
-  "each apply must target the state its following smooth reads");
+  // both halves computes its own, so the shell performs exactly 2k-1 fused
+  // sweeps and encodes no separate band apply at all
+  // (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md).
+  assert.deepEqual(bandApplySources, [],
+    "a fused sweep must not also encode the merged-band apply it replaced");
+  assert.equal(hybrid.workAccountingPlan.fusedBandSweeps, 2 * sweeps - 1);
   assert.equal(innerCorrections, 1,
     "the page-parallel first-order V-cycle runs once between the matched halves");
   assert.equal(outerOperatorApplies, 1,
@@ -195,11 +184,12 @@ test("Section 4.3 correction encodes the paper's parallel schedule", () => {
     Array.from({ length: 2 * sweeps - 1 },
       () => ({ label: bandRecord, offset: 4 * 12 })),
     "every shell smooth consumes the convergence-gated union class record");
-  // Gate + four row stages + 2k-1 smooths + 2k-1 merged applies + one exact
-  // apply + the inner V-cycle. A converged solve encodes all of them and
-  // dispatches zero workgroups.
+  // Gate + four row stages + 2k-1 fused smooths + one exact apply + the inner
+  // V-cycle. A converged solve encodes all of them and dispatches zero
+  // workgroups. The 2k-1 merged applies that used to sit beside the smooths
+  // are gone (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md).
   assert.equal(hybrid.encodedCorrectionDispatchCount,
-    5 + 2 * (2 * sweeps - 1) + 1 + 1);
+    5 + (2 * sweeps - 1) + 1 + 1);
   assert.equal(hybrid.encodedCorrectionDispatchCount,
     directDispatches + indirect.length + bandApplySources.length
       + outerOperatorApplies + innerCorrections);
