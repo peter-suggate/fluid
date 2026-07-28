@@ -352,17 +352,9 @@ test("smoother halo staging consumes physical page adjacency without directory l
 });
 
 test("accurate A2 consumes the 19-channel page operator with one destination-owned merged dispatch", () => {
-  // POWER_LIQUIDS_ULTIMATE_M1MAX: applyRow was split so the Section 4.3 shell
-  // can evaluate the same image inside its band sweep. Its every early return
-  // now yields an invalid RowImage in place of storing nothing, and its reports
-  // go through reportRowAt so the shell keeps this module's claim policy. The
-  // fail-closed guard and its stage code are unchanged.
   assert.match(octreeSPGridAccurateOperatorShader,
-    /page=pageFor\(l,q\);\s*if\(page==INVALID\|\|page>=levelCapacity\(l\)\)\{reportRowAt\(2u,31u,row\);return RowImage\(0\.0,false\);\}/,
+    /page=pageFor\(l,q\);\s*if\(page==INVALID\|\|page>=levelCapacity\(l\)\)\{reportAt\(2u,31u,row\);return;\}/,
     "a missing native physical page must fail closed before any page-record access");
-  assert.match(octreeSPGridAccurateOperatorShader,
-    /fn applyRow\(row:u32\)\{let image=applyRowImage\(row\);if\(image\.valid\)\{outputVector\[row\]=image\.value;\}\}/,
-    "the operator must store exactly the shared row image, on exactly its valid paths");
   for (const entry of ["applyRegularInterior", "applyTransitionInterior",
     "applyPhysicalBoundary", "applyTransitionBoundary"]) {
     assert.match(octreeSPGridAccurateOperatorShader, new RegExp(`fn ${entry}\\b`));

@@ -766,12 +766,8 @@ test("rediscretized A2 owns coarse-fine contacts through spatial pages", () => {
   assert.match(spgridVCycleSource,
     /fn finerAdjoint[\s\S]*pageSlot\(fine,ghostPage,ghostQ,vec3u\(activeQ\),row\)[\s\S]*coefficientForDirection\(other,otherMetric,delta\)/,
     "destination-owned E^T must gather coarse-fine contacts through physical page adjacency");
-  // POWER_LIQUIDS_ULTIMATE_M1MAX: the gather moved into applyRowImage, which
-  // the Section 4.3 shell shares verbatim, and reads its operand through
-  // operandAt so the shell can point it at one half of its ping-pong arena.
-  // Both are still one destination row gathering the published coefficients.
   assert.match(spgridVCycleSource,
-    /fn applyRowImage[\s\S]*section63Coefficients\[base\+1u\+channel\][\s\S]*value\+=c\*\(x-operandAt\(encoded-1u\)\)/,
+    /fn applyRow[\s\S]*section63Coefficients\[base\+1u\+channel\][\s\S]*value\+=c\*\(x-inputVector\[encoded-1u\]\)/,
     "each destination row must own its dynamically published Section 6.3 coefficient gather");
   assert.match(spgridVCycleSource,
     /applyRegularInterior[\s\S]*applyTransitionInterior[\s\S]*applyPhysicalBoundary[\s\S]*applyTransitionBoundary/,

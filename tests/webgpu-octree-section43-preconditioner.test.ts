@@ -95,11 +95,11 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
   };
   hybrid.encodeCorrection(broker, correction);
 
-  // POWER_LIQUIDS_ULTIMATE_M1MAX: every band sweep resolves its own L2 image
-  // from the shared applyRowImage, so the merged compact-band apply that used
-  // to precede each smooth is gone. Sweep parity is still the paper's
-  // alternating schedule.
-  const bandSweep = (fromB: boolean) => [fromB ? "smoothBtoA" : "smoothAtoB"];
+  // Every band sweep consumes a precomputed L2 image of the state it reads, so
+  // the merged compact-band apply must immediately precede each smooth and
+  // target the same source. Sweep parity is the paper's alternating schedule.
+  const bandSweep = (fromB: boolean) =>
+    ["L2-band-merged", fromB ? "smoothBtoA" : "smoothAtoB"];
   const preHalf = Array.from({ length: 7 },
     (_unused, index) => bandSweep(((index + 1) & 1) === 1)).flat();
   const postHalf = Array.from({ length: 8 },
@@ -131,16 +131,13 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
   assert.equal(hybrid.encodedSetupDispatchCount, 10);
   assert.equal(hybrid.encodedPassTransitionCount, 4,
     "setup keeps two publication boundaries; correction adds its own gate and the L2 apply gate");
-  // Gate, four row stages, 15 fused band sweeps, one exact four-class L2 apply,
-  // and the inner page-parallel V-cycle. The 15 merged-band applies are gone:
-  // each sweep resolves its own row image (POWER_LIQUIDS_ULTIMATE_M1MAX).
-  assert.equal(hybrid.encodedCorrectionDispatchCount, 5 + 15 + 4 + 3);
-  assert.equal(hybrid.workAccountingPlan.fusedBandSweeps, 15);
-  assert.equal(hybrid.workAccountingPlan.avoidedBandDispatches, 60);
+  // Gate, four row stages, 15 band smooths, 15 merged band applies, one exact
+  // four-class L2 apply, and the inner page-parallel V-cycle.
+  assert.equal(hybrid.encodedCorrectionDispatchCount, 5 + 2 * 15 + 4 + 3);
+  assert.equal(hybrid.workAccountingPlan.mergedBandApplies, 15);
+  assert.equal(hybrid.workAccountingPlan.avoidedBandDispatches, 45);
   assert.equal(order.includes("L2-band-apply"), false,
     "the compact shell no longer invokes the four-class workset path");
-  assert.equal(order.includes("L2-band-merged"), false,
-    "a fused sweep must not also encode the separate merged-band apply");
   const cachedBindGroups = bindGroupCount;
   hybrid.encodeCorrection(broker, correction);
   assert.equal(bindGroupCount, cachedBindGroups,
@@ -175,25 +172,12 @@ test("Section 4.3 hybrid shader keeps a race-free zero sweep and shared shell op
     /hybridValue|applyHybridA/,
     "the first sweep must not read zeroes written by another workgroup",
   );
-  // POWER_LIQUIDS_ULTIMATE_M1MAX: the sweep's residual is formed against the
-  // image it just computed itself, not one staged through device memory by a
-  // second dispatch. The row-wide inner residual still reads the staged image,
-  // because the exact four-class L2 apply still produces it.
   assert.match(octreeSection43HybridPreconditionerShader,
-    /fn smoothValue\(row: u32, image: f32\)[\s\S]*rhs\[row\] - image/);
-  assert.doesNotMatch(
-    octreeSection43HybridPreconditionerShader.match(
-      /fn smoothValue[\s\S]*?\n\}/,
-    )?.[0] ?? "",
-    /operatorImage/,
-    "a fused sweep must not reach the staged operator image at all");
-  assert.match(octreeSection43HybridPreconditionerShader,
-    /fn smoothAtoB[\s\S]*let image = applyRowImage\(row\);/,
-    "the shell must consume the operator's own shared row image, not a copy of it");
+    /fn smoothValue[\s\S]*rhs\[row\] - operatorImage\[row\]/);
   assert.match(octreeSection43HybridPreconditionerShader,
     /fn formInnerResidual[\s\S]*rhs\[row\] - operatorImage\[row\]/);
   assert.match(octreeSection43HybridPreconditionerShader,
-    /fn addInnerCorrection[\s\S]*hybrid\[hybridRow\(row, false\)\] = value; hybrid\[hybridRow\(row, true\)\] = value;/,
+    /fn addInnerCorrection[\s\S]*hybridA\[row\] = value; hybridB\[row\] = value;/,
     "the domain-wide M1 correction must initialize both post-shell ping-pong states");
   assert.match(octreeSection43HybridPreconditionerShader,
     /fn compactBandIntersections[\s\S]*atomicAdd\(&bandWorksets\[classBase \+ 1u\]/,
@@ -258,10 +242,7 @@ test("Dawn executes compact Section 4.3 band publication and shell bindings", {
     secondOrderOperator: operator,
     section63: { coefficients: make(152, new Float32Array([1])), control: accepted,
       topology: make(4), state: make(4), geometry: make(16), metrics: make(16),
-      // The shell now declares the accurate operator's whole layout uniform,
-      // because the shared Section 6.3 addressing reads its memoized level
-      // tables: 64 header bytes plus five sixteen-slot u32 tables.
-      layout: make(64 + 5 * 16 * 4, new Uint32Array(16 + 5 * 16),
+      layout: make(64, new Uint32Array(16),
         GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST) },
   }, { rowCapacity: 1,
   });

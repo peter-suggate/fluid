@@ -20,12 +20,7 @@ import {
 } from "./webgpu-octree-section43-contract";
 import type { OctreePipelinedWorksetLinearOperator } from "./webgpu-octree-pipelined-mgpcg";
 import { PassBroker } from "./webgpu-pass-broker";
-import {
-  octreeSection63DirectionChannelWGSL,
-  octreeSection63OperatorLayoutWGSL,
-  octreeSection63RowAddressWGSL,
-  octreeSection63RowImageWGSL,
-} from "./webgpu-octree-spgrid-vcycle";
+import { octreeSection63DirectionChannelWGSL } from "./webgpu-octree-spgrid-vcycle";
 
 type HybridStage =
   | "resetBandWorksets"
@@ -50,16 +45,12 @@ const HYBRID_BINDINGS: Readonly<Record<HybridStage, readonly number[]>> = Object
   compactBandIntersections: [0, 1, 11, 12, 13, 15, 17, 23],
   finalizeBandWorksets: [0, 12, 15, 16, 17],
   prepareCorrectionDispatches: [0, 12, 16, 17, 19, 20],
-  smoothZeroToB: [0, 1, 4, 6, 11, 12, 13, 17],
-  // The fused sweep resolves its own Section 6.3 row image, so it reaches the
-  // operator's topology/state/geometry/metric ABI and no longer reads the
-  // staged image at binding 14. Ten storage bindings exactly; see the portable
-  // ceiling asserted by tests/webgpu-octree-section43-persistent-correction.
-  smoothBtoA: [0, 1, 2, 4, 6, 12, 13, 15, 17, 21, 22, 23],
-  smoothAtoB: [0, 1, 2, 4, 6, 12, 13, 15, 17, 21, 22, 23],
+  smoothZeroToB: [0, 1, 4, 6, 7, 11, 12, 13, 17],
+  smoothBtoA: [0, 1, 4, 6, 7, 11, 12, 13, 14, 15, 17],
+  smoothAtoB: [0, 1, 4, 6, 7, 11, 12, 13, 14, 15, 17],
   formInnerResidual: [0, 4, 8, 12, 14, 17],
-  addInnerCorrection: [0, 6, 9, 12, 17],
-  publishCorrection: [0, 5, 6, 12, 17],
+  addInnerCorrection: [0, 6, 7, 9, 12, 17],
+  publishCorrection: [0, 5, 7, 12, 17],
 });
 
 /** Byte offset of the fifth (union) compact class record. */
@@ -107,14 +98,11 @@ implements OctreeFirstOrderSPDVCycle {
   readonly allocatedBytes: number;
   readonly boundarySmoothingIterations: number;
   readonly workAccountingPlan: Readonly<{ boundarySweeps: number; encodedSetupDispatches: number;
-    encodedCorrectionDispatches: number; fusedBandSweeps: number; avoidedBandDispatches: number }>;
+    encodedCorrectionDispatches: number; mergedBandApplies: number; avoidedBandDispatches: number }>;
 
   private readonly params: GPUBuffer;
-  /** Both §4.3 ping-pong states, A at row 0 and B at row `rowCapacity`. One
-   * buffer because the fused band sweep reads one half and writes the other,
-   * and because two bindings do not fit its ten-storage operator ABI. */
-  private readonly hybrid: GPUBuffer;
-  private readonly vectorBytes: number;
+  private readonly hybridA: GPUBuffer;
+  private readonly hybridB: GPUBuffer;
   private readonly innerRhs: GPUBuffer;
   private readonly innerCorrection: GPUBuffer;
   private readonly bandA: GPUBuffer;
@@ -176,7 +164,6 @@ implements OctreeFirstOrderSPDVCycle {
     this.boundarySmoothingIterations =
       normalizeOctreeSection43BoundarySmoothing(options.boundarySmoothingIterations);
     const vectorBytes = options.rowCapacity * 4;
-    this.vectorBytes = vectorBytes;
     const worksetStrideWords = options.rowCapacity + 7;
     const worksetBankStrideWords = 5 * worksetStrideWords;
     if (source.section63.coefficients.size < 2 * options.rowCapacity * 19 * 4
@@ -193,11 +180,8 @@ implements OctreeFirstOrderSPDVCycle {
       size: vectorBytes,
       usage: storage | GPUBufferUsage.COPY_SRC,
     });
-    this.hybrid = device.createBuffer({
-      label: "Section 4.3 hybrid L2 iterates A|B",
-      size: 2 * vectorBytes,
-      usage: storage | GPUBufferUsage.COPY_SRC,
-    });
+    this.hybridA = vector("Section 4.3 hybrid L2 iterate A");
+    this.hybridB = vector("Section 4.3 hybrid L2 iterate B");
     this.innerRhs = vector("Section 4.3 hybrid L1 residual");
     this.innerCorrection = vector("Section 4.3 hybrid L1 correction");
     this.bandA = vector("Section 4.3 hybrid boundary band A");
@@ -269,31 +253,28 @@ implements OctreeFirstOrderSPDVCycle {
     ) as Record<HybridStage, GPUComputePipeline>);
     this.encodedSetupDispatchCount = (inner.encodedSetupDispatchCount ?? 0)
       + 5 + OCTREE_SECTION43_BOUNDARY_BAND_LAYERS;
-    const fusedBandSweeps = 2 * this.boundarySmoothingIterations - 1;
+    const mergedBandApplies = 2 * this.boundarySmoothingIterations - 1;
     // One convergence-gate publisher, four row-wide stages (zero sweep, inner
-    // residual, M1 seeding, publication), ONE compact band sweep per matched
-    // sweep after the zero sweep — the merged-band L2 apply that used to
-    // precede each of them is now resolved inside it, see encodeBandSweep —
-    // one exact row-wide L2 apply, and the page-parallel first-order V-cycle.
-    this.encodedCorrectionDispatchCount = 5 + fusedBandSweeps
+    // residual, M1 seeding, publication), one compact band smooth and one
+    // merged band L2 apply per matched sweep after the zero sweep, one exact
+    // row-wide L2 apply, and the page-parallel first-order V-cycle.
+    this.encodedCorrectionDispatchCount = 5 + 2 * mergedBandApplies
       + source.secondOrderOperator.encodedDispatchCount
       + inner.encodedCorrectionDispatchCount;
     // Setup keeps its accepted-row and compact-band boundaries. Correction
     // adds its own gate boundary plus the exact L2 apply's gate boundary; the
-    // inner V-cycle reports its own. The fused sweep fences nothing, exactly as
-    // the apply/smooth pair it replaces did not.
+    // inner V-cycle reports its own.
     this.encodedPassTransitionCount = (inner.encodedPassTransitionCount ?? 0) + 4;
-    this.allocatedBytes = this.params.size + this.hybrid.size + 5 * vectorBytes
+    this.allocatedBytes = this.params.size + 7 * vectorBytes
       + this.bandWorksets.size + this.bandDispatch.size
       + this.gatedRowDispatch.size + this.gatedBandDispatch.size;
     this.workAccountingPlan = Object.freeze({ boundarySweeps: this.boundarySmoothingIterations,
       encodedSetupDispatches: this.encodedSetupDispatchCount,
       encodedCorrectionDispatches: this.encodedCorrectionDispatchCount,
-      fusedBandSweeps,
-      // Each fused sweep avoids a whole encoded band apply: its gate is the
-      // sweep's own, and its row image never reaches device memory.
-      avoidedBandDispatches: fusedBandSweeps
-        * source.secondOrderOperator.encodedDispatchCount });
+      mergedBandApplies,
+      avoidedBandDispatches: mergedBandApplies
+        * (source.secondOrderOperator.encodedDispatchCount
+          - source.secondOrderOperator.encodedMergedBandDispatchCount) });
   }
 
   encodeSetup(
@@ -329,7 +310,7 @@ implements OctreeFirstOrderSPDVCycle {
   ): void {
     this.assertLive();
     this.assertRowCount(input.rowCount);
-    if (input.rhs.size < this.vectorBytes || input.correction.size < this.vectorBytes) {
+    if (input.rhs.size < this.hybridA.size || input.correction.size < this.hybridA.size) {
       throw new RangeError("Section 4.3 hybrid correction vectors are too small");
     }
     const resources = this.resources(
@@ -348,14 +329,13 @@ implements OctreeFirstOrderSPDVCycle {
     pass = broker.compute({ label: "Section 4.3 hybrid pre-smoothing shell" });
     this.runRows(pass, "smoothZeroToB", resources);
     for (let iteration = 1; iteration < this.boundarySmoothingIterations; iteration += 1) {
-      this.encodeBandSweep(broker, resources, (iteration & 1) === 1);
+      this.encodeBandSweep(broker, resources, (iteration & 1) === 1, input.solverControl);
     }
 
     // §4.3(2): r1 = q - L2 p1 over every accepted row, then the page-parallel
-    // symmetric first-order V-cycle. p1 now lives in the arena's A half, which
-    // is its row 0, so the operator binds the arena and reads exactly hybridA.
+    // symmetric first-order V-cycle. p1 now lives in hybridA.
     this.source.secondOrderOperator.encode(
-      broker, this.hybrid, this.operatorImage, input.solverControl,
+      broker, this.hybridA, this.operatorImage, input.solverControl,
     );
     pass = broker.compute({ label: "Section 4.3 hybrid inner residual" });
     this.runRows(pass, "formInnerResidual", resources);
@@ -371,28 +351,32 @@ implements OctreeFirstOrderSPDVCycle {
     pass = broker.compute({ label: "Section 4.3 hybrid post-smoothing shell" });
     this.runRows(pass, "addInnerCorrection", resources);
     for (let iteration = 0; iteration < this.boundarySmoothingIterations; iteration += 1) {
-      this.encodeBandSweep(broker, resources, (iteration & 1) === 0);
+      this.encodeBandSweep(broker, resources, (iteration & 1) === 0, input.solverControl);
     }
     this.runRows(broker.compute(), "publishCorrection", resources);
   }
 
   /**
-   * One damped-Jacobi shell sweep, over the convergence-gated union class
-   * record. Each row resolves its own Section 6.3 operator image inline, from
-   * the shared `applyRowImage` the merged-band A2 apply calls; damped Jacobi
-   * reads only the source half of the arena and writes only the destination
-   * half, so a row taking `A x` of the same source vector it smooths from is
-   * not a hazard. This deletes the second indirect dispatch and the device
-   * round trip of the image that used to separate the two — see
-   * `docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md`, "SPGrid Section 6.3 ·
-   * destination-owned merged band", 2.719 ms/advance over 22 brackets and 330
-   * dispatches on the mini lane.
+   * One damped-Jacobi shell sweep. The band smoother consumes a precomputed
+   * L2 image of the state it reads, so the merged compact-band apply must
+   * immediately precede it and target the same source state.
    */
   private encodeBandSweep(
     broker: PassBroker,
     resources: readonly (GPUBuffer | undefined)[],
     fromB: boolean,
+    solverControl: GPUBuffer,
   ): void {
+    this.source.secondOrderOperator.encodeMergedBandWorkset(
+      broker,
+      fromB ? this.hybridB : this.hybridA,
+      this.operatorImage,
+      solverControl,
+      this.bandWorksets,
+      this.gatedBandDispatch,
+      this.bandOperatorLayout,
+      BAND_UNION_DISPATCH_OFFSET_BYTES,
+    );
     this.runBand(broker.compute(), fromB ? "smoothBtoA" : "smoothAtoB", resources);
   }
 
@@ -410,8 +394,8 @@ implements OctreeFirstOrderSPDVCycle {
       rowCount,
       rhs,
       correction,
-      this.hybrid,
-      undefined,
+      this.hybridA,
+      this.hybridB,
       this.innerRhs,
       this.innerCorrection,
       this.bandA,
@@ -508,7 +492,8 @@ implements OctreeFirstOrderSPDVCycle {
     this.destroyed = true;
     this.groups.clear();
     this.params.destroy();
-    this.hybrid.destroy();
+    this.hybridA.destroy();
+    this.hybridB.destroy();
     this.innerRhs.destroy();
     this.innerCorrection.destroy();
     this.bandA.destroy();
@@ -533,7 +518,7 @@ struct Params {
   m1SmoothingDegree: u32,
   padding: u32,
 }
-${octreeSection63OperatorLayoutWGSL}
+struct Section63Layout{workset:vec4u,dimsCapacity:vec4u,hierarchy:vec4u,numerics:vec4f}
 struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> section63Coefficients: array<f32>;
@@ -541,18 +526,14 @@ struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 @group(0) @binding(3) var<storage, read> rowCount: array<u32>;
 @group(0) @binding(4) var<storage, read> rhs: array<f32>;
 @group(0) @binding(5) var<storage, read_write> correction: array<f32>;
-// Both ping-pong states: A occupies rows [0, rowCapacity), B the rows that
-// follow. Binding 7 is retired with the split buffers.
-@group(0) @binding(6) var<storage, read_write> hybrid: array<f32>;
+@group(0) @binding(6) var<storage, read_write> hybridA: array<f32>;
+@group(0) @binding(7) var<storage, read_write> hybridB: array<f32>;
 @group(0) @binding(8) var<storage, read_write> innerRhs: array<f32>;
 @group(0) @binding(9) var<storage, read> innerCorrection: array<f32>;
 @group(0) @binding(10) var<storage, read_write> bandA: array<u32>;
 @group(0) @binding(11) var<storage, read_write> bandB: array<u32>;
 @group(0) @binding(12) var<storage, read_write> control: array<atomic<u32>>;
-// The SAME buffer the accurate A2 operator binds as its layout uniform, now
-// declared with its full shape so the shared Section 6.3 addressing block reads
-// the identical memoized level tables the operator does.
-@group(0) @binding(13) var<uniform> p: Layout;
+@group(0) @binding(13) var<uniform> section63: Section63Layout;
 @group(0) @binding(14) var<storage, read> operatorImage: array<f32>;
 @group(0) @binding(15) var<storage, read_write> bandWorksets: array<atomic<u32>>;
 @group(0) @binding(16) var<storage, read_write> bandDispatch: array<u32>;
@@ -589,68 +570,50 @@ fn reportAt(flag: u32, stage: u32, row: u32) {
     if (claim.old_value != 0u) { return; }
   }
 }
-// The accurate A2 operator's own report policy, so the shared row-image block
-// below claims (stage, row) exactly as it does when the operator calls it from
-// its own dispatch. The retry loop above is this module's; the two decide only
-// which diagnostic pair lands on an already-failed solve.
-fn reportRowAt(flag:u32,stage:u32,row:u32){if(arrayLength(&control)>0u){
- atomicOr(&control[0],flag);
- if(arrayLength(&control)>7u){let claim=atomicCompareExchangeWeak(&control[6],0u,stage);
-  if(claim.exchanged){atomicStore(&control[7],row);}}
-}}
-fn acceptedBank()->u32{return accepted[4]&1u;}
-// Which half of the ping-pong arena the shared row image is taken of. It is a
-// literal written once per entry point, so it is invocation-uniform and no
-// control flow depends on storage.
-var<private> shellSourceRow: u32 = 0u;
-fn operandAt(row:u32)->f32{return hybrid[shellSourceRow+row];}
-// Exactly what arrayLength() reported when hybridA and hybridB were separate
-// rowCapacity-word buffers, so applyRowImage's bound check is unchanged.
-fn operandCount()->u32{return params.rowCapacity;}
 fn diagonalAt(row: u32) -> f32 {
-  return section63Coefficients[(accepted[4] & 1u) * p.hierarchy.w + row * 19u];
+  return section63Coefficients[(accepted[4] & 1u) * section63.hierarchy.w + row * 19u];
 }
 fn validDiagonal(row: u32) -> bool {
   let diagonal = diagonalAt(row);
   return finite(diagonal) && diagonal > 0.0;
 }
-// The Section 6.3 addressing this shell used to transcribe with prefix loops is
-// now the operator's own, from the same layout uniform. The band dilation and
-// the fused sweep therefore walk one implementation of the hierarchy.
-${octreeSection63RowAddressWGSL}
+fn coefficientBase(row:u32)->u32{return (accepted[4]&1u)*section63.hierarchy.w+row*19u;}
 fn validSection63Row(row:u32)->bool{if(row>=rows()||row>=arrayLength(&metrics)){return false;}let base=coefficientBase(row);if(base+19u>arrayLength(&section63Coefficients)){return false;}let m=metrics[row];if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u){return false;}for(var channel=0u;channel<19u;channel+=1u){let c=section63Coefficients[base+channel];if(!finite(c)||c<0.0){return false;}}return section63Coefficients[base]>0.0;}
 fn section63Class(row:u32)->u32{let base=coefficientBase(row);var off=0.0;for(var channel=1u;channel<19u;channel+=1u){off+=section63Coefficients[base+channel];}let physicalBoundary=(metrics[row].transformAndFlags&0x3f00u)!=0u;let boundary=physicalBoundary||section63Coefficients[base]>off+max(1e-6,1e-5*abs(off));let transition=metrics[row].caseId!=0u;return select(select(0u,2u,boundary),select(1u,3u,boundary),transition);}
+fn levels()->u32{return section63.hierarchy.x;}fn maxStride()->u32{return section63.hierarchy.y;}fn capacity()->u32{return section63.dimsCapacity.w;}
+fn dims(l:u32)->vec3u{let s=1u<<l;return(section63.dimsCapacity.xyz+vec3u(s-1u))/s;}
+fn levelCapacity(l:u32)->u32{let d=dims(l);let threshold=maxStride()/2u;var cells=d.x;if(cells>=threshold||d.y>threshold/cells){return maxStride();}cells*=d.y;if(cells>=threshold||d.z>threshold/cells){return maxStride();}cells*=d.z;var result=1u;let limit=2u*cells;while(result<limit){result<<=1u;}return result;}
+fn levelBase(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=levelCapacity(k);}return result;}fn totalLevelSlots()->u32{return section63.hierarchy.z;}fn at(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
+fn rowMapBase()->u32{return 16u;}fn workBase()->u32{return rowMapBase()+levels()*capacity();}fn pageWorkBase()->u32{return workBase()+totalLevelSlots();}fn logicalPageDims(l:u32)->vec3u{return(dims(l)+vec3u(7u,7u,3u))/vec3u(8u,8u,4u);}fn logicalPageCount(l:u32)->u32{let d=logicalPageDims(l);return d.x*d.y*d.z;}fn pageLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=logicalPageCount(k);}return result;}fn pageDirectoryBase()->u32{return pageWorkBase()+PAGE_RECORD_WORDS*totalLevelSlots();}
+fn transferCapacity(l:u32)->u32{return min(capacity()*8u,levelCapacity(l)*8u);}fn transferLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=transferCapacity(k)*4u+4u*levelCapacity(k);}return result;}fn transferBase()->u32{return pageDirectoryBase()+pageLevelOffset(levels());}fn directoryBase()->u32{return transferBase()+transferLevelOffset(levels()-1u);}fn brickDims(l:u32)->vec3u{return(dims(l)+vec3u(3u))/4u;}fn brickCount(l:u32)->u32{let d=brickDims(l);return d.x*d.y*d.z;}fn brickLevelOffset(l:u32)->u32{var result=0u;for(var k=0u;k<l;k+=1u){result+=brickCount(k);}return result;}fn totalBrickCount()->u32{return brickLevelOffset(levels());}fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}fn brickRecord(l:u32,q:vec3u)->u32{let d=brickDims(l);let b=q/4u;let dense=b.x+d.x*(b.y+d.y*b.z);return directoryBase()+16u+(brickLevelOffset(l)+dense)*4u;}
+fn pageRecord(l:u32,page:u32)->u32{return pageWorkBase()+(levelBase(l)+page)*PAGE_RECORD_WORDS;}fn pageNeighbour(l:u32,page:u32,ordinal:u32)->u32{return topology[pageRecord(l,page)+1u+ordinal];}fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}fn localBit(q:vec3u)->u32{let local=q&vec3u(3u);return local.x+4u*local.y+16u*local.z;}fn pageFor(l:u32,q:vec3u)->u32{let pages=logicalPageDims(l);let v=q/vec3u(8u,8u,4u);return topology[pageDirectoryBase()+pageLevelOffset(l)+v.x+pages.x*(v.y+pages.y*v.z)];}
+fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u)->u32{let shape=vec3u(8u,8u,4u);let delta=vec3i(q/shape)-vec3i(origin/shape);if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportAt(INVALID_ROW_ERROR,10u,INVALID);return INVALID;}let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));let physical=pageNeighbour(l,page,ordinal);if(physical==INVALID){return INVALID;}let physicalOrigin=decode(topology[pageRecord(l,physical)],l);if(any(physicalOrigin/shape!=q/shape)){reportAt(INVALID_ROW_ERROR,10u,INVALID);return INVALID;}let record=brickRecord(l,q);let bit=localBit(q);let low=topology[record+1u];let high=topology[record+2u];if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return INVALID;}let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}let slot=topology[rankedSlotsBase()+levelBase(l)+topology[record+3u]+rank];if(slot>=levelCapacity(l)){reportAt(INVALID_ROW_ERROR,10u,INVALID);return INVALID;}return slot;}
+fn originOf(h:vec4u)->vec3u{return vec3u(h.x%section63.dimsCapacity.x,(h.x/section63.dimsCapacity.x)%section63.dimsCapacity.y,h.x/(section63.dimsCapacity.x*section63.dimsCapacity.y));}
+fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}
+fn worldDirection(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1,(code&1u)!=0u),select(1,-1,(code&2u)!=0u),select(1,-1,(code&4u)!=0u));let q=value*signs;let permutation=(code/8u)%6u;if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;}
 ${octreeSection63DirectionChannelWGSL}
-// The operator's own per-row image, verbatim. The shell evaluates it inside its
-// band sweep; nothing here is a second transcription of the Section 6.3 stencil.
-${octreeSection63RowImageWGSL}
+// One indexed load replaces the eighteen-step scan that re-evaluated
+// worldDirection per candidate. The table is the memoized scan result.
+fn coefficientForDirection(row:u32,direction:vec3i)->f32{
+ let channel=section63ChannelForDirection(metrics[row].transformAndFlags&63u,direction);
+ if(channel>=18u){return 0.0;}
+ return section63Coefficients[coefficientBase(row)+1u+channel];}
 fn bandAt(row:u32,useB:bool)->u32{return select(bandA[row],bandB[row],useB);}
-fn dilatedBand(row:u32,useB:bool)->u32{var value=bandAt(row,useB);let h=geometry[row];let m=metrics[row];let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);let base=coefficientBase(row);for(var channel=0u;channel<18u&&value==0u;channel+=1u){if(section63Coefficients[base+1u+channel]==0.0){continue;}let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){continue;}let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID||(state[at(FLAGS,l,slot)]&MG_ONLY)!=0u){continue;}let encoded=state[at(OWNER,l,slot)];if(encoded>0u&&encoded<=rows()){value=max(value,bandAt(encoded-1u,useB));}}
- if(l>0u&&value==0u){let fine=l-1u;for(var child=0u;child<8u&&value==0u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}for(var candidate=0u;candidate<18u&&value==0u;candidate+=1u){let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);if(activeSlot==INVALID||(state[at(FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[at(OWNER,fine,activeSlot)];if(encoded>0u&&encoded<=rows()&&coefficientForDirection(encoded-1u,metrics[encoded-1u],delta)>0.0){value=max(value,bandAt(encoded-1u,useB));}}}}
+fn dilatedBand(row:u32,useB:bool)->u32{var value=bandAt(row,useB);let h=geometry[row];let m=metrics[row];let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);let base=coefficientBase(row);for(var channel=0u;channel<18u&&value==0u;channel+=1u){if(section63Coefficients[base+1u+channel]==0.0){continue;}let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){continue;}let slot=pageSlot(l,page,q,vec3u(targetQ));if(slot==INVALID||(state[at(FLAGS,l,slot)]&MG_ONLY)!=0u){continue;}let encoded=state[at(OWNER,l,slot)];if(encoded>0u&&encoded<=rows()){value=max(value,bandAt(encoded-1u,useB));}}
+ if(l>0u&&value==0u){let fine=l-1u;for(var child=0u;child<8u&&value==0u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ);if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}for(var candidate=0u;candidate<18u&&value==0u;candidate+=1u){let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ));if(activeSlot==INVALID||(state[at(FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[at(OWNER,fine,activeSlot)];if(encoded>0u&&encoded<=rows()&&coefficientForDirection(encoded-1u,delta)>0.0){value=max(value,bandAt(encoded-1u,useB));}}}}
  return value;}
-/** Row index of the A half; B follows one whole row capacity later. */
-fn hybridRow(row: u32, useB: bool) -> u32 {
-  return select(row, params.rowCapacity + row, useB);
+fn hybridValue(row: u32, useB: bool) -> f32 {
+  return select(hybridA[row], hybridB[row], useB);
 }
 fn bandWorksetBase(cls: u32) -> u32 {
   return (accepted[4] & 1u) * params.worksetBankStrideWords
     + cls * params.worksetStrideWords;
 }
-// The union class record, guarded by BOTH header tests the split encode used:
-// this shell's finalized-publication test, and the operator's own workRow
-// bounds. bandRow-valid already implied workRow-valid (the count can never
-// exceed the capacity word compactBandIntersections fails closed against), so
-// the conjunction admits the exact rows that used to receive an image; keeping
-// the operator's terms means a fused sweep can never smooth a row the separate
-// apply would have skipped.
 fn bandRow(item: u32) -> u32 {
   let base = bandWorksetBase(4u);
-  if (base + 7u > arrayLength(&bandWorksets)
-    || atomicLoad(&bandWorksets[base]) != accepted[3]
+  if (atomicLoad(&bandWorksets[base]) != accepted[3]
     || atomicLoad(&bandWorksets[base + 3u]) != 3u
-    || atomicLoad(&bandWorksets[base + 1u]) > atomicLoad(&bandWorksets[base + 2u])
-    || item >= atomicLoad(&bandWorksets[base + 1u])
-    || base + 7u + item >= arrayLength(&bandWorksets)) {
+    || item >= atomicLoad(&bandWorksets[base + 1u])) {
     return INVALID;
   }
   return atomicLoad(&bandWorksets[base + 7u + item]);
@@ -686,20 +649,11 @@ fn resetBandWorksets() {
     bandDispatch[3u * cls + 2u] = 1u;
   }
 }
-// The image argument is this row's Section 6.3 operator image of the state the
-// sweep reads. It used to be staged in a whole extra dispatch and read back
-// from operatorImage; the fused sweep hands it over in a register.
-//
-// The bandB[row]==0u early-out the split form carried is deleted, not dropped:
-// the union class record is written only by compactBandIntersections, which
-// admits a row only when bandB[row]!=0u, and bandB is written only by
-// the setup dilation, which cannot run between the publication and this sweep.
-// It was therefore never taken here, and reading it would put an eleventh
-// storage binding on the portable ten-buffer ceiling.
-fn smoothValue(row: u32, image: f32) -> f32 {
-  let current = operandAt(row);
+fn smoothValue(row: u32, useB: bool) -> f32 {
+  let current = hybridValue(row, useB);
+  if (bandB[row] == 0u) { return current; }
   let next = current
-    + params.damping * (rhs[row] - image) / diagonalAt(row);
+    + params.damping * (rhs[row] - operatorImage[row]) / diagonalAt(row);
   if (!finite(next)) {
     reportAt(NONFINITE_ERROR, 11u, row);
     return current;
@@ -784,35 +738,18 @@ fn finalizeBandWorksets() {
 fn smoothZeroToB(@builtin(global_invocation_id) global: vec3u) {
   let row = global.x;
   if (stopped() || row >= rows()) { return; }
-  hybrid[hybridRow(row, false)] = 0.0;
-  hybrid[hybridRow(row, true)] = smoothZeroValue(row);
+  hybridA[row] = 0.0;
+  hybridB[row] = smoothZeroValue(row);
 }
-// The fused shell sweep. Damped Jacobi reads only the source half of the arena
-// and writes only the destination half, so evaluating this row's own operator
-// image from that same source vector is not a hazard: no invocation reads a
-// word another invocation writes. applyRowImage is the operator's own
-// function, so the arithmetic and its order are the merged-band apply's, term
-// for term. A row whose image is invalid reported and stored nothing in the
-// split form, and the sweep that followed it saw the error flag and did
-// nothing; here it returns before writing, which is the same fail-closed
-// outcome one dispatch earlier.
 @compute @workgroup_size(64)
 fn smoothBtoA(@builtin(global_invocation_id) global: vec3u) {
-  shellSourceRow = params.rowCapacity;
   let row = bandRow(global.x);
-  if (!stopped() && row != INVALID && row < rows()) {
-    let image = applyRowImage(row);
-    if (image.valid) { hybrid[hybridRow(row, false)] = smoothValue(row, image.value); }
-  }
+  if (!stopped() && row != INVALID && row < rows()) { hybridA[row] = smoothValue(row, true); }
 }
 @compute @workgroup_size(64)
 fn smoothAtoB(@builtin(global_invocation_id) global: vec3u) {
-  shellSourceRow = 0u;
   let row = bandRow(global.x);
-  if (!stopped() && row != INVALID && row < rows()) {
-    let image = applyRowImage(row);
-    if (image.valid) { hybrid[hybridRow(row, true)] = smoothValue(row, image.value); }
-  }
+  if (!stopped() && row != INVALID && row < rows()) { hybridB[row] = smoothValue(row, false); }
 }
 @compute @workgroup_size(64)
 fn formInnerResidual(@builtin(global_invocation_id) global: vec3u) {
@@ -826,18 +763,18 @@ fn formInnerResidual(@builtin(global_invocation_id) global: vec3u) {
 fn addInnerCorrection(@builtin(global_invocation_id) global: vec3u) {
   let row = global.x;
   if (stopped() || row >= rows()) { return; }
-  let value = hybrid[hybridRow(row, false)] + innerCorrection[row];
+  let value = hybridA[row] + innerCorrection[row];
   if (!finite(value)) { reportAt(NONFINITE_ERROR, 13u, row); }
   // Paper §4.3 step (3) starts the matching post-sweep from p2 everywhere.
   // Only band rows are subsequently ping-ponged, so both states must carry
   // the domain-wide M1 correction before that compact dispatch begins.
-  else { hybrid[hybridRow(row, false)] = value; hybrid[hybridRow(row, true)] = value; }
+  else { hybridA[row] = value; hybridB[row] = value; }
 }
 @compute @workgroup_size(64)
 fn publishCorrection(@builtin(global_invocation_id) global: vec3u) {
   let row = global.x;
   if (stopped() || row >= rows()) { return; }
-  let value = hybrid[hybridRow(row, true)];
+  let value = hybridB[row];
   if (!finite(value)) { reportAt(NONFINITE_ERROR, 14u, row); }
   else { correction[row] = value; }
 }
