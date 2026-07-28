@@ -263,6 +263,19 @@ const cleanBaselineEnvironment: Record<string, string> = {
   FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES: "",
 };
 
+/**
+ * `xctrace --launch` inherits this process's environment, and it cannot be
+ * given a variable whose value is empty. A profile variable set to "" is an
+ * instruction to the worker to run *without* that setting, so the only way to
+ * deliver it through xctrace is to make it absent on both paths: omitted from
+ * the forwarded `--env` list, and removed from what the worker inherits.
+ */
+function clearEmptyProfileVariables(): void {
+  for (const [key, value] of Object.entries(profileEnvironment)) {
+    if (value === "") delete process.env[key];
+  }
+}
+
 export interface SmokeResultRecord {
   readonly simulationWall_ms?: number;
   readonly steps?: number;
@@ -602,13 +615,22 @@ const main = async (): Promise<void> => {
     }
   } else {
     console.log("recording Metal System Trace...");
+    clearEmptyProfileVariables();
     traced = await runWorker([
       "xcrun", "xctrace", "record",
       "--template", "Metal System Trace",
       "--output", tracePath,
       "--no-prompt",
       "--target-stdout", "-",
-      ...Object.entries(profileEnvironment).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+      // xctrace rejects `--env VAR=` outright ("cannot be parsed with provided
+      // value"), so an empty value cannot be forwarded as one. Omitting the
+      // variable is equivalent for every consumer -- lib/webgpu-pass-broker.ts
+      // and tools/xctrace-frame-report.ts both read it as `?? ""` -- and the
+      // deletion in `clearEmptyProfileVariables` stops an exported value in
+      // this shell from inheriting into the launched worker under that name.
+      ...Object.entries(profileEnvironment)
+        .filter(([, value]) => value !== "")
+        .flatMap(([key, value]) => ["--env", `${key}=${value}`]),
       "--launch", "--", nodeBinary, "--import", "tsx", worker,
     ], `${outputDirectory}/traced.log`, "traced");
   }

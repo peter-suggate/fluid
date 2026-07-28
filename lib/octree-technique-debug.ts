@@ -44,6 +44,23 @@ export interface OctreeTechniqueDebugSource {
     readonly phi: GPUBufferBinding;
     readonly topologyControl: GPUBufferBinding;
     readonly redistanceControl: GPUBufferBinding;
+    /**
+     * The two authored band half-widths, in finest octree cells, so the overlay
+     * can draw the pressure band's reach against the surface band's actual
+     * residency. They are separate parameters and an under-reaching surface
+     * band is what starves the fine-to-coarse restriction, so the comparison
+     * is the point of the view rather than a decoration.
+     */
+    readonly bands: {
+      /** Authored pressure refinement half-width, in finest octree cells. */
+      readonly pressureBandCells: number;
+      /** Authored surface-tracking half-width, in finest octree cells. */
+      readonly surfaceBandCells: number;
+      /** Planner output: the width Section 5 transport actually moves, in fine cells. */
+      readonly transportBandFineCells: number;
+      /** Planner output: the width redistance leaves valid, in fine cells. */
+      readonly redistanceBandFineCells: number;
+    };
   };
   readonly generation: number;
 }
@@ -62,6 +79,7 @@ export const OCTREE_TECHNIQUE_OVERLAY_MODES = [
   "operator-open-fraction",
   "tetra-validity",
   "global-fine-phi",
+  "band-residency",
 ] as const;
 
 export type OctreeTechniqueOverlayMode = typeof OCTREE_TECHNIQUE_OVERLAY_MODES[number];
@@ -84,4 +102,5 @@ export const OCTREE_TECHNIQUE_OVERLAY_CODES: Readonly<Record<OctreeTechniqueOver
   "operator-open-fraction": 22,
   "tetra-validity": 23,
   "global-fine-phi": 25,
+  "band-residency": 26,
 };

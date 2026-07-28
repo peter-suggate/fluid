@@ -24,6 +24,13 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   overrides: Object.freeze({
     maximumLeafSize: "2",
     interfaceRefinementBandCells: 3,
+    // Pinned alongside the pressure band, not derived from it. `resolveMethod-
+    // Values` seeds every declared parameter from its own spec default, so a
+    // profile that pins one band and stays silent on the other does not leave
+    // the second unset -- it leaves it at 4. On this 16-cubed tank that is an
+    // eighth dilation ring, which overflows the fine brick capacity around
+    // generation 100 and rejects the publication.
+    fineLevelSetBandCells: 3,
     globalFineLevelSetFactor: "4",
   }),
 });
@@ -36,6 +43,7 @@ export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.free
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
     interfaceRefinementBandCells: 4,
+    fineLevelSetBandCells: 4,
   }),
 });
 
@@ -180,10 +188,12 @@ const TWIN_DAM_BRICK_TIERS = Object.freeze({
  *
  * Both extents are solver limits rather than taste, and both are pinned by
  * tests:
- *  - 14336 cells keeps the octree lane under the bounded 16384-row SPGrid
- *    V-cycle. At this domain size `planOctreePressureCapacity` saturates at
- *    the cell count, so a wider tank on the same lattice fails octree solver
- *    construction outright.
+ *  - 14336 cells keeps the octree lane inside the bounded SPGrid V-cycle. At
+ *    this domain size `planOctreePressureCapacity` saturates at the cell
+ *    count, so the pressure plan is the tank volume itself. The V-cycle's row
+ *    ceiling was 16,384 when this tank was authored; it is now
+ *    `SPGRID_MAXIMUM_ROW_CAPACITY`, and the test below reads that constant
+ *    rather than the number.
  *  - Eight-cell reservoirs stay inside the tall-cell method's default twelve
  *    regular layers. Columns taller than that band are compressed by the
  *    remesh, which loses most of their volume over half a second.

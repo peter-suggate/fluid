@@ -31,6 +31,8 @@ import {
   FINE_LEVELSET_TOPOLOGY_FINALIZE_REASON,
   fineLevelSetLeafSeedWGSL,
   makeFineLevelSetTopologyWGSL,
+  fineLevelSetResidencyFloorCells,
+  planFineLevelSetBandFineCells,
   planFineLevelSetLeafBrickBounds,
   planFineLevelSetPageDeltaLayout,
   planFineLevelSetTopologyBand,
@@ -192,6 +194,51 @@ test("fine topology takes the larger trajectory/redistance radius plus the paper
     maximumBacktraceFineCells: 1, interpolationSupportFineCells: 1,
     redistanceBandFineCells: 4, safetyBrickRings: 0,
   }), /at least one publication safety ring/);
+});
+
+test("the authored surface band drives the fine widths in finest-cell units", () => {
+  // The mini lane: band 3 at factor 4. These are the numbers the residency
+  // note on `fineLevelSetResidencyFloorCells` documents.
+  assert.deepEqual(planFineLevelSetBandFineCells(3, 4), {
+    transportBandFineCells: 12,
+    redistanceBandFineCells: 23,
+    maximumBacktraceFineCells: 8,
+  });
+  // Held in finest cells, so the band keeps one physical thickness across the
+  // paper's two interface-tracking factors rather than halving at factor 8.
+  assert.equal(planFineLevelSetBandFineCells(3, 8).transportBandFineCells,
+    2 * planFineLevelSetBandFineCells(3, 4).transportBandFineCells);
+  // A thickness sweep must actually move the width it is sweeping.
+  assert.deepEqual([1, 2, 4, 8].map((band) =>
+    planFineLevelSetBandFineCells(band, 4).transportBandFineCells), [4, 8, 16, 32]);
+});
+
+test("every sweepable surface band stays above the departure residency floor", () => {
+  // The silent failure the floor guards against -- INVALID resident bricks, a
+  // zero-iteration pressure solve and a still-green acceptance gate -- is not
+  // detectable from a benchmark result, so a thickness sweep must not be able
+  // to reach it by choosing a band. Pin the structural margin the residency
+  // note claims rather than trusting the prose to stay current.
+  for (const fineFactor of [4, 8] as const) {
+    for (let band = 0; band <= 32; band += 1) {
+      const widths = planFineLevelSetBandFineCells(band, fineFactor);
+      const plan = planFineLevelSetTopologyBand(4, {
+        ...widths, interpolationSupportFineCells: 1, safetyBrickRings: 1,
+        redistanceBandFineCells: widths.redistanceBandFineCells,
+      });
+      const floor = fineLevelSetResidencyFloorCells(widths.transportBandFineCells,
+        widths.maximumBacktraceFineCells, 1);
+      assert.ok(plan.dilationBrickRings * 4 >= floor + 6,
+        `band ${band} at factor ${fineFactor} covers ${plan.dilationBrickRings * 4}`
+        + ` fine cells against a floor of ${floor}`);
+    }
+  }
+  // The mini lane runs at seven rings, not the five the pre-widening note
+  // recorded.
+  assert.equal(planFineLevelSetTopologyBand(4, {
+    ...planFineLevelSetBandFineCells(3, 4),
+    interpolationSupportFineCells: 1, safetyBrickRings: 1,
+  }).dilationBrickRings, 7);
 });
 
 test("fine page delta publishes exact XOR keys and separate dirty/JFA-support sets", () => {

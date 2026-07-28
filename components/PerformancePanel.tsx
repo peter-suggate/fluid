@@ -164,6 +164,20 @@ const PAPER_VIEWS: readonly PaperView[] = [
     ],
   },
   {
+    id: "band-residency", figure: "§5", label: "Band slice",
+    description: "Every authored and derived band nested outward from the interface: pressure reach, transported surface band, redistance support, and the dilation halo.",
+    source: "Published Section 5 φ residency and the solver's own band planner",
+    mode: "band-residency", axis: "z",
+    legend: [
+      { swatch: "#ffffff", label: "φ = 0 interface" },
+      { swatch: "#ff168f", label: "pressure refinement reach" },
+      { swatch: "#15c8db", label: "transported surface band" },
+      { swatch: "#6b54eb", label: "redistance support margin" },
+      { swatch: "#1a664d", label: "dilation / safety rings" },
+      { swatch: "#f5ba1a", label: "pressure reach truncated by residency" },
+    ],
+  },
+  {
     id: "power-cells", figure: "FIG. 4", label: "Power cells",
     description: "Pressure sites and exact regular/transition power-cell classification.",
     source: "Compact leaves, topology descriptors, and generated power catalog",

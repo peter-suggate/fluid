@@ -309,6 +309,25 @@ if (octreeInterfaceBandOverride !== undefined
   && (!Number.isInteger(octreeInterfaceBandOverride) || octreeInterfaceBandOverride < 0)) {
   throw new Error("FLUID_OCTREE_INTERFACE_BAND must be a non-negative integer");
 }
+// Section 5 surface-band thickness, independent of the pressure band above.
+// Unset leaves the projection on the pressure band, so an A/B against a lane's
+// recorded numbers only needs this one variable.
+const octreeFineBandOverride = process.env.FLUID_OCTREE_FINE_BAND === undefined
+  ? undefined : Number(process.env.FLUID_OCTREE_FINE_BAND);
+// A band narrower than the pressure band leaves the fine-to-coarse restriction
+// without valid phi where the pressure cell centres read it, and the generation
+// is rejected. That is a mismatch with the pressure band rather than a floor on
+// this value, so the harness admits 1 and lets the pairing fail closed.
+if (octreeFineBandOverride !== undefined
+  && (!Number.isInteger(octreeFineBandOverride) || octreeFineBandOverride < 1)) {
+  throw new Error("FLUID_OCTREE_FINE_BAND must be a positive integer");
+}
+const octreePressureRowCapacityOverride = process.env.FLUID_PRESSURE_ROW_CAPACITY === undefined
+  ? undefined : Number(process.env.FLUID_PRESSURE_ROW_CAPACITY);
+if (octreePressureRowCapacityOverride !== undefined
+  && (!Number.isSafeInteger(octreePressureRowCapacityOverride) || octreePressureRowCapacityOverride < 1)) {
+  throw new Error("FLUID_PRESSURE_ROW_CAPACITY must be a positive integer");
+}
 const octreeGlobalFineFactorOverride = process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR;
 if (octreeGlobalFineFactorOverride !== undefined && !["4", "8"].includes(octreeGlobalFineFactorOverride)) {
   throw new Error("FLUID_OCTREE_GLOBAL_FINE_FACTOR must be 4 or 8");
@@ -3015,8 +3034,17 @@ async function runGPU(
   if (method.id === "octree" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
   if (method.id === "octree" && octreeInterfaceBandOverride !== undefined) {
     values.interfaceRefinementBandCells = octreeInterfaceBandOverride;
+    // Preserve the coupled widths a lane was authored against unless the
+    // surface band is explicitly swept below.
+    values.fineLevelSetBandCells = octreeInterfaceBandOverride;
+  }
+  if (method.id === "octree" && octreeFineBandOverride !== undefined) {
+    values.fineLevelSetBandCells = octreeFineBandOverride;
   }
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
+  if (method.id === "octree" && octreePressureRowCapacityOverride !== undefined) {
+    values.pressureRowCapacity = octreePressureRowCapacityOverride;
+  }
   if (method.id === "quadtree-tall-cell" && quadtreePreconditionerOverride !== undefined) values.preconditioner = quadtreePreconditionerOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeStaleStepsOverride !== undefined) values.topologyStaleSteps = quadtreeStaleStepsOverride;
   if (method.id === "quadtree-tall-cell" && quadtreeInlineRebuildOverride !== undefined) values.inlineRebuild = quadtreeInlineRebuildOverride;

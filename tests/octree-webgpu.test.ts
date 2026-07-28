@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { simulationMethods } from "../lib/methods";
-import { octreeMethod } from "../lib/methods/octree";
+import { octreeMethod, octreeSolverOptions } from "../lib/methods/octree";
+import { POWER_VALIDATION_METHOD_PROFILE, scenePresets } from "../lib/scenes";
+import { resolveMethodValues } from "../lib/methods/types";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
@@ -93,6 +95,7 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "legacy quality tiers must not obscure the explicit power-method controls");
   assert.deepEqual(octreeMethod.params.map((spec) => spec.key), [
     "globalFineLevelSetFactor", "maximumLeafSize", "interfaceRefinementBandCells",
+    "fineLevelSetBandCells",
   ], "the product UI must not expose a retired pressure path");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "surfaceColumns"), false,
     "scene voxelDomain is the sole spatial-resolution authority");
@@ -118,6 +121,16 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeSource, /rounded >= 32/);
   const interfaceBand = octreeMethod.params.find((spec) => spec.key === "interfaceRefinementBandCells");
   assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine" && interfaceBand.default === 4);
+  const surfaceBand = octreeMethod.params.find((spec) => spec.key === "fineLevelSetBandCells");
+  assert.ok(surfaceBand && surfaceBand.kind === "number" && surfaceBand.tier === "fine"
+    && surfaceBand.default === 4);
+  assert.equal(surfaceBand.min, 1,
+    "the floor is relational -- a band narrower than the pressure band is what starves"
+    + " the fine-to-coarse restriction -- so an incompatible pair must fail closed and"
+    + " visibly rather than be clamped away by the control");
+  assert.equal("fineLevelSetBandCells" in octreeMethod.presetFor("balanced"), false,
+    "seeding the surface band in the preset makes every consumer's band authored,"
+    + " which defeats its coupling to a scene-pinned pressure band");
   const globalFine = octreeMethod.params.find((spec) => spec.key === "globalFineLevelSetFactor");
   assert.ok(globalFine && globalFine.kind === "select" && globalFine.default === "4" && globalFine.tier === "coarse");
   assert.deepEqual(globalFine.options.map((option) => option.value), ["4", "8"]);
@@ -196,7 +209,7 @@ test("native power pressure capacity reserves rows without a variable-entry aren
   const dims = { nx: 288, ny: 96, nz: 64 };
   const count = dims.nx * dims.ny * dims.nz;
   const plan = planOctreePressureCapacity(dims, 16, 4);
-  assert.equal(plan.rowCapacity, 643_840);
+  assert.equal(plan.rowCapacity, 537_856);
   assert.deepEqual(Object.keys(plan).sort(), ["headerBytes", "pressureBytes", "rowCapacity"],
     "resolved case-local handles replace the retired variable-entry capacity");
   assert.ok(plan.rowCapacity < count / 2, "the widened ocean must not reserve one pressure slot per finest cell");
@@ -206,19 +219,19 @@ test("native power pressure capacity reserves rows without a variable-entry aren
 test("compact frontier retains only the immutable public row-delta ABI", () => {
   const cellCount = 320 * 96 * 80;
   const rowCapacity = planOctreePressureCapacity({ nx: 320, ny: 96, nz: 80 }, 16, 4).rowCapacity;
-  assert.equal(rowCapacity, 779_776);
+  assert.equal(rowCapacity, 626_176);
   const compact = planOctreeLeafFrontierAllocation(cellCount, rowCapacity);
   assert.deepEqual(compact, {
     cellCount: 2_457_600,
-    listCapacity: 779_776,
-    candidateOffsetWords: 1_559_562,
-    rowDeltaControlOffsetWords: 2_339_338,
-    rowDeltaNewToOldOffsetWords: 2_339_354,
-    rowDeltaOldToNewOffsetWords: 3_119_130,
-    rowDeltaDirtyRowsOffsetWords: 3_898_906,
-    rowDeltaAffectedRowsOffsetWords: 4_678_682,
-    candidateBytes: 3_119_104,
-    allocatedBytes: 21_833_832,
+    listCapacity: 626_176,
+    candidateOffsetWords: 1_252_362,
+    rowDeltaControlOffsetWords: 1_878_538,
+    rowDeltaNewToOldOffsetWords: 1_878_554,
+    rowDeltaOldToNewOffsetWords: 2_504_730,
+    rowDeltaDirtyRowsOffsetWords: 3_130_906,
+    rowDeltaAffectedRowsOffsetWords: 3_757_082,
+    candidateBytes: 2_504_704,
+    allocatedBytes: 17_533_032,
   });
   assert.throws(() => planOctreeLeafFrontierAllocation(0, rowCapacity), /positive integer/);
   assert.throws(() => planOctreeLeafFrontierAllocation(cellCount, 0), /positive integer/);
@@ -238,6 +251,45 @@ test("cold dam-UI frontier candidates cover every finest cell exactly once", () 
     "rounded indirect workgroups must reject the invalid lane base before octant addition can wrap");
 });
 
+test("an unauthored surface band follows a scene-pinned pressure band", () => {
+  // Regression: the validation profile pins interfaceRefinementBandCells to 3
+  // and overrides nothing else, so an unauthored surface band that resolved to
+  // its own spec default of 4 widened the fine band behind the scene's back.
+  // That is not a cosmetic mismatch -- it took the dilation from 7 rings to 8,
+  // overflowed the fine brick capacity around generation 100 of the mini dam
+  // and rejected the publication (topology 0x11, downstream 0x5).
+  // Resolve exactly as the UI does. `presetFor` alone is the smoke harness's
+  // path and does NOT reproduce this: `resolveMethodValues` seeds every
+  // declared parameter from its spec default first, so the surface band is
+  // always present and "unauthored" is not observable from the values.
+  const values = resolveMethodValues(octreeMethod, "balanced",
+    { ...POWER_VALIDATION_METHOD_PROFILE.overrides });
+  const pinned = octreeSolverOptions(defaultScene, "balanced", values).octree;
+  assert.equal(pinned.interfaceRefinementBandCells, 3);
+  assert.equal(pinned.fineLevelSetBandCells, 3,
+    "the surface band the UI resolves must match the band the scene profile pins");
+  // Authored, it is independent again -- that independence is the whole point
+  // of the separate control.
+  const swept = octreeSolverOptions(defaultScene, "balanced",
+    { ...values, fineLevelSetBandCells: 6 }).octree;
+  assert.equal(swept.interfaceRefinementBandCells, 3);
+  assert.equal(swept.fineLevelSetBandCells, 6);
+  // The control opens at one finest cell; the pairing, not the control, is what
+  // rejects an under-reaching band.
+  assert.equal(octreeSolverOptions(defaultScene, "balanced",
+    { ...values, fineLevelSetBandCells: 1 }).octree.fineLevelSetBandCells, 1);
+  // Structural guard: the two bands are independent parameters, so any profile
+  // that pins one must pin the other. Silence is not "inherit" -- it resolves
+  // to that parameter's own default and the bands drift apart.
+  for (const preset of scenePresets) {
+    const overrides = preset.methodProfile?.methodId === "octree"
+      ? preset.methodProfile.overrides : undefined;
+    if (!overrides || overrides.interfaceRefinementBandCells === undefined) continue;
+    assert.equal(typeof overrides.fineLevelSetBandCells, "number",
+      `${preset.id} pins the pressure band but leaves the surface band at its spec default`);
+  }
+});
+
 test("compact scan scratch feeds the class-specialized structured authority", () => {
   const dims = { nx: 640, ny: 192, nz: 160 };
   const pressure = planOctreePressureCapacity(dims, 16, 4);
@@ -247,20 +299,20 @@ test("compact scan scratch feeds the class-specialized structured authority", ()
     dims, pressure.rowCapacity, activeTileWorklistBytes, activeTileCapacity, 16,
   );
   assert.deepEqual(compact, {
-    scanBlockCapacity: 12_403,
+    scanBlockCapacity: 10_003,
     candidateBlockCapacity: 76_800,
-    scanAndTaskBytes: 763_296,
+    scanAndTaskBytes: 734_496,
     activeTileBytes: 269_476,
-    changeStateBaseWords: 6_578_370,
-    tileChangeFlagsOffsetWords: 6_578_370,
-    tileRefinementSignaturesOffsetWords: 6_587_970,
-    tileFrontierSignaturesOffsetWords: 6_611_970,
-    tileSignatureChangedOffsetWords: 6_635_970,
-    tileFrontierChangeFlagsOffsetWords: 6_640_770,
-    frontierTopologyReuseWord: 6_645_730,
-    rowDeltaScratchBaseWords: 190_824,
-    rowDeltaScratchWords: 6_387_546,
-    allocatedBytes: 26_582_956,
+    changeStateBaseWords: 5_335_170,
+    tileChangeFlagsOffsetWords: 5_335_170,
+    tileRefinementSignaturesOffsetWords: 5_344_770,
+    tileFrontierSignaturesOffsetWords: 5_368_770,
+    tileSignatureChangedOffsetWords: 5_392_770,
+    tileFrontierChangeFlagsOffsetWords: 5_397_570,
+    frontierTopologyReuseWord: 5_402_530,
+    rowDeltaScratchBaseWords: 183_624,
+    rowDeltaScratchWords: 5_151_546,
+    allocatedBytes: 21_610_156,
   });
   assert.throws(() => planOctreeCompactionAllocation(dims, 0, 0, 0, 16), /positive integer/);
   assert.throws(() => planOctreeCompactionAllocation(dims, 1, -1, 0, 16), /active-tile bounds/);
@@ -779,8 +831,25 @@ test("structured boundary rows use exact fine-over-coarse level-set crossings", 
     /let loPoint=rowCenter\(lo\);let world=worldBoundaryBit\(h\)!=0u;var hiPoint=handleCenter\(h\);if\(hi!=INVALID\)\{hiPoint=rowCenter\(hi\);\}else if\(!world\)[\s\S]*let plo=fineSample\(loPoint,clo\.x\);let phi=fineSample\(hiPoint,chi\.x\)/,
     "each structured contact must sample both actual power-cell centres from fine phi with coarse phi as its explicit authority");
   assert.match(structuredBoundarySource,
-    /if\(!world&&\(hi==INVALID\|\|\(\(plo\.x<0\.\)!=\(phi\.x<0\.\)\)\)\)[\s\S]*let theta=-plo\.x\/\(phi\.x-plo\.x\);[\s\S]*scale=1\.\/theta/,
-    "the pressure boundary must use main's exact, uncapped signed-distance zero crossing");
+    /if\(!world&&\(hi==INVALID\|\|\(\(plo\.x<0\.\)!=\(phi\.x<0\.\)\)\)\)/,
+    "a crossing must be resolved for an open face whose ghost point flips sign");
+  // theta is measured from whichever side is wet and floored at 1e-2; it is
+  // deliberately not the uncapped crossing. A sliver drives the 1/theta face
+  // coefficient without bound, and hard-failing the legitimately dry-centre
+  // geometry (the frontier admits rows the interface has not reached yet)
+  // poisoned the whole topology epoch, permanently freezing the accepted
+  // velocity authority. The recordTheta histogram buckets are chosen around
+  // this same floor, so restoring an uncapped crossing silently invalidates
+  // bucket 0 as well.
+  assert.match(structuredBoundarySource,
+    /let theta=max\(-plo\.x\/\(phi\.x-plo\.x\),1e-2\);[\s\S]*let theta=max\(-phi\.x\/\(plo\.x-phi\.x\),1e-2\);/,
+    "the crossing must be measured from whichever side is wet, floored at 1e-2");
+  assert.match(structuredBoundarySource,
+    /if\(!finite\(theta\)\|\|theta>1\.\)\{fail\(h,8u\|1024u\);return;\}[\s\S]*scale=1\.\/theta;/,
+    "a crossing outside the face must fail the slot closed rather than clamp into range");
+  assert.match(structuredBoundarySource,
+    /\}else\{\n?\s*\/\/ No wet side[\s\S]*scale=0\.;/,
+    "an open face with no wet side must decouple instead of coupling through air");
   assert.doesNotMatch(octreeProjectionShader,
     /fn reconstructGradients|fn storeReconstructedGradient|fn projectedComponentCached/,
     "affine dense projection was superseded by the compact power-face operator");
@@ -830,14 +899,42 @@ test("octree dense diagnostic textures are allocated only on overlay demand", ()
 
 test("structured solve dispatches are class-exact and convergence gated", () => {
   assert.match(structuredVelocitySource,
-    /if\(clean&&cls<4u\)\{let dispatch=6u\+3u\*cls;publicationDispatch\[dispatch\]=groups/,
+    /if\(clean&&cls<4u\)\{let dispatch=6u\+3u\*cls;publicationDispatch\[dispatch\]=groupsX;publicationDispatch\[dispatch\+1u\]=groupsY/,
     "the accepted structured epoch must publish one exact indirect record per resolved row class");
+  // The published record is two-dimensional. A class whose block count passes
+  // maxComputeWorkgroupsPerDimension is silently zeroed by the indirect-args
+  // validator, so a saturating class must pin X and carry the remainder in Y.
+  assert.match(structuredVelocitySource,
+    /let groupsX=max\(1u,min\(65535u,groups\)\);let groupsY=\(groups\+groupsX-1u\)\/groupsX;/,
+    "class dispatch records must fold their block count into two dimensions");
+  assert.match(structuredVelocitySource, /fn foldedItem\(g:vec3u\)->u32\{return g\.x\+g\.y\*65535u\*64u;\}/,
+    "slot-shaped kernels must recover their linear item from the pinned X extent");
   assert.match(spgridVCycleSource,
     /classDispatch\[destination\]=select\(0u,worksets\[source\],solveLive&&valid\)/,
     "the convergence gate must zero future class work without host intervention");
+  // The apply is no longer a per-class loop over records 0..3; those four
+  // gated records now size the aggregate passes rather than being dispatched
+  // one at a time, and the aggregates live directly above them in the same
+  // buffer. The invariant the loop protected is unchanged: every accurate A2
+  // gather reaches the GPU through a record the convergence gate can zero, so
+  // a converged solve costs no host round trip to stop.
   assert.match(spgridVCycleSource,
-    /pass\.dispatchWorkgroupsIndirect\(this\.accurateClassDispatch, index \* 12\)/,
-    "every class-specialized E^T gather must consume its gated indirect record");
+    /const ACCURATE_UNION_DISPATCH_OFFSET_BYTES = 4 \* 12;\s*const ACCURATE_TERM_DISPATCH_OFFSET_BYTES = 5 \* 12;\s*const ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES = 6 \* 12;/,
+    "the aggregate records must follow the four gated class records in one buffer");
+  for (const offset of ["ACCURATE_TERM_DISPATCH_OFFSET_BYTES",
+    "ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES", "ACCURATE_UNION_DISPATCH_OFFSET_BYTES"]) {
+    assert.match(spgridVCycleSource,
+      new RegExp(`pass\\.dispatchWorkgroupsIndirect\\(this\\.accurateClassDispatch, ${offset}\\)`),
+      `the accurate A2 apply must consume its gated indirect record at ${offset}`);
+  }
+  const accurateApply = spgridVCycleSource.slice(
+    spgridVCycleSource.indexOf("private encodeAccurateWorksets("),
+    spgridVCycleSource.indexOf("private encodeAccurateMergedBandWorkset("));
+  assert.ok(accurateApply.length > 0, "the accurate A2 apply must remain one readable method");
+  assert.equal((accurateApply.match(/pass\.dispatchWorkgroups\(/g) ?? []).length, 1,
+    "inside the apply only the record publication may dispatch directly");
+  assert.equal((accurateApply.match(/pass\.dispatchWorkgroupsIndirect\(/g) ?? []).length, 3,
+    "every other accurate A2 pass must reach the GPU through a gated record");
   assert.doesNotMatch(octreeProjectionShader, /fn compactRowIndex\(gid: vec3u\)/,
     "the deleted variable-row executor must not return to the topology shader");
 });

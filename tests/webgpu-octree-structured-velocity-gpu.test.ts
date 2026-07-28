@@ -45,13 +45,24 @@ test("classify and scatter run one invocation per (row, catalog slot)", () => {
   // 48 is the rowFamilySlots stride (6 families x 8 orientations), not the
   // catalog-slot bound, so the record has to be `maxSlots` wide to index a
   // (row, slot) pair exactly once.
+  // The record is published two-dimensionally: slots are rows * maximumFace-
+  // Incidence, so at the catalog's 30 the block count passes the one-dimensional
+  // workgroup limit near 140,000 rows and the indirect-args validator would
+  // silently zero it. X is pinned at 65,535 on saturation so the kernels can
+  // recover their linear item from a constant stride rather than a uniform.
   assert.match(directStructuredVelocityPublicationWGSL,
-    /publicationDispatch\[3\]=\(rows\*p\.maxSlots\+63u\)\/64u/,
+    /publishBlockDispatch\(3u,\(rows\*p\.maxSlots\+63u\)\/64u\)/,
     "word 3 is the (row, catalog slot) launch record consumed at byte offset 12");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn publishBlockDispatch\(at:u32,blocks:u32\)\{let x=max\(1u,min\(65535u,blocks\)\);\s*publicationDispatch\[at\]=x;publicationDispatch\[at\+1u\]=\(blocks\+x-1u\)\/x;publicationDispatch\[at\+2u\]=1u;\}/,
+    "a saturating record must pin X and carry the remainder in Y, not overflow one dimension");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn foldedItem\(g:vec3u\)->u32\{return g\.x\+g\.y\*65535u\*64u;\}/,
+    "the item fold must use the same pinned extent the record was published with");
   for (const entry of ["classifyStructuredCatalogSlots", "scatterStructuredFamilySlots"]) {
     assert.match(directStructuredVelocityPublicationWGSL,
-      new RegExp(`fn ${entry}\\(@builtin\\(global_invocation_id\\)g:vec3u\\)\\{let rows=min\\(control\\.rowCount,p\\.rowCapacity\\);let row=g\\.x/p\\.maxSlots;let local=g\\.x%p\\.maxSlots;`),
-      `${entry} must decode one (row, slot) pair per invocation`);
+      new RegExp(`fn ${entry}\\(@builtin\\(global_invocation_id\\)g:vec3u\\)\\{let rows=min\\(control\\.rowCount,p\\.rowCapacity\\);let slot=foldedItem\\(g\\);let row=slot/p\\.maxSlots;let local=slot%p\\.maxSlots;`),
+      `${entry} must decode one (row, slot) pair per invocation from the folded item`);
   }
   const host = WebGPUDirectStructuredVelocityAuthority.prototype as unknown as
     Record<string, () => void>;

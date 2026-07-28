@@ -725,8 +725,19 @@ export const OCTREE_SPGRID_CAPTURE_CONTROL_WORD = Object.freeze({
  * Row indices and codes cannot collide: `SPGRID_MAXIMUM_ROW_CAPACITY` is far
  * below `codeBase`, and the differential harness asserts it.
  */
+/**
+ * Words of compiled fine-adjoint image per row: eight fine aliases of a 2:1
+ * coarse leaf times eighteen candidate directions. This is deliberately the
+ * adjoint half of the `accurateTerms` staging layout, so an image index and a
+ * staged index are the same arithmetic and the ordered fold is untouched.
+ */
+const ADJOINT_ROW_WORDS = 144;
+
 export const OCTREE_SPGRID_OPERATOR_IMAGE = Object.freeze({
   rowWords: 19,
+  adjointRowWords: ADJOINT_ROW_WORDS,
+  adjointRowMask: 0xf_ffff,
+  adjointChannelShift: 20,
   codeBase: 0xffff_0000,
   skip: 0,
   outOfDomain: 27,
@@ -1016,6 +1027,18 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateOperatorRowsPipeline: GPUComputePipeline;
   private readonly accurateOperatorRowsGroup: GPUBindGroup;
   private readonly accurateOperatorRowsDispatch: readonly [number, number, number];
+  /**
+   * Measurement-only control arm: run the merged-band adjoint stage through
+   * the pre-image chase instead of the compiled image. Set
+   * `FLUID_SPGRID_ADJOINT_BY_CHASE=1` to select it. Production is the image.
+   */
+  private readonly adjointByChase = typeof process !== "undefined"
+    && process.env?.FLUID_SPGRID_ADJOINT_BY_CHASE === "1";
+  /** Per-epoch compiled fine-adjoint image: 144 u32 per row, indices only. */
+  private readonly accurateAdjointRows: GPUBuffer;
+  private readonly accurateAdjointRowsPipeline: GPUComputePipeline;
+  private readonly accurateAdjointRowsGroup: GPUBindGroup;
+  private readonly accurateAdjointRowsDispatch: readonly [number, number, number];
   private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
@@ -1250,6 +1273,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: this.plan.rowCapacity * 19 * 4,
       usage: storage,
     });
+    this.accurateAdjointRows = device.createBuffer({
+      label: "SPGrid accurate A2 compiled fine-adjoint rows",
+      // One word per (child, candidate) lane of the adjoint staging layout, so
+      // the image index and the accurateTerms index are the same arithmetic.
+      // This is 144 of the 163 words per row accurateTerms already carries, and
+      // it is sized off the same planned row capacity for the same reason.
+      size: this.plan.rowCapacity * ADJOINT_ROW_WORDS * 4,
+      usage: storage,
+    });
     const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
       regularInterior: "applyRegularInterior",
       transitionInterior: "applyTransitionInterior",
@@ -1265,9 +1297,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       label: "SPGrid Section 6.3 · parallel merged-band direct terms", layout: "auto",
       compute: { module: accurateModule, entryPoint: "stageMergedBandTerms" },
     });
+    // Interleaved A/B arm for the compiled fine-adjoint image. Both entry
+    // points stage the same words from the same expression; they differ only in
+    // where the destination row comes from, so selecting between them in ONE
+    // build is the only way to price the image without rebuilding the tree
+    // between samples. Production is the image; the chase is the control.
     this.accurateMergedAdjointPipeline = device.createComputePipeline({
       label: "SPGrid Section 6.3 · parallel merged-band adjoint children", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "stageMergedBandAdjoints" },
+      compute: { module: accurateModule, entryPoint: this.adjointByChase
+        ? "stageMergedBandAdjointsByChase" : "stageMergedBandAdjoints" },
     });
     this.accurateUnionPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · accepted row union", layout: "auto",
@@ -1302,6 +1340,23 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       ],
     });
     this.accurateOperatorRowsDispatch = dispatchFor(this.plan.rowCapacity * 19);
+    this.accurateAdjointRowsPipeline = device.createComputePipeline({
+      label: "SPGrid accurate A2 · compile fine-adjoint rows", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "buildAccurateAdjointRows" },
+    });
+    this.accurateAdjointRowsGroup = device.createBindGroup({
+      label: "SPGrid accurate A2 · fine-adjoint image bindings",
+      layout: this.accurateAdjointRowsPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 6, resource: { buffer: this.topology } },
+        { binding: 7, resource: { buffer: this.state } },
+        { binding: 8, resource: { buffer: this.capturedGeometry } },
+        { binding: 9, resource: { buffer: source.topologyMetrics } },
+        { binding: 11, resource: { buffer: this.accurateWorksetLayout } },
+        { binding: 14, resource: { buffer: this.accurateAdjointRows } },
+      ],
+    });
+    this.accurateAdjointRowsDispatch = dispatchFor(this.plan.rowCapacity * ADJOINT_ROW_WORDS);
     this.accurateOperator = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
       // One convergence gate, wide direct and fine-adjoint stages, then a
@@ -1338,9 +1393,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // the changed-page commit, thirteen data-parallel candidate phases
     // separated by dispatch order rather than by statement order in one thread,
     // the candidate validator, five transactional publication dispatches, and
-    // the once-per-epoch operator-image compile that rides the same pass.
+    // and the two once-per-epoch image compiles (direct, fine-adjoint) that
+    // ride the same pass.
     // Keep this exact for command and active/scheduled accounting.
-    this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5 + 1;
+    this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5 + 2;
     // One compact 8x8x4 page dispatch stages the one-cell halo and executes
     // the complete even-degree Chebyshev polynomial in workgroup memory.
     // Post-smoothing consumes the weights in reverse order, retaining the
@@ -1363,7 +1419,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       + this.candidateTopology.size + this.candidateState.size + this.candidateDispatch.size
       + this.candidateGhosts.size + this.committedInputs.size
       + this.accurateWorksetLayout.size + this.accurateClassDispatch.size
-      + this.accurateOperatorRows.size
+      + this.accurateOperatorRows.size + this.accurateAdjointRows.size
       + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0);
   }
 
@@ -1485,6 +1541,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     pass.setPipeline(this.accurateOperatorRowsPipeline);
     pass.setBindGroup(0, this.accurateOperatorRowsGroup);
     pass.dispatchWorkgroups(...this.accurateOperatorRowsDispatch);
+    // The fine-adjoint half, on the same inputs and in the same pass, for the
+    // same reason. This one carries the larger share: the adjoint stage is
+    // entered by every merged-band apply, 165 of them per advance on the mini
+    // lane, and each lane used to run two dependent page/brick/rank chases.
+    pass.setPipeline(this.accurateAdjointRowsPipeline);
+    pass.setBindGroup(0, this.accurateAdjointRowsGroup);
+    pass.dispatchWorkgroups(...this.accurateAdjointRowsDispatch);
     // dispatchMeta remains STORAGE-only inside compute passes. Copying its
     // finalized records after the setup boundary gives correction a distinct
     // INDIRECT-only source and avoids a whole-pass storage/indirect conflict.
@@ -1685,7 +1748,16 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
         [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
         [11, { buffer: this.accurateWorksetLayout }], [12, { buffer: this.accurateTerms }],
+        [14, { buffer: this.accurateAdjointRows }],
       ]);
+      // Same reachability change the direct-term stage took: the addressing is
+      // the compiled fine-adjoint image (14), so the stage no longer reaches
+      // the topology (6) or state (7) arenas, and dropping them keeps it inside
+      // the ten-storage-buffer ceiling that binding 14 would otherwise break.
+      // The control arm is the mirror image of that: it walks the arenas and
+      // never reads the compiled image.
+      if (this.adjointByChase) shared.delete(14);
+      else { shared.delete(6); shared.delete(7); }
       cached.mergedAdjointGroup = this.device.createBindGroup({
         label: "SPGrid Section 6.3 · parallel merged-band adjoint bindings",
         layout: this.accurateMergedAdjointPipeline.getBindGroupLayout(0),
@@ -1767,8 +1839,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       const termGroup = makeGroup(this.accurateTermPipeline,
         [0, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13],
         "SPGrid Section 6.3 · staged direct-term bindings");
+      shared.set(14, { buffer: this.accurateAdjointRows });
+      // Likewise for the fine-adjoint stage: compiled image (14) instead of
+      // topology/state.
       const adjointGroup = makeGroup(this.accurateAdjointPipeline,
-        [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [0, 2, 3, 4, 5, 8, 9, 10, 11, 12, 14],
         "SPGrid Section 6.3 · staged fine-adjoint bindings");
       const finalizeGroup = makeGroup(this.accurateFinalizePipeline,
         [0, 1, 2, 3, 8, 9, 10, 11, 12],
@@ -1791,7 +1866,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.candidateTopology.destroy(); this.candidateState.destroy(); this.candidateDispatch.destroy();
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
     this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy(); this.accurateTerms.destroy();
-    this.accurateOperatorRows.destroy();
+    this.accurateOperatorRows.destroy(); this.accurateAdjointRows.destroy();
     for (const buffer of [...this.params, ...this.candidateParams]) buffer.destroy();
   }
 }
@@ -2003,12 +2078,35 @@ struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 // multiply-add, which is not a restructuring-only change on this backend
 // (POWER_LIQUIDS_ULTIMATE_M1MAX, refuted lever 10).
 @group(0) @binding(13) var<storage,read_write> operatorRows:array<u32>;
+// Compiled fine-adjoint image: 144 u32 per row, one per (child, candidate)
+// lane of the destination-owned GhostValueAccumulate, published by
+// buildAccurateAdjointRows in the same commit and consumed by
+// stageAdjointCandidate. A word is either an encoded edge -- the destination
+// row in the low twenty bits and its Section 6.3 channel in the next five --
+// or a code at or above CHANNEL_CODE_BASE carrying the reports the inline walk
+// raised. Same discipline as the direct image: u32 only, so the coefficient is
+// still a live load from the accepted bank and the term stays one fused
+// multiply-add.
+@group(0) @binding(14) var<storage,read_write> adjointRows:array<u32>;
 const INVALID=0xffffffffu;const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
 const KEY=0u;const FLAGS=1u;const OWNER=24u;const STATE_CHANNELS=26u;
 const WORKSET_HEADER_WORDS=7u;const PAGE_RECORD_WORDS=28u;
 const OPERATOR_ROW_WORDS=19u;
-// Row capacity is bounded by SPGRID_MAXIMUM_ROW_CAPACITY (16,384), so every
+// Eight fine aliases of a 2:1 coarse leaf, eighteen candidate directions each.
+// This is the staging layout accurateTerms already uses for the adjoint half of
+// a row, so image word and staged word are the same index and the ordered fold
+// is untouched.
+const ADJOINT_ROW_WORDS=144u;
+// The edge packing. Twenty bits of row is exactly SPGRID_MAXIMUM_ROW_CAPACITY,
+// and five bits carry a channel that is always below eighteen here, so the
+// largest edge is far below CHANNEL_CODE_BASE and can never be read as a code.
+const ADJOINT_ROW_MASK=0xfffffu;
+const ADJOINT_CHANNEL_SHIFT=20u;
+// Row capacity is bounded by SPGRID_MAXIMUM_ROW_CAPACITY (1,048,576), so every
 // value at or above this base is unambiguously a code and never a row index.
+// Keep that headroom in mind if the ceiling is ever raised again: the margin is
+// what makes this encoding unambiguous, and it is asserted by the differential
+// harness rather than left to this comment.
 const CHANNEL_CODE_BASE=0xffff0000u;
 // primary 0 / secondary 0: the direction resolved to a multigrid-only slot.
 // The stencil contributes nothing and reports nothing, exactly as the inline
@@ -2016,6 +2114,7 @@ const CHANNEL_CODE_BASE=0xffff0000u;
 const CHANNEL_SKIP=0xffff0000u;
 fn channelCode(primary:u32,secondary:u32)->u32{return CHANNEL_CODE_BASE|(secondary<<8u)|primary;}
 fn operatorRowBase(row:u32)->u32{return row*OPERATOR_ROW_WORDS;}
+fn adjointRowBase(row:u32)->u32{return row*ADJOINT_ROW_WORDS;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn stopped()->bool{return arrayLength(&solverControl)<2u||atomicLoad(&solverControl[0])!=0u||atomicLoad(&solverControl[1])!=0u;}
 fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
@@ -2159,6 +2258,43 @@ fn reportChannelCode(code:u32,row:u32){
  let secondary=(code>>8u)&0xffu;let primary=code&0xffu;
  if(secondary!=0u){reportAt(2u,secondary,row);}
  if(primary!=0u){reportAt(2u,primary,row);}}
+// "Which fine row does this (child, candidate) alias reach, and through which
+// Section 6.3 channel", as the once-per-epoch image builder asks it: every
+// guard the inline walk applies, in the inline walk's order, with each report
+// returned as a code instead of raised, so a builder that must not touch the
+// solver control can hand it to the consumer.
+//
+// The dependent part -- the ghost resolution and the active-neighbour
+// resolution -- is not transcribed here: both are pageSlotCoded, the same one
+// definition the inline walk's pageSlot calls. That shared call is what keeps
+// the compiled edge equal to the edge the walk would have produced.
+//
+// A candidate whose direction has no channel in this row's transform resolves
+// to a zero coefficient, so the walk's c>0.0 test leaves the staged word at
+// zero and raises nothing -- which is precisely CHANNEL_SKIP, so it is encoded
+// as one rather than given a representation of its own.
+fn resolveAdjointCandidate(row:u32,child:u32,candidate:u32)->u32{
+ let h=geometry[row];let l=countTrailingZeros(h.y);if(l==0u){return CHANNEL_SKIP;}
+ let fine=l-1u;let q=originOf(h)/(1u<<l);
+ let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
+ let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){return CHANNEL_SKIP;}
+ if(ghostPage>=levelCapacity(fine)){return channelCode(31u,0u);}
+ let ghost=pageSlotCoded(fine,ghostPage,ghostQ,ghostQ);
+ if(ghost.x==INVALID){return channelCode(0u,ghost.y);}
+ let fineBase=levelBase(fine);
+ if((state[atBase(FLAGS,fineBase,ghost.x)]&GHOST)==0u
+  ||state[atBase(OWNER,fineBase,ghost.x)]!=row+1u){return CHANNEL_SKIP;}
+ let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;
+ if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){return CHANNEL_SKIP;}
+ let resolvedActive=pageSlotCoded(fine,ghostPage,ghostQ,vec3u(activeQ));
+ if(resolvedActive.x==INVALID){return channelCode(0u,resolvedActive.y);}
+ if((state[atBase(FLAGS,fineBase,resolvedActive.x)]&ACTIVE)==0u){return CHANNEL_SKIP;}
+ let encoded=state[atBase(OWNER,fineBase,resolvedActive.x)];
+ if(encoded==0u||encoded>capacity()){return channelCode(24u,0u);}
+ let other=encoded-1u;
+ let channel=section63ChannelForDirection(metrics[other].transformAndFlags&63u,delta);
+ if(channel>=18u){return CHANNEL_SKIP;}
+ return other|(channel<<ADJOINT_CHANNEL_SHIFT);}
 // Destination-owned GhostValueAccumulate. A 2:1 coarse leaf has at most
 // eight fine-level aliases. Each alias gathers the (at most eighteen) active
 // page neighbours that point to it. This is E^T by construction: it reads the
@@ -2284,11 +2420,58 @@ fn buildOperatorRow(row:u32,word:u32){
 // multiply plus a bare add and moved peak speed 7.8269 -> 7.5066
 // (POWER_LIQUIDS_ULTIMATE_M1MAX, refuted lever 10).
 //
-// The per-lane cost is the ghost resolution (pageFor + pageSlot) repeated by
-// the eighteen lanes of a child rather than shared. That is the trade: ~2.8x
-// the total dependent loads for ~6.3x the chains in flight and 1/19th the
-// per-lane depth. It is the same trade the direct-term stage already took.
+// The per-lane cost used to be the ghost resolution (pageFor + pageSlot)
+// repeated by the eighteen lanes of a child rather than shared. Both that
+// resolution and the per-candidate active-neighbour resolution are now
+// compiled once per accepted topology epoch, so a lane loads one word where it
+// used to run two five-to-seven-deep dependent chains. On the mini lane this
+// stage is entered by 165 merged-band applies per advance and measured 1.584
+// ms/advance -- the largest single pressure line in the isolated capture -- so
+// the chase is paid 165 times for a topology that changed once.
+//
+// Values and evaluation order are untouched: the coefficient is the same load
+// from the same accepted bank, the operand is the same inputVector element,
+// the product is the same single expression, and the staged word is the same
+// index, so finalizeStagedRow folds an unchanged array in unchanged order.
 fn stageAdjointCandidate(row:u32,child:u32,candidate:u32){let base=row*162u+18u+child*18u;
+ if(base+18u>arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
+  ||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
+ let destination=base+candidate;
+ accurateTerms[destination]=0.0;
+ let image=adjointRowBase(row)+child*18u+candidate;
+ if(image>=arrayLength(&adjointRows)){reportAt(2u,31u,row);return;}
+ let code=adjointRows[image];
+ if(code>=CHANNEL_CODE_BASE){reportChannelCode(code,row);return;}
+ let other=code&ADJOINT_ROW_MASK;
+ let c=section63Coefficients[coefficientBase(other)+1u+(code>>ADJOINT_CHANNEL_SHIFT)];
+ if(c>0.0){accurateTerms[destination]=c*(inputVector[row]-inputVector[other]);}
+}
+// Compile the fine-adjoint half of the operator, in the same commit and on the
+// same inputs as buildAccurateOperatorRows: one lane per (row, child,
+// candidate), writing the staging layout's own index so image word and staged
+// word never need translating.
+fn buildAdjointRow(row:u32,word:u32){
+ let image=adjointRowBase(row);
+ if(word>=ADJOINT_ROW_WORDS||image+ADJOINT_ROW_WORDS>arrayLength(&adjointRows)
+  ||row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)){return;}
+ // The same liveness test buildOperatorRow uses. An unpublished row carries a
+ // zero size word, and countTrailingZeros(0u) is 32, so the level has to be
+ // rejected before anything derives a level from it. Such a row is never in a
+ // transition workset, so no apply ever reads the word this writes.
+ if(geometry[row].y==0u){adjointRows[image+word]=CHANNEL_SKIP;return;}
+ adjointRows[image+word]=resolveAdjointCandidate(row,word/18u,word%18u);
+}
+@compute @workgroup_size(64) fn buildAccurateAdjointRows(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let item=linearLane(wg,groups,lane);
+ buildAdjointRow(item/ADJOINT_ROW_WORDS,item%ADJOINT_ROW_WORDS);
+}
+// Reference arm of the operator-image differential. This is
+// stageAdjointCandidate's body from before the compiled image: it re-runs both
+// page/brick/rank chases on every call. Production never encodes it. Keep it
+// byte-faithful to what the image replaced; it is the only executable
+// statement of what the image has to agree with.
+fn stageAdjointCandidateByChase(row:u32,child:u32,candidate:u32){let base=row*162u+18u+child*18u;
  if(base+18u>arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
   ||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
  let destination=base+candidate;
@@ -2411,6 +2594,11 @@ fn stageUnionItemByChase(item:u32,count:u32,row:u32){let countIndex=stagedCountI
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/144u;
  if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointCandidate(row,(item%144u)/18u,item%18u);}}}
+// Differential reference only; never encoded. See stageAdjointCandidateByChase.
+@compute @workgroup_size(64) fn stageMergedBandAdjointsByChase(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/144u;
+ if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointCandidateByChase(row,(item%144u)/18u,item%18u);}}}
 @compute @workgroup_size(64) fn finalizeStagedUnionRows(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let countIndex=stagedCountIndex();

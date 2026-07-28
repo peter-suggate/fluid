@@ -173,6 +173,8 @@ struct FineState { color:vec3f,alpha:f32,address:u32 }
 @group(0) @binding(1) var<uniform> fine:FineParams;
 @group(0) @binding(2) var<storage,read> worklist:array<u32>;
 @group(0) @binding(3) var<storage,read> metadata:array<u32>;
+struct BandConfig { pressureBandCells:u32,surfaceBandCells:u32,transportBandFineCells:u32,redistanceBandFineCells:u32 }
+@group(0) @binding(4) var<uniform> bands:BandConfig;
 @group(0) @binding(5) var<storage,read> sampleFlags:array<u32>;
 @group(0) @binding(6) var<storage,read> topologyControl:array<u32>;
 @group(0) @binding(7) var<storage,read> redistanceControl:array<u32>;
@@ -217,19 +219,100 @@ fn globalFinePhi(point:vec3f)->vec4f {
   var color=mix(phiColor,vec3f(0.96,0.02,0.72),residualInk);color=mix(color,vec3f(1.0),zeroInk);
   return vec4f(color,0.86);
 }
+/**
+ * Pressure refinement band against surface-band residency.
+ *
+ * Both widths are authored in finest octree cells, so both are measured here in
+ * the same unit: the finest cell is fineFactor fine cells wide. A sample is in
+ * the surface band when its fine phi is actually resident and valid -- that is
+ * the band as published, not as requested -- and in the pressure band when its
+ * distance to the interface is inside the authored pressure reach.
+ *
+ * The state worth seeing is the fourth one. A resident sample that is inside
+ * the pressure reach but has a non-resident face neighbour marks where the
+ * pressure discretization wants phi that the surface band does not carry. That
+ * is the precondition for the fine-to-coarse restriction finding no valid phi
+ * at a pressure cell centre, which rejects the whole publication rather than
+ * degrading it -- so the view shows the cause, not just the aftermath.
+ */
+fn bandResidency(point:vec3f)->vec4f {
+  if(arrayLength(&topologyControl)==0u||topologyControl[0]!=0u
+    ||arrayLength(&redistanceControl)<=4u||redistanceControl[3]==0u||redistanceControl[4]!=0u){
+    return vec4f(1.0,0.01,0.06,0.96);
+  }
+  let relative=renderWorldToFine(point);
+  if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return vec4f(0.0);}
+  let q=vec3i(floor(relative));
+  let address=fineAddress(q);
+  let finest=max(fine.fineCellWidth,1e-9)*f32(max(fine.fineFactor,1u));
+  if(address==INVALID){
+    // No resident support here. Drawn faintly so the surface band reads as a
+    // shell against the rest of the domain rather than a solid block.
+    return vec4f(0.03,0.09,0.28,0.06);
+  }
+  let phi=finePhi[address];
+  if(phi!=phi||abs(phi)>=3.402823e38){return vec4f(1.0,0.01,0.06,0.96);}
+  let h=max(fine.fineCellWidth,1e-9);
+  let distance=abs(phi);
+  // Every authored and derived width, nested outward from the interface. The
+  // two authored bands are in finest cells; the planner's transport and
+  // redistance widths are in fine cells, so they are scaled differently on
+  // purpose rather than sharing one unit.
+  if(distance<=0.5*h){return vec4f(1.0,1.0,1.0,0.95);}
+  var truncated=false;
+  for(var axis=0u;axis<3u;axis+=1u){
+    var delta=vec3i(0);delta[axis]=1;
+    if(fineAddress(q+delta)==INVALID||fineAddress(q-delta)==INVALID){truncated=true;}
+  }
+  if(distance<=f32(bands.pressureBandCells)*finest){
+    // The pressure solve reads phi here. Residency truncating this reach is the
+    // precondition for the restriction finding none, so it outranks the fill.
+    if(truncated){return vec4f(0.96,0.73,0.10,0.95);}
+    return vec4f(1.0,0.09,0.56,0.72);
+  }
+  if(distance<=f32(bands.transportBandFineCells)*h){
+    // Authored surface band beyond the pressure reach: transported every step.
+    return vec4f(0.04,0.72,0.82,0.34);
+  }
+  if(distance<=f32(bands.redistanceBandFineCells)*h){
+    // Kept valid by redistance but not transported -- the support margin that
+    // covers the backtrace and the trilinear stencil.
+    return vec4f(0.42,0.33,0.92,0.26);
+  }
+  // Resident past the redistance cutoff: whole-brick dilation and safety rings.
+  return vec4f(0.10,0.40,0.30,0.16);
+}
+fn bandResidencyVolume(uv:vec2f)->vec4f {
+  let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;
+  let interval=boxInterval(ray,minimum,maximum);if(interval.y<=interval.x){discard;}
+  let steps=traversalSteps(ray,interval);let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);
+  for(var i=0u;i<512u;i+=1u){
+    if(i>=steps||accum.a>0.985){break;}
+    let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);
+    let sample=bandResidency(point);
+    if(sample.a<=0.001){continue;}
+    accum=composite(accum,sample.rgb,sample.a*volumeOpacity());
+  }
+  return finishVolume(accum);
+}
 fn fineVolume(uv:vec2f)->vec4f {
   let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;let interval=boxInterval(ray,minimum,maximum);if(interval.y<=interval.x){discard;}let travel=abs(ray.direction*(interval.y-interval.x))/max(fine.fineCellWidth,1e-9);let steps=u32(clamp(ceil(travel.x+travel.y+travel.z+1.0),1.0,512.0));let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;
   for(var i=0u;i<512u;i+=1u){if(i>=steps||accum.a>0.985){break;}let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);let sample=fineState(point);if(sample.address==previous){continue;}previous=sample.address;let alpha=select(sample.alpha*0.20,sample.alpha,sample.alpha>0.30);accum=composite(accum,sample.color,alpha*volumeOpacity());}
   return finishVolume(accum);
 }
 @fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f {
-  let mode=i32(round(u.debug.w));if(i32(round(u.debug.x))==4){if(mode==25){discard;}return fineVolume(input.uv);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}if(mode==25){let sample=globalFinePhi(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}let sample=fineState(hit.xyz);if(sample.alpha<=0.001){discard;}return vec4f(displayColor(sample.color),sample.alpha);
+  let mode=i32(round(u.debug.w));
+  if(i32(round(u.debug.x))==4){if(mode==25){discard;}if(mode==26){return bandResidencyVolume(input.uv);}return fineVolume(input.uv);}
+  let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}
+  if(mode==26){let sample=bandResidency(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}
+  if(mode==25){let sample=globalFinePhi(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}let sample=fineState(hit.xyz);if(sample.alpha<=0.001){discard;}return vec4f(displayColor(sample.color),sample.alpha);
 }`;
 
 export class OctreeTechniqueOverlayPipeline {
   private topologyPipeline?: GPURenderPipeline;
   private lifecyclePipeline?: GPURenderPipeline;
   private fineLifecyclePipeline?: GPURenderPipeline;
+  private bandConfig?: GPUBuffer;
   private lifecycleMembershipPipeline?: GPUComputePipeline;
   private source?: OctreeTechniqueDebugSource;
   private ownerRows?: GPUTexture;
@@ -303,18 +386,29 @@ export class OctreeTechniqueOverlayPipeline {
       ]});
     }
     const fine=source.fineBandLifecycle;
-    if(fine&&this.fineLifecyclePipeline)this.fineLifecycleGroup=this.device.createBindGroup({layout:this.fineLifecyclePipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:fine.params},{binding:2,resource:fine.worklist},
-      {binding:3,resource:fine.metadata},{binding:5,resource:fine.sampleFlags},
-      {binding:6,resource:fine.topologyControl},{binding:7,resource:fine.redistanceControl},{binding:8,resource:fine.phi},
-    ]});
+    if(fine&&this.fineLifecyclePipeline){
+      if(!this.bandConfig)this.bandConfig=this.device.createBuffer({
+        label:"Octree band-residency overlay config",size:16,
+        usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+      this.device.queue.writeBuffer(this.bandConfig,0,new Uint32Array([
+        Math.max(0,Math.round(fine.bands.pressureBandCells)),
+        Math.max(0,Math.round(fine.bands.surfaceBandCells)),
+        Math.max(0,Math.round(fine.bands.transportBandFineCells)),
+        Math.max(0,Math.round(fine.bands.redistanceBandFineCells)),
+      ]));
+      this.fineLifecycleGroup=this.device.createBindGroup({layout:this.fineLifecyclePipeline.getBindGroupLayout(0),entries:[
+        {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:fine.params},{binding:2,resource:fine.worklist},
+        {binding:3,resource:fine.metadata},{binding:4,resource:{buffer:this.bandConfig}},{binding:5,resource:fine.sampleFlags},
+        {binding:6,resource:fine.topologyControl},{binding:7,resource:fine.redistanceControl},{binding:8,resource:fine.phi},
+      ]});
+    }
   }
 
   encode(encoder: GPUCommandEncoder, target: GPUTextureView, modeCode: number): boolean {
     let pipeline:GPURenderPipeline|undefined;let group:GPUBindGroup|undefined;
     if(modeCode===12||modeCode===14||modeCode===15){pipeline=this.topologyPipeline;group=this.topologyGroup;}
     else if(modeCode===17){pipeline=this.lifecyclePipeline;group=this.lifecycleGroup;if(this.lifecycleMembership&&this.lifecycleMembershipPipeline&&this.lifecycleMembershipGroup){const broker=new PassBroker(encoder);broker.clearBuffer(this.lifecycleMembership);const compute=broker.compute({label:"Expand octree topology lifecycle membership"});compute.setPipeline(this.lifecycleMembershipPipeline);compute.setBindGroup(0,this.lifecycleMembershipGroup);compute.dispatchWorkgroups(Math.ceil(this.lifecycleCapacity/64));broker.fence("octree topology lifecycle membership complete");}else{return false;}}
-    else if(modeCode===18||modeCode===25){pipeline=this.fineLifecyclePipeline;group=this.fineLifecycleGroup;}
+    else if(modeCode===18||modeCode===25||modeCode===26){pipeline=this.fineLifecyclePipeline;group=this.fineLifecycleGroup;}
     else{return false;}
     if(!pipeline||!group)return false;
     const pass=encoder.beginRenderPass({label:"Octree paper-technique overlay",colorAttachments:[{view:target,loadOp:"load",storeOp:"store"}]});

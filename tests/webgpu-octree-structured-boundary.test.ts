@@ -104,8 +104,13 @@ test("dynamic workset publication is wide and its destinations stay index-ordere
   assert.match(structuredBoundaryCoefficientWGSL,
     /countStructuredRowClasses[\s\S]*?if\(lane<5u\)\{worksetBlocks\[lane\*worksetBlockStride\(\)\+wg\.x\]/,
     "the row count must publish only classes 0..4 so it cannot clobber family blocks");
+  // The family phase indexes its block table through `foldedBlock` while the
+  // row phase above stays on `wg.x`. That asymmetry is deliberate: family work
+  // is slot-shaped, so its block count can saturate one workgroup dimension and
+  // its record is published two-dimensionally; row work is bounded by
+  // rowCapacity and never folds. Both still write disjoint class ranges.
   assert.match(structuredBoundaryCoefficientWGSL,
-    /countStructuredFamilyClasses[\s\S]*?if\(lane>=5u&&lane<9u\)\{worksetBlocks\[lane\*worksetBlockStride\(\)\+wg\.x\]/,
+    /countStructuredFamilyClasses[\s\S]*?if\(lane>=5u&&lane<9u\)\{worksetBlocks\[lane\*worksetBlockStride\(\)\+foldedBlock\(wg\)\]/,
     "the family count must publish only classes 5..8 so it cannot clobber row blocks");
   assert.match(structuredBoundaryCoefficientWGSL,
     /let blocks=select\(rowBlocks,slotBlocks,cls>=5u\);[\s\S]*for\(var start=0u;start<blocks;start\+=256u\)/,

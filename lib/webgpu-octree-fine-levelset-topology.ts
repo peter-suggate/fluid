@@ -60,14 +60,33 @@ export interface FineLevelSetTopologyBand {
  *
  * A departure query reads `transport + backtrace + interpolation` cells from
  * the interface, and every one of those samples must be resident or the
- * trilinear stencil fails closed and rolls the whole publication back. This is
- * a strictly stronger requirement than the redistance width, which only has to
- * be *valid* where it is read and explicitly invalidates past its own cutoff.
+ * trilinear stencil fails closed and rolls the whole publication back. That is
+ * a different requirement from the redistance width, which only has to be
+ * *valid* where it is read and explicitly invalidates past its own cutoff.
  *
- * Measured on the mini lane (transport 12, backtrace 4, interpolation 1 => 17):
- * 5 rings give 20 cells and run clean; 4 rings give 16, and the band overflows
- * into the INVALID sentinel, the pressure solve executes zero iterations, and
- * the acceptance gate still reports success. Keep this exact.
+ * The failure this guards is silent: when the dilation cannot cover the floor
+ * the resident-brick count degrades to the INVALID sentinel, the pressure
+ * solve executes zero iterations, and the acceptance gate still reports
+ * success. That was observed directly on the mini lane, back when the widths
+ * were `backtrace = fineFactor` and `redistance = transport + 3` -- which put
+ * the mini lane at 5 dilation rings against a floor of 17, one ring above
+ * failure.
+ *
+ * Both widths have since grown, and the current relationship in
+ * `planFineLevelSetBandFineCells` makes the floor structurally unreachable
+ * rather than narrowly satisfied. With `redistance = transport + 2f + 3` and
+ * `backtrace = 2f`, redistance now exceeds the floor by 2 and always drives
+ * `requiredFineCells`, so
+ *
+ *   coverage = ceil(redistance / B) * B + B  >=  redistance + B
+ *            =  floor + 6
+ *
+ * for every band width and every `f`, `B`. The mini lane consequently runs at
+ * 7 rings (transport 12, backtrace 8, interpolation 1 => floor 21; redistance
+ * 23 => 28 covered), not the 5 the older note recorded. The check below is
+ * therefore a tripwire on the width relationships themselves: it fires only if
+ * someone decouples redistance from the departure stencil again, which is
+ * exactly the edit that reintroduces the silent mode above.
  */
 export function fineLevelSetResidencyFloorCells(
   transportBandFineCells: number,
@@ -76,6 +95,68 @@ export function fineLevelSetResidencyFloorCells(
 ): number {
   return transportBandFineCells + maximumBacktraceFineCells
     + interpolationSupportFineCells;
+}
+
+/** The three fine-cell widths every Section 5 consumer derives from one band. */
+export interface FineLevelSetBandFineCells {
+  /** Section 5 surface-tracking width: the samples transport actually moves. */
+  readonly transportBandFineCells: number;
+  /** Width redistance must leave valid, covering the trilinear support beyond
+   * the transport band and the closed cutoff at its outer shell. */
+  readonly redistanceBandFineCells: number;
+  /** Conservative complete-trajectory displacement bound for one step. */
+  readonly maximumBacktraceFineCells: number;
+}
+
+/**
+ * Resolve the authored surface band into the widths allocation, per-step
+ * encode and work accounting all consume.
+ *
+ * `bandCells` is a half-width in *finest octree cells*, not fine cells, so the
+ * band keeps a fixed physical thickness when `fineFactor` changes between 4
+ * and 8. This is the sole place the fine widths are derived: allocation sizes
+ * brick residency from it once at construction while transport and redistance
+ * re-derive it every step, and a disagreement between those two silently
+ * under-provisions the band rather than failing (see the residency note on
+ * `fineLevelSetResidencyFloorCells`).
+ *
+ * Aanjaneya et al. [2017] Section 5 only constrains this from below -- the
+ * band must stay wide enough that the surface still falls inside it after
+ * advection -- which the redistance width above the residency floor satisfies
+ * for every `bandCells >= 0`. Width above that floor buys coarse-phi
+ * correction coverage, not per-sample surface accuracy, and costs band volume
+ * plus JFA passes.
+ */
+export function planFineLevelSetBandFineCells(
+  bandCells: number,
+  fineFactor: number,
+): FineLevelSetBandFineCells {
+  if (!Number.isFinite(bandCells) || bandCells < 0) {
+    throw new RangeError("Fine level-set band must be finite and non-negative");
+  }
+  if (!Number.isSafeInteger(fineFactor) || fineFactor < 1) {
+    throw new RangeError("Fine level-set factor must be a positive integer");
+  }
+  // The 256-cell sanity cap belongs on the transport band alone, with room
+  // left for the redistance reach below. Capping the two independently lets
+  // redistance saturate while transport keeps growing, and once redistance
+  // stops exceeding `transport + backtrace + interpolation` the dilation no
+  // longer covers the departure stencil -- the silent zero-iteration mode
+  // documented on `fineLevelSetResidencyFloorCells`. That was reachable from
+  // the authored parameter range: band 31 at factor 8 gave transport 248 and a
+  // clamped redistance of 256, covering 260 fine cells against a floor of 265.
+  const redistanceReachFineCells = 2 * fineFactor + 3;
+  const transportBandFineCells = Math.min(256 - redistanceReachFineCells,
+    Math.max(4, Math.round(bandCells) * fineFactor));
+  // The redistancer retains reachable samples on the closed authored cutoff.
+  // Two finest cells cover the ceil(sqrt(3)) trilinear reach, and the final
+  // three fine cells keep all eight samples around a pressure-cell centre
+  // valid when that centre itself lands on the outer support shell.
+  const redistanceBandFineCells = transportBandFineCells + redistanceReachFineCells;
+  // The regular UI lane advances by 0.008 s. Its characteristic can cross more
+  // than one finest octree cell once the dam accelerates.
+  const maximumBacktraceFineCells = 2 * fineFactor;
+  return { transportBandFineCells, redistanceBandFineCells, maximumBacktraceFineCells };
 }
 
 /** Bootstrap is the only authority permitted to discover/dilate the complete

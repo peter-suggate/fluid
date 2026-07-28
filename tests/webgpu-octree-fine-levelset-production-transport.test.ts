@@ -14,12 +14,25 @@ function compact(source: string) { return source.replace(/\s+/g, ""); }
 
 test("octree allocation and recurring publication share the two-cell transport closure", () => {
   const source = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
+  // Allocation and the recurring publishers no longer re-derive these widths
+  // side by side; they read one planner. That is what makes the closure
+  // structural rather than two literals that happen to agree -- and they must
+  // agree, because allocation sizes the resident bricks once while transport
+  // and redistance re-derive their reach every step, so a divergence
+  // under-provisions the band instead of failing.
   assert.match(source,
-    /constmaximumBacktraceFineCells=2\*globalFineFactor;constphysicalBand=planFineLevelSetTopologyBand\(brickResolution,\{maximumBacktraceFineCells,/,
-    "allocation must reserve the same two-finest-cell trajectory that the UI runtime can request");
+    /=planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells,globalFineFactor\);constphysicalBand=planFineLevelSetTopologyBand\(brickResolution,\{maximumBacktraceFineCells,/,
+    "allocation must reserve the planner's trajectory bound for the band it sizes");
   assert.match(source,
-    /constmaximumBacktraceFineCells=2\*this\.globalFineLevelSet!\.plan\.fineFactor;.*transport\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,/s,
+    /=planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells,this\.globalFineLevelSet!\.plan\.fineFactor\);.*transport\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,/s,
     "transport and both recurring A/B topology publishers must consume the allocation bound");
+  assert.equal((source.match(/2\*globalFineFactor|2\*this\.globalFineLevelSet!\.plan\.fineFactor/g) ?? []).length, 0,
+    "no site may re-derive the trajectory bound inline; the planner is the sole authority");
+  assert.equal((source.match(/planFineLevelSetBandFineCells\(/g) ?? []).length, 5,
+    "allocation, structured dynamics, the per-step transport/redistance pair, work"
+    + " accounting and the band-residency overlay source must each read the one"
+    + " planner -- the overlay included, so the view cannot draw a band the solver"
+    + " did not allocate");
 });
 
 test("direct fine transport has one page-bounded structured authority path", () => {

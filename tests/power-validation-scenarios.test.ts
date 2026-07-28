@@ -96,6 +96,10 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
     overrides: {
       maximumLeafSize: "2",
       interfaceRefinementBandCells: 3,
+      // Both bands are pinned. Leaving the surface band out does not inherit
+      // the pressure band -- `resolveMethodValues` fills it from its own spec
+      // default of 4, which on this tank overflows the fine brick capacity.
+      fineLevelSetBandCells: 3,
       globalFineLevelSetFactor: "4",
     },
   });
@@ -104,7 +108,8 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
   }
   assert.deepEqual(LARGE_HYDROSTATIC_POWER_METHOD_PROFILE, {
     ...POWER_VALIDATION_METHOD_PROFILE,
-    overrides: { ...POWER_VALIDATION_METHOD_PROFILE.overrides, interfaceRefinementBandCells: 4 },
+    overrides: { ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+      interfaceRefinementBandCells: 4, fineLevelSetBandCells: 4 },
   });
   assert.equal(getScenePreset("hydrostatic-power-large-offset").methodProfile,
     LARGE_HYDROSTATIC_POWER_METHOD_PROFILE);

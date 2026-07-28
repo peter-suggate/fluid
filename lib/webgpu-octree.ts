@@ -81,6 +81,7 @@ import { performanceShaderVariant } from "./stores/performance-instrumentation-s
 import { FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, planFineLevelSetGPUSummaries,
   WebGPUFineLevelSetSummaries } from "./webgpu-octree-fine-levelset-summary";
 import {
+  planFineLevelSetBandFineCells,
   planFineLevelSetTopologyBand,
   WebGPUFineLevelSetLeafSeeds,
   WebGPUFineLevelSetTopology,
@@ -234,6 +235,16 @@ export interface OctreeProjectionOptions {
   adaptivity?: number;
   /** Pure-phase cells farther from liquid/solid interfaces than this finest-cell band may remain coarse. */
   interfaceRefinementBandCells?: number;
+  /**
+   * Half-width of the Section 5 high-resolution surface-tracking band, in
+   * finest octree cells. Independent of the pressure refinement band above:
+   * that one decides where the octree stays fine, this one decides how far the
+   * separate fine level set is carried around the interface. Defaults to
+   * `interfaceRefinementBandCells`, which is how the two were coupled before
+   * they were separated, so an unset value reproduces the previous widths
+   * exactly.
+   */
+  fineLevelSetBandCells?: number;
   /** Authoritative domain-global Section 5 narrow-band factor. */
   globalFineLevelSetFactor?: 4 | 8;
   /** Explicit physical brick cap for the global factor-4/factor-8 publication. */
@@ -718,10 +729,62 @@ export function sumOctreePowerAllocationBreakdown(
 }
 
 /**
+ * Deformation/topology headroom on the interface band, matching the physical
+ * narrow-band plan above.  Fixed-size row records do not fragment, so this is
+ * pure interface-growth reserve.
+ */
+export const OCTREE_PRESSURE_SURFACE_GROWTH_SAFETY = 1.25;
+
+/**
+ * A sloshing or collapsing liquid redistributes within at least this fraction
+ * of the container, so the wettable envelope never shrinks below it however
+ * shallow the authored fill is.
+ */
+export const OCTREE_PRESSURE_WETTABLE_FLOOR_FRACTION = 0.5;
+
+/**
+ * Failure-only readback layout, in words. Both the copy offsets and the decode
+ * slices are derived from this one table, so a region cannot be copied to one
+ * offset and decoded from another. Reserved entries hold historical offsets
+ * stable; a region whose source is absent this run simply stays zero.
+ */
+const OCTREE_FRONTIER_FAILURE_REGIONS = [
+  ["frontier", 16], ["compaction", 16], ["reservedControl", 16],
+  ["descriptorCandidate", 16], ["topologyCandidate", 16], ["structuredCandidate", 16],
+  ["boundaryCandidate", 16], ["spgridCandidate", 16], ["epoch", 16], ["rowDelta", 16],
+  ["ownerCandidate", 32], ["carryFlags", 64], ["fineSummaryDirectory", 16],
+  ["fineSummaryWorkState", 32], ["coarseControl", 16], ["coarseDirectory", 8],
+  ["coarseDelta", 16], ["finePageDelta", 16], ["rowDeltaNewToOld", 64],
+  ["rowDeltaAffectedRows", 64], ["descriptorCandidates", 64], ["descriptorStatuses", 64],
+  ["structuredDispatch", 18], ["candidateSchedules", 9], ["reservedAlignment", 1],
+  ["frontierCandidates", 32],
+] as const satisfies ReadonlyArray<readonly [string, number]>;
+
+type OctreeFrontierFailureRegion = (typeof OCTREE_FRONTIER_FAILURE_REGIONS)[number][0];
+
+const OCTREE_FRONTIER_FAILURE_LAYOUT = (() => {
+  const spans = new Map<string, { readonly words: number; readonly bytes: number; readonly count: number }>();
+  let words = 0;
+  for (const [name, count] of OCTREE_FRONTIER_FAILURE_REGIONS) {
+    spans.set(name, { words, bytes: words * 4, count });
+    words += count;
+  }
+  return Object.freeze({
+    totalBytes: words * 4,
+    span(name: OctreeFrontierFailureRegion) {
+      const found = spans.get(name);
+      if (!found) throw new RangeError(`Unknown octree frontier failure region ${name}`);
+      return found;
+    },
+  });
+})();
+
+/**
  * Capacity for the compact pressure publication.  The interface contribution
- * scales with domain surface area, while the fully-coarse term covers the calm
- * bulk.  Overflow is detected on-GPU and fail-closed; this is a capacity, not
- * an assumption used by the numerical kernels.
+ * is an area-times-width band, the wall term reserves the closed-wall unit
+ * strip that can carry rows, and the fully-coarse term covers the calm bulk.
+ * Overflow is detected on-GPU and fail-closed; this is a capacity, not an
+ * assumption used by the numerical kernels.
  */
 export function planOctreePressureCapacity(
   dims: { nx: number; ny: number; nz: number },
@@ -729,17 +792,43 @@ export function planOctreePressureCapacity(
   interfaceBandCells: number,
   override?: number,
   closedTop = false,
+  liquidFillFraction = 1,
 ): OctreePressureCapacityPlan {
   const count = dims.nx * dims.ny * dims.nz;
   const aligned = (value: number) => Math.ceil(value / 256) * 256;
-  const surfaceArea = dims.nx * dims.ny + dims.nx * dims.nz + dims.ny * dims.nz;
-  const surfaceRows = surfaceArea * Math.max(2, Math.ceil(interfaceBandCells) + 2);
+  const bandLayers = Math.max(2, Math.ceil(interfaceBandCells) + 2);
+  // One connected interface has the area of a single cross-section.  Summing
+  // all three modelled a surface that is simultaneously maximal in every
+  // orientation, which no single interface can be, and at the widened ocean it
+  // reserved 384k rows against a 25.6k-cell free surface.  This is the same
+  // area-times-width shape `planGlobalFineNarrowBandBrickCapacity` uses for the
+  // physical band, including its explicit deformation headroom.
+  const interfaceArea = Math.max(dims.nx * dims.ny, dims.nx * dims.nz, dims.ny * dims.nz);
+  const surfaceRows = Math.ceil(interfaceArea * bandLayers * OCTREE_PRESSURE_SURFACE_GROWTH_SAFETY);
   const coarseRows = 8 * Math.ceil(count / Math.max(1, maximumLeafSize ** 3));
   // Power authority currently uses the generated interior catalog.  Reserve
-  // the exact closed-wall unit-strip upper bound in addition to the moving
-  // interface bound; overlap only makes this conservative.  This prevents the
+  // the closed-wall unit-strip bound in addition to the moving interface
+  // bound; overlap only makes this conservative.  This prevents the
   // correctness strip from silently converting into a row-arena rollback.
-  const wallRows = planOctreePowerBoundaryStrip(dims, interfaceBandCells, closedTop).unitCellUpperBound;
+  //
+  // `powerClosedWallStripIntersects` splits the whole strip to unit owners,
+  // but splitting the tree is not publishing a row: only wet leaves reach the
+  // row arena, and the strip above the free surface stays dry.  The widened
+  // ocean measures 148,600 published rows against a 480,768-cell closed strip,
+  // so reserving the strip over the full container height was reserving air.
+  // The wettable envelope is the rest waterline plus the strip width and the
+  // interface band, and never less than half the container, which covers the
+  // authored collapse and seiche cases.  Beyond it the GPU fails closed on
+  // arena overflow rather than corrupting the solve.
+  const stripWidth = Math.max(OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS, Math.ceil(interfaceBandCells));
+  const clampedFill = Math.max(0, Math.min(1, liquidFillFraction));
+  const wettableCellsY = Math.min(dims.ny,
+    Math.max(Math.ceil(dims.ny * OCTREE_PRESSURE_WETTABLE_FLOOR_FRACTION),
+      Math.ceil(clampedFill * dims.ny) + stripWidth + bandLayers));
+  const wallRows = wettableCellsY >= dims.ny
+    ? planOctreePowerBoundaryStrip(dims, interfaceBandCells, closedTop).unitCellUpperBound
+    : planOctreePowerBoundaryStrip({ nx: dims.nx, ny: wettableCellsY, nz: dims.nz },
+      interfaceBandCells, false).unitCellUpperBound;
   const requested = override === undefined ? surfaceRows + wallRows + coarseRows : override;
   const rowCapacity = Math.max(1, Math.min(count, aligned(Math.max(1, Math.floor(requested)))));
   return {
@@ -1134,6 +1223,7 @@ export class WebGPUOctreeProjection {
   private readonly topologyTileSize: number;
   private readonly adaptivity: number;
   private readonly interfaceRefinementBandCells: number;
+  private readonly fineLevelSetBandCells: number;
   private pipelinedMGPCG!: WebGPUOctreePipelinedMGPCG;
   /**
    * Single-dispatch executor for small domains (Part D). Present only when the
@@ -1216,6 +1306,12 @@ export class WebGPUOctreeProjection {
     this.balanceRounds = Math.max(1, Math.ceil(Math.log2(this.maxLeafSize)));
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
+    // Section 5's surface band is a separate physical width from the pressure
+    // refinement band; the paper only constrains it from below. Defaulting to
+    // the pressure band preserves the coupled widths every existing lane was
+    // measured against, so an unset value is not a behaviour change.
+    this.fineLevelSetBandCells = Math.max(0, Math.min(32,
+      Math.round(options.fineLevelSetBandCells ?? this.interfaceRefinementBandCells)));
     // Analytic dam/tank scenes can construct compact topology and first fine seeds
     // phi without allocating or uploading a box-sized bootstrap texture.
     // Explicitly seeded brick geometry is not one of those closed-form shapes,
@@ -1244,6 +1340,7 @@ export class WebGPUOctreeProjection {
       dims, this.maxLeafSize, this.interfaceRefinementBandCells,
       options.pressureRowCapacity,
       scene.container.top === "closed",
+      scene.container.fillFraction,
     );
     // The immutable pressure-row capacity selects the production lane. Every
     // capacity owned by one persistent workgroup must fit that executor's
@@ -1461,7 +1558,9 @@ export class WebGPUOctreeProjection {
     this.topologyCandidateDispatch = device.createBuffer({
       label: "Octree topology, frontier, and row-delta dispatch",
       size: 48,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
+      // COPY_SRC is failure-path only: the compact schedules are unreadable
+      // once a rejection has already consumed them.
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC,
     });
     this.params = device.createBuffer({ label: "Octree projection parameters", size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const projectionActivityProfile = performanceShaderVariant();
@@ -1640,7 +1739,11 @@ export class WebGPUOctreeProjection {
           // coarse interface leaf must not be discarded merely because its
           // pressure degree of freedom spans more than one finest cell.
           finestLeafSize: this.maxLeafSize,
-          haloCells: this.interfaceRefinementBandCells,
+          // Seeding must reach at least as far as the widest band that
+          // consumes the seeds. An over-wide halo only produces seeds the
+          // redistance cutoff later invalidates; an under-wide one leaves the
+          // outer band unseeded and fails the publication closed.
+          haloCells: Math.max(this.interfaceRefinementBandCells, this.fineLevelSetBandCells),
           // Always bound; the analytic condition below selects the authority.
           // Without one of the two, no leaf seeds the band at all and every
           // downstream fine/coarse publication is empty.
@@ -1666,24 +1769,16 @@ export class WebGPUOctreeProjection {
           const brickDimensions = [dims.nx, dims.ny, dims.nz]
             .map((value) => Math.ceil(value * globalFineFactor / brickResolution)) as [number, number, number];
           const logicalBrickCount = brickDimensions.reduce((product, value) => product * value, 1);
-          const transportBandFineCells = Math.min(256, Math.max(4,
-            this.interfaceRefinementBandCells * globalFineFactor));
           // Section 5 transports every sample in the authored narrow band.
           // The resident topology must therefore also hold the complete
-          // backtrace and trilinear stencil beyond that band.  A 3-D
-          // trilinear corner can be sqrt(3) fine cells from the query, so its
-          // signed-distance support needs two cells rather than one.
-          // The redistancer retains reachable samples on the closed authored
-          // cutoff. Two cells cover ceil(sqrt(3)) interpolation reach, and one
-          // final cell keeps all eight samples around a pressure-cell centre
-          // valid when that centre itself lands on the outer support shell.
-          // An unreachable cutoff sentinel is still rejected by seed identity.
-          const redistanceBandFineCells = Math.min(256,
-            transportBandFineCells + 2 * globalFineFactor + 3);
-          // The regular UI lane advances by 0.008 s. Its characteristic can
-          // cross more than one finest octree cell once the dam accelerates,
-          // while the redistance residency above already reserves two.
-          const maximumBacktraceFineCells = 2 * globalFineFactor;
+          // backtrace and trilinear stencil beyond that band. A 3-D trilinear
+          // corner can be sqrt(3) fine cells from the query, so its
+          // signed-distance support needs two cells rather than one. An
+          // unreachable cutoff sentinel is still rejected by seed identity.
+          // These widths are re-derived per step from the same planner; the
+          // shared helper is what keeps allocation and encode in agreement.
+          const { transportBandFineCells, redistanceBandFineCells, maximumBacktraceFineCells }
+            = planFineLevelSetBandFineCells(this.fineLevelSetBandCells, globalFineFactor);
           const physicalBand = planFineLevelSetTopologyBand(brickResolution, {
             maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
@@ -2341,8 +2436,8 @@ export class WebGPUOctreeProjection {
       maximumDisplacementFineCells: this.globalFineLevelSet?.plan.fineFactor ?? 4,
       ...(this.globalFineSourceA && this.globalFineSourceB ? {
         fineSources: [this.globalFineSourceA, this.globalFineSourceB] as const,
-        transportBandFineCells: Math.min(256, Math.max(4,
-          this.interfaceRefinementBandCells * this.globalFineSourceA.plan.fineFactor)),
+        transportBandFineCells: planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
+          this.globalFineSourceA.plan.fineFactor).transportBandFineCells,
       } : {}),
     });
     const producedSupport = this.airVelocitySupport.plan.support;
@@ -3451,13 +3546,12 @@ export class WebGPUOctreeProjection {
           );
         const compactCoarseEntry: GPUBindGroupEntry = { binding: 9,
           resource: { buffer: this.powerCoarseLevelSetSchedule!.sampleSource.directory } };
-        const bandCells = Math.min(256, Math.max(4,
-          this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4)));
-        // Match allocation planning above. The final three cells cover the
-        // complete 3-D trilinear stencil and its centre on the closed cutoff.
-        const redistanceBandCells = Math.min(256,
-          bandCells + 2 * this.globalFineLevelSet!.plan.fineFactor + 3);
-        const maximumBacktraceFineCells = 2 * this.globalFineLevelSet!.plan.fineFactor;
+        // Same planner as allocation. The final three cells cover the complete
+        // 3-D trilinear stencil and its centre on the closed cutoff.
+        const { transportBandFineCells: bandCells,
+          redistanceBandFineCells: redistanceBandCells, maximumBacktraceFineCells }
+          = planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
+            this.globalFineLevelSet!.plan.fineFactor);
         const transport = this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB;
         let transportEncoded = false;
         // Adapter publication, coarse bootstrap and compact interface seeding
@@ -3472,8 +3566,7 @@ export class WebGPUOctreeProjection {
             timestep: dt_s,
             boundaryPolicy: "closed-neumann",
             openTopBoundary: this.scene.container.top !== "closed",
-            transportBandCells: Math.min(256, Math.max(4,
-              this.interfaceRefinementBandCells * (this.globalFineLevelSet?.plan.fineFactor ?? 4))),
+            transportBandCells: bandCells,
             maximumBacktraceFineCells,
           });
           // Topology may reuse the shared physical payload pool. Capture the
@@ -3788,6 +3881,13 @@ export class WebGPUOctreeProjection {
       phi: { buffer: fine.phi },
       topologyControl: { buffer: fineTopology.control },
       redistanceControl: { buffer: fineRedistance.control },
+      // The derived widths come from the planner the solver itself runs, so the
+      // view cannot drift from the band that was actually allocated.
+      bands: {
+        pressureBandCells: this.interfaceRefinementBandCells,
+        surfaceBandCells: this.fineLevelSetBandCells,
+        ...planFineLevelSetBandFineCells(this.fineLevelSetBandCells, fine.plan.fineFactor),
+      },
     } : undefined;
     return {
       leaves: { buffer: surface.leaves },
@@ -3866,55 +3966,67 @@ export class WebGPUOctreeProjection {
    * selector/counts and compact scheduler words identify the first zero
    * publication without reading any row payload or influencing authority. */
   async readPowerFrontierFailure() {
+    const layout = OCTREE_FRONTIER_FAILURE_LAYOUT;
     const readback = this.device.createBuffer({
       label: "Octree power-frontier failure readback",
-      size: 2464,
+      size: layout.totalBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.device.createCommandEncoder({
       label: "Read octree power-frontier failure headers",
     });
-    encoder.copyBufferToBuffer(this.leafFrontier, 0, readback, 0, 64);
-    encoder.copyBufferToBuffer(this.compaction, 0, readback, 64, 64);
-    encoder.copyBufferToBuffer(this.powerDescriptor!.control, 0, readback, 192, 64);
-    encoder.copyBufferToBuffer(this.powerTopology!.control, 0, readback, 256, 64);
-    encoder.copyBufferToBuffer(this.structuredVelocity!.candidateControl, 0, readback, 320, 64);
-    encoder.copyBufferToBuffer(this.structuredBoundary!.candidateControl, 0, readback, 384, 64);
-    encoder.copyBufferToBuffer(this.firstOrderVCycle.candidateControl, 0, readback, 448, 64);
-    encoder.copyBufferToBuffer(this.topologyEpoch!.state, 0, readback, 512, 64);
-    encoder.copyBufferToBuffer(this.leafFrontier,
-      this.frontierAllocation.rowDeltaControlOffsetWords * 4, readback, 576, 64);
-    encoder.copyBufferToBuffer(this.ownerPages.candidateTransaction, 0, readback, 640, 128);
-    encoder.copyBufferToBuffer(this.compaction,
-      this.compactionAllocationRowDeltaScratchOffsetBytes, readback, 768, 256);
+    const capture = (region: OctreeFrontierFailureRegion, source: GPUBuffer, sourceOffset = 0) => {
+      const span = layout.span(region);
+      encoder.copyBufferToBuffer(source, sourceOffset, readback, span.bytes, span.count * 4);
+    };
+    capture("frontier", this.leafFrontier);
+    capture("compaction", this.compaction);
+    capture("descriptorCandidate", this.powerDescriptor!.control);
+    capture("topologyCandidate", this.powerTopology!.control);
+    capture("structuredCandidate", this.structuredVelocity!.candidateControl);
+    capture("boundaryCandidate", this.structuredBoundary!.candidateControl);
+    capture("spgridCandidate", this.firstOrderVCycle.candidateControl);
+    capture("epoch", this.topologyEpoch!.state);
+    capture("rowDelta", this.leafFrontier,
+      this.frontierAllocation.rowDeltaControlOffsetWords * 4);
+    capture("ownerCandidate", this.ownerPages.candidateTransaction);
+    capture("carryFlags", this.compaction, this.compactionAllocationRowDeltaScratchOffsetBytes);
     if (this.globalFineSummaries) {
-      encoder.copyBufferToBuffer(this.globalFineSummaries.directory, 0, readback, 1024, 64);
-      encoder.copyBufferToBuffer(this.globalFineSummaries.diagnosticBuffers.workState,
-        0, readback, 1088, 128);
+      capture("fineSummaryDirectory", this.globalFineSummaries.directory);
+      capture("fineSummaryWorkState", this.globalFineSummaries.diagnosticBuffers.workState);
     }
     if (this.powerCoarseLevelSetSchedule) {
       const coarse = this.powerCoarseLevelSetSchedule.sampleSource;
-      encoder.copyBufferToBuffer(coarse.control, 0, readback, 1216, 64);
-      encoder.copyBufferToBuffer(coarse.directory, 0, readback, 1280, 32);
-      encoder.copyBufferToBuffer(coarse.delta, 0, readback, 1312, 64);
+      capture("coarseControl", coarse.control);
+      capture("coarseDirectory", coarse.directory);
+      capture("coarseDelta", coarse.delta);
     }
     const fineTopology = this.globalFinePublishedIsA
       ? this.globalFineTopologyBA : this.globalFineTopologyAB;
-    if (fineTopology) {
-      encoder.copyBufferToBuffer(fineTopology.pageDelta, 0, readback, 1376, 64);
-    }
+    if (fineTopology) capture("finePageDelta", fineTopology.pageDelta);
     // Keep the first descriptor wave beside its exact row-delta inputs. A
     // malformed compact-list publication otherwise gets overwritten by the
     // coupled poison flag before a failure-only inspection can distinguish
     // list ordering from descriptor geometry.
-    encoder.copyBufferToBuffer(this.leafFrontier,
-      this.frontierAllocation.rowDeltaNewToOldOffsetWords * 4, readback, 1440, 256);
-    encoder.copyBufferToBuffer(this.leafFrontier,
-      this.frontierAllocation.rowDeltaAffectedRowsOffsetWords * 4, readback, 1696, 256);
-    encoder.copyBufferToBuffer(this.powerDescriptor!.candidateDescriptors,
-      0, readback, 1952, 256);
-    encoder.copyBufferToBuffer(this.powerDescriptor!.dispatch,
-      4 * 4, readback, 2208, 256);
+    capture("rowDeltaNewToOld", this.leafFrontier,
+      this.frontierAllocation.rowDeltaNewToOldOffsetWords * 4);
+    capture("rowDeltaAffectedRows", this.leafFrontier,
+      this.frontierAllocation.rowDeltaAffectedRowsOffsetWords * 4);
+    capture("descriptorCandidates", this.powerDescriptor!.candidateDescriptors);
+    capture("descriptorStatuses", this.powerDescriptor!.dispatch, 4 * 4);
+    // The structured publication's own indirect records. Words 3..5 are the
+    // slot dispatch consumed by `classifyStructuredCatalogSlots`; a record
+    // Dawn's indirect-args validator zeroed raises no error and simply never
+    // runs the stage, which is indistinguishable from a physics rejection in
+    // the control words alone.
+    capture("structuredDispatch", this.structuredVelocity!.liveRowDispatch);
+    // The three compact schedules the emission/sort/carry stages actually
+    // consume, beside the head of the compact candidate list they fill. A
+    // published row count with an empty candidate record is invisible in the
+    // control words alone.
+    capture("candidateSchedules", this.topologyCandidateDispatch);
+    capture("frontierCandidates", this.leafFrontier,
+      this.frontierAllocation.candidateOffsetWords * 4);
     this.device.queue.submit([encoder.finish()]);
     let result: {
       frontier: number[];
@@ -3938,34 +4050,44 @@ export class WebGPUOctreeProjection {
       rowDeltaAffectedRows: number[];
       descriptorCandidates: number[];
       descriptorStatuses: number[];
+      structuredDispatch: number[];
+      candidateSchedules: number[];
+      frontierCandidates: number[];
       boundaryFailureRow?: unknown;
       coarseFailureRow?: unknown;
     };
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
+      const decode = (region: OctreeFrontierFailureRegion) => {
+        const span = layout.span(region);
+        return Array.from(words.slice(span.words, span.words + span.count));
+      };
       result = {
-        frontier: Array.from(words.slice(0, 16)),
-        compaction: Array.from(words.slice(16, 32)),
-        descriptorCandidate: Array.from(words.slice(48, 64)),
-        topologyCandidate: Array.from(words.slice(64, 80)),
-        structuredCandidate: Array.from(words.slice(80, 96)),
-        boundaryCandidate: Array.from(words.slice(96, 112)),
-        spgridCandidate: Array.from(words.slice(112, 128)),
-        epoch: Array.from(words.slice(128, 144)),
-        rowDelta: Array.from(words.slice(144, 160)),
-        ownerCandidate: Array.from(words.slice(160, 192)),
-        carryFlags: Array.from(words.slice(192, 256)),
-        fineSummaryDirectory: Array.from(words.slice(256, 272)),
-        fineSummaryWorkState: Array.from(words.slice(272, 304)),
-        coarseControl: Array.from(words.slice(304, 320)),
-        coarseDirectory: Array.from(words.slice(320, 328)),
-        coarseDelta: Array.from(words.slice(328, 344)),
-        finePageDelta: Array.from(words.slice(344, 360)),
-        rowDeltaNewToOld: Array.from(words.slice(360, 424)),
-        rowDeltaAffectedRows: Array.from(words.slice(424, 488)),
-        descriptorCandidates: Array.from(words.slice(488, 552)),
-        descriptorStatuses: Array.from(words.slice(552, 616)),
+        frontier: decode("frontier"),
+        compaction: decode("compaction"),
+        descriptorCandidate: decode("descriptorCandidate"),
+        topologyCandidate: decode("topologyCandidate"),
+        structuredCandidate: decode("structuredCandidate"),
+        boundaryCandidate: decode("boundaryCandidate"),
+        spgridCandidate: decode("spgridCandidate"),
+        epoch: decode("epoch"),
+        rowDelta: decode("rowDelta"),
+        ownerCandidate: decode("ownerCandidate"),
+        carryFlags: decode("carryFlags"),
+        fineSummaryDirectory: decode("fineSummaryDirectory"),
+        fineSummaryWorkState: decode("fineSummaryWorkState"),
+        coarseControl: decode("coarseControl"),
+        coarseDirectory: decode("coarseDirectory"),
+        coarseDelta: decode("coarseDelta"),
+        finePageDelta: decode("finePageDelta"),
+        rowDeltaNewToOld: decode("rowDeltaNewToOld"),
+        rowDeltaAffectedRows: decode("rowDeltaAffectedRows"),
+        descriptorCandidates: decode("descriptorCandidates"),
+        descriptorStatuses: decode("descriptorStatuses"),
+        structuredDispatch: decode("structuredDispatch"),
+        candidateSchedules: decode("candidateSchedules"),
+        frontierCandidates: decode("frontierCandidates"),
       };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -4200,9 +4322,12 @@ export class WebGPUOctreeProjection {
       reductionPartialCount: outer.workAccountingPlan.reductionPartialCount,
     });
     const fine = this.globalFineLevelSetSource;
-    const bandCells = Math.min(256,
-      Math.max(4, this.interfaceRefinementBandCells * (fine?.plan.fineFactor ?? 4))
-        + (fine?.plan.fineFactor ?? 4) + 3);
+    // The redistancer is encoded from `redistanceBandCells`, so the accounting
+    // estimate has to plan the JFA ladder over that same width. Deriving it
+    // separately here previously lost one `fineFactor` of reach and reported
+    // fewer encoded iterations than were submitted.
+    const { redistanceBandFineCells: bandCells } = planFineLevelSetBandFineCells(
+      this.fineLevelSetBandCells, fine?.plan.fineFactor ?? 4);
     return Object.freeze({ pressure,
       ownerLogicalPages: this.ownerPages.plan.logicalBrickCount,
       ownerBytesPerPage: this.ownerPages.plan.bytesPerPage,
@@ -5789,12 +5914,24 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   if (!summary.found) { return false; }
   // The fine-summary values and cell spacing are physical. Two authored
   // bands are retained here: the requested interface band and one additional
-  // maximum-leaf displacement/support ring. This spatial retention is the
-  // pressure-side coarsening hysteresis and prevents alternating split/carry
-  // decisions as the zero set crosses a dyadic boundary. It also keeps the
-  // coarse and fine publication clocks coherent across transported frames.
+  // displacement/support ring the width of this leaf's own edge. This spatial
+  // retention is the pressure-side coarsening hysteresis and prevents
+  // alternating split/carry decisions as the zero set crosses a dyadic
+  // boundary. It also keeps the coarse and fine publication clocks coherent
+  // across transported frames.
+  //
+  // The ring scales with the CANDIDATE leaf, not with the configured maximum
+  // leaf. A leaf may only survive when the interface clears the authored band
+  // by its own edge length, which is the standard 2:1 graded-octree sizing
+  // criterion and is what makes each dyadic size occupy its own shell. Sizing
+  // the ring by the maximum leaf instead made the protected region uniform
+  // across every size, so raising the maximum leaf widened a uniformly FINE
+  // band (16 -> a 20-cell band, 32 -> a 36-cell band) instead of coarsening
+  // the calm interior. The max(2, size) floor is the smallest dyadic merge
+  // candidate, so every maximum-leaf-2 validation lane keeps exactly the ring
+  // it has today.
   let cellWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
-  let protectionWidth = (max(1.0, params.solve.w) + f32(params.dimsMax.w)) * cellWidth;
+  let protectionWidth = (max(1.0, params.solve.w) + max(2.0, f32(size))) * cellWidth;
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
   return summary.complete && (crossesInterface || summary.minimumAbsolutePhi <= protectionWidth);
 }

@@ -205,7 +205,14 @@ const EMPTY:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.emptyPublication}u;const RECIPROCI
 const GRADING:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.grading}u;const COEFFICIENT:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.coefficientPositivity}u;
 const HIERARCHY:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.hierarchy}u;const INDIRECT:u32=${OCTREE_TOPOLOGY_EPOCH_ERROR.indirectDispatch}u;
 const OWNER_READY:u32=0x80000000u;const STRUCTURED_READY:u32=0x5356454cu;
-fn poison(error:u32){epoch.reserved[1u]=structured[0u];epoch.reserved[2u]=structured[1u];ownerCandidate[28u]=0u;frontier[6u]=0u;frontier[9u]=error;
+// Reserved word 3 latches the stash to the FIRST poison of a candidate. Both
+// validateInactiveTopologyEpoch and beginReadyTopologyCommit poison, and the
+// second one used to stash the value the first had already written into
+// structured word 0, so a rejection reported the epoch's own error word back
+// to itself and the publisher's real failure code was lost.
+fn poison(error:u32){if(epoch.reserved[3u]==0u){epoch.reserved[3u]=1u;
+  epoch.reserved[1u]=structured[0u];epoch.reserved[2u]=structured[1u];}
+ ownerCandidate[28u]=0u;frontier[6u]=0u;frontier[9u]=error;
  descriptor[2u]|=error;descriptor[4u]|=error;
  topology[2u]|=error;structured[0u]=error;boundary[0u]|=error;spgrid[8u]|=error;}
 fn candidateCount()->u32{let selector=frontier[7u];return select(p.rowCapacity+1u,frontier[selector],selector<=1u);}
@@ -227,7 +234,7 @@ fn candidateErrors()->u32{var error=0u;let count=candidateCount();let generation
  // candidate validator proves every changed page, not every resident page.
  if(spgrid[8u]!=0u||spgrid[0u]==0u||spgrid[4u]!=spgrid[0u]
    ||spgrid[1u]==0u||spgrid[2u]!=spgrid[3u]||spgrid[2u]>spgrid[1u]){error|=HIERARCHY;}return error;}
-@compute @workgroup_size(1)fn validateInactiveTopologyEpoch(){let error=candidateErrors();let count=candidateCount();
+@compute @workgroup_size(1)fn validateInactiveTopologyEpoch(){epoch.reserved[3u]=0u;let error=candidateErrors();let count=candidateCount();
  epoch.readyEpoch=epoch.activeEpoch+1u;epoch.readyGeneration=ownerCandidate[24u];epoch.error=error;epoch.rowCount=count;
  epoch.topologyHash=(count*0x9e3779b9u)^descriptor[1u]^(structured[3u]<<16u)^spgrid[1u];epoch.ready=select(1u,0u,error!=0u);
  if(error!=0u){poison(error);}}

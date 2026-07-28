@@ -28,6 +28,30 @@ const FAMILY_CLASSES = [5, 6, 7, 8] as const;
 export const STRUCTURED_VELOCITY_EXTENSION_LAYERS = 6;
 export const STRUCTURED_PROJECTION_ENERGY_WORDS = 32;
 
+/** Workgroup size of every slot-shaped structured kernel. */
+export const STRUCTURED_SLOT_WORKGROUP_SIZE = 64;
+/** `maxComputeWorkgroupsPerDimension` floor required of every WebGPU device. */
+const MAXIMUM_WORKGROUPS_PER_DIMENSION = 65_535;
+
+/**
+ * Two-dimensional dispatch for a slot-capacity-shaped kernel.
+ *
+ * `slotCapacity` is `pressureRowCapacity * maximumFaceIncidence`, so it passes
+ * the one-dimensional 65,535-workgroup ceiling at roughly 140,000 pressure
+ * rows -- well inside the domains the adaptive octree is meant to carry. The X
+ * extent is pinned at exactly 65,535 whenever it saturates, which is what lets
+ * the kernel recover a linear slot handle from a constant stride instead of a
+ * uniform. Below saturation Y is 1 and the stride is never applied.
+ */
+export function structuredSlotDispatch(slotCapacity: number): readonly [number, number, number] {
+  if (!Number.isSafeInteger(slotCapacity) || slotCapacity < 1) {
+    throw new RangeError("Structured slot dispatch capacity must be a positive integer");
+  }
+  const blocks = Math.ceil(slotCapacity / STRUCTURED_SLOT_WORKGROUP_SIZE);
+  const x = Math.min(MAXIMUM_WORKGROUPS_PER_DIMENSION, blocks);
+  return [x, Math.ceil(blocks / x), 1];
+}
+
 /**
  * Whether the four-stage kinetic-energy probe is encoded this run.
  *
@@ -532,7 +556,7 @@ export class WebGPUStructuredVelocityDynamics {
     pass.setPipeline(this.topologyTransfer);
     pass.setBindGroup(0, this.group(this.topologyTransfer,
       [0, 1, 2, 3, 4, 5, 6, 16, 17, 18, 24], params));
-    pass.dispatchWorkgroups(Math.ceil(this.resources.structured.plan.slotCapacity / 64));
+    pass.dispatchWorkgroups(...structuredSlotDispatch(this.resources.structured.plan.slotCapacity));
     broker.fence("changed topology face velocities transferred");
   }
 
@@ -704,6 +728,12 @@ fn boundaryValid()->bool{
   }
   return boundaryValidWord;
 }
+// Class dispatch records pin X at exactly 65,535 workgroups whenever a class
+// saturates one dimension (see publishStructuredClassDispatch in
+// webgpu-octree-structured-velocity-gpu.ts and its boundary twin), so a class
+// item folds back with that constant stride. A class that fits one dimension
+// dispatches Y=1 and never reaches the second term.
+fn classItem(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
 fn workItem(cls:u32,index:u32)->u32{let base=wbase(cls);if(!boundaryValid()||worksets[base]!=acc(3u)||index>=worksets[base+1u]){return INVALID;}return worksets[base+7u+index];}
 
 @compute @workgroup_size(1)
@@ -713,8 +743,11 @@ fn prepareStructuredDynamics(){
     let valid=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid()&&worksets[base]==acc(3u);
     let out=3u*cls;
     indirect[out]=select(0u,worksets[base+4u],valid);
-    indirect[out+1u]=1u;
-    indirect[out+2u]=1u;
+    // Y and Z are published words, not constants: a slot-shaped class whose
+    // block count passes 65,535 is recorded as (65535, ceil(blocks/65535), 1)
+    // and classItem folds the two dimensions back.
+    indirect[out+1u]=select(1u,worksets[base+5u],valid);
+    indirect[out+2u]=select(1u,worksets[base+6u],valid);
   }
 }
 
@@ -1180,8 +1213,12 @@ fn candidateClosedWorld(point:vec3f,n:vec3f)->bool{
   return false;
 }
 fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAMPLE);return handle<atomicMin(&candidate[1],handle);}
+// The slot handle is two-dimensional: structuredSlotDispatch pins X at
+// exactly 65,535 workgroups whenever the slot capacity saturates the
+// one-dimensional limit, so the row stride below is that saturated extent.
+// Under saturation Y is 1 and the second term is zero.
 @compute @workgroup_size(64)fn transferStructuredTopologyCandidate(@builtin(global_invocation_id)g:vec3u){
-  let handle=g.x;if(arrayLength(&candidate)<7u||atomicLoad(&candidate[0])!=CANDIDATE_VALID||atomicLoad(&candidate[6])==0u||handle>=atomicLoad(&candidate[3])){return;}
+  let handle=g.x+g.y*65535u*64u;if(arrayLength(&candidate)<7u||atomicLoad(&candidate[0])!=CANDIDATE_VALID||atomicLoad(&candidate[6])==0u||handle>=atomicLoad(&candidate[3])){return;}
   let candidateBank=atomicLoad(&candidate[5])&1u;let base=candidateBank*p.authorityWords;let marker=bitcast<f32>(a[base+p.centroidOffset+4u*handle+3u]);if(marker>0.5){return;}
   let at=base+p.centroidOffset+4u*handle;let point=vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));let nt=base+p.normalOffset+4u*handle;let n=vec3f(bitcast<f32>(a[nt]),bitcast<f32>(a[nt+1u]),bitcast<f32>(a[nt+2u]));
   if(!finite3(point)||!finite3(n)){_ = rejectCandidateTransfer(handle);return;}
@@ -1337,10 +1374,10 @@ fn advect(cls:u32,index:u32){
   setNextValue(handle,projected);
   transportMetrics[handle]=vec4f(projected*n*area,.5*area*max(0.,prior*prior-projected*projected));
 }
-@compute @workgroup_size(64)fn advectStructuredClass5(@builtin(global_invocation_id)g:vec3u){advect(5u,g.x);}
-@compute @workgroup_size(64)fn advectStructuredClass6(@builtin(global_invocation_id)g:vec3u){advect(6u,g.x);}
-@compute @workgroup_size(64)fn advectStructuredClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,g.x);}
-@compute @workgroup_size(64)fn advectStructuredClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,g.x);}
+@compute @workgroup_size(64)fn advectStructuredClass5(@builtin(global_invocation_id)g:vec3u){advect(5u,classItem(g));}
+@compute @workgroup_size(64)fn advectStructuredClass6(@builtin(global_invocation_id)g:vec3u){advect(6u,classItem(g));}
+@compute @workgroup_size(64)fn advectStructuredClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,classItem(g));}
+@compute @workgroup_size(64)fn advectStructuredClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,classItem(g));}
 
 fn commitAdvected(cls:u32,index:u32){
   let handle=workItem(cls,index);
@@ -1350,10 +1387,10 @@ fn commitAdvected(cls:u32,index:u32){
   if(!supportPublicationValid()){return;}
   a[abase()+p.valuesOffset+handle]=a[nextValueAt(handle)];
 }
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass5(@builtin(global_invocation_id)g:vec3u){commitAdvected(5u,g.x);}
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass6(@builtin(global_invocation_id)g:vec3u){commitAdvected(6u,g.x);}
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass7(@builtin(global_invocation_id)g:vec3u){commitAdvected(7u,g.x);}
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass8(@builtin(global_invocation_id)g:vec3u){commitAdvected(8u,g.x);}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass5(@builtin(global_invocation_id)g:vec3u){commitAdvected(5u,classItem(g));}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass6(@builtin(global_invocation_id)g:vec3u){commitAdvected(6u,classItem(g));}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass7(@builtin(global_invocation_id)g:vec3u){commitAdvected(7u,classItem(g));}
+@compute @workgroup_size(64)fn commitAdvectedStructuredClass8(@builtin(global_invocation_id)g:vec3u){commitAdvected(8u,classItem(g));}
 
 var<workgroup> projectionEnergyPartial:array<f32,128>;
 var<workgroup> projectionEnergyCount:array<u32,128>;
@@ -1499,10 +1536,10 @@ fn forceFamily(cls:u32,index:u32){
   if(!finite(forced)){rejectSample(11u,handle);return;}
   setValue(handle,forced);
 }
-@compute @workgroup_size(64)fn forceStructuredClass5(@builtin(global_invocation_id)g:vec3u){forceFamily(5u,g.x);}
-@compute @workgroup_size(64)fn forceStructuredClass6(@builtin(global_invocation_id)g:vec3u){forceFamily(6u,g.x);}
-@compute @workgroup_size(64)fn forceStructuredClass7(@builtin(global_invocation_id)g:vec3u){forceFamily(7u,g.x);}
-@compute @workgroup_size(64)fn forceStructuredClass8(@builtin(global_invocation_id)g:vec3u){forceFamily(8u,g.x);}
+@compute @workgroup_size(64)fn forceStructuredClass5(@builtin(global_invocation_id)g:vec3u){forceFamily(5u,classItem(g));}
+@compute @workgroup_size(64)fn forceStructuredClass6(@builtin(global_invocation_id)g:vec3u){forceFamily(6u,classItem(g));}
+@compute @workgroup_size(64)fn forceStructuredClass7(@builtin(global_invocation_id)g:vec3u){forceFamily(7u,classItem(g));}
+@compute @workgroup_size(64)fn forceStructuredClass8(@builtin(global_invocation_id)g:vec3u){forceFamily(8u,classItem(g));}
 
 fn divergenceRow(cls:u32,index:u32){
   let row=workItem(cls,index);
@@ -1537,10 +1574,10 @@ fn divergenceRow(cls:u32,index:u32){
   // RHS, and projection describe different equations at different leaf sizes.
   rhs[row]=p.physical.z*flux/p.physical.y;
 }
-@compute @workgroup_size(64)fn divergenceStructuredClass0(@builtin(global_invocation_id)g:vec3u){divergenceRow(0u,g.x);}
-@compute @workgroup_size(64)fn divergenceStructuredClass1(@builtin(global_invocation_id)g:vec3u){divergenceRow(1u,g.x);}
-@compute @workgroup_size(64)fn divergenceStructuredClass2(@builtin(global_invocation_id)g:vec3u){divergenceRow(2u,g.x);}
-@compute @workgroup_size(64)fn divergenceStructuredClass3(@builtin(global_invocation_id)g:vec3u){divergenceRow(3u,g.x);}
+@compute @workgroup_size(64)fn divergenceStructuredClass0(@builtin(global_invocation_id)g:vec3u){divergenceRow(0u,classItem(g));}
+@compute @workgroup_size(64)fn divergenceStructuredClass1(@builtin(global_invocation_id)g:vec3u){divergenceRow(1u,classItem(g));}
+@compute @workgroup_size(64)fn divergenceStructuredClass2(@builtin(global_invocation_id)g:vec3u){divergenceRow(2u,classItem(g));}
+@compute @workgroup_size(64)fn divergenceStructuredClass3(@builtin(global_invocation_id)g:vec3u){divergenceRow(3u,classItem(g));}
 
 // The paper's cut-cell solid coupling (Batty-style apertures) constrains
 // u.n on solid faces bilaterally, so the solve balances a liquid sheet on
@@ -1684,15 +1721,15 @@ fn bodyImpulseRow(cls:u32,index:u32){
     accumulateBodyImpulse(chosen,impulse,torque);
   }
 }
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass0(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(0u,g.x);}
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass1(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(1u,g.x);}
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass2(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(2u,g.x);}
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass3(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(3u,g.x);}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass0(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(0u,classItem(g));}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass1(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(1u,classItem(g));}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass2(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(2u,classItem(g));}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass3(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(3u,classItem(g));}
 
-@compute @workgroup_size(64)fn separateStructuredClass0(@builtin(global_invocation_id)g:vec3u){markSeparationRow(0u,g.x);}
-@compute @workgroup_size(64)fn separateStructuredClass1(@builtin(global_invocation_id)g:vec3u){markSeparationRow(1u,g.x);}
-@compute @workgroup_size(64)fn separateStructuredClass2(@builtin(global_invocation_id)g:vec3u){markSeparationRow(2u,g.x);}
-@compute @workgroup_size(64)fn separateStructuredClass3(@builtin(global_invocation_id)g:vec3u){markSeparationRow(3u,g.x);}
+@compute @workgroup_size(64)fn separateStructuredClass0(@builtin(global_invocation_id)g:vec3u){markSeparationRow(0u,classItem(g));}
+@compute @workgroup_size(64)fn separateStructuredClass1(@builtin(global_invocation_id)g:vec3u){markSeparationRow(1u,classItem(g));}
+@compute @workgroup_size(64)fn separateStructuredClass2(@builtin(global_invocation_id)g:vec3u){markSeparationRow(2u,classItem(g));}
+@compute @workgroup_size(64)fn separateStructuredClass3(@builtin(global_invocation_id)g:vec3u){markSeparationRow(3u,classItem(g));}
 
 fn projectFamily(cls:u32,index:u32){
   let handle=workItem(cls,index);
@@ -1718,10 +1755,10 @@ fn projectFamily(cls:u32,index:u32){
   if(!finite(projected)){rejectSample(33u,handle);return;}
   setValue(handle,projected);
 }
-@compute @workgroup_size(64)fn projectStructuredClass5(@builtin(global_invocation_id)g:vec3u){projectFamily(5u,g.x);}
-@compute @workgroup_size(64)fn projectStructuredClass6(@builtin(global_invocation_id)g:vec3u){projectFamily(6u,g.x);}
-@compute @workgroup_size(64)fn projectStructuredClass7(@builtin(global_invocation_id)g:vec3u){projectFamily(7u,g.x);}
-@compute @workgroup_size(64)fn projectStructuredClass8(@builtin(global_invocation_id)g:vec3u){projectFamily(8u,g.x);}
+@compute @workgroup_size(64)fn projectStructuredClass5(@builtin(global_invocation_id)g:vec3u){projectFamily(5u,classItem(g));}
+@compute @workgroup_size(64)fn projectStructuredClass6(@builtin(global_invocation_id)g:vec3u){projectFamily(6u,classItem(g));}
+@compute @workgroup_size(64)fn projectStructuredClass7(@builtin(global_invocation_id)g:vec3u){projectFamily(7u,classItem(g));}
+@compute @workgroup_size(64)fn projectStructuredClass8(@builtin(global_invocation_id)g:vec3u){projectFamily(8u,classItem(g));}
 
 fn reconstructRow(cls:u32,index:u32){
   let row=workItem(cls,index);
@@ -1746,8 +1783,8 @@ fn reconstructRow(cls:u32,index:u32){
   if(!finite3(projected)){rejectSample(54u,row);return;}
   rowVelocity[rbase()+row]=vec4f(projected,1.);
 }
-@compute @workgroup_size(64)fn reconstructStructuredClass0(@builtin(global_invocation_id)g:vec3u){reconstructRow(0u,g.x);}
-@compute @workgroup_size(64)fn reconstructStructuredClass1(@builtin(global_invocation_id)g:vec3u){reconstructRow(1u,g.x);}
-@compute @workgroup_size(64)fn reconstructStructuredClass2(@builtin(global_invocation_id)g:vec3u){reconstructRow(2u,g.x);}
-@compute @workgroup_size(64)fn reconstructStructuredClass3(@builtin(global_invocation_id)g:vec3u){reconstructRow(3u,g.x);}
+@compute @workgroup_size(64)fn reconstructStructuredClass0(@builtin(global_invocation_id)g:vec3u){reconstructRow(0u,classItem(g));}
+@compute @workgroup_size(64)fn reconstructStructuredClass1(@builtin(global_invocation_id)g:vec3u){reconstructRow(1u,classItem(g));}
+@compute @workgroup_size(64)fn reconstructStructuredClass2(@builtin(global_invocation_id)g:vec3u){reconstructRow(2u,classItem(g));}
+@compute @workgroup_size(64)fn reconstructStructuredClass3(@builtin(global_invocation_id)g:vec3u){reconstructRow(3u,classItem(g));}
 `;

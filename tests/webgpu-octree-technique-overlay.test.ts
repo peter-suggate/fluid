@@ -11,18 +11,53 @@ const overlaySource = readFileSync(new URL("../lib/webgpu-octree-technique-overl
 const auditOverlaySource = readFileSync(new URL("../lib/webgpu-octree-technique-audit-overlay.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const panelSource = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
 test("paper-technique modes have unique stable uniform codes", () => {
   for (const mode of ["power-cells", "delaunay-tetrahedra", "transition-band",
     "octree-lifecycle", "fine-band-lifecycle", "operator-diagonal", "operator-rhs",
     "operator-reciprocity", "operator-open-fraction", "tetra-validity",
-    "global-fine-phi"] as const) {
+    "global-fine-phi", "band-residency"] as const) {
     assert.equal(isOctreeTechniqueOverlayMode(mode), true, mode);
     assert.ok(OCTREE_TECHNIQUE_OVERLAY_CODES[mode] >= 12, mode);
   }
   assert.equal(new Set(Object.values(OCTREE_TECHNIQUE_OVERLAY_CODES)).size,
     OCTREE_TECHNIQUE_OVERLAY_MODES.length);
   assert.equal(isOctreeTechniqueOverlayMode("structure"), false);
+});
+
+test("the band-residency view compares both authored bands against actual residency", () => {
+  // Both widths are authored in finest cells, so the shader has to convert with
+  // the fine plan's own factor rather than assume fine cells.
+  assert.match(overlaySource,
+    /let finest=max\(fine\.fineCellWidth,1e-9\)\*f32\(max\(fine\.fineFactor,1u\)\);/,
+    "the pressure reach must be measured in finest cells, the unit it is authored in");
+  assert.match(overlaySource,
+    /if\(distance<=f32\(bands\.pressureBandCells\)\*finest\)\{/,
+    "pressure-band membership is a distance test against the authored pressure width");
+  // The derived widths are in fine cells, the authored ones in finest cells.
+  // Scaling either with the wrong unit silently mis-draws the nesting.
+  assert.match(overlaySource,
+    /if\(distance<=f32\(bands\.transportBandFineCells\)\*h\)\{/,
+    "the transported surface band is a fine-cell width");
+  assert.match(overlaySource,
+    /if\(distance<=f32\(bands\.redistanceBandFineCells\)\*h\)\{/,
+    "the redistance support margin is a fine-cell width");
+  assert.match(octreeSource,
+    /\.\.\.planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells, fine\.plan\.fineFactor\)/,
+    "the view must consume the solver's own planner, not re-derive the widths");
+  // The state the view exists for: resident phi inside the pressure reach whose
+  // neighbour is not resident. That is where the fine-to-coarse restriction
+  // loses the phi a pressure cell centre needs.
+  assert.match(overlaySource,
+    /if\(fineAddress\(q\+delta\)==INVALID\|\|fineAddress\(q-delta\)==INVALID\)\{truncated=true;\}/,
+    "a truncated pressure reach must be detected from residency, not assumed");
+  assert.match(overlaySource, /\{binding:4,resource:\{buffer:this\.bandConfig\}\}/,
+    "the authored widths must reach the shader");
+  assert.equal(OCTREE_TECHNIQUE_OVERLAY_CODES["band-residency"], 26);
+  assert.match(overlaySource, /modeCode===18\|\|modeCode===25\|\|modeCode===26/,
+    "the mode must route to the fine publication pipeline that owns phi residency");
+  assert.match(panelSource, /"band-residency": "PRESSURE vs SURFACE BAND"/);
 });
 
 test("technique overlay composes directly from compact topology and fine publications", () => {
