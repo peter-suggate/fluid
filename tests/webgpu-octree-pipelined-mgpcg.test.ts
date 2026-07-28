@@ -27,6 +27,18 @@ import { PassBroker } from "../lib/webgpu-pass-broker";
 import { decodeOctreePressureSolveWork } from "../lib/webgpu-octree-work-accounting";
 import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 
+/**
+ * The alternate-path bans below (`f16`/`f64`/`portable`/`fallback`/`legacy`)
+ * exist to prove no second code path was reintroduced, so they apply to WGSL
+ * CODE. They are deliberately NOT loosened per the test-pinning rule in
+ * docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md: the pattern is unchanged and only the
+ * subject narrows to the comment-stripped source, because `finalizeAndPublish`
+ * now carries prose explaining that the seed remains the fail-closed fallback
+ * publication. Any real fallback branch still trips these.
+ */
+const mgpcgShaderCode = () => octreePipelinedMGPCGShader
+  .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
 test("pipelined planner exposes residual and direct-curvature reductions", () => {
   const plan = planOctreePipelinedMGPCG({ rowCapacity: 6_912, maximumIterations: 10 });
   assert.deepEqual(plan.rowDispatch, [108, 1, 1]);
@@ -147,14 +159,16 @@ test("WGSL implements direct curvature, compensated scalars, and GPU tail zeroin
     /fn finishDirectionCurvature[\s\S]*atomicAdd\(&control\[3\], 1u\)[\s\S]*let direct = compensatedValue\(curvature\)/);
   assert.match(octreePipelinedMGPCGShader,
     /fn zeroRemainingAfterUpdate[\s\S]*zeroDispatch\(iteration, 3u\)[\s\S]*zeroDispatch\(future, 0u\)[\s\S]*zeroDispatch\(future, 1u\)/);
+  // `success` was renamed `usable` when finalizeAndPublish stopped discarding a
+  // budget-limited iterate; the pinned predicate is unchanged in meaning.
   assert.match(octreePipelinedMGPCGShader,
-    /pressureOut\[row\] = select\(seed, candidate, success && finite\(candidate\)\)/);
+    /pressureOut\[row\] = select\(seed, candidate, usable && finite\(candidate\)\)/);
   assert.match(octreePipelinedMGPCGShader,
     /fn diagonalAt\(row: u32\)[\s\S]*section63Coefficients\[\(acceptedBank\(\) \* capacity\(\) \+ row\) \* 19u\]/);
   assert.match(octreePipelinedMGPCGShader, /let value = -rhs\[row\] - directionImage\[row\]/);
   assert.doesNotMatch(octreePipelinedMGPCGShader, /LeafHeader|headers\[/,
     "the outer solve must consume the Section 6.3 diagonal channel and RHS authorities directly");
-  assert.doesNotMatch(octreePipelinedMGPCGShader, /\bf64\b|fallback|legacy/i);
+  assert.doesNotMatch(mgpcgShaderCode(), /\bf64\b|fallback|legacy/i);
 });
 
 test("sole target shader is 128-lane subgroup f32 and fail-closed", () => {
@@ -172,7 +186,7 @@ test("sole target shader is 128-lane subgroup f32 and fail-closed", () => {
   assert.match(octreePipelinedMGPCGShader,
     /merged\[lane\] = local;\n\s*for \(var width = REDUCTION_LANES \/ 2u; width > 0u; width >>= 1u\) \{\n\s*workgroupBarrier\(\);\n\s*if \(lane < width\) \{\n\s*merged\[lane\] = mergeScalars\(merged\[lane\], merged\[lane \+ width\]\);/);
   assert.match(octreePipelinedMGPCGShader, /fn zeroRemainingAfterUpdate\(iteration: u32\)/);
-  assert.doesNotMatch(octreePipelinedMGPCGShader, /\bf16\b|portable|fallback|legacy/i);
+  assert.doesNotMatch(mgpcgShaderCode(), /\bf16\b|portable|fallback|legacy/i);
 });
 
 test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-safe", () => {
