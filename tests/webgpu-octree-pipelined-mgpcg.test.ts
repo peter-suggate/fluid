@@ -15,6 +15,8 @@ import {
   mergeCompensatedF32,
   octreeCompensatedF32WGSL,
   octreePipelinedMGPCGActivityShader,
+  octreePipelinedMGPCGColdStartEnabled,
+  octreePipelinedMGPCGSeedVariantShader,
   octreePipelinedMGPCGShader,
   planOctreePipelinedMGPCG,
 } from "../lib/webgpu-octree-pipelined-mgpcg";
@@ -187,6 +189,72 @@ test("sole target shader is 128-lane subgroup f32 and fail-closed", () => {
     /merged\[lane\] = local;\n\s*for \(var width = REDUCTION_LANES \/ 2u; width > 0u; width >>= 1u\) \{\n\s*workgroupBarrier\(\);\n\s*if \(lane < width\) \{\n\s*merged\[lane\] = mergeScalars\(merged\[lane\], merged\[lane \+ width\]\);/);
   assert.match(octreePipelinedMGPCGShader, /fn zeroRemainingAfterUpdate\(iteration: u32\)/);
   assert.doesNotMatch(mgpcgShaderCode(), /\bf16\b|portable|fallback|legacy/i);
+});
+
+// The pressure solve is warm-started and has been since the structured
+// cutover; the seed path is assembled across three files and reads, from inside
+// the solver, like a fail-closed fallback. Pin the solver half of it so a
+// future reader can establish "already warm" without tracing the topology
+// transaction, and so a refactor cannot silently turn the seeded start into a
+// cold one -- which would cost iterations while failing nothing, exactly the
+// class of silent regression docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3 exists for.
+test("the solve starts CG from the published pressure seed, not from zero", () => {
+  assert.match(octreePipelinedMGPCGShader,
+    /fn initializeState[\s\S]*?let seed = pressureSeed\[row\];[\s\S]*?\n  pressure\[row\] = seed;\n/,
+    "initializeState must adopt the seed as the initial iterate x0");
+  // r0 = -rhs - A*x0. `encode` maps `vectors.pressure` into `directionImage`
+  // between the two stages, so this subtraction is what makes x0 warm rather
+  // than decorative.
+  assert.match(octreePipelinedMGPCGShader,
+    /fn formInitialResidual[\s\S]*?let value = -rhs\[row\] - directionImage\[row\];/,
+    "the initial residual must be formed against the operator image of the seed");
+  const encodeSource = WebGPUOctreePipelinedMGPCG.prototype.encode.toString();
+  const seededState = encodeSource.indexOf('"initializeState"');
+  const seedImage = encodeSource.indexOf("this.source.vectors.pressure");
+  const initialResidual = encodeSource.indexOf('"formInitialResidual"');
+  assert.ok(seededState >= 0 && seedImage > seededState && initialResidual > seedImage,
+    "the encode must seed, apply A to the seeded pressure, then form r0 from it");
+  // The stopping test is relative to ||b||, never to ||r0||, which is the
+  // property that converts a smaller seeded residual into fewer EXECUTED
+  // iterations rather than into an unchanged iteration count at a lower
+  // residual. Do not re-base the threshold on the initial residual.
+  assert.match(octreePipelinedMGPCGShader,
+    /let bb = max\(compensatedValue\(pairAt\(8u\)\), params\.numerics\.z\);\n\s*let threshold = max\(\n\s*params\.numerics\.y \* params\.numerics\.y,\n\s*params\.numerics\.x \* params\.numerics\.x \* bb,\n\s*\);/,
+    "convergence must remain relative to the right-hand-side norm");
+  assert.match(octreePipelinedMGPCGShader, /local\.bb = addCompensatedF32\(local\.bb, b \* b\)/);
+});
+
+test("cold start is an opt-in measurement arm and off is byte-identical", () => {
+  assert.equal(octreePipelinedMGPCGColdStartEnabled({}), false,
+    "the production default must be the warm start that already ships");
+  assert.equal(octreePipelinedMGPCGColdStartEnabled(
+    { FLUID_OCTREE_PRESSURE_COLD_START: "0" }), false);
+  assert.equal(octreePipelinedMGPCGColdStartEnabled(
+    { FLUID_OCTREE_PRESSURE_COLD_START: "1" }), true);
+  assert.equal(octreePipelinedMGPCGSeedVariantShader(false), octreePipelinedMGPCGShader,
+    "the disabled arm must return the production source by identity");
+  const cold = octreePipelinedMGPCGSeedVariantShader(true);
+  assert.notEqual(cold, octreePipelinedMGPCGShader);
+  assert.equal(cold.replace("\n  pressure[row] = 0.0;\n", "\n  pressure[row] = seed;\n"),
+    octreePipelinedMGPCGShader,
+    "the cold arm must differ from production by exactly the seeded-iterate statement");
+  // The fail-closed publication keeps republishing the seed in BOTH arms: the
+  // measurement changes where CG starts, never what a failed solve publishes.
+  assert.match(cold,
+    /let seed = select\(0\.0, pressureSeed\[row\], finite\(pressureSeed\[row\]\)\);/);
+  assert.match(cold, /pressureOut\[row\] = select\(seed, candidate, usable && finite\(candidate\)\);/);
+  // The seeded row audit is shared, so a non-finite seed still fails its row
+  // closed on the cold arm and the two arms differ only in the iterate.
+  assert.match(cold, /fn initializeState[\s\S]*?!finite\(seed\)[\s\S]*?ERROR_INVALID_ROW/);
+  const disabled = createGPULogicalActivityAdoptionContext({
+    moduleId: OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID,
+    profile: { enabled: false, generation: 11 },
+    identity: "subgroup", subgroupsAlreadyEnabled: true,
+  });
+  assert.equal(octreePipelinedMGPCGActivityShader(disabled), octreePipelinedMGPCGShader,
+    "the default base must remain the production shader");
+  assert.equal(octreePipelinedMGPCGActivityShader(disabled, cold), cold,
+    "an explicit base must survive the disabled activity variant byte-for-byte");
 });
 
 test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-safe", () => {

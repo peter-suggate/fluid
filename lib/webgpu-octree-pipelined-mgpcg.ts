@@ -130,6 +130,12 @@ export interface OctreePipelinedMGPCGOptions {
   readonly hardIterationCeiling?: number;
   readonly relativeTolerance?: number;
   readonly absoluteTolerance?: number;
+  /**
+   * Measurement-only override of the seeded initial iterate. Omitted (the
+   * production default) reads `FLUID_OCTREE_PRESSURE_COLD_START`; see
+   * `octreePipelinedMGPCGColdStartEnabled`. Never set this from product code.
+   */
+  readonly coldStart?: boolean;
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -278,9 +284,86 @@ export interface OctreePipelinedMGPCGSource {
   readonly vectors: OctreePipelinedMGPCGVectors;
 }
 
+/**
+ * The solve is ALREADY WARM-STARTED, unconditionally, and has been since the
+ * structured cutover. This is written down here because the seed path is
+ * assembled in three files and reads, from inside this one, like a fail-closed
+ * fallback rather than an initial iterate -- which has now cost more than one
+ * session an attempt to "add" a warm start that already ships.
+ *
+ * How `pressureSeed` gets the previous frame's pressure, end to end:
+ *
+ * 1. Tail of substep N, `encodeInactiveTopologyCandidate` in
+ *    `webgpu-octree.ts` builds the row-delta transaction. `mergeFrontierRows`
+ *    merges the old and new row sets sorted by `(level, Morton)` and publishes
+ *    `frontier[rowDeltaNewToOldBase() + newRow]`, a total map from every new
+ *    row to its predecessor, encoded +1 so that 0 means "no predecessor". Row
+ *    identity is therefore keyed on the exact `(cell, size)` octree leaf, never
+ *    on a row index; `mergeOctreePowerRowIdentities` is the CPU oracle for it.
+ * 2. The same pass's `emitLeaves` reads that map and writes the remapped
+ *    pressure into the candidate seed buffer:
+ *      `previousRow = rowDeltaMapOld(frontier[rowDeltaNewToOldBase() + row])`
+ *      `pressureOut[row] = select(0.0, pressureIn[previousRow], warmLane)`
+ *    A new row with no predecessor decodes to `INVALID` and seeds exactly 0,
+ *    which is the fail-closed case. `warmLane` is `params.pressureCapacity.w & 1u`,
+ *    which `webgpu-octree.ts` writes as `flags = 1 | (generation << 2)`: bit 0
+ *    is a hard 1, and `tests/octree-coarse-phi-authority.test.ts` pins that the
+ *    warm lane "must not remain configurable".
+ * 3. Head of substep N+1, `commitCandidateRows`
+ *    (`webgpu-octree-topology-epoch.ts`, pass label "Commit accepted topology
+ *    row identities and pressure seed") copies the candidate seed into BOTH
+ *    pressure banks, gated on the accepted-epoch token. A rejected candidate
+ *    copies nothing and the previous accepted seed is retained.
+ * 4. `WebGPUOctreeProjection.encode` passes the bank as `pressureSeed`;
+ *    `initializeState` sets `pressure[row] = seed`, the operator maps it into
+ *    `directionImage`, and `formInitialResidual` forms `r0 = -rhs - A*p_seed`.
+ *
+ * So CG starts from the previous frame's converged pressure, and because the
+ * stopping threshold is relative to `||b||` rather than `||r0||`, a smaller
+ * `r0` converts directly into fewer executed iterations. Two consequences for
+ * anyone shopping for iteration count:
+ *
+ * - There is no unclaimed warm-start win here. The measured 4-5 executed
+ *   iterations of the encoded 10 are the WARM number.
+ * - The seed is dimensional and scales as 1/dt (`rhs = rho*flux/dt`, and A is
+ *   dt-independent -- see `encodeForcesAndDivergence`). A lane with a varying
+ *   dt seeds a mis-scaled iterate. The Dawn gate lanes are fixed-dt; the
+ *   browser's fractional rAF dts are not.
+ */
 export interface OctreePipelinedMGPCGSolve {
+  /**
+   * Previous-generation pressure remapped onto this generation's rows. Both
+   * the initial iterate and the fail-closed publication fallback.
+   */
   readonly pressureSeed: GPUBuffer;
   readonly pressureOut: GPUBuffer;
+}
+
+/**
+ * Measurement instrument for the warm start documented on
+ * `OctreePipelinedMGPCGSolve`. **Default off, and off is today.**
+ *
+ * The flag is named for the change it makes rather than for the feature,
+ * because the feature already ships enabled: a `..._WARM_START` flag defaulting
+ * off would have to mean "off = warm", which is a trap. Setting
+ * `FLUID_OCTREE_PRESSURE_COLD_START=1` makes `initializeState` begin from
+ * `p = 0` instead of the published seed, so one binary can measure what the
+ * warm start is worth on a lane under the document's interleaved A/B protocol.
+ * Everything else -- the row remap, the epoch commit, the encoded dispatch
+ * graph, the reduction tree, the fail-closed seed republication in
+ * `finalizeAndPublish` -- is untouched, so the only difference between the arms
+ * is the initial iterate.
+ *
+ * Unset, this returns false and the module compiles `octreePipelinedMGPCGShader`
+ * byte-for-byte, with the same module cache key and the same shader label.
+ * Set, it changes the iterate sequence: Gate B, never Gate A.
+ */
+export function octreePipelinedMGPCGColdStartEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_PRESSURE_COLD_START === "1";
 }
 
 export type OctreePipelinedMGPCGPipelineName =
@@ -387,6 +470,11 @@ export class WebGPUOctreePipelinedMGPCG {
   readonly allocatedBytes: number;
   readonly encodedPassTransitionCountPerIteration = 4;
   readonly reductionsPerOuterIteration = 2 as const;
+  /**
+   * True in production: `initializeState` begins from `solve.pressureSeed`.
+   * False only under the `FLUID_OCTREE_PRESSURE_COLD_START` measurement arm.
+   */
+  readonly startsFromPublishedSeed: boolean;
 
   /** GPU-authored records suitable for the existing diagnostics readback. */
   get workAccountingBuffers(): Readonly<{ control: GPUBuffer; indirectTail: GPUBuffer }> {
@@ -512,12 +600,20 @@ export class WebGPUOctreePipelinedMGPCG {
         checkpoints: descriptor.checkpoints,
       });
     }
+    // Read once, at construction, because it selects a shader variant. Off is
+    // today: the base source, the cache key and the label are all unchanged.
+    const coldStart = options.coldStart ?? octreePipelinedMGPCGColdStartEnabled();
+    this.startsFromPublishedSeed = !coldStart;
     const shaderVariant = activity.module(
-      octreePipelinedMGPCGActivityShader(activity),
-      `${OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`,
+      octreePipelinedMGPCGActivityShader(
+        activity, octreePipelinedMGPCGSeedVariantShader(coldStart),
+      ),
+      `${OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`
+        + (coldStart ? "/cold-start" : ""),
     );
     const shaderModule = device.createShaderModule({
-      label: "Octree pipelined MGPCG · M1 Max 128-lane subgroups",
+      label: "Octree pipelined MGPCG · M1 Max 128-lane subgroups"
+        + (coldStart ? " · cold start (measurement)" : ""),
       code: shaderVariant.code,
     });
     this.pipelines = Object.freeze(Object.fromEntries(
@@ -1379,13 +1475,42 @@ function instrumentMGPCGActivityEntry(
   return instrumented;
 }
 
-/** Activity-only solver variant; disabled mode returns the production shader byte-for-byte. */
+/** Activity-only solver variant; disabled mode returns the base shader byte-for-byte. */
 export function octreePipelinedMGPCGActivityShader(
   activity: GPULogicalActivityAdoptionContext,
+  base: string = octreePipelinedMGPCGShader,
 ): string {
-  if (!activity.enabled) return octreePipelinedMGPCGShader;
+  if (!activity.enabled) return base;
   return MGPCG_ACTIVITY_ENTRIES.reduce(
     (source, spec) => instrumentMGPCGActivityEntry(source, activity, spec),
-    octreePipelinedMGPCGShader,
+    base,
+  );
+}
+
+/**
+ * The single statement that seeds the initial iterate, and its cold
+ * replacement. The finiteness audit above it is deliberately left alone: a
+ * non-finite seed still fails its row closed in both arms, so the two arms
+ * differ in the iterate they start from and in nothing else.
+ */
+const MGPCG_WARM_SEED_STATEMENT = "\n  pressure[row] = seed;\n";
+const MGPCG_COLD_SEED_STATEMENT = "\n  pressure[row] = 0.0;\n";
+
+/**
+ * Cold-start measurement variant; `false` returns the production shader
+ * byte-for-byte (by identity, not by reconstruction). See
+ * `octreePipelinedMGPCGColdStartEnabled` for why this exists at all.
+ */
+export function octreePipelinedMGPCGSeedVariantShader(coldStart: boolean): string {
+  if (!coldStart) return octreePipelinedMGPCGShader;
+  const occurrences =
+    octreePipelinedMGPCGShader.split(MGPCG_WARM_SEED_STATEMENT).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(
+      `Pipelined MGPCG warm-seed statement is not unique (${occurrences} matches)`,
+    );
+  }
+  return octreePipelinedMGPCGShader.replace(
+    MGPCG_WARM_SEED_STATEMENT, MGPCG_COLD_SEED_STATEMENT,
   );
 }
