@@ -68,6 +68,8 @@ Correctness gates:
   fingerprints (`phiBitXor` and the final field stats in the smoke
   output) must be identical. Any difference means the change was not
   restructuring-only: stop, find why.
+  **READ THE NEXT SECTION FIRST — as of 2026-07-28 this gate has a
+  nonzero A/A noise floor and cannot, on its own, establish bit-exactness.**
 - **Gate B (envelope).** For changes that legitimately reorder float
   operations or change eligibility logic. The 500-step gate must pass
   500/500 steps with 0 validation errors and volumeDrift 0, and the
@@ -89,6 +91,62 @@ Test-pinning rule: several tests deliberately pin the current
 architecture. Where a change must break one, this document names it;
 change exactly that assertion in the same PR, with a comment referencing
 this document. Never loosen a regex beyond the named assertion.
+
+---
+
+## Gate A does not currently have a zero noise floor — measured 2026-07-28
+
+**The 500-step mini lane is not run-to-run deterministic.** Four runs of
+`npm run test:webgpu:minimal-power-dam-break`, two of one build and two of
+another, produced **three distinct physics results**, and the grouping cuts
+across builds rather than along them. Counting differing
+`compact-octree-field-readback` records (21 records per run):
+
+| | mine | mine2 | base | base2 |
+|---|---|---|---|---|
+| **mine** | 0 | 21 | **0** | 24 |
+| **mine2** | 21 | 0 | 21 | 21 |
+| **base** | **0** | 21 | 0 | 24 |
+| **base2** | 24 | 21 | 24 | 0 |
+
+`mine` is `base` plus one restructuring commit. `mine`==`base` exactly, while
+`base`!=`base2` — **the same binary, run twice, disagrees more than two
+different binaries do.**
+
+First divergence is at generation 227 (~step 227 of 500), in the words the
+solve itself publishes:
+
+    volumeControl base : [...,1074587894,2984807340,1,1043030718,1044068975,1042941196,...]
+    volumeControl base2: [...,1074587894,         0,1,1043030716,1044068976,1042941195,...]
+    mgpcgControl  base : [0,1,4,8,1485,26,0,4294967295,1269294911,0,1041957517,0,1135801996,...]
+    mgpcgControl  base2: [0,1,4,8,1485,26,0,4294967295,1269294918,0,1041957004,0,1135802102,...]
+
+Executed iterations (4) and row count (1485) agree; the residual words differ
+in their low bits and one volume word is 0 on one run and not the other. That
+is float-reassociation-shaped, not logic-shaped. The prime suspect is the
+reduction association — `subgroupAdd`'s association is implementation-defined
+and Part D already had to replace it with an explicit tree to make two paths
+bit-comparable — but it has not been localized, and a genuine race is not
+excluded.
+
+**What this invalidates.** Any claim of the form "the 500-step break log diffs
+to zero lines, therefore bit-exact" is a coin flip, including the ones already
+in this document's commit trail. A passing diff is *consistent with*
+bit-exactness; it does not establish it. `1bec36a` reported A1-vs-A2 as a
+"genuine zero noise floor"; that does not reproduce today.
+
+**What to do until it is fixed.**
+
+1. Always run the A/A pair (the same build twice) in the same session as the
+   A/B pair, and report all of it. A change is only *consistent with* Gate A
+   if A/B agrees **and** A/A agrees.
+2. Treat the raster checkpoints
+   (`globalFineGenerationCheckpoints[*].raster`, `frontInterfaceHash`,
+   `terraceEdges`) as having an even larger noise floor: an A/A pair differed
+   at 12 of 20 checkpoints. They are a presentation-path instrument, not a
+   physics one. Do not gate on them.
+3. Localizing this is worth more than any single item in Parts B-F. Everything
+   downstream of it is unverifiable restructuring.
 
 ---
 
