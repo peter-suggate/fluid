@@ -130,13 +130,24 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   prepareAirSupportFaces: Object.freeze([0,7]),
   resolveAirSupportFaceAdjacency: Object.freeze([0,2,3,7,8,11,15,16,23]),
   seedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,19,21,23]),
-  extendAirSupportFacesAtoB: Object.freeze([0,2,7,8,19,20,23]),
-  extendAirSupportFacesBtoA: Object.freeze([0,2,7,8,19,20,23]),
+  // These three reach the shader's globals only through `extendFace`, whose
+  // `faceCenter` now reads the face row's origin and extent from the adjacency
+  // record (23) instead of re-resolving the row's cell. That dropped the only
+  // path from this helper to `faceCellIn`, so `rowGeometry` (2) and
+  // `recordArena` (8) are no longer statically referenced here. Every pipeline
+  // in this module is created with `layout: "auto"`, which derives the bind
+  // group layout from the entry point's ACTUAL static usage, and
+  // `createBindGroup` requires the supplied entries to match that layout
+  // exactly -- a binding declared here but unused by the shader is a hard
+  // validation error, not slack. Keep this list minimal: it is a description of
+  // the shader, not a request.
+  extendAirSupportFacesAtoB: Object.freeze([0,7,19,20,23]),
+  extendAirSupportFacesBtoA: Object.freeze([0,7,19,20,23]),
   // The ledger entry point reaches only scratch through s/sw. The persistent
   // tail also calls extendFace, so it retains that helper's full transitive
   // bind set even though its own convergence bookkeeping is scratch-only.
   advanceAirSupportMarchWave: Object.freeze([7]),
-  marchAirSupportFacesToFixedPoint: Object.freeze([0,2,7,8,19,20,23]),
+  marchAirSupportFacesToFixedPoint: Object.freeze([0,7,19,20,23]),
   reconstructAirSupportVectors: Object.freeze([0,2,7,8,15,16,19,22,23,24]),
   finalizeAirSupportMetadata: Object.freeze([0,2,7,8,9,22]),
   commitAirSupportDirectRows: Object.freeze([0,2,7,17,22]),
