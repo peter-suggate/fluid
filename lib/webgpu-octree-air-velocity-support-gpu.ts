@@ -1053,8 +1053,25 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
   if(headerAt>arrayLength(&tetraHeaders)||arrayLength(&tetraHeaders)-headerAt<3u){fail(item,ERROR_CATALOG);return;}
   let first=tetraHeaders[headerAt];let count=tetraHeaders[headerAt+1u];
   if(first>arrayLength(&tetrahedra)||count>arrayLength(&tetrahedra)-first){fail(item,ERROR_CATALOG);return;}
+  // Section 6.2 stores the local Delaunay tetrahedralization per topology case
+  // precisely because it is scene independent. Everything below the selector
+  // byte -- selectorSize, selectorCenter, the resolved owner page and the flag
+  // word it is OR-ed with -- is a function of the selector alone; owner.size,
+  // center and transform are loop invariant. The generated catalog puts 136.4
+  // vertex occurrences but only 24.7 DISTINCT selectors in the mean case (5.51x,
+  // 199,872 distinct over 1,102,236 occurrences across all 8,083 fanned
+  // entries), so walking occurrences re-resolved every owner ~5.5 times.
+  // Walk the distinct selector set instead. Both terminal operations --
+  // fail(item,ERROR_CATALOG) and markFineResolvedOwner's atomicOr/failTopology
+  // -- are idempotent and receive identical arguments on every occurrence of a
+  // selector, so the published flag set and the first-error word are bit-for-bit
+  // what the occurrence walk produced, independent of order.
+  var seen=array<u32,8>(0u,0u,0u,0u,0u,0u,0u,0u);
   for(var tetra=0u;tetra<count;tetra+=1u){let packed=tetrahedra[first+tetra];for(var vertex=0u;vertex<3u;vertex+=1u){
-    let selector=(packed>>(8u*vertex))&255u;if(selector>=p.tetraVertexCount||selector>=arrayLength(&tetraVertices)){fail(item,ERROR_CATALOG);continue;}
+    let selector=(packed>>(8u*vertex))&255u;let selectorBit=1u<<(selector&31u);
+    if((seen[selector>>5u]&selectorBit)!=0u){continue;}
+    seen[selector>>5u]|=selectorBit;
+    if(selector>=p.tetraVertexCount||selector>=arrayLength(&tetraVertices)){fail(item,ERROR_CATALOG);continue;}
     let v=tetraVertices[selector];if(v.w<=0.||!finiteValue(v.x)||!finiteValue(v.y)||!finiteValue(v.z)||!finiteValue(v.w)){
       fail(item,ERROR_CATALOG);continue;}
     let sizef=f32(owner.size)*v.w;let selectorSize=u32(round(sizef));

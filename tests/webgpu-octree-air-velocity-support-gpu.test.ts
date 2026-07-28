@@ -158,6 +158,20 @@ test("fine-band support closes over the exact regular or transition interpolatio
   assert.match(closure,
     /letpacked=tetrahedra\[first\+tetra\].*letselector=.*letv=tetraVertices\[selector\].*letselectorCenter=center\+f32\(owner\.size\)\*inverseTransform.*markFineResolvedOwner\(selectorCenter,selectorSize,item\)/s,
     "transition demand must include the actual catalog tetrahedron selector owners");
+  // Section 6.2's fan is scene independent, and everything below the selector
+  // byte is a function of the selector alone. The generated catalog carries
+  // 136.4 vertex occurrences but only 24.7 DISTINCT selectors per fanned entry
+  // (5.51x; 1,102,236 occurrences over 199,872 distinct across all 8,083), so
+  // the occurrence walk resolved every owner page ~5.5 times over. The closure
+  // must publish the DISTINCT set: both terminal operations are idempotent and
+  // receive identical arguments on every occurrence, so this is bit-exact, and
+  // it is what makes this pass 1.86 rather than 2.65 ms/advance on the mini lane.
+  assert.match(closure,
+    /varseen=array<u32,8>\(0u,0u,0u,0u,0u,0u,0u,0u\);for\(vartetra=0u/,
+    "the transition fan must carry a distinct-selector set rather than re-resolving occurrences");
+  assert.match(closure,
+    /letselector=\(packed>>\(8u\*vertex\)\)&255u;letselectorBit=1u<<\(selector&31u\);if\(\(seen\[selector>>5u\]&selectorBit\)!=0u\)\{continue;\}seen\[selector>>5u\]\|=selectorBit;/,
+    "the distinct-selector guard must precede the vertex load, not merely the owner-page lookup");
   assert.match(shader,
     /fnmarkExactRegularNeighborhood.*letexpectedCenter=clamp\(center\+.*vec3f\(half\),vec3f\(p\.dimensions\)-vec3f\(half\)\).*letresolved=octreeOwnerPageLookup.*letmatches=resolved\.size==size.*atomicOr/s,
     "regular closure must require the exact same-size center after the consumer's boundary clamp");
