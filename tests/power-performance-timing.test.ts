@@ -68,12 +68,17 @@ test("physics checkpoints follow performed command stages at their trailing seam
     /Uniform diagnostics reduction[^]*Diagnostics reduction/);
 });
 
-test("physics sampling defaults to detailed capture and remains cadence-bounded", () => {
+test("physics sampling defaults to uninstrumented and remains cadence-bounded", () => {
   const store = source("../lib/stores/performance-instrumentation-store.ts");
   const tall = source("../lib/webgpu-eulerian.ts");
-  assert.match(store, /mode: "activity"/);
-  assert.match(store, /enabled: true/,
-    "the default UI simulation path captures detailed profiling evidence");
+  // Inverted deliberately (P0.1): "activity" compiles per-workgroup atomics
+  // into every MGPCG entry point and rewrites their returns, so defaulting to
+  // it charged the browser product for measurement it never asked for. The
+  // panel and FLUID_PERFORMANCE_TRACES opt in; nothing opts in for the user.
+  assert.match(store, /mode: "off",\n\s*enabled: false,\n\s*shaderActivityEnabled: false,/,
+    "the product default must construct uninstrumented");
+  assert.match(store, /const shaderActivityEnabled = mode === "activity"/,
+    "shader instrumentation must follow the selected mode, never a separate switch");
   assert.match(solver, /const PHYSICS_TRACE_CADENCE_MS = 100/);
   assert.match(tall, /lastPhysicsTraceAt_ms>=100/);
   assert.match(tall, /Substep planning \+ advance setup/);

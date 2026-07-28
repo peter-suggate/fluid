@@ -217,7 +217,7 @@ test("invalid or exhausted shadow work fails closed and raster/timing fallback r
   assert.match(svoDrySceneShader, /SVO_STATUS_WORK_EXHAUSTED\|\|leaf\.status==SVO_STATUS_STACK_OVERFLOW\|\|leaf\.status==SVO_STATUS_SOURCE_OVERFLOW[^]*SVO_VIS_STEP_EXHAUSTED/);
   assert.match(svoDrySceneShader, /fn svoVisibilityFail\([^]*vec3f\(0\.0\)/,
     "shared invalid/exhausted/occluded results must carry zero direct visibility");
-  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, temporalFrame\?: SparseVoxelTemporalFrameState, reuseKey\?: string\): DrySceneReplacementResult \| false/);
+  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, temporalFrame\?: SparseVoxelTemporalFrameState, reuseKey\?: string[^)]*\): DrySceneReplacementResult \| false/);
   assert.doesNotMatch(drySceneSource, /timestampWrites|TimestampRange/,
     "SVO presentation work must be covered by the enclosing generic trace only");
   assert.match(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"Dry scene"/,

@@ -66,11 +66,19 @@ test("completion generation advances only after scoped revisions and validity", 
   const shader = octreeSparseBrickStructuralFinalizeShader;
   assert.match(shader, /fn finalizeInitial\(\) \{ finishFrame\(true\); \}/);
   assert.match(shader, /fn finalizeFrame\(\) \{ finishFrame\(false\); \}/);
-  assert.match(shader, new RegExp(`atomicStore\\(&state\\[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}\\], 1u\\)`));
-  assert.match(shader, new RegExp(`atomicStore\\(&state\\[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}\\], 1u\\)`));
-  assert.match(shader, new RegExp(`atomicAdd\\(&state\\[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}\\], 1u\\)`));
-  assert.match(shader, new RegExp(`atomicAdd\\(&state\\[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}\\], 1u\\)`));
-  assert.doesNotMatch(shader, new RegExp(`atomic(?:Store|Add)\\(&state\\[${SPARSE_VOXEL_PUBLICATION_STATE.fineFluidRevision}\\]`));
+  // Both finalize entry points are single-invocation, so the publication state
+  // is written with plain stores rather than atomics: there is no second writer
+  // to order against, and the ordering that does matter (validity before the
+  // complete generation) is the program order asserted below.
+  assert.match(shader, /@compute @workgroup_size\(1\)\s*fn finalizeInitial/);
+  assert.match(shader, /@compute @workgroup_size\(1\)\s*fn finalizeFrame/);
+  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}\\] = 1u;`));
+  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}\\] = 1u;`));
+  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}\\] \\+= 1u;`));
+  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}\\] \\+= 1u;`));
+  assert.doesNotMatch(shader,
+    new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.fineFluidRevision}\\]\\s*(?:\\+)?=`),
+    "fine fluid must stay explicitly unavailable; the water renderer owns that publication");
   assert.ok(
     shader.indexOf(`state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}]`) <
       shader.indexOf(`state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}]`),

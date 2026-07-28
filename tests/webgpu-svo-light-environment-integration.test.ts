@@ -75,7 +75,17 @@ test("one uniform arena preserves exact published records without adding a stora
   assert.deepEqual(arena.slice(SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.environmentWordOffset), scene.environmentLightingRecord);
   assert.match(svoDrySceneShader, /@group\(0\) @binding\(13\) var<uniform> dryLighting:DryLightingArena/);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 13), { binding: 13, type: "uniform" });
-  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 8);
+  // The dry pass carries ten read-only storage bindings, past the WebGPU
+  // default of eight. That is deliberate -- `requiredFluidDeviceLimits`
+  // requests the adapter's advertised value for exactly this layout -- so the
+  // invariant worth holding is that the shader and the published binding
+  // contract agree, not a bare literal that drifts the moment one of them
+  // gains a binding the other does not.
+  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length,
+    SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length,
+    "every dry-pass storage binding must be declared in the shader and the contract");
+  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT
+    .filter(({ type }) => type === "read-only-storage").length, 10);
 });
 
 test("directional, point, sphere, and rectangle lighting share bounded stable visibility work", () => {

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import { WebGPUOctreePowerCoarseLevelSet } from "../lib/webgpu-octree-power-coarse-levelset";
+import { planFineLevelSetBandFineCells } from "../lib/webgpu-octree-fine-levelset-topology";
 import {
   applyGlobalFineTransportDiagnostics,
   WebGPUUniformEulerianSolver,
@@ -18,11 +19,25 @@ function compact(value: string | Function): string {
 test("fine redistance retains the outer pressure-centre trilinear shell", () => {
   const source = compact(octreeSource);
   const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
+  // Allocation and the recurring encode no longer restate the reach: both read
+  // one planner, so "the identical authored radius" is structural instead of
+  // two literals that have to be kept in step. Assert the reach on the
+  // planner's own output, where a change to it is a change in behaviour rather
+  // than in formatting.
+  for (const fineFactor of [4, 8] as const) {
+    const widths = planFineLevelSetBandFineCells(3, fineFactor);
+    assert.equal(widths.redistanceBandFineCells,
+      widths.transportBandFineCells + 2 * fineFactor + 3,
+      "redistance must reserve the trilinear reach and the closed cutoff beyond transport");
+    assert.ok(widths.redistanceBandFineCells
+      > widths.transportBandFineCells + widths.maximumBacktraceFineCells,
+      "the support shell must extend past the complete backtrace");
+  }
   assert.match(source,
-    /constredistanceBandFineCells=Math\.min\(256,transportBandFineCells\+globalFineFactor\+3\)/,
-    "allocation planning must reserve one cell beyond the backtrace and trilinear reach");
+    /=planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells,globalFineFactor\)/,
+    "allocation planning must size the band from the planner");
   assert.match(surface,
-    /constredistanceBandCells=Math\.min\(256,bandCells\+this\.globalFineLevelSet\.plan\.fineFactor\+3\)/,
+    /=planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells,this\.globalFineLevelSet\.plan\.fineFactor\)/,
     "recurring redistance must retain the same pressure-centre support shell");
   const settlement = compact(octreeSource.slice(
     octreeSource.indexOf("  private encodePendingFineSettlement("),
@@ -125,7 +140,24 @@ test("diagnostic readback remains explicitly separated from simulation encoding"
 
 test("global-fine QA diagnostics publish one bounded structured authority packet", () => {
   const diagnostics = compact(WebGPUOctreeProjection.prototype.readGlobalFineLevelSetDiagnostics);
-  assert.match(diagnostics, /label:"GlobalfinestructuredQAdiagnostics",size:576/);
+  // Derived, not restated. "Bounded" is the claim: the readback must be exactly
+  // large enough for every copy it enqueues, and no two copies may land on the
+  // same bytes. A literal size made each legitimate addition look like a
+  // regression while never checking either property.
+  const declared = /label:"GlobalfinestructuredQAdiagnostics",size:(\d+)/.exec(diagnostics);
+  assert.ok(declared, "the QA packet must be one explicitly sized readback");
+  const spans = [...diagnostics.matchAll(/copyBufferToBuffer\([^;]*?,readback,(\d+),(\d+)\)/g)]
+    .map((match) => ({ offset: Number(match[1]), bytes: Number(match[2]) }))
+    .sort((a, b) => a.offset - b.offset);
+  assert.ok(spans.length > 0, "the packet must enqueue its authority copies");
+  assert.equal(Number(declared[1]),
+    Math.max(...spans.map(({ offset, bytes }) => offset + bytes)),
+    "the packet must be exactly as large as the copies it enqueues");
+  spans.reduce((end, span) => {
+    assert.ok(span.offset >= end,
+      `QA packet copy at ${span.offset} overlaps the region ending at ${end}`);
+    return span.offset + span.bytes;
+  }, 0);
   assert.match(diagnostics, /this\.globalFineSeeds\.buffer,0,readback,0,8/);
   assert.match(diagnostics, /topology\.control,0,readback,8,36/);
   assert.match(diagnostics, /fine\.worklist,0,readback,44,20/);

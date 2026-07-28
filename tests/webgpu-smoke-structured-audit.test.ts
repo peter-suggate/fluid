@@ -35,8 +35,10 @@ test("structured control decoders expose the packed accepted transaction", () =>
 test("packed per-step audit snapshots retain every authority control", () => {
   const layout = STRUCTURED_GENERATION_AUDIT_SNAPSHOT;
   // 24 structured + 28 boundary + 28 fine worklist + 64 mgpcg + 64 fine volume
-  // + 128 projection energy (32-word per-stage layout).
-  assert.equal(layout.strideBytes, 336);
+  // + 128 projection energy (32-word per-stage layout), then the four P0.4
+  // verdict segments: 64 topology epoch + 384 SPGrid level delta + 8
+  // air-support failure + 16 fine-transport governor.
+  assert.equal(layout.strideBytes, 808);
   const bytes = new Uint8Array(2 * layout.strideBytes);
   const write = (record: number, offsetBytes: number, values: readonly number[]) => {
     new Uint32Array(bytes.buffer, record * layout.strideBytes + offsetBytes, values.length).set(values);

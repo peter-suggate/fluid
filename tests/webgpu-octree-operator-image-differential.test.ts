@@ -247,6 +247,101 @@ test("compiling and reading back the operator image reproduces the chase exactly
   assert.ok(compared >= (8 + capacity) * 7 * 4);
 });
 
+/** Every terminal outcome of resolveAdjointCandidate. Page-resolution reports
+ * are carried as the secondary byte because pageSlot raised them before the
+ * adjoint caller returned. */
+type AdjointOutcome =
+  | { readonly kind: "skip" }
+  | { readonly kind: "page-overflow" }
+  | { readonly kind: "unresolved"; readonly pageStage: 21 | 22 | 23 }
+  | { readonly kind: "invalid-owner" }
+  | { readonly kind: "edge"; readonly row: number; readonly channel: number };
+
+function compileAdjointImage(outcome: AdjointOutcome): number {
+  const code = (primary: number, secondary: number) =>
+    (IMAGE.codeBase | (secondary << 8) | primary) >>> 0;
+  switch (outcome.kind) {
+    case "skip": return IMAGE.codeBase;
+    case "page-overflow": return code(31, 0);
+    case "unresolved": return code(0, outcome.pageStage);
+    case "invalid-owner": return code(24, 0);
+    case "edge": return (outcome.row | (outcome.channel << IMAGE.adjointChannelShift)) >>> 0;
+  }
+}
+
+function stagedAdjointByChase(outcome: AdjointOutcome, c: number, x: number,
+  vector: Float32Array): Staged {
+  switch (outcome.kind) {
+    case "skip": return { reports: [], term: 0 };
+    case "page-overflow": return { reports: [31], term: 0 };
+    case "unresolved": return { reports: [outcome.pageStage], term: 0 };
+    case "invalid-owner": return { reports: [24], term: 0 };
+    case "edge": return { reports: [], term: c > 0
+      ? Math.fround(c * Math.fround(x - vector[outcome.row]!)) : 0 };
+  }
+}
+
+function stagedAdjointByImage(code: number, coefficients: Float32Array, x: number,
+  vector: Float32Array): Staged {
+  if (code >= IMAGE.codeBase) {
+    const secondary = (code >>> 8) & 0xff, primary = code & 0xff;
+    return { reports: [...(secondary === 0 ? [] : [secondary]),
+      ...(primary === 0 ? [] : [primary])], term: 0 };
+  }
+  const other = code & IMAGE.adjointRowMask;
+  const channel = code >>> IMAGE.adjointChannelShift;
+  const c = coefficients[channel]!;
+  return { reports: [], term: c > 0
+    ? Math.fround(c * Math.fround(x - vector[other]!)) : 0 };
+}
+
+test("compiling and reading the fine-adjoint image reproduces its chase exactly", () => {
+  const shader = octreeSPGridAccurateOperatorShader;
+  assert.equal(shader.match(/\bfn resolveAdjointCandidate\s*\(/g)?.length, 1);
+  assert.match(wgslFunctionBody(shader, "resolveAdjointCandidate"),
+    /pageSlotCoded\(fine,ghostPage,ghostQ,ghostQ\)[\s\S]*pageSlotCoded\(fine,ghostPage,ghostQ,vec3u\(activeQ\)\)/,
+    "both adjoint address chases must share the direct image's single resolver");
+  assert.doesNotMatch(wgslFunctionBody(shader, "stageAdjointCandidate"),
+    /pageSlot|pageFor\(|brickRecord|rankedSlotsBase/,
+    "the production adjoint stage must retain no topology chase");
+  assert.match(wgslFunctionBody(shader, "stageAdjointCandidateByChase"),
+    /pageSlot\(fine,ghostPage,ghostQ,ghostQ,row\)[\s\S]*pageSlot\(fine,ghostPage,ghostQ,vec3u\(activeQ\),row\)/,
+    "the differential reference must retain both replaced chases");
+  assert.doesNotMatch(shader,
+    /bitcast<f32>\(adjointRows|adjointRows\[[^\]]*\]\s*=\s*bitcast/,
+    "the adjoint image must remain an index/channel table, never a rounded term table");
+
+  const capacity = 257;
+  const vector = new Float32Array(capacity);
+  for (let row = 0; row < capacity; row += 1) {
+    vector[row] = Math.fround(Math.sin(row * 1.61803398875) * 2 ** ((row % 17) - 8));
+  }
+  const coefficients = new Float32Array(18);
+  for (let channel = 0; channel < coefficients.length; channel += 1) {
+    coefficients[channel] = Math.fround(channel % 5 === 0 ? 0 : (channel + 1) / 37);
+  }
+  const fixed: AdjointOutcome[] = [
+    { kind: "skip" }, { kind: "page-overflow" },
+    { kind: "unresolved", pageStage: 21 }, { kind: "unresolved", pageStage: 22 },
+    { kind: "unresolved", pageStage: 23 }, { kind: "invalid-owner" },
+  ];
+  const outcomes: AdjointOutcome[] = [...fixed];
+  for (let row = 0; row < capacity; row += 1) for (let channel = 0; channel < 18; channel += 1) {
+    outcomes.push({ kind: "edge", row, channel });
+  }
+  const x = Math.fround(-13.375);
+  for (const outcome of outcomes) {
+    const code = compileAdjointImage(outcome);
+    const image = stagedAdjointByImage(code, coefficients, x, vector);
+    const c = outcome.kind === "edge" ? coefficients[outcome.channel]! : 0;
+    const chase = stagedAdjointByChase(outcome, c, x, vector);
+    assert.deepEqual(image.reports, chase.reports, `adjoint reports differ for ${outcome.kind}`);
+    assert.equal(Object.is(image.term, chase.term), true,
+      `adjoint term differs for ${outcome.kind}: ${image.term} vs ${chase.term}`);
+  }
+  assert.equal(outcomes.length, fixed.length + capacity * 18);
+});
+
 test("the image is compiled once per epoch, in the commit that publishes it", () => {
   const commit = WebGPUOctreeSPGridVCycle.prototype.encodeReadySetupCommit.toString();
   assert.match(commit, /accurateOperatorRowsPipeline/,
@@ -268,11 +363,17 @@ test("the image is compiled once per epoch, in the commit that publishes it", ()
   assert.match(WebGPUOctreeSPGridVCycle.prototype.constructor.toString(),
     /buildAccurateOperatorRows/,
     "the compile pipeline must be constructed from the accurate operator module");
-  // The reference arm exists for the differential and must never be encoded.
+  // The reference arm is reachable only through an explicit measurement flag;
+  // the default constructor path remains the compiled image. Keeping the arm in
+  // the same build is what makes an interleaved performance differential valid.
   const source = [prototype.encodeAccurateWorksets, prototype.encodeAccurateMergedBandWorkset,
     WebGPUOctreeSPGridVCycle.prototype.constructor].map((fn) => fn.toString()).join("\n");
-  assert.doesNotMatch(source, /stageMergedBandTermsByChase/,
-    "production must never encode the chase reference arm");
+  assert.match(source,
+    /this\.directByChase\?"stageMergedBandTermsByChase":"stageMergedBandTerms"/,
+    "the direct chase must remain an explicit opt-in measurement arm");
+  assert.match(wgslFunctionBody(octreeSPGridAccurateOperatorShader,
+    "stageAcceptedUnionTermsByChase"), /stageUnionItemByChase/,
+    "the class apply and merged-band apply must price the same chase");
 });
 
 test("Dawn applies both addressings to the same vectors and stages identical terms", {

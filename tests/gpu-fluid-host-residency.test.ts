@@ -40,14 +40,25 @@ test("octree uses one active-page dispatch with a bounded GPU fine-transport sch
     "only the retained quadtree backend may select a host subdivision count");
   assert.doesNotMatch(advance, /this\.octreeProjection\s*\?\s*proactiveQuadtreeSubsteps/);
   assert.match(transport, /FINE_LEVELSET_TRANSPORT_MAXIMUM_ENCODED_SUBSTEPS = 64/);
-  assert.match(transport,
-    /owners\.dispatchWorkgroupsIndirect\(this\.indirectDispatch, 16\)/,
-    "owner publication must use the exact active-page indirect record");
+  // Owner publication is gone: per-trajectory owner selection replaced the
+  // page-anchor dispatch, and a sibling test asserts that dispatch stays
+  // deleted. What survives is the invariant this was really guarding -- every
+  // transport dispatch is indirect off the published record, never a host-side
+  // workgroup count.
+  assert.doesNotMatch(transport, /ownerPipeline|ownerGroup/,
+    "the retired page-anchor owner publication must not return");
+  assert.doesNotMatch(transport, /dispatchWorkgroups\(\s*Math\./,
+    "no transport stage may size itself from a host-computed workgroup count");
   assert.match(transport,
     /classify\.dispatchWorkgroupsIndirect\(this\.indirectDispatch, 160\)/,
     "classification must use the exact active-page indirect record");
+  // The record offset indexes through the class table rather than the loop
+  // counter: the specialized pipelines no longer map one-to-one onto workset
+  // classes, so `index` is a pipeline ordinal and the class it consumes is the
+  // table entry. Using the ordinal directly would read a neighbouring class's
+  // record, which is a silently wrong workset rather than a failure.
   assert.match(transport,
-    /transport\.dispatchWorkgroupsIndirect\(this\.indirectDispatch, \(4 \+ 7 \* index \+ 4\) \* 4\)/,
+    /transport\.dispatchWorkgroupsIndirect\(this\.indirectDispatch,\s*\(4 \+ 7 \* FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES\[index\]! \+ 4\) \* 4\)/,
     "each specialized transport must use its exact compact class workset");
   assert.match(transport,
     /commit\.dispatchWorkgroupsIndirect\(this\.indirectDispatch, 160\)/,

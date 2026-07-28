@@ -162,9 +162,17 @@ function productionRegularSample(point: Vec3): Vec3 {
 }
 
 test("production regular structured transport matches affine interpolation and the fine trace oracle", () => {
+  // Each corner now resolves its owner by position and checks that owner's
+  // size and centre before contributing, instead of taking the anchor's tag on
+  // faith. A neighbour at a different resolution is rejected rather than
+  // interpolated, which is the case the oracle below cannot model -- so the
+  // rejection is asserted here rather than left implicit.
   assert.match(structuredFineLevelSetTransportWGSL,
-    /fn regularSample[\s\S]*for\(var corner=0u;corner<8u;corner\+=1u\)[\s\S]*taggedVelocity\(regularTag\(anchor,offset\)\)[\s\S]*result\+=w\*value\.xyz/,
+    /fn regularSampleExact[\s\S]*for\(var corner=0u;corner<8u;corner\+=1u\)[\s\S]*taggedVelocity\(owner\.tag\)[\s\S]*result\+=w\*value\.xyz/,
     "the numerical differential must remain attached to the production trilinear gather");
+  assert.match(structuredFineLevelSetTransportWGSL,
+    /if\(owner\.tag==INVALID\|\|owner\.size!=anchor\.size\|\|any\(abs\(ownerCenter-samplePoint\)>vec3f\(tolerance\)\)\)\{return RegularAttempt\(vec4f\(0,0,0,-1\),0u\);\}/,
+    "a corner owner at another resolution must reject the sample, not be interpolated");
   assert.match(structuredFineLevelSetTransportWGSL,
     /fn regularCommonDeparture[\s\S]*x-=bitcast<f32>\(state\[2\]\)\*v\.xyz/,
     "the differential must remain attached to the production microstep update");

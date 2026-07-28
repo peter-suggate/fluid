@@ -246,6 +246,15 @@ export interface FineSeedCandidateResidencyPoolPlan {
  * publisher then retains the last complete generation and reports overflow.
  * The active analytic t=0 tile count is an explicit lower bound so cold-start
  * authority cannot be truncated by the steady-state estimate.
+ *
+ * `includeLiquidInterior` switches the budget from a surface band to the wet
+ * volume. Pressure topology needs an owner page for every deep-liquid coarse
+ * row, not just the refined interface sheet, so a scheduler that retains the
+ * interior is bounded by its logical lattice rather than by interface area.
+ * Keeping the area estimate there silently truncated the deep bulk: the tile
+ * ring dilates one tile out of a *resident brick*, so once the tank floor sat
+ * more than one topology tile below the free surface it published no tile, and
+ * every cell in it decoded as an unmapped owner page.
  */
 export function planFineSeedCandidateResidencyPools(
   brickDimensions: readonly [number, number, number],
@@ -254,6 +263,7 @@ export function planFineSeedCandidateResidencyPools(
   haloCells: number,
   producerRowCapacity: number,
   minimumTileCapacity = 1,
+  includeLiquidInterior = false,
 ): FineSeedCandidateResidencyPoolPlan {
   const checkedVolume = (dims: readonly [number, number, number], label: string) => {
     if (!dims.every((value) => Number.isSafeInteger(value) && value > 0)) {
@@ -274,10 +284,14 @@ export function planFineSeedCandidateResidencyPools(
   const bandBrickLayers = Math.max(2, Math.ceil(haloCells / brickSize) * 2 + 1);
   const topologyTileBricks = Math.max(1, Math.ceil(brickDimensions[0] / tileDimensions[0]));
   const bandTileLayers = Math.max(3, Math.ceil(bandBrickLayers / topologyTileBricks) + 2);
-  const brickCapacity = Math.max(1, Math.min(logicalBrickCount, producerRowCapacity,
-    Math.ceil(area(brickDimensions) * bandBrickLayers)));
-  const tileCapacity = Math.max(1, Math.min(logicalTileCount,
-    Math.max(minimumTileCapacity, Math.ceil(area(tileDimensions) * bandTileLayers))));
+  const brickCapacity = includeLiquidInterior
+    ? logicalBrickCount
+    : Math.max(1, Math.min(logicalBrickCount, producerRowCapacity,
+      Math.ceil(area(brickDimensions) * bandBrickLayers)));
+  const tileCapacity = includeLiquidInterior
+    ? logicalTileCount
+    : Math.max(1, Math.min(logicalTileCount,
+      Math.max(minimumTileCapacity, Math.ceil(area(tileDimensions) * bandTileLayers))));
   return { brickCapacity, tileCapacity, logicalBrickCount, logicalTileCount, bandBrickLayers, bandTileLayers };
 }
 

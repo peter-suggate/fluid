@@ -179,20 +179,40 @@ test("outer redistance support is copied without velocity and failures retain bo
   const shader = compact(structuredFineLevelSetTransportWGSL);
   assert.match(shader, /fninTransportBand\(value:f32\)->bool\{returnfinite\(value\)&&abs\(value\)<=f32\(p\.bandCells\)\*p\.h;\}/,
     "the host-published transport band must define the characteristic domain");
+  // Per-lane reduction moved into two shared helpers, so the "first true miss"
+  // invariant is asserted once where it now lives rather than repeated in each
+  // runner. min(), not assignment: a later bad sample must not displace the
+  // first, which is the index the page diagnostic reports.
+  assert.match(shader,
+    /fnmarkBadSample\(lid:u32,local:u32\)\{reduceNonfinite\[lid\]\+=1u;reduceFirstBad\[lid\]=min\(reduceFirstBad\[lid\],local\);\}/,
+    "an out-of-range or non-finite sample must retain the first failing local index");
+  assert.match(shader,
+    /reduceFirstBad\[lid\]=min\(reduceFirstBad\[lid\],select\(INVALID,local,s\.bad!=0u\)\)/,
+    "an in-band miss must retain the first failing local index");
   for (const name of ["runRegularCommon", "runRegularRare", "runTransitionCommon", "runTransitionRare"]) {
     const start = shader.indexOf(`fn${name}`);
     const end = shader.indexOf("fn", start + 2);
     const run = shader.slice(start, end);
     assert.match(run, /if\(!inTransportBand\(old\)\)\{nextPhi\[index\]=old;continue;\}/,
       `${name} must preserve outer support without requesting velocity`);
-    assert.match(run, /firstBad=min\(firstBad,select\(INVALID,local,s\.bad!=0u\)\)/,
-      `${name} must retain the first true in-band miss`);
+    assert.match(run, /accumulateSample\(lid,local,finishSample\(/,
+      `${name} must report every in-band outcome through the shared lane reduction`);
+    assert.match(run, /markBadSample\(lid,local\)/,
+      `${name} must report an out-of-range or non-finite sample rather than drop it`);
   }
   assert.match(shader,
     /state\[base\+2u\]=\(reduceDisplacement\[0\]&65535u\)\|\(min\(reduceFirstBad\[0\],65535u\)<<16u\)/,
     "the existing per-page status word must pack displacement and first failure without a new buffer");
+  // Status summarization is a lane reduction now, so the rejection returns a
+  // summary instead of incrementing a control in a serial loop. Same verdict:
+  // one nonfinite, one invalidStatus, and no attempt to decode the packed
+  // status word -- whose INVALID marker would otherwise read as two 65535
+  // counters.
   assert.match(shader,
-    /if\(work==INVALID\)\{control\.nonfinite\+=1u;control\.invalidStatus\+=1u;continue;\}/,
+    /structStatusSummary\{outside:u32,nonfinite:u32,processed:u32,extended:u32,invalidStatus:u32,maxDisplacement:u32,firstWork:u32\}/,
+    "the rejection below is positional; reordering these fields changes what it counts");
+  assert.match(shader,
+    /if\(work==INVALID\)\{returnStatusSummary\(0u,1u,0u,0u,1u,0u,INVALID\);\}/,
     "classification rejection must fail closed without decoding the INVALID marker as two 65535 counters");
   assert.match(shader, /letpacked=state\[base\+2u\];[\s\S]*packed&65535u/,
     "summary displacement must ignore the packed first-failure half-word");
@@ -286,20 +306,32 @@ test("fine phi commit publishes old and new interface membership atomically", ()
     "page-owned reductions and deterministic compaction must not revive an append race");
 });
 
-test("WGSL declares exactly the ten direct specialized production entry points", () => {
+test("WGSL declares exactly the specialized production entry points, in pipeline order", () => {
   const entries = [...structuredFineLevelSetTransportWGSL.matchAll(
     /@compute\s*@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
   )].map((match) => match[1]);
+  // The workset publication, status summary and phase-mask delta each gained a
+  // reduce/scan/compact stage, so the ten specialized kernels are now
+  // seventeen. The list is still exact and still ordered: an entry point that
+  // appears without a place in this sequence is a kernel nothing schedules.
   assert.deepEqual(entries, [
     "planStructuredFineTransportSubsteps",
     "classifyStructuredFineTransportBlocks",
+    "reduceStructuredFineTransportWorksetBlocks",
+    "scanStructuredFineTransportWorksetGroups",
     "publishStructuredFineTransportWorksets",
+    "compactStructuredFineTransportWorksets",
     "transportRegularCommonPhi",
     "transportTransitionCommonPhi",
     "transportRegularRarePhi",
     "transportTransitionRarePhi",
+    "reduceStructuredFineTransportStatus",
     "summarizeStructuredFineTransport",
     "commitStructuredFineTransport",
+    "clearStructuredFineDelta",
+    "reduceStructuredFineDeltaBlocks",
     "publishStructuredFineDelta",
+    "compactStructuredFineDelta",
   ]);
+  assert.equal(new Set(entries).size, entries.length, "entry points must be unique");
 });

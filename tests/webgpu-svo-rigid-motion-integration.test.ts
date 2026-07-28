@@ -50,7 +50,17 @@ test("continuity, teleport, and roster changes fail closed while revision and ge
 test("production dry pass uses a renderer-owned uniform mirror within the fragment storage baseline", () => {
   assert.equal(SVO_DRY_RIGID_MOTION_CAPACITY, 12);
   assert.equal(SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, 12 * 128);
-  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length, 8);
+  // The dry pass carries ten read-only storage bindings, past the WebGPU
+  // default of eight. That is deliberate -- `requiredFluidDeviceLimits`
+  // requests the adapter's advertised value for exactly this layout -- so the
+  // invariant worth holding is that the shader and the published binding
+  // contract agree, not a bare literal that drifts the moment one of them
+  // gains a binding the other does not.
+  assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length,
+    SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length,
+    "every dry-pass storage binding must be declared in the shader and the contract");
+  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT
+    .filter(({ type }) => type === "read-only-storage").length, 10);
   assert.match(svoDrySceneShader, /@binding\(14\) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>/);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 14), { binding: 14, type: "uniform" });
   assert.match(drySource, /return \{ binding, visibility: GPUShaderStage\.FRAGMENT, buffer: \{ type \} \}/);

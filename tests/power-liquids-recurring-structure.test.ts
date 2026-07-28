@@ -182,11 +182,21 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
         // `worksetPublicationEnabled` holds the transaction gate the single
         // publication kernel used to read inline; all five wide publication
         // stages now read it through that one reviewed helper.
+        // `recordTheta` is the ghost-fluid crossing histogram: one atomicAdd
+        // into a fixed seven-bucket control, chosen around the 1e-2 theta
+        // floor. It accumulates a diagnostic count, never a face coefficient,
+        // and takes no ordering on the publication.
         ? ["acceptStructuredBoundary", "commitStructuredBoundarySlots", "fail", "publishStructuredBoundarySetup",
-          "rebuildStructuredBoundaryRows", "resolveStructuredBoundarySlots",
+          "rebuildStructuredBoundaryRows", "recordTheta", "resolveStructuredBoundarySlots",
           "resolveStructuredSolidSlots", "worksetPublicationEnabled"]
       : graph.name === "structured velocity dynamics"
-        ? ["acc", "rejectSample", "rejectVector"]
+        // `accumulateBodyImpulse` sums the rigid-exchange impulse and torque as
+        // fixed-point integers, which is what makes the sum order-independent
+        // across the lanes contributing to one body. The two candidate-transfer
+        // functions are the usual fail-closed pair: store the error code, keep
+        // the lowest failing handle with atomicMin.
+        ? ["acc", "accumulateBodyImpulse", "rejectCandidateTransfer", "rejectSample",
+          "rejectVector", "transferStructuredTopologyCandidate"]
       : graph.name === "fine level-set summaries"
         ? ["addFineBase", "addFineSummaryPages", "changedKey", "coarseEntryAt", "dirLoad", "dirStore",
           "ensureDirectoryPage", "ensureFineSummaryCoarseDirectoryPages", "ensureFineSummaryCoarseRanks",

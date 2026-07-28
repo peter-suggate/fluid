@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { SVO_CONTACT_VISIBILITY_CONTRACT } from "../lib/svo-contact-visibility";
 import {
+  SVO_DRY_SCENE_BINDING_CONTRACT,
   SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES,
   SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES,
   svoDrySceneShader,
@@ -60,10 +61,17 @@ test("contact radius, bias, and directions are finite, edge-aware, and temporall
     "the two directions must not shimmer with frame-varying noise");
 });
 
-test("cone AO halves its samples while the camera is changing", () => {
+test("cone AO drops to a single cone while the camera is changing, never to zero", () => {
   const contact = shaderFunction("dryContactVisibility", "dryEnvironment");
-  assert.equal(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES, 2);
+  // One cone while moving, not two and not zero. Disabling AO outright is
+  // cheaper still, but its error lands in contiguous patches on contact
+  // shading rather than as diffuse noise, so every settle would pop those
+  // regions darker; the measured comparison is on the constant itself.
+  assert.equal(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES, 1);
   assert.equal(SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES, 4);
+  assert.ok(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES >= 1,
+    "AO must stay present while moving so settling changes noise, not whether ambient exists");
+  assert.ok(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES < SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES);
   assert.match(contact, new RegExp(
     `coneSampleCount=select\\(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,`
     + `${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms\\.viewport\\.w>=-1\\.0\\)`,
@@ -85,8 +93,15 @@ test("contact visibility attenuates indirect diffuse only and adds no storage bi
   assert.match(shade, /return max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct,vec3f\(0\.0\)\)/);
   assert.doesNotMatch(shade, /(?:surface\.emissive|specularEnvironment|direct)\s*\*\s*contactVisibility/);
 
+  // "adds no storage binding" is the claim under test: contact visibility must
+  // read what the pass already binds. Hold that against the published contract
+  // rather than a literal, so a legitimate binding added elsewhere updates both
+  // sides at once while a shader-only addition still fails.
   const storageBindings = [...svoDrySceneShader.matchAll(/@group\(0\) @binding\((\d+)\) var<storage/g)]
     .map((match) => Number(match[1]));
-  assert.equal(storageBindings.length, 8);
+  assert.deepEqual([...storageBindings].sort((a, b) => a - b),
+    SVO_DRY_SCENE_BINDING_CONTRACT
+      .filter(({ type }) => type === "read-only-storage").map(({ binding }) => binding),
+    "the dry pass must bind exactly the storage resources its contract publishes");
   assert.equal(new Set(storageBindings).size, storageBindings.length);
 });

@@ -50,7 +50,17 @@ function reachableStorageBindings(entryPoint: string): number[] {
 }
 
 test("structured boundary update is canonical, transactional, and face-graph free", () => {
-  assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /PowerFaceRecord|incidence|atomicAdd/i);
+  assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /PowerFaceRecord|incidence/i);
+  // The theta histogram is the one permitted accumulation: it counts crossing
+  // buckets for diagnostics and touches no face graph. Banning atomicAdd
+  // outright also banned that, so the ban is now on the target instead --
+  // any other atomic accumulation here would be face-contribution gathering,
+  // which is exactly what this update must not do.
+  const atomicTargets = [...structuredBoundaryCoefficientWGSL
+    .matchAll(/atomicAdd\(&([A-Za-z0-9_.]+)(\[[^\]]*\])?/g)]
+    .map((match) => `${match[1]}${match[2] ? "[]" : ""}`);
+  assert.deepEqual([...new Set(atomicTargets)].sort(), ["control.theta[]"],
+    "only the theta histogram may accumulate atomically in the boundary update");
   assert.match(structuredBoundaryCoefficientWGSL, /fn fineSample\(/);
   assert.match(structuredBoundaryCoefficientWGSL,
     /let lattice=\(x-fp\.origin\)\/fp\.width-vec3f\(\.5\)[\s\S]*for\(var corner=0u;corner<8u;corner\+=1u\)[\s\S]*if\(sample\.y==0\.\)\{return vec2f\(coarsePhi,0\.\);\}/,
@@ -83,8 +93,12 @@ test("structured boundary update is canonical, transactional, and face-graph fre
   assert.match(structuredBoundaryCoefficientWGSL,
     /scatterStructuredRowWorksets[\s\S]*dynamicWorksets\[worksetBase\(cls\)\+7u\+worksetBlocks\[cls\*worksetBlockStride\(\)\+wg\.x\]\+worksetBlockOffset\(lane\)\]=row/,
     "current free-surface coefficients must publish actual disjoint row and family worksets");
+  // Family work is slot-shaped, so its block index folds through `foldedBlock`
+  // while the row scatter above stays on `wg.x`. The prefix arithmetic is
+  // otherwise identical, which is the property under test: both phases must
+  // read the same block-ordered prefix table.
   assert.match(structuredBoundaryCoefficientWGSL,
-    /scatterStructuredFamilyWorksets[\s\S]*dynamicWorksets\[worksetBase\(cls\)\+7u\+worksetBlocks\[cls\*worksetBlockStride\(\)\+wg\.x\]\+worksetBlockOffset\(lane\)\]=h/,
+    /scatterStructuredFamilyWorksets[\s\S]*dynamicWorksets\[worksetBase\(cls\)\+7u\+worksetBlocks\[cls\*worksetBlockStride\(\)\+foldedBlock\(wg\)\]\+worksetBlockOffset\(lane\)\]=h/,
     "family worksets must scatter from the same block-ordered prefix as the row worksets");
 });
 

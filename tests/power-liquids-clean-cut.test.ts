@@ -115,8 +115,12 @@ test("production has no runtime switch back to a retired authority", () => {
     /powerDiagramProjection|leafSolver|faceVelocityTransport|FLUID_OCTREE_FACE_TRANSFER/);
   assert.doesNotMatch(production,
     /WebGPUOctreePowerFaces|WebGPUOctreePowerOperator|WebGPUOctreePowerVelocity|WebGPUOctreePowerFace/);
+  // Word-bounded: the ban is on a retired *authority* named fallback or legacy,
+  // not on those letters inside an unrelated identifier. `airSupportFallbacks`
+  // is a diagnostics field counting stationary-air patches, and matching it
+  // made an unrelated counter look like a revived pressure path.
   assert.doesNotMatch(runtimeSource("../lib/webgpu-octree.ts"),
-    /options\.pressureIterations|private readonly iterations|galerkin|fallback|legacy/i);
+    /options\.pressureIterations|private readonly iterations|galerkin|\bfallback\b|\blegacy\b/i);
 });
 
 test("pressure is the sole subgroup pipelined M1 authority", () => {

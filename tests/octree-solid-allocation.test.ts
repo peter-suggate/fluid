@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { auditWGSLComputeBindingReachability } from "../lib/wgsl-binding-reachability";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { octreeProjectionShader, planOctreeSolidCellAllocation } from "../lib/webgpu-octree";
+import { OCTREE_PROJECTION_ACTIVITY_ENTRY_POINTS, octreeProjectionShader,
+  planOctreeSolidCellAllocation } from "../lib/webgpu-octree";
 
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 const sparseTreeSource = readFileSync(new URL("../lib/sparse-brick-octree.ts", import.meta.url), "utf8");
@@ -43,6 +45,19 @@ test("compact surface authority deletes the topology phi snapshot binding and ba
   assert.doesNotMatch(octreeSource,
     /phiSnapshot|hasDensePhiSnapshot|planOctreePhiSnapshotAllocation|refreshSnapshot/,
     "the snapshot allocation, binding, pipelines, and switches must stay deleted");
-  assert.doesNotMatch(octreeProjectionShader, /@binding\(14\)/,
-    "the deleted snapshot must not leave an inert legacy binding");
+  // Binding 14 was the deleted phi snapshot; it now carries the bootstrap
+  // level set, which the topology kernels genuinely read. Banning the slot
+  // number banned its reuse rather than the snapshot, so the check is now that
+  // whatever occupies it is live: declared, named for its current purpose, and
+  // reachable from an entry point. An inert binding is the actual defect.
+  const binding14 = /@group\(0\)\s*@binding\(14\)\s*var(?:<[^>]*>)?\s*(\w+)/
+    .exec(octreeProjectionShader);
+  if (binding14) {
+    assert.equal(binding14[1], "bootstrapLevelSetIn",
+      "binding 14 must be the live bootstrap level set, not a revived snapshot");
+    assert.ok(OCTREE_PROJECTION_ACTIVITY_ENTRY_POINTS.some((entryPoint) =>
+      auditWGSLComputeBindingReachability(octreeProjectionShader, entryPoint)
+        .bindings.some(({ binding }) => binding === 14)),
+    "a binding no entry point reaches is the inert leftover this guards against");
+  }
 });

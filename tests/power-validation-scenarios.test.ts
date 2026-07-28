@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { STRUCTURED_GENERATION_AUDIT_SNAPSHOT } from "../lib/structured-authority-audit";
 import { damBreakFractions } from "../lib/initial-fluid";
 import { validateScene } from "../lib/model";
 import {
@@ -200,12 +201,22 @@ test("moving dam Dawn regression crosses the former rejection and checks structu
 
 test("per-generation Dawn audit records one coherent structured epoch", () => {
   const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  assert.match(smoke,
-    /auditEncoder\.copyBufferToBuffer\(audited\.structuredVelocityControl,[\s\S]*layout\.structuredBytes\)/,
-    "each audited step must enqueue the exact six-word structured velocity control");
-  assert.match(smoke,
-    /auditEncoder\.copyBufferToBuffer\(audited\.structuredBoundaryControl,[\s\S]*layout\.boundaryBytes\)/,
-    "each audited step must enqueue the exact seven-word structured boundary control");
+  // The per-buffer copies moved into one shared ABI writer that the browser's
+  // snapshot ring also calls, so the harness and the UI record byte-identical
+  // bytes. The exact widths are still asserted -- on the writer, where they
+  // are now defined once instead of at each call site.
+  const audit = readFileSync(
+    new URL("../lib/structured-authority-audit.ts", import.meta.url), "utf8");
+  assert.match(smoke, /encodeStructuredAuditRecordCopies\(auditEncoder, \{[\s\S]*?structuredVelocityControl:[\s\S]*?structuredBoundaryControl:/,
+    "each audited step must enqueue the structured velocity and boundary controls");
+  assert.match(audit,
+    /copy\("structured", sources\.structuredVelocityControl,\s*layout\.structuredOffsetBytes, layout\.structuredBytes\)/,
+    "the writer must copy the exact six-word structured velocity control");
+  assert.match(audit,
+    /copy\("boundary", sources\.structuredBoundaryControl,\s*layout\.boundaryOffsetBytes, layout\.boundaryBytes\)/,
+    "the writer must copy the exact seven-word structured boundary control");
+  assert.equal(STRUCTURED_GENERATION_AUDIT_SNAPSHOT.structuredBytes, 24);
+  assert.equal(STRUCTURED_GENERATION_AUDIT_SNAPSHOT.boundaryBytes, 28);
   assert.match(smoke,
     /expectedStructuredEpoch: snapshot\.structured\.epoch,[\s\S]*structured: snapshot\.structured,[\s\S]*boundary: snapshot\.boundary/,
     "admission must validate velocity, boundary, and fine publication as one coherent epoch");

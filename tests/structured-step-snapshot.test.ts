@@ -120,5 +120,31 @@ test("destroy releases the slot buffers", () => {
 });
 
 test("the ring's record layout is the harness audit ABI", () => {
-  assert.equal(STRUCTURED_GENERATION_AUDIT_SNAPSHOT.strideBytes, 336);
+  // Derived from the segments rather than restated. The record has grown once
+  // already (P0.4 appended the topology-epoch, SPGrid level-delta, air-support
+  // and fine-transport verdicts), and restating the total meant a legitimate
+  // append read as a regression while the property that actually matters went
+  // unchecked: the segments must tile the record exactly. A gap wastes copy
+  // bandwidth on every audited step; an overlap silently corrupts a
+  // neighbouring subsystem's verdict words.
+  const layout = STRUCTURED_GENERATION_AUDIT_SNAPSHOT as unknown as Record<string, number>;
+  const segments = Object.keys(layout)
+    .filter((key) => key.endsWith("OffsetBytes"))
+    .map((key) => ({
+      name: key.slice(0, -"OffsetBytes".length),
+      offset: layout[key]!,
+      bytes: layout[`${key.slice(0, -"OffsetBytes".length)}Bytes`]!,
+    }))
+    .sort((a, b) => a.offset - b.offset);
+  assert.ok(segments.length >= 6, "every audited authority must publish a segment");
+  let cursor = 0;
+  for (const segment of segments) {
+    assert.equal(typeof segment.bytes, "number", `${segment.name} declares no width`);
+    assert.equal(segment.offset, cursor,
+      `${segment.name} must start where the previous segment ends`);
+    cursor += segment.bytes;
+  }
+  assert.equal(STRUCTURED_GENERATION_AUDIT_SNAPSHOT.strideBytes, cursor,
+    "the stride must be exactly the packed segments");
+  assert.equal(STRUCTURED_GENERATION_AUDIT_SNAPSHOT.strideBytes, 808);
 });

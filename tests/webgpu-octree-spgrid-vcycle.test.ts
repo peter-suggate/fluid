@@ -1015,9 +1015,13 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.match(octreeSPGridVCycleShader,
     /fn transferLive\(l:u32\)->bool\{return l\+1u<levels\(\)&&\(topologyDirty\(l\)\|\|topologyDirty\(l\+1u\)\);\}/,
     "the retained fine endpoint transfer must rebuild with the changed coarse suffix");
+  // The predicate is broadcast through `uniformWord` before the early return.
+  // That is not indirection for its own sake: the body goes on to take
+  // workgroup barriers, so every lane has to agree on whether it returns, and
+  // a bare `if(!transferLive(l))` would make that exit non-uniform.
   assert.match(octreeSPGridVCycleShader,
-    /fn rebuildCandidateTransferFor[\s\S]*if\(!transferLive\(l\)\)\{return;\}/,
-    "the ordered transfer owner must consume the shared dirty predicate");
+    /fn rebuildCandidateTransferFor[\s\S]*let live=uniformWord\(lane,select\(0u,1u,transferLive\(l\)\)\);\s*if\(live==0u\)\{return;\}/,
+    "the ordered transfer owner must consume the shared dirty predicate, uniformly");
   // The row scan is page-parallel: one workgroup per work item, one lane per
   // page row. Pinning the workgroup_id/lane row address keeps a future edit
   // from folding it back into the single-workgroup loop it was split out of,

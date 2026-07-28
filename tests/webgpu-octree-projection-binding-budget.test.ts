@@ -6,6 +6,7 @@ import {
   OCTREE_PROJECTION_ACTIVITY_MODULE_ID,
   OCTREE_PROJECTION_ACTIVITY_TASKS,
   OCTREE_PROJECTION_CORE_BUFFER_LAYOUT,
+  OCTREE_PROJECTION_CORE_TEXTURE_LAYOUT,
   OCTREE_PROJECTION_FRONTIER_SORT_BUFFER_LAYOUT,
   octreeProjectionActivityShader,
   octreeProjectionShader,
@@ -15,6 +16,7 @@ import {
   auditWGSLComputeBindingReachability,
 } from "../lib/wgsl-binding-reachability";
 import { createGPULogicalActivityAdoptionContext } from "../lib/gpu-logical-activity-adoption";
+import { GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT } from "../lib/gpu-logical-activity";
 
 const computeEntryPoints = [...octreeProjectionShader.matchAll(
   /@compute\b(?:\s*@[A-Za-z_]\w*\s*\([^)]*\))*\s*fn\s+([A-Za-z_]\w*)\s*\(/g,
@@ -61,9 +63,12 @@ test("only the exact frontier sort family reaches scratch binding nine", () => {
 });
 
 test("every projection entry point is covered by its explicit layout family", () => {
+  // The family is buffers plus textures. Taking only the buffer layout made
+  // every texture the shader legitimately reaches read as uncovered, so the
+  // texture entries are now published beside the buffers and consumed here.
   const coreBindings = new Set<number>([
     ...OCTREE_PROJECTION_CORE_BUFFER_LAYOUT.map(({ binding }) => binding),
-    12,
+    ...OCTREE_PROJECTION_CORE_TEXTURE_LAYOUT.map(({ binding }) => binding),
   ]);
   const sortBindings = new Set<number>(
     OCTREE_PROJECTION_FRONTIER_SORT_BUFFER_LAYOUT.map(({ binding }) => binding),
@@ -95,7 +100,15 @@ test("projection activity variant is conditional, bounded, exhaustive, and stora
   assert.equal((source.match(/fluidGpuLogicalActivityWorkgroup\(/g) ?? []).length,
     computeEntryPoints.length, "each dispatch entry point gets one progress checkpoint");
   assert.equal((variant.code.match(/struct FluidGpuLogicalActivityBuffer/g) ?? []).length, 1);
-  assert.match(source, /< 128u/);
+  // "Bounded" moved from an inlined `< 128u` guard in each entry point to the
+  // shared helper's stratified sampling, so it is asserted on the emitted
+  // module rather than on the pre-variant source. The property is stronger
+  // than the old guard: records per dispatch are capped by the sample count
+  // regardless of how many workgroups the dispatch has.
+  assert.match(variant.code,
+    /let sampleCount = min\(FLUID_GPU_ACTIVITY_STRATIFIED_SAMPLE_COUNT, total\);/,
+    "records per dispatch must be bounded by the stratified sample count, not the dispatch size");
+  assert.equal(GPU_LOGICAL_ACTIVITY_STRATIFIED_SAMPLE_COUNT, 16);
   assert.ok(Object.values(OCTREE_PROJECTION_ACTIVITY_TASKS)
     .every(({ phaseId }) => phaseId === "coarse-grid"));
   for (const entryPoint of computeEntryPoints) {

@@ -341,14 +341,37 @@ test("compute-pass budget rejects missing and unnamed stage ownership", () => {
     maximumComputePassesPerAdvance: 60,
   }), ["compute passes/stage attribution incomplete (2.0 unattributed/advance)"]);
 
-  const unnamed = summarizePowerDamPerformance({
+  // `<unlabeled compute pass>` now has an owner: the three post-fence
+  // `broker.compute()` calls in the pipelined MGPCG open a pass with no
+  // descriptor, and they are bucketed as their own stage rather than folded
+  // into "MGPCG solve" so the count stays visible. Attribution is therefore
+  // complete for it -- while still being reported separately, which is the
+  // point of the separate bucket.
+  const unlabeled = summarizePowerDamPerformance({
     scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
     simulationWall_ms: 1, gpuCommandAudit: {
       computePasses: 4,
       computePassesByLabel: { "<unlabeled compute pass>": { calls: 4, bytes: 0 } },
     },
   });
-  assert.deepEqual(powerDamPerformanceFailures(unnamed, {
+  assert.equal(powerDamComputePassStage("<unlabeled compute pass>"),
+    "MGPCG solve · unlabeled broker pass",
+    "an unlabeled broker pass must land in its own bucket, never inflate the solve");
+  assert.deepEqual(powerDamPerformanceFailures(unlabeled, {
+    maximumComputePassesPerAdvance: 60,
+  }), []);
+
+  // A label with no owner at all is still rejected: that is the case this gate
+  // exists for, and bucketing the known unlabeled pass must not have opened a
+  // hole for genuinely unattributed work.
+  const unowned = summarizePowerDamPerformance({
+    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
+    simulationWall_ms: 1, gpuCommandAudit: {
+      computePasses: 4,
+      computePassesByLabel: { "A newly introduced mystery pass": { calls: 4, bytes: 0 } },
+    },
+  });
+  assert.deepEqual(powerDamPerformanceFailures(unowned, {
     maximumComputePassesPerAdvance: 60,
   }), ["compute passes/stage attribution incomplete (2.0 unattributed/advance)"]);
 });

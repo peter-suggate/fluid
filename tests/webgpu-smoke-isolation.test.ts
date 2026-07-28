@@ -12,6 +12,7 @@ import {
   readWebGPUExclusiveLockHolder,
   WEBGPU_EXCLUSIVE_LOCK,
 } from "../tools/webgpu-smoke-isolation";
+import { POWER_DAM_LANE_ENVIRONMENT } from "../tools/power-dam-lane-environment";
 
 function assertContainsInOrder(source: string, fragments: readonly string[], message: string): void {
   let offset = 0;
@@ -85,8 +86,13 @@ test("the xctrace profiler refuses to start against a held lock, and never orpha
     "await readWebGPUExclusiveLockHolder()",
     "throw new Error(holder.alive",
   ], "a capture costs minutes; a held lock must be found before any of them are spent");
-  assert.ok(profiler.indexOf("await requireExclusiveGPU()")
-    < profiler.indexOf('console.log("recording untraced baseline'),
+  // Anchored on the first recording the profiler announces, whatever that lane
+  // is currently called. The invariant is ordering -- no capture may start
+  // before the lock check -- and naming one baseline label made a rename look
+  // like a lock-ordering regression.
+  const firstRecording = profiler.indexOf('console.log("recording');
+  assert.ok(firstRecording > 0, "the profiler must announce the run it starts");
+  assert.ok(profiler.indexOf("await requireExclusiveGPU()") < firstRecording,
     "the check must precede the first GPU run the profiler starts");
   // A worker that dies before announcing construction used to resolve
   // `constructed`, sending the profiler on to attach Instruments to a dead pid,
@@ -160,12 +166,19 @@ test("minimal dam acceptance and capture pin the exact 500-step, 2-second contra
   assert.match(command, /run-webgpu-smoke-isolated\.ts$/,
     "the exact acceptance lane must acquire the exclusive GPU lock");
 
+  // The lane table now lives beside the benchmark rather than inside it, so the
+  // contract is asserted against the value the harness actually spawns with.
+  // Reading the exported table instead of its source text also means a lane
+  // cannot satisfy this by containing the right characters in a comment.
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT.mini.FLUID_SCENE, "minimal-power-dam-break");
+  for (const [key, value] of Object.entries({
+    FLUID_TARGET_S: "2", FLUID_MAX_DT: "0.004",
+    FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500",
+  })) assert.equal(POWER_DAM_LANE_ENVIRONMENT.mini[key], value,
+    `the regression capture mini lane must retain the exact acceptance contract for ${key}`);
+
   const benchmark = normalizeWhitespace(await readFile(
     new URL("../tools/benchmark-power-dam.ts", import.meta.url), "utf8"));
-  assertContainsInOrder(benchmark, [
-    'mini: { FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "2"',
-    'FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500"',
-  ], "the regression capture mini lane must retain the exact acceptance contract");
   assert.match(benchmark, /run-webgpu-smoke-isolated\.ts/,
     "every regression capture subprocess must acquire the exclusive GPU lock");
 });
@@ -257,15 +270,24 @@ test("compact and structured publication rejection reports exact authority evide
     smoke.indexOf("if (captureCompactPowerStep)"),
     smoke.indexOf("if (steps === oracleSteps)", smoke.indexOf("if (captureCompactPowerStep)")),
   ));
+  // The per-buffer copies are no longer open-coded here: one shared ABI writer
+  // now serves both this harness and the browser's step-coherent snapshot ring,
+  // so the two record byte-identical bytes. Asserting the call and its complete
+  // source set keeps the "exact snapshot" contract while making an open-coded
+  // copy that bypasses the shared writer -- and so could drift from the UI --
+  // the thing that fails.
   assertContainsInOrder(generationAudit, [
-    "auditEncoder.copyBufferToBuffer",
-    "audited.structuredVelocityControl",
-    "audited.structuredBoundaryControl",
-    "fine.worklist",
-    "audited.globalFineVolumeControl",
-    "audited.structuredProjectionEnergyStats",
+    "encodeStructuredAuditRecordCopies(auditEncoder",
+    "structuredVelocityControl:",
+    "structuredBoundaryControl:",
+    "fineWorklist:",
+    "mgpcgControl:",
+    "fineVolumeControl:",
+    "projectionEnergyStats:",
     "device.queue.submit",
   ], "every accepted step must enqueue one exact structured/fine generation snapshot");
+  assert.doesNotMatch(generationAudit, /auditEncoder\.copyBufferToBuffer/,
+    "audit copies must go through the shared ABI writer the UI ring also uses");
   assert.doesNotMatch(generationAudit, /await awaitAdvanceCompletion|readBufferBinding|mapAsync/,
     "the recurring structured audit must not fence or map the GPU queue");
   const terminalAudit = normalizeWhitespace(smoke.slice(

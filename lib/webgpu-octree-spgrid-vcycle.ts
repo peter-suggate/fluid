@@ -1028,6 +1028,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateOperatorRowsGroup: GPUBindGroup;
   private readonly accurateOperatorRowsDispatch: readonly [number, number, number];
   /**
+   * Measurement-only control arm for the direct half of the operator image.
+   * The shader retains the exact pre-image chase for the differential harness;
+   * selecting it here prices address compilation without changing the build,
+   * topology, coefficients, term staging, or fold order. Production is the
+   * compiled image.
+   */
+  private readonly directByChase = typeof process !== "undefined"
+    && process.env?.FLUID_SPGRID_DIRECT_BY_CHASE === "1";
+  /**
    * Measurement-only control arm: run the merged-band adjoint stage through
    * the pre-image chase instead of the compiled image. Set
    * `FLUID_SPGRID_ADJOINT_BY_CHASE=1` to select it. Production is the image.
@@ -1295,7 +1304,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     ) as Record<AccurateClass, GPUComputePipeline>);
     this.accurateMergedTermPipeline = device.createComputePipeline({
       label: "SPGrid Section 6.3 · parallel merged-band direct terms", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "stageMergedBandTerms" },
+      compute: { module: accurateModule, entryPoint: this.directByChase
+        ? "stageMergedBandTermsByChase" : "stageMergedBandTerms" },
     });
     // Interleaved A/B arm for the compiled fine-adjoint image. Both entry
     // points stage the same words from the same expression; they differ only in
@@ -1313,7 +1323,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     });
     this.accurateTermPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · parallel direct terms", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "stageAcceptedUnionTerms" },
+      compute: { module: accurateModule, entryPoint: this.directByChase
+        ? "stageAcceptedUnionTermsByChase" : "stageAcceptedUnionTerms" },
     });
     this.accurateAdjointPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · parallel fine-adjoint children", layout: "auto",
@@ -1726,9 +1737,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         [11, { buffer: this.accurateWorksetLayout }], [12, { buffer: this.accurateTerms }],
         [13, { buffer: this.accurateOperatorRows }],
       ]);
-      // Same reachability as the class-path term stage: compiled image instead
-      // of topology/state.
-      shared.delete(6); shared.delete(7);
+      // Image and chase are deliberately mirror ABIs. Production drops the
+      // topology/state arenas in favour of the compiled index image; the
+      // measurement arm retains the arenas and drops that image.
+      if (this.directByChase) shared.delete(13);
+      else { shared.delete(6); shared.delete(7); }
       cached.mergedTermGroup = this.device.createBindGroup({
         label: "SPGrid Section 6.3 · parallel merged-band term bindings",
         layout: this.accurateMergedTermPipeline.getBindGroupLayout(0),
@@ -1832,12 +1845,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         "SPGrid Section 6.3 · accepted row union bindings");
       shared.set(12, { buffer: this.accurateTerms });
       shared.set(13, { buffer: this.accurateOperatorRows });
-      // The direct-term stage no longer reaches the topology (6) or state (7)
-      // arenas: its addressing is the compiled image (13). That also keeps the
-      // stage inside the portable ten-storage-buffer ceiling, which binding 13
-      // would otherwise have broken.
       const termGroup = makeGroup(this.accurateTermPipeline,
-        [0, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13],
+        this.directByChase
+          ? [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+          : [0, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13],
         "SPGrid Section 6.3 · staged direct-term bindings");
       shared.set(14, { buffer: this.accurateAdjointRows });
       // Likewise for the fine-adjoint stage: compiled image (14) instead of
@@ -2574,6 +2585,13 @@ fn stageUnionItemByChase(item:u32,count:u32,row:u32){let countIndex=stagedCountI
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=acceptedUnionCount();
  stageUnionItem(item,count,unionRow(item/18u));}
+// Measurement-only counterpart to stageAcceptedUnionTerms. Production selects
+// the image entry point; keeping both union shapes available lets one process
+// price the cache without changing any workset or reduction geometry.
+@compute @workgroup_size(64) fn stageAcceptedUnionTermsByChase(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=acceptedUnionCount();
+ stageUnionItemByChase(item,count,unionRow(item/18u));}
 @compute @workgroup_size(64) fn stageMergedBandTerms(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=validWorkCount(4u);

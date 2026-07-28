@@ -47,8 +47,14 @@ export function runShellValidation(): ValidationResult[] {
   const massError = Math.abs(properties.mass_kg - expectedMass) / expectedMass;
   results.push({ id: "R3-01", name: "Sphere analytic mass", measured: massError.toExponential(2), threshold: "< 1e-12 relative", passed: massError < 1e-12 });
 
+  // The container has to clear the drop as well as the footprint: the body
+  // starts at y = 10, so leaving height at the default 0.9 m had this
+  // "free fall" check measuring the ceiling clamp instead of gravity -- it
+  // reported ~95% position error against a <1% threshold while the integrator
+  // was correct.
   const freeFallScene = cloneScene(defaultScene);
-  freeFallScene.container.width_m = 20; freeFallScene.container.depth_m = 20; freeFallScene.rigidBodies = [];
+  freeFallScene.container.width_m = 20; freeFallScene.container.depth_m = 20;
+  freeFallScene.container.height_m = 20; freeFallScene.rigidBodies = [];
   const falling = initializeRigidBody({ ...sphereDescription, position_m: { x: 0, y: 10, z: 0 }, linearVelocity_m_s: { x: 0, y: 0, z: 0 } });
   for (let i = 0; i < 250; i += 1) advanceRigidBodies([falling], freeFallScene, 0.001);
   const expectedY = 10 + 0.5 * defaultScene.fluid.gravity_m_s2.y * 0.25 ** 2;
