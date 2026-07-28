@@ -303,6 +303,45 @@ Recorded so the implementer does not rediscover them.
    (C4's table, F4's hoists, C1/C2's parallelization) are where the wall
    actually moves.
 
+10. **Deleting a storage round-trip between two kernels — including the
+    §4.3 merged-band apply / band sweep fusion.** MEASURED 2026-07-28 and
+    refuted. Fusing `SPGrid Section 6.3 · destination-owned merged band`
+    into `smoothAtoB`/`smoothBtoA` removes 165 dispatches per advance and
+    was argued Gate A from a rendered-shader diff: every float op, both
+    18-channel loops, `max(0.0, diagonal-sum)`, `finerAdjoint` and all
+    eleven report codes byte-identical, same row set, no other reader of
+    `operatorImage`, no hazard. **The argument is wrong, and the way it is
+    wrong generalizes.** A/A was 0 on both arms (uncontaminated
+    instrument); A/B differed at 20 of 21 records in both pairings.
+
+    Divergence starts at the first solve checkpoint, in `mgpcgControl`
+    residual words only, at ~6e-5 relative — 173846.97 vs 173847.06,
+    4.3749e-4 vs 4.3721e-4. By generation 502 that has grown into a
+    different simulation: 212,981 vs 230,785 fine samples, 4,075 vs 4,096
+    active pages, 1,473 vs 1,470 rows, and **peakLiquidSpeed 7.826915 ->
+    8.046456**, which is the intentionally-red gate the protocol says must
+    not get redder. Note that is the *identical* end value the reverted
+    Part D reduction-tree patch produced; slightly-different rounding in
+    the operator appears to fall into the same alternative trajectory.
+
+    **The mechanism: the round-trip IS a rounding step.** Storing
+    `applyRow`'s result to an f32 storage buffer and reloading it forces a
+    round to f32 and ends the expression. Computing it inline leaves the
+    value in a register, where the backend contracts the multiply-add the
+    split form could not. This is the same effect the `applyRow`
+    row-x-channel experiment hit from the other direction — staging terms
+    through workgroup memory turned one fused multiply-accumulate into a
+    bare multiply plus a bare add and moved peak speed 7.8269 -> 7.5066.
+
+    So: **on this backend, removing (or adding) a memory round-trip between
+    two kernels is never a restructuring-only change.** Any fusion or
+    de-fusion across a storage buffer must be proposed as Gate B with the
+    envelope run, never as Gate A, however identical the two shaders read.
+    Worth salvaging from the attempt regardless of the fusion: it extracted
+    `applyRow` and its addressing into shared WGSL, deleting a ~4.7 KB
+    duplicate transcription of the §6.3 addressing that the §4.3 shell
+    carried. That deduplication is a correctness win and can land alone.
+
 ---
 
 # Part A — groundwork
