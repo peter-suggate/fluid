@@ -823,7 +823,7 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "zeroVectors" | "seedRhs"
   | "smoothPageChebyshevForward" | "smoothPageChebyshevReverse"
   | "restrictAndGhostAccumulate" | "exactBottom"
-  | "prolongAndGhostPropagate" | "solveCoarseTail" | "publish";
+  | "prolongAndGhostPropagate" | "publish";
 
 export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
   beginL1CapturePlan: [0, 3, 6, 13, 14, 18],
@@ -867,9 +867,6 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   restrictAndGhostAccumulate: [0, 4, 5, 6, 7],
   exactBottom: [0, 4, 5, 6, 7],
   prolongAndGhostPropagate: [0, 4, 5, 6, 7],
-  // The single-page coarse tail reaches exactly what the four kernels it
-  // replaces reach; it adds no resource to the correction's ABI.
-  solveCoarseTail: [0, 4, 5, 6, 7],
   publish: [0, 3, 4, 5, 7, 9, 11],
 });
 
@@ -941,12 +938,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly candidateGhosts: GPUBuffer;
   /** Exact fingerprint of the inputs the last committed hierarchy consumed. */
   private readonly committedInputs: GPUBuffer;
-  /**
-   * First level of the single-page hierarchy suffix that `solveCoarseTail`
-   * owns, or 0 when no such suffix is worth collapsing. Authored from the
-   * scene dimensions alone -- never from readback.
-   */
-  readonly coarseTailFirstLevel: number;
   private readonly levelDispatch: readonly [number, number, number];
   private readonly clearDispatch: readonly [number, number, number];
   private readonly pageDispatch: readonly [number, number, number];
@@ -1224,23 +1215,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       },
     });
     const l = this.plan.levelCount;
-    // The coarse tail's authored eligibility, decided entirely from the
-    // authored domain: the first level whose logical 8x8x4 page grid holds a
-    // single page, and every coarser level with it. See
-    // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md -- Part D refuted collapsing a level
-    // that has width, so the cut is drawn exactly where width stops. A level
-    // with more than one page is a block-Jacobi smooth whose one-cell halo
-    // crosses into its neighbours; walking those pages down one workgroup would
-    // turn it into block Gauss-Seidel and change the arithmetic, so multi-page
-    // levels keep their own wide dispatch.
-    const logicalPagesAt = (level: number) => options.dimensions
-      .map((value, axis) => Math.ceil(Math.ceil(value / 2 ** level) / [8, 8, 4][axis]))
-      .reduce((product, value) => product * value, 1);
-    let tail = 1;
-    while (tail < l && logicalPagesAt(tail) > 1) tail += 1;
-    // The tail must swallow at least one non-bottom level, or it would replace
-    // a single exactBottom dispatch with a single dispatch and buy nothing.
-    this.coarseTailFirstLevel = tail <= l - 2 ? tail : 0;
     // Three exact L1-capture dispatches (plan, the page-parallel row scan, and
     // its work-list reduction), the two-dispatch unchanged-input skip probe,
     // the changed-page commit, thirteen data-parallel candidate phases
@@ -1252,14 +1226,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // the complete even-degree Chebyshev polynomial in workgroup memory.
     // Post-smoothing consumes the weights in reverse order, retaining the
     // fixed symmetric V-cycle schedule without pointwise dispatches.
-    //
-    // Gate, clear, one zeroVectors per level, the RHS seed, a smooth/restrict
-    // pair per wide descent level, the exact bottom, a prolong/smooth pair per
-    // wide ascent level, and the publication. The coarse tail replaces the
-    // 4*(levelCount-1-first)+1 records of the single-page suffix with one.
-    this.encodedCorrectionDispatchCount = this.coarseTailFirstLevel > 0
-      ? l + 5 + 4 * this.coarseTailFirstLevel
-      : l + 5 + (l - 1) * 4;
+    this.encodedCorrectionDispatchCount = l + 5 + (l - 1) * 4;
     this.diagnostics = Object.freeze({ levelCount: l,
       coarsestCapacity: this.plan.levelCapacities[this.plan.levelCount - 1],
       maximumTransferRecordsPerLevel: Math.max(...this.plan.transferCapacities),
@@ -1424,33 +1391,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.runIndirect(pass, "clearCorrection", 0, input, false);
     for (let level = 0; level < this.plan.levelCount; level += 1) this.runIndirect(pass, "zeroVectors", level, input, false);
     this.runIndirect(pass, "seedRhs", 0, input, false);
-    // Levels below the single-page suffix keep their own wide dispatches; the
-    // suffix is one 256-lane workgroup that carries the same schedule across
-    // storageBarrier()/workgroupBarrier() instead of dispatch boundaries. See
-    // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md (Part D, and refuted-lever item 9).
-    const tail = this.coarseTailFirstLevel;
-    const wideLevels = tail > 0 ? tail : this.plan.levelCount - 1;
-    for (let level = 0; level < wideLevels; level += 1) {
+    for (let level = 0; level < this.plan.levelCount - 1; level += 1) {
       this.smooth(staged(`pre-smooth level ${level}`), level, false, input);
       this.runIndirect(staged(`restrict level ${level}`), "restrictAndGhostAccumulate", level, input, true);
     }
-    if (tail > 0) {
-      // One workgroup, sourced from the BOTTOM level's published compact-page
-      // record. That level is a one-cell domain, so the record is exactly 1
-      // whenever the hierarchy holds any row at all - including the case where
-      // every row's native level is coarser than `tail` and level `tail` itself
-      // is empty - and 0 once prepareCorrectionDispatches' convergence gate has
-      // zeroed it. The tail therefore inherits "gpu-zero-indirect" unchanged
-      // and can never be skipped while one of the records it replaces would
-      // have launched.
-      const tailPass = staged(`coarse tail levels ${tail}-${this.plan.levelCount - 1}`);
-      this.bind(tailPass, "solveCoarseTail", tail, input);
-      tailPass.dispatchWorkgroupsIndirect(this.indirectDispatch,
-        (this.plan.levelCount - 1) * DISPATCH_RECORD_BYTES_PER_LEVEL + 9 * 4);
-    } else {
-      this.runIndirect(staged("exact bottom"), "exactBottom", this.plan.levelCount - 1, input, false);
-    }
-    for (let level = wideLevels - 1; level >= 0; level -= 1) {
+    this.runIndirect(staged("exact bottom"), "exactBottom", this.plan.levelCount - 1, input, false);
+    for (let level = this.plan.levelCount - 2; level >= 0; level -= 1) {
       this.runIndirect(staged(`prolong level ${level}`), "prolongAndGhostPropagate", level, input, false);
       this.smooth(staged(`post-smooth level ${level}`), level, true, input);
     }
@@ -3163,11 +3109,7 @@ fn stencilDirection(k:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,
 // the column at INVALID, so the c==0 early-out still skips exactly the spokes
 // the recomputed find() used to skip - and it now skips them without paying for
 // the lookup first.
-// The level is an argument rather than level() so the single-page coarse tail
-// can evaluate the same stencil at four different levels inside one dispatch;
-// every caller still passes the level whose params buffer is bound, so the
-// arithmetic is unchanged. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md.
-fn applied(l:u32,slot:u32,source:u32)->f32{
+fn applied(slot:u32,source:u32)->f32{let l=level();
  // Section 4.5, independent of the column-index change: every address term the
  // eighteen iterations used to re-derive per spoke is a dispatch invariant.
  // levelCapacity and levelBase are memoized-table reads and neighbourBase is a
@@ -3231,46 +3173,41 @@ fn pageAppliedB(l:u32,slot:u32,halo:u32)->f32{
   if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}value-=c*pageB[neighbourHalo];}
  return value;
 }
-// The stride argument is the calling workgroup's lane count. Every element of a sweep is
-// independent -- lane e reads pageA/pageRhs/pageDiagonal/pageSlots and writes
-// only pageB[halo(e)] -- so re-striping the same 256 elements across 128 or 256
-// lanes visits the identical set with the identical operands and produces the
-// identical floats. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md.
-fn pageSweepAtoB(l:u32,lid:u32,stride:u32,phase:u32,degree:u32){
- let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=stride){let halo=pageInteriorHaloIndex(local);
+fn pageSweepAtoB(l:u32,lid:u32,phase:u32,degree:u32){
+ let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
   let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageA[halo];if(!smoothable(l,slot)){pageB[halo]=source;continue;}
   let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageB[halo]=source;continue;}
   let next=source+weight*(pageRhs[halo]-pageAppliedA(l,slot,halo))/d;
   if(!finite(next)){reportAt(NONFINITE,80u,slot);pageB[halo]=source;}else{pageB[halo]=next;}}
 }
-fn pageSweepBtoA(l:u32,lid:u32,stride:u32,phase:u32,degree:u32){
- let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=stride){let halo=pageInteriorHaloIndex(local);
+fn pageSweepBtoA(l:u32,lid:u32,phase:u32,degree:u32){
+ let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
   let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageB[halo];if(!smoothable(l,slot)){pageA[halo]=source;continue;}
   let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageA[halo]=source;continue;}
   let next=source+weight*(pageRhs[halo]-pageAppliedB(l,slot,halo))/d;
   if(!finite(next)){reportAt(NONFINITE,80u,slot);pageA[halo]=source;}else{pageA[halo]=next;}}
 }
 fn pagePhase(step:u32,degree:u32,reverse:bool)->u32{return select(step,degree-1u-step,reverse);}
-fn smoothPage(l:u32,reverse:bool,page:u32,lid:u32,stride:u32){let pageLive=page<pageCount(l)&&!stopped();var origin=vec3u(0u);
+fn smoothPage(reverse:bool,page:u32,lid:u32){let l=level();let pageLive=page<pageCount(l)&&!stopped();var origin=vec3u(0u);
  if(pageLive){origin=decode(pageKey(l,page),l);}let d=dims(l);
- for(var halo=lid;halo<HALO_ELEMENTS;halo+=stride){let x=halo%HALO_X;let yz=halo/HALO_X;
+ for(var halo=lid;halo<HALO_ELEMENTS;halo+=128u){let x=halo%HALO_X;let yz=halo/HALO_X;
   let relative=vec3i(i32(x)-1,i32(yz%HALO_Y)-1,i32(yz/HALO_Y)-1);let q=vec3i(origin)+relative;var slot=INVALID;
   if(pageLive&&all(q>=vec3i(0))&&all(q<vec3i(d))){slot=pageSlot(l,page,origin,vec3u(q));}pageSlots[halo]=slot;
   var value=0.0;var rhs=0.0;var diagonal=1.0;if(slot!=INVALID){value=loadf(A,l,slot);rhs=loadf(RHS,l,slot);diagonal=loadf(DIAG,l,slot);}
   pageA[halo]=value;pageB[halo]=value;pageRhs[halo]=rhs;pageDiagonal[halo]=diagonal;}
  workgroupBarrier();
- pageSweepAtoB(l,lid,stride,pagePhase(0u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
- pageSweepBtoA(l,lid,stride,pagePhase(1u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
- if(p.solve.x==4u){pageSweepAtoB(l,lid,stride,pagePhase(2u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
- if(p.solve.x==4u){pageSweepBtoA(l,lid,stride,pagePhase(3u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
- if(pageLive){for(var local=lid;local<PAGE_ELEMENTS;local+=stride){let halo=pageInteriorHaloIndex(local);let slot=pageSlots[halo];
+ pageSweepAtoB(l,lid,pagePhase(0u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
+ pageSweepBtoA(l,lid,pagePhase(1u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
+ if(p.solve.x==4u){pageSweepAtoB(l,lid,pagePhase(2u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
+ if(p.solve.x==4u){pageSweepBtoA(l,lid,pagePhase(3u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
+ if(pageLive){for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);let slot=pageSlots[halo];
    if(slot!=INVALID){storef(A,l,slot,pageA[halo]);}}}
 }
 @compute @workgroup_size(128) fn smoothPageChebyshevForward(@builtin(workgroup_id) page:vec3u,@builtin(local_invocation_index) lid:u32){
- smoothPage(level(),false,page.x,lid,128u);
+ smoothPage(false,page.x,lid);
 }
 @compute @workgroup_size(128) fn smoothPageChebyshevReverse(@builtin(workgroup_id) page:vec3u,@builtin(local_invocation_index) lid:u32){
- smoothPage(level(),true,page.x,lid,128u);
+ smoothPage(true,page.x,lid);
 }
 // Return the immutable transfer target owned by one fine slot/corner.
 // Restriction consumes the same records through its parent-owned chains, so
@@ -3313,14 +3250,6 @@ var<workgroup> restrictSum:f32;
  let l=level();let i=wg.x+wg.y*65535u;
  let live=uniformWord(lane,select(0u,1u,l+1u<levels()&&i<count(l+1u)&&!stopped()));
  if(live==0u){return;}
- restrictCoarseSlot(l,i,lane);}
-// The one coarse slot's E^T sum, factored out of the entry point above so the
-// single-page coarse tail can call it for a whole level inside one dispatch
-// without duplicating the walk. Lanes at or above RESTRICT_LANES carry every
-// barrier and stage nothing, so a 64-lane and a 256-lane caller visit the same
-// records in the same ascending order and fold them with the same single
-// accumulator: the published sum is bit-identical either way.
-fn restrictCoarseSlot(l:u32,i:u32,lane:u32){
  let coarse=workSlot(l+1u,i);let limit=uniformWord(lane,transferCount(l));
  if(lane==0u){restrictNext=topology[parentHeadBase(l)+coarse];
   restrictSum=0.0;restrictFailed=0u;restrictStaged=0u;}
@@ -3337,10 +3266,10 @@ fn restrictCoarseSlot(l:u32,i:u32,lane:u32){
   if(staged==0u){break;}
   var weight=0.0;var residual=0.0;
   if(lane<staged){let record=restrictRecord[lane];let fine=topology[transferWord(l,record,0u)];
-   let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=applied(l,fine,A);
+   let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=applied(fine,A);
    residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
    weight=bitcast<f32>(topology[transferWord(l,record,2u)]);}
-  if(lane<RESTRICT_LANES){restrictWeight[lane]=weight;restrictResidual[lane]=residual;}
+  restrictWeight[lane]=weight;restrictResidual[lane]=residual;
   workgroupBarrier();
   if(lane==0u){var folded=restrictSum;
    for(var t=0u;t<staged;t+=1u){folded+=restrictWeight[t]*restrictResidual[t];}
@@ -3350,92 +3279,15 @@ fn restrictCoarseSlot(l:u32,i:u32,lane:u32){
  if(lane==0u&&restrictFailed==0u){let sum=restrictSum;
   if(restrictNext!=INVALID||!finite(sum)){reportAt(OVERFLOW,87u,coarse);}
   else{storef(RHS,l+1u,coarse,sum);}}}
-// Exact one-cell bottom, factored out of the entry point below for the same
-// reason. One invocation owns it in both callers.
-fn solveExactBottom(l:u32){if(count(l)!=1u){reportAt(NONPOSITIVE,88u,l);return;}
- let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){reportAt(NONPOSITIVE,89u,s);return;}
- let x=loadf(RHS,l,s)/d;if(!finite(x)){reportAt(NONFINITE,90u,s);}else{storef(A,l,s,x);}}
-@compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}
- solveExactBottom(l);}
+@compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}if(count(l)!=1u){reportAt(NONPOSITIVE,88u,l);return;}
+ let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){reportAt(NONPOSITIVE,89u,s);return;}let x=loadf(RHS,l,s)/d;if(!finite(x)){reportAt(NONFINITE,90u,s);}else{storef(A,l,s,x);}}
 // One fine invocation owns the complete interpolation sum, deleting all
 // prolongation atomics. GhostValuePropagate is the unit-copy branch of the
-// same E mapping rather than a second dispatch. The per-slot body is factored
-// out so the single-page coarse tail runs the identical rule.
-fn prolongAtSlot(l:u32,i:u32){
+// same E mapping rather than a second dispatch.
+@compute @workgroup_size(64) fn prolongAndGhostPropagate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}
  let fine=workSlot(l,i);let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let targetCount=select(8u,1u,ghost);var value=select(loadf(A,l,fine),0.0,ghost);
  for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse==INVALID){return;}
   value+=transfer.weight*loadf(A,l+1u,transfer.coarse);}if(!finite(value)){reportAt(NONFINITE,91u,fine);}else{storef(A,l,fine,value);}}
-@compute @workgroup_size(64) fn prolongAndGhostPropagate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}
- prolongAtSlot(l,i);}
 @compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let native=firstTrailingBit(sourceRowGeometry(r).y);
  let v=loadf(A,native,rowMap(native,r));if(!finite(v)){reportAt(NONFINITE,92u,r);}else{outputCorrection[r]=v;}}}
-// ---------------------------------------------------------------------------
-// The single-page coarse tail. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md.
-//
-// Part D of that document measured a persistent kernel that swallowed the
-// WHOLE solve at +15 ms and left it default-off, because one workgroup is one
-// GPU core and level 0 has real width. This entry point swallows only the
-// suffix of the hierarchy whose logical page grid is a single 8x8x4 page. Every
-// level it owns already dispatched exactly one workgroup, so no level loses
-// parallelism it had; encodeCorrection keeps a wide indirect dispatch for level
-// 0 and for every level above the single-page suffix.
-//
-// The single-page precondition is load-bearing, not cosmetic. smoothPage stages
-// a one-cell halo that crosses into the 27 neighbouring pages and writes only
-// its own interior, so a level with several pages is a block-Jacobi sweep whose
-// halo reads race the other pages' writes; walking those pages down one
-// workgroup would make it block Gauss-Seidel and change every float. A level
-// with one page has no neighbouring page to read, so this walk is the identical
-// arithmetic. tailSmoothLevel fails closed if the precondition is ever violated.
-//
-// storageBarrier(); workgroupBarrier(); replaces each dispatch boundary: with a
-// single workgroup, workgroup-scope acquire/release fully orders this kernel's
-// storage traffic between phases.
-//
-// Barrier uniformity (Tint enforces this; naga does not -- see the document's
-// warning): the first level is p.dimsLevel.w and the last is p.capacity.y-1u, both
-// uniform-buffer words, so both level loops are uniform. Every storage-derived
-// bound is laundered through uniformWord before it governs a construct that
-// contains a barrier, and no path in this entry point returns early, so every
-// lane executes the identical barrier sequence.
-const COARSE_TAIL_LANES=256u;
-fn tailSmoothLevel(l:u32,lane:u32,reverse:bool){
- let pages=pageCount(l);
- if(lane==0u&&pages>1u){reportAt(OVERFLOW,93u,l);}
- let walk=uniformWord(lane,select(0u,pages,!stopped()&&pages<=1u));
- for(var page=0u;page<walk;page+=1u){smoothPage(l,reverse,page,lane,COARSE_TAIL_LANES);}
- storageBarrier();workgroupBarrier();
-}
-fn tailRestrictLevel(l:u32,lane:u32){
- let slots=uniformWord(lane,select(0u,count(l+1u),!stopped()));
- for(var i=0u;i<slots;i+=1u){restrictCoarseSlot(l,i,lane);}
- storageBarrier();workgroupBarrier();
-}
-fn tailProlongLevel(l:u32,lane:u32){
- let slots=uniformWord(lane,select(0u,count(l),!stopped()));
- for(var i=lane;i<slots;i+=COARSE_TAIL_LANES){prolongAtSlot(l,i);}
- storageBarrier();workgroupBarrier();
-}
-@compute @workgroup_size(256) fn solveCoarseTail(@builtin(local_invocation_index) lane:u32){
- let first=level();let last=levels()-1u;
- // The host binds the params of a level in [1,last-1]. A level-0 binding would
- // swallow the one level that certainly has width, so fail closed instead. The
- // test is on two uniform-buffer words, so this return is uniform and precedes
- // every barrier in the entry point.
- if(first==0u||first>=last){if(lane==0u){reportAt(OVERFLOW,94u,first);}return;}
- for(var l=first;l<last;l+=1u){
-  tailSmoothLevel(l,lane,false);
-  tailRestrictLevel(l,lane);
- }
- // Exactly the encoded exactBottom record: it was dispatched over
- // ceil(count(last)/64) workgroups with only invocation zero acting, so an
- // empty bottom level ran no invocation and reported nothing.
- if(lane==0u&&!stopped()&&count(last)>0u){solveExactBottom(last);}
- storageBarrier();workgroupBarrier();
- for(var back=last;back>first;back-=1u){
-  let l=back-1u;
-  tailProlongLevel(l,lane);
-  tailSmoothLevel(l,lane,true);
- }
-}
 `;
