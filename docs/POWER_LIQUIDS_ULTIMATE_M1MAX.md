@@ -736,6 +736,65 @@ per step vs the parent run.
 
 ---
 
+# Part D' — the single-page coarse tail (IMPLEMENTED, NOT YET MEASURED)
+
+`OctreeSPGridVCycle.encodeCorrection` now encodes one `solveCoarseTail`
+dispatch in place of the V-cycle records for the **suffix of the hierarchy
+whose logical 8x8x4 page grid is a single page**. It is `@workgroup_size(256)`,
+dispatched `[1,1,1]` through the bottom level's convergence-gated compact-page
+record, and it carries the identical schedule (`pre-smooth / restrict` down,
+exact bottom, `prolong / post-smooth` up) with `storageBarrier();
+workgroupBarrier();` where the dispatch boundaries used to be.
+
+Motivation, from a per-label capture (`--isolate-pass-labels`, mini, 100 steps):
+restricting **level 3's eight cells cost 0.242 ms/advance** against **0.276 ms
+for level 0's 1,473 rows**. That is launch floor, not arithmetic.
+
+Selection is authored from the scene dimensions only (`coarseTailFirstLevel`).
+mini 16^3 -> level 2; ui 24x18x16 -> level 2; 64x48x32 -> level 3.
+
+Encoded correction dispatches per V-cycle application: mini **26 -> 18**, ui
+**31 -> 19**. Pass transitions unchanged at 1. At mini's 11 applications per
+advance that is **88 fewer dispatches per advance**.
+
+**Why the cut is at the single-page suffix and not at level 1.** The brief that
+commissioned this asked for levels 1..levelCount-1 and claimed Gate A. That is
+wrong, and the code says why. `smoothPage` stages a one-cell halo that resolves
+through `pageNeighbour` into the 27 neighbouring pages and then writes only its
+own interior, so a level with more than one page is a **block-Jacobi sweep whose
+halo reads race the other pages' interior writes** — benign today only because
+every page of a level is launched in the same dispatch and stages before any of
+them writes. Walking those pages down one workgroup makes each page read the
+previous page's *updated* values: block Gauss-Seidel, a different
+preconditioner, different floats. At mini, level 1 is 8^3 = 1x1x2 pages, so
+level 1 is exactly the level this rules out; only levels 2-4 are collapsible.
+`tailSmoothLevel` reports `OVERFLOW` stage 93 if it is ever handed a multi-page
+level, so the precondition is a hard failure rather than a silent physics
+change.
+
+**Gate A argument.** (a) Levels the tail owns have one page, so `smoothPage`
+resolves every staged halo cell through ordinal 13 and reads nothing another
+page writes — the walk order is irrelevant. (b) Chebyshev sweeps are per-element
+independent, so re-striping 256 page elements over 256 lanes instead of 128
+visits the same elements with the same operands. (c) `restrictCoarseSlot` is the
+existing kernel body verbatim; lanes >= 64 carry the barriers and stage nothing,
+so the staged record set, the ascending record order and the single-accumulator
+fold are unchanged. (d) `prolongAtSlot`, `solveExactBottom` are the existing
+bodies factored out; the tail visits the same slot sets with the same per-slot
+outcomes. (e) The convergence gate, the `stopped()` early-outs and every
+`reportAt` stage/index are preserved phase by phase.
+
+**NOT MEASURED.** The GPU was held by another process for the whole of this
+change, so no Gate-A fingerprint run and no wall exist. Two entries in this
+document argue it may be worth little — refuted-lever item 9 (deleting 231
+dispatches measured as a 2 ms *regression*) and Part D below — and both were
+about dispatch *count*, which is why the cut here was drawn at measured
+per-label launch floor instead. Score it before believing it, and if it does not
+pay, delete `solveCoarseTail`, restore the four-record loop, and record the
+refutation in the list above.
+
+---
+
 # Part D — IMPLEMENTED, MEASURED, AND NOT SELECTED
 
 **Built, correct, and 15 ms slower. Default OFF.** The kernel described below

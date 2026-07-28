@@ -660,7 +660,13 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     "WGSL select eagerly evaluates both insertion paths");
   assert.match(octreeSPGridVCycleShader, /fn smoothable/);
   assert.doesNotMatch(octreeSPGridVCycleShader, /fn smoothAtoB|fn smoothBtoA|relaxJacobi/);
-  assert.match(octreeSPGridVCycleShader, /let product=applied\(fine,A\)/,
+  // Arity only: `applied` takes its level as an argument now, because the
+  // single-page coarse tail evaluates the same stencil at several levels inside
+  // one dispatch and cannot read it from the bound params buffer. The pinned
+  // property -- that restriction consumes the live stencil rather than a
+  // materialized AX/residual channel -- is unchanged. See
+  // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md.
+  assert.match(octreeSPGridVCycleShader, /let product=applied\(l,fine,A\)/,
     "restriction must consume the final pre-smoothing stencil without materializing AX or residual");
   assert.doesNotMatch(octreeSPGridVCycleShader,
     /\b(?:AX|RESIDUAL)\b|fn (?:applyA|applyB|jacobiAtoB|jacobiBtoA|formResidual)\b/,
@@ -763,7 +769,16 @@ test("one correction gates then executes exact indirect records with cached desc
   broker.fence("correction complete");
   assert.equal(passes - setupPasses, 2);
   assert.equal(dispatches - before, cycle.encodedCorrectionDispatchCount);
-  assert.equal(cycle.encodedCorrectionDispatchCount, 26,
+  // Was 26. At 16^3 the logical page grid is 16 pages at level 0, 2 at level 1
+  // and one page from level 2 down, so `solveCoarseTail` owns levels 2-4 and
+  // replaces their nine records (two smooth/restrict pairs, the exact bottom,
+  // two prolong/smooth pairs) with one. Levels 0 and 1 keep their wide
+  // dispatches because they still have width -- Part D of
+  // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md measured collapsing a wide level at
+  // +15 ms, and a multi-page level's cross-page halo would additionally turn
+  // block Jacobi into block Gauss-Seidel.
+  assert.equal(cycle.coarseTailFirstLevel, 2);
+  assert.equal(cycle.encodedCorrectionDispatchCount, 18,
     "one gate plus fused forward/reverse page smoothers own the correction schedule");
   assert.equal(cycle.encodedPassTransitionCount, 1);
   assert.equal(cycle.diagnostics.bottomOperation, "exact-single-cell");
@@ -814,6 +829,92 @@ test("accurate A2 encodes only one gate and four cached class dispatches", () =>
   broker.fence("A2 repeated");
   assert.equal(groups, firstGroups, "immutable A2 bind groups must be reused");
   cycle.destroy();
+});
+
+// The coarse tail exists because the per-label capture showed restricting the
+// eight cells of level 3 costing 0.242 ms/advance against 0.276 ms for level
+// 0's 1,473 rows -- launch floor, not arithmetic. It is bounded by the
+// single-page rule because Part D of docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md
+// measured a persistent kernel that swallowed a wide level at +15 ms.
+test("the coarse tail collapses exactly the single-page hierarchy suffix", () => {
+  Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
+  const buffer = (size: number, usage = 31) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const device = { queue: { writeBuffer() {} },
+    createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+    createShaderModule: () => ({}), createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => ({}),
+  } as unknown as GPUDevice;
+  const shape = (dimensions: readonly [number, number, number]) => {
+    const cycle = new WebGPUOctreeSPGridVCycle(device, spgridSource(buffer, 128, 8 * 512),
+      { dimensions, rowCapacity: 128, finestCellWidth: 1 });
+    const result = { levelCount: cycle.plan.levelCount, first: cycle.coarseTailFirstLevel,
+      dispatches: cycle.encodedCorrectionDispatchCount };
+    cycle.destroy(); return result;
+  };
+  const pages = (dimensions: readonly [number, number, number], level: number) =>
+    dimensions.map((value, axis) => Math.ceil(Math.ceil(value / 2 ** level) / [8, 8, 4][axis]))
+      .reduce((product, value) => product * value, 1);
+  for (const dimensions of [[16, 16, 16], [24, 18, 16], [8, 8, 8], [4, 4, 4],
+    [64, 48, 32]] as const) {
+    const { levelCount, first, dispatches } = shape(dimensions);
+    assert.ok(first >= 1, `${dimensions} must never hand level 0 to the coarse tail`);
+    assert.ok(first <= levelCount - 2,
+      `${dimensions} must collapse at least one non-bottom level`);
+    for (let level = first; level < levelCount; level += 1) {
+      assert.equal(pages(dimensions, level), 1,
+        `${dimensions} level ${level} must be a single 8x8x4 page before the tail owns it`);
+    }
+    if (first > 1) {
+      assert.ok(pages(dimensions, first - 1) > 1,
+        `${dimensions} must not surrender level ${first - 1}, which still has page width`);
+    }
+    // Gate + clear + one zeroVectors per level + RHS seed + a smooth/restrict
+    // pair per wide descent level + a prolong/smooth pair per wide ascent level
+    // + the tail + the publication.
+    assert.equal(dispatches, levelCount + 5 + 4 * first);
+    assert.equal(dispatches, levelCount + 5 + 4 * (levelCount - 1)
+      - (4 * (levelCount - 1 - first) + 1) + 1,
+    `${dimensions} must delete exactly the records the tail absorbs`);
+  }
+  // The two production lanes: 16^3 mini and the 24x18x16 ui scene.
+  assert.deepEqual(shape([16, 16, 16]), { levelCount: 5, first: 2, dispatches: 18 });
+  assert.deepEqual(shape([24, 18, 16]), { levelCount: 6, first: 2, dispatches: 19 });
+});
+
+test("the coarse tail carries the V-cycle schedule under uniform barriers only", () => {
+  const tail = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("const COARSE_TAIL_LANES="));
+  assert.match(tail, /@compute @workgroup_size\(256\) fn solveCoarseTail/,
+    "the tail is one 256-lane workgroup, the width every level it owns already had");
+  // Every construct in the tail that encloses a barrier is bounded by a
+  // uniform-buffer word or by a storage word laundered through uniformWord.
+  // `npm run test:water-shaders` does not check this -- naga validates unsound
+  // barriers as OK. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md.
+  assert.match(tail, /let walk=uniformWord\(lane,select\(0u,pages,!stopped\(\)&&pages<=1u\)\);\s*\n\s*for\(var page=0u;page<walk/,
+    "the page walk must be bounded by a laundered word, never by a raw storage read");
+  assert.match(tail, /let slots=uniformWord\(lane,select\(0u,count\(l\+1u\),!stopped\(\)\)\);\s*\n\s*for\(var i=0u;i<slots/,
+    "the restriction walk must be bounded by a laundered word");
+  assert.match(tail, /let first=level\(\);let last=levels\(\)-1u;/,
+    "both level loops must be bounded by uniform-buffer words");
+  assert.doesNotMatch(tail, /for\([^)]*<\s*(?:pageCount|count|transferCount)\(/,
+    "no barrier-carrying loop may read its bound straight out of storage");
+  // The single-page precondition is what keeps the walk block Jacobi rather
+  // than block Gauss-Seidel, so it must stay a hard failure.
+  assert.match(tail, /if\(lane==0u&&pages>1u\)\{reportAt\(OVERFLOW,93u,l\);\}/,
+    "a multi-page level handed to the tail must fail closed, never be smoothed serially");
+  assert.match(tail, /if\(first==0u\|\|first>=last\)\{if\(lane==0u\)\{reportAt\(OVERFLOW,94u,first\);\}return;\}/,
+    "a level-0 binding must fail closed before any barrier");
+  // The exact schedule encodeCorrection used to encode, in order.
+  assert.match(tail,
+    /fn solveCoarseTail[\s\S]*for\(var l=first;l<last;l\+=1u\)\{\s*\n\s*tailSmoothLevel\(l,lane,false\);\s*\n\s*tailRestrictLevel\(l,lane\);[\s\S]*solveExactBottom\(last\)[\s\S]*for\(var back=last;back>first;back-=1u\)\{\s*\n\s*let l=back-1u;\s*\n\s*tailProlongLevel\(l,lane\);\s*\n\s*tailSmoothLevel\(l,lane,true\);/,
+    "the tail must run pre-smooth/restrict down, the exact bottom, then prolong/post-smooth up");
+  for (const phase of ["tailSmoothLevel", "tailRestrictLevel", "tailProlongLevel"]) {
+    assert.match(tail, new RegExp(`fn ${phase}\\([\\s\\S]*?storageBarrier\\(\\);workgroupBarrier\\(\\);\\s*\\n\\}`),
+      `${phase} must close with the storage barrier that replaces its dispatch boundary`);
+  }
+  // Part D's 128-lane page-walking megakernel stays banned by name and shape.
+  assert.doesNotMatch(octreeSPGridVCycleShader, /var<workgroup> persistentPage|fn persistentCorrection/,
+    "the retired serial page-walk executor must not return under any name");
 });
 
 test("resolved-row persistent executor is absent at every production capacity", () => {
@@ -1094,9 +1195,20 @@ test("correction consumes only per-level live slot dispatches", () => {
   assert.ok(offsets.every((offset) => offset % 48 === 8 || offset % 48 === 20
     || offset % 48 === 36),
   "kernels consume published slot, parent-slot, or compact-page records");
-  assert.equal(offsets.filter((offset) => offset % 48 === 20).length, cycle.plan.levelCount - 1);
+  // Was levelCount-1 restrictions and 2*(levelCount-1) page smooths. At 8^3
+  // only level 0 has more than one logical 8x8x4 page, so `solveCoarseTail`
+  // owns levels 1 upward: one wide restriction remains, and the compact-page
+  // record is consumed by the forward and reverse level-0 smooths plus the tail
+  // itself, which is dispatched from the one-cell bottom level's page record so
+  // it stays convergence-gated. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md.
+  const wide = cycle.coarseTailFirstLevel > 0
+    ? cycle.coarseTailFirstLevel : cycle.plan.levelCount - 1;
+  assert.equal(cycle.coarseTailFirstLevel, 1);
+  assert.equal(offsets.filter((offset) => offset % 48 === 20).length, wide);
   assert.equal(offsets.filter((offset) => offset % 48 === 36).length,
-    2 * (cycle.plan.levelCount - 1));
+    2 * wide + Number(cycle.coarseTailFirstLevel > 0));
+  assert.ok(offsets.includes((cycle.plan.levelCount - 1) * 48 + 36),
+    "the coarse tail consumes the one-cell bottom level's convergence-gated page record");
   cycle.destroy();
 });
 
@@ -1128,7 +1240,7 @@ test("Dawn accepts the native sparse V-cycle shader", {
     "finalizeLifecycle", "prepareCorrectionDispatches", "clearCorrection", "zeroVectors", "seedRhs",
     "restrictAndGhostAccumulate", "exactBottom",
     "smoothPageChebyshevForward", "smoothPageChebyshevReverse",
-    "prolongAndGhostPropagate", "publish"]) {
+    "prolongAndGhostPropagate", "solveCoarseTail", "publish"]) {
     device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
   }
   const validationError = await device.popErrorScope();
