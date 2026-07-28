@@ -4000,6 +4000,24 @@ async function runGPU(
   dataFlowAudit?.stop();
   await awaitAdvanceCompletion();
   captureGenericPhaseTrace();
+  // Ghost-fluid theta census. The failure dump already carries these words, but
+  // a converging scene never takes that path, so the control case in any
+  // stiffness comparison was unmeasurable. Bins are [decoupled, at-1e-2-floor,
+  // <=.05, <=.1, <=.25, <=.5, <1, ==1] over boundary slots.
+  if (process.env.FLUID_BOUNDARY_THETA_HISTOGRAM === "1") {
+    const projection = (solver as GPUSolverInstance & { octreeProjection?: {
+      readPowerFrontierFailure(): Promise<{ boundaryCandidate?: readonly number[] } | undefined>;
+    } }).octreeProjection;
+    const census = await projection?.readPowerFrontierFailure();
+    const words = census?.boundaryCandidate;
+    if (words && words.length >= 16) {
+      console.log(JSON.stringify({ scenario: scenario.id, method: method.id,
+        phase: "ghost-fluid-theta-census", slots: words[3], rows: words[2],
+        histogram: { decoupled: words[8], atFloor1e2: words[9], to0_05: words[10],
+          to0_1: words[11], to0_25: words[12], to0_5: words[13], below1: words[14],
+          unscaled: words[15] } }));
+    }
+  }
   if (powerGenerationAuditSnapshot) {
     if (powerGenerationAuditSteps.length === 0) {
       throw new Error("structured generation audit captured no accepted-step snapshots");
@@ -4043,11 +4061,17 @@ async function runGPU(
           Math.sqrt(Math.max(0, diagnostics.residualSquared)),
           powerGenerationAuditDts[record]!, scene.fluid.density_kg_m3,
         );
-        if (diagnostics.flags !== 0 || !diagnostics.converged
-          || diagnostics.rows !== snapshot.structured.rowCount
-          || !Number.isFinite(diagnostics.relativeResidual)
-          || projectedResidual === undefined) {
-          generationFailures.push("MGPCG publication is invalid or incoherent");
+        // Name the specific incoherence: "invalid" alone cannot distinguish a
+        // solver that diverged from one whose row count disagrees with the
+        // structured epoch it was solved against, and those have no shared fix.
+        const mgpcgFailures: string[] = [];
+        if (diagnostics.flags !== 0) mgpcgFailures.push(`flags=0x${diagnostics.flags.toString(16)}`);
+        if (!diagnostics.converged) mgpcgFailures.push(`not converged after ${diagnostics.iterations} iterations (relativeResidual=${diagnostics.relativeResidual})`);
+        if (diagnostics.rows !== snapshot.structured.rowCount) mgpcgFailures.push(`rows=${diagnostics.rows} != structured rowCount=${snapshot.structured.rowCount}`);
+        if (!Number.isFinite(diagnostics.relativeResidual)) mgpcgFailures.push(`relativeResidual=${diagnostics.relativeResidual} (residualSquared=${diagnostics.residualSquared}, rhsSquared=${diagnostics.rhsSquared})`);
+        if (projectedResidual === undefined) mgpcgFailures.push(`projected variational residual is undefined (residualSquared=${diagnostics.residualSquared}, dt=${powerGenerationAuditDts[record]})`);
+        if (mgpcgFailures.length > 0) {
+          generationFailures.push(`MGPCG publication is invalid or incoherent: ${mgpcgFailures.join("; ")}`);
         }
         mgpcgIterationMinimum = Math.min(mgpcgIterationMinimum, diagnostics.iterations);
         mgpcgIterationMaximum = Math.max(mgpcgIterationMaximum, diagnostics.iterations);
