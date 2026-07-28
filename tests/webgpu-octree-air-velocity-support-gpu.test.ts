@@ -56,7 +56,11 @@ test("GPU plan composes both support layouts and bounded candidate schedules", (
   assert.equal(plan.faceCellCapacity, plan.rowCapacity + plan.support.supportCapacity);
   assert.equal(plan.faceCapacity, plan.faceCellCapacity * 12);
   assert.equal(plan.faceBytes, plan.faceCapacity * 16);
-  assert.equal(OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE, 1 + 30 + 24);
+  // 1 incidence count + 30 incident rows + 2x12 signed patch neighbours, then
+  // the 4-word resolved cell geometry (origin coordinate and extent) the march
+  // reads instead of re-running faceCellIn and coord() per candidate. See
+  // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md Part E3 -- "make one encode cheap".
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE, 1 + 30 + 24 + 4);
   assert.equal(plan.faceAdjacencyStride, OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE);
   assert.equal(plan.faceAdjacencyBytes, plan.faceCellCapacity * plan.faceAdjacencyStride * 4);
   assert.equal(plan.directAirVectorBytes, plan.rowCapacity * 16);
@@ -256,20 +260,37 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   // closest-point-transform ranking. Accumulating per-hop path length made
   // the metric an axis-graph geodesic (Manhattan-like), which under-drives
   // diagonal spreading and squares off the dam front.
+  // Renegotiated by name for the resolved face geometry -- see
+  // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md Part E3. The metric is unchanged:
+  // still the Euclidean distance from this patch's centre to the centre of the
+  // ORIGINAL seed patch. Only the way the seed patch's centre is obtained
+  // changed, from re-resolving the row's cell and running coord() to reading
+  // the origin/extent resolveAirSupportFaceAdjacency published for that row.
   assert.match(march,
-    /distance=length\(center-faceCenterIn\(candidate\.z,directRows,bank,supportRows\)\)/,
+    /distance=length\(center-faceCenter\(candidate\.z\)\)/,
     "the fast-marching-like relaxation must rank sources by Euclidean distance to the original seed, not accumulated hop length");
-  // `center` is the marching patch's own centre and every scratch control word
-  // the metric needs, read once per lane. They were previously re-derived on
-  // each of up to 120 candidates, which is where Section 5's per-lane cost went.
+  assert.match(shader,
+    /fnfaceCenter\(item:u32\)->vec3f\{.*letg=adjacencyGeometry\(faceRow\);letorigin=vec3f\(g\.xyz\);letextent=f32\(g\.w\)/s,
+    "the patch centre must come from the resolved per-face-row geometry, not a per-candidate cell resolution");
+  assert.match(shader,
+    /fnsetAdjacencyGeometry\(faceRow:u32,cell:vec4u\)\{.*letq=coord\(cell\.x\).*faceAdjacency\[at\+3u\]=cell\.y/s,
+    "the resolved geometry must be exactly coord(cell.x) and cell.y so the centre stays bit-identical");
+  assert.match(shader,
+    /letcell=faceCell\(faceRow\);if\(cell\.x==INVALID\)\{failTopology\(7u,faceRow\);return;\}setAdjacencyGeometry\(faceRow,cell\)/,
+    "face-row geometry must be resolved by the adjacency publication, from the same faceCell the reader used to call");
+  // `center` is the marching patch's own centre and the published face count,
+  // read once per lane. They were previously re-derived on each of up to 120
+  // candidates, which is where Section 5's per-lane cost went.
   assert.match(march,
-    /letcenter=faceCenterIn\(item,directRows,bank,supportRows\);/,
+    /letcenter=faceCenter\(item\);/,
     "the marching patch's own centre is loop-invariant and must leave the candidate scan");
   const candidateScan = march.slice(march.indexOf("for(varlocalFace"),
     march.indexOf("letchanged=any(best!=current)"));
   assert.ok(candidateScan.length > 0);
-  assert.doesNotMatch(candidateScan, /s\(29u\)|s\(2u\)|s\(4u\)|s\(8u\)|faceCenterIn\(item/,
+  assert.doesNotMatch(candidateScan, /s\(29u\)|s\(2u\)|s\(4u\)|s\(8u\)|faceCenter\(item/,
     "no dispatch-uniform scratch word or invariant centre may be re-read inside the candidate scan");
+  assert.doesNotMatch(candidateScan, /faceCellIn|coord\(/,
+    "the candidate scan must not re-resolve a face row's cell or re-run coord()'s emulated integer divisions");
   assert.match(shader, /clean=errors==0u&&\(s\(35u\)\|s\(36u\)\|s\(37u\)\)==0u/,
     "publication requires a deliberate GPU-observed no-change wave");
   assert.match(march,

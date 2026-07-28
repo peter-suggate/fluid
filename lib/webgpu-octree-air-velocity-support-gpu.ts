@@ -72,8 +72,17 @@ export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP = 2;
 export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 47;
 export const OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS = 6;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_WORDS = 4;
+/**
+ * Origin coordinate (3 words) and extent (1 word) of a face row's cell,
+ * resolved once by `resolveAirSupportFaceAdjacency` and appended to that row's
+ * adjacency record. `faceCenter` used to re-derive both on every candidate of
+ * the march's 30x4 scan, and re-deriving the origin means `coord()`'s three
+ * emulated integer divisions by the runtime domain dimensions.
+ */
+export const OCTREE_AIR_SUPPORT_GPU_FACE_GEOMETRY_WORDS = 4;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE =
-  1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence + 2 * STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS;
+  1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence + 2 * STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS
+  + OCTREE_AIR_SUPPORT_GPU_FACE_GEOMETRY_WORDS;
 
 export const OCTREE_AIR_SUPPORT_GPU_ERROR = Object.freeze({
   source: 1 << 0,
@@ -1354,6 +1363,15 @@ fn adjacencyNegative(faceRow:u32,axis:u32,quadrant:u32)->u32{
   return faceAdjacency[adjacencyBase(faceRow)+${1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u+4u*axis+quadrant];}
 fn adjacencyPositive(faceRow:u32,axis:u32,quadrant:u32)->u32{
   return faceAdjacency[adjacencyBase(faceRow)+${1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence + STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant];}
+// This face row's cell origin coordinate and extent, resolved once by
+// resolveAirSupportFaceAdjacency into the tail of the same adjacency record the
+// march already reads for its incidence list. See faceCenter.
+fn adjacencyGeometryBase(faceRow:u32)->u32{
+  return adjacencyBase(faceRow)+${1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence + 2 * STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;}
+fn setAdjacencyGeometry(faceRow:u32,cell:vec4u){let at=adjacencyGeometryBase(faceRow);let q=coord(cell.x);
+  faceAdjacency[at]=q.x;faceAdjacency[at+1u]=q.y;faceAdjacency[at+2u]=q.z;faceAdjacency[at+3u]=cell.y;}
+fn adjacencyGeometry(faceRow:u32)->vec4u{let at=adjacencyGeometryBase(faceRow);
+  return vec4u(faceAdjacency[at],faceAdjacency[at+1u],faceAdjacency[at+2u],faceAdjacency[at+3u]);}
 
 // Resolve all topology identities once. The six extrapolation waves consume
 // only this compact indexed graph; catalog and owner-page traversal is kept in
@@ -1363,7 +1381,8 @@ fn adjacencyPositive(faceRow:u32,axis:u32,quadrant:u32)->u32{
   let faceRows=s(2u)+s(8u);if(faceRow>=faceRows||s(0u)!=0u){return;}let base=adjacencyBase(faceRow);
   if(base+p.faceAdjacencyStride>arrayLength(&faceAdjacency)){fail(faceRow,ERROR_CAPACITY);return;}
   for(var local=0u;local<p.faceAdjacencyStride;local+=1u){faceAdjacency[base+local]=INVALID;}
-  let cell=faceCell(faceRow);if(cell.x==INVALID){failTopology(7u,faceRow);return;}let header=caseHeader(cell.z);
+  let cell=faceCell(faceRow);if(cell.x==INVALID){failTopology(7u,faceRow);return;}setAdjacencyGeometry(faceRow,cell);
+  let header=caseHeader(cell.z);
   if(header.x==INVALID||header.y>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u
       ||header.x>arrayLength(&catalogFaces)||header.y>arrayLength(&catalogFaces)-header.x){fail(faceRow,ERROR_CATALOG);return;}
   var count=0u;for(var localFace=0u;localFace<header.y;localFace+=1u){let identity=catalogNeighbor(cell,header.x+localFace);
@@ -1379,13 +1398,40 @@ fn adjacencyPositive(faceRow:u32,axis:u32,quadrant:u32)->u32{
     faceAdjacency[base+${1 + OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence + STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+patchIndex]=faceRowForIdentity(positive);
   }}}
 
-fn faceCenterIn(item:u32,directRows:u32,bank:u32,supportRows:u32)->vec3f{
+// The patch centre of one owned face slot. The origin coordinate and extent
+// come from the adjacency record resolveAirSupportFaceAdjacency authored for
+// this face row, not from re-resolving the row's cell.
+//
+// This is the hot half of the march. extendFace evaluates it once for its own
+// patch and then again for the seed patch of every one of up to 30x4 = 120
+// candidates, on every sweep -- 12 prefix waves, up to 48 wide waves, plus the
+// persistent tail. Each evaluation used to run faceCellIn (a rowGeometry gather
+// for a direct row; SIX recordArena atomicLoads for a support row) and then
+// coord(), whose three divisions and modulos are by p.dimensions.x/.y, runtime
+// values, so the backend emits emulated integer division rather than the
+// multiply-shift it can use for a literal. That is the ALU the 'Extrapolate
+// structured ordinary faces' pass (3.06 ms, twice per advance, ALU limiter
+// 61%) and 'March Section 5 closest faces' (1.01 ms, twice) are spending.
+//
+// The stored words ARE coord(cell.x) and cell.y, written by the same faceCellIn
+// call the reader used to make, so vec3f(g.xyz) and f32(g.w) reproduce
+// vec3f(coord(cell.x)) and f32(cell.y) exactly and every float operation below
+// is unchanged and in the same order. Nothing is stored as f32 and reloaded, so
+// no expression is ended and no multiply-add is unfused: this moves an INTEGER
+// address derivation, not a float value. Gate A.
+//
+// The three scratch control words the old signature threaded through
+// (directRows/bank/supportRows) only ever selected which cell faceCellIn
+// resolved. They are settled before this stage and unwritten during it -- which
+// is exactly why the resolution can be hoisted to the publication at all -- so
+// with the resolution gone the parameters go too, and extendFace stops issuing
+// three atomicLoads per invocation to feed them.
+fn faceCenter(item:u32)->vec3f{
   let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
   let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let quadrant=local%4u;
-  let cell=faceCellIn(faceRow,directRows,bank,supportRows);let origin=vec3f(coord(cell.x));let extent=f32(cell.y);var center=origin+vec3f(.5*extent);
+  let g=adjacencyGeometry(faceRow);let origin=vec3f(g.xyz);let extent=f32(g.w);var center=origin+vec3f(.5*extent);
   center[axis]=origin[axis]+extent;var transverse=0u;for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
     center[a]=origin[a]+select(.25,.75,(quadrant&(1u<<transverse))!=0u)*extent;transverse+=1u;}return center;}
-fn faceCenter(item:u32)->vec3f{return faceCenterIn(item,s(2u),s(4u),s(8u));}
 
 var<workgroup> seedCounts:array<u32,256>;
 @compute @workgroup_size(256)fn seedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
@@ -1410,16 +1456,18 @@ fn betterFace(candidate:vec4u,best:vec4u)->bool{let candidateDistance=bitcast<f3
   return candidate.w!=0u&&finiteValue(candidateDistance)&&(best.w==0u||candidateDistance<bestDistance
     ||(candidateDistance==bestDistance&&candidate.z<best.z));}
 // Everything the 30x4 candidate scan needs about the marching patch itself is
-// loop-invariant: the published face count, the three dispatch-uniform scratch
-// control words, and this patch's own centre. They used to be re-derived on
-// every candidate — up to 119 redundant repeats per lane per sweep of an
-// atomic load, a faceCell gather, and coord()'s emulated integer divisions.
-// Hoisting recomputes nothing and reorders nothing, so the marched field is
-// bit-identical; it only removes work from the single hottest loop in Section 5.
+// loop-invariant: the published face count and this patch's own centre. They
+// used to be re-derived on every candidate — up to 119 redundant repeats per
+// lane per sweep of an atomic load, a faceCell gather, and coord()'s emulated
+// integer divisions. Hoisting recomputes nothing and reorders nothing, so the
+// marched field is bit-identical; it only removes work from the single hottest
+// loop in Section 5. The per-candidate faceCenter below is now a four-word read
+// of the candidate's own adjacency record — the gather and the divisions are
+// resolved once per face row by resolveAirSupportFaceAdjacency.
 fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[item],readA);
   let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;var best=current;
-  let faceCount=s(29u);let directRows=s(2u);let bank=s(4u);let supportRows=s(8u);
-  let center=faceCenterIn(item,directRows,bank,supportRows);
+  let faceCount=s(29u);
+  let center=faceCenter(item);
   let incidence=adjacencyIncidentCount(faceRow);if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(item,ERROR_CAPACITY);return false;}
   for(var localFace=0u;localFace<incidence;localFace+=1u){let otherRow=adjacencyIncident(faceRow,localFace);
     if(otherRow==INVALID){continue;}let sourceBase=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis;
@@ -1431,7 +1479,7 @@ fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[it
         // Accumulating per-hop path length instead made the metric an
         // axis-graph geodesic (Manhattan-like), which under-drives diagonal
         // spreading and squares off the dam front.
-        let distance=length(center-faceCenterIn(candidate.z,directRows,bank,supportRows));
+        let distance=length(center-faceCenter(candidate.z));
         if(!finiteValue(distance)){fail(item,ERROR_SOURCE);continue;}candidate.y=bitcast<u32>(distance);}
       if(betterFace(candidate,best)){best=candidate;}}}
   let changed=any(best!=current);if(readA){faceB[item]=best;}else{faceA[item]=best;}return changed;}
