@@ -27,14 +27,15 @@ const TASKS = ["Advect", "Solve pressure", "Publish"];
 
 const writeTrace = (options: {
   frames: number; frameUs: number; extraOn?: readonly number[];
-  spacingUs?: number; intervalUs?: number;
+  spacingUs?: number; intervalUs?: number; tasks?: readonly string[];
 }): Record<string, string> => {
   const directory = mkdtempSync(join(tmpdir(), "xctrace-seg-"));
   const intervals: string[] = [];
   const encoders: string[] = [];
+  const base = options.tasks ?? TASKS;
   let id = 0;
   for (let frame = 0; frame < options.frames; frame += 1) {
-    const labels = options.extraOn?.includes(frame) ? [...TASKS, "Rebuild topology"] : TASKS;
+    const labels = options.extraOn?.includes(frame) ? [...base, "Rebuild topology"] : base;
     labels.forEach((label, slot) => {
       id += 1;
       const encoderId = `0x${id.toString(16)}`;
@@ -59,8 +60,9 @@ const writeTrace = (options: {
   };
 };
 
-const build = async (tables: Record<string, string>, steps?: number) => buildFrameReport({
-  tables, lane: "mini", environment: {}, tracedPid: 4242,
+const build = async (tables: Record<string, string>, steps?: number,
+  environment: Record<string, string> = {}) => buildFrameReport({
+  tables, lane: "mini", environment, tracedPid: 4242,
   traced: steps === undefined ? undefined : { steps, simulationWall_ms: steps * 50 },
 });
 
@@ -124,6 +126,96 @@ test("a capture covering part of the run says so instead of claiming the whole r
   assert.ok(boundary?.includes("% of the run"), `expected a coverage note, got: ${boundary}`);
   assert.equal(report.frames.firstAdvance, undefined,
     "advance numbers are unknowable when the capture is a window");
+});
+
+/**
+ * A partially scoped capture still prints a full pass table, and every row in
+ * it reads like a kernel. On the mini lane 2026-07-28 that let a 3.55 ms row
+ * named `Structured boundary worksets - count row classes` -- in truth the
+ * SPGrid candidate hierarchy rebuild sharing that pass -- be quoted as the
+ * classify kernel's cost. The report must refuse to present it that way.
+ */
+const SCOPED = {
+  FLUID_GPU_ISOLATE_PASS_LABELS: "1",
+  FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES: "Fine JFA ·",
+};
+const MIXED = ["Fine JFA - flood", "Structured boundary worksets - count row classes", "Publish"];
+
+test("a partially scoped capture reports its unscoped rows as composite, by name", async () => {
+  const report = await build(
+    writeTrace({ frames: 12, frameUs: 50_000, tasks: MIXED }), 12, SCOPED);
+  assert.equal(report.attribution.mode, "scoped");
+  // The broker normalises "·" to "-" before matching, so the report must too:
+  // a prefix that isolates on the GPU and fails to match here would demote a
+  // real stage to a composite bucket without anyone noticing.
+  assert.deepEqual(report.attribution.isolatedPrefixes, ["Fine JFA -"]);
+  const byLabel = new Map(report.passes.map((pass) => [pass.label, pass]));
+  const exact = byLabel.get("Fine JFA - flood");
+  assert.equal(exact?.exactAttribution, true, "the isolated prefix is an exact stage");
+  assert.equal(exact?.compositeReason, undefined);
+  for (const label of ["Structured boundary worksets - count row classes", "Publish"]) {
+    const pass = byLabel.get(label);
+    assert.equal(pass?.exactAttribution, false, `${label} was never isolated`);
+    assert.ok(pass?.compositeReason?.includes("next pass boundary"),
+      `${label} must say what its number actually covers: ${pass?.compositeReason}`);
+  }
+  assert.equal(report.attribution.exactBuckets, 1);
+  assert.equal(report.attribution.compositeBuckets, 2);
+  assert.ok(report.attribution.largestComposites
+    .some((entry) => entry.label === "Structured boundary worksets - count row classes"));
+  // The caveat has to be where a reader lands, not buried under the table.
+  const banner = report.console.find((line) => line.startsWith("attribution:"));
+  assert.ok(banner?.includes("PARTIAL"), `expected a scope warning, got: ${banner}`);
+  assert.ok(report.console.some((line) => line.includes("COMPOSITE ROW IS NOT")));
+  assert.ok(report.console.some((line) => line.includes("largest COMPOSITE buckets")));
+});
+
+test("with isolation off every bucket is composite, and with it on none is by default", async () => {
+  const off = await build(writeTrace({ frames: 12, frameUs: 50_000, tasks: MIXED }), 12);
+  assert.equal(off.attribution.mode, "off");
+  assert.equal(off.attribution.exactBuckets, 0);
+  assert.equal(off.attribution.compositeBuckets, MIXED.length);
+  assert.ok(off.passes.every((pass) => pass.compositeReason?.includes("label isolation was off")));
+  assert.ok(off.console.some((line) => line.includes("label isolation OFF")));
+
+  const full = await build(writeTrace({ frames: 12, frameUs: 50_000, tasks: MIXED }), 12,
+    { FLUID_GPU_ISOLATE_PASS_LABELS: "1" });
+  assert.equal(full.attribution.mode, "full");
+  assert.equal(full.attribution.compositeBuckets, 0);
+  assert.ok(full.passes.every((pass) => pass.exactAttribution));
+});
+
+test("an Instruments-merged encoder is never an exact stage, however isolated", async () => {
+  // Instruments joins the encoders it drew as one interval with " & ". Label
+  // isolation cannot make such a bucket a stage: the interval spans them all.
+  const directory = mkdtempSync(join(tmpdir(), "xctrace-merge-"));
+  const intervals: string[] = [];
+  const encoders: string[] = [];
+  for (let frame = 0; frame < 12; frame += 1) {
+    ["Fine JFA - flood & Fine JFA - resolve", "Fine JFA - seed"].forEach((label, slot) => {
+      const encoderId = `0x${(frame * 8 + slot + 1).toString(16)}`;
+      encoders.push(JSON.stringify({
+        "encoder-id": encoderId, "encoder-label": `Command Buffer 0:${label}`,
+        process: "node (4242)",
+      }));
+      intervals.push(JSON.stringify({
+        "encoder-id": encoderId, start: stamp(1_000_000 + frame * 50_000 + slot * 1000),
+        duration: "500.00 µs", "channel-name": "Compute", process: "node (4242)",
+      }));
+    });
+  }
+  writeFileSync(join(directory, "intervals.ndjson"), `${intervals.join("\n")}\n`);
+  writeFileSync(join(directory, "encoders.ndjson"), `${encoders.join("\n")}\n`);
+  const report = await build({
+    "gpu-intervals": join(directory, "intervals.ndjson"),
+    encoders: join(directory, "encoders.ndjson"),
+  }, 12, { FLUID_GPU_ISOLATE_PASS_LABELS: "1" });
+  const merged = report.passes.find((pass) => pass.merged);
+  assert.ok(merged, "the two-encoder interval must survive as a merged bucket");
+  assert.equal(merged.exactAttribution, false);
+  assert.ok(merged.compositeReason?.includes("merged"), merged.compositeReason);
+  assert.equal(report.passes.find((pass) => pass.label === "Fine JFA - seed")?.exactAttribution,
+    true, "the single-encoder stage beside it stays exact");
 });
 
 test("frames are retained in full so any of them can be redrawn", async () => {

@@ -49,6 +49,9 @@ export function xctraceSafeComputeLabel(label: string): string {
     .replace(/[^\x20-\x7e]/g, "?");
 }
 
+/** The name a report must use for a pass whose `compute()` carried no label. */
+export const UNLABELLED_PASS = "(unlabelled)";
+
 /**
  * Lazily owns the compute pass for one GPU command encoder.
  *
@@ -61,6 +64,21 @@ export class PassBroker {
   private openComputePassLabel?: string;
   private openedComputePassCount = 0;
   private latestFence?: string;
+  /**
+   * Every label that `compute()` was asked for while a pass opened under a
+   * DIFFERENT label was already open, keyed by that opening label.
+   *
+   * Metal names an encoder once, when it begins, so a later label cannot reach
+   * the trace: the encoder keeps the opening name and Instruments charges it
+   * everything encoded until the pass ends. That is not a defect to be fixed by
+   * fencing -- production deliberately shares passes -- it is a fact about the
+   * measurement that has to be *reported*, because a per-encoder timing report
+   * otherwise prints a composite bucket under a single stage's name.
+   *
+   * Deduplicated, so a stage encoded 165 times costs one entry; bounded by the
+   * distinct label count of one command encoder, which is a few hundred.
+   */
+  private readonly absorbed = new Map<string, Set<string>>();
   /** Sampled per broker so a test can drive it; production reads the env once
    * per command encoder, which is not on any hot path. */
   private readonly isolateLabels: boolean;
@@ -98,6 +116,15 @@ export class PassBroker {
       this.openComputePass = this.encoder.beginComputePass(emittedDescriptor);
       this.openComputePassLabel = nextLabel;
       this.openedComputePassCount += 1;
+      return this.openComputePass;
+    }
+    // The pass survived, so `emittedDescriptor.label` never reaches Metal.
+    // Record the loss rather than let it be inferred from a timing report.
+    if (nextLabel !== this.openComputePassLabel) {
+      const owner = this.openComputePassLabel ?? UNLABELLED_PASS;
+      const swallowed = this.absorbed.get(owner) ?? new Set<string>();
+      swallowed.add(nextLabel ?? UNLABELLED_PASS);
+      this.absorbed.set(owner, swallowed);
     }
     return this.openComputePass;
   }
@@ -157,4 +184,55 @@ export class PassBroker {
   get hasOpenComputePass(): boolean { return this.openComputePass !== undefined; }
 
   get lastFenceReason(): string | undefined { return this.latestFence; }
+
+  /**
+   * Which stage labels this broker dropped, and which pass swallowed them.
+   *
+   * A key is the label Metal actually recorded for an encoder; its values are
+   * the stages that were encoded into that same encoder under a name no trace
+   * can see. Any timing attributed to a key that has values is a COMPOSITE
+   * bucket -- the key's own dispatches plus every value's -- never that
+   * stage's cost.
+   */
+  get labelAttributionAudit(): ReadonlyMap<string, ReadonlySet<string>> {
+    return this.absorbed;
+  }
+
+  /** Stages encoded under `label`'s Metal encoder but not named by it. */
+  absorbedBy(label: string): readonly string[] {
+    return [...this.absorbed.get(xctraceSafeComputeLabel(label)) ?? []];
+  }
+
+  /** True when `label` named an encoder that carried nothing else. */
+  attributionIsExact(label: string): boolean {
+    return !this.absorbed.has(xctraceSafeComputeLabel(label));
+  }
+
+  /** Distinct (encoder label, dropped label) pairs this broker produced. */
+  get absorbedLabelCount(): number {
+    let total = 0;
+    for (const swallowed of this.absorbed.values()) total += swallowed.size;
+    return total;
+  }
+}
+
+/**
+ * Render a broker's dropped labels as report lines. Kept beside the broker so
+ * a harness never has to re-derive the rule that a key with values is a
+ * composite bucket rather than a stage.
+ */
+export function formatPassBrokerLabelAudit(
+  audit: ReadonlyMap<string, ReadonlySet<string>>,
+  limit = 12,
+): readonly string[] {
+  const ranked = [...audit.entries()]
+    .sort((left, right) => right[1].size - left[1].size);
+  if (ranked.length === 0) return [];
+  const lines = [`${ranked.length} Metal encoder labels are composite buckets;`
+    + " each also carries the stages listed after it:"];
+  for (const [owner, swallowed] of ranked.slice(0, limit)) {
+    lines.push(`  ${owner} + ${swallowed.size}: ${[...swallowed].join(", ")}`);
+  }
+  if (ranked.length > limit) lines.push(`  ... and ${ranked.length - limit} more`);
+  return lines;
 }

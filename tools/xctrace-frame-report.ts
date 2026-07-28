@@ -23,6 +23,7 @@
  *  - The trace has no notion of a simulation step, so frame boundaries are
  *    recovered by finding a pass that fires exactly once per advance.
  */
+import { xctraceSafeComputeLabel } from "../lib/webgpu-pass-broker";
 import { readTraceRows, durationMicroseconds, timestampMicroseconds } from "./xctrace-trace-tables";
 
 export interface Interval {
@@ -38,8 +39,19 @@ export interface Interval {
 
 export interface PassCost {
   readonly label: string;
-  /** True only when label isolation proves this encoder contains that stage. */
+  /**
+   * True only when label isolation proves this encoder contains that stage and
+   * nothing else. When false, `label` is merely the FIRST label of the Metal
+   * encoder: `gpuMsPerFrame` is the whole encoder, including every stage
+   * encoded after it until the next pass boundary.
+   */
   readonly exactAttribution: boolean;
+  /**
+   * Why this bucket is not a stage cost. Present exactly when
+   * `exactAttribution` is false, so a renderer can never show the number
+   * without the caveat.
+   */
+  readonly compositeReason?: string;
   readonly callsPerFrame: number;
   readonly gpuMsPerFrame: number;
   readonly meanMicroseconds: number;
@@ -169,6 +181,30 @@ export interface FrameReport {
      */
     readonly occupancyTrace: readonly {
       t: number; p: readonly number[]; label: string | null;
+    }[];
+  };
+  /**
+   * What the pass table is allowed to claim.
+   *
+   * Every capture so far has been *partially* scoped: label isolation on, but
+   * restricted to one prefix, so a handful of buckets are true stages and the
+   * rest are named after whichever stage happened to open their Metal encoder.
+   * That distinction decided a 3.5 ms attribution question on the mini lane
+   * once already, so it is a first-class field rather than a per-row flag a
+   * renderer may forget to read.
+   */
+  readonly attribution: {
+    readonly mode: "off" | "full" | "scoped";
+    readonly isolatedPrefixes: readonly string[];
+    readonly exactBuckets: number;
+    readonly compositeBuckets: number;
+    readonly exactMsPerFrame: number;
+    readonly compositeMsPerFrame: number;
+    /** Composite share of attributed interval time, 0..1. */
+    readonly compositeShare: number;
+    /** Costliest composite buckets -- the rows most likely to be misread. */
+    readonly largestComposites: readonly {
+      label: string; gpuMsPerFrame: number; reason: string;
     }[];
   };
   readonly passes: readonly PassCost[];
@@ -372,11 +408,33 @@ const SIMD_WIDTH = 32;
 
 export const buildFrameReport = async (input: BuildFrameReportInput): Promise<FrameReport> => {
   const labelIsolationEnabled = input.environment.FLUID_GPU_ISOLATE_PASS_LABELS === "1";
+  // The broker normalises prefixes with exactly this function before matching,
+  // so the report must use the same one or a prefix with punctuation would
+  // isolate on the GPU and fail to match here -- silently demoting real stages
+  // to composite buckets.
   const isolatedPrefixes = (input.environment.FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES ?? "")
-    .split(",").map((prefix) => prefix.trim()
-      .replaceAll("·", "-").replaceAll("→", "to").replaceAll("←", "from")
-      .replaceAll("×", "x").replace(/[^\x20-\x7e]/g, "?"))
+    .split(",").map((prefix) => xctraceSafeComputeLabel(prefix.trim()))
     .filter((prefix) => prefix.length > 0);
+  const attributionMode: "off" | "full" | "scoped" = !labelIsolationEnabled ? "off"
+    : isolatedPrefixes.length === 0 ? "full" : "scoped";
+  /** Why a bucket cannot be read as its named stage, or undefined when it can. */
+  const compositeReason = (label: string, merged: boolean): string | undefined => {
+    if (merged) {
+      return "Instruments merged several Metal encoders into this interval;"
+        + " the cost covers all of them";
+    }
+    if (attributionMode === "off") {
+      return "label isolation was off: this is the first label of its Metal encoder"
+        + " and the cost includes every stage encoded until the next pass boundary";
+    }
+    if (attributionMode === "scoped"
+      && !isolatedPrefixes.some((prefix) => label.startsWith(prefix))) {
+      return `outside the isolated prefix scope (${isolatedPrefixes.join(", ")}):`
+        + " this is the first label of its Metal encoder and the cost includes"
+        + " every stage encoded until the next pass boundary";
+    }
+    return undefined;
+  };
   // ---- Encoder identity ----
   // The GPU track's own label text is unusable as a grouping key: Instruments
   // concatenates the labels of every encoder it drew as one interval, so the
@@ -800,10 +858,11 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
       .map(([name, count]) => ({ name, samples: count }))
       .sort((left, right) => right.samples - left.samples).slice(0, 12);
     const counterSamples = entry.counters.get("Compute Occupancy")?.n ?? 0;
+    const reason = compositeReason(label, entry.merged);
     return {
       label,
-      exactAttribution: labelIsolationEnabled && (isolatedPrefixes.length === 0
-        || isolatedPrefixes.some((prefix) => label.startsWith(prefix))),
+      exactAttribution: reason === undefined,
+      ...(reason === undefined ? {} : { compositeReason: reason }),
       callsPerFrame: entry.calls / frameCount,
       gpuMsPerFrame: entry.us / 1e3 / frameCount,
       meanMicroseconds: entry.us / entry.calls,
@@ -841,9 +900,24 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     };
   }).sort((left, right) => right.gpuMsPerFrame - left.gpuMsPerFrame);
   const exactPassList = passList.filter((pass) => pass.exactAttribution);
+  const compositePassList = passList.filter((pass) => !pass.exactAttribution);
   const exactMicroseconds = exactPassList.reduce((sum, pass) =>
     sum + pass.gpuMsPerFrame * 1e3 * frameCount, 0);
   const compositeMicroseconds = Math.max(0, intervalMicroseconds - exactMicroseconds);
+  const attribution: FrameReport["attribution"] = {
+    mode: attributionMode,
+    isolatedPrefixes,
+    exactBuckets: exactPassList.length,
+    compositeBuckets: compositePassList.length,
+    exactMsPerFrame: exactMicroseconds / 1e3 / frameCount,
+    compositeMsPerFrame: compositeMicroseconds / 1e3 / frameCount,
+    compositeShare: compositeMicroseconds / Math.max(intervalMicroseconds, 1),
+    largestComposites: compositePassList.slice(0, 12).map((pass) => ({
+      label: pass.label,
+      gpuMsPerFrame: pass.gpuMsPerFrame,
+      reason: pass.compositeReason ?? "composite",
+    })),
+  };
 
   // ---- Per-frame samples and retained frames ----
   const taskLabels = (exactPassList.length > 0 ? exactPassList : passList)
@@ -937,6 +1011,31 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
 
   const lines: string[] = [];
   lines.push(`frames analysed: ${frameCount} (anchor "${anchor}")`);
+  // First, because it decides what every number below is allowed to mean.
+  // Metal names an encoder once, when it begins; the broker deliberately shares
+  // one pass across consecutive stages, so an un-isolated bucket carries its
+  // named stage AND everything encoded after it until the next pass boundary.
+  // A 3.55 ms row once read as a 24-workgroup classify on this lane and was in
+  // fact the whole SPGrid candidate hierarchy rebuild sharing its pass.
+  {
+    const composite = `${attribution.compositeBuckets} composite`
+      + ` (${attribution.compositeMsPerFrame.toFixed(2)} ms/advance,`
+      + ` ${(100 * attribution.compositeShare).toFixed(1)}%)`;
+    lines.push(`attribution:     ${attribution.mode === "off"
+      ? `label isolation OFF -- ALL ${passList.length} buckets are composite`
+      : attribution.mode === "full"
+        ? `full label isolation -- ${attribution.exactBuckets} exact stages, ${composite}`
+        : `PARTIAL label isolation, scoped to "${isolatedPrefixes.join(", ")}"`
+          + ` -- only ${attribution.exactBuckets} of ${passList.length} buckets`
+          + ` (${attribution.exactMsPerFrame.toFixed(2)} ms/advance) are exact stages; ${composite}`}`);
+    if (attribution.compositeBuckets > 0) {
+      lines.push("                 A COMPOSITE ROW IS NOT ITS NAMED KERNEL'S COST: it is the first"
+        + " label of a Metal encoder");
+      lines.push("                 and carries every stage encoded until the next pass boundary."
+        + " Re-run with the label");
+      lines.push("                 prefix that covers the row you care about before quoting its ms.");
+    }
+  }
   // Whether a "frame" here is really one advance is checkable rather than
   // assumable, and it is a separate question from whether every advance does
   // the same work. The boundary is validated against the step count the
@@ -1021,18 +1120,34 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
       + " ms remains composite/outside this targeted capture");
   }
   lines.push("");
-  lines.push(labelIsolationEnabled && isolatedPrefixes.length > 0
-    ? "top exactly isolated GPU tasks (non-target composite buckets omitted):"
-    : labelIsolationEnabled ? "top GPU tasks (ms per advance):"
-      : "top composite GPU pass groups (enable label isolation for exact stages):");
+  // The header must describe the list that is actually printed. A scoped
+  // capture whose prefix matched nothing falls back to the composite list, and
+  // calling that "exactly isolated" is how a composite bucket gets quoted.
   const rankedPasses = exactPassList.length > 0 ? exactPassList : passList;
+  lines.push(exactPassList.length === 0
+    ? "top COMPOSITE GPU pass groups -- no stage was exactly isolated in this capture:"
+    : attributionMode === "scoped"
+      ? "top exactly isolated GPU tasks (non-target composite buckets omitted):"
+      : "top GPU tasks (ms per advance):");
   for (const pass of rankedPasses.slice(0, 15)) {
     lines.push(`  ${pass.gpuMsPerFrame.toFixed(3).padStart(8)} ms`
       + ` ${(100 * pass.share).toFixed(1).padStart(5)}%`
       + ` ${pass.callsPerFrame.toFixed(1).padStart(6)}x`
       + ` ${pass.meanMicroseconds.toFixed(0).padStart(6)} µs`
       + ` occ ${pass.occupancy === undefined ? "  n/a" : `${(100 * pass.occupancy).toFixed(0).padStart(3)}%`}`
-      + `  ${pass.merged ? "[merged] " : ""}${pass.label.slice(0, 70)}`);
+      + `  ${pass.exactAttribution ? "" : "[composite] "}${pass.merged ? "[merged] " : ""}`
+      + `${pass.label.slice(0, 70)}`);
+  }
+  // Printed even when exact stages exist: these are the rows a reader is most
+  // likely to lift out of the HTML table and quote as a kernel cost.
+  if (attribution.largestComposites.length > 0) {
+    lines.push("");
+    lines.push("largest COMPOSITE buckets -- each is \"this label plus every stage encoded"
+      + " until the next pass boundary\", NOT a kernel cost:");
+    for (const composite of attribution.largestComposites.slice(0, 10)) {
+      lines.push(`  ${composite.gpuMsPerFrame.toFixed(3).padStart(8)} ms`
+        + `  ${composite.label.slice(0, 78)}`);
+    }
   }
   const pressureMicroStages = passList.filter((pass) =>
     pass.exactAttribution && (pass.label.startsWith("SPGrid accurate A2 -")
@@ -1123,6 +1238,7 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
         name, points: points.sort((left, right) => left.t - right.t),
       })),
     },
+    attribution,
     passes: passList,
     occupancyGrid,
     shaders: [...shaderTally.entries()]

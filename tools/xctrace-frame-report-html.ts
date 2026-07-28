@@ -70,7 +70,15 @@ tbody tr.sel{background:color-mix(in srgb,var(--accent) 18%,transparent)}
 .bar{height:7px;border-radius:4px;background:var(--accent);display:inline-block;vertical-align:middle}
 .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;
   background:var(--panel2);color:var(--muted);margin-left:6px}
+.pill.composite{background:color-mix(in srgb,#d64545 22%,transparent);color:#d64545;
+  cursor:help}
 .warn{border-left:3px solid #d68c36;padding-left:10px}
+/* Attribution scope is not a footnote: a composite bucket read as a kernel
+   cost has already cost this project one wrong 3.5 ms diagnosis. */
+.banner{border:1px solid #d68c36;border-left-width:4px;border-radius:8px;padding:11px 14px;
+  margin:0 0 18px;background:color-mix(in srgb,#d68c36 10%,transparent);font-size:13px}
+.banner b{color:#d68c36}
+.composite-label{color:var(--muted)}
 canvas{display:block;width:100%;border-radius:8px}
 .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:8px}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
@@ -95,6 +103,7 @@ input[type=search]{background:var(--panel2);color:var(--ink);border:1px solid va
 <div class="wrap">
 <h1>Mini dam break — GPU frame profile</h1>
 <div class="sub" id="sub"></div>
+<div id="attribution-banner"></div>
 <div class="cards" id="cards"></div>
 
 <h2>One advance, end to end</h2>
@@ -286,6 +295,29 @@ const cards = [
 $('cards').innerHTML = cards.map(([k,v,n])=>
   '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="n">'+n+'</div></div>').join('');
 
+// ---------- attribution scope ----------
+// Read before anything else on the page. A capture with partial isolation
+// still prints a full pass table, and every row in it looks like a kernel;
+// the ones that are not say so here, by name and by cost.
+const A = R.attribution;
+if (A && A.compositeBuckets > 0) {
+  const worst = (A.largestComposites||[]).slice(0,5).map(c=>
+    '<li><span class="num">'+fmt(c.gpuMsPerFrame,3)+' ms</span> &nbsp;'+esc(c.label)+'</li>').join('');
+  $('attribution-banner').innerHTML = '<div class="banner">'
+    +'<b>'+(A.mode==='off' ? 'Label isolation was OFF for this capture.'
+        : A.mode==='scoped' ? 'Label isolation was PARTIAL, scoped to “'
+            +esc(A.isolatedPrefixes.join(', '))+'”.'
+        : 'Some buckets are still composite.')+'</b> '
+    +A.exactBuckets+' of '+(A.exactBuckets+A.compositeBuckets)+' buckets are exact stages ('
+    +fmt(A.exactMsPerFrame)+' ms/advance). The remaining '+A.compositeBuckets+' carry '
+    +fmt(A.compositeMsPerFrame)+' ms/advance ('+pct(A.compositeShare,1)+' of attributed interval '
+    +'time) and are <b>named after whichever stage opened their Metal encoder</b> — each one’s '
+    +'ms is that label <i>plus every stage encoded until the next pass boundary</i>. '
+    +'Do not quote a composite row as its kernel’s cost; re-capture with a prefix that covers it.'
+    +(worst?'<ul style="margin:8px 0 0;padding-left:20px">'+worst+'</ul>':'')
+    +'</div>';
+}
+
 $('machine-scope').innerHTML = EXACT_PASSES.length
   ? '<b>Complete attributed-interval coverage:</b> exact stages are shown individually; the '
     +fmt(compositeMs)+' ms/advance that was outside this targeted capture is the grey unresolved column. '
@@ -459,8 +491,13 @@ function renderPasses(){
   $('passes').querySelector('tbody').innerHTML=rows.map(p=>
     '<tr data-l="'+escapeAttr(p.label)+'"'+(selected===p.label?' class="sel"':'')+'>'
     +'<td><span title="'+escapeAttr(p.label)+'">'+esc(primary(p.label))+'</span>'
+      // A composite row's name is the encoder's first label, so the row is
+      // rendered as what it is -- that label AND its tail -- never as a stage.
+      +(p.exactAttribution===false
+        ?'<span class="composite-label"> + every stage to the next pass boundary</span>':'')
       +(extra(p.label)?'<span class="pill">+'+extra(p.label)+' passes</span>':'')
-      +(p.exactAttribution===false?'<span class="pill">composite / outside target</span>':'')
+      +(p.exactAttribution===false?'<span class="pill composite" title="'
+        +escapeAttr(p.compositeReason||'composite bucket')+'">not a kernel cost</span>':'')
       +'<div><span class="bar" style="width:'+(100*p.gpuMsPerFrame/max).toFixed(1)+'%"></span></div></td>'
     +COLS.slice(1).map(c=>'<td class="num">'+c[2](p[c[0]])+'</td>').join('')+'</tr>').join('');
   $('passnote').textContent=rows.length+' of '+R.passes.length+' tasks';
@@ -479,7 +516,11 @@ function selectPass(label){
   d.style.display='block';
   const sh=(p.shaders||[]).map(s=>'<tr><td>'+esc(s.name)+'</td><td class="num">'+s.samples+'</td></tr>').join('');
   const constituents = p.label.split(' \u00b7 ');
-  d.innerHTML='<h3>'+esc(primary(p.label))+'</h3><div class="kv">'
+  d.innerHTML='<h3>'+esc(primary(p.label))+'</h3>'
+   +(p.exactAttribution===false
+     ?'<div class="banner"><b>Composite bucket — not this stage\\u2019s cost.</b> '
+       +esc(p.compositeReason||'')+'.</div>':'')
+   +'<div class="kv">'
    +'<div><span>GPU per advance</span>'+fmt(p.gpuMsPerFrame,3)+' ms</div>'
    +'<div><span>share of GPU</span>'+pct(p.share,1)+'</div>'
    +'<div><span>invocations</span>'+fmt(p.callsPerFrame,1)+'</div>'

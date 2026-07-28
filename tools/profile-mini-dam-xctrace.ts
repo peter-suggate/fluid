@@ -491,6 +491,9 @@ const main = async (): Promise<void> => {
     console.log(
       isolateLabelPrefix
         ? `  micro-stage attribution: only "${isolateLabelPrefix}" transitions are Metal-encoder-isolated`
+          + "\n  EVERY OTHER ROW IN THE REPORT IS A COMPOSITE BUCKET: Metal names an encoder once,"
+          + "\n  so an unscoped label carries its own dispatches AND every stage encoded after it"
+          + "\n  until the next pass boundary. Widen --isolate-label-prefix to price one of those."
         : "  micro-stage attribution: label- and Metal-encoder-isolated passes"
           + " (utilization experiment; not shipping wall clock)",
     );

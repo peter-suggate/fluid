@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   PassBroker,
+  formatPassBrokerLabelAudit,
   passBrokerLabelIsolationPrefixes,
   passBrokerLabelIsolationRequested,
   xctraceSafeComputeLabel,
@@ -119,6 +120,90 @@ test("label isolation is off unless asked for, and then only changes pass bounda
   broker.finish();
   assert.equal(broker.computePassCount, 1);
   assert.deepEqual(events, ["begin:count rows", "end:1", "finish"]);
+});
+
+/**
+ * Regression pin for a 3.55 ms misdiagnosis on the mini dam lane, 2026-07-28.
+ *
+ * A capture scoped to `--isolate-label-prefix="Fine JFA -"` reported
+ * `Structured boundary worksets - count row classes` at 3.553 ms/advance with
+ * 0.6% occupancy. That kernel is a 24-workgroup classify over ~1,483 rows. The
+ * number was real GPU time, but it belonged to the whole SPGrid candidate
+ * hierarchy rebuild, which `encodeFromStructuredControl` leaves sharing the
+ * pass that the count kernel opened. A fully isolated capture the same day
+ * measured the count kernel at 0.009 ms and the rebuild stages at ~3.39 ms.
+ *
+ * Metal names an encoder once, so the later labels can never reach a trace.
+ * What the broker CAN do is say which labels it dropped and into what -- the
+ * fact a report needs to stop printing a composite bucket as a stage.
+ */
+test("the broker records which labels a shared pass swallowed", () => {
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events), {
+    isolateLabels: true, isolateLabelPrefixes: ["Fine JFA -"],
+  });
+  // The five workset publication dispatches, unfenced, exactly as
+  // `encodeFromStructuredControl` encodes them.
+  const publication = [
+    "Structured boundary worksets - count row classes",
+    "Structured boundary worksets - count family classes",
+    "Structured boundary worksets - scan blocks",
+    "Structured boundary worksets - scatter rows",
+    "Structured boundary worksets - scatter families",
+  ];
+  const first = broker.compute({ label: publication[0] });
+  for (const label of publication.slice(1)) {
+    assert.equal(broker.compute({ label }), first,
+      "an out-of-scope label must keep the production grouping");
+  }
+  // ...and then the caller keeps encoding into the same open pass.
+  broker.compute({ label: "SPGrid V-cycle - candidate build level sets" });
+  broker.compute();
+  assert.equal(broker.computePassCount, 1, "one Metal encoder holds the whole group");
+
+  assert.equal(broker.attributionIsExact(publication[0]), false,
+    "the label that opened the pass must not be presented as an exact stage");
+  assert.deepEqual(broker.absorbedBy(publication[0]), [
+    ...publication.slice(1),
+    "SPGrid V-cycle - candidate build level sets",
+    "(unlabelled)",
+  ], "every stage charged to that encoder must be nameable");
+  assert.equal(broker.absorbedLabelCount, 6);
+
+  // A stage that really did own its encoder stays exact.
+  const fine = broker.compute({ label: "Fine JFA - seed closest points" });
+  assert.notEqual(fine, first);
+  broker.fence("fine seed complete");
+  assert.equal(broker.attributionIsExact("Fine JFA - seed closest points"), true);
+
+  // Repeating one label is not absorption: the bucket is still that stage.
+  const repeated = broker.compute({ label: "repeat" });
+  assert.equal(broker.compute({ label: "repeat" }), repeated);
+  assert.equal(broker.attributionIsExact("repeat"), true);
+
+  const audit = formatPassBrokerLabelAudit(broker.labelAttributionAudit);
+  assert.ok(audit[0]?.includes("composite buckets"), audit.join("\n"));
+  assert.ok(audit.some((line) => line.includes(publication[0]) && line.includes("+ 6")),
+    audit.join("\n"));
+});
+
+test("the audit keys on the label Metal actually recorded, including none", () => {
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events), { isolateLabels: false });
+  // A pass opened without a label still owns everything encoded into it, and a
+  // report that finds `(unlabelled)` in the trace must be able to look it up.
+  broker.compute();
+  broker.compute({ label: "swallowed by an anonymous pass" });
+  assert.deepEqual([...broker.labelAttributionAudit.keys()], ["(unlabelled)"]);
+  assert.deepEqual(broker.absorbedBy("(unlabelled)"), ["swallowed by an anonymous pass"]);
+  // The audit is keyed by the xctrace-safe form, because that is the only
+  // spelling a Metal trace can ever show.
+  broker.fence("next");
+  broker.compute({ label: "SPGrid V-cycle · correction" });
+  broker.compute({ label: "tail" });
+  assert.deepEqual(broker.absorbedBy("SPGrid V-cycle · correction"), ["tail"]);
+  assert.deepEqual(broker.absorbedBy("SPGrid V-cycle - correction"), ["tail"]);
+  assert.equal(formatPassBrokerLabelAudit(new Map()).length, 0);
 });
 
 test("PassBroker copy, clear, and indirect update close compute first", () => {
