@@ -62,7 +62,7 @@ interface WGSLFunctionDeclaration {
 }
 
 /** Remove comments without changing offsets or accidentally joining tokens. */
-function codeOnlyWGSL(source: string): string {
+export function codeOnlyWGSL(source: string): string {
   let output = "";
   for (let index = 0; index < source.length;) {
     if (source[index] === "/" && source[index + 1] === "/") {

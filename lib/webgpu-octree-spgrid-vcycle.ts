@@ -2379,15 +2379,66 @@ fn candidateReport(l:u32){levelDelta[deltaAt(l,4u)]|=DELTA_ERROR;}
 fn cMergeClass(index:u32,incoming:u32){let old=candidateState[index];var merged=MG_ONLY;
  if((old&ACTIVE)!=0u||(incoming&ACTIVE)!=0u){merged=ACTIVE;}else if((old&GHOST)!=0u||(incoming&GHOST)!=0u){merged=GHOST;}
  candidateState[index]=merged;}
-fn cInsert(l:u32,q:vec3u,flags:u32)->u32{let key=coordKey(min(q,dims(l)-vec3u(1u)),l);var slot=insertionHash(key,l);
- for(var probe=0u;probe<256u;probe+=1u){let index=cAt(KEY,l,slot);let old=candidateState[index];
-  if(old==key){cMergeClass(cAt(FLAGS,l,slot),flags);return slot;}if(old==0u){candidateState[index]=key;
-   cMergeClass(cAt(FLAGS,l,slot),flags);let w=cCount(l);if(w>=levelCapacity(l)){candidateReport(l);return INVALID;}
-   candidateDispatch[l*DISPATCH_WORDS]=w+1u;candidateTopology[workBase()+levelBase(l)+w]=slot;return slot;}
-  slot=(slot+1u)&(levelCapacity(l)-1u);}candidateReport(l);return INVALID;}
-fn cInsertOwned(l:u32,q:vec3u,flags:u32,owner:u32)->u32{let slot=cInsert(l,q,flags);if(slot==INVALID){return INVALID;}
- let encoded=owner+1u;let old=candidateState[cAt(OWNER,l,slot)];if(old==encoded){return slot;}
- if(old!=0u){candidateReport(l);return INVALID;}candidateState[cAt(OWNER,l,slot)]=encoded;return slot;}
+// Running worklist counter for the ordered insertion owner. The claim path used
+// to read candidateDispatch[l*DISPATCH_WORDS] and store back w+1 on every claim.
+// That is a global read-after-write carried across iterations of a loop only ONE
+// lane runs: the next claim cannot form its worklist index until the previous
+// claim's store has landed, so ~1,473 full memory round trips sit end to end on
+// the critical path of a single-lane replay with nothing resident to hide them.
+// Holding the counter in workgroup storage for the level and publishing it once
+// yields the identical worklist indices and the identical final count -- inside
+// the dispatch the counter's only reader is that same ordered owner, and every
+// consumer (selectedCount, the transfer scan, validateCandidateHierarchy) reads
+// it from a LATER dispatch, after endClaims has stored it.
+var<workgroup> claimCount:u32;
+fn beginClaims(l:u32){claimCount=cCount(l);}
+fn endClaims(l:u32){candidateDispatch[l*DISPATCH_WORDS]=claimCount;}
+// cMergeClass against a zero word, term for term. A slot whose KEY is zero has
+// zero FLAGS and zero OWNER: the candidate arena starts zeroed, the only other
+// writers of those two channels are clearCandidateLevels (which zeroes all
+// three together) and the claim path below (which sets KEY non-zero in the same
+// step), so no slot can carry a class or an owner without a key. That makes the
+// read-back on the fresh-claim path a load of a value already known.
+fn cFreshClass(incoming:u32)->u32{
+ if((incoming&ACTIVE)!=0u){return ACTIVE;}
+ if((incoming&GHOST)!=0u){return GHOST;}
+ return MG_ONLY;}
+// Ordered open-address insertion, addressed by key. Every caller already holds
+// the key; the coordinate form recomputed coordKey(decode(key)) per proposal --
+// two emulated integer divisions and a multiply chain -- on the owner's critical
+// path. encodedOwner is owner+1, or 0 for an insertion that claims no
+// ownership; owner+1 is never 0, so the sentinel is unambiguous.
+//
+// Statement order is preserved exactly, including on the failure paths: the
+// overflow check still runs after KEY and FLAGS are stored and before the
+// counter advances, so an overflowing claim still leaves its key and class
+// behind and still appends nothing, and an owner is still never written for a
+// proposal that returned INVALID.
+fn cClaimKey(l:u32,key:u32,flags:u32,encodedOwner:u32)->u32{
+ var slot=insertionHash(key,l);
+ for(var probe=0u;probe<256u;probe+=1u){
+  let index=cAt(KEY,l,slot);let old=candidateState[index];
+  if(old==key){
+   cMergeClass(cAt(FLAGS,l,slot),flags);
+   if(encodedOwner!=0u){
+    let previous=candidateState[cAt(OWNER,l,slot)];
+    if(previous!=encodedOwner){
+     if(previous!=0u){candidateReport(l);return INVALID;}
+     candidateState[cAt(OWNER,l,slot)]=encodedOwner;}}
+   return slot;}
+  if(old==0u){
+   candidateState[index]=key;
+   candidateState[cAt(FLAGS,l,slot)]=cFreshClass(flags);
+   let w=claimCount;if(w>=levelCapacity(l)){candidateReport(l);return INVALID;}
+   claimCount=w+1u;candidateTopology[workBase()+levelBase(l)+w]=slot;
+   if(encodedOwner!=0u){candidateState[cAt(OWNER,l,slot)]=encodedOwner;}
+   return slot;}
+  slot=(slot+1u)&(levelCapacity(l)-1u);}
+ candidateReport(l);return INVALID;}
+// Coordinate-addressed wrappers, kept for the one call site whose proposal is a
+// computed direction rather than a staged key. The clamp is cInsert's own.
+fn cInsertKeyed(l:u32,q:vec3u,flags:u32,encodedOwner:u32)->u32{
+ return cClaimKey(l,coordKey(min(q,dims(l)-vec3u(1u)),l),flags,encodedOwner);}
 fn selectedCount(l:u32)->u32{return select(count(l),cCount(l),topologyDirty(l));}
 fn selectedWorkSlot(l:u32,i:u32)->u32{return select(workSlot(l,i),cWorkSlot(l,i),topologyDirty(l));}
 fn selectedRowMap(l:u32,r:u32)->u32{return select(rowMap(l,r),cRowMap(l,r),topologyDirty(l));}
@@ -2494,11 +2545,11 @@ fn packChunkFlags(lane:u32){
 // identical to the serial builder: the lanes only pre-resolve rows whose
 // coordinate is already resident, and the single ordered owner replays the rest
 // in the identical ascending-row sequence. Retiring a resident row is a
-// provable no-op, not a reordering - cInsert returns the slot cLookup just
+// provable no-op, not a reordering - cClaimKey returns the slot cLookup just
 // found and cMergeClass(existing,MG_ONLY) is the identity on ACTIVE, GHOST and
 // MG_ONLY alike, so the only remaining effect is the row-map write the lane
-// performs itself. Rows at their native level are never retired because
-// cInsertOwned also claims ownership.
+// performs itself. Rows at their native level are never retired because the
+// claim also takes ownership.
 @compute @workgroup_size(256) fn buildCandidateLevelSets(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
  let l=wg.x;
@@ -2506,6 +2557,7 @@ fn packChunkFlags(lane:u32){
  if(live==0u){return;}
  let n=uniformWord(lane,rows());
  let rowBase=rowMapBase()+l*p.capacity.x;
+ if(lane==0u){beginClaims(l);}
  for(var base=0u;base<n;base+=CHUNK){
   let r=base+lane;
   var key=0u;var encoded=0u;var flag=0u;
@@ -2520,11 +2572,17 @@ fn packChunkFlags(lane:u32){
    for(var word=0u;word<8u;word+=1u){var bits=chunkMask[word];
     loop{if(bits==0u){break;}
      let t=word*32u+firstTrailingBit(bits);bits&=bits-1u;
-     let q=decode(chunkKey[t],l);let owner=chunkAux[t];var slot=INVALID;
-     if(owner!=0u){slot=cInsertOwned(l,q,ACTIVE,owner-1u);}else{slot=cInsert(l,q,MG_ONLY);}
+     // chunkKey[t] is coordKey of an already-clamped coordinate, so the former
+     // decode(key) -> coordKey(min(q,dims-1)) round trip returned the same key
+     // it started from, at the cost of two emulated integer divisions per
+     // proposal on the single-lane critical path.
+     let owner=chunkAux[t];var slot=INVALID;
+     if(owner!=0u){slot=cClaimKey(l,chunkKey[t],ACTIVE,owner);}
+     else{slot=cClaimKey(l,chunkKey[t],MG_ONLY,0u);}
      if(slot!=INVALID){candidateTopology[rowBase+base+t]=slot;}}}}
   storageBarrier();workgroupBarrier();
  }
+ if(lane==0u){endClaims(l);}
 }
 const GHOST_STRIDE=20u;
 // Phase 3 (row parallel, read only). A contact-ghost alias is a pure function
@@ -2566,6 +2624,7 @@ fn rebuildCandidateGhostsFor(r:u32){
  let live=uniformWord(lane,select(0u,1u,l+1u<levels()&&topologyDirty(l)));
  if(live==0u){return;}
  let n=uniformWord(lane,rows());
+ if(lane==0u){beginClaims(l);}
  for(var base=0u;base<n;base+=CHUNK){
   let r=base+lane;var flag=0u;
   if(r<n&&ghostScratch[r*GHOST_STRIDE]!=0u&&firstTrailingBit(geometry(r).y)==l){flag=1u;}
@@ -2580,9 +2639,10 @@ fn rebuildCandidateGhostsFor(r:u32){
      for(var channel=0u;channel<18u;channel+=1u){if((mask&(1u<<channel))==0u){continue;}
       let owner=ghostScratch[record+2u+channel];
       let targetQ=vec3i(q)+section63WorldDirection(section63Direction(channel),m.transformAndFlags&63u);
-      _=cInsertOwned(l,vec3u(targetQ),GHOST,owner-1u);}}}}
+      _=cInsertKeyed(l,vec3u(targetQ),GHOST,owner);}}}}
   storageBarrier();workgroupBarrier();
  }
+ if(lane==0u){endClaims(l);}
 }
 struct CoarseCorner{coordinate:vec3u,weight:f32}
 // One shared definition of the cell-centred trilinear corner, so the ordered
@@ -2632,6 +2692,7 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
  let selected=uniformWord(lane,selectedCount(l));
  let total=selected*8u;
  let coarseLimit=dims(l+1u)-vec3u(1u);
+ if(lane==0u){beginClaims(l+1u);}
  for(var base=0u;base<total;base+=CHUNK){
   let rank=base+lane;
   var key=0u;var encoded=0u;var flag=0u;
@@ -2654,11 +2715,18 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
      let t=word*32u+firstTrailingBit(bits);bits&=bits-1u;
      let owner=chunkAux[t];
      if(owner==INVALID){candidateReport(l);continue;}
-     let q=decode(chunkKey[t],l+1u);
-     if(owner!=0u){_=cInsertOwned(l+1u,q,GHOST,owner-1u);}
-     else{_=cInsert(l+1u,q,MG_ONLY);}}}}
+     // Both writers of chunkKey above emit coordKey of a coarseLimit-clamped
+     // coordinate, so the former decode(key) -> coordKey(min(q,dims-1)) round
+     // trip was the identity, paid in emulated integer division per proposal.
+     if(owner!=0u){_=cClaimKey(l+1u,chunkKey[t],GHOST,owner);}
+     else{_=cClaimKey(l+1u,chunkKey[t],MG_ONLY,0u);}}}}
   storageBarrier();workgroupBarrier();
  }
+ // Level l+1's count must be published before the next iteration reads it as
+ // selectedCount(l+1); the barrier pair is what orders that store against the
+ // other lanes' reads, and it sits in uniform control flow.
+ if(lane==0u){endClaims(l+1u);}
+ storageBarrier();workgroupBarrier();
 }
 @compute @workgroup_size(256) fn buildCandidateLevelDeltas(@builtin(local_invocation_index) lane:u32){
  for(var l=0u;l+1u<levels();l+=1u){rebuildCandidateTransferFor(l,lane);}

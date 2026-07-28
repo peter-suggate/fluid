@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { codeOnlyWGSL } from "../lib/wgsl-binding-reachability";
 import {
   OCTREE_SPGRID_VCYCLE_BINDINGS,
   OCTREE_SPGRID_CAPTURE_CONTROL_WORD,
@@ -94,7 +95,15 @@ function blockScannedRecordBases(fanOut: readonly number[], chunk: number): { ba
   return { bases, total: carry };
 }
 
-function reachableWGSLBindings(shader: string, entryPoint: string): number[] {
+// Comments are stripped first, using the same routine the production analyser
+// in lib/wgsl-binding-reachability.ts already applies. Without it a comment that
+// merely NAMES a bound resource or a callee -- "it sits in uniform control
+// flow", say, against the binding whose variable is `control` -- registers as a
+// use of that binding, and the audit reports a reachability the shader does not
+// have. codeOnlyWGSL preserves offsets and never joins tokens, so every regex
+// below still matches the same spans.
+function reachableWGSLBindings(rawShader: string, entryPoint: string): number[] {
+  const shader = codeOnlyWGSL(rawShader);
   const globals = [...shader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var(?:<[^>]+>)?\s+(\w+)/g)]
     .map((match) => ({ binding: Number(match[1]), name: match[2] }));
   const functions = new Map<string, string>();
@@ -603,7 +612,13 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
   assert.match(octreeSPGridVCycleShader, /const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u/);
   assert.match(octreeSPGridVCycleShader, /fn cMergeClass/);
   assert.match(octreeSPGridVCycleShader, /fn contactCoord/);
-  assert.match(octreeSPGridVCycleShader, /fn cInsertOwned/);
+  // Was /fn cInsertOwned/. The ordered owner now claims by key rather than by
+  // coordinate (see docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md): cClaimKey takes the
+  // staged key directly and folds the ownership claim in, so the pin follows the
+  // same responsibility under its new name. What matters to this test is that
+  // one function both inserts and takes ownership, which the owner argument
+  // pins more precisely than the old name did.
+  assert.match(octreeSPGridVCycleShader, /fn cClaimKey\(l:u32,key:u32,flags:u32,encodedOwner:u32\)/);
   assert.match(octreeSPGridVCycleShader, /fn buildCandidateLevelSets\(/);
   assert.match(octreeSPGridVCycleShader, /const XYPP=9u.*const YZPP=17u/s,
     "the production stencil retains all twelve directed octree-edge contacts");
