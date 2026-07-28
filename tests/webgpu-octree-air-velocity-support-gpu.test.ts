@@ -101,6 +101,51 @@ test("producer proves generations and exact owner identities before admitting ai
     "fine-band demand must be generated only from the exact selected fine publication");
 });
 
+// A brick is brickResolution^3 samples over a lattice refined by
+// fineFactor >= brickResolution, so every sample in a brick shares one
+// `q / fineFactor` owner cell. Emitting the demand neighbourhood per SAMPLE
+// therefore re-issued the same 27 atomics 64 times, all contending on the same
+// 27 words: measured at 2.46 ms/advance of a 33.6 ms frame, and effectively
+// free once reduced. atomicOr of one constant bit pattern is commutative and
+// idempotent, so the reduced emit publishes an identical flag set -- the
+// 500-step minimal-power-dam-break gate reproduces byte-identically.
+test("fine-band demand reduces a brick to its distinct owner cells before emitting", () => {
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  const demand = shader.slice(shader.indexOf("fnmarkFineBandAirSupportDemand"),
+    shader.indexOf("fnmarkFineResolvedOwner"));
+  assert.match(demand, /atomicMin\(&markFineBaseCell,cellOf\(base\)\)/,
+    "in-band samples must reduce to one base owner cell per brick");
+  assert.match(demand, /workgroupBarrier\(\)[\s\S]*letsharedCell=atomicLoad\(&markFineBaseCell\)/,
+    "the reduction must be observed behind a workgroup barrier");
+  assert.match(demand, /for\(varn=lane;n<count;n\+=64u\)/,
+    "the single neighbourhood must be spread over the workgroup, not re-issued per sample");
+  // Correctness rests on uniformity being PROVEN, never assumed: a brick that
+  // ever spans two base cells must fall back to the per-sample emit.
+  assert.match(demand, /atomicStore\(&markFineBaseSplit,1u\)/);
+  assert.match(demand, /if\(atomicLoad\(&markFineBaseSplit\)!=0u\)\{if\(inBand\)\{markFineBandDemandNeighborhood\(base\)/,
+    "a split brick must retain the exact per-sample neighbourhood emit");
+});
+
+// The candidate arena is provisioned for rowCapacity rows; only the accepted
+// rows emit. Sweeping the provisioned extent walked (rowCapacity-rows)*stride
+// dead 3-word slots per encode, twice per advance.
+test("candidate sweeps are bounded by the live row extent, not the provisioned capacity", () => {
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  assert.match(shader,
+    /fncandidateBoundFor\(rows:u32\)->u32\{returnmin\(rows\*p\.candidateStride\+p\.domainVolume,p\.candidateCapacity\)/,
+    "the swept extent must be the live rows plus the fine block, clamped to capacity");
+  // Relocating the fine block to follow the LAST ACCEPTED row keeps the live
+  // index space contiguous. It cannot reorder anything: every row candidate
+  // index stays below rows*candidateStride and so still precedes every fine
+  // candidate, preserving ranks, directory winners and support-record slots.
+  assert.match(shader, /fnfineCandidateBase\(\)->u32\{returnmin\(s\(2u\)\*p\.candidateStride,p\.fineCandidateOffset\)/);
+  assert.match(shader, /fnemitFineBandAirSupportCandidates[\s\S]*letoutput=fineCandidateBase\(\)\+item/);
+  assert.match(shader, /fnclearAirSupportCandidates[\s\S]*if\(item<s\(6u\)\)\{setCandidate/,
+    "the clear must cover exactly the swept extent");
+  assert.doesNotMatch(shader, /if\(item<p\.candidateCapacity\)/,
+    "no sweep may still be bounded by the provisioned candidate capacity");
+});
+
 test("fine-band support closes over the exact regular or transition interpolation dependencies", () => {
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
   const closure = shader.slice(shader.indexOf("fncloseFineBandAirSupportInterpolationDemand"),

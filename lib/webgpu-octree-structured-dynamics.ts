@@ -160,6 +160,28 @@ export function decodeStructuredProjectionEnergy(
   }), blocker: null });
 }
 
+/**
+ * Diagnostic-only: read the GPU-authored per-class indirect dispatch widths back
+ * to the host.
+ *
+ * `encodeClasses` dispatches one workgroup of 64 lanes per 64 workset entries,
+ * so the recorded X dimension IS the occupancy ceiling of every family kernel:
+ * a class holding 430 faces can never put more than seven workgroups on a
+ * 32-core GPU no matter how expensive each face is. Nothing on the host knows
+ * that number otherwise -- the worksets are published entirely GPU-side by
+ * `publishStructuredBoundaryWorksets` -- and profiling the family kernels
+ * without it invites the exact misreading this census was added to settle
+ * (see the class 5/7/8 split in the 2026-07-28 mini-dam measurement).
+ *
+ * Off by default: it stages a 108-byte copy and forces a pass boundary.
+ */
+export function structuredWorksetCensusEnabled(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_WORKSET_CENSUS === "1";
+}
+
 export interface StructuredDynamicsResources {
   readonly structured: DirectStructuredVelocitySource;
   readonly topology: OctreePowerTopologySource;
@@ -231,6 +253,11 @@ export class WebGPUStructuredVelocityDynamics {
     WeakMap<GPUBuffer, WeakMap<GPUBuffer, GPUBindGroup>>>();
   /** Encode the four energy summarizers only when a host actually reads them. */
   private readonly projectionEnergyProbe = structuredProjectionEnergyProbeEnabled();
+  /** Diagnostic-only per-class dispatch-width census; see `censusTick`. */
+  private readonly censusEnabled = structuredWorksetCensusEnabled();
+  private censusStaging?: GPUBuffer;
+  private censusPhase: "idle" | "copied" | "mapping" = "idle";
+  private censusStep = 0;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly resources: StructuredDynamicsResources) {
@@ -273,7 +300,8 @@ export class WebGPUStructuredVelocityDynamics {
     pieces.forEach((piece, index) => copy.copyBufferToBuffer(piece, 0, this.catalog, offsets[index]!, piece.size));
     device.queue.submit([copy.finish()]);
     this.dispatch = device.createBuffer({ label: "Structured dynamics accepted indirect arguments",
-      size: 9 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+      size: 9 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT
+        | GPUBufferUsage.COPY_SRC });
     this.transportMetrics = resources.selectorRows;
     this.projectionEnergyStats = device.createBuffer({
       label: "Structured paired projection kinetic energy",
@@ -407,9 +435,48 @@ export class WebGPUStructuredVelocityDynamics {
     });
   }
 
+  /**
+   * Stage one 108-byte copy of the accepted class dispatch record, then decode
+   * the PREVIOUS frame's copy. Splitting the copy and the map across two frames
+   * is what makes the reading trustworthy: `mapAsync` issued in the same frame
+   * resolves against the queue serial that existed before this encoder was
+   * submitted, so it would report the record from two steps earlier without
+   * saying so.
+   */
+  private censusTick(broker: PassBroker): void {
+    if (!this.censusEnabled || this.destroyed) return;
+    this.censusStep += 1;
+    const staging = this.censusStaging ??= this.device.createBuffer({
+      label: "Structured dynamics workset census staging",
+      size: 9 * 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    if (this.censusPhase === "copied") {
+      this.censusPhase = "mapping";
+      const step = this.censusStep;
+      void staging.mapAsync(GPUMapMode.READ).then(() => {
+        const words = [...new Uint32Array(staging.getMappedRange())];
+        staging.unmap();
+        this.censusPhase = "idle";
+        console.log(JSON.stringify({ phase: "structured-workset-census", step,
+          // Class 4 is unused; 0-3 are row classes and 5-8 the face families.
+          workgroupsByClass: [0, 1, 2, 3, 4, 5, 6, 7, 8].map((cls) => words[3 * cls] ?? 0),
+        }));
+      }).catch(() => { this.censusPhase = "idle"; });
+      return;
+    }
+    if (this.censusPhase !== "idle") return;
+    // The broker's own copy, never its raw-encoder escape hatch: structured
+    // dynamics must not reach the underlying encoder beneath the pressure
+    // spine, and a diagnostic is not a reason to breach that. The invariant is
+    // pinned textually by tests/webgpu-pass-broker.test.ts, so naming the
+    // forbidden accessor even in a comment fails that test.
+    broker.copyBufferToBuffer(this.dispatch, 0, staging, 0, 9 * 12);
+    this.censusPhase = "copied";
+  }
+
   encodeAdvection(broker: PassBroker, dt: number): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
     const params = this.update(0, dt, 1, [0, 0, 0]); this.encodePrepare(broker, params);
+    this.censusTick(broker);
     this.encodeProjectionEnergy(broker, params, "start");
     this.encodeClasses(broker, this.advection, FAMILY_CLASSES, [0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18], params,
       "Advect structured family class");

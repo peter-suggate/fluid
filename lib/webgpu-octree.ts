@@ -222,6 +222,12 @@ interface OctreePipelineCacheEntry {
 }
 const octreePipelineCache = new WeakMap<GPUDevice, Map<string, OctreePipelineCacheEntry>>();
 
+/** Diagnostic-only census of the exact per-generation row-delta control header.
+ * Off unless `FLUID_OCTREE_ROW_DELTA_CENSUS=1`; it adds one 64-byte copy and a
+ * post-submit map per candidate and must never be enabled while benchmarking. */
+const octreeRowDeltaCensusEnabled = (): boolean =>
+  typeof process !== "undefined" && process.env?.FLUID_OCTREE_ROW_DELTA_CENSUS === "1";
+
 export interface OctreeProjectionOptions {
   maximumLeafSize?: 2 | 4 | 8 | 16 | 32;
   /** 0 = finest cells everywhere; 1 = full distance-graded coarsening. */
@@ -1013,6 +1019,14 @@ export class WebGPUOctreeProjection {
   private globalFinePublishedIsA = true;
   private readonly globalFinePublicationByEncoder = new WeakMap<GPUCommandEncoder, boolean>();
   private readonly analyticBootstrapRetirementByEncoder = new WeakSet<GPUCommandEncoder>();
+  /** Diagnostic-only row-delta census state (see `octreeRowDeltaCensusEnabled`). */
+  private readonly rowDeltaCensusFree: GPUBuffer[] = [];
+  private readonly rowDeltaCensusPending: GPUBuffer[] = [];
+  private rowDeltaCensusSamples = 0;
+  private rowDeltaCensusMembershipChanged = 0;
+  private rowDeltaCensusIdenticalRows = 0;
+  private readonly rowDeltaCensusTotals = new Float64Array(9);
+  private readonly rowDeltaCensusMaxima = new Uint32Array(9);
   /** Once the t=0 authority is retired, scalar scene revisions must never
    * re-arm the analytic selector: `writeParams` runs on every
    * `applySceneUniforms`, and a re-armed selector silently rebuilds all
@@ -2656,6 +2670,7 @@ export class WebGPUOctreeProjection {
 
   /** Retire invocation-stable coarse-phi parameter slots after queue submit. */
   retireSubmittedEncoder(encoder: GPUCommandEncoder) {
+    this.drainRowDeltaCensus();
     const publishedIsA = this.globalFinePublicationByEncoder.get(encoder);
     if (publishedIsA !== undefined) {
       this.globalFinePublishedIsA = publishedIsA;
@@ -2884,7 +2899,60 @@ export class WebGPUOctreeProjection {
     this.encodeFrontierRows(encoder, "Inactive octree pressure-row candidate",
       this.latestPressureInA ? this.candidateRowGroups.fromA : this.candidateRowGroups.fromB);
     this.encodeInactiveCoupledPowerCandidate(encoder);
+    this.encodeRowDeltaCensusCopy(encoder);
     return true;
+  }
+
+  /** Diagnostic-only: stage the 16-word row-delta control header for the
+   * post-submit census. No production path observes this copy. */
+  private encodeRowDeltaCensusCopy(encoder: GPUCommandEncoder): void {
+    if (!octreeRowDeltaCensusEnabled()) return;
+    const readback = this.rowDeltaCensusFree.pop() ?? this.device.createBuffer({
+      label: "Octree row-delta census readback",
+      size: 64,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    encoder.copyBufferToBuffer(this.leafFrontier,
+      this.frontierAllocation.rowDeltaControlOffsetWords * 4, readback, 0, 64);
+    this.rowDeltaCensusPending.push(readback);
+  }
+
+  /** Diagnostic-only: drain census readbacks staged before this submission. */
+  private drainRowDeltaCensus(): void {
+    if (!octreeRowDeltaCensusEnabled() || this.rowDeltaCensusPending.length === 0) return;
+    const pending = this.rowDeltaCensusPending.splice(0, this.rowDeltaCensusPending.length);
+    for (const readback of pending) {
+      void readback.mapAsync(GPUMapMode.READ).then(() => {
+        const words = new Uint32Array(readback.getMappedRange().slice(0));
+        readback.unmap();
+        this.rowDeltaCensusFree.push(readback);
+        this.rowDeltaCensusSamples += 1;
+        for (let index = 0; index < 9; index += 1) {
+          this.rowDeltaCensusTotals[index] += words[index]!;
+          if (words[index]! > this.rowDeltaCensusMaxima[index]!) {
+            this.rowDeltaCensusMaxima[index] = words[index]!;
+          }
+        }
+        if (words[3] !== 0 || words[4] !== 0) this.rowDeltaCensusMembershipChanged += 1;
+        if (words[6] === 0) this.rowDeltaCensusIdenticalRows += 1;
+        if (this.rowDeltaCensusSamples % 50 === 0) this.reportRowDeltaCensus();
+      }).catch(() => { /* diagnostic only */ });
+    }
+  }
+
+  reportRowDeltaCensus(): void {
+    const samples = this.rowDeltaCensusSamples;
+    if (samples === 0) return;
+    const mean = (index: number) => this.rowDeltaCensusTotals[index]! / samples;
+    console.error(JSON.stringify({
+      phase: "octree-row-delta-census", samples,
+      meanCurrent: mean(0), meanCarried: mean(2), meanAdded: mean(3), meanRetired: mean(4),
+      meanDirty: mean(5), meanAffected: mean(6),
+      maxAdded: this.rowDeltaCensusMaxima[3], maxRetired: this.rowDeltaCensusMaxima[4],
+      maxDirty: this.rowDeltaCensusMaxima[5], maxAffected: this.rowDeltaCensusMaxima[6],
+      membershipChangedGenerations: this.rowDeltaCensusMembershipChanged,
+      zeroAffectedGenerations: this.rowDeltaCensusIdenticalRows,
+    }));
   }
 
   /** Complete the inactive epoch after frontier/owner publication. Every

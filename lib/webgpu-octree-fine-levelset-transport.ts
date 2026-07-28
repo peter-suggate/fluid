@@ -17,6 +17,23 @@ export { structuredFineLevelSetTransportWGSL } from "./webgpu-octree-fine-levels
 import { structuredFineLevelSetTransportWGSL } from "./webgpu-octree-fine-levelset-transport.wgsl";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 
+/**
+ * Diagnostic-only, shares `FLUID_WORKSET_CENSUS=1` with the structured dynamics
+ * census (`webgpu-octree-structured-dynamics.ts`); duplicated here rather than
+ * imported so the fine lane keeps no dependency on the family-class module.
+ *
+ * `publishStructuredFineTransportWorksets` dispatches ONE workgroup per page,
+ * so the published class count is literally the workgroup count of `Advect fine
+ * phi <class>` -- and 64 lanes per page means a class holding 214 pages can put
+ * at most 13,696 threads on a 98,304-slot GPU however wide the lattice is.
+ */
+export function fineTransportWorksetCensusEnabled(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_WORKSET_CENSUS === "1";
+}
+
 export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP = 4_096;
 export const FINE_LEVELSET_TRANSPORT_MAXIMUM_ENCODED_SUBSTEPS = 64;
@@ -190,6 +207,11 @@ export class WebGPUFineLevelSetTransport {
   private readonly scanBlocks: number;
   /** 256-word blocks covering the interface delta's cleared header and stream. */
   private readonly deltaClearBlocks: number;
+  /** Diagnostic-only per-class page-count census; see `censusTick`. */
+  private readonly censusEnabled = fineTransportWorksetCensusEnabled();
+  private censusStaging?: GPUBuffer;
+  private censusPhase: "idle" | "copied" | "mapping" = "idle";
+  private censusStep = 0;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
@@ -378,6 +400,7 @@ export class WebGPUFineLevelSetTransport {
     // End the pass only for the storage-write -> INDIRECT-only copy below.
     broker.fence("structured fine transport worksets published");
     broker.updateIndirectBuffer(this.governor, 0, this.indirectDispatch, 0, 512);
+    this.censusTick(broker);
     const classNames = ["common", "rare"];
     this.transportPipelines.forEach((pipeline, index) => {
       const transport = broker.compute({ label: `Advect fine phi ${classNames[index]}` });
@@ -408,6 +431,41 @@ export class WebGPUFineLevelSetTransport {
     run(this.compactDeltaPipeline, this.compactDeltaGroup,
       "Compact structured fine topology delta", this.scanBlocks);
     return broker;
+  }
+
+  /** Copy this frame's published class headers, decode the previous frame's.
+   * The two-frame split is required for the same reason as the structured
+   * dynamics census: an in-frame `mapAsync` resolves against a queue serial
+   * that predates this encoder's submission. */
+  private censusTick(broker: PassBroker): void {
+    if (!this.censusEnabled || this.destroyed) return;
+    this.censusStep += 1;
+    const staging = this.censusStaging ??= this.device.createBuffer({
+      label: "Structured fine transport workset census staging",
+      size: 128, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    if (this.censusPhase === "copied") {
+      this.censusPhase = "mapping";
+      const step = this.censusStep;
+      void staging.mapAsync(GPUMapMode.READ).then(() => {
+        const words = [...new Uint32Array(staging.getMappedRange())];
+        staging.unmap();
+        this.censusPhase = "idle";
+        // Governor layout: word 1 is the accepted substep count, then four
+        // seven-word class headers from word 4 -- see HEADER_BASE/HEADER_WORDS
+        // in `webgpu-octree-fine-levelset-transport.wgsl.ts`. Class order is
+        // regular-common, transition-common, regular-rare, transition-rare.
+        console.log(JSON.stringify({ phase: "fine-transport-workset-census", step,
+          flags: words[0] ?? 0, substeps: words[1] ?? 0,
+          pagesByClass: [0, 1, 2, 3].map((cls) => words[4 + 7 * cls + 1] ?? 0),
+          validByClass: [0, 1, 2, 3].map((cls) => words[4 + 7 * cls + 3] ?? 0),
+          samplesPerBrick: this.source.plan.samplesPerBrick,
+        }));
+      }).catch(() => { this.censusPhase = "idle"; });
+      return;
+    }
+    if (this.censusPhase !== "idle") return;
+    broker.copyBufferToBuffer(this.governor, 0, staging, 0, 128);
+    this.censusPhase = "copied";
   }
 
   destroy(): void {

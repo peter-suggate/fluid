@@ -40,8 +40,48 @@ test("direct publisher contains no general face/incidence authority or floating 
   assert.match(directStructuredVelocityPublicationWGSL, /fn finalizeStructuredPublication\(/);
 });
 
+test("classify and scatter run one invocation per (row, catalog slot)", () => {
+  // `begin` used to publish a rows*48 record at word 3 that no dispatch read.
+  // 48 is the rowFamilySlots stride (6 families x 8 orientations), not the
+  // catalog-slot bound, so the record has to be `maxSlots` wide to index a
+  // (row, slot) pair exactly once.
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /publicationDispatch\[3\]=\(rows\*p\.maxSlots\+63u\)\/64u/,
+    "word 3 is the (row, catalog slot) launch record consumed at byte offset 12");
+  for (const entry of ["classifyStructuredCatalogSlots", "scatterStructuredFamilySlots"]) {
+    assert.match(directStructuredVelocityPublicationWGSL,
+      new RegExp(`fn ${entry}\\(@builtin\\(global_invocation_id\\)g:vec3u\\)\\{let rows=min\\(control\\.rowCount,p\\.rowCapacity\\);let row=g\\.x/p\\.maxSlots;let local=g\\.x%p\\.maxSlots;`),
+      `${entry} must decode one (row, slot) pair per invocation`);
+  }
+  const host = WebGPUDirectStructuredVelocityAuthority.prototype as unknown as
+    Record<string, () => void>;
+  const encode = host.encodeCandidatePasses.toString();
+  assert.equal([...encode.matchAll(/dispatchWorkgroupsIndirect\(this\.liveRowDispatch,\s*12\)/g)].length, 2,
+    "classify and scatter are the two stages launched off the (row, slot) record");
+  // The per-row family fold the classifier used to do in place. It must stay a
+  // single owner per row: the counters are a plain sequential accumulation, so
+  // making it per-slot would need atomics, and atomics are not an ordering.
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn countStructuredRowFamilies\(@builtin\(global_invocation_id\)g:vec3u\)\{let row=g\.x;/);
+  assert.doesNotMatch(directStructuredVelocityPublicationWGSL,
+    /fn countStructuredRowFamilies\([\s\S]*?atomicAdd/,
+    "family counts stay a deterministic per-row reduction, never atomics-as-ordering");
+  // Scatter's handle used to come from a running per-row counter. Per slot it
+  // is recomputed as "earlier owner slots of the same family in this row",
+  // which is the same integer without any cross-invocation ordering.
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /var rank=0u;for\(var earlier=0u;earlier<local;earlier\+=1u\)\{let earlierMeta=[\s\S]*?\(earlierMeta&7u\)==family\)\{rank\+=1u;\}\}/,
+    "the scattered handle rank must be recomputed, not inherited from a serial counter");
+});
+
 test("Section 6.3 publication binds only its current reachable stage ABI", () => {
-  const encode = WebGPUDirectStructuredVelocityAuthority.prototype.encodeCandidate.toString();
+  // The stages moved from `encodeCandidate` into `encodeCandidatePasses` when
+  // `encodeCandidate` became the repeat wrapper the wall-clock cost probe
+  // needs. The invariant is unchanged -- read the method that now owns the
+  // dispatches, so the assertion still fails if a binding creeps in.
+  const prototype = WebGPUDirectStructuredVelocityAuthority.prototype as unknown as
+    Record<string, () => void>;
+  const encode = prototype.encodeCandidatePasses.toString();
   const stage = encode.slice(encode.indexOf("Publish direct Section 6.3 rows and worksets"),
     encode.indexOf("Finalize direct structured publication"));
   assert.ok(stage.length > 0, "Section 6.3 host stage must remain present");

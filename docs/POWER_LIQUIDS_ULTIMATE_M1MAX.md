@@ -203,6 +203,45 @@ Recorded so the implementer does not rediscover them.
    The GPU convergence gate already zeroes the unused tail, and a
    zero-work indirect dispatch costs so little that 231 of them are below
    the noise floor. B4 is a ~2 ms **regression**; do not implement it.
+10. **Replacing a uniform workgroup-memory sweep with per-lane
+    first-hit searches.** MEASURED 2026-07-28 and refuted, on
+    `linkCandidateParentChains`. Its predecessor/last scan visits all 256
+    `chunkKey[t]`; the "obvious" improvement is for each lane to scan down
+    from `lane-1` for the predecessor and up from `lane+1` for `last`,
+    breaking at the first hit. That is *exactly* equivalent — verified over
+    1,024,000 lane cases across three key distributions, and it is integer
+    index arithmetic, so there is no reassociation to worry about — and it
+    measured **0.903 → 1.134 ms/advance (+26%)** under label isolation while
+    every neighbouring SPGrid kernel stayed flat in the same capture.
+    The reason is the transferable part: in the uniform sweep every lane
+    reads the *same* `chunkKey[t]` index, which is a workgroup-memory
+    broadcast; giving each lane its own address turns one broadcast into 32
+    distinct bank accesses, and the early exits buy nothing because a SIMD
+    group still runs to its slowest lane. Generally on this GPU, prefer a
+    uniform full sweep over a divergent early-exit search when the operand
+    lives in workgroup memory. `tests/webgpu-octree-spgrid-vcycle.test.ts`
+    pins the shared index so this cannot be reintroduced silently.
+11. **Memoizing `pageSlot`'s page resolution on the ordinal.** MEASURED
+    2026-07-28 and refuted. `applyRow` and `finerAdjoint` walk eighteen
+    stencil directions from one origin, and `pageSlot` re-derives
+    `pageNeighbour` + `decode` + an origin compare on each; because a page
+    is 8x8x4, most of those directions land on ordinal 13, so caching the
+    resolution per distinct ordinal looked like it should delete most of
+    the walks (up to 8 children x 18 directions = 144 per row above L0 in
+    `finerAdjoint`). It is exact — `topology` is bound read-only, so the
+    resolution is a pure function of (level, page, ordinal) — and it bought
+    **0.02 ms**: the merged band went 2.796 -> 2.776 ms over two interleaved
+    captures while `buildCandidateLevelSets`, which the change does not
+    touch, moved by the same 0.02 in the same pair.
+    The lesson is where the cost actually is. The page resolution is two
+    loads of a single address that stays hot in L1 across all eighteen
+    iterations, so it was already nearly free. What costs is the
+    **q-dependent** tail of `pageSlot`: `brickRecord(l,q)`, the two
+    brick-mask loads and the ranked-slot indirection
+    `topology[rankedSlotsBase()+levelBase(l)+topology[record+3]+rank]` — a
+    dependent chain of scattered loads, one per direction, that no
+    origin-side memo can remove. Any future attempt on the §6.3 merged band
+    has to attack that chain, not the page lookup.
    Keep the authored E=10 envelope.
    **The general lesson, which reprices several items in this document:**
    this frame is NOT dispatch-overhead-bound. Any change justified mainly

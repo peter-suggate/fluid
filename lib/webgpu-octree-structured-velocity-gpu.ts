@@ -68,6 +68,29 @@ const positive = (value: number, label: string): number => {
   return value;
 };
 
+/**
+ * Diagnostic only: encode the whole candidate publication N times instead of
+ * once, so its marginal cost can be read off the wall clock.
+ *
+ * The chain is idempotent by construction -- `beginStructuredPublication`
+ * recomputes `activeBank` from the *accepted* control, which no pass here
+ * writes, and every later pass is a pure function of the same inputs -- so
+ * repeating it leaves exactly the state one pass would have left. That makes
+ * `(wall(N) - wall(1)) / (N - 1)` a direct wall-clock measurement of the
+ * publication, which per-pass GPU timestamps alone cannot supply: a merged
+ * Metal encoder charges inter-pass drain to whichever encoder it merged into.
+ * Never set in production; ignored unless it parses to 2..8.
+ */
+export function structuredPublicationRepeatCount(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): number {
+  const raw = environment?.FLUID_PROBE_STRUCTURED_PUBLICATION_REPEAT;
+  if (raw === undefined) return 1;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 2 && value <= 8 ? value : 1;
+}
+
 export function planStructuredVelocityGPU(rowCapacityValue: number,
   maximumCaseSlotsValue: number = OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence,
   storageAlignment = 256): StructuredVelocityGPUPlan {
@@ -179,6 +202,7 @@ export class WebGPUDirectStructuredVelocityAuthority {
   readonly candidateControl: GPUBuffer;
   private readonly beginPipeline: GPUComputePipeline;
   private readonly classifyPipeline: GPUComputePipeline;
+  private readonly countFamiliesPipeline: GPUComputePipeline;
   private readonly prefixPipeline: GPUComputePipeline;
   private readonly scatterPipeline: GPUComputePipeline;
   private readonly section63Pipeline: GPUComputePipeline;
@@ -239,6 +263,7 @@ export class WebGPUDirectStructuredVelocityAuthority {
     this.classifyPipeline = publicationActivity.registerPipeline(
       pipeline("classifyStructuredCatalogSlots"),
     );
+    this.countFamiliesPipeline = pipeline("countStructuredRowFamilies");
     this.prefixPipeline = pipeline("prefixStructuredFamilies");
     this.scatterPipeline = pipeline("scatterStructuredFamilySlots");
     this.section63Pipeline = pipeline("publishSection63Rows");
@@ -305,6 +330,14 @@ export class WebGPUDirectStructuredVelocityAuthority {
     if (!Number.isSafeInteger(epoch) || epoch <= 0 || epoch > 0xffff_ffff) {
       throw new RangeError("Structured velocity epoch must be a published uint32 generation");
     }
+    for (let extra = structuredPublicationRepeatCount(); extra > 1; extra -= 1) {
+      this.encodeCandidatePasses(broker, epoch, injectedFailure, topologyMetrics, leafHeaders);
+    }
+    this.encodeCandidatePasses(broker, epoch, injectedFailure, topologyMetrics, leafHeaders);
+  }
+
+  private encodeCandidatePasses(broker: PassBroker, epoch: number, injectedFailure: number,
+    topologyMetrics: GPUBuffer, leafHeaders: GPUBuffer): void {
     const authority = this.authorityA;
     this.device.queue.writeBuffer(this.params, 0, this.parameterData(epoch, injectedFailure));
     const resource = (buffer: GPUBuffer) => ({ buffer });
@@ -328,6 +361,21 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 1, resource: resource(leafHeaders) },
       { binding: 2, resource: resource(topologyMetrics) },
       { binding: 4, resource: resource(this.inputs.topology.catalogFaces) },
+      { binding: 5, resource: resource(this.inputs.topology.catalogVolumes) },
+      { binding: 8, resource: resource(authority) },
+      { binding: 9, resource: resource(this.candidateControl) },
+    ]));
+    // Byte offset 12 is the (row x catalog slot) record `begin` publishes, one
+    // invocation per slot instead of one per row. It was computed and never
+    // read until this call site existed.
+    pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 12);
+    // Per-row fold of the per-slot ownership metadata the classifier just
+    // wrote. Same pass, so WebGPU already orders the two dispatches.
+    pass.setPipeline(this.countFamiliesPipeline);
+    pass.setBindGroup(0, this.group(this.countFamiliesPipeline, [
+      { binding: 0, resource: resource(this.params) },
+      { binding: 1, resource: resource(leafHeaders) },
+      { binding: 2, resource: resource(topologyMetrics) },
       { binding: 5, resource: resource(this.inputs.topology.catalogVolumes) },
       { binding: 8, resource: resource(authority) },
       { binding: 9, resource: resource(this.candidateControl) },
@@ -364,7 +412,7 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 8, resource: resource(authority) },
       { binding: 9, resource: resource(this.candidateControl) },
     ]));
-    pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 0);
+    pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 12);
     broker.fence("structured family values scattered");
     pass = broker.compute({ label: "Publish direct Section 6.3 rows and worksets" });
     pass.setPipeline(this.section63Pipeline);
@@ -590,16 +638,33 @@ fn rowBankBase()->u32{return control.activeBank*p.rowCapacity;}
 fn worksetBankBase()->u32{return control.activeBank*9u*p.worksetStride;}
 fn rowClass(row:u32)->u32{let m=metrics[row];let transition=m.caseId!=0u;let boundary=(m.transformAndFlags&0x3f00u)!=0u;return select(select(0u,2u,boundary),select(1u,3u,boundary),transition);}
 
-@compute @workgroup_size(1)fn beginStructuredPublication(){let rows=min(sourceRowDelta[p.deltaControlOffset],p.rowCapacity);let hasAccepted=arrayLength(&acceptedControl)>=6u&&atomicLoad(&acceptedControl[0])==0u&&atomicLoad(&acceptedControl[3])!=0u;atomicStore(&control.flags,p.injectedFailure);atomicStore(&control.firstError,select(INVALID,0u,p.injectedFailure!=0u));control.rowCount=rows;control.slotCount=0u;control.epoch=0u;control.activeBank=select(0u,1u-(atomicLoad(&acceptedControl[4])&1u),hasAccepted);control.projected=select(0u,1u,hasAccepted);atomicStore(&control.entryCount,0u);for(var family=0u;family<7u;family+=1u){control.familyOffsets[family]=0u;}publicationDispatch[0]=(rows+63u)/64u;publicationDispatch[1]=1u;publicationDispatch[2]=1u;publicationDispatch[3]=(rows*48u+63u)/64u;publicationDispatch[4]=1u;publicationDispatch[5]=1u;}
+@compute @workgroup_size(1)fn beginStructuredPublication(){let rows=min(sourceRowDelta[p.deltaControlOffset],p.rowCapacity);let hasAccepted=arrayLength(&acceptedControl)>=6u&&atomicLoad(&acceptedControl[0])==0u&&atomicLoad(&acceptedControl[3])!=0u;atomicStore(&control.flags,p.injectedFailure);atomicStore(&control.firstError,select(INVALID,0u,p.injectedFailure!=0u));control.rowCount=rows;control.slotCount=0u;control.epoch=0u;control.activeBank=select(0u,1u-(atomicLoad(&acceptedControl[4])&1u),hasAccepted);control.projected=select(0u,1u,hasAccepted);atomicStore(&control.entryCount,0u);for(var family=0u;family<7u;family+=1u){control.familyOffsets[family]=0u;}publicationDispatch[0]=(rows+63u)/64u;publicationDispatch[1]=1u;publicationDispatch[2]=1u;publicationDispatch[3]=(rows*p.maxSlots+63u)/64u;publicationDispatch[4]=1u;publicationDispatch[5]=1u;}
 
-@compute @workgroup_size(64)fn classifyStructuredCatalogSlots(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity){return;}
+// One invocation per (row, catalog slot). The row-level guards are re-evaluated
+// per slot rather than hoisted: \`fail\` is an atomicOr plus an atomicMin on the
+// same row index, so N slots reporting one row's failure leave exactly the
+// flags and first-error one row-owning thread left.
+@compute @workgroup_size(64)fn classifyStructuredCatalogSlots(@builtin(global_invocation_id)g:vec3u){let rows=min(control.rowCount,p.rowCapacity);let row=g.x/p.maxSlots;let local=g.x%p.maxSlots;if(row>=rows){return;}
   if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)){fail(row,ERROR_CAPACITY);return;}let m=metrics[row];if((m.transformAndFlags&VALID)==0u||m.error!=0u||m.caseId>=p.catalogEntryCount){fail(row,ERROR_SOURCE);return;}
   let h=caseHeader(m.caseId);if(h.y==0u||h.y>p.maxSlots||h.x>p.catalogFaceCount||h.y>p.catalogFaceCount-h.x){fail(row,ERROR_CATALOG);return;}
-  var counts:array<u32,6>;for(var local=0u;local<p.maxSlots;local+=1u){let at=rowBase(row)+local;authority[candidateAuthorityBase()+p.rowNeighborOffset+at]=INVALID;authority[candidateAuthorityBase()+p.rowReciprocalOffset+at]=INVALID;authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at]=0u;authority[candidateAuthorityBase()+p.rowHandleOffset+at]=INVALID;authority[candidateAuthorityBase()+p.rowCatalogOffset+at]=INVALID;if(local>=h.y){continue;}
-    let global=h.x+local;let packed=templatePacked(global);let family=(packed>>8u)&7u;let orientation=(packed>>11u)&7u;if(family>=6u){fail(row,ERROR_CATALOG);continue;}let geo=geometry(row,local);if(!finite(geo.area)||geo.area<=0.0||!finite(geo.inverseDistance)||geo.inverseDistance<=0.0||abs(length(geo.normal)-1.0)>4e-4){fail(row,ERROR_GEOMETRY);continue;}
-    var neighbor=INVALID;var reverse=INVALID;if(geo.neighborSize>0.0){neighbor=findRow(geo.neighborCenter,geo.neighborSize);if(neighbor!=INVALID){if(neighbor==row){fail(row,ERROR_NEIGHBOR);continue;}reverse=reciprocal(row,neighbor);if(reverse==INVALID){fail(row,ERROR_RECIPROCITY);continue;}}}
-    let owner=neighbor==INVALID||row<neighbor;authority[candidateAuthorityBase()+p.rowNeighborOffset+at]=neighbor;authority[candidateAuthorityBase()+p.rowReciprocalOffset+at]=reverse;authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at]=family|(orientation<<3u)|(select(0u,1u,owner)<<6u)|(select(0u,1u,neighbor==INVALID)<<7u);authority[candidateAuthorityBase()+p.rowCatalogOffset+at]=global;if(owner){counts[family]+=1u;}}
-  for(var family=0u;family<6u;family+=1u){authority[candidateAuthorityBase()+p.rowFamilyPrefixOffset+familyIndex(row,family)]=counts[family];authority[candidateAuthorityBase()+p.rowFamilyHandleOffset+familyIndex(row,family)]=(familyIndex(row,family)*8u);for(var o=0u;o<8u;o+=1u){authority[candidateAuthorityBase()+p.rowFamilySlotOffset+(familyIndex(row,family)*8u+o)]=INVALID;}}}
+  // \`control\` is read_write with atomic members, so a compiler may not lift
+  // \`candidateAuthorityBase()\` out of the body by itself. Nothing here writes
+  // \`activeBank\`, so lifting it by hand is value-identical.
+  let base=candidateAuthorityBase();let at=rowBase(row)+local;
+  authority[base+p.rowNeighborOffset+at]=INVALID;authority[base+p.rowReciprocalOffset+at]=INVALID;authority[base+p.rowOwnerMetadataOffset+at]=0u;authority[base+p.rowHandleOffset+at]=INVALID;authority[base+p.rowCatalogOffset+at]=INVALID;if(local>=h.y){return;}
+  let global=h.x+local;let packed=templatePacked(global);let family=(packed>>8u)&7u;let orientation=(packed>>11u)&7u;if(family>=6u){fail(row,ERROR_CATALOG);return;}let geo=geometry(row,local);if(!finite(geo.area)||geo.area<=0.0||!finite(geo.inverseDistance)||geo.inverseDistance<=0.0||abs(length(geo.normal)-1.0)>4e-4){fail(row,ERROR_GEOMETRY);return;}
+  var neighbor=INVALID;var reverse=INVALID;if(geo.neighborSize>0.0){neighbor=findRow(geo.neighborCenter,geo.neighborSize);if(neighbor!=INVALID){if(neighbor==row){fail(row,ERROR_NEIGHBOR);return;}reverse=reciprocal(row,neighbor);if(reverse==INVALID){fail(row,ERROR_RECIPROCITY);return;}}}
+  let owner=neighbor==INVALID||row<neighbor;authority[base+p.rowNeighborOffset+at]=neighbor;authority[base+p.rowReciprocalOffset+at]=reverse;authority[base+p.rowOwnerMetadataOffset+at]=family|(orientation<<3u)|(select(0u,1u,owner)<<6u)|(select(0u,1u,neighbor==INVALID)<<7u);authority[base+p.rowCatalogOffset+at]=global;}
+
+// The per-row reduction the classifier used to fold in place. One thread still
+// owns each row's six family counters, so the accumulation order is the slot
+// order it always was -- no atomics, and therefore no atomics-as-ordering.
+@compute @workgroup_size(64)fn countStructuredRowFamilies(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity){return;}
+  if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)){return;}let m=metrics[row];if((m.transformAndFlags&VALID)==0u||m.error!=0u||m.caseId>=p.catalogEntryCount){return;}
+  let h=caseHeader(m.caseId);if(h.y==0u||h.y>p.maxSlots||h.x>p.catalogFaceCount||h.y>p.catalogFaceCount-h.x){return;}
+  let base=candidateAuthorityBase();var counts:array<u32,6>;
+  for(var local=0u;local<h.y;local+=1u){let slotMeta=authority[base+p.rowOwnerMetadataOffset+rowBase(row)+local];let family=slotMeta&7u;if(((slotMeta>>6u)&1u)!=0u&&family<6u){counts[family]+=1u;}}
+  for(var family=0u;family<6u;family+=1u){authority[base+p.rowFamilyPrefixOffset+familyIndex(row,family)]=counts[family];authority[base+p.rowFamilyHandleOffset+familyIndex(row,family)]=(familyIndex(row,family)*8u);for(var o=0u;o<8u;o+=1u){authority[base+p.rowFamilySlotOffset+(familyIndex(row,family)*8u+o)]=INVALID;}}}
 
 var<workgroup> familyLane:array<u32,384>;
 @compute @workgroup_size(64)fn prefixStructuredFamilies(@builtin(local_invocation_index)lane:u32){let rows=min(control.rowCount,p.rowCapacity);let chunk=(rows+63u)/64u;let first=lane*chunk;let last=min(first+chunk,rows);
@@ -612,11 +677,20 @@ fn oldRow(newRow:u32)->u32{if(p.newToOldOffset+newRow>=arrayLength(&rowDelta)){r
 // x is the carried value; y marks an exact face identity. Changed topology
 // faces remain pending for the old-field transfer instead of becoming zero.
 fn carryValue(row:u32,neighbor:u32,family:u32,orientation:u32)->vec2f{if(control.projected==0u){return vec2f(0.0);}let oldOwner=oldRow(row);if(oldOwner==INVALID){return vec2f(0.0);}let oldNeighbor=select(INVALID,oldRow(neighbor),neighbor!=INVALID);if(neighbor!=INVALID&&oldNeighbor==INVALID){return vec2f(0.0);}
-  for(var local=0u;local<p.maxSlots;local+=1u){let handle=authority[acceptedAuthorityBase()+p.rowHandleOffset+rowBase(oldOwner)+local];if(handle==INVALID||handle>=p.slotCapacity){continue;}let slotMetadata=authority[acceptedAuthorityBase()+p.metadataOffset+handle];if((slotMetadata&7u)!=family||((slotMetadata>>3u)&7u)!=orientation){continue;}let other=authority[acceptedAuthorityBase()+p.neighborOffset+handle];if(other==oldNeighbor){return vec2f(bitcast<f32>(authority[acceptedAuthorityBase()+p.valuesOffset+handle]),1.0);}}return vec2f(0.0);}
+  let accepted=acceptedAuthorityBase();
+  for(var local=0u;local<p.maxSlots;local+=1u){let handle=authority[accepted+p.rowHandleOffset+rowBase(oldOwner)+local];if(handle==INVALID||handle>=p.slotCapacity){continue;}let slotMetadata=authority[accepted+p.metadataOffset+handle];if((slotMetadata&7u)!=family||((slotMetadata>>3u)&7u)!=orientation){continue;}let other=authority[accepted+p.neighborOffset+handle];if(other==oldNeighbor){return vec2f(bitcast<f32>(authority[accepted+p.valuesOffset+handle]),1.0);}}return vec2f(0.0);}
 
-@compute @workgroup_size(64)fn scatterStructuredFamilySlots(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var ranks:array<u32,6>;
-  for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let ownerMeta=authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at];if(((ownerMeta>>6u)&1u)==0u){continue;}let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;let handle=control.familyOffsets[family]+authority[candidateAuthorityBase()+p.rowFamilyPrefixOffset+familyIndex(row,family)]+ranks[family];ranks[family]+=1u;if(handle>=control.slotCount){fail(row,ERROR_CAPACITY);continue;}let neighbor=authority[candidateAuthorityBase()+p.rowNeighborOffset+at];let geo=geometry(row,local);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];
-    let carried=carryValue(row,neighbor,family,orientation);authority[candidateAuthorityBase()+p.rowHandleOffset+at]=handle;authority[candidateAuthorityBase()+p.valuesOffset+handle]=bitcast<u32>(carried.x);authority[candidateAuthorityBase()+p.ownerOffset+handle]=row;authority[candidateAuthorityBase()+p.neighborOffset+handle]=neighbor;authority[candidateAuthorityBase()+p.metadataOffset+handle]=family|(orientation<<3u)|(global<<6u)|(((ownerMeta>>7u)&1u)<<30u);authority[candidateAuthorityBase()+p.areaOffset+handle]=bitcast<u32>(geo.area);authority[candidateAuthorityBase()+p.inverseOffset+handle]=bitcast<u32>(geo.inverseDistance);authority[candidateAuthorityBase()+p.fractionOffset+handle]=bitcast<u32>(1.0);authority[candidateAuthorityBase()+p.pressureScaleOffset+handle]=bitcast<u32>(1.0);authority[candidateAuthorityBase()+p.normalOffset+4u*handle]=bitcast<u32>(geo.normal.x);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+1u]=bitcast<u32>(geo.normal.y);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+2u]=bitcast<u32>(geo.normal.z);authority[candidateAuthorityBase()+p.normalOffset+4u*handle+3u]=0u;authority[candidateAuthorityBase()+p.centroidOffset+4u*handle]=bitcast<u32>(geo.centroid.x);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+1u]=bitcast<u32>(geo.centroid.y);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+2u]=bitcast<u32>(geo.centroid.z);authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]=bitcast<u32>(carried.y);}}
+// One invocation per (row, catalog slot). The rank a slot used to inherit from
+// the running \`ranks[family]\` counter is recomputed here as "owner slots of the
+// same family strictly earlier in this row", which is the same number by
+// construction and needs no atomic and no cross-thread ordering. A slot that
+// overflows \`slotCount\` still consumes its rank, exactly as the serial loop's
+// pre-check increment did.
+@compute @workgroup_size(64)fn scatterStructuredFamilySlots(@builtin(global_invocation_id)g:vec3u){let rows=min(control.rowCount,p.rowCapacity);let row=g.x/p.maxSlots;let local=g.x%p.maxSlots;if(row>=rows||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);if(local>=h.y){return;}
+  let base=candidateAuthorityBase();let at=rowBase(row)+local;let ownerMeta=authority[base+p.rowOwnerMetadataOffset+at];if(((ownerMeta>>6u)&1u)==0u){return;}let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;
+  var rank=0u;for(var earlier=0u;earlier<local;earlier+=1u){let earlierMeta=authority[base+p.rowOwnerMetadataOffset+rowBase(row)+earlier];if(((earlierMeta>>6u)&1u)!=0u&&(earlierMeta&7u)==family){rank+=1u;}}
+  let handle=control.familyOffsets[family]+authority[base+p.rowFamilyPrefixOffset+familyIndex(row,family)]+rank;if(handle>=control.slotCount){fail(row,ERROR_CAPACITY);return;}let neighbor=authority[base+p.rowNeighborOffset+at];let geo=geometry(row,local);let global=authority[base+p.rowCatalogOffset+at];
+  let carried=carryValue(row,neighbor,family,orientation);authority[base+p.rowHandleOffset+at]=handle;authority[base+p.valuesOffset+handle]=bitcast<u32>(carried.x);authority[base+p.ownerOffset+handle]=row;authority[base+p.neighborOffset+handle]=neighbor;authority[base+p.metadataOffset+handle]=family|(orientation<<3u)|(global<<6u)|(((ownerMeta>>7u)&1u)<<30u);authority[base+p.areaOffset+handle]=bitcast<u32>(geo.area);authority[base+p.inverseOffset+handle]=bitcast<u32>(geo.inverseDistance);authority[base+p.fractionOffset+handle]=bitcast<u32>(1.0);authority[base+p.pressureScaleOffset+handle]=bitcast<u32>(1.0);authority[base+p.normalOffset+4u*handle]=bitcast<u32>(geo.normal.x);authority[base+p.normalOffset+4u*handle+1u]=bitcast<u32>(geo.normal.y);authority[base+p.normalOffset+4u*handle+2u]=bitcast<u32>(geo.normal.z);authority[base+p.normalOffset+4u*handle+3u]=0u;authority[base+p.centroidOffset+4u*handle]=bitcast<u32>(geo.centroid.x);authority[base+p.centroidOffset+4u*handle+1u]=bitcast<u32>(geo.centroid.y);authority[base+p.centroidOffset+4u*handle+2u]=bitcast<u32>(geo.centroid.z);authority[base+p.centroidOffset+4u*handle+3u]=bitcast<u32>(carried.y);}
 
 @compute @workgroup_size(64)fn publishSection63Rows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);
   for(var axisSlot=0u;axisSlot<6u;axisSlot+=1u){authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+axisSlot]=INVALID;}for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let neighbor=authority[candidateAuthorityBase()+p.rowNeighborOffset+at];let ownerMeta=authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at];var handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];var sign=1;if(((ownerMeta>>6u)&1u)==0u){let reverse=authority[candidateAuthorityBase()+p.rowReciprocalOffset+at];if(neighbor==INVALID||reverse==INVALID){atomicOr(&control.flags,ERROR_RECIPROCITY);continue;}handle=authority[candidateAuthorityBase()+p.rowHandleOffset+rowBase(neighbor)+reverse];sign=-1;}if(handle==INVALID||handle>=control.slotCount){atomicOr(&control.flags,ERROR_CAPACITY);continue;}authority[candidateAuthorityBase()+p.rowHandleOffset+at]=handle;authority[candidateAuthorityBase()+p.rowSignOffset+at]=bitcast<u32>(sign);let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;authority[candidateAuthorityBase()+p.rowFamilySlotOffset+authority[candidateAuthorityBase()+p.rowFamilyHandleOffset+familyIndex(row,family)]+orientation]=handle;let localGeometry=geometry(row,local);let worldNormal=localGeometry.normal;if(neighbor!=INVALID&&headers[neighbor].size==headers[row].size){let absoluteNormal=abs(worldNormal);let axis=select(select(2u,1u,absoluteNormal.y>absoluteNormal.z),0u,absoluteNormal.x>max(absoluteNormal.y,absoluteNormal.z));let transverse=dot(absoluteNormal,vec3f(1.0))-absoluteNormal[axis];if(absoluteNormal[axis]>.9999&&transverse<1e-4){let direction=2u*axis+select(0u,1u,worldNormal[axis]>0.0);authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+direction]=neighbor;}}}

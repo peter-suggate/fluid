@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { PassBroker } from "../lib/webgpu-pass-broker";
+import { PassBroker, passBrokerLabelIsolationRequested } from "../lib/webgpu-pass-broker";
 
 function fakeEncoder(events: string[]) {
   let passIndex = 0;
@@ -33,6 +33,44 @@ test("PassBroker reuses compute until an explicit fence", () => {
   broker.finish();
   assert.equal(broker.computePassCount, 2);
   assert.deepEqual(events, ["begin:first", "end:1", "begin:third", "end:2", "finish"]);
+});
+
+test("label isolation gives every distinct compute label its own pass", () => {
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events), { isolateLabels: true });
+  const first = broker.compute({ label: "count rows" });
+  // A different label must not be silently swallowed into the open pass: that
+  // swallowing is what makes a per-pass timestamp report attribute one label's
+  // ms to a whole group of stages.
+  const second = broker.compute({ label: "scatter families" });
+  assert.notEqual(second, first);
+  // Repeating a label keeps the pass, so a stage that reopens its own pass to
+  // add dispatches still reports as one bucket.
+  assert.equal(broker.compute({ label: "scatter families" }), second);
+  // An unlabelled request never forces a split; there is no bucket to protect.
+  assert.equal(broker.compute(), second);
+  broker.finish();
+  assert.equal(broker.computePassCount, 2);
+  assert.deepEqual(events, [
+    "begin:count rows", "end:1", "begin:scatter families", "end:2", "finish",
+  ]);
+});
+
+test("label isolation is off unless asked for, and then only changes pass boundaries", () => {
+  assert.equal(passBrokerLabelIsolationRequested({}), false);
+  // A browser has no `process`; the broker must not throw there.
+  assert.equal(passBrokerLabelIsolationRequested(undefined), false);
+  assert.equal(passBrokerLabelIsolationRequested({ FLUID_GPU_ISOLATE_PASS_LABELS: "0" }), false);
+  assert.equal(passBrokerLabelIsolationRequested({ FLUID_GPU_ISOLATE_PASS_LABELS: "1" }), true);
+  // Default construction must reproduce the production command stream exactly:
+  // one pass across differing labels, and the later labels dropped.
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events), { isolateLabels: false });
+  const first = broker.compute({ label: "count rows" });
+  assert.equal(broker.compute({ label: "scatter families" }), first);
+  broker.finish();
+  assert.equal(broker.computePassCount, 1);
+  assert.deepEqual(events, ["begin:count rows", "end:1", "finish"]);
 });
 
 test("PassBroker copy, clear, and indirect update close compute first", () => {
@@ -91,7 +129,7 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
     "legacy encoder boundary"]) {
     assert.doesNotMatch(brokerSource, new RegExp(legacyName), `${legacyName} must stay deleted`);
   }
-  assert.match(brokerSource, /constructor\(private readonly encoder: GPUCommandEncoder\)/,
+  assert.match(brokerSource, /constructor\(private readonly encoder: GPUCommandEncoder[,)]/,
     "raw encoder access must go through the fencing commandEncoder boundary");
   assert.match(ownerPageSource, /encodeInactiveCandidate\(broker: PassBroker\): void/);
   assert.match(ownerPageSource, /encodeReadyCommit\(broker: PassBroker\): void/);

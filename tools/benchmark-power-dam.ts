@@ -17,6 +17,7 @@ import {
 } from "./octree-regression-artifact";
 import {
   POWER_DAM_LANE_ENVIRONMENT,
+  powerDamLaneWithSteps,
   type PowerDamRuntimeLane as RuntimeLane,
 } from "./power-dam-lane-environment";
 
@@ -35,6 +36,22 @@ const lane = (requestedLane === "quiescent" ? "moving-interface" : requestedLane
 const traceProfile = args.has("--profile");
 const fineTimestamps = args.has("--fine-timestamps");
 const passTimestamps = args.has("--pass-timestamps") || args.has("--algorithm-diagnostics");
+// Superseded by --isolate-pass-labels, and it never worked: splitting Metal
+// encoders cannot separate dispatches WebGPU recorded into ONE pass, which is
+// what the broker does. Kept because its +0.9 ms on a 168-pass frame is a
+// direct measurement of per-encoder switch cost.
+const isolatePassEncoders = args.has("--isolate-passes");
+if (isolatePassEncoders && !passTimestamps) {
+  throw new Error("--isolate-passes requires --pass-timestamps; on its own it only makes the frame slower");
+}
+// The attribution mode that works. Every labelled `compute()` gets its own
+// pass, so a label's timestamps bracket that label's dispatches and nothing
+// else. Costs extra pass launches, so the frame is inflated: read the ranking,
+// never the ms/advance.
+const isolatePassLabels = args.has("--isolate-pass-labels");
+if (isolatePassLabels && !passTimestamps) {
+  throw new Error("--isolate-pass-labels requires --pass-timestamps; on its own it only makes the frame slower");
+}
 if (quiescent && fineTimestamps) {
   throw new Error("--quiescent cannot use --fine-timestamps until the runner can timestamp only a trailing window");
 }
@@ -64,6 +81,20 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
     FLUID_PERFORMANCE_TRACES: traceProfile || artifactPath ? "1" : "0",
     FLUID_GPU_FINE_TIMESTAMPS: fineTimestamps ? "1" : "0",
     FLUID_GPU_PASS_TIMESTAMPS: passTimestamps ? "1" : "0",
+    FLUID_GPU_ISOLATE_PASS_ENCODERS: isolatePassEncoders ? "1" : "0",
+    FLUID_GPU_ISOLATE_PASS_LABELS: isolatePassLabels ? "1" : "0",
+    // One captured command buffer is one advance, and one advance is not a
+    // stable sample: back-to-back single-buffer captures reordered the top of
+    // the table and moved individual stages by more than 4x. Twenty-five
+    // captures, taken after the cold opening advances, reproduced the rank
+    // order exactly and every stage to better than 1% across two runs. The
+    // caller can still pin either number for a targeted capture.
+    ...(isolatePassLabels ? {
+      FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS:
+        process.env.FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS ?? "25",
+      FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS:
+        process.env.FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS ?? "40",
+    } : {}),
     FLUID_ALGORITHM_DIAGNOSTICS: args.has("--algorithm-diagnostics") ? "1" : "0",
     FLUID_GPU_COMMAND_AUDIT: "1",
     FLUID_STABILITY_ENVELOPE: artifactPath ? "1" : (process.env.FLUID_STABILITY_ENVELOPE ?? "0"),
@@ -104,7 +135,24 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
   return result;
 };
 
-const movingResult = await runBenchmark();
+// Ablation lane. Wall clock still SIZES a saving: `--pass-timestamps
+// --isolate-pass-labels` ranks stages honestly but reads ~19% high in
+// aggregate (48.6 ms of brackets against a 39.2 ms clean advance), because the
+// one captured command buffer carries every timestamp write.
+// So A/B iteration needs it cheap. `--steps=N` shortens the lane without
+// desynchronising FLUID_TARGET_S from FLUID_MAX_DT. Compare only runs at the
+// SAME step count: the frame drifts materially over a lane, so a 150-step mean
+// and a 500-step mean describe different regimes.
+const stepsOverride = process.argv.find((argument) => argument.startsWith("--steps="))
+  ?.slice("--steps=".length);
+const laneOverride = stepsOverride === undefined ? {} : (() => {
+  const steps = Number(stepsOverride);
+  if (!Number.isInteger(steps) || steps <= 0) throw new Error(`--steps must be a positive integer; received ${stepsOverride}`);
+  if (quiescent) throw new Error("--steps cannot override the quiescent lane, which owns its own settle/measure split");
+  return powerDamLaneWithSteps(lane, steps);
+})();
+
+const movingResult = await runBenchmark(laneOverride);
 let artifactResult: OctreeRegressionResultRecord = movingResult;
 // The raw record of the run whose FINAL advance the terminal gates describe.
 // `powerDamResultWindow` rebuilds a differenced record from an explicit field
@@ -304,11 +352,23 @@ if (jsonOnly) {
   }
   if (summary.passTimestamps) {
     const timestamps = summary.passTimestamps;
-    console.log(`compute-pass GPU timestamps: ${timestamps.measuredPasses} passes in ${timestamps.capturedCommandBuffers} command buffer(s), ${timestamps.invalidPasses} invalid, ${timestamps.capacityOverflows} capacity overflows; ${timestamps.summedPass_ms.toFixed(2)} ms summed pass occupancy`);
+    // Every ms below is divided by the captured command buffers, so the table
+    // reads per advance no matter how many advances were sampled.
+    const captures = Math.max(1, timestamps.capturedCommandBuffers);
+    console.log(`compute-pass GPU timestamps: ${timestamps.measuredPasses} passes in ${timestamps.capturedCommandBuffers} command buffer(s), ${timestamps.invalidPasses} invalid, ${timestamps.capacityOverflows} capacity overflows; ${(timestamps.summedPass_ms / captures).toFixed(2)} ms/advance summed pass occupancy over a ${((timestamps.span_ms ?? 0) / captures).toFixed(2)} ms/advance GPU span (coverage ${(timestamps.coverageRatio ?? 0).toFixed(3)})`);
+    // The coverage ratio is the licence to read the table at all. Passes tile
+    // the command buffer only when each labelled `compute()` owns its pass;
+    // otherwise a label is its group's total charged to whichever pass stayed
+    // open, which is how a 0.3 ms workset publication once read as 3.6 ms.
+    console.log(timestamps.labelIsolated
+      ? `compute-pass attribution: per-LABEL — every labelled compute() owned its pass, and the brackets tile ${((timestamps.coverageRatio ?? 0) * 100).toFixed(1)}% of the GPU span. Ranking is trustworthy; absolute ms is inflated by the extra pass launches, so size a saving by ablation on the wall clock (--steps=N)`
+      : timestamps.encoderIsolated
+        ? "compute-pass attribution: encoder-isolated, and STILL NOT per-pass — splitting Metal encoders does not stop a pass staying open across later stages; add --isolate-pass-labels"
+        : "compute-pass attribution: per-GROUP, not per-pass — PassBroker keeps one pass open across many compute({label}) calls and drops the later labels, so each label below is everything encoded until the next fence; add --isolate-pass-labels, or attribute by ablation on the wall clock (--steps=N)");
     for (const [label, bucket] of Object.entries(timestamps.byLabel)
       .sort((left, right) => right[1].total_ms - left[1].total_ms)
       .slice(0, 40)) {
-      console.log(`GPU compute pass: ${label}: ${bucket.total_ms.toFixed(3)} ms · ${bucket.mean_ms.toFixed(3)} ms mean · ${bucket.samples} samples`);
+      console.log(`GPU compute pass: ${label}: ${(bucket.total_ms / captures).toFixed(3)} ms/advance · ${bucket.mean_ms.toFixed(3)} ms mean · ${bucket.samples} samples`);
     }
   }
   if (summary.dataFlow) {

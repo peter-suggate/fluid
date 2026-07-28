@@ -157,7 +157,12 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
       source: octreeSPGridVCycleShader,
       entries: [
         "beginL1CapturePlan",
+        // The capture plan is two kernels: a page-parallel row scan and the
+        // work-list reduction that publishes readyGeneration and the level
+        // dirty flags. The publishing half is the one this review covers, so
+        // both have to be entry points or the coverage has a hole.
         "planL1CaptureDelta",
+        "reduceL1CaptureDelta",
         "commitChangedL1",
         "finalizeL1CapturePublication",
         "buildCandidateLevelDeltas",
@@ -174,9 +179,12 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
         ? ["acceptStructuredPublication", "beginStructuredPublication", "fail", "finalizeStructuredPublication",
           "publishSection63Rows", "reconstructStructuredCellVelocity", "scatterStructuredFamilySlots"]
       : graph.name === "structured boundary coefficients"
+        // `worksetPublicationEnabled` holds the transaction gate the single
+        // publication kernel used to read inline; all five wide publication
+        // stages now read it through that one reviewed helper.
         ? ["acceptStructuredBoundary", "commitStructuredBoundarySlots", "fail", "publishStructuredBoundarySetup",
-          "publishStructuredBoundaryWorksets", "rebuildStructuredBoundaryRows", "resolveStructuredBoundarySlots",
-          "resolveStructuredSolidSlots"]
+          "rebuildStructuredBoundaryRows", "resolveStructuredBoundarySlots",
+          "resolveStructuredSolidSlots", "worksetPublicationEnabled"]
       : graph.name === "structured velocity dynamics"
         ? ["acc", "rejectSample", "rejectVector"]
       : graph.name === "fine level-set summaries"

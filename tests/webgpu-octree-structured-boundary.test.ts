@@ -6,7 +6,9 @@ import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structur
 const boundaryEntryPoints = ["prepareStructuredBoundaryCandidate", "prepareStructuredBoundaryAccepted",
   "classifyStructuredLiquidRows",
   "resolveStructuredBoundarySlots", "resolveStructuredSolidSlots", "commitStructuredBoundarySlots",
-  "rebuildStructuredBoundaryRows", "publishStructuredBoundaryWorksets", "acceptStructuredBoundary"] as const;
+  "rebuildStructuredBoundaryRows", "countStructuredRowClasses", "countStructuredFamilyClasses",
+  "scanStructuredWorksetBlocks", "scatterStructuredRowWorksets", "scatterStructuredFamilyWorksets",
+  "acceptStructuredBoundary"] as const;
 
 function reachableStorageBindings(entryPoint: string): number[] {
   const globals = [...structuredBoundaryCoefficientWGSL.matchAll(
@@ -79,8 +81,40 @@ test("structured boundary update is canonical, transactional, and face-graph fre
     /let direction=vec3i\(round\(slot\.areaCentroid\.yzw\+\.5\*slot\.normalInverseDistance\.xyz\)\)/,
     "dynamic rows must use the same centroid-plus-half-normal channel map as the generated 19-channel catalog");
   assert.match(structuredBoundaryCoefficientWGSL,
-    /publishStructuredBoundaryWorksets[\s\S]*dynamicWorksets\[worksetBase\(cls\)\+7u\+prefix\[cls\]\]/,
+    /scatterStructuredRowWorksets[\s\S]*dynamicWorksets\[worksetBase\(cls\)\+7u\+worksetBlocks\[cls\*worksetBlockStride\(\)\+wg\.x\]\+worksetBlockOffset\(lane\)\]=row/,
     "current free-surface coefficients must publish actual disjoint row and family worksets");
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /scatterStructuredFamilyWorksets[\s\S]*dynamicWorksets\[worksetBase\(cls\)\+7u\+worksetBlocks\[cls\*worksetBlockStride\(\)\+wg\.x\]\+worksetBlockOffset\(lane\)\]=h/,
+    "family worksets must scatter from the same block-ordered prefix as the row worksets");
+});
+
+test("dynamic workset publication is wide and its destinations stay index-ordered", () => {
+  // The destination of an element is the exclusive prefix of its class over
+  // preceding blocks plus the count of lower lanes in its own block carrying
+  // the same class. That is the element's rank in ascending index order, which
+  // is exactly what the superseded single-workgroup kernel produced -- the
+  // published worksets must be bit-identical, not merely equivalent.
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /fn worksetBlockOffset\(lane:u32\)->u32\{let cls=worksetBlockClass\[lane\];var n=0u;for\(var j=0u;j<lane;j\+=1u\)/,
+    "the intra-block offset must count lower lanes of the same class, never bump a shared cursor");
+  assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /publishStructuredBoundaryWorksets/,
+    "the single-workgroup workset publication must not survive alongside the wide one");
+  // Row classes are 0..3 and family classes 5..8, so the two phases can share
+  // one block table only while each writes its own disjoint class range.
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /countStructuredRowClasses[\s\S]*?if\(lane<5u\)\{worksetBlocks\[lane\*worksetBlockStride\(\)\+wg\.x\]/,
+    "the row count must publish only classes 0..4 so it cannot clobber family blocks");
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /countStructuredFamilyClasses[\s\S]*?if\(lane>=5u&&lane<9u\)\{worksetBlocks\[lane\*worksetBlockStride\(\)\+wg\.x\]/,
+    "the family count must publish only classes 5..8 so it cannot clobber row blocks");
+  // A row's 19-channel class is the expensive part; it must be read from the
+  // cache the row phase filled rather than recomputed per incident slot.
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /fn cachedRowClass\(row:u32\)->u32\{return select\(dynamicRowClass\(row\),worksetClasses\[row\],row<control\.rows\);\}/,
+    "family classification must read cached row classes for every in-range row");
+  assert.doesNotMatch(structuredBoundaryCoefficientWGSL,
+    /fn dynamicFamilyClass[^\n]*dynamicRowClass/,
+    "dynamicFamilyClass must not recompute a row class it can read from the cache");
 });
 
 test("candidate-ready and recurring accepted controls have disjoint setup semantics", () => {

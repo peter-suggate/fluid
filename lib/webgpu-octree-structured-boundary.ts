@@ -60,8 +60,10 @@ export class WebGPUStructuredBoundaryCoefficients {
   readonly worksets: GPUBuffer;
   readonly worksetStrideWords: number;
   readonly worksetBankStrideWords: number;
-  readonly encodedDispatchCount = 7;
+  readonly encodedDispatchCount = 11;
   readonly allocatedBytes: number;
+  private readonly worksetClasses: GPUBuffer;
+  private readonly worksetBlocks: GPUBuffer;
   private readonly candidateMask: GPUBuffer;
   private readonly candidates: GPUBuffer;
   private readonly candidateSolidNormalVelocities: GPUBuffer;
@@ -75,7 +77,11 @@ export class WebGPUStructuredBoundaryCoefficients {
   private readonly resolveSolid: GPUComputePipeline;
   private readonly commit: GPUComputePipeline;
   private readonly rebuild: GPUComputePipeline;
-  private readonly publishWorksets: GPUComputePipeline;
+  private readonly countRowClasses: GPUComputePipeline;
+  private readonly countFamilyClasses: GPUComputePipeline;
+  private readonly scanWorksetBlocks: GPUComputePipeline;
+  private readonly scatterRowWorksets: GPUComputePipeline;
+  private readonly scatterFamilyWorksets: GPUComputePipeline;
   private readonly accept: GPUComputePipeline;
   private readonly acceptGroup: GPUBindGroup;
   private readonly groupsByFineParams = new WeakMap<GPUBuffer,
@@ -118,6 +124,14 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.worksets = device.createBuffer({ label: "Packed A/B dynamic structured boundary worksets",
       size: 2 * this.worksetBankStrideWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC });
+    // Workset compaction scratch. Both are pure per-advance intermediates:
+    // the class of every row then every slot, and 9 classes of per-block
+    // prefix bases over whichever of the two ranges that class draws from.
+    this.worksetClasses = device.createBuffer({ label: "Structured boundary workset element classes",
+      size: (structured.plan.rowCapacity + structured.plan.slotCapacity) * 4, usage: storage });
+    this.worksetBlocks = device.createBuffer({ label: "Structured boundary workset block prefixes",
+      size: 9 * Math.ceil(Math.max(structured.plan.rowCapacity, structured.plan.slotCapacity) / 64) * 4,
+      usage: storage });
     this.params = device.createBuffer({ label: "Structured boundary parameters", size: 128,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     if (!resources.solid) {
@@ -152,7 +166,11 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.resolveSolid = make("resolveStructuredSolidSlots");
     this.commit = make("commitStructuredBoundarySlots");
     this.rebuild = make("rebuildStructuredBoundaryRows");
-    this.publishWorksets = make("publishStructuredBoundaryWorksets");
+    this.countRowClasses = make("countStructuredRowClasses");
+    this.countFamilyClasses = make("countStructuredFamilyClasses");
+    this.scanWorksetBlocks = make("scanStructuredWorksetBlocks");
+    this.scatterRowWorksets = make("scatterStructuredRowWorksets");
+    this.scatterFamilyWorksets = make("scatterStructuredFamilyWorksets");
     this.accept = make("acceptStructuredBoundary");
     this.acceptGroup = device.createBindGroup({ layout: this.accept.getBindGroupLayout(0), entries: [
       { binding: 16, resource: { buffer: this.candidateControl } },
@@ -161,6 +179,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.allocatedBytes = this.liquidMask.size + this.solidNormalVelocities.size
       + this.candidateMask.size + this.candidates.size + this.candidateSolidNormalVelocities.size
       + this.control.size + this.candidateControl.size + this.dispatch.size + this.params.size + this.worksets.size
+      + this.worksetClasses.size + this.worksetBlocks.size
       + (this.inertSolidStorage?.size ?? 0);
   }
 
@@ -185,7 +204,8 @@ export class WebGPUStructuredBoundaryCoefficients {
       18: this.worksets, 19: this.resources.rigidBodies, 20: this.solidNormalVelocities,
       21: this.candidateSolidNormalVelocities, 22: this.control,
       23: section63.topologyMetrics, 24: section63.catalogFaces,
-      25: this.resources.separationMask };
+      25: this.resources.separationMask,
+      27: this.worksetClasses, 28: this.worksetBlocks };
     // Binding 26 is the only texture in this layout; every other entry is a
     // buffer from the map above.
     // `coarseValue` references the texture unconditionally, so the auto layout
@@ -206,7 +226,11 @@ export class WebGPUStructuredBoundaryCoefficients {
       group(this.resolveSolid, [0, 2, 3, 10, 11, 16, 19, 21]),
       group(this.commit, [0, 2, 11, 16, 20, 21]),
       group(this.rebuild, [0, 2, 12, 13, 14, 16, 24]),
-      group(this.publishWorksets, [0, 2, 3, 13, 14, 16, 18]),
+      group(this.countRowClasses, [0, 3, 14, 16, 27, 28]),
+      group(this.countFamilyClasses, [0, 2, 3, 13, 14, 16, 27, 28]),
+      group(this.scanWorksetBlocks, [0, 16, 18, 28]),
+      group(this.scatterRowWorksets, [0, 16, 18, 27, 28]),
+      group(this.scatterFamilyWorksets, [0, 16, 18, 27, 28]),
     ]);
     byControl.set(structuredControl, authority === "candidate-ready"
       ? { ...cached, candidateReady: groups }
@@ -220,19 +244,18 @@ export class WebGPUStructuredBoundaryCoefficients {
     if (this.destroyed) throw new Error("Structured boundary coefficients are destroyed");
     const groups = this.groups(fine, structuredControl, authority);
     const prepare = authority === "candidate-ready" ? this.prepareCandidate : this.prepareAccepted;
-    const stages = [prepare, this.classify, this.resolve, this.resolveSolid, this.commit, this.rebuild,
-      this.publishWorksets] as const;
+    const stages = [prepare, this.classify, this.resolve, this.resolveSolid, this.commit,
+      this.rebuild] as const;
     const prepareLabel = authority === "candidate-ready"
       ? "Prepare structured boundary candidate-ready transaction"
       : "Prepare structured boundary accepted recurring transaction";
     const labels = [prepareLabel, "Classify fine-over-coarse liquid rows",
       "Resolve canonical free-surface boundary slots", "Resolve canonical solid boundary slots",
       "Commit canonical structured boundary slots",
-      "Rebuild symmetric structured boundary rows", "Publish dynamic structured boundary worksets"] as const;
+      "Rebuild symmetric structured boundary rows"] as const;
     stages.forEach((pipeline, index) => {
       const pass = broker.compute({ label: labels[index] }); pass.setPipeline(pipeline); pass.setBindGroup(0, groups[index]!);
       if (index === 0) pass.dispatchWorkgroups(1);
-      else if (index === 6) pass.dispatchWorkgroups(1);
       else pass.dispatchWorkgroupsIndirect(this.dispatch, index >= 2 && index <= 4 ? 12 : 0);
       // NOTE: stages 1..5 exchange only plain storage, which WebGPU already
       // orders inside a pass, so in principle only the prepare (which writes
@@ -241,8 +264,44 @@ export class WebGPUStructuredBoundaryCoefficients {
       // an authoritative resolved-row publication being rejected in-app, so the
       // fences stay until that is understood. Launch structure is not this
       // frame's cost -- see docs/OCTREE_PHASE0_BASELINE.md.
-      if (index <= 5) broker.fence(labels[index]);
+      broker.fence(labels[index]);
     });
+    // Workset publication: count -> block scan -> scatter, all five dispatches
+    // in the one pass the serial kernel used to occupy. No fence is needed
+    // between them -- they hand off only plain storage (`worksetClasses`,
+    // `worksetBlocks`, `dynamicWorksets`), which WebGPU orders within a pass,
+    // and nothing here reads a buffer this pass writes as an indirect
+    // argument. `this.dispatch` is bound INDIRECT-only for the whole pass.
+    // `FLUID_STRUCTURED_WORKSET_SPLIT=1` fences each stage into its own pass.
+    // SUPERSEDED by `FLUID_GPU_ISOLATE_PASS_LABELS=1` (`lib/webgpu-pass-broker.ts`),
+    // which does this for every labelled stage in the frame; keep this only if
+    // you want the split without the global flag.
+    //
+    // This group is where the instrument's two bugs were caught, so the history
+    // is worth keeping: these five dispatches once reported 3.604 ms on
+    // whichever one was LAST, and swapping the final two moved that identical
+    // number with the position rather than the kernel. The cause was NOT Metal
+    // encoder merging (that theory was tested and refuted -- bracket coverage
+    // never exceeds 1, so passes do not overlap). It was `PassBroker.compute()`
+    // silently dropping the label when a pass is already open, leaving one
+    // bracket running across every downstream stage, compounded by Dawn's
+    // `timestamp_quantization` toggle rounding every reading to 65536 ns so
+    // anything genuinely cheap read as exactly zero. With both fixed these five
+    // dispatches total 0.19 ms, matching the ~0.3 ms the wall clock measured.
+    const splitPublication = process.env.FLUID_STRUCTURED_WORKSET_SPLIT === "1";
+    let publication = broker.compute({ label: "Publish dynamic structured boundary worksets" });
+    const publish = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup,
+      indirectOffset?: number) => {
+      if (splitPublication) { broker.fence(label); publication = broker.compute({ label }); }
+      publication.setPipeline(pipeline); publication.setBindGroup(0, group);
+      if (indirectOffset === undefined) publication.dispatchWorkgroups(1);
+      else publication.dispatchWorkgroupsIndirect(this.dispatch, indirectOffset);
+    };
+    publish("Workset count row classes", this.countRowClasses, groups[6]!, 0);
+    publish("Workset count family classes", this.countFamilyClasses, groups[7]!, 12);
+    publish("Workset scan blocks", this.scanWorksetBlocks, groups[8]!);
+    publish("Workset scatter rows", this.scatterRowWorksets, groups[9]!, 0);
+    publish("Workset scatter families", this.scatterFamilyWorksets, groups[10]!, 12);
   }
 
   /** Build an inactive boundary publication from a structured candidate that
@@ -281,7 +340,7 @@ export class WebGPUStructuredBoundaryCoefficients {
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
     for (const buffer of [this.liquidMask, this.solidNormalVelocities, this.candidateMask, this.candidates,
-      this.candidateSolidNormalVelocities,
+      this.candidateSolidNormalVelocities, this.worksetClasses, this.worksetBlocks,
       this.control, this.candidateControl, this.dispatch, this.params, this.inertSolidStorage]) buffer?.destroy();
     this.worksets.destroy();
   }
@@ -298,6 +357,10 @@ struct CatalogSlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInv
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>accepted:array<u32>;@group(0)@binding(2)var<storage,read_write>a:array<u32>;@group(0)@binding(3)var<storage,read>geometry:array<vec4u>;@group(0)@binding(5)var<uniform>fp:FineP;@group(0)@binding(6)var<storage,read>fineWork:array<u32>;@group(0)@binding(7)var<storage,read>fineMeta:array<u32>;@group(0)@binding(8)var<storage,read>fineFlags:array<u32>;@group(0)@binding(9)var<storage,read>finePhi:array<f32>;@group(0)@binding(10)var<storage,read>solid:VertexArena;@group(0)@binding(11)var<storage,read_write>candidates:array<vec2f>;@group(0)@binding(12)var<storage,read_write>candidateLiquid:array<u32>;@group(0)@binding(13)var<storage,read_write>liquid:array<u32>;@group(0)@binding(14)var<storage,read_write>rows:array<u32>;@group(0)@binding(15)var<storage,read_write>diagonal:array<f32>;@group(0)@binding(16)var<storage,read_write>control:C;@group(0)@binding(17)var<storage,read_write>dispatch:array<u32>;@group(0)@binding(18)var<storage,read_write>dynamicWorksets:array<u32>;@group(0)@binding(19)var<storage,read>rigidBodies:array<RigidBody>;@group(0)@binding(20)var<storage,read_write>solidVelocity:array<f32>;@group(0)@binding(21)var<storage,read_write>candidateSolidVelocity:array<f32>;
 @group(0)@binding(22)var<storage,read_write>acceptedBoundary:C;@group(0)@binding(23)var<storage,read>metrics:array<Metric>;@group(0)@binding(24)var<storage,read>catalogSlots:array<CatalogSlotGeometry>;
 @group(0)@binding(25)var<storage,read>separationMask:array<u32>;
+// Workset publication scratch: one class per row then one per slot (offset by
+// the row capacity), and a per-class table of per-block prefix bases.
+@group(0)@binding(27)var<storage,read_write>worksetClasses:array<u32>;
+@group(0)@binding(28)var<storage,read_write>worksetBlocks:array<u32>;
 // Host-rasterized t=0 level set, authoritative only while pad.z==3. Analytic
 // and post-bootstrap lanes bind a placeholder here and never sample it.
 @group(0)@binding(26)var bootstrapLevelSetIn:texture_3d<f32>;
@@ -380,22 +443,112 @@ fn channelForCatalogSlot(global:u32)->u32{if(global>=arrayLength(&catalogSlots))
 @compute @workgroup_size(64)fn rebuildStructuredBoundaryRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows||atomicLoad(&control.flags)!=0u){return;}liquid[lbase()+row]=candidateLiquid[row];let base=section63Base()+row*19u;if(base+19u>arrayLength(&rows)){fail(row,64u);return;}for(var channel=0u;channel<19u;channel+=1u){rows[base+channel]=0u;}var d=select(1.,0.,candidateLiquid[row]!=0u);for(var local=0u;local<p.counts.z;local+=1u){let at=row*p.counts.z+local;let h=a[abase()+p.offset2.y+at];if(h==INVALID||h>=control.slots){continue;}let lo=handleOwner(h);let hi=handleNeighbor(h);let other=select(lo,hi,lo==row);let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);let coefficient=bitcast<f32>(a[abase()+p.offset0.z+h])*bitcast<f32>(a[abase()+p.offset0.w+h])*aperture*scale;if(candidateLiquid[row]==0u||coefficient<=0.){continue;}d+=coefficient;if(other!=INVALID&&other<control.rows&&other!=row&&candidateLiquid[other]!=0u){let global=a[abase()+p.offset2.w+at];let channel=channelForCatalogSlot(global);if(channel==INVALID){fail(row,64u);continue;}rows[base+channel]=bitcast<u32>(bitcast<f32>(rows[base+channel])+coefficient);}}rows[base]=bitcast<u32>(d);if(row+1u==control.rows){control.published=control.epoch;}}
 fn rowTransition(row:u32)->bool{let at=rbase()+row;return row<control.rows&&at<arrayLength(&geometry)&&geometry[at].z!=0u;}
 fn dynamicRowClass(row:u32)->u32{let base=section63Base()+row*19u;var off=0.;for(var channel=1u;channel<19u;channel+=1u){off+=bitcast<f32>(rows[base+channel]);}let boundary=bitcast<f32>(rows[base])>off+max(1e-6,1e-5*abs(off));return select(select(0u,2u,boundary),select(1u,3u,boundary),rowTransition(row));}
-fn dynamicFamilyClass(h:u32)->u32{let lo=handleOwner(h);let hi=handleNeighbor(h);if(liquidAt(lo)==0u&&(hi==INVALID||hi>=control.rows||liquidAt(hi)==0u)){return 9u;}let transition=rowTransition(lo)||(hi!=INVALID&&hi<control.rows&&rowTransition(hi));let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);let boundary=hi==INVALID||dynamicRowClass(lo)>=2u||(hi<control.rows&&dynamicRowClass(hi)>=2u)||aperture<0.999999||abs(scale-1.)>1e-6||(hi<control.rows&&liquidAt(lo)!=liquidAt(hi));return select(select(5u,7u,boundary),select(6u,8u,boundary),transition);}
+// A row's class is read once per row and up to twice per incident slot. The
+// serial publication recomputed it every time, so the 19-channel offdiagonal
+// sum ran up to four times per slot; caching it is the bulk of the win.
+fn cachedRowClass(row:u32)->u32{return select(dynamicRowClass(row),worksetClasses[row],row<control.rows);}
+fn dynamicFamilyClass(h:u32)->u32{let lo=handleOwner(h);let hi=handleNeighbor(h);if(liquidAt(lo)==0u&&(hi==INVALID||hi>=control.rows||liquidAt(hi)==0u)){return 9u;}let transition=rowTransition(lo)||(hi!=INVALID&&hi<control.rows&&rowTransition(hi));let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);let boundary=hi==INVALID||cachedRowClass(lo)>=2u||(hi<control.rows&&cachedRowClass(hi)>=2u)||aperture<0.999999||abs(scale-1.)>1e-6||(hi<control.rows&&liquidAt(lo)!=liquidAt(hi));return select(select(5u,7u,boundary),select(6u,8u,boundary),transition);}
 fn worksetBase(cls:u32)->u32{return control.bank*p.pad.y+cls*p.pad.x;}
-var<workgroup> dynamicCounts:array<u32,576>;var<workgroup> dynamicEnabled:u32;
-@compute @workgroup_size(64)fn publishStructuredBoundaryWorksets(@builtin(local_invocation_index)lane:u32){
- if(lane==0u){dynamicEnabled=select(0u,1u,atomicLoad(&control.flags)==0u&&control.rows>0u&&control.published==control.epoch);}
- let enabled=workgroupUniformLoad(&dynamicEnabled);if(enabled==0u){return;}
- let rowChunk=(control.rows+63u)/64u;let rowFirst=lane*rowChunk;let rowLast=min(rowFirst+rowChunk,control.rows);
- let slotChunk=(control.slots+63u)/64u;let slotFirst=lane*slotChunk;let slotLast=min(slotFirst+slotChunk,control.slots);
- var localCounts:array<u32,9>;for(var row=rowFirst;row<rowLast;row+=1u){localCounts[dynamicRowClass(row)]+=1u;}
- for(var h=slotFirst;h<slotLast;h+=1u){let cls=dynamicFamilyClass(h);if(cls<9u){localCounts[cls]+=1u;}}
- for(var cls=0u;cls<9u;cls+=1u){dynamicCounts[cls*64u+lane]=localCounts[cls];}workgroupBarrier();
- for(var width=1u;width<64u;width<<=1u){for(var cls=0u;cls<9u;cls+=1u){var add=0u;if(lane>=width){add=dynamicCounts[cls*64u+lane-width];}workgroupBarrier();dynamicCounts[cls*64u+lane]+=add;}workgroupBarrier();}
- var prefix:array<u32,9>;if(lane>0u){for(var cls=0u;cls<9u;cls+=1u){prefix[cls]=dynamicCounts[cls*64u+lane-1u];}}
- for(var row=rowFirst;row<rowLast;row+=1u){let cls=dynamicRowClass(row);dynamicWorksets[worksetBase(cls)+7u+prefix[cls]]=row;prefix[cls]+=1u;}
- for(var h=slotFirst;h<slotLast;h+=1u){let cls=dynamicFamilyClass(h);if(cls<9u){dynamicWorksets[worksetBase(cls)+7u+prefix[cls]]=h;prefix[cls]+=1u;}}workgroupBarrier();
- if(lane==0u){for(var cls=0u;cls<9u;cls+=1u){let base=worksetBase(cls);let count=dynamicCounts[cls*64u+63u];dynamicWorksets[base]=control.epoch;dynamicWorksets[base+1u]=count;dynamicWorksets[base+2u]=select(p.counts.x,p.counts.y,cls>=5u);dynamicWorksets[base+3u]=3u;dynamicWorksets[base+4u]=(count+63u)/64u;dynamicWorksets[base+5u]=1u;dynamicWorksets[base+6u]=1u;}}
+// Wide deterministic workset publication.
+//
+// This replaces a single 64-lane workgroup that walked every row and every
+// slot, ran a 9-class Hillis-Steele scan across its own lanes (108 barriers),
+// and then walked both ranges a second time to scatter. At ~12k slots that is
+// a latency-bound serial crawl: 64 resident threads of 98,304, with nothing
+// to hide a dependent global load behind. It measured 4.00 ms of a 48.7 ms
+// advance.
+//
+// The replacement is the standard count -> block scan -> scatter compaction,
+// one lane per element. Destinations are IDENTICAL to the serial form, not
+// merely equivalent: a block's base is the exclusive prefix of the per-block
+// counts in ascending block order, and a lane's offset within its block is
+// the number of lower lanes carrying the same class, so every class's workset
+// is still exactly its members in ascending element order. That determinism
+// is why the scan is an ordered integer prefix and not an atomic bump; an
+// atomic counter is also banned outright in this shader.
+//
+// Row classes are 0..3 and family classes 5..8, which never overlap, so the
+// row and slot phases share the block table without a shared cursor: the row
+// count writes classes 0..4 at row-block indices and the slot count writes
+// classes 5..8 at slot-block indices.
+const WORKSET_SKIP:u32=0xffffffffu;
+var<workgroup> worksetBlockClass:array<u32,64>;
+var<workgroup> worksetScan:array<u32,256>;
+var<workgroup> worksetGate:u32;
+fn worksetPublicationEnabled()->bool{return atomicLoad(&control.flags)==0u&&control.rows>0u&&control.published==control.epoch;}
+fn worksetBlockStride()->u32{return (max(p.counts.x,p.counts.y)+63u)/64u;}
+fn worksetSlotClassBase()->u32{return p.counts.x;}
+fn worksetBlockTotal(cls:u32)->u32{var n=0u;for(var j=0u;j<64u;j+=1u){if(worksetBlockClass[j]==cls){n+=1u;}}return n;}
+fn worksetBlockOffset(lane:u32)->u32{let cls=worksetBlockClass[lane];var n=0u;for(var j=0u;j<lane;j+=1u){if(worksetBlockClass[j]==cls){n+=1u;}}return n;}
+@compute @workgroup_size(64)fn countStructuredRowClasses(@builtin(global_invocation_id)g:vec3u,@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wg:vec3u){
+ if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());}
+ if(workgroupUniformLoad(&worksetGate)==0u){return;}
+ let row=g.x;
+ var cls=WORKSET_SKIP;
+ if(row<control.rows){cls=dynamicRowClass(row);worksetClasses[row]=cls;}
+ worksetBlockClass[lane]=cls;
+ workgroupBarrier();
+ if(lane<5u){worksetBlocks[lane*worksetBlockStride()+wg.x]=worksetBlockTotal(lane);}
+}
+@compute @workgroup_size(64)fn countStructuredFamilyClasses(@builtin(global_invocation_id)g:vec3u,@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wg:vec3u){
+ if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());}
+ if(workgroupUniformLoad(&worksetGate)==0u){return;}
+ let h=g.x;
+ var cls=WORKSET_SKIP;
+ if(h<control.slots){let value=dynamicFamilyClass(h);worksetClasses[worksetSlotClassBase()+h]=value;if(value<9u){cls=value;}}
+ worksetBlockClass[lane]=cls;
+ workgroupBarrier();
+ if(lane>=5u&&lane<9u){worksetBlocks[lane*worksetBlockStride()+wg.x]=worksetBlockTotal(lane);}
+}
+@compute @workgroup_size(256)fn scanStructuredWorksetBlocks(@builtin(local_invocation_index)lane:u32){
+ if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());}
+ if(workgroupUniformLoad(&worksetGate)==0u){return;}
+ // Every barrier below is reached under bounds derived from the uniform p, so
+ // the loop trip counts are uniform even though the live-element predicate is
+ // not; out-of-range blocks contribute a zero and never gate a barrier.
+ let stride=worksetBlockStride();
+ let rowBlocks=(control.rows+63u)/64u;
+ let slotBlocks=(control.slots+63u)/64u;
+ for(var cls=0u;cls<9u;cls+=1u){
+  let blocks=select(rowBlocks,slotBlocks,cls>=5u);
+  var carry=0u;
+  for(var start=0u;start<stride;start+=256u){
+   let at=start+lane;
+   let live=at<blocks;
+   var value=0u;if(live){value=worksetBlocks[cls*stride+at];}
+   worksetScan[lane]=value;workgroupBarrier();
+   for(var width=1u;width<256u;width<<=1u){
+    var add=0u;if(lane>=width){add=worksetScan[lane-width];}
+    workgroupBarrier();worksetScan[lane]+=add;workgroupBarrier();
+   }
+   if(live){worksetBlocks[cls*stride+at]=carry+worksetScan[lane]-value;}
+   let total=worksetScan[255];workgroupBarrier();
+   carry+=total;
+  }
+  if(lane==0u){let base=worksetBase(cls);dynamicWorksets[base]=control.epoch;dynamicWorksets[base+1u]=carry;dynamicWorksets[base+2u]=select(p.counts.x,p.counts.y,cls>=5u);dynamicWorksets[base+3u]=3u;dynamicWorksets[base+4u]=(carry+63u)/64u;dynamicWorksets[base+5u]=1u;dynamicWorksets[base+6u]=1u;}
+ }
+}
+@compute @workgroup_size(64)fn scatterStructuredRowWorksets(@builtin(global_invocation_id)g:vec3u,@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wg:vec3u){
+ if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());}
+ if(workgroupUniformLoad(&worksetGate)==0u){return;}
+ let row=g.x;
+ var cls=WORKSET_SKIP;
+ if(row<control.rows){cls=worksetClasses[row];}
+ worksetBlockClass[lane]=cls;
+ workgroupBarrier();
+ if(cls>=9u){return;}
+ dynamicWorksets[worksetBase(cls)+7u+worksetBlocks[cls*worksetBlockStride()+wg.x]+worksetBlockOffset(lane)]=row;
+}
+@compute @workgroup_size(64)fn scatterStructuredFamilyWorksets(@builtin(global_invocation_id)g:vec3u,@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wg:vec3u){
+ if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());}
+ if(workgroupUniformLoad(&worksetGate)==0u){return;}
+ let h=g.x;
+ var cls=WORKSET_SKIP;
+ if(h<control.slots){cls=worksetClasses[worksetSlotClassBase()+h];}
+ worksetBlockClass[lane]=cls;
+ workgroupBarrier();
+ if(cls>=9u){return;}
+ dynamicWorksets[worksetBase(cls)+7u+worksetBlocks[cls*worksetBlockStride()+wg.x]+worksetBlockOffset(lane)]=h;
 }
 @compute @workgroup_size(1)fn acceptStructuredBoundary(){if(atomicLoad(&control.flags)!=0u||control.epoch==0u||control.published!=control.epoch){return;}atomicStore(&acceptedBoundary.flags,0u);atomicStore(&acceptedBoundary.firstError,INVALID);acceptedBoundary.rows=control.rows;acceptedBoundary.slots=control.slots;acceptedBoundary.epoch=control.epoch;acceptedBoundary.bank=control.bank;acceptedBoundary.published=control.published;acceptedBoundary.pad=0u;}
 `;

@@ -777,6 +777,18 @@ fn publishedRow(cell:u32,size:u32)->u32{if(cell>=p.domainVolume){return INVALID;
   let row=s(rowIndexAt(cell));if(row>=s(2u)){return INVALID;}
   let g=rowGeometry[s(4u)*p.rowCapacity+row];
   return select(INVALID,row,g.x==cell&&g.y==size);}
+// Base of the domain-sized fine-band candidate block. It follows the LAST
+// accepted row's candidates rather than the last provisionable row's, so the
+// live candidate index space [0, rows*stride + domainVolume) is contiguous and
+// the sweeps below never walk the dead tail. Relocating the block cannot
+// reorder anything: every row candidate index stays < rows*candidateStride and
+// therefore still precedes every fine candidate, exactly as when the block sat
+// at rowCapacity*candidateStride.
+// p.fineCandidateOffset (rowCapacity*candidateStride) remains the fail-closed
+// ceiling: rows never exceeds rowCapacity, so the min only ever fires on a
+// corrupt accepted row count.
+fn fineCandidateBase()->u32{return min(s(2u)*p.candidateStride,p.fineCandidateOffset);}
+fn candidateBoundFor(rows:u32)->u32{return min(rows*p.candidateStride+p.domainVolume,p.candidateCapacity);}
 fn candidateAt(item:u32)->Candidate{let at=p.candidateOffset+${OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS}u*item;
   return Candidate(s(at),s(at+1u),s(at+2u));}
 fn setCandidate(item:u32,value:Candidate){let at=p.candidateOffset+${OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS}u*item;
@@ -851,7 +863,20 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   }
   sw(0u,0u);sw(1u,INVALID);sw(31u,0u);let rows=min(accepted.rowCount,p.rowCapacity);sw(2u,rows);sw(3u,accepted.epoch);
   sw(4u,accepted.bank);var boundary=0u;if(p.boundaryEpochOffset<arrayLength(&boundaryEpoch)){boundary=boundaryEpoch[p.boundaryEpochOffset];}sw(5u,boundary);
-  let candidates=p.candidateCapacity;let blocks=p.blockCapacity;sw(6u,candidates);sw(7u,blocks);sw(8u,0u);sw(9u,p.supportCapacity);
+  // The candidate arena is provisioned for rowCapacity rows, but only the
+  // accepted rows ever emit into it, and the fine block is relocated to
+  // sit immediately after them (see fineCandidateBase). Bounding the sweeps by
+  // that live extent stops clearAirSupportCandidates, markAndScan, scatter and
+  // resolveAirSupportTopology walking (rowCapacity-rows)*candidateStride dead
+  // slots -- the arena is 3 words/slot, so the dead tail is what makes this pass
+  // address-translation bound rather than compute bound.
+  //
+  // The emitted records are bit-identical to the capacity-wide sweep: row
+  // candidates keep their indices, the fine block still follows every row
+  // candidate, so the surviving candidates keep their relative order and
+  // therefore their ranks, directory winners and support-record slots.
+  let candidates=candidateBoundFor(rows);
+  let blocks=(candidates+255u)/256u;sw(6u,candidates);sw(7u,blocks);sw(8u,0u);sw(9u,p.supportCapacity);
   sw(25u,0u);sw(26u,0u);sw(27u,0u);sw(28u,0u);sw(40u,p.expectedFineGeneration);
   sw(41u,0u);sw(42u,INVALID);
   if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.bank>1u
@@ -883,7 +908,7 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
 // origin cell; a second claimant is a topology fault, not a tie to resolve.
 @compute @workgroup_size(256)fn clearAirSupportCandidates(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(item<p.candidateCapacity){setCandidate(item,Candidate(INVALID,0u,INVALID));}
+  if(item<s(6u)){setCandidate(item,Candidate(INVALID,0u,INVALID));}
   if(item<s(2u)){let g=rowGeometry[s(4u)*p.rowCapacity+item];
     if(g.x>=p.domainVolume){fail(item,ERROR_SOURCE);}
     else if(atomicMin(&scratch[rowIndexAt(g.x)],item)!=INVALID){fail(item,ERROR_TOPOLOGY);}}}
@@ -898,27 +923,76 @@ fn unpackFineBrick(key:u32)->vec3u{let xy=p.fineBrickDims.x*p.fineBrickDims.y;le
   let y=rem/p.fineBrickDims.x;return vec3u(rem-y*p.fineBrickDims.x,y,z);}
 fn fineLocal(local:u32)->vec3u{let z=local/(p.fineR*p.fineR);let rem=local-z*p.fineR*p.fineR;
   let y=rem/p.fineR;return vec3u(rem-y*p.fineR,y,z);}
+fn markFineBandDemandNeighborhood(base:vec3u){
+  let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
+  for(var dz=-i32(radius);dz<=i32(radius);dz+=1){for(var dy=-i32(radius);dy<=i32(radius);dy+=1){for(var dx=-i32(radius);dx<=i32(radius);dx+=1){
+    let demandCell=vec3i(base)+vec3i(dx,dy,dz);if(all(demandCell>=vec3i(0))&&all(demandCell<vec3i(p.dimensions))){
+      atomicOr(&scratch[p.directoryFlagOffset+cellOf(vec3u(demandCell))],QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}}}}}
+// The resident brick page this workgroup owns (INVALID when the workgroup is
+// retired), the minimum base owner cell any of its in-band samples demanded,
+// and whether the brick ever spanned more than one such cell.
+var<workgroup> markFineBrickPage:atomic<u32>;
+var<workgroup> markFineBaseCell:atomic<u32>;
+var<workgroup> markFineBaseSplit:atomic<u32>;
 @compute @workgroup_size(64)fn markFineBandAirSupportDemand(@builtin(workgroup_id)wid:vec3u,
   @builtin(num_workgroups)groups:vec3u,@builtin(local_invocation_index)lane:u32){
-  let headerValid=p.fineFactor>0u&&p.transportBandFineCells>0u&&p.expectedFineGeneration>0u
-    &&arrayLength(&fineWorklist)>=7u+p.finePageCapacity&&fineWorklist[0]==p.expectedFineGeneration
-    &&fineWorklist[2]==p.finePageCapacity&&(fineWorklist[3]&3u)==3u&&fineWorklist[5]==1u
-    &&fineWorklist[6]==1u&&fineWorklist[1]<=p.finePageCapacity;
-  if(!headerValid){if(lane==0u){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}return;}
-  let work=wid.x+wid.y*groups.x;let live=fineWorklist[1];if(work>=live){return;}let id=fineWorklist[7u+work];
-  if(id>=p.finePageCapacity||id*10u+2u>=arrayLength(&fineMetadata)
-      ||fineMetadata[id*10u]!=id||fineMetadata[id*10u+2u]!=p.expectedFineGeneration){
-    if(lane==0u){fail(work,ERROR_SOURCE|ERROR_GENERATION);}return;}
-  for(var local=lane;local<p.fineSamplesPerBrick;local+=64u){let index=id*p.fineSamplesPerBrick+local;
+  // Header/residency admission moved into lane 0 and behind workgroup state:
+  // the reduction below needs workgroup barriers, and a barrier may not sit
+  // downstream of a storage-derived early return.
+  if(lane==0u){
+    atomicStore(&markFineBrickPage,INVALID);atomicStore(&markFineBaseCell,INVALID);
+    atomicStore(&markFineBaseSplit,0u);
+    let headerValid=p.fineFactor>0u&&p.transportBandFineCells>0u&&p.expectedFineGeneration>0u
+      &&arrayLength(&fineWorklist)>=7u+p.finePageCapacity&&fineWorklist[0]==p.expectedFineGeneration
+      &&fineWorklist[2]==p.finePageCapacity&&(fineWorklist[3]&3u)==3u&&fineWorklist[5]==1u
+      &&fineWorklist[6]==1u&&fineWorklist[1]<=p.finePageCapacity;
+    if(!headerValid){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
+    else{let work=wid.x+wid.y*groups.x;let live=fineWorklist[1];
+      if(work<live){let id=fineWorklist[7u+work];
+        if(id>=p.finePageCapacity||id*10u+2u>=arrayLength(&fineMetadata)
+            ||fineMetadata[id*10u]!=id||fineMetadata[id*10u+2u]!=p.expectedFineGeneration){
+          fail(work,ERROR_SOURCE|ERROR_GENERATION);
+        }else{atomicStore(&markFineBrickPage,id);}}}}
+  workgroupBarrier();
+  let id=workgroupUniformLoad(&markFineBrickPage);
+  // The demanded cell set is the union of every in-band sample's
+  // (2*radius+1)^3 owner-cell neighbourhood, and atomicOr of one constant bit
+  // pattern is both commutative and idempotent -- so emitting a neighbourhood
+  // once per DISTINCT base cell publishes exactly the same flags as emitting it
+  // once per in-band sample.
+  //
+  // That is worth proving because a brick is brickResolution^3 samples over a
+  // lattice refined by fineFactor >= brickResolution (the planner admits only
+  // brickResolution 4 with fineFactor 4 or 8, and brick origins are multiples
+  // of brickResolution), so q/fineFactor is CONSTANT across a brick: all 64
+  // lanes were recomputing and re-issuing the SAME 27 atomics, contending on
+  // the same 27 words. Uniformity is established here rather than assumed, and
+  // a brick that ever spans two base cells falls back to the per-sample emit.
+  let sampleCount=select(0u,p.fineSamplesPerBrick,id!=INVALID);
+  var base=vec3u(0u);var inBand=false;
+  for(var local=lane;local<sampleCount;local+=64u){let index=id*p.fineSamplesPerBrick+local;
     if(index>=arrayLength(&fineFlags)||index>=arrayLength(&finePhi)){fail(index,ERROR_CAPACITY);continue;}
     if((fineFlags[index]&1u)==0u){continue;}let value=finePhi[index];if(!finiteValue(value)){fail(index,ERROR_SOURCE);continue;}
     if(abs(value)>f32(p.transportBandFineCells)*p.fineWidth){continue;}
     let q=unpackFineBrick(fineMetadata[id*10u+1u])*p.fineR+fineLocal(local);
     if(any(q>=p.fineSampleDims)){fail(index,ERROR_SOURCE);continue;}
-    let base=q/p.fineFactor;let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
-    for(var dz=-i32(radius);dz<=i32(radius);dz+=1){for(var dy=-i32(radius);dy<=i32(radius);dy+=1){for(var dx=-i32(radius);dx<=i32(radius);dx+=1){
-      let demandCell=vec3i(base)+vec3i(dx,dy,dz);if(all(demandCell>=vec3i(0))&&all(demandCell<vec3i(p.dimensions))){
-        atomicOr(&scratch[p.directoryFlagOffset+cellOf(vec3u(demandCell))],QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}}}}}}
+    let sampleBase=q/p.fineFactor;
+    if(inBand&&any(sampleBase!=base)){atomicStore(&markFineBaseSplit,1u);}
+    base=sampleBase;inBand=true;}
+  if(inBand){atomicMin(&markFineBaseCell,cellOf(base));}
+  workgroupBarrier();
+  let sharedCell=atomicLoad(&markFineBaseCell);
+  if(inBand&&cellOf(base)!=sharedCell){atomicStore(&markFineBaseSplit,1u);}
+  workgroupBarrier();
+  if(atomicLoad(&markFineBaseSplit)!=0u){if(inBand){markFineBandDemandNeighborhood(base);}return;}
+  if(sharedCell==INVALID){return;}
+  // Uniform brick: spread its one neighbourhood across the workgroup's lanes.
+  let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
+  let width=2u*radius+1u;let count=width*width*width;let origin=coord(sharedCell);
+  for(var n=lane;n<count;n+=64u){
+    let dx=i32(n%width)-i32(radius);let dy=i32((n/width)%width)-i32(radius);let dz=i32(n/(width*width))-i32(radius);
+    let demandCell=vec3i(origin)+vec3i(dx,dy,dz);if(all(demandCell>=vec3i(0))&&all(demandCell<vec3i(p.dimensions))){
+      atomicOr(&scratch[p.directoryFlagOffset+cellOf(vec3u(demandCell))],QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}}}
 
 fn markFineResolvedOwner(expectedCenter:vec3f,expectedSize:u32,item:u32){
   if(expectedSize==0u){fail(item,ERROR_CATALOG);return;}
@@ -992,7 +1066,7 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
     markFineResolvedOwner(selectorCenter,selectorSize,item);}}}
 
 @compute @workgroup_size(256)fn emitFineBandAirSupportCandidates(@builtin(global_invocation_id)g:vec3u){let item=g.x;
-  if(item>=p.domainVolume||s(0u)!=0u){return;}let output=p.fineCandidateOffset+item;
+  if(item>=p.domainVolume||s(0u)!=0u){return;}let output=fineCandidateBase()+item;
   setCandidate(output,Candidate(INVALID,0u,INVALID));let demanded=s(p.directoryFlagOffset+item);
   if((demanded&RECORD_FINE)==0u){return;}let owner=octreeOwnerPageLookup(vec3i(coord(item)));
   if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){failTopology(4u,output);return;}let resolvedCell=cellOf(owner.origin);
@@ -1084,7 +1158,7 @@ var<workgroup> marks:array<u32,256>;
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let block=wid.x+wid.y*groups.x;let item=block*256u+lane;
   var mark=0u;if(item<s(6u)){let c=candidateAt(item);mark=select(0u,1u,c.cell!=INVALID&&s(p.directoryWinnerOffset+c.cell)==item);}
   marks[lane]=mark;workgroupBarrier();for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=marks[lane-offset];}
-    workgroupBarrier();marks[lane]+=add;workgroupBarrier();}if(item<p.candidateCapacity){sw(p.rankOffset+item,select(INVALID,marks[lane]-1u,mark!=0u));}
+    workgroupBarrier();marks[lane]+=add;workgroupBarrier();}if(item<s(6u)){sw(p.rankOffset+item,select(INVALID,marks[lane]-1u,mark!=0u));}
   if(lane==255u&&block<p.blockCapacity){sw(p.blockCountOffset+block,marks[255u]);}}
 
 var<workgroup> blockScan:array<u32,256>;
@@ -1107,7 +1181,12 @@ var<workgroup> blockScan:array<u32,256>;
 
 @compute @workgroup_size(256)fn resolveAirSupportTags(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(item>=s(6u)||s(0u)!=0u){return;}let c=candidateAt(item);if(c.cell==INVALID){return;}let tag=s(p.directoryWinnerOffset+c.cell);
+  // This entry point is dispatched over rows*256 items, which now overlaps the
+  // relocated fine-band block. Fine candidates carry no tag word and the final
+  // store below already skipped them, so retiring them here keeps the integrity
+  // gates below applying to exactly the tagged row candidates they always did.
+  if(item>=s(6u)||s(0u)!=0u){return;}let c=candidateAt(item);
+  if(c.cell==INVALID||c.tagWord==INVALID){return;}let tag=s(p.directoryWinnerOffset+c.cell);
   if((tag&SUPPORT_TAG)==0u){fail(item,ERROR_TAG);return;}let support=tag&0x7fffffffu;if(support>=s(8u)){fail(item,ERROR_TAG);return;}
   let at=p.recordOffset+support*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;if(r(at)!=coord(c.cell).x||r(at+1u)!=coord(c.cell).y||r(at+2u)!=coord(c.cell).z||r(at+3u)!=c.size){failTopology(5u,item);return;}
   if(c.tagWord!=INVALID){atomicStore(&supportArena[c.tagWord],tag);}}

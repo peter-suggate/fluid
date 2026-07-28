@@ -54,6 +54,7 @@ import {
   type GPUDataFlowManifest,
   type GPUDataFlowPassRecorder,
 } from "./webgpu-data-flow-manifest";
+import { createPassEncoderIsolationScratch, isolateComputePassEncoders } from "./webgpu-pass-encoder-isolation";
 import { encodeStructuredAuditRecordCopies, exactStructuredGenerationAuditFailures,
   finalPerformanceAuthorityFailures, STRUCTURED_GENERATION_AUDIT_SNAPSHOT,
   unpackStructuredBoundaryControl, unpackStructuredGenerationAuditSnapshot,
@@ -106,11 +107,25 @@ Object.assign(globalThis, globals);
 // must still select its worker_threads transport here: Dawn's worker wrapper
 // does not preserve typed-array inputs used by the topology packer.
 Reflect.deleteProperty(globalThis, "Worker");
+// Dawn quantizes timestamp-query results to 65536 ns unless told not to, so
+// every pass reads as an integer number of 65.536 us quanta and anything
+// cheaper than that reads as exactly zero. That is a browser fingerprinting
+// defence with no purchase in a local benchmark process, and it destroys the
+// resolution per-pass attribution needs, so the pass-timestamp diagnostic
+// turns it off. Nothing else about the command stream changes.
+const dawnDisabledFeatures = [
+  ...(process.env.FLUID_GPU_PASS_TIMESTAMPS === "1" || process.env.FLUID_GPU_FINE_TIMESTAMPS === "1"
+    ? ["timestamp_quantization"] : []),
+  ...(process.env.FLUID_WEBGPU_DAWN_DISABLED_FEATURES?.split(",").map((name) => name.trim())
+    .filter((name) => name.length > 0) ?? []),
+];
 const dawnOptions = [
   `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
   ...(process.env.FLUID_WEBGPU_ADAPTER ? [`adapter=${process.env.FLUID_WEBGPU_ADAPTER}`] : []),
   ...(process.env.FLUID_WEBGPU_DAWN_FEATURES
     ? [`enable-dawn-features=${process.env.FLUID_WEBGPU_DAWN_FEATURES}`] : []),
+  ...(dawnDisabledFeatures.length > 0
+    ? [`disable-dawn-features=${Array.from(new Set(dawnDisabledFeatures)).join(",")}`] : []),
 ];
 const gpu = create(dawnOptions);
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
@@ -207,6 +222,14 @@ const genericPhaseTraceRequested = process.env.FLUID_GPU_FINE_TIMESTAMPS === "1"
  * already opens, and the first recurring command buffer is resolved only
  * after it has been submitted. */
 const gpuPassTimestampRequested = process.env.FLUID_GPU_PASS_TIMESTAMPS === "1";
+/** Give every compute pass its own Metal encoder so the timestamps above are
+ * actually per-pass rather than per-encoder. Costs one encoder switch per pass,
+ * so an isolated run's absolute frame time is inflated and is a ranking, never
+ * a baseline. See `tools/webgpu-pass-encoder-isolation.ts`. */
+const gpuIsolatePassEncodersRequested = process.env.FLUID_GPU_ISOLATE_PASS_ENCODERS === "1";
+/** Read by `lib/webgpu-pass-broker.ts`; mirrored here only so the report can
+ * state which passes it actually measured. */
+const gpuIsolatePassLabelsRequested = process.env.FLUID_GPU_ISOLATE_PASS_LABELS === "1";
 const performanceTraceRequested =
   process.env.FLUID_PERFORMANCE_TRACES === undefined
     ? true
@@ -2127,7 +2150,28 @@ interface GPUPassTimestampReport {
   invalidPasses: number;
   capacityOverflows: number;
   summedPass_ms: number;
+  /** False means Dawn was free to merge passes into shared Metal encoders, so
+   * each label is really its encoder's total charged to the encoder's last
+   * pass. Only an isolated report attributes time to a single pass, and only
+   * an unisolated wall clock states what the frame costs. */
+  encoderIsolated: boolean;
+  /** Every labelled `compute()` got its own pass, so a label's dispatches are
+   * exactly the dispatches recorded under that label. */
+  labelIsolated: boolean;
+  /** Wall span of the captured command buffers on the GPU timeline: last
+   * timestamp minus first. */
+  span_ms: number;
+  /** `summedPass_ms / span_ms`. One means the passes tile the span, which is
+   * the only state in which a label's ms is that label's cost. Above one means
+   * brackets overlap, below one means unbracketed GPU time. */
+  coverageRatio: number;
   byLabel: Record<string, GPUFineTimestampBucket>;
+}
+
+interface GPUPassTimestampCapture {
+  buckets: Array<[string, number | undefined]>;
+  capacityOverflows: number;
+  span_ms: number;
 }
 
 class GPUPassTimestampEncoderSession {
@@ -2185,15 +2229,25 @@ class GPUPassTimestampEncoderSession {
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
   }
 
-  async read(): Promise<{
-    buckets: Array<[string, number | undefined]>;
-    capacityOverflows: number;
-  }> {
+  async read(): Promise<GPUPassTimestampCapture> {
     try {
-      if (this.queryCount === 0) return { buckets: [], capacityOverflows: this.capacityOverflows };
+      if (this.queryCount === 0) {
+        return { buckets: [], capacityOverflows: this.capacityOverflows, span_ms: 0 };
+      }
       const bytes = this.queryCount * 8;
       await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
       const timestamps = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
+      // The union of every pass bracket. Compared against the sum of the
+      // brackets it states whether this capture is an attribution at all: a sum
+      // materially above the span means passes overlapped on the GPU timeline,
+      // and a per-pass number that overlaps its neighbours cannot be a cost.
+      let earliest: bigint | undefined, latest: bigint | undefined;
+      for (let index = 0; index < this.queryCount; index += 1) {
+        const timestamp = timestamps[index] ?? 0n;
+        if (timestamp === 0n) continue;
+        if (earliest === undefined || timestamp < earliest) earliest = timestamp;
+        if (latest === undefined || timestamp > latest) latest = timestamp;
+      }
       return {
         buckets: this.labels.map((label, index) => {
           const begin = timestamps[2 * index] ?? 0n;
@@ -2201,6 +2255,7 @@ class GPUPassTimestampEncoderSession {
           return [label, begin > 0n && end >= begin ? Number(end - begin) / 1e6 : undefined];
         }),
         capacityOverflows: this.capacityOverflows,
+        span_ms: earliest !== undefined && latest !== undefined ? Number(latest - earliest) / 1e6 : 0,
       };
     } finally {
       if (this.readBuffer.mapState === "mapped") this.readBuffer.unmap();
@@ -2217,22 +2272,31 @@ class GPUPassTimestampEncoderSession {
 class GPUPassTimestampAudit {
   private enabled = false;
   private claimedCommandBuffers = 0;
+  private skippedCommandBuffers = 0;
   private readonly submitted = new WeakMap<GPUCommandBuffer, GPUPassTimestampEncoderSession>();
-  private readonly reads: Promise<{
-    buckets: Array<[string, number | undefined]>;
-    capacityOverflows: number;
-  }>[] = [];
+  private readonly reads: Promise<GPUPassTimestampCapture>[] = [];
 
   constructor(
     private readonly device: GPUDevice,
     private readonly maximumCommandBuffers = 1,
     private readonly queryCapacity = 2048,
+    private readonly encoderIsolated = false,
+    private readonly labelIsolated = false,
+    private readonly skipCommandBuffers = 0,
   ) {}
 
   start(): void { this.enabled = true; }
 
   createEncoderSession(): GPUPassTimestampEncoderSession | undefined {
     if (!this.enabled || this.claimedCommandBuffers >= this.maximumCommandBuffers) return undefined;
+    // The first recurring command buffer is the coldest one in the run: on the
+    // mini lane its GPU span measured 92.7 ms against a 39.1 ms mean advance.
+    // Skipping forward buys a representative buffer at no cost but a later
+    // capture.
+    if (this.skippedCommandBuffers < this.skipCommandBuffers) {
+      this.skippedCommandBuffers += 1;
+      return undefined;
+    }
     this.claimedCommandBuffers += 1;
     return new GPUPassTimestampEncoderSession(this.device, this.queryCapacity);
   }
@@ -2272,12 +2336,18 @@ class GPUPassTimestampAudit {
         ...bucket,
         mean_ms: bucket.total_ms / Math.max(1, bucket.samples),
       }]));
+    const summedPass_ms = Array.from(aggregates.values()).reduce((sum, bucket) => sum + bucket.total_ms, 0);
+    const span_ms = captures.reduce((sum, capture) => sum + capture.span_ms, 0);
     return {
       capturedCommandBuffers: captures.length,
       measuredPasses: Array.from(aggregates.values()).reduce((sum, bucket) => sum + bucket.samples, 0),
       invalidPasses,
       capacityOverflows: captures.reduce((sum, capture) => sum + capture.capacityOverflows, 0),
-      summedPass_ms: Array.from(aggregates.values()).reduce((sum, bucket) => sum + bucket.total_ms, 0),
+      summedPass_ms,
+      encoderIsolated: this.encoderIsolated,
+      labelIsolated: this.labelIsolated,
+      span_ms,
+      coverageRatio: span_ms > 0 ? summedPass_ms / span_ms : 0,
       byLabel,
     };
   }
@@ -2820,8 +2890,18 @@ async function runGPU(
   const passTimestampAudit = gpuPassTimestampRequested
     && device.features.has("timestamp-query")
     ? new GPUPassTimestampAudit(device, Math.max(1,
-      Math.floor(Number(process.env.FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS ?? 1))))
+      Math.floor(Number(process.env.FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS ?? 1))),
+    undefined, gpuIsolatePassEncodersRequested, gpuIsolatePassLabelsRequested,
+    Math.max(0, Math.floor(Number(process.env.FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS ?? 0))))
     : undefined;
+  // Only ever paired with the pass timestamps it exists to make honest; on its
+  // own it would just be a slower frame.
+  const passEncoderIsolationScratch = gpuIsolatePassEncodersRequested && passTimestampAudit
+    ? createPassEncoderIsolationScratch(device)
+    : undefined;
+  if (gpuIsolatePassEncodersRequested && !passTimestampAudit) {
+    console.warn("FLUID_GPU_ISOLATE_PASS_ENCODERS ignored: it only applies with FLUID_GPU_PASS_TIMESTAMPS=1");
+  }
   const instrumentedQueue = commandAudit || passTimestampAudit ? new Proxy(device.queue, {
     get(target, property) {
       if (property === "writeBuffer") return (buffer: GPUBuffer, bufferOffset: number,
@@ -2869,7 +2949,12 @@ async function runGPU(
       };
       if (property === "createCommandEncoder") return (descriptor?: GPUCommandEncoderDescriptor) => {
         commandAudit?.recordCommandEncoder(descriptor);
-        const encoder = target.createCommandEncoder(descriptor);
+        // Isolation sits UNDER the audit: the audit must keep describing the
+        // solver's own commands so an isolated run stays comparable to an
+        // ordinary one dispatch-for-dispatch.
+        const encoder = passEncoderIsolationScratch
+          ? isolateComputePassEncoders(target.createCommandEncoder(descriptor), passEncoderIsolationScratch)
+          : target.createCommandEncoder(descriptor);
         const dataFlow = dataFlowAudit?.createEncoderSession();
         const passTimestamps = passTimestampAudit?.createEncoderSession();
         return commandAudit || dataFlow || passTimestamps

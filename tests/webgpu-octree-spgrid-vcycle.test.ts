@@ -518,6 +518,11 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     octreeSPGridVCycleShader.indexOf("fn brickOfIndex("));
   assert.match(linkChains, /if\(t<lane\)\{predecessor=block\+t;\}/,
     "a record's chain predecessor is the largest smaller record index sharing its coarse slot");
+  // The uniform sweep is load-bearing for speed, not just correctness: the
+  // equivalent per-lane first-hit searches measured 0.903 -> 1.134 ms because
+  // chunkKey[t] stops being a workgroup-memory broadcast. Pin the shared index.
+  assert.match(linkChains, /for\(var t=0u;t<CHUNK;t\+=1u\)/,
+    "every lane must read the same chunkKey index so the scan stays a broadcast");
   const adjointLeaves: Array<{ origin: [number, number, number]; size: number }> = [
     { origin: [0, 4, 0], size: 2 }, { origin: [4, 4, 4], size: 4 }];
   for (let x = 0; x < 4; x += 1) for (let y = 0; y < 3; y += 1) adjointLeaves.push({ origin: [x, y, 0], size: 1 });
@@ -670,8 +675,20 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
   assert.match(octreeSPGridAccurateDispatchGateShader,
     /classDispatch\[destination\]=select\(0u,worksets\[source\],solveLive&&valid\)/,
     "the accurate owner zeroes every remaining destination-class record");
+  // pageSlot resolves the page inline, on purpose: memoizing it on the ordinal
+  // is exact but measured as nothing (see the refuted-levers list). Pin the
+  // single-function shape so the memo is not reintroduced without a measurement.
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn pageSlot\(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32\)->u32\{[\s\S]{0,400}?let physical=pageNeighbour\(l,page,ordinal\);/,
+    "pageSlot must resolve the page inline rather than through a threaded memo");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.beginL1CapturePlan, [0, 3, 6, 13, 14, 18]);
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.planL1CaptureDelta, [0, 1, 3, 11, 13, 14, 18, 20, 21]);
+  // The capture plan was split so the per-row Section 6.3 validation runs one
+  // workgroup per page instead of one lane of one workgroup. The row scan kept
+  // the row bindings and lost the level-delta arena (14), which markDirtyFrom
+  // took with it into the reduction; the reduction keeps only what the
+  // work-list traversal and the finalization reach.
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.planL1CaptureDelta, [0, 1, 3, 11, 13, 18, 20, 21]);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.reduceL1CaptureDelta, [0, 3, 13, 14, 18]);
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.commitChangedL1, [0, 1, 3, 11, 13, 18]);
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.finalizeL1CapturePublication, [0, 3, 13, 18]);
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.detectCandidateGhosts,
@@ -847,8 +864,11 @@ test("setup retires the prior live generation without unconditional full-buffer 
   cycle.encodeSetup(broker, input);
   assert.equal(dispatches, cycle.encodedSetupDispatchCount,
     "cold setup owns exact page planning plus transactional candidate publication");
+  // planL1CaptureDelta is now the page-parallel row scan and
+  // reduceL1CaptureDelta the work-list fold that used to be its lane-0 tail, so
+  // the capture prologue is three dispatches rather than two.
   assert.deepEqual(events.slice(0, 6), ["begin", "direct:beginL1CapturePlan", "direct:planL1CaptureDelta",
-    "direct:probeCandidateSkip", "direct:applyCandidateSkip", "direct:commitChangedL1"]);
+    "direct:reduceL1CaptureDelta", "direct:probeCandidateSkip", "direct:applyCandidateSkip"]);
   assert.ok(events.some((event) => event === "direct:validateCandidateHierarchy"));
   assert.ok(events.some((event) => event === "direct:commitChangedL1"));
   assert.ok(events.some((event) => event === "direct:finalizeL1CapturePublication"));
@@ -870,7 +890,8 @@ test("setup retires the prior live generation without unconditional full-buffer 
   cycle.encodeCapture(broker);
   broker.fence("capture complete");
   const recurringCapture = events.slice(beforeCapture);
-  assert.deepEqual(recurringCapture, ["begin", "direct:beginL1CapturePlan", "direct:planL1CaptureDelta", "end"],
+  assert.deepEqual(recurringCapture, ["begin", "direct:beginL1CapturePlan", "direct:planL1CaptureDelta",
+    "direct:reduceL1CaptureDelta", "end"],
   "warm capture plans exact changed pages without mutating the published hierarchy");
   cycle.destroy();
 });
@@ -928,14 +949,30 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.match(octreeSPGridVCycleShader,
     /fn rebuildCandidateTransferFor[\s\S]*if\(!transferLive\(l\)\)\{return;\}/,
     "the ordered transfer owner must consume the shared dirty predicate");
+  // The row scan is page-parallel: one workgroup per work item, one lane per
+  // page row. Pinning the workgroup_id/lane row address keeps a future edit
+  // from folding it back into the single-workgroup loop it was split out of,
+  // which cost 6.40 ms/advance on 64 of the machine's 98,304 threads.
+  //
+  // That mapping is only complete because a capture page holds exactly as many
+  // rows as the scan has lanes. Widening CAPTURE_PAGE_ROWS without widening the
+  // workgroup would silently leave the tail of every page unvalidated, so pin
+  // the two together.
+  assert.match(octreeSPGridVCycleShader, /const CAPTURE_PAGE_ROWS=64u;/,
+    "the page-parallel row scan addresses row begin+lane across a 64-lane workgroup");
   assert.match(octreeSPGridVCycleShader,
-    /@workgroup_size\(64\) fn planL1CaptureDelta[\s\S]*validSection63Row\(r\)[\s\S]*deltaOldRow\(r\)[\s\S]*var topologyChanged=true/,
+    /@workgroup_size\(64\) fn planL1CaptureDelta\(@builtin\(workgroup_id\)[\s\S]*let r=begin\+lane;[\s\S]*validSection63Row\(r\)[\s\S]*deltaOldRow\(r\)[\s\S]*var topologyChanged=true/,
     "compact producer dirty rows directly invalidate their dependent sparse suffix");
   assert.match(octreeSPGridVCycleShader,
     /commitChangedL1[\s\S]*capturePageStamp\(page\)!=generation[\s\S]*capturedGeometry\[r\]=sourceRowGeometry\(r\)/,
     "only exact changed pages are eligible for fixed-geometry commit");
+  // The work-list traversal and its finalization moved from planL1CaptureDelta's
+  // lane-0 tail into reduceL1CaptureDelta unchanged, so the invariant is now
+  // pinned by that name. Membership is still decided by the work list, never by
+  // a page stamp: two captures can share one generation, and a stale record
+  // must never be mistaken for this capture's.
   assert.match(octreeSPGridVCycleShader,
-    /planL1CaptureDelta[\s\S]*for\(var work=lane;work<workCount;work\+=64u\)[\s\S]*captureWorkUnique\(work,page\)[\s\S]*captureLaneChanged\[lane\][\s\S]*validatedPages=totalChanged[\s\S]*readyGeneration=generation/,
+    /fn reduceL1CaptureDelta[\s\S]*for\(var work=lane;work<workCount;work\+=64u\)[\s\S]*captureWorkUnique\(work,page\)[\s\S]*captureLaneChanged\[lane\][\s\S]*validatedPages=totalChanged[\s\S]*readyGeneration=generation/,
     "capture planning must reduce only compact producer-stamped pages before candidate setup begins");
   assert.match(octreeSPGridVCycleShader,
     /finalizeL1CapturePublication[\s\S]*for\(var work=lane;work<workCount;work\+=64u\)[\s\S]*copyStamp!=generation[\s\S]*totalCopied!=capturePages\.changedPages[\s\S]*publishedGeneration=generation/,

@@ -44,6 +44,19 @@ export interface PowerDamPassTimestampReport {
   readonly invalidPasses: number;
   readonly capacityOverflows: number;
   readonly summedPass_ms: number;
+  /** False means Dawn was free to merge passes into shared Metal encoders, so
+   * every label is really its encoder's total charged to the encoder's last
+   * pass. Older records predate the flag and read as unisolated, which is what
+   * they were. */
+  readonly encoderIsolated?: boolean;
+  /** Every labelled `compute()` opened its own pass, so a label's ms covers
+   * exactly the dispatches recorded under that label. Older records predate the
+   * flag and read as unisolated, which is what they were. */
+  readonly labelIsolated?: boolean;
+  /** GPU-timeline span of the captured command buffers. */
+  readonly span_ms?: number;
+  /** `summedPass_ms / span_ms`; see the smoke runner for what it certifies. */
+  readonly coverageRatio?: number;
   readonly byLabel: Readonly<Record<string, PowerDamFineTimestampBucket>>;
 }
 
