@@ -58,9 +58,31 @@ fn activeBank()->u32{return accepted[4]&1u;} fn rbase()->u32{return state[33u]*p
 fn airWord(word:u32)->u32{if(word>=4u*arrayLength(&airSupport)){return INVALID;}return bitcast<vec4u>(airSupport[word/4u])[word&3u];}
 fn cellCoord(cell:u32)->vec3u{return vec3u(cell%p.dimensions.x,(cell/p.dimensions.x)%p.dimensions.y,
   cell/(p.dimensions.x*p.dimensions.y));}
+// One owner record is four consecutive words, and airSupport is bound as
+// array<vec4f>, so when the record is vec4-aligned the four words ARE one
+// element. The alignment test is dispatch-uniform -- at = airOwnerOffset +
+// 4*cell, so (at & 3) is airOwnerOffset & 3 for every lane and every call --
+// which means the branch costs nothing and the unaligned arm is retained only
+// so no host layout assumption is smuggled into the shader.
+//
+// This is the hottest addressing function in the fine transport kernel:
+// transitionSample resolves an owner once per substep and regularSampleExact
+// resolves eight more for its corner exactness test, so a common-path sample
+// pays 9 records per substep and 36 across the four substeps the governor
+// schedules. Each record cost four airWord calls, i.e. four separate
+// airSupport[...] loads plus four DYNAMIC vector-component extracts (word&3u),
+// which lower to a select chain or a scratch round-trip rather than a register
+// swizzle. The aligned arm is one load and four static component reads.
+//
+// Nothing here touches a float: the record is four u32 words, read and
+// compared as integers, so there is no reassociation and no rounding step of
+// the kind the storage round-trip refutation describes. Gate A.
+fn airOwnerRecord(at:u32)->AirOwner{
+  if((at&3u)==0u){let v=bitcast<vec4u>(airSupport[at>>2u]);return AirOwner(v.x,v.y,v.z,v.w);}
+  return AirOwner(airWord(at),airWord(at+1u),airWord(at+2u),airWord(at+3u));}
 fn airOwner(cell:u32)->AirOwner{if(cell>=p.dimensions.x*p.dimensions.y*p.dimensions.z){return AirOwner(INVALID,INVALID,0u,INVALID);}
   let at=p.airOwnerOffset+4u*cell;if(at+3u>=4u*arrayLength(&airSupport)){return AirOwner(INVALID,INVALID,0u,INVALID);}
-  let result=AirOwner(airWord(at),airWord(at+1u),airWord(at+2u),airWord(at+3u));let supportCount=airWord(p.airControlOffset+6u);
+  let result=airOwnerRecord(at);let supportCount=airWord(p.airControlOffset+6u);
   let tagValid=result.tag!=INVALID&&select(result.tag<state[32],(result.tag&0x7fffffffu)<supportCount,(result.tag&SUPPORT_TAG)!=0u);
   if(tagValid&&result.cell<p.dimensions.x*p.dimensions.y*p.dimensions.z&&result.size>0u&&result.caseTransform!=INVALID){return result;}
   return AirOwner(INVALID,INVALID,0u,INVALID);}
