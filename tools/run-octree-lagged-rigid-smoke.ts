@@ -4,6 +4,8 @@ import { octreeMethod } from "../lib/methods/octree";
 import { createPaperScenario } from "../lib/paper-scenarios";
 import { initializeRigidBodies } from "../lib/rigid-body";
 import { GPU_RIGID_RENDER_BYTES, GPU_RIGID_RENDER_FLOATS } from "../lib/webgpu-rigid-body";
+import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -13,11 +15,23 @@ const gpu = create([`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]);
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
 const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
 if (!adapter) throw new Error("WebGPU did not expose an adapter");
-const device = await adapter.requestDevice();
+// The production octree lane is gated on the subgroup/reduction profile the
+// solver measures; request the same execution device the smoke harness does.
+const device = await adapter.requestDevice({
+  requiredFeatures: fluidExecutionDeviceFeatures(adapter.features),
+  requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+});
 const validationErrors: string[] = [];
 device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
 
 const scene = createPaperScenario("dam-break-boxes");
+// The paper authors Figure 4 at a 0.02 m lattice: 60x45x40 finest cells, whose
+// pressure-row capacity is several times the bounded 16384-row SPGrid this
+// implementation ships. Keep the authored box stack and dam and take the
+// 24x18x16 lattice the rest of the octree acceptance matrix already runs, so
+// the lane exercises resident rigid coupling rather than failing in the
+// allocator before a single step is encoded.
+scene.voxelDomain.finestCellSize_m = Number(process.env.FLUID_VOXEL_CELL_SIZE ?? 0.05);
 const containerTop = process.env.FLUID_CONTAINER_TOP;
 if (containerTop !== undefined && containerTop !== "open" && containerTop !== "closed") {
   throw new Error("FLUID_CONTAINER_TOP must be open or closed");
@@ -27,7 +41,15 @@ const dt = scene.numerics.fixedDt_s;
 const target_s = Number(process.env.FLUID_TARGET_S ?? 0.3);
 const bodies = initializeRigidBodies(scene.rigidBodies);
 const initialCenters = bodies.map((body) => ({ ...body.position_m }));
-const solver = octreeMethod.createSolver!(device, scene, "balanced", octreeMethod.presetFor("balanced"), undefined);
+// The octree publishes its t=0 sparse authority asynchronously, and the first
+// substep flips a topology candidate that only exists once that publication has
+// fenced. Construct through the asynchronous path the product uses so no step
+// is encoded against a half-published epoch.
+const solver = await octreeMethod.createSolverAsync!(
+  device, scene, "balanced", octreeMethod.presetFor("balanced"), undefined, () => {},
+);
+assert.equal(solver.initialSparseAuthorityReady, true,
+  "octree construction must fence the complete t=0 sparse authority");
 
 let submittedTime_s = 0;
 while (submittedTime_s + 1e-9 < target_s) {

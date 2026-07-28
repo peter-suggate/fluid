@@ -15,8 +15,10 @@ import { unpackFineLevelSetGPUTransportControl } from
   "../lib/webgpu-octree-fine-levelset-transport";
 import {
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
+  FINE_LEVELSET_JFA_LOOKUP_STRIDES,
   WebGPUFineLevelSetRedistance,
   fineLevelSetJFACPTWGSL,
+  fineLevelSetJFATapAddress,
   planFineLevelSetJFAStrides,
   unpackFineLevelSetGPURedistanceControl,
 } from "../lib/webgpu-octree-fine-levelset-redistance";
@@ -48,7 +50,12 @@ const dawnDevice = dawnModule?.then(async (dawn) => {
   const adapter = await gpu.requestAdapter();
   assert.ok(adapter);
   assert.ok(adapter.limits.maxStorageBuffersPerShaderStage >= 10);
-  return adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
+  assert.ok(adapter.features.has("subgroups"),
+    "the production M1 Max fine-JFA target requires subgroup candidate reductions");
+  return adapter.requestDevice({
+    requiredFeatures: ["subgroups"],
+    requiredLimits: { maxStorageBuffersPerShaderStage: 10 },
+  });
 });
 function redistanceDeltaAuthority(
   pageDelta: GPUBuffer,
@@ -688,15 +695,15 @@ test("fine redistance construction requires the topology-authored delta ABI", ()
 
 test("fine redistance is fixed-pass JFA-CPT", () => {
   assert.deepEqual(planFineLevelSetJFAStrides(21), [4, 2, 1, 1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [32, 16, 8, 4, 2, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [16, 8, 4, 2, 1, 1, 1]);
   assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1, 1]);
   assert.deepEqual(planFineLevelSetJFAStrides(2), [2, 1, 1, 1]);
   assert.match(fineLevelSetJFACPTWGSL,
-    /d<bestD\|\|\(d==bestD&&seedStableKey\(candidate\)<seedStableKey\(best\)\)/,
-    "equal-distance propagation must choose the stable global sample key");
+    /otherDistance<bestDistance\|\|\(otherDistance==bestDistance&&otherKey<bestKey\)/,
+    "equal-distance cooperative reduction must choose the stable global sample key");
   assert.match(fineLevelSetJFACPTWGSL,
-    /var bestD=LARGE;if\(best!=INVALID\)\{let delta=point-materializedClosestPoint\(best\);bestD=dot\(delta,delta\);\}/,
-    "each flood must cache the current winner's distance instead of recomputing its closest point per candidate");
+    /subgroupShuffleDown\(bestDistance,width\)[\s\S]*subgroupShuffleDown\(bestSeed,width\)/,
+    "candidate distance and seed must be evaluated once and reduced in subgroup registers");
   assert.match(fineLevelSetJFACPTWGSL,
     /fn resolvedDistance\(seed:u32,q:vec3u\)->f32\{if\(seed==INVALID\)\{return bandDistance\(\);\}return length/,
     "a reachable distance must remain unclamped so beyond-band seeds cannot masquerade as exact-cutoff samples");
@@ -747,14 +754,78 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
     /var<workgroup>floodPageIds:array<u32,27>[\s\S]*fn prepareFloodPageIds[\s\S]*if\(lid<27u\)\{floodPageIds\[lid\]=page;\}workgroupBarrier\(\)[\s\S]*fn cachedFloodSampleIndex[\s\S]*let id=floodPageIds\[/,
     "each JFA workgroup must resolve its 27 generation-fixed support pages once");
   assert.doesNotMatch(fineLevelSetJFACPTWGSL,
-    /fn flood\([^}]*sampleIndex\(/,
+    /fn cooperativeFlood\([^}]*sampleIndex\(/,
     "the 27-tap flood must not repeat page-directory resolution in every lane");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /@compute @workgroup_size\(256\)fn jumpFloodAToB[\s\S]*fn jumpFloodBToA/,
+    "each brick flood must expose eight 32-lane candidate teams");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /let team=lid\/subgroupSize;[\s\S]*let candidateSlot=subgroupLane[\s\S]*candidateSlot<27u[\s\S]*candidateSlot==27u/,
+    "the 27 spatial taps and incumbent must occupy one deterministic 32-lane reduction");
+  const cooperativeFlood = fineLevelSetJFACPTWGSL.slice(
+    fineLevelSetJFACPTWGSL.indexOf("fn cooperativeFlood"),
+    fineLevelSetJFACPTWGSL.indexOf("fn resolvedDistance"),
+  );
+  assert.doesNotMatch(cooperativeFlood,
+    /floodCandidate(?:Distance|Key|Seed)|workgroupBarrier/,
+    "candidate reduction must not serialize eight teams through workgroup scratch barriers");
   assert.match(fineLevelSetJFACPTWGSL,
     /fn deltaRecordError[\s\S]*publishedPageOf\(key\)!=id[\s\S]*!support&&supportPageOf\(key\)!=id/,
     "dirty/support records must be sorted, published, generation-current, and dirty must be a support subset");
   assert.doesNotMatch(fineLevelSetJFACPTWGSL,
     /fn sampleIndex\(q:vec3u\)[^}]*publishedPageOf/,
     "the full active worklist cannot re-enter recurring JFA through neighbor lookup");
+});
+
+test("fixed B4 JFA tap lookup is exhaustive parity with the coordinate formula", () => {
+  const coordinate = (index: number) =>
+    [index & 3, (index >> 2) & 3, (index >> 4) & 3] as const;
+  for (const stride of FINE_LEVELSET_JFA_LOOKUP_STRIDES) {
+    const radius = Math.max(1, Math.ceil(stride / 4));
+    for (let local = 0; local < 64; local += 1) {
+      const q = coordinate(local);
+      for (let tap = 0; tap < 27; tap += 1) {
+        const tapZ = Math.floor(tap / 9); const remainder = tap - tapZ * 9;
+        const tapY = Math.floor(remainder / 3); const tapX = remainder - tapY * 3;
+        const displaced = [
+          q[0] + (tapX - 1) * stride,
+          q[1] + (tapY - 1) * stride,
+          q[2] + (tapZ - 1) * stride,
+        ];
+        const pageDelta = displaced.map((value) => Math.floor(value / 4));
+        assert.ok(pageDelta.every((value) => value === 0 || Math.abs(value) === radius),
+          `stride ${stride}, local ${local}, tap ${tap} escaped the 27-page halo`);
+        const pageCoordinate = pageDelta.map((value) => value < 0 ? 0 : value > 0 ? 2 : 1);
+        const localCoordinate = displaced.map((value, axis) => value - pageDelta[axis]! * 4);
+        assert.deepEqual(fineLevelSetJFATapAddress(local, tap, stride), {
+          pageSlot: pageCoordinate[0]! + 3 * (pageCoordinate[1]! + 3 * pageCoordinate[2]!),
+          localIndex: localCoordinate[0]! + 4 * (localCoordinate[1]! + 4 * localCoordinate[2]!),
+        }, `stride ${stride}, local ${local}, tap ${tap}`);
+      }
+    }
+  }
+  assert.throws(() => fineLevelSetJFATapAddress(-1, 0, 1), /local index/);
+  assert.throws(() => fineLevelSetJFATapAddress(0, 27, 1), /tap/);
+  assert.throws(() => fineLevelSetJFATapAddress(0, 0, 3), /power of two/);
+});
+
+test("JFA fixed tap path consumes topology's exact-filtered radius-one halo", () => {
+  assert.match(fineLevelSetJFACPTWGSL,
+    /const JFA_TAP_AXIS_CODES:array<u32,27>[\s\S]*const JFA_AXIS_ADDRESSES:array<u32,108>/,
+    "the shader lookup must remain the compact separable B4 table");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /if\(JFA_STRIDE<=4u&&hasRadiusOneHalo\(\)\)\{page=radiusOneHaloPage\(id,lid,key\);\}else\{page=supportPageOf\(key\);\}/,
+    "radius-one strides must consume topology's existing halo with an absent-halo fallback");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /metadata\[base\+1u\]==expectedKey[\s\S]*supportMask\[page\]==p\.generation/,
+    "topology halo entries must retain identity and exact support-membership validation");
+  const flood = fineLevelSetJFACPTWGSL.slice(
+    fineLevelSetJFACPTWGSL.indexOf("fn cooperativeFlood"),
+    fineLevelSetJFACPTWGSL.indexOf("fn resolvedDistance"),
+  );
+  assert.match(flood, /cachedFloodSampleIndex\(local,candidateSlot\)/);
+  assert.doesNotMatch(flood, /q\/p\.brickResolution|q%p\.brickResolution|abs\(delta\)/,
+    "candidate lanes must not reconstruct the fixed tap address");
 });
 
 test("sparse diagonal JFA landing gaps deterministically reject narrow-band publication", () => {
@@ -943,7 +1014,7 @@ test("recurring fine redistance canonicalizes opposite flood parities on the sam
     "validation and commit must consume the same canonical A-seed/B-distance state after either parity");
 });
 
-test("factor-4 JFA-CPT redistance is one pass over topology-published delta dispatches", () => {
+test("factor-4 JFA-CPT redistance exposes every topology-bounded micro-stage", () => {
   const passes: string[][] = [];
   const copies: unknown[][] = [];
   const indirectOffsets: number[] = [];
@@ -982,7 +1053,7 @@ test("factor-4 JFA-CPT redistance is one pass over topology-published delta disp
   try {
     // Product default: 4 interface cells * factor 4, plus factor + one
     // transport/interpolation support cell at publication = 21 fine cells.
-    const broker = new PassBroker(encoder);
+    const broker = new PassBroker(encoder, { isolateLabels: true });
     new WebGPUFineLevelSetRedistance(
       device, source as never, redistanceDeltaAuthority(buffer, 1)).encode(broker,
       { bandCells: 21 });
@@ -992,28 +1063,29 @@ test("factor-4 JFA-CPT redistance is one pass over topology-published delta disp
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
   }
 
-  assert.equal(passes.length, 1);
+  assert.equal(passes.length, 13,
+    "support, seed, seven floods, resolve, validate, finalize, and commit need exact labels");
   assert.deepEqual(copies, [],
     "JFA must consume topology's immutable command publication without recurring copies");
-  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84, 84],
+  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84, 84],
     "support-mask publication plus seed/flood/resolve consume JFA support while validation and parallel commit touch the dirty dispatch");
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
     /updateIndirectBuffer|dispatchWorkgroupsIndirect\(this\.delta\.pageDelta/,
     "the writable page-delta transaction must never be consumed as an indirect command buffer");
-  assert.deepEqual(passes[0], ["publishSupportPageMask",
+  assert.deepEqual(passes.flat(), ["publishSupportPageMask",
     "seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
     "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "jumpFloodBToA",
-    "jumpFloodAToB", "jumpFloodBToA", "resolveClosestPointsAToB", "validateJFADistances",
+    "jumpFloodAToB", "resolveClosestPointsBToCanonical", "validateJFADistances",
     "finalizeJFADistances", "commitJFADistances"]);
-  assert.equal(passes[0].length, 14,
+  assert.equal(passes.flat().length, 13,
     "generation-stamped direct support membership needs one bounded publication and no capacity clear");
   assert.match(fineLevelSetJFACPTWGSL, /override JFA_STRIDE:u32=1u/);
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
     /jfaParams|initializeJFAControl|reduceJFASeedStats|reduceJFAResolveStats|reduceJFAValidationStats/,
     "mutable stride buffers and the retired scalar reduction pipelines must stay deleted");
-  assert.equal(passes[0].filter((entryPoint) =>
+  assert.equal(passes.flat().filter((entryPoint) =>
     entryPoint === "seedClosestPoints" || entryPoint.startsWith("jumpFlood")
-      || entryPoint.startsWith("resolveClosestPoints")).length, 10,
+      || entryPoint.startsWith("resolveClosestPoints")).length, 9,
     "the 21-cell distance transform is one seed, seven floods, and one resolve dispatch");
 });
 
@@ -1041,8 +1113,11 @@ test("opt-in Dawn backend reproducer: sparse diagonal JFA support gap dispatch",
   deltaWords.set([generationData.activeCount, source.generation, generationData.activeCount,
     generationData.activeCount, generationData.activeCount, 1, 1,
     generationData.activeCount, 1, 1]);
+  const sortedIds = [...generationData.worklistWords.slice(7, 7 + generationData.activeCount)]
+    .sort((a, b) => generationData.metadataWords[a * 10 + 1]!
+      - generationData.metadataWords[b * 10 + 1]!);
   for (let i = 0; i < generationData.activeCount; i += 1) {
-    const id = generationData.worklistWords[7 + i];
+    const id = sortedIds[i]!;
     deltaWords[16 + i] = generationData.metadataWords[id * 10 + 1];
     deltaWords[16 + 2 * plan.maximumResidentBricks + i] = id;
     deltaWords[16 + 3 * plan.maximumResidentBricks + i] = id;
@@ -1075,7 +1150,8 @@ test("opt-in Dawn backend reproducer: sparse diagonal JFA support gap dispatch",
   assert.ok(control.unresolvedCells > 0,
     "a narrow-band island unreachable through resident JFA landing points must be reported");
   assert.equal(control.committed, false);
-  assert.equal(control.flags, 0, "a propagation gap is a publication rejection, not a shader fault");
+  assert.equal(control.flags, 0,
+    `a propagation gap is a publication rejection, not a shader fault: ${JSON.stringify(control)}`);
   readback.destroy(); redistance.destroy(); deltaDispatch.destroy(); owner.destroy();
 });
 

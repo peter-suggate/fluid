@@ -47,7 +47,8 @@ const entries = ["prepareStructuredDynamics",
     `commitAdvectedStructuredClass${value}`, `forceStructuredClass${value}`,
     `projectStructuredClass${value}`]),
   ...[0, 1, 2, 3].flatMap((value) => [`divergenceStructuredClass${value}`,
-    `separateStructuredClass${value}`, `reconstructStructuredClass${value}`]),
+    `separateStructuredClass${value}`, `reconstructStructuredClass${value}`,
+    `exchangeStructuredBodyImpulseClass${value}`]),
 ];
 
 test("structured dynamics owns destination writes and has no general face/incidence graph", () => {
@@ -56,7 +57,15 @@ test("structured dynamics owns destination writes and has no general face/incide
     "uniform dimensions stay scalar-packed so all authority offsets retain their host word indices");
   assert.doesNotMatch(structuredVelocityDynamicsWGSL, /dimensions:vec3u/,
     "a vec3 uniform member would insert two hidden words before every authority offset");
-  assert.doesNotMatch(structuredVelocityDynamicsWGSL, /PowerFaceRecord|incidence|atomicAdd/i);
+  assert.doesNotMatch(structuredVelocityDynamicsWGSL, /PowerFaceRecord|incidence/i);
+  // Scatter is banned in the field graph, where a destination owns its own
+  // write. The one exception is the rigid exchange: many cut faces reduce onto
+  // one of at most twelve bodies, which has no destination-owned form.
+  assert.deepEqual(
+    [...structuredVelocityDynamicsWGSL.matchAll(/atomicAdd\(&([A-Za-z0-9_]+)/g)]
+      .map((match) => match[1]).filter((name, index, all) => all.indexOf(name) === index),
+    ["rigidExchange"],
+    "no field stage may scatter; only the bounded per-body impulse reduction may");
   assert.match(structuredVelocityDynamicsWGSL, /fn regularSample\(/);
   assert.match(structuredVelocityDynamicsWGSL,
     /sampleX=clamp\(x,vec3f\(\.5\*h\),vec3f\(d\)\*p\.physical\.x-vec3f\(\.5\*h\)\)/,
@@ -654,4 +663,50 @@ test("Dawn Metal compiles all structured dynamics variants", {
   }));
   const error = await device.popErrorScope(); assert.equal(error, null, error?.message);
   device.destroy();
+});
+
+test("the body-impulse exchange is the exact adjoint of the divergence solid term", () => {
+  const divergence = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceRow("),
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredClass0"));
+  assert.match(divergence, /flux\+=sign\*area\*\(aperture\*sample\+\(1\.-aperture\)\*solid\)/,
+    "the constraint the adjoint differentiates must stay the aperture-weighted solid flux");
+  const exchange = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn bodyImpulseRow("),
+    structuredVelocityDynamicsWGSL.indexOf("fn exchangeStructuredBodyImpulseClass0"));
+  // p * area * (1 - aperture) along the row's outward normal, times dt.
+  assert.match(exchange, /p\.physical\.y\*solved\*area\*\(1\.-aperture\)\*sign\*n/,
+    "the impulse must be the pressure over the blocked share of the same face, along the same outward normal");
+  assert.match(exchange, /liquidAt\(row\)==0u\){return;}/,
+    "only a liquid row carries a pressure that can push on a solid");
+  assert.match(exchange, /if\(aperture>=1\.\){continue;}/,
+    "an uncut face transmits nothing and must not cost a body search");
+  assert.match(exchange, /sdf<half&&sdf<best/,
+    "attribution must use the same nearest-body-within-half-a-face predicate as the boundary producer");
+  assert.doesNotMatch(exchange, /setValue|rhs\[|outputVector/,
+    "the adjoint reads the solved pressure and writes only the resident rigid exchange");
+});
+
+test("only integrating bodies put the adjoint on the command graph", () => {
+  const projection = dynamicsHost.slice(dynamicsHost.indexOf("encodeProjection("),
+    dynamicsHost.indexOf("destroy(): void"));
+  assert.match(projection, /if \(couplingBodyCount > 0\) \{[\s\S]*this\.bodyImpulse/,
+    "a scene of authored static solids must not encode an exchange nobody reads");
+  const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  assert.match(octree, /this\.dynamicCouplingBodyCount = hasDynamicBodies \? bounded : 0;/,
+    "static-only rosters must resolve to a zero coupling count");
+  assert.match(octree, /\], pressure, this\.dynamicCouplingBodyCount\);/,
+    "the projection encode must carry the live coupling roster");
+});
+
+test("the solid boundary samples rigid poses in the centred world frame", () => {
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /fn solidWorld\(x:vec3f\)->vec3f\{return x-vec3f\(\.5\*f32\(p\.dimensions\.x\)\*p\.physical\.x,0\.,\.5\*f32\(p\.dimensions\.z\)\*p\.physical\.x\);\}/,
+    "lattice-origin centroids must be centred before they index an authored rigid pose");
+  const resolve = structuredBoundaryCoefficientWGSL.slice(
+    structuredBoundaryCoefficientWGSL.indexOf("fn resolveStructuredSolidSlots"));
+  assert.match(resolve, /let world=solidWorld\(x\);/);
+  assert.match(resolve, /rigidSdf\(rb,world\)/,
+    "sampling the uncentred point looks for every body half a domain away in x and z");
+  assert.doesNotMatch(resolve, /rigidSdf\(rb,x\)/);
 });

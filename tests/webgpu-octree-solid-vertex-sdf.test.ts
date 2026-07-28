@@ -55,9 +55,26 @@ test("GPU publication is generation-tagged and fail-closed", () => {
   assert.match(octreeSolidVertexSdfShader, /arena\.control\[4\]=generation/);
   assert.match(octreeSolidVertexSdfShader, /arena\.control\[3\]=count\*8u/);
   assert.match(octreeSolidVertexSdfShader, /arena\.control\[5\]=VALID/);
-  assert.match(octreeSolidVertexSdfShader, /rollbackSeedControl\[5\]!=0u/);
-  assert.doesNotMatch(octreeSolidVertexSdfShader, /rollbackSeedControl\[5\]==params\.publication\.x/,
-    "retry generation is GPU-derived from the structured candidate, never a host attempt stamp");
+  // The retry generation stays GPU-authored. It is header word 7 of the
+  // row-delta control block -- the candidate epoch the descriptor publishes --
+  // so a rollback that happens after the host wrote its attempt stamp is still
+  // witnessed here. The former predicate read the ACCEPTED structured control
+  // and required its word 6 (the projected flag) to equal this module's VALID
+  // magic, which is constant false; the arena published invalid on every step
+  // of every scene with terrain or a rigid body.
+  assert.match(octreeSolidVertexSdfShader,
+    /fn candidateGeneration\(\)->u32\{let at=params\.rowDelta\.x\+7u;/);
+  assert.match(octreeSolidVertexSdfShader, /let generation=candidateGeneration\(\);/);
+  assert.match(octreeSolidVertexSdfShader, /let rollbackValid=generation!=0u&&count!=0u;/);
+  assert.doesNotMatch(octreeSolidVertexSdfShader, /generation=params\.publication\.x/,
+    "retry generation is GPU-derived from the candidate row delta, never a host attempt stamp");
+  // The row count is the same row-delta header the structured publication
+  // takes; the general compaction arena is concurrently reused for dirty-tile
+  // work and is cleared to zero there.
+  assert.match(octreeSolidVertexSdfShader,
+    /fn candidateRowCount\(\)->u32\{let at=params\.rowDelta\.x;/);
+  assert.doesNotMatch(octreeSolidVertexSdfShader, /rowCountSource\[0\]/,
+    "word 0 of the compaction arena is a dirty-tile count, not a row count");
   assert.doesNotMatch(octreeSolidVertexSdfShader,
     /atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/,
     "each row owns its eight samples and singleton publication reduces row sentinels deterministically");
@@ -101,7 +118,6 @@ test("Dawn validates the active-row indirect solid SDF publication", {
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const headers = device.createBuffer({ size: 48, usage: storage });
   const rowCount = device.createBuffer({ size: 4, usage: storage });
-  const rollback = device.createBuffer({ size: 32, usage: storage });
   const rigidBodies = device.createBuffer({ size: 128, usage: storage });
   const terrain = device.createTexture({
     size: [2, 2],
@@ -112,7 +128,7 @@ test("Dawn validates the active-row indirect solid SDF publication", {
   device.queue.writeBuffer(rowCount, 0, new Uint32Array([1]));
   device.pushErrorScope("validation");
   const publication = new WebGPUOctreeSolidVertexSdf(
-    device, 1, headers, rowCount, terrain, rigidBodies, rollback,
+    device, 1, headers, rowCount, terrain, rigidBodies, 0,
   );
   const encoder = device.createCommandEncoder();
   const broker = new PassBroker(encoder);
@@ -130,7 +146,6 @@ test("Dawn validates the active-row indirect solid SDF publication", {
   publication.destroy();
   headers.destroy();
   rowCount.destroy();
-  rollback.destroy();
   rigidBodies.destroy();
   terrain.destroy();
   device.destroy();

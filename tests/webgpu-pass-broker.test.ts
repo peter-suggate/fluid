@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { PassBroker, passBrokerLabelIsolationRequested } from "../lib/webgpu-pass-broker";
+import {
+  PassBroker,
+  passBrokerLabelIsolationPrefixes,
+  passBrokerLabelIsolationRequested,
+  xctraceSafeComputeLabel,
+} from "../lib/webgpu-pass-broker";
 
 function fakeEncoder(events: string[]) {
   let passIndex = 0;
@@ -35,6 +40,23 @@ test("PassBroker reuses compute until an explicit fence", () => {
   assert.deepEqual(events, ["begin:first", "end:1", "begin:third", "end:2", "finish"]);
 });
 
+test("compute labels remain attributable through Dawn's ASCII-only Metal path", () => {
+  assert.equal(xctraceSafeComputeLabel("SPGrid V-cycle · A→B × 4"),
+    "SPGrid V-cycle - AtoB x 4");
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events), {
+    isolateLabels: true,
+    isolateLabelPrefixes: ["SPGrid V-cycle ·"],
+  });
+  broker.compute({ label: "SPGrid V-cycle · one-pass symmetric correction" });
+  broker.compute({ label: "ordinary" });
+  broker.finish();
+  assert.deepEqual(events, [
+    "begin:SPGrid V-cycle - one-pass symmetric correction", "end:1",
+    "begin:ordinary", "end:2", "finish",
+  ]);
+});
+
 test("label isolation gives every distinct compute label its own pass", () => {
   const events: string[] = [];
   const broker = new PassBroker(fakeEncoder(events), { isolateLabels: true });
@@ -54,6 +76,32 @@ test("label isolation gives every distinct compute label its own pass", () => {
   assert.deepEqual(events, [
     "begin:count rows", "end:1", "begin:scatter families", "end:2", "finish",
   ]);
+});
+
+test("label isolation can protect one micro-stage prefix without splitting unrelated stages", () => {
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events), {
+    isolateLabels: true,
+    isolateLabelPrefixes: ["Fine JFA -"],
+  });
+  const ordinary = broker.compute({ label: "ordinary A" });
+  assert.equal(broker.compute({ label: "ordinary B" }), ordinary,
+    "unrelated labels retain the production grouping");
+  const firstFine = broker.compute({ label: "Fine JFA - seed" });
+  assert.notEqual(firstFine, ordinary, "entering the selected prefix closes ordinary work");
+  const secondFine = broker.compute({ label: "Fine JFA - flood stride 16" });
+  assert.notEqual(secondFine, firstFine, "selected micro-stages remain individually attributable");
+  const after = broker.compute({ label: "ordinary C" });
+  assert.notEqual(after, secondFine, "leaving the selected prefix closes the target bucket");
+  assert.equal(broker.compute({ label: "ordinary D" }), after);
+  broker.finish();
+  assert.deepEqual(events, [
+    "begin:ordinary A", "end:1", "begin:Fine JFA - seed", "end:2",
+    "begin:Fine JFA - flood stride 16", "end:3", "begin:ordinary C", "end:4", "finish",
+  ]);
+  assert.deepEqual(passBrokerLabelIsolationPrefixes({
+    FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES: " Fine JFA - , SPGrid accurate A2 - ",
+  }), ["Fine JFA -", "SPGrid accurate A2 -"]);
 });
 
 test("label isolation is off unless asked for, and then only changes pass boundaries", () => {

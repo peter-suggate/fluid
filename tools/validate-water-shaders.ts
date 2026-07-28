@@ -112,8 +112,16 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "sparse-voxel-temporal-accumulation": sparseVoxelTemporalAccumulatorShader,
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));
+// Naga still rejects the standardized `enable subgroups` directive. These
+// modules are compiled by Dawn in the focused backend tests instead; silently
+// stripping the directive here would validate a shader that production never runs.
+const dawnValidated = new Set(["global-fine-jfa-cpt"]);
 try {
   for (const [name, source] of Object.entries(shaders)) {
+    if (dawnValidated.has(name)) {
+      console.log(`deferred ${name} to Dawn subgroup validation`);
+      continue;
+    }
     const path = join(directory, `${name}.wgsl`);
     writeFileSync(path, source);
     const result = spawnSync(naga, [path], { encoding: "utf8" });

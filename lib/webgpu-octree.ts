@@ -1046,6 +1046,8 @@ export class WebGPUOctreeProjection {
   private globalFineGeneration = 2;
   private lastPowerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
   private powerTimestep_s = 0;
+  /** Bodies that integrate this step; zero keeps the adjoint off the graph. */
+  private dynamicCouplingBodyCount = 0;
   private powerAdvancingPressureSteps = 0;
   private readonly solveDispatch: GPUBuffer;
   private readonly topologyCandidateDispatch: GPUBuffer;
@@ -2276,8 +2278,9 @@ export class WebGPUOctreeProjection {
     }
     if (sceneHasTerrain(this.scene) || this.scene.rigidBodies.length > 0) {
       this.powerSolidVertices = new WebGPUOctreeSolidVertexSdf(
-        this.device, rowCapacity, this.candidateLeafHeaders, this.compaction, this.resources.terrain,
-        this.resources.rigidBodies, structuredSource.control,
+        this.device, rowCapacity, this.candidateLeafHeaders,
+        this.powerRowDelta.rows, this.resources.terrain,
+        this.resources.rigidBodies, this.powerRowDelta.controlOffsetWords,
       );
     }
     // One-step-lagged unilateral-contact active set: the projection stage
@@ -2361,6 +2364,8 @@ export class WebGPUOctreeProjection {
       divergenceRhs: this.structuredDivergenceRhs,
       liquidMask: this.structuredBoundary!.liquidMask,
       solidNormalVelocities: this.structuredBoundary!.solidNormalVelocities,
+      rigidBodies: this.resources.rigidBodies,
+      rigidExchange: this.resources.rigidExchange,
       boundaryWorksets: this.structuredBoundary!.worksets,
       boundaryControl: this.structuredBoundary!.control,
       selectorRows: this.powerCoarseLevelSetSchedule!.selectorRows,
@@ -2599,8 +2604,14 @@ export class WebGPUOctreeProjection {
   }
 
   setCouplingBodies(count: number, hasDynamicBodies: boolean) {
-    this.device.queue.writeBuffer(this.params, 44, new Uint32Array([Math.max(0, Math.min(12, Math.floor(count)))]));
+    const bounded = Math.max(0, Math.min(12, Math.floor(count)));
+    this.device.queue.writeBuffer(this.params, 44, new Uint32Array([bounded]));
     this.device.queue.writeBuffer(this.params, 116, new Float32Array([hasDynamicBodies ? 1 : 0]));
+    // Only a body that integrates can consume a reaction. A scene of authored
+    // static solids still cuts apertures and imposes its normal velocity, but
+    // the fluid-to-solid adjoint would write an exchange nobody reads, so the
+    // whole pass stays off its command graph.
+    this.dynamicCouplingBodyCount = hasDynamicBodies ? bounded : 0;
   }
 
   /**
@@ -3115,7 +3126,7 @@ export class WebGPUOctreeProjection {
       this.scene.fluid.gravity_m_s2.x,
       this.scene.fluid.gravity_m_s2.y,
       this.scene.fluid.gravity_m_s2.z,
-    ], pressure);
+    ], pressure, this.dynamicCouplingBodyCount);
     if (!this.airVelocitySupport || this.activePowerGeneration === 0) {
       throw new Error("Structured projection requires an accepted Section 5 air-support epoch");
     }
@@ -4962,6 +4973,25 @@ fn samplePhiPoint(point:vec3f)->f32{
   let p000=phi(vec3i(a));let p100=phi(vec3i(vec3u(b.x,a.y,a.z)));let p010=phi(vec3i(vec3u(a.x,b.y,a.z)));let p110=phi(vec3i(vec3u(b.x,b.y,a.z)));
   let p001=phi(vec3i(vec3u(a.x,a.y,b.z)));let p101=phi(vec3i(vec3u(b.x,a.y,b.z)));let p011=phi(vec3i(vec3u(a.x,b.y,b.z)));let p111=phi(vec3i(b));
   return mix(mix(mix(p000,p100,t.x),mix(p010,p110,t.x),t.y),mix(mix(p001,p101,t.x),mix(p011,p111,t.x),t.y),t.z);}
+// Whether this generation can classify liquid at all.
+//
+// liquidOwner has no third state: when correctedCoarsePhi reports no
+// authority it answers "air". A transaction encoded against a missing
+// authority therefore classifies the whole domain dry, carries no row, emits
+// no candidate, and publishes an empty topology -- and that state is
+// terminal, because dirty marking only visits ACTIVE tiles, so a topology
+// that ever reaches zero rows can never dirty a tile again and never
+// re-refines. Measured: a solid crossing out of the interface band leaves the
+// corrected-coarse publication one generation behind the candidate, this
+// predicate went false for one step, and the run published zero pressure rows
+// for the remaining 95 steps.
+//
+// The bootstrap authorities answer from closed form or the uploaded dense SDF
+// and never consult the directory, so they are always available.
+fn liquidAuthorityAvailable()->bool{
+  if(bootstrapPhiEnabled()){return true;}
+  return coarseDirectoryAuthority();
+}
 fn liquidOwner(owner: Owner) -> bool {
   if (!ownerValid(owner)) { return false; }
   let centre=vec3f(unpackOrigin(owner.packedOrigin))+vec3f(0.5*f32(owner.size));
@@ -6623,8 +6653,12 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
   let previousCount=frontierCount(previous);let candidateCount=frontier[4];
   let boundedCandidates=min(candidateCount,frontierListCapacity());
   let required=frontier[5]+candidateCount;
+  // A candidate whose liquid authority is unavailable is rejected, never
+  // published. Rejection retains the previous frontier selector and retries on
+  // the next generation, which is exactly what the lagging coarse publication
+  // needs; publishing would instead freeze the topology at zero rows forever.
   var matched=0u;var invalid=select(0u,1u,candidateCount>frontierListCapacity()
-    ||required>frontierListCapacity());
+    ||required>frontierListCapacity()||!liquidAuthorityAvailable());
   var firstFailure=0xffffffffu;var exactFailures=0u;
   if(!frontierRejected&&!frontierReused){
     for(var row=lid;row<previousCount;row+=256u){

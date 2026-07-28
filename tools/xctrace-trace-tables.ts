@@ -57,7 +57,7 @@ export interface ParseTableOptions {
 
 /** Yield one object per `<row>` of an exported Instruments table. */
 export async function* parseTraceTable(
-  path: string,
+  source: string | AsyncIterable<string>,
   options: ParseTableOptions = {},
 ): AsyncGenerator<TraceRow> {
   const wanted = options.columns ? new Set(options.columns) : undefined;
@@ -82,7 +82,9 @@ export async function* parseTraceTable(
     row[name] = value;
   };
 
-  const stream = createReadStream(path, { encoding: "utf8", highWaterMark: 1 << 21 });
+  const stream = typeof source === "string"
+    ? createReadStream(source, { encoding: "utf8", highWaterMark: 1 << 21 })
+    : source;
   for await (const chunk of stream as AsyncIterable<string>) {
     buffer += chunk;
     // Hold back a trailing partial tag so a split never corrupts a match.

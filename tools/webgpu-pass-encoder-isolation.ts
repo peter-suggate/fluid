@@ -1,10 +1,11 @@
 /**
  * Break every WebGPU compute pass into its own Metal command encoder.
  *
- * READ THIS FIRST: **this is superseded, and it never fixed anything.** Use
- * `--isolate-pass-labels` (`FLUID_GPU_ISOLATE_PASS_LABELS=1`, implemented in
- * `lib/webgpu-pass-broker.ts`) for per-pass attribution. This module is kept
- * only as the measured record of a wrong diagnosis.
+ * For in-process timestamp attribution, use `--isolate-pass-labels`: encoder
+ * isolation alone cannot split dispatches recorded in one WebGPU pass. For
+ * xctrace hardware-counter attribution, use BOTH modes. Instruments groups
+ * counters by Metal encoder, and Dawn may merge several already-distinct
+ * WebGPU passes into one encoder unless this diagnostic clear separates them.
  *
  * THE PROBLEM IT WAS AIMED AT. `FLUID_GPU_PASS_TIMESTAMPS=1` looks like
  * per-pass GPU attribution but was not. Measured 2026-07-28 on the mini dam

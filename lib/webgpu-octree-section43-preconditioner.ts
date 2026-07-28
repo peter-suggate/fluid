@@ -44,7 +44,7 @@ const HYBRID_BINDINGS: Readonly<Record<HybridStage, readonly number[]>> = Object
   dilateBandBtoA: [0, 1, 2, 10, 11, 12, 13, 17, 21, 22, 23],
   compactBandIntersections: [0, 1, 11, 12, 13, 15, 17, 23],
   finalizeBandWorksets: [0, 12, 15, 16, 17],
-  prepareCorrectionDispatches: [0, 12, 16, 17, 19, 20],
+  prepareCorrectionDispatches: [0, 12, 15, 16, 17, 19, 20],
   smoothZeroToB: [0, 1, 4, 6, 7, 11, 12, 13, 17],
   smoothBtoA: [0, 1, 4, 6, 7, 11, 12, 13, 14, 15, 17],
   smoothAtoB: [0, 1, 4, 6, 7, 11, 12, 13, 14, 15, 17],
@@ -170,7 +170,8 @@ implements OctreeFirstOrderSPDVCycle {
       || source.rowCount.size < 4
       || !Number.isSafeInteger(source.secondOrderOperator.encodedDispatchCount)
       || source.secondOrderOperator.encodedDispatchCount < 1
-      || source.secondOrderOperator.encodedMergedBandDispatchCount !== 1) {
+      || !Number.isSafeInteger(source.secondOrderOperator.encodedMergedBandDispatchCount)
+      || source.secondOrderOperator.encodedMergedBandDispatchCount < 1) {
       throw new RangeError("Section 4.3 hybrid compact L2 source capacity is too small");
     }
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
@@ -204,7 +205,8 @@ implements OctreeFirstOrderSPDVCycle {
     });
     this.gatedBandDispatch = device.createBuffer({
       label: "Section 4.3 convergence-gated compact class dispatches",
-      size: 5 * 12,
+      // Five compact class/union records plus direct-term and adjoint records.
+      size: 7 * 12,
       usage: storage | GPUBufferUsage.INDIRECT,
     });
     this.bandOperatorLayout = device.createBuffer({
@@ -255,10 +257,11 @@ implements OctreeFirstOrderSPDVCycle {
       + 5 + OCTREE_SECTION43_BOUNDARY_BAND_LAYERS;
     const mergedBandApplies = 2 * this.boundarySmoothingIterations - 1;
     // One convergence-gate publisher, four row-wide stages (zero sweep, inner
-    // residual, M1 seeding, publication), one compact band smooth and one
-    // merged band L2 apply per matched sweep after the zero sweep, one exact
-    // row-wide L2 apply, and the page-parallel first-order V-cycle.
-    this.encodedCorrectionDispatchCount = 5 + 2 * mergedBandApplies
+    // residual, M1 seeding, publication), one compact band smooth plus the
+    // operator's staged merged-band apply per matched sweep after the zero
+    // sweep, one exact row-wide L2 apply, and the page-parallel L1 V-cycle.
+    this.encodedCorrectionDispatchCount = 5
+      + (1 + source.secondOrderOperator.encodedMergedBandDispatchCount) * mergedBandApplies
       + source.secondOrderOperator.encodedDispatchCount
       + inner.encodedCorrectionDispatchCount;
     // Setup keeps its accepted-row and compact-band boundaries. Correction
@@ -353,7 +356,9 @@ implements OctreeFirstOrderSPDVCycle {
     for (let iteration = 0; iteration < this.boundarySmoothingIterations; iteration += 1) {
       this.encodeBandSweep(broker, resources, (iteration & 1) === 0, input.solverControl);
     }
-    this.runRows(broker.compute(), "publishCorrection", resources);
+    this.runRows(broker.compute({
+      label: "Section 4.3 hybrid correction publication",
+    }), "publishCorrection", resources);
   }
 
   /**
@@ -377,7 +382,11 @@ implements OctreeFirstOrderSPDVCycle {
       this.bandOperatorLayout,
       BAND_UNION_DISPATCH_OFFSET_BYTES,
     );
-    this.runBand(broker.compute(), fromB ? "smoothBtoA" : "smoothAtoB", resources);
+    this.runBand(broker.compute({
+      label: fromB
+        ? "Section 4.3 hybrid band smooth B to A"
+        : "Section 4.3 hybrid band smooth A to B",
+    }), fromB ? "smoothBtoA" : "smoothAtoB", resources);
   }
 
   private resources(
@@ -630,6 +639,31 @@ fn prepareCorrectionDispatches() {
     if (!solveLive && word % 3u == 0u) { value = 0u; }
     gatedBandDispatch[word] = value;
   }
+  let unionBase = bandWorksetBase(4u);
+  let unionRows = atomicLoad(&bandWorksets[unionBase + 1u]);
+  let unionValid = atomicLoad(&bandWorksets[unionBase]) == accepted[3]
+    && atomicLoad(&bandWorksets[unionBase + 2u]) >= unionRows
+    && atomicLoad(&bandWorksets[unionBase + 3u]) == 3u;
+  gatedBandDispatch[15] = select(0u, (unionRows * 18u + 63u) / 64u,
+    solveLive && unionValid);
+  gatedBandDispatch[16] = 1u;
+  gatedBandDispatch[17] = 1u;
+  var transitionRows = 0u;
+  var transitionValid = true;
+  for (var index = 0u; index < 2u; index += 1u) {
+    let cls = select(1u, 3u, index == 1u);
+    let base = bandWorksetBase(cls);
+    let count = atomicLoad(&bandWorksets[base + 1u]);
+    transitionValid = transitionValid
+      && atomicLoad(&bandWorksets[base]) == accepted[3]
+      && atomicLoad(&bandWorksets[base + 2u]) >= count
+      && atomicLoad(&bandWorksets[base + 3u]) == 3u;
+    transitionRows += count;
+  }
+  gatedBandDispatch[18] = select(0u, (transitionRows * 8u + 63u) / 64u,
+    solveLive && unionValid && transitionValid);
+  gatedBandDispatch[19] = 1u;
+  gatedBandDispatch[20] = 1u;
 }
 
 @compute @workgroup_size(1)

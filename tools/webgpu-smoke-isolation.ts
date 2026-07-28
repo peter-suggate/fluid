@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 
 export const WEBGPU_EXCLUSIVE_LOCK = "/tmp/fluid-webgpu-exclusive.lock";
 export const DEFAULT_WEBGPU_SMOKE_TIMEOUT_MS = 120_000;
@@ -49,6 +49,64 @@ export async function acquireWebGPUExclusiveLock(
     throw error;
   }
   return evidence;
+}
+
+export interface WebGPUExclusiveLockHolder {
+  /** Absent when the lock exists but has not been stamped (or was hand-made). */
+  readonly owner?: WebGPUExclusiveLockOwner;
+  /**
+   * Whether the owning process still exists. This is the distinction a caller
+   * must act on: a live owner means wait for it or stop it, while a dead one is
+   * the crash evidence this lock deliberately preserves for a human to clear.
+   * An unstamped lock counts as live -- it is most likely a run mid-acquisition.
+   */
+  readonly alive: boolean;
+  /** One line naming the holder, for an error a reader can act on. */
+  readonly description: string;
+}
+
+const ownerIsRunning = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the pid exists and belongs to somebody else, which for our
+    // purposes is every bit as much a live GPU run as one of our own.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/**
+ * Who holds the exclusive lock right now, or `undefined` when it is free.
+ *
+ * Read this before starting long GPU work. Acquisition failure is reported by
+ * whichever process loses the race, deep inside its startup and only through
+ * its exit status, so a supervisor that spends minutes on a capture wants to
+ * find out first -- and to be able to say who it is waiting for. The lock is an
+ * absolute path, so the holder may well be a different checkout of this repo.
+ */
+export async function readWebGPUExclusiveLockHolder(
+  lockPath: string = WEBGPU_EXCLUSIVE_LOCK,
+): Promise<WebGPUExclusiveLockHolder | undefined> {
+  try {
+    await stat(lockPath);
+  } catch {
+    return undefined;
+  }
+  let owner: WebGPUExclusiveLockOwner | undefined;
+  try {
+    owner = JSON.parse(await readFile(`${lockPath}/owner.json`, "utf8")) as WebGPUExclusiveLockOwner;
+  } catch { /* an unstamped lock still excludes us; it just cannot say who by */ }
+  if (owner === undefined || typeof owner.pid !== "number") {
+    return { alive: true, description: "an owner that has not stamped owner.json yet" };
+  }
+  const alive = ownerIsRunning(owner.pid);
+  return {
+    owner,
+    alive,
+    description: `pid ${owner.pid} (${owner.kind}, ${owner.target})`
+      + ` started ${owner.startedAt}${alive ? "" : ", no longer running"}`,
+  };
 }
 
 export async function releaseWebGPUExclusiveLock(): Promise<void> {

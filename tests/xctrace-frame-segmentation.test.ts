@@ -27,6 +27,7 @@ const TASKS = ["Advect", "Solve pressure", "Publish"];
 
 const writeTrace = (options: {
   frames: number; frameUs: number; extraOn?: readonly number[];
+  spacingUs?: number; intervalUs?: number;
 }): Record<string, string> => {
   const directory = mkdtempSync(join(tmpdir(), "xctrace-seg-"));
   const intervals: string[] = [];
@@ -37,13 +38,14 @@ const writeTrace = (options: {
     labels.forEach((label, slot) => {
       id += 1;
       const encoderId = `0x${id.toString(16)}`;
-      const start = 1_000_000 + frame * options.frameUs + slot * 1000;
+      const start = 1_000_000 + frame * options.frameUs + slot * (options.spacingUs ?? 1000);
       encoders.push(JSON.stringify({
         "encoder-id": encoderId, "encoder-label": `Command Buffer 0:${label}`,
         process: "node (4242)",
       }));
       intervals.push(JSON.stringify({
-        "encoder-id": encoderId, start: stamp(start), duration: "500.00 µs",
+        "encoder-id": encoderId, start: stamp(start),
+        duration: `${(options.intervalUs ?? 500).toFixed(2)} µs`,
         "channel-name": "Compute", process: "node (4242)",
         "event-label": `${label}      ( node (4242) )  0x1`,
       }));
@@ -89,6 +91,19 @@ test("the per-frame series reconciles with the per-advance averages", async () =
     const tasks = frame.tasks.reduce((sum, value) => sum + value, 0);
     assert.ok(Math.abs(tasks - frame.busyMs) < 1e-9, "per-task ms must sum to the frame's busy ms");
   }
+});
+
+test("overlapping Metal interval records are counted once as GPU busy time", async () => {
+  const report = await build(writeTrace({
+    frames: 12, frameUs: 50_000, spacingUs: 1000, intervalUs: 1500,
+  }), 12);
+  assert.ok(Math.abs(report.gpu.intervalMsPerFrame - 4.5) < 1e-9,
+    "three attributed 1.5 ms records remain visible as interval time");
+  assert.ok(Math.abs(report.gpu.busyMsPerFrame - 3.5) < 1e-9,
+    "the union of overlapping records is the actual busy span");
+  assert.ok(Math.abs(report.gpu.overlapMsPerFrame - 1) < 1e-9);
+  assert.ok(report.frames.samples.every((frame) =>
+    Math.abs(frame.busyMs + frame.gapMs - frame.durationMs) < 1e-9));
 });
 
 test("an advance doing extra work is reported as such, not as a broken boundary", async () => {

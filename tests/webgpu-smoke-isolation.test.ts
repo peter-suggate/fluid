@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   DEFAULT_WEBGPU_SMOKE_TIMEOUT_MS,
   MAXIMUM_WEBGPU_SMOKE_TIMEOUT_MS,
   MINIMUM_WEBGPU_SMOKE_TIMEOUT_MS,
   parseWebGPUSmokeTimeout,
+  readWebGPUExclusiveLockHolder,
   WEBGPU_EXCLUSIVE_LOCK,
 } from "../tools/webgpu-smoke-isolation";
 
@@ -30,6 +34,75 @@ test("isolated smoke timeout is validated in the 60-240 second safety envelope",
     assert.throws(() => parseWebGPUSmokeTimeout(value), /must be an integer from 60000 to 240000/);
   }
   assert.equal(WEBGPU_EXCLUSIVE_LOCK, "/tmp/fluid-webgpu-exclusive.lock");
+});
+
+/**
+ * These run against a lock of their own making, never `WEBGPU_EXCLUSIVE_LOCK`:
+ * touching the real one would evict whatever Dawn run happens to hold it.
+ */
+test("the exclusive lock reports its holder, and whether that holder still exists", async (t) => {
+  const scratch = await mkdtemp(join(tmpdir(), "fluid-lock-holder-"));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const lock = join(scratch, "exclusive.lock");
+
+  assert.equal(await readWebGPUExclusiveLockHolder(lock), undefined,
+    "a free lock must read as free, not as an unknown holder");
+
+  await mkdir(lock);
+  const midAcquisition = await readWebGPUExclusiveLockHolder(lock);
+  assert.equal(midAcquisition?.alive, true,
+    "a lock that exists but is unstamped is a run mid-acquisition, so it excludes us");
+
+  const stamp = async (pid: number): Promise<void> => writeFile(`${lock}/owner.json`, JSON.stringify({
+    pid, parentPid: process.ppid, startedAt: "2026-07-28T01:37:54.664Z",
+    kind: "dawn-smoke", target: "tools/run-webgpu-smoke.ts",
+  }));
+
+  await stamp(process.pid);
+  const live = await readWebGPUExclusiveLockHolder(lock);
+  assert.equal(live?.alive, true, "a running owner is a live GPU run, to be waited for");
+  assert.equal(live?.owner?.pid, process.pid);
+  for (const fragment of [String(process.pid), "dawn-smoke", "tools/run-webgpu-smoke.ts"]) {
+    assert.ok(live?.description.includes(fragment),
+      `the holder description must name ${fragment} so the caller knows who to wait for`);
+  }
+
+  // A reaped child's pid is gone, which is the crash-evidence case: the lock
+  // outlived its owner and only a human may clear it.
+  const reaped = spawnSync("/usr/bin/true").pid;
+  assert.ok(typeof reaped === "number" && reaped > 0);
+  await stamp(reaped);
+  const stale = await readWebGPUExclusiveLockHolder(lock);
+  assert.equal(stale?.alive, false, "an owner that no longer exists must not read as a live run");
+  assert.match(stale?.description ?? "", /no longer running/);
+});
+
+test("the xctrace profiler refuses to start against a held lock, and never orphans its solver", async () => {
+  const profiler = normalizeWhitespace(await readFile(
+    new URL("../tools/profile-mini-dam-xctrace.ts", import.meta.url), "utf8"));
+  assertContainsInOrder(profiler, [
+    "const requireExclusiveGPU",
+    "await readWebGPUExclusiveLockHolder()",
+    "throw new Error(holder.alive",
+  ], "a capture costs minutes; a held lock must be found before any of them are spent");
+  assert.ok(profiler.indexOf("await requireExclusiveGPU()")
+    < profiler.indexOf('console.log("recording untraced baseline'),
+    "the check must precede the first GPU run the profiler starts");
+  // A worker that dies before announcing construction used to resolve
+  // `constructed`, sending the profiler on to attach Instruments to a dead pid,
+  // and to reject `finished` with nobody listening, which killed the profiler
+  // with an unhandled rejection naming the spawn plumbing instead of the cause.
+  assertContainsInOrder(profiler, [
+    "if (failure) { abandonConstruction(failure); fail(failure); }",
+    "constructed.catch(() => {});",
+    "finished.catch(() => {});",
+  ], "a worker that never constructs must reject construction, and reject it handled");
+  assertContainsInOrder(profiler, [
+    "traced = await handle.finished;",
+    "} catch (error) {",
+    "handle.stop();",
+    "throw error;",
+  ], "an abandoned capture must take its lock-holding solver with it");
 });
 
 test("isolated smoke records its owner and releases only on ordinary worker completion", async () => {
@@ -118,6 +191,8 @@ test("direct octree Dawn test and smoke commands run beneath one lock-owning par
     "test:webgpu:octree-m1-cutover",
     "test:webgpu:octree-displacement",
     "test:webgpu:octree-lagged-rigid",
+    "test:webgpu:octree-rigid-buoyancy",
+    "test:webgpu:octree-solid-topology",
   ]) {
     assert.match(packageJson.scripts[name] ?? "", /run-webgpu-exclusive\.ts/,
       `${name} must not create Dawn outside the shared lock`);

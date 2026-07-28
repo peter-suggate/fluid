@@ -886,7 +886,11 @@ type CachedAccurateApply = {
   readonly gateGroup: GPUBindGroup;
   readonly classGroups: Readonly<Record<AccurateClass, GPUBindGroup>>;
   readonly unionGroup: GPUBindGroup;
-  mergedBandGroup?: GPUBindGroup;
+  readonly termGroup: GPUBindGroup;
+  readonly adjointGroup: GPUBindGroup;
+  readonly finalizeGroup: GPUBindGroup;
+  mergedTermGroup?: GPUBindGroup;
+  mergedAdjointGroup?: GPUBindGroup;
 };
 
 /**
@@ -894,6 +898,8 @@ type CachedAccurateApply = {
  * accepted row classes, which `applyAcceptedUnion` consumes as one dispatch.
  */
 const ACCURATE_UNION_DISPATCH_OFFSET_BYTES = 4 * 12;
+const ACCURATE_TERM_DISPATCH_OFFSET_BYTES = 5 * 12;
+const ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES = 6 * 12;
 
 /**
  * Paper-style native sparse pyramid with an authoritative brick-rank lookup.
@@ -945,8 +951,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateGatePipeline: GPUComputePipeline;
   private readonly accurateClassDispatch: GPUBuffer;
   private readonly accurateClassPipelines: Readonly<Record<AccurateClass, GPUComputePipeline>>;
-  private readonly accurateMergedBandPipeline: GPUComputePipeline;
+  private readonly accurateMergedTermPipeline: GPUComputePipeline;
+  private readonly accurateMergedAdjointPipeline: GPUComputePipeline;
   private readonly accurateUnionPipeline: GPUComputePipeline;
+  private readonly accurateTermPipeline: GPUComputePipeline;
+  private readonly accurateAdjointPipeline: GPUComputePipeline;
+  private readonly accurateFinalizePipeline: GPUComputePipeline;
+  private readonly accurateTerms: GPUBuffer;
   private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
@@ -1163,8 +1174,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       // Four per-class records, then the union record the single accepted-row
       // dispatch consumes. The class records stay published so the four-way
       // encode remains a one-line A/B against the union encode.
-      size: ACCURATE_UNION_DISPATCH_OFFSET_BYTES + 12,
+      size: ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES + 12,
       usage: storage | GPUBufferUsage.INDIRECT,
+    });
+    this.accurateTerms = device.createBuffer({
+      label: "SPGrid accurate A2 staged direct terms and compact row map",
+      // Eighteen direct terms and 8×18 fine-adjoint candidate terms per row,
+      // followed by one compact union-row id per row and one count word.
+      size: (this.plan.rowCapacity * 163 + 1) * 4,
+      usage: storage,
     });
     const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
       regularInterior: "applyRegularInterior",
@@ -1177,20 +1195,37 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         device.createComputePipeline({ label: `SPGrid accurate A2 · ${rowClass}`, layout: "auto",
           compute: { module: accurateModule, entryPoint: accurateEntries[rowClass] } })]),
     ) as Record<AccurateClass, GPUComputePipeline>);
-    this.accurateMergedBandPipeline = device.createComputePipeline({
-      label: "SPGrid Section 6.3 · destination-owned merged band", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "applyMergedBand" },
+    this.accurateMergedTermPipeline = device.createComputePipeline({
+      label: "SPGrid Section 6.3 · parallel merged-band direct terms", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "stageMergedBandTerms" },
+    });
+    this.accurateMergedAdjointPipeline = device.createComputePipeline({
+      label: "SPGrid Section 6.3 · parallel merged-band adjoint children", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "stageMergedBandAdjoints" },
     });
     this.accurateUnionPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · accepted row union", layout: "auto",
       compute: { module: accurateModule, entryPoint: "applyAcceptedUnion" },
     });
+    this.accurateTermPipeline = device.createComputePipeline({
+      label: "SPGrid accurate A2 · parallel direct terms", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "stageAcceptedUnionTerms" },
+    });
+    this.accurateAdjointPipeline = device.createComputePipeline({
+      label: "SPGrid accurate A2 · parallel fine-adjoint children", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "stageAcceptedUnionAdjoints" },
+    });
+    this.accurateFinalizePipeline = device.createComputePipeline({
+      label: "SPGrid accurate A2 · ordered row fold", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "finalizeStagedUnionRows" },
+    });
     this.accurateOperator = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
-      // One convergence gate plus one indirect dispatch over the union of the
-      // four accepted class lists; see encodeAccurateWorksets.
-      encodedDispatchCount: 2,
-      encodedMergedBandDispatchCount: 1 as const,
+      // One convergence gate, wide direct and fine-adjoint stages, then a
+      // compact ordered row fold. The fold retains scalar A2 association while
+      // dependent page/rank walks execute independently.
+      encodedDispatchCount: 4,
+      encodedMergedBandDispatchCount: 3,
       encode: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer, solverControl: GPUBuffer) => {
         if (!this.source.classDispatch) {
           throw new Error("SPGrid accurate A2 requires accepted class dispatch publication");
@@ -1479,19 +1514,20 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       throw new RangeError("SPGrid accurate A2 vectors are smaller than row capacity");
     }
     const cached = this.accurateBinding(input, output, solverControl, worksets, worksetLayout);
-    let pass = broker.compute({ label: "SPGrid accurate A2 · publish convergence-gated records" });
+    let pass = broker.compute({ label: "SPGrid accurate A2 - publish convergence-gated records" });
     pass.setPipeline(this.accurateGatePipeline);
     pass.setBindGroup(0, cached.gateGroup);
     pass.dispatchWorkgroups(1, 1, 1);
     broker.fence("SPGrid accurate A2 convergence-gated indirect publication");
-    // One indirect dispatch over the concatenation of the four disjoint class
-    // lists. The four class records stay published beside the union record, so
-    // restoring the four-way encode is a local edit for A/B measurement.
-    pass = broker.compute({ label: "SPGrid accurate A2 · accepted row union" });
-    pass.setPipeline(this.accurateUnionPipeline);
-    pass.setBindGroup(0, cached.unionGroup);
-    pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch,
-      ACCURATE_UNION_DISPATCH_OFFSET_BYTES);
+    pass = broker.compute({ label: "SPGrid accurate A2 - parallel direct terms" });
+    pass.setPipeline(this.accurateTermPipeline); pass.setBindGroup(0, cached.termGroup);
+    pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch, ACCURATE_TERM_DISPATCH_OFFSET_BYTES);
+    pass = broker.compute({ label: "SPGrid accurate A2 - parallel fine-adjoint children" });
+    pass.setPipeline(this.accurateAdjointPipeline); pass.setBindGroup(0, cached.adjointGroup);
+    pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch, ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES);
+    pass = broker.compute({ label: "SPGrid accurate A2 - ordered row fold" });
+    pass.setPipeline(this.accurateFinalizePipeline); pass.setBindGroup(0, cached.finalizeGroup);
+    pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch, ACCURATE_UNION_DISPATCH_OFFSET_BYTES);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after accurate A2 class apply");
     }
@@ -1516,29 +1552,52 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     }
     if (!Number.isSafeInteger(mergedDispatchOffsetBytes) || mergedDispatchOffsetBytes < 0
       || (mergedDispatchOffsetBytes & 3) !== 0
-      || mergedDispatchOffsetBytes + 12 > mergedDispatch.size) {
+      || mergedDispatchOffsetBytes + 36 > mergedDispatch.size) {
       throw new RangeError("SPGrid accurate A2 merged-band dispatch offset is invalid");
     }
     const cached = this.accurateBinding(input, output, solverControl, worksets, worksetLayout);
-    if (!cached.mergedBandGroup) {
+    if (!cached.mergedTermGroup) {
       const shared = new Map<number, GPUBufferBinding>([
-        [0, { buffer: input }], [1, { buffer: output }], [2, { buffer: solverControl }],
+        [0, { buffer: input }], [2, { buffer: solverControl }],
         [3, { buffer: this.source.control }],
         [4, { buffer: cached.worksets, offset: cached.worksetOffset,
           ...(cached.worksetSize === undefined ? {} : { size: cached.worksetSize }) }],
         [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
         [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
         [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
-        [11, { buffer: this.accurateWorksetLayout }],
+        [11, { buffer: this.accurateWorksetLayout }], [12, { buffer: this.accurateTerms }],
       ]);
-      cached.mergedBandGroup = this.device.createBindGroup({
-        label: "SPGrid Section 6.3 · destination-owned merged band bindings",
-        layout: this.accurateMergedBandPipeline.getBindGroupLayout(0),
+      cached.mergedTermGroup = this.device.createBindGroup({
+        label: "SPGrid Section 6.3 · parallel merged-band term bindings",
+        layout: this.accurateMergedTermPipeline.getBindGroupLayout(0),
         entries: [...shared].map(([binding, resource]) => ({ binding, resource })),
       });
     }
-    const pass = broker.compute({ label: "SPGrid Section 6.3 · destination-owned merged band" });
-    pass.setPipeline(this.accurateMergedBandPipeline); pass.setBindGroup(0, cached.mergedBandGroup);
+    let pass = broker.compute({ label: "SPGrid Section 6.3 - parallel merged-band direct terms" });
+    pass.setPipeline(this.accurateMergedTermPipeline); pass.setBindGroup(0, cached.mergedTermGroup);
+    pass.dispatchWorkgroupsIndirect(mergedDispatch, mergedDispatchOffsetBytes + 12);
+    if (!cached.mergedAdjointGroup) {
+      const shared = new Map<number, GPUBufferBinding>([
+        [0, { buffer: input }], [2, { buffer: solverControl }],
+        [3, { buffer: this.source.control }],
+        [4, { buffer: cached.worksets, offset: cached.worksetOffset,
+          ...(cached.worksetSize === undefined ? {} : { size: cached.worksetSize }) }],
+        [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
+        [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
+        [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
+        [11, { buffer: this.accurateWorksetLayout }], [12, { buffer: this.accurateTerms }],
+      ]);
+      cached.mergedAdjointGroup = this.device.createBindGroup({
+        label: "SPGrid Section 6.3 · parallel merged-band adjoint bindings",
+        layout: this.accurateMergedAdjointPipeline.getBindGroupLayout(0),
+        entries: [...shared].map(([binding, resource]) => ({ binding, resource })),
+      });
+    }
+    pass = broker.compute({ label: "SPGrid Section 6.3 - parallel merged-band adjoint children" });
+    pass.setPipeline(this.accurateMergedAdjointPipeline); pass.setBindGroup(0, cached.mergedAdjointGroup);
+    pass.dispatchWorkgroupsIndirect(mergedDispatch, mergedDispatchOffsetBytes + 24);
+    pass = broker.compute({ label: "SPGrid Section 6.3 - ordered merged-band row fold" });
+    pass.setPipeline(this.accurateFinalizePipeline); pass.setBindGroup(0, cached.finalizeGroup);
     pass.dispatchWorkgroupsIndirect(mergedDispatch, mergedDispatchOffsetBytes);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after merged-band A2 apply");
@@ -1600,8 +1659,19 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       const unionGroup = makeGroup(this.accurateUnionPipeline,
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         "SPGrid Section 6.3 · accepted row union bindings");
+      shared.set(12, { buffer: this.accurateTerms });
+      const termGroup = makeGroup(this.accurateTermPipeline,
+        [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "SPGrid Section 6.3 · staged direct-term bindings");
+      const adjointGroup = makeGroup(this.accurateAdjointPipeline,
+        [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "SPGrid Section 6.3 · staged fine-adjoint bindings");
+      const finalizeGroup = makeGroup(this.accurateFinalizePipeline,
+        [0, 1, 2, 3, 8, 9, 10, 11, 12],
+        "SPGrid Section 6.3 · ordered row-fold bindings");
       cached = { input, output, solverControl, worksets: worksets.buffer,
-        worksetOffset, worksetSize, worksetLayout, gateGroup, classGroups, unionGroup };
+        worksetOffset, worksetSize, worksetLayout, gateGroup, classGroups, unionGroup,
+        termGroup, adjointGroup, finalizeGroup };
       this.accurateBindings.push(cached);
     }
     return cached;
@@ -1616,7 +1686,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.capturePageState.destroy(); this.levelDelta.destroy();
     this.candidateTopology.destroy(); this.candidateState.destroy(); this.candidateDispatch.destroy();
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
-    this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy();
+    this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy(); this.accurateTerms.destroy();
     for (const buffer of [...this.params, ...this.candidateParams]) buffer.destroy();
   }
 }
@@ -1634,9 +1704,10 @@ fn activeSolve()->bool{return arrayLength(&solverControl)>=2u
 fn prepareAccurateDispatches(){
  let solveLive=activeSolve();
  let bank=select(0u,accepted[4]&1u,arrayLength(&accepted)>4u);
- var unionRows=0u;var unionValid=true;
+ var unionRows=0u;var transitionRows=0u;var unionValid=true;
  for(var cls=0u;cls<4u;cls+=1u){
-  let source=bank*worksetLayout.y+cls*worksetLayout.x+4u;let destination=cls*3u;
+  let base=bank*worksetLayout.y+cls*worksetLayout.x;
+  let source=base+4u;let destination=cls*3u;
   let valid=source+2u<arrayLength(&worksets);
   classDispatch[destination]=select(0u,worksets[source],solveLive&&valid);
   classDispatch[destination+1u]=select(1u,worksets[source+1u],valid);
@@ -1644,12 +1715,15 @@ fn prepareAccurateDispatches(){
   // The union record covers the same rows as the four class records. Its lane
   // count is the exact sum of the published class counts, so the concatenated
   // walk in applyAcceptedUnion lands on every accepted row and on no other.
-  let base=source-4u;
   if(!valid||base+2u>=arrayLength(&worksets)||worksets[base+1u]>worksets[base+2u]){unionValid=false;}
-  else{unionRows+=worksets[base+1u];}
+  else{unionRows+=worksets[base+1u];if(cls==1u||cls==3u){transitionRows+=worksets[base+1u];}}
  }
  classDispatch[12]=select(0u,(unionRows+63u)/64u,solveLive&&unionValid);
  classDispatch[13]=1u;classDispatch[14]=1u;
+ classDispatch[15]=select(0u,(unionRows*18u+63u)/64u,solveLive&&unionValid);
+ classDispatch[16]=1u;classDispatch[17]=1u;
+ classDispatch[18]=select(0u,(transitionRows*8u+63u)/64u,solveLive&&unionValid);
+ classDispatch[19]=1u;classDispatch[20]=1u;
 }
 `;
 
@@ -1812,6 +1886,7 @@ struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 @group(0) @binding(9) var<storage,read> metrics:array<Metric>;
 @group(0) @binding(10) var<storage,read> section63Coefficients:array<f32>;
 @group(0) @binding(11) var<uniform> p:Layout;
+@group(0) @binding(12) var<storage,read_write> accurateTerms:array<f32>;
 const INVALID=0xffffffffu;const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
 const KEY=0u;const FLAGS=1u;const OWNER=24u;const STATE_CHANNELS=26u;
 const WORKSET_HEADER_WORDS=7u;const PAGE_RECORD_WORDS=28u;
@@ -1825,6 +1900,7 @@ fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
 fn acceptedBank()->u32{return accepted[4]&1u;}
 fn worksetBase(cls:u32)->u32{return acceptedBank()*worksetLayout.y+cls*worksetLayout.x;}
 fn linearLane(wg:vec3u,groups:vec3u,lane:u32)->u32{return((wg.z*groups.y+wg.y)*groups.x+wg.x)*64u+lane;}
+fn linearGroup(wg:vec3u,groups:vec3u)->u32{return(wg.z*groups.y+wg.y)*groups.x+wg.x;}
 fn workRow(item:u32,cls:u32)->u32{let base=worksetBase(cls);if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)
  ||worksets[base]!=accepted[3]||worksets[base+1u]>worksets[base+2u]||item>=worksets[base+1u]
  ||base+WORKSET_HEADER_WORDS+item>=arrayLength(&worksets)){return INVALID;}return worksets[base+WORKSET_HEADER_WORDS+item];}
@@ -1952,6 +2028,115 @@ fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=array
   if((flags&MG_ONLY)!=0u){continue;}let encoded=state[atBase(OWNER,slotBase,slot)];if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);continue;}
   value+=c*(x-inputVector[encoded-1u]);}
  value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}}
+
+fn stageDirectTerm(row:u32,channel:u32){let destination=row*162u+channel;
+ if(destination>=arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
+  ||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
+ if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
+ let c=section63Coefficients[base+1u+channel];var term=0.0;
+ if(c!=0.0){let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
+  if(page==INVALID||page>=levelCapacity(l)){reportAt(2u,31u,row);return;}
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
+  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(2u,27u,row);}
+  else{let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);}
+   else{let slotBase=levelBase(l);if((state[atBase(FLAGS,slotBase,slot)]&MG_ONLY)==0u){let encoded=state[atBase(OWNER,slotBase,slot)];
+    if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);}else{term=c*(inputVector[row]-inputVector[encoded-1u]);}}}}}
+ accurateTerms[destination]=term;
+}
+
+fn stageAdjointChild(row:u32,child:u32){let destination=row*162u+18u+child*18u;
+ if(destination+18u>arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
+  ||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
+ for(var candidate=0u;candidate<18u;candidate+=1u){accurateTerms[destination+candidate]=0.0;}
+ let h=geometry[row];let l=countTrailingZeros(h.y);if(l==0u){return;}let fine=l-1u;
+ let q=originOf(h)/(1u<<l);let x=inputVector[row];let fineDims=vec3i(dims(fine));let fineBase=levelBase(fine);
+ let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
+ let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){return;}
+ if(ghostPage>=levelCapacity(fine)){reportAt(2u,31u,row);return;}
+ let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);
+ if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){return;}
+ for(var candidate=0u;candidate<18u;candidate+=1u){let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;
+  if(any(activeQ<vec3i(0))||any(activeQ>=fineDims)){continue;}
+  let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
+  if(activeSlot==INVALID||(state[atBase(FLAGS,fineBase,activeSlot)]&ACTIVE)==0u){continue;}
+  let encoded=state[atBase(OWNER,fineBase,activeSlot)];if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);continue;}
+  let other=encoded-1u;let c=coefficientForDirection(other,metrics[other],delta);
+  if(c>0.0){accurateTerms[destination+candidate]=c*(x-inputVector[other]);}
+ }}
+
+fn finalizeStagedRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)
+ ||row>=arrayLength(&inputVector)||row*162u+162u>arrayLength(&accurateTerms)){reportAt(2u,25u,row);return;}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
+ if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
+ let x=inputVector[row];var sum=0.0;
+ for(var channel=0u;channel<18u;channel+=1u){sum+=section63Coefficients[base+1u+channel];}
+ var value=max(0.0,section63Coefficients[base]-sum)*x;
+ for(var channel=0u;channel<18u;channel+=1u){value+=accurateTerms[row*162u+channel];}
+ if(m.caseId!=0u){for(var child=0u;child<8u;child+=1u){for(var candidate=0u;candidate<18u;candidate+=1u){
+  value+=accurateTerms[row*162u+18u+child*18u+candidate];}}}
+ if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}
+}
+
+fn stagedRowIdsBase()->u32{return capacity()*162u;}
+fn stagedCountIndex()->u32{return capacity()*163u;}
+fn validWorkCount(cls:u32)->u32{let base=worksetBase(cls);
+ if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+  ||worksets[base+1u]>worksets[base+2u]){return 0u;}
+ return worksets[base+1u];}
+fn acceptedUnionCount()->u32{var count=0u;
+ for(var cls=0u;cls<4u;cls+=1u){let base=worksetBase(cls);
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+   ||worksets[base+1u]>worksets[base+2u]){return 0u;}
+  count+=worksets[base+1u];}
+ return count;}
+// A fine ghost can point to a coarse owner only at a coarse/fine interface.
+// Section 6.3 classifies exactly those rows as transition classes 1 and 3;
+// regular and physical-only rows therefore have an identically zero E^T tail.
+fn transitionUnionCount()->u32{var count=0u;
+ for(var index=0u;index<2u;index+=1u){let cls=select(1u,3u,index==1u);let base=worksetBase(cls);
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+   ||worksets[base+1u]>worksets[base+2u]){return 0u;}
+  count+=worksets[base+1u];}
+ return count;}
+fn transitionUnionRow(item:u32)->u32{var remaining=item;
+ for(var index=0u;index<2u;index+=1u){let cls=select(1u,3u,index==1u);let base=worksetBase(cls);
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+   ||worksets[base+1u]>worksets[base+2u]){return INVALID;}
+  let count=worksets[base+1u];if(remaining<count){
+   if(base+WORKSET_HEADER_WORDS+remaining>=arrayLength(&worksets)){return INVALID;}
+   return worksets[base+WORKSET_HEADER_WORDS+remaining];}remaining-=count;}
+ return INVALID;}
+fn stageUnionItem(item:u32,count:u32,row:u32){let countIndex=stagedCountIndex();
+ if(item==0u&&countIndex<arrayLength(&accurateTerms)){accurateTerms[countIndex]=bitcast<f32>(count);}
+ let rowItem=item/18u;let channel=item%18u;if(rowItem>=count){return;}
+ let rowIndex=stagedRowIdsBase()+rowItem;
+ if(channel==0u&&rowIndex<arrayLength(&accurateTerms)){accurateTerms[rowIndex]=bitcast<f32>(row);}
+ if(row!=INVALID){stageDirectTerm(row,channel);}}
+@compute @workgroup_size(64) fn stageAcceptedUnionTerms(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=acceptedUnionCount();
+ stageUnionItem(item,count,unionRow(item/18u));}
+@compute @workgroup_size(64) fn stageMergedBandTerms(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=validWorkCount(4u);
+ stageUnionItem(item,count,workRow(item/18u,4u));}
+@compute @workgroup_size(64) fn stageAcceptedUnionAdjoints(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/8u;
+ if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointChild(row,item%8u);}}}
+@compute @workgroup_size(64) fn stageMergedBandAdjoints(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/8u;
+ if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointChild(row,item%8u);}}}
+@compute @workgroup_size(64) fn finalizeStagedUnionRows(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let countIndex=stagedCountIndex();
+ if(countIndex>=arrayLength(&accurateTerms)){reportAt(2u,25u,item);return;}
+ let count=bitcast<u32>(accurateTerms[countIndex]);if(item>=count){return;}
+ let rowIndex=stagedRowIdsBase()+item;if(rowIndex>=arrayLength(&accurateTerms)){reportAt(2u,25u,item);return;}
+ let row=bitcast<u32>(accurateTerms[rowIndex]);if(row!=INVALID){finalizeStagedRow(row);}}
+
 @compute @workgroup_size(64) fn applyRegularInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),0u);if(!stopped()&&row!=INVALID){applyRow(row);}}
 @compute @workgroup_size(64) fn applyTransitionInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),1u);if(!stopped()&&row!=INVALID){applyRow(row);}}
 @compute @workgroup_size(64) fn applyPhysicalBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),2u);if(!stopped()&&row!=INVALID){applyRow(row);}}

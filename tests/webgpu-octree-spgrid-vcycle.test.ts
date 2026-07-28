@@ -351,7 +351,7 @@ test("smoother halo staging consumes physical page adjacency without directory l
     "physical adjacency removes recurring publication probes from halo staging");
 });
 
-test("accurate A2 consumes the 19-channel page operator with one destination-owned merged dispatch", () => {
+test("accurate A2 stages wide direct terms before an ordered row fold", () => {
   assert.match(octreeSPGridAccurateOperatorShader,
     /page=pageFor\(l,q\);\s*if\(page==INVALID\|\|page>=levelCapacity\(l\)\)\{reportAt\(2u,31u,row\);return;\}/,
     "a missing native physical page must fail closed before any page-record access");
@@ -374,7 +374,14 @@ test("accurate A2 consumes the 19-channel page operator with one destination-own
   );
   assert.match(regularEntry, /applyRow\(row\)/);
   assert.match(octreeSPGridAccurateOperatorShader,
-    /applyTransitionInterior[\s\S]*applyRow\(row\)[\s\S]*applyPhysicalBoundary[\s\S]*applyRow\(row\)[\s\S]*applyTransitionBoundary[\s\S]*applyRow\(row\)/);
+    /fn stageDirectTerm[\s\S]*accurateTerms\[destination\]=term;[\s\S]*fn stageAdjointChild[\s\S]*destination\+candidate\]=c\*\(x-inputVector\[other\]\);[\s\S]*fn finalizeStagedRow[\s\S]*value\+=accurateTerms\[row\*162u\+channel\]/,
+    "dependent channel terms must be produced independently then folded in channel order");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn stageAcceptedUnionTerms[\s\S]*unionRow\(item\/18u\)[\s\S]*fn stageMergedBandTerms[\s\S]*workRow\(item\/18u,4u\)[\s\S]*fn stageAcceptedUnionAdjoints[\s\S]*item\/8u[\s\S]*fn stageMergedBandAdjoints[\s\S]*fn finalizeStagedUnionRows/,
+    "the wide stages must expose direct channels and fine children independently");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn transitionUnionCount[\s\S]*select\(1u,3u,index==1u\)[\s\S]*fn transitionUnionRow[\s\S]*stageAcceptedUnionAdjoints[\s\S]*transitionUnionRow\(rowItem\)/,
+    "fine-adjoint workers must be restricted to the two coarse/fine transition classes");
   const merged = octreeSPGridAccurateOperatorShader.slice(
     octreeSPGridAccurateOperatorShader.indexOf("fn applyMergedBand"),
   );
@@ -689,7 +696,7 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
     "candidate capture must publish and validate the topology source generation");
   assert.match(octreeSPGridAccurateDispatchGateShader,
     /classDispatch\[destination\]=select\(0u,worksets\[source\],solveLive&&valid\)/,
-    "the accurate owner zeroes every remaining destination-class record");
+    "the accurate owner zeroes every stopped destination class record");
   // pageSlot resolves the page inline, on purpose: memoizing it on the ordinal
   // is exact but measured as nothing (see the refuted-levers list). Pin the
   // single-function shape so the memo is not reintroduced without a measurement.
@@ -777,7 +784,7 @@ test("one correction gates then executes exact indirect records with cached desc
   cycle.destroy();
 });
 
-test("accurate A2 encodes only one gate and four cached class dispatches", () => {
+test("accurate A2 encodes one gate, one wide term stage, and one ordered fold", () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   let direct = 0, indirect = 0, groups = 0;
   const buffer = (size: number, usage = 31) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
@@ -796,17 +803,17 @@ test("accurate A2 encodes only one gate and four cached class dispatches", () =>
   const input = buffer(512), output = buffer(512), solverControl = buffer(64);
   cycle.accurateOperator.encode(broker, input, output, solverControl);
   broker.fence("A2 complete");
-  assert.equal(cycle.accurateOperator.encodedDispatchCount, 5);
-  assert.equal(direct, 1); assert.equal(indirect, 4);
+  assert.equal(cycle.accurateOperator.encodedDispatchCount, 4);
+  assert.equal(direct, 1); assert.equal(indirect, 3);
   const mergedWorksets = buffer(4096);
-  const mergedDispatch = buffer(60, GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE);
+  const mergedDispatch = buffer(84, GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE);
   const mergedLayout = buffer(16);
   cycle.accurateOperator.encodeMergedBandWorkset(broker, input, output, solverControl,
     mergedWorksets, mergedDispatch, mergedLayout, 48);
   broker.fence("merged band complete");
-  assert.equal(cycle.accurateOperator.encodedMergedBandDispatchCount, 1);
-  assert.equal(direct, 1); assert.equal(indirect, 5,
-    "the shell union consumes one pre-gated indirect record");
+  assert.equal(cycle.accurateOperator.encodedMergedBandDispatchCount, 3);
+  assert.equal(direct, 1); assert.equal(indirect, 6,
+    "the shell union stages direct and adjoint terms before its ordered row fold");
   const firstGroups = groups;
   cycle.accurateOperator.encode(broker, input, output, solverControl);
   cycle.accurateOperator.encodeMergedBandWorkset(broker, input, output, solverControl,
@@ -1148,7 +1155,9 @@ test("Dawn accepts the four class-specialized accurate operator and convergence 
   for (const [code, entryPoints] of [
     [octreeSPGridAccurateOperatorShader, ["applyRegularInterior",
       "applyTransitionInterior", "applyPhysicalBoundary", "applyTransitionBoundary",
-      "applyMergedBand"]],
+      "applyMergedBand", "stageAcceptedUnionTerms", "stageMergedBandTerms",
+      "stageAcceptedUnionAdjoints", "stageMergedBandAdjoints",
+      "finalizeStagedUnionRows"]],
     [octreeSPGridAccurateDispatchGateShader, ["prepareAccurateDispatches"]],
   ] as const) {
     const shaderModule = device.createShaderModule({ code });

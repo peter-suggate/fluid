@@ -130,9 +130,12 @@ export class WebGPUOctreeSolidVertexSdf {
     rowCount: GPUBuffer,
     terrain: GPUTexture,
     rigidBodies: GPUBuffer,
-    rollbackSeedControl: GPUBuffer,
+    private readonly rowDeltaControlOffsetWords: number,
   ) {
     this.plan = planOctreeSolidVertexSdf(rowCapacity);
+    if (!Number.isSafeInteger(rowDeltaControlOffsetWords) || rowDeltaControlOffsetWords < 0) {
+      throw new RangeError("Solid vertex-SDF row-delta control offset must be a non-negative integer");
+    }
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.arena = device.createBuffer({
       label: "Sparse octree solid vertex SDF publication",
@@ -153,7 +156,6 @@ export class WebGPUOctreeSolidVertexSdf {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
@@ -170,7 +172,6 @@ export class WebGPUOctreeSolidVertexSdf {
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     this.preparePipeline = device.createComputePipeline({ label: "Prepare sparse solid vertex SDF workset",
@@ -187,16 +188,13 @@ export class WebGPUOctreeSolidVertexSdf {
         { binding: 0, resource: { buffer: this.params } },
         { binding: 2, resource: { buffer: rowCount } },
         { binding: 4, resource: { buffer: this.arena } },
-        // prepareSolidVertexSdf seeds arena.control[4] from rollbackSeedControl[5];
-        // omitting this binding is what invalidated the group.
-        { binding: 5, resource: { buffer: rollbackSeedControl } },
         { binding: 6, resource: { buffer: this.activeDispatch } },
       ],
     });
     this.group = device.createBindGroup({ label: "Sparse octree solid vertex SDF", layout, entries: [
       { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: { buffer: leafHeaders } },
       { binding: 2, resource: { buffer: rowCount } }, { binding: 3, resource: terrain.createView() },
-      { binding: 4, resource: { buffer: this.arena } }, { binding: 5, resource: { buffer: rollbackSeedControl } },
+      { binding: 4, resource: { buffer: this.arena } },
       { binding: 7, resource: { buffer: rigidBodies } },
     ] });
   }
@@ -213,6 +211,7 @@ export class WebGPUOctreeSolidVertexSdf {
     words.set([...options.dimensions, this.plan.rowCapacity], 0);
     floats.set([...options.physicalSpacing, 0], 4);
     words.set([options.generation >>> 0, options.terrainEnabled ? 1 : 0, options.bodyCount, 0], 8);
+    words.set([this.rowDeltaControlOffsetWords, 0, 0, 0], 12);
     this.device.queue.writeBuffer(this.params, 0, bytes);
     const prepare = broker.compute({ label: "Prepare sparse owner-vertex solid SDF workset" });
     prepare.setBindGroup(0, this.prepareGroup);
@@ -235,7 +234,7 @@ export class WebGPUOctreeSolidVertexSdf {
 
 export const octreeSolidVertexSdfShader = /* wgsl */ `
 struct Header{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,p0:u32,p1:u32,gradient:vec4f}
-struct Params{dims:vec4u,spacing:vec4f,publication:vec4u,padding:vec4u}
+struct Params{dims:vec4u,spacing:vec4f,publication:vec4u,rowDelta:vec4u}
 struct VertexArena{control:array<u32,16>,values:array<u32>}
 struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
 @group(0)@binding(0)var<uniform>params:Params;
@@ -243,7 +242,6 @@ struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVe
 @group(0)@binding(2)var<storage,read>rowCountSource:array<u32>;
 @group(0)@binding(3)var terrain:texture_2d<f32>;
 @group(0)@binding(4)var<storage,read_write>arena:VertexArena;
-@group(0)@binding(5)var<storage,read>rollbackSeedControl:array<u32>;
 @group(0)@binding(6)var<storage,read_write>activeDispatch:array<u32>;
 @group(0)@binding(7)var<storage,read>rigidBodies:array<RigidBody>;
 const VALID:u32=${OCTREE_SOLID_VERTEX_SDF_VALID}u;const INVALID:u32=0xffffffffu;
@@ -272,8 +270,22 @@ fn worldVertex(vertex:vec3u)->vec3f{let spacing=params.spacing.xyz;return vec3f(
   -.5*f32(params.dims.x)*spacing.x+f32(vertex.x)*spacing.x,
   f32(vertex.y)*spacing.y,
   -.5*f32(params.dims.z)*spacing.z+f32(vertex.z)*spacing.z);}
-@compute @workgroup_size(1)fn prepareSolidVertexSdf(){let count=select(0u,min(rowCountSource[0],params.dims.w),arrayLength(&rowCountSource)>0u);
-  let generation=select(0u,rollbackSeedControl[5],arrayLength(&rollbackSeedControl)>=6u);
+// The candidate row count is the row-delta control header, exactly the word
+// beginStructuredPublication takes as its own row count. The general
+// compaction arena is concurrently reused for dirty-tile work and is cleared
+// to zero there, so reading its word 0 sampled a tile count -- and, whenever
+// the topology rebuild happened to be mid-flight, a zero that failed this
+// publication closed for the rest of the run.
+fn candidateRowCount()->u32{let at=params.rowDelta.x;
+  return select(0u,min(rowCountSource[at],params.dims.w),at<arrayLength(&rowCountSource));}
+// Header word 7 of the same control block: the GPU-published candidate epoch,
+// exactly what the descriptor's own generation() reads. Deriving the stamp here
+// keeps the retry generation GPU-authored -- a host attempt stamp cannot
+// witness a rollback that happened after the host wrote it.
+fn candidateGeneration()->u32{let at=params.rowDelta.x+7u;
+  return select(0u,rowCountSource[at],at<arrayLength(&rowCountSource));}
+@compute @workgroup_size(1)fn prepareSolidVertexSdf(){let count=candidateRowCount();
+  let generation=candidateGeneration();
   arena.control[0]=0u;arena.control[1]=count;arena.control[2]=0u;arena.control[3]=0u;arena.control[4]=generation;arena.control[5]=0u;arena.control[6]=INVALID;arena.control[7]=select(0u,1u,hasSolidSource());arena.control[8]=0u;
   activeDispatch[0]=(count+63u)/64u;activeDispatch[1]=1u;activeDispatch[2]=1u;}
 @compute @workgroup_size(64)fn publishSolidVertexSdf(@builtin(global_invocation_id)id:vec3u){let row=id.x;
@@ -285,9 +297,17 @@ fn worldVertex(vertex:vec3u)->vec3f{let spacing=params.spacing.xyz;return vec3f(
     var sdf=1e20;if(params.publication.y!=0u){sdf=(f32(vertex.y)-heightAtVertex(vec2f(vertex.xz)))*params.spacing.y;}
     let world=worldVertex(vertex);for(var body=0u;body<params.publication.z;body+=1u){if(body>=arrayLength(&rigidBodies)){fail(CAPACITY,row);return;}sdf=min(sdf,rigidSdf(rigidBodies[body],world));}
     if(!finite(sdf)){fail(NONFINITE,row);return;}arena.values[row*8u+corner]=bitcast<u32>(sdf);}}
-@compute @workgroup_size(1)fn finishSolidVertexSdf(){let count=arena.control[1];var flags=0u;var first=INVALID;if(arrayLength(&rowCountSource)==0u||rowCountSource[0]>params.dims.w){flags|=CAPACITY;first=0u;}
+@compute @workgroup_size(1)fn finishSolidVertexSdf(){let count=arena.control[1];let generation=candidateGeneration();var flags=0u;var first=INVALID;let at=params.rowDelta.x;
+  if(at>=arrayLength(&rowCountSource)||rowCountSource[at]>params.dims.w){flags|=CAPACITY;first=0u;}
   if(!hasSolidSource()){flags|=SOURCE;first=0u;}for(var row=0u;row<count;row+=1u){let base=row*8u;if(base+7u>=arrayLength(&arena.values)){flags|=CAPACITY;first=min(first,row);continue;}if(!finite(bitcast<f32>(arena.values[base]))){let code=arena.values[base+1u];flags|=select(NONFINITE,code,code==SOURCE||code==CAPACITY||code==HEADER||code==NONFINITE);first=min(first,row);continue;}for(var corner=1u;corner<8u;corner+=1u){if(!finite(bitcast<f32>(arena.values[base+corner]))){flags|=NONFINITE;first=min(first,row);}}}
-  let rollbackValid=arrayLength(&rollbackSeedControl)>=7u&&rollbackSeedControl[2]==count&&rollbackSeedControl[5]!=0u&&rollbackSeedControl[6]==VALID;
-  arena.control[8]=select(0u,rollbackSeedControl[5],arrayLength(&rollbackSeedControl)>=6u);if(!rollbackValid){flags|=SOURCE;first=0u;}
+  // The former predicate read the ACCEPTED structured control: it compared that
+  // publication's row count (which lags by an epoch, by design) against this
+  // candidate's, and required word 6 of that struct to equal this module's own
+  // VALID magic. Word 6 is the structured projected flag, so the term was
+  // constant false: the arena published invalid on every step of every scene
+  // with terrain or a rigid body, solidAt() returned 1e20, and no aperture was
+  // ever cut by a solid.
+  let rollbackValid=generation!=0u&&count!=0u;
+  arena.control[8]=generation;if(!rollbackValid){flags|=SOURCE;first=0u;}
   arena.control[0]=flags;arena.control[6]=first;if(flags==0u&&arena.control[7]!=0u){arena.control[2]=count;arena.control[3]=count*8u;arena.control[5]=VALID;}else{arena.control[2]=0u;arena.control[3]=0u;arena.control[5]=0u;}}
 `;

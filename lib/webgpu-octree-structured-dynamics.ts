@@ -12,6 +12,7 @@ import {
 } from "./webgpu-octree-air-velocity-support";
 import type { PassBroker } from "./webgpu-pass-broker";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
+import { GPU_RIGID_BODY_CAPACITY } from "./webgpu-rigid-body";
 
 const ROW_CLASSES = [0, 1, 2, 3] as const;
 const FAMILY_CLASSES = [5, 6, 7, 8] as const;
@@ -198,6 +199,13 @@ export interface StructuredDynamicsResources {
    * named by the accepted structured publication, so every read here must apply
    * the same `bank()*slotCapacity` base. */
   readonly solidNormalVelocities: GPUBuffer;
+  /** Authoritative GPU rigid state; the same 32-float-per-body records the
+   * boundary producer samples for apertures and solid normal velocities. */
+  readonly rigidBodies: GPUBuffer;
+  /** Resident twelve-i32-per-body fixed-point exchange the GPU rigid
+   * integrator consumes. Slots 0..2 carry the linear impulse and 3..5 the
+   * angular impulse, both scaled by 1e6; see `gpuRigidBodyShader`. */
+  readonly rigidExchange: GPUBuffer;
   /** Current-step boundary-class worksets and their fail-closed publication. */
   readonly boundaryWorksets: GPUBuffer;
   readonly boundaryControl: GPUBuffer;
@@ -243,6 +251,7 @@ export class WebGPUStructuredVelocityDynamics {
   private readonly force: readonly GPUComputePipeline[];
   private readonly divergence: readonly GPUComputePipeline[];
   private readonly separation: readonly GPUComputePipeline[];
+  private readonly bodyImpulse: readonly GPUComputePipeline[];
   private readonly projection: readonly GPUComputePipeline[];
   private readonly reconstruct: readonly GPUComputePipeline[];
   private readonly summarizePreProjectionEnergy: GPUComputePipeline;
@@ -269,6 +278,8 @@ export class WebGPUStructuredVelocityDynamics {
       || resources.separationMask.size < resources.dimensions[0] * resources.dimensions[1] * resources.dimensions[2] * 4
       || resources.liquidMask.size < structured.plan.rowCapacity * 2 * 4
       || resources.solidNormalVelocities.size < structured.plan.slotCapacity * 2 * 4
+      || resources.rigidBodies.size < GPU_RIGID_BODY_CAPACITY * 8 * 16
+      || resources.rigidExchange.size < GPU_RIGID_BODY_CAPACITY * 12 * 4
       || !Number.isSafeInteger(resources.selectorStride) || resources.selectorStride < 1
       || !Number.isSafeInteger(resources.selectorOffsetWords) || resources.selectorOffsetWords < 0
       || resources.selectorRows.size < (resources.selectorOffsetWords
@@ -343,6 +354,7 @@ export class WebGPUStructuredVelocityDynamics {
     this.force = FAMILY_CLASSES.map((value) => make(`forceStructuredClass${value}`));
     this.divergence = ROW_CLASSES.map((value) => make(`divergenceStructuredClass${value}`));
     this.separation = ROW_CLASSES.map((value) => make(`separateStructuredClass${value}`));
+    this.bodyImpulse = ROW_CLASSES.map((value) => make(`exchangeStructuredBodyImpulseClass${value}`));
     this.projection = FAMILY_CLASSES.map((value) => make(`projectStructuredClass${value}`));
     this.reconstruct = ROW_CLASSES.map((value) => make(`reconstructStructuredClass${value}`));
     this.summarizePreProjectionEnergy = make("summarizeStructuredPreProjectionEnergy");
@@ -364,6 +376,18 @@ export class WebGPUStructuredVelocityDynamics {
     return this.params[stage];
   }
 
+  /**
+   * Publish the coupling roster into the projection-stage parameter word the
+   * body-impulse adjoint reads. Only stage 2 runs that kernel; advection and
+   * the force/divergence stage never sample a body.
+   */
+  private updateCouplingBodies(count: number): void {
+    if (!Number.isSafeInteger(count) || count < 0 || count > GPU_RIGID_BODY_CAPACITY) {
+      throw new RangeError("Structured dynamics coupling body count is out of range");
+    }
+    this.device.queue.writeBuffer(this.params[2], 152, new Uint32Array([count]));
+  }
+
   private entries(params: GPUBuffer, pressure: GPUBuffer): Readonly<Record<number, GPUBuffer>> {
     const { structured, topology, divergenceRhs, liquidMask } = this.resources;
     return { 0: params, 1: structured.control, 2: structured.authority,
@@ -372,7 +396,8 @@ export class WebGPUStructuredVelocityDynamics {
       12: this.dispatch, 13: pressure, 14: divergenceRhs, 15: this.resources.separationMask, 16: liquidMask,
       17: this.resources.boundaryControl, 18: this.transportMetrics,
       22: this.resources.solidNormalVelocities, 23: this.projectionEnergyStats,
-      24: structured.candidateControl };
+      24: structured.candidateControl, 25: this.resources.rigidBodies,
+      26: this.resources.rigidExchange };
   }
 
   private group(pipeline: GPUComputePipeline, entries: readonly number[], params: GPUBuffer,
@@ -536,9 +561,11 @@ export class WebGPUStructuredVelocityDynamics {
 
   encodeProjection(broker: PassBroker, dt: number, density: number,
     gravity: readonly [number, number, number] = [0, 0, 0],
-    pressure = this.resources.pressure): void {
+    pressure = this.resources.pressure,
+    couplingBodyCount = 0): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
     const params = this.update(2, dt, density, gravity); this.encodePrepare(broker, params);
+    this.updateCouplingBodies(couplingBodyCount);
     // Publish the lagged unilateral-contact active set from the solved
     // pressure: rows holding tension against gravity-opposed closed world
     // faces are marked, and the NEXT step's boundary rebuild opens exactly
@@ -548,6 +575,15 @@ export class WebGPUStructuredVelocityDynamics {
     this.encodeClasses(broker, this.separation, ROW_CLASSES,
       [0, 1, 2, 3, 5, 6, 11, 13, 15, 16, 17], params,
       "Mark structured overhead separation row class", pressure);
+    // Read the solved pressure before the projection stage consumes it. Both
+    // stages are read-only in `pressure`, so no fence separates them; the
+    // exchange only writes the resident rigid buffer, which the integrator
+    // reads once, after the whole advance.
+    if (couplingBodyCount > 0) {
+      this.encodeClasses(broker, this.bodyImpulse, ROW_CLASSES,
+        [0, 1, 2, 5, 6, 11, 13, 16, 17, 25, 26], params,
+        "Exchange structured body impulse row class", pressure);
+    }
     this.encodeClasses(broker, this.projection, FAMILY_CLASSES,
       [0, 1, 2, 11, 13, 16, 17, 22], params,
       "Project structured family class", pressure);
@@ -572,7 +608,7 @@ export class WebGPUStructuredVelocityDynamics {
 }
 
 export const structuredVelocityDynamicsWGSL = /* wgsl */ `
-struct P{rowCapacity:u32,slotCapacity:u32,maxSlots:u32,authorityWords:u32,worksetStride:u32,worksetBankStride:u32,dimensionX:u32,dimensionY:u32,dimensionZ:u32,closedMask:u32,denseOffset:u32,slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,tetraVertexCount:u32,templateHeaderOffset:u32,reconstructionOffset:u32,valuesOffset:u32,ownerOffset:u32,neighborOffset:u32,metadataOffset:u32,areaOffset:u32,inverseOffset:u32,fractionOffset:u32,pressureScaleOffset:u32,normalOffset:u32,centroidOffset:u32,rowNeighborOffset:u32,rowReciprocalOffset:u32,rowOwnerMetadataOffset:u32,rowHandleOffset:u32,rowSignOffset:u32,rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,padA:u32,padB:u32,physical:vec4f,gravity:vec4f,selectorOffsetWords:u32,selectorStride:u32,regularTagOffsetWords:u32,supportControlOffsetWords:u32,supportVectorOffsetWords:u32,supportCapacity:u32,ownerDirectoryOffsetWords:u32,ownerDirectoryCellCapacity:u32}
+struct P{rowCapacity:u32,slotCapacity:u32,maxSlots:u32,authorityWords:u32,worksetStride:u32,worksetBankStride:u32,dimensionX:u32,dimensionY:u32,dimensionZ:u32,closedMask:u32,denseOffset:u32,slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,tetraVertexCount:u32,templateHeaderOffset:u32,reconstructionOffset:u32,valuesOffset:u32,ownerOffset:u32,neighborOffset:u32,metadataOffset:u32,areaOffset:u32,inverseOffset:u32,fractionOffset:u32,pressureScaleOffset:u32,normalOffset:u32,centroidOffset:u32,rowNeighborOffset:u32,rowReciprocalOffset:u32,rowOwnerMetadataOffset:u32,rowHandleOffset:u32,rowSignOffset:u32,rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,bodyCount:u32,padB:u32,physical:vec4f,gravity:vec4f,selectorOffsetWords:u32,selectorStride:u32,regularTagOffsetWords:u32,supportControlOffsetWords:u32,supportVectorOffsetWords:u32,supportCapacity:u32,ownerDirectoryOffsetWords:u32,ownerDirectoryCellCapacity:u32}
 struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 struct SlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDistance:vec4f}
 
@@ -594,6 +630,9 @@ struct SlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDis
 @group(0)@binding(22)var<storage,read>solidNormalVelocities:array<f32>;
 @group(0)@binding(23)var<storage,read_write>projectionEnergyStats:array<u32>;
 @group(0)@binding(24)var<storage,read_write>candidate:array<atomic<u32>>;
+struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
+@group(0)@binding(25)var<storage,read>rigidBodies:array<RigidBody>;
+@group(0)@binding(26)var<storage,read_write>rigidExchange:array<atomic<i32>>;
 
 const INVALID:u32=0xffffffffu;
 const ERROR_SAMPLE:u32=${OCTREE_STRUCTURED_GPU_ERROR.carry}u;
@@ -1561,6 +1600,95 @@ fn markSeparationRow(cls:u32,index:u32){
   }
   separationMask[cell]=(acc(3u)<<6u)|faceBits;
 }
+// Fluid -> rigid, the exact adjoint of the solid term the divergence RHS
+// already integrates.
+//
+// divergenceRow constrains each liquid row with
+//   sum_h sign*area*(aperture*u_f + (1-aperture)*u_s) = 0,
+// so the solved pressure is the multiplier of a constraint the SOLID normal
+// velocity enters. Differentiating that constraint with respect to u_s gives
+// the force the fluid transmits through the blocked share of each cut face:
+//   F_h = p_row * area_h * (1 - aperture_h) * (sign_h * n_h),
+// i.e. pressure pushing outward from the row onto whatever occupies the
+// closed fraction. Summed over a submerged body's whole cut boundary against
+// a hydrostatic field this is exactly -rho*V*g, so buoyancy, form drag and
+// the impact response all fall out of the one term; nothing here re-derives
+// Archimedes on the side. The impulse lands in the same fixed-point exchange
+// the tall-cell and quadtree lanes write, so the resident GPU integrator is
+// unchanged and the response is frame-lagged by exactly one substep.
+//
+// Attribution matches resolveStructuredSolidSlots face for face: the
+// nearest body whose SDF is within half the face's own row spacing owns the
+// blocked share. A face cut by terrain and by no body contributes nothing.
+fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.*(q.x*uv+uuv);}
+fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f(q.x,-q.yzw),v);}
+fn rigidSdf(body:RigidBody,world:vec3f)->f32{
+  let q=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);
+  let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
+  if(shape==0){return length(q)-d.x;}
+  if(shape==1){let b=abs(q)-.5*d;return length(max(b,vec3f(0)))+min(max(b.x,max(b.y,b.z)),0.);}
+  if(shape==2){let cy=clamp(q.y,-.5*d.y,.5*d.y);return length(vec3f(q.x,q.y-cy,q.z))-d.x;}
+  let radial=length(q.xz)-d.x;let axial=abs(q.y)-.5*d.y;
+  return length(max(vec2f(radial,axial),vec2f(0)))+min(max(radial,axial),0.);
+}
+// Structured centroids are lattice-origin; authored rigid poses centre x and
+// z about the container, exactly as the solid vertex-SDF producer does.
+fn solidWorld(x:vec3f)->vec3f{return x-vec3f(.5*f32(p.dimensionX)*p.physical.x,0.,.5*f32(p.dimensionZ)*p.physical.x);}
+fn accumulateBodyImpulse(body:u32,impulse:vec3f,torque:vec3f){
+  let base=body*12u;
+  if(base+5u>=arrayLength(&rigidExchange)){return;}
+  atomicAdd(&rigidExchange[base],i32(round(impulse.x*1e6)));
+  atomicAdd(&rigidExchange[base+1u],i32(round(impulse.y*1e6)));
+  atomicAdd(&rigidExchange[base+2u],i32(round(impulse.z*1e6)));
+  atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1e6)));
+  atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1e6)));
+  atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1e6)));
+}
+fn bodyImpulseRow(cls:u32,index:u32){
+  let row=workItem(cls,index);
+  if(row==INVALID||row>=acc(2u)){return;}
+  if(p.bodyCount==0u||liquidAt(row)==0u){return;}
+  let solved=pressure[row];
+  if(!finite(solved)){rejectSample(40u,row);return;}
+  // t=0 publishes the same operator with a zero-length step; there is no
+  // impulse to transfer and dividing the exchange by it would be undefined.
+  if(p.physical.y<=0.){return;}
+  let count=rowSlotCount(row);
+  if(count>p.maxSlots){rejectSample(41u,row);return;}
+  for(var local=0u;local<count;local+=1u){
+    let at=row*p.maxSlots+local;
+    let handle=a[abase()+p.rowHandleOffset+at];
+    if(handle==INVALID||handle>=acc(5u)){rejectSample(42u,row);return;}
+    let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
+    if(!finite(aperture)||aperture<0.||aperture>1.){rejectSample(43u,handle);return;}
+    if(aperture>=1.){continue;}
+    let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
+    let sign=f32(bitcast<i32>(a[abase()+p.rowSignOffset+at]));
+    let n=normal(handle);
+    if(!finite(area)||!finite(sign)||!finite3(n)){rejectSample(44u,handle);return;}
+    let world=solidWorld(centroid(handle));
+    if(!finite3(world)){rejectSample(45u,handle);return;}
+    let inv=bitcast<f32>(a[abase()+p.inverseOffset+handle]);
+    let half=.5/max(inv,1e-20);
+    var best=1e20;var chosen=INVALID;
+    for(var body=0u;body<p.bodyCount;body+=1u){
+      if(body>=arrayLength(&rigidBodies)){rejectSample(46u,handle);return;}
+      let sdf=rigidSdf(rigidBodies[body],world);
+      if(sdf<half&&sdf<best){best=sdf;chosen=body;}
+    }
+    if(chosen==INVALID){continue;}
+    let impulse=p.physical.y*solved*area*(1.-aperture)*sign*n;
+    if(!finite3(impulse)){rejectSample(47u,handle);return;}
+    let torque=cross(world-rigidBodies[chosen].positionShape.xyz,impulse);
+    if(!finite3(torque)){rejectSample(48u,handle);return;}
+    accumulateBodyImpulse(chosen,impulse,torque);
+  }
+}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass0(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(0u,g.x);}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass1(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(1u,g.x);}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass2(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(2u,g.x);}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass3(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(3u,g.x);}
+
 @compute @workgroup_size(64)fn separateStructuredClass0(@builtin(global_invocation_id)g:vec3u){markSeparationRow(0u,g.x);}
 @compute @workgroup_size(64)fn separateStructuredClass1(@builtin(global_invocation_id)g:vec3u){markSeparationRow(1u,g.x);}
 @compute @workgroup_size(64)fn separateStructuredClass2(@builtin(global_invocation_id)g:vec3u){markSeparationRow(2u,g.x);}

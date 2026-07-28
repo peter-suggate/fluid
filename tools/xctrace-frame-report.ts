@@ -38,6 +38,8 @@ export interface Interval {
 
 export interface PassCost {
   readonly label: string;
+  /** True only when label isolation proves this encoder contains that stage. */
+  readonly exactAttribution: boolean;
   readonly callsPerFrame: number;
   readonly gpuMsPerFrame: number;
   readonly meanMicroseconds: number;
@@ -127,6 +129,13 @@ export interface FrameReport {
   };
   readonly gpu: {
     readonly busyMsPerFrame: number; readonly wallMsPerFrame: number;
+    /** Sum of attributed interval durations. May exceed busy time because
+     * Instruments can emit overlapping parent/child Metal intervals. */
+    readonly intervalMsPerFrame: number;
+    readonly overlapMsPerFrame: number;
+    readonly exactMsPerFrame: number;
+    readonly compositeMsPerFrame: number;
+    readonly exactIntervalCoverage: number;
     readonly occupancy: number; readonly intervalsPerFrame: number;
     readonly encodersPerFrame: number; readonly passesPerFrame: number;
     readonly gapMsPerFrame: number;
@@ -362,6 +371,12 @@ const GRID_BINS = 90;
 const SIMD_WIDTH = 32;
 
 export const buildFrameReport = async (input: BuildFrameReportInput): Promise<FrameReport> => {
+  const labelIsolationEnabled = input.environment.FLUID_GPU_ISOLATE_PASS_LABELS === "1";
+  const isolatedPrefixes = (input.environment.FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES ?? "")
+    .split(",").map((prefix) => prefix.trim()
+      .replaceAll("·", "-").replaceAll("→", "to").replaceAll("←", "from")
+      .replaceAll("×", "x").replace(/[^\x20-\x7e]/g, "?"))
+    .filter((prefix) => prefix.length > 0);
   // ---- Encoder identity ----
   // The GPU track's own label text is unusable as a grouping key: Instruments
   // concatenates the labels of every encoder it drew as one interval, so the
@@ -482,7 +497,6 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     const index = frameAt(interval.start);
     if (index < 0) continue;
     const frame = frameAccumulators[index];
-    frame.busy += interval.duration;
     frame.encoders += 1;
     frame.passes += interval.encoders.length;
     frame.tasks.set(interval.label, (frame.tasks.get(interval.label) ?? 0) + interval.duration);
@@ -518,11 +532,19 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     partitionSum: number[]; partitionCount: number[];
   }
   const passes = new Map<string, PassAccumulator>();
-  let busyMicroseconds = 0;
+  const intervalMicroseconds = windowed.reduce((sum, interval) => sum + interval.duration, 0);
+  const busySpans = mergeSpans(windowed.map((interval) => ({
+    start: Math.max(windowStart, interval.start),
+    end: Math.min(windowEnd, interval.start + interval.duration),
+  })));
+  const busyMicroseconds = busySpans.reduce((sum, span) => sum + span.end - span.start, 0);
+  for (const frame of frameAccumulators) {
+    frame.busy = busySpans.reduce((sum, span) => sum
+      + Math.max(0, Math.min(frame.end, span.end) - Math.max(frame.start, span.start)), 0);
+  }
   let mergedMicroseconds = 0;
   let exclusiveMicroseconds = 0;
   for (const interval of windowed) {
-    busyMicroseconds += interval.duration;
     if (interval.merged) mergedMicroseconds += interval.duration;
     const end = interval.start + interval.duration;
     const exclusive = interval.duration - contendedMicroseconds(interval.start, end);
@@ -780,10 +802,12 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     const counterSamples = entry.counters.get("Compute Occupancy")?.n ?? 0;
     return {
       label,
+      exactAttribution: labelIsolationEnabled && (isolatedPrefixes.length === 0
+        || isolatedPrefixes.some((prefix) => label.startsWith(prefix))),
       callsPerFrame: entry.calls / frameCount,
       gpuMsPerFrame: entry.us / 1e3 / frameCount,
       meanMicroseconds: entry.us / entry.calls,
-      share: busyMicroseconds > 0 ? entry.us / busyMicroseconds : 0,
+      share: intervalMicroseconds > 0 ? entry.us / intervalMicroseconds : 0,
       merged: entry.merged,
       exclusiveShare: entry.us > 0 ? entry.exclusiveUs / entry.us : 0,
       counterSamples,
@@ -816,9 +840,14 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
       shaders,
     };
   }).sort((left, right) => right.gpuMsPerFrame - left.gpuMsPerFrame);
+  const exactPassList = passList.filter((pass) => pass.exactAttribution);
+  const exactMicroseconds = exactPassList.reduce((sum, pass) =>
+    sum + pass.gpuMsPerFrame * 1e3 * frameCount, 0);
+  const compositeMicroseconds = Math.max(0, intervalMicroseconds - exactMicroseconds);
 
   // ---- Per-frame samples and retained frames ----
-  const taskLabels = passList.slice(0, 24).map((pass) => pass.label);
+  const taskLabels = (exactPassList.length > 0 ? exactPassList : passList)
+    .slice(0, 24).map((pass) => pass.label);
   const frameSamples: FrameSample[] = frameAccumulators.map((frame, index) => {
     const duration = frame.end - frame.start;
     return {
@@ -903,7 +932,8 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
   const contention = [...contentionTally.entries()]
     .map(([process, entry]) => ({ process, ...entry }))
     .sort((left, right) => right.gpuMs - left.gpuMs);
-  const exclusiveCoverage = busyMicroseconds > 0 ? exclusiveMicroseconds / busyMicroseconds : 0;
+  const exclusiveCoverage = intervalMicroseconds > 0
+    ? exclusiveMicroseconds / intervalMicroseconds : 0;
 
   const lines: string[] = [];
   lines.push(`frames analysed: ${frameCount} (anchor "${anchor}")`);
@@ -952,6 +982,12 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
   }
   lines.push(`GPU busy:        ${busyMsPerFrame.toFixed(2)} ms/advance`
     + ` = ${(100 * busyMsPerFrame / wallMsPerFrame).toFixed(1)}% of frame wall`);
+  const overlapMicroseconds = Math.max(0, intervalMicroseconds - busyMicroseconds);
+  if (overlapMicroseconds > 0) {
+    lines.push(`GPU intervals:   ${(intervalMicroseconds / 1e3 / frameCount).toFixed(2)}`
+      + ` ms/advance attributed, including ${(overlapMicroseconds / 1e3 / frameCount).toFixed(2)}`
+      + " ms of overlapping Metal interval records");
+  }
   lines.push(`GPU idle gaps:   ${(gapMicroseconds / 1e3 / frameCount).toFixed(2)} ms/advance`
     + ` across ${Math.round(gaps.length / frameCount)} gaps`);
   lines.push(`GPU encoders:    ${Math.round(windowed.length / frameCount)}/advance`
@@ -978,15 +1014,54 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
       + ` ${contention[0].gpuMs.toFixed(0)} ms of GPU in the window;`
       + ` ${(100 * exclusiveCoverage).toFixed(1)}% of our GPU time was uncontended`);
   }
+  if (exactPassList.length > 0) {
+    lines.push(`exact targets:   ${(exactMicroseconds / 1e3 / frameCount).toFixed(2)}`
+      + ` ms/advance = ${(100 * exactMicroseconds / Math.max(intervalMicroseconds, 1)).toFixed(1)}%`
+      + ` of attributed interval time; ${(compositeMicroseconds / 1e3 / frameCount).toFixed(2)}`
+      + " ms remains composite/outside this targeted capture");
+  }
   lines.push("");
-  lines.push("top GPU tasks (ms per advance):");
-  for (const pass of passList.slice(0, 15)) {
+  lines.push(labelIsolationEnabled && isolatedPrefixes.length > 0
+    ? "top exactly isolated GPU tasks (non-target composite buckets omitted):"
+    : labelIsolationEnabled ? "top GPU tasks (ms per advance):"
+      : "top composite GPU pass groups (enable label isolation for exact stages):");
+  const rankedPasses = exactPassList.length > 0 ? exactPassList : passList;
+  for (const pass of rankedPasses.slice(0, 15)) {
     lines.push(`  ${pass.gpuMsPerFrame.toFixed(3).padStart(8)} ms`
       + ` ${(100 * pass.share).toFixed(1).padStart(5)}%`
       + ` ${pass.callsPerFrame.toFixed(1).padStart(6)}x`
       + ` ${pass.meanMicroseconds.toFixed(0).padStart(6)} µs`
       + ` occ ${pass.occupancy === undefined ? "  n/a" : `${(100 * pass.occupancy).toFixed(0).padStart(3)}%`}`
       + `  ${pass.merged ? "[merged] " : ""}${pass.label.slice(0, 70)}`);
+  }
+  const pressureMicroStages = passList.filter((pass) =>
+    pass.exactAttribution && (pass.label.startsWith("SPGrid accurate A2 -")
+    || pass.label.startsWith("SPGrid Section 6.3 -")));
+  if (pressureMicroStages.length > 0) {
+    lines.push("");
+    lines.push("pressure micro-stages (label isolation required for exact attribution):");
+    for (const pass of pressureMicroStages) {
+      lines.push(`  ${pass.gpuMsPerFrame.toFixed(3).padStart(8)} ms`
+        + ` ${pass.callsPerFrame.toFixed(1).padStart(6)}x`
+        + ` occ ${pass.occupancy === undefined ? "  n/a" : `${(100 * pass.occupancy).toFixed(1).padStart(5)}%`}`
+        + ` ALU ${pass.alu === undefined ? "  n/a" : `${(100 * pass.alu).toFixed(1).padStart(5)}%`}`
+        + ` resident ${pass.residentThreads === undefined ? "?" : pass.residentThreads.toFixed(0)} threads`
+        + `  ${pass.label}`);
+    }
+  }
+  const fineJFAMicroStages = passList.filter((pass) =>
+    pass.exactAttribution && pass.label.startsWith("Fine JFA -"));
+  if (fineJFAMicroStages.length > 0) {
+    lines.push("");
+    lines.push("fine JFA micro-stages (cooperative floods use eight 32-lane teams):");
+    for (const pass of fineJFAMicroStages) {
+      lines.push(`  ${pass.gpuMsPerFrame.toFixed(3).padStart(8)} ms`
+        + ` ${pass.callsPerFrame.toFixed(1).padStart(6)}x`
+        + ` occ ${pass.occupancy === undefined ? "  n/a" : `${(100 * pass.occupancy).toFixed(1).padStart(5)}%`}`
+        + ` ALU ${pass.alu === undefined ? "  n/a" : `${(100 * pass.alu).toFixed(1).padStart(5)}%`}`
+        + ` resident ${pass.residentThreads === undefined ? "?" : pass.residentThreads.toFixed(0)} threads`
+        + `  ${pass.label}`);
+    }
   }
 
   return {
@@ -1014,13 +1089,18 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     },
     gpu: {
       busyMsPerFrame, wallMsPerFrame,
+      intervalMsPerFrame: intervalMicroseconds / 1e3 / frameCount,
+      overlapMsPerFrame: Math.max(0, intervalMicroseconds - busyMicroseconds) / 1e3 / frameCount,
+      exactMsPerFrame: exactMicroseconds / 1e3 / frameCount,
+      compositeMsPerFrame: compositeMicroseconds / 1e3 / frameCount,
+      exactIntervalCoverage: exactMicroseconds / Math.max(intervalMicroseconds, 1),
       occupancy: busyMsPerFrame / wallMsPerFrame,
       intervalsPerFrame: windowed.length / frameCount,
       encodersPerFrame: windowed.length / frameCount,
       passesPerFrame: windowed.reduce((sum, i) => sum + i.encoders.length, 0) / frameCount,
       gapMsPerFrame: gapMicroseconds / 1e3 / frameCount,
       largestGapsUs: [...gaps].sort((left, right) => right - left).slice(0, 10),
-      mergedShare: busyMicroseconds > 0 ? mergedMicroseconds / busyMicroseconds : 0,
+      mergedShare: intervalMicroseconds > 0 ? mergedMicroseconds / intervalMicroseconds : 0,
     },
     counters: {
       available: globalCounters.size > 0,

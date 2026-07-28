@@ -237,9 +237,8 @@ export interface OctreePipelinedLinearOperator {
  * cannot silently fall back to all live pressure rows. */
 export interface OctreePipelinedWorksetLinearOperator
 extends OctreePipelinedLinearOperator {
-  /** One dispatch over the compact union workset. Its kernel selects the
-   * unchanged accurate class body from each resolved row's published class. */
-  readonly encodedMergedBandDispatchCount: 1;
+  /** Dispatches needed to apply the operator to the compact union workset. */
+  readonly encodedMergedBandDispatchCount: number;
   encodeWorksets(
     broker: PassBroker,
     input: GPUBuffer,

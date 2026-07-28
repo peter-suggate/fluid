@@ -189,7 +189,7 @@ input[type=search]{background:var(--panel2);color:var(--ink);border:1px solid va
 <h2>Machine utilisation \u2014 task \u00d7 GPU units</h2>
 <div class="panel">
   <div class="row">
-    <span class="muted">Column width is GPU time per advance; column height is the machine. Lit cells are the share of the GPU the task actually occupied, from the measured compute-occupancy counter. <b>Dark area is idle silicon</b> \u2014 machine-time the frame paid for and did not use.</span>
+    <span class="muted" id="machine-scope"></span>
   </div>
   <div class="row">
     <label class="muted">Y axis granularity
@@ -203,6 +203,7 @@ input[type=search]{background:var(--panel2);color:var(--ink);border:1px solid va
     <span><i style="background:rgb(214,140,54)"></i>35%</span>
     <span><i style="background:rgb(196,186,64)"></i>70%</span>
     <span><i style="background:rgb(72,170,110)"></i>100%</span>
+    <span><i style="background:#737b89"></i>unresolved composite work</span>
     <span><i style="background:var(--empty)"></i>idle \u2014 no work resident</span>
   </div>
   <div class="detail" id="machine-detail" style="display:none"></div>
@@ -229,6 +230,26 @@ input[type=search]{background:var(--panel2);color:var(--ink);border:1px solid va
 const R = ${data};
 ${RAMP}
 const $ = (id) => document.getElementById(id);
+const EXACT_PASSES = R.passes.filter(p=>p.exactAttribution===true);
+const COMPOSITE_PASSES = R.passes.filter(p=>p.exactAttribution!==true);
+const compositeMs = R.gpu.compositeMsPerFrame
+  ?? COMPOSITE_PASSES.reduce((s,p)=>s+p.gpuMsPerFrame,0);
+const compositeWeighted = (field) => {
+  const known=COMPOSITE_PASSES.filter(p=>p[field]!==undefined&&p[field]!==null);
+  const weight=known.reduce((s,p)=>s+p.gpuMsPerFrame,0);
+  return weight>0 ? known.reduce((s,p)=>s+p.gpuMsPerFrame*p[field],0)/weight : null;
+};
+const UNRESOLVED_COMPOSITE = {
+  label:'Unresolved non-target/composite interval buckets',
+  gpuMsPerFrame:compositeMs,
+  share:compositeMs/Math.max(R.gpu.intervalMsPerFrame||compositeMs,1e-9),
+  occupancy:compositeWeighted('occupancy'),
+  alu:compositeWeighted('alu'),
+  counterSamples:COMPOSITE_PASSES.reduce((s,p)=>s+(p.counterSamples||0),0),
+  unresolved:true,
+};
+const MACHINE_PASSES = EXACT_PASSES.length
+  ? [UNRESOLVED_COMPOSITE,...EXACT_PASSES] : R.passes;
 const primary = (label) => label.split(' \u00b7 ')[0];
 const extra = (label) => label.split(' \u00b7 ').length - 1;
 const fmt = (v,d=2) => (v===undefined||v===null||Number.isNaN(v)) ? '—' : v.toFixed(d);
@@ -246,6 +267,9 @@ $('sub').textContent = R.scene+' · grid '+R.grid+' · lane '+R.lane
 const cards = [
   ['frame wall', fmt(R.gpu.wallMsPerFrame)+' ms', 'p10 '+fmt(R.frames.p10Ms)+' / p90 '+fmt(R.frames.p90Ms)],
   ['GPU busy', fmt(R.gpu.busyMsPerFrame)+' ms', pct(R.gpu.occupancy)+' of frame wall'],
+  ['interval overlap', fmt(R.gpu.overlapMsPerFrame)+' ms', 'excluded from GPU busy'],
+  ['exact-stage coverage', EXACT_PASSES.length?pct(R.gpu.exactIntervalCoverage,1):'\u2014',
+     EXACT_PASSES.length?fmt(R.gpu.exactMsPerFrame)+' of '+fmt(R.gpu.intervalMsPerFrame)+' interval ms':'no targeted isolation'],
   ['GPU idle gaps', fmt(R.gpu.gapMsPerFrame)+' ms', 'per advance'],
   ['resident threads', R.counters.available&&R.counters.totalThreads
       ? Math.round((R.counters.meanOccupancy||0)*R.counters.totalThreads).toLocaleString():'—',
@@ -261,6 +285,16 @@ const cards = [
 ];
 $('cards').innerHTML = cards.map(([k,v,n])=>
   '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="n">'+n+'</div></div>').join('');
+
+$('machine-scope').innerHTML = EXACT_PASSES.length
+  ? '<b>Complete attributed-interval coverage:</b> exact stages are shown individually; the '
+    +fmt(compositeMs)+' ms/advance that was outside this targeted capture is the grey unresolved column. '
+    +'Only '+fmt(R.gpu.exactMsPerFrame)+' ms ('+pct(R.gpu.exactIntervalCoverage,1)
+    +') has exact stage identity. Interval records overlap by '+fmt(R.gpu.overlapMsPerFrame)
+    +' ms, so widths are <b>not</b> a wall-clock partition.'
+  : 'No stages were exactly isolated, so columns are composite encoder buckets. '
+    +'Column width is attributed GPU interval time; height is measured occupancy. '
+    +'<b>Do not interpret a composite bucket\u2019s first label as its complete contents.</b>';
 
 // ---------- frame selection ----------
 // The report retains whole frames, not just a representative one, so the
@@ -426,6 +460,7 @@ function renderPasses(){
     '<tr data-l="'+escapeAttr(p.label)+'"'+(selected===p.label?' class="sel"':'')+'>'
     +'<td><span title="'+escapeAttr(p.label)+'">'+esc(primary(p.label))+'</span>'
       +(extra(p.label)?'<span class="pill">+'+extra(p.label)+' passes</span>':'')
+      +(p.exactAttribution===false?'<span class="pill">composite / outside target</span>':'')
       +'<div><span class="bar" style="width:'+(100*p.gpuMsPerFrame/max).toFixed(1)+'%"></span></div></td>'
     +COLS.slice(1).map(c=>'<td class="num">'+c[2](p[c[0]])+'</td>').join('')+'</tr>').join('');
   $('passnote').textContent=rows.length+' of '+R.passes.length+' tasks';
@@ -691,7 +726,7 @@ const UNIT_CHOICES = HW.totalSlots ? [
 $('units').innerHTML = UNIT_CHOICES.map(c=>'<option value="'+c.n+'">'+c.label+'</option>').join('');
 const unitName = () => (UNIT_CHOICES.find(c=>c.n===UNITS)||UNIT_CHOICES[0]).label.split(' \u2014 ')[1];
 function drawMachine(){
-  const tasks=R.passes.filter(p=>p.gpuMsPerFrame>0.005).slice(0,26);
+  const tasks=MACHINE_PASSES.filter(p=>p.gpuMsPerFrame>0.001).slice(0,96);
   const total=tasks.reduce((s,p)=>s+p.gpuMsPerFrame,0)||1;
   const w=mc.clientWidth, h=430;
   mc.width=w*devicePixelRatio; mc.height=h*devicePixelRatio;
@@ -732,7 +767,8 @@ function drawMachine(){
       let frac=0;
       if(litExact!==null){ frac = Math.max(0, Math.min(1, litExact-u)); }
       if(frac>0){
-        mctx.globalAlpha=dim; mctx.fillStyle=ramp(p.alu===null||p.alu===undefined?occ:p.alu);
+        mctx.globalAlpha=dim; mctx.fillStyle=p.unresolved?'#737b89'
+          :ramp(p.alu===null||p.alu===undefined?occ:p.alu);
         mctx.fillRect(x, y+(1-frac)*cellH, Math.max(1,cw-1), Math.max(0.7,cellH*frac-0.5));
       }
       if(frac<1){
@@ -760,7 +796,9 @@ function drawMachine(){
   const litMs=tasks.reduce((s,p)=>s+(p.occupancy?p.gpuMsPerFrame*p.occupancy:0),0);
   $('wastenote').innerHTML = R.counters.available
     ? '<b>'+idleMs.toFixed(1)+' ms/advance of idle machine</b> against '+litMs.toFixed(2)
-      +' ms of occupied machine \u2014 '+(100*litMs/(litMs+idleMs)).toFixed(1)+'% of the GPU-time area is doing work.'
+      +' ms of occupied machine \u2014 '+(100*litMs/(litMs+idleMs)).toFixed(1)
+      +'% of the attributed interval GPU-time area is doing work'
+      +(EXACT_PASSES.length?' (grey includes unresolved stage mixtures).':'.')
     : 'GPU counters were not captured, so occupancy is unknown; rerun with --counters.';
 }
 function mHit(e){
@@ -777,7 +815,8 @@ mc.addEventListener('mousemove',(e)=>{
     +(c.p.residentThreads!==undefined
       ? '<br><b>'+Math.round(c.p.residentThreads).toLocaleString()+' resident threads</b> of '
         +HW.totalThreads.toLocaleString()+' ('+fmt(c.p.residentSlots,0)+' SIMD groups)' : '')
-    +'<br>ALU '+pct(c.p.alu,1)+' \u00b7 '+(c.p.limiter||'no limiter engaged'));
+    +'<br>ALU '+pct(c.p.alu,1)+' \u00b7 '+(c.p.limiter||'no limiter engaged')
+    +(c.p.unresolved?'<br><b>Aggregate only: recapture these labels for micro-stage identity.</b>':''));
 });
 mc.addEventListener('mouseleave',hideTip);
 mc.addEventListener('click',(e)=>{
@@ -798,7 +837,7 @@ mc.addEventListener('click',(e)=>{
     +'<div><span>limiter</span>'+(c.p.limiter||'none engaged')+'</div>'
     +'<div><span>counter samples</span>'+(c.p.counterSamples||0)+'</div>'
     +'</div>';
-  selectPass(c.p.label);
+  if(!c.p.unresolved) selectPass(c.p.label);
 });
 $('pmode').onchange=()=>{PMODE=$('pmode').value;drawPlacement();};
 $('units').onchange=()=>{UNITS=Number($('units').value);drawMachine();};

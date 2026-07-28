@@ -53,6 +53,8 @@ export interface PowerDamPassTimestampReport {
    * exactly the dispatches recorded under that label. Older records predate the
    * flag and read as unisolated, which is what they were. */
   readonly labelIsolated?: boolean;
+  /** Optional label prefixes retained by a targeted micro-stage capture. */
+  readonly labelPrefixes?: readonly string[];
   /** GPU-timeline span of the captured command buffers. */
   readonly span_ms?: number;
   /** `summedPass_ms / span_ms`; see the smoke runner for what it certifies. */

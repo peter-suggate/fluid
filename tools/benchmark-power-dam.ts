@@ -52,6 +52,10 @@ const isolatePassLabels = args.has("--isolate-pass-labels");
 if (isolatePassLabels && !passTimestamps) {
   throw new Error("--isolate-pass-labels requires --pass-timestamps; on its own it only makes the frame slower");
 }
+const pressureMicroStages = args.has("--pressure-micro-stages");
+if (pressureMicroStages && (!passTimestamps || !isolatePassLabels)) {
+  throw new Error("--pressure-micro-stages requires --pass-timestamps and --isolate-pass-labels");
+}
 if (quiescent && fineTimestamps) {
   throw new Error("--quiescent cannot use --fine-timestamps until the runner can timestamp only a trailing window");
 }
@@ -94,6 +98,13 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
         process.env.FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS ?? "25",
       FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS:
         process.env.FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS ?? "40",
+      ...(pressureMicroStages ? {
+        // Retain every split A2 stage while declining unrelated labels before
+        // they consume query slots. This fits the hardware-safe 2,048-query
+        // set even though a fully isolated advance has ~3,400 stages.
+        FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES:
+          "SPGrid accurate A2 -,SPGrid Section 6.3 -",
+      } : {}),
     } : {}),
     FLUID_ALGORITHM_DIAGNOSTICS: args.has("--algorithm-diagnostics") ? "1" : "0",
     FLUID_GPU_COMMAND_AUDIT: "1",
@@ -361,7 +372,9 @@ if (jsonOnly) {
     // otherwise a label is its group's total charged to whichever pass stayed
     // open, which is how a 0.3 ms workset publication once read as 3.6 ms.
     console.log(timestamps.labelIsolated
-      ? `compute-pass attribution: per-LABEL — every labelled compute() owned its pass, and the brackets tile ${((timestamps.coverageRatio ?? 0) * 100).toFixed(1)}% of the GPU span. Ranking is trustworthy; absolute ms is inflated by the extra pass launches, so size a saving by ablation on the wall clock (--steps=N)`
+      ? timestamps.labelPrefixes && timestamps.labelPrefixes.length > 0
+        ? `compute-pass attribution: per-LABEL FILTERED — every retained compute() owned its pass; ${timestamps.measuredPasses} samples match [${timestamps.labelPrefixes.join(", ")}], with ${timestamps.capacityOverflows} dropped for capacity. Per-label times and call counts are exact; coverage is intentionally partial because unrelated stages were not timestamped`
+        : `compute-pass attribution: per-LABEL — every labelled compute() owned its pass, and the brackets tile ${((timestamps.coverageRatio ?? 0) * 100).toFixed(1)}% of the GPU span. Ranking is trustworthy; absolute ms is inflated by the extra pass launches, so size a saving by ablation on the wall clock (--steps=N)`
       : timestamps.encoderIsolated
         ? "compute-pass attribution: encoder-isolated, and STILL NOT per-pass — splitting Metal encoders does not stop a pass staying open across later stages; add --isolate-pass-labels"
         : "compute-pass attribution: per-GROUP, not per-pass — PassBroker keeps one pass open across many compute({label}) calls and drops the later labels, so each label below is everything encoded until the next fence; add --isolate-pass-labels, or attribute by ablation on the wall clock (--steps=N)");

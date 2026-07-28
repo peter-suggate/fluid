@@ -27,6 +27,28 @@ export function passBrokerLabelIsolationRequested(
   return environment?.FLUID_GPU_ISOLATE_PASS_LABELS === "1";
 }
 
+/** Optional diagnostic scope. An empty list preserves full label isolation;
+ * prefixes isolate only transitions into, within, and out of matching stages. */
+export function passBrokerLabelIsolationPrefixes(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): readonly string[] {
+  return (environment?.FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES ?? "")
+    .split(",").map((value) => value.trim()).filter((value) => value.length > 0);
+}
+
+/** Dawn/Metal currently drops application encoder labels containing non-ASCII
+ * punctuation from xctrace, turning a named pass into `Compute Command N`.
+ * Keep the source-facing label expressive, but emit a stable printable form. */
+export function xctraceSafeComputeLabel(label: string): string {
+  return label
+    .replaceAll("·", "-")
+    .replaceAll("→", "to")
+    .replaceAll("←", "from")
+    .replaceAll("×", "x")
+    .replace(/[^\x20-\x7e]/g, "?");
+}
+
 /**
  * Lazily owns the compute pass for one GPU command encoder.
  *
@@ -42,20 +64,39 @@ export class PassBroker {
   /** Sampled per broker so a test can drive it; production reads the env once
    * per command encoder, which is not on any hot path. */
   private readonly isolateLabels: boolean;
+  private readonly isolateLabelPrefixes: readonly string[];
 
-  constructor(private readonly encoder: GPUCommandEncoder, options?: { isolateLabels?: boolean }) {
+  constructor(private readonly encoder: GPUCommandEncoder, options?: {
+    isolateLabels?: boolean;
+    isolateLabelPrefixes?: readonly string[];
+  }) {
     this.isolateLabels = options?.isolateLabels ?? passBrokerLabelIsolationRequested();
+    this.isolateLabelPrefixes = (options?.isolateLabelPrefixes
+      ?? passBrokerLabelIsolationPrefixes()).map(xctraceSafeComputeLabel);
   }
 
   /** Return the open compute pass, creating it only when necessary. */
   compute(descriptor?: GPUComputePassDescriptor): GPUComputePassEncoder {
-    if (this.isolateLabels && this.openComputePass && descriptor?.label !== undefined
-      && descriptor.label !== this.openComputePassLabel) {
+    const requestedLabel = descriptor?.label;
+    const nextLabel = requestedLabel === undefined
+      ? undefined : xctraceSafeComputeLabel(requestedLabel);
+    const emittedDescriptor = requestedLabel === nextLabel
+      ? descriptor
+      : { ...descriptor, label: nextLabel };
+    const scopedIsolation = this.isolateLabelPrefixes.length === 0
+      || this.isolateLabelPrefixes.some((prefix) =>
+        this.openComputePassLabel?.startsWith(prefix) || nextLabel?.startsWith(prefix));
+    // A targeted pass must also close before an unlabelled request; otherwise
+    // the unlabelled dispatch would silently become part of the target bucket.
+    const labelChanged = nextLabel === undefined
+      ? this.isolateLabelPrefixes.some((prefix) => this.openComputePassLabel?.startsWith(prefix))
+      : nextLabel !== this.openComputePassLabel;
+    if (this.isolateLabels && this.openComputePass && labelChanged && scopedIsolation) {
       this.fence("pass label isolation");
     }
     if (!this.openComputePass) {
-      this.openComputePass = this.encoder.beginComputePass(descriptor);
-      this.openComputePassLabel = descriptor?.label;
+      this.openComputePass = this.encoder.beginComputePass(emittedDescriptor);
+      this.openComputePassLabel = nextLabel;
       this.openedComputePassCount += 1;
     }
     return this.openComputePass;

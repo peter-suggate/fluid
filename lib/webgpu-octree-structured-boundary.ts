@@ -289,19 +289,23 @@ export class WebGPUStructuredBoundaryCoefficients {
     // anything genuinely cheap read as exactly zero. With both fixed these five
     // dispatches total 0.19 ms, matching the ~0.3 ms the wall clock measured.
     const splitPublication = process.env.FLUID_STRUCTURED_WORKSET_SPLIT === "1";
-    let publication = broker.compute({ label: "Publish dynamic structured boundary worksets" });
     const publish = (label: string, pipeline: GPUComputePipeline, group: GPUBindGroup,
       indirectOffset?: number) => {
-      if (splitPublication) { broker.fence(label); publication = broker.compute({ label }); }
+      if (splitPublication) broker.fence(label);
+      // Supplying every semantic label costs no production pass: the broker
+      // reuses its open encoder unless diagnostic label isolation is enabled.
+      // It does let a targeted xctrace split expose count/scan/scatter instead
+      // of charging their downstream tail to whichever label opened the pass.
+      const publication = broker.compute({ label });
       publication.setPipeline(pipeline); publication.setBindGroup(0, group);
       if (indirectOffset === undefined) publication.dispatchWorkgroups(1);
       else publication.dispatchWorkgroupsIndirect(this.dispatch, indirectOffset);
     };
-    publish("Workset count row classes", this.countRowClasses, groups[6]!, 0);
-    publish("Workset count family classes", this.countFamilyClasses, groups[7]!, 12);
-    publish("Workset scan blocks", this.scanWorksetBlocks, groups[8]!);
-    publish("Workset scatter rows", this.scatterRowWorksets, groups[9]!, 0);
-    publish("Workset scatter families", this.scatterFamilyWorksets, groups[10]!, 12);
+    publish("Structured boundary worksets - count row classes", this.countRowClasses, groups[6]!, 0);
+    publish("Structured boundary worksets - count family classes", this.countFamilyClasses, groups[7]!, 12);
+    publish("Structured boundary worksets - scan blocks", this.scanWorksetBlocks, groups[8]!);
+    publish("Structured boundary worksets - scatter rows", this.scatterRowWorksets, groups[9]!, 0);
+    publish("Structured boundary worksets - scatter families", this.scatterFamilyWorksets, groups[10]!, 12);
   }
 
   /** Build an inactive boundary publication from a structured candidate that
@@ -400,8 +404,16 @@ fn recordTheta(scale:f32){
  atomicAdd(&control.theta[bucket],1u);}
 @compute @workgroup_size(1)fn prepareStructuredBoundaryCandidate(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let slotCount=accepted[3];let generation=accepted[4];let bank=accepted[5];let valid=accepted[0]==${OCTREE_STRUCTURED_GPU_VALID}u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);}
 @compute @workgroup_size(1)fn prepareStructuredBoundaryAccepted(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let generation=accepted[3];let bank=accepted[4];let slotCount=accepted[5];let valid=accepted[0]==0u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);}
+fn solidAt(row:u32,x:vec3f)->f32{if(p.resolved.w==0u||solid.header[5]!=SOLID_VALID||row>=solid.header[2]){return 1e20;}let rg=geometry[rbase()+row];let q=vec3u(rg.x%p.dimensions.x,(rg.x/p.dimensions.x)%p.dimensions.y,rg.x/(p.dimensions.x*p.dimensions.y));let t=clamp((x/p.physical.x-vec3f(q))/f32(rg.y),vec3f(0),vec3f(1));var v=0.;for(var corner=0u;corner<8u;corner+=1u){let w=select(1.-t.x,t.x,(corner&1u)!=0u)*select(1.-t.y,t.y,(corner&2u)!=0u)*select(1.-t.z,t.z,(corner&4u)!=0u);v+=w*bitcast<f32>(solid.values[row*8u+corner]);}return v;}
 @compute @workgroup_size(64)fn classifyStructuredLiquidRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows){return;}let point=rowCenter(row);let coarseSample=coarseValue(point);let sample=fineSample(point,coarseSample.x);if(coarseSample.y==0.&&sample.y==0.){candidateLiquid[row]=0u;fail(row,2u);return;}candidateLiquid[row]=select(0u,1u,sample.x<0.);}
 fn handleOwner(h:u32)->u32{return a[abase()+p.offset0.x+h];}fn handleNeighbor(h:u32)->u32{return a[abase()+p.offset0.y+h];}fn handleNormal(h:u32)->vec3f{let at=abase()+p.offset1.z+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn handleCenter(h:u32)->vec3f{let at=abase()+p.offset1.w+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn sbase()->u32{return control.bank*p.counts.y;}fn lbase()->u32{return control.bank*p.counts.x;}fn liquidAt(row:u32)->u32{return liquid[lbase()+row];}
+// Lattice-origin face centroids to the centred world frame authored rigid
+// poses live in. handleCenter shares the structured centroids region,
+// which stores (cellCoord + .5*size)*h and therefore spans [0, dim*h] on
+// every axis; worldVertex in the solid vertex-SDF producer centres x and z
+// about the container. Sampling a body SDF with the uncentred point looked
+// for every body half a domain away in x and z.
+fn solidWorld(x:vec3f)->vec3f{return x-vec3f(.5*f32(p.dimensions.x)*p.physical.x,0.,.5*f32(p.dimensions.z)*p.physical.x);}
 fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.*(q.x*uv+uuv);}fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f(q.x,-q.yzw),v);}fn rigidSdf(body:RigidBody,world:vec3f)->f32{let q=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));if(shape==0){return length(q)-d.x;}if(shape==1){let b=abs(q)-.5*d;return length(max(b,vec3f(0)))+min(max(b.x,max(b.y,b.z)),0.);}if(shape==2){let cy=clamp(q.y,-.5*d.y,.5*d.y);return length(vec3f(q.x,q.y-cy,q.z))-d.x;}let radial=length(q.xz)-d.x;let axial=abs(q.y)-.5*d.y;return length(max(vec2f(radial,axial),vec2f(0)))+min(max(radial,axial),0.);}
 fn worldBoundaryBit(h:u32)->u32{if(handleNeighbor(h)!=INVALID){return 0u;}let x=handleCenter(h)/p.physical.x;let n=handleNormal(h);for(var axis=0u;axis<3u;axis+=1u){if(n[axis]<-.5&&x[axis]<=1e-4){return 1u<<(2u*axis);}if(n[axis]>.5&&x[axis]>=f32(p.dimensions[axis])-1e-4){return 1u<<(2u*axis+1u);}}return 0u;}fn closedWorld(h:u32)->bool{let bit=worldBoundaryBit(h);return bit!=0u&&(p.resolved.z&bit)!=0u;}
 // Unilateral overhead contact: the previous projection marked rows holding
@@ -421,7 +433,6 @@ fn separationFresh(row:u32,faceBit:u32)->bool{
   let age=(epoch-marked)&0x3ffffffu;
   return age<=2u;
 }
-fn solidAt(row:u32,x:vec3f)->f32{if(p.resolved.w==0u||solid.header[5]!=SOLID_VALID||row>=solid.header[2]){return 1e20;}let rg=geometry[rbase()+row];let q=vec3u(rg.x%p.dimensions.x,(rg.x/p.dimensions.x)%p.dimensions.y,rg.x/(p.dimensions.x*p.dimensions.y));let t=clamp((x/p.physical.x-vec3f(q))/f32(rg.y),vec3f(0),vec3f(1));var v=0.;for(var corner=0u;corner<8u;corner+=1u){let w=select(1.-t.x,t.x,(corner&1u)!=0u)*select(1.-t.y,t.y,(corner&2u)!=0u)*select(1.-t.z,t.z,(corner&4u)!=0u);v+=w*bitcast<f32>(solid.values[row*8u+corner]);}return v;}
 @compute @workgroup_size(64)fn resolveStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}let lo=handleOwner(h);let hi=handleNeighbor(h);if(lo>=control.rows){fail(h,4u);return;}let loPoint=rowCenter(lo);let world=worldBoundaryBit(h)!=0u;var hiPoint=handleCenter(h);if(hi!=INVALID){hiPoint=rowCenter(hi);}else if(!world){let inv=bitcast<f32>(a[abase()+p.offset0.w+h]);hiPoint=loPoint+handleNormal(h)/max(inv,1e-20);}let clo=coarseValue(loPoint);let chi=coarseValue(hiPoint);let plo=fineSample(loPoint,clo.x);let phi=fineSample(hiPoint,chi.x);if((clo.y==0.&&plo.y==0.)||(!world&&chi.y==0.&&phi.y==0.)){fail(h,8u|128u);return;}var scale=1.;
 // Ghost-fluid crossing handling covers every orientation the moving front
 // produces. A band row's centre may legitimately sit on the dry side of its
@@ -457,7 +468,7 @@ if(boundaryBit!=0u&&(p.resolved.z&boundaryBit)!=0u){
   aperture=select(0.,1.,separationFresh(lo,boundaryBit));
 }
 recordTheta(scale);candidates[h]=vec2f(aperture,scale);}
-@compute @workgroup_size(64)fn resolveStructuredSolidSlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}let lo=handleOwner(h);let hi=handleNeighbor(h);if(lo>=control.rows){fail(h,4u);return;}let x=handleCenter(h);let n=handleNormal(h);let inv=bitcast<f32>(a[abase()+p.offset0.w+h]);let half=.5/max(inv,1e-20);var aperture=candidates[h].x;if(aperture>0.&&p.resolved.w!=0u){let sdf=min(solidAt(lo,x),select(1e20,solidAt(hi,x),hi!=INVALID));if(!finite(sdf)){fail(h,16u);return;}aperture=clamp(.5+sdf/max(p.physical.x,1e-20),0.,1.);}var best=1e20;var normalVelocity=0.;for(var body=0u;body<p.dimensions.w;body+=1u){if(body>=arrayLength(&rigidBodies)){fail(h,32u);return;}let rb=rigidBodies[body];let sdf=rigidSdf(rb,x);if(sdf<half&&sdf<best){best=sdf;normalVelocity=dot(rb.linearVelocity.xyz+cross(rb.angularVelocity.xyz,x-rb.positionShape.xyz),n);}}candidateSolidVelocity[h]=normalVelocity;candidates[h]=vec2f(aperture,candidates[h].y);}
+@compute @workgroup_size(64)fn resolveStructuredSolidSlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}let lo=handleOwner(h);let hi=handleNeighbor(h);if(lo>=control.rows){fail(h,4u);return;}let x=handleCenter(h);let n=handleNormal(h);let inv=bitcast<f32>(a[abase()+p.offset0.w+h]);let half=.5/max(inv,1e-20);var aperture=candidates[h].x;if(aperture>0.&&p.resolved.w!=0u){let sdf=min(solidAt(lo,x),select(1e20,solidAt(hi,x),hi!=INVALID));if(!finite(sdf)){fail(h,16u);return;}aperture=clamp(.5+sdf/max(p.physical.x,1e-20),0.,1.);}let world=solidWorld(x);var best=1e20;var normalVelocity=0.;for(var body=0u;body<p.dimensions.w;body+=1u){if(body>=arrayLength(&rigidBodies)){fail(h,32u);return;}let rb=rigidBodies[body];let sdf=rigidSdf(rb,world);if(sdf<half&&sdf<best){best=sdf;normalVelocity=dot(rb.linearVelocity.xyz+cross(rb.angularVelocity.xyz,world-rb.positionShape.xyz),n);}}candidateSolidVelocity[h]=normalVelocity;candidates[h]=vec2f(aperture,candidates[h].y);}
 @compute @workgroup_size(64)fn commitStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=g.x;if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}a[abase()+p.offset1.x+h]=bitcast<u32>(candidates[h].x);a[abase()+p.offset1.y+h]=bitcast<u32>(candidates[h].y);solidVelocity[sbase()+h]=candidateSolidVelocity[h];}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}
 fn channelForCatalogSlot(global:u32)->u32{if(global>=arrayLength(&catalogSlots)){return INVALID;}let slot=catalogSlots[global];let direction=vec3i(round(slot.areaCentroid.yzw+.5*slot.normalInverseDistance.xyz));for(var channel=0u;channel<18u;channel+=1u){if(all(direction==canonicalDirection(channel))){return channel+1u;}}return INVALID;}
@@ -493,9 +504,11 @@ fn worksetBase(cls:u32)->u32{return control.bank*p.pad.y+cls*p.pad.x;}
 // count writes classes 0..4 at row-block indices and the slot count writes
 // classes 5..8 at slot-block indices.
 const WORKSET_SKIP:u32=0xffffffffu;
-var<workgroup> worksetBlockClass:array<u32,64>;
-var<workgroup> worksetScan:array<u32,256>;
-var<workgroup> worksetGate:u32;
+    var<workgroup> worksetBlockClass:array<u32,64>;
+    var<workgroup> worksetScan:array<u32,256>;
+    var<workgroup> worksetGate:u32;
+    var<workgroup> worksetLiveRowBlocks:u32;
+    var<workgroup> worksetLiveSlotBlocks:u32;
 fn worksetPublicationEnabled()->bool{return atomicLoad(&control.flags)==0u&&control.rows>0u&&control.published==control.epoch;}
 fn worksetBlockStride()->u32{return (max(p.counts.x,p.counts.y)+63u)/64u;}
 fn worksetSlotClassBase()->u32{return p.counts.x;}
@@ -521,19 +534,22 @@ fn worksetBlockOffset(lane:u32)->u32{let cls=worksetBlockClass[lane];var n=0u;fo
  workgroupBarrier();
  if(lane>=5u&&lane<9u){worksetBlocks[lane*worksetBlockStride()+wg.x]=worksetBlockTotal(lane);}
 }
-@compute @workgroup_size(256)fn scanStructuredWorksetBlocks(@builtin(local_invocation_index)lane:u32){
- if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());}
- if(workgroupUniformLoad(&worksetGate)==0u){return;}
+    @compute @workgroup_size(256)fn scanStructuredWorksetBlocks(@builtin(local_invocation_index)lane:u32){
+     if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());worksetLiveRowBlocks=(control.rows+63u)/64u;worksetLiveSlotBlocks=(control.slots+63u)/64u;}
+     if(workgroupUniformLoad(&worksetGate)==0u){return;}
  // Every barrier below is reached under bounds derived from the uniform p, so
  // the loop trip counts are uniform even though the live-element predicate is
- // not; out-of-range blocks contribute a zero and never gate a barrier.
- let stride=worksetBlockStride();
- let rowBlocks=(control.rows+63u)/64u;
- let slotBlocks=(control.slots+63u)/64u;
+     // not; out-of-range blocks contribute a zero and never gate a barrier.
+     let stride=worksetBlockStride();
+     let rowBlocks=workgroupUniformLoad(&worksetLiveRowBlocks);
+     let slotBlocks=workgroupUniformLoad(&worksetLiveSlotBlocks);
  for(var cls=0u;cls<9u;cls+=1u){
   let blocks=select(rowBlocks,slotBlocks,cls>=5u);
   var carry=0u;
-  for(var start=0u;start<stride;start+=256u){
+     // blocks is uniform and describes the live publication. Iterating to
+     // the capacity-derived stride made mini scan 1,920 block slots per
+     // class although only ~24 row / ~188 family blocks contained work.
+     for(var start=0u;start<blocks;start+=256u){
    let at=start+lane;
    let live=at<blocks;
    var value=0u;if(live){value=worksetBlocks[cls*stride+at];}

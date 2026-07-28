@@ -107,6 +107,12 @@ test("dynamic workset publication is wide and its destinations stay index-ordere
   assert.match(structuredBoundaryCoefficientWGSL,
     /countStructuredFamilyClasses[\s\S]*?if\(lane>=5u&&lane<9u\)\{worksetBlocks\[lane\*worksetBlockStride\(\)\+wg\.x\]/,
     "the family count must publish only classes 5..8 so it cannot clobber row blocks");
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /let blocks=select\(rowBlocks,slotBlocks,cls>=5u\);[\s\S]*for\(var start=0u;start<blocks;start\+=256u\)/,
+    "the ordered scan must visit live blocks rather than its capacity stride");
+  assert.doesNotMatch(structuredBoundaryCoefficientWGSL,
+    /for\(var start=0u;start<stride;start\+=256u\)/,
+    "unused capacity blocks must not consume scan tiles");
   // A row's 19-channel class is the expensive part; it must be read from the
   // cache the row phase filled rather than recomputed per incident slot.
   assert.match(structuredBoundaryCoefficientWGSL,

@@ -2158,6 +2158,8 @@ interface GPUPassTimestampReport {
   /** Every labelled `compute()` got its own pass, so a label's dispatches are
    * exactly the dispatches recorded under that label. */
   labelIsolated: boolean;
+  /** Optional prefixes retained before query slots are allocated. */
+  labelPrefixes?: readonly string[];
   /** Wall span of the captured command buffers on the GPU timeline: last
    * timestamp minus first. */
   span_ms: number;
@@ -2182,7 +2184,8 @@ class GPUPassTimestampEncoderSession {
   private queryCount = 0;
   private capacityOverflows = 0;
 
-  constructor(private readonly device: GPUDevice, private readonly capacity: number) {
+  constructor(private readonly device: GPUDevice, private readonly capacity: number,
+    private readonly labelPrefixes: readonly string[] = []) {
     this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
     this.resolveBuffer = device.createBuffer({
       label: "Algorithm pass timestamps resolve",
@@ -2197,6 +2200,9 @@ class GPUPassTimestampEncoderSession {
   }
 
   computePassDescriptor(descriptor?: GPUComputePassDescriptor): GPUComputePassDescriptor | undefined {
+    const label = descriptor?.label?.trim() || "<unlabeled compute pass>";
+    if (this.labelPrefixes.length > 0
+      && !this.labelPrefixes.some((prefix) => label.startsWith(prefix))) return descriptor;
     if (descriptor?.timestampWrites) {
       // Never overwrite the solver's semantic recorder. Diagnostic runs turn
       // that recorder off, but retaining this guard makes the two facilities
@@ -2207,7 +2213,6 @@ class GPUPassTimestampEncoderSession {
       this.capacityOverflows += 1;
       return descriptor;
     }
-    const label = descriptor?.label?.trim() || "<unlabeled compute pass>";
     const beginningOfPassWriteIndex = this.queryCount;
     const endOfPassWriteIndex = this.queryCount + 1;
     this.queryCount += 2;
@@ -2283,6 +2288,7 @@ class GPUPassTimestampAudit {
     private readonly encoderIsolated = false,
     private readonly labelIsolated = false,
     private readonly skipCommandBuffers = 0,
+    private readonly labelPrefixes: readonly string[] = [],
   ) {}
 
   start(): void { this.enabled = true; }
@@ -2298,7 +2304,7 @@ class GPUPassTimestampAudit {
       return undefined;
     }
     this.claimedCommandBuffers += 1;
-    return new GPUPassTimestampEncoderSession(this.device, this.queryCapacity);
+    return new GPUPassTimestampEncoderSession(this.device, this.queryCapacity, this.labelPrefixes);
   }
 
   attach(commandBuffer: GPUCommandBuffer, session: GPUPassTimestampEncoderSession): void {
@@ -2346,6 +2352,7 @@ class GPUPassTimestampAudit {
       summedPass_ms,
       encoderIsolated: this.encoderIsolated,
       labelIsolated: this.labelIsolated,
+      ...(this.labelPrefixes.length > 0 ? { labelPrefixes: this.labelPrefixes } : {}),
       span_ms,
       coverageRatio: span_ms > 0 ? summedPass_ms / span_ms : 0,
       byLabel,
@@ -2887,12 +2894,19 @@ async function runGPU(
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
   const commandAudit = gpuCommandAuditRequested ? new GPUCommandAudit() : undefined;
   const dataFlowAudit = genericPhaseTraceRequested ? new GPUDataFlowAudit() : undefined;
+  const requestedPassTimestampQueryCapacity = Number(
+    process.env.FLUID_GPU_PASS_TIMESTAMP_QUERY_CAPACITY ?? 2048);
+  const passTimestampQueryCapacity = Number.isFinite(requestedPassTimestampQueryCapacity)
+    ? Math.max(2, 2 * Math.floor(requestedPassTimestampQueryCapacity / 2)) : 2048;
+  const passTimestampLabelPrefixes = (process.env.FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES ?? "")
+    .split(",").map((value) => value.trim()).filter((value) => value.length > 0);
   const passTimestampAudit = gpuPassTimestampRequested
     && device.features.has("timestamp-query")
     ? new GPUPassTimestampAudit(device, Math.max(1,
       Math.floor(Number(process.env.FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS ?? 1))),
-    undefined, gpuIsolatePassEncodersRequested, gpuIsolatePassLabelsRequested,
-    Math.max(0, Math.floor(Number(process.env.FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS ?? 0))))
+    passTimestampQueryCapacity, gpuIsolatePassEncodersRequested, gpuIsolatePassLabelsRequested,
+    Math.max(0, Math.floor(Number(process.env.FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS ?? 0))),
+    passTimestampLabelPrefixes)
     : undefined;
   // Only ever paired with the pass timestamps it exists to make honest; on its
   // own it would just be a slower frame.

@@ -117,3 +117,25 @@ test("published-directory miss is air only after every requested sorted row publ
     "coarse publication must be a fixed-record sorted reduction, not a hash or atomic append");
   assert.match(octreeProjectionShader, /A miss in a valid directory is the[\s\S]*explicit positive-air complement/);
 });
+
+test("an unavailable liquid authority rejects the frontier candidate instead of publishing an empty topology", () => {
+  // liquidOwner has no third state: when correctedCoarsePhi reports no
+  // authority it answers "air". Publishing a transaction encoded against a
+  // missing authority therefore classifies the whole domain dry, carries no
+  // row, emits no candidate, and lands on a zero-row topology -- which is
+  // terminal, because dirty marking only visits ACTIVE tiles, so a zero-row
+  // topology can never dirty a tile again and never re-refines.
+  assert.match(octreeProjectionShader,
+    /fn liquidAuthorityAvailable\(\)->bool\{\s*if\(bootstrapPhiEnabled\(\)\)\{return true;\}\s*return coarseDirectoryAuthority\(\);\s*\}/,
+    "the bootstrap authorities answer from closed form or the uploaded dense SDF and never consult the directory");
+  assert.match(octreeProjectionShader,
+    /var matched=0u;var invalid=select\(0u,1u,candidateCount>frontierListCapacity\(\)\s*\|\|required>frontierListCapacity\(\)\|\|!liquidAuthorityAvailable\(\)\)/,
+    "frontier finalization must fold the liquid authority into its rejection predicate");
+  // The rejection path retains the previous selector: it never assigns
+  // frontier[7] and never writes frontier[next], so the last complete topology
+  // survives and the next generation retries once the coarse publication has
+  // caught up.
+  assert.match(octreeProjectionShader,
+    /if\(!valid\)\{[\s\S]*frontier\[9\]=4u;\s*compaction\[11\]=FRONTIER_FAILED_MAGIC;[\s\S]*?return;\s*\}\s*frontier\[next\]=required;\s*frontier\[7\]=next;/,
+    "a rejected candidate must not flip the immutable frontier selector");
+});

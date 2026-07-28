@@ -33,9 +33,29 @@
  *                                     attaching, so the window lands in steady
  *                                     state (default: 60% of the expected run)
  *   --out=DIR                         artifact directory
- *   --baseline / --no-baseline        run an untraced pass first to quantify
- *                                     tracing distortion (default on)
+ *   --baseline / --no-baseline        run the clean, non-isolated shipping
+ *                                     graph first to quantify total profiling
+ *                                     distortion (default on)
+ *   --isolate-pass-labels             give every labelled compute stage its
+ *                                     own pass, so counters and encoder time
+ *                                     identify micro-stages exactly. This is
+ *                                     an experimental utilization stream, not
+ *                                     the untouched shipping command graph.
+ *   --isolate-label-prefix=PREFIX     split only transitions into, within, and
+ *                                     out of PREFIX, keeping a targeted micro
+ *                                     trace small enough for Instruments.
  *   --keep-xml                        retain the exported XML tables
+ *   --gpu-report-only                 omit CPU sampling and shader-profiler
+ *                                     exports from a GPU utilization report
+ *   --discard-tables                  delete derived NDJSON tables after the
+ *                                     self-contained HTML/JSON report is built
+ *   --discard-trace                   delete the source .trace after the report
+ *                                     is built; keep it on failed reductions
+ *
+ * Every Dawn entrypoint in the repo serialises on `/tmp/fluid-webgpu-exclusive.lock`,
+ * and that path is absolute, so a benchmark running out of any other checkout
+ * excludes this capture too. The profiler checks the lock before it spends
+ * anything, and names the holder when it finds one.
  *
  * Do NOT reach for xctrace's `--window`: it discards the metadata streams that
  * are recorded when the process starts, which erases every Metal object label
@@ -54,6 +74,10 @@ import {
   powerDamLaneWithSteps,
   type PowerDamRuntimeLane,
 } from "./power-dam-lane-environment";
+import {
+  readWebGPUExclusiveLockHolder,
+  WEBGPU_EXCLUSIVE_LOCK,
+} from "./webgpu-smoke-isolation";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
 import { buildFrameReport, renderFrameReportHtml } from "./xctrace-frame-report";
 
@@ -70,10 +94,17 @@ if (!(lane in POWER_DAM_LANE_ENVIRONMENT)) {
 const steps = flag("steps") === undefined ? undefined : Number(flag("steps"));
 const counters = process.argv.includes("--counters");
 const counterSeconds = Number(flag("counter-seconds") ?? 2);
+const counterTimeLimit = Number.isInteger(counterSeconds)
+  ? `${counterSeconds}s` : `${Math.round(counterSeconds * 1000)}ms`;
 const requestedWarmupSeconds = flag("counter-warmup") === undefined
   ? undefined : Number(flag("counter-warmup"));
 const runBaseline = !process.argv.includes("--no-baseline");
+const isolatePassLabels = process.argv.includes("--isolate-pass-labels");
+const isolateLabelPrefix = flag("isolate-label-prefix")?.trim();
 const keepXml = process.argv.includes("--keep-xml");
+const gpuReportOnly = process.argv.includes("--gpu-report-only");
+const discardTables = process.argv.includes("--discard-tables");
+const discardTrace = process.argv.includes("--discard-trace");
 const outputDirectory = resolve(root, flag("out") ?? "artifacts/xctrace-mini-dam");
 
 // ---- Counter window planning ----------------------------------------------
@@ -190,7 +221,22 @@ const profileEnvironment: Record<string, string> = {
   FLUID_PERFORMANCE_PROFILE: "1",
   FLUID_PERFORMANCE_TRACES: "0",
   FLUID_GPU_FINE_TIMESTAMPS: "0",
-  FLUID_GPU_PASS_TIMESTAMPS: "0",
+  // Timestamping supplies the diagnostic encoder-isolation scratch. Only one
+  // filtered command buffer is retained; xctrace remains the counter source.
+  FLUID_GPU_PASS_TIMESTAMPS: isolatePassLabels ? "1" : "0",
+  // Diagnostic micro-stage mode: PassBroker normally keeps one compute pass
+  // open across several labelled stages, so Metal only retains the first
+  // label. Isolation makes each label a real encoder/counter attribution unit.
+  FLUID_GPU_ISOLATE_PASS_LABELS: isolatePassLabels ? "1" : "0",
+  FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES: isolatePassLabels && isolateLabelPrefix
+    ? isolateLabelPrefix : "",
+  // Instruments attributes counters to Metal encoders, and Dawn may merge
+  // several distinct WebGPU passes into one encoder. Combined with label
+  // isolation, this makes one micro-stage equal one counter attribution unit.
+  FLUID_GPU_ISOLATE_PASS_ENCODERS: isolatePassLabels ? "1" : "0",
+  FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS: "1",
+  FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES:
+    isolateLabelPrefix ?? "Fine JFA -,SPGrid accurate A2 -,SPGrid Section 6.3 -",
   FLUID_ALGORITHM_DIAGNOSTICS: "0",
   FLUID_GPU_COMMAND_AUDIT: "1",
   FLUID_STABILITY_ENVELOPE: "0",
@@ -203,6 +249,19 @@ const profileEnvironment: Record<string, string> = {
   FLUID_TRIPWIRES: "1",
   ...laneEnvironment,
 };
+/** Shipping command graph used as the wall-clock control. A targeted capture
+ * intentionally adds pass/Metal-encoder boundaries, so comparing it with an
+ * untraced run that kept those boundaries would conceal the main measurement
+ * distortion the user needs to see. */
+const cleanBaselineEnvironment: Record<string, string> = {
+  ...profileEnvironment,
+  FLUID_GPU_PASS_TIMESTAMPS: "0",
+  FLUID_GPU_ISOLATE_PASS_LABELS: "0",
+  FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES: "",
+  FLUID_GPU_ISOLATE_PASS_ENCODERS: "0",
+  FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS: "0",
+  FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES: "",
+};
 
 export interface SmokeResultRecord {
   readonly simulationWall_ms?: number;
@@ -213,7 +272,12 @@ export interface SmokeResultRecord {
 
 interface WorkerHandle {
   readonly pid: number;
-  /** Resolves when the solver has finished construction and is stepping. */
+  /**
+   * Resolves when the solver has finished construction and is stepping, and
+   * rejects if it exits before getting there. It must never resolve on a
+   * premature exit: what waits on it goes on to attach Instruments, and
+   * attaching to a dead pid costs the whole capture and reports nothing.
+   */
   readonly constructed: Promise<void>;
   readonly finished: Promise<SmokeResultRecord | undefined>;
   /**
@@ -221,27 +285,49 @@ interface WorkerHandle {
    * A counter window is only meaningful if it lies between these two.
    */
   readonly timing: { steppingStartedAt?: number; steppingEndedAt?: number };
+  /**
+   * Terminate the worker if it is still running. The profiler owns a solver
+   * that holds the machine-wide GPU lock, so any path that abandons a capture
+   * has to take the solver with it rather than leave it stepping.
+   */
+  readonly stop: () => void;
 }
+
+/** How much of a failed worker's output to quote; the reason is at the end. */
+const OUTPUT_TAIL_LINES = 12;
+
+const quoteTail = (tail: readonly string[]): string => (tail.length === 0 ? ""
+  : `\n${tail.map((line) => `  | ${line.slice(0, 240)}`).join("\n")}`);
 
 /** Spawn the worker, forwarding output to `logPath`. */
 const startWorker = (
   argv: readonly string[],
   logPath: string,
   label: string,
+  environment: Readonly<Record<string, string>> = profileEnvironment,
 ): WorkerHandle => {
   const log = createWriteStream(logPath);
   const child = spawn(argv[0], argv.slice(1), {
     cwd: root,
-    env: { ...process.env, ...profileEnvironment },
+    env: { ...process.env, ...environment },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let result: SmokeResultRecord | undefined;
   let announceConstructed: () => void = () => {};
-  const constructed = new Promise<void>((done) => { announceConstructed = done; });
+  let abandonConstruction: (reason: Error) => void = () => {};
+  const constructed = new Promise<void>((done, fail) => {
+    announceConstructed = done;
+    abandonConstruction = fail;
+  });
   const timing: { steppingStartedAt?: number; steppingEndedAt?: number } = {};
-  const lines = createInterface({ input: child.stdout });
-  lines.on("line", (line) => {
+  const tail: string[] = [];
+  const absorb = (line: string): void => {
     log.write(`${line}\n`);
+    tail.push(line);
+    if (tail.length > OUTPUT_TAIL_LINES) tail.shift();
+  };
+  createInterface({ input: child.stdout }).on("line", (line) => {
+    absorb(line);
     if (!line.startsWith("{")) return;
     try {
       const record = JSON.parse(line) as { phase?: string } & SmokeResultRecord;
@@ -253,25 +339,56 @@ const startWorker = (
       }
     } catch { /* progress lines are not all JSON */ }
   });
-  child.stderr.pipe(log);
+  createInterface({ input: child.stderr }).on("line", absorb);
+  let running = true;
   const finished = new Promise<SmokeResultRecord | undefined>((done, fail) => {
-    child.once("error", fail);
-    child.once("exit", (status, signal) => {
+    child.once("error", (error) => {
+      running = false;
+      abandonConstruction(error);
+      fail(error);
+    });
+    // `close` rather than `exit`: it fires once the worker's output has drained
+    // too, which is the only point at which the quoted tail holds the reason
+    // the run ended.
+    child.once("close", (status, signal) => {
+      running = false;
       log.end();
-      announceConstructed();
-      if (signal) fail(new Error(`${label} exited from ${signal}`));
-      else if (status !== 0) fail(new Error(`${label} exited with ${status}; see ${logPath}`));
-      else done(result);
+      const startupFailure = tail.some((line) => line.includes("Refusing concurrent GPU execution"))
+        ? `${label} never started: another GPU run holds ${WEBGPU_EXCLUSIVE_LOCK}.`
+          + " Dawn runs are serialised machine-wide, across checkouts as well as within one;"
+          + ` wait for the holder to finish, then rerun. See ${logPath}`
+        : undefined;
+      const failure = signal !== null ? new Error(`${label} exited from ${signal}${quoteTail(tail)}`)
+        : status !== 0
+          ? new Error((startupFailure ?? `${label} exited with ${status}; see ${logPath}`)
+            + quoteTail(tail))
+          : undefined;
+      if (failure) { abandonConstruction(failure); fail(failure); }
+      else { announceConstructed(); done(result); }
     });
   });
-  return { pid: child.pid ?? -1, constructed, finished, timing };
+  // Both promises can reject long before anything awaits them -- a worker that
+  // dies during startup rejects `finished` while the profiler is still waiting
+  // on `constructed`, and that used to take the profiler down as an unhandled
+  // rejection whose stack named this line rather than the cause. Marking them
+  // handled here costs nothing: the rejection is still delivered to whoever
+  // awaits them.
+  constructed.catch(() => {});
+  finished.catch(() => {});
+  return { pid: child.pid ?? -1, constructed, finished, timing, stop: () => {
+    // SIGTERM, not SIGKILL: the worker's handler releases the exclusive lock,
+    // whereas a killed worker leaves it behind as owner evidence for a human.
+    if (running) child.kill("SIGTERM");
+  } };
 };
 
 const runWorker = async (
   argv: readonly string[],
   logPath: string,
   label: string,
-): Promise<SmokeResultRecord | undefined> => startWorker(argv, logPath, label).finished;
+  environment?: Readonly<Record<string, string>>,
+): Promise<SmokeResultRecord | undefined> =>
+  startWorker(argv, logPath, label, environment).finished;
 
 const delay = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
 
@@ -280,13 +397,32 @@ const delay = (ms: number): Promise<void> => new Promise((done) => { setTimeout(
 
 const TABLES: readonly {
   schema: string; file: string; stacks?: boolean; countersOnly?: boolean;
+  gpuReportOptional?: boolean; columns: readonly string[];
 }[] = [
-  { schema: "metal-gpu-intervals", file: "gpu-intervals" },
-  { schema: "metal-application-encoders-list", file: "encoders" },
-  { schema: "time-profile", file: "time-profile", stacks: true },
-  { schema: "gpu-counter-info", file: "counter-info", countersOnly: true },
-  { schema: "gpu-counter-value", file: "counter-value", countersOnly: true },
-  { schema: "metal-shader-profiler-intervals", file: "shader-profile", countersOnly: true },
+  {
+    schema: "metal-gpu-intervals", file: "gpu-intervals",
+    columns: ["start", "duration", "channel-name", "event-label", "process", "encoder-id"],
+  },
+  {
+    schema: "metal-application-encoders-list", file: "encoders",
+    columns: ["encoder-id", "encoder-label", "process"],
+  },
+  {
+    schema: "time-profile", file: "time-profile", stacks: true, gpuReportOptional: true,
+    columns: ["time", "process", "thread", "thread-state"],
+  },
+  {
+    schema: "gpu-counter-info", file: "counter-info", countersOnly: true,
+    columns: ["counter-id", "name", "type", "sample-interval"],
+  },
+  {
+    schema: "gpu-counter-value", file: "counter-value", countersOnly: true,
+    columns: ["timestamp", "counter-id", "value", "ring-buffer-index"],
+  },
+  {
+    schema: "metal-shader-profiler-intervals", file: "shader-profile", countersOnly: true,
+    gpuReportOptional: true, columns: ["start", "label", "pso-label"],
+  },
 ];
 
 const run = (
@@ -323,6 +459,27 @@ const intervalOwners = async (ndjson: string): Promise<Map<string, number>> => {
   return tally;
 };
 
+/**
+ * Refuse to start while another Dawn run owns the machine.
+ *
+ * Every GPU entrypoint in the repo serialises on one absolute-path lock, so the
+ * holder can be any checkout -- a benchmark running out of a scratch copy
+ * counts. A capture is minutes of work whose first second is what fails, and it
+ * fails inside the worker, where the only signal reaching the profiler is a
+ * non-zero exit. Asking up front turns that into one actionable line.
+ */
+const requireExclusiveGPU = async (): Promise<void> => {
+  const holder = await readWebGPUExclusiveLockHolder();
+  if (holder === undefined) return;
+  throw new Error(holder.alive
+    ? `another GPU run holds ${WEBGPU_EXCLUSIVE_LOCK}: ${holder.description}.`
+      + " Dawn runs are serialised machine-wide, across checkouts as well as within one;"
+      + " wait for it to finish or stop it, then rerun."
+    : `${WEBGPU_EXCLUSIVE_LOCK} was left behind by ${holder.description}.`
+      + " Confirm no Dawn or browser GPU run is active, then remove it:"
+      + ` rm -rf ${WEBGPU_EXCLUSIVE_LOCK}`);
+};
+
 const main = async (): Promise<void> => {
   mkdirSync(outputDirectory, { recursive: true });
   const tracePath = `${outputDirectory}/mini-dam.trace`;
@@ -330,19 +487,30 @@ const main = async (): Promise<void> => {
 
   console.log(`lane ${lane}: ${profileEnvironment.FLUID_ORACLE_STEPS} advances`
     + ` of ${profileEnvironment.FLUID_SCENE} at grid ${profileEnvironment.FLUID_EXPECT_GRID}`);
+  if (isolatePassLabels) {
+    console.log(
+      isolateLabelPrefix
+        ? `  micro-stage attribution: only "${isolateLabelPrefix}" transitions are Metal-encoder-isolated`
+        : "  micro-stage attribution: label- and Metal-encoder-isolated passes"
+          + " (utilization experiment; not shipping wall clock)",
+    );
+  }
   if (sizingPlan?.extended) {
     console.log(`  run extended from ${requestedSteps} to ${sizingPlan.steps} advances:`
       + ` a ${counterSeconds} s counter window plus Instruments' ${ATTACH_LATENCY_S} s attach`
       + " does not fit inside a shorter stepping phase");
   }
 
+  await requireExclusiveGPU();
+
   let baseline: SmokeResultRecord | undefined;
   if (runBaseline) {
-    console.log("recording untraced baseline (establishes the tracing distortion factor)...");
+    console.log("recording clean non-isolated baseline (shipping wall-clock control)...");
     baseline = await runWorker(
       [nodeBinary, "--import", "tsx", worker],
       `${outputDirectory}/baseline.log`,
       "baseline",
+      cleanBaselineEnvironment,
     );
     if (baseline?.simulationWall_ms && baseline.steps) {
       console.log(`  baseline: ${(baseline.simulationWall_ms / baseline.steps).toFixed(2)}`
@@ -384,21 +552,28 @@ const main = async (): Promise<void> => {
       [nodeBinary, "--import", "tsx", worker], `${outputDirectory}/traced.log`, "traced",
     );
     tracedPid = handle.pid;
-    await handle.constructed;
-    await delay(plan.spawnDelaySeconds * 1000);
     let recordingStartedAt: number | undefined;
-    await run(["xcrun", "xctrace", "record",
-      "--template", "Metal System Trace",
-      "--instrument", "Metal GPU Counters",
-      "--output", tracePath, "--no-prompt",
-      "--time-limit", `${counterSeconds}s`,
-      "--attach", String(handle.pid)], (line) => {
-      if (recordingStartedAt === undefined && /Ctrl-C to stop the recording/.test(line)) {
-        recordingStartedAt = Date.now();
-      }
-    });
-    console.log("  counter window captured; waiting for the run to finish...");
-    traced = await handle.finished;
+    try {
+      await handle.constructed;
+      await delay(plan.spawnDelaySeconds * 1000);
+      await run(["xcrun", "xctrace", "record",
+        "--template", "Metal System Trace",
+        "--instrument", "Metal GPU Counters",
+        "--output", tracePath, "--no-prompt",
+        "--time-limit", counterTimeLimit,
+        "--attach", String(handle.pid)], (line) => {
+        if (recordingStartedAt === undefined && /Ctrl-C to stop the recording/.test(line)) {
+          recordingStartedAt = Date.now();
+        }
+      });
+      console.log("  counter window captured; waiting for the run to finish...");
+      traced = await handle.finished;
+    } catch (error) {
+      // The solver outlives us otherwise, holding the machine-wide GPU lock,
+      // and the next run then fails for a reason that has nothing to do with it.
+      handle.stop();
+      throw error;
+    }
 
     // Where the window actually landed. Everything about an attached counter
     // run depends on this overlapping the stepping phase, and when it does not
@@ -443,22 +618,54 @@ const main = async (): Promise<void> => {
   const tables: Record<string, string> = {};
   for (const table of TABLES) {
     if (table.countersOnly && !counters) continue;
+    if (table.gpuReportOptional && gpuReportOnly) continue;
     const xml = `${outputDirectory}/${table.file}.xml`;
     const ndjson = `${outputDirectory}/${table.file}.ndjson`;
-    await run(["xcrun", "xctrace", "export", "--input", tracePath,
-      "--xpath", `/trace-toc/run[@number="1"]/data/table[@schema="${table.schema}"]`,
-      "--output", xml]);
+    const exportArguments = ["xctrace", "export", "--input", tracePath,
+      "--xpath", `/trace-toc/run[@number="1"]/data/table[@schema="${table.schema}"]`];
+    let exportProcess: ReturnType<typeof spawn> | undefined;
+    let exportCompleted: Promise<void> | undefined;
+    let source: string | AsyncIterable<string> = xml;
+    if (keepXml) {
+      await run(["xcrun", ...exportArguments, "--output", xml]);
+    } else {
+      // xctrace writes XML to stdout when --output is omitted. Parse that
+      // stream directly: counter tables approach a gigabyte even for a short
+      // window, and the report never needs a materialised XML copy.
+      exportProcess = spawn("xcrun", exportArguments,
+        { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+      const exportStdout = exportProcess.stdout;
+      const exportStderr = exportProcess.stderr;
+      if (!exportStdout || !exportStderr) throw new Error("xctrace export pipes unavailable");
+      exportStdout.setEncoding("utf8");
+      let stderr = "";
+      exportStderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      exportCompleted = new Promise((done, fail) => {
+        exportProcess?.once("exit", (code) => (code === 0 ? done()
+          : fail(new Error(`xctrace export ${table.schema} failed (${code}):`
+            + ` ${stderr.slice(0, 400)}`))));
+        exportProcess?.once("error", fail);
+      });
+      source = exportStdout as AsyncIterable<string>;
+    }
     const batch: string[] = [];
     const sink = createWriteStream(ndjson);
     let rows = 0;
-    for await (const row of parseTraceTable(xml, { stacks: table.stacks })) {
-      batch.push(JSON.stringify(row));
-      rows += 1;
-      if (batch.length >= 4096) { sink.write(`${batch.join("\n")}\n`); batch.length = 0; }
+    try {
+      for await (const row of parseTraceTable(source, {
+        stacks: table.stacks,
+        columns: table.columns,
+      })) {
+        batch.push(JSON.stringify(row));
+        rows += 1;
+        if (batch.length >= 4096) { sink.write(`${batch.join("\n")}\n`); batch.length = 0; }
+      }
+      if (exportCompleted) await exportCompleted;
+    } finally {
+      if (exportProcess?.exitCode === null) exportProcess.kill("SIGTERM");
     }
     if (batch.length > 0) sink.write(`${batch.join("\n")}\n`);
     await new Promise((done) => sink.end(done));
-    if (!keepXml) rmSync(xml, { force: true });
     tables[table.file] = ndjson;
     console.log(`  ${table.schema}: ${rows} rows`);
     if (table.file === "gpu-intervals" && tracedPid !== undefined) {
@@ -489,13 +696,23 @@ const main = async (): Promise<void> => {
   });
   await writeFile(`${outputDirectory}/summary.json`, `${JSON.stringify(report, null, 2)}\n`);
   await writeFile(`${outputDirectory}/report.html`, renderFrameReportHtml(report));
+  if (discardTables) {
+    for (const path of Object.values(tables)) rmSync(path, { force: true });
+    console.log(discardTrace
+      ? "discarded derived trace tables; the self-contained report is retained"
+      : "discarded derived trace tables; the report and source trace are retained");
+  }
+  if (discardTrace) {
+    rmSync(tracePath, { recursive: true, force: true });
+    console.log("discarded source trace after the self-contained report was built");
+  }
 
   console.log("");
   for (const line of report.console) console.log(line);
   console.log("");
   console.log(`report:  ${outputDirectory}/report.html`);
   console.log(`summary: ${outputDirectory}/summary.json`);
-  console.log(`trace:   ${tracePath}   (open with: open ${tracePath})`);
+  if (!discardTrace) console.log(`trace:   ${tracePath}   (open with: open ${tracePath})`);
 };
 
 // Only capture when run as a program. Importing this module -- a test reaching
@@ -503,4 +720,12 @@ const main = async (): Promise<void> => {
 const isMain = process.argv[1] !== undefined
   && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 
-if (isMain) await main();
+if (isMain) {
+  // The interesting failures here -- a held GPU lock, a window that missed the
+  // stepping phase -- are diagnoses, not defects in this file. Print the
+  // diagnosis; a stack trace through the spawn plumbing only buries it.
+  await main().catch((error: unknown) => {
+    console.error(`\nprofile aborted: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
+}
