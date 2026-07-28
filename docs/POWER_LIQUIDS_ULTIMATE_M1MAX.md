@@ -68,8 +68,9 @@ Correctness gates:
   fingerprints (`phiBitXor` and the final field stats in the smoke
   output) must be identical. Any difference means the change was not
   restructuring-only: stop, find why.
-  **READ THE NEXT SECTION FIRST — as of 2026-07-28 this gate has a
-  nonzero A/A noise floor and cannot, on its own, establish bit-exactness.**
+  **Run the A/A pair (the same build twice) alongside it — see "A second
+  WebGPU client on the GPU changes physics results" below. A/A must be zero
+  before A/B means anything.**
 - **Gate B (envelope).** For changes that legitimately reorder float
   operations or change eligibility logic. The 500-step gate must pass
   500/500 steps with 0 validation errors and volumeDrift 0, and the
@@ -94,61 +95,55 @@ this document. Never loosen a regex beyond the named assertion.
 
 ---
 
-## Gate A does not currently have a zero noise floor — measured 2026-07-28
+## A second WebGPU client on the GPU changes physics results — measured 2026-07-28
 
-**The 500-step mini lane is not run-to-run deterministic.** Four runs of
-`npm run test:webgpu:minimal-power-dam-break`, two of one build and two of
-another, produced **three distinct physics results**, and the grouping cuts
-across builds rather than along them. Counting differing
-`compact-octree-field-readback` records (21 records per run):
+**This section replaces an earlier one that claimed the lane is not run-to-run
+deterministic. That claim was wrong, and the retraction is the point: the
+divergence was contamination, not a solver bug.**
 
-| | mine | mine2 | base | base2 |
-|---|---|---|---|---|
-| **mine** | 0 | 21 | **0** | 24 |
-| **mine2** | 21 | 0 | 21 | 21 |
-| **base** | **0** | 21 | 0 | 24 |
-| **base2** | 24 | 21 | 24 | 0 |
+What was actually seen. Four runs of
+`npm run test:webgpu:minimal-power-dam-break`, two of each of two builds,
+produced three distinct physics results, grouping across builds rather than
+along them. Every one of those runs was taken while the fluid sim was also open
+in a browser WebGPU tab.
 
-`mine` is `base` plus one restructuring commit. `mine`==`base` exactly, while
-`base`!=`base2` — **the same binary, run twice, disagrees more than two
-different binaries do.**
+What a quiet machine gives, same commit, same lane, same harness:
 
-First divergence is at generation 227 (~step 227 of 500), in the words the
-solve itself publishes:
+- three A/A runs at the lane's exact configuration (500 steps, raster on,
+  envelope on, `FLUID_CHECKPOINT_EVERY_S=0.1`, `skip_validation`): all three
+  byte-identical across all 21 `compact-octree-field-readback` records;
+- two A/A runs of the npm script itself: 0 differing readback lines;
+- A/A at 300 and 500 steps, raster on and off, dense checkpoints: 0 differing.
 
-    volumeControl base : [...,1074587894,2984807340,1,1043030718,1044068975,1042941196,...]
-    volumeControl base2: [...,1074587894,         0,1,1043030716,1044068976,1042941195,...]
-    mgpcgControl  base : [0,1,4,8,1485,26,0,4294967295,1269294911,0,1041957517,0,1135801996,...]
-    mgpcgControl  base2: [0,1,4,8,1485,26,0,4294967295,1269294918,0,1041957004,0,1135802102,...]
+So the lane IS deterministic, and Gate A is a sound instrument — **provided
+nothing else is using the GPU.** The repo's existing "close every browser WebGPU
+tab" warning is not only about crashes and throughput: a shared GPU can silently
+change the values a run publishes. First divergence in the contaminated pairs
+was at generation 227, in `mgpcgControl` residual low bits and `volumeControl`
+word 6 (`correction`, an f32: ~-7e-9 against exactly 0.0), with executed
+iterations and row count agreeing — small enough to look exactly like benign
+float reassociation, which is what made it convincing.
 
-Executed iterations (4) and row count (1485) agree; the residual words differ
-in their low bits and one volume word is 0 on one run and not the other. That
-is float-reassociation-shaped, not logic-shaped. The prime suspect is the
-reduction association — `subgroupAdd`'s association is implementation-defined
-and Part D already had to replace it with an explicit tree to make two paths
-bit-comparable — but it has not been localized, and a genuine race is not
-excluded.
+Consequences for anyone measuring here:
 
-**What this invalidates.** Any claim of the form "the 500-step break log diffs
-to zero lines, therefore bit-exact" is a coin flip, including the ones already
-in this document's commit trail. A passing diff is *consistent with*
-bit-exactness; it does not establish it. `1bec36a` reported A1-vs-A2 as a
-"genuine zero noise floor"; that does not reproduce today.
-
-**What to do until it is fixed.**
-
-1. Always run the A/A pair (the same build twice) in the same session as the
-   A/B pair, and report all of it. A change is only *consistent with* Gate A
-   if A/B agrees **and** A/A agrees.
-2. Treat the raster checkpoints
+1. A contaminated run can produce a false Gate-A **pass** as easily as a false
+   failure. Two of the four contaminated runs agreed with each other across
+   different builds.
+2. Always run the A/A pair (the same build twice) alongside the A/B pair, in the
+   same session, and report both. A/A must be zero before A/B means anything.
+   This is cheap and it is the only thing that catches contamination.
+3. Do not gate on the raster checkpoints
    (`globalFineGenerationCheckpoints[*].raster`, `frontInterfaceHash`,
-   `terraceEdges`) as having an even larger noise floor: an A/A pair differed
-   at 12 of 20 checkpoints. They are a presentation-path instrument, not a
-   physics one. Do not gate on them.
-3. Localizing this is worth more than any single item in Parts B-F. Everything
-   downstream of it is unverifiable restructuring.
+   `terraceEdges`). Under contamination an A/A pair differed at 12 of 20 of
+   them, against 12 of 21 for the physics readbacks — they amplify, not isolate.
+4. The physics instrument to diff is the `compact-octree-field-readback` line
+   set. It excludes every timing field, so it needs no normalisation.
 
----
+Verified with this protocol on a quiet machine: `f9b599b` (candidate hash claim)
+is bit-identical to its parent across all 21 records — Gate A, confirmed rather
+than assumed. The single-page V-cycle coarse tail was **not**: 21 of 21 records
+differed against the same parent, which is why it is reverted rather than
+downgraded to Gate B.
 
 ## Measured results, 2026-07-27
 
