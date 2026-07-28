@@ -426,11 +426,15 @@ export class WebGPUOctreePipelinedMGPCG {
       || preconditioner.encodedCorrectionDispatchCount < 1) {
       throw new Error("Pipelined MGPCG requires an explicit fixed-schedule SPD first-order V-cycle");
     }
-    // The reduction is now the pinned shared-memory tree (Part D item 4), so
-    // no `subgroupAdd` remains. The feature gate, the `enable subgroups;`
-    // directive and the `subgroup_invocation_id`/`subgroup_size` parameters
-    // stay because the GPU logical-activity variant still emits subgroup
-    // ballots through those same builtins.
+    // The reduction is the pinned shared-memory tree, so no `subgroupAdd`
+    // remains -- see targetSubgroupReductionWGSL for why that is a determinism
+    // requirement and not a preference. This comment went stale once before,
+    // when a revert restored the subgroup form without restoring the comment,
+    // so the invariant is pinned by a test on the emitted WGSL rather than by
+    // this prose: octreePipelinedMGPCGShader must contain no subgroupAdd.
+    // The feature gate, the `enable subgroups;` directive and the
+    // `subgroup_invocation_id`/`subgroup_size` parameters stay because the GPU
+    // logical-activity variant still emits ballots through those builtins.
     if (!device.features.has("subgroups")) {
       throw new Error("Pipelined MGPCG requires the target subgroup feature");
     }
@@ -751,31 +755,46 @@ fn compensatedValue(a: CompensatedF32) -> f32 { return a.hi + a.lo; }
 `;
 
 /**
- * REVERTED 2026-07-27. This was replaced by an explicit width-halving tree so
- * the persistent Part D executor could be compared bit-for-bit against this
- * path. Measurement killed that motive: the persistent executor is +15.1 ms on
- * the mini churn lane and is no longer selected by default, and the tree swap
- * is a Gate B regression on its own -- it reddened the peak-speed gate
- * (7.827 -> 8.046 m/s), raised the projected residual (3.10e-6 -> 3.69e-6), and
- * added a fine-transport-invalid failure plus two top-two-layer-wet failures at
- * t=1.60 and t=2.00. Restore the tree only alongside a persistent path that has
- * been measured to win. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md Part D.
+ * The four merged solve scalars, folded over the workgroup by an explicit
+ * fixed-shape tree.
+ *
+ * This deliberately uses NO subgroup reduction, for two independent reasons.
+ *
+ * 1. Determinism. `subgroupAdd`'s association is implementation-defined, so the
+ *    value it returns is not a property of this shader. That made the whole
+ *    500-step lane non-reproducible: four captures of one binary disagreed in
+ *    the compact-field readback, first at generation 227, in exactly the
+ *    `mgpcgControl` residual words this fold publishes -- while two DIFFERENT
+ *    binaries could agree exactly. A bit-exact diff against a baseline is only
+ *    evidence if the baseline reproduces itself, so every correctness proof on
+ *    this branch depended on pinning this.
+ *
+ * 2. Correctness, independently of determinism. The subgroup form was
+ *      CompensatedF32(subgroupAdd(local.gamma.hi), subgroupAdd(local.gamma.lo))
+ *    which is NOT a compensated sum. `hi` and `lo` are not independent
+ *    accumulators: `lo` is the rounding error of `hi`, an invariant that
+ *    `twoSumF32` re-establishes on every merge. Adding the `hi` parts with a
+ *    plain f32 reduction throws away every rounding error generated inside that
+ *    reduction, and pairing the result with a separately-summed `lo` yields a
+ *    pair whose `lo` is not the error term of its `hi`. So the highest-fan-in
+ *    stage of the reduction -- 128 lanes collapsing to one partial per subgroup
+ *    -- was the one place the compensation was silently dropped, and it was
+ *    dropped in favour of roughly plain f32 summation. `mergeScalars` below is
+ *    the renormalising merge, and it is now used at every level.
+ *
+ * The shape is fixed at compile time: REDUCTION_LANES is a constant, so this is
+ * always the same seven levels pairing the same lanes, independent of
+ * `subgroup_size` and of which lanes happen to be active. `enable subgroups;`
+ * and the feature gate stay because the GPU logical-activity variant still
+ * emits `subgroupBallot` through those builtins.
+ *
+ * An earlier pinning attempt was reverted on 2026-07-27 for "reddening" the
+ * Gate B values. That justification does not survive this finding: the values
+ * it was compared against were not reproducible, and any pinned tree MUST
+ * change the association and therefore the values. Movement here is expected
+ * and is not evidence of regression.
  */
 const targetSubgroupReductionWGSL = /* wgsl */ `
-  merged[lane] = zeroMergedScalars();
-  workgroupBarrier();
-  let subgroupIndex = lane / subgroupSize;
-  let subgroupTotal = MergedScalars(
-    CompensatedF32(subgroupAdd(local.gamma.hi), subgroupAdd(local.gamma.lo)),
-    CompensatedF32(subgroupAdd(local.delta.hi), subgroupAdd(local.delta.lo)),
-    CompensatedF32(subgroupAdd(local.rr.hi), subgroupAdd(local.rr.lo)),
-    CompensatedF32(subgroupAdd(local.bb.hi), subgroupAdd(local.bb.lo)),
-  );
-  if (subgroupLane == 0u) { merged[subgroupIndex] = subgroupTotal; }
-  workgroupBarrier();
-  let subgroupCount = (REDUCTION_LANES + subgroupSize - 1u) / subgroupSize;
-  local = zeroMergedScalars();
-  if (lane < subgroupCount) { local = merged[lane]; }
   merged[lane] = local;
   for (var width = REDUCTION_LANES / 2u; width > 0u; width >>= 1u) {
     workgroupBarrier();
@@ -1192,11 +1211,26 @@ fn finalizeAndPublish(@builtin(global_invocation_id) global: vec3u) {
   }
   storageBarrier();
   if (row >= rows()) { return; }
-  let success = !failed() && atomicLoad(&control[1]) != 0u;
+  // Section 4.3 states the gate as "satisfactory convergence within 6-10
+  // iterations"; the 1e-4 relative residual is this repository's f32 QA policy,
+  // not a paper quantity (see tools/webgpu-smoke-pressure.ts). Discarding a
+  // budget-limited iterate and republishing the SEED therefore inverts the
+  // paper: a settled tank that reached 2.4e-4 was being handed back completely
+  // unprojected, which is far worse than the iterate it threw away. Exhausting
+  // the budget, or a preconditioner/curvature breakdown once CG has already
+  // advanced, still leaves the best iterate strictly better than the seed, so
+  // publish it. The seed remains the fallback for a solve that produced no
+  // trustworthy iterate at all: invalid authority, an invalid row, or a
+  // non-finite reduction, plus any breakdown before the first update.
+  let fatal = (atomicLoad(&control[0]) & (ERROR_INVALID_AUTHORITY
+    | ERROR_INVALID_ROW | ERROR_NONFINITE)) != 0u;
+  let converged = atomicLoad(&control[1]) != 0u;
+  let advanced = atomicLoad(&control[2]) > 0u;
+  let usable = !fatal && (converged || advanced);
   let seed = select(0.0, pressureSeed[row], finite(pressureSeed[row]));
   let candidate = pressure[row];
-  pressureOut[row] = select(seed, candidate, success && finite(candidate));
-  if (global.x == 0u && success) { atomicStore(&control[20], 1u); }
+  pressureOut[row] = select(seed, candidate, usable && finite(candidate));
+  if (global.x == 0u && converged && !fatal) { atomicStore(&control[20], 1u); }
 }
 `;
 

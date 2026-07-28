@@ -61,6 +61,60 @@ test("pipelined solve row count comes only from the accepted structured authorit
     "a cleared next-candidate compaction buffer must not invalidate the accepted solve");
 });
 
+test("the merged reduction is a pinned tree with no implementation-defined association", () => {
+  // Two independent requirements, both violated by the subgroup form this
+  // replaced, and both regressed once already by a revert that restored the
+  // subgroup form while leaving a comment claiming it was gone.
+  //
+  // Determinism: subgroupAdd's association is implementation-defined, so its
+  // result is not a property of this shader. That made the 500-step lane
+  // non-reproducible in the very mgpcgControl residual words this fold
+  // publishes, which invalidates every bit-exact diff taken against it.
+  assert.doesNotMatch(octreePipelinedMGPCGShader, /subgroupAdd/,
+    "no float reduction may use an implementation-defined association");
+  // Correctness: hi and lo are not independent accumulators -- lo is the
+  // rounding error of hi. Summing them separately drops the compensation at the
+  // highest-fan-in stage. Every level must go through the renormalising merge.
+  assert.match(octreePipelinedMGPCGShader,
+    /merged\[lane\] = local;\s*for \(var width = REDUCTION_LANES \/ 2u; width > 0u; width >>= 1u\) \{\s*workgroupBarrier\(\);\s*if \(lane < width\) \{\s*merged\[lane\] = mergeScalars\(merged\[lane\], merged\[lane \+ width\]\);/,
+    "the fold must be the fixed-shape width-halving tree over mergeScalars");
+  // Fixed shape: the tree depth must come from the compile-time lane count, not
+  // from subgroup_size or from which lanes happen to be active. The builtin
+  // parameters themselves stay -- the logical-activity variant emits ballots
+  // through them -- so the invariant is that every mention is a declaration and
+  // none is a use.
+  const mentions = octreePipelinedMGPCGShader.match(/subgroupSize/g) ?? [];
+  const declarations = octreePipelinedMGPCGShader
+    .match(/@builtin\(subgroup_size\) subgroupSize: u32/g) ?? [];
+  assert.equal(mentions.length, declarations.length,
+    "reduction shape must not depend on a runtime subgroup width");
+  assert.ok(declarations.length > 0);
+});
+
+test("summing hi and lo independently is not a compensated sum", () => {
+  // This is the arithmetic the subgroup reduction performed, isolated. It is
+  // wrong independently of any determinism concern, and it is wrong in exactly
+  // the regime CompensatedF32 exists for. gamma (r*u) and delta (u*w) are
+  // signed inner products, so catastrophic cancellation across lanes is the
+  // normal case, not a contrived one -- and those are the words that drive the
+  // CG coefficients.
+  const lanes = [1e8, 1, 1, -1e8].map((v) => addCompensatedF32([0, 0], v));
+  let hi = Math.fround(0), lo = Math.fround(0);
+  for (const lane of lanes) {
+    hi = Math.fround(hi + lane[0]);
+    lo = Math.fround(lo + lane[1]);
+  }
+  // hi and lo are NOT independent accumulators: lo is the rounding error of hi.
+  // Summing the hi parts in plain f32 discards the error that summation itself
+  // generates, and the separately-summed lo cannot recover it.
+  assert.equal(Math.fround(hi + lo), 0, "the subgroup form loses the whole sum");
+  const tree = mergeCompensatedF32(
+    mergeCompensatedF32(lanes[0]!, lanes[1]!),
+    mergeCompensatedF32(lanes[2]!, lanes[3]!));
+  assert.equal(compensatedF32Value(tree), 2,
+    "the pinned tree renormalises at every level and keeps the exact answer");
+});
+
 test("compensated f32 helpers retain low cancellation terms", () => {
   let compensated: CompensatedF32 = [0, 0];
   let naive = Math.fround(0);
