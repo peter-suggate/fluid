@@ -685,12 +685,54 @@ const GHOST_SCRATCH_WORDS_PER_ROW = 20;
 /** valid/rows/mismatch-generation header plus the per-row build fingerprint. */
 const COMMITTED_INPUT_HEADER_WORDS = 4;
 const COMMITTED_INPUT_WORDS_PER_ROW = 4;
-/** Explicit row bound; the constructor also fails closed on device limits. */
-export const SPGRID_MAXIMUM_ROW_CAPACITY = 16_384;
+/**
+ * Explicit row bound; the constructor also fails closed on device limits.
+ *
+ * Nothing in the pyramid is O(rowCapacity) with a large constant: the sparse
+ * hash arenas are `nextPowerOfTwo(min(rowCapacity * 16, 2 * domainCells))` per
+ * level, so they saturate at the domain's own cardinality long before this
+ * bound, and the only strictly per-row terms are the level row map
+ * (`levelCount * rowCapacity`) and the transfer stride (`rowCapacity * 8`).
+ * Row indices are compared against `CHANNEL_CODE_BASE` (0xffff0000), and every
+ * capacity-shaped dispatch is already the two-dimensional `dispatchFor` form,
+ * so a capacity of 2^20 rows stays inside both. The former 16,384 was a
+ * bring-up guard, and because `WebGPUOctreeProjection` constructs this V-cycle
+ * unconditionally as the Section 4.3 preconditioner it was the hard ceiling on
+ * the whole power-octree method: any scene planning more than 16,384 pressure
+ * rows -- roughly a 25-cubed liquid domain -- failed solver construction with
+ * a RangeError before reaching a single dispatch. The device-limit check in
+ * the constructor below remains the real fail-closed gate.
+ */
+export const SPGRID_MAXIMUM_ROW_CAPACITY = 1_048_576;
 export const OCTREE_SPGRID_CAPTURE_CONTROL_WORD = Object.freeze({
   readyGeneration: 4,
   error: 8,
   sourceGeneration: 10,
+} as const);
+
+/**
+ * The ABI of the per-epoch compiled Section 6.3 operator image
+ * (`buildAccurateOperatorRows` writes it, `stageDirectTerm` reads it).
+ *
+ * `rowWords` u32 per row: word 0 is the row's page-resolution status (0, or
+ * `pageUnresolved` when the row has no resolvable native page), word
+ * `1 + channel` is either the absolute destination row index or a code at or
+ * above `codeBase`. A code carries the primary report stage in its low byte and
+ * pageSlot's own stage in the next byte, so the consumer replays exactly the
+ * reports the inline walk raised, in the same per-lane order. A primary of
+ * zero is the multigrid-only skip, which reported nothing.
+ *
+ * Row indices and codes cannot collide: `SPGRID_MAXIMUM_ROW_CAPACITY` is far
+ * below `codeBase`, and the differential harness asserts it.
+ */
+export const OCTREE_SPGRID_OPERATOR_IMAGE = Object.freeze({
+  rowWords: 19,
+  codeBase: 0xffff_0000,
+  skip: 0,
+  outOfDomain: 27,
+  unresolvedSlot: 28,
+  invalidOwner: 29,
+  pageUnresolved: 31,
 } as const);
 
 type OctreeSPGridSourceMode = "accepted" | "candidate";
@@ -710,6 +752,17 @@ function nextPowerOfTwo(value: number): number { let result = 1; while (result <
 function dispatchFor(capacity: number): readonly [number, number, number] {
   const blocks = Math.ceil(capacity / 64), x = Math.min(65_535, Math.max(1, blocks));
   return [x, Math.max(1, Math.ceil(blocks / x)), 1];
+}
+/**
+ * One workgroup per item, folded into two dimensions.
+ *
+ * X saturates at exactly 65,535, so a kernel recovers its item index as
+ * `wg.x + wg.y * 65535u` -- the same constant-stride form the level kernels in
+ * this file already use. Below saturation Y is 1 and the stride never applies.
+ */
+function workgroupPerItemDispatch(count: number): readonly [number, number, number] {
+  const items = Math.max(1, count), x = Math.min(65_535, items);
+  return [x, Math.ceil(items / x), 1];
 }
 
 export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, "dimensions" | "rowCapacity" | "maximumLevels">): OctreeSPGridVCyclePlan {
@@ -958,6 +1011,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateAdjointPipeline: GPUComputePipeline;
   private readonly accurateFinalizePipeline: GPUComputePipeline;
   private readonly accurateTerms: GPUBuffer;
+  /** Per-epoch compiled operator image: 19 u32 per row, indices only. */
+  private readonly accurateOperatorRows: GPUBuffer;
+  private readonly accurateOperatorRowsPipeline: GPUComputePipeline;
+  private readonly accurateOperatorRowsGroup: GPUBindGroup;
+  private readonly accurateOperatorRowsDispatch: readonly [number, number, number];
   private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
@@ -1184,6 +1242,14 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: (this.plan.rowCapacity * 163 + 1) * 4,
       usage: storage,
     });
+    this.accurateOperatorRows = device.createBuffer({
+      label: "SPGrid accurate A2 compiled operator rows",
+      // One page-status word plus eighteen resolved destination rows per row.
+      // At the mini lane's live count this is ~113 KB; it is sized off the
+      // planned row capacity so a topology growth cannot outrun it.
+      size: this.plan.rowCapacity * 19 * 4,
+      usage: storage,
+    });
     const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
       regularInterior: "applyRegularInterior",
       transitionInterior: "applyTransitionInterior",
@@ -1219,6 +1285,23 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       label: "SPGrid accurate A2 · ordered row fold", layout: "auto",
       compute: { module: accurateModule, entryPoint: "finalizeStagedUnionRows" },
     });
+    this.accurateOperatorRowsPipeline = device.createComputePipeline({
+      label: "SPGrid accurate A2 · compile operator rows", layout: "auto",
+      compute: { module: accurateModule, entryPoint: "buildAccurateOperatorRows" },
+    });
+    this.accurateOperatorRowsGroup = device.createBindGroup({
+      label: "SPGrid accurate A2 · operator image bindings",
+      layout: this.accurateOperatorRowsPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 6, resource: { buffer: this.topology } },
+        { binding: 7, resource: { buffer: this.state } },
+        { binding: 8, resource: { buffer: this.capturedGeometry } },
+        { binding: 9, resource: { buffer: source.topologyMetrics } },
+        { binding: 11, resource: { buffer: this.accurateWorksetLayout } },
+        { binding: 13, resource: { buffer: this.accurateOperatorRows } },
+      ],
+    });
+    this.accurateOperatorRowsDispatch = dispatchFor(this.plan.rowCapacity * 19);
     this.accurateOperator = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
       // One convergence gate, wide direct and fine-adjoint stages, then a
@@ -1254,9 +1337,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // its work-list reduction), the two-dispatch unchanged-input skip probe,
     // the changed-page commit, thirteen data-parallel candidate phases
     // separated by dispatch order rather than by statement order in one thread,
-    // the candidate validator, and five transactional publication dispatches.
+    // the candidate validator, five transactional publication dispatches, and
+    // the once-per-epoch operator-image compile that rides the same pass.
     // Keep this exact for command and active/scheduled accounting.
-    this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5;
+    this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5 + 1;
     // One compact 8x8x4 page dispatch stages the one-cell halo and executes
     // the complete even-degree Chebyshev polynomial in workgroup memory.
     // Post-smoothing consumes the weights in reverse order, retaining the
@@ -1279,6 +1363,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       + this.candidateTopology.size + this.candidateState.size + this.candidateDispatch.size
       + this.candidateGhosts.size + this.committedInputs.size
       + this.accurateWorksetLayout.size + this.accurateClassDispatch.size
+      + this.accurateOperatorRows.size
       + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0);
   }
 
@@ -1303,7 +1388,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // concurrently across the machine instead of down the lanes of a single
     // workgroup. Measured at 6.40 ms/advance over two calls before this split.
     this.run(broker.compute({ label: "SPGrid V-cycle · capture plan L1 delta" }),
-      "planL1CaptureDelta", 0, input, [this.plan.rowCapacity, 1, 1]);
+      "planL1CaptureDelta", 0, input, workgroupPerItemDispatch(this.plan.rowCapacity));
     this.run(broker.compute({ label: "SPGrid V-cycle · capture reduce L1 delta" }),
       "reduceL1CaptureDelta", 0, input, [1, 1, 1]);
     this.preparedCaptureSource = input;
@@ -1342,7 +1427,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // One workgroup per work item; see the kernel. Same shape as the capture
     // row scan above, and most workgroups exit on the eligibility test.
     this.run(staged("commit changed L1"), "commitChangedL1", 0, input,
-      [this.plan.rowCapacity, 1, 1], geometry);
+      workgroupPerItemDispatch(this.plan.rowCapacity), geometry);
     // Ordered data-parallel candidate construction. Each phase is its own
     // dispatch so per-level and inter-phase ordering is carried by dispatch
     // boundaries instead of statement order inside a single invocation.
@@ -1379,7 +1464,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     }
     const candidate = this.candidateSetupInput;
     const pass = broker.compute({ label: "SPGrid V-cycle · publish validated exact level deltas" });
-    this.run(pass, "commitChangedL1", 0, input, [this.plan.rowCapacity, 1, 1], this.capturedGeometry);
+    this.run(pass, "commitChangedL1", 0, input,
+      workgroupPerItemDispatch(this.plan.rowCapacity), this.capturedGeometry);
     this.run(pass, "finalizeL1CapturePublication", 0, input, [1, 1, 1]);
     this.run(pass, "commitCandidateLevels", 0, input,
       dispatchFor(Math.max(this.plan.levelStride, this.plan.brickCount,
@@ -1390,6 +1476,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // fingerprint (or none), so the next probe can never skip a stale build.
     this.run(pass, "publishCommittedInputs", 0, candidate,
       this.plan.rowDispatch, this.candidateCapturedGeometry);
+    // Compile the Section 6.3 operator's addressing for the epoch this pass
+    // just published. It reads only what the dispatches above wrote (pages,
+    // brick masks, ranked slots, FLAGS/OWNER, captured geometry), and WebGPU
+    // orders storage between dispatches in one pass, so the image is exact the
+    // instant the commit is. Every apply for the rest of the epoch then gathers
+    // through it instead of re-running the chase.
+    pass.setPipeline(this.accurateOperatorRowsPipeline);
+    pass.setBindGroup(0, this.accurateOperatorRowsGroup);
+    pass.dispatchWorkgroups(...this.accurateOperatorRowsDispatch);
     // dispatchMeta remains STORAGE-only inside compute passes. Copying its
     // finalized records after the setup boundary gives correction a distinct
     // INDIRECT-only source and avoids a whole-pass storage/indirect conflict.
@@ -1566,7 +1661,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
         [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
         [11, { buffer: this.accurateWorksetLayout }], [12, { buffer: this.accurateTerms }],
+        [13, { buffer: this.accurateOperatorRows }],
       ]);
+      // Same reachability as the class-path term stage: compiled image instead
+      // of topology/state.
+      shared.delete(6); shared.delete(7);
       cached.mergedTermGroup = this.device.createBindGroup({
         label: "SPGrid Section 6.3 · parallel merged-band term bindings",
         layout: this.accurateMergedTermPipeline.getBindGroupLayout(0),
@@ -1660,8 +1759,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         "SPGrid Section 6.3 · accepted row union bindings");
       shared.set(12, { buffer: this.accurateTerms });
+      shared.set(13, { buffer: this.accurateOperatorRows });
+      // The direct-term stage no longer reaches the topology (6) or state (7)
+      // arenas: its addressing is the compiled image (13). That also keeps the
+      // stage inside the portable ten-storage-buffer ceiling, which binding 13
+      // would otherwise have broken.
       const termGroup = makeGroup(this.accurateTermPipeline,
-        [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [0, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13],
         "SPGrid Section 6.3 · staged direct-term bindings");
       const adjointGroup = makeGroup(this.accurateAdjointPipeline,
         [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
@@ -1687,6 +1791,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.candidateTopology.destroy(); this.candidateState.destroy(); this.candidateDispatch.destroy();
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
     this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy(); this.accurateTerms.destroy();
+    this.accurateOperatorRows.destroy();
     for (const buffer of [...this.params, ...this.candidateParams]) buffer.destroy();
   }
 }
@@ -1887,9 +1992,27 @@ struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 @group(0) @binding(10) var<storage,read> section63Coefficients:array<f32>;
 @group(0) @binding(11) var<uniform> p:Layout;
 @group(0) @binding(12) var<storage,read_write> accurateTerms:array<f32>;
+// Compiled operator image: nineteen u32 per row, published once per accepted
+// topology epoch by buildAccurateOperatorRows and consumed by stageDirectTerm.
+// Word 0 is the row's page-resolution status; word 1+channel is the resolved
+// destination row, or an encoded skip/report code. u32 only: storing a float
+// here and reloading it would end the term expression and cost the fused
+// multiply-add, which is not a restructuring-only change on this backend
+// (POWER_LIQUIDS_ULTIMATE_M1MAX, refuted lever 10).
+@group(0) @binding(13) var<storage,read_write> operatorRows:array<u32>;
 const INVALID=0xffffffffu;const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
 const KEY=0u;const FLAGS=1u;const OWNER=24u;const STATE_CHANNELS=26u;
 const WORKSET_HEADER_WORDS=7u;const PAGE_RECORD_WORDS=28u;
+const OPERATOR_ROW_WORDS=19u;
+// Row capacity is bounded by SPGRID_MAXIMUM_ROW_CAPACITY (16,384), so every
+// value at or above this base is unambiguously a code and never a row index.
+const CHANNEL_CODE_BASE=0xffff0000u;
+// primary 0 / secondary 0: the direction resolved to a multigrid-only slot.
+// The stencil contributes nothing and reports nothing, exactly as the inline
+// walk's continue did.
+const CHANNEL_SKIP=0xffff0000u;
+fn channelCode(primary:u32,secondary:u32)->u32{return CHANNEL_CODE_BASE|(secondary<<8u)|primary;}
+fn operatorRowBase(row:u32)->u32{return row*OPERATOR_ROW_WORDS;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn stopped()->bool{return arrayLength(&solverControl)<2u||atomicLoad(&solverControl[0])!=0u||atomicLoad(&solverControl[1])!=0u;}
 fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
@@ -1961,18 +2084,27 @@ fn pageFor(l:u32,q:vec3u)->u32{let pages=logicalPageDims(l);let v=q/vec3u(8u,8u,
 // the cost here is the q-DEPENDENT tail below - brickRecord, the two brick-mask
 // loads and the ranked-slot indirection - which is a dependent chain of
 // scattered loads that no ordinal memo can remove.
-fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32)->u32{
+// The resolution itself, with the report split out as a returned stage rather
+// than an atomic. One definition serves the inline walk AND the once-per-epoch
+// image builder, so the compiled addresses cannot drift from the addresses the
+// inline walk would have produced - that identity is what makes the image a
+// restructuring-only change rather than a re-derivation.
+fn pageSlotCoded(l:u32,page:u32,origin:vec3u,q:vec3u)->vec2u{
  let shape=vec3u(8u,8u,4u);let delta=vec3i(q/shape)-vec3i(origin/shape);
- if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportAt(2u,21u,row);return INVALID;}
+ if(any(delta<vec3i(-1))||any(delta>vec3i(1))){return vec2u(INVALID,21u);}
  let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));let physical=pageNeighbour(l,page,ordinal);
- if(physical==INVALID){return INVALID;}let physicalOrigin=decode(topology[pageRecord(l,physical)],l);
- if(any(physicalOrigin/shape!=q/shape)){reportAt(2u,22u,row);return INVALID;}
+ if(physical==INVALID){return vec2u(INVALID,0u);}let physicalOrigin=decode(topology[pageRecord(l,physical)],l);
+ if(any(physicalOrigin/shape!=q/shape)){return vec2u(INVALID,22u);}
  let record=brickRecord(l,q);let bit=localBit(q);let low=topology[record+1u];let high=topology[record+2u];
- if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return INVALID;}
+ if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return vec2u(INVALID,0u);}
  let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
  if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
  let slot=topology[rankedSlotsBase()+levelBase(l)+topology[record+3u]+rank];
- if(slot>=levelCapacity(l)){reportAt(2u,23u,row);return INVALID;}return slot;}
+ if(slot>=levelCapacity(l)){return vec2u(INVALID,23u);}return vec2u(slot,0u);}
+fn pageSlot(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32)->u32{
+ let resolved=pageSlotCoded(l,page,origin,q);
+ if(resolved.y!=0u){reportAt(2u,resolved.y,row);}
+ return resolved.x;}
 fn originOf(h:vec4u)->vec3u{return vec3u(h.x%p.dimsCapacity.x,(h.x/p.dimsCapacity.x)%p.dimsCapacity.y,h.x/(p.dimsCapacity.x*p.dimsCapacity.y));}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(
  vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),
@@ -1989,6 +2121,41 @@ fn coefficientForDirection(row:u32,metric:Metric,direction:vec3i)->f32{
  let channel=section63ChannelForDirection(metric.transformAndFlags&63u,direction);
  if(channel>=18u){return 0.0;}
  return section63Coefficients[coefficientBase(row)+1u+channel];}
+// "Which row does this stencil direction reach", as the once-per-epoch image
+// builder asks it: every guard the inline walk applies, in the inline walk's
+// order, with each report returned as a stage code instead of raised, so a
+// builder that must not touch the solver control can carry it to the consumer.
+//
+// The dependent part - pageNeighbour, the origin compare, brickRecord, the two
+// brick-mask loads and the ranked-slot indirection - is not transcribed here:
+// it is pageSlotCoded, the one definition the inline walk's pageSlot also
+// calls. That shared call is what keeps the compiled address equal to the
+// address the walk would have produced, and
+// tests/webgpu-octree-operator-image-differential.test.ts applies both forms to
+// the same vectors on the same published topology to require it.
+//
+// levelDims and slotBase stay parameters because they are dispatch-invariant
+// per row; both are pure functions of l.
+fn resolveDirectChannel(l:u32,page:u32,q:vec3u,levelDims:vec3i,slotBase:u32,
+ transform:u32,channel:u32)->u32{
+ let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),transform);
+ if(any(targetQ<vec3i(0))||any(targetQ>=levelDims)){return channelCode(27u,0u);}
+ let resolved=pageSlotCoded(l,page,q,vec3u(targetQ));
+ if(resolved.x==INVALID){return channelCode(28u,resolved.y);}
+ let flags=state[atBase(FLAGS,slotBase,resolved.x)];
+ if((flags&MG_ONLY)!=0u){return CHANNEL_SKIP;}
+ let encoded=state[atBase(OWNER,slotBase,resolved.x)];
+ if(encoded==0u||encoded>capacity()){return channelCode(29u,0u);}
+ return encoded-1u;}
+// Replay a coded resolution's reports in the order the inline walk raised
+// them: pageSlot's own stage first, then the caller's. reportAt claims the
+// first error by compare-exchange, so preserving per-lane order preserves the
+// claimed stage.
+fn reportChannelCode(code:u32,row:u32){
+ if(code<CHANNEL_CODE_BASE){return;}
+ let secondary=(code>>8u)&0xffu;let primary=code&0xffu;
+ if(secondary!=0u){reportAt(2u,secondary,row);}
+ if(primary!=0u){reportAt(2u,primary,row);}}
 // Destination-owned GhostValueAccumulate. A 2:1 coarse leaf has at most
 // eight fine-level aliases. Each alias gathers the (at most eighteen) active
 // page neighbours that point to it. This is E^T by construction: it reads the
@@ -2029,20 +2196,69 @@ fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=array
   value+=c*(x-inputVector[encoded-1u]);}
  value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}}
 
+// One linear, prefetchable load replaces the five-to-seven-deep dependent
+// chase this used to run per channel: brickRecord, two brick-mask loads and
+// the ranked-slot indirection, once per direction, on ~100 SpMV-equivalents
+// per solve. The chase now runs once per accepted topology epoch, in
+// buildAccurateOperatorRows, through the same resolveDirectChannel.
+//
+// Values and evaluation order are untouched: the coefficient is the same load
+// from the same bank, the operand is the same inputVector element, and the
+// product is the same single expression, so the backend contracts the same
+// multiply-add. Only the address arrives differently.
 fn stageDirectTerm(row:u32,channel:u32){let destination=row*162u+channel;
  if(destination>=arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
   ||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
- let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
+ let m=metrics[row];let base=coefficientBase(row);
  if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
  let c=section63Coefficients[base+1u+channel];var term=0.0;
- if(c!=0.0){let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
-  if(page==INVALID||page>=levelCapacity(l)){reportAt(2u,31u,row);return;}
-  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
-  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(2u,27u,row);}
-  else{let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);}
-   else{let slotBase=levelBase(l);if((state[atBase(FLAGS,slotBase,slot)]&MG_ONLY)==0u){let encoded=state[atBase(OWNER,slotBase,slot)];
-    if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);}else{term=c*(inputVector[row]-inputVector[encoded-1u]);}}}}}
+ if(c!=0.0){let image=operatorRowBase(row);
+  if(image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)||operatorRows[image]!=0u){reportAt(2u,31u,row);return;}
+  let code=operatorRows[image+1u+channel];
+  if(code>=CHANNEL_CODE_BASE){reportChannelCode(code,row);}
+  else{term=c*(inputVector[row]-inputVector[code]);}}
  accurateTerms[destination]=term;
+}
+
+// Compile the operator once per accepted topology epoch.
+//
+// Encoded by encodeReadySetupCommit, in the pass that commits the hierarchy,
+// after commitCandidateLevels and commitChangedL1 have published this epoch's
+// pages, brick masks, ranked slots, FLAGS and OWNER. Those are the only inputs
+// the resolution reads, and the only writer of any of them is that same commit,
+// so an image built here is exact for every apply until the next commit - and
+// the next commit re-runs this. There is no staleness window and no epoch
+// stamp to get wrong.
+//
+// One lane per (row, word). Word 0 publishes the row's page-resolution status,
+// words 1..18 the eighteen channel destinations.
+//
+// This is a pure function of (topology, state, geometry, metrics) over the
+// whole row capacity: it depends on no publication word and takes no view of
+// which rows are live, so it cannot mark a live row dead on a step where a
+// control has not landed yet. Rows the apply never visits get compiled and
+// never read. The h.y guard is the one addition to applyRow's own metric gate:
+// countTrailingZeros(0) is 32, and a shift of 32 is indeterminate in WGSL, so a
+// row with no size is refused rather than compiled from an indeterminate level.
+fn buildOperatorRow(row:u32,word:u32){
+ let image=operatorRowBase(row);
+ if(word>=OPERATOR_ROW_WORDS||image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)
+  ||row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)){return;}
+ let h=geometry[row];let m=metrics[row];
+ var status=31u;
+ var l=0u;var q=vec3u(0u);var page=INVALID;
+ if(h.y!=0u&&m.error==0u&&(m.transformAndFlags&0x80000000u)!=0u){
+  l=countTrailingZeros(h.y);q=originOf(h)/(1u<<l);page=pageFor(l,q);
+  if(page!=INVALID&&page<levelCapacity(l)){status=0u;}}
+ if(word==0u){operatorRows[image]=status;return;}
+ if(status!=0u){operatorRows[image+word]=CHANNEL_SKIP;return;}
+ operatorRows[image+word]=resolveDirectChannel(l,page,q,vec3i(dims(l)),levelBase(l),
+  m.transformAndFlags&63u,word-1u);
+}
+@compute @workgroup_size(64) fn buildAccurateOperatorRows(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let item=linearLane(wg,groups,lane);
+ buildOperatorRow(item/OPERATOR_ROW_WORDS,item%OPERATOR_ROW_WORDS);
 }
 
 fn stageAdjointChild(row:u32,child:u32){let destination=row*162u+18u+child*18u;
@@ -2113,6 +2329,36 @@ fn stageUnionItem(item:u32,count:u32,row:u32){let countIndex=stagedCountIndex();
  let rowIndex=stagedRowIdsBase()+rowItem;
  if(channel==0u&&rowIndex<arrayLength(&accurateTerms)){accurateTerms[rowIndex]=bitcast<f32>(row);}
  if(row!=INVALID){stageDirectTerm(row,channel);}}
+// Reference arm of the operator-image differential. This is stageDirectTerm's
+// body from before the compiled image: it re-runs the page/brick/rank chase on
+// every call. Production never encodes it. It exists so
+// tests/webgpu-octree-operator-image-differential.test.ts can apply BOTH
+// addressings to the same vectors on the same published topology and require
+// the staged terms to be bit-identical, which is the harness
+// POWER_LIQUIDS_ULTIMATE_M1MAX asks for before the chase is trusted to be gone.
+// Keep it byte-faithful to what the image replaced; it is the only executable
+// statement of what the image has to agree with.
+fn stageDirectTermByChase(row:u32,channel:u32){let destination=row*162u+channel;
+ if(destination>=arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
+  ||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
+ if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
+ let c=section63Coefficients[base+1u+channel];var term=0.0;
+ if(c!=0.0){let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
+  if(page==INVALID||page>=levelCapacity(l)){reportAt(2u,31u,row);return;}
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
+  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(2u,27u,row);}
+  else{let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);}
+   else{let slotBase=levelBase(l);if((state[atBase(FLAGS,slotBase,slot)]&MG_ONLY)==0u){let encoded=state[atBase(OWNER,slotBase,slot)];
+    if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);}else{term=c*(inputVector[row]-inputVector[encoded-1u]);}}}}}
+ accurateTerms[destination]=term;
+}
+fn stageUnionItemByChase(item:u32,count:u32,row:u32){let countIndex=stagedCountIndex();
+ if(item==0u&&countIndex<arrayLength(&accurateTerms)){accurateTerms[countIndex]=bitcast<f32>(count);}
+ let rowItem=item/18u;let channel=item%18u;if(rowItem>=count){return;}
+ let rowIndex=stagedRowIdsBase()+rowItem;
+ if(channel==0u&&rowIndex<arrayLength(&accurateTerms)){accurateTerms[rowIndex]=bitcast<f32>(row);}
+ if(row!=INVALID){stageDirectTermByChase(row,channel);}}
 @compute @workgroup_size(64) fn stageAcceptedUnionTerms(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=acceptedUnionCount();
@@ -2121,6 +2367,11 @@ fn stageUnionItem(item:u32,count:u32,row:u32){let countIndex=stagedCountIndex();
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=validWorkCount(4u);
  stageUnionItem(item,count,workRow(item/18u,4u));}
+// Differential reference only; never encoded. See stageDirectTermByChase.
+@compute @workgroup_size(64) fn stageMergedBandTermsByChase(@builtin(workgroup_id) wg:vec3u,
+ @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=validWorkCount(4u);
+ stageUnionItemByChase(item,count,workRow(item/18u,4u));}
 @compute @workgroup_size(64) fn stageAcceptedUnionAdjoints(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/8u;
@@ -2412,7 +2663,10 @@ fn contactCoord(own:vec4u,other:vec4u,l:u32)->vec3u{let scale=1u<<l;let begin=or
 // work-list reduction that follows reads its own dispatch's output.
 @compute @workgroup_size(64) fn planL1CaptureDelta(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
- let generation=captureGeneration();let work=wg.x;
+ // Two-dimensional work index: workgroupPerItemDispatch pins X at exactly
+ // 65,535 once the row capacity saturates one dimension, so this stride is
+ // that extent. Below saturation wg.y is always zero.
+ let generation=captureGeneration();let work=wg.x+wg.y*65535u;
  // Out-of-range pages and non-unique work items contribute nothing to the page
  // records; reduceL1CaptureDelta re-derives their flags from the same work
  // list, so this dispatch owns only the row scan.
@@ -2497,7 +2751,10 @@ fn contactCoord(own:vec4u,other:vec4u,l:u32)->vec3u{let scale=1u<<l;let begin=or
 // lane 0, under the identical eligibility test.
 @compute @workgroup_size(64) fn commitChangedL1(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
- let generation=captureGeneration();let work=wg.x;
+ // Two-dimensional work index: workgroupPerItemDispatch pins X at exactly
+ // 65,535 once the row capacity saturates one dimension, so this stride is
+ // that extent. Below saturation wg.y is always zero.
+ let generation=captureGeneration();let work=wg.x+wg.y*65535u;
  let page=captureWorkPage(work);
  if(work>=captureWorkCount()||page>=captureExpectedPages()||!captureWorkUnique(work,page)
   ||capturePageStamp(page)!=generation

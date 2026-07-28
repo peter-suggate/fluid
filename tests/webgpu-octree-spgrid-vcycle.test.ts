@@ -365,6 +365,25 @@ test("accurate A2 stages wide direct terms before an ordered row fold", () => {
     "A2 must read the accepted dynamic Section 6.3 bank");
   assert.match(octreeSPGridAccurateOperatorShader, /fn pageSlot[\s\S]*pageNeighbour/);
   assert.match(octreeSPGridAccurateOperatorShader, /fn finerAdjoint[\s\S]*state\[at\(OWNER,fine,ghost\)\]!=row\+1u/);
+  // The compiled operator image carries u32 indices and nothing else. A float
+  // stored here and reloaded would end the term expression and cost the fused
+  // multiply-add, which POWER_LIQUIDS_ULTIMATE_M1MAX refuted lever 10 measured
+  // as a physics change, not a restructuring.
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /@binding\(13\) var<storage,read_write> operatorRows:array<u32>;/,
+    "the compiled operator image must be a u32 index table");
+  assert.doesNotMatch(octreeSPGridAccurateOperatorShader,
+    /bitcast<f32>\(operatorRows|operatorRows\[[^\]]*\]=bitcast/,
+    "no float may round-trip through the operator image");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn stageDirectTerm[\s\S]{0,900}?let code=operatorRows\[image\+1u\+channel\];[\s\S]{0,200}?term=c\*\(inputVector\[row\]-inputVector\[code\]\);/,
+    "the direct term must gather one linear image word instead of chasing pageSlot");
+  assert.doesNotMatch(
+    octreeSPGridAccurateOperatorShader.slice(
+      octreeSPGridAccurateOperatorShader.indexOf("fn stageDirectTerm"),
+      octreeSPGridAccurateOperatorShader.indexOf("fn buildOperatorRow")),
+    /pageSlot|pageFor\(/,
+    "the direct term stage must retain no page-directory chase at all");
   assert.doesNotMatch(octreeSPGridAccurateOperatorShader,
     /ResolvedParams|resolvedRows|neighbourRow|maximumNeighborSlots|atomicAddF32/,
     "production A2 must expose neither the retired row-gather ABI nor scatter accumulation");
@@ -697,12 +716,22 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
   assert.match(octreeSPGridAccurateDispatchGateShader,
     /classDispatch\[destination\]=select\(0u,worksets\[source\],solveLive&&valid\)/,
     "the accurate owner zeroes every stopped destination class record");
-  // pageSlot resolves the page inline, on purpose: memoizing it on the ordinal
-  // is exact but measured as nothing (see the refuted-levers list). Pin the
-  // single-function shape so the memo is not reintroduced without a measurement.
+  // The page resolution still happens inline, on purpose: memoizing it on the
+  // ordinal is exact but measured as nothing (see the refuted-levers list).
+  //
+  // RENEGOTIATED for the per-epoch operator image (POWER_LIQUIDS_ULTIMATE_M1MAX
+  // Part F1 stage 2, re-scored). The resolution moved from `pageSlot` into
+  // `pageSlotCoded`, which returns the report stage instead of raising it, so
+  // the once-per-epoch image builder can run the identical resolution without
+  // touching the solver control. `pageSlot` is now nothing but that call plus
+  // the report. Only the assertion's subject changed: the pin is still "the
+  // page is resolved inline, in one function, with no threaded memo".
   assert.match(octreeSPGridAccurateOperatorShader,
-    /fn pageSlot\(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32\)->u32\{[\s\S]{0,400}?let physical=pageNeighbour\(l,page,ordinal\);/,
-    "pageSlot must resolve the page inline rather than through a threaded memo");
+    /fn pageSlotCoded\(l:u32,page:u32,origin:vec3u,q:vec3u\)->vec2u\{[\s\S]{0,400}?let physical=pageNeighbour\(l,page,ordinal\);/,
+    "pageSlotCoded must resolve the page inline rather than through a threaded memo");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn pageSlot\(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32\)->u32\{\s*let resolved=pageSlotCoded\(l,page,origin,q\);\s*if\(resolved\.y!=0u\)\{reportAt\(2u,resolved\.y,row\);\}\s*return resolved\.x;\}/,
+    "pageSlot must be pageSlotCoded plus its report, so the compiled image and the inline walk cannot diverge");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.beginL1CapturePlan, [0, 3, 6, 13, 14, 18]);
   // The capture plan was split so the per-row Section 6.3 validation runs one
   // workgroup per page instead of one lane of one workgroup. The row scan kept
@@ -1157,7 +1186,7 @@ test("Dawn accepts the four class-specialized accurate operator and convergence 
       "applyTransitionInterior", "applyPhysicalBoundary", "applyTransitionBoundary",
       "applyMergedBand", "stageAcceptedUnionTerms", "stageMergedBandTerms",
       "stageAcceptedUnionAdjoints", "stageMergedBandAdjoints",
-      "finalizeStagedUnionRows"]],
+      "finalizeStagedUnionRows", "buildAccurateOperatorRows"]],
     [octreeSPGridAccurateDispatchGateShader, ["prepareAccurateDispatches"]],
   ] as const) {
     const shaderModule = device.createShaderModule({ code });
