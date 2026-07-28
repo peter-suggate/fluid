@@ -14,9 +14,12 @@ import {
 import { unpackFineLevelSetGPUTransportControl } from
   "../lib/webgpu-octree-fine-levelset-transport";
 import {
+  FINE_LEVELSET_JFA_B4_ADDRESSING_ENV,
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
   FINE_LEVELSET_JFA_LOOKUP_STRIDES,
   WebGPUFineLevelSetRedistance,
+  fineLevelSetJFAB4AddressingRequested,
+  fineLevelSetJFACPTB4AddressingWGSL,
   fineLevelSetJFACPTWGSL,
   fineLevelSetJFATapAddress,
   planFineLevelSetJFAStrides,
@@ -826,6 +829,104 @@ test("JFA fixed tap path consumes topology's exact-filtered radius-one halo", ()
   assert.match(flood, /cachedFloodSampleIndex\(local,candidateSlot\)/);
   assert.doesNotMatch(flood, /q\/p\.brickResolution|q%p\.brickResolution|abs\(delta\)/,
     "candidate lanes must not reconstruct the fixed tap address");
+});
+
+test("B4 flood addressing is opt-in, defaults off, and requires the B4 page geometry", () => {
+  const b4Plan = { brickResolution: 4, samplesPerBrick: 64 };
+  assert.equal(FINE_LEVELSET_JFA_B4_ADDRESSING_ENV, "FLUID_FINE_JFA_B4_ADDRESSING");
+  assert.equal(fineLevelSetJFAB4AddressingRequested(b4Plan, {}), false,
+    "the arithmetic variant must never be selected without the explicit opt-in");
+  assert.equal(fineLevelSetJFAB4AddressingRequested(b4Plan, { FLUID_FINE_JFA_B4_ADDRESSING: "0" }), false);
+  assert.equal(fineLevelSetJFAB4AddressingRequested(b4Plan, { FLUID_FINE_JFA_B4_ADDRESSING: "1" }), true);
+  // The shifts are only the same integers on a 4-cell, 64-sample page, which
+  // is what `encode` already demands. A non-B4 plan must fall back rather than
+  // publish a differently addressed closest-point field.
+  for (const plan of [{ brickResolution: 8, samplesPerBrick: 64 },
+    { brickResolution: 4, samplesPerBrick: 512 }]) {
+    assert.equal(fineLevelSetJFAB4AddressingRequested(plan, { FLUID_FINE_JFA_B4_ADDRESSING: "1" }), false,
+      "B4 addressing must not be selected for a page geometry it is not exact on");
+  }
+  const constructed = WebGPUFineLevelSetRedistance.toString();
+  assert.match(constructed, /fineLevelSetJFAB4AddressingRequested\(\s*source\.plan\s*\)/,
+    "the variant must be chosen once at construction from the validated plan");
+  assert.match(constructed, /b4-addressing/,
+    "the two sources must not share a shader-variant cache key");
+});
+
+test("B4 flood addressing changes only the seed address arithmetic", () => {
+  const production = fineLevelSetJFACPTWGSL.split("\n");
+  const variant = fineLevelSetJFACPTB4AddressingWGSL.split("\n");
+  assert.equal(variant.length, production.length,
+    "the arithmetic variant must not add or remove a line of the transform");
+  const differing = production.flatMap((line, index) => line === variant[index] ? [] : [index]);
+  assert.equal(differing.length, 4,
+    "only localCoord, physicalSampleQ, the closest-point accessor and the candidate evaluation may differ");
+
+  // 1. The B4 page geometry is expressed with the same shifts and masks the
+  //    fixed tap table above already uses, instead of u32 division.
+  assert.match(fineLevelSetJFACPTB4AddressingWGSL,
+    /fn localCoord\(local:u32\)->vec3u\{return vec3u\(local&3u,\(local>>2u\)&3u,\(local>>4u\)&3u\);\}/);
+  assert.match(fineLevelSetJFACPTB4AddressingWGSL,
+    /fn physicalSampleQ\(index:u32\)->vec3u\{let id=index>>6u;return unpackBrick\(metadata\[id\*10u\+1u\]\)\*4u\+localCoord\(index&63u\);\}/);
+  assert.doesNotMatch(fineLevelSetJFACPTB4AddressingWGSL,
+    /index\/p\.samplesPerBrick|local\/\(r\*r\)/,
+    "the flood's per-tap address must contain no u32 division by a page dimension");
+
+  // 2. One lattice coordinate feeds both the closest point and the stable
+  //    tie-break key, rather than each recomputing it.
+  const flood = fineLevelSetJFACPTB4AddressingWGSL.slice(
+    fineLevelSetJFACPTB4AddressingWGSL.indexOf("fn cooperativeFlood"),
+    fineLevelSetJFACPTB4AddressingWGSL.indexOf("fn resolvedDistance"));
+  assert.match(flood,
+    /let seedQ=physicalSampleQ\(candidate\);let delta=\(vec3f\(q\)\+vec3f\(\.5\)\)-closestPointAt\(seedQ,candidate\);bestDistance=dot\(delta,delta\);bestKey=sampleKey\(seedQ\);/,
+    "the candidate's physical coordinate must be resolved once and shared");
+  assert.equal(flood.match(/physicalSampleQ\(/g)?.length, 1,
+    "a candidate lane must resolve its seed coordinate exactly once");
+  assert.doesNotMatch(flood, /materializedClosestPoint|seedStableKey/,
+    "the flood must not re-enter the accessors that recompute the coordinate");
+  // `sampleKey(seedQ)` IS `seedStableKey(candidate)` and `closestPointAt(seedQ,
+  // candidate)` IS `materializedClosestPoint(candidate)`, by definition:
+  assert.match(fineLevelSetJFACPTWGSL,
+    /fn seedStableKey\(index:u32\)->u32\{return sampleKey\(physicalSampleQ\(index\)\);\}/);
+  assert.match(fineLevelSetJFACPTB4AddressingWGSL,
+    /fn materializedClosestPoint\(index:u32\)->vec3f\{return closestPointAt\(physicalSampleQ\(index\),index\);\}/);
+  const body = (source: string) => source.slice(source.indexOf("let code=flags[index]>>SAMPLE_FLAG_BITS"),
+    source.indexOf("direction>=6u);}"));
+  assert.equal(body(fineLevelSetJFACPTB4AddressingWGSL), body(fineLevelSetJFACPTWGSL),
+    "the closest-point float expression tree must be transcribed unchanged");
+
+  // 3. Nothing about coverage, control flow or barrier uniformity moves.
+  const count = (source: string, pattern: RegExp) => source.match(pattern)?.length ?? 0;
+  for (const pattern of [/workgroupBarrier\(\)/g, /\breturn;/g, /@compute/g,
+    /subgroupShuffleDown\(/g, /bandDistance\(\)/g, /unresolved=/g]) {
+    assert.equal(count(fineLevelSetJFACPTB4AddressingWGSL, pattern),
+      count(fineLevelSetJFACPTWGSL, pattern),
+      `the arithmetic variant must not move ${pattern.source}`);
+  }
+  const entryPoints = (source: string) => [...source
+    .matchAll(/@compute\s+@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+  assert.deepEqual(entryPoints(fineLevelSetJFACPTB4AddressingWGSL), entryPoints(fineLevelSetJFACPTWGSL));
+});
+
+test("B4 flood addressing is an exact integer restatement of the generic page arithmetic", () => {
+  // The generic form divides; the B4 form shifts. On the 4-cell, 64-sample
+  // page the encode already requires, the two produce the same integers for
+  // every address the shader can form, so the published closest-point field
+  // and its tie-break ordering are unchanged.
+  const resolution = 4, samplesPerBrick = resolution ** 3;
+  for (let local = 0; local < samplesPerBrick; local += 1) {
+    const z = Math.floor(local / (resolution * resolution));
+    const remainder = local - z * resolution * resolution;
+    const y = Math.floor(remainder / resolution);
+    assert.deepEqual([local & 3, (local >> 2) & 3, (local >> 4) & 3],
+      [remainder - y * resolution, y, z], `localCoord divergence at local ${local}`);
+  }
+  for (let index = 0; index < 1 << 18; index += 1) {
+    const id = Math.floor(index / samplesPerBrick);
+    assert.equal(index >>> 6, id, `page divergence at index ${index}`);
+    assert.equal(index & (samplesPerBrick - 1), index - id * samplesPerBrick,
+      `local divergence at index ${index}`);
+  }
 });
 
 test("sparse diagonal JFA landing gaps deterministically reject narrow-band publication", () => {

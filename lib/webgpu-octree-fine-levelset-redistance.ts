@@ -169,6 +169,20 @@ fn jfaStrideClass()->u32{if(JFA_STRIDE==1u){return 0u;}if(JFA_STRIDE==2u){return
 fn fixedTapAddress(local:u32,tap:u32)->vec2u{let code=JFA_TAP_AXIS_CODES[tap];let base=jfaStrideClass()*12u;let x=JFA_AXIS_ADDRESSES[base+(local&3u)*3u+(code&3u)];let y=JFA_AXIS_ADDRESSES[base+((local>>2u)&3u)*3u+((code>>2u)&3u)];let z=JFA_AXIS_ADDRESSES[base+((local>>4u)&3u)*3u+((code>>4u)&3u)];return vec2u((x>>2u)+3u*((y>>2u)+3u*(z>>2u)),(x&3u)+4u*((y&3u)+4u*(z&3u)));}
 `;
 
+/** Opt-in B4-specialized flood addressing. Default OFF so the document's
+ * interleaved A/B protocol can compare both variants inside one binary. */
+export const FINE_LEVELSET_JFA_B4_ADDRESSING_ENV = "FLUID_FINE_JFA_B4_ADDRESSING";
+
+/** The variant is only legal on the B4 generation the encode already demands,
+ * so the caller's plan is re-checked before the source is selected. */
+export function fineLevelSetJFAB4AddressingRequested(
+  plan: { readonly brickResolution: number; readonly samplesPerBrick: number },
+  environment: Record<string, string | undefined> = process.env,
+): boolean {
+  return environment[FINE_LEVELSET_JFA_B4_ADDRESSING_ENV] === "1"
+    && plan.brickResolution === 4 && plan.samplesPerBrick === 64;
+}
+
 export function fineLevelSetRedistanceAllocatedBytes(maximumResidentBricks: number): number {
   if (!Number.isSafeInteger(maximumResidentBricks) || maximumResidentBricks < 1) {
     throw new RangeError("Fine redistance resident capacity must be a positive integer");
@@ -205,6 +219,8 @@ export function unpackFineLevelSetGPURedistanceControl(words: ArrayLike<number>)
 export class WebGPUFineLevelSetRedistance {
   readonly control: GPUBuffer;
   readonly allocatedBytes: number;
+  /** True when the opt-in B4-specialized flood addressing variant is compiled. */
+  readonly b4Addressing: boolean;
   private readonly reductions: GPUBuffer;
   private readonly supportMask: GPUBuffer;
   private readonly params: GPUBuffer;
@@ -249,9 +265,15 @@ export class WebGPUFineLevelSetRedistance {
       moduleId: "octree/fine-redistance-jfa",
       profile: jfaProfile,
     });
+    // Selected once, at construction, from the plan the encode already
+    // validates. Both variants publish the same closest-point field; the B4
+    // form only replaces exact integer division with the shifts the fixed tap
+    // table above already uses.
+    this.b4Addressing = fineLevelSetJFAB4AddressingRequested(source.plan);
     const jfaVariant = jfaActivity.module(
-      fineLevelSetJFAActivityShader(jfaActivity),
-      `octree/fine-redistance-jfa/${jfaProfile.cacheKey}`,
+      fineLevelSetJFAActivityShader(jfaActivity, this.b4Addressing
+        ? fineLevelSetJFACPTB4AddressingWGSL : fineLevelSetJFACPTWGSL),
+      `octree/fine-redistance-jfa/${jfaProfile.cacheKey}${this.b4Addressing ? "/b4-addressing" : ""}`,
     );
     const jfaModule = device.createShaderModule({ label: "fine-levelset JFA closest-point transform",
       code: jfaVariant.code });
@@ -388,10 +410,67 @@ export class WebGPUFineLevelSetRedistance {
   }
 }
 
+/** Per-tap seed addressing. The flood is the only ALU-limited kernel in the
+ * frame (96 % ALU limiter at 51 % occupancy, measured 2026-07-28) and its
+ * arithmetic is dominated by integer division: every candidate lane runs
+ * `physicalSampleQ` TWICE — once inside `materializedClosestPoint` and once
+ * inside `seedStableKey` — and each call divides by `p.samplesPerBrick`,
+ * by `p.brickResolution` and by `p.brickResolution * p.brickResolution`, plus
+ * two more divisions inside `unpackBrick`. With eight batches per workgroup
+ * that is ~96 u32 divisions per lane per flood dispatch.
+ *
+ * The B4 variant removes both sources without touching a single float:
+ *
+ * 1. `p.brickResolution` is 4 and `p.samplesPerBrick` is 64 on every generation
+ *    this shader may run on — `encode` throws otherwise, and the fixed tap
+ *    table above is already transcribed for a 4-cell page (`>>2u` / `&3u` /
+ *    `4u*`). Making `localCoord` and `physicalSampleQ` agree with the tap
+ *    table replaces three divisions with shifts and masks. For `local < 64`
+ *    and `r == 4` the two forms are the same integers, exhaustively.
+ * 2. The candidate's lattice coordinate is computed once and shared by the
+ *    closest point and the stable tie-break key, instead of being recomputed
+ *    independently by each. `sampleKey(seedQ)` IS `seedStableKey(candidate)`
+ *    by definition, and `closestPointAt(seedQ, candidate)` evaluates the same
+ *    expression tree as `materializedClosestPoint(candidate)` on the same `q`.
+ *
+ * Both are integer identities, so no float is reassociated and no memory
+ * round-trip is added or removed (see the §4.3 fusion refutation in
+ * POWER_LIQUIDS_ULTIMATE_M1MAX: the rounding hazard is a storage round-trip,
+ * which this change does not have). Coverage, the seed set, the stride ladder,
+ * the tie-break order and every acceptance count are untouched.
+ */
+function fineLevelSetJFALocalCoordWGSL(b4Addressing: boolean): string {
+  return b4Addressing
+    ? "fn localCoord(local:u32)->vec3u{return vec3u(local&3u,(local>>2u)&3u,(local>>4u)&3u);}"
+    : "fn localCoord(local:u32)->vec3u{let r=p.brickResolution;let z=local/(r*r);let rem=local-z*r*r;let y=rem/r;return vec3u(rem-y*r,y,z);}";
+}
+
+function fineLevelSetJFAPhysicalSampleWGSL(b4Addressing: boolean): string {
+  return b4Addressing
+    ? "fn physicalSampleQ(index:u32)->vec3u{let id=index>>6u;return unpackBrick(metadata[id*10u+1u])*4u+localCoord(index&63u);}"
+    : "fn physicalSampleQ(index:u32)->vec3u{let id=index/p.samplesPerBrick;let local=index-id*p.samplesPerBrick;return unpackBrick(metadata[id*10u+1u])*p.brickResolution+localCoord(local);}";
+}
+
+const FINE_LEVELSET_JFA_CLOSEST_POINT_BODY =
+  "let code=flags[index]>>SAMPLE_FLAG_BITS;let direction=code>>24u;let fraction=f32(code&CP_FRACTION_MASK)/CP_FRACTION_SCALE;return vec3f(q)+vec3f(.5)+select(vec3f(directionDelta(direction))*fraction,vec3f(0.),direction>=6u);";
+
+function fineLevelSetJFAClosestPointWGSL(b4Addressing: boolean): string {
+  return b4Addressing
+    ? `fn closestPointAt(q:vec3u,index:u32)->vec3f{${FINE_LEVELSET_JFA_CLOSEST_POINT_BODY}}fn materializedClosestPoint(index:u32)->vec3f{return closestPointAt(physicalSampleQ(index),index);}`
+    : `fn materializedClosestPoint(index:u32)->vec3f{let q=physicalSampleQ(index);${FINE_LEVELSET_JFA_CLOSEST_POINT_BODY}}`;
+}
+
+function fineLevelSetJFACandidateWGSL(b4Addressing: boolean): string {
+  return b4Addressing
+    ? "var bestDistance=LARGE;var bestKey=INVALID;var bestSeed=candidate;if(candidate!=INVALID){let seedQ=physicalSampleQ(candidate);let delta=(vec3f(q)+vec3f(.5))-closestPointAt(seedQ,candidate);bestDistance=dot(delta,delta);bestKey=sampleKey(seedQ);}"
+    : "var bestDistance=LARGE;var bestKey=INVALID;var bestSeed=candidate;if(candidate!=INVALID){let delta=(vec3f(q)+vec3f(.5))-materializedClosestPoint(candidate);bestDistance=dot(delta,delta);bestKey=seedStableKey(candidate);}";
+}
+
 /** Sparse 1+JFA closest-point transform. Seed keys are global fine-sample
  * linear indices, so the deterministic secondary ordering is independent of
  * physical page IDs and A/B generation allocation order. */
-export const fineLevelSetJFACPTWGSL = /* wgsl */ `
+function buildFineLevelSetJFACPTWGSL(b4Addressing: boolean): string {
+  return /* wgsl */ `
 enable subgroups;
 ${fineLevelSetLinearWorkgroupWGSL}
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;const NEGATIVE:u32=16u;const LARGE:f32=3.402823e38;
@@ -419,7 +498,7 @@ fn reduceLane(lid:u32,sum0:u32,sum1:u32,sum2:u32,sum3:u32,maximum:u32,errorFlags
 fn publishSeedPartial(work:u32,lid:u32){if(lid==0u&&work<p.pageCapacity){partials[work]=Partial(reduceSum0[0],0u,0u,0u,0u,reduceFlags[0],reduceFirstError[0]);}}
 fn publishResolvePartial(work:u32,lid:u32){if(lid==0u&&work<p.pageCapacity){partials[work].resolveMissing=reduceSum0[0];partials[work].accepted=reduceSum1[0];}}
 fn publishValidationPartial(work:u32,lid:u32){if(lid==0u&&work<p.pageCapacity){partials[work].validationUnresolved=reduceSum0[0];partials[work].maximum=reduceMaximum[0];partials[work].flags|=reduceFlags[0];partials[work].firstError=min(partials[work].firstError,reduceFirstError[0]);}}
-fn unpackBrick(key:u32)->vec3u{let xy=p.brickDims.x*p.brickDims.y;let z=key/xy;let rem=key-z*xy;let y=rem/p.brickDims.x;return vec3u(rem-y*p.brickDims.x,y,z);}fn packBrick(q:vec3u)->u32{return q.x+p.brickDims.x*(q.y+p.brickDims.y*q.z);}fn localCoord(local:u32)->vec3u{let r=p.brickResolution;let z=local/(r*r);let rem=local-z*r*r;let y=rem/r;return vec3u(rem-y*r,y,z);}fn localIndex(q:vec3u)->u32{return q.x+p.brickResolution*(q.y+p.brickResolution*q.z);}
+fn unpackBrick(key:u32)->vec3u{let xy=p.brickDims.x*p.brickDims.y;let z=key/xy;let rem=key-z*xy;let y=rem/p.brickDims.x;return vec3u(rem-y*p.brickDims.x,y,z);}fn packBrick(q:vec3u)->u32{return q.x+p.brickDims.x*(q.y+p.brickDims.y*q.z);}${fineLevelSetJFALocalCoordWGSL(b4Addressing)}fn localIndex(q:vec3u)->u32{return q.x+p.brickResolution*(q.y+p.brickResolution*q.z);}
 fn sampleKey(q:vec3u)->u32{return q.x+p.sampleDims.x*(q.y+p.sampleDims.y*q.z);}
 ${makeFineLevelSetSortedWorklistLookupWGSL("p", "metadata", "worklist", "publishedPageOf", "brickDims")}
 fn deltaCount(support:bool)->u32{return min(pageDelta[select(2u,3u,support)],p.pageCapacity);}
@@ -457,11 +536,11 @@ fn cachedFloodSampleIndex(local:u32,tap:u32)->u32{
 fn deltaRecordError(work:u32,support:bool)->u32{if(work>=deltaCount(support)){return 0u;}let id=rawDeltaPage(work,support);if(id>=p.pageCapacity||metadata[id*10u+2u]!=p.generation){return STALE;}let key=metadata[id*10u+1u];if(publishedPageOf(key)!=id){return STALE;}if(work>0u){let previous=rawDeltaPage(work-1u,support);if(previous>=p.pageCapacity||metadata[previous*10u+2u]!=p.generation||metadata[previous*10u+1u]>=key){return STALE;}}if(!support&&supportPageOf(key)!=id){return STALE;}return 0u;}
 fn sampleIndex(q:vec3u)->u32{if(any(q>=p.sampleDims)){return INVALID;}let id=supportPageOf(packBrick(q/p.brickResolution));if(id==INVALID){return INVALID;}let index=id*p.samplesPerBrick+localIndex(q%p.brickResolution);return select(INVALID,index,finite(bitcast<f32>(phi[index])));}
 fn directionDelta(direction:u32)->vec3i{if(direction==0u){return vec3i(-1,0,0);}if(direction==1u){return vec3i(1,0,0);}if(direction==2u){return vec3i(0,-1,0);}if(direction==3u){return vec3i(0,1,0);}if(direction==4u){return vec3i(0,0,-1);}return vec3i(0,0,1);}
-fn physicalSampleQ(index:u32)->vec3u{let id=index/p.samplesPerBrick;let local=index-id*p.samplesPerBrick;return unpackBrick(metadata[id*10u+1u])*p.brickResolution+localCoord(local);}
+${fineLevelSetJFAPhysicalSampleWGSL(b4Addressing)}
 fn seedStableKey(index:u32)->u32{return sampleKey(physicalSampleQ(index));}
 fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=bitcast<f32>(phi[index]);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){continue;}let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}let other=bitcast<f32>(phi[neighbor]);if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}}if(bestDirection==INVALID){return INVALID;}let quantized=u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE));if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
 fn hasCachedClosestPoint(index:u32)->bool{return (flags[index]>>SAMPLE_FLAG_BITS)!=0u;}
-fn materializedClosestPoint(index:u32)->vec3f{let q=physicalSampleQ(index);let code=flags[index]>>SAMPLE_FLAG_BITS;let direction=code>>24u;let fraction=f32(code&CP_FRACTION_MASK)/CP_FRACTION_SCALE;return vec3f(q)+vec3f(.5)+select(vec3f(directionDelta(direction))*fraction,vec3f(0.),direction>=6u);}
+${fineLevelSetJFAClosestPointWGSL(b4Addressing)}
 fn cooperativeFlood(id:u32,centerBrick:vec3u,lid:u32,subgroupLane:u32,subgroupSize:u32,fromA:bool){
  let team=lid/subgroupSize;let teamCount=256u/subgroupSize;let candidateSlot=subgroupLane;
  let batchCount=(p.samplesPerBrick+teamCount-1u)/teamCount;
@@ -472,7 +551,7 @@ fn cooperativeFlood(id:u32,centerBrick:vec3u,lid:u32,subgroupLane:u32,subgroupSi
   if(laneActive&&candidateSlot<27u){
    let candidateIndex=cachedFloodSampleIndex(local,candidateSlot);if(candidateIndex!=INVALID){candidate=select(workB[candidateIndex],workA[candidateIndex],fromA);}
   }else if(laneActive&&candidateSlot==27u){candidate=select(workB[index],workA[index],fromA);}
-  var bestDistance=LARGE;var bestKey=INVALID;var bestSeed=candidate;if(candidate!=INVALID){let delta=(vec3f(q)+vec3f(.5))-materializedClosestPoint(candidate);bestDistance=dot(delta,delta);bestKey=seedStableKey(candidate);}
+  ${fineLevelSetJFACandidateWGSL(b4Addressing)}
   var width=subgroupSize>>1u;loop{if(width==0u){break;}let otherDistance=subgroupShuffleDown(bestDistance,width);let otherKey=subgroupShuffleDown(bestKey,width);let otherSeed=subgroupShuffleDown(bestSeed,width);if(subgroupLane<width&&(otherDistance<bestDistance||(otherDistance==bestDistance&&otherKey<bestKey))){bestDistance=otherDistance;bestKey=otherKey;bestSeed=otherSeed;}width>>=1u;}
   if(laneActive&&subgroupLane==0u){if(fromA){workB[index]=bestSeed;}else{workA[index]=bestSeed;}}
  }
@@ -512,6 +591,16 @@ fn resolvedSeed(index:u32)->u32{return workA[index];}
   let index=id*p.samplesPerBrick+lid;let transported=bitcast<f32>(phi[index]);let d=distanceValue(index);let negative=transported<0.;let closestPointCode=flags[index]&~((1u<<SAMPLE_FLAG_BITS)-1u);let isInterface=closestPointCode!=0u;phi[index]=bitcast<u32>(select(d,-d,negative));if(resolvedSeed(index)==INVALID||d>bandDistance()){flags[index]=0u;}else{flags[index]=closestPointCode|VALID|select(0u,INTERFACE,isInterface)|select(0u,NEGATIVE,negative);}
 }
 `;
+}
+
+/** Production source. Byte-identical to the schedule this file has always
+ * emitted; every architectural pin in the test suite reads this constant. */
+export const fineLevelSetJFACPTWGSL = buildFineLevelSetJFACPTWGSL(false);
+
+/** Opt-in variant selected by `FLUID_FINE_JFA_B4_ADDRESSING=1`. Differs from
+ * the production source only in `localCoord`, `physicalSampleQ`, the closest
+ * point accessor and the flood's candidate evaluation. */
+export const fineLevelSetJFACPTB4AddressingWGSL = buildFineLevelSetJFACPTWGSL(true);
 
 function instrumentFineLevelSetJFAEntry(
   source: string,
@@ -534,7 +623,10 @@ function instrumentFineLevelSetJFAEntry(
 }
 
 /** Activity-only flood variants; production keeps the exported WGSL byte-for-byte. */
-export function fineLevelSetJFAActivityShader(activity: GPULogicalActivityAdoptionContext): string {
+export function fineLevelSetJFAActivityShader(
+  activity: GPULogicalActivityAdoptionContext,
+  source: string = fineLevelSetJFACPTWGSL,
+): string {
   const checkpoint = (task: string, name: "enter" | "exit") => activity.workgroup(task, name, {
     workgroupId: "wid",
     numWorkgroups: "nw",
@@ -545,9 +637,9 @@ export function fineLevelSetJFAActivityShader(activity: GPULogicalActivityAdopti
   const abExit = checkpoint("jump-flood-a-to-b", "exit");
   const baEntry = checkpoint("jump-flood-b-to-a", "enter");
   const baExit = checkpoint("jump-flood-b-to-a", "exit");
-  if (!abEntry && !abExit && !baEntry && !baExit) return fineLevelSetJFACPTWGSL;
+  if (!abEntry && !abExit && !baEntry && !baExit) return source;
   const withAB = instrumentFineLevelSetJFAEntry(
-    fineLevelSetJFACPTWGSL, "jumpFloodAToB", abEntry, abExit,
+    source, "jumpFloodAToB", abEntry, abExit,
   );
   return instrumentFineLevelSetJFAEntry(withAB, "jumpFloodBToA", baEntry, baExit);
 }
