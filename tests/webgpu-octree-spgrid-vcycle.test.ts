@@ -392,12 +392,30 @@ test("accurate A2 stages wide direct terms before an ordered row fold", () => {
     octreeSPGridAccurateOperatorShader.indexOf("fn applyTransitionInterior"),
   );
   assert.match(regularEntry, /applyRow\(row\)/);
+  // RENEGOTIATED with the per-candidate E^T widening (POWER_LIQUIDS_ULTIMATE
+  // _M1MAX Part D's "parallel gather, serial fold", priority item 2). The
+  // adjoint producer is now `stageAdjointCandidate`, one lane per (row, child,
+  // candidate), so it writes ONE term rather than a child's eighteen. The
+  // named property is unchanged and is what the pattern still pins: dependent
+  // terms are produced independently, then folded in channel order.
   assert.match(octreeSPGridAccurateOperatorShader,
-    /fn stageDirectTerm[\s\S]*accurateTerms\[destination\]=term;[\s\S]*fn stageAdjointChild[\s\S]*destination\+candidate\]=c\*\(x-inputVector\[other\]\);[\s\S]*fn finalizeStagedRow[\s\S]*value\+=accurateTerms\[row\*162u\+channel\]/,
+    /fn stageDirectTerm[\s\S]*accurateTerms\[destination\]=term;[\s\S]*fn stageAdjointCandidate[\s\S]*accurateTerms\[destination\]=c\*\(x-inputVector\[other\]\);[\s\S]*fn finalizeStagedRow[\s\S]*value\+=accurateTerms\[row\*162u\+channel\]/,
     "dependent channel terms must be produced independently then folded in channel order");
+  // The fold itself must stay serial, in one lane's registers, in ascending
+  // child-then-candidate order. Widening the producer must never become a
+  // reassociation of the sum.
   assert.match(octreeSPGridAccurateOperatorShader,
-    /fn stageAcceptedUnionTerms[\s\S]*unionRow\(item\/18u\)[\s\S]*fn stageMergedBandTerms[\s\S]*workRow\(item\/18u,4u\)[\s\S]*fn stageAcceptedUnionAdjoints[\s\S]*item\/8u[\s\S]*fn stageMergedBandAdjoints[\s\S]*fn finalizeStagedUnionRows/,
-    "the wide stages must expose direct channels and fine children independently");
+    /fn finalizeStagedRow[\s\S]*for\(var child=0u;child<8u;child\+=1u\)\{for\(var candidate=0u;candidate<18u;candidate\+=1u\)\{\s*value\+=accurateTerms\[row\*162u\+18u\+child\*18u\+candidate\];/,
+    "the E^T fold must keep the serial ascending order the single-lane walk used");
+  // RENEGOTIATED with the same change: the adjoint lane count per row goes from
+  // 8 (one per child, each walking eighteen candidates in sequence) to 144.
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn stageAcceptedUnionTerms[\s\S]*unionRow\(item\/18u\)[\s\S]*fn stageMergedBandTerms[\s\S]*workRow\(item\/18u,4u\)[\s\S]*fn stageAcceptedUnionAdjoints[\s\S]*item\/144u[\s\S]*stageAdjointCandidate\(row,\(item%144u\)\/18u,item%18u\)[\s\S]*fn stageMergedBandAdjoints[\s\S]*fn finalizeStagedUnionRows/,
+    "the wide stages must expose direct channels and fine adjoint candidates independently");
+  // Both publishers of the adjoint record must agree with that lane count.
+  assert.match(octreeSPGridAccurateDispatchGateShader,
+    /classDispatch\[18\]=select\(0u,\(transitionRows\*144u\+63u\)\/64u/,
+    "the accepted-class gate must launch one lane per (row, child, candidate)");
   assert.match(octreeSPGridAccurateOperatorShader,
     /fn transitionUnionCount[\s\S]*select\(1u,3u,index==1u\)[\s\S]*fn transitionUnionRow[\s\S]*stageAcceptedUnionAdjoints[\s\S]*transitionUnionRow\(rowItem\)/,
     "fine-adjoint workers must be restricted to the two coarse/fine transition classes");

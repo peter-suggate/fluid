@@ -1827,7 +1827,10 @@ fn prepareAccurateDispatches(){
  classDispatch[13]=1u;classDispatch[14]=1u;
  classDispatch[15]=select(0u,(unionRows*18u+63u)/64u,solveLive&&unionValid);
  classDispatch[16]=1u;classDispatch[17]=1u;
- classDispatch[18]=select(0u,(transitionRows*8u+63u)/64u,solveLive&&unionValid);
+ // One lane per (transition row, child, candidate): the eighteen candidates a
+ // child's chains cover are independent, so they issue concurrently instead of
+ // eighteen deep behind one lane.
+ classDispatch[18]=select(0u,(transitionRows*144u+63u)/64u,solveLive&&unionValid);
  classDispatch[19]=1u;classDispatch[20]=1u;
 }
 `;
@@ -2261,10 +2264,35 @@ fn buildOperatorRow(row:u32,word:u32){
  buildOperatorRow(item/OPERATOR_ROW_WORDS,item%OPERATOR_ROW_WORDS);
 }
 
-fn stageAdjointChild(row:u32,child:u32){let destination=row*162u+18u+child*18u;
- if(destination+18u>arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
+// E^T, one lane per (row, child, candidate) instead of one lane per (row,
+// child) walking eighteen candidates in sequence.
+//
+// The walk each lane used to own was eighteen INDEPENDENT dependent chains run
+// back to back: nothing in candidate k+1 needs candidate k, so the sequencing
+// bought nothing and the launch was 152 chains deep on
+// ceil(transitionRows*8/64) workgroups. Giving each candidate its own lane
+// issues them concurrently: the depth per lane drops from nineteen chains to
+// three, and the launch widens eighteen-fold onto a machine on which nothing
+// in this solve is saturated.
+//
+// Bit-exact by construction, and deliberately NOT a fold change: each lane
+// writes exactly the one accurateTerms word its (child, candidate) wrote
+// before, from the identical expression on the identical operands, and
+// finalizeStagedRow still sums them in ascending child-then-candidate order in
+// one lane's registers. Nothing is staged through workgroup memory - doing that
+// to these terms is what turned one fused multiply-accumulate into a bare
+// multiply plus a bare add and moved peak speed 7.8269 -> 7.5066
+// (POWER_LIQUIDS_ULTIMATE_M1MAX, refuted lever 10).
+//
+// The per-lane cost is the ghost resolution (pageFor + pageSlot) repeated by
+// the eighteen lanes of a child rather than shared. That is the trade: ~2.8x
+// the total dependent loads for ~6.3x the chains in flight and 1/19th the
+// per-lane depth. It is the same trade the direct-term stage already took.
+fn stageAdjointCandidate(row:u32,child:u32,candidate:u32){let base=row*162u+18u+child*18u;
+ if(base+18u>arrayLength(&accurateTerms)||row>=capacity()||row>=arrayLength(&geometry)
   ||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
- for(var candidate=0u;candidate<18u;candidate+=1u){accurateTerms[destination+candidate]=0.0;}
+ let destination=base+candidate;
+ accurateTerms[destination]=0.0;
  let h=geometry[row];let l=countTrailingZeros(h.y);if(l==0u){return;}let fine=l-1u;
  let q=originOf(h)/(1u<<l);let x=inputVector[row];let fineDims=vec3i(dims(fine));let fineBase=levelBase(fine);
  let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
@@ -2272,14 +2300,14 @@ fn stageAdjointChild(row:u32,child:u32){let destination=row*162u+18u+child*18u;
  if(ghostPage>=levelCapacity(fine)){reportAt(2u,31u,row);return;}
  let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);
  if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){return;}
- for(var candidate=0u;candidate<18u;candidate+=1u){let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;
-  if(any(activeQ<vec3i(0))||any(activeQ>=fineDims)){continue;}
-  let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
-  if(activeSlot==INVALID||(state[atBase(FLAGS,fineBase,activeSlot)]&ACTIVE)==0u){continue;}
-  let encoded=state[atBase(OWNER,fineBase,activeSlot)];if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);continue;}
-  let other=encoded-1u;let c=coefficientForDirection(other,metrics[other],delta);
-  if(c>0.0){accurateTerms[destination+candidate]=c*(x-inputVector[other]);}
- }}
+ let delta=canonicalDirection(candidate);let activeQ=vec3i(ghostQ)-delta;
+ if(any(activeQ<vec3i(0))||any(activeQ>=fineDims)){return;}
+ let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
+ if(activeSlot==INVALID||(state[atBase(FLAGS,fineBase,activeSlot)]&ACTIVE)==0u){return;}
+ let encoded=state[atBase(OWNER,fineBase,activeSlot)];if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);return;}
+ let other=encoded-1u;let c=coefficientForDirection(other,metrics[other],delta);
+ if(c>0.0){accurateTerms[destination]=c*(x-inputVector[other]);}
+}
 
 fn finalizeStagedRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)
  ||row>=arrayLength(&inputVector)||row*162u+162u>arrayLength(&accurateTerms)){reportAt(2u,25u,row);return;}
@@ -2372,14 +2400,17 @@ fn stageUnionItemByChase(item:u32,count:u32,row:u32){let countIndex=stagedCountI
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=validWorkCount(4u);
  stageUnionItemByChase(item,count,workRow(item/18u,4u));}
+// ADJOINT_LANES_PER_ROW = 8 children x 18 candidates. The dispatch records in
+// octreeSPGridAccurateDispatchGateShader and in the Section 4.3 shell's
+// prepareCorrectionDispatches publish transitionRows*144 lanes to match.
 @compute @workgroup_size(64) fn stageAcceptedUnionAdjoints(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/8u;
- if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointChild(row,item%8u);}}}
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/144u;
+ if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointCandidate(row,(item%144u)/18u,item%18u);}}}
 @compute @workgroup_size(64) fn stageMergedBandAdjoints(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/8u;
- if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointChild(row,item%8u);}}}
+ if(stopped()){return;}let item=linearLane(wg,groups,lane);let count=transitionUnionCount();let rowItem=item/144u;
+ if(rowItem<count){let row=transitionUnionRow(rowItem);if(row!=INVALID){stageAdjointCandidate(row,(item%144u)/18u,item%18u);}}}
 @compute @workgroup_size(64) fn finalizeStagedUnionRows(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(stopped()){return;}let item=linearLane(wg,groups,lane);let countIndex=stagedCountIndex();

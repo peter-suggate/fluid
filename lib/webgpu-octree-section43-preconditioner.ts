@@ -660,7 +660,11 @@ fn prepareCorrectionDispatches() {
       && atomicLoad(&bandWorksets[base + 3u]) == 3u;
     transitionRows += count;
   }
-  gatedBandDispatch[18] = select(0u, (transitionRows * 8u + 63u) / 64u,
+  // One lane per (transition row, child, candidate). The eighteen E^T
+  // candidates behind a child are independent chains, so the staged adjoint
+  // stage issues them concurrently rather than eighteen deep in one lane;
+  // stageAdjointCandidate in the operator shader owns the matching indexing.
+  gatedBandDispatch[18] = select(0u, (transitionRows * 144u + 63u) / 64u,
     solveLive && unionValid && transitionValid);
   gatedBandDispatch[19] = 1u;
   gatedBandDispatch[20] = 1u;
