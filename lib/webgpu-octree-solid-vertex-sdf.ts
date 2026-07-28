@@ -157,22 +157,43 @@ export class WebGPUOctreeSolidVertexSdf {
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    this.preparePipeline = device.createComputePipeline({ label: "Prepare sparse solid vertex SDF workset", layout: "auto",
+    // The prepare entry point is the only one that touches the indirect
+    // dispatch (binding 6) and the only one that omits the headers, terrain and
+    // body bindings, so it needs a layout of its own. Declare that layout
+    // explicitly rather than deriving it with "auto": an auto layout silently
+    // tracks whatever the shader happens to reference, so adding a binding to
+    // prepareSolidVertexSdf without adding it here produced an invalid bind
+    // group with no label and no cause, surfacing only as a validation failure
+    // in whichever pass first bound it. Declared explicitly, the same drift is
+    // a pipeline-creation error naming the binding.
+    const prepareLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+    ] });
+    this.preparePipeline = device.createComputePipeline({ label: "Prepare sparse solid vertex SDF workset",
+      layout: device.createPipelineLayout({ bindGroupLayouts: [prepareLayout] }),
       compute: { module, entryPoint: "prepareSolidVertexSdf" } });
     this.publishPipeline = device.createComputePipeline({ label: "Materialize sparse solid vertex SDF", layout: pipelineLayout,
       compute: { module, entryPoint: "publishSolidVertexSdf" } });
     this.finishPipeline = device.createComputePipeline({ label: "Validate sparse solid vertex SDF", layout: pipelineLayout,
       compute: { module, entryPoint: "finishSolidVertexSdf" } });
     this.prepareGroup = device.createBindGroup({
-      layout: this.preparePipeline.getBindGroupLayout(0),
+      label: "Sparse octree solid vertex SDF prepare",
+      layout: prepareLayout,
       entries: [
         { binding: 0, resource: { buffer: this.params } },
         { binding: 2, resource: { buffer: rowCount } },
         { binding: 4, resource: { buffer: this.arena } },
+        // prepareSolidVertexSdf seeds arena.control[4] from rollbackSeedControl[5];
+        // omitting this binding is what invalidated the group.
+        { binding: 5, resource: { buffer: rollbackSeedControl } },
         { binding: 6, resource: { buffer: this.activeDispatch } },
       ],
     });
-    this.group = device.createBindGroup({ layout, entries: [
+    this.group = device.createBindGroup({ label: "Sparse octree solid vertex SDF", layout, entries: [
       { binding: 0, resource: { buffer: this.params } }, { binding: 1, resource: { buffer: leafHeaders } },
       { binding: 2, resource: { buffer: rowCount } }, { binding: 3, resource: terrain.createView() },
       { binding: 4, resource: { buffer: this.arena } }, { binding: 5, resource: { buffer: rollbackSeedControl } },

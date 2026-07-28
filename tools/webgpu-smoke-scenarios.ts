@@ -12,6 +12,7 @@ import {
 export const smokeScenarioIds = [
   "dam-break-ui",
   "settled-tank",
+  "settled-tank-ui",
   "dam-break-boxes",
   "hose-tank",
   "sphere-jet",
@@ -197,6 +198,18 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
     const uiScene = getScenePreset("water-box-dam-break").create();
     return { id, description: "exact browser water-box dam-break preset", scene: uiScene,
       oracleSteps: 2, target_s: 0.2 };
+  }
+  if (id === "settled-tank-ui") {
+    // The hand-authored settled-tank scenario below clears rigidBodies, but the
+    // browser preset it stands in for keeps the default scene's bodies ("drop
+    // bodies into calm water"). Only a populated rigidBodies array constructs
+    // the solid vertex-SDF stage at all, so every stage that runs exclusively
+    // on the body path was unreachable from Dawn and shipped untested. Take the
+    // scene from the same preset factory as the browser, for the same reason
+    // dam-break-ui does.
+    const uiScene = getScenePreset("water-box-tank-fill").create();
+    return { id, description: "exact browser water-box settled-tank preset, with rigid bodies",
+      scene: uiScene, oracleSteps: 2, target_s: 0.2 };
   }
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
