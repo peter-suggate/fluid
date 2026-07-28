@@ -39,13 +39,44 @@ export interface FineLevelSetRedistanceDeltaAuthority {
   };
 }
 
-/** Warm-started descending JFA strides followed by two local repair passes.
+/** Descending JFA strides followed by two local repair passes.
  *
- * The recurring sparse field is transported from the preceding accepted
- * generation and the timestep is bounded by `maximumDisplacementFineCells`.
- * New collar bricks are coarse-seeded by topology before this transform.
- * Consequently the flood only has to repair the motion collar; it does not
- * need to rediscover the complete maintained band from a domain-scale jump.
+ * **This schedule is NOT warm-started**, which is why `encodeJFA` must keep
+ * passing `bandCells` as the displacement. `seedClosestPoints` writes
+ * `workA[index]=INVALID` for every support sample on every generation and
+ * re-derives the seed set from phi sign changes, so no closest-point field
+ * crosses a generation boundary: the flood has to reach every band cell from
+ * the interface every step, however little the interface moved.
+ *
+ * The per-step displacement itself is genuinely small. Transport rejects any
+ * `maximumBacktraceFineCells` above `2 * fineFactor` (8 fine cells at factor
+ * 4) and publishes the measured per-step maximum, `ceil(|v| * dt / h)` in fine
+ * cells, in its status summary. So `planFineLevelSetJFAStrides(bandCells, 8)`
+ * would emit 8,4,2,1,+1,+1 and delete one of the seven floods — and it is
+ * unsound today, in the way that looks like a win. Band cells 9..23 from the
+ * interface would finish with `seed==INVALID`; `resolveClosestPoints*` counts
+ * them as `unresolved`; `finalizeJFADistances` clears `committed`; and
+ * `webgpu-octree-fine-levelset-topology.ts` then rejects the publication,
+ * because `redistanceValid` requires `redistanceControl[0]==0` and
+ * `redistanceControl[3]!=0`. The surface freezes, the frame gets faster, and
+ * the run still prints PASS — POWER_LIQUIDS_ULTIMATE_M1MAX, "things that look
+ * like wins and are not", item 1. E1 step 2 stays blocked until the
+ * closest-point channels are carried in the fine-page transaction, and that
+ * carry must survive physical page reassignment: a transported seed index
+ * naming a recycled page resolves to a live-looking wrong coordinate, which
+ * fails open rather than closed.
+ *
+ * Replacing the ladder with an ordered 6-direction sweep is not a substitute
+ * either. This transform is dispatched one workgroup per support page over an
+ * unordered compacted page list, so a sweep pass propagates only within a page
+ * (4 cells) plus its halo; covering 23 cells still needs ~6 rounds, the same
+ * pass count, while giving up the 32-lane subgroup candidate reduction and
+ * requiring per-lane divergent workgroup-memory addressing — measured a 26 %
+ * regression on this GPU (item 10). Ordering the sweep globally instead costs
+ * one dispatch per slab per direction. And a 6-sweep vector distance transform
+ * is not exact for a sub-cell closest-point field, so it would be Gate B for
+ * no pass saving. The lever that did work was arithmetic inside the flood:
+ * see `FINE_LEVELSET_JFA_B4_ADDRESSING_ENV`.
  */
 export function planFineLevelSetJFAStrides(
   bandCells: number,
