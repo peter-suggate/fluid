@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
+import { auditWGSLComputeBindingReachability } from "../lib/wgsl-binding-reachability";
+
 import {
   decodeOctreeAirSupportGPUFirstError,
   OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE,
@@ -408,67 +410,26 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
 });
 
 // Every pipeline in this module is created with `layout: "auto"`, so the bind
-// group layout is derived from each entry point's ACTUAL static usage and
-// `createBindGroup` rejects an entry set that does not match it exactly. A
-// binding declared above but no longer referenced by the shader is therefore a
-// hard device error, and it surfaces only once a GPU builds the group -- the
-// UI reported it as "[Invalid BindGroup (unlabeled)] is invalid due to a
-// previous error" after `faceCenter` stopped reaching `faceCellIn`, leaving
-// rowGeometry (2) and recordArena (8) declared but dead on the three march
-// entry points.
+// group layout is derived from each entry point's ACTUAL static usage, and
+// `createBindGroup` rejects an entry set that does not match it exactly. The
+// table above is therefore a DESCRIPTION of the shader, not a request: a
+// binding declared but no longer referenced is a hard device error, not slack.
 //
-// The reachability below OVER-approximates uses: it treats every identifier in
-// a transitively reachable function body as a use, including inside comments.
-// So it can miss a dead binding, but it can never invent one -- which makes it
-// sound in the only direction asserted here. The opposite direction (used but
-// undeclared) is deliberately NOT asserted: over-approximation makes it noisy,
-// and a genuinely missing binding fails pipeline creation immediately anyway.
-test("no entry point declares a binding its shader does not reference", () => {
-  const globals = new Map<string, number>();
-  for (const match of octreeAirVelocitySupportPublicationWGSL
-    .matchAll(/@group\(0\)@binding\((\d+)\)\s*var\s*(?:<[^>]*>)?\s*(\w+)/g)) {
-    globals.set(match[2]!, Number(match[1]));
-  }
-  assert.ok(globals.size > 20, "binding globals should have been discovered");
-
-  const bodies = new Map<string, string>();
-  for (const match of octreeAirVelocitySupportPublicationWGSL.matchAll(/fn\s+(\w+)\s*\(/g)) {
-    const open = octreeAirVelocitySupportPublicationWGSL.indexOf("{", match.index! + match[0].length);
-    if (open < 0) continue;
-    let depth = 0, at = open;
-    for (; at < octreeAirVelocitySupportPublicationWGSL.length; at += 1) {
-      const character = octreeAirVelocitySupportPublicationWGSL[at];
-      if (character === "{") depth += 1;
-      else if (character === "}") { depth -= 1; if (depth === 0) break; }
-    }
-    bodies.set(match[1]!, octreeAirVelocitySupportPublicationWGSL.slice(open, at + 1));
-  }
-
-  const reachableBindings = (entryPoint: string): Set<number> => {
-    const visited = new Set<string>(), used = new Set<number>(), pending = [entryPoint];
-    while (pending.length > 0) {
-      const name = pending.pop()!;
-      if (visited.has(name)) continue;
-      visited.add(name);
-      const body = bodies.get(name);
-      assert.ok(body !== undefined, `no body found for ${name}; the extractor is stale`);
-      for (const [, identifier] of body.matchAll(/\b(\w+)\b/g)) {
-        const binding = globals.get(identifier);
-        if (binding !== undefined) used.add(binding);
-        if (bodies.has(identifier)) pending.push(identifier);
-      }
-    }
-    return used;
-  };
-
+// It surfaces only once a GPU builds the group, which is why it reached the UI
+// as "[Invalid BindGroup (unlabeled)] is invalid due to a previous error" —
+// named after the pass that used the group, not the entry point that declared
+// it — when `faceCenter` stopped reaching `faceCellIn` and left rowGeometry (2)
+// and recordArena (8) dead on the three march entry points.
+//
+// `tests/webgpu-octree-spgrid-vcycle.test.ts` has held this same invariant over
+// its own auto-layout module for some time; this producer simply never got it.
+test("every auto-layout entry point declares exactly its reachable bindings", () => {
   for (const [entryPoint, declared] of Object.entries(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS)) {
-    const used = reachableBindings(entryPoint);
-    // Binding 0 is the uniform parameter block, bound by `resource` for every
-    // entry point whether or not the body names it.
-    const dead = declared.filter((binding) => binding !== 0 && !used.has(binding));
-    assert.deepEqual(dead, [],
-      `${entryPoint} declares binding(s) ${dead.join(", ")} that its shader never references; `
-      + "layout: \"auto\" will reject the bind group at runtime");
+    const reachable = auditWGSLComputeBindingReachability(
+      octreeAirVelocitySupportPublicationWGSL, entryPoint).bindings.map(({ binding }) => binding);
+    assert.deepEqual([...declared].sort((left, right) => left - right),
+      [...reachable].sort((left, right) => left - right),
+      `${entryPoint} bind group must equal its exact WGSL auto-layout reachability`);
   }
 });
 
