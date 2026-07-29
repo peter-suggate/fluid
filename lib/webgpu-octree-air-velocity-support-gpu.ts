@@ -834,8 +834,9 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   if(resolvedCell!=u32(cell)||resolvedSize!=size){
     failTopology(1u,item);atomicStore(&supportArena[tagWord],INVALID);return;}
   // Mark demanded identities even when the accepted direct-row table already
-  // owns them. The extrapolation destination is the demanded closure, not all
-  // remote air rows present in the sparse topology.
+  // owns them. Demand flags gate the interpolation closures; the march
+  // destination itself is the whole accepted air partition, enrolled by
+  // emitFineBandAirSupportCandidates so the extension domain stays contiguous.
   atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],flags);
   let direct=publishedRow(resolvedCell,resolvedSize);if(direct!=INVALID){atomicStore(&supportArena[tagWord],direct);return;}
   setCandidate(item,Candidate(resolvedCell,resolvedSize,tagWord));
@@ -1105,10 +1106,25 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
 @compute @workgroup_size(256)fn emitFineBandAirSupportCandidates(@builtin(global_invocation_id)g:vec3u){let item=g.x;
   if(item>=p.domainVolume||s(0u)!=0u){return;}let output=fineCandidateBase()+item;
   setCandidate(output,Candidate(INVALID,0u,INVALID));let demanded=s(p.directoryFlagOffset+item);
-  if((demanded&RECORD_FINE)==0u){return;}let owner=octreeOwnerPageLookup(vec3i(coord(item)));
-  if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){failTopology(4u,output);return;}let resolvedCell=cellOf(owner.origin);
-  atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],demanded);let direct=publishedRow(resolvedCell,owner.size);
-  if(direct!=INVALID){return;}setCandidate(output,Candidate(resolvedCell,owner.size,INVALID));
+  // Paper Section 5 marches the closest-face extension over the octree's whole
+  // air region, so its domain is contiguous by construction and every fine-band
+  // face has a path to a seeded liquid face. A demanded-cells-only destination
+  // broke that invariant: a thin splash film whose coarse rows have all gone
+  // air demands only a 1-ring around its own fine band, which islands away
+  // from the liquid and freezes at stationary air — the stuck ceiling/corner
+  // fluid artifact. Every accepted air leaf therefore joins the march graph:
+  // the leaf's origin cell emits its one candidate, while non-origin cells
+  // only forward their demand flags to the owning leaf as before.
+  let owner=octreeOwnerPageLookup(vec3i(coord(item)));
+  if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){
+    if((demanded&RECORD_FINE)!=0u){failTopology(4u,output);}return;}
+  let resolvedCell=cellOf(owner.origin);
+  if(demanded!=0u||resolvedCell==item){
+    atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],demanded|RECORD_EXTENSION);}
+  let direct=publishedRow(resolvedCell,owner.size);
+  if(direct!=INVALID){return;}
+  if((demanded&RECORD_FINE)==0u&&resolvedCell!=item){return;}
+  setCandidate(output,Candidate(resolvedCell,owner.size,INVALID));
   atomicMin(&scratch[p.directoryWinnerOffset+resolvedCell],output);}
 
 var<workgroup> emitRowActive:atomic<u32>;
@@ -1593,16 +1609,13 @@ fn regularVectorAt(faceRow:u32,point:vec3f)->vec4f{let cell=faceCell(faceRow);le
     else if(u32(origin[axis])==0u&&(p.closedBoundaryMask&(1u<<(2u*axis)))!=0u){negative=vec4u(bitcast<u32>(0.),0u,INVALID,1u);}
     if(positive.w==0u&&negative.w==0u){
       // No marched value on either side: this cell's face-graph component
-      // holds no seeded liquid face. Measured provenance (mini dam, first
-      // wall contact): the demand flags were fineBandDemand|extensionClosure
-      // on far-air cells 5+ coarse cells above any liquid — the degenerately
-      // dense fine band demands high air whose support subset forms ISLANDS
-      // with no demanded path down to the liquid. The paper's extension
-      // domain is a contiguous distance band and cannot island; ours breaks
-      // that invariant upstream (docs/FINE_BAND_DENSITY_PLAN.md is the real
-      // fix). Far air with band-clamped static phi needs no meaningful
-      // velocity, so stationary air is correct-by-content here; failing
-      // closed instead froze the whole epoch on the first island.
+      // holds no seeded liquid face. Since emitFineBandAirSupportCandidates
+      // now enrolls every accepted air leaf, the march domain is the paper's
+      // contiguous air partition and this can only be air sealed away from
+      // all liquid by solids or closed walls (a fine film that has never had
+      // liquid rows still reaches the bulk's seeds through the far-air
+      // leaves). Stationary air is the correct content for a sealed pocket;
+      // failing closed instead froze the whole epoch on the first island.
       atomicAdd(&scratch[41u],1u);
       atomicMin(&scratch[42u],(((cell.w>>6u)&0xffu)<<16u)|(cell.x<<3u)|axis);
       result[axis]=0.;continue;}
