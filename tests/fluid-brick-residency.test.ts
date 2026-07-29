@@ -119,6 +119,26 @@ test("GPU residency derives a topology-tile worklist so leaves never straddle a 
   assert.match(fluidBrickResidencyShader, /candidateGroupsPerTile = max\(1u, groupsPerTile \/ 8u\)/);
 });
 
+test("pressure topology residency retains dry closed-wall grading support", () => {
+  assert.match(fluidBrickResidencyShader, /fn tileHasPressureBoundarySupport/);
+  assert.match(fluidBrickResidencyShader,
+    /tile\.x < min\(2u, d\.x\)[\s\S]*tile\.z < min\(2u, d\.z\)[\s\S]*tile\.y < min\(2u, d\.y\)/,
+    "side walls and the floor retain their boundary tile plus one grading tile");
+  assert.match(fluidBrickResidencyShader,
+    /pressureBoundaryTopClosed\(\) && tile\.y \+ 2u >= d\.y/,
+    "only a closed-top scene retains the ceiling grading strip");
+  assert.match(fluidBrickResidencyShader,
+    /if \(includeWholeDomainPressureSupport\(\)\) \{ return true; \}/,
+    "an authored inflow retains dry nozzle refinement support before phi arrives");
+  const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  assert.match(octreeSource,
+    /includePressureBoundarySupport: true,[\s\S]*pressureBoundaryTopClosed: scene\.container\.top === "closed"/,
+    "the owner-page topology scheduler must opt into the same wall policy as refinement");
+  assert.match(octreeSource,
+    /includeWholeDomainPressureSupport: scene\.fluid\.inflow !== undefined/,
+    "inflow scenes must publish dry nozzle support independently of initial liquid");
+});
+
 test("pressure topology rebuild consumes the shared topology-tile worklist indirectly", () => {
   const rebuild = WebGPUOctreeProjection.prototype.encodeInactiveTopologyCandidate.toString();
   assert.match(rebuild, /else if\(residencyReady\)\{this\.ownerPages\.encodeInactiveCandidate\(new PassBroker\(encoder\)\)\}/,

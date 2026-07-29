@@ -192,10 +192,12 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
       : graph.name === "structured velocity dynamics"
         // `accumulateBodyImpulse` sums the rigid-exchange impulse and torque as
         // fixed-point integers, which is what makes the sum order-independent
-        // across the lanes contributing to one body. The two candidate-transfer
+        // across the lanes contributing to one body. `candidateTransferItem`
+        // reads the candidate transaction header atomically before consuming
+        // its compact changed-face workset. The two candidate-transfer
         // functions are the usual fail-closed pair: store the error code, keep
         // the lowest failing handle with atomicMin.
-        ? ["acc", "accumulateBodyImpulse", "rejectCandidateTransfer", "rejectSample",
+        ? ["acc", "accumulateBodyImpulse", "candidateTransferItem", "rejectCandidateTransfer", "rejectSample",
           "rejectVector", "transferStructuredTopologyCandidate"]
       : graph.name === "fine level-set summaries"
         ? ["addFineBase", "addFineSummaryPages", "changedKey", "coarseEntryAt", "dirLoad", "dirStore",

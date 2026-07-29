@@ -17,6 +17,7 @@ import {
   GIZMO_AXIS_DIRECTIONS,
   type GizmoAxis,
 } from "@/lib/editor-gizmo";
+import { CLICK_SLOP_PX, emptySpaceClickDeselects } from "@/lib/editor-tools";
 import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
 import {
   aimInflow,
@@ -53,7 +54,7 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { advancePresentationClock, presentationFrameDue, presentationStateChanged } from "@/lib/frame-pacing";
 import { getScenePreset } from "@/lib/scenes";
-import { SVO_COST_OVERLAY_LABELS } from "@/lib/svo-render-diagnostics";
+import { SVO_COST_OVERLAY_DEFINITIONS } from "@/lib/svo-render-diagnostics";
 import { projectViewportFailure, viewportFailureIndicator } from "@/lib/viewport-failure-diagnostics";
 import { dawnReproductionForGPUFailure } from "@/lib/webgpu-failure-reproduction";
 import {
@@ -84,13 +85,22 @@ export function WebGPUViewport() {
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
   const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
   const svoMaximumNodeVisits = useUIStore((state) => state.svoMaximumNodeVisits);
+  const svoOverlayDefinition = SVO_COST_OVERLAY_DEFINITIONS[svoCostOverlay];
+  const svoOverlayRamp = `linear-gradient(90deg,${svoOverlayDefinition.legend
+    .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
   const activeTool = useUIStore((state) => state.activeTool);
   const selection = useUIStore((state) => state.selection);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const [hover, setHover] = useState<EditorHover | null>(null);
   const pointerRef = useRef<
-    | { id: number; x: number; y: number; action: "orbit" | "pan" }
-    | { id: number; x: number; y: number; action: "pick" }
+    // `x`/`y` track the last move; `downX`/`downY` stay at the press origin.
+    // The distance between them is what separates a background click, which
+    // deselects, from a camera drag, which keeps the selection.
+    | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan" }
+    // `released` records a pointerup that arrived while the GPU pick readback
+    // was still in flight, so a fast click still resolves instead of being
+    // dropped along with the gesture.
+    | { id: number; x: number; y: number; downX: number; downY: number; action: "pick"; released?: boolean }
     | { id: number; action: "body"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     // Editor gizmo drags preview on runtime state only and commit on release.
     | { id: number; action: "gizmo-axis"; bodyId: string; axis: GizmoAxis; axisOrigin: Vec3; grabOffset: Vec3; lastPosition: Vec3 }
@@ -629,7 +639,7 @@ export function WebGPUViewport() {
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
       if (simulation.backend === "webgpu" && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
-        pointerRef.current={id:pointerId,x,y,action:"pick"};
+        pointerRef.current={id:pointerId,x,y,downX:x,downY:y,action:"pick"};
         const rect=event.currentTarget.getBoundingClientRect();
         const picked=await rendererRef.current.pickRigidBody(ray.origin,ray.direction,{
           normalizedX:(event.clientX-rect.left)/Math.max(rect.width,1),
@@ -638,8 +648,16 @@ export function WebGPUViewport() {
         const active=pointerRef.current;
         if(!active||active.id!==pointerId||active.action!=="pick")return;
         const body=picked?useDiagnosticsStore.getState().bodies[picked.bodyIndex]:undefined;
-        if(body&&picked){beginBodyDrag(pointerId,timeStamp,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;}
-        pointerRef.current={id:pointerId,x,y,action:"orbit"};
+        if(body&&picked){
+          // A pointer already released cannot be dragged, so a fast click on a
+          // body selects it without opening a throw that never ends.
+          if(active.released){pointerRef.current=null;useUIStore.getState().selectBody(body.description.id);return;}
+          beginBodyDrag(pointerId,timeStamp,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;
+        }
+        // Nothing under the cursor: a released pointer was a background click,
+        // a held one becomes the orbit fallback.
+        if(active.released){pointerRef.current=null;useUIStore.getState().select(undefined);return;}
+        pointerRef.current={...active,action:"orbit"};
         return;
       }
       let nearest: { body: RigidBodyState; t: number } | undefined;
@@ -653,7 +671,7 @@ export function WebGPUViewport() {
         return;
       }
     }
-    pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
+    pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const active = pointerRef.current;
@@ -746,6 +764,17 @@ export function WebGPUViewport() {
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const active = pointerRef.current;
     if (active?.id !== event.pointerId) return;
+    // An interrupted gesture is not a click, so it must not move the selection.
+    const cancelled = event.type === "pointercancel";
+    // A pick whose readback has not landed yet outlives the gesture: clearing
+    // it here would silently swallow every click faster than one GPU frame.
+    if (active.action === "pick") {
+      const travelled = Math.hypot(event.clientX - active.downX, event.clientY - active.downY);
+      if (!cancelled && travelled <= CLICK_SLOP_PX) {
+        pointerRef.current = { ...active, released: true };
+        return;
+      }
+    }
     pointerRef.current = null;
     if (active.action === "body") { simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end"); return; }
     // Terrain reaches the solver only through a re-seed.
@@ -762,6 +791,13 @@ export function WebGPUViewport() {
       simulation.manipulateBody(active.bodyId, active.lastPosition, "end");
       simulation.updateBody(active.bodyId, { position_m: active.lastPosition, linearVelocity_m_s: { x: 0, y: 0, z: 0 } });
       simulation.commitEdit();
+      return;
+    }
+    // Nothing claimed the press, so a click that never became a drag is the
+    // user clicking through to the background. Deselect, whatever was selected.
+    if (!cancelled && (active.action === "orbit" || active.action === "pan")
+      && emptySpaceClickDeselects(active.action, event.clientX - active.downX, event.clientY - active.downY)) {
+      useUIStore.getState().select(undefined);
     }
   };
 
@@ -881,12 +917,10 @@ export function WebGPUViewport() {
       <i /><span>{failure.locationLabel ?? "first recorded failure"}</span>
     </div>}
     {svoCostOverlay !== "off" && svoRenderMode === "svo" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-cost-legend">
-      <header><span>SVO · {SVO_COST_OVERLAY_LABELS[svoCostOverlay]}</span><span>depth ≤ {svoMaximumTraversalDepth} · visits ≤ {svoMaximumNodeVisits}</span></header>
-      {svoCostOverlay === "exhaustion"
-        ? <div className="svo-cost-ramp" style={{ background: "linear-gradient(90deg,#17372f 0 48%,#f5d442 48% 72%,#f04438 72%)" }} />
-        : <div className="svo-cost-ramp" />}
-      <footer><span>{svoCostOverlay === "exhaustion" ? "within budget" : "lower work"}</span><span>{svoCostOverlay === "exhaustion" ? "exhausted / invalid" : "higher work"}</span></footer>
-      <small>Heatmap is blended with the scene radiance; lower the limits in Render to expose expensive rays.</small>
+      <header><span>SVO · {svoOverlayDefinition.label}</span><span>depth ≤ {svoMaximumTraversalDepth} · visits ≤ {svoMaximumNodeVisits}</span></header>
+      <div className="svo-cost-ramp" style={{ background: svoOverlayRamp }} />
+      <footer><span>{svoOverlayDefinition.legend[0].label}</span><span>{svoOverlayDefinition.legend.at(-1)?.label}</span></footer>
+      <small>{svoOverlayDefinition.description} Adjust its limits and scene blend in Render.</small>
     </div>}
   </>;
 }

@@ -86,9 +86,10 @@ test("required compact validation rejects and exposes a downstream publication r
   rejected.coarseDirectory[1] = generation - 1;
   rejected.coarseControl![10] = generation - 1;
   rejected.topologyControl!.set([16, 1, 1, 1, 1, 1, 1, 2]);
-  assert.throws(() => reconstructCompactOctreeOccupancyField(rejected, [2, 1, 1]),
-    /coarse\/fine generation mismatch/,
-    "a rejected transaction must retain the prior mesh rather than reconstruct a new render publication");
+  const reconstruction = reconstructCompactOctreeOccupancyField(rejected, [2, 1, 1]);
+  assert.equal(reconstruction.publicationValid, false);
+  assert.equal(compactOctreeFieldEvidenceIsAcceptable(reconstruction), false,
+    "a rollback still requires a complete current fine-SPGrid publication");
   assert.equal(compactOctreePublicationHeaderEvidence(rejected).downstreamFinalizeReason, 2);
   assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).transportControl,
     [0, 0, 42, 0, 7, 4, 3, 3]);
@@ -123,7 +124,7 @@ test("compact smoke reconstruction rejects a stale coarse/fine generation pair",
   });
 });
 
-test("compact smoke reconstruction rejects every rollback epoch", () => {
+test("compact smoke reconstruction accepts an explicit retained octree with a current fine SPGrid", () => {
   const rolledBack = snapshot();
   rolledBack.coarseDirectory[1] = generation - 1;
   rolledBack.coarseControl![10] = generation - 1;
@@ -135,14 +136,20 @@ test("compact smoke reconstruction rejects every rollback epoch", () => {
   rolledBack.flags.fill(FINE_LEVELSET_SAMPLE_FLAGS.valid, 0, plan.samplesPerBrick);
   rolledBack.phi.fill(-0.5, 0, plan.samplesPerBrick / 2);
   rolledBack.phi.fill(0.5, plan.samplesPerBrick / 2, plan.samplesPerBrick);
-  assert.throws(() => reconstructCompactOctreeOccupancyField(rolledBack, [2, 1, 1]),
-    /coarse\/fine generation mismatch/,
-    "rollback evidence is diagnostic-only and cannot create a new render publication");
+  // Aanjaneya et al. 2017 Section 5
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) explicitly uses a
+  // background octree and a separately rebuilt fine SPGrid. The rollback is
+  // provenance for retaining the valid octree, not a reason to hide the fine
+  // interface that advanced independently.
+  const retained = reconstructCompactOctreeOccupancyField(rolledBack, [2, 1, 1]);
+  assert.equal(retained.coarseGeneration, generation - 1);
+  assert.equal(retained.retainedCoarseAuthority, true);
+  assert.equal(compactOctreeFieldEvidenceIsAcceptable(retained), true);
 
   for (const invalid of [
     { topology: new Uint32Array([16, 1, 1, 1, 1, 1, 1, 0]), coarse: generation - 1 },
-    { topology: new Uint32Array([17, 1, 1, 1, 1, 1, 1, 2]), coarse: generation - 1 },
-    { topology: new Uint32Array([16, 1, 1, 1, 1, 1, 1, 2]), coarse: generation - 2 },
+    { topology: new Uint32Array([0x20, 1, 1, 1, 1, 1, 1, 2]), coarse: generation - 1 },
+    { topology: new Uint32Array([16, 1, 1, 1, 1, 1, 1, 0x10]), coarse: generation - 2 },
   ]) {
     const stale = { ...rolledBack, topologyControl: invalid.topology,
       coarseDirectory: rolledBack.coarseDirectory.slice() };

@@ -33,12 +33,13 @@ test("projected aperture normalization is orientation independent", () => {
 });
 
 test("step-averaged ramp integrates the configured tap volume", () => {
-  const inflow = createPaperScenario("hose-tank").fluid.inflow!;
+  const inflow = { ...createPaperScenario("hose-tank").fluid.inflow!, ramp_s: 0.35 };
   assert.ok(Math.abs(averageInflowStrength(inflow, 0, inflow.ramp_s) - 0.5) < 1e-12);
   assert.equal(averageInflowStrength(inflow, inflow.ramp_s, 1), 1);
   const time = 3.144, expectedStrengthIntegral = time - 0.5 * inflow.ramp_s;
   assert.ok(Math.abs(averageInflowStrength(inflow, 0, time) * time - expectedStrengthIntegral) < 1e-12);
-  const expectedVolume = Math.PI * inflow.radius_m ** 2 * 0.8 * expectedStrengthIntegral;
+  const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+  const expectedVolume = Math.PI * inflow.radius_m ** 2 * speed * expectedStrengthIntegral;
   assert.ok(Math.abs(integratedInflowVolume(inflow, 0, time) - expectedVolume) < 1e-9);
 });
 

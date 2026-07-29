@@ -9,13 +9,18 @@
 export interface OctreeTechniqueDebugSource {
   readonly leaves: GPUBufferBinding;
   readonly topologyMetrics: GPUBufferBinding;
+  readonly catalogEntryHeaders: GPUBufferBinding;
+  readonly catalogFaces: GPUBufferBinding;
   readonly tetrahedronHeaders: GPUBufferBinding;
   readonly tetrahedra: GPUBufferBinding;
   readonly tetrahedronVertices: GPUBufferBinding;
   readonly structuredAuthority: GPUBufferBinding;
+  readonly structuredParams: GPUBufferBinding;
   readonly structuredRowGeometry: GPUBufferBinding;
   readonly structuredRowVelocities: GPUBufferBinding;
   readonly structuredControl: GPUBufferBinding;
+  /** Current compact pressure potential, selected from the live ping-pong bank. */
+  readonly pressure: GPUBufferBinding;
   /** Published pressure rows; diagonal and RHS stay live entirely on GPU. */
   readonly leafHeaders: GPUBufferBinding;
   /**
@@ -45,11 +50,10 @@ export interface OctreeTechniqueDebugSource {
     readonly topologyControl: GPUBufferBinding;
     readonly redistanceControl: GPUBufferBinding;
     /**
-     * The two authored band half-widths, in finest octree cells, so the overlay
-     * can draw the pressure band's reach against the surface band's actual
-     * residency. They are separate parameters and an under-reaching surface
-     * band is what starves the fine-to-coarse restriction, so the comparison
-     * is the point of the view rather than a decoration.
+     * The coupled authored half-widths, in finest octree cells, so the overlay
+     * can draw the master pressure reach against the surface band's actual
+     * derived residency. Keeping both values explicit also exposes diagnostic
+     * fine-only fault injection without making it a product control.
      */
     readonly bands: {
       /** Authored pressure refinement half-width, in finest octree cells. */
@@ -80,6 +84,10 @@ export const OCTREE_TECHNIQUE_OVERLAY_MODES = [
   "tetra-validity",
   "global-fine-phi",
   "band-residency",
+  "evaluated-velocity",
+  "projection-update",
+  "divergence-closure",
+  "structured-velocity",
 ] as const;
 
 export type OctreeTechniqueOverlayMode = typeof OCTREE_TECHNIQUE_OVERLAY_MODES[number];
@@ -103,4 +111,8 @@ export const OCTREE_TECHNIQUE_OVERLAY_CODES: Readonly<Record<OctreeTechniqueOver
   "tetra-validity": 23,
   "global-fine-phi": 25,
   "band-residency": 26,
+  "evaluated-velocity": 27,
+  "projection-update": 28,
+  "divergence-closure": 29,
+  "structured-velocity": 30,
 };

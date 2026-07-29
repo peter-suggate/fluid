@@ -66,8 +66,21 @@ test("packed per-step audit snapshots retain every authority control", () => {
   assert.throws(() => unpackStructuredGenerationAuditSnapshot(bytes, 2), /truncated/);
 });
 
-test("exact structured generation audit accepts only one coherent successor", () => {
+test("paper-separated fine SPGrid may advance while a coherent pressure octree is retained", () => {
+  // Aanjaneya et al. 2017, Section 5
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) defines the fine SPGrid
+  // and background octree as separate meshes. Fine topology is updated after
+  // every advection; no paper rule couples its numeric generation to a
+  // pressure-topology epoch that did not need adaptation.
   assert.deepEqual(exactStructuredGenerationAuditFailures(coherentAudit()), []);
+  const retained = coherentAudit();
+  assert.deepEqual(exactStructuredGenerationAuditFailures({
+    ...retained,
+    publishedFineGeneration: 9,
+    expectedStructuredEpoch: 7,
+    previousFineGeneration: 8,
+    previousStructuredEpoch: 7,
+  }), []);
   const stale = coherentAudit();
   const failures = exactStructuredGenerationAuditFailures({ ...stale,
     structured: { ...stale.structured, epoch: 6 },
@@ -75,6 +88,13 @@ test("exact structured generation audit accepts only one coherent successor", ()
   });
   assert.ok(failures.includes("structured velocity publication is invalid"));
   assert.ok(failures.includes("structured boundary publication is invalid or incoherent"));
+  assert.ok(exactStructuredGenerationAuditFailures({
+    ...retained,
+    expectedStructuredEpoch: 6,
+    previousStructuredEpoch: 7,
+    structured: { ...retained.structured, epoch: 6 },
+    boundary: { ...retained.boundary, epoch: 6, publishedEpoch: 6 },
+  }).includes("structured epoch regressed"));
 });
 
 test("final performance authority validates seven-word fine and structured publications", () => {

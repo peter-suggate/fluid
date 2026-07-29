@@ -538,7 +538,6 @@ export class WebGPUQuadtreeSurfaceState {
   private readonly ownedReconcileFallback?: GPUTexture;
   private readonly ownedSolidFallback?: GPUBuffer;
   private readonly ownedSparseFallback?: GPUBuffer;
-  private presentationTextureReleased = false;
 
   constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture | undefined, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer, private readonly sparseExecution?: SparseSurfaceExecutionSource, private readonly presentationOnly = false, private readonly placeholderOnly = false) {
     this.cache = presentationOnly ? cache : ensureSurfaceCache(device, cache);
@@ -748,30 +747,25 @@ export class WebGPUQuadtreeSurfaceState {
   addReferenceVolumeCells(cells: number) { if (Number.isFinite(cells) && cells > 0) this.referenceVolumeCells += cells; }
 
   /**
-   * Global-fine storage only needs the dense level set to seed its first
-   * command submission. WebGPU keeps resources alive for work that was
-   * already submitted, so the owner may release this compatibility texture
-   * immediately after that submission without a CPU/GPU fence.
+   * The dense field stops being an authority after global-fine publication,
+   * but it cannot yet be destroyed: recurring projection, boundary, and fine
+   * seed bind groups retain views of this texture even after their shaders
+   * select the Section-5 fine-SPGrid/background-octree authorities. WebGPU
+   * validates every bound resource, including dynamically unused bindings.
+   *
+   * Keep this compatibility resource alive until `destroy()` unless every
+   * recurring group is atomically rebound to a replacement texture first.
+   * See Aanjaneya et al. 2017 Section 5
+   * (`docs/papers/aanjaneya-2017-power-liquids.txt`): the two meshes are
+   * independent authorities; that assumption does not waive bind-group
+   * resource lifetime.
    */
   releasePresentationTexture() {
-    if (!this.presentationOnly || this.presentationTextureReleased) return 0;
-    // The analytic sparse path owns only this format-compatible texel. It is
-    // intentionally the persistent sampled fallback for recurring bind
-    // groups, so releasing it would invalidate every later submission while
-    // saving no box-scaled storage.
-    if (this.placeholderOnly) return 0;
-    this.presentationTextureReleased = true;
-    // destroy() invalidates a resource even for already-submitted work in
-    // Dawn. Detach it from future submissions immediately, but defer actual
-    // destruction until the bootstrap command buffer has completed.
-    void this.device.queue.onSubmittedWorkDone().then(() => this.texture.destroy()).catch(() => {
-      // Device loss owns resource teardown.
-    });
-    return this.dims.nx * this.dims.ny * this.dims.nz * 4;
+    return 0;
   }
 
   destroy() {
-    if (!this.presentationTextureReleased) this.texture.destroy(); this.scratch?.destroy(); this.predicted?.destroy(); this.reversed?.destroy(); this.seedsA?.destroy(); this.seedsB?.destroy(); this.params?.destroy(); this.passBuffer?.destroy(); this.reductions?.destroy(); this.ownedReconcileFallback?.destroy(); this.ownedSolidFallback?.destroy(); this.ownedSparseFallback?.destroy();
+    this.texture.destroy(); this.scratch?.destroy(); this.predicted?.destroy(); this.reversed?.destroy(); this.seedsA?.destroy(); this.seedsB?.destroy(); this.params?.destroy(); this.passBuffer?.destroy(); this.reductions?.destroy(); this.ownedReconcileFallback?.destroy(); this.ownedSolidFallback?.destroy(); this.ownedSparseFallback?.destroy();
   }
 }
 

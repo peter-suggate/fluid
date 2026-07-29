@@ -1,8 +1,5 @@
 import type { GPUEulerianInfo } from "./webgpu-eulerian";
 import type { WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
-import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
-import type { VoxelRenderMode } from "./webgpu-voxel-debug";
-import type { SvoRenderMode } from "./svo-render-mode";
 
 export type PaperPipelineStageTone = "pending" | "healthy" | "warning" | "rejected" | "stale";
 
@@ -167,83 +164,3 @@ export function paperPipelineHealthFlags(
     .filter((stage) => stage.tone === "rejected" || stage.tone === "stale")
     .map((stage) => `2017-${stage.id}-${stage.state.toLowerCase()}`);
 }
-
-export interface PaperVisualPreset {
-  readonly id: string;
-  readonly label: string;
-  readonly description: string;
-  readonly mode?: GridOverlayMode;
-  readonly axis: GridOverlayConfig["axis"];
-  readonly renderer?: SvoRenderMode;
-  readonly voxels?: VoxelRenderMode;
-}
-
-export interface PaperVisualAuthority {
-  readonly label: string;
-  readonly stageId: string;
-  readonly state: string;
-  readonly tone: PaperPipelineStageTone;
-  readonly generation?: string;
-  readonly frame: string;
-  readonly detail: string;
-}
-
-const PAPER_VISUAL_LABELS: Readonly<Partial<Record<GridOverlayMode, string>>> = {
-  structure: "Solver structure", resolution: "Adaptive cell scale",
-  cfl: "CFL load", speed: "Extrapolated speed", representation: "Pressure coverage",
-  phi: "Level set φ", divergence: "Projected divergence", pressure: "Pressure", projection: "Projection Δu",
-  "power-cells": "Power cells", "power-faces": "Power faces", "delaunay-tetrahedra": "Delaunay tetrahedra",
-  "transition-band": "Transition band", "power-operator": "Power operator", "octree-lifecycle": "Octree lifecycle",
-  "fine-band-lifecycle": "Fine-band lifecycle", "operator-diagonal": "Operator diagonal",
-  "global-fine-phi": "Global-fine φ / Eikonal residual",
-  "operator-rhs": "Operator RHS", "operator-reciprocity": "Face reciprocity",
-  "operator-open-fraction": "Face open fraction", "tetra-validity": "Tetrahedron validity",
-};
-
-function visualStageId(mode: GridOverlayMode, axis: GridOverlayConfig["axis"]): string {
-  if (axis === "off") return "raster";
-  if (mode === "fine-band-lifecycle" || mode === "global-fine-phi" || mode === "phi") return "fine";
-  if (mode === "speed") return "extrapolation";
-  if (mode === "pressure" || mode === "divergence" || mode === "projection"
-    || mode === "power-operator" || mode.startsWith("operator-")) return "pressure";
-  if (mode === "power-cells" || mode === "power-faces" || mode === "delaunay-tetrahedra"
-    || mode === "transition-band" || mode === "tetra-validity") return "power";
-  return "authority";
-}
-
-/** Relates the selected existing overlay to the exact publication it is
- * displaying. This is UI interpretation only: no visualization can make a
- * rejected or stale product current. */
-export function paperVisualAuthority(
-  mode: GridOverlayMode,
-  axis: GridOverlayConfig["axis"],
-  stages: readonly PaperPipelineStage[],
-  info: GPUEulerianInfo | null | undefined,
-): PaperVisualAuthority {
-  const stageId = visualStageId(mode, axis);
-  const stage = stages.find((candidate) => candidate.id === stageId) ?? stages[0]
-    ?? pending("authority", "t=0", "Sparse authority fence", "Waiting for GPU diagnostics.");
-  const steps = info?.encodedSteps ?? 0;
-  return {
-    label: axis === "off" ? "Production raster" : PAPER_VISUAL_LABELS[mode] ?? mode,
-    stageId,
-    state: stage.state,
-    tone: stage.tone,
-    generation: stage.generation,
-    frame: steps === 0 ? "t=0 preflight" : `latest encoded substep ${steps}`,
-    detail: stage.detail,
-  };
-}
-
-/** One-click views composed exclusively from existing GPU overlay sources. */
-export const PAPER_VISUAL_PRESETS: readonly PaperVisualPreset[] = [
-  { id: "power-cells", label: "Power cells", description: "Sites and exact power-cell classification", mode: "power-cells", axis: "volume" },
-  { id: "power-faces", label: "Power faces", description: "Primal faces, dual links, normals, boundaries", mode: "power-faces", axis: "volume" },
-  { id: "transitions", label: "Delaunay", description: "Local tetrahedra and transition rows", mode: "delaunay-tetrahedra", axis: "volume" },
-  { id: "fine-band", label: "Fine φ", description: "Interface seeds, frontier, known redistance support", mode: "fine-band-lifecycle", axis: "volume" },
-  { id: "fine-phi-values", label: "Fine φ values", description: "Paper fine-lattice φ and |∇φ|−1 residual", mode: "global-fine-phi", axis: "z" },
-  { id: "velocity", label: "Structured velocity", description: "Live projected full-vector field", mode: "speed", axis: "z" },
-  { id: "pressure", label: "Pressure / residual", description: "Mapped pressure plus live numeric residual", mode: "pressure", axis: "z" },
-  { id: "operator", label: "Operator", description: "Power Laplacian coefficients and validity", mode: "power-operator", axis: "volume" },
-  { id: "raster", label: "Raster source", description: "Current production water geometry", axis: "off", renderer: "raster", voxels: "smooth" },
-] as const;

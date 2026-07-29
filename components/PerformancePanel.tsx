@@ -8,7 +8,6 @@ import {
   type PaperPhaseId,
   type PerformanceTrace,
 } from "@/lib/performance-trace";
-import { isOctreeTechniqueOverlayMode } from "@/lib/octree-technique-debug";
 import { performanceActivityFrameHasSettledEvidence } from "@/lib/performance-activity";
 import { emptyPerformanceReport, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { simulation } from "@/lib/simulation/controller";
@@ -23,6 +22,15 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import type { GridOverlayConfig, GridOverlayMode } from "@/lib/webgpu-renderer";
 
 const PERFORMANCE_AVERAGE_WINDOW = 30;
+const PERFORMANCE_CAPTURE_MODES: readonly {
+  mode: PerformanceInstrumentationMode;
+  label: string;
+  title: string;
+}[] = [
+  { mode: "off", label: "OFF", title: "Production command graph with measurement work bypassed" },
+  { mode: "timeline", label: "TIMELINE", title: "Low-overhead CPU and GPU timestamp timeline using production WGSL" },
+  { mode: "activity", label: "DETAILED", title: "Perturbing shader-heartbeat capture with instrumented WGSL and readbacks" },
+];
 const PHASE_LAYOUT: Readonly<Record<PerformanceTrace["lane"], readonly [PaperPhaseId, string][]>> = {
   "main-thread": [
     ["frame-control", "Frame control + simulation admission"],
@@ -131,7 +139,7 @@ const PAPER_VIEWS: readonly PaperView[] = [
     id: "layered-grid", figure: "FIG. 6", label: "Fine SDF layer",
     description: "Interface core, redistanced support, and compact coarse authority outside the fine allocation.",
     source: "Sparse fine-band hash, sample flags, and publication controls",
-    mode: "fine-band-lifecycle", axis: "z",
+    mode: "fine-band-lifecycle", axis: "volume",
     legend: [
       { swatch: "#ff168f", label: "interface core" },
       { swatch: "#15c8db", label: "valid redistanced sample" },
@@ -141,9 +149,9 @@ const PAPER_VIEWS: readonly PaperView[] = [
   },
   {
     id: "coarse-grid", figure: "FIG. 6/8", label: "Adaptive coarse grid",
-    description: "Current compact leaf scale and refinement transitions on an exact scene slice.",
+    description: "Current compact leaf scale and refinement transitions throughout the live volume.",
     source: "Published octree owner map and compact leaf records",
-    mode: "resolution", axis: "z",
+    mode: "resolution", axis: "volume",
     legend: [
       { swatch: "#38adbd", label: "finest compact leaf" },
       { swatch: "#55a8ba", label: "intermediate dyadic leaf" },
@@ -155,7 +163,7 @@ const PAPER_VIEWS: readonly PaperView[] = [
     id: "sdf", figure: "FIG. 6/7", label: "Fine signed distance",
     description: "Factor-m φ values, the zero crossing, and the centered-gradient Eikonal residual.",
     source: "Published Section 5 fine-lattice φ samples",
-    mode: "global-fine-phi", axis: "z",
+    mode: "global-fine-phi", axis: "volume",
     legend: [
       { swatch: "linear-gradient(90deg,#1973eb,#f5f5e6,#ed7829)", label: "liquid (−) · zero · air (+)" },
       { swatch: "#ffffff", label: "φ = 0 crossing" },
@@ -167,7 +175,7 @@ const PAPER_VIEWS: readonly PaperView[] = [
     id: "band-residency", figure: "§5", label: "Band slice",
     description: "Every authored and derived band nested outward from the interface: pressure reach, transported surface band, redistance support, and the dilation halo.",
     source: "Published Section 5 φ residency and the solver's own band planner",
-    mode: "band-residency", axis: "z",
+    mode: "band-residency", axis: "volume",
     legend: [
       { swatch: "#ffffff", label: "φ = 0 interface" },
       { swatch: "#ff168f", label: "pressure refinement reach" },
@@ -217,40 +225,42 @@ const PAPER_VIEWS: readonly PaperView[] = [
     id: "pressure", figure: "§4", label: "Evaluated pressure",
     description: "Affine pressure potential dt·p/ρ reconstructed from the live leaf degrees of freedom.",
     source: "Current pressure leaf field",
-    mode: "pressure", axis: "z",
+    mode: "pressure", axis: "volume",
     legend: [{ swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "low → high pressure potential" }],
   },
   {
     id: "velocity", figure: "§5", label: "Evaluated velocity",
-    description: "Magnitude of the reconstructed projected velocity, including the extrapolated air band.",
-    source: "Current solver velocity publication",
-    mode: "speed", axis: "z",
+    description: "Magnitude of the evaluated projected velocity on every live compact pressure row.",
+    source: "Accepted structured row-velocity publication",
+    mode: "evaluated-velocity", axis: "volume",
     legend: [
       { swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "zero → live maximum speed" },
-      { swatch: "#b8deda", label: "bright air · extrapolated band" },
     ],
   },
   {
     id: "projection", figure: "§4.1", label: "Pressure update Δu",
-    description: "Magnitude of u after projection minus u before projection, normalized by live maximum speed.",
-    source: "Current before/after projection fields",
-    mode: "projection", axis: "z",
+    description: "Largest pressure-potential velocity update across the generalized faces incident on each live row.",
+    source: "Current pressure rows, face inverse distances, and accepted adjacency",
+    mode: "projection-update", axis: "volume",
     legend: [{ swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "small → large |Δu|" }],
   },
   {
     id: "divergence", figure: "EQ. 2", label: "Divergence closure",
     description: "Post-projection divergence; the color scale saturates at |∇·u| Δt = 1.",
-    source: "Current projected velocity field",
-    mode: "divergence", axis: "z",
+    source: "Accepted generalized-face fluxes and physical power-cell volumes",
+    mode: "divergence-closure", axis: "volume",
     legend: [{ swatch: "linear-gradient(90deg,#1548df,#f5f5f5,#e21a14)", label: "compression (−) · zero · expansion (+)" }],
   },
   {
     id: "extrapolation", figure: "§5", label: "Structured velocity",
     description: "Projected full-vector reconstruction over the direct six-family authority.",
     source: "Live structured rows, family slots, and projected CPT seeds",
-    mode: "speed", axis: "z",
+    mode: "structured-velocity", axis: "volume",
     legend: [
-      { swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "zero → live projected speed" },
+      { swatch: "#ff6666", label: "positive X component" },
+      { swatch: "#66ff66", label: "positive Y component" },
+      { swatch: "#6666ff", label: "positive Z component" },
+      { swatch: "#808080", label: "zero vector" },
       { swatch: "#ff1738", label: "invalid structured publication" },
     ],
   },
@@ -310,12 +320,20 @@ export function PerformancePanel() {
   const physics = lanes.physics.trace;
   const presentation = lanes.presentation.trace;
   const selectView = (view: PaperView) => {
+    if (overlayMode === view.mode && overlayAxis !== "off") {
+      setOverlayAxis("off");
+      return;
+    }
     setOverlayMode(view.mode);
-    setOverlayAxis(view.axis);
-    if (view.axis === "volume") setOverlaySlice(0.42);
+    // A field card changes the publication, not the user's chosen
+    // presentation. Only an inactive overlay needs the card's volume default.
+    if (overlayAxis === "off") {
+      setOverlayAxis(view.axis);
+      if (view.axis === "volume") setOverlaySlice(0.42);
+    }
   };
   const selectedView = PAPER_VIEWS.find((view) => view.mode === overlayMode);
-  const volumeCapable = isOctreeTechniqueOverlayMode(overlayMode) && overlayMode !== "global-fine-phi";
+  const volumeCapable = methodId === "octree";
   const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
   const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
   const holdingPausedMeasurements = lanes.cpu.held || lanes.physics.held || lanes.presentation.held;
@@ -338,7 +356,7 @@ export function PerformancePanel() {
     const shaderVariantChanged = (instrumentationMode === "activity") !== (mode === "activity");
     setInstrumentationMode(mode);
     const activityStore = usePerformanceActivityStore.getState();
-    if (mode === "off") activityStore.setEnabled(false);
+    if (mode !== "activity") activityStore.setEnabled(false);
     else if (activityStore.enabled) activityStore.beginGeneration();
     else activityStore.setEnabled(true);
     useDiagnosticsStore.getState().set({
@@ -358,21 +376,17 @@ export function PerformancePanel() {
     <header className="performance-panel-header">
       <div><span>POWER LIQUIDS OBSERVATORY</span><h2>Measured work + live fields</h2></div>
       <div className="performance-panel-header-actions">
-        <button
-          className="measurement-mode"
-          type="button"
-          role="switch"
-          aria-checked={instrumentationMode === "activity"}
-          aria-label="Detailed performance capture"
-          data-enabled={instrumentationMode === "activity"}
-          onClick={() => changeInstrumentationMode(
-            instrumentationMode === "activity" ? "off" : "activity",
-          )}
-        >
+        <div className="measurement-mode" role="group" aria-label="Performance capture mode">
           <span>CAPTURE</span>
-          <strong>{instrumentationMode === "activity" ? "DETAILED" : "OFF"}</strong>
-          <i aria-hidden="true" />
-        </button>
+          {PERFORMANCE_CAPTURE_MODES.map(({ mode, label, title }) => <button
+            key={mode}
+            type="button"
+            aria-pressed={instrumentationMode === mode}
+            data-mode={mode}
+            title={title}
+            onClick={() => changeInstrumentationMode(mode)}
+          >{label}</button>)}
+        </div>
       </div>
     </header>
 
@@ -404,14 +418,14 @@ export function PerformancePanel() {
     />
     </> : <div className="performance-disabled-notice">
       <strong>Running without measurement instrumentation</strong>
-      <span>Timestamp queries, stage-boundary encoder breaks, and trace-buffer resolves/readbacks are bypassed. Correctness synchronization remains active. Measuring adds no queue fence and no dispatch: a sampled step submits the same command graph plus one marker pass, which the Dawn lane prices at about 2%.</span>
+      <span>Timestamp queries, stage-boundary encoder breaks, and trace-buffer resolves/readbacks are bypassed. Correctness synchronization remains active. TIMELINE keeps production WGSL and samples stage timestamps; DETAILED recompiles shader-heartbeat variants and is intentionally perturbing.</span>
     </div>}
 
     <section className="paper-observatory">
       <header><div><h3>Paper field observatory</h3><small>LIVE GPU PUBLICATIONS · NO FIELD READBACK</small></div><span>{methodId === "octree" ? "OCTREE AUTHORITY" : "SELECT OCTREE FOR FULL SET"}</span></header>
       <div className="paper-view-grid">
         {PAPER_VIEWS.map((view) => {
-          const active = overlayMode === view.mode;
+          const active = overlayAxis !== "off" && overlayMode === view.mode;
           return <button key={view.id} className={active ? "active" : ""} onClick={() => selectView(view)} aria-pressed={active}>
             <span>{view.figure}</span><strong>{view.label}</strong><small>{view.description}</small>
           </button>;

@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import { WebGPUOctreePowerCoarseLevelSet } from "../lib/webgpu-octree-power-coarse-levelset";
-import { planFineLevelSetBandFineCells } from "../lib/webgpu-octree-fine-levelset-topology";
+import {
+  fineLevelSetResidencyFloorCells,
+  planFineLevelSetBandFineCells,
+  planFineLevelSetRecurringTopologyBand,
+  planFineLevelSetTopologyBand,
+} from "../lib/webgpu-octree-fine-levelset-topology";
 import {
   applyGlobalFineTransportDiagnostics,
   WebGPUUniformEulerianSolver,
@@ -16,7 +21,7 @@ function compact(value: string | Function): string {
   return value.toString().replace(/\s+/g, "");
 }
 
-test("fine redistance retains the outer pressure-centre trilinear shell", () => {
+test("fine redistance ends at transport while topology covers the complete departure shell", () => {
   const source = compact(octreeSource);
   const surface = compact(WebGPUOctreeProjection.prototype.encodeSurface);
   // Allocation and the recurring encode no longer restate the reach: both read
@@ -27,11 +32,21 @@ test("fine redistance retains the outer pressure-centre trilinear shell", () => 
   for (const fineFactor of [4, 8] as const) {
     const widths = planFineLevelSetBandFineCells(3, fineFactor);
     assert.equal(widths.redistanceBandFineCells,
-      widths.transportBandFineCells + 2 * fineFactor + 3,
-      "redistance must reserve the trilinear reach and the closed cutoff beyond transport");
-    assert.ok(widths.redistanceBandFineCells
-      > widths.transportBandFineCells + widths.maximumBacktraceFineCells,
-      "the support shell must extend past the complete backtrace");
+      widths.transportBandFineCells,
+      "physical redistance ends at the transported surface cutoff");
+    const topology = planFineLevelSetTopologyBand(4, {
+      ...widths, interpolationSupportFineCells: 1,
+    });
+    assert.ok(topology.dilationBrickRings * 4 >= fineLevelSetResidencyFloorCells(
+      widths.transportBandFineCells, widths.maximumBacktraceFineCells, 1),
+    "resident topology, rather than physical redistance, covers the complete departure shell");
+    const recurring = planFineLevelSetRecurringTopologyBand(4, {
+      ...widths, interpolationSupportFineCells: 1,
+    }, 2);
+    assert.ok(recurring.dilationBrickRings <= topology.dilationBrickRings
+      && recurring.dilationBrickRings * 4 >= Math.max(
+        widths.redistanceBandFineCells, 2 + 1),
+    "recurring topology must discard unused worst-case trajectory pages while retaining the measured landing stencil");
   }
   assert.match(source,
     /=planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells,globalFineFactor\)/,

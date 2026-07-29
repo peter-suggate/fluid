@@ -11,9 +11,14 @@ export const OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS = 10;
 /** Validation/diagnostic ceiling. It is deliberately not host-encoded. */
 export const OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING = 16;
 export const OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE = 1e-4;
-/** Section 4.3 reports that about eight matching boundary Jacobi sweeps were
- * needed for satisfactory 6--10 iteration convergence. */
+/** Section 4.3 reports k≈8 as a general choice. */
 export const OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH = 8;
+/** The live 16-cubed, two-level dam sweep found k=4 to be the best symmetric
+ * shell: it retained 3--8 iteration convergence over 500 steps while removing
+ * nearly half the repeated band applies. */
+export const OCTREE_SECTION43_MINI_SHELL_DEPTH = 4;
+export const OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT =
+  "FLUID_OCTREE_SECTION43_SHELL_DEPTH";
 
 export interface OctreeSolveTailSceneProfile {
   readonly finestDimensions: readonly [number, number, number];
@@ -32,7 +37,7 @@ export interface OctreeSolveTailPolicy {
   /** Retained only for validation and diagnostics; no commands are emitted. */
   readonly hardOuterIterationCeiling: 16;
   readonly relativeTolerance: number;
-  readonly boundarySmoothingIterations: 8;
+  readonly boundarySmoothingIterations: number;
   readonly sceneComplexityScore: number;
   readonly reasons: readonly string[];
 }
@@ -62,8 +67,24 @@ function validateProfile(profile: OctreeSolveTailSceneProfile): void {
  */
 export function planOctreeSolveTail(
   profile: OctreeSolveTailSceneProfile,
+  environment?: Readonly<Record<string, string | undefined>>,
 ): OctreeSolveTailPolicy {
   validateProfile(profile);
+  const resolvedEnvironment = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const shellDepthText = resolvedEnvironment?.[OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT];
+  const smallTwoLevelProfile = profile.maximumLeafSize === 2
+    && Math.max(...profile.finestDimensions) <= 16;
+  const boundarySmoothingIterations = shellDepthText === undefined
+    ? (smallTwoLevelProfile
+      ? OCTREE_SECTION43_MINI_SHELL_DEPTH
+      : OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH)
+    : Number(shellDepthText);
+  if (!Number.isSafeInteger(boundarySmoothingIterations)
+    || boundarySmoothingIterations < 2 || boundarySmoothingIterations > 16
+    || (boundarySmoothingIterations & 1) !== 0) {
+    throw new RangeError(`${OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT} must be an even integer in [2,16]`);
+  }
   const dimensions = profile.finestDimensions;
   const aspectRatio = Math.max(...dimensions) / Math.min(...dimensions);
   const refinementDepth = Math.log2(profile.maximumLeafSize);
@@ -101,7 +122,7 @@ export function planOctreeSolveTail(
       profile.requestedRelativeTolerance,
       OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
     ),
-    boundarySmoothingIterations: OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+    boundarySmoothingIterations,
     sceneComplexityScore: score,
     reasons: Object.freeze(reasons),
   });

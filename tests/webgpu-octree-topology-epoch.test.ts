@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   OCTREE_TOPOLOGY_EPOCH_ERROR,
   WebGPUOctreeTopologyEpoch,
+  octreeTopologyEpochHistoryShader,
   octreeTopologyEpochWGSL,
   publishReadyOctreeTopology,
   validateOctreeTopologyCandidate,
@@ -151,7 +152,9 @@ test("every topology-epoch pipeline binds its own reflected auto layout and exac
     descriptorCandidateControl: buffer(), topologyCandidateControl: buffer(),
     structuredCandidateControl: buffer(), structuredAcceptedControl: buffer(), boundaryCandidateControl: buffer(),
     spgridCandidateControl: buffer(), candidateLeafHeaders: buffer(), acceptedLeafHeaders: buffer(),
-    candidatePressure: buffer(), pressureA: buffer(), pressureB: buffer(), rowCountControl: buffer(),
+    candidatePressure: buffer(), candidatePressureHistory: buffer(),
+    acceptedPressureHistory: buffer(), pressureA: buffer(), pressureB: buffer(),
+    rowCountControl: buffer(),
   };
   const epoch = new WebGPUOctreeTopologyEpoch(device, resources,
     { rowCapacity: 128, slotCapacity: 256, catalogVersion: 5 });
@@ -168,4 +171,13 @@ test("every topology-epoch pipeline binds its own reflected auto layout and exac
     [1, 10, 11, 12, 13, 14, 15, 17],
   ]);
   epoch.destroy();
+});
+
+test("pressure history carry is an exact opt-in topology-commit variant", () => {
+  assert.equal(octreeTopologyEpochHistoryShader(false), octreeTopologyEpochWGSL);
+  const enabled = octreeTopologyEpochHistoryShader(true);
+  assert.match(enabled, /@binding\(18\).*candidatePressureHistory/);
+  assert.match(enabled, /@binding\(19\).*acceptedPressureHistory/);
+  assert.match(enabled,
+    /acceptedPressureHistory\[row\]=candidatePressureHistory\[row\]/);
 });

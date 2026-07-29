@@ -3,10 +3,19 @@ export interface OctreeMGPCGDiagnostics {
   readonly converged: boolean;
   readonly iterations: number;
   readonly rows: number;
+  /** First GPU stage that rejected the solve; zero means no stage claimed it. */
+  readonly firstErrorStage: number;
+  /** Row associated with the first error, or 0xffffffff for scalar reductions. */
+  readonly firstErrorRow: number;
   readonly residualSquared: number;
   readonly rhsSquared: number;
   readonly relativeResidualSquared: number;
   readonly relativeResidual: number;
+  readonly temporalPredictionAlpha?: number;
+  readonly temporalPredictionApplied?: boolean;
+  readonly temporalPredictionNumerator?: number;
+  readonly temporalPredictionCurvature?: number;
+  readonly temporalDirectionSquared?: number;
 }
 
 /** Decode the 64-byte GPU MGPCG control publication used by Dawn QA. */
@@ -21,10 +30,21 @@ export function decodeOctreeMGPCGDiagnostics(words: Uint32Array): OctreeMGPCGDia
     converged: words[1] !== 0,
     iterations: words[2],
     rows: words[4],
+    firstErrorStage: words[6],
+    firstErrorRow: words[7],
     residualSquared,
     rhsSquared,
     relativeResidualSquared,
     relativeResidual: Math.sqrt(relativeResidualSquared),
+    ...(words.length > 22 ? {
+      temporalPredictionAlpha: floats[21],
+      temporalPredictionApplied: words[22] !== 0,
+      ...(words.length > 25 ? {
+        temporalPredictionNumerator: floats[23],
+        temporalPredictionCurvature: floats[24],
+        temporalDirectionSquared: floats[25],
+      } : {}),
+    } : {}),
   };
 }
 

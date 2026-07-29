@@ -1,5 +1,5 @@
 /**
- * Capture a detailed CPU+GPU profile of a mini-dam-break simulation frame with
+ * Capture a detailed GPU-stage profile of a mini-dam-break simulation frame with
  * Instruments (`xctrace`), then reduce the trace to a report.
  *
  * Why this exists: the in-process instrumentation
@@ -17,18 +17,26 @@
  * Usage:
  *   node --import tsx tools/profile-mini-dam-xctrace.ts [options]
  *
- *   --lane=mini|moving-interface|ui   scene lane            (default mini)
+ *   --lane=mini|moving-interface|ui|ocean|ceiling-drop scene lane (default mini)
+ *   --band=0|1|2|3|4                override the octree interface-band level
+ *                                    after applying the lane preset
+ *   --first-frame                    gate before advance 1 and reduce the
+ *                                    capture to literal advance 1
  *   --steps=N                         advances to run       (default lane's own)
- *   --counters                        also record GPU hardware counters, which
- *                                     is what supplies occupancy / ALU /
- *                                     bandwidth per task. Counters emit ~3
+ *   The report always reduces the counter window to exactly one complete,
+ *   representative advance. The longer traced run exists only to warm encoder
+ *   metadata and supply a choice of complete steady-state advances.
+ *   GPU hardware counters and full pass-label isolation are mandatory. This
+ *   is what supplies occupancy / ALU / bandwidth per task and prevents a Metal
+ *   encoder from being named after only its first WebGPU stage. Counters emit ~3
  *                                     million rows per second of recording, so
  *                                     this mode does NOT record the whole run:
  *                                     it launches the solver, waits for it to
  *                                     reach steady state, and then attaches for
  *                                     --counter-seconds only.
  *   --counter-seconds=N               length of the attached counter window
- *                                     (default 2)
+ *                                     (minimum/default 3; full label metadata
+ *                                     needs a longer warm-up than scoped traces)
  *   --counter-warmup=N                seconds of stepping to let elapse before
  *                                     attaching, so the window lands in steady
  *                                     state (default: 60% of the expected run)
@@ -36,21 +44,22 @@
  *   --baseline / --no-baseline        run the clean, non-isolated shipping
  *                                     graph first to quantify total profiling
  *                                     distortion (default on)
- *   --isolate-pass-labels             give every labelled compute stage its
- *                                     own pass, so counters and encoder time
- *                                     identify micro-stages exactly. This is
- *                                     an experimental utilization stream, not
- *                                     the untouched shipping command graph.
- *   --isolate-label-prefix=PREFIX     split only transitions into, within, and
- *                                     out of PREFIX, keeping a targeted micro
- *                                     trace small enough for Instruments.
+ *   The clean baseline remains non-isolated, so the report still records the
+ *   shipping wall clock separately from the fully-labelled diagnostic stream.
  *   --keep-xml                        retain the exported XML tables
+ *   --counter-reduction=N             retain roughly 1/N counter rows while
+ *                                     preserving exact GPU stages (default 100)
+ *   --full-diagnostics                additionally capture/export Time Profiler
+ *                                     and the other Metal System Trace instruments;
+ *                                     the default is GPU-stage diagnostics only
  *   --gpu-report-only                 omit CPU sampling and shader-profiler
  *                                     exports from a GPU utilization report
  *   --discard-tables                  delete derived NDJSON tables after the
  *                                     self-contained HTML/JSON report is built
  *   --discard-trace                   delete the source .trace after the report
  *                                     is built; keep it on failed reductions
+ *   --reuse-tables                    rebuild a rejected report from retained
+ *                                     NDJSON tables without recapturing
  *
  * Every Dawn entrypoint in the repo serialises on `/tmp/fluid-webgpu-exclusive.lock`,
  * and that path is absolute, so a benchmark running out of any other checkout
@@ -64,7 +73,8 @@
  * costs ~1% of steady-state wall.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { createWriteStream, mkdirSync, rmSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync }
+  from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -79,7 +89,11 @@ import {
   WEBGPU_EXCLUSIVE_LOCK,
 } from "./webgpu-smoke-isolation";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
-import { buildFrameReport, renderFrameReportHtml } from "./xctrace-frame-report";
+import {
+  buildFrameReport,
+  GPU_FRAME_START_LABELS,
+  renderFrameReportHtml,
+} from "./xctrace-frame-report";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const worker = fileURLToPath(new URL("./run-webgpu-smoke-isolated-worker.ts", import.meta.url));
@@ -91,21 +105,147 @@ const lane = (flag("lane") ?? "mini") as PowerDamRuntimeLane;
 if (!(lane in POWER_DAM_LANE_ENVIRONMENT)) {
   throw new Error(`--lane must be one of ${Object.keys(POWER_DAM_LANE_ENVIRONMENT).join(", ")}`);
 }
+const bandLevel = flag("band") === undefined ? undefined : Number(flag("band"));
+if (bandLevel !== undefined
+  && (!Number.isInteger(bandLevel) || bandLevel < 0 || bandLevel > 4)) {
+  throw new Error("--band must be an integer from 0 through 4");
+}
 const steps = flag("steps") === undefined ? undefined : Number(flag("steps"));
-const counters = process.argv.includes("--counters");
-const counterSeconds = Number(flag("counter-seconds") ?? 2);
+const firstFrame = process.argv.includes("--first-frame");
+const counters = true;
+const counterSeconds = Number(flag("counter-seconds") ?? 3);
+if (!Number.isFinite(counterSeconds) || counterSeconds < 3) {
+  throw new Error("--counter-seconds must be at least 3 for full labels plus occupancy");
+}
 const counterTimeLimit = Number.isInteger(counterSeconds)
   ? `${counterSeconds}s` : `${Math.round(counterSeconds * 1000)}ms`;
 const requestedWarmupSeconds = flag("counter-warmup") === undefined
   ? undefined : Number(flag("counter-warmup"));
 const runBaseline = !process.argv.includes("--no-baseline");
-const isolatePassLabels = process.argv.includes("--isolate-pass-labels");
-const isolateLabelPrefix = flag("isolate-label-prefix")?.trim();
+const isolatePassLabels = true;
+const isolateLabelPrefix = undefined;
+if (process.argv.some((argument) => argument.startsWith("--isolate-label-prefix="))) {
+  throw new Error("Partial xctrace label isolation is disabled: capture every label instead");
+}
+if (process.argv.includes("--no-counters")
+  || process.argv.includes("--no-isolate-pass-labels")) {
+  throw new Error("xctrace captures require GPU counters and full label isolation");
+}
 const keepXml = process.argv.includes("--keep-xml");
 const gpuReportOnly = process.argv.includes("--gpu-report-only");
+const fullDiagnostics = process.argv.includes("--full-diagnostics");
+const counterReduction = Number(flag("counter-reduction") ?? 100);
+if (!Number.isFinite(counterReduction) || counterReduction < 1) {
+  throw new Error("--counter-reduction must be at least 1");
+}
 const discardTables = process.argv.includes("--discard-tables");
 const discardTrace = process.argv.includes("--discard-trace");
+const reuseTables = process.argv.includes("--reuse-tables");
 const outputDirectory = resolve(root, flag("out") ?? "artifacts/xctrace-mini-dam");
+
+/** Stage timings and labels come from Metal interval tables and are never
+ * downsampled. These are the only counter series consumed by the report; LLC
+ * is retained for its representative-frame plot. */
+export const RETAINED_GPU_COUNTERS = new Set([
+  "Compute Occupancy",
+  "ALU Utilization",
+  "GPU Read Bandwidth",
+  "GPU Write Bandwidth",
+  "GPU Last Level Cache Utilization",
+]);
+
+export interface CounterExtractionPolicy {
+  readonly targetReduction: number;
+  readonly sourceCounterCount: number;
+  readonly retainedCounterCount: number;
+  readonly timestampStride: number;
+  readonly retainedCounterIds: ReadonlySet<string>;
+}
+
+/** Select fewer counter names and then enough timestamps to meet the requested
+ * total row reduction. On the current 31-counter device, 5 names x every 17th
+ * timestamp retains 1/105.4 of the source rows. */
+export const makeCounterExtractionPolicy = (
+  countersById: ReadonlyMap<string, string>,
+  targetReduction = 100,
+  retainedCounterNames: ReadonlySet<string> = RETAINED_GPU_COUNTERS,
+): CounterExtractionPolicy => {
+  const retainedCounterIds = targetReduction === 1
+    ? new Set(countersById.keys())
+    : new Set([...countersById].filter(([, name]) => retainedCounterNames.has(name))
+      .map(([id]) => id));
+  if (retainedCounterIds.size === 0) {
+    throw new Error("none of the report's required GPU counters were present");
+  }
+  const timestampStride = Math.max(1, Math.ceil(targetReduction
+    * retainedCounterIds.size / Math.max(countersById.size, 1)));
+  return {
+    targetReduction,
+    sourceCounterCount: countersById.size,
+    retainedCounterCount: retainedCounterIds.size,
+    timestampStride,
+    retainedCounterIds,
+  };
+};
+
+export class CounterRowSelector {
+  private timestamp: string | undefined;
+  private timestampIndex = -1;
+  private retainTimestamp = false;
+
+  public constructor(private readonly policy: CounterExtractionPolicy) {}
+
+  public keep(row: Readonly<Record<string, unknown>>): boolean {
+    const timestamp = String(row.timestamp ?? "");
+    if (timestamp !== this.timestamp) {
+      this.timestamp = timestamp;
+      this.timestampIndex += 1;
+      this.retainTimestamp = this.timestampIndex % this.policy.timestampStride === 0;
+    }
+    return this.retainTimestamp
+      && this.policy.retainedCounterIds.has(String(row["counter-id"] ?? ""));
+  }
+}
+
+interface InstrumentsScratchEntry {
+  readonly path: string;
+  readonly kind: "file" | "directory";
+  readonly sizeBytes: number;
+  readonly modifiedAt: string;
+}
+
+/** Instruments writes its raw ktrace and reduction stores outside the trace
+ * bundle under opaque names. Record the exact names with the artifact: failed
+ * captures otherwise leave multi-gigabyte files that are nearly impossible to
+ * associate with the run that created them. */
+const scratchRoots = (() => {
+  const temporary = process.env.TMPDIR?.replace(/\/$/, "");
+  if (!temporary || !existsSync(temporary)) return [] as readonly string[];
+  const roots = [temporary,
+    resolve(temporary, "../C/com.apple.dt.InstrumentsCLI/path_manager")]
+    .filter((path) => existsSync(path)).map((path) => realpathSync(path));
+  return [...new Set(roots)];
+})();
+
+const instrumentsScratchSnapshot = (): Map<string, InstrumentsScratchEntry> => {
+  const entries = new Map<string, InstrumentsScratchEntry>();
+  for (const directory of scratchRoots) {
+    for (const name of readdirSync(directory)) {
+      if (!/^instruments.*\.ktrace$/.test(name) && !/^xrtmp__/.test(name)) continue;
+      const path = resolve(directory, name);
+      try {
+        const metadata = statSync(path);
+        entries.set(path, {
+          path,
+          kind: metadata.isDirectory() ? "directory" : "file",
+          sizeBytes: metadata.size,
+          modifiedAt: metadata.mtime.toISOString(),
+        });
+      } catch { /* Instruments may remove a transient between readdir and stat. */ }
+    }
+  }
+  return entries;
+};
 
 // ---- Counter window planning ----------------------------------------------
 // An attached counter run has to fit a recording window inside the solver's
@@ -194,7 +334,7 @@ const requestedSteps = steps ?? Number(POWER_DAM_LANE_ENVIRONMENT[lane].FLUID_OR
  * use the assumed pace. Placement is re-planned against the measured pace once
  * the baseline has run.
  */
-const sizingPlan = counters ? planCounterWindow({
+const sizingPlan = counters && !firstFrame ? planCounterWindow({
   requestedSteps,
   perAdvanceMs: ASSUMED_MS_PER_ADVANCE,
   counterSeconds,
@@ -247,21 +387,33 @@ const profileEnvironment: Record<string, string> = {
   FLUID_RASTER_CHECKPOINTS: "0",
   FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000",
   FLUID_TRIPWIRES: "1",
+  FLUID_PROFILE_FIRST_ADVANCE_GATE: firstFrame ? "1" : "0",
   ...laneEnvironment,
+  // This deliberately follows the lane preset. A shell-level override cannot
+  // win against startWorker's explicit environment, which previously made
+  // comparative traces silently profile the lane's default band every time.
+  ...(bandLevel === undefined ? {} : { FLUID_OCTREE_INTERFACE_BAND: String(bandLevel) }),
 };
 /** Shipping command graph used as the wall-clock control. A targeted capture
  * intentionally adds pass/Metal-encoder boundaries, so comparing it with an
  * untraced run that kept those boundaries would conceal the main measurement
  * distortion the user needs to see. */
-const cleanBaselineEnvironment: Record<string, string> = {
-  ...profileEnvironment,
+export const makeCleanBaselineEnvironment = (
+  environment: Readonly<Record<string, string>>,
+): Record<string, string> => ({
+  ...environment,
+  // A literal-first-frame trace pauses the *traced* worker until Instruments
+  // has attached. The shipping control is not attached and must never inherit
+  // that gate or it waits forever for a signal nobody owns.
+  FLUID_PROFILE_FIRST_ADVANCE_GATE: "0",
   FLUID_GPU_PASS_TIMESTAMPS: "0",
   FLUID_GPU_ISOLATE_PASS_LABELS: "0",
   FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES: "",
   FLUID_GPU_ISOLATE_PASS_ENCODERS: "0",
   FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS: "0",
   FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES: "",
-};
+});
+const cleanBaselineEnvironment = makeCleanBaselineEnvironment(profileEnvironment);
 
 /**
  * `xctrace --launch` inherits this process's environment, and it cannot be
@@ -283,6 +435,59 @@ export interface SmokeResultRecord {
   readonly gpuCommandAudit?: Record<string, unknown>;
 }
 
+export const assertCompleteOccupancyReport = (report: Pick<
+  import("./xctrace-frame-report").FrameReport,
+  "attribution" | "counters" | "passes" | "frames" | "timeline"
+>): void => {
+  const failures: string[] = [];
+  if (report.attribution.mode !== "full" || report.attribution.compositeBuckets !== 0) {
+    failures.push(`label isolation is ${report.attribution.mode}`
+      + ` with ${report.attribution.compositeBuckets} composite buckets`);
+  }
+  if (report.counters.meanOccupancy === undefined
+    || report.counters.partitionCount < 1
+    || report.counters.occupancyTrace.length === 0) {
+    failures.push("Compute Occupancy was not captured across a labelled representative advance");
+  }
+  if (!report.passes.some((pass) => pass.counterSamples > 0
+    && pass.occupancy !== undefined)) {
+    failures.push("no labelled GPU task received occupancy samples");
+  }
+  if (report.frames.count !== 1 || report.frames.samples.length !== 1
+    || report.frames.captures.length !== 1) {
+    failures.push(`report contains ${report.frames.count} analysed advances and`
+      + ` ${report.frames.captures.length} captured advances instead of exactly one`);
+  }
+  const encoderIds = report.timeline.intervals
+    .map((interval) => interval.encoderId).filter((id): id is string => id !== undefined);
+  if (new Set(encoderIds).size !== encoderIds.length) {
+    failures.push("one Metal encoder appears more than once in the stage timeline");
+  }
+  if (!GPU_FRAME_START_LABELS.some((label) => label === report.frames.anchor)) {
+    failures.push(`frame anchor "${report.frames.anchor}" is periodic but not a semantic GPU start`);
+  } else {
+    const first = report.timeline.intervals[0];
+    const semanticStart = report.timeline.intervals
+      .find((interval) => interval.label === report.frames.anchor);
+    // Distinct command buffers can overlap at an advance boundary. In the
+    // current dam graph the deterministic fine-seed residency publication is
+    // real work for the new advance and can reach the GPU just before the
+    // topology gate. Keep that stage in the frame, while still requiring both
+    // the observed work and the semantic boundary to occur close to t=0.
+    if (first === undefined || first.start > 250 || semanticStart === undefined
+      || semanticStart.start > 5_000) {
+      failures.push(`frame origin does not contain semantic GPU start "${report.frames.anchor}"`
+        + " within 5000 us after near-zero recurring work"
+        + ` (first ${first?.label ?? "no stage"} at ${first?.start ?? "?"} us;`
+        + ` semantic start at ${semanticStart?.start ?? "?"} us)`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error("xctrace report rejected: " + failures.join("; ")
+      + ". The trace and exported tables were retained for diagnosis.");
+  }
+};
+
 interface WorkerHandle {
   readonly pid: number;
   /**
@@ -292,6 +497,9 @@ interface WorkerHandle {
    * attaching to a dead pid costs the whole capture and reports nothing.
    */
   readonly constructed: Promise<void>;
+  /** Resolves at the profiling gate after t=0 diagnostics and before the first
+   * recurring command buffer is encoded. */
+  readonly beforeFirstAdvance: Promise<void>;
   readonly finished: Promise<SmokeResultRecord | undefined>;
   /**
    * Wall clocks for the stepping phase, filled in as the worker announces it.
@@ -332,6 +540,12 @@ const startWorker = (
     announceConstructed = done;
     abandonConstruction = fail;
   });
+  let announceBeforeFirstAdvance: () => void = () => {};
+  let abandonBeforeFirstAdvance: (reason: Error) => void = () => {};
+  const beforeFirstAdvance = new Promise<void>((done, fail) => {
+    announceBeforeFirstAdvance = done;
+    abandonBeforeFirstAdvance = fail;
+  });
   const timing: { steppingStartedAt?: number; steppingEndedAt?: number } = {};
   const tail: string[] = [];
   const absorb = (line: string): void => {
@@ -350,6 +564,10 @@ const startWorker = (
         timing.steppingStartedAt = Date.now();
         announceConstructed();
       }
+      if (record.phase === "before-first-advance"
+        && (record as { profileGate?: string }).profileGate === "waiting-for-sigusr1") {
+        announceBeforeFirstAdvance();
+      }
     } catch { /* progress lines are not all JSON */ }
   });
   createInterface({ input: child.stderr }).on("line", absorb);
@@ -358,6 +576,7 @@ const startWorker = (
     child.once("error", (error) => {
       running = false;
       abandonConstruction(error);
+      abandonBeforeFirstAdvance(error);
       fail(error);
     });
     // `close` rather than `exit`: it fires once the worker's output has drained
@@ -376,8 +595,12 @@ const startWorker = (
           ? new Error((startupFailure ?? `${label} exited with ${status}; see ${logPath}`)
             + quoteTail(tail))
           : undefined;
+      // Keep this exact construction-rejection sequence stable: the lock
+      // lifecycle test treats it as the proof a dead worker cannot strand an
+      // attach waiter. The profiling gate is rejected alongside it.
       if (failure) { abandonConstruction(failure); fail(failure); }
-      else { announceConstructed(); done(result); }
+      if (failure) abandonBeforeFirstAdvance(failure);
+      else { announceConstructed(); announceBeforeFirstAdvance(); done(result); }
     });
   });
   // Both promises can reject long before anything awaits them -- a worker that
@@ -387,8 +610,9 @@ const startWorker = (
   // handled here costs nothing: the rejection is still delivered to whoever
   // awaits them.
   constructed.catch(() => {});
+  beforeFirstAdvance.catch(() => {});
   finished.catch(() => {});
-  return { pid: child.pid ?? -1, constructed, finished, timing, stop: () => {
+  return { pid: child.pid ?? -1, constructed, beforeFirstAdvance, finished, timing, stop: () => {
     // SIGTERM, not SIGKILL: the worker's handler releases the exclusive lock,
     // whereas a killed worker leaves it behind as owner evidence for a human.
     if (running) child.kill("SIGTERM");
@@ -410,7 +634,7 @@ const delay = (ms: number): Promise<void> => new Promise((done) => { setTimeout(
 
 const TABLES: readonly {
   schema: string; file: string; stacks?: boolean; countersOnly?: boolean;
-  gpuReportOptional?: boolean; columns: readonly string[];
+  gpuReportOptional?: boolean; fullDiagnosticsOnly?: boolean; columns: readonly string[];
 }[] = [
   {
     schema: "metal-gpu-intervals", file: "gpu-intervals",
@@ -421,7 +645,16 @@ const TABLES: readonly {
     columns: ["encoder-id", "encoder-label", "process"],
   },
   {
+    schema: "metal-application-command-buffer-submissions", file: "command-buffer-submissions",
+    columns: ["start", "duration", "num-encoders", "process", "cmdbuffer-id"],
+  },
+  {
+    schema: "metal-command-buffer-completed", file: "command-buffer-completed",
+    columns: ["timestamp", "cmdbuffer-id"],
+  },
+  {
     schema: "time-profile", file: "time-profile", stacks: true, gpuReportOptional: true,
+    fullDiagnosticsOnly: true,
     columns: ["time", "process", "thread", "thread-state"],
   },
   {
@@ -496,10 +729,42 @@ const requireExclusiveGPU = async (): Promise<void> => {
 const main = async (): Promise<void> => {
   mkdirSync(outputDirectory, { recursive: true });
   const tracePath = `${outputDirectory}/mini-dam.trace`;
+  const scratchBefore = instrumentsScratchSnapshot();
+  const observedScratch = new Map(scratchBefore);
+  const observeCaptureScratch = (): void => {
+    for (const [path, entry] of instrumentsScratchSnapshot()) observedScratch.set(path, entry);
+  };
+  const writeTempInfo = async (status: string): Promise<void> => {
+    observeCaptureScratch();
+    const created = [...observedScratch.entries()]
+      .filter(([path]) => !scratchBefore.has(path)).map(([, entry]) => entry);
+    await writeFile(`${outputDirectory}/temp-info.json`, `${JSON.stringify({
+      status,
+      capturedAt: new Date().toISOString(),
+      tracePath,
+      scratchRoots,
+      created,
+      cleanup: {
+        note: "Delete only the exact created paths after confirming no xctrace process is active.",
+        activeProcessCheck: "pgrep -lf xctrace",
+      },
+    }, null, 2)}\n`);
+  };
+  await writeTempInfo("prepared");
+  // Never leave a stale successful-looking report behind when a replacement
+  // capture fails the mandatory labelling/occupancy checks below.
+  rmSync(`${outputDirectory}/summary.json`, { force: true });
+  rmSync(`${outputDirectory}/report.html`, { force: true });
   const nodeBinary = process.execPath;
 
   console.log(`lane ${lane}: ${profileEnvironment.FLUID_ORACLE_STEPS} advances`
-    + ` of ${profileEnvironment.FLUID_SCENE} at grid ${profileEnvironment.FLUID_EXPECT_GRID}`);
+    + ` of ${profileEnvironment.FLUID_SCENE} at grid ${profileEnvironment.FLUID_EXPECT_GRID}`
+    + `, interface band ${profileEnvironment.FLUID_OCTREE_INTERFACE_BAND ?? "scene default"}`);
+  console.log(fullDiagnostics
+    ? "  capture instruments: full Metal System Trace + GPU counters"
+    : "  capture instruments: Metal Application + GPU + GPU counters (stage diagnostics only)");
+  console.log(`  counter extraction: target ${counterReduction.toFixed(0)}x fewer rows;`
+    + " exact Metal stage intervals remain full resolution");
   if (isolatePassLabels) {
     console.log(
       isolateLabelPrefix
@@ -515,6 +780,58 @@ const main = async (): Promise<void> => {
     console.log(`  run extended from ${requestedSteps} to ${sizingPlan.steps} advances:`
       + ` a ${counterSeconds} s counter window plus Instruments' ${ATTACH_LATENCY_S} s attach`
       + " does not fit inside a shorter stepping phase");
+  }
+
+  if (reuseTables) {
+    console.log("rebuilding report from retained trace tables...");
+    const tables: Record<string, string> = {};
+    for (const table of TABLES) {
+      if (table.countersOnly && !counters) continue;
+      if (table.gpuReportOptional && gpuReportOnly) continue;
+      if (table.fullDiagnosticsOnly && !fullDiagnostics) continue;
+      const path = `${outputDirectory}/${table.file}.ndjson`;
+      if (!existsSync(path)) throw new Error(`--reuse-tables requires ${path}`);
+      tables[table.file] = path;
+    }
+    const resultFromLog = (name: string): SmokeResultRecord | undefined => {
+      const path = `${outputDirectory}/${name}.log`;
+      if (!existsSync(path)) return undefined;
+      let result: SmokeResultRecord | undefined;
+      for (const line of readFileSync(path, "utf8").split("\n")) {
+        if (!line.startsWith("{")) continue;
+        try {
+          const record = JSON.parse(line) as { phase?: string } & SmokeResultRecord;
+          if (record.phase === "result") result = record;
+        } catch { /* diagnostics include non-JSON progress text */ }
+      }
+      return result;
+    };
+    const extractionPath = `${outputDirectory}/counter-extraction.json`;
+    const extraction = JSON.parse(readFileSync(extractionPath, "utf8")) as {
+      sourceCounterCount: number; retainedCounterCount: number; timestampStride: number;
+    };
+    const report = await buildFrameReport({
+      tables,
+      lane,
+      environment: profileEnvironment,
+      traced: resultFromLog("traced"),
+      baseline: resultFromLog("baseline"),
+      singleFrame: !firstFrame,
+      firstFrame,
+      counterExtraction: extraction,
+    });
+    assertCompleteOccupancyReport(report);
+    await writeFile(`${outputDirectory}/summary.json`, `${JSON.stringify(report, null, 2)}\n`);
+    await writeFile(`${outputDirectory}/report.html`, renderFrameReportHtml(report));
+    if (discardTables) {
+      for (const path of Object.values(tables)) rmSync(path, { force: true });
+      console.log("discarded derived trace tables; the report and source trace are retained");
+    }
+    for (const line of report.console) console.log(line);
+    console.log(`report:  ${outputDirectory}/report.html`);
+    console.log(`summary: ${outputDirectory}/summary.json`);
+    await writeTempInfo("complete");
+    return;
   }
 
   await requireExclusiveGPU();
@@ -559,7 +876,10 @@ const main = async (): Promise<void> => {
         + ` too short to hold a ${counterSeconds} s window;`
         + ` rerun with --steps=${plan.steps} or a smaller --counter-seconds`);
     }
-    console.log(`launching solver, attaching GPU counters at`
+    console.log(firstFrame
+      ? `launching solver behind a pre-advance gate; the ${counterSeconds} s counter`
+        + " window will warm for 1.2 s before advance 1 is released..."
+      : `launching solver, attaching GPU counters at`
       + ` ${plan.spawnDelaySeconds.toFixed(1)} s so recording starts`
       + ` ${plan.windowStartSeconds.toFixed(1)} s into stepping`
       + ` (Instruments takes ~${ATTACH_LATENCY_S} s to attach) for a ${counterSeconds} s window,`
@@ -570,18 +890,43 @@ const main = async (): Promise<void> => {
     tracedPid = handle.pid;
     let recordingStartedAt: number | undefined;
     try {
-      await handle.constructed;
-      await delay(plan.spawnDelaySeconds * 1000);
-      await run(["xcrun", "xctrace", "record",
-        "--template", "Metal System Trace",
-        "--instrument", "Metal GPU Counters",
-        "--output", tracePath, "--no-prompt",
-        "--time-limit", counterTimeLimit,
-        "--attach", String(handle.pid)], (line) => {
-        if (recordingStartedAt === undefined && /Ctrl-C to stop the recording/.test(line)) {
-          recordingStartedAt = Date.now();
+      if (firstFrame) await handle.beforeFirstAdvance;
+      else {
+        await handle.constructed;
+        await delay(plan.spawnDelaySeconds * 1000);
+      }
+      let releaseGate: Promise<void> | undefined;
+      try {
+        const blankTemplate = resolve(execFileSync("xcode-select", ["-p"]).toString().trim(),
+          "../Applications/Instruments.app/Contents/Packages/Base.instrdst/Contents/Templates/Blank.tracetemplate");
+        if (!fullDiagnostics && !existsSync(blankTemplate)) {
+          throw new Error(`Instruments Blank template not found at ${blankTemplate}`);
         }
-      });
+        const instruments = fullDiagnostics
+          ? ["--template", "Metal System Trace", "--instrument", "Metal GPU Counters"]
+          : ["--template", blankTemplate,
+            "--instrument", "Metal Application",
+            "--instrument", "GPU",
+            "--instrument", "Metal GPU Counters"];
+        await run(["xcrun", "xctrace", "record",
+          ...instruments,
+          "--output", tracePath, "--no-prompt",
+          "--time-limit", counterTimeLimit,
+          "--attach", String(handle.pid)], (line) => {
+          if (recordingStartedAt === undefined && /Ctrl-C to stop the recording/.test(line)) {
+            recordingStartedAt = Date.now();
+            observeCaptureScratch();
+            if (firstFrame) {
+              releaseGate = delay(1_200).then(() => {
+                process.kill(handle.pid, "SIGUSR1");
+              });
+            }
+          }
+        });
+      } finally {
+        await writeTempInfo("recording-finished");
+      }
+      await releaseGate;
       console.log("  counter window captured; waiting for the run to finish...");
       traced = await handle.finished;
     } catch (error) {
@@ -641,9 +986,11 @@ const main = async (): Promise<void> => {
 
   console.log("exporting trace tables...");
   const tables: Record<string, string> = {};
+  let counterPolicy: CounterExtractionPolicy | undefined;
   for (const table of TABLES) {
     if (table.countersOnly && !counters) continue;
     if (table.gpuReportOptional && gpuReportOnly) continue;
+    if (table.fullDiagnosticsOnly && !fullDiagnostics) continue;
     const xml = `${outputDirectory}/${table.file}.xml`;
     const ndjson = `${outputDirectory}/${table.file}.ndjson`;
     const exportArguments = ["xctrace", "export", "--input", tracePath,
@@ -676,11 +1023,16 @@ const main = async (): Promise<void> => {
     const batch: string[] = [];
     const sink = createWriteStream(ndjson);
     let rows = 0;
+    let sourceRows = 0;
+    const counterSelector = table.file === "counter-value" && counterPolicy
+      ? new CounterRowSelector(counterPolicy) : undefined;
     try {
       for await (const row of parseTraceTable(source, {
         stacks: table.stacks,
         columns: table.columns,
       })) {
+        sourceRows += 1;
+        if (counterSelector && !counterSelector.keep(row)) continue;
         batch.push(JSON.stringify(row));
         rows += 1;
         if (batch.length >= 4096) { sink.write(`${batch.join("\n")}\n`); batch.length = 0; }
@@ -692,7 +1044,34 @@ const main = async (): Promise<void> => {
     if (batch.length > 0) sink.write(`${batch.join("\n")}\n`);
     await new Promise((done) => sink.end(done));
     tables[table.file] = ndjson;
-    console.log(`  ${table.schema}: ${rows} rows`);
+    console.log(`  ${table.schema}: ${rows} rows`
+      + (sourceRows === rows ? "" : ` retained from ${sourceRows}`));
+    if (table.file === "counter-info") {
+      const countersById = new Map<string, string>();
+      const sampleIntervals = new Set<number>();
+      for await (const row of readTraceRows(ndjson)) {
+        countersById.set(String(row["counter-id"]), String(row.name ?? ""));
+        const interval = Number(String(row["sample-interval"] ?? "0").replace(/,/g, ""));
+        if (interval > 0) sampleIntervals.add(interval);
+      }
+      counterPolicy = makeCounterExtractionPolicy(countersById, counterReduction);
+      const hardwareSampleIntervalNs = sampleIntervals.size === 1
+        ? [...sampleIntervals][0] : undefined;
+      await writeFile(`${outputDirectory}/counter-extraction.json`, `${JSON.stringify({
+        targetReduction: counterPolicy.targetReduction,
+        sourceCounterCount: counterPolicy.sourceCounterCount,
+        retainedCounterCount: counterPolicy.retainedCounterCount,
+        retainedCounters: [...countersById]
+          .filter(([id]) => counterPolicy?.retainedCounterIds.has(id)).map(([, name]) => name),
+        timestampStride: counterPolicy.timestampStride,
+        hardwareSampleIntervalNs,
+        retainedSampleIntervalNs: hardwareSampleIntervalNs === undefined ? undefined
+          : hardwareSampleIntervalNs * counterPolicy.timestampStride,
+        note: "Metal intervals, encoder labels, command-buffer boundaries, and shader samples are not downsampled.",
+      }, null, 2)}\n`);
+      console.log(`    retaining ${counterPolicy.retainedCounterCount}/${counterPolicy.sourceCounterCount}`
+        + ` counters at every ${counterPolicy.timestampStride}th hardware timestamp`);
+    }
     if (table.file === "gpu-intervals" && tracedPid !== undefined) {
       // Answer "did we catch our own GPU work" before exporting the counter
       // tables, which are millions of rows and minutes of work either way.
@@ -718,7 +1097,15 @@ const main = async (): Promise<void> => {
     traced,
     baseline,
     tracedPid,
+    singleFrame: !firstFrame,
+    firstFrame,
+    counterExtraction: counterPolicy === undefined ? undefined : {
+      sourceCounterCount: counterPolicy.sourceCounterCount,
+      retainedCounterCount: counterPolicy.retainedCounterCount,
+      timestampStride: counterPolicy.timestampStride,
+    },
   });
+  assertCompleteOccupancyReport(report);
   await writeFile(`${outputDirectory}/summary.json`, `${JSON.stringify(report, null, 2)}\n`);
   await writeFile(`${outputDirectory}/report.html`, renderFrameReportHtml(report));
   if (discardTables) {
@@ -738,6 +1125,7 @@ const main = async (): Promise<void> => {
   console.log(`report:  ${outputDirectory}/report.html`);
   console.log(`summary: ${outputDirectory}/summary.json`);
   if (!discardTrace) console.log(`trace:   ${tracePath}   (open with: open ${tracePath})`);
+  await writeTempInfo("complete");
 };
 
 // Only capture when run as a program. Importing this module -- a test reaching

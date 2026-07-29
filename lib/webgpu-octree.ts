@@ -26,7 +26,10 @@ import {
 } from "./generated/octree-power-catalog";
 import { WebGPUOctreePowerDescriptor } from "./webgpu-octree-power-descriptor";
 import { WebGPUOctreePowerTopology } from "./webgpu-octree-power-topology";
-import { WebGPUDirectStructuredVelocityAuthority } from "./webgpu-octree-structured-velocity-gpu";
+import {
+  structuredVelocityRowCapacityForBindingLimit,
+  WebGPUDirectStructuredVelocityAuthority,
+} from "./webgpu-octree-structured-velocity-gpu";
 import { WebGPUStructuredBoundaryCoefficients } from "./webgpu-octree-structured-boundary";
 import { WebGPUStructuredVelocityDynamics } from "./webgpu-octree-structured-dynamics";
 import { planOctreeAirVelocitySupport } from "./webgpu-octree-air-velocity-support";
@@ -43,8 +46,12 @@ import {
 } from "./webgpu-octree-pipelined-mgpcg";
 import { WebGPUOctreePersistentMGPCG } from "./webgpu-octree-persistent-mgpcg";
 import { WebGPUOctreeSection43HybridPreconditioner } from "./webgpu-octree-section43-preconditioner";
-import { WebGPUOctreeSPGridVCycle } from "./webgpu-octree-spgrid-vcycle";
+import {
+  spgridRowCapacityForBindingLimit,
+  WebGPUOctreeSPGridVCycle,
+} from "./webgpu-octree-spgrid-vcycle";
 import { WebGPUOctreeTopologyEpoch } from "./webgpu-octree-topology-epoch";
+import { WebGPUOctreePressureHistoryRemap } from "./webgpu-octree-pressure-history";
 import { planOctreeSolveTail, type OctreeSolveTailPolicy } from "./octree-solve-tail-policy";
 import {
   OctreeWorkAccounting,
@@ -82,6 +89,7 @@ import { FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, planFineLevelSetGPUSummaries
   WebGPUFineLevelSetSummaries } from "./webgpu-octree-fine-levelset-summary";
 import {
   planFineLevelSetBandFineCells,
+  planFineLevelSetCapacityDilationBrickRings,
   planFineLevelSetTopologyBand,
   WebGPUFineLevelSetLeafSeeds,
   WebGPUFineLevelSetTopology,
@@ -167,6 +175,14 @@ export interface OctreeProjectionWorkAccountingBuffers {
   readonly hybridBandWorksetBanks: readonly (readonly GPUBufferBinding[])[];
   readonly ownerControl: GPUBufferBinding;
   readonly spgridDispatch: GPUBufferBinding;
+  /** A2's convergence-gated union/direct/adjoint records, for Dawn diagnosis. */
+  readonly accurateClassDispatch: GPUBufferBinding;
+  /** Failure-only QA vectors used to distinguish an A2 null mode from no output. */
+  readonly mgpcgPreconditioned: GPUBufferBinding;
+  readonly mgpcgPreconditionedImage: GPUBufferBinding;
+  readonly mgpcgResidual: GPUBufferBinding;
+  /** One-bank sizing view over the packed A/B Section 6.3 coefficients. */
+  readonly section63Coefficients: GPUBufferBinding;
   readonly outerControl: GPUBufferBinding;
   readonly outerIndirectTail: GPUBufferBinding;
   readonly liveRowDispatch: GPUBufferBinding;
@@ -237,12 +253,10 @@ export interface OctreeProjectionOptions {
   interfaceRefinementBandCells?: number;
   /**
    * Half-width of the Section 5 high-resolution surface-tracking band, in
-   * finest octree cells. Independent of the pressure refinement band above:
-   * that one decides where the octree stays fine, this one decides how far the
-   * separate fine level set is carried around the interface. Defaults to
-   * `interfaceRefinementBandCells`, which is how the two were coupled before
-   * they were separated, so an unset value reproduces the previous widths
-   * exactly.
+   * finest octree cells. The product master control supplies the same authored
+   * reach as the pressure band above; the separate option remains only for
+   * diagnostic fault injection. An unset value follows
+   * `interfaceRefinementBandCells`.
    */
   fineLevelSetBandCells?: number;
   /** Authoritative domain-global Section 5 narrow-band factor. */
@@ -298,6 +312,8 @@ interface PendingFinePublication {
   readonly target: WebGPUFineLevelSetBrickSource;
   readonly targetIsA: boolean;
   readonly redistanceBandCells: number;
+  readonly maximumDisplacementFineCells: number;
+  readonly warmClosestPoints: boolean;
 }
 
 /** Read at encode time so benchmark processes can select attribution without
@@ -308,6 +324,16 @@ export function octreeFineEngineSplitsEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_ENGINE_SPLIT !== "collapsed";
+}
+
+/** Closest-point carry is the recurring production path. An explicit zero
+ * retains the cold transform as a process-local comparison oracle. */
+export function fineLevelSetWarmStartRequested(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_FINE_JFA_WARM_START !== "0";
 }
 
 /**
@@ -671,12 +697,16 @@ export interface GlobalFineNarrowBandCapacityPlan {
  * dimensions while holding the physical brick-band width fixed grows the
  * reserve quadratically rather than materializing the cubic fine lattice.
  * `surfaceGrowthSafety` is explicit deformation/topology headroom; fixed-size
- * physical pages themselves do not incur allocator fragmentation.
+ * physical pages themselves do not incur allocator fragmentation. The 1.5
+ * default preserves the evolving fine SPGrid required by Aanjaneya et al.
+ * 2017 Section 5 (`docs/papers/aanjaneya-2017-power-liquids.txt`); their
+ * two-grid construction updates the fine surface grid every advection step
+ * and does not assume that its interface remains planar.
  */
 export function planGlobalFineNarrowBandBrickCapacity(
   brickDimensions: readonly [number, number, number],
   dilationBrickRings: number,
-  surfaceGrowthSafety = 1.25,
+  surfaceGrowthSafety = 1.5,
 ): GlobalFineNarrowBandCapacityPlan {
   if (brickDimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
     || !Number.isSafeInteger(dilationBrickRings) || dilationBrickRings < 1
@@ -706,7 +736,7 @@ export function planGlobalFineNarrowBandBrickCapacity(
 export function estimateGlobalFineNarrowBandBrickCapacity(
   brickDimensions: readonly [number, number, number],
   dilationBrickRings: number,
-  surfaceGrowthSafety = 1.25,
+  surfaceGrowthSafety = 1.5,
 ): number {
   return planGlobalFineNarrowBandBrickCapacity(
     brickDimensions, dilationBrickRings, surfaceGrowthSafety,
@@ -793,6 +823,7 @@ export function planOctreePressureCapacity(
   override?: number,
   closedTop = false,
   liquidFillFraction = 1,
+  rowCapacityLimit = Number.MAX_SAFE_INTEGER,
 ): OctreePressureCapacityPlan {
   const count = dims.nx * dims.ny * dims.nz;
   const aligned = (value: number) => Math.ceil(value / 256) * 256;
@@ -830,7 +861,11 @@ export function planOctreePressureCapacity(
     : planOctreePowerBoundaryStrip({ nx: dims.nx, ny: wettableCellsY, nz: dims.nz },
       interfaceBandCells, false).unitCellUpperBound;
   const requested = override === undefined ? surfaceRows + wallRows + coarseRows : override;
-  const rowCapacity = Math.max(1, Math.min(count, aligned(Math.max(1, Math.floor(requested)))));
+  if (!Number.isSafeInteger(rowCapacityLimit) || rowCapacityLimit < 1) {
+    throw new RangeError("Octree pressure row-capacity limit must be a positive safe integer");
+  }
+  const rowCapacity = Math.max(1,
+    Math.min(count, rowCapacityLimit, aligned(Math.max(1, Math.floor(requested)))));
   return {
     rowCapacity,
     pressureBytes: rowCapacity * 2 * 4,
@@ -851,6 +886,7 @@ export interface OctreeCompactionAllocationPlan {
   tileSignatureChangedOffsetWords: number;
   tileFrontierChangeFlagsOffsetWords: number;
   frontierTopologyReuseWord: number;
+  dirtyFailureOffsetWords: number;
   /** Plain-storage scratch for cooperative row classification and scans. */
   rowDeltaScratchBaseWords: number;
   rowDeltaScratchWords: number;
@@ -898,13 +934,14 @@ export function planOctreeCompactionAllocation(
   const tileFrontierChangeFlagWords = 1;
   const rigidSnapshotWords = 2 + 12 * 12;
   const dirtyAuthorityWords = 1;
+  const dirtyFailureWords = 8;
   // The fourteen publication words are a last-good row-control snapshot plus
   // an independent exact-topology reuse bit.  The latter survives restoring
   // words 0..11, so downstream topology consumers can distinguish immutable
   // row reuse from a freshly emitted row set without a host readback.
   const activeTileBytes = 4 * ((2 + tileSignatureWords + tileFrontierSignatureWords
     + tileSignatureChangedWords + tileFrontierChangeFlagWords) * activeTileCapacity
-    + dirtyAuthorityWords + rigidSnapshotWords + 14) + 32;
+    + dirtyAuthorityWords + rigidSnapshotWords + 14 + dirtyFailureWords) + 32;
   const rowDeltaBlockCount = Math.ceil(pressureRowCapacity / 256);
   // Two row-sized streams (flags and exclusive ranks), one block-total stream
   // plus its exact total, and two words per classification block.
@@ -913,7 +950,7 @@ export function planOctreeCompactionAllocation(
     + rowDeltaScratchWords * 4 + activeTileBytes;
   const changeStateWords = (2 + tileSignatureWords + tileFrontierSignatureWords
     + tileSignatureChangedWords + tileFrontierChangeFlagWords) * activeTileCapacity
-    + dirtyAuthorityWords + rigidSnapshotWords + 14;
+    + dirtyAuthorityWords + rigidSnapshotWords + 14 + dirtyFailureWords;
   const changeStateBaseWords = allocatedBytes / 4 - 8 - changeStateWords;
   const tileChangeFlagsOffsetWords = changeStateBaseWords;
   const tileRefinementSignaturesOffsetWords = changeStateBaseWords + 2 * activeTileCapacity;
@@ -927,11 +964,12 @@ export function planOctreeCompactionAllocation(
     + (2 + tileSignatureWords + tileFrontierSignatureWords
       + tileSignatureChangedWords + tileFrontierChangeFlagWords) * activeTileCapacity
     + dirtyAuthorityWords + rigidSnapshotWords + 13;
+  const dirtyFailureOffsetWords = frontierTopologyReuseWord + 1;
   const rowDeltaScratchBaseWords = changeStateBaseWords - rowDeltaScratchWords;
   return { scanBlockCapacity, candidateBlockCapacity, scanAndTaskBytes, activeTileBytes,
     changeStateBaseWords, tileChangeFlagsOffsetWords, tileRefinementSignaturesOffsetWords,
     tileFrontierSignaturesOffsetWords, tileSignatureChangedOffsetWords,
-    tileFrontierChangeFlagsOffsetWords, frontierTopologyReuseWord,
+    tileFrontierChangeFlagsOffsetWords, frontierTopologyReuseWord, dirtyFailureOffsetWords,
     rowDeltaScratchBaseWords, rowDeltaScratchWords, allocatedBytes };
 }
 
@@ -952,7 +990,9 @@ function octreeLeafSize(value: number): 2 | 4 | 8 | 16 | 32 {
 type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
   readonly plan: { readonly levelCount: number };
   readonly accurateOperator: OctreePipelinedWorksetLinearOperator;
-  readonly workAccountingBuffers: Readonly<{ dispatch: GPUBuffer; capture: GPUBuffer }>;
+  readonly workAccountingBuffers: Readonly<{
+    dispatch: GPUBuffer; capture: GPUBuffer; accurateClassDispatch: GPUBuffer;
+  }>;
   readonly workAccountingPlan: Readonly<{ levelCount: number;
     levelCapacities: readonly number[]; encodedCorrectionDispatches: number;
     persistentEnabled: boolean; persistentMaximumIterations: number }>;
@@ -1084,6 +1124,8 @@ export class WebGPUOctreeProjection {
   private readonly leafHeaders: GPUBuffer;
   private readonly candidateLeafHeaders: GPUBuffer;
   private readonly candidatePressure: GPUBuffer;
+  private readonly candidatePressureHistory: GPUBuffer;
+  private readonly acceptedPressureHistory: GPUBuffer;
   /** Plain-u32 ping/pong scratch used only by the cold large-frontier merge sort. */
   private readonly frontierSortScratch: GPUBuffer;
   private readonly leafFrontier: GPUBuffer;
@@ -1144,6 +1186,8 @@ export class WebGPUOctreeProjection {
   private globalFineGeneration = 2;
   private lastPowerBoundaryFineSource?: { generation: number; generationSlot: 0 | 1 };
   private powerTimestep_s = 0;
+  private surfaceInflow?: SurfaceInflowState;
+  private pendingSurfaceReferenceVolume_m3 = 0;
   /** Bodies that integrate this step; zero keeps the adjoint off the graph. */
   private dynamicCouplingBodyCount = 0;
   private powerAdvancingPressureSteps = 0;
@@ -1152,6 +1196,7 @@ export class WebGPUOctreeProjection {
   private readonly topologyTileChangeFlagsOffsetBytes: number;
   private readonly topologyTileChangeFlagsByteLength: number;
   private readonly compactionAllocationRowDeltaScratchOffsetBytes: number;
+  private readonly dirtyFailureOffsetBytes: number;
   private readonly solidCells: GPUBuffer;
   private readonly hasDenseSolidCells: boolean;
   private readonly params: GPUBuffer;
@@ -1246,6 +1291,7 @@ export class WebGPUOctreeProjection {
   private structuredVelocity?: WebGPUDirectStructuredVelocityAuthority;
   private structuredBoundary?: WebGPUStructuredBoundaryCoefficients;
   private topologyEpoch?: WebGPUOctreeTopologyEpoch;
+  private pressureHistoryRemap?: WebGPUOctreePressureHistoryRemap;
   private structuredDynamics?: WebGPUStructuredVelocityDynamics;
   private airVelocitySupport?: WebGPUOctreeAirVelocitySupportProducer;
   private structuredDivergenceRhs?: GPUBuffer;
@@ -1315,10 +1361,9 @@ export class WebGPUOctreeProjection {
     this.balanceRounds = Math.max(1, Math.ceil(Math.log2(this.maxLeafSize)));
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
-    // Section 5's surface band is a separate physical width from the pressure
-    // refinement band; the paper only constrains it from below. Defaulting to
-    // the pressure band preserves the coupled widths every existing lane was
-    // measured against, so an unset value is not a behaviour change.
+    // Product configurations couple Section 5 surface reach to pressure reach.
+    // A distinct value is admitted only for diagnostic fault injection; unset
+    // follows the master band exactly.
     this.fineLevelSetBandCells = Math.max(0, Math.min(32,
       Math.round(options.fineLevelSetBandCells ?? this.interfaceRefinementBandCells)));
     // Analytic dam/tank scenes can construct compact topology and first fine seeds
@@ -1345,11 +1390,32 @@ export class WebGPUOctreeProjection {
       || Math.max(...spacing) / Math.min(...spacing) > 1 + 1e-5) {
       throw new RangeError("Power catalog requires isotropic finest cells");
     }
+    const maximumStorageBinding = Math.min(
+      device.limits.maxStorageBufferBindingSize,
+      device.limits.maxBufferSize,
+    );
+    const plannedPressureCapacity = planOctreePressureCapacity(
+      dims, this.maxLeafSize, this.interfaceRefinementBandCells,
+      options.pressureRowCapacity,
+      scene.container.top === "closed",
+      scene.container.fillFraction,
+    );
+    const structuredVelocityRowLimit = structuredVelocityRowCapacityForBindingLimit(maximumStorageBinding);
+    const spgridRowLimit = spgridRowCapacityForBindingLimit(
+      [dims.nx, dims.ny, dims.nz],
+      maximumStorageBinding,
+      plannedPressureCapacity.rowCapacity,
+    );
+    const deviceRowLimit = Math.min(structuredVelocityRowLimit, spgridRowLimit);
+    if (deviceRowLimit < 1) {
+      throw new RangeError("Octree row authorities cannot fit one row in the storage binding limit");
+    }
     this.pressureCapacity = planOctreePressureCapacity(
       dims, this.maxLeafSize, this.interfaceRefinementBandCells,
       options.pressureRowCapacity,
       scene.container.top === "closed",
       scene.container.fillFraction,
+      deviceRowLimit,
     );
     // The immutable pressure-row capacity selects the production lane. Every
     // capacity owned by one persistent workgroup must fit that executor's
@@ -1387,7 +1453,10 @@ export class WebGPUOctreeProjection {
       // bulk worklist needed by owner-page lifecycle.
       bulkResidency: true,
       brickPreActivation: true,
-      topologyTileBricks: this.topologyTileSize / sparseWorldBrickSize
+      topologyTileBricks: this.topologyTileSize / sparseWorldBrickSize,
+      includePressureBoundarySupport: true,
+      pressureBoundaryTopClosed: scene.container.top === "closed",
+      includeWholeDomainPressureSupport: scene.fluid.inflow !== undefined,
     });
     const analyticBootstrapPlan = analyticSparseBootstrap ? planOctreeAnalyticBootstrapBounds({
       dimensions: [dims.nx, dims.ny, dims.nz],
@@ -1421,6 +1490,9 @@ export class WebGPUOctreeProjection {
         // deep-liquid tile more than one tile below the free surface publishes
         // no topology tile and its cells decode as unmapped owner pages.
         includeLiquidInterior: true,
+        includePressureBoundarySupport: true,
+        pressureBoundaryTopClosed: scene.container.top === "closed",
+        includeWholeDomainPressureSupport: scene.fluid.inflow !== undefined,
         // Direct page candidates consume no sparse-world leaf publication.
         // Keep only format-valid sentinel words for those bindings.
         fineSeedCandidatesOnly: true,
@@ -1537,6 +1609,7 @@ export class WebGPUOctreeProjection {
     this.topologyTileChangeFlagsByteLength = tileCapacity * 4;
     this.compactionAllocationRowDeltaScratchOffsetBytes =
       compactionAllocation.rowDeltaScratchBaseWords * 4;
+    this.dirtyFailureOffsetBytes = compactionAllocation.dirtyFailureOffsetWords * 4;
     this.compaction = device.createBuffer({
       label: "Octree leaf compaction and resident topology worklist",
       size: this.compactionByteLength,
@@ -1562,6 +1635,16 @@ export class WebGPUOctreeProjection {
     this.candidatePressure = device.createBuffer({ label: "Inactive octree remapped pressure seed",
       size: Math.max(4, pressureSlots * 4),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.candidatePressureHistory = device.createBuffer({
+      label: "Inactive octree remapped previous pressure history",
+      size: Math.max(4, pressureSlots * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.acceptedPressureHistory = device.createBuffer({
+      label: "Accepted octree previous pressure history",
+      size: Math.max(4, pressureSlots * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
     this.frontierSortScratch = device.createBuffer({
       label: "Cold frontier merge-sort ping/pong scratch",
       size: Math.max(4, this.frontierAllocation.listCapacity * 4),
@@ -1683,6 +1766,7 @@ export class WebGPUOctreeProjection {
       allocatedBytes: this.ownerPages.allocatedBytes + this.solidCells.size
         + surfaceStateAllocation.allocatedBytes
         + this.pressureA.size + this.pressureB.size + this.candidatePressure.size
+        + this.candidatePressureHistory.size + this.acceptedPressureHistory.size
         + this.leafHeaders.size + this.candidateLeafHeaders.size + this.frontierSortScratch.size
         + this.leafFrontier.size + this.compaction.size + this.unpublishedFineSummaryDirectory.size
         + this.solveStats.size + this.solveDispatch.size + this.topologyCandidateDispatch.size
@@ -1727,6 +1811,7 @@ export class WebGPUOctreeProjection {
     this.workAccounting.setAuthorityBytes("surface-state", this.surfaceStateAccountingBytes);
     this.workAccounting.setAuthorityBytes("pressure-topology-state",
       this.pressureA.size + this.pressureB.size + this.candidatePressure.size
+      + this.candidatePressureHistory.size + this.acceptedPressureHistory.size
       + this.leafHeaders.size + this.candidateLeafHeaders.size + this.frontierSortScratch.size
       + this.leafFrontier.size + this.compaction.size + this.unpublishedFineSummaryDirectory.size
       + this.solveStats.size + this.solveDispatch.size + this.topologyCandidateDispatch.size
@@ -1802,8 +1887,11 @@ export class WebGPUOctreeProjection {
             safetyBrickRings: 1,
             transportBandFineCells,
           });
+          const capacityDilationBrickRings = planFineLevelSetCapacityDilationBrickRings(
+            brickResolution, this.fineLevelSetBandCells, globalFineFactor,
+          );
           const defaultCapacity = estimateGlobalFineNarrowBandBrickCapacity(
-            brickDimensions, physicalBand.dilationBrickRings,
+            brickDimensions, capacityDilationBrickRings,
           );
           const requestedCapacity = Math.min(logicalBrickCount,
             options.globalFineLevelSetMaximumBricks ?? defaultCapacity);
@@ -2249,6 +2337,14 @@ export class WebGPUOctreeProjection {
       controlOffsetWords: this.frontierAllocation.rowDeltaControlOffsetWords,
       newToOldOffsetWords: this.frontierAllocation.rowDeltaNewToOldOffsetWords,
       dirtyRowsOffsetWords: this.frontierAllocation.rowDeltaDirtyRowsOffsetWords };
+    this.pressureHistoryRemap = new WebGPUOctreePressureHistoryRemap(this.device, {
+      rowDelta: rowDelta.rows,
+      rowDeltaControlOffsetWords: rowDelta.controlOffsetWords,
+      rowDeltaNewToOldOffsetWords: rowDelta.newToOldOffsetWords,
+      currentCandidatePressure: this.candidatePressure,
+      candidateHistory: this.candidatePressureHistory,
+      rowCapacity,
+    });
     this.firstOrderVCycle = new WebGPUOctreeSPGridVCycle(this.device, {
       ...section63Source, rowGeometry: structuredSource.rowGeometry, rowDelta,
     }, { dimensions: [this.dims.nx, this.dims.ny, this.dims.nz], rowCapacity,
@@ -2434,11 +2530,14 @@ export class WebGPUOctreeProjection {
       candidateLeafHeaders: this.candidateLeafHeaders,
       acceptedLeafHeaders: this.leafHeaders,
       candidatePressure: this.candidatePressure,
+      candidatePressureHistory: this.candidatePressureHistory,
+      acceptedPressureHistory: this.acceptedPressureHistory,
       pressureA: this.pressureA,
       pressureB: this.pressureB,
       rowCountControl: this.compaction,
     }, { rowCapacity, slotCapacity: structured.plan.slotCapacity,
-      catalogVersion: OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version });
+      catalogVersion: OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version,
+      carryPressureHistory: this.pipelinedMGPCG.usesTemporalPredictor });
     this.airVelocitySupport = new WebGPUOctreeAirVelocitySupportProducer(this.device, {
       structured: structuredSource,
       topology: this.powerTopology.source,
@@ -3018,8 +3117,14 @@ export class WebGPUOctreeProjection {
     broker.copyBufferToBuffer(this.compaction, 48, this.topologyCandidateDispatch, 0, 12);
     broker.copyBufferToBuffer(this.compaction, 4, this.topologyCandidateDispatch, 12, 12);
     broker.fence("octree topology and frontier publication complete");
-    this.encodeFrontierRows(encoder, "Inactive octree pressure-row candidate",
-      this.latestPressureInA ? this.candidateRowGroups.fromA : this.candidateRowGroups.fromB);
+    this.encodeFrontierRows(
+      encoder,
+      "Inactive octree pressure-row candidate",
+      this.latestPressureInA ? this.candidateRowGroups.fromA : this.candidateRowGroups.fromB,
+      this.pipelinedMGPCG.usesTemporalPredictor
+        ? (this.latestPressureInA ? this.pressureB : this.pressureA)
+        : undefined,
+    );
     this.encodeInactiveCoupledPowerCandidate(encoder);
     this.encodeRowDeltaCensusCopy(encoder);
     return true;
@@ -3126,6 +3231,16 @@ export class WebGPUOctreeProjection {
   }
 
   /** Beginning of substep N+1: sole coupled owner/frontier epoch flip. */
+  /** The substep's body-force increment for the Section 5 extension: air
+   * vectors are rebuilt from projected liquid seeds every epoch, so the
+   * producer folds exactly one g*dt into each reconstructed air vector. */
+  private airSupportGravityImpulse(
+    dt_s = this.powerTimestep_s,
+  ): [number, number, number] {
+    const gravity = this.scene.fluid.gravity_m_s2;
+    return [gravity.x * dt_s, gravity.y * dt_s, gravity.z * dt_s];
+  }
+
   encodeReadyTopologyFlip(encoder: GPUCommandEncoder): void {
     const descriptor = this.powerDescriptor, topology = this.powerTopology;
     const structured = this.structuredVelocity, boundary = this.structuredBoundary;
@@ -3155,7 +3270,8 @@ export class WebGPUOctreeProjection {
     // field to ordinary faces, extends it outside liquid, and maps it back
     // before the newly accepted epoch may be sampled.
     this.airVelocitySupport.encode(broker, acceptedGeneration,
-      this.globalFineBootstrapped ? (this.globalFineCurrentIsA ? 0 : 1) : undefined);
+      this.globalFineBootstrapped ? (this.globalFineCurrentIsA ? 0 : 1) : undefined,
+      this.airSupportGravityImpulse());
     // This helper owns its broker. Close the publication pass before returning
     // so both the cold checkpoint (which finishes the encoder immediately) and
     // the recurring caller can safely append or finish commands.
@@ -3208,19 +3324,26 @@ export class WebGPUOctreeProjection {
     // transport interval. Its exact advection map is identity; invoking the
     // departure sampler here can only reject boundary stencils that no
     // positive-time characteristic ever requested.
-    if (this.powerTimestep_s > 0) dynamics.encodeAdvection(broker, this.powerTimestep_s);
+    if (this.powerTimestep_s > 0) dynamics.encodeAdvection(
+      broker, this.powerTimestep_s, this.surfaceInflow,
+    );
     dynamics.encodeForcesAndDivergence(
       broker, this.powerTimestep_s, this.scene.fluid.density_kg_m3, [
         this.scene.fluid.gravity_m_s2.x,
         this.scene.fluid.gravity_m_s2.y,
         this.scene.fluid.gravity_m_s2.z,
-      ]);
+      ], this.surfaceInflow);
     splitProductionPhase(undefined, "structuredAdvectionBoundaryRhs");
     const pass = broker.compute({ label: "Publish physical power-cell volumes" });
     pass.setPipeline(volumePipeline); pass.setBindGroup(0, volumeGroup);
     pass.dispatchWorkgroupsIndirect(structured.source.liveRowDispatch, 0);
     splitProductionPhase(undefined, "structuredVolumeCapture");
-    this.firstOrderVCycle.encodeCapture(broker);
+    // The inactive hierarchy was built at the preceding tail and committed at
+    // this substep's head. Nothing in advection/RHS assembly mutates its row
+    // geometry or accepted Section 6.3 coefficients, so an accepted recapture
+    // here only defeats encodeSetup's already-committed fast path and encodes
+    // the full candidate chain a second time. The next tail captures the next
+    // candidate from its own explicit source mode.
     splitProductionPhase("rowEngineA", "finalPressureRowAssembly", true);
     return encoder;
   }
@@ -3237,7 +3360,7 @@ export class WebGPUOctreeProjection {
       this.scene.fluid.gravity_m_s2.x,
       this.scene.fluid.gravity_m_s2.y,
       this.scene.fluid.gravity_m_s2.z,
-    ], pressure, this.dynamicCouplingBodyCount);
+    ], pressure, this.dynamicCouplingBodyCount, this.surfaceInflow);
     if (!this.airVelocitySupport || this.activePowerGeneration === 0) {
       throw new Error("Structured projection requires an accepted Section 5 air-support epoch");
     }
@@ -3247,6 +3370,7 @@ export class WebGPUOctreeProjection {
     encoder: GPUCommandEncoder,
     label: string,
     group = this.groups.ab,
+    previousPressureForTemporalHistory?: GPUBuffer,
   ): void {
     const broker = new PassBroker(encoder);
     const dirty = broker.compute({ label: `${label} dirty-row deterministic scan` });
@@ -3280,6 +3404,14 @@ export class WebGPUOctreeProjection {
     deltaFinalize.dispatchWorkgroups(1);
     deltaFinalize.setPipeline(this.publishReusedRowDeltaPipeline);
     deltaFinalize.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 12);
+    if (previousPressureForTemporalHistory) {
+      const historyRemap = this.pressureHistoryRemap;
+      if (!historyRemap) throw new Error("Temporal predictor requires pressure history remap");
+      // The non-latest pressure bank is the seed consumed by the solve that
+      // produced the latest bank. The row-delta publication above carries its
+      // stable predecessor index, including affected rows.
+      historyRemap.encodeIntoPass(deltaFinalize, previousPressureForTemporalHistory);
+    }
     broker.copyBufferToBuffer(this.compaction, 8, this.solveDispatch, 0, 24);
   }
 
@@ -3341,6 +3473,7 @@ export class WebGPUOctreeProjection {
     } else {
       this.pipelinedMGPCG.encode(solveBroker, {
         pressureSeed: pressureIn,
+        pressureHistory: this.acceptedPressureHistory,
         pressureOut,
       });
     }
@@ -3372,7 +3505,7 @@ export class WebGPUOctreeProjection {
       }
       const supportBroker = new PassBroker(encoder);
       this.airVelocitySupport.encode(supportBroker, this.activePowerGeneration,
-        this.globalFineCurrentIsA ? 0 : 1);
+        this.globalFineCurrentIsA ? 0 : 1, this.airSupportGravityImpulse());
       supportBroker.fence("settled fine-demand air support published");
       encoder = supportBroker.commandEncoder();
     }
@@ -3455,7 +3588,15 @@ export class WebGPUOctreeProjection {
     const redistanceBroker = new PassBroker(encoder);
     pending.redistance.encode(redistanceBroker, {
       bandCells: pending.redistanceBandCells,
+      maximumDisplacementFineCells: pending.maximumDisplacementFineCells,
+      warmStart: pending.warmClosestPoints,
       residualTolerance: 1,
+      // Mirrors the transport kernel's closed-Neumann boundary policy: closed
+      // walls extend phi with unit outward slope, so seeding can represent a
+      // surface separating from a wall (lid films otherwise dry only by
+      // lateral erosion — the free-fall drop oracles).
+      closedBoundary: true,
+      openTopBoundary: this.scene.container.top !== "closed",
     });
     pending.volume?.encode(redistanceBroker);
     encoder = redistanceBroker.commandEncoder();
@@ -3496,6 +3637,7 @@ export class WebGPUOctreeProjection {
    * encoder always owns the continuation. */
   encodeSurface(encoder: GPUCommandEncoder, dt_s: number, inflow?: SurfaceInflowState,
     _maximumDt_s?: number, productionBoundary?: OctreeSemanticBoundary): GPUCommandEncoder {
+    this.surfaceInflow = inflow;
     const fineEngineSplits = octreeFineEngineSplitsEnabled();
     const splitProductionPhase = (
       enginePhase: OctreeEnginePhase | undefined,
@@ -3580,6 +3722,7 @@ export class WebGPUOctreeProjection {
           this.lastGlobalFineTransport = transport;
           const completedTransportBroker = transport.encode(transportBroker, {
             timestep: dt_s,
+            ...(inflow ? { inflow } : {}),
             boundaryPolicy: "closed-neumann",
             openTopBoundary: this.scene.container.top !== "closed",
             transportBandCells: bandCells,
@@ -3618,7 +3761,7 @@ export class WebGPUOctreeProjection {
             safetyBrickRings: 1,
           }, true, this.globalFineBootstrapped
             ? { kind: "delta", producer: publicationTransport!.topologyDelta }
-            : { kind: "bootstrap" });
+            : { kind: "bootstrap" }, inflow);
           encoder = topologyBroker.commandEncoder();
           splitProductionPhase("brickEngineA", "fineTopology");
         } else {
@@ -3636,9 +3779,13 @@ export class WebGPUOctreeProjection {
             safetyBrickRings: 1,
           }, true, this.globalFineBootstrapped
             ? { kind: "delta", producer: publicationTransport!.topologyDelta }
-            : { kind: "bootstrap" });
+            : { kind: "bootstrap" }, inflow);
           encoder = topologyBroker.commandEncoder();
           splitProductionPhase("brickEngineA", "fineTopology");
+        }
+        if (publicationVolume && this.pendingSurfaceReferenceVolume_m3 > 0) {
+          publicationVolume.addReferenceVolume(this.pendingSurfaceReferenceVolume_m3);
+          this.pendingSurfaceReferenceVolume_m3 = 0;
         }
         const wasBootstrapped = this.globalFineBootstrapped;
         // Latch after the seed decision above, so the first delta publication
@@ -3654,6 +3801,8 @@ export class WebGPUOctreeProjection {
           target: publicationTarget,
           targetIsA: !this.globalFineCurrentIsA,
           redistanceBandCells,
+          maximumDisplacementFineCells: maximumBacktraceFineCells,
+          warmClosestPoints: wasBootstrapped && fineLevelSetWarmStartRequested(),
         };
         // On recurring steps, coarse phi consumes the transported target before
         // any current-step force. Bootstrap first needs redistance to populate
@@ -3673,7 +3822,7 @@ export class WebGPUOctreeProjection {
           }
           const supportBroker = new PassBroker(encoder);
           this.airVelocitySupport.encode(supportBroker, this.activePowerGeneration,
-            this.globalFineCurrentIsA ? 0 : 1);
+            this.globalFineCurrentIsA ? 0 : 1, this.airSupportGravityImpulse(dt_s));
           supportBroker.fence("settled t=0 fine-demand air support published");
           encoder = supportBroker.commandEncoder();
           if (productionBoundary) {
@@ -3687,7 +3836,16 @@ export class WebGPUOctreeProjection {
     }
     return encoder;
   }
-  addSurfaceReferenceVolumeCells(cells: number) { this.surfaceState.addReferenceVolumeCells(cells); }
+  addSurfaceReferenceVolumeCells(cells: number) {
+    if (!Number.isFinite(cells) || cells < 0) {
+      throw new RangeError("Octree inflow reference cells must be finite and non-negative");
+    }
+    this.surfaceState.addReferenceVolumeCells(cells);
+    const cellVolume = (this.scene.container.width_m / this.dims.nx)
+      * (this.scene.container.height_m / this.dims.ny)
+      * (this.scene.container.depth_m / this.dims.nz);
+    this.pendingSurfaceReferenceVolume_m3 += cells * cellVolume;
+  }
   async readSolveDiagnostics() {
     // The staging buffer was copied inside the solve encoder, so it can never
     // race the next rebuild's worklist copy over the compaction header. It
@@ -3908,13 +4066,17 @@ export class WebGPUOctreeProjection {
     return {
       leaves: { buffer: surface.leaves },
       topologyMetrics: { buffer: topology.metrics },
+      catalogEntryHeaders: { buffer: topology.catalogEntryHeaders },
+      catalogFaces: { buffer: topology.catalogFaces },
       tetrahedronHeaders: { buffer: tetrahedronHeaders },
       tetrahedra: { buffer: tetrahedra },
       tetrahedronVertices: { buffer: tetrahedronVertices },
       structuredAuthority: { buffer: structured.authority },
+      structuredParams: { buffer: structured.params },
       structuredRowGeometry: { buffer: structured.rowGeometry },
       structuredRowVelocities: { buffer: structured.rowVelocities },
       structuredControl: { buffer: structured.control },
+      pressure: { buffer: this.latestPressureInA ? this.pressureA : this.pressureB },
       leafHeaders: { buffer: this.leafHeaders },
       topologyLifecycle: {
         tileWorklist: { buffer: this.topologyResidency.tileWorklist },
@@ -3997,6 +4159,7 @@ export class WebGPUOctreeProjection {
     };
     capture("frontier", this.leafFrontier);
     capture("compaction", this.compaction);
+    capture("reservedControl", this.compaction, this.dirtyFailureOffsetBytes);
     capture("descriptorCandidate", this.powerDescriptor!.control);
     capture("topologyCandidate", this.powerTopology!.control);
     capture("structuredCandidate", this.structuredVelocity!.candidateControl);
@@ -4047,6 +4210,7 @@ export class WebGPUOctreeProjection {
     let result: {
       frontier: number[];
       compaction: number[];
+      dirtyAuthority: number[];
       descriptorCandidate: number[];
       topologyCandidate: number[];
       structuredCandidate: number[];
@@ -4069,6 +4233,8 @@ export class WebGPUOctreeProjection {
       structuredDispatch: number[];
       candidateSchedules: number[];
       frontierCandidates: number[];
+      controlSummary?: Record<string, number[]>;
+      descriptorFailureRow?: unknown;
       boundaryFailureRow?: unknown;
       coarseFailureRow?: unknown;
     };
@@ -4082,6 +4248,7 @@ export class WebGPUOctreeProjection {
       result = {
         frontier: decode("frontier"),
         compaction: decode("compaction"),
+        dirtyAuthority: decode("reservedControl"),
         descriptorCandidate: decode("descriptorCandidate"),
         topologyCandidate: decode("topologyCandidate"),
         structuredCandidate: decode("structuredCandidate"),
@@ -4109,6 +4276,12 @@ export class WebGPUOctreeProjection {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
     }
+    const descriptorFirstError = Number(result.descriptorCandidate[3]) >>> 0;
+    if (Number(result.descriptorCandidate[2]) !== 0
+      && descriptorFirstError < this.pressureCapacity.rowCapacity) {
+      result.descriptorFailureRow =
+        await this.readPowerDescriptorCandidateFailure(descriptorFirstError);
+    }
     const boundary = result.boundaryCandidate;
     const boundaryFirstError = Number(boundary[1]) >>> 0;
     if ((Number(boundary[0]) & 2) !== 0 && boundaryFirstError < this.pressureCapacity.rowCapacity) {
@@ -4118,6 +4291,20 @@ export class WebGPUOctreeProjection {
     if (Number(result.coarseControl[0]) !== 0 && coarseFirstError < this.pressureCapacity.rowCapacity) {
       result.coarseFailureRow = await this.readPowerCoarseFailureRow(coarseFirstError);
     }
+    // Repeat only the compact producer controls at the tail of the serialized
+    // error. Large row samples are commonly truncated by consoles precisely
+    // where the originating publisher verdict would otherwise be lost.
+    result.controlSummary = {
+      frontier: result.frontier,
+      dirtyAuthority: result.dirtyAuthority,
+      descriptor: result.descriptorCandidate,
+      topology: result.topologyCandidate,
+      structured: result.structuredCandidate,
+      boundary: result.boundaryCandidate,
+      spgrid: result.spgridCandidate,
+      epoch: result.epoch,
+      ownerCandidate: result.ownerCandidate,
+    };
     return result;
   }
   /** Failure-only readback of the immutable sparse owner-page control header. */
@@ -4293,6 +4480,15 @@ export class WebGPUOctreeProjection {
       ownerControl: { buffer: this.ownerPages.arena, size: 16 * 4 },
       spgridDispatch: { buffer: spgridBuffers.dispatch,
         size: spgridPlan.levelCount * 12 * 4 + 8 },
+      accurateClassDispatch: { buffer: spgridBuffers.accurateClassDispatch, size: 29 * 4 },
+      mgpcgPreconditioned: { buffer: this.pipelinedMGPCGVectors.preconditioned,
+        size: outer.workAccountingPlan.rowCapacity * 4 },
+      mgpcgPreconditionedImage: { buffer: this.pipelinedMGPCGVectors.preconditionedImage,
+        size: outer.workAccountingPlan.rowCapacity * 4 },
+      mgpcgResidual: { buffer: this.pipelinedMGPCGVectors.residual,
+        size: outer.workAccountingPlan.rowCapacity * 4 },
+      section63Coefficients: { buffer: structured.section63.coefficients,
+        size: structured.section63.coefficientBankStrideWords * 4 },
       outerControl: { buffer: outerBuffers.control, size: Math.min(128, outerBuffers.control.size) },
       outerIndirectTail: { buffer: outerBuffers.indirectTail,
         size: outerPlan.maximumIterations * 16 * 4 },
@@ -4591,11 +4787,73 @@ export class WebGPUOctreeProjection {
   async readPowerDescriptorCandidateFailure(row: number) {
     if (!this.powerDescriptor || !Number.isSafeInteger(row) || row < 0
       || row >= this.pressureCapacity.rowCapacity) return undefined;
+    const headerReadback = this.device.createBuffer({
+      label: "Rejected power descriptor candidate leaf header",
+      size: 48 + this.ownerPages.arena.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Read rejected power descriptor candidate leaf header",
+    });
+    encoder.copyBufferToBuffer(this.candidateLeafHeaders, row * 48, headerReadback, 0, 48);
+    encoder.copyBufferToBuffer(
+      this.ownerPages.arena, 0, headerReadback, 48, this.ownerPages.arena.size,
+    );
+    this.device.queue.submit([encoder.finish()]);
     const [descriptor, rowRecord] = await Promise.all([
       this.powerDescriptor.readCandidateFailure(row),
       this.readPowerCoarseFailureRow(row),
+      headerReadback.mapAsync(GPUMapMode.READ),
     ]);
-    return { descriptor, row: rowRecord };
+    try {
+      const bytes = headerReadback.getMappedRange().slice(0);
+      const words = new Uint32Array(bytes), floats = new Float32Array(bytes);
+      const owner = words.subarray(12);
+      const cell = words[0] ?? 0;
+      const q = [
+        cell % this.dims.nx,
+        Math.floor(cell / this.dims.nx) % this.dims.ny,
+        Math.floor(cell / (this.dims.nx * this.dims.ny)),
+      ];
+      const brickDimensions = [
+        Math.ceil(this.dims.nx / 8),
+        Math.ceil(this.dims.ny / 8),
+        Math.ceil(this.dims.nz / 8),
+      ];
+      const brick = q.map((value) => Math.floor(value / 8));
+      const logical = brick[0] + brick[1] * brickDimensions[0]
+        + brick[2] * brickDimensions[0] * brickDimensions[1];
+      const capacity = owner[3] ?? 0;
+      const logicalCount = owner[4] ?? 0;
+      const activeTable = (owner[10] ?? 0) >>> 31;
+      const local = q.map((value) => value % 8);
+      const inspectOwnerTable = (table: number) => {
+        const directoryOffset = (owner[5] ?? 0) + 3 * capacity + table * logicalCount;
+        const encodedPage = owner[directoryOffset + logical] ?? 0;
+        const payloadOffset = (owner[6] ?? 0) + table * capacity * 512;
+        const payloadWord = encodedPage > 0 && encodedPage !== 0xffff_ffff
+          ? owner[payloadOffset + (encodedPage - 1) * 512
+            + local[0] + local[1] * 8 + local[2] * 64]
+          : undefined;
+        return { table, directoryOffset, encodedPage, payloadOffset, payloadWord };
+      };
+      return {
+        descriptor,
+        candidateHeader: {
+          cell: words[0], entryStart: words[1], entryCount: words[2], size: words[3],
+          diagonal: floats[4], rhs: floats[5], gradient: Array.from(floats.slice(8, 12)),
+        },
+        ownerControl: Array.from(owner.slice(0, 16)),
+        candidateOwnerPages: {
+          q, logical, active: inspectOwnerTable(activeTable),
+          inactive: inspectOwnerTable(1 - activeTable),
+        },
+        row: rowRecord,
+      };
+    } finally {
+      if (headerReadback.mapState === "mapped") headerReadback.unmap();
+      headerReadback.destroy();
+    }
   }
   /** Diagnostic-only raw sparse summary header; topology consumes this GPU-side. */
   get globalFineSummaryDirectory(): GPUBuffer | undefined { return this.globalFineSummaries?.directory; }
@@ -4743,6 +5001,13 @@ export class WebGPUOctreeProjection {
         encoder, source.leaves, source.candidates.candidates, source.candidates.countAndDispatch,
       );
     }
+    // The dry-scene renderer reads the static world (topology, authored
+    // scenery distance, material/owner identity) from this same source, and it
+    // is gated on the structural publication fence. Encoding it here — once,
+    // on the first render-world publication — is what makes the room, its
+    // shell and its props reachable by a primary ray. Water stays on the
+    // raster extraction path, so no dense fluid payload is published.
+    this.sparseBrickWorld?.encodeStaticPublication(encoder);
     // Publication is GPU-transactional. Failed, stale, and overflowing
     // generations retain the last good (including analytic t=0) tile stream;
     // a published zero-count generation is the distinct valid-empty case.
@@ -4762,6 +5027,7 @@ export class WebGPUOctreeProjection {
     this.section43HybridPreconditioner?.destroy();
     this.firstOrderVCycle?.destroy();
     this.topologyEpoch?.destroy();
+    this.pressureHistoryRemap?.destroy();
     this.structuredDynamics?.destroy();
     this.structuredBoundary?.destroy(); this.structuredVelocity?.destroy();
     this.structuredDivergenceRhs?.destroy();
@@ -4771,7 +5037,9 @@ export class WebGPUOctreeProjection {
     this.topologyCandidateDispatch.destroy();
     this.coldDispatch.destroy();
     this.compaction.destroy(); this.leafHeaders.destroy(); this.candidateLeafHeaders.destroy();
-    this.candidatePressure.destroy(); this.frontierSortScratch.destroy(); this.leafFrontier.destroy();
+    this.candidatePressure.destroy(); this.candidatePressureHistory.destroy();
+    this.acceptedPressureHistory.destroy();
+    this.frontierSortScratch.destroy(); this.leafFrontier.destroy();
     this.solveDispatch.destroy(); this.solidCells.destroy(); this.solveStats.destroy();
     this.unpublishedFineSummaryDirectory.destroy();
     this.compactVoxelInspection?.destroy();
@@ -5051,7 +5319,14 @@ fn storeOwnerRequired(cell: vec3u, origin: vec3u, size: u32) {
   let logical = brick.x + brick.y * brickDims.x + brick.z * brickDims.x * brickDims.y;
   let encoded = requireOwnerPageEncoded(logical); if (encoded == 0u) { return; }
   let local = cell % vec3u(8u);
-  atomicStore(&owners[ownerPayloadBase() + (encoded - 1u) * 512u + local.x + local.y * 8u + local.z * 64u], encodePagedOwner(cell, origin, size));
+  // Balance can split a freshly published child while the neighbouring
+  // parent split is still writing its coarser children in the same dispatch.
+  // The exponent occupies bits 18..20, above every origin delta, so every
+  // valid finer dyadic encoding is numerically smaller than every overlapping
+  // coarser encoding. Atomic min therefore makes that race deterministic and
+  // leaves one non-overlapping owner partition instead of a torn parent.
+  atomicMin(&owners[ownerPayloadBase() + (encoded - 1u) * 512u
+    + local.x + local.y * 8u + local.z * 64u], encodePagedOwner(cell, origin, size));
 }
 fn requireLeafOwnerPages(origin: vec3u, size: u32, lane: u32, lanes: u32) {
   let brickDims = (dims() + vec3u(7u)) / 8u; let first = origin / 8u; let last = (origin + vec3u(size - 1u)) / 8u;
@@ -5354,7 +5629,7 @@ const TILE_SIGNATURE_VALID_MASK: u32 = 0x00ffffffu;
 const PRESSURE_RETENTION_GENERATIONS: u32 = 3u;
 const TILE_SIGNATURE_FAILED: u32 = 0xffffffffu;
 fn changeStateWords() -> u32 {
-  return 14u * topologyTileCapacity() + 1u + RIGID_SNAPSHOT_WORDS + 14u;
+  return 14u * topologyTileCapacity() + 1u + RIGID_SNAPSHOT_WORDS + 22u;
 }
 fn changeStateBase() -> u32 { return arrayLength(&compaction) - 8u - changeStateWords(); }
 fn tileChangeFlagsBase() -> u32 { return changeStateBase(); }
@@ -5377,8 +5652,34 @@ fn frontierPublicationBase() -> u32 {
   return rigidSnapshotBase() + RIGID_SNAPSHOT_WORDS;
 }
 fn frontierTopologyReuseBase() -> u32 { return frontierPublicationBase() + 13u; }
+fn dirtyFailureBase() -> u32 { return frontierTopologyReuseBase() + 1u; }
 const FRONTIER_REUSE_MAGIC: u32 = 0x46525553u;
 const FRONTIER_FAILED_MAGIC: u32 = 0x4641494cu;
+const DIRTY_FAILURE_TILE_COUNTS: u32 = 1u;
+const DIRTY_FAILURE_TILE_SIGNATURE: u32 = 2u;
+const DIRTY_FAILURE_RETIRED_TILE: u32 = 3u;
+const DIRTY_FAILURE_TILE_OVERFLOW: u32 = 4u;
+const DIRTY_FAILURE_FRONTIER_COUNTS: u32 = 5u;
+const DIRTY_FAILURE_FRONTIER_SIGNATURE: u32 = 6u;
+const DIRTY_FAILURE_FRONTIER_OVERFLOW: u32 = 7u;
+fn clearDirtyFailure() {
+  for (var word = 0u; word < 8u; word += 1u) {
+    compaction[dirtyFailureBase() + word] = 0u;
+  }
+}
+fn rejectDirtyAuthority(reason: u32, stage: u32, slot: u32, tileIndex: u32,
+    activeCount: u32, retiredCount: u32, capacity: u32) {
+  compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
+  if (compaction[dirtyFailureBase()] != 0u) { return; }
+  compaction[dirtyFailureBase()] = reason;
+  compaction[dirtyFailureBase() + 1u] = stage;
+  compaction[dirtyFailureBase() + 2u] = slot;
+  compaction[dirtyFailureBase() + 3u] = tileIndex;
+  compaction[dirtyFailureBase() + 4u] = activeCount;
+  compaction[dirtyFailureBase() + 5u] = retiredCount;
+  compaction[dirtyFailureBase() + 6u] = capacity;
+  compaction[dirtyFailureBase() + 7u] = frontier[3];
+}
 fn frontierGenerationReused() -> bool {
   return compaction[11] == FRONTIER_REUSE_MAGIC
     || compaction[frontierTopologyReuseBase()] != 0u;
@@ -5418,7 +5719,8 @@ fn appendDirtyTile(tileIndex: u32, generation: u32, count: ptr<function, u32>) {
   if (!topologyTileActive(tileIndex)
       || compaction[tileChangeFlagsBase() + tileIndex] == generation) { return; }
   if (*count >= topologyTileCapacity()) {
-    compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
+    rejectDirtyAuthority(DIRTY_FAILURE_TILE_OVERFLOW, 1u, *count, tileIndex,
+      compaction[0], compaction[4], topologyTileCapacity());
     return;
   }
   compaction[tileChangeFlagsBase() + tileIndex] = generation;
@@ -5622,10 +5924,13 @@ fn appendRigidBounds(body: RigidBody, generation: u32, count: ptr<function, u32>
 fn buildDirtyTileDelta() {
   let generation = max(1u, frontier[3] + 1u);
   var dirtyCount = 0u;
+  clearDirtyFailure();
   compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
   let capacity = topologyTileCapacity();
   let activeCount = compaction[0];
   if (activeCount > capacity || compaction[4] > capacity) {
+    rejectDirtyAuthority(DIRTY_FAILURE_TILE_COUNTS, 1u, 0u, 0u,
+      activeCount, compaction[4], capacity);
     compaction[0] = 0u;
     compaction[4] = 0u;
     compaction[1] = 0u; compaction[2] = 1u; compaction[3] = 1u;
@@ -5638,7 +5943,8 @@ fn buildDirtyTileDelta() {
     let tileIndex = compaction[16u + slot];
     let changed = compaction[tileSignatureChangedBase() + slot];
     if (tileIndex >= capacity || changed == TILE_SIGNATURE_FAILED) {
-      compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
+      rejectDirtyAuthority(DIRTY_FAILURE_TILE_SIGNATURE, 1u, slot, tileIndex,
+        activeCount, compaction[4], capacity);
       break;
     }
     if ((changed & TILE_SIGNATURE_STRUCTURAL_CHANGED) != 0u) {
@@ -5651,13 +5957,20 @@ fn buildDirtyTileDelta() {
   for (var slot = 0u; slot < compaction[4]; slot += 1u) {
     let tileIndex = compaction[retiredTileIndexBase() + slot];
     if (tileIndex >= capacity) {
-      compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
+      rejectDirtyAuthority(DIRTY_FAILURE_RETIRED_TILE, 1u, slot, tileIndex,
+        activeCount, compaction[4], capacity);
       break;
     }
     let signature = tileSignatureBase() + TILE_SIGNATURE_WORDS * tileIndex;
     compaction[signature + 4u] = 0u;
     let frontierSignature = tileFrontierSignatureBase() + TILE_SIGNATURE_WORDS * tileIndex;
     compaction[frontierSignature + 4u] = 0u;
+    // The tile is no longer active, so appendDirtyTileRing deliberately will
+    // not add the tile itself to the active dirty list. Its old frontier rows
+    // still belong to this generation's changed authority, however: without
+    // this stamp classifyFrontierCarry treats those identities as clean and
+    // carries headers whose owners were reset through the retired dispatch.
+    compaction[tileChangeFlagsBase() + tileIndex] = generation;
     appendDirtyTileRing(tileIndex, generation, &dirtyCount);
   }
   let snapshotValid = compaction[rigidSnapshotBase()] == RIGID_SNAPSHOT_MAGIC;
@@ -5696,6 +6009,9 @@ fn buildDirtyTileDelta() {
   let candidateDispatch = residencyTiledDispatch(
     totalTiles * candidateBlocks * candidateBlocks * candidateBlocks);
   compaction[8] = candidateDispatch.x; compaction[9] = candidateDispatch.y; compaction[10] = 1u;
+  if (validDelta && compaction[dirtyFailureBase()] == 0u) {
+    compaction[dirtyFailureBase()] = 0x100u;
+  }
 }
 
 @compute @workgroup_size(1)
@@ -5704,8 +6020,11 @@ fn buildDirtyFrontierDelta() {
   let capacity = topologyTileCapacity();
   let activeCount = compaction[0];
   var dirtyCount = 0u;
+  clearDirtyFailure();
   compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
   if (activeCount > capacity || compaction[4] > capacity) {
+    rejectDirtyAuthority(DIRTY_FAILURE_FRONTIER_COUNTS, 2u, 0u, 0u,
+      activeCount, compaction[4], capacity);
     compaction[0] = 0u; compaction[4] = 0u;
     compaction[8] = 0u; compaction[9] = 1u; compaction[10] = 1u;
     return;
@@ -5720,14 +6039,16 @@ fn buildDirtyFrontierDelta() {
     let changed = compaction[tileSignatureChangedBase() + slot];
     compaction[tileSignatureChangedBase() + slot] = 0u;
     if (tileIndex >= capacity || changed == TILE_SIGNATURE_FAILED) {
-      compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
+      rejectDirtyAuthority(DIRTY_FAILURE_FRONTIER_SIGNATURE, 2u, slot, tileIndex,
+        activeCount, compaction[4], capacity);
       break;
     }
     let structural = compaction[tileChangeFlagsBase() + tileIndex] == generation;
     let wet = (changed & TILE_SIGNATURE_FRONTIER_CHANGED) != 0u;
     if (structural || wet) {
       if (dirtyCount >= capacity) {
-        compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
+        rejectDirtyAuthority(DIRTY_FAILURE_FRONTIER_OVERFLOW, 2u, slot, tileIndex,
+          activeCount, compaction[4], capacity);
         break;
       }
       if (wet) { compaction[tileFrontierChangeFlagsBase() + tileIndex] = generation; }
@@ -5750,6 +6071,10 @@ fn buildDirtyFrontierDelta() {
   compaction[8] = candidateDispatch.x;
   compaction[9] = candidateDispatch.y;
   compaction[10] = 1u;
+  if (compaction[dirtyAuthorityBase()] == DIRTY_TILE_VALID_MAGIC
+      && compaction[dirtyFailureBase()] == 0u) {
+    compaction[dirtyFailureBase()] = 0x200u;
+  }
 }
 // -----------------------------------------------------------------------------
 

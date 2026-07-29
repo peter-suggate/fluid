@@ -14,7 +14,23 @@ import { performanceShaderVariant } from "./stores/performance-instrumentation-s
 export interface FineLevelSetGPURedistanceOptions {
   /** Required signed-distance width, measured in fine cells. */
   bandCells: number;
+  /** Conservative one-step interface displacement. Used only with a
+   * recycle-safe closest-point carry; cold publications still span the band. */
+  maximumDisplacementFineCells?: number;
+  /** The topology transaction remapped the preceding closest-point field into
+   * this generation's physical page identities. */
+  warmStart?: boolean;
   residualTolerance?: number;
+  /** Closed domain walls extend phi outward with unit slope (the transport
+   * kernel's convention), so a boundary sample whose interface sits within
+   * one cell of a closed wall seeds a crossing toward it. Without this, a
+   * film flush against the lid has no sign change inside the lattice: its
+   * top surface is invisible to seeding, the march rebuilds the film's phi
+   * from the nearest lateral crossing, and the film can only dry inward from
+   * its edges (the free-fall drop oracles measure exactly that peel). */
+  closedBoundary?: boolean;
+  /** An open top exempts the +y wall from the closed-wall virtual crossing. */
+  openTopBoundary?: boolean;
 }
 
 /** The exact immutable page-delta ABI authored by fine topology.
@@ -39,32 +55,24 @@ export interface FineLevelSetRedistanceDeltaAuthority {
   };
 }
 
-/** Descending JFA strides followed by two local repair passes.
+/** Descending JFA strides followed by bounded local repair passes.
  *
- * **This schedule is NOT warm-started**, which is why `encodeJFA` must keep
- * passing `bandCells` as the displacement. `seedClosestPoints` writes
- * `workA[index]=INVALID` for every support sample on every generation and
- * re-derives the seed set from phi sign changes, so no closest-point field
- * crosses a generation boundary: the flood has to reach every band cell from
- * the interface every step, however little the interface moved.
+ * Cold publications pass `bandCells` as the displacement and rebuild the
+ * complete transform from current interface seeds. Recurring publications may
+ * instead start from topology's recycle-safe remap of the preceding seed field
+ * and use the conservative one-step transport displacement. The warm path
+ * refreshes every closest-point code from current transported phi before it
+ * validates a carried seed, and conditionally restores the remaining cold
+ * collar repairs if the short schedule leaves a sparse support gap.
  *
- * The per-step displacement itself is genuinely small. Transport rejects any
- * `maximumBacktraceFineCells` above `2 * fineFactor` (8 fine cells at factor
- * 4) and publishes the measured per-step maximum, `ceil(|v| * dt / h)` in fine
- * cells, in its status summary. So `planFineLevelSetJFAStrides(bandCells, 8)`
- * would emit 8,4,2,1,+1,+1 and delete one of the seven floods — and it is
- * unsound today, in the way that looks like a win. Band cells 9..23 from the
- * interface would finish with `seed==INVALID`; `resolveClosestPoints*` counts
- * them as `unresolved`; `finalizeJFADistances` clears `committed`; and
- * `webgpu-octree-fine-levelset-topology.ts` then rejects the publication,
- * because `redistanceValid` requires `redistanceControl[0]==0` and
- * `redistanceControl[3]!=0`. The surface freezes, the frame gets faster, and
- * the run still prints PASS — POWER_LIQUIDS_ULTIMATE_M1MAX, "things that look
- * like wins and are not", item 1. E1 step 2 stays blocked until the
- * closest-point channels are carried in the fine-page transaction, and that
- * carry must survive physical page reassignment: a transported seed index
- * naming a recycled page resolves to a live-looking wrong coordinate, which
- * fails open rather than closed.
+ * For a cold full-band transform, `maximumDisplacementFineCells` is the
+ * physical signed-distance band rather than the measured characteristic. The
+ * descending ladder is nevertheless allowed to follow that exact band: its
+ * summed reach is larger than the cutoff for every product width, and five
+ * local collar repairs close sparse page-boundary turning routes. The former
+ * unconditional factor-four-page floor came from a 15-cell prototype band;
+ * retaining it after band 1 moved to an 8-cell cutoff made bands 1 and 4 run
+ * the same ladder and erased the narrow-band pass-count win.
  *
  * Replacing the ladder with an ordered 6-direction sweep is not a substitute
  * either. This transform is dispatched one workgroup per support page over an
@@ -81,6 +89,7 @@ export interface FineLevelSetRedistanceDeltaAuthority {
 export function planFineLevelSetJFAStrides(
   bandCells: number,
   maximumDisplacementFineCells = 4,
+  collarRepairPasses = 5,
 ): readonly number[] {
   if (!Number.isSafeInteger(bandCells) || bandCells < 1 || bandCells > 256) {
     throw new RangeError("Fine redistance bandCells must be an integer in [1, 256]");
@@ -88,6 +97,10 @@ export function planFineLevelSetJFAStrides(
   if (!Number.isSafeInteger(maximumDisplacementFineCells)
     || maximumDisplacementFineCells < 1 || maximumDisplacementFineCells > 256) {
     throw new RangeError("Fine redistance displacement must be an integer in [1, 256]");
+  }
+  if (!Number.isSafeInteger(collarRepairPasses)
+    || collarRepairPasses < 0 || collarRepairPasses > 5) {
+    throw new RangeError("Fine redistance collar repair count must be an integer in [0, 5]");
   }
   let stride = 1;
   const repairRadius = Math.min(bandCells, maximumDisplacementFineCells);
@@ -108,11 +121,14 @@ export function planFineLevelSetJFAStrides(
   }
   const strides: number[] = [];
   for (; stride >= 1; stride /= 2) strides.push(stride);
-  // Two +1 collar repairs close sparse page-boundary landing gaps after the
-  // descending schedule. The second is required by the mini dam-break
-  // generation-280 boundary. Publication still fails closed if a seed is missing.
-  strides.push(1);
-  strides.push(1);
+  // Five +1 collar repairs close sparse page-boundary landing gaps after the
+  // descending schedule. Unlike dense JFA, the Section 5 fine SPGrid is a
+  // narrow, evolving resident set: a closest-point route may turn across a
+  // page corner and therefore need several local hops after the binary
+  // landing ladder. Two repairs covered the mini dam but left 176,898 ocean
+  // band samples unresolved at the first rolling-wave topology expansion.
+  // The publication still fails closed if all five cannot reach a seed.
+  for (let repair = 0; repair < collarRepairPasses; repair += 1) strides.push(1);
   return strides;
 }
 
@@ -133,9 +149,9 @@ export interface FineLevelSetGPURedistanceControl {
 
 export const FINE_LEVELSET_REDISTANCE_CONTROL_BYTES = 40;
 export const FINE_LEVELSET_REDISTANCE_REDUCTION_RECORD_BYTES = 28;
-const FINE_LEVELSET_JFA_MAX_PASSES = 10;
+const FINE_LEVELSET_JFA_MAX_PASSES = 13;
 export const FINE_LEVELSET_REDISTANCE_ALLOCATED_BYTES = FINE_LEVELSET_REDISTANCE_CONTROL_BYTES
-  + 80;
+  + 96 + 12;
 
 /** Immutable B4 JFA tap address. `pageSlot` is x-fastest in the 3x3x3
  * radius halo and `localIndex` is x-fastest in the destination B4 page. */
@@ -254,14 +270,17 @@ export class WebGPUFineLevelSetRedistance {
   readonly b4Addressing: boolean;
   private readonly reductions: GPUBuffer;
   private readonly supportMask: GPUBuffer;
+  private readonly warmFallbackDispatch: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly publishSupportMaskPipeline: GPUComputePipeline;
+  private readonly jfaRefreshClosestPointsPipeline: GPUComputePipeline;
   private readonly jfaSeedPipeline: GPUComputePipeline;
   private readonly jfaABPipelines: ReadonlyMap<number, GPUComputePipeline>;
   private readonly jfaBAPipelines: ReadonlyMap<number, GPUComputePipeline>;
   private readonly jfaResolveAToBPipeline: GPUComputePipeline;
   private readonly jfaResolveBToCanonicalPipeline: GPUComputePipeline;
   private readonly jfaValidatePipeline: GPUComputePipeline;
+  private readonly jfaPrepareWarmFallbackPipeline: GPUComputePipeline;
   private readonly jfaFinalizePipeline: GPUComputePipeline;
   private readonly jfaCommitPipeline: GPUComputePipeline;
   /** Every resource bound by redistance is construction-stable. Retain one
@@ -288,8 +307,12 @@ export class WebGPUFineLevelSetRedistance {
       size: reductionBytes, usage: GPUBufferUsage.STORAGE });
     this.supportMask = device.createBuffer({ label: "fine-levelset JFA direct support-page mask",
       size: pageCapacity * 4, usage: GPUBufferUsage.STORAGE });
+    this.warmFallbackDispatch = device.createBuffer({
+      label: "fine-levelset JFA warm fallback dispatch",
+      size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
+    });
     this.allocatedBytes = fineLevelSetRedistanceAllocatedBytes(source.plan.maximumResidentBricks);
-    this.params = device.createBuffer({ label: "fine-levelset JFA-CPT parameters", size: 80,
+    this.params = device.createBuffer({ label: "fine-levelset JFA-CPT parameters", size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const jfaProfile = performanceShaderVariant();
     const jfaActivity = createGPULogicalActivityAdoptionContext({
@@ -318,6 +341,7 @@ export class WebGPUFineLevelSetRedistance {
       },
     });
     this.publishSupportMaskPipeline = jfaPipeline("publishSupportPageMask");
+    this.jfaRefreshClosestPointsPipeline = jfaPipeline("refreshClosestPointCodes");
     this.jfaSeedPipeline = jfaPipeline("seedClosestPoints");
     const immutableStrides = Array.from({ length: 9 }, (_, index) => 1 << index);
     this.jfaABPipelines = new Map(immutableStrides.map((stride) =>
@@ -327,6 +351,7 @@ export class WebGPUFineLevelSetRedistance {
     this.jfaResolveAToBPipeline = jfaPipeline("resolveClosestPointsAToB");
     this.jfaResolveBToCanonicalPipeline = jfaPipeline("resolveClosestPointsBToCanonical");
     this.jfaValidatePipeline = jfaPipeline("validateJFADistances");
+    this.jfaPrepareWarmFallbackPipeline = jfaPipeline("prepareWarmFallbackDispatch");
     this.jfaFinalizePipeline = jfaPipeline("finalizeJFADistances");
     this.jfaCommitPipeline = jfaPipeline("commitJFADistances");
   }
@@ -343,7 +368,13 @@ export class WebGPUFineLevelSetRedistance {
     if (!Number.isFinite(tolerance) || tolerance <= 0 || tolerance > 1) {
       throw new RangeError("Fine redistance residual tolerance must be in (0, 1]");
     }
-    const bytes = new ArrayBuffer(80); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
+    const warmStart = options.warmStart === true;
+    const maximumDisplacementFineCells = options.maximumDisplacementFineCells ?? options.bandCells;
+    if (!Number.isSafeInteger(maximumDisplacementFineCells)
+      || maximumDisplacementFineCells < 1 || maximumDisplacementFineCells > 256) {
+      throw new RangeError("Fine redistance displacement must be an integer in [1, 256]");
+    }
+    const bytes = new ArrayBuffer(96); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
     u32.set([...this.source.plan.brickDimensions, this.source.plan.brickResolution,
       ...this.source.plan.sampleDimensions, this.source.plan.samplesPerBrick,
       this.source.plan.maximumResidentBricks, FINE_LEVELSET_WORKSET_HEADER_WORDS,
@@ -351,33 +382,38 @@ export class WebGPUFineLevelSetRedistance {
     f32[13] = this.source.plan.fineCellWidth; f32[14] = tolerance;
     u32[15] = this.source.plan.maximumResidentBricks * this.source.plan.samplesPerBrick;
     u32[16] = this.device.limits.maxComputeWorkgroupsPerDimension;
-    u32[17] = 0;
+    u32[17] = warmStart ? 1 : 0;
     u32[18] = this.delta.pageDeltaLayout.dirtyPagesOffsetWords;
     u32[19] = this.delta.pageDeltaLayout.supportPagesOffsetWords;
-    this.encodeJFA(broker, bytes, options.bandCells, tolerance);
+    u32[20] = options.closedBoundary === true ? 1 : 0;
+    u32[21] = options.openTopBoundary === true ? 1 : 0;
+    this.encodeJFA(broker, bytes, options.bandCells,
+      warmStart ? maximumDisplacementFineCells : options.bandCells, warmStart, tolerance);
   }
 
   private encodeJFA(
     broker: PassBroker,
     baseBytes: ArrayBuffer,
     bandCells: number,
+    maximumDisplacementFineCells: number,
+    warmStart: boolean,
     residualTolerance: number,
   ): void {
-    // The compact topology currently carries phi but not the materialized
-    // closest-point seed index into a newly allocated A/B page. Span the
-    // maintained band until that cache becomes part of the page transaction.
-    // The 23-cell band starts at stride 16 — sum-covered (16+8+4+2+1 = 31 >= 23)
-    // rather than round-up-covered — so the ladder is 16,8,4,2,1 plus the two
-    // +1 collar repairs: 7 floods, one fewer than the former stride-32
-    // schedule. Dispatch remains page-delta bounded.
-    const strides = planFineLevelSetJFAStrides(bandCells, bandCells);
+    // A cold publication spans the physical cutoff. A recurring publication
+    // starts from the prior transform after topology has remapped every seed
+    // through logical page identity, so only the one-step displacement plus
+    // two local collar repairs remains. Cold keeps the five repairs required
+    // by the ocean topology expansion.
+    const strides = planFineLevelSetJFAStrides(
+      bandCells, maximumDisplacementFineCells, warmStart ? 2 : 5);
     if (strides.length > FINE_LEVELSET_JFA_MAX_PASSES) throw new RangeError("Fine JFA pass budget exceeded");
     this.device.queue.writeBuffer(this.params, 0, baseBytes);
     const buffers = [[1, this.source.worklist], [2, this.source.metadata], [3, this.delta.pageDelta],
       [4, this.source.flags], [5, this.source.phi], [6, this.source.workA], [7, this.source.workB],
-      [8, this.control], [9, this.reductions], [10, this.supportMask]] as const;
+      [8, this.control], [9, this.reductions], [10, this.supportMask],
+      [11, this.warmFallbackDispatch]] as const;
     const run = (label: string, pipeline: GPUComputePipeline, params: GPUBuffer,
-      wanted: readonly number[], dispatch: "support" | "dirty" | "single") => {
+      wanted: readonly number[], dispatch: "support" | "dirty" | "fallback" | "single") => {
       const pass = broker.compute({ label });
       pass.setPipeline(pipeline);
       let bindGroup = this.bindGroups.get(pipeline);
@@ -394,6 +430,7 @@ export class WebGPUFineLevelSetRedistance {
       }
       pass.setBindGroup(0, bindGroup);
       if (dispatch === "single") pass.dispatchWorkgroups(1);
+      else if (dispatch === "fallback") pass.dispatchWorkgroupsIndirect(this.warmFallbackDispatch, 0);
       else pass.dispatchWorkgroupsIndirect(this.delta.redistanceDispatches.buffer,
         dispatch === "dirty"
           ? this.delta.redistanceDispatches.dirtyOffsetBytes
@@ -402,6 +439,15 @@ export class WebGPUFineLevelSetRedistance {
     const params = this.params;
     run("Fine JFA - publish support mask", this.publishSupportMaskPipeline,
       params, [2, 3, 10], "support");
+    if (warmStart) {
+      // Carried seeds are meaningful only if their referenced interface sample
+      // still owns a closest-point code for the transported phi. Refresh the
+      // complete code field before any destination validates a carried index;
+      // folding this into seeding would race cross-page references.
+      run("Fine JFA - refresh transported closest-point codes",
+        this.jfaRefreshClosestPointsPipeline,
+        params, [1, 2, 3, 4, 5, 10], "support");
+    }
     run("Fine JFA - seed closest points", this.jfaSeedPipeline,
       params, [1, 2, 3, 4, 5, 6, 7, 9, 10], "support");
     let inA = true;
@@ -415,6 +461,25 @@ export class WebGPUFineLevelSetRedistance {
     run(`Fine JFA - resolve ${inA ? "A to B" : "B to canonical"}`,
       inA ? this.jfaResolveAToBPipeline : this.jfaResolveBToCanonicalPipeline,
       params, [2, 3, 4, 5, 6, 7, 9], "support");
+    if (warmStart) {
+      // Two local repairs cover the coherent common case. A sparse collar can
+      // still expose a longer turning route after page churn, so inspect the
+      // deterministic resolve records on-GPU and publish a zero-or-exact
+      // fallback dispatch. Three further repairs reproduce the cold five-pass
+      // closure only for generations that actually need it.
+      run("Fine JFA - prepare warm fallback", this.jfaPrepareWarmFallbackPipeline,
+        params, [3, 9, 11], "single");
+      let fallbackInA = true;
+      for (let repair = 0; repair < 3; repair += 1) {
+        const pipeline = (fallbackInA ? this.jfaABPipelines : this.jfaBAPipelines).get(1)!;
+        run(`Fine JFA - conditional collar repair ${repair + 3}`,
+          pipeline, params, [1, 2, 3, 4, 5, 6, 7, 10], "fallback");
+        fallbackInA = !fallbackInA;
+      }
+      run("Fine JFA - resolve conditional collar fallback",
+        this.jfaResolveBToCanonicalPipeline,
+        params, [2, 3, 4, 5, 6, 7, 9], "fallback");
+    }
     // Resolve canonicalizes persistent delta state: seeds are always in A and
     // magnitudes are always in B, independent of this generation's JFA parity.
     // Production uses tolerance=1. The unsigned-distance upwind residual is
@@ -437,6 +502,7 @@ export class WebGPUFineLevelSetRedistance {
     this.control.destroy();
     this.reductions.destroy();
     this.supportMask.destroy();
+    this.warmFallbackDispatch.destroy();
     this.params.destroy();
   }
 }
@@ -511,10 +577,10 @@ const SAMPLE_FLAG_BITS:u32=5u;const CP_FRACTION_MASK:u32=0x00ffffffu;const CP_FR
 const STALE:u32=4u;const NONFINITE:u32=8u;
 override JFA_STRIDE:u32=1u;
 ${fineLevelSetJFATapLookupWGSL}
-struct Params{brickDims:vec3u,brickResolution:u32,sampleDims:vec3u,samplesPerBrick:u32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,bandCells:u32,fineWidth:f32,tolerance:f32,scratchWords:u32,maxWorkgroups:u32,pad0:u32,dirtyPagesOffset:u32,supportPagesOffset:u32}
+struct Params{brickDims:vec3u,brickResolution:u32,sampleDims:vec3u,samplesPerBrick:u32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,bandCells:u32,fineWidth:f32,tolerance:f32,scratchWords:u32,maxWorkgroups:u32,warmStart:u32,dirtyPagesOffset:u32,supportPagesOffset:u32,closed:u32,openTop:u32,pad0:u32,pad1:u32}
 struct Control{unresolved:u32,residualScaled:u32,seeds:u32,committed:u32,flags:u32,firstError:u32,accepted:u32,initialPages:u32,finalPages:u32,resolveMissing:u32}
 struct Partial{seeds:u32,resolveMissing:u32,accepted:u32,validationUnresolved:u32,maximum:u32,flags:u32,firstError:u32}
-@group(0)@binding(0)var<uniform>p:Params;@group(0)@binding(1)var<storage,read>worklist:array<u32>;@group(0)@binding(2)var<storage,read>metadata:array<u32>;@group(0)@binding(3)var<storage,read>pageDelta:array<u32>;@group(0)@binding(4)var<storage,read_write>flags:array<u32>;@group(0)@binding(5)var<storage,read_write>phi:array<u32>;@group(0)@binding(6)var<storage,read_write>workA:array<u32>;@group(0)@binding(7)var<storage,read_write>workB:array<u32>;@group(0)@binding(8)var<storage,read_write>control:Control;@group(0)@binding(9)var<storage,read_write>partials:array<Partial>;@group(0)@binding(10)var<storage,read_write>supportMask:array<u32>;
+@group(0)@binding(0)var<uniform>p:Params;@group(0)@binding(1)var<storage,read>worklist:array<u32>;@group(0)@binding(2)var<storage,read>metadata:array<u32>;@group(0)@binding(3)var<storage,read>pageDelta:array<u32>;@group(0)@binding(4)var<storage,read_write>flags:array<u32>;@group(0)@binding(5)var<storage,read_write>phi:array<u32>;@group(0)@binding(6)var<storage,read_write>workA:array<u32>;@group(0)@binding(7)var<storage,read_write>workB:array<u32>;@group(0)@binding(8)var<storage,read_write>control:Control;@group(0)@binding(9)var<storage,read_write>partials:array<Partial>;@group(0)@binding(10)var<storage,read_write>supportMask:array<u32>;@group(0)@binding(11)var<storage,read_write>warmFallbackDispatch:array<u32>;
 var<workgroup>reduceSum0:array<u32,256>;var<workgroup>reduceSum1:array<u32,256>;var<workgroup>reduceSum2:array<u32,256>;var<workgroup>reduceSum3:array<u32,256>;var<workgroup>reduceMaximum:array<u32,256>;var<workgroup>reduceFlags:array<u32,256>;var<workgroup>reduceFirstError:array<u32,256>;
 // One workgroup owns one brick. Every JFA tap therefore lands in one of only
 // 27 generation-fixed neighboring bricks; resolve those pages once. The 256
@@ -534,6 +600,11 @@ fn sampleKey(q:vec3u)->u32{return q.x+p.sampleDims.x*(q.y+p.sampleDims.y*q.z);}
 ${makeFineLevelSetSortedWorklistLookupWGSL("p", "metadata", "worklist", "publishedPageOf", "brickDims")}
 fn deltaCount(support:bool)->u32{return min(pageDelta[select(2u,3u,support)],p.pageCapacity);}
 fn deltaOffset(support:bool)->u32{return select(p.dirtyPagesOffset,p.supportPagesOffset,support);}
+@compute @workgroup_size(256)fn prepareWarmFallbackDispatch(@builtin(local_invocation_index)lid:u32){
+ let pages=deltaCount(true);var missing=0u;for(var work=lid;work<pages;work+=256u){missing+=select(0u,1u,partials[work].resolveMissing>0u);}
+ reduceLane(lid,missing,0u,0u,0u,0u,0u,INVALID,128u);
+ if(lid==0u){if(reduceSum0[0]>0u&&pages>0u){let x=min(p.maxWorkgroups,pages);warmFallbackDispatch[0]=x;warmFallbackDispatch[1]=(pages+x-1u)/x;warmFallbackDispatch[2]=1u;}else{warmFallbackDispatch[0]=0u;warmFallbackDispatch[1]=1u;warmFallbackDispatch[2]=1u;}}
+}
 fn rawDeltaPage(work:u32,support:bool)->u32{if(work>=deltaCount(support)){return INVALID;}return pageDelta[deltaOffset(support)+work];}
 fn deltaPageAt(work:u32,support:bool)->u32{let id=rawDeltaPage(work,support);return select(INVALID,id,id<p.pageCapacity&&metadata[id*10u+2u]==p.generation);}
 fn deltaPage(wid:vec3u,nw:vec3u,support:bool)->u32{return deltaPageAt(fineLinearWorkgroup(wid,nw),support);}
@@ -569,8 +640,23 @@ fn sampleIndex(q:vec3u)->u32{if(any(q>=p.sampleDims)){return INVALID;}let id=sup
 fn directionDelta(direction:u32)->vec3i{if(direction==0u){return vec3i(-1,0,0);}if(direction==1u){return vec3i(1,0,0);}if(direction==2u){return vec3i(0,-1,0);}if(direction==3u){return vec3i(0,1,0);}if(direction==4u){return vec3i(0,0,-1);}return vec3i(0,0,1);}
 ${fineLevelSetJFAPhysicalSampleWGSL(b4Addressing)}
 fn seedStableKey(index:u32)->u32{return sampleKey(physicalSampleQ(index));}
-fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=bitcast<f32>(phi[index]);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){continue;}let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}let other=bitcast<f32>(phi[neighbor]);if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}}if(bestDirection==INVALID){return INVALID;}let quantized=u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE));if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
+fn carriedSeed(index:u32)->u32{
+ if(p.warmStart==0u){return INVALID;}let seed=workA[index];if(seed>=p.scratchWords){return INVALID;}
+ let page=seed/p.samplesPerBrick;if(page>=p.pageCapacity||metadata[page*10u+2u]!=p.generation||supportMask[page]!=p.generation||!hasCachedClosestPoint(seed)){return INVALID;}
+ return seed;
+}
+// A lattice edge that crosses a closed domain wall evaluates a virtual
+// outside neighbor carrying the closed-wall unit-slope extension used by
+// transport: center plus one cell of distance. A liquid sample whose
+// interface sits within one cell of the wall therefore seeds a crossing
+// toward it — the surface of a film separating from the lid stays
+// representable even though every in-lattice neighbor is still liquid.
+// Deeper liquid (center <= -fineWidth) wets the wall and seeds nothing.
+fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=bitcast<f32>(phi[index]);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);var other=0.;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){if(p.closed==0u||(p.openTop!=0u&&direction==3u)){continue;}other=center+p.fineWidth;}else{let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}other=bitcast<f32>(phi[neighbor]);}if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}}if(bestDirection==INVALID){return INVALID;}let quantized=u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE));if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
 fn hasCachedClosestPoint(index:u32)->bool{return (flags[index]>>SAMPLE_FLAG_BITS)!=0u;}
+@compute @workgroup_size(64)fn refreshClosestPointCodes(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)nw:vec3u){
+ let id=deltaPage(wid,nw,true);if(id==INVALID||lid>=p.samplesPerBrick){return;}let index=id*p.samplesPerBrick+lid;let brick=unpackBrick(metadata[id*10u+1u]);let q=brick*p.brickResolution+localCoord(lid);let persistent=flags[index]&((1u<<SAMPLE_FLAG_BITS)-1u);flags[index]=persistent;if(any(q>=p.sampleDims)||!finite(bitcast<f32>(phi[index]))){return;}let closest=seedClosestPointCode(q,index);if(closest!=INVALID){flags[index]=persistent|(closest<<SAMPLE_FLAG_BITS);}
+}
 ${fineLevelSetJFAClosestPointWGSL(b4Addressing)}
 fn cooperativeFlood(id:u32,centerBrick:vec3u,lid:u32,subgroupLane:u32,subgroupSize:u32,fromA:bool){
  let team=lid/subgroupSize;let teamCount=256u/subgroupSize;let candidateSlot=subgroupLane;
@@ -593,7 +679,7 @@ fn resolvedSeed(index:u32)->u32{return workA[index];}
 @compute @workgroup_size(64)fn seedClosestPoints(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)nw:vec3u){
   let work=fineLinearWorkgroup(wid,nw);let id=deltaPage(wid,nw,true);var seedCount=0u;var errorFlags=0u;var firstError=INVALID;
   if(lid==0u){errorFlags=deltaRecordError(work,true);firstError=select(INVALID,work,errorFlags!=0u);}
-  if(id!=INVALID&&lid<p.samplesPerBrick){let index=id*p.samplesPerBrick+lid;let brick=unpackBrick(metadata[id*10u+1u]);let q=brick*p.brickResolution+localCoord(lid);workA[index]=INVALID;workB[index]=INVALID;flags[index]&=(1u<<SAMPLE_FLAG_BITS)-1u;if(!any(q>=p.sampleDims)){let value=bitcast<f32>(phi[index]);if(!finite(value)){errorFlags|=NONFINITE;firstError=min(firstError,index);}else{let closest=seedClosestPointCode(q,index);if(closest!=INVALID){workA[index]=index;flags[index]|=closest<<SAMPLE_FLAG_BITS;seedCount=1u;}}}}
+  if(id!=INVALID&&lid<p.samplesPerBrick){let index=id*p.samplesPerBrick+lid;let brick=unpackBrick(metadata[id*10u+1u]);let q=brick*p.brickResolution+localCoord(lid);let carried=carriedSeed(index);workA[index]=carried;workB[index]=INVALID;if(p.warmStart==0u){flags[index]&=(1u<<SAMPLE_FLAG_BITS)-1u;}if(!any(q>=p.sampleDims)){let value=bitcast<f32>(phi[index]);if(!finite(value)){errorFlags|=NONFINITE;firstError=min(firstError,index);}else if(p.warmStart!=0u){if(hasCachedClosestPoint(index)){workA[index]=index;seedCount=1u;}}else{let closest=seedClosestPointCode(q,index);if(closest!=INVALID){workA[index]=index;flags[index]=(flags[index]&((1u<<SAMPLE_FLAG_BITS)-1u))|(closest<<SAMPLE_FLAG_BITS);seedCount=1u;}}}}
   reduceLane(lid,seedCount,0u,0u,0u,0u,errorFlags,firstError,32u);publishSeedPartial(work,lid);
 }
 @compute @workgroup_size(256)fn jumpFloodAToB(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)nw:vec3u,@builtin(subgroup_invocation_id)subgroupLane:u32,@builtin(subgroup_size)subgroupSize:u32){let id=deltaPage(wid,nw,true);prepareFloodPageIds(id,lid);var brick=vec3u(0u);if(id!=INVALID){brick=unpackBrick(metadata[id*10u+1u]);}cooperativeFlood(id,brick,lid,subgroupLane,subgroupSize,true);}

@@ -17,6 +17,7 @@ import {
   octreeSPGridAccurateOperatorShader,
   octreeSPGridVCycleShader,
   planOctreeSPGridVCycle,
+  spgridRowCapacityForBindingLimit,
   lookupSPGridBrickRank,
   prolongSPGrid,
   restrictSPGrid,
@@ -170,7 +171,21 @@ test("native sparse pyramid allocation is bounded by row capacity, not dense dom
     rowCapacity: SPGRID_MAXIMUM_ROW_CAPACITY + 1 }), /bounded/);
 });
 
+test("SPGrid derives an aligned row ceiling from the negotiated binding limit", () => {
+  const dimensions = [320, 96, 80] as const;
+  assert.equal(spgridRowCapacityForBindingLimit(dimensions, 1024 ** 3, 184_832), 131_072);
+  assert.equal(spgridRowCapacityForBindingLimit(dimensions, 2 * 1024 ** 3, 369_664), 369_664);
+  const limited = planOctreeSPGridVCycle({ dimensions, rowCapacity: 131_072 });
+  const overflowing = planOctreeSPGridVCycle({ dimensions, rowCapacity: 131_328 });
+  assert.ok(Math.max(limited.stateBytes, limited.topologyBytes) <= 1024 ** 3);
+  assert.ok(Math.max(overflowing.stateBytes, overflowing.topologyBytes) > 1024 ** 3);
+});
+
 test("degree-2/4 Chebyshev schedules use a safe positive scaled first-order interval", () => {
+  // Aanjaneya et al. 2017, Section 4.3
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) requires the first-order
+  // V-cycle M1 to be linear, symmetric, and positive definite. This fixture
+  // evaluates the same globally synchronized polynomial used by the GPU.
   const matrix = [
     [2, -1, 0, 0],
     [-1, 2, -1, 0],
@@ -188,6 +203,22 @@ test("degree-2/4 Chebyshev schedules use a safe positive scaled first-order inte
     const eigenvalue = 1 - Math.cos(mode * Math.PI / 5);
     assert.ok(eigenvalue < bounds.upper);
   }
+  // M1 shares L2's boundary conditions without copying L2's adaptive
+  // directional graph onto unrelated adjacent SPGrid slots. The retained
+  // quantity is the non-negative boundary reaction diag - sum(offdiag), added
+  // to a symmetric first-order graph. This concrete graph satisfies Sylvester's
+  // criterion (leading minors 1.5, 2, and 3) and exercises unequal reactions.
+  const boundaryMatrix = [
+    [1.5, -1, 0],
+    [-1, 2, -1],
+    [0, -1, 2.25],
+  ];
+  const boundaryApply = (x: readonly number[]) => boundaryMatrix.map((row) => dot(row, x));
+  const boundaryA = [1, -2, 0.5], boundaryB = [-0.25, 3, 2];
+  assert.ok(Math.abs(dot(boundaryA, boundaryApply(boundaryB))
+    - dot(boundaryApply(boundaryA), boundaryB)) < 1e-12);
+  assert.ok(dot(boundaryA, boundaryApply(boundaryA)) > 0
+    && dot(boundaryB, boundaryApply(boundaryB)) > 0);
   for (const degree of [2, 4] as const) {
     const weights = Array.from({ length: degree }, (_, phase) =>
       spgridChebyshevRelaxationWeight(bounds, degree, phase));
@@ -205,6 +236,8 @@ test("degree-2/4 Chebyshev schedules use a safe positive scaled first-order inte
     const ma = apply(a), mb = apply(b);
     assert.ok(Math.abs(dot(a, mb) - dot(ma, b)) < 1e-12,
       `degree-${degree} fixed polynomial must remain symmetric`);
+    assert.ok(dot(a, ma) > 0 && dot(b, mb) > 0,
+      `degree-${degree} fixed polynomial must remain positive definite`);
     const combined = apply(a.map((value, index) => value + 0.25 * b[index]));
     assert.ok(combined.every((value, index) =>
       Math.abs(value - (ma[index] + 0.25 * mb[index])) < 1e-12),
@@ -331,17 +364,20 @@ test("8x8x4 pressure pages publish exact stable physical 27-neighbour adjacency"
   assert.throws(() => buildSPGridPhysicalPageAdjacency([8, 8, 4], [[8, 0, 0]]), /Malformed/);
 });
 
-test("smoother halo staging consumes physical page adjacency without directory lookup", () => {
+test("global M1 smoother consumes the published column index between synchronized phases", () => {
+  // This dispatch boundary is part of the Section 4.3 M1 assumption in
+  // `docs/papers/aanjaneya-2017-power-liquids.txt`: freezing cross-page halos
+  // across multiple phases would not apply the global SPD polynomial above.
   assert.match(octreeSPGridVCycleShader,
     /fn linkCandidatePageNeighbours[\s\S]*pageDirectoryBase\(\)[\s\S]*candidateTopology\[record\+1u\+ordinal\]=physical/,
     "candidate publication must resolve all 27 physical neighbours before commit");
   const smoother = octreeSPGridVCycleShader.slice(
-    octreeSPGridVCycleShader.indexOf("fn smoothPage("),
-    octreeSPGridVCycleShader.indexOf("fn smoothPageChebyshevForward"),
+    octreeSPGridVCycleShader.indexOf("fn relaxChebyshev("),
+    octreeSPGridVCycleShader.indexOf("fn correctionTransfer("),
   );
-  assert.match(smoother, /slot=pageSlot\(l,page,origin,vec3u\(q\)\)/);
-  assert.doesNotMatch(smoother, /\bfind\(|\bdirectoryLookup\(/,
-    "the 600-value staged halo may not repeat the global directory path");
+  assert.match(smoother, /applied\(slot,src\)/);
+  assert.doesNotMatch(smoother, /pageSlots|workgroupBarrier|\bfind\(|\bdirectoryLookup\(/,
+    "one dispatch must evaluate one global Jacobi phase from the published columns");
   const pageSlot = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn pageSlot("),
     octreeSPGridVCycleShader.indexOf("fn originOf("),
@@ -352,6 +388,19 @@ test("smoother halo staging consumes physical page adjacency without directory l
 });
 
 test("accurate A2 stages wide direct terms before an ordered row fold", () => {
+  // `docs/papers/aanjaneya-2017-power-liquids.txt`, Section 4.3 assumes the
+  // accurate A2 matrix is SPD. Omitting rows because a one-dimensional Dawn
+  // dispatch exceeds 65,535 workgroups turns p^T A2 p into zero and violates
+  // that assumption before CG has taken its first iteration.
+  assert.match(octreeSPGridAccurateDispatchGateShader,
+    /fn publishAccurateDispatch[\s\S]*min\(65535u,blocks\)[\s\S]*\(blocks\+x-1u\)\/x/,
+    "wide accurate stages must fold their exact workgroup count into two dimensions");
+  assert.match(octreeSPGridAccurateDispatchGateShader,
+    /publishAccurateDispatch\(15u,\(unionRows\*18u\+63u\)\/64u/,
+    "every direct A2 term must remain scheduled above the Dawn X-dimension ceiling");
+  assert.match(octreeSPGridAccurateDispatchGateShader,
+    /publishAccurateDispatch\(18u,\(transitionRows\*144u\+63u\)\/64u/,
+    "every fine-adjoint A2 term must remain scheduled above the Dawn X-dimension ceiling");
   assert.match(octreeSPGridAccurateOperatorShader,
     /page=pageFor\(l,q\);\s*if\(page==INVALID\|\|page>=levelCapacity\(l\)\)\{reportAt\(2u,31u,row\);return;\}/,
     "a missing native physical page must fail closed before any page-record access");
@@ -414,7 +463,7 @@ test("accurate A2 stages wide direct terms before an ordered row fold", () => {
     "the wide stages must expose direct channels and fine adjoint candidates independently");
   // Both publishers of the adjoint record must agree with that lane count.
   assert.match(octreeSPGridAccurateDispatchGateShader,
-    /classDispatch\[18\]=select\(0u,\(transitionRows\*144u\+63u\)\/64u/,
+    /publishAccurateDispatch\(18u,\(transitionRows\*144u\+63u\)\/64u/,
     "the accepted-class gate must launch one lane per (row, child, candidate)");
   assert.match(octreeSPGridAccurateOperatorShader,
     /fn transitionUnionCount[\s\S]*select\(1u,3u,index==1u\)[\s\S]*fn transitionUnionRow[\s\S]*stageAcceptedUnionAdjoints[\s\S]*transitionUnionRow\(rowItem\)/,
@@ -513,7 +562,12 @@ test("parent-owned restriction has a bounded dispatch and atomic-removal target"
   assert.equal(cycle.diagnostics.parentGatherAtomicAddCount, 0);
   const restriction = octreeSPGridVCycleShader.slice(octreeSPGridVCycleShader.indexOf("fn restrictAndGhostAccumulate"),
     octreeSPGridVCycleShader.indexOf("fn exactBottom"));
-  assert.match(restriction, /parentHeadBase\(l\)\+coarse[\s\S]*storef\(RHS,l\+1u,coarse,sum\)/);
+  assert.match(restriction,
+    /parentHeadBase\(l\)\+coarse[\s\S]*storef\(RHS,l\+1u,coarse,loadf\(RHS,l\+1u,coarse\)\+sum\)/,
+    // `docs/papers/aanjaneya-2017-power-liquids.txt`, Section 4.3 assumes L1
+    // and L2 share every adaptive pressure variable. A native coarse row's
+    // directly seeded RHS must survive E^T accumulation from finer rows.
+    "restriction must accumulate into native coarse pressure variables");
   assert.doesNotMatch(restriction, /atomic(?:Add|CompareExchange|Or)|atomicAddF/,
     "one parent owns each restriction sum");
   cycle.destroy();
@@ -695,15 +749,42 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
   assert.match(applied, /reportAt\(OVERFLOW,75u,slot\)/,
     "an unresolvable column must remain fail-closed on the same overflow stage");
   assert.match(octreeSPGridVCycleShader,
-    /candidateTopology\[neighbourAt\(k,l,s\)\]=other;cStoref\(XP\+k,l,s,coefficient\)/,
+    /candidateTopology\[neighbourAt\(k,l,s\)\]=other;cStoref\(XP\+k,l,s,c\)/,
     "a coefficient and the slot it was accumulated against must publish together");
+  assert.match(octreeSPGridVCycleShader,
+    /fn applyCandidateSkip[\s\S]*levelDelta\[deltaAt\(0u,1u\)\]=DELTA_STENCIL/,
+    "unchanged topology must still refresh M1's dynamic finest boundary stencil");
+  assert.match(octreeSPGridVCycleShader,
+    /fn buildCandidateStencils[\s\S]*i>=selectedCount\(l\)[\s\S]*selectedWorkSlot\(l,i\)[\s\S]*selectedState\(KEY,l,s\)[\s\S]*selectedDirectoryLookup\(l,vec3u\(targetQ\)\)/,
+    "a stencil-only refresh must enumerate the accepted topology, never stale inactive candidate slots");
+  assert.match(octreeSPGridVCycleShader,
+    /fn publishCandidateSpectralBounds[\s\S]*selectedCount\(l\)[\s\S]*selectedWorkSlot\(l,i\)/,
+    "the spectral proof must cover the same accepted worklist as a stencil-only rebuild");
+  assert.match(octreeSPGridVCycleShader,
+    /acceptedOff\+=max\(0\.0,c\)[\s\S]*diagonal=max\(0\.0,acceptedDiagonal-acceptedOff\)/,
+    "M1 must import L2's boundary reaction while retaining its symmetric first-order graph");
+  assert.match(octreeSPGridVCycleShader,
+    /var acceptedFine=\(flags&ACTIVE\)!=0u\s*&&encodedOwner>0u/,
+    // `docs/papers/aanjaneya-2017-power-liquids.txt`, Section 4.3 states that
+    // L1 and L2 have exactly the same pressure variables. Native adaptive
+    // pressure rows exist at every octree level, so their L2 boundary reaction
+    // must not be restricted to SPGrid level zero.
+    "every native adaptive pressure level must share L2's boundary reaction");
+  assert.match(octreeSPGridVCycleShader,
+    /if\(!\(diagonal>1e-20\)\|\|!finite\(diagonal\)\)\{diagonal=coefficient;\}/,
+    "the exact one-cell bottom solve must retain the first-order grid scale");
+  assert.doesNotMatch(octreeSPGridVCycleShader,
+    /section63ChannelForDirection\(transform,section63Direction\(k\)\)/,
+    "adaptive L2 directions must not be projected onto unrelated adjacent SPGrid slots");
   assert.match(octreeSPGridVCycleShader,
     /if\(\(stencilDirty\(l\)\|\|topologyChanged\)&&i<levelCapacity\(l\)\)\{[\s\S]{0,160}?topology\[neighbourAt\(k,l,i\)\]=candidateTopology\[neighbourAt\(k,l,i\)\]/,
     "the column indices must commit on the union of the gates that publish their coefficients");
   assert.doesNotMatch(octreeSPGridVCycleShader, /select\([^\n]*insert\([^\n]*insertOwned/,
     "WGSL select eagerly evaluates both insertion paths");
   assert.match(octreeSPGridVCycleShader, /fn smoothable/);
-  assert.doesNotMatch(octreeSPGridVCycleShader, /fn smoothAtoB|fn smoothBtoA|relaxJacobi/);
+  assert.match(octreeSPGridVCycleShader, /fn smoothChebyshevAtoB0/);
+  assert.match(octreeSPGridVCycleShader, /fn smoothChebyshevBtoA3/);
+  assert.doesNotMatch(octreeSPGridVCycleShader, /fn smoothPageChebyshev|relaxJacobi/);
   assert.match(octreeSPGridVCycleShader, /let product=applied\(fine,A\)/,
     "restriction must consume the final pre-smoothing stencil without materializing AX or residual");
   assert.doesNotMatch(octreeSPGridVCycleShader,
@@ -817,13 +898,13 @@ test("one correction gates then executes exact indirect records with cached desc
   broker.fence("correction complete");
   assert.equal(passes - setupPasses, 2);
   assert.equal(dispatches - before, cycle.encodedCorrectionDispatchCount);
-  assert.equal(cycle.encodedCorrectionDispatchCount, 26,
-    "one gate plus fused forward/reverse page smoothers own the correction schedule");
+  assert.equal(cycle.encodedCorrectionDispatchCount, 34,
+    "one gate plus globally synchronized degree-two phases own the correction schedule");
   assert.equal(cycle.encodedPassTransitionCount, 1);
   assert.equal(cycle.diagnostics.bottomOperation, "exact-single-cell");
   assert.equal(cycle.diagnostics.coarsestDegreesOfFreedom, 1);
   assert.equal(cycle.diagnostics.pageAdjacency, "physical-27");
-  assert.equal(cycle.diagnostics.smootherLookup, "adjacent-page-mask-rank");
+  assert.equal(cycle.diagnostics.smootherLookup, "published-column-index");
   const firstGroups = groups;
   cycle.encodeCorrection(broker, input);
   broker.fence("correction complete");
@@ -1004,7 +1085,7 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.match(octreeSPGridVCycleShader, /fn rebuildCandidateGhostsFor\(r:u32\)/,
     "the retained ghost predicate must own exactly one row, not a whole level");
   assert.match(octreeSPGridVCycleShader,
-    /fn buildCandidateStencils[\s\S]*if\(!stencilDirty\(l\)\|\|i>=cCount\(l\)\)\{continue;\}/,
+    /fn buildCandidateStencils[\s\S]*if\(!stencilDirty\(l\)\|\|i>=selectedCount\(l\)\)\{continue;\}/,
     "rediscretized stencil initialization must scale with live slots, not sparse capacity");
   const levelSetBuild = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn clearCandidateLevels"),
@@ -1127,7 +1208,7 @@ test("failed level publication is terminal and has no full-capacity recovery fal
     "successful recurring generations must not write full sparse capacity");
 });
 
-test("correction consumes only per-level live slot dispatches", () => {
+test("correction covers the shared L1/L2 pressure-row domain and uses live slot dispatches internally", () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   const buffer = (size: number, usage = 31, label?: string) => ({ size, usage, label, destroy() {} }) as unknown as GPUBuffer;
   const device = { queue: { writeBuffer() {} },
@@ -1144,17 +1225,22 @@ test("correction consumes only per-level live slot dispatches", () => {
   const broker = new PassBroker(encoder);
   cycle.encodeCorrection(broker, input);
   broker.fence("correction complete");
-  assert.equal(direct, 1, "only the convergence-tail publisher is a direct singleton");
+  // Aanjaneya et al. 2017, Section 4.3
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) assumes that L1 and L2
+  // have exactly the same pressure variables. Clear, seed, and publish must
+  // therefore cover accepted rows directly: level zero's sparse slot count
+  // excludes valid native coarser rows on an adaptive octree.
+  assert.equal(direct, 4,
+    "the convergence publisher plus all three pressure-row stages are direct");
   assert.equal(offsets.length, cycle.encodedCorrectionDispatchCount - direct);
   assert.equal(sources.size, 1, "all correction work must consume the dedicated indirect buffer");
   assert.ok(offsets.includes(8), "level zero consumes its live slot record");
   assert.ok(offsets.includes((cycle.plan.levelCount - 1) * 48 + 8), "the bottom level uses its own live slot record");
-  assert.ok(offsets.every((offset) => offset % 48 === 8 || offset % 48 === 20
-    || offset % 48 === 36),
-  "kernels consume published slot, parent-slot, or compact-page records");
+  assert.ok(offsets.every((offset) => offset % 48 === 8 || offset % 48 === 20),
+  "kernels consume published slot or parent-slot records");
   assert.equal(offsets.filter((offset) => offset % 48 === 20).length, cycle.plan.levelCount - 1);
-  assert.equal(offsets.filter((offset) => offset % 48 === 36).length,
-    2 * (cycle.plan.levelCount - 1));
+  assert.equal(offsets.filter((offset) => offset % 48 === 36).length, 0,
+    "no page-local multi-phase smoother may bypass global dispatch ordering");
   cycle.destroy();
 });
 
@@ -1185,7 +1271,10 @@ test("Dawn accepts the native sparse V-cycle shader", {
     "validateCandidateHierarchy", "commitCandidateLevels",
     "finalizeLifecycle", "prepareCorrectionDispatches", "clearCorrection", "zeroVectors", "seedRhs",
     "restrictAndGhostAccumulate", "exactBottom",
-    "smoothPageChebyshevForward", "smoothPageChebyshevReverse",
+    "smoothChebyshevAtoB0", "smoothChebyshevBtoA0",
+    "smoothChebyshevAtoB1", "smoothChebyshevBtoA1",
+    "smoothChebyshevAtoB2", "smoothChebyshevBtoA2",
+    "smoothChebyshevAtoB3", "smoothChebyshevBtoA3",
     "prolongAndGhostPropagate", "publish"]) {
     device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
   }
@@ -1280,6 +1369,19 @@ test("Dawn compact-arena setup replaces stale hierarchy and changed capture reco
   device.queue.writeBuffer(source.rowGeometry, 0, geometryWords);
   device.queue.writeBuffer(source.rows, 0, resolvedWords);
   device.queue.writeBuffer(source.diagonals, 0, new Float32Array([2, 2, 2, 2]));
+  // The production finest M1 consumes the accepted L2 boundary coefficients,
+  // as required by Aanjaneya et al. (2017), Section 4.3. Give this lifecycle
+  // fixture a valid identity boundary operator instead of relying on the old
+  // synthetic-stencil fallback: one positive diagonal and no coupled faces.
+  const acceptedCoefficients = new Float32Array(2 * 4 * 19);
+  for (let row = 0; row < 4; row += 1) acceptedCoefficients[row * 19] = 1;
+  device.queue.writeBuffer(source.coefficients, 0, acceptedCoefficients);
+  const topologyMetrics = new Uint32Array(4 * 4);
+  for (let row = 0; row < 4; row += 1) topologyMetrics[row * 4 + 1] = 0x80000000;
+  device.queue.writeBuffer(source.topologyMetrics, 0, topologyMetrics);
+  const catalogCoefficients = new Float32Array(1_608 * 19);
+  catalogCoefficients[0] = 1;
+  device.queue.writeBuffer(source.catalogCoefficients, 0, catalogCoefficients);
   device.queue.writeBuffer(source.control, 0,
     new Uint32Array([0, 0xffffffff, 4, 1, 0, 0]));
   const deltaWords = new Uint32Array(source.rowDelta.rows.size / 4);
@@ -1353,6 +1455,8 @@ test("Dawn compact-arena setup replaces stale hierarchy and changed capture reco
   deltaWords.set([1, 2, 3, 4], source.rowDelta.newToOldOffsetWords);
   deltaWords[source.rowDelta.dirtyRowsOffsetWords] = 0;
   device.queue.writeBuffer(source.rowDelta.rows, 0, deltaWords);
+  device.queue.writeBuffer(source.control, 0,
+    new Uint32Array([0, 0xffffffff, 4, 2, 0, 0]));
   geometryWords[0] = 4; device.queue.writeBuffer(source.rowGeometry, 0, geometryWords);
   const captureRead = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const captureStateRead = device.createBuffer({ size: cycle.plan.capturePageStateBytes,

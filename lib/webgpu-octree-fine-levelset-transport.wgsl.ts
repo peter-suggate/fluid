@@ -17,7 +17,8 @@ struct P {
   rowFamilySlotOffset:u32,tetraVertexCount:u32,maxBacktrace:u32,airOwnerOffset:u32,volumeOffset:u32,
   slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,templateHeaderOffset:u32,
   airSupportEnabled:u32,selectorTagOffset:u32,regularTagOffset:u32,airControlOffset:u32,
-  supportVectorOffset:u32,supportCapacity:u32,selectorStride:u32
+  supportVectorOffset:u32,supportCapacity:u32,selectorStride:u32,
+  inflowPositionRadius:vec4f,inflowVelocityAperture:vec4f,inflowTiming:vec4f
 }
 struct Control { outside:u32,nonfinite:u32,processed:u32,committed:u32,extended:u32,maxDisplacement:u32,
   authorityUnavailable:u32,velocityUnavailable:u32,invalidStatus:u32,nonpositive:u32,reasons:u32,
@@ -94,11 +95,14 @@ fn airPublicationValid()->bool{let at=p.airControlOffset;if(p.airSupportEnabled!
   ||arrayLength(&boundary)<7u||boundary[0]!=0u||boundary[1]!=INVALID||boundary[2]!=accepted[2]
   ||boundary[4]!=accepted[3]||boundary[5]!=activeBank()||boundary[6]!=boundary[4]){return false;}
   let count=airWord(at+6u);let capacity=airWord(at+7u);let faces=airWord(at+10u);let seeds=airWord(at+11u);
+  // Selector and regular-stencil demand are independent; uniform topologies
+  // legitimately publish the whole support closure through the latter.
+  let demandCount=airWord(at+8u)+airWord(at+9u);
   return airWord(at)==0u&&airWord(at+1u)==INVALID&&airWord(at+2u)==accepted[3]
     &&airWord(at+3u)==activeBank()&&airWord(at+4u)==boundary[4]&&airWord(at+5u)==accepted[2]
     &&capacity==p.supportCapacity&&count<=capacity&&airWord(at+13u)==SUPPORT_VALID
     &&airWord(at+14u)==SUPPORT_VERSION&&airWord(at+15u)==p.generation&&seeds<=faces
-    &&(count==0u||(airWord(at+8u)>0u&&faces>0u&&seeds>0u));}
+    &&(count==0u||(demandCount>0u&&faces>0u&&seeds>0u));}
 fn statusBase(page:u32)->u32{return STATUS_BASE+3u*page;}
 fn payloadBase()->u32{return STATUS_BASE+3u*p.pageCapacity;}
 fn headerBase(cls:u32)->u32{return HEADER_BASE+HEADER_WORDS*cls;}
@@ -338,6 +342,35 @@ fn sampleIndex(q:vec3u)->u32{let b=q/p.r;let id=pageOf(packBrick(b));if(id==INVA
 fn sampleFine(x0:vec3f)->f32{let high=vec3f(p.sampleDims)-vec3f(1.0001);let grid=clamp((x0-p.origin)/p.h-vec3f(.5),vec3f(0),high);let base=vec3u(floor(grid));let t=fract(grid);var sum=0.;var weight=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=min(base+o,p.sampleDims-vec3u(1));let at=sampleIndex(q);if(at==INVALID||at>=arrayLength(&phi)||(flags[at]&VALID)==0u){continue;}let value=phi[at];if(!finite(value)){continue;}let w=select(1.-t.x,t.x,o.x!=0u)*select(1.-t.y,t.y,o.y!=0u)*select(1.-t.z,t.z,o.z!=0u);sum+=w*value;weight+=w;}return select(3.402823e38,sum/max(weight,1e-20),weight>0.999);}
 fn insideDomain(x:vec3f)->bool{return all(x>=p.origin)&&all(x<=p.origin+vec3f(p.sampleDims)*p.h);}
 fn clampDomain(x:vec3f)->vec3f{var hi=p.origin+vec3f(p.sampleDims)*p.h;if(p.openTop!=0u){hi.y=max(hi.y,x.y);}return clamp(x,p.origin,hi);}
+// The boundary reference for the closed-wall phi extension is the sample
+// lattice (cell centers), not the wall plane: sampleFine clamps its stencil
+// to the outermost row of centers, so any departure point beyond that row --
+// including one still inside the physical domain's boundary half-shell --
+// re-reads that row's own phi with the signed-distance gradient flattened to
+// zero. Measuring the exit from the wall plane therefore contributes nothing
+// until the per-step displacement exceeds half a cell, which freezes a thin
+// receding film at exactly the measured early-fall rates.
+fn clampSampleLattice(x:vec3f)->vec3f{let lo=p.origin+vec3f(.5*p.h);var hi=p.origin+(vec3f(p.sampleDims)-vec3f(.5))*p.h;if(p.openTop!=0u){hi.y=max(hi.y,x.y);}return clamp(x,lo,hi);}
+// Aanjaneya et al. 2017, Section 5: keep the m-step characteristic and its
+// single terminal phi gather unchanged. The nozzle is an authored boundary
+// condition applied only after that sample is accepted; it is not a second
+// advection scheme and cannot make an incomplete sparse stencil publish.
+fn inflowStrength()->f32{return clamp(p.inflowTiming.x,0.,1.);}
+fn inflowLatticePosition()->vec3f{let extent=vec3f(p.sampleDims)*p.h;return p.inflowPositionRadius.xyz+vec3f(.5*extent.x,0.,.5*extent.z);}
+fn inflowSourcePhi(x:vec3f)->f32{
+  let velocity=p.inflowVelocityAperture.xyz;let speed=length(velocity);if(speed<=1e-6){return 3.402823e38;}
+  let direction=velocity/speed;let relative=x-inflowLatticePosition();let axial=dot(relative,direction);
+  let radial=length(relative-axial*direction);let depth=2.*p.physical;
+  return max(radial-p.inflowPositionRadius.w,max(-axial,axial-depth));
+}
+fn isInflowSample(x:vec3f)->bool{
+  if(inflowStrength()<=0.||p.inflowPositionRadius.w<=0.){return false;}
+  return inflowSourcePhi(x)<=.70710678*p.h;
+}
+fn applyInflowPhi(value:f32,x:vec3f)->f32{
+  let source=inflowSourcePhi(x);let rampDepth=.5*p.h*inflowStrength();
+  return select(value,min(value,max(source,-rampDepth)),isInflowSample(x));
+}
 var<workgroup> reduceOutside:array<u32,64>;var<workgroup> reduceNonfinite:array<u32,64>;var<workgroup> reduceProcessed:array<u32,64>;var<workgroup> reduceExtended:array<u32,64>;var<workgroup> reduceDisplacement:array<u32,64>;var<workgroup> reduceFirstBad:array<u32,64>;
 // The six per-lane counters accumulate in the reduction slots this lane
 // already owns, not in registers.
@@ -369,12 +402,21 @@ fn regularCommonDeparture(origin:vec3f)->Departure{var x=origin;var good=1u;var 
 fn regularRareDeparture(origin:vec3f,air:bool)->Departure{var x=origin;var good=1u;var extended=0u;var maximum=0.;for(var stage=0u;stage<state[1];stage+=1u){let v=transitionSample(x);good&=select(0u,1u,v.w>=0.&&finite3(v.xyz));if(good!=0u){extended+=select(0u,1u,air);maximum=max(maximum,length(v.xyz));x-=bitcast<f32>(state[2])*v.xyz;}}return Departure(x,good,extended,maximum);}
 fn transitionCommonDeparture(origin:vec3f)->Departure{var x=origin;var good=1u;var maximum=0.;for(var stage=0u;stage<state[1];stage+=1u){let v=transitionSample(x);good&=select(0u,1u,v.w>=0.&&finite3(v.xyz));if(good!=0u){maximum=max(maximum,length(v.xyz));x-=bitcast<f32>(state[2])*v.xyz;}}return Departure(x,good,0u,maximum);}
 fn transitionRareDeparture(origin:vec3f,air:bool)->Departure{var x=origin;var good=1u;var extended=0u;var maximum=0.;for(var stage=0u;stage<state[1];stage+=1u){let v=transitionSample(x);good&=select(0u,1u,v.w>=0.&&finite3(v.xyz));if(good!=0u){extended+=select(0u,1u,air);maximum=max(maximum,length(v.xyz));x-=bitcast<f32>(state[2])*v.xyz;}}return Departure(x,good,extended,maximum);}
-fn finishSample(index:u32,old:f32,d:Departure)->SampleOutcome{var x=d.x;var outside=0u;if(!insideDomain(x)){outside=1u;if(p.closed!=0u){x=clampDomain(x);}}var sampled=3.402823e38;if(d.good!=0u){sampled=sampleFine(x);}let acceptedSample=d.good!=0u&&finite(sampled);if(acceptedSample){nextPhi[index]=sampled;}else{nextPhi[index]=old;}return SampleOutcome(outside,select(1u,0u,acceptedSample),select(0u,1u,acceptedSample),d.extended,u32(ceil(d.maximumSpeed*p.dt/p.h)));}
+// A characteristic that exits through a closed wall originates inside the
+// solid, where no liquid can exist, so the signed distance along the exit
+// segment grows at unit rate away from the wall. Sampling the clamped wall
+// value alone lets a receding surface re-sample its own film forever — the
+// wall acts as a liquid reservoir and the film can dry only by redistance
+// erosion, which is the measured ceiling/corner sticking (free-fall drop
+// oracles). Adding the exit length advances phi at exactly the recession
+// speed. Characteristics approaching a wall never exit, so impacts are
+// untouched, and the term can only move phi toward air, never create liquid.
+fn finishSample(index:u32,old:f32,origin:vec3f,d:Departure)->SampleOutcome{var x=d.x;var outside=0u;var exitDistance=0.;if(!insideDomain(x)){outside=1u;}if(p.closed!=0u){let interior=clampSampleLattice(x);exitDistance=distance(x,interior);x=interior;}let sampled=select(3.402823e38,sampleFine(x),d.good!=0u);let acceptedSample=d.good!=0u&&finite(sampled);if(acceptedSample){nextPhi[index]=applyInflowPhi(sampled+exitDistance,origin);}else{nextPhi[index]=old;}return SampleOutcome(outside,select(1u,0u,acceptedSample),select(0u,1u,acceptedSample),d.extended,u32(ceil(d.maximumSpeed*p.dt/p.h)));}
 fn pageSample(id:u32,local:u32)->vec4u{let brick=unpackBrick(metadata[id*10u+1u]);let index=id*p.samplesPerBrick+local;let q=brick*p.r+localCoord(local);return vec4u(index,q);}
-fn runRegularCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}if(!inTransportBand(old)){nextPhi[index]=old;continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;accumulateSample(lid,local,finishSample(index,old,regularCommonDeparture(origin)));}}}finishPage(original,lid);}
-fn runRegularRare(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}if(!inTransportBand(old)){nextPhi[index]=old;continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;accumulateSample(lid,local,finishSample(index,old,regularRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
-fn runTransitionCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}if(!inTransportBand(old)){nextPhi[index]=old;continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;accumulateSample(lid,local,finishSample(index,old,transitionCommonDeparture(origin)));}}}finishPage(original,lid);}
-fn runTransitionRare(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}if(!inTransportBand(old)){nextPhi[index]=old;continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;accumulateSample(lid,local,finishSample(index,old,transitionRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
+fn runRegularCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularCommonDeparture(origin)));}}}finishPage(original,lid);}
+fn runRegularRare(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
+fn runTransitionCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionCommonDeparture(origin)));}}}finishPage(original,lid);}
+fn runTransitionRare(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
 @compute @workgroup_size(64)fn transportRegularCommonPhi(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){runRegularCommon(wg.x,lid);}
 @compute @workgroup_size(64)fn transportTransitionCommonPhi(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){runTransitionCommon(wg.x,lid);}
 @compute @workgroup_size(64)fn transportRegularRarePhi(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){runRegularRare(wg.x,lid);}
@@ -507,7 +549,11 @@ fn deltaChangedKey(work:u32)->u32{
     carry+=identityScanTotal;workgroupBarrier();}
   if(lid!=0u){return;}
   let count=carry;let liveCount=min(worklist[1],p.pageCapacity);
-  delta[0]=count;delta[1]=p.generation;delta[2]=control.committed;delta[3]=liveCount;delta[4]=select(0u,u32(ceil(f32(count)/64.)),count>0u);delta[5]=1u;delta[6]=1u;delta[7]=0u;
+  // Word seven carries the measured complete-characteristic displacement to
+  // recurring topology. It is already bounded by p.maxBacktrace before any
+  // transport dispatch is published, so topology can shrink active residency
+  // generation-by-generation without a host readback or optimistic guess.
+  delta[0]=count;delta[1]=p.generation;delta[2]=control.committed;delta[3]=liveCount;delta[4]=select(0u,u32(ceil(f32(count)/64.)),count>0u);delta[5]=1u;delta[6]=1u;delta[7]=control.maxDisplacement;
 }
 @compute @workgroup_size(256)fn compactStructuredFineDelta(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){
   let work=wg.x*256u+lid;

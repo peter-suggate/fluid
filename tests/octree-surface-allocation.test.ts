@@ -14,12 +14,13 @@ test("adaptive surface authority retains one publication phi", () => {
   assert.equal(plan.persistentAllocatedBytes, plan.publicationBytes);
 });
 
-test("direct paged authority retains only one format-compatible phi texel after bootstrap", () => {
+test("direct paged authority retains its bound bootstrap phi until group teardown", () => {
   const plan = planOctreeSurfaceStateAllocation([320, 96, 80], true);
   assert.equal(plan.publicationBytes, 9_830_400);
-  assert.equal(plan.persistentPublicationBytes, 4);
+  assert.equal(plan.releasePublicationAfterBootstrap, false);
+  assert.equal(plan.persistentPublicationBytes, 9_830_400);
   assert.equal(plan.allocatedBytes, 9_830_400, "bootstrap peak includes the uploaded dense field");
-  assert.equal(plan.persistentAllocatedBytes, 4);
+  assert.equal(plan.persistentAllocatedBytes, 9_830_400);
 });
 
 test("analytic sparse bootstrap never allocates the box-sized publication peak", () => {
@@ -38,20 +39,22 @@ test("surface-state publication scales with volume for the large target domain",
   assert.throws(() => planOctreeSurfaceStateAllocation([0, 5, 3]), RangeError);
 });
 
-test("presentation-only dense phi is released exactly once after bootstrap submission", async () => {
+test("presentation-only dense phi remains alive while recurring groups retain its views", async () => {
   let destroys = 0;
   const state = {
     presentationOnly: true,
-    presentationTextureReleased: false,
-    device: { queue: { onSubmittedWorkDone: () => Promise.resolve() } },
     texture: { destroy: () => { destroys += 1; } },
     dims: { nx: 320, ny: 96, nz: 80 },
   };
   const release = WebGPUQuadtreeSurfaceState.prototype.releasePresentationTexture;
-  assert.equal(release.call(state as never), 9_830_400);
+  // Aanjaneya et al. 2017 Section 5
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) gives the fine SPGrid and
+  // background octree separate authority. It does not make a WebGPU texture
+  // safe to destroy while recurring compatibility bindings retain its view.
+  assert.equal(release.call(state as never), 0);
   assert.equal(release.call(state as never), 0);
   await Promise.resolve();
-  assert.equal(destroys, 1);
+  assert.equal(destroys, 0);
 });
 
 test("format-only phi placeholder remains live until solver destruction", async () => {
@@ -59,8 +62,6 @@ test("format-only phi placeholder remains live until solver destruction", async 
   const state = {
     presentationOnly: true,
     placeholderOnly: true,
-    presentationTextureReleased: false,
-    device: { queue: { onSubmittedWorkDone: () => Promise.resolve() } },
     texture: { destroy: () => { destroys += 1; } },
     dims: { nx: 60, ny: 45, nz: 40 },
   };
@@ -68,7 +69,6 @@ test("format-only phi placeholder remains live until solver destruction", async 
   assert.equal(release.call(state as never), 0);
   await Promise.resolve();
   assert.equal(destroys, 0, "recurring bind groups retain the format placeholder");
-  assert.equal(state.presentationTextureReleased, false);
 });
 
 test("solver retires bootstrap phi only after compact cutover and exposes no fallback authority", () => {

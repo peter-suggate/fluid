@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+  OCTREE_SECTION43_MINI_SHELL_DEPTH,
+  OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT,
   OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
   countOctreePressureCommands,
   planOctreeSolveTail,
@@ -41,8 +43,9 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
     quiescent.encodedOuterIterations,
     river.encodedOuterIterations,
   ], [10, 10, 10]);
-  for (const policy of [mini, quiescent, river,
-    planOctreeSolveTail(PROFILES.uiDam)]) {
+  assert.equal(mini.boundarySmoothingIterations,
+    OCTREE_SECTION43_MINI_SHELL_DEPTH);
+  for (const policy of [quiescent, river, planOctreeSolveTail(PROFILES.uiDam)]) {
     assert.ok(policy.encodedOuterIterations >= 4
       && policy.encodedOuterIterations <= 10);
     assert.equal(policy.hardOuterIterationCeiling, 16);
@@ -54,9 +57,23 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
     "production retains the established f32 residual acceptance floor");
 });
 
-test("paper k=8 shell has deterministic five-level command counts", () => {
+test("solve-tail policy admits an explicit symmetric Section 4.3 shell-depth experiment", () => {
+  for (const depth of [2, 4, 6, 8, 10, 12, 14, 16]) {
+    const policy = planOctreeSolveTail(PROFILES.miniDam, {
+      [OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT]: String(depth),
+    });
+    assert.equal(policy.boundarySmoothingIterations, depth);
+  }
+  for (const value of ["", "0", "3", "18", "four"]) {
+    assert.throws(() => planOctreeSolveTail(PROFILES.miniDam, {
+      [OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT]: value,
+    }), /even integer in \[2,16\]/);
+  }
+});
+
+test("selected Section 4.3 shell has deterministic five-level command counts", () => {
   const expectedCounts = new Map<OctreeSolveTailSceneProfile, number>([
-    [PROFILES.miniDam, 872],
+    [PROFILES.miniDam, 696],
     [PROFILES.uiDam, 872],
     [PROFILES.quiescent, 872],
     [PROFILES.river, 872],
@@ -80,9 +97,18 @@ test("paper k=8 shell has deterministic five-level command counts", () => {
     mergedBandOperatorDispatches: 1,
     firstOrderSetupDispatches: 10,
     firstOrderCorrectionDispatches: 26,
-    boundarySmoothingIterations: OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+    boundarySmoothingIterations: OCTREE_SECTION43_MINI_SHELL_DEPTH,
+  }).encodedPressureDispatches, 696,
+  "the maximum encoded envelope includes the selected mini matching shell");
+  assert.equal(countOctreePressureCommands({
+    encodedOuterIterations: 10,
+    fullOperatorDispatches: 5,
+    mergedBandOperatorDispatches: 1,
+    firstOrderSetupDispatches: 10,
+    firstOrderCorrectionDispatches: 26,
+    boundarySmoothingIterations: 8,
   }).encodedPressureDispatches, 872,
-  "the maximum encoded envelope includes the paper k=8 matching shell");
+  "the paper k=8 reference remains available through the experiment override");
 });
 
 type Matrix = readonly (readonly number[])[];
@@ -179,7 +205,7 @@ function shellPreconditioner(fixture: NumericalFixture, depth: number) {
   };
 }
 
-test("CPU shell-depth sweep keeps the paper k=8 production shell inside acceptance", () => {
+test("CPU shell-depth sweep keeps the selected production shell inside acceptance", () => {
   const depths = [2, 4, 6, 8] as const;
   for (const fixture of fixtures()) {
     const policy = planOctreeSolveTail(PROFILES[fixture.name]);
@@ -191,9 +217,10 @@ test("CPU shell-depth sweep keeps the paper k=8 production shell inside acceptan
       maximumIterations: policy.encodedOuterIterations,
       relativeTolerance: OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
     }));
-    const selected = results[depths.indexOf(OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH)]!;
+    const selected = results[depths.indexOf(
+      policy.boundarySmoothingIterations as typeof depths[number])]!;
     assert.equal(selected.accepted, true,
-      `${fixture.name} k=${OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH} acceptance`);
+      `${fixture.name} k=${policy.boundarySmoothingIterations} acceptance`);
     assert.ok(selected.diagnostics.relativeResidualNorm <= 1e-4);
     assert.ok(selected.diagnostics.iterations <= policy.encodedOuterIterations);
     const shallowCommands = countOctreePressureCommands({
@@ -210,7 +237,7 @@ test("CPU shell-depth sweep keeps the paper k=8 production shell inside acceptan
       mergedBandOperatorDispatches: 1,
       firstOrderSetupDispatches: 10,
       firstOrderCorrectionDispatches: 26,
-      boundarySmoothingIterations: OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+      boundarySmoothingIterations: policy.boundarySmoothingIterations,
     }).encodedPressureDispatches;
     assert.ok(selectedCommands > shallowCommands,
       "the paper shell must account for all additional fixed command bodies");

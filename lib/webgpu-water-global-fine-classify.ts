@@ -31,7 +31,13 @@ const INVALID:u32=0xffffffffu;
 const SHARP_CORNER_HALF_CELL_EPSILON:f32=${GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON};
 fn validCurrentPublication()->bool{
   if(arrayLength(&fineTopologyControl)<8u||arrayLength(&fineWorklist)<7u){return false;}
-  let clean=fineTopologyControl[0]==0u&&fineTopologyControl[4]==1u&&fineTopologyControl[5]==0u&&fineTopologyControl[7]==0u;
+  let topologyFlags=fineTopologyControl[0];let topologyReason=fineTopologyControl[7];
+  let clean=topologyFlags==0u&&fineTopologyControl[4]==1u&&fineTopologyControl[5]==0u&&topologyReason==0u;
+  // Aanjaneya et al. 2017 Section 5 uses separate background-octree and
+  // fine-SPGrid meshes. A rejected adaptation intentionally retains the last
+  // valid octree while the independently numbered fine SPGrid advances.
+  let retained=fineTopologyControl[4]==1u&&fineTopologyControl[5]==1u
+    &&topologyFlags!=0u&&topologyReason!=0u&&(topologyFlags&~0x1fu)==0u&&(topologyReason&~0x0fu)==0u;
   let count=fineWorklist[1];let generation=params.table.w&0x3fffffffu;
   let finePublished=params.table.y==7u&&count<=params.table.x&&count<=params.table.z
     &&7u+count<=arrayLength(&fineWorklist)&&(fineWorklist[0]&0x3fffffffu)==generation
@@ -39,14 +45,14 @@ fn validCurrentPublication()->bool{
     &&fineWorklist[4]==(count+63u)/64u&&fineWorklist[5]==1u&&fineWorklist[6]==1u;
   let rowCount=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));
   let expectedWidth=params.settings.w*max(1.0,params.cellAndDt.x);
+  let coarseGeneration=powerCoarseSamples.generation&0x3fffffffu;
   let coarsePublished=powerCoarseSamples.state==0x80000000u
-    &&(powerCoarseSamples.generation&0x3fffffffu)==generation
     &&rowCount>0u&&powerCoarseSamples.rowCount==rowCount
     &&powerCoarseSamples.maximumLeafSize>0u&&(powerCoarseSamples.maximumLeafSize&(powerCoarseSamples.maximumLeafSize-1u))==0u
     &&all(powerCoarseSamples.dimensions*max(1u,u32(round(params.cellAndDt.x)))==params.sampleDimensions)
     &&powerCoarseSamples.physicalCellSize>0.0
     &&abs(powerCoarseSamples.physicalCellSize-expectedWidth)<=1e-5*max(powerCoarseSamples.physicalCellSize,expectedWidth);
-  return clean&&finePublished&&coarsePublished;
+  return finePublished&&coarsePublished&&((clean&&coarseGeneration==generation)||retained);
 }
 fn pageLookup(key:u32)->u32{
   if(params.table.y!=7u||arrayLength(&fineWorklist)<7u||fineWorklist[0]!=params.table.w

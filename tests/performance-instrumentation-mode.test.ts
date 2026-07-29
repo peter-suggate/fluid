@@ -38,3 +38,13 @@ test("activity capture changes the compile-time shader generation", () => {
   assert.equal(production.generation, before + 2);
   assert.equal(production.cacheKey, "production");
 });
+
+test("the backward-compatible enabled state selects the production-WGSL timeline", () => {
+  usePerformanceInstrumentationStore.getState().setMode("off");
+  const before = usePerformanceInstrumentationStore.getState().shaderGeneration;
+  usePerformanceInstrumentationStore.getState().setEnabled(true);
+  const enabled = usePerformanceInstrumentationStore.getState();
+  assert.equal(enabled.mode, "timeline");
+  assert.equal(enabled.shaderActivityEnabled, false);
+  assert.equal(enabled.shaderGeneration, before);
+});

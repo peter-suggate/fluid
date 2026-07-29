@@ -13,3 +13,12 @@ test("SVO dry-frame benchmark uses the generic one-shot GPU trace", () => {
   assert.match(source, /samples\.push\(trace\.total_ms\)/);
   assert.doesNotMatch(source, /createQuerySet|resolveQuerySet|timestampWrites|GPU(?:Compute|Render)PassTimestampWrites/);
 });
+
+test("SVO dry-frame benchmark exposes a clean render-only xctrace lane", () => {
+  assert.match(source, /FLUID_SVO_DRY_FRAME_PROFILE_SECONDS/);
+  assert.match(source, /FLUID_SVO_DRY_FRAME_SCENE/);
+  assert.match(source, /phase: "constructed"/);
+  assert.match(source, /label: `SVO render frame \$\{frame\}`/);
+  assert.match(source, /phase: "result"/);
+  assert.match(source, /if \(profileSeconds > 0\)[^]*process\.exit\(0\);[^]*Timing helpers/);
+});

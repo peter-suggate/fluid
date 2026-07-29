@@ -871,6 +871,27 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
     brickDispatch: dispatchFor(brickCount) };
 }
 
+/** Largest 256-row SPGrid plan whose two bindable arenas fit the device. */
+export function spgridRowCapacityForBindingLimit(
+  dimensions: readonly [number, number, number],
+  maximumBindingBytesValue: number,
+  maximumRowsValue = SPGRID_MAXIMUM_ROW_CAPACITY,
+  rowAlignment = 256,
+): number {
+  const maximumBindingBytes = positiveInteger(maximumBindingBytesValue, "SPGrid storage binding limit");
+  const maximumRows = positiveInteger(maximumRowsValue, "SPGrid maximum rows");
+  const alignment = positiveInteger(rowAlignment, "SPGrid row alignment");
+  let low = 0;
+  let high = Math.floor(Math.min(maximumRows, SPGRID_MAXIMUM_ROW_CAPACITY) / alignment);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const plan = planOctreeSPGridVCycle({ dimensions, rowCapacity: middle * alignment });
+    if (Math.max(plan.stateBytes, plan.topologyBytes) <= maximumBindingBytes) low = middle;
+    else high = middle - 1;
+  }
+  return low * alignment;
+}
+
 export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "planL1CaptureDelta" | "reduceL1CaptureDelta"
   | "commitChangedL1" | "finalizeL1CapturePublication"
@@ -885,7 +906,10 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "validateCandidateHierarchy" | "commitCandidateLevels"
   | "finalizeLifecycle" | "prepareCorrectionDispatches" | "clearCorrection"
   | "zeroVectors" | "seedRhs"
-  | "smoothPageChebyshevForward" | "smoothPageChebyshevReverse"
+  | "smoothChebyshevAtoB0" | "smoothChebyshevBtoA0"
+  | "smoothChebyshevAtoB1" | "smoothChebyshevBtoA1"
+  | "smoothChebyshevAtoB2" | "smoothChebyshevBtoA2"
+  | "smoothChebyshevAtoB3" | "smoothChebyshevBtoA3"
   | "restrictAndGhostAccumulate" | "exactBottom"
   | "prolongAndGhostPropagate" | "publish";
 
@@ -918,16 +942,18 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   markCandidatePageOccupancy: [0, 14, 15],
   compactCandidatePages: [0, 14, 15, 17],
   linkCandidatePageNeighbours: [0, 14, 15, 17],
-  buildCandidateStencils: [0, 14, 15, 16, 17],
-  publishCandidateSpectralBounds: [0, 14, 15, 16, 17],
+  buildCandidateStencils: [0, 3, 4, 5, 6, 7, 14, 15, 16, 17, 24],
+  publishCandidateSpectralBounds: [0, 4, 6, 14, 15, 16, 17],
   validateCandidateHierarchy: [0, 6, 13, 14, 17],
   commitCandidateLevels: [0, 4, 5, 6, 13, 14, 15, 16, 17],
   finalizeLifecycle: [0, 3, 6, 7, 13],
   prepareCorrectionDispatches: [0, 6, 7, 19],
   clearCorrection: [0, 3, 7, 9],
   zeroVectors: [0, 4, 5, 6, 7], seedRhs: [0, 3, 4, 5, 7, 8, 11],
-  smoothPageChebyshevForward: [0, 4, 5, 6, 7],
-  smoothPageChebyshevReverse: [0, 4, 5, 6, 7],
+  smoothChebyshevAtoB0: [0, 4, 5, 6, 7], smoothChebyshevBtoA0: [0, 4, 5, 6, 7],
+  smoothChebyshevAtoB1: [0, 4, 5, 6, 7], smoothChebyshevBtoA1: [0, 4, 5, 6, 7],
+  smoothChebyshevAtoB2: [0, 4, 5, 6, 7], smoothChebyshevBtoA2: [0, 4, 5, 6, 7],
+  smoothChebyshevAtoB3: [0, 4, 5, 6, 7], smoothChebyshevBtoA3: [0, 4, 5, 6, 7],
   restrictAndGhostAccumulate: [0, 4, 5, 6, 7],
   exactBottom: [0, 4, 5, 6, 7],
   prolongAndGhostPropagate: [0, 4, 5, 6, 7],
@@ -990,7 +1016,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     bottomOperation: "exact-single-cell"; coarsestDegreesOfFreedom: 1;
     directoryLookup: "brick-mask-rank"; lookupProbeUpperBound: 1; directoryBytes: number;
     directoryBrickCount: number; directoryBuildDispatchCount: number;
-    pageAdjacency: "physical-27"; smootherLookup: "adjacent-page-mask-rank" }>;
+    pageAdjacency: "physical-27"; smootherLookup: "published-column-index" }>;
   private readonly capturedGeometry: GPUBuffer;
   private readonly candidateCapturedGeometry: GPUBuffer;
   private readonly topology: GPUBuffer;
@@ -1061,8 +1087,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private destroyed = false;
 
   /** GPU-authored controls suitable for the runtime's diagnostics readback. */
-  get workAccountingBuffers(): Readonly<{ dispatch: GPUBuffer; capture: GPUBuffer }> {
-    return Object.freeze({ dispatch: this.dispatchMeta, capture: this.capturePageState });
+  get workAccountingBuffers(): Readonly<{
+    dispatch: GPUBuffer; capture: GPUBuffer; accurateClassDispatch: GPUBuffer;
+  }> {
+    return Object.freeze({ dispatch: this.dispatchMeta, capture: this.capturePageState,
+      accurateClassDispatch: this.accurateClassDispatch });
   }
 
   /** Candidate hierarchy/capture report consumed by the coupled epoch reduction. */
@@ -1228,11 +1257,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         this.plan.rowDispatch[0], this.plan.slotDispatch[0], this.plan.transferDispatch[0], this.pre]);
       words[12] = this.post;
       words[13] = sourceMode === "candidate" ? 1 : 0;
+      floats[14] = 1;
       floats[15] = options.finestCellWidth;
       words.set([delta.rowCapacity, delta.controlOffsetWords, delta.newToOldOffsetWords,
         delta.dirtyRowsOffsetWords], 16);
       words.set([this.plan.totalLevelSlots, this.plan.brickCount,
         this.plan.pageDirectoryBytes / 4, 0], 20);
+      floats[23] = 0;
       words.set(levelCaps, 24);
       words.set(levelBases, 24 + PARAMS_LEVEL_TABLE_SLOTS);
       words.set(brickOffsets, 24 + 2 * PARAMS_LEVEL_TABLE_SLOTS);
@@ -1264,9 +1295,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       // Four per-class records, then the union record the single accepted-row
       // dispatch consumes. The class records stay published so the four-way
       // encode remains a one-line A/B against the union encode.
-      size: ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES + 12,
-      usage: storage | GPUBufferUsage.INDIRECT,
+      // Six trailing high-water diagnostics preserve the first live gate even
+      // after fail-closed tail gates zero the executable records.
+      size: ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES + 12 + 8 * 4,
+      usage: storage | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
+    device.queue.writeBuffer(this.accurateClassDispatch, 0, new Uint32Array(29));
     this.accurateTerms = device.createBuffer({
       label: "SPGrid accurate A2 staged direct terms and compact row map",
       // Eighteen direct terms and 8×18 fine-adjoint candidate terms per row,
@@ -1408,11 +1442,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // ride the same pass.
     // Keep this exact for command and active/scheduled accounting.
     this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5 + 2;
-    // One compact 8x8x4 page dispatch stages the one-cell halo and executes
-    // the complete even-degree Chebyshev polynomial in workgroup memory.
-    // Post-smoothing consumes the weights in reverse order, retaining the
-    // fixed symmetric V-cycle schedule without pointwise dispatches.
-    this.encodedCorrectionDispatchCount = l + 5 + (l - 1) * 4;
+    // Aanjaneya et al. Section 4.3 requires M1 to be SPD. Each Chebyshev phase
+    // is therefore a separate, globally synchronized Jacobi dispatch. Folding
+    // several phases into one page while freezing cross-page halo values does
+    // not evaluate the claimed global polynomial and is not a symmetric M1.
+    this.encodedCorrectionDispatchCount = l + 5
+      + (l - 1) * (this.pre + this.post + 2);
     this.diagnostics = Object.freeze({ levelCount: l,
       coarsestCapacity: this.plan.levelCapacities[this.plan.levelCount - 1],
       maximumTransferRecordsPerLevel: Math.max(...this.plan.transferCapacities),
@@ -1425,7 +1460,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       directoryBytes: this.plan.directoryBytes, directoryBrickCount: this.plan.brickCount,
       directoryBuildDispatchCount: 1,
       pageAdjacency: "physical-27" as const,
-      smootherLookup: "adjacent-page-mask-rank" as const });
+      smootherLookup: "published-column-index" as const });
     this.allocatedBytes = this.plan.allocatedBytes + this.capturedGeometry.size + this.candidateCapturedGeometry.size
       + this.candidateTopology.size + this.candidateState.size + this.candidateDispatch.size
       + this.candidateGhosts.size + this.committedInputs.size
@@ -1568,7 +1603,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   }
 
   encodeSetup(broker: PassBroker, input: { solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
-    if (!this.candidateSetupInput && this.lastSetupInput?.rowCount === input.rowCount
+    if (!this.candidateSetupInput && !this.preparedCaptureSource
+      && this.lastSetupInput?.rowCount === input.rowCount
       && this.lastSetupInput.solverControl === input.solverControl) return;
     if (!this.candidateSetupInput) {
       this.encodeSetupCandidate(broker, { ...input, sourceMode: "accepted" });
@@ -1587,14 +1623,19 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // returns the pass already open and DISCARDS the label, so the encoded
     // command stream is byte-for-byte the single pass this reads as. With
     // `FLUID_GPU_ISOLATE_PASS_LABELS=1` each label brackets its own dispatch,
-    // which is the only way to see which of the twenty-six V-cycle dispatches
-    // holds the correction's time: the whole schedule used to report as one
-    // 0.42 ms/cycle number.
+    // which is the only way to attribute individual V-cycle phases.
     const staged = (label: string): GPUComputePassEncoder =>
       broker.compute({ label: `SPGrid V-cycle · ${label}` });
-    this.runIndirect(pass, "clearCorrection", 0, input, false);
+    // These three kernels are defined on the accepted pressure-row domain,
+    // not on level zero's sparse slot worklist. Aanjaneya et al. §4.3 relies
+    // on L1 and L2 having exactly the same pressure variables; dispatching
+    // through count(0) silently omitted native coarser rows on an adaptive
+    // octree and allowed their correction entries to retain an earlier M1
+    // application. The fixed-capacity row dispatch remains convergence-gated
+    // in WGSL and covers every live accepted row.
+    this.run(pass, "clearCorrection", 0, input, this.plan.rowDispatch);
     for (let level = 0; level < this.plan.levelCount; level += 1) this.runIndirect(pass, "zeroVectors", level, input, false);
-    this.runIndirect(pass, "seedRhs", 0, input, false);
+    this.run(pass, "seedRhs", 0, input, this.plan.rowDispatch);
     for (let level = 0; level < this.plan.levelCount - 1; level += 1) {
       this.smooth(staged(`pre-smooth level ${level}`), level, false, input);
       this.runIndirect(staged(`restrict level ${level}`), "restrictAndGhostAccumulate", level, input, true);
@@ -1604,18 +1645,17 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       this.runIndirect(staged(`prolong level ${level}`), "prolongAndGhostPropagate", level, input, false);
       this.smooth(staged(`post-smooth level ${level}`), level, true, input);
     }
-    this.runIndirect(staged("publish correction"), "publish", 0, input, false);
+    this.run(staged("publish correction"), "publish", 0, input, this.plan.rowDispatch);
   }
 
   private smooth(pass: GPUComputePassEncoder, level: number, reverse: boolean,
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
-    this.bind(pass, reverse
-      ? "smoothPageChebyshevReverse"
-      : "smoothPageChebyshevForward", level, input);
-    pass.dispatchWorkgroupsIndirect(
-      this.indirectDispatch,
-      level * DISPATCH_RECORD_BYTES_PER_LEVEL + 9 * 4,
-    );
+    for (let step = 0; step < this.pre; step += 1) {
+      const phase = reverse ? this.pre - 1 - step : step;
+      const direction = (step & 1) === 0 ? "AtoB" : "BtoA";
+      const name = `smoothChebyshev${direction}${phase}` as OctreeSPGridVCyclePipelineName;
+      this.runIndirect(pass, name, level, input, false);
+    }
   }
 
   private runIndirect(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
@@ -1653,7 +1693,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         [16, this.candidateState], [17, this.candidateDispatch], [18, this.source.rowDelta.rows],
         [19, this.indirectDispatch],
         [20, input.topologyMetrics ?? this.source.topologyMetrics], [21, this.source.catalogCoefficients],
-        [22, this.candidateGhosts], [23, this.committedInputs],
+        [22, this.candidateGhosts], [23, this.committedInputs], [24, this.source.coefficients],
       ]);
       group = this.device.createBindGroup({ label: `SPGrid V-cycle · ${name} · level ${level}`,
         layout: pipeline.getBindGroupLayout(0), entries: OCTREE_SPGRID_VCYCLE_BINDINGS[name].map((binding) => ({
@@ -1891,6 +1931,11 @@ export const octreeSPGridAccurateDispatchGateShader = /* wgsl */ `
 @group(0) @binding(4) var<storage,read_write> classDispatch:array<u32>;
 fn activeSolve()->bool{return arrayLength(&solverControl)>=2u
  &&solverControl[0]==0u&&solverControl[1]==0u;}
+fn publishAccurateDispatch(at:u32,blocks:u32,live:bool){
+ if(live&&blocks>0u){let x=min(65535u,blocks);classDispatch[at]=x;
+  classDispatch[at+1u]=(blocks+x-1u)/x;classDispatch[at+2u]=1u;}
+ else{classDispatch[at]=0u;classDispatch[at+1u]=1u;classDispatch[at+2u]=1u;}
+}
 @compute @workgroup_size(1)
 fn prepareAccurateDispatches(){
  let solveLive=activeSolve();
@@ -1909,15 +1954,20 @@ fn prepareAccurateDispatches(){
   if(!valid||base+2u>=arrayLength(&worksets)||worksets[base+1u]>worksets[base+2u]){unionValid=false;}
   else{unionRows+=worksets[base+1u];if(cls==1u||cls==3u){transitionRows+=worksets[base+1u];}}
  }
- classDispatch[12]=select(0u,(unionRows+63u)/64u,solveLive&&unionValid);
- classDispatch[13]=1u;classDispatch[14]=1u;
- classDispatch[15]=select(0u,(unionRows*18u+63u)/64u,solveLive&&unionValid);
- classDispatch[16]=1u;classDispatch[17]=1u;
+ publishAccurateDispatch(12u,(unionRows+63u)/64u,solveLive&&unionValid);
+ publishAccurateDispatch(15u,(unionRows*18u+63u)/64u,solveLive&&unionValid);
  // One lane per (transition row, child, candidate): the eighteen candidates a
  // child's chains cover are independent, so they issue concurrently instead of
  // eighteen deep behind one lane.
- classDispatch[18]=select(0u,(transitionRows*144u+63u)/64u,solveLive&&unionValid);
- classDispatch[19]=1u;classDispatch[20]=1u;
+ publishAccurateDispatch(18u,(transitionRows*144u+63u)/64u,solveLive&&unionValid);
+ classDispatch[21]=max(classDispatch[21],select(0u,1u,solveLive));
+ classDispatch[22]=max(classDispatch[22],select(0u,1u,unionValid));
+ classDispatch[23]=max(classDispatch[23],unionRows);
+ classDispatch[24]=max(classDispatch[24],transitionRows);
+ classDispatch[25]=max(classDispatch[25],bank);
+ classDispatch[26]=max(classDispatch[26],select(0u,accepted[3],arrayLength(&accepted)>3u));
+ classDispatch[27]+=select(0u,1u,solveLive);
+ classDispatch[28]+=select(0u,1u,solveLive&&unionValid&&unionRows>0u);
 }
 `;
 
@@ -2685,6 +2735,7 @@ struct CapturePageState{generation:u32,expectedPages:u32,validatedPages:u32,chan
 @group(0) @binding(21) var<storage,read> catalogCoefficients:array<f32>;
 @group(0) @binding(22) var<storage,read_write> ghostScratch:array<u32>;
 @group(0) @binding(23) var<storage,read_write> committedInputs:array<u32>;
+@group(0) @binding(24) var<storage,read> acceptedCoefficients:array<f32>;
 const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;const INVALID=0xffffffffu;
 const OVERFLOW=2u;const NONFINITE=4u;const NONPOSITIVE=8u;
 const KEY=0u;const FLAGS=1u;const DIAG=2u;const XP=3u;const XM=4u;const YP=5u;const YM=6u;const ZP=7u;const ZM=8u;
@@ -2693,13 +2744,6 @@ const YZPP=17u;const YZPM=18u;const YZMP=19u;const YZMM=20u;
 const RHS=21u;const A=22u;const B=23u;const OWNER=24u;const SPECTRAL=25u;
 const STATE_CHANNELS=26u;
 const PAGE_X=8u;const PAGE_Y=8u;const PAGE_Z=4u;
-const HALO_X=10u;const HALO_Y=10u;const HALO_Z=6u;
-const PAGE_ELEMENTS=256u;const HALO_ELEMENTS=600u;
-var<workgroup> pageSlots:array<u32,600>;
-var<workgroup> pageA:array<f32,600>;
-var<workgroup> pageB:array<f32,600>;
-var<workgroup> pageRhs:array<f32,600>;
-var<workgroup> pageDiagonal:array<f32,600>;
 const STRUCTURED_CANDIDATE_READY=0x5356454cu;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn stopped()->bool{return atomicLoad(&control[0])!=0u||atomicLoad(&control[1])!=0u;}
 fn sourceControlReady()->bool{if(arrayLength(&acceptedRows)<6u){return false;}if(p.solve.y==0u){return acceptedRows[0]==0u&&acceptedRows[3]!=0u;}if(p.solve.y==1u){return acceptedRows[0]==STRUCTURED_CANDIDATE_READY&&acceptedRows[4]!=0u;}return false;}
@@ -3020,12 +3064,9 @@ fn contactCoord(own:vec4u,other:vec4u,l:u32)->vec3u{let scale=1u<<l;let begin=or
 }
 // Sound unchanged-input predicate. The hierarchy is a pure function of the row
 // count, every row's captured fixed geometry, and every row's Section 6.3
-// case/transform (the catalog table, domain, and finest width are immutable for
-// the instance). committedInputs holds that exact tuple for the last accepted
-// publication, so a generation with no stamped mismatch provably reproduces the
-// published hierarchy and may retire its dirty flags. Any difference, any
-// bootstrap, any earlier capture fault, and any absent fingerprint stamps the
-// generation and leaves the rebuild unconditional.
+// case/transform. Dynamic boundary fractions are deliberately not part of this
+// topology fingerprint: an unchanged topology retires its coarse dirty flags,
+// then rebuilds the level-zero stencil from the current accepted coefficients.
 const COMMITTED_VALID=0u;const COMMITTED_ROWS=1u;const COMMITTED_MISMATCH=2u;
 const COMMITTED_HEADER=4u;const COMMITTED_STRIDE=4u;
 fn committedRowBase(r:u32)->u32{return COMMITTED_HEADER+r*COMMITTED_STRIDE;}
@@ -3046,6 +3087,10 @@ fn committedRowBase(r:u32)->u32{return COMMITTED_HEADER+r*COMMITTED_STRIDE;}
  if(generation==0u||committedInputs[COMMITTED_MISMATCH]==generation
   ||committedInputs[COMMITTED_VALID]!=1u||captureBootstrap()||captureFailed()){return;}
  for(var l=0u;l<levels();l+=1u){levelDelta[deltaAt(l,1u)]=0u;}
+ // Aanjaneya et al. Section 4.3's first-order M1 shares the pressure unknowns
+ // and boundary conditions with L2. Free-surface fractions can change without
+ // a topology/case change, so the finest stencil must follow every publication.
+ levelDelta[deltaAt(0u,1u)]=DELTA_STENCIL;
 }
 @compute @workgroup_size(64) fn clearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){outputCorrection[r]=0.0;}}
 fn cAt(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
@@ -3137,6 +3182,10 @@ fn cDirectoryLookup(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return 
  let ranked=candidateTopology[record+3u]+rank;if(ranked>=cCount(l)||ranked>=levelCapacity(l)){candidateReport(l);return INVALID;}
  let slot=candidateTopology[rankedSlotsBase()+levelBase(l)+ranked];
  if(slot>=levelCapacity(l)||candidateState[cAt(KEY,l,slot)]!=coordKey(q,l)){candidateReport(l);return INVALID;}return slot;}
+fn selectedDirectoryLookup(l:u32,q:vec3u)->u32{
+ if(topologyDirty(l)){return cDirectoryLookup(l,q);}
+ return directoryLookup(l,q,false);
+}
 fn cLookup(l:u32,q:vec3u)->u32{if(l>=levels()||any(q>=dims(l))){return INVALID;}let wanted=coordKey(q,l);var slot=insertionHash(wanted,l);
  for(var probe=0u;probe<256u;probe+=1u){let old=candidateState[cAt(KEY,l,slot)];if(old==wanted){return slot;}if(old==0u){return INVALID;}slot=(slot+1u)&(levelCapacity(l)-1u);}return INVALID;}
 fn section63Direction(k:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[k];}
@@ -3660,8 +3709,8 @@ fn logicalPageOrigin(l:u32,dense:u32)->vec3u{let d=logicalPageDims(l);
 @compute @workgroup_size(64) fn buildCandidateStencils(@builtin(global_invocation_id) g:vec3u){
  let i=boundedLinearIndex(g);
  for(var l=0u;l<levels();l+=1u){
-  if(!stencilDirty(l)||i>=cCount(l)){continue;}
-  let s=cWorkSlot(l,i);
+  if(!stencilDirty(l)||i>=selectedCount(l)){continue;}
+  let s=selectedWorkSlot(l,i);
   for(var c=DIAG;c<=YZMM;c+=1u){candidateState[cAt(c,l,s)]=0u;}
   // A channel keeps INVALID unless this owner publishes both its coefficient
   // and the slot that coefficient was accumulated against, in the same
@@ -3669,11 +3718,38 @@ fn logicalPageOrigin(l:u32,dense:u32)->vec3u{let d=logicalPageDims(l);
   // a zero coefficient is always paired with an unresolvable neighbour.
   for(var k=0u;k<18u;k+=1u){candidateTopology[neighbourAt(k,l,s)]=INVALID;}
   let coefficient=f32(1u<<l)*p.reserved.y;
-  let q=decode(candidateState[cAt(KEY,l,s)],l);let flags=candidateState[cAt(FLAGS,l,s)];var diagonal=0.0;
-  for(var k=0u;k<6u;k+=1u){let targetQ=vec3i(q)+section63Direction(k);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){continue;}
-   let other=cDirectoryLookup(l,vec3u(targetQ));if(other==INVALID){if((flags&GHOST)==0u){diagonal+=coefficient;}continue;}
-   diagonal+=coefficient;candidateTopology[neighbourAt(k,l,s)]=other;cStoref(XP+k,l,s,coefficient);}
-  if(!(diagonal>1e-20)||!finite(diagonal)){diagonal=1.0;}cStoref(DIAG,l,s,diagonal);
+  let q=decode(selectedState(KEY,l,s),l);let flags=selectedState(FLAGS,l,s);var diagonal=0.0;
+  let encodedOwner=selectedState(OWNER,l,s);var acceptedFine=(flags&ACTIVE)!=0u
+   &&encodedOwner>0u&&encodedOwner<=p.capacity.x;
+  var acceptedBase=0u;
+  if(acceptedFine){let row=encodedOwner-1u;acceptedBase=(acceptedBank()*p.capacity.x+row)*19u;
+   if(acceptedBase+19u>arrayLength(&acceptedCoefficients)){
+    candidateReport(l);acceptedFine=false;
+   }else{let acceptedDiagonal=acceptedCoefficients[acceptedBase];var acceptedOff=0.0;
+    for(var channel=0u;channel<18u;channel+=1u){let c=acceptedCoefficients[acceptedBase+1u+channel];
+     if(!finite(c)||c<0.0){candidateReport(l);acceptedFine=false;}acceptedOff+=max(0.0,c);}
+    if(!finite(acceptedDiagonal)||!(acceptedDiagonal>0.0)||!finite(acceptedOff)){
+     candidateReport(l);acceptedFine=false;
+    }else if(acceptedFine){
+     // Aanjaneya et al. Section 4.3 uses a first-order M1 with the same
+     // boundary conditions as L2. Keep the symmetric first-order grid graph,
+     // and import only L2's non-negative Dirichlet/free-surface reaction
+     // (diag - sum(offdiag)). Importing directional L2 contacts onto adjacent
+     // unit SPGrid slots is not a shared discretization on adaptive rows and
+     // makes M1 nonsymmetric.
+     diagonal=max(0.0,acceptedDiagonal-acceptedOff);
+    }}}
+  for(var k=0u;k<6u;k+=1u){let c=coefficient;
+   let targetQ=vec3i(q)+section63Direction(k);if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){continue;}
+   let other=selectedDirectoryLookup(l,vec3u(targetQ));if(other==INVALID){if((flags&GHOST)==0u){diagonal+=c;}continue;}
+   diagonal+=c;candidateTopology[neighbourAt(k,l,s)]=other;cStoref(XP+k,l,s,c);}
+  if((flags&MG_ONLY)!=0u){diagonal+=bitcast<f32>(p.totals.w)*coefficient;}
+  // The one-cell terminal grid has no in-domain neighbour, but M1 represents
+  // the same free-surface pressure problem as L2 rather than a pure Neumann
+  // null space. Keep its exact solve on the level's physical first-order
+  // scale; a dimensionless unit fallback increasingly over-corrected the
+  // constant mode as the hierarchy deepened.
+  if(!(diagonal>1e-20)||!finite(diagonal)){diagonal=coefficient;}cStoref(DIAG,l,s,diagonal);
  }
 }
 var<workgroup> spectralLane:array<f32,64>;
@@ -3684,8 +3760,8 @@ var<workgroup> spectralLane:array<f32,64>;
 @compute @workgroup_size(64) fn publishCandidateSpectralBounds(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
  let l=wg.x;let live=l<levels()&&stencilDirty(l);var upper=1.0;
- if(live){let n=cCount(l);
-  for(var i=lane;i<n;i+=64u){let s=cWorkSlot(l,i);let d=cLoadf(DIAG,l,s);var off=0.0;
+ if(live){let n=selectedCount(l);
+  for(var i=lane;i<n;i+=64u){let s=selectedWorkSlot(l,i);let d=cLoadf(DIAG,l,s);var off=0.0;
    for(var k=0u;k<18u;k+=1u){let c=cLoadf(XP+k,l,s);
     if(!finite(c)||c<0.0){candidateReport(l);}off+=abs(c);}
    if(!finite(d)||!(d>0.0)||!finite(off)||off>d*(1.0+1e-4)){candidateReport(l);}
@@ -3811,83 +3887,21 @@ fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
  let centre=0.5*(upper+lower);let radius=0.5*(upper-lower);
  return 1.0/(centre-radius*cos(3.141592653589793*(2.0*f32(phase)+1.0)/(2.0*f32(degree))));
 }
-fn pageInteriorHaloIndex(local:u32)->u32{let x=local%PAGE_X;let yz=local/PAGE_X;
- return x+1u+HALO_X*((yz%PAGE_Y)+1u+HALO_Y*((yz/PAGE_Y)+1u));}
-// The staged halo is a dense 10x10x6 lattice in row-major order, so a unit step
-// along an axis is a constant stride in the flat index. stencilDirection(k)
-// dotted with (1, HALO_X, HALO_X*HALO_Y) is therefore the entire neighbour
-// address, transcribed here in stencilDirection's channel order.
-//
-// This is exact, not an approximation. smoothPage stages halo h only after
-// proving 0 <= origin+haloCoord(h)-1 < dims(l), and pageSlot returns a slot
-// only when state[at(KEY,l,slot)] == coordKey(q,l) for that same q. So for every
-// staged slot, decode(state[at(KEY,l,slot)],l) == q == origin + haloCoord(h) - 1,
-// and the old per-iteration expression
-//   decode(key) + stencilDirection(k) - origin + 1
-// reduces to haloCoord(h) + stencilDirection(k), with origin cancelling. The
-// linearisation of that is h + HALO_STEP[k]: one add, no divide, no reload of
-// the loop-invariant key.
-//
-// The bounds test the old form needed is likewise dead. The only callers walk
-// pageInteriorHaloIndex(local) for local < 256, whose halo coordinates lie in
-// [1,8]x[1,8]x[1,4], so every one-step neighbour stays inside [0,9]x[0,9]x[0,5]
-// and the flat index stays inside [0,600).
-const HALO_SX:i32=1;const HALO_SY:i32=i32(HALO_X);const HALO_SZ:i32=i32(HALO_X*HALO_Y);
-const HALO_STEP=array<i32,18>(
- HALO_SX,-HALO_SX,HALO_SY,-HALO_SY,HALO_SZ,-HALO_SZ,
- HALO_SX+HALO_SY,HALO_SX-HALO_SY,HALO_SY-HALO_SX,-HALO_SX-HALO_SY,
- HALO_SX+HALO_SZ,HALO_SX-HALO_SZ,HALO_SZ-HALO_SX,-HALO_SX-HALO_SZ,
- HALO_SY+HALO_SZ,HALO_SY-HALO_SZ,HALO_SZ-HALO_SY,-HALO_SY-HALO_SZ);
-fn pageAppliedA(l:u32,slot:u32,halo:u32)->f32{
- var value=pageDiagonal[halo]*pageA[halo];
- for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let neighbourHalo=u32(i32(halo)+HALO_STEP[k]);
-  if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}value-=c*pageA[neighbourHalo];}
- return value;
-}
-fn pageAppliedB(l:u32,slot:u32,halo:u32)->f32{
- var value=pageDiagonal[halo]*pageB[halo];
- for(var k=0u;k<18u;k+=1u){let c=loadf(XP+k,l,slot);if(c==0.0){continue;}
-  let neighbourHalo=u32(i32(halo)+HALO_STEP[k]);
-  if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}value-=c*pageB[neighbourHalo];}
- return value;
-}
-fn pageSweepAtoB(l:u32,lid:u32,phase:u32,degree:u32){
- let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
-  let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageA[halo];if(!smoothable(l,slot)){pageB[halo]=source;continue;}
-  let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageB[halo]=source;continue;}
-  let next=source+weight*(pageRhs[halo]-pageAppliedA(l,slot,halo))/d;
-  if(!finite(next)){reportAt(NONFINITE,80u,slot);pageB[halo]=source;}else{pageB[halo]=next;}}
-}
-fn pageSweepBtoA(l:u32,lid:u32,phase:u32,degree:u32){
- let weight=chebyshevWeight(l,phase,degree);for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);
-  let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageB[halo];if(!smoothable(l,slot)){pageA[halo]=source;continue;}
-  let d=pageDiagonal[halo];if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageA[halo]=source;continue;}
-  let next=source+weight*(pageRhs[halo]-pageAppliedB(l,slot,halo))/d;
-  if(!finite(next)){reportAt(NONFINITE,80u,slot);pageA[halo]=source;}else{pageA[halo]=next;}}
-}
-fn pagePhase(step:u32,degree:u32,reverse:bool)->u32{return select(step,degree-1u-step,reverse);}
-fn smoothPage(reverse:bool,page:u32,lid:u32){let l=level();let pageLive=page<pageCount(l)&&!stopped();var origin=vec3u(0u);
- if(pageLive){origin=decode(pageKey(l,page),l);}let d=dims(l);
- for(var halo=lid;halo<HALO_ELEMENTS;halo+=128u){let x=halo%HALO_X;let yz=halo/HALO_X;
-  let relative=vec3i(i32(x)-1,i32(yz%HALO_Y)-1,i32(yz/HALO_Y)-1);let q=vec3i(origin)+relative;var slot=INVALID;
-  if(pageLive&&all(q>=vec3i(0))&&all(q<vec3i(d))){slot=pageSlot(l,page,origin,vec3u(q));}pageSlots[halo]=slot;
-  var value=0.0;var rhs=0.0;var diagonal=1.0;if(slot!=INVALID){value=loadf(A,l,slot);rhs=loadf(RHS,l,slot);diagonal=loadf(DIAG,l,slot);}
-  pageA[halo]=value;pageB[halo]=value;pageRhs[halo]=rhs;pageDiagonal[halo]=diagonal;}
- workgroupBarrier();
- pageSweepAtoB(l,lid,pagePhase(0u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
- pageSweepBtoA(l,lid,pagePhase(1u,p.solve.x,reverse),p.solve.x);workgroupBarrier();
- if(p.solve.x==4u){pageSweepAtoB(l,lid,pagePhase(2u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
- if(p.solve.x==4u){pageSweepBtoA(l,lid,pagePhase(3u,p.solve.x,reverse),p.solve.x);}workgroupBarrier();
- if(pageLive){for(var local=lid;local<PAGE_ELEMENTS;local+=128u){let halo=pageInteriorHaloIndex(local);let slot=pageSlots[halo];
-   if(slot!=INVALID){storef(A,l,slot,pageA[halo]);}}}
-}
-@compute @workgroup_size(128) fn smoothPageChebyshevForward(@builtin(workgroup_id) page:vec3u,@builtin(local_invocation_index) lid:u32){
- smoothPage(false,page.x,lid);
-}
-@compute @workgroup_size(128) fn smoothPageChebyshevReverse(@builtin(workgroup_id) page:vec3u,@builtin(local_invocation_index) lid:u32){
- smoothPage(true,page.x,lid);
-}
+fn relaxChebyshev(slot:u32,src:u32,dst:u32,phase:u32){let l=level();let source=loadf(src,l,slot);
+ if(!smoothable(l,slot)){storef(dst,l,slot,source);return;}let d=loadf(DIAG,l,slot);
+ if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);storef(dst,l,slot,source);return;}
+ let next=source+chebyshevWeight(l,phase,p.solve.x)*(loadf(RHS,l,slot)-applied(slot,src))/d;
+ if(!finite(next)){reportAt(NONFINITE,80u,slot);storef(dst,l,slot,source);}else{storef(dst,l,slot,next);}}
+fn smoothGlobal(g:vec3u,src:u32,dst:u32,phase:u32){let i=slotIndex(g);let l=level();
+ if(i<count(l)&&!stopped()){relaxChebyshev(workSlot(l,i),src,dst,phase);}}
+@compute @workgroup_size(64) fn smoothChebyshevAtoB0(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,A,B,0u);}
+@compute @workgroup_size(64) fn smoothChebyshevBtoA0(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,B,A,0u);}
+@compute @workgroup_size(64) fn smoothChebyshevAtoB1(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,A,B,1u);}
+@compute @workgroup_size(64) fn smoothChebyshevBtoA1(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,B,A,1u);}
+@compute @workgroup_size(64) fn smoothChebyshevAtoB2(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,A,B,2u);}
+@compute @workgroup_size(64) fn smoothChebyshevBtoA2(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,B,A,2u);}
+@compute @workgroup_size(64) fn smoothChebyshevAtoB3(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,A,B,3u);}
+@compute @workgroup_size(64) fn smoothChebyshevBtoA3(@builtin(global_invocation_id) g:vec3u){smoothGlobal(g,B,A,3u);}
 // Return the immutable transfer target owned by one fine slot/corner.
 // Restriction consumes the same records through its parent-owned chains, so
 // E and E^T cannot diverge.
@@ -3947,7 +3961,7 @@ var<workgroup> restrictSum:f32;
   if(lane<staged){let record=restrictRecord[lane];let fine=topology[transferWord(l,record,0u)];
    let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=applied(fine,A);
    residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
-   weight=bitcast<f32>(topology[transferWord(l,record,2u)]);}
+   weight=p.reserved.x*bitcast<f32>(topology[transferWord(l,record,2u)]);}
   restrictWeight[lane]=weight;restrictResidual[lane]=residual;
   workgroupBarrier();
   if(lane==0u){var folded=restrictSum;
@@ -3957,7 +3971,12 @@ var<workgroup> restrictSum:f32;
  }
  if(lane==0u&&restrictFailed==0u){let sum=restrictSum;
   if(restrictNext!=INVALID||!finite(sum)){reportAt(OVERFLOW,87u,coarse);}
-  else{storef(RHS,l+1u,coarse,sum);}}}
+  // Accepted pressure rows are injected at their native octree levels before
+  // the descent. GhostValueAccumulate contributes the finer residual to that
+  // existing native RHS; replacing it would delete the direct coarse pressure
+  // variable from M1 while prolongation still returned a correction to it,
+  // breaking the E^T/E symmetry required by Aanjaneya et al. §4.3.
+  else{storef(RHS,l+1u,coarse,loadf(RHS,l+1u,coarse)+sum);}}}
 @compute @workgroup_size(64) fn exactBottom(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>0u||stopped()){return;}if(count(l)!=1u){reportAt(NONPOSITIVE,88u,l);return;}
  let s=workSlot(l,0u);let d=loadf(DIAG,l,s);if(!(d>0.0)){reportAt(NONPOSITIVE,89u,s);return;}let x=loadf(RHS,l,s)/d;if(!finite(x)){reportAt(NONFINITE,90u,s);}else{storef(A,l,s,x);}}
 // One fine invocation owns the complete interpolation sum, deleting all
@@ -3966,7 +3985,7 @@ var<workgroup> restrictSum:f32;
 @compute @workgroup_size(64) fn prolongAndGhostPropagate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}
  let fine=workSlot(l,i);let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let targetCount=select(8u,1u,ghost);var value=select(loadf(A,l,fine),0.0,ghost);
  for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse==INVALID){return;}
-  value+=transfer.weight*loadf(A,l+1u,transfer.coarse);}if(!finite(value)){reportAt(NONFINITE,91u,fine);}else{storef(A,l,fine,value);}}
+  value+=p.reserved.x*transfer.weight*loadf(A,l+1u,transfer.coarse);}if(!finite(value)){reportAt(NONFINITE,91u,fine);}else{storef(A,l,fine,value);}}
 @compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let native=firstTrailingBit(sourceRowGeometry(r).y);
  let v=loadf(A,native,rowMap(native,r));if(!finite(v)){reportAt(NONFINITE,92u,r);}else{outputCorrection[r]=v;}}}
 `;

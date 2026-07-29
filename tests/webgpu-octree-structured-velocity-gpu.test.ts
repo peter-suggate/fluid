@@ -11,6 +11,7 @@ import {
   WebGPUDirectStructuredVelocityAuthority,
   directStructuredVelocityPublicationWGSL,
   planStructuredVelocityGPU,
+  structuredVelocityRowCapacityForBindingLimit,
 } from "../lib/webgpu-octree-structured-velocity-gpu";
 
 // Numerical harnesses submit their own raw encoders; exercise the production
@@ -24,6 +25,16 @@ test("direct structured authority has six fixed families and nine disjoint works
   assert.equal(plan.offsets.rowFamilyHandles + 6 * 128, plan.offsets.rowFamilySlots);
   assert.equal(plan.authorityWords, plan.offsets.rowFamilySlots + 48 * 128);
   assert.equal(plan.worksetBytes, 9 * plan.worksetStrideWords * 4);
+});
+
+test("packed A/B structured authority derives a device-safe aligned row ceiling", () => {
+  const oneRow = planStructuredVelocityGPU(1, 30, 256);
+  assert.equal(oneRow.authorityBytes, 2_904);
+  const limit = 1024 ** 3;
+  const capacity = structuredVelocityRowCapacityForBindingLimit(limit, 30);
+  assert.equal(capacity, 184_832);
+  assert.ok(2 * planStructuredVelocityGPU(capacity, 30).authorityBytes <= limit);
+  assert.ok(2 * planStructuredVelocityGPU(capacity + 256, 30).authorityBytes > limit);
 });
 
 test("direct publisher contains no general face/incidence authority or floating scatter", () => {
@@ -114,8 +125,8 @@ test("rejected structured candidates can mutate only inactive-bank and candidate
   assert.match(directStructuredVelocityPublicationWGSL,
     /fn section63BankBase\(\)->u32\{return control\.activeBank[\s\S]*fn rowBankBase\(\)->u32\{return control\.activeBank[\s\S]*fn worksetBankBase\(\)->u32\{return control\.activeBank/);
   assert.match(directStructuredVelocityPublicationWGSL,
-    /if\(clean&&cls<4u\)\{let dispatch=6u\+3u\*cls;publicationDispatch\[dispatch\]=groups/,
-    "a rejected candidate must preserve the accepted class-dispatch records");
+    /publicationDispatch\[18u\]=0u;publicationDispatch\[19u\]=1u;publicationDispatch\[20u\]=1u;[\s\S]*if\(clean&&cls<=4u\)\{let dispatch=6u\+3u\*cls/,
+    "a rejected candidate must zero its transfer record while preserving accepted class records");
   assert.match(directStructuredVelocityPublicationWGSL,
     /fn acceptStructuredPublication\(\)\{if\(atomicLoad\(&control\.flags\)!=[^{]+\{return;\}[\s\S]*acceptedControl/,
     "candidate validation is the sole gate allowed to mutate accepted control");
@@ -131,6 +142,9 @@ test("changed topology faces remain pending for old-field transfer while exact c
   assert.doesNotMatch(directStructuredVelocityPublicationWGSL,
     /fn carryValue\([^)]*\)->f32/,
     "zero must no longer be indistinguishable from an exactly carried physical zero");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /marker<=\.5\)\{local\[4u\]\+=1u;[\s\S]*worksetBase\(4u\)[\s\S]*publicationDispatch\[18u\]/,
+    "changed faces must publish a compact candidate-only workset and indirect command");
 });
 
 test("Dawn Metal compiles every direct structured publication stage", {

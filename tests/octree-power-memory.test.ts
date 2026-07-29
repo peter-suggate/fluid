@@ -90,8 +90,8 @@ test("global fine capacity uses 2D dispatch and never silently shrinks the physi
   assert.throws(() => resolveGlobalFineBrickCapacity(400_000, 262_145, 65_535, 64, 256 * 1024 * 1024, 64, 8),
     /exceeds the sparse binding\/dispatch limit/);
   assert.throws(() => resolveGlobalFineBrickCapacity(213_648, 0, 65_535), /positive integer/);
-  assert.equal(estimateGlobalFineNarrowBandBrickCapacity([60, 45, 40], 7), 50_625);
-  assert.equal(estimateGlobalFineNarrowBandBrickCapacity([120, 90, 80], 12), 337_500);
+  assert.equal(estimateGlobalFineNarrowBandBrickCapacity([60, 45, 40], 7), 60_750);
+  assert.equal(estimateGlobalFineNarrowBandBrickCapacity([120, 90, 80], 12), 405_000);
 });
 
 test("global fine capacity is an explicit surface-area times band plan", () => {
@@ -101,9 +101,9 @@ test("global fine capacity is an explicit surface-area times band plan", () => {
     maximumInterfaceAreaBricks: 2_700,
     bandLayers: 15,
     bandBrickCount: 40_500,
-    surfaceGrowthSafety: 1.25,
-    surfaceGrowthHeadroomBricks: 10_125,
-    maximumResidentBricks: 50_625,
+    surfaceGrowthSafety: 1.5,
+    surfaceGrowthHeadroomBricks: 20_250,
+    maximumResidentBricks: 60_750,
   });
   const doubled = planGlobalFineNarrowBandBrickCapacity([120, 90, 80], 7);
   assert.equal(doubled.maximumResidentBricks, 4 * balanced.maximumResidentBricks,
@@ -112,6 +112,23 @@ test("global fine capacity is an explicit surface-area times band plan", () => {
   const clipped = planGlobalFineNarrowBandBrickCapacity([4, 3, 2], 7);
   assert.equal(clipped.maximumResidentBricks, clipped.logicalBrickCount,
     "a band wider than a tiny domain may conservatively cover that whole domain");
+});
+
+test("the Section 5 fine band retains a rolling ocean surface through advection", () => {
+  // Aanjaneya et al. 2017, Section 5
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) assumes that the fine
+  // SPGrid surrounding the free surface is updated at every advection step.
+  // It does not assume the surface stays planar. The capacity policy must
+  // therefore include deformation headroom instead of reserving only the
+  // initial area-times-band estimate. Dawn reaches 679,613 desired pages as
+  // the authored ocean slab rolls over; the former 1.25 policy held 652,800
+  // and violated that retained-fine-authority assumption.
+  const ocean = planGlobalFineNarrowBandBrickCapacity([320, 96, 80], 8);
+  assert.equal(ocean.bandBrickCount, 522_240);
+  assert.equal(ocean.surfaceGrowthSafety, 1.5);
+  assert.equal(ocean.maximumResidentBricks, 783_360);
+  assert.ok(ocean.maximumResidentBricks >= 679_613,
+    "the evolving Section 5 surface band must remain resident at the reproduced Dawn crest");
 });
 
 test("fine summary budgets a bounded sparse paged directory and compact active mip", () => {

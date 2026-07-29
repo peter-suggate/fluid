@@ -244,6 +244,23 @@ export function buildSvoEnvironmentLighting(
   return { record, packedRecord, staticRevision, cacheKey: `svo-environment-lighting-v${SVO_ENVIRONMENT_LIGHTING_VERSION}:${environmentId}:${staticRevision}` };
 }
 
+/**
+ * The environment's own ambient radiance, with no geometry in it. This is what
+ * a frame should show while the sparse world is still being published: the room
+ * has not resolved yet, but the light in it is already the authored light, so
+ * the first published frame arrives as a reveal rather than a cut from a
+ * different scene.
+ */
+export function svoEnvironmentAmbientBackgroundLinear(
+  environmentId: EnvironmentId,
+  options: SvoEnvironmentLightingOptions = {},
+): readonly [number, number, number] {
+  const record = svoEnvironmentLightingRecord(environmentId, 1, options);
+  const { lowerRadianceLinear: lower, upperRadianceLinear: upper, diffuseScale } = record;
+  const blend = (channel: 0 | 1 | 2) => Math.max(0, 0.5 * (lower[channel] + upper[channel]) * diffuseScale);
+  return Object.freeze([blend(0), blend(1), blend(2)] as const);
+}
+
 /** Binding-free mirror for one selected environment record. */
 export const svoEnvironmentLightingWGSL = /* wgsl */ `
 struct SvoEnvironmentLightingRecord{lowerDiffuse:vec4f,upperSpecular:vec4f,accentPower:vec4f,keyColorIntensity:vec4f,keyDirectionSharpness:vec4f,identity:vec4u}

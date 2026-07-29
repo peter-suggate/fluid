@@ -16,8 +16,13 @@ import {
   octreeCompensatedF32WGSL,
   octreePipelinedMGPCGActivityShader,
   octreePipelinedMGPCGColdStartEnabled,
+  octreePipelinedMGPCGTemporalPredictorEnabled,
+  octreePipelinedMGPCGTemporalPredictorAlpha,
+  octreePipelinedMGPCGTemporalPredictorMode,
+  octreePipelinedMGPCGFixedTemporalSeedShader,
   octreePipelinedMGPCGSeedVariantShader,
   octreePipelinedMGPCGShader,
+  octreeTemporalPressurePredictorShader,
   planOctreePipelinedMGPCG,
 } from "../lib/webgpu-octree-pipelined-mgpcg";
 import {
@@ -255,6 +260,34 @@ test("cold start is an opt-in measurement arm and off is byte-identical", () => 
     "the default base must remain the production shader");
   assert.equal(octreePipelinedMGPCGActivityShader(disabled, cold), cold,
     "an explicit base must survive the disabled activity variant byte-for-byte");
+});
+
+test("rank-one temporal prediction is opt-in and restarts ordinary PCG", () => {
+  assert.equal(octreePipelinedMGPCGTemporalPredictorEnabled({}), false);
+  assert.equal(octreePipelinedMGPCGTemporalPredictorEnabled(
+    { FLUID_OCTREE_PRESSURE_TEMPORAL_PREDICTOR: "1" }), true);
+  assert.equal(octreePipelinedMGPCGTemporalPredictorMode(
+    { FLUID_OCTREE_PRESSURE_TEMPORAL_PREDICTOR: "1" }), "fixed");
+  assert.equal(octreePipelinedMGPCGTemporalPredictorMode(
+    { FLUID_OCTREE_PRESSURE_TEMPORAL_PREDICTOR: "current-operator" }),
+  "current-operator");
+  assert.equal(octreePipelinedMGPCGTemporalPredictorAlpha({}), 0.25);
+  const fixed = octreePipelinedMGPCGFixedTemporalSeedShader(
+    octreePipelinedMGPCGShader, 0.25,
+  );
+  assert.match(fixed, /@binding\(17\).*pressureHistory/);
+  assert.match(fixed, /let temporalAlpha = 0\.25 \* clamp\(f32\(temporalAge\) \/ 64\.0/);
+  assert.match(fixed, /let predicted = seed \+ temporalAlpha \* select/);
+  assert.match(octreeTemporalPressurePredictorShader,
+    /direction\[row\] = select\(0\.0, history, finite\(history\)\)/);
+  assert.match(octreeTemporalPressurePredictorShader,
+    /local\.numerator = d \* r;[\s\S]*local\.curvature = d \* ad;/);
+  assert.match(octreeTemporalPressurePredictorShader,
+    /let candidate = total\.numerator \/ total\.curvature;/);
+  assert.match(octreeTemporalPressurePredictorShader,
+    /pressure\[row\] = predicted;[\s\S]*residual\[row\] = predictedResidual;/);
+  assert.doesNotMatch(octreeTemporalPressurePredictorShader, /\bbeta\b/,
+    "the temporal direction must end before fixed-preconditioner PCG starts");
 });
 
 test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-safe", () => {
@@ -690,7 +723,7 @@ test("Dawn executes a manufactured one-row solve through direct-curvature PCG", 
     for (let level = 0; level < 2; level += 1) {
       const base = level * 12; spgridDispatch[base] = 1; spgridDispatch[base + 8] = 1;
       spgridDispatch.set([1, 1, 1], base + 2);
-      spgridDispatch.set([0, 1, 1], base + 5);
+      spgridDispatch.set([level + 1 < 2 ? 1 : 0, 1, 1], base + 5);
       spgridDispatch.set([1, 1, 1], base + 9);
     }
     for (let iteration = 0; iteration < solver.plan.maximumIterations; iteration += 1) {

@@ -12,6 +12,7 @@ import {
 function control(input: {
   flags?: number; converged?: boolean; iterations?: number; rows?: number;
   residualSquared?: number; rhsSquared?: number;
+  firstErrorStage?: number; firstErrorRow?: number;
 } = {}) {
   const words = new Uint32Array(16);
   const floats = new Float32Array(words.buffer);
@@ -19,6 +20,8 @@ function control(input: {
   words[1] = (input.converged ?? true) ? 1 : 0;
   words[2] = input.iterations ?? 7;
   words[4] = input.rows ?? 42;
+  words[6] = input.firstErrorStage ?? 0;
+  words[7] = input.firstErrorRow ?? 0xffff_ffff;
   floats[10] = input.residualSquared ?? 1e-10;
   floats[11] = 1e-18;
   floats[8] = input.rhsSquared ?? 1;
@@ -32,9 +35,33 @@ test("MGPCG smoke diagnostics decode the GPU control ABI", () => {
   assert.equal(decoded.converged, true);
   assert.equal(decoded.iterations, 7);
   assert.equal(decoded.rows, 42);
+  assert.equal(decoded.firstErrorStage, 0);
+  assert.equal(decoded.firstErrorRow, 0xffff_ffff);
   assert.ok(Math.abs(decoded.relativeResidualSquared - 1.00000001e-10) < 1e-16);
   assert.ok(Math.abs(decoded.relativeResidual - Math.sqrt(1.00000001e-10)) < 1e-10);
   assert.equal(octreeMGPCGDiagnosticsAreAcceptable(decoded), true);
+});
+
+test("MGPCG diagnostics distinguish a Section 4.3 M1 rejection from a Krylov positivity rejection", () => {
+  // Aanjaneya et al. 2017, Section 4.3
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) assumes M1 and therefore
+  // the composed fixed preconditioner M are symmetric positive definite. A
+  // stage in the V-cycle (76+) and the outer r^T M r gate (stage 5) are both
+  // terminal evidence against that assumption, but they identify different
+  // defects and must remain distinguishable in the Dawn regression.
+  const m1 = decodeOctreeMGPCGDiagnostics(control({
+    flags: 8, converged: false, firstErrorStage: 79, firstErrorRow: 123,
+  }));
+  assert.equal(m1.firstErrorStage, 79);
+  assert.equal(m1.firstErrorRow, 123);
+  assert.equal(octreeMGPCGDiagnosticsAreAcceptable(m1), false);
+
+  const krylov = decodeOctreeMGPCGDiagnostics(control({
+    flags: 8, converged: false, firstErrorStage: 5,
+  }));
+  assert.equal(krylov.firstErrorStage, 5);
+  assert.equal(krylov.firstErrorRow, 0xffff_ffff);
+  assert.equal(octreeMGPCGDiagnosticsAreAcceptable(krylov), false);
 });
 
 test("MGPCG smoke acceptance fails closed on errors, rejection, empty rows, and residual misses", () => {

@@ -18,7 +18,13 @@ export const OCTREE_SECTION63_CHANNELS = 19 as const;
 
 export const OCTREE_STRUCTURED_GPU_VALID = 0x5356_454c;
 export const OCTREE_STRUCTURED_GPU_CONTROL_BYTES = 128;
+export const OCTREE_STRUCTURED_GPU_TRANSFER_LIST_OFFSET_WORDS =
+  OCTREE_STRUCTURED_GPU_CONTROL_BYTES / 4;
 export const OCTREE_STRUCTURED_GPU_WORKSET_HEADER_WORDS = 7;
+/** Candidate-only indirect record for the compact changed-face transfer set. */
+export const OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES = 72;
+const OCTREE_STRUCTURED_GPU_DISPATCH_BYTES =
+  OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES + 12;
 
 export const OCTREE_STRUCTURED_GPU_ERROR = Object.freeze({
   source: 1 << 0,
@@ -130,9 +136,29 @@ export function planStructuredVelocityGPU(rowCapacityValue: number,
     rowCapacity, maximumCaseSlots, slotCapacity, authorityWords: words, authorityBytes,
     worksetStrideWords, worksetBytes,
     allocatedBytes: 2 * authorityBytes + 2 * worksetBytes + 2 * OCTREE_STRUCTURED_GPU_CONTROL_BYTES
-      + 4 * rowCapacity * 16 + 2 * rowCapacity * OCTREE_SECTION63_CHANNELS * 4 + 256 + 72,
+      + slotCapacity * 4
+      + 4 * rowCapacity * 16 + 2 * rowCapacity * OCTREE_SECTION63_CHANNELS * 4 + 256
+      + OCTREE_STRUCTURED_GPU_DISPATCH_BYTES,
     offsets: Object.freeze(offsets) as StructuredVelocityGPUPlan["offsets"],
   });
+}
+
+/**
+ * Largest 256-row arena whose packed A/B authority remains one valid storage
+ * binding.  The structured publisher deliberately binds both banks together
+ * so candidate shaders can carry accepted values without another storage
+ * binding; the pressure capacity therefore has to be negotiated before any of
+ * the row-indexed solver resources are allocated.
+ */
+export function structuredVelocityRowCapacityForBindingLimit(
+  maximumBindingBytesValue: number,
+  maximumCaseSlotsValue: number = OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence,
+  rowAlignment = 256,
+): number {
+  const maximumBindingBytes = positive(maximumBindingBytesValue, "Structured velocity storage binding limit");
+  const alignment = positive(rowAlignment, "Structured velocity row alignment");
+  const bytesPerBankRow = planStructuredVelocityGPU(1, maximumCaseSlotsValue).authorityBytes;
+  return Math.floor(Math.floor(maximumBindingBytes / (2 * bytesPerBankRow)) / alignment) * alignment;
 }
 
 export interface DirectStructuredVelocitySource {
@@ -229,7 +255,14 @@ export class WebGPUDirectStructuredVelocityAuthority {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.authorityA = device.createBuffer({ label: "Packed A/B structured velocity authority", size: 2 * this.plan.authorityBytes, usage: storage });
     this.control = device.createBuffer({ label: "Accepted structured velocity publication control", size: OCTREE_STRUCTURED_GPU_CONTROL_BYTES, usage: storage });
-    this.candidateControl = device.createBuffer({ label: "Candidate structured velocity publication control", size: OCTREE_STRUCTURED_GPU_CONTROL_BYTES, usage: storage });
+    // The trailing runtime array mirrors the compact class-4 transfer list.
+    // Dynamics already binds this fail-closed transaction, keeping transfer
+    // within Metal's ten-storage-buffer limit without a capacity dispatch.
+    this.candidateControl = device.createBuffer({
+      label: "Candidate structured velocity publication control and changed-face list",
+      size: OCTREE_STRUCTURED_GPU_CONTROL_BYTES + this.plan.slotCapacity * 4,
+      usage: storage,
+    });
     this.rowVelocitiesA = device.createBuffer({ label: "Packed A/B structured cell velocities", size: 2 * this.plan.rowCapacity * 16, usage: storage });
     this.rowVelocitiesB = this.rowVelocitiesA;
     this.section63Coefficients = device.createBuffer({
@@ -243,7 +276,8 @@ export class WebGPUDirectStructuredVelocityAuthority {
       size: 2 * this.plan.rowCapacity * 16, usage: storage });
     this.params = device.createBuffer({ label: "Direct structured velocity parameters", size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.liveRowDispatch = device.createBuffer({ label: "Structured publication and accepted class dispatches", size: 72,
+    this.liveRowDispatch = device.createBuffer({ label: "Structured publication and accepted class dispatches",
+      size: OCTREE_STRUCTURED_GPU_DISPATCH_BYTES,
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE
         | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const publicationProfile = performanceShaderVariant();
@@ -587,7 +621,7 @@ struct Params {
 }
 struct LeafHeader {cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,flags:u32,reserved:u32,gradient:vec4f}
 struct Metric {caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
-struct Control {flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,slotCount:u32,epoch:u32,activeBank:u32,projected:u32,entryCount:atomic<u32>,familyOffsets:array<u32,7>,reserved:array<u32,17>}
+struct Control {flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,slotCount:u32,epoch:u32,activeBank:u32,projected:u32,entryCount:atomic<u32>,familyOffsets:array<u32,7>,reserved:array<u32,17>,transferHandles:array<u32>}
 @group(0)@binding(0)var<uniform>p:Params;
 @group(0)@binding(1)var<storage,read>headers:array<LeafHeader>;
 @group(0)@binding(2)var<storage,read>metrics:array<Metric>;
@@ -709,11 +743,11 @@ fn carryValue(row:u32,neighbor:u32,family:u32,orientation:u32)->vec2f{if(control
 fn familyClass(handle:u32)->u32{let owner=authority[candidateAuthorityBase()+p.ownerOffset+handle];let neighbor=authority[candidateAuthorityBase()+p.neighborOffset+handle];var transition=metrics[owner].caseId!=0u;var boundary=neighbor==INVALID||rowClass(owner)>=2u;if(neighbor!=INVALID){transition=transition||metrics[neighbor].caseId!=0u;boundary=boundary||rowClass(neighbor)>=2u;}return select(select(5u,7u,boundary),select(6u,8u,boundary),transition);}
 var<workgroup> finalCounts:array<u32,576>;
 @compute @workgroup_size(64)fn finalizeStructuredPublication(@builtin(local_invocation_index)lane:u32){let rows=min(control.rowCount,p.rowCapacity);let slots=min(control.slotCount,p.slotCapacity);let rowChunk=(rows+63u)/64u;let rowFirst=lane*rowChunk;let rowLast=min(rowFirst+rowChunk,rows);let slotChunk=(slots+63u)/64u;let slotFirst=lane*slotChunk;let slotLast=min(slotFirst+slotChunk,slots);
-  var local:array<u32,9>;for(var row=rowFirst;row<rowLast;row+=1u){local[rowClass(row)]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){local[familyClass(handle)]+=1u;}for(var cls=0u;cls<9u;cls+=1u){finalCounts[cls*64u+lane]=local[cls];}workgroupBarrier();
+  var local:array<u32,9>;for(var row=rowFirst;row<rowLast;row+=1u){local[rowClass(row)]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){local[familyClass(handle)]+=1u;let marker=bitcast<f32>(authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]);if(marker<=.5){local[4u]+=1u;}}for(var cls=0u;cls<9u;cls+=1u){finalCounts[cls*64u+lane]=local[cls];}workgroupBarrier();
   for(var width=1u;width<64u;width<<=1u){for(var cls=0u;cls<9u;cls+=1u){var add=0u;if(lane>=width){add=finalCounts[cls*64u+lane-width];}workgroupBarrier();finalCounts[cls*64u+lane]+=add;}workgroupBarrier();}
   var prefix:array<u32,9>;if(lane>0u){for(var cls=0u;cls<9u;cls+=1u){prefix[cls]=finalCounts[cls*64u+lane-1u];}}
-  for(var row=rowFirst;row<rowLast;row+=1u){let cls=rowClass(row);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=row;prefix[cls]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){let cls=familyClass(handle);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=handle;prefix[cls]+=1u;}workgroupBarrier();
-  if(lane==0u){let clean=atomicLoad(&control.flags)==0u&&control.slotCount<=p.slotCapacity;let epoch=candidateEpoch();for(var cls=0u;cls<9u;cls+=1u){let count=finalCounts[cls*64u+63u];let groups=(count+63u)/64u;let groupsX=max(1u,min(65535u,groups));let groupsY=(groups+groupsX-1u)/groupsX;let base=worksetBase(cls);worksets[worksetBankBase()+base]=epoch;worksets[worksetBankBase()+base+1u]=count;worksets[worksetBankBase()+base+2u]=select(p.rowCapacity,p.slotCapacity,cls>=5u);worksets[worksetBankBase()+base+3u]=3u;worksets[worksetBankBase()+base+4u]=groupsX;worksets[worksetBankBase()+base+5u]=groupsY;worksets[worksetBankBase()+base+6u]=1u;if(clean&&cls<4u){let dispatch=6u+3u*cls;publicationDispatch[dispatch]=groupsX;publicationDispatch[dispatch+1u]=groupsY;publicationDispatch[dispatch+2u]=1u;}}if(clean&&epoch!=0u){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}}}
+  for(var row=rowFirst;row<rowLast;row+=1u){let cls=rowClass(row);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=row;prefix[cls]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){let cls=familyClass(handle);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=handle;prefix[cls]+=1u;let marker=bitcast<f32>(authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]);if(marker<=.5){let transferRank=prefix[4u];worksets[worksetBankBase()+worksetBase(4u)+7u+transferRank]=handle;control.transferHandles[transferRank]=handle;prefix[4u]+=1u;}}workgroupBarrier();
+  if(lane==0u){let clean=atomicLoad(&control.flags)==0u&&control.slotCount<=p.slotCapacity;let epoch=candidateEpoch();publicationDispatch[18u]=0u;publicationDispatch[19u]=1u;publicationDispatch[20u]=1u;for(var cls=0u;cls<9u;cls+=1u){let count=finalCounts[cls*64u+63u];let groups=(count+63u)/64u;let groupsX=max(1u,min(65535u,groups));let groupsY=(groups+groupsX-1u)/groupsX;let base=worksetBase(cls);worksets[worksetBankBase()+base]=epoch;worksets[worksetBankBase()+base+1u]=count;worksets[worksetBankBase()+base+2u]=select(p.rowCapacity,p.slotCapacity,cls>=4u);worksets[worksetBankBase()+base+3u]=3u;worksets[worksetBankBase()+base+4u]=groupsX;worksets[worksetBankBase()+base+5u]=groupsY;worksets[worksetBankBase()+base+6u]=1u;if(clean&&cls<=4u){let dispatch=6u+3u*cls;publicationDispatch[dispatch]=groupsX;publicationDispatch[dispatch+1u]=groupsY;publicationDispatch[dispatch+2u]=1u;}}if(clean&&epoch!=0u){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}}}
 
 @compute @workgroup_size(64)fn reconstructStructuredCellVelocity(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var canonical=vec3f(0.0);for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];if(handle==INVALID||handle>=control.slotCount){rowVelocities[rowBankBase()+row]=vec4f(0.0);return;}let sample=f32(bitcast<i32>(authority[candidateAuthorityBase()+p.rowSignOffset+at]))*bitcast<f32>(authority[candidateAuthorityBase()+p.valuesOffset+handle]);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];let r=p.reconstructionOffset+3u*global;canonical+=vec3f(bitcast<f32>(dense[r]),bitcast<f32>(dense[r+1u]),bitcast<f32>(dense[r+2u]))*sample;}let hrow=headers[row];rowVelocities[rowBankBase()+row]=vec4f(inverseStructuredTransform(canonical,m.transformAndFlags&63u),1.0);rowGeometry[rowBankBase()+row]=vec4u(hrow.cell,hrow.size,m.caseId,m.transformAndFlags);}
 

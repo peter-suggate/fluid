@@ -38,6 +38,12 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
 
   if (id === "hose-tank") {
     scene.sceneId = "paper-figure-3-hose-filled-tank";
+    // Section 5 chooses the timestep from the effective octree resolution.
+    // The established jet can reach roughly 2.7 finest-octree cells per
+    // 1/180 s controller step, which asks the factor-4 fine characteristic to
+    // leave its certified eight-cell resident support. Keep the authored
+    // geometry and velocity, and resolve that CFL requirement temporally.
+    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 360;
     scene.container.fillFraction = 0.06;
     scene.fluid.initialCondition = "tank-fill";
     // Horizontal hose: the jet enters from the left wall and arcs into the
@@ -45,7 +51,7 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
     // injection cylinder is oriented along it), adjustable in scene config.
     scene.fluid.inflow = {
       center_m: { x: -0.40, y: 0.55, z: 0 }, radius_m: 0.08, length_m: 0.12,
-      velocity_m_s: { x: 0.80, y: 0, z: 0 }, start_s: 0, end_s: 14, ramp_s: 0.35
+      velocity_m_s: { x: 1.60, y: 0, z: 0 }, start_s: 0, end_s: 14, ramp_s: 0
     };
     scene.rigidBodies = [{
       id: "paper-hose-nozzle", name: "Hose nozzle", shape: "cylinder",

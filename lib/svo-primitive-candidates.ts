@@ -11,7 +11,16 @@ import {
 
 /** Nodes intentionally share the 64-byte primitive-record stride and binding. */
 export const SVO_PRIMITIVE_CANDIDATE_VERSION = 1;
-export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES = 64;
+/**
+ * Sized to the largest shipped scenery catalog with headroom. This was 64 while
+ * environments held ~20 authored props; once each scene described its own
+ * geometry properly the biggest catalog reached 114 primitives, and every
+ * environment but the calibration studio silently fell off the acceleration
+ * structure onto brute-force intersection. Raising it restores the BVH for all
+ * of them: the node arena, the shader's traversal bound and its work budget are
+ * all derived from this constant, so they scale with it.
+ */
+export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES = 128;
 export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES = 2 * SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES - 1;
 export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK = 16;
 export const SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL = 0xffff_ffff;

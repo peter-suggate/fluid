@@ -252,16 +252,17 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.match(initialize, /binding:8,visibility:GPUShaderStage\.COMPUTE,buffer:\{type:"read-only-storage"\}/,
     "production layout must bind the selected fine slot's publication worklist");
   assert.match(globalFineSurfaceClassificationShader,
-    /fineTopologyControl\[0\]==0u&&fineTopologyControl\[4\]==1u&&fineTopologyControl\[5\]==0u&&fineTopologyControl\[7\]==0u/,
-    "global publication requires a clean current-slot transaction");
+    /let clean=topologyFlags==0u&&fineTopologyControl\[4\]==1u&&fineTopologyControl\[5\]==0u&&topologyReason==0u/,
+    "global publication recognizes a clean current-slot transaction");
   assert.match(globalFineSurfaceClassificationShader,
     /fineWorklist\[2\]==params\.table\.z&&\(fineWorklist\[3\]&3u\)==3u[\s\S]*fineWorklist\[4\]==\(count\+63u\)\/64u&&fineWorklist\[5\]==1u&&fineWorklist\[6\]==1u/,
     "global publication requires the selected fine worklist to be complete and published");
   assert.match(globalFineSurfaceClassificationShader,
-    /\(powerCoarseSamples\.generation&0x3fffffffu\)==generation/,
-    "global publication requires exact same-generation compact coarse authority");
-  assert.doesNotMatch(globalFineSurfaceClassificationShader, /rollback|coarseGeneration\+1u/,
-    "a rejected rollback transaction must retain the prior mesh, not become a mixed render epoch");
+    /\(clean&&coarseGeneration==generation\)\|\|retained/,
+    "a clean publication requires equal generations while an explicit rollback retains the independent octree");
+  assert.match(globalFineSurfaceClassificationShader,
+    /let retained=fineTopologyControl\[4\]==1u&&fineTopologyControl\[5\]==1u[\s\S]*topologyFlags&~0x1fu[\s\S]*topologyReason&~0x0fu/,
+    "the Section-5 two-mesh fallback accepts only a known, explicit rollback transaction");
   assert.equal((globalFineSurfaceClassificationShader.match(/@group\(0\)@binding\(8\)/g) ?? []).length, 1,
     "the publication worklist consumes the classifier's tenth and final storage binding");
   assert.doesNotMatch(globalFineSurfaceClassificationShader, /atomicLoad\(&powerCoarseSamples/,

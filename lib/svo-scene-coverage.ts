@@ -107,15 +107,23 @@ interface ProceduralForegroundGap {
   reason: "screen-space-foreground" | "screen-space-vignette" | "screen-space-particles";
 }
 
+/**
+ * Every environment once painted a screen-space foreground in NDC — botanical
+ * framing, a vignette, drifting dust, swaying grass. None of it parallaxed,
+ * occluded or took light, so it read as a decal stuck to the lens. All of it is
+ * now analytic scenery in lib/voxel-scenery, which is why this table is empty:
+ * an entry here means an environment has gone back to painting instead of
+ * building, and the coverage audit should fail it.
+ */
 const PROCEDURAL_FOREGROUND_GAPS: Readonly<Record<EnvironmentId, readonly ProceduralForegroundGap[]>> = Object.freeze({
-  conservatory: [{ key: "conservatory/foreground/botanical-framing", reason: "screen-space-foreground" }],
-  courtyard: [{ key: "courtyard/foreground/citrus-framing", reason: "screen-space-foreground" }],
-  "night-lab": [{ key: "night-lab/foreground/vignette", reason: "screen-space-vignette" }],
-  "concrete-gallery": [{ key: "concrete-gallery/foreground/slab-dust", reason: "screen-space-particles" }],
-  bathhouse: [{ key: "bathhouse/foreground/post-cloth", reason: "screen-space-foreground" }],
-  "research-station": [{ key: "research-station/foreground/frame-drift", reason: "screen-space-particles" }],
+  conservatory: [],
+  courtyard: [],
+  "night-lab": [],
+  "concrete-gallery": [],
+  bathhouse: [],
+  "research-station": [],
   default: [],
-  garden: [{ key: "garden/foreground/grass-sun-bloom", reason: "screen-space-foreground" }],
+  garden: [],
 });
 
 function dimensions(proxy: EnvironmentProxyPrimitive): readonly [number, number, number] {

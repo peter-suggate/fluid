@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bodySelection,
+  CLICK_SLOP_PX,
   DEFAULT_EDITOR_TOOL,
   EDITOR_TOOLS,
   editorToolForShortcut,
   editorToolIsActive,
+  emptySpaceClickDeselects,
   getEditorTool,
   selectedBodyIdOf,
 } from "../lib/editor-tools";
@@ -25,6 +27,32 @@ test("select is the default tool and is always implemented", () => {
   assert.equal(DEFAULT_EDITOR_TOOL, "select");
   assert.equal(editorToolIsActive("select"), true);
   assert.equal(useUIStore.getInitialState().activeTool, "select");
+});
+
+test("the viewport opens on an empty selection so the first drag is the camera", () => {
+  const initial = useUIStore.getInitialState();
+  assert.equal(initial.selection, undefined);
+  assert.equal(initial.selectedBodyId, undefined);
+});
+
+test("a background click deselects, a camera drag keeps the selection", () => {
+  // A click never travels far; anything beyond the slop is a camera gesture
+  // and must not throw away what the user is holding.
+  assert.equal(emptySpaceClickDeselects("orbit", 0, 0), true);
+  assert.equal(emptySpaceClickDeselects("orbit", CLICK_SLOP_PX, 0), true);
+  assert.equal(emptySpaceClickDeselects("orbit", -CLICK_SLOP_PX, 0), true);
+  assert.equal(emptySpaceClickDeselects("orbit", CLICK_SLOP_PX + 1, 0), false);
+  assert.equal(emptySpaceClickDeselects("orbit", 0, CLICK_SLOP_PX + 1), false);
+  // Diagonal travel is measured as distance, not per-axis.
+  assert.equal(emptySpaceClickDeselects("orbit", CLICK_SLOP_PX, CLICK_SLOP_PX), false);
+
+  // Pan is asked for explicitly with shift or the middle button, so it is
+  // navigation rather than a pick and never touches the selection.
+  assert.equal(emptySpaceClickDeselects("pan", 0, 0), false);
+});
+
+test("the select tool tells the user how to let go of a selection", () => {
+  assert.match(getEditorTool("select").hint, /deselect/);
 });
 
 test("unimplemented tools declare the plan phase that lands them", () => {

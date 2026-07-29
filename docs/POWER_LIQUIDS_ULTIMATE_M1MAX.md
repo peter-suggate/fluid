@@ -195,17 +195,14 @@ violation surfaces as pipeline-creation failure on Dawn.
 These were each proposed and then refuted by measurement or analysis.
 Recorded so the implementer does not rediscover them.
 
-1. **Narrowing the fine band at the current scene sizes.** The ring count
-   is `ceil(max(backtrace+interp, redistance)/4) + safetyBrickRings`;
-   the redistance width is 23 (mini) and shrinking it to the residency
-   floor of 21 still yields 7 rings. The `+3` inside
-   `redistanceBandFineCells` is derived geometry (trilinear corner reach
-   for departure-point sampling), not slack; the departure sampler fails
-   closed if φ validity is narrower than it assumes. Under-covering the
-   band causes the topology publication to be rejected and rolled back
-   every step — the surface freezes, the frame gets faster, and the run
-   still prints PASS. Band sparsity only becomes real on much larger
-   domains.
+1. **Shrinking redistance and topology as if they were one radius.** Physical
+   redistance now ends at `transport`, but topology must independently
+   cover `transport + backtrace + interpolation`. Its required radius credits
+   the mandatory final safety ring only after proving that complete residency
+   floor. Under-covering it rejects and rolls back topology — the surface
+   freezes, the frame gets faster, and a run without per-generation tripwires
+   can still print PASS. Immutable page capacity deliberately retains the
+   former conservative envelope; reserved pages do not become active work.
 2. **Staging transport field data into workgroup memory.** The
    backtrace reach is 8 fine cells + 1 interpolation cell, so one staged
    φ channel needs a 22³ tile = 42,592 bytes against the 16,384-byte

@@ -13,13 +13,13 @@ test("renderer modes use sparse voxels as the WebGPU default and retain raster a
 
 test("visual controls clearly separate production renderer choice from debug representation", () => {
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /aria-label="Scene renderer"/);
-  assert.match(panel, /setSvoRenderMode\("raster"\)[^]*>Raster<\/button>/);
-  assert.match(panel, /setSvoRenderMode\("svo"\)[^]*>Sparse voxels<\/button>/);
-  assert.match(panel, /setVoxelRenderMode\("raw-voxels"\)[^]*>Raw voxels<\/button>/);
-  assert.match(panel, /setVoxelRenderMode\("surface-voxels"\)[^]*>Finest surface<\/button>/);
-  assert.match(panel, /aria-label="SVO lighting quality"[^]*setSvoLightingMode\("direct"\)[^]*>Direct<\/button>[^]*setSvoLightingMode\("cone"\)[^]*>Beautiful<\/button>/);
-  assert.match(panel, /aria-label="SVO lighting effects"[^]*setSvoShadowsEnabled[^]*>Shadows<\/button>[^]*setSvoAmbientOcclusionEnabled[^]*>Ambient occlusion<\/button>/);
+  assert.match(panel, /aria-label="Renderer"/);
+  assert.match(panel, /selectRenderer\("svo"\)[^]*>SVO<\/button>/);
+  assert.match(panel, /selectRenderer\("raster"\)[^]*>RASTER<\/button>/);
+  assert.match(panel, /selectRepresentation\("raw-voxels"\)[^]*>RAW<\/button>/);
+  assert.match(panel, /selectRepresentation\("surface-voxels"\)[^]*>SURFACE<\/button>/);
+  assert.match(panel, /aria-label="SVO lighting quality"[^]*setSvoLightingMode\("direct"\)[^]*>DIRECT<\/button>[^]*setSvoLightingMode\("cone"\)[^]*>BEAUTIFUL<\/button>/);
+  assert.match(panel, /aria-label="SVO lighting effects"[^]*setSvoShadowsEnabled[^]*>SHADOWS<\/button>[^]*setSvoAmbientOcclusionEnabled[^]*>AO<\/button>/);
 });
 
 test("scene configuration exposes the unified voxel lattice instead of method-level columns", () => {

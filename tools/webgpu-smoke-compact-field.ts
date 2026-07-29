@@ -35,6 +35,10 @@ export interface CompactOctreeFieldEvidence {
   readonly negativeValidSamples: number;
   readonly positiveValidSamples: number;
   readonly publicationValid: boolean;
+  readonly coarseGeneration: number;
+  /** True when the current fine SPGrid intentionally uses the last committed
+   * background octree after a rejected adaptation transaction. */
+  readonly retainedCoarseAuthority: boolean;
   readonly topologyFlags?: number;
   readonly topologyPublished?: boolean;
   readonly topologyRolledBack?: boolean;
@@ -120,13 +124,15 @@ export interface CompactOctreeFieldReconstruction extends CompactOctreeFieldEvid
 
 /** Required factor-4 acceptance proof; a plausible coarse-only field is insufficient. */
 export function compactOctreeFieldEvidenceIsAcceptable(evidence: CompactOctreeFieldEvidence): boolean {
+  const cleanCurrentTopology = evidence.topologyFlags === 0
+    && evidence.topologyPublished === true && evidence.topologyRolledBack === false
+    && evidence.downstreamFinalizeReason === 0;
   return evidence.publicationValid
     && evidence.activePages > 0 && evidence.malformedActivePages === 0
     && evidence.validSamples > 0 && evidence.finiteValidSamples === evidence.validSamples
     && evidence.negativeValidSamples > 0 && evidence.positiveValidSamples > 0
     && evidence.fineSamples > 0 && evidence.coarseSamples > 0
-    && evidence.topologyFlags === 0 && evidence.topologyPublished === true
-    && evidence.topologyRolledBack === false && evidence.downstreamFinalizeReason === 0;
+    && (cleanCurrentTopology || evidence.retainedCoarseAuthority);
 }
 
 /** Header-only evidence is safe to report even when a publication is invalid. */
@@ -430,6 +436,8 @@ export function reconstructCompactOctreeOccupancyField(
       && (snapshot.worklist[3] & 3) === 3 && snapshot.worklist[5] === 1 && snapshot.worklist[6] === 1
       && activePages > 0 && malformedActivePages === 0
       && validSamples > 0 && finiteValidSamples === validSamples,
+    coarseGeneration: snapshot.coarseDirectory[1],
+    retainedCoarseAuthority: topology?.[4] === 1 && topology?.[5] === 1,
     ...(topology ? { topologyFlags: topology[0], topologyPublished: topology[4] !== 0,
       topologyRolledBack: topology[5] !== 0, downstreamFinalizeReason: topology[7] } : {}),
   };

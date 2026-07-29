@@ -71,6 +71,10 @@ export interface OctreeSparseBrickWorldOptions {
    * brick-granular.
    */
   topologyTileBricks?: number;
+  /** Retain dry pressure-wall tiles and their grading support for owner pages. */
+  includePressureBoundarySupport?: boolean;
+  pressureBoundaryTopClosed?: boolean;
+  includeWholeDomainPressureSupport?: boolean;
 }
 
 export interface OctreeSparseBrickDenseFields {
@@ -384,6 +388,17 @@ fn materializeBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocatio
 }
 `;
 
+/**
+ * Fields a static-world publication makes valid. Producers without a dense
+ * fluid payload — the octree lane, whose water is presented by raster
+ * extraction — publish exactly this set, which must remain a superset of
+ * `SVO_DRY_SCENE_REQUIRED_VALID_FIELDS` for the dry renderer to trace at all.
+ */
+export const OCTREE_SPARSE_BRICK_STATIC_VALID_FIELDS =
+  SPARSE_VOXEL_VALID_FIELDS.topology
+  | SPARSE_VOXEL_VALID_FIELDS.staticGeometry
+  | SPARSE_VOXEL_VALID_FIELDS.materialOwner;
+
 const structuralPublicationFinalizeShader = /* wgsl */ `
 @group(0) @binding(0) var<storage, read_write> state: array<u32>;
 
@@ -395,6 +410,14 @@ const VALID_FIELDS: u32 = ${
   SPARSE_VOXEL_VALID_FIELDS.velocity |
   SPARSE_VOXEL_VALID_FIELDS.materialOwner
 }u;
+
+// The static-world publication carries exactly the immutable lattice: the
+// canonical topology, the authored-scenery signed distance, and the
+// material/owner identity written by the proxy voxelizer. Fluid, velocity and
+// dynamic-solid payloads are deliberately absent, so their validity bits stay
+// clear and every consumer that needs them rejects this generation instead of
+// reading a buffer nobody filled.
+const STATIC_VALID_FIELDS: u32 = ${OCTREE_SPARSE_BRICK_STATIC_VALID_FIELDS}u;
 
 fn finishFrame(first: bool) {
   if (first) {
@@ -416,6 +439,16 @@ fn finalizeInitial() { finishFrame(true); }
 
 @compute @workgroup_size(1)
 fn finalizeFrame() { finishFrame(false); }
+
+@compute @workgroup_size(1)
+fn finalizeStatic() {
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}] = 1u;
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}] = 1u;
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}] = STATIC_VALID_FIELDS;
+  // Last, for the same reason as finishFrame: the topology publication and the
+  // proxy voxelization encoded before this pass are one complete snapshot.
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}] += 1u;
+}
 `;
 
 /**
@@ -463,6 +496,7 @@ export class OctreeSparseBrickWorld {
   private readonly structuralPublicationState: GPUBuffer;
   private readonly structuralInitialPipeline: GPUComputePipeline;
   private readonly structuralFramePipeline: GPUComputePipeline;
+  private readonly structuralStaticPipeline: GPUComputePipeline;
   private readonly structuralFinalizeBindGroup: GPUBindGroup;
   private readonly proxyVoxelizer: SparseSceneProxyVoxelizer;
   private readonly wideFanout?: WebGPUSvoWideFanout;
@@ -568,6 +602,9 @@ export class OctreeSparseBrickWorld {
         haloCells: options.haloCells ?? 2,
         retireAfterFrames: 3,
         includeLiquidInterior: true,
+        includePressureBoundarySupport: options.includePressureBoundarySupport,
+        pressureBoundaryTopClosed: options.pressureBoundaryTopClosed,
+        includeWholeDomainPressureSupport: options.includeWholeDomainPressureSupport,
         leafIndices,
         leafCapacity: this.tree.leafCapacity,
         topologyTileBricks: options.topologyTileBricks ?? 1,
@@ -660,6 +697,11 @@ export class OctreeSparseBrickWorld {
       label: "Finalize sparse voxel structural frame",
       layout: structuralPipelineLayout,
       compute: { module: structuralModule, entryPoint: "finalizeFrame" },
+    });
+    this.structuralStaticPipeline = device.createComputePipeline({
+      label: "Finalize static sparse voxel structural publication",
+      layout: structuralPipelineLayout,
+      compute: { module: structuralModule, entryPoint: "finalizeStatic" },
     });
     this.structuralFinalizeBindGroup = device.createBindGroup({
       label: "Sparse voxel structural publication finalizer bindings",
@@ -868,6 +910,34 @@ export class OctreeSparseBrickWorld {
       allocatedBytes: buffers.reduce((sum, buffer) => sum + buffer.size, 0),
     };
     return source;
+  }
+
+  /**
+   * Publish the immutable static world — canonical topology plus the authored
+   * scenery voxelization — with no dense fluid payload. Water presentation is
+   * owned by raster extraction, so a producer that never fills the dense
+   * level-set/velocity/solid textures still owes the dry-scene renderer this
+   * publication: without it `publicationState.completeGeneration` stays zero
+   * and every static primary ray misses, leaving analytic glass and rigid
+   * bodies alone on a black frame.
+   *
+   * Idempotent: the first call encodes the topology, the proxy voxelization
+   * and the finalize pass; later calls are no-ops, so a per-frame caller pays
+   * nothing after bring-up. Returns whether this call encoded the publication.
+   */
+  encodeStaticPublication(encoder: GPUCommandEncoder): boolean {
+    if (this.destroyed || this.published) return false;
+    this.tree.encodePublish(encoder, this.source);
+    this.published = true;
+    this.proxyVoxelizer.encode(encoder);
+    this.proxiesPublished = true;
+    const broker = new PassBroker(encoder);
+    const finalizer = broker.compute({ label: "Finalize static sparse voxel structural publication" });
+    finalizer.setPipeline(this.structuralStaticPipeline);
+    finalizer.setBindGroup(0, this.structuralFinalizeBindGroup);
+    finalizer.dispatchWorkgroups(1);
+    broker.fence("static sparse structural publication finalized");
+    return true;
   }
 
   encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, dt_s = 0): void {

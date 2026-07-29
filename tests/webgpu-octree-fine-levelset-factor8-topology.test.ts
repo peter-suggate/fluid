@@ -105,8 +105,8 @@ test("Dawn production-width factor-8 topology publishes the complete twelve-ring
     device.limits.maxComputeWorkgroupsPerDimension, 64,
     Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize), 64,
   );
-  assert.equal(maximumResidentBricks, 337_500,
-    "the production physical-band plan reserves 25 layers plus 25% surface-growth headroom");
+  assert.equal(maximumResidentBricks, 405_000,
+    "the production physical-band plan reserves 25 layers plus 50% surface-growth headroom");
   const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [60, 45, 40],
     finestCellWidth: 1, fineFactor: 8, brickResolution: 4, maximumResidentBricks });
   const owner = new WebGPUFineLevelSetBricks(device, plan);

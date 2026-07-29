@@ -41,6 +41,8 @@ export interface OctreeTopologyEpochGPUResources {
   readonly candidateLeafHeaders: GPUBuffer;
   readonly acceptedLeafHeaders: GPUBuffer;
   readonly candidatePressure: GPUBuffer;
+  readonly candidatePressureHistory?: GPUBuffer;
+  readonly acceptedPressureHistory?: GPUBuffer;
   readonly pressureA: GPUBuffer;
   readonly pressureB: GPUBuffer;
   readonly rowCountControl: GPUBuffer;
@@ -50,6 +52,7 @@ export interface OctreeTopologyEpochGPUOptions {
   readonly rowCapacity: number;
   readonly slotCapacity: number;
   readonly catalogVersion: number;
+  readonly carryPressureHistory?: boolean;
 }
 
 /**
@@ -89,8 +92,12 @@ export class WebGPUOctreeTopologyEpoch {
       this.options.catalogVersion, this.options.rowCapacity, this.options.slotCapacity,
       0, 0, 0, 0, 0,
     ]));
+    if (options.carryPressureHistory
+      && (!resources.candidatePressureHistory || !resources.acceptedPressureHistory)) {
+      throw new Error("Topology epoch pressure-history carry requires both history buffers");
+    }
     const module = device.createShaderModule({ label: "Coupled octree topology epoch reduction",
-      code: octreeTopologyEpochWGSL });
+      code: octreeTopologyEpochHistoryShader(options.carryPressureHistory === true) });
     const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
       layout: "auto", compute: { module, entryPoint } });
     this.validatePipeline = make("validateInactiveTopologyEpoch");
@@ -139,6 +146,10 @@ export class WebGPUOctreeTopologyEpoch {
         { binding: 14, resource: { buffer: resources.pressureB } },
         { binding: 15, resource: { buffer: resources.rowCountControl } },
         { binding: 17, resource: { buffer: resources.structuredAcceptedControl } },
+        ...(options.carryPressureHistory ? [
+          { binding: 18, resource: { buffer: resources.candidatePressureHistory! } },
+          { binding: 19, resource: { buffer: resources.acceptedPressureHistory! } },
+        ] : []),
       ] });
   }
 
@@ -265,6 +276,22 @@ fn candidateErrors()->u32{var error=0u;let count=candidateCount();let generation
  let seed=candidatePressure[row];pressureA[row]=seed;pressureB[row]=seed;
 }
 `;
+
+export function octreeTopologyEpochHistoryShader(enabled: boolean): string {
+  if (!enabled) return octreeTopologyEpochWGSL;
+  return octreeTopologyEpochWGSL
+    .replace(
+      "@group(0)@binding(17)var<storage,read>acceptedStructured:array<u32>;",
+      "@group(0)@binding(17)var<storage,read>acceptedStructured:array<u32>;\n"
+        + "@group(0)@binding(18)var<storage,read>candidatePressureHistory:array<f32>;\n"
+        + "@group(0)@binding(19)var<storage,read_write>acceptedPressureHistory:array<f32>;",
+    )
+    .replace(
+      "let seed=candidatePressure[row];pressureA[row]=seed;pressureB[row]=seed;",
+      "let seed=candidatePressure[row];pressureA[row]=seed;pressureB[row]=seed;\n"
+        + " acceptedPressureHistory[row]=candidatePressureHistory[row];",
+    );
+}
 
 export interface OctreeTopologyCandidateReport {
   readonly epoch: number;

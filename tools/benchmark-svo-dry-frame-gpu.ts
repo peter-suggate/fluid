@@ -20,9 +20,13 @@
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25, default 0.5),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
+ *      FLUID_SVO_DRY_FRAME_SCENE (default garden-svo-lighting),
  *      FLUID_SVO_DRY_FRAME_OUT, FLUID_SVO_DRY_FRAME_CAMERA_MOVING (1 publishes
  *      the camera-changing sentinel, times the moving tier against the settled
  *      tier, and reports settle-pop luminance stats plus moving/settled PNGs).
+ *      FLUID_SVO_DRY_FRAME_PROFILE_SECONDS runs a clean, continuously submitted
+ *      render-only frame loop for external xctrace attachment and exits before
+ *      the benchmark's timestamp queries, A/Bs, or readbacks.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -66,6 +70,8 @@ const outPath = process.env.FLUID_SVO_DRY_FRAME_OUT ?? "/tmp/svo-bench/baseline.
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
+const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
+const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
 /**
  * Publish the camera-changing sentinel so the dry shader's moving-quality tier
  * is exercised, and additionally report moving-vs-settled timings, the
@@ -95,6 +101,8 @@ assert.ok(Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(heigh
 assert.ok(Number.isSafeInteger(warmups) && warmups >= 0 && Number.isSafeInteger(cycles) && cycles > 0);
 assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
 assert.ok([1, 0.5, 0.25].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, or 0.25");
+assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
+  "FLUID_SVO_DRY_FRAME_PROFILE_SECONDS must be a non-negative number");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
 
 const log = (message: string) => process.stderr.write(`${message}\n`);
@@ -243,7 +251,10 @@ function packBodies(scene: SceneDescription): { data: Float32Array<ArrayBuffer>;
 // ---------------------------------------------------------------------------
 const { create, globals } = await import(pathToFileURL(modulePath).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
 Object.assign(globalThis, globals);
-const gpu = create(["backend=metal"]);
+const dawnFeatures = (process.env.FLUID_WEBGPU_DAWN_FEATURES ?? "")
+  .split(",").map((feature) => feature.trim()).filter(Boolean);
+const gpu = create(["backend=metal",
+  ...(dawnFeatures.length > 0 ? [`enable-dawn-features=${dawnFeatures.join(",")}`] : [])]);
 const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
 assert.ok(adapter, "no Metal adapter — benchmark did not execute on the GPU");
 const adapterInfo = {
@@ -269,7 +280,7 @@ log(`Adapter: ${JSON.stringify(adapterInfo)} timestamps=${timestampsSupported}`)
 // Build the shipped garden lighting-study world (sparse bricks + node-mip
 // pyramid + wide fanout) and the exact production dry-scene data.
 // ---------------------------------------------------------------------------
-const preset = getScenePreset("garden-svo-lighting");
+const preset = getScenePreset(scenePresetId);
 const scene = preset.create();
 const camera: CameraState = { ...defaultCamera, ...preset.camera, target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m) } };
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
@@ -366,6 +377,54 @@ if (coneScale !== 1) {
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
+
+// ---------------------------------------------------------------------------
+// Clean external-profiler lane. Each frame is one command buffer containing
+// the production cone prepass and primary dry-scene render passes. There are
+// deliberately no timestamp queries, readbacks, diagnostic resolves, or
+// simulation submissions in this branch; xctrace observes the shipping graph.
+// ---------------------------------------------------------------------------
+if (profileSeconds > 0) {
+  const samples_ms: number[] = [];
+  console.log(JSON.stringify({
+    phase: "constructed",
+    scene: scenePresetId,
+    resolution: { width, height },
+    coneScale,
+  }));
+  const profileStarted = performance.now();
+  let frame = 0;
+  while (performance.now() - profileStarted < profileSeconds * 1000) {
+    const encoder = device.createCommandEncoder({ label: `SVO render frame ${frame}` });
+    encodeFrame(encoder);
+    const submitted = performance.now();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    samples_ms.push(performance.now() - submitted);
+    frame += 1;
+  }
+  const sorted = [...samples_ms].sort((left, right) => left - right);
+  const result = {
+    phase: "result",
+    scene: scenePresetId,
+    frames: samples_ms.length,
+    renderWall_ms: samples_ms.reduce((sum, value) => sum + value, 0),
+    medianFrame_ms: median(samples_ms),
+    p95Frame_ms: percentile95(samples_ms),
+    minimumFrame_ms: sorted[0] ?? 0,
+    maximumFrame_ms: sorted[sorted.length - 1] ?? 0,
+    resolution: { width, height },
+    coneScale,
+  };
+  console.log(JSON.stringify(result));
+  renderer.destroy();
+  target.destroy();
+  uniformBuffer.destroy();
+  bodyBuffer.destroy();
+  solver.destroy();
+  device.destroy();
+  process.exit(0);
+}
 
 // ---------------------------------------------------------------------------
 // Timing helpers. Samples are serialized (submit -> fence) because concurrent
@@ -756,7 +815,7 @@ const result = {
   },
   movingTier,
   scene: {
-    presetId: "garden-svo-lighting",
+    presetId: scenePresetId,
     sceneId: scene.sceneId,
     environment: environmentId,
     quality: "balanced",

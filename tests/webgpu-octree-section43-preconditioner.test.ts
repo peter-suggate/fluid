@@ -21,6 +21,7 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
   });
   const order: string[] = [];
   let bindGroupCount = 0;
+  let publishCorrectionBindings: number[] | undefined;
   const buffer = (size: number) => ({
     size,
     destroy() {},
@@ -37,7 +38,13 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
         getBindGroupLayout() { return {}; },
       };
     },
-    createBindGroup() { bindGroupCount += 1; return {}; },
+    createBindGroup(descriptor: GPUBindGroupDescriptor) {
+      bindGroupCount += 1;
+      if (descriptor.label === "Section 4.3 hybrid · publishCorrection bindings") {
+        publishCorrectionBindings = Array.from(descriptor.entries, (entry) => entry.binding);
+      }
+      return {};
+    },
   } as unknown as GPUDevice;
   const rowCount = buffer(4);
   const inner = {
@@ -122,7 +129,7 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
     "L2-apply",
     "formInnerResidual",
     "L1-correction",
-    // §4.3(3) p2 = p1 + M1 r1, then the matching k sweeps ending in hybridB.
+    // §4.3(3) p2 = p1 + M1 r1, then the matching even-k sweeps ending in B.
     "addInnerCorrection",
     ...postHalf,
     "publishCorrection",
@@ -138,6 +145,8 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
   assert.equal(hybrid.workAccountingPlan.avoidedBandDispatches, 45);
   assert.equal(order.includes("L2-band-apply"), false,
     "the compact shell no longer invokes the four-class workset path");
+  assert.deepEqual(publishCorrectionBindings, [0, 5, 7, 12, 17],
+    "even-k publication must bind the eighth-sweep hybridB destination");
   const cachedBindGroups = bindGroupCount;
   hybrid.encodeCorrection(broker, correction);
   assert.equal(bindGroupCount, cachedBindGroups,
@@ -152,6 +161,17 @@ test("Section 4.3 hybrid shader keeps a race-free zero sweep and shared shell op
   assert.match(octreeSection43HybridPreconditionerShader,
     /fn prepareCorrectionDispatches[\s\S]*gatedRowDispatch\[0\] = select\(0u, \(rows\(\) \+ 63u\) \/ 64u, solveLive\)[\s\S]*word % 3u == 0u/,
     "the shell publishes zero-x row and class records after convergence");
+  // The same local paper, Section 4.3, requires this shell and M1 to compose
+  // into one linear SPD preconditioner. At ocean scale the staged L2 shell
+  // exceeds Dawn's 65,535-workgroup X limit; dropping that stage makes the
+  // second r^T M r negative even though the algebraic schedule is symmetric.
+  assert.match(octreeSection43HybridPreconditionerShader,
+    /fn publishHybridAccurateDispatch[\s\S]*min\(65535u,blocks\)[\s\S]*\(blocks\+x-1u\)\/x/,
+    "wide shell operator stages must preserve every term with a 2D dispatch");
+  assert.match(octreeSection43HybridPreconditionerShader,
+    /publishHybridAccurateDispatch\(15u, \(unionRows \* 18u \+ 63u\) \/ 64u/);
+  assert.match(octreeSection43HybridPreconditionerShader,
+    /publishHybridAccurateDispatch\(18u, \(transitionRows \* 144u \+ 63u\) \/ 64u/);
   assert.doesNotMatch(octreeSection43HybridPreconditionerShader, /sourceRowDispatch/,
     "the accepted solve must not consume the mutable next-candidate row record");
   assert.doesNotMatch(octreeSection43HybridPreconditionerShader, /fn failed\(\)/);
@@ -179,6 +199,14 @@ test("Section 4.3 hybrid shader keeps a race-free zero sweep and shared shell op
   assert.match(octreeSection43HybridPreconditionerShader,
     /fn addInnerCorrection[\s\S]*hybridA\[row\] = value; hybridB\[row\] = value;/,
     "the domain-wide M1 correction must initialize both post-shell ping-pong states");
+  // Aanjaneya et al. 2017, Section 4.3
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) assumes the k pre- and
+  // post-sweeps form a symmetric composition around SPD M1. For even k=8 the
+  // post schedule starts B->A and ends in B, so publishing A is a seven-sweep
+  // asymmetric operator and is not an admissible implementation shortcut.
+  assert.match(octreeSection43HybridPreconditionerShader,
+    /fn publishCorrection[\s\S]*let value = hybridB\[row\]/,
+    "the even-k post-smoother must publish its eighth and final state");
   assert.match(octreeSection43HybridPreconditionerShader,
     /fn compactBandIntersections[\s\S]*atomicAdd\(&bandWorksets\[classBase \+ 1u\]/,
     "the fixed shell is compacted into exact row-class intersections");

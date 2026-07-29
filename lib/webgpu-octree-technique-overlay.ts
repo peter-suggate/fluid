@@ -71,6 +71,8 @@ fn segmentDistance3(point:vec3f,a:vec3f,b:vec3f)->f32 { let edge=b-a;let t=clamp
 fn leafOrigin(leaf:Leaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn leafContains(leaf:Leaf,pointFine:vec3f)->bool { let origin=vec3f(leafOrigin(leaf)); return leaf.size>0u&&all(pointFine>=origin)&&all(pointFine<origin+vec3f(f32(leaf.size))); }
 fn displayColor(linear:vec3f)->vec3f { let mapped=linear/(linear+vec3f(1.0));return pow(max(mapped,vec3f(0.0)),vec3f(1.0/2.2)); }
+fn compositeDisplay(accum:vec4f,linearColor:vec3f,alpha:f32)->vec4f{return composite(accum,displayColor(linearColor),alpha);}
+fn finishDisplayVolume(accum:vec4f)->vec4f{if(accum.a<=0.001){discard;}return vec4f(accum.rgb/max(accum.a,1e-6),accum.a);}
 `;
 
 export const octreeTechniqueTopologyShader = /* wgsl */ `
@@ -87,10 +89,8 @@ struct TetraVertex { value:vec4f }
 @group(0) @binding(6) var<storage,read> tetraVertices:array<TetraVertex>;
 const INVALID:u32=0xffffffffu; const VALID:u32=0x80000000u;
 fn edgeInk(point:vec2f,a:vec3f,b:vec3f,width:f32)->f32 { return 1.0-smoothstep(width,2.2*width,segmentDistance(point,slice2(fineToWorld(a)),slice2(fineToWorld(b)))); }
-fn topologyFault(pointFine:vec3f)->vec4f {
-  let cell=vec3i(clamp(floor(pointFine),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0)));
-  let row=textureLoad(ownerRows,cell,0).x;
-  if(row==INVALID||row>=arrayLength(&leaves)||row>=arrayLength(&metrics)||!leafContains(leaves[row],pointFine)){return vec4f(vec3f(1.0,0.01,0.18),0.88);}
+fn topologyFault(row:u32,pointFine:vec3f)->vec4f {
+  if(row>=arrayLength(&leaves)||row>=arrayLength(&metrics)||!leafContains(leaves[row],pointFine)){return vec4f(vec3f(1.0,0.01,0.18),0.88);}
   let metric=metrics[row];if((metric.transformAndFlags&VALID)==0u||metric.topologyCode>=arrayLength(&tetraHeaders)){return vec4f(vec3f(1.0,0.01,0.06),0.92);}
   return vec4f(0.0);
 }
@@ -100,26 +100,26 @@ fn volumeTopology(uv:vec2f,mode:i32)->vec4f {
   let steps=traversalSteps(ray,interval);let dt=(interval.y-interval.x)/f32(steps);let baseWidth=max(min(min(u.container.x/u.gridInfo.x,u.container.y/u.gridInfo.y),u.container.z/u.gridInfo.z)*0.10,1e-5);
   var accum=vec4f(0.0);var previous=INVALID;
   for(var sample=0u;sample<512u;sample+=1u){if(sample>=steps||accum.a>0.985){break;}let t=interval.x+(f32(sample)+0.5)*dt;let point=ray.origin+ray.direction*t;let pointFine=worldToFine(point);let cell=vec3i(clamp(floor(pointFine),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0)));let row=textureLoad(ownerRows,cell,0).x;
-    if(row==previous){continue;}previous=row;
-    let fault=topologyFault(pointFine);if(fault.a>0.0){accum=composite(accum,fault.rgb,0.32*volumeOpacity());continue;}
+    if(row==previous){continue;}previous=row;if(row==INVALID){continue;}
+    let fault=topologyFault(row,pointFine);if(fault.a>0.0){accum=compositeDisplay(accum,fault.rgb,0.32*volumeOpacity());continue;}
     let leaf=leaves[row];let metric=metrics[row];let header=tetraHeaders[metric.topologyCode];let transition=(header.flags&1u)==0u;let boundary=((metric.transformAndFlags>>8u)&63u)!=0u;
     let centerFine=vec3f(leafOrigin(leaf))+vec3f(0.5*f32(leaf.size));let centerWorld=fineToWorld(centerFine);let site=1.0-smoothstep(baseWidth,2.8*baseWidth,raySegmentDistance(ray,centerWorld,centerWorld+vec3f(0.0,1e-8,0.0)).x);
-    if(mode==12){let base=select(vec3f(0.08,0.52,0.42),vec3f(0.42,0.14,0.70),transition);accum=composite(accum,mix(base,vec3f(1.0,0.73,0.12),site),volumeOpacity()*(0.045+0.34*site));continue;}
-    if(mode==15){if(transition||boundary){let color=select(vec3f(0.94,0.45,0.06),vec3f(0.96,0.08,0.40),boundary);accum=composite(accum,color,volumeOpacity()*0.42);}continue;}
+    if(mode==12){let base=select(vec3f(0.08,0.52,0.42),vec3f(0.42,0.14,0.70),transition);accum=compositeDisplay(accum,mix(base,vec3f(1.0,0.73,0.12),site),volumeOpacity()*(0.24+0.56*site));continue;}
+    if(mode==15){if(transition||boundary){let color=select(vec3f(0.94,0.45,0.06),vec3f(0.96,0.08,0.40),boundary);accum=compositeDisplay(accum,color,volumeOpacity()*0.42);}continue;}
     if(mode!=14||!transition||header.first>arrayLength(&tetrahedra)||header.count>arrayLength(&tetrahedra)-header.first){continue;}
     var ink=site;let count=min(header.count,${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra}u);let transform=metric.transformAndFlags&63u;let width=max(baseWidth,t*1.44/max(u.viewport.y,1.0));
     for(var local=0u;local<count;local+=1u){let packed=tetrahedra[header.first+local];let selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);if(any(selectors>=vec3u(arrayLength(&tetraVertices)))){ink=1.0;continue;}let a=centerFine+f32(leaf.size)*inversePowerTransform(tetraVertices[selectors.x].value.xyz,transform);let b=centerFine+f32(leaf.size)*inversePowerTransform(tetraVertices[selectors.y].value.xyz,transform);let c=centerFine+f32(leaf.size)*inversePowerTransform(tetraVertices[selectors.z].value.xyz,transform);let aw=fineToWorld(a);let bw=fineToWorld(b);let cw=fineToWorld(c);
       ink=max(ink,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,centerWorld,aw).x));ink=max(ink,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,centerWorld,bw).x));ink=max(ink,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,centerWorld,cw).x));ink=max(ink,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,aw,bw).x));ink=max(ink,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,bw,cw).x));ink=max(ink,1.0-smoothstep(width,2.2*width,raySegmentDistance(ray,cw,aw).x));}
-    if(ink>0.01){accum=composite(accum,mix(vec3f(0.12,0.72,0.86),vec3f(1.0,0.72,0.12),site),volumeOpacity()*0.92*ink);}
+    if(ink>0.01){accum=compositeDisplay(accum,mix(vec3f(0.12,0.72,0.86),vec3f(1.0,0.72,0.12),site),volumeOpacity()*0.92*ink);}
   }
-  return finishVolume(accum);
+  return finishDisplayVolume(accum);
 }
 @fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f {
   let mode=i32(round(u.debug.w));if(i32(round(u.debug.x))==4){return volumeTopology(input.uv,mode);}
   let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;
   if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}let pointFine=worldToFine(hit.xyz);let cell=vec3i(clamp(floor(pointFine),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0)));
   let row=textureLoad(ownerRows,cell,0).x;let footprint=max(hit.w*1.44/max(u.viewport.y,1.0),1e-5);
-  if(row==INVALID||row>=arrayLength(&leaves)||row>=arrayLength(&metrics)||!leafContains(leaves[row],pointFine)){return vec4f(displayColor(vec3f(1.0,0.01,0.18)),0.94);}
+  if(row==INVALID){discard;}let fault=topologyFault(row,pointFine);if(fault.a>0.0){return vec4f(displayColor(fault.rgb),0.94);}
   let leaf=leaves[row];let metric=metrics[row];let valid=(metric.transformAndFlags&VALID)!=0u&&metric.topologyCode<arrayLength(&tetraHeaders);
   if(!valid){return vec4f(displayColor(vec3f(1.0,0.01,0.06)),0.96);}let header=tetraHeaders[metric.topologyCode];let transition=(header.flags&1u)==0u;
   let boundary=((metric.transformAndFlags>>8u)&63u)!=0u;let centerFine=vec3f(leafOrigin(leaf))+vec3f(0.5*f32(leaf.size));let centerWorld=fineToWorld(centerFine);
@@ -133,6 +133,41 @@ fn volumeTopology(uv:vec2f,mode:i32)->vec4f {
     ink=max(ink,edgeInk(slice2(hit.xyz),centerFine,a,footprint));ink=max(ink,edgeInk(slice2(hit.xyz),centerFine,b,footprint));ink=max(ink,edgeInk(slice2(hit.xyz),centerFine,c,footprint));ink=max(ink,edgeInk(slice2(hit.xyz),a,b,footprint));ink=max(ink,edgeInk(slice2(hit.xyz),b,c,footprint));ink=max(ink,edgeInk(slice2(hit.xyz),c,a,footprint));}
   if(ink<0.02){discard;}return vec4f(displayColor(mix(vec3f(0.12,0.72,0.86),vec3f(1.0,0.72,0.12),siteInk)),0.94*ink);
 }`;
+
+/**
+ * Direct views of the accepted generalized-face and structured-velocity
+ * publications. Separate pipelines keep each bind group below WebGPU's
+ * portable fragment-storage-buffer limit while giving every observatory field
+ * a real compact source instead of the octree renderer's zero-texture fallback.
+ */
+export const octreeTechniqueFaceShader = /* wgsl */ `
+${sharedWGSL}
+struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f }
+struct Metric { topologyCode:u32,transformAndFlags:u32,volume:f32,reserved:u32 }
+struct CatalogSlotGeometry { neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDistance:vec4f }
+@group(0) @binding(0) var<uniform> u:Uniforms;@group(0) @binding(1) var ownerRows:texture_3d<u32>;@group(0) @binding(2) var<storage,read> headers:array<LeafHeader>;@group(0) @binding(3) var<storage,read> metrics:array<Metric>;@group(0) @binding(4) var<storage,read> entryHeaders:array<vec2u>;@group(0) @binding(5) var<storage,read> catalogFaces:array<CatalogSlotGeometry>;
+const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;
+fn cellCoord(cell:u32)->vec3u{let d=vec3u(max(u.gridInfo.xyz,vec3f(1.0)));return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}
+fn rowAt(point:vec3f)->u32{return textureLoad(ownerRows,vec3i(clamp(floor(worldToFine(point)),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0))),0).x;}
+fn rowValid(row:u32,point:vec3f)->bool{if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)){return false;}let h=headers[row];let origin=vec3f(cellCoord(h.cell));return h.size>0u&&(metrics[row].transformAndFlags&VALID)!=0u&&all(point>=origin)&&all(point<origin+vec3f(f32(h.size)));}
+fn catalogRange(row:u32)->vec2u{let code=metrics[row].topologyCode;if(code>=arrayLength(&entryHeaders)){return vec2u(INVALID,0u);}let range=entryHeaders[code];if(range.x>arrayLength(&catalogFaces)||range.y>arrayLength(&catalogFaces)-range.x){return vec2u(INVALID,0u);}return range;}
+fn heat(value:f32)->vec3f{let t=clamp(value,0.0,1.0);return select(mix(vec3f(0.04,0.20,0.70),vec3f(0.06,0.78,0.55),t*2.0),mix(vec3f(0.06,0.78,0.55),vec3f(1.0,0.08,0.025),(t-0.5)*2.0),t>=0.5);}
+fn faceSample(row:u32,ray:CameraRay,interval:vec2f,point:vec3f,footprint:f32,volume:bool,operatorView:bool)->vec4f{let range=catalogRange(row);if(range.x==INVALID){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let h=headers[row];let centerFine=vec3f(cellCoord(h.cell))+vec3f(0.5*f32(h.size));let center=fineToWorld(centerFine);let scale=min(min(u.container.x/u.gridInfo.x,u.container.y/u.gridInfo.y),u.container.z/u.gridInfo.z);var planeInk=0.0;var dualInk=0.0;var normalInk=0.0;var coefficient=0.0;
+  for(var local=0u;local<${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u;local+=1u){if(local>=range.y){break;}let face=catalogFaces[range.x+local];coefficient=max(coefficient,face.areaCentroid.x*face.normalInverseDistance.w*f32(h.size));if(operatorView){continue;}let transform=metrics[row].transformAndFlags&63u;let centroidFine=centerFine+f32(h.size)*inversePowerTransform(face.areaCentroid.yzw,transform);let centroid=fineToWorld(centroidFine);let normal=normalize(inversePowerTransform(face.normalInverseDistance.xyz,transform));let radius=sqrt(max(face.areaCentroid.x,1e-8)/3.14159265)*f32(h.size)*scale;let neighbor=fineToWorld(centerFine+f32(h.size)*inversePowerTransform(face.neighborOffsetSize.xyz,transform));if(volume){let denominator=dot(ray.direction,normal);if(abs(denominator)>1e-6){let distance=dot(centroid-ray.origin,normal)/denominator;if(distance>=interval.x&&distance<=interval.y){planeInk=max(planeInk,1.0-smoothstep(radius,max(radius+2.0*footprint,1.08*radius),length(ray.origin+ray.direction*distance-centroid)));}}dualInk=max(dualInk,1.0-smoothstep(footprint,2.2*footprint,raySegmentDistance(ray,center,neighbor).x));normalInk=max(normalInk,1.0-smoothstep(footprint,2.2*footprint,raySegmentDistance(ray,centroid,centroid+normal*max(0.75*radius,footprint)).x));}else{let signedDistance=dot(point-centroid,normal);let radial=length((point-centroid)-normal*signedDistance);planeInk=max(planeInk,(1.0-smoothstep(footprint,2.2*footprint,abs(signedDistance)))*(1.0-smoothstep(radius,max(radius+2.0*footprint,1.08*radius),radial)));dualInk=max(dualInk,1.0-smoothstep(footprint,2.2*footprint,segmentDistance3(point,center,neighbor)));normalInk=max(normalInk,1.0-smoothstep(footprint,2.2*footprint,segmentDistance3(point,centroid,centroid+normal*max(0.75*radius,footprint))));}}
+  if(operatorView){return vec4f(heat(1.0-exp(-coefficient)),select(0.86,0.22,volume));}let alpha=max(planeInk,max(dualInk,normalInk));var color=vec3f(0.02);if(planeInk>=dualInk&&planeInk>=normalInk){color=mix(color,vec3f(0.04,0.84,0.96),planeInk);}else if(dualInk>=normalInk){color=mix(color,vec3f(0.48,0.10,0.72),dualInk);}else{color=mix(color,vec3f(0.98,0.72,0.08),normalInk);}return vec4f(color,alpha*select(0.96,1.0,volume));}
+fn faceVolume(uv:vec2f,operatorView:bool)->vec4f{let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let interval=boxInterval(ray,minimum,minimum+u.container.xyz);if(interval.y<=interval.x){discard;}let steps=traversalSteps(ray,interval);let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;for(var i=0u;i<512u;i+=1u){if(i>=steps||accum.a>0.985){break;}let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);let row=rowAt(point);if(row==previous){continue;}previous=row;if(!rowValid(row,worldToFine(point))){continue;}let sample=faceSample(row,ray,interval,point,max(dt*0.2,1e-5),true,operatorView);accum=compositeDisplay(accum,sample.rgb,sample.a*volumeOpacity());}return finishDisplayVolume(accum);}
+@fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f{let operatorView=i32(round(u.debug.w))==16;if(i32(round(u.debug.x))==4){return faceVolume(input.uv,operatorView);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);if(any(hit.xyz<minimum)||any(hit.xyz>minimum+u.container.xyz)){discard;}let row=rowAt(hit.xyz);if(row==INVALID){discard;}if(!rowValid(row,worldToFine(hit.xyz))){return vec4f(displayColor(vec3f(1.0,0.01,0.10)),0.94);}let sample=faceSample(row,cameraRay(input.uv),vec2f(0.0),hit.xyz,max(hit.w*1.44/max(u.viewport.y,1.0),1e-5),false,operatorView);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}
+`;
+
+export const octreeTechniqueStructuredShader = /* wgsl */ `
+${sharedWGSL}
+struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f }struct Metric { topologyCode:u32,transformAndFlags:u32,volume:f32,reserved:u32 }struct StructuredParams { words:array<vec4u,16> }
+@group(0) @binding(0) var<uniform> u:Uniforms;@group(0) @binding(1) var ownerRows:texture_3d<u32>;@group(0) @binding(2) var<storage,read> headers:array<LeafHeader>;@group(0) @binding(3) var<storage,read> metrics:array<Metric>;@group(0) @binding(4) var<storage,read> accepted:array<u32>;@group(0) @binding(5) var<storage,read> rowVelocities:array<vec4f>;@group(0) @binding(6) var<uniform> structured:StructuredParams;@group(0) @binding(7) var<storage,read> authority:array<u32>;@group(0) @binding(8) var<storage,read> pressure:array<f32>;
+const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;fn word(i:u32)->u32{return structured.words[i/4u][i%4u];}fn finiteValue(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn cellCoord(cell:u32)->vec3u{let d=vec3u(max(u.gridInfo.xyz,vec3f(1.0)));return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}fn rowAt(point:vec3f)->u32{return textureLoad(ownerRows,vec3i(clamp(floor(worldToFine(point)),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0))),0).x;}fn rowValid(row:u32,point:vec3f)->bool{if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)){return false;}let h=headers[row];let origin=vec3f(cellCoord(h.cell));return h.size>0u&&(metrics[row].transformAndFlags&VALID)!=0u&&all(point>=origin)&&all(point<origin+vec3f(f32(h.size)));}fn publicationValid()->bool{return arrayLength(&accepted)>=6u&&accepted[0]==0u&&accepted[3]!=0u;}fn rowCapacity()->u32{return max(1u,word(0u));}fn authorityBase()->u32{return (accepted[4]&1u)*word(15u);}fn heat(value:f32)->vec3f{let t=clamp(value,0.0,1.0);if(t<0.5){return mix(vec3f(0.04,0.20,0.70),vec3f(0.06,0.78,0.55),t*2.0);}return mix(vec3f(0.06,0.78,0.55),vec3f(1.0,0.08,0.025),(t-0.5)*2.0);}
+fn rowSample(row:u32,mode:i32,volume:bool)->vec4f{if(!publicationValid()||row>=accepted[2]||row>=rowCapacity()){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let metric=metrics[row];if(!finiteValue(metric.volume)||metric.volume<=0.0){return vec4f(vec3f(1.0,0.01,0.10),0.94);}if(mode==27||mode==30){let at=(accepted[4]&1u)*rowCapacity()+row;if(at>=arrayLength(&rowVelocities)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let velocity=rowVelocities[at];if(velocity.w<=0.0||any(velocity.xyz!=velocity.xyz)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}if(mode==30){let direction=vec3f(0.5)+0.5*velocity.xyz/max(length(velocity.xyz),1e-6);return vec4f(direction,select(0.88,0.13,volume));}return vec4f(heat(length(velocity.xyz)/max(u.environment.z,1e-4)),select(0.88,0.13,volume));}let base=authorityBase();let maxSlots=word(1u);let slotBase=row*maxSlots;var ownPressure=0.0;if(row<arrayLength(&pressure)){ownPressure=pressure[row];}var largest=0.0;var flux=0.0;for(var local=0u;local<${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u;local+=1u){if(local>=maxSlots){break;}let at=slotBase+local;let handleAt=base+word(29u)+at;let signAt=base+word(30u)+at;if(handleAt>=arrayLength(&authority)||signAt>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let handle=authority[handleAt];if(handle==INVALID||handle>=accepted[5]){continue;}if(mode==29){let valueAt=base+word(16u)+handle;let areaAt=base+word(20u)+handle;let fractionAt=base+word(22u)+handle;if(max(valueAt,max(areaAt,fractionAt))>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}flux+=f32(bitcast<i32>(authority[signAt]))*bitcast<f32>(authority[valueAt])*bitcast<f32>(authority[areaAt])*bitcast<f32>(authority[fractionAt]);}else{let neighborAt=base+word(18u)+handle;let inverseAt=base+word(21u)+handle;if(max(neighborAt,inverseAt)>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let neighbor=authority[neighborAt];var neighborPressure=0.0;if(neighbor<arrayLength(&pressure)){neighborPressure=pressure[neighbor];}largest=max(largest,abs(neighborPressure-ownPressure)*bitcast<f32>(authority[inverseAt]));}}if(mode==28){return vec4f(heat(largest/max(u.environment.z,0.05)),select(0.90,0.13,volume));}let width=f32(headers[row].size)*bitcast<f32>(word(40u));let divergence=flux/max(metric.volume*width*width*width,1e-9);let scaled=clamp(divergence*max(u.environment.y,1e-6),-1.0,1.0);let color=select(mix(vec3f(0.96),vec3f(0.88,0.10,0.08),scaled),mix(vec3f(0.96),vec3f(0.08,0.28,0.88),-scaled),scaled<0.0);return vec4f(color,select(0.92,0.14,volume));}
+fn structuredVolume(uv:vec2f,mode:i32)->vec4f{let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let interval=boxInterval(ray,minimum,minimum+u.container.xyz);if(interval.y<=interval.x){discard;}let steps=traversalSteps(ray,interval);let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;for(var i=0u;i<512u;i+=1u){if(i>=steps||accum.a>0.985){break;}let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);let row=rowAt(point);if(row==previous){continue;}previous=row;if(!rowValid(row,worldToFine(point))){continue;}let sample=rowSample(row,mode,true);accum=composite(accum,sample.rgb,sample.a*volumeOpacity());}return finishVolume(accum);}
+@fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f{let mode=i32(round(u.debug.w));if(i32(round(u.debug.x))==4){return structuredVolume(input.uv,mode);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);if(any(hit.xyz<minimum)||any(hit.xyz>minimum+u.container.xyz)){discard;}let row=rowAt(hit.xyz);if(row==INVALID){discard;}if(!rowValid(row,worldToFine(hit.xyz))){return vec4f(displayColor(vec3f(1.0,0.01,0.10)),0.94);}let sample=rowSample(row,mode,false);return vec4f(displayColor(sample.rgb),sample.a);}
+`;
 
 const octreeLifecycleMembershipShader = /* wgsl */ `
 struct Config { dimensions:vec3u,tileSize:u32,capacity:u32,pad0:u32,pad1:u32,pad2:u32 }
@@ -199,7 +234,6 @@ fn fineState(point:vec3f)->FineState {
   let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return FineState(vec3f(0.0),0.0,INVALID);}let q=vec3u(floor(relative));let brick=q/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
   if(arrayLength(&topologyControl)>0u&&topologyControl[0]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}if(arrayLength(&redistanceControl)>4u&&redistanceControl[4]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
   let page=pageOf(key);if(page==INVALID){let desired=arrayLength(&topologyControl)>4u&&topologyControl[4]==0u;return FineState(select(vec3f(0.03,0.10,0.34),vec3f(1.0,0.34,0.04),desired),select(0.045,0.34,desired),key);}
-  if(page>=fine.pageCapacity||page*10u+3u>=arrayLength(&metadata)||metadata[page*10u+2u]!=fine.generation||arrayLength(&worklist)<=1u||worklist[1]!=fine.generation){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
   let local=q-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;if(address>=arrayLength(&sampleFlags)){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}let flags=sampleFlags[address];
   if((flags&VALID)==0u){return FineState(vec3f(0.26,0.08,0.48),0.20,address);}if((flags&INTERFACE)!=0u){return FineState(vec3f(1.0,0.02,0.44),0.90,address);}return FineState(vec3f(0.04,0.72,0.82),0.34,address);
 }
@@ -300,9 +334,14 @@ fn fineVolume(uv:vec2f)->vec4f {
   for(var i=0u;i<512u;i+=1u){if(i>=steps||accum.a>0.985){break;}let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);let sample=fineState(point);if(sample.address==previous){continue;}previous=sample.address;let alpha=select(sample.alpha*0.20,sample.alpha,sample.alpha>0.30);accum=composite(accum,sample.color,alpha*volumeOpacity());}
   return finishVolume(accum);
 }
+fn globalFinePhiVolume(uv:vec2f)->vec4f {
+  let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;let interval=boxInterval(ray,minimum,maximum);if(interval.y<=interval.x){discard;}let travel=abs(ray.direction*(interval.y-interval.x))/max(fine.fineCellWidth,1e-9);let steps=u32(clamp(ceil(travel.x+travel.y+travel.z+1.0),1.0,512.0));let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;
+  for(var i=0u;i<512u;i+=1u){if(i>=steps||accum.a>0.985){break;}let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){continue;}let address=fineAddress(vec3i(floor(relative)));if(address==previous){continue;}previous=address;let sample=globalFinePhi(point);if(sample.a<=0.001){continue;}accum=composite(accum,sample.rgb,sample.a*0.12*volumeOpacity());}
+  return finishVolume(accum);
+}
 @fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f {
   let mode=i32(round(u.debug.w));
-  if(i32(round(u.debug.x))==4){if(mode==25){discard;}if(mode==26){return bandResidencyVolume(input.uv);}return fineVolume(input.uv);}
+  if(i32(round(u.debug.x))==4){if(mode==25){return globalFinePhiVolume(input.uv);}if(mode==26){return bandResidencyVolume(input.uv);}return fineVolume(input.uv);}
   let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}
   if(mode==26){let sample=bandResidency(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}
   if(mode==25){let sample=globalFinePhi(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}let sample=fineState(hit.xyz);if(sample.alpha<=0.001){discard;}return vec4f(displayColor(sample.color),sample.alpha);
@@ -310,6 +349,8 @@ fn fineVolume(uv:vec2f)->vec4f {
 
 export class OctreeTechniqueOverlayPipeline {
   private topologyPipeline?: GPURenderPipeline;
+  private facePipeline?: GPURenderPipeline;
+  private structuredPipeline?: GPURenderPipeline;
   private lifecyclePipeline?: GPURenderPipeline;
   private fineLifecyclePipeline?: GPURenderPipeline;
   private bandConfig?: GPUBuffer;
@@ -317,6 +358,8 @@ export class OctreeTechniqueOverlayPipeline {
   private source?: OctreeTechniqueDebugSource;
   private ownerRows?: GPUTexture;
   private topologyGroup?: GPUBindGroup;
+  private faceGroup?: GPUBindGroup;
+  private structuredGroup?: GPUBindGroup;
   private lifecycleGroup?: GPUBindGroup;
   private fineLifecycleGroup?: GPUBindGroup;
   private lifecycleMembershipGroup?: GPUBindGroup;
@@ -343,8 +386,10 @@ export class OctreeTechniqueOverlayPipeline {
   }
 
   async initialize(): Promise<void> {
-    [this.topologyPipeline,this.lifecyclePipeline,this.fineLifecyclePipeline,this.lifecycleMembershipPipeline]=await Promise.all([
+    [this.topologyPipeline,this.facePipeline,this.structuredPipeline,this.lifecyclePipeline,this.fineLifecyclePipeline,this.lifecycleMembershipPipeline]=await Promise.all([
       this.pipeline("Octree topology technique overlay",octreeTechniqueTopologyShader),
+      this.pipeline("Octree generalized-face technique overlay",octreeTechniqueFaceShader),
+      this.pipeline("Octree structured-field technique overlay",octreeTechniqueStructuredShader),
       this.pipeline("Octree topology-lifecycle overlay",octreeTechniqueLifecycleShader),
       this.pipeline("Octree fine-band lifecycle overlay",octreeTechniqueFineLifecycleShader),
       this.computePipeline("Octree topology-lifecycle membership",octreeLifecycleMembershipShader),
@@ -360,12 +405,24 @@ export class OctreeTechniqueOverlayPipeline {
   }
 
   private rebuildGroups(): void {
-    this.topologyGroup=undefined;this.lifecycleGroup=undefined;this.fineLifecycleGroup=undefined;this.lifecycleMembershipGroup=undefined;
+    this.topologyGroup=undefined;this.faceGroup=undefined;this.structuredGroup=undefined;this.lifecycleGroup=undefined;this.fineLifecycleGroup=undefined;this.lifecycleMembershipGroup=undefined;
     const source=this.source;if(!source)return;const ownerRows=this.ownerRows;
     if(ownerRows&&this.topologyPipeline)this.topologyGroup=this.device.createBindGroup({layout:this.topologyPipeline.getBindGroupLayout(0),entries:[
       {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:ownerRows.createView({dimension:"3d"})},
       {binding:2,resource:source.leaves},{binding:3,resource:source.topologyMetrics},{binding:4,resource:source.tetrahedronHeaders},
       {binding:5,resource:source.tetrahedra},{binding:6,resource:source.tetrahedronVertices},
+    ]});
+    if(ownerRows&&this.facePipeline)this.faceGroup=this.device.createBindGroup({layout:this.facePipeline.getBindGroupLayout(0),entries:[
+      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:ownerRows.createView({dimension:"3d"})},
+      {binding:2,resource:source.leafHeaders},{binding:3,resource:source.topologyMetrics},
+      {binding:4,resource:source.catalogEntryHeaders},{binding:5,resource:source.catalogFaces},
+    ]});
+    if(ownerRows&&this.structuredPipeline)this.structuredGroup=this.device.createBindGroup({layout:this.structuredPipeline.getBindGroupLayout(0),entries:[
+      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:ownerRows.createView({dimension:"3d"})},
+      {binding:2,resource:source.leafHeaders},{binding:3,resource:source.topologyMetrics},
+      {binding:4,resource:source.structuredControl},{binding:5,resource:source.structuredRowVelocities},
+      {binding:6,resource:source.structuredParams},{binding:7,resource:source.structuredAuthority},
+      {binding:8,resource:source.pressure},
     ]});
     const lifecycle=source.topologyLifecycle;
     if(lifecycle){
@@ -407,6 +464,8 @@ export class OctreeTechniqueOverlayPipeline {
   encode(encoder: GPUCommandEncoder, target: GPUTextureView, modeCode: number): boolean {
     let pipeline:GPURenderPipeline|undefined;let group:GPUBindGroup|undefined;
     if(modeCode===12||modeCode===14||modeCode===15){pipeline=this.topologyPipeline;group=this.topologyGroup;}
+    else if(modeCode===13||modeCode===16){pipeline=this.facePipeline;group=this.faceGroup;}
+    else if(modeCode>=27&&modeCode<=30){pipeline=this.structuredPipeline;group=this.structuredGroup;}
     else if(modeCode===17){pipeline=this.lifecyclePipeline;group=this.lifecycleGroup;if(this.lifecycleMembership&&this.lifecycleMembershipPipeline&&this.lifecycleMembershipGroup){const broker=new PassBroker(encoder);broker.clearBuffer(this.lifecycleMembership);const compute=broker.compute({label:"Expand octree topology lifecycle membership"});compute.setPipeline(this.lifecycleMembershipPipeline);compute.setBindGroup(0,this.lifecycleMembershipGroup);compute.dispatchWorkgroups(Math.ceil(this.lifecycleCapacity/64));broker.fence("octree topology lifecycle membership complete");}else{return false;}}
     else if(modeCode===18||modeCode===25||modeCode===26){pipeline=this.fineLifecyclePipeline;group=this.fineLifecycleGroup;}
     else{return false;}

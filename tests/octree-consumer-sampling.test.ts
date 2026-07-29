@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import {
   OCTREE_CONSUMER_MAX_FACE_CANDIDATES,
   createGlobalFineLevelSetConsumerSource,
-  globalFineCoarseGenerationPairIsValid,
+  fineTopologyRetainsBackgroundOctree, globalFineCoarseGenerationPairIsValid,
   octreeConsumerSamplingWGSL,
   planOctreeConsumerTraffic,
   sampleOctreeFaceVelocity,
@@ -100,14 +100,26 @@ test("global fine render epochs require one clean current publication", () => {
   const clean = new Uint32Array([0, 1, 1, 1, 1, 0, 1, 0]);
   const rollback = new Uint32Array([16, 1, 1, 1, 1, 1, 1, 2]);
   assert.equal(globalFineCoarseGenerationPairIsValid(7, 7, clean), true);
-  assert.equal(globalFineCoarseGenerationPairIsValid(7, 6, rollback), false,
-    "a retagged rollback field is not a new render publication");
-  assert.equal(globalFineCoarseGenerationPairIsValid(7, 7, rollback), false);
+  // Aanjaneya et al. 2017 Section 5
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) rebuilds the fine SPGrid
+  // after every advection while keeping a separate background octree. An
+  // explicit rollback may therefore retain any valid octree generation; its
+  // numeric counter is not a fine-SPGrid freshness test.
+  assert.equal(globalFineCoarseGenerationPairIsValid(7, 6, rollback), true);
+  assert.equal(globalFineCoarseGenerationPairIsValid(7, 5, rollback), true);
+  assert.equal(globalFineCoarseGenerationPairIsValid(7, 7, rollback), true);
+  assert.equal(fineTopologyRetainsBackgroundOctree(rollback), true,
+    "the explicit known rollback is retained-octree provenance for smoke and UI consumers");
   assert.equal(globalFineCoarseGenerationPairIsValid(7, 6, clean), false);
-  assert.equal(globalFineCoarseGenerationPairIsValid(7, 5, rollback), false);
   assert.equal(globalFineCoarseGenerationPairIsValid(7, 7, undefined), false);
-  assert.equal(globalFineCoarseGenerationPairIsValid(0, 0x3fff_ffff, rollback), false,
-    "a wrapped prior rollback epoch remains rejected");
+  assert.equal(globalFineCoarseGenerationPairIsValid(7, 5,
+    new Uint32Array([0x20, 1, 1, 1, 1, 1, 1, 2])), false,
+  "unknown rollback flags remain fail-closed");
+  assert.equal(fineTopologyRetainsBackgroundOctree(
+    new Uint32Array([0x20, 1, 1, 1, 1, 1, 1, 2])), false);
+  assert.equal(globalFineCoarseGenerationPairIsValid(7, 5,
+    new Uint32Array([16, 1, 1, 1, 1, 1, 1, 0])), false,
+  "a rollback without a rejection reason remains fail-closed");
 });
 
 test("traffic plan reports eliminated dense consumer allocation without hiding gather cost", () => {

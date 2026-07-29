@@ -18,7 +18,7 @@ export interface OctreeSurfaceStateAllocationPlan {
  */
 export function planOctreeSurfaceStateAllocation(
   dimensions: readonly [number, number, number],
-  releasePublicationAfterBootstrap = false,
+  _releasePublicationAfterBootstrap = false,
   analyticSparseBootstrap = false,
 ): OctreeSurfaceStateAllocationPlan {
   for (const [axis, value] of dimensions.entries()) {
@@ -27,9 +27,13 @@ export function planOctreeSurfaceStateAllocation(
   const cellCount = dimensions[0] * dimensions[1] * dimensions[2];
   if (!Number.isSafeInteger(cellCount)) throw new RangeError("Surface cell count exceeds safe integer range");
   const publicationBytes = cellCount * 4;
-  const persistentPublicationBytes = releasePublicationAfterBootstrap || analyticSparseBootstrap ? 4 : publicationBytes;
+  // Non-analytic bootstrap phi remains bound by recurring WebGPU groups even
+  // after Section 5's fine SPGrid and background octree become authoritative.
+  // It may only be excluded when analytic bootstrap allocated one texel from
+  // the outset; treating an unused binding as dead is invalid in Dawn.
+  const persistentPublicationBytes = analyticSparseBootstrap ? 4 : publicationBytes;
   return {
-    releasePublicationAfterBootstrap,
+    releasePublicationAfterBootstrap: analyticSparseBootstrap,
     cellCount,
     publicationBytes,
     persistentPublicationBytes,

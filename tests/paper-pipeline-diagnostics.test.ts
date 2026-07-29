@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PAPER_VISUAL_PRESETS, paperPipelineHealthFlags, paperPipelineStages,
-  paperVisualAuthority } from "../lib/paper-pipeline-diagnostics";
+import { paperPipelineHealthFlags, paperPipelineStages } from "../lib/paper-pipeline-diagnostics";
 import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
 
 function info(patch: Partial<GPUEulerianInfo> = {}): GPUEulerianInfo {
@@ -98,15 +97,6 @@ test("coarse-phi causal failure is attributed to grading coverage", () => {
   assert.match(fine?.detail ?? "", /no causal non-obtuse simplex at row 37/);
 });
 
-test("one-click presets reuse existing topology, fine, velocity, pressure, and raster views", () => {
-  const ids = new Set(PAPER_VISUAL_PRESETS.map((preset) => preset.id));
-  for (const id of ["power-cells", "transitions", "fine-band", "fine-phi-values",
-    "velocity", "pressure", "operator", "raster"]) assert.ok(ids.has(id), id);
-  assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "raster")?.axis, "off");
-  assert.equal(PAPER_VISUAL_PRESETS.find((preset) => preset.id === "fine-band")?.mode,
-    "fine-band-lifecycle");
-});
-
 test("raster CURRENT requires matching GPU-latched attachment and mesh", () => {
   const gpu = info({ globalFineGeneration: 21 });
   const stale = paperPipelineStages(gpu, {
@@ -121,21 +111,4 @@ test("raster CURRENT requires matching GPU-latched attachment and mesh", () => {
     globalFineCrossingPublished: true, presentationFallbackActive: false,
   }).find((stage) => stage.id === "raster");
   assert.equal(current?.state, "CURRENT");
-});
-
-test("active visual reports exact publication and t=0/latest-step identity", () => {
-  const gpu = info({
-    initialSparseAuthorityReady: true, encodedSteps: 0, globalFineGeneration: 12,
-    globalFinePublished: true, globalFineRolledBack: false, globalFineSeedError: 0,
-    globalFineTopologyFlags: 0, globalFineDownstreamFinalizeReason: 0,
-  });
-  const stages = paperPipelineStages(gpu, undefined);
-  const fine = paperVisualAuthority("fine-band-lifecycle", "volume", stages, gpu);
-  assert.equal(fine.stageId, "fine");
-  assert.equal(fine.state, "PUBLISHED");
-  assert.equal(fine.frame, "t=0 preflight");
-  const stepped = paperVisualAuthority("power-cells", "volume", stages,
-    { ...gpu, encodedSteps: 3 });
-  assert.equal(stepped.stageId, "power");
-  assert.equal(stepped.frame, "latest encoded substep 3");
 });

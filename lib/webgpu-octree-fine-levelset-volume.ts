@@ -65,7 +65,7 @@ export function planFineLevelSetGPUVolume(coarseRowCapacity: number, fineSampleC
   const reductionScratchBytes = Math.max(coarsePartialBytes, finePartialBytes);
   return { coarseRowCapacity, fineSampleCapacity, coarsePartialCount, finePartialCount,
     coarsePartialBytes, finePartialBytes, reductionScratchBytes,
-    allocatedBytes: 64 + reductionScratchBytes + FINE_LEVELSET_VOLUME_INDIRECT_BYTES + 12
+    allocatedBytes: 64 + 16 + reductionScratchBytes + FINE_LEVELSET_VOLUME_INDIRECT_BYTES + 12
       + (ownsControl ? FINE_LEVELSET_VOLUME_CONTROL_BYTES : 0) };
 }
 
@@ -82,10 +82,12 @@ export class WebGPUFineLevelSetVolumeCorrection {
   readonly plan: FineLevelSetGPUVolumePlan;
   get allocatedBytes(): number { return this.plan.allocatedBytes; }
   private readonly coarseParams: GPUBuffer;
+  private readonly referenceDeltaParams: GPUBuffer;
   private readonly reductionScratch: GPUBuffer;
   private readonly fineDispatch: GPUBuffer;
   private readonly coarseDispatch: GPUBuffer;
   private readonly resetPipeline: GPUComputePipeline;
+  private readonly addReferencePipeline: GPUComputePipeline;
   private readonly coarsePartialPipeline: GPUComputePipeline;
   private readonly prepareCoarseDispatchPipeline: GPUComputePipeline;
   private readonly coarseFinalizePipeline: GPUComputePipeline;
@@ -97,6 +99,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
   private readonly measuredFinalizePipeline: GPUComputePipeline;
   private readonly groups = new Map<GPUComputePipeline, GPUBindGroup>();
   private readonly ownsControl: boolean;
+  private pendingReferenceVolume = 0;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
@@ -112,6 +115,8 @@ export class WebGPUFineLevelSetVolumeCorrection {
       size: FINE_LEVELSET_VOLUME_CONTROL_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.coarseParams = device.createBuffer({ label: "global fine total-volume coarse params", size: 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.referenceDeltaParams = device.createBuffer({ label: "global fine injected-volume reference delta", size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.reductionScratch = device.createBuffer({ label: "global fine total-volume partial reductions",
       size: this.plan.reductionScratchBytes, usage: GPUBufferUsage.STORAGE });
@@ -142,6 +147,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
     const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
       compute: { module: shaderModule, entryPoint } });
     this.resetPipeline = pipeline("resetVolumeControl");
+    this.addReferencePipeline = pipeline("addReferenceVolume");
     this.prepareCoarseDispatchPipeline = pipeline("prepareCoarseVolumeDispatch");
     this.coarsePartialPipeline = pipeline("reduceCoarseVolumePartials");
     this.coarseFinalizePipeline = pipeline("finalizeCoarseVolume");
@@ -156,6 +162,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
         entries: entries.map(([binding, buffer]) => ({ binding, resource: { buffer } })) }));
     };
     cache(this.resetPipeline, [[5, this.control]]);
+    cache(this.addReferencePipeline, [[5, this.control], [16, this.referenceDeltaParams]]);
     cache(this.prepareCoarseDispatchPipeline, [[0, this.source.params], [6, this.coarseParams], [11, this.coarse.sampleDirectory],
       [12, this.reductionScratch], [13, this.coarse.publicationControl], [15, this.coarseDispatch]]);
     cache(this.coarsePartialPipeline, [[0, this.source.params], [6, this.coarseParams],
@@ -188,6 +195,16 @@ export class WebGPUFineLevelSetVolumeCorrection {
   /** Standalone project-specific conservation experiment. */
   encode(broker: PassBroker): void { this.encodePasses(broker, true); }
 
+  /** Add analytic source volume before the next resident measurement.
+   * This updates the project-specific correction target; it is deliberately
+   * not presented as part of Aanjaneya et al.'s Section 5 algorithm. */
+  addReferenceVolume(volume_m3: number): void {
+    if (!Number.isFinite(volume_m3) || volume_m3 < 0) {
+      throw new RangeError("Fine volume reference delta must be finite and non-negative");
+    }
+    this.pendingReferenceVolume += volume_m3;
+  }
+
   private encodePasses(broker: PassBroker, applyCorrection: boolean): void {
     if (this.destroyed) throw new Error("Fine volume correction is destroyed");
     const run = (pipeline: GPUComputePipeline, _entries: readonly [number, GPUBuffer][], groups: number, label: string) => {
@@ -201,6 +218,13 @@ export class WebGPUFineLevelSetVolumeCorrection {
       pass.setBindGroup(0, this.groups.get(pipeline)!);
       pass.dispatchWorkgroupsIndirect(this.fineDispatch, 0);
     };
+    if (this.pendingReferenceVolume > 0) {
+      this.device.queue.writeBuffer(this.referenceDeltaParams, 0,
+        new Float32Array([this.pendingReferenceVolume, 0, 0, 0]));
+      run(this.addReferencePipeline, [[5, this.control], [16, this.referenceDeltaParams]], 1,
+        "Advance global fine inflow volume reference");
+      this.pendingReferenceVolume = 0;
+    }
     run(this.resetPipeline, [[5, this.control]], 1, "Reset global volume reduction");
     run(this.prepareCoarseDispatchPipeline, [[0, this.source.params], [6, this.coarseParams], [11, this.coarse.sampleDirectory],
       [12, this.reductionScratch], [13, this.coarse.publicationControl], [15, this.coarseDispatch]], 1,
@@ -265,7 +289,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
   }
 
   destroy(): void { if (this.destroyed) return; this.destroyed = true;
-    this.coarseParams.destroy(); this.reductionScratch.destroy(); this.fineDispatch.destroy(); this.coarseDispatch.destroy();
+    this.coarseParams.destroy(); this.referenceDeltaParams.destroy(); this.reductionScratch.destroy(); this.fineDispatch.destroy(); this.coarseDispatch.destroy();
     if (this.ownsControl) this.control.destroy(); }
 }
 
@@ -274,10 +298,12 @@ ${fineLevelSetLinearWorkgroupWGSL}
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const PUBLISHED:u32=0x80000000u;const ERROR_COARSE:u32=1u;const ERROR_FINE:u32=2u;const ERROR_OWNER:u32=4u;const OWNER_FOUND:u32=0u;const OWNER_ABSENT:u32=1u;const OWNER_MALFORMED:u32=3u;const OWNER_OUTSIDE:u32=4u;
 struct FineParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineCellWidth:f32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
 struct CoarseParams{dimensions:vec3u,maximumLeafSize:u32,rowCapacity:u32,pad0:u32,physicalCellSize:f32,p0:u32,p1:u32,p2:u32,p3:u32,p4:u32,p5:u32}
+struct ReferenceDelta{volume:f32,p0:f32,p1:f32,p2:f32}
 struct Header{cell:u32,a:u32,b:u32,size:u32,x:f32,y:f32,z:u32,w:u32,g:vec4f}struct CoarsePhi{phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32}
 struct CoarseSample{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,physicalVolume:f32}struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,physicalCellSize:f32,entries:array<CoarseSample>}
 struct Control{flags:u32,initialized:u32,samples:u32,referenceVolume:f32,currentVolume:f32,interfaceArea:f32,correction:f32,corrected:u32,coarseVolume:f32,fineVolume:f32,replacedCoarseVolume:f32,coarseRows:u32,expectedAir:u32,generation:u32,lookupFailures:u32,staleOwners:u32}
 @group(0)@binding(0)var<uniform>p:FineParams;@group(0)@binding(1)var<storage,read>metadata:array<u32>;@group(0)@binding(2)var<storage,read>worklist:array<u32>;@group(0)@binding(3)var<storage,read>sampleFlags:array<u32>;@group(0)@binding(4)var<storage,read_write>phi:array<f32>;@group(0)@binding(5)var<storage,read_write>control:Control;
+@group(0)@binding(16)var<uniform>referenceDelta:ReferenceDelta;
 @group(0)@binding(6)var<uniform>c:CoarseParams;@group(0)@binding(7)var<storage,read>headers:array<Header>;@group(0)@binding(8)var<storage,read>coarsePhi:array<CoarsePhi>;@group(0)@binding(9)var<storage,read>physicalVolumes:array<f32>;@group(0)@binding(10)var<storage,read>rowCountSource:array<u32>;@group(0)@binding(11)var<storage,read>coarseDirectory:CoarseDirectory;
 @group(0)@binding(12)var<storage,read_write>partials:array<u32>;
 @group(0)@binding(13)var<storage,read>coarsePublication:array<u32>;
@@ -295,6 +321,7 @@ fn find(cell:u32,size:u32)->vec2u{let count=min(coarseDirectory.rowCount,arrayLe
 fn owner(x:vec3f)->vec2u{if(!validDirectory()){return vec2u(INVALID,OWNER_MALFORMED);}let grid=x/c.physicalCellSize;if(any(grid<vec3f(0))||any(grid>=vec3f(c.dimensions))){return vec2u(INVALID,OWNER_OUTSIDE);}let q=vec3u(floor(grid));var size=1u;var unresolved=OWNER_ABSENT;loop{let o=(q/size)*size;let cell=o.x+c.dimensions.x*(o.y+c.dimensions.y*o.z);let found=find(cell,size);if(found.y==OWNER_FOUND){let entry=coarseDirectory.entries[found.x];if(entry.row>=coarsePublication[2]||(entry.flags&9u)!=9u||!finite(entry.phi)||!finite(entry.minimumPhi)||!finite(entry.maximumPhi)||entry.minimumPhi>entry.phi||entry.phi>entry.maximumPhi||!finite(entry.physicalVolume)||entry.physicalVolume<=0.0){return vec2u(INVALID,OWNER_MALFORMED);}return found;}if(found.y!=OWNER_ABSENT){unresolved=found.y;}if(size>=c.maximumLeafSize){break;}size*=2u;}return vec2u(INVALID,unresolved);}
 fn activeSample(flat:u32)->vec2u{let count=min(worklist[1],p.pageCapacity);if(flat>=count*p.samplesPerBrick){return vec2u(INVALID);}let w=flat/p.samplesPerBrick;let local=flat-w*p.samplesPerBrick;let id=worklist[7u+w];if(id>=p.pageCapacity||metadata[id*10u+2u]!=p.generation){return vec2u(INVALID);}return vec2u(id,local);}fn unpackBrick(key:u32)->vec3u{let xy=p.brickDimensions.x*p.brickDimensions.y;let z=key/xy;let r=key-z*xy;let y=r/p.brickDimensions.x;return vec3u(r-y*p.brickDimensions.x,y,z);}fn localCoord(local:u32)->vec3u{let r=p.brickResolution;let z=local/(r*r);let q=local-z*r*r;let y=q/r;return vec3u(q-y*r,y,z);}
 @compute @workgroup_size(1)fn resetVolumeControl(){let initialized=control.initialized;let reference=control.referenceVolume;control=Control(0u,initialized,0u,reference,0.,0.,0.,0u,0.,0.,0.,0u,0u,0u,0u,0u);}
+@compute @workgroup_size(1)fn addReferenceVolume(){if(control.initialized!=0u&&finite(referenceDelta.volume)&&referenceDelta.volume>0.){control.referenceVolume+=referenceDelta.volume;}}
 @compute @workgroup_size(256)fn prepareCoarseVolumeDispatch(@builtin(local_invocation_index)lid:u32){
  let count=select(0u,min(coarseDirectory.rowCount,c.rowCapacity),validDirectory());let groups=(count+63u)/64u;
  for(var word=groups*4u+lid;word<c.p0*4u;word+=256u){partials[word]=0u;}

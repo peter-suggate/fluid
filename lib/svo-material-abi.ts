@@ -30,12 +30,19 @@ export function svoMaterialFunctionIdForEnvironmentProxy(
 ): number {
   const semantic = `${primitive.group} ${primitive.tags.join(" ")}`;
   if (primitive.tags.includes("shell")) return SVO_MATERIAL_FUNCTION_IDS.architecturalSurface;
-  if (/leaf|foliage|hedge|flower|fruit|canopy/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.foliage;
-  if (/wood|cedar|bench|stool|bucket|tree|trunk/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.wood;
-  if (/stone|column|plinth|pebble|limestone/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.stone;
-  if (/pot|planter|ceramic|clay|tile/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.ceramic;
-  if (/steel|metal|pipe|frame|fixture|instrument|console|monitor/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.brushedMetal;
-  if (/mushroom|organic/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.organic;
+  if (/leaf|foliage|hedge|flower|fruit|canopy|lilypad|reed/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.foliage;
+  if (/wood|cedar|bench|stool|bucket|tree|trunk|duckboard|batten/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.wood;
+  if (/stone|column|plinth|pebble|limestone|coping|parapet|curb|kerb|monolith/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.stone;
+  if (/pot|planter|ceramic|clay|tile|porcelain|bridge/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.ceramic;
+  if (/steel|metal|pipe|frame|fixture|instrument|console|monitor|hull|rib|stringer|coaming|gauge|gantry|mast|rack|conduit|bollard|dewar|equipment-case/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.brushedMetal;
+  if (/mushroom|organic|hose|rope|cable|cord|floor-mat|linen|towel|cloth/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.organic;
+  // Flat painted joinery: counters, boards, targets and panels are sprayed or
+  // laminated, so they take the same fine architectural grain as a wall rather
+  // than a material grain of their own.
+  if (/counter|board|panel|target/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.architecturalSurface;
+  // Everything still here is deliberately flat: cycloramas and calibration
+  // wedges (whose whole job is unmodulated albedo), softboxes, glass, and the
+  // void behind a porthole. Procedural grain on any of those would be a lie.
   return SVO_MATERIAL_FUNCTION_IDS.none;
 }
 

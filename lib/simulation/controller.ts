@@ -197,7 +197,10 @@ class SimulationController {
       fluidState: this.fluidSolver?.diagnostics ?? null,
       fluidRenderState: this.fluidSolver?.getRenderState() ?? null,
     });
-    useUIStore.getState().selectBody(scene.rigidBodies[0]?.id);
+    // Open on an empty selection: with no gizmo on screen the first drag
+    // orbits the scene, which is what someone arriving at a viewport expects.
+    // Selecting is the user's move to make.
+    useUIStore.getState().select(undefined);
   }
 
   get backend(): SimulationBackend {
@@ -424,7 +427,9 @@ class SimulationController {
     runtime.resetSimulationTime();
     runtime.setSimRate(null);
     runtime.setRunState("paused");
-    useUIStore.getState().selectBody(scene.rigidBodies[0]?.id);
+    // A reset lands on a fresh scene, so nothing carries a selection into it.
+    // commitEdit({ reseed: true }) restores the user's selection afterwards.
+    useUIStore.getState().select(undefined);
     runtime.setNotice(!runtimePlan.fluidSolver
       ? "Static renderer scene reset · fluid solver disabled"
       : `${scene.fluid.inflow ? "Inflow scene" : scene.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
@@ -631,7 +636,9 @@ class SimulationController {
     sceneStore.patchScene({ rigidBodies: descriptions });
     this.bodies = this.bodies.filter((body) => body.description.id !== bodyId);
     this.publishBodies();
-    useUIStore.getState().selectBody(descriptions[0]?.id);
+    // Deleting is not a way of selecting something else: land on empty rather
+    // than jumping the gizmo onto whichever body happens to be first.
+    useUIStore.getState().select(undefined);
     useRuntimeStore.getState().setRunState("paused");
     useRuntimeStore.getState().setNotice("Body removed");
   }

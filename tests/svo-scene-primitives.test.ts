@@ -82,7 +82,7 @@ test("front room shell remains modelled but is identified as the interior-view s
   assert.equal(source.primitiveIndexByOwnerId.get(source.openShellOwnerId!), open[0].primitiveIndex);
 
   const withoutShell = buildSvoScenePrimitives(scene, { environmentId: "night-lab", includeShell: false });
-  assert.equal(withoutShell.descriptors.length, 32);
+  assert.equal(withoutShell.descriptors.length, 105);
   assert.equal(withoutShell.openShellOwnerId, undefined);
   assert.deepEqual(withoutShell.skipOwnerIds, []);
   assert.ok(withoutShell.metadata.every((metadata) => !metadata.shell));
@@ -107,7 +107,7 @@ test("night-lab back wall is four stable analytic boxes around the thin-glass op
 test("floor-only and garden catalogs report presentation support explicitly", () => {
   const scene = cloneScene(defaultScene);
   const floor = buildSvoScenePrimitives(scene, { environmentId: "default" });
-  assert.equal(floor.descriptors.length, 1);
+  assert.equal(floor.descriptors.length, 18, "the cyclorama, datum grid and softbox join the floor plate");
   assert.equal(floor.metadata[0].shell, true);
   assert.equal(floor.openShellOwnerId, undefined);
   assert.equal(floor.requiresRasterTerrainFallback, false);
@@ -115,7 +115,7 @@ test("floor-only and garden catalogs report presentation support explicitly", ()
 
   scene.terrain = { baseHeight_m: 0.2, features: [] };
   const garden = buildSvoScenePrimitives(scene, { environmentId: "garden" });
-  assert.equal(garden.descriptors.length, 22, "garden props remain directly representable");
+  assert.equal(garden.descriptors.length, 104, "garden props remain directly representable");
   assert.ok(garden.descriptors.every((descriptor) => descriptor.kind !== "terrain-heightfield"));
   assert.equal(garden.requiresRasterTerrainFallback, false);
   assert.deepEqual(garden.unsupportedSources, []);

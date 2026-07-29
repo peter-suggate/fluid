@@ -8,7 +8,7 @@ import { resolveMethodValues } from "../lib/methods/types";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { enumerateOctreeFrontierCandidateLattice, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { enumerateOctreeFrontierCandidateLattice, fineLevelSetWarmStartRequested, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import {
   octreePipelinedMGPCGShader,
   WebGPUOctreePipelinedMGPCG,
@@ -95,7 +95,6 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "legacy quality tiers must not obscure the explicit power-method controls");
   assert.deepEqual(octreeMethod.params.map((spec) => spec.key), [
     "globalFineLevelSetFactor", "maximumLeafSize", "interfaceRefinementBandCells",
-    "fineLevelSetBandCells",
   ], "the product UI must not expose a retired pressure path");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "surfaceColumns"), false,
     "scene voxelDomain is the sole spatial-resolution authority");
@@ -120,17 +119,13 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeSource, /function octreeLeafSize\(value: number\): 2 \| 4 \| 8 \| 16 \| 32/);
   assert.match(octreeSource, /rounded >= 32/);
   const interfaceBand = octreeMethod.params.find((spec) => spec.key === "interfaceRefinementBandCells");
-  assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine" && interfaceBand.default === 4);
-  const surfaceBand = octreeMethod.params.find((spec) => spec.key === "fineLevelSetBandCells");
-  assert.ok(surfaceBand && surfaceBand.kind === "number" && surfaceBand.tier === "fine"
-    && surfaceBand.default === 4);
-  assert.equal(surfaceBand.min, 1,
-    "the floor is relational -- a band narrower than the pressure band is what starves"
-    + " the fine-to-coarse restriction -- so an incompatible pair must fail closed and"
-    + " visibly rather than be clamped away by the control");
-  assert.equal("fineLevelSetBandCells" in octreeMethod.presetFor("balanced"), false,
-    "seeding the surface band in the preset makes every consumer's band authored,"
-    + " which defeats its coupling to a scene-pinned pressure band");
+  assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine"
+    && interfaceBand.label === "Band reach" && interfaceBand.default === 4);
+  assert.deepEqual(interfaceBand && interfaceBand.kind === "number"
+    ? [interfaceBand.min, interfaceBand.max, interfaceBand.step] : undefined, [0, 4, 1],
+  "the product control exposes the five coupled experimental reach levels");
+  assert.equal(octreeMethod.params.some((spec) => spec.key === "fineLevelSetBandCells"), false,
+    "the surface width is derived from the single product knob");
   const globalFine = octreeMethod.params.find((spec) => spec.key === "globalFineLevelSetFactor");
   assert.ok(globalFine && globalFine.kind === "select" && globalFine.default === "4" && globalFine.tier === "coarse");
   assert.deepEqual(globalFine.options.map((option) => option.value), ["4", "8"]);
@@ -214,6 +209,8 @@ test("native power pressure capacity reserves rows without a variable-entry aren
     "resolved case-local handles replace the retired variable-entry capacity");
   assert.ok(plan.rowCapacity < count / 2, "the widened ocean must not reserve one pressure slot per finest cell");
   assert.equal(planOctreePressureCapacity(dims, 16, 4, 1024).rowCapacity, 1024);
+  assert.equal(planOctreePressureCapacity(dims, 16, 4, undefined, false, 1, 184_832).rowCapacity,
+    184_832, "device binding limits cap every row-indexed authority before allocation");
 });
 
 test("compact frontier retains only the immutable public row-delta ABI", () => {
@@ -251,42 +248,34 @@ test("cold dam-UI frontier candidates cover every finest cell exactly once", () 
     "rounded indirect workgroups must reject the invalid lane base before octant addition can wrap");
 });
 
-test("an unauthored surface band follows a scene-pinned pressure band", () => {
-  // Regression: the validation profile pins interfaceRefinementBandCells to 3
-  // and overrides nothing else, so an unauthored surface band that resolved to
-  // its own spec default of 4 widened the fine band behind the scene's back.
-  // That is not a cosmetic mismatch -- it took the dilation from 7 rings to 8,
-  // overflowed the fine brick capacity around generation 100 of the mini dam
-  // and rejected the publication (topology 0x11, downstream 0x5).
-  // Resolve exactly as the UI does. `presetFor` alone is the smoke harness's
-  // path and does NOT reproduce this: `resolveMethodValues` seeds every
-  // declared parameter from its spec default first, so the surface band is
-  // always present and "unauthored" is not observable from the values.
+test("the band-reach control couples pressure and surface support", () => {
   const values = resolveMethodValues(octreeMethod, "balanced",
     { ...POWER_VALIDATION_METHOD_PROFILE.overrides });
   const pinned = octreeSolverOptions(defaultScene, "balanced", values).octree;
   assert.equal(pinned.interfaceRefinementBandCells, 3);
   assert.equal(pinned.fineLevelSetBandCells, 3,
-    "the surface band the UI resolves must match the band the scene profile pins");
-  // Authored, it is independent again -- that independence is the whole point
-  // of the separate control.
+    "one product level must reach both pressure and fine-surface consumers");
+  for (const level of [0, 1, 2, 3, 4]) {
+    const options = octreeSolverOptions(defaultScene, "balanced",
+      { ...values, interfaceRefinementBandCells: level }).octree;
+    assert.equal(options.interfaceRefinementBandCells, level);
+    assert.equal(options.fineLevelSetBandCells, level);
+  }
+  assert.deepEqual(octreeSolverOptions(defaultScene, "balanced",
+    { ...values, interfaceRefinementBandCells: 99 }).octree,
+  { ...pinned, interfaceRefinementBandCells: 4, fineLevelSetBandCells: 4 },
+  "out-of-range authored values clamp to the five supported product levels");
+  // Fine-only fault injection remains available to the Dawn harness, but is
+  // intentionally absent from the product schema.
   const swept = octreeSolverOptions(defaultScene, "balanced",
     { ...values, fineLevelSetBandCells: 6 }).octree;
   assert.equal(swept.interfaceRefinementBandCells, 3);
   assert.equal(swept.fineLevelSetBandCells, 6);
-  // The control opens at one finest cell; the pairing, not the control, is what
-  // rejects an under-reaching band.
-  assert.equal(octreeSolverOptions(defaultScene, "balanced",
-    { ...values, fineLevelSetBandCells: 1 }).octree.fineLevelSetBandCells, 1);
-  // Structural guard: the two bands are independent parameters, so any profile
-  // that pins one must pin the other. Silence is not "inherit" -- it resolves
-  // to that parameter's own default and the bands drift apart.
   for (const preset of scenePresets) {
     const overrides = preset.methodProfile?.methodId === "octree"
       ? preset.methodProfile.overrides : undefined;
-    if (!overrides || overrides.interfaceRefinementBandCells === undefined) continue;
-    assert.equal(typeof overrides.fineLevelSetBandCells, "number",
-      `${preset.id} pins the pressure band but leaves the surface band at its spec default`);
+    assert.equal(overrides?.fineLevelSetBandCells, undefined,
+      `${preset.id} bypasses the coupled product reach with a fine-only override`);
   }
 });
 
@@ -302,7 +291,7 @@ test("compact scan scratch feeds the class-specialized structured authority", ()
     scanBlockCapacity: 10_003,
     candidateBlockCapacity: 76_800,
     scanAndTaskBytes: 734_496,
-    activeTileBytes: 269_476,
+    activeTileBytes: 269_508,
     changeStateBaseWords: 5_335_170,
     tileChangeFlagsOffsetWords: 5_335_170,
     tileRefinementSignaturesOffsetWords: 5_344_770,
@@ -310,9 +299,10 @@ test("compact scan scratch feeds the class-specialized structured authority", ()
     tileSignatureChangedOffsetWords: 5_392_770,
     tileFrontierChangeFlagsOffsetWords: 5_397_570,
     frontierTopologyReuseWord: 5_402_530,
+    dirtyFailureOffsetWords: 5_402_531,
     rowDeltaScratchBaseWords: 183_624,
     rowDeltaScratchWords: 5_151_546,
-    allocatedBytes: 21_610_156,
+    allocatedBytes: 21_610_188,
   });
   assert.throws(() => planOctreeCompactionAllocation(dims, 0, 0, 0, 16), /positive integer/);
   assert.throws(() => planOctreeCompactionAllocation(dims, 1, -1, 0, 16), /active-tile bounds/);
@@ -492,6 +482,9 @@ test("owner-page misses reject instead of synthesizing topology", () => {
   assert.match(octreeProjectionShader,
     /if \(word == 0xffffffffu \|\| word == 0u\) \{ return rejectOwnerAuthority\(\); \}/,
     "a missing owner payload is an invalid authority, never an inferred leaf");
+  assert.match(octreeProjectionShader,
+    /fn storeOwnerRequired[\s\S]*atomicMin\(&owners\[[\s\S]*encodePagedOwner\(cell, origin, size\)\)/,
+    "overlapping balance writers must deterministically retain the finer dyadic owner");
   assert.doesNotMatch(octreeDiagnosticShader, /canonicalOwner|fallback|legacy|compatibility/);
   assert.match(octreeDiagnosticShader,
     /if\(!ownerValid\(owner\)\)\{[\s\S]*textureStore\(topologyOut,vec3i\(gid\),vec4u\(0xffffffffu\)\)/,
@@ -777,6 +770,25 @@ test("octree has no executable variable-row assembly before the structured opera
   assert.match(encode, /encodeNativePowerAssembly/);
 });
 
+test("accepted SPGrid coefficients are reused from the committed tail candidate", () => {
+  const assembly = octreeSource.slice(
+    octreeSource.indexOf("  private encodeNativePowerAssembly("),
+    octreeSource.indexOf("\n  private encodeStructuredProjection(",
+      octreeSource.indexOf("  private encodeNativePowerAssembly(")),
+  );
+  assert.doesNotMatch(assembly, /firstOrderVCycle\.encodeCapture/,
+    "assembly must not rebuild the inactive hierarchy that the prior tail already committed");
+  assert.match(assembly, /preceding tail[\s\S]*committed at[\s\S]*substep's head/,
+    "the omitted recapture is guarded by the explicit tail-to-head epoch contract");
+});
+
+test("recurring fine redistance keeps its warm start as the production default", () => {
+  assert.equal(fineLevelSetWarmStartRequested({}), true);
+  assert.equal(fineLevelSetWarmStartRequested({ FLUID_FINE_JFA_WARM_START: "1" }), true);
+  assert.equal(fineLevelSetWarmStartRequested({ FLUID_FINE_JFA_WARM_START: "0" }), false,
+    "the cold path remains available only as an explicit process-local oracle");
+});
+
 test("octree delegates every capacity to the direct-curvature PCG authority", () => {
   const encode = WebGPUOctreePipelinedMGPCG.prototype.encode.toString();
   assert.doesNotMatch(encode, /executionMode|persistentMGPCG|WebGPUOctreeMGPCG/);
@@ -899,7 +911,7 @@ test("octree dense diagnostic textures are allocated only on overlay demand", ()
 
 test("structured solve dispatches are class-exact and convergence gated", () => {
   assert.match(structuredVelocitySource,
-    /if\(clean&&cls<4u\)\{let dispatch=6u\+3u\*cls;publicationDispatch\[dispatch\]=groupsX;publicationDispatch\[dispatch\+1u\]=groupsY/,
+    /if\(clean&&cls<=4u\)\{let dispatch=6u\+3u\*cls;publicationDispatch\[dispatch\]=groupsX;publicationDispatch\[dispatch\+1u\]=groupsY/,
     "the accepted structured epoch must publish one exact indirect record per resolved row class");
   // The published record is two-dimensional. A class whose block count passes
   // maxComputeWorkgroupsPerDimension is silently zeroed by the indirect-args
@@ -962,4 +974,13 @@ test("pressure topology retains published fine-interface support across generati
   assert.match(octreeProjectionShader,
     /fn refineCoarseBlock[\s\S]*pressureRefinementProtected\(origin, size\)/,
     "large dyadic leaves must use the same protection predicate as fine leaves");
+});
+
+test("retired topology tiles invalidate their old frontier identities", () => {
+  assert.match(octreeProjectionShader,
+    /for \(var slot = 0u; slot < compaction\[4\]; slot \+= 1u\)[\s\S]*compaction\[tileChangeFlagsBase\(\) \+ tileIndex\] = generation;[\s\S]*appendDirtyTileRing\(tileIndex, generation, &dirtyCount\)/,
+    "a retired tile must stamp its own old rows even though it is absent from the active dirty list");
+  assert.match(octreeProjectionShader,
+    /fn rowAuthorityDirtyGeneration[\s\S]*compaction\[tileChangeFlagsBase\(\)\+index\]==generation/,
+    "frontier carry must consume the retired-tile structural stamp");
 });

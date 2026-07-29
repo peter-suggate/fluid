@@ -500,9 +500,56 @@ fn displayColor(linear: vec3f) -> vec3f {
   return pow(max(mapped, vec3f(0.0)), vec3f(1.0 / 2.2));
 }
 
+fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
+  let contribution=(1.0-accumulated.a)*clamp(alpha,0.0,1.0);
+  return vec4f(accumulated.rgb+color*contribution,accumulated.a+contribution);
+}
+
+fn volumeField(uv:vec2f)->vec4f {
+  let ndc=uv*2.0-1.0;
+  let origin=u.cameraPosition.xyz;
+  let forward=normalize(u.cameraTarget.xyz-origin);
+  var right=cross(forward,vec3f(0.0,1.0,0.0));
+  if(length(right)<1e-5){right=vec3f(1.0,0.0,0.0);}
+  right=normalize(right);
+  let up=normalize(cross(right,forward));
+  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*${CAMERA_TAN_HALF_FOV}+up*ndc.y*${CAMERA_TAN_HALF_FOV});
+  let size=u.container.xyz;
+  let boundsMin=vec3f(-0.5*size.x,0.0,-0.5*size.z);
+  let interval=boxIntersection(origin,direction,boundsMin,boundsMin+size);
+  if(interval.y<=max(interval.x,0.0)){discard;}
+  let start=max(interval.x,0.0);
+  let dims=max(u.gridInfo.xyz,vec3f(1.0));
+  let fineTravel=abs(direction*(interval.y-start))*dims/max(size,vec3f(1e-9));
+  let steps=u32(clamp(ceil(fineTravel.x+fineTravel.y+fineTravel.z+1.0),1.0,512.0));
+  let stepLength=(interval.y-start)/f32(steps);
+  let footprint=max(stepLength*0.20,1e-5);
+  let opacity=clamp(u.debug.y,0.05,1.0);
+  let adaptiveGrid=u.debug.z>0.5;
+  var accumulated=vec4f(0.0);
+  var previous=vec2u(0xffffffffu);
+  for(var index=0u;index<512u;index+=1u){
+    if(index>=steps||accumulated.a>0.985){break;}
+    let point=origin+direction*(start+(f32(index)+0.5)*stepLength);
+    let local=clamp((point-boundsMin)/size,vec3f(0.0),vec3f(0.99999))*dims;
+    let cell=clamp(vec3i(floor(local)),vec3i(0),vec3i(dims)-vec3i(1));
+    let linear=u32(cell.x)+u32(dims.x)*(u32(cell.y)+u32(dims.y)*u32(cell.z));
+    var key=vec2u(linear,0u);
+    if(adaptiveGrid){key=adaptiveCellKey(cell,vec3i(dims));}
+    if(all(key==previous)){continue;}
+    previous=key;
+    let sample=gridSample(point,boundsMin,size,1,footprint);
+    let alpha=sample.alpha*opacity*0.16;
+    accumulated=volumeComposite(accumulated,sample.color,alpha);
+  }
+  if(accumulated.a<=0.001){discard;}
+  return vec4f(displayColor(accumulated.rgb/max(accumulated.a,1e-6)),accumulated.a);
+}
+
 @fragment fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
   let axis = i32(round(u.debug.x));
   if (axis <= 0 || u.gridInfo.w <= 0.5) { discard; }
+  if (axis == 4) { return volumeField(input.uv); }
   let ndc = input.uv * 2.0 - 1.0;
   let origin = u.cameraPosition.xyz;
   let forward = normalize(u.cameraTarget.xyz - origin);

@@ -27,7 +27,7 @@ function ramp(u,fallback){
 export const renderFrameReportHtml = (report: FrameReport): string => {
   const data = JSON.stringify(report).replace(/</g, "\\u003c");
 
-  return `<meta charset="utf-8">
+  const html = `<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mini dam break — GPU frame profile</title>
 <style>
@@ -316,6 +316,14 @@ if (A && A.compositeBuckets > 0) {
     +'Do not quote a composite row as its kernel’s cost; re-capture with a prefix that covers it.'
     +(worst?'<ul style="margin:8px 0 0;padding-left:20px">'+worst+'</ul>':'')
     +'</div>';
+}
+if (R.counters.available && R.counters.exclusiveCoverage < 0.5) {
+  $('attribution-banner').innerHTML += '<div class="banner" style="margin-top:10px">'
+    +'<b>GPU utilization counters have low uncontended coverage: '
+    +pct(R.counters.exclusiveCoverage,1)+'.</b> Pass timings are process-labelled and remain usable, '
+    +'but occupancy, ALU, cache, and bandwidth values are estimates from the short windows where no '
+    +'other process had GPU work in flight. Re-capture with other GPU-heavy apps closed before treating '
+    +'those utilization values as firm.</div>';
 }
 
 $('machine-scope').innerHTML = EXACT_PASSES.length
@@ -1098,4 +1106,15 @@ addEventListener('resize',()=>{drawTimeline();drawCounters();drawGrid();drawMach
 drawTimeline(); drawCounters(); renderPasses(); drawGrid(); drawMachine(); drawPlacement(); drawWaves(); renderShaders(); drawFlame();
 renderCompare(); selectFrame(capIndex);
 </script>`;
+  if (report.workUnit !== "frame") return html;
+  const renderingHtml = html
+    .replaceAll("Mini dam break — GPU frame profile", report.title ?? "SVO rendering — GPU frame profile")
+    .replaceAll("compute passes", "render passes")
+    .replaceAll("Advance", "Frame")
+    .replaceAll("advance", "frame");
+  return report.counters?.occupancyCounterName === "Fragment Occupancy"
+    ? renderingHtml
+      .replaceAll("Compute Occupancy", "Fragment Occupancy")
+      .replaceAll("compute occupancy", "fragment occupancy")
+    : renderingHtml;
 };

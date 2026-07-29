@@ -598,35 +598,4 @@ fn sampleEnvironment(ro:vec3f,rd:vec3f)->EnvironmentSample{
   return EnvironmentSample(color,t);
 }
 
-fn envEllipse(p:vec2f,center:vec2f,radius:vec2f,angle:f32)->f32{let cs=cos(angle);let sn=sin(angle);let d=p-center;let q=vec2f(cs*d.x+sn*d.y,-sn*d.x+cs*d.y)/radius;return 1.0-smoothstep(.82,1.02,length(q));}
-fn envStroke(distance:f32,width:f32)->f32{return 1.0-smoothstep(width,width+.008,abs(distance));}
-
-fn environmentForeground(color:vec3f,ndc:vec2f)->vec3f{
-  let e=environmentIndex();var c=color;
-  if(e==0){
-    var leaves=envEllipse(ndc,vec2f(-.94,.68),vec2f(.22,.085),-.72)+envEllipse(ndc,vec2f(-.83,.84),vec2f(.20,.078),-.22)+envEllipse(ndc,vec2f(.92,-.70),vec2f(.27,.10),.58)+envEllipse(ndc,vec2f(.82,-.88),vec2f(.22,.09),.08);leaves=clamp(leaves,0.0,1.0);let branch=envStroke(ndc.y+.78-.40*ndc.x,.012);c=mix(c,vec3f(.018,.075,.041),max(leaves*.48,branch*.30));c+=leaves*vec3f(.020,.065,.032);
-  }else if(e==1){
-    let corner=smoothstep(.48,.72,ndc.x)*smoothstep(.36,.64,ndc.y);let leaf=envEllipse(ndc,vec2f(.91,.78),vec2f(.18,.066),.72)+envEllipse(ndc,vec2f(.82,.91),vec2f(.15,.057),.28);let branch=envStroke(ndc.y-.53*ndc.x-.30,.009)*corner;let fruit=1.0-smoothstep(.036,.048,length(ndc-vec2f(.88,.72)));c=mix(c,vec3f(.055,.105,.048),clamp(leaf*.44+branch*.26,0.0,1.0));c=mix(c,vec3f(.88,.48,.11),fruit*.58);
-  }else if(e==2){
-    let edge=smoothstep(.88,1.25,max(abs(ndc.x),abs(ndc.y)));c*=1.0-.28*edge;
-  }else if(e==3){
-    let slab=smoothstep(.68,.74,ndc.x)*(1.0-smoothstep(-.76,-.67,ndc.y));let rail=envStroke(ndc.y+.86,.018);c=mix(c,vec3f(.025,.029,.027),max(slab*.56,rail*.42));let dust=envHash21(floor((ndc+vec2f(u.viewport.z*.002,0))*vec2f(410,260)));c+=vec3f(.18,.13,.08)*select(0.0,.08,dust>.997);
-  }else if(e==4){
-    let post=smoothstep(.92,.88,abs(ndc.x));let cloth=smoothstep(.68,.74,ndc.x)*smoothstep(.38,.46,ndc.y);let hem=envStroke(ndc.y-.38-.018*sin(ndc.x*14.0),.010)*smoothstep(.68,.75,ndc.x);c=mix(c,vec3f(.055,.035,.022),post*.44);c=mix(c,vec3f(.30,.20,.12),cloth*.42);c+=hem*vec3f(.22,.15,.08);
-  }else if(e==5){
-    let radius=length(ndc*vec2f(1.0,u.viewport.y/max(u.viewport.x,1.0)));let frame=smoothstep(.83,.91,radius);let rib=max(envStroke(abs(ndc.x)-.93,.025),envStroke(abs(ndc.y)-.91,.025));c=mix(c,vec3f(.003,.014,.024),max(frame*.58,rib*.48));let drift=envHash21(floor((ndc+vec2f(u.viewport.z*.006,-u.viewport.z*.003))*vec2f(330,210)));c+=vec3f(.20,.62,.72)*select(0.0,.20,drift>.996);
-  }else if(e==7){
-    // Out-of-focus pale grass blades along the bottom edge, swaying gently,
-    // and a soft warm-white bloom from the top-left sun.
-    let sway=.014*sin(u.viewport.z*1.7+ndc.x*9.0);
-    let lane=floor((ndc.x+sway)*70.0);
-    let bladeHeight=.05+.15*envHash21(vec2f(lane,5.0));
-    let across=fract((ndc.x+sway)*70.0)-.5;
-    let taper=1.0-clamp((ndc.y+1.0)/max(bladeHeight,1e-4),0.0,1.0);
-    let blade=step(abs(across),.42*taper)*step(ndc.y,-1.0+bladeHeight);
-    c=mix(c,vec3f(.33,.34,.33),blade*.6);
-    c+=vec3f(.15,.14,.12)*pow(max(0.0,1.0-length(ndc-vec2f(-.88,.86))),3.0);
-  }
-  return c;
-}
 `;

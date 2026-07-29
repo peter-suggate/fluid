@@ -13,7 +13,7 @@ import {
 } from "../tools/webgpu-smoke-scenarios";
 
 test("native WebGPU matrix covers the UI dam break, equilibrium, moving boundaries, rigid geometry, and deep compression", () => {
-  assert.deepEqual(smokeScenarioIds, ["dam-break-ui", "settled-tank", "settled-tank-ui", "dam-break-boxes", "hose-tank", "sphere-jet", "deep-water", "garden-pond", "garden-dam-break", "brick-quad-dam-break", "twin-dam-collision", "hydrostatic-power-two-level", "hydrostatic-power-large-offset", "minimal-power-dam-break", "ocean-seiche"]);
+  assert.deepEqual(smokeScenarioIds, ["dam-break-ui", "settled-tank", "settled-tank-ui", "dam-break-boxes", "hose-tank", "sphere-jet", "deep-water", "garden-pond", "garden-hose", "garden-dam-break", "brick-quad-dam-break", "twin-dam-collision", "hydrostatic-power-two-level", "hydrostatic-power-large-offset", "minimal-power-dam-break", "ocean-seiche"]);
   for (const id of smokeScenarioIds) {
     const scenario = createSmokeScenario(id);
     assert.deepEqual(validateScene(scenario.scene), []);
@@ -22,6 +22,7 @@ test("native WebGPU matrix covers the UI dam break, equilibrium, moving boundari
   }
   assert.ok(createSmokeScenario("deep-water").scene.container.height_m >= 20);
   assert.ok(createSmokeScenario("hose-tank").scene.fluid.inflow);
+  assert.ok(createSmokeScenario("garden-hose").scene.fluid.inflow);
   assert.ok(createSmokeScenario("sphere-jet").scene.rigidBodies.length > 0);
 });
 
@@ -31,6 +32,13 @@ test("dam-break-ui is the exact browser preset, including its two-rate timestep 
   assert.deepEqual(dawn, browser);
   assert.equal(dawn.numerics.fixedDt_s, 0.004);
   assert.equal(dawn.numerics.maxDt_s, 0.008);
+});
+
+test("garden-hose smoke is the exact authored browser preset", () => {
+  assert.deepEqual(
+    createSmokeScenario("garden-hose").scene,
+    getScenePreset("garden-hose").create(),
+  );
 });
 
 test("Dawn performance reproduction reaches the UI's evolved third profiler sample", () => {

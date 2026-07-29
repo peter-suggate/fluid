@@ -67,7 +67,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     "param.octree.globalFineLevelSetFactor",
     "param.octree.maximumLeafSize",
     "param.octree.interfaceRefinementBandCells",
-    "param.octree.fineLevelSetBandCells",
   ]);
   const unapprovedQueryKeys = [...new Set([...query.keys()].filter((key) => !approvedQueryKeys.has(key)))];
   return [

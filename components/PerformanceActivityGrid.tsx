@@ -895,13 +895,16 @@ export function PerformanceActivityGrid({
         <span className="activity-capture-status" data-state={view.captureState} title={captureStatus.detail}>
           {captureStatus.short}
         </span>
+        {queueWallFallback && <span className="activity-queue-fallback" title="The duration waits for the whole submitted GPU queue and can include work queued before this lane">
+          QUEUE-WALL FALLBACK · INCLUDES BACKLOG
+        </span>}
         <span className={view.synchronized ? "synchronized" : "independent"}>
           {view.synchronized ? "CORRELATED FRAME CLOCK" : "INDEPENDENT LANE ORIGINS"}
         </span>
       </div>
     </header>
     <div className="activity-matrix-summary" aria-label="Matrix summary">
-      <span><small>FRAME WINDOW</small><strong>{formatMs(view.duration_ms)}</strong></span>
+      <span><small>{queueWallFallback ? "QUEUE ENVELOPE" : "FRAME WINDOW"}</small><strong>{formatMs(view.duration_ms)}</strong></span>
       <span><small>CPU ROWS</small><strong>{stats.cpuRows}</strong></span>
       <span><small>GPU WG / DISPLAY BANDS</small><strong>{stats.logicalGpuRows > 0 ? `${stats.logicalGpuRows} / ${stats.logicalGpuBands}` : stats.gpuRows}</strong></span>
       <span><small>{completeUtilization ? "ACTIVE OBSERVED CELLS" : "UTILIZATION"}</small><strong>{completeUtilization
@@ -975,8 +978,8 @@ export function PerformanceActivityGrid({
                   <small>{kind === "gpu-logical"
                     ? `${resources.length} BAND${resources.length === 1 ? "" : "S"} · ${stats.logicalGpuRows} STRATIFIED SAMPLE${stats.logicalGpuRows === 1 ? "" : "S"} · ${hasBallotUtilization ? "ACTIVE-LANE INTENSITY" : "SAMPLE COVERAGE"}${hasStageProjection ? " · TIMESTAMP-PROJECTED CONTEXT" : ""}`
                     : kind === "aggregate"
-                      ? `${resources.length} TIMESTAMPED QUEUE LANE${resources.length === 1 ? "" : "S"}`
-                    : `${resources.length} ROW${resources.length === 1 ? "" : "S"}`}</small>
+                      ? `${resources.length} ${queueWallFallback ? "QUEUE-COMPLETION ENVELOPE" : "TIMESTAMPED QUEUE LANE"}${resources.length === 1 ? "" : "S"}`
+                      : `${resources.length} ROW${resources.length === 1 ? "" : "S"}`}</small>
                 </div>
                 {resources.map((resource, resourceIndex) => <div className="activity-resource-row" key={resource.id} data-group={resource.group}>
                   <div className="activity-resource-label"><b>{String(resourceIndex).padStart(2, "0")}</b><span>{resource.label}</span><small>{formatMs(Math.max(0, ...resource.segments.map((segment) => segment.end_ms)))}</small></div>

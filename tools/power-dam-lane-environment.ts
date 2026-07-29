@@ -8,7 +8,7 @@
  * number the benchmark gates on.
  */
 
-export type PowerDamRuntimeLane = "mini" | "ui" | "moving-interface";
+export type PowerDamRuntimeLane = "mini" | "ui" | "moving-interface" | "ocean" | "ceiling-drop";
 
 export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<string, string>> = {
   mini: {
@@ -27,6 +27,25 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     FLUID_SCENE: "dam-break-ui", FLUID_TARGET_S: "0.496",
     FLUID_MAX_DT: "0.008", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
     FLUID_EXPECT_GRID: "24,18,16",
+  },
+  ocean: {
+    // Two submissions are intentional: the second semantic frame-start is the
+    // exact GPU end boundary for the literal first advance selected by xctrace.
+    FLUID_SCENE: "ocean-seiche", FLUID_TARGET_S: "0.01",
+    FLUID_MAX_DT: "0.005", FLUID_ORACLE_STEPS: "2", FLUID_EXPECT_EXACT_STEPS: "2",
+    FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648",
+    FLUID_POWER_GENERATION_AUDIT: "1", FLUID_POWER_GENERATION_AUDIT_LOG: "1",
+    // The unpublished-next-candidate forensic is intentionally not a capture
+    // gate: frame 1/2 can be valid while generation 3 is rejected, and that
+    // post-frame diagnosis must not discard an otherwise complete xctrace.
+    FLUID_POWER_STAGE_AUDIT: "1",
+    FLUID_POWER_AUDIT_EVERY_STEPS: "1", FLUID_STABILITY_ENVELOPE: "1",
+  },
+  "ceiling-drop": {
+    FLUID_SCENE: "ceiling-slab-drop", FLUID_TARGET_S: "0.024",
+    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "6", FLUID_EXPECT_EXACT_STEPS: "6",
+    FLUID_EXPECT_GRID: "24,16,24", FLUID_MAXIMUM_LEAF_SIZE: "2",
+    FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
 };
 

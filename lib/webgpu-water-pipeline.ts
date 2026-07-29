@@ -966,7 +966,11 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   result+=environmentLightColor()*(glint*(.18+.82*outerEdge)+fresnel*outerEdge*.16);
   return result;
 }
-fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=environmentForeground(color,ndc)*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayTransfer(c),1);}
+// Scenery is geometry, not a screen-space overlay: every frond, batten and
+// blade that used to be painted here in NDC is now an analytic primitive in
+// lib/voxel-scenery, so it parallaxes, occludes and takes light like the rest
+// of the world. Only the lens falloff remains, which belongs to the camera.
+fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayTransfer(c),1);}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   // Full-screen interpolated UV has Y=1 at the top of the render target,
   // while sampled WebGPU textures have Y=0 there. The shared legacy upscaler
@@ -1074,6 +1078,13 @@ export class RasterWaterPipeline {
   private lastExtractionAt_ms = -Infinity;
   private causticsValid = false;
   private sceneHasFluid = true;
+  /**
+   * Ambient background used instead of the legacy procedural room while the
+   * sparse world owns presentation but has not published a frame yet. Undefined
+   * restores the raster environment, which is still the whole picture in raster
+   * and voxel-inspection modes.
+   */
+  private pendingSvoBackground?: readonly [number, number, number];
   private dryInterfaceClearsEncoded = false;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
   private globalFineLevelSet?: GlobalFineLevelSetConsumerSource;
@@ -1372,6 +1383,16 @@ export class RasterWaterPipeline {
     this.dryInterfaceClearsEncoded = false;
   }
 
+  /**
+   * Hand the dry scene to the sparse renderer for the whole session, including
+   * the frames before it can publish one. The legacy procedural environment is
+   * a different set from the authored one, so showing it while the sparse world
+   * loads reads as the wrong scene rather than as a scene loading.
+   */
+  setPendingSvoBackground(background: readonly [number, number, number] | undefined) {
+    this.pendingSvoBackground = background;
+  }
+
   private rebuildBindGroups() {
     this.compositeBindGroups = new WeakMap();
     const globalFine = this.globalFineLevelSet;
@@ -1489,8 +1510,16 @@ export class RasterWaterPipeline {
     traceBoundary?.();
     const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture, tracePhase) ?? false;
     if (!sparseSceneResult) {
-      const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTextureView!,clearValue:{r:0,g:0,b:0,a:65504},loadOp:"clear",storeOp:"store"}]});scene.setPipeline(this.scenePipeline);scene.setBindGroup(0,this.sceneBindGroup);scene.draw(3);scene.end();
-      tracePhase?.({ id: "dry-scene", label: "Raster dry-scene fallback" });
+      // Alpha carries scene depth; the far value keeps water and spray in front
+      // of a background that has no geometry of its own.
+      const pending = this.pendingSvoBackground;
+      const clearValue = pending
+        ? { r: pending[0], g: pending[1], b: pending[2], a: 65504 }
+        : { r: 0, g: 0, b: 0, a: 65504 };
+      const scene=encoder.beginRenderPass({label:"Dry scene",colorAttachments:[{view:this.sceneTextureView!,clearValue,loadOp:"clear",storeOp:"store"}]});
+      if (!pending) { scene.setPipeline(this.scenePipeline); scene.setBindGroup(0,this.sceneBindGroup); scene.draw(3); }
+      scene.end();
+      tracePhase?.({ id: "dry-scene", label: pending ? "Sparse dry-scene pending" : "Raster dry-scene fallback" });
     }
     traceBoundary?.();
     // Water and spray target the same interface attachments and depth state.

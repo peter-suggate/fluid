@@ -380,7 +380,6 @@ const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRul
   // physics phase (lib/webgpu-uniform-eulerian.ts). Owned so a --profile capture
   // does not report them as unattributed work.
   { stage: "Profiler phase boundaries", label: /^Physics activity (?:boundary \d+|frame (?:begin|end))$/i },
-  { stage: "Structured velocity dynamics", label: /^Mark structured overhead separation row class/i },
   // C2 widened the single-workgroup cubic band scatter into an indirect
   // (seed x halo-cell) dispatch; the new pass needs the same owner.
   { stage: "Fine topology", label: /^Scatter recurring fine-band seed halos$/i },

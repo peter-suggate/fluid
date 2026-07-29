@@ -472,7 +472,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       - (inputs.sharedArena ? this.plan.support.totalBytes : 0);
   }
 
-  private parameterData(expectedEpoch: number, fineSlot?: 0 | 1): ArrayBuffer {
+  private parameterData(expectedEpoch: number, fineSlot?: 0 | 1,
+    gravityDt: readonly [number, number, number] = [0, 0, 0]): ArrayBuffer {
     if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 1 || expectedEpoch > 0xffff_ffff) {
       throw new RangeError("Air-support expected epoch must be a published uint32 generation");
     }
@@ -518,10 +519,15 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     words[57] = fine?.generation ?? 0;
     new Float32Array(bytes)[58] = fine?.plan.fineCellWidth ?? 0;
     words[59] = this.inputs.closedBoundaryMask;
+    if (!gravityDt.every((component) => Number.isFinite(component))) {
+      throw new RangeError("Air-support gravity impulse must be finite");
+    }
+    new Float32Array(bytes).set(gravityDt, 60);
     return bytes;
   }
 
-  encode(broker: PassBroker, expectedEpoch: number, fineSlot?: 0 | 1): void {
+  encode(broker: PassBroker, expectedEpoch: number, fineSlot?: 0 | 1,
+    gravityDt?: readonly [number, number, number]): void {
     if (this.destroyed) throw new Error("Air-support GPU producer is destroyed");
     if (fineSlot !== undefined && !this.inputs.fineSources) {
       throw new Error("Air-support fine-demand slot requires configured A/B fine sources");
@@ -529,7 +535,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     const parameterSlot = this.parameterSlot;
     this.parameterSlot = parameterSlot === 0 ? 1 : 0;
     const params = this.params[parameterSlot], groups = this.groups[parameterSlot];
-    this.device.queue.writeBuffer(params, 0, this.parameterData(expectedEpoch, fineSlot));
+    this.device.queue.writeBuffer(params, 0,
+      this.parameterData(expectedEpoch, fineSlot, gravityDt ?? [0, 0, 0]));
     this.publicationCount += 1;
     let pass = broker.compute({ label: "Initialize structured air-support publication" });
     pass.setPipeline(this.pipelines.beginAirSupportPublication!);
@@ -698,6 +705,7 @@ struct P {
   fineCandidateOffset:u32,finePageCapacity:u32,fineFactor:u32,transportBandFineCells:u32,
   fineBrickDims:vec3u,fineR:u32,fineSampleDims:vec3u,fineSamplesPerBrick:u32,
   maxDisplacementFineCells:u32,expectedFineGeneration:u32,fineWidth:f32,closedBoundaryMask:u32,
+  airGravityDt:vec3f,
 }
 struct Accepted {flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,epoch:u32,bank:u32,slotCount:u32}
 // No demand-flags word: every consumer reads the deduplicated per-cell
@@ -1623,6 +1631,13 @@ fn regularVectorAt(faceRow:u32,point:vec3f)->vec4f{let cell=faceCell(faceRow);le
     let t=clamp((point[axis]-origin[axis])/f32(cell.y),0.,1.);result[axis]=mix(negativeValue,positiveValue,t);}
   return vec4f(result,1.);}
 
+// Euclidean distance from this row's nearest marched face patch to its
+// original seed patch — the free-surface proximity the march already carries.
+fn rowSeedDistance(faceRow:u32)->f32{var best=3.402823e38;
+  for(var local=0u;local<${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;local+=1u){
+    let sample=faceA[faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+local];
+    if(sample.w!=0u){best=min(best,bitcast<f32>(sample.y));}}
+  return best;}
 fn reconstructedFaceVector(faceRow:u32)->vec4f{let cell=faceCell(faceRow);let caseId=cell.z;let transform=cell.w&63u;let header=caseHeader(caseId);
   if(header.x==INVALID||header.x>arrayLength(&catalogFaces)||header.y>arrayLength(&catalogFaces)-header.x){fail(faceRow,ERROR_CATALOG);return vec4f(0.,0.,0.,-1.);}
   var canonical=vec3f(0.);let anchorCenter=vec3f(coord(cell.x))+.5*f32(cell.y);
@@ -1637,7 +1652,24 @@ fn reconstructedFaceVector(faceRow:u32)->vec4f{let cell=faceCell(faceRow);let ca
     let sample=dot(interpolated.xyz,normal);let coefficient=p.reconstructionOffset+3u*global;
     if(coefficient+2u>=arrayLength(&denseCatalog)||!finiteValue(sample)){fail(faceRow,ERROR_CATALOG);return vec4f(0.,0.,0.,-1.);}
     canonical+=vec3f(bitsf(coefficient),bitsf(coefficient+1u),bitsf(coefficient+2u))*sample;}
-  let result=inverseTransform(canonical,transform);
+  // Gravity over the extension band. A sub-grid film (ceiling sheet, wall-seam
+  // band) owns no liquid rows, so nothing ever integrated the body force into
+  // the only field that transports its phi — and near seams the closest liquid
+  // seeds are wall-constrained faces whose values are ~0, leaving the film in
+  // frozen equilibrium. Add this substep's body-force increment at the one
+  // reconstruction site every air consumer shares (fine transport, the dry-row
+  // staggered substitution, committed direct-air rows). Bounded by
+  // construction: the march rebuilds every air vector from the projected
+  // liquid seeds each epoch, so this is one g*dt, never an accumulating field
+  // — the pathology that keeps forceFamily's wet gate cannot recur here.
+  //
+  // Ramped by the marched seed distance: air hugging the liquid must stay the
+  // paper's exact closest-face copy — the surface sampler ingests it, and an
+  // un-projected impulse there pumps splash energy (measured +30% peak speed
+  // on the minimal dam) and biases hydrostatic rest. Only detached air, whose
+  // dynamics no liquid row carries, receives the body force.
+  let gravityRamp=clamp((rowSeedDistance(faceRow)-1.5)/1.5,0.,1.);
+  let result=inverseTransform(canonical,transform)+gravityRamp*p.airGravityDt;
   if(!finiteValue(result.x)||!finiteValue(result.y)||!finiteValue(result.z)){fail(faceRow,ERROR_SOURCE);return vec4f(0.,0.,0.,-1.);}
   return vec4f(result,1.);}
 

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { planCounterWindow } from "../tools/profile-mini-dam-xctrace";
+import {
+  makeCleanBaselineEnvironment,
+  planCounterWindow,
+} from "../tools/profile-mini-dam-xctrace";
 
 /**
  * An attached GPU-counter capture is only meaningful while the solver is
@@ -78,4 +81,15 @@ test("the labelled part of a window is shorter than the window", () => {
   assert.ok(plan.labelledSeconds > 0 && plan.labelledSeconds < 2);
   const brief = planCounterWindow({ requestedSteps: 500, perAdvanceMs: 50, counterSeconds: 1 });
   assert.equal(brief.labelledSeconds, 0, "a 1 s window is all warm-up and labels nothing");
+});
+
+test("literal first-frame gating never leaks into the clean shipping control", () => {
+  const baseline = makeCleanBaselineEnvironment({
+    FLUID_PROFILE_FIRST_ADVANCE_GATE: "1",
+    FLUID_GPU_PASS_TIMESTAMPS: "1",
+    FLUID_GPU_ISOLATE_PASS_LABELS: "1",
+  });
+  assert.equal(baseline.FLUID_PROFILE_FIRST_ADVANCE_GATE, "0");
+  assert.equal(baseline.FLUID_GPU_PASS_TIMESTAMPS, "0");
+  assert.equal(baseline.FLUID_GPU_ISOLATE_PASS_LABELS, "0");
 });

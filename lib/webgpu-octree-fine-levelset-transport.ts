@@ -13,6 +13,7 @@ import {
   type OctreeAirVelocitySupportLayout,
 } from "./webgpu-octree-air-velocity-support";
 import type { PassBroker } from "./webgpu-pass-broker";
+import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 export { structuredFineLevelSetTransportWGSL } from "./webgpu-octree-fine-levelset-transport.wgsl";
 import { structuredFineLevelSetTransportWGSL } from "./webgpu-octree-fine-levelset-transport.wgsl";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
@@ -69,6 +70,8 @@ export type FineLevelSetGPUBoundaryPolicy = "strict" | "closed-neumann";
 
 export interface FineLevelSetGPUTransportOptions {
   timestep: number;
+  /** Authored nozzle source applied directly to resident fine phi. */
+  inflow?: SurfaceInflowState;
   generation?: number;
   transportBandCells?: number;
   /** Fine-cell closure proven resident by the destination topology publication. */
@@ -111,7 +114,7 @@ export function planFineLevelSetGPUTransport(queryCapacity: number,
   return { queryCapacity, velocityChunkCapacity: queryCapacity, chunkCount: 1,
     topologyDeltaBytes, pageStatusBytes, worksetBytes,
     controlBytes: FINE_LEVELSET_TRANSPORT_CONTROL_BYTES,
-    allocatedBytes: 256 + pageStatusBytes + worksetBytes + topologyDeltaBytes
+    allocatedBytes: 320 + pageStatusBytes + worksetBytes + topologyDeltaBytes
       + FINE_LEVELSET_TRANSPORT_CONTROL_BYTES + 2 * 512 };
 }
 
@@ -142,6 +145,8 @@ export function unpackFineLevelSetGPUTransportControl(words: ArrayLike<number>):
 export interface FineLevelSetTransportTopologyDelta {
   readonly buffer: GPUBuffer;
   readonly pageCapacity: number;
+  /** Header word seven: measured complete-characteristic displacement in fine cells. */
+  readonly maximumDisplacementOffsetWords: 7;
   readonly candidateKeysOffsetWords: 8;
   readonly changedKeysOffsetWords: number;
 }
@@ -254,7 +259,7 @@ export class WebGPUFineLevelSetTransport {
       piece, 0, this.samplingCatalog, samplingOffsets[index + 1]!, piece.size));
     device.queue.submit([catalogCopy.finish()]);
     this.params = device.createBuffer({ label: "Structured fine transport parameters",
-      size: 256,
+      size: 320,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.control = device.createBuffer({ label: "Structured fine transport control",
       size: FINE_LEVELSET_TRANSPORT_CONTROL_BYTES, usage: storage });
@@ -273,7 +278,8 @@ export class WebGPUFineLevelSetTransport {
       size: 512, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     this.topologyDelta = { buffer: device.createBuffer({
       label: "Structured fine transport interface delta", size: this.plan.topologyDeltaBytes, usage: storage }),
-      pageCapacity: source.plan.maximumResidentBricks, candidateKeysOffsetWords: 8,
+      pageCapacity: source.plan.maximumResidentBricks, maximumDisplacementOffsetWords: 7,
+      candidateKeysOffsetWords: 8,
       changedKeysOffsetWords: 8 + source.plan.maximumResidentBricks };
     const module = device.createShaderModule({ label: "Direct structured fine level-set transport",
       code: structuredFineLevelSetTransportWGSL });
@@ -350,7 +356,7 @@ export class WebGPUFineLevelSetTransport {
       || maximumBacktraceFineCells > 2 * plan.fineFactor) {
       throw new RangeError("Fine transport displacement bound exceeds its configured support depth");
     }
-    const bytes = new ArrayBuffer(256), u = new Uint32Array(bytes), f = new Float32Array(bytes);
+    const bytes = new ArrayBuffer(320), u = new Uint32Array(bytes), f = new Float32Array(bytes);
     u.set(plan.brickDimensions, 0); u[3] = plan.brickResolution;
     u.set(plan.sampleDimensions, 4); u[7] = plan.samplesPerBrick;
     f.set(plan.domainOrigin, 8); f[11] = plan.fineCellWidth;
@@ -372,6 +378,14 @@ export class WebGPUFineLevelSetTransport {
     u.set(air ? [1, air.layout.selectorTagOffsetWords, air.layout.regularTagOffsetWords,
       air.layout.controlOffsetWords, air.layout.supportVectorOffsetWords,
       air.layout.supportCapacity, air.layout.selectorStride] : [0, 0, 0, 0, 0, 0, 0], 57);
+    const inflow = options.inflow;
+    if (inflow) {
+      f.set([inflow.outletCenter_m.x, inflow.outletCenter_m.y,
+        inflow.outletCenter_m.z, inflow.radius_m], 64);
+      f.set([inflow.velocity_m_s.x, inflow.velocity_m_s.y,
+        inflow.velocity_m_s.z, inflow.apertureScale], 68);
+    }
+    f.set([inflow?.strength ?? 0, 0, 0, 0], 72);
     this.device.queue.writeBuffer(this.params, 0, bytes);
     const run = (pipeline: GPUComputePipeline, group: GPUBindGroup, label: string, groups: number) => {
       const pass = broker.compute({ label }); pass.setPipeline(pipeline); pass.setBindGroup(0, group);

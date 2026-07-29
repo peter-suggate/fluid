@@ -43,7 +43,7 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     id: "select",
     label: "SELECT",
     shortcut: "q",
-    hint: "click to select · drag a gizmo axis to move · drag the body to throw it",
+    hint: "click to select · click empty space or press Esc to deselect · drag a gizmo axis to move · drag the body to throw it",
     status: "active",
   },
   {
@@ -147,4 +147,30 @@ export function bodySelection(id: string | undefined): EditorSelection | undefin
 /** The body id a selection refers to, or undefined for non-body selections. */
 export function selectedBodyIdOf(selection: EditorSelection | undefined): string | undefined {
   return selection?.kind === "body" ? selection.id : undefined;
+}
+
+/**
+ * Pointer travel, in CSS pixels, below which a press-and-release is still a
+ * click. Wide enough to absorb the jitter of a real click on a trackpad,
+ * narrow enough that a deliberate camera nudge is read as a drag.
+ */
+export const CLICK_SLOP_PX = 4;
+
+/**
+ * Whether releasing a viewport gesture on empty space should clear the
+ * selection.
+ *
+ * The pointer machine only falls through to an orbit when nothing under the
+ * cursor claimed the press, so an orbit that never moved *is* the user clicking
+ * the background — the one gesture that always deselects, whatever is selected
+ * and whatever tool is armed. Pans are excluded: shift or the middle button
+ * asks for navigation explicitly, so a pan is never a pick.
+ */
+export function emptySpaceClickDeselects(
+  action: "orbit" | "pan",
+  travelX_px: number,
+  travelY_px: number,
+): boolean {
+  if (action !== "orbit") return false;
+  return Math.hypot(travelX_px, travelY_px) <= CLICK_SLOP_PX;
 }

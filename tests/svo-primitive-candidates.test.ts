@@ -5,6 +5,7 @@ import { environmentIds } from "../lib/environments";
 import { cloneScene, defaultScene, type Vec3 } from "../lib/model";
 import {
   SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL,
+  SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
   SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES,
   SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK,
   buildSvoPrimitiveCandidates,
@@ -100,7 +101,10 @@ test("overlapping equal-depth owners retain the original lowest-index tie rule",
 });
 
 test("balanced BVH work is bounded and empty rays perform zero exact intersections", () => {
-  const descriptors: SvoFinitePrimitiveDescriptor[] = Array.from({ length: 64 }, (_, index) => ({
+  // A catalog filled exactly to capacity, so the balanced tree it produces is
+  // the widest one the shader ever traverses. Derived from the cap rather than
+  // hardcoded: the two have to move together or this stops testing the bound.
+  const descriptors: SvoFinitePrimitiveDescriptor[] = Array.from({ length: SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES }, (_, index) => ({
     kind: index % 2 === 0 ? "sphere" : "box",
     primitiveId: index + 1,
     materialId: 2,
@@ -121,7 +125,8 @@ test("balanced BVH work is bounded and empty rays perform zero exact intersectio
   assert.ok(querySvoPrimitiveCandidates(publication, {
     origin_m: { x: -2, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 },
   }).maximumStackDepth <= SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK);
-  assert.throws(() => buildSvoPrimitiveCandidates([...descriptors, descriptors[0]]), /1-64 primitives/);
+  assert.throws(() => buildSvoPrimitiveCandidates([...descriptors, descriptors[0]]),
+    new RegExp(`1-${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES} primitives`));
 });
 
 test("packed candidate records preserve the shared stride and fail closed on descriptor mismatch", () => {

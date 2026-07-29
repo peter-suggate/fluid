@@ -13,9 +13,12 @@ import {
 
 test("every authored environment gets a stable full-scene proxy catalog", () => {
   const scene = cloneScene(defaultScene);
+  // A tripwire, not a target: these move whenever a scenery module is
+  // re-art-directed, and the number changing is the prompt to look at the
+  // render. Each environment's geometry lives in lib/voxel-scenery/<id>.ts.
   const authoredPropCounts = new Map([
-    ["conservatory", 19], ["courtyard", 16], ["night-lab", 32], ["concrete-gallery", 9],
-    ["bathhouse", 16], ["research-station", 21], ["default", 0], ["garden", 22]
+    ["conservatory", 100], ["courtyard", 93], ["night-lab", 105], ["concrete-gallery", 68],
+    ["bathhouse", 90], ["research-station", 104], ["default", 17], ["garden", 104]
   ]);
   for (const id of environmentIds) {
     const first = buildEnvironmentProxyCatalog(scene, id);
@@ -24,7 +27,7 @@ test("every authored environment gets a stable full-scene proxy catalog", () => 
     assert.equal(first.environmentIndex, environmentIds.indexOf(id));
     assert.ok(first.shell.bounds_m.max.x > first.shell.bounds_m.min.x, `${id} shell x extent`);
     assert.ok(first.shell.bounds_m.max.z > first.shell.bounds_m.min.z, `${id} shell z extent`);
-    if (id !== "default") assert.ok(first.primitives.length > 0, `${id} must expose authored prop proxies`);
+    assert.ok(first.primitives.length > 0, `${id} must expose authored prop proxies`);
     assert.equal(first.primitives.length, authoredPropCounts.get(id), `${id} must retain every shader-authored prop`);
     const all = environmentProxyPrimitives(first);
     const keys = all.map((primitive) => primitive.key);
@@ -46,9 +49,9 @@ test("night lab includes the complete furniture and fixture vocabulary", () => {
   for (const required of ["desk", "bench", "stool", "chair", "counter", "instrument", "shelf", "fixture", "light"]) assert.ok(tags.has(required), required);
   assert.equal(catalog.primitives.filter((primitive) => primitive.tags.includes("stool")).length, 3);
   assert.equal(catalog.primitives.filter((primitive) => primitive.key.includes("fixtures/troffer")).length, 4);
-  assert.ok(catalog.primitives.some((primitive) => primitive.key.endsWith("counter/monitor-screen") && primitive.material.emission === 1));
-  assert.ok(catalog.primitives.some((primitive) => primitive.key.endsWith("desk-lamp/bulb") && primitive.material.emission === 2.8));
-  assert.ok(catalog.primitives.some((primitive) => primitive.key.endsWith("desk/top") && primitive.material.colorLinear[0] === .35));
+  assert.ok(catalog.primitives.some((primitive) => primitive.key.endsWith("counter/monitor-screen") && primitive.material.emission === 1.35));
+  assert.ok(catalog.primitives.some((primitive) => primitive.key.endsWith("desk-lamp/bulb") && primitive.material.emission === 3.4));
+  assert.ok(catalog.primitives.some((primitive) => primitive.key.endsWith("desk/top") && primitive.material.colorLinear[0] === .60));
   const materialTable = environmentProxyMaterialTable(catalog);
   assert.deepEqual(materialTable.map((entry) => entry.index), materialTable.map((_, index) => index));
   assert.deepEqual(materialTable.map((entry) => entry.key), environmentProxyPrimitives(catalog).map((primitive) => primitive.key));
@@ -71,14 +74,44 @@ test("world coordinates track scene dimensions and garden terrain base height", 
   assert.equal(garden.primitives.find((primitive) => primitive.key.endsWith("tree-big/trunk"))?.center_m.y, .17 + .30);
 });
 
-test("primitive colors and emission retain the exact shader constants", () => {
+/**
+ * Surface colours used to be pinned here to keep the proxy catalog in step with
+ * the raster environment shader. Props are voxel-native now — the SVO path
+ * reads these materials directly — so that parity contract is gone, and
+ * neutrality is enforced generally in tests/scenery-art-direction.test.ts.
+ *
+ * What still deserves pinning is the emitters. They are the only tinted things
+ * left in any scene, so each one is a deliberate lighting decision rather than
+ * a surface colour, and silent drift in a tint or an intensity would restage
+ * the room without anything else noticing.
+ */
+test("emissive sources keep the tint and intensity their scene was lit around", () => {
   const scene = cloneScene(defaultScene);
-  const conservatory = buildEnvironmentProxyCatalog(scene, "conservatory");
-  assert.deepEqual(conservatory.primitives.find((primitive) => primitive.key.endsWith("bench/seat"))?.material.colorLinear, [.34, .23, .12]);
-  assert.deepEqual(conservatory.primitives.find((primitive) => primitive.key.endsWith("pendant-1/globe"))?.material.colorLinear, [.85, .68, .38]);
-  assert.equal(conservatory.primitives.find((primitive) => primitive.key.endsWith("pendant-1/globe"))?.material.emission, .48);
-  const station = buildEnvironmentProxyCatalog(scene, "research-station");
-  assert.deepEqual(station.primitives.find((primitive) => primitive.key.endsWith("console-left/monitor"))?.material.colorLinear, [.06, .48, .58]);
+  const emitter = (environmentId: Parameters<typeof buildEnvironmentProxyCatalog>[1], suffix: string) =>
+    buildEnvironmentProxyCatalog(scene, environmentId).primitives.find((primitive) => primitive.key.endsWith(suffix))?.material;
+
+  // Warm globes over the conservatory staging bench.
+  assert.deepEqual(emitter("conservatory", "pendant-1/globe")?.colorLinear, [.85, .68, .38]);
+  assert.equal(emitter("conservatory", "pendant-1/globe")?.emission, .48);
+  // Cold instrument cyan, the one cool note in the station hull.
+  assert.deepEqual(emitter("research-station", "console-left/monitor")?.colorLinear, [.06, .48, .58]);
+  assert.equal(emitter("research-station", "console-left/monitor")?.emission, .30);
+  // The night lab's single warm source, read against its cool troffers.
+  const bulb = emitter("night-lab", "desk-lamp/bulb");
+  assert.equal(bulb?.emission, 3.4);
+  assert.ok(bulb!.colorLinear[0] > bulb!.colorLinear[2], "the task lamp must stay warmer than it is blue");
+  const troffer = emitter("night-lab", "fixtures/troffer-left-1");
+  assert.ok(troffer!.emission > 0 && troffer!.colorLinear[2] >= troffer!.colorLinear[0] * .9,
+    "ceiling troffers stay the cool counterweight to the task lamp");
+
+  // Anything an environment nominates as a light really does emit; a fixture
+  // tagged for the light table but left at zero would publish a black lamp.
+  for (const id of environmentIds) {
+    for (const primitive of buildEnvironmentProxyCatalog(scene, id).primitives) {
+      if (!primitive.tags.includes("light")) continue;
+      assert.ok(primitive.material.emission > 0, `${primitive.key} is tagged as a light but emits nothing`);
+    }
+  }
 });
 
 test("AABB helpers conservatively cover negative cells and deduplicate sparse bricks", () => {

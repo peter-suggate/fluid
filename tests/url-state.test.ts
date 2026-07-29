@@ -203,10 +203,10 @@ test("a bare link to a profiled preset resolves to that preset's authored method
 
 test("an explicit param key overrides one value of a profiled preset", () => {
   const parsed = parseQueryState(
-    "?scene=minimal-power-dam-break&param.octree.interfaceRefinementBandCells=5");
+    "?scene=minimal-power-dam-break&param.octree.interfaceRefinementBandCells=0");
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
-  assert.equal(values.interfaceRefinementBandCells, 5);
+  assert.equal(values.interfaceRefinementBandCells, 0);
   // Every other authored setting is still the profile's.
   assert.equal(values.maximumLeafSize, "2");
   assert.equal(values.globalFineLevelSetFactor, "4");

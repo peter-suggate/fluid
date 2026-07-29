@@ -17,6 +17,7 @@ import { buildSvoScenePrimitives } from "./svo-scene-primitives";
 import { buildSvoSceneGlass } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "./svo-terrain-material";
+import { svoEnvironmentAmbientBackgroundLinear } from "./svo-environment-lighting";
 import {
   DEFAULT_SVO_LIGHTING_MODE,
   DEFAULT_SVO_LIGHTING_OPTIONS,
@@ -188,8 +189,9 @@ export function optionalRendererPipelineRequests(
 ): OptionalRendererPipeline[] {
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
-    if (gridOverlay.axis !== "volume") requested.push("grid-overlay");
-    if (gridOverlay.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode)) {
+    const technique = Boolean(gridOverlay.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode));
+    if (!technique) requested.push("grid-overlay");
+    if (technique) {
       requested.push("technique-overlay", "technique-audit-overlay");
     }
   }
@@ -1382,6 +1384,12 @@ export class FluidLabRenderer {
     const techniqueModeCode = gridOverlay?.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode)
       ? OCTREE_TECHNIQUE_OVERLAY_CODES[gridOverlay.mode]
       : 0;
+    // The compact pressure solve ping-pongs its row buffer. Refresh the
+    // diagnostic bundle only while a technique view is visible so pressure
+    // updates never keep a bind group pointed at the preceding solve bank.
+    if (techniqueModeCode) {
+      this.techniqueOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
+    }
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, drySceneTemporalFrame,
       position.x, position.y, position.z, svoCostOverlayCode(activeSvoDiagnostics.overlay),
@@ -1517,6 +1525,18 @@ export class FluidLabRenderer {
       }
       : undefined;
     this.waterPipeline.setSceneHasFluid(Boolean(sceneRuntime.fluidSolver));
+    // Sparse presentation owns the dry scene for the whole session. Frames it
+    // cannot publish yet show the environment's own ambient light, never the
+    // legacy procedural room, which is a different set from the authored one.
+    // A scene that has actually fallen back keeps the raster room, because
+    // there it is the whole picture rather than a placeholder.
+    const svoPresentationExpected = useSvoDryScene
+      && !this.failedOptionalPipelines.has("svo-dry-scene")
+      && this.svoTerrainSupported && this.svoGlassSupported && this.svoMaterialsSupported
+      && this.svoPrimitiveCandidatesSupported && this.svoLightingSupported;
+    this.waterPipeline.setPendingSvoBackground(
+      svoPresentationExpected ? svoEnvironmentAmbientBackgroundLinear(environmentId, scene.lighting?.environment) : undefined,
+    );
     const rasterResult = this.waterPipeline.encode(
       encoder, this.presentationTexture,
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1,
@@ -1592,9 +1612,9 @@ export class FluidLabRenderer {
     }
     if (gridOverlay && gridOverlay.axis !== "off") {
       const overlayView=this.presentationTexture.createView();
-      // The legacy grid pass is a planar inspector. Full-volume paper modes
-      // ray-integrate their compact structures in the technique pass itself.
-      if(gridOverlay.axis!=="volume")this.gridOverlayPipeline?.encode(encoder,overlayView);
+      // Generic texture fields and compact paper publications each own both
+      // their slice and ray-integrated volume presentation.
+      if(!techniqueModeCode)this.gridOverlayPipeline?.encode(encoder,overlayView);
       if(techniqueModeCode){
         this.techniqueOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);
         this.techniqueAuditOverlayPipeline?.encode(encoder,overlayView,techniqueModeCode);

@@ -183,6 +183,22 @@ test("minimal dam acceptance and capture pin the exact 500-step, 2-second contra
     "every regression capture subprocess must acquire the exclusive GPU lock");
 });
 
+test("the ocean first-frame lane runs two exact advances under the browser storage tier", () => {
+  assert.deepEqual(POWER_DAM_LANE_ENVIRONMENT.ocean, {
+    FLUID_SCENE: "ocean-seiche",
+    FLUID_TARGET_S: "0.01",
+    FLUID_MAX_DT: "0.005",
+    FLUID_ORACLE_STEPS: "2",
+    FLUID_EXPECT_EXACT_STEPS: "2",
+    FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648",
+    FLUID_POWER_GENERATION_AUDIT: "1",
+    FLUID_POWER_GENERATION_AUDIT_LOG: "1",
+    FLUID_POWER_STAGE_AUDIT: "1",
+    FLUID_POWER_AUDIT_EVERY_STEPS: "1",
+    FLUID_STABILITY_ENVELOPE: "1",
+  });
+});
+
 test("M1 cutover suite does not name deleted page-pool fallback tests", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
     scripts: Record<string, string>;

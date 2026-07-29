@@ -22,10 +22,11 @@ test("performance panel can bypass every trace producer without disabling correc
   const renderer = read("../lib/webgpu-renderer.ts");
   const uniform = read("../lib/webgpu-uniform-eulerian.ts");
   const tall = read("../lib/webgpu-eulerian.ts");
-  assert.equal((panel.match(/aria-label="Detailed performance capture"/g) ?? []).length, 1,
-    "capture mode has exactly one binary control");
-  assert.equal((panel.match(/role="switch"/g) ?? []).length, 1);
-  assert.doesNotMatch(panel, /MEASUREMENT LOAD|<select|Timeline only/);
+  assert.equal((panel.match(/aria-label="Performance capture mode"/g) ?? []).length, 1,
+    "capture modes share one explicit control group");
+  assert.match(panel, /mode: "timeline", label: "TIMELINE"/);
+  assert.match(panel, /mode: "activity", label: "DETAILED"/);
+  assert.doesNotMatch(panel, /MEASUREMENT LOAD|<select/);
   assert.match(panel, /Correctness synchronization remains active/);
   // Renegotiated by docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md item P0.1: the product
   // default is uninstrumented. "activity" compiles per-workgroup atomics into
@@ -36,6 +37,8 @@ test("performance panel can bypass every trace producer without disabling correc
   assert.match(store, /enabled: false/,
     "detailed trace and activity capture are opt-in, not the default");
   assert.match(store, /shaderActivityEnabled: false/);
+  assert.match(store, /const mode: PerformanceInstrumentationMode = enabled \? "timeline" : "off"/,
+    "legacy measurement callers preserve production shader variants");
   for (const source of [controller, renderer, uniform, tall]) {
     assert.match(source, /usePerformanceInstrumentationStore\.getState\(\)/);
   }

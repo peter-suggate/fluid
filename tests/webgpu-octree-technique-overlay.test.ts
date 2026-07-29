@@ -10,14 +10,18 @@ import { OctreeTechniqueAuditOverlayPipeline } from "../lib/webgpu-octree-techni
 const overlaySource = readFileSync(new URL("../lib/webgpu-octree-technique-overlay.ts", import.meta.url), "utf8");
 const auditOverlaySource = readFileSync(new URL("../lib/webgpu-octree-technique-audit-overlay.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-const panelSource = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+const performancePanelSource = readFileSync(new URL("../components/PerformancePanel.tsx", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+const fineBricksSource = readFileSync(
+  new URL("../lib/webgpu-octree-fine-levelset-bricks.ts", import.meta.url), "utf8");
 
 test("paper-technique modes have unique stable uniform codes", () => {
-  for (const mode of ["power-cells", "delaunay-tetrahedra", "transition-band",
+  for (const mode of ["power-cells", "power-faces", "delaunay-tetrahedra", "transition-band",
+    "power-operator",
     "octree-lifecycle", "fine-band-lifecycle", "operator-diagonal", "operator-rhs",
     "operator-reciprocity", "operator-open-fraction", "tetra-validity",
-    "global-fine-phi", "band-residency"] as const) {
+    "global-fine-phi", "band-residency", "evaluated-velocity", "projection-update",
+    "divergence-closure", "structured-velocity"] as const) {
     assert.equal(isOctreeTechniqueOverlayMode(mode), true, mode);
     assert.ok(OCTREE_TECHNIQUE_OVERLAY_CODES[mode] >= 12, mode);
   }
@@ -57,7 +61,41 @@ test("the band-residency view compares both authored bands against actual reside
   assert.equal(OCTREE_TECHNIQUE_OVERLAY_CODES["band-residency"], 26);
   assert.match(overlaySource, /modeCode===18\|\|modeCode===25\|\|modeCode===26/,
     "the mode must route to the fine publication pipeline that owns phi residency");
-  assert.match(panelSource, /"band-residency": "PRESSURE vs SURFACE BAND"/);
+  assert.match(performancePanelSource, /mode: "band-residency", axis: "volume"/);
+});
+
+test("fine lifecycle uses the generation word rather than the active-page count", () => {
+  assert.match(fineBricksSource, /\$\{worklist\}\[0\]!=\$\{params\}\.generation/,
+    "the shared page lookup must validate generation from header word zero");
+  assert.match(overlaySource,
+    /makeFineLevelSetSortedWorklistLookupWGSL\("fine", "metadata", "worklist", "pageOf"\)/,
+    "the lifecycle shader must use the shared generation-validating lookup");
+  assert.doesNotMatch(overlaySource, /worklist\[1\]!=fine\.generation/,
+    "header word one is the active-page count, not the publication generation");
+});
+
+test("sparse technique slices do not report absent pressure rows as corrupt", () => {
+  assert.match(overlaySource, /previous=row;if\(row==INVALID\)\{continue;\}/,
+    "power-cell volume traversal must skip unowned sparse space");
+  assert.match(overlaySource, /if\(row==INVALID\)\{discard;\}let fault=topologyFault\(row,pointFine\)/,
+    "power-cell slices must leave unowned sparse space transparent");
+  assert.equal((overlaySource.match(/if\(row==INVALID\)\{discard;\}if\(!rowValid/g) ?? []).length, 2,
+    "face and structured-field slices must also distinguish absence from corruption");
+  assert.match(auditOverlaySource, /if\(row==INVALID\)\{discard;\}/,
+    "audit slices must preserve the same sparse-owner semantics");
+});
+
+test("categorical power volumes preserve their slice palettes", () => {
+  assert.match(overlaySource, /fn compositeDisplay\(/,
+    "categorical volume samples should be converted with the same display mapping as slices");
+  assert.match(overlaySource, /return finishDisplayVolume\(accum\)/,
+    "categorical volumes must not apply a second display transform after compositing");
+  assert.match(overlaySource, /0\.24\+0\.56\*site/,
+    "power-cell volume classification should retain enough opacity to preserve categorical color");
+  assert.match(overlaySource, /alpha\*select\(0\.96,1\.0,volume\)/,
+    "geometry volume opacity should be controlled once at composition, not squared");
+  assert.match(overlaySource, /if\(planeInk>=dualInk&&planeInk>=normalInk\)/,
+    "overlapping geometry should retain categorical colors instead of adding to white");
 });
 
 test("technique overlay composes directly from compact topology and fine publications", () => {
@@ -72,6 +110,17 @@ test("technique overlay composes directly from compact topology and fine publica
   assert.doesNotMatch(overlaySource, /mapAsync|copyBufferToBuffer|readback/i);
   assert.doesNotMatch(auditOverlaySource, /mapAsync|copyBufferToBuffer|readback/i);
   assert.match(overlaySource, /i32\(round\(u\.debug\.x\)\)==4/);
+  assert.match(overlaySource, /return globalFinePhiVolume\(input\.uv\)/,
+    "fine phi must retain its own volume presentation");
+  assert.match(overlaySource, /modeCode===13\|\|modeCode===16/,
+    "power faces and the power operator must route to their real catalog pipeline");
+  assert.match(overlaySource, /modeCode>=27&&modeCode<=30/,
+    "compact velocity, projection, and divergence fields must route to structured authority");
+  assert.match(overlaySource, /if\(mode==30\)\{let direction=/,
+    "structured velocity must show vector direction instead of duplicating evaluated speed");
+  assert.match(overlaySource, /source\.catalogEntryHeaders/);
+  assert.match(overlaySource, /source\.structuredAuthority/);
+  assert.match(overlaySource, /source\.pressure/);
   assert.match(auditOverlaySource, /let volume=i32\(round\(u\.debug\.x\)\)==4/);
   assert.match(rendererSource,
     /techniqueOverlayPipeline\?\.setSource\(this\.gpuFluid\?\.octreeTechniqueDebugSource\)/);
@@ -81,17 +130,16 @@ test("technique overlay composes directly from compact topology and fine publica
     /techniqueAuditOverlayPipeline\?\.encode\(encoder,overlayView,techniqueModeCode\)/);
 });
 
-test("render panel exposes topology, fine, pressure, and validity inspection", () => {
-  for (const label of ["Power cells", "Tetrahedra", "Transitions", "Operator",
-    "Octree lifecycle", "Fine band", "Diagonal", "RHS", "Reciprocity",
-    "Open fraction", "Tetra validity"]) assert.match(panelSource, new RegExp(`>${label}<`));
-  assert.match(panelSource, /aria-label="Diagnostic geometry"/);
-  assert.match(panelSource, />Slice</);
-  assert.match(panelSource, />Full volume</);
-  assert.match(panelSource, /setGridOverlayAxis\("volume"\)/);
-  assert.match(panelSource, /Volume opacity/);
-  assert.match(panelSource,
-    /Residual next to the white zero crossing audits redistancing; interior equal-distance ridges are nondifferentiable/);
+test("performance observatory owns topology, fine, pressure, and velocity inspection", () => {
+  for (const label of ["Fine SDF layer", "Adaptive coarse grid", "Fine signed distance",
+    "Band slice", "Power cells", "Power face geometry", "Sparse topology lifecycle",
+    "Evaluated pressure", "Evaluated velocity", "Pressure update Δu", "Divergence closure",
+    "Structured velocity", "Power operator"]) assert.match(performancePanelSource, new RegExp(`label: "${label}"`));
+  assert.match(performancePanelSource, /aria-label="Paper field view plane"/);
+  assert.match(performancePanelSource, />VOLUME<\/button>/);
+  assert.match(performancePanelSource, />HIDE<\/button>/);
+  assert.match(performancePanelSource, /setOverlayAxis\("volume"\)/);
+  assert.match(performancePanelSource, /VOLUME OPACITY/);
 });
 
 test("Dawn compiles every technique and audit pipeline at portable binding counts", {

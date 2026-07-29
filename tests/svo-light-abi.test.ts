@@ -72,7 +72,11 @@ test("packed identity lane carries type, stable ID, owner, and revision", () => 
 
 test("garden point fixture packs one-sample identity and conservative emitter endpoint", () => {
   const scene = getScenePreset("garden-svo-lighting").create();
-  const point = buildSvoSceneLights(scene).records.find(({ kind }) => kind === "point");
+  // The dusk study carries two point sources at different heights — the stone
+  // lantern's ember as well as the lamppost — so this has to name the fixture
+  // it means rather than taking whichever point light happens to sort first.
+  const point = buildSvoSceneLights(scene).records
+    .find(({ kind, sourceKey }) => kind === "point" && sourceKey.endsWith("lamppost/lantern"));
   assert.ok(point);
   assert.equal(point.radius_m, 0.18);
   const packed = packSvoLightRecords([point]);

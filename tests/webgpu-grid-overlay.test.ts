@@ -123,6 +123,15 @@ test("grid overlay field modes sample live GPU velocity without readback", () =>
   assert.match(gridOverlayShader, /max\(u\.environment\.z, 1e-4\)/);
 });
 
+test("generic scientific fields ray-integrate the full volume", () => {
+  assert.match(gridOverlayShader, /fn volumeField\(uv:vec2f\)->vec4f/);
+  assert.match(gridOverlayShader, /if \(axis == 4\) \{ return volumeField\(input\.uv\); \}/);
+  assert.match(gridOverlayShader, /accumulated=volumeComposite\(accumulated,sample\.color,alpha\)/);
+  assert.match(rendererSource, /if \(!technique\) requested\.push\("grid-overlay"\)/,
+    "volume fields must request the generic renderer instead of entering a blank state");
+  assert.match(rendererSource, /if\(!techniqueModeCode\)this\.gridOverlayPipeline\?\.encode/);
+});
+
 test("grid overlay velocity sampling honours the packed tall-cell layout", () => {
   // Piecewise tall-cell reconstruction: top world cell = top endpoint dof,
   // every other interior row = bottom dof — the field projection controls.

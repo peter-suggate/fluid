@@ -46,12 +46,12 @@ export const usePerformanceInstrumentationStore = create<PerformanceInstrumentat
     };
   }),
   // Backward-compatible control for callers that only understand on/off.
-  // The full profiler is the default enabled mode; timeline-only remains
-  // available through setMode without compiling heartbeat declarations.
+  // Enabling measurement must preserve production WGSL: detailed shader
+  // heartbeats are an explicit opt-in through setMode("activity").
   setEnabled: (enabled) => set((state) => {
-    const mode: PerformanceInstrumentationMode = enabled ? "activity" : "off";
+    const mode: PerformanceInstrumentationMode = enabled ? "timeline" : "off";
     if (mode === state.mode) return state;
-    const shaderActivityEnabled = mode === "activity";
+    const shaderActivityEnabled = false;
     return {
       mode,
       enabled,

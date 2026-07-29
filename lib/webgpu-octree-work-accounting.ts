@@ -622,11 +622,17 @@ function decodeOctreePressureSolveWorkUnchecked(
       return blocked("SPGrid level count exceeds its published capacity");
     }
     const selectedGroups = safeProduct(dispatch.subarray(base + 2, base + 5));
-    const transferGroups = safeProduct(dispatch.subarray(base + 5, base + 8));
+    const parentGroups = safeProduct(dispatch.subarray(base + 5, base + 8));
     const pageGroups = safeProduct(dispatch.subarray(base + 9, base + 12));
-    if (selectedGroups === null || transferGroups === null || pageGroups === null
+    const parentSlots = levelIndex + 1 < plan.spgridLevelCount
+      ? dispatch[(levelIndex + 1) * 12]!
+      : 0;
+    if (selectedGroups === null || parentGroups === null || pageGroups === null
       || selectedGroups !== Math.ceil(count / 64)
-      || transferGroups !== Math.ceil(transfers / 64) || pageGroups !== pages) {
+      // Restriction is one cooperative workgroup per coarse parent slot. The
+      // transfer-record count bounds the chain walked inside those groups; it
+      // is not the indirect dispatch width.
+      || parentGroups !== parentSlots || pageGroups !== pages) {
       return blocked("SPGrid indirect dispatch does not match its compact publication");
     }
     levelRows += count;
@@ -634,10 +640,10 @@ function decodeOctreePressureSolveWorkUnchecked(
     executedSPGridDispatchesPerCorrection += Number(selectedGroups > 0);
     if (levelIndex + 1 < plan.spgridLevelCount) {
       transferRows += transfers;
-      transferScheduledLanes += transferGroups * 64;
+      transferScheduledLanes += parentGroups * 64;
       pagesPerCycle += 2 * pages;
       executedSPGridDispatchesPerCorrection += 2 * Number(pages > 0)
-        + Number(transferGroups > 0) + Number(selectedGroups > 0);
+        + Number(parentGroups > 0) + Number(selectedGroups > 0);
     } else {
       executedSPGridDispatchesPerCorrection += Number(selectedGroups > 0);
     }

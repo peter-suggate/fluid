@@ -164,7 +164,8 @@ fn auditRow(row:u32,volume:bool)->AuditSample {
     let hit=slicePoint(input.uv);
     if(hit.w<=0.0||any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}
     let row=ownerAt(hit.xyz);
-    if(row==INVALID||row>=arrayLength(&headers)||!headerContains(headers[row],worldToFine(hit.xyz))){return vec4f(invalidSample().color,0.94);}
+    if(row==INVALID){discard;}
+    if(row>=arrayLength(&headers)||!headerContains(headers[row],worldToFine(hit.xyz))){return vec4f(invalidSample().color,0.94);}
     let sample=auditRow(row,false);
     return vec4f(sample.color,sample.opacity);
   }

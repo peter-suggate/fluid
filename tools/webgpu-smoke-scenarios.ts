@@ -18,12 +18,15 @@ export const smokeScenarioIds = [
   "sphere-jet",
   "deep-water",
   "garden-pond",
+  "garden-hose",
   "garden-dam-break",
   "brick-quad-dam-break",
   "twin-dam-collision",
   "hydrostatic-power-two-level",
   "hydrostatic-power-large-offset",
   "minimal-power-dam-break",
+  "ceiling-slab-drop",
+  "corner-brick-drop",
   "ocean-seiche"
 ] as const;
 
@@ -60,7 +63,7 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
     return {
       id,
       description: id === "hose-tank"
-        ? "ramped boundary inflow and a shallow receiving pool"
+        ? "fixed cylindrical boundary inflow and a shallow receiving pool"
         : id === "dam-break-boxes"
           ? "three-dimensional dam break with immersed boxes"
           : "directed inlet jet past a fixed immersed sphere",
@@ -92,6 +95,20 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
         ? "hydrostatic rest in an organic pool carved from a terrain heightfield"
         : "dam break released onto a lawn heightfield draining into the pool",
       scene, oracleSteps: 2, target_s: id === "garden-pond" ? 0.1 : 0.2
+    };
+  }
+
+  if (id === "garden-hose") {
+    // Exercise the authored UI preset rather than a smoke-only approximation:
+    // terrain, shallow receiving puddle, nozzle body, and inflow placement all
+    // participate in its sparse t=0 topology.
+    const scene = getScenePreset("garden-hose").create();
+    return {
+      id,
+      description: "terrain pond with a shallow receiving puddle and continuous hose inflow",
+      scene,
+      oracleSteps: 2,
+      target_s: 0.5,
     };
   }
 
@@ -163,6 +180,24 @@ export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
       // The browser's first rejected moving-surface generation has appeared
       // just beyond 0.4 s. The default Dawn matrix must cross that boundary,
       // not stop at the earlier 50-step initialization oracle.
+      target_s: 0.5,
+      methodProfile: preset.methodProfile,
+    };
+  }
+
+  if (id === "ceiling-slab-drop" || id === "corner-brick-drop") {
+    // Analytic unilateral-contact oracles: a single seeded brick under the
+    // closed lid whose exact trajectory is free fall (see lib/scenes.ts).
+    // These are the minimal reproductions of ceiling and seam/corner
+    // sticking, with a closed-form reference instead of a recorded trace.
+    const preset = getScenePreset(id), scene = preset.create();
+    return {
+      id,
+      description: id === "ceiling-slab-drop"
+        ? "seeded brick flush under the lid whose exact answer is free fall"
+        : "seeded brick in a top corner seam whose exact answer is free fall",
+      scene,
+      oracleSteps: 2,
       target_s: 0.5,
       methodProfile: preset.methodProfile,
     };

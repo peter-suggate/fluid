@@ -20,15 +20,14 @@ interface StructuredBoundaryGroupCache {
 
 export interface StructuredBoundaryResources {
   readonly structured: DirectStructuredVelocitySource;
-  /** One u32 per finest cell: (generation << 1) | ceiling-tension flag,
-   * written by the dynamics projection stage. A fresh flag opens the row's
-   * closed world faces this rebuild (unilateral ceiling contact). */
-  readonly separationMask: GPUBuffer;
   /** Identity-keyed coarse phi from the accepted pre-adaptation topology.
    * Candidate rows may be inserted or reordered, so row-indexed values are
    * not a valid source for the inactive structured generation. */
   readonly coarse: Pick<OctreePowerCoarseLevelSetSampleSource, "directory" | "rowCapacity">;
   readonly solid?: OctreeSolidVertexSdfSource;
+  /** Per-cell unilateral-contact face bits published by the previous
+   * projection's separation stage; fresh marks open closed world faces. */
+  readonly separationMask: GPUBuffer;
   readonly rigidBodies: GPUBuffer;
   readonly bodyCount: number;
   readonly dimensions: readonly [number, number, number];
@@ -92,10 +91,10 @@ export class WebGPUStructuredBoundaryCoefficients {
     const { structured } = resources;
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || resources.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
-      || resources.separationMask.size < resources.dimensions[0]! * resources.dimensions[1]! * resources.dimensions[2]! * 4
       || resources.coarse.rowCapacity !== structured.plan.rowCapacity
       || resources.coarse.directory.size < 32 + structured.plan.rowCapacity * 32
       || !Number.isSafeInteger(resources.bodyCount) || resources.bodyCount < 0 || resources.bodyCount > 12
+      || resources.separationMask.size < resources.dimensions[0]! * resources.dimensions[1]! * resources.dimensions[2]! * 4
       || resources.rigidBodies.size < 12 * 8 * 16
       || resources.analyticBootstrap
         && (!Number.isFinite(resources.analyticBootstrap.fillFraction)

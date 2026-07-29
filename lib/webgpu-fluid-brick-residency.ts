@@ -60,6 +60,19 @@ export interface FluidBrickResidencyOptions {
    * whole wet volume.
    */
   includeLiquidInterior?: boolean;
+  /**
+   * Keep the closed side/floor (and optionally ceiling) pressure-wall tiles,
+   * plus their one-tile grading support, resident even when they are dry.
+   * The power topology refines those strips independently of liquid phi.
+   */
+  includePressureBoundarySupport?: boolean;
+  pressureBoundaryTopClosed?: boolean;
+  /**
+   * Retain the whole pressure-owner tile lattice for authored inflows. Inflow
+   * protection refines dry cells around the nozzle before transported phi
+   * arrives, so phi-derived residency alone cannot bound that support.
+   */
+  includeWholeDomainPressureSupport?: boolean;
   /** Tree leaf index for every x-major solver brick. */
   leafIndices?: Uint32Array<ArrayBuffer>;
   leafCapacity?: number;
@@ -375,6 +388,11 @@ const HALO: u32 = 4u;
 const ACTIVATED: u32 = 8u;
 const WAS_RESIDENT: u32 = 32u;
 const HEADER_WORDS: u32 = 16u;
+fn schedulerFlags() -> u32 { return u32(params.settings.w); }
+fn includeLiquidInterior() -> bool { return (schedulerFlags() & 1u) != 0u; }
+fn includePressureBoundarySupport() -> bool { return (schedulerFlags() & 2u) != 0u; }
+fn pressureBoundaryTopClosed() -> bool { return (schedulerFlags() & 4u) != 0u; }
+fn includeWholeDomainPressureSupport() -> bool { return (schedulerFlags() & 8u) != 0u; }
 
 fn brickCoordinate(index: u32) -> vec3u {
   let bx = params.brickDimsCapacity.x;
@@ -470,7 +488,7 @@ fn classify(@builtin(global_invocation_id) gid: vec3u) {
   let core = minimumPhi <= 0.0 && maximumPhi >= 0.0;
   let minimumAbsolutePhi = select(min(abs(minimumPhi), abs(maximumPhi)), 0.0, core);
   let desired = minimumAbsolutePhi < params.settings.x
-    || (params.settings.w > 0.5 && minimumPhi < 0.0);
+    || (includeLiquidInterior() && minimumPhi < 0.0);
   var dryFrames = select(min(0xffffu, (previous >> 16u) + 1u), 0u, desired);
   let retireAfter = u32(params.settings.y);
   let resident = desired || (wasResident && dryFrames <= retireAfter);
@@ -500,7 +518,7 @@ fn classifySwept(@builtin(global_invocation_id) gid: vec3u) {
   // front pre-activates the bricks it will sweep before phi arrives.
   let sweptSupport = brickMaximumSpeed(origin) * params.settings.z * 1.5;
   let desired = minimumAbsolutePhi < max(params.settings.x, sweptSupport)
-    || (params.settings.w > 0.5 && range.x < 0.0);
+    || (includeLiquidInterior() && range.x < 0.0);
   let previous = atomicLoad(&states[brickIndex]);
   let wasResident = ((previous & 0xffu) & RESIDENT) != 0u;
   var dryFrames = select(min(0xffffu, (previous >> 16u) + 1u), 0u, desired);
@@ -591,6 +609,19 @@ fn tileHasResident(tile: vec3i) -> bool {
   return false;
 }
 
+fn tileHasPressureBoundarySupport(tile: vec3u) -> bool {
+  if (includeWholeDomainPressureSupport()) { return true; }
+  if (!includePressureBoundarySupport()) { return false; }
+  let d = params.tiling.yzw;
+  // The topology's unit wall strip can force refinement in every boundary
+  // tile even when phi is dry. Retain one additional maximum-leaf tile for
+  // the same 2:1 grading closure used around resident liquid tiles.
+  return tile.x < min(2u, d.x) || tile.x + 2u >= d.x
+    || tile.z < min(2u, d.z) || tile.z + 2u >= d.z
+    || tile.y < min(2u, d.y)
+    || (pressureBoundaryTopClosed() && tile.y + 2u >= d.y);
+}
+
 // One thread per topology tile scans the 3x3x3 tile neighborhood. The full
 // 2:1 grading chain travels less than one maximum-leaf tile, so this dilation
 // replaces a maxLeaf-1 phi-residency halo without making the atlas retain that
@@ -607,7 +638,7 @@ fn emitTopologyTiles(@builtin(global_invocation_id) gid: vec3u) {
     (tileIndex / params.tiling.y) % params.tiling.z,
     tileIndex / (params.tiling.y * params.tiling.z)
   );
-  var anyResident = false;
+  var anyResident = tileHasPressureBoundarySupport(tile);
   for (var dz = -1; dz <= 1 && !anyResident; dz += 1) {
     for (var dy = -1; dy <= 1 && !anyResident; dy += 1) {
       for (var dx = -1; dx <= 1 && !anyResident; dx += 1) {
@@ -694,6 +725,20 @@ struct Candidate { row:u32,flags:u32 }
 @group(0) @binding(11) var<storage,read_write> publishedWorklist:array<u32>;
 const RESIDENT=1u;const CORE=2u;const HALO=4u;const ACTIVATED=8u;const LIVE=32u;
 const WAS_RESIDENT=32u;const HEADER=16u;const INVALID=0xffffffffu;const COMMIT=0xc01117edu;
+fn schedulerFlags()->u32{return u32(params.settings.w);}
+fn persistentLiquid()->bool{return (schedulerFlags()&1u)!=0u;}
+fn pressureBoundarySupport()->bool{return (schedulerFlags()&2u)!=0u;}
+fn pressureBoundaryTopClosed()->bool{return (schedulerFlags()&4u)!=0u;}
+fn wholeDomainPressureSupport()->bool{return (schedulerFlags()&8u)!=0u;}
+fn pressureBoundaryTile(key:u32)->bool{
+  if(wholeDomainPressureSupport()){return true;}
+  if(!pressureBoundarySupport()){return false;}
+  let d=params.tiling.yzw;
+  let q=vec3u(key%d.x,(key/d.x)%d.y,key/(d.x*d.y));
+  return q.x<min(2u,d.x)||q.x+2u>=d.x
+    ||q.z<min(2u,d.z)||q.z+2u>=d.z
+    ||q.y<min(2u,d.y)||(pressureBoundaryTopClosed()&&q.y+2u>=d.y);
+}
 fn dispatch2(n:u32)->vec2u{let x=min(n,65535u);return vec2u(x,select(1u,(n+x-1u)/x,x>0u));}
 fn producerAccepted()->bool{return candidateControl[5]==1u&&candidateControl[6]==0u
   &&candidateControl[7]==arrayLength(&candidates)&&candidateControl[4]>publishedTileWorklist[15];}
@@ -751,7 +796,8 @@ fn markTileRing(key:u32){
   if(i<arrayLength(&tileWorklist)){tileWorklist[i]=0u;}
   if(i<brickCap){let old=publishedStates[i];let was=(old&RESIDENT)!=0u;
     atomicStore(&states[i],select(0u,WAS_RESIDENT,was)|(min(0xffffu,(old>>16u)+1u)<<16u));}
-  if(i<=tileCap){atomicStore(&tileStates[i],0u);}
+  if(i<tileCap){atomicStore(&tileStates[i],select(0u,1u,pressureBoundaryTile(i)));}
+  if(i==tileCap){atomicStore(&tileStates[i],0u);}
 }
 @compute @workgroup_size(256) fn markFineSeedCandidateResidency(@builtin(global_invocation_id)gid:vec3u){
   if(!producerAccepted()){return;}let i=gid.x;
@@ -786,7 +832,7 @@ fn markTileRing(key:u32){
   if(!producerAccepted()){return;}let logical=gid.x;let brickCap=params.brickDimsCapacity.w;
   if(logical<brickCap){let marked=atomicLoad(&states[logical]);
     let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;
-    let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;
+    let dry=select(marked>>16u,0u,desired);let persistent=persistentLiquid();
     let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);
     let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)
       |select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);
@@ -928,6 +974,12 @@ var<workgroup> sparseError:u32;var<workgroup> sparseAccepted:u32;
   for(var slot=lid;slot<tileSlots();slot+=256u){tileStates[slot*2u]=publishedTileStates[slot*2u];
     tileStates[slot*2u+1u]=0u;}storageBarrier();workgroupBarrier();
   if(lid==0u){let tileCells=params.dimsBrick.w*params.tiling.x;let td=vec3i(params.tiling.yzw);
+    let logicalTileCount=params.tiling.y*params.tiling.z*params.tiling.w;
+    for(var key=0u;key<logicalTileCount&&sparseError==0u;key++){
+      if(!pressureBoundaryTile(key)){continue;}
+      let slot=claimTile(key);if(slot==INVALID){sparseError=7u;break;}
+      tileStates[slot*2u+1u]=1u;
+    }
     for(var row=0u;row<arrayLength(&leaves)&&sparseError==0u;row++){let leaf=leaves[row];
       if((leaf.flags&LIVE)==0u||leaf.size==0u){continue;}let a=vec3u(leaf.originX,leaf.originY,leaf.originZ);
       if(any(a>=params.dimsBrick.xyz)){sparseError=9u;break;}let first=vec3i(a/tileCells);
@@ -958,7 +1010,7 @@ var<workgroup> sparseError:u32;var<workgroup> sparseAccepted:u32;
     if(encoded==0u||encoded==INVALID){continue;}let logical=encoded-1u;
     if(logical>=params.brickDimsCapacity.w){localError=8u;continue;}let marked=states[slot*2u+1u];
     let desired=(marked&(CORE|HALO))!=0u;let was=(marked&WAS_RESIDENT)!=0u;
-    let dry=select(marked>>16u,0u,desired);let persistent=params.settings.w>0.5;
+    let dry=select(marked>>16u,0u,desired);let persistent=persistentLiquid();
     let resident=select(desired||(was&&dry<=u32(params.settings.y)),was||desired,persistent);
     let core=(marked&CORE)!=0u;let flags=select(0u,RESIDENT,resident)|select(0u,CORE,core)
       |select(0u,HALO,resident&&!core)|select(0u,ACTIVATED,resident&&!was)|select(0u,WAS_RESIDENT,was);
@@ -1161,7 +1213,11 @@ export class GPUFluidBrickResidency {
     const retireAfterFrames = options.retireAfterFrames ?? 3;
     if (!(haloCells >= 0) || !Number.isFinite(haloCells)) throw new RangeError("Fluid brick halo must be finite and non-negative");
     if (!Number.isInteger(retireAfterFrames) || retireAfterFrames < 0 || retireAfterFrames > 0xffff) throw new RangeError("Fluid brick retirement window must be a uint16");
-    floats.set([haloCells * Math.max(...cellSize), retireAfterFrames, 0, options.includeLiquidInterior ? 1 : 0], 8);
+    const schedulerFlags = (options.includeLiquidInterior ? 1 : 0)
+      | (options.includePressureBoundarySupport ? 2 : 0)
+      | (options.pressureBoundaryTopClosed ? 4 : 0)
+      | (options.includeWholeDomainPressureSupport ? 8 : 0);
+    floats.set([haloCells * Math.max(...cellSize), retireAfterFrames, 0, schedulerFlags], 8);
     device.queue.writeBuffer(this.params, 0, parameterData);
     const shaderModule = device.createShaderModule({ label: "Fluid brick residency shader", code: fluidBrickResidencyShader });
     this.layout = device.createBindGroupLayout({ label: "Fluid brick residency layout", entries: [

@@ -28,6 +28,7 @@ const TASKS = ["Advect", "Solve pressure", "Publish"];
 const writeTrace = (options: {
   frames: number; frameUs: number; extraOn?: readonly number[];
   spacingUs?: number; intervalUs?: number; tasks?: readonly string[];
+  slicesPerEncoder?: number;
 }): Record<string, string> => {
   const directory = mkdtempSync(join(tmpdir(), "xctrace-seg-"));
   const intervals: string[] = [];
@@ -44,12 +45,14 @@ const writeTrace = (options: {
         "encoder-id": encoderId, "encoder-label": `Command Buffer 0:${label}`,
         process: "node (4242)",
       }));
-      intervals.push(JSON.stringify({
-        "encoder-id": encoderId, start: stamp(start),
-        duration: `${(options.intervalUs ?? 500).toFixed(2)} µs`,
-        "channel-name": "Compute", process: "node (4242)",
-        "event-label": `${label}      ( node (4242) )  0x1`,
-      }));
+      for (let slice = 0; slice < (options.slicesPerEncoder ?? 1); slice += 1) {
+        intervals.push(JSON.stringify({
+          "encoder-id": encoderId, start: stamp(start + slice * 250),
+          duration: `${(options.intervalUs ?? 500).toFixed(2)} µs`,
+          "channel-name": "Compute", process: "node (4242)",
+          "event-label": `${label}      ( node (4242) )  0x1`,
+        }));
+      }
     });
   }
   writeFileSync(join(directory, "intervals.ndjson"), `${intervals.join("\n")}\n`);
@@ -61,9 +64,10 @@ const writeTrace = (options: {
 };
 
 const build = async (tables: Record<string, string>, steps?: number,
-  environment: Record<string, string> = {}) => buildFrameReport({
+  environment: Record<string, string> = {}, singleFrame = false, firstFrame = false) => buildFrameReport({
   tables, lane: "mini", environment, tracedPid: 4242,
   traced: steps === undefined ? undefined : { steps, simulationWall_ms: steps * 50 },
+  singleFrame, firstFrame,
 });
 
 test("each detected frame is one advance and carries that advance's work", async () => {
@@ -106,6 +110,58 @@ test("overlapping Metal interval records are counted once as GPU busy time", asy
   assert.ok(Math.abs(report.gpu.overlapMsPerFrame - 1) < 1e-9);
   assert.ok(report.frames.samples.every((frame) =>
     Math.abs(frame.busyMs + frame.gapMs - frame.durationMs) < 1e-9));
+});
+
+test("one representative frame coalesces resumed encoder slices without losing their cost", async () => {
+  const report = await build(writeTrace({
+    frames: 12, frameUs: 50_000, intervalUs: 200, slicesPerEncoder: 2,
+  }), 12, { FLUID_GPU_ISOLATE_PASS_LABELS: "1" }, true);
+  assert.equal(report.frames.count, 1);
+  assert.equal(report.frames.samples.length, 1);
+  assert.equal(report.frames.captures.length, 1);
+  assert.equal(report.frames.samples[0].encoders, TASKS.length,
+    "resumed slices are not additional encoder calls");
+  assert.equal(report.frames.captures[0].intervals.length, TASKS.length,
+    "the timeline contains one item per Metal encoder");
+  assert.equal(new Set(report.timeline.intervals.map((interval) => interval.encoderId)).size,
+    report.timeline.intervals.length);
+  const advect = report.passes.find((pass) => pass.label === "Advect");
+  assert.equal(advect?.callsPerFrame, 1);
+  assert.ok(Math.abs((advect?.gpuMsPerFrame ?? 0) - 0.4) < 1e-9,
+    "both 0.2 ms execution slices contribute to stage GPU time");
+});
+
+test("literal first-frame mode selects advance 1 and uses advance 2 as its exact boundary", async () => {
+  const report = await build(writeTrace({ frames: 2, frameUs: 50_000,
+    tasks: ["Open coupled topology ready-commit gate", "Advect", "Solve pressure"] }), 2,
+    { FLUID_GPU_ISOLATE_PASS_LABELS: "1" }, false, true);
+  assert.equal(report.frames.count, 1);
+  assert.equal(report.frames.firstAdvance, 1);
+  assert.equal(report.frames.samples[0].durationMs, 50);
+  assert.equal(report.frames.captures.length, 1);
+  assert.match(report.console[0], /literal advance 1 only/);
+});
+
+test("encoder-isolation blits are overhead, not duplicate solver stages", async () => {
+  const report = await build(writeTrace({
+    frames: 12, frameUs: 50_000,
+    tasks: ["Blit Command 42", "Open coupled topology ready-commit gate", "Solve pressure"],
+  }), 12, {
+    FLUID_GPU_ISOLATE_PASS_LABELS: "1",
+    FLUID_GPU_ISOLATE_PASS_ENCODERS: "1",
+  }, true);
+  assert.deepEqual(report.passes.map((pass) => pass.label).sort(),
+    ["Open coupled topology ready-commit gate", "Solve pressure"]);
+  assert.equal(report.frames.anchor, "Open coupled topology ready-commit gate");
+  assert.equal(report.timeline.intervals[0].label,
+    "Open coupled topology ready-commit gate");
+  assert.equal(report.timeline.intervals[0].start, 1000,
+    "time zero is the preceding setup blit, one millisecond before first compute in this fixture");
+  assert.ok(report.timeline.intervals.every((interval) =>
+    !interval.label.startsWith("Blit Command")));
+  assert.equal(report.gpu.diagnosticBlitsPerFrame, 1);
+  assert.ok(Math.abs(report.gpu.diagnosticBlitMsPerFrame - 0.5) < 1e-9);
+  assert.equal(report.frames.samples[0].encoders, 2);
 });
 
 test("an advance doing extra work is reported as such, not as a broken boundary", async () => {

@@ -14,14 +14,15 @@ const spgridSource = readFileSync(
 const topologySource = readFileSync(
   new URL("../lib/webgpu-octree-power-topology.ts", import.meta.url), "utf8");
 
-test("page Chebyshev remains an oracle for the sole live first-order smoother", () => {
+test("page Chebyshev remains offline while production uses global synchronized phases", () => {
   assert.doesNotMatch(oracleSource,
     /@compute|createShaderModule|createComputePipeline|dispatchWorkgroups|GPUBuffer|GPUDevice/,
     "the page oracle must never become another executable pressure path");
   assert.match(spgridSource,
-    /@compute @workgroup_size\(128\) fn smoothPageChebyshevForward/);
+    /@compute @workgroup_size\(64\) fn smoothChebyshevAtoB0/);
   assert.match(spgridSource,
-    /@compute @workgroup_size\(128\) fn smoothPageChebyshevReverse/);
+    /@compute @workgroup_size\(64\) fn smoothChebyshevBtoA3/);
+  assert.doesNotMatch(spgridSource, /fn smoothPageChebyshev/);
   assert.match(spgridSource, /const PAGE_X=8u;const PAGE_Y=8u;const PAGE_Z=4u/);
   assert.match(topologySource, /Section 6\.3 coefficients/,
     "Section 6.3 channels must enter the accepted topology publication");

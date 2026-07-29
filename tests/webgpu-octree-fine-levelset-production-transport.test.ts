@@ -45,7 +45,7 @@ test("direct fine transport has one page-bounded structured authority path", () 
     pageStatusBytes: 262_144 * 12,
     worksetBytes: 128 + 262_144 * 4,
     controlBytes: 64,
-    allocatedBytes: 256 + 262_144 * 12 + 128 + 262_144 * 4
+    allocatedBytes: 320 + 262_144 * 12 + 128 + 262_144 * 4
       + (8 + 2 * 262_144) * 4 + 64 + 2 * 512,
   });
   assert.deepEqual(planFineLevelSetGPUTransportPasses(plan, 8), {
@@ -64,6 +64,29 @@ test("fine transport consumes the shared positive-air tag and vector authority",
   assert.match(shader, /supportVectorOffset\/4u\+support/);
   assert.doesNotMatch(shader, /@binding\(19\).*cpt|cpt\[/,
     "the retired row-only extension must not bypass the support publication");
+});
+
+test("fine transport applies the authored nozzle source outside the existing interface band", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  const encode = compact(WebGPUFineLevelSetTransport.prototype.encode.toString());
+  const octree = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
+  assert.match(encode,
+    /inflowPositionRadius.*inflow\.outletCenter_m\.x.*inflowVelocityAperture|f\.set\(\[inflow\.outletCenter_m\.x/s,
+    "the recurring uniform must carry the exact per-step outlet state");
+  assert.match(shader, /fnisInflowSample\(x:vec3f\)->bool/);
+  assert.doesNotMatch(shader, /fninflowAxis|fninflowFaceIndex|fninflowReceiverIndex/,
+    "fine source geometry must remain in nozzle coordinates for arbitrary orientations");
+  assert.match(shader,
+    /!inTransportBand\(old\)&&!isInflowSample\(origin\).*finishSample\(index,old,origin/s,
+    "a dry nozzle sample must not be skipped merely because no prior interface reached it");
+  assert.match(shader,
+    /fninflowSourcePhi\(x:vec3f\)->f32.*relative=x-inflowLatticePosition\(\).*axial=dot\(relative,direction\).*radial=length\(relative-axial\*direction\).*max\(-axial,axial-depth\).*fnapplyInflowPhi\(value:f32,x:vec3f\)->f32.*min\(value,max\(source,-rampDepth\)\)/s,
+    "the source must clamp destination phi to a one-sided, nozzle-oriented extrusion");
+  assert.doesNotMatch(shader, /effectiveRadius|sqrt\(inflowStrength\(\)\)/,
+    "source strength must never deform the authored circular nozzle radius");
+  assert.match(octree,
+    /transport\.encode\(transportBroker,\{timestep:dt_s,\.\.\.\(inflow\?\{inflow\}:\{\}\)/,
+    "octree surface publication must forward the authored source to direct fine transport");
 });
 
 test("recurring transport publishes two validity classes before atomic commit", () => {
@@ -129,6 +152,9 @@ test("WGSL fails closed unless generation, epoch, and accepted A\/B bank agree",
   assert.match(shader,
     /fnairPublicationValid\(\)->bool.*boundary\[4\]!=accepted\[3\].*airWord\(at\+2u\)==accepted\[3\].*airWord\(at\+3u\)==activeBank\(\).*airWord\(at\+5u\)==accepted\[2\].*airWord\(at\+13u\)==SUPPORT_VALID.*airWord\(at\+14u\)==SUPPORT_VERSION.*airWord\(at\+15u\)==p\.generation/s,
     "transport must consume a committed support transaction for its exact fine generation");
+  assert.match(shader,
+    /demandCount=airWord\(at\+8u\)\+airWord\(at\+9u\)[\s\S]*count==0u\|\|\(demandCount>0u&&faces>0u&&seeds>0u\)/,
+    "regular-only air support must remain valid for fine transport");
   assert.doesNotMatch(shader, /airWord\(at\+12u\)>=p\.maxBacktrace/,
     "face-graph hops must not be compared numerically with fine-cell displacement");
   const encode = compact(WebGPUFineLevelSetTransport.prototype.encode.toString());
@@ -193,8 +219,9 @@ test("outer redistance support is copied without velocity and failures retain bo
     const start = shader.indexOf(`fn${name}`);
     const end = shader.indexOf("fn", start + 2);
     const run = shader.slice(start, end);
-    assert.match(run, /if\(!inTransportBand\(old\)\)\{nextPhi\[index\]=old;continue;\}/,
-      `${name} must preserve outer support without requesting velocity`);
+    assert.match(run,
+      /if\(!inTransportBand\(old\)&&!isInflowSample\(origin\)\)\{nextPhi\[index\]=old;continue;\}/,
+      `${name} must preserve non-source outer support without requesting velocity`);
     assert.match(run, /accumulateSample\(lid,local,finishSample\(/,
       `${name} must report every in-band outcome through the shared lane reduction`);
     assert.match(run, /markBadSample\(lid,local\)/,
@@ -242,7 +269,16 @@ test("every trajectory reselects regular or transition interpolation m times and
   assert.match(transitionRare, /letv=transitionSample\(x\).*extended\+=select\(0u,1u,air\)/s);
   assert.equal([...shader.matchAll(/sampleFine\(/g)].length, 2,
     "WGSL must contain one sampleFine declaration and one final-trajectory invocation");
-  assert.match(shader, /fnfinishSample.*if\(d\.good!=0u\)\{sampled=sampleFine\(x\);\}/s);
+  assert.match(shader,
+    /fnfinishSample.*if\(!insideDomain\(x\)\)\{outside=1u;\}if\(p\.closed!=0u\)\{letinterior=clampSampleLattice\(x\);exitDistance=distance\(x,interior\);x=interior;\}letsampled=select\(3\.402823e38,sampleFine\(x\),d\.good!=0u\)/s,
+    "a closed-wall departure must clamp to the sample-center lattice and record the clamped length:"
+    + " no liquid exists beyond a closed wall, so phi grows at unit rate along that segment."
+    + " Clamping alone lets a receding surface re-sample its own wall film forever, and measuring"
+    + " from the wall plane instead of the stencil's outermost centers contributes nothing until a"
+    + " step moves half a cell (both measured by the free-fall drop oracles)");
+  assert.match(shader,
+    /fnclampSampleLattice\(x:vec3f\)->vec3f\{letlo=p\.origin\+vec3f\(\.5\*p\.h\);varhi=p\.origin\+\(vec3f\(p\.sampleDims\)-vec3f\(\.5\)\)\*p\.h;if\(p\.openTop!=0u\)\{hi\.y=max\(hi\.y,x\.y\);\}returnclamp\(x,lo,hi\);\}/,
+    "the closed-wall extension reference is the outermost sample centers with the open top exempt");
 });
 
 test("missing sparse phi support remains a fail-closed sentinel", () => {
@@ -252,7 +288,7 @@ test("missing sparse phi support remains a fail-closed sentinel", () => {
   assert.doesNotMatch(shader, /abs\(v\)<=3\.402823e38/,
     "the missing-stencil sentinel must never be committed as transported phi");
   assert.match(shader,
-    /fnsampleFine.*returnselect\(3\.402823e38,.*weight>0\.999\).*fnfinishSample.*acceptedSample=d\.good!=0u&&finite\(sampled\).*if\(acceptedSample\)\{nextPhi\[index\]=sampled;\}else\{nextPhi\[index\]=old;\}/s,
+    /fnsampleFine.*returnselect\(3\.402823e38,.*weight>0\.999\).*fnfinishSample.*acceptedSample=d\.good!=0u&&finite\(sampled\).*if\(acceptedSample\)\{nextPhi\[index\]=applyInflowPhi\(sampled\+exitDistance,origin\);\}else\{nextPhi\[index\]=old;\}/s,
     "an incomplete trilinear stencil must preserve the previous finite phi and reject publication telemetry");
 });
 
@@ -302,6 +338,9 @@ test("fine phi commit publishes old and new interface membership atomically", ()
     /fncommitStructuredFineTransport.*oldInterface.*newInterface.*membership=pageChanged\[0\]!=0u\|\|before\|\|after.*phi\[index\]=nextPhi\[index\]/s);
   assert.match(shader,
     /fnpublishStructuredFineDelta.*delta\[0\]=count.*delta\[1\]=p\.generation.*delta\[2\]=control\.committed/s);
+  assert.match(shader,
+    /fnpublishStructuredFineDelta.*delta\[7\]=control\.maxDisplacement/s,
+    "the topology delta must carry the measured complete-characteristic reach");
   assert.doesNotMatch(shader, /atomic/,
     "page-owned reductions and deterministic compaction must not revive an append race");
 });

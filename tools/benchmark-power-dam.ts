@@ -156,14 +156,26 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
 // and a 500-step mean describe different regimes.
 const stepsOverride = process.argv.find((argument) => argument.startsWith("--steps="))
   ?.slice("--steps=".length);
-const laneOverride = stepsOverride === undefined ? {} : (() => {
+const bandLevelOverride = process.argv.find((argument) => argument.startsWith("--band-level="))
+  ?.slice("--band-level=".length);
+const laneOverride: Record<string, string> = stepsOverride === undefined ? {} : (() => {
   const steps = Number(stepsOverride);
   if (!Number.isInteger(steps) || steps <= 0) throw new Error(`--steps must be a positive integer; received ${stepsOverride}`);
   if (quiescent) throw new Error("--steps cannot override the quiescent lane, which owns its own settle/measure split");
   return powerDamLaneWithSteps(lane, steps);
 })();
+const bandEnvironmentOverride: Record<string, string> = {};
+if (bandLevelOverride !== undefined) {
+  const bandLevel = Number(bandLevelOverride);
+  if (!Number.isInteger(bandLevel) || bandLevel < 0 || bandLevel > 4) {
+    throw new Error(`--band-level must be an integer from 0 through 4; received ${bandLevelOverride}`);
+  }
+  // Applied after the authored lane so an A/B cannot silently fall back to
+  // the mini lane's recorded level-3 default.
+  bandEnvironmentOverride.FLUID_OCTREE_INTERFACE_BAND = String(bandLevel);
+}
 
-const movingResult = await runBenchmark(laneOverride);
+const movingResult = await runBenchmark({ ...laneOverride, ...bandEnvironmentOverride });
 let artifactResult: OctreeRegressionResultRecord = movingResult;
 // The raw record of the run whose FINAL advance the terminal gates describe.
 // `powerDamResultWindow` rebuilds a differenced record from an explicit field
@@ -178,8 +190,12 @@ if (quiescent) {
     FLUID_ORACLE_STEPS: String(steps),
     FLUID_EXPECT_EXACT_STEPS: String(steps),
   });
-  const settlePrefix = await runBenchmark(environmentForSteps(settleSteps));
-  const complete = await runBenchmark(environmentForSteps(settleSteps + measuredSteps));
+  const settlePrefix = await runBenchmark({
+    ...environmentForSteps(settleSteps), ...bandEnvironmentOverride,
+  });
+  const complete = await runBenchmark({
+    ...environmentForSteps(settleSteps + measuredSteps), ...bandEnvironmentOverride,
+  });
   terminalResult = complete;
   artifactResult = powerDamResultWindow(settlePrefix, complete);
   const quiescentSummary = summarizePowerDamPerformance(artifactResult);

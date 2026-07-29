@@ -174,6 +174,19 @@ test("queue-wall fallback is not presented as measured semantic activity", () =>
   assert.equal(view.resources[0].segments[0].evidence, "unknown");
 });
 
+test("queue-wall fallback is rendered as a backlog-inclusive envelope, not a frame", () => {
+  const physics = trace({
+    lane: "physics",
+    total_ms: 72,
+    measurementSource: "gpu-queue-wall",
+    phases: [{ id: "other", label: "GPU queue completion", duration_ms: 72 }],
+  });
+  const markup = renderToStaticMarkup(createElement(PerformanceActivityGrid, { physics }));
+  assert.match(markup, /QUEUE ENVELOPE/);
+  assert.match(markup, /QUEUE-WALL FALLBACK · INCLUDES BACKLOG/);
+  assert.doesNotMatch(markup, /FRAME WINDOW/);
+});
+
 test("a correlated activity frame preserves absolute starts and all evidence states", () => {
   const frame = activityFrame(10);
   const view = buildPerformanceActivityView({ frame });

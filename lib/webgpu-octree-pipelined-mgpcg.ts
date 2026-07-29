@@ -68,6 +68,11 @@ export const OCTREE_PIPELINED_PCG_CONTROL = Object.freeze({
   betaHi: 18,
   betaLo: 19,
   published: 20,
+  temporalAlpha: 21,
+  temporalApplied: 22,
+  temporalNumerator: 23,
+  temporalCurvature: 24,
+  temporalDirectionSquared: 25,
 } as const);
 
 export type CompensatedF32 = readonly [hi: number, lo: number];
@@ -136,6 +141,10 @@ export interface OctreePipelinedMGPCGOptions {
    * `octreePipelinedMGPCGColdStartEnabled`. Never set this from product code.
    */
   readonly coldStart?: boolean;
+  /** Measurement arm for the rank-one previous-pressure secant predictor. */
+  readonly temporalPredictor?: boolean;
+  readonly temporalPredictorMode?: "fixed" | "current-operator";
+  readonly temporalPredictorAlpha?: number;
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -336,6 +345,8 @@ export interface OctreePipelinedMGPCGSolve {
    * the initial iterate and the fail-closed publication fallback.
    */
   readonly pressureSeed: GPUBuffer;
+  /** Accepted row-remapped temporal secant p[n-1] - p[n-2]. */
+  readonly pressureHistory?: GPUBuffer;
   readonly pressureOut: GPUBuffer;
 }
 
@@ -364,6 +375,35 @@ export function octreePipelinedMGPCGColdStartEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_OCTREE_PRESSURE_COLD_START === "1";
+}
+
+/** Opt-in A/B arm. Production remains on the established warm seed. */
+export function octreePipelinedMGPCGTemporalPredictorEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_PRESSURE_TEMPORAL_PREDICTOR === "1"
+    || resolved?.FLUID_OCTREE_PRESSURE_TEMPORAL_PREDICTOR === "current-operator";
+}
+
+export function octreePipelinedMGPCGTemporalPredictorMode(
+  environment?: Readonly<Record<string, string | undefined>>,
+): "off" | "fixed" | "current-operator" {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const value = resolved?.FLUID_OCTREE_PRESSURE_TEMPORAL_PREDICTOR;
+  if (value === "current-operator") return "current-operator";
+  return value === "1" ? "fixed" : "off";
+}
+
+export function octreePipelinedMGPCGTemporalPredictorAlpha(
+  environment?: Readonly<Record<string, string | undefined>>,
+): number {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const parsed = Number(resolved?.FLUID_OCTREE_PRESSURE_TEMPORAL_ALPHA ?? "0.25");
+  return Number.isFinite(parsed) && parsed >= -1 && parsed <= 2 ? parsed : 0.25;
 }
 
 export type OctreePipelinedMGPCGPipelineName =
@@ -459,6 +499,21 @@ interface CachedGroup {
   readonly group: GPUBindGroup;
 }
 
+type TemporalPredictorPipelineName =
+  | "initializeTemporalDirection"
+  | "reduceTemporalPartials"
+  | "finishTemporalReduction"
+  | "applyTemporalPrediction";
+
+const TEMPORAL_PREDICTOR_BINDINGS: Readonly<Record<
+TemporalPredictorPipelineName, readonly number[]
+>> = Object.freeze({
+  initializeTemporalDirection: [0, 2, 11, 13, 17],
+  reduceTemporalPartials: [0, 2, 10, 11, 12, 13, 14, 16],
+  finishTemporalReduction: [0, 2, 13, 14],
+  applyTemporalPrediction: [0, 2, 5, 7, 8, 10, 11, 12, 13, 16],
+});
+
 /**
  * Replacement-ready matrix-free PCG owner. It deliberately does not
  * allocate hybrid smoother or multigrid vectors.
@@ -475,6 +530,9 @@ export class WebGPUOctreePipelinedMGPCG {
    * False only under the `FLUID_OCTREE_PRESSURE_COLD_START` measurement arm.
    */
   readonly startsFromPublishedSeed: boolean;
+  readonly usesTemporalPredictor: boolean;
+  readonly usesCurrentOperatorTemporalPredictor: boolean;
+  readonly temporalPredictorAlpha: number;
 
   /** GPU-authored records suitable for the existing diagnostics readback. */
   get workAccountingBuffers(): Readonly<{ control: GPUBuffer; indirectTail: GPUBuffer }> {
@@ -493,7 +551,11 @@ export class WebGPUOctreePipelinedMGPCG {
   private readonly partials: GPUBuffer;
   private readonly outerDispatch: GPUBuffer;
   private readonly pipelines: Readonly<Record<PipelineName, GPUComputePipeline>>;
+  private readonly temporalPipelines?: Readonly<Record<
+    TemporalPredictorPipelineName, GPUComputePipeline
+  >>;
   private readonly groups = new Map<PipelineName, CachedGroup[]>();
+  private readonly temporalGroups = new Map<TemporalPredictorPipelineName, CachedGroup[]>();
   private readonly relativeTolerance: number;
   private readonly absoluteTolerance: number;
   private destroyed = false;
@@ -604,16 +666,40 @@ export class WebGPUOctreePipelinedMGPCG {
     // today: the base source, the cache key and the label are all unchanged.
     const coldStart = options.coldStart ?? octreePipelinedMGPCGColdStartEnabled();
     this.startsFromPublishedSeed = !coldStart;
+    const configuredTemporalMode = options.temporalPredictorMode
+      ?? octreePipelinedMGPCGTemporalPredictorMode();
+    const temporalMode = options.temporalPredictor === false
+      ? "off"
+      : options.temporalPredictor === true && configuredTemporalMode === "off"
+        ? "fixed"
+        : configuredTemporalMode;
+    this.usesTemporalPredictor = temporalMode !== "off";
+    this.usesCurrentOperatorTemporalPredictor = temporalMode === "current-operator";
+    this.temporalPredictorAlpha = options.temporalPredictorAlpha
+      ?? octreePipelinedMGPCGTemporalPredictorAlpha();
+    if (!Number.isFinite(this.temporalPredictorAlpha)
+      || this.temporalPredictorAlpha < -1 || this.temporalPredictorAlpha > 2) {
+      throw new RangeError("Temporal pressure predictor alpha must remain in [-1,2]");
+    }
+    if (coldStart && this.usesTemporalPredictor) {
+      throw new Error("Temporal pressure prediction cannot be combined with the cold-start arm");
+    }
+    const seededShader = octreePipelinedMGPCGSeedVariantShader(coldStart);
+    const baseShader = temporalMode === "fixed"
+      ? octreePipelinedMGPCGFixedTemporalSeedShader(seededShader, this.temporalPredictorAlpha)
+      : seededShader;
     const shaderVariant = activity.module(
       octreePipelinedMGPCGActivityShader(
-        activity, octreePipelinedMGPCGSeedVariantShader(coldStart),
+        activity, baseShader,
       ),
       `${OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`
-        + (coldStart ? "/cold-start" : ""),
+        + (coldStart ? "/cold-start" : "")
+        + (temporalMode === "fixed" ? `/temporal-fixed-${this.temporalPredictorAlpha}` : ""),
     );
     const shaderModule = device.createShaderModule({
       label: "Octree pipelined MGPCG · M1 Max 128-lane subgroups"
-        + (coldStart ? " · cold start (measurement)" : ""),
+        + (coldStart ? " · cold start (measurement)" : "")
+        + (temporalMode === "fixed" ? ` · temporal α=${this.temporalPredictorAlpha}` : ""),
       code: shaderVariant.code,
     });
     this.pipelines = Object.freeze(Object.fromEntries(
@@ -626,6 +712,20 @@ export class WebGPUOctreePipelinedMGPCG {
         })),
       ]),
     ) as Record<PipelineName, GPUComputePipeline>);
+    if (this.usesCurrentOperatorTemporalPredictor) {
+      const temporalModule = device.createShaderModule({
+        label: "Octree temporal pressure predictor · rank-one secant",
+        code: octreeTemporalPressurePredictorShader,
+      });
+      this.temporalPipelines = Object.freeze(Object.fromEntries(
+        (Object.keys(TEMPORAL_PREDICTOR_BINDINGS) as TemporalPredictorPipelineName[])
+          .map((entryPoint) => [entryPoint, device.createComputePipeline({
+            label: `Temporal pressure predictor · ${entryPoint}`,
+            layout: "auto",
+            compute: { module: temporalModule, entryPoint },
+          })]),
+      ) as Record<TemporalPredictorPipelineName, GPUComputePipeline>);
+    }
     this.allocatedBytes = this.plan.ownedBytes;
   }
 
@@ -637,7 +737,8 @@ export class WebGPUOctreePipelinedMGPCG {
     // pair, and directions; then advance + M + residual reduction/finish +
     // direction + A(direction) + direct-curvature reduction/finish,
     // and one fail-closed publication.
-    return 8 + 2 * apply + setup + correction
+    const temporalPrelude = this.usesCurrentOperatorTemporalPredictor ? apply + 3 : 0;
+    return 8 + 2 * apply + setup + correction + temporalPrelude
       + this.plan.maximumIterations * (6 + apply + correction);
   }
 
@@ -646,6 +747,10 @@ export class WebGPUOctreePipelinedMGPCG {
     const vectorBytes = this.plan.rowCapacity * 4;
     if (solve.pressureSeed.size < vectorBytes || solve.pressureOut.size < vectorBytes) {
       throw new RangeError("Pipelined MGPCG solve buffers are smaller than the planned capacity");
+    }
+    if (this.usesTemporalPredictor && (!solve.pressureHistory
+      || solve.pressureHistory.size < vectorBytes)) {
+      throw new RangeError("Temporal pressure predictor history is smaller than the planned capacity");
     }
     const resources = this.resources(solve);
     broker.clearBuffer(this.control);
@@ -657,12 +762,33 @@ export class WebGPUOctreePipelinedMGPCG {
     broker.fence("pipelined MGPCG live dispatch publication");
     pass = broker.compute({ label: "Pipelined MGPCG state initialization" });
     this.runOuterIndirect(pass, "initializeState", 0, 0, resources);
-    this.source.operator.encode(
-      broker, this.source.vectors.pressure, this.source.vectors.directionImage,
-      this.control,
-    );
-    pass = broker.compute({ label: "Pipelined MGPCG initial residual" });
-    this.runOuterIndirect(pass, "formInitialResidual", 0, 0, resources);
+    if (this.usesCurrentOperatorTemporalPredictor) {
+      pass = broker.compute({ label: "Temporal pressure predictor direction" });
+      this.runTemporalOuterIndirect(pass, "initializeTemporalDirection", 0, 0, resources);
+      this.source.operator.encode(
+        broker, this.source.vectors.pressure, this.source.vectors.preconditionedImage,
+        this.control,
+      );
+      this.source.operator.encode(
+        broker, this.source.vectors.direction, this.source.vectors.directionImage,
+        this.control,
+      );
+      pass = broker.compute({ label: "Temporal pressure predictor reduction" });
+      this.runTemporalOuterIndirect(pass, "reduceTemporalPartials", 0, 2, resources);
+      broker.fence("temporal pressure predictor partials complete");
+      pass = broker.compute({ label: "Temporal pressure predictor reduction finish" });
+      this.runTemporalDirect(pass, "finishTemporalReduction", [1, 1, 1], resources);
+      broker.fence("temporal pressure predictor coefficient publication");
+      pass = broker.compute({ label: "Temporal pressure predictor apply" });
+      this.runTemporalOuterIndirect(pass, "applyTemporalPrediction", 0, 0, resources);
+    } else {
+      this.source.operator.encode(
+        broker, this.source.vectors.pressure, this.source.vectors.directionImage,
+        this.control,
+      );
+      pass = broker.compute({ label: "Pipelined MGPCG initial residual" });
+      this.runOuterIndirect(pass, "formInitialResidual", 0, 0, resources);
+    }
 
     const preconditioner = this.source.preconditioner;
     preconditioner.encodeSetup(broker, {
@@ -752,7 +878,60 @@ export class WebGPUOctreePipelinedMGPCG {
       this.partials,
       this.outerDispatch,
       this.source.rhs,
+      solve.pressureHistory,
     ];
+  }
+
+  private bindTemporal(
+    pass: GPUComputePassEncoder,
+    name: TemporalPredictorPipelineName,
+    resources: readonly (GPUBuffer | undefined)[],
+  ): void {
+    const pipeline = this.temporalPipelines?.[name];
+    if (!pipeline) throw new Error("Temporal pressure predictor pipeline is unavailable");
+    const bindings = TEMPORAL_PREDICTOR_BINDINGS[name];
+    const variants = this.temporalGroups.get(name);
+    const cached = variants?.find((candidate) =>
+      bindings.every((binding) => candidate.resources[binding] === resources[binding]));
+    const group = cached?.group ?? this.device.createBindGroup({
+      label: `Temporal pressure predictor · ${name}`,
+      layout: pipeline.getBindGroupLayout(0),
+      entries: bindings.map((binding) => ({
+        binding,
+        resource: { buffer: resources[binding]! },
+      })),
+    });
+    if (!cached) {
+      const next = { resources: [...resources], group };
+      if (variants) variants.push(next); else this.temporalGroups.set(name, [next]);
+    }
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, group);
+  }
+
+  private runTemporalDirect(
+    pass: GPUComputePassEncoder,
+    name: TemporalPredictorPipelineName,
+    dispatch: readonly [number, number, number],
+    resources: readonly (GPUBuffer | undefined)[],
+  ): void {
+    this.bindTemporal(pass, name, resources);
+    pass.dispatchWorkgroups(...dispatch);
+  }
+
+  private runTemporalOuterIndirect(
+    pass: GPUComputePassEncoder,
+    name: TemporalPredictorPipelineName,
+    iteration: number,
+    stage: 0 | 1 | 2 | 3,
+    resources: readonly (GPUBuffer | undefined)[],
+  ): void {
+    this.bindTemporal(pass, name, resources);
+    const record = iteration * OCTREE_PIPELINED_PCG_DISPATCHES_PER_ITERATION + stage;
+    pass.dispatchWorkgroupsIndirect(
+      this.outerDispatch,
+      record * OCTREE_PIPELINED_PCG_INDIRECT_STRIDE_BYTES,
+    );
   }
 
   private bind(
@@ -760,7 +939,12 @@ export class WebGPUOctreePipelinedMGPCG {
     name: PipelineName,
     resources: readonly (GPUBuffer | undefined)[],
   ): void {
-    const pipeline = this.pipelines[name], bindings = PIPELINE_BINDINGS[name];
+    const pipeline = this.pipelines[name];
+    const baseBindings = PIPELINE_BINDINGS[name];
+    const bindings = this.usesTemporalPredictor
+      && !this.usesCurrentOperatorTemporalPredictor && name === "initializeState"
+      ? [...baseBindings, 17]
+      : baseBindings;
     const variants = this.groups.get(name);
     const cached = variants?.find((candidate) =>
       bindings.every((binding) => candidate.resources[binding] === resources[binding]));
@@ -898,6 +1082,144 @@ const targetSubgroupReductionWGSL = /* wgsl */ `
     }
   }
   workgroupBarrier();`;
+
+/**
+ * One-dimensional current-operator projection of the published warm seed onto
+ * the temporal secant `p[n-1] - p[n-2]`. It deliberately ends before PCG is
+ * initialized: no Krylov direction or beta is carried between solves.
+ */
+export const octreeTemporalPressurePredictorShader = /* wgsl */ `
+struct Params {
+  shape: vec4u,
+  numerics: vec4f,
+  padding0: vec4u,
+  padding1: vec4u,
+}
+struct TemporalScalars {
+  numerator: f32,
+  curvature: f32,
+  directionSquared: f32,
+  padding: f32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read> acceptedAuthority: array<u32>;
+@group(0) @binding(5) var<storage, read> pressureSeed: array<f32>;
+@group(0) @binding(7) var<storage, read_write> pressure: array<f32>;
+@group(0) @binding(8) var<storage, read_write> residual: array<f32>;
+@group(0) @binding(10) var<storage, read> seedImage: array<f32>;
+@group(0) @binding(11) var<storage, read_write> direction: array<f32>;
+@group(0) @binding(12) var<storage, read> directionImage: array<f32>;
+@group(0) @binding(13) var<storage, read_write> control: array<atomic<u32>>;
+@group(0) @binding(14) var<storage, read_write> partials: array<TemporalScalars>;
+@group(0) @binding(16) var<storage, read> rhs: array<f32>;
+@group(0) @binding(17) var<storage, read> pressureHistory: array<f32>;
+const INVALID: u32 = 0xffffffffu;
+const ERROR_NONFINITE: u32 = ${OCTREE_PIPELINED_PCG_ERROR.nonFinite}u;
+const REDUCTION_LANES: u32 = ${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE}u;
+fn rows() -> u32 { return min(acceptedAuthority[2], params.shape.x); }
+fn failed() -> bool { return atomicLoad(&control[0]) != 0u; }
+fn finite(value: f32) -> bool { return value == value && abs(value) <= 3.402823e38; }
+fn reportNonFinite(row: u32) {
+  atomicOr(&control[0], ERROR_NONFINITE);
+  atomicMin(&control[7], row);
+  atomicCompareExchangeWeak(&control[6], 0u, 16u);
+}
+
+@compute @workgroup_size(64)
+fn initializeTemporalDirection(@builtin(global_invocation_id) global: vec3u) {
+  let row = global.x;
+  if (row >= rows() || failed()) { return; }
+  let history = pressureHistory[row];
+  direction[row] = select(0.0, history, finite(history));
+}
+
+var<workgroup> temporal: array<TemporalScalars, ${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE}>;
+
+@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
+fn reduceTemporalPartials(
+  @builtin(local_invocation_index) lane: u32,
+  @builtin(workgroup_id) workgroup: vec3u,
+  @builtin(global_invocation_id) global: vec3u,
+) {
+  var local = TemporalScalars(0.0, 0.0, 0.0, 0.0);
+  let row = global.x;
+  if (row < rows() && !failed()) {
+    let d = direction[row];
+    let ad = directionImage[row];
+    let r = -rhs[row] - seedImage[row];
+    if (!finite(d) || !finite(ad) || !finite(r)) {
+      reportNonFinite(row);
+    } else {
+      local.numerator = d * r;
+      local.curvature = d * ad;
+      local.directionSquared = d * d;
+    }
+  }
+  temporal[lane] = local;
+  for (var width = REDUCTION_LANES / 2u; width > 0u; width >>= 1u) {
+    workgroupBarrier();
+    if (lane < width) {
+      temporal[lane].numerator += temporal[lane + width].numerator;
+      temporal[lane].curvature += temporal[lane + width].curvature;
+      temporal[lane].directionSquared += temporal[lane + width].directionSquared;
+    }
+  }
+  workgroupBarrier();
+  if (lane == 0u) { partials[workgroup.x] = temporal[0]; }
+}
+
+@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
+fn finishTemporalReduction(@builtin(local_invocation_index) lane: u32) {
+  var local = TemporalScalars(0.0, 0.0, 0.0, 0.0);
+  let count = (rows() + REDUCTION_LANES - 1u) / REDUCTION_LANES;
+  for (var partial = lane; partial < count; partial += REDUCTION_LANES) {
+    local.numerator += partials[partial].numerator;
+    local.curvature += partials[partial].curvature;
+    local.directionSquared += partials[partial].directionSquared;
+  }
+  temporal[lane] = local;
+  for (var width = REDUCTION_LANES / 2u; width > 0u; width >>= 1u) {
+    workgroupBarrier();
+    if (lane < width) {
+      temporal[lane].numerator += temporal[lane + width].numerator;
+      temporal[lane].curvature += temporal[lane + width].curvature;
+      temporal[lane].directionSquared += temporal[lane + width].directionSquared;
+    }
+  }
+  workgroupBarrier();
+  if (lane != 0u) { return; }
+  let total = temporal[0];
+  atomicStore(&control[23], bitcast<u32>(total.numerator));
+  atomicStore(&control[24], bitcast<u32>(total.curvature));
+  atomicStore(&control[25], bitcast<u32>(total.directionSquared));
+  var alpha = 0.0;
+  let scaleFloor = max(1e-30, total.directionSquared * 1e-12);
+  if (!failed() && finite(total.numerator) && finite(total.curvature)
+    && finite(total.directionSquared) && total.curvature > scaleFloor) {
+    let candidate = total.numerator / total.curvature;
+    if (finite(candidate)) { alpha = clamp(candidate, -1.0, 2.0); }
+  }
+  atomicStore(&control[21], bitcast<u32>(alpha));
+  atomicStore(&control[22], select(0u, 1u, alpha != 0.0));
+}
+
+@compute @workgroup_size(64)
+fn applyTemporalPrediction(@builtin(global_invocation_id) global: vec3u) {
+  let row = global.x;
+  if (row >= rows() || failed()) { return; }
+  let alpha = bitcast<f32>(atomicLoad(&control[21]));
+  let baseResidual = -rhs[row] - seedImage[row];
+  let predicted = pressureSeed[row] + alpha * direction[row];
+  let predictedResidual = baseResidual - alpha * directionImage[row];
+  if (!finite(predicted) || !finite(predictedResidual)) {
+    pressure[row] = pressureSeed[row];
+    residual[row] = baseResidual;
+  } else {
+    pressure[row] = predicted;
+    residual[row] = predictedResidual;
+  }
+}
+`;
 
 export const octreePipelinedMGPCGShader = /* wgsl */ `
 enable subgroups;
@@ -1153,6 +1475,11 @@ ${targetSubgroupReductionWGSL}
       return;
     }
     storePair(8u, total.bb);
+    // Preserve the first attempted Section 4.3 scalars even when the fail-closed
+    // positivity gate below rejects them. They are diagnostics only on this
+    // branch: no recurrence reads previous gamma during the initial reduction.
+    storePair(12u, total.gamma);
+    storePair(14u, total.delta);
   }
   storePair(10u, total.rr);
   atomicAdd(&control[3], 1u);
@@ -1513,4 +1840,34 @@ export function octreePipelinedMGPCGSeedVariantShader(coldStart: boolean): strin
   return octreePipelinedMGPCGShader.replace(
     MGPCG_WARM_SEED_STATEMENT, MGPCG_COLD_SEED_STATEMENT,
   );
+}
+
+/** Fixed-coefficient temporal seed with no additional accurate-operator apply. */
+export function octreePipelinedMGPCGFixedTemporalSeedShader(
+  base: string,
+  alpha: number,
+): string {
+  if (!Number.isFinite(alpha) || alpha < -1 || alpha > 2) {
+    throw new RangeError("Fixed temporal pressure alpha must remain in [-1,2]");
+  }
+  const rhsDeclaration =
+    "@group(0) @binding(16) var<storage, read> rhs: array<f32>;";
+  const alphaText = Number.isInteger(Math.fround(alpha))
+    ? `${Math.fround(alpha)}.0`
+    : `${Math.fround(alpha)}`;
+  const replacement = `
+  let temporal = pressureHistory[row];
+  let generation = acceptedAuthority[3];
+  let temporalAge = select(0u, generation - 4u, generation > 4u);
+  let temporalAlpha = ${alphaText} * clamp(f32(temporalAge) / 64.0, 0.0, 1.0);
+  let predicted = seed + temporalAlpha * select(0.0, temporal, finite(temporal));
+  pressure[row] = select(seed, predicted, finite(predicted));
+`;
+  if (!base.includes(rhsDeclaration) || !base.includes(MGPCG_WARM_SEED_STATEMENT)) {
+    throw new Error("Pipelined MGPCG fixed temporal seed anchors are unavailable");
+  }
+  return base
+    .replace(rhsDeclaration, `${rhsDeclaration}\n`
+      + "@group(0) @binding(17) var<storage, read> pressureHistory: array<f32>;")
+    .replace(MGPCG_WARM_SEED_STATEMENT, replacement);
 }

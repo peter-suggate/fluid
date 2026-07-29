@@ -25,6 +25,13 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   assert.match(measure, /^encodeMeasurement\(broker\)\{this\.encodePasses\(broker,false\);?\}$/,
     "the paper path must measure volume without applying a global phi offset");
   assert.match(shader,
+    /fnaddReferenceVolume\(\).*control\.referenceVolume\+=referenceDelta\.volume/,
+    "an authored source must advance the GPU-owned conservation reference before measurement");
+  const addReference = WebGPUFineLevelSetVolumeCorrection.prototype.addReferenceVolume
+    .toString().replace(/\s+/g, "");
+  assert.match(addReference, /pendingReferenceVolume\+=volume_m3/,
+    "source volume must be accumulated until the next publication settlement");
+  assert.match(shader,
     /fnvalidDirectory\(\)->bool\{if\(arrayLength\(&coarsePublication\)<12u[\s\S]*coarseDirectory\.state==PUBLISHED[\s\S]*coarsePublication\[2\]==coarseDirectory\.rowCount[\s\S]*coarseDirectory\.rowCount<=c\.rowCapacity[\s\S]*all\(coarseDirectory\.dimensions==c\.dimensions\)/,
     "a directory miss is meaningful only after the compact sorted publication header validates");
   assert.match(shader,

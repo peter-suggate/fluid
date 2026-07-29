@@ -149,6 +149,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return max(slab.x-position.x,posit
         [{ binding: 9, resource: { buffer: plane } }], undefined, false,
         frame === 0 ? { kind: "bootstrap" } : { kind: "delta", producer: {
           buffer: transportDelta, pageCapacity: plan.maximumResidentBricks,
+          maximumDisplacementOffsetWords: 7,
           candidateKeysOffsetWords: 8, changedKeysOffsetWords: 8 + plan.maximumResidentBricks,
         } });
       const pass = encoder.beginComputePass({ label: "Latch fine topology invariants" });

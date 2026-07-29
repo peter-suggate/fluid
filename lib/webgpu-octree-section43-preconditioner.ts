@@ -350,7 +350,7 @@ implements OctreeFirstOrderSPDVCycle {
     });
 
     // §4.3(3): p2 = p1 + M1 r1 seeds both ping-pong states, then the identical
-    // matched k sweeps leave z in hybridB.
+    // matched even-k schedule starts B->A and therefore leaves z in hybridB.
     pass = broker.compute({ label: "Section 4.3 hybrid post-smoothing shell" });
     this.runRows(pass, "addInnerCorrection", resources);
     for (let iteration = 0; iteration < this.boundarySmoothingIterations; iteration += 1) {
@@ -627,6 +627,12 @@ fn bandRow(item: u32) -> u32 {
   }
   return atomicLoad(&bandWorksets[base + 7u + item]);
 }
+fn publishHybridAccurateDispatch(at:u32,blocks:u32,live:bool){
+  if(live&&blocks>0u){let x=min(65535u,blocks);gatedBandDispatch[at]=x;
+    gatedBandDispatch[at+1u]=(blocks+x-1u)/x;gatedBandDispatch[at+2u]=1u;}
+  else{gatedBandDispatch[at]=0u;gatedBandDispatch[at+1u]=1u;
+    gatedBandDispatch[at+2u]=1u;}
+}
 
 @compute @workgroup_size(1)
 fn prepareCorrectionDispatches() {
@@ -644,10 +650,8 @@ fn prepareCorrectionDispatches() {
   let unionValid = atomicLoad(&bandWorksets[unionBase]) == accepted[3]
     && atomicLoad(&bandWorksets[unionBase + 2u]) >= unionRows
     && atomicLoad(&bandWorksets[unionBase + 3u]) == 3u;
-  gatedBandDispatch[15] = select(0u, (unionRows * 18u + 63u) / 64u,
+  publishHybridAccurateDispatch(15u, (unionRows * 18u + 63u) / 64u,
     solveLive && unionValid);
-  gatedBandDispatch[16] = 1u;
-  gatedBandDispatch[17] = 1u;
   var transitionRows = 0u;
   var transitionValid = true;
   for (var index = 0u; index < 2u; index += 1u) {
@@ -664,10 +668,8 @@ fn prepareCorrectionDispatches() {
   // candidates behind a child are independent chains, so the staged adjoint
   // stage issues them concurrently rather than eighteen deep in one lane;
   // stageAdjointCandidate in the operator shader owns the matching indexing.
-  gatedBandDispatch[18] = select(0u, (transitionRows * 144u + 63u) / 64u,
+  publishHybridAccurateDispatch(18u, (transitionRows * 144u + 63u) / 64u,
     solveLive && unionValid && transitionValid);
-  gatedBandDispatch[19] = 1u;
-  gatedBandDispatch[20] = 1u;
 }
 
 @compute @workgroup_size(1)
@@ -812,6 +814,10 @@ fn addInnerCorrection(@builtin(global_invocation_id) global: vec3u) {
 fn publishCorrection(@builtin(global_invocation_id) global: vec3u) {
   let row = global.x;
   if (stopped() || row >= rows()) { return; }
+  // Aanjaneya et al. (2017), Section 4.3 uses matching k=8 sweeps on both
+  // sides of M1. Starting post-smoothing from identical A/B values and taking
+  // the first sweep B->A leaves the eighth result in B; publishing A would
+  // silently expose the seventh sweep and destroy the required symmetry.
   let value = hybridB[row];
   if (!finite(value)) { reportAt(NONFINITE_ERROR, 14u, row); }
   else { correction[row] = value; }

@@ -28,7 +28,7 @@ function pressureControls(iterations = 1, maximumIterations = 2) {
     const base = level * 12;
     spgridDispatch[base] = 1;
     spgridDispatch.set([1, 1, 1], base + 2);
-    spgridDispatch.set([0, 1, 1], base + 5);
+    spgridDispatch.set([level + 1 < 2 ? 1 : 0, 1, 1], base + 5);
     spgridDispatch[base + 8] = 1;
     spgridDispatch.set([1, 1, 1], base + 9);
   }
@@ -194,7 +194,8 @@ test("pressure solve telemetry decodes all fixed layers and a zero-work converge
   assert.equal(report.layers["spgrid-vcycle"]?.encodedIterations, 3);
   assert.equal(report.layers["spgrid-vcycle"]?.executedIterations, 2);
   assert.equal(report.layers["spgrid-vcycle"]?.worksets, 4);
-  assert.equal(report.layers["spgrid-vcycle"]?.executedDispatches, 18);
+  assert.equal(report.layers["spgrid-vcycle"]?.executedDispatches, 20,
+    "both parent-owned restriction dispatches are credited per executed correction");
   assert.equal(report.layers["outer-pipelined-mgpcg"]?.encodedDispatches, 20);
   assert.equal(report.layers["outer-pipelined-mgpcg"]?.executedDispatches, 14);
   assert.equal(report.layers["spgrid-vcycle"]?.activePages, 4);
@@ -232,8 +233,9 @@ test("pressure telemetry gives an initially converged solve no nested tail credi
   assert.equal(spgrid.encodedIterations, 3);
   assert.equal(spgrid.executedIterations, 1);
   assert.equal(spgrid.worksets, 2);
-  assert.equal(spgrid.scheduledLanes, 704);
-  assert.equal(spgrid.executedDispatches, 9);
+  assert.equal(spgrid.scheduledLanes, 768);
+  assert.equal(spgrid.executedDispatches, 10,
+    "the initial correction includes its parent-owned restriction dispatch");
 });
 
 test("nested payload credit grows only with GPU-executed outer iterations", () => {
@@ -304,6 +306,11 @@ test("pressure telemetry blocks missing, stale, failed, and unproven controls", 
   skippedExecutedRow.outerIndirectTail.fill(0, 0, 4);
   assert.match(decodeOctreePressureSolveWork(skippedExecutedRow, pressurePlan).blocker!,
     /executed indirect/);
+  const transferCountDispatch = pressureControls();
+  transferCountDispatch.spgridDispatch.set([0, 1, 1], 5);
+  assert.match(decodeOctreePressureSolveWork(transferCountDispatch, pressurePlan).blocker!,
+    /compact publication/,
+    "restriction dispatch must be sized by published coarse parents, not transfer records");
   assert.match(decodeOctreePressureSolveWork(pressureControls(), {
     ...pressurePlan, persistentEnabled: true, persistentMaximumIterations: 12,
   }).blocker!, /persistent coarse-solve control unavailable/);

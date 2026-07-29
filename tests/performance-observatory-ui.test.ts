@@ -28,10 +28,23 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
     "power-cells",
     "octree-lifecycle",
     "pressure",
-    "speed",
-    "projection",
-    "divergence",
+    "evaluated-velocity",
+    "projection-update",
+    "divergence-closure",
+    "structured-velocity",
   ]) assert.match(panel, new RegExp(`mode: "${mode}"`), mode);
+
+  assert.equal((panel.match(/axis: "volume"/g) ?? []).length, 13,
+    "every observatory card defaults to its volume presentation");
+  assert.match(panel, /if \(overlayAxis === "off"\) \{[\s\S]*setOverlayAxis\(view\.axis\)/,
+    "a card should use its volume default only when no presentation is active");
+  assert.doesNotMatch(panel, /setOverlayMode\(view\.mode\);\s*setOverlayAxis\(view\.axis\);/,
+    "switching fields must preserve the user's selected view plane or volume");
+  assert.match(panel,
+    /if \(overlayMode === view\.mode && overlayAxis !== "off"\) \{\s*setOverlayAxis\("off"\);\s*return;/,
+    "clicking the selected observatory card should unselect and hide it");
+  assert.match(panel, /const active = overlayAxis !== "off" && overlayMode === view\.mode/,
+    "a hidden field must not leave its observatory card selected");
 
   assert.match(panel, /paper-view-controls/);
   assert.match(panel, /paper-field-legend/);
@@ -65,9 +78,10 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
   assert.match(panel, /activityHistory\.filter\(performanceActivityFrameHasSettledEvidence\)/);
   assert.match(panel, /WAITING FOR COMPLETE CAPTURE/);
   assert.match(panel, /instrumentationMode === "timeline" \? cpu : undefined/);
-  assert.match(panel, /role="switch"/);
-  assert.match(panel, /instrumentationMode === "activity" \? "off" : "activity"/);
-  assert.doesNotMatch(panel, /<select[\s\S]*Performance capture mode|Timeline only/);
+  assert.match(panel, /role="group" aria-label="Performance capture mode"/);
+  assert.match(panel, /mode: "timeline", label: "TIMELINE"/);
+  assert.match(panel, /mode: "activity", label: "DETAILED"/);
+  assert.doesNotMatch(panel, /<select[\s\S]*Performance capture mode/);
   assert.match(grid, /data-accounting-ledgers="cpu-gpu-independent"/);
   assert.doesNotMatch(panel, /cpu\.total_ms\s*\+\s*physics\.total_ms|physics\.total_ms\s*\+\s*presentation\.total_ms/);
 });

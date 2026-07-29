@@ -33,8 +33,10 @@ import {
   makeFineLevelSetTopologyWGSL,
   fineLevelSetResidencyFloorCells,
   planFineLevelSetBandFineCells,
+  planFineLevelSetCapacityDilationBrickRings,
   planFineLevelSetLeafBrickBounds,
   planFineLevelSetPageDeltaLayout,
+  planFineLevelSetRecurringTopologyBand,
   planFineLevelSetTopologyBand,
   WebGPUFineLevelSetLeafSeeds,
   WebGPUFineLevelSetTopology,
@@ -201,16 +203,71 @@ test("the authored surface band drives the fine widths in finest-cell units", ()
   // note on `fineLevelSetResidencyFloorCells` documents.
   assert.deepEqual(planFineLevelSetBandFineCells(3, 4), {
     transportBandFineCells: 12,
-    redistanceBandFineCells: 23,
+    redistanceBandFineCells: 12,
     maximumBacktraceFineCells: 8,
   });
+  assert.deepEqual(planFineLevelSetBandFineCells(0, 4), {
+    transportBandFineCells: 4,
+    redistanceBandFineCells: 4,
+    maximumBacktraceFineCells: 8,
+  }, "level zero redistances exactly the minimum transport brick");
+  assert.deepEqual(planFineLevelSetBandFineCells(1, 4), {
+    transportBandFineCells: 8,
+    redistanceBandFineCells: 8,
+    maximumBacktraceFineCells: 8,
+  }, "level one retains the measured two-finest-cell moving-surface floor");
+  assert.deepEqual(planFineLevelSetTopologyBand(4, {
+    ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
+  }), {
+    transportBandFineCells: 4,
+    redistanceBandFineCells: 4,
+    maximumBacktraceFineCells: 8,
+    interpolationSupportFineCells: 1,
+    safetyBrickRings: 1,
+    requiredFineCells: 9,
+    dilationBrickRings: 4,
+  }, "level zero topology independently retains backtrace and the safety ring");
+  assert.deepEqual(planFineLevelSetRecurringTopologyBand(4, {
+    ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
+  }, 2), {
+    transportBandFineCells: 4,
+    redistanceBandFineCells: 4,
+    maximumBacktraceFineCells: 8,
+    interpolationSupportFineCells: 1,
+    safetyBrickRings: 1,
+    maximumDisplacementFineCells: 2,
+    requiredFineCells: 4,
+    dilationBrickRings: 2,
+  }, "level zero recurring topology keeps physical redistance plus the paper one-ring");
+  assert.equal(planFineLevelSetRecurringTopologyBand(4, {
+    ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
+  }, 8).dilationBrickRings, 4,
+  "a worst-case characteristic restores the conservative construction radius");
+  assert.equal(planFineLevelSetRecurringTopologyBand(4, {
+    ...planFineLevelSetBandFineCells(4, 4), interpolationSupportFineCells: 1,
+  }, 2).dilationBrickRings, 5,
+  "a wide authored band remains the recurring physical-width authority");
+  assert.throws(() => planFineLevelSetRecurringTopologyBand(4, {
+    ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
+  }, 9), /exceeds its configured backtrace bound/);
+  assert.equal(planFineLevelSetCapacityDilationBrickRings(4, 0, 4), 5,
+    "level zero reserves level one's deformation envelope without activating it");
+  assert.equal(planFineLevelSetCapacityDilationBrickRings(4, 0, 8), 8,
+    "the factor-8 experimental lane retains the same proven capacity policy");
+  assert.deepEqual([0, 1, 2, 3, 4].map((band) => {
+    const widths = planFineLevelSetBandFineCells(band, 4);
+    return [widths.redistanceBandFineCells, planFineLevelSetTopologyBand(4, {
+      ...widths, interpolationSupportFineCells: 1,
+    }).dilationBrickRings];
+  }), [[4, 4], [8, 5], [8, 5], [12, 6], [16, 7]],
+  "level zero is the sole one-brick experiment while nonzero levels retain moving-surface support");
   // Held in finest cells, so the band keeps one physical thickness across the
   // paper's two interface-tracking factors rather than halving at factor 8.
   assert.equal(planFineLevelSetBandFineCells(3, 8).transportBandFineCells,
     2 * planFineLevelSetBandFineCells(3, 4).transportBandFineCells);
   // A thickness sweep must actually move the width it is sweeping.
-  assert.deepEqual([1, 2, 4, 8].map((band) =>
-    planFineLevelSetBandFineCells(band, 4).transportBandFineCells), [4, 8, 16, 32]);
+  assert.deepEqual([0, 1, 2, 4, 8].map((band) =>
+    planFineLevelSetBandFineCells(band, 4).transportBandFineCells), [4, 8, 8, 16, 32]);
 });
 
 test("every sweepable surface band stays above the departure residency floor", () => {
@@ -228,17 +285,18 @@ test("every sweepable surface band stays above the departure residency floor", (
       });
       const floor = fineLevelSetResidencyFloorCells(widths.transportBandFineCells,
         widths.maximumBacktraceFineCells, 1);
-      assert.ok(plan.dilationBrickRings * 4 >= floor + 6,
+      const coverage = plan.dilationBrickRings * 4;
+      assert.ok(coverage >= floor && coverage < floor + 4,
         `band ${band} at factor ${fineFactor} covers ${plan.dilationBrickRings * 4}`
         + ` fine cells against a floor of ${floor}`);
     }
   }
-  // The mini lane runs at seven rings, not the five the pre-widening note
-  // recorded.
+  // The reduced redistance policy removes one active ring while retaining the
+  // complete departure-residency floor.
   assert.equal(planFineLevelSetTopologyBand(4, {
     ...planFineLevelSetBandFineCells(3, 4),
     interpolationSupportFineCells: 1, safetyBrickRings: 1,
-  }).dilationBrickRings, 7);
+  }).dilationBrickRings, 6);
 });
 
 test("fine page delta publishes exact XOR keys and separate dirty/JFA-support sets", () => {
@@ -350,6 +408,12 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnpublishRecurringSparseBand[\s\S]*recurringProducerChanged\(item\)[\s\S]*currentMetadata\[id\*10u\+3u\]&2u[\s\S]*interfaceKey=key/,
     "recurring seeds are the compact producer-changed current-interface set");
   assert.match(wgsl,
+    /fnrecurringInflowSeedKey[\s\S]*inflowPositionRadius[\s\S]*fnpublishRecurringSparseBand[\s\S]*ownsInflow[\s\S]*recurringSeedSlot\(cursor\)\]=inflowKey/,
+    "an authored source seeds the same recurring sparse halo before its interface exists");
+  assert.match(wgsl,
+    /fnapplyInflowPhi[\s\S]*fninitializeDesiredSamples[\s\S]*value=applyInflowPhi\(value,position\)/,
+    "new nozzle pages initialize source phi before Section 5 fast marching");
+  assert.match(wgsl,
     /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],2u\|select\(0u,1u,exact\)\)[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*desiredScan\[item\]=prefix[\s\S]*fnscatterRecurringSparseBand[\s\S]*output=desiredScan\[key\][\s\S]*targetB\[7u\+output\]=key/,
     "compact seeds scatter bounded halos, rank in parallel, and publish canonical keys exactly once");
   assert.match(wgsl,
@@ -359,7 +423,16 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     "recurring topology must not retain a capacity-wide ordering branch");
   assert.match(wgsl,
     /recurringSeedLanes\[local\]=localSeeds[\s\S]*recurringSeedLanes\[local\]\+=recurringSeedLanes\[local\+width\][\s\S]*control\[1\]=seeds;control\[8\]=seeds/,
-    "the exact producer-changed interface prefix is captured before sparse dilation");
+    "the exact interface/source seed prefix is captured before sparse dilation");
+  assert.match(wgsl,
+    /fnrecurringDilationBrickRings[\s\S]*transportDelta\[7\]\+params\.interpolationSupportFineCells[\s\S]*max\(params\.redistanceBandFineCells,landing\)[\s\S]*params\.safetyBrickRings[\s\S]*rings>params\.dilationBrickRings/,
+    "recurring residency follows measured displacement but cannot escape the conservative bound");
+  assert.match(wgsl,
+    /fnrecurringScatterMembership[\s\S]*radius=i32\(control\[6\]\)[\s\S]*delta=vec3i[\s\S]*-vec3i\(radius\)/,
+    "the reduced recurring halo cube must remain centered on its dynamic radius");
+  assert.doesNotMatch(wgsl,
+    /fnrecurringScatterMembership[\s\S]*radius=i32\(params\.dilationBrickRings\)/,
+    "a reduced recurring width cannot be offset by the conservative construction radius");
   assert.doesNotMatch(wgsl,
     /publishRecurringDesiredBricks|recurringCandidate|recurringKeyAffected|recurringDesiredNow|recurringShiftedKey|sparseFringe|seedWithinDilation|topologySourceLookup|recurringSeedMembership|finalizeDesiredBricks|for\(varother=0u;other<count;other\+=1u\)/,
     "the scalar resident walk, per-output membership search, old full fringe, and quadratic rank sort are deleted");
@@ -541,6 +614,18 @@ test("fine topology rollback snapshot cannot alias Section 5 transport or closes
     "transport/distance/request scratch cannot carry rollback authority");
   assert.match(finalize, /binding:17,resource:resource\(this\.next\.rollbackPhi\)[\s\S]*binding:32,resource:resource\(this\.current\.rollbackPhi\)/,
     "a rejected downstream generation must restore the protected signed snapshot");
+  const shader = makeFineLevelSetTopologyWGSL(
+    "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
+  ).replace(/\s+/g, "");
+  assert.match(shader,
+    /fnremapCarriedSeed\(seed:u32\)[\s\S]*currentMetadata\[oldPage\*10u\+1u\][\s\S]*targetLookup\(key\)[\s\S]*returnnextPage\*params\.samplesPerBrick\+local/,
+    "carried JFA seeds must be translated through logical brick identity across page recycling");
+  assert.match(shader,
+    /carryDesiredWorkSamples[\s\S]*nextWorkA\[targetIndex\]=remapCarriedSeed\(currentWorkA\[sourceIndex\]\)/,
+    "normal publication must carry only recycle-safe closest-point indices");
+  assert.match(shader,
+    /settleFineWorkPayload[\s\S]*nextFlags\[targetIndex\]=currentFlags\[sourceIndex\];nextWorkA\[targetIndex\]=remapCarriedSeed\(currentWorkA\[sourceIndex\]\)/,
+    "rejection must restore cached closest-point bits and their remapped seed as one payload");
 });
 
 test("fine topology keeps cold failure unpublished and confines affine seeds to bootstrap", () => {
@@ -681,7 +766,8 @@ test("fine topology binds exactly the resources reachable from every compute ent
       "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}").encode(broker);
     topology.encode(broker, undefined, [], undefined, false, {
       kind: "delta",
-      producer: { buffer, pageCapacity: 1, candidateKeysOffsetWords: 8,
+      producer: { buffer, pageCapacity: 1, maximumDisplacementOffsetWords: 7,
+        candidateKeysOffsetWords: 8,
         changedKeysOffsetWords: 9 },
     });
   } finally {
@@ -744,10 +830,23 @@ test("fine redistance construction requires the topology-authored delta ABI", ()
 });
 
 test("fine redistance is fixed-pass JFA-CPT", () => {
-  assert.deepEqual(planFineLevelSetJFAStrides(21), [4, 2, 1, 1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [16, 8, 4, 2, 1, 1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1, 1]);
-  assert.deepEqual(planFineLevelSetJFAStrides(2), [2, 1, 1, 1]);
+  // Aanjaneya et al. 2017, Section 5
+  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) updates the high-resolution
+  // SPGrid every advection step and keeps it as the free-surface authority.
+  // Cold schedules use bandCells and retain five sparse collar repairs. The
+  // recurring schedule consumes the recycle-safe carried transform, so its
+  // ladder is shaped by one-step displacement and needs only two repairs.
+  assert.deepEqual(planFineLevelSetJFAStrides(21), [4, 2, 1, 1, 1, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [16, 8, 4, 2, 1, 1, 1, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(8, 8), [8, 4, 2, 1, 1, 1, 1, 1, 1],
+    "band 1 uses its natural cold full-band ladder without a stride-16 pass");
+  assert.deepEqual(planFineLevelSetJFAStrides(1), [1, 1, 1, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(2), [2, 1, 1, 1, 1, 1, 1]);
+  assert.deepEqual(planFineLevelSetJFAStrides(23, 8, 2), [8, 4, 2, 1, 1, 1],
+    "a carried transform reduces the band-23 ladder to the six E1 floods");
+  assert.match(WebGPUFineLevelSetRedistance.toString(),
+    /warmStart\s*\?\s*maximumDisplacementFineCells\s*:\s*options\.bandCells/,
+    "only a declared carried transform may replace the physical band with displacement");
   assert.match(fineLevelSetJFACPTWGSL,
     /otherDistance<bestDistance\|\|\(otherDistance==bestDistance&&otherKey<bestKey\)/,
     "equal-distance cooperative reduction must choose the stable global sample key");
@@ -769,8 +868,24 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
     /resolveClosestPointsBToCanonical[\s\S]*var seed=workB\[index\][\s\S]*workA\[index\]=seed;workB\[index\]=bitcast<u32>\(d\)/,
     "an odd flood schedule must canonicalize B seeds into A before the next delta generation");
   assert.match(fineLevelSetJFACPTWGSL,
-    /seedClosestPoints[\s\S]*workA\[index\]=INVALID;workB\[index\]=INVALID;flags\[index\]&=\(1u<<SAMPLE_FLAG_BITS\)-1u/,
-    "every recurring generation erases prior scratch while retaining untouched authority bits");
+    /fn carriedSeed\(index:u32\)[\s\S]*p\.warmStart==0u[\s\S]*supportMask\[page\]!=p\.generation[\s\S]*seedClosestPoints[\s\S]*let carried=carriedSeed\(index\);workA\[index\]=carried;workB\[index\]=INVALID/,
+    "warm seeds are generation/support validated while cold publication still clears them");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /refreshClosestPointCodes[\s\S]*let persistent=flags\[index\]&\(\(1u<<SAMPLE_FLAG_BITS\)-1u\);flags\[index\]=persistent[\s\S]*seedClosestPointCode\(q,index\)[\s\S]*flags\[index\]=persistent\|\(closest<<SAMPLE_FLAG_BITS\)/,
+    "warm publication must erase stale closest-point codes before deriving the current interface seeds");
+  const encodedRedistance = WebGPUFineLevelSetRedistance.prototype.encode.toString();
+  assert.match(encodedRedistance,
+    /warmStart[\s\S]*maximumDisplacementFineCells[\s\S]*encodeJFA/,
+    "the warm-start declaration and displacement bound must travel together into the JFA encode");
+  const encodedJFA = (WebGPUFineLevelSetRedistance.prototype as unknown as {
+    encodeJFA: (...args: unknown[]) => void;
+  }).encodeJFA.toString();
+  assert.match(encodedJFA,
+    /refresh transported closest-point codes[\s\S]*seed closest points/,
+    "current closest-point codes must be globally refreshed before carried destinations inspect them");
+  assert.match(encodedJFA,
+    /prepare warm fallback[\s\S]*for\(let repair=0;repair<3;repair\+=1\)[\s\S]*repair\+3/,
+    "a GPU-resident miss must restore the three omitted cold collar repairs");
   assert.match(fineLevelSetJFACPTWGSL,
     /let value=bitcast<f32>\(phi\[index\]\);if\(!finite\(value\)\)\{errorFlags\|=NONFINITE/,
     "recurring redistance must reject non-finite transported phi");
@@ -783,7 +898,7 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
   assert.doesNotMatch(fineLevelSetJFACPTWGSL, /fn betterSeed/,
     "candidate comparison must evaluate each closest point only once");
   assert.match(fineLevelSetJFACPTWGSL,
-    /flags\[index\]\|=closest<<SAMPLE_FLAG_BITS/,
+    /flags\[index\]=\(flags\[index\]&\(\(1u<<SAMPLE_FLAG_BITS\)-1u\)\)\|\(closest<<SAMPLE_FLAG_BITS\)/,
     "seeding materializes subcell closest points without rewriting persistent validity/sign bits");
   assert.match(fineLevelSetJFACPTWGSL,
     /fn materializedClosestPoint\(index:u32\)[^}]*flags\[index\]>>SAMPLE_FLAG_BITS[^}]*CP_FRACTION_MASK/,
@@ -1068,8 +1183,17 @@ test("fine redistance binds exactly the resources reachable from each compute en
       new WebGPUFineLevelSetRedistance(device, {
         ...source, plan: { ...source.plan, fineFactor },
       } as never, redistanceDeltaAuthority(buffer, 1)).encode(
-        broker, { bandCells: fineFactor === 4 ? 1 : 2 });
+        broker, { bandCells: fineFactor === 4 ? 1 : 2,
+          warmStart: true, maximumDisplacementFineCells: 1 });
       broker.fence("redistance binding inspection");
+      if (fineFactor === 4) {
+        const coldBroker = new PassBroker(encoder);
+        new WebGPUFineLevelSetRedistance(device, {
+          ...source, plan: { ...source.plan, fineFactor },
+        } as never, redistanceDeltaAuthority(buffer, 1)).encode(
+          coldBroker, { bandCells: 1 });
+        coldBroker.fence("cold redistance parity binding inspection");
+      }
     }
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
@@ -1078,12 +1202,14 @@ test("fine redistance binds exactly the resources reachable from each compute en
 
   const expected: Record<string, number[]> = {
     publishSupportPageMask: [0, 2, 3, 10],
+    refreshClosestPointCodes: [0, 1, 2, 3, 4, 5, 10],
     seedClosestPoints: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10],
     jumpFloodAToB: [0, 1, 2, 3, 4, 5, 6, 7, 10],
     jumpFloodBToA: [0, 1, 2, 3, 4, 5, 6, 7, 10],
     resolveClosestPointsAToB: [0, 2, 3, 4, 5, 6, 7, 9],
     resolveClosestPointsBToCanonical: [0, 2, 3, 4, 5, 6, 7, 9],
     validateJFADistances: [0, 1, 2, 3, 4, 5, 7, 9, 10],
+    prepareWarmFallbackDispatch: [0, 3, 9, 11],
     finalizeJFADistances: [0, 3, 8, 9],
     commitJFADistances: [0, 2, 3, 4, 5, 6, 7, 8],
   };
@@ -1136,7 +1262,7 @@ test("recurring fine redistance canonicalizes opposite flood parities on the sam
   try {
     const redistance = new WebGPUFineLevelSetRedistance(
       device, source as never, redistanceDeltaAuthority(buffer, 1));
-    for (const bandCells of [2, 1]) {
+    for (const bandCells of [16, 32]) {
       const broker = new PassBroker(encoder);
       redistance.encode(broker, { bandCells });
       broker.fence(`redistance recurring parity ${bandCells}`);
@@ -1149,12 +1275,14 @@ test("recurring fine redistance canonicalizes opposite flood parities on the sam
   const recurrence = passes.map((commands) => commands.filter((entryPoint) =>
     entryPoint === "seedClosestPoints" || entryPoint.startsWith("jumpFlood")
       || entryPoint.startsWith("resolveClosestPoints")));
-  assert.deepEqual(recurrence, [
-    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB",
-      "jumpFloodBToA", "resolveClosestPointsAToB"],
-    ["seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB",
-      "resolveClosestPointsBToCanonical"],
-  ]);
+  assert.equal(recurrence[0]?.at(-1), "resolveClosestPointsAToB");
+  assert.equal(recurrence[1]?.at(-1), "resolveClosestPointsBToCanonical");
+  for (const commands of recurrence) {
+    assert.equal(commands[0], "seedClosestPoints");
+    for (let index = 1; index < commands.length - 1; index += 1) {
+      assert.equal(commands[index], index % 2 === 1 ? "jumpFloodAToB" : "jumpFloodBToA");
+    }
+  }
   assert.equal(parameterWrites, 2,
     "each recurring encode uploads one parameter block, independent of the JFA stride count");
   assert.match(fineLevelSetJFACPTWGSL,
@@ -1211,11 +1339,11 @@ test("factor-4 JFA-CPT redistance exposes every topology-bounded micro-stage", (
     else Reflect.deleteProperty(globalThis, "GPUBufferUsage");
   }
 
-  assert.equal(passes.length, 13,
-    "support, seed, seven floods, resolve, validate, finalize, and commit need exact labels");
+  assert.equal(passes.length, 16,
+    "support, seed, ten floods, resolve, validate, finalize, and commit need exact labels");
   assert.deepEqual(copies, [],
     "JFA must consume topology's immutable command publication without recurring copies");
-  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84, 84],
+  assert.deepEqual(indirectOffsets, [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 84, 84],
     "support-mask publication plus seed/flood/resolve consume JFA support while validation and parallel commit touch the dirty dispatch");
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
     /updateIndirectBuffer|dispatchWorkgroupsIndirect\(this\.delta\.pageDelta/,
@@ -1223,9 +1351,10 @@ test("factor-4 JFA-CPT redistance exposes every topology-bounded micro-stage", (
   assert.deepEqual(passes.flat(), ["publishSupportPageMask",
     "seedClosestPoints", "jumpFloodAToB", "jumpFloodBToA",
     "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "jumpFloodBToA",
-    "jumpFloodAToB", "resolveClosestPointsBToCanonical", "validateJFADistances",
+    "jumpFloodAToB", "jumpFloodBToA", "jumpFloodAToB", "jumpFloodBToA",
+    "resolveClosestPointsAToB", "validateJFADistances",
     "finalizeJFADistances", "commitJFADistances"]);
-  assert.equal(passes.flat().length, 13,
+  assert.equal(passes.flat().length, 16,
     "generation-stamped direct support membership needs one bounded publication and no capacity clear");
   assert.match(fineLevelSetJFACPTWGSL, /override JFA_STRIDE:u32=1u/);
   assert.doesNotMatch(WebGPUFineLevelSetRedistance.toString(),
@@ -1233,8 +1362,8 @@ test("factor-4 JFA-CPT redistance exposes every topology-bounded micro-stage", (
     "mutable stride buffers and the retired scalar reduction pipelines must stay deleted");
   assert.equal(passes.flat().filter((entryPoint) =>
     entryPoint === "seedClosestPoints" || entryPoint.startsWith("jumpFlood")
-      || entryPoint.startsWith("resolveClosestPoints")).length, 9,
-    "the 21-cell distance transform is one seed, seven floods, and one resolve dispatch");
+      || entryPoint.startsWith("resolveClosestPoints")).length, 12,
+    "the 21-cell distance transform is one seed, ten floods, and one resolve dispatch");
 });
 
 test("opt-in Dawn backend reproducer: sparse diagonal JFA support gap dispatch", {

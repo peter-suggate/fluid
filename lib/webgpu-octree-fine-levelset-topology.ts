@@ -4,6 +4,7 @@ import { fineLevelSetLinearWorkgroupWGSL,
 import { PassBroker } from "./webgpu-pass-broker";
 import type { FineLevelSetTransportTopologyDelta } from "./webgpu-octree-fine-levelset-transport";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
+import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 
 export const FINE_LEVELSET_TOPOLOGY_ERROR = Object.freeze({
   capacity: 1 << 0,
@@ -50,8 +51,8 @@ export interface FineLevelSetTopologyBand {
   safetyBrickRings?: number;
   /** Surface-tracking transport width, in fine cells. Supplying it lets the
    * plan assert the residency floor instead of trusting the caller's arithmetic.
-   * This is deliberately NOT the pressure `interfaceRefinementBandCells`; see
-   * `lib/methods/octree.ts`, which states the two bands are distinct. */
+   * This is a derived fine-lattice width, not the master knob's pressure-band
+   * width; the product couples their authored reach before this conversion. */
   transportBandFineCells?: number;
 }
 
@@ -72,21 +73,11 @@ export interface FineLevelSetTopologyBand {
  * the mini lane at 5 dilation rings against a floor of 17, one ring above
  * failure.
  *
- * Both widths have since grown, and the current relationship in
- * `planFineLevelSetBandFineCells` makes the floor structurally unreachable
- * rather than narrowly satisfied. With `redistance = transport + 2f + 3` and
- * `backtrace = 2f`, redistance now exceeds the floor by 2 and always drives
- * `requiredFineCells`, so
- *
- *   coverage = ceil(redistance / B) * B + B  >=  redistance + B
- *            =  floor + 6
- *
- * for every band width and every `f`, `B`. The mini lane consequently runs at
- * 7 rings (transport 12, backtrace 8, interpolation 1 => floor 21; redistance
- * 23 => 28 covered), not the 5 the older note recorded. The check below is
- * therefore a tripwire on the width relationships themselves: it fires only if
- * someone decouples redistance from the departure stencil again, which is
- * exactly the edit that reintroduces the silent mode above.
+ * Physical redistance no longer duplicates the complete backtrace allowance:
+ * every level uses `redistance = transport`. Topology covers the separate
+ * `transport + backtrace + interpolation` residency floor directly, crediting
+ * the mandatory outer safety ring only after proving the remaining radius.
+ * The check below remains the fail-closed tripwire on that relationship.
  */
 export function fineLevelSetResidencyFloorCells(
   transportBandFineCells: number,
@@ -101,8 +92,7 @@ export function fineLevelSetResidencyFloorCells(
 export interface FineLevelSetBandFineCells {
   /** Section 5 surface-tracking width: the samples transport actually moves. */
   readonly transportBandFineCells: number;
-  /** Width redistance must leave valid, covering the trilinear support beyond
-   * the transport band and the closed cutoff at its outer shell. */
+  /** Width redistance must leave valid for the transported surface samples. */
   readonly redistanceBandFineCells: number;
   /** Conservative complete-trajectory displacement bound for one step. */
   readonly maximumBacktraceFineCells: number;
@@ -112,9 +102,14 @@ export interface FineLevelSetBandFineCells {
  * Resolve the authored surface band into the widths allocation, per-step
  * encode and work accounting all consume.
  *
- * `bandCells` is a half-width in *finest octree cells*, not fine cells, so the
- * band keeps a fixed physical thickness when `fineFactor` changes between 4
- * and 8. This is the sole place the fine widths are derived: allocation sizes
+ * `bandCells` is the product reach level. Levels 2--4 remain literal
+ * half-widths in finest octree cells. Level 0 is the deliberately aggressive
+ * one-fine-brick experiment, while level 1 retains the two-finest-cell surface
+ * support floor measured by the moving mini-dam acceptance lane. That floor is
+ * independent of recurring topology: it prevents interface-core transport
+ * starvation without restoring the old worst-case trajectory halo.
+ *
+ * This is the sole place the fine widths are derived: allocation sizes
  * brick residency from it once at construction while transport and redistance
  * re-derive it every step, and a disagreement between those two silently
  * under-provisions the band rather than failing (see the residency note on
@@ -122,10 +117,11 @@ export interface FineLevelSetBandFineCells {
  *
  * Aanjaneya et al. [2017] Section 5 only constrains this from below -- the
  * band must stay wide enough that the surface still falls inside it after
- * advection -- which the redistance width above the residency floor satisfies
- * for every `bandCells >= 0`. Width above that floor buys coarse-phi
- * correction coverage, not per-sample surface accuracy, and costs band volume
- * plus JFA passes.
+ * advection. Width beyond the derived trajectory and interpolation support
+ * buys coarse-phi correction coverage, not per-sample surface accuracy, and
+ * costs band volume plus JFA passes. Topology independently covers the
+ * complete departure stencil, interpolation, and its mandatory
+ * publication-safety ring outside this physical cutoff.
  */
 export function planFineLevelSetBandFineCells(
   bandCells: number,
@@ -137,21 +133,20 @@ export function planFineLevelSetBandFineCells(
   if (!Number.isSafeInteger(fineFactor) || fineFactor < 1) {
     throw new RangeError("Fine level-set factor must be a positive integer");
   }
-  // The 256-cell sanity cap belongs on the transport band alone, with room
-  // left for the redistance reach below. Capping the two independently lets
-  // redistance saturate while transport keeps growing, and once redistance
-  // stops exceeding `transport + backtrace + interpolation` the dilation no
-  // longer covers the departure stencil -- the silent zero-iteration mode
-  // documented on `fineLevelSetResidencyFloorCells`. That was reachable from
-  // the authored parameter range: band 31 at factor 8 gave transport 248 and a
-  // clamped redistance of 256, covering 260 fine cells against a floor of 265.
-  const redistanceReachFineCells = 2 * fineFactor + 3;
+  // The 256-cell sanity cap applies to the transported physical band.
+  // Redistance shares that cutoff; topology independently covers trajectory
+  // and interpolation residency, so neither support is silently truncated
+  // when the authored diagnostic range approaches this cap.
+  const authoredBandCells = Math.round(bandCells);
+  const surfaceSupportCells = authoredBandCells === 0
+    ? 1
+    : Math.max(2, authoredBandCells);
+  const redistanceReachFineCells = 0;
   const transportBandFineCells = Math.min(256 - redistanceReachFineCells,
-    Math.max(4, Math.round(bandCells) * fineFactor));
-  // The redistancer retains reachable samples on the closed authored cutoff.
-  // Two finest cells cover the ceil(sqrt(3)) trilinear reach, and the final
-  // three fine cells keep all eight samples around a pressure-cell centre
-  // valid when that centre itself lands on the outer support shell.
+    surfaceSupportCells * fineFactor);
+  // The redistancer retains reachable samples on the closed authored cutoff;
+  // departure/interpolation residency outside it is topology's independent
+  // responsibility and is not duplicated in this physical validity width.
   const redistanceBandFineCells = transportBandFineCells + redistanceReachFineCells;
   // The regular UI lane advances by 0.008 s. Its characteristic can cross more
   // than one finest octree cell once the dam accelerates.
@@ -240,9 +235,16 @@ export function planFineLevelSetTopologyBand(
   if (safetyBrickRings < 1) {
     throw new RangeError("Fine topology requires at least one publication safety ring");
   }
+  const residencyFloor = band.transportBandFineCells === undefined ? 0
+    : fineLevelSetResidencyFloorCells(band.transportBandFineCells,
+      band.maximumBacktraceFineCells, band.interpolationSupportFineCells);
+  // The final dilation adds `safetyBrickRings` whole rings. Credit those rings
+  // against the residency floor here, but never against the explicit
+  // redistance or trajectory radii themselves.
   const requiredFineCells = Math.max(
     band.maximumBacktraceFineCells + band.interpolationSupportFineCells,
     band.redistanceBandFineCells,
+    Math.max(0, residencyFloor - safetyBrickRings * brickResolution),
   );
   const dilationBrickRings = Math.ceil(requiredFineCells / brickResolution)
     + safetyBrickRings;
@@ -253,17 +255,89 @@ export function planFineLevelSetTopologyBand(
   // harness still reports `validation errors: 0` and a passing gate. A
   // configuration that computes nothing must not be reachable by accident.
   if (band.transportBandFineCells !== undefined) {
-    const floor = fineLevelSetResidencyFloorCells(band.transportBandFineCells,
-      band.maximumBacktraceFineCells, band.interpolationSupportFineCells);
-    if (dilationBrickRings * brickResolution < floor) {
+    if (dilationBrickRings * brickResolution < residencyFloor) {
       throw new RangeError(`Fine topology dilation of ${dilationBrickRings} brick rings `
         + `covers ${dilationBrickRings * brickResolution} fine cells but the departure `
-        + `stencil needs ${floor} (transport ${band.transportBandFineCells} + backtrace `
+        + `stencil needs ${residencyFloor} (transport ${band.transportBandFineCells} + backtrace `
         + `${band.maximumBacktraceFineCells} + interpolation `
         + `${band.interpolationSupportFineCells})`);
     }
   }
   return { ...band, safetyBrickRings, requiredFineCells, dilationBrickRings };
+}
+
+/**
+ * Recurring topology width after the just-finished characteristic is known.
+ *
+ * The conservative construction plan above is an immutable upper bound. It
+ * proves that even the configured worst-case characteristic fits in the page
+ * pool, but publishing that complete bound every step turns a narrow band into
+ * a mostly-invalid resident volume. Section 5 instead rebuilds from the moved
+ * interface, allocates its block 1-ring, and fast-marches outward only as far
+ * as the physical band requires.
+ *
+ * Our page table is immutable during JFA, so the equivalent recurring radius
+ * is the larger of (a) the physical redistance output and (b) the measured
+ * characteristic landing stencil. These are alternative radii from the new
+ * interface, not `transport + worst-case backtrace` consecutive legs. The
+ * mandatory safety ring remains outside both.
+ */
+export function planFineLevelSetRecurringTopologyBand(
+  brickResolution: number,
+  band: FineLevelSetTopologyBand,
+  maximumDisplacementFineCells: number,
+): FineLevelSetTopologyBandPlan & { readonly maximumDisplacementFineCells: number } {
+  const conservative = planFineLevelSetTopologyBand(brickResolution, band);
+  if (!Number.isSafeInteger(maximumDisplacementFineCells)
+    || maximumDisplacementFineCells < 0
+    || maximumDisplacementFineCells > band.maximumBacktraceFineCells) {
+    throw new RangeError("Fine recurring topology displacement exceeds its configured backtrace bound");
+  }
+  const requiredFineCells = Math.max(
+    band.redistanceBandFineCells,
+    maximumDisplacementFineCells + band.interpolationSupportFineCells,
+  );
+  const dilationBrickRings = Math.ceil(requiredFineCells / brickResolution)
+    + conservative.safetyBrickRings;
+  if (dilationBrickRings > conservative.dilationBrickRings) {
+    throw new RangeError("Fine recurring topology escaped its conservative construction bound");
+  }
+  return {
+    ...conservative,
+    maximumDisplacementFineCells,
+    requiredFineCells,
+    dilationBrickRings,
+  };
+}
+
+/**
+ * Immutable page capacity retains the former conservative redistance envelope
+ * even though active publication uses the reduced physical cutoff. Capacity
+ * headroom prevents a temporarily folded surface from freezing topology; it
+ * reserves addresses but does not make those pages resident or dispatch work.
+ */
+export function planFineLevelSetCapacityDilationBrickRings(
+  brickResolution: number,
+  bandCells: number,
+  fineFactor: number,
+): number {
+  // Validate through the product planner, then reconstruct the old
+  // `transport + 2f + 3` envelope solely for immutable address capacity.
+  planFineLevelSetBandFineCells(bandCells, fineFactor);
+  const capacityBandCells = Math.max(1, Math.round(bandCells));
+  const conservativeReachFineCells = 2 * fineFactor + 3;
+  const transportBandFineCells = Math.min(256 - conservativeReachFineCells,
+    Math.max(4, capacityBandCells * fineFactor));
+  const capacityWidths: FineLevelSetBandFineCells = {
+    transportBandFineCells,
+    redistanceBandFineCells: transportBandFineCells + conservativeReachFineCells,
+    maximumBacktraceFineCells: 2 * fineFactor,
+  };
+  return planFineLevelSetTopologyBand(brickResolution, {
+    ...capacityWidths,
+    interpolationSupportFineCells: 1,
+    safetyBrickRings: 1,
+  }).dilationBrickRings;
 }
 
 export interface FineLevelSetGPUSeedSource { readonly buffer: GPUBuffer; readonly affineValues?: boolean; }
@@ -697,7 +771,7 @@ export class WebGPUFineLevelSetTopology {
       + this.pageDeltaLayout.totalBytes + FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES + sampleBytes
       + (desiredCandidateWords + desiredScanWords + this.sparseCandidateCapacity
         + current.plan.maximumResidentBricks + topologyScratchWords) * 4;
-    this.params = device.createBuffer({ label: "fine-levelset topology params", size: 112,
+    this.params = device.createBuffer({ label: "fine-levelset topology params", size: 144,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.emptySeeds = device.createBuffer({ label: "empty global fine seeds", size: 8,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -804,7 +878,8 @@ export class WebGPUFineLevelSetTopology {
   encode(broker: PassBroker, seedSource?: FineLevelSetGPUSeedSource,
     extraPublishEntries: readonly GPUBindGroupEntry[] = [], band?: FineLevelSetTopologyBand,
     deferPublication = false,
-    publication: FineLevelSetTopologyPublication = { kind: "bootstrap" }): void {
+    publication: FineLevelSetTopologyPublication = { kind: "bootstrap" },
+    inflow?: SurfaceInflowState): void {
     const plan = this.current.plan;
     const bandPlan = planFineLevelSetTopologyBand(plan.brickResolution, band ?? {
       maximumBacktraceFineCells: 0,
@@ -816,7 +891,7 @@ export class WebGPUFineLevelSetTopology {
     // transport + interpolation + signed-distance support before JFA-CPT
     // starts; no distance pass is permitted to mutate page tables.
     const dilationBrickRings = bandPlan.dilationBrickRings;
-    const bytes = new ArrayBuffer(112); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
+    const bytes = new ArrayBuffer(144); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
     u32.set(plan.brickDimensions, 0); u32[3] = plan.brickResolution;
     u32.set(plan.sampleDimensions, 4); u32[7] = plan.samplesPerBrick;
     f32.set(plan.domainOrigin, 8); f32[11] = plan.fineCellWidth;
@@ -835,6 +910,19 @@ export class WebGPUFineLevelSetTopology {
     u32[22] = this.device.limits.maxComputeWorkgroupsPerDimension;
     u32[23] = publication.kind === "delta" ? 1 : 0;
     u32[24] = Math.max(this.sparseCandidateCapacity, plan.logicalBrickCount);
+    // Recurring publication consumes the transport producer's measured
+    // characteristic displacement. These three fields let the GPU shrink the
+    // active halo without weakening the immutable construction/capacity bound
+    // in `dilationBrickRings`.
+    u32[25] = bandPlan.redistanceBandFineCells;
+    u32[26] = bandPlan.interpolationSupportFineCells;
+    u32[27] = bandPlan.safetyBrickRings;
+    if (inflow) {
+      f32.set([inflow.outletCenter_m.x, inflow.outletCenter_m.y,
+        inflow.outletCenter_m.z, inflow.radius_m], 28);
+      f32.set([inflow.velocity_m_s.x, inflow.velocity_m_s.y,
+        inflow.velocity_m_s.z, inflow.strength], 32);
+    }
     this.device.queue.writeBuffer(this.params, 0, bytes);
     this.device.queue.writeBuffer(this.control, 0, new Uint32Array(8));
     const resource = (buffer: GPUBuffer) => ({ buffer });
@@ -1128,7 +1216,7 @@ export class WebGPUFineLevelSetTopology {
         ...extraPublishEntries.map((entry) => entry.binding)]);
     runIndirect(this.initializeWorkPipeline, lifecycleEntries,
       "Initialize added global fine work A/B samples",
-      2, [0, 6, 7, 15, 30, 31]);
+      2, [0, 7, 15, 30, 31]);
     runIndirect(this.linkPipeline, publishEntries,
       "Gather all compact global fine adjacency", 6, [0, 3, 4, 7, 21]);
     runIdentity(this.reduceTopologyErrorRecordsPipeline, lifecycleEntries,
@@ -1157,13 +1245,17 @@ export class WebGPUFineLevelSetTopology {
       [0, 3, 4, 5, 6, 7, 14, 15, 16, 17, 32]);
       runIndirect(this.settleWorkPayloadPipeline, [
         { binding: 0, resource: resource(this.params) },
+        { binding: 3, resource: resource(this.next.metadata) },
+        { binding: 4, resource: resource(this.next.worklist) },
         { binding: 7, resource: resource(this.control) },
         { binding: 14, resource: resource(this.current.worklist) },
+        { binding: 16, resource: resource(this.current.metadata) },
+        { binding: 24, resource: resource(this.current.flags) },
+        { binding: 26, resource: resource(this.current.workA) },
+        { binding: 28, resource: resource(this.next.flags) },
         { binding: 30, resource: resource(this.next.workA) },
-        { binding: 31, resource: resource(this.next.workB) },
-        { binding: 32, resource: resource(this.current.rollbackPhi) },
       ], "Settle immediate rejected fine work payload", 0,
-      [0, 7, 14, 30, 31, 32]);
+      [0, 3, 4, 7, 14, 16, 24, 26, 28, 30]);
     }
     broker.fence("global fine topology publication complete");
   }
@@ -1210,11 +1302,15 @@ export class WebGPUFineLevelSetTopology {
     settleWorkPass.setPipeline(this.settleWorkPayloadPipeline);
     settleWorkPass.setBindGroup(0, this.cachedBindGroup(this.settleWorkPayloadPipeline, [
         { binding: 0, resource: resource(this.params) },
+        { binding: 3, resource: resource(this.next.metadata) },
+        { binding: 4, resource: resource(this.next.worklist) },
         { binding: 7, resource: resource(this.control) },
         { binding: 14, resource: resource(this.current.worklist) },
+        { binding: 16, resource: resource(this.current.metadata) },
+        { binding: 24, resource: resource(this.current.flags) },
+        { binding: 26, resource: resource(this.current.workA) },
+        { binding: 28, resource: resource(this.next.flags) },
         { binding: 30, resource: resource(this.next.workA) },
-        { binding: 31, resource: resource(this.next.workB) },
-        { binding: 32, resource: resource(this.current.rollbackPhi) },
       ]));
     settleWorkPass.dispatchWorkgroupsIndirect(this.indirectDispatch, 0);
     broker.fence("global fine topology publication complete");
@@ -1233,7 +1329,8 @@ export function makeFineLevelSetTopologyWGSL(coarsePhiWGSL: string): string {
   return /* wgsl */ `
 	const INVALID:u32=0xffffffffu;const VALID:u32=1u;const CAPACITY:u32=1u;const NONFINITE:u32=4u;const MALFORMED:u32=8u;
 struct Params { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
- domainOrigin:vec3f,fineCellWidth:f32,sparseCandidateCapacity:u32,pageCapacity:u32,currentGeneration:u32,nextGeneration:u32,fineFactor:u32,affineSeeds:u32,dilationBrickRings:u32,deferPublication:u32,dirtyHaloRings:u32,supportHaloRings:u32,maxWorkgroups:u32,recurringDelta:u32,scanRecordCapacity:u32,pad0:u32,pad1:u32,pad2:u32 }
+ domainOrigin:vec3f,fineCellWidth:f32,sparseCandidateCapacity:u32,pageCapacity:u32,currentGeneration:u32,nextGeneration:u32,fineFactor:u32,affineSeeds:u32,dilationBrickRings:u32,deferPublication:u32,dirtyHaloRings:u32,supportHaloRings:u32,maxWorkgroups:u32,recurringDelta:u32,scanRecordCapacity:u32,redistanceBandFineCells:u32,interpolationSupportFineCells:u32,safetyBrickRings:u32,
+ inflowPositionRadius:vec4f,inflowVelocityStrength:vec4f }
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read_write> sourceA:array<u32>;
 @group(0) @binding(2) var<storage,read_write> sourceB:array<u32>;
@@ -1273,6 +1370,34 @@ ${fineLevelSetLinearWorkgroupWGSL}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn packBrick(coord:vec3u)->u32{return coord.x+params.brickDimensions.x*(coord.y+params.brickDimensions.y*coord.z);}
 fn unpackBrick(key:u32)->vec3u{let xy=params.brickDimensions.x*params.brickDimensions.y;let z=key/xy;let rem=key-z*xy;let y=rem/params.brickDimensions.x;return vec3u(rem-y*params.brickDimensions.x,y,z);}
+fn inflowLatticePosition()->vec3f{let extent=vec3f(params.sampleDimensions)*params.fineCellWidth;return params.inflowPositionRadius.xyz+vec3f(.5*extent.x,0.,.5*extent.z);}
+// Sources in the paper examples are application boundary conditions. Section
+// 5 still requires their newly emerging interface to own resident SPGrid
+// cells before fast marching; this key seeds that ordinary dilation path.
+fn recurringInflowSeedKey()->u32{
+ if(params.inflowVelocityStrength.w<=0.||params.inflowPositionRadius.w<=0.){return INVALID;}
+ let scale=params.fineCellWidth*f32(params.brickResolution);
+ let q=floor((inflowLatticePosition()-params.domainOrigin)/scale);
+ if(any(q<vec3f(0.))||any(q>=vec3f(params.brickDimensions))){return INVALID;}
+ return packBrick(vec3u(q));
+}
+// Oriented downstream extrusion of the analytic aperture. Keeping the test in
+// nozzle coordinates makes the source independent of grid axes and leaves one
+// signed-distance hook (radial-radius) for future aperture shapes.
+fn inflowSourcePhi(position:vec3f)->f32{
+ let velocity=params.inflowVelocityStrength.xyz;let speed=length(velocity);if(speed<=1e-6){return 3.402823e38;}
+ let direction=velocity/speed;let relative=position-inflowLatticePosition();let axial=dot(relative,direction);
+ let radial=length(relative-axial*direction);let depth=2.*params.fineCellWidth*f32(params.fineFactor);
+ return max(radial-params.inflowPositionRadius.w,max(-axial,axial-depth));
+}
+fn inflowSample(position:vec3f)->bool{
+ if(params.inflowVelocityStrength.w<=0.||params.inflowPositionRadius.w<=0.){return false;}
+ return inflowSourcePhi(position)<=.70710678*params.fineCellWidth;
+}
+fn applyInflowPhi(value:f32,position:vec3f)->f32{
+ let source=inflowSourcePhi(position);let rampDepth=.5*params.fineCellWidth*clamp(params.inflowVelocityStrength.w,0.,1.);
+ return select(value,min(value,max(source,-rampDepth)),inflowSample(position));
+}
 fn localCoord(local:u32)->vec3u{let r=params.brickResolution;let z=local/(r*r);let rem=local-z*r*r;let y=rem/r;return vec3u(rem-y*r,y,z);}
 fn localIndex(coord:vec3u)->u32{return coord.x+params.brickResolution*(coord.y+params.brickResolution*coord.z);}
 fn currentNeighbor(id:u32,local:u32,direction:u32)->u32{var coord=localCoord(local);var nextId=id;let r=params.brickResolution;
@@ -1414,17 +1539,25 @@ var<workgroup> recurringSeedLanes:array<u32,256>;
 // idempotent, so overlapping halos are deduplicated at the point of insertion
 // without a sort, hash probe, or per-output search.
 //
-// The halo is a fixed (2*rings+1)^3 volume, so one invocation owns exactly one
+// The halo is a fixed (2*rings+1)^3 volume for this generation, so one
+// invocation owns exactly one
 // (seed, halo offset) pair and issues exactly one OR. Because OR is idempotent
 // and commutative and no other value is produced here, the resulting membership
 // mask is independent of how the pairs are distributed over invocations: the
-// band is unchanged, only its dilation cost is parallel. The ring count itself
-// is untouched -- narrowing the band is a separate, refuted change.
-fn recurringHaloWidth()->u32{return 2u*params.dilationBrickRings+1u;}
+// band is unchanged, only its dilation cost is parallel. The current
+// characteristic has already moved the interface; topology therefore needs
+// the larger of its landing stencil and physical JFA output, plus the paper's
+// block 1-ring. The construction-time radius remains a fail-closed upper bound.
+fn recurringDilationBrickRings()->u32{
+ let landing=transportDelta[7]+params.interpolationSupportFineCells;
+ let required=max(params.redistanceBandFineCells,landing);
+ return (required+params.brickResolution-1u)/params.brickResolution+params.safetyBrickRings;
+}
+fn recurringHaloWidth()->u32{return 2u*control[6]+1u;}
 fn recurringHaloVolume()->u32{let width=recurringHaloWidth();return width*width*width;}
 fn recurringScatterMembership(key:u32,offset:u32){
  if(key>=desiredLogicalCount()||offset>=recurringHaloVolume()){return;}
- let width=recurringHaloWidth();let radius=i32(params.dilationBrickRings);
+ let width=recurringHaloWidth();let radius=i32(control[6]);
  let z=offset/(width*width);let plane=offset-z*width*width;let y=plane/width;let x=plane-y*width;
  let delta=vec3i(i32(x),i32(y),i32(z))-vec3i(radius);
  let point=vec3i(unpackBrick(key))+delta;
@@ -1443,7 +1576,6 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  if(local==0u){
   recurringFlags=0u;
   for(var word=0u;word<10u;word+=1u){control[word]=0u;}
-  control[6]=params.dilationBrickRings;
   for(var word=0u;word<7u;word+=1u){targetB[word]=INVALID;}
   if(params.recurringDelta==0u||arrayLength(&transportDelta)<8u+2u*params.pageCapacity
     ||arrayLength(&currentWorklist)<7u||currentWorklist[1]>params.pageCapacity
@@ -1453,6 +1585,9 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
     ||transportDelta[3]!=currentWorklist[1]||transportDelta[0]>params.pageCapacity){
    recurringFlags=MALFORMED;
   }
+  var rings=0u;if(recurringFlags==0u){rings=recurringDilationBrickRings();}
+  if(rings<params.safetyBrickRings||rings>params.dilationBrickRings){recurringFlags|=MALFORMED;rings=0u;}
+  control[6]=rings;
  }
  workgroupBarrier();
  var localError=0u;
@@ -1471,6 +1606,8 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  }
  storageBarrier();workgroupBarrier();
  var localSeeds=0u;let producerCount=recurringProducerCount();
+ let inflowKey=recurringInflowSeedKey();let ownsInflow=local==0u&&inflowKey!=INVALID;
+ if(ownsInflow){localSeeds+=1u;}
  for(var item=local;item<producerCount;item+=256u){
   var interfaceKey=INVALID;
   let key=recurringProducerChanged(item);
@@ -1492,6 +1629,7 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  // is a deterministic (lane-major) function of the producer stream; the halo
  // scatter that consumes it is order-free either way.
  var cursor=scanIdentityBlock(local,localSeeds);
+ if(ownsInflow){if(cursor<params.pageCapacity){sparseCandidates[recurringSeedSlot(cursor)]=inflowKey;}cursor+=1u;}
  for(var item=local;item<producerCount;item+=256u){
   let staged=sparseCandidates[item];
   if(staged!=INVALID){
@@ -1558,6 +1696,18 @@ fn targetLookup(key:u32)->u32{let logicalCount=desiredLogicalCount();
  let id=sourceD[7u+params.pageCapacity+key];if(id>=params.pageCapacity){return INVALID;}
  let base=id*10u;return select(INVALID,id,sourceC[base]==id&&sourceC[base+1u]==key
   &&sourceC[base+2u]==params.nextGeneration);}
+// A closest-point seed is a physical sample index. Carrying that integer
+// verbatim across the A/B page transaction is unsafe: the same physical page
+// can name a different logical brick in the target generation. Resolve the
+// seed's old logical key, then map that key through the complete target
+// directory; any missing or stale identity retires the seed fail-closed.
+fn remapCarriedSeed(seed:u32)->u32{
+ if(seed==INVALID){return INVALID;}let oldPage=seed/params.samplesPerBrick;let local=seed-oldPage*params.samplesPerBrick;
+ if(oldPage>=params.pageCapacity||currentMetadata[oldPage*10u+2u]!=params.currentGeneration){return INVALID;}
+ let key=currentMetadata[oldPage*10u+1u];let nextPage=targetLookup(key);
+ if(nextPage==INVALID||nextPage>=params.pageCapacity||sourceC[nextPage*10u+2u]!=params.nextGeneration){return INVALID;}
+ return nextPage*params.samplesPerBrick+local;
+}
 fn identityBlockCount()->u32{return (params.pageCapacity+255u)/256u;}
 fn identitySuperBlockCount()->u32{return (identityBlockCount()+255u)/256u;}
 fn identityScanStride()->u32{return identityBlockCount()+identitySuperBlockCount();}
@@ -1741,7 +1891,7 @@ fn identityTotal(stream:u32,count:u32)->u32{
  let id=sourceD[7u+work];if(id>=params.pageCapacity){return;}let key=sourceC[id*10u+1u];let old=currentLookup(key);
  if(old==INVALID){return;}for(var sample=local;sample<params.samplesPerBrick;sample+=64u){
   let sourceIndex=old*params.samplesPerBrick+sample;let targetIndex=id*params.samplesPerBrick+sample;
-  nextWorkA[targetIndex]=currentWorkA[sourceIndex];nextWorkB[targetIndex]=currentWorkB[sourceIndex];
+  nextWorkA[targetIndex]=remapCarriedSeed(currentWorkA[sourceIndex]);nextWorkB[targetIndex]=currentWorkB[sourceIndex];
  }
 }
 @compute @workgroup_size(64) fn classifyFinePageDelta(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) local:u32){
@@ -1836,8 +1986,8 @@ fn changedNeighborRadii(key:u32)->vec2u{
    pageDelta[changedKeysOffset()+dirty+item]=currentMetadata[id*10u+1u];}}
 }
 @compute @workgroup_size(64) fn snapshotDeltaPayload(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[14]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[rollbackPagesOffset()+work];if(id>=params.pageCapacity||currentMetadata[id*10u+2u]!=params.currentGeneration){error=MALFORMED;}else if(local<params.samplesPerBrick){let index=id*params.samplesPerBrick+local;let value=bitcast<f32>(currentPhi[index]);if(!finite(value)){error=NONFINITE;}else{payloadSnapshot[index]=value;}}}publishTopologyError(work,local,error,laneActive);}
-@compute @workgroup_size(64) fn initializeDesiredSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[11]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity){error=MALFORMED;}else if(local<params.samplesPerBrick){let key=sourceC[id*10u+1u];let index=id*params.samplesPerBrick+local;if(index<arrayLength(&targetA)&&index<arrayLength(&targetB)){let brick=unpackBrick(key);let coord=localCoord(local);let q=brick*params.brickResolution+coord;if(any(q>=params.sampleDimensions)){targetA[index]=0u;targetB[index]=0u;}else{let position=params.domainOrigin+(vec3f(q)+vec3f(0.5))*params.fineCellWidth;var value=sampleCoarseOctreePhi(position);let seeded=externalSeedPhi(key,(vec3f(q)+vec3f(0.5))/f32(params.fineFactor));if(finite(seeded)){value=seeded;}if(!finite(value)){error=NONFINITE;}else{let encoded=bitcast<u32>(value);targetA[index]=VALID|select(0u,16u,value<0.0);targetB[index]=encoded;}}}}}publishTopologyError(work,local,error,laneActive);}
-@compute @workgroup_size(64) fn initializeDesiredWorkSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);if(work>=pageDelta[11]||control[0]!=0u){return;}let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity||local>=params.samplesPerBrick){return;}let index=id*params.samplesPerBrick+local;let encoded=targetB[index];nextWorkA[index]=encoded;nextWorkB[index]=encoded;}
+@compute @workgroup_size(64) fn initializeDesiredSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[11]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity){error=MALFORMED;}else if(local<params.samplesPerBrick){let key=sourceC[id*10u+1u];let index=id*params.samplesPerBrick+local;if(index<arrayLength(&targetA)&&index<arrayLength(&targetB)){let brick=unpackBrick(key);let coord=localCoord(local);let q=brick*params.brickResolution+coord;if(any(q>=params.sampleDimensions)){targetA[index]=0u;targetB[index]=0u;}else{let position=params.domainOrigin+(vec3f(q)+vec3f(0.5))*params.fineCellWidth;var value=sampleCoarseOctreePhi(position);let seeded=externalSeedPhi(key,(vec3f(q)+vec3f(0.5))/f32(params.fineFactor));if(finite(seeded)){value=seeded;}value=applyInflowPhi(value,position);if(!finite(value)){error=NONFINITE;}else{let encoded=bitcast<u32>(value);targetA[index]=VALID|select(0u,16u,value<0.0);targetB[index]=encoded;}}}}}publishTopologyError(work,local,error,laneActive);}
+@compute @workgroup_size(64) fn initializeDesiredWorkSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);if(work>=pageDelta[11]||control[0]!=0u){return;}let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity||local>=params.samplesPerBrick){return;}let index=id*params.samplesPerBrick+local;nextWorkA[index]=INVALID;nextWorkB[index]=INVALID;}
 @compute @workgroup_size(64) fn linkDesiredNeighbors(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){
  let work=fineLinearWorkgroup(wid,nwg);if(work>=sourceD[1]||control[0]!=0u){return;}
  let id=sourceD[7u+work];if(id>=params.pageCapacity||sourceC[id*10u+2u]!=params.nextGeneration){if(local==0u){atomicOr(&topologyErrors[work],MALFORMED);}return;}
@@ -1907,7 +2057,10 @@ fn publishFineSettlementDispatch(){writeIndirectDispatch(0u,fineSettlementWorkgr
  if(control[0]==0u){return;}let work=fineLinearWorkgroup(wid,nwg);let currentCount=min(currentWorklist[1],params.pageCapacity);
  if(work>=currentCount||local>=params.samplesPerBrick){return;}let old=currentWorklist[7u+work];if(old>=params.pageCapacity){return;}
  let sourceIndex=old*params.samplesPerBrick+local;let targetIndex=work*params.samplesPerBrick+local;
- let value=currentCommittedPhi[sourceIndex];nextWorkA[targetIndex]=value;nextWorkB[targetIndex]=value;
+ // The publication pass reconstructs the low authority bits. Restore the
+ // cached closest-point payload and its recycle-safe remapped seed together;
+ // the distance lane is scratch and the next JFA overwrites it before use.
+ nextFlags[targetIndex]=currentFlags[sourceIndex];nextWorkA[targetIndex]=remapCarriedSeed(currentWorkA[sourceIndex]);
 }
 `;
 }

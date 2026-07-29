@@ -55,6 +55,24 @@ test("the water pipeline replacement callback is fail-safe and replaces rather t
   assert.ok(replacementCall >= 0 && rasterFallback > replacementCall);
 });
 
+test("the legacy procedural environment never appears while sparse presentation is selected", () => {
+  const fallback = waterSource.slice(
+    waterSource.indexOf("if (!sparseSceneResult)"),
+    waterSource.indexOf("traceBoundary?.();", waterSource.indexOf("if (!sparseSceneResult)")),
+  );
+  expectSource(fallback, /if \(!pending\) \{ scene\.setPipeline\(this\.scenePipeline\)/,
+    "a pending sparse presentation must clear the dry target instead of drawing the raster room");
+  expectSource(fallback, /r: pending\[0\], g: pending\[1\], b: pending\[2\], a: 65504/,
+    "the pending clear shows the environment's ambient light at far scene depth");
+  expectSource(rendererSource, /setPendingSvoBackground\(\s*svoPresentationExpected \? svoEnvironmentAmbientBackgroundLinear\(environmentId, scene\.lighting\?\.environment\) : undefined,\s*\)/,
+    "the renderer must claim the dry scene for sparse presentation before the pipeline can publish one");
+  expectSource(rendererSource, /const svoPresentationExpected = useSvoDryScene\s*&& !this\.failedOptionalPipelines\.has\("svo-dry-scene"\)/,
+    "a scene that has genuinely fallen back keeps the raster room rather than a flat placeholder");
+  // Raster and voxel-inspection modes are still whole pictures drawn by the
+  // legacy scene shader, so it must remain reachable when SVO is not selected.
+  assert.match(waterSource, /scene\.setPipeline\(this\.scenePipeline\)/);
+});
+
 test("the direct renderer exposes a source-aware replacement texture contract", () => {
   assert.ok(drySceneSource, "lib/webgpu-svo-dry-scene.ts must implement the production dry-scene renderer");
   expectSource(drySceneSource, /export class SparseVoxelDrySceneRenderer/,

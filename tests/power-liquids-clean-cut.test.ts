@@ -52,8 +52,10 @@ test("CPU differential oracles contain no shadow GPU executors", () => {
   assert.match(pageOracle, /offline CPU numerical oracle/);
   assert.doesNotMatch(pageOracle,
     /@compute|createShaderModule|createComputePipeline|dispatchWorkgroups|GPUBuffer|GPUDevice/);
-  assert.match(spgridProduction, /fn smoothPageChebyshevForward/);
-  assert.match(spgridProduction, /fn smoothPageChebyshevReverse/);
+  assert.match(spgridProduction, /fn smoothChebyshevAtoB0/);
+  assert.match(spgridProduction, /fn smoothChebyshevBtoA3/);
+  assert.doesNotMatch(spgridProduction, /fn smoothPageChebyshev/,
+    "the offline page oracle must not remain an executable M1 smoother");
 });
 
 test("live owners cover the deleted duplicate page-pool responsibilities", () => {

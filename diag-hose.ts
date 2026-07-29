@@ -1,0 +1,18 @@
+import { getScenePreset } from "./lib/scenes";
+import { buildSvoScenePrimitives } from "./lib/svo-scene-primitives";
+import { buildSvoSceneLights } from "./lib/svo-light-abi";
+import { buildSvoSceneGlass } from "./lib/svo-scene-glass";
+const preset = getScenePreset("hose-tank");
+const scene = preset.create();
+scene.environment = preset.background;
+const env = scene.environment!;
+console.log("env:", env, "container:", scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+const p = buildSvoScenePrimitives(scene, { environmentId: env });
+console.log("descriptors:", p.descriptors.length, "candidates?", Boolean(p.primitiveCandidates), "openShellOwnerId:", p.openShellOwnerId);
+console.log("requiresRasterTerrainFallback:", p.requiresRasterTerrainFallback, "unsupported:", p.unsupportedSources.length);
+console.log("packedRecords bytes:", p.packedRecords.byteLength);
+const lights = buildSvoSceneLights(scene, { environmentId: env });
+console.log("lights:", lights.records.map((r) => `${r.kind}:${r.sourceKey}:${r.intensity ?? "-"}`).join("\n        "));
+console.log("omitted:", lights.omittedFixtureKeys.length);
+const glass = buildSvoSceneGlass(scene, { environmentId: env });
+console.log("glass panes:", glass.metadata.length);

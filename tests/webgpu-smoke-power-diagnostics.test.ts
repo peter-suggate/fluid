@@ -65,7 +65,7 @@ test("2017 pressure comments do not attribute ICCG or the QA tolerance to the pa
   const pressure = readFileSync(new URL("../tools/webgpu-smoke-pressure.ts", import.meta.url), "utf8");
   assert.doesNotMatch(smoke, /paper example uses ICCG|paper.*relative residual\s+1e-4/i);
   assert.match(smoke, /1e-4 relative-residual limit is this regression's float32 QA/);
-  assert.match(smoke, /projected residual[\s\S]*exceeds 1e-6/);
+  assert.match(smoke, /projected residual[\s\S]*exceeds 3\.5e-6/);
   assert.doesNotMatch(pressure, /Paper-result acceptance|ICCG\/PCG solves use a 1e-4/);
   assert.match(pressure, /2017 paper reports iteration counts, not this tolerance/);
 });

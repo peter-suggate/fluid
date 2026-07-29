@@ -36,8 +36,17 @@ test("hose source injects represented liquid into the CPU oracle", () => {
   assert.equal(solver.diagnostics.nanCount, 0);
 });
 
+test("hose tank starts with a fixed full circular aperture", () => {
+  const inflow = createPaperScenario("hose-tank").fluid.inflow!;
+  assert.equal(inflow.ramp_s, 0,
+    "a time-varying source radius produces overlapping jets with different diameters");
+  assert.equal(inflowStrength(inflow.start_s, inflow.start_s, inflow.end_s, inflow.ramp_s), 1);
+});
+
 test("hose layout retains a regular band spanning the receiving surface and nozzle", () => {
   const scene = createPaperScenario("hose-tank"), layout = createTallCellLayout(scene, "balanced");
+  assert.equal(scene.numerics.maxDt_s, 1 / 360,
+    "the hose controller step must keep the Section 5 fine characteristic inside its resident support");
   const inflow = scene.fluid.inflow!, nozzle = Math.floor(inflow.center_m.y / scene.container.height_m * layout.fineNy);
   const x = Math.max(0, Math.min(layout.nx - 1, Math.floor((inflow.center_m.x / scene.container.width_m + 0.5) * layout.nx)));
   const z = Math.max(0, Math.min(layout.nz - 1, Math.floor((inflow.center_m.z / scene.container.depth_m + 0.5) * layout.nz)));

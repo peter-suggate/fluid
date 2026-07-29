@@ -24,13 +24,6 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   overrides: Object.freeze({
     maximumLeafSize: "2",
     interfaceRefinementBandCells: 3,
-    // Pinned alongside the pressure band, not derived from it. `resolveMethod-
-    // Values` seeds every declared parameter from its own spec default, so a
-    // profile that pins one band and stays silent on the other does not leave
-    // the second unset -- it leaves it at 4. On this 16-cubed tank that is an
-    // eighth dilation ring, which overflows the fine brick capacity around
-    // generation 100 and rejects the publication.
-    fineLevelSetBandCells: 3,
     globalFineLevelSetFactor: "4",
   }),
 });
@@ -43,7 +36,6 @@ export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.free
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
     interfaceRefinementBandCells: 4,
-    fineLevelSetBandCells: 4,
   }),
 });
 
@@ -139,6 +131,55 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
   delete scene.fluid.inflow;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;
+}
+
+/**
+ * Analytic free-fall oracles for unilateral wall contact. A single 8-cubed
+ * fluid brick is seeded flush against the closed lid of a 1.2 x 0.8 x 1.2 m
+ * tank (24x16x24 cells at 0.05 m, a 3x2x3 brick lattice). No pressure field
+ * can support liquid hanging from a ceiling — that would require tension —
+ * so from t=0 the body must be in free fall: its centre of mass obeys
+ * y(t) = 0.6 m - g t^2 / 2 until the lower face reaches the floor at about
+ * 0.29 s. Any measured deviation is wall adhesion introduced by the
+ * discretization, isolated from dam-break dynamics.
+ *
+ * The centered variant touches only the lid. The corner variant additionally
+ * touches two side walls and their shared vertical edge, which makes it the
+ * minimal reproduction of seam/corner sticking.
+ */
+function createFreeFallDropScene(id: "ceiling-slab-drop" | "corner-brick-drop"): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = id;
+  scene.duration_s = 0.5;
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: 1.2,
+    height_m: 0.8,
+    depth_m: 1.2,
+    // Ignored: the seeded brick replaces the base fill entirely.
+    fillFraction: 512 / (24 * 16 * 24),
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialBrickSeeds_m = [id === "ceiling-slab-drop"
+    ? { x: 0, y: 0.75, z: 0 }
+    : { x: -0.55, y: 0.75, z: -0.55 }];
+  delete scene.fluid.initialBrickSeedsAdditive;
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.inflow;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+export function createCeilingSlabDropScene(): SceneDescription {
+  return createFreeFallDropScene("ceiling-slab-drop");
+}
+
+export function createCornerBrickDropScene(): SceneDescription {
+  return createFreeFallDropScene("corner-brick-drop");
 }
 
 /**
@@ -476,6 +517,26 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     create: createMinimalPowerDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
+  },
+  {
+    id: "ceiling-slab-drop",
+    name: "Octree · ceiling drop oracle",
+    group: "Comparisons",
+    description: "One 8³ fluid brick seeded flush under the closed lid, touching nothing else. The exact answer is free fall (y = y₀ − gt²/2, impact ≈0.29 s); any hesitation is wall adhesion.",
+    background: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    create: createCeilingSlabDropScene,
+    camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } }
+  },
+  {
+    id: "corner-brick-drop",
+    name: "Octree · corner drop oracle",
+    group: "Comparisons",
+    description: "One 8³ fluid brick seeded into a top corner: lid, two walls, and their vertical edge seam. Frictionless walls exert only normal force, so the exact answer is still free fall.",
+    background: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    create: createCornerBrickDropScene,
+    camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } }
   },
   {
     id: "ocean-seiche",

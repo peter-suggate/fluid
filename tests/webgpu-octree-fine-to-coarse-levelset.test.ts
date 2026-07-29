@@ -50,8 +50,8 @@ test("fine-to-coarse restriction rejects an unpublished or stale fine source", (
     "restriction must close its final compute pass before caller readback or downstream copies");
   assert.equal(FINE_TO_COARSE_LEVELSET_ERROR.unpublishedSource, 8);
   assert.match(shader,
-    /letrollback=topologyControl\[0\]==DOWNSTREAM_ROLLBACK&&topologyControl\[4\]==1u&&topologyControl\[5\]==1u&&topologyControl\[7\]!=0u/,
-    "restriction accepts the exact prior field retagged by a completed downstream rollback");
+    /letrollback=\(topologyControl\[0\]&DOWNSTREAM_ROLLBACK\)!=0u&&topologyControl\[4\]==1u&&topologyControl\[5\]==1u&&topologyControl\[7\]!=0u/,
+    "restriction accepts the exact prior field retagged by a completed downstream rollback, including combined failure flags");
   assert.match(shader,
     /topologyReady=\(topologyControl\[0\]==0u&&\(committed\|\|provisional\)&&topologyControl\[5\]==0u&&topologyControl\[7\]==0u\)\|\|rollback/,
     "restriction rejects arbitrary stale input while allowing committed, provisional, or exact rollback authority");
