@@ -157,7 +157,6 @@ function drySceneDataFor(scene: SceneDescription, source: SparseVoxelSceneRender
   const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "container-pane" || role === "container-top");
   return {
     primitiveRecords: scenePrimitives.packedRecords,
-    primitiveCandidates: scenePrimitives.primitiveCandidates,
     ownerBase: scene.rigidBodies.length,
     skippedOwnerId: scenePrimitives.openShellOwnerId,
     terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,

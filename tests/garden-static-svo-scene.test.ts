@@ -8,6 +8,7 @@ import { buildSvoSceneLights } from "../lib/svo-light-abi";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
 import { buildEnvironmentProxyCatalog } from "../lib/voxel-environments";
 import { buildOctreeSvoEnvironmentLightingPublication } from "../lib/webgpu-octree-sparse-bricks";
+import { staticSvoRenderBrickSize } from "../lib/webgpu-static-svo-scene";
 import { canInitializeGPUSceneSource, gpuSceneSolverKey, type SimulationRunConfig } from "../lib/webgpu-renderer";
 
 test("garden SVO lighting preset is a valid fluid-free static scene", () => {
@@ -93,8 +94,22 @@ test("garden lighting scene rebuilds its complete lattice from scene voxel contr
   assert.deepEqual(validateScene(scene), []);
 
   const staticSource = readFileSync(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url), "utf8");
-  assert.match(staticSource, /brickSize: scene\.voxelDomain\.brickSize_cells/,
+  assert.match(staticSource, /brickSize: staticSvoRenderBrickSize\(scene, options\)/,
     "changing the dry lighting scene leaf size must reach the allocated sparse world");
+  assert.match(staticSource, /staticLightingBrickSize: scene\.voxelDomain\.brickSize_cells/,
+    "a render-topology experiment must not move the static cone-lighting lattice");
+});
+
+test("static SVO render brick overrides do not mutate a fluid scene's solver contract", () => {
+  const scene = getScenePreset("hose-tank").create();
+  assert.equal(scene.voxelDomain.brickSize_cells, 8);
+  assert.ok(validateScene(scene).every((message) => !message.includes("4-cell voxel bricks")));
+
+  assert.equal(staticSvoRenderBrickSize(scene), 8);
+  assert.equal(staticSvoRenderBrickSize(scene, { renderBrickSize: 4 }), 4);
+  assert.equal(scene.voxelDomain.brickSize_cells, 8,
+    "the benchmark override is a renderer construction input, not an authored scene mutation");
+  assert.deepEqual(validateScene(scene), []);
 });
 
 test("every authored scene declares one scene-level voxel authority", () => {

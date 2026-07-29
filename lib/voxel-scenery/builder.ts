@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "../environments";
-import type { SceneDescription, Vec3 } from "../model";
+import type { Quaternion, SceneDescription, Vec3 } from "../model";
 
 /** Linear-light RGB, matching the constants authored in webgpu-environments.ts. */
 export type EnvironmentLinearColor = readonly [number, number, number];
@@ -24,6 +24,14 @@ interface EnvironmentProxyBase {
   readonly group: string;
   readonly tags: readonly string[];
   readonly center_m: Vec3;
+  /**
+   * Local-to-world rotation, in the repository's wxyz order. Omitted means
+   * axis-aligned. Scenery was axis-aligned for its whole life, which is why
+   * anything diagonal or curved used to be spelled as a chain of ellipsoid
+   * beads: the record, the voxelizer and the renderer all carried a rotation
+   * that the authoring layer never filled in.
+   */
+  readonly orientation?: Quaternion;
   readonly material: EnvironmentProxyMaterial;
   readonly aabb_m: EnvironmentProxyAabb;
 }
@@ -45,7 +53,35 @@ export interface EnvironmentEllipsoidProxy extends EnvironmentProxyBase {
   readonly radius_m: Vec3;
 }
 
-export type EnvironmentProxyPrimitive = EnvironmentBoxProxy | EnvironmentCylinderProxy | EnvironmentEllipsoidProxy;
+/** A swept circle along the local +Y segment: what a hose, cable or rail actually is. */
+export interface EnvironmentCapsuleProxy extends EnvironmentProxyBase {
+  readonly kind: "capsule";
+  readonly radius_m: number;
+  readonly halfLength_m: number;
+}
+
+/** A ring swept about the local +Y axis, with its tube in the local XZ plane. */
+export interface EnvironmentTorusProxy extends EnvironmentProxyBase {
+  readonly kind: "torus";
+  readonly majorRadius_m: number;
+  readonly minorRadius_m: number;
+}
+
+/** A truncated cone about the local +Y axis: pots, spouts, shoulders, anything tapered. */
+export interface EnvironmentConeProxy extends EnvironmentProxyBase {
+  readonly kind: "cone";
+  readonly baseRadius_m: number;
+  readonly topRadius_m: number;
+  readonly halfHeight_m: number;
+}
+
+export type EnvironmentProxyPrimitive =
+  | EnvironmentBoxProxy
+  | EnvironmentCylinderProxy
+  | EnvironmentEllipsoidProxy
+  | EnvironmentCapsuleProxy
+  | EnvironmentTorusProxy
+  | EnvironmentConeProxy;
 
 export interface EnvironmentProxyShell {
   readonly kind: "room" | "floor" | "terrain-heightfield";
@@ -67,6 +103,36 @@ export function aabb(center: Vec3, radius: Vec3): EnvironmentProxyAabb {
   };
 }
 
+/** Half-extent of a rotated local box, the standard |R| * halfExtent bound. */
+function rotatedExtent(local: Vec3, orientation: Quaternion | undefined): Vec3 {
+  if (!orientation) return local;
+  const { w, x, y, z } = orientation;
+  const rows = [
+    [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+    [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+    [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+  ];
+  return V(
+    Math.abs(rows[0][0]) * local.x + Math.abs(rows[0][1]) * local.y + Math.abs(rows[0][2]) * local.z,
+    Math.abs(rows[1][0]) * local.x + Math.abs(rows[1][1]) * local.y + Math.abs(rows[1][2]) * local.z,
+    Math.abs(rows[2][0]) * local.x + Math.abs(rows[2][1]) * local.y + Math.abs(rows[2][2]) * local.z,
+  );
+}
+
+/** Shortest-arc rotation taking the local +Y axis onto `direction`. */
+export function alongAxis(direction: Vec3): Quaternion {
+  const length = Math.hypot(direction.x, direction.y, direction.z);
+  if (!(length > 0)) throw new Error("Scenery axis direction must have nonzero length");
+  const unit = { x: direction.x / length, y: direction.y / length, z: direction.z / length };
+  if (unit.y >= 1 - 1e-12) return { w: 1, x: 0, y: 0, z: 0 };
+  // Antiparallel has no shortest arc; any perpendicular axis is equivalent.
+  if (unit.y <= -1 + 1e-12) return { w: 0, x: 1, y: 0, z: 0 };
+  const axis = { x: unit.z, y: 0, z: -unit.x };
+  const w = 1 + unit.y;
+  const magnitude = Math.hypot(w, axis.x, axis.y, axis.z);
+  return { w: w / magnitude, x: axis.x / magnitude, y: axis.y / magnitude, z: axis.z / magnitude };
+}
+
 export function roughnessFor(group: string, emission: number): number {
   if (emission > 0.2) return 0.28;
   if (/leaf|hedge|flower|fruit/.test(group)) return 0.86;
@@ -84,30 +150,79 @@ export class ProxyBuilder {
 
   constructor(private readonly environmentId: EnvironmentId) {}
 
-  box(key: string, group: string, center_m: Vec3, halfSize_m: Vec3, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], shell = false): EnvironmentBoxProxy {
+  box(key: string, group: string, center_m: Vec3, halfSize_m: Vec3, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], shell = false, orientation?: Quaternion): EnvironmentBoxProxy {
     const proxy: EnvironmentBoxProxy = {
       kind: "box", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
-      center_m, halfSize_m, material: { colorLinear, emission, roughness: roughnessFor(group, emission) }, aabb_m: aabb(center_m, halfSize_m)
+      center_m, orientation, halfSize_m, material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(halfSize_m, orientation))
     };
     (shell ? this.shell : this.props).push(proxy);
     return proxy;
   }
 
-  cylinder(key: string, group: string, center_m: Vec3, radius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = []): EnvironmentCylinderProxy {
+  cylinder(key: string, group: string, center_m: Vec3, radius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentCylinderProxy {
     const radius = V(radius_m, halfHeight_m, radius_m);
     const proxy: EnvironmentCylinderProxy = {
       kind: "cylinder", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
-      center_m, radius_m, halfHeight_m, axis: "y",
-      material: { colorLinear, emission, roughness: roughnessFor(group, emission) }, aabb_m: aabb(center_m, radius)
+      center_m, orientation, radius_m, halfHeight_m, axis: "y",
+      material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(radius, orientation))
     };
     this.props.push(proxy);
     return proxy;
   }
 
-  ellipsoid(key: string, group: string, center_m: Vec3, radius_m: Vec3, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = []): EnvironmentEllipsoidProxy {
+  ellipsoid(key: string, group: string, center_m: Vec3, radius_m: Vec3, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentEllipsoidProxy {
     const proxy: EnvironmentEllipsoidProxy = {
       kind: "ellipsoid", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
-      center_m, radius_m, material: { colorLinear, emission, roughness: roughnessFor(group, emission) }, aabb_m: aabb(center_m, radius_m)
+      center_m, orientation, radius_m, material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(radius_m, orientation))
+    };
+    this.props.push(proxy);
+    return proxy;
+  }
+
+  /**
+   * A capsule authored as the run it follows. Handing over both endpoints is
+   * the point of it: a hose, a cable or a rail is described by where it goes,
+   * and the rotation that reaches the record is derived here rather than being
+   * approximated by a row of beads.
+   */
+  capsule(key: string, group: string, from_m: Vec3, to_m: Vec3, radius_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = []): EnvironmentCapsuleProxy {
+    const segment = V(to_m.x - from_m.x, to_m.y - from_m.y, to_m.z - from_m.z);
+    const halfLength_m = .5 * Math.hypot(segment.x, segment.y, segment.z);
+    const center_m = V(.5 * (from_m.x + to_m.x), .5 * (from_m.y + to_m.y), .5 * (from_m.z + to_m.z));
+    // A zero-length run is a sphere, and has no axis to align to.
+    const orientation = halfLength_m > 0 ? alongAxis(segment) : undefined;
+    const proxy: EnvironmentCapsuleProxy = {
+      kind: "capsule", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
+      center_m, orientation, radius_m, halfLength_m,
+      material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(V(radius_m, halfLength_m + radius_m, radius_m), orientation))
+    };
+    this.props.push(proxy);
+    return proxy;
+  }
+
+  torus(key: string, group: string, center_m: Vec3, majorRadius_m: number, minorRadius_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentTorusProxy {
+    const outer = majorRadius_m + minorRadius_m;
+    const proxy: EnvironmentTorusProxy = {
+      kind: "torus", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
+      center_m, orientation, majorRadius_m, minorRadius_m,
+      material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(V(outer, minorRadius_m, outer), orientation))
+    };
+    this.props.push(proxy);
+    return proxy;
+  }
+
+  cone(key: string, group: string, center_m: Vec3, baseRadius_m: number, topRadius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentConeProxy {
+    const widest = Math.max(baseRadius_m, topRadius_m);
+    const proxy: EnvironmentConeProxy = {
+      kind: "cone", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
+      center_m, orientation, baseRadius_m, topRadius_m, halfHeight_m,
+      material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(V(widest, halfHeight_m, widest), orientation))
     };
     this.props.push(proxy);
     return proxy;

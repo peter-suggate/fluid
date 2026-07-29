@@ -12,7 +12,7 @@ import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sce
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { SparseVoxelDebugRenderer, type SparseVoxelRenderSource, type SparseVoxelSceneRenderSource, type VoxelRenderMode } from "./webgpu-voxel-debug";
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canConsumeSparseVoxelPrimitiveCandidates, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, type SparseVoxelDrySceneData } from "./webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, type SparseVoxelDrySceneData } from "./webgpu-svo-dry-scene";
 import { buildSvoScenePrimitives } from "./svo-scene-primitives";
 import { buildSvoSceneGlass } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
@@ -295,7 +295,6 @@ export type SvoRendererFallbackReason =
   | "unsupported-terrain"
   | "unsupported-glass-cutout"
   | "missing-pbr-materials"
-  | "missing-primitive-candidates"
   | "missing-lighting-publications"
   | "pipeline-compile-failure"
   | "inspection-mode";
@@ -312,7 +311,6 @@ export interface EffectiveRendererConditions {
   terrainSupported: boolean;
   glassSupported?: boolean;
   materialsSupported?: boolean;
-  primitiveCandidatesSupported?: boolean;
   lightingSupported?: boolean;
   inspectionMode: boolean;
   svoEncoded: boolean;
@@ -329,7 +327,6 @@ export function resolveEffectiveRendererStatus(
   if (!conditions.terrainSupported) return { requestedMode, effectiveMode: "raster", fallbackReason: "unsupported-terrain" };
   if (conditions.glassSupported === false) return { requestedMode, effectiveMode: "raster", fallbackReason: "unsupported-glass-cutout" };
   if (conditions.materialsSupported === false) return { requestedMode, effectiveMode: "raster", fallbackReason: "missing-pbr-materials" };
-  if (conditions.primitiveCandidatesSupported === false) return { requestedMode, effectiveMode: "raster", fallbackReason: "missing-primitive-candidates" };
   if (conditions.lightingSupported === false) return { requestedMode, effectiveMode: "raster", fallbackReason: "missing-lighting-publications" };
   if (!conditions.sourceAvailable || !conditions.svoEncoded) return { requestedMode, effectiveMode: "raster", fallbackReason: "missing-source" };
   return { requestedMode, effectiveMode: "svo" };
@@ -439,7 +436,6 @@ export class FluidLabRenderer {
   private svoTerrainSupported = true;
   private svoGlassSupported = true;
   private svoMaterialsSupported = true;
-  private svoPrimitiveCandidatesSupported = true;
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
   /** Internal A/B: temporal-off also restores full-rate shadow visibility. */
@@ -458,6 +454,13 @@ export class FluidLabRenderer {
   /** Same contract for presentation cost: the traced presentation total is
    * instrumentation-gated, so scheduling reads this fence-derived estimate. */
   private readonly presentationWallEstimator = new GPUAdvanceWallEstimator();
+  /** Monotone queue epochs used to reject wall samples that contain work from
+   * the other lane. These are submission-order evidence, not telemetry. */
+  private physicsQueueWorkSequence = 0;
+  private nonPhysicsQueueWorkSequence = 0;
+  /** Stats readbacks are queue work too; keep idle evidence conservative until
+   * their promise settles. */
+  private diagnosticQueueWorkPending = 0;
   private lastPresentationCompletedAt_ms = -Infinity;
   private presentationPending = false;
   private simulationRunning = true;
@@ -806,7 +809,7 @@ export class FluidLabRenderer {
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
     this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined;
     this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.svoDrySceneSource = undefined; this.svoDrySceneData = undefined; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingStaticSvoPresentation = undefined;
-    this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoPrimitiveCandidatesSupported = true; this.svoLightingSupported = true;
+    this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
     this.presentationTexture = undefined; this.voxelDebugDepth = undefined; this.presentationTextureKey = "";
     this.fluidTexture = undefined; this.columnBaseTexture = undefined; this.gridCellTexture = undefined;
@@ -938,6 +941,7 @@ export class FluidLabRenderer {
   private resetPresentationTrace() {
     this.latestPresentationTrace = undefined;
     this.lastPresentationTraceAt_ms = -Infinity;
+    this.presentationWallEstimator.reset();
   }
 
   private currentFrameMetrics(methodId: string, context: string, presentationSubmitted: boolean, cpu?: PerformanceTrace): RendererFrameMetrics {
@@ -1051,8 +1055,8 @@ export class FluidLabRenderer {
       this.svoTerrainSupported=!scenePrimitives.requiresRasterTerrainFallback&&(!sceneHasTerrain(scene)||Boolean(scenePrimitives.analyticTerrain));
       const thickReplacedPaneKeys=new Set(sceneThickGlass.metadata.flatMap(({replacesThinPaneKey})=>replacesThinPaneKey?[replacesThinPaneKey]:[]));
       this.svoMaterialsSupported=canConsumeSparseVoxelPbrMaterials(sparseSceneSource);
-      const candidateDrySceneData:SparseVoxelDrySceneData={
-        primitiveRecords:scenePrimitives.packedRecords,primitiveCandidates:scenePrimitives.primitiveCandidates,
+      const assembledDrySceneData:SparseVoxelDrySceneData={
+        primitiveRecords:scenePrimitives.packedRecords,
         ownerBase:scene.rigidBodies.length,skippedOwnerId:scenePrimitives.openShellOwnerId,
         terrainMaterialId:scenePrimitives.analyticTerrain?.materialId,terrainMaterialMetadata:terrainMaterial?.packedMetadata,terrainMaterialCacheKey:terrainMaterial?.cacheKey,
         glassRecords:sceneGlass.packedRecords,glassCacheKey:sceneGlass.cacheKey,
@@ -1060,11 +1064,10 @@ export class FluidLabRenderer {
         primaryCompositeOwnedGlassPaneIdBase:compositorOwnedGlass[0]?.paneId,primaryCompositeOwnedGlassPaneCount:compositorOwnedGlass.length,
         ...lightingMirrors,
       };
-      const thickGlassBound=resolveSparseVoxelThickGlassBinderStatus(candidateDrySceneData)==="bound";
+      const thickGlassBound=resolveSparseVoxelThickGlassBinderStatus(assembledDrySceneData)==="bound";
       this.svoGlassSupported=!sceneGlass.metadata.some(({key,opaqueCutoutKey})=>Boolean(opaqueCutoutKey)&&(!thickGlassBound||!thickReplacedPaneKeys.has(key)));
-      this.svoPrimitiveCandidatesSupported=canConsumeSparseVoxelPrimitiveCandidates(candidateDrySceneData);
-      this.svoLightingSupported=Boolean(lightingMirrors)&&canConsumeSparseVoxelLighting(sparseSceneSource,candidateDrySceneData);
-      const drySceneData:SparseVoxelDrySceneData|undefined=this.svoTerrainSupported&&this.svoGlassSupported&&this.svoMaterialsSupported&&this.svoPrimitiveCandidatesSupported&&this.svoLightingSupported?candidateDrySceneData:undefined;
+      this.svoLightingSupported=Boolean(lightingMirrors)&&canConsumeSparseVoxelLighting(sparseSceneSource,assembledDrySceneData);
+      const drySceneData:SparseVoxelDrySceneData|undefined=this.svoTerrainSupported&&this.svoGlassSupported&&this.svoMaterialsSupported&&this.svoLightingSupported?assembledDrySceneData:undefined;
       this.svoSourceAvailable=canEncodeSparseVoxelDryScene(sparseSceneSource,drySceneData);
       this.svoDrySceneSource=sparseSceneSource;this.svoDrySceneData=drySceneData;
       this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData);
@@ -1165,17 +1168,25 @@ export class FluidLabRenderer {
     // A completion fence is the scheduling boundary. Encoding the entire debt
     // here can put hundreds of milliseconds of GPU work between presentations.
     if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches, maximumPendingAdvances)) return fluid.info;
+    const pendingAtSubmit = this.gpuPendingBatches;
+    const nonPhysicsSequenceAtSubmit = this.nonPhysicsQueueWorkSequence;
+    const queueWasIdleAtSubmit = pendingAtSubmit === 0
+      && !this.presentationPending && this.diagnosticQueueWorkPending === 0;
     const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
     if (submittedTime > previousSubmittedTime) {
       const generation = this.gpuFluidGeneration;
-      const pendingAtSubmit = this.gpuPendingBatches;
       const submittedAt_ms = performance.now();
+      this.physicsQueueWorkSequence += 1;
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
       fluid.info.gpuInFlightSimulation_s = Math.max(0, submittedTime - (fluid.info.completedTime_s ?? 0));
       void device.queue.onSubmittedWorkDone().then(() => {
         if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
-        this.advanceWallEstimator.observeCompletion(performance.now(), submittedAt_ms, pendingAtSubmit);
+        this.advanceWallEstimator.observeCompletion(performance.now(), submittedAt_ms, {
+          pendingTargetWorkAtSubmit: pendingAtSubmit,
+          interveningWorkSequence: nonPhysicsSequenceAtSubmit,
+          queueWasIdleAtSubmit,
+        });
         this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
         fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
         fluid.info.gpuPendingBatches = this.gpuPendingBatches;
@@ -1187,7 +1198,14 @@ export class FluidLabRenderer {
     }
     // Functional diagnostics use a bounded cadence and remain independent of
     // the generic performance trace sampled by the solver itself.
-    const now_ms=performance.now();if(now_ms-this.lastGPUInfoPollAt_ms>=250){this.lastGPUInfoPollAt_ms=now_ms;void fluid.readStats().then(info=>this.gpuInfoCallback?.({...info})).catch(()=>{ /* Device loss is reported by device.lost. */ });}
+    const now_ms=performance.now();if(now_ms-this.lastGPUInfoPollAt_ms>=250){
+      this.lastGPUInfoPollAt_ms=now_ms;
+      this.nonPhysicsQueueWorkSequence += 1;
+      this.diagnosticQueueWorkPending += 1;
+      void fluid.readStats().then(info=>this.gpuInfoCallback?.({...info}))
+        .catch(()=>{ /* Device loss is reported by device.lost. */ })
+        .finally(()=>{this.diagnosticQueueWorkPending=Math.max(0,this.diagnosticQueueWorkPending-1);});
+    }
     return fluid.info;
   }
 
@@ -1533,7 +1551,7 @@ export class FluidLabRenderer {
     const svoPresentationExpected = useSvoDryScene
       && !this.failedOptionalPipelines.has("svo-dry-scene")
       && this.svoTerrainSupported && this.svoGlassSupported && this.svoMaterialsSupported
-      && this.svoPrimitiveCandidatesSupported && this.svoLightingSupported;
+      && this.svoLightingSupported;
     this.waterPipeline.setPendingSvoBackground(
       svoPresentationExpected ? svoEnvironmentAmbientBackgroundLinear(environmentId, scene.lighting?.environment) : undefined,
     );
@@ -1581,7 +1599,6 @@ export class FluidLabRenderer {
       terrainSupported: this.svoTerrainSupported,
       glassSupported: this.svoGlassSupported,
       materialsSupported: this.svoMaterialsSupported,
-      primitiveCandidatesSupported: this.svoPrimitiveCandidatesSupported,
       lightingSupported: this.svoLightingSupported,
       inspectionMode: voxelRenderMode !== "smooth",
       svoEncoded,
@@ -1640,7 +1657,13 @@ export class FluidLabRenderer {
     if (hardwarePresentationTrace) hardwarePresentationTrace.resolve(encoder);
     else presentationTrace?.destroy();
     presentationQueueTrace?.begin();
+    const presentationSubmittedAt_ms=performance.now();
+    const presentationQueueWasIdleAtSubmit=this.gpuPendingBatches===0
+      && this.diagnosticQueueWorkPending===0;
+    const physicsSequenceAtPresentationSubmit=this.physicsQueueWorkSequence;
     this.device.queue.submit([encoder.finish()]);
+    this.nonPhysicsQueueWorkSequence+=1;
+    this.presentationPending=true;
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
     const presentationTraceRead = hardwarePresentationTrace
       ? hardwarePresentationTrace.read()
@@ -1671,13 +1694,15 @@ export class FluidLabRenderer {
     }
     const surfaceDiagnosticsRequired = true;
     const surfaceDiagnosticsCompletion = this.waterPipeline.completeSurfaceDiagnostics();
-    this.presentationPending=true;
     const presentationDevice=this.device;
-    const presentationSubmittedAt_ms=performance.now();
     void this.device.queue.onSubmittedWorkDone().then(async()=>{
       if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
       const completedAt_ms=performance.now();
-      this.presentationWallEstimator.observeCompletion(completedAt_ms,presentationSubmittedAt_ms,0);
+      this.presentationWallEstimator.observeCompletion(completedAt_ms,presentationSubmittedAt_ms,{
+        pendingTargetWorkAtSubmit:0,
+        interveningWorkSequence:physicsSequenceAtPresentationSubmit,
+        queueWasIdleAtSubmit:presentationQueueWasIdleAtSubmit,
+      });
       this.presentationPending=false;this.lastPresentationCompletedAt_ms=completedAt_ms;
       if(initialStaticSvoSubmission)this.settleStaticSvoPresentation(initialStaticSvoSubmission);
       if(initialRasterSubmission){

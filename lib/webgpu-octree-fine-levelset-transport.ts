@@ -106,7 +106,7 @@ export function planFineLevelSetGPUTransport(queryCapacity: number,
     throw new RangeError("Fine transport capacities must be positive integers");
   }
   const pages = Math.max(1, pageCapacity);
-  const topologyDeltaBytes = (8 + 2 * pages) * 4;
+  const topologyDeltaBytes = (8 + 3 * pages) * 4;
   // Three words per page: classification uses {class, work-id}; transport
   // reuses them as two packed u16 counter pairs plus exact displacement.
   const pageStatusBytes = pages * 12;
@@ -264,7 +264,7 @@ export class WebGPUFineLevelSetTransport {
     this.control = device.createBuffer({ label: "Structured fine transport control",
       size: FINE_LEVELSET_TRANSPORT_CONTROL_BYTES, usage: storage });
     this.scanBlocks = Math.ceil(source.plan.maximumResidentBricks / 256);
-    this.deltaClearBlocks = Math.ceil((8 + 2 * source.plan.maximumResidentBricks) / 256);
+    this.deltaClearBlocks = Math.ceil((8 + 3 * source.plan.maximumResidentBricks) / 256);
     // Block-scan scratch for the widened workset, status, and delta
     // publications: SCAN_BLOCK_WORDS (16) per 256-page block, one global
     // record, then one prefix word per scanned item so the scatters carry the
@@ -304,7 +304,10 @@ export class WebGPUFineLevelSetTransport {
     this.compactDeltaPipeline = make("compactStructuredFineDelta");
     const all = new Map<number, GPUBuffer>([
       [0, this.params], [1, source.metadata], [2, source.worklist], [3, source.flags], [4, source.phi],
-      [5, source.workA], [6, this.samplingCatalog], [7, this.control], [8, this.topologyDelta.buffer],
+      // workA is persistent closest-point identity. The distance lane workB is
+      // the sanctioned transport scratch: topology reconstructs its carried
+      // magnitude from transported phi before any JFA consumer can observe it.
+      [5, source.workB], [6, this.samplingCatalog], [7, this.control], [8, this.topologyDelta.buffer],
       [9, structured.control],
       [12, structured.rowVelocities], [13, this.governor], [14, topology.metrics],
       // Missing support remains constructible for isolated tests, but the

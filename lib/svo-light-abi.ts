@@ -94,6 +94,34 @@ export function canonicalSvoLightRecord(input: SvoLightRecord): SvoLightRecord {
   });
 }
 
+/**
+ * Emitter size for a proxy of any kind: the radius that stops a point fixture's
+ * shadow ray at its own visible surface, or the equal-volume sphere an area
+ * emitter is sampled as.
+ */
+function proxyEmitterRadius(proxy: EnvironmentProxyPrimitive, policy: "bounding" | "equivalent-sphere"): number {
+  if (proxy.kind === "ellipsoid") {
+    const { x, y, z } = proxy.radius_m;
+    return policy === "bounding" ? Math.max(x, y, z) : Math.cbrt(x * y * z);
+  }
+  if (proxy.kind === "cylinder") {
+    return policy === "bounding"
+      ? Math.max(proxy.radius_m, proxy.halfHeight_m)
+      : Math.cbrt(proxy.radius_m * proxy.radius_m * proxy.halfHeight_m);
+  }
+  if (proxy.kind === "capsule") {
+    return policy === "bounding" ? proxy.halfLength_m + proxy.radius_m : proxy.radius_m;
+  }
+  if (proxy.kind === "torus") {
+    return policy === "bounding" ? proxy.majorRadius_m + proxy.minorRadius_m : proxy.minorRadius_m;
+  }
+  if (proxy.kind === "cone") {
+    const widest = Math.max(proxy.baseRadius_m, proxy.topRadius_m);
+    return policy === "bounding" ? Math.max(widest, proxy.halfHeight_m) : Math.cbrt(widest * widest * proxy.halfHeight_m);
+  }
+  return Math.max(proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z);
+}
+
 function proxyPhysicalLight(proxy: EnvironmentProxyPrimitive, ownerBase: number, revision: number): SvoLightRecord | undefined {
   if (!(proxy.material.emission > 0) || !proxy.tags.includes("light")) return undefined;
   const common = {
@@ -118,16 +146,10 @@ function proxyPhysicalLight(proxy: EnvironmentProxyPrimitive, ownerBase: number,
     halfWidth_m: 0, halfHeight_m: 0,
     // The shader still samples one point at the center, but stops its shadow
     // ray at the visible emitter surface so the lantern cannot shadow itself.
-    radius_m: proxy.kind === "ellipsoid"
-      ? Math.max(proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z)
-      : proxy.kind === "cylinder"
-        ? Math.max(proxy.radius_m, proxy.halfHeight_m)
-        : Math.max(proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z),
+    radius_m: proxyEmitterRadius(proxy, "bounding"),
   });
   if (proxy.kind !== "box") {
-    const radius_m = proxy.kind === "ellipsoid"
-      ? Math.cbrt(proxy.radius_m.x * proxy.radius_m.y * proxy.radius_m.z)
-      : Math.cbrt(proxy.radius_m * proxy.radius_m * proxy.halfHeight_m);
+    const radius_m = proxyEmitterRadius(proxy, "equivalent-sphere");
     return canonicalSvoLightRecord({
       ...common,
       kind: "sphereArea",

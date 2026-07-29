@@ -59,6 +59,10 @@ export interface CompactOctreeFieldEvidence {
   readonly redistanceAcceptedCells?: number;
   readonly redistanceInitialPages?: number;
   readonly redistanceFinalPages?: number;
+  readonly redistanceFrontierFloodPages?: number;
+  readonly redistanceFrontierSeedPages?: number;
+  readonly redistanceFrontierResolvePages?: number;
+  readonly redistanceFallbackPages?: number;
   readonly volumeControl?: readonly number[];
   readonly mgpcgControl?: readonly number[];
 }
@@ -114,6 +118,10 @@ export interface CompactOctreePublicationHeaderEvidence {
   readonly redistanceAcceptedCells?: number;
   readonly redistanceInitialPages?: number;
   readonly redistanceFinalPages?: number;
+  readonly redistanceFrontierFloodPages?: number;
+  readonly redistanceFrontierSeedPages?: number;
+  readonly redistanceFrontierResolvePages?: number;
+  readonly redistanceFallbackPages?: number;
   readonly volumeControl?: readonly number[];
   readonly mgpcgControl?: readonly number[];
 }
@@ -198,6 +206,12 @@ export function compactOctreePublicationHeaderEvidence(
       redistanceAcceptedCells: redistance.acceptedCells,
       redistanceInitialPages: redistance.initialPages,
       redistanceFinalPages: redistance.finalPages,
+      redistanceFrontierFloodPages: redistance.frontierFloodPages,
+      redistanceFrontierSeedPages: redistance.frontierSeedPages,
+      redistanceFrontierResolvePages: redistance.frontierResolvePages,
+      redistanceFallbackPages: redistance.fallbackPages,
+      redistanceFrontierMeasuredDisplacement: redistance.frontierMeasuredDisplacement,
+      redistanceFrontierFirstEnabledFloodPass: redistance.frontierFirstEnabledFloodPass,
     } : {}),
     ...(snapshot.volumeControl ? { volumeControl: Array.from(snapshot.volumeControl) } : {}),
     ...(snapshot.mgpcgControl ? { mgpcgControl: Array.from(snapshot.mgpcgControl) } : {}),

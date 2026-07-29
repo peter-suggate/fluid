@@ -405,6 +405,29 @@ export interface OctreeSPGridVCyclePlan {
   readonly brickDispatch: readonly [number, number, number];
 }
 
+export interface OctreeSPGridHierarchyLevelCensus {
+  readonly level: number;
+  readonly capacity: number;
+  readonly occupied: number;
+  readonly active: number;
+  readonly ghost: number;
+  readonly multigridOnly: number;
+  readonly invalidClass: number;
+  readonly publishedCount: number;
+  readonly publishedTransferCount: number;
+  readonly publishedPageCount: number;
+  readonly selectedGroups: number;
+  readonly restrictionGroups: number;
+  readonly pageGroups: number;
+  readonly gatedSelectedGroups: number;
+  readonly gatedRestrictionGroups: number;
+  readonly gatedPageGroups: number;
+}
+
+export interface OctreeSPGridHierarchyCensus {
+  readonly levels: readonly Readonly<OctreeSPGridHierarchyLevelCensus>[];
+}
+
 export interface SPGridBrickRankDirectory {
   readonly dimensions: readonly [number, number, number];
   readonly masks: readonly (readonly [number, number])[];
@@ -871,6 +894,45 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
     brickDispatch: dispatchFor(brickCount) };
 }
 
+/** Pure decoder shared by the post-submit readback and deterministic tests. */
+export function decodeOctreeSPGridHierarchyCensus(
+  plan: OctreeSPGridVCyclePlan,
+  flags: Uint32Array,
+  dispatch: Uint32Array,
+  gatedDispatch: Uint32Array,
+): Readonly<OctreeSPGridHierarchyCensus> {
+  const dispatchWords = plan.dispatchBytes / 4;
+  if (flags.length < plan.totalLevelSlots
+    || dispatch.length < dispatchWords || gatedDispatch.length < dispatchWords) {
+    throw new RangeError("SPGrid hierarchy census buffers are shorter than the plan");
+  }
+  const levels = plan.levelCapacities.map((capacity, level) => {
+    let occupied = 0, active = 0, ghost = 0, multigridOnly = 0, invalidClass = 0;
+    const begin = plan.levelOffsets[level]!;
+    for (let slot = 0; slot < capacity; slot += 1) {
+      const cellFlags = flags[begin + slot]!;
+      if (cellFlags === 0) continue;
+      occupied += 1;
+      const classes = Number((cellFlags & SPGRID_CELL_FLAG.active) !== 0)
+        + Number((cellFlags & SPGRID_CELL_FLAG.ghost) !== 0)
+        + Number((cellFlags & SPGRID_CELL_FLAG.multigridOnly) !== 0);
+      if (classes !== 1) invalidClass += 1;
+      if ((cellFlags & SPGRID_CELL_FLAG.active) !== 0) active += 1;
+      if ((cellFlags & SPGRID_CELL_FLAG.ghost) !== 0) ghost += 1;
+      if ((cellFlags & SPGRID_CELL_FLAG.multigridOnly) !== 0) multigridOnly += 1;
+    }
+    const record = level * DISPATCH_RECORD_WORDS_PER_LEVEL;
+    return Object.freeze({ level, capacity, occupied, active, ghost, multigridOnly,
+      invalidClass, publishedCount: dispatch[record]!,
+      publishedTransferCount: dispatch[record + 1]!, publishedPageCount: dispatch[record + 8]!,
+      selectedGroups: dispatch[record + 2]!, restrictionGroups: dispatch[record + 5]!,
+      pageGroups: dispatch[record + 9]!, gatedSelectedGroups: gatedDispatch[record + 2]!,
+      gatedRestrictionGroups: gatedDispatch[record + 5]!,
+      gatedPageGroups: gatedDispatch[record + 9]! });
+  });
+  return Object.freeze({ levels: Object.freeze(levels) });
+}
+
 /** Largest 256-row SPGrid plan whose two bindable arenas fit the device. */
 export function spgridRowCapacityForBindingLimit(
   dimensions: readonly [number, number, number],
@@ -1115,6 +1177,47 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       encodedCorrectionDispatches: this.encodedCorrectionDispatchCount,
       persistentEnabled: false,
       persistentMaximumIterations: 12 });
+  }
+
+  /**
+   * Diagnostic-only census of the committed sparse hierarchy. This copies the
+   * FLAGS channel rather than the full 26-channel state arena, so a pressure
+   * profile can distinguish useful ACTIVE/GHOST/MG_ONLY work from capacity
+   * padding without perturbing the recurring command graph.
+   */
+  async readHierarchyCensus(): Promise<Readonly<OctreeSPGridHierarchyCensus>> {
+    this.assertLive();
+    const flagBytes = this.plan.totalLevelSlots * 4;
+    const dispatchBytes = this.plan.dispatchBytes;
+    const readback = this.device.createBuffer({
+      label: "SPGrid hierarchy FLAGS/dispatch census readback",
+      size: flagBytes + 2 * dispatchBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Read SPGrid hierarchy FLAGS/dispatch census",
+    });
+    // FLAGS is channel one in the channel-major state arena.
+    encoder.copyBufferToBuffer(this.state, flagBytes, readback, 0, flagBytes);
+    encoder.copyBufferToBuffer(this.dispatchMeta, 0, readback, flagBytes, dispatchBytes);
+    encoder.copyBufferToBuffer(
+      this.indirectDispatch, 0, readback, flagBytes + dispatchBytes, dispatchBytes,
+    );
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const dispatchBase = this.plan.totalLevelSlots, gatedBase = dispatchBase + dispatchBytes / 4;
+      return decodeOctreeSPGridHierarchyCensus(
+        this.plan,
+        words.subarray(0, this.plan.totalLevelSlots),
+        words.subarray(dispatchBase, gatedBase),
+        words.subarray(gatedBase, gatedBase + dispatchBytes / 4),
+      );
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
   }
 
   constructor(private readonly device: GPUDevice, private readonly source: OctreeSPGridVCycleSource,

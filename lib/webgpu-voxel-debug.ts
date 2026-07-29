@@ -286,10 +286,12 @@ export interface SparseVoxelSceneRenderSource {
   structural?: SparseVoxelStructuralRenderSource;
   /** Optional immutable 4^3 acceleration view derived from the canonical structural topology. */
   wideFanout?: import("./webgpu-svo-wide-fanout").WebGPUSvoWideFanoutSource;
+  /** Optional 16-byte aligned traversal nodes derived from the canonical 32-byte records. */
+  compactHierarchy?: import("./webgpu-svo-compact-hierarchy").WebGpuSvoCompactHierarchySource;
   /** Optional complete sparse opacity generation derived from static canonical-world geometry. */
   nodeMipPyramid?: import("./webgpu-svo-node-mip-pyramid").WebGpuSvoNodeMipVisibleGeneration;
   /** Renderer-derived allocation telemetry; absent capabilities report zero bytes. */
-  derivedRenderAllocationBytes?: Readonly<{ wideFanout: number; nodeMipPyramid?: number }>;
+  derivedRenderAllocationBytes?: Readonly<{ wideFanout: number; compactHierarchy?: number; nodeMipPyramid?: number }>;
   /** Allows the caller to expose buffer replacement without implementation coupling. */
   revision: number;
 }

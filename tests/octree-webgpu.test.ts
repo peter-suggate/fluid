@@ -8,7 +8,7 @@ import { resolveMethodValues } from "../lib/methods/types";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { enumerateOctreeFrontierCandidateLattice, fineLevelSetWarmStartRequested, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { enumerateOctreeFrontierCandidateLattice, fineLevelSetWarmStartRequested, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePersistentMGPCGEnabled, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import {
   octreePipelinedMGPCGShader,
   WebGPUOctreePipelinedMGPCG,
@@ -24,7 +24,7 @@ const structuredBoundarySource = readFileSync(
 const spgridVCycleSource = readFileSync(
   new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
 const uniformSolverSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
-const smokeSource = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+const smokeSource = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
 const packageManifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts: Record<string, string>;
 };
@@ -787,6 +787,12 @@ test("recurring fine redistance keeps its warm start as the production default",
   assert.equal(fineLevelSetWarmStartRequested({ FLUID_FINE_JFA_WARM_START: "1" }), true);
   assert.equal(fineLevelSetWarmStartRequested({ FLUID_FINE_JFA_WARM_START: "0" }), false,
     "the cold path remains available only as an explicit process-local oracle");
+});
+
+test("eligible octrees select persistent MGPCG by default with a hierarchical oracle", () => {
+  assert.equal(octreePersistentMGPCGEnabled({}), true);
+  assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "1" }), true);
+  assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "0" }), false);
 });
 
 test("octree delegates every capacity to the direct-curvature PCG authority", () => {

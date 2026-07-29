@@ -38,7 +38,7 @@ test("bring-up timeout is bounded and validated before Dawn loads", () => {
 test("launcher owns the child-process timeout and worker owns exclusive GPU cleanup", async () => {
   const launcher = await readFile(new URL("../tools/run-webgpu-bringup-stage.ts", import.meta.url), "utf8");
   const worker = await readFile(new URL("../tools/run-webgpu-bringup-stage-worker.ts", import.meta.url), "utf8");
-  const fullSmoke = await readFile(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  const fullSmoke = await readFile(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
   assert.match(launcher, /spawn\(process\.execPath/);
   assert.match(launcher, /child\.kill\("SIGTERM"\)/);
   assert.match(launcher, /child\.kill\("SIGKILL"\)/);

@@ -57,6 +57,9 @@ test("factor-4 and factor-8 lanes differ only at the requested fine cutover", ()
   }
   assert.match(factor4, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
   assert.match(factor8, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=8/);
-  assert.equal(factor4.replace("FACTOR=4", "FACTOR=8"), factor8,
+  assert.equal(
+    factor4.replace("FLUID_LANE=fine-factor-4", "FLUID_LANE=fine-factor-8")
+      .replace("FACTOR=4", "FACTOR=8"),
+    factor8,
     "fine-factor evidence must not drift into two incomparable smoke contracts");
 });

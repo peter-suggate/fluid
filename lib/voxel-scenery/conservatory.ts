@@ -1,5 +1,6 @@
 import {
   addRoomShell,
+  alongAxis,
   C,
   cmul,
   V,
@@ -46,24 +47,21 @@ const scatter = (index: number) => ((Math.imul(index + 1, 2246822519) >>> 11) & 
 const shade = (base: readonly [number, number, number], index: number, spread = .18) =>
   cmul(base, 1 - spread * .5 + spread * scatter(index));
 
-/** Eight chunky beads per turn read as a coil; ellipsoids are stretched along the local tangent. */
-const COIL_TURN: ReadonlyArray<{ readonly u: number; readonly v: number; readonly rx: number; readonly rz: number }> = [
-  { u: 1, v: 0, rx: .075, rz: .155 },
-  { u: .7071, v: .7071, rx: .125, rz: .125 },
-  { u: 0, v: 1, rx: .155, rz: .075 },
-  { u: -.7071, v: .7071, rx: .125, rz: .125 },
-  { u: -1, v: 0, rx: .075, rz: .155 },
-  { u: -.7071, v: -.7071, rx: .125, rz: .125 },
-  { u: 0, v: -1, rx: .155, rz: .075 },
-  { u: .7071, v: -.7071, rx: .125, rz: .125 },
-];
-const COIL_INNER: ReadonlyArray<{ readonly u: number; readonly v: number; readonly rx: number; readonly rz: number }> = [
-  { u: 1, v: 0, rx: .07, rz: .135 },
-  { u: .5, v: .866, rx: .125, rz: .10 },
-  { u: -.5, v: .866, rx: .125, rz: .10 },
-  { u: -1, v: 0, rx: .07, rz: .135 },
-  { u: -.5, v: -.866, rx: .125, rz: .10 },
-  { u: .5, v: -.866, rx: .125, rz: .10 },
+/**
+ * The hose is one continuous run: two turns coiled on the paving, then a path
+ * that leaves the coil, crosses to the cane and climbs to the glass. Each turn
+ * is a torus and each leg is a capsule, so the tube keeps one radius the whole
+ * way and the surface never steps where two pieces meet. Points are in the
+ * environment's own scale, and y is measured from the flagstones.
+ */
+const HOSE_RADIUS = .05;
+/** Base radius of a flowerpot as a fraction of its rim: the shape says "pot", not "pipe". */
+const POT_TAPER = .72;
+const HOSE_PATH: ReadonlyArray<readonly [number, number, number]> = [
+  [-1.02, .05, .50],
+  [-.90, .05, .30],
+  [-.74, .05, .08],
+  [-.66, .05, .04],
 ];
 
 /** Flagstone slabs, hand-authored so the paving ring never crosses the tank footprint. */
@@ -127,8 +125,8 @@ export const conservatoryScenery: EnvironmentSceneryModule = {
       ["c", -.98, -.74, .125, .140],
       ["d", -.80, -.88, .070, .075],
     ];
-    pots.forEach(([name, x, z, r, h], i) => b.cylinder(`bench/pot-${name}`, "terracotta-pot", V(x * s, benchTop + h * s, z * s), r * s, h * s, shade(CLAY, i, .16), 0, ["pot"]));
-    b.cylinder("bench/pot-upturned", "terracotta-pot", V(-1.19 * s, benchTop + .08 * s, -.86 * s), .105 * s, .08 * s, cmul(CLAY, .82), 0, ["pot"]);
+    pots.forEach(([name, x, z, r, h], i) => b.cone(`bench/pot-${name}`, "terracotta-pot", V(x * s, benchTop + h * s, z * s), POT_TAPER * r * s, r * s, h * s, shade(CLAY, i, .16), 0, ["pot"]));
+    b.cone("bench/pot-upturned", "terracotta-pot", V(-1.19 * s, benchTop + .08 * s, -.86 * s), .105 * s, POT_TAPER * .105 * s, .08 * s, cmul(CLAY, .82), 0, ["pot"]);
     b.box("bench/seed-tray", "wood-bench", V(-1.36 * s, benchTop + .032 * s, -.545 * s), V(.20 * s, .032 * s, .105 * s), cmul(CHALK, .92), 0, ["bench"]);
     b.ellipsoid("bench/seedling-a", "porcelain-foliage", V(-1.66 * s, benchTop + .30 * s, -.78 * s), V(.115 * s, .09 * s, .10 * s), PORCELAIN, 0, ["plant"]);
     b.ellipsoid("bench/seedling-b", "porcelain-foliage", V(-.98 * s, benchTop + .34 * s, -.74 * s), V(.135 * s, .11 * s, .12 * s), cmul(PORCELAIN, .90), 0, ["plant"]);
@@ -156,22 +154,30 @@ export const conservatoryScenery: EnvironmentSceneryModule = {
     for (const i of [-1, 1]) b.box(`trough/trestle-${i < 0 ? "front" : "back"}`, "wood-bench", V(troughX, g + .07 * s, troughZ + .38 * i * s), V(.24 * s, .07 * s, .05 * s), cmul(LIME, .62), 0, ["trough"]);
 
     // --- The hose ----------------------------------------------------------
-    // Two turns of coil on the paving at the near left, then a run that
-    // straightens, climbs a cane and terminates at the tank's left glass.
+    // Two turns of coil on the paving at the near left, then a run that leaves
+    // the coil, crosses the flagstones, climbs a cane and terminates at the
+    // tank's left glass — the same read as before, now as five swept solids
+    // instead of a chain of beads standing in for the ones we could not rotate.
     const coil = { x: -1.02 * s, z: .82 * s };
-    COIL_TURN.forEach((node, i) => b.ellipsoid(`hose/coil-outer-${i + 1}`, "rubber-hose", V(coil.x + node.u * .32 * s, g + .055 * s, coil.z + node.v * .32 * s), V(node.rx * s, .055 * s, node.rz * s), shade(RUBBER, i, .35), 0, ["hose"]));
-    COIL_INNER.forEach((node, i) => b.ellipsoid(`hose/coil-inner-${i + 1}`, "rubber-hose", V(coil.x + node.u * .19 * s, g + .145 * s, coil.z + node.v * .19 * s), V(node.rx * s, .05 * s, node.rz * s), shade(cmul(RUBBER, 1.35), i + 8, .35), 0, ["hose"]));
-    b.box("hose/run-back", "rubber-hose", V(-.86 * s, g + .05 * s, .42 * s), V(.055 * s, .05 * s, .34 * s), cmul(RUBBER, 1.2), 0, ["hose"]);
-    b.box("hose/run-in", "rubber-hose", V(-.745 * s, g + .05 * s, .06 * s), V(.17 * s, .05 * s, .055 * s), cmul(RUBBER, 1.3), 0, ["hose"]);
-    b.cylinder("hose/riser", "rubber-hose", V(-.635 * s, g + .25 * s, .04 * s), .05 * s, .25 * s, cmul(RUBBER, 1.5), 0, ["hose"]);
-    b.cylinder("hose/cane", "wood-bench", V(-.68 * s, g + .36 * s, .10 * s), .022 * s, .36 * s, cmul(LIME, .70), 0, ["hose"]);
+    b.torus("hose/coil-outer", "rubber-hose", V(coil.x, g + .055 * s, coil.z), .32 * s, .055 * s, RUBBER, 0, ["hose"]);
+    b.torus("hose/coil-inner", "rubber-hose", V(coil.x, g + .145 * s, coil.z), .19 * s, .05 * s, cmul(RUBBER, 1.35), 0, ["hose"]);
+    HOSE_PATH.slice(0, -1).forEach(([x, y, z], i) => {
+      const [nextX, nextY, nextZ] = HOSE_PATH[i + 1];
+      b.capsule(`hose/run-${i + 1}`, "rubber-hose", V(x * s, g + y * s, z * s), V(nextX * s, g + nextY * s, nextZ * s),
+        HOSE_RADIUS * s, shade(cmul(RUBBER, 1.25), i, .30), 0, ["hose"]);
+    });
+    // The riser leans as it climbs, which is what a hose tied to a cane does.
+    const riserFoot = HOSE_PATH[HOSE_PATH.length - 1];
+    b.capsule("hose/riser", "rubber-hose", V(riserFoot[0] * s, g + riserFoot[1] * s, riserFoot[2] * s), V(-.615 * s, jetY, .04 * s),
+      HOSE_RADIUS * s, cmul(RUBBER, 1.5), 0, ["hose"]);
+    b.cylinder("hose/cane", "wood-bench", V(-.68 * s, g + .36 * s, .10 * s), .022 * s, .36 * s, cmul(LIME, .70), 0, ["hose"], alongAxis(V(.07, 1, -.02)));
     b.box("hose/nozzle-arm", "zinc-metal", V(-.585 * s, jetY, .04 * s), V(.07 * s, .045 * s, .045 * s), cmul(ZINC, .92), 0, ["hose", "fixture"]);
     b.box("hose/nozzle-collar", "zinc-metal", V(-.545 * s, jetY, .04 * s), V(.033 * s, .030 * s, .030 * s), cmul(ZINC, 1.20), 0, ["hose", "fixture"]);
 
     // --- Foreground can, bottom right --------------------------------------
     const canX = 1.08 * s, canZ = .42 * s;
     b.cylinder("can/body", "zinc-metal", V(canX, g + .17 * s, canZ), .17 * s, .17 * s, cmul(ZINC, .96), 0, ["watering-can"]);
-    b.cylinder("can/shoulder", "zinc-metal", V(canX, g + .40 * s, canZ), .115 * s, .06 * s, cmul(ZINC, 1.12), 0, ["watering-can"]);
+    b.cone("can/shoulder", "zinc-metal", V(canX, g + .40 * s, canZ), .155 * s, .105 * s, .06 * s, cmul(ZINC, 1.12), 0, ["watering-can"]);
     b.box("can/spout", "zinc-metal", V(.82 * s, g + .30 * s, canZ), V(.16 * s, .035 * s, .035 * s), cmul(ZINC, .84), 0, ["watering-can"]);
     b.ellipsoid("can/rose", "zinc-metal", V(.665 * s, g + .30 * s, canZ), V(.06 * s, .06 * s, .06 * s), cmul(ZINC, 1.22), 0, ["watering-can"]);
     b.box("can/handle", "zinc-metal", V(canX, g + .48 * s, canZ), V(.045 * s, .09 * s, .13 * s), cmul(ZINC, .78), 0, ["watering-can"]);
@@ -183,14 +189,15 @@ export const conservatoryScenery: EnvironmentSceneryModule = {
       ["c", -1.62, .12, .13, .10],
       ["d", -1.34, .34, .105, .16],
     ];
-    floorPots.forEach(([name, x, z, r, h], i) => b.cylinder(`pots/floor-${name}`, "terracotta-pot", V(x * s, g + h * s, z * s), r * s, h * s, shade(CLAY, i + 4, .20), 0, ["pot"]));
+    floorPots.forEach(([name, x, z, r, h], i) => b.cone(`pots/floor-${name}`, "terracotta-pot", V(x * s, g + h * s, z * s), POT_TAPER * r * s, r * s, h * s, shade(CLAY, i + 4, .20), 0, ["pot"]));
 
     // A stack of upturned pots holds the near-left edge of the paper camera,
     // so the frame closes on that side without anything crowding the tank.
     const stack: ReadonlyArray<readonly [string, number, number, number]> = [
       ["base", .085, .180, .085], ["mid", .235, .155, .075], ["top", .375, .130, .065],
     ];
-    stack.forEach(([name, y, r, h], i) => b.cylinder(`pots/stack-${name}`, "terracotta-pot", V(-1.85 * s, g + y * s, 1.25 * s), r * s, h * s, shade(CLAY, i + 9, .22), 0, ["pot"]));
+    // Upturned, so the taper runs the other way and the stack reads as a stack.
+    stack.forEach(([name, y, r, h], i) => b.cone(`pots/stack-${name}`, "terracotta-pot", V(-1.85 * s, g + y * s, 1.25 * s), r * s, POT_TAPER * r * s, h * s, shade(CLAY, i + 9, .22), 0, ["pot"]));
 
     // --- Paving ------------------------------------------------------------
     FLAGSTONES.forEach(([x, z], i) => b.box(`paving/slab-${i + 1}`, "flagstone-paving", V(x * s, g + .03 * s, z * s), V(.30 * s, .03 * s, .30 * s), shade(STONE, i + 16, .26), 0, ["paving"]));

@@ -4,16 +4,26 @@ import {
   sparseBrickDispatchDimensions,
   type SparseBrickOctreeGPU,
 } from "./sparse-brick-octree";
+import type { EnvironmentProxyPrimitive } from "./voxel-environments";
 
 export type SparseSceneVector3 = readonly [number, number, number];
 export type SparseSceneQuaternion = readonly [number, number, number, number];
 
 export const SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES = 48;
 
+/**
+ * Voxelization keeps its own compact vocabulary rather than sharing the render
+ * ABI's records: this pass evaluates every primitive at every candidate voxel,
+ * so it wants the cheapest distance that still classifies a cell, where the
+ * renderer wants the exact one. Tags are its own; only the shapes are shared.
+ */
 export const SPARSE_SCENE_PRIMITIVE_TYPES = Object.freeze({
   box: 1,
   cylinder: 2,
   ellipsoid: 3,
+  capsule: 4,
+  torus: 5,
+  cone: 6,
 } as const);
 
 interface SparseScenePrimitiveBase {
@@ -25,6 +35,8 @@ interface SparseScenePrimitiveBase {
 export interface SparseSceneBoxPrimitive extends SparseScenePrimitiveBase {
   kind: "box";
   halfExtents: SparseSceneVector3;
+  /** Quaternion order is xyzw. */
+  orientation?: SparseSceneQuaternion;
 }
 
 export interface SparseSceneCylinderPrimitive extends SparseScenePrimitiveBase {
@@ -42,10 +54,63 @@ export interface SparseSceneEllipsoidPrimitive extends SparseScenePrimitiveBase 
   orientation?: SparseSceneQuaternion;
 }
 
+/** Swept circle along the local +Y segment. Quaternion order is xyzw. */
+export interface SparseSceneCapsulePrimitive extends SparseScenePrimitiveBase {
+  kind: "capsule";
+  radius: number;
+  halfLength: number;
+  orientation?: SparseSceneQuaternion;
+}
+
+/** Ring swept about the local +Y axis. Quaternion order is xyzw. */
+export interface SparseSceneTorusPrimitive extends SparseScenePrimitiveBase {
+  kind: "torus";
+  majorRadius: number;
+  minorRadius: number;
+  orientation?: SparseSceneQuaternion;
+}
+
+/** Truncated cone about the local +Y axis: `baseRadius` at -Y, `topRadius` at +Y. */
+export interface SparseSceneConePrimitive extends SparseScenePrimitiveBase {
+  kind: "cone";
+  baseRadius: number;
+  topRadius: number;
+  halfHeight: number;
+  orientation?: SparseSceneQuaternion;
+}
+
 export type SparseScenePrimitive =
   | SparseSceneBoxPrimitive
   | SparseSceneCylinderPrimitive
-  | SparseSceneEllipsoidPrimitive;
+  | SparseSceneEllipsoidPrimitive
+  | SparseSceneCapsulePrimitive
+  | SparseSceneTorusPrimitive
+  | SparseSceneConePrimitive;
+
+/**
+ * Adapt one authored scenery proxy into this pass's vocabulary. Kept beside the
+ * shapes themselves so a new one cannot reach the render ABI while silently
+ * missing from voxelization, which would publish a surface nothing owns.
+ */
+export function sparseScenePrimitiveForProxy(
+  proxy: EnvironmentProxyPrimitive,
+  identity: Pick<SparseScenePrimitiveBase, "materialId" | "ownerId">,
+): SparseScenePrimitive {
+  const center: SparseSceneVector3 = [proxy.center_m.x, proxy.center_m.y, proxy.center_m.z];
+  // Scenery authors wxyz; this pass packs xyzw.
+  const orientation: SparseSceneQuaternion | undefined = proxy.orientation
+    ? [proxy.orientation.x, proxy.orientation.y, proxy.orientation.z, proxy.orientation.w]
+    : undefined;
+  const base = { ...identity, center, orientation };
+  if (proxy.kind === "box") return { ...base, kind: "box", halfExtents: [proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z] };
+  if (proxy.kind === "cylinder") return { ...base, kind: "cylinder", radius: proxy.radius_m, halfHeight: proxy.halfHeight_m };
+  if (proxy.kind === "capsule") return { ...base, kind: "capsule", radius: proxy.radius_m, halfLength: proxy.halfLength_m };
+  if (proxy.kind === "torus") return { ...base, kind: "torus", majorRadius: proxy.majorRadius_m, minorRadius: proxy.minorRadius_m };
+  if (proxy.kind === "cone") {
+    return { ...base, kind: "cone", baseRadius: proxy.baseRadius_m, topRadius: proxy.topRadius_m, halfHeight: proxy.halfHeight_m };
+  }
+  return { ...base, kind: "ellipsoid", radii: [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z] };
+}
 
 export interface SparseSceneCellSample {
   solidSignedDistance: number;
@@ -100,6 +165,28 @@ function primitiveExtent(primitive: SparseScenePrimitive): SparseSceneVector3 {
     }
     return [primitive.radius, primitive.halfHeight, primitive.radius];
   }
+  if (primitive.kind === "capsule") {
+    if (!Number.isFinite(primitive.radius) || primitive.radius <= 0 ||
+        !Number.isFinite(primitive.halfLength) || primitive.halfLength < 0) {
+      throw new RangeError("Capsule radius must be positive and its half length non-negative");
+    }
+    return [primitive.radius, primitive.halfLength, primitive.radius];
+  }
+  if (primitive.kind === "torus") {
+    if (!Number.isFinite(primitive.majorRadius) || !Number.isFinite(primitive.minorRadius)
+        || primitive.minorRadius <= 0 || !(primitive.minorRadius < primitive.majorRadius)) {
+      throw new RangeError("Torus minor radius must be positive and smaller than its major radius");
+    }
+    return [primitive.majorRadius, primitive.minorRadius, 0];
+  }
+  if (primitive.kind === "cone") {
+    if (!Number.isFinite(primitive.halfHeight) || primitive.halfHeight <= 0
+        || !(primitive.baseRadius >= 0) || !(primitive.topRadius >= 0)
+        || !(Math.max(primitive.baseRadius, primitive.topRadius) > 0)) {
+      throw new RangeError("Cone half height must be positive with a positive radius at one end");
+    }
+    return [primitive.baseRadius, primitive.halfHeight, primitive.topRadius];
+  }
   positiveVector(primitive.radii, "Ellipsoid radii");
   return primitive.radii;
 }
@@ -121,7 +208,7 @@ export function packSparseScenePrimitives(primitives: readonly SparseScenePrimit
     finiteVector(primitive.center, "Primitive center");
     validateIdentity(primitive.materialId, primitive.ownerId);
     const extent = primitiveExtent(primitive);
-    const orientation = primitive.kind === "box" ? [0, 0, 0, 1] as const : normalizedQuaternion(primitive.orientation);
+    const orientation = normalizedQuaternion(primitive.orientation);
     const base = index * (SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES / 4);
     floats.set(primitive.center, base);
     words[base + 3] = primitiveType(primitive);
@@ -163,6 +250,27 @@ function ellipsoidDistance(point: SparseSceneVector3, radii: SparseSceneVector3)
   return k1 > 1e-12 ? k0 * (k0 - 1) / k1 : -Math.min(...radii);
 }
 
+function capsuleDistance(point: SparseSceneVector3, radius: number, halfLength: number): number {
+  const segmentY = Math.max(-halfLength, Math.min(halfLength, point[1]));
+  return Math.hypot(point[0], point[1] - segmentY, point[2]) - radius;
+}
+
+function torusDistance(point: SparseSceneVector3, majorRadius: number, minorRadius: number): number {
+  return Math.hypot(Math.hypot(point[0], point[2]) - majorRadius, point[1]) - minorRadius;
+}
+
+function coneDistance(point: SparseSceneVector3, baseRadius: number, halfHeight: number, topRadius: number): number {
+  const radial = Math.hypot(point[0], point[2]);
+  const capRadius = point[1] < 0 ? baseRadius : topRadius;
+  const cap: readonly [number, number] = [radial - Math.min(radial, capRadius), Math.abs(point[1]) - halfHeight];
+  const slope: readonly [number, number] = [topRadius - baseRadius, 2 * halfHeight];
+  const toApex: readonly [number, number] = [topRadius - radial, halfHeight - point[1]];
+  const projection = Math.min(1, Math.max(0, (toApex[0] * slope[0] + toApex[1] * slope[1]) / (slope[0] ** 2 + slope[1] ** 2)));
+  const side: readonly [number, number] = [radial - topRadius + slope[0] * projection, point[1] - halfHeight + slope[1] * projection];
+  const inside = side[0] < 0 && cap[1] < 0;
+  return (inside ? -1 : 1) * Math.sqrt(Math.min(cap[0] ** 2 + cap[1] ** 2, side[0] ** 2 + side[1] ** 2));
+}
+
 /** CPU mirror of the WGSL primitive SDF, useful for topology planning and tests. */
 export function sparseScenePrimitiveSignedDistance(
   primitive: SparseScenePrimitive,
@@ -176,14 +284,26 @@ export function sparseScenePrimitiveSignedDistance(
     worldPoint[1] - primitive.center[1],
     worldPoint[2] - primitive.center[2],
   ];
+  const local = inverseRotate(localOffset, normalizedQuaternion(primitive.orientation));
   if (primitive.kind === "box") {
     positiveVector(primitive.halfExtents, "Box half extents");
-    return boxDistance(localOffset, primitive.halfExtents);
+    return boxDistance(local, primitive.halfExtents);
   }
-  const local = inverseRotate(localOffset, normalizedQuaternion(primitive.orientation));
   if (primitive.kind === "cylinder") {
     primitiveExtent(primitive);
     return cylinderDistance(local, primitive.radius, primitive.halfHeight);
+  }
+  if (primitive.kind === "capsule") {
+    primitiveExtent(primitive);
+    return capsuleDistance(local, primitive.radius, primitive.halfLength);
+  }
+  if (primitive.kind === "torus") {
+    primitiveExtent(primitive);
+    return torusDistance(local, primitive.majorRadius, primitive.minorRadius);
+  }
+  if (primitive.kind === "cone") {
+    primitiveExtent(primitive);
+    return coneDistance(local, primitive.baseRadius, primitive.halfHeight, primitive.topRadius);
   }
   positiveVector(primitive.radii, "Ellipsoid radii");
   return ellipsoidDistance(local, primitive.radii);
@@ -261,6 +381,24 @@ fn cylinderDistance(point: vec3f, radius: f32, halfHeight: f32) -> f32 {
   let q = vec2f(length(point.xz) - radius, abs(point.y) - halfHeight);
   return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0);
 }
+fn capsuleDistance(point: vec3f, radius: f32, halfLength: f32) -> f32 {
+  let segmentY = clamp(point.y, -halfLength, halfLength);
+  return length(vec3f(point.x, point.y - segmentY, point.z)) - radius;
+}
+fn torusDistance(point: vec3f, majorRadius: f32, minorRadius: f32) -> f32 {
+  return length(vec2f(length(point.xz) - majorRadius, point.y)) - minorRadius;
+}
+fn coneDistance(point: vec3f, baseRadius: f32, halfHeight: f32, topRadius: f32) -> f32 {
+  let radial = length(point.xz);
+  let capRadius = select(topRadius, baseRadius, point.y < 0.0);
+  let cap = vec2f(radial - min(radial, capRadius), abs(point.y) - halfHeight);
+  let slope = vec2f(topRadius - baseRadius, 2.0 * halfHeight);
+  let toApex = vec2f(topRadius - radial, halfHeight - point.y);
+  let projection = clamp(dot(toApex, slope) / dot(slope, slope), 0.0, 1.0);
+  let side = vec2f(radial - topRadius, point.y - halfHeight) + slope * projection;
+  let inside = side.x < 0.0 && cap.y < 0.0;
+  return select(1.0, -1.0, inside) * sqrt(min(dot(cap, cap), dot(side, side)));
+}
 fn ellipsoidDistance(point: vec3f, radii: vec3f) -> f32 {
   let k0 = length(point / radii);
   let k1 = length(point / (radii * radii));
@@ -269,10 +407,13 @@ fn ellipsoidDistance(point: vec3f, radii: vec3f) -> f32 {
 fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
   let primitiveType = bitcast<u32>(primitive.centerType.w);
   let offset = world - primitive.centerType.xyz;
-  if (primitiveType == 1u) { return boxDistance(offset, primitive.extentIdentity.xyz); }
   let local = inverseRotate(offset, primitive.rotation);
+  if (primitiveType == 1u) { return boxDistance(local, primitive.extentIdentity.xyz); }
   if (primitiveType == 2u) { return cylinderDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y); }
   if (primitiveType == 3u) { return ellipsoidDistance(local, primitive.extentIdentity.xyz); }
+  if (primitiveType == 4u) { return capsuleDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y); }
+  if (primitiveType == 5u) { return torusDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y); }
+  if (primitiveType == 6u) { return coneDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y, primitive.extentIdentity.z); }
   return 1e20;
 }
 fn linearIndex(gid: vec3u, groups: vec3u) -> u32 {

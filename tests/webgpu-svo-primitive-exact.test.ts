@@ -121,6 +121,66 @@ const cases: OracleCase[] = [
     ray: { origin_m: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: 0, z: -4 } },
   },
   {
+    name: "torus tube",
+    primitive: {
+      kind: "torus", primitiveId: 15, materialId: 33, center_m: { x: 0, y: 0, z: 0 },
+      majorRadius_m: 1, minorRadius_m: 0.25, orientation: identity,
+    },
+    ray: { origin_m: { x: 1, y: 3, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
+    name: "torus hole",
+    primitive: {
+      kind: "torus", primitiveId: 16, materialId: 33, center_m: { x: 0, y: 0, z: 0 },
+      majorRadius_m: 1, minorRadius_m: 0.25, orientation: identity,
+    },
+    // Straight down the axis: a torus is supposed to have nothing there.
+    ray: { origin_m: { x: 0, y: 3, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+    expectedStatus: 0,
+  },
+  {
+    name: "rotated torus tube",
+    primitive: {
+      kind: "torus", primitiveId: 17, materialId: 33, center_m: { x: 0, y: 0, z: 0 },
+      majorRadius_m: 1, minorRadius_m: 0.25, orientation: quarterTurn,
+    },
+    ray: { origin_m: { x: -3, y: 1, z: 0 }, direction: { x: 1, y: 0, z: 0 } },
+  },
+  {
+    name: "cone lateral band",
+    primitive: {
+      kind: "cone", primitiveId: 18, materialId: 34, center_m: { x: 0, y: 0, z: 0 },
+      baseRadius_m: 1, topRadius_m: 0.5, halfHeight_m: 1, orientation: identity,
+    },
+    ray: { origin_m: { x: -3, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 } },
+  },
+  {
+    name: "cone top cap",
+    primitive: {
+      kind: "cone", primitiveId: 19, materialId: 34, center_m: { x: 0, y: 0, z: 0 },
+      baseRadius_m: 1, topRadius_m: 0.5, halfHeight_m: 1, orientation: identity,
+    },
+    ray: { origin_m: { x: 0.2, y: 3, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
+    name: "cone inside exit",
+    primitive: {
+      kind: "cone", primitiveId: 20, materialId: 34, center_m: { x: 0, y: 0, z: 0 },
+      baseRadius_m: 1, topRadius_m: 0.5, halfHeight_m: 1, orientation: identity,
+    },
+    ray: { origin_m: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
+    name: "invalid zero torus major radius",
+    primitive: {
+      kind: "torus", primitiveId: 21, materialId: 33, center_m: { x: 0, y: 0, z: 0 },
+      majorRadius_m: 1, minorRadius_m: 0.25, orientation: identity,
+    },
+    ray: { origin_m: { x: 1, y: 3, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+    expectedStatus: 2,
+    corruptDimensions: true,
+  },
+  {
     name: "invalid zero ellipsoid radius",
     primitive: {
       kind: "ellipsoid", primitiveId: 14, materialId: 32, center_m: { x: 0, y: 0, z: 0 },
@@ -153,6 +213,10 @@ test("shared primitive ray WGSL exposes exact bounded status and normal results"
   assert.match(svoPrimitiveWGSL, /kind == SVO_KIND_CAPSULE/);
   assert.match(svoPrimitiveWGSL, /kind == SVO_KIND_ELLIPSOID/);
   assert.match(svoPrimitiveWGSL, /bestFeature = SVO_FEATURE_CYLINDER_CAP/);
+  // Kinds without a closed form share one sphere trace over their exact field.
+  assert.match(svoPrimitiveWGSL, /fn svoMarchedDistance_m/);
+  assert.match(svoPrimitiveWGSL, /fn svoTorusDistance_m/);
+  assert.match(svoPrimitiveWGSL, /fn svoConeSample/);
 });
 
 test("real GPU exact primitive hits agree with the CPU oracle", {

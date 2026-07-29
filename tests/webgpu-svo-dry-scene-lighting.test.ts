@@ -157,25 +157,18 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
     "a conservative world-space sphere must reject distant bodies before quaternion transforms");
   assert.match(adapter, /shape>=2&&!bodyCandidateVisible\(ray\.origin_m,ray\.direction,body,tMin_m,bestT\)/,
     "capsules and cylinders must retain conservative rejection while box/sphere exact tests avoid a duplicate local transform");
-  assert.match(adapter, /tracePrimitiveCandidates\(ray\.origin_m,ray\.direction,tMin_m,bestT,[^,]+,true\)/,
-    "small authored catalogs must spatially reject candidates before exact shadow intersections");
-  const candidateTraversalStart = svoDrySceneShader.indexOf("fn tracePrimitiveCandidates(");
-  const candidateTraversalEnd = svoDrySceneShader.indexOf("fn traceLeafPayload(", candidateTraversalStart);
-  const candidateTraversal = svoDrySceneShader.slice(candidateTraversalStart, candidateTraversalEnd);
-  assert.match(candidateTraversal, /opaqueAnyHit&&candidate\.t<DRY_MISS[^]*return DryCandidateTrace\(candidate,leftOrPrimitive,DRY_CANDIDATE_COMPLETE,workItems\)/,
-    "opaque shadow candidate traversal must stop at its first exact blocker rather than resolve nearest identity");
-  assert.match(adapter, /candidate\.hit\.t<bestT\)\{return dryVisibilityStep\(SVO_VIS_STEP_HIT/,
-    "any opaque analytic blocker must terminate visibility without nearest-identity work");
-  assert.match(adapter, /onlyIgnoredReceiver=dry\.metadata\.x==1u&&svoPrimitiveOwnerId\(primitives\[0\]\)==dryVisibilityIgnoredOwner/,
-    "the common one-primitive convex receiver must bypass its entire static candidate query");
+  assert.match(adapter, /dryTraversalCursorBegin[^]*dryTraversalCursorNext[^]*traceLeafPayloadVisibility/,
+    "every static shadow ray must traverse the SVO hierarchy and its brick payload");
+  assert.doesNotMatch(adapter, /tracePrimitiveCandidates|onlyIgnoredReceiver/,
+    "static shadow rays must not switch to a primitive-candidate path for small catalogs");
   assert.match(svoDrySceneShader, /owner==dry\.metadata\.z\|\|owner==dryVisibilityIgnoredOwner/,
-    "multi-primitive candidate traversal must skip the exact convex receiver while retaining every other blocker");
+    "SVO payload traversal must skip the exact receiver while retaining every other blocker");
   assert.match(adapter, /payload\.status==SVO_VIS_STEP_HIT\)\{return dryVisibilityStep\(SVO_VIS_STEP_HIT/,
     "any opaque SVO payload blocker must terminate before terrain and glass work");
   assert.doesNotMatch(adapter, /for\(var primitiveIndex=0u;primitiveIndex<dry\.metadata\.x/,
-    "small authored catalogs must never return to a full exact-primitive shadow loop");
+    "static visibility must never return to a full exact-primitive shadow loop");
   assert.match(adapter, /traceLeafPayloadVisibility/,
-    "large or generated catalogs must retain SVO payload shadow traversal");
+    "all catalogs must use SVO payload shadow traversal");
   assert.match(adapter, /traceTerrain\(ray\.origin_m,ray\.direction\)/,
     "analytic terrain must cast hard shadows");
   assert.match(adapter, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,false\)/,

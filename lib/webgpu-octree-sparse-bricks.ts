@@ -34,12 +34,15 @@ import {
 import { planAdaptiveSparseBrickOctree } from "./adaptive-sparse-brick-plan";
 import { planSvoWideFanout } from "./svo-wide-fanout";
 import { WebGPUSvoWideFanout } from "./webgpu-svo-wide-fanout";
+import { packSvoCompactHierarchy } from "./svo-compact-hierarchy";
+import { WebGpuSvoCompactHierarchy } from "./webgpu-svo-compact-hierarchy";
 import { WebGpuSvoNodeMipPyramid } from "./webgpu-svo-node-mip-pyramid";
+import { WebGpuSvoBrickOccupancyBuilder } from "./webgpu-svo-brick-occupancy";
 import { buildSvoStaticNodeMipPublication } from "./svo-static-node-mips";
 import { planSparseSceneDomain } from "./sparse-scene-domain";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "./voxel-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
-import { SparseSceneProxyVoxelizer, type SparseScenePrimitive } from "./webgpu-sparse-scene-proxies";
+import { SparseSceneProxyVoxelizer, sparseScenePrimitiveForProxy, type SparseScenePrimitive } from "./webgpu-sparse-scene-proxies";
 import {
   SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
   SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS,
@@ -58,6 +61,12 @@ import { PassBroker } from "./webgpu-pass-broker";
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
+  /**
+   * Optional brick alignment used only to derive the static opacity pyramid.
+   * Render-topology experiments can then vary `brickSize` without shifting
+   * cone-lighting samples or changing the comparison's lighting input.
+   */
+  staticLightingBrickSize?: SparseBrickSize;
   /** Air-side support retained for pressure-topology rebuilds. */
   haloCells?: number;
   /** Keep the independent deep-liquid topology worklist. */
@@ -499,7 +508,9 @@ export class OctreeSparseBrickWorld {
   private readonly structuralStaticPipeline: GPUComputePipeline;
   private readonly structuralFinalizeBindGroup: GPUBindGroup;
   private readonly proxyVoxelizer: SparseSceneProxyVoxelizer;
+  private readonly brickOccupancyBuilder: WebGpuSvoBrickOccupancyBuilder;
   private readonly wideFanout?: WebGPUSvoWideFanout;
+  private readonly compactHierarchy?: WebGpuSvoCompactHierarchy;
   private readonly nodeMipPyramid?: WebGpuSvoNodeMipPyramid;
   private published = false;
   private proxiesPublished = false;
@@ -516,6 +527,14 @@ export class OctreeSparseBrickWorld {
       environmentPrimitives.map((primitive) => ({ min: primitive.aabb_m.min, max: primitive.aabb_m.max })),
       { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m }
     );
+    const staticLightingDomain = options.staticLightingBrickSize !== undefined
+      && options.staticLightingBrickSize !== brickSize
+      ? planSparseSceneDomain(
+        scene, dimensions, options.staticLightingBrickSize,
+        environmentPrimitives.map((primitive) => ({ min: primitive.aabb_m.min, max: primitive.aabb_m.max })),
+        { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m },
+      )
+      : sceneDomain;
     this.solverGridOriginCells = sceneDomain.solverGridOriginCells;
     const maximumDepth = sparseSceneOctreeMaximumDepth(sceneDomain.brickDimensions, sceneDomain.coordinates);
     const plan = planAdaptiveSparseBrickOctree({
@@ -528,6 +547,10 @@ export class OctreeSparseBrickWorld {
     this.finestLevel = plan.maximumDepth;
     const packed = packSparseBrickPlan(plan, 1);
     this.tree = new SparseBrickOctreeGPU(device, { brickSize, nodeCapacity: Math.max(1, plan.nodes.length), leafCapacity: Math.max(1, plan.leaves.length), label: "Octree unified sparse-brick world" });
+    this.brickOccupancyBuilder = new WebGpuSvoBrickOccupancyBuilder(device);
+    this.compactHierarchy = plan.nodes.length === 0 ? undefined : new WebGpuSvoCompactHierarchy(device,
+      packSvoCompactHierarchy({ nodes: packed.nodes, leaves: packed.leaves,
+        publishedNodeCount: plan.nodes.length, publishedLeafCount: plan.leaves.length }, 1));
     // Renderer acceleration is a derived immutable view of the exact same
     // canonical terminal set. Failure leaves structural authority untouched
     // and simply omits the optional capability.
@@ -552,13 +575,15 @@ export class OctreeSparseBrickWorld {
     // world lattice. It deliberately excludes fluid lanes: water transport
     // and topology remain owned by the canonical simulation octree.
     let nodeMipPyramid: WebGpuSvoNodeMipPyramid | undefined;
+    let nodeMipWorldOrigin_m: readonly [number, number, number] | undefined;
     try {
       const maximumDirectoryPages = Math.min(8_192, Number(device.limits?.maxTextureDimension2D) || 8_192);
-      const staticMips = buildSvoStaticNodeMipPublication(scene, sceneDomain, environmentPrimitives, {
+      const staticMips = buildSvoStaticNodeMipPublication(scene, staticLightingDomain, environmentPrimitives, {
         generation: 1,
         capacity: maximumDirectoryPages,
         samplesPerAxis: 2,
       });
+      nodeMipWorldOrigin_m = staticMips.worldOrigin_m;
       nodeMipPyramid = new WebGpuSvoNodeMipPyramid(device);
       nodeMipPyramid.beginGeneration(staticMips.plan);
       for (const page of staticMips.interiors) nodeMipPyramid.uploadInteriorPage(page.key, page.interior);
@@ -708,16 +733,10 @@ export class OctreeSparseBrickWorld {
       layout: structuralLayout,
       entries: [{ binding: 0, resource: { buffer: this.structuralPublicationState } }],
     });
-    const proxyPrimitives: SparseScenePrimitive[] = environmentPrimitives.map((primitive) => {
-      const identity = {
-        center: [primitive.center_m.x, primitive.center_m.y, primitive.center_m.z] as const,
-        materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
-        ownerId: scene.rigidBodies.length + primitive.ownerIndex
-      };
-      if (primitive.kind === "box") return { ...identity, kind: "box", halfExtents: [primitive.halfSize_m.x, primitive.halfSize_m.y, primitive.halfSize_m.z] };
-      if (primitive.kind === "cylinder") return { ...identity, kind: "cylinder", radius: primitive.radius_m, halfHeight: primitive.halfHeight_m };
-      return { ...identity, kind: "ellipsoid", radii: [primitive.radius_m.x, primitive.radius_m.y, primitive.radius_m.z] };
-    });
+    const proxyPrimitives: SparseScenePrimitive[] = environmentPrimitives.map((primitive) => sparseScenePrimitiveForProxy(primitive, {
+      materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
+      ownerId: scene.rigidBodies.length + primitive.ownerIndex,
+    }));
     this.proxyVoxelizer = new SparseSceneProxyVoxelizer(device, this.tree, proxyPrimitives, {
       cellSize: this.cellSize,
       worldOrigin: [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z],
@@ -841,9 +860,14 @@ export class OctreeSparseBrickWorld {
       fluidBrickStats: { buffer: this.residency.worklist }, fluidBrickCapacity: this.residency.capacity,
       structural,
       wideFanout: this.wideFanout?.capability(),
-      nodeMipPyramid: this.nodeMipPyramid?.visibleGeneration(),
+      compactHierarchy: this.compactHierarchy?.capability(),
+      nodeMipPyramid: this.nodeMipPyramid?.visibleGeneration() && {
+        ...this.nodeMipPyramid.visibleGeneration()!,
+        worldOrigin_m: nodeMipWorldOrigin_m,
+      },
       derivedRenderAllocationBytes: {
         wideFanout: this.wideFanout?.allocatedBytes ?? 0,
+        compactHierarchy: this.compactHierarchy?.allocatedBytes ?? 0,
         nodeMipPyramid: this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0,
       },
       revision: 1
@@ -853,6 +877,7 @@ export class OctreeSparseBrickWorld {
       + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0)
       + this.pbrMaterialBuffer.size + this.lightBuffer.size + this.environmentLightingBuffer.size + this.structuralPublicationState.size
       + this.proxyVoxelizer.allocatedBytes + (this.wideFanout?.allocatedBytes ?? 0)
+      + (this.compactHierarchy?.allocatedBytes ?? 0)
       + (this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0);
   }
 
@@ -931,6 +956,10 @@ export class OctreeSparseBrickWorld {
     this.published = true;
     this.proxyVoxelizer.encode(encoder);
     this.proxiesPublished = true;
+    // Render acceleration is derived only after the authoritative immutable
+    // material/owner payload has been voxelized. It writes terminal node flags
+    // in place and adds no publication binding or persistent allocation.
+    this.brickOccupancyBuilder.encode(encoder, this.tree);
     const broker = new PassBroker(encoder);
     const finalizer = broker.compute({ label: "Finalize static sparse voxel structural publication" });
     finalizer.setPipeline(this.structuralStaticPipeline);
@@ -968,6 +997,9 @@ export class OctreeSparseBrickWorld {
       this.proxyVoxelizer.encode(encoder);
       this.proxiesPublished = true;
     }
+    // Dense material owners may change every simulation frame. Rebuild before
+    // the generation finalizer so a renderer never observes stale skip bounds.
+    this.brickOccupancyBuilder.encode(encoder, this.tree);
     if (encodePlan.inspectionPublication) {
       this.encodeInspectionPublication(encoder);
       inspection?.publication.markEncoded();
@@ -1013,6 +1045,7 @@ export class OctreeSparseBrickWorld {
     this.bulkResidency?.destroy();
     this.proxyVoxelizer.destroy();
     this.wideFanout?.destroy();
+    this.compactHierarchy?.destroy();
     this.nodeMipPyramid?.destroy();
     for (const buffer of [...this.sourceBuffers, this.pbrMaterialBuffer, this.lightBuffer, this.environmentLightingBuffer, this.structuralPublicationState, ...(this.inspection?.buffers ?? [])]) buffer.destroy();
   }

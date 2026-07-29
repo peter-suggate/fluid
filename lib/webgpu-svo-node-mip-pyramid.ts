@@ -53,6 +53,8 @@ export interface WebGpuSvoNodeMipVisibleGeneration {
   /** Sampled uint directory avoids consuming an additional renderer storage binding. */
   directoryTexture: GPUTexture;
   directoryView: GPUTextureView;
+  /** Optional world-space coordinate frame when it differs from the structural tree. */
+  worldOrigin_m?: readonly [number, number, number];
 }
 
 interface OwnedGeneration extends WebGpuSvoNodeMipVisibleGeneration {

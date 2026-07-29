@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+  OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY,
   OCTREE_SECTION43_MINI_SHELL_DEPTH,
   OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT,
   OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
@@ -16,6 +17,16 @@ const PROFILES = Object.freeze({
     finestDimensions: [16, 16, 16], maximumLeafSize: 2,
     initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
     movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
+  },
+  ceilingDrop: {
+    finestDimensions: [24, 16, 24], maximumLeafSize: 2,
+    initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
+    movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-4,
+  },
+  largerTwoLevel: {
+    finestDimensions: [32, 24, 16], maximumLeafSize: 2,
+    initialCondition: "tank-fill", hasInflow: false, hasTerrain: false,
+    movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-4,
   },
   uiDam: {
     finestDimensions: [24, 18, 16], maximumLeafSize: 16,
@@ -32,6 +43,11 @@ const PROFILES = Object.freeze({
     initialCondition: "tank-fill", hasInflow: true, hasTerrain: true,
     movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
   },
+  ocean: {
+    finestDimensions: [320, 96, 80], maximumLeafSize: 32,
+    initialCondition: "tank-fill", hasInflow: false, hasTerrain: false,
+    movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-4,
+  },
 } satisfies Record<string, OctreeSolveTailSceneProfile>);
 
 test("solve-tail policy encodes the paper upper envelope and keeps scene score as telemetry", () => {
@@ -45,7 +61,12 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
   ], [10, 10, 10]);
   assert.equal(mini.boundarySmoothingIterations,
     OCTREE_SECTION43_MINI_SHELL_DEPTH);
-  for (const policy of [quiescent, river, planOctreeSolveTail(PROFILES.uiDam)]) {
+  assert.equal(OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY, 9_216);
+  assert.equal(planOctreeSolveTail(PROFILES.ceilingDrop).boundarySmoothingIterations,
+    OCTREE_SECTION43_MINI_SHELL_DEPTH,
+    "the 24x16x24 ceiling keeps its validated k=4 shell independent of executor choice");
+  for (const policy of [quiescent, river, planOctreeSolveTail(PROFILES.uiDam),
+    planOctreeSolveTail(PROFILES.largerTwoLevel), planOctreeSolveTail(PROFILES.ocean)]) {
     assert.ok(policy.encodedOuterIterations >= 4
       && policy.encodedOuterIterations <= 10);
     assert.equal(policy.hardOuterIterationCeiling, 16);
@@ -74,9 +95,12 @@ test("solve-tail policy admits an explicit symmetric Section 4.3 shell-depth exp
 test("selected Section 4.3 shell has deterministic five-level command counts", () => {
   const expectedCounts = new Map<OctreeSolveTailSceneProfile, number>([
     [PROFILES.miniDam, 696],
+    [PROFILES.ceilingDrop, 696],
+    [PROFILES.largerTwoLevel, 872],
     [PROFILES.uiDam, 872],
     [PROFILES.quiescent, 872],
     [PROFILES.river, 872],
+    [PROFILES.ocean, 872],
   ]);
   for (const profile of Object.values(PROFILES)) {
     const policy = planOctreeSolveTail(profile);

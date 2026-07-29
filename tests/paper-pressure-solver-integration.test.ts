@@ -12,7 +12,7 @@ const hybridSource = readFileSync(
 );
 const spgridCycleSource = readFileSync(new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
 const uniformSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
-const smokeSource = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+const smokeSource = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
 
 test("paper MGPCG is the only production pressure authority", () => {
   assert.equal(octreeMethod.params.some((parameter) => parameter.key === "powerMultigridHierarchy"), false);
@@ -109,13 +109,16 @@ test("pressure source no longer contains the deleted aggregate hierarchy", () =>
 });
 
 test("Dawn performance mode isolates stepping wall time from compact-field QA", () => {
-  assert.match(smokeSource, /process\.env\.FLUID_PERFORMANCE_PROFILE === "1"/);
-  assert.match(smokeSource, /!collectStabilityEnvelope && !performanceProfileRequested/);
-  assert.match(smokeSource, /if \(!performanceProfileRequested\) failures\.push\(\.\.\.invariantFailures/);
   assert.match(smokeSource,
-    /const simulationWall_ms[\s\S]*await awaitAdvanceCompletion\(\);[\s\S]*finalPerformanceAuthorityFailures/,
-    "the final packed authority gate must remain outside measured stepping wall time");
-  assert.match(smokeSource, /scenarioId === "dam-break-ui" \? "final-authority-only" : "skipped"/);
+    /environmentBoolean\("FLUID_PERFORMANCE_PROFILE", collect\.performanceProfile\)/,
+    "the scene-authored profile remains the default with an explicit operational override");
+  assert.match(smokeSource, /!collectStabilityEnvelope && !performanceProfileRequested/);
+  assert.match(smokeSource, /evaluateSceneDiagnosticLane\(sceneDiagnosticRuntimeRegistry/);
+  assert.doesNotMatch(smokeSource, /invariantFailures/);
+  assert.match(smokeSource,
+    /await awaitAdvanceCompletion\(\);[\s\S]*const simulationWall_ms = queueCompleteSimulationWall_ms[\s\S]*finalPerformanceAuthorityFailures/,
+    "stepping wall must include the final queue drain while the packed authority gate remains outside it");
+  assert.match(smokeSource, /runOptions\.performanceProfile[\s\S]*?"final-authority-only"/);
 });
 
 test("the pipelined preconditioner remains one fixed proof-carrying V-cycle", () => {

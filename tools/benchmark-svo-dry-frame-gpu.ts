@@ -20,16 +20,31 @@
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25, default 0.5),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
+ *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default hybrid),
+ *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
+ *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only static-world override),
+ *      FLUID_SVO_DRY_FRAME_SHADING (inline | split; default inline),
+ *      FLUID_SVO_DRY_FRAME_COHERENCE (off | static-primary; default off;
+ *      static-primary requires split and reuses exact primary visibility),
+ *      FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS (0 disables; diagnostic canonical primary-ray proxy),
  *      FLUID_SVO_DRY_FRAME_SCENE (default garden-svo-lighting),
- *      FLUID_SVO_DRY_FRAME_OUT, FLUID_SVO_DRY_FRAME_CAMERA_MOVING (1 publishes
+ *      FLUID_SVO_DRY_FRAME_OUT, FLUID_SVO_DRY_FRAME_RAW_OUT (optional packed
+ *      scale-1 rgba16float fingerprint frame),
+ *      FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT (optional packed rgba16float at
+ *      the requested cone scale), FLUID_SVO_DRY_FRAME_CAMERA_MOVING (1 publishes
  *      the camera-changing sentinel, times the moving tier against the settled
  *      tier, and reports settle-pop luminance stats plus moving/settled PNGs).
+ *      FLUID_SVO_DRY_FRAME_TIMING=wall bypasses timestamp queries and measures
+ *      serialized submit-to-fence wall time (useful on Dawn builds where a
+ *      timestamp-query feature is exposed but query resolution is unreliable).
  *      FLUID_SVO_DRY_FRAME_PROFILE_SECONDS runs a clean, continuously submitted
  *      render-only frame loop for external xctrace attachment and exits before
  *      the benchmark's timestamp queries, A/Bs, or readbacks.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
@@ -51,15 +66,50 @@ import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
   canConsumeSparseVoxelPbrMaterials,
-  canConsumeSparseVoxelPrimitiveCandidates,
   canEncodeSparseVoxelDryScene,
   resolveSparseVoxelThickGlassBinderStatus,
+  SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
+  SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL,
   SparseVoxelDrySceneRenderer,
   svoConePrepassSize,
   type SparseVoxelDrySceneData,
+  type SvoBrickOccupancyMode,
   type SvoConeLightingScale,
+  type SvoDryTraversalMode,
+  type SvoDryShadingPath,
+  type SvoDryRayCoherenceMode,
 } from "../lib/webgpu-svo-dry-scene";
 import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
+const sourceProvenance = () => {
+  const git = (...arguments_: string[]): string => execFileSync("git", arguments_, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  const commit = git("rev-parse", "HEAD").trim();
+  const status = git("status", "--short", "--untracked-files=all");
+  const trackedDiff = git("diff", "--no-ext-diff", "--binary", "HEAD");
+  const renderPaths = git("ls-files", "-co", "--exclude-standard")
+    .split("\n")
+    .filter((file) => /^(?:lib\/(?:webgpu-svo|webgpu-static-svo|svo-|scenes\.ts|paper-scenarios\.ts|environments\.ts|voxel-scenery\/)|tools\/benchmark-svo-dry-frame-gpu\.ts)/.test(file))
+    .sort();
+  const renderHash = createHash("sha256");
+  for (const file of renderPaths) {
+    renderHash.update(file).update("\0").update(readFileSync(path.resolve(repoRoot, file))).update("\0");
+  }
+  return {
+    commit,
+    dirty: status.trim().length > 0,
+    changedFiles: status.split("\n").filter(Boolean).length,
+    fingerprint: createHash("sha256")
+      .update(commit).update("\n").update(status).update("\n").update(trackedDiff).digest("hex"),
+    renderFingerprint: renderHash.digest("hex"),
+    renderFiles: renderPaths.length,
+  };
+};
 
 const width = Number(process.env.FLUID_SVO_DRY_FRAME_WIDTH ?? 1280);
 const height = Number(process.env.FLUID_SVO_DRY_FRAME_HEIGHT ?? 720);
@@ -67,11 +117,21 @@ const warmups = Number(process.env.FLUID_SVO_DRY_FRAME_WARMUPS ?? 4);
 const cycles = Number(process.env.FLUID_SVO_DRY_FRAME_CYCLES ?? 16);
 const encodesPerSample = Number(process.env.FLUID_SVO_DRY_FRAME_ENCODES_PER_SAMPLE ?? 1);
 const outPath = process.env.FLUID_SVO_DRY_FRAME_OUT ?? "/tmp/svo-bench/baseline.json";
+const rawOutPath = process.env.FLUID_SVO_DRY_FRAME_RAW_OUT;
+const configuredRawOutPath = process.env.FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT;
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
+const forceWallTiming = process.env.FLUID_SVO_DRY_FRAME_TIMING === "wall";
+const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "hybrid";
+const brickOccupancyModeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY ?? "off";
+const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "inline";
+const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
+const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
+const renderBrickSizeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_SIZE;
+const renderBrickSize = renderBrickSizeRaw === undefined ? undefined : Number(renderBrickSizeRaw);
 /**
  * Publish the camera-changing sentinel so the dry shader's moving-quality tier
  * is exercised, and additionally report moving-vs-settled timings, the
@@ -103,7 +163,25 @@ assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
 assert.ok([1, 0.5, 0.25].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, or 0.25");
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
   "FLUID_SVO_DRY_FRAME_PROFILE_SECONDS must be a non-negative number");
+assert.ok(renderBrickSize === undefined || renderBrickSize === 4 || renderBrickSize === 8,
+  "FLUID_SVO_DRY_FRAME_BRICK_SIZE must be 4 or 8");
+assert.ok(["hybrid", "canonical", "canonical-parametric", "compact", "wide"].includes(traversalModeRaw),
+  "FLUID_SVO_DRY_FRAME_TRAVERSAL must be hybrid, canonical, canonical-parametric, compact, or wide");
+assert.ok(["off", "bounds", "macro", "macro-hdda"].includes(brickOccupancyModeRaw),
+  "FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY must be off, bounds, macro, or macro-hdda");
+assert.ok(["inline", "split"].includes(shadingPathRaw),
+  "FLUID_SVO_DRY_FRAME_SHADING must be inline or split");
+assert.ok(["off", "static-primary"].includes(rayCoherenceModeRaw),
+  "FLUID_SVO_DRY_FRAME_COHERENCE must be off or static-primary");
+assert.ok(rayCoherenceModeRaw === "off" || shadingPathRaw === "split",
+  "FLUID_SVO_DRY_FRAME_COHERENCE=static-primary requires FLUID_SVO_DRY_FRAME_SHADING=split");
+assert.ok(Number.isFinite(screenSpaceTerminationPixels) && screenSpaceTerminationPixels >= 0,
+  "FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS must be a non-negative finite number");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
+const traversalMode = traversalModeRaw as SvoDryTraversalMode;
+const brickOccupancyMode = brickOccupancyModeRaw as SvoBrickOccupancyMode;
+const shadingPath = shadingPathRaw as SvoDryShadingPath;
+const rayCoherenceMode = rayCoherenceModeRaw as SvoDryRayCoherenceMode;
 
 const log = (message: string) => process.stderr.write(`${message}\n`);
 
@@ -285,7 +363,14 @@ const scene = preset.create();
 const camera: CameraState = { ...defaultCamera, ...preset.camera, target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m) } };
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
 
-const solver = await WebGPUStaticSvoScene.create(device, scene, "balanced", ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`));
+const solver = await WebGPUStaticSvoScene.create(
+  device,
+  scene,
+  "balanced",
+  ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`),
+  undefined,
+  renderBrickSize === undefined ? {} : { renderBrickSize },
+);
 const source = solver.sparseVoxelSceneSource;
 assert.ok(source?.structural, "static SVO world did not publish a structural scene source");
 
@@ -300,7 +385,6 @@ const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "
 const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, source);
 const drySceneData: SparseVoxelDrySceneData = {
   primitiveRecords: scenePrimitives.packedRecords,
-  primitiveCandidates: scenePrimitives.primitiveCandidates,
   ownerBase: scene.rigidBodies.length,
   skippedOwnerId: scenePrimitives.openShellOwnerId,
   terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
@@ -318,7 +402,6 @@ const drySceneData: SparseVoxelDrySceneData = {
 };
 assert.equal(scenePrimitives.requiresRasterTerrainFallback, false, "garden terrain must render analytically");
 assert.ok(canConsumeSparseVoxelPbrMaterials(source), "PBR material publication unavailable");
-assert.ok(canConsumeSparseVoxelPrimitiveCandidates(drySceneData), "primitive candidate BVH unavailable");
 assert.ok(canEncodeSparseVoxelDryScene(source, drySceneData), "production dry-scene contract rejected the garden source");
 const nodeMip = source.nodeMipPyramid;
 const coneMipReady = Boolean(nodeMip && nodeMip.generation > 0 && nodeMip.plan.complete);
@@ -333,7 +416,7 @@ const bodies = packBodies(scene);
 device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count));
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
-const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer);
+const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels, rayCoherenceMode);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setLightingMode(process.env.FLUID_SVO_DRY_FRAME_LIGHTING === "direct" ? "direct" : "cone");
 function applyLighting(scale: SvoConeLightingScale, shadows = shadowsEnabled, ambientOcclusion = ambientOcclusionEnabled): void {
@@ -354,8 +437,14 @@ const target = device.createTexture({
   usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
 });
 
+// Deliberately explicit: this benchmark scene, camera, viewport, and rigid-body
+// publication are frozen. Production callers must construct an equivalent key
+// from their own revisions; undefined always traces.
+const primaryCoherenceKey = rayCoherenceMode === "static-primary"
+  ? JSON.stringify({ scenePresetId, width, height, camera, bodyCount: bodies.count, sourceRevision: source.revision })
+  : undefined;
 function encodeFrame(encoder: GPUCommandEncoder): void {
-  const result = renderer.encode(encoder, target);
+  const result = renderer.encode(encoder, target, undefined, primaryCoherenceKey);
   assert.ok(result && result.encoded, "production dry-scene encode declined the frame (raster fallback)");
 }
 
@@ -434,7 +523,7 @@ let timingMethod: string;
 let traceSampleId = 0;
 async function timeFrames(count: number, label: string): Promise<number[]> {
   const samples: number[] = [];
-  if (GPUPerformanceTraceRecorder.supported(device)) {
+  if (GPUPerformanceTraceRecorder.supported(device) && !forceWallTiming) {
     timingMethod = "generic-performance-trace";
     for (let cycle = 0; cycle < count; cycle += 1) {
       const encoder = device.createCommandEncoder({ label: `${label} cycle ${cycle}` });
@@ -468,7 +557,8 @@ async function timeFrames(count: number, label: string): Promise<number[]> {
   return samples;
 }
 
-timingMethod = GPUPerformanceTraceRecorder.supported(device) ? "generic-performance-trace" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
+timingMethod = GPUPerformanceTraceRecorder.supported(device) && !forceWallTiming
+  ? "generic-performance-trace" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
 const samples = await timeFrames(cycles, "Bench");
 assert.equal(samples.length, cycles);
 assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
@@ -479,6 +569,7 @@ assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
 // Interleaved cycle-by-cycle so thermal drift cancels between the two tiers.
 // ---------------------------------------------------------------------------
 function writeViewUniforms(moving: boolean, overlay?: { mode: number; opacity: number }): void {
+  renderer.setDiagnosticOverlayActive(Boolean(overlay?.mode));
   device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count, overlay, moving));
 }
 let movingTierTiming: { moving_ms: number[]; settled_ms: number[] } | undefined;
@@ -564,6 +655,24 @@ async function captureFrame(label: string): Promise<Uint32Array> {
   readback.destroy();
   return packedRows;
 }
+async function captureTextureBytes(texture: GPUTexture, bytesPerPixelIn: number, label: string, aspect: GPUTextureAspect = "all"): Promise<Uint8Array> {
+  const paddedBytesPerRow = Math.ceil(width * bytesPerPixelIn / 256) * 256;
+  const readback = device.createBuffer({ label: `${label} readback`, size: paddedBytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder({ label });
+  encoder.copyTextureToBuffer({ texture, aspect }, { buffer: readback, bytesPerRow: paddedBytesPerRow, rowsPerImage: height }, [width, height]);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await readback.mapAsync(GPUMapMode.READ);
+  const mapped = new Uint8Array(readback.getMappedRange());
+  const compact = new Uint8Array(width * bytesPerPixelIn * height);
+  for (let row = 0; row < height; row += 1) compact.set(
+    mapped.subarray(row * paddedBytesPerRow, row * paddedBytesPerRow + width * bytesPerPixelIn),
+    row * width * bytesPerPixelIn,
+  );
+  readback.unmap();
+  readback.destroy();
+  return compact;
+}
 function decodePixels(packedRows: Uint32Array): Float32Array {
   const halfWords = new Uint16Array(packedRows.buffer, packedRows.byteOffset, packedRows.length * 2);
   const pixels = new Float32Array(width * height * 4);
@@ -583,6 +692,13 @@ function relativeLuminance(pixels: Float32Array, pixelIndex: number): number {
 writeViewUniforms(false);
 applyLighting(1);
 const referenceRows = await captureFrame("Bench fingerprint frame");
+const referenceGBuffer = renderer.gBufferTextures;
+assert.ok(referenceGBuffer, "dry renderer did not retain its G-buffer after the reference frame");
+const [packedSurfaceBytes, identityMediaBytes, hardwareDepthBytes] = await Promise.all([
+  captureTextureBytes(referenceGBuffer.packedSurface, 16, "Bench packed-surface fingerprint"),
+  captureTextureBytes(referenceGBuffer.identityMedia, 8, "Bench identity-media fingerprint"),
+  captureTextureBytes(referenceGBuffer.hardwareDepth, 4, "Bench hardware-depth fingerprint", "depth-only"),
+]);
 let reducedRows: Uint32Array | undefined;
 let overlayRows: Uint32Array | undefined;
 // Settle-pop capture: the same scale and lighting, differing only in the
@@ -615,6 +731,17 @@ if (coneScale !== 1) {
 // Reference frame (scale 1) carries the bit-exact fingerprint contract.
 const imageHash = fnv1a32(referenceRows);
 const referencePixels = decodePixels(referenceRows);
+if (rawOutPath) {
+  mkdirSync(path.dirname(rawOutPath), { recursive: true });
+  writeFileSync(rawOutPath, new Uint8Array(referenceRows.buffer, referenceRows.byteOffset, referenceRows.byteLength));
+}
+const configuredRows = coneScale === 1 ? referenceRows : reducedRows;
+assert.ok(configuredRows, "configured-scale frame was not captured");
+if (configuredRawOutPath) {
+  mkdirSync(path.dirname(configuredRawOutPath), { recursive: true });
+  writeFileSync(configuredRawOutPath,
+    new Uint8Array(configuredRows.buffer, configuredRows.byteOffset, configuredRows.byteLength));
+}
 if (process.env.FLUID_SVO_DRY_FRAME_DUMP) {
   const dump = new Uint8Array(width * height * 3);
   for (let pixel = 0; pixel < width * height; pixel += 1) {
@@ -786,8 +913,36 @@ if (movingTierTiming) {
 // ---------------------------------------------------------------------------
 const result = {
   phase: "svo-dry-frame-gpu-benchmark",
+  source: sourceProvenance(),
   adapter: adapterInfo,
   backend: "metal",
+  traversalMode,
+  brickOccupancyMode,
+  shadingPath,
+  rayCoherenceMode,
+  screenSpaceTermination: {
+    thresholdPixels: screenSpaceTerminationPixels,
+    mode: screenSpaceTerminationPixels > 0 ? "diagnostic-conservative-aabb-proxy" : "exact",
+    shadowsRemainExact: true,
+    representativeMaterial: false,
+    representativeNormal: false,
+  },
+  splitShading: shadingPath === "split" ? {
+    extraBytesPerPixel: SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
+    extraMiBPerFrame: width * height * SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL / (1024 * 1024),
+    extraGiBPerSecondAt60Fps: width * height * SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL * 60 / (1024 ** 3),
+    residentBytesPerPixel: SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL,
+    residentMiB: width * height * SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL / (1024 * 1024),
+  } : undefined,
+  rayCoherence: rayCoherenceMode === "static-primary" ? {
+    exact: true,
+    scope: "unchanged camera + geometry + rigid-body publication",
+    warmupPrimaryFrames: 1,
+    steadyPrimaryRaysTracedPerFrame: 0,
+    steadyPrimaryRaysReusedPerFrame: width * height,
+    shadowAndConeRaysRemainPerFrame: true,
+    incrementalResidentBytes: 0,
+  } : undefined,
   resolution: { width, height },
   timing: {
     method: timingMethod,
@@ -826,8 +981,21 @@ const result = {
     temporalAccumulation: false,
     grid: { nx: solver.info.nx, ny: solver.info.ny, nz: solver.info.nz },
     brickSize: source.structural!.domain.brickSize,
+    authoredBrickSize: scene.voxelDomain.brickSize_cells,
     maximumDepth: source.structural!.domain.maximumDepth,
     structuralCapacities: source.structural!.capacities,
+    structuralBytes: {
+      topology: source.structural!.capacities.nodes * source.structural!.strides.node
+        + source.structural!.capacities.leaves * source.structural!.strides.leaf,
+      geometry: source.structural!.capacities.voxels * source.structural!.strides.geometry,
+      velocity: source.structural!.capacities.voxels * source.structural!.strides.velocity,
+      materialOwners: source.structural!.capacities.voxels * source.structural!.strides.materialOwner,
+      payload: source.structural!.capacities.voxels * (
+        source.structural!.strides.geometry
+        + source.structural!.strides.velocity
+        + source.structural!.strides.materialOwner
+      ),
+    },
     primitiveCount: scenePrimitives.packedRecords.byteLength / 64,
     glassPaneCount: sceneGlass.metadata.length,
     thickGlassStatus: resolveSparseVoxelThickGlassBinderStatus(drySceneData),
@@ -836,12 +1004,27 @@ const result = {
     terrain: Boolean(scene.terrain),
     nodeMipPyramid: { ready: coneMipReady, generation: nodeMip?.generation ?? 0, pages: nodeMip?.plan.pages.length ?? 0 },
     wideFanout: Boolean(source.wideFanout),
+    compactHierarchy: source.compactHierarchy ? {
+      ready: true,
+      nodeCount: source.compactHierarchy.nodeCount,
+      strideBytes: source.compactHierarchy.strideBytes,
+      residentBytes: source.compactHierarchy.residentBytes,
+      canonicalNodeBytes: source.compactHierarchy.nodeCount * 32,
+      hotNodeByteReductionPercent: 100 * (1 - source.compactHierarchy.strideBytes / 32),
+    } : { ready: false },
+    derivedRenderAllocationBytes: source.derivedRenderAllocationBytes,
     allocatedBytes: solver.info.allocatedBytes,
   },
   camera,
   fingerprint: {
     contract: "reference (scale 1) frame: 16x16 grid of RGBA radianceDepth (rgba16float, decoded to f32) at pixel centers of a uniform grid, plus FNV-1a-32 over the full packed image bytes; bit-exact reproduction expected on identical hardware/driver, otherwise compare grid values within 1e-3 absolute",
     imageHashFnv1a32: `0x${imageHash.toString(16).padStart(8, "0")}`,
+    packedSurfaceHashFnv1a32: `0x${fnv1a32(new Uint32Array(packedSurfaceBytes.buffer)).toString(16).padStart(8, "0")}`,
+    identityMediaHashFnv1a32: `0x${fnv1a32(new Uint32Array(identityMediaBytes.buffer)).toString(16).padStart(8, "0")}`,
+    hardwareDepthHashFnv1a32: `0x${fnv1a32(new Uint32Array(hardwareDepthBytes.buffer)).toString(16).padStart(8, "0")}`,
+    packedRgba16FloatPath: rawOutPath,
+    configuredImageHashFnv1a32: `0x${fnv1a32(configuredRows).toString(16).padStart(8, "0")}`,
+    configuredPackedRgba16FloatPath: configuredRawOutPath,
     referenceHashMatchesBaseline,
     litSampleCount: litSamples,
     gridSize,

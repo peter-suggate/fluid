@@ -79,9 +79,11 @@ new residual into that space, then run ordinary MGPCG. The safe first target is
 four outer iterations to two without changing the stopping criterion. This is
 a Gate-B numerical change; non-convergence remains fail-closed.
 
-Do not revive the one-workgroup persistent solve. It reduced launches but
-measured 15.1 ms slower because it used roughly one GPU core. The production
-shape remains many row/page workgroups.
+The one-workgroup persistent solve is now the small-capacity production path.
+The older +15.1 ms label-isolated result does not predict clean wall time:
+current A/Bs measure ceiling 113 -> 53 ms/10 advances and mini 107 -> 58 ms/10.
+Retain the hierarchical path for larger capacities and as the
+`FLUID_OCTREE_PERSISTENT_MGPCG=0` oracle.
 
 ### 2. Halve the symmetric Section 4.3 shell -- landed and measured
 
@@ -157,6 +159,13 @@ path. This specialization is for this mini dam-break case; large sparse scenes
 continue to use SPGrid.
 
 ### 5. Separate stable graphs from per-frame values
+
+The Section 5 portion of this item landed on 2026-07-29. A GPU-validated
+same-epoch receipt now reuses identities, tags, owner directory, catalog
+topology and face adjacency across the two required publications; dynamic fine
+demand and velocities are refreshed. The remaining work is the same mechanism
+for the other graphs below and replacing Section 5's domain-wide air membership
+with an exact compact seed-to-demand corridor.
 
 Several low-occupancy tasks rebuild identities and relationships although only
 values changed:
@@ -237,9 +246,10 @@ executed step.
 - **One 256-lane adjoint workgroup per transition row:** 38.11 -> 38.27 ms.
   The fine-adjoint span is limited by dependent address chains, not its
   child-by-direction loop.
-- **One-workgroup persistent MGPCG:** 79.7 -> 94.8 ms in the earlier isolated
-  comparison despite removing hundreds of launches. Parallelism matters more
-  than dispatch count on this GPU.
+- **One-workgroup persistent MGPCG (historical):** 79.7 -> 94.8 ms in the
+  earlier isolated comparison. Superseded by clean current-tree small-scene
+  A/Bs (ceiling 113 -> 53 ms/10; mini 107 -> 58 ms/10). Trace isolation changed
+  the command graph and made that older result unsuitable for selection.
 
 These failures all point to the same conclusion: cache **published results and
 stable relationships across frames**, not small lookup fragments inside one

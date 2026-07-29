@@ -10,7 +10,6 @@ const ready: EffectiveRendererConditions = {
   terrainSupported: true,
   glassSupported: true,
   materialsSupported: true,
-  primitiveCandidatesSupported: true,
   lightingSupported: true,
   inspectionMode: false,
   svoEncoded: true,
@@ -48,9 +47,6 @@ test("effective renderer status distinguishes required SVO fallbacks", () => {
   assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, materialsSupported: false, svoEncoded: false }), {
     requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-pbr-materials",
   });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, primitiveCandidatesSupported: false, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-primitive-candidates",
-  });
   assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, lightingSupported: false, svoEncoded: false }), {
     requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-lighting-publications",
   });
@@ -83,5 +79,5 @@ test("renderer publishes effective status through the viewport diagnostics bridg
   assert.match(renderer, /canEncodeSparseVoxelDryScene\(sparseSceneSource,drySceneData\)/);
   assert.match(viewport, /effectiveRendererStatus\) => useDiagnosticsStore\.getState\(\)\.set\(\{ effectiveRendererStatus \}\)/);
   assert.match(panel, /data-testid="effective-renderer-status"/);
-  for (const reason of ["missing-source", "unsupported-terrain", "unsupported-glass-cutout", "missing-pbr-materials", "missing-primitive-candidates", "missing-lighting-publications", "pipeline-compile-failure"]) assert.ok(panel.includes(`"${reason}"`));
+  for (const reason of ["missing-source", "unsupported-terrain", "unsupported-glass-cutout", "missing-pbr-materials", "missing-lighting-publications", "pipeline-compile-failure"]) assert.ok(panel.includes(`"${reason}"`));
 });

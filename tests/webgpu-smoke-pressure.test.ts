@@ -109,7 +109,7 @@ test("projected variational diagnostics convert algebraic pressure residual to E
     octreeProjectedVariationalResidualRms(1, 0.004, 0),
   ]) assert.equal(value, undefined);
 
-  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  const smoke = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
   assert.match(smoke,
     /projectedVariationalResidual = octreeProjectedVariationalResidualRms\([\s\S]*sample\.pressureResidual, stepDt, scene\.fluid\.density_kg_m3\)/,
     "the per-step envelope must consume the Eq. (4) flux residual derived from the current solve and timestep");

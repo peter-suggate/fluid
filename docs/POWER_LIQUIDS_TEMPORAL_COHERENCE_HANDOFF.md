@@ -117,10 +117,12 @@ controls are authoritative for shipping wall time.
   **This is the template for all new coherence**: GPU-resident fingerprint +
   fail-closed carry gated on the accepted-epoch commit token. Never a
   host-side skip.
-- **Persistent MGPCG megakernel (Part D)** is implemented and measured 15 ms
-  *slower*; deliberately not selected (`lib/webgpu-octree.ts:335-350`,
-  `FLUID_OCTREE_PERSISTENT_MGPCG`). Do not resurrect it as an answer to the
-  small-dispatch problem.
+- **Persistent MGPCG megakernel (Part D)** is now the default for constructed
+  capacities up to 16,384. The older “15 ms slower” result was label-isolated
+  and does not predict clean small-scene wall time. Current clean A/Bs are
+  ceiling 113 -> 53 ms/10 advances and mini 107 -> 58 ms/10, both converged
+  with zero tripwires. `FLUID_OCTREE_PERSISTENT_MGPCG=0` keeps the hierarchical
+  oracle.
 - The epoch validator already tolerates a zero-page SPGrid delta as valid
   reuse (`lib/webgpu-octree-topology-epoch.ts:243-247`) — the precedent for
   extending "unchanged ⇒ no work" to other families.

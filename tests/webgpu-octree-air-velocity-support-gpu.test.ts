@@ -7,13 +7,18 @@ import { auditWGSLComputeBindingReachability } from "../lib/wgsl-binding-reachab
 
 import {
   decodeOctreeAirSupportGPUFirstError,
+  octreeAirSupportChangedFrontierEnabled,
+  octreeAirSupportTopologyReuseEnabled,
   OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE,
   OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS,
-  OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX,
   OCTREE_AIR_SUPPORT_GPU_ERROR,
   OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE,
+  OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES,
+  OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX,
+  OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS,
   OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS,
   OCTREE_AIR_SUPPORT_GPU_TOPOLOGY_STAGE,
+  OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES,
   WebGPUOctreeAirVelocitySupportProducer,
   octreeAirVelocitySupportPublicationWGSL,
   planOctreeAirVelocitySupportGPU,
@@ -34,6 +39,18 @@ test("bounded topology errors retain stage and item in the existing word", () =>
   });
   assert.match(compact(octreeAirVelocitySupportPublicationWGSL),
     /fnfailTopology\(stage:u32,item:u32\).*stage<<24u.*item&0x00ffffffu/);
+});
+
+test("same-epoch Section 5 topology reuse defaults on and retains a full-rebuild A/B", () => {
+  assert.equal(octreeAirSupportTopologyReuseEnabled({}), true);
+  assert.equal(octreeAirSupportTopologyReuseEnabled({ FLUID_OCTREE_AIR_SUPPORT_TOPOLOGY_REUSE: "1" }), true);
+  assert.equal(octreeAirSupportTopologyReuseEnabled({ FLUID_OCTREE_AIR_SUPPORT_TOPOLOGY_REUSE: "0" }), false);
+});
+
+test("Section 5 changed-frontier defaults on and retains a construction-stable dense A/B", () => {
+  assert.equal(octreeAirSupportChangedFrontierEnabled({}), true);
+  assert.equal(octreeAirSupportChangedFrontierEnabled({ FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER: "1" }), true);
+  assert.equal(octreeAirSupportChangedFrontierEnabled({ FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER: "0" }), false);
 });
 
 test("GPU plan composes both support layouts and bounded candidate schedules", () => {
@@ -65,7 +82,11 @@ test("GPU plan composes both support layouts and bounded candidate schedules", (
   assert.equal(OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE, 1 + 30 + 24 + 4);
   assert.equal(plan.faceAdjacencyStride, OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE);
   assert.equal(plan.faceAdjacencyBytes, plan.faceCellCapacity * plan.faceAdjacencyStride * 4);
+  assert.equal(plan.faceFrontierBytes, (16 + 3 * plan.faceCapacity) * 4,
+    "two compact queues and generation marks must cover every face exactly");
   assert.equal(plan.directAirVectorBytes, plan.rowCapacity * 16);
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 51,
+    "same-epoch graph and seed-list reuse controls must remain outside the candidate arena");
 });
 
 test("WGSL performs deterministic mark, parallel scan, scatter, and tag resolution", () => {
@@ -105,6 +126,45 @@ test("producer proves generations and exact owner identities before admitting ai
   assert.match(shader,
     /fnmarkFineBandAirSupportDemand.*fineWorklist\[0\]==p\.expectedFineGeneration.*fineMetadata\[id\*10u\+2u\]!=p\.expectedFineGeneration/s,
     "fine-band demand must be generated only from the exact selected fine publication");
+  assert.match(shader,
+    /letreuseTopology=p\.reuseTopology!=0u&&existingReady&&precedingSupportRows<=p\.supportCapacity;sw\(47u,select\(0u,1u,reuseTopology\)\)/,
+    "same-epoch reuse must be GPU-gated by a valid receipt, never host optimism");
+});
+
+test("the second same-epoch Section 5 publication reuses immutable topology and refreshes fine demand", () => {
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  const begin = shader.slice(shader.indexOf("fnbeginAirSupportPublication"),
+    shader.indexOf("fnclearAirSupportDirectory"));
+  assert.match(begin,
+    /existingReady=.*airControlOffset\+2u.*accepted\.epoch.*airControlOffset\+3u.*accepted\.bank.*airControlOffset\+4u.*boundaryNow/s,
+    "a topology, bank, or liquid-mask/boundary epoch change must force a fresh solution");
+  assert.match(begin,
+    /letretainedGraph=reuseTopology&&\(p\.capturePreceding&2u\)!=0u&&atomicLoad\(&faceFrontier\[11u\]\)==RETAINED_GRAPH_VALID&&precedingSeeds<=3u\*p\.candidateCapacity&&precedingSeeds<=p\.faceCapacity/s,
+    "retained values require the preceding sparse graph marker and a bounded exact seed list");
+  const clear = shader.slice(shader.indexOf("fnclearAirSupportDirectory"),
+    shader.indexOf("fnclearAirSupportCandidates"));
+  assert.match(clear, /s\(47u\)!=0u.*~\(QUERY_FINE\|RECORD_FINE\)/s,
+    "reuse keeps stable row demand, winners and dense row indices while clearing dynamic fine demand");
+  const fineCandidates = shader.slice(shader.indexOf("fnemitFineBandAirSupportCandidates"),
+    shader.indexOf("var<workgroup>emitRowActive"));
+  assert.match(fineCandidates, /if\(reuse&&demanded==0u\)\{return;\}/,
+    "a reused publication must not walk undemanded domain cells merely to rebuild identical identities");
+  assert.match(fineCandidates, /if\(reuse\)\{return;\}letdirect=publishedRow/,
+    "dynamic fine flags must be forwarded before candidate production retires");
+  const topology = shader.slice(shader.indexOf("fnresolveAirSupportTopology"),
+    shader.indexOf("fnpublishAirSupportOwnerDirectory"));
+  assert.match(topology,
+    /s\(47u\)!=0u.*stable=r\(at\+5u\)&~\(RECORD_FINE<<6u\).*dynamic=s\(p\.directoryFlagOffset\+recordCell\(item\)\)&RECORD_FINE/s,
+    "reused records must refresh generation-dependent fine flags without re-resolving catalog topology");
+  assert.match(shader, /fnpublishAirSupportOwnerDirectory.*s\(47u\)!=0u.*return/s,
+    "the identity-keyed owner directory is immutable within the accepted epoch");
+  assert.match(shader, /fnresolveAirSupportFaceAdjacency.*s\(47u\)!=0u.*return/s,
+    "face adjacency is immutable within the accepted epoch");
+  assert.match(shader, /fnvalidateAirSupportFrontierReciprocity.*s\(50u\)!=0u.*return/s,
+    "only a previously validated sparse graph may skip reciprocity validation");
+  assert.match(shader,
+    /fnfinalizeRetainedAirSupportMarchSchedule.*atomicStore\(&faceFrontier\[11u\],select\(0u,RETAINED_GRAPH_VALID,clean\)\)/s,
+    "a failed refresh or construction must revoke retained-graph admission");
 });
 
 // A brick is brickResolution^3 samples over a lattice refined by
@@ -219,7 +279,7 @@ test("transition and regular demand slots are fixed and physical exterior stays 
   // out-of-domain cube tag INVALID.
   assert.match(shader, /if\(!inDomain\)\{atomicStore\(&supportArena\[tag\],INVALID\);\}else\{/);
   assert.match(shader, /any\(origin<vec3i\(0\)\).*atomicStore\(&supportArena\[tag\],INVALID\)/);
-  assert.match(shader, /writeDispatch\(16u,select\(vec3u\(0u,1u,1u\),dispatchFor\(rows,1u\),clean\)\)/,
+  assert.match(shader, /writeDispatch\(16u,select\(vec3u\(0u,1u,1u\),dispatchFor\(rows,1u\),clean&&!reuseTopology\)\)/,
     "the indirect schedule must dispatch one 2-D-safe workgroup per row");
   assert.doesNotMatch(shader, /regularNeighborhoodExact/,
     "candidate lanes must not each repeat the complete 27-owner proof");
@@ -237,7 +297,7 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
     "nearest-face selection is strict-less so the lowest local slot index wins exact ties");
   assert.doesNotMatch(shader, /fnprojectedPowerVector/,
     "no cell-centred reconstructed vector may masquerade as a face seed");
-  const seed = shader.slice(shader.indexOf("fnseedAirSupportFaces"), shader.indexOf("fnbetterFace"));
+  const seed = shader.slice(shader.indexOf("fnairSupportSeedCarrier"), shader.indexOf("fnbetterFace"));
   assert.match(seed, /projectedAxisFaceValue\(faceRow,axis,patchCenter\)/);
   assert.match(seed, /adjacencyPositive\(faceRow,axis,local%4u\)/);
   assert.match(seed, /projectedAxisFaceValue\(otherRow,axis,patchCenter\)/,
@@ -256,7 +316,7 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   assert.doesNotMatch(march, /tagForIdentity|faceRowForTag|octreeOwnerPageLookup|catalogNeighbor|caseHeader/,
     "the face march must be a pure indexed gather over published adjacency");
   assert.match(shader,
-    /fnbetterFace\(candidate:vec4u,best:vec4u\).*candidateDistance=bitcast<f32>\(candidate\.y\).*candidateDistance<bestDistance.*candidateDistance==bestDistance&&candidate\.z<best\.z/s);
+    /fnbetterFace\(candidate:vec4u,best:vec4u\).*candidateDistanceSquared=bitcast<f32>\(candidate\.y\).*candidateDistanceSquared<bestDistanceSquared.*candidateDistanceSquared==bestDistanceSquared&&candidate\.z<best\.z/s);
   // The carrier metric is the true Euclidean distance to the ORIGINAL seed
   // patch (candidate.z, preserved verbatim through every copy) — the
   // closest-point-transform ranking. Accumulating per-hop path length made
@@ -269,8 +329,12 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   // changed, from re-resolving the row's cell and running coord() to reading
   // the origin/extent resolveAirSupportFaceAdjacency published for that row.
   assert.match(march,
-    /distance=length\(center-faceCenter\(candidate\.z\)\)/,
-    "the fast-marching-like relaxation must rank sources by Euclidean distance to the original seed, not accumulated hop length");
+    /delta=center-faceCenter\(candidate\.z\);letdistanceSquared=dot\(delta,delta\)/,
+    "the relaxation must rank sources by squared Euclidean distance to the original seed, not accumulated hop length");
+  assert.match(shader, /fnrowSeedDistance.*returnsqrt\(bestSquared\)/s,
+    "physical distance is recovered once per row for the detached-air gravity ramp");
+  assert.doesNotMatch(march, /length\(/,
+    "the inner candidate scan must not pay a square root for an ordering-only metric");
   assert.match(shader,
     /fnfaceCenter\(item:u32\)->vec3f\{.*letg=adjacencyGeometry\(faceRow\);letorigin=vec3f\(g\.xyz\);letextent=f32\(g\.w\)/s,
     "the patch centre must come from the resolved per-face-row geometry, not a per-candidate cell resolution");
@@ -296,8 +360,29 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   assert.match(shader, /clean=errors==0u&&\(s\(35u\)\|s\(36u\)\|s\(37u\)\)==0u/,
     "publication requires a deliberate GPU-observed no-change wave");
   assert.match(march,
-    /var<workgroup>relaxationChanged:atomic<u32>.*fnmarchAirSupportFacesToFixedPoint.*letaxis=wid\.x;letcount=4u\*faceRows.*for\(varlocal=lane;local<count;local\+=256u\).*storageBarrier\(\).*changed==0u\|\|tailWave>=max\(1u,count\)/s,
-    "one persistent workgroup per independent velocity axis must march its compact graph to a fixed point with the |V_axis| proof bound");
+    /fnmarchAirSupportFacesChangedFrontier.*frontierCurrentCount=atomicLoad\(&faceFrontier\[axis\]\).*letsource=atomicLoad\(&faceFrontier\[frontierQueueBase\(0u,axis\)\+local\]\).*appendFrontierDestination.*letactiveCount=workgroupUniformLoad\(&frontierActiveCount\).*extendFace\(item,true\).*if\(any\(proposal!=previous\)\).*frontierCurrentCount=frontierChangedCount.*wave>=max\(1u,axisCapacity\)/s,
+    "one persistent workgroup per axis must expand, deduplicate, relax, and compact only the changed frontier under the |V_axis| proof bound");
+  assert.match(shader,
+    /fnvalidateAirSupportFrontierReciprocity.*adjacencyIncident\(faceRow,local\).*adjacencyIncident\(other,back\)==faceRow.*failTopology\(9u,faceRow\)/s,
+    "reverse frontier expansion must be admitted only for a proven reciprocal incidence graph");
+  assert.match(shader,
+    /fncompactAirSupportSeedFrontier.*faceA\[item\]\.w!=0u.*appendSeedFrontier/s,
+    "the first frontier must contain only actual projected-face seeds");
+  assert.match(shader,
+    /fnseedRetainedAirSupportFaces.*s\(50u\)!=0u.*item=s\(p\.candidateOffset\+invocation\).*faceB\[item\]=carrier/s,
+    "a retained publication must recompute only the exact preceding seed list into the staging bank");
+  assert.match(shader,
+    /fnrefreshRetainedAirSupportFaceValues.*letseedItem=carrier\.z.*letseed=faceB\[seedItem\].*carrier\.x!=seed\.x.*faceA\[item\]=carrier/s,
+    "retained closest-source identities and distances must update only from their exact winning seed value");
+  assert.match(shader,
+    /fnfinalizeRetainedAirSupportMarchSchedule.*s\(25u\)!=s\(49u\).*atomicStore\(&faceFrontier\[10u\],1u\).*writeDispatch\(32u,select\(vec3u\(0u,1u,1u\),dispatchFor\(s\(29u\),256u\),clean&&!retained\)\)/s,
+    "equal seed membership must admit a zero second-publication march schedule and mismatches must fail closed");
+  assert.match(shader,
+    /fnpackedFrontierLane\(packed:u32\)->vec2u\{returnvec2u\(packed%3u,packed\/3u\)/,
+    "occupancy-wide waves must pack live axis queues without provisioned-capacity holes");
+  assert.match(shader,
+    /fnexpandAirSupportChangedFrontier.*appendFrontierDestination.*fnrelaxAirSupportChangedFrontier.*extendFace\(item,true\).*fncommitAirSupportChangedFrontier.*proposal=faceB\[item\].*faceA\[item\]=proposal.*fnadvanceAirSupportChangedFrontier/s,
+    "parallel sparse waves must retain dispatch barriers between expand, relax, commit, and count publication");
   assert.doesNotMatch(march, /STRUCTURED_VELOCITY_EXTENSION_LAYERS|maximumRelaxationWaves|dimensions\.reduce/,
     "the paper march must not be replaced by a widened scene or domain wave count");
   assert.doesNotMatch(march, /sum\+=|weight\+=/,
@@ -350,11 +435,11 @@ test("direct air rows and support identities share one fail-closed face transact
   assert.match(shader, /RECORD_SELECTOR\|RECORD_EXTENSION/);
 });
 
-test("host schedule uses a parallel occupancy prefix and a persistent fixed-point authority", () => {
+test("host defaults to the exact changed frontier and retains the preceding fixed dense oracle", () => {
   const encode = compact(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
   assert.match(encode, /dispatchWorkgroups\(1\).*updateIndirectBuffer/);
-  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 2,
-    "fixed-point marching must not repeatedly copy indirect schedules");
+  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 3,
+    "the retained-graph admission may replace the march schedule exactly once");
   for (const [name, offset] of [["clearAirSupportDirectory", 0], ["clearAirSupportTags", 12],
     ["emitAirSupportCandidates", 24], ["markAndScanAirSupportCandidates", 36]] as const) {
     assert.match(encode, new RegExp(`run\\("${name}",${offset}\\)`));
@@ -362,21 +447,34 @@ test("host schedule uses a parallel occupancy prefix and a persistent fixed-poin
   assert.match(encode, /updateIndirectBuffer\(this\.scratch,32\*4,this\.indirect,4\*12,2\*12\)/);
   assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,48\)/);
   assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,60\)/);
+  assert.match(encode,
+    /resolveAirSupportTopology.*dispatchWorkgroups\(Math\.ceil\(this\.plan\.support\.supportCapacity\/OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE\)\)/s,
+    "support topology work must be bounded by support rows, not the much larger candidate arena");
   assert.match(encode, /run\("finalizeAirSupportMetadata"\)[\s\S]*commitAirSupportDirectRows[\s\S]*run\("commitAirSupportPublication"\)/);
   assert.doesNotMatch(encode, /dispatchWorkgroups\(this\.plan\.faceCapacity/);
   assert.match(encode, /clearBuffer\(this\.scratch,32\*4,6\*4\)/,
     "copied indirect words must be recycled once as six storage-visible wave flags");
-  assert.match(encode, /marchAirSupportFacesToFixedPoint.*dispatchWorkgroups\(3\).*broker\.fence\("Section5closest-facefixedpointpublished"\)/s);
+  assert.match(encode, /validateAirSupportFrontierReciprocity.*compactAirSupportSeedFrontier.*refreshRetainedAirSupportFaceValues.*finalizeRetainedAirSupportMarchSchedule.*broker\.fence\("Section5ordinary-faceseedspublished"\)/s);
+  assert.match(encode, /broker\.fence\("Section5ordinary-faceseedspublished"\).*updateIndirectBuffer\(this\.scratch,32\*4,this\.indirect,48,12\).*clearBuffer\(this\.scratch,32\*4,6\*4\)/s,
+    "the GPU reuse decision must replace the march schedule only across an indirect-copy visibility boundary");
+  assert.match(encode, /marchAirSupportFacesChangedFrontier.*dispatchWorkgroups\(3\).*broker\.fence\("Section5closest-facefixedpointpublished"\)/s);
+  assert.match(encode, /changedFrontier=octreeAirSupportChangedFrontierEnabled\(\)/,
+    "the A/B decision must not alter construction or resource layout");
+  assert.match(encode, /if\(changedFrontier\).*compactAirSupportSeedFrontier.*else\{for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX/s);
+  assert.match(encode,
+    /for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES.*expandAirSupportChangedFrontier.*relaxAirSupportChangedFrontier.*commitAirSupportChangedFrontier.*advanceAirSupportChangedFrontier.*marchAirSupportFacesChangedFrontier/s,
+    "the sparse default must batch useful frontier work across occupancy-wide dispatches before its exact residual tail");
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES, 12);
+  assert.match(encode, /for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES.*advanceAirSupportMarchWave.*marchAirSupportFacesToFixedPoint/s);
   assert.equal(OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX, 12);
-  assert.match(encode, /for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX;wave\+=1\)/,
-    "the fully parallel prefix is a fixed occupancy optimization");
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES, 12);
   assert.doesNotMatch(encode, /maximumRelaxationWaves|prepareAirSupportContinuation|for\(letlayer/,
     "the host must not encode a scene/domain propagation bound");
 });
 
 test("entry bind sets exactly match the reachable staging transaction", () => {
   assert.deepEqual(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS, {
-    beginAirSupportPublication: [0,1,3,7,8,9,10],
+    beginAirSupportPublication: [0,1,3,7,8,9,10,29],
     clearAirSupportDirectory: [0,7], clearAirSupportCandidates: [0,2,7],
     clearAirSupportTags: [0,7,9],
     emitAirSupportCandidates: [0,2,3,4,5,6,7,9,11,18],
@@ -387,14 +485,19 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
     closeFineBandAirSupportInterpolationDemand: [0,2,3,4,5,6,7,11,12,13,14],
     emitFineBandAirSupportCandidates: [0,2,3,7,11],
     publishAirSupportOwnerDirectory: [0,2,3,7,8,9,11],
-    prepareAirSupportFaces: [0,7],
+    prepareAirSupportFaces: [0,7,29],
     resolveAirSupportFaceAdjacency: [0,2,3,7,8,11,15,16,23],
+    validateAirSupportFrontierReciprocity: [0,7,23],
     seedAirSupportFaces: [0,1,2,7,8,15,16,18,19,21,23],
-    // rowGeometry (2) and recordArena (8) left these three when faceCenter
-    // stopped re-resolving the face row's cell and started reading the origin
-    // and extent from the adjacency record (23). `layout: "auto"` derives the
-    // layout from actual static usage, so declaring a binding the shader does
-    // not reference makes createBindGroup fail outright.
+    seedRetainedAirSupportFaces: [0,1,2,7,8,15,16,18,20,21,23],
+    compactAirSupportSeedFrontier: [0,7,19,29],
+    refreshRetainedAirSupportFaceValues: [7,19,20],
+    finalizeRetainedAirSupportMarchSchedule: [7,29],
+    expandAirSupportChangedFrontier: [0,7,23,29],
+    relaxAirSupportChangedFrontier: [0,7,19,20,23,29],
+    commitAirSupportChangedFrontier: [0,7,19,20,29],
+    advanceAirSupportChangedFrontier: [29],
+    marchAirSupportFacesChangedFrontier: [0,7,19,20,23,29],
     extendAirSupportFacesAtoB: [0,7,19,20,23],
     extendAirSupportFacesBtoA: [0,7,19,20,23],
     advanceAirSupportMarchWave: [7],

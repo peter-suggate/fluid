@@ -41,12 +41,12 @@ test("direct fine transport has one page-bounded structured authority path", () 
     queryCapacity: 16_777_216,
     velocityChunkCapacity: 16_777_216,
     chunkCount: 1,
-    topologyDeltaBytes: (8 + 2 * 262_144) * 4,
+    topologyDeltaBytes: (8 + 3 * 262_144) * 4,
     pageStatusBytes: 262_144 * 12,
     worksetBytes: 128 + 262_144 * 4,
     controlBytes: 64,
     allocatedBytes: 320 + 262_144 * 12 + 128 + 262_144 * 4
-      + (8 + 2 * 262_144) * 4 + 64 + 2 * 512,
+      + (8 + 3 * 262_144) * 4 + 64 + 2 * 512,
   });
   assert.deepEqual(planFineLevelSetGPUTransportPasses(plan, 8), {
     chunkCount: 1, segmentCount: 64, passesPerSegment: 0, passesPerChunk: 1, encodedPasses: 10,
@@ -332,10 +332,11 @@ test("open-domain characteristics sample cube and transition velocity on the sam
     "boundary velocity continuation must not erase final departure and phi-support diagnostics");
 });
 
-test("fine phi commit publishes old and new interface membership atomically", () => {
+test("fine phi commit separates interface membership from exact CP repair", () => {
   const shader = compact(structuredFineLevelSetTransportWGSL);
   assert.match(shader,
-    /fncommitStructuredFineTransport.*oldInterface.*newInterface.*membership=pageChanged\[0\]!=0u\|\|before\|\|after.*phi\[index\]=nextPhi\[index\]/s);
+    /fncommitStructuredFineTransport.*newInterface.*membership=pageChanged\[0\]!=0u\|\|before\|\|after.*repair=pageChanged\[0\]!=0u.*PAGE_INTERFACE,after.*PAGE_DIRTY,repair.*delta\[8u\+id\]=select\(INVALID,metadata\[id\*10u\+1u\],membership\).*delta\[8u\+2u\*p\.pageCapacity\+id\]=select\(INVALID,metadata\[id\*10u\+1u\],repair\).*phi\[index\]=nextPhi\[index\]/s,
+    "stable old/new interface membership must retain its closest-point identities");
   assert.match(shader,
     /fnpublishStructuredFineDelta.*delta\[0\]=count.*delta\[1\]=p\.generation.*delta\[2\]=control\.committed/s);
   assert.match(shader,

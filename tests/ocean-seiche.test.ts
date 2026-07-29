@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createOceanSeicheScene, getScenePreset } from "../lib/scenes";
 import { combineInitialBrickWet, initialFluidBrickContainsCell } from "../lib/initial-fluid";
 import { createTallCellLayout, initialLiquidPhi, type GPUQuality } from "../lib/tall-cell-grid";
 import { createSmokeScenario, isSmokeScenarioId, minimumOceanFarHalfDisturbanceCells } from "../tools/webgpu-smoke-scenarios";
 import { validateScene } from "../lib/model";
+import { getSceneWebGPUSmokeLane } from "../lib/scene-webgpu-smoke-catalog";
 
 const OCEAN_GRID = [320, 96, 80] as const;
 
@@ -73,11 +73,10 @@ test("ocean scene is registered in the UI presets and the smoke harness with lea
   assert.equal(minimumOceanFarHalfDisturbanceCells(scenario.scene.container.width_m), 0.45,
     "the fixed slab's far-half amplitude bar scales inversely with widened tank length");
   assert.ok(scenario.target_s >= 5, "the wave needs several crossings of observation time");
-  // Scenes cannot carry method parameters; the harness must request the
-  // raised 32-cubed cap for the octree run (env override still wins).
-  const harness = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  assert.match(harness, /scenarioId === "ocean-seiche"\) values\.maximumLeafSize = 32/);
-  assert.match(harness, /const sparseSource = sparseStatsRequested\s*\? \(solver as GPUSolverInstance\)\.sparseVoxelRenderSource\s*:\s*undefined/,
+  const lane = getSceneWebGPUSmokeLane("ocean-seiche");
+  assert.deepEqual(lane.methods.map(({ id }) => id), ["octree"]);
+  assert.equal(lane.methods[0].overrides.maximumLeafSize, "32");
+  assert.equal(lane.collect.sparsePublication, false,
     "production ocean benchmarks must not allocate the lazy raw-inspection publication");
-  assert.match(harness, /phase: "ocean-wave-profile"/);
+  assert.ok(lane.hooks.some(({ id }) => id === "ocean-wave-profile"));
 });

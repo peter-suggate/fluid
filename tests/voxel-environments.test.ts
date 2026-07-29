@@ -17,7 +17,7 @@ test("every authored environment gets a stable full-scene proxy catalog", () => 
   // re-art-directed, and the number changing is the prompt to look at the
   // render. Each environment's geometry lives in lib/voxel-scenery/<id>.ts.
   const authoredPropCounts = new Map([
-    ["conservatory", 100], ["courtyard", 93], ["night-lab", 105], ["concrete-gallery", 68],
+    ["conservatory", 89], ["courtyard", 93], ["night-lab", 105], ["concrete-gallery", 68],
     ["bathhouse", 90], ["research-station", 104], ["default", 17], ["garden", 104]
   ]);
   for (const id of environmentIds) {

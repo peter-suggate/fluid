@@ -8,10 +8,14 @@
  * Usage:
  *   node --import tsx tools/profile-svo-render-xctrace.ts
  *     [--scene=hose-tank] [--resolution=660x662]
+ *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide]
+ *     [--shading=inline|split]
+ *     [--cone-scale=0.5|0.25] [--warmups=4]
  *     [--counter-seconds=3] [--counter-reduction=100] [--out=DIR]
  *     [--reuse-trace] [--reuse-tables]
  */
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -39,6 +43,16 @@ const flag = (name: string): string | undefined => process.argv
   .find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
 
 const scene = flag("scene") ?? "hose-tank";
+const variant = flag("variant") ?? "baseline";
+if (!/^[a-zA-Z0-9._-]+$/.test(variant)) {
+  throw new Error("--variant may contain only letters, digits, dot, underscore, and dash");
+}
+const traversal = flag("traversal") ?? "hybrid";
+if (!["hybrid", "canonical", "canonical-parametric", "compact", "wide"].includes(traversal)) {
+  throw new Error("--traversal must be hybrid, canonical, canonical-parametric, compact, or wide");
+}
+const shading = flag("shading") ?? "inline";
+if (!["inline", "split"].includes(shading)) throw new Error("--shading must be inline or split");
 const resolutionMatch = /^(\d+)x(\d+)$/.exec(flag("resolution") ?? "660x662");
 if (!resolutionMatch) throw new Error("--resolution must be WIDTHxHEIGHT");
 const width = Number(resolutionMatch[1]), height = Number(resolutionMatch[2]);
@@ -52,6 +66,14 @@ if (!Number.isFinite(counterSeconds) || counterSeconds < 3) {
 const counterReduction = Number(flag("counter-reduction") ?? 100);
 if (!Number.isFinite(counterReduction) || counterReduction < 1) {
   throw new Error("--counter-reduction must be at least 1");
+}
+const coneScale = Number(flag("cone-scale") ?? 0.5);
+if (![0.5, 0.25].includes(coneScale)) {
+  throw new Error("--cone-scale must be 0.5 or 0.25 so the profiled pass graph includes the cone prepass");
+}
+const warmups = Number(flag("warmups") ?? 4);
+if (!Number.isSafeInteger(warmups) || warmups < 1) {
+  throw new Error("--warmups must be a positive integer");
 }
 const keepTables = process.argv.includes("--keep-tables");
 const reuseTrace = process.argv.includes("--reuse-trace");
@@ -105,6 +127,44 @@ interface RenderWorkerResult {
   readonly medianFrame_ms: number;
   readonly p95Frame_ms: number;
 }
+
+interface SourceProvenance {
+  readonly commit: string;
+  readonly dirty: boolean;
+  readonly changedFiles: number;
+  readonly fingerprint: string;
+  readonly renderFingerprint: string;
+  readonly renderFiles: number;
+}
+
+/** A profile is only useful for A/B work when its exact source state is
+ * recoverable. The fingerprint deliberately includes tracked working-tree
+ * changes and the untracked-file manifest without copying the source into the
+ * artifact. */
+const sourceProvenance = (): SourceProvenance => {
+  const git = (...arguments_: string[]): string => execFileSync("git", arguments_, {
+    cwd: root, encoding: "utf8", maxBuffer: 128 * 1024 * 1024,
+  });
+  const commit = git("rev-parse", "HEAD").trim();
+  const status = git("status", "--short", "--untracked-files=all");
+  const trackedDiff = git("diff", "--no-ext-diff", "--binary", "HEAD");
+  const renderPaths = git("ls-files", "-co", "--exclude-standard")
+    .split("\n").filter((path) => /^(?:lib\/(?:webgpu-svo|webgpu-static-svo|svo-|scenes\.ts|paper-scenarios\.ts|environments\.ts|voxel-scenery\/)|tools\/benchmark-svo-dry-frame-gpu\.ts)/.test(path))
+    .sort();
+  const renderHash = createHash("sha256");
+  for (const path of renderPaths) {
+    renderHash.update(path).update("\0").update(readFileSync(resolve(root, path))).update("\0");
+  }
+  return {
+    commit,
+    dirty: status.trim().length > 0,
+    changedFiles: status.split("\n").filter(Boolean).length,
+    fingerprint: createHash("sha256")
+      .update(commit).update("\n").update(status).update("\n").update(trackedDiff).digest("hex"),
+    renderFingerprint: renderHash.digest("hex"),
+    renderFiles: renderPaths.length,
+  };
+};
 
 const run = (argv: readonly string[]): Promise<void> => new Promise((done, fail) => {
   const child = spawn(argv[0], argv.slice(1), { cwd: root, stdio: ["ignore", "ignore", "pipe"] });
@@ -187,7 +247,10 @@ const assertRenderReport = (report: FrameReport): void => {
     || report.counters.exclusiveCoverage <= 0) {
     failures.push("occupancy/ALU counters did not cover the render window");
   }
-  for (const label of ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"]) {
+  const expectedLabels = shading === "split"
+    ? ["Sparse voxel cone-lighting prepass", "Sparse voxel primary visibility", "Sparse voxel deferred dry lighting"]
+    : ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"];
+  for (const label of expectedLabels) {
     const pass = report.passes.find((candidate) => candidate.label === label);
     if (!pass || pass.counterSamples === 0 || pass.occupancy === undefined || pass.alu === undefined) {
       failures.push(`${label} has no attributed occupancy/ALU samples`);
@@ -235,7 +298,7 @@ const writeReport = async (
     tables,
     lane: "svo-render",
     workUnit: "frame",
-    title: "Hose tank SVO rendering — GPU frame profile",
+    title: `Hose tank SVO rendering — ${variant} GPU frame profile`,
     frameStartLabels: ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"],
     occupancyCounterName: "Fragment Occupancy",
     environment: {
@@ -244,6 +307,9 @@ const writeReport = async (
       FLUID_GPU_ISOLATE_PASS_LABELS: "1",
       FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES: "Sparse voxel",
       FLUID_GPU_ISOLATE_PASS_ENCODERS: "0",
+      FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
+      FLUID_SVO_DRY_FRAME_SHADING: shading,
+      FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
     },
     tracedPid,
     traced: { simulationWall_ms: result.renderWall_ms, steps: result.frames },
@@ -261,6 +327,11 @@ const writeReport = async (
 
 const main = async (): Promise<void> => {
   mkdirSync(outputDirectory, { recursive: true });
+  const source = sourceProvenance();
+  const capturePath = resolve(outputDirectory, "capture.json");
+  const priorCapture = existsSync(capturePath)
+    ? JSON.parse(readFileSync(capturePath, "utf8")) as Record<string, unknown>
+    : undefined;
   if (reuseTables) {
     console.log("rebuilding report from retained render tables...");
     const tables = Object.fromEntries(TABLES.map((table) => {
@@ -274,8 +345,10 @@ const main = async (): Promise<void> => {
     const result = workerResultFromLog();
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, extraction, result, tracedPid);
-    await writeFile(resolve(outputDirectory, "capture.json"), `${JSON.stringify({
-      scene, resolution: { width, height }, counterSeconds, counterReduction,
+    await writeFile(capturePath, `${JSON.stringify({
+      variant, traversal, shading, coneScale, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      ...priorCapture,
+      source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
     }, null, 2)}\n`);
     for (const line of report.console) console.log(line);
@@ -291,8 +364,10 @@ const main = async (): Promise<void> => {
     const { tables, policy } = await exportTables();
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, policy, result, tracedPid);
-    await writeFile(resolve(outputDirectory, "capture.json"), `${JSON.stringify({
-      scene, resolution: { width, height }, counterSeconds, counterReduction,
+    await writeFile(capturePath, `${JSON.stringify({
+      variant, traversal, shading, coneScale, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      ...priorCapture,
+      source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
     }, null, 2)}\n`);
     if (!keepTables) for (const path of Object.values(tables)) rmSync(path, { force: true });
@@ -306,14 +381,26 @@ const main = async (): Promise<void> => {
   for (const name of ["summary.json", "report.html"]) {
     rmSync(resolve(outputDirectory, name), { force: true });
   }
+  // Persist identity before launching anything. If xctrace export is later
+  // interrupted, `--reuse-trace` must retain the source fingerprint from the
+  // capture rather than accidentally claiming the source state at rebuild time.
+  await writeFile(capturePath, `${JSON.stringify({
+    state: "capturing", variant, traversal, shading, coneScale, warmups, scene,
+    resolution: { width, height }, counterSeconds, counterReduction, source,
+    tracePath, startedAt: new Date().toISOString(),
+  }, null, 2)}\n`);
   const holder = await readWebGPUExclusiveLockHolder();
   if (holder) {
     throw new Error(`${WEBGPU_EXCLUSIVE_LOCK} is held by ${holder.description}`);
   }
   await acquireWebGPUExclusiveLock("svo-render-xctrace", `${scene} ${width}x${height}`);
+  let lockHeld = true;
   let child: ReturnType<typeof spawn> | undefined;
   const stop = (): void => { if (child && child.exitCode === null) child.kill("SIGTERM"); };
-  const onSignal = (): void => { stop(); releaseWebGPUExclusiveLockSync(); };
+  const onSignal = (): void => {
+    stop();
+    if (lockHeld) { releaseWebGPUExclusiveLockSync(); lockHeld = false; }
+  };
   process.once("SIGINT", onSignal); process.once("SIGTERM", onSignal);
   try {
     const logPath = resolve(outputDirectory, "worker.log");
@@ -327,8 +414,10 @@ const main = async (): Promise<void> => {
         FLUID_SVO_DRY_FRAME_SCENE: scene,
         FLUID_SVO_DRY_FRAME_WIDTH: String(width),
         FLUID_SVO_DRY_FRAME_HEIGHT: String(height),
-        FLUID_SVO_DRY_FRAME_WARMUPS: "4",
-        FLUID_SVO_DRY_FRAME_CONE_SCALE: "0.5",
+        FLUID_SVO_DRY_FRAME_WARMUPS: String(warmups),
+        FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
+        FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
+        FLUID_SVO_DRY_FRAME_SHADING: shading,
         FLUID_SVO_DRY_FRAME_PROFILE_SECONDS: String(counterSeconds + 9),
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -384,11 +473,21 @@ const main = async (): Promise<void> => {
     await finished;
     if (!result) throw new Error(`render worker produced no result; see ${logPath}`);
 
+    // Counter-table export is CPU/disk reduction over an immutable completed
+    // trace and can take several minutes. Release the process-wide GPU lock as
+    // soon as the measured worker exits so unrelated shader compilation is not
+    // blocked by report generation. `lockHeld` prevents the finalizer from
+    // deleting a newer owner's lock.
+    await releaseWebGPUExclusiveLock();
+    lockHeld = false;
+
     console.log("exporting and reducing trace tables...");
     const { tables, policy } = await exportTables();
     const report = await writeReport(tables, policy, result, child.pid);
-    await writeFile(resolve(outputDirectory, "capture.json"), `${JSON.stringify({
-      scene, resolution: { width, height }, counterSeconds, counterReduction,
+    await writeFile(capturePath, `${JSON.stringify({
+      state: "complete",
+      variant, traversal, shading, coneScale, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      source,
       worker: result, tracePath, capturedAt: new Date().toISOString(),
     }, null, 2)}\n`);
     if (!keepTables) for (const path of Object.values(tables)) rmSync(path, { force: true });
@@ -401,7 +500,7 @@ const main = async (): Promise<void> => {
   } finally {
     stop();
     process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal);
-    await releaseWebGPUExclusiveLock();
+    if (lockHeld) await releaseWebGPUExclusiveLock();
   }
 };
 

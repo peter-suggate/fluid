@@ -76,7 +76,13 @@ export function svoPrimitiveCandidateBounds(descriptorInput: SvoFinitePrimitiveD
   else if (descriptor.kind === "box") local = descriptor.halfExtents_m;
   else if (descriptor.kind === "capsule") local = { x: descriptor.radius_m, y: descriptor.segmentHalfLength_m + descriptor.radius_m, z: descriptor.radius_m };
   else if (descriptor.kind === "cylinder") local = { x: descriptor.radius_m, y: descriptor.halfHeight_m, z: descriptor.radius_m };
-  else local = descriptor.radii_m;
+  else if (descriptor.kind === "torus") {
+    const outer = descriptor.majorRadius_m + descriptor.minorRadius_m;
+    local = { x: outer, y: descriptor.minorRadius_m, z: outer };
+  } else if (descriptor.kind === "cone") {
+    const widest = Math.max(descriptor.baseRadius_m, descriptor.topRadius_m);
+    local = { x: widest, y: descriptor.halfHeight_m, z: widest };
+  } else local = descriptor.radii_m;
   const orientation = descriptor.kind === "sphere" ? { w: 1, x: 0, y: 0, z: 0 } : descriptor.orientation!;
   const extent = worldExtents(local, orientation);
   // Float32 upload plus a small absolute pad keeps tangencies and subcell props

@@ -71,7 +71,7 @@ test("factor-8 transport keeps direct structured scratch page-bounded", () => {
   assert.equal(plan.velocityChunkCapacity, samples);
   assert.equal(plan.pageStatusBytes, pages * 12,
     "classification storage is reused as two packed u16 telemetry pairs plus exact displacement");
-  assert.equal(plan.topologyDeltaBytes, (8 + 2 * pages) * 4);
+  assert.equal(plan.topologyDeltaBytes, (8 + 3 * pages) * 4);
   assert.ok(plan.allocatedBytes < 7_500_000,
     "direct structured transport must allocate only page reductions (including exact displacement) and the topology delta");
 });
@@ -182,15 +182,15 @@ test("parallel total-volume scratch is bounded by compact directory and resident
   const a = planFineLevelSetGPUVolume(257, 4097, true);
   assert.equal(a.coarsePartialCount, 5); assert.equal(a.finePartialCount, 65);
   assert.equal(a.coarsePartialBytes, 80); assert.equal(a.finePartialBytes, 2080);
-  assert.equal(a.reductionScratchBytes, 2080); assert.equal(a.allocatedBytes, 64 + 2080 + 16 + 12 + 64,
-    "fine and exact coarse indirect records are both charged");
+  assert.equal(a.reductionScratchBytes, 2080); assert.equal(a.allocatedBytes, 64 + 16 + 2080 + 16 + 12 + 64,
+    "coarse parameters plus fine and exact coarse indirect records are all charged");
   const b = planFineLevelSetGPUVolume(257, 4097, false);
   assert.equal(b.allocatedBytes, a.allocatedBytes - 64, "B must share, not double-count, the A/B reference control");
   const snapshot = planFineLevelSetGPUVolume(257, 64, true, 1024);
   assert.equal(snapshot.coarsePartialCount, 16);
   assert.equal(snapshot.coarsePartialBytes, 256);
   assert.equal(snapshot.reductionScratchBytes, 256);
-  assert.equal(snapshot.allocatedBytes, 64 + 256 + 16 + 12 + 64,
+  assert.equal(snapshot.allocatedBytes, 64 + 16 + 256 + 16 + 12 + 64,
     "the accepted coarse-directory snapshot, not only live row capacity, sizes coarse reduction scratch");
 });
 

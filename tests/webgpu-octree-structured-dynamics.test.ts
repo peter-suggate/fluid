@@ -251,7 +251,7 @@ test("projection energy decoder fails closed on partial pairs", () => {
 });
 
 test("smoke stability envelope consumes only explicit structured energy pairs", () => {
-  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  const smoke = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
   assert.match(smoke,
     /structuredEnergySamples = sample\.structuredProjectionEnergySampleCount[\s\S]*structuredEnergyRatio = sample\.structuredProjectionEnergyRatio/);
   assert.match(smoke,

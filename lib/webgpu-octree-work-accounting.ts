@@ -528,34 +528,36 @@ function decodeOctreePressureSolveWorkUnchecked(
   if (outer[OUTER.zeroed] !== requiredZeroedTail) {
     return blocked("outer convergence tail was not proven zero-work");
   }
-  const indirect = controls.outerIndirectTail;
-  if (!indirect || indirect.length < plan.maximumOuterIterations * 16) {
-    return blocked("outer indirect-tail snapshot unavailable");
-  }
-  const zeroRecord = (record: number) => indirect[record * 4] === 0
-    && indirect[record * 4 + 1] === 0 && indirect[record * 4 + 2] === 0
-    && indirect[record * 4 + 3] === 0;
-  const liveRecord = (record: number, x: number) => indirect[record * 4] === x
-    && indirect[record * 4 + 1] === 1 && indirect[record * 4 + 2] === 1
-    && indirect[record * 4 + 3] === 0;
   const rowGroups = Math.ceil(liveRows / 64);
   const liveReductionPartials = Math.ceil(liveRows / (plan.reductionLanes ?? 128));
-  for (let iteration = 0; iteration < iterations; iteration += 1) {
-    const base = iteration * 4;
-    const terminal = iteration + 1 === iterations;
-    if (!liveRecord(base, rowGroups)
-      || (terminal
-        ? !zeroRecord(base + 1)
-        : !liveRecord(base + 1, liveReductionPartials))
-      || !liveRecord(base + 2, liveReductionPartials)
-      || (terminal ? !zeroRecord(base + 3) : !liveRecord(base + 3, rowGroups))) {
-      return blocked("outer executed indirect records do not match the planned solve");
+  if (!plan.persistentEnabled) {
+    const indirect = controls.outerIndirectTail;
+    if (!indirect || indirect.length < plan.maximumOuterIterations * 16) {
+      return blocked("outer indirect-tail snapshot unavailable");
     }
-  }
-  for (let iteration = iterations; iteration < plan.maximumOuterIterations; iteration += 1) {
-    for (let stage = 0; stage < 4; stage += 1) {
-      if (!zeroRecord(iteration * 4 + stage)) {
-        return blocked("outer future convergence-tail record is not zero-work");
+    const zeroRecord = (record: number) => indirect[record * 4] === 0
+      && indirect[record * 4 + 1] === 0 && indirect[record * 4 + 2] === 0
+      && indirect[record * 4 + 3] === 0;
+    const liveRecord = (record: number, x: number) => indirect[record * 4] === x
+      && indirect[record * 4 + 1] === 1 && indirect[record * 4 + 2] === 1
+      && indirect[record * 4 + 3] === 0;
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      const base = iteration * 4;
+      const terminal = iteration + 1 === iterations;
+      if (!liveRecord(base, rowGroups)
+        || (terminal
+          ? !zeroRecord(base + 1)
+          : !liveRecord(base + 1, liveReductionPartials))
+        || !liveRecord(base + 2, liveReductionPartials)
+        || (terminal ? !zeroRecord(base + 3) : !liveRecord(base + 3, rowGroups))) {
+        return blocked("outer executed indirect records do not match the planned solve");
+      }
+    }
+    for (let iteration = iterations; iteration < plan.maximumOuterIterations; iteration += 1) {
+      for (let stage = 0; stage < 4; stage += 1) {
+        if (!zeroRecord(iteration * 4 + stage)) {
+          return blocked("outer future convergence-tail record is not zero-work");
+        }
       }
     }
   }
@@ -733,15 +735,15 @@ function decodeOctreePressureSolveWorkUnchecked(
   let persistent: OctreePressureLayerWork | null = null;
   if (plan.persistentEnabled) {
     const control = controls.persistentControl;
-    if (!control || control.length < 13) return blocked("persistent coarse-solve control unavailable");
-    if (control[0] !== 0 || control[1] !== 1 || control[3] !== liveRows
+    if (!control || control.length < 5) return blocked("persistent solve control unavailable");
+    if (control[0] !== 0 || control[1] !== 1 || control[4] !== liveRows
       || control[2]! > (plan.persistentMaximumIterations ?? 12)) {
-      return blocked("persistent coarse-solve control is invalid or unconverged");
+      return blocked("persistent solve control is invalid or unconverged");
     }
     const persistentIterations = control[2]!;
     persistent = layer({
-      scheduledLanes: 64,
-      activeLanes: Math.min(liveRows, 64),
+      scheduledLanes: 256,
+      activeLanes: Math.min(liveRows, 256),
       activePages: 0,
       worksets: 1,
       encodedIterations: plan.persistentMaximumIterations ?? 12,

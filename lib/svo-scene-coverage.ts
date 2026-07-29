@@ -129,6 +129,14 @@ const PROCEDURAL_FOREGROUND_GAPS: Readonly<Record<EnvironmentId, readonly Proced
 function dimensions(proxy: EnvironmentProxyPrimitive): readonly [number, number, number] {
   if (proxy.kind === "box") return [2 * proxy.halfSize_m.x, 2 * proxy.halfSize_m.y, 2 * proxy.halfSize_m.z];
   if (proxy.kind === "cylinder") return [2 * proxy.radius_m, 2 * proxy.halfHeight_m, 2 * proxy.radius_m];
+  // The thin-feature test below wants the smallest solid width, so a swept
+  // shape reports its tube, not the extent of the run it is swept along.
+  if (proxy.kind === "capsule") return [2 * proxy.radius_m, 2 * proxy.radius_m, 2 * proxy.radius_m];
+  if (proxy.kind === "torus") return [2 * proxy.minorRadius_m, 2 * proxy.minorRadius_m, 2 * proxy.minorRadius_m];
+  if (proxy.kind === "cone") {
+    const widest = 2 * Math.max(proxy.baseRadius_m, proxy.topRadius_m);
+    return [widest, 2 * proxy.halfHeight_m, widest];
+  }
   return [2 * proxy.radius_m.x, 2 * proxy.radius_m.y, 2 * proxy.radius_m.z];
 }
 

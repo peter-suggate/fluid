@@ -10,9 +10,12 @@ export const OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION = 1 / 30;
  * `for (row = lane; row < rowCount; row += 256)` — so capacity is bounded by
  * how much work one workgroup (one GPU core) can absorb before the
  * row-parallel hierarchical path saturates the device, not by the lane count.
- * Above this, the production row-parallel pipelined solver is selected.
+ * Above this, the production row-parallel pipelined solver is selected. The
+ * 4,096 cutoff is measured, not aspirational: the ceiling lane provisions
+ * 9,216 rows and the one-workgroup executor was 15.3 ms/frame slower there,
+ * while the 4,096-capacity mini lane still benefits from dispatch fusion.
  */
-export const OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY = 8_192;
+export const OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY = 4_096;
 /** x, r, z, d, A*d, four hybrid f32 fields, and two band u32 fields. */
 export const OCTREE_PERSISTENT_MGPCG_STATE_CHANNELS = 11;
 

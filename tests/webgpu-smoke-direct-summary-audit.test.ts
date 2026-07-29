@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+const smoke = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
+const readbacks = readFileSync(new URL("../tools/webgpu-smoke-readbacks.ts", import.meta.url), "utf8");
 const compactField = readFileSync(new URL("../tools/webgpu-smoke-compact-field.ts", import.meta.url), "utf8");
 
 test("initial fine-summary audit reads the resident direct-summary buffers", () => {
@@ -26,10 +27,10 @@ test("initial fine-summary audit reads the resident direct-summary buffers", () 
 });
 
 test("compact field QA reads and validates the complete resident worklist ABI", () => {
-  const start = smoke.indexOf("async function readCubicVolumeField(");
-  const end = smoke.indexOf("\ntype GPUCommandAuditBucket", start);
+  const start = readbacks.indexOf("async function readCubicVolumeField(");
+  const end = readbacks.indexOf("\nexport async function dumpFineRedistancePageDeltaForensics", start);
   assert.ok(start >= 0 && end > start, "compact field readback must have a bounded source region");
-  const readback = smoke.slice(start, end);
+  const readback = readbacks.slice(start, end);
   assert.match(readback,
     /readBufferBinding\(device, \{ buffer: source\.worklist \}, source\.worklist\.size\)/,
     "QA must copy the complete current seven-word-header/direct-directory/halo buffer");
@@ -43,10 +44,10 @@ test("compact field QA reads and validates the complete resident worklist ABI", 
 });
 
 test("fine-generation probes read the direct page directory after the current header", () => {
-  const start = smoke.indexOf("async function readGlobalFineGenerationDiagnostics(");
-  const end = smoke.indexOf("\nfunction decodeFloat16", start);
+  const start = readbacks.indexOf("async function readGlobalFineGenerationDiagnostics(");
+  const end = readbacks.indexOf("\nexport function decodeFloat16", start);
   assert.ok(start >= 0 && end > start, "fine-generation diagnostics must have a bounded source region");
-  const diagnostics = smoke.slice(start, end);
+  const diagnostics = readbacks.slice(start, end);
   assert.match(diagnostics,
     /readBufferBinding\(device, \{ buffer: source\.worklist \}, source\.worklist\.size\)/,
     "fine-generation probes must copy the resident direct page directory");

@@ -43,7 +43,7 @@ test("production source contains no legacy timing, readback, or performance visu
  */
 const timestampQueryOwners = [
   "/lib/performance-trace.ts",
-  "/tools/run-webgpu-smoke.ts",
+  "/tools/webgpu-smoke-gpu-audits.ts",
   "/tools/experiment-webgpu-atomic-clock.ts",
 ];
 

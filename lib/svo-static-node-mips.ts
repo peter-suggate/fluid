@@ -63,10 +63,39 @@ function cellBounds(domain: SparseSceneDomainPlan, globalCell: readonly [number,
   return { minimum, maximum: minimum.map((value, axis) => value + domain.cellSize_m[axis]) as Triple };
 }
 
+/** Proxy-local sample point: the world offset, brought back through any authored rotation. */
+function localProxyPoint(proxy: EnvironmentProxyPrimitive, point: readonly [number, number, number]): Triple {
+  const offset: Triple = [point[0] - proxy.center_m.x, point[1] - proxy.center_m.y, point[2] - proxy.center_m.z];
+  const q = proxy.orientation;
+  if (!q) return offset;
+  const [x, y, z] = offset;
+  const ux = -q.x, uy = -q.y, uz = -q.z;
+  const tx = 2 * (uy * z - uz * y), ty = 2 * (uz * x - ux * z), tz = 2 * (ux * y - uy * x);
+  return [
+    x + q.w * tx + (uy * tz - uz * ty),
+    y + q.w * ty + (uz * tx - ux * tz),
+    z + q.w * tz + (ux * ty - uy * tx),
+  ];
+}
+
 function pointInsideProxy(proxy: EnvironmentProxyPrimitive, point: readonly [number, number, number]): boolean {
-  const dx = point[0] - proxy.center_m.x, dy = point[1] - proxy.center_m.y, dz = point[2] - proxy.center_m.z;
+  const [dx, dy, dz] = localProxyPoint(proxy, point);
   if (proxy.kind === "box") return Math.abs(dx) <= proxy.halfSize_m.x && Math.abs(dy) <= proxy.halfSize_m.y && Math.abs(dz) <= proxy.halfSize_m.z;
   if (proxy.kind === "cylinder") return dx * dx + dz * dz <= proxy.radius_m * proxy.radius_m && Math.abs(dy) <= proxy.halfHeight_m;
+  if (proxy.kind === "capsule") {
+    const segmentY = Math.max(-proxy.halfLength_m, Math.min(proxy.halfLength_m, dy));
+    return dx * dx + (dy - segmentY) ** 2 + dz * dz <= proxy.radius_m * proxy.radius_m;
+  }
+  if (proxy.kind === "torus") {
+    const ring = Math.hypot(dx, dz) - proxy.majorRadius_m;
+    return ring * ring + dy * dy <= proxy.minorRadius_m * proxy.minorRadius_m;
+  }
+  if (proxy.kind === "cone") {
+    if (Math.abs(dy) > proxy.halfHeight_m) return false;
+    const height = (dy + proxy.halfHeight_m) / (2 * proxy.halfHeight_m);
+    const radius_m = proxy.baseRadius_m + (proxy.topRadius_m - proxy.baseRadius_m) * height;
+    return dx * dx + dz * dz <= radius_m * radius_m;
+  }
   return (dx / proxy.radius_m.x) ** 2 + (dy / proxy.radius_m.y) ** 2 + (dz / proxy.radius_m.z) ** 2 <= 1;
 }
 

@@ -136,6 +136,8 @@ export function svoPrimitiveBoundingRadius(primitive: SvoFinitePrimitiveDescript
   if (primitive.kind === "box") return Math.hypot(primitive.halfExtents_m.x, primitive.halfExtents_m.y, primitive.halfExtents_m.z);
   if (primitive.kind === "capsule") return primitive.segmentHalfLength_m + primitive.radius_m;
   if (primitive.kind === "cylinder") return Math.hypot(primitive.radius_m, primitive.halfHeight_m);
+  if (primitive.kind === "torus") return primitive.majorRadius_m + primitive.minorRadius_m;
+  if (primitive.kind === "cone") return Math.hypot(Math.max(primitive.baseRadius_m, primitive.topRadius_m), primitive.halfHeight_m);
   return Math.max(primitive.radii_m.x, primitive.radii_m.y, primitive.radii_m.z);
 }
 

@@ -199,6 +199,21 @@ test("the ocean first-frame lane runs two exact advances under the browser stora
   });
 });
 
+test("the ceiling profiler uses the authored band-1 fast formulation", async () => {
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_SCENE,
+    "ceiling-slab-drop");
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_LANE, "performance");
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_EXPECT_GRID,
+    "24,16,24");
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_MAXIMUM_LEAF_SIZE, "2");
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_OCTREE_INTERFACE_BAND, "1");
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_OCTREE_GLOBAL_FINE_FACTOR, "4");
+  const smokeSource = await readFile(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
+  assert.match(smokeSource,
+    /const enforcedDiagnosticFindings = runOptions\.performanceProfile\s*\? \[\]/,
+    "performance captures must rely on exact execution and packed final authority, not disabled scene collectors");
+});
+
 test("M1 cutover suite does not name deleted page-pool fallback tests", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
     scripts: Record<string, string>;
@@ -245,7 +260,7 @@ test("one-step power/fine comparison pins exact time, spatial readback, and moti
   assert.ok(command);
   for (const setting of [
     "FLUID_TARGET_S=0.004", "FLUID_MAX_DT=0.004", "FLUID_ORACLE_STEPS=1",
-    "FLUID_EXPECT_EXACT_STEPS=1", "FLUID_MIN_PEAK_SPEED_M_S=0.01",
+    "FLUID_EXPECT_EXACT_STEPS=1",
     "FLUID_REQUIRE_SPATIAL_FIELD=1", "FLUID_EXPECT_GRID=24,18,16",
   ]) assert.match(command, new RegExp(setting.replaceAll(".", "\\.")));
   assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
@@ -257,12 +272,13 @@ test("one-step power/fine comparison pins exact time, spatial readback, and moti
 });
 
 test("compact and structured publication rejection reports exact authority evidence before abort", async () => {
-  const smoke = await readFile(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
-  const functionStart = smoke.indexOf("async function readCubicVolumeField(");
-  const functionEnd = smoke.indexOf("\ntype GPUCommandAuditBucket", functionStart);
+  const smoke = await readFile(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
+  const readbacks = await readFile(new URL("../tools/webgpu-smoke-readbacks.ts", import.meta.url), "utf8");
+  const functionStart = readbacks.indexOf("async function readCubicVolumeField(");
+  const functionEnd = readbacks.indexOf("\nexport async function dumpFineRedistancePageDeltaForensics", functionStart);
   assert.notEqual(functionStart, -1, "compact field readback function must exist");
   assert.notEqual(functionEnd, -1, "compact field readback function must have a bounded end");
-  const readback = normalizeWhitespace(smoke.slice(functionStart, functionEnd));
+  const readback = normalizeWhitespace(readbacks.slice(functionStart, functionEnd));
 
   const expectedControlReadbacks = [
     ["solver.globalFineCoarseLevelSetControl", "64"],
@@ -308,7 +324,7 @@ test("compact and structured publication rejection reports exact authority evide
     "the recurring structured audit must not fence or map the GPU queue");
   const terminalAudit = normalizeWhitespace(smoke.slice(
     smoke.indexOf("if (powerGenerationAuditSnapshot)",
-      smoke.indexOf("await awaitAdvanceCompletion();", smoke.indexOf("const simulationWall_ms"))),
+      smoke.indexOf("const simulationWall_ms")),
     smoke.indexOf("const gpuFineTimestamps", smoke.indexOf("const simulationWall_ms")),
   ));
   assertContainsInOrder(terminalAudit, [

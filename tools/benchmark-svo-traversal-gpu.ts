@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
-import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
+import { createWebgpuSvoTraversalWGSL, webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
 
 type Variant = "baseline" | "optimized";
-type Comparison = "expansion" | "morton-decode";
+type Comparison = "expansion" | "morton-decode" | "parametric";
 type FixtureKind = "dense" | "deep-sparse";
 
 interface PackedFixture {
@@ -42,12 +42,12 @@ function positiveInteger(value: string, label: string): number {
 }
 
 function benchmarkComparison(value: string): Comparison {
-  if (value === "expansion" || value === "morton-decode") return value;
+  if (value === "expansion" || value === "morton-decode" || value === "parametric") return value;
   if (value === "parent-bounds" || value === "carried-bounds") {
     throw new RangeError(`comparison "${value}" was retired: its baseline reconstructed pre-carried-bounds traversal `
       + "text that no longer exists in the library; use \"expansion\" (candidate-array vs in-stack insertion) instead");
   }
-  throw new RangeError("comparison must be expansion or morton-decode");
+  throw new RangeError("comparison must be expansion, morton-decode, or parametric");
 }
 
 function benchmarkFixture(value: string): FixtureKind {
@@ -287,12 +287,15 @@ fn svoDecodeMorton(low: u32, high: u32, level: u32) -> vec3u {
 }
 
 function baselineTraversalWGSL(): string {
+  if (comparison === "parametric") return webgpuSvoTraversalWGSL;
   if (comparison === "morton-decode") return mortonDecodeBaselineTraversalWGSL();
   return expansionBaselineTraversalWGSL();
 }
 
 function shader(variant: Variant, workgroupSize: number, fixture: PackedFixture): string {
-  const traversal = variant === "optimized" ? webgpuSvoTraversalWGSL : baselineTraversalWGSL();
+  const traversal = variant === "optimized"
+    ? comparison === "parametric" ? createWebgpuSvoTraversalWGSL({ childEnumeration: "parametric" }) : webgpuSvoTraversalWGSL
+    : baselineTraversalWGSL();
   const extent = 2 ** fixture.depth * fixture.brickSize;
   return `${traversal}
 struct BenchmarkResult { status: u32, visits: u32, nodeIndex: u32, leafIndex: u32 }
@@ -448,27 +451,31 @@ for (let cycle = 0; cycle < cycles; cycle += 1) {
     const variants: readonly Variant[] = cycle % 2 === 0 ? ["baseline", "optimized"] : ["optimized", "baseline"];
     for (const variant of variants) {
       const key = `${variant}/${workgroupSize}`;
-      const encoder = device.createCommandEncoder();
       const target = pipelines.get(key)!;
-      const recorder = new GPUPerformanceTraceRecorder(
-        device,
-        ++traceSampleId,
-        "presentation",
-        `svo-traversal:${key}:cycle-${cycle}`,
-        [{ id: "dry-scene", label: `SVO ${variant} traversal (${workgroupSize})` }],
-      );
-      recorder.boundary(encoder, `${key} trace start`);
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
-      for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) {
-        pass.dispatchWorkgroups(Math.ceil(width * height / workgroupSize));
+      let trace: Awaited<ReturnType<GPUPerformanceTraceRecorder["read"]>> = undefined;
+      for (let attempt = 0; attempt < 3 && !trace; attempt += 1) {
+        const encoder = device.createCommandEncoder();
+        const recorder = new GPUPerformanceTraceRecorder(
+          device,
+          ++traceSampleId,
+          "presentation",
+          `svo-traversal:${key}:cycle-${cycle}:attempt-${attempt}`,
+          [{ id: "dry-scene", label: `SVO ${variant} traversal (${workgroupSize})` }],
+        );
+        recorder.boundary(encoder, `${key} trace start`);
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
+        for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) {
+          pass.dispatchWorkgroups(Math.ceil(width * height / workgroupSize));
+        }
+        pass.end();
+        recorder.boundary(encoder, `${key} trace complete`);
+        recorder.resolve(encoder);
+        device.queue.submit([encoder.finish()]);
+        trace = await recorder.read();
       }
-      pass.end();
-      recorder.boundary(encoder, `${key} trace complete`);
-      recorder.resolve(encoder);
-      device.queue.submit([encoder.finish()]);
-      const trace = await recorder.read();
-      assert.ok(trace, `${key} GPU trace was invalid`);
+      if (!trace) await device.queue.onSubmittedWorkDone();
+      assert.ok(trace, `${key} GPU trace was invalid; validation=${validationErrors.join(" | ") || "none"}`);
       const values = samples.get(key) ?? [];
       values.push(trace.total_ms);
       samples.set(key, values);
@@ -500,11 +507,13 @@ console.log(JSON.stringify({
   fixture: { depth: fixture.depth, nodes: fixture.nodes.length / 8, leaves: fixture.leaves.length / 4,
     baselineStackEntryBytes: 12,
     optimizedStackEntryBytes: 12,
-    baselineExpansionScratchWords: comparison === "expansion" ? 32 : 0,
-    optimizedExpansionScratchWords: comparison === "expansion" ? 7 : 0,
+    baselineExpansionScratchWords: comparison === "expansion" ? 32 : comparison === "parametric" ? 7 : 0,
+    optimizedExpansionScratchWords: comparison === "expansion" ? 7 : comparison === "parametric" ? 8 : 0,
     expansionScratchNote: comparison === "expansion"
       ? "baseline: array<SvoCandidate, 8> = 32 words; optimized: nearest SvoCandidate (4) + deferred SvoStackEntry (3) in registers"
-      : "expansion scratch identical in both variants for this comparison",
+      : comparison === "parametric"
+        ? "baseline streams up to 8 child AABB hits; optimized sorts at most 3 midpoint crossing scalars and enumerates at most 4 segments"
+        : "expansion scratch identical in both variants for this comparison",
     stackCapacity: 32,
     invocationCount: width * height, rayCount: width * height * traversalsPerInvocation,
     allHitInvocationCount: hitInvocationCount, averageNodeVisits: visitSum / (width * height * traversalsPerInvocation) },

@@ -313,18 +313,18 @@ test("pressure telemetry blocks missing, stale, failed, and unproven controls", 
     "restriction dispatch must be sized by published coarse parents, not transfer records");
   assert.match(decodeOctreePressureSolveWork(pressureControls(), {
     ...pressurePlan, persistentEnabled: true, persistentMaximumIterations: 12,
-  }).blocker!, /persistent coarse-solve control unavailable/);
+  }).blocker!, /persistent solve control unavailable/);
 });
 
 test("pressure telemetry accounts the selected persistent single-workgroup solve", () => {
   const controls = pressureControls();
   const persistentControl = new Uint32Array(13);
-  persistentControl[1] = 1; persistentControl[2] = 2; persistentControl[3] = 1;
+  persistentControl[1] = 1; persistentControl[2] = 2; persistentControl[4] = 1;
   const decoded = decodeOctreePressureSolveWork({ ...controls, persistentControl }, {
     ...pressurePlan, persistentEnabled: true, persistentMaximumIterations: 12,
   });
   assert.equal(decoded.blocker, null);
-  assert.equal(decoded.report?.layers["persistent-coarse-solve"]?.scheduledLanes, 64);
+  assert.equal(decoded.report?.layers["persistent-coarse-solve"]?.scheduledLanes, 256);
   assert.equal(decoded.report?.layers["persistent-coarse-solve"]?.executedIterations, 2);
   assert.equal(decoded.report?.layers["persistent-coarse-solve"]?.reductionPasses, 3);
   assert.equal(decoded.report?.stage.reductionPasses, 5,
@@ -397,7 +397,7 @@ test("projection capture selects the GPU-accepted workset bank and smoke awaits 
   assert.doesNotMatch(projection,
     /setAuthorityBytes\("projection-resident",\s*this\.info\.allocatedBytes\)/,
     "an aggregate compensating bucket could conceal double-counted named arenas");
-  const smoke = readFileSync(new URL("../tools/run-webgpu-smoke.ts", import.meta.url), "utf8");
+  const smoke = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
   assert.match(smoke,
     /capturedWorkAccounting\s*=\s*accountingOwner\.captureWorkAccounting[\s\S]*await accountingOwner\.captureWorkAccounting\(\)[\s\S]*octreeWorkAccounting:\s*capturedWorkAccounting\?\.snapshot/,
     "the smoke artifact must await GPU accounting capture before snapshotting the ledger");

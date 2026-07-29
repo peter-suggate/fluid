@@ -13,6 +13,7 @@ import {
   buildSPGridParentGatherCSR,
   buildSPGridPyramidOracle,
   computeSPGridScaledSpectralBounds,
+  decodeOctreeSPGridHierarchyCensus,
   octreeSPGridAccurateDispatchGateShader,
   octreeSPGridAccurateOperatorShader,
   octreeSPGridVCycleShader,
@@ -169,6 +170,29 @@ test("native sparse pyramid allocation is bounded by row capacity, not dense dom
   assert.ok(!("cellCount" in wide));
   assert.throws(() => planOctreeSPGridVCycle({ dimensions: [16, 16, 16],
     rowCapacity: SPGRID_MAXIMUM_ROW_CAPACITY + 1 }), /bounded/);
+});
+
+test("SPGrid hierarchy census separates live roles, padding, and convergence-gated widths", () => {
+  const plan = planOctreeSPGridVCycle({ dimensions: [4, 4, 4], rowCapacity: 8 });
+  const flags = new Uint32Array(plan.totalLevelSlots);
+  const level0 = plan.levelOffsets[0]!;
+  flags.set([SPGRID_CELL_FLAG.active, SPGRID_CELL_FLAG.ghost,
+    SPGRID_CELL_FLAG.multigridOnly, SPGRID_CELL_FLAG.active | SPGRID_CELL_FLAG.ghost], level0);
+  const dispatch = new Uint32Array(plan.dispatchBytes / 4);
+  const gated = new Uint32Array(plan.dispatchBytes / 4);
+  dispatch.set([4, 7, 1, 1, 1, 2, 1, 1, 3, 3, 1, 1], 0);
+  gated.set([4, 7, 0, 1, 1, 0, 1, 1, 3, 0, 1, 1], 0);
+  const census = decodeOctreeSPGridHierarchyCensus(plan, flags, dispatch, gated);
+  assert.deepEqual(census.levels[0], {
+    level: 0, capacity: plan.levelCapacities[0], occupied: 4,
+    active: 2, ghost: 2, multigridOnly: 1, invalidClass: 1,
+    publishedCount: 4, publishedTransferCount: 7, publishedPageCount: 3,
+    selectedGroups: 1, restrictionGroups: 2, pageGroups: 3,
+    gatedSelectedGroups: 0, gatedRestrictionGroups: 0, gatedPageGroups: 0,
+  });
+  assert.throws(() => decodeOctreeSPGridHierarchyCensus(
+    plan, flags.subarray(1), dispatch, gated,
+  ), /shorter than the plan/);
 });
 
 test("SPGrid derives an aligned row ceiling from the negotiated binding limit", () => {

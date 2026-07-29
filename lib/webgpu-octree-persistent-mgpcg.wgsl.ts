@@ -64,6 +64,12 @@ export const OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS = 8;
 export interface OctreePersistentMGPCGShaderOptions {
   /** Encoded outer-iteration budget; mirrors `plan.maximumIterations`. */
   readonly maximumIterations: number;
+  /**
+   * Address row-shaped channels with the accepted live-row count rather than
+   * the provisioned capacity. The two CPU/GPU copy-staged input channels are
+   * repacked into this live prefix once at kernel entry.
+   */
+  readonly compactLiveRows?: boolean;
   /** Compile-time-only profiler hooks. Omitted production output remains
    * byte-for-byte free of profiler declarations, builtins, and calls. */
   readonly activity?: Readonly<{
@@ -104,6 +110,7 @@ export function octreePersistentMGPCGWGSL(
   options: OctreePersistentMGPCGShaderOptions,
 ): string {
   const iterations = options.maximumIterations;
+  const rowStride = options.compactLiveRows === false ? "capacity()" : "wRows";
   const activityParameters = options.activity?.parameters
     ? `,\n ${options.activity.parameters}` : "";
   const activityEnter = options.activity?.enter ? `\n ${options.activity.enter}` : "";
@@ -228,12 +235,20 @@ fn count(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS);}
 fn transferCount(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS+1u);}
 fn pageCount(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS+8u);}
 
-fn ch(c:u32,r:u32)->u32{return ARENA_HEADER+c*capacity()+r;}
+// The source copies land at the stable capacity-strided ABI offsets. All hot
+// vectors use a live-row stride in the production variant, keeping the entire
+// 472-row ceiling solve in a small contiguous working set instead of placing
+// consecutive channels 36 KiB apart. The legacy capacity-strided variant is
+// retained as a process-local A/B oracle.
+fn stagedCh(c:u32,r:u32)->u32{return ARENA_HEADER+c*capacity()+r;}
+fn stagedVload(c:u32,r:u32)->f32{return bitcast<f32>(arena[stagedCh(c,r)]);}
+fn rowStride()->u32{return ${rowStride};}
+fn ch(c:u32,r:u32)->u32{return ARENA_HEADER+c*rowStride()+r;}
 fn vload(c:u32,r:u32)->f32{return bitcast<f32>(arena[ch(c,r)]);}
 fn vstore(c:u32,r:u32,v:f32){arena[ch(c,r)]=bitcast<u32>(v);}
 fn uload(c:u32,r:u32)->u32{return arena[ch(c,r)];}
 fn ustore(c:u32,r:u32,v:u32){arena[ch(c,r)]=v;}
-fn partialBase()->u32{return ARENA_HEADER+CHANNELS*capacity();}
+fn partialBase()->u32{return ARENA_HEADER+CHANNELS*rowStride();}
 
 // ---------------------------------------------------------------------------
 // Address helpers. These are the SPGrid V-cycle's memoized-table forms; the
@@ -973,10 +988,16 @@ fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters
   // --- P1: initializeState ------------------------------------------------
   for(var row=lane;row<liveRows;row+=LANES){
    if(failed()){continue;}
-   let seed=vload(CH_SEED,row);
+   // RHS and seed were copied before the live count was GPU-visible to the
+   // host. Read them once from their stable staging offsets, then place them
+   // in the compact channel layout used by every subsequent phase.
+   let seed=stagedVload(CH_SEED,row);
+   let rhs=stagedVload(CH_RHS,row);
    let diagonal=diagonalAt(row);
-   if(!finite(diagonal)||diagonal<=0.0||!finite(vload(CH_RHS,row))||!finite(seed)){
+   if(!finite(diagonal)||diagonal<=0.0||!finite(rhs)||!finite(seed)){
     reportAt(ERR_ROW,2u,row);continue;}
+   vstore(CH_RHS,row,rhs);
+   vstore(CH_SEED,row,seed);
    vstore(CH_PRESSURE,row,seed);
    vstore(CH_RESIDUAL,row,0.0);}
   storageBarrier();workgroupBarrier();

@@ -1,36 +1,17 @@
-import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
+import type { SceneDescription } from "../lib/model";
 import type { MethodProfile } from "../lib/methods";
-import { createPaperScenario } from "../lib/paper-scenarios";
-import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "../lib/garden-scene";
 import {
-  createBrickQuadDamBreakScene,
-  createOceanSeicheScene,
-  createTwinDamCollisionScene,
-  getScenePreset,
-} from "../lib/scenes";
+  getSceneWebGPUSmokeLane,
+  getSceneWebGPUSmokeSuite,
+  isSceneWebGPUSmokeId,
+  sceneWebGPUSmokeIds,
+  type SceneWebGPUSmokeId,
+} from "../lib/scene-webgpu-smoke-catalog";
+import type { SceneWebGPUSmokeLane, SceneWebGPUSmokeSuite } from "../lib/scene-webgpu-smoke";
 
-export const smokeScenarioIds = [
-  "dam-break-ui",
-  "settled-tank",
-  "settled-tank-ui",
-  "dam-break-boxes",
-  "hose-tank",
-  "sphere-jet",
-  "deep-water",
-  "garden-pond",
-  "garden-hose",
-  "garden-dam-break",
-  "brick-quad-dam-break",
-  "twin-dam-collision",
-  "hydrostatic-power-two-level",
-  "hydrostatic-power-large-offset",
-  "minimal-power-dam-break",
-  "ceiling-slab-drop",
-  "corner-brick-drop",
-  "ocean-seiche"
-] as const;
+export const smokeScenarioIds = sceneWebGPUSmokeIds;
 
-export type SmokeScenarioId = typeof smokeScenarioIds[number];
+export type SmokeScenarioId = SceneWebGPUSmokeId;
 
 /** Preserve the original 7.2 m gate's disturbance-volume bar for the same fixed slab in a wider tank. */
 export function minimumOceanFarHalfDisturbanceCells(width_m: number): number {
@@ -50,218 +31,34 @@ export interface SmokeScenario {
    * Dawn consumes this same object so the browser and native smoke cannot
    * silently drift through duplicated command-line overrides. */
   methodProfile?: MethodProfile;
+  /** Complete scene-owned contract consumed by the agnostic runner. */
+  suite: SceneWebGPUSmokeSuite<SmokeScenarioId>;
+  lane: SceneWebGPUSmokeLane;
 }
 
 export function isSmokeScenarioId(value: string): value is SmokeScenarioId {
-  return smokeScenarioIds.includes(value as SmokeScenarioId);
+  return isSceneWebGPUSmokeId(value);
 }
 
-export function createSmokeScenario(id: SmokeScenarioId): SmokeScenario {
-  if (id === "hose-tank" || id === "dam-break-boxes" || id === "sphere-jet") {
-    const scene = createPaperScenario(id);
-    scene.environment = id === "hose-tank" ? "conservatory" : id === "dam-break-boxes" ? "concrete-gallery" : "night-lab";
-    return {
-      id,
-      description: id === "hose-tank"
-        ? "fixed cylindrical boundary inflow and a shallow receiving pool"
-        : id === "dam-break-boxes"
-          ? "three-dimensional dam break with immersed boxes"
-          : "directed inlet jet past a fixed immersed sphere",
-      scene,
-      oracleSteps: 2,
-      // Inflow jets need time to establish before the frozen-scene gate is
-      // meaningful: at 0.05 s the stream is still entirely sub-threshold and
-      // the gate measured ambient equilibrium noise instead.
-      target_s: id === "dam-break-boxes" ? Math.max(scene.numerics.maxDt_s * 8, 0.05) : 0.5
-    };
-  }
-
-  if (id === "garden-pond" || id === "garden-dam-break") {
-    // Terrain heightfield scenes. The CPU reference has no static-solid
-    // support, so oracle differentials are informative only; the per-method
-    // invariant gates (volume, stability) remain authoritative.
-    const scene = applyGardenPool(cloneScene(defaultScene), id === "garden-dam-break" ? { fillFraction: 0.16 } : {});
-    scene.environment = "garden";
-    scene.sceneId = `smoke-${id}`;
-    scene.rigidBodies = [];
-    scene.fluid.surfaceTension_N_m = 0;
-    delete scene.fluid.inflow;
-    scene.fluid.initialCondition = id === "garden-pond" ? "tank-fill" : "dam-break";
-    if (id === "garden-dam-break") scene.fluid.initialBrickSeeds_m = [{ ...GARDEN_DAM_BRICK_SEED_M }];
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = id === "garden-pond" ? 1 / 120 : 0.004;
-    return {
-      id,
-      description: id === "garden-pond"
-        ? "hydrostatic rest in an organic pool carved from a terrain heightfield"
-        : "dam break released onto a lawn heightfield draining into the pool",
-      scene, oracleSteps: 2, target_s: id === "garden-pond" ? 0.1 : 0.2
-    };
-  }
-
-  if (id === "garden-hose") {
-    // Exercise the authored UI preset rather than a smoke-only approximation:
-    // terrain, shallow receiving puddle, nozzle body, and inflow placement all
-    // participate in its sparse t=0 topology.
-    const scene = getScenePreset("garden-hose").create();
-    return {
-      id,
-      description: "terrain pond with a shallow receiving puddle and continuous hose inflow",
-      scene,
-      oracleSteps: 2,
-      target_s: 0.5,
-    };
-  }
-
-  if (id === "brick-quad-dam-break") {
-    // Exactly four 8-cubed fluid bricks (16x8x16 finest cells, 2x2 in x/z at
-    // one brick of height); the water starts confined to one brick quadrant.
-    const scene = createBrickQuadDamBreakScene();
-    scene.environment = "default";
-    scene.sceneId = "smoke-brick-quad-dam-break";
-    scene.fluid.surfaceTension_N_m = 0;
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
-    return {
-      id,
-      description: "four-brick tank whose dam break carries water across every fluid brick boundary",
-      scene, oracleSteps: 2, target_s: 1.5
-    };
-  }
-
-  if (id === "twin-dam-collision") {
-    // Two seeded 2x1x1-brick reservoirs on opposite floor corners of a
-    // 56x16x16-cell tank. This is the seeded-geometry scenario for the power
-    // octree: its bootstrap is the dense imported SDF rather than the
-    // closed-form analytic dam.
-    const scene = createTwinDamCollisionScene();
-    scene.environment = "default";
-    scene.sceneId = "smoke-twin-dam-collision";
-    scene.fluid.surfaceTension_N_m = 0;
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
-    return {
-      id,
-      description: "wide tank whose two diagonally opposed reservoirs collapse and collide mid-tank",
-      // The fronts need ~0.5 s to cross the 1.2 m of dry floor between them,
-      // so a shorter target would only observe two independent dam breaks.
-      scene, oracleSteps: 2, target_s: 1.0
-    };
-  }
-
-  if (id === "hydrostatic-power-two-level") {
-    const preset = getScenePreset(id), scene = preset.create();
-    return {
-      id,
-      description: "16-cubed settled tank with room for unit and two-cell power-diagram leaves",
-      scene,
-      oracleSteps: 50,
-      target_s: 50 * scene.numerics.maxDt_s,
-      methodProfile: preset.methodProfile,
-    };
-  }
-
-  if (id === "hydrostatic-power-large-offset") {
-    const preset = getScenePreset(id), scene = preset.create();
-    return {
-      id,
-      description: "32x24x16 settled tank with a cell-cut free surface and a larger two-level pressure grid",
-      scene,
-      oracleSteps: 1,
-      target_s: scene.numerics.maxDt_s,
-      methodProfile: preset.methodProfile,
-    };
-  }
-
-  if (id === "minimal-power-dam-break") {
-    const preset = getScenePreset(id), scene = preset.create();
-    return {
-      id,
-      description: "minimal two-level analytic dam reservoir collapsing in a 16-cubed tank",
-      scene,
-      oracleSteps: 50,
-      // The browser's first rejected moving-surface generation has appeared
-      // just beyond 0.4 s. The default Dawn matrix must cross that boundary,
-      // not stop at the earlier 50-step initialization oracle.
-      target_s: 0.5,
-      methodProfile: preset.methodProfile,
-    };
-  }
-
-  if (id === "ceiling-slab-drop" || id === "corner-brick-drop") {
-    // Analytic unilateral-contact oracles: a single seeded brick under the
-    // closed lid whose exact trajectory is free fall (see lib/scenes.ts).
-    // These are the minimal reproductions of ceiling and seam/corner
-    // sticking, with a closed-form reference instead of a recorded trace.
-    const preset = getScenePreset(id), scene = preset.create();
-    return {
-      id,
-      description: id === "ceiling-slab-drop"
-        ? "seeded brick flush under the lid whose exact answer is free fall"
-        : "seeded brick in a top corner seam whose exact answer is free fall",
-      scene,
-      oracleSteps: 2,
-      target_s: 0.5,
-      methodProfile: preset.methodProfile,
-    };
-  }
-
-  if (id === "ocean-seiche") {
-    // A wide deep tank whose calm interior coarsens into 16/32-cubed octree
-    // leaves; a raised 2x1x10-brick slab along the -x wall collapses into a
-    // long gravity wave (~4.2 m/s) that crosses the 8 m tank in ~1.9 s.
-    const scene = createOceanSeicheScene();
-    // The benchmark isolates fluid scaling. Publishing the full research
-    // station's legacy inspection records adds hundreds of MB unrelated to
-    // the solver and can hide the sparse-field signal under debug memory.
-    scene.environment = "default";
-    scene.sceneId = "smoke-ocean-seiche";
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
-    return {
-      id,
-      description: "wide deep ocean tank releasing a wall-hugging surface slab into a traversing gravity wave",
-      scene, oracleSteps: 1, target_s: 6
-    };
-  }
-
-  const scene = cloneScene(defaultScene);
-  scene.environment = id === "deep-water" ? "research-station" : "default";
-  scene.rigidBodies = [];
-  if (id === "dam-break-ui") {
-    // This identifier is a parity contract, not a similar hand-authored smoke
-    // scene. Construct it through the same preset factory as the browser so
-    // scene identity, both timesteps, capillarity, walls, and future authored
-    // defaults cannot silently diverge. Diagnostic overrides are applied by
-    // run-webgpu-smoke only after this canonical scene has been obtained.
-    const uiScene = getScenePreset("water-box-dam-break").create();
-    return { id, description: "exact browser water-box dam-break preset", scene: uiScene,
-      oracleSteps: 2, target_s: 0.2 };
-  }
-  if (id === "settled-tank-ui") {
-    // The hand-authored settled-tank scenario below clears rigidBodies, but the
-    // browser preset it stands in for keeps the default scene's bodies ("drop
-    // bodies into calm water"). Only a populated rigidBodies array constructs
-    // the solid vertex-SDF stage at all, so every stage that runs exclusively
-    // on the body path was unreachable from Dawn and shipped untested. Take the
-    // scene from the same preset factory as the browser, for the same reason
-    // dam-break-ui does.
-    const uiScene = getScenePreset("water-box-tank-fill").create();
-    return { id, description: "exact browser water-box settled-tank preset, with rigid bodies",
-      scene: uiScene, oracleSteps: 2, target_s: 0.2 };
-  }
-  scene.fluid.surfaceTension_N_m = 0;
-  delete scene.fluid.inflow;
-  if (id === "settled-tank") {
-    scene.sceneId = "smoke-settled-tank";
-    scene.fluid.initialCondition = "tank-fill";
-    scene.container.fillFraction = 0.7;
-    scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 120;
-    return { id, description: "hydrostatic preservation in a closed, level pool", scene, oracleSteps: 2, target_s: 0.1 };
-  }
-
-  scene.sceneId = "smoke-deep-water";
-  scene.container.height_m = 20;
-  scene.container.fillFraction = 0.8;
-  scene.fluid.initialCondition = "tank-fill";
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
-  return { id, description: "extreme vertical aspect ratio and tall-cell compression", scene, oracleSteps: 1, target_s: 0.1 };
+export function createSmokeScenario(id: SmokeScenarioId, laneId?: string): SmokeScenario {
+  const suite = getSceneWebGPUSmokeSuite(id);
+  const lane = getSceneWebGPUSmokeLane(id, laneId);
+  const authoredScene = suite.createScene();
+  const soleMethod = lane.methods.length === 1 ? lane.methods[0] : undefined;
+  return {
+    id,
+    description: lane.description || suite.description,
+    scene: authoredScene,
+    oracleSteps: lane.oracle.matchedSteps,
+    target_s: lane.stop.simulatedTime_s,
+    methodProfile: soleMethod ? {
+      methodId: soleMethod.id,
+      quality: soleMethod.quality,
+      overrides: { ...soleMethod.overrides },
+    } : undefined,
+    suite,
+    lane,
+  };
 }
 
 export interface ScalarFieldSummary {

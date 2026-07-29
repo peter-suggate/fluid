@@ -17,6 +17,15 @@ test("render xctrace profiler captures external Metal counters and anchors real 
   assert.match(profiler, /CounterRowSelector/);
 });
 
+test("render profiles preserve enough variant and source identity for controlled A/Bs", () => {
+  assert.match(profiler, /--variant=baseline/);
+  assert.match(profiler, /--traversal=hybrid\|canonical\|canonical-parametric\|compact\|wide/);
+  assert.match(profiler, /FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal/);
+  assert.match(profiler, /sourceProvenance\(\)/);
+  assert.match(profiler, /createHash\("sha256"\)/);
+  assert.match(profiler, /fingerprint:/);
+});
+
 test("frame detection prefers the render prepass over an equally periodic interior pass", () => {
   const intervals = Array.from({ length: 8 }, (_, frame) => [
     { start: frame * 50_000, duration: 8_000, label: "Sparse voxel cone-lighting prepass",

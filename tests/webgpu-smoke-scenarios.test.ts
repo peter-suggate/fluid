@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { validateScene } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
+import { sceneWebGPUSmokeIds } from "../lib/scene-webgpu-smoke-catalog";
 import {
   compareScalarFields,
   compareSingleTallCellNeighborhood,
@@ -13,7 +14,7 @@ import {
 } from "../tools/webgpu-smoke-scenarios";
 
 test("native WebGPU matrix covers the UI dam break, equilibrium, moving boundaries, rigid geometry, and deep compression", () => {
-  assert.deepEqual(smokeScenarioIds, ["dam-break-ui", "settled-tank", "settled-tank-ui", "dam-break-boxes", "hose-tank", "sphere-jet", "deep-water", "garden-pond", "garden-hose", "garden-dam-break", "brick-quad-dam-break", "twin-dam-collision", "hydrostatic-power-two-level", "hydrostatic-power-large-offset", "minimal-power-dam-break", "ocean-seiche"]);
+  assert.deepEqual(smokeScenarioIds, sceneWebGPUSmokeIds);
   for (const id of smokeScenarioIds) {
     const scenario = createSmokeScenario(id);
     assert.deepEqual(validateScene(scenario.scene), []);

@@ -9,6 +9,13 @@ export const SVO_PRIMITIVE_RECORD_WORDS = SVO_PRIMITIVE_RECORD_STRIDE_BYTES / Ui
 export const SVO_PRIMITIVE_INVALID_REFERENCE = 0xffff_ffff;
 /** Fixed bisection ceiling shared by the CPU oracle and f32 WGSL closest-point solve. */
 export const SVO_ELLIPSOID_CLOSEST_POINT_ITERATIONS = 64;
+/**
+ * Sphere-trace ceiling for kinds whose hit is solved by marching their exact
+ * distance rather than by a closed-form root. Callers hand in a bounded
+ * interval — one traversed voxel in the renderer — so the march starts within a
+ * cell of the surface and this ceiling is never the reason a hit is missed.
+ */
+export const SVO_PRIMITIVE_MARCH_ITERATIONS = 48;
 
 /** Stable on-GPU primitive tags. Zero remains reserved for an invalid/empty record. */
 export const SVO_PRIMITIVE_KINDS = Object.freeze({
@@ -18,12 +25,21 @@ export const SVO_PRIMITIVE_KINDS = Object.freeze({
   cylinder: 4,
   ellipsoid: 5,
   terrainHeightfield: 6,
+  torus: 7,
+  cone: 8,
 } as const);
 
 export const SVO_PRIMITIVE_FLAGS = Object.freeze({
   exactDistance: 1,
   hardFeatures: 2,
   externalTerrain: 4,
+  /**
+   * The kind's ray hit is a bounded sphere trace of its own exact distance
+   * instead of a closed-form root. This is what makes a new shape cheap: it
+   * costs one signed-distance function on each of the CPU and the GPU, not a
+   * bespoke quartic and its degenerate cases.
+   */
+  marchedIntersection: 8,
 } as const);
 
 /** Stable feature IDs returned beside shading normals. */
@@ -83,6 +99,32 @@ export interface SvoEllipsoidPrimitive extends SvoOrientedPrimitive {
 }
 
 /**
+ * A ring swept about the local +Y axis, so its tube lies in the local XZ plane.
+ * One record replaces the bead chains scenery used to approximate a coil, and
+ * because it is a single owner the surface no longer steps at voxel boundaries
+ * where two beads used to meet.
+ */
+export interface SvoTorusPrimitive extends SvoOrientedPrimitive {
+  kind: "torus";
+  /** Centreline radius of the ring. */
+  majorRadius_m: number;
+  /** Tube radius, strictly inside the centreline so the ring never self-intersects. */
+  minorRadius_m: number;
+}
+
+/**
+ * A truncated cone about the local +Y axis: `baseRadius_m` at -Y, `topRadius_m`
+ * at +Y. A zero top radius is an ordinary cone. Anything with a taper — a
+ * flowerpot, a spout, a stem — is this, not a cylinder.
+ */
+export interface SvoConePrimitive extends SvoOrientedPrimitive {
+  kind: "cone";
+  baseRadius_m: number;
+  topRadius_m: number;
+  halfHeight_m: number;
+}
+
+/**
  * A terrain record references the shared scene heightfield table. Variable-size
  * terrain features deliberately do not live in every primitive record.
  */
@@ -98,6 +140,8 @@ export type SvoPrimitiveDescriptor =
   | SvoCapsulePrimitive
   | SvoCylinderPrimitive
   | SvoEllipsoidPrimitive
+  | SvoTorusPrimitive
+  | SvoConePrimitive
   | SvoTerrainHeightfieldPrimitive;
 
 export interface SvoPrimitiveSample {
@@ -197,6 +241,26 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
     positive(descriptor.radii_m.z, "Ellipsoid Z radius");
     return { ...descriptor.radii_m };
   }
+  if (descriptor.kind === "torus") {
+    positive(descriptor.majorRadius_m, "Torus major radius");
+    positive(descriptor.minorRadius_m, "Torus minor radius");
+    // A tube thicker than the ring it is swept around passes through the axis,
+    // and the swept-circle distance stops being the distance to that solid.
+    if (!(descriptor.minorRadius_m < descriptor.majorRadius_m)) {
+      throw new RangeError("Torus minor radius must be smaller than its major radius");
+    }
+    return { x: descriptor.majorRadius_m, y: descriptor.minorRadius_m, z: 0 };
+  }
+  if (descriptor.kind === "cone") {
+    positive(descriptor.halfHeight_m, "Cone half height");
+    nonNegative(descriptor.baseRadius_m, "Cone base radius");
+    nonNegative(descriptor.topRadius_m, "Cone top radius");
+    // Both ends may not close: that degenerates to a segment with no surface.
+    if (!(Math.max(descriptor.baseRadius_m, descriptor.topRadius_m) > 0)) {
+      throw new RangeError("Cone must have a positive radius at one end");
+    }
+    return { x: descriptor.baseRadius_m, y: descriptor.halfHeight_m, z: descriptor.topRadius_m };
+  }
   uint32(descriptor.terrainReference, "Terrain reference");
   if (descriptor.terrainReference === SVO_PRIMITIVE_INVALID_REFERENCE) throw new RangeError("Terrain reference may not use the invalid sentinel");
   const epsilon = descriptor.normalEpsilon_m ?? 0.02;
@@ -210,12 +274,23 @@ function kindCode(kind: SvoPrimitiveDescriptor["kind"]): number {
   if (kind === "capsule") return SVO_PRIMITIVE_KINDS.capsule;
   if (kind === "cylinder") return SVO_PRIMITIVE_KINDS.cylinder;
   if (kind === "ellipsoid") return SVO_PRIMITIVE_KINDS.ellipsoid;
+  if (kind === "torus") return SVO_PRIMITIVE_KINDS.torus;
+  if (kind === "cone") return SVO_PRIMITIVE_KINDS.cone;
   return SVO_PRIMITIVE_KINDS.terrainHeightfield;
+}
+
+/** Kinds whose ray hit is marched rather than solved in closed form. */
+function marchedKind(kind: SvoPrimitiveDescriptor["kind"]): boolean {
+  return kind === "torus" || kind === "cone";
 }
 
 function primitiveFlags(kind: SvoPrimitiveDescriptor["kind"]): number {
   if (kind === "box" || kind === "cylinder") return SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.hardFeatures;
   if (kind === "sphere" || kind === "capsule" || kind === "ellipsoid") return SVO_PRIMITIVE_FLAGS.exactDistance;
+  if (kind === "torus") return SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.marchedIntersection;
+  if (kind === "cone") {
+    return SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.hardFeatures | SVO_PRIMITIVE_FLAGS.marchedIntersection;
+  }
   if (kind === "terrain-heightfield") return SVO_PRIMITIVE_FLAGS.externalTerrain;
   return 0;
 }
@@ -241,6 +316,8 @@ export function canonicalSvoPrimitive(descriptor: SvoPrimitiveDescriptor): SvoPr
   if (descriptor.kind === "capsule") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, segmentHalfLength_m: d.y };
   if (descriptor.kind === "cylinder") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, halfHeight_m: d.y };
   if (descriptor.kind === "ellipsoid") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radii_m: d };
+  if (descriptor.kind === "torus") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), majorRadius_m: d.x, minorRadius_m: d.y };
+  if (descriptor.kind === "cone") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
   return { ...descriptor, ownerId, normalEpsilon_m: d.x };
 }
 
@@ -285,6 +362,8 @@ function descriptorFromRecord(words: Uint32Array, floats: Float32Array, base: nu
   if (kind === SVO_PRIMITIVE_KINDS.capsule) return { ...identity, kind: "capsule", center_m, orientation, radius_m: d.x, segmentHalfLength_m: d.y };
   if (kind === SVO_PRIMITIVE_KINDS.cylinder) return { ...identity, kind: "cylinder", center_m, orientation, radius_m: d.x, halfHeight_m: d.y };
   if (kind === SVO_PRIMITIVE_KINDS.ellipsoid) return { ...identity, kind: "ellipsoid", center_m, orientation, radii_m: d };
+  if (kind === SVO_PRIMITIVE_KINDS.torus) return { ...identity, kind: "torus", center_m, orientation, majorRadius_m: d.x, minorRadius_m: d.y };
+  if (kind === SVO_PRIMITIVE_KINDS.cone) return { ...identity, kind: "cone", center_m, orientation, baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
   if (kind === SVO_PRIMITIVE_KINDS.terrainHeightfield) {
     return { ...identity, kind: "terrain-heightfield", terrainReference: words[base + 13], normalEpsilon_m: d.x };
   }
@@ -600,6 +679,106 @@ function intersectEllipsoidLocal(
   return nearestLocalHit(candidates, ray);
 }
 
+/**
+ * Local signed distance, shading normal and feature of the marched kinds. Both
+ * distances are exact, which is what lets one sphere trace stand in for a
+ * bespoke root solve per shape.
+ */
+function marchedLocalSample(descriptor: SvoTorusPrimitive | SvoConePrimitive, point: Vec3): SvoPrimitiveSample {
+  if (descriptor.kind === "torus") {
+    const radial = Math.hypot(point.x, point.z);
+    const ring = radial - descriptor.majorRadius_m;
+    const signedDistance_m = Math.hypot(ring, point.y) - descriptor.minorRadius_m;
+    // On the axis the whole ring is equidistant, so no single normal exists.
+    const scale = radial > NORMAL_EPSILON ? ring / radial : 0;
+    const normal = radial > NORMAL_EPSILON
+      ? normalize({ x: point.x * scale, y: point.y, z: point.z * scale })
+      : null;
+    return { signedDistance_m, normal, featureId: SVO_PRIMITIVE_FEATURES.smooth };
+  }
+  const { baseRadius_m: base, topRadius_m: top, halfHeight_m: half } = descriptor;
+  const radial = Math.hypot(point.x, point.z);
+  // Exact frustum distance: nearest of the end disc (`cap`) and the lateral
+  // band (`side`), signed by whether the point is inside both.
+  const capRadius = point.y < 0 ? base : top;
+  const cap = { x: radial - Math.min(radial, capRadius), y: Math.abs(point.y) - half };
+  const slope = { x: top - base, y: 2 * half };
+  const toApex = { x: top - radial, y: half - point.y };
+  const projection = Math.min(1, Math.max(0, (toApex.x * slope.x + toApex.y * slope.y) / (slope.x ** 2 + slope.y ** 2)));
+  const side = { x: radial - top + slope.x * projection, y: point.y - half + slope.y * projection };
+  const capSquared = cap.x ** 2 + cap.y ** 2;
+  const sideSquared = side.x ** 2 + side.y ** 2;
+  const inside = side.x < 0 && cap.y < 0;
+  const signedDistance_m = (inside ? -1 : 1) * Math.sqrt(Math.min(capSquared, sideSquared));
+  // Hard features: select the authored end or the authored band, never a blend.
+  if (capSquared <= sideSquared) {
+    return {
+      signedDistance_m,
+      normal: { x: 0, y: Math.sign(point.y || 1), z: 0 },
+      featureId: SVO_PRIMITIVE_FEATURES.cylinderCap,
+    };
+  }
+  const lateral = normalize({ x: slope.y, y: base - top, z: 0 })!;
+  const direction = radial > NORMAL_EPSILON ? { x: point.x / radial, z: point.z / radial } : { x: 1, z: 0 };
+  return {
+    signedDistance_m,
+    normal: { x: direction.x * lateral.x, y: lateral.y, z: direction.z * lateral.x },
+    featureId: SVO_PRIMITIVE_FEATURES.cylinderSide,
+  };
+}
+
+/** Rotation-invariant radius that bounds a marched kind about its own centre. */
+function marchedBoundingRadius(descriptor: SvoTorusPrimitive | SvoConePrimitive): number {
+  return descriptor.kind === "torus"
+    ? descriptor.majorRadius_m + descriptor.minorRadius_m
+    : Math.hypot(Math.max(descriptor.baseRadius_m, descriptor.topRadius_m), descriptor.halfHeight_m);
+}
+
+/** Surface acceptance band, shared with WGSL so both solves stop in the same place. */
+function marchSurfaceEpsilon(t_m: number): number {
+  return Math.max(1e-6, 1e-4 * Math.abs(t_m));
+}
+
+/**
+ * Bounded sphere trace against an exact distance. Stepping by |distance| walks
+ * to the surface from either side, so a ray that starts inside reports the same
+ * far surface a closed-form solve would.
+ */
+function intersectMarchedLocal(
+  descriptor: SvoTorusPrimitive | SvoConePrimitive,
+  origin: Vec3,
+  direction: Vec3,
+  ray: CanonicalPrimitiveRay,
+): LocalPrimitiveRayHit | null {
+  // The bounding sphere both rejects misses early and closes an unbounded tMax.
+  const bounds = quadraticRoots(
+    direction.x ** 2 + direction.y ** 2 + direction.z ** 2,
+    origin.x * direction.x + origin.y * direction.y + origin.z * direction.z,
+    origin.x ** 2 + origin.y ** 2 + origin.z ** 2 - marchedBoundingRadius(descriptor) ** 2,
+  );
+  if (bounds.length < 2) return null;
+  const start = Math.max(ray.tMin_m, bounds[0]);
+  const end = Math.min(ray.tMax_m, bounds[1]);
+  if (!(end >= start)) return null;
+  let t_m = start;
+  for (let iteration = 0; iteration <= SVO_PRIMITIVE_MARCH_ITERATIONS; iteration += 1) {
+    const sample = marchedLocalSample(descriptor, {
+      x: origin.x + direction.x * t_m,
+      y: origin.y + direction.y * t_m,
+      z: origin.z + direction.z * t_m,
+    });
+    const distance = Math.abs(sample.signedDistance_m);
+    if (distance <= marchSurfaceEpsilon(t_m)) {
+      return sample.normal ? { t_m, normal: sample.normal, featureId: sample.featureId } : null;
+    }
+    // The floor only guarantees progress; the acceptance band above is what
+    // decides a hit, so it can never step across a surface it should have found.
+    t_m += Math.max(distance, NORMAL_EPSILON);
+    if (t_m > end) return null;
+  }
+  return null;
+}
+
 function intersectCanonicalSvoPrimitive(
   descriptor: SvoFinitePrimitiveDescriptor,
   ray: CanonicalPrimitiveRay,
@@ -609,7 +788,8 @@ function intersectCanonicalSvoPrimitive(
     : descriptor.kind === "box" ? intersectBoxLocal(descriptor, origin, direction, ray)
       : descriptor.kind === "capsule" ? intersectCapsuleLocal(descriptor, origin, direction, ray)
         : descriptor.kind === "cylinder" ? intersectCylinderLocal(descriptor, origin, direction, ray)
-          : intersectEllipsoidLocal(descriptor, origin, direction, ray);
+          : descriptor.kind === "torus" || descriptor.kind === "cone" ? intersectMarchedLocal(descriptor, origin, direction, ray)
+            : intersectEllipsoidLocal(descriptor, origin, direction, ray);
   if (!localHit) return null;
   const normal = worldNormal(orientation, localHit.normal);
   if (!normal) return null;
@@ -621,7 +801,7 @@ function intersectCanonicalSvoPrimitive(
       z: ray.origin_m.z + ray.direction.z * localHit.t_m,
     },
     normal,
-    normalPolicy: descriptor.kind === "box" || descriptor.kind === "cylinder" ? "hard-feature" : "smooth",
+    normalPolicy: descriptor.kind === "box" || descriptor.kind === "cylinder" || descriptor.kind === "cone" ? "hard-feature" : "smooth",
     featureId: localHit.featureId,
     primitiveKind: descriptor.kind,
     primitiveId: descriptor.primitiveId,
@@ -779,6 +959,10 @@ export function sampleSvoPrimitive(
       normal: worldNormal(orientation, normalize(offset)), featureId: SVO_PRIMITIVE_FEATURES.smooth,
     };
   }
+  if (descriptor.kind === "torus" || descriptor.kind === "cone") {
+    const local = marchedLocalSample(descriptor, point);
+    return { ...local, normal: worldNormal(orientation, local.normal) };
+  }
   if (descriptor.kind === "cylinder") {
     const radialLength = Math.hypot(point.x, point.z);
     const radialDistance = radialLength - descriptor.radius_m;
@@ -832,6 +1016,8 @@ const SVO_KIND_CAPSULE: u32 = 3u;
 const SVO_KIND_CYLINDER: u32 = 4u;
 const SVO_KIND_ELLIPSOID: u32 = 5u;
 const SVO_KIND_TERRAIN: u32 = 6u;
+const SVO_KIND_TORUS: u32 = 7u;
+const SVO_KIND_CONE: u32 = 8u;
 const SVO_FEATURE_SMOOTH: u32 = 0u;
 const SVO_FEATURE_BOX_X: u32 = 1u;
 const SVO_FEATURE_BOX_Y: u32 = 2u;
@@ -915,7 +1101,80 @@ fn svoPrimitiveRayInRange(t_m: f32, tMin_m: f32, tMax_m: f32) -> bool {
   return t_m >= tMin_m - tolerance_m && t_m <= tMax_m + tolerance_m;
 }
 
-/** Exact bounded analytic hit for every finite primitive kind in the shared ABI. */
+struct SvoConeSample {
+  distance_m: f32,
+  featureId: u32,
+  normal: vec3f,
+}
+
+fn svoTorusDistance_m(point: vec3f, dimensions_m: vec3f) -> f32 {
+  let ring = vec2f(length(point.xz) - dimensions_m.x, point.y);
+  return length(ring) - dimensions_m.y;
+}
+
+fn svoTorusNormal(point: vec3f, dimensions_m: vec3f) -> vec3f {
+  let radial = length(point.xz);
+  if (!(radial > 1e-8)) { return vec3f(0.0); }
+  let scale = (radial - dimensions_m.x) / radial;
+  let offset = vec3f(point.x * scale, point.y, point.z * scale);
+  let magnitude = length(offset);
+  return select(vec3f(0.0), offset / magnitude, magnitude > 1e-12);
+}
+
+// Exact frustum distance: nearest of the end disc and the lateral band, signed
+// by whether the point is inside both. dimensions are (base, halfHeight, top).
+fn svoConeSample(point: vec3f, dimensions_m: vec3f) -> SvoConeSample {
+  let base = dimensions_m.x;
+  let half = dimensions_m.y;
+  let top = dimensions_m.z;
+  let radial = length(point.xz);
+  let capRadius = select(top, base, point.y < 0.0);
+  let cap = vec2f(radial - min(radial, capRadius), abs(point.y) - half);
+  let slope = vec2f(top - base, 2.0 * half);
+  let toApex = vec2f(top - radial, half - point.y);
+  let projection = clamp(dot(toApex, slope) / dot(slope, slope), 0.0, 1.0);
+  let side = vec2f(radial - top, point.y - half) + slope * projection;
+  let capSquared = dot(cap, cap);
+  let sideSquared = dot(side, side);
+  let inside = side.x < 0.0 && cap.y < 0.0;
+  let distance_m = select(1.0, -1.0, inside) * sqrt(min(capSquared, sideSquared));
+  // Hard features: select the authored end or the authored band, never a blend.
+  if (capSquared <= sideSquared) {
+    return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_CAP, vec3f(0.0, select(1.0, -1.0, point.y < 0.0), 0.0));
+  }
+  let lateral = normalize(vec2f(slope.y, base - top));
+  let direction = select(vec2f(1.0, 0.0), point.xz / max(radial, 1e-8), radial > 1e-8);
+  return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_SIDE, vec3f(direction.x * lateral.x, lateral.y, direction.y * lateral.x));
+}
+
+fn svoMarchedKind(kind: u32) -> bool { return kind == SVO_KIND_TORUS || kind == SVO_KIND_CONE; }
+
+fn svoMarchedDistance_m(kind: u32, point: vec3f, dimensions_m: vec3f) -> f32 {
+  if (kind == SVO_KIND_TORUS) { return svoTorusDistance_m(point, dimensions_m); }
+  return svoConeSample(point, dimensions_m).distance_m;
+}
+
+fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f) -> vec4f {
+  if (kind == SVO_KIND_TORUS) { return vec4f(svoTorusNormal(point, dimensions_m), f32(SVO_FEATURE_SMOOTH)); }
+  let cone = svoConeSample(point, dimensions_m);
+  return vec4f(cone.normal, f32(cone.featureId));
+}
+
+/** Rotation-invariant radius that bounds a marched kind about its own centre. */
+fn svoMarchedBoundingRadius_m(kind: u32, dimensions_m: vec3f) -> f32 {
+  if (kind == SVO_KIND_TORUS) { return dimensions_m.x + dimensions_m.y; }
+  return length(vec2f(max(dimensions_m.x, dimensions_m.z), dimensions_m.y));
+}
+
+/** Surface acceptance band, shared with the CPU so both solves stop in the same place. */
+fn svoMarchSurfaceEpsilon_m(t_m: f32) -> f32 { return max(1e-6, 1e-4 * abs(t_m)); }
+
+/**
+ * Bounded ray hit for every finite primitive kind in the shared ABI: a closed
+ * form where one exists, and otherwise a sphere trace of the kind's own exact
+ * distance. Stepping by |distance| walks to the surface from either side, so a
+ * ray that starts inside reports the same far surface a closed form would.
+ */
 fn svoIntersectPrimitiveExact(
   record: SvoPrimitiveRecord,
   worldOrigin_m: vec3f,
@@ -935,13 +1194,18 @@ fn svoIntersectPrimitiveExact(
   let localDirection = svoQuaternionRotate(inverse, worldDirection);
   let dimensions_m = svoPrimitiveDimensions_m(record);
   let kind = svoPrimitiveKind(record);
-  let finiteKind = kind >= SVO_KIND_SPHERE && kind <= SVO_KIND_ELLIPSOID;
-  let dimensionsValid = select(
-    dimensions_m.x > 0.0,
-    all(dimensions_m > vec3f(0.0)),
-    kind == SVO_KIND_BOX || kind == SVO_KIND_ELLIPSOID,
-  ) && select(true, dimensions_m.y >= 0.0, kind == SVO_KIND_CAPSULE)
-    && select(true, dimensions_m.y > 0.0, kind == SVO_KIND_CYLINDER);
+  let marched = svoMarchedKind(kind);
+  let finiteKind = (kind >= SVO_KIND_SPHERE && kind <= SVO_KIND_ELLIPSOID) || marched;
+  var dimensionsValid = false;
+  if (kind == SVO_KIND_BOX || kind == SVO_KIND_ELLIPSOID) { dimensionsValid = all(dimensions_m > vec3f(0.0)); }
+  else if (kind == SVO_KIND_SPHERE) { dimensionsValid = dimensions_m.x > 0.0; }
+  else if (kind == SVO_KIND_CAPSULE) { dimensionsValid = dimensions_m.x > 0.0 && dimensions_m.y >= 0.0; }
+  else if (kind == SVO_KIND_CYLINDER) { dimensionsValid = dimensions_m.x > 0.0 && dimensions_m.y > 0.0; }
+  else if (kind == SVO_KIND_TORUS) { dimensionsValid = dimensions_m.y > 0.0 && dimensions_m.y < dimensions_m.x; }
+  else if (kind == SVO_KIND_CONE) {
+    dimensionsValid = dimensions_m.y > 0.0 && dimensions_m.x >= 0.0 && dimensions_m.z >= 0.0
+      && max(dimensions_m.x, dimensions_m.z) > 0.0;
+  }
   if (!finiteKind || !dimensionsValid) { return svoPrimitiveNoRayHit(SVO_PRIMITIVE_RAY_INVALID); }
 
   var bestT_m = SVO_PRIMITIVE_RAY_INFINITY;
@@ -1008,6 +1272,39 @@ fn svoIntersectPrimitiveExact(
       let point_m = localOrigin + localDirection * bestT_m;
       bestNormal[featureAxis] = select(-1.0, 1.0, point_m[featureAxis] >= 0.0);
       bestFeature = SVO_FEATURE_BOX_X + featureAxis;
+    }
+  } else if (marched) {
+    // The bounding sphere both rejects misses early and bounds the march to the
+    // part of the interval that can contain this primitive at all.
+    let boundingRadius_m = svoMarchedBoundingRadius_m(kind, dimensions_m);
+    let bounds = svoPrimitiveQuadraticRoots(
+      dot(localDirection, localDirection),
+      dot(localOrigin, localDirection),
+      dot(localOrigin, localOrigin) - boundingRadius_m * boundingRadius_m,
+    );
+    if (bounds.count == 2u) {
+      let start = max(tMin_m, bounds.values[0]);
+      let end = min(tMax_m, bounds.values[1]);
+      if (end >= start) {
+        var marchT_m = start;
+        for (var iteration = 0u; iteration <= ${SVO_PRIMITIVE_MARCH_ITERATIONS}u; iteration += 1u) {
+          let point_m = localOrigin + localDirection * marchT_m;
+          let distance_m = abs(svoMarchedDistance_m(kind, point_m, dimensions_m));
+          if (distance_m <= svoMarchSurfaceEpsilon_m(marchT_m)) {
+            let local = svoMarchedLocalNormal(kind, point_m, dimensions_m);
+            if (length(local.xyz) > 1e-8) {
+              bestT_m = marchT_m;
+              bestNormal = local.xyz;
+              bestFeature = u32(local.w);
+            }
+            break;
+          }
+          // The floor only guarantees progress; the acceptance band above is
+          // what decides a hit, so it never steps across a surface.
+          marchT_m += max(distance_m, 1e-8);
+          if (marchT_m > end) { break; }
+        }
+      }
     }
   } else {
     let radialRoots = svoPrimitiveQuadraticRoots(
@@ -1209,6 +1506,7 @@ fn svoPrimitiveDistance_m(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terra
   if (kind == SVO_KIND_CAPSULE) { return svoCapsuleDistance_m(point, dimensions_m); }
   if (kind == SVO_KIND_CYLINDER) { return svoCylinderDistance_m(point, dimensions_m); }
   if (kind == SVO_KIND_ELLIPSOID) { return svoEllipsoidDistance_m(point, dimensions_m); }
+  if (svoMarchedKind(kind)) { return svoMarchedDistance_m(kind, point, dimensions_m); }
   return 3.402823e38;
 }
 
@@ -1242,6 +1540,7 @@ fn svoPrimitiveLocalNormal(record: SvoPrimitiveRecord, point: vec3f) -> vec4f {
     return vec4f(normalize(vec3f(point.x, point.y - closestY, point.z)), f32(SVO_FEATURE_SMOOTH));
   }
   if (kind == SVO_KIND_CYLINDER) { return svoCylinderFeatureNormal(point, dimensions_m); }
+  if (svoMarchedKind(kind)) { return svoMarchedLocalNormal(kind, point, dimensions_m); }
   if (kind == SVO_KIND_ELLIPSOID) {
     if (any(dimensions_m <= vec3f(0.0))) { return vec4f(0.0); }
     let closest = svoEllipsoidClosestPoint_m(dimensions_m, point);

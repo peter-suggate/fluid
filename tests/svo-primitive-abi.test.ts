@@ -52,13 +52,23 @@ const descriptors: SvoPrimitiveDescriptor[] = [
     radii_m: { x: 2, y: 1, z: 0.5 },
   },
   { kind: "terrain-heightfield", primitiveId: 106, materialId: 2, terrainReference: 7, normalEpsilon_m: 0.025 },
+  {
+    kind: "torus", primitiveId: 107, materialId: 33, ownerId: 6, center_m: { x: -3, y: 1, z: 2 },
+    majorRadius_m: 0.8, minorRadius_m: 0.15,
+  },
+  {
+    kind: "cone", primitiveId: 108, materialId: 34, ownerId: 7, center_m: { x: 3, y: 1, z: -2 },
+    baseRadius_m: 0.6, topRadius_m: 0.9, halfHeight_m: 0.5,
+  },
 ];
 
 test("primitive ABI uses four aligned lanes and stable kind values", () => {
   assert.equal(SVO_PRIMITIVE_RECORD_STRIDE_BYTES, 64);
   assert.equal(SVO_PRIMITIVE_RECORD_WORDS, 16);
+  // Tags are permanent: shapes added later take the next free value so records
+  // captured by an older build still decode to the shape they were written as.
   assert.deepEqual(SVO_PRIMITIVE_KINDS, {
-    sphere: 1, box: 2, capsule: 3, cylinder: 4, ellipsoid: 5, terrainHeightfield: 6,
+    sphere: 1, box: 2, capsule: 3, cylinder: 4, ellipsoid: 5, terrainHeightfield: 6, torus: 7, cone: 8,
   });
 
   const packed = packSvoPrimitiveRecords(descriptors);
@@ -140,6 +150,60 @@ test("primitive validation rejects lossy identity, invalid geometry, and degener
   assert.throws(() => canonicalSvoPrimitive({
     kind: "terrain-heightfield", primitiveId: 1, materialId: 2, terrainReference: SVO_PRIMITIVE_INVALID_REFERENCE,
   }), /invalid sentinel/);
+  // A tube at least as thick as its ring passes through the axis, and the
+  // swept-circle distance stops being the distance to that solid.
+  assert.throws(() => canonicalSvoPrimitive({
+    kind: "torus", primitiveId: 1, materialId: 33, center_m: { x: 0, y: 0, z: 0 }, majorRadius_m: 1, minorRadius_m: 1,
+  }), /smaller than its major radius/);
+  assert.throws(() => canonicalSvoPrimitive({
+    kind: "cone", primitiveId: 1, materialId: 34, center_m: { x: 0, y: 0, z: 0 },
+    baseRadius_m: 0, topRadius_m: 0, halfHeight_m: 1,
+  }), /positive radius at one end/);
+  // A cone closed at exactly one end is an ordinary cone, and stays legal.
+  assert.doesNotThrow(() => canonicalSvoPrimitive({
+    kind: "cone", primitiveId: 1, materialId: 34, center_m: { x: 0, y: 0, z: 0 },
+    baseRadius_m: 1, topRadius_m: 0, halfHeight_m: 1,
+  }));
+});
+
+test("swept ring and tapered cone evaluations keep their zero sets, features, and flags", () => {
+  const torus = descriptors[6];
+  const cone = descriptors[7];
+  assert.equal(torus.kind, "torus");
+  assert.equal(cone.kind, "cone");
+  if (torus.kind !== "torus" || cone.kind !== "cone") return;
+
+  const packed = packSvoPrimitiveRecords([torus, cone]);
+  assert.equal(packed[14], SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.marchedIntersection);
+  assert.equal(packed[SVO_PRIMITIVE_RECORD_WORDS + 14],
+    SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.hardFeatures | SVO_PRIMITIVE_FLAGS.marchedIntersection);
+  assert.deepEqual(unpackSvoPrimitiveRecords(packed).map((entry) => entry.kind), ["torus", "cone"]);
+
+  const ring = torus.center_m;
+  // On the tube centreline the field is exactly minus the tube radius, and at
+  // the ring's own centre the nearest solid is a whole major radius away.
+  close(sampleSvoPrimitive(torus, { x: ring.x + torus.majorRadius_m, y: ring.y, z: ring.z }).signedDistance_m, -torus.minorRadius_m);
+  close(sampleSvoPrimitive(torus, ring).signedDistance_m, torus.majorRadius_m - torus.minorRadius_m);
+  const outerTop = sampleSvoPrimitive(torus, { x: ring.x, y: ring.y + torus.minorRadius_m, z: ring.z + torus.majorRadius_m });
+  close(outerTop.signedDistance_m, 0);
+  closeVector(outerTop.normal, { x: 0, y: 1, z: 0 });
+  assert.equal(outerTop.featureId, SVO_PRIMITIVE_FEATURES.smooth);
+
+  // The cone widens toward +Y, so its lateral normal leans downward by the
+  // authored slope while the caps stay flat and keep their own feature.
+  const apexward = sampleSvoPrimitive(cone, { x: cone.center_m.x, y: cone.center_m.y + cone.halfHeight_m, z: cone.center_m.z });
+  close(apexward.signedDistance_m, 0);
+  closeVector(apexward.normal, { x: 0, y: 1, z: 0 });
+  assert.equal(apexward.featureId, SVO_PRIMITIVE_FEATURES.cylinderCap);
+  const flank = sampleSvoPrimitive(cone, { x: cone.center_m.x + 0.75, y: cone.center_m.y, z: cone.center_m.z });
+  close(flank.signedDistance_m, 0);
+  assert.equal(flank.featureId, SVO_PRIMITIVE_FEATURES.cylinderSide);
+  const slope = Math.hypot(2 * cone.halfHeight_m, cone.topRadius_m - cone.baseRadius_m);
+  closeVector(flank.normal, {
+    x: 2 * cone.halfHeight_m / slope,
+    y: (cone.baseRadius_m - cone.topRadius_m) / slope,
+    z: 0,
+  });
 });
 
 test("rigid-body adapter preserves the repository's dimension semantics", () => {

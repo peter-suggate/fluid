@@ -16,7 +16,8 @@
  * buffer, so `StructuredStepSnapshotRing` and the Part-A tripwires are
  * unaffected.
  *
- * Selection is by row count against {@link OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD};
+ * Selection is by constructed row capacity against
+ * {@link OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD};
  * the hierarchical path stays fully supported and is the big-domain path.
  */
 import { PassBroker } from "./webgpu-pass-broker";
@@ -55,10 +56,10 @@ export {
  * Authored row-count ceiling for the persistent executor.
  *
  * Single source of truth is the Section 4.3 contract constant, so the
- * selection gate and the contract can never drift. 8,192 covers both
- * production lanes with headroom; above it the hierarchical path is selected,
- * because a single workgroup is one GPU core and stops winning once the
- * row-parallel work can saturate the device.
+ * selection gate and the contract can never drift. 4,096 retains the measured
+ * mini-lane win; larger constructed systems use the hierarchical path because
+ * a single workgroup is one GPU core and loses once row/page-parallel work can
+ * saturate the device.
  */
 export const OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD =
   OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY;
@@ -73,6 +74,19 @@ export const OCTREE_PERSISTENT_MGPCG_CONTROL_MARKER = 0x5045_5253;
 export const OCTREE_PERSISTENT_MGPCG_CONTROL = Object.freeze({
   executorMarker: 21,
 } as const);
+
+/**
+ * Keep the old capacity-strided arena available as a process-local timing and
+ * correctness oracle. Production packs every hot vector to the accepted live
+ * row prefix; the external staging ABI remains capacity-strided.
+ */
+export function octreePersistentMGPCGCompactLiveRowsEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG_COMPACT_ROWS !== "0";
+}
 
 export const OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID = "octree/persistent-mgpcg";
 const OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK = "whole-solve";
@@ -296,8 +310,9 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       if (OCTREE_PERSISTENT_MGPCG_LANES > limits.maxComputeInvocationsPerWorkgroup) {
         throw new RangeError("Persistent MGPCG 256-lane workgroup exceeds device limits");
       }
-      if (OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES > limits.maxComputeWorkgroupStorageSize) {
-        throw new RangeError("Persistent MGPCG workgroup storage exceeds device limits");
+      if (this.workgroupStorageBytes > limits.maxComputeWorkgroupStorageSize) {
+        throw new RangeError(`Persistent MGPCG requires ${this.workgroupStorageBytes} bytes of `
+          + `workgroup storage; device exposes ${limits.maxComputeWorkgroupStorageSize}`);
       }
       if (this.storageBindingCount > limits.maxStorageBuffersPerShaderStage) {
         throw new RangeError("Persistent MGPCG storage bindings exceed device limits");
@@ -399,8 +414,10 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       "@builtin(subgroup_invocation_id) activitySubgroupLane:u32",
       "@builtin(subgroup_size) activitySubgroupSize:u32",
     ].join(",\n ");
+    const compactLiveRows = octreePersistentMGPCGCompactLiveRowsEnabled();
     const shaderSource = octreePersistentMGPCGWGSL({
       maximumIterations: options.maximumIterations,
+      compactLiveRows,
       ...(activity.enabled ? { activity: {
         parameters: activityParameters,
         enter: activity.subgroup(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "enter", activitySite),
@@ -417,10 +434,12 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     });
     const shaderVariant = activity.module(
       shaderSource,
-      `${OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`,
+      `${OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`
+        + `/${compactLiveRows ? "compact-live" : "capacity-strided"}`,
     );
     const shaderModule = device.createShaderModule({
-      label: "Octree persistent MGPCG · single-dispatch 256-lane solve",
+      label: `Octree persistent MGPCG · single-dispatch 256-lane solve · ${
+        compactLiveRows ? "compact live rows" : "capacity-strided oracle"}`,
       code: shaderVariant.code,
     });
     this.pipeline = activity.registerPipeline(device.createComputePipeline({

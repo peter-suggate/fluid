@@ -12,7 +12,7 @@ import {
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
-import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
+import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 test("scale 1 preserves the production shader byte-for-byte (fingerprint contract)", () => {
   assert.equal(createSvoDrySceneFragmentWGSL(1), svoDrySceneShader,
@@ -101,7 +101,7 @@ test("the cone-lighting scale is an optional lighting option that defaults to th
   } as unknown as GPUDevice;
   try {
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
-    renderer.setSource(mockSource(), candidateBackedDrySceneFixture);
+    renderer.setSource(mockSource(), svoDrySceneFixture);
     assert.equal(renderer.coneLightingScale, 1, "callers without the option keep the historical inline path");
     const paramsWrites = () => writes.filter(({ label }) => label === "Sparse voxel dry scene parameters").length;
     const beforeRepeat = paramsWrites();

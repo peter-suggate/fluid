@@ -16,6 +16,7 @@ const warmups = Number(process.env.FLUID_SVO_WIDE_WARMUPS ?? 4);
 const dispatchesPerSample = Number(process.env.FLUID_SVO_WIDE_DISPATCHES ?? 2);
 const originX = Number(process.env.FLUID_SVO_WIDE_ORIGIN_X ?? -4);
 const productionFallback = process.env.FLUID_SVO_WIDE_PRODUCTION_FALLBACK !== "0";
+const forceWallTiming = process.env.FLUID_SVO_WIDE_TIMING === "wall";
 const rayProfile = process.env.FLUID_SVO_WIDE_RAY_PROFILE ?? "camera";
 const malformedWidePage = process.env.FLUID_SVO_WIDE_MALFORMED_PAGE === "1";
 const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -159,6 +160,17 @@ let traceSampleId = 0;
 for (let cycle = 0; cycle < cycles; cycle += 1) for (const variant of (cycle % 2 ? ["wide", "canonical"] : ["canonical", "wide"]) as Variant[]) {
   const encoder = device.createCommandEncoder();
   const target = targets.get(variant)!;
+  if (forceWallTiming) {
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
+    for (let dispatch = 0; dispatch < dispatchesPerSample; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(invocationCount / 128));
+    pass.end();
+    const start = performance.now();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    samples[variant].push((performance.now() - start) / dispatchesPerSample);
+    continue;
+  }
   const recorder = new GPUPerformanceTraceRecorder(
     device,
     ++traceSampleId,

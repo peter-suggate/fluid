@@ -23,7 +23,7 @@ test("SVO cost diagnostic controls are bounded and retain a production-off defau
   });
   assert.equal(svoCostOverlayCode("traversal-depth"), 1);
   assert.equal(svoCostOverlayCode("brick-tests"), 3);
-  assert.equal(svoCostOverlayCode("candidate-work"), 5);
+  assert.equal(svoCostOverlayCode("exact-tests"), 5);
   assert.equal(svoCostOverlayCode("shadow-work"), 6);
   assert.equal(svoCostOverlayCode("mip-steps"), 7);
   assert.equal(svoCostOverlayCode("total-cost"), 8);
@@ -89,7 +89,7 @@ test("render panel contains rendering controls only; solver fields stay in perfo
   assert.match(panelSource, /LIVE PER-PIXEL SCENE HEATMAPS/);
 });
 
-test("dry shader measures topology, candidate, mip, and shadow work before applying the heatmap", () => {
+test("dry shader measures topology, payload refinement, mip, and shadow work before applying the heatmap", () => {
   assert.match(svoDrySceneShader, /fn dryConfiguredMapping\(\)->SvoMapping/);
   assert.match(svoDrySceneShader, /mapping\.maxVisits=min\(mapping\.maxVisits,dryDiagnosticMaximumNodeVisits\(\)\)/);
   assert.match(svoDrySceneShader, /fn dryTraverse\([^]*svoTraverseWithDepthLimit/);
@@ -97,7 +97,7 @@ test("dry shader measures topology, candidate, mip, and shadow work before apply
   assert.match(svoDrySceneShader, /dryPrimaryLeafVisits\+=1u/);
   assert.match(svoDrySceneShader, /dryPrimaryEmptyBrickSkips\+=1u/);
   assert.match(svoDrySceneShader, /dryPrimaryVoxelWorkItems\+=1u/);
-  assert.match(svoDrySceneShader, /dryCandidateWorkItems\+=candidate\.workItems/);
+  assert.match(svoDrySceneShader, /dryPrimaryExactTests\+=1u/);
   assert.match(svoDrySceneShader, /dryShadowNodeVisits\+=result\.nodeVisits/);
   assert.match(svoDrySceneShader, /dryMipSteps\+=1u/);
   assert.match(svoDrySceneShader, /fn dryLogCost\([^]*log2\(1\.0\+max\(value,0\.0\)\)/);

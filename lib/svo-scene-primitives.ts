@@ -85,7 +85,7 @@ export interface SvoScenePrimitiveBuild {
   environmentId: EnvironmentId;
   descriptors: readonly SvoPrimitiveDescriptor[];
   packedRecords: Uint32Array<ArrayBuffer>;
-  /** Bounded static BVH sharing the primitive-record stride and GPU binding. */
+  /** @deprecated Offline audit index; the renderer always uses SVO payload traversal. */
   primitiveCandidates?: SvoPrimitiveCandidatePublication;
   metadata: readonly SvoEnvironmentPrimitiveMetadata[];
   primitiveIndexByOwnerId: ReadonlyMap<number, number>;
@@ -129,12 +129,27 @@ function descriptorForProxy(
     materialId: identity.materialId,
     ownerId: identity.ownerId,
     center_m: { ...primitive.center_m },
+    // Undefined stays undefined: canonicalisation supplies the identity
+    // rotation, so axis-aligned scenery packs exactly as it always has.
+    orientation: primitive.orientation ? { ...primitive.orientation } : undefined,
   };
   if (primitive.kind === "box") {
     return { ...base, kind: "box", halfExtents_m: { ...primitive.halfSize_m } };
   }
   if (primitive.kind === "cylinder") {
     return { ...base, kind: "cylinder", radius_m: primitive.radius_m, halfHeight_m: primitive.halfHeight_m };
+  }
+  if (primitive.kind === "capsule") {
+    return { ...base, kind: "capsule", radius_m: primitive.radius_m, segmentHalfLength_m: primitive.halfLength_m };
+  }
+  if (primitive.kind === "torus") {
+    return { ...base, kind: "torus", majorRadius_m: primitive.majorRadius_m, minorRadius_m: primitive.minorRadius_m };
+  }
+  if (primitive.kind === "cone") {
+    return {
+      ...base, kind: "cone",
+      baseRadius_m: primitive.baseRadius_m, topRadius_m: primitive.topRadius_m, halfHeight_m: primitive.halfHeight_m,
+    };
   }
   return { ...base, kind: "ellipsoid", radii_m: { ...primitive.radius_m } };
 }

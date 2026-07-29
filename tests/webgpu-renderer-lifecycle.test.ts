@@ -54,6 +54,14 @@ test("GPU queue stays dense around presentation without admitting a physics burs
     "the rolling window is an absolute in-flight ceiling");
   assert.doesNotMatch(renderer, /gpuPendingBatches\+postPresentationDepth/,
     "a presentation must not add a fresh window on top of already queued physics");
+  assert.match(renderer, /interveningWorkSequence: nonPhysicsSequenceAtSubmit/,
+    "physics wall samples must carry the non-physics queue epoch they followed");
+  assert.match(renderer, /this\.nonPhysicsQueueWorkSequence \+= 1;\s*this\.diagnosticQueueWorkPending \+= 1;/,
+    "stats readbacks must invalidate physics wall samples and conservative idle evidence");
+  assert.match(renderer, /this\.nonPhysicsQueueWorkSequence\+=1;\s*this\.presentationPending=true;/,
+    "presentation submission must invalidate later physics wall samples before refilling the queue");
+  assert.match(renderer, /queueWasIdleAtSubmit:presentationQueueWasIdleAtSubmit/,
+    "presentation cost must only learn from an independently idle queue");
 });
 
 test("the exact generic physics partition drives presentation admission", () => {
@@ -74,6 +82,8 @@ test("renderer does not synthesize a second wall-clock timing system", () => {
   );
   assert.match(submit, /submitNextPreparedGPUAdvance/);
   assert.doesNotMatch(submit, /queueReadyAtPromise|cpuAdvanceEncode_ms|physicsQueueWall_ms|gpuAdvanceWall_ms/);
+  assert.match(renderer, /resetPresentationTrace\(\)[^{]*\{[^}]*this\.presentationWallEstimator\.reset\(\)/s,
+    "a new presentation context must discard a stale scheduling estimate");
 });
 
 test("paused solver attachment and raw publication each request exactly one presentation", () => {

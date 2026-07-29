@@ -4,6 +4,24 @@ import type { GPUSolverInstance } from "./methods/types";
 import { createTallCellLayout, type GPUQuality } from "./tall-cell-grid";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
 
+export interface StaticSvoSceneOptions {
+  /**
+   * Renderer-only construction override used by topology experiments. It does
+   * not mutate `scene.voxelDomain` and therefore cannot change the simulation
+   * contract of a fluid-enabled authored scene.
+   */
+  renderBrickSize?: 4 | 8;
+}
+
+export function staticSvoRenderBrickSize(
+  scene: Pick<SceneDescription, "voxelDomain">,
+  options: StaticSvoSceneOptions = {},
+): 4 | 8 {
+  const brickSize = options.renderBrickSize ?? scene.voxelDomain.brickSize_cells;
+  if (brickSize !== 4 && brickSize !== 8) throw new RangeError("Static SVO render brick size must be 4 or 8");
+  return brickSize;
+}
+
 export type StaticSvoSceneProgress = (progress: {
   phase: "allocation" | "warmup";
   taskId: string;
@@ -35,6 +53,7 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     private readonly device: GPUDevice,
     scene: SceneDescription,
     quality: GPUQuality,
+    options: StaticSvoSceneOptions,
   ) {
     const layout = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, {
       // Static presentation needs a lattice, not a stored liquid band.
@@ -84,7 +103,8 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     );
 
     this.world = new OctreeSparseBrickWorld(device, scene, dimensions, {
-      brickSize: scene.voxelDomain.brickSize_cells,
+      brickSize: staticSvoRenderBrickSize(scene, options),
+      staticLightingBrickSize: scene.voxelDomain.brickSize_cells,
       haloCells: 0,
       brickPreActivation: false,
     });
@@ -142,10 +162,11 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     quality: GPUQuality,
     progress: StaticSvoSceneProgress,
     signal?: AbortSignal,
+    options: StaticSvoSceneOptions = {},
   ): Promise<WebGPUStaticSvoScene> {
     progress({ phase: "allocation", taskId: "static-svo.allocate", label: "Allocate static sparse garden", completed: 0, total: 2 });
     if (signal?.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
-    const source = new WebGPUStaticSvoScene(device, scene, quality);
+    const source = new WebGPUStaticSvoScene(device, scene, quality, options);
     try {
       progress({ phase: "warmup", taskId: "static-svo.publish", label: "Publish static sparse garden", completed: 1, total: 2 });
       const encoder = device.createCommandEncoder({ label: "Publish renderer-only SVO scene" });

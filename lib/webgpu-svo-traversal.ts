@@ -62,6 +62,8 @@ export interface SvoTraversalOptions {
   rootNodeIndex?: number;
   /** Optional mutable counters for deterministic traversal-work diagnostics. */
   diagnostics?: SvoTraversalWorkDiagnostics;
+  /** Experimental child enumerator. The default retains the production AABB path. */
+  childEnumeration?: "aabb" | "parametric";
 }
 
 export interface SvoTraversalWorkDiagnostics {
@@ -225,6 +227,93 @@ interface StackEntry extends SvoRayInterval {
   octant: number;
 }
 
+export interface SvoChildIntersection extends SvoRayInterval {
+  octant: number;
+}
+
+export interface SvoParametricChildIntersections {
+  /** Degenerate midpoint-plane cases deliberately retain closed-AABB semantics. */
+  mode: "parametric" | "aabb-fallback";
+  intersections: readonly SvoChildIntersection[];
+}
+
+function childBounds(parent: SvoAabb, octant: number): SvoAabb {
+  const middle = parent.minimum.map((value, axis) => (value + parent.maximum[axis]) * 0.5) as [number, number, number];
+  return {
+    minimum: middle.map((value, axis) => (octant & (1 << axis)) === 0 ? parent.minimum[axis] : value) as [number, number, number],
+    maximum: middle.map((value, axis) => (octant & (1 << axis)) === 0 ? value : parent.maximum[axis]) as [number, number, number],
+  };
+}
+
+function referenceChildIntersections(ray: SvoRay, parent: SvoAabb, childMask: number): SvoChildIntersection[] {
+  const intersections: SvoChildIntersection[] = [];
+  for (let octant = 0; octant < 8; octant += 1) {
+    if ((childMask & (1 << octant)) === 0) continue;
+    const interval = intersectSvoRayAabb(ray, childBounds(parent, octant));
+    if (interval) intersections.push({ octant, ...interval });
+  }
+  intersections.sort((left, right) => left.tEnter - right.tEnter || left.tExit - right.tExit || left.octant - right.octant);
+  return intersections;
+}
+
+/**
+ * Enumerate the at-most-four open child cells crossed by a ray using the three
+ * parent midpoint-plane times. Exact plane, edge, point, and zero-length ties
+ * fall back to the closed-AABB oracle because those cases intentionally visit
+ * every touching child in stable ascending-octant order.
+ */
+export function enumerateSvoChildIntersectionsParametric(
+  ray: SvoRay,
+  parent: SvoAabb,
+  parentInterval: SvoRayInterval,
+  childMask = 0xff,
+): SvoParametricChildIntersections {
+  if (!Number.isInteger(childMask) || childMask < 0 || childMask > 0xff) {
+    throw new RangeError("SVO child mask must be an 8-bit unsigned integer");
+  }
+  const [rayMinimum, rayMaximum] = rayRange(ray);
+  const tEnter = Math.max(parentInterval.tEnter, rayMinimum);
+  const tExit = Math.min(parentInterval.tExit, rayMaximum);
+  if (tExit < tEnter) return { mode: "parametric", intersections: [] };
+  const fallback = (): SvoParametricChildIntersections => ({
+    mode: "aabb-fallback",
+    intersections: referenceChildIntersections(ray, parent, childMask),
+  });
+  if (tEnter === tExit) return fallback();
+
+  const middle = parent.minimum.map((value, axis) => (value + parent.maximum[axis]) * 0.5) as [number, number, number];
+  const crossings: number[] = [];
+  for (let axis = 0; axis < 3; axis += 1) {
+    const direction = ray.direction[axis];
+    if (direction === 0) {
+      if (ray.origin[axis] === middle[axis]) return fallback();
+      continue;
+    }
+    const crossing = (middle[axis] - ray.origin[axis]) / direction;
+    if (crossing === tEnter || crossing === tExit) return fallback();
+    if (crossing > tEnter && crossing < tExit) {
+      if (crossings.includes(crossing)) return fallback();
+      crossings.push(crossing);
+    }
+  }
+  crossings.sort((left, right) => left - right);
+
+  const boundaries = [tEnter, ...crossings, tExit];
+  const intersections: SvoChildIntersection[] = [];
+  for (let segment = 0; segment + 1 < boundaries.length; segment += 1) {
+    const lower = boundaries[segment], upper = boundaries[segment + 1];
+    const probeT = lower + (upper - lower) * 0.5;
+    let octant = 0;
+    for (let axis = 0; axis < 3; axis += 1) {
+      const coordinate = ray.origin[axis] + ray.direction[axis] * probeT;
+      if (coordinate === middle[axis]) return fallback();
+      if (coordinate > middle[axis]) octant |= 1 << axis;
+    }
+    if ((childMask & (1 << octant)) !== 0) intersections.push({ octant, tEnter: lower, tExit: upper });
+  }
+  return { mode: "parametric", intersections };
+}
+
 function invalid(visits: number, reason: string): SvoTraversalResult {
   return { status: "invalid-topology", visits, reason };
 }
@@ -241,6 +330,10 @@ export function traversePackedSvo(
   options: SvoTraversalOptions = {},
 ): SvoTraversalResult {
   const diagnostics = options.diagnostics;
+  const childEnumeration = options.childEnumeration ?? "aabb";
+  if (childEnumeration !== "aabb" && childEnumeration !== "parametric") {
+    throw new RangeError("SVO child enumeration must be aabb or parametric");
+  }
   if (diagnostics) {
     diagnostics.rootAabbTests = 0;
     diagnostics.internalNodesExpanded = 0;
@@ -315,7 +408,7 @@ export function traversePackedSvo(
     if (childMask === 0) continue;
     if (firstChild === SPARSE_BRICK_INVALID_INDEX) return invalid(visits, "Non-empty child mask has no first child");
     if (diagnostics) diagnostics.internalNodesExpanded += 1;
-    const childHits: StackEntry[] = [];
+    let childHits: StackEntry[] = [];
     let discoveredChildCount = 0;
     for (let octant = 0; octant < 8; octant += 1) {
       if ((childMask & (1 << octant)) === 0) continue;
@@ -324,12 +417,28 @@ export function traversePackedSvo(
       if (childIndex >= nodeCount) return invalid(visits, "Child range exceeds the published topology");
       const childBase = childIndex * NODE_WORDS;
       if (topology.nodes[childBase + 2] !== level + 1) return invalid(visits, "Child level is not parent level plus one");
-      if (diagnostics) diagnostics.childAabbTests += 1;
-      const interval = intersectSvoRayAabb(ray, nodeBounds(topology.nodes, childIndex, mapping));
-      if (interval) childHits.push({ nodeIndex: childIndex, octant, ...interval });
+      if (childEnumeration === "aabb") {
+        if (diagnostics) diagnostics.childAabbTests += 1;
+        const interval = intersectSvoRayAabb(ray, nodeBounds(topology.nodes, childIndex, mapping));
+        if (interval) childHits.push({ nodeIndex: childIndex, octant, ...interval });
+      }
     }
     if (discoveredChildCount !== recordedChildCount) return invalid(visits, "Child count does not match child mask");
-    childHits.sort((left, right) => left.tEnter - right.tEnter || left.tExit - right.tExit || left.octant - right.octant);
+    if (childEnumeration === "parametric") {
+      const enumeration = enumerateSvoChildIntersectionsParametric(
+        ray,
+        nodeBounds(topology.nodes, current.nodeIndex, mapping),
+        current,
+        childMask,
+      );
+      if (enumeration.mode === "aabb-fallback" && diagnostics) diagnostics.childAabbTests += discoveredChildCount;
+      childHits = enumeration.intersections.map((interval) => ({
+        ...interval,
+        nodeIndex: firstChild + popcountBefore(childMask, interval.octant),
+      }));
+    } else {
+      childHits.sort((left, right) => left.tEnter - right.tEnter || left.tExit - right.tExit || left.octant - right.octant);
+    }
     if (stack.length + childHits.length > stackCapacity) return { status: "stack-overflow", visits };
     // LIFO stack: farthest first makes the nearest child the next node read.
     for (let index = childHits.length - 1; index >= 0; index -= 1) stack.push(childHits[index]);
@@ -597,6 +706,7 @@ fn svoTraversalContinuationNext(
     }
     var parentBounds = (*continuation).currentBounds;
     if ((*continuation).currentBoundsValid == 0u) { parentBounds = svoNodeBounds(node, mapping); }
+    // SVO_CONTINUATION_CHILD_EXPANSION_BEGIN
     // Streaming expansion: the nearest candidate lives in registers while every
     // deferred sibling is insertion-sorted directly into the traversal stack
     // region [expansionBase, stackSize), kept farthest-at-bottom so pops stay
@@ -669,6 +779,7 @@ fn svoTraversalContinuationNext(
     (*continuation).current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
     (*continuation).currentBounds = svoChildBounds(parentBounds, nearest.octant);
     (*continuation).currentBoundsValid = 1u;
+    // SVO_CONTINUATION_CHILD_EXPANSION_END
   }
   (*continuation).status = SVO_STATUS_WORK_EXHAUSTED;
   return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
@@ -721,6 +832,7 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
     }
     var parentBounds = currentBounds;
     if (!currentBoundsValid) { parentBounds = svoNodeBounds(node, mapping); }
+    // SVO_RESTART_CHILD_EXPANSION_BEGIN
     // Streaming expansion: identical ordering contract to the continuation
     // variant above — nearest candidate in registers, deferred siblings
     // insertion-sorted into the stack region [expansionBase, stackSize).
@@ -782,6 +894,7 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
     current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
     currentBounds = svoChildBounds(parentBounds, nearest.octant);
     currentBoundsValid = true;
+    // SVO_RESTART_CHILD_EXPANSION_END
   }
   return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits);
 }
@@ -790,11 +903,212 @@ fn svoTraverse(ray: SvoRay, mapping: SvoMapping) -> SvoTraversalHit {
 }
 `;
 
+const SVO_PARAMETRIC_CHILD_HELPERS_WGSL = /* wgsl */ `
+struct SvoParametricSegments {
+  crossings: vec4f,
+  tExit: f32,
+  crossingCount: u32,
+  valid: u32,
+  _padding: u32,
+}
+
+fn svoParametricSegmentInterval(segments: SvoParametricSegments, segment: u32) -> vec2f {
+  let lower = segments.crossings[segment];
+  var upper = segments.tExit;
+  if (segment < segments.crossingCount) { upper = segments.crossings[segment + 1u]; }
+  return vec2f(lower, upper);
+}
+
+fn svoParametricSegmentOctant(ray: SvoRay, parentBounds: mat2x3f, interval: vec2f) -> u32 {
+  let probeT = interval.x + (interval.y - interval.x) * 0.5;
+  let point = ray.origin + ray.direction * probeT;
+  let middle = (parentBounds[0] + parentBounds[1]) * 0.5;
+  return select(0u, 1u, point.x > middle.x)
+    | select(0u, 2u, point.y > middle.y)
+    | select(0u, 4u, point.z > middle.z);
+}
+
+// A line crosses at most three midpoint planes and therefore at most four open
+// octree children. Exact plane/edge/point ties return valid=0 so the caller can
+// preserve the reference traversal's inclusive touching-child behavior.
+fn svoParametricSegments(ray: SvoRay, parentBounds: mat2x3f, current: SvoStackEntry) -> SvoParametricSegments {
+  let tEnter = max(current.tEnter, ray.tMin);
+  let tExit = min(current.tExit, ray.tMax);
+  var crossings = vec4f(tEnter, 0.0, 0.0, 0.0);
+  if (tExit <= tEnter) { return SvoParametricSegments(crossings, tExit, 0u, 0u, 0u); }
+  let middle = (parentBounds[0] + parentBounds[1]) * 0.5;
+  var crossingCount = 0u;
+  for (var axis = 0u; axis < 3u; axis += 1u) {
+    let direction = ray.direction[axis];
+    if (direction == 0.0) {
+      if (ray.origin[axis] == middle[axis]) { return SvoParametricSegments(crossings, tExit, crossingCount, 0u, 0u); }
+      continue;
+    }
+    let crossing = (middle[axis] - ray.origin[axis]) / direction;
+    if (crossing == tEnter || crossing == tExit) {
+      return SvoParametricSegments(crossings, tExit, crossingCount, 0u, 0u);
+    }
+    if (crossing <= tEnter || crossing >= tExit) { continue; }
+    for (var previous = 1u; previous <= crossingCount; previous += 1u) {
+      if (crossings[previous] == crossing) {
+        return SvoParametricSegments(crossings, tExit, crossingCount, 0u, 0u);
+      }
+    }
+    var insertion = crossingCount + 1u;
+    loop {
+      if (insertion == 1u || crossings[insertion - 1u] < crossing) { break; }
+      crossings[insertion] = crossings[insertion - 1u];
+      insertion -= 1u;
+    }
+    crossings[insertion] = crossing;
+    crossingCount += 1u;
+  }
+  let segments = SvoParametricSegments(crossings, tExit, crossingCount, 1u, 0u);
+  for (var segment = 0u; segment <= crossingCount; segment += 1u) {
+    let interval = svoParametricSegmentInterval(segments, segment);
+    let probeT = interval.x + (interval.y - interval.x) * 0.5;
+    let point = ray.origin + ray.direction * probeT;
+    if (any(point == middle)) { return SvoParametricSegments(crossings, tExit, crossingCount, 0u, 0u); }
+  }
+  return segments;
+}
+`;
+
+function sectionBetween(source: string, begin: string, end: string): string {
+  const beginIndex = source.indexOf(begin), endIndex = source.indexOf(end, beginIndex + begin.length);
+  if (beginIndex < 0 || endIndex < 0) throw new Error(`Missing WGSL section ${begin}`);
+  return source.slice(beginIndex + begin.length, endIndex);
+}
+
+function replaceSection(source: string, begin: string, end: string, body: string): string {
+  const beginIndex = source.indexOf(begin), endIndex = source.indexOf(end, beginIndex + begin.length);
+  if (beginIndex < 0 || endIndex < 0) throw new Error(`Missing WGSL section ${begin}`);
+  return source.slice(0, beginIndex + begin.length) + body + source.slice(endIndex);
+}
+
+function parametricContinuationExpansion(aabbFallback: string): string {
+  return /* wgsl */ `
+    let parametricSegments = svoParametricSegments(ray, parentBounds, current);
+    if (parametricSegments.valid == 0u) {
+${aabbFallback}
+    } else {
+      for (var validationOctant = 0u; validationOctant < 8u; validationOctant += 1u) {
+        if ((mask & (1u << validationOctant)) == 0u) { continue; }
+        let validationIndex = node.links.x + svoPopcountBefore(mask, validationOctant);
+        if (validationIndex >= mapping.nodeCount || svoNodes[validationIndex].address.z != node.address.z + 1u) {
+          (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+          return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+        }
+      }
+      var nearest = SvoCandidate(0u, 0u, 0.0, 0.0);
+      var nearestSegment = 0u;
+      var candidateCount = 0u;
+      let segmentCount = parametricSegments.crossingCount + 1u;
+      for (var segment = 0u; segment < segmentCount; segment += 1u) {
+        let interval = svoParametricSegmentInterval(parametricSegments, segment);
+        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        if ((mask & (1u << octant)) == 0u) { continue; }
+        let childIndex = node.links.x + svoPopcountBefore(mask, octant);
+        if (candidateCount == 0u) {
+          nearest = SvoCandidate(childIndex, octant, interval.x, interval.y);
+          nearestSegment = segment;
+        }
+        candidateCount += 1u;
+      }
+      if (candidateCount == 0u) {
+        svoTraversalContinuationAdvance(continuation);
+        if ((*continuation).status != SVO_STATUS_CONTINUE) {
+          return svoMiss((*continuation).status, visits);
+        }
+        continue;
+      }
+      if ((*continuation).stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
+        (*continuation).status = SVO_STATUS_STACK_OVERFLOW;
+        return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
+      }
+      var reverseSegment = segmentCount;
+      loop {
+        if (reverseSegment == 0u) { break; }
+        reverseSegment -= 1u;
+        if (reverseSegment == nearestSegment) { continue; }
+        let interval = svoParametricSegmentInterval(parametricSegments, reverseSegment);
+        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        if ((mask & (1u << octant)) == 0u) { continue; }
+        let childIndex = node.links.x + svoPopcountBefore(mask, octant);
+        (*continuation).stack[(*continuation).stackSize] = SvoStackEntry(childIndex, interval.x, interval.y);
+        (*continuation).stackSize += 1u;
+      }
+      (*continuation).current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
+      (*continuation).currentBounds = svoChildBounds(parentBounds, nearest.octant);
+      (*continuation).currentBoundsValid = 1u;
+    }
+`;
+}
+
+function parametricRestartExpansion(aabbFallback: string): string {
+  return /* wgsl */ `
+    let parametricSegments = svoParametricSegments(ray, parentBounds, current);
+    if (parametricSegments.valid == 0u) {
+${aabbFallback}
+    } else {
+      for (var validationOctant = 0u; validationOctant < 8u; validationOctant += 1u) {
+        if ((mask & (1u << validationOctant)) == 0u) { continue; }
+        let validationIndex = node.links.x + svoPopcountBefore(mask, validationOctant);
+        if (validationIndex >= mapping.nodeCount || svoNodes[validationIndex].address.z != node.address.z + 1u) {
+          return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
+        }
+      }
+      var nearest = SvoCandidate(0u, 0u, 0.0, 0.0);
+      var nearestSegment = 0u;
+      var candidateCount = 0u;
+      let segmentCount = parametricSegments.crossingCount + 1u;
+      for (var segment = 0u; segment < segmentCount; segment += 1u) {
+        let interval = svoParametricSegmentInterval(parametricSegments, segment);
+        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        if ((mask & (1u << octant)) == 0u) { continue; }
+        let childIndex = node.links.x + svoPopcountBefore(mask, octant);
+        if (candidateCount == 0u) {
+          nearest = SvoCandidate(childIndex, octant, interval.x, interval.y);
+          nearestSegment = segment;
+        }
+        candidateCount += 1u;
+      }
+      if (candidateCount == 0u) {
+        if (stackSize == 0u) { return svoMiss(SVO_STATUS_MISS, visits); }
+        stackSize -= 1u;
+        current = stack[stackSize];
+        currentBoundsValid = false;
+        continue;
+      }
+      if (stackSize + candidateCount - 1u > SVO_STACK_CAPACITY) {
+        return svoMiss(SVO_STATUS_STACK_OVERFLOW, visits);
+      }
+      var reverseSegment = segmentCount;
+      loop {
+        if (reverseSegment == 0u) { break; }
+        reverseSegment -= 1u;
+        if (reverseSegment == nearestSegment) { continue; }
+        let interval = svoParametricSegmentInterval(parametricSegments, reverseSegment);
+        let octant = svoParametricSegmentOctant(ray, parentBounds, interval);
+        if ((mask & (1u << octant)) == 0u) { continue; }
+        let childIndex = node.links.x + svoPopcountBefore(mask, octant);
+        stack[stackSize] = SvoStackEntry(childIndex, interval.x, interval.y);
+        stackSize += 1u;
+      }
+      current = SvoStackEntry(nearest.nodeIndex, nearest.tEnter, nearest.tExit);
+      currentBounds = svoChildBounds(parentBounds, nearest.octant);
+      currentBoundsValid = true;
+    }
+`;
+}
+
 export interface WebgpuSvoTraversalBindings {
   group?: number;
   control?: number;
   nodes?: number;
   leaves?: number;
+  /** Experimental internal-node expansion; omitted keeps the production shader byte-identical. */
+  childEnumeration?: "aabb" | "parametric";
 }
 
 /** Remap the helper's three bindings when composing it into a larger renderer shader. */
@@ -803,11 +1117,27 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
   const control = bindings.control ?? 0;
   const nodes = bindings.nodes ?? 1;
   const leaves = bindings.leaves ?? 2;
+  const childEnumeration = bindings.childEnumeration ?? "aabb";
   for (const [label, value] of Object.entries({ group, control, nodes, leaves })) {
     if (!Number.isInteger(value) || value < 0) throw new RangeError(`SVO WGSL ${label} must be a non-negative integer`);
   }
   if (new Set([control, nodes, leaves]).size !== 3) throw new RangeError("SVO WGSL bindings must be distinct");
-  return webgpuSvoTraversalWGSL
+  if (childEnumeration !== "aabb" && childEnumeration !== "parametric") {
+    throw new RangeError("SVO WGSL child enumeration must be aabb or parametric");
+  }
+  let source = webgpuSvoTraversalWGSL;
+  if (childEnumeration === "parametric") {
+    const continuationBegin = "// SVO_CONTINUATION_CHILD_EXPANSION_BEGIN";
+    const continuationEnd = "// SVO_CONTINUATION_CHILD_EXPANSION_END";
+    const restartBegin = "// SVO_RESTART_CHILD_EXPANSION_BEGIN";
+    const restartEnd = "// SVO_RESTART_CHILD_EXPANSION_END";
+    source = source.replace("fn svoTraversalContinuationAdvance", `${SVO_PARAMETRIC_CHILD_HELPERS_WGSL}\nfn svoTraversalContinuationAdvance`);
+    source = replaceSection(source, continuationBegin, continuationEnd,
+      parametricContinuationExpansion(sectionBetween(source, continuationBegin, continuationEnd)));
+    source = replaceSection(source, restartBegin, restartEnd,
+      parametricRestartExpansion(sectionBetween(source, restartBegin, restartEnd)));
+  }
+  return source
     .replace("@group(0) @binding(0) var<storage, read> svoControl", `@group(${group}) @binding(${control}) var<storage, read> svoControl`)
     .replace("@group(0) @binding(1) var<storage, read> svoNodes", `@group(${group}) @binding(${nodes}) var<storage, read> svoNodes`)
     .replace("@group(0) @binding(2) var<storage, read> svoLeaves", `@group(${group}) @binding(${leaves}) var<storage, read> svoLeaves`);

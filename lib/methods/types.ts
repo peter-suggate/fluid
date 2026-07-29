@@ -108,6 +108,7 @@ export interface GPUSolverInstance {
     readonly changedKeysOffsetWords: number;
     readonly dirtyPagesOffsetWords: number;
     readonly supportPagesOffsetWords: number;
+    readonly promotionCountsOffsetWords: number;
   };
   /** QA-only sparse owner-page arena readback for topology forensics. */
   readonly ownerLatticeDebug?: {

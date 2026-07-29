@@ -201,6 +201,18 @@ test("a bare link to a profiled preset resolves to that preset's authored method
   assert.deepEqual(rehydrated.overrides[profile.methodId], { ...profile.overrides });
 });
 
+test("a bare ceiling-drop link hydrates the dedicated band-1 UI profile", () => {
+  const profile = getScenePreset("ceiling-slab-drop").methodProfile;
+  assert.ok(profile);
+  const parsed = parseQueryState("?scene=ceiling-slab-drop");
+  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
+    parsed.overrides[parsed.methodId] ?? {});
+  assert.equal(values.maximumLeafSize, "2");
+  assert.equal(values.interfaceRefinementBandCells, 1);
+  assert.equal(values.globalFineLevelSetFactor, "4");
+  assert.deepEqual(parsed.overrides[profile.methodId], { ...profile.overrides });
+});
+
 test("an explicit param key overrides one value of a profiled preset", () => {
   const parsed = parseQueryState(
     "?scene=minimal-power-dam-break&param.octree.interfaceRefinementBandCells=0");

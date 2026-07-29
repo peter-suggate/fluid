@@ -13,6 +13,23 @@ illegal or unmeasurable without it. Then B (encode gating), C (kernel
 widening), D (persistent solve), E (fine lane), F (scale items), roughly
 independent within each part.
 
+> **2026-07-29 performance correction.** The Part-D conclusion below that the
+> persistent solver was slower is superseded. That result came from a
+> label-isolated ~1,470-row case and attributed tracing overhead as shipping
+> wall time. Clean current-tree A/Bs show the opposite for small scenes:
+> ceiling drop is 113 -> 53 ms/10 advances and mini dam is 107 -> 58 ms/10,
+> with converged residuals and zero tripwires. The persistent executor is now
+> the default up to its constructed 16,384-row capacity; setting
+> `FLUID_OCTREE_PERSISTENT_MGPCG=0` retains the hierarchical oracle.
+>
+> Section 5 also now separates topology from values across the two publications
+> in one accepted epoch. The second publication reuses identities, tags, owner
+> directory, catalog topology and face adjacency after a GPU-side VALID receipt
+> check, while refreshing fine-demand flags, seeds, the closest-face fixed
+> point and reconstructed velocities. Its metric is squared Euclidean distance
+> in the candidate loop (one square root per reconstructed row), and its wide
+> envelope is 12 waves plus an exact persistent convergence tail.
+
 ---
 
 ## How to run and verify (used by every change below)
@@ -220,7 +237,10 @@ Recorded so the implementer does not rediscover them.
 4. **Deleting the 12-wave Jacobi prefix before the Section 5 march.**
    The march's ping-pong `readA` initializer is derived from the prefix
    wave count, and the prefix offloads work the 768-thread persistent
-   march would otherwise do at 19 % occupancy. Widen it if anything.
+   march would otherwise do at 19 % occupancy. Keep the prefix. The later
+   production result uses 12 additional wide waves, then the persistent tail;
+   the former 48-wave envelope encoded 36 redundant sweeps per publication on
+   the ceiling graph.
 5. **Enabling the dead `var topologyChanged = true` branch in
    `planL1CaptureDelta`.** Its comparison is unsound three ways (compares
    2 of 4 relevant words, indexes captured geometry with new-generation
@@ -825,9 +845,9 @@ per step vs the parent run.
 
 ---
 
-# Part D — IMPLEMENTED, MEASURED, AND NOT SELECTED
+# Part D — IMPLEMENTED; 2026-07-29 CLEAN A/B SUPERSEDES THIS RESULT
 
-**Built, correct, and 15 ms slower. Default OFF.** The kernel described below
+**Historical result; do not use it for current selection.** The kernel described below
 was implemented in `lib/webgpu-octree-persistent-mgpcg{,.wgsl}.ts` and wired
 into `WebGPUOctreeProjection.encode`. It works: on the mini churn lane it
 collapses the solve from **1,125 → 413 dispatches** and **168 → 78 compute
@@ -839,16 +859,25 @@ validation errors. Interleaved A/B, same binary, flag on vs off:
 | hierarchical | 79.74 | 79.68 | 79.68 |
 | persistent | 94.79 | 94.90 | 94.79 |
 
-**+15.1 ms.** One workgroup is one GPU core, so the solve gives up ~31/32 of the
+That isolated experiment measured **+15.1 ms**, but a clean current-tree A/B
+shows that its conclusion does not transfer to small live systems. On the
+ceiling case (roughly 459 live pressure rows), the hierarchical command graph
+cost 113 ms/10 advances and the persistent executor cost 53 ms/10. On the
+mini case the corresponding result was 107 -> 58 ms/10. One workgroup is one
+GPU core, but for these small systems eliminating the fixed launch graph wins.
+
+The historical interpretation was: one workgroup gives up ~31/32 of the
 machine to buy back dispatch overhead this frame does not pay — the same
 premise the B4 experiment independently refuted (deleting 231 dispatches per
 advance measured as a 2 ms *regression*). The 862-dispatch/91-pass count was
 never the cost; it was the symptom of a wide problem being solved widely.
 
-Keep the implementation. It is correct, it is behind
-`FLUID_OCTREE_PERSISTENT_MGPCG=1`, and it is the cheapest way to re-test the
-premise at a scale where the arithmetic changes. Do not enable it by default,
-and do not spend more on it at 16³/24×18×16.
+The current production policy is default-on whenever the executor was
+constructed (capacity <= 16,384). `FLUID_OCTREE_PERSISTENT_MGPCG=0` is the
+explicit full-hierarchy A/B. The level-zero band also retains one extra
+redistance/restriction shell; this repaired the pre-existing step-19
+interface-coverage failure exposed by the persistent trajectory without
+doubling the transported band.
 
 **The reduction-tree patch was reverted with it.** Replacing `subgroupAdd` with
 an explicit width-halving tree existed only to make the two paths bit-comparable.
@@ -1016,7 +1045,28 @@ flood kernel's 27-tap gather (it already caches per-page sample
 indices; extend to the directory). Address staging changes no
 arithmetic and no evaluation order: Gate A.
 
-## E3. Restructure the air-support producer (after B2)
+## E3. Restructure the air-support producer — topology/value split landed
+
+**Landed 2026-07-29.** The two same-epoch publications now share immutable
+support identities, tags, owner directory, resolved catalog topology and face
+adjacency. Reuse is decided on GPU from the preceding VALID receipt, accepted
+epoch/bank/boundary and capacity; an invalid or partial receipt rebuilds. Only
+generation-dependent fine flags and velocity-dependent seed/march/vector work
+are refreshed. Fresh catalog resolution is dispatched over support capacity,
+not the much larger candidate capacity. Set
+`FLUID_OCTREE_AIR_SUPPORT_TOPOLOGY_REUSE=0` for the full-rebuild oracle.
+
+The inner closest-face ordering now carries squared Euclidean distance, removing
+a square root from every candidate visit and recovering physical distance once
+per reconstructed row. The schedule is 12 prefix + 12 wide waves with the
+three-axis persistent kernel as the exact tail. On the 20-frame ceiling run the
+final fine/raster hashes remain bit-identical; dispatches fell 10,121 -> 7,962
+after shortening the envelope.
+
+**Still open:** support membership is still almost the whole air partition, so
+both publications still march about 94k face patches. The next structural win
+is a compact exact seed-to-demand corridor/frontier; topology reuse alone does
+not solve the domain-wide graph expansion.
 
 Even encoded once, the air-support build is a heavy chain with three
 structural problems:

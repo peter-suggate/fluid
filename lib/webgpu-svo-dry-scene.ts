@@ -1,12 +1,7 @@
 import { svoPrimitiveWGSL, SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "./svo-primitive-abi";
 import {
-  SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL,
   SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
-  SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES,
-  SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK,
-  SVO_PRIMITIVE_CANDIDATE_VERSION,
   packSvoPrimitiveCandidateArena,
-  type SvoPrimitiveCandidateArena,
   type SvoPrimitiveCandidatePublication,
 } from "./svo-primitive-candidates";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "./svo-primitive-motion";
@@ -41,6 +36,7 @@ import { SVO_VISIBILITY_LIMITS, svoVisibilityRaysWGSL } from "./svo-visibility-r
 import { terrainHeightAt, terrainNormalAt, type TerrainDescription } from "./terrain";
 import { unifiedLightingShaderLibrary } from "./webgpu-lighting";
 import { createWebgpuSvoTraversalWGSL } from "./webgpu-svo-traversal";
+import { createWebgpuSvoCompactTraversalWGSL, resolveWebGpuSvoCompactHierarchy } from "./webgpu-svo-compact-hierarchy";
 import {
   createWebgpuSvoWideFanoutTraversalWGSL,
   resolveSvoWideTraversalCapability,
@@ -62,11 +58,13 @@ import { SparseVoxelTemporalAccumulator, type SparseVoxelTemporalFrameState } fr
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import { svoNodeMipSamplingWGSL } from "./svo-node-mip-sampling";
 import { svoCostOverlayCode } from "./svo-render-diagnostics";
+import { svoBrickOccupancyWGSL } from "./svo-brick-occupancy";
+import { createSvoScreenSpaceTraversalWGSL } from "./svo-screen-space-termination";
 
 export interface SparseVoxelDrySceneData {
   /** Packed `SvoPrimitiveRecord` values in dense environment-owner order. */
   primitiveRecords: Uint32Array<ArrayBuffer>;
-  /** Static conservative BVH appended to binding 7 after the primitive records. */
+  /** @deprecated Offline audit index; it is never uploaded or consumed by rendering. */
   primitiveCandidates?: SvoPrimitiveCandidatePublication;
   /** First owner ID belonging to primitive zero (rigid bodies occupy lower IDs). */
   ownerBase: number;
@@ -195,11 +193,11 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   terrainWordOffset: 24,
   terrainMaterialWordOffset: 28,
   materialPublicationWordOffset: 32,
-  primitiveCandidateWordOffset: 36,
-  nodeMipWordOffset: 40,
-  nodeMipAtlasWordOffset: 44,
-  wideFanoutWordOffset: 48,
-  nodeMipLevelStartWordOffset: 52,
+  nodeMipWordOffset: 36,
+  nodeMipAtlasWordOffset: 40,
+  wideFanoutWordOffset: 44,
+  nodeMipLevelStartWordOffset: 48,
+  nodeMipOriginWordOffset: 60,
 } as const);
 
 /** materialPublication.w flags shared by the direct and derived-lighting paths. */
@@ -470,18 +468,6 @@ export const SVO_DRY_SCENE_REQUIRED_VALID_FIELDS =
   | SPARSE_VOXEL_VALID_FIELDS.staticGeometry
   | SPARSE_VOXEL_VALID_FIELDS.materialOwner;
 
-/**
- * Small authored catalogs are cheaper to intersect once than to revisit the
- * root for every empty structural leaf. Generated catalogs retain SVO payload DDA.
- */
-export const SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT = 64;
-export type SparseVoxelDrySceneCullingMode = "direct-small-catalog" | "svo-payload-dda";
-
-export function sparseVoxelDrySceneCullingMode(primitiveCount: number): SparseVoxelDrySceneCullingMode {
-  if (!Number.isInteger(primitiveCount) || primitiveCount < 0) throw new RangeError("SVO dry-scene primitive count must be a non-negative integer");
-  return primitiveCount <= SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT ? "direct-small-catalog" : "svo-payload-dda";
-}
-
 /** Metadata-level validation for the producer-owned direct-index PBR table. */
 export function canConsumeSparseVoxelPbrMaterials(source: SparseVoxelSceneRenderSource | undefined): boolean {
   const publication = source?.pbrMaterials;
@@ -587,21 +573,19 @@ export function packSparseVoxelDrySceneLightingArena(
   return packed;
 }
 
-/** Validate the conservative static candidate publication independently for typed fallback reporting. */
+/** @deprecated Offline validation helper; this result never gates the SVO renderer. */
 export function canConsumeSparseVoxelPrimitiveCandidates(scene: SparseVoxelDrySceneData | undefined): boolean {
   const primitiveCount = scene?.primitiveRecords.byteLength
     ? scene.primitiveRecords.byteLength / SVO_PRIMITIVE_RECORD_STRIDE_BYTES
     : 0;
-  let candidatesValid = primitiveCount > SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES;
-  if (!candidatesValid && scene?.primitiveCandidates) {
-    try {
-      packSvoPrimitiveCandidateArena(scene.primitiveRecords, scene.primitiveCandidates);
-      candidatesValid = true;
-    } catch {
-      candidatesValid = false;
-    }
+  if (primitiveCount > SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES) return true;
+  if (!scene?.primitiveCandidates) return false;
+  try {
+    packSvoPrimitiveCandidateArena(scene.primitiveRecords, scene.primitiveCandidates);
+    return true;
+  } catch {
+    return false;
   }
-  return candidatesValid;
 }
 
 export function canEncodeSparseVoxelDryScene(
@@ -615,7 +599,6 @@ export function canEncodeSparseVoxelDryScene(
     && canConsumeSparseVoxelLighting(source, scene)
     && scene.primitiveRecords.byteLength >= SVO_PRIMITIVE_RECORD_STRIDE_BYTES
     && scene.primitiveRecords.byteLength % SVO_PRIMITIVE_RECORD_STRIDE_BYTES === 0
-    && canConsumeSparseVoxelPrimitiveCandidates(scene)
     && (scene.glassRecords?.byteLength ?? 0) % SVO_THIN_GLASS_RECORD_STRIDE_BYTES === 0
     && (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES <= SVO_SCENE_GLASS_MAXIMUM_PANES
     && (scene.terrainMaterialMetadata === undefined || scene.terrainMaterialMetadata.byteLength === SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES)
@@ -684,7 +667,7 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   // A cached page key is only trustworthy once its coordinate is recomputed in
   // range: the dryNodeMipAt out-of-range early return leaves the cache stale.
   let levelWidth=dry.mapping.cellSize*exp2(f32(level));
-  let levelVoxel=(position_m-dry.mapping.worldOrigin)/levelWidth;
+  let levelVoxel=(position_m-dry.nodeMipOrigin.xyz)/levelWidth;
   let levelPageFloor=floor(levelVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
   if(any(levelPageFloor<vec3f(0.0))||any(levelPageFloor>=vec3f(2097152.0))
     ||(*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=vec3u(levelPageFloor))||(*pageCache).resident!=0u){
@@ -693,19 +676,19 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   // Non-resident page: no page means no atlas content, so every sample whose
   // trilinear support sits inside this page extent is exactly zero.
   var region=DryConeZeroRegion(
-    dry.mapping.worldOrigin+levelPageFloor*f32(SVO_NODE_MIP_INTERIOR_SIZE)*levelWidth,
-    dry.mapping.worldOrigin+(levelPageFloor+vec3f(1.0))*f32(SVO_NODE_MIP_INTERIOR_SIZE)*levelWidth,1u);
+    dry.nodeMipOrigin.xyz+levelPageFloor*f32(SVO_NODE_MIP_INTERIOR_SIZE)*levelWidth,
+    dry.nodeMipOrigin.xyz+(levelPageFloor+vec3f(1.0))*f32(SVO_NODE_MIP_INTERIOR_SIZE)*levelWidth,1u);
   let coarseLevel=min(level+2u,dry.nodeMip.z-1u);
   if(coarseLevel>level){
     // Directory-only coarse upgrade (no texture fetch): a non-resident coarse
     // page has no resident descendants via the ancestor-residency chain, so the
     // whole coarse page extent is zero.
     let coarseWidth=dry.mapping.cellSize*exp2(f32(coarseLevel));
-    let coarsePageFloor=floor((position_m-dry.mapping.worldOrigin)/(coarseWidth*f32(SVO_NODE_MIP_INTERIOR_SIZE)));
+    let coarsePageFloor=floor((position_m-dry.nodeMipOrigin.xyz)/(coarseWidth*f32(SVO_NODE_MIP_INTERIOR_SIZE)));
     if(dryNodeMipFind(coarseLevel,vec3u(coarsePageFloor))==0xffffffffu){
       region=DryConeZeroRegion(
-        dry.mapping.worldOrigin+coarsePageFloor*f32(SVO_NODE_MIP_INTERIOR_SIZE)*coarseWidth,
-        dry.mapping.worldOrigin+(coarsePageFloor+vec3f(1.0))*f32(SVO_NODE_MIP_INTERIOR_SIZE)*coarseWidth,1u);
+        dry.nodeMipOrigin.xyz+coarsePageFloor*f32(SVO_NODE_MIP_INTERIOR_SIZE)*coarseWidth,
+        dry.nodeMipOrigin.xyz+(coarsePageFloor+vec3f(1.0))*f32(SVO_NODE_MIP_INTERIOR_SIZE)*coarseWidth,1u);
     }
   }
   return region;
@@ -815,7 +798,7 @@ ${levelStart}fn dryNodeMipFind(level:u32,coordinate:vec3u)->u32{
 }
 fn dryNodeMipReady()->bool{return dry.nodeMip.w!=0u&&dry.nodeMip.x!=0u&&dry.nodeMip.x==publicationState[2]&&dry.nodeMip.y>0u&&dry.nodeMip.z>0u;}
 fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPageCache>)->DryNodeMipLookup{
-  let level=min(u32(max(floor(lodIn),0.0)),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));let virtualVoxel=(position_m-dry.mapping.worldOrigin)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
+  let level=min(u32(max(floor(lodIn),0.0)),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));let virtualVoxel=(position_m-dry.nodeMipOrigin.xyz)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
   if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let pageCoordinate=vec3u(pageFloor);
   if((*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=pageCoordinate)){
     *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
@@ -843,6 +826,44 @@ ${visibility}`;
  * pipeline state at all.
  */
 export type SvoConeLightingScale = 1 | 0.5 | 0.25;
+
+/** Compile-time static traversal experiment. Hybrid preserves the shipping fallback semantics. */
+export type SvoDryTraversalMode = "hybrid" | "canonical" | "canonical-parametric" | "compact" | "wide";
+
+/** Compile-time 8^3 leaf acceleration experiment; off preserves the baseline shader. */
+export type SvoBrickOccupancyMode = "off" | "bounds" | "macro" | "macro-hdda";
+
+/** Opt-in visibility/lighting pass split. Production remains the inline shader. */
+export type SvoDryShadingPath = "inline" | "split";
+
+/**
+ * Exact temporal coherence experiment for render-only/static-camera frames.
+ * The caller-owned key must change whenever camera, geometry, or rigid bodies
+ * change. No key means no reuse, so production callers cannot opt in by
+ * accident.
+ */
+export type SvoDryRayCoherenceMode = "off" | "static-primary";
+
+export type SvoDryPrimaryCoherenceDecision = "trace" | "reuse";
+
+/** Pure policy seam used by the renderer and by fail-closed contract tests. */
+export function svoDryPrimaryCoherenceDecision(
+  mode: SvoDryRayCoherenceMode,
+  splitActive: boolean,
+  frameKey: string | undefined,
+  cachedKey: string | undefined,
+): SvoDryPrimaryCoherenceDecision {
+  return mode === "static-primary" && splitActive && frameKey !== undefined && frameKey === cachedKey
+    ? "reuse" : "trace";
+}
+
+/** Exact float normal + primary hit distance crossing the split pass boundary. */
+export const SVO_DRY_SPLIT_GEOMETRY_FORMAT = "rgba32float" as GPUTextureFormat;
+export const SVO_DRY_SPLIT_IDENTITY_FORMAT = "rg32uint" as GPUTextureFormat;
+/** 24-byte write plus 24-byte read across the pass boundary. */
+export const SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL = 48;
+/** Resident exact-primary cache: rgba32float geometry + rg32uint identity. */
+export const SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL = 24;
 
 /** Reduced-rate cone-lighting prepass target contract. */
 export const SVO_DRY_CONE_PREPASS_CONTRACT = Object.freeze({
@@ -875,8 +896,189 @@ export type SparseVoxelDrySceneLightingOptions = SvoLightingOptions & {
  * `dryLightVisibility` and `dryContactVisibility`; rigid-body blocker terms
  * stay inline at full resolution so moving-body contact shadows remain exact.
  */
-export function createSvoDrySceneFragmentWGSL(coneLightingScale: SvoConeLightingScale = 1): string {
+export function createSvoDrySceneFragmentWGSL(
+  coneLightingScale: SvoConeLightingScale = 1,
+  traversalMode: SvoDryTraversalMode = "hybrid",
+  brickOccupancyMode: SvoBrickOccupancyMode = "off",
+  shadingPath: SvoDryShadingPath = "inline",
+  screenSpaceTerminationPixels = 0,
+): string {
+  if (traversalMode !== "hybrid" && traversalMode !== "canonical"
+    && traversalMode !== "canonical-parametric" && traversalMode !== "compact" && traversalMode !== "wide") {
+    throw new RangeError(`Unsupported dry-scene traversal mode: ${traversalMode}`);
+  }
+  if (brickOccupancyMode !== "off" && brickOccupancyMode !== "bounds"
+    && brickOccupancyMode !== "macro" && brickOccupancyMode !== "macro-hdda") {
+    throw new RangeError(`Unsupported dry-scene brick occupancy mode: ${brickOccupancyMode}`);
+  }
+  if (shadingPath !== "inline" && shadingPath !== "split") {
+    throw new RangeError(`Unsupported dry-scene shading path: ${shadingPath}`);
+  }
+  if (!Number.isFinite(screenSpaceTerminationPixels) || screenSpaceTerminationPixels < 0) {
+    throw new RangeError("Dry-scene screen-space termination must be a non-negative finite pixel count");
+  }
+  if (screenSpaceTerminationPixels > 0 && (traversalMode !== "canonical" || shadingPath !== "inline")) {
+    throw new RangeError("Diagnostic screen-space termination currently requires canonical inline traversal");
+  }
   const reduced = coneLightingScale !== 1;
+  const split = shadingPath === "split";
+  const canonicalTraversal = traversalMode === "canonical" || traversalMode === "canonical-parametric";
+  const wideTraversalWGSL = canonicalTraversal || traversalMode === "compact"
+    ? ""
+    : createWebgpuSvoWideFanoutTraversalWGSL({ pages: 11, descriptors: 12 });
+  const compactTraversalWGSL = traversalMode === "compact" ? createWebgpuSvoCompactTraversalWGSL(11) : "";
+  const compactTraversal = traversalMode === "compact";
+  const canonicalTraversalWGSL = createWebgpuSvoTraversalWGSL({ control: 2, nodes: 3, leaves: 4,
+    childEnumeration: traversalMode === "canonical-parametric" ? "parametric" : "aabb" });
+  const screenSpaceTraversalWGSL = screenSpaceTerminationPixels > 0
+    ? createSvoScreenSpaceTraversalWGSL(canonicalTraversalWGSL) : "";
+  const leafAccessWGSL = compactTraversal ? /* wgsl */ `
+fn dryLeafBounds(nodeIndex:u32)->mat2x3f{return svoCompactNodeBounds(svoCompactNodes[nodeIndex],dry.mapping);}
+fn dryLeafFlags(nodeIndex:u32)->u32{return svoNodes[nodeIndex].links.w;}
+` : /* wgsl */ `
+fn dryLeafBounds(nodeIndex:u32)->mat2x3f{return svoNodeBounds(svoNodes[nodeIndex],dry.mapping);}
+fn dryLeafFlags(nodeIndex:u32)->u32{return svoNodes[nodeIndex].links.w;}
+`;
+  const primaryTraversalCursorWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+fn drySvoShouldTerminateNodeScreenSpace(bounds:mat2x3f,level:u32)->bool{
+  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,.72,${screenSpaceTerminationPixels},level,0u);
+}
+fn dryTraversalCursorNextPrimary(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{
+  return svoTraversalContinuationNextScreenSpace(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);
+}
+` : /* wgsl */ `
+fn dryTraversalCursorNextPrimary(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{return dryTraversalCursorNext(ray,mapping,cursor);}
+`;
+  const screenSpaceProxyWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+const DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY:u32=15u;
+fn dryScreenSpaceProxyHit(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
+  let bounds=svoNodeBounds(svoNodes[hit.nodeIndex],dry.mapping);let point=ro+rd*hit.tEnter;
+  let faceDistance=min(abs(point-bounds[0]),abs(bounds[1]-point));var axis=0u;
+  if(faceDistance.y<faceDistance.x){axis=1u;}if(faceDistance.z<faceDistance[axis]){axis=2u;}
+  var normal=vec3f(0.0);normal[axis]=select(-1.0,1.0,abs(point[axis]-bounds[1][axis])<abs(point[axis]-bounds[0][axis]));
+  return DryHit(hit.tEnter,normal,0u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(hit.level,0u,0u));
+}
+` : "";
+  const screenSpaceProxyTraceWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(leaf.status==SVO_STATUS_SCREEN_SPACE_PROXY){dryPrimaryMaximumDepth=max(dryPrimaryMaximumDepth,leaf.level);return dryScreenSpaceProxyHit(ro,rd,leaf);}` : "";
+  const screenSpaceProxyShadeWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(hit.fieldSource==DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY){let depthBand=clamp(f32(hit._padding.x)/21.0,0.0,1.0);return mix(vec3f(.02,.06,.18),vec3f(1.0,.04,.72),depthBand);}` : "";
+  const traversalCursorWGSL = canonicalTraversal ? /* wgsl */ `
+struct DryTraversalCursor{canonical:SvoTraversalContinuation}
+fn dryTraversalCursorBegin(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>){svoTraversalContinuationBegin(ray,mapping,&(*cursor).canonical);}
+fn dryTraversalCursorNext(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{return svoTraversalContinuationNext(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);}
+` : traversalMode === "compact" ? /* wgsl */ `
+struct DryTraversalCursor{compact:SvoCompactTraversalContinuation}
+fn dryTraversalCursorBegin(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>){svoCompactContinuationBegin(ray,mapping,&(*cursor).compact);}
+fn dryTraversalCursorNext(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{return svoCompactContinuationNext(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).compact);}
+` : traversalMode === "wide" ? /* wgsl */ `
+struct DryTraversalCursor{wide:SvoWideTraversalCursor}
+fn dryWidePublication()->SvoWidePublication{return SvoWidePublication(dry.wideFanout.x,dry.wideFanout.y,dry.wideFanout.z,dry.wideFanout.w);}
+fn dryCanonicalPublicationGeneration()->u32{return select(0u,publicationState[2],arrayLength(&publicationState)>2u);}
+fn dryTraversalCursorBegin(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>){let initialized=svoWideCursorInitialize(&(*cursor).wide,ray,mapping,dryWidePublication(),dryCanonicalPublicationGeneration());if(!initialized){(*cursor).wide.state=SVO_WIDE_CURSOR_INVALID;}}
+fn dryTraversalCursorNext(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{return svoWideCursorNext(&(*cursor).wide,ray,mapping,dryDiagnosticMaximumDepth(),dryWidePublication(),dryCanonicalPublicationGeneration());}
+` : /* wgsl */ `
+struct DryTraversalCursor{canonical:SvoTraversalContinuation,wide:SvoWideTraversalCursor,useWide:u32}
+fn dryWidePublication()->SvoWidePublication{return SvoWidePublication(dry.wideFanout.x,dry.wideFanout.y,dry.wideFanout.z,dry.wideFanout.w);}
+fn dryCanonicalPublicationGeneration()->u32{return select(0u,publicationState[2],arrayLength(&publicationState)>2u);}
+fn dryTraversalCursorBegin(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>){
+  (*cursor).useWide=select(0u,1u,svoWideCursorInitialize(&(*cursor).wide,ray,mapping,dryWidePublication(),dryCanonicalPublicationGeneration()));
+  if((*cursor).useWide==0u){svoTraversalContinuationBegin(ray,mapping,&(*cursor).canonical);}
+}
+fn dryTraversalCursorNext(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{
+  if((*cursor).useWide!=0u){let wideHit=svoWideCursorNext(&(*cursor).wide,ray,mapping,dryDiagnosticMaximumDepth(),dryWidePublication(),dryCanonicalPublicationGeneration());if(wideHit.status==SVO_STATUS_HIT||wideHit.status==SVO_STATUS_MISS||wideHit.status==SVO_STATUS_WORK_EXHAUSTED){return wideHit;}(*cursor).useWide=0u;if(wideHit.visits>=mapping.maxVisits){return svoMiss(SVO_STATUS_WORK_EXHAUSTED,wideHit.visits);}var fallbackMapping=mapping;fallbackMapping.maxVisits-=wideHit.visits;svoTraversalContinuationBegin(ray,fallbackMapping,&(*cursor).canonical);var fallback=svoTraversalContinuationNext(ray,fallbackMapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);fallback.visits+=wideHit.visits;return fallback;}
+  return svoTraversalContinuationNext(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);
+}
+`;
+  const brickOccupancyHelpersWGSL = brickOccupancyMode === "off" ? "" : /* wgsl */ `
+${svoBrickOccupancyWGSL}
+const DRY_BRICK_OCCUPANCY_MACRO:u32=${brickOccupancyMode === "macro" ? 1 : 0}u;
+fn dryBrickMacroSkip(summary:SvoBrickOccupancy,local:vec3u,bounds:mat2x3f,extent:vec3f,ro:vec3f,rd:vec3f,entry:f32)->vec2f{
+  if(DRY_BRICK_OCCUPANCY_MACRO==0u||svoBrickMacroOccupied(summary,local)){return vec2f(0.0,entry);}
+  let macroCoord=local>>vec3u(2u);let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));
+  let boundaryCell=vec3i(macroCoord*4u)+select(vec3i(0),vec3i(4),step>vec3i(0));
+  let boundary=bounds[0]+vec3f(boundaryCell)*extent;
+  let next=select(vec3f(3.402823e38),(boundary-ro)/rd,abs(rd)>vec3f(1e-9));
+  return vec2f(1.0,max(entry,min(next.x,min(next.y,next.z))));
+}
+`;
+  const primaryBrickSetupWGSL = brickOccupancyMode === "off"
+    ? /* wgsl */ `let bounds=dryLeafBounds(hit.nodeIndex); let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
+  var entry=max(hit.tEnter,0.0);let point=ro+rd*(entry+1e-5); var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));`
+    : /* wgsl */ `let bounds=dryLeafBounds(hit.nodeIndex);let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
+  let brickSummary=svoBrickOccupancyDecode(dryLeafFlags(hit.nodeIndex));var brickExit=hit.tExit;var entry=max(hit.tEnter,0.0);
+  if(brickSummary.ready!=0u){if(brickSummary.occupied==0u){return missHit();}let occupiedInterval=svoRayAabbWithInverse(SvoRay(ro,entry,rd,brickExit),1.0/rd,svoBrickOccupiedBounds(brickSummary,bounds[0],extent));if(occupiedInterval.x==0.0){return missHit();}entry=max(entry,occupiedInterval.y);brickExit=min(brickExit,occupiedInterval.z);}
+  let point=ro+rd*(entry+1e-5);var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));`;
+  const primaryBrickExitWGSL = brickOccupancyMode === "off" ? "hit.tExit" : "brickExit";
+  const primaryMacroSkipWGSL = brickOccupancyMode === "macro" ? /* wgsl */ `let macroSkip=dryBrickMacroSkip(brickSummary,vec3u(cell),bounds,extent,ro,rd,entry);if(macroSkip.x!=0.0){if(macroSkip.y>=brickExit||macroSkip.y>=DRY_MISS){break;}entry=macroSkip.y;let skipPoint=ro+rd*(entry+max(1e-5,length(extent)*1e-4));cell=vec3i(clamp(floor((skipPoint-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));let skipBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;nextT=select(vec3f(DRY_MISS),(skipBoundary-ro)/rd,abs(rd)>vec3f(1e-9));continue;}
+    ` : "";
+  const shadowBrickSetupWGSL = brickOccupancyMode === "off"
+    ? /* wgsl */ `let bounds=dryLeafBounds(hit.nodeIndex);let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
+  var entry=max(max(hit.tEnter,tMin_m),0.0);let point=ray.origin_m+ray.direction*(entry+1e-5);var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));`
+    : /* wgsl */ `let bounds=dryLeafBounds(hit.nodeIndex);let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
+  let brickSummary=svoBrickOccupancyDecode(dryLeafFlags(hit.nodeIndex));var brickExit=min(hit.tExit,ray.tMax_m);var entry=max(max(hit.tEnter,tMin_m),0.0);
+  if(brickSummary.ready!=0u){if(brickSummary.occupied==0u){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,0u,DRY_MISS);}let occupiedInterval=svoRayAabbWithInverse(SvoRay(ray.origin_m,entry,ray.direction,brickExit),1.0/ray.direction,svoBrickOccupiedBounds(brickSummary,bounds[0],extent));if(occupiedInterval.x==0.0){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,0u,DRY_MISS);}entry=max(entry,occupiedInterval.y);brickExit=min(brickExit,occupiedInterval.z);}
+  let point=ray.origin_m+ray.direction*(entry+1e-5);var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));`;
+  const shadowBrickExitWGSL = brickOccupancyMode === "off" ? "hit.tExit" : "brickExit";
+  const shadowMacroSkipWGSL = brickOccupancyMode === "macro" ? /* wgsl */ `let macroSkip=dryBrickMacroSkip(brickSummary,vec3u(cell),bounds,extent,ray.origin_m,ray.direction,entry);if(macroSkip.x!=0.0){if(macroSkip.y>=brickExit||macroSkip.y>=DRY_MISS){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}entry=macroSkip.y;let skipPoint=ray.origin_m+ray.direction*(entry+max(1e-5,length(extent)*1e-4));cell=vec3i(clamp(floor((skipPoint-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));let skipBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;nextT=select(vec3f(DRY_MISS),(skipBoundary-ray.origin_m)/ray.direction,abs(ray.direction)>vec3f(1e-9));continue;}
+    ` : "";
+  const primaryLeafTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafPayloadMacroHdda" : "traceLeafPayload";
+  const shadowLeafTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafPayloadVisibilityMacroHdda" : "traceLeafPayloadVisibility";
+  const macroHddaPrimaryWGSL = brickOccupancyMode === "macro-hdda" ? /* wgsl */ `
+fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f,extent:vec3f,intervalEnter:f32,intervalExit:f32,cellMinimum:vec3u,cellMaximum:vec3u)->DryHit{
+  var entry=max(intervalEnter,0.0);let point=ro+rd*(entry+1e-5);var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(cellMinimum),vec3f(cellMaximum-vec3u(1u))));
+  let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
+  var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));let tolerance=length(extent)*1.05;
+  for(var iteration=0u;iteration<32u;iteration+=1u){
+    if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit){break;}
+    dryPrimaryVoxelWorkItems+=1u;let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
+    if(payloadIndex<arrayLength(&materialOwners)){let identity=materialOwners[payloadIndex];let owner=identity>>16u;if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){dryPrimaryExactTests+=1u;let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,intervalExit));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}}
+    let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
+  }
+  return missHit();
+}
+fn traceLeafPayloadMacroHdda(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
+  let bounds=dryLeafBounds(hit.nodeIndex);let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);let summary=svoBrickOccupancyDecode(dryLeafFlags(hit.nodeIndex));
+  if(summary.ready==0u){return traceLeafPayloadFineInterval(ro,rd,hit,bounds,extent,hit.tEnter,hit.tExit,vec3u(0u),vec3u(dry.mapping.brickSize));}
+  if(summary.occupied==0u){return missHit();}
+  let interval=svoRayAabbWithInverse(SvoRay(ro,max(hit.tEnter,0.0),rd,hit.tExit),1.0/rd,svoBrickOccupiedBounds(summary,bounds[0],extent));if(interval.x==0.0){return missHit();}
+  var macroEntry=max(max(hit.tEnter,interval.y),0.0);let brickExit=min(hit.tExit,interval.z);let macroExtent=extent*4.0;let point=ro+rd*(macroEntry+1e-5);var macroCell=vec3i(clamp(floor((point-bounds[0])/macroExtent),vec3f(0.0),vec3f(1.0)));
+  let macroStep=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));let macroBoundary=bounds[0]+(vec3f(macroCell)+select(vec3f(0.0),vec3f(1.0),macroStep>vec3i(0)))*macroExtent;
+  var macroNextT=select(vec3f(DRY_MISS),(macroBoundary-ro)/rd,abs(rd)>vec3f(1e-9));let macroDeltaT=select(vec3f(DRY_MISS),abs(macroExtent/rd),abs(rd)>vec3f(1e-9));
+  for(var macroIteration=0u;macroIteration<8u;macroIteration+=1u){
+    if(any(macroCell<vec3i(0))||any(macroCell>=vec3i(2))||macroEntry>brickExit){break;}let macroExit=min(min(macroNextT.x,macroNextT.y),min(macroNextT.z,brickExit));let macroCoord=vec3u(macroCell);let macroBit=macroCoord.x|(macroCoord.y<<1u)|(macroCoord.z<<2u);
+    if((summary.macroMask&(1u<<macroBit))!=0u){let cellMinimum=macroCoord*4u;let candidate=traceLeafPayloadFineInterval(ro,rd,hit,bounds,extent,macroEntry,macroExit,cellMinimum,cellMinimum+vec3u(4u));if(candidate.t<DRY_MISS){return candidate;}}
+    let advance=min(macroNextT.x,min(macroNextT.y,macroNextT.z));if(macroNextT.x<=advance+1e-6){macroCell.x+=macroStep.x;macroNextT.x+=macroDeltaT.x;}if(macroNextT.y<=advance+1e-6){macroCell.y+=macroStep.y;macroNextT.y+=macroDeltaT.y;}if(macroNextT.z<=advance+1e-6){macroCell.z+=macroStep.z;macroNextT.z+=macroDeltaT.z;}macroEntry=advance;
+  }
+  return missHit();
+}
+` : "";
+  const macroHddaShadowWGSL = brickOccupancyMode === "macro-hdda" ? /* wgsl */ `
+fn traceLeafPayloadVisibilityFineInterval(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHit,bounds:mat2x3f,extent:vec3f,intervalEnter:f32,intervalExit:f32,cellMinimum:vec3u,cellMaximum:vec3u,workLimit:u32)->SvoVisibilityStep{
+  var entry=max(max(intervalEnter,tMin_m),0.0);let point=ray.origin_m+ray.direction*(entry+1e-5);var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(cellMinimum),vec3f(cellMaximum-vec3u(1u))));
+  let step=select(vec3i(-1),vec3i(1),ray.direction>=vec3f(0.0));let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
+  var nextT=select(vec3f(DRY_MISS),(nextBoundary-ray.origin_m)/ray.direction,abs(ray.direction)>vec3f(1e-9));let deltaT=select(vec3f(DRY_MISS),abs(extent/ray.direction),abs(ray.direction)>vec3f(1e-9));let tolerance=length(extent)*1.05;var workItems=0u;
+  for(var iteration=0u;iteration<32u;iteration+=1u){
+    if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit||entry>ray.tMax_m){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
+    let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);if(payloadIndex>=arrayLength(&materialOwners)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let identity=materialOwners[payloadIndex];let owner=identity>>16u;
+    if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex>=dry.metadata.x||primitiveIndex>=arrayLength(&primitives)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,min(intervalExit,ray.tMax_m)));let candidate=primitiveHit(primitives[primitiveIndex],ray.origin_m,ray.direction,max(entry-tolerance,tMin_m),cellExit+tolerance);if(candidate.t<DRY_MISS){return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,candidate.t);}}
+    let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
+  }
+  return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
+}
+fn traceLeafPayloadVisibilityMacroHdda(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHit,workLimit:u32)->SvoVisibilityStep{
+  let bounds=dryLeafBounds(hit.nodeIndex);let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);let summary=svoBrickOccupancyDecode(dryLeafFlags(hit.nodeIndex));
+  if(summary.ready==0u){return traceLeafPayloadVisibilityFineInterval(ray,tMin_m,hit,bounds,extent,hit.tEnter,min(hit.tExit,ray.tMax_m),vec3u(0u),vec3u(dry.mapping.brickSize),workLimit);}if(summary.occupied==0u){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,0u,DRY_MISS);}
+  let interval=svoRayAabbWithInverse(SvoRay(ray.origin_m,max(max(hit.tEnter,tMin_m),0.0),ray.direction,min(hit.tExit,ray.tMax_m)),1.0/ray.direction,svoBrickOccupiedBounds(summary,bounds[0],extent));if(interval.x==0.0){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,0u,DRY_MISS);}
+  var macroEntry=max(max(hit.tEnter,interval.y),tMin_m);let brickExit=min(min(hit.tExit,interval.z),ray.tMax_m);let macroExtent=extent*4.0;let point=ray.origin_m+ray.direction*(macroEntry+1e-5);var macroCell=vec3i(clamp(floor((point-bounds[0])/macroExtent),vec3f(0.0),vec3f(1.0)));
+  let macroStep=select(vec3i(-1),vec3i(1),ray.direction>=vec3f(0.0));let macroBoundary=bounds[0]+(vec3f(macroCell)+select(vec3f(0.0),vec3f(1.0),macroStep>vec3i(0)))*macroExtent;
+  var macroNextT=select(vec3f(DRY_MISS),(macroBoundary-ray.origin_m)/ray.direction,abs(ray.direction)>vec3f(1e-9));let macroDeltaT=select(vec3f(DRY_MISS),abs(macroExtent/ray.direction),abs(ray.direction)>vec3f(1e-9));var workItems=0u;
+  for(var macroIteration=0u;macroIteration<8u;macroIteration+=1u){
+    if(any(macroCell<vec3i(0))||any(macroCell>=vec3i(2))||macroEntry>brickExit){break;}let macroExit=min(min(macroNextT.x,macroNextT.y),min(macroNextT.z,brickExit));let macroCoord=vec3u(macroCell);let macroBit=macroCoord.x|(macroCoord.y<<1u)|(macroCoord.z<<2u);
+    if((summary.macroMask&(1u<<macroBit))!=0u){if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}let cellMinimum=macroCoord*4u;var fine=traceLeafPayloadVisibilityFineInterval(ray,tMin_m,hit,bounds,extent,macroEntry,macroExit,cellMinimum,cellMinimum+vec3u(4u),workLimit-workItems);workItems+=fine.workItems;if(fine.status!=SVO_VIS_STEP_MISS){fine.workItems=workItems;return fine;}}
+    let advance=min(macroNextT.x,min(macroNextT.y,macroNextT.z));if(macroNextT.x<=advance+1e-6){macroCell.x+=macroStep.x;macroNextT.x+=macroDeltaT.x;}if(macroNextT.y<=advance+1e-6){macroCell.y+=macroStep.y;macroNextT.y+=macroDeltaT.y;}if(macroNextT.z<=advance+1e-6){macroCell.z+=macroStep.z;macroNextT.z+=macroDeltaT.z;}macroEntry=advance;
+  }
+  return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);
+}
+` : "";
   const prepassDeclarationsWGSL = reduced ? /* wgsl */ `// Reduced-rate cone-lighting prepass consumption. visibility packs
 // [AO, light0, light1, light2] cone transmittances; geometry packs
 // [linear hit distance, geometric normal]. Lights at slot 3 and above
@@ -909,6 +1111,15 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
   dryPrepassData=accumulated/weightSum;dryPrepassState=1u;
 }
 ` : "";
+  const splitGroup = reduced ? 2 : 1;
+  const splitDeclarationsWGSL = split ? /* wgsl */ `// Split visibility/lighting bridge. The visibility entry writes exact primary
+// geometry while the lighting entry reads it together with the final G-buffer.
+// Separate pipelines expose only the bindings reachable from their entry point.
+@group(${splitGroup}) @binding(0) var drySplitGeometryWrite:texture_storage_2d<rgba32float,write>;
+@group(${splitGroup}) @binding(1) var drySplitGeometryRead:texture_2d<f32>;
+@group(${splitGroup}) @binding(4) var drySplitOpaqueIdentityWrite:texture_storage_2d<rg32uint,write>;
+@group(${splitGroup}) @binding(5) var drySplitOpaqueIdentityRead:texture_2d<u32>;
+` : "";
   const prepassResolveCallWGSL = reduced
     ? /* wgsl */ `dryPrepassData=vec4f(1.0);dryPrepassState=0u;dryConeFallback=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal);}`
     : "";
@@ -925,7 +1136,7 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
   const prepassEntryWGSL = reduced ? /* wgsl */ `struct DryPrepassOut{@location(0) visibility:vec4f,@location(1) geometry:vec4f}
 @fragment fn dryPrepassMain(input:VertexOut)->DryPrepassOut{
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
-  dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryShadowTracingEnabled=1u;dryPrimitiveCandidateFailure=0u;
+  dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryShadowTracingEnabled=1u;
   var output=DryPrepassOut(vec4f(1.0),vec4f(0.0));
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)==0u||!dryNodeMipReady()){return output;}
   let opaque=traceOpaqueScene(ro,rd);
@@ -985,6 +1196,31 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f){
   return output;
 }
 ` : "";
+  const splitEntryWGSL = split ? /* wgsl */ `struct DryVisibilityOut{
+  @location(0) packedSurface:vec4u,
+  @location(1) identityMedia:vec4u,
+  @builtin(frag_depth) hardwareDepth:f32,
+}
+fn drySplitVisibilityOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryVisibilityOut{
+  var targets=targetsIn;let flags=(targets.packedSurface.w>>4u)&0xffffu;
+  if(dryShadowTracingEnabled==0u&&(flags&SVO_GBUFFER_VALID_SURFACE)!=0u){targets.packedSurface.w|=DRY_GBUFFER_SHADOW_DEFERRED<<20u;}
+  return DryVisibilityOut(targets.packedSurface,targets.identityMedia,hardwareDepth);
+}
+@fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);dryThickGlassEnabled=0u;
+  let opaque=traceOpaqueScene(ro,rd);let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(opaque.materialId,opaqueMetadata,0u,0u));let glass=traceGlass(ro,rd,0.0,opaque.t,true);let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;let generation=dryPublicationGeneration();
+  if(glassVisible){let record=glassPanes[glass.recordIndex];let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);let targets=svoGBufferSurface(vec3f(0.0),glass.hit.t_m,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID,SVO_FEATURE_SMOOTH);return drySplitVisibilityOut(targets,dryHardwareDepth(glass.hit.t_m,rd,forward));}
+  if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
+  return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u),0.0);
+}
+@fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);dryThickGlassEnabled=0u;
+  let coordinate=vec2i(input.position.xy);let geometry=textureLoad(drySplitGeometryRead,coordinate,0);let opaqueIdentity=textureLoad(drySplitOpaqueIdentityRead,coordinate,0);var opaque=missHit();
+  if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueIdentity.x,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));}
+  ${prepassResolveCallWGSL}let glass=traceGlass(ro,rd,0.0,opaque.t,true);var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return dryCostOverlay(vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS)));
+}
+` : "";
   return /* wgsl */ `
 ${svoTerrainMaterialWGSL}
 ${svoMaterialWGSL}
@@ -1007,8 +1243,6 @@ struct DryParams {
   terrainMaterial:SvoTerrainMaterialMetadata,
   // x: dense slot count; y: table revision; z: 96-byte stride; w: bounded contact-visibility gate.
   materialPublication:vec4u,
-  // x: record offset after primitives; y: node count; z: root; w: candidate ABI version.
-  candidatePublication:vec4u,
   // x: complete static generation; y: directory pages; z: levels; w: available.
   nodeMip:vec4u,
   nodeMipAtlas:vec4u,
@@ -1016,6 +1250,8 @@ struct DryParams {
   wideFanout:vec4u,
   // Twelve per-level directory row starts (count of pages with level < i) as three vec4u.
   nodeMipLevelStart:array<vec4u,3>,
+  // xyz: world-space origin of the node-mip lattice.
+  nodeMipOrigin:vec4f,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -1056,24 +1292,16 @@ struct DryHit {
 @group(0) @binding(17) var nodeMipSampler:sampler;
 @group(0) @binding(18) var nodeMipDirectory:texture_2d<u32>;
 
-${createWebgpuSvoTraversalWGSL({ control: 2, nodes: 3, leaves: 4 })}
-${createWebgpuSvoWideFanoutTraversalWGSL({ pages: 11, descriptors: 12 })}
+${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}
+${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
 ${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true })}
-${prepassDeclarationsWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
+${prepassDeclarationsWGSL}${splitDeclarationsWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
 fn dryDiagnosticMaximumNodeVisits()->u32{return clamp(dryDiagnosticControl()&511u,1u,256u);}
 fn dryDiagnosticMaximumDepth()->u32{return clamp(dryDiagnosticControl()>>9u,1u,21u);}
 fn dryTraverse(ray:SvoRay,mapping:SvoMapping)->SvoTraversalHit{return svoTraverseWithDepthLimit(ray,mapping,dryDiagnosticMaximumDepth());}
-struct DryTraversalCursor{canonical:SvoTraversalContinuation,wide:SvoWideTraversalCursor,useWide:u32}
-fn dryWidePublication()->SvoWidePublication{return SvoWidePublication(dry.wideFanout.x,dry.wideFanout.y,dry.wideFanout.z,dry.wideFanout.w);}
-fn dryCanonicalPublicationGeneration()->u32{return select(0u,publicationState[2],arrayLength(&publicationState)>2u);}
-fn dryTraversalCursorBegin(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>){
-  (*cursor).useWide=select(0u,1u,svoWideCursorInitialize(&(*cursor).wide,ray,mapping,dryWidePublication(),dryCanonicalPublicationGeneration()));
-  if((*cursor).useWide==0u){svoTraversalContinuationBegin(ray,mapping,&(*cursor).canonical);}
-}
-fn dryTraversalCursorNext(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{
-  if((*cursor).useWide!=0u){let wideHit=svoWideCursorNext(&(*cursor).wide,ray,mapping,dryDiagnosticMaximumDepth(),dryWidePublication(),dryCanonicalPublicationGeneration());if(wideHit.status==SVO_STATUS_HIT||wideHit.status==SVO_STATUS_MISS||wideHit.status==SVO_STATUS_WORK_EXHAUSTED){return wideHit;}(*cursor).useWide=0u;if(wideHit.visits>=mapping.maxVisits){return svoMiss(SVO_STATUS_WORK_EXHAUSTED,wideHit.visits);}var fallbackMapping=mapping;fallbackMapping.maxVisits-=wideHit.visits;svoTraversalContinuationBegin(ray,fallbackMapping,&(*cursor).canonical);var fallback=svoTraversalContinuationNext(ray,fallbackMapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);fallback.visits+=wideHit.visits;return fallback;}
-  return svoTraversalContinuationNext(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);
-}
+${traversalCursorWGSL}
+${primaryTraversalCursorWGSL}
+${leafAccessWGSL}
 ${svoPrimitiveWGSL}
 ${unifiedLightingShaderLibrary}
 ${svoThinGlassWGSL}
@@ -1089,8 +1317,8 @@ const DRY_GBUFFER_HARD_FEATURE:u32=256u;const DRY_GBUFFER_NO_INTERSECTION:u32=1u
 const DRY_GBUFFER_WORK_EXHAUSTED:u32=2u;const DRY_GBUFFER_INVALID_FIELD:u32=3u;
 const DRY_GBUFFER_SHADOW_DEFERRED:u32=8u;
 const DRY_REVERSED_Z_NEAR_M:f32=0.01;
-var<private> dryPrimitiveCandidateFailure:u32;var<private> dryVisibilityIgnoredOwner:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;var<private> dryShadowTracingEnabled:u32;
-var<private> dryPrimaryNodeVisits:u32;var<private> dryPrimaryLeafVisits:u32;var<private> dryPrimaryEmptyBrickSkips:u32;var<private> dryPrimaryVoxelWorkItems:u32;var<private> dryPrimaryMaximumDepth:u32;var<private> dryCandidateWorkItems:u32;var<private> dryShadowNodeVisits:u32;var<private> dryShadowLeafVisits:u32;var<private> dryShadowWorkItems:u32;var<private> dryMipSteps:u32;var<private> dryTraversalFailure:u32;
+var<private> dryVisibilityIgnoredOwner:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;var<private> dryShadowTracingEnabled:u32;
+var<private> dryPrimaryNodeVisits:u32;var<private> dryPrimaryLeafVisits:u32;var<private> dryPrimaryEmptyBrickSkips:u32;var<private> dryPrimaryVoxelWorkItems:u32;var<private> dryPrimaryExactTests:u32;var<private> dryPrimaryMaximumDepth:u32;var<private> dryShadowNodeVisits:u32;var<private> dryShadowLeafVisits:u32;var<private> dryShadowWorkItems:u32;var<private> dryMipSteps:u32;var<private> dryTraversalFailure:u32;
 fn dryConfiguredMapping()->SvoMapping{
   var mapping=dry.mapping;
   mapping.maxVisits=min(mapping.maxVisits,dryDiagnosticMaximumNodeVisits());
@@ -1114,20 +1342,20 @@ fn dryCostOverlay(radianceDepth:vec4f)->vec4f{
   let brickCost=dryLogCost(f32(dryPrimaryLeafVisits),48.0);
   let emptyBrickCost=dryLogCost(f32(dryPrimaryEmptyBrickSkips),48.0);
   let voxelCost=dryLogCost(f32(dryPrimaryVoxelWorkItems),1536.0);
-  let candidateCost=dryLogCost(f32(dryCandidateWorkItems),f32(${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES * 2}));
+  let exactTestCost=dryLogCost(f32(dryPrimaryExactTests),256.0);
   let shadowNodeCost=dryLogCost(f32(dryShadowNodeVisits),f32(${SVO_VISIBILITY_LIMITS.nodeVisits * (SVO_DRY_SCENE_MAX_SHADED_LIGHTS + SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount)}));
   let shadowBrickCost=dryLogCost(f32(dryShadowLeafVisits),f32(${SVO_VISIBILITY_LIMITS.leafVisits * (SVO_DRY_SCENE_MAX_SHADED_LIGHTS + SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount)}));
   let shadowVoxelCost=dryLogCost(f32(dryShadowWorkItems),f32(${SVO_VISIBILITY_LIMITS.workItems * (SVO_DRY_SCENE_MAX_SHADED_LIGHTS + SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount)}));
   let shadowCost=max(shadowNodeCost,max(shadowBrickCost,shadowVoxelCost));
   let mipCost=dryLogCost(f32(dryMipSteps),384.0);
-  let primaryCost=max(max(depthCost,nodeCost),max(max(brickCost,emptyBrickCost),max(voxelCost,candidateCost)));
+  let primaryCost=max(max(depthCost,nodeCost),max(max(brickCost,emptyBrickCost),max(voxelCost,exactTestCost)));
   let compositeCost=1.0-(1.0-primaryCost)*(1.0-shadowCost)*(1.0-mipCost);
   var cost=depthCost;
   if(mode==${svoCostOverlayCode("node-visits")}u){cost=nodeCost;}
   else if(mode==${svoCostOverlayCode("brick-tests")}u){cost=brickCost;}
   else if(mode==${svoCostOverlayCode("empty-brick-skips")}u){cost=emptyBrickCost;}
   else if(mode==${svoCostOverlayCode("voxel-work")}u){cost=voxelCost;}
-  else if(mode==${svoCostOverlayCode("candidate-work")}u){cost=candidateCost;}
+  else if(mode==${svoCostOverlayCode("exact-tests")}u){cost=exactTestCost;}
   else if(mode==${svoCostOverlayCode("shadow-node-visits")}u){cost=shadowNodeCost;}
   else if(mode==${svoCostOverlayCode("shadow-brick-visits")}u){cost=shadowBrickCost;}
   else if(mode==${svoCostOverlayCode("shadow-voxel-work")}u){cost=shadowVoxelCost;}
@@ -1142,8 +1370,6 @@ fn dryCostOverlay(radianceDepth:vec4f)->vec4f{
   }
   ${prepassOverlayWGSL}if(mode==${svoCostOverlayCode("exhaustion")}u){
     var failure=dryTraversalFailure;
-    if(dryPrimitiveCandidateFailure==DRY_GBUFFER_WORK_EXHAUSTED){failure=max(failure,1u);}
-    if(dryPrimitiveCandidateFailure==DRY_GBUFFER_INVALID_FIELD){failure=2u;}
     overlayColor=select(select(vec3f(.024,.235,.204),vec3f(1.0,.69,0.0),failure==1u),vec3f(1.0,0.0,.72),failure>=2u);
   }
   return vec4f(mix(radianceDepth.rgb,overlayColor,clamp(uniforms.cameraTarget.w,0.0,1.0)),radianceDepth.a);
@@ -1156,6 +1382,7 @@ fn dryBoundThickGlassOwner(owner:u32)->bool{
 fn dryOpaqueOwnerSuppressed(owner:u32)->bool{return owner==dry.metadata.z||owner==dryVisibilityIgnoredOwner||dryBoundThickGlassOwner(owner);}
 
 fn missHit()->DryHit { return DryHit(DRY_MISS,vec3f(0.0,1.0,0.0),0u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,0u,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u)); }
+${screenSpaceProxyWGSL}
 fn qrotWxyz(q:vec4f,v:vec3f)->vec3f { let a=cross(q.yzw,v); return v+2.0*(q.x*a+cross(q.yzw,a)); }
 fn qinvWxyz(q:vec4f,v:vec3f)->vec3f { return qrotWxyz(vec4f(q.x,-q.yzw),v); }
 
@@ -1314,72 +1541,28 @@ fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->
   return DryHit(exact.t_m,exact.normal.xyz,svoPrimitiveMaterialId(record),svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
 
-const DRY_CANDIDATE_COMPLETE:u32=0u;const DRY_CANDIDATE_INVALID:u32=1u;const DRY_CANDIDATE_EXHAUSTED:u32=2u;
-struct DryCandidateTrace{hit:DryHit,primitiveIndex:u32,status:u32,workItems:u32}
-fn dryCandidateNode(nodeIndex:u32)->SvoPrimitiveRecord{return primitives[dry.candidatePublication.x+nodeIndex];}
-fn dryCandidateInterval(node:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryBoundsInterval{
-  return dryBoundsInterval(bitcast<vec3f>(node.centerKind.xyz),bitcast<vec3f>(node.dimensionsIdentity.xyz),ro,rd,tMin,tMax);
-}
-fn tracePrimitiveCandidates(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,workLimit:u32,opaqueAnyHit:bool)->DryCandidateTrace{
-  var best=missHit();best.t=tMax;var bestIndex=0xffffffffu;var workItems=0u;
-  let recordOffset=dry.candidatePublication.x;let nodeCount=dry.candidatePublication.y;let root=dry.candidatePublication.z;
-  if(dry.candidatePublication.w!=${SVO_PRIMITIVE_CANDIDATE_VERSION}u||recordOffset!=dry.metadata.x||nodeCount==0u||nodeCount>${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES}u||root>=nodeCount||recordOffset+nodeCount>arrayLength(&primitives)){
-    return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_INVALID,workItems);
-  }
-  if(nodeCount==1u){
-    if(workLimit<2u){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_EXHAUSTED,workItems);}let node=dryCandidateNode(root);workItems+=1u;let primitiveIndex=node.centerKind.w;
-    if(node.dimensionsIdentity.w!=${SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL}u||primitiveIndex>=recordOffset){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_INVALID,workItems);}
-    if(dryCandidateInterval(node,ro,rd,tMin,tMax).valid==0u){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_COMPLETE,workItems);}workItems+=1u;let record=primitives[primitiveIndex];
-    let owner=svoPrimitiveOwnerId(record);if(dryOpaqueOwnerSuppressed(owner)){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_COMPLETE,workItems);}let hit=primitiveHit(record,ro,rd,tMin,tMax);return DryCandidateTrace(hit,select(0xffffffffu,primitiveIndex,hit.t<DRY_MISS),DRY_CANDIDATE_COMPLETE,workItems);
-  }
-  var stack:array<u32,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}>;var stackCount=1u;stack[0]=root;
-  for(var visit=0u;visit<${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES}u;visit+=1u){
-    if(stackCount==0u){break;}if(workItems>=workLimit){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_EXHAUSTED,workItems);}workItems+=1u;
-    stackCount-=1u;let nodeIndex=stack[stackCount];if(nodeIndex>=nodeCount){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_INVALID,workItems);}let node=dryCandidateNode(nodeIndex);
-    if(dryCandidateInterval(node,ro,rd,tMin,best.t).valid==0u){continue;}
-    let leftOrPrimitive=node.centerKind.w;let rightChild=node.dimensionsIdentity.w;
-    if(rightChild==${SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL}u){
-      if(leftOrPrimitive>=dry.metadata.x||leftOrPrimitive>=recordOffset||workItems>=workLimit){return DryCandidateTrace(best,bestIndex,select(DRY_CANDIDATE_EXHAUSTED,DRY_CANDIDATE_INVALID,leftOrPrimitive>=dry.metadata.x||leftOrPrimitive>=recordOffset),workItems);}workItems+=1u;
-      let record=primitives[leftOrPrimitive];let owner=svoPrimitiveOwnerId(record);if(dryOpaqueOwnerSuppressed(owner)){continue;}let candidate=primitiveHit(record,ro,rd,tMin,best.t);if(opaqueAnyHit&&candidate.t<DRY_MISS&&candidate.t>=tMin){return DryCandidateTrace(candidate,leftOrPrimitive,DRY_CANDIDATE_COMPLETE,workItems);}let tolerance=1e-6*max(1.0,max(candidate.t,best.t));
-      if(candidate.t<DRY_MISS&&candidate.t>=tMin&&(bestIndex==0xffffffffu||candidate.t<best.t-tolerance||(abs(candidate.t-best.t)<=tolerance&&leftOrPrimitive<bestIndex))){best=candidate;bestIndex=leftOrPrimitive;}
-      continue;
-    }
-    if(leftOrPrimitive>=nodeCount||rightChild>=nodeCount){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_INVALID,workItems);}
-    let leftInterval=dryCandidateInterval(dryCandidateNode(leftOrPrimitive),ro,rd,tMin,best.t);let rightInterval=dryCandidateInterval(dryCandidateNode(rightChild),ro,rd,tMin,best.t);
-    let childCount=select(0u,1u,leftInterval.valid!=0u)+select(0u,1u,rightInterval.valid!=0u);if(stackCount+childCount>${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}u){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_EXHAUSTED,workItems);}
-    if(leftInterval.valid!=0u&&rightInterval.valid!=0u){if(leftInterval.nearT<=rightInterval.nearT){stack[stackCount]=rightChild;stack[stackCount+1u]=leftOrPrimitive;}else{stack[stackCount]=leftOrPrimitive;stack[stackCount+1u]=rightChild;}stackCount+=2u;}
-    else if(leftInterval.valid!=0u){stack[stackCount]=leftOrPrimitive;stackCount+=1u;}else if(rightInterval.valid!=0u){stack[stackCount]=rightChild;stackCount+=1u;}
-  }
-  if(stackCount!=0u){return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_EXHAUSTED,workItems);}return DryCandidateTrace(best,bestIndex,DRY_CANDIDATE_COMPLETE,workItems);
-}
-
 fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
-  let bounds=svoNodeBounds(svoNodes[hit.nodeIndex],dry.mapping); let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
-  var entry=max(hit.tEnter,0.0); let point=ro+rd*(entry+1e-5); var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));
+  ${primaryBrickSetupWGSL}
   let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0)); let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9)); let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
   let tolerance=length(extent)*1.05;
   for(var iteration=0u;iteration<32u;iteration+=1u){
-    if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>hit.tExit){break;}
-    dryPrimaryVoxelWorkItems+=1u;
+    if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>${primaryBrickExitWGSL}){break;}
+    ${primaryMacroSkipWGSL}dryPrimaryVoxelWorkItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex<arrayLength(&materialOwners)){
       let identity=materialOwners[payloadIndex];let owner=identity>>16u;
-      if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,hit.tExit));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}
+      if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){dryPrimaryExactTests+=1u;let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,${primaryBrickExitWGSL}));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z)); if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return missHit();
 }
+${macroHddaPrimaryWGSL}
 
 fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
   if(publicationState[0]==0u||(publicationState[1]&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return missHit();}
-  // Small authored catalogs use the producer-published conservative BVH in
-  // the same binding. Exact intersections occur only at retained leaves.
-  if(dry.metadata.x<=${SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT}u){
-    let candidate=tracePrimitiveCandidates(ro,rd,0.0,DRY_MISS,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES * 2}u,false);dryCandidateWorkItems+=candidate.workItems;if(candidate.status!=DRY_CANDIDATE_COMPLETE){dryPrimitiveCandidateFailure=select(DRY_GBUFFER_INVALID_FIELD,DRY_GBUFFER_WORK_EXHAUSTED,candidate.status==DRY_CANDIDATE_EXHAUSTED);}return candidate.hit;
-  }
-  var minimum=0.0;let mapping=dryConfiguredMapping();var continuation:DryTraversalCursor;dryTraversalCursorBegin(SvoRay(ro,minimum,rd,DRY_MISS),mapping,&continuation);for(var leafVisit=0u;leafVisit<48u;leafVisit+=1u){let ray=SvoRay(ro,minimum,rd,DRY_MISS);let leaf=dryTraversalCursorNext(ray,mapping,&continuation);dryPrimaryNodeVisits+=leaf.visits;if(leaf.status!=SVO_STATUS_HIT){if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){dryTraversalFailure=max(dryTraversalFailure,1u);}else if(leaf.status!=SVO_STATUS_MISS){dryTraversalFailure=2u;}break;}dryPrimaryLeafVisits+=1u;dryPrimaryMaximumDepth=max(dryPrimaryMaximumDepth,leaf.level);let payloadHit=traceLeafPayload(ro,rd,leaf);if(payloadHit.t<DRY_MISS){return payloadHit;}dryPrimaryEmptyBrickSkips+=1u;minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);} return missHit();
+  var minimum=0.0;let mapping=dryConfiguredMapping();var continuation:DryTraversalCursor;dryTraversalCursorBegin(SvoRay(ro,minimum,rd,DRY_MISS),mapping,&continuation);for(var leafVisit=0u;leafVisit<48u;leafVisit+=1u){let ray=SvoRay(ro,minimum,rd,DRY_MISS);let leaf=dryTraversalCursorNextPrimary(ray,mapping,&continuation);dryPrimaryNodeVisits+=leaf.visits;${screenSpaceProxyTraceWGSL}if(leaf.status!=SVO_STATUS_HIT){if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){dryTraversalFailure=max(dryTraversalFailure,1u);}else if(leaf.status!=SVO_STATUS_MISS){dryTraversalFailure=2u;}break;}dryPrimaryLeafVisits+=1u;dryPrimaryMaximumDepth=max(dryPrimaryMaximumDepth,leaf.level);let payloadHit=${primaryLeafTraceCallWGSL}(ro,rd,leaf);if(payloadHit.t<DRY_MISS){return payloadHit;}dryPrimaryEmptyBrickSkips+=1u;minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);} return missHit();
 }
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
@@ -1431,27 +1614,27 @@ fn dryBiasedVisibilityRayUnit(surfacePosition_m:vec3f,geometricNormal:vec3f,dire
 // Shadow payload lookup mirrors the production leaf DDA, but reports invalid
 // data and bounded-work exhaustion explicitly so direct light fails closed.
 fn traceLeafPayloadVisibility(ray:SvoVisibilityRay,tMin_m:f32,hit:SvoTraversalHit,workLimit:u32)->SvoVisibilityStep {
-  let bounds=svoNodeBounds(svoNodes[hit.nodeIndex],dry.mapping);let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
-  var entry=max(max(hit.tEnter,tMin_m),0.0);let point=ray.origin_m+ray.direction*(entry+1e-5);var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));
+  ${shadowBrickSetupWGSL}
   let step=select(vec3i(-1),vec3i(1),ray.direction>=vec3f(0.0));let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ray.origin_m)/ray.direction,abs(ray.direction)>vec3f(1e-9));let deltaT=select(vec3f(DRY_MISS),abs(extent/ray.direction),abs(ray.direction)>vec3f(1e-9));
   let tolerance=length(extent)*1.05;var workItems=0u;
   for(var iteration=0u;iteration<32u;iteration+=1u){
-    if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>hit.tExit||entry>ray.tMax_m){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}
-    if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
+    if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>${shadowBrickExitWGSL}||entry>ray.tMax_m){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}
+    ${shadowMacroSkipWGSL}if(workItems>=workLimit){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);}workItems+=1u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex>=arrayLength(&materialOwners)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
     let identity=materialOwners[payloadIndex];let owner=identity>>16u;
     if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){
       let primitiveIndex=owner-dry.metadata.y;
       if(primitiveIndex>=dry.metadata.x||primitiveIndex>=arrayLength(&primitives)){return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,workItems,DRY_MISS);}
-      let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,min(hit.tExit,ray.tMax_m)));let candidate=primitiveHit(primitives[primitiveIndex],ray.origin_m,ray.direction,max(entry-tolerance,tMin_m),cellExit+tolerance);
+      let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,min(${shadowBrickExitWGSL},ray.tMax_m)));let candidate=primitiveHit(primitives[primitiveIndex],ray.origin_m,ray.direction,max(entry-tolerance,tMin_m),cellExit+tolerance);
       if(candidate.t<DRY_MISS){return dryVisibilityStep(SVO_VIS_STEP_HIT,0u,0u,workItems,candidate.t);}
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,0u,0u,workItems,DRY_MISS);
 }
+${macroHddaShadowWGSL}
 
 const DRY_MEDIUM_AIR:u32=0u;
 fn dryThinGlassIncidentIor()->f32{return 1.0;}
@@ -1469,26 +1652,19 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
     let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,candidate.t);}
   }
 
-  if(dry.metadata.x<=${SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT}u){
-    let onlyIgnoredReceiver=dry.metadata.x==1u&&svoPrimitiveOwnerId(primitives[0])==dryVisibilityIgnoredOwner;
-    if(!onlyIgnoredReceiver){let candidate=tracePrimitiveCandidates(ray.origin_m,ray.direction,tMin_m,bestT,remaining.workItems-workItems,true);workItems+=candidate.workItems;
-      if(candidate.status==DRY_CANDIDATE_INVALID){return dryVisibilityStep(SVO_VIS_STEP_INVALID,nodeVisits,leafVisits,workItems,DRY_MISS);}if(candidate.status==DRY_CANDIDATE_EXHAUSTED){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
-      if(candidate.hit.t<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,candidate.hit.t);}}
-  }else{
-    var cursor=max(tMin_m,0.0);var shadowContinuation:DryTraversalCursor;let initialShadowMapping=dryConfiguredMapping();dryTraversalCursorBegin(SvoRay(ray.origin_m,cursor,ray.direction,bestT),initialShadowMapping,&shadowContinuation);
-    for(var leafAttempt=0u;leafAttempt<${SVO_VISIBILITY_LIMITS.leafVisits}u;leafAttempt+=1u){
-      if(cursor>=bestT){break;}if(leafVisits>=remaining.leafVisits||nodeVisits>=remaining.nodeVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
-      var shadowMapping=dryConfiguredMapping();shadowMapping.maxVisits=min(shadowMapping.maxVisits,remaining.nodeVisits-nodeVisits);
-      let leaf=dryTraversalCursorNext(SvoRay(ray.origin_m,cursor,ray.direction,bestT),shadowMapping,&shadowContinuation);nodeVisits+=leaf.visits;
-      if(leaf.status==SVO_STATUS_MISS){break;}
-      if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
-      if(leaf.status!=SVO_STATUS_HIT){return dryVisibilityStep(SVO_VIS_STEP_INVALID,nodeVisits,leafVisits,workItems,DRY_MISS);}leafVisits+=1u;
-      let payloadRay=SvoVisibilityRay(ray.origin_m,bestT,ray.direction,ray.originBias_m);let payload=traceLeafPayloadVisibility(payloadRay,tMin_m,leaf,remaining.workItems-workItems);workItems+=payload.workItems;
-      if(payload.status==SVO_VIS_STEP_HIT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,payload.t_m);}if(payload.status!=SVO_VIS_STEP_MISS){return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
-      cursor=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
-    }
-    if(cursor<bestT&&leafVisits>=remaining.leafVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+  var cursor=max(tMin_m,0.0);var shadowContinuation:DryTraversalCursor;let initialShadowMapping=dryConfiguredMapping();dryTraversalCursorBegin(SvoRay(ray.origin_m,cursor,ray.direction,bestT),initialShadowMapping,&shadowContinuation);
+  for(var leafAttempt=0u;leafAttempt<${SVO_VISIBILITY_LIMITS.leafVisits}u;leafAttempt+=1u){
+    if(cursor>=bestT){break;}if(leafVisits>=remaining.leafVisits||nodeVisits>=remaining.nodeVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+    var shadowMapping=dryConfiguredMapping();shadowMapping.maxVisits=min(shadowMapping.maxVisits,remaining.nodeVisits-nodeVisits);
+    let leaf=dryTraversalCursorNext(SvoRay(ray.origin_m,cursor,ray.direction,bestT),shadowMapping,&shadowContinuation);nodeVisits+=leaf.visits;
+    if(leaf.status==SVO_STATUS_MISS){break;}
+    if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+    if(leaf.status!=SVO_STATUS_HIT){return dryVisibilityStep(SVO_VIS_STEP_INVALID,nodeVisits,leafVisits,workItems,DRY_MISS);}leafVisits+=1u;
+    let payloadRay=SvoVisibilityRay(ray.origin_m,bestT,ray.direction,ray.originBias_m);let payload=${shadowLeafTraceCallWGSL}(payloadRay,tMin_m,leaf,remaining.workItems-workItems);workItems+=payload.workItems;
+    if(payload.status==SVO_VIS_STEP_HIT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,payload.t_m);}if(payload.status!=SVO_VIS_STEP_MISS){return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
+    cursor=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
+  if(cursor<bestT&&leafVisits>=remaining.leafVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
 
   if(terrainEnabled()){
     let terrainWork=${SVO_TERRAIN_FALLBACK_STEPS + SVO_TERRAIN_FALLBACK_REFINEMENTS + 6}u;
@@ -1579,7 +1755,6 @@ fn traceDrySolidScene(ro:vec3f,rd:vec3f)->DryHit {
   return hit;
 }
 fn traceOpaqueScene(ro:vec3f,rd:vec3f)->DryHit {
-  dryPrimitiveCandidateFailure=0u;
   return traceDrySolidScene(ro,rd);
 }
 const DRY_SURFACE_REGION_NONE:u32=0xffffffffu;
@@ -1609,7 +1784,7 @@ fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   return DrySurfaceMaterial(base,roughness,material.emissiveRoughness.xyz+selectedEmission,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,regionId,variationFlags,1u,0u);
 }
 fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
-  if(hit.t>=DRY_MISS){return dryEnvironment(rd,0.0);}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
+  if(hit.t>=DRY_MISS){return dryEnvironment(rd,0.0);}${screenSpaceProxyShadeWGSL}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
   if(surface.valid==0u){return vec3f(0.0);}
   let directClosure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);var direct=vec3f(0.0);var sampleBudget=0u;
   let lightCount=min(dryLighting.metadata.x,min(${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u,${SVO_LIGHT_MAXIMUM_RECORDS}u));
@@ -1684,11 +1859,11 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
 }
 
 @fragment fn fragmentMain(input:VertexOut)->DryFragmentOut {
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryPrimitiveCandidateFailure=0u;dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryMaximumDepth=0u;dryCandidateWorkItems=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);
   // Curved thick glass is compiled separately from this Metal-sensitive pass.
   // Its authored pane therefore remains visible through the exact thin fallback.
   dryThickGlassEnabled=0u;
-  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}if(dryPrimitiveCandidateFailure!=0u){return dryFragmentOut(svoGBufferMiss(vec3f(.22,.005,.02),DRY_GBUFFER_FIELD_ANALYTIC,dryPublicationGeneration(),dryPrimitiveCandidateFailure,4096u),0.0);}let glass=traceGlass(ro,rd,0.0,opaque.t,true);var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
+  let opaque=traceOpaqueScene(ro,rd);${prepassResolveCallWGSL}let glass=traceGlass(ro,rd,0.0,opaque.t,true);var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
   let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;var glassSurface=DryGlassSurface(vec3f(0.0),DRY_MISS,0u,DRY_OWNER_NONE,0u,0u);
   if(glassVisible){glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);let radiance=max(color*vignette,vec3f(0.0));let generation=dryPublicationGeneration();
@@ -1704,7 +1879,7 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u),0.0);
 }
-${prepassEntryWGSL}`;
+${splitEntryWGSL}${prepassEntryWGSL}`;
 }
 
 const drySceneShader = createSvoDrySceneFragmentWGSL(1);
@@ -1727,6 +1902,20 @@ async function checkedModule(device: GPUDevice, label: string, code: string): Pr
 
 export class SparseVoxelDrySceneRenderer {
   private pipeline?: GPURenderPipeline;
+  private splitVisibilityPipeline?: GPURenderPipeline;
+  private splitLightingPipeline?: GPURenderPipeline;
+  private splitPipelineScale?: SvoConeLightingScale;
+  private splitVisibilityLayout?: GPUBindGroupLayout;
+  private splitLightingLayout?: GPUBindGroupLayout;
+  private splitVisibilityBindGroup?: GPUBindGroup;
+  private splitLightingBindGroup?: GPUBindGroup;
+  private splitGeometry?: GPUTexture;
+  private splitGeometryView?: GPUTextureView;
+  private splitOpaqueIdentity?: GPUTexture;
+  private splitOpaqueIdentityView?: GPUTextureView;
+  private splitWidth = 0;
+  private splitHeight = 0;
+  private splitDiagnosticsActive = false;
   private layout?: GPUBindGroupLayout;
   private bindGroup?: GPUBindGroup;
   private vertexModule?: GPUShaderModule;
@@ -1747,7 +1936,6 @@ export class SparseVoxelDrySceneRenderer {
   private targetWidth = 0;
   private targetHeight = 0;
   private primitiveBuffer?: GPUBuffer;
-  private primitiveCandidateArena?: SvoPrimitiveCandidateArena;
   private glassBuffer?: GPUBuffer;
   private glassCacheKey?: string;
   private readonly paramsBuffer: GPUBuffer;
@@ -1768,6 +1956,8 @@ export class SparseVoxelDrySceneRenderer {
   private reusableStableFrames = 0;
   private reusableTarget?: GPUTexture;
   private reusableResult?: DrySceneReplacementResult;
+  /** Last exact split-visibility publication authorized by a caller-owned static-frame key. */
+  private primaryVisibilityCacheKey?: string;
   /** Resource/source epoch. Later compatible frames do not invalidate a copy already ordered on the queue. */
   private pickingFrameToken = 1;
   private readonly temporalAccumulator: SparseVoxelTemporalAccumulator;
@@ -1781,11 +1971,20 @@ export class SparseVoxelDrySceneRenderer {
     private readonly device: GPUDevice,
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer,
-    private readonly targetFormat: GPUTextureFormat = "rgba16float"
+    private readonly targetFormat: GPUTextureFormat = "rgba16float",
+    private readonly traversalMode: SvoDryTraversalMode = "hybrid",
+    private readonly brickOccupancyMode: SvoBrickOccupancyMode = "off",
+    private readonly shadingPath: SvoDryShadingPath = "inline",
+    private readonly screenSpaceTerminationPixels = 0,
+    private readonly rayCoherenceMode: SvoDryRayCoherenceMode = "off",
   ) {
     if (targetFormat !== SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat) {
       throw new Error(`Sparse voxel dry scene location 0 must use ${SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat}`);
     }
+    if (shadingPath !== "inline" && shadingPath !== "split") throw new RangeError(`Unsupported dry-scene shading path: ${shadingPath}`);
+    if (rayCoherenceMode !== "off" && rayCoherenceMode !== "static-primary") throw new RangeError(`Unsupported dry-scene ray coherence mode: ${rayCoherenceMode}`);
+    if (rayCoherenceMode === "static-primary" && shadingPath !== "split") throw new RangeError("Static-primary ray coherence requires split shading");
+    if (screenSpaceTerminationPixels > 0 && (traversalMode !== "canonical" || shadingPath !== "inline")) throw new RangeError("Diagnostic screen-space termination currently requires canonical inline traversal");
     this.paramsBuffer = device.createBuffer({ label: "Sparse voxel dry scene parameters", size: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.lightingBuffer = device.createBuffer({ label: "Sparse voxel dry scene lighting arena", size: SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rigidMotionUniformBuffer = device.createBuffer({ label: "Sparse voxel rigid motion uniform mirror", size: SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -1804,11 +2003,13 @@ export class SparseVoxelDrySceneRenderer {
     progress?.("Compiling sparse dry-scene pipeline", 0, 2);
     const [vertexModule, fragmentModule] = await Promise.all([
       checkedModule(this.device, "Sparse voxel dry scene vertex", drySceneVertexShader),
-      checkedModule(this.device, "Sparse voxel dry scene fragment", drySceneShader),
+      checkedModule(this.device, `Sparse voxel dry scene fragment (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
+        this.traversalMode === "hybrid" && this.brickOccupancyMode === "off" && this.screenSpaceTerminationPixels === 0
+          ? drySceneShader : createSvoDrySceneFragmentWGSL(1, this.traversalMode, this.brickOccupancyMode, this.shadingPath, this.screenSpaceTerminationPixels)),
     ]);
     this.layout = this.device.createBindGroupLayout({ label: "Sparse voxel dry scene bindings", entries: sparseVoxelDrySceneBindGroupLayoutEntries() });
     this.pipeline = await this.device.createRenderPipelineAsync({
-      label: "Sparse voxel dry scene", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
+      label: `Sparse voxel dry scene (${this.traversalMode}, brick-${this.brickOccupancyMode})`, layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
       vertex: { module: vertexModule, entryPoint: "vertexMain" }, fragment: { module: fragmentModule, entryPoint: "fragmentMain", targets: [
         { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat },
         { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.packedSurfaceFormat },
@@ -1822,10 +2023,113 @@ export class SparseVoxelDrySceneRenderer {
       },
     });
     this.vertexModule = vertexModule;
+    if (this.shadingPath === "split") await this.ensureSplitPipelines(1);
     progress?.("Compiling sparse temporal accumulation", 1, 2);
     await this.temporalAccumulator.initialize();
     progress?.("Sparse presentation pipelines compiled", 2, 2);
     this.rebuild();
+  }
+
+  /**
+   * Compile the opt-in visibility/G-buffer then lighting pair. Entry-point
+   * reachability keeps primary traversal out of the lighting pass for opaque
+   * pixels even though both entries share one source module.
+   */
+  private async ensureSplitPipelines(scale: SvoConeLightingScale): Promise<void> {
+    if (this.shadingPath !== "split" || !this.layout || !this.vertexModule) return;
+    if (this.splitPipelineScale === scale && this.splitVisibilityPipeline && this.splitLightingPipeline) {
+      this.ensureSplitTargets();
+      return;
+    }
+    if (scale !== 1 && !this.conePrepassLayout) return;
+    this.splitVisibilityLayout ??= this.device.createBindGroupLayout({
+      label: "Sparse voxel split visibility outputs",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_GEOMETRY_FORMAT } },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_IDENTITY_FORMAT } },
+      ],
+    });
+    this.splitLightingLayout ??= this.device.createBindGroupLayout({
+      label: "Sparse voxel split lighting inputs",
+      entries: [
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+        { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint" } },
+      ],
+    });
+    const module = await checkedModule(this.device, `Sparse voxel dry scene split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
+      createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split"));
+    const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
+    const [visibility, lighting] = await Promise.all([
+      this.device.createRenderPipelineAsync({
+        label: `Sparse voxel primary visibility (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, ...middleLayouts, this.splitVisibilityLayout] }),
+        vertex: { module: this.vertexModule, entryPoint: "vertexMain" },
+        fragment: { module, entryPoint: "dryVisibilityMain", targets: [
+          { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.packedSurfaceFormat },
+          { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.identityMediaFormat },
+        ] },
+        primitive: { topology: "triangle-list" },
+        depthStencil: {
+          format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+          depthWriteEnabled: true,
+          depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+        },
+      }),
+      this.device.createRenderPipelineAsync({
+        label: `Sparse voxel deferred dry lighting x${scale}`,
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, ...middleLayouts, this.splitLightingLayout] }),
+        vertex: { module: this.vertexModule, entryPoint: "vertexMain" },
+        fragment: { module, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
+        primitive: { topology: "triangle-list" },
+      }),
+    ]);
+    this.splitVisibilityPipeline = visibility;
+    this.splitLightingPipeline = lighting;
+    this.splitPipelineScale = scale;
+    this.clearReusableFrame();
+    this.ensureSplitTargets();
+  }
+
+  private ensureSplitTargets(): void {
+    if (this.shadingPath !== "split" || !this.targetWidth || !this.targetHeight
+      || !this.splitVisibilityLayout || !this.splitLightingLayout) return;
+    if (!this.splitGeometry || !this.splitOpaqueIdentity || this.splitWidth !== this.targetWidth || this.splitHeight !== this.targetHeight) {
+      this.clearPrimaryVisibilityCache();
+      this.splitGeometry?.destroy();
+      this.splitOpaqueIdentity?.destroy();
+      this.splitGeometry = this.device.createTexture({
+        label: "Sparse voxel split exact primary geometry",
+        size: [this.targetWidth, this.targetHeight],
+        format: SVO_DRY_SPLIT_GEOMETRY_FORMAT,
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      this.splitGeometryView = this.splitGeometry.createView();
+      this.splitOpaqueIdentity = this.device.createTexture({
+        label: "Sparse voxel split exact primary identity",
+        size: [this.targetWidth, this.targetHeight],
+        format: SVO_DRY_SPLIT_IDENTITY_FORMAT,
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      this.splitOpaqueIdentityView = this.splitOpaqueIdentity.createView();
+      this.splitWidth = this.targetWidth;
+      this.splitHeight = this.targetHeight;
+    }
+    this.splitVisibilityBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel split visibility output binding",
+      layout: this.splitVisibilityLayout,
+      entries: [
+        { binding: 0, resource: this.splitGeometryView! },
+        { binding: 4, resource: this.splitOpaqueIdentityView! },
+      ],
+    });
+    this.splitLightingBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel split lighting input bindings",
+      layout: this.splitLightingLayout,
+      entries: [
+        { binding: 1, resource: this.splitGeometryView! },
+        { binding: 5, resource: this.splitOpaqueIdentityView! },
+      ],
+    });
   }
 
   /** Active per-axis cone-lighting rate; 1 keeps the historical inline path. */
@@ -1843,15 +2147,17 @@ export class SparseVoxelDrySceneRenderer {
     const scale = this.coneScale;
     if (this.conePipelineScale === scale && this.conePrepassPipeline && this.coneReducedPipeline) {
       this.ensureConePrepassTargets();
+      await this.ensureSplitPipelines(scale);
       return;
     }
     if (this.conePipelineCompile) await this.conePipelineCompile.catch(() => {});
     if (this.conePipelineScale === scale && this.conePrepassPipeline && this.coneReducedPipeline) {
       this.ensureConePrepassTargets();
+      await this.ensureSplitPipelines(scale);
       return;
     }
     const compile = (async () => {
-      const module = await checkedModule(this.device, `Sparse voxel dry scene cone prepass (x${scale})`, createSvoDrySceneFragmentWGSL(scale));
+      const module = await checkedModule(this.device, `Sparse voxel dry scene cone prepass (x${scale}, ${this.traversalMode}, brick-${this.brickOccupancyMode})`, createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode));
       this.conePrepassLayout ??= this.device.createBindGroupLayout({
         label: "Sparse voxel cone-prepass outputs",
         entries: [
@@ -1898,6 +2204,7 @@ export class SparseVoxelDrySceneRenderer {
     });
     this.conePipelineCompile = wrapped;
     await wrapped;
+    await this.ensureSplitPipelines(scale);
   }
 
   private ensureConePrepassTargets(): void {
@@ -1949,12 +2256,12 @@ export class SparseVoxelDrySceneRenderer {
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
     this.clearReusableFrame();
+    this.clearPrimaryVisibilityCache();
     this.temporalAccumulator.invalidate();
     this.source = source;
     this.scene = scene;
     this.primitiveBuffer?.destroy();
     this.primitiveBuffer = undefined;
-    this.primitiveCandidateArena = undefined;
     const reuseGlassBuffer = Boolean(
       this.glassBuffer && scene?.glassCacheKey && scene.glassCacheKey === this.glassCacheKey,
     );
@@ -1964,14 +2271,9 @@ export class SparseVoxelDrySceneRenderer {
       this.glassCacheKey = undefined;
     }
     if (canEncodeSparseVoxelDryScene(source, scene)) {
-      const primitiveCount = scene!.primitiveRecords.byteLength / SVO_PRIMITIVE_RECORD_STRIDE_BYTES;
-      const candidateArena = primitiveCount <= SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES
-        ? packSvoPrimitiveCandidateArena(scene!.primitiveRecords, scene!.primitiveCandidates!)
-        : undefined;
-      const primitiveArenaRecords = candidateArena?.packedRecords ?? scene!.primitiveRecords;
-      this.primitiveCandidateArena = candidateArena;
-      this.primitiveBuffer = this.device.createBuffer({ label: "Sparse voxel analytic primitives and static candidate BVH", size: primitiveArenaRecords.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-      this.device.queue.writeBuffer(this.primitiveBuffer, 0, primitiveArenaRecords);
+      const primitiveRecords = scene!.primitiveRecords;
+      this.primitiveBuffer = this.device.createBuffer({ label: "Sparse voxel analytic primitive records", size: primitiveRecords.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(this.primitiveBuffer, 0, primitiveRecords);
       if (!this.glassBuffer) {
         const records = scene!.glassRecords;
         this.glassBuffer = this.device.createBuffer({ label: "Sparse voxel thin-glass panes", size: Math.max(SVO_THIN_GLASS_RECORD_STRIDE_BYTES, records?.byteLength ?? 0), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -2012,6 +2314,7 @@ export class SparseVoxelDrySceneRenderer {
     }
     // Fail-soft: frames stay on the inline path until the variant pipelines resolve.
     if (coneLightingScale !== 1) void this.ensureConeLightingPrepass().catch(() => {});
+    else if (this.shadingPath === "split") void this.ensureSplitPipelines(1).catch(() => {});
   }
 
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
@@ -2032,14 +2335,8 @@ export class SparseVoxelDrySceneRenderer {
       | (shadowsEnabled ? SVO_DRY_VISIBILITY_FLAGS.exactShadow : 0)
       | (this.lightingMode === "cone" && (shadowsEnabled || ambientOcclusionEnabled) ? SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested : 0);
     words.set([pbrMaterials.count, pbrMaterials.revision, pbrMaterials.strideBytes, visibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
-    const candidates = this.primitiveCandidateArena;
-    words.set(candidates ? [
-      candidates.candidateRecordOffset,
-      candidates.candidateNodeCount,
-      candidates.candidateRootNodeIndex,
-      candidates.candidateVersion,
-    ] : [0, 0, 0, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.primitiveCandidateWordOffset);
     const nodeMip = source.nodeMipPyramid;
+    floats.set(nodeMip?.worldOrigin_m ?? structural.domain.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset);
     if (nodeMip && nodeMip.generation > 0 && nodeMip.plan.complete) {
       words.set([nodeMip.generation, nodeMip.plan.pages.length, Math.max(1, ...nodeMip.plan.pages.map((page) => page.key.level + 1)), 1], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipWordOffset);
       words.set([...nodeMip.plan.atlas.texels, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipAtlasWordOffset);
@@ -2066,13 +2363,23 @@ export class SparseVoxelDrySceneRenderer {
     if (!this.layout || !this.pipeline || !source || !structural || !this.primitiveBuffer || !this.glassBuffer || !this.scene) { this.bindGroup = undefined; return; }
     const nodeMip = source.nodeMipPyramid;
     const wide = resolveSvoWideTraversalCapability(source.wideFanout, source.revision, structural.domain.maximumDepth);
+    const compact = resolveWebGpuSvoCompactHierarchy(source.compactHierarchy, {
+      nodeCount: structural.capacities.nodes,
+      leafCount: structural.capacities.leaves,
+      sourceGeneration: source.revision,
+    });
+    if (this.traversalMode === "compact" && compact.status !== "ready") {
+      this.bindGroup = undefined;
+      return;
+    }
     this.bindGroup = this.device.createBindGroup({ layout: this.layout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } },
       { binding: 2, resource: structural.control }, { binding: 3, resource: structural.nodes }, { binding: 4, resource: structural.leaves },
       { binding: 5, resource: structural.materialOwners }, { binding: 6, resource: source.pbrMaterials!.binding }, { binding: 7, resource: { buffer: this.primitiveBuffer } },
       { binding: 8, resource: structural.publication.state }, { binding: 9, resource: { buffer: this.paramsBuffer } },
       { binding: 10, resource: { buffer: this.glassBuffer } },
-      { binding: 11, resource: wide.status === "ready" ? wide.source.pages : structural.nodes },
+      { binding: 11, resource: this.traversalMode === "compact" && compact.status === "ready"
+        ? compact.source.nodes : wide.status === "ready" ? wide.source.pages : structural.nodes },
       { binding: 12, resource: wide.status === "ready" ? wide.source.descriptors : structural.leaves },
       { binding: 13, resource: { buffer: this.lightingBuffer } },
       { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
@@ -2095,11 +2402,20 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   ensureSize(width: number, height: number): void {
-    if (this.gBufferTargets.ensureSize(width, height)) { this.pickingFrameToken += 1; this.lastPickingTarget = undefined; this.clearReusableFrame(); }
+    if (this.gBufferTargets.ensureSize(width, height)) { this.pickingFrameToken += 1; this.lastPickingTarget = undefined; this.clearReusableFrame(); this.clearPrimaryVisibilityCache(); }
     this.temporalAccumulator.ensureSize(width, height);
     this.targetWidth = width;
     this.targetHeight = height;
     this.ensureConePrepassTargets();
+    this.ensureSplitTargets();
+  }
+
+  /** Heatmap counters are invocation-private, so diagnostics intentionally retain the inline path. */
+  setDiagnosticOverlayActive(active: boolean): void {
+    if (active === this.splitDiagnosticsActive) return;
+    this.splitDiagnosticsActive = active;
+    this.clearReusableFrame();
+    this.clearPrimaryVisibilityCache();
   }
 
   invalidateTemporalHistory(): void { this.temporalAccumulator.invalidate(); }
@@ -2141,10 +2457,19 @@ export class SparseVoxelDrySceneRenderer {
     const usePrepass = this.coneScale !== 1 && this.conePipelineScale === this.coneScale
       && Boolean(this.conePrepassPipeline && this.coneReducedPipeline && this.conePrepassBindGroup
         && this.conePrepassVisibilityView && this.conePrepassGeometryView);
-    const frameKey = reuseKey === undefined ? undefined : `${reuseKey}|cone=${usePrepass ? this.coneScale : 1}`;
+    const effectiveScale: SvoConeLightingScale = usePrepass ? this.coneScale : 1;
+    const useSplit = this.shadingPath === "split" && !this.splitDiagnosticsActive
+      && this.splitPipelineScale === effectiveScale
+      && Boolean(this.splitVisibilityPipeline && this.splitLightingPipeline
+        && this.splitVisibilityBindGroup && this.splitLightingBindGroup && this.splitGeometryView);
+    const frameKey = reuseKey === undefined ? undefined : `${reuseKey}|cone=${effectiveScale}|shading=${useSplit ? "split" : "inline"}`;
+    const primaryFrameKey = reuseKey === undefined ? undefined : `${reuseKey}|primary=${useSplit ? "split" : "inline"}`;
+    const reusePrimaryVisibility = svoDryPrimaryCoherenceDecision(
+      this.rayCoherenceMode, useSplit, primaryFrameKey, this.primaryVisibilityCacheKey,
+    ) === "reuse";
     const targetTexture = "width" in target ? target as GPUTexture : undefined;
     const requiredStableFrames = temporalFrame ? 2 : 1;
-    if (frameKey && targetTexture && frameKey === this.reusableKey && targetTexture === this.reusableTarget
+    if (this.rayCoherenceMode === "off" && frameKey && targetTexture && frameKey === this.reusableKey && targetTexture === this.reusableTarget
       && this.reusableStableFrames >= requiredStableFrames && this.reusableResult) {
       this.lastTemporalEncoded = Boolean(temporalFrame);
       return this.reusableResult;
@@ -2169,25 +2494,64 @@ export class SparseVoxelDrySceneRenderer {
       prepass.end();
       tracePhase?.({ id: "svo-cone-lighting", label: "SVO cone-lighting prepass" });
     }
-    const pass = encoder.beginRenderPass({
-      label: "Sparse voxel dry scene",
-      colorAttachments: [
-        { view: targetView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-        { view: gBufferViews.packedSurface, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-        { view: gBufferViews.identityMedia, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-      ],
-      depthStencilAttachment: {
-        view: gBufferViews.hardwareDepth,
-        depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
-        depthLoadOp: "clear",
-        depthStoreOp: "store",
-      },
-    });
-    pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
-    pass.draw(3); pass.end();
-    tracePhase?.({ id: "svo-primary", label: "SVO traversal + dry shading" });
+    if (useSplit) {
+      const splitGroup = usePrepass ? 2 : 1;
+      if (!reusePrimaryVisibility) {
+        const visibility = encoder.beginRenderPass({
+          label: "Sparse voxel primary visibility",
+          colorAttachments: [
+            { view: gBufferViews.packedSurface, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+            { view: gBufferViews.identityMedia, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+          ],
+          depthStencilAttachment: {
+            view: gBufferViews.hardwareDepth,
+            depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        visibility.setPipeline(this.splitVisibilityPipeline!);
+        visibility.setBindGroup(0, this.bindGroup);
+        if (usePrepass) visibility.setBindGroup(1, this.conePrepassBindGroup!);
+        visibility.setBindGroup(splitGroup, this.splitVisibilityBindGroup!);
+        visibility.draw(3);
+        visibility.end();
+        this.primaryVisibilityCacheKey = this.rayCoherenceMode === "static-primary" ? primaryFrameKey : undefined;
+        tracePhase?.({ id: "svo-primary", label: "SVO primary visibility" });
+      }
+
+      const lighting = encoder.beginRenderPass({
+        label: "Sparse voxel deferred dry lighting",
+        colorAttachments: [{ view: targetView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+      });
+      lighting.setPipeline(this.splitLightingPipeline!);
+      lighting.setBindGroup(0, this.bindGroup);
+      if (usePrepass) lighting.setBindGroup(1, this.conePrepassBindGroup!);
+      lighting.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+      lighting.draw(3);
+      lighting.end();
+      tracePhase?.({ id: "dry-scene", label: "SVO deferred dry lighting" });
+    } else {
+      const pass = encoder.beginRenderPass({
+        label: "Sparse voxel dry scene",
+        colorAttachments: [
+          { view: targetView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+          { view: gBufferViews.packedSurface, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+          { view: gBufferViews.identityMedia, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+        ],
+        depthStencilAttachment: {
+          view: gBufferViews.hardwareDepth,
+          depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+          depthLoadOp: "clear",
+          depthStoreOp: "store",
+        },
+      });
+      pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline);
+      pass.setBindGroup(0, this.bindGroup);
+      if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
+      pass.draw(3); pass.end();
+      tracePhase?.({ id: "svo-primary", label: "SVO traversal + dry shading" });
+    }
     this.lastPickingTarget = targetTexture;
     const gBuffer = this.gBufferTargets.textures;
     const temporalResolve = temporalFrame && targetTexture && gBuffer
@@ -2196,7 +2560,7 @@ export class SparseVoxelDrySceneRenderer {
     this.lastTemporalEncoded = Boolean(temporalResolve);
     if (temporalResolve) tracePhase?.({ id: "svo-temporal", label: "SVO temporal resolve" });
     const result = { encoded: true, sampledTargetView: temporalResolve ? temporalResolve.resolvedView : targetView } as const;
-    if (frameKey && targetTexture) {
+    if (this.rayCoherenceMode === "off" && frameKey && targetTexture) {
       this.reusableStableFrames = frameKey === this.reusableKey && targetTexture === this.reusableTarget ? this.reusableStableFrames + 1 : 1;
       this.reusableKey = frameKey; this.reusableTarget = targetTexture; this.reusableResult = result;
     } else this.clearReusableFrame();
@@ -2204,6 +2568,17 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   destroy(): void {
+    this.splitGeometry?.destroy();
+    this.splitOpaqueIdentity?.destroy();
+    this.splitGeometry = undefined;
+    this.splitGeometryView = undefined;
+    this.splitOpaqueIdentity = undefined;
+    this.splitOpaqueIdentityView = undefined;
+    this.splitVisibilityBindGroup = undefined;
+    this.splitLightingBindGroup = undefined;
+    this.splitVisibilityPipeline = undefined;
+    this.splitLightingPipeline = undefined;
+    this.splitPipelineScale = undefined;
     this.releaseConePrepassTargets();
     this.conePrepassPipeline = undefined;
     this.coneReducedPipeline = undefined;
@@ -2221,6 +2596,7 @@ export class SparseVoxelDrySceneRenderer {
     this.pickingReadback.destroy();
     this.lastPickingTarget = undefined;
     this.clearReusableFrame();
+    this.clearPrimaryVisibilityCache();
     this.pickingFrameToken += 1;
     this.bindGroup = undefined;
     this.glassBuffer = undefined;
@@ -2230,6 +2606,10 @@ export class SparseVoxelDrySceneRenderer {
 
   private clearReusableFrame(): void {
     this.reusableKey = undefined; this.reusableStableFrames = 0; this.reusableTarget = undefined; this.reusableResult = undefined;
+  }
+
+  private clearPrimaryVisibilityCache(): void {
+    this.primaryVisibilityCacheKey = undefined;
   }
 }
 

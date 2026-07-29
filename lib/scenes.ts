@@ -28,6 +28,16 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
+/** The ceiling-drop UI oracle uses the narrow fast-formulation interface
+ * reach without changing the shared power-validation profile. */
+export const CEILING_DROP_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...POWER_VALIDATION_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+    interfaceRefinementBandCells: 1,
+  }),
+});
+
 /** The larger offset tank needs one additional interface-support cell to keep
  * its unit/two-cell Section 5 band inside complete catalog support. This mirrors the
  * isolated Dawn oracle instead of inheriting the tiny 16-cubed profile. */
@@ -143,11 +153,25 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
  * 0.29 s. Any measured deviation is wall adhesion introduced by the
  * discretization, isolated from dam-break dynamics.
  *
- * The centered variant touches only the lid. The corner variant additionally
- * touches two side walls and their shared vertical edge, which makes it the
- * minimal reproduction of seam/corner sticking.
+ * The four variants form a 2x2 over the two contact kinds, which is what
+ * makes them attributive rather than merely reproductive:
+ *
+ *              | no vertical walls   | two vertical walls
+ *   lid        | ceiling-slab-drop   | corner-brick-drop
+ *   mid-air    | midair-brick-drop   | midair-corner-drop
+ *
+ * The mid-air pair hangs the same brick in the middle layer of a taller
+ * (24-cubed) tank so it touches no ceiling at all. Comparing a row isolates
+ * what the vertical walls do; comparing a column isolates what the lid does.
+ * `midair-brick-drop` touches nothing and is the zero-contact control: any
+ * deviation it shows is the scheme's own transient, not adhesion.
  */
-function createFreeFallDropScene(id: "ceiling-slab-drop" | "corner-brick-drop"): SceneDescription {
+export type FreeFallDropSceneId = "ceiling-slab-drop" | "corner-brick-drop"
+  | "midair-brick-drop" | "midair-corner-drop";
+
+function createFreeFallDropScene(id: FreeFallDropSceneId): SceneDescription {
+  const lidAttached = id === "ceiling-slab-drop" || id === "corner-brick-drop";
+  const cornered = id === "corner-brick-drop" || id === "midair-corner-drop";
   const scene = cloneScene(defaultScene);
   scene.sceneId = id;
   scene.duration_s = 0.5;
@@ -155,18 +179,24 @@ function createFreeFallDropScene(id: "ceiling-slab-drop" | "corner-brick-drop"):
   scene.container = {
     ...scene.container,
     width_m: 1.2,
-    height_m: 0.8,
+    // The lid variants seed the top brick of a two-brick column; the mid-air
+    // variants seed the middle brick of a three-brick column. Both leave the
+    // same eight cells of clearance beneath, so all four share one analytic
+    // trajectory and one impact time.
+    height_m: lidAttached ? 0.8 : 1.2,
     depth_m: 1.2,
     // Ignored: the seeded brick replaces the base fill entirely.
-    fillFraction: 512 / (24 * 16 * 24),
+    fillFraction: 512 / (24 * (lidAttached ? 16 : 24) * 24),
     top: "closed",
     fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
   scene.fluid.initialCondition = "dam-break";
-  scene.fluid.initialBrickSeeds_m = [id === "ceiling-slab-drop"
-    ? { x: 0, y: 0.75, z: 0 }
-    : { x: -0.55, y: 0.75, z: -0.55 }];
+  scene.fluid.initialBrickSeeds_m = [{
+    x: cornered ? -0.55 : 0,
+    y: lidAttached ? 0.75 : 0.6,
+    z: cornered ? -0.55 : 0,
+  }];
   delete scene.fluid.initialBrickSeedsAdditive;
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
@@ -180,6 +210,14 @@ export function createCeilingSlabDropScene(): SceneDescription {
 
 export function createCornerBrickDropScene(): SceneDescription {
   return createFreeFallDropScene("corner-brick-drop");
+}
+
+export function createMidairBrickDropScene(): SceneDescription {
+  return createFreeFallDropScene("midair-brick-drop");
+}
+
+export function createMidairCornerDropScene(): SceneDescription {
+  return createFreeFallDropScene("midair-corner-drop");
 }
 
 /**
@@ -524,7 +562,7 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     group: "Comparisons",
     description: "One 8³ fluid brick seeded flush under the closed lid, touching nothing else. The exact answer is free fall (y = y₀ − gt²/2, impact ≈0.29 s); any hesitation is wall adhesion.",
     background: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    methodProfile: CEILING_DROP_METHOD_PROFILE,
     create: createCeilingSlabDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } }
   },
@@ -537,6 +575,26 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     create: createCornerBrickDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } }
+  },
+  {
+    id: "midair-brick-drop",
+    name: "Octree · mid-air drop control",
+    group: "Comparisons",
+    description: "The same 8³ brick hanging in open space, touching no boundary at all. The zero-contact control: whatever it deviates from free fall is the scheme's own transient, not adhesion.",
+    background: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    create: createMidairBrickDropScene,
+    camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } }
+  },
+  {
+    id: "midair-corner-drop",
+    name: "Octree · mid-air corner oracle",
+    group: "Comparisons",
+    description: "The same 8³ brick against two vertical walls and their seam, but clear of the lid. Gravity is tangential to both walls, so free-slip walls cannot slow it: this isolates seam adhesion from ceiling adhesion.",
+    background: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    create: createMidairCornerDropScene,
+    camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } }
   },
   {
     id: "ocean-seiche",

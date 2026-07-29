@@ -1,20 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  sparseVoxelDrySceneCullingMode,
-  SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT,
-} from "../lib/webgpu-svo-dry-scene";
+import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 
-test("small authored catalogs avoid repeated root traversal", () => {
-  assert.equal(SVO_DRY_SCENE_DIRECT_PRIMITIVE_LIMIT, 64);
-  assert.equal(sparseVoxelDrySceneCullingMode(0), "direct-small-catalog");
-  assert.equal(sparseVoxelDrySceneCullingMode(64), "direct-small-catalog");
-  assert.equal(sparseVoxelDrySceneCullingMode(65), "svo-payload-dda");
-});
+test("all static opaque rays use the SVO hierarchy and brick payload", () => {
+  const primaryStart = svoDrySceneShader.indexOf("fn traceStatic(");
+  const primaryEnd = svoDrySceneShader.indexOf("struct DryGlassHit", primaryStart);
+  const primary = svoDrySceneShader.slice(primaryStart, primaryEnd);
+  assert.match(primary, /dryTraversalCursorBegin/);
+  assert.match(primary, /dryTraversalCursorNext/);
+  assert.match(primary, /traceLeafPayload/);
+  assert.doesNotMatch(primary, /tracePrimitiveCandidates|dry\.metadata\.x\s*[<>]=?/);
 
-test("dry-scene culling mode rejects lossy primitive counts", () => {
-  for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-    assert.throws(() => sparseVoxelDrySceneCullingMode(invalid), /non-negative integer/);
-  }
+  const visibilityStart = svoDrySceneShader.indexOf("fn svoVisibilityNext(");
+  const visibilityEnd = svoDrySceneShader.indexOf("fn dryLightVisibility(", visibilityStart);
+  const visibility = svoDrySceneShader.slice(visibilityStart, visibilityEnd);
+  assert.match(visibility, /dryTraversalCursorBegin/);
+  assert.match(visibility, /dryTraversalCursorNext/);
+  assert.match(visibility, /traceLeafPayloadVisibility/);
+  assert.doesNotMatch(visibility, /tracePrimitiveCandidates|dry\.metadata\.x\s*[<>]=?\s*\d/);
 });

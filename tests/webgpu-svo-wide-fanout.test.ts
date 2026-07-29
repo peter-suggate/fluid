@@ -227,14 +227,18 @@ test("renderer capability resolution fails closed and publishes only traversal m
   });
 });
 
-test("wide WGSL uses resumable page-local DDA and only two remappable bindings", () => {
+test("wide WGSL uses resumable page-local DDA with a self-contained boundary scan", () => {
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /struct SvoWideTraversalCursor/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /frames: array<SvoWideCursorFrame, 12>/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /SVO_WIDE_MAXIMUM_CELL_STEPS: u32 = 12u/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /frame\.cellSteps >= SVO_WIDE_MAXIMUM_CELL_STEPS/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /direction\[axis\] == 0\.0.*boundary > 0\.0/s);
-  assert.match(webgpuSvoWideFanoutTraversalWGSL, /if \(any\(ray\.direction == vec3f\(0\.0\)\)\) \{ return false; \}/,
-    "parallel and shared-face rays must select canonical traversal before the wide cursor yields");
+  assert.doesNotMatch(webgpuSvoWideFanoutTraversalWGSL, /if \(any\(ray\.direction == vec3f\(0\.0\)\)\) \{ return false; \}/,
+    "parallel rays must remain inside the wide traversal");
+  assert.match(webgpuSvoWideFanoutTraversalWGSL, /SVO_WIDE_MODE_BOUNDARY_SCAN/);
+  assert.match(webgpuSvoWideFanoutTraversalWGSL, /fn svoWideCursorNextBoundaryScan/);
+  assert.match(webgpuSvoWideFanoutTraversalWGSL, /remainingLow: u32,[^]*remainingHigh: u32/);
+  assert.match(webgpuSvoWideFanoutTraversalWGSL, /svoWideCanonicalSlotTieKey/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /callVisits >= visitLimit/);
   assert.doesNotMatch(webgpuSvoWideFanoutTraversalWGSL, /pageVisits >= visitLimit/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /if \(svoControl\[12\] != 0u\) \{ return false; \}/);
@@ -246,8 +250,8 @@ test("wide WGSL uses resumable page-local DDA and only two remappable bindings",
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /leaf\.topology\.y, sourceLevel/);
   assert.doesNotMatch(webgpuSvoWideFanoutTraversalWGSL, /svoNodes\[/,
     "terminal canonical node cross-validation happens once at publish, not per ray");
-  assert.equal((webgpuSvoWideFanoutTraversalWGSL.match(/svoWidePageHeaderValid\(/g) ?? []).length, 3,
-    "page headers are checked at definition, root initialization, and first frame entry only");
+  assert.equal((webgpuSvoWideFanoutTraversalWGSL.match(/svoWidePageHeaderValid\(/g) ?? []).length, 4,
+    "page headers are checked at definition, root initialization, and first entry in either traversal mode only");
   assert.doesNotMatch(webgpuSvoWideFanoutTraversalWGSL, /array<SvoWideDescriptor,\s*64>/);
   const remapped = createWebgpuSvoWideFanoutTraversalWGSL({ group: 2, pages: 11, descriptors: 12 });
   assert.match(remapped, /@group\(2\) @binding\(11\).*svoWidePages/);
@@ -283,7 +287,7 @@ test("resumable wide traversal WGSL compiles with the canonical traversal ABI", 
   } finally { device.destroy(); }
 });
 
-test("GPU wide traversal falls back with exact parity for boundary, far-origin, and malformed cases", {
+test("GPU wide traversal is self-contained with exact parity for boundary and far-origin rays", {
   skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU validation",
 }, async () => {
   const run = promisify(execFile);
@@ -294,12 +298,15 @@ test("GPU wide traversal falls back with exact parity for boundary, far-origin, 
     { env: { FLUID_SVO_WIDE_RAY_PROFILE: "camera", FLUID_SVO_WIDE_ORIGIN_X: "-10000000" }, publishValidation: "ready" },
     // A malformed publication is rejected at the publish fence, never sampled
     // per ray: the wide path sees no capability and stays canonical.
-    { env: { FLUID_SVO_WIDE_RAY_PROFILE: "camera", FLUID_SVO_WIDE_MALFORMED_PAGE: "1" }, publishValidation: "invalid" },
+    { env: { FLUID_SVO_WIDE_RAY_PROFILE: "camera", FLUID_SVO_WIDE_MALFORMED_PAGE: "1",
+      FLUID_SVO_WIDE_PRODUCTION_FALLBACK: "1" }, publishValidation: "invalid" },
   ];
   for (const scenario of scenarios) {
     const { stdout } = await run(process.execPath, ["--import", "tsx", tool], {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
       env: { ...process.env, WEBGPU_NODE_MODULE: modulePath!, FLUID_SVO_WIDE_INVOCATIONS: "64",
+        FLUID_SVO_WIDE_PRODUCTION_FALLBACK: "0",
+        FLUID_SVO_WIDE_TIMING: "wall",
         FLUID_SVO_WIDE_CYCLES: "1", FLUID_SVO_WIDE_DISPATCHES: "1", FLUID_SVO_WIDE_WARMUPS: "1", ...scenario.env },
     });
     const report = JSON.parse(stdout) as {

@@ -11,7 +11,7 @@ import {
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
-import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
+import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const drySource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 const worldSource = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
@@ -64,7 +64,7 @@ test("lighting quality, shadows, and ambient occlusion write independent visibil
   } as unknown as GPUDevice;
   try {
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
-    renderer.setSource(source(), candidateBackedDrySceneFixture);
+    renderer.setSource(source(), svoDrySceneFixture);
     const params = () => writes.filter(({ label }) => label === "Sparse voxel dry scene parameters");
     const flagWord = (write: { words: Uint32Array }) => write.words[SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset + 3];
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, SVO_DRY_VISIBILITY_FLAGS.exactShadow);
@@ -136,6 +136,16 @@ test("cone steps reuse a matching mip page and search only on page, LOD, or gene
     absentPrevious = step;
   }
   assert.equal(searches, 1, "repeated samples in one non-resident sparse page reuse the negative lookup");
+});
+
+test("node-mip sampling publishes its own world origin without growing the dry uniform", () => {
+  assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset, 60);
+  assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes, 256);
+  assert.equal((SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset + 4) * 4, SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes);
+  assert.match(drySource, /floats\.set\(nodeMip\?\.worldOrigin_m \?\? structural\.domain\.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT\.nodeMipOriginWordOffset\)/);
+  assert.match(svoDrySceneShader, /virtualVoxel=\(position_m-dry\.nodeMipOrigin\.xyz\)/,
+    "topology experiments must not reinterpret an unchanged opacity atlas in the structural tree's coordinate frame");
+  assert.match(worldSource, /worldOrigin_m: nodeMipWorldOrigin_m/);
 });
 
 test("sparse-brick world exposes, accounts, and retires its optional node-mip capability", () => {

@@ -17,6 +17,18 @@ export const OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH = 8;
  * shell: it retained 3--8 iteration convergence over 500 steps while removing
  * nearly half the repeated band applies. */
 export const OCTREE_SECTION43_MINI_SHELL_DEPTH = 4;
+/**
+ * Validated finest-cell envelope for the small two-level k=4 formulation.
+ *
+ * This is deliberately capacity-shaped rather than an axis-length test: the
+ * 24x16x24 ceiling drop is still a small 9,216-cell system. The envelope is
+ * independent of which MGPCG executor is selected: ceiling-drop now uses the
+ * row-parallel solver while retaining the separately validated k=4 shell. The
+ * next larger authored two-level validation profile (32x24x16) remains on k=8.
+ * Finest-cell count is an immutable conservative bound, so this selection
+ * never depends on a readback or a previous advance.
+ */
+export const OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY = 24 * 16 * 24;
 export const OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT =
   "FLUID_OCTREE_SECTION43_SHELL_DEPTH";
 
@@ -73,8 +85,10 @@ export function planOctreeSolveTail(
   const resolvedEnvironment = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   const shellDepthText = resolvedEnvironment?.[OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT];
+  const finestCellCapacity = profile.finestDimensions.reduce(
+    (product, dimension) => product * dimension, 1);
   const smallTwoLevelProfile = profile.maximumLeafSize === 2
-    && Math.max(...profile.finestDimensions) <= 16;
+    && finestCellCapacity <= OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY;
   const boundarySmoothingIterations = shellDepthText === undefined
     ? (smallTwoLevelProfile
       ? OCTREE_SECTION43_MINI_SHELL_DEPTH

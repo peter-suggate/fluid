@@ -25,12 +25,38 @@ function normalize(value: Vec3): Vec3 {
   return { x: value.x / length, y: value.y / length, z: value.z / length };
 }
 
+function rotate(q: { w: number; x: number; y: number; z: number }, v: Vec3): Vec3 {
+  const tx = 2 * (q.y * v.z - q.z * v.y), ty = 2 * (q.z * v.x - q.x * v.z), tz = 2 * (q.x * v.y - q.y * v.x);
+  return {
+    x: v.x + q.w * tx + (q.y * tz - q.z * ty),
+    y: v.y + q.w * ty + (q.z * tx - q.x * tz),
+    z: v.z + q.w * tz + (q.x * ty - q.y * tx),
+  };
+}
+
+/**
+ * A point inside the solid. Aiming at the centre is only a hit for the convex
+ * kinds: a ray at the middle of a torus goes straight through its hole, which
+ * is the shape doing its job rather than a gap in coverage.
+ */
+function interiorTarget(descriptor: SvoFinitePrimitiveDescriptor): Vec3 {
+  if (descriptor.kind !== "torus") return descriptor.center_m;
+  const offset = rotate(descriptor.orientation ?? identity, { x: descriptor.majorRadius_m, y: 0, z: 0 });
+  return {
+    x: descriptor.center_m.x + offset.x,
+    y: descriptor.center_m.y + offset.y,
+    z: descriptor.center_m.z + offset.z,
+  };
+}
+
 test("candidate bounds conservatively cover smooth, sharp, rotated, and subcell primitives", () => {
   const descriptors: SvoFinitePrimitiveDescriptor[] = [
     { kind: "sphere", primitiveId: 1, materialId: 2, ownerId: 1, center_m: { x: -2, y: 0, z: 0 }, radius_m: .7 },
     { kind: "box", primitiveId: 2, materialId: 3, ownerId: 2, center_m: { x: 0, y: 0, z: 0 }, halfExtents_m: { x: .8, y: .6, z: .5 }, orientation: { w: Math.SQRT1_2, x: 0, y: Math.SQRT1_2, z: 0 } },
     { kind: "box", primitiveId: 3, materialId: 3, ownerId: 3, center_m: { x: 2, y: 0, z: 0 }, halfExtents_m: { x: .4, y: .003, z: .2 }, orientation: identity },
     { kind: "ellipsoid", primitiveId: 4, materialId: 4, ownerId: 4, center_m: { x: 0, y: 2, z: 0 }, radii_m: { x: .8, y: .3, z: .5 }, orientation: identity },
+    { kind: "torus", primitiveId: 5, materialId: 5, ownerId: 5, center_m: { x: -2, y: 2, z: 0 }, majorRadius_m: .6, minorRadius_m: .12, orientation: { w: Math.SQRT1_2, x: Math.SQRT1_2, y: 0, z: 0 } },
+    { kind: "cone", primitiveId: 6, materialId: 6, ownerId: 6, center_m: { x: 2, y: 2, z: 0 }, baseRadius_m: .3, topRadius_m: .45, halfHeight_m: .4, orientation: identity },
   ];
   const publication = buildSvoPrimitiveCandidates(descriptors);
   for (let primitiveIndex = 0; primitiveIndex < descriptors.length; primitiveIndex += 1) {
@@ -48,7 +74,8 @@ test("candidate bounds conservatively cover smooth, sharp, rotated, and subcell 
       y: center.y + offset.y * (diagonal + 1),
       z: center.z + offset.z * (diagonal + 1),
     };
-    const direction = normalize({ x: center.x - origin_m.x, y: center.y - origin_m.y, z: center.z - origin_m.z });
+    const target = interiorTarget(descriptor);
+    const direction = normalize({ x: target.x - origin_m.x, y: target.y - origin_m.y, z: target.z - origin_m.z });
     const ray = { origin_m, direction };
     assert.ok(intersectSvoPrimitive(descriptor, ray), `exact ray hits primitive ${primitiveIndex}`);
     assert.ok(querySvoPrimitiveCandidates(publication, ray).primitiveIndices.includes(primitiveIndex),
@@ -56,16 +83,17 @@ test("candidate bounds conservatively cover smooth, sharp, rotated, and subcell 
   }
 });
 
-test("every shipped analytic catalog has no candidate false negatives", () => {
+test("offline candidate utility has no false negatives for shipped analytic catalogs", () => {
   const scene = cloneScene(defaultScene);
   for (const environmentId of environmentIds) {
     const built = buildSvoScenePrimitives(scene, { environmentId });
-    assert.ok(built.primitiveCandidates, `${environmentId} publishes its bounded candidate BVH`);
+    const descriptors = built.descriptors as readonly SvoFinitePrimitiveDescriptor[];
+    const primitiveCandidates = buildSvoPrimitiveCandidates(descriptors, { skippedOwnerId: built.openShellOwnerId });
     built.descriptors.forEach((descriptor, primitiveIndex) => {
       assert.notEqual(descriptor.kind, "terrain-heightfield");
       const finite = descriptor as SvoFinitePrimitiveDescriptor;
       if (finite.ownerId === built.openShellOwnerId) {
-        assert.ok(!built.primitiveCandidates!.nodes.some((node) => node.rightChildIndex === SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL && node.leftOrPrimitiveIndex === primitiveIndex));
+        assert.ok(!primitiveCandidates.nodes.some((node) => node.rightChildIndex === SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL && node.leftOrPrimitiveIndex === primitiveIndex));
         return;
       }
       const bounds = svoPrimitiveCandidateBounds(finite);
@@ -76,10 +104,11 @@ test("every shipped analytic catalog has no candidate false negatives", () => {
         bounds.maximum_m.z - bounds.minimum_m.z,
       );
       const origin_m = { x: center.x + span + 1, y: center.y + .37 * (span + 1), z: center.z + .23 * (span + 1) };
-      const direction = normalize({ x: center.x - origin_m.x, y: center.y - origin_m.y, z: center.z - origin_m.z });
+      const target = interiorTarget(finite);
+      const direction = normalize({ x: target.x - origin_m.x, y: target.y - origin_m.y, z: target.z - origin_m.z });
       const ray = { origin_m, direction };
       assert.ok(intersectSvoPrimitive(finite, ray), `${environmentId} exact hit ${primitiveIndex}`);
-      assert.ok(querySvoPrimitiveCandidates(built.primitiveCandidates!, ray).primitiveIndices.includes(primitiveIndex),
+      assert.ok(querySvoPrimitiveCandidates(primitiveCandidates, ray).primitiveIndices.includes(primitiveIndex),
         `${environmentId} candidate retains ${primitiveIndex}`);
     });
   }

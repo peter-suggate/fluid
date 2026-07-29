@@ -340,25 +340,23 @@ export function fineLevelSetWarmStartRequested(
  * Part D executor selection, read at encode time so an A/B can switch paths
  * without reconstructing anything.
  *
- * **Default OFF, on measurement.** The persistent executor works — it collapses
- * the solve from 1,125 to 413 dispatches and 168 to 78 compute passes per
- * advance, with identical executed iterations and zero validation errors — but
- * it is SLOWER, and stably so. Interleaved A/B on the mini churn lane
- * (2026-07-27): hierarchical 79.74 / 79.68 / 79.68, persistent 94.79 / 94.90 /
- * 94.79, i.e. **+15.1 ms**. One workgroup is one GPU core, so the solve gives up
- * ~31/32 of the machine to buy dispatch overhead that this frame does not pay
- * (independently established: deleting 231 dispatches/advance measured as a
- * 2 ms regression). Keep the implementation — it is correct, it is the
- * large-domain question mark, and it is the only way to test the premise again
- * cheaply — but do not select it by default.
- * `FLUID_OCTREE_PERSISTENT_MGPCG=1` opts in.
+ * **Default ON below the constructed executor's authored capacity.** Clean,
+ * non-isolated M1 Max measurements on 2026-07-29 reversed the earlier
+ * label-isolated conclusion: ceiling-drop fell from 113 -> 53 ms/10 advances
+ * and mini-dam from 107 -> 58 ms/10 advances, with the same two executed
+ * iterations, converged residuals and zero tripwires. The old comparison paid
+ * trace/pass-isolation overhead and is not a shipping-wall authority.
+ *
+ * `FLUID_OCTREE_PERSISTENT_MGPCG=0` retains the hierarchical A/B oracle. A
+ * capacity above the authored single-workgroup limit never constructs this
+ * executor and therefore falls back regardless of the environment setting.
  */
 export function octreePersistentMGPCGEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG === "1";
+  return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG !== "0";
 }
 
 export function octreeSparseWorldRequired(
@@ -996,6 +994,7 @@ type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
   readonly workAccountingPlan: Readonly<{ levelCount: number;
     levelCapacities: readonly number[]; encodedCorrectionDispatches: number;
     persistentEnabled: boolean; persistentMaximumIterations: number }>;
+  readHierarchyCensus(): Promise<Readonly<{ levels: readonly Readonly<Record<string, number>>[] }>>;
   encodeCapture(broker: PassBroker): void;
   readonly candidateControl: GPUBuffer;
   /** Copy source for the step-snapshot ring (A4). Never bound by this file. */
@@ -4527,9 +4526,11 @@ export class WebGPUOctreeProjection {
       spgridLevelCount: spgrid.workAccountingPlan.levelCount,
       spgridEncodedCorrectionDispatches: spgrid.workAccountingPlan.encodedCorrectionDispatches,
       spgridLevelCapacities: spgrid.workAccountingPlan.levelCapacities,
-      // Production always uses the row-parallel outer authority. The optional
-      // SPGrid single-workgroup executor is not selected by this schedule.
-      persistentEnabled: false,
+      persistentEnabled: octreePersistentMGPCGEnabled()
+        && this.persistentMGPCG !== undefined,
+      ...(this.persistentMGPCG ? {
+        persistentMaximumIterations: this.persistentMGPCG.iterationBudget,
+      } : {}),
       reductionLanes: outer.workAccountingPlan.reductionLanes,
       reductionPartialCount: outer.workAccountingPlan.reductionPartialCount,
     });
@@ -4647,6 +4648,9 @@ export class WebGPUOctreeProjection {
       spgridDispatch: words.get("spgridDispatch"),
       outerControl: words.get("outerControl"),
       outerIndirectTail: words.get("outerIndirectTail"),
+      ...(plan.pressure.persistentEnabled
+        ? { persistentControl: words.get("outerControl") }
+        : {}),
       fineWorkset: words.get("fineWorklist"),
       fineTopologyControl: words.get("fineTopologyControl"),
       fineTransportControl: words.get("fineTransportControl"),
@@ -4723,6 +4727,7 @@ export class WebGPUOctreeProjection {
       changedKeysOffsetWords: topology.pageDeltaLayout.changedKeysOffsetWords,
       dirtyPagesOffsetWords: topology.pageDeltaLayout.dirtyPagesOffsetWords,
       supportPagesOffsetWords: topology.pageDeltaLayout.supportPagesOffsetWords,
+      promotionCountsOffsetWords: topology.pageDeltaLayout.promotionCountsOffsetWords,
     };
   }
   /** Rejection-only parity evidence for the two immutable fine publications. */
@@ -4983,6 +4988,10 @@ export class WebGPUOctreeProjection {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
     }
+  }
+  /** Post-submit diagnostic census; never participates in pressure scheduling. */
+  readSPGridHierarchyCensus() {
+    return this.firstOrderVCycle?.readHierarchyCensus();
   }
   get fluidBrickCapacity() { return this.topologyResidency.capacity; }
   readFluidBrickResidencyStats() { return this.topologyResidency.readStats(); }

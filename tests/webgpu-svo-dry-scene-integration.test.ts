@@ -4,7 +4,6 @@ import test from "node:test";
 
 import { DEFAULT_SVO_LIGHTING_MODE, DEFAULT_SVO_LIGHTING_OPTIONS, DEFAULT_SVO_RENDER_MODE } from "../lib/svo-render-mode";
 import {
-  canConsumeSparseVoxelPrimitiveCandidates,
   canEncodeSparseVoxelDryScene,
   SVO_DRY_SCENE_BINDING_CONTRACT,
   svoDrySceneShader,
@@ -13,7 +12,7 @@ import {
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
 import type { DrySceneReplacementEncoder } from "../lib/webgpu-water-pipeline";
-import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
+import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererUrl = new URL("../lib/webgpu-renderer.ts", import.meta.url);
 const waterUrl = new URL("../lib/webgpu-water-pipeline.ts", import.meta.url);
@@ -88,10 +87,10 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
   assert.doesNotMatch(drySceneSource, /SparseVoxelDebugRecord|voxelRecords|brickRecords/,
     "production traversal must not expand or consume debug cube records");
   const primitiveHitStart = drySceneSource.indexOf("fn primitiveHit(");
-  const primitiveHitEnd = drySceneSource.indexOf("const DRY_CANDIDATE_COMPLETE", primitiveHitStart);
+  const primitiveHitEnd = drySceneSource.indexOf("fn traceLeafPayload(", primitiveHitStart);
   const primitiveHit = drySceneSource.slice(primitiveHitStart, primitiveHitEnd);
   assert.match(primitiveHit, /svoIntersectPrimitiveExact\(record,ro,rd,max\(tMin,1e-4\),tMax\)/,
-    "candidate leaves must use the shared five-kind analytic ray contract");
+    "occupied SVO payload cells must use the shared five-kind analytic ray contract");
   assert.doesNotMatch(primitiveHit, /svoEvaluatePrimitive|svoPrimitiveDistance_m|svoEllipsoidClosestPoint_m/,
     "ray hits must not run the bounded ellipsoid closest-point distance solve to recover a normal");
   assert.match(drySceneSource, /fn nearestBodyIgnoring\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,
@@ -157,15 +156,11 @@ test("unavailable structural fields fail over to raster before GPU encoding", ()
       },
     },
   } as unknown as SparseVoxelRenderSource;
-  const scene: SparseVoxelDrySceneData = { ...candidateBackedDrySceneFixture, ownerBase: 32 };
+  const scene: SparseVoxelDrySceneData = { ...svoDrySceneFixture, ownerBase: 32 };
   assert.equal(canEncodeSparseVoxelDryScene(undefined, scene), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, undefined), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, { ...scene, primitiveRecords: new Uint32Array(0) }), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, scene), true);
-  assert.equal(canConsumeSparseVoxelPrimitiveCandidates(scene), true);
-  assert.equal(canEncodeSparseVoxelDryScene(source, { ...scene, primitiveCandidates: undefined }), false,
-    "small analytic catalogs must fail over when their conservative candidate publication is unavailable");
-  assert.equal(canConsumeSparseVoxelPrimitiveCandidates({ ...scene, primitiveCandidates: undefined }), false);
   const unavailable = {
     ...source,
     structural: {

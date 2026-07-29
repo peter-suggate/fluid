@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
-import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
+import { createWebgpuSvoTraversalWGSL, webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
 
-type Variant = "restart" | "continuation";
+type Variant = "restart" | "continuation" | "parametric";
 
 const INVALID = 0xffff_ffff;
 const SVO_STATUS_MISS_FOR_HOST = 0;
@@ -17,6 +17,7 @@ const depth = positiveInteger(process.env.FLUID_SVO_CONTINUATION_DEPTH ?? "5", "
 const warmups = positiveInteger(process.env.FLUID_SVO_CONTINUATION_WARMUPS ?? "4", "warmups");
 const cycles = positiveInteger(process.env.FLUID_SVO_CONTINUATION_CYCLES ?? "12", "cycles");
 const dispatches = positiveInteger(process.env.FLUID_SVO_CONTINUATION_DISPATCHES ?? "1", "dispatches");
+const forceWallTiming = process.env.FLUID_SVO_CONTINUATION_TIMING === "wall";
 assert.ok(depth >= 3 && depth <= 6, "depth must be between 3 and 6");
 
 function positiveInteger(value: string, label: string): number {
@@ -58,10 +59,10 @@ function denseFixture(maximumDepth: number): {
 }
 
 function variantBody(variant: Variant): string {
-  const begin = variant === "continuation"
+  const begin = variant !== "restart"
     ? "var continuation: SvoTraversalContinuation; svoTraversalContinuationBegin(ray, mapping, &continuation);"
     : "";
-  const next = variant === "continuation"
+  const next = variant !== "restart"
     ? "svoTraversalContinuationNext(narrowed, mapping, mapping.maximumDepth, &continuation)"
     : "svoTraverseWithDepthLimit(narrowed, mapping, mapping.maximumDepth)";
   return `${begin}
@@ -88,7 +89,10 @@ function variantBody(variant: Variant): string {
 
 function shader(variant: Variant, nodeCount: number, leafCount: number): string {
   const extent = 2 ** depth * 4;
-  return `${webgpuSvoTraversalWGSL}
+  const traversal = variant === "parametric"
+    ? createWebgpuSvoTraversalWGSL({ childEnumeration: "parametric" })
+    : webgpuSvoTraversalWGSL;
+  return `${traversal}
 struct BenchmarkResult { status: u32, visits: u32, leaves: u32, sequenceHash: u32 }
 @group(0) @binding(3) var<storage, read_write> results: array<BenchmarkResult>;
 fn enumerateLeaves(ray: SvoRay, mapping: SvoMapping) -> BenchmarkResult {
@@ -140,7 +144,7 @@ const output = device.createBuffer({ size: resultBytes, usage: GPUBufferUsage.ST
 const readback = device.createBuffer({ size: resultBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
 const targets = new Map<Variant, { pipeline: GPUComputePipeline; bindGroup: GPUBindGroup }>();
 
-for (const variant of ["restart", "continuation"] as const) {
+for (const variant of ["restart", "continuation", "parametric"] as const) {
   const shaderModule = device.createShaderModule({ label: `${variant} leaf enumeration`, code: shader(variant, fixture.nodes.length / 8, fixture.leaves.length / 4) });
   const info = await shaderModule.getCompilationInfo();
   assert.deepEqual(info.messages.filter(({ type }) => type === "error").map(({ lineNum, linePos, message }) => ({ lineNum, linePos, message })), []);
@@ -163,7 +167,8 @@ async function outputFor(variant: Variant): Promise<Uint32Array> {
   return copied;
 }
 
-const restartOutput = await outputFor("restart"), continuationOutput = await outputFor("continuation");
+const restartOutput = await outputFor("restart"), continuationOutput = await outputFor("continuation"),
+  parametricOutput = await outputFor("parametric");
 for (let index = 0; index < restartOutput.length; index += 4) {
   assert.equal(restartOutput[index], SVO_STATUS_MISS_FOR_HOST, `restart invocation ${index / 4} did not enumerate to miss`);
   assert.ok(restartOutput[index + 2] >= 8, `invocation ${index / 4} crossed only ${restartOutput[index + 2]} leaves`);
@@ -173,60 +178,85 @@ assert.deepEqual(
   Array.from(restartOutput, (_, index) => index % 4 === 1 ? 0 : restartOutput[index]),
   "continuation changed status, leaf count, nearest-hit ordering, or intervals",
 );
-let restartVisits = 0, continuationVisits = 0, leafTotal = 0;
+assert.deepEqual(
+  Array.from(parametricOutput, (_, index) => index % 4 === 1 ? 0 : parametricOutput[index]),
+  Array.from(restartOutput, (_, index) => index % 4 === 1 ? 0 : restartOutput[index]),
+  "parametric continuation changed status, leaf count, nearest-hit ordering, or intervals",
+);
+let restartVisits = 0, continuationVisits = 0, parametricVisits = 0, leafTotal = 0;
 for (let index = 0; index < restartOutput.length; index += 4) {
-  restartVisits += restartOutput[index + 1]; continuationVisits += continuationOutput[index + 1]; leafTotal += restartOutput[index + 2];
+  restartVisits += restartOutput[index + 1]; continuationVisits += continuationOutput[index + 1];
+  parametricVisits += parametricOutput[index + 1]; leafTotal += restartOutput[index + 2];
 }
 assert.ok(continuationVisits < restartVisits, "continuation did not reduce topology visits");
+assert.equal(parametricVisits, continuationVisits, "parametric enumeration changed continuation node visits");
 
-const variants = ["restart", "continuation"] as const;
+const variants = ["restart", "continuation", "parametric"] as const;
 for (let warmup = 0; warmup < warmups; warmup += 1) {
   for (const variant of variants) await outputFor(variant);
 }
-const samples: Record<Variant, number[]> = { restart: [], continuation: [] };
+const samples: Record<Variant, number[]> = { restart: [], continuation: [], parametric: [] };
 let traceSampleId = 0;
 for (let cycle = 0; cycle < cycles; cycle += 1) {
-  const order = cycle % 2 === 0 ? variants : (["continuation", "restart"] as const);
+  const order = cycle % 2 === 0 ? variants : (["parametric", "continuation", "restart"] as const);
   for (const variant of order) {
-    const encoder = device.createCommandEncoder();
     const target = targets.get(variant)!;
-    const recorder = new GPUPerformanceTraceRecorder(
-      device,
-      ++traceSampleId,
-      "presentation",
-      `svo-continuation:${variant}:cycle-${cycle}`,
-      [{ id: "dry-scene", label: `SVO ${variant} traversal` }],
-    );
-    recorder.boundary(encoder, `${variant} trace start`);
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
-    for (let dispatch = 0; dispatch < dispatches; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(width * height / 128));
-    pass.end();
-    recorder.boundary(encoder, `${variant} trace complete`);
-    recorder.resolve(encoder);
-    device.queue.submit([encoder.finish()]);
-    const trace = await recorder.read();
+    if (forceWallTiming) {
+      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+      pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
+      for (let dispatch = 0; dispatch < dispatches; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(width * height / 128));
+      pass.end();
+      const commandBuffer = encoder.finish(), startedAt = performance.now();
+      device.queue.submit([commandBuffer]);
+      await device.queue.onSubmittedWorkDone();
+      samples[variant].push((performance.now() - startedAt) / dispatches);
+      continue;
+    }
+    let trace: Awaited<ReturnType<GPUPerformanceTraceRecorder["read"]>> = undefined;
+    for (let attempt = 0; attempt < 3 && !trace; attempt += 1) {
+      const encoder = device.createCommandEncoder();
+      const recorder = new GPUPerformanceTraceRecorder(
+        device,
+        ++traceSampleId,
+        "presentation",
+        `svo-continuation:${variant}:cycle-${cycle}:attempt-${attempt}`,
+        [{ id: "dry-scene", label: `SVO ${variant} traversal` }],
+      );
+      recorder.boundary(encoder, `${variant} trace start`);
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(target.pipeline); pass.setBindGroup(0, target.bindGroup);
+      for (let dispatch = 0; dispatch < dispatches; dispatch += 1) pass.dispatchWorkgroups(Math.ceil(width * height / 128));
+      pass.end();
+      recorder.boundary(encoder, `${variant} trace complete`);
+      recorder.resolve(encoder);
+      device.queue.submit([encoder.finish()]);
+      trace = await recorder.read();
+    }
     assert.ok(trace, `${variant} GPU trace was invalid`);
     samples[variant].push(trace.total_ms / dispatches);
   }
 }
-const restartMedian = median(samples.restart), continuationMedian = median(samples.continuation);
+const restartMedian = median(samples.restart), continuationMedian = median(samples.continuation),
+  parametricMedian = median(samples.parametric);
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, []);
 
 const invocationCount = width * height;
 console.log(JSON.stringify({
   backend: process.env.FLUID_WEBGPU_BACKEND ?? "metal", dimensions: [width, height], depth, cycles,
+  timingMethod: forceWallTiming ? "serialized-submit-to-fence-wall" : "gpu-timestamp-query",
   parity: { exactSequenceOutputs: true, invocations: invocationCount, averageLeaves: leafTotal / invocationCount },
   nodeVisits: {
     restartPerRay: restartVisits / invocationCount,
     continuationPerRay: continuationVisits / invocationCount,
+    parametricPerRay: parametricVisits / invocationCount,
     reductionPercent: (1 - continuationVisits / restartVisits) * 100,
   },
   gpuMilliseconds: {
-    restartMedian, continuationMedian,
+    restartMedian, continuationMedian, parametricMedian,
     improvementPercent: (1 - continuationMedian / restartMedian) * 100,
-    restartSamples: samples.restart, continuationSamples: samples.continuation,
+    parametricImprovementOverContinuationPercent: (1 - parametricMedian / continuationMedian) * 100,
+    restartSamples: samples.restart, continuationSamples: samples.continuation, parametricSamples: samples.parametric,
   },
 }, null, 2));
 

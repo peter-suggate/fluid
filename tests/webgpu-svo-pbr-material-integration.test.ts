@@ -12,7 +12,7 @@ import {
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
-import { candidateBackedDrySceneFixture } from "./svo-dry-scene-test-fixture";
+import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const dryRendererSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
@@ -46,7 +46,7 @@ function structuralSource(
   } as unknown as SparseVoxelRenderSource;
 }
 
-const scene: SparseVoxelDrySceneData = candidateBackedDrySceneFixture;
+const scene: SparseVoxelDrySceneData = svoDrySceneFixture;
 
 test("production PBR publication validation is exact and malformed sources fail over before encoding", () => {
   const valid = structuralSource();
@@ -77,8 +77,8 @@ test("binding 6 consumes the 96-byte producer table while the legacy debug ABI r
 test("published count, revision, direct identity, flags, and material functions are enforced in WGSL", () => {
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
     sizeBytes: 256, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
-    primitiveCandidateWordOffset: 36, nodeMipWordOffset: 40, nodeMipAtlasWordOffset: 44,
-    wideFanoutWordOffset: 48, nodeMipLevelStartWordOffset: 52,
+    nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
+    wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
   });
   assert.match(dryRendererSource, /const visibilityFlags = \(ambientOcclusionEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact \| SVO_DRY_VISIBILITY_FLAGS\.ambientOcclusion : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested/,
     "the visibility lane keeps ambient occlusion, shadows, and requested cone lighting independently switchable");
