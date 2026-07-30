@@ -427,9 +427,11 @@ test("the probe mirrors the production cone step law and calls production helper
   assert.match(probe, /boundedStep>=result\.coneTaps/,
     "the drawn GI cone contains exactly the tap count taken by the shipping integrator");
   // Exact intersection, light sampling, and bias come from the shipping shader.
-  for (const helper of ["primitiveHit", "dryLightSample", "dryBiasedVisibilityRayUnit", "dryNodeMipAt", "traceOpaqueScene", "svoTraceVisibility"]) {
+  for (const helper of ["primitiveHit", "dryLightSample", "dryBiasedVisibilityRayUnit", "dryNodeMipAt", "traceTerrain", "nearestBody", "svoTraceVisibility"]) {
     assert.match(probe, new RegExp(`${helper}\\(`), `${helper} is reused rather than reimplemented`);
   }
+  assert.doesNotMatch(probe, /let opaque=traceOpaqueScene\(ro,rd\)/,
+    "the probe must not run the complete static primary traversal a second time");
 });
 
 test("records go to a storage texture, and the request arrives in a uniform", () => {

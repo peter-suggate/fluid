@@ -24,9 +24,9 @@ import {
  * stack discipline, the same brick DDA, and the same cone step law as the
  * shipping shader, and it calls the shipping shader's own helpers wherever a
  * helper exists (`primitiveHit`, `dryLightSample`, `dryBiasedVisibilityRayUnit`,
- * `dryNodeMipAt`, `traceOpaqueScene`). What it adds is a record per unit of
- * work. Keeping it separate is what lets the production entry points stay
- * byte-identical, which the frame fingerprint depends on.
+ * `dryNodeMipAt`, `traceTerrain`, `nearestBody`). What it adds is a record per
+ * unit of work. Keeping it separate is what lets the production entry points
+ * stay byte-identical, which the frame fingerprint depends on.
  *
  * It runs as a fragment shader over a 1x1 target and guards on the integer
  * pixel coordinate, so exactly one invocation ever writes: helper invocations
@@ -556,9 +556,14 @@ fn probeGlobalIllumination(position:vec3f,normal:vec3f){
   let rd=normalize(forward+right*ndc.x*viewport.x/viewport.y*.72+up*ndc.y*.72);
 
   let staticHit=probeTraceStatic(ro,rd);
-  // The authoritative hit is the shipping composition over every intersector:
-  // octree bricks, the analytic terrain field, and the rigid-body scan.
-  let opaque=traceOpaqueScene(ro,rd);
+  // Compose the authoritative hit from the instrumented static result plus the
+  // same terrain and rigid intersectors as traceDrySolidScene. Calling
+  // traceOpaqueScene here would traverse the complete static SVO a second time
+  // and makes Dawn specialize two independent primary traversers into this one
+  // diagnostic fragment pipeline.
+  var opaque=staticHit;
+  let terrain=traceTerrain(ro,rd);if(terrain.t<opaque.t){opaque=terrain;}
+  let rigid=nearestBody(ro,rd);if(rigid.t<opaque.t){opaque=rigid;}
   var status=${SVO_PIXEL_TRACE_STATUS.miss}u;
   if(opaque.t<DRY_MISS){
     status=${SVO_PIXEL_TRACE_STATUS.hit}u;

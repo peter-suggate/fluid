@@ -26,6 +26,10 @@ struct VertexOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
  * here only compiles shaders, so sharing is both safer and faster.
  */
 let shared: Promise<GPUDevice> | undefined;
+// A device does not keep the Node binding's Dawn Instance wrapper alive. If
+// this local is allowed to collect while Metal compilation is still in flight,
+// AsyncRunner::ProcessEvents dereferences the released InstanceBase mutex.
+let sharedGpu: GPU | undefined;
 
 function device(): Promise<GPUDevice> {
   shared ??= (async () => {
@@ -34,8 +38,8 @@ function device(): Promise<GPUDevice> {
       globals: Record<string, unknown>;
     };
     Object.assign(globalThis, globals);
-    const gpu = create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
-    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+    sharedGpu = create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
+    const adapter = await sharedGpu.requestAdapter({ powerPreference: "high-performance" });
     assert.ok(adapter, "an adapter is required for shader validation");
     return adapter.requestDevice({
       requiredLimits: { maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage },
