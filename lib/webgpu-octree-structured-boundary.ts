@@ -263,6 +263,8 @@ export class WebGPUStructuredBoundaryCoefficients {
       "Resolve canonical free-surface boundary slots", "Resolve canonical solid boundary slots",
       "Commit canonical structured boundary slots",
       "Rebuild symmetric structured boundary rows"] as const;
+    const compactBoundaryPass = typeof process === "undefined"
+      || process.env.FLUID_STRUCTURED_BOUNDARY_COMPACT_PASS !== "0";
     stages.forEach((pipeline, index) => {
       const pass = broker.compute({ label: labels[index] }); pass.setPipeline(pipeline); pass.setBindGroup(0, groups[index]!);
       if (index === 0) pass.dispatchWorkgroups(1);
@@ -270,11 +272,15 @@ export class WebGPUStructuredBoundaryCoefficients {
       // NOTE: stages 1..5 exchange only plain storage, which WebGPU already
       // orders inside a pass, so in principle only the prepare (which writes
       // `this.dispatch` as storage for later indirect reads) needs a boundary.
-      // Collapsing them measured under 1 ms on a 96 ms frame and coincided with
-      // an authoritative resolved-row publication being rejected in-app, so the
-      // fences stay until that is understood. Launch structure is not this
-      // frame's cost -- see docs/OCTREE_PHASE0_BASELINE.md.
-      broker.fence(labels[index]);
+      // An old collapse coincided with an unrelated in-app rejection. The
+      // current exact tripwires and paired 500-step control proved identical
+      // state, while the large lane measured a 7 -> 2 pass reduction and a
+      // repeatable wall saving. Zero retains the historical split as an A/B.
+      // Prepare writes the indirect records and always owns a boundary.
+      // Every later stage exchanges only plain storage at stable bindings;
+      // the compact arm prices their native in-pass ordering under the full
+      // publication and solve tripwires.
+      if (index === 0 || !compactBoundaryPass) broker.fence(labels[index]);
     });
     // Workset publication: count -> block scan -> scatter, all five dispatches
     // in the one pass the serial kernel used to occupy. No fence is needed

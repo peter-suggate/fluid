@@ -214,10 +214,12 @@ export function VisualPanel() {
         </div>
       </ControlGroup>
 
-      <ControlGroup title="Cone tracing" note="wide-mip march geometry">
+      <ControlGroup title="Cone tracing" note="step size · softness · clearance" open>
         <div className="svo-control-grid">
           <RangeControl label="Cone step budget" unit="steps" value={tuning.coneStepBudget} min={1} max={48} step={1} displayDigits={0} onChange={(value) => updateTuning("coneStepBudget", value)} modified={modified("coneStepBudget")} onReset={resetTuning("coneStepBudget")} />
-          <RangeControl label="Shadow aperture" unit="rad" value={tuning.shadowConeAperture} min={0.01} max={0.25} step={0.005} displayDigits={3} onChange={(value) => updateTuning("shadowConeAperture", value)} modified={modified("shadowConeAperture")} onReset={resetTuning("shadowConeAperture")} />
+          <RangeControl label="Shadow cone aperture" unit="rad" value={tuning.shadowConeAperture} min={0.01} max={0.25} step={0.005} displayDigits={3}
+            onChange={(value) => updateTuning("shadowConeAperture", value)} modified={modified("shadowConeAperture")} onReset={resetTuning("shadowConeAperture")}
+            hint="Wider cones take larger march steps and produce softer shadows; narrower cones preserve sharper shadows but require more taps." />
           <RangeControl label="Normal escape" unit="cells" value={tuning.coneNormalEscapeCells} min={0} max={2} step={0.05} displayDigits={2} onChange={(value) => updateTuning("coneNormalEscapeCells", value)} modified={modified("coneNormalEscapeCells")} onReset={resetTuning("coneNormalEscapeCells")} />
           <RangeControl label="Emitter clearance" unit="cells" value={tuning.coneEmitterClearanceCells} min={0} max={8} step={0.25} displayDigits={2} onChange={(value) => updateTuning("coneEmitterClearanceCells", value)} modified={modified("coneEmitterClearanceCells")} onReset={resetTuning("coneEmitterClearanceCells")} />
         </div>

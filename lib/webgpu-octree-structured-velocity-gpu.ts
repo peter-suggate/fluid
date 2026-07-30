@@ -24,7 +24,7 @@ export const OCTREE_STRUCTURED_GPU_WORKSET_HEADER_WORDS = 7;
 /** Candidate-only indirect record for the compact changed-face transfer set. */
 export const OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES = 72;
 const OCTREE_STRUCTURED_GPU_DISPATCH_BYTES =
-  OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES + 12;
+  OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES + 36;
 
 export const OCTREE_STRUCTURED_GPU_ERROR = Object.freeze({
   source: 1 << 0,
@@ -447,7 +447,9 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 9, resource: resource(this.candidateControl) },
     ]));
     pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 12);
-    broker.fence("structured family values scattered");
+    const compactPublicationPass = typeof process !== "undefined"
+      && process.env.FLUID_STRUCTURED_PUBLICATION_COMPACT_PASS === "1";
+    if (!compactPublicationPass) broker.fence("structured family values scattered");
     pass = broker.compute({ label: "Publish direct Section 6.3 rows and worksets" });
     pass.setPipeline(this.section63Pipeline);
     pass.setBindGroup(0, this.group(this.section63Pipeline, [
@@ -508,7 +510,9 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 1, resource: resource(leafHeaders) },
     ]));
     pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 0);
-    broker.fence("structured candidate reconstruction complete");
+    const compactReconstructionPass = typeof process !== "undefined"
+      && process.env.FLUID_STRUCTURED_RECONSTRUCTION_COMPACT_PASS === "1";
+    if (!compactReconstructionPass) broker.fence("structured candidate reconstruction complete");
   }
 
   encodeReadyCommit(broker: PassBroker): void {
@@ -680,6 +684,8 @@ fn rowClass(row:u32)->u32{let m=metrics[row];let transition=m.caseId!=0u;let bou
 // the catalog's 30 they pass the one-dimensional limit near 140,000 rows.
 fn publishBlockDispatch(at:u32,blocks:u32){let x=max(1u,min(65535u,blocks));
  publicationDispatch[at]=x;publicationDispatch[at+1u]=(blocks+x-1u)/x;publicationDispatch[at+2u]=1u;}
+fn publishExactRowDispatch(at:u32,rows:u32){if(rows==0u){publicationDispatch[at]=0u;
+ publicationDispatch[at+1u]=1u;publicationDispatch[at+2u]=1u;return;}publishBlockDispatch(at,rows);}
 fn foldedItem(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
 @compute @workgroup_size(1)fn beginStructuredPublication(){let rows=min(sourceRowDelta[p.deltaControlOffset],p.rowCapacity);let hasAccepted=arrayLength(&acceptedControl)>=6u&&atomicLoad(&acceptedControl[0])==0u&&atomicLoad(&acceptedControl[3])!=0u;atomicStore(&control.flags,p.injectedFailure);atomicStore(&control.firstError,select(INVALID,0u,p.injectedFailure!=0u));control.rowCount=rows;control.slotCount=0u;control.epoch=0u;control.activeBank=select(0u,1u-(atomicLoad(&acceptedControl[4])&1u),hasAccepted);control.projected=select(0u,1u,hasAccepted);atomicStore(&control.entryCount,0u);for(var family=0u;family<7u;family+=1u){control.familyOffsets[family]=0u;}publishBlockDispatch(0u,(rows+63u)/64u);publishBlockDispatch(3u,(rows*p.maxSlots+63u)/64u);}
 
@@ -747,7 +753,7 @@ var<workgroup> finalCounts:array<u32,576>;
   for(var width=1u;width<64u;width<<=1u){for(var cls=0u;cls<9u;cls+=1u){var add=0u;if(lane>=width){add=finalCounts[cls*64u+lane-width];}workgroupBarrier();finalCounts[cls*64u+lane]+=add;}workgroupBarrier();}
   var prefix:array<u32,9>;if(lane>0u){for(var cls=0u;cls<9u;cls+=1u){prefix[cls]=finalCounts[cls*64u+lane-1u];}}
   for(var row=rowFirst;row<rowLast;row+=1u){let cls=rowClass(row);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=row;prefix[cls]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){let cls=familyClass(handle);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=handle;prefix[cls]+=1u;let marker=bitcast<f32>(authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]);if(marker<=.5){let transferRank=prefix[4u];worksets[worksetBankBase()+worksetBase(4u)+7u+transferRank]=handle;control.transferHandles[transferRank]=handle;prefix[4u]+=1u;}}workgroupBarrier();
-  if(lane==0u){let clean=atomicLoad(&control.flags)==0u&&control.slotCount<=p.slotCapacity;let epoch=candidateEpoch();publicationDispatch[18u]=0u;publicationDispatch[19u]=1u;publicationDispatch[20u]=1u;for(var cls=0u;cls<9u;cls+=1u){let count=finalCounts[cls*64u+63u];let groups=select((count+63u)/64u,count,cls==4u);let groupsX=max(1u,min(65535u,groups));let groupsY=(groups+groupsX-1u)/groupsX;let base=worksetBase(cls);worksets[worksetBankBase()+base]=epoch;worksets[worksetBankBase()+base+1u]=count;worksets[worksetBankBase()+base+2u]=select(p.rowCapacity,p.slotCapacity,cls>=4u);worksets[worksetBankBase()+base+3u]=3u;worksets[worksetBankBase()+base+4u]=groupsX;worksets[worksetBankBase()+base+5u]=groupsY;worksets[worksetBankBase()+base+6u]=1u;if(clean&&cls<=4u){let dispatch=6u+3u*cls;publicationDispatch[dispatch]=groupsX;publicationDispatch[dispatch+1u]=groupsY;publicationDispatch[dispatch+2u]=1u;}}if(clean&&epoch!=0u){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}}}
+  if(lane==0u){let clean=atomicLoad(&control.flags)==0u&&control.slotCount<=p.slotCapacity;let epoch=candidateEpoch();publicationDispatch[18u]=0u;publicationDispatch[19u]=1u;publicationDispatch[20u]=1u;publicationDispatch[21u]=0u;publicationDispatch[22u]=1u;publicationDispatch[23u]=1u;publicationDispatch[24u]=0u;publicationDispatch[25u]=1u;publicationDispatch[26u]=1u;for(var cls=0u;cls<9u;cls+=1u){let count=finalCounts[cls*64u+63u];let groups=select((count+63u)/64u,count,cls==4u);let groupsX=max(1u,min(65535u,groups));let groupsY=(groups+groupsX-1u)/groupsX;let base=worksetBase(cls);worksets[worksetBankBase()+base]=epoch;worksets[worksetBankBase()+base+1u]=count;worksets[worksetBankBase()+base+2u]=select(p.rowCapacity,p.slotCapacity,cls>=4u);worksets[worksetBankBase()+base+3u]=3u;worksets[worksetBankBase()+base+4u]=groupsX;worksets[worksetBankBase()+base+5u]=groupsY;worksets[worksetBankBase()+base+6u]=1u;if(clean&&cls<=4u){let dispatch=6u+3u*cls;publicationDispatch[dispatch]=groupsX;publicationDispatch[dispatch+1u]=groupsY;publicationDispatch[dispatch+2u]=1u;}}if(clean){publishExactRowDispatch(21u,finalCounts[63u]+finalCounts[127u]+finalCounts[191u]+finalCounts[255u]);publishExactRowDispatch(24u,finalCounts[127u]+finalCounts[255u]);}if(clean&&epoch!=0u){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}}}
 
 @compute @workgroup_size(64)fn reconstructStructuredCellVelocity(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var canonical=vec3f(0.0);for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];if(handle==INVALID||handle>=control.slotCount){rowVelocities[rowBankBase()+row]=vec4f(0.0);return;}let sample=f32(bitcast<i32>(authority[candidateAuthorityBase()+p.rowSignOffset+at]))*bitcast<f32>(authority[candidateAuthorityBase()+p.valuesOffset+handle]);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];let r=p.reconstructionOffset+3u*global;canonical+=vec3f(bitcast<f32>(dense[r]),bitcast<f32>(dense[r+1u]),bitcast<f32>(dense[r+2u]))*sample;}let hrow=headers[row];rowVelocities[rowBankBase()+row]=vec4f(inverseStructuredTransform(canonical,m.transformAndFlags&63u),1.0);rowGeometry[rowBankBase()+row]=vec4u(hrow.cell,hrow.size,m.caseId,m.transformAndFlags);}
 

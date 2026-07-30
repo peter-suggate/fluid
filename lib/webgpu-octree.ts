@@ -2416,6 +2416,7 @@ export class WebGPUOctreeProjection {
       rowCapacity: this.frontierAllocation.listCapacity,
       controlOffsetWords: this.frontierAllocation.rowDeltaControlOffsetWords,
       newToOldOffsetWords: this.frontierAllocation.rowDeltaNewToOldOffsetWords,
+      oldToNewOffsetWords: this.frontierAllocation.rowDeltaOldToNewOffsetWords,
       // SPGrid caches row-indexed pages. Insertions and retirements therefore
       // require its wider positional influence stream even though remapped
       // power descriptors can carry the same immutable identities exactly.

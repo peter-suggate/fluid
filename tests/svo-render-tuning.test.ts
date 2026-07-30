@@ -64,6 +64,13 @@ test("cone prepass tuning preserves every supported spatial rate", () => {
     "the production moving and settled scales are both prewarmed");
 });
 
+test("shadow cone aperture is exposed in the initially open cone controls", () => {
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /ControlGroup title="Cone tracing"[^>]* open>/);
+  assert.match(panel, /label="Shadow cone aperture"[^>]*value=\{tuning\.shadowConeAperture\}/);
+  assert.match(panel, /updateTuning\("shadowConeAperture", value\)/);
+});
+
 test("temporal history caps are halved consistently across quality presets", () => {
   assert.equal(SVO_RENDER_TUNING_PRESETS.performance.temporalMaximumSamples, 16);
   assert.equal(DEFAULT_SVO_RENDER_TUNING.temporalMaximumSamples, 32);

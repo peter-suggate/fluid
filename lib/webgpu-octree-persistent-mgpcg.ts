@@ -63,6 +63,24 @@ export {
  */
 export const OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD =
   OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY;
+/** Discovery arm for capacity-large/live-small systems. The compact-live-row
+ * kernel sizes hot work from the accepted row count; allocated capacity only
+ * enlarges storage arenas. Keep this bounded to the shipping large lane until
+ * the throughput crossover is measured. */
+export const OCTREE_PERSISTENT_MGPCG_LARGE_ROW_THRESHOLD = 65_536;
+export function octreePersistentMGPCGLargeCapacityRequested(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG_LARGE === "1";
+}
+
+function persistentMGPCGRowThreshold(): number {
+  return octreePersistentMGPCGLargeCapacityRequested()
+    ? OCTREE_PERSISTENT_MGPCG_LARGE_ROW_THRESHOLD
+    : OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD;
+}
 
 /** One 256-lane workgroup, one dispatch. */
 export const OCTREE_PERSISTENT_MGPCG_LANES = 256;
@@ -265,12 +283,13 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     private readonly options: OctreePersistentMGPCGOptions,
   ) {
     const rowCapacity = positiveInteger(source.rowCapacity, "Persistent MGPCG row capacity");
-    if (rowCapacity > OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD) {
+    const rowThreshold = persistentMGPCGRowThreshold();
+    if (rowCapacity > rowThreshold) {
       throw new RangeError(
         "Persistent MGPCG row capacity exceeds the authored single-workgroup threshold",
       );
     }
-    this.maximumRowCapacity = OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD;
+    this.maximumRowCapacity = rowThreshold;
     this.plan = planOctreeSPGridVCycle({
       dimensions: source.dimensions,
       rowCapacity,
@@ -553,7 +572,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   /** Row-count gate the encode site consults; see the threshold's docs. */
   static selects(rowCapacity: number): boolean {
     return Number.isSafeInteger(rowCapacity) && rowCapacity > 0
-      && rowCapacity <= OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD;
+      && rowCapacity <= persistentMGPCGRowThreshold();
   }
 
   get iterationBudget(): number { return this.options.maximumIterations; }

@@ -761,7 +761,11 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       pass.setBindGroup(0, groups.marchAirSupportFacesToFixedPoint!);
       pass.dispatchWorkgroups(3);
     }
-    broker.fence("Section 5 closest-face fixed point published");
+    const compactReconstructionPass = typeof process !== "undefined"
+      && process.env.FLUID_AIR_SUPPORT_RECONSTRUCT_COMPACT_PASS === "1";
+    if (!compactReconstructionPass) {
+      broker.fence("Section 5 closest-face fixed point published");
+    }
     pass = broker.compute({ label: "Reconstruct Section 5 air-support vectors" });
     pass.setPipeline(this.pipelines.reconstructAirSupportVectors!);
     pass.setBindGroup(0, groups.reconstructAirSupportVectors!);

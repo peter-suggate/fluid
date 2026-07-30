@@ -118,7 +118,11 @@ test("the compiled image ABI matches the shader's own constants", () => {
   assert.match(shader, /const CHANNEL_SKIP=0xffff0000u;/);
   assert.match(shader,
     /fn channelCode\(primary:u32,secondary:u32\)->u32\{return CHANNEL_CODE_BASE\|\(secondary<<8u\)\|primary;\}/);
-  assert.match(shader, /fn operatorRowBase\(row:u32\)->u32\{return row\*OPERATOR_ROW_WORDS;\}/);
+  assert.match(shader,
+    /fn operatorRowBase\(row:u32\)->u32\{return\(operatorImageBank\(\)\*capacity\(\)\+row\)\*OPERATOR_ROW_WORDS;\}/);
+  assert.match(shader,
+    /fn persistentImagePredecessor[\s\S]*ROW_DELTA_VALID[\s\S]*encoded&ROW_DELTA_STRUCTURAL[\s\S]*value-1u/,
+    "clean rows must carry the prior generation's exact compiled image by stable identity");
   assert.equal(IMAGE.codeBase, 0xffff_0000);
   assert.equal(IMAGE.skip, 0);
   // A row index can never be mistaken for a code. This is what lets the

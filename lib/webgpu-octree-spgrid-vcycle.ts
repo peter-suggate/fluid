@@ -645,6 +645,7 @@ export interface OctreeSPGridL1DeltaSource {
   readonly rowCapacity: number;
   readonly controlOffsetWords: number;
   readonly newToOldOffsetWords: number;
+  readonly oldToNewOffsetWords: number;
   readonly dirtyRowsOffsetWords: number;
   /** Control word holding the count for dirtyRowsOffsetWords (5=structural,
    * 6=the wider positional/face influence stream). */
@@ -1055,6 +1056,8 @@ type CachedAccurateApply = {
 const ACCURATE_UNION_DISPATCH_OFFSET_BYTES = 4 * 12;
 const ACCURATE_TERM_DISPATCH_OFFSET_BYTES = 5 * 12;
 const ACCURATE_ADJOINT_DISPATCH_OFFSET_BYTES = 6 * 12;
+const ACCURATE_SOURCE_IMAGE_ROW_RECORD_BYTES = 5 * 12;
+const ACCURATE_SOURCE_IMAGE_TRANSITION_RECORD_BYTES = 6 * 12;
 
 /**
  * Paper-style native sparse pyramid with an authoritative brick-rank lookup.
@@ -1117,8 +1120,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateOperatorRows: GPUBuffer;
   private readonly accurateOperatorRowsPipeline: GPUComputePipeline;
   private readonly accurateOperatorRowsGroup: GPUBindGroup;
-  private readonly accurateOperatorRowsDispatch: readonly [number, number, number];
   private readonly accurateImageDeltaParams: GPUBuffer;
+  private readonly accurateImageEpochs: GPUBuffer;
   /**
    * Measurement-only control arm for the direct half of the operator image.
    * The shader retains the exact pre-image chase for the differential harness;
@@ -1139,7 +1142,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateAdjointRows: GPUBuffer;
   private readonly accurateAdjointRowsPipeline: GPUComputePipeline;
   private readonly accurateAdjointRowsGroup: GPUBindGroup;
-  private readonly accurateAdjointRowsDispatch: readonly [number, number, number];
   private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
@@ -1245,10 +1247,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     const deltaCountControlWord = delta.dirtyCountControlWord ?? 5;
     if (!Number.isSafeInteger(delta.rowCapacity) || delta.rowCapacity !== this.plan.rowCapacity
       || (deltaCountControlWord !== 5 && deltaCountControlWord !== 6)
-      || ![delta.controlOffsetWords, delta.newToOldOffsetWords, delta.dirtyRowsOffsetWords]
+      || ![delta.controlOffsetWords, delta.newToOldOffsetWords, delta.oldToNewOffsetWords,
+        delta.dirtyRowsOffsetWords]
         .every((offset) => Number.isSafeInteger(offset) && offset >= 0)
       || delta.newToOldOffsetWords < delta.controlOffsetWords + 16
-      || delta.dirtyRowsOffsetWords < delta.newToOldOffsetWords + delta.rowCapacity
+      || delta.oldToNewOffsetWords < delta.newToOldOffsetWords + delta.rowCapacity
+      || delta.dirtyRowsOffsetWords < delta.oldToNewOffsetWords + delta.rowCapacity
       || delta.rows.size < (delta.dirtyRowsOffsetWords + delta.rowCapacity) * 4
       || (delta.rows.usage & GPUBufferUsage.STORAGE) === 0) {
       throw new RangeError("SPGrid L1 requires the exact compact row-delta producer authority");
@@ -1422,12 +1426,19 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: (this.plan.rowCapacity * 163 + 1) * 4,
       usage: storage,
     });
+    // Exact cross-generation carry remains an opt-in discovery arm. Its
+    // old->new destination remap was slower than rebuilding compact live rows
+    // on the large lane, so production keeps one bank and pays no dormant
+    // double-image memory/cache cost.
+    const persistentImageCarry = typeof process !== "undefined"
+      && process.env.FLUID_SPGRID_PERSISTENT_IMAGES === "1";
+    const imageBanks = persistentImageCarry ? 2 : 1;
     this.accurateOperatorRows = device.createBuffer({
       label: "SPGrid accurate A2 compiled operator rows",
       // One page-status word plus eighteen resolved destination rows per row.
       // At the mini lane's live count this is ~113 KB; it is sized off the
       // planned row capacity so a topology growth cannot outrun it.
-      size: 2 * this.plan.rowCapacity * 19 * 4,
+      size: imageBanks * this.plan.rowCapacity * 19 * 4,
       usage: storage,
     });
     this.accurateAdjointRows = device.createBuffer({
@@ -1436,7 +1447,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       // the image index and the accurateTerms index are the same arithmetic.
       // This is 144 of the 163 words per row accurateTerms already carries, and
       // it is sized off the same planned row capacity for the same reason.
-      size: 2 * this.plan.rowCapacity * ADJOINT_ROW_WORDS * 4,
+      size: imageBanks * this.plan.rowCapacity * ADJOINT_ROW_WORDS * 4,
       usage: storage,
     });
     this.accurateImageDeltaParams = device.createBuffer({
@@ -1446,8 +1457,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     });
     device.queue.writeBuffer(this.accurateImageDeltaParams, 0, new Uint32Array([
       delta.controlOffsetWords, delta.newToOldOffsetWords,
-      delta.dirtyRowsOffsetWords, deltaCountControlWord,
+      delta.oldToNewOffsetWords, deltaCountControlWord,
     ]));
+    this.accurateImageEpochs = device.createBuffer({
+      label: "SPGrid accurate A2 persistent-image epoch stamps",
+      size: 16,
+      usage: GPUBufferUsage.STORAGE,
+    });
     const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
       regularInterior: "applyRegularInterior",
       transitionInterior: "applyTransitionInterior",
@@ -1494,14 +1510,17 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.accurateOperatorRowsPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · compile operator rows", layout: "auto",
       compute: { module: accurateModule, entryPoint: "buildAccurateOperatorRows",
-        constants: { persistentImageCarry: typeof process === "undefined"
-          || process.env.FLUID_SPGRID_PERSISTENT_IMAGES !== "0" ? 1 : 0 } },
+        constants: { persistentImageCarry: persistentImageCarry ? 1 : 0 } },
     });
     this.accurateOperatorRowsGroup = device.createBindGroup({
       label: "SPGrid accurate A2 · operator image bindings",
       layout: this.accurateOperatorRowsPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 6, resource: { buffer: this.topology } },
+        { binding: 3, resource: { buffer: source.control } },
+        { binding: 4, resource: { buffer: "buffer" in source.worksets.regularInterior
+          ? source.worksets.regularInterior.buffer : source.worksets.regularInterior } },
+        { binding: 5, resource: { buffer: this.accurateWorksetLayout } },
         { binding: 7, resource: { buffer: this.state } },
         { binding: 8, resource: { buffer: this.capturedGeometry } },
         { binding: 9, resource: { buffer: source.topologyMetrics } },
@@ -1509,20 +1528,23 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         { binding: 13, resource: { buffer: this.accurateOperatorRows } },
         { binding: 15, resource: { buffer: this.accurateImageDeltaParams } },
         { binding: 16, resource: { buffer: this.source.rowDelta.rows } },
+        { binding: 17, resource: { buffer: this.accurateImageEpochs } },
       ],
     });
-    this.accurateOperatorRowsDispatch = dispatchFor(this.plan.rowCapacity * 19);
     this.accurateAdjointRowsPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · compile fine-adjoint rows", layout: "auto",
       compute: { module: accurateModule, entryPoint: "buildAccurateAdjointRows",
-        constants: { persistentImageCarry: typeof process === "undefined"
-          || process.env.FLUID_SPGRID_PERSISTENT_IMAGES !== "0" ? 1 : 0 } },
+        constants: { persistentImageCarry: persistentImageCarry ? 1 : 0 } },
     });
     this.accurateAdjointRowsGroup = device.createBindGroup({
       label: "SPGrid accurate A2 · fine-adjoint image bindings",
       layout: this.accurateAdjointRowsPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 6, resource: { buffer: this.topology } },
+        { binding: 3, resource: { buffer: source.control } },
+        { binding: 4, resource: { buffer: "buffer" in source.worksets.regularInterior
+          ? source.worksets.regularInterior.buffer : source.worksets.regularInterior } },
+        { binding: 5, resource: { buffer: this.accurateWorksetLayout } },
         { binding: 7, resource: { buffer: this.state } },
         { binding: 8, resource: { buffer: this.capturedGeometry } },
         { binding: 9, resource: { buffer: source.topologyMetrics } },
@@ -1530,9 +1552,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         { binding: 14, resource: { buffer: this.accurateAdjointRows } },
         { binding: 15, resource: { buffer: this.accurateImageDeltaParams } },
         { binding: 16, resource: { buffer: this.source.rowDelta.rows } },
+        { binding: 17, resource: { buffer: this.accurateImageEpochs } },
       ],
     });
-    this.accurateAdjointRowsDispatch = dispatchFor(this.plan.rowCapacity * ADJOINT_ROW_WORDS);
     this.accurateOperator = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
       // One convergence gate, wide direct and fine-adjoint stages, then a
@@ -1597,7 +1619,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       + this.candidateGhosts.size + this.committedInputs.size
       + this.accurateWorksetLayout.size + this.accurateClassDispatch.size
       + this.accurateOperatorRows.size + this.accurateAdjointRows.size
-      + this.accurateImageDeltaParams.size
+      + this.accurateImageDeltaParams.size + this.accurateImageEpochs.size
       + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0);
   }
 
@@ -1696,6 +1718,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       || this.candidateSetupInput.solverControl !== input.solverControl) {
       throw new Error("SPGrid ready commit requires the matching inactive hierarchy candidate");
     }
+    const imageDispatch = this.source.classDispatch;
+    if (!imageDispatch) {
+      throw new Error("SPGrid image compilation requires structured live-row task records");
+    }
+    const imageDispatchBase = this.source.classDispatchOffsetBytes ?? 0;
     const candidate = this.candidateSetupInput;
     const pass = broker.compute({ label: "SPGrid V-cycle · publish validated exact level deltas" });
     this.run(pass, "commitChangedL1", 0, input,
@@ -1718,14 +1745,16 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // through it instead of re-running the chase.
     pass.setPipeline(this.accurateOperatorRowsPipeline);
     pass.setBindGroup(0, this.accurateOperatorRowsGroup);
-    pass.dispatchWorkgroups(...this.accurateOperatorRowsDispatch);
+    pass.dispatchWorkgroupsIndirect(imageDispatch,
+      imageDispatchBase + ACCURATE_SOURCE_IMAGE_ROW_RECORD_BYTES);
     // The fine-adjoint half, on the same inputs and in the same pass, for the
     // same reason. This one carries the larger share: the adjoint stage is
     // entered by every merged-band apply, 165 of them per advance on the mini
     // lane, and each lane used to run two dependent page/brick/rank chases.
     pass.setPipeline(this.accurateAdjointRowsPipeline);
     pass.setBindGroup(0, this.accurateAdjointRowsGroup);
-    pass.dispatchWorkgroups(...this.accurateAdjointRowsDispatch);
+    pass.dispatchWorkgroupsIndirect(imageDispatch,
+      imageDispatchBase + ACCURATE_SOURCE_IMAGE_TRANSITION_RECORD_BYTES);
     // dispatchMeta remains STORAGE-only inside compute passes. Copying its
     // finalized records after the setup boundary gives correction a distinct
     // INDIRECT-only source and avoids a whole-pass storage/indirect conflict.
@@ -2050,7 +2079,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
     this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy(); this.accurateTerms.destroy();
     this.accurateOperatorRows.destroy(); this.accurateAdjointRows.destroy();
-    this.accurateImageDeltaParams.destroy();
+    this.accurateImageDeltaParams.destroy(); this.accurateImageEpochs.destroy();
     for (const buffer of [...this.params, ...this.candidateParams]) buffer.destroy();
   }
 }
@@ -2243,6 +2272,7 @@ fn section63ChannelForDirection(code:u32,direction:vec3i)->u32{
 })();
 
 export const octreeSPGridAccurateOperatorShader = /* wgsl */ `
+override persistentImageCarry:bool=true;
 // The five sixteen-entry tables are the same memoized allocation authority the
 // V-cycle uniform already carries. They replace this shader's four remaining
 // per-address prefix loops; pageSlot alone used to run three of them - two of
@@ -2251,6 +2281,7 @@ struct Layout{workset:vec4u,dimsCapacity:vec4u,hierarchy:vec4u,numerics:vec4f,
  levelCaps:array<vec4u,4>,levelBases:array<vec4u,4>,brickOffsets:array<vec4u,4>,
  pageOffsets:array<vec4u,4>,transferOffsets:array<vec4u,4>}
 struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
+struct ImageDeltaParams{controlOffset:u32,newToOldOffset:u32,oldToNewOffset:u32,dirtyCountWord:u32}
 @group(0) @binding(0) var<storage,read> inputVector:array<f32>;
 @group(0) @binding(1) var<storage,read_write> outputVector:array<f32>;
 @group(0) @binding(2) var<storage,read_write> solverControl:array<atomic<u32>>;
@@ -2282,6 +2313,9 @@ struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 // still a live load from the accepted bank and the term stays one fused
 // multiply-add.
 @group(0) @binding(14) var<storage,read_write> adjointRows:array<u32>;
+@group(0) @binding(15) var<uniform> imageDelta:ImageDeltaParams;
+@group(0) @binding(16) var<storage,read> rowDelta:array<u32>;
+@group(0) @binding(17) var<storage,read_write> imageEpochs:array<atomic<u32>>;
 const INVALID=0xffffffffu;const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
 const KEY=0u;const FLAGS=1u;const OWNER=24u;const STATE_CHANNELS=26u;
 const WORKSET_HEADER_WORDS=7u;const PAGE_RECORD_WORDS=28u;
@@ -2306,9 +2340,17 @@ const CHANNEL_CODE_BASE=0xffff0000u;
 // The stencil contributes nothing and reports nothing, exactly as the inline
 // walk's continue did.
 const CHANNEL_SKIP=0xffff0000u;
+const ROW_DELTA_VALID=0x52444c54u;const ROW_DELTA_STRUCTURAL=0x40000000u;
+var<workgroup> compiledImagePredecessor:u32;
 fn channelCode(primary:u32,secondary:u32)->u32{return CHANNEL_CODE_BASE|(secondary<<8u)|primary;}
-fn operatorRowBase(row:u32)->u32{return row*OPERATOR_ROW_WORDS;}
-fn adjointRowBase(row:u32)->u32{return row*ADJOINT_ROW_WORDS;}
+fn operatorImageBank()->u32{return select(0u,accepted[3]&1u,
+ arrayLength(&operatorRows)>=2u*capacity()*OPERATOR_ROW_WORDS);}
+fn adjointImageBank()->u32{return select(0u,accepted[3]&1u,
+ arrayLength(&adjointRows)>=2u*capacity()*ADJOINT_ROW_WORDS);}
+fn operatorRowBase(row:u32)->u32{return(operatorImageBank()*capacity()+row)*OPERATOR_ROW_WORDS;}
+fn adjointRowBase(row:u32)->u32{return(adjointImageBank()*capacity()+row)*ADJOINT_ROW_WORDS;}
+fn priorOperatorRowBase(row:u32)->u32{return((1u-operatorImageBank())*capacity()+row)*OPERATOR_ROW_WORDS;}
+fn priorAdjointRowBase(row:u32)->u32{return((1u-adjointImageBank())*capacity()+row)*ADJOINT_ROW_WORDS;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn stopped()->bool{return arrayLength(&solverControl)<2u||atomicLoad(&solverControl[0])!=0u||atomicLoad(&solverControl[1])!=0u;}
 fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
@@ -2317,6 +2359,26 @@ fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
   if(claim.exchanged){atomicStore(&solverControl[7],row);}}
 }}
 fn acceptedBank()->u32{return accepted[4]&1u;}
+fn persistentImagePredecessor(row:u32,bank:u32)->u32{
+ if(!persistentImageCarry||arrayLength(&imageEpochs)<2u||bank>1u
+  ||accepted[3]==0u
+  ||atomicLoad(&imageEpochs[1u-bank])!=accepted[3]){return INVALID;}
+ let base=imageDelta.controlOffset;
+ if(base+15u>=arrayLength(&rowDelta)||row>=rowDelta[base]
+  ||rowDelta[base]>capacity()||rowDelta[base+7u]!=accepted[3]
+  ||rowDelta[base+8u]!=ROW_DELTA_VALID
+  ||imageDelta.newToOldOffset>arrayLength(&rowDelta)
+  ||row>=arrayLength(&rowDelta)-imageDelta.newToOldOffset){return INVALID;}
+ let encoded=rowDelta[imageDelta.newToOldOffset+row];let value=encoded&0x3fffffffu;
+ if((encoded&ROW_DELTA_STRUCTURAL)!=0u||value==0u||value-1u>=capacity()){return INVALID;}
+ return value-1u;
+}
+fn remapPersistentDestination(oldRow:u32)->u32{
+ if(imageDelta.oldToNewOffset>arrayLength(&rowDelta)
+  ||oldRow>=arrayLength(&rowDelta)-imageDelta.oldToNewOffset){return INVALID;}
+ let encoded=rowDelta[imageDelta.oldToNewOffset+oldRow];
+ return select(INVALID,encoded-1u,encoded!=0u&&encoded-1u<capacity());
+}
 fn worksetBase(cls:u32)->u32{return acceptedBank()*worksetLayout.y+cls*worksetLayout.x;}
 fn linearLane(wg:vec3u,groups:vec3u,lane:u32)->u32{return((wg.z*groups.y+wg.y)*groups.x+wg.x)*64u+lane;}
 fn linearGroup(wg:vec3u,groups:vec3u)->u32{return(wg.z*groups.y+wg.y)*groups.x+wg.x;}
@@ -2573,10 +2635,13 @@ fn stageDirectTerm(row:u32,channel:u32){let destination=row*162u+channel;
 // never read. The h.y guard is the one addition to applyRow's own metric gate:
 // countTrailingZeros(0) is 32, and a shift of 32 is indeterminate in WGSL, so a
 // row with no size is refused rather than compiled from an indeterminate level.
-fn buildOperatorRow(row:u32,word:u32){
+fn buildOperatorRow(row:u32,word:u32,predecessor:u32){
  let image=operatorRowBase(row);
  if(word>=OPERATOR_ROW_WORDS||image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)
   ||row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)){return;}
+ if(predecessor!=INVALID){let carried=operatorRows[priorOperatorRowBase(predecessor)+word];
+  if(word!=0u&&carried<CHANNEL_CODE_BASE){let remapped=remapPersistentDestination(carried);
+   if(remapped!=INVALID){operatorRows[image+word]=remapped;return;}}}
  let h=geometry[row];let m=metrics[row];
  var status=31u;
  var l=0u;var q=vec3u(0u);var page=INVALID;
@@ -2588,10 +2653,15 @@ fn buildOperatorRow(row:u32,word:u32){
  operatorRows[image+word]=resolveDirectChannel(l,page,q,vec3i(dims(l)),levelBase(l),
   m.transformAndFlags&63u,word-1u);
 }
-@compute @workgroup_size(64) fn buildAccurateOperatorRows(@builtin(workgroup_id) wg:vec3u,
+@compute @workgroup_size(32) fn buildAccurateOperatorRows(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let item=linearLane(wg,groups,lane);
- buildOperatorRow(item/OPERATOR_ROW_WORDS,item%OPERATOR_ROW_WORDS);
+ let item=linearGroup(wg,groups);let row=unionRow(item);
+ if(lane==0u){compiledImagePredecessor=select(INVALID,
+  persistentImagePredecessor(row,operatorImageBank()),row!=INVALID);}
+ workgroupBarrier();
+ if(row!=INVALID&&lane<OPERATOR_ROW_WORDS){buildOperatorRow(row,lane,compiledImagePredecessor);}
+ if(item==0u&&lane==0u&&arrayLength(&imageEpochs)>=2u){
+  atomicStore(&imageEpochs[operatorImageBank()],accepted[3]+1u);}
 }
 
 // E^T, one lane per (row, child, candidate) instead of one lane per (row,
@@ -2644,10 +2714,13 @@ fn stageAdjointCandidate(row:u32,child:u32,candidate:u32){let base=row*162u+18u+
 // same inputs as buildAccurateOperatorRows: one lane per (row, child,
 // candidate), writing the staging layout's own index so image word and staged
 // word never need translating.
-fn buildAdjointRow(row:u32,word:u32){
+fn buildAdjointRow(row:u32,word:u32,predecessor:u32){
  let image=adjointRowBase(row);
  if(word>=ADJOINT_ROW_WORDS||image+ADJOINT_ROW_WORDS>arrayLength(&adjointRows)
   ||row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)){return;}
+ if(predecessor!=INVALID){let carried=adjointRows[priorAdjointRowBase(predecessor)+word];
+  if(carried<CHANNEL_CODE_BASE){let remapped=remapPersistentDestination(carried&ADJOINT_ROW_MASK);
+   if(remapped!=INVALID){adjointRows[image+word]=remapped|(carried&~ADJOINT_ROW_MASK);return;}}}
  // The same liveness test buildOperatorRow uses. An unpublished row carries a
  // zero size word, and countTrailingZeros(0u) is 32, so the level has to be
  // rejected before anything derives a level from it. Such a row is never in a
@@ -2657,8 +2730,13 @@ fn buildAdjointRow(row:u32,word:u32){
 }
 @compute @workgroup_size(64) fn buildAccurateAdjointRows(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let item=linearLane(wg,groups,lane);
- buildAdjointRow(item/ADJOINT_ROW_WORDS,item%ADJOINT_ROW_WORDS);
+ let item=linearGroup(wg,groups);let row=transitionUnionRow(item);
+ if(lane==0u){compiledImagePredecessor=select(INVALID,
+  persistentImagePredecessor(row,adjointImageBank()),row!=INVALID);}
+ workgroupBarrier();
+ if(row!=INVALID){for(var word=lane;word<ADJOINT_ROW_WORDS;word+=64u){buildAdjointRow(row,word,compiledImagePredecessor);}}
+ if(item==0u&&lane==0u&&arrayLength(&imageEpochs)>=2u){
+  atomicStore(&imageEpochs[adjointImageBank()],accepted[3]+1u);}
 }
 // Reference arm of the operator-image differential. This is
 // stageAdjointCandidate's body from before the compiled image: it re-runs both

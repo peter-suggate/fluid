@@ -217,17 +217,73 @@ pipeline fast enough.
 5. Re-derive every winning probe under the normal GPU-resident scheduling and
    generation contracts before shipping it.
 
+## Product follow-through: exact image tasks and phase packing
+
+The first follow-through pass implemented exact A/B compiled SPGrid images.
+The inactive generation maps current rows to predecessors through the compact
+row delta, rejects structurally dirty rows, and remaps every carried destination
+through the exact old-to-new map. Previously unresolved skip/error codes are
+always rebuilt. This fixed the stage-28 stale-edge failure and completed the
+60-step large lane with zero validation errors.
+
+Cross-generation image carry did not pay for its own exact remapping. In a
+matched interleave it measured 38.30/38.63 ms disabled and 38.73/38.80 ms
+enabled after predecessor validation was hoisted to one workgroup lookup.
+Production therefore uses a single image bank; carry and its doubled allocation
+are available only with `FLUID_SPGRID_PERSISTENT_IMAGES=1`.
+
+The useful part was producer-authored image work. Structured row publication
+now emits exact union-row and transition-row dispatch records. Operator-image
+compilation consumes one 32-lane task per accepted row; adjoint compilation
+consumes one 64-lane task per transition row in three fixed waves. This removes
+the old `capacity * 19` and `capacity * 144` launch shapes without adding a
+storage-to-indirect pass boundary.
+
+The large-capacity single-workgroup MGPCG arm was also carried through to a
+correct measurement. With `FLUID_OCTREE_PERSISTENT_MGPCG_LARGE=1`, it reduced
+MGPCG from 1,675 dispatches and 44 passes per advance to one dispatch/pass and
+kept every tripwire clean, but slowed 38.3 to 74.82 ms/advance because one
+workgroup leaves the large GPU idle. It remains an explicit discovery arm;
+capacity-large systems retain the row-parallel solver.
+
+Phase packing produced a shipping win in structured boundary publication.
+Only prepare writes indirect arguments; classify, free-surface resolve,
+solid resolve, commit, rebuild, and workset publication exchange plain storage.
+Keeping the required prepare boundary while packing the later stages reduced
+the stage from seven compute passes to two. Two paired large-lane comparisons
+measured 39.52 -> 38.63 and 38.35 -> 38.08 ms/advance, a mean saving of
+0.58 ms/advance, with zero validation errors. The packed path is default;
+`FLUID_STRUCTURED_BOUNDARY_COMPACT_PASS=0` retains the control.
+
+Both packed and unpacked boundary paths completed the 500-step minimal dam with
+identical late state and identical quality diagnostics, including the same
+817/430/6/1 ceiling-pixel failures. Those failures and the variational-residual
+gate are therefore a pre-existing long-lane baseline issue, not a phase-pack
+divergence. Publication, topology, restriction, redistance, and pressure
+controls remained valid through all 500 advances in both arms.
+
+Three adjacent fence probes were not promoted: removing the structured
+scatter-to-Section-6.3 label boundary regressed by about 0.36 ms/advance,
+packing reconstruction into its consumers was neutral (about 0.06 ms within
+run noise), and packing Section 5 fixed-point publication into reconstruction
+reduced two passes but was wall-neutral (38.325 vs 38.35 ms/advance). Their
+switches remain opt-in measurement arms.
+
 ## Verification
 
-- `npx tsc --noEmit` passes.
-- The 15 discovery and data-flow-manifest tests pass.
-- The 25 xctrace capture, counter-window, extraction, frame-segmentation, and
-  profiler tests pass.
-- Every water shader validates (the subgroup JFA shader remains intentionally
-  delegated to Dawn validation), and 36 of 38 broad Power Liquids structural
-  tests pass.
-- The two remaining broad failures are the pre-existing lexical clean-cut
-  guards for `fallback|legacy|compatibility` in the direct structured authority
-  and octree production sources. This change adds none of those terms to those
-  files.
-- `git diff --check` passes.
+- `npx tsc --noEmit` and `git diff --check` pass.
+- The focused SPGrid, Section 5, structured-boundary,
+  structured-publication, persistent MGPCG, and B4 transport suites pass (93
+  tests in the latest combined run;
+  GPU-only cases are covered separately).
+- Dawn/Metal constructs every production SPGrid setup bind group with
+  validation enabled.
+- The final 60-step production large lane reports 166.1 compute passes per
+  advance (down from 171.1), zero validation errors, 3/10 pressure iterations,
+  and complete fine-band residency.
+- The 500-step minimal gate advances cleanly but fails pre-existing late
+  variational/ceiling quality thresholds in both packed and unpacked controls.
+- The exact UI two-step gate advances and renders cleanly but fails the same
+  pre-existing descriptor/topology diagnostic counts (32/1,633) with boundary
+  packing and persistent carry explicitly disabled. These unresolved baseline
+  gates prevent claiming full acceptance-suite green.

@@ -49,7 +49,7 @@ export const FLUID_FINE_TRANSPORT_B4_ADDRESSING_ENV = "FLUID_FINE_TRANSPORT_B4_A
 /** Exact B4/64-sample integer specialization. The generic arithmetic remains
  * selectable as a differential oracle and for every non-B4 geometry. */
 export function fineTransportB4AddressingEnabled(
-  plan: Pick<WebGPUFineLevelSetBrickSource["plan"], "brickResolution" | "samplesPerBrick">,
+  plan: Readonly<{ brickResolution: number; samplesPerBrick: number }>,
   environment: Record<string, string | undefined> | undefined
     = typeof process !== "undefined" ? process.env : undefined,
 ): boolean {

@@ -37,12 +37,14 @@ const spgridDelta = (
 ) => {
   const controlOffsetWords = 0;
   const newToOldOffsetWords = 16;
-  const dirtyRowsOffsetWords = newToOldOffsetWords + rowCapacity;
+  const oldToNewOffsetWords = newToOldOffsetWords + rowCapacity;
+  const dirtyRowsOffsetWords = oldToNewOffsetWords + rowCapacity;
   return {
     rows: buffer(4 * (dirtyRowsOffsetWords + rowCapacity)),
     rowCapacity,
     controlOffsetWords,
     newToOldOffsetWords,
+    oldToNewOffsetWords,
     dirtyRowsOffsetWords,
   };
 };
@@ -72,6 +74,8 @@ const spgridSource = (
     invalidRows: binding,
     control: buffer(64, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
     rowDelta: spgridDelta(buffer, rowCapacity),
+    classDispatch: buffer(108, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT),
+    classDispatchOffsetBytes: 24,
   };
 };
 
@@ -1176,8 +1180,11 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.match(readyCommit,
     /commitChangedL1[\s\S]*finalizeL1CapturePublication[\s\S]*commitCandidateLevels[\s\S]*finalizeLifecycle[\s\S]*publishCommittedInputs/,
     "accepted L1 geometry and dependent levels publish only after the coupled ready gate");
-  assert.doesNotMatch(`${candidateSetup}\n${readyCommit}`, /dispatchWorkgroupsIndirect|setupIndirect|prepareSetup/,
+  assert.doesNotMatch(candidateSetup, /dispatchWorkgroupsIndirect|setupIndirect|prepareSetup/,
     "candidate publication must not retain redundant per-level indirect commands");
+  assert.match(readyCommit,
+    /source\.classDispatch[\s\S]*dispatchWorkgroupsIndirect[\s\S]*ACCURATE_SOURCE_IMAGE_TRANSITION_RECORD_BYTES/,
+    "accepted image compilation consumes exact GPU-authored live-row records");
   assert.match(readyCommit, /this\.run\(pass,\s*"finalizeLifecycle"/);
 });
 
