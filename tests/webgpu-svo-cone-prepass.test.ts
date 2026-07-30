@@ -33,7 +33,12 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     assert.match(reduced, /@group\(1\) @binding\(1\) var dryPrepassGeometryTexture:texture_2d<f32>/);
     assert.match(reduced, /@group\(1\) @binding\(2\) var dryPrepassIdentityTexture:texture_2d<u32>/);
     assert.match(reduced, /@group\(1\) @binding\(3\) var dryPrepassRadianceTexture:texture_2d<f32>/);
-    assert.match(reduced, /@fragment fn dryPrepassMain/);
+    assert.match(reduced, /@fragment fn dryPrepassGeometryMain/,
+      "the reduced primary trace must be isolated from cone-march register pressure");
+    assert.match(reduced, /@fragment fn dryPrepassVisibilityMain/,
+      "the cone marcher must consume the freshly traced reduced geometry in its own phase");
+    assert.match(reduced, /dryPrepassVisibilityMain[^]*textureLoad\(dryPrepassGeometryTexture,coordinate,0\)[^]*textureLoad\(dryPrepassIdentityTexture,coordinate,0\)[^]*return dryPrepassTraceVisibility/,
+      "the cone phase reconstructs the dynamic hit instead of tracing primary visibility again");
     assert.match(reduced, /@fragment fn dryPrepassShadeMain/,
       "opaque shading must have a separate reduced-rate entry point so it cannot inflate cone-pass register pressure");
     assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true })),
@@ -94,6 +99,14 @@ test("automatic relight composition contains the isolated primary and lighting e
   assert.match(automatic, /@fragment fn dryLightingMain/);
   assert.match(automatic, /@group\(2\) @binding\(0\) var drySplitGeometryWrite/);
   assert.match(automatic, /@group\(2\) @binding\(1\) var drySplitGeometryRead/);
+  assert.match(automatic, /@compute @workgroup_size\(8,8\) fn dryPrepassCoherentMain/,
+    "2x2 relighting must consume coherent current-frame primary hits without tracing them again");
+  assert.match(automatic, /atomicAdd\(&dryPrepassBoundaryQueue\.count,1u\)/,
+    "ambiguous 2x2 texels must compact into a boundary queue instead of diverging through primary traversal");
+  assert.match(automatic, /@compute @workgroup_size\(64\) fn dryPrepassBoundaryMain[^]*traceOpaqueScene/,
+    "only compacted boundary texels may retrace the exact 2x2 centre ray");
+  assert.match(rendererSource, /if \(usePrepass && !useSplit\)[^]*if \(useSplit\)[^]*Sparse voxel compact cone visibility[^]*conePrepassCoherentPipeline[^]*conePrepassBoundaryPipeline/,
+    "the relight path must run full-resolution primary visibility before the two compact cone kernels");
 });
 
 test("prepass target contract and sizing", () => {

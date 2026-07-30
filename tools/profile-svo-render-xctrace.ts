@@ -13,7 +13,7 @@
  *     [--cone-scale=0.5|0.25|0.125] [--warmups=4]
  *     [--radiance-reconstruction=nearest|gated-linear|joint-bilateral|wide-relight|full-res-relight]
  *     [--counter-seconds=3] [--counter-reduction=100] [--out=DIR]
- *     [--reuse-trace] [--reuse-tables]
+ *     [--timing-only] [--reuse-trace] [--reuse-tables]
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -83,6 +83,7 @@ if (!Number.isSafeInteger(warmups) || warmups < 1) {
 const keepTables = process.argv.includes("--keep-tables");
 const reuseTrace = process.argv.includes("--reuse-trace");
 const reuseTables = process.argv.includes("--reuse-tables");
+const timingOnly = process.argv.includes("--timing-only");
 const outputDirectory = resolve(root, flag("out") ?? "artifacts/xctrace-hose-render-utilization");
 const tracePath = resolve(outputDirectory, "svo-render.trace");
 const counterTimeLimit = Number.isInteger(counterSeconds)
@@ -186,7 +187,7 @@ const exportTables = async (): Promise<{
 }> => {
   const tables: Record<string, string> = {};
   let policy: CounterExtractionPolicy | undefined;
-  for (const table of TABLES) {
+  for (const table of TABLES.filter((candidate) => !timingOnly || !candidate.file.startsWith("counter-"))) {
     const ndjson = resolve(outputDirectory, `${table.file}.ndjson`);
     const exportArguments = ["xcrun", "xctrace", "export", "--input", tracePath,
       "--xpath", `/trace-toc/run[@number="1"]/data/table[@schema="${table.schema}"]`];
@@ -239,7 +240,11 @@ const exportTables = async (): Promise<{
       }, null, 2)}\n`);
     }
   }
-  if (!policy) throw new Error("GPU counter metadata was not exported");
+  if (!policy) {
+    if (!timingOnly) throw new Error("GPU counter metadata was not exported");
+    policy = { targetReduction: 1, sourceCounterCount: 0, retainedCounterCount: 0,
+      timestampStride: 1, retainedCounterIds: new Set<string>() };
+  }
   return { tables, policy };
 };
 
@@ -248,17 +253,25 @@ const assertRenderReport = (report: FrameReport): void => {
   if (report.frames.count < 1 || report.frames.captures.length < 1) {
     failures.push("no complete render frames were reduced");
   }
-  if (report.counters.meanOccupancy === undefined || report.counters.meanAlu === undefined
-    || report.counters.exclusiveCoverage <= 0) {
+  if (!timingOnly && (report.counters.meanOccupancy === undefined || report.counters.meanAlu === undefined
+    || report.counters.exclusiveCoverage <= 0)) {
     failures.push("occupancy/ALU counters did not cover the render window");
   }
-  const expectedLabels = shading === "split"
-    ? ["Sparse voxel cone-lighting prepass", "Sparse voxel primary visibility", "Sparse voxel deferred dry lighting"]
+  const splitRelight = (shading === "split" || shading === "auto-relight")
+    && (radianceReconstruction === "wide-relight" || radianceReconstruction === "full-res-relight");
+  const expectedLabels = splitRelight
+    ? ["Sparse voxel primary visibility", "Sparse voxel deferred dry lighting"]
     : ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"];
   for (const label of expectedLabels) {
     const pass = report.passes.find((candidate) => candidate.label === label);
-    if (!pass || pass.counterSamples === 0 || pass.occupancy === undefined || pass.alu === undefined) {
+    if (!pass || (!timingOnly && (pass.counterSamples === 0 || pass.occupancy === undefined || pass.alu === undefined))) {
       failures.push(`${label} has no attributed occupancy/ALU samples`);
+    }
+  }
+  if (splitRelight) {
+    const compactConeLabel = "Sparse voxel compact cone visibility";
+    if (!report.passes.some((candidate) => candidate.label === compactConeLabel)) {
+      failures.push(`${compactConeLabel} has no attributed GPU interval`);
     }
   }
   if (failures.length > 0) throw new Error(`render xctrace report rejected: ${failures.join("; ")}`);
@@ -304,7 +317,8 @@ const writeReport = async (
     lane: "svo-render",
     workUnit: "frame",
     title: `Hose tank SVO rendering — ${variant} GPU frame profile`,
-    frameStartLabels: ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene", "Sparse voxel primary visibility"],
+    frameStartLabels: ["Sparse voxel primary visibility", "Sparse voxel cone-lighting prepass",
+      "Sparse voxel compact cone visibility", "Sparse voxel dry scene"],
     occupancyCounterName: "Fragment Occupancy",
     environment: {
       FLUID_SCENE: scene,
@@ -340,14 +354,15 @@ const main = async (): Promise<void> => {
     : undefined;
   if (reuseTables) {
     console.log("rebuilding report from retained render tables...");
-    const tables = Object.fromEntries(TABLES.map((table) => {
+    const tables = Object.fromEntries(TABLES.filter((candidate) => !timingOnly || !candidate.file.startsWith("counter-")).map((table) => {
       const path = resolve(outputDirectory, `${table.file}.ndjson`);
       if (!existsSync(path)) throw new Error(`--reuse-tables requires ${path}`);
       return [table.file, path];
     }));
-    const extractionPath = resolve(outputDirectory, "counter-extraction.json");
-    const extraction = JSON.parse(readFileSync(extractionPath, "utf8")) as Pick<
-      CounterExtractionPolicy, "sourceCounterCount" | "retainedCounterCount" | "timestampStride">;
+    const extraction = timingOnly
+      ? { sourceCounterCount: 0, retainedCounterCount: 0, timestampStride: 1 }
+      : JSON.parse(readFileSync(resolve(outputDirectory, "counter-extraction.json"), "utf8")) as Pick<
+        CounterExtractionPolicy, "sourceCounterCount" | "retainedCounterCount" | "timestampStride">;
     const result = workerResultFromLog();
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, extraction, result, tracedPid);
