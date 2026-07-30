@@ -65,6 +65,15 @@ export interface GPUDataFlowPassRecord {
   readonly paths: readonly GPUDataFlowDispatchPath[];
 }
 
+export interface GPUDataFlowSequenceRecord {
+  readonly ordinal: number;
+  readonly label: string;
+  readonly pipeline: string;
+  readonly entryPoint: string;
+  readonly readBufferIds: readonly number[];
+  readonly writtenBufferIds: readonly number[];
+}
+
 export interface GPUDataFlowManifest {
   readonly schemaVersion: 1;
   readonly measuredAdvances: number;
@@ -74,6 +83,9 @@ export interface GPUDataFlowManifest {
   };
   readonly buffers: readonly GPUDataFlowBufferRecord[];
   readonly passes: readonly GPUDataFlowPassRecord[];
+  /** Command-order dispatch stream retained for dependency-DAG reconstruction.
+   * Timestamp duration remains owned by the aggregated pass record. */
+  readonly sequence: readonly GPUDataFlowSequenceRecord[];
 }
 
 interface ShaderBinding {
@@ -444,6 +456,23 @@ export class GPUDataFlowAudit {
     }).sort((left, right) =>
       (right.totalPerAdvance_ms ?? 0) - (left.totalPerAdvance_ms ?? 0)
       || right.dispatches - left.dispatches || left.label.localeCompare(right.label));
+    const sequence = this.samples.map((sample, ordinal): GPUDataFlowSequenceRecord => {
+      const readBufferIds = new Set<number>(), writtenBufferIds = new Set<number>();
+      for (const binding of sample.bindings) {
+        if (binding.access === "read" || binding.access === "uniform") {
+          readBufferIds.add(binding.bufferId);
+        } else if (binding.access === "read_write") {
+          readBufferIds.add(binding.bufferId);
+          writtenBufferIds.add(binding.bufferId);
+        }
+      }
+      return {
+        ordinal, label: sample.passLabel, pipeline: sample.pipeline,
+        entryPoint: sample.entryPoint,
+        readBufferIds: [...readBufferIds].sort((a, b) => a - b),
+        writtenBufferIds: [...writtenBufferIds].sort((a, b) => a - b),
+      };
+    });
     return {
       schemaVersion: 1,
       measuredAdvances,
@@ -453,6 +482,7 @@ export class GPUDataFlowAudit {
       },
       buffers: catalog,
       passes: records,
+      sequence,
     };
   }
 }

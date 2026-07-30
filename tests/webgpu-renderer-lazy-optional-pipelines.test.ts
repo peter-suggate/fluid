@@ -67,11 +67,17 @@ test("dry SVO startup reports both expensive pipeline compilations", () => {
   assert.match(rendererSource, /label: "Submitting first sparse garden frame"[^]*completed: 3, total: 4/);
 });
 
-test("production enables the traversal split only for reduced relighting", () => {
-  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"auto-relight"\)/,
-    "the production renderer must opt into the measured relight-only split policy");
+test("production enables exact static-primary coherence only for safe scene states", () => {
+  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"canonical-parametric"[^]*"split", 0, "static-primary"\)/,
+    "the production renderer must opt into the measured split/coherence policy");
+  assert.match(rendererSource, /const primaryCoherenceKey = !sceneRuntime\.fluidSolver \|\| !this\.simulationRunning[^]*shadowStabilityKey[^]*sceneEpoch/,
+    "static worlds and paused solvers must use the complete caller-owned key");
+  assert.match(rendererSource, /encode\(replacementEncoder, target, temporalFrame, primaryCoherenceKey, tracePhase\)/,
+    "the safe key must reach the renderer cache; running fluid scenes pass undefined");
+  assert.match(drySceneSource, /this\.rayCoherenceMode, useSplit && usePrepass, primaryFrameKey/,
+    "coherence must fail closed until a reduced prepass makes primary output parity-invariant");
   assert.match(drySceneSource, /const relightSplit = usePrepass[^]*coneRadianceReconstruction === "wide-relight"[^]*coneRadianceReconstruction === "full-res-relight"[^]*this\.shadingPath === "auto-relight" && relightSplit/,
-    "automatic splitting must remain gated by an active reduced prepass and a relight reconstruction mode");
+    "the automatic diagnostic mode must remain available");
   assert.match(drySceneSource, /this\.shadingPath === "auto-relight" && relight && this\.coneScale !== 1[^]*ensureConeLightingPrepass/,
     "selecting relight must asynchronously compile its split variant while the inline path remains available");
 });

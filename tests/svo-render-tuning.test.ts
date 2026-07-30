@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   DEFAULT_SVO_RENDER_TUNING,
   SVO_CONE_RADIANCE_RECONSTRUCTION_CODES,
+  SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
   SVO_RENDER_TUNING_PRESETS,
   normalizeSvoRenderTuning,
@@ -26,7 +27,28 @@ test("primary leaf tuning reaches the audited shader ceiling without recompilati
     new RegExp(`leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget`));
 });
 
+test("environment bricks default one refinement level deeper than the previous plan", () => {
+  assert.equal(SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM, 1);
+  assert.equal(DEFAULT_SVO_RENDER_TUNING.environmentBrickRefinementLevels, 1);
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    environmentBrickRefinementLevels: 0,
+  }).environmentBrickRefinementLevels, 0);
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    environmentBrickRefinementLevels: 2,
+  }).environmentBrickRefinementLevels, 1);
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /Environment brick refinement/);
+});
+
 test("cone prepass tuning preserves every supported spatial rate", () => {
+  assert.equal(DEFAULT_SVO_RENDER_TUNING.coneLightingScale, 0.5,
+    "balanced production uses the accepted 2x2 visibility tier");
+  assert.equal(SVO_RENDER_TUNING_PRESETS.performance.coneLightingScale, 0.25,
+    "the 4x4 relight tier remains an explicit performance choice");
+  assert.equal(SVO_RENDER_TUNING_PRESETS.quality.coneLightingScale, 0.5,
+    "quality retains the accepted 2x2 visibility error bar");
   for (const coneLightingScale of [1, 0.5, 0.25, 0.125] as const) {
     assert.equal(normalizeSvoRenderTuning({
       ...DEFAULT_SVO_RENDER_TUNING,
@@ -35,6 +57,17 @@ test("cone prepass tuning preserves every supported spatial rate", () => {
   }
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   for (const label of ["FULL", "2×2", "4×4", "8×8"]) assert.ok(panel.includes(`label: "${label}"`));
+  const renderer = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
+  assert.match(renderer, /conePipelineBundles = new Map<SvoConeLightingScale/,
+    "scale-specific pipelines remain resident instead of replacing one global variant");
+  assert.match(renderer, /Promise\.all\(\(\[0\.25, 0\.5\] as const\)/,
+    "the production moving and settled scales are both prewarmed");
+});
+
+test("temporal history caps are halved consistently across quality presets", () => {
+  assert.equal(SVO_RENDER_TUNING_PRESETS.performance.temporalMaximumSamples, 16);
+  assert.equal(DEFAULT_SVO_RENDER_TUNING.temporalMaximumSamples, 32);
+  assert.equal(SVO_RENDER_TUNING_PRESETS.quality.temporalMaximumSamples, 48);
 });
 
 test("radiance reconstruction modes normalize and remain available for live visual A/B", () => {

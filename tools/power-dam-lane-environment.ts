@@ -8,7 +8,7 @@
  * number the benchmark gates on.
  */
 
-export type PowerDamRuntimeLane = "mini" | "large" | "ui" | "moving-interface" | "ocean" | "ceiling-drop";
+export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop";
 
 export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<string, string>> = {
   mini: {
@@ -21,6 +21,16 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     FLUID_SCENE: "large-power-dam-break", FLUID_TARGET_S: "2",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500",
     FLUID_EXPECT_GRID: "64,20,64", FLUID_MAXIMUM_LEAF_SIZE: "16",
+    FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
+  },
+  hydrostatic: {
+    // Match the large churn lane's timestep, fine factor and authored band.
+    // The scene itself is the Section 4/5 still-water correctness oracle. Its
+    // intentional quarter-cell cut prevents a grid-aligned surface from hiding
+    // interface work or hydrostatic imbalance.
+    FLUID_SCENE: "hydrostatic-power-large-offset", FLUID_TARGET_S: "0.96",
+    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "240", FLUID_EXPECT_EXACT_STEPS: "240",
+    FLUID_EXPECT_GRID: "32,24,16", FLUID_MAXIMUM_LEAF_SIZE: "16",
     FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
   "moving-interface": {
@@ -73,6 +83,30 @@ export const powerDamLaneWithSteps = (
   return {
     ...base,
     FLUID_TARGET_S: String(steps * dt),
+    FLUID_ORACLE_STEPS: String(steps),
+    FLUID_EXPECT_EXACT_STEPS: String(steps),
+  };
+};
+
+/** Rewrite a lane timestep at fixed simulated time. This is the authored
+ * X-7 dt-elasticity contract: halving dt doubles advances without changing the
+ * physical interval being measured. */
+export const powerDamLaneWithDt = (
+  lane: PowerDamRuntimeLane,
+  dt: number,
+  target_s = Number(POWER_DAM_LANE_ENVIRONMENT[lane].FLUID_TARGET_S),
+): Record<string, string> => {
+  if (!Number.isFinite(dt) || dt <= 0 || !Number.isFinite(target_s) || target_s <= 0) {
+    throw new Error(`dt and target time must be positive and finite; received dt=${dt}, target=${target_s}`);
+  }
+  const steps = Math.round(target_s / dt);
+  if (steps < 1 || Math.abs(steps * dt - target_s) > 1e-9 * Math.max(1, target_s)) {
+    throw new Error(`target time ${target_s} must be an integer multiple of dt ${dt}`);
+  }
+  return {
+    ...POWER_DAM_LANE_ENVIRONMENT[lane],
+    FLUID_TARGET_S: String(target_s),
+    FLUID_MAX_DT: String(dt),
     FLUID_ORACLE_STEPS: String(steps),
     FLUID_EXPECT_EXACT_STEPS: String(steps),
   };

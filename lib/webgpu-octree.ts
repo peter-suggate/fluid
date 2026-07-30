@@ -100,6 +100,8 @@ import {
   WebGPUFineLevelSetLeafSeeds,
   WebGPUFineLevelSetTopology,
 } from "./webgpu-octree-fine-levelset-topology";
+import { WebGPUFineRedundancyCensus, WebGPURowRedundancyCensus,
+  powerRedundancyCensusEnabled } from "./webgpu-power-redundancy-census";
 
 type OctreePipelineVariants = { full: GPUComputePipeline; delta: GPUComputePipeline };
 
@@ -246,13 +248,55 @@ interface OctreePipelineCacheEntry {
 const octreePipelineCache = new WeakMap<GPUDevice, Map<string, OctreePipelineCacheEntry>>();
 
 /** Diagnostic-only census of the exact per-generation row-delta control header.
- * Off unless `FLUID_OCTREE_ROW_DELTA_CENSUS=1`; it adds one 64-byte copy and a
+ * Off unless `FLUID_OCTREE_ROW_DELTA_CENSUS=1`; it adds bounded header copies and a
  * post-submit map per candidate and must never be enabled while benchmarking. */
 const octreeRowDeltaCensusEnabled = (): boolean =>
   typeof process !== "undefined" && process.env?.FLUID_OCTREE_ROW_DELTA_CENSUS === "1";
 
+export const FLUID_DIRTY_ORACLE_ENV = "FLUID_DIRTY_ORACLE";
+/** Deliberately quality-invalid discovery arm. It prices only membership
+ * change plus the existing row one-ring; never use this as product authority. */
+export function octreeDirtyOracleMembershipRequested(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.[FLUID_DIRTY_ORACLE_ENV] === "membership";
+}
+
+export const FLUID_POWER_STRUCTURAL_DELTA_ENV = "FLUID_POWER_STRUCTURAL_DELTA";
+/** Exact experimental arm: descriptors consume only changes to the anchor and
+ * the paper's 18 owner probes. Broad remains the production default until the
+ * compact list repays its classification cost in an interleaved wall test. */
+export function octreePowerStructuralDeltaRequested(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.[FLUID_POWER_STRUCTURAL_DELTA_ENV] === "1";
+}
+
+export const FLUID_FREEZE_TOPOLOGY_AFTER_ENV = "FLUID_FREEZE_TOPOLOGY_AFTER";
+/** Probe-only accepted-generation threshold. Undefined is the byte-identical
+ * product path; malformed values fail loudly instead of silently freezing. */
+export function octreeFreezeTopologyAfter(
+  environment?: Readonly<Record<string, string | undefined>>,
+): number | undefined {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const raw = resolved?.[FLUID_FREEZE_TOPOLOGY_AFTER_ENV];
+  if (raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${FLUID_FREEZE_TOPOLOGY_AFTER_ENV} must be a positive integer`);
+  }
+  return value;
+}
+
 export interface OctreeProjectionOptions {
   maximumLeafSize?: 2 | 4 | 8 | 16 | 32;
+  /** Renderer-owned refinement of authored-environment bricks. */
+  environmentBrickRefinementLevels?: number;
   /** 0 = finest cells everywhere; 1 = full distance-graded coarsening. */
   adaptivity?: number;
   /** Pure-phase cells farther from liquid/solid interfaces than this finest-cell band may remain coarse. */
@@ -320,6 +364,9 @@ interface PendingFinePublication {
   readonly redistanceBandCells: number;
   readonly maximumDisplacementFineCells: number;
   readonly warmClosestPoints: boolean;
+  /** X-4 ablation: transport/redistance the accepted page set in place and do
+   * not run a topology publication, restriction, summary, or coarse repair. */
+  readonly frozenTopology?: true;
 }
 
 /** Read at encode time so benchmark processes can select attribution without
@@ -1140,6 +1187,8 @@ export class WebGPUOctreeProjection {
   private readonly globalFineSeeds?: WebGPUFineLevelSetLeafSeeds;
   private globalFineTopologyAB?: WebGPUFineLevelSetTopology;
   private globalFineTopologyBA?: WebGPUFineLevelSetTopology;
+  private redundancyCensus?: WebGPUFineRedundancyCensus;
+  private rowRedundancyCensus?: WebGPURowRedundancyCensus;
   private globalFineRedistanceA?: WebGPUFineLevelSetRedistance;
   private globalFineRedistanceB?: WebGPUFineLevelSetRedistance;
   private globalFineVolumeA?: WebGPUFineLevelSetVolumeCorrection;
@@ -1171,8 +1220,10 @@ export class WebGPUOctreeProjection {
   private rowDeltaCensusSamples = 0;
   private rowDeltaCensusMembershipChanged = 0;
   private rowDeltaCensusIdenticalRows = 0;
+  private rowDeltaCensusDirtyEqualsAffected = 0;
   private readonly rowDeltaCensusTotals = new Float64Array(9);
   private readonly rowDeltaCensusMaxima = new Uint32Array(9);
+  private readonly rowDeltaPromotionTotals = new Float64Array(6);
   /** Once the t=0 authority is retired, scalar scene revisions must never
    * re-arm the analytic selector: `writeParams` runs on every
    * `applySceneUniforms`, and a re-armed selector silently rebuilds all
@@ -1460,6 +1511,7 @@ export class WebGPUOctreeProjection {
     const sparseWorldBrickSize = scene.voxelDomain.brickSize_cells;
     if (allocateSparseWorld) this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], {
       brickSize: sparseWorldBrickSize,
+      environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
       haloCells: topologyHaloCells,
       // Canonical faces/pages own the simulation fields. Retain only the wet
       // bulk worklist needed by owner-page lifecycle.
@@ -2039,6 +2091,8 @@ export class WebGPUOctreeProjection {
       sparseTopologyTileStates: this.topologyResidency.allocationPlan.sparseKeyPools ? 1 : 0,
       denseSolidField: this.hasDenseSolidCells ? 1 : 0,
       topologyCandidateView: candidateTopology ? 1 : 0,
+      dirtyOracleMembership: octreeDirtyOracleMembershipRequested() ? 1 : 0,
+      structuralDescriptorDelta: octreePowerStructuralDeltaRequested() ? 1 : 0,
     };
   }
   private diagnosticDescriptor(): GPUComputePipelineDescriptor {
@@ -2362,11 +2416,19 @@ export class WebGPUOctreeProjection {
       rowCapacity: this.frontierAllocation.listCapacity,
       controlOffsetWords: this.frontierAllocation.rowDeltaControlOffsetWords,
       newToOldOffsetWords: this.frontierAllocation.rowDeltaNewToOldOffsetWords,
-      dirtyRowsOffsetWords: this.frontierAllocation.rowDeltaDirtyRowsOffsetWords };
+      // SPGrid caches row-indexed pages. Insertions and retirements therefore
+      // require its wider positional influence stream even though remapped
+      // power descriptors can carry the same immutable identities exactly.
+      dirtyRowsOffsetWords: this.frontierAllocation.rowDeltaAffectedRowsOffsetWords,
+      dirtyCountControlWord: 6 as const };
     this.pressureHistoryRemap = new WebGPUOctreePressureHistoryRemap(this.device, {
       rowDelta: rowDelta.rows,
       rowDeltaControlOffsetWords: rowDelta.controlOffsetWords,
       rowDeltaNewToOldOffsetWords: rowDelta.newToOldOffsetWords,
+      // Record two is the exact current-row schedule for both fresh and
+      // identity-reused frontier publications.
+      rowDispatch: this.topologyCandidateDispatch,
+      rowDispatchOffsetBytes: 24,
       currentCandidatePressure: this.candidatePressure,
       candidateHistory: this.candidatePressureHistory,
       rowCapacity,
@@ -2491,6 +2553,13 @@ export class WebGPUOctreeProjection {
       this.globalFineTopologyBA = new WebGPUFineLevelSetTopology(
         this.device, this.globalFineSourceB, this.globalFineSourceA, compactCoarse.wgsl(9),
       );
+      if (powerRedundancyCensusEnabled()) {
+        this.redundancyCensus = new WebGPUFineRedundancyCensus(
+          this.device, this.globalFineSourceA, this.globalFineSourceB,
+          this.globalFineSourceA.plan.maximumResidentBricks,
+          this.globalFineSourceA.plan.samplesPerBrick,
+        );
+      }
       const changedKeysOffsetWords = this.globalFineTopologyAB.pageDeltaLayout.changedKeysOffsetWords;
       if (changedKeysOffsetWords !== this.globalFineTopologyBA.pageDeltaLayout.changedKeysOffsetWords) {
         throw new Error("Fine topology A/B page-delta layouts disagree");
@@ -2582,6 +2651,30 @@ export class WebGPUOctreeProjection {
           this.globalFineSourceA.plan.fineFactor).transportBandFineCells,
       } : {}),
     });
+    if (powerRedundancyCensusEnabled()) {
+      const packedRowBankWords = rowCapacity * 4;
+      this.rowRedundancyCensus = new WebGPURowRedundancyCensus(
+        this.device, this.leafFrontier, rowCapacity,
+        this.frontierAllocation.rowDeltaControlOffsetWords,
+        this.frontierAllocation.rowDeltaNewToOldOffsetWords, [
+          { name: "power-descriptors", accepted: this.powerDescriptor.descriptors,
+            candidate: this.powerDescriptor.candidateDescriptors, wordsPerRow: 1 },
+          { name: "power-topology-metrics", accepted: this.powerTopology.metrics,
+            candidate: this.powerTopology.candidateMetrics, wordsPerRow: 4 },
+          { name: "structured-cell-velocities", accepted: structured.rowVelocitiesA,
+            candidate: structured.rowVelocitiesA, wordsPerRow: 4,
+            acceptedBankControl: structured.control, candidateBankControl: structured.candidateControl,
+            acceptedBankWord: 4, candidateBankWord: 5, bankStrideWords: packedRowBankWords,
+            quantizeFloat: true },
+          { name: "structured-row-geometry", accepted: structured.rowGeometry,
+            candidate: structured.rowGeometry, wordsPerRow: 4,
+            acceptedBankControl: structured.control, candidateBankControl: structured.candidateControl,
+            acceptedBankWord: 4, candidateBankWord: 5, bankStrideWords: packedRowBankWords },
+          { name: "structured-boundary-liquid-mask", accepted: this.structuredBoundary.liquidMask,
+            candidate: this.structuredBoundary.candidateMask, wordsPerRow: 1 },
+        ],
+      );
+    }
     const producedSupport = this.airVelocitySupport.plan.support;
     if (producedSupport.totalBytes !== airSupportLayout.totalBytes
       || producedSupport.rowCapacity !== airSupportLayout.rowCapacity
@@ -2922,6 +3015,8 @@ export class WebGPUOctreeProjection {
   /** Retire invocation-stable coarse-phi parameter slots after queue submit. */
   retireSubmittedEncoder(encoder: GPUCommandEncoder) {
     this.drainRowDeltaCensus();
+    this.redundancyCensus?.drain();
+    this.rowRedundancyCensus?.drain();
     const publishedIsA = this.globalFinePublicationByEncoder.get(encoder);
     if (publishedIsA !== undefined) {
       this.globalFinePublishedIsA = publishedIsA;
@@ -2941,6 +3036,14 @@ export class WebGPUOctreeProjection {
     analyticColdBootstrap = false,
     coldFullRebuild = false,
   ) {
+    const freezeAfter = octreeFreezeTopologyAfter();
+    if (!analyticColdBootstrap && !coldFullRebuild && freezeAfter !== undefined
+      && this.activePowerGeneration >= freezeAfter) {
+      // X-4 host-scheduling ablation. The accepted owner/frontier epoch,
+      // descriptors, boundary slots and structured identities remain frozen;
+      // transport, redistance and pressure continue on those immutable sets.
+      return false;
+    }
     this.powerAttemptGeneration = ((this.powerAttemptGeneration + 1) >>> 0) || 1;
     this.candidatePowerGeneration = this.powerAttemptGeneration;
     // Stamp the attempt in GPU command order. Multiple substeps may be
@@ -3182,17 +3285,31 @@ export class WebGPUOctreeProjection {
     return true;
   }
 
-  /** Diagnostic-only: stage the 16-word row-delta control header for the
-   * post-submit census. No production path observes this copy. */
+  private topologyMaintenanceFrozen(): boolean {
+    const freezeAfter = octreeFreezeTopologyAfter();
+    return freezeAfter !== undefined && this.globalFineBootstrapped
+      && this.activePowerGeneration >= freezeAfter;
+  }
+
+  /** Diagnostic-only: stage the row-delta header and the already-computed fine
+   * promotion histogram. No production path observes either copy. */
   private encodeRowDeltaCensusCopy(encoder: GPUCommandEncoder): void {
     if (!octreeRowDeltaCensusEnabled()) return;
     const readback = this.rowDeltaCensusFree.pop() ?? this.device.createBuffer({
       label: "Octree row-delta census readback",
-      size: 64,
+      size: 160,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     encoder.copyBufferToBuffer(this.leafFrontier,
       this.frontierAllocation.rowDeltaControlOffsetWords * 4, readback, 0, 64);
+    const fineTopology = this.globalFinePublishedIsA
+      ? this.globalFineTopologyBA : this.globalFineTopologyAB;
+    if (fineTopology) {
+      encoder.copyBufferToBuffer(fineTopology.pageDelta, 0, readback, 64, 64);
+      encoder.copyBufferToBuffer(fineTopology.pageDelta,
+        fineTopology.pageDeltaLayout.promotionCountsOffsetWords * 4,
+        readback, 128, 24);
+    }
     this.rowDeltaCensusPending.push(readback);
   }
 
@@ -3214,6 +3331,24 @@ export class WebGPUOctreeProjection {
         }
         if (words[3] !== 0 || words[4] !== 0) this.rowDeltaCensusMembershipChanged += 1;
         if (words[6] === 0) this.rowDeltaCensusIdenticalRows += 1;
+        if (words[5] === words[6]) this.rowDeltaCensusDirtyEqualsAffected += 1;
+        for (let index = 0; index < 6; index += 1) {
+          this.rowDeltaPromotionTotals[index] += words[32 + index] ?? 0;
+        }
+        // One NDJSON record per generation makes X-8 a pure log join. The
+        // distinct dirty/affected indices are emitted explicitly so equality
+        // can no longer be mistaken for reading one counter twice.
+        console.error(JSON.stringify({
+          phase: "octree-row-delta-census-sample", sample: this.rowDeltaCensusSamples,
+          current: words[0], previous: words[1], carried: words[2], added: words[3],
+          retired: words[4], dirty: words[5], affected: words[6], generation: words[7],
+          fine: {
+            changed: words[16], generation: words[17], dirty: words[18], support: words[19],
+            transported: words[21], added: words[22], retired: words[23], repair: words[24],
+            displacement: words[25],
+            promotionReasons: Array.from(words.slice(32, 38)),
+          },
+        }));
         if (this.rowDeltaCensusSamples % 50 === 0) this.reportRowDeltaCensus();
       }).catch(() => { /* diagnostic only */ });
     }
@@ -3231,6 +3366,9 @@ export class WebGPUOctreeProjection {
       maxDirty: this.rowDeltaCensusMaxima[5], maxAffected: this.rowDeltaCensusMaxima[6],
       membershipChangedGenerations: this.rowDeltaCensusMembershipChanged,
       zeroAffectedGenerations: this.rowDeltaCensusIdenticalRows,
+      dirtyEqualsAffectedGenerations: this.rowDeltaCensusDirtyEqualsAffected,
+      meanFinePromotionReasons: Array.from(this.rowDeltaPromotionTotals,
+        (total) => total / samples),
     }));
   }
 
@@ -3280,6 +3418,7 @@ export class WebGPUOctreeProjection {
       topologyMetrics: topology.candidateMetrics,
     });
     epoch.encodeCandidateValidation(broker, generation);
+    this.rowRedundancyCensus?.encode(broker);
   }
 
   /** Beginning of substep N+1: sole coupled owner/frontier epoch flip. */
@@ -3300,6 +3439,10 @@ export class WebGPUOctreeProjection {
     // A pending target has not completed redistance/settlement yet. Section 5
     // demand must be derived only from the currently accepted fine source.
     const fine = this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB;
+    if (this.candidatePowerGeneration === 0) {
+      const freezeAfter = octreeFreezeTopologyAfter();
+      if (freezeAfter !== undefined && this.activePowerGeneration >= freezeAfter) return;
+    }
     if (!descriptor || !topology || !structured || !boundary || !epoch || !fine
       || this.candidatePowerGeneration === 0) {
       throw new Error("Ready topology flip requires a complete inactive coupled candidate");
@@ -3556,7 +3699,7 @@ export class WebGPUOctreeProjection {
     }
     splitProductionPhase(undefined, "structuredProjection");
     encoder = this.encodePendingFineSettlement(encoder, options?.productionBoundary);
-    if (this.powerTimestep_s > 0) {
+    if (this.powerTimestep_s > 0 && !this.topologyMaintenanceFrozen()) {
       if (!this.airVelocitySupport || !this.globalFineBootstrapped) {
         throw new Error("Live Section 5 support refresh requires the settled fine generation");
       }
@@ -3660,13 +3803,15 @@ export class WebGPUOctreeProjection {
     split("closestPointWaves", "fineRedistance");
 
     const restrictionBroker = new PassBroker(encoder);
-    pending.topology.encodeFinalizePublication(restrictionBroker, {
+    if (!pending.frozenTopology) pending.topology.encodeFinalizePublication(restrictionBroker, {
       redistance: pending.redistance.control,
       ...(pending.volume ? { volume: pending.volume.control } : {}),
       ...(pending.transport ? { transport: pending.transport.control } : {}),
     });
-    this.encodeCoarsePhiCorrection(restrictionBroker, pending.target, pending.topology, 0);
-    if (this.powerCoarseLevelSetSchedule) {
+    this.redundancyCensus?.encode(restrictionBroker, pending.targetIsA);
+    if (!pending.frozenTopology) this.encodeCoarsePhiCorrection(
+      restrictionBroker, pending.target, pending.topology, 0);
+    if (!pending.frozenTopology && this.powerCoarseLevelSetSchedule) {
       const coarse = this.powerCoarseLevelSetSchedule.sampleSource;
       this.globalFineSummaries?.encode(restrictionBroker, pending.target, {
         buffer: pending.topology.pageDelta,
@@ -3706,6 +3851,46 @@ export class WebGPUOctreeProjection {
     };
     if (this.pendingFinePublication) {
       throw new Error("A transported fine generation must settle before another surface step");
+    }
+    if (dt_s > 0 && this.topologyMaintenanceFrozen()) {
+      const currentIsA = this.globalFineCurrentIsA;
+      const current = currentIsA ? this.globalFineSourceA : this.globalFineSourceB;
+      const transport = currentIsA ? this.globalFineTransportA : this.globalFineTransportB;
+      // The topology which most recently published the current slot retains
+      // the accepted page-delta/control identity required by redistance.
+      const topology = currentIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
+      const redistance = currentIsA ? this.globalFineRedistanceA : this.globalFineRedistanceB;
+      const volume = currentIsA ? this.globalFineVolumeA : this.globalFineVolumeB;
+      const structuredSource = this.structuredVelocity?.source;
+      if (!current || !transport || !topology || !redistance || !structuredSource) {
+        throw new Error("Frozen topology transport requires the accepted fine and structured authorities");
+      }
+      const { transportBandFineCells, redistanceBandFineCells,
+        maximumBacktraceFineCells } = planFineLevelSetBandFineCells(
+          this.fineLevelSetBandCells, this.globalFineLevelSet!.plan.fineFactor);
+      this.lastGlobalFineTransport = transport;
+      const transportBroker = transport.encode(new PassBroker(encoder), {
+        timestep: dt_s,
+        ...(inflow ? { inflow } : {}),
+        boundaryPolicy: "closed-neumann",
+        openTopBoundary: this.scene.container.top !== "closed",
+        transportBandCells: transportBandFineCells,
+        maximumBacktraceFineCells,
+      });
+      encoder = transportBroker.commandEncoder();
+      splitProductionPhase(undefined, "fineTransport");
+      if (volume && this.pendingSurfaceReferenceVolume_m3 > 0) {
+        volume.addReferenceVolume(this.pendingSurfaceReferenceVolume_m3);
+        this.pendingSurfaceReferenceVolume_m3 = 0;
+      }
+      this.pendingFinePublication = {
+        topology, redistance, ...(volume ? { volume } : {}), transport,
+        target: current, targetIsA: currentIsA,
+        redistanceBandCells: redistanceBandFineCells,
+        maximumDisplacementFineCells: maximumBacktraceFineCells,
+        warmClosestPoints: fineLevelSetWarmStartRequested(), frozenTopology: true,
+      };
+      return encoder;
     }
     if (this.fineSeedAdapter) {
       let coarseBootstrappedThisStep = false;
@@ -5246,6 +5431,8 @@ export class WebGPUOctreeProjection {
     this.globalFineVolumeA?.destroy(); this.globalFineVolumeB?.destroy();
     this.globalFineTransportA?.destroy(); this.globalFineTransportB?.destroy();
     this.globalFineTopologyAB?.destroy(); this.globalFineTopologyBA?.destroy();
+    this.redundancyCensus?.destroy();
+    this.rowRedundancyCensus?.destroy();
     this.globalFineSeeds?.destroy(); this.globalFineLevelSet?.destroy();
     this.globalFineSummaries?.destroy();
     this.fineSeedAdapter?.destroy();
@@ -5346,6 +5533,8 @@ override sparseTopologyTileStates: u32 = 0u;
 override denseSolidField: bool = true;
 override frontierSortStage: u32 = 0u;
 override topologyCandidateView: u32 = 0u;
+override dirtyOracleMembership: bool = false;
+override structuralDescriptorDelta: bool = false;
 struct Owner { packedOrigin: u32, size: u32 }
 struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f }
 struct LeafHeader { cell: u32, entryStart: u32, entryCount: u32, size: u32, diagonal: f32, rhs: f32, pad0: u32, pad1: u32, gradient: vec4f }
@@ -6276,7 +6465,10 @@ fn buildDirtyFrontierDelta() {
       break;
     }
     let structural = compaction[tileChangeFlagsBase() + tileIndex] == generation;
-    let wet = (changed & TILE_SIGNATURE_FRONTIER_CHANGED) != 0u;
+    // X-3 probe: membership-only intentionally ignores changed wet/fraction
+    // decisions. Structural membership still carries the existing one-ring
+    // through markRowDeltaRing. This is a bound, not a sound product mode.
+    let wet = !dirtyOracleMembership && (changed & TILE_SIGNATURE_FRONTIER_CHANGED) != 0u;
     if (structural || wet) {
       if (dirtyCount >= capacity) {
         rejectDirtyAuthority(DIRTY_FAILURE_FRONTIER_OVERFLOW, 2u, slot, tileIndex,
@@ -7068,8 +7260,9 @@ fn candidateSortStore(index:u32,value:u32,toCandidate:bool){
 }
 const ROW_DELTA_VALID:u32=0x52444c54u;
 const ROW_DELTA_AFFECTED:u32=0x80000000u;
+const ROW_DELTA_STRUCTURAL:u32=0x40000000u;
 fn rowDeltaMapOld(encoded:u32)->u32{
-  let value=encoded&0x7fffffffu;
+  let value=encoded&0x3fffffffu;
   return select(0xffffffffu,value-1u,value!=0u);
 }
 fn rowDeltaBlockCount()->u32{return (frontierListCapacity()+255u)/256u;}
@@ -7201,17 +7394,35 @@ fn sortFrontierCandidates(@builtin(global_invocation_id)gid:vec3u){
   }
 }
 
-fn rowAuthorityDirtyGeneration(cell:u32,generation:u32)->bool{
+fn rowAuthorityFrontierDirtyGeneration(cell:u32,generation:u32)->bool{
   let origin=cellCoord(cell);let tileSize=topologyTileSize();
   let td=(dims()+vec3u(tileSize-1u))/tileSize;let tile=vec3i(origin/tileSize);
   let ownIndex=u32(tile.x)+td.x*(u32(tile.y)+td.y*u32(tile.z));
-  if(compaction[tileFrontierChangeFlagsBase()+ownIndex]==generation){return true;}
-  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
-    let q=tile+vec3i(x,y,z);if(any(q<vec3i(0))||any(q>=vec3i(td))){continue;}
-    let index=u32(q.x)+td.x*(u32(q.y)+td.y*u32(q.z));
+  return compaction[tileFrontierChangeFlagsBase()+ownIndex]==generation;
+}
+fn rowAuthorityStructuralDirtyGeneration(cell:u32,generation:u32)->bool{
+  let origin=cellCoord(cell);let size=ownerAtIndex(cell).size;
+  let tileSize=topologyTileSize();let td=(dims()+vec3u(tileSize-1u))/tileSize;
+  // A descriptor reads exactly the anchor owner plus the paper's 18
+  // face/edge owner probes. Test those authority tiles directly. The old
+  // maximum-leaf cube admitted unrelated changes from as many as 27 tiles
+  // and made the structural workset nearly indistinguishable from the wet
+  // influence set.
+  let ownTile=origin/tileSize;
+  let ownIndex=ownTile.x+td.x*(ownTile.y+td.y*ownTile.z);
+  if(compaction[tileChangeFlagsBase()+ownIndex]==generation){return true;}
+  for(var bit=0u;bit<18u;bit+=1u){
+    let probe=paperProbe(origin,size,PAPER_DIRECTIONS[bit]);
+    if(!valid(probe)){continue;}
+    let tile=vec3u(probe)/tileSize;
+    let index=tile.x+td.x*(tile.y+td.y*tile.z);
     if(compaction[tileChangeFlagsBase()+index]==generation){return true;}
-  }}}
+  }
   return false;
+}
+fn rowAuthorityDirtyGeneration(cell:u32,generation:u32)->bool{
+  return rowAuthorityFrontierDirtyGeneration(cell,generation)
+    ||rowAuthorityStructuralDirtyGeneration(cell,generation);
 }
 fn rowAuthorityDirty(cell:u32)->bool{return rowAuthorityDirtyGeneration(cell,frontierGeneration());}
 fn rowKeyLess(levelA:u32,mortonA:u32,levelB:u32,mortonB:u32)->bool{
@@ -7269,7 +7480,9 @@ fn classifyFrontierCarry(@builtin(global_invocation_id)gid:vec3u){
   // a second capacity-sized preparation/classification pass.
   frontier[rowDeltaOldToNewBase()+row]=0u;
   let cell=frontierCell(previous,row);let old=leafHeaders[row];
-  let dirty=rowAuthorityDirtyGeneration(cell,frontier[8u]);
+  let exactStructural=rowAuthorityStructuralDirtyGeneration(cell,frontier[8u]);
+  let dirty=exactStructural||rowAuthorityFrontierDirtyGeneration(cell,frontier[8u]);
+  let structuralDirty=select(dirty,exactStructural,structuralDescriptorDelta);
   let owner=ownerAtIndex(cell);
   let cellMatches=old.cell==cell;
   let sizeMatches=old.size==owner.size;
@@ -7285,7 +7498,8 @@ fn classifyFrontierCarry(@builtin(global_invocation_id)gid:vec3u){
   let reason=select(0u,1u,!cellMatches)|select(0u,2u,!sizeMatches)
     |select(0u,4u,!originMatches)|select(0u,8u,exact&&!wet);
   compaction[rowDeltaFlagsBase()+row]=select(0u,1u,keep)
-    |select(0u,reason<<1u,!dirty)|select(0u,32u,dirty);
+    |select(0u,reason<<1u,!dirty)|select(0u,32u,dirty)
+    |select(0u,64u,structuralDirty);
 }
 
 @compute @workgroup_size(256)
@@ -7340,8 +7554,11 @@ fn mergeFrontierRows(@builtin(global_invocation_id)gid:vec3u){
     if(output<frontierListCapacity()){
       frontier[frontierBase(next)+output]=cell;
       let dirty=output!=slot||(compaction[rowDeltaFlagsBase()+slot]&32u)!=0u;
+      let exactStructural=(compaction[rowDeltaFlagsBase()+slot]&64u)!=0u;
+      let structural=select(dirty,exactStructural,structuralDescriptorDelta);
       frontier[rowDeltaNewToOldBase()+output]=(slot+1u)
-        |select(0u,ROW_DELTA_AFFECTED,dirty);
+        |select(0u,ROW_DELTA_AFFECTED,dirty)
+        |select(0u,ROW_DELTA_STRUCTURAL,structural);
       frontier[rowDeltaOldToNewBase()+slot]=output+1u;
     }
   }
@@ -7361,8 +7578,12 @@ fn mergeFrontierRows(@builtin(global_invocation_id)gid:vec3u){
           &&leafHeaders[old].size==size;
         let dirty=!exact||old!=output
           ||rowAuthorityDirtyGeneration(cell,frontier[8u]);
+        let exactStructural=!exact
+          ||rowAuthorityStructuralDirtyGeneration(cell,frontier[8u]);
+        let structural=select(dirty,exactStructural,structuralDescriptorDelta);
         frontier[rowDeltaNewToOldBase()+output]=select(old+1u,0u,!exact)
-          |select(0u,ROW_DELTA_AFFECTED,dirty);
+          |select(0u,ROW_DELTA_AFFECTED,dirty)
+          |select(0u,ROW_DELTA_STRUCTURAL,structural);
         if(exact){frontier[rowDeltaOldToNewBase()+old]=output+1u;}
       }
     }
@@ -7506,10 +7727,15 @@ fn classifyRowDelta(
     // Positional L1 consumers publish by row page. A carried identity that
     // moved because of an insertion/retirement must therefore enter the exact
     // dirty stream even when its spatial authority tile is unchanged.
-    let dirty=old==0xffffffffu||old!=row||rowAuthorityDirty(cell);
+    let exactStructural=old==0xffffffffu
+      ||rowAuthorityStructuralDirtyGeneration(cell,frontierGeneration());
+    let affected=exactStructural
+      ||rowAuthorityFrontierDirtyGeneration(cell,frontierGeneration());
+    let structuralDirty=select(affected,exactStructural,structuralDescriptorDelta);
     frontier[rowDeltaNewToOldBase()+row]=
-      select(old+1u,0u,old==0xffffffffu)|select(0u,ROW_DELTA_AFFECTED,dirty);
-    compaction[rowDeltaFlagsBase()+row]=select(0u,1u,dirty);
+      select(old+1u,0u,old==0xffffffffu)|select(0u,ROW_DELTA_AFFECTED,affected)
+      |select(0u,ROW_DELTA_STRUCTURAL,structuralDirty);
+    compaction[rowDeltaFlagsBase()+row]=select(0u,1u,structuralDirty);
     carried=select(1u,0u,old==0xffffffffu);
     if(row>0u){let prior=frontierCell(current,row-1u);
       if(!rowIdentityLess(prior,ownerAtIndex(prior).size,cell,size)){invalid=1u;}}
@@ -7563,7 +7789,8 @@ fn scanRowDeltaBlock(affected:bool,wid:u32,lid:u32){
   let row=wid*256u+lid;let count=frontier[rowDeltaControlBase()];
   var flag=0u;
   if(row<count){
-    flag=select(0u,1u,(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_AFFECTED)!=0u);
+    flag=select(select(0u,1u,(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_STRUCTURAL)!=0u),
+      select(0u,1u,(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_AFFECTED)!=0u),affected);
   }
   let rank=rowDeltaExclusiveScan(flag,lid);
   if(row<count){compaction[rowDeltaPrefixBase()+row]=rank;}
@@ -7591,7 +7818,7 @@ fn prefixDirtyRowDeltaBlocks(@builtin(local_invocation_index)lid:u32){prefixRowD
 @compute @workgroup_size(256)
 fn scatterDirtyRowDelta(@builtin(global_invocation_id)gid:vec3u){
   let row=gid.x;let count=frontier[rowDeltaControlBase()];
-  if(row<count&&(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_AFFECTED)!=0u){
+  if(row<count&&(frontier[rowDeltaNewToOldBase()+row]&ROW_DELTA_STRUCTURAL)!=0u){
     let output=compaction[rowDeltaPrefixBase()+row]
       +compaction[rowDeltaBlockTotalsBase()+row/256u];
     frontier[rowDeltaDirtyRowsBase()+output]=row;

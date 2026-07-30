@@ -22,6 +22,13 @@
  *                                    after applying the lane preset
  *   --first-frame                    gate before advance 1 and reduce the
  *                                    capture to literal advance 1
+ *   --counter-start-gate             gate before advance 1 only until the
+ *                                    counter recorder is live, then reduce a
+ *                                    representative recurring advance
+ *   --counter-gate-warmup-ms=N       delay after the recorder is live before
+ *                                    releasing that gate (default 1200; use 0
+ *                                    when a large isolated frame would exhaust
+ *                                    the bounded label stream first)
  *   --steps=N                         advances to run       (default lane's own)
  *   The report always reduces the counter window to exactly one complete,
  *   representative advance. The longer traced run exists only to warm encoder
@@ -112,10 +119,22 @@ if (bandLevel !== undefined
 }
 const steps = flag("steps") === undefined ? undefined : Number(flag("steps"));
 const firstFrame = process.argv.includes("--first-frame");
+// Counter attach takes ~2.7 s, while the isolated Metal-encoder metadata
+// stream can fill its bounded trace buffer in ~4 s. A normal warmup therefore
+// cannot make labels and counters overlap reliably. This gate starts the
+// recorder before recurring work without changing representative-frame
+// selection (unlike --first-frame, which intentionally selects bootstrap).
+const counterStartGate = process.argv.includes("--counter-start-gate");
+const profileGate = firstFrame || counterStartGate;
 const counters = true;
 const counterSeconds = Number(flag("counter-seconds") ?? 3);
 if (!Number.isFinite(counterSeconds) || counterSeconds < 3) {
   throw new Error("--counter-seconds must be at least 3 for full labels plus occupancy");
+}
+const counterGateWarmupMs = Number(flag("counter-gate-warmup-ms") ?? 1_200);
+if (!Number.isFinite(counterGateWarmupMs) || counterGateWarmupMs < 0
+  || counterGateWarmupMs > counterSeconds * 1_000) {
+  throw new Error("--counter-gate-warmup-ms must be between 0 and the counter window");
 }
 const counterTimeLimit = Number.isInteger(counterSeconds)
   ? `${counterSeconds}s` : `${Math.round(counterSeconds * 1000)}ms`;
@@ -392,7 +411,7 @@ const profileEnvironment: Record<string, string> = {
   FLUID_RASTER_CHECKPOINTS: "0",
   FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000",
   FLUID_TRIPWIRES: "1",
-  FLUID_PROFILE_FIRST_ADVANCE_GATE: firstFrame ? "1" : "0",
+  FLUID_PROFILE_FIRST_ADVANCE_GATE: profileGate ? "1" : "0",
   ...laneEnvironment,
   // This deliberately follows the lane preset. A shell-level override cannot
   // win against startWorker's explicit environment, which previously made
@@ -881,9 +900,10 @@ const main = async (): Promise<void> => {
         + ` too short to hold a ${counterSeconds} s window;`
         + ` rerun with --steps=${plan.steps} or a smaller --counter-seconds`);
     }
-    console.log(firstFrame
+    console.log(profileGate
       ? `launching solver behind a pre-advance gate; the ${counterSeconds} s counter`
-        + " window will warm for 1.2 s before advance 1 is released..."
+        + ` window will warm for ${(counterGateWarmupMs / 1_000).toFixed(1)} s before advance 1 is released${firstFrame
+          ? " and selected" : "; a later recurring advance will be selected"}...`
       : `launching solver, attaching GPU counters at`
       + ` ${plan.spawnDelaySeconds.toFixed(1)} s so recording starts`
       + ` ${plan.windowStartSeconds.toFixed(1)} s into stepping`
@@ -895,7 +915,7 @@ const main = async (): Promise<void> => {
     tracedPid = handle.pid;
     let recordingStartedAt: number | undefined;
     try {
-      if (firstFrame) await handle.beforeFirstAdvance;
+      if (profileGate) await handle.beforeFirstAdvance;
       else {
         await handle.constructed;
         await delay(plan.spawnDelaySeconds * 1000);
@@ -921,8 +941,8 @@ const main = async (): Promise<void> => {
           if (recordingStartedAt === undefined && /Ctrl-C to stop the recording/.test(line)) {
             recordingStartedAt = Date.now();
             observeCaptureScratch();
-            if (firstFrame) {
-              releaseGate = delay(1_200).then(() => {
+            if (profileGate) {
+              releaseGate = delay(counterGateWarmupMs).then(() => {
                 process.kill(handle.pid, "SIGUSR1");
               });
             }

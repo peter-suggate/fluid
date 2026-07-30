@@ -143,6 +143,9 @@ export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
   // Evolving fluid coverage. Sampled, like the node-mip atlas, so water shadows
   // cost the fragment stage a texture unit rather than another storage buffer.
   { binding: 19, type: "texture-3d-float" as const },
+  // Direct node-mip page table. A sampled r32uint texture preserves the
+  // fragment-stage storage-buffer ceiling while replacing directory searches.
+  { binding: 20, type: "texture-3d-uint" as const },
 ] as const);
 
 export function sparseVoxelDrySceneBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
@@ -150,10 +153,11 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(): GPUBindGroupLayoutE
   // inputs, but not material shading, glass, or dormant traversal variants.
   // Keeping those fragment-only also stays below WebGPU's per-stage storage
   // binding limit on Apple GPUs.
-  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19]);
+  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 20]);
   return SVO_DRY_SCENE_BINDING_CONTRACT.map(({ binding, type }): GPUBindGroupLayoutEntry => {
     const visibility = GPUShaderStage.FRAGMENT | (computeBindings.has(binding) ? GPUShaderStage.COMPUTE : 0);
     if (type === "texture-3d-float") return { binding, visibility, texture: { sampleType: "float", viewDimension: "3d" } };
+    if (type === "texture-3d-uint") return { binding, visibility, texture: { sampleType: "uint", viewDimension: "3d" } };
     if (type === "texture-2d-uint") return { binding, visibility, texture: { sampleType: "uint", viewDimension: "2d" } };
     if (type === "filtering-sampler") return { binding, visibility, sampler: { type: "filtering" } };
     return { binding, visibility, buffer: { type } };
@@ -213,7 +217,7 @@ export function packSparseVoxelDrySceneThickGlassArena(
 
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 384,
+  sizeBytes: 448,
   terrainWordOffset: 24,
   terrainMaterialWordOffset: 28,
   materialPublicationWordOffset: 32,
@@ -226,6 +230,10 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   fluidCoverageWordOffset: 64,
   /** Five vec4 lanes of bounded runtime rendering controls. */
   tuningWordOffset: 76,
+  /** xyz: packed direct-table extent; w: published/usable. */
+  nodeMipDirectWordOffset: 96,
+  /** Twelve constant-indexed Z-slab offsets, one per supported node-mip level. */
+  nodeMipDirectLevelZWordOffset: 100,
 } as const);
 
 /** materialPublication.w flags shared by the direct and derived-lighting paths. */
@@ -658,6 +666,8 @@ export interface SvoDryConeMarcherOptions {
    * surface normal and skip it, so contact darkening keeps its exact cost.
    */
   fluidCoverage?: boolean;
+  /** Resolve a virtual page with one r32uint texture load before directory fallback. */
+  directPageTable?: boolean;
 }
 
 /**
@@ -665,7 +675,7 @@ export interface SvoDryConeMarcherOptions {
  * production dry shader and the A/B cone benchmark. Every variant is bit-exact:
  * optimizations may only change how a value is computed, never the value.
  * Requires bindings/declarations named `dry` (DryParams), `publicationState`,
- * `nodeMipAtlas`, `nodeMipSampler`, `nodeMipDirectory`, the private counter
+ * `nodeMipAtlas`, `nodeMipSampler`, `nodeMipDirectory`, `nodeMipPageTable`, the private counter
  * `dryMipSteps`, and the `svoNodeMipSamplingWGSL` library.
  */
 export function createSvoDryConeMarcherWGSL(options: SvoDryConeMarcherOptions = {}): string {
@@ -703,6 +713,27 @@ fn dryNodeMipMorton(coordinate:vec3u)->vec2u{
   const searchRange = options.rangedDirectorySearch
     ? /* wgsl */ `var low=dryNodeMipLevelStart(level);var high=select(dry.nodeMip.y,dryNodeMipLevelStart(level+1u),level<11u);`
     : /* wgsl */ `var low=0u;var high=dry.nodeMip.y;`;
+  const directPageTable = options.directPageTable ? /* wgsl */ `fn dryNodeMipDirectLevelZ(level:u32)->u32{
+  let clamped=min(level,11u);
+  let word=select(select(dry.nodeMipDirectLevelZ[0],dry.nodeMipDirectLevelZ[1],clamped>=4u),dry.nodeMipDirectLevelZ[2],clamped>=8u);
+  let lane=clamped&3u;
+  return select(select(select(word.x,word.y,lane==1u),word.z,lane==2u),word.w,lane==3u);
+}
+fn dryNodeMipDirectFind(level:u32,coordinate:vec3u)->u32{
+  if(dry.nodeMipDirect.w==0u||level>=dry.nodeMip.z){return 0xffffffffu;}
+  let zStart=dryNodeMipDirectLevelZ(level);
+  let zEnd=select(dry.nodeMipDirect.z,dryNodeMipDirectLevelZ(level+1u),level+1u<dry.nodeMip.z);
+  if(coordinate.x>=dry.nodeMipDirect.x||coordinate.y>=dry.nodeMipDirect.y||coordinate.z>=zEnd-zStart){return 0xffffffffu;}
+  let encoded=textureLoad(nodeMipPageTable,vec3i(vec3u(coordinate.x,coordinate.y,zStart+coordinate.z)),0).x;
+  return select(0xffffffffu,encoded-1u,encoded!=0u);
+}
+` : "";
+  const directFind = options.directPageTable
+    ? /* wgsl */ `if(dry.nodeMipDirect.w!=0u){return dryNodeMipDirectFind(level,coordinate);}`
+    : "";
+  const pageOrigin = options.directPageTable
+    ? /* wgsl */ `if(dry.nodeMipDirect.w!=0u){let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));*pageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u);}else{let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);}`
+    : /* wgsl */ `let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);`;
   const zeroRegion = options.emptySpaceElision
     ? /* wgsl */ `struct DryConeZeroRegion{minimum:vec3f,maximum:vec3f,valid:u32}
 fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNodeMipPageCache>)->DryConeZeroRegion{
@@ -847,8 +878,8 @@ ${morton}
 fn dryNodeMipCompare(entry:SvoNodeMipDirectoryEntry,level:u32,morton:vec2u)->i32{
   if(entry.level<level){return -1;}if(entry.level>level){return 1;}if(entry.mortonHigh<morton.y){return -1;}if(entry.mortonHigh>morton.y){return 1;}if(entry.mortonLow<morton.x){return -1;}if(entry.mortonLow>morton.x){return 1;}return 0;
 }
-${levelStart}fn dryNodeMipFind(level:u32,coordinate:vec3u)->u32{
-  if(level>=dry.nodeMip.z||dry.nodeMip.y==0u){return 0xffffffffu;}let morton=dryNodeMipMorton(coordinate);${searchRange}
+${directPageTable}${levelStart}fn dryNodeMipFind(level:u32,coordinate:vec3u)->u32{
+  if(level>=dry.nodeMip.z||dry.nodeMip.y==0u){return 0xffffffffu;}${directFind}let morton=dryNodeMipMorton(coordinate);${searchRange}
   for(var iteration=0u;iteration<24u&&low<high;iteration+=1u){let middle=low+(high-low)/2u;let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,middle);let comparison=dryNodeMipCompare(entry,level,morton);if(comparison<0){low=middle+1u;}else{high=middle;}}
   if(low>=dry.nodeMip.y){return 0xffffffffu;}let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,low);if(entry.generation!=dry.nodeMip.x||dryNodeMipCompare(entry,level,morton)!=0){return 0xffffffffu;}return low;
 }
@@ -858,7 +889,7 @@ fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPage
   if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let pageCoordinate=vec3u(pageFloor);
   if((*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=pageCoordinate)){
     *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
-    if(pageIndex!=0xffffffffu){let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);}
+    if(pageIndex!=0xffffffffu){${pageOrigin}}
   }
   if((*pageCache).resident==0u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);return DryNodeMipLookup(svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,(*pageCache).pageOrigin,local),1u);
 }
@@ -870,16 +901,10 @@ ${visibility}`;
  * Per-axis resolution scale for the cone-lighting prepass; 1 keeps the inline
  * path.
  *
- * Deliberately NOT switched per camera-motion state. Dropping to 0.25 while
- * moving measures well on paper (garden, M1 Max, 1280x720: 11.08 ms moving
- * against 13.63 ms settled at 0.5, quality still inside the reduced-rate bar
- * at mean 0.0047 / p95 0.0224), but ensureConeLightingPrepass caches exactly
- * one scale's pipelines: changing scale discards them and recompiles a shader
- * module plus two render pipelines, which would stall precisely at the moment
- * the camera starts moving. Prewarming both scales' pipelines would make this
- * the strongest moving-tier lever available; until then motion quality is
- * traded inside the shader (SVO_DRY_SCENE_MOVING_* constants), which costs no
- * pipeline state at all.
+ * Camera-state budgets remain compile-time-free. The renderer retains and
+ * prewarms both production rates (0.25 balanced/moving and 0.5 quality/settled),
+ * so a camera-state tier can switch without compiling a Metal shader when
+ * motion begins.
  */
 export type SvoConeLightingScale = 1 | 0.5 | 0.25 | 0.125;
 
@@ -985,7 +1010,7 @@ export function createSvoDrySceneFragmentWGSL(
    * Appends the live pixel-trace probe entry point. Off by every production
    * call site, which is what keeps scale-1 output byte-identical to the string
    * the frame fingerprint gates on.
-   */
+  */
   pixelProbe = false,
 ): string {
   if (pixelProbe && (coneLightingScale !== 1 || shadingPath !== "inline")) {
@@ -1270,6 +1295,13 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
   const prepassOverlayWGSL = reduced ? /* wgsl */ `if(mode==${svoCostOverlayCode("prepass-fallback")}u){overlayColor=vec3f(.16,.14,.24);if(dryPrepassState==1u){overlayColor=vec3f(0.0,.9,1.0);}if(dryConeFallback==1u){overlayColor=vec3f(1.0,.09,.30);}}
   ` : /* wgsl */ `if(mode==${svoCostOverlayCode("prepass-fallback")}u){overlayColor=vec3f(.16,.14,.24);}
   `;
+  const splitPrimaryShadowStateWGSL = reduced
+    // The reduced visibility plane computes every shadow before deferred
+    // lighting. Marking alternating primary pixels as shadow-deferred would
+    // describe work this graph did not defer and would make an otherwise exact
+    // static G-buffer depend on presentation-frame parity.
+    ? "dryShadowTracingEnabled=1u;"
+    : "let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);";
   const prepassEntryWGSL = reduced ? /* wgsl */ `struct DryPrepassGeometryOut{@location(0) geometry:vec4f,@location(1) identity:u32}
 @fragment fn dryPrepassGeometryMain(input:VertexOut)->DryPrepassGeometryOut{
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
@@ -1374,7 +1406,7 @@ fn drySplitVisibilityOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryVisi
   return DryVisibilityOut(targets.packedSurface,targets.identityMedia,hardwareDepth);
 }
 @fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;let temporalShadowSampling=uniforms.viewport.w>=0.0&&(dry.materialPublication.w&2u)!=0u;let shadowParity=(u32(input.position.x)+u32(input.position.y)+u32(uniforms.viewport.w))&1u;dryShadowTracingEnabled=select(1u,select(0u,1u,shadowParity==0u),temporalShadowSampling);dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;${splitPrimaryShadowStateWGSL}dryThickGlassEnabled=0u;
   let opaque=traceOpaqueScene(ro,rd);let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(opaque.materialId,opaqueMetadata,0u,0u));let glass=traceGlass(ro,rd,0.0,opaque.t,true);let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;let generation=dryPublicationGeneration();
   if(glassVisible){let record=glassPanes[glass.recordIndex];let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);let targets=svoGBufferSurface(vec3f(0.0),glass.hit.t_m,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID,SVO_FEATURE_SMOOTH);return drySplitVisibilityOut(targets,dryHardwareDepth(glass.hit.t_m,rd,forward));}
   if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
@@ -1455,6 +1487,9 @@ struct DryParams {
   tuningRays0:vec4f,
   // AO aperture, shadow aperture, normal escape, emitter clearance.
   tuningRays1:vec4f,
+  // Packed Z slabs in nodeMipPageTable. w=0 retains sorted-directory fallback.
+  nodeMipDirect:vec4u,
+  nodeMipDirectLevelZ:array<vec4u,3>,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -1495,10 +1530,11 @@ struct DryHit {
 @group(0) @binding(17) var nodeMipSampler:sampler;
 @group(0) @binding(18) var nodeMipDirectory:texture_2d<u32>;
 @group(0) @binding(19) var fluidCoverageVolume:texture_3d<f32>;
+@group(0) @binding(20) var nodeMipPageTable:texture_3d<u32>;
 
 ${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
-${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true })}
+${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true })}
 ${prepassDeclarationsWGSL}${splitDeclarationsWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
 fn dryDiagnosticMaximumNodeVisits()->u32{return clamp(dryDiagnosticControl()&511u,1u,256u);}
 fn dryDiagnosticMaximumDepth()->u32{return clamp(dryDiagnosticControl()>>9u,1u,21u);}
@@ -2146,6 +2182,21 @@ async function checkedModule(device: GPUDevice, label: string, code: string): Pr
   return shaderModule;
 }
 
+interface SvoDrySplitPipelineBundle {
+  readonly visibility: GPURenderPipeline;
+  readonly lighting: GPURenderPipeline;
+  readonly prepassReset?: GPUComputePipeline;
+  readonly prepassCoherent?: GPUComputePipeline;
+  readonly prepassBoundary?: GPUComputePipeline;
+}
+
+interface SvoDryConePipelineBundle {
+  readonly geometry: GPURenderPipeline;
+  readonly visibility: GPURenderPipeline;
+  readonly shade: GPURenderPipeline;
+  readonly reduced: GPURenderPipeline;
+}
+
 export class SparseVoxelDrySceneRenderer {
   private pipeline?: GPURenderPipeline;
   private splitVisibilityPipeline?: GPURenderPipeline;
@@ -2154,6 +2205,8 @@ export class SparseVoxelDrySceneRenderer {
   private conePrepassCoherentPipeline?: GPUComputePipeline;
   private conePrepassBoundaryPipeline?: GPUComputePipeline;
   private splitPipelineScale?: SvoConeLightingScale;
+  private readonly splitPipelineBundles = new Map<SvoConeLightingScale, SvoDrySplitPipelineBundle>();
+  private readonly splitPipelineCompiles = new Map<SvoConeLightingScale, Promise<SvoDrySplitPipelineBundle>>();
   private splitVisibilityLayout?: GPUBindGroupLayout;
   private splitLightingLayout?: GPUBindGroupLayout;
   private splitVisibilityBindGroup?: GPUBindGroup;
@@ -2171,7 +2224,9 @@ export class SparseVoxelDrySceneRenderer {
   /** Reduced-rate cone-lighting prepass state; absent at scale 1. */
   private coneScale: SvoConeLightingScale = 1;
   private conePipelineScale?: SvoConeLightingScale;
-  private conePipelineCompile?: Promise<void>;
+  private readonly conePipelineBundles = new Map<SvoConeLightingScale, SvoDryConePipelineBundle>();
+  private readonly conePipelineCompiles = new Map<SvoConeLightingScale, Promise<SvoDryConePipelineBundle>>();
+  private coneScalePrewarmStarted = false;
   private conePrepassGeometryPipeline?: GPURenderPipeline;
   private conePrepassVisibilityPipeline?: GPURenderPipeline;
   private conePrepassShadePipeline?: GPURenderPipeline;
@@ -2208,6 +2263,8 @@ export class SparseVoxelDrySceneRenderer {
   private readonly nodeMipFallbackAtlasView: GPUTextureView;
   private readonly nodeMipFallbackDirectory: GPUTexture;
   private readonly nodeMipFallbackDirectoryView: GPUTextureView;
+  private readonly nodeMipFallbackDirectPageTable: GPUTexture;
+  private readonly nodeMipFallbackDirectPageTableView: GPUTextureView;
   private readonly nodeMipFallbackSampler: GPUSampler;
   private readonly fluidCoverageFallback: GPUTexture;
   private readonly fluidCoverageFallbackView: GPUTextureView;
@@ -2271,6 +2328,8 @@ export class SparseVoxelDrySceneRenderer {
     this.nodeMipFallbackAtlasView = this.nodeMipFallbackAtlas.createView({ dimension: "3d" });
     this.nodeMipFallbackDirectory = device.createTexture({ label: "Sparse voxel node-mip fallback directory", size: [2, 1], format: "rgba32uint", usage: GPUTextureUsage.TEXTURE_BINDING });
     this.nodeMipFallbackDirectoryView = this.nodeMipFallbackDirectory.createView();
+    this.nodeMipFallbackDirectPageTable = device.createTexture({ label: "Sparse voxel node-mip fallback direct page table", size: [1, 1, 1], dimension: "3d", format: "r32uint", usage: GPUTextureUsage.TEXTURE_BINDING });
+    this.nodeMipFallbackDirectPageTableView = this.nodeMipFallbackDirectPageTable.createView({ dimension: "3d" });
     this.nodeMipFallbackSampler = device.createSampler({ label: "Sparse voxel node-mip fallback sampler", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge", magFilter: "linear", minFilter: "linear" });
     // Zero-initialized, and the packed frame reports invalid alongside it, so a
     // scene with no solver never samples this and never shows a water shadow.
@@ -2317,15 +2376,32 @@ export class SparseVoxelDrySceneRenderer {
    * reachability keeps primary traversal out of the lighting pass for opaque
    * pixels even though both entries share one source module.
    */
+  private activateSplitPipelineBundle(scale: SvoConeLightingScale, bundle: SvoDrySplitPipelineBundle): void {
+    this.splitVisibilityPipeline = bundle.visibility;
+    this.splitLightingPipeline = bundle.lighting;
+    this.conePrepassResetPipeline = bundle.prepassReset;
+    this.conePrepassCoherentPipeline = bundle.prepassCoherent;
+    this.conePrepassBoundaryPipeline = bundle.prepassBoundary;
+    this.splitPipelineScale = scale;
+    this.ensureSplitTargets();
+    this.ensureConePrepassTargets();
+  }
+
   private async ensureSplitPipelines(scale: SvoConeLightingScale): Promise<void> {
     const relight = this.renderTuning.coneRadianceReconstruction === "wide-relight"
       || this.renderTuning.coneRadianceReconstruction === "full-res-relight";
     if (this.shadingPath === "inline"
       || (this.shadingPath === "auto-relight" && (scale === 1 || !relight))
       || !this.layout || !this.vertexModule) return;
-    if (this.splitPipelineScale === scale && this.splitVisibilityPipeline && this.splitLightingPipeline
-      && (scale === 1 || (this.conePrepassResetPipeline && this.conePrepassCoherentPipeline && this.conePrepassBoundaryPipeline))) {
-      this.ensureSplitTargets();
+    const cached = this.splitPipelineBundles.get(scale);
+    if (cached) {
+      if (scale === this.coneScale) this.activateSplitPipelineBundle(scale, cached);
+      return;
+    }
+    const pending = this.splitPipelineCompiles.get(scale);
+    if (pending) {
+      const bundle = await pending;
+      if (scale === this.coneScale) this.activateSplitPipelineBundle(scale, bundle);
       return;
     }
     if (scale !== 1 && !this.conePrepassLayout) return;
@@ -2354,14 +2430,17 @@ export class SparseVoxelDrySceneRenderer {
         { binding: 5, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, texture: { sampleType: "uint" } },
       ],
     });
-    const module = await checkedModule(this.device, `Sparse voxel dry scene split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
-      createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split"));
-    const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
-    const [visibility, lighting, prepassReset, prepassCoherent, prepassBoundary] = await Promise.all([
-      this.device.createRenderPipelineAsync({
+    const layout = this.layout;
+    const vertexModule = this.vertexModule;
+    const compile = (async (): Promise<SvoDrySplitPipelineBundle> => {
+      const module = await checkedModule(this.device, `Sparse voxel dry scene split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
+        createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split"));
+      const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
+      const [visibility, lighting, prepassReset, prepassCoherent, prepassBoundary] = await Promise.all([
+        this.device.createRenderPipelineAsync({
         label: `Sparse voxel primary visibility (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, ...middleLayouts, this.splitVisibilityLayout] }),
-        vertex: { module: this.vertexModule, entryPoint: "vertexMain" },
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitVisibilityLayout] }),
+        vertex: { module: vertexModule, entryPoint: "vertexMain" },
         fragment: { module, entryPoint: "dryVisibilityMain", targets: [
           { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.packedSurfaceFormat },
           { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.identityMediaFormat },
@@ -2373,10 +2452,10 @@ export class SparseVoxelDrySceneRenderer {
           depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
         },
       }),
-      this.device.createRenderPipelineAsync({
+        this.device.createRenderPipelineAsync({
         label: `Sparse voxel deferred dry lighting x${scale}`,
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, ...middleLayouts, this.splitLightingLayout] }),
-        vertex: { module: this.vertexModule, entryPoint: "vertexMain" },
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout] }),
+        vertex: { module: vertexModule, entryPoint: "vertexMain" },
         fragment: { module, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
         primitive: { topology: "triangle-list" },
       }),
@@ -2395,16 +2474,21 @@ export class SparseVoxelDrySceneRenderer {
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!] }),
         compute: { module, entryPoint: "dryPrepassBoundaryMain" },
       }),
-    ]);
-    this.splitVisibilityPipeline = visibility;
-    this.splitLightingPipeline = lighting;
-    this.conePrepassResetPipeline = prepassReset;
-    this.conePrepassCoherentPipeline = prepassCoherent;
-    this.conePrepassBoundaryPipeline = prepassBoundary;
-    this.splitPipelineScale = scale;
-    this.clearReusableFrame();
-    this.ensureSplitTargets();
-    this.ensureConePrepassTargets();
+      ]);
+      const bundle = { visibility, lighting, prepassReset, prepassCoherent, prepassBoundary };
+      this.splitPipelineBundles.set(scale, bundle);
+      return bundle;
+    })();
+    this.splitPipelineCompiles.set(scale, compile);
+    try {
+      const bundle = await compile;
+      if (scale === this.coneScale) {
+        this.activateSplitPipelineBundle(scale, bundle);
+        this.clearReusableFrame();
+      }
+    } finally {
+      if (this.splitPipelineCompiles.get(scale) === compile) this.splitPipelineCompiles.delete(scale);
+    }
   }
 
   private ensureSplitTargets(): void {
@@ -2462,23 +2546,31 @@ export class SparseVoxelDrySceneRenderer {
    * the current scale. Fail-soft: until this resolves, encode keeps the
    * bit-exact inline path. No-op at scale 1 or before initialize().
    */
-  async ensureConeLightingPrepass(): Promise<void> {
-    if (this.coneScale === 1 || !this.layout || !this.pipeline || !this.vertexModule) return;
-    const scale = this.coneScale;
-    if (this.conePipelineScale === scale && this.conePrepassGeometryPipeline && this.conePrepassVisibilityPipeline
-      && this.conePrepassShadePipeline && this.coneReducedPipeline) {
-      this.ensureConePrepassTargets();
+  private activateConePipelineBundle(scale: SvoConeLightingScale, bundle: SvoDryConePipelineBundle): void {
+    this.conePrepassGeometryPipeline = bundle.geometry;
+    this.conePrepassVisibilityPipeline = bundle.visibility;
+    this.conePrepassShadePipeline = bundle.shade;
+    this.coneReducedPipeline = bundle.reduced;
+    this.conePipelineScale = scale;
+    this.ensureConePrepassTargets();
+  }
+
+  private async ensureConeLightingScale(scale: Exclude<SvoConeLightingScale, 1>): Promise<void> {
+    if (!this.layout || !this.pipeline || !this.vertexModule) return;
+    const cached = this.conePipelineBundles.get(scale);
+    if (cached) {
+      if (scale === this.coneScale) this.activateConePipelineBundle(scale, cached);
       await this.ensureSplitPipelines(scale);
       return;
     }
-    if (this.conePipelineCompile) await this.conePipelineCompile.catch(() => {});
-    if (this.conePipelineScale === scale && this.conePrepassGeometryPipeline && this.conePrepassVisibilityPipeline
-      && this.conePrepassShadePipeline && this.coneReducedPipeline) {
-      this.ensureConePrepassTargets();
+    const pending = this.conePipelineCompiles.get(scale);
+    if (pending) {
+      const bundle = await pending;
+      if (scale === this.coneScale) this.activateConePipelineBundle(scale, bundle);
       await this.ensureSplitPipelines(scale);
       return;
     }
-    const compile = (async () => {
+    const compile = (async (): Promise<SvoDryConePipelineBundle> => {
       const module = await checkedModule(this.device, `Sparse voxel dry scene cone prepass (x${scale}, ${this.traversalMode}, brick-${this.brickOccupancyMode})`, createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode));
       this.conePrepassLayout ??= this.device.createBindGroupLayout({
         label: "Sparse voxel cone-prepass outputs",
@@ -2550,20 +2642,48 @@ export class SparseVoxelDrySceneRenderer {
           },
         }),
       ]);
-      this.conePrepassGeometryPipeline = prepassGeometryPipeline;
-      this.conePrepassVisibilityPipeline = prepassVisibilityPipeline;
-      this.conePrepassShadePipeline = prepassShadePipeline;
-      this.coneReducedPipeline = reducedPipeline;
-      this.conePipelineScale = scale;
-      this.clearReusableFrame();
-      this.ensureConePrepassTargets();
+      const bundle = {
+        geometry: prepassGeometryPipeline,
+        visibility: prepassVisibilityPipeline,
+        shade: prepassShadePipeline,
+        reduced: reducedPipeline,
+      };
+      this.conePipelineBundles.set(scale, bundle);
+      return bundle;
     })();
-    const wrapped: Promise<void> = compile.finally(() => {
-      if (this.conePipelineCompile === wrapped) this.conePipelineCompile = undefined;
-    });
-    this.conePipelineCompile = wrapped;
-    await wrapped;
-    await this.ensureSplitPipelines(scale);
+    this.conePipelineCompiles.set(scale, compile);
+    try {
+      const bundle = await compile;
+      if (scale === this.coneScale) {
+        this.activateConePipelineBundle(scale, bundle);
+        this.clearReusableFrame();
+      }
+      await this.ensureSplitPipelines(scale);
+    } finally {
+      if (this.conePipelineCompiles.get(scale) === compile) this.conePipelineCompiles.delete(scale);
+    }
+  }
+
+  async ensureConeLightingPrepass(): Promise<void> {
+    if (this.coneScale === 1) return;
+    const requestedScale = this.coneScale;
+    await this.ensureConeLightingScale(requestedScale);
+    if (!this.coneScalePrewarmStarted) {
+      this.coneScalePrewarmStarted = true;
+      // These are the production moving/settled tiers. Keeping both bundles
+      // resident makes a camera-state transition a pointer swap plus target
+      // resize, never a Metal shader compilation at the moment of motion.
+      try {
+        await Promise.all(([0.25, 0.5] as const)
+          .filter((scale) => scale !== requestedScale)
+          .map((scale) => this.ensureConeLightingScale(scale)));
+      } catch (error) {
+        // A transient device/compiler failure must not permanently suppress a
+        // later explicit warmup attempt.
+        this.coneScalePrewarmStarted = false;
+        throw error;
+      }
+    }
   }
 
   private ensureConePrepassTargets(): void {
@@ -2755,6 +2875,12 @@ export class SparseVoxelDrySceneRenderer {
       && coneLightingScale === this.coneScale) return;
     this.lightingOptions = { shadowsEnabled: options.shadowsEnabled, ambientOcclusionEnabled: options.ambientOcclusionEnabled };
     this.coneScale = coneLightingScale;
+    if (coneLightingScale !== 1) {
+      const coneBundle = this.conePipelineBundles.get(coneLightingScale);
+      if (coneBundle) this.activateConePipelineBundle(coneLightingScale, coneBundle);
+      const splitBundle = this.splitPipelineBundles.get(coneLightingScale);
+      if (splitBundle) this.activateSplitPipelineBundle(coneLightingScale, splitBundle);
+    }
     this.clearReusableFrame();
     this.temporalAccumulator.invalidate();
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) {
@@ -2834,6 +2960,10 @@ export class SparseVoxelDrySceneRenderer {
       for (const page of nodeMip.plan.pages) if (page.key.level < 11) levelStart[page.key.level + 1] += 1;
       for (let boundary = 1; boundary < levelStart.length; boundary += 1) levelStart[boundary] += levelStart[boundary - 1];
       words.set(levelStart, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipLevelStartWordOffset);
+      if (nodeMip.directPageTableReady) {
+        words.set([...nodeMip.directPageTableDimensions, 1], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipDirectWordOffset);
+        words.set(nodeMip.directPageTableLevelZOffsets, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipDirectLevelZWordOffset);
+      }
     }
     const wide = resolveSvoWideTraversalCapability(source.wideFanout, source.revision, structural.domain.maximumDepth);
     if (wide.status === "ready") {
@@ -2876,6 +3006,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 17, resource: nodeMip?.sampler ?? this.nodeMipFallbackSampler },
       { binding: 18, resource: nodeMip?.directoryView ?? this.nodeMipFallbackDirectoryView },
       { binding: 19, resource: this.fluidCoverage?.visibleGeneration()?.view ?? this.fluidCoverageFallbackView },
+      { binding: 20, resource: nodeMip?.directPageTableView ?? this.nodeMipFallbackDirectPageTableView },
     ] });
   }
 
@@ -3148,7 +3279,10 @@ export class SparseVoxelDrySceneRenderer {
     const frameKey = reuseKey === undefined ? undefined : `${reuseKey}|cone=${effectiveScale}|shading=${useSplit ? "split" : "inline"}`;
     const primaryFrameKey = reuseKey === undefined ? undefined : `${reuseKey}|primary=${useSplit ? "split" : "inline"}`;
     const reusePrimaryVisibility = svoDryPrimaryCoherenceDecision(
-      this.rayCoherenceMode, useSplit, primaryFrameKey, this.primaryVisibilityCacheKey,
+      // Reduced split shading computes a complete cone-visibility plane every
+      // frame, so its primary G-buffer is parity-invariant. Scale 1 still owns
+      // checkerboard shadow-deferred flags and must always retrace.
+      this.rayCoherenceMode, useSplit && usePrepass, primaryFrameKey, this.primaryVisibilityCacheKey,
     ) === "reuse";
     const targetTexture = "width" in target ? target as GPUTexture : undefined;
     const requiredStableFrames = temporalFrame ? 2 : 1;
@@ -3226,7 +3360,9 @@ export class SparseVoxelDrySceneRenderer {
         visibility.setBindGroup(splitGroup, this.splitVisibilityBindGroup!);
         visibility.draw(3);
         visibility.end();
-        this.primaryVisibilityCacheKey = this.rayCoherenceMode === "static-primary" ? primaryFrameKey : undefined;
+        this.primaryVisibilityCacheKey = this.rayCoherenceMode === "static-primary" && usePrepass
+          ? primaryFrameKey
+          : undefined;
         tracePhase?.({ id: "svo-primary", label: "SVO primary visibility" });
       }
 
@@ -3325,6 +3461,10 @@ export class SparseVoxelDrySceneRenderer {
     this.conePrepassShadePipeline = undefined;
     this.coneReducedPipeline = undefined;
     this.conePipelineScale = undefined;
+    this.splitPipelineBundles.clear();
+    this.splitPipelineCompiles.clear();
+    this.conePipelineBundles.clear();
+    this.conePipelineCompiles.clear();
     this.primitiveBuffer?.destroy();
     this.glassBuffer?.destroy();
     this.paramsBuffer.destroy();
@@ -3333,6 +3473,7 @@ export class SparseVoxelDrySceneRenderer {
     this.thickGlassUniformBuffer.destroy();
     this.nodeMipFallbackAtlas.destroy();
     this.nodeMipFallbackDirectory.destroy();
+    this.nodeMipFallbackDirectPageTable.destroy();
     this.gBufferTargets.destroy();
     this.temporalAccumulator.destroy();
     this.pickingReadback.destroy();

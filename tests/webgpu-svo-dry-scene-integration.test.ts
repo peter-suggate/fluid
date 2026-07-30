@@ -113,11 +113,12 @@ test("the fullscreen vertex stage compiles from a small module isolated from the
 });
 
 test("every dry-shader group-zero declaration has one layout and bind-group entry", () => {
-  const declarations = [...svoDrySceneShader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var(?:(?:<(uniform|storage,\s*read)>)|\s+[^:]+:\s*(texture_3d<f32>|texture_2d<u32>|sampler))/g)]
+  const declarations = [...svoDrySceneShader.matchAll(/@group\(0\)\s+@binding\((\d+)\)\s+var(?:(?:<(uniform|storage,\s*read)>)|\s+[^:]+:\s*(texture_3d<f32>|texture_3d<u32>|texture_2d<u32>|sampler))/g)]
     .map((match) => ({
       binding: Number(match[1]),
       type: match[2] === "uniform" ? "uniform" : match[2] ? "read-only-storage"
         : match[3] === "texture_3d<f32>" ? "texture-3d-float"
+        : match[3] === "texture_3d<u32>" ? "texture-3d-uint"
         : match[3] === "texture_2d<u32>" ? "texture-2d-uint" : "filtering-sampler",
     }))
     .sort((a, b) => a.binding - b.binding);
@@ -140,15 +141,17 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), [
     { binding: 11, type: "read-only-storage" }, { binding: 12, type: "read-only-storage" },
   ]);
-  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-4).map(({ binding, type }) => [binding, type]), [
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-5).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
     // Evolving fluid coverage shares the node-mip sampler rather than adding a
     // second one: both want clamp-to-edge linear filtering.
     [19, "texture-3d-float"],
+    [20, "texture-3d-uint"],
   ], "cone lighting must consume sampled resources rather than another fragment storage buffer");
   assert.match(drySceneSource, /nodeMip\?\.view \?\? this\.nodeMipFallbackAtlasView/);
   assert.match(drySceneSource, /nodeMip\?\.sampler \?\? this\.nodeMipFallbackSampler/);
   assert.match(drySceneSource, /nodeMip\?\.directoryView \?\? this\.nodeMipFallbackDirectoryView/);
+  assert.match(drySceneSource, /nodeMip\?\.directPageTableView \?\? this\.nodeMipFallbackDirectPageTableView/);
 });
 
 test("unavailable structural fields fail over to raster before GPU encoding", () => {

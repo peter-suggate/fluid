@@ -392,7 +392,7 @@ export class WebGPUOctreePowerDescriptor {
     assertOctreePowerRowDeltaLayout(delta, this.plan.rowCapacity, "Power descriptor");
     this.device.queue.writeBuffer(this.params, 0, new Uint32Array([
       ...options.dimensions, options.maximumLeafSize, this.plan.rowCapacity, generation, this.plan.rowCapacity, 0,
-      delta.controlOffsetWords, delta.newToOldOffsetWords, delta.affectedRowsOffsetWords,
+      delta.controlOffsetWords, delta.newToOldOffsetWords, delta.dirtyRowsOffsetWords,
       candidateOwnerView ? 1 : 0,
     ]));
     let cached = this.cachedGroup;
@@ -414,9 +414,9 @@ export class WebGPUOctreePowerDescriptor {
     const group = cached.group;
     let pass = broker.compute({ label: "Prepare power descriptor control" });
     pass.setPipeline(this.preparePipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1);
-    broker.copyBufferToBuffer(delta.rows, (delta.controlOffsetWords + 12) * 4,
+    broker.copyBufferToBuffer(delta.rows, (delta.controlOffsetWords + 9) * 4,
       this.workDispatch, 0, this.plan.dispatchBytes);
-    pass = broker.compute({ label: "Resolve affected power descriptors" });
+    pass = broker.compute({ label: "Resolve structurally dirty power descriptors" });
     pass.setPipeline(this.generatePipeline); pass.setBindGroup(0, group);
     pass.dispatchWorkgroupsIndirect(this.workDispatch, 0);
     broker.copyBufferToBuffer(this.control, 64, this.workDispatch, 0, this.plan.dispatchBytes);
@@ -523,7 +523,6 @@ struct ControlArena {
 @group(0) @binding(9) var<storage,read> ownerCandidate:array<u32>;
 const INVALID:u32=0xffffffffu;
 const ROW_DELTA_VALID:u32=${OCTREE_POWER_ROW_DELTA_VALID}u;
-const ROW_DELTA_AFFECTED:u32=0x80000000u;
 const OWNER_MAGIC:u32=${OCTREE_OWNER_ARENA_MAGIC}u;
 const OWNER_PUBLICATION_READY:u32=${OCTREE_OWNER_PAGE_PUBLICATION_STATUS.ready}u;
 const OWNER_VALID:u32=0x80000000u;
@@ -560,15 +559,15 @@ fn generation()->u32{let base=params.delta.x;return select(0u,rowDelta[base+7u],
 fn deltaAccepted(requested:u32)->bool{
   if(params.delta.x>arrayLength(&rowDelta)||arrayLength(&rowDelta)-params.delta.x<16u){return false;}
   let base=params.delta.x;let previous=rowDelta[base+1u];let carried=rowDelta[base+2u];
-  let added=rowDelta[base+3u];let retired=rowDelta[base+4u];let affected=rowDelta[base+6u];
+  let added=rowDelta[base+3u];let retired=rowDelta[base+4u];let dirty=rowDelta[base+5u];
   let mapsFit=params.delta.y<=arrayLength(&rowDelta)&&requested<=arrayLength(&rowDelta)-params.delta.y;
-  let affectedFits=params.delta.z<=arrayLength(&rowDelta)&&affected<=arrayLength(&rowDelta)-params.delta.z;
-  return mapsFit&&affectedFits&&rowDelta[base]==requested
+  let dirtyFits=params.delta.z<=arrayLength(&rowDelta)&&dirty<=arrayLength(&rowDelta)-params.delta.z;
+  return mapsFit&&dirtyFits&&rowDelta[base]==requested
     &&rowDelta[base+7u]==generation()&&rowDelta[base+8u]==ROW_DELTA_VALID
-    &&carried<=previous&&affected<=requested
+    &&carried<=previous&&dirty<=requested
     &&requested==carried+added&&requested==previous+added-retired;
 }
-fn affectedRow(item:u32)->u32{return rowDelta[params.delta.z+item];}
+fn dirtyRow(item:u32)->u32{return rowDelta[params.delta.z+item];}
 fn supportedSize(size:u32)->bool{return size==1u||size==2u||size==4u||size==8u||size==16u||size==32u;}
 fn volumeFits()->bool{let d=dims();return d.x!=0u&&d.y!=0u&&d.z!=0u&&d.x<=0xffffffffu/d.y&&d.x*d.y<=0xffffffffu/d.z;}
 fn cellCoord(cell:u32)->vec3u{let d=dims();return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}
@@ -630,7 +629,7 @@ fn succeedRow(row:u32,descriptor:u32){
 }
 fn descriptorValid(descriptor:u32)->bool{return descriptor!=INVALID&&(descriptor&0x40000000u)==0u;}
 fn descriptorFlags(descriptor:u32)->u32{return select(CAPACITY,descriptor&127u,(descriptor&0x40000000u)!=0u);}
-fn affectedCount()->u32{return rowDelta[params.delta.x+6u];}
+fn dirtyCount()->u32{return rowDelta[params.delta.x+5u];}
 fn dispatchFor(count:u32)->vec3u{
   let groups=(count+63u)/64u;let x=min(groups,65535u);
   return vec3u(x,select(1u,(groups+x-1u)/x,x>0u),1u);
@@ -678,11 +677,11 @@ var<workgroup> publicationFailures:array<vec4u,256>;
 @compute @workgroup_size(64) fn generatePowerDescriptors(
     @builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) workgroups:vec3u,@builtin(local_invocation_index) lid:u32){
   if(controlArena.candidate.flags!=0u){return;}
-  let item=(wid.x+wid.y*workgroups.x)*64u+lid;if(item>=affectedCount()){return;}
-  let row=affectedRow(item);let requested=controlArena.candidate.rowCount;
+  let item=(wid.x+wid.y*workgroups.x)*64u+lid;if(item>=dirtyCount()){return;}
+  let row=dirtyRow(item);let requested=controlArena.candidate.rowCount;
   if(row>=requested||row>=arrayLength(&headers)||row>=arrayLength(&descriptors)){return;}
   indirectDispatch[statusBase()+row]=STATUS_LISTED;
-  if((item>0u&&affectedRow(item-1u)>=row)||(rowDelta[params.delta.y+row]&ROW_DELTA_AFFECTED)==0u){
+  if(item>0u&&dirtyRow(item-1u)>=row){
     failRow(row,CAPACITY,0u);return;
   }
   let header=headers[row];
@@ -727,11 +726,10 @@ var<workgroup> publicationFailures:array<vec4u,256>;
   let block=wid.x+wid.y*workgroups.x;let row=block*256u+lane;let requested=controlArena.candidate.rowCount;
   var status=0u;
   if(row<requested&&controlArena.candidate.flags==0u){
-    let encoded=rowDelta[params.delta.y+row];let flagged=(encoded&ROW_DELTA_AFFECTED)!=0u;
+    let encoded=rowDelta[params.delta.y+row];
     let listed=(indirectDispatch[statusBase()+row]&STATUS_LISTED)!=0u;
-    let oldPlusOne=encoded&0x7fffffffu;var descriptor=INVALID;var flags=0u;
-    if(flagged!=listed){flags|=CAPACITY;}
-    if(flagged){descriptor=descriptors[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
+    let oldPlusOne=encoded&0x3fffffffu;var descriptor=INVALID;var flags=0u;
+    if(listed){descriptor=descriptors[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
     else if(oldPlusOne==0u){flags|=CAPACITY;}
     else{
       let old=oldPlusOne-1u;
@@ -797,7 +795,7 @@ var<workgroup> publicationFailures:array<vec4u,256>;
     controlArena.candidate.validCount=total.x;controlArena.candidate.sameOrFinerCount=total.y;
     controlArena.candidate.sameOrCoarserCount=total.z;controlArena.candidate.errorCount+=total.w;
     controlArena.candidate.flags|=failed.x;controlArena.candidate.firstInvalid=min(controlArena.candidate.firstInvalid,failed.y);
-    if(failed.z!=affectedCount()||total.x!=controlArena.candidate.rowCount||total.y+total.z!=total.x){
+    if(failed.z!=dirtyCount()||total.x!=controlArena.candidate.rowCount||total.y+total.z!=total.x){
       rejectCandidate(select(0u,failed.y,failed.y!=INVALID),CAPACITY);
     }
     if(controlArena.candidate.errorCount==0u&&controlArena.candidate.flags==0u){

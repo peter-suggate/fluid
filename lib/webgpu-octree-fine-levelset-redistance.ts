@@ -263,8 +263,9 @@ fn jfaStrideClass()->u32{if(JFA_STRIDE==1u){return 0u;}if(JFA_STRIDE==2u){return
 fn fixedTapAddress(local:u32,tap:u32)->vec2u{let code=JFA_TAP_AXIS_CODES[tap];let base=jfaStrideClass()*12u;let x=JFA_AXIS_ADDRESSES[base+(local&3u)*3u+(code&3u)];let y=JFA_AXIS_ADDRESSES[base+((local>>2u)&3u)*3u+((code>>2u)&3u)];let z=JFA_AXIS_ADDRESSES[base+((local>>4u)&3u)*3u+((code>>4u)&3u)];return vec2u((x>>2u)+3u*((y>>2u)+3u*(z>>2u)),(x&3u)+4u*((y&3u)+4u*(z&3u)));}
 `;
 
-/** Opt-in B4-specialized flood addressing. Default OFF so the document's
- * interleaved A/B protocol can compare both variants inside one binary. */
+/** B4-specialized flood addressing. Production defaults ON for the exact B4
+ * page geometry; `=0` retains the generic arithmetic as an in-binary
+ * differential control. */
 export const FINE_LEVELSET_JFA_B4_ADDRESSING_ENV = "FLUID_FINE_JFA_B4_ADDRESSING";
 /** Set to zero for an in-binary recurring support-wide JFA oracle. */
 export const FINE_LEVELSET_JFA_DIRTY_FRONTIER_ENV = "FLUID_FINE_JFA_DIRTY_FRONTIER";
@@ -282,7 +283,7 @@ export function fineLevelSetJFAB4AddressingRequested(
   plan: { readonly brickResolution: number; readonly samplesPerBrick: number },
   environment: Record<string, string | undefined> = process.env,
 ): boolean {
-  return environment[FINE_LEVELSET_JFA_B4_ADDRESSING_ENV] === "1"
+  return environment[FINE_LEVELSET_JFA_B4_ADDRESSING_ENV] !== "0"
     && plan.brickResolution === 4 && plan.samplesPerBrick === 64;
 }
 
@@ -966,9 +967,9 @@ fn resolvedSeed(index:u32)->u32{return workA[index];}
  * constant; the subgroup form below is retained only as a measurement oracle. */
 export const fineLevelSetJFACPTWGSL = buildFineLevelSetJFACPTWGSL(false);
 
-/** Opt-in variant selected by `FLUID_FINE_JFA_B4_ADDRESSING=1`. Differs from
- * the production source only in `localCoord`, `physicalSampleQ`, the closest
- * point accessor and the flood's candidate evaluation. */
+/** Production B4 variant (or explicit `FLUID_FINE_JFA_B4_ADDRESSING=1`).
+ * Differs from the generic differential source only in `localCoord`,
+ * `physicalSampleQ`, the closest-point accessor and candidate evaluation. */
 export const fineLevelSetJFACPTB4AddressingWGSL = buildFineLevelSetJFACPTWGSL(true);
 
 /** Measurement oracle for the superseded one-subgroup-per-voxel flood. */

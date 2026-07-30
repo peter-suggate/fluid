@@ -63,7 +63,8 @@ test("production dry pass uses a renderer-owned uniform mirror within the fragme
     .filter(({ type }) => type === "read-only-storage").length, 10);
   assert.match(svoDrySceneShader, /@binding\(14\) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>/);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 14), { binding: 14, type: "uniform" });
-  assert.match(drySource, /return \{ binding, visibility: GPUShaderStage\.FRAGMENT, buffer: \{ type \} \}/);
+  assert.match(drySource, /const visibility = GPUShaderStage\.FRAGMENT \| \(computeBindings\.has\(binding\) \? GPUShaderStage\.COMPUTE : 0\)/);
+  assert.match(drySource, /return \{ binding, visibility, buffer: \{ type \} \}/);
   assert.match(drySource, /copyBufferToBuffer\(this\.rigidMotionSource, 0, this\.rigidMotionUniformBuffer, 0, SVO_DRY_RIGID_MOTION_UNIFORM_BYTES\)/);
   assert.match(rendererSource, /setRigidMotionSource\(backend === "webgpu" \? this\.gpuFluid\?\.rigidMotionBuffer : undefined\)/);
   assert.match(methodsSource, /readonly rigidMotionBuffer\?: GPUBuffer/);

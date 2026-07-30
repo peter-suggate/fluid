@@ -17,6 +17,7 @@ import {
 } from "./octree-regression-artifact";
 import {
   POWER_DAM_LANE_ENVIRONMENT,
+  powerDamLaneWithDt,
   powerDamLaneWithSteps,
   type PowerDamRuntimeLane as RuntimeLane,
 } from "./power-dam-lane-environment";
@@ -25,9 +26,8 @@ const args = new Set(process.argv.slice(2));
 const requestedLane = process.argv.find((argument) => argument.startsWith("--lane="))
   ?.slice("--lane=".length) ?? "mini";
 const quiescent = args.has("--quiescent") || requestedLane === "quiescent";
-if (requestedLane !== "mini" && requestedLane !== "large" && requestedLane !== "ui" && requestedLane !== "quiescent"
-  && requestedLane !== "moving-interface") {
-  throw new Error("--lane must be mini, large, ui, quiescent, or moving-interface");
+if (requestedLane !== "quiescent" && !(requestedLane in POWER_DAM_LANE_ENVIRONMENT)) {
+  throw new Error(`--lane must be quiescent or one of ${Object.keys(POWER_DAM_LANE_ENVIRONMENT).join(", ")}`);
 }
 if (quiescent && requestedLane === "ui") {
   throw new Error("--quiescent uses the mini dam and cannot be combined with --lane=ui");
@@ -60,6 +60,11 @@ if (quiescent && fineTimestamps) {
   throw new Error("--quiescent cannot use --fine-timestamps until the runner can timestamp only a trailing window");
 }
 const jsonOnly = args.has("--json");
+const forwardNDJSON = args.has("--forward-ndjson");
+// Discovery-only escape hatch. Tripwires still execute and every failure is
+// retained loudly, but an intentionally quality-invalid ablation may finish
+// far enough to report its wall-clock lower bound.
+const qualityInvalidProbe = args.has("--quality-invalid-probe");
 const artifactPath = process.argv.find((argument) => argument.startsWith("--artifact="))
   ?.slice("--artifact=".length);
 const diagnosticArtifactPath = process.argv.find((argument) =>
@@ -129,6 +134,9 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
     // is not a speedup. `FLUID_TRIPWIRES=1` also makes an *unevaluable*
     // counter a failure. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3.
     FLUID_TRIPWIRES: "1",
+    ...(qualityInvalidProbe ? { FLUID_TRIPWIRE_ALLOW:
+      "topology-rollback,restriction-unaccepted,mgpcg-nonconvergence,fine-band-sentinel",
+      FLUID_TRIPWIRE_ALLOW_SUMMARY: "1", FLUID_QUALITY_INVALID_PROBE: "1" } : {}),
 });
 
 const runBenchmark = async (overrides: Record<string, string> = {}): Promise<PowerDamResultRecord> => {
@@ -139,7 +147,19 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
   });
   let result: PowerDamResultRecord | undefined;
   const lines = createInterface({ input: child.stdout! });
-  lines.on("line", (line) => { result = powerDamResultFromLine(line) ?? result; });
+  lines.on("line", (line) => {
+    result = powerDamResultFromLine(line) ?? result;
+    if (forwardNDJSON) {
+      try {
+        const record = JSON.parse(line) as { record?: string; phase?: string };
+        if (record.record === "progress"
+          || record.phase === "octree-row-delta-census-sample"
+          || record.phase === "frame-redundancy-census") {
+          console.log(line);
+        }
+      } catch { /* forward only machine-readable experiment records */ }
+    }
+  });
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => signal
@@ -161,9 +181,21 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
 // and a 500-step mean describe different regimes.
 const stepsOverride = process.argv.find((argument) => argument.startsWith("--steps="))
   ?.slice("--steps=".length);
+const dtOverride = process.argv.find((argument) => argument.startsWith("--dt="))
+  ?.slice("--dt=".length);
+const targetOverride = process.argv.find((argument) => argument.startsWith("--target-s="))
+  ?.slice("--target-s=".length);
 const bandLevelOverride = process.argv.find((argument) => argument.startsWith("--band-level="))
   ?.slice("--band-level=".length);
-const laneOverride: Record<string, string> = stepsOverride === undefined ? {} : (() => {
+if (stepsOverride !== undefined && dtOverride !== undefined) {
+  throw new Error("--steps and --dt are mutually exclusive; --dt derives steps at fixed simulated time");
+}
+const laneOverride: Record<string, string> = dtOverride !== undefined ? (() => {
+  if (quiescent) throw new Error("--dt cannot override the quiescent paired-prefix lane");
+  const dt = Number(dtOverride);
+  const target = targetOverride === undefined ? 2 : Number(targetOverride);
+  return powerDamLaneWithDt(lane, dt, target);
+})() : stepsOverride === undefined ? {} : (() => {
   const steps = Number(stepsOverride);
   if (!Number.isInteger(steps) || steps <= 0) throw new Error(`--steps must be a positive integer; received ${stepsOverride}`);
   if (quiescent) throw new Error("--steps cannot override the quiescent lane, which owns its own settle/measure split");
@@ -334,9 +366,12 @@ const failures = [...powerDamPerformanceFailures(summary, {
 // session to triage.
 if (jsonOnly) {
   for (const failure of failures) console.error(`performance gate: ${failure}`);
-  console.log(JSON.stringify(quiescent
+  const output = quiescent
     ? { lane: "quiescent", moving: summarizePowerDamPerformance(movingResult), quiescent: summary }
-    : summary));
+    : summary;
+  console.log(JSON.stringify(qualityInvalidProbe
+    ? { ...output, qualityInvalidProbe: true, probeFailures: failures }
+    : output));
 } else {
   const authority = quiescent ? "quiescent paired-prefix window"
     : traceProfile ? "generic trace sample" : "throughput authority";
@@ -415,4 +450,4 @@ if (jsonOnly) {
   console.log(`acceptance: benchmark:power-dam-ui ${lane === "ui" ? "recorded above" : "required separately"}; zero validation errors ${summary.validationErrorCount === 0 ? "PASS" : "FAIL"}; performance gates ${failures.length === 0 ? "PASS" : "FAIL"}`);
   console.log("acceptance: run npm run acceptance:power-liquids-phase for the UI profile, exact two-step smoke, and 500-step minimal gate");
 }
-if (summary.validationErrorCount > 0 || failures.length > 0) process.exitCode = 1;
+if (summary.validationErrorCount > 0 || (!qualityInvalidProbe && failures.length > 0)) process.exitCode = 1;

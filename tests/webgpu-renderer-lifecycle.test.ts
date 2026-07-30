@@ -1,27 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { canQueuePreparedGPUAdvance, FluidLabRenderer, observedGPUAdvanceTime_ms, pausedTargetRequiresGPUAdvance, presentationHasPhysicsSlack, presentationPhysicsQueueDepth, presentationPriorityDue, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
+import { BROWSER_GPU_THROUGHPUT_DEPTH, canQueuePreparedGPUAdvance, FluidLabRenderer, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
+import { MAXIMUM_PENDING_PHYSICS_ADVANCES } from "../lib/structured-step-snapshot";
 import { presentationStateChanged } from "../lib/frame-pacing";
-
-test("presentation takes queue priority once a 60 Hz deadline has elapsed", () => {
-  assert.equal(presentationPriorityDue(-Infinity, 0), true);
-  assert.equal(presentationPriorityDue(100, 108), false);
-  assert.equal(presentationPriorityDue(100, 116.2), true);
-});
-
-test("physics admission preserves the measured presentation deadline", () => {
-  assert.equal(presentationHasPhysicsSlack(-Infinity, 0, 2, 1), false);
-  assert.equal(presentationHasPhysicsSlack(100, 105, 4, 2), true);
-  assert.equal(presentationHasPhysicsSlack(100, 112, 4, 2), false);
-  assert.equal(presentationHasPhysicsSlack(100, 105, 20, 2), false);
-});
-
-test("a paused explicit step bypasses presentation-slack deferral exactly while debt remains", () => {
-  assert.equal(pausedTargetRequiresGPUAdvance(false, 0.004, 0), true);
-  assert.equal(pausedTargetRequiresGPUAdvance(false, 0.004, 0.004), false);
-  assert.equal(pausedTargetRequiresGPUAdvance(true, 0.004, 0), false);
-});
 
 test("GPU submission advances only once toward prepared simulation debt", () => {
   let submittedTime_s = 0;
@@ -42,48 +24,44 @@ test("GPU submission advances only once toward prepared simulation debt", () => 
   assert.equal(advances, 1);
 });
 
-test("GPU queue stays dense around presentation without admitting a physics burst", () => {
-  assert.equal(presentationPhysicsQueueDepth(undefined, 1), 2);
-  assert.equal(presentationPhysicsQueueDepth(35, 1), 1);
-  assert.equal(presentationPhysicsQueueDepth(3.4, 1), 5, "one whole advance may overshoot the remaining budget");
+test("GPU queue pairs at most one simulation advance with each presentation", () => {
+  assert.equal(MAXIMUM_PENDING_PHYSICS_ADVANCES, 8);
+  assert.equal(BROWSER_GPU_THROUGHPUT_DEPTH, 2);
   assert.equal(canQueuePreparedGPUAdvance(0, 4), true);
   assert.equal(canQueuePreparedGPUAdvance(3, 4), true);
   assert.equal(canQueuePreparedGPUAdvance(4, 4), false);
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  assert.match(renderer, /const maximumPendingAdvances=postPresentationDepth/,
-    "the rolling window is an absolute in-flight ceiling");
-  assert.doesNotMatch(renderer, /gpuPendingBatches\+postPresentationDepth/,
-    "a presentation must not add a fresh window on top of already queued physics");
-  assert.match(renderer, /interveningWorkSequence: nonPhysicsSequenceAtSubmit/,
-    "physics wall samples must carry the non-physics queue epoch they followed");
-  assert.match(renderer, /this\.nonPhysicsQueueWorkSequence \+= 1;\s*this\.diagnosticQueueWorkPending \+= 1;/,
-    "stats readbacks must invalidate physics wall samples and conservative idle evidence");
-  assert.match(renderer, /this\.nonPhysicsQueueWorkSequence\+=1;\s*this\.presentationPending=true;/,
-    "presentation submission must invalidate later physics wall samples before refilling the queue");
-  assert.match(renderer, /queueWasIdleAtSubmit:presentationQueueWasIdleAtSubmit/,
-    "presentation cost must only learn from an independently idle queue");
+  const draw = renderer.slice(renderer.indexOf("  draw(time_s:"), renderer.indexOf("  destroy(): void"));
+  const advance = draw.indexOf("gpuInfo = this.submitPreparedGPUFluid");
+  const presentation = draw.indexOf("this.device.queue.submit([encoder.finish()])");
+  assert.ok(advance >= 0 && presentation > advance,
+    "the paired presentation must be queued immediately after its simulation advance");
+  assert.equal((draw.match(/this\.submitPreparedGPUFluid\(/g) ?? []).length, 1,
+    "draw must never enqueue an autonomous post-presentation simulation burst");
+  assert.doesNotMatch(renderer, /continuePreparedGPUWork|postPresentationDepth/,
+    "simulation completion must not refill ahead of the next paired presentation");
 });
 
-test("the exact generic physics partition drives presentation admission", () => {
-  const trace = {
-    sampleId: 1, domain: "gpu", lane: "physics", context: "test", capturedAt_ms: 0,
-    total_ms: 3.5, phases: [{ id: "other", label: "test", duration_ms: 3.5 }],
-  } satisfies NonNullable<Parameters<typeof observedGPUAdvanceTime_ms>[0]>;
-  assert.equal(observedGPUAdvanceTime_ms(trace), 3.5);
-  assert.equal(observedGPUAdvanceTime_ms({ ...trace, lane: "presentation" }), undefined);
-  assert.equal(observedGPUAdvanceTime_ms(undefined), undefined);
-});
-
-test("renderer does not synthesize a second wall-clock timing system", () => {
+test("renderer scheduling has no wall-clock timing system", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const submit = renderer.slice(
     renderer.indexOf("private submitPreparedGPUFluid"),
-    renderer.indexOf("/** Keep the GPU occupied", renderer.indexOf("private submitPreparedGPUFluid")),
+    renderer.indexOf("/** Re-pose the scene", renderer.indexOf("private submitPreparedGPUFluid")),
   );
   assert.match(submit, /submitNextPreparedGPUAdvance/);
-  assert.doesNotMatch(submit, /queueReadyAtPromise|cpuAdvanceEncode_ms|physicsQueueWall_ms|gpuAdvanceWall_ms/);
-  assert.match(renderer, /resetPresentationTrace\(\)[^{]*\{[^}]*this\.presentationWallEstimator\.reset\(\)/s,
-    "a new presentation context must discard a stale scheduling estimate");
+  assert.doesNotMatch(submit, /queueReadyAtPromise|cpuAdvanceEncode_ms|physicsQueueWall_ms|gpuAdvanceWall_ms|WallEstimator/);
+  assert.doesNotMatch(renderer, /presentationHasPhysicsSlack|presentationPhysicsQueueDepth|presentationWallEstimator|advanceWallEstimator/,
+    "render and simulation admission must not negotiate through timing estimates");
+});
+
+test("presentation stays double buffered without a single-frame completion gate", () => {
+  const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(renderer, /presentationPending|presentationThroughputSlotAvailable/);
+  assert.match(renderer, /presentationsInFlight >= BROWSER_GPU_THROUGHPUT_DEPTH/,
+    "presentation must stay double buffered instead of growing an unbounded stale-frame FIFO");
+  assert.match(renderer, /this\.device\.queue\.submit\(\[encoder\.finish\(\)\]\)/);
+  assert.match(renderer, /completedPresentations\+=1/,
+    "FPS evidence must count completed GPU presentations without gating the next draw");
 });
 
 test("paused solver attachment publications cannot suppress the continuous presentation loop", () => {

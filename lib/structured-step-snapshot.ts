@@ -33,9 +33,9 @@ import {
 export type StructuredStepSnapshotSources = StructuredAuditRecordSources;
 
 /**
- * Ceiling on advances a driver may keep in flight. `presentationPhysicsQueueDepth`
- * (`lib/webgpu-renderer.ts`) clamps the browser's measured depth to this, and the
- * Dawn harness fences well inside it. The ring is sized from this rather than
+ * Maximum supported advances a driver may keep in flight. Interactive drivers
+ * can use a lower latency-oriented depth, and the Dawn harness fences well
+ * inside it. The ring is sized from this rather than
  * from a literal because an under-sized ring is not a diagnostics degradation:
  * every slot can legally be mapping, `encode` then SKIPS the record, and a
  * missing `step-snapshot` stage latches a permanent step-sequence fault

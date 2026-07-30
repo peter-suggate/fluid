@@ -54,15 +54,15 @@ test("ping-pong HDR, compact keys, and moments have exact bounded formats and li
   const accumulator = new SparseVoxelTemporalAccumulator(mockDevice(textures, pipelines));
   await accumulator.initialize();
   assert.deepEqual(SVO_TEMPORAL_ACCUMULATION_LAYOUT, {
-    paramsBytes: 160, historyColorFormat: "rgba16float", momentsFormat: "rgba16float", keyFormat: "rgba16uint",
+    paramsBytes: 176, historyColorFormat: "rgba16float", momentsFormat: "rgba16float", keyFormat: "rgba16uint",
     pingPongBytesPerPixel: 64, previousNeighborhoodLoadsPerAcceptedPixel: 9, neighborhoodLoadsPerAcceptedPixel: 8,
     fullScreenResolvePassesPerFrame: 1, aliasBreakingCopiesPerFrame: 0,
-    maximumAccumulationSamples: 64, maximumStoredSamples: 255,
+    maximumAccumulationSamples: 32, maximumStoredSamples: 255,
   });
   assert.deepEqual(Array.from(pipelines[0].fragment!.targets).map((target) => target?.format), ["rgba16float", "rgba16float", "rgba16uint", "rgba16uint"]);
   assert.equal(accumulator.ensureSize(320, 180), true);
-  assert.equal(accumulator.allocatedBytes, 3_686_560);
-  assert.equal(sparseVoxelTemporalAllocatedBytes(1920, 1080), 132_710_560);
+  assert.equal(accumulator.allocatedBytes, 3_686_576);
+  assert.equal(sparseVoxelTemporalAllocatedBytes(1920, 1080), 132_710_576);
   assert.equal(accumulator.ensureSize(320, 180), false);
   assert.equal(textures.length, 8);
   assert.deepEqual(textures.map(({ descriptor }) => descriptor.format), ["rgba16float", "rgba16float", "rgba16uint", "rgba16uint", "rgba16float", "rgba16float", "rgba16uint", "rgba16uint"]);
@@ -108,7 +108,7 @@ test("one resolve pass exposes ping-pong HDR without an alias-breaking copy and 
 test("shader accepts exact static or rigid-valid motion and uses velocity reprojection, rejection, moments, and neighborhood clamp", () => {
   assert.match(sparseVoxelTemporalAccumulatorShader, /supportedMotion=motionKind==SVO_TEMPORAL_MOTION_STATIC\|\|motionKind==SVO_TEMPORAL_MOTION_RIGID/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /previousWorld=world-velocity\*temporal\.control\.y/);
-  assert.match(sparseVoxelTemporalAccumulatorShader, /svoTemporalHistoryReason\(currentKey,previousKey,temporal\.control\.x,temporal\.control\.y,velocity,motionKind,true,true,error\)/);
+  assert.match(sparseVoxelTemporalAccumulatorShader, /svoTemporalHistoryReason\(currentKey,previousKey,temporal\.control\.x\*temporal\.tuning\.z,temporal\.control\.y,velocity,motionKind,true,true,error\)/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /TEMPORAL_REQUIRED_FLAGS/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /svoTemporalHistoryReason\(/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /currentKey\.depth_m=expectedPreviousDistance/);
@@ -117,7 +117,8 @@ test("shader accepts exact static or rigid-valid motion and uses velocity reproj
   assert.match(sparseVoxelTemporalAccumulatorShader, /let exactIdentity=all\(keyA\.zw==published\[0\]\.zw\)&&all\(keyB==published\[1\]\)/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /history=temporalVarianceClamp\(history,oldMoments\)/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /sampleCount=min\(oldMoments\.z\+1\.0,255\.0\)/);
-  assert.match(sparseVoxelTemporalAccumulatorShader, /accumulationCount=min\(sampleCount,64\.0\)/);
+  assert.match(sparseVoxelTemporalAccumulatorShader, /accumulationCount=min\(sampleCount,temporal\.tuning\.x\)/,
+    "the live preset cap, rather than a baked shader constant, bounds history weight");
   assert.match(sparseVoxelTemporalAccumulatorShader, /shadowDeferred=failure==TEMPORAL_FAILURE_SHADOW_DEFERRED/);
   assert.match(sparseVoxelTemporalAccumulatorShader, /if\(shadowDeferred\)\{result=previous\.rgb;sampleCount=oldMoments\.z;pausedStable=oldMoments\.w;\}/,
     "a deferred shadow pixel reuses only accepted identity-validated history");

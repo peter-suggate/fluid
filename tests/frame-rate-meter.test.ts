@@ -23,3 +23,25 @@ test("reset prevents an inactive gap from contaminating resumed FPS", () => {
   assert.equal(meter.sample(10_000), undefined);
   assert.equal(meter.sample(10_020), 50);
 });
+
+test("completed FPS uses cumulative GPU completions rather than callback spacing", () => {
+  const meter = new SmoothedFrameRate(5);
+  assert.equal(meter.sampleCompleted(0, 0), undefined);
+  assert.equal(meter.sampleCompleted(3, 50), 60);
+  assert.equal(meter.sampleCompleted(6, 100), 60);
+});
+
+test("batched GPU completion delivery does not create an FPS spike", () => {
+  const meter = new SmoothedFrameRate(5);
+  meter.sampleCompleted(0, 0);
+  meter.sampleCompleted(1, 16);
+  assert.equal(meter.sampleCompleted(6, 100), 60);
+});
+
+test("completed FPS falls to zero after the rolling window contains no completions", () => {
+  const meter = new SmoothedFrameRate(5);
+  meter.sampleCompleted(0, 0);
+  meter.sampleCompleted(6, 100);
+  meter.sampleCompleted(6, 700);
+  assert.equal(meter.completedFramesPerSecond, 0);
+});

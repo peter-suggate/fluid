@@ -145,6 +145,9 @@ test("changed topology faces remain pending for old-field transfer while exact c
   assert.match(directStructuredVelocityPublicationWGSL,
     /marker<=\.5\)\{local\[4u\]\+=1u;[\s\S]*worksetBase\(4u\)[\s\S]*publicationDispatch\[18u\]/,
     "changed faces must publish a compact candidate-only workset and indirect command");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /let groups=select\(\(count\+63u\)\/64u,count,cls==4u\)/,
+    "class 4 must publish one workgroup per changed face for cooperative transfer");
 });
 
 test("Dawn Metal compiles every direct structured publication stage", {

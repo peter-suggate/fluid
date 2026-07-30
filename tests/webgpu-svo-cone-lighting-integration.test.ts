@@ -154,8 +154,8 @@ test("node-mip sampling publishes its own world origin inside the static uniform
     SVO_DRY_SCENE_PARAMS_LAYOUT.fluidCoverageWordOffset + SVO_FLUID_COVERAGE_LAYOUT.frameWords,
     "runtime tuning must immediately follow the 12-word fluid frame");
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes,
-    (SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset + 5 * 4) * Uint32Array.BYTES_PER_ELEMENT,
-    "the uniform allocation must end after all five tuning vec4 lanes");
+    (SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipDirectLevelZWordOffset + 3 * 4) * Uint32Array.BYTES_PER_ELEMENT,
+    "the uniform allocation must end after the direct page-table metadata");
   assert.match(drySource, /floats\.set\(nodeMip\?\.worldOrigin_m \?\? structural\.domain\.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT\.nodeMipOriginWordOffset\)/);
   assert.match(svoDrySceneShader, /virtualVoxel=\(position_m-dry\.nodeMipOrigin\.xyz\)/,
     "topology experiments must not reinterpret an unchanged opacity atlas in the structural tree's coordinate frame");
@@ -186,5 +186,6 @@ test("production dry shader compiles sampled node-mip atlas and uint directory b
     assert.deepEqual(info.messages.filter(({ type }) => type === "error"), []);
     assert.match(svoDrySceneShader, /@binding\(16\) var nodeMipAtlas:texture_3d<f32>/);
     assert.match(svoDrySceneShader, /@binding\(18\) var nodeMipDirectory:texture_2d<u32>/);
+    assert.match(svoDrySceneShader, /@binding\(20\) var nodeMipPageTable:texture_3d<u32>/);
   } finally { device.destroy(); }
 });

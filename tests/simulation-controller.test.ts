@@ -104,6 +104,15 @@ test("controller source has no reporting-cadence correlation fallback", () => {
     "latest CPU callbacks are combined only after the GPU-physics branch has returned");
 });
 
+test("Fast Refresh retains the controller paired with the retained WebGPU viewport", () => {
+  const source = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
+  assert.match(source, /__fluidLabSimulationController/,
+    "transport and the retained render loop must keep sharing one controller after a module refresh");
+  assert.match(source, /Object\.setPrototypeOf\(retainedSimulation, SimulationController\.prototype\)/,
+    "the retained controller must adopt edited methods without losing its live simulation clock");
+  assert.match(source, /retainedSimulation \?\? new SimulationController\(\)/);
+});
+
 test("adding a rigid body does not pause a running simulation", () => {
   const originalScene = cloneScene(useSceneStore.getState().scene);
   const originalRunState = useRuntimeStore.getState().runState;

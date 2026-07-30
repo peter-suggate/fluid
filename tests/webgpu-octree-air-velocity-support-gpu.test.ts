@@ -8,6 +8,8 @@ import { auditWGSLComputeBindingReachability } from "../lib/wgsl-binding-reachab
 import {
   decodeOctreeAirSupportGPUFirstError,
   octreeAirSupportChangedFrontierEnabled,
+  octreeAirSupportCompactFineCellsEnabled,
+  octreeAirSupportCompactFineDemandEnabled,
   octreeAirSupportTopologyReuseEnabled,
   OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE,
   OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS,
@@ -51,6 +53,26 @@ test("Section 5 changed-frontier defaults on and retains a construction-stable d
   assert.equal(octreeAirSupportChangedFrontierEnabled({}), true);
   assert.equal(octreeAirSupportChangedFrontierEnabled({ FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER: "1" }), true);
   assert.equal(octreeAirSupportChangedFrontierEnabled({ FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER: "0" }), false);
+});
+
+test("fine demand defaults to a GPU-authored live-page launch and retains the capacity A/B", () => {
+  assert.equal(octreeAirSupportCompactFineDemandEnabled({}), true);
+  assert.equal(octreeAirSupportCompactFineDemandEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND: "1",
+  }), true);
+  assert.equal(octreeAirSupportCompactFineDemandEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND: "0",
+  }), false);
+});
+
+test("reuse-only compact fine-cell listing stays opt-in after a neutral A/B", () => {
+  assert.equal(octreeAirSupportCompactFineCellsEnabled({}), false);
+  assert.equal(octreeAirSupportCompactFineCellsEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS: "1",
+  }), true);
+  assert.equal(octreeAirSupportCompactFineCellsEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS: "0",
+  }), false);
 });
 
 test("GPU plan composes both support layouts and bounded candidate schedules", () => {
@@ -449,18 +471,23 @@ test("direct air rows and support identities share one fail-closed face transact
 test("host defaults to the exact changed frontier and retains the preceding fixed dense oracle", () => {
   const encode = compact(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
   assert.match(encode, /dispatchWorkgroups\(1\).*updateIndirectBuffer/);
-  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 3,
-    "the retained-graph admission may replace the march schedule exactly once");
+  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 4,
+    "identity work, face work, and the retained march must all remain GPU scheduled");
   for (const [name, offset] of [["clearAirSupportDirectory", 0], ["clearAirSupportTags", 12],
     ["emitAirSupportCandidates", 24], ["markAndScanAirSupportCandidates", 36]] as const) {
     assert.match(encode, new RegExp(`run\\("${name}",${offset}\\)`));
   }
   assert.match(encode, /updateIndirectBuffer\(this\.scratch,32\*4,this\.indirect,4\*12,2\*12\)/);
   assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,48\)/);
+  assert.match(encode,
+    /prepareFineBandAirSupportDemand.*updateIndirectBuffer[\s\S]*markFineBandAirSupportDemand.*dispatchWorkgroupsIndirect\(this\.indirect,48\)/s,
+    "fine demand must launch one workgroup per live page from a GPU-authored schedule");
+  assert.match(encode, /if\(compactFineDemand\)pass\.dispatchWorkgroupsIndirect\(this\.indirect,48\);else\{/,
+    "the provisioned-capacity launch must remain available only as the explicit A/B oracle");
   assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,60\)/);
   assert.match(encode,
-    /resolveAirSupportTopology.*dispatchWorkgroups\(Math\.ceil\(this\.plan\.support\.supportCapacity\/OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE\)\)/s,
-    "support topology work must be bounded by support rows, not the much larger candidate arena");
+    /updateIndirectBuffer\(this\.scratch,43\*4,this\.indirect,60,12\)[\s\S]*resolveAirSupportTopology.*dispatchWorkgroupsIndirect\(this\.indirect,60\)/s,
+    "support topology work must use the exact GPU-authored support-row count, not capacity");
   assert.match(encode, /run\("finalizeAirSupportMetadata"\)[\s\S]*commitAirSupportDirectRows[\s\S]*run\("commitAirSupportPublication"\)/);
   assert.doesNotMatch(encode, /dispatchWorkgroups\(this\.plan\.faceCapacity/);
   assert.match(encode, /clearBuffer\(this\.scratch,32\*4,6\*4\)/,
@@ -492,6 +519,7 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
     markAndScanAirSupportCandidates: [0,7], prefixAirSupportBlocks: [0,7],
     scatterAirSupportRecords: [0,7,8], resolveAirSupportTags: [0,7,8,9],
     resolveAirSupportTopology: [0,3,7,8,11,12,13,14],
+    prepareFineBandAirSupportDemand: [0,7,26],
     markFineBandAirSupportDemand: [0,7,25,26,27,28],
     closeFineBandAirSupportInterpolationDemand: [0,2,3,4,5,6,7,11,12,13,14],
     emitFineBandAirSupportCandidates: [0,2,3,7,11],

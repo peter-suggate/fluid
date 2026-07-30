@@ -31,6 +31,8 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
     velocityTransport: "maccormack" as const,
     octree: {
       maximumLeafSize: maximumLeafSize(values.maximumLeafSize ?? 16),
+      environmentBrickRefinementLevels: typeof values.svoEnvironmentBrickRefinementLevels === "number"
+        ? values.svoEnvironmentBrickRefinementLevels : undefined,
       // Pressure topology is a method setting, not a solver setting. Keep the
       // same adaptive octree when comparing the two pressure implementations.
       adaptivity: 1,

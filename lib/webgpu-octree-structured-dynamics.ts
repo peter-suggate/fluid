@@ -1282,22 +1282,40 @@ fn oldFieldAt(anchor:u32,point:vec3f)->vec4f{
   // zero is never presented as a successful topology transfer.
   if(!vectorValid(sample)){sample=velocitySample(anchor);}return sample;
 }
-fn oldAnchor(candidateBank:u32,candidateRow:u32,n:vec3f)->u32{
-  let center=candidateRowCenter(candidateBank,candidateRow);var row=acceptedRowContaining(center);if(row!=INVALID){return row;}
-  // A newly wet candidate centre can lie just beyond the old liquid frontier.
-  // Search back into its owner side by a bounded CFL support distance; the
-  // accepted Section 5 closure then evaluates the new face point itself.
-  for(var step=1u;step<=4u;step+=1u){row=acceptedRowContaining(center-f32(step)*.5*p.physical.x*n);if(row!=INVALID){return row;}}
-  // The interface can enter a cell transverse to this particular face normal.
-  // Section 5 guarantees a one-ring extended old field, so choose the nearest
-  // accepted carrier in the bounded 5^3 neighbourhood and evaluate the new
-  // centroid through that carrier's regular/tetrahedral closure.
-  var nearest=INVALID;var nearestDistance=0x7fffffffi;
-  for(var dz=-2i;dz<=2i;dz+=1i){for(var dy=-2i;dy<=2i;dy+=1i){for(var dx=-2i;dx<=2i;dx+=1i){
-    let offset=vec3i(dx,dy,dz);if(all(offset==vec3i(0))){continue;}let candidateRow=acceptedRowContaining(center+vec3f(offset)*p.physical.x);if(candidateRow==INVALID){continue;}
-    let distance=dx*dx+dy*dy+dz*dz;if(distance<nearestDistance||(distance==nearestDistance&&candidateRow<nearest)){nearest=candidateRow;nearestDistance=distance;}
-  }}}
-  return nearest;
+// One changed face owns one 128-lane workgroup. The first five lanes evaluate
+// the scalar search's ordered centre/backtrace probes; all 125 neighbourhood
+// offsets are then evaluated in parallel only when those probes miss. Integer
+// pair reduction preserves the scalar choice exactly: first probe rank for the
+// backtrace, then (squared distance, accepted row) for the 5^3 search.
+var<workgroup> transferProbeRows:array<u32,128>;
+var<workgroup> transferProbeRanks:array<u32,128>;
+var<workgroup> transferOld:vec4f;
+var<workgroup> transferDirect:u32;
+var<workgroup> transferNeighbor:u32;
+var<workgroup> transferHandle:u32;
+var<workgroup> transferDisposition:u32;
+var<workgroup> transferCandidateBank:u32;
+var<workgroup> transferOwner:u32;
+var<workgroup> transferPoint:vec4f;
+var<workgroup> transferNormal:vec4f;
+fn reduceTransferProbe(lid:u32)->u32{
+  workgroupBarrier();
+  for(var width=64u;width>0u;width>>=1u){
+    if(lid<width){let other=lid+width;let rank=transferProbeRanks[lid];let otherRank=transferProbeRanks[other];let row=transferProbeRows[lid];let otherRow=transferProbeRows[other];if(otherRank<rank||(otherRank==rank&&otherRow<row)){transferProbeRanks[lid]=otherRank;transferProbeRows[lid]=otherRow;}}
+    workgroupBarrier();
+  }
+  return transferProbeRows[0];
+}
+fn oldAnchor(candidateBank:u32,candidateRow:u32,n:vec3f,lid:u32)->u32{
+  let center=candidateRowCenter(candidateBank,candidateRow);
+  var row=INVALID;var rank=INVALID;
+  if(lid<5u){let probe=select(center,center-f32(lid)*.5*p.physical.x*n,lid>0u);row=acceptedRowContaining(probe);rank=select(INVALID,lid,row!=INVALID);}
+  transferProbeRows[lid]=row;transferProbeRanks[lid]=rank;
+  let reducedDirect=reduceTransferProbe(lid);if(lid==0u){transferDirect=reducedDirect;}let direct=workgroupUniformLoad(&transferDirect);if(direct!=INVALID){return direct;}
+  row=INVALID;rank=INVALID;
+  if(lid<125u){let z=lid/25u;let rem=lid-z*25u;let y=rem/5u;let x=rem-y*5u;let offset=vec3i(i32(x)-2i,i32(y)-2i,i32(z)-2i);if(any(offset!=vec3i(0))){row=acceptedRowContaining(center+vec3f(offset)*p.physical.x);if(row!=INVALID){rank=u32(offset.x*offset.x+offset.y*offset.y+offset.z*offset.z);}}}
+  transferProbeRows[lid]=row;transferProbeRanks[lid]=rank;
+  return reduceTransferProbe(lid);
 }
 fn candidateClosedWorld(point:vec3f,n:vec3f)->bool{
   let grid=point/p.physical.x;let d=dimensions();
@@ -1309,35 +1327,43 @@ fn candidateClosedWorld(point:vec3f,n:vec3f)->bool{
 }
 fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAMPLE);return handle<atomicMin(&candidate[1],handle);}
 // Candidate class 4 is the compact set of faces whose exact identity could not
-// be carried. Its producer publishes the same two-dimensional indirect shape
-// as every accepted class, so the folded item uses the common pinned stride.
-@compute @workgroup_size(64)fn transferStructuredTopologyCandidate(@builtin(global_invocation_id)g:vec3u){
-  let index=g.x+g.y*65535u*64u;let handle=candidateTransferItem(index);if(handle==INVALID||atomicLoad(&candidate[6])==0u||handle>=atomicLoad(&candidate[3])){return;}
-  let candidateBank=atomicLoad(&candidate[5])&1u;let base=candidateBank*p.authorityWords;let marker=bitcast<f32>(a[base+p.centroidOffset+4u*handle+3u]);if(marker>0.5){return;}
-  let at=base+p.centroidOffset+4u*handle;let point=vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));let nt=base+p.normalOffset+4u*handle;let n=vec3f(bitcast<f32>(a[nt]),bitcast<f32>(a[nt+1u]),bitcast<f32>(a[nt+2u]));
-  if(!finite3(point)||!finite3(n)){_ = rejectCandidateTransfer(handle);return;}
-  if(candidateClosedWorld(point,n)){a[base+p.valuesOffset+handle]=bitcast<u32>(0.);return;}
-  let candidateOwner=a[base+p.ownerOffset+handle];let candidateNeighbor=a[base+p.neighborOffset+handle];
+// be carried. Unlike ordinary 64-lane class work, its indirect record publishes
+// one workgroup per item so the neighbourhood search is wide rather than one
+// dependent page walk per changed face.
+@compute @workgroup_size(128)fn transferStructuredTopologyCandidate(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)lid:u32){
+  if(lid==0u){
+    let index=g.x+g.y*65535u;let handle=candidateTransferItem(index);transferHandle=handle;transferDisposition=3u;
+    if(handle!=INVALID&&atomicLoad(&candidate[6])!=0u&&handle<atomicLoad(&candidate[3])){
+      let candidateBank=atomicLoad(&candidate[5])&1u;let base=candidateBank*p.authorityWords;transferCandidateBank=candidateBank;
+      let marker=bitcast<f32>(a[base+p.centroidOffset+4u*handle+3u]);
+      if(marker<=0.5){let at=base+p.centroidOffset+4u*handle;let point=vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));let nt=base+p.normalOffset+4u*handle;let n=vec3f(bitcast<f32>(a[nt]),bitcast<f32>(a[nt+1u]),bitcast<f32>(a[nt+2u]));transferPoint=vec4f(point,0.);transferNormal=vec4f(n,0.);transferOwner=a[base+p.ownerOffset+handle];transferNeighbor=a[base+p.neighborOffset+handle];transferDisposition=select(select(0u,2u,candidateClosedWorld(point,n)),1u,!finite3(point)||!finite3(n));}
+    }
+  }
+  let disposition=workgroupUniformLoad(&transferDisposition);let handle=workgroupUniformLoad(&transferHandle);if(disposition==3u){return;}if(disposition==1u){if(lid==0u){_ = rejectCandidateTransfer(handle);}return;}
+  let candidateBank=workgroupUniformLoad(&transferCandidateBank);let base=candidateBank*p.authorityWords;let point=workgroupUniformLoad(&transferPoint).xyz;let n=workgroupUniformLoad(&transferNormal).xyz;
+  if(disposition==2u){if(lid==0u){a[base+p.valuesOffset+handle]=bitcast<u32>(0.);}return;}
+  let candidateOwner=workgroupUniformLoad(&transferOwner);let candidateNeighbor=workgroupUniformLoad(&transferNeighbor);
   // Paper Section 5 frontier discipline: a face whose owner centre lies
   // beyond the old liquid is newly wetted and takes the extrapolated field —
   // a COPY of the closest projected face value — never an interpolant
   // evaluated outside its element (which extends the frontier velocity
   // gradient one cell and ratchets the corner jet, measured at +45% ME).
-  let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;
-  var old=invalidVector();
-  if(!ownerInsideOld){old=extendedOwnerVelocity(point);}
+  if(lid==0u){let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;transferOld=invalidVector();if(!ownerInsideOld){transferOld=extendedOwnerVelocity(point);}}
+  let uniformNeighbor=workgroupUniformLoad(&transferNeighbor);let initialOld=workgroupUniformLoad(&transferOld);
   var ownerAnchor=INVALID;var neighborAnchor=INVALID;
-  if(!vectorValid(old)){
-    ownerAnchor=oldAnchor(candidateBank,candidateOwner,n);let ownerField=oldFieldAt(ownerAnchor,point);var neighborField=invalidVector();
-    if(candidateNeighbor!=INVALID){neighborAnchor=oldAnchor(candidateBank,candidateNeighbor,-n);if(neighborAnchor!=ownerAnchor){neighborField=oldFieldAt(neighborAnchor,point);}}
+  if(!vectorValid(initialOld)){
+    ownerAnchor=oldAnchor(candidateBank,candidateOwner,n,lid);
+    if(uniformNeighbor!=INVALID){neighborAnchor=oldAnchor(candidateBank,uniformNeighbor,-n,lid);}
+    if(lid==0u){let ownerField=oldFieldAt(ownerAnchor,point);var neighborField=invalidVector();if(uniformNeighbor!=INVALID&&neighborAnchor!=ownerAnchor){neighborField=oldFieldAt(neighborAnchor,point);}
     // Resolve the two-sided ambiguity the way main's sampleOldIncident did:
     // one interpolated sample through the incident owner-side element, never a
     // mean of two independent closures — averaging both sides low-passes every
     // newly created interface face on every topology change.
-    old=ownerField;if(!vectorValid(ownerField)){old=neighborField;}
-    if(!vectorValid(old)){old=extendedOwnerVelocity(point);}
+    transferOld=ownerField;if(!vectorValid(ownerField)){transferOld=neighborField;}
+    if(!vectorValid(transferOld)){transferOld=extendedOwnerVelocity(point);}}
+    _ = workgroupUniformLoad(&transferOld);
   }
-  if(!vectorValid(old)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=dot(old.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);
+  if(lid==0u){if(!vectorValid(transferOld)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=dot(transferOld.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);}
 }
 
 // Characteristic sources must be this substep's prior face values: the

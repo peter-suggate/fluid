@@ -11,6 +11,8 @@ export interface StaticSvoSceneOptions {
    * contract of a fluid-enabled authored scene.
    */
   renderBrickSize?: 4 | 8;
+  /** Additional subdivision of authored-environment bricks. */
+  environmentBrickRefinementLevels?: number;
 }
 
 export function staticSvoRenderBrickSize(
@@ -104,6 +106,7 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
 
     this.world = new OctreeSparseBrickWorld(device, scene, dimensions, {
       brickSize: staticSvoRenderBrickSize(scene, options),
+      environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
       staticLightingBrickSize: scene.voxelDomain.brickSize_cells,
       haloCells: 0,
       brickPreActivation: false,

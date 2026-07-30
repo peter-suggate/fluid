@@ -339,7 +339,9 @@ test("descriptor production source has only exact delta work and deterministic p
   const source = readFileSync(new URL("../lib/webgpu-octree-power-descriptor.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\batomic(?:Add|Load|Min|Or|Store)?\b|compareExchange|clearBuffer|workControl/);
   assert.doesNotMatch(source, /live-index|indexedOwner|hashSite|hashCapacity|ownerMode.*auto/);
-  assert.match(source, /copyBufferToBuffer\(delta\.rows, \(delta\.controlOffsetWords \+ 12\) \* 4/);
+  assert.match(source, /copyBufferToBuffer\(delta\.rows, \(delta\.controlOffsetWords \+ 9\) \* 4/,
+    "descriptor work must consume the structural dirty dispatch, not the wider wet affected set");
+  assert.match(source, /delta\.dirtyRowsOffsetWords/);
   assert.match(source, /dispatchWorkgroupsIndirect\(this\.workDispatch, 0\)/);
   assert.match(source, /controlArena\.authority=candidate/);
   assert.doesNotMatch(source,

@@ -21,10 +21,10 @@
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
  *      _RADIANCE_RECONSTRUCTION (nearest | gated-linear | joint-bilateral | wide-relight | full-res-relight),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
- *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default hybrid),
+ *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default canonical-parametric),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
  *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only static-world override),
- *      FLUID_SVO_DRY_FRAME_SHADING (inline | split; default inline),
+ *      FLUID_SVO_DRY_FRAME_SHADING (inline | split | auto-relight; default auto-relight),
  *      FLUID_SVO_DRY_FRAME_COHERENCE (off | static-primary; default off;
  *      static-primary requires split and reuses exact primary visibility),
  *      FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS (0 disables; diagnostic canonical primary-ray proxy),
@@ -35,6 +35,8 @@
  *      the requested cone scale), FLUID_SVO_DRY_FRAME_CAMERA_MOVING (1 publishes
  *      the camera-changing sentinel, times the moving tier against the settled
  *      tier, and reports settle-pop luminance stats plus moving/settled PNGs).
+ *      FLUID_SVO_DRY_FRAME_TEMPORAL_FRAME publishes an explicit settled frame
+ *      index (default -1) for checkerboard/coherence validation.
  *      FLUID_SVO_DRY_FRAME_TIMING=wall bypasses timestamp queries and measures
  *      serialized submit-to-fence wall time (useful on Dawn builds where a
  *      timestamp-query feature is exposed but query resolution is unreliable).
@@ -128,9 +130,9 @@ const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
 const forceWallTiming = process.env.FLUID_SVO_DRY_FRAME_TIMING === "wall";
-const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "hybrid";
+const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "canonical-parametric";
 const brickOccupancyModeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY ?? "off";
-const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "inline";
+const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "auto-relight";
 const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
 const renderBrickSizeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_SIZE;
@@ -141,6 +143,9 @@ const renderBrickSize = renderBrickSizeRaw === undefined ? undefined : Number(re
  * settle-pop luminance statistics, and a moving-tier PNG.
  */
 const cameraMoving = process.env.FLUID_SVO_DRY_FRAME_CAMERA_MOVING === "1";
+const settledTemporalFrame = Number(process.env.FLUID_SVO_DRY_FRAME_TEMPORAL_FRAME ?? -1);
+assert.ok(Number.isInteger(settledTemporalFrame) && settledTemporalFrame >= -1,
+  "FLUID_SVO_DRY_FRAME_TEMPORAL_FRAME must be an integer >= -1");
 /**
  * M1 Max 1280x720 scale-1 baseline; scale 1 must keep the WGSL byte-identical.
  * Re-baselined for the tuned cone marcher, whose three deliberate pieces all
@@ -286,7 +291,7 @@ function packViewUniforms(
   // is measured by publishing the same SVO_CAMERA_CHANGING_FRAME sentinel the
   // renderer emits while the camera is in motion, which is the only input the
   // dry shader's moving-quality switches read.
-  const temporalFrame = (cameraMovingOverride ?? cameraMoving) ? SVO_CAMERA_CHANGING_FRAME : -1;
+  const temporalFrame = (cameraMovingOverride ?? cameraMoving) ? SVO_CAMERA_CHANGING_FRAME : settledTemporalFrame;
   const uniform = new Float32Array([
     width, height, 0, temporalFrame,
     position.x, position.y, position.z, overlay?.mode ?? 0,

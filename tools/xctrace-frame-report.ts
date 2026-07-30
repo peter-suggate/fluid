@@ -380,8 +380,14 @@ export const detectFrames = (
   const frameCount = [...tally.entries()]
     .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0][0];
   const atModalCount = candidates.filter((candidate) => candidate.count === frameCount);
+  // A bounded metadata stream commonly clips one edge occurrence from most
+  // interior labels while retaining the semantic start (or vice versa). Do
+  // not reject the authored frame boundary merely because its count differs
+  // from the statistical mode by one; clipping the first/last boundaries
+  // below is explicitly designed for that edge condition.
   const anchor = preferredLabels
-    .map((label) => atModalCount.find((candidate) => candidate.label === label))
+    .map((label) => candidates.find((candidate) => candidate.label === label
+      && Math.abs(candidate.count - frameCount) <= 1))
     .find((candidate) => candidate !== undefined)
     ?? atModalCount.sort((left, right) => left.cv - right.cv)[0];
   return { boundaries: anchor.starts, anchor: anchor.label };

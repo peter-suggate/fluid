@@ -65,7 +65,8 @@ export class WebGPUStructuredBoundaryCoefficients {
   readonly allocatedBytes: number;
   private readonly worksetClasses: GPUBuffer;
   private readonly worksetBlocks: GPUBuffer;
-  private readonly candidateMask: GPUBuffer;
+  /** Inactive logical-row mask exposed only for the X-2 diagnostic census. */
+  readonly candidateMask: GPUBuffer;
   private readonly candidates: GPUBuffer;
   private readonly candidateSolidNormalVelocities: GPUBuffer;
   private readonly dispatch: GPUBuffer;

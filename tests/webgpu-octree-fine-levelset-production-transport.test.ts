@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP,
   FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS,
+  fineTransportB4AddressingEnabled,
+  fineTransportStagedAddressingRequested,
   planFineLevelSetGPUTransport,
   planFineLevelSetGPUTransportPasses,
   structuredFineLevelSetTransportWGSL,
@@ -28,9 +30,9 @@ test("octree allocation and recurring publication share the two-cell transport c
     "transport and both recurring A/B topology publishers must consume the allocation bound");
   assert.equal((source.match(/2\*globalFineFactor|2\*this\.globalFineLevelSet!\.plan\.fineFactor/g) ?? []).length, 0,
     "no site may re-derive the trajectory bound inline; the planner is the sole authority");
-  assert.equal((source.match(/planFineLevelSetBandFineCells\(/g) ?? []).length, 5,
+  assert.equal((source.match(/planFineLevelSetBandFineCells\(/g) ?? []).length, 6,
     "allocation, structured dynamics, the per-step transport/redistance pair, work"
-    + " accounting and the band-residency overlay source must each read the one"
+    + " accounting, the band-residency overlay and surface publication sources must each read the one"
     + " planner -- the overlay included, so the view cannot draw a band the solver"
     + " did not allocate");
 });
@@ -279,6 +281,42 @@ test("every trajectory reselects regular or transition interpolation m times and
   assert.match(shader,
     /fnclampSampleLattice\(x:vec3f\)->vec3f\{letlo=p\.origin\+vec3f\(\.5\*p\.h\);varhi=p\.origin\+\(vec3f\(p\.sampleDims\)-vec3f\(\.5\)\)\*p\.h;if\(p\.openTop!=0u\)\{hi\.y=max\(hi\.y,x\.y\);\}returnclamp\(x,lo,hi\);\}/,
     "the closed-wall extension reference is the outermost sample centers with the open top exempt");
+});
+
+test("B4 transport can stage the exact bounded page-address halo", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  const construction = compact(WebGPUFineLevelSetTransport.toString());
+  assert.equal(fineTransportStagedAddressingRequested({}), false);
+  assert.equal(fineTransportStagedAddressingRequested({ FLUID_FINE_TRANSPORT_STAGED_ADDRESSING: "1" }), true);
+  assert.equal(fineTransportStagedAddressingRequested({ FLUID_FINE_TRANSPORT_STAGED_ADDRESSING: "true" }), false);
+  assert.match(shader,
+    /constFINE_PAGE_WINDOW_RADIUS:u32=2u;.*var<workgroup>finePageWindow:array<u32,125>/s);
+  assert.match(shader,
+    /letrequiredFineRadius=\(p\.maxBacktrace\+p\.r-1u\)\/p\.r\+1u;finePageWindowEnabled=select\(0u,1u,requiredFineRadius<=FINE_PAGE_WINDOW_RADIUS\).*fnstagedPageOf.*returnpageOf\(packBrick\(brick\)\).*returnfinePageWindow\[/s,
+    "the staged table must cover the proven characteristic reach and preserve direct fallback");
+  assert.match(shader,
+    /prepareFinePageWindow\(id,lid\);if\(id!=INVALID\).*finishSample/s,
+    "all lanes must publish the address halo before any terminal phi gather");
+  assert.match(construction,
+    /constants:\{stagedFineAddressing:fineTransportStagedAddressingRequested\(\)\?1:0/,
+    "the exact direct path must remain selectable in the same shader");
+});
+
+test("B4 transport defaults to exact shift-only sample addressing", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  const construction = compact(WebGPUFineLevelSetTransport.toString());
+  const b4 = { brickResolution: 4, samplesPerBrick: 64 };
+  assert.equal(fineTransportB4AddressingEnabled(b4, {}), true);
+  assert.equal(fineTransportB4AddressingEnabled(b4,
+    { FLUID_FINE_TRANSPORT_B4_ADDRESSING: "0" }), false);
+  assert.equal(fineTransportB4AddressingEnabled(
+    { brickResolution: 8, samplesPerBrick: 512 }, {}), false);
+  assert.match(shader,
+    /fnlocalCoord\(i:u32\)->vec3u\{if\(b4FineAddressing\)\{returnvec3u\(i&3u,\(i>>2u\)&3u,i>>4u\)/);
+  assert.match(shader,
+    /fnsampleIndex\(q:vec3u\)->u32\{if\(b4FineAddressing\)\{letb=q>>vec3u\(2\).*return\(id<<6u\)\|l\.x\|\(l\.y<<2u\)\|\(l\.z<<4u\)/s);
+  assert.match(construction,
+    /b4FineAddressing:fineTransportB4AddressingEnabled\(source\.plan\)\?1:0/);
 });
 
 test("missing sparse phi support remains a fail-closed sentinel", () => {

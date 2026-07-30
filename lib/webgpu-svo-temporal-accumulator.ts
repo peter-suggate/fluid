@@ -12,7 +12,7 @@ export const SVO_TEMPORAL_ACCUMULATION_LAYOUT = Object.freeze({
   neighborhoodLoadsPerAcceptedPixel: 8,
   fullScreenResolvePassesPerFrame: 1,
   aliasBreakingCopiesPerFrame: 0,
-  maximumAccumulationSamples: 64,
+  maximumAccumulationSamples: 32,
   maximumStoredSamples: 255,
 } as const);
 

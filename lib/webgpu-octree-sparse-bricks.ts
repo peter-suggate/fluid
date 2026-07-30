@@ -62,6 +62,8 @@ import { PassBroker } from "./webgpu-pass-broker";
 
 export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
+  /** Additional authored-environment subdivision beyond the legacy 2x brick ceiling. */
+  environmentBrickRefinementLevels?: number;
   /**
    * Optional brick alignment used only to derive the static opacity pyramid.
    * Render-topology experiments can then vary `brickSize` without shifting
@@ -117,6 +119,19 @@ export function planOctreeSparseBrickEncode(
 
 /** Environment terminal leaves are at most 2x the solver brick scale. */
 export const ENVIRONMENT_MAXIMUM_COARSENING_POWER = 1;
+
+/** One extra level is the production default; zero reproduces the previous plan. */
+export const DEFAULT_ENVIRONMENT_BRICK_REFINEMENT_LEVELS = 1;
+
+export function environmentMaximumCoarseningPower(
+  refinementLevels = DEFAULT_ENVIRONMENT_BRICK_REFINEMENT_LEVELS,
+): number {
+  if (!Number.isInteger(refinementLevels) || refinementLevels < 0
+    || refinementLevels > ENVIRONMENT_MAXIMUM_COARSENING_POWER) {
+    throw new RangeError(`Environment brick refinement must be an integer from 0 to ${ENVIRONMENT_MAXIMUM_COARSENING_POWER}`);
+  }
+  return ENVIRONMENT_MAXIMUM_COARSENING_POWER - refinementLevels;
+}
 
 /** Derive the immutable renderer directory without taking structural authority. */
 export function planOctreeSvoWideFanout(plan: SparseBrickPlan) {
@@ -548,7 +563,10 @@ export class OctreeSparseBrickWorld {
       solverBricks: sceneDomain.solverBrickCoordinates,
       proxyBricks: sceneDomain.proxyBrickCoordinates.flat(),
       maximumDepth,
-      maximumEnvironmentCoarseningPower: Math.min(ENVIRONMENT_MAXIMUM_COARSENING_POWER, maximumDepth)
+      maximumEnvironmentCoarseningPower: Math.min(
+        environmentMaximumCoarseningPower(options.environmentBrickRefinementLevels),
+        maximumDepth,
+      )
     });
     this.finestLevel = plan.maximumDepth;
     const packed = packSparseBrickPlan(plan, 1);

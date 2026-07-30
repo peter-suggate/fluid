@@ -14,6 +14,9 @@ import { svoNodeMipSamplingWGSL } from "./svo-node-mip-sampling";
 export const WEBGPU_SVO_NODE_MIP_LAYOUT = Object.freeze({
   format: "rgba8unorm" as GPUTextureFormat,
   directoryTextureFormat: "rgba32uint" as GPUTextureFormat,
+  directPageTableTextureFormat: "r32uint" as GPUTextureFormat,
+  directPageTableMaximumLevels: 12,
+  directPageTableMaximumBytes: 64 * 1024 * 1024,
   directoryTexelsPerPage: 2,
   dimension: "3d" as GPUTextureDimension,
   directoryStrideBytes: SVO_NODE_MIP_LAYOUT.directoryBytesPerPage,
@@ -53,15 +56,70 @@ export interface WebGpuSvoNodeMipVisibleGeneration {
   /** Sampled uint directory avoids consuming an additional renderer storage binding. */
   directoryTexture: GPUTexture;
   directoryView: GPUTextureView;
+  /** Level slabs of slot+1 values. Zero is non-resident; the directory remains a fallback. */
+  directPageTableTexture: GPUTexture;
+  directPageTableView: GPUTextureView;
+  directPageTableDimensions: readonly [number, number, number];
+  directPageTableLevelZOffsets: Uint32Array<ArrayBuffer>;
+  directPageTableReady: boolean;
+  directPageTableBytes: number;
   /** Optional world-space coordinate frame when it differs from the structural tree. */
   worldOrigin_m?: readonly [number, number, number];
 }
 
 interface OwnedGeneration extends WebGpuSvoNodeMipVisibleGeneration {
+  directPageTableWords: Uint32Array<ArrayBuffer>;
   uploadedSlots: Set<number>;
   directoryComplete: boolean;
   payloadComplete: boolean;
   apronsComplete: boolean;
+}
+
+export interface WebGpuSvoNodeMipDirectPageTable {
+  dimensions: readonly [number, number, number];
+  levelZOffsets: Uint32Array<ArrayBuffer>;
+  words: Uint32Array<ArrayBuffer>;
+  ready: boolean;
+}
+
+/**
+ * Packs each virtual mip level into a Z slab. The texel stores atlas slot+1, so
+ * shader lookup needs one textureLoad and can derive the physical atlas origin
+ * from the regular row-major slot mapping. Pathological sparse extents retain
+ * the compact sorted-directory fallback instead of allocating a huge volume.
+ */
+export function createWebGpuSvoNodeMipDirectPageTable(
+  plan: SvoNodeMipPyramidPlan,
+  maximumDimension = 2_048,
+): WebGpuSvoNodeMipDirectPageTable {
+  const levelZOffsets = new Uint32Array(WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableMaximumLevels);
+  if (plan.pages.length === 0) return { dimensions: [1, 1, 1], levelZOffsets, words: new Uint32Array(1), ready: false };
+  const levelCount = Math.max(...plan.pages.map((page) => page.key.level + 1));
+  if (levelCount > WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableMaximumLevels) {
+    return { dimensions: [1, 1, 1], levelZOffsets, words: new Uint32Array(1), ready: false };
+  }
+  let width = 1, height = 1, depth = 0;
+  for (let level = 0; level < levelCount; level += 1) {
+    levelZOffsets[level] = depth;
+    let levelDepth = 0;
+    for (const page of plan.pages) if (page.key.level === level) {
+      width = Math.max(width, page.key.coordinate[0] + 1);
+      height = Math.max(height, page.key.coordinate[1] + 1);
+      levelDepth = Math.max(levelDepth, page.key.coordinate[2] + 1);
+    }
+    depth += levelDepth;
+  }
+  const wordCount = width * height * depth;
+  const ready = width <= maximumDimension && height <= maximumDimension && depth <= maximumDimension
+    && Number.isSafeInteger(wordCount)
+    && wordCount * Uint32Array.BYTES_PER_ELEMENT <= WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableMaximumBytes;
+  if (!ready) return { dimensions: [1, 1, 1], levelZOffsets: new Uint32Array(levelZOffsets.length), words: new Uint32Array(1), ready: false };
+  const words = new Uint32Array(wordCount);
+  for (const page of plan.pages) {
+    const [x, y, z] = page.key.coordinate;
+    words[((levelZOffsets[page.key.level] + z) * height + y) * width + x] = page.slot + 1;
+  }
+  return { dimensions: [width, height, depth], levelZOffsets, words, ready: true };
 }
 
 export interface WebGpuSvoNodeMipTelemetry {
@@ -93,6 +151,14 @@ function createGeneration(device: GPUDevice, plan: SvoNodeMipPyramidPlan, sample
     format: WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTextureFormat,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
+  const directPageTable = createWebGpuSvoNodeMipDirectPageTable(plan, device.limits?.maxTextureDimension3D ?? 2_048);
+  const directPageTableTexture = device.createTexture({
+    label: `SVO node mip direct page table generation ${plan.generation}`,
+    size: directPageTable.dimensions,
+    dimension: "3d",
+    format: WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableTextureFormat,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
   return {
     generation: plan.generation,
     plan,
@@ -102,6 +168,13 @@ function createGeneration(device: GPUDevice, plan: SvoNodeMipPyramidPlan, sample
     directory,
     directoryTexture,
     directoryView: directoryTexture.createView(),
+    directPageTableTexture,
+    directPageTableView: directPageTableTexture.createView({ dimension: "3d" }),
+    directPageTableDimensions: directPageTable.dimensions,
+    directPageTableLevelZOffsets: directPageTable.levelZOffsets,
+    directPageTableReady: directPageTable.ready,
+    directPageTableBytes: directPageTable.ready ? directPageTable.words.byteLength : 0,
+    directPageTableWords: directPageTable.words,
     uploadedSlots: new Set<number>(),
     directoryComplete: false,
     payloadComplete: false,
@@ -148,6 +221,14 @@ export class WebGpuSvoNodeMipPyramid {
       { bytesPerRow: SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, rowsPerImage: plan.pages.length },
       [WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, plan.pages.length],
     );
+    if (this.candidate.directPageTableReady) {
+      this.device.queue.writeTexture(
+        { texture: this.candidate.directPageTableTexture },
+        this.candidate.directPageTableWords,
+        { bytesPerRow: this.candidate.directPageTableDimensions[0] * Uint32Array.BYTES_PER_ELEMENT, rowsPerImage: this.candidate.directPageTableDimensions[1] },
+        this.candidate.directPageTableDimensions,
+      );
+    }
     this.candidate.directoryComplete = true;
     if (plan.pages.length === 0) {
       this.candidate.payloadComplete = true;
@@ -207,8 +288,12 @@ export class WebGpuSvoNodeMipPyramid {
 
   visibleGeneration(): WebGpuSvoNodeMipVisibleGeneration | undefined {
     if (!this.visible) return undefined;
-    const { generation, plan, texture, view, sampler, directory, directoryTexture, directoryView } = this.visible;
-    return { generation, plan, texture, view, sampler, directory, directoryTexture, directoryView };
+    const { generation, plan, texture, view, sampler, directory, directoryTexture, directoryView,
+      directPageTableTexture, directPageTableView, directPageTableDimensions, directPageTableLevelZOffsets,
+      directPageTableReady, directPageTableBytes } = this.visible;
+    return { generation, plan, texture, view, sampler, directory, directoryTexture, directoryView,
+      directPageTableTexture, directPageTableView, directPageTableDimensions, directPageTableLevelZOffsets,
+      directPageTableReady, directPageTableBytes };
   }
 
   telemetry(): WebGpuSvoNodeMipTelemetry {
@@ -218,8 +303,8 @@ export class WebGpuSvoNodeMipPyramid {
       candidateGeneration: this.candidate?.generation ?? 0,
       residentPages: source?.plan.residentPageCount ?? 0,
       uploadedPages: this.candidate?.uploadedSlots.size ?? this.visible?.uploadedSlots.size ?? 0,
-      allocatedBytes: (this.visible ? this.visible.plan.allocatedBytes + this.visible.plan.directoryBytes : 0)
-        + (this.candidate ? this.candidate.plan.allocatedBytes + this.candidate.plan.directoryBytes : 0),
+      allocatedBytes: (this.visible ? this.visible.plan.allocatedBytes + this.visible.directPageTableBytes : 0)
+        + (this.candidate ? this.candidate.plan.allocatedBytes + this.candidate.directPageTableBytes : 0),
       fallback: this.candidate ? (this.visible ? "previous-complete-generation" : "unavailable") : this.visible ? "none" : "unavailable",
     };
   }
@@ -246,5 +331,6 @@ export class WebGpuSvoNodeMipPyramid {
     generation.texture.destroy();
     generation.directory.destroy();
     generation.directoryTexture.destroy();
+    generation.directPageTableTexture.destroy();
   }
 }

@@ -5,8 +5,25 @@ import { planSvoNodeMipPyramid, SVO_NODE_MIP_LAYOUT } from "../lib/svo-node-mip-
 import {
   WEBGPU_SVO_NODE_MIP_LAYOUT,
   WebGpuSvoNodeMipPyramid,
+  createWebGpuSvoNodeMipDirectPageTable,
   webgpuSvoNodeMipSamplingValidationWGSL,
 } from "../lib/webgpu-svo-node-mip-pyramid";
+
+test("direct page table packs level slabs as slot+1 and bounds pathological extents", () => {
+  const plan = planSvoNodeMipPyramid({ generation: 3, occupiedPages: [[0, 0, 0], [3, 1, 2]], levelCount: 3 });
+  const table = createWebGpuSvoNodeMipDirectPageTable(plan);
+  assert.equal(table.ready, true);
+  assert.deepEqual(table.dimensions, [4, 2, 6]);
+  assert.deepEqual([...table.levelZOffsets.slice(0, 3)], [0, 3, 5]);
+  const [width, height] = table.dimensions;
+  for (const page of plan.pages) {
+    const [x, y, z] = page.key.coordinate;
+    const index = ((table.levelZOffsets[page.key.level] + z) * height + y) * width + x;
+    assert.equal(table.words[index], page.slot + 1);
+  }
+  assert.equal(createWebGpuSvoNodeMipDirectPageTable(plan, 2).ready, false,
+    "a device-incompatible volume must preserve the compact directory fallback");
+});
 
 interface MockTexture { descriptor: GPUTextureDescriptor; destroyed: boolean; createView(): GPUTextureView; destroy(): void }
 interface MockBuffer { descriptor: GPUBufferDescriptor; destroyed: boolean; destroy(): void }
@@ -49,11 +66,14 @@ test("WebGPU owner uploads directory/pages and atomically swaps complete generat
   assert.equal(published.published, true);
   assert.equal(owner.visibleGeneration()?.generation, 1);
   assert.equal(mock.bufferWrites.length, 1);
-  assert.equal(mock.textureWrites.length, 2, "sampled directory and page payload are uploaded");
-  assert.deepEqual(mock.textureWrites[1].size, [10, 10, 10]);
-  assert.equal(mock.textureWrites[1].layout.bytesPerRow, 40);
-  assert.equal(mock.textureWrites[1].data.byteLength, SVO_NODE_MIP_LAYOUT.bytesPerPage);
+  assert.equal(mock.textureWrites.length, 3, "sampled directory, direct page table, and page payload are uploaded");
+  assert.deepEqual(mock.textureWrites[1].size, [1, 1, 1]);
+  assert.equal(mock.textureWrites[1].data[0], 1, "direct-table zero is reserved for non-resident pages");
+  assert.deepEqual(mock.textureWrites[2].size, [10, 10, 10]);
+  assert.equal(mock.textureWrites[2].layout.bytesPerRow, 40);
+  assert.equal(mock.textureWrites[2].data.byteLength, SVO_NODE_MIP_LAYOUT.bytesPerPage);
   assert.equal(owner.visibleGeneration()?.directoryTexture, mock.textures[1] as unknown as GPUTexture);
+  assert.equal(owner.visibleGeneration()?.directPageTableTexture, mock.textures[2] as unknown as GPUTexture);
 
   const second = planSvoNodeMipPyramid({ generation: 2, occupiedPages: [[0, 0, 0]], levelCount: 1 });
   owner.beginGeneration(second);
@@ -65,6 +85,7 @@ test("WebGPU owner uploads directory/pages and atomically swaps complete generat
   assert.equal(owner.visibleGeneration()?.generation, 2);
   assert.equal(mock.textures[0].destroyed, true);
   assert.equal(mock.textures[1].destroyed, true);
+  assert.equal(mock.textures[2].destroyed, true);
   assert.equal(mock.buffers[0].destroyed, true);
   owner.destroy();
   assert.equal(mock.textures.at(-1)?.destroyed, true);
@@ -80,6 +101,7 @@ test("WebGPU owner publishes an empty complete generation without zero-sized res
   assert.equal(owner.publish().published, true);
   assert.deepEqual(mock.textures[0].descriptor.size, [1, 1, 1]);
   assert.deepEqual(mock.textures[1].descriptor.size, [2, 1]);
+  assert.deepEqual(mock.textures[2].descriptor.size, [1, 1, 1]);
   assert.equal(mock.buffers[0].descriptor.size, 32);
   owner.destroy();
 });

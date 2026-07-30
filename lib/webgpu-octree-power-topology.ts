@@ -614,7 +614,7 @@ var<workgroup> publicationAux:array<vec2u,256>;
   if(row<requested&&controlArena.candidate.flags==0u){
     let encoded=rowDelta[params.delta.y+row];let flagged=(encoded&ROW_DELTA_AFFECTED)!=0u;
     let listed=(lookupArena[statusBase()+row]&STATUS_LISTED)!=0u;
-    let oldPlusOne=encoded&0x7fffffffu;var metric=PowerRowMetric(INVALID,0u,0.0,CAPACITY);var flags=0u;
+    let oldPlusOne=encoded&0x3fffffffu;var metric=PowerRowMetric(INVALID,0u,0.0,CAPACITY);var flags=0u;
     if(flagged!=listed){flags|=CAPACITY;}
     if(flagged){metric=metrics[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
     else if(oldPlusOne==0u){flags|=CAPACITY;}

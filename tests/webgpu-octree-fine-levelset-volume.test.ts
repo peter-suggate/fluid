@@ -6,6 +6,7 @@ import { FineLevelSetBrickOracle, packFineLevelSetBrickKey,
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
 import { OCTREE_POWER_COARSE_LEVELSET_VALID } from "../lib/webgpu-octree-power-coarse-levelset";
 import { WebGPUFineLevelSetVolumeCorrection,
+  fineLevelSetVolumeCadence,
   fineLevelSetVolumeCorrectionWGSL,
   unpackFineLevelSetGPUVolumeControl } from "../lib/webgpu-octree-fine-levelset-volume";
 import { PassBroker } from "../lib/webgpu-pass-broker";
@@ -14,6 +15,13 @@ import { usePerformanceInstrumentationStore } from "../lib/stores/performance-in
 // Numerical harnesses submit their own raw encoders; exercise the production
 // shader variant instead of the solver-owned activity binding session.
 usePerformanceInstrumentationStore.getState().setMode("timeline");
+
+test("project-specific volume cadence is explicit and fail closed", () => {
+  assert.equal(fineLevelSetVolumeCadence({}), 1);
+  assert.equal(fineLevelSetVolumeCadence({ FLUID_FINE_VOLUME_CADENCE: "4" }), 4);
+  assert.throws(() => fineLevelSetVolumeCadence({ FLUID_FINE_VOLUME_CADENCE: "0" }), /\[1, 256\]/);
+  assert.throws(() => fineLevelSetVolumeCadence({ FLUID_FINE_VOLUME_CADENCE: "1.5" }), /\[1, 256\]/);
+});
 
 test("fine volume classifies compact-air overlap only through the authoritative coarse directory", () => {
   const shader = fineLevelSetVolumeCorrectionWGSL.replace(/\s+/g, "");

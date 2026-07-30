@@ -15,10 +15,14 @@ export const SVO_CONE_RADIANCE_RECONSTRUCTION_CODES = Object.freeze({
 /** Audited compile-time ceiling for primary-ray leaf continuation. */
 export const SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT = 256;
 
+/** Additional authored-environment subdivision beyond the legacy SVO brick plan. */
+export const SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM = 1;
+
 /** Runtime-adjustable sparse-presentation controls. Shader loops retain hard caps;
  * these values only lower work or adjust quality inside those audited bounds. */
 export interface SvoRenderTuning {
   readonly resolutionScale: number;
+  readonly environmentBrickRefinementLevels: number;
   readonly coneLightingScale: SvoConeLightingScale;
   readonly coneRadianceReconstruction: SvoConeRadianceReconstruction;
   readonly temporalEnabled: boolean;
@@ -49,6 +53,10 @@ export interface SvoRenderTuning {
 
 export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   resolutionScale: 0.72,
+  environmentBrickRefinementLevels: 1,
+  // The balanced tier keeps the accepted 2x2 visibility error bar. The 4x4
+  // rate remains available in the performance preset, while full-resolution
+  // relighting preserves material and edge detail at either reduced rate.
   coneLightingScale: 0.5,
   coneRadianceReconstruction: "full-res-relight",
   temporalEnabled: true,
@@ -72,7 +80,7 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   shadowConeAperture: 0.065,
   coneNormalEscapeCells: 0.5,
   coneEmitterClearanceCells: 3,
-  temporalMaximumSamples: 64,
+  temporalMaximumSamples: 32,
   temporalVarianceSigma: 2,
   temporalDepthToleranceScale: 1,
 });
@@ -90,19 +98,19 @@ export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
     visibilityNodeVisits: 48,
     visibilityLeafVisits: 12,
     visibilityWorkItems: 320,
-    temporalMaximumSamples: 32,
+    temporalMaximumSamples: 16,
   }),
   balanced: DEFAULT_SVO_RENDER_TUNING,
   quality: Object.freeze({
     ...DEFAULT_SVO_RENDER_TUNING,
     resolutionScale: 1,
-    coneLightingScale: 1 as const,
+    coneLightingScale: 0.5 as const,
     checkerboardShadowsEnabled: false,
     primaryLeafVisits: 128,
     visibilityNodeVisits: 128,
     visibilityLeafVisits: 32,
     visibilityWorkItems: 1024,
-    temporalMaximumSamples: 96,
+    temporalMaximumSamples: 48,
   }),
 });
 
@@ -124,6 +132,11 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     ? value.coneRadianceReconstruction : "full-res-relight";
   return {
     resolutionScale: bounded(value.resolutionScale, 0.35, 1),
+    environmentBrickRefinementLevels: integer(
+      value.environmentBrickRefinementLevels,
+      0,
+      SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
+    ),
     coneLightingScale,
     coneRadianceReconstruction,
     temporalEnabled: Boolean(value.temporalEnabled),

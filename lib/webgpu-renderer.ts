@@ -42,7 +42,6 @@ import type { SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumu
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "./svo-render-tuning";
 import { isGPUInitializationAbort } from "./gpu-initialization";
-import { GPUAdvanceWallEstimator } from "./gpu-advance-pacing";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
 import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { OctreeTechniqueOverlayPipeline } from "./webgpu-octree-technique-overlay";
@@ -65,7 +64,8 @@ import {
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
-export const MAX_PRESENTATION_GAP_MS = 1000 / 60;
+/** One item executing and one queued keeps the GPU busy without visible FIFO bursts. */
+export const BROWSER_GPU_THROUGHPUT_DEPTH = 2;
 export const SVO_SHADOW_HISTORY_WARMUP_FRAMES = 2;
 export const SVO_CAMERA_CHANGING_FRAME = -2;
 
@@ -82,26 +82,6 @@ export function svoDrySceneTemporalFrame(shadowTemporalFrame: number, cameraStab
     : SVO_CAMERA_CHANGING_FRAME;
 }
 
-export function presentationPriorityDue(lastFrameAt_ms: number, now_ms: number) {
-  return !Number.isFinite(lastFrameAt_ms) || now_ms - lastFrameAt_ms + 0.5 >= MAX_PRESENTATION_GAP_MS;
-}
-
-/** Only start physics when its measured cost still fits before the next presentation. */
-export function presentationHasPhysicsSlack(lastFrameAt_ms: number, now_ms: number, physics_ms: number | undefined, presentation_ms = 0) {
-  if (!Number.isFinite(lastFrameAt_ms) || !physics_ms || !Number.isFinite(physics_ms) || physics_ms <= 0) return false;
-  const elapsed_ms = Math.max(0, now_ms - lastFrameAt_ms);
-  return elapsed_ms + physics_ms + Math.max(0, presentation_ms) + 0.5 < MAX_PRESENTATION_GAP_MS;
-}
-
-/** Telemetry-only physics partition total. Scheduling deliberately does NOT
- * consume this: it exists only while instrumentation is enabled, and admission
- * must be identical with the profiler on or off (see GPUAdvanceWallEstimator). */
-export function observedGPUAdvanceTime_ms(trace: PerformanceTrace | undefined) {
-  return trace?.lane === "physics" && Number.isFinite(trace.total_ms) && trace.total_ms > 0
-    ? trace.total_ms
-    : undefined;
-}
-
 /** Submit one solver advance toward the prepared simulation clock. */
 export function submitNextPreparedGPUAdvance(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[]) {
   const previousSubmittedTime = fluid.info.submittedTime_s ?? 0;
@@ -110,27 +90,9 @@ export function submitNextPreparedGPUAdvance(fluid: GPUSolverInstance, time_s: n
   return { previousSubmittedTime, submittedTime };
 }
 
-/** Estimate a dense post-presentation queue that fits inside one 60 Hz interval. */
-export function presentationPhysicsQueueDepth(physics_ms: number | undefined, presentation_ms = 0) {
-  // One 8 ms solver step per 60 Hz presentation can never reach real time.
-  // Start with two advances until the first completion fence supplies a wall
-  // estimate, then let the measured budget take over.
-  if (!physics_ms || !Number.isFinite(physics_ms) || physics_ms <= 0) return 2;
-  const physicsBudget_ms = Math.max(physics_ms, MAX_PRESENTATION_GAP_MS - Math.max(0, presentation_ms));
-  // Prefer one whole extra advance over leaving an unusable tail in the frame
-  // budget. This can miss 60 Hz by at most one measured physics step, but
-  // produces the highest simulation throughput for indivisible advances.
-  return Math.max(1, Math.min(8, Math.ceil(physicsBudget_ms / physics_ms)));
-}
-
-/** Bound physics queue depth to the explicitly calculated rolling window. */
+/** Bound physics queue depth to the fixed throughput window. */
 export function canQueuePreparedGPUAdvance(pendingAdvances: number, maximumPendingAdvances: number) {
   return pendingAdvances < Math.max(1, maximumPendingAdvances);
-}
-
-/** A paused clock can still carry one controller-authorized single step. */
-export function pausedTargetRequiresGPUAdvance(simulationRunning: boolean, targetTime_s: number, submittedTime_s: number) {
-  return !simulationRunning && targetTime_s > submittedTime_s + 1e-9;
 }
 
 /** Column-major right-handed world-to-WebGPU-clip transform for voxel raster passes. */
@@ -531,25 +493,9 @@ export class FluidLabRenderer {
   private svoShadowStableFrames = 0;
   private svoRenderDiagnosticsKey = "";
   private gpuPendingBatches = 0;
-  /** Instrumentation-independent per-advance wall cost; the only scheduling
-   * input. The hardware physics trace is telemetry and must never feed
-   * admission, or toggling the profiler changes the simulation's driver. */
-  private readonly advanceWallEstimator = new GPUAdvanceWallEstimator();
-  /** Same contract for presentation cost: the traced presentation total is
-   * instrumentation-gated, so scheduling reads this fence-derived estimate. */
-  private readonly presentationWallEstimator = new GPUAdvanceWallEstimator();
-  /** Monotone queue epochs used to reject wall samples that contain work from
-   * the other lane. These are submission-order evidence, not telemetry. */
-  private physicsQueueWorkSequence = 0;
-  private nonPhysicsQueueWorkSequence = 0;
-  /** Stats readbacks are queue work too; keep idle evidence conservative until
-   * their promise settles. */
-  private diagnosticQueueWorkPending = 0;
-  private lastPresentationCompletedAt_ms = -Infinity;
-  private presentationPending = false;
+  private presentationsInFlight = 0;
+  private completedPresentations = 0;
   private simulationRunning = true;
-  private preparedGPUTime_s = 0;
-  private preparedGPUBodies: RigidBodyState[] = [];
   private gpuFluidGeneration = 0;
   /** True only while both compact t=0 raster sources are attached. */
   private globalFineWaterAttached = false;
@@ -713,9 +659,12 @@ export class FluidLabRenderer {
     if (wants.has("svo-dry-scene")) this.ensureOptionalPipeline(
       "svo-dry-scene", this.svoDryScenePipeline,
       // Relight already pays a full-resolution material/BRDF pass. Isolating
-      // primary traversal raises Metal occupancy substantially; other
-      // reconstruction modes retain the original inline graph.
-      (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float", "hybrid", "off", "auto-relight"),
+      // primary traversal raises Metal occupancy substantially. Exact-keyed
+      // coherence can then retain that G-buffer for static/paused dry scenes.
+      // Canonical-parametric removes the wide/canonical hybrid cursor and was
+      // revalidated against split full-res relighting: 12.55 ms versus
+      // 22.10-23.60 ms hybrid at 660x662 with identical output hashes.
+      (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float", "canonical-parametric", "off", "split", 0, "static-primary"),
       (pipeline) => pipeline.initialize((label, completed) => this.reportSvoPipelineProgress(label, completed)),
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;
@@ -1170,22 +1119,6 @@ export class FluidLabRenderer {
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
-    this.preparedGPUTime_s = 0;
-    this.preparedGPUBodies = [];
-    this.advanceWallEstimator.reset();
-  }
-
-  /**
-   * In-flight advances the queue should hold. Without a measured step this is
-   * the documented bootstrap of two, which is exactly enough to keep one
-   * advance executing while the next waits — so completion-callback latency
-   * never reaches the device, with or without instrumentation.
-   */
-  private preparedGPUQueueDepth(_fluid: GPUSolverInstance) {
-    return presentationPhysicsQueueDepth(
-      this.advanceWallEstimator.estimate_ms,
-      this.presentationWallEstimator.estimate_ms ?? 0,
-    );
   }
 
   /** Begin a new controller timeline before any old GPU completion can commit. */
@@ -1202,15 +1135,11 @@ export class FluidLabRenderer {
     this.resetPresentationTrace();
   }
 
-  /** Stop refilling physics immediately while preserving already-submitted queue work. */
+  /** Change simulation admission while preserving already-submitted queue work. */
   setSimulationRunning(running: boolean): number | undefined {
     if (running !== this.simulationRunning) this.resetPresentationTrace();
     this.simulationRunning = running;
     const submittedTime_s = this.gpuFluid?.info.submittedTime_s;
-    if (!running) {
-      this.preparedGPUTime_s = submittedTime_s ?? this.gpuFluid?.info.completedTime_s ?? 0;
-      this.preparedGPUBodies = [];
-    }
     return submittedTime_s;
   }
 
@@ -1218,7 +1147,6 @@ export class FluidLabRenderer {
   private resetPresentationTrace() {
     this.latestPresentationTrace = undefined;
     this.lastPresentationTraceAt_ms = -Infinity;
-    this.presentationWallEstimator.reset();
   }
 
   private currentFrameMetrics(methodId: string, context: string, presentationSubmitted: boolean, cpu?: PerformanceTrace): RendererFrameMetrics {
@@ -1302,7 +1230,10 @@ export class FluidLabRenderer {
     const create:Promise<GPUSolverInstance>=prepare().then(async ():Promise<GPUSolverInstance>=>{
       if(abort.signal.aborted||this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
       if (!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver) {
-        return WebGPUStaticSvoScene.create(device, scene, config.quality, report, abort.signal);
+        const refinement = config.values.svoEnvironmentBrickRefinementLevels;
+        return WebGPUStaticSvoScene.create(device, scene, config.quality, report, abort.signal, {
+          environmentBrickRefinementLevels: typeof refinement === "number" ? refinement : undefined,
+        });
       }
       return method.createSolverAsync
         ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
@@ -1441,69 +1372,34 @@ export class FluidLabRenderer {
   private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1) {
     const device = this.device;
     if (!device) return fluid.info;
-    this.preparedGPUTime_s = Math.max(this.preparedGPUTime_s, time_s);
-    this.preparedGPUBodies = bodies;
-    // A completion fence is the scheduling boundary. Encoding the entire debt
-    // here can put hundreds of milliseconds of GPU work between presentations.
+    // Admit at most the single advance paired with this draw. The following
+    // presentation is submitted immediately after it, so no later simulation
+    // work can overtake the frame that visualizes this state transition.
     if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches, maximumPendingAdvances)) return fluid.info;
-    const pendingAtSubmit = this.gpuPendingBatches;
-    const nonPhysicsSequenceAtSubmit = this.nonPhysicsQueueWorkSequence;
-    const queueWasIdleAtSubmit = pendingAtSubmit === 0
-      && !this.presentationPending && this.diagnosticQueueWorkPending === 0;
-    const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, this.preparedGPUTime_s, this.preparedGPUBodies);
+    const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, time_s, bodies);
     if (submittedTime > previousSubmittedTime) {
       const generation = this.gpuFluidGeneration;
-      const submittedAt_ms = performance.now();
-      this.physicsQueueWorkSequence += 1;
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
       fluid.info.gpuInFlightSimulation_s = Math.max(0, submittedTime - (fluid.info.completedTime_s ?? 0));
       void device.queue.onSubmittedWorkDone().then(() => {
         if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
-        this.advanceWallEstimator.observeCompletion(performance.now(), submittedAt_ms, {
-          pendingTargetWorkAtSubmit: pendingAtSubmit,
-          interveningWorkSequence: nonPhysicsSequenceAtSubmit,
-          queueWasIdleAtSubmit,
-        });
         this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
         fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
         fluid.info.gpuPendingBatches = this.gpuPendingBatches;
         fluid.info.gpuInFlightSimulation_s = Math.max(0, (fluid.info.submittedTime_s ?? submittedTime) - fluid.info.completedTime_s);
         this.gpuInfoCallback?.({ ...fluid.info });
         this.gpuAdvanceCompletedCallback?.(submittedTime);
-        this.continuePreparedGPUWork(fluid, generation);
       }).catch(() => { /* Device loss is reported by device.lost. */ });
     }
     // Functional diagnostics use a bounded cadence and remain independent of
     // the generic performance trace sampled by the solver itself.
     const now_ms=performance.now();if(now_ms-this.lastGPUInfoPollAt_ms>=250){
       this.lastGPUInfoPollAt_ms=now_ms;
-      this.nonPhysicsQueueWorkSequence += 1;
-      this.diagnosticQueueWorkPending += 1;
       void fluid.readStats().then(info=>this.gpuInfoCallback?.({...info}))
-        .catch(()=>{ /* Device loss is reported by device.lost. */ })
-        .finally(()=>{this.diagnosticQueueWorkPending=Math.max(0,this.diagnosticQueueWorkPending-1);});
+        .catch(()=>{ /* Device loss is reported by device.lost. */ });
     }
     return fluid.info;
-  }
-
-  /**
-   * Refill the queue back to its rolling in-flight ceiling.
-   *
-   * An empty queue is never the right state for a GPU-limited solver: the next
-   * refill would then have to wait for an animation-frame callback, which is
-   * most of the gap between this lane and the Dawn harness. This used to gate
-   * on presentation slack, but slack is a presentation-deadline guard, not
-   * evidence about the queue — and it is unsatisfiable until a physics trace
-   * exists, so an uninstrumented session never refilled at all. The ceiling
-   * still bounds Reset's drain to the same depth the presentation path admits.
-   */
-  private continuePreparedGPUWork(fluid: GPUSolverInstance, generation: number) {
-    if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
-    if (!this.simulationRunning) return;
-    const depth = this.preparedGPUQueueDepth(fluid);
-    if (this.gpuPendingBatches >= depth) return;
-    this.submitPreparedGPUFluid(fluid, this.preparedGPUTime_s, this.preparedGPUBodies, depth);
   }
 
   /**
@@ -1579,6 +1475,9 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
+  /** Frames whose presentation submission has actually finished on the GPU. */
+  get completedPresentationCount(): number { return this.completedPresentations; }
+
   draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
@@ -1613,8 +1512,15 @@ export class FluidLabRenderer {
     const basis = cameraBasis(camera), position = basis.position;
     if (backend === "webgpu" && gridOverlay?.axis !== "off") this.gpuFluid?.ensureGridDiagnosticTextures?.();
     const sceneRuntime = planSceneRuntime(scene, { methodId: config.methodId, renderMode: svoRenderMode });
+    const svoSceneConfig: SimulationRunConfig = {
+      ...config,
+      values: {
+        ...config.values,
+        svoEnvironmentBrickRefinementLevels: activeSvoTuning.environmentBrickRefinementLevels,
+      },
+    };
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
-      ? this.currentGPUFluid(scene, config, time_s)
+      ? this.currentGPUFluid(scene, svoSceneConfig, time_s)
       : undefined;
     const pixelTraceRequested = Boolean(pixelTrace) && svoRenderMode === "svo" && voxelRenderMode === "smooth";
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
@@ -1661,23 +1567,19 @@ export class FluidLabRenderer {
       this.voxelDebugPipeline?.setSource(this.voxelInspectionSource);
       this.voxelDebugSourceGeneration = requestedVoxelDebugGeneration;
     }
-    if (readyGPUFluid) { this.preparedGPUTime_s = Math.max(this.preparedGPUTime_s, time_s); this.preparedGPUBodies = bodies; }
-    if (this.presentationPending) {
-      // One presentation at a time, but physics keeps flowing. Returning here
-      // without admitting work used to leave the device idle for the rest of
-      // the interval, because the presentation fence covers the whole queue.
-      if (readyGPUFluid) {
-        if (pausedTargetRequiresGPUAdvance(this.simulationRunning, time_s, readyGPUFluid.info.submittedTime_s ?? 0)) {
-          this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
-        } else this.continuePreparedGPUWork(readyGPUFluid, this.gpuFluidGeneration);
-      }
+    if (this.presentationsInFlight >= BROWSER_GPU_THROUGHPUT_DEPTH) {
+      // The next draw uses the newest camera and solver state. Do not append a
+      // stale presentation to a saturated FIFO: double buffering is sufficient
+      // to keep execution dense without turning throughput into input latency.
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
-    const observedStep_ms=this.advanceWallEstimator.estimate_ms;
-    const renderBeforePhysics = backend === "webgpu" && !presentationHasPhysicsSlack(this.lastPresentationCompletedAt_ms, performance.now(), observedStep_ms, this.presentationWallEstimator.estimate_ms ?? 0);
     let gpuInfo = readyGPUFluid?.info;
-    const explicitPausedAdvance = readyGPUFluid && pausedTargetRequiresGPUAdvance(this.simulationRunning, time_s, readyGPUFluid.info.submittedTime_s ?? 0);
-    if (readyGPUFluid && (explicitPausedAdvance || !renderBeforePhysics)) gpuInfo = this.submitPreparedGPUFluid(readyGPUFluid, time_s, bodies);
+    if (readyGPUFluid) {
+      gpuInfo = this.submitPreparedGPUFluid(
+        readyGPUFluid, time_s, bodies,
+        this.simulationRunning ? BROWSER_GPU_THROUGHPUT_DEPTH : 1,
+      );
+    }
     // The global fine narrow band double-buffers generations. Refresh its
     // tagged renderer binding after each admitted solver encode so extraction
     // follows the newly published generation without any CPU field copy.
@@ -1793,8 +1695,8 @@ export class FluidLabRenderer {
     }
     this.advanceSceneryAnimation();
     this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
-    // Reduced-rate cone lighting is the production default: half-resolution
-    // prepass + guided upsample, measured within the visibility-error gates.
+    // Reduced-rate cone lighting is the production default: quarter-axis-rate
+    // prepass + full-resolution relight, with 0.5 retained by the quality tier.
     this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
     this.svoDryScenePipeline?.setRenderTuning(activeSvoTuning);
     cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
@@ -1871,11 +1773,15 @@ export class FluidLabRenderer {
           depthToleranceScale: activeSvoTuning.temporalDepthToleranceScale,
         } : undefined;
         if (!temporalFrame) this.svoDryScenePipeline?.invalidateTemporalHistory();
-        // SVO visibility and shading are presentation work, not an on-change
-        // cache. Execute them for every submitted frame so dynamic sparse
-        // publications, lighting, and temporal sampling can never be hidden
-        // behind a host-computed scene key.
-        const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, temporalFrame, undefined, tracePhase) ?? false;
+        // Primary visibility is immutable only for a static dry scene or a
+        // paused solver. Source replacement and authored primitive animation
+        // invalidate the renderer-owned cache; this caller key additionally
+        // covers camera, viewport, bodies, selection, tuning and environment.
+        // Running fluid scenes fail closed to a fresh primary trace.
+        const primaryCoherenceKey = !sceneRuntime.fluidSolver || !this.simulationRunning
+          ? `${shadowStabilityKey}|viewport=${this.presentationTexture!.width}x${this.presentationTexture!.height}|scene=${this.svoDryScenePipeline?.sceneEpoch ?? 0}`
+          : undefined;
+        const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, temporalFrame, primaryCoherenceKey, tracePhase) ?? false;
         svoEncoded = Boolean(replacementResult);
         if (!replacementResult) this.svoDryScenePipeline?.invalidateTemporalHistory();
         return replacementResult;
@@ -2014,13 +1920,19 @@ export class FluidLabRenderer {
     if (hardwarePresentationTrace) hardwarePresentationTrace.resolve(encoder);
     else presentationTrace?.destroy();
     presentationQueueTrace?.begin();
-    const presentationSubmittedAt_ms=performance.now();
-    const presentationQueueWasIdleAtSubmit=this.gpuPendingBatches===0
-      && this.diagnosticQueueWorkPending===0;
-    const physicsSequenceAtPresentationSubmit=this.physicsQueueWorkSequence;
     this.device.queue.submit([encoder.finish()]);
-    this.nonPhysicsQueueWorkSequence+=1;
-    this.presentationPending=true;
+    this.presentationsInFlight+=1;
+    const completedPresentationDevice=this.device;
+    let presentationRetired=false;
+    const retirePresentation=()=>{
+      if(presentationRetired)return;
+      presentationRetired=true;
+      this.presentationsInFlight=Math.max(0,this.presentationsInFlight-1);
+    };
+    void completedPresentationDevice.queue.onSubmittedWorkDone().then(()=>{
+      retirePresentation();
+      if(!this.disposed&&!this.deviceLost&&this.device===completedPresentationDevice)this.completedPresentations+=1;
+    }).catch(retirePresentation);
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
     const presentationTraceRead = hardwarePresentationTrace
@@ -2052,36 +1964,19 @@ export class FluidLabRenderer {
     }
     const surfaceDiagnosticsRequired = true;
     const surfaceDiagnosticsCompletion = this.waterPipeline.completeSurfaceDiagnostics();
-    const presentationDevice=this.device;
-    void this.device.queue.onSubmittedWorkDone().then(async()=>{
-      if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
-      const completedAt_ms=performance.now();
-      this.presentationWallEstimator.observeCompletion(completedAt_ms,presentationSubmittedAt_ms,{
-        pendingTargetWorkAtSubmit:0,
-        interveningWorkSequence:physicsSequenceAtPresentationSubmit,
-        queueWasIdleAtSubmit:presentationQueueWasIdleAtSubmit,
-      });
-      this.presentationPending=false;this.lastPresentationCompletedAt_ms=completedAt_ms;
-      if(initialStaticSvoSubmission)this.settleStaticSvoPresentation(initialStaticSvoSubmission);
-      if(initialRasterSubmission){
-        const initialDiagnostics=await surfaceDiagnosticsCompletion;
-        this.settleInitialRasterPresentation(initialRasterSubmission,surfaceDiagnosticsRequired,initialDiagnostics);
-      }
-      if(this.gpuFluid)this.continuePreparedGPUWork(this.gpuFluid,this.gpuFluidGeneration);
-    }).catch(()=>{this.presentationPending=false;});
-    if(readyGPUFluid&&this.simulationRunning){
-      cpuTrace?.transition({ id: "other", label: "Post-submit physics scheduling" });
-      const postPresentationDepth=this.preparedGPUQueueDepth(readyGPUFluid);
-      // postPresentationDepth is a ceiling, not an increment. Adding the
-      // current pending count here admitted another full window every frame,
-      // so slow 16/32-leaf solvers accumulated seconds of work that Reset then
-      // had to drain before it could replace the solver.
-      const maximumPendingAdvances=postPresentationDepth;
-      for(let queued=0;queued<postPresentationDepth;queued+=1){
-        const before=readyGPUFluid.info.submittedTime_s??0;
-        this.submitPreparedGPUFluid(readyGPUFluid,time_s,bodies,maximumPendingAdvances);
-        if((readyGPUFluid.info.submittedTime_s??0)<=before)break;
-      }
+    // The ordinary completion callback only retires a throughput slot and feeds
+    // FPS evidence. First-frame startup additionally needs proof that its exact
+    // submission completed before publishing renderer authority.
+    if(initialStaticSvoSubmission||initialRasterSubmission){
+      const presentationDevice=this.device;
+      void this.device.queue.onSubmittedWorkDone().then(async()=>{
+        if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
+        if(initialStaticSvoSubmission)this.settleStaticSvoPresentation(initialStaticSvoSubmission);
+        if(initialRasterSubmission){
+          const initialDiagnostics=await surfaceDiagnosticsCompletion;
+          this.settleInitialRasterPresentation(initialRasterSubmission,surfaceDiagnosticsRequired,initialDiagnostics);
+        }
+      }).catch(()=>{ /* Device loss is reported by device.lost. */ });
     }
     return this.currentFrameMetrics(config.methodId, presentationContext, true, cpuTrace?.finish());
   }

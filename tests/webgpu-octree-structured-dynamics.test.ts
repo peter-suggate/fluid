@@ -310,11 +310,14 @@ test("newly wet topology faces inherit the accepted Section 5 air extension", ()
   const transfer = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn transferStructuredTopologyCandidate("),
     structuredVelocityDynamicsWGSL.indexOf("// Characteristic sources"));
+  assert.match(structuredVelocityDynamicsWGSL,
+    /@compute @workgroup_size\(128\)fn transferStructuredTopologyCandidate[\s\S]*let index=g\.x\+g\.y\*65535u;let handle=candidateTransferItem\(index\)/,
+    "each changed face must own a wide workgroup resolved from the compact class-4 list");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn oldAnchor\([\s\S]*lid<5u[\s\S]*lid<125u[\s\S]*reduceTransferProbe/,
+    "ordered backtrace probes and the complete 5^3 neighbourhood must reduce cooperatively");
   assert.match(transfer,
-    /let index=g\.x\+g\.y\*65535u\*64u;let handle=candidateTransferItem\(index\)/,
-    "each transfer lane must resolve a compact class-4 handle rather than scan capacity");
-  assert.match(transfer,
-    /if\(!vectorValid\(old\)\)\{old=extendedOwnerVelocity\(point\);\}[\s\S]*if\(!vectorValid\(old\)\).*rejectCandidateTransfer/,
+    /if\(!vectorValid\(transferOld\)\)\{transferOld=extendedOwnerVelocity\(point\);\}[\s\S]*if\(!vectorValid\(transferOld\)\).*rejectCandidateTransfer/,
     "the extended field is used only after exact old-row transfer fails, and missing support still rejects");
   assert.doesNotMatch(transfer, /old=vec4f\(0/,
     "newly wet faces must never be admitted with an invented zero velocity");

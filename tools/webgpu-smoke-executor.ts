@@ -302,6 +302,11 @@ const firstAdvanceProfileGateReleased = firstAdvanceProfileGate
   : undefined;
 const regressionArtifactRequested = process.env.FLUID_REGRESSION_ARTIFACT === "1";
 const genericPhaseTraceRequested = process.env.FLUID_GPU_FINE_TIMESTAMPS === "1";
+/** X-6 needs the buffer dependency DAG without also enabling the semantic
+ * phase timestamp recorder. Keep an explicit diagnostic switch so a clean
+ * pass-timestamp capture cannot silently omit its manifest. */
+const gpuDataFlowManifestRequested = genericPhaseTraceRequested
+  || process.env.FLUID_GPU_DATA_FLOW_MANIFEST === "1";
 /** One-shot, pass-local GPU timestamps for algorithm attribution. Unlike the
  * semantic fallback tracer this does not split submissions or wait between
  * phases: timestamp writes are attached to the compute passes the solver
@@ -331,6 +336,8 @@ const genericPhaseTraceAdvances = Math.max(
   1,
   Math.floor(Number(process.env.FLUID_GPU_FINE_TIMESTAMP_ADVANCES ?? 1)),
 );
+const dataFlowSkipAdvances = Math.max(0,
+  Math.floor(Number(process.env.FLUID_GPU_DATA_FLOW_SKIP_ADVANCES ?? 0)));
 /** Emit every GPU physics phase trace the solver captures as a JSON line.
  * The dynamic recorder throttles itself to one in-flight sample per 250 ms,
  * so slow advances are sampled near-continuously and fast advances sparsely. */
@@ -893,7 +900,7 @@ async function runGPU(
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
   const commandAudit = gpuCommandAuditRequested ? new GPUCommandAudit() : undefined;
-  const dataFlowAudit = genericPhaseTraceRequested ? new GPUDataFlowAudit() : undefined;
+  const dataFlowAudit = gpuDataFlowManifestRequested ? new GPUDataFlowAudit() : undefined;
   const requestedPassTimestampQueryCapacity = Number(
     process.env.FLUID_GPU_PASS_TIMESTAMP_QUERY_CAPACITY ?? 2048);
   const passTimestampQueryCapacity = Number.isFinite(requestedPassTimestampQueryCapacity)
@@ -1209,7 +1216,7 @@ async function runGPU(
   // below measures only recurring advance work and explicitly requested
   // profiler/readback activity after the initialized solver is warm.
   commandAudit?.reset();
-  dataFlowAudit?.start();
+  if (dataFlowSkipAdvances === 0) dataFlowAudit?.start();
   passTimestampAudit?.start();
   const runStarted = performance.now();
   let steps = 0, samplingWall_ms = 0, matched: Awaited<ReturnType<typeof readCubicVolumeField>> | undefined;
@@ -1410,6 +1417,11 @@ async function runGPU(
     }
   };
   while ((solver.info.submittedTime_s ?? 0) + 1e-9 < target_s) {
+    if (dataFlowAudit) {
+      if (steps >= dataFlowSkipAdvances
+        && steps < dataFlowSkipAdvances + genericPhaseTraceAdvances) dataFlowAudit.start();
+      else dataFlowAudit.stop();
+    }
     const stepDt = perturbCadence
       ? Math.min(scene.numerics.maxDt_s, regressionDtPattern[steps % regressionDtPattern.length])
       : scene.numerics.maxDt_s;
@@ -1469,7 +1481,6 @@ async function runGPU(
       }
     }
     captureGenericPhaseTrace();
-    if (dataFlowAudit && steps >= genericPhaseTraceAdvances) dataFlowAudit.stop();
     if (physicsTraceLogRequested) {
       const trace = (solver.info as { physicsTrace?: {
         sampleId: number; context: string; total_ms: number;
@@ -2364,8 +2375,15 @@ async function runGPU(
     }
     const allowed = tripped.filter((entry) => tripwireAllowList.has(entry.id));
     const failing = tripped.filter((entry) => !tripwireAllowList.has(entry.id));
-    for (const entry of allowed) {
-      console.error(`[tripwire ${entry.id} ALLOWED] ${JSON.stringify(entry)}`);
+    if (process.env.FLUID_TRIPWIRE_ALLOW_SUMMARY === "1" && allowed.length > 0) {
+      const counts: Record<string, number> = {};
+      for (const entry of allowed) counts[entry.id] = (counts[entry.id] ?? 0) + 1;
+      console.error(`[tripwires ALLOWED probe summary] ${JSON.stringify({ counts,
+        firstTrips: allowed.slice(0, 12), lastTrip: allowed[allowed.length - 1] })}`);
+    } else {
+      for (const entry of allowed) {
+        console.error(`[tripwire ${entry.id} ALLOWED] ${JSON.stringify(entry)}`);
+      }
     }
     if (failing.length !== 0) {
       const byId: Record<string, number> = {};
@@ -2393,10 +2411,10 @@ async function runGPU(
         ...bucket, mean_ms: bucket.total_ms / Math.max(1, bucket.samples),
       }])),
   } : undefined;
-  const gpuDataFlowManifest = dataFlowAudit?.report(
-    Math.min(steps, genericPhaseTraceAdvances),
-    gpuFineTimestamps?.byLabel,
-  );
+  // Finalized after the pass-local timestamp audit drains. Semantic phase
+  // labels ("fine-sdf-redistance: ...") do not match compute-pass labels and
+  // would silently assign zero duration to every DAG node.
+  let gpuDataFlowManifest: ReturnType<GPUDataFlowAudit["report"]> | undefined;
   let finalPerformanceAuthority: Readonly<Record<string, unknown>> | undefined;
   if (performanceProfileRequested && method.id === "octree") {
     const authority = solver as GPUSolverInstance & {
@@ -2459,7 +2477,11 @@ async function runGPU(
       phase: "final-performance-authority", ...finalAuthority,
     }));
     if (finalAuthorityFailures.length !== 0) {
-      throw new Error(`final performance authority rejected: ${JSON.stringify(finalAuthority)}`);
+      if (process.env.FLUID_QUALITY_INVALID_PROBE === "1") {
+        console.error(`[final performance authority ALLOWED probe] ${JSON.stringify(finalAuthority)}`);
+      } else {
+        throw new Error(`final performance authority rejected: ${JSON.stringify(finalAuthority)}`);
+      }
     }
   }
   solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
@@ -2720,6 +2742,10 @@ async function runGPU(
   const gpuPassTimestamps = passTimestampAudit
     ? await passTimestampAudit.report()
     : undefined;
+  gpuDataFlowManifest = dataFlowAudit?.report(
+    Math.min(Math.max(0, steps - dataFlowSkipAdvances), genericPhaseTraceAdvances),
+    gpuPassTimestamps?.byLabel ?? gpuFineTimestamps?.byLabel,
+  );
   const diagnosticProjection = solver as GPUSolverInstance & {
     octreeProjection?: {
       readGlobalFineLevelSetDiagnostics(): Promise<{

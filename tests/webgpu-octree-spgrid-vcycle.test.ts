@@ -1158,7 +1158,7 @@ test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
   assert.doesNotMatch(octreeSPGridVCycleShader, /fn validateL1CapturePages|fn finalizeL1CapturePlan/,
     "the recurring all-page compare/reduce kernels must be deleted");
   assert.match(octreeSPGridVCycleShader,
-    /fn captureWorkCount\(\)->u32\{return select\(deltaControl\(5u\),captureExpectedPages\(\),captureBootstrap\(\)\);\}/,
+    /fn deltaDirtyCountWord\(\)->u32\{return select\(5u,6u,\(p\.delta\.w&0x80000000u\)!=0u\);\}[\s\S]*fn captureWorkCount\(\)->u32\{return select\(deltaControl\(deltaDirtyCountWord\(\)\),captureExpectedPages\(\),captureBootstrap\(\)\);\}/,
     "only explicit cold bootstrap may enumerate every page");
   const captureTransaction = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn beginL1CapturePlan"),

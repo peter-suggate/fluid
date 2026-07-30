@@ -6,6 +6,8 @@ import {
 } from "./webgpu-octree-air-velocity-support";
 
 export const structuredFineLevelSetTransportWGSL = /* wgsl */ `
+override stagedFineAddressing:bool=false;
+override b4FineAddressing:bool=false;
 struct P {
   brickDims:vec3u,r:u32,sampleDims:vec3u,samplesPerBrick:u32,origin:vec3f,h:f32,
   pageCapacity:u32,generation:u32,segments:u32,maxLeaf:u32,dimensions:vec3u,rowCapacity:u32,
@@ -49,6 +51,11 @@ const HEADER_WORDS:u32=7u; const HEADER_BASE:u32=4u; const STATUS_BASE:u32=128u;
 const SUPPORT_TAG:u32=${OCTREE_AIR_SUPPORT_TAG}u;
 const SUPPORT_VALID:u32=${OCTREE_AIR_SUPPORT_VALID}u;
 const SUPPORT_VERSION:u32=${OCTREE_AIR_SUPPORT_LAYOUT_VERSION}u;
+const AIR_OWNER_WINDOW_RADIUS:u32=2u;const AIR_OWNER_WINDOW_COUNT:u32=125u;
+var<workgroup> airOwnerWindow:array<AirOwner,125>;
+var<workgroup> airOwnerWindowAnchor:vec3u;
+var<workgroup> airOwnerWindowRadius:u32;
+var<workgroup> airOwnerWindowEnabled:u32;
 // FLT_MAX is the fail-closed value returned by sampleFine. Keep the bound
 // strict so a missing sparse trilinear stencil cannot be committed as phi.
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
@@ -89,7 +96,14 @@ fn airOwner(cell:u32)->AirOwner{if(cell>=p.dimensions.x*p.dimensions.y*p.dimensi
   return AirOwner(INVALID,INVALID,0u,INVALID);}
 fn ownerCellAtPosition(x:vec3f)->u32{let q=vec3u(clamp(floor(x/p.physical),vec3f(0),vec3f(p.dimensions)-vec3f(1)));
   return q.x+p.dimensions.x*(q.y+p.dimensions.y*q.z);}
-fn airOwnerAtPosition(x:vec3f)->AirOwner{return airOwner(ownerCellAtPosition(x));}
+fn stagedAirOwner(cell:u32)->AirOwner{
+  if(!stagedFineAddressing||airOwnerWindowEnabled==0u){return airOwner(cell);}
+  let q=cellCoord(cell);let radius=airOwnerWindowRadius;
+  let delta=vec3i(q)-vec3i(airOwnerWindowAnchor)+vec3i(i32(radius));let width=2u*radius+1u;
+  if(any(delta<vec3i(0))||any(delta>=vec3i(i32(width)))){return airOwner(cell);}
+  return airOwnerWindow[u32(delta.x)+width*(u32(delta.y)+width*u32(delta.z))];
+}
+fn airOwnerAtPosition(x:vec3f)->AirOwner{return stagedAirOwner(ownerCellAtPosition(x));}
 fn airPublicationValid()->bool{let at=p.airControlOffset;if(p.airSupportEnabled!=1u||at+16u>4u*arrayLength(&airSupport)
   ||p.airOwnerOffset+4u*p.dimensions.x*p.dimensions.y*p.dimensions.z>4u*arrayLength(&airSupport)
   ||arrayLength(&boundary)<7u||boundary[0]!=0u||boundary[1]!=INVALID||boundary[2]!=accepted[2]
@@ -186,7 +200,8 @@ fn planStructuredFineTransportSubsteps(@builtin(local_invocation_index)lid:u32) 
 }
 
 fn unpackBrick(key:u32)->vec3u{let xy=p.brickDims.x*p.brickDims.y;let z=key/xy;let rem=key-z*xy;let y=rem/p.brickDims.x;return vec3u(rem-y*p.brickDims.x,y,z);}
-fn localCoord(i:u32)->vec3u{let z=i/(p.r*p.r);let rem=i-z*p.r*p.r;let y=rem/p.r;return vec3u(rem-y*p.r,y,z);}
+fn localCoord(i:u32)->vec3u{if(b4FineAddressing){return vec3u(i&3u,(i>>2u)&3u,i>>4u);}
+ let z=i/(p.r*p.r);let rem=i-z*p.r*p.r;let y=rem/p.r;return vec3u(rem-y*p.r,y,z);}
 var<workgroup> classifyRare:array<u32,64>;var<workgroup> classifyInvalid:array<u32,64>;
 @compute @workgroup_size(64)
 fn classifyStructuredFineTransportBlocks(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){let work=wg.x;var id=INVALID;var rare=0u;var invalid=0u;if(state[0]==0u&&work<min(worklist[1],p.pageCapacity)){id=worklist[7u+work];if(id>=p.pageCapacity||metadata[id*10u+2u]!=p.generation){id=INVALID;}}if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;let sampleValid=(flags[index]&VALID)!=0u;if(sampleValid){let value=phi[index];invalid|=select(1u,0u,finite(value));rare|=select(0u,1u,value>=0.);}else{rare=1u;}}}classifyRare[lid]=rare;classifyInvalid[lid]=invalid;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lid<width){classifyRare[lid]|=classifyRare[lid+width];classifyInvalid[lid]|=classifyInvalid[lid+width];}workgroupBarrier();}if(lid==0u&&work<p.pageCapacity){let base=statusBase(work);let valid=id!=INVALID&&classifyInvalid[0]==0u;let cls=select(REGULAR_COMMON,REGULAR_RARE,classifyRare[0]!=0u);state[base]=cls;state[base+1u]=select(INVALID,work,valid);state[base+2u]=0xffff0000u;}}
@@ -338,7 +353,56 @@ fn transitionSample(x:vec3f)->vec4f{
 
 fn packBrick(q:vec3u)->u32{return q.x+p.brickDims.x*(q.y+p.brickDims.y*q.z);}
 fn pageOf(key:u32)->u32{let at=7u+p.pageCapacity+key;if(key>=p.brickDims.x*p.brickDims.y*p.brickDims.z||at>=arrayLength(&worklist)){return INVALID;}let id=worklist[at];return select(INVALID,id,id<p.pageCapacity&&metadata[id*10u+1u]==key&&metadata[id*10u+2u]==p.generation);}
-fn sampleIndex(q:vec3u)->u32{let b=q/p.r;let id=pageOf(packBrick(b));if(id==INVALID){return INVALID;}let l=q-b*p.r;return id*p.samplesPerBrick+l.x+p.r*(l.y+p.r*l.z);}
+// Address-only halo for the terminal phi gather. A characteristic starts in
+// the workgroup's B4 brick and moves by at most p.maxBacktrace samples; the
+// trilinear +1 corner needs one additional brick. The configured maximum of
+// 2*fineFactor is at most eight samples on current B4 plans, hence radius 3
+// and a 7^3 table. No phi or flags are staged, preserving the exact float
+// evaluation and storage-rounding path.
+const FINE_PAGE_WINDOW_RADIUS:u32=2u;const FINE_PAGE_WINDOW_WIDTH:u32=5u;
+const FINE_PAGE_WINDOW_COUNT:u32=125u;
+var<workgroup> finePageWindow:array<u32,125>;
+var<workgroup> finePageWindowAnchor:vec3u;
+var<workgroup> finePageWindowRadius:u32;
+var<workgroup> finePageWindowEnabled:u32;
+fn prepareFinePageWindow(id:u32,lid:u32){
+  if(!stagedFineAddressing){return;}
+  if(lid==0u){finePageWindowAnchor=vec3u(0);if(id!=INVALID){finePageWindowAnchor=unpackBrick(metadata[id*10u+1u]);}
+    let requiredFineRadius=(p.maxBacktrace+p.r-1u)/p.r+1u;
+    finePageWindowEnabled=select(0u,1u,requiredFineRadius<=FINE_PAGE_WINDOW_RADIUS);
+    finePageWindowRadius=min(FINE_PAGE_WINDOW_RADIUS,requiredFineRadius);
+    airOwnerWindowAnchor=vec3u(0);if(id!=INVALID){airOwnerWindowAnchor=(finePageWindowAnchor*p.r)/max(1u,p.segments);}
+    let requiredAirRadius=(p.maxBacktrace+max(1u,p.segments)-1u)/max(1u,p.segments)+1u;
+    airOwnerWindowEnabled=select(0u,1u,requiredAirRadius<=AIR_OWNER_WINDOW_RADIUS);
+    airOwnerWindowRadius=min(AIR_OWNER_WINDOW_RADIUS,requiredAirRadius);}
+  workgroupBarrier();
+  let radius=workgroupUniformLoad(&finePageWindowRadius);let width=2u*radius+1u;let count=width*width*width;
+  for(var item=lid;item<FINE_PAGE_WINDOW_COUNT;item+=64u){var page=INVALID;
+    if(finePageWindowEnabled!=0u&&id!=INVALID&&item<count){let z=item/(width*width);let rem=item-z*width*width;let y=rem/width;let x=rem-y*width;
+      let brick=vec3i(finePageWindowAnchor)+vec3i(i32(x)-i32(radius),i32(y)-i32(radius),i32(z)-i32(radius));
+      if(all(brick>=vec3i(0))&&all(brick<vec3i(p.brickDims))){page=pageOf(packBrick(vec3u(brick)));}}
+    finePageWindow[item]=page;
+  }
+  let airRadius=workgroupUniformLoad(&airOwnerWindowRadius);let airWidth=2u*airRadius+1u;
+  let airCount=airWidth*airWidth*airWidth;
+  for(var item=lid;item<AIR_OWNER_WINDOW_COUNT;item+=64u){var owner=AirOwner(INVALID,INVALID,0u,INVALID);
+    if(airOwnerWindowEnabled!=0u&&id!=INVALID&&item<airCount){let z=item/(airWidth*airWidth);let rem=item-z*airWidth*airWidth;let y=rem/airWidth;let x=rem-y*airWidth;
+      let q=vec3i(airOwnerWindowAnchor)+vec3i(i32(x)-i32(airRadius),i32(y)-i32(airRadius),i32(z)-i32(airRadius));
+      if(all(q>=vec3i(0))&&all(q<vec3i(p.dimensions))){let cell=u32(q.x)+p.dimensions.x*(u32(q.y)+p.dimensions.y*u32(q.z));owner=airOwner(cell);}}
+    airOwnerWindow[item]=owner;
+  }
+  workgroupBarrier();
+}
+fn stagedPageOf(brick:vec3u)->u32{
+  if(!stagedFineAddressing||finePageWindowEnabled==0u){return pageOf(packBrick(brick));}
+  let radius=finePageWindowRadius;let delta=vec3i(brick)-vec3i(finePageWindowAnchor)+vec3i(i32(radius));let width=2u*radius+1u;
+  if(any(delta<vec3i(0))||any(delta>=vec3i(i32(width)))){return pageOf(packBrick(brick));}
+  return finePageWindow[u32(delta.x)+width*(u32(delta.y)+width*u32(delta.z))];
+}
+fn sampleIndex(q:vec3u)->u32{if(b4FineAddressing){let b=q>>vec3u(2);let id=stagedPageOf(b);
+  if(id==INVALID){return INVALID;}let l=q&vec3u(3);return (id<<6u)|l.x|(l.y<<2u)|(l.z<<4u);}
+ let b=q/p.r;let id=stagedPageOf(b);if(id==INVALID){return INVALID;}let l=q-b*p.r;
+ return id*p.samplesPerBrick+l.x+p.r*(l.y+p.r*l.z);}
 fn sampleFine(x0:vec3f)->f32{let high=vec3f(p.sampleDims)-vec3f(1.0001);let grid=clamp((x0-p.origin)/p.h-vec3f(.5),vec3f(0),high);let base=vec3u(floor(grid));let t=fract(grid);var sum=0.;var weight=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=min(base+o,p.sampleDims-vec3u(1));let at=sampleIndex(q);if(at==INVALID||at>=arrayLength(&phi)||(flags[at]&VALID)==0u){continue;}let value=phi[at];if(!finite(value)){continue;}let w=select(1.-t.x,t.x,o.x!=0u)*select(1.-t.y,t.y,o.y!=0u)*select(1.-t.z,t.z,o.z!=0u);sum+=w*value;weight+=w;}return select(3.402823e38,sum/max(weight,1e-20),weight>0.999);}
 fn insideDomain(x:vec3f)->bool{return all(x>=p.origin)&&all(x<=p.origin+vec3f(p.sampleDims)*p.h);}
 fn clampDomain(x:vec3f)->vec3f{var hi=p.origin+vec3f(p.sampleDims)*p.h;if(p.openTop!=0u){hi.y=max(hi.y,x.y);}return clamp(x,p.origin,hi);}
@@ -413,8 +477,8 @@ fn transitionRareDeparture(origin:vec3f,air:bool)->Departure{var x=origin;var go
 // untouched, and the term can only move phi toward air, never create liquid.
 fn finishSample(index:u32,old:f32,origin:vec3f,d:Departure)->SampleOutcome{var x=d.x;var outside=0u;var exitDistance=0.;if(!insideDomain(x)){outside=1u;}if(p.closed!=0u){let interior=clampSampleLattice(x);exitDistance=distance(x,interior);x=interior;}let sampled=select(3.402823e38,sampleFine(x),d.good!=0u);let acceptedSample=d.good!=0u&&finite(sampled);if(acceptedSample){nextPhi[index]=applyInflowPhi(sampled+exitDistance,origin);}else{nextPhi[index]=old;}return SampleOutcome(outside,select(1u,0u,acceptedSample),select(0u,1u,acceptedSample),d.extended,u32(ceil(d.maximumSpeed*p.dt/p.h)));}
 fn pageSample(id:u32,local:u32)->vec4u{let brick=unpackBrick(metadata[id*10u+1u]);let index=id*p.samplesPerBrick+local;let q=brick*p.r+localCoord(local);return vec4u(index,q);}
-fn runRegularCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularCommonDeparture(origin)));}}}finishPage(original,lid);}
-fn runRegularRare(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
+fn runRegularCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_COMMON,work);var id=INVALID;if(original!=INVALID){let candidate=worklist[7u+original];if(candidate<p.pageCapacity&&metadata[candidate*10u+2u]==p.generation){id=candidate;}}prepareFinePageWindow(id,lid);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularCommonDeparture(origin)));}}finishPage(original,lid);}
+fn runRegularRare(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_RARE,work);var id=INVALID;if(original!=INVALID){let candidate=worklist[7u+original];if(candidate<p.pageCapacity&&metadata[candidate*10u+2u]==p.generation){id=candidate;}}prepareFinePageWindow(id,lid);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularRareDeparture(origin,old>=0.)));}}finishPage(original,lid);}
 fn runTransitionCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionCommonDeparture(origin)));}}}finishPage(original,lid);}
 fn runTransitionRare(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
 @compute @workgroup_size(64)fn transportRegularCommonPhi(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){runRegularCommon(wg.x,lid);}

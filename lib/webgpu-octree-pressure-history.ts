@@ -1,9 +1,18 @@
 import type { PassBroker } from "./webgpu-pass-broker";
 
+/** A/B escape hatch for the exact accepted-row launch. Product defaults to
+ * compact; the capacity arm exists only for interleaved discovery timing. */
+export const octreePressureHistoryCompactDispatchEnabled = (): boolean =>
+  typeof process === "undefined"
+  || process.env?.FLUID_PRESSURE_HISTORY_COMPACT_DISPATCH !== "0";
+
 export interface OctreePressureHistoryRemapSource {
   readonly rowDelta: GPUBuffer;
   readonly rowDeltaControlOffsetWords: number;
   readonly rowDeltaNewToOldOffsetWords: number;
+  /** Exact current-row dispatch authored by the accepted frontier transaction. */
+  readonly rowDispatch: GPUBuffer;
+  readonly rowDispatchOffsetBytes: number;
   readonly currentCandidatePressure: GPUBuffer;
   readonly candidateHistory: GPUBuffer;
   readonly rowCapacity: number;
@@ -25,7 +34,11 @@ export class WebGPUOctreePressureHistoryRemap {
       || !Number.isSafeInteger(source.rowDeltaControlOffsetWords)
       || source.rowDeltaControlOffsetWords < 0
       || !Number.isSafeInteger(source.rowDeltaNewToOldOffsetWords)
-      || source.rowDeltaNewToOldOffsetWords < 0) {
+      || source.rowDeltaNewToOldOffsetWords < 0
+      || !Number.isSafeInteger(source.rowDispatchOffsetBytes)
+      || source.rowDispatchOffsetBytes < 0
+      || source.rowDispatchOffsetBytes % 4 !== 0
+      || source.rowDispatch.size < source.rowDispatchOffsetBytes + 12) {
       throw new RangeError("Pressure history remap layout is invalid");
     }
     const vectorBytes = source.rowCapacity * 4;
@@ -82,7 +95,18 @@ export class WebGPUOctreePressureHistoryRemap {
     }
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, group);
-    pass.dispatchWorkgroups(Math.ceil(this.source.rowCapacity / 64));
+    // The topology transaction has already published this exact current-row
+    // schedule. Reusing it avoids launching the temporal remap over every
+    // allocated pressure slot while preserving the shader's fail-closed count
+    // guard against a malformed publication.
+    if (octreePressureHistoryCompactDispatchEnabled()) {
+      pass.dispatchWorkgroupsIndirect(
+        this.source.rowDispatch,
+        this.source.rowDispatchOffsetBytes,
+      );
+    } else {
+      pass.dispatchWorkgroups(Math.ceil(this.source.rowCapacity / 256));
+    }
   }
 
   destroy(): void {
@@ -100,15 +124,18 @@ struct Params { rowCapacity: u32, newToOldOffset: u32, controlOffset: u32, paddi
 @group(0) @binding(3) var<storage, read> currentCandidatePressure: array<f32>;
 @group(0) @binding(4) var<storage, read_write> candidateHistory: array<f32>;
 fn finite(value: f32) -> bool { return value == value && abs(value) <= 3.402823e38; }
-@compute @workgroup_size(64)
+// The accepted frontier record is one workgroup per 256 current rows. Match
+// that publication quantum exactly so the indirect launch covers every row.
+@compute @workgroup_size(256)
 fn remapPressureHistory(@builtin(global_invocation_id) global: vec3u) {
   let row = global.x;
   let count = min(rowDelta[params.controlOffset], params.rowCapacity);
   if (row >= count) { return; }
   let encoded = rowDelta[params.newToOldOffset + row];
-  // Bit 31 marks the row as affected; the +1 predecessor identity occupies
-  // the low 31 bits and remains valid for both clean and dirty carried rows.
-  let value = encoded & 0x7fffffffu;
+  // Bits 31/30 mark affected and structural dependency cones. The +1 stable
+  // predecessor identity occupies the low thirty bits; strip both flags or a
+  // structural carried row silently looks like an out-of-range predecessor.
+  let value = encoded & 0x3fffffffu;
   let oldRow = value - 1u;
   var history = 0.0;
   if (value != 0u && oldRow < arrayLength(&previousPressure)) {

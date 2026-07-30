@@ -646,6 +646,9 @@ export interface OctreeSPGridL1DeltaSource {
   readonly controlOffsetWords: number;
   readonly newToOldOffsetWords: number;
   readonly dirtyRowsOffsetWords: number;
+  /** Control word holding the count for dirtyRowsOffsetWords (5=structural,
+   * 6=the wider positional/face influence stream). */
+  readonly dirtyCountControlWord?: 5 | 6;
 }
 
 export type OctreeSPGridWorksetBinding = GPUBuffer | Readonly<{
@@ -1238,7 +1241,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       throw new RangeError("SPGrid Section 6.3 buffers require publication storage usage");
     }
     const delta = source.rowDelta;
+    const deltaCountControlWord = delta.dirtyCountControlWord ?? 5;
     if (!Number.isSafeInteger(delta.rowCapacity) || delta.rowCapacity !== this.plan.rowCapacity
+      || (deltaCountControlWord !== 5 && deltaCountControlWord !== 6)
       || ![delta.controlOffsetWords, delta.newToOldOffsetWords, delta.dirtyRowsOffsetWords]
         .every((offset) => Number.isSafeInteger(offset) && offset >= 0)
       || delta.newToOldOffsetWords < delta.controlOffsetWords + 16
@@ -1362,8 +1367,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       words[13] = sourceMode === "candidate" ? 1 : 0;
       floats[14] = 1;
       floats[15] = options.finestCellWidth;
+      // The high bit is internal parameter metadata, not a buffer offset. It
+      // selects control[6] for an affected-list source while preserving the
+      // compact four-word shader ABI.
+      const encodedDirtyRowsOffset = delta.dirtyRowsOffsetWords
+        | (deltaCountControlWord === 6 ? 0x80000000 : 0);
       words.set([delta.rowCapacity, delta.controlOffsetWords, delta.newToOldOffsetWords,
-        delta.dirtyRowsOffsetWords], 16);
+        encodedDirtyRowsOffset], 16);
       words.set([this.plan.totalLevelSlots, this.plan.brickCount,
         this.plan.pageDirectoryBytes / 4, 0], 20);
       floats[23] = 0;
@@ -2930,19 +2940,22 @@ fn capturePageStamp(page:u32)->u32{return capturePages.pages[page].changeStamp;}
 fn captureFailed()->bool{return capturePages.error!=0u;}
 fn captureReport(flag:u32){capturePages.error|=flag;}
 fn deltaControl(word:u32)->u32{return sourceDelta[p.delta.y+word];}
-fn deltaOldRow(row:u32)->u32{let encoded=sourceDelta[p.delta.z+row]&0x7fffffffu;
+fn deltaOldRow(row:u32)->u32{let encoded=sourceDelta[p.delta.z+row]&0x3fffffffu;
  return select(INVALID,encoded-1u,encoded!=0u);}
-fn deltaDirtyRow(index:u32)->u32{return sourceDelta[p.delta.w+index];}
+fn deltaDirtyRowsOffset()->u32{return p.delta.w&0x7fffffffu;}
+fn deltaDirtyCountWord()->u32{return select(5u,6u,(p.delta.w&0x80000000u)!=0u);}
+fn deltaDirtyRow(index:u32)->u32{return sourceDelta[deltaDirtyRowsOffset()+index];}
 fn deltaAccepted(n:u32)->bool{
  if(p.delta.x!=p.capacity.x||p.delta.y+16u>arrayLength(&sourceDelta)
-  ||p.delta.z+p.delta.x>arrayLength(&sourceDelta)||p.delta.w+p.delta.x>arrayLength(&sourceDelta)){return false;}
+  ||p.delta.z+p.delta.x>arrayLength(&sourceDelta)
+  ||deltaDirtyRowsOffset()+p.delta.x>arrayLength(&sourceDelta)){return false;}
  let previous=deltaControl(1u);let carried=deltaControl(2u);let added=deltaControl(3u);
- let retired=deltaControl(4u);let dirty=deltaControl(5u);
+ let retired=deltaControl(4u);let dirty=deltaControl(deltaDirtyCountWord());
  return deltaControl(0u)==n&&deltaControl(7u)!=0u&&deltaControl(8u)==ROW_DELTA_VALID
   &&carried<=min(n,previous)&&n==carried+added&&n==previous+added-retired&&dirty<=n;
 }
 fn captureBootstrap()->bool{return capturePages.bootstrap!=0u;}
-fn captureWorkCount()->u32{return select(deltaControl(5u),captureExpectedPages(),captureBootstrap());}
+fn captureWorkCount()->u32{return select(deltaControl(deltaDirtyCountWord()),captureExpectedPages(),captureBootstrap());}
 fn captureWorkPage(work:u32)->u32{return select(deltaDirtyRow(work)/CAPTURE_PAGE_ROWS,work,captureBootstrap());}
 fn captureWorkUnique(work:u32,page:u32)->bool{
  return captureBootstrap()||work==0u||deltaDirtyRow(work-1u)/CAPTURE_PAGE_ROWS!=page;

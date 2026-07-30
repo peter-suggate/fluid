@@ -115,10 +115,12 @@ test("the production shader embeds the optimized marcher; the baseline variant k
   // elision stays benchmark-only: tools/benchmark-svo-cone-gpu.ts measured it
   // slower than the subset (cone LOD samples empty space through
   // ancestor-resident coarse pages where the non-residency proof never fires).
-  const optimized = createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true });
+  const optimized = createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true });
   assert.ok(svoDrySceneShader.includes(optimized), "production dry shader must embed the morton+ranged+fluid marcher block");
   assert.match(optimized, /0xff0000ffu[^]*0x0f00f00fu[^]*0xc30c30c3u[^]*0x49249249u/);
   assert.match(optimized, /dryNodeMipLevelStart\(level\)/);
+  assert.match(optimized, /textureLoad\(nodeMipPageTable[^]*encoded-1u/,
+    "a resident page-cache miss must resolve through one direct-table texture load");
   assert.doesNotMatch(optimized, /nodeMipLevelStart\[clamped>>2u\]/,
     "a dynamically indexed uniform array trips a slow-path Metal transform; keep constant vector indexing");
   const elision = createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, emptySpaceElision: true });

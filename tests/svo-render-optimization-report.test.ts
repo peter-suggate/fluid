@@ -18,8 +18,11 @@ test("SVO optimization report is an offline artifact reducer with separate mode 
 test("report applies the measured-quality policy without hiding exactness", () => {
   assert.match(source, /Experiment decisions/);
   assert.match(source, /at least 5% median savings and at most 0\.05% changed pixels/);
-  assert.match(source, /Reject; keep inline/);
-  assert.match(source, /canonical-parametric traversal \+ inline shading/);
+  assert.doesNotMatch(source, /Reject; keep inline/);
+  assert.match(source, /canonical-parametric traversal \+ split visibility\/lighting/);
+  assert.match(source, /Superseded; keep split relight/);
+  assert.match(source, /status: "missing-evidence"/,
+    "a clean checkout emits an honest restoration manifest instead of throwing");
   assert.match(source, /Screen-space 64 px is rejected/);
   assert.match(source, /Final same-source, same-resolution fingerprint is exact/);
   assert.match(source, /presented reference PNGs are byte-identical/);

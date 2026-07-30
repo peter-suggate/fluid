@@ -122,7 +122,7 @@ export function TransportBar() {
         {staticRenderScene
           ? <span className="continuous-run" title="This preset initializes the static sparse scene and renderer only.">STATIC SVO · FLUID SOLVER DISABLED</span>
           : webgpu
-          ? <span className="continuous-run" title={`Physics fills measured GPU slack between presentations · present every browser animation frame · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>MAX SIM THROUGHPUT · PRESENT ASAP</span>
+          ? <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>
           : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}
       </div>
       <div className="file-actions">

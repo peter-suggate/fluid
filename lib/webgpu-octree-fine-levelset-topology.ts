@@ -422,6 +422,15 @@ export interface FineLevelSetPageDeltaLayout {
   readonly totalBytes: number;
 }
 
+export const FINE_LEVELSET_DIRTY_ORACLE_ENV = "FLUID_DIRTY_ORACLE";
+export function fineLevelSetDirtyOracleMembershipRequested(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.[FINE_LEVELSET_DIRTY_ORACLE_ENV] === "membership";
+}
+
 export function planFineLevelSetPageDeltaLayout(pageCapacity: number): FineLevelSetPageDeltaLayout {
   if (!Number.isSafeInteger(pageCapacity) || pageCapacity < 1) {
     throw new RangeError("Fine page-delta capacity must be a positive integer");
@@ -1123,7 +1132,7 @@ export class WebGPUFineLevelSetTopology {
         FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES);
       runIndirect(this.scatterRecurringSeedHaloPipeline, discoverEntries,
         "Scatter recurring fine-band seed halos",
-        FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT, [0, 7, 19, 21]);
+        FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT, [0, 7, 19, 21, 23]);
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scatter");
       const recurringBlocks = Math.ceil(plan.logicalBrickCount / 256);
       const recurringSuperBlocks = Math.ceil(recurringBlocks / 256);
@@ -1358,9 +1367,20 @@ export class WebGPUFineLevelSetTopology {
     this.disabledVolumeControl.destroy(); this.disabledTransportControl.destroy(); }
 }
 
-export function makeFineLevelSetTopologyWGSL(coarsePhiWGSL: string): string {
+export function makeFineLevelSetTopologyWGSL(
+  coarsePhiWGSL: string,
+  dirtyOracleMembership = fineLevelSetDirtyOracleMembershipRequested(),
+  deltaRadiusMask = typeof process === "undefined"
+    || process.env.FLUID_FINE_DELTA_RADIUS_MASK !== "0",
+  deltaNeighborQuery = typeof process !== "undefined"
+    && process.env.FLUID_FINE_DELTA_NEIGHBOR_QUERY === "1",
+): string {
   return /* wgsl */ `
 	const INVALID:u32=0xffffffffu;const VALID:u32=1u;const CAPACITY:u32=1u;const NONFINITE:u32=4u;const MALFORMED:u32=8u;
+const DIRTY_ORACLE_MEMBERSHIP:bool=${dirtyOracleMembership ? "true" : "false"};
+const DELTA_RADIUS_MASK:bool=${deltaRadiusMask ? "true" : "false"};
+const DELTA_NEIGHBOR_QUERY:bool=${deltaNeighborQuery ? "true" : "false"};
+const DELTA_DIRTY:u32=0x100u;const DELTA_SUPPORT:u32=0x200u;
 struct Params { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,sparseCandidateCapacity:u32,pageCapacity:u32,currentGeneration:u32,nextGeneration:u32,fineFactor:u32,affineSeeds:u32,dilationBrickRings:u32,deferPublication:u32,dirtyHaloRings:u32,supportHaloRings:u32,maxWorkgroups:u32,recurringDelta:u32,scanRecordCapacity:u32,redistanceBandFineCells:u32,interpolationSupportFineCells:u32,safetyBrickRings:u32,
  inflowPositionRadius:vec4f,inflowVelocityStrength:vec4f }
@@ -1475,8 +1495,11 @@ fn lifecycleDispatchOffset()->u32{let blocks=(params.pageCapacity+255u)/256u;let
 fn promotionCountsOffset()->u32{return lifecycleDispatchOffset()+21u;}
 var<workgroup> topologyErrorLanes:array<u32,64>;
 fn publishTopologyError(work:u32,local:u32,flag:u32,laneActive:bool){topologyErrorLanes[local]=flag;workgroupBarrier();var width=32u;loop{if(width==0u){break;}if(local<width){topologyErrorLanes[local]|=topologyErrorLanes[local+width];}workgroupBarrier();width>>=1u;}if(local==0u&&laneActive){atomicOr(&topologyErrors[work],topologyErrorLanes[0]);}}
-fn producerChangedContains(key:u32)->bool{if(params.recurringDelta==0u||arrayLength(&transportDelta)<8u+3u*params.pageCapacity
- ||transportDelta[1]!=params.currentGeneration||transportDelta[2]!=1u||transportDelta[0]>params.pageCapacity){return false;}
+fn producerAuthorityValid()->bool{return params.recurringDelta!=0u
+ &&arrayLength(&transportDelta)>=8u+3u*params.pageCapacity
+ &&transportDelta[1]==params.currentGeneration&&transportDelta[2]==1u
+ &&transportDelta[0]<=params.pageCapacity;}
+fn producerChangedContains(key:u32)->bool{if(!producerAuthorityValid()){return false;}
  let id=currentLookup(key);return id!=INVALID&&transportDelta[8u+2u*params.pageCapacity+id]==key;}
 fn producerInterfaceContains(key:u32)->bool{if(params.recurringDelta==0u||arrayLength(&transportDelta)<8u+3u*params.pageCapacity
  ||transportDelta[1]!=params.currentGeneration||transportDelta[2]!=1u||transportDelta[0]>params.pageCapacity){return false;}
@@ -1590,18 +1613,33 @@ fn recurringDilationBrickRings()->u32{
  let required=max(params.redistanceBandFineCells,landing);
  return (required+params.brickResolution-1u)/params.brickResolution+params.safetyBrickRings;
 }
-fn recurringHaloWidth()->u32{return 2u*control[6]+1u;}
+fn recurringHaloRadius()->u32{return control[6];}
+fn recurringHaloWidth()->u32{return 2u*recurringHaloRadius()+1u;}
 fn recurringHaloVolume()->u32{let width=recurringHaloWidth();return width*width*width;}
+fn deltaRadiusWidth()->u32{return 2u*params.supportHaloRings+1u;}
+fn deltaRadiusVolume()->u32{let width=deltaRadiusWidth();return width*width*width;}
 fn recurringScatterMembership(key:u32,offset:u32){
  if(key>=desiredLogicalCount()||offset>=recurringHaloVolume()){return;}
- let width=recurringHaloWidth();let radius=i32(control[6]);
+ let width=recurringHaloWidth();let radius=i32(recurringHaloRadius());
  let z=offset/(width*width);let plane=offset-z*width*width;let y=plane/width;let x=plane-y*width;
  let delta=vec3i(i32(x),i32(y),i32(z))-vec3i(radius);
  let point=vec3i(unpackBrick(key))+delta;
  if(any(point<vec3i(0))||any(point>=vec3i(params.brickDimensions))){return;}
  let output=packBrick(vec3u(point));
- let exact=all(delta==vec3i(0));
- atomicOr(&topologyErrors[output],2u|select(0u,1u,exact));
+ let distance=u32(max(abs(delta.x),max(abs(delta.y),abs(delta.z))));let exact=distance==0u;
+ let bits=select(0u,2u,distance<=control[6])|select(0u,1u,exact);
+ atomicOr(&topologyErrors[output],bits);
+}
+fn recurringScatterDeltaRadii(key:u32,offset:u32){
+ if(key>=desiredLogicalCount()||offset>=deltaRadiusVolume()){return;}
+ let width=deltaRadiusWidth();let radius=i32(params.supportHaloRings);
+ let z=offset/(width*width);let plane=offset-z*width*width;let y=plane/width;let x=plane-y*width;
+ let delta=vec3i(i32(x),i32(y),i32(z))-vec3i(radius);
+ let point=vec3i(unpackBrick(key))+delta;
+ if(any(point<vec3i(0))||any(point>=vec3i(params.brickDimensions))){return;}
+ let distance=u32(max(abs(delta.x),max(abs(delta.y),abs(delta.z))));
+ let bits=select(0u,DELTA_DIRTY,distance<=params.dirtyHaloRings)|DELTA_SUPPORT;
+ atomicOr(&topologyErrors[packBrick(vec3u(point))],bits);
 }
 // The bootstrap expansion arena is never live during recurring publication.
 // Its record region stages one classification per compact producer; its sorted
@@ -1631,7 +1669,8 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  // Fixed lifecycle error records occupy the physical-page prefix. Desired
  // membership from the previous publication exists only at its compact live
  // keys, so both sets are reset without a logical-domain capacity sweep.
- for(var item=local;item<params.pageCapacity;item+=256u){
+ let resetCount=select(params.pageCapacity,arrayLength(&topologyErrors),DELTA_RADIUS_MASK);
+ for(var item=local;item<resetCount;item+=256u){
   atomicStore(&topologyErrors[item],0u);
  }
  let livePages=min(currentWorklist[1],params.pageCapacity);
@@ -1679,11 +1718,17 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
   var ranked=select(0u,recurringSeedLanes[0],recurringFlags==0u);
   // The pair grid is seeds*volume invocations. Refuse to author a wrapped
   // count: an under-sized halo dispatch would silently under-cover the band.
-  let volume=recurringHaloVolume();
+  let volume=recurringHaloVolume();let deltaVolume=select(0u,deltaRadiusVolume(),DELTA_RADIUS_MASK);
+  let producers=recurringProducerCount();
+  var bandPairs=0u;var deltaPairs=0u;
   if(volume==0u||ranked>(0xffffffffu-255u)/volume){recurringFlags|=CAPACITY;ranked=0u;}
+  else{bandPairs=ranked*volume;
+   if(deltaVolume!=0u&&producers>(0xffffffffu-bandPairs-255u)/deltaVolume){
+    recurringFlags|=CAPACITY;ranked=0u;bandPairs=0u;
+   }else{deltaPairs=producers*deltaVolume;}}
   control[0]=recurringFlags;
   let seeds=min(ranked,params.pageCapacity);control[1]=seeds;control[8]=seeds;
-  writeIndirectDispatch(${FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT}u,(seeds*volume+255u)/256u);
+  writeIndirectDispatch(${FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT}u,(bandPairs+deltaPairs+255u)/256u);
  }
 }
 // One invocation per (compact seed, halo offset) pair. The grid is authored on
@@ -1696,9 +1741,12 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  let volume=recurringHaloVolume();if(volume==0u){return;}
  let seeds=min(control[8],params.pageCapacity);
  let pair=(wid.y*params.maxWorkgroups+wid.x)*256u+local;
- if(pair>=seeds*volume){return;}
- let seed=pair/volume;
- recurringScatterMembership(sparseCandidates[recurringSeedSlot(seed)],pair-seed*volume);
+ let bandPairs=seeds*volume;
+ if(pair<bandPairs){let seed=pair/volume;
+  recurringScatterMembership(sparseCandidates[recurringSeedSlot(seed)],pair-seed*volume);return;}
+ if(DELTA_RADIUS_MASK){let deltaPair=pair-bandPairs;let deltaVolume=deltaRadiusVolume();
+  let producer=deltaPair/deltaVolume;if(producer<recurringProducerCount()){
+   recurringScatterDeltaRadii(recurringProducerChanged(producer),deltaPair-producer*deltaVolume);}}
 }
 fn recurringDesiredPresent(item:u32)->bool{
  return control[0]==0u&&item<desiredLogicalCount()&&(atomicLoad(&topologyErrors[item])&2u)!=0u;
@@ -1720,7 +1768,8 @@ fn recurringDesiredTotal()->u32{let count=desiredLogicalCount();if(count==0u){re
 @compute @workgroup_size(256) fn scatterRecurringSparseBand(
  @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
  let key=wid.x*256u+local;if(key>=desiredLogicalCount()){return;}
- let membership=atomicLoad(&topologyErrors[key]);atomicStore(&topologyErrors[key],0u);
+ let membership=atomicLoad(&topologyErrors[key]);
+ atomicStore(&topologyErrors[key],select(0u,membership&(DELTA_DIRTY|DELTA_SUPPORT),DELTA_RADIUS_MASK));
  if(control[0]==0u&&(membership&2u)!=0u){
   let output=desiredScan[key];if(output<params.pageCapacity){targetB[7u+output]=key;}
  }
@@ -1836,7 +1885,8 @@ fn topologyErrorScratchBlock(block:u32)->u32{return 2u*block;}
 fn topologyErrorScratchSuper(block:u32)->u32{return 2u*(topologyErrorBlockCount()+block);}
 @compute @workgroup_size(256) fn reduceTopologyErrorRecords(
  @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let work=wid.x*256u+local;var value=0u;if(work<params.pageCapacity){value=atomicLoad(&topologyErrors[work]);}
+ let work=wid.x*256u+local;var value=0u;if(work<params.pageCapacity){
+  value=atomicLoad(&topologyErrors[work])&(CAPACITY|NONFINITE|MALFORMED);}
  reduceErrorBlock(local,value,select(INVALID,work,value!=0u));if(local==0u){
   let output=topologyErrorScratchBlock(wid.x);desiredScan[output]=errorOrLanes[0];desiredScan[output+1u]=errorFirstLanes[0];}}
 @compute @workgroup_size(256) fn reduceTopologyErrorGroups(
@@ -1993,7 +2043,18 @@ fn changedNeighborRadii(key:u32)->vec2u{
 }
 fn interfaceNeighborRadii(key:u32)->vec2u{
  if(params.recurringDelta==0u){return changedNeighborRadii(key);}
+ if(DELTA_RADIUS_MASK){let membership=atomicLoad(&topologyErrors[key]);
+  return vec2u(select(0u,1u,(membership&DELTA_DIRTY)!=0u),
+    select(0u,1u,(membership&DELTA_SUPPORT)!=0u));}
  if(key>=desiredLogicalCount()){return vec2u(0u);}let origin=vec3i(unpackBrick(key));
+ if(DELTA_NEIGHBOR_QUERY){var dirty=0u;var support=0u;let radius=i32(params.supportHaloRings);
+  for(var z=-radius;z<=radius&&(dirty==0u||support==0u);z+=1){
+   for(var y=-radius;y<=radius&&(dirty==0u||support==0u);y+=1){
+    for(var x=-radius;x<=radius&&(dirty==0u||support==0u);x+=1){let q=origin+vec3i(x,y,z);
+     if(any(q<vec3i(0))||any(q>=vec3i(params.brickDimensions))){continue;}
+     if(producerChangedContains(packBrick(vec3u(q)))){let distance=max(abs(x),max(abs(y),abs(z)));
+      support=1u;dirty|=select(0u,1u,distance<=i32(params.dirtyHaloRings));}}}}
+  return vec2u(dirty,support);}
  let total=recurringProducerCount();var dirty=0u;var support=0u;
  for(var item=0u;item<total&&(dirty==0u||support==0u);item+=1u){let changedKey=recurringProducerChanged(item);
   if(changedKey>=desiredLogicalCount()){continue;}let delta=abs(origin-vec3i(unpackBrick(changedKey)));
@@ -2001,12 +2062,32 @@ fn interfaceNeighborRadii(key:u32)->vec2u{
   support|=select(0u,1u,distance<=i32(params.supportHaloRings));}
  return vec2u(dirty,support);
 }
+// X-3 quality-invalid arm. Only newly allocated and retired logical page keys
+// seed a one-brick Chebyshev ring. Transport/fraction changes are ignored on
+// purpose so this measures the classification ceiling rather than correctness.
+fn membershipNeighborRadii(key:u32)->vec2u{
+ if(key>=desiredLogicalCount()){return vec2u(0u);}let origin=vec3i(unpackBrick(key));
+ let added=min(pageDelta[11],params.pageCapacity);let retired=min(pageDelta[12],params.pageCapacity);
+ var hit=0u;
+ for(var item=0u;item<added&&hit==0u;item+=1u){let id=pageDelta[addedPagesOffset()+item];
+  if(id<params.pageCapacity&&sourceC[id*10u+2u]==params.nextGeneration){let changedKey=sourceC[id*10u+1u];
+   let delta=abs(origin-vec3i(unpackBrick(changedKey)));hit|=select(0u,1u,max(delta.x,max(delta.y,delta.z))<=1);}}
+ for(var item=0u;item<retired&&hit==0u;item+=1u){let id=pageDelta[retiredPagesOffset()+item];
+  if(id<params.pageCapacity&&currentMetadata[id*10u+2u]==params.currentGeneration){let changedKey=currentMetadata[id*10u+1u];
+   let delta=abs(origin-vec3i(unpackBrick(changedKey)));hit|=select(0u,1u,max(delta.x,max(delta.y,delta.z))<=1);}}
+ return vec2u(hit);
+}
 fn repairNeighbor(key:u32)->bool{
  if(key>=desiredLogicalCount()){return false;}let origin=vec3i(unpackBrick(key));
  let firstCount=min(pageDelta[13],params.pageCapacity);let total=min(pageDelta[0],2u*params.pageCapacity);
- for(var item=0u;item<total;item+=1u){let changedKey=pageDelta[changedKeysOffset()+item];if(changedKey>=desiredLogicalCount()){continue;}
-  let delta=abs(origin-vec3i(unpackBrick(changedKey)));let distance=max(delta.x,max(delta.y,delta.z));
-  let radius=select(0u,params.dirtyHaloRings,item>=firstCount);if(distance<=i32(radius)){return true;}}
+ // Desired changed keys have radius zero. They are a sorted prefix, so exact
+ // membership is one binary lookup rather than a full prefix walk. Only the
+ // retired tail owns a spatial repair radius and still requires distance
+ // tests. This is the same predicate, split at its authored radius boundary.
+ if(sortedChangedStreamContains(key,0u,firstCount)){return true;}
+ for(var item=firstCount;item<total;item+=1u){let changedKey=pageDelta[changedKeysOffset()+item];
+  if(changedKey>=desiredLogicalCount()){continue;}let delta=abs(origin-vec3i(unpackBrick(changedKey)));
+  let distance=max(delta.x,max(delta.y,delta.z));if(distance<=i32(params.dirtyHaloRings)){return true;}}
  return false;
 }
 @compute @workgroup_size(64) fn classifyFineAffectedPages(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
@@ -2015,7 +2096,8 @@ fn repairNeighbor(key:u32)->bool{
  if(work<desired){let id=sourceD[7u+work];var error=0u;var key=INVALID;
   if(id>=params.pageCapacity||sourceC[id*10u+2u]!=params.nextGeneration){error=MALFORMED;}
   else{key=sourceC[id*10u+1u];if(key>=desiredLogicalCount()){error=MALFORMED;}}
-  let affected=select(vec2u(0u),interfaceNeighborRadii(key),error==0u);
+  let affected=select(vec2u(0u),select(interfaceNeighborRadii(key),membershipNeighborRadii(key),
+    DIRTY_ORACLE_MEMBERSHIP),error==0u);
   let carried=error==0u&&currentMetadata[id*10u+1u]==key&&currentMetadata[id*10u+2u]==params.currentGeneration;
   // Dirty is the complete physical output halo, not merely the pages whose
   // phase mask changed. Every carried page inside this radius must receive the

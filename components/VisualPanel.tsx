@@ -10,6 +10,7 @@ import {
   type SvoCostOverlayMode,
 } from "@/lib/svo-render-diagnostics";
 import {
+  SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
   SVO_RENDER_TUNING_PRESETS,
   svoRenderTuningKey,
@@ -158,6 +159,11 @@ export function VisualPanel() {
         <div className="svo-control-grid">
           <RangeControl label="Render resolution" unit="%" value={tuning.resolutionScale * 100} min={35} max={100} step={1} displayDigits={0}
             onChange={(value) => updateTuning("resolutionScale", value / 100)} modified={modified("resolutionScale")} onReset={resetTuning("resolutionScale")} />
+          <RangeControl label="Environment brick refinement" unit="levels" value={tuning.environmentBrickRefinementLevels}
+            min={0} max={SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM} step={1} displayDigits={0}
+            onChange={(value) => updateTuning("environmentBrickRefinementLevels", value)}
+            modified={modified("environmentBrickRefinementLevels")} onReset={resetTuning("environmentBrickRefinementLevels")}
+            hint="Additional SVO subdivision for authored scenery outside the simulation lattice. Changing it rebuilds the sparse world." />
           <label className="render-discrete-control"><span>Cone prepass</span><div>
             {([{ scale: 1, label: "FULL" }, { scale: 0.5, label: "2×2" }, { scale: 0.25, label: "4×4" }, { scale: 0.125, label: "8×8" }] as const)
               .map(({ scale, label }) => <button key={scale} className={tuning.coneLightingScale === scale ? "active" : ""}

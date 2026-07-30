@@ -136,6 +136,26 @@ export function octreeAirSupportChangedFrontierEnabled(
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER !== "0";
 }
 
+/** GPU-authored live-page demand dispatch is the production path. Explicit
+ * zero preserves the former provisioned-capacity launch as an exact A/B oracle. */
+export function octreeAirSupportCompactFineDemandEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND !== "0";
+}
+
+/** Compact reuse-only demand-cell listing is retained as an exact experiment.
+ * It is not the default: broad closures make its append atomics wall-neutral. */
+export function octreeAirSupportCompactFineCellsEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS === "1";
+}
+
 /** Exact per-entry bind reachability. Binding zero/eleven are uniforms; all
  * other entries are storage resources and no pipeline reaches more than ten. */
 export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
@@ -149,6 +169,7 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   scatterAirSupportRecords: Object.freeze([0,7,8]),
   resolveAirSupportTags: Object.freeze([0,7,8,9]),
   resolveAirSupportTopology: Object.freeze([0,3,7,8,11,12,13,14]),
+  prepareFineBandAirSupportDemand: Object.freeze([0,7,26]),
   markFineBandAirSupportDemand: Object.freeze([0,7,25,26,27,28]),
   closeFineBandAirSupportInterpolationDemand: Object.freeze([0,2,3,4,5,6,7,11,12,13,14]),
   emitFineBandAirSupportCandidates: Object.freeze([0,2,3,7,11]),
@@ -363,6 +384,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     Readonly<Record<string, GPUBindGroup>>];
   private readonly fineDemandGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
     readonly [GPUBindGroup, GPUBindGroup]];
+  private readonly fineDemandScheduleGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
+    readonly [GPUBindGroup, GPUBindGroup]];
   private readonly ownsArena: boolean;
   private destroyed = false;
   private publicationCount = 0;
@@ -474,7 +497,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       return { buffer: buffers.get(binding)! };
     };
     const fineOnlyEntries = new Set<OctreeAirSupportGPUEntryPoint>([
-      "markFineBandAirSupportDemand", "closeFineBandAirSupportInterpolationDemand",
+      "prepareFineBandAirSupportDemand", "markFineBandAirSupportDemand",
+      "closeFineBandAirSupportInterpolationDemand",
       "emitFineBandAirSupportCandidates",
     ]);
     const configuredEntries = entries.filter((entry) => inputs.fineSources || !fineOnlyEntries.has(entry));
@@ -487,16 +511,20 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     this.groups = Object.freeze(this.params.map(makeGroups)) as unknown as
       readonly [Readonly<Record<string, GPUBindGroup>>, Readonly<Record<string, GPUBindGroup>>];
     if (inputs.fineSources) {
-      const bindings = OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS.markFineBandAirSupportDemand;
-      const makeFineGroup = (params: GPUBuffer, fine: WebGPUFineLevelSetBrickSource) => device.createBindGroup({
-        layout: this.pipelines.markFineBandAirSupportDemand!.getBindGroupLayout(0),
-        entries: bindings.map((binding) => ({ binding, resource: { buffer: binding === 0 ? params
+      const makeFineGroup = (entry: "prepareFineBandAirSupportDemand" | "markFineBandAirSupportDemand",
+        params: GPUBuffer, fine: WebGPUFineLevelSetBrickSource) => device.createBindGroup({
+        layout: this.pipelines[entry]!.getBindGroupLayout(0),
+        entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS[entry].map((binding) => ({
+          binding, resource: { buffer: binding === 0 ? params
           : binding === 25 ? fine.metadata
           : binding === 26 ? fine.worklist : binding === 27 ? fine.flags : binding === 28 ? fine.phi
             : buffers.get(binding)! } })),
       });
       this.fineDemandGroups = Object.freeze(this.params.map((params) => Object.freeze(
-        inputs.fineSources!.map((fine) => makeFineGroup(params, fine))))) as unknown as
+        inputs.fineSources!.map((fine) => makeFineGroup("markFineBandAirSupportDemand", params, fine))))) as unknown as
+          readonly [readonly [GPUBindGroup, GPUBindGroup], readonly [GPUBindGroup, GPUBindGroup]];
+      this.fineDemandScheduleGroups = Object.freeze(this.params.map((params) => Object.freeze(
+        inputs.fineSources!.map((fine) => makeFineGroup("prepareFineBandAirSupportDemand", params, fine))))) as unknown as
           readonly [readonly [GPUBindGroup, GPUBindGroup], readonly [GPUBindGroup, GPUBindGroup]];
     }
     this.allocatedBytes = this.plan.allocatedBytes + 256
@@ -505,7 +533,9 @@ export class WebGPUOctreeAirVelocitySupportProducer {
 
   private parameterData(expectedEpoch: number, fineSlot?: 0 | 1,
     gravityDt: readonly [number, number, number] = [0, 0, 0],
-    changedFrontier = octreeAirSupportChangedFrontierEnabled()): ArrayBuffer {
+    changedFrontier = octreeAirSupportChangedFrontierEnabled(),
+    compactFineDemand = octreeAirSupportCompactFineDemandEnabled(),
+    compactFineCells = octreeAirSupportCompactFineCellsEnabled()): ArrayBuffer {
     if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 1 || expectedEpoch > 0xffff_ffff) {
       throw new RangeError("Air-support expected epoch must be a published uint32 generation");
     }
@@ -535,7 +565,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       this.inputs.structured.plan.offsets.rowSlotHandles,
       this.inputs.structured.plan.offsets.rowSlotSigns,
       this.inputs.structured.plan.offsets.rowCatalogSlots,
-      (this.publicationCount > 0 ? 1 : 0) | (changedFrontier ? 2 : 0),
+      (this.publicationCount > 0 ? 1 : 0) | (changedFrontier ? 2 : 0)
+        | (compactFineCells ? 4 : 0),
       this.plan.faceAdjacencyStride,
       this.plan.support.ownerDirectoryOffsetWords,
       this.plan.fineCandidateOffset,
@@ -568,17 +599,26 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     const parameterSlot = this.parameterSlot;
     this.parameterSlot = parameterSlot === 0 ? 1 : 0;
     const changedFrontier = octreeAirSupportChangedFrontierEnabled();
+    const compactFineDemand = octreeAirSupportCompactFineDemandEnabled();
     const params = this.params[parameterSlot], groups = this.groups[parameterSlot];
     this.device.queue.writeBuffer(params, 0,
-      this.parameterData(expectedEpoch, fineSlot, gravityDt ?? [0, 0, 0], changedFrontier));
+      this.parameterData(expectedEpoch, fineSlot, gravityDt ?? [0, 0, 0], changedFrontier,
+        compactFineDemand, octreeAirSupportCompactFineCellsEnabled()));
     this.publicationCount += 1;
     let pass = broker.compute({ label: "Initialize structured air-support publication" });
     pass.setPipeline(this.pipelines.beginAirSupportPublication!);
     pass.setBindGroup(0, groups.beginAirSupportPublication!);
     pass.dispatchWorkgroups(1);
+    if (fineSlot !== undefined && compactFineDemand && this.fineDemandScheduleGroups) {
+      pass.setPipeline(this.pipelines.prepareFineBandAirSupportDemand!);
+      pass.setBindGroup(0, this.fineDemandScheduleGroups[parameterSlot][fineSlot]);
+      pass.dispatchWorkgroups(1);
+    }
     // Storage-authored schedules are copied into an INDIRECT-only buffer. The
     // second copy below is the only other required pass boundary.
-    broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0, 4 * 12);
+    broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0,
+      (fineSlot === undefined || !compactFineDemand ? 4 : 5) * 12);
+    broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
     pass = broker.compute({ label: "Publish structured air-support identities" });
     const run = (name: keyof typeof this.pipelines, indirectOffset?: number) => {
       pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, groups[name]!);
@@ -590,12 +630,14 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     run("clearAirSupportTags", 12);
     run("emitAirSupportCandidates", 24);
     if (fineSlot !== undefined && this.fineDemandGroups) {
-      const capacity = this.inputs.fineSources![fineSlot].plan.maximumResidentBricks;
-      const x = Math.min(capacity, this.device.limits.maxComputeWorkgroupsPerDimension);
-      const y = Math.ceil(capacity / x);
       pass.setPipeline(this.pipelines.markFineBandAirSupportDemand!);
       pass.setBindGroup(0, this.fineDemandGroups[parameterSlot][fineSlot]);
-      pass.dispatchWorkgroups(x, y);
+      if (compactFineDemand) pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+      else {
+        const capacity = this.inputs.fineSources![fineSlot].plan.maximumResidentBricks;
+        const x = Math.min(capacity, this.device.limits.maxComputeWorkgroupsPerDimension);
+        pass.dispatchWorkgroups(x, Math.ceil(capacity / x));
+      }
       pass.setPipeline(this.pipelines.closeFineBandAirSupportInterpolationDemand!);
       pass.setBindGroup(0, groups.closeFineBandAirSupportInterpolationDemand!);
       pass.dispatchWorkgroups(Math.ceil(this.plan.domainVolume / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE));
@@ -606,13 +648,12 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     run("markAndScanAirSupportCandidates", 36);
     run("prefixAirSupportBlocks");
     run("scatterAirSupportRecords", 36);
-    // Topology resolution is support-row work, not candidate work. The old
-    // candidate-sized indirect record launched hundreds of empty workgroups;
-    // a capacity-bounded direct dispatch is both smaller on a fresh epoch and
-    // lets the same entry refresh only RECORD_FINE on a reused epoch.
+    // Topology resolution is exact support-row work. The GPU reuse decision
+    // and live count authored this record alongside the other identity
+    // schedules; the later face-schedule copy safely overwrites it.
     pass.setPipeline(this.pipelines.resolveAirSupportTopology!);
     pass.setBindGroup(0, groups.resolveAirSupportTopology!);
-    pass.dispatchWorkgroups(Math.ceil(this.plan.support.supportCapacity / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE));
+    pass.dispatchWorkgroupsIndirect(this.indirect, 60);
     run("resolveAirSupportTags", 24);
     pass.setPipeline(this.pipelines.publishAirSupportOwnerDirectory!);
     pass.setBindGroup(0, groups.publishAirSupportOwnerDirectory!);
@@ -894,6 +935,21 @@ fn candidateAt(item:u32)->Candidate{let at=p.candidateOffset+${OCTREE_AIR_SUPPOR
   return Candidate(s(at),s(at+1u),s(at+2u));}
 fn setCandidate(item:u32,value:Candidate){let at=p.candidateOffset+${OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS}u*item;
   sw(at,value.cell);sw(at+1u,value.size);sw(at+2u,value.tagWord);}
+fn compactFineDemandActive()->bool{return s(47u)!=0u&&(p.capturePreceding&4u)!=0u;}
+// On a reused topology the fine candidate block is dead. Reuse it as an exact
+// list of cells carrying this generation's dynamic RECORD_FINE bit. Query
+// cells are appended by the mark dispatch first; value-only closure cells are
+// appended by the following closure dispatch. atomicOr is the uniqueness
+// authority, so every cell appears exactly once despite overlapping bricks.
+fn publishFineDemand(cell:u32,bits:u32){
+  let old=atomicOr(&scratch[p.directoryFlagOffset+cell],bits);
+  if(compactFineDemandActive()&&(old&RECORD_FINE)==0u){
+    let rank=atomicAdd(&scratch[30u],1u);
+    if(rank>=p.domainVolume){fail(cell,ERROR_CAPACITY);return;}
+    setCandidate(fineCandidateBase()+rank,Candidate(cell,0u,INVALID));
+    if((bits&QUERY_FINE)!=0u){atomicAdd(&scratch[28u],1u);}
+  }
+}
 fn recordAt(index:u32)->vec4u{let at=p.recordOffset+index*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
   return vec4u(r(at),r(at+1u),r(at+2u),r(at+3u));}
 fn recordCell(index:u32)->u32{return cellOf(recordAt(index).xyz);}
@@ -976,7 +1032,8 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   if(atomicLoad(&accepted.flags)!=0u&&existingReady){
     sw(0u,ERROR_SOURCE|ERROR_GENERATION);sw(1u,0u);sw(31u,2u);
     writeDispatch(10u,vec3u(0u,1u,1u));writeDispatch(13u,vec3u(0u,1u,1u));
-    writeDispatch(16u,vec3u(0u,1u,1u));writeDispatch(19u,vec3u(0u,1u,1u));return;
+    writeDispatch(16u,vec3u(0u,1u,1u));writeDispatch(19u,vec3u(0u,1u,1u));
+    writeDispatch(43u,vec3u(0u,1u,1u));return;
   }
   sw(0u,0u);sw(1u,INVALID);sw(31u,0u);let rows=min(accepted.rowCount,p.rowCapacity);sw(2u,rows);sw(3u,accepted.epoch);
   sw(4u,accepted.bank);var boundary=0u;if(p.boundaryEpochOffset<arrayLength(&boundaryEpoch)){boundary=boundaryEpoch[p.boundaryEpochOffset];}sw(5u,boundary);
@@ -998,7 +1055,7 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   sw(25u,0u);
   sw(26u,select(0u,atomicLoad(&supportArena[p.airControlOffset+8u]),reuseTopology));
   sw(27u,select(0u,atomicLoad(&supportArena[p.airControlOffset+9u]),reuseTopology));
-  sw(28u,0u);sw(40u,p.expectedFineGeneration);
+  sw(28u,0u);sw(30u,0u);sw(40u,p.expectedFineGeneration);
   sw(41u,0u);sw(42u,INVALID);
   if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.bank>1u
       ||accepted.rowCount==0u||accepted.rowCount>p.rowCapacity||accepted.slotCount>p.slotCapacity){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
@@ -1019,6 +1076,11 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   // 27-site cube closure once before emitting either cube or tetra candidates.
   writeDispatch(16u,select(vec3u(0u,1u,1u),dispatchFor(rows,1u),clean&&!reuseTopology));
   writeDispatch(19u,select(vec3u(0u,1u,1u),dispatchFor(candidates,256u),clean&&!reuseTopology));
+  // Words 43-45 are identity-phase scratch until prepareAirSupportFaces
+  // resets them. Publish the exact support-row schedule there so topology
+  // refresh never launches over provisioned support capacity.
+  let topologyWork=select(p.supportCapacity,s(8u),reuseTopology);
+  writeDispatch(43u,select(vec3u(0u,1u,1u),dispatchFor(topologyWork,256u),clean));
 }
 
 @compute @workgroup_size(256)fn clearAirSupportDirectory(@builtin(local_invocation_index)lane:u32,
@@ -1047,11 +1109,26 @@ fn unpackFineBrick(key:u32)->vec3u{let xy=p.fineBrickDims.x*p.fineBrickDims.y;le
   let y=rem/p.fineBrickDims.x;return vec3u(rem-y*p.fineBrickDims.x,y,z);}
 fn fineLocal(local:u32)->vec3u{let z=local/(p.fineR*p.fineR);let rem=local-z*p.fineR*p.fineR;
   let y=rem/p.fineR;return vec3u(rem-y*p.fineR,y,z);}
+// The fine worklist's resident dispatch is sample-kernel shaped
+// (ceil(livePages/64)). Section 5 deliberately assigns one whole workgroup to
+// each brick so its 64 lanes can reduce that brick's samples. Publish the exact
+// page-shaped schedule into the otherwise-dead fifth indirect record during
+// the existing initialization pass; no CPU count, capacity launch, or extra
+// pass boundary is required.
+@compute @workgroup_size(1)fn prepareFineBandAirSupportDemand(){
+  let valid=p.fineFactor>0u&&p.transportBandFineCells>0u&&p.expectedFineGeneration>0u
+    &&arrayLength(&fineWorklist)>=7u+p.finePageCapacity
+    &&fineWorklist[0]==p.expectedFineGeneration&&fineWorklist[2]==p.finePageCapacity
+    &&(fineWorklist[3]&3u)==3u&&fineWorklist[5]==1u&&fineWorklist[6]==1u
+    &&fineWorklist[1]<=p.finePageCapacity;
+  if(!valid){fail(0u,ERROR_SOURCE|ERROR_GENERATION);writeDispatch(22u,vec3u(0u,1u,1u));return;}
+  writeDispatch(22u,select(vec3u(0u,1u,1u),dispatchFor(fineWorklist[1],1u),s(0u)==0u));
+}
 fn markFineBandDemandNeighborhood(base:vec3u){
   let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
   for(var dz=-i32(radius);dz<=i32(radius);dz+=1){for(var dy=-i32(radius);dy<=i32(radius);dy+=1){for(var dx=-i32(radius);dx<=i32(radius);dx+=1){
     let demandCell=vec3i(base)+vec3i(dx,dy,dz);if(all(demandCell>=vec3i(0))&&all(demandCell<vec3i(p.dimensions))){
-      atomicOr(&scratch[p.directoryFlagOffset+cellOf(vec3u(demandCell))],QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}}}}}
+      publishFineDemand(cellOf(vec3u(demandCell)),QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}}}}}
 // The resident brick page this workgroup owns (INVALID when the workgroup is
 // retired), the minimum base owner cell any of its in-band samples demanded,
 // and whether the brick ever spanned more than one such cell.
@@ -1116,7 +1193,7 @@ var<workgroup> markFineBaseSplit:atomic<u32>;
   for(var n=lane;n<count;n+=64u){
     let dx=i32(n%width)-i32(radius);let dy=i32((n/width)%width)-i32(radius);let dz=i32(n/(width*width))-i32(radius);
     let demandCell=vec3i(origin)+vec3i(dx,dy,dz);if(all(demandCell>=vec3i(0))&&all(demandCell<vec3i(p.dimensions))){
-      atomicOr(&scratch[p.directoryFlagOffset+cellOf(vec3u(demandCell))],QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}}}
+      publishFineDemand(cellOf(vec3u(demandCell)),QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}}}
 
 fn markFineResolvedOwner(expectedCenter:vec3f,expectedSize:u32,item:u32){
   if(expectedSize==0u){fail(item,ERROR_CATALOG);return;}
@@ -1126,7 +1203,7 @@ fn markFineResolvedOwner(expectedCenter:vec3f,expectedSize:u32,item:u32){
   let ownerCenter=vec3f(owner.origin)+.5*f32(owner.size);
   let tolerance=max(1e-5/physical,f32(expectedSize)*2e-5);
   if(owner.size!=expectedSize||any(abs(ownerCenter-expectedCenter)>vec3f(tolerance))){failTopology(2u,item);return;}
-  atomicOr(&scratch[p.directoryFlagOffset+cellOf(owner.origin)],RECORD_FINE|RECORD_EXTENSION);
+  publishFineDemand(cellOf(owner.origin),RECORD_FINE|RECORD_EXTENSION);
 }
 
 fn fineResolvedOwnerMatches(expectedCenter:vec3f,expectedSize:u32,item:u32)->bool{
@@ -1151,7 +1228,7 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
     let matches=resolved.size==size&&all(abs(resolvedCenter-expectedCenter)<=vec3f(tolerance));
     exact=exact&&matches;
     if(matches){
-      atomicOr(&scratch[p.directoryFlagOffset+cellOf(resolved.origin)],RECORD_FINE|RECORD_EXTENSION);
+      publishFineDemand(cellOf(resolved.origin),RECORD_FINE|RECORD_EXTENSION);
     }}}}
   return exact;
 }
@@ -1161,7 +1238,11 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
 // of the locally resolved power case. Publish that exact one-hop closure once;
 // recurring transport then performs only dense owner/tag gathers.
 @compute @workgroup_size(256)fn closeFineBandAirSupportInterpolationDemand(@builtin(global_invocation_id)g:vec3u){
-  let item=g.x;if(item>=p.domainVolume||s(0u)!=0u||(s(p.directoryFlagOffset+item)&QUERY_FINE)==0u){return;}
+  let invocation=g.x;var item=invocation;
+  if(compactFineDemandActive()){
+    if(invocation>=s(28u)){return;}item=candidateAt(fineCandidateBase()+invocation).cell;
+  }
+  if(item>=p.domainVolume||s(0u)!=0u||(s(p.directoryFlagOffset+item)&QUERY_FINE)==0u){return;}
   let owner=octreeOwnerPageLookup(vec3i(coord(item)));if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){failTopology(3u,item);return;}
   let originCell=cellOf(owner.origin);let direct=publishedRow(originCell,owner.size);var caseId=INVALID;var transform=0u;
   if(direct!=INVALID){let geometry=rowGeometry[s(4u)*p.rowCapacity+direct];caseId=geometry.z;transform=geometry.w&63u;
@@ -1206,9 +1287,13 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
     if(any(origin<vec3i(0))||any(origin+vec3i(i32(selectorSize))>vec3i(p.dimensions))){continue;}
     markFineResolvedOwner(selectorCenter,selectorSize,item);}}}
 
-@compute @workgroup_size(256)fn emitFineBandAirSupportCandidates(@builtin(global_invocation_id)g:vec3u){let item=g.x;
+@compute @workgroup_size(256)fn emitFineBandAirSupportCandidates(@builtin(global_invocation_id)g:vec3u){
+  let invocation=g.x;var item=invocation;let reuse=s(47u)!=0u;
+  if(compactFineDemandActive()){
+    if(invocation>=s(30u)){return;}item=candidateAt(fineCandidateBase()+invocation).cell;
+  }
   if(item>=p.domainVolume||s(0u)!=0u){return;}let output=fineCandidateBase()+item;
-  let demanded=s(p.directoryFlagOffset+item);let reuse=s(47u)!=0u;
+  let demanded=s(p.directoryFlagOffset+item);
   if(reuse&&demanded==0u){return;}
   if(!reuse){setCandidate(output,Candidate(INVALID,0u,INVALID));}
   // Paper Section 5 marches the closest-face extension over the octree's whole

@@ -128,9 +128,12 @@ test("performance UI exposes one matrix with three independent closed ledgers an
   assert.doesNotMatch(panel, /cpu\.total_ms\s*\+|physics\.total_ms\s*\+|presentation\.total_ms\s*\+/);
 });
 
-test("production SVO traversal and shading execute for every submitted presentation", () => {
+test("production SVO submits every presentation and reuses only exact static primary visibility", () => {
   assert.doesNotMatch(renderer, /drySceneReuseKey|Sparse voxel dry scene reuse timestamp/);
-  assert.match(renderer, /SVO visibility and shading are presentation work[^]*svoDryScenePipeline\?\.encode\(replacementEncoder, target, temporalFrame,/);
+  assert.match(renderer, /const primaryCoherenceKey = !sceneRuntime\.fluidSolver \|\| !this\.simulationRunning/,
+    "running fluid scenes must fail closed to a fresh primary trace");
+  assert.match(renderer, /svoDryScenePipeline\?\.encode\(replacementEncoder, target, temporalFrame, primaryCoherenceKey, tracePhase\)/,
+    "every submitted presentation must still execute current cone visibility and deferred shading");
   assert.doesNotMatch(viewport, /pausedPresentation|continuousPerformancePresentation/,
     "all paused scenes must keep submitting completion-gated presentations");
   assert.doesNotMatch(viewport, /presentationFrameDue|advancePresentationClock/,

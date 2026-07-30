@@ -395,6 +395,34 @@ test("fine page delta publishes exact XOR keys and separate dirty/JFA-support se
     "the writable page-delta header must not retain duplicate indirect command records");
 });
 
+test("production delta-radius scatter makes recurring affected-page classification O(1)", () => {
+  const shader = makeFineLevelSetTopologyWGSL(
+    "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
+  ).replace(/\s+/g, "");
+  assert.match(shader, /constDELTA_RADIUS_MASK:bool=true/);
+  assert.match(shader,
+    /fnrecurringHaloRadius\(\)->u32\{returncontrol\[6\];\}.*fnrecurringScatterDeltaRadii.*radius=i32\(params\.supportHaloRings\)/s,
+    "only the compact changed-producer stream must scatter through the complete support radius");
+  assert.match(shader,
+    /bandPairs=ranked\*volume;.*deltaPairs=producers\*deltaVolume;.*bandPairs\+deltaPairs/s,
+    "the existing halo dispatch must combine interface-band and exact delta-radius pairs");
+  assert.match(shader,
+    /fninterfaceNeighborRadii.*if\(DELTA_RADIUS_MASK\).*atomicLoad\(&topologyErrors\[key\]\).*DELTA_DIRTY.*DELTA_SUPPORT/s,
+    "each desired page must classify from its dense logical-key mask");
+  assert.match(shader,
+    /reduceTopologyErrorRecords.*atomicLoad\(&topologyErrors\[work\]\)&\(CAPACITY\|NONFINITE\|MALFORMED\)/s,
+    "radius bits must not enter the fail-closed lifecycle error reduction");
+});
+
+test("opt-in fine delta neighbor query uses the producer's dense changed marker", () => {
+  const shader = makeFineLevelSetTopologyWGSL(
+    "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}", false, false, true,
+  ).replace(/\s+/g, "");
+  assert.match(shader, /constDELTA_NEIGHBOR_QUERY:bool=true/);
+  assert.match(shader,
+    /fninterfaceNeighborRadii.*if\(DELTA_NEIGHBOR_QUERY\).*radius=i32\(params\.supportHaloRings\).*producerChangedContains\(packBrick\(vec3u\(q\)\)\).*distance<=i32\(params\.dirtyHaloRings\)/s);
+});
+
 test("fine topology isolates cold closure and publishes recurring sparse deltas", () => {
   const wgsl = makeFineLevelSetTopologyWGSL(
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
@@ -435,7 +463,7 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnapplyInflowPhi[\s\S]*fninitializeDesiredSamples[\s\S]*value=applyInflowPhi\(value,position\)/,
     "new nozzle pages initialize source phi before Section 5 fast marching");
   assert.match(wgsl,
-    /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],2u\|select\(0u,1u,exact\)\)[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*desiredScan\[item\]=prefix[\s\S]*fnscatterRecurringSparseBand[\s\S]*output=desiredScan\[key\][\s\S]*targetB\[7u\+output\]=key/,
+    /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],bits\)[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*desiredScan\[item\]=prefix[\s\S]*fnscatterRecurringSparseBand[\s\S]*output=desiredScan\[key\][\s\S]*targetB\[7u\+output\]=key/,
     "compact seeds scatter bounded halos, rank in parallel, and publish canonical keys exactly once");
   assert.match(wgsl,
     /fnscanRecurringDesiredRecords[\s\S]*wid\.x\*256u\+local[\s\S]*fnfinalizeRecurringSparseBand[\s\S]*recurringDesiredTotal\(\)[\s\S]*fnscatterRecurringSparseBand/,
@@ -449,7 +477,7 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnrecurringDilationBrickRings[\s\S]*transportDelta\[7\]\+params\.interpolationSupportFineCells[\s\S]*max\(params\.redistanceBandFineCells,landing\)[\s\S]*params\.safetyBrickRings[\s\S]*rings>params\.dilationBrickRings/,
     "recurring residency follows measured displacement but cannot escape the conservative bound");
   assert.match(wgsl,
-    /fnrecurringScatterMembership[\s\S]*radius=i32\(control\[6\]\)[\s\S]*delta=vec3i[\s\S]*-vec3i\(radius\)/,
+    /fnrecurringHaloRadius\(\)->u32\{returncontrol\[6\];\}[\s\S]*fnrecurringScatterMembership[\s\S]*radius=i32\(recurringHaloRadius\(\)\)[\s\S]*delta=vec3i[\s\S]*-vec3i\(radius\)/,
     "the reduced recurring halo cube must remain centered on its dynamic radius");
   assert.doesNotMatch(wgsl,
     /fnrecurringScatterMembership[\s\S]*radius=i32\(params\.dilationBrickRings\)/,
@@ -1079,11 +1107,11 @@ test("JFA fixed tap path consumes topology's exact-filtered radius-one halo", ()
     "candidate lanes must not reconstruct the fixed tap address");
 });
 
-test("B4 flood addressing is opt-in, defaults off, and requires the B4 page geometry", () => {
+test("B4 flood addressing defaults on, has a differential off switch, and requires B4 geometry", () => {
   const b4Plan = { brickResolution: 4, samplesPerBrick: 64 };
   assert.equal(FINE_LEVELSET_JFA_B4_ADDRESSING_ENV, "FLUID_FINE_JFA_B4_ADDRESSING");
-  assert.equal(fineLevelSetJFAB4AddressingRequested(b4Plan, {}), false,
-    "the arithmetic variant must never be selected without the explicit opt-in");
+  assert.equal(fineLevelSetJFAB4AddressingRequested(b4Plan, {}), true,
+    "the exact shift-addressed arithmetic is the production B4 path");
   assert.equal(fineLevelSetJFAB4AddressingRequested(b4Plan, { FLUID_FINE_JFA_B4_ADDRESSING: "0" }), false);
   assert.equal(fineLevelSetJFAB4AddressingRequested(b4Plan, { FLUID_FINE_JFA_B4_ADDRESSING: "1" }), true);
   // The shifts are only the same integers on a 4-cell, 64-sample page, which
@@ -1091,7 +1119,7 @@ test("B4 flood addressing is opt-in, defaults off, and requires the B4 page geom
   // publish a differently addressed closest-point field.
   for (const plan of [{ brickResolution: 8, samplesPerBrick: 64 },
     { brickResolution: 4, samplesPerBrick: 512 }]) {
-    assert.equal(fineLevelSetJFAB4AddressingRequested(plan, { FLUID_FINE_JFA_B4_ADDRESSING: "1" }), false,
+    assert.equal(fineLevelSetJFAB4AddressingRequested(plan, {}), false,
       "B4 addressing must not be selected for a page geometry it is not exact on");
   }
   const constructed = WebGPUFineLevelSetRedistance.toString();

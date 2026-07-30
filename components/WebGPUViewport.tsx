@@ -503,8 +503,6 @@ export function WebGPUViewport() {
     let alive = true;
     let activeBinding = renderBinding;
     const frameRate = new SmoothedFrameRate(5);
-    let lastSubmittedAt_ms: number | undefined;
-    let measuredRunState = useRuntimeStore.getState().runState;
     let initializationStarted = false;
     let stopping = false;
     let stopped = false;
@@ -595,17 +593,9 @@ export function WebGPUViewport() {
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
         const runtime = useRuntimeStore.getState();
-        if (runtime.runState !== measuredRunState) {
-          measuredRunState = runtime.runState;
-          frameRate.reset();
-          lastSubmittedAt_ms = undefined;
-          activeBinding.publishFrameRate(undefined);
-        } else if (lastSubmittedAt_ms !== undefined && performance.now() - lastSubmittedAt_ms >= 1_000) {
-          activeBinding.publishFrameRate(0);
-        }
         // Pausing freezes simulation time, not presentation. Attempt every
-        // browser animation frame; FluidLabRenderer's in-flight guard is the
-        // only backpressure on rendering.
+        // browser animation frame; the renderer's double buffer bounds latency
+        // without changing cadence for camera motion or simulation state.
         let metrics;
         try {
           metrics = renderer.draw(
@@ -635,10 +625,8 @@ export function WebGPUViewport() {
         }
         activeBinding.publishPixelTrace(renderer);
         simulation.recordFrame(metrics, renderer.presentationResolution);
+        activeBinding.publishFrameRate(frameRate.sampleCompleted(renderer.completedPresentationCount, performance.now()));
         if (metrics.presentationSubmitted) {
-          const submittedAt_ms = performance.now();
-          lastSubmittedAt_ms = submittedAt_ms;
-          activeBinding.publishFrameRate(frameRate.sample(submittedAt_ms));
           simulationRecording.capturePresentedState(canvas, runtime.simulationTime);
         }
       };

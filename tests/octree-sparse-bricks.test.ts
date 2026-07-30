@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  DEFAULT_ENVIRONMENT_BRICK_REFINEMENT_LEVELS,
   ENVIRONMENT_MAXIMUM_COARSENING_POWER,
+  environmentMaximumCoarseningPower,
   octreeSparseBrickDebugPublicationShader,
   planOctreeBrickCoordinates,
   sparseSceneOctreeMaximumDepth,
@@ -33,8 +35,11 @@ test("raw inspection keeps room shells modelled without letting them hide interi
   assert.match(source, /primitive\.tags\.includes\("shell"\) \? 0 : 1/);
 });
 
-test("scene environment terminal leaves are two levels deeper than the original coarse representation", () => {
+test("scene environment defaults one level deeper than the previous brick plan", () => {
   assert.equal(ENVIRONMENT_MAXIMUM_COARSENING_POWER, 1);
+  assert.equal(DEFAULT_ENVIRONMENT_BRICK_REFINEMENT_LEVELS, 1);
+  assert.equal(environmentMaximumCoarseningPower(0), 1);
+  assert.equal(environmentMaximumCoarseningPower(), 0);
 });
 
 test("sparse scene root depth covers empty positive authored bounds", () => {

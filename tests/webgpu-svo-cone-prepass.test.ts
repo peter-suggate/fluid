@@ -41,7 +41,7 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
       "the cone phase reconstructs the dynamic hit instead of tracing primary visibility again");
     assert.match(reduced, /@fragment fn dryPrepassShadeMain/,
       "opaque shading must have a separate reduced-rate entry point so it cannot inflate cone-pass register pressure");
-    assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true })),
+    assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true })),
       "the reduced variant must embed the identical optimized marcher block");
     assert.match(reduced, /if\(weightSum<0\.05\)\{dryConeFallback=1u;return;\}/,
       "silhouette pixels below the guidance-weight threshold must fall back to exact inline cones");

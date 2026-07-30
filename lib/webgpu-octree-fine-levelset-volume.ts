@@ -10,6 +10,23 @@ import { performanceShaderVariant } from "./stores/performance-instrumentation-s
 export const FINE_LEVELSET_VOLUME_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_VOLUME_VALID = 0x8000_0000;
 const FINE_LEVELSET_VOLUME_INDIRECT_BYTES = 16;
+export const FLUID_FINE_VOLUME_CADENCE_ENV = "FLUID_FINE_VOLUME_CADENCE";
+const volumeCadenceTicks = new WeakMap<GPUBuffer, number>();
+
+/** Project-specific correction cadence. The paper path does not require this
+ * global phi offset; cadence one preserves the existing product behavior. */
+export function fineLevelSetVolumeCadence(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): number {
+  const raw = environment?.[FLUID_FINE_VOLUME_CADENCE_ENV];
+  if (raw === undefined || raw === "") return 1;
+  const cadence = Number(raw);
+  if (!Number.isSafeInteger(cadence) || cadence < 1 || cadence > 256) {
+    throw new RangeError(`${FLUID_FINE_VOLUME_CADENCE_ENV} must be an integer in [1, 256]`);
+  }
+  return cadence;
+}
 
 export interface FineLevelSetGPUVolumeControl {
   readonly flags: number; readonly initialized: boolean; readonly samples: number;
@@ -207,6 +224,14 @@ export class WebGPUFineLevelSetVolumeCorrection {
 
   private encodePasses(broker: PassBroker, applyCorrection: boolean): void {
     if (this.destroyed) throw new Error("Fine volume correction is destroyed");
+    const cadence = applyCorrection ? fineLevelSetVolumeCadence() : 1;
+    const tick = (volumeCadenceTicks.get(this.control) ?? 0) + 1;
+    volumeCadenceTicks.set(this.control, tick);
+    // Both A/B helpers share `control`, so this counts real advances rather
+    // than alternate visits to a physical page bank. Source injection always
+    // forces the measurement that updates its conservation reference.
+    if (cadence > 1 && this.pendingReferenceVolume === 0
+      && (tick - 1) % cadence !== 0) return;
     const run = (pipeline: GPUComputePipeline, _entries: readonly [number, GPUBuffer][], groups: number, label: string) => {
       const pass = broker.compute({ label }); pass.setPipeline(pipeline);
       pass.setBindGroup(0, this.groups.get(pipeline)!);

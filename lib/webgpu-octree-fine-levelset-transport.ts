@@ -35,6 +35,28 @@ export function fineTransportWorksetCensusEnabled(
   return environment?.FLUID_WORKSET_CENSUS === "1";
 }
 
+export const FLUID_FINE_TRANSPORT_STAGED_ADDRESSING_ENV = "FLUID_FINE_TRANSPORT_STAGED_ADDRESSING";
+/** Exact address-only E-5 specialization. Kept switchable for interleaved
+ * measurements; incompatible geometries fail back to direct lookup in WGSL. */
+export function fineTransportStagedAddressingRequested(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.[FLUID_FINE_TRANSPORT_STAGED_ADDRESSING_ENV] === "1";
+}
+
+export const FLUID_FINE_TRANSPORT_B4_ADDRESSING_ENV = "FLUID_FINE_TRANSPORT_B4_ADDRESSING";
+/** Exact B4/64-sample integer specialization. The generic arithmetic remains
+ * selectable as a differential oracle and for every non-B4 geometry. */
+export function fineTransportB4AddressingEnabled(
+  plan: Pick<WebGPUFineLevelSetBrickSource["plan"], "brickResolution" | "samplesPerBrick">,
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return plan.brickResolution === 4 && plan.samplesPerBrick === 64
+    && environment?.[FLUID_FINE_TRANSPORT_B4_ADDRESSING_ENV] !== "0";
+}
+
 export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP = 4_096;
 export const FINE_LEVELSET_TRANSPORT_MAXIMUM_ENCODED_SUBSTEPS = 64;
@@ -284,7 +306,10 @@ export class WebGPUFineLevelSetTransport {
     const module = device.createShaderModule({ label: "Direct structured fine level-set transport",
       code: structuredFineLevelSetTransportWGSL });
     const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
-      compute: { module, entryPoint } });
+      compute: { module, entryPoint, constants: {
+        stagedFineAddressing: fineTransportStagedAddressingRequested() ? 1 : 0,
+        b4FineAddressing: fineTransportB4AddressingEnabled(source.plan) ? 1 : 0,
+      } } });
     this.planPipeline = make("planStructuredFineTransportSubsteps");
     this.classifyPipeline = make("classifyStructuredFineTransportBlocks");
     this.reduceWorksetsPipeline = make("reduceStructuredFineTransportWorksetBlocks");

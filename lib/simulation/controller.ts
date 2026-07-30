@@ -899,4 +899,26 @@ class SimulationController {
 }
 
 export { BUILD_ID };
-export const simulation = new SimulationController();
+
+type SimulationControllerWindow = Window & {
+  /**
+   * The WebGPU viewport deliberately survives React Fast Refresh so compiled
+   * pipelines and the live device are not destroyed. Its controller must have
+   * the same lifetime: replacing only this singleton leaves the retained draw
+   * loop reading an old clock while refreshed transport controls write a new
+   * one, making Play and Step appear inert until a full page reload.
+   */
+  __fluidLabSimulationController?: SimulationController;
+};
+
+const simulationWindow = typeof window === "undefined"
+  ? undefined
+  : window as SimulationControllerWindow;
+const retainedSimulation = simulationWindow?.__fluidLabSimulationController;
+if (retainedSimulation) {
+  // Pick up edited methods while preserving the live clock, bodies, and GPU
+  // completion state owned by the retained WebGPU session.
+  Object.setPrototypeOf(retainedSimulation, SimulationController.prototype);
+}
+export const simulation = retainedSimulation ?? new SimulationController();
+if (simulationWindow) simulationWindow.__fluidLabSimulationController = simulation;
