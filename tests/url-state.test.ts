@@ -56,6 +56,11 @@ test("query state accepts the finest surface voxel inspection mode", () => {
   assert.equal(parsed.ui.voxelRenderMode, "surface-voxels");
 });
 
+test("query state accepts occupied brick inspection", () => {
+  const parsed = parseQueryState("?voxels=occupied-bricks");
+  assert.equal(parsed.ui.voxelRenderMode, "occupied-bricks");
+});
+
 test("query state round-trips the unified scene voxel domain atomically", () => {
   const parsed = parseQueryState('?scene=garden-svo-lighting&scene.voxelDomain={"finestCellSize_m":0.04,"brickSize_cells":4}');
   assert.deepEqual(parsed.scene.voxelDomain, { finestCellSize_m: 0.04, brickSize_cells: 4 });

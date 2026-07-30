@@ -15,6 +15,12 @@ test("octree exposes one production pressure authority", () => {
 
   assert.equal("powerPressureSolver" in options.octree, false);
   assert.equal(options.octree.adaptivity, 1);
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...commonValues, globalFineLevelSetMaximumBricks: 6_144,
+  }).octree.globalFineLevelSetMaximumBricks, 6_144);
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...commonValues, globalFineLevelSetMaximumBricks: 0,
+  }).octree.globalFineLevelSetMaximumBricks, undefined);
 });
 
 test("UI has no retired pressure-solver selector", () => {

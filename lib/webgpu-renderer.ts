@@ -1,3 +1,4 @@
+import { WebGpuSvoFluidCoverage } from "./webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
 import type { CameraState, SceneDescription } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
@@ -11,8 +12,14 @@ import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./en
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { SparseVoxelDebugRenderer, type SparseVoxelRenderSource, type SparseVoxelSceneRenderSource, type VoxelRenderMode } from "./webgpu-voxel-debug";
-import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, type SparseVoxelDrySceneData } from "./webgpu-svo-dry-scene";
+import { CAMERA_TAN_HALF_FOV, viewportAspect } from "./webgpu-camera";
+import {
+  buildSvoPixelTraceGeometry,
+  type SvoPixelTrace,
+  type SvoPixelTraceLayer,
+} from "./svo-pixel-trace";
+import { SparseVoxelPixelTraceOverlay } from "./webgpu-svo-pixel-trace-overlay";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, type SparseVoxelDrySceneData } from "./webgpu-svo-dry-scene";
 import { buildSvoScenePrimitives } from "./svo-scene-primitives";
 import { buildSvoSceneGlass } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
@@ -28,6 +35,7 @@ import {
 } from "./svo-render-mode";
 import type { SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
+import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "./svo-render-tuning";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import { GPUAdvanceWallEstimator } from "./gpu-advance-pacing";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
@@ -173,7 +181,51 @@ export type OptionalRendererPipeline =
   | "technique-audit-overlay"
   | "voxel-debug"
   | "svo-dry-scene"
-  | "secondary-particles";
+  | "secondary-particles"
+  | "pixel-trace-overlay";
+
+/**
+ * Live pixel-trace diagnostic state.
+ *
+ * The probe traces the pixel under `normalized`, and the overlay draws the
+ * previous frame's decoded result: the readback is one frame behind by
+ * construction, which is invisible at pointer rates and is what keeps the
+ * diagnostic off the critical path.
+ */
+export type PixelTraceStatus =
+  /** The sparse dry scene is not the active presentation, so there is nothing to trace. */
+  | "path-inactive"
+  /** The probe's shader and pipeline are still being built. */
+  | "compiling"
+  /** This device cannot host the probe; the reason was logged once. */
+  | "unsupported"
+  /** Armed and able, but no trace has been read back yet. */
+  | "waiting"
+  | "live";
+
+export interface PixelTraceConfig {
+  /** Viewport fractions, 0..1 from the top-left. */
+  readonly normalizedX: number;
+  readonly normalizedY: number;
+  readonly layers: readonly SvoPixelTraceLayer[];
+  /** 0 replays the ray's work from the camera outward; 1 shows all of it. */
+  readonly reveal: number;
+  readonly occludedAlpha?: number;
+  readonly widthScale?: number;
+  /**
+   * A pinned trace keeps its recorded geometry while the camera orbits it, and
+   * stops probing: re-tracing the pixel from a moved camera would quietly answer
+   * a different ray. `normalizedX`/`normalizedY` are then the pinned position,
+   * not the pointer's.
+   */
+  readonly pinned?: boolean;
+  /**
+   * Re-trace the pinned pixel anyway, because the scene the frozen answer
+   * describes has moved on. Only the caller knows whether that is honest: it is
+   * the same ray only while the camera has not moved since the pin.
+   */
+  readonly refresh?: boolean;
+}
 
 /**
  * Pipeline compilation requested by the current presentation mode. Explicit
@@ -186,6 +238,7 @@ export function optionalRendererPipelineRequests(
   svoRenderMode: SvoRenderMode,
   simulationRunning: boolean,
   secondaryParticlesAvailable: boolean,
+  pixelTraceActive = false,
 ): OptionalRendererPipeline[] {
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
@@ -198,6 +251,8 @@ export function optionalRendererPipelineRequests(
   if (voxelRenderMode !== "smooth") requested.push("voxel-debug");
   if (svoRenderMode === "svo" && voxelRenderMode === "smooth") requested.push("svo-dry-scene");
   if (simulationRunning && secondaryParticlesAvailable) requested.push("secondary-particles");
+  // The trace overlay is only meaningful over the sparse path it explains.
+  if (pixelTraceActive && svoRenderMode === "svo" && voxelRenderMode === "smooth") requested.push("pixel-trace-overlay");
   return requested;
 }
 
@@ -247,7 +302,7 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
  * the editor's terrain handles depend on this being fixed.
  */
 export function gpuSceneSeedKey(scene: SceneDescription): string {
-  return `${scene.container.fillFraction}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.terrain ?? null)}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
+  return `${scene.container.fillFraction}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.terrain ?? null)}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
 }
 
 /** Pure scalars; no lattice or seed depends on them. */
@@ -398,6 +453,22 @@ export class FluidLabRenderer {
   private gridOverlayPipeline?: GridOverlayPipeline;
   private techniqueOverlayPipeline?: OctreeTechniqueOverlayPipeline;
   private techniqueAuditOverlayPipeline?: OctreeTechniqueAuditOverlayPipeline;
+  private pixelTraceOverlayPipeline?: SparseVoxelPixelTraceOverlay;
+  /** Latest decoded trace, and a revision the UI polls instead of a callback. */
+  private latestPixelTraceValue?: SvoPixelTrace;
+  private pixelTraceRevisionValue = 0;
+  private pixelTraceGeometryKey = "";
+  private pixelTraceReadInFlight = false;
+  /**
+   * Everything a trace's answer depends on except the camera and the pixel: the
+   * scene epoch, the presentation, and the traversal tuning. The revision is what
+   * lets a held trace be recognized as describing a frame that no longer exists.
+   */
+  private pixelTraceSceneKey = "";
+  private pixelTraceSceneRevisionValue = 0;
+  /** Revision the in-flight probe was encoded under, carried to the trace it produces. */
+  private pixelTraceEncodedSceneRevision = 0;
+  private pixelTraceSceneRevisionOfTrace = -1;
   /** Optional programs compile only after their explicit presentation mode is used. */
   private readonly optionalPipelineTasks = new Map<OptionalRendererPipeline, Promise<void>>();
   /** A compile failure is sticky for this device; do not hammer a fragile driver every frame. */
@@ -406,7 +477,6 @@ export class FluidLabRenderer {
   private voxelDebugDepth?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
-  private readonly rasterRenderScale = 0.72;
   private uniformBuffer?: GPUBuffer;
   private bodyBuffer?: GPUBuffer;
   private fluidTexture?: GPUTexture;
@@ -439,7 +509,7 @@ export class FluidLabRenderer {
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
   /** Internal A/B: temporal-off also restores full-rate shadow visibility. */
-  private readonly svoTemporalAccumulationEnabled = typeof location === "undefined" || new URLSearchParams(location.search).get("svoTemporal") !== "0";
+  private svoTemporalAccumulationEnabled = DEFAULT_SVO_RENDER_TUNING.temporalEnabled;
   private presentationFrameIndex = 0;
   private svoCameraStabilityKey = "";
   private svoCameraStableFrames = 0;
@@ -469,6 +539,14 @@ export class FluidLabRenderer {
   private gpuFluidGeneration = 0;
   /** True only while both compact t=0 raster sources are attached. */
   private globalFineWaterAttached = false;
+  /**
+   * Water's shadow term. Owned here rather than by the sparse publication: its
+   * source is the solver's dense coarse level set, which reaches presentation
+   * as a texture and only means signed distance while the global-fine lane is
+   * attached. Rebuilt whenever that field or its geometry changes.
+   */
+  private svoFluidCoverage?: WebGpuSvoFluidCoverage;
+  private svoFluidCoverageKey?: string;
   private pendingInitialRasterPresentation?: PendingInitialRasterPresentation;
   /** Static worlds become ready only after their first dry-SVO frame completes. */
   private pendingStaticSvoPresentation?: PendingStaticSvoPresentation;
@@ -631,6 +709,13 @@ export class FluidLabRenderer {
       },
       (pipeline) => pipeline.destroy(),
     );
+    if (wants.has("pixel-trace-overlay")) this.ensureOptionalPipeline(
+      "pixel-trace-overlay", this.pixelTraceOverlayPipeline,
+      (device) => new SparseVoxelPixelTraceOverlay(device, this.format!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => { this.pixelTraceOverlayPipeline = pipeline; },
+      (pipeline) => pipeline.destroy(),
+    );
     if (wants.has("secondary-particles")) this.ensureOptionalPipeline(
       "secondary-particles", this.secondaryParticlePipeline,
       (device) => new SecondaryParticleRenderPipeline(device, this.uniformBuffer!),
@@ -672,6 +757,132 @@ export class FluidLabRenderer {
     if(!fluid?.pickRigidBody||this.disposed||this.deviceLost)return undefined;
     const picked=await fluid.pickRigidBody(origin,direction);
     return this.gpuFluid===fluid&&this.gpuFluidGeneration===generation?picked:undefined;
+  }
+
+  /* ----------------------------------------------------------------------- */
+  /* Live pixel trace                                                        */
+  /* ----------------------------------------------------------------------- */
+
+  /**
+   * Latest decoded trace and a revision counter. The UI polls the revision from
+   * its animation frame rather than being called back, so a trace arriving while
+   * React is mid-render can never tear a frame.
+   */
+  get latestPixelTrace(): SvoPixelTrace | undefined { return this.latestPixelTraceValue; }
+  get pixelTraceRevision(): number { return this.pixelTraceRevisionValue; }
+  get pixelTraceAvailable(): boolean { return Boolean(this.svoDryScenePipeline?.pixelTraceReady); }
+
+  /**
+   * Why the diagnostic is or is not showing anything.
+   *
+   * Without this the HUD cannot tell "you have not moved the pointer yet" from
+   * "this scene is on the raster fallback, so there is no sparse traversal to
+   * trace" — and both look like a broken pointer.
+   */
+  get pixelTraceStatus(): PixelTraceStatus {
+    if (this.svoDryScenePipeline?.pixelTraceUnsupported) return "unsupported";
+    // svoPickingAvailable is exactly "the sparse dry scene encoded this frame",
+    // which is the same condition the probe needs to have anything to walk.
+    if (!this.svoPickingAvailable) return "path-inactive";
+    if (this.svoDryScenePipeline?.pixelTraceCompiling) return "compiling";
+    if (!this.latestPixelTraceValue) return "waiting";
+    return "live";
+  }
+
+  /**
+   * True when the newest decoded trace answers the pixel currently requested.
+   *
+   * Click-to-pin waits for this instead of freezing whatever is already drawn:
+   * the readback runs a frame behind its request, so the trace on screen at the
+   * instant of a click generally belongs to a neighbouring pixel.
+   */
+  get pixelTraceAnswersRequest(): boolean {
+    const trace = this.latestPixelTraceValue;
+    const requested = this.svoDryScenePipeline?.pixelTraceRequestedPixel;
+    if (!trace || !requested) return false;
+    return trace.pixel[0] === requested[0] && trace.pixel[1] === requested[1];
+  }
+
+  /**
+   * True when the held trace describes a scene the renderer has moved on from —
+   * a republished topology, another light, a different shadow or cone budget.
+   *
+   * A live trace clears this by itself on the next frame. A pinned one cannot:
+   * it has stopped probing, so its counters would go on describing a frame that
+   * no longer exists until someone asks for a refresh.
+   */
+  get pixelTraceStale(): boolean {
+    if (!this.latestPixelTraceValue) return false;
+    return this.pixelTraceSceneRevisionOfTrace !== this.pixelTraceSceneRevisionValue;
+  }
+
+  private pumpPixelTraceReadback(): void {
+    const pipeline = this.svoDryScenePipeline;
+    if (!pipeline || this.pixelTraceReadInFlight) return;
+    this.pixelTraceReadInFlight = true;
+    const encodedSceneRevision = this.pixelTraceEncodedSceneRevision;
+    void pipeline.readPixelTrace().then((trace) => {
+      if (this.disposed || this.deviceLost || this.svoDryScenePipeline !== pipeline || !trace) return;
+      this.latestPixelTraceValue = trace;
+      // The trace answers the scene it was encoded against, not the one that
+      // happens to be current when its readback resolves.
+      this.pixelTraceSceneRevisionOfTrace = encodedSceneRevision;
+      this.pixelTraceRevisionValue += 1;
+    }).catch(() => { /* A superseded or unmapped readback is not a frame error. */ })
+      .finally(() => { this.pixelTraceReadInFlight = false; });
+  }
+
+  private encodePixelTraceOverlay(
+    encoder: GPUCommandEncoder,
+    basis: ReturnType<typeof cameraBasis>,
+    config: PixelTraceConfig,
+  ): void {
+    const overlay = this.pixelTraceOverlayPipeline, trace = this.latestPixelTraceValue;
+    if (!overlay?.ready || !trace || !this.presentationTexture) return;
+    // Rebuild the segment buffer only when the trace or the requested layers
+    // change: orbiting a pinned trace is a uniform update, not a re-upload.
+    const key = `${this.pixelTraceRevisionValue}|${config.layers.join(",")}|${config.widthScale ?? 1}`;
+    if (key !== this.pixelTraceGeometryKey) {
+      const geometry = buildSvoPixelTraceGeometry(trace, { layers: config.layers, widthScale: config.widthScale });
+      overlay.setGeometry(geometry);
+      this.pixelTraceGeometryKey = key;
+    }
+    const width = this.presentationTexture.width, height = this.presentationTexture.height;
+    overlay.encode(encoder, this.cachedTextureView(this.presentationTexture), this.pixelTraceSceneDepthView(), {
+      camera: {
+        position_m: [basis.position.x, basis.position.y, basis.position.z],
+        forward: [basis.forward.x, basis.forward.y, basis.forward.z],
+        right: [basis.right.x, basis.right.y, basis.right.z],
+        up: [basis.up.x, basis.up.y, basis.up.z],
+        tanHalfFov: CAMERA_TAN_HALF_FOV,
+        aspect: viewportAspect(width, height),
+      },
+      viewportWidth: width,
+      viewportHeight: height,
+      reveal: config.reveal,
+      occludedAlpha: config.occludedAlpha,
+      depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
+    });
+  }
+
+  /** Stable views: a fresh view object every frame would rebuild bind groups. */
+  private readonly cachedTextureViews = new WeakMap<GPUTexture, GPUTextureView>();
+
+  private cachedTextureView(texture: GPUTexture): GPUTextureView {
+    const existing = this.cachedTextureViews.get(texture);
+    if (existing) return existing;
+    const view = texture.createView();
+    this.cachedTextureViews.set(texture, view);
+    return view;
+  }
+
+  /**
+   * Scene depth for the overlay's occlusion ghosting. Absent while the sparse
+   * G-buffer has not been published, which simply draws the trace unghosted.
+   */
+  private pixelTraceSceneDepthView(): GPUTextureView | undefined {
+    const depth = this.svoDryScenePipeline?.gBufferTextures?.hardwareDepth;
+    return depth ? this.cachedTextureView(depth) : undefined;
   }
 
   initialize(): Promise<void> {
@@ -823,6 +1034,55 @@ export class FluidLabRenderer {
     } catch (error) {
       this.onStatus({ state: "unavailable", label: error instanceof Error ? `GPU recovery failed: ${error.message}` : "GPU recovery failed" });
     }
+  }
+
+
+  /**
+   * Build or reuse the fluid coverage volume for this frame.
+   *
+   * Gated on the global-fine lane, because that is the only configuration in
+   * which the solver's dense field carries a signed distance; the tall-cell and
+   * quadtree lanes pack occupancy into the same texture, and resampling that as
+   * a distance would put a shadow wherever the field happened to be positive.
+   * Outside the lane the volume is released and water casts no shadow, which is
+   * the behaviour every lane had before.
+   */
+  private ensureFluidCoverage(
+    solver: GPUSolverInstance | undefined,
+    scene: SceneDescription,
+  ): WebGpuSvoFluidCoverage | undefined {
+    const device = this.device;
+    // surfaceFieldTexture is the contoured level set when the solver keeps one
+    // apart from volumeTexture; it is the field globalCoarsePhi already reads.
+    const field = device && solver && this.globalFineWaterAttached && solver.globalFineLevelSetSource
+      ? solver.surfaceFieldTexture ?? solver.volumeTexture
+      : undefined;
+    const info = solver?.info;
+    if (!field || !info || !device) {
+      this.svoFluidCoverage?.destroy();
+      this.svoFluidCoverage = undefined;
+      this.svoFluidCoverageKey = undefined;
+      return undefined;
+    }
+    const dimensions = [info.nx, info.ny, info.nz] as const;
+    const container = scene.container;
+    const key = `${field.label}:${dimensions.join(",")}:${container.width_m},${container.height_m},${container.depth_m}`;
+    if (this.svoFluidCoverage && this.svoFluidCoverageKey === key) return this.svoFluidCoverage;
+    this.svoFluidCoverage?.destroy();
+    this.svoFluidCoverageKey = key;
+    try {
+      // The dense field spans the container box exactly, which is the same
+      // mapping the raster composite uses to sample it.
+      this.svoFluidCoverage = new WebGpuSvoFluidCoverage(device, {
+        fieldDimensions: dimensions,
+        worldOrigin_m: [-container.width_m / 2, 0, -container.depth_m / 2],
+        cellSize_m: [container.width_m / info.nx, container.height_m / info.ny, container.depth_m / info.nz],
+      }, { coarsePhi: field.createView({ dimension: "3d" }) });
+    } catch {
+      this.svoFluidCoverage = undefined;
+      this.svoFluidCoverageKey = undefined;
+    }
+    return this.svoFluidCoverage;
   }
 
   private updateRenderSources(texture = this.fluidTexture, columnSource?: GPUTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture, pressureSamples = this.pressureSamplesFallbackTexture, divergence = this.scalarFallbackTexture, pressure = this.scalarFallbackTexture) {
@@ -1277,7 +1537,7 @@ export class FluidLabRenderer {
     return `${this.presentationTexture.width} × ${this.presentationTexture.height} (${Math.round(this.activeRenderScale * 100)}%)`;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
       ? new CPUPerformanceTrace(
@@ -1287,19 +1547,23 @@ export class FluidLabRenderer {
       )
       : undefined;
     if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
-    this.resize(this.rasterRenderScale);
+    const activeSvoTuning = normalizeSvoRenderTuning(svoTuning);
+    this.svoTemporalAccumulationEnabled = activeSvoTuning.temporalEnabled
+      && (typeof location === "undefined" || new URLSearchParams(location.search).get("svoTemporal") !== "0");
+    this.resize(activeSvoTuning.resolutionScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     if (svoRenderMode !== "svo" || voxelRenderMode !== "smooth") { this.svoPickingAvailable = false; this.lastSvoPickingBodies = []; }
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
-    const activeSvoDiagnostics = requestedSvoDiagnostics.overlay === "off" || svoRenderMode !== "svo" || voxelRenderMode !== "smooth"
+    const activeSvoDiagnostics = svoRenderMode !== "svo" || voxelRenderMode !== "smooth"
       ? DEFAULT_SVO_RENDER_DIAGNOSTICS : requestedSvoDiagnostics;
-    const diagnosticsKey = `${activeSvoDiagnostics.overlay}:${activeSvoDiagnostics.maximumTraversalDepth}:${activeSvoDiagnostics.maximumNodeVisits}:${activeSvoDiagnostics.overlayOpacity}`;
+    const tuningKey = svoRenderTuningKey(activeSvoTuning);
+    const diagnosticsKey = `${activeSvoDiagnostics.overlay}:${activeSvoDiagnostics.maximumTraversalDepth}:${activeSvoDiagnostics.maximumNodeVisits}:${tuningKey}`;
     if (diagnosticsKey !== this.svoRenderDiagnosticsKey) {
       this.svoRenderDiagnosticsKey = diagnosticsKey;
       this.svoDryScenePipeline?.invalidateTemporalHistory();
       this.resetPresentationTrace();
     }
-    const presentationContext = `${config.methodId}:${config.quality}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:temporal-${this.svoTemporalAccumulationEnabled ? "on" : "off"}:lighting-${svoLightingMode}:${voxelRenderMode}:${svoRenderMode}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:temporal-${this.svoTemporalAccumulationEnabled ? "on" : "off"}:lighting-${svoLightingMode}:${voxelRenderMode}:${svoRenderMode}:tuning-${tuningKey}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -1310,10 +1574,37 @@ export class FluidLabRenderer {
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
       ? this.currentGPUFluid(scene, config, time_s)
       : undefined;
+    const pixelTraceRequested = Boolean(pixelTrace) && svoRenderMode === "svo" && voxelRenderMode === "smooth";
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, voxelRenderMode, svoRenderMode, this.simulationRunning,
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
+      pixelTraceRequested,
     ));
+    // The probe's answer depends on the scene epoch, the presentation, and the
+    // traversal tuning as much as on the pixel. Tracking them as one revision is
+    // what lets a pinned ray notice that its numbers describe a frame that has
+    // since been replaced — another light, a republished topology, a new budget.
+    const traceSceneKey = `${this.svoDryScenePipeline?.sceneEpoch ?? 0}|${presentationContext}|${diagnosticsKey}`;
+    if (traceSceneKey !== this.pixelTraceSceneKey) {
+      this.pixelTraceSceneKey = traceSceneKey;
+      this.pixelTraceSceneRevisionValue += 1;
+    }
+    // A pinned ray stops probing, except when the caller asks for a refresh
+    // because the scene moved on under it.
+    const pixelTraceProbing = pixelTraceRequested && Boolean(pixelTrace)
+      && (!pixelTrace!.pinned || pixelTrace!.refresh === true);
+    if (pixelTraceProbing) {
+      const width = this.presentationTexture.width, height = this.presentationTexture.height;
+      this.svoDryScenePipeline?.requestPixelTrace(
+        Math.floor(Math.max(0, Math.min(1, pixelTrace!.normalizedX)) * width),
+        Math.floor(Math.max(0, Math.min(1, pixelTrace!.normalizedY)) * height),
+      );
+    } else if (!pixelTraceRequested) {
+      this.svoDryScenePipeline?.clearPixelTraceRequest();
+      this.pixelTraceOverlayPipeline?.clear();
+      if (this.latestPixelTraceValue) { this.latestPixelTraceValue = undefined; this.pixelTraceRevisionValue += 1; }
+      this.pixelTraceGeometryKey = "";
+    }
     // Raw voxel/brick inspection is opt-in. Keeping the source detached in
     // smooth presentation avoids a second capacity-sized GPU instance arena
     // (about 295 MB for the widened ocean) while SVO continues to consume the
@@ -1389,7 +1680,7 @@ export class FluidLabRenderer {
         body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z,
       ]),
     ].join("|");
-    const checkerboardShadowsEligible = this.svoTemporalAccumulationEnabled && svoLightingOptions.shadowsEnabled
+    const checkerboardShadowsEligible = this.svoTemporalAccumulationEnabled && activeSvoTuning.checkerboardShadowsEnabled && svoLightingOptions.shadowsEnabled
       && svoRenderMode === "svo" && voxelRenderMode === "smooth" && requestedSvoDiagnostics.overlay === "off";
     if (!checkerboardShadowsEligible || shadowStabilityKey !== this.svoShadowStabilityKey) {
       this.svoShadowStabilityKey = checkerboardShadowsEligible ? shadowStabilityKey : "";
@@ -1411,7 +1702,7 @@ export class FluidLabRenderer {
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, drySceneTemporalFrame,
       position.x, position.y, position.z, svoCostOverlayCode(activeSvoDiagnostics.overlay),
-      camera.target_m.x, camera.target_m.y, camera.target_m.z, activeSvoDiagnostics.overlayOpacity,
+      camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       // options.w carries the largest represented adaptive pressure-cell
       // width. The grid overlay uses it to normalize its categorical scale
@@ -1461,7 +1752,8 @@ export class FluidLabRenderer {
     this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
     // Reduced-rate cone lighting is the production default: half-resolution
     // prepass + guided upsample, measured within the visibility-error gates.
-    this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: 0.5 });
+    this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
+    this.svoDryScenePipeline?.setRenderTuning(activeSvoTuning);
     cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
     const shouldTracePresentation = measurementInstrumentationEnabled
@@ -1512,6 +1804,7 @@ export class FluidLabRenderer {
     this.voxelInspectionSource?.inspectionPublication?.encodePending?.(encoder);
     if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
     this.svoDryScenePipeline?.setRigidMotionSource(backend === "webgpu" ? this.gpuFluid?.rigidMotionBuffer : undefined);
+    this.svoDryScenePipeline?.setFluidCoverage(this.ensureFluidCoverage(readyGPUFluid, scene));
     this.secondaryParticlePipeline?.setSource(backend === "webgpu" ? this.gpuFluid?.secondaryParticles : undefined);
     let svoEncoded = false;
     const useSvoDryScene = svoRenderMode === "svo" && voxelRenderMode === "smooth";
@@ -1530,6 +1823,9 @@ export class FluidLabRenderer {
           cellSize_m,
           paused: !this.simulationRunning,
           composition: "dry-before-raster-water",
+          maximumSamples: activeSvoTuning.temporalMaximumSamples,
+          varianceSigma: activeSvoTuning.temporalVarianceSigma,
+          depthToleranceScale: activeSvoTuning.temporalDepthToleranceScale,
         } : undefined;
         if (!temporalFrame) this.svoDryScenePipeline?.invalidateTemporalHistory();
         // SVO visibility and shading are presentation work, not an on-change
@@ -1555,6 +1851,9 @@ export class FluidLabRenderer {
     this.waterPipeline.setPendingSvoBackground(
       svoPresentationExpected ? svoEnvironmentAmbientBackgroundLinear(environmentId, scene.lighting?.environment) : undefined,
     );
+    // Before the dry pass samples it, and outside the water pipeline's own
+    // passes so the volume is complete for the whole frame.
+    this.svoFluidCoverage?.encode(encoder);
     const rasterResult = this.waterPipeline.encode(
       encoder, this.presentationTexture,
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1,
@@ -1641,6 +1940,21 @@ export class FluidLabRenderer {
     if (inspectionOverlayEncoded) {
       completeDetailedPresentationPhase({ id: "inspection-overlay", label: "Inspection overlays" });
     }
+    if (pixelTraceRequested && pixelTrace) {
+      // The probe re-traces the requested pixel against the topology this frame
+      // just drew from, and the overlay draws the trace decoded from the last
+      // readback. One frame of latency, no stall.
+      //
+      // A pinned trace stops probing altogether. Re-tracing the same pixel from
+      // a moved camera would quietly answer a different ray, which is the exact
+      // opposite of freezing one; the recorded world-space work is what the
+      // overlay keeps drawing while the camera orbits around it. A refresh is the
+      // one exception, and only the caller can tell that it is the same ray.
+      if (pixelTraceProbing && this.svoDryScenePipeline?.encodePixelTrace(encoder)) {
+        this.pixelTraceEncodedSceneRevision = this.pixelTraceSceneRevisionValue;
+      }
+      this.encodePixelTraceOverlay(encoder, basis, pixelTrace);
+    }
     closeFixedPresentationPhase();
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}]});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
@@ -1664,6 +1978,7 @@ export class FluidLabRenderer {
     this.device.queue.submit([encoder.finish()]);
     this.nonPhysicsQueueWorkSequence+=1;
     this.presentationPending=true;
+    if (pixelTraceProbing) this.pumpPixelTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
     const presentationTraceRead = hardwarePresentationTrace
       ? hardwarePresentationTrace.read()

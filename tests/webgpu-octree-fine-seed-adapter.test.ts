@@ -44,6 +44,9 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
     "surface deltas consume current-generation interface-membership dirty stamps");
   assert.match(octreeFineSeedCandidateShader, /generation!=0u&&error==0u/,
     "publication validity is independent of a possibly-zero candidate count");
+  assert.equal((octreeFineSeedCandidateShader.match(
+    /candidateControl\[7\]=params\.dimsCapacity\.w/g) ?? []).length, 2,
+    "the residency consumer's capacity handshake must not receive the changing live-row count");
   assert.match(octreeFineSeedCandidateShader,
     /structuredControl\[0\]==0u&&structuredControl\[2\]>0u&&structuredControl\[3\]!=0u/,
     "a missing or rejected structured authority must reject the candidate generation");

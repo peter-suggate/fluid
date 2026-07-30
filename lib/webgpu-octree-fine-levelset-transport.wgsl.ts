@@ -533,7 +533,10 @@ fn deltaChangedKey(work:u32)->u32{
 // commitStructuredFineTransport stays untouched, as before.
 @compute @workgroup_size(256)fn clearStructuredFineDelta(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){
   let i=wg.x*256u+lid;if(i>=8u+3u*p.pageCapacity){return;}
-  if(i<8u||i>=8u+p.pageCapacity){delta[i]=0u;}
+  // Preserve both dense per-physical-page classifications authored by commit:
+  // broad old/new interface membership and exact closest-point repair. Only
+  // the header and the middle compact stream are rebuilt by this scan.
+  if(i<8u||(i>=8u+p.pageCapacity&&i<8u+2u*p.pageCapacity)){delta[i]=0u;}
 }
 @compute @workgroup_size(256)fn reduceStructuredFineDeltaBlocks(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){
   let work=wg.x*256u+lid;

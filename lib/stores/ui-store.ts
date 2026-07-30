@@ -9,6 +9,8 @@ import {
   type SvoRenderMode,
 } from "../svo-render-mode";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoCostOverlayMode } from "../svo-render-diagnostics";
+import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../svo-render-tuning";
+import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../svo-pixel-trace";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { VoxelRenderMode } from "../webgpu-voxel-debug";
 
@@ -61,7 +63,16 @@ interface UIStore {
   svoCostOverlay: SvoCostOverlayMode;
   svoMaximumTraversalDepth: number;
   svoMaximumNodeVisits: number;
-  svoOverlayOpacity: number;
+  /** Dense runtime tuning surface for the sparse presentation path. */
+  svoRenderTuning: SvoRenderTuning;
+  /**
+   * Live ray-work diagnostic: hovering a pixel draws, in 3D, the octree boxes,
+   * brick cells, analytic tests, shadow rays, and cone samples that produced it.
+   */
+  pixelTraceEnabled: boolean;
+  /** A pinned trace holds its recorded geometry so the camera can orbit it. */
+  pixelTracePinned: boolean;
+  pixelTraceLayers: readonly SvoPixelTraceLayer[];
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   setActiveTool: (tool: EditorTool) => void;
   select: (selection?: EditorSelection) => void;
@@ -83,7 +94,11 @@ interface UIStore {
   setSvoCostOverlay: (mode: SvoCostOverlayMode) => void;
   setSvoMaximumTraversalDepth: (depth: number) => void;
   setSvoMaximumNodeVisits: (visits: number) => void;
-  setSvoOverlayOpacity: (opacity: number) => void;
+  setSvoRenderTuning: (next: SvoRenderTuning | ((current: SvoRenderTuning) => SvoRenderTuning)) => void;
+  setPixelTraceEnabled: (enabled: boolean) => void;
+  setPixelTracePinned: (pinned: boolean) => void;
+  togglePixelTraceLayer: (layer: SvoPixelTraceLayer) => void;
+  setPixelTraceLayers: (layers: readonly SvoPixelTraceLayer[]) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -108,7 +123,10 @@ export const useUIStore = create<UIStore>((set) => ({
   svoCostOverlay: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlay,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
-  svoOverlayOpacity: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlayOpacity,
+  svoRenderTuning: DEFAULT_SVO_RENDER_TUNING,
+  pixelTraceEnabled: false,
+  pixelTracePinned: false,
+  pixelTraceLayers: SVO_PIXEL_TRACE_LAYERS,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   setActiveTool: (activeTool) => set({ activeTool }),
   select: (selection) => set({ selection, selectedBodyId: selectedBodyIdOf(selection) }),
@@ -136,7 +154,6 @@ export const useUIStore = create<UIStore>((set) => ({
       overlay: state.svoCostOverlay,
       maximumTraversalDepth: svoMaximumTraversalDepth,
       maximumNodeVisits: state.svoMaximumNodeVisits,
-      overlayOpacity: state.svoOverlayOpacity,
     }).maximumTraversalDepth,
   })),
   setSvoMaximumNodeVisits: (svoMaximumNodeVisits) => set((state) => ({
@@ -144,15 +161,26 @@ export const useUIStore = create<UIStore>((set) => ({
       overlay: state.svoCostOverlay,
       maximumTraversalDepth: state.svoMaximumTraversalDepth,
       maximumNodeVisits: svoMaximumNodeVisits,
-      overlayOpacity: state.svoOverlayOpacity,
     }).maximumNodeVisits,
   })),
-  setSvoOverlayOpacity: (svoOverlayOpacity) => set((state) => ({
-    svoOverlayOpacity: normalizeSvoRenderDiagnostics({
-      overlay: state.svoCostOverlay,
-      maximumTraversalDepth: state.svoMaximumTraversalDepth,
-      maximumNodeVisits: state.svoMaximumNodeVisits,
-      overlayOpacity: svoOverlayOpacity,
-    }).overlayOpacity,
+  setSvoRenderTuning: (next) => set((state) => ({
+    svoRenderTuning: normalizeSvoRenderTuning(typeof next === "function" ? next(state.svoRenderTuning) : next),
   })),
+  // Disabling always releases the pin: a pinned trace with the diagnostic off
+  // would silently re-appear the next time it is switched on.
+  setPixelTraceEnabled: (pixelTraceEnabled) => set((state) => ({
+    pixelTraceEnabled,
+    pixelTracePinned: pixelTraceEnabled ? state.pixelTracePinned : false,
+  })),
+  setPixelTracePinned: (pixelTracePinned) => set({ pixelTracePinned }),
+  togglePixelTraceLayer: (layer) => set((state) => ({
+    pixelTraceLayers: state.pixelTraceLayers.includes(layer)
+      ? state.pixelTraceLayers.filter((entry) => entry !== layer)
+      // Keep the canonical order regardless of toggle order, so the legend and
+      // the drawn overlay always agree about layering.
+      : SVO_PIXEL_TRACE_LAYERS.filter((entry) => entry === layer || state.pixelTraceLayers.includes(entry)),
+  })),
+  setPixelTraceLayers: (pixelTraceLayers) => set({
+    pixelTraceLayers: SVO_PIXEL_TRACE_LAYERS.filter((entry) => pixelTraceLayers.includes(entry)),
+  }),
 }));

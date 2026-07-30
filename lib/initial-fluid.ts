@@ -21,6 +21,18 @@ export function damBreakFractions(fillFraction: number): DamBreakFractions {
   return { width: footprint, height, depth: footprint };
 }
 
+/** Resolves an authored absolute reservoir size, falling back to the legacy
+ * fill-derived normalized dam shape. */
+export function sceneDamBreakFractions(scene: SceneDescription): DamBreakFractions {
+  const dimensions = scene.fluid.initialDamBreakDimensions_m;
+  if (!dimensions) return damBreakFractions(scene.container.fillFraction);
+  return {
+    width: dimensions.x / scene.container.width_m,
+    height: dimensions.y / scene.container.height_m,
+    depth: dimensions.z / scene.container.depth_m,
+  };
+}
+
 export const INITIAL_FLUID_BRICK_SIZE = 8;
 
 function seedCell(scene: SceneDescription, seed: Vec3, dimensions: readonly [number, number, number]) {

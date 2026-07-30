@@ -45,6 +45,7 @@ import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type Environm
 import { SparseSceneProxyVoxelizer, sparseScenePrimitiveForProxy, type SparseScenePrimitive } from "./webgpu-sparse-scene-proxies";
 import {
   SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
+  SPARSE_VOXEL_DEBUG_HAS_CONTENT,
   SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS,
   SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS,
   SPARSE_VOXEL_PUBLICATION_STATE,
@@ -384,6 +385,10 @@ fn materializeBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocatio
     if (candidate != 0u && candidateOwner != 0xffffu && candidateOwner < params.settings.y && candidateOwner < arrayLength(&bodyMaterials)) { candidate = bodyMaterials[candidateOwner]; }
     if (candidate != 0u) { isActive = true; material = candidate; owner = candidateOwner; }
   }
+  // Preserve payload occupancy independently from fluid residency. The latter
+  // includes empty halo/support allocation and must not masquerade as content
+  // in occupied-brick inspection.
+  let hasContent = isActive;
   let residency = fluidLeafStates[leafIndex];
   let fluidResident = (residency & 1u) != 0u;
   if (fluidResident) { isActive = true; material = params.settings.w; owner = 0xffffu; }
@@ -393,7 +398,8 @@ fn materializeBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocatio
   let scale = 1u << (params.settings.z - node.address.z);
   let world = params.origin.xyz + vec3f(brick * brickSize * scale) * params.cell.xyz;
   let extent = f32(brickSize * scale) * params.cell.xyz;
-  brickRecords[leafIndex] = DebugRecord(vec4f(world, 0.0), vec4f(extent, 0.0), vec4u(material, select(0u, 1u, isActive) | residency, node.address.z, owner));
+  let contentFlag = select(0u, ${SPARSE_VOXEL_DEBUG_HAS_CONTENT}u, hasContent);
+  brickRecords[leafIndex] = DebugRecord(vec4f(world, 0.0), vec4f(extent, 0.0), vec4u(material, select(0u, 1u, isActive) | residency | contentFlag, node.address.z, owner));
 }
 `;
 

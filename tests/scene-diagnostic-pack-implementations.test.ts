@@ -131,3 +131,42 @@ test("octree authority does not invent dam-envelope failures for timing-only evi
   assert.equal(result.passed, true);
   assert.equal(result.packFindings.some(({ checkId }) => checkId.includes(".dam-")), false);
 });
+
+test("water raster authority follows the retained accepted fine-grid generation", () => {
+  const generation = { generation: 7 };
+  const raster = {
+    frontInterfacePixels: 10,
+    backInterfacePixels: 8,
+    backOnlyInterfacePixels: 0,
+    reverseView: { backOnlyInterfacePixels: 0 },
+    surfaceGeometrySource: "global-fine-coarse",
+    globalFineCrossingPublished: true,
+    presentationFallbackActive: false,
+    globalFineAuthorityLatch: 1,
+    globalFineAuthorityTransition: { validGeneration: 7 },
+  };
+  const evidence: NormalizedSceneDiagnosticEvidence = {
+    methods: {
+      octree: {
+        available: ["global fine generation", "front/back raster"],
+        diagnostics: {
+          initialGlobalFineGeneration: generation,
+          finalGlobalFineGeneration: generation,
+          initialGlobalFineRaster: raster,
+          finalGlobalFineRaster: raster,
+        },
+      },
+    },
+  };
+  const runtime = createSceneDiagnosticRuntime({ packs: sceneDiagnosticPackImplementations, hooks: {} });
+  const result = runtime.evaluate({
+    scene: defaultScene,
+    lane: lane({ id: "authoritative-water-raster" }),
+    evidence,
+  });
+
+  assert.equal(result.passed, true);
+  assert.ok(result.packFindings
+    .filter(({ checkId }) => checkId.endsWith("-authority"))
+    .every(({ passed }) => passed));
+});

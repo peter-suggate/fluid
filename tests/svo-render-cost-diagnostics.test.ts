@@ -19,7 +19,7 @@ const viewportSource = readFileSync(new URL("../components/WebGPUViewport.tsx", 
 
 test("SVO cost diagnostic controls are bounded and retain a production-off default", () => {
   assert.deepEqual(DEFAULT_SVO_RENDER_DIAGNOSTICS, {
-    overlay: "off", maximumTraversalDepth: 21, maximumNodeVisits: 256, overlayOpacity: 0.9,
+    overlay: "off", maximumTraversalDepth: 21, maximumNodeVisits: 256,
   });
   assert.equal(svoCostOverlayCode("traversal-depth"), 1);
   assert.equal(svoCostOverlayCode("brick-tests"), 3);
@@ -32,21 +32,19 @@ test("SVO cost diagnostic controls are bounded and retain a production-off defau
   assert.equal(svoCostOverlayCode("prepass-fallback"), 14);
   assert.equal(svoCostOverlayCode("work-composition"), 15);
   assert.deepEqual(normalizeSvoRenderDiagnostics({
-    overlay: "total-cost", maximumTraversalDepth: 99, maximumNodeVisits: 0, overlayOpacity: 2,
-  }), { overlay: "total-cost", maximumTraversalDepth: 21, maximumNodeVisits: 1, overlayOpacity: 1 });
+    overlay: "total-cost", maximumTraversalDepth: 99, maximumNodeVisits: 0,
+  }), { overlay: "total-cost", maximumTraversalDepth: 21, maximumNodeVisits: 1 });
 
   const initial = useUIStore.getInitialState();
   useUIStore.setState(initial, true);
   useUIStore.getState().setSvoCostOverlay("node-visits");
   useUIStore.getState().setSvoMaximumTraversalDepth(0);
   useUIStore.getState().setSvoMaximumNodeVisits(999);
-  useUIStore.getState().setSvoOverlayOpacity(-1);
   assert.deepEqual({
     overlay: useUIStore.getState().svoCostOverlay,
     depth: useUIStore.getState().svoMaximumTraversalDepth,
     visits: useUIStore.getState().svoMaximumNodeVisits,
-    opacity: useUIStore.getState().svoOverlayOpacity,
-  }, { overlay: "node-visits", depth: 1, visits: 256, opacity: 0 });
+  }, { overlay: "node-visits", depth: 1, visits: 256 });
   useUIStore.setState(initial, true);
 });
 
@@ -102,6 +100,8 @@ test("dry shader measures topology, payload refinement, mip, and shadow work bef
   assert.match(svoDrySceneShader, /dryMipSteps\+=1u/);
   assert.match(svoDrySceneShader, /fn dryLogCost\([^]*log2\(1\.0\+max\(value,0\.0\)\)/);
   assert.match(svoDrySceneShader, /primaryCost\*vec3f\(0\.0,\.851,1\.0\)[^]*shadowCost\*vec3f\(1\.0,\.078,\.576\)[^]*mipCost\*vec3f\(1\.0,\.902,0\.0\)/);
+  assert.match(svoDrySceneShader, /return vec4f\(overlayColor,radianceDepth\.a\)/);
+  assert.doesNotMatch(svoDrySceneShader, /mix\(radianceDepth\.rgb,overlayColor/);
   assert.match(svoDrySceneShader, /targets\.radianceDepth=dryCostOverlay\(targets\.radianceDepth\)/);
   assert.match(rendererSource, /svoCostOverlayCode\(activeSvoDiagnostics\.overlay\)/);
   assert.match(rendererSource, /diagnosticsKey/);

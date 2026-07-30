@@ -65,6 +65,10 @@ test("inspection materialization follows each leaf's authoritative payload offse
     "expanded record index is not an authoritative sparse payload index");
   assert.doesNotMatch(brickMaterializer, /materialOwners\[leafIndex \* voxelsPerBrick \+ local\]/,
     "leaf order is independent from sparse payload arena placement");
+  assert.match(brickMaterializer, /let hasContent = isActive;/,
+    "brick publication snapshots real payload occupancy before residency broadens the active set");
+  assert.match(brickMaterializer, /select\(0u, 256u, hasContent\)/,
+    "occupied-brick inspection receives an explicit content bit independent of halo allocation");
 });
 
 test("inspection control is optional on legacy render sources", () => {

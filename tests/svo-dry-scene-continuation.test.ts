@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
+import { SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT } from "../lib/svo-render-tuning";
 
 function shaderSection(start: string, end: string): string {
   const startIndex = svoDrySceneShader.indexOf(start);
@@ -14,10 +15,12 @@ test("dry primary static payload traversal resumes one selected near-to-far curs
   const traceStatic = shaderSection("fn traceStatic(", "struct DryGlassHit");
   assert.match(traceStatic, /var continuation:DryTraversalCursor/);
   assert.match(traceStatic, /dryTraversalCursorBegin\(SvoRay\(ro,minimum,rd,DRY_MISS\),mapping,&continuation\)/);
-  assert.match(traceStatic, /dryTraversalCursorNext\(ray,mapping,&continuation\)/);
+  assert.match(traceStatic, /dryTraversalCursorNextPrimary\(ray,mapping,&continuation\)/);
   assert.doesNotMatch(traceStatic, /dryTraverse\(/);
   assert.match(traceStatic, /dryPrimaryNodeVisits\+=leaf\.visits/);
   assert.match(traceStatic, /dryPrimaryLeafVisits\+=1u/);
+  assert.match(traceStatic, new RegExp(`leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget`));
+  assert.match(traceStatic, /if\(!traversalFinished\)\{dryTraversalFailure=max\(dryTraversalFailure,1u\);\}/);
   assert.match(traceStatic, /minimum=leaf\.tExit\+max\(1e-5,length\(dry\.mapping\.cellSize\)\*1e-3\)/);
 });
 

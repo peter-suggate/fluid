@@ -23,6 +23,9 @@ export interface FreeFallContactDiagnosticParameters {
   releaseCheckTime_s: number;
   maximumCeilingWetCellsAfterRelease: number;
   maximumCeilingPixelsAfterRelease: number;
+  /** Authored seed-brick geometry, in background-grid cells. */
+  initialBrickSize_cells?: number;
+  initialCentroidHalfBrickOffset_cells?: number;
   /** Compare corner/seam velocity shortfall with contact-free liquid. */
   includeCornerSeams?: boolean;
   seamEvaluationStart_s?: number;
@@ -127,8 +130,21 @@ export function evaluateFreeFallContactDiagnostic(input: {
     const gravity = input.scene.fluid.gravity_m_s2;
     const g = Math.hypot(gravity.x, gravity.y, gravity.z);
     const cell_m = input.scene.container.height_m / grid[1];
-    const initialCentroidY_cells = grid[1] - 4;
-    const drop_m = (grid[1] - 8) * cell_m;
+    // Aanjaneya et al. Section 5 tracks the authored interface on a separate
+    // fine grid (paper lines 411-420); its analytic comparison must therefore
+    // start from that authored seed, not infer that every scene touches the
+    // lid. The mid-air variants deliberately occupy the middle brick layer.
+    const brickSize = input.parameters.initialBrickSize_cells ?? 8;
+    const halfBrick = input.parameters.initialCentroidHalfBrickOffset_cells
+      ?? brickSize / 2;
+    const seed = input.scene.fluid.initialBrickSeeds_m?.[0];
+    const seedCellY = seed
+      ? Math.min(grid[1] - 1, Math.max(0,
+        Math.floor(seed.y / input.scene.container.height_m * grid[1])))
+      : grid[1] - 1;
+    const originY = Math.floor(seedCellY / brickSize) * brickSize;
+    const initialCentroidY_cells = originY + halfBrick;
+    const drop_m = originY * cell_m;
     const analyticImpact_s = g > 0 && drop_m >= 0 ? Math.sqrt(2 * drop_m / g) : 0;
     const cutoff_s = Math.min(analyticImpact_s, input.parameters.impactTime_s)
       - input.parameters.preImpactMargin_s;
@@ -170,7 +186,8 @@ export function evaluateFreeFallContactDiagnostic(input: {
       }
 
       if (input.parameters.includeCornerSeams === true
-        && time_s >= (input.parameters.seamEvaluationStart_s ?? Infinity) - 1e-9) {
+        && time_s >= (input.parameters.seamEvaluationStart_s ?? Infinity) - 1e-9
+        && time_s <= cutoff_s + 1e-9) {
         const comparison = seamShortfallExcess(checkpoint);
         const maximum = input.parameters.maximumSeamShortfallExcess;
         const passed = comparison !== undefined && maximum !== undefined

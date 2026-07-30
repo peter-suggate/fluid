@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 
 import { getScenePreset } from "../lib/scenes";
 import { CompactOctreeVoxelInspection, compactOctreeVoxelInspectionShader } from "../lib/webgpu-octree-voxel-inspection";
+import { SPARSE_VOXEL_DEBUG_ACTIVE, SPARSE_VOXEL_DEBUG_HAS_CONTENT } from "../lib/webgpu-voxel-debug";
 
 const source = readFileSync(new URL("../lib/webgpu-octree-voxel-inspection.ts", import.meta.url), "utf8");
 const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
@@ -22,6 +23,8 @@ test("compact raw voxels materialize directly from live pressure-grid rows", () 
     "retired pressure rows must be cleared when the compact frontier shrinks");
   assert.match(compactOctreeVoxelInspectionShader, /voxelRecords\[row\]=record/);
   assert.match(compactOctreeVoxelInspectionShader, /brickRecords\[row\]=record/);
+  assert.match(compactOctreeVoxelInspectionShader, /ACTIVE\|256u/,
+    "every live compact leaf advertises material content to occupied-brick inspection");
   assert.doesNotMatch(compactOctreeVoxelInspectionShader, /textureLoad|textureStore|mapAsync/,
     "inspection must not recreate or read back the retired dense level-set volume");
 });
@@ -83,7 +86,12 @@ test("GPU materialization decodes compact pressure headers and clears retired ro
   const expectedExtent = [2 * scene.container.width_m / 8, 2 * scene.container.height_m / 6, 2 * scene.container.depth_m / 5];
   Array.from(floats.slice(0, 3)).forEach((value, axis) => assert.ok(Math.abs(value - expectedOrigin[axis]) < 1e-6));
   Array.from(floats.slice(4, 7)).forEach((value, axis) => assert.ok(Math.abs(value - expectedExtent[axis]) < 1e-6));
-  assert.deepEqual(Array.from(uints.slice(8, 12)), [3, 1, 1, 0xffff_ffff]);
+  assert.deepEqual(Array.from(uints.slice(8, 12)), [
+    3,
+    SPARSE_VOXEL_DEBUG_ACTIVE | SPARSE_VOXEL_DEBUG_HAS_CONTENT,
+    1,
+    0xffff_ffff,
+  ]);
   assert.equal(uints[12 + 9], 0, "the first unused row is explicitly inactive");
   await device.queue.onSubmittedWorkDone();
   assert.deepEqual(errors, []);

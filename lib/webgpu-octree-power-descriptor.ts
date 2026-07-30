@@ -736,7 +736,16 @@ var<workgroup> publicationFailures:array<vec4u,256>;
     else{
       let old=oldPlusOne-1u;
       if(old>=controlArena.authority.rowCount||old>=arrayLength(&committedDescriptors)){flags|=CAPACITY;}
-      else{descriptor=committedDescriptors[old];if(old!=row){descriptors[row]=descriptor;status|=STATUS_PUBLISH;}}
+      else{
+        descriptor=committedDescriptors[old];
+        // Section 4 stores one normal-velocity degree of freedom on every
+        // power-cell face (paper lines 305-307). Candidate consumers require
+        // that complete face geometry even when an immutable row retains its
+        // numeric index; a prior rejected attempt may have dirtied this
+        // scratch slot, so same-index carry must materialize it as well.
+        descriptors[row]=descriptor;
+        if(old!=row){status|=STATUS_PUBLISH;}
+      }
     }
     if(!descriptorValid(descriptor)){flags|=descriptorFlags(descriptor);}
     else{status|=STATUS_VALID;if((descriptor&COARSER_FLAG)!=0u){status|=STATUS_COARSER;}}

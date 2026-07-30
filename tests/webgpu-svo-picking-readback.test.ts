@@ -119,8 +119,8 @@ test("default SVO picking uses the G-buffer while raster keeps the resident rigi
   assert.match(viewportSource, /beginBodyDrag\(pointerId,timeStamp,ray,body,picked\.position_m,picked\.orientation,"surfacePosition_m" in picked\?picked\.surfacePosition_m:picked\.position_m\)/,
     "SVO uses exact surface unprojection while the resident raster picker retains its center-position fallback");
   assert.match(viewportSource, /useUIStore\.getState\(\)\.selectBody\(body\.description\.id\)/);
-  assert.match(viewportSource, /const continuousPerformancePresentation = runtime\.runState === "paused"[\s\S]*ui\.rightPanel === "performance"[\s\S]*const pausedPresentation = runtime\.runState === "paused" && !continuousPerformancePresentation \? \[[\s\S]*?sceneState, ui, method/,
-    "the profiler keeps static scenes presenting while ordinary paused views still repaint selection changes from their state key");
+  assert.doesNotMatch(viewportSource, /pausedPresentation|continuousPerformancePresentation/,
+    "paused views must keep submitting paced frames instead of waiting for a state-key change");
   assert.match(drySource, /selectedEmission=body\.colorSelected\.w\*vec3f\(\.12,\.42,\.32\)/,
     "the production SVO material path visibly consumes selected rigid state");
   assert.match(drySource, /if \(shape==0\)[\s\S]*?discriminant=b\*b-dot\(localOrigin,localOrigin\)\+radius\*radius/,

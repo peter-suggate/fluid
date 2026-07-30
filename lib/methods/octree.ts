@@ -37,6 +37,14 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
       interfaceRefinementBandCells: bandReachCells,
       fineLevelSetBandCells: diagnosticFineBand,
       globalFineLevelSetFactor: globalFineLevelSetFactor(values.globalFineLevelSetFactor),
+      // Hidden authored/harness override for scenes whose fluid footprint is
+      // intentionally much smaller than the container. The generic fallback
+      // remains the conservative domain-cross-section estimate.
+      globalFineLevelSetMaximumBricks:
+        typeof values.globalFineLevelSetMaximumBricks === "number"
+          && Number.isSafeInteger(values.globalFineLevelSetMaximumBricks)
+          && values.globalFineLevelSetMaximumBricks > 0
+          ? values.globalFineLevelSetMaximumBricks : undefined,
       // Diagnostic-only capacity override. Not an authored UI parameter: the
       // production capacity comes from `planOctreePressureCapacity`, and this
       // exists so a harness can bisect the arena demand of a large domain

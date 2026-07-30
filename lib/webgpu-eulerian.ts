@@ -1,5 +1,5 @@
 import type { SceneDescription } from "./model";
-import { damBreakFractions } from "./initial-fluid";
+import { sceneDamBreakFractions } from "./initial-fluid";
 import { initializeRigidBodies, type RigidBodyState } from "./rigid-body";
 import { tallCellComputeShader } from "./tall-cell-kernels";
 import { createTallCellLayout, type GPUQuality, type TallCellLayout } from "./tall-cell-grid";
@@ -1229,7 +1229,7 @@ export class WebGPUEulerianSolver {
   // column bases.
   get preProjectionVelocityTexture(){return this.velocityC;}
   private initializeVolume(){
-    const {nx,nz,packedNy,initialPhi,columnBases,initialVolumeCellSum,referenceLiquidVolume_cells}=this.layout,c=this.scene.container,dam=damBreakFractions(c.fillFraction);const initiallyRepresented=referenceLiquidVolume_cells;this.referenceLiquidVolumeCells=initiallyRepresented*(this.options.referenceVolumeScale??1);const initialDrift=(initiallyRepresented-this.referenceLiquidVolumeCells)/Math.max(1,this.referenceLiquidVolumeCells);
+    const {nx,nz,packedNy,initialPhi,columnBases,initialVolumeCellSum,referenceLiquidVolume_cells}=this.layout,c=this.scene.container,dam=sceneDamBreakFractions(this.scene);const initiallyRepresented=referenceLiquidVolume_cells;this.referenceLiquidVolumeCells=initiallyRepresented*(this.options.referenceVolumeScale??1);const initialDrift=(initiallyRepresented-this.referenceLiquidVolumeCells)/Math.max(1,this.referenceLiquidVolumeCells);
     // This solver transports phi, so its represented-volume diagnostics and
     // controller reference use the smooth-Heaviside/fixed-point functional
     // from reduceDiagnostics. Keep initialVolumeCellSum as distinct binary

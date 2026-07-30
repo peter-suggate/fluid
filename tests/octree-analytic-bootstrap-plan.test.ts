@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   OCTREE_ANALYTIC_BOOTSTRAP_GRADING_HALO_TILES,
+  OCTREE_ANALYTIC_BOOTSTRAP_OWNER_PROBE_HALO_TILES,
   planOctreeAnalyticBootstrap,
   planOctreeAnalyticBootstrapBounds,
   sampleOctreeAnalyticBootstrapPhi,
@@ -18,7 +19,7 @@ const tank: OctreeAnalyticBootstrapInput = {
   interfaceBandCells: 4,
 };
 
-test("tank-fill bootstrap is a bounded slab plus the exact grading tile ring", () => {
+test("tank-fill bootstrap is a bounded slab plus its grading and owner-probe rings", () => {
   const plan = planOctreeAnalyticBootstrap(tank);
   assert.deepEqual(plan.tileDimensions, [4, 3, 3]);
   assert.equal(plan.tileCapacity, 36);
@@ -27,6 +28,9 @@ test("tank-fill bootstrap is a bounded slab plus the exact grading tile ring", (
   assert.equal(plan.gradingHaloTiles, OCTREE_ANALYTIC_BOOTSTRAP_GRADING_HALO_TILES);
   assert.deepEqual(plan.activeTileLimits, { minimum: [0, 0, 0], maximumExclusive: [4, 2, 3] });
   assert.equal(plan.activeTileCount, 24);
+  assert.deepEqual(plan.ownerPageTileLimits,
+    { minimum: [0, 0, 0], maximumExclusive: [4, 3, 3] });
+  assert.equal(plan.ownerPageTileCount, 36);
   assert.deepEqual([...plan.activeTileIndices.slice(0, 5)], [0, 1, 2, 3, 4]);
   assert.deepEqual([...plan.activeTileIndices.slice(-4)], [28, 29, 30, 31]);
   assert.equal(plan.liquidTileCount, 12);
@@ -43,10 +47,50 @@ test("dam-break bootstrap includes deep liquid in a compact coarse-tile worklist
   assert.equal(plan.tileCapacity, 512);
   assert.deepEqual(plan.activeTileLimits, { minimum: [0, 0, 0], maximumExclusive: [4, 8, 4] });
   assert.equal(plan.activeTileCount, 128);
+  assert.deepEqual(plan.ownerPageTileLimits,
+    { minimum: [0, 0, 0], maximumExclusive: [5, 8, 5] });
+  assert.equal(plan.ownerPageTileCount, 200);
   assert.equal(plan.liquidTileCount, 72);
   assert.ok(plan.interfaceTileCount < plan.activeTileCount);
   assert.ok(plan.activeTileCount < plan.tileCapacity / 2);
   for (const index of plan.liquidTileIndices) assert.ok(plan.activeTileIndices.includes(index));
+});
+
+test("large mini-dam keeps the final owner-probe tile out of topology work", () => {
+  const plan = planOctreeAnalyticBootstrapBounds({
+    dimensions: [64, 20, 64], containerSize: [3.2, 1, 3.2], tileSizeCells: 8,
+    initialCondition: "dam-break", fillFraction: 23 / 64, interfaceBandCells: 3,
+  });
+  assert.equal(OCTREE_ANALYTIC_BOOTSTRAP_OWNER_PROBE_HALO_TILES, 1);
+  assert.deepEqual(plan.tileDimensions, [8, 3, 8]);
+  assert.deepEqual(plan.activeTileLimits, { minimum: [0, 0, 0], maximumExclusive: [7, 3, 7] });
+  assert.equal(plan.activeTileCount, 147);
+  assert.deepEqual(plan.ownerPageTileLimits,
+    { minimum: [0, 0, 0], maximumExclusive: [8, 3, 8] });
+  assert.equal(plan.ownerPageTileCount, 192);
+});
+
+test("large scene's authored mini reservoir stays compact at leaf-16 and band 1", () => {
+  const input: OctreeAnalyticBootstrapInput = {
+    dimensions: [64, 20, 64], containerSize: [3.2, 1, 3.2], tileSizeCells: 16,
+    initialCondition: "dam-break", fillFraction: (0.22 * 0.8 ** 3) / (3.2 * 1 * 3.2),
+    damBreakDimensions: [0.5, 0.736, 0.5], interfaceBandCells: 1,
+  };
+  const compact = planOctreeAnalyticBootstrapBounds(input);
+  const oracle = planOctreeAnalyticBootstrap(input);
+  assert.deepEqual(compact.damBreak, { width: 0.15625, height: 0.736, depth: 0.15625 });
+  assert.deepEqual(compact.tileDimensions, [4, 2, 4]);
+  assert.deepEqual(compact.activeTileLimits,
+    { minimum: [0, 0, 0], maximumExclusive: [2, 2, 2] });
+  assert.equal(compact.activeTileCount, 8,
+    "cold topology must not seed all 32 leaf-16 tiles for a corner-localized reservoir");
+  assert.deepEqual(compact.ownerPageTileLimits,
+    { minimum: [0, 0, 0], maximumExclusive: [3, 2, 3] });
+  assert.equal(compact.ownerPageTileCount, 18);
+  assert.deepEqual(compact.activeTileLimits, oracle.activeTileLimits);
+  assert.ok(sampleOctreeAnalyticBootstrapPhi(input, [-1.55, 0.2, -1.55]) < 0);
+  assert.ok(sampleOctreeAnalyticBootstrapPhi(input, [-1, 0.2, -1.55]) > 0);
+  assert.ok(sampleOctreeAnalyticBootstrapPhi(input, [-1.55, 0.8, -1.55]) > 0);
 });
 
 test("every missing tile is analytically proven non-negative while deep liquid keeps negative authority", () => {
@@ -142,6 +186,8 @@ test("planner rejects values that cannot form a bounded WebGPU worklist", () => 
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, containerSize: [1.2, Number.NaN, 0.8] }), /container size/);
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, tileSizeCells: 12 }), /power of two/);
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, fillFraction: 1.1 }), /fill fraction/);
+  assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, damBreakDimensions: [1.3, 0.2, 0.2] }), /dam dimensions/);
+  assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, damBreakDimensions: [0.2, Number.NaN, 0.2] }), /dam dimensions/);
   assert.throws(() => planOctreeAnalyticBootstrap({ ...tank, interfaceBandCells: -1 }), /interface band/);
   assert.throws(() => planOctreeAnalyticBootstrapBounds({ ...tank, containerSize: [Number.MAX_VALUE, 0.9, 0.8], interfaceBandCells: Number.MAX_VALUE }), /support/);
 });

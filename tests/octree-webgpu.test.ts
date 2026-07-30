@@ -85,6 +85,12 @@ test("paper grading preserves catalog-valid co-spherical masks", () => {
     "the host must not schedule the removed refinement cascade");
   assert.match(octreeProjectionShader, /fn repairPaperMixedNeighbors/,
     "the paper's exclusive same\/coarser or same\/finer grading rule remains enforced");
+  assert.match(octreeProjectionShader,
+    /fn repairPaperRatioNeighbors[\s\S]*neighbor\.size > 2u \* size[\s\S]*for \(var parity = 0u; parity < 8u;/,
+    "unit leaves at a sparse tile seam must repair a 4:1 lookup neighbor without publishing that tile as pressure work");
+  assert.match(octreeSource,
+    /balanceRounds\s*=\s*2\s*\*\s*Math\.max\(1,\s*Math\.ceil\(Math\.log2\(this\.maxLeafSize\)\)\)/,
+    "strong grading must budget both mixed-ring and renewed 2:1 propagation");
 });
 
 test("octree is a registered GPU method with dam-break defaults", () => {

@@ -85,8 +85,8 @@ test("GPU plan composes both support layouts and bounded candidate schedules", (
   assert.equal(plan.faceFrontierBytes, (16 + 3 * plan.faceCapacity) * 4,
     "two compact queues and generation marks must cover every face exactly");
   assert.equal(plan.directAirVectorBytes, plan.rowCapacity * 16);
-  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 51,
-    "same-epoch graph and seed-list reuse controls must remain outside the candidate arena");
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 60,
+    "reuse controls and the durable stage-6 failure latch must remain outside the candidate arena");
 });
 
 test("WGSL performs deterministic mark, parallel scan, scatter, and tag resolution", () => {
@@ -210,6 +210,17 @@ test("candidate sweeps are bounded by the live row extent, not the provisioned c
     "the clear must cover exactly the swept extent");
   assert.doesNotMatch(shader, /if\(item<p\.candidateCapacity\)/,
     "no sweep may still be bounded by the provisioned candidate capacity");
+});
+
+test("analytic owner halo remains lookup-only outside accepted frontier leaves", () => {
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  const emit = shader.slice(shader.indexOf("fnemitFineBandAirSupportCandidates"),
+    shader.indexOf("var<workgroup>emitRowActive"));
+  assert.match(emit,
+    /lettopologyMember=\(owner\.status&OWNER_PAGE_LOOKUP_TOPOLOGY\)!=0u;/);
+  assert.match(emit,
+    /if\(demanded!=0u\|\|\(topologyMember&&resolvedCell==item\)\).*if\(demanded==0u&&!topologyMember\)\{return;\}/s,
+    "probe-only halo owners must not become Section 5 march destinations");
 });
 
 test("fine-band support closes over the exact regular or transition interpolation dependencies", () => {

@@ -112,7 +112,8 @@ test("power topology WGSL resolves affected rows and compacts exact publication 
   assert.doesNotMatch(octreePowerTopologyShader, /fn rowListedAffected/,
     "the exact affected-list proof must not binary-search the list once per live row");
   assert.match(octreePowerTopologyShader,
-    /if\(old!=row\)\{metrics\[row\]=metric;status\|=STATUS_PUBLISH;\}/);
+    /metric=committedMetrics\[old\];[\s\S]*metrics\[row\]=metric;if\(old!=row\)\{status\|=STATUS_PUBLISH;\}/,
+    "same-index carry must refresh complete candidate geometry without entering the sparse commit list");
   assert.match(octreePowerTopologyShader,
     /commitDispatch=dispatchFor\(published\)/);
   assert.match(octreePowerTopologyShader,

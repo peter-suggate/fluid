@@ -1,9 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FluidLabRenderer } from "@/lib/webgpu-renderer";
+import { FluidLabRenderer, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
+import {
+  resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
+  type SvoPixelTrace, type SvoPixelTracePinRequest,
+} from "@/lib/svo-pixel-trace";
+import { PixelTraceHud } from "./PixelTraceHud";
 import { getMethod } from "@/lib/methods";
-import { canonicalScene } from "@/lib/model";
+import { canonicalScene, type CameraState } from "@/lib/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
 import { boundingRadius, createBodyDescription, type RigidBodyState } from "@/lib/rigid-body";
 import { simulation } from "@/lib/simulation/controller";
@@ -52,7 +57,7 @@ import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store"
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { advancePresentationClock, presentationFrameDue, presentationStateChanged } from "@/lib/frame-pacing";
+import { SmoothedFrameRate } from "@/lib/frame-rate-meter";
 import { getScenePreset } from "@/lib/scenes";
 import { SVO_COST_OVERLAY_DEFINITIONS } from "@/lib/svo-render-diagnostics";
 import { projectViewportFailure, viewportFailureIndicator } from "@/lib/viewport-failure-diagnostics";
@@ -70,8 +75,14 @@ import {
 
 type Vec3 = RigidBodyState["position_m"];
 
+/** Duration of the pinned trace's self-drawing sweep. */
+const PIXEL_TRACE_REVEAL_MS = 1100;
+/** The HUD's readout cadence; the 3D overlay itself stays per-frame. */
+const PIXEL_TRACE_HUD_INTERVAL_MS = 110;
+
 export function WebGPUViewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fpsRef = useRef<HTMLOutputElement>(null);
   const rendererRef = useRef<FluidLabRenderer | null>(null);
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
@@ -92,6 +103,198 @@ export function WebGPUViewport() {
   const selection = useUIStore((state) => state.selection);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const [hover, setHover] = useState<EditorHover | null>(null);
+  const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
+  const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
+  const pixelTraceLayers = useUIStore((state) => state.pixelTraceLayers);
+  const setPixelTraceEnabled = useUIStore((state) => state.setPixelTraceEnabled);
+  const setPixelTracePinned = useUIStore((state) => state.setPixelTracePinned);
+  const togglePixelTraceLayer = useUIStore((state) => state.togglePixelTraceLayer);
+  const [pixelTraceState, setPixelTraceState] = useState<{
+    trace: SvoPixelTrace | undefined;
+    status: PixelTraceStatus;
+    pointerSeen: boolean;
+    /** A pinned trace whose scene has changed and whose aim can no longer refresh. */
+    stale: boolean;
+  }>({ trace: undefined, status: "path-inactive", pointerSeen: false, stale: false });
+  const pixelTrace = pixelTraceState.trace;
+  /** Latest pointer position in viewport fractions; read by the render loop. */
+  const tracePointerRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
+  /**
+   * A click waiting for the probe to answer its own pixel. While one is held the
+   * probe traces the clicked position rather than the live pointer, so the ray
+   * that ends up frozen is the one the user aimed at.
+   */
+  const tracePinRequestRef = useRef<SvoPixelTracePinRequest | null>(null);
+  /**
+   * Where the pinned ray was aimed, and from which view. The position is what the
+   * probe must re-trace when the scene changes under a pinned ray; the camera key
+   * is what says whether re-tracing it would still be the same ray.
+   */
+  const tracePinnedRef = useRef<{ normalizedX: number; normalizedY: number; cameraKey: string } | null>(null);
+  /** Press origin of a gesture that could still turn out to be a pinning click. */
+  const tracePinGestureRef = useRef<{ id: number; downX: number; downY: number } | null>(null);
+  /** Pin transitions restart the reveal sweep; live hover always shows it whole. */
+  const traceRevealRef = useRef({ pinned: false, startedAt_ms: 0 });
+  const tracePublishRef = useRef<{
+    revision: number;
+    at_ms: number;
+    status: PixelTraceStatus;
+    pointerSeen: boolean;
+    pinned: boolean;
+    stale: boolean;
+  }>({ revision: -1, at_ms: 0, status: "path-inactive", pointerSeen: false, pinned: false, stale: false });
+
+  /**
+   * Identity of the view a pin request was aimed from. Any change means the
+   * clicked pixel names a different ray, so the request no longer describes what
+   * the user pointed at.
+   */
+  const pixelTraceCameraKey = (view: CameraState): string =>
+    `${view.azimuth_rad}|${view.elevation_rad}|${view.distance_m}|${view.target_m.x},${view.target_m.y},${view.target_m.z}`;
+
+  const pixelTraceDrawConfig = (
+    ui: ReturnType<typeof useUIStore.getState>,
+    renderer: FluidLabRenderer,
+  ): PixelTraceConfig | undefined => {
+    if (!ui.pixelTraceEnabled) { tracePinRequestRef.current = null; tracePinnedRef.current = null; return undefined; }
+    const pinnedAt = ui.pixelTracePinned ? tracePinnedRef.current : null;
+    // A pinned ray traces its own pixel, not the pointer's, so a refresh answers
+    // the ray that is frozen rather than wherever the mouse happens to be. A
+    // pending click outranks the live pointer for the same reason: the probe must
+    // stay on the clicked pixel until that pixel comes back.
+    const pointer = pinnedAt ?? tracePinRequestRef.current ?? tracePointerRef.current;
+    if (!pointer) return undefined;
+    const now_ms = performance.now();
+    if (ui.pixelTracePinned !== traceRevealRef.current.pinned) {
+      traceRevealRef.current = { pinned: ui.pixelTracePinned, startedAt_ms: now_ms };
+    }
+    const { refresh } = resolveSvoPixelTracePinnedFrame({
+      pinned: ui.pixelTracePinned,
+      sceneChanged: renderer.pixelTraceStale,
+      aimCameraKey: pinnedAt?.cameraKey,
+      cameraKey: pixelTraceCameraKey(ui.camera),
+    });
+    return {
+      normalizedX: pointer.normalizedX,
+      normalizedY: pointer.normalizedY,
+      layers: ui.pixelTraceLayers,
+      // Live hover changes the ray every frame, so an animated sweep would only
+      // strobe. Pinning is the moment worth animating: the frozen ray then draws
+      // its own work in the order the shader did it. A refresh deliberately does
+      // not replay it — the ray did not change, only the work it found.
+      reveal: ui.pixelTracePinned
+        ? Math.min(1, (now_ms - traceRevealRef.current.startedAt_ms) / PIXEL_TRACE_REVEAL_MS)
+        : 1,
+      pinned: ui.pixelTracePinned,
+      refresh,
+    };
+  };
+
+  const publishPixelTrace = (renderer: FluidLabRenderer) => {
+    const status = renderer.pixelTraceStatus;
+    const pointerSeen = tracePointerRef.current !== null;
+    const revision = renderer.pixelTraceRevision;
+    const pinRequest = tracePinRequestRef.current;
+    if (pinRequest) {
+      // The probe has been tracing the clicked pixel since the click; freeze it
+      // only once that pixel is what came back.
+      const resolution = resolveSvoPixelTracePin(pinRequest, {
+        answered: renderer.pixelTraceAnswersRequest,
+        cameraKey: pixelTraceCameraKey(useUIStore.getState().camera),
+        probeCanAnswer: status !== "unsupported" && status !== "path-inactive",
+        revision,
+      });
+      if (resolution !== "wait") {
+        tracePinRequestRef.current = null;
+        if (resolution === "pin") {
+          // Keep the aim: a pinned ray has to be able to re-trace its own pixel
+          // when the scene changes, and to know which view that pixel meant.
+          tracePinnedRef.current = {
+            normalizedX: pinRequest.normalizedX,
+            normalizedY: pinRequest.normalizedY,
+            cameraKey: pinRequest.cameraKey,
+          };
+          setPixelTracePinned(true);
+        }
+      }
+    }
+    const pinnedNow = useUIStore.getState().pixelTracePinned;
+    if (!pinnedNow) {
+      tracePinnedRef.current = null;
+    } else if (!tracePinnedRef.current && tracePointerRef.current) {
+      // Pinned from the panel or the HUD button rather than by a click. Reaching
+      // either control takes the pointer off the viewport, so the last position it
+      // held is the pixel the probe has been tracing ever since — which makes it
+      // the aim of the trace now being frozen.
+      tracePinnedRef.current = {
+        ...tracePointerRef.current,
+        cameraKey: pixelTraceCameraKey(useUIStore.getState().camera),
+      };
+    }
+    // Staleness worth reporting is the kind no refresh can fix; everything else
+    // resolves itself on the next frame.
+    const { stale } = resolveSvoPixelTracePinnedFrame({
+      pinned: pinnedNow,
+      sceneChanged: renderer.pixelTraceStale,
+      aimCameraKey: tracePinnedRef.current?.cameraKey,
+      cameraKey: pixelTraceCameraKey(useUIStore.getState().camera),
+    });
+    const published = tracePublishRef.current;
+    // Why nothing is showing matters as much as what is showing, and a frozen
+    // answer about a scene that has since changed is worth saying out loud, so
+    // both publish even on frames where no new trace arrived.
+    if (status !== published.status || pointerSeen !== published.pointerSeen || stale !== published.stale) {
+      tracePublishRef.current = { ...published, status, pointerSeen, stale };
+      setPixelTraceState((current) => ({ ...current, status, pointerSeen, stale }));
+    }
+    const pinnedChanged = pinnedNow !== tracePublishRef.current.pinned;
+    if (pinnedChanged) tracePublishRef.current = { ...tracePublishRef.current, pinned: pinnedNow };
+    if (revision === published.revision) return;
+    const now_ms = performance.now();
+    // The overlay is already live on the GPU; the HUD's numbers only need to keep
+    // up with reading, not with the pointer. Pinning is the exception: it stops
+    // the readback, so the frozen trace is the last one there will ever be and
+    // skipping it would leave the HUD describing a different pixel.
+    if (!pinnedChanged && now_ms - published.at_ms < PIXEL_TRACE_HUD_INTERVAL_MS) return;
+    tracePublishRef.current = { ...tracePublishRef.current, revision, at_ms: now_ms };
+    setPixelTraceState((current) => ({ ...current, trace: renderer.latestPixelTrace }));
+  };
+
+  /**
+   * Fold a completed press into the ray diagnostic.
+   *
+   * Pinning is orthogonal to whatever else the click did — select a body, clear
+   * the selection — so it neither consumes the gesture nor has to win a priority
+   * fight with the pointer machine. It only declines when an authoring tool is
+   * armed, because a paint dab is a click too and flip-flopping the pin under
+   * every dab would be nothing but noise.
+   */
+  const resolvePixelTracePinGesture = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const gesture = tracePinGestureRef.current;
+    tracePinGestureRef.current = null;
+    if (!gesture || gesture.id !== event.pointerId || event.type === "pointercancel") return;
+    if (Math.hypot(event.clientX - gesture.downX, event.clientY - gesture.downY) > CLICK_SLOP_PX) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointer = {
+      normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
+      normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
+    };
+    // A click is a pointer observation in its own right: without this a click
+    // that never moved first would have nowhere to trace.
+    tracePointerRef.current = pointer;
+    const ui = useUIStore.getState();
+    const { request } = svoPixelTracePinClick({
+      pinned: ui.pixelTracePinned,
+      pending: tracePinRequestRef.current !== null,
+      ...pointer,
+      cameraKey: pixelTraceCameraKey(ui.camera),
+      revision: rendererRef.current?.pixelTraceRevision ?? 0,
+    });
+    tracePinRequestRef.current = request ?? null;
+    // Releasing needs no handshake: there is nothing to wait for, and the frozen
+    // work should give way to the pointer on the very next frame.
+    if (!request && ui.pixelTracePinned) ui.setPixelTracePinned(false);
+  };
   const pointerRef = useRef<
     // `x`/`y` track the last move; `downX`/`downY` stay at the press origin.
     // The distance between them is what separates a background click, which
@@ -138,6 +341,19 @@ export function WebGPUViewport() {
     }))
     : undefined;
   const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
+  // Where the traced ray currently appears on screen. Projecting a point on the
+  // ray rather than reusing the pointer is what keeps the marker on a pinned ray
+  // while the camera orbits away from the pixel that produced it.
+  const traceReticle = pixelTraceEnabled && pixelTrace
+    ? projectToViewport(
+      {
+        x: pixelTrace.ray.origin_m[0] + pixelTrace.ray.direction[0] * (pixelTrace.hit?.distance_m ?? 1),
+        y: pixelTrace.ray.origin_m[1] + pixelTrace.ray.direction[1] * (pixelTrace.hit?.distance_m ?? 1),
+        z: pixelTrace.ray.origin_m[2] + pixelTrace.ray.direction[2] * (pixelTrace.hit?.distance_m ?? 1),
+      },
+      camera, viewportSize.width, viewportSize.height,
+    )
+    : undefined;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -219,8 +435,12 @@ export function WebGPUViewport() {
     rendererRef.current = renderer;
     let frame = 0;
     let alive = true;
-    let lastFrameAt_ms = -Infinity;
-    let lastPausedPresentation: readonly unknown[] | undefined;
+    const frameRate = new SmoothedFrameRate(5);
+    let lastSubmittedAt_ms: number | undefined;
+    let measuredRunState = useRuntimeStore.getState().runState;
+    const publishFrameRate = (fps: number | undefined) => {
+      if (fpsRef.current) fpsRef.current.textContent = fps === undefined ? "— FPS" : `${fps.toFixed(1)} FPS`;
+    };
     let initializationStarted = false;
     let stopping = false;
     let stopped = false;
@@ -302,30 +522,26 @@ export function WebGPUViewport() {
         await stopGPU(status.label);
         return;
       }
-      const render = (now_ms: number) => {
+      const render = () => {
         if (!alive || !running) return;
         frame = requestAnimationFrame(render);
-        if (!presentationFrameDue(lastFrameAt_ms, now_ms)) return;
-        lastFrameAt_ms = advancePresentationClock(lastFrameAt_ms, now_ms);
         const sceneState = useSceneStore.getState();
         const scene = sceneState.scene;
         const ui = useUIStore.getState();
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
         const runtime = useRuntimeStore.getState();
-        // A trace needs newly completed submissions, not repeated snapshots
-        // of the last on-change frame. Static dry scenes have no fluid solver
-        // and are paused by design, so keep presenting while PERF is visible.
-        // FluidLabRenderer still admits only one presentation at a time.
-        const continuousPerformancePresentation = runtime.runState === "paused"
-          && ui.rightPanel === "performance";
-        const pausedPresentation = runtime.runState === "paused" && !continuousPerformancePresentation ? [
-          sceneState, ui, method, state.bodies, state.fluidRenderState, state.gpuInfo,
-          simulation.time(), renderer.presentationRevision,
-          canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio
-        ] : undefined;
-        if (pausedPresentation && !presentationStateChanged(lastPausedPresentation, pausedPresentation)) return;
-        if (!pausedPresentation) lastPausedPresentation = undefined;
+        if (runtime.runState !== measuredRunState) {
+          measuredRunState = runtime.runState;
+          frameRate.reset();
+          lastSubmittedAt_ms = undefined;
+          publishFrameRate(undefined);
+        } else if (lastSubmittedAt_ms !== undefined && performance.now() - lastSubmittedAt_ms >= 1_000) {
+          publishFrameRate(0);
+        }
+        // Pausing freezes simulation time, not presentation. Attempt every
+        // browser animation frame; FluidLabRenderer's in-flight guard is the
+        // only backpressure on rendering.
         let metrics;
         try {
           metrics = renderer.draw(
@@ -345,18 +561,22 @@ export function WebGPUViewport() {
               overlay: ui.svoCostOverlay,
               maximumTraversalDepth: ui.svoMaximumTraversalDepth,
               maximumNodeVisits: ui.svoMaximumNodeVisits,
-              overlayOpacity: ui.svoOverlayOpacity,
-            }
+            },
+            ui.svoRenderTuning,
+            pixelTraceDrawConfig(ui, renderer),
           );
         } catch (error: unknown) {
           void stopGPU(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
           return;
         }
+        publishPixelTrace(renderer);
         simulation.recordFrame(metrics, renderer.presentationResolution);
-        if (metrics.presentationSubmitted) simulationRecording.capturePresentedState(canvas, runtime.simulationTime);
-        // Retry a pending paused presentation instead of considering it
-        // painted before a command buffer was submitted.
-        if (pausedPresentation && metrics.presentationSubmitted) lastPausedPresentation = pausedPresentation;
+        if (metrics.presentationSubmitted) {
+          const submittedAt_ms = performance.now();
+          lastSubmittedAt_ms = submittedAt_ms;
+          publishFrameRate(frameRate.sample(submittedAt_ms));
+          simulationRecording.capturePresentedState(canvas, runtime.simulationTime);
+        }
       };
       frame = requestAnimationFrame(render);
       }).catch((error: unknown) => {
@@ -598,6 +818,13 @@ export function WebGPUViewport() {
 
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
+    // Arm before any of the early returns below claim the press: the release, not
+    // the press, is what decides whether this was a click.
+    const traceUI = useUIStore.getState();
+    tracePinGestureRef.current = traceUI.pixelTraceEnabled && traceUI.activeTool === "select"
+      && event.button === 0 && !event.shiftKey
+      ? { id: event.pointerId, downX: event.clientX, downY: event.clientY }
+      : null;
     // pointerRef is a ref, so clearing hover here is what actually re-renders
     // the chip away for the duration of the gesture.
     setHover(null);
@@ -675,6 +902,13 @@ export function WebGPUViewport() {
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const active = pointerRef.current;
+    // The pixel-trace probe follows the pointer whatever else the gesture is
+    // doing: a ref, so tracking it costs no React render per move.
+    const rect = event.currentTarget.getBoundingClientRect();
+    tracePointerRef.current = {
+      normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
+      normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
+    };
     if (!active) {
       // Analytic hover: no GPU readback, so it is safe at pointer-move rate.
       const ray = pointerRay(event);
@@ -762,6 +996,9 @@ export function WebGPUViewport() {
     setCamera((current) => active.action === "pan" ? pan(current, dx, dy) : orbit(current, dx, dy));
   };
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    // Ahead of the pointer-id guard below: a pin gesture is tracked separately,
+    // so it must resolve even on the releases the pointer machine ignores.
+    resolvePixelTracePinGesture(event);
     const active = pointerRef.current;
     if (active?.id !== event.pointerId) return;
     // An interrupted gesture is not a click, so it must not move the selection.
@@ -809,6 +1046,7 @@ export function WebGPUViewport() {
       data-testid="gpu-viewport"
       data-camera-azimuth={camera.azimuth_rad.toFixed(6)}
       data-camera-elevation={camera.elevation_rad.toFixed(6)}
+      data-pixel-trace={pixelTraceEnabled && activeTool === "select" && !pixelTracePinned ? "live" : undefined}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
@@ -817,6 +1055,13 @@ export function WebGPUViewport() {
       onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
       onContextMenu={(event) => event.preventDefault()}
     />
+    <output
+      ref={fpsRef}
+      className="fps-meter"
+      data-testid="fps-meter"
+      aria-label="Presentation frame rate"
+      title="WebGPU presentations per second · rolling mean of the latest 5 frame intervals"
+    >— FPS</output>
     {gizmo && gizmo.origin.depth_m > 1e-6 && <svg
       className="editor-gizmo"
       data-testid="editor-gizmo"
@@ -897,6 +1142,26 @@ export function WebGPUViewport() {
       <i /><span>{hover.label}</span>
       <small>{hover.position_m.x.toFixed(2)} · {hover.position_m.y.toFixed(2)} · {hover.position_m.z.toFixed(2)} m</small>
     </div>}
+    {pixelTraceEnabled && svoRenderMode === "svo" && voxelRenderMode === "smooth" && <>
+      {traceReticle?.visible && <div
+        className="pixel-trace-reticle"
+        data-testid="pixel-trace-reticle"
+        data-pinned={pixelTracePinned ? "true" : "false"}
+        style={{ left: `${traceReticle.leftFraction * 100}%`, top: `${traceReticle.topFraction * 100}%` }}
+        aria-hidden="true"
+      ><i /><em /></div>}
+      <PixelTraceHud
+        trace={pixelTrace}
+        enabledLayers={pixelTraceLayers}
+        pinned={pixelTracePinned}
+        probeStatus={pixelTraceState.status}
+        pointerSeen={pixelTraceState.pointerSeen}
+        stale={pixelTraceState.stale}
+        onToggleLayer={togglePixelTraceLayer}
+        onTogglePinned={() => setPixelTracePinned(!pixelTracePinned)}
+        onClose={() => setPixelTraceEnabled(false)}
+      />
+    </>}
     {failure && <div
       className={`viewport-failure-alert tone-${failure.tone}`}
       data-testid="viewport-failure-alert"

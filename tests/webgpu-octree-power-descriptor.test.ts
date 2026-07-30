@@ -322,7 +322,8 @@ test("descriptor WGSL has bounded direct-owner queries and exact delta publicati
   assert.match(octreePowerDescriptorShader, /fn prefixPowerDescriptorDelta/);
   assert.match(octreePowerDescriptorShader, /fn scatterPowerDescriptorDelta/);
   assert.match(octreePowerDescriptorShader,
-    /if\(old!=row\)\{descriptors\[row\]=descriptor;status\|=STATUS_PUBLISH;\}/);
+    /descriptor=committedDescriptors\[old\];[\s\S]*descriptors\[row\]=descriptor;[\s\S]*if\(old!=row\)\{status\|=STATUS_PUBLISH;\}/,
+    "same-index carry must refresh complete candidate scratch without entering the sparse commit list");
   assert.match(octreePowerDescriptorShader,
     /commitDispatch=dispatchFor\(published\)/);
   assert.doesNotMatch(octreePowerDescriptorShader,

@@ -16,7 +16,6 @@ import { unpackFineLevelSetGPUTransportControl } from
 import {
   FINE_LEVELSET_JFA_B4_ADDRESSING_ENV,
   FINE_LEVELSET_JFA_DIRTY_FRONTIER_ENV,
-  FINE_LEVELSET_JFA_SYNTHETIC_FRONTIER_ENV,
   FINE_LEVELSET_JFA_FRONTIER_CONTROL_BYTES,
   FINE_LEVELSET_JFA_FRONTIER_STAGES,
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
@@ -370,6 +369,11 @@ test("fine page delta publishes exact XOR keys and separate dirty/JFA-support se
     /fnfinalizeFinePageDelta[\s\S]*pageDelta\[9\]=select\(INVALID,transportDelta\[7\],producerValid\)/,
     "recurring redistance receives the GPU-measured transport displacement without a readback");
   assert.match(shader,
+    /letdirty=affected\.x!=0u;letsupport=affected\.y!=0u/,
+    "the recurring terminal must rewrite the complete physical output halo so carried valid phi retreats with the surface");
+  assert.doesNotMatch(shader, /producerChangedFaceNeighbor/,
+    "phase-change pages and a face collar are not a complete signed-distance output set");
+  assert.match(shader,
     /fnpublishFineSummaryChangedKeys[\s\S]*changedKeysOffset\(\)\+item[\s\S]*changedKeysOffset\(\)\+dirty\+item/,
     "dirty target keys and retired source keys publish as separate bounded streams");
   assert.doesNotMatch(shader,
@@ -481,7 +485,7 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
   assert.doesNotMatch(encode, /updateIndirectBuffer\(this\.pageDelta|copyBufferToBuffer/,
     "page-delta dispatches are authored directly without copy-induced pass breaks");
   assert.match(encode,
-    /broker\.fence\("finechanged-keydispatchpublication"\)[\s\S]*runIndirect\(this\.classifyAffectedPagesPipeline[\s\S]*?,3,\[0,3,4,7,14,15,16,18,21,23\]\)/,
+    /broker\.fence\("finechanged-keydispatchpublication"\)[\s\S]*runIndirect\(this\.classifyAffectedPagesPipeline[\s\S]*?,3,\[0,3,4,7,14,15,16,21,23\]\)/,
     "one storage-to-indirect boundary publishes the exact dirty/support classifier");
   assert.doesNotMatch(encode,
     /clearAffectedCandidatesPipeline|markRetiredRollbackPipeline|dilateDirty|dilateSupport|scanAffectedRecordsPipeline/,
@@ -638,10 +642,10 @@ test("fine topology rollback snapshot cannot alias Section 5 transport or closes
     /fnremapCarriedSeed\(seed:u32\)[\s\S]*currentMetadata\[oldPage\*10u\+1u\][\s\S]*targetLookup\(key\)[\s\S]*returnnextPage\*params\.samplesPerBrick\+local/,
     "carried JFA seeds must be translated through logical brick identity across page recycling");
   assert.match(shader,
-    /carryDesiredWorkSamples[\s\S]*nextWorkA\[targetIndex\]=remapCarriedSeed\(currentWorkA\[sourceIndex\]\)/,
-    "normal publication must carry only recycle-safe closest-point indices");
+    /fnpersistentCarriedSeed\(sourceIndex:u32,targetIndex:u32\)[\s\S]*remapCarriedSeed\(currentWorkA\[sourceIndex\]\)[\s\S]*currentFlags\[sourceIndex\][\s\S]*carryDesiredWorkSamples[\s\S]*nextWorkA\[targetIndex\]=persistentCarriedSeed\(sourceIndex,targetIndex\)/,
+    "normal publication must carry recycle-safe closest-point indices and canonicalize cached interface samples");
   assert.match(shader,
-    /settleFineWorkPayload[\s\S]*nextFlags\[targetIndex\]=currentFlags\[sourceIndex\];nextWorkA\[targetIndex\]=remapCarriedSeed\(currentWorkA\[sourceIndex\]\)/,
+    /settleFineWorkPayload[\s\S]*nextFlags\[targetIndex\]=currentFlags\[sourceIndex\];nextWorkA\[targetIndex\]=persistentCarriedSeed\(sourceIndex,targetIndex\)/,
     "rejection must restore cached closest-point bits and their remapped seed as one payload");
 });
 
@@ -869,11 +873,10 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
     /warmStart\s*\?\s*maximumDisplacementFineCells\s*:\s*options\.bandCells/,
     "only a declared carried transform may replace the physical band with displacement");
   assert.match(fineLevelSetJFACPTWGSL,
-    /otherDistance<bestDistance\|\|\(otherDistance==bestDistance&&otherKey<bestKey\)/,
-    "equal-distance cooperative reduction must choose the stable global sample key");
-  assert.match(fineLevelSetJFACPTWGSL,
-    /subgroupShuffleDown\(bestDistance,width\)[\s\S]*subgroupShuffleDown\(bestSeed,width\)/,
-    "candidate distance and seed must be evaluated once and reduced in subgroup registers");
+    /candidateDistance<bestDistance\|\|\(candidateDistance==bestDistance&&candidateKey<bestKey\)/,
+    "equal-distance lane-local selection must choose the stable global sample key");
+  assert.doesNotMatch(fineLevelSetJFACPTWGSL, /subgroupShuffle/,
+    "one voxel per lane must not retain the transposed candidate shuffle network");
   assert.match(fineLevelSetJFACPTWGSL,
     /fn resolvedDistance\(seed:u32,q:vec3u\)->f32\{if\(seed==INVALID\)\{return bandDistance\(\);\}return length/,
     "a reachable distance must remain unclamped so beyond-band seeds cannot masquerade as exact-cutoff samples");
@@ -943,11 +946,11 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
     /fn cooperativeFlood\([^}]*sampleIndex\(/,
     "the 27-tap flood must not repeat page-directory resolution in every lane");
   assert.match(fineLevelSetJFACPTWGSL,
-    /@compute @workgroup_size\(256\)fn jumpFloodAToB[\s\S]*fn jumpFloodBToA/,
-    "each brick flood must expose eight 32-lane candidate teams");
+    /@compute @workgroup_size\(64\)fn jumpFloodAToB[\s\S]*@compute @workgroup_size\(64\)fn jumpFloodBToA/,
+    "each B4 flood must expose one lane for every brick voxel");
   assert.match(fineLevelSetJFACPTWGSL,
-    /let team=lid\/subgroupSize;[\s\S]*let candidateSlot=subgroupLane[\s\S]*candidateSlot<27u[\s\S]*candidateSlot==27u/,
-    "the 27 spatial taps and incumbent must occupy one deterministic 32-lane reduction");
+    /for\(var candidateSlot=0u;candidateSlot<28u;candidateSlot\+=1u\)[\s\S]*candidateSlot<27u/,
+    "every voxel lane must walk the 27 spatial taps and incumbent deterministically");
   const cooperativeFlood = fineLevelSetJFACPTWGSL.slice(
     fineLevelSetJFACPTWGSL.indexOf("fn cooperativeFlood"),
     fineLevelSetJFACPTWGSL.indexOf("fn resolvedDistance"),
@@ -1004,14 +1007,17 @@ test("recurring JFA frontiers are reverse stride closures with a full-support fa
     /fn\s+finalizeJFAFrontierDispatches[\s\S]*atomicStore\(&frontierControl\[lid\],count\)/,
     "published frontier counts and indirect records must both reflect gated flood work");
   assert.match(fineLevelSetJFACPTWGSL,
-    /fn\s+resetJFAFrontiers[\s\S]*frontierControl\[[^\]]+\],1u/,
-    "production keeps compact reverse lists bypassed until a synthetic list proof exists");
+    /fn\s+resetJFAFrontiers[\s\S]*p\.frontierRequested==2u&&deltaCount\(false\)<support/,
+    "compact reverse lists bypass only for a forced oracle or a support-wide dirty set");
   const encodedJFA = (WebGPUFineLevelSetRedistance.prototype as unknown as {
     encodeJFA: (...args: unknown[]) => void;
   }).encodeJFA.toString();
   assert.match(encodedJFA,
-    /warmStart&&this\.dirtyFrontier\?planFineLevelSetJFAFrontierStages/,
-    "the construction-stable environment switch must gate frontier publication before encoding");
+    /const frontierStages=warmStart\?planFineLevelSetJFAFrontierStages/,
+    "every legal recurring ladder plans the same N+1 frontier stages");
+  assert.match(encodedJFA,
+    /baseWords\[27\]=useFrontiers\?this\.dirtyFrontier\?2:1:0/,
+    "the construction-stable environment switch selects compact publication or its support-wide oracle");
   assert.match(encodedJFA,
     /for\(let stage=strides\.length;stage>=0;stage-=1\)[\s\S]*build recurring frontier/,
     "the host encodes the dependency construction from dirty output back toward the first flood");
@@ -1066,7 +1072,9 @@ test("JFA fixed tap path consumes topology's exact-filtered radius-one halo", ()
     fineLevelSetJFACPTWGSL.indexOf("fn cooperativeFlood"),
     fineLevelSetJFACPTWGSL.indexOf("fn resolvedDistance"),
   );
-  assert.match(flood, /cachedFloodSampleIndex\(local,candidateSlot\)/);
+  assert.match(flood, /cachedFloodSampleIndex\(lid,candidateSlot\)/);
+  assert.match(flood, /candidateSlot<28u[\s\S]*workB\[index\],workA\[index\]/,
+    "each voxel lane must inspect all 27 taps plus its incumbent");
   assert.doesNotMatch(flood, /q\/p\.brickResolution|q%p\.brickResolution|abs\(delta\)/,
     "candidate lanes must not reconstruct the fixed tap address");
 });
@@ -1118,7 +1126,7 @@ test("B4 flood addressing changes only the seed address arithmetic", () => {
     fineLevelSetJFACPTB4AddressingWGSL.indexOf("fn cooperativeFlood"),
     fineLevelSetJFACPTB4AddressingWGSL.indexOf("fn resolvedDistance"));
   assert.match(flood,
-    /let seedQ=physicalSampleQ\(candidate\);let delta=\(vec3f\(q\)\+vec3f\(\.5\)\)-closestPointAt\(seedQ,candidate\);bestDistance=dot\(delta,delta\);bestKey=sampleKey\(seedQ\);/,
+    /let seedQ=physicalSampleQ\(candidate\);let delta=\(vec3f\(q\)\+vec3f\(\.5\)\)-closestPointAt\(seedQ,candidate\);let candidateDistance=dot\(delta,delta\);let candidateKey=sampleKey\(seedQ\);/,
     "the candidate's physical coordinate must be resolved once and shared");
   assert.equal(flood.match(/physicalSampleQ\(/g)?.length, 1,
     "a candidate lane must resolve its seed coordinate exactly once");
@@ -1518,7 +1526,7 @@ test("opt-in Dawn backend reproducer: sparse diagonal JFA support gap dispatch",
   readback.destroy(); redistance.destroy(); deltaDispatch.destroy(); owner.destroy();
 });
 
-test("synthetic Dawn proves N+1 dirty-terminal frontier lists and gated indirect records", {
+test("isolated Dawn proves N+1 dirty-terminal frontier lists and gated indirect records", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for GPU frontier publication proof",
 }, async () => {
   const device = await dawnDevice!;
@@ -1555,14 +1563,10 @@ test("synthetic Dawn proves N+1 dirty-terminal frontier lists and gated indirect
     dispatchWords.set([5, 1, 1], 15);
     dispatchWords.set([dirtyOrdinals.length, 1, 1], 21);
     device.queue.writeBuffer(dispatch, 0, dispatchWords);
-    const previousCompact = process.env[FINE_LEVELSET_JFA_SYNTHETIC_FRONTIER_ENV];
     const previousDirty = process.env[FINE_LEVELSET_JFA_DIRTY_FRONTIER_ENV];
-    process.env[FINE_LEVELSET_JFA_SYNTHETIC_FRONTIER_ENV] = "1";
     process.env[FINE_LEVELSET_JFA_DIRTY_FRONTIER_ENV] = "1";
     const redistance = new WebGPUFineLevelSetRedistance(device, source,
       redistanceDeltaAuthority(delta, 5, dispatch));
-    if (previousCompact === undefined) delete process.env[FINE_LEVELSET_JFA_SYNTHETIC_FRONTIER_ENV];
-    else process.env[FINE_LEVELSET_JFA_SYNTHETIC_FRONTIER_ENV] = previousCompact;
     if (previousDirty === undefined) delete process.env[FINE_LEVELSET_JFA_DIRTY_FRONTIER_ENV];
     else process.env[FINE_LEVELSET_JFA_DIRTY_FRONTIER_ENV] = previousDirty;
     const internals = redistance as unknown as {
@@ -1599,7 +1603,8 @@ test("synthetic Dawn proves N+1 dirty-terminal frontier lists and gated indirect
   const compact = await runCase([2]);
   assert.equal(compact.bypass, 0);
   assert.deepEqual(compact.counts, [5, 0, 0, 5, 5, 3, 1]);
-  assert.deepEqual(compact.lists[0], [0, 1, 2, 3, 4], "stage 0 is the seed-input closure");
+  assert.deepEqual(compact.lists[0], [0, 1, 2, 3, 4],
+    "stage 0 records the first flood's persistent-input dependency closure");
   assert.deepEqual(compact.lists[3], [0, 1, 2, 3, 4]);
   assert.deepEqual(compact.lists[4], [0, 1, 2, 3, 4]);
   assert.deepEqual(compact.lists[5], [1, 2, 3]);

@@ -47,6 +47,9 @@ export interface CompactOctreeFieldEvidence {
   readonly latchedFinalizeReason?: number;
   readonly latchedFirstRejectedGeneration?: number;
   readonly latchedRejectionCount?: number;
+  readonly firstTopologyFailureFlags?: number;
+  readonly firstTopologyFailureItem?: number;
+  readonly firstTopologyFailureGeneration?: number;
   /** Complete raw downstream transaction controls, retained for rejection telemetry. */
   readonly transportControl?: readonly number[];
   readonly redistanceControl?: readonly number[];
@@ -106,6 +109,9 @@ export interface CompactOctreePublicationHeaderEvidence {
   readonly latchedFinalizeReason?: number;
   readonly latchedFirstRejectedGeneration?: number;
   readonly latchedRejectionCount?: number;
+  readonly firstTopologyFailureFlags?: number;
+  readonly firstTopologyFailureItem?: number;
+  readonly firstTopologyFailureGeneration?: number;
   /** Complete raw downstream transaction controls, retained for rejection telemetry. */
   readonly transportControl?: readonly number[];
   readonly redistanceControl?: readonly number[];
@@ -183,6 +189,11 @@ export function compactOctreePublicationHeaderEvidence(
         latchedFinalizeReason: topology[10],
         latchedFirstRejectedGeneration: topology[11] >>> 16,
         latchedRejectionCount: topology[11] & 0xffff,
+      } : {}),
+      ...(topology.length >= 16 ? {
+        firstTopologyFailureFlags: topology[12],
+        firstTopologyFailureItem: topology[13],
+        firstTopologyFailureGeneration: topology[14],
       } : {}),
     } : {}),
     ...(restriction && restriction.length >= 6 ? {

@@ -25,9 +25,9 @@ const args = new Set(process.argv.slice(2));
 const requestedLane = process.argv.find((argument) => argument.startsWith("--lane="))
   ?.slice("--lane=".length) ?? "mini";
 const quiescent = args.has("--quiescent") || requestedLane === "quiescent";
-if (requestedLane !== "mini" && requestedLane !== "ui" && requestedLane !== "quiescent"
+if (requestedLane !== "mini" && requestedLane !== "large" && requestedLane !== "ui" && requestedLane !== "quiescent"
   && requestedLane !== "moving-interface") {
-  throw new Error("--lane must be mini, ui, quiescent, or moving-interface");
+  throw new Error("--lane must be mini, large, ui, quiescent, or moving-interface");
 }
 if (quiescent && requestedLane === "ui") {
   throw new Error("--quiescent uses the mini dam and cannot be combined with --lane=ui");
@@ -108,6 +108,11 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
     } : {}),
     FLUID_ALGORITHM_DIAGNOSTICS: args.has("--algorithm-diagnostics") ? "1" : "0",
     FLUID_GPU_COMMAND_AUDIT: "1",
+    // Throughput profiles keep the lightweight per-step tripwires below, but
+    // must not inherit the scene catalog's full generation audit. That audit
+    // also owns the four-pass structured energy probe; inheriting only its
+    // host-side validation would reject the deliberately unprobed samples.
+    FLUID_POWER_GENERATION_AUDIT: "0",
     FLUID_STABILITY_ENVELOPE: artifactPath ? "1" : (process.env.FLUID_STABILITY_ENVELOPE ?? "0"),
     FLUID_REGRESSION_ARTIFACT: artifactPath ? "1" : "0",
     FLUID_CHECKPOINT_EVERY_S: artifactPath

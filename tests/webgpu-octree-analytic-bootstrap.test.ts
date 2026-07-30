@@ -30,6 +30,9 @@ test("analytic cold topology publishes the resident worklist ABI entirely on GPU
   assert.match(octreeDeterministicOwnerPageLifecycleShader,
     /fn candidatePageKey[\s\S]*fn ownerPageWord\(cell: vec3u, origin: vec3u, size: u32\)[\s\S]*fn buildOwnerPageCandidate[\s\S]*ownerPageWord\(cell,origin,size\)/,
     "cold owner pages must consume the bounded analytic tile stream and seed brick-relative owner records");
+  assert.match(octreeDeterministicOwnerPageLifecycleShader,
+    /analyticCompact=all\(compactLimits>vec3u\(0u\)\)[\s\S]*tileIndex=tile\.x\+tiles\.x\*\(tile\.y\+tiles\.y\*tile\.z\)/,
+    "read-only owner probe tiles use their own compact limits instead of entering topology work");
   const ownerEncode = WebGPUOctreeSimulationOwnerPages.prototype.encodeAnalyticBootstrap.toString();
   assert.doesNotMatch(ownerEncode, /mapAsync|getMappedRange|copyBufferToBuffer/,
     "production owner bootstrap remains GPU-only");

@@ -126,7 +126,11 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   assert.equal(new Set(declarations.map(({ binding }) => binding)).size, declarations.length, "shader bindings must be unique");
 
   const rebuildStart = drySceneSource.indexOf("this.bindGroup = this.device.createBindGroup");
-  const rebuildEnd = drySceneSource.indexOf("]);", rebuildStart);
+  // Bound the scan by this call's own terminator. Reaching for the next "]);"
+  // anywhere in the file silently swallowed later bind groups — a diagnostic
+  // one, for instance — and reported their bindings as production duplicates.
+  const rebuildEnd = drySceneSource.indexOf("] });", rebuildStart);
+  assert.ok(rebuildStart >= 0 && rebuildEnd > rebuildStart, "the production bind group must be built in one call");
   const resources = [...drySceneSource.slice(rebuildStart, rebuildEnd).matchAll(/\{ binding: (\d+), resource:/g)]
     .map((match) => Number(match[1])).sort((a, b) => a - b);
   assert.deepEqual(resources, SVO_DRY_SCENE_BINDING_CONTRACT.map(({ binding }) => binding),
@@ -136,8 +140,11 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), [
     { binding: 11, type: "read-only-storage" }, { binding: 12, type: "read-only-storage" },
   ]);
-  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-3).map(({ binding, type }) => [binding, type]), [
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-4).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
+    // Evolving fluid coverage shares the node-mip sampler rather than adding a
+    // second one: both want clamp-to-edge linear filtering.
+    [19, "texture-3d-float"],
   ], "cone lighting must consume sampled resources rather than another fragment storage buffer");
   assert.match(drySceneSource, /nodeMip\?\.view \?\? this\.nodeMipFallbackAtlasView/);
   assert.match(drySceneSource, /nodeMip\?\.sampler \?\? this\.nodeMipFallbackSampler/);

@@ -17,7 +17,7 @@
  * Usage:
  *   node --import tsx tools/profile-mini-dam-xctrace.ts [options]
  *
- *   --lane=mini|moving-interface|ui|ocean|ceiling-drop scene lane (default mini)
+ *   --lane=mini|large|moving-interface|ui|ocean|ceiling-drop scene lane (default mini)
  *   --band=0|1|2|3|4                override the octree interface-band level
  *                                    after applying the lane preset
  *   --first-frame                    gate before advance 1 and reduce the
@@ -379,6 +379,11 @@ const profileEnvironment: Record<string, string> = {
     isolateLabelPrefix ?? "Fine JFA -,SPGrid accurate A2 -,SPGrid Section 6.3 -",
   FLUID_ALGORITHM_DIAGNOSTICS: "0",
   FLUID_GPU_COMMAND_AUDIT: "1",
+  // Match benchmark-power-dam's shipping graph. Scene catalog defaults enable
+  // the exhaustive generation/energy audit, which is validation work rather
+  // than part of the profiled solver frame; the lightweight tripwires below
+  // remain mandatory.
+  FLUID_POWER_GENERATION_AUDIT: "0",
   FLUID_STABILITY_ENVELOPE: "0",
   FLUID_CHECKPOINT_EVERY_S: "0",
   FLUID_CPU_ORACLE: "0",

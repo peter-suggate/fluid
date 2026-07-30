@@ -179,8 +179,18 @@ test("minimal dam acceptance and capture pin the exact 500-step, 2-second contra
 
   const benchmark = normalizeWhitespace(await readFile(
     new URL("../tools/benchmark-power-dam.ts", import.meta.url), "utf8"));
+  const profiler = normalizeWhitespace(await readFile(
+    new URL("../tools/profile-mini-dam-xctrace.ts", import.meta.url), "utf8"));
   assert.match(benchmark, /run-webgpu-smoke-isolated\.ts/,
     "every regression capture subprocess must acquire the exclusive GPU lock");
+  assert.match(benchmark, /FLUID_POWER_GENERATION_AUDIT: "0"/,
+    "throughput profiles must not inherit the scene's full generation/energy audit");
+  assert.match(benchmark, /FLUID_TRIPWIRES: "1"/,
+    "disabling the full audit must retain the per-step silent-failure gates");
+  assert.match(profiler, /FLUID_POWER_GENERATION_AUDIT: "0"/,
+    "the xctrace graph must match the benchmark's generation-audit setting");
+  assert.match(profiler, /FLUID_TRIPWIRES: "1"/,
+    "the xctrace graph must retain the benchmark's per-step tripwires");
 });
 
 test("the ocean first-frame lane runs two exact advances under the browser storage tier", () => {
@@ -212,6 +222,14 @@ test("the ceiling profiler uses the authored band-1 fast formulation", async () 
   assert.match(smokeSource,
     /const enforcedDiagnosticFindings = runOptions\.performanceProfile\s*\? \[\]/,
     "performance captures must rely on exact execution and packed final authority, not disabled scene collectors");
+});
+
+test("the large dam profiler pins leaf-16 and band-1", () => {
+  const lane = POWER_DAM_LANE_ENVIRONMENT.large;
+  assert.equal(lane.FLUID_SCENE, "large-power-dam-break");
+  assert.equal(lane.FLUID_EXPECT_GRID, "64,20,64");
+  assert.equal(lane.FLUID_MAXIMUM_LEAF_SIZE, "16");
+  assert.equal(lane.FLUID_OCTREE_INTERFACE_BAND, "1");
 });
 
 test("M1 cutover suite does not name deleted page-pool fallback tests", async () => {

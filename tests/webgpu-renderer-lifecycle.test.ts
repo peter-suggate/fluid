@@ -86,7 +86,7 @@ test("renderer does not synthesize a second wall-clock timing system", () => {
     "a new presentation context must discard a stale scheduling estimate");
 });
 
-test("paused solver attachment and raw publication each request exactly one presentation", () => {
+test("paused solver attachment publications cannot suppress the continuous presentation loop", () => {
   const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const viewportSource = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
   const attachStart = rendererSource.indexOf("this.gpuFluidPending=create.then");
@@ -98,19 +98,17 @@ test("paused solver attachment and raw publication each request exactly one pres
     "the repaint revision must publish only after the warmed SVO and temporal-ready renderer source attaches");
   assert.equal((attach.match(/pausedPresentationRevision\+=1/g) ?? []).length, 1,
     "one successful transactional attach requests one paused repaint");
-  assert.match(viewportSource, /simulation\.time\(\), renderer\.presentationRevision,/,
-    "the paused presentation key must poll the renderer-owned attach revision");
+  assert.doesNotMatch(viewportSource, /renderer\.presentationRevision|pausedPresentation/,
+    "the viewport must not wait for a renderer revision before drawing while paused");
 
   const stableState = {};
   const attached = [stableState, 1] as const;
   assert.equal(presentationStateChanged([stableState, 0], attached), true);
-  assert.equal(presentationStateChanged(attached, attached), false,
-    "the attached solver paints once and does not create a paused render loop");
+  assert.equal(presentationStateChanged(attached, attached), false);
   const rawMode = {};
   const raw = [rawMode, 1] as const;
   assert.equal(presentationStateChanged(attached, raw), true);
-  assert.equal(presentationStateChanged(raw, raw), false,
-    "the raw-mode state change services its pending publication in exactly one presentation");
+  assert.equal(presentationStateChanged(raw, raw), false);
 });
 
 test("timeline reset invalidates old completions and cannot trigger a timestamp rebuild", () => {

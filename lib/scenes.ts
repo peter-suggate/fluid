@@ -4,6 +4,7 @@ import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoo
 import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./methods";
+import { sceneDamBreakFractions } from "./initial-fluid";
 
 export interface ScenePreset {
   id: string;
@@ -25,6 +26,25 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
     maximumLeafSize: "2",
     interfaceRefinementBandCells: 3,
     globalFineLevelSetFactor: "4",
+  }),
+});
+
+/** Fixed WebGPU pool for the room-sized scene's physically unchanged water.
+ * The initial paper-style publication occupies 3,114 pages, but Section 5
+ * rebuilds around the deformed surface: a floor-spanning sheet needs the
+ * 64 x 64 brick footprint times band-1's seven recurring layers, or 28,672
+ * pages. One additional footprint rounds that physical bound to 32,768 while
+ * exact active residency remains the rebuilt band rather than the whole pool. */
+export const LARGE_POWER_DAM_FINE_BRICK_CAPACITY = 32_768;
+
+/** The room-sized comparison keeps empty regions aggressively coarse. */
+export const LARGE_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...POWER_VALIDATION_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+    maximumLeafSize: "16",
+    interfaceRefinementBandCells: 1,
+    globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
   }),
 });
 
@@ -140,6 +160,33 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+/**
+ * A watchable, room-sized version of the minimal dam break. The
+ * footprint is four times longer and four times wider, while the tank is only
+ * 25% taller, making the container exactly 20x larger by volume. The reservoir
+ * keeps the mini scene's absolute dimensions, volume, corner placement, and
+ * lattice spacing; only the empty space around it grows.
+ */
+export function createLargePowerDamBreakScene(): SceneDescription {
+  const scene = createMinimalPowerDamBreakScene();
+  const miniDam = sceneDamBreakFractions(scene);
+  const initialDamBreakDimensions_m = {
+    x: miniDam.width * scene.container.width_m,
+    y: miniDam.height * scene.container.height_m,
+    z: miniDam.depth * scene.container.depth_m,
+  };
+  scene.sceneId = "large-power-dam-break";
+  scene.container = {
+    ...scene.container,
+    width_m: 3.2,
+    height_m: 1.0,
+    depth_m: 3.2,
+    fillFraction: scene.container.fillFraction / 20,
+  };
+  scene.fluid.initialDamBreakDimensions_m = initialDamBreakDimensions_m;
   return scene;
 }
 
@@ -555,6 +602,16 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     create: createMinimalPowerDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
+  },
+  {
+    id: "large-power-dam-break",
+    name: "Octree · 20× dam break",
+    group: "Comparisons",
+    description: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using maximum leaf 16³ and a band-1 interface.",
+    background: "default",
+    methodProfile: LARGE_POWER_DAM_METHOD_PROFILE,
+    create: createLargePowerDamBreakScene,
+    camera: { distance_m: 6.4, target_m: { x: 0, y: 0.45, z: 0 } }
   },
   {
     id: "ceiling-slab-drop",

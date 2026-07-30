@@ -203,6 +203,12 @@ test("inflow, migration, brick coverage, hose, and ocean policies are scene-auth
 });
 
 test("authored lanes carry formerly runner-owned method and sampling decisions", () => {
+  const large = getSceneWebGPUSmokeLane("large-power-dam-break");
+  assert.deepEqual(large.methods.map(({ id }) => id), ["octree"]);
+  assert.equal(large.methods[0].overrides.maximumLeafSize, "16");
+  assert.equal(large.methods[0].overrides.interfaceRefinementBandCells, 1);
+  assert.equal(large.methods[0].overrides.globalFineLevelSetMaximumBricks, 32_768);
+
   const ocean = getSceneWebGPUSmokeLane("ocean-seiche");
   assert.deepEqual(ocean.methods.map(({ id }) => id), ["octree"]);
   assert.equal(ocean.methods[0].overrides.maximumLeafSize, "32");

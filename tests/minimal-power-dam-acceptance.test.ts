@@ -69,6 +69,9 @@ interface MinimalDamResult {
       generation: number;
       coarseGeneration?: number;
       publicationValid: boolean;
+      activePages?: number;
+      redistanceInitialPages?: number;
+      redistanceFinalPages?: number;
     };
   }>;
 }
@@ -84,7 +87,7 @@ function resultRecord(stdout: string): MinimalDamResult | undefined {
   }).at(-1);
 }
 
-test("Dawn keeps minimal-dam fine and coarse publications on one clock through generation 15", {
+test("Dawn keeps the band-1 minimal dam current through generation 15", {
   skip: !process.env.WEBGPU_NODE_MODULE
     ? "set WEBGPU_NODE_MODULE for the focused minimal-dam generation gate"
     : process.env.FLUID_MINIMAL_DAM_GENERATION_ACCEPTANCE !== "1"
@@ -121,13 +124,17 @@ test("Dawn keeps minimal-dam fine and coarse publications on one clock through g
       FLUID_CHECKPOINT_EVERY_S: "0.004",
       FLUID_VOXEL_CELL_SIZE: "0.05",
       FLUID_EXPECT_GRID: "16,16,16",
+      // This is a focused publication invariant, not the authored two-second
+      // scene acceptance lane. Keep the short exact run while still collecting
+      // the generation checkpoints below.
+      FLUID_PERFORMANCE_PROFILE: "1",
       FLUID_STABILITY_ENVELOPE: "1",
       FLUID_CPU_ORACLE: "0",
       FLUID_FIELD_STATS: "1",
       FLUID_RASTER_CHECKPOINTS: "0",
       FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1",
       FLUID_MAXIMUM_LEAF_SIZE: "2",
-      FLUID_OCTREE_INTERFACE_BAND: "3",
+      FLUID_OCTREE_INTERFACE_BAND: "1",
       FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
       FLUID_POWER_GENERATION_AUDIT: "1",
       FLUID_POWER_GENERATION_AUDIT_LOG: "0",
@@ -153,6 +160,14 @@ test("Dawn keeps minimal-dam fine and coarse publications on one clock through g
     assert.equal(generation.publicationValid, true, `checkpoint ${index + 1} exposed an unpublished fine slot`);
     assert.equal(generation.coarseGeneration, generation.generation,
       `checkpoint ${index + 1} exposed a stale fine/coarse generation pair`);
+    assert.ok((generation.activePages ?? 0) > 0,
+      `checkpoint ${index + 1} exposed no live fine band`);
+    assert.ok((generation.redistanceInitialPages ?? 0) > 0,
+      `checkpoint ${index + 1} exposed no fine-band output worklist`);
+    assert.ok((generation.redistanceFinalPages ?? 0) > 0,
+      `checkpoint ${index + 1} exposed no fine-band support worklist`);
+    assert.equal(generation.redistanceInitialPages, generation.redistanceFinalPages,
+      `checkpoint ${index + 1} carried stale valid phi outside the recomputed band output halo`);
     if (index > 0) assert.ok(generation.generation > generations[index - 1]!.generation,
       `checkpoint ${index + 1} did not advance the immutable publication`);
   });

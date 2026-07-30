@@ -1,5 +1,5 @@
 import { adaptiveOpticalLayerDefaults, adaptivePressureCellTopology, buildAdaptiveOpticalLayerField, buildQuadtree, buildVariationalSystem, maximumVelocityUpdateFluidScale, populateTallPressureGrid, populateTallPressureGridFromLeafProfiles, quadtreeFromPackedCells, quadtreeSizingFromVelocityAndSurface, signedDistanceFromVolume, type AdaptiveOpticalLayerField, type QuadtreeGrid, type TallPressureGrid, type TallPressureSample, type VariationalBody, type VariationalSystem } from "./quadtree-tall-cell-grid";
-import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
+import { combineInitialBrickWet, initialFluidBrickContainsCell, sceneDamBreakFractions } from "./initial-fluid";
 import { insidePrimitive } from "./fluid-rigid-coupling";
 import { boundingRadius, quaternionRotate, type RigidBodyState } from "./rigid-body";
 import type { SceneDescription, Vec3 } from "./model";
@@ -418,7 +418,7 @@ function displacedVolumesForGrid(grid: TallPressureGrid, phi: Float32Array | und
 
 function initialFields(scene: SceneDescription, nx: number, ny: number, nz: number) {
   const count = nx * ny * nz, phi = new Float32Array(count), velocity = Array.from({ length: count }, () => ({ x: 0, y: 0, z: 0 }));
-  const dam = damBreakFractions(scene.container.fillFraction);
+  const dam = sceneDamBreakFractions(scene);
   const heights = sceneHasTerrain(scene) ? terrainColumnHeights(scene, nx, nz) : undefined;
   const cellHeight = scene.container.height_m / ny;
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {

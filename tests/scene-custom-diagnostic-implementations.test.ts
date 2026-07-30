@@ -116,6 +116,42 @@ test("free-fall corner seam shortfall is compared with contact-free liquid", () 
   assert.deepEqual(finding?.actual, { baseline: 0.1, seam: 0.2, excess: 0.1 });
 });
 
+test("mid-air free-fall uses the authored seed layer and stops seam attribution before impact", () => {
+  const scene = cloneScene(defaultScene);
+  scene.container.height_m = 1.2;
+  scene.fluid.initialBrickSeeds_m = [{ x: -0.55, y: 0.6, z: -0.55 }];
+  const grid = [24, 24, 24] as const;
+  const cell_m = scene.container.height_m / grid[1];
+  const checkpoint = (time_s: number) => ({
+    time_s,
+    centroidY_cells: 12 - 0.5 * 9.81 * time_s ** 2 / cell_m,
+    ceilingWetCells: 0,
+    ceilingContactPixels: 0,
+    attribution: { velocityByContact: [
+      { contacts: 0, meanShortfallFraction: 0 },
+      { contacts: 2, meanShortfallFraction: time_s < 0.27 ? 0 : 1 },
+    ] },
+  });
+  const findings = evaluateFreeFallContactDiagnostic({
+    scene, methods: ["octree"],
+    evidence: evidence({ octree: { run: { simulatedTime_s: 0.3 },
+      field: { grid, checkpoints: [checkpoint(0.1), checkpoint(0.2), checkpoint(0.28)] } } }),
+    parameters: {
+      minimumRunTime_s: 0.3, evaluationStart_s: 0.1, impactTime_s: 0.29,
+      preImpactMargin_s: 0.02, minimumMeasuredToAnalyticDropRatio: 0.6,
+      maximumMeasuredToAnalyticDropRatio: 1.45, maximumDropHeadroom_cells: 0.5,
+      minimumPreImpactCheckpoints: 2, releaseCheckTime_s: 0.2,
+      maximumCeilingWetCellsAfterRelease: 0, maximumCeilingPixelsAfterRelease: 0,
+      initialBrickSize_cells: 8, initialCentroidHalfBrickOffset_cells: 4,
+      includeCornerSeams: true, seamEvaluationStart_s: 0.02,
+      maximumSeamShortfallExcess: 0.05,
+    },
+  });
+  assert.equal(findings.every(({ passed }) => passed), true);
+  assert.equal(findings.some(({ id }) => id === "octree.seam-shortfall.2"), false,
+    "post-impact wall/floor contact is not a free-fall seam comparison");
+});
+
 test("garden migration reports source evacuation and capacity independently", () => {
   const parameters = {
     initialCoreBricks: 1, evaluateAfter_s: 1, minimumFinalCoreBricks: 2,

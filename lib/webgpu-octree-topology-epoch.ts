@@ -222,7 +222,12 @@ const OWNER_READY:u32=0x80000000u;const STRUCTURED_READY:u32=0x5356454cu;
 // structured word 0, so a rejection reported the epoch's own error word back
 // to itself and the publisher's real failure code was lost.
 fn poison(error:u32){if(epoch.reserved[3u]==0u){epoch.reserved[3u]=1u;
-  epoch.reserved[1u]=structured[0u];epoch.reserved[2u]=structured[1u];}
+  epoch.reserved[1u]=structured[0u];epoch.reserved[2u]=structured[1u];
+  // Preserve the descriptor producer's unpoisoned failure packet. The epoch
+  // error is ORed into its public control below, which otherwise destroys the
+  // first malformed owner/grading row needed to diagnose a rejected union.
+  epoch.reserved[4u]=descriptor[3u];epoch.reserved[5u]=descriptor[2u];
+  epoch.reserved[6u]=descriptor[4u];}
  ownerCandidate[28u]=0u;frontier[6u]=0u;frontier[9u]=error;
  descriptor[2u]|=error;descriptor[4u]|=error;
  topology[2u]|=error;structured[0u]=error;boundary[0u]|=error;spgrid[8u]|=error;}

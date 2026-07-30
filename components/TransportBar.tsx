@@ -8,7 +8,6 @@ import { useRecordingStore } from "@/lib/stores/recording-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore } from "@/lib/stores/method-store";
-import { PRESENTATION_FPS, frameInterval_ms } from "@/lib/frame-pacing";
 import { requestManualGPUStop } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 import { planSceneRuntime } from "@/lib/scene-runtime";
@@ -123,8 +122,8 @@ export function TransportBar() {
         {staticRenderScene
           ? <span className="continuous-run" title="This preset initializes the static sparse scene and renderer only.">STATIC SVO · FLUID SOLVER DISABLED</span>
           : webgpu
-          ? <span className="continuous-run" title={`Physics fills measured GPU slack between presentations · present every ${frameInterval_ms().toFixed(2)} ms · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>MAX SIM THROUGHPUT · PRESENT {PRESENTATION_FPS} FPS</span>
-          : <span className="continuous-run" title={`CPU reference simulation · present every ${frameInterval_ms().toFixed(2)} ms · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT {PRESENTATION_FPS} FPS</span>}
+          ? <span className="continuous-run" title={`Physics fills measured GPU slack between presentations · present every browser animation frame · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>MAX SIM THROUGHPUT · PRESENT ASAP</span>
+          : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}
       </div>
       <div className="file-actions">
         <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{applyingGPUSettings ? `GPU SETTINGS · ${gpuStatus.operation ?? gpuStatus.label}` : notice}</span>

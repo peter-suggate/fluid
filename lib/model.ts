@@ -94,6 +94,8 @@ export interface SceneDescription {
     surfaceTension_N_m: number;
     gravity_m_s2: Vec3;
     initialCondition: "dam-break" | "tank-fill";
+    /** Optional absolute size of the corner-anchored dam reservoir. */
+    initialDamBreakDimensions_m?: Vec3;
     /**
      * Optional world-space seeds for exact solver bricks. Each seed fills the
      * one brick containing it; multiple seeds create disconnected initial
@@ -243,6 +245,21 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!scene.fluid || scene.fluid.dynamicViscosity_Pa_s < 0) errors.push("Dynamic viscosity cannot be negative");
   if (!scene.fluid || scene.fluid.surfaceTension_N_m < 0) errors.push("Surface tension cannot be negative");
   if (!scene.fluid || !["dam-break", "tank-fill"].includes(scene.fluid.initialCondition)) errors.push("Unsupported fluid initial condition");
+  const damDimensions = scene.fluid?.initialDamBreakDimensions_m;
+  if (damDimensions) {
+    if (scene.fluid.initialCondition !== "dam-break") errors.push("Initial dam-break dimensions require the dam-break initial condition");
+    if (![damDimensions.x, damDimensions.y, damDimensions.z].every((value) => Number.isFinite(value) && value > 0)) {
+      errors.push("Initial dam-break dimensions must be positive and finite");
+    } else if (damDimensions.x > c.width_m || damDimensions.y > c.height_m || damDimensions.z > c.depth_m) {
+      errors.push("Initial dam-break dimensions must fit inside the container");
+    } else {
+      const damFillFraction = damDimensions.x * damDimensions.y * damDimensions.z
+        / (c.width_m * c.height_m * c.depth_m);
+      if (Math.abs(damFillFraction - c.fillFraction) > 1e-9) {
+        errors.push("Fill fraction must equal the authored dam-break volume fraction");
+      }
+    }
+  }
   if (scene.fluid?.initialBrickSeeds_m) {
     if (!Array.isArray(scene.fluid.initialBrickSeeds_m) || scene.fluid.initialBrickSeeds_m.length === 0) errors.push("Initial fluid brick seeds must be a non-empty array");
     else for (const [index, seed] of scene.fluid.initialBrickSeeds_m.entries()) {

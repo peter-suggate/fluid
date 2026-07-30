@@ -25,8 +25,6 @@ export interface SvoRenderDiagnostics {
   readonly maximumTraversalDepth: number;
   /** Per-call topology-node budget; the production hard ceiling is 256. */
   readonly maximumNodeVisits: number;
-  /** Mix factor between production radiance and the diagnostic heatmap. */
-  readonly overlayOpacity: number;
 }
 
 export interface SvoCostOverlayLegendStop {
@@ -51,7 +49,6 @@ export const DEFAULT_SVO_RENDER_DIAGNOSTICS: SvoRenderDiagnostics = Object.freez
   overlay: "off",
   maximumTraversalDepth: 21,
   maximumNodeVisits: 256,
-  overlayOpacity: 0.9,
 });
 
 /** Shared high-contrast ramp used by every scalar work view. */
@@ -119,6 +116,5 @@ export function normalizeSvoRenderDiagnostics(value: SvoRenderDiagnostics): SvoR
     overlay: SVO_COST_OVERLAY_MODES.includes(value.overlay) ? value.overlay : "off",
     maximumTraversalDepth: Math.max(1, Math.min(21, Math.round(value.maximumTraversalDepth))),
     maximumNodeVisits: Math.max(1, Math.min(256, Math.round(value.maximumNodeVisits))),
-    overlayOpacity: Math.max(0, Math.min(1, value.overlayOpacity)),
   };
 }

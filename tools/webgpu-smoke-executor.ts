@@ -14,7 +14,7 @@ import { fineTopologyRetainsBackgroundOctree } from "../lib/octree-consumer-samp
 import type { WebGPUFineLevelSetBrickSource } from "../lib/webgpu-octree-fine-levelset-bricks";
 import { FINE_LEVELSET_VOLUME_VALID, unpackFineLevelSetGPUVolumeControl }
   from "../lib/webgpu-octree-fine-levelset-volume";
-import { unpackFineLevelSetGPUTopologyControl }
+import { FINE_LEVELSET_TOPOLOGY_ERROR, unpackFineLevelSetGPUTopologyControl }
   from "../lib/webgpu-octree-fine-levelset-topology";
 import { unpackFineToCoarseGPUControl }
   from "../lib/webgpu-octree-fine-to-coarse-levelset";
@@ -2207,6 +2207,7 @@ async function runGPU(
         airSupportControl?: readonly number[];
         precedingAirSupportTerminal?: readonly number[];
         firstAirSupportFailure?: readonly number[];
+        airSupportFailureTopology?: Readonly<Record<string, unknown>>;
         structuredRejectCarry?: readonly number[];
       } | undefined>;
     } }).octreeProjection;
@@ -2232,6 +2233,7 @@ async function runGPU(
           control: fineFailure.airSupportControl,
           precedingTerminal: fineFailure.precedingAirSupportTerminal,
           firstFailure: fineFailure.firstAirSupportFailure,
+          topologyFailure: fineFailure.airSupportFailureTopology,
           structuredRejectCarry: fineFailure.structuredRejectCarry,
         } : undefined,
       })}`);
@@ -2330,10 +2332,12 @@ async function runGPU(
               rows: mgpcg.rows, relativeResidual: mgpcg.relativeResidual,
               residualSquared: mgpcg.residualSquared, rhsSquared: mgpcg.rhsSquared });
           }
-          // 4. Fine-band capacity overflow. The active count degrades to the
-          //    INVALID sentinel, which silently no-ops the solver and still
-          //    prints PASS. The count is worklist header word ONE; a prior
-          //    consumer read word zero (the generation) and printed nonsense.
+          // 4. Fine-band capacity overflow. Older publishers degraded the
+          //    active count to INVALID. The transactional publisher instead
+          //    retains the prior fine authority and reports the rejected
+          //    required count in topology control, so both receipts must be
+          //    checked. The count is worklist header word ONE; a prior consumer
+          //    read word zero (the generation) and printed nonsense.
           const header = readFineLevelSetWorksetHeader(words(record,
             TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes));
           if (header === undefined) {
@@ -2343,6 +2347,14 @@ async function runGPU(
             trip("fine-band-sentinel", { activeCount: header.activeCount,
               sentinel: "0xFFFFFFFF", capacity: header.capacity,
               generation: header.generation, flags: header.flags });
+          } else if ((topology.flags & FINE_LEVELSET_TOPOLOGY_ERROR.capacity) !== 0
+            || topology.requiredDesiredBricks > header.capacity) {
+            trip("fine-band-sentinel", { activeCount: header.activeCount,
+              retainedPublication: topology.rolledBack,
+              requiredDesiredBricks: topology.requiredDesiredBricks,
+              requiredDesiredBricksExact: topology.requiredDesiredBricksExact,
+              capacity: header.capacity, generation: header.generation,
+              topologyFlags: topology.flags });
           }
         }
       } finally {

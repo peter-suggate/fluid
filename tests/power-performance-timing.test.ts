@@ -131,6 +131,8 @@ test("performance UI exposes one matrix with three independent closed ledgers an
 test("production SVO traversal and shading execute for every submitted presentation", () => {
   assert.doesNotMatch(renderer, /drySceneReuseKey|Sparse voxel dry scene reuse timestamp/);
   assert.match(renderer, /SVO visibility and shading are presentation work[^]*svoDryScenePipeline\?\.encode\(replacementEncoder, target, temporalFrame,/);
-  assert.match(viewport, /continuousPerformancePresentation[^]*ui\.rightPanel === "performance"[^]*!continuousPerformancePresentation/,
-    "the performance panel must keep a paused static dry scene submitting completion-gated presentations");
+  assert.doesNotMatch(viewport, /pausedPresentation|continuousPerformancePresentation/,
+    "all paused scenes must keep submitting completion-gated presentations");
+  assert.doesNotMatch(viewport, /presentationFrameDue|advancePresentationClock/,
+    "the viewport must attempt every browser animation frame without a fixed-Hz gate");
 });

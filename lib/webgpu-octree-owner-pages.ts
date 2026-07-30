@@ -14,6 +14,9 @@ export const OCTREE_OWNER_PAGE_VOXELS = OCTREE_OWNER_BRICK_SIZE ** 3;
 export const OCTREE_OWNER_ARENA_CONTROL_WORDS = 16;
 export const OCTREE_OWNER_ARENA_MAGIC = 0x4f57_4e52;
 export const OCTREE_OWNER_PAGE_WORD_VALID = 0x8000_0000;
+/** Resident page belongs to the moving accepted-topology worklist, rather
+ * than only to the immutable analytic lookup halo. */
+export const OCTREE_OWNER_PAGE_WORD_TOPOLOGY = 0x0020_0000;
 export const OCTREE_OWNER_PAGE_TABLE_MISSING = 0;
 export const OCTREE_OWNER_PAGE_TABLE_RESERVED = 0xffff_ffff;
 
@@ -353,6 +356,7 @@ export function decodeOctreeOwnerPageWord(
 export const OCTREE_OWNER_PAGE_LOOKUP_STATUS = Object.freeze({
   missing: 1 << 0,
   invalid: 1 << 1,
+  topology: 1 << 2,
 } as const);
 
 /** Locate a logical brick in the accepted sorted owner records. */
@@ -464,7 +468,8 @@ export function lookupOctreeOwnerPage(
     if (owner.size > maximumLeafSize || !containsCell || !insideDomain) {
       return missingOwnerLookup(cellValue, plan.dimensions, maximumLeafSize, true);
     }
-    return { ...owner, status: 0 };
+    return { ...owner, status: (packed & OCTREE_OWNER_PAGE_WORD_TOPOLOGY) !== 0
+      ? OCTREE_OWNER_PAGE_LOOKUP_STATUS.topology : 0 };
   } catch {
     return missingOwnerLookup(cellValue, plan.dimensions, maximumLeafSize, true);
   }
@@ -495,7 +500,9 @@ struct OctreeOwnerPageLookupResult {
 
 const OWNER_PAGE_LOOKUP_MISSING: u32 = ${OCTREE_OWNER_PAGE_LOOKUP_STATUS.missing}u;
 const OWNER_PAGE_LOOKUP_INVALID: u32 = ${OCTREE_OWNER_PAGE_LOOKUP_STATUS.invalid}u;
+const OWNER_PAGE_LOOKUP_TOPOLOGY: u32 = ${OCTREE_OWNER_PAGE_LOOKUP_STATUS.topology}u;
 const OWNER_PAGE_WORD_VALID: u32 = ${OCTREE_OWNER_PAGE_WORD_VALID}u;
+const OWNER_PAGE_WORD_TOPOLOGY: u32 = ${OCTREE_OWNER_PAGE_WORD_TOPOLOGY}u;
 const OWNER_PAGE_TABLE_RESERVED: u32 = ${OCTREE_OWNER_PAGE_TABLE_RESERVED}u;
 const OWNER_PAGE_BRICK_SIZE: u32 = ${OCTREE_OWNER_BRICK_SIZE}u;
 const OWNER_PAGE_VOXELS: u32 = ${OCTREE_OWNER_PAGE_VOXELS}u;
@@ -630,7 +637,8 @@ fn octreeOwnerPageLookup(cell: vec3i) -> OctreeOwnerPageLookupResult {
   var result: OctreeOwnerPageLookupResult;
   result.origin = origin;
   result.size = size;
-  result.status = 0u;
+  result.status = select(0u, OWNER_PAGE_LOOKUP_TOPOLOGY,
+    (packed & OWNER_PAGE_WORD_TOPOLOGY) != 0u);
   return result;
 }
 `;
@@ -798,6 +806,7 @@ const HEADER: u32 = 16u;
 const PAGE_VOXELS: u32 = 512u;
 const INVALID_KEY: u32 = 0xffffffffu;
 const CANDIDATE_VALID: u32 = 0x80000000u;
+const OWNER_WORD_TOPOLOGY: u32 = ${OCTREE_OWNER_PAGE_WORD_TOPOLOGY}u;
 const CONTROL_FREE_COUNT: u32 = ${OCTREE_OWNER_PAGE_CONTROL_WORDS.freeCount}u;
 const CONTROL_RESIDENT_COUNT: u32 = ${OCTREE_OWNER_PAGE_CONTROL_WORDS.residentCount}u;
 const CONTROL_CANDIDATE_ERROR: u32 = ${OCTREE_OWNER_PAGE_CONTROL_WORDS.candidateError}u;
@@ -858,7 +867,19 @@ fn candidatePageKey(slot:u32)->u32 {
   let dimensions=vec3u(params.counts.z,params.counts.w,params.offsets.w);
   let brickDimensions=(dimensions+vec3u(7u))/8u;
   let tiles=(dimensions+vec3u(tileSize-1u))/tileSize;
-  let tileIndex=worklist[HEADER+item];
+  let compactLimits=params.topology.yzw;
+  let compactCount=compactLimits.x*compactLimits.y*compactLimits.z;
+  let recurring=params.source.w!=0u;
+  let worklistCount=select(0u,worklist[0],recurring);
+  var tileIndex=INVALID_KEY;
+  if(item<worklistCount){tileIndex=worklist[HEADER+item];}
+  else if(item-worklistCount<compactCount){
+    let compactItem=item-worklistCount;
+    let tile=vec3u(compactItem%compactLimits.x,
+      (compactItem/compactLimits.x)%compactLimits.y,
+      compactItem/(compactLimits.x*compactLimits.y));
+    tileIndex=tile.x+tiles.x*(tile.y+tiles.y*tile.z);
+  }
   var key=0u;
   if(tileIndex<tiles.x*tiles.y*tiles.z){
     let tile=vec3u(tileIndex%tiles.x,(tileIndex/tiles.x)%tiles.y,
@@ -903,7 +924,16 @@ fn buildOwnerPageCandidate(@builtin(local_invocation_index) lid:u32) {
     }
     let capacity=params.counts.y;
     let oldCount=arena[CONTROL_RESIDENT_COUNT];let tileSize=params.source.y;
-    let activeCount=worklist[0];let pagesPerAxis=tileSize/8u;
+    let compactLimits=params.topology.yzw;
+    let compactCount=compactLimits.x*compactLimits.y*compactLimits.z;
+    // Cold bootstrap consumes only the compact analytic support box. Every
+    // recurring candidate unions that immutable air-side support floor with
+    // the moving topology worklist. Sorting below removes overlapping pages.
+    // This preserves Section 5 face/edge owner probes without enrolling the
+    // support-only tiles in refinement or fine-fluid residency.
+    let worklistCount=select(0u,worklist[0],params.source.w!=0u);
+    let activeCount=worklistCount+compactCount;
+    let pagesPerAxis=tileSize/8u;
     let pagesPerTile=pagesPerAxis*pagesPerAxis*pagesPerAxis;
     let sourceSlots=activeCount*pagesPerTile;
     let age=generation-arena[CONTROL_ACCEPTED_GENERATION];
@@ -944,14 +974,21 @@ fn buildOwnerPageCandidate(@builtin(local_invocation_index) lid:u32) {
       }
     }
     if(lid==0u){
-      var lo=0u;var hi=sourceSlots;
-      while(lo<hi){let mid=lo+(hi-lo)/2u;
-        if(sortedKey(mid)<INVALID_KEY){lo=mid+1u;}else{hi=mid;}}
-      let count=lo;transactionState[4]=count;scratch[META_NEW_COUNT]=count;
+      // Both sources are internally unique, but the moving worklist normally
+      // overlaps the immutable analytic support floor. Compact the sorted
+      // stream to a genuine set union before stable-ID carry classification.
+      var count=0u;var previous=INVALID_KEY;
+      for(var read=0u;read<sourceSlots;read+=1u){
+        let key=sortedKey(read);
+        if(key<INVALID_KEY&&key!=previous){scratch[sortABase()+count]=key;count+=1u;previous=key;}
+      }
+      for(var clear=count;clear<sourceSlots;clear+=1u){scratch[sortABase()+clear]=INVALID_KEY;}
+      transactionState[4]=count;scratch[META_NEW_COUNT]=count;
       if(count>params.counts.y||(count>0u&&sortedKey(0u)==0u)){
         transactionState[0]=0u;scratch[META_ERROR]=1u;
       }
     }
+    storageBarrier();workgroupBarrier();
     let admitted=workgroupUniformLoad(&transactionState[0]);
     let newCount=workgroupUniformLoad(&transactionState[4]);
     if(admitted!=0u){
@@ -1044,6 +1081,10 @@ fn buildOwnerPageCandidate(@builtin(local_invocation_index) lid:u32) {
                 word=ownerPageWord(cell,origin,size);
               }
             }
+            // Membership is a leaf property, not a resident-page property.
+            // The compact frontier marks accepted leaf origins after it has
+            // finished refining this inactive owner bank.
+            word&=~OWNER_WORD_TOPOLOGY;
             arena[payloadBase(inactiveTable())+(encodedPage-1u)*PAGE_VOXELS+local]=word;
           }
         }
@@ -1223,6 +1264,11 @@ export class WebGPUOctreeSimulationOwnerPages {
     if (analyticBootstrap && !topologyResidency) {
       throw new Error("Analytic owner bootstrap requires the coupled topology epoch source");
     }
+    if (analyticBootstrap && (analyticBootstrap.activeTileCount
+      !== analyticBootstrap.activeTileLimits[0] * analyticBootstrap.activeTileLimits[1]
+        * analyticBootstrap.activeTileLimits[2])) {
+      throw new RangeError("Analytic owner bootstrap count must match its compact limits");
+    }
     if (topologyResidency && (!Number.isSafeInteger(topologyResidency.tileSizeCells)
         || topologyResidency.tileSizeCells < 8 || topologyResidency.tileSizeCells > 32
         || (topologyResidency.tileSizeCells & (topologyResidency.tileSizeCells - 1)) !== 0
@@ -1239,9 +1285,19 @@ export class WebGPUOctreeSimulationOwnerPages {
     const analyticMinimumPages = analyticBootstrap
       ? octreeAnalyticOwnerBootstrapPageCount(dimensions, analyticBootstrap)
       : 1;
+    const topologyMaximumCandidatePages = topologyResidency
+      ? topologyResidency.tileListCapacity
+        * (topologyResidency.tileSizeCells / OCTREE_OWNER_BRICK_SIZE) ** 3
+      : 0;
+    // The recurring candidate is the set union of its moving worklist and the
+    // immutable analytic support floor. Reserve for their worst-case unique
+    // page count (the planner clips this to the finite logical domain). A
+    // smaller adaptive arena can validate the cold set and then deadlock on
+    // the first legitimate support-only page added by recurrence.
+    const recurringUnionMinimumPages = analyticMinimumPages + topologyMaximumCandidatePages;
     this.plan = planOctreeOwnerPages(dimensions, {
       ...options,
-      minimumPages: Math.max(options.minimumPages ?? 1, analyticMinimumPages),
+      minimumPages: Math.max(options.minimumPages ?? 1, recurringUnionMinimumPages),
     });
     this.arena = device.createBuffer({ label: "Simulation octree owner pages", size: this.plan.allocatedBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.params = device.createBuffer({ label: "Simulation octree sorted owner-page parameters", size: 64,
@@ -1249,15 +1305,15 @@ export class WebGPUOctreeSimulationOwnerPages {
     this.analyticParams = analyticBootstrap
       ? device.createBuffer({ label: "Analytic octree sorted owner-page parameters", size: 64,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }) : undefined;
-    const topologyCandidateSlots = topologyResidency
-      ? topologyResidency.tileListCapacity
-        * (topologyResidency.tileSizeCells / OCTREE_OWNER_BRICK_SIZE) ** 3
-      : 0;
+    const topologyCandidateSlots = topologyMaximumCandidatePages;
     const analyticCandidateSlots = analyticBootstrap
       ? analyticBootstrap.activeTileCount
         * (analyticBootstrap.tileSizeCells / OCTREE_OWNER_BRICK_SIZE) ** 3
       : 0;
-    const candidateSlotCapacity = Math.max(1, topologyCandidateSlots, analyticCandidateSlots);
+    // Recurring publications retain the immutable analytic air-support floor
+    // and add the moving topology worklist. Their candidate stream is a union;
+    // the GPU sort deterministically removes pages present in both sources.
+    const candidateSlotCapacity = Math.max(1, topologyCandidateSlots + analyticCandidateSlots);
     if (!Number.isSafeInteger(candidateSlotCapacity) || candidateSlotCapacity < 1) {
       throw new RangeError("Octree owner candidate-page capacity is invalid");
     }
@@ -1287,21 +1343,24 @@ export class WebGPUOctreeSimulationOwnerPages {
       tileListCapacity: number,
       tileSize: number,
       candidateGenerationOffsetPlusOne = 0,
+      analyticLimits: readonly [number, number, number] = [0, 0, 0],
     ) => new Uint32Array([
       this.plan.logicalBrickCount, this.plan.capacity, dimensions[0], dimensions[1],
       this.plan.ownerRecordKeyOffsetWords, this.plan.ownerRecordPageOffsetWords,
       this.plan.ownerPagesOffsetWords, dimensions[2],
       tileListCapacity, tileSize, candidateSlotCapacity, candidateGenerationOffsetPlusOne,
-      topologyResidency?.candidateGeneration.frontierListCapacity ?? 0, 0, 0, 0,
+      topologyResidency?.candidateGeneration.frontierListCapacity ?? 0, ...analyticLimits,
     ]);
     device.queue.writeBuffer(this.params, 0, parameterWords(
-      topologyResidency?.tileListCapacity ?? analyticBootstrap?.activeTileCount ?? 1,
+      (topologyResidency?.tileListCapacity ?? 0) + (analyticBootstrap?.activeTileCount ?? 0) || 1,
       topologyResidency?.tileSizeCells ?? analyticBootstrap?.tileSizeCells ?? 8,
       topologyResidency ? topologyResidency.candidateGeneration.offsetWords + 1 : 0,
+      analyticBootstrap?.activeTileLimits,
     ));
     if (this.analyticParams && analyticBootstrap) {
       device.queue.writeBuffer(this.analyticParams, 0,
-        parameterWords(Math.max(1, analyticBootstrap.activeTileCount), analyticBootstrap.tileSizeCells));
+        parameterWords(Math.max(1, analyticBootstrap.activeTileCount), analyticBootstrap.tileSizeCells,
+          0, analyticBootstrap.activeTileLimits));
     }
     const layout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },

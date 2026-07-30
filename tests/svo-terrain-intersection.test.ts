@@ -79,9 +79,10 @@ test("WGSL terrain path is bounded, refined, and retains terrain material identi
 
   const source = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 256, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 384, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
+    nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
   });
   assert.match(source, /size: SVO_DRY_SCENE_PARAMS_LAYOUT\.sizeBytes/);
   assert.match(source, /new ArrayBuffer\(SVO_DRY_SCENE_PARAMS_LAYOUT\.sizeBytes\)/);

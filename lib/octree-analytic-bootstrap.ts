@@ -10,12 +10,22 @@ export type OctreeAnalyticBootstrapVec3 = readonly [number, number, number];
  */
 export const OCTREE_ANALYTIC_BOOTSTRAP_GRADING_HALO_TILES = 1;
 
+/**
+ * Descriptor and balance kernels probe the owner immediately beyond the
+ * complete grading transition. Keep that final query inside an immutable
+ * owner page instead of turning a proven-dry analytic tile into a candidate
+ * error that suppresses the entire cold row publication.
+ */
+export const OCTREE_ANALYTIC_BOOTSTRAP_OWNER_PROBE_HALO_TILES = 1;
+
 export interface OctreeAnalyticBootstrapInput {
   readonly dimensions: OctreeAnalyticBootstrapVec3;
   readonly containerSize: OctreeAnalyticBootstrapVec3;
   readonly tileSizeCells: number;
   readonly initialCondition: OctreeAnalyticBootstrapCondition;
   readonly fillFraction: number;
+  /** Optional absolute corner-anchored dam extents in world metres. */
+  readonly damBreakDimensions?: OctreeAnalyticBootstrapVec3;
   readonly interfaceBandCells: number;
 }
 
@@ -46,6 +56,9 @@ export interface OctreeAnalyticBootstrapBoundsPlan {
    */
   readonly activeTileLimits: OctreeAnalyticBootstrapTileLimits;
   readonly activeTileCount: number;
+  /** Read-only owner coverage includes one extra tile beyond topology work. */
+  readonly ownerPageTileLimits: OctreeAnalyticBootstrapTileLimits;
+  readonly ownerPageTileCount: number;
   readonly outsideWorklist: {
     /** All negative analytic liquid is present in activeTileLimits. */
     readonly sign: "non-negative-air";
@@ -91,9 +104,24 @@ function validateInput(input: OctreeAnalyticBootstrapInput): void {
   if (!Number.isFinite(input.fillFraction) || input.fillFraction < 0 || input.fillFraction > 1) {
     throw new RangeError("Analytic bootstrap fill fraction must be in [0, 1]");
   }
+  if (input.damBreakDimensions !== undefined
+    && (input.damBreakDimensions.length !== 3
+      || input.damBreakDimensions.some((value, axis) => !Number.isFinite(value)
+        || value < 0 || value > input.containerSize[axis]))) {
+    throw new RangeError("Analytic bootstrap dam dimensions must lie inside the container");
+  }
   if (!Number.isFinite(input.interfaceBandCells) || input.interfaceBandCells < 0) {
     throw new RangeError("Analytic bootstrap interface band must be finite and non-negative");
   }
+}
+
+function resolvedDamBreak(input: OctreeAnalyticBootstrapInput): DamBreakFractions {
+  if (input.damBreakDimensions === undefined) return damBreakFractions(input.fillFraction);
+  return {
+    width: input.damBreakDimensions[0] / input.containerSize[0],
+    height: input.damBreakDimensions[1] / input.containerSize[1],
+    depth: input.damBreakDimensions[2] / input.containerSize[2],
+  };
 }
 
 function intersects(a: Bounds3, b: Bounds3, inclusive = false): boolean {
@@ -188,7 +216,7 @@ export function planOctreeAnalyticBootstrapBounds(
   if (!Number.isFinite(interfaceSupportWorld)) {
     throw new RangeError("Analytic bootstrap interface support must remain finite");
   }
-  const damBreak = damBreakFractions(input.fillFraction);
+  const damBreak = resolvedDamBreak(input);
   const liquidExtent = input.initialCondition === "tank-fill"
     ? [containerSize[0], input.fillFraction * containerSize[1], containerSize[2]] as const
     : [
@@ -211,6 +239,14 @@ export function planOctreeAnalyticBootstrapBounds(
   )) as unknown as OctreeAnalyticBootstrapVec3;
   const activeTileLimits = { minimum: [0, 0, 0] as const, maximumExclusive } as const;
   const activeTileCount = maximumExclusive[0] * maximumExclusive[1] * maximumExclusive[2];
+  const ownerMaximumExclusive = maximumExclusive.map((value, axis) => Math.min(
+    tileDimensions[axis], value + OCTREE_ANALYTIC_BOOTSTRAP_OWNER_PROBE_HALO_TILES,
+  )) as unknown as OctreeAnalyticBootstrapVec3;
+  const ownerPageTileLimits = {
+    minimum: [0, 0, 0] as const, maximumExclusive: ownerMaximumExclusive,
+  } as const;
+  const ownerPageTileCount = ownerMaximumExclusive[0]
+    * ownerMaximumExclusive[1] * ownerMaximumExclusive[2];
   return {
     dimensions,
     containerSize,
@@ -226,6 +262,8 @@ export function planOctreeAnalyticBootstrapBounds(
     gradingHaloTiles: OCTREE_ANALYTIC_BOOTSTRAP_GRADING_HALO_TILES,
     activeTileLimits,
     activeTileCount,
+    ownerPageTileLimits,
+    ownerPageTileCount,
     outsideWorklist: {
       sign: "non-negative-air",
       bootstrapAuthority: "analytic-sdf",
@@ -241,11 +279,15 @@ export function planOctreeAnalyticBootstrapBounds(
  * purposes and only the three exposed upper faces contribute to phi.
  */
 export function sampleOctreeAnalyticBootstrapPhi(
-  input: Pick<OctreeAnalyticBootstrapInput, "containerSize" | "initialCondition" | "fillFraction">,
+  input: Pick<OctreeAnalyticBootstrapInput,
+    "containerSize" | "initialCondition" | "fillFraction" | "damBreakDimensions">,
   point: OctreeAnalyticBootstrapVec3,
 ): number {
   if (input.initialCondition === "tank-fill") return point[1] - input.fillFraction * input.containerSize[1];
-  const damBreak = damBreakFractions(input.fillFraction);
+  const damBreak = resolvedDamBreak({
+    ...input,
+    dimensions: [1, 1, 1], tileSizeCells: 1, interfaceBandCells: 0,
+  });
   const bounds = analyticBounds({
     ...input,
     dimensions: [1, 1, 1], tileSizeCells: 1, interfaceBandCells: 0,
@@ -297,15 +339,20 @@ export function planOctreeAnalyticBootstrap(input: OctreeAnalyticBootstrapInput)
 
   const desired = new Set([...liquidIndices, ...interfaceIndices]);
   const active = new Set<number>();
+  const haloTiles = OCTREE_ANALYTIC_BOOTSTRAP_GRADING_HALO_TILES;
   for (const index of desired) {
     const x = index % tileDimensions[0];
     const y = Math.floor(index / tileDimensions[0]) % tileDimensions[1];
     const z = Math.floor(index / (tileDimensions[0] * tileDimensions[1]));
-    for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1) for (let dx = -1; dx <= 1; dx += 1) {
-      const q = [x + dx, y + dy, z + dz] as const;
-      if (q[0] >= 0 && q[1] >= 0 && q[2] >= 0
-        && q[0] < tileDimensions[0] && q[1] < tileDimensions[1] && q[2] < tileDimensions[2]) {
-        active.add(flatten(q, tileDimensions));
+    for (let dz = -haloTiles; dz <= haloTiles; dz += 1) {
+      for (let dy = -haloTiles; dy <= haloTiles; dy += 1) {
+        for (let dx = -haloTiles; dx <= haloTiles; dx += 1) {
+          const q = [x + dx, y + dy, z + dz] as const;
+          if (q[0] >= 0 && q[1] >= 0 && q[2] >= 0
+            && q[0] < tileDimensions[0] && q[1] < tileDimensions[1] && q[2] < tileDimensions[2]) {
+            active.add(flatten(q, tileDimensions));
+          }
+        }
       }
     }
   }

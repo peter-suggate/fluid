@@ -69,8 +69,10 @@ export const OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES = 12;
  * count. Word 49 retains the preceding seed-list count; the list itself reuses
  * dead candidate scratch after identity publication. Word 50 admits the exact
  * retained-solution refresh only when that list and the reciprocal graph were
- * published by the preceding sparse transaction. */
-export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 51;
+ * published by the preceding sparse transaction. Words 51-59 durably latch
+ * the first stage-6 rejected identity/reason before later transactions may
+ * reuse its record slot. */
+export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 60;
 export const OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS = 6;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_WORDS = 4;
 /**
@@ -1163,8 +1165,8 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
   let owner=octreeOwnerPageLookup(vec3i(coord(item)));if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){failTopology(3u,item);return;}
   let originCell=cellOf(owner.origin);let direct=publishedRow(originCell,owner.size);var caseId=INVALID;var transform=0u;
   if(direct!=INVALID){let geometry=rowGeometry[s(4u)*p.rowCapacity+direct];caseId=geometry.z;transform=geometry.w&63u;
-  }else{let descriptor=descriptorForIdentity(owner.origin,owner.size);if(descriptor==INVALID){failTopology(3u,item);return;}
-    let resolved=resolveDescriptor(descriptor);caseId=resolved.x;transform=resolved.y;}
+  }else{let descriptor=descriptorForIdentity(owner.origin,owner.size);if(descriptor.x==INVALID){failTopology(3u,item);return;}
+    let resolved=resolveDescriptor(descriptor.x);caseId=resolved.x;transform=resolved.y;}
   if(caseId==INVALID||caseId>=p.catalogEntryCount||transform>=48u){fail(item,ERROR_CATALOG);return;}
   let center=vec3f(owner.origin)+.5*f32(owner.size);
   // A nominal case-zero descriptor does not see a body-diagonal coarse owner.
@@ -1222,11 +1224,13 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
   if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){
     if((demanded&RECORD_FINE)!=0u){failTopology(4u,output);}return;}
   let resolvedCell=cellOf(owner.origin);
-  if(demanded!=0u||resolvedCell==item){
+  let topologyMember=(owner.status&OWNER_PAGE_LOOKUP_TOPOLOGY)!=0u;
+  if(demanded!=0u||(topologyMember&&resolvedCell==item)){
     atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],demanded|RECORD_EXTENSION);}
   if(reuse){return;}
   let direct=publishedRow(resolvedCell,owner.size);
   if(direct!=INVALID){return;}
+  if(demanded==0u&&!topologyMember){return;}
   if((demanded&RECORD_FINE)==0u&&resolvedCell!=item){return;}
   setCandidate(output,Candidate(resolvedCell,owner.size,INVALID));
   atomicMin(&scratch[p.directoryWinnerOffset+resolvedCell],output);}
@@ -1364,19 +1368,25 @@ fn resolveDescriptor(descriptor:u32)->vec2u{let boundary=(descriptor>>24u)&63u;l
   else{let index=geometry&0x3ffffu;if((geometry&0x40fc0000u)==0u&&index<arrayLength(&sameOrFinerDirect)){packed=sameOrFinerDirect[index];}}
   if(packed==INVALID){return vec2u(INVALID);}let transform=packed>>16u;var entry=packed&0xffffu;if(boundary!=0u){
     entry=resolveBoundaryEntry(entry,transformBoundaryMask(boundary,transform));}return vec2u(entry,transform);}
-fn descriptorForIdentity(origin:vec3u,size:u32)->u32{var sizes:array<u32,18>;var boundary=0u;var finer=false;var coarser=false;
+// Returns [descriptor, failure reason, failure detail]. A rejected record has
+// no catalog case or extension layer, so resolveAirSupportTopology persists
+// reason/detail in those two otherwise-unused words before failing closed.
+// reason 1 = malformed owner, 2 = ratio beyond 2:1, 3 = mixed finer/coarser.
+fn descriptorForIdentity(origin:vec3u,size:u32)->vec3u{var sizes:array<u32,18>;var boundary=0u;var finer=false;var coarser=false;
+  var firstFiner=31u;var firstCoarser=31u;
   for(var bit=0u;bit<18u;bit+=1u){let direction=DIRECTIONS[bit];var probe=vec3i(0);
     for(var axis=0u;axis<3u;axis+=1u){probe[axis]=select(select(i32(origin[axis]+size/2u),i32(origin[axis]+size),direction[axis]>0),i32(origin[axis])-1,direction[axis]<0);}
     if(any(probe<vec3i(0))||any(probe>=vec3i(p.dimensions))){if(bit<6u){boundary|=1u<<bit;}sizes[bit]=size;continue;}
-    let owner=octreeOwnerPageLookup(probe);if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u||owner.size*2u<size||owner.size>size*2u){return INVALID;}
-    sizes[bit]=owner.size;finer=finer||owner.size<size;coarser=coarser||owner.size>size;}
-  if(finer&&coarser){return INVALID;}var descriptor=boundary<<24u;if(!coarser){for(var bit=0u;bit<18u;bit+=1u){if(sizes[bit]==size){descriptor|=1u<<bit;}}}
+    let owner=octreeOwnerPageLookup(probe);if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){return vec3u(INVALID,1u,(bit&31u)|((owner.size&63u)<<8u)|((owner.status&0xffffu)<<16u));}
+    if(owner.size*2u<size||owner.size>size*2u){return vec3u(INVALID,2u,(bit&31u)|((owner.size&63u)<<8u)|((size&63u)<<16u));}
+    sizes[bit]=owner.size;if(owner.size<size){finer=true;firstFiner=min(firstFiner,bit);}if(owner.size>size){coarser=true;firstCoarser=min(firstCoarser,bit);}}
+  if(finer&&coarser){return vec3u(INVALID,3u,(firstFiner&31u)|((firstCoarser&31u)<<5u));}var descriptor=boundary<<24u;if(!coarser){for(var bit=0u;bit<18u;bit+=1u){if(sizes[bit]==size){descriptor|=1u<<bit;}}}
   else{let child=(origin/vec3u(size))&vec3u(1u);descriptor|=0x80000000u|child.x|(child.y<<1u)|(child.z<<2u);
     let outward=vec3i(select(-1,1,child.x==1u),select(-1,1,child.y==1u),select(-1,1,child.z==1u));
     let wanted=array<vec3i,6>(vec3i(outward.x,0,0),vec3i(0,outward.y,0),vec3i(0,0,outward.z),
       vec3i(outward.x,outward.y,0),vec3i(outward.x,0,outward.z),vec3i(0,outward.y,outward.z));
     for(var coarse=0u;coarse<6u;coarse+=1u){for(var bit=0u;bit<18u;bit+=1u){if(all(DIRECTIONS[bit]==wanted[coarse])&&sizes[bit]==size*2u){descriptor|=1u<<(coarse+3u);}}}}
-  return descriptor;}
+  return vec3u(descriptor,0u,0u);}
 
 @compute @workgroup_size(256)fn resolveAirSupportTopology(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
@@ -1385,7 +1395,8 @@ fn descriptorForIdentity(origin:vec3u,size:u32)->u32{var sizes:array<u32,18>;var
     let stable=r(at+5u)&~(RECORD_FINE<<6u);let dynamic=s(p.directoryFlagOffset+recordCell(item))&RECORD_FINE;
     atomicStore(&recordArena[at+5u],stable|(dynamic<<6u));return;}
   let descriptor=descriptorForIdentity(identity.xyz,identity.w);
-  if(descriptor==INVALID){failTopology(6u,item);return;}let resolved=resolveDescriptor(descriptor);
+  if(descriptor.x==INVALID){let at=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
+    atomicStore(&recordArena[at+4u],descriptor.y);atomicStore(&recordArena[at+6u],descriptor.z);failTopology(6u,item);return;}let resolved=resolveDescriptor(descriptor.x);
   if(resolved.x==INVALID||resolved.x>=p.catalogEntryCount||resolved.y>=48u){fail(item,ERROR_CATALOG);return;}
   let at=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;atomicStore(&recordArena[at+4u],resolved.x);
   let old=r(at+5u);atomicStore(&recordArena[at+5u],resolved.y|(old&0xffffffc0u));}
@@ -1928,7 +1939,12 @@ var<workgroup> reconstructCompleted:array<u32,256>;
     if(reconstructCompleted[0]!=0u){atomicAdd(&scratch[28u],reconstructCompleted[0]);}}}
 
 @compute @workgroup_size(1)fn finalizeAirSupportMetadata(){if(s(31u)==2u){return;}
-  let first=s(1u);if((first>>24u)==8u){let row=first&0x00ffffffu;let directRows=s(2u);var rejected=vec4f(0.);
+  let first=s(1u);if((first>>24u)==6u&&s(59u)==0u){let item=first&0x00ffffffu;
+    if(item<s(8u)){let failedAt=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
+      sw(51u,r(failedAt));sw(52u,r(failedAt+1u));sw(53u,r(failedAt+2u));sw(54u,r(failedAt+3u));
+      sw(55u,r(failedAt+4u));sw(56u,r(failedAt+6u));sw(57u,r(failedAt+7u));sw(58u,r(failedAt+5u));
+      sw(59u,first);}}
+  if((first>>24u)==8u){let row=first&0x00ffffffu;let directRows=s(2u);var rejected=vec4f(0.);
     if(row<directRows&&row<arrayLength(&directAirVectors)){rejected=directAirVectors[row];}
     else if(row>=directRows){let support=row-directRows;let mirror=p.recordVectorOffset+4u*support;
       if(mirror+3u<arrayLength(&recordArena)){rejected=vec4f(bitcast<f32>(r(mirror)),bitcast<f32>(r(mirror+1u)),

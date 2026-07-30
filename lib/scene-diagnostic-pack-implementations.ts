@@ -441,11 +441,17 @@ const authoritativeWaterRaster = defineDiagnosticPackImplementation({
         scalar({ id: `${which}-reverse-back-only`, method, actual: numberPath(reverse, "backOnlyInterfacePixels"), label: `${which} reverse back-only pixels`, expected: { maximum: maximumBackOnly }, pass: (actual) => actual <= maximumBackOnly }),
         truth({ id: `${which}-authority`, method, actual: value, label: `${which} raster authority`, pass: (actual) => {
           const record = recordValue(actual);
+          // Section 5 keeps the authored interface on a separate fine grid. A
+          // retained raster therefore identifies its accepted fine-grid
+          // authority through the clean A/B transition, even when the compact
+          // raster summary does not duplicate that generation at top level.
+          const rasterGeneration = numberPath(record, "globalFineGeneration")
+            ?? numberPath(record, "globalFineAuthorityTransition", "validGeneration");
           return record?.surfaceGeometrySource === parameterString(context, "expectedSurfaceGeometrySource", "global-fine-coarse")
             && (!parameterBoolean(context, "requireGlobalFineCrossingPublished", true) || record.globalFineCrossingPublished === true)
             && (!parameterBoolean(context, "requirePresentationFallbackInactive", true) || record.presentationFallbackActive === false)
             && (!parameterBoolean(context, "requireNonzeroAuthorityLatch", true) || (numberPath(record, "globalFineAuthorityLatch") ?? 0) !== 0)
-            && numberPath(record, "globalFineGeneration") === numberPath(published, "generation");
+            && rasterGeneration === numberPath(published, "generation");
         } }),
       );
     }

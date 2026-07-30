@@ -1,4 +1,4 @@
-import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell, initialFluidBrickSignedDistance } from "./initial-fluid";
+import { combineInitialBrickWet, initialFluidBrickContainsCell, initialFluidBrickSignedDistance, sceneDamBreakFractions } from "./initial-fluid";
 import type { SceneDescription } from "./model";
 import { sceneHasTerrain, terrainColumnHeights, terrainHeightAt } from "./terrain";
 
@@ -142,7 +142,7 @@ function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx
     if ((y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ)) return false;
   }
   const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, fineNy, nz]);
-  const dam = damBreakFractions(scene.container.fillFraction);
+  const dam = sceneDamBreakFractions(scene);
   const baseWet = scene.fluid.initialCondition === "tank-fill"
     ? (y + 0.5) / fineNy <= scene.container.fillFraction
     : (x + 0.5) / nx <= dam.width && (y + 0.5) / fineNy <= dam.height && (z + 0.5) / nz <= dam.depth;
@@ -180,7 +180,7 @@ export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y:
 
 function baseDamBreakPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {
   const c = scene.container;
-  const dam = damBreakFractions(c.fillFraction);
+  const dam = sceneDamBreakFractions(scene);
   const half = { x: 0.5 * dam.width * c.width_m, y: 0.5 * dam.height * c.height_m, z: 0.5 * dam.depth * c.depth_m };
   return boxSignedDistance(point, {
     x: -0.5 * c.width_m + half.x,

@@ -155,10 +155,13 @@ test("candidate-ready and recurring accepted controls have disjoint setup semant
     "a setup entry point must not infer authority by accepting both layouts");
 });
 
-test("cold boundary classification uses an explicit one-shot authored SDF authority", () => {
+test("boundary classification uses authored SDF only for bootstrap and missing coarse publication", () => {
   assert.match(structuredBoundaryCoefficientWGSL,
     /if\(p\.pad\.z!=0u\)\{return vec2f\(analyticInitialPhi\(point\),1\.\);\}/,
-    "the selected cold bootstrap must own its sample rather than act as an invalid-coarse fallback");
+    "the selected cold bootstrap must own its sample");
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /return select\(vec2f\(1\.,0\.\),vec2f\(analyticInitialPhi\(point\),1\.\),authoredAnalyticPhiAvailable\(\)\);/,
+    "an authored analytic scene must bridge a missing recurring coarse-directory publication");
   assert.match(structuredBoundaryCoefficientWGSL,
     /powerCoarseSamples\.generation&0x3fffffffu;let expected=control\.epoch&0x3fffffffu/,
     "recurring boundary publication must require the matching coarse generation");

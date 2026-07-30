@@ -619,7 +619,14 @@ var<workgroup> publicationAux:array<vec2u,256>;
     if(flagged){metric=metrics[row];status|=STATUS_AFFECTED|STATUS_PUBLISH;}
     else if(oldPlusOne==0u){flags|=CAPACITY;}
     else{let old=oldPlusOne-1u;if(old>=controlArena.authority.resolvedCount||old>=arrayLength(&committedMetrics)){flags|=CAPACITY;}
-      else{metric=committedMetrics[old];if(old!=row){metrics[row]=metric;status|=STATUS_PUBLISH;}}}
+      else{
+        metric=committedMetrics[old];
+        // Section 4's pressure/normal-velocity discretization is defined on
+        // the complete power-cell face geometry. Republish every carried
+        // metric into candidate scratch; the sparse commit bit still records
+        // only rows whose stable index changed.
+        metrics[row]=metric;if(old!=row){status|=STATUS_PUBLISH;}
+      }}
     if(!metricValid(metric)){flags|=metricFlags(metric);}else{status|=STATUS_VALID;}
     status|=flags&255u;lookupArena[statusBase()+row]=status;
   }

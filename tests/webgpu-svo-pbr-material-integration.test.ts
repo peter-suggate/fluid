@@ -76,9 +76,10 @@ test("binding 6 consumes the 96-byte producer table while the legacy debug ABI r
 
 test("published count, revision, direct identity, flags, and material functions are enforced in WGSL", () => {
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 256, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 384, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
+    nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
   });
   assert.match(dryRendererSource, /const visibilityFlags = \(ambientOcclusionEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact \| SVO_DRY_VISIBILITY_FLAGS\.ambientOcclusion : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested/,
     "the visibility lane keeps ambient occlusion, shadows, and requested cone lighting independently switchable");

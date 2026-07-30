@@ -4,6 +4,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { SVO_MATERIAL_RECORD_STRIDE_BYTES } from "../lib/svo-material-abi";
+import { SVO_FLUID_COVERAGE_LAYOUT } from "../lib/svo-fluid-coverage";
 import {
   SparseVoxelDrySceneRenderer,
   SVO_DRY_SCENE_PARAMS_LAYOUT,
@@ -91,7 +92,10 @@ test("missing or stale node-mip samples enter exact bounded visibility rather th
   const start = svoDrySceneShader.indexOf("fn dryLightVisibility(");
   const end = svoDrySceneShader.indexOf("fn dryContactVisibilityRadius", start);
   const visibility = svoDrySceneShader.slice(start, end);
-  assert.match(visibility, /let cone=dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*return vec3f\(cone\.transmittance\);\}/);
+  // Only a valid cone short-circuits. Water attenuation multiplies that result
+  // rather than replacing it, so an invalid cone still falls through to the
+  // exact bounded traversal below instead of returning a lit surface.
+  assert.match(visibility, /let cone=dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*let raw=vec3f\(cone\.transmittance\)\*dryFluidTransmittance\(cone\.fluidDepth_m\);return mix\(vec3f\(1\.0\),raw,dry\.tuningRays0\.y\);\}/);
   assert.ok(visibility.indexOf("svoTraceVisibility", visibility.indexOf("dryConeVisibility")) > visibility.indexOf("dryConeVisibility"));
   assert.match(svoDrySceneShader, /fn dryNodeMipReady\(\)->bool\{return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&dry\.nodeMip\.x==publicationState\[2\]/,
     "cone use is fenced to the matching structural static-geometry revision");
@@ -138,10 +142,20 @@ test("cone steps reuse a matching mip page and search only on page, LOD, or gene
   assert.equal(searches, 1, "repeated samples in one non-resident sparse page reuse the negative lookup");
 });
 
-test("node-mip sampling publishes its own world origin without growing the dry uniform", () => {
+test("node-mip sampling publishes its own world origin inside the static uniform block", () => {
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset, 60);
-  assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes, 256);
-  assert.equal((SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset + 4) * 4, SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes);
+  // The static-lighting block still ends exactly where it always did. Evolving
+  // fluid coverage is appended past it rather than repacking anything below, so
+  // every offset a cone-lighting frame reads is unmoved.
+  assert.equal((SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset + 4) * 4, 256);
+  assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.fluidCoverageWordOffset * 4, 256,
+    "the fluid frame must start where the static block ends");
+  assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset,
+    SVO_DRY_SCENE_PARAMS_LAYOUT.fluidCoverageWordOffset + SVO_FLUID_COVERAGE_LAYOUT.frameWords,
+    "runtime tuning must immediately follow the 12-word fluid frame");
+  assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes,
+    (SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset + 5 * 4) * Uint32Array.BYTES_PER_ELEMENT,
+    "the uniform allocation must end after all five tuning vec4 lanes");
   assert.match(drySource, /floats\.set\(nodeMip\?\.worldOrigin_m \?\? structural\.domain\.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT\.nodeMipOriginWordOffset\)/);
   assert.match(svoDrySceneShader, /virtualVoxel=\(position_m-dry\.nodeMipOrigin\.xyz\)/,
     "topology experiments must not reinterpret an unchanged opacity atlas in the structural tree's coordinate frame");

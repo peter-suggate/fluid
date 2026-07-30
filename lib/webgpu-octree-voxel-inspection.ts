@@ -1,5 +1,6 @@
 import type { SceneDescription } from "./model";
 import {
+  SPARSE_VOXEL_DEBUG_HAS_CONTENT,
   SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
   createSparseVoxelInspectionPublicationController,
   type SparseVoxelInspectionPublicationProducerController,
@@ -55,7 +56,7 @@ fn materialize(@builtin(global_invocation_id) gid:vec3u) {
   let world=params.worldOrigin.xyz+vec3f(cellOrigin)*params.cellSize.xyz;
   let extent=f32(header.size)*params.cellSize.xyz;
   let level=u32(round(log2(max(1.0,f32(header.size)))));
-  let record=DebugRecord(vec4f(world,0.0),vec4f(extent,0.0),vec4u(${VOXEL_MATERIAL_IDS.fluid}u,ACTIVE,level,INVALID));
+  let record=DebugRecord(vec4f(world,0.0),vec4f(extent,0.0),vec4u(${VOXEL_MATERIAL_IDS.fluid}u,ACTIVE|${SPARSE_VOXEL_DEBUG_HAS_CONTENT}u,level,INVALID));
   voxelRecords[row]=record;
   brickRecords[row]=record;
 }

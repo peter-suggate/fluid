@@ -1,4 +1,4 @@
-import { combineInitialBrickWet, damBreakFractions, initialFluidBrickContainsCell } from "./initial-fluid";
+import { combineInitialBrickWet, initialFluidBrickContainsCell, sceneDamBreakFractions } from "./initial-fluid";
 import {
   CPUPerformanceTrace,
   GPUQueueWallPerformanceTraceRecorder,
@@ -522,6 +522,12 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   /** recordArena[13..15] captured one-shot by the NEXT begin: the preceding
    * failed transaction's terminal flags/detail/layout. */
   readonly precedingAirSupportTerminal?: readonly number[];
+  /** Failure-only CPU mirror of the rejected stage-6 leaf and its complete
+   * paper face/edge neighborhood. It is absent on clean publications. */
+  readonly airSupportFailureTopology?: Readonly<Record<string, unknown>>;
+  /** scratch[51..59]: immutable identity/reason captured by the failure's
+   * finalize pass before a later transaction may reuse its record slot. */
+  readonly airSupportTopologyFailureLatch?: readonly number[];
   /** scratch[41..42]: stationary-air fallback patch count and first
    * (cell<<3)|axis identity from the most recent march. */
   readonly airSupportFallbacks?: readonly number[];
@@ -1346,7 +1352,8 @@ fn recordPhysicsPhaseBoundary(
         directRows: support?.[5], supportCount: support?.[6],
         faceItems: support?.[10], seeds: support?.[11], maxWaves: support?.[12],
         latchedFlags: latched[0], latchedFirstError: latched[1],
-        precedingTerminal: value.precedingAirSupportTerminal }));
+        precedingTerminal: value.precedingAirSupportTerminal,
+        topologyFailure: value.airSupportFailureTopology }));
     }
     const fallbacks = value.airSupportFallbacks;
     if (fallbacks && (fallbacks[0] ?? 0) > 0
@@ -1658,7 +1665,7 @@ fn recordPhysicsPhaseBoundary(
 
   private initializeVolume() {
     const { nx, ny, nz } = this.info, c = this.scene.container;
-    const data = this.hostAllocation ? new Float32Array(nx * ny * nz) : undefined, dam = damBreakFractions(c.fillFraction);
+    const data = this.hostAllocation ? new Float32Array(nx * ny * nz) : undefined, dam = sceneDamBreakFractions(this.scene);
     const terrainHeights = terrainColumnHeights(this.scene, nx, nz), cellHeight = c.height_m / ny;
     let initialSum = 0;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {

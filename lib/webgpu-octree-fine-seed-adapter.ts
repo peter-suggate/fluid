@@ -27,7 +27,7 @@ export const OCTREE_FINE_SEED_ADAPTER_CONTROL_BYTES = 36;
 export const OCTREE_FINE_SEED_ADAPTER_PUBLICATION = Object.freeze({
   count: 0, dispatch: 1, generation: 4, published: 5, error: 6, capacity: 7, delta: 8,
 } as const);
-export const OCTREE_FINE_SEED_ADAPTER_PARAMETER_BYTES = 64;
+export const OCTREE_FINE_SEED_ADAPTER_PARAMETER_BYTES = 80;
 export const OCTREE_FINE_SEED_ADAPTER_DISPATCH_BYTES = 24;
 
 export interface OctreeFineSeedAdapterPlan {
@@ -85,6 +85,8 @@ export interface OctreeFineSeedAdapterOptions {
   /** Authored analytic SDF used only before the first fine generation. */
   readonly analyticInitialCondition?: "dam-break" | "tank-fill";
   readonly initialFillFraction?: number;
+  /** Optional absolute corner-anchored dam extents in world metres. */
+  readonly initialDamBreakDimensions?: readonly [number, number, number];
   /**
    * Imported dense t=0 level set for scenes with no closed-form surface. It is
    * always bound; `analyticInitialCondition` decides which authority the seed
@@ -154,7 +156,7 @@ var<workgroup> publicationValid:u32;
     let generation=select(0u,frontier[3],arrayLength(&frontier)>3u);
     candidateControl[0]=0u;candidateControl[1]=0u;candidateControl[2]=1u;candidateControl[3]=1u;
     candidateControl[4]=generation;candidateControl[5]=select(0u,1u,sourceValid&&generation!=0u);
-    candidateControl[6]=select(1u,0u,sourceValid);candidateControl[7]=0u;
+    candidateControl[6]=select(1u,0u,sourceValid);candidateControl[7]=params.dimsCapacity.w;
     candidateControl[8]=select(0u,1u,deltaMode());
   }
 }
@@ -185,7 +187,7 @@ var<workgroup> publicationValid:u32;
   if(lid==0u){
     candidateControl[0]=count;candidateControl[1]=(count+255u)/256u;
     candidateControl[2]=1u;candidateControl[3]=1u;candidateControl[4]=generation;
-    candidateControl[6]=error;candidateControl[7]=rows;
+    candidateControl[6]=error;candidateControl[7]=params.dimsCapacity.w;
     candidateControl[8]=select(0u,1u,deltaMode());
     publicationValid=select(0u,1u,generation!=0u&&error==0u);
     candidateControl[5]=publicationValid;
@@ -285,6 +287,11 @@ export class WebGPUOctreeFineSeedAdapter {
     if (!Number.isFinite(initialFillFraction) || initialFillFraction < 0 || initialFillFraction > 1) {
       throw new RangeError("Octree analytic initial fill fraction must lie in [0, 1]");
     }
+    const initialDamBreakDimensions = options.initialDamBreakDimensions ?? [0, 0, 0];
+    if (initialDamBreakDimensions.some((value, axis) => !Number.isFinite(value) || value < 0
+      || value > topology.cellSize[axis] * dimensions[axis])) {
+      throw new RangeError("Octree analytic dam dimensions must lie inside the domain");
+    }
     new Uint32Array(parameterData).set([
       dimensions[0], dimensions[1], dimensions[2], rowCapacity,
       finestLeafSize, Math.ceil(haloCells), analyticMode, 0,
@@ -299,6 +306,7 @@ export class WebGPUOctreeFineSeedAdapter {
       change.tileSizeCells, change.tileCapacity, change.topologyReuseWord,
       change.tileChangeFlagsOffsetWords,
     ] : [1, 0, OCTREE_FINE_SEED_INVALID, 0], 12);
+    new Float32Array(parameterData).set([...initialDamBreakDimensions, 0], 16);
     device.queue.writeBuffer(this.params, 0, parameterData);
 
     this.layout = device.createBindGroupLayout({ label: "Octree fine-seed adapter layout", entries: [
@@ -443,7 +451,7 @@ export class WebGPUOctreeFineSeedAdapter {
 export const octreeFineSeedAdapterShader = /* wgsl */ `
 struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f }
 struct FineSeedLeaf { originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f }
-struct Params { dimsCapacity:vec4u, selection:vec4u, cellHalo:vec4f, change:vec4u }
+struct Params { dimsCapacity:vec4u, selection:vec4u, cellHalo:vec4f, change:vec4u, damDimensions:vec4f }
 @group(0) @binding(0) var<storage,read> leafHeaders:array<LeafHeader>;
 @group(0) @binding(3) var<storage,read> structuredVelocityControl:array<u32>;
 @group(0) @binding(4) var<storage,read> structuredRowVelocities:array<vec4f>;
@@ -470,7 +478,7 @@ fn bootstrapPhi(point:vec3f)->f32{
 fn analyticInitialPhi(point:vec3f)->f32{
   let fill=bitcast<f32>(params.selection.w);let world=vec3f((point.x/f32(dims().x)-0.5)*params.cellHalo.x*f32(dims().x),point.y*params.cellHalo.y,(point.z/f32(dims().z)-0.5)*params.cellHalo.z*f32(dims().z));
   if(params.selection.z==1u){return world.y-fill*params.cellHalo.y*f32(dims().y);}
-  let heightFraction=max(0.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let extent=params.cellHalo.xyz*vec3f(dims());let exposedMaximum=vec3f(-0.5*extent.x+footprintFraction*extent.x,heightFraction*extent.y,-0.5*extent.z+footprintFraction*extent.z);let q=world-exposedMaximum;return length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.0);
+  let heightFraction=max(0.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let extent=params.cellHalo.xyz*vec3f(dims());let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);let authored=any(params.damDimensions.xyz>vec3f(0.0));let damDimensions=select(fallback,params.damDimensions.xyz,authored);let exposedMaximum=vec3f(-0.5*extent.x+damDimensions.x,damDimensions.y,-0.5*extent.z+damDimensions.z);let q=world-exposedMaximum;return length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.0);
 }
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn coarsePublicationValid()->bool{return arrayLength(&coarseControl)>=12u&&coarseControl[0]==0u

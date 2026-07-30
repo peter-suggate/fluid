@@ -342,6 +342,9 @@ test("fine phi commit separates interface membership from exact CP repair", () =
   assert.match(shader,
     /fnpublishStructuredFineDelta.*delta\[7\]=control\.maxDisplacement/s,
     "the topology delta must carry the measured complete-characteristic reach");
+  assert.match(shader,
+    /fnclearStructuredFineDelta.*i>=8u\+p\.pageCapacity&&i<8u\+2u\*p\.pageCapacity.*delta\[i\]=0u/s,
+    "delta compaction clears only its middle stream and preserves dense exact CP-repair records");
   assert.doesNotMatch(shader, /atomic/,
     "page-owned reductions and deterministic compaction must not revive an append race");
 });

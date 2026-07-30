@@ -33,10 +33,12 @@ export interface StructuredBoundaryResources {
   readonly dimensions: readonly [number, number, number];
   readonly physicalCellSize: number;
   readonly closedBoundaryMask: number;
-  /** Exact authored SDF used only until compact coarse phi publishes. */
+  /** Exact authored SDF used for the cold bootstrap and as a narrowly scoped
+   * fallback while a recurring coarse-directory generation is unpublished. */
   readonly analyticBootstrap?: Readonly<{
     initialCondition: "dam-break" | "tank-fill";
     fillFraction: number;
+    damBreakDimensions?: Readonly<{ x: number; y: number; z: number }>;
   }>;
   /**
    * The imported dense t=0 level set, used by scenes whose surface has no
@@ -89,6 +91,7 @@ export class WebGPUStructuredBoundaryCoefficients {
 
   constructor(private readonly device: GPUDevice, private readonly resources: StructuredBoundaryResources) {
     const { structured } = resources;
+    const analyticDam = resources.analyticBootstrap?.damBreakDimensions;
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || resources.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
       || resources.coarse.rowCapacity !== structured.plan.rowCapacity
@@ -100,6 +103,9 @@ export class WebGPUStructuredBoundaryCoefficients {
         && (!Number.isFinite(resources.analyticBootstrap.fillFraction)
           || resources.analyticBootstrap.fillFraction < 0
           || resources.analyticBootstrap.fillFraction > 1)
+      || analyticDam && [analyticDam.x, analyticDam.y, analyticDam.z]
+        .some((value, axis) => !Number.isFinite(value) || value < 0
+          || value > resources.dimensions[axis]! * resources.physicalCellSize)
       || resources.solid && resources.solid.plan.rowCapacity !== structured.plan.rowCapacity) {
       throw new RangeError("Structured boundary resources are invalid or undersized");
     }
@@ -131,13 +137,13 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.worksetBlocks = device.createBuffer({ label: "Structured boundary workset block prefixes",
       size: 9 * Math.ceil(Math.max(structured.plan.rowCapacity, structured.plan.slotCapacity) / 64) * 4,
       usage: storage });
-    this.params = device.createBuffer({ label: "Structured boundary parameters", size: 128,
+    this.params = device.createBuffer({ label: "Structured boundary parameters", size: 144,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     if (!resources.solid) {
       this.inertSolidStorage = device.createBuffer({ label: "Inert structured solid SDF binding", size: 80,
         usage: storage });
     }
-    const words = new Uint32Array(32), floats = new Float32Array(words.buffer);
+    const words = new Uint32Array(36), floats = new Float32Array(words.buffer);
     words.set([structured.plan.rowCapacity, structured.plan.slotCapacity,
       structured.plan.maximumCaseSlots, structured.plan.authorityWords,
       19, structured.section63.coefficientBankStrideWords,
@@ -153,6 +159,10 @@ export class WebGPUStructuredBoundaryCoefficients {
         : resources.analyticBootstrap?.initialCondition === "dam-break" ? 2
           : resources.bootstrapLevelSet ? 3 : 0], 28);
     floats[31] = resources.analyticBootstrap?.fillFraction ?? 0;
+    const dam = resources.analyticBootstrap?.damBreakDimensions;
+    floats.set([dam?.x ?? 0, dam?.y ?? 0, dam?.z ?? 0,
+      resources.analyticBootstrap?.initialCondition === "tank-fill" ? 1
+        : resources.analyticBootstrap?.initialCondition === "dam-break" ? 2 : 0], 32);
     device.queue.writeBuffer(this.params, 0, words.buffer);
     const module = device.createShaderModule({ label: "Structured boundary coefficients",
       code: structuredBoundaryCoefficientWGSL });
@@ -334,8 +344,9 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.encodeReadyCommit(broker);
   }
 
-  /** End the one-shot authored t=0 authority. Subsequent invalid coarse-phi
-   * samples are errors; the analytic surface is never a recovery fallback. */
+  /** End the one-shot authored t=0 authority. The immutable authored-shape
+   * marker remains so a recurring transaction can bridge only a missing
+   * coarse-directory publication; a valid coarse generation always wins. */
   retireAnalyticBootstrap(): void {
     this.device.queue.writeBuffer(this.params, 120, new Uint32Array([0]));
   }
@@ -350,7 +361,7 @@ export class WebGPUStructuredBoundaryCoefficients {
 }
 
 export const structuredBoundaryCoefficientWGSL = /* wgsl */ `
-struct P{counts:vec4u,resolved:vec4u,dimensions:vec4u,physical:vec4f,offset0:vec4u,offset1:vec4u,offset2:vec4u,pad:vec4u}
+struct P{counts:vec4u,resolved:vec4u,dimensions:vec4u,physical:vec4f,offset0:vec4u,offset1:vec4u,offset2:vec4u,pad:vec4u,damDimensions:vec4f}
 struct FineP{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,origin:vec3f,width:f32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
 // The 64-byte publication has always carried eight words past the pad. They now
 // hold a ghost-fluid theta histogram, which is the only production evidence of
@@ -387,11 +398,12 @@ fn rowCenter(row:u32)->vec3f{let g=geometry[rbase()+row];let q=vec3u(g.x%p.dimen
 fn finePage(key:u32)->u32{if(fp.worklistHeaderWords!=7u||arrayLength(&fineWork)<7u||fineWork[0]!=fp.generation||fineWork[2]!=fp.pageCapacity||(fineWork[3]&3u)!=3u){return INVALID;}let base=7u+fp.worklistCapacity;if(base+key>=arrayLength(&fineWork)){return INVALID;}let id=fineWork[base+key];let m=id*10u;return select(INVALID,id,id<fp.pageCapacity&&m+2u<arrayLength(&fineMeta)&&fineMeta[m]==id&&fineMeta[m+1u]==key&&fineMeta[m+2u]==fp.generation);}
 fn loadFine(q:vec3i)->vec2f{if(any(q<vec3i(0))||any(q>=vec3i(fp.sampleDimensions))){return vec2f(0.);}let u=vec3u(q);let brick=u/fp.brickResolution;let local=u-brick*fp.brickResolution;let key=brick.x+fp.brickDimensions.x*(brick.y+fp.brickDimensions.y*brick.z);let id=finePage(key);if(id==INVALID){return vec2f(0.);}let li=local.x+fp.brickResolution*(local.y+fp.brickResolution*local.z);let at=id*fp.samplesPerBrick+li;if(at>=arrayLength(&finePhi)||at>=arrayLength(&fineFlags)||(fineFlags[at]&1u)==0u||!finite(finePhi[at])){return vec2f(0.);}return vec2f(finePhi[at],1.);}
 fn fineSample(x:vec3f,coarsePhi:f32)->vec2f{if(!(fp.width>0.)||fp.brickResolution==0u){return vec2f(coarsePhi,0.);}let lattice=(x-fp.origin)/fp.width-vec3f(.5);let maximum=vec3f(fp.sampleDimensions)-vec3f(1.);if(any(lattice<vec3f(0.))||any(lattice>maximum)){return vec2f(coarsePhi,0.);}let base=vec3i(floor(lattice));let fraction=fract(lattice);var value=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let weight=select(1.-fraction.x,fraction.x,o.x==1)*select(1.-fraction.y,fraction.y,o.y==1)*select(1.-fraction.z,fraction.z,o.z==1);if(weight==0.){continue;}let sample=loadFine(base+o);if(sample.y==0.){return vec2f(coarsePhi,0.);}value+=weight*sample.x;}return vec2f(value,1.);}
-fn analyticInitialPhi(point:vec3f)->f32{let extent=vec3f(p.dimensions.xyz)*p.physical.x;let world=point-vec3f(.5*extent.x,0.,.5*extent.z);let fill=bitcast<f32>(p.pad.w);if(p.pad.z==1u){return world.y-fill*extent.y;}let heightFraction=max(.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let exposedMaximum=vec3f(-.5*extent.x+footprintFraction*extent.x,heightFraction*extent.y,-.5*extent.z+footprintFraction*extent.z);let q=world-exposedMaximum;return length(max(q,vec3f(0.)))+min(max(q.x,max(q.y,q.z)),0.);}
+fn authoredAnalyticPhiAvailable()->bool{return p.damDimensions.w==1.||p.damDimensions.w==2.;}
+fn analyticInitialPhi(point:vec3f)->f32{let extent=vec3f(p.dimensions.xyz)*p.physical.x;let world=point-vec3f(.5*extent.x,0.,.5*extent.z);let fill=bitcast<f32>(p.pad.w);if(p.pad.z==1u||p.damDimensions.w==1.){return world.y-fill*extent.y;}let heightFraction=max(.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);let authored=any(p.damDimensions.xyz>vec3f(0.));let damDimensions=select(fallback,p.damDimensions.xyz,authored);let exposedMaximum=vec3f(-.5*extent.x+damDimensions.x,damDimensions.y,-.5*extent.z+damDimensions.z);let q=world-exposedMaximum;return length(max(q,vec3f(0.)))+min(max(q.x,max(q.y,q.z)),0.);}
 fn bootstrapTexturePhi(point:vec3f)->f32{let c=vec3i(floor(point/p.physical.x));
  return textureLoad(bootstrapLevelSetIn,clamp(c,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)),0).x;}
 fn coarseValue(point:vec3f)->vec2f{if(p.pad.z==3u){return vec2f(bootstrapTexturePhi(point),1.);}
- if(p.pad.z!=0u){return vec2f(analyticInitialPhi(point),1.);}let generation=powerCoarseSamples.generation&0x3fffffffu;let expected=control.epoch&0x3fffffffu;if(powerCoarseSamples.state!=0x80000000u||generation!=expected||any(powerCoarseSamples.dimensions!=p.dimensions.xyz)||abs(powerCoarseSamples.physicalCellSize-p.physical.x)>1e-5*max(powerCoarseSamples.physicalCellSize,p.physical.x)){return vec2f(1.,0.);}let value=sampleCoarseOctreePhi(point);let valid=finite(value)&&value<3.402823e38;return vec2f(value,select(0.,1.,valid));}
+ if(p.pad.z!=0u){return vec2f(analyticInitialPhi(point),1.);}let generation=powerCoarseSamples.generation&0x3fffffffu;let expected=control.epoch&0x3fffffffu;if(powerCoarseSamples.state!=0x80000000u||generation!=expected||any(powerCoarseSamples.dimensions!=p.dimensions.xyz)||abs(powerCoarseSamples.physicalCellSize-p.physical.x)>1e-5*max(powerCoarseSamples.physicalCellSize,p.physical.x)){return select(vec2f(1.,0.),vec2f(analyticInitialPhi(point),1.),authoredAnalyticPhiAvailable());}let value=sampleCoarseOctreePhi(point);let valid=finite(value)&&value<3.402823e38;return vec2f(value,select(0.,1.,valid));}
 fn publishStructuredBoundarySetup(rowCount:u32,slotCount:u32,generation:u32,bank:u32,valid:bool){atomicStore(&control.flags,select(1u,0u,valid));atomicStore(&control.firstError,select(0u,INVALID,valid));control.rows=select(0u,rowCount,valid);control.slots=select(0u,slotCount,valid);control.epoch=select(0u,generation,valid);control.bank=select(0u,bank,valid);control.published=0u;for(var b=0u;b<8u;b+=1u){atomicStore(&control.theta[b],0u);}let rowBlocks=(control.rows+63u)/64u;dispatch[0]=rowBlocks;dispatch[1]=1u;dispatch[2]=1u;let slotBlocks=(control.slots+63u)/64u;let slotX=max(1u,min(65535u,slotBlocks));dispatch[3]=slotX;dispatch[4]=(slotBlocks+slotX-1u)/slotX;dispatch[5]=1u;}
 // Bucket boundaries are chosen around the 1e-2 floor and the values at which a
 // 1/theta face coefficient starts to dominate the row: [floor, .05, .1, .25,

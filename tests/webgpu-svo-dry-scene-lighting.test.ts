@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { createBiasedSvoVisibilityRay, SVO_VISIBILITY_LIMITS } from "../lib/svo-visibility-rays";
+import { createBiasedSvoVisibilityRay } from "../lib/svo-visibility-rays";
 import {
   directionalLightSceneExitDistance,
   SVO_DRY_SCENE_AREA_LIGHT_SAMPLES,
@@ -105,7 +105,7 @@ test("the moving-quality tier reduces cone work on the camera-changing sentinel 
   assert.ok(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES >= 1,
     "AO must never be switched off entirely while moving: restoring it at rest is a full ambient-term brightness step");
   const aoTier = new RegExp(
-    `select\\(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`,
+    `select\\(dry\\.tuningCounts1\\.z,dry\\.tuningCounts1\\.y,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`,
   );
   assert.match(svoDrySceneShader, aoTier, "AO cone counts must switch on the shared settled predicate");
 
@@ -114,7 +114,7 @@ test("the moving-quality tier reduces cone work on the camera-changing sentinel 
   assert.equal(SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES, 1);
   assert.equal(SVO_DRY_SCENE_AREA_LIGHT_SAMPLES, 2);
   const areaTier = new RegExp(
-    `let sampleCount=select\\(1u,select\\(${SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\),area\\)`,
+    `let sampleCount=select\\(1u,select\\(dry\\.tuningCounts1\\.x,dry\\.tuningCounts0\\.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\),area\\)`,
   );
   assert.match(svoDrySceneShader, areaTier,
     "area-light shape sample counts must switch on the shared settled predicate");
@@ -132,14 +132,12 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
   // along the geometric normal, the march end shortens by the escape's
   // projection plus a finite-emitter clearance of one cone-support width, and
   // the rigid blocker keeps the exact bias-adjusted ray.
-  assert.match(svoDrySceneShader, /let coneMaxRaw_m=max\(0\.0,ray\.tMax_m-coneEscape_m\*dot\(geometricNormal,towardLight\)\);[^]*dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,\.065,coneMax_m,geometricNormal,finiteDistance_m>0\.0\)[^]*rigidBlocker\.t<ray\.tMax_m/,
+  assert.match(svoDrySceneShader, /let coneMaxRaw_m=max\(0\.0,ray\.tMax_m-coneEscape_m\*dot\(geometricNormal,towardLight\)\);[^]*dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,dry\.tuningRays1\.y,coneMax_m,geometricNormal,finiteDistance_m>0\.0\)[^]*rigidBlocker\.t<ray\.tMax_m/,
     "cone visibility derives from the bias-adjusted emitter endpoint and rigid visibility keeps the exact ray");
   assert.match(svoDrySceneShader, /visibilityDistance=select\(distance,max\(0\.0,distance-light\.shape\.x\),light\.identity\.x==SVO_LIGHT_POINT\)/,
     "point attenuation uses center distance while visibility stops at the conservative emitter surface");
   assert.match(svoDrySceneShader, /fn directionalLightSceneExitDistance/);
-  assert.match(svoDrySceneShader, new RegExp(
-    `SvoVisibilityBudget\\(${SVO_VISIBILITY_LIMITS.nodeVisits}u,${SVO_VISIBILITY_LIMITS.leafVisits}u,${SVO_VISIBILITY_LIMITS.workItems}u,4u\\)`,
-  ));
+  assert.match(svoDrySceneShader, /SvoVisibilityBudget\(dry\.tuningCounts1\.w,dry\.tuningCounts2\.x,dry\.tuningCounts2\.y,dry\.tuningCounts2\.z\)/);
   assert.match(svoDrySceneShader, /svoTraceVisibility\([^;]*true,0\.001,max\(ray\.originBias_m,1e-6\)\)/,
     "the hard ray must bound pane transmission and advance beyond each sheet");
 
@@ -188,14 +186,14 @@ test("cone visibility is generation-checked and falls back to exact SVO visibili
   const lightStart = svoDrySceneShader.indexOf("fn dryLightVisibility(");
   const lightEnd = svoDrySceneShader.indexOf("fn dryContactVisibilityRadius", lightStart);
   const lightVisibility = svoDrySceneShader.slice(lightStart, lightEnd);
-  assert.match(lightVisibility, /dry\.materialPublication\.w&4u[^]*dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*return vec3f\(cone\.transmittance\);\}/);
+  assert.match(lightVisibility, /dry\.materialPublication\.w&4u[^]*dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*let raw=vec3f\(cone\.transmittance\)\*dryFluidTransmittance\(cone\.fluidDepth_m\);return mix\(vec3f\(1\.0\),raw,dry\.tuningRays0\.y\);\}/);
   assert.ok(lightVisibility.indexOf("svoTraceVisibility", lightVisibility.indexOf("dryConeVisibility")) > 0,
     "a missing or stale cone result must continue through exact bounded visibility");
   const contactStart = svoDrySceneShader.indexOf("fn dryContactVisibility(");
   const contactEnd = svoDrySceneShader.indexOf("fn dryEnvironment(", contactStart);
   assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /dry\.materialPublication\.w&4u[^]*dryNodeMipReady\(\)[^]*for\(var sampleIndex=0u;sampleIndex<4u/,
     "cone AO uses four bounded hemisphere samples only when the cache is ready");
-  assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /cone\.valid==0u\)\{coneValid=false;break;\}[^]*if\(coneValid\)\{return[^]*svoTraceVisibility/,
+  assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /cone\.valid==0u\)\{coneValid=false;break;\}[^]*if\(coneValid\)\{[^]*return[^]*svoTraceVisibility/,
     "an unavailable cone sample must fall through to exact bounded AO instead of leaking ambient light");
   assert.match(svoDrySceneShader, /diffuseEnvironment=[^;]*\*contactVisibility\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
     "AO must modulate diffuse environment only, leaving direct light, emission, and specular environment intact");
@@ -204,7 +202,7 @@ test("cone visibility is generation-checked and falls back to exact SVO visibili
 test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {
   assert.match(svoDrySceneShader, /if\(\(dry\.materialPublication\.w&2u\)==0u\)\{return vec3f\(1\.0\);\}/,
     "the shadow-disabled production path must return before traversal");
-  assert.match(rendererSource, /checkerboardShadowsEligible = this\.svoTemporalAccumulationEnabled && svoLightingOptions\.shadowsEnabled/,
+  assert.match(rendererSource, /checkerboardShadowsEligible = this\.svoTemporalAccumulationEnabled && activeSvoTuning\.checkerboardShadowsEnabled && svoLightingOptions\.shadowsEnabled/,
     "the user-facing shadow option must drive the temporally reconstructed visibility path");
   assert.match(svoDrySceneShader, /publicationState\[0\]==0u[^]*SVO_VIS_STEP_INVALID/);
   assert.match(svoDrySceneShader, /SVO_STATUS_WORK_EXHAUSTED\|\|leaf\.status==SVO_STATUS_STACK_OVERFLOW\|\|leaf\.status==SVO_STATUS_SOURCE_OVERFLOW[^]*SVO_VIS_STEP_EXHAUSTED/);

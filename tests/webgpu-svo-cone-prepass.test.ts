@@ -27,7 +27,7 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityTexture:texture_2d<f32>/);
     assert.match(reduced, /@group\(1\) @binding\(1\) var dryPrepassGeometryTexture:texture_2d<f32>/);
     assert.match(reduced, /@fragment fn dryPrepassMain/);
-    assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true })),
+    assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true })),
       "the reduced variant must embed the identical optimized marcher block");
     assert.match(reduced, /if\(weightSum<0\.05\)\{dryConeFallback=1u;return;\}/,
       "silhouette pixels below the guidance-weight threshold must fall back to exact inline cones");

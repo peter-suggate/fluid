@@ -1409,7 +1409,7 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     pass.exactAttribution && pass.label.startsWith("Fine JFA -"));
   if (fineJFAMicroStages.length > 0) {
     lines.push("");
-    lines.push("fine JFA micro-stages (cooperative floods use eight 32-lane teams):");
+    lines.push("fine JFA micro-stages (B4 floods use one voxel per lane):");
     for (const pass of fineJFAMicroStages) {
       lines.push(`  ${pass.gpuMsPerFrame.toFixed(3).padStart(8)} ms`
         + ` ${pass.callsPerFrame.toFixed(1).padStart(6)}x`

@@ -3,7 +3,7 @@ import { svoTemporalHistoryWGSL } from "./svo-temporal-history";
 import type { SparseVoxelGBufferTextures } from "./webgpu-svo-gbuffer-targets";
 
 export const SVO_TEMPORAL_ACCUMULATION_LAYOUT = Object.freeze({
-  paramsBytes: 160,
+  paramsBytes: 176,
   historyColorFormat: "rgba16float" as GPUTextureFormat,
   momentsFormat: "rgba16float" as GPUTextureFormat,
   keyFormat: "rgba16uint" as GPUTextureFormat,
@@ -38,6 +38,9 @@ export interface SparseVoxelTemporalFrameState {
   paused: boolean;
   /** History is dry-only and must resolve before the legacy raster-water compositor samples it. */
   composition: "dry-before-raster-water";
+  maximumSamples?: number;
+  varianceSigma?: number;
+  depthToleranceScale?: number;
 }
 
 interface TemporalHistorySet {
@@ -70,6 +73,8 @@ struct TemporalParams{
   previousRight:vec4f,
   previousUp:vec4f,
   control:vec4f,
+  // x: accumulation cap; y: variance sigma; z: history depth-tolerance scale.
+  tuning:vec4f,
 }
 @group(0) @binding(0) var<uniform> temporal:TemporalParams;
 @group(0) @binding(1) var currentColor:texture_2d<f32>;
@@ -110,19 +115,19 @@ fn temporalLuminance(color:vec3f)->f32{return dot(color,vec3f(.2126,.7152,.0722)
 fn temporalSignedVelocityLane(word:u32,shift:u32)->f32{let raw=i32((word>>shift)&0x3ffu);let signed=select(raw,raw-1024,raw>=512);return f32(signed)*(SVO_GBUFFER_MAX_VELOCITY_M_S/511.0);}
 fn temporalVelocity(word:u32)->vec3f{return vec3f(temporalSignedVelocityLane(word,0u),temporalSignedVelocityLane(word,10u),temporalSignedVelocityLane(word,20u));}
 fn temporalVarianceClamp(colorIn:vec3f,moments:vec4f)->vec3f{
-  let luminance=temporalLuminance(colorIn);let variance=max(moments.y-moments.x*moments.x,0.0);let deviation=max(2.0*sqrt(variance),.01);let clipped=clamp(luminance,moments.x-deviation,moments.x+deviation);return colorIn*select(1.0,clipped/max(luminance,1e-6),luminance>1e-6);
+  let luminance=temporalLuminance(colorIn);let variance=max(moments.y-moments.x*moments.x,0.0);let deviation=max(temporal.tuning.y*sqrt(variance),.01);let clipped=clamp(luminance,moments.x-deviation,moments.x+deviation);return colorIn*select(1.0,clipped/max(luminance,1e-6),luminance>1e-6);
 }
 @fragment fn temporalFragment(@builtin(position) position:vec4f)->TemporalOut{
   let dimensions=vec2i(textureDimensions(currentColor));let pixel=clamp(vec2i(position.xy),vec2i(0),dimensions-vec2i(1));let current=textureLoad(currentColor,pixel,0);let packed=textureLoad(currentPackedSurface,pixel,0);let identity=textureLoad(currentIdentityMedia,pixel,0);let published=temporalPublishedKey(packed,identity);let metadataFlags=(packed.w>>4u)&0xffffu;let failure=(packed.w>>20u)&0xffu;let shadowDeferred=failure==TEMPORAL_FAILURE_SHADOW_DEFERRED;let motionKind=packed.z>>30u;let velocity=temporalVelocity(packed.z);let supportedMotion=motionKind==SVO_TEMPORAL_MOTION_STATIC||motionKind==SVO_TEMPORAL_MOTION_RIGID;let currentUsable=(metadataFlags&TEMPORAL_REQUIRED_FLAGS)==TEMPORAL_REQUIRED_FLAGS&&supportedMotion&&current.a>0.0;
   var accepted=false;var previous=vec4f(0.0);var oldMoments=vec4f(0.0);var previousPixel=vec2i(0);var expectedPreviousDistance=0.0;
   if(temporal.control.z>.5&&currentUsable){
     let world=temporal.currentPosition.xyz+temporalCurrentRay(position.xy)*current.a;let previousWorld=world-velocity*temporal.control.y;let relative=previousWorld-temporal.previousPosition.xyz;let previousForwardDepth=dot(relative,temporal.previousForward.xyz);let previousNdc=vec2f(dot(relative,temporal.previousRight.xyz)/(max(previousForwardDepth,1e-6)*temporal.currentForwardAspect.w*TEMPORAL_TAN_HALF_FOV),dot(relative,temporal.previousUp.xyz)/(max(previousForwardDepth,1e-6)*TEMPORAL_TAN_HALF_FOV));let previousUv=previousNdc*.5+.5;let reprojectValid=previousForwardDepth>0.0&&all(previousUv>=vec2f(0.0))&&all(previousUv<vec2f(1.0));
-    if(reprojectValid){previousPixel=clamp(vec2i(floor(previousUv*temporal.viewport.xy)),vec2i(0),dimensions-vec2i(1));oldMoments=textureLoad(previousMoments,previousPixel,0);if(oldMoments.z>0.0){let keyA=textureLoad(previousKeyA,previousPixel,0);let keyB=textureLoad(previousKeyB,previousPixel,0);let exactIdentity=all(keyA.zw==published[0].zw)&&all(keyB==published[1]);if(exactIdentity){previous=textureLoad(previousColor,previousPixel,0);var currentKey=temporalKey(current,packed,identity);expectedPreviousDistance=length(relative);currentKey.depth_m=expectedPreviousDistance;let previousKey=temporalPreviousKey(previous,keyA,keyB);let error=abs(previous.a-expectedPreviousDistance);accepted=svoTemporalHistoryReason(currentKey,previousKey,temporal.control.x,temporal.control.y,velocity,motionKind,true,true,error)==SVO_TEMPORAL_REASON_ACCEPTED;}}}
+    if(reprojectValid){previousPixel=clamp(vec2i(floor(previousUv*temporal.viewport.xy)),vec2i(0),dimensions-vec2i(1));oldMoments=textureLoad(previousMoments,previousPixel,0);if(oldMoments.z>0.0){let keyA=textureLoad(previousKeyA,previousPixel,0);let keyB=textureLoad(previousKeyB,previousPixel,0);let exactIdentity=all(keyA.zw==published[0].zw)&&all(keyB==published[1]);if(exactIdentity){previous=textureLoad(previousColor,previousPixel,0);var currentKey=temporalKey(current,packed,identity);expectedPreviousDistance=length(relative);currentKey.depth_m=expectedPreviousDistance;let previousKey=temporalPreviousKey(previous,keyA,keyB);let error=abs(previous.a-expectedPreviousDistance);accepted=svoTemporalHistoryReason(currentKey,previousKey,temporal.control.x*temporal.tuning.z,temporal.control.y,velocity,motionKind,true,true,error)==SVO_TEMPORAL_REASON_ACCEPTED;}}}
   }
   var result=current.rgb;var sampleCount=select(-1.0,1.0,currentUsable&&!shadowDeferred);var pausedStable=select(0.0,1.0,temporal.control.w>.5&&currentUsable&&!shadowDeferred);
   if(accepted){
     if(shadowDeferred){result=previous.rgb;sampleCount=oldMoments.z;pausedStable=oldMoments.w;}
-    else{let neighborhood=temporalNeighborhood(pixel,dimensions,current.rgb);var history=clamp(previous.rgb,neighborhood[0],neighborhood[1]);history=temporalVarianceClamp(history,oldMoments);sampleCount=min(oldMoments.z+1.0,255.0);pausedStable=select(0.0,min(oldMoments.w+1.0,255.0),temporal.control.w>.5);let accumulationCount=min(sampleCount,${SVO_TEMPORAL_ACCUMULATION_LAYOUT.maximumAccumulationSamples}.0);result=mix(current.rgb,history,(accumulationCount-1.0)/accumulationCount);}
+    else{let neighborhood=temporalNeighborhood(pixel,dimensions,current.rgb);var history=clamp(previous.rgb,neighborhood[0],neighborhood[1]);history=temporalVarianceClamp(history,oldMoments);sampleCount=min(oldMoments.z+1.0,255.0);pausedStable=select(0.0,min(oldMoments.w+1.0,255.0),temporal.control.w>.5);let accumulationCount=min(sampleCount,temporal.tuning.x);result=mix(current.rgb,history,(accumulationCount-1.0)/accumulationCount);}
   }
   let luminance=min(temporalLuminance(current.rgb),255.0);let momentWeight=1.0/max(sampleCount,1.0);let mean=select(luminance,select(mix(oldMoments.x,luminance,momentWeight),oldMoments.x,shadowDeferred),accepted);let second=select(luminance*luminance,select(mix(oldMoments.y,luminance*luminance,momentWeight),oldMoments.y,shadowDeferred),accepted);return TemporalOut(vec4f(max(result,vec3f(0.0)),current.a),vec4f(mean,second,sampleCount,pausedStable),published[0],published[1]);
 }
@@ -230,6 +235,12 @@ export class SparseVoxelTemporalAccumulator {
     buffer.set([...previousCamera.right, 0], 28);
     buffer.set([...previousCamera.up, 0], 32);
     buffer.set([frame.cellSize_m, frame.deltaTime_s, this.historyValid ? 1 : 0, frame.paused ? 1 : 0], 36);
+    buffer.set([
+      Math.max(1, Math.min(SVO_TEMPORAL_ACCUMULATION_LAYOUT.maximumStoredSamples, Math.round(frame.maximumSamples ?? SVO_TEMPORAL_ACCUMULATION_LAYOUT.maximumAccumulationSamples))),
+      Math.max(0.5, Math.min(4, frame.varianceSigma ?? 2)),
+      Math.max(0.25, Math.min(4, frame.depthToleranceScale ?? 1)),
+      0,
+    ], 40);
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
     if (!this.inputBindings || this.inputBindings.currentTarget !== currentTarget
       || this.inputBindings.packedSurface !== gBuffer.packedSurface

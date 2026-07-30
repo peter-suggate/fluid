@@ -4,6 +4,7 @@ import type { MethodParamValues } from "./methods";
 import { createPaperScenario } from "./paper-scenarios";
 import {
   CEILING_DROP_METHOD_PROFILE,
+  LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
   createBrickQuadDamBreakScene,
   createOceanSeicheScene,
   createTwinDamCollisionScene,
@@ -37,6 +38,7 @@ export const sceneWebGPUSmokeIds = [
   "hydrostatic-power-two-level",
   "hydrostatic-power-large-offset",
   "minimal-power-dam-break",
+  "large-power-dam-break",
   "ceiling-slab-drop",
   "corner-brick-drop",
   "midair-brick-drop",
@@ -335,6 +337,12 @@ const octreePowerOverrides = {
   maximumLeafSize: "2",
   interfaceRefinementBandCells: 3,
   globalFineLevelSetFactor: "4",
+} as const;
+const largePowerDamOverrides = {
+  ...octreePowerOverrides,
+  maximumLeafSize: "16",
+  interfaceRefinementBandCells: 1,
+  globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
 } as const;
 
 const powerDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [
@@ -850,6 +858,16 @@ const suiteList = [
       methods: methods(["octree"], { octree: { ...octreePowerOverrides, globalFineLevelSetFactor: "8" } }),
       collect: { fieldStats: "final", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } }, diagnostics: powerDiagnostics, timeout_ms: 240_000 }),
   }),
+  suite("large-power-dam-break", "20x-volume authored dam cold-start and one-step regression",
+    () => getScenePreset("large-power-dam-break").create(), {
+      default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
+        methods: methods(["octree"], { octree: largePowerDamOverrides }), timeout_ms: 240_000,
+        collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true, structuredValidation: true,
+          globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
+        diagnostics: [powerDiagnostics[0], powerDiagnostics[2]],
+        acceptance: [...powerAcceptance,
+          { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 20, 64] }] }),
+    }),
   ...(["ceiling-slab-drop", "corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const).map((id) => suite(id,
     id === "ceiling-slab-drop" ? "Seeded brick flush under the lid free-fall oracle"
       : id === "corner-brick-drop" ? "Seeded brick in a lid/corner seam free-fall oracle"

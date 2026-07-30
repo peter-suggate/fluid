@@ -168,6 +168,17 @@ test("pressure topology residency covers refinement and 2:1 grading support", ()
   assert.doesNotMatch(source, /\+ \(this\.maxLeafSize - 1\)/, "grading support no longer inflates brick residency");
   assert.match(fluidBrickResidencyShader, /2:1 grading chain travels less than one maximum-leaf tile/);
   assert.match(source, /haloCells: topologyHaloCells/);
+  const surfacePublication = source.slice(source.indexOf("encodeSurface("),
+    source.indexOf("addSurfaceReferenceVolumeCells("));
+  assert.match(surfacePublication,
+    /fineSeedAdapter\.encode\(preparationBroker\)[\s\S]*topologyResidency\.encodeFineSeedCandidates/,
+    "current fine-demand residency must publish before the substep's topology balance");
+  const renderStart = source.indexOf("  encodeSparseBrickWorld(encoder:");
+  const renderPublication = source.slice(renderStart,
+    source.indexOf("\n  destroy()", renderStart));
+  assert.doesNotMatch(renderPublication,
+    /this\.topologyResidency\.encodeFineSeedCandidates/,
+    "render publication must not be the topology worklist's first current-generation update");
 });
 
 test("retired topology tiles rebuild before leaving the active domain", () => {
@@ -178,6 +189,9 @@ test("retired topology tiles rebuild before leaving the active domain", () => {
   assert.match(rebuild, /this\.refineCoarsePipelines\.get\(size\)/,
     "coarse cooperative refinement covers the full domain, including retired tiles");
   assert.match(rebuild, /dispatchCandidates\(this\.balancePipeline,this\.balanceDeltaPipeline\)/);
+  assert.match(rebuild,
+    /this\.refineLevelPipelines[\s\S]*topologyResidency\.tileWorklist[\s\S]*FLUID_TILE_ACTIVE_CANDIDATE_DISPATCH_OFFSET_BYTES[\s\S]*balanceRounds/,
+    "grading closure must inspect the complete resident support stream after delta refinement");
   assert.match(octreeProjectionShader, /fn deltaTileOrigin/);
   // Retired tile indices follow the active tile capacity in the copied list.
   assert.match(octreeProjectionShader,

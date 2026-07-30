@@ -9,6 +9,7 @@ import {
   OCTREE_OWNER_PAGE_CONTROL_WORDS,
   OCTREE_OWNER_PAGE_LOOKUP_STATUS,
   OCTREE_OWNER_PAGE_PUBLICATION_STATUS,
+  OCTREE_OWNER_PAGE_WORD_TOPOLOGY,
   OCTREE_OWNER_PAGE_WORD_VALID,
   WebGPUOctreeSimulationOwnerPages,
   OctreeOwnerPageLifecycleMirror,
@@ -174,9 +175,10 @@ test("sorted owner lookup decodes a stable physical page independent of record r
   arena[plan.ownerDirectoryOffsetWords + 2] = 1;
   const cell = [16, 0, 0] as const;
   arena[plan.ownerPagesOffsetWords] =
-    packOctreeOwnerPageWord(cell, cell, 1);
+    packOctreeOwnerPageWord(cell, cell, 1) | OCTREE_OWNER_PAGE_WORD_TOPOLOGY;
   assert.deepEqual(lookupOctreeOwnerPage(arena, plan, cell, 16), {
-    origin: [...cell], size: 1, missing: false, status: 0,
+    origin: [...cell], size: 1, missing: false,
+    status: OCTREE_OWNER_PAGE_LOOKUP_STATUS.topology,
   });
   assert.ok((lookupOctreeOwnerPage(arena, plan, [8, 0, 0], 16).status
     & OCTREE_OWNER_PAGE_LOOKUP_STATUS.missing) !== 0);
@@ -254,6 +256,11 @@ test("WGSL materializes a complete inactive payload without touching the active 
   assert.match(publish, /var word=arena\[payloadBase\(activeTable\(\)\)[\s\S]*arena\[payloadBase\(inactiveTable\(\)\)/);
   assert.doesNotMatch(publish, /arena\[payloadBase\(activeTable\(\)\).*\]=/,
     "candidate publication must never write the accepted payload bank");
+  assert.match(publish, /word&=~OWNER_WORD_TOPOLOGY/,
+    "inactive-bank carry must clear the prior frontier's leaf-membership marks");
+  assert.match(projectionSource,
+    /fn markAcceptedOwner[\s\S]*atomicOr\(&owners\[at\],OWNER_WORD_TOPOLOGY\)[\s\S]*fn emitLeaves[\s\S]*markAcceptedOwner\(unpackOrigin\(acceptedOwner\.packedOrigin\)\)/,
+    "only compact accepted leaves may mark extension-graph membership");
 });
 
 test("owner control ABI names every word by its current deterministic-publication meaning", () => {
