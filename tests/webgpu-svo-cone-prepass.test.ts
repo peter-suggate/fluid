@@ -24,8 +24,10 @@ test("scale 1 preserves the production shader byte-for-byte (fingerprint contrac
 test("reduced scales add the prepass entry and guided upsample while keeping every inline fallback", () => {
   for (const scale of [0.5, 0.25] as const) {
     const reduced = createSvoDrySceneFragmentWGSL(scale);
-    assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityTexture:texture_2d<f32>/);
-    assert.match(reduced, /@group\(1\) @binding\(1\) var dryPrepassGeometryTexture:texture_2d<f32>/);
+    assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityTexture0:texture_2d<f32>/);
+    assert.match(reduced, /@group\(1\) @binding\(1\) var dryPrepassVisibilityTexture1:texture_2d<f32>/);
+    assert.match(reduced, /@group\(1\) @binding\(2\) var dryPrepassVisibilityTexture2:texture_2d<f32>/);
+    assert.match(reduced, /@group\(1\) @binding\(3\) var dryPrepassGeometryTexture:texture_2d<f32>/);
     assert.match(reduced, /@fragment fn dryPrepassMain/);
     assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true })),
       "the reduced variant must embed the identical optimized marcher block");
@@ -34,11 +36,17 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     // Deliberate cone-banding fix: shadow-cone origins escape the receiver's
     // trilinear support along the geometric normal, and finite emitters clear
     // the march end by one cone-support width before marching.
-    assert.match(reduced, /let cone=dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,\.065,coneMax_m,geometricNormal,finiteDistance_m>0\.0\)/,
-      "the inline shadow cone must remain the fallback for fallback-band pixels and lights past slot 2");
-    assert.match(reduced, /dryCurrentLightSlot<3u/,
-      "lights at slot 3 and above must keep inline full-resolution cones (documented cap)");
-    assert.match(reduced, /let prepassRigidBlocker=nearestBodyIgnoring\(ray\.origin_m,towardLight,ownerId\);if\(prepassRigidBlocker\.t<ray\.tMax_m\)\{return vec3f\(0\.0\);\}/,
+    assert.match(reduced, /let cone=dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,dry\.tuningRays1\.y,coneMax_m,geometricNormal,finiteDistance_m>0\.0\)/,
+      "the inline shadow cone must remain the fallback for fallback-band pixels");
+    assert.match(reduced, /dryCurrentLightSlot<8u/,
+      "every user-shadable light slot must reuse the reduced-rate visibility cache");
+    assert.match(reduced, /if\(index<4u\)\{return dryPrepassData0\[index\];\}[^]*if\(index<8u\)\{return dryPrepassData1\[index-4u\];\}[^]*dryPrepassData2\[min\(index-8u,3u\)\]/,
+      "AO and all eight light slots must decode from their documented packed planes");
+    assert.match(reduced, /if\(lightIndex<3u\)\{output\.visibility0\[1u\+lightIndex\]=packedVisibility;\}[^]*else if\(lightIndex<7u\)\{output\.visibility1\[lightIndex-3u\]=packedVisibility;\}[^]*else\{output\.visibility2\.x=packedVisibility;\}/,
+      "the prepass writer and full-resolution reader must agree on every packed light channel");
+    assert.match(reduced, /if\(lightCount>3u\)\{accumulated1\+=textureLoad\(dryPrepassVisibilityTexture1[^]*if\(lightCount>7u\)\{accumulated2\+=textureLoad\(dryPrepassVisibilityTexture2/,
+      "unused visibility planes must not add guided texture reads at lower light caps");
+    assert.match(reduced, /let raw=select\(dryPrepassChannel\(1u\+dryCurrentLightSlot\),0\.0,prepassRigidBlocker\.t<ray\.tMax_m\)/,
       "rigid-body blocker terms stay inline at full resolution on the upsampled shadow path");
     assert.match(reduced, /prepassUnblocked\+=select\(1\.0,0\.0,prepassRigidBlocker\.t<prepassRadius\)/,
       "rigid AO blocker sampling stays inline at full resolution on the upsampled AO path");
@@ -50,8 +58,9 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
 
 test("prepass target contract and sizing", () => {
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityFormat, "rgba8unorm");
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityTargetCount, 3);
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.geometryFormat, "rgba16float");
-  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights, 3);
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights, 8);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.5), [640, 360]);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.25), [320, 180]);
   assert.deepEqual(svoConePrepassSize(1281, 721, 0.5), [641, 361]);

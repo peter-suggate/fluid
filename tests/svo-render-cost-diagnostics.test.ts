@@ -113,5 +113,5 @@ test("reduced cone lighting visualizes prepass reuse and full-resolution fallbac
   assert.match(reducedShader, new RegExp(`mode==${prepassMode}u`));
   assert.match(reducedShader, /dryPrepassState==1u[^]*vec3f\(0\.0,\.9,1\.0\)/);
   assert.match(reducedShader, /dryConeFallback==1u[^]*vec3f\(1\.0,\.09,\.30\)/);
-  assert.match(reducedShader, /dryPrepassData=vec4f\(1\.0\);dryPrepassState=0u;dryConeFallback=0u/);
+  assert.match(reducedShader, /dryPrepassData0=vec4f\(1\.0\);dryPrepassData1=vec4f\(1\.0\);dryPrepassData2=vec4f\(1\.0\);dryPrepassState=0u;dryConeFallback=0u/);
 });

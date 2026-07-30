@@ -674,3 +674,22 @@ test("one gate decides whether the probe runs, so a pinned ray cannot half-probe
   // The scene key covers the epoch, the presentation, and the traversal tuning.
   assert.match(renderer, /sceneEpoch \?\? 0\}\|\$\{presentationContext\}\|\$\{diagnosticsKey\}/);
 });
+
+test("a pinned ray's aim is only ever recorded from a request, never invented", () => {
+  const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  // The aim is written in exactly one place: where a pin request resolves. Any
+  // other writer would be inventing one from the current pointer and camera, and
+  // a refresh against an invented aim answers a ray the user never pinned.
+  const aims = viewport.match(/tracePinnedRef\.current = \{/g) ?? [];
+  assert.equal(aims.length, 1, "exactly one place records an aim");
+  const clears = viewport.match(/tracePinnedRef\.current = null/g) ?? [];
+  assert.equal(clears.length, 2, "cleared when unpinned and when the diagnostic closes");
+  assert.match(viewport, /if \(!pinnedNow\) tracePinnedRef\.current = null;/);
+  // Neither pin control declares a pin; both ask, so the viewport supplies the aim.
+  assert.match(panel, /on \? requestPixelTracePin\(\) : setPixelTracePinned\(false\)/);
+  assert.match(viewport, /pixelTracePinned \? setPixelTracePinned\(false\) : requestPixelTracePin\(\)/);
+  assert.match(viewport, /ui\.pixelTracePinRequested && !ui\.pixelTracePinned/);
+  // While pinned the probe traces the pinned pixel, not wherever the pointer went.
+  assert.match(viewport, /const pointer = pinnedAt \?\? tracePinRequestRef\.current \?\? tracePointerRef\.current;/);
+});

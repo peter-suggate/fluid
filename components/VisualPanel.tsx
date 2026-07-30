@@ -76,6 +76,7 @@ export function VisualPanel() {
   const setPixelTraceEnabled = useUIStore((state) => state.setPixelTraceEnabled);
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
   const setPixelTracePinned = useUIStore((state) => state.setPixelTracePinned);
+  const requestPixelTracePin = useUIStore((state) => state.requestPixelTracePin);
 
   const selectedView = SVO_COST_OVERLAY_DEFINITIONS[svoCostOverlay];
   const visualizationAvailable = svoRenderMode === "svo" && voxelRenderMode === "smooth";
@@ -248,7 +249,14 @@ export function VisualPanel() {
       <ControlGroup title="Ray work under the pointer" note="LIVE 3D TRACE OF ONE PIXEL" open>
         <div className="render-toggle-row" role="group" aria-label="Live ray-work diagnostic">
           <Toggle label="Trace hovered pixel" checked={pixelTraceEnabled} onChange={enablePixelTrace} />
-          <Toggle label="Pin ray" checked={pixelTracePinned} disabled={!pixelTraceEnabled} onChange={setPixelTracePinned} />
+          <Toggle
+            label="Pin ray"
+            checked={pixelTracePinned}
+            disabled={!pixelTraceEnabled}
+            // The viewport owns which pixel and which view a pin records, so this
+            // asks for one rather than declaring one from out here.
+            onChange={(on) => (on ? requestPixelTracePin() : setPixelTracePinned(false))}
+          />
         </div>
         <p className="panel-note">
           Hovering the viewport re-traces that exact pixel with an instrumented mirror of the shipping shader and draws

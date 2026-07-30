@@ -72,6 +72,13 @@ interface UIStore {
   pixelTraceEnabled: boolean;
   /** A pinned trace holds its recorded geometry so the camera can orbit it. */
   pixelTracePinned: boolean;
+  /**
+   * A pin asked for from outside the viewport. The viewport owns the aim — which
+   * pixel, from which view — and pinning without recording it is what lets a
+   * later refresh silently answer a different ray, so a control that cannot know
+   * the aim asks for a pin instead of declaring one.
+   */
+  pixelTracePinRequested: boolean;
   pixelTraceLayers: readonly SvoPixelTraceLayer[];
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   setActiveTool: (tool: EditorTool) => void;
@@ -97,6 +104,8 @@ interface UIStore {
   setSvoRenderTuning: (next: SvoRenderTuning | ((current: SvoRenderTuning) => SvoRenderTuning)) => void;
   setPixelTraceEnabled: (enabled: boolean) => void;
   setPixelTracePinned: (pinned: boolean) => void;
+  /** Ask the viewport to pin the ray under the pointer, aim and all. */
+  requestPixelTracePin: () => void;
   togglePixelTraceLayer: (layer: SvoPixelTraceLayer) => void;
   setPixelTraceLayers: (layers: readonly SvoPixelTraceLayer[]) => void;
 }
@@ -126,6 +135,7 @@ export const useUIStore = create<UIStore>((set) => ({
   svoRenderTuning: DEFAULT_SVO_RENDER_TUNING,
   pixelTraceEnabled: false,
   pixelTracePinned: false,
+  pixelTracePinRequested: false,
   pixelTraceLayers: SVO_PIXEL_TRACE_LAYERS,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
   setActiveTool: (activeTool) => set({ activeTool }),
@@ -171,8 +181,12 @@ export const useUIStore = create<UIStore>((set) => ({
   setPixelTraceEnabled: (pixelTraceEnabled) => set((state) => ({
     pixelTraceEnabled,
     pixelTracePinned: pixelTraceEnabled ? state.pixelTracePinned : false,
+    pixelTracePinRequested: false,
   })),
-  setPixelTracePinned: (pixelTracePinned) => set({ pixelTracePinned }),
+  // Only the viewport may declare a pin, because only it knows the aim the pin
+  // must record. Every other control asks, and the request is consumed there.
+  setPixelTracePinned: (pixelTracePinned) => set({ pixelTracePinned, pixelTracePinRequested: false }),
+  requestPixelTracePin: () => set({ pixelTracePinRequested: true }),
   togglePixelTraceLayer: (layer) => set((state) => ({
     pixelTraceLayers: state.pixelTraceLayers.includes(layer)
       ? state.pixelTraceLayers.filter((entry) => entry !== layer)

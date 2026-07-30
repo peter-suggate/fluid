@@ -108,6 +108,7 @@ export function WebGPUViewport() {
   const pixelTraceLayers = useUIStore((state) => state.pixelTraceLayers);
   const setPixelTraceEnabled = useUIStore((state) => state.setPixelTraceEnabled);
   const setPixelTracePinned = useUIStore((state) => state.setPixelTracePinned);
+  const requestPixelTracePin = useUIStore((state) => state.requestPixelTracePin);
   const togglePixelTraceLayer = useUIStore((state) => state.togglePixelTraceLayer);
   const [pixelTraceState, setPixelTraceState] = useState<{
     trace: SvoPixelTrace | undefined;
@@ -194,6 +195,18 @@ export function WebGPUViewport() {
     const status = renderer.pixelTraceStatus;
     const pointerSeen = tracePointerRef.current !== null;
     const revision = renderer.pixelTraceRevision;
+    // A pin asked for from the panel or the HUD button becomes the same request a
+    // click makes, so both record an exact aim and neither can re-aim later.
+    const ui = useUIStore.getState();
+    if (ui.pixelTracePinRequested && !ui.pixelTracePinned && !tracePinRequestRef.current && tracePointerRef.current) {
+      tracePinRequestRef.current = svoPixelTracePinClick({
+        pinned: false, pending: false,
+        ...tracePointerRef.current,
+        cameraKey: pixelTraceCameraKey(ui.camera),
+        revision,
+      }).request ?? null;
+      useUIStore.setState({ pixelTracePinRequested: false });
+    }
     const pinRequest = tracePinRequestRef.current;
     if (pinRequest) {
       // The probe has been tracing the clicked pixel since the click; freeze it
@@ -219,18 +232,12 @@ export function WebGPUViewport() {
       }
     }
     const pinnedNow = useUIStore.getState().pixelTracePinned;
-    if (!pinnedNow) {
-      tracePinnedRef.current = null;
-    } else if (!tracePinnedRef.current && tracePointerRef.current) {
-      // Pinned from the panel or the HUD button rather than by a click. Reaching
-      // either control takes the pointer off the viewport, so the last position it
-      // held is the pixel the probe has been tracing ever since — which makes it
-      // the aim of the trace now being frozen.
-      tracePinnedRef.current = {
-        ...tracePointerRef.current,
-        cameraKey: pixelTraceCameraKey(useUIStore.getState().camera),
-      };
-    }
+    // A pin with no aim on record can never be refreshed, so it must never be
+    // possible: an aim invented from the current pointer and camera would let a
+    // later refresh answer a ray the user never pinned. Controls outside the
+    // viewport therefore ask, and the ask is honoured through the same handshake
+    // a click uses.
+    if (!pinnedNow) tracePinnedRef.current = null;
     // Staleness worth reporting is the kind no refresh can fix; everything else
     // resolves itself on the next frame.
     const { stale } = resolveSvoPixelTracePinnedFrame({
@@ -1158,7 +1165,8 @@ export function WebGPUViewport() {
         pointerSeen={pixelTraceState.pointerSeen}
         stale={pixelTraceState.stale}
         onToggleLayer={togglePixelTraceLayer}
-        onTogglePinned={() => setPixelTracePinned(!pixelTracePinned)}
+        // Pinning asks; unpinning is immediate. The ask is what carries the aim.
+        onTogglePinned={() => (pixelTracePinned ? setPixelTracePinned(false) : requestPixelTracePin())}
         onClose={() => setPixelTraceEnabled(false)}
       />
     </>}

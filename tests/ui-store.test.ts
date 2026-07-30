@@ -57,3 +57,28 @@ test("presentation defaults to beautiful sparse voxels", () => {
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, false);
   useUIStore.setState(initial, true);
 });
+
+test("a pin asked for outside the viewport stays a request until the aim is known", () => {
+  const initial = useUIStore.getInitialState();
+  useUIStore.setState(initial, true);
+
+  useUIStore.getState().setPixelTraceEnabled(true);
+  // Only the viewport knows which pixel, and from which view, a pin records.
+  // Declaring the pin from a panel would leave it with no aim, and a pin with no
+  // aim cannot be re-traced when the scene changes without answering some other
+  // ray. So the control asks and the viewport completes it.
+  useUIStore.getState().requestPixelTracePin();
+  assert.equal(useUIStore.getState().pixelTracePinRequested, true);
+  assert.equal(useUIStore.getState().pixelTracePinned, false, "asking is not pinning");
+
+  useUIStore.getState().setPixelTracePinned(true);
+  assert.equal(useUIStore.getState().pixelTracePinned, true);
+  assert.equal(useUIStore.getState().pixelTracePinRequested, false, "the request is consumed, not left armed");
+
+  // Closing the diagnostic drops both the pin and any request in flight.
+  useUIStore.getState().requestPixelTracePin();
+  useUIStore.getState().setPixelTraceEnabled(false);
+  assert.equal(useUIStore.getState().pixelTracePinned, false);
+  assert.equal(useUIStore.getState().pixelTracePinRequested, false);
+  useUIStore.setState(initial, true);
+});
