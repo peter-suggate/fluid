@@ -421,7 +421,9 @@ fn probeConeMarch(kind:u32,detail:u32,origin_m:vec3f,direction:vec3f,aperture:f3
 // accepted light sample, plus the cone march that actually answers it.
 fn probeLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32){
   let globalIllumination=(dry.materialPublication.w&${options.visibilityFlags.globalIllumination}u)!=0u;
-  let lightCount=select(min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${options.maximumShadedLights}u)),min(dryLighting.metadata.x,1u),globalIllumination);
+  // Mirror the shipping GLOBAL path: every authored emitter remains present,
+  // but each uses one exact visibility sample while GI performs its cone fan.
+  let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${options.maximumShadedLights}u));
   let coneRequested=(dry.materialPublication.w&${options.visibilityFlags.coneLightingRequested}u)!=0u
     &&(dry.materialPublication.w&${options.visibilityFlags.globalIllumination}u)==0u&&dryNodeMipReady();
   for(var lightIndex=0u;lightIndex<${options.maximumShadedLights}u;lightIndex+=1u){

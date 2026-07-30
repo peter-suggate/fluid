@@ -1600,7 +1600,15 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f)->DryGlobalIllumination{
     if(coneIndex>=coneCount){break;}let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0);
     dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
     let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,dryNodeMipSceneExitDistance(origin,direction),perConeBudget,.995,.0039215686,1u));
-    let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);dryMipSteps+=result.coneTaps;indirect+=result.radiance*weight;visibility+=result.transmittance*weight;
+    let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);dryMipSteps+=result.coneTaps;
+    // Sparse GI is fail-soft. A non-finite texture/filter result must not
+    // poison the entire lighting closure (max/clamp preserve NaN), turning an
+    // otherwise valid directly-lit surface black. Retain every valid cone and
+    // treat an invalid cone as zero bounce with unobstructed visibility.
+    let finiteRadiance=all(result.radiance==result.radiance)&&all(abs(result.radiance)<vec3f(65504.0));
+    let finiteVisibility=result.transmittance==result.transmittance&&abs(result.transmittance)<65504.0;
+    indirect+=select(vec3f(0.0),result.radiance,finiteRadiance)*weight;
+    visibility+=select(1.0,result.transmittance,finiteVisibility)*weight;
   }
   let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u)!=0u);
   return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength));
@@ -2140,7 +2148,12 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   if(surface.valid==0u){return vec3f(0.0);}
   let directClosure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);var direct=vec3f(0.0);var sampleBudget=0u;
   let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;
-  let lightCount=select(min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u)),min(dryLighting.metadata.x,1u),globalIllumination);
+  // GI supplements the authored lighting design; it must not replace every
+  // local fixture with whichever record happens to be first (the garden's
+  // first record is an intentionally weak dusk directional light). Keep all
+  // configured emitters, while the sample-count selection below still limits
+  // GLOBAL mode to one exact visibility sample per light.
+  let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
     if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
@@ -3031,7 +3044,7 @@ export class SparseVoxelDrySceneRenderer {
       tuning.primaryLeafVisits, tuning.coneStepBudget, tuning.maximumShadedLights, tuning.stableAreaLightSamples,
       tuning.movingAreaLightSamples, tuning.stableAoSamples, tuning.movingAoSamples, tuning.visibilityNodeVisits,
       tuning.visibilityLeafVisits, tuning.visibilityWorkItems, tuning.visibilityIntersections,
-      giReady ? SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["joint-bilateral"] : SVO_CONE_RADIANCE_RECONSTRUCTION_CODES[tuning.coneRadianceReconstruction],
+      SVO_CONE_RADIANCE_RECONSTRUCTION_CODES[tuning.coneRadianceReconstruction],
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset);
     floats.set([
       tuning.shadowBiasCells, tuning.shadowStrength, tuning.aoRadiusScale, tuning.aoStrength,

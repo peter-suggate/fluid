@@ -102,8 +102,8 @@ test("global illumination exposes image-shaping controls with cinematic balanced
   for (const label of ["GI bounce", "GI occlusion", "Diffuse environment", "Direct key", "GI cones", "GI cone aperture"]) {
     assert.ok(panel.includes(`label="${label}"`), `${label} is live-tunable`);
   }
-  assert.match(svoDrySceneShader, /indirect\+=result\.radiance\*weight;visibility\+=result\.transmittance\*weight/,
-    "one GI gather must supply both bounced light and broad occlusion");
+  assert.match(svoDrySceneShader, /indirect\+=select\(vec3f\(0\.0\),result\.radiance,finiteRadiance\)\*weight;[^]*visibility\+=select\(1\.0,result\.transmittance,finiteVisibility\)\*weight/,
+    "one fail-soft GI gather must supply both bounced light and broad occlusion");
   assert.match(svoDrySceneShader, /direct\*directScale\+indirectDiffuse/);
 });
 

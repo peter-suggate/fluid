@@ -12,6 +12,7 @@ import {
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import { SVO_CONE_RADIANCE_RECONSTRUCTION_CODES } from "../lib/svo-render-tuning";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const drySource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
@@ -111,6 +112,9 @@ test("lighting quality, shadows, and ambient occlusion write independent visibil
       "GI replaces the standalone AO/contact cones");
     assert.deepEqual([...params().at(-1)!.words.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset,
       SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset + 4)], [1, 1, 0, 0]);
+    assert.equal(params().at(-1)!.words[SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset + 11],
+      SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"],
+      "GLOBAL must not reconstruct an unwritten reduced-radiance plane as black");
     const giParams = new Float32Array(params().at(-1)!.words.buffer);
     assert.deepEqual([...giParams.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset,
       SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset + 4)], [1.5, 0.8199999928474426, 0.6499999761581421, 0.8999999761581421]);
