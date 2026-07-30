@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -14,11 +15,15 @@ import {
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
+const rendererSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
+
 test("scale 1 preserves the production shader byte-for-byte (fingerprint contract)", () => {
   assert.equal(createSvoDrySceneFragmentWGSL(1), svoDrySceneShader,
     "the factory default must return the exact historical string so the bit-exact frame fingerprint reproduces");
   assert.doesNotMatch(svoDrySceneShader, /dryPrepass|@group\(1\)/,
     "the inline path must carry no prepass declarations, bindings, or code");
+  assert.doesNotMatch(svoDrySceneShader, /anyBodyBlockerIgnoring/,
+    "the reduced-only blocker specialization must not perturb the scale-1 shader");
 });
 
 test("reduced scales add the prepass entry and guided upsample while keeping every inline fallback", () => {
@@ -52,14 +57,26 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
       "AO must retain eight bits while all eight lights round-trip through seven-bit lanes");
     assert.match(reduced, /let packed=textureLoad\(dryPrepassVisibilityKeyTexture,texel,0\)[^]*accumulated0\+=dryPrepassUnpack0\(packed\)[^]*accumulated1\+=dryPrepassUnpack1\(packed\)[^]*accumulated2\+=dryPrepassUnpack2\(packed\)/,
       "one coherent integer fetch must provide every visibility lane and guide the 2x2 reconstruction");
-    assert.match(reduced, /let raw=select\(dryPrepassChannel\(1u\+dryCurrentLightSlot\),0\.0,prepassRigidBlocker\.t<ray\.tMax_m\)/,
+    assert.match(reduced, /let prepassRigidBlocked=anyBodyBlockerIgnoring\(ray\.origin_m,towardLight,ownerId,ray\.tMax_m\);let raw=select\(dryPrepassChannel\(1u\+dryCurrentLightSlot\),0\.0,prepassRigidBlocked\)/,
       "rigid-body blocker terms stay inline at full resolution on the upsampled shadow path");
-    assert.match(reduced, /prepassUnblocked\+=select\(1\.0,0\.0,prepassRigidBlocker\.t<prepassRadius\)/,
+    assert.match(reduced, /prepassUnblocked\+=select\(1\.0,0\.0,prepassRigidBlocked\)/,
       "rigid AO blocker sampling stays inline at full resolution on the upsampled AO path");
-    assert.match(reduced, /if\(weight>bestRadianceWeight&&dryPrepassIdentityMatches\(textureLoad\(dryPrepassIdentityTexture,texel,0\)\.x,u32\(round\(geometry\.w\)\),hit\)\)\{bestRadianceWeight=weight;bestRadianceTexel=texel;\}/,
+    assert.match(reduced, /fn anyBodyBlockerIgnoring\([^]*if\(bodyHit\(ro,rd,body\)\.t<tMax\)\{return true;\}/,
+      "blocker-only paths must early out without carrying the full nearest-hit payload");
+    assert.match(reduced, /let identityMatches=dryPrepassIdentityMatches\(textureLoad\(dryPrepassIdentityTexture,texel,0\)\.x,u32\(round\(geometry\.w\)\),hit\)/,
       "radiance reconstruction must reject exact material, owner, feature, field, or motion identity mismatches");
-    assert.match(reduced, /accumulated2\+=dryPrepassUnpack2\(packed\)\*weight;[^]*if\(weight>bestRadianceWeight&&dryPrepassIdentityMatches/,
+    assert.match(reduced, /accumulated2\+=dryPrepassUnpack2\(packed\)\*weight;[^]*if\(identityMatches\)/,
       "depth/normal-guided visibility may cross identity boundaries without authorizing radiance reuse");
+    assert.match(reduced, /if\(bilinear>1e-6&&!identityMatches\)\{linearSafe=0u;\}[^]*if\(bilinear>1e-6&&\(depthWeight<0\.25\|\|normalWeight<0\.25\)\)\{linearSafe=0u;\}/,
+      "hardware filtering must be disabled before it can cross an identity, depth, or normal edge");
+    assert.match(reduced, /textureSampleLevel\(dryPrepassRadianceTexture,nodeMipSampler,pixel\/max\(uniforms\.viewport\.xy,vec2f\(1\.0\)\),0\.0\)/,
+      "the gated-linear mode must use the resident linear sampler without another pass");
+    assert.match(reduced, /accumulatedRadiance\+=textureLoad\(dryPrepassRadianceTexture,texel,0\)\*weight;radianceWeightSum\+=weight/,
+      "joint-bilateral mode must reuse the visibility guide weights for edge-aware radiance reconstruction");
+    assert.match(reduced, /let weight=bilinear\*select\(guidedWeight,1\.0,dry\.tuningCounts2\.w==3u\)/,
+      "wide relight must aggressively reconstruct shadow factors with unmodified bilinear weights");
+    assert.match(reduced, /tuningCounts2\.w!=3u&&dry\.tuningCounts2\.w!=4u&&bestRadianceWeight>0\.0/,
+      "both relight modes must bypass every reduced-radiance shortcut");
     assert.match(reduced, /fn dryPrepassPackIdentity\(hit:DryHit\)->u32\{return \(hit\.materialId&0xffffu\)\|\(\(hit\.ownerId&0xffffu\)<<16u\);\}/);
     assert.match(reduced, /let opaque=DryHit\(geometry\.x,dryPrepassDecodeNormal\(geometry\.yz\),identity&0xffffu,identity>>16u/);
     assert.match(reduced, /return vec4f\(shadeDryOpaque\(opaque,ro,rd\),opaque\.t\)/,
@@ -67,6 +84,16 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     assert.match(reduced, /if\(hit\.t>=DRY_MISS\)[^]*dryPrepassRadianceState==1u&&hit\.motionKind==DRY_GBUFFER_MOTION_STATIC[^]*let position=ro\+rd\*hit\.t;let surface=dryEvaluateSurfaceMaterial/,
       "exact-matched static radiance must return before full-resolution procedural material evaluation");
   }
+  assert.match(rendererSource, /coneRadianceReconstruction !== "wide-relight"[^]*coneRadianceReconstruction !== "full-res-relight"[^]*Sparse voxel reduced-rate opaque shading/,
+    "both relight modes must omit the reduced shading pass whose radiance they deliberately do not consume");
+});
+
+test("automatic relight composition contains the isolated primary and lighting entries", () => {
+  const automatic = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "auto-relight");
+  assert.match(automatic, /@fragment fn dryVisibilityMain/);
+  assert.match(automatic, /@fragment fn dryLightingMain/);
+  assert.match(automatic, /@group\(2\) @binding\(0\) var drySplitGeometryWrite/);
+  assert.match(automatic, /@group\(2\) @binding\(1\) var drySplitGeometryRead/);
 });
 
 test("prepass target contract and sizing", () => {

@@ -712,7 +712,10 @@ export class FluidLabRenderer {
     );
     if (wants.has("svo-dry-scene")) this.ensureOptionalPipeline(
       "svo-dry-scene", this.svoDryScenePipeline,
-      (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!),
+      // Relight already pays a full-resolution material/BRDF pass. Isolating
+      // primary traversal raises Metal occupancy substantially; other
+      // reconstruction modes retain the original inline graph.
+      (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float", "hybrid", "off", "auto-relight"),
       (pipeline) => pipeline.initialize((label, completed) => this.reportSvoPipelineProgress(label, completed)),
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;

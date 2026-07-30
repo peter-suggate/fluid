@@ -64,6 +64,7 @@ import { svoBrickOccupancyWGSL } from "./svo-brick-occupancy";
 import { createSvoScreenSpaceTraversalWGSL } from "./svo-screen-space-termination";
 import {
   DEFAULT_SVO_RENDER_TUNING,
+  SVO_CONE_RADIANCE_RECONSTRUCTION_CODES,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
   normalizeSvoRenderTuning,
   type SvoRenderTuning,
@@ -882,8 +883,8 @@ export type SvoDryTraversalMode = "hybrid" | "canonical" | "canonical-parametric
 /** Compile-time 8^3 leaf acceleration experiment; off preserves the baseline shader. */
 export type SvoBrickOccupancyMode = "off" | "bounds" | "macro" | "macro-hdda";
 
-/** Opt-in visibility/lighting pass split. Production remains the inline shader. */
-export type SvoDryShadingPath = "inline" | "split";
+/** Split policy: production isolates traversal from relighting only when that path is selected. */
+export type SvoDryShadingPath = "inline" | "split" | "auto-relight";
 
 /**
  * Exact temporal coherence experiment for render-only/static-camera frames.
@@ -990,7 +991,7 @@ export function createSvoDrySceneFragmentWGSL(
     && brickOccupancyMode !== "macro" && brickOccupancyMode !== "macro-hdda") {
     throw new RangeError(`Unsupported dry-scene brick occupancy mode: ${brickOccupancyMode}`);
   }
-  if (shadingPath !== "inline" && shadingPath !== "split") {
+  if (shadingPath !== "inline" && shadingPath !== "split" && shadingPath !== "auto-relight") {
     throw new RangeError(`Unsupported dry-scene shading path: ${shadingPath}`);
   }
   if (!Number.isFinite(screenSpaceTerminationPixels) || screenSpaceTerminationPixels < 0) {
@@ -1000,7 +1001,7 @@ export function createSvoDrySceneFragmentWGSL(
     throw new RangeError("Diagnostic screen-space termination currently requires canonical inline traversal");
   }
   const reduced = coneLightingScale !== 1;
-  const split = shadingPath === "split";
+  const split = shadingPath !== "inline";
   const canonicalTraversal = traversalMode === "canonical" || traversalMode === "canonical-parametric";
   const wideTraversalWGSL = canonicalTraversal || traversalMode === "compact"
     ? ""
@@ -1197,25 +1198,38 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
   let normal=normalize(normalIn);
   let coordinate=pixel*(vec2f(dims)/max(uniforms.viewport.xy,vec2f(1.0)))-vec2f(.5);
   let base=floor(coordinate);let fraction=coordinate-base;
-  var accumulated0=vec4f(0.0);var accumulated1=vec4f(0.0);var accumulated2=vec4f(0.0);var weightSum=0.0;var bestRadianceWeight=0.0;var bestRadianceTexel=vec2i(0);
+  var accumulated0=vec4f(0.0);var accumulated1=vec4f(0.0);var accumulated2=vec4f(0.0);var weightSum=0.0;
+  var accumulatedRadiance=vec4f(0.0);var radianceWeightSum=0.0;var bestRadianceWeight=0.0;var bestRadianceTexel=vec2i(0);var linearSafe=1u;
   for(var j=0u;j<2u;j+=1u){for(var i=0u;i<2u;i+=1u){
     let texel=vec2i(clamp(base+vec2f(f32(i),f32(j)),vec2f(0.0),vec2f(dims)-vec2f(1.0)));
     let geometry=textureLoad(dryPrepassGeometryTexture,texel,0);
-    if(geometry.x<=0.0){continue;}
+    if(geometry.x<=0.0){linearSafe=0u;continue;}
     let packed=textureLoad(dryPrepassVisibilityKeyTexture,texel,0);
     let bilinear=select(1.0-fraction.x,fraction.x,i==1u)*select(1.0-fraction.y,fraction.y,j==1u);
     let depthWeight=exp(-24.0*abs(geometry.x-depth)/max(depth,1e-3));
     let normalWeight=pow(max(dot(normal,dryPrepassDecodeNormal(geometry.yz)),0.0),8.0);
-    let weight=bilinear*depthWeight*normalWeight;
+    let identityMatches=dryPrepassIdentityMatches(textureLoad(dryPrepassIdentityTexture,texel,0).x,u32(round(geometry.w)),hit);
+    if(bilinear>1e-6&&!identityMatches){linearSafe=0u;}
+    if(bilinear>1e-6&&(depthWeight<0.25||normalWeight<0.25)){linearSafe=0u;}
+    let guidedWeight=depthWeight*normalWeight;
+    let weight=bilinear*select(guidedWeight,1.0,dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u);
     if(weight<=1e-6){continue;}
     accumulated0+=dryPrepassUnpack0(packed)*weight;
     accumulated1+=dryPrepassUnpack1(packed)*weight;
     accumulated2+=dryPrepassUnpack2(packed)*weight;
-    if(weight>bestRadianceWeight&&dryPrepassIdentityMatches(textureLoad(dryPrepassIdentityTexture,texel,0).x,u32(round(geometry.w)),hit)){bestRadianceWeight=weight;bestRadianceTexel=texel;}weightSum+=weight;
+    if(identityMatches){
+      if(weight>bestRadianceWeight){bestRadianceWeight=weight;bestRadianceTexel=texel;}
+      if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["joint-bilateral"]}u){accumulatedRadiance+=textureLoad(dryPrepassRadianceTexture,texel,0)*weight;radianceWeightSum+=weight;}
+    }
+    weightSum+=weight;
   }}
   if(weightSum<${SVO_DRY_CONE_PREPASS_CONTRACT.fallbackWeightThreshold}){dryConeFallback=1u;return;}
   dryPrepassData0=accumulated0/weightSum;dryPrepassData1=accumulated1/weightSum;dryPrepassData2=accumulated2/weightSum;dryPrepassState=1u;
-  if(bestRadianceWeight>0.0){dryPrepassRadiance=textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0);dryPrepassRadianceState=1u;}
+  if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["gated-linear"]}u&&linearSafe!=0u&&bestRadianceWeight>0.0){
+    dryPrepassRadiance=textureSampleLevel(dryPrepassRadianceTexture,nodeMipSampler,pixel/max(uniforms.viewport.xy,vec2f(1.0)),0.0);dryPrepassRadianceState=1u;
+  }else if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["joint-bilateral"]}u&&radianceWeightSum>1e-6){
+    dryPrepassRadiance=accumulatedRadiance/radianceWeightSum;dryPrepassRadianceState=1u;
+  }else if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&bestRadianceWeight>0.0){dryPrepassRadiance=textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0);dryPrepassRadianceState=1u;}
 }
 ` : "";
   const splitGroup = reduced ? 2 : 1;
@@ -1231,11 +1245,16 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
     ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryConeFallback=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}`
     : "";
   const prepassShadowShortcutWGSL = reduced
-    ? /* wgsl */ `if(dryPrepassState==1u&&dryCurrentLightSlot<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u){let prepassRigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(dryPrepassChannel(1u+dryCurrentLightSlot),0.0,prepassRigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}`
+    ? /* wgsl */ `if(dryPrepassState==1u&&dryCurrentLightSlot<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u){let prepassRigidBlocked=anyBodyBlockerIgnoring(ray.origin_m,towardLight,ownerId,ray.tMax_m);let raw=select(dryPrepassChannel(1u+dryCurrentLightSlot),0.0,prepassRigidBlocked);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}`
     : "";
   const prepassContactShortcutWGSL = reduced
-    ? /* wgsl */ `if(dryPrepassState==1u){let prepassRadius=dryContactVisibilityRadius();if(prepassRadius<=0.0){return vec3f(1.0);}let prepassCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let prepassOrigin=position+normalize(geometricNormal)*prepassCell*.2;let prepassSamples=select(dry.tuningCounts1.z,dry.tuningCounts1.y,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL});var prepassUnblocked=0.0;for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=prepassSamples){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let prepassRigidBlocker=nearestBodyIgnoring(prepassOrigin,rotated,ownerId);prepassUnblocked+=select(1.0,0.0,prepassRigidBlocker.t<prepassRadius);}let raw=clamp(dryPrepassData0.x*(prepassUnblocked/f32(prepassSamples)),0.0,1.0);return vec3f(mix(1.0,raw,dry.tuningRays0.w));}`
+    ? /* wgsl */ `if(dryPrepassState==1u){let prepassRadius=dryContactVisibilityRadius();if(prepassRadius<=0.0){return vec3f(1.0);}let prepassCell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let prepassOrigin=position+normalize(geometricNormal)*prepassCell*.2;let prepassSamples=select(dry.tuningCounts1.z,dry.tuningCounts1.y,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL});var prepassUnblocked=0.0;for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=prepassSamples){break;}let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex&1u);let rotated=select(direction,normalize(direction+cross(normalize(geometricNormal),direction)*.7),sampleIndex>=2u);let prepassRigidBlocked=anyBodyBlockerIgnoring(prepassOrigin,rotated,ownerId,prepassRadius);prepassUnblocked+=select(1.0,0.0,prepassRigidBlocked);}let raw=clamp(dryPrepassData0.x*(prepassUnblocked/f32(prepassSamples)),0.0,1.0);return vec3f(mix(1.0,raw,dry.tuningRays0.w));}`
     : "";
+  const prepassBodyBlockerWGSL = reduced ? /* wgsl */ `fn anyBodyBlockerIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32,tMax:f32)->bool {
+  for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,tMax)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,tMax)){continue;}if(bodyHit(ro,rd,body).t<tMax){return true;}}
+  return false;
+}
+` : "";
   const prepassLightSlotWGSL = reduced ? /* wgsl */ `dryCurrentLightSlot=lightIndex;` : "";
   const prepassRadianceShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassRadianceState==1u&&hit.motionKind==DRY_GBUFFER_MOTION_STATIC){return max(dryPrepassRadiance.rgb,vec3f(0.0));}`
@@ -1387,7 +1406,7 @@ struct DryParams {
   tuningCounts0:vec4u,
   // Moving area, stable/moving AO, exact visibility node visits.
   tuningCounts1:vec4u,
-  // Exact visibility leaves, work items, intersections, reserved.
+  // Exact visibility leaves, work items, intersections, radiance reconstruction mode.
   tuningCounts2:vec4u,
   // Shadow bias/strength and AO radius/strength.
   tuningRays0:vec4f,
@@ -1676,6 +1695,7 @@ fn bodyBoundingSphereVisible(ro:vec3f,rd:vec3f,body:BodyGPU,tMin:f32,tMax:f32)->
 fn nearestBodyIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32)->DryHit {
   var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
 }
+${prepassBodyBlockerWGSL}
 fn nearestBody(ro:vec3f,rd:vec3f)->DryHit{return nearestBodyIgnoring(ro,rd,DRY_OWNER_NONE);}
 
 fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit {
@@ -2187,7 +2207,7 @@ export class SparseVoxelDrySceneRenderer {
     if (targetFormat !== SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat) {
       throw new Error(`Sparse voxel dry scene location 0 must use ${SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat}`);
     }
-    if (shadingPath !== "inline" && shadingPath !== "split") throw new RangeError(`Unsupported dry-scene shading path: ${shadingPath}`);
+    if (shadingPath !== "inline" && shadingPath !== "split" && shadingPath !== "auto-relight") throw new RangeError(`Unsupported dry-scene shading path: ${shadingPath}`);
     if (rayCoherenceMode !== "off" && rayCoherenceMode !== "static-primary") throw new RangeError(`Unsupported dry-scene ray coherence mode: ${rayCoherenceMode}`);
     if (rayCoherenceMode === "static-primary" && shadingPath !== "split") throw new RangeError("Static-primary ray coherence requires split shading");
     if (screenSpaceTerminationPixels > 0 && (traversalMode !== "canonical" || shadingPath !== "inline")) throw new RangeError("Diagnostic screen-space termination currently requires canonical inline traversal");
@@ -2246,7 +2266,11 @@ export class SparseVoxelDrySceneRenderer {
    * pixels even though both entries share one source module.
    */
   private async ensureSplitPipelines(scale: SvoConeLightingScale): Promise<void> {
-    if (this.shadingPath !== "split" || !this.layout || !this.vertexModule) return;
+    const relight = this.renderTuning.coneRadianceReconstruction === "wide-relight"
+      || this.renderTuning.coneRadianceReconstruction === "full-res-relight";
+    if (this.shadingPath === "inline"
+      || (this.shadingPath === "auto-relight" && (scale === 1 || !relight))
+      || !this.layout || !this.vertexModule) return;
     if (this.splitPipelineScale === scale && this.splitVisibilityPipeline && this.splitLightingPipeline) {
       this.ensureSplitTargets();
       return;
@@ -2301,7 +2325,10 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   private ensureSplitTargets(): void {
-    if (this.shadingPath !== "split" || !this.targetWidth || !this.targetHeight
+    const relight = this.renderTuning.coneRadianceReconstruction === "wide-relight"
+      || this.renderTuning.coneRadianceReconstruction === "full-res-relight";
+    if (this.shadingPath === "inline" || (this.shadingPath === "auto-relight" && !relight)
+      || !this.targetWidth || !this.targetHeight
       || !this.splitVisibilityLayout || !this.splitLightingLayout) return;
     if (!this.splitGeometry || !this.splitOpaqueIdentity || this.splitWidth !== this.targetWidth || this.splitHeight !== this.targetHeight) {
       this.clearPrimaryVisibilityCache();
@@ -2374,7 +2401,7 @@ export class SparseVoxelDrySceneRenderer {
           { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint" } },
           { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
           { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint" } },
-          { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
         ],
       });
       this.conePrepassShadeLayout ??= this.device.createBindGroupLayout({
@@ -2614,6 +2641,13 @@ export class SparseVoxelDrySceneRenderer {
     this.clearReusableFrame();
     this.temporalAccumulator.invalidate();
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) this.writeParams(this.source, this.scene);
+    const relight = normalized.coneRadianceReconstruction === "wide-relight"
+      || normalized.coneRadianceReconstruction === "full-res-relight";
+    if (this.shadingPath === "auto-relight" && relight && this.coneScale !== 1) {
+      // Fail-soft while the one-time relight split variant compiles. The
+      // existing inline reduced pipeline remains valid in the meantime.
+      void this.ensureConeLightingPrepass().catch(() => {});
+    }
   }
 
   /**
@@ -2650,7 +2684,8 @@ export class SparseVoxelDrySceneRenderer {
     words.set([
       tuning.primaryLeafVisits, tuning.coneStepBudget, tuning.maximumShadedLights, tuning.stableAreaLightSamples,
       tuning.movingAreaLightSamples, tuning.stableAoSamples, tuning.movingAoSamples, tuning.visibilityNodeVisits,
-      tuning.visibilityLeafVisits, tuning.visibilityWorkItems, tuning.visibilityIntersections, 0,
+      tuning.visibilityLeafVisits, tuning.visibilityWorkItems, tuning.visibilityIntersections,
+      SVO_CONE_RADIANCE_RECONSTRUCTION_CODES[tuning.coneRadianceReconstruction],
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset);
     floats.set([
       tuning.shadowBiasCells, tuning.shadowStrength, tuning.aoRadiusScale, tuning.aoStrength,
@@ -2967,7 +3002,11 @@ export class SparseVoxelDrySceneRenderer {
         && this.conePrepassBindGroup && this.conePrepassShadeBindGroup && this.conePrepassVisibilityView
         && this.conePrepassGeometryView && this.conePrepassIdentityView && this.conePrepassRadianceView);
     const effectiveScale: SvoConeLightingScale = usePrepass ? this.coneScale : 1;
-    const useSplit = this.shadingPath === "split" && !this.splitDiagnosticsActive
+    const relightSplit = usePrepass && (this.renderTuning.coneRadianceReconstruction === "wide-relight"
+      || this.renderTuning.coneRadianceReconstruction === "full-res-relight");
+    const splitRequested = this.shadingPath === "split"
+      || (this.shadingPath === "auto-relight" && relightSplit);
+    const useSplit = splitRequested && !this.splitDiagnosticsActive
       && this.splitPipelineScale === effectiveScale
       && Boolean(this.splitVisibilityPipeline && this.splitLightingPipeline
         && this.splitVisibilityBindGroup && this.splitLightingBindGroup && this.splitGeometryView);
@@ -3002,17 +3041,22 @@ export class SparseVoxelDrySceneRenderer {
       prepass.setBindGroup(0, this.bindGroup);
       prepass.draw(3);
       prepass.end();
-      const shade = encoder.beginRenderPass({
-        label: "Sparse voxel reduced-rate opaque shading",
-        colorAttachments: [
-          { view: this.conePrepassRadianceView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
-        ],
-      });
-      shade.setPipeline(this.conePrepassShadePipeline!);
-      shade.setBindGroup(0, this.bindGroup);
-      shade.setBindGroup(1, this.conePrepassShadeBindGroup!);
-      shade.draw(3);
-      shade.end();
+      // Relight deliberately consumes only the reduced visibility cache. Its
+      // full-rate material/BRDF work never reads radiance, so omit this pass.
+      if (this.renderTuning.coneRadianceReconstruction !== "wide-relight"
+        && this.renderTuning.coneRadianceReconstruction !== "full-res-relight") {
+        const shade = encoder.beginRenderPass({
+          label: "Sparse voxel reduced-rate opaque shading",
+          colorAttachments: [
+            { view: this.conePrepassRadianceView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+          ],
+        });
+        shade.setPipeline(this.conePrepassShadePipeline!);
+        shade.setBindGroup(0, this.bindGroup);
+        shade.setBindGroup(1, this.conePrepassShadeBindGroup!);
+        shade.draw(3);
+        shade.end();
+      }
       tracePhase?.({ id: "svo-cone-lighting", label: "SVO cone-lighting prepass" });
     }
     if (useSplit) {

@@ -163,6 +163,12 @@ export function VisualPanel() {
               .map(({ scale, label }) => <button key={scale} className={tuning.coneLightingScale === scale ? "active" : ""}
                 onClick={() => updateTuning("coneLightingScale", scale)}>{label}</button>)}
           </div></label>
+          <label className="render-discrete-control reconstruction-control"><span>Lighting reconstruction</span><div>
+            {([{ mode: "nearest", label: "EXACT" }, { mode: "gated-linear", label: "LINEAR" }, { mode: "joint-bilateral", label: "BILAT" },
+              { mode: "wide-relight", label: "WIDE" }, { mode: "full-res-relight", label: "RELIGHT" }] as const)
+              .map(({ mode, label }) => <button key={mode} className={tuning.coneRadianceReconstruction === mode ? "active" : ""}
+                disabled={tuning.coneLightingScale === 1} onClick={() => updateTuning("coneRadianceReconstruction", mode)}>{label}</button>)}
+          </div></label>
         </div>
         {effectiveRendererStatus.fallbackReason && <p className="render-inline-warning">SVO fallback: {rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}.</p>}
       </ControlGroup>

@@ -9,8 +9,9 @@
  *   node --import tsx tools/profile-svo-render-xctrace.ts
  *     [--scene=hose-tank] [--resolution=660x662]
  *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide]
- *     [--shading=inline|split]
+ *     [--shading=inline|split|auto-relight]
  *     [--cone-scale=0.5|0.25|0.125] [--warmups=4]
+ *     [--radiance-reconstruction=nearest|gated-linear|joint-bilateral|wide-relight|full-res-relight]
  *     [--counter-seconds=3] [--counter-reduction=100] [--out=DIR]
  *     [--reuse-trace] [--reuse-tables]
  */
@@ -52,7 +53,7 @@ if (!["hybrid", "canonical", "canonical-parametric", "compact", "wide"].includes
   throw new Error("--traversal must be hybrid, canonical, canonical-parametric, compact, or wide");
 }
 const shading = flag("shading") ?? "inline";
-if (!["inline", "split"].includes(shading)) throw new Error("--shading must be inline or split");
+if (!["inline", "split", "auto-relight"].includes(shading)) throw new Error("--shading must be inline, split, or auto-relight");
 const resolutionMatch = /^(\d+)x(\d+)$/.exec(flag("resolution") ?? "660x662");
 if (!resolutionMatch) throw new Error("--resolution must be WIDTHxHEIGHT");
 const width = Number(resolutionMatch[1]), height = Number(resolutionMatch[2]);
@@ -70,6 +71,10 @@ if (!Number.isFinite(counterReduction) || counterReduction < 1) {
 const coneScale = Number(flag("cone-scale") ?? 0.5);
 if (![0.5, 0.25, 0.125].includes(coneScale)) {
   throw new Error("--cone-scale must be 0.5, 0.25, or 0.125 so the profiled pass graph includes the cone prepass");
+}
+const radianceReconstruction = flag("radiance-reconstruction") ?? "full-res-relight";
+if (!["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstruction)) {
+  throw new Error("--radiance-reconstruction must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
 }
 const warmups = Number(flag("warmups") ?? 4);
 if (!Number.isSafeInteger(warmups) || warmups < 1) {
@@ -299,7 +304,7 @@ const writeReport = async (
     lane: "svo-render",
     workUnit: "frame",
     title: `Hose tank SVO rendering — ${variant} GPU frame profile`,
-    frameStartLabels: ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"],
+    frameStartLabels: ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene", "Sparse voxel primary visibility"],
     occupancyCounterName: "Fragment Occupancy",
     environment: {
       FLUID_SCENE: scene,
@@ -310,6 +315,7 @@ const writeReport = async (
       FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
       FLUID_SVO_DRY_FRAME_SHADING: shading,
       FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
+      FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION: radianceReconstruction,
     },
     tracedPid,
     traced: { simulationWall_ms: result.renderWall_ms, steps: result.frames },
@@ -346,7 +352,7 @@ const main = async (): Promise<void> => {
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, extraction, result, tracedPid);
     await writeFile(capturePath, `${JSON.stringify({
-      variant, traversal, shading, coneScale, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
       ...priorCapture,
       source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
@@ -365,7 +371,7 @@ const main = async (): Promise<void> => {
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, policy, result, tracedPid);
     await writeFile(capturePath, `${JSON.stringify({
-      variant, traversal, shading, coneScale, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
       ...priorCapture,
       source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
@@ -385,7 +391,7 @@ const main = async (): Promise<void> => {
   // interrupted, `--reuse-trace` must retain the source fingerprint from the
   // capture rather than accidentally claiming the source state at rebuild time.
   await writeFile(capturePath, `${JSON.stringify({
-    state: "capturing", variant, traversal, shading, coneScale, warmups, scene,
+    state: "capturing", variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene,
     resolution: { width, height }, counterSeconds, counterReduction, source,
     tracePath, startedAt: new Date().toISOString(),
   }, null, 2)}\n`);
@@ -416,6 +422,7 @@ const main = async (): Promise<void> => {
         FLUID_SVO_DRY_FRAME_HEIGHT: String(height),
         FLUID_SVO_DRY_FRAME_WARMUPS: String(warmups),
         FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
+        FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION: radianceReconstruction,
         FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
         FLUID_SVO_DRY_FRAME_SHADING: shading,
         FLUID_SVO_DRY_FRAME_PROFILE_SECONDS: String(counterSeconds + 9),
@@ -486,7 +493,7 @@ const main = async (): Promise<void> => {
     const report = await writeReport(tables, policy, result, child.pid);
     await writeFile(capturePath, `${JSON.stringify({
       state: "complete",
-      variant, traversal, shading, coneScale, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
       source,
       worker: result, tracePath, capturedAt: new Date().toISOString(),
     }, null, 2)}\n`);

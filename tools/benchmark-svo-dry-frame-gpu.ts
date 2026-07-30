@@ -19,6 +19,7 @@
  * Rerun: node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
+ *      _RADIANCE_RECONSTRUCTION (nearest | gated-linear | joint-bilateral | wide-relight | full-res-relight),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
  *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default hybrid),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
@@ -61,6 +62,7 @@ import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "../lib/svo-terrain-material";
 import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } from "../lib/terrain";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
 import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
 import {
@@ -120,6 +122,7 @@ const outPath = process.env.FLUID_SVO_DRY_FRAME_OUT ?? "/tmp/svo-bench/baseline.
 const rawOutPath = process.env.FLUID_SVO_DRY_FRAME_RAW_OUT;
 const configuredRawOutPath = process.env.FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT;
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
+const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION ?? "full-res-relight";
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
@@ -161,6 +164,8 @@ assert.ok(Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(heigh
 assert.ok(Number.isSafeInteger(warmups) && warmups >= 0 && Number.isSafeInteger(cycles) && cycles > 0);
 assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
 assert.ok([1, 0.5, 0.25, 0.125].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, 0.25, or 0.125");
+assert.ok(["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstructionRaw),
+  "FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
   "FLUID_SVO_DRY_FRAME_PROFILE_SECONDS must be a non-negative number");
 assert.ok(renderBrickSize === undefined || renderBrickSize === 4 || renderBrickSize === 8,
@@ -169,8 +174,8 @@ assert.ok(["hybrid", "canonical", "canonical-parametric", "compact", "wide"].inc
   "FLUID_SVO_DRY_FRAME_TRAVERSAL must be hybrid, canonical, canonical-parametric, compact, or wide");
 assert.ok(["off", "bounds", "macro", "macro-hdda"].includes(brickOccupancyModeRaw),
   "FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY must be off, bounds, macro, or macro-hdda");
-assert.ok(["inline", "split"].includes(shadingPathRaw),
-  "FLUID_SVO_DRY_FRAME_SHADING must be inline or split");
+assert.ok(["inline", "split", "auto-relight"].includes(shadingPathRaw),
+  "FLUID_SVO_DRY_FRAME_SHADING must be inline, split, or auto-relight");
 assert.ok(["off", "static-primary"].includes(rayCoherenceModeRaw),
   "FLUID_SVO_DRY_FRAME_COHERENCE must be off or static-primary");
 assert.ok(rayCoherenceModeRaw === "off" || shadingPathRaw === "split",
@@ -178,6 +183,7 @@ assert.ok(rayCoherenceModeRaw === "off" || shadingPathRaw === "split",
 assert.ok(Number.isFinite(screenSpaceTerminationPixels) && screenSpaceTerminationPixels >= 0,
   "FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS must be a non-negative finite number");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
+const radianceReconstruction = radianceReconstructionRaw as SvoConeRadianceReconstruction;
 const traversalMode = traversalModeRaw as SvoDryTraversalMode;
 const brickOccupancyMode = brickOccupancyModeRaw as SvoBrickOccupancyMode;
 const shadingPath = shadingPathRaw as SvoDryShadingPath;
@@ -419,6 +425,7 @@ device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels, rayCoherenceMode);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setLightingMode(process.env.FLUID_SVO_DRY_FRAME_LIGHTING === "direct" ? "direct" : "cone");
+renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale, coneRadianceReconstruction: radianceReconstruction });
 function applyLighting(scale: SvoConeLightingScale, shadows = shadowsEnabled, ambientOcclusion = ambientOcclusionEnabled): void {
   renderer.setLightingOptions({ shadowsEnabled: shadows, ambientOcclusionEnabled: ambientOcclusion, coneLightingScale: scale });
 }
@@ -454,7 +461,10 @@ for (let index = 0; index < Math.max(1, warmups); index += 1) {
   encodeFrame(encoder);
   device.queue.submit([encoder.finish()]);
 }
-if (coneScale !== 1) {
+// The external-profiler lane captures only the configured shipping graph. Do
+// not warm the scale-1 A/B here: split shading owns one active scale variant,
+// and an unawaited scale switch can otherwise replace it before xctrace starts.
+if (coneScale !== 1 && profileSeconds <= 0) {
   applyLighting(1);
   for (let index = 0; index < Math.max(1, warmups); index += 1) {
     const encoder = device.createCommandEncoder({ label: `Bench reference warmup ${index}` });
@@ -927,7 +937,7 @@ const result = {
     representativeMaterial: false,
     representativeNormal: false,
   },
-  splitShading: shadingPath === "split" ? {
+  splitShading: shadingPath !== "inline" ? {
     extraBytesPerPixel: SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
     extraMiBPerFrame: width * height * SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL / (1024 * 1024),
     extraGiBPerSecondAt60Fps: width * height * SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL * 60 / (1024 ** 3),
@@ -954,6 +964,7 @@ const result = {
   },
   coneLighting: {
     scale: coneScale,
+    radianceReconstruction,
     prepassResolution: coneScale !== 1 ? svoConePrepassSize(width, height, coneScale) : undefined,
     interleaved: interleaved ? {
       referenceMedian_ms: median(interleaved.reference_ms),

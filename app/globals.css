@@ -401,6 +401,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .render-toggle:disabled { opacity: .3; cursor: not-allowed; }
 .svo-control-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 5px; }
 .svo-control-grid .range-control, .render-discrete-control { min-width: 0; min-height: 54px; margin: 0; padding: 7px 8px; border: 1px solid var(--line); background: var(--render-control-bg); }
+.svo-control-grid .reconstruction-control { grid-column: 1 / -1; }
 .svo-control-grid .control-heading { margin-bottom: 8px; gap: 5px; }
 .svo-control-grid .control-heading > span { min-width: 0; overflow: hidden; color: #91a49f; font: 8px/1.15 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .svo-control-grid .control-heading output { flex: 0 0 auto; font-size: 8px; }

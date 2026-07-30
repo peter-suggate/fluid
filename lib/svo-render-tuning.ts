@@ -1,5 +1,17 @@
 import type { SvoConeLightingScale } from "./webgpu-svo-dry-scene";
 
+/** Full-resolution reconstruction policy for reduced visibility and opaque radiance. */
+export type SvoConeRadianceReconstruction =
+  | "nearest" | "gated-linear" | "joint-bilateral" | "wide-relight" | "full-res-relight";
+
+export const SVO_CONE_RADIANCE_RECONSTRUCTION_CODES = Object.freeze({
+  nearest: 0,
+  "gated-linear": 1,
+  "joint-bilateral": 2,
+  "wide-relight": 3,
+  "full-res-relight": 4,
+} satisfies Record<SvoConeRadianceReconstruction, number>);
+
 /** Audited compile-time ceiling for primary-ray leaf continuation. */
 export const SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT = 256;
 
@@ -8,6 +20,7 @@ export const SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT = 256;
 export interface SvoRenderTuning {
   readonly resolutionScale: number;
   readonly coneLightingScale: SvoConeLightingScale;
+  readonly coneRadianceReconstruction: SvoConeRadianceReconstruction;
   readonly temporalEnabled: boolean;
   readonly checkerboardShadowsEnabled: boolean;
   readonly primaryLeafVisits: number;
@@ -37,6 +50,7 @@ export interface SvoRenderTuning {
 export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   resolutionScale: 0.72,
   coneLightingScale: 0.5,
+  coneRadianceReconstruction: "full-res-relight",
   temporalEnabled: true,
   checkerboardShadowsEnabled: true,
   primaryLeafVisits: 48,
@@ -102,9 +116,16 @@ const integer = (value: number, minimum: number, maximum: number) =>
 export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTuning {
   const coneLightingScale = value.coneLightingScale === 0.125 || value.coneLightingScale === 0.25 || value.coneLightingScale === 0.5
     ? value.coneLightingScale : 1;
+  const coneRadianceReconstruction = value.coneRadianceReconstruction === "nearest"
+    || value.coneRadianceReconstruction === "gated-linear"
+    || value.coneRadianceReconstruction === "joint-bilateral"
+    || value.coneRadianceReconstruction === "wide-relight"
+    || value.coneRadianceReconstruction === "full-res-relight"
+    ? value.coneRadianceReconstruction : "full-res-relight";
   return {
     resolutionScale: bounded(value.resolutionScale, 0.35, 1),
     coneLightingScale,
+    coneRadianceReconstruction,
     temporalEnabled: Boolean(value.temporalEnabled),
     checkerboardShadowsEnabled: Boolean(value.checkerboardShadowsEnabled),
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),

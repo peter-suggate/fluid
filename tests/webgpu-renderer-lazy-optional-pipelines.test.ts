@@ -66,3 +66,12 @@ test("dry SVO startup reports both expensive pipeline compilations", () => {
   assert.match(rendererSource, /label: "Sparse garden renderer attached"[^]*completed: 3, total: 4/);
   assert.match(rendererSource, /label: "Submitting first sparse garden frame"[^]*completed: 3, total: 4/);
 });
+
+test("production enables the traversal split only for reduced relighting", () => {
+  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"auto-relight"\)/,
+    "the production renderer must opt into the measured relight-only split policy");
+  assert.match(drySceneSource, /const relightSplit = usePrepass[^]*coneRadianceReconstruction === "wide-relight"[^]*coneRadianceReconstruction === "full-res-relight"[^]*this\.shadingPath === "auto-relight" && relightSplit/,
+    "automatic splitting must remain gated by an active reduced prepass and a relight reconstruction mode");
+  assert.match(drySceneSource, /this\.shadingPath === "auto-relight" && relight && this\.coneScale !== 1[^]*ensureConeLightingPrepass/,
+    "selecting relight must asynchronously compile its split variant while the inline path remains available");
+});
