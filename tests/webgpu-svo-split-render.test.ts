@@ -44,9 +44,9 @@ test("static-primary coherence is exact-keyed and fails closed", () => {
 
 test("reduced cone prepass reserves group one and moves the split bridge to group two", () => {
   const split = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "split");
-  assert.match(split, /@group\(1\) @binding\(0\) var dryPrepassVisibilityTexture0/);
+  assert.match(split, /@group\(1\) @binding\(0\) var dryPrepassVisibilityKeyTexture/);
   assert.match(split, /@group\(2\) @binding\(0\) var drySplitGeometryWrite/);
-  assert.match(split, /dryPrepassResolve\(input\.position\.xy,opaque\.t,opaque\.normal\)/);
+  assert.match(split, /dryPrepassResolve\(input\.position\.xy,opaque\.t,opaque\.normal,opaque\)/);
 });
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;

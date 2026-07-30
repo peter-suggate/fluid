@@ -24,11 +24,13 @@ test("scale 1 preserves the production shader byte-for-byte (fingerprint contrac
 test("reduced scales add the prepass entry and guided upsample while keeping every inline fallback", () => {
   for (const scale of [0.5, 0.25] as const) {
     const reduced = createSvoDrySceneFragmentWGSL(scale);
-    assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityTexture0:texture_2d<f32>/);
-    assert.match(reduced, /@group\(1\) @binding\(1\) var dryPrepassVisibilityTexture1:texture_2d<f32>/);
-    assert.match(reduced, /@group\(1\) @binding\(2\) var dryPrepassVisibilityTexture2:texture_2d<f32>/);
-    assert.match(reduced, /@group\(1\) @binding\(3\) var dryPrepassGeometryTexture:texture_2d<f32>/);
+    assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityKeyTexture:texture_2d<u32>/);
+    assert.match(reduced, /@group\(1\) @binding\(1\) var dryPrepassGeometryTexture:texture_2d<f32>/);
+    assert.match(reduced, /@group\(1\) @binding\(2\) var dryPrepassIdentityTexture:texture_2d<u32>/);
+    assert.match(reduced, /@group\(1\) @binding\(3\) var dryPrepassRadianceTexture:texture_2d<f32>/);
     assert.match(reduced, /@fragment fn dryPrepassMain/);
+    assert.match(reduced, /@fragment fn dryPrepassShadeMain/,
+      "opaque shading must have a separate reduced-rate entry point so it cannot inflate cone-pass register pressure");
     assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true })),
       "the reduced variant must embed the identical optimized marcher block");
     assert.match(reduced, /if\(weightSum<0\.05\)\{dryConeFallback=1u;return;\}/,
@@ -42,24 +44,35 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
       "every user-shadable light slot must reuse the reduced-rate visibility cache");
     assert.match(reduced, /if\(index<4u\)\{return dryPrepassData0\[index\];\}[^]*if\(index<8u\)\{return dryPrepassData1\[index-4u\];\}[^]*dryPrepassData2\[min\(index-8u,3u\)\]/,
       "AO and all eight light slots must decode from their documented packed planes");
-    assert.match(reduced, /if\(lightIndex<3u\)\{output\.visibility0\[1u\+lightIndex\]=packedVisibility;\}[^]*else if\(lightIndex<7u\)\{output\.visibility1\[lightIndex-3u\]=packedVisibility;\}[^]*else\{output\.visibility2\.x=packedVisibility;\}/,
+    assert.match(reduced, /if\(lightIndex<3u\)\{visibility0\[1u\+lightIndex\]=packedVisibility;\}[^]*else if\(lightIndex<7u\)\{visibility1\[lightIndex-3u\]=packedVisibility;\}[^]*else\{visibility2\.x=packedVisibility;\}/,
       "the prepass writer and full-resolution reader must agree on every packed light channel");
-    assert.match(reduced, /if\(lightCount>3u\)\{accumulated1\+=textureLoad\(dryPrepassVisibilityTexture1[^]*if\(lightCount>7u\)\{accumulated2\+=textureLoad\(dryPrepassVisibilityTexture2/,
-      "unused visibility planes must not add guided texture reads at lower light caps");
+    assert.match(reduced, /fn dryPrepassQuantize7\(value:f32\)->u32\{return u32\(round\(clamp\(value,0\.0,1\.0\)\*127\.0\)\);\}/);
+    assert.match(reduced, /fn dryPrepassPack\([^]*clamp\(data0\.x,0\.0,1\.0\)\*255\.0/);
+    assert.match(reduced, /fn dryPrepassUnpack0[^]*\/255\.0[^]*\/127\.0[^]*fn dryPrepassUnpack1[^]*fn dryPrepassUnpack2/,
+      "AO must retain eight bits while all eight lights round-trip through seven-bit lanes");
+    assert.match(reduced, /let packed=textureLoad\(dryPrepassVisibilityKeyTexture,texel,0\)[^]*accumulated0\+=dryPrepassUnpack0\(packed\)[^]*accumulated1\+=dryPrepassUnpack1\(packed\)[^]*accumulated2\+=dryPrepassUnpack2\(packed\)/,
+      "one coherent integer fetch must provide every visibility lane and guide the 2x2 reconstruction");
     assert.match(reduced, /let raw=select\(dryPrepassChannel\(1u\+dryCurrentLightSlot\),0\.0,prepassRigidBlocker\.t<ray\.tMax_m\)/,
       "rigid-body blocker terms stay inline at full resolution on the upsampled shadow path");
     assert.match(reduced, /prepassUnblocked\+=select\(1\.0,0\.0,prepassRigidBlocker\.t<prepassRadius\)/,
       "rigid AO blocker sampling stays inline at full resolution on the upsampled AO path");
-    const prepassEntry = reduced.slice(reduced.indexOf("@fragment fn dryPrepassMain"));
-    assert.doesNotMatch(prepassEntry, /nearestBodyIgnoring/,
-      "the prepass must exclude the rigid blocker term so moving bodies never bake into reduced-rate texels");
+    assert.match(reduced, /dryPrepassIdentityMatches\(textureLoad\(dryPrepassIdentityTexture,texel,0\)\.x,u32\(round\(geometry\.w\)\),hit\)/,
+      "radiance reconstruction must reject exact material, owner, feature, field, or motion identity mismatches");
+    assert.match(reduced, /fn dryPrepassPackIdentity\(hit:DryHit\)->u32\{return \(hit\.materialId&0xffffu\)\|\(\(hit\.ownerId&0xffffu\)<<16u\);\}/);
+    assert.match(reduced, /let opaque=DryHit\(geometry\.x,dryPrepassDecodeNormal\(geometry\.yz\),identity&0xffffu,identity>>16u/);
+    assert.match(reduced, /return vec4f\(shadeDryOpaque\(opaque,ro,rd\),opaque\.t\)/,
+      "the isolated reduced-rate pass must shade the reconstructed coarse hit without another primary trace");
+    assert.match(reduced, /if\(hit\.t>=DRY_MISS\)[^]*dryPrepassRadianceState==1u&&hit\.motionKind==DRY_GBUFFER_MOTION_STATIC[^]*let position=ro\+rd\*hit\.t;let surface=dryEvaluateSurfaceMaterial/,
+      "exact-matched static radiance must return before full-resolution procedural material evaluation");
   }
 });
 
 test("prepass target contract and sizing", () => {
-  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityFormat, "rgba8unorm");
-  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityTargetCount, 3);
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityFormat, "rg32uint");
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityTargetCount, 1);
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.geometryFormat, "rgba16float");
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.identityFormat, "r32uint");
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.radianceFormat, "rgba16float");
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights, 8);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.5), [640, 360]);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.25), [320, 180]);
