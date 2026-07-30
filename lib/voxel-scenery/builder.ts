@@ -1,5 +1,8 @@
 import type { EnvironmentId } from "../environments";
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
+import type { EnvironmentProxySway } from "../scenery-sway";
+
+export type { EnvironmentProxySway } from "../scenery-sway";
 
 /** Linear-light RGB, matching the constants authored in webgpu-environments.ts. */
 export type EnvironmentLinearColor = readonly [number, number, number];
@@ -32,6 +35,13 @@ interface EnvironmentProxyBase {
    * that the authoring layer never filled in.
    */
   readonly orientation?: Quaternion;
+  /**
+   * Authored gust motion, applied per presented frame by the renderer and by
+   * nothing else. Omitted means the primitive is exactly where the catalog
+   * says it is, which is what every static consumer — voxelization, occupancy
+   * mips, coverage — reads. See lib/scenery-sway.ts for why that stays sound.
+   */
+  readonly sway?: EnvironmentProxySway;
   readonly material: EnvironmentProxyMaterial;
   readonly aabb_m: EnvironmentProxyAabb;
 }
@@ -147,39 +157,58 @@ export class ProxyBuilder {
   readonly props: EnvironmentProxyPrimitive[] = [];
   readonly shell: EnvironmentBoxProxy[] = [];
   private nextOwner = 0;
+  private swayResolver?: (proxy: EnvironmentProxyPrimitive) => EnvironmentProxySway | undefined;
 
   constructor(private readonly environmentId: EnvironmentId) {}
 
+  /**
+   * Emit the primitives built inside `emit` as one moving object.
+   *
+   * Motion is scoped rather than passed per call because it belongs to the
+   * object — a tree, a hanging cable — and not to the individual beads it is
+   * spelled with. The resolver sees each finished proxy, so a branch's share of
+   * the gust can be derived from where that branch actually ended up instead of
+   * being threaded by hand through the geometry that placed it. It is called
+   * exactly once per primitive, in emission order, and returning undefined
+   * leaves that primitive static.
+   */
+  sway(resolve: (proxy: EnvironmentProxyPrimitive) => EnvironmentProxySway | undefined, emit: () => void): void {
+    if (this.swayResolver) throw new Error("Scenery sway scopes do not nest");
+    this.swayResolver = resolve;
+    try { emit(); } finally { this.swayResolver = undefined; }
+  }
+
+  private emit<T extends EnvironmentProxyPrimitive>(proxy: T, shell = false): T {
+    const sway = this.swayResolver?.(proxy);
+    const result = sway ? { ...proxy, sway } : proxy;
+    (shell ? this.shell : this.props).push(result as EnvironmentProxyPrimitive as never);
+    return result;
+  }
+
   box(key: string, group: string, center_m: Vec3, halfSize_m: Vec3, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], shell = false, orientation?: Quaternion): EnvironmentBoxProxy {
-    const proxy: EnvironmentBoxProxy = {
+    return this.emit<EnvironmentBoxProxy>({
       kind: "box", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
       center_m, orientation, halfSize_m, material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
       aabb_m: aabb(center_m, rotatedExtent(halfSize_m, orientation))
-    };
-    (shell ? this.shell : this.props).push(proxy);
-    return proxy;
+    }, shell);
   }
 
   cylinder(key: string, group: string, center_m: Vec3, radius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentCylinderProxy {
     const radius = V(radius_m, halfHeight_m, radius_m);
-    const proxy: EnvironmentCylinderProxy = {
+    return this.emit<EnvironmentCylinderProxy>({
       kind: "cylinder", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
       center_m, orientation, radius_m, halfHeight_m, axis: "y",
       material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
       aabb_m: aabb(center_m, rotatedExtent(radius, orientation))
-    };
-    this.props.push(proxy);
-    return proxy;
+    });
   }
 
   ellipsoid(key: string, group: string, center_m: Vec3, radius_m: Vec3, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentEllipsoidProxy {
-    const proxy: EnvironmentEllipsoidProxy = {
+    return this.emit<EnvironmentEllipsoidProxy>({
       kind: "ellipsoid", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
       center_m, orientation, radius_m, material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
       aabb_m: aabb(center_m, rotatedExtent(radius_m, orientation))
-    };
-    this.props.push(proxy);
-    return proxy;
+    });
   }
 
   /**
@@ -194,38 +223,32 @@ export class ProxyBuilder {
     const center_m = V(.5 * (from_m.x + to_m.x), .5 * (from_m.y + to_m.y), .5 * (from_m.z + to_m.z));
     // A zero-length run is a sphere, and has no axis to align to.
     const orientation = halfLength_m > 0 ? alongAxis(segment) : undefined;
-    const proxy: EnvironmentCapsuleProxy = {
+    return this.emit<EnvironmentCapsuleProxy>({
       kind: "capsule", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
       center_m, orientation, radius_m, halfLength_m,
       material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
       aabb_m: aabb(center_m, rotatedExtent(V(radius_m, halfLength_m + radius_m, radius_m), orientation))
-    };
-    this.props.push(proxy);
-    return proxy;
+    });
   }
 
   torus(key: string, group: string, center_m: Vec3, majorRadius_m: number, minorRadius_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentTorusProxy {
     const outer = majorRadius_m + minorRadius_m;
-    const proxy: EnvironmentTorusProxy = {
+    return this.emit<EnvironmentTorusProxy>({
       kind: "torus", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
       center_m, orientation, majorRadius_m, minorRadius_m,
       material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
       aabb_m: aabb(center_m, rotatedExtent(V(outer, minorRadius_m, outer), orientation))
-    };
-    this.props.push(proxy);
-    return proxy;
+    });
   }
 
   cone(key: string, group: string, center_m: Vec3, baseRadius_m: number, topRadius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentConeProxy {
     const widest = Math.max(baseRadius_m, topRadius_m);
-    const proxy: EnvironmentConeProxy = {
+    return this.emit<EnvironmentConeProxy>({
       kind: "cone", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
       center_m, orientation, baseRadius_m, topRadius_m, halfHeight_m,
       material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
       aabb_m: aabb(center_m, rotatedExtent(V(widest, halfHeight_m, widest), orientation))
-    };
-    this.props.push(proxy);
-    return proxy;
+    });
   }
 }
 

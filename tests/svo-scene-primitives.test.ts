@@ -115,7 +115,7 @@ test("floor-only and garden catalogs report presentation support explicitly", ()
 
   scene.terrain = { baseHeight_m: 0.2, features: [] };
   const garden = buildSvoScenePrimitives(scene, { environmentId: "garden" });
-  assert.equal(garden.descriptors.length, 104, "garden props remain directly representable");
+  assert.equal(garden.descriptors.length, 122, "garden props remain directly representable");
   assert.ok(garden.descriptors.every((descriptor) => descriptor.kind !== "terrain-heightfield"));
   assert.equal(garden.requiresRasterTerrainFallback, false);
   assert.deepEqual(garden.unsupportedSources, []);

@@ -21,6 +21,7 @@ export type {
   EnvironmentProxyMaterial,
   EnvironmentProxyPrimitive,
   EnvironmentProxyShell,
+  EnvironmentProxySway,
   EnvironmentSceneryContext,
   EnvironmentSceneryModule,
 } from "./voxel-scenery";

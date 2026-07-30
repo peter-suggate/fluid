@@ -122,7 +122,7 @@ export function VisualPanel() {
       <div className="render-status-line">
         <span className={effectiveRendererStatus.effectiveMode === "svo" ? "online" : ""} />
         <strong data-testid="effective-renderer-status">{effectiveRendererStatus.effectiveMode === "svo" ? "SVO ACTIVE" : "RASTER ACTIVE"}</strong>
-        <code>{Math.round(tuning.resolutionScale * 100)}% · cone {tuning.coneLightingScale}× · {tuning.temporalEnabled ? "TAA" : "RAW"}</code>
+        <code>{Math.round(tuning.resolutionScale * 100)}% · cone {tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`} · {tuning.temporalEnabled ? "TAA" : "RAW"}</code>
       </div>
     </header>
 
@@ -159,8 +159,9 @@ export function VisualPanel() {
           <RangeControl label="Render resolution" unit="%" value={tuning.resolutionScale * 100} min={35} max={100} step={1} displayDigits={0}
             onChange={(value) => updateTuning("resolutionScale", value / 100)} modified={modified("resolutionScale")} onReset={resetTuning("resolutionScale")} />
           <label className="render-discrete-control"><span>Cone prepass</span><div>
-            {([0.25, 0.5, 1] as const).map((scale) => <button key={scale} className={tuning.coneLightingScale === scale ? "active" : ""}
-              onClick={() => updateTuning("coneLightingScale", scale)}>{scale === 1 ? "FULL" : `${scale}×`}</button>)}
+            {([{ scale: 1, label: "FULL" }, { scale: 0.5, label: "2×2" }, { scale: 0.25, label: "4×4" }, { scale: 0.125, label: "8×8" }] as const)
+              .map(({ scale, label }) => <button key={scale} className={tuning.coneLightingScale === scale ? "active" : ""}
+                onClick={() => updateTuning("coneLightingScale", scale)}>{label}</button>)}
           </div></label>
         </div>
         {effectiveRendererStatus.fallbackReason && <p className="render-inline-warning">SVO fallback: {rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}.</p>}

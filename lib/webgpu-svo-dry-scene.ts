@@ -874,7 +874,7 @@ ${visibility}`;
  * traded inside the shader (SVO_DRY_SCENE_MOVING_* constants), which costs no
  * pipeline state at all.
  */
-export type SvoConeLightingScale = 1 | 0.5 | 0.25;
+export type SvoConeLightingScale = 1 | 0.5 | 0.25 | 0.125;
 
 /** Compile-time static traversal experiment. Hybrid preserves the shipping fallback semantics. */
 export type SvoDryTraversalMode = "hybrid" | "canonical" | "canonical-parametric" | "compact" | "wide";
@@ -1197,13 +1197,12 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
   let normal=normalize(normalIn);
   let coordinate=pixel*(vec2f(dims)/max(uniforms.viewport.xy,vec2f(1.0)))-vec2f(.5);
   let base=floor(coordinate);let fraction=coordinate-base;
-  var accumulated0=vec4f(0.0);var accumulated1=vec4f(0.0);var accumulated2=vec4f(0.0);var weightSum=0.0;var bestWeight=0.0;var bestTexel=vec2i(0);
+  var accumulated0=vec4f(0.0);var accumulated1=vec4f(0.0);var accumulated2=vec4f(0.0);var weightSum=0.0;var bestRadianceWeight=0.0;var bestRadianceTexel=vec2i(0);
   for(var j=0u;j<2u;j+=1u){for(var i=0u;i<2u;i+=1u){
     let texel=vec2i(clamp(base+vec2f(f32(i),f32(j)),vec2f(0.0),vec2f(dims)-vec2f(1.0)));
     let geometry=textureLoad(dryPrepassGeometryTexture,texel,0);
     if(geometry.x<=0.0){continue;}
     let packed=textureLoad(dryPrepassVisibilityKeyTexture,texel,0);
-    if(!dryPrepassIdentityMatches(textureLoad(dryPrepassIdentityTexture,texel,0).x,u32(round(geometry.w)),hit)){continue;}
     let bilinear=select(1.0-fraction.x,fraction.x,i==1u)*select(1.0-fraction.y,fraction.y,j==1u);
     let depthWeight=exp(-24.0*abs(geometry.x-depth)/max(depth,1e-3));
     let normalWeight=pow(max(dot(normal,dryPrepassDecodeNormal(geometry.yz)),0.0),8.0);
@@ -1212,10 +1211,11 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
     accumulated0+=dryPrepassUnpack0(packed)*weight;
     accumulated1+=dryPrepassUnpack1(packed)*weight;
     accumulated2+=dryPrepassUnpack2(packed)*weight;
-    if(weight>bestWeight){bestWeight=weight;bestTexel=texel;}weightSum+=weight;
+    if(weight>bestRadianceWeight&&dryPrepassIdentityMatches(textureLoad(dryPrepassIdentityTexture,texel,0).x,u32(round(geometry.w)),hit)){bestRadianceWeight=weight;bestRadianceTexel=texel;}weightSum+=weight;
   }}
   if(weightSum<${SVO_DRY_CONE_PREPASS_CONTRACT.fallbackWeightThreshold}){dryConeFallback=1u;return;}
-  dryPrepassData0=accumulated0/weightSum;dryPrepassData1=accumulated1/weightSum;dryPrepassData2=accumulated2/weightSum;dryPrepassRadiance=textureLoad(dryPrepassRadianceTexture,bestTexel,0);dryPrepassState=1u;dryPrepassRadianceState=1u;
+  dryPrepassData0=accumulated0/weightSum;dryPrepassData1=accumulated1/weightSum;dryPrepassData2=accumulated2/weightSum;dryPrepassState=1u;
+  if(bestRadianceWeight>0.0){dryPrepassRadiance=textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0);dryPrepassRadianceState=1u;}
 }
 ` : "";
   const splitGroup = reduced ? 2 : 1;
@@ -2550,6 +2550,31 @@ export class SparseVoxelDrySceneRenderer {
       this.device.queue.writeBuffer(this.thickGlassUniformBuffer, 0, packSparseVoxelDrySceneThickGlassArena(scene));
     }
     this.rebuild();
+  }
+
+  /**
+   * Re-pose a contiguous run of analytic primitive records in place.
+   *
+   * This is the whole cost of authored scenery motion. Identity, material and
+   * dimensions are unchanged, so the published sparse world — its bricks, its
+   * material owners, its occupancy mips — stays exactly as valid as it was, and
+   * the caller has already bounded the motion so a re-posed surface cannot
+   * leave the cell that owns it (lib/scenery-sway.ts). The reusable-frame and
+   * primary-visibility caches are the one thing that would go stale, so a
+   * moving scene simply never populates them.
+   */
+  updatePrimitiveRecords(records: Uint32Array<ArrayBuffer>, firstPrimitiveIndex: number): boolean {
+    if (!this.primitiveBuffer || !records.byteLength) return false;
+    if (records.byteLength % SVO_PRIMITIVE_RECORD_STRIDE_BYTES !== 0) throw new RangeError("Animated primitive records must be whole records");
+    const offset = firstPrimitiveIndex * SVO_PRIMITIVE_RECORD_STRIDE_BYTES;
+    if (!Number.isSafeInteger(firstPrimitiveIndex) || firstPrimitiveIndex < 0
+      || offset + records.byteLength > this.primitiveBuffer.size) {
+      throw new RangeError("Animated primitive span falls outside the published primitive records");
+    }
+    this.device.queue.writeBuffer(this.primitiveBuffer, offset, records);
+    this.clearReusableFrame();
+    this.clearPrimaryVisibilityCache();
+    return true;
   }
 
   /** Select lighting without rebuilding source-owned scene resources. */

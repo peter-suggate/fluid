@@ -6148,7 +6148,13 @@ fn appendRigidBounds(body: RigidBody, generation: u32, count: ptr<function, u32>
 }
 @compute @workgroup_size(1)
 fn buildDirtyTileDelta() {
-  let generation = max(1u, frontier[3] + 1u);
+  // Dirty membership belongs to the candidate attempt, not to the last
+  // accepted frontier plus one. A rejected attempt deliberately leaves
+  // frontier[3] unchanged while stampFrontierAttempt advances frontier[8].
+  // Using the accepted clock here made every retry stamp the old generation;
+  // carry validation then treated genuinely changed rows as clean and turned
+  // one recoverable rejection into a permanent topology freeze.
+  let generation = frontier[8u];
   var dirtyCount = 0u;
   clearDirtyFailure();
   compaction[dirtyAuthorityBase()] = FRONTIER_FAILED_MAGIC;
@@ -6242,7 +6248,7 @@ fn buildDirtyTileDelta() {
 
 @compute @workgroup_size(1)
 fn buildDirtyFrontierDelta() {
-  let generation = max(1u, frontier[3] + 1u);
+  let generation = frontier[8u];
   let capacity = topologyTileCapacity();
   let activeCount = compaction[0];
   var dirtyCount = 0u;

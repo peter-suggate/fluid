@@ -351,7 +351,7 @@ test("every narrative step's layer is drawable, so the readout and overlay agree
 test("the probe is absent from every production dry-scene composition", () => {
   assert.equal(createSvoDrySceneFragmentWGSL(1, "hybrid"), svoDrySceneShader);
   assert.doesNotMatch(svoDrySceneShader, /dryProbeMain|probeRecords|probeRequest/);
-  for (const scale of [0.5, 0.25] as const) {
+  for (const scale of [0.5, 0.25, 0.125] as const) {
     assert.doesNotMatch(createSvoDrySceneFragmentWGSL(scale), /dryProbeMain|probeRecords|probeRequest/);
   }
   assert.doesNotMatch(createSvoDrySceneFragmentWGSL(1, "hybrid", "off", "split"), /dryProbeMain|probeRecords|probeRequest/);

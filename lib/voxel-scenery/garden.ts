@@ -1,3 +1,4 @@
+import { sceneryMaximumSwayExcursion_m } from "../scenery-sway";
 import { terrainHeightAt } from "../terrain";
 import {
   C,
@@ -6,6 +7,7 @@ import {
   type EnvironmentLinearColor,
   type EnvironmentSceneryModule,
 } from "./builder";
+import { emitProceduralTree, planProceduralTree } from "./procedural-tree";
 
 /**
  * Porcelain garden: a bonsai landscape in glazed white clay, built around the
@@ -19,6 +21,20 @@ import {
  * pond, ring it, or are reflected in it. Lily pads at the waterline are the one
  * deliberate exception, and they are kept to the shallow rim so the open water
  * stays open.
+ *
+ * One tree is the subject of the set rather than part of its backdrop: the
+ * procedural specimen on the west bank is grown from a seed, is the only thing
+ * here that moves, and is deliberately the most detailed object in frame. The
+ * scattered small props were thinned to pay for it — a ring of nine mushrooms
+ * and a field of eight pebbles were reading as clutter around a pond that is
+ * supposed to be the subject, and they were competing with the one silhouette
+ * that should carry the frame.
+ *
+ * Budget: the whole catalog stays at or under SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES
+ * (128). Production tolerates more — it falls back to SVO payload traversal —
+ * but the offline candidate audit in tests/svo-primitive-candidates.test.ts
+ * only sweeps catalogs that fit, so going over silently drops this set's
+ * no-false-negative coverage. Spend new detail by taking it from somewhere else.
  *
  * Palette: value only. `clay` and `stone` never leave a ~5% neutral band, so
  * form reads through light, shadow and ambient occlusion instead of hue. The
@@ -70,7 +86,6 @@ export const gardenScenery: EnvironmentSceneryModule = {
       return (x: number, rise: number, z: number) => V(x * s, base + rise * s, z * s);
     };
 
-    const trunk = clay(.50);
     const gill = clay(.45);
     // The lamppost was the last saturated surface in the set: a near-black
     // metal post. Glazed porcelain instead, so the only colour left anywhere in
@@ -79,93 +94,77 @@ export const gardenScenery: EnvironmentSceneryModule = {
     const lampClay = stone(.60);
     const lampGlow = C(1.0, .48, .19);
 
-    // ---- Cloud trees ------------------------------------------------------
-    // Niwaki, not lollipops: every canopy is a flattened pad, stacked at
-    // varied heights so the silhouette reads as cut cloud even when the top of
-    // the frame crops it. The tallest tree backs the far bank; a small one sits
-    // in the near corner to frame the pond.
-    const bigTree = rootedAt(-.45, -.117);
-    // Held: the trunk datum is the lawn, and downstream tests read its top at
-    // g + 0.30 s. Everything else on this tree hangs off that.
-    b.cylinder("tree-big/trunk", "tree-trunk", V(-.45 * s, g + .15 * s, -.117 * s), .055 * s, .15 * s, trunk, 0, ["tree"]);
-    b.ellipsoid("tree-big/canopy-low", "leaf-foliage", bigTree(-.345, .255, -.215), V(.160 * s, .085 * s, .150 * s), clay(.80), 0, ["tree"]);
-    b.ellipsoid("tree-big/canopy-main", "leaf-foliage", bigTree(-.40, .40, -.08), V(.30 * s, .155 * s, .28 * s), clay(.90), 0, ["tree"]);
-    b.ellipsoid("tree-big/canopy-side", "leaf-foliage", bigTree(-.56, .325, -.20), V(.175 * s, .098 * s, .165 * s), clay(.83), 0, ["tree"]);
-    b.ellipsoid("tree-big/canopy-top", "leaf-foliage", bigTree(-.325, .525, -.02), V(.155 * s, .090 * s, .145 * s), clay(.95), 0, ["tree"]);
+    // ---- The specimen tree ------------------------------------------------
+    // The one grown object in the set, on the west bank where the old hand-
+    // built cloud tree stood. It keeps that tree's root and its lawn datum, so
+    // the bank it stands on is unchanged; everything above the root is
+    // generated from the seed below, and re-seeding re-grows the whole tree.
+    //
+    // It is also the only thing here that moves. The gust is bounded by the
+    // sparse lattice rather than by taste: a swaying prop is re-posed in the
+    // render ABI every frame and is never re-voxelized, so its surface has to
+    // stay inside the cell ownership the proxy voxelizer wrote once at
+    // bring-up. lib/scenery-sway.ts owns that budget.
+    const heroRoot = rootedAt(-.45, -.117);
+    const heroTree = planProceduralTree({
+      key: "tree-hero",
+      root_m: heroRoot(-.45, 0, -.117),
+      height_m: .66 * s,
+      rootRadius_m: .036 * s,
+      spread_m: .30 * s,
+      seed: 0x5eed_9a3,
+      // Leans over the deep basin, so the crown is the thing reflected in the
+      // open water and the trunk still clears the bank.
+      leanXZ: [1, .28],
+      bark: clay,
+      leaf: clay,
+    });
+    emitProceduralTree(b, heroTree, {
+      excursion_m: sceneryMaximumSwayExcursion_m(scene.voxelDomain.finestCellSize_m),
+    });
 
-    const roundTree = rootedAt(.45, -.25);
-    b.cylinder("tree-round/trunk", "tree-trunk", roundTree(.45, .12, -.25), .045 * s, .12 * s, clay(.48), 0, ["tree"]);
-    b.ellipsoid("tree-round/canopy-main", "leaf-foliage", roundTree(.45, .325, -.25), V(.225 * s, .125 * s, .215 * s), clay(.87), 0, ["tree"]);
-    b.ellipsoid("tree-round/canopy-side", "leaf-foliage", roundTree(.56, .42, -.19), V(.125 * s, .072 * s, .115 * s), clay(.93), 0, ["tree"]);
-
+    // ---- Cloud tree -------------------------------------------------------
+    // The one hand-built tree left is backdrop: flattened pads at varied
+    // heights, standing well back on the knoll so the specimen owns the middle
+    // distance. The near-corner tree that used to frame the pond is gone — it
+    // sat between the camera and the specimen and cropped it.
     const knollTree = rootedAt(-.373, .233);
     b.cylinder("tree-knoll/trunk", "tree-trunk", knollTree(-.373, .135, .233), .038 * s, .135 * s, clay(.49), 0, ["tree"]);
     b.ellipsoid("tree-knoll/canopy-low", "leaf-foliage", knollTree(-.405, .245, .200), V(.145 * s, .078 * s, .135 * s), clay(.82), 0, ["tree"]);
     b.ellipsoid("tree-knoll/canopy-main", "leaf-foliage", knollTree(-.355, .350, .245), V(.175 * s, .092 * s, .165 * s), clay(.89), 0, ["tree"]);
     b.ellipsoid("tree-knoll/canopy-top", "leaf-foliage", knollTree(-.320, .450, .215), V(.115 * s, .065 * s, .110 * s), clay(.95), 0, ["tree"]);
 
-    const nearTree = rootedAt(.54, .34);
-    b.cylinder("tree-near/trunk", "tree-trunk", nearTree(.54, .115, .34), .034 * s, .115 * s, clay(.47), 0, ["tree"]);
-    b.ellipsoid("tree-near/canopy-main", "leaf-foliage", nearTree(.545, .245, .335), V(.160 * s, .085 * s, .150 * s), clay(.86), 0, ["tree"]);
-    b.ellipsoid("tree-near/canopy-top", "leaf-foliage", nearTree(.515, .335, .300), V(.105 * s, .060 * s, .100 * s), clay(.92), 0, ["tree"]);
-
-    const farTree = rootedAt(-.117, -.45);
-    b.cylinder("tree-far/trunk", "tree-trunk", farTree(-.117, .10, -.45), .030 * s, .10 * s, clay(.46), 0, ["tree"]);
-    b.ellipsoid("tree-far/canopy", "leaf-foliage", farTree(-.117, .215, -.45), V(.145 * s, .078 * s, .135 * s), clay(.84), 0, ["tree"]);
-
-    // ---- Mushroom ring ----------------------------------------------------
-    // Oversized to toy scale and spaced right around the pond, so wherever the
-    // camera lands there is a cap catching light on the far bank.
+    // ---- Mushrooms --------------------------------------------------------
+    // Three, not the ring of nine this once was. Oversized to toy scale and
+    // kept to the far bank, where a lit cap still reads against the water
+    // without the near lawn turning into a fairy circle.
     const grand = rootedAt(-.20, -.33);
     b.cylinder("mushroom-grand/stem", "mushroom-stem", grand(-.20, .10, -.33), .05 * s, .10 * s, clay(.72), 0, ["mushroom"]);
     b.cylinder("mushroom-grand/gill", "mushroom-gill", grand(-.20, .205, -.33), .115 * s, .012 * s, gill, 0, ["mushroom"]);
     b.ellipsoid("mushroom-grand/cap", "mushroom-cap", grand(-.20, .25, -.33), V(.14 * s, .088 * s, .14 * s), clay(.94), 0, ["mushroom"]);
-
-    const sprout = rootedAt(-.13, -.36);
-    b.cylinder("mushroom-sprout/stem", "mushroom-stem", sprout(-.13, .055, -.36), .028 * s, .055 * s, clay(.68), 0, ["mushroom"]);
-    b.ellipsoid("mushroom-sprout/cap", "mushroom-cap", sprout(-.13, .135, -.36), V(.072 * s, .046 * s, .072 * s), clay(.88), 0, ["mushroom"]);
 
     const tall = rootedAt(-.30, .25);
     b.cylinder("mushroom-tall/stem", "mushroom-stem", tall(-.30, .075, .25), .036 * s, .075 * s, clay(.70), 0, ["mushroom"]);
     b.cylinder("mushroom-tall/gill", "mushroom-gill", tall(-.30, .16, .25), .085 * s, .010 * s, gill, 0, ["mushroom"]);
     b.ellipsoid("mushroom-tall/cap", "mushroom-cap", tall(-.30, .20, .25), V(.105 * s, .066 * s, .105 * s), clay(.91), 0, ["mushroom"]);
 
-    const button = rootedAt(.38, .07);
-    b.cylinder("mushroom-button/stem", "mushroom-stem", button(.38, .06, .07), .032 * s, .06 * s, clay(.69), 0, ["mushroom"]);
-    b.ellipsoid("mushroom-button/cap", "mushroom-cap", button(.38, .15, .07), V(.085 * s, .054 * s, .085 * s), clay(.89), 0, ["mushroom"]);
-
-    const pip = rootedAt(.24, -.345);
-    b.cylinder("mushroom-pip/stem", "mushroom-stem", pip(.24, .045, -.345), .024 * s, .045 * s, clay(.66), 0, ["mushroom"]);
-    b.ellipsoid("mushroom-pip/cap", "mushroom-cap", pip(.24, .115, -.345), V(.06 * s, .04 * s, .06 * s), clay(.86), 0, ["mushroom"]);
-
     const crown = rootedAt(.413, .133);
     b.cylinder("mushroom-crown/stem", "mushroom-stem", crown(.413, .115, .133), .052 * s, .115 * s, clay(.73), 0, ["mushroom"]);
     b.cylinder("mushroom-crown/gill", "mushroom-gill", crown(.413, .235, .133), .12 * s, .013 * s, clay(.44), 0, ["mushroom"]);
     b.ellipsoid("mushroom-crown/cap", "mushroom-cap", crown(.413, .285, .133), V(.15 * s, .095 * s, .15 * s), clay(.95), 0, ["mushroom"]);
 
-    const knollCap = rootedAt(-.413, .207);
-    b.cylinder("mushroom-knoll/stem", "mushroom-stem", knollCap(-.413, .07, .207), .034 * s, .07 * s, clay(.70), 0, ["mushroom"]);
-    b.ellipsoid("mushroom-knoll/cap", "mushroom-cap", knollCap(-.413, .155, .207), V(.095 * s, .06 * s, .095 * s), clay(.90), 0, ["mushroom"]);
-
-    const twin = rootedAt(.207, .347);
-    b.cylinder("mushroom-twin/stem", "mushroom-stem", twin(.207, .062, .347), .030 * s, .062 * s, clay(.69), 0, ["mushroom"]);
-    b.ellipsoid("mushroom-twin/cap", "mushroom-cap", twin(.207, .148, .347), V(.082 * s, .052 * s, .082 * s), clay(.92), 0, ["mushroom"]);
-
     // ---- Rock arrangement -------------------------------------------------
-    // A three-stone group bedded into the west bank where the pond narrows, a
-    // pair flanking the rockery promontory, and one low boulder in the near
-    // corner to stop the foreground running out of the frame flat.
+    // A two-stone group bedded into the west bank where the pond narrows, one
+    // on the rockery promontory, and one low boulder in the near corner to stop
+    // the foreground running out of the frame flat. The stones that used to
+    // crowd the specimen tree's root are gone: its flare does that work now.
     const sentinel = rootedAt(-.393, -.04);
     b.ellipsoid("rock-sentinel/body", "stone-rock", sentinel(-.393, .175, -.04), V(.105 * s, .175 * s, .09 * s), stone(.60), 0, ["rock"]);
     b.ellipsoid("rock-sentinel/shoulder", "stone-rock", sentinel(-.420, .085, -.055), V(.085 * s, .085 * s, .075 * s), stone(.66), 0, ["rock"]);
     const recline = rootedAt(-.433, .02);
     b.ellipsoid("rock-recline/body", "stone-rock", recline(-.433, .075, .02), V(.170 * s, .075 * s, .115 * s), stone(.64), 0, ["rock"]);
-    const lowRock = rootedAt(-.36, -.12);
-    b.ellipsoid("rock-low/body", "stone-rock", lowRock(-.36, .052, -.12), V(.105 * s, .052 * s, .09 * s), stone(.71), 0, ["rock"]);
     const promontoryA = rootedAt(.06, .267);
     b.ellipsoid("rock-promontory-a/body", "stone-rock", promontoryA(.06, .075, .267), V(.100 * s, .075 * s, .085 * s), stone(.63), 0, ["rock"]);
-    const promontoryB = rootedAt(-.047, .247);
-    b.ellipsoid("rock-promontory-b/body", "stone-rock", promontoryB(-.047, .058, .247), V(.085 * s, .058 * s, .075 * s), stone(.68), 0, ["rock"]);
     const nearRock = rootedAt(.433, .183);
     b.ellipsoid("rock-near/body", "stone-rock", nearRock(.433, .090, .183), V(.115 * s, .090 * s, .100 * s), stone(.61), 0, ["rock"]);
 
@@ -253,12 +252,10 @@ export const gardenScenery: EnvironmentSceneryModule = {
     reedClump("reed-shore", .2667, .2067, 3, 2203, .038, .050, .100, .0105);
     reedClump("reed-north", .0833, .2467, 3, 3307, .030, .048, .095, .0105);
     reedClump("reed-west", -.3467, -.0467, 3, 4409, .040, .052, .108, .0108, true);
-    reedClump("reed-cove", -.1533, .1467, 2, 5501, .032, .045, .085, .0100);
     reedClump("reed-beach", .0733, -.3000, 3, 6607, .036, .046, .092, .0102);
-    // Two tufts on the immediate foreground lawn, where the painted blades used
-    // to sit. Short, so they read as grass rather than as more reeds.
+    // One tuft on the immediate foreground lawn, where the painted blades used
+    // to sit. Short, so it reads as grass rather than as more reeds.
     reedClump("tuft-near", .3500, .3667, 2, 7703, .030, .030, .060, .0098);
-    reedClump("tuft-fore", -.1000, .3500, 2, 8809, .028, .028, .055, .0098);
 
     // ---- Lily pads --------------------------------------------------------
     // Held to the shallow rim rather than the open basin: they trace the
@@ -287,11 +284,6 @@ export const gardenScenery: EnvironmentSceneryModule = {
       ["pebble-1", .2100, -.2900, .050, .034, .68],
       ["pebble-2", .2600, -.3250, .036, .024, .74],
       ["pebble-3", -.0500, .3100, .045, .030, .70],
-      ["pebble-4", .0550, -.2900, .036, .024, .69],
-      ["pebble-5", .0830, -.3090, .028, .019, .75],
-      ["pebble-6", .1150, -.3230, .042, .027, .66],
-      ["pebble-7", .1510, -.3310, .024, .017, .72],
-      ["pebble-8", .1870, -.3330, .034, .023, .71],
     ];
     for (const [name, x, z, radius, rise, value] of pebbles) {
       b.ellipsoid(`${name}/body`, "stone-pebble", rootedAt(x, z)(x, rise * .62, z),

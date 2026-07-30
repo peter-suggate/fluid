@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription } from "./model";
+import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "./scenery-sway";
 import {
   packSvoPrimitiveRecords,
   type SvoFinitePrimitiveDescriptor,
@@ -63,6 +64,8 @@ export interface SvoEnvironmentPrimitiveMetadata {
   shell: boolean;
   /** Front room shell is retained in the model but skipped for interior presentation. */
   openShell: boolean;
+  /** Authored gust motion; the renderer re-poses this record every frame. */
+  sway?: EnvironmentProxySway;
   /** Audit-only bounds; they do not alter rigid-body or solver collision physics. */
   coverageBounds: SvoPrimitiveCoverageBounds;
 }
@@ -255,6 +258,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
       },
       shell: primitive.tags.includes("shell"),
       openShell,
+      sway: primitive.sway,
       coverageBounds: coverageBounds(primitive, coverageCellSize_m),
     });
     primitiveIndexByOwnerId.set(ownerId, primitiveIndex);
@@ -284,6 +288,46 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     staticRevision,
     cacheKey,
   });
+}
+
+/**
+ * The contiguous span of primitive records the renderer re-poses each frame.
+ *
+ * A span rather than a list of indices: authored motion belongs to whole
+ * objects, an object's parts are emitted together, and one `writeBuffer` over
+ * the span costs less than a scatter even when it carries a few static records
+ * along with it. Nothing outside the span is touched, and nothing about the
+ * span's identity, material, or dimensions ever changes — only its transform,
+ * which is what keeps the published sparse world valid underneath it.
+ */
+export interface SvoScenePrimitiveAnimation {
+  /** Index of the first record in the span, in `descriptors` order. */
+  readonly firstPrimitiveIndex: number;
+  /** Authored rest pose of every record in the span, animated or not. */
+  readonly restDescriptors: readonly SvoPrimitiveDescriptor[];
+  /** Aligned with `restDescriptors`; undefined leaves that record at rest. */
+  readonly sway: readonly (EnvironmentProxySway | undefined)[];
+}
+
+/** Undefined when the environment authored no motion, which is the usual case. */
+export function svoScenePrimitiveAnimation(build: SvoScenePrimitiveBuild): SvoScenePrimitiveAnimation | undefined {
+  const animated = build.metadata.filter(({ sway }) => sway);
+  if (animated.length === 0) return undefined;
+  const first = Math.min(...animated.map(({ primitiveIndex }) => primitiveIndex));
+  const last = Math.max(...animated.map(({ primitiveIndex }) => primitiveIndex));
+  return {
+    firstPrimitiveIndex: first,
+    restDescriptors: build.descriptors.slice(first, last + 1),
+    sway: build.metadata.slice(first, last + 1).map(({ sway }) => sway),
+  };
+}
+
+/** Records for the animated span at one presentation time, ready to upload. */
+export function packSvoScenePrimitiveAnimation(animation: SvoScenePrimitiveAnimation, time_s: number): Uint32Array<ArrayBuffer> {
+  return packSvoPrimitiveRecords(animation.restDescriptors.map((descriptor, index) => {
+    const sway = animation.sway[index];
+    return sway ? swayedPrimitiveDescriptor(descriptor, sway, time_s) : descriptor;
+  }));
 }
 
 /** Build the selected scene environment catalog and convert it in one call. */

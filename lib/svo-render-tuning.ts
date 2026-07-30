@@ -100,7 +100,7 @@ const integer = (value: number, minimum: number, maximum: number) =>
   Math.round(bounded(value, minimum, maximum));
 
 export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTuning {
-  const coneLightingScale = value.coneLightingScale === 0.25 || value.coneLightingScale === 0.5
+  const coneLightingScale = value.coneLightingScale === 0.125 || value.coneLightingScale === 0.25 || value.coneLightingScale === 0.5
     ? value.coneLightingScale : 1;
   return {
     resolutionScale: bounded(value.resolutionScale, 0.35, 1),

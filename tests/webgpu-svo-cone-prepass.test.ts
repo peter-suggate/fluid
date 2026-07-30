@@ -22,7 +22,7 @@ test("scale 1 preserves the production shader byte-for-byte (fingerprint contrac
 });
 
 test("reduced scales add the prepass entry and guided upsample while keeping every inline fallback", () => {
-  for (const scale of [0.5, 0.25] as const) {
+  for (const scale of [0.5, 0.25, 0.125] as const) {
     const reduced = createSvoDrySceneFragmentWGSL(scale);
     assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityKeyTexture:texture_2d<u32>/);
     assert.match(reduced, /@group\(1\) @binding\(1\) var dryPrepassGeometryTexture:texture_2d<f32>/);
@@ -56,8 +56,10 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
       "rigid-body blocker terms stay inline at full resolution on the upsampled shadow path");
     assert.match(reduced, /prepassUnblocked\+=select\(1\.0,0\.0,prepassRigidBlocker\.t<prepassRadius\)/,
       "rigid AO blocker sampling stays inline at full resolution on the upsampled AO path");
-    assert.match(reduced, /dryPrepassIdentityMatches\(textureLoad\(dryPrepassIdentityTexture,texel,0\)\.x,u32\(round\(geometry\.w\)\),hit\)/,
+    assert.match(reduced, /if\(weight>bestRadianceWeight&&dryPrepassIdentityMatches\(textureLoad\(dryPrepassIdentityTexture,texel,0\)\.x,u32\(round\(geometry\.w\)\),hit\)\)\{bestRadianceWeight=weight;bestRadianceTexel=texel;\}/,
       "radiance reconstruction must reject exact material, owner, feature, field, or motion identity mismatches");
+    assert.match(reduced, /accumulated2\+=dryPrepassUnpack2\(packed\)\*weight;[^]*if\(weight>bestRadianceWeight&&dryPrepassIdentityMatches/,
+      "depth/normal-guided visibility may cross identity boundaries without authorizing radiance reuse");
     assert.match(reduced, /fn dryPrepassPackIdentity\(hit:DryHit\)->u32\{return \(hit\.materialId&0xffffu\)\|\(\(hit\.ownerId&0xffffu\)<<16u\);\}/);
     assert.match(reduced, /let opaque=DryHit\(geometry\.x,dryPrepassDecodeNormal\(geometry\.yz\),identity&0xffffu,identity>>16u/);
     assert.match(reduced, /return vec4f\(shadeDryOpaque\(opaque,ro,rd\),opaque\.t\)/,
@@ -76,8 +78,11 @@ test("prepass target contract and sizing", () => {
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights, 8);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.5), [640, 360]);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.25), [320, 180]);
+  assert.deepEqual(svoConePrepassSize(1280, 720, 0.125), [160, 90]);
   assert.deepEqual(svoConePrepassSize(1281, 721, 0.5), [641, 361]);
+  assert.deepEqual(svoConePrepassSize(1281, 721, 0.125), [160, 90]);
   assert.deepEqual(svoConePrepassSize(1, 1, 0.25), [1, 1], "prepass targets never collapse below 1x1");
+  assert.deepEqual(svoConePrepassSize(1, 1, 0.125), [1, 1]);
   assert.deepEqual(svoConePrepassSize(1280, 720, 1), [1280, 720]);
 });
 
@@ -132,6 +137,8 @@ test("the cone-lighting scale is an optional lighting option that defaults to th
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.5 });
     assert.equal(renderer.coneLightingScale, 0.5);
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.5 });
+    renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.125 });
+    assert.equal(renderer.coneLightingScale, 0.125, "the 8x8 option reaches the renderer without normalization loss");
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true });
     assert.equal(renderer.coneLightingScale, 1, "omitting the option returns to the inline path");
     renderer.destroy();
@@ -149,7 +156,7 @@ test("reduced shader variants compile with both entry points on the GPU backend"
   const gpu = create(["backend=metal"]), adapter = await gpu.requestAdapter({ powerPreference: "high-performance" }); assert.ok(adapter);
   const device = await adapter.requestDevice();
   try {
-    for (const scale of [0.5, 0.25] as const) {
+    for (const scale of [0.5, 0.25, 0.125] as const) {
       const code = createSvoDrySceneFragmentWGSL(scale);
       const module = device.createShaderModule({ label: `Cone-prepass dry shader validation x${scale}`, code });
       const info = await module.getCompilationInfo();

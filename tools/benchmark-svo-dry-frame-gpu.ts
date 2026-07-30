@@ -18,7 +18,7 @@
  *
  * Rerun: node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
- *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25, default 0.5),
+ *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
  *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default hybrid),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
@@ -160,7 +160,7 @@ const modulePath = process.env.WEBGPU_NODE_MODULE
 assert.ok(Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0);
 assert.ok(Number.isSafeInteger(warmups) && warmups >= 0 && Number.isSafeInteger(cycles) && cycles > 0);
 assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
-assert.ok([1, 0.5, 0.25].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, or 0.25");
+assert.ok([1, 0.5, 0.25, 0.125].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, 0.25, or 0.125");
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
   "FLUID_SVO_DRY_FRAME_PROFILE_SECONDS must be a non-negative number");
 assert.ok(renderBrickSize === undefined || renderBrickSize === 4 || renderBrickSize === 8,

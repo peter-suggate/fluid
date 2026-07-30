@@ -465,6 +465,15 @@ test("topology attempt generations are stamped in GPU invocation order", () => {
     /fn stampFrontierAttempt\(\)[\s\S]*frontier\[8\] \+ 1u[\s\S]*frontier\[8\] = next/);
   assert.doesNotMatch(octreeProjectionShader, /frontier\[8\]\s*=\s*params\.pressureCapacity\.z/,
     "begin/finalize must preserve the invocation-stable GPU attempt stamp");
+  const dirtyTransactions = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn buildDirtyTileDelta"),
+    octreeProjectionShader.indexOf("// -----------------------------------------------------------------------------",
+      octreeProjectionShader.indexOf("fn buildDirtyTileDelta")),
+  );
+  assert.equal((dirtyTransactions.match(/let generation = frontier\[8u\]/g) ?? []).length, 2,
+    "both structural and wet-frontier dirty sets must use the candidate attempt generation");
+  assert.doesNotMatch(dirtyTransactions, /frontier\[3\]\s*\+\s*1u/,
+    "a rejected attempt must not leave subsequent dirty stamps on the accepted-generation clock");
 });
 
 test("cold pressure-row emission dereferences the inactive owner table", () => {

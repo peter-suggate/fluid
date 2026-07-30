@@ -18,7 +18,7 @@ test("every authored environment gets a stable full-scene proxy catalog", () => 
   // render. Each environment's geometry lives in lib/voxel-scenery/<id>.ts.
   const authoredPropCounts = new Map([
     ["conservatory", 89], ["courtyard", 93], ["night-lab", 105], ["concrete-gallery", 68],
-    ["bathhouse", 90], ["research-station", 104], ["default", 17], ["garden", 104]
+    ["bathhouse", 90], ["research-station", 104], ["default", 17], ["garden", 122]
   ]);
   for (const id of environmentIds) {
     const first = buildEnvironmentProxyCatalog(scene, id);
@@ -71,7 +71,13 @@ test("world coordinates track scene dimensions and garden terrain base height", 
   assert.equal(garden.floorY_m, .17);
   assert.equal(garden.shell.kind, "terrain-heightfield");
   assert.equal(garden.shell.primitives.length, 0, "terrain stays an analytic heightfield instead of becoming a filled box");
-  assert.equal(garden.primitives.find((primitive) => primitive.key.endsWith("tree-big/trunk"))?.center_m.y, .17 + .30);
+  const heroParts = garden.primitives.filter(({ key }) => key.includes("/tree-hero/"));
+  assert.ok(heroParts.length > 20, "the specimen tree is grown from a seed, not authored bead by bead");
+  const trunkBase = garden.primitives.find(({ key }) => key.endsWith("tree-hero/trunk-0"));
+  assert.ok(trunkBase && Math.abs(trunkBase.aabb_m.min.y - .17) < .02,
+    "the specimen tree stands on the terrain datum under its own root, not on a nominal lawn plane");
+  assert.ok(heroParts.every(({ sway }) => sway && sway.pivot_m.y === .17),
+    "every part of one tree swings about that tree's own root");
 });
 
 /**

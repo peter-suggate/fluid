@@ -20,7 +20,12 @@ import {
 } from "./svo-pixel-trace";
 import { SparseVoxelPixelTraceOverlay } from "./webgpu-svo-pixel-trace-overlay";
 import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, type SparseVoxelDrySceneData } from "./webgpu-svo-dry-scene";
-import { buildSvoScenePrimitives } from "./svo-scene-primitives";
+import {
+  buildSvoScenePrimitives,
+  packSvoScenePrimitiveAnimation,
+  svoScenePrimitiveAnimation,
+  type SvoScenePrimitiveAnimation,
+} from "./svo-scene-primitives";
 import { buildSvoSceneGlass } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "./svo-terrain-material";
@@ -450,6 +455,15 @@ export class FluidLabRenderer {
   private svoDryScenePipeline?: SparseVoxelDrySceneRenderer;
   private svoDrySceneSource?: SparseVoxelSceneRenderSource;
   private svoDrySceneData?: SparseVoxelDrySceneData;
+  /** Authored scenery motion for the attached scene, absent when nothing moves. */
+  private sceneryAnimation?: SvoScenePrimitiveAnimation;
+  /**
+   * Presentation clock for authored scenery, in seconds since the first frame
+   * that drew it. Deliberately not the simulation clock: a garden the user has
+   * paused to inspect its lighting should still be alive, and the gust is not a
+   * physical quantity anyone reads off the timeline.
+   */
+  private sceneryAnimationOrigin_ms?: number;
   private gridOverlayPipeline?: GridOverlayPipeline;
   private techniqueOverlayPipeline?: OctreeTechniqueOverlayPipeline;
   private techniqueAuditOverlayPipeline?: OctreeTechniqueAuditOverlayPipeline;
@@ -1019,7 +1033,7 @@ export class FluidLabRenderer {
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
     this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined;
-    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.svoDrySceneSource = undefined; this.svoDrySceneData = undefined; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingStaticSvoPresentation = undefined;
+    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.svoDrySceneSource = undefined; this.svoDrySceneData = undefined; this.sceneryAnimation = undefined; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingStaticSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
     this.presentationTexture = undefined; this.voxelDebugDepth = undefined; this.presentationTextureKey = "";
@@ -1273,7 +1287,7 @@ export class FluidLabRenderer {
         this.secondaryParticlePipeline?.setSource(undefined);
         this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;
         this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;
-        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.svoDryScenePipeline?.setSource(undefined,undefined);
+        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.sceneryAnimation=undefined;this.svoDryScenePipeline?.setSource(undefined,undefined);
         previous.destroy();previousDestroyedForReset=true;
       }
       this.resetGPUQueueTracking();
@@ -1330,6 +1344,7 @@ export class FluidLabRenderer {
       const drySceneData:SparseVoxelDrySceneData|undefined=this.svoTerrainSupported&&this.svoGlassSupported&&this.svoMaterialsSupported&&this.svoLightingSupported?assembledDrySceneData:undefined;
       this.svoSourceAvailable=canEncodeSparseVoxelDryScene(sparseSceneSource,drySceneData);
       this.svoDrySceneSource=sparseSceneSource;this.svoDrySceneData=drySceneData;
+      this.sceneryAnimation=drySceneData?svoScenePrimitiveAnimation(scenePrimitives):undefined;this.sceneryAnimationOrigin_ms=undefined;
       this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData);
       if(staticRenderScene){
         if(this.failedOptionalPipelines.has("svo-dry-scene"))this.failPendingStaticSvoPresentation();
@@ -1486,6 +1501,30 @@ export class FluidLabRenderer {
     const depth = this.preparedGPUQueueDepth(fluid);
     if (this.gpuPendingBatches >= depth) return;
     this.submitPreparedGPUFluid(fluid, this.preparedGPUTime_s, this.preparedGPUBodies, depth);
+  }
+
+  /**
+   * Re-pose the scene's authored scenery motion for this frame.
+   *
+   * One buffer write over one contiguous span of analytic primitive records:
+   * the sparse world, its material owners and its baked occupancy mips are all
+   * untouched, because the motion was bounded at authoring time to stay inside
+   * the cell ownership they already describe (lib/scenery-sway.ts). The frame
+   * therefore costs a few kilobytes and no re-voxelization, and the tree's
+   * silhouette, normals, exact shadows and every distance-dependent light term
+   * follow it. Its cone-marched soft shadow does not, and stays at the
+   * reference pose the mip pyramid was built from.
+   */
+  private advanceSceneryAnimation(): void {
+    const animation = this.sceneryAnimation;
+    if (!animation || !this.svoDryScenePipeline) return;
+    const now_ms = performance.now();
+    this.sceneryAnimationOrigin_ms ??= now_ms;
+    const time_s = Math.max(0, now_ms - this.sceneryAnimationOrigin_ms) / 1000;
+    this.svoDryScenePipeline.updatePrimitiveRecords(
+      packSvoScenePrimitiveAnimation(animation, time_s),
+      animation.firstPrimitiveIndex,
+    );
   }
 
   private uploadFluid(fluid?: EulerianRenderState) {
@@ -1749,6 +1788,7 @@ export class FluidLabRenderer {
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
+    this.advanceSceneryAnimation();
     this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
     // Reduced-rate cone lighting is the production default: half-resolution
     // prepass + guided upsample, measured within the visibility-error gates.

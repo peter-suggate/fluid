@@ -75,6 +75,35 @@ import {
 
 type Vec3 = RigidBodyState["position_m"];
 
+interface GPUViewportLifecycle {
+  readonly canvas: HTMLCanvasElement;
+  readonly renderer: FluidLabRenderer;
+  /** Point the retained render loop at the current component's refs/state. */
+  readonly rebind: (binding: GPUViewportRenderBinding) => void;
+  /** Cancel the teardown queued by React's development effect replay. */
+  readonly cancelDeferredCleanup: () => boolean;
+  /** Give an HMR/RSC replacement time to reclaim this GPU session. */
+  readonly deferCleanup: () => void;
+  /** Tear down immediately when the retained canvas really changes. */
+  readonly cleanupImmediately: () => void;
+}
+
+interface GPUViewportRenderBinding {
+  readonly publishFrameRate: (fps: number | undefined) => void;
+  readonly pixelTraceDrawConfig: (
+    ui: ReturnType<typeof useUIStore.getState>,
+    renderer: FluidLabRenderer,
+  ) => PixelTraceConfig | undefined;
+  readonly publishPixelTrace: (renderer: FluidLabRenderer) => void;
+}
+
+type GPUViewportWindow = Window & {
+  /** Survives Vinext RSC program reloads, which can replace the React ref. */
+  __fluidLabGPUViewportLifecycle?: GPUViewportLifecycle;
+};
+
+const GPU_DEVELOPMENT_REBIND_GRACE_MS = 1_000;
+
 /** Duration of the pinned trace's self-drawing sweep. */
 const PIXEL_TRACE_REVEAL_MS = 1100;
 /** The HUD's readout cadence; the 3D overlay itself stays per-frame. */
@@ -84,6 +113,7 @@ export function WebGPUViewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fpsRef = useRef<HTMLOutputElement>(null);
   const rendererRef = useRef<FluidLabRenderer | null>(null);
+  const gpuLifecycleRef = useRef<GPUViewportLifecycle | null>(null);
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
@@ -383,6 +413,35 @@ export function WebGPUViewport() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const lifecycleWindow = window as GPUViewportWindow;
+    const renderBinding: GPUViewportRenderBinding = {
+      publishFrameRate: (fps) => {
+        if (fpsRef.current) fpsRef.current.textContent = fps === undefined ? "— FPS" : `${fps.toFixed(1)} FPS`;
+      },
+      pixelTraceDrawConfig,
+      publishPixelTrace,
+    };
+    // React Fast Refresh deliberately cleans up and replays effects, including
+    // effects with an empty dependency list. Vinext's RSC program reload can
+    // also replace this component's hook state asynchronously, so the live
+    // lifecycle is retained on the document's Window as well as in the ref.
+    // In particular, this leaves compiled shader and pipeline objects alone;
+    // shader edits take effect on a real page reload instead of sacrificing the
+    // browser's current GPU access.
+    const retainedLifecycle = gpuLifecycleRef.current ?? lifecycleWindow.__fluidLabGPUViewportLifecycle;
+    if (retainedLifecycle?.canvas === canvas && retainedLifecycle.cancelDeferredCleanup()) {
+      // A session created by the immediately previous hot module version does
+      // not have rebind yet. Preserve it during this one-time migration too.
+      retainedLifecycle.rebind?.(renderBinding);
+      gpuLifecycleRef.current = retainedLifecycle;
+      lifecycleWindow.__fluidLabGPUViewportLifecycle = retainedLifecycle;
+      rendererRef.current = retainedLifecycle.renderer;
+      return retainedLifecycle.deferCleanup;
+    }
+    if (retainedLifecycle) {
+      retainedLifecycle.cleanupImmediately();
+      gpuLifecycleRef.current = null;
+    }
     const diagnostics = useDiagnosticsStore.getState();
     const safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
     const canonicalSafeMethodValues = resolvedMethodValues({ methodId: "octree", quality: "balanced", overrides: {} });
@@ -442,12 +501,10 @@ export function WebGPUViewport() {
     rendererRef.current = renderer;
     let frame = 0;
     let alive = true;
+    let activeBinding = renderBinding;
     const frameRate = new SmoothedFrameRate(5);
     let lastSubmittedAt_ms: number | undefined;
     let measuredRunState = useRuntimeStore.getState().runState;
-    const publishFrameRate = (fps: number | undefined) => {
-      if (fpsRef.current) fpsRef.current.textContent = fps === undefined ? "— FPS" : `${fps.toFixed(1)} FPS`;
-    };
     let initializationStarted = false;
     let stopping = false;
     let stopped = false;
@@ -542,9 +599,9 @@ export function WebGPUViewport() {
           measuredRunState = runtime.runState;
           frameRate.reset();
           lastSubmittedAt_ms = undefined;
-          publishFrameRate(undefined);
+          activeBinding.publishFrameRate(undefined);
         } else if (lastSubmittedAt_ms !== undefined && performance.now() - lastSubmittedAt_ms >= 1_000) {
-          publishFrameRate(0);
+          activeBinding.publishFrameRate(0);
         }
         // Pausing freezes simulation time, not presentation. Attempt every
         // browser animation frame; FluidLabRenderer's in-flight guard is the
@@ -570,18 +627,18 @@ export function WebGPUViewport() {
               maximumNodeVisits: ui.svoMaximumNodeVisits,
             },
             ui.svoRenderTuning,
-            pixelTraceDrawConfig(ui, renderer),
+            activeBinding.pixelTraceDrawConfig(ui, renderer),
           );
         } catch (error: unknown) {
           void stopGPU(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
           return;
         }
-        publishPixelTrace(renderer);
+        activeBinding.publishPixelTrace(renderer);
         simulation.recordFrame(metrics, renderer.presentationResolution);
         if (metrics.presentationSubmitted) {
           const submittedAt_ms = performance.now();
           lastSubmittedAt_ms = submittedAt_ms;
-          publishFrameRate(frameRate.sample(submittedAt_ms));
+          activeBinding.publishFrameRate(frameRate.sample(submittedAt_ms));
           simulationRecording.capturePresentedState(canvas, runtime.simulationTime);
         }
       };
@@ -612,7 +669,53 @@ export function WebGPUViewport() {
       diagnostics.set({ gpuStatus: { state: "manual", label: "WebGPU is waiting for explicit startup" } });
       window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
     } else beginInitialization();
-    return () => { alive = false; running = false; window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization); window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop); window.removeEventListener("pagehide", pageHide); unsubscribeAutomaticStart(); unsubscribeSafeScene(); unsubscribeSafeMethod(); unsubscribeSafeUI(); unsubscribeRunState(); cancelAnimationFrame(frame); if(rendererRef.current===renderer)rendererRef.current=null; void stopGPU("WebGPU stopped during component cleanup", false); };
+    let cleanupTimer: number | undefined;
+    let cleanupCompleted = false;
+    const cleanupImmediately = () => {
+      if (cleanupCompleted) return;
+      cleanupCompleted = true;
+      if (cleanupTimer !== undefined) window.clearTimeout(cleanupTimer);
+      cleanupTimer = undefined;
+      alive = false;
+      running = false;
+      window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
+      window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
+      window.removeEventListener("pagehide", pageHide);
+      unsubscribeAutomaticStart();
+      unsubscribeSafeScene();
+      unsubscribeSafeMethod();
+      unsubscribeSafeUI();
+      unsubscribeRunState();
+      cancelAnimationFrame(frame);
+      if (rendererRef.current === renderer) rendererRef.current = null;
+      if (gpuLifecycleRef.current?.renderer === renderer) gpuLifecycleRef.current = null;
+      if (lifecycleWindow.__fluidLabGPUViewportLifecycle?.renderer === renderer) {
+        lifecycleWindow.__fluidLabGPUViewportLifecycle = undefined;
+      }
+      void stopGPU("WebGPU stopped during component cleanup", false);
+    };
+    const lifecycle: GPUViewportLifecycle = {
+      canvas,
+      renderer,
+      rebind: (binding) => { activeBinding = binding; },
+      cancelDeferredCleanup: () => {
+        if (cleanupCompleted) return false;
+        if (cleanupTimer !== undefined) window.clearTimeout(cleanupTimer);
+        cleanupTimer = undefined;
+        return true;
+      },
+      deferCleanup: () => {
+        if (cleanupCompleted || cleanupTimer !== undefined) return;
+        cleanupTimer = window.setTimeout(
+          cleanupImmediately,
+          process.env.NODE_ENV === "development" ? GPU_DEVELOPMENT_REBIND_GRACE_MS : 0,
+        );
+      },
+      cleanupImmediately,
+    };
+    gpuLifecycleRef.current = lifecycle;
+    lifecycleWindow.__fluidLabGPUViewportLifecycle = lifecycle;
+    return lifecycle.deferCleanup;
   }, []);
 
   const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) =>

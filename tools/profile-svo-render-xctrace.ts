@@ -10,7 +10,7 @@
  *     [--scene=hose-tank] [--resolution=660x662]
  *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide]
  *     [--shading=inline|split]
- *     [--cone-scale=0.5|0.25] [--warmups=4]
+ *     [--cone-scale=0.5|0.25|0.125] [--warmups=4]
  *     [--counter-seconds=3] [--counter-reduction=100] [--out=DIR]
  *     [--reuse-trace] [--reuse-tables]
  */
@@ -68,8 +68,8 @@ if (!Number.isFinite(counterReduction) || counterReduction < 1) {
   throw new Error("--counter-reduction must be at least 1");
 }
 const coneScale = Number(flag("cone-scale") ?? 0.5);
-if (![0.5, 0.25].includes(coneScale)) {
-  throw new Error("--cone-scale must be 0.5 or 0.25 so the profiled pass graph includes the cone prepass");
+if (![0.5, 0.25, 0.125].includes(coneScale)) {
+  throw new Error("--cone-scale must be 0.5, 0.25, or 0.125 so the profiled pass graph includes the cone prepass");
 }
 const warmups = Number(flag("warmups") ?? 4);
 if (!Number.isSafeInteger(warmups) || warmups < 1) {

@@ -82,6 +82,29 @@ test("safe browser mode is a one-step lease with explicit teardown", () => {
   assert.match(controllerSource, /safeBrowserBringup\(\) && this\.safeBrowserStepConsumed/);
 });
 
+test("Fast Refresh and RSC program reload retain the live GPU session", () => {
+  assert.match(viewportSource,
+    /gpuLifecycleRef\.current \?\? lifecycleWindow\.__fluidLabGPUViewportLifecycle/,
+    "RSC program reload must recover the lifecycle even when React replaces its ref");
+  assert.match(viewportSource,
+    /retainedLifecycle\?\.canvas === canvas && retainedLifecycle\.cancelDeferredCleanup\(\)/,
+    "a replay on the retained canvas must reclaim the existing renderer");
+  assert.match(viewportSource,
+    /retainedLifecycle\.rebind\?\.\(renderBinding\);[\s\S]*rendererRef\.current = retainedLifecycle\.renderer;[\s\S]*return retainedLifecycle\.deferCleanup/,
+    "the replacement component must reuse the renderer and adopt the retained loop");
+  assert.match(viewportSource,
+    /process\.env\.NODE_ENV === "development" \? GPU_DEVELOPMENT_REBIND_GRACE_MS : 0/,
+    "development cleanup must leave enough time for Vinext's asynchronous RSC commit");
+  const immediateCleanup = viewportSource.slice(
+    viewportSource.indexOf("const cleanupImmediately = () =>"),
+    viewportSource.indexOf("const lifecycle: GPUViewportLifecycle"),
+  );
+  assert.match(immediateCleanup, /stopGPU\("WebGPU stopped during component cleanup", false\)/,
+    "a real unmount must still release the GPU after the replay window");
+  assert.match(viewportSource, /const pageHide = \(\) => \{ void stopGPU\("WebGPU stopped during page close", false\); \}/,
+    "a real document unload must bypass the Fast Refresh grace period");
+});
+
 test("URL-derived safe mode is hydration-stable and fails locked", () => {
   assert.match(safeModeHookSource, /serverSnapshot = \(\): null => null/,
     "SSR and the first client render must share the same unresolved policy state");
