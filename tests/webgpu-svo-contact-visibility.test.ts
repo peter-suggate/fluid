@@ -88,10 +88,11 @@ test("cone AO drops to a single cone while the camera is changing, never to zero
 test("contact visibility attenuates indirect diffuse only and adds no storage binding", () => {
   const shade = shaderFunction("shadeDryOpaque", "shadeThinGlass");
   assert.match(shade, /let contactVisibility=dryContactVisibility\(position,hit\.normal,hit\.featureId,hit\.ownerId\)/);
-  assert.match(shade, /let diffuseEnvironment=[^;]*\*contactVisibility\/UNIFIED_PI/);
+  assert.match(shade, /let gi=dryGlobalIllumination\(position,hit\.normal\)/);
+  assert.match(shade, /let diffuseEnvironment=[^;]*\*contactVisibility\*gi\.visibility\*diffuseEnvironmentScale\/UNIFIED_PI/);
   assert.match(shade, /let specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*fresnel/);
-  assert.match(shade, /let indirectDiffuse=diffuseColor\*dryGlobalIllumination\(position,hit\.normal\)/);
-  assert.match(shade, /return max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct\+indirectDiffuse,vec3f\(0\.0\)\)/);
+  assert.match(shade, /let indirectDiffuse=diffuseColor\*gi\.radiance/);
+  assert.match(shade, /return max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct\*directScale\+indirectDiffuse,vec3f\(0\.0\)\)/);
   assert.doesNotMatch(shade, /(?:surface\.emissive|specularEnvironment|direct)\s*\*\s*contactVisibility/);
 
   // "adds no storage binding" is the claim under test: contact visibility must

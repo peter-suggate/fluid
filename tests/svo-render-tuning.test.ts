@@ -71,6 +71,42 @@ test("shadow cone aperture is exposed in the initially open cone controls", () =
   assert.match(panel, /updateTuning\("shadowConeAperture", value\)/);
 });
 
+test("global illumination exposes image-shaping controls with cinematic balanced defaults", () => {
+  assert.deepEqual({
+    bounce: DEFAULT_SVO_RENDER_TUNING.giBounceStrength,
+    occlusion: DEFAULT_SVO_RENDER_TUNING.giOcclusionStrength,
+    environment: DEFAULT_SVO_RENDER_TUNING.giEnvironmentStrength,
+    direct: DEFAULT_SVO_RENDER_TUNING.giDirectStrength,
+    aperture: DEFAULT_SVO_RENDER_TUNING.giConeAperture,
+    cones: DEFAULT_SVO_RENDER_TUNING.giConeCount,
+  }, { bounce: 1.5, occlusion: 0.82, environment: 0.65, direct: 0.9, aperture: 1.05, cones: 4 });
+  const normalized = normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    giBounceStrength: 99, giOcclusionStrength: -1, giEnvironmentStrength: 99,
+    giDirectStrength: -1, giConeAperture: 99, giConeCount: 2,
+  });
+  assert.deepEqual({
+    bounce: normalized.giBounceStrength, occlusion: normalized.giOcclusionStrength,
+    environment: normalized.giEnvironmentStrength, direct: normalized.giDirectStrength,
+    aperture: normalized.giConeAperture, cones: normalized.giConeCount,
+  }, { bounce: 4, occlusion: 0, environment: 2, direct: 0, aperture: 1.4, cones: 3 });
+  const upgraded = normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    giBounceStrength: undefined, giOcclusionStrength: undefined, giEnvironmentStrength: undefined,
+    giDirectStrength: undefined, giConeAperture: undefined, giConeCount: undefined,
+  } as unknown as typeof DEFAULT_SVO_RENDER_TUNING);
+  assert.equal(upgraded.giBounceStrength, DEFAULT_SVO_RENDER_TUNING.giBounceStrength,
+    "an older persisted tuning object upgrades to the image-forward GI defaults");
+  assert.equal(upgraded.giConeCount, DEFAULT_SVO_RENDER_TUNING.giConeCount);
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  for (const label of ["GI bounce", "GI occlusion", "Diffuse environment", "Direct key", "GI cones", "GI cone aperture"]) {
+    assert.ok(panel.includes(`label="${label}"`), `${label} is live-tunable`);
+  }
+  assert.match(svoDrySceneShader, /indirect\+=result\.radiance\*weight;visibility\+=result\.transmittance\*weight/,
+    "one GI gather must supply both bounced light and broad occlusion");
+  assert.match(svoDrySceneShader, /direct\*directScale\+indirectDiffuse/);
+});
+
 test("temporal history caps are halved consistently across quality presets", () => {
   assert.equal(SVO_RENDER_TUNING_PRESETS.performance.temporalMaximumSamples, 16);
   assert.equal(DEFAULT_SVO_RENDER_TUNING.temporalMaximumSamples, 32);

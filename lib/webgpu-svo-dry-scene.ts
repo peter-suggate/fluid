@@ -220,7 +220,7 @@ export function packSparseVoxelDrySceneThickGlassArena(
 
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 480,
+  sizeBytes: 512,
   terrainWordOffset: 24,
   terrainMaterialWordOffset: 28,
   materialPublicationWordOffset: 32,
@@ -241,6 +241,10 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   tetrahedralRadianceWordOffset: 112,
   /** xyz: complete sparse-lighting world extent in metres. */
   nodeMipExtentWordOffset: 116,
+  /** xyzw: GI bounce, broad occlusion, diffuse environment, direct key. */
+  giLightingWordOffset: 120,
+  /** xy: GI aperture and cone count; zw reserved. */
+  giConesWordOffset: 124,
 } as const);
 
 /** materialPublication.w flags shared by the direct and derived-lighting paths. */
@@ -250,6 +254,7 @@ export const SVO_DRY_VISIBILITY_FLAGS = Object.freeze({
   coneLightingRequested: 1 << 2,
   ambientOcclusion: 1 << 3,
   globalIllumination: 1 << 4,
+  globalIlluminationOcclusion: 1 << 5,
 } as const);
 
 export const SVO_TERRAIN_FAST_MIN_VERTICAL = 0.35;
@@ -1503,6 +1508,10 @@ struct DryParams {
   // x: tetrahedral-radiance generation; y: complete and generation-matched.
   tetrahedralRadiance:vec4u,
   nodeMipExtent:vec4f,
+  // Bounce exposure, broad occlusion, diffuse environment, direct key.
+  giLighting:vec4f,
+  // Aperture, cone count, reserved, reserved.
+  giCones:vec4f,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -1580,18 +1589,20 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
   let uv=svoNodeMipAtlasUv(dryGiPageCache.pageOrigin,local,textureDimensions(tetraRadianceLobe0));
   return SvoTetraRadianceConeSourceSample(opacity.solidMean,svoTetraSample(tetraRadianceLobe0,tetraRadianceLobe1,tetraRadianceLobe2,tetraRadianceLobe3,nodeMipSampler,uv),1u,1u);
 }
-fn dryGlobalIllumination(position:vec3f,normal:vec3f)->vec3f{
-  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u||!dryTetraRadianceReady()){return vec3f(0.0);}
+struct DryGlobalIllumination{radiance:vec3f,visibility:f32}
+fn dryGlobalIllumination(position:vec3f,normal:vec3f)->DryGlobalIllumination{
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u||!dryTetraRadianceReady()){return DryGlobalIllumination(vec3f(0.0),1.0);}
   let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
-  let origin=position+normalize(normal)*minimumVoxel*max(dry.tuningRays1.z,1.0);var indirect=vec3f(0.0);
-  let perConeBudget=max(1u,min(64u,dry.tuningCounts0.y)/3u);
-  for(var coneIndex=0u;coneIndex<3u;coneIndex+=1u){
-    let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,3u,0.0);
+  let origin=position+normalize(normal)*minimumVoxel*max(dry.tuningRays1.z,1.0);var indirect=vec3f(0.0);var visibility=0.0;
+  let coneCount=clamp(u32(round(dry.giCones.y)),3u,4u);let perConeBudget=max(1u,min(64u,dry.tuningCounts0.y)/coneCount);
+  for(var coneIndex=0u;coneIndex<4u;coneIndex+=1u){
+    if(coneIndex>=coneCount){break;}let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0);
     dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
-    let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,1.0471975512,minimumVoxel,dryNodeMipSceneExitDistance(origin,direction),perConeBudget,.995,.0039215686,1u));
-    dryMipSteps+=result.coneTaps;indirect+=result.radiance*svoTetraRadianceHemisphereWeight(coneIndex,3u);
+    let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,dryNodeMipSceneExitDistance(origin,direction),perConeBudget,.995,.0039215686,1u));
+    let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);dryMipSteps+=result.coneTaps;indirect+=result.radiance*weight;visibility+=result.transmittance*weight;
   }
-  return max(indirect,vec3f(0.0));
+  let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u)!=0u);
+  return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength));
 }
 ${prepassDeclarationsWGSL}${splitDeclarationsWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
 fn dryDiagnosticMaximumNodeVisits()->u32{return clamp(dryDiagnosticControl()&511u,1u,256u);}
@@ -2133,8 +2144,8 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
     if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
-  let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let fresnel=unifiedSchlick(max(dot(hit.normal,viewDirection),0.0),f0);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let diffuseEnvironment=diffuseColor*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*fresnel;let indirectDiffuse=diffuseColor*dryGlobalIllumination(position,hit.normal);
-  return max(surface.emissive+diffuseEnvironment+specularEnvironment+direct+indirectDiffuse,vec3f(0.0));
+  let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let fresnel=unifiedSchlick(max(dot(hit.normal,viewDirection),0.0),f0);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let gi=dryGlobalIllumination(position,hit.normal);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=select(1.0,dry.giLighting.w,globalIllumination);let diffuseEnvironment=diffuseColor*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*gi.visibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*fresnel;let indirectDiffuse=diffuseColor*gi.radiance;
+  return max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
 }
 
 struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}
@@ -3010,7 +3021,8 @@ export class SparseVoxelDrySceneRenderer {
     const visibilityFlags = (!giReady && ambientOcclusionEnabled ? SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion : 0)
       | (shadowsEnabled ? SVO_DRY_VISIBILITY_FLAGS.exactShadow : 0)
       | (coneFallback && (shadowsEnabled || ambientOcclusionEnabled) || giReady ? SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested : 0)
-      | (giReady ? SVO_DRY_VISIBILITY_FLAGS.globalIllumination : 0);
+      | (giReady ? SVO_DRY_VISIBILITY_FLAGS.globalIllumination : 0)
+      | (giReady && ambientOcclusionEnabled ? SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion : 0);
     words.set([pbrMaterials.count, pbrMaterials.revision, pbrMaterials.strideBytes, visibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
     const tuning = this.renderTuning;
     words.set([
@@ -3025,6 +3037,10 @@ export class SparseVoxelDrySceneRenderer {
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset + 12);
     floats.set(nodeMip?.worldOrigin_m ?? structural.domain.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset);
     floats.set(nodeMip?.worldExtent_m ?? structural.domain.dimensionsCells.map((cells, axis) => cells * structural.domain.cellSize_m[axis]), SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipExtentWordOffset);
+    floats.set([
+      tuning.giBounceStrength, tuning.giOcclusionStrength, tuning.giEnvironmentStrength, tuning.giDirectStrength,
+    ], SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset);
+    floats.set([tuning.giConeAperture, tuning.giConeCount, 0, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset);
     if (nodeMip && nodeMip.generation > 0 && nodeMip.plan.complete) {
       words.set([nodeMip.generation, nodeMip.plan.pages.length, Math.max(1, ...nodeMip.plan.pages.map((page) => page.key.level + 1)), 1], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipWordOffset);
       words.set([...nodeMip.plan.atlas.texels, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipAtlasWordOffset);

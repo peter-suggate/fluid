@@ -107,6 +107,23 @@ This makes the new system a redistribution of cone work, not an additive GI
 mode. It also attacks the continuous-simulation case that exact static-primary
 screen reuse cannot accelerate.
 
+## Presentation controls and diagnostics
+
+`GLOBAL` exposes the terms that determine the final energy balance rather than
+hiding them in shader constants: bounce exposure, broad GI occlusion, analytic
+diffuse-environment fill, exact direct-key strength, cone count, and aperture.
+The balanced image preset uses four 1.05-radian cones, 150% bounce exposure,
+82% broad occlusion, 65% diffuse environment fill, and a 90% direct key. The
+direct term therefore remains the crisp high-frequency key on lit surfaces,
+while indirect radiance and broad visibility visibly own the shaded regions.
+The AO switch controls this broad GI visibility when the radiance atlas is
+valid; standalone contact cones remain disabled so the work is not duplicated.
+
+Pixel-trace ABI v3 records the production GI integrator's cone count, tap count,
+gathered RGB, and resulting diffuse visibility. It also replays the exact tap
+positions and mip levels into the cone overlay, so atlas fallback, insufficient
+cone reach, or an imbalanced energy mix can be distinguished at one pixel.
+
 ## Staged implementation and gates
 
 1. **Storage and injection.** Allocate the four radiance atlases only when GI is

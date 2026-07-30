@@ -44,7 +44,10 @@ function source(): SparseVoxelRenderSource {
 }
 
 test("lighting quality, shadows, and ambient occlusion write independent visibility flags", () => {
-  assert.deepEqual(SVO_DRY_VISIBILITY_FLAGS, { exactContact: 1, exactShadow: 2, coneLightingRequested: 4, ambientOcclusion: 8, globalIllumination: 16 });
+  assert.deepEqual(SVO_DRY_VISIBILITY_FLAGS, {
+    exactContact: 1, exactShadow: 2, coneLightingRequested: 4, ambientOcclusion: 8,
+    globalIllumination: 16, globalIlluminationOcclusion: 32,
+  });
   assert.match(drySource, /const coneFallback = this\.lightingMode === "cone" \|\| \(this\.lightingMode === "gi" && !giReady\)/);
   const previousBufferUsage = globalThis.GPUBufferUsage, previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, {
@@ -93,10 +96,20 @@ test("lighting quality, shadows, and ambient occlusion write independent visibil
     const giFlags = flagWord(params().at(-1)!);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, SVO_DRY_VISIBILITY_FLAGS.globalIllumination);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested);
+    assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion,
+      SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion, "AO enables broad GI-cone visibility");
     assert.equal(giFlags & (SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion), 0,
       "GI replaces the standalone AO/contact cones");
     assert.deepEqual([...params().at(-1)!.words.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset,
       SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset + 4)], [1, 1, 0, 0]);
+    const giParams = new Float32Array(params().at(-1)!.words.buffer);
+    assert.deepEqual([...giParams.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset,
+      SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset + 4)], [1.5, 0.8199999928474426, 0.6499999761581421, 0.8999999761581421]);
+    assert.deepEqual([...giParams.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset,
+      SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset + 2)], [1.0499999523162842, 4]);
+    renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: false });
+    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion, 0,
+      "the AO switch remains meaningful in GLOBAL mode");
     renderer.destroy();
   } finally {
     Object.assign(globalThis, { GPUBufferUsage: previousBufferUsage, GPUTextureUsage: previousTextureUsage });
@@ -169,8 +182,8 @@ test("node-mip sampling publishes its own world origin inside the static uniform
     SVO_DRY_SCENE_PARAMS_LAYOUT.fluidCoverageWordOffset + SVO_FLUID_COVERAGE_LAYOUT.frameWords,
     "runtime tuning must immediately follow the 12-word fluid frame");
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes,
-    (SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipExtentWordOffset + 4) * Uint32Array.BYTES_PER_ELEMENT,
-    "the uniform allocation must end after the sparse-lighting world extent");
+    (SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset + 4) * Uint32Array.BYTES_PER_ELEMENT,
+    "the uniform allocation must end after the GI controls");
   assert.match(drySource, /floats\.set\(nodeMip\?\.worldOrigin_m \?\? structural\.domain\.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT\.nodeMipOriginWordOffset\)/);
   assert.match(svoDrySceneShader, /virtualVoxel=\(position_m-dry\.nodeMipOrigin\.xyz\)/,
     "topology experiments must not reinterpret an unchanged opacity atlas in the structural tree's coordinate frame");

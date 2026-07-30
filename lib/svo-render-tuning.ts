@@ -44,6 +44,16 @@ export interface SvoRenderTuning {
   readonly aoStrength: number;
   readonly aoConeAperture: number;
   readonly shadowConeAperture: number;
+  /** Artistic exposure applied only to gathered diffuse radiance. */
+  readonly giBounceStrength: number;
+  /** Broad visibility recovered from the diffuse GI cones. */
+  readonly giOcclusionStrength: number;
+  /** Analytic diffuse-environment contribution while GI is active. */
+  readonly giEnvironmentStrength: number;
+  /** Exact direct-light contribution while GI is active. */
+  readonly giDirectStrength: number;
+  readonly giConeAperture: number;
+  readonly giConeCount: number;
   readonly coneNormalEscapeCells: number;
   readonly coneEmitterClearanceCells: number;
   readonly temporalMaximumSamples: number;
@@ -78,6 +88,14 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   aoStrength: 1,
   aoConeAperture: 0.62,
   shadowConeAperture: 0.065,
+  // GI is deliberately image-forward by default: the exact key light remains
+  // crisp, while bounce and broad cone visibility visibly shape the scene.
+  giBounceStrength: 1.5,
+  giOcclusionStrength: 0.82,
+  giEnvironmentStrength: 0.65,
+  giDirectStrength: 0.9,
+  giConeAperture: 1.05,
+  giConeCount: 4,
   coneNormalEscapeCells: 0.5,
   coneEmitterClearanceCells: 3,
   temporalMaximumSamples: 32,
@@ -92,6 +110,9 @@ export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
     coneLightingScale: 0.25 as const,
     primaryLeafVisits: 24,
     coneStepBudget: 20,
+    giConeCount: 3,
+    giBounceStrength: 1.35,
+    giOcclusionStrength: 0.72,
     maximumShadedLights: 3,
     stableAreaLightSamples: 1,
     stableAoSamples: 2,
@@ -107,6 +128,8 @@ export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
     coneLightingScale: 0.5 as const,
     checkerboardShadowsEnabled: false,
     primaryLeafVisits: 128,
+    coneStepBudget: 48,
+    giConeCount: 4,
     visibilityNodeVisits: 128,
     visibilityLeafVisits: 32,
     visibilityWorkItems: 1024,
@@ -158,6 +181,12 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     aoStrength: bounded(value.aoStrength, 0, 1),
     aoConeAperture: bounded(value.aoConeAperture, 0.1, 1.4),
     shadowConeAperture: bounded(value.shadowConeAperture, 0.01, 0.25),
+    giBounceStrength: bounded(value.giBounceStrength ?? DEFAULT_SVO_RENDER_TUNING.giBounceStrength, 0, 4),
+    giOcclusionStrength: bounded(value.giOcclusionStrength ?? DEFAULT_SVO_RENDER_TUNING.giOcclusionStrength, 0, 1),
+    giEnvironmentStrength: bounded(value.giEnvironmentStrength ?? DEFAULT_SVO_RENDER_TUNING.giEnvironmentStrength, 0, 2),
+    giDirectStrength: bounded(value.giDirectStrength ?? DEFAULT_SVO_RENDER_TUNING.giDirectStrength, 0, 2),
+    giConeAperture: bounded(value.giConeAperture ?? DEFAULT_SVO_RENDER_TUNING.giConeAperture, 0.4, 1.4),
+    giConeCount: integer(value.giConeCount ?? DEFAULT_SVO_RENDER_TUNING.giConeCount, 3, 4),
     coneNormalEscapeCells: bounded(value.coneNormalEscapeCells, 0, 2),
     coneEmitterClearanceCells: bounded(value.coneEmitterClearanceCells, 0, 8),
     temporalMaximumSamples: integer(value.temporalMaximumSamples, 1, 128),

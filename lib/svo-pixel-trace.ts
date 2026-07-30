@@ -6,15 +6,16 @@
  * point that appends a record for every unit of work it performs — each
  * hierarchy node it opens, each child box it tests and rejects, each leaf brick
  * it enters, each fine cell its DDA steps, each analytic surface test it
- * issues, and each cone sample its shadow and ambient-occlusion marches take.
+ * issues, and each cone sample its shadow, ambient-occlusion, and global-
+ * illumination marches take.
  * Nothing here knows about WebGPU: the layout is the contract between
  * `webgpu-svo-pixel-trace.ts` (which writes it on the GPU) and the overlay
  * pipeline plus the HUD (which read it), and it is exercised directly by tests.
  */
 
-export const SVO_PIXEL_TRACE_ABI_VERSION = 2;
+export const SVO_PIXEL_TRACE_ABI_VERSION = 3;
 /** "SVT" plus the ABI version, so a stale mapped buffer is never decoded. */
-export const SVO_PIXEL_TRACE_MAGIC = 0x53565402;
+export const SVO_PIXEL_TRACE_MAGIC = 0x53565403;
 export const SVO_PIXEL_TRACE_HEADER_WORDS = 40;
 export const SVO_PIXEL_TRACE_RECORD_WORDS = 12;
 export const SVO_PIXEL_TRACE_DEFAULT_RECORD_CAPACITY = 4096;
@@ -77,6 +78,8 @@ export const SVO_PIXEL_TRACE_KINDS = Object.freeze({
   terrainStep: 11,
   /** A rigid-body analytic test; the renderer keeps at most twelve. */
   rigidTest: 12,
+  /** One opacity/radiance tap from a wide diffuse global-illumination cone. */
+  globalIlluminationConeSample: 13,
 } as const);
 
 export type SvoPixelTraceKind = typeof SVO_PIXEL_TRACE_KINDS[keyof typeof SVO_PIXEL_TRACE_KINDS];
@@ -153,7 +156,15 @@ export const SVO_PIXEL_TRACE_HEADER = Object.freeze({
    * so without it the overlay cannot draw the footprint a tap actually covered.
    */
   minimumVoxel: 32,
+  giConeTaps: 33,
+  giConeCount: 34,
+  giVisibility: 35,
+  giRadiance: 36,
+  /** bit 0: GLOBAL selected; bit 1: radiance publication ready. */
+  giState: 39,
 } as const);
+
+export const SVO_PIXEL_TRACE_GI_STATE = Object.freeze({ enabled: 1 << 0, ready: 1 << 1 } as const);
 
 export type SvoTraceVec3 = readonly [number, number, number];
 
@@ -200,6 +211,13 @@ export interface SvoPixelTrace {
     readonly featureId: number;
   };
   readonly counters: SvoPixelTraceCounters;
+  readonly globalIllumination?: {
+    readonly ready: boolean;
+    readonly coneTaps: number;
+    readonly coneCount: number;
+    readonly visibility: number;
+    readonly radiance: SvoTraceVec3;
+  };
   readonly records: readonly SvoPixelTraceRecord[];
   /** Records the shader produced but could not store; the prefix stays exact. */
   readonly droppedRecords: number;
@@ -258,6 +276,7 @@ export function decodeSvoPixelTrace(words: Uint32Array, floats: Float32Array): S
   const direction = vec3(floats, header.rayDirection);
   const origin_m = vec3(floats, header.rayOrigin);
   const minimumVoxel = floats[header.minimumVoxel];
+  const giState = words[header.giState];
   const hit = status === SVO_PIXEL_TRACE_STATUS.hit && Number.isFinite(distance_m) && distance_m > 0
     ? {
       position_m: origin_m.map((value, axis) => value + direction[axis] * distance_m) as unknown as SvoTraceVec3,
@@ -289,6 +308,13 @@ export function decodeSvoPixelTrace(words: Uint32Array, floats: Float32Array): S
       traversalFailure: words[header.traversalFailure],
       shadedLights: words[header.shadedLights],
     },
+    globalIllumination: (giState & SVO_PIXEL_TRACE_GI_STATE.enabled) !== 0 ? {
+      ready: (giState & SVO_PIXEL_TRACE_GI_STATE.ready) !== 0,
+      coneTaps: words[header.giConeTaps],
+      coneCount: words[header.giConeCount],
+      visibility: floats[header.giVisibility],
+      radiance: vec3(floats, header.giRadiance),
+    } : undefined,
     records,
     droppedRecords: Math.max(0, produced - stored),
     minimumVoxel_m: Number.isFinite(minimumVoxel) && minimumVoxel > 0 ? minimumVoxel : undefined,
@@ -366,7 +392,8 @@ export function svoPixelTraceLayerForKind(kind: SvoPixelTraceKind): SvoPixelTrac
     case SVO_PIXEL_TRACE_KINDS.primaryHit: return "exact";
     case SVO_PIXEL_TRACE_KINDS.shadowRay: return "shadow-rays";
     case SVO_PIXEL_TRACE_KINDS.coneSample:
-    case SVO_PIXEL_TRACE_KINDS.occlusionConeSample: return "cones";
+    case SVO_PIXEL_TRACE_KINDS.occlusionConeSample:
+    case SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample: return "cones";
   }
 }
 
@@ -434,7 +461,9 @@ export interface SvoPixelTraceMipRung {
 export function svoPixelTraceMipLadder(trace: SvoPixelTrace): readonly SvoPixelTraceMipRung[] {
   const taps = new Map<number, number>();
   for (const record of trace.records) {
-    if (record.kind !== SVO_PIXEL_TRACE_KINDS.coneSample && record.kind !== SVO_PIXEL_TRACE_KINDS.occlusionConeSample) continue;
+    if (record.kind !== SVO_PIXEL_TRACE_KINDS.coneSample
+      && record.kind !== SVO_PIXEL_TRACE_KINDS.occlusionConeSample
+      && record.kind !== SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample) continue;
     taps.set(record.level, (taps.get(record.level) ?? 0) + 1);
   }
   return [...taps.entries()]
@@ -674,7 +703,9 @@ export function buildSvoPixelTraceGeometry(
   const coneGroups = new Map<string, SvoPixelTraceRecord[]>();
   if (enabled.has("cones")) {
     for (const record of trace.records) {
-      if (record.kind !== SVO_PIXEL_TRACE_KINDS.coneSample && record.kind !== SVO_PIXEL_TRACE_KINDS.occlusionConeSample) continue;
+      if (record.kind !== SVO_PIXEL_TRACE_KINDS.coneSample
+        && record.kind !== SVO_PIXEL_TRACE_KINDS.occlusionConeSample
+        && record.kind !== SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample) continue;
       const group = coneGroups.get(coneKey(record));
       if (group) group.push(record); else coneGroups.set(coneKey(record), [record]);
     }
@@ -700,7 +731,8 @@ export function buildSvoPixelTraceGeometry(
       // clutter, but an occlusion fan has nothing else to say where it pointed.
       const last = group[group.length - 1];
       const first = group[0];
-      if (last !== first && last.kind === SVO_PIXEL_TRACE_KINDS.occlusionConeSample) {
+      if (last !== first && (last.kind === SVO_PIXEL_TRACE_KINDS.occlusionConeSample
+        || last.kind === SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample)) {
         const axisLength_m = Math.hypot(last.a[0] - first.a[0], last.a[1] - first.a[1], last.a[2] - first.a[2]);
         push(first.a, last.a, {
           layer: "cones", order: last.order, intensity: 0.5, kind: last.kind,
@@ -779,7 +811,8 @@ export function buildSvoPixelTraceGeometry(
         break;
       }
       case SVO_PIXEL_TRACE_KINDS.coneSample:
-      case SVO_PIXEL_TRACE_KINDS.occlusionConeSample: {
+      case SVO_PIXEL_TRACE_KINDS.occlusionConeSample:
+      case SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample: {
         // `b` is the march direction, tEnter the cone half-width at this sample,
         // tExit the coverage it read. Coverage drives brightness, so the taps
         // that actually occlude are the ones that stand out; the colour is the
@@ -839,7 +872,9 @@ export function svoPixelTraceNarrative(trace: SvoPixelTrace): readonly SvoPixelT
   const rejected = kinds.get(SVO_PIXEL_TRACE_KINDS.childRejected) ?? 0;
   const accepted = kinds.get(SVO_PIXEL_TRACE_KINDS.childAccepted) ?? 0;
   const cells = kinds.get(SVO_PIXEL_TRACE_KINDS.brickCell) ?? 0;
-  const cones = (kinds.get(SVO_PIXEL_TRACE_KINDS.coneSample) ?? 0) + (kinds.get(SVO_PIXEL_TRACE_KINDS.occlusionConeSample) ?? 0);
+  const cones = (kinds.get(SVO_PIXEL_TRACE_KINDS.coneSample) ?? 0)
+    + (kinds.get(SVO_PIXEL_TRACE_KINDS.occlusionConeSample) ?? 0)
+    + (kinds.get(SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample) ?? 0);
   const shadows = kinds.get(SVO_PIXEL_TRACE_KINDS.shadowRay) ?? 0;
   const steps: SvoPixelTraceNarrativeStep[] = [
     {
@@ -872,6 +907,17 @@ export function svoPixelTraceNarrative(trace: SvoPixelTrace): readonly SvoPixelT
       id: "shadow", label: "Query visibility", layer: "shadow-rays",
       detail: `${counters.shadowNodeVisits} hierarchy nodes and ${counters.shadowLeafVisits} bricks for exact visibility`,
       value: `${shadows} rays`,
+    });
+  }
+  if (trace.globalIllumination) {
+    const gi = trace.globalIllumination;
+    const radiance = gi.radiance.map((channel) => Math.max(0, channel).toFixed(2)).join(" / ");
+    steps.push({
+      id: "gi", label: "Gather global illumination", layer: "cones",
+      detail: gi.ready
+        ? `bounced RGB ${radiance}; broad diffuse visibility ${Math.round(Math.max(0, Math.min(1, gi.visibility)) * 100)}%`
+        : "GLOBAL was selected, but the generation-matched tetrahedral radiance atlas was unavailable",
+      value: gi.ready ? `${gi.coneCount} cones · ${gi.coneTaps} taps` : "fallback",
     });
   }
   if (cones > 0 || counters.mipSteps > 0) {

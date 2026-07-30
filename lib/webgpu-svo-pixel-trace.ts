@@ -1,4 +1,5 @@
 import {
+  SVO_PIXEL_TRACE_GI_STATE,
   SVO_PIXEL_TRACE_DEFAULT_RECORD_CAPACITY,
   SVO_PIXEL_TRACE_FLAGS,
   SVO_PIXEL_TRACE_HEADER,
@@ -53,7 +54,13 @@ export interface SvoPixelTraceProbeOptions {
   /** Mirrors SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT. */
   readonly primaryLeafVisitHardLimit: number;
   /** Mirrors SVO_DRY_VISIBILITY_FLAGS. */
-  readonly visibilityFlags: { readonly exactShadow: number; readonly coneLightingRequested: number; readonly ambientOcclusion: number };
+  readonly visibilityFlags: {
+    readonly exactShadow: number;
+    readonly coneLightingRequested: number;
+    readonly ambientOcclusion: number;
+    readonly globalIllumination: number;
+    readonly globalIlluminationOcclusion: number;
+  };
   /** Mirrors SVO_DRY_SCENE_CAMERA_SETTLED_WGSL. */
   readonly cameraSettledExpression: string;
 }
@@ -113,6 +120,11 @@ var<private> probeShadowWork:u32;
 var<private> probeMipSteps:u32;
 var<private> probeFailure:u32;
 var<private> probeShadedLights:u32;
+var<private> probeGiState:u32;
+var<private> probeGiConeTaps:u32;
+var<private> probeGiConeCount:u32;
+var<private> probeGiVisibility:f32;
+var<private> probeGiRadiance:vec3f;
 
 struct ProbeStackEntry{nodeIndex:u32,tEnter:f32,tExit:f32}
 var<private> probeStack:array<ProbeStackEntry,32>;
@@ -407,14 +419,16 @@ fn probeConeMarch(kind:u32,detail:u32,origin_m:vec3f,direction:vec3f,aperture:f3
 // Mirror of the shadow half of shadeDryOpaque: one biased visibility ray per
 // accepted light sample, plus the cone march that actually answers it.
 fn probeLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32){
-  let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${options.maximumShadedLights}u));
-  let coneRequested=(dry.materialPublication.w&${options.visibilityFlags.coneLightingRequested}u)!=0u&&dryNodeMipReady();
+  let globalIllumination=(dry.materialPublication.w&${options.visibilityFlags.globalIllumination}u)!=0u;
+  let lightCount=select(min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${options.maximumShadedLights}u)),min(dryLighting.metadata.x,1u),globalIllumination);
+  let coneRequested=(dry.materialPublication.w&${options.visibilityFlags.coneLightingRequested}u)!=0u
+    &&(dry.materialPublication.w&${options.visibilityFlags.globalIllumination}u)==0u&&dryNodeMipReady();
   for(var lightIndex=0u;lightIndex<${options.maximumShadedLights}u;lightIndex+=1u){
     if(lightIndex>=lightCount){break;}
     let light=dryLighting.lights[lightIndex];
     if(light.identity.w!=dryLighting.metadata.y){continue;}
     let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
-    let sampleCount=select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${options.cameraSettledExpression}),area);
+    let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${options.cameraSettledExpression}),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${options.areaLightSamples}u;sampleIndex+=1u){
       if(sampleIndex>=sampleCount){break;}
       let sample=dryLightSample(light,sampleIndex,position);
@@ -473,6 +487,45 @@ fn probeContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32){
   }
 }
 
+// The shipping integrator remains authoritative for energy, opacity, validity,
+// and termination. This replay emits only the geometry of exactly the taps it
+// took. Avoiding a second texture-sampling integration also keeps diagnostic
+// work proportional to the shipping gather instead of nearly doubling it.
+fn probeGiConeMarch(detail:u32,origin:vec3f,directionIn:vec3f,maximumSteps:u32)->SvoTetraRadianceConeResult{
+  let direction=normalize(directionIn);let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+  let maximumDistance=dryNodeMipSceneExitDistance(origin,direction);let config=SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,maximumDistance,maximumSteps,.995,.0039215686,1u);
+  dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+  let result=svoTetraRadianceConeTrace(config);let tangent=tan(dry.giCones.x*.5);var distance=minimumVoxel*.5;
+  for(var boundedStep=0u;boundedStep<64u;boundedStep+=1u){
+    if(boundedStep>=result.coneTaps||distance>=maximumDistance){break;}
+    let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);
+    let voxelWidth=minimumVoxel*exp2(floor(lod));let step=min(max(voxelWidth,diameter*.5),maximumDistance-distance);
+    let position=origin+direction*distance;probeMipSteps+=1u;
+    probeRecord(${kinds.globalIlluminationConeSample}u,u32(max(floor(lod),0.0)),detail,0u,position,direction,diameter*.5,0.0);
+    distance+=max(step,minimumVoxel*.25);
+  }
+  return result;
+}
+
+fn probeGlobalIllumination(position:vec3f,normal:vec3f){
+  if((dry.materialPublication.w&${options.visibilityFlags.globalIllumination}u)==0u){return;}
+  probeGiState=${SVO_PIXEL_TRACE_GI_STATE.enabled}u;
+  if(!dryTetraRadianceReady()){return;}
+  probeGiState|=${SVO_PIXEL_TRACE_GI_STATE.ready}u;
+  let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+  let origin=position+normalize(normal)*minimumVoxel*max(dry.tuningRays1.z,1.0);
+  let coneCount=clamp(u32(round(dry.giCones.y)),3u,4u);let perConeBudget=max(1u,min(64u,dry.tuningCounts0.y)/coneCount);
+  probeGiConeCount=coneCount;var radiance=vec3f(0.0);var visibility=0.0;
+  for(var coneIndex=0u;coneIndex<4u;coneIndex+=1u){
+    if(coneIndex>=coneCount){break;}let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);
+    let result=probeGiConeMarch(coneIndex,origin,svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0),perConeBudget);
+    probeGiConeTaps+=result.coneTaps;radiance+=result.radiance*weight;visibility+=result.transmittance*weight;
+  }
+  let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${options.visibilityFlags.globalIlluminationOcclusion}u)!=0u);
+  probeGiRadiance=max(radiance,vec3f(0.0))*dry.giLighting.x;
+  probeGiVisibility=mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength);
+}
+
 @fragment fn dryProbeMain(input:VertexOut)->@location(0) vec4f{
   // One writer only. The probe target is 1x1, so every other invocation in the
   // rasterizer's quad returns here before it can touch storage. This is an
@@ -483,6 +536,7 @@ fn probeContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32){
   probeNodeVisits=0u;probeLeafVisits=0u;probeEmptyBrickSkips=0u;probeVoxelWork=0u;probeExactTests=0u;
   probeMaximumDepth=0u;probeShadowNodeVisits=0u;probeShadowLeafVisits=0u;probeShadowWork=0u;
   probeMipSteps=0u;probeFailure=0u;probeShadedLights=0u;
+  probeGiState=0u;probeGiConeTaps=0u;probeGiConeCount=0u;probeGiVisibility=1.0;probeGiRadiance=vec3f(0.0);
   dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;dryShadowTracingEnabled=1u;
   dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;
   dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;
@@ -514,6 +568,7 @@ fn probeContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32){
     probeRecord(${kinds.primaryHit}u,0u,opaque.ownerId,${flags.hit}u,position,geometricNormal,opaque.t,cellScale*.75);
     probeLightVisibility(position,geometricNormal,opaque.ownerId);
     probeContactVisibility(position,geometricNormal,opaque.featureId);
+    probeGlobalIllumination(position,geometricNormal);
     probeWriteFloat(${header.hitNormal}u,geometricNormal.x);
     probeWriteFloat(${header.hitNormal + 1}u,geometricNormal.y);
     probeWriteFloat(${header.hitNormal + 2}u,geometricNormal.z);
@@ -555,6 +610,13 @@ fn probeContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32){
   probeWriteWord(${header.hitMaterialId}u,dryResolvedMaterialId(opaque));
   probeWriteWord(${header.hitFeatureId}u,opaque.featureId);
   probeWriteWord(${header.shadedLights}u,probeShadedLights);
+  probeWriteWord(${header.giConeTaps}u,probeGiConeTaps);
+  probeWriteWord(${header.giConeCount}u,probeGiConeCount);
+  probeWriteFloat(${header.giVisibility}u,probeGiVisibility);
+  probeWriteFloat(${header.giRadiance}u,probeGiRadiance.x);
+  probeWriteFloat(${header.giRadiance + 1}u,probeGiRadiance.y);
+  probeWriteFloat(${header.giRadiance + 2}u,probeGiRadiance.z);
+  probeWriteWord(${header.giState}u,probeGiState);
   return vec4f(0.0);
 }
 `;

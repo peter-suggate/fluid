@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   SVO_PIXEL_TRACE_DEFAULT_RECORD_CAPACITY,
   SVO_PIXEL_TRACE_FLAGS,
+  SVO_PIXEL_TRACE_GI_STATE,
   SVO_PIXEL_TRACE_HEADER,
   SVO_PIXEL_TRACE_HEADER_WORDS,
   SVO_PIXEL_TRACE_KINDS,
@@ -153,6 +154,30 @@ test("a trace decodes its header, counters, and records", () => {
   assert.equal(trace.hit?.ownerId, 5);
   assert.equal(trace.hit?.materialId, 9);
   assert.equal(svoPixelTraceTotalWork(trace), 41 + 3 + 22 + 2 + 48);
+});
+
+test("a trace reports the shipping GI gather state, energy, visibility, and wide-cone taps", () => {
+  const encoded = encodeTraceBuffer({
+    counters: { mipSteps: 3 },
+    records: [
+      { kind: SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample, level: 1, detail: 0 },
+      { kind: SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample, level: 2, detail: 1 },
+    ],
+  });
+  encoded.words[SVO_PIXEL_TRACE_HEADER.giState] = SVO_PIXEL_TRACE_GI_STATE.enabled | SVO_PIXEL_TRACE_GI_STATE.ready;
+  encoded.words[SVO_PIXEL_TRACE_HEADER.giConeCount] = 4;
+  encoded.words[SVO_PIXEL_TRACE_HEADER.giConeTaps] = 31;
+  encoded.floats[SVO_PIXEL_TRACE_HEADER.giVisibility] = 0.42;
+  encoded.floats.set([0.3, 0.2, 0.1], SVO_PIXEL_TRACE_HEADER.giRadiance);
+  const trace = decodeSvoPixelTrace(encoded.words, encoded.floats);
+  assert.ok(trace?.globalIllumination?.ready);
+  assert.equal(trace.globalIllumination.coneCount, 4);
+  assert.equal(trace.globalIllumination.coneTaps, 31);
+  assert.ok(Math.abs(trace.globalIllumination.visibility - 0.42) < 1e-6);
+  assert.deepEqual(trace.records.map(({ kind }) => kind), [13, 13]);
+  assert.deepEqual(svoPixelTraceMipLadder(trace).map(({ level }) => level), [1, 2]);
+  const gi = svoPixelTraceNarrative(trace).find(({ id }) => id === "gi");
+  assert.match(gi?.detail ?? "", /bounced RGB 0\.30 \/ 0\.20 \/ 0\.10; broad diffuse visibility 42%/);
 });
 
 test("a miss decodes without a hit even when a distance word survives", () => {
@@ -385,6 +410,8 @@ test("the probe records every kind of work it claims to record", () => {
   assert.match(probe, /fn probeConeMarch/);
   assert.match(probe, /fn probeLightVisibility/);
   assert.match(probe, /fn probeContactVisibility/);
+  assert.match(probe, /fn probeGlobalIllumination/);
+  assert.match(probe, /fn probeGiConeMarch/);
 });
 
 test("the probe mirrors the production cone step law and calls production helpers", () => {
@@ -395,6 +422,10 @@ test("the probe mirrors the production cone step law and calls production helper
   assert.match(probe, /distance\+=max\(stepWidth,minimumVoxel\*\.25\);/);
   assert.match(probe, /svoNodeMipCoverageOpacity\(conservativeCoverage,stepWidth\/diameter\)/);
   assert.match(probe, /emitterOffset\*=1\.5;/);
+  assert.match(probe, /let result=svoTetraRadianceConeTrace\(config\)/,
+    "the diagnostic must report the production radiance gather rather than a second approximation");
+  assert.match(probe, /boundedStep>=result\.coneTaps/,
+    "the drawn GI cone contains exactly the tap count taken by the shipping integrator");
   // Exact intersection, light sampling, and bias come from the shipping shader.
   for (const helper of ["primitiveHit", "dryLightSample", "dryBiasedVisibilityRayUnit", "dryNodeMipAt", "traceOpaqueScene", "svoTraceVisibility"]) {
     assert.match(probe, new RegExp(`${helper}\\(`), `${helper} is reused rather than reimplemented`);

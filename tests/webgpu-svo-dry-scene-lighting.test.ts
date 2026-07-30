@@ -195,8 +195,8 @@ test("cone visibility is generation-checked and falls back to exact SVO visibili
     "cone AO uses four bounded hemisphere samples only when the cache is ready");
   assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /cone\.valid==0u\)\{coneValid=false;break;\}[^]*if\(coneValid\)\{[^]*return[^]*svoTraceVisibility/,
     "an unavailable cone sample must fall through to exact bounded AO instead of leaking ambient light");
-  assert.match(svoDrySceneShader, /diffuseEnvironment=[^;]*\*contactVisibility\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
-    "AO must modulate diffuse environment only, leaving direct light, emission, and specular environment intact");
+  assert.match(svoDrySceneShader, /diffuseEnvironment=[^;]*\*contactVisibility\*gi\.visibility\*diffuseEnvironmentScale\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
+    "contact and GI visibility must modulate diffuse environment only, leaving emission and specular environment intact");
 });
 
 test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {
