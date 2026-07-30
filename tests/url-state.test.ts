@@ -336,6 +336,9 @@ test("SVO lighting round-trips exact direct while cone remains the canonical fai
 
   const cone = parseQueryState("?svoLighting=cone");
   assert.equal(cone.ui.svoLightingMode, "cone");
+
+  const gi = parseQueryState("?svoLighting=gi");
+  assert.equal(gi.ui.svoLightingMode, "gi");
   const coneQuery = serializeQueryState("?svoLighting=direct", {
     presetId: cone.presetId,
     scene: cone.scene,

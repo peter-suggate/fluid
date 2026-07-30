@@ -90,7 +90,8 @@ test("contact visibility attenuates indirect diffuse only and adds no storage bi
   assert.match(shade, /let contactVisibility=dryContactVisibility\(position,hit\.normal,hit\.featureId,hit\.ownerId\)/);
   assert.match(shade, /let diffuseEnvironment=[^;]*\*contactVisibility\/UNIFIED_PI/);
   assert.match(shade, /let specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*fresnel/);
-  assert.match(shade, /return max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct,vec3f\(0\.0\)\)/);
+  assert.match(shade, /let indirectDiffuse=diffuseColor\*dryGlobalIllumination\(position,hit\.normal\)/);
+  assert.match(shade, /return max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct\+indirectDiffuse,vec3f\(0\.0\)\)/);
   assert.doesNotMatch(shade, /(?:surface\.emissive|specularEnvironment|direct)\s*\*\s*contactVisibility/);
 
   // "adds no storage binding" is the claim under test: contact visibility must

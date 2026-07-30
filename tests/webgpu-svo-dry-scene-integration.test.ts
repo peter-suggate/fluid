@@ -141,12 +141,14 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), [
     { binding: 11, type: "read-only-storage" }, { binding: 12, type: "read-only-storage" },
   ]);
-  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-5).map(({ binding, type }) => [binding, type]), [
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-9).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
     // Evolving fluid coverage shares the node-mip sampler rather than adding a
     // second one: both want clamp-to-edge linear filtering.
     [19, "texture-3d-float"],
     [20, "texture-3d-uint"],
+    [21, "texture-3d-float"], [22, "texture-3d-float"],
+    [23, "texture-3d-float"], [24, "texture-3d-float"],
   ], "cone lighting must consume sampled resources rather than another fragment storage buffer");
   assert.match(drySceneSource, /nodeMip\?\.view \?\? this\.nodeMipFallbackAtlasView/);
   assert.match(drySceneSource, /nodeMip\?\.sampler \?\? this\.nodeMipFallbackSampler/);

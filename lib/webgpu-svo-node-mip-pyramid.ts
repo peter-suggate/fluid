@@ -65,6 +65,8 @@ export interface WebGpuSvoNodeMipVisibleGeneration {
   directPageTableBytes: number;
   /** Optional world-space coordinate frame when it differs from the structural tree. */
   worldOrigin_m?: readonly [number, number, number];
+  /** Full sparse-lighting lattice extent, including authored scenery around the solver tank. */
+  worldExtent_m?: readonly [number, number, number];
 }
 
 interface OwnedGeneration extends WebGpuSvoNodeMipVisibleGeneration {

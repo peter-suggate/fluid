@@ -49,10 +49,11 @@ test("presentation defaults to beautiful sparse voxels", () => {
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, true);
   useUIStore.getState().setSvoRenderMode("svo");
   useUIStore.getState().setSvoLightingMode("direct");
+  useUIStore.getState().setSvoLightingMode("gi");
   useUIStore.getState().setSvoShadowsEnabled(false);
   useUIStore.getState().setSvoAmbientOcclusionEnabled(false);
   assert.equal(useUIStore.getState().svoRenderMode, "svo");
-  assert.equal(useUIStore.getState().svoLightingMode, "direct");
+  assert.equal(useUIStore.getState().svoLightingMode, "gi");
   assert.equal(useUIStore.getState().svoShadowsEnabled, false);
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, false);
   useUIStore.setState(initial, true);

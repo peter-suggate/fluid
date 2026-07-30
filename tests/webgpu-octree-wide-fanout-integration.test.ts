@@ -30,12 +30,13 @@ test("octree world exposes, accounts, and destroys its optional derived capabili
   const sourceAbi = readFileSync(new URL("../lib/webgpu-voxel-debug.ts", import.meta.url), "utf8");
   assert.match(sourceAbi, /wideFanout\?: import\("\.\/webgpu-svo-wide-fanout"\)\.WebGPUSvoWideFanoutSource/);
   assert.match(sourceAbi, /compactHierarchy\?: import\("\.\/webgpu-svo-compact-hierarchy"\)\.WebGpuSvoCompactHierarchySource/);
-  assert.match(sourceAbi, /derivedRenderAllocationBytes\?: Readonly<\{ wideFanout: number; compactHierarchy\?: number; nodeMipPyramid\?: number \}>/);
+  assert.match(sourceAbi, /derivedRenderAllocationBytes\?: Readonly<\{[^]*wideFanout: number;[^]*compactHierarchy\?: number;[^]*nodeMipPyramid\?: number;[^]*tetrahedralRadiance\?: number;/);
   assert.match(producer, /wideFanout: this\.wideFanout\?\.capability\(\)/);
   assert.match(producer, /compactHierarchy: this\.compactHierarchy\?\.capability\(\)/);
-  assert.match(producer, /derivedRenderAllocationBytes: \{[^]*wideFanout: this\.wideFanout\?\.allocatedBytes \?\? 0,[^]*compactHierarchy: this\.compactHierarchy\?\.allocatedBytes \?\? 0,[^]*nodeMipPyramid: this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0/);
-  assert.match(producer, /this\.proxyVoxelizer\.allocatedBytes \+ \(this\.wideFanout\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.compactHierarchy\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0\)/);
+  assert.match(producer, /derivedRenderAllocationBytes: \{[^]*wideFanout: this\.wideFanout\?\.allocatedBytes \?\? 0,[^]*compactHierarchy: this\.compactHierarchy\?\.allocatedBytes \?\? 0,[^]*nodeMipPyramid: this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0,[^]*tetrahedralRadiance: this\.tetrahedralRadiance\?\.telemetry\(\)\.allocatedBytes \?\? 0/);
+  assert.match(producer, /this\.proxyVoxelizer\.allocatedBytes \+ \(this\.wideFanout\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.compactHierarchy\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0\)[^]*\+ \(this\.tetrahedralRadiance\?\.telemetry\(\)\.allocatedBytes \?\? 0\)/);
   assert.match(producer, /this\.wideFanout\?\.destroy\(\)/);
   assert.match(producer, /this\.compactHierarchy\?\.destroy\(\)/);
   assert.match(producer, /this\.nodeMipPyramid\?\.destroy\(\)/);
+  assert.match(producer, /this\.tetrahedralRadiance\?\.destroy\(\)/);
 });

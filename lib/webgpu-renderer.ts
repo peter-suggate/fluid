@@ -1709,7 +1709,7 @@ export class FluidLabRenderer {
       : 0;
     const traceDetailedSvoRenderPath = svoRenderMode === "svo"
       && voxelRenderMode === "smooth"
-      && svoLightingMode === "cone";
+      && (svoLightingMode === "cone" || svoLightingMode === "gi");
     const presentationTrace = shouldTracePresentation
       && !this.hardwarePresentationTraceInvalid
       && GPUStageTimestampRecorder.supported(this.device)

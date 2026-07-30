@@ -4,7 +4,7 @@ export const SVO_RENDER_MODES = ["raster", "svo"] as const;
 export type SvoRenderMode = typeof SVO_RENDER_MODES[number];
 
 /** Lighting backends for the direct sparse-scene renderer. */
-export const SVO_LIGHTING_MODES = ["direct", "cone"] as const;
+export const SVO_LIGHTING_MODES = ["direct", "cone", "gi"] as const;
 
 export type SvoLightingMode = typeof SVO_LIGHTING_MODES[number];
 

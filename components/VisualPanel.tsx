@@ -140,6 +140,7 @@ export function VisualPanel() {
           <div><span>LIGHTING PATH</span><div role="group" aria-label="SVO lighting quality">
             <button className={svoLightingMode === "direct" ? "active" : ""} disabled={svoRenderMode !== "svo"} onClick={() => setSvoLightingMode("direct")}>DIRECT</button>
             <button className={svoLightingMode === "cone" ? "active" : ""} disabled={svoRenderMode !== "svo"} onClick={() => setSvoLightingMode("cone")}>BEAUTIFUL</button>
+            <button className={svoLightingMode === "gi" ? "active" : ""} disabled={svoRenderMode !== "svo"} onClick={() => setSvoLightingMode("gi")}>GLOBAL</button>
           </div></div>
           <div><span>SCENE REPRESENTATION</span><div role="group" aria-label="Scene representation">
             <button className={voxelRenderMode === "smooth" ? "active" : ""} onClick={() => selectRepresentation("smooth")}>FINISHED</button>

@@ -19,7 +19,7 @@ test("visual controls clearly separate production renderer choice from debug rep
   assert.match(panel, /selectRepresentation\("raw-voxels"\)[^]*>RAW<\/button>/);
   assert.match(panel, /selectRepresentation\("surface-voxels"\)[^]*>SURFACE<\/button>/);
   assert.match(panel, /selectRepresentation\("occupied-bricks"\)[^]*>CONTENT<\/button>/);
-  assert.match(panel, /aria-label="SVO lighting quality"[^]*setSvoLightingMode\("direct"\)[^]*>DIRECT<\/button>[^]*setSvoLightingMode\("cone"\)[^]*>BEAUTIFUL<\/button>/);
+  assert.match(panel, /aria-label="SVO lighting quality"[^]*setSvoLightingMode\("direct"\)[^]*>DIRECT<\/button>[^]*setSvoLightingMode\("cone"\)[^]*>BEAUTIFUL<\/button>[^]*setSvoLightingMode\("gi"\)[^]*>GLOBAL<\/button>/);
   assert.match(panel, /aria-label="SVO lighting effects"[^]*<Toggle label="Shadows"[^]*onChange=\{setSvoShadowsEnabled\}[^]*<Toggle label="AO"[^]*onChange=\{setSvoAmbientOcclusionEnabled\}/);
 });
 

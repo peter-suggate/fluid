@@ -114,7 +114,7 @@ test("the moving-quality tier reduces cone work on the camera-changing sentinel 
   assert.equal(SVO_DRY_SCENE_MOVING_AREA_LIGHT_SAMPLES, 1);
   assert.equal(SVO_DRY_SCENE_AREA_LIGHT_SAMPLES, 2);
   const areaTier = new RegExp(
-    `let sampleCount=select\\(1u,select\\(dry\\.tuningCounts1\\.x,dry\\.tuningCounts0\\.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\),area\\)`,
+    `let sampleCount=select\\(select\\(1u,select\\(dry\\.tuningCounts1\\.x,dry\\.tuningCounts0\\.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\),area\\),1u,globalIllumination\\)`,
   );
   assert.match(svoDrySceneShader, areaTier,
     "area-light shape sample counts must switch on the shared settled predicate");

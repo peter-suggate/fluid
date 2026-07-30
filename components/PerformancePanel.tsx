@@ -78,7 +78,7 @@ const SVO_CONE_PRESENTATION_PHASE_LAYOUT: readonly [PaperPhaseId, string][] = [
 ] as const;
 
 const isSvoConePresentationTrace = (trace: PerformanceTrace) =>
-  trace.lane === "presentation" && trace.context.includes(":lighting-cone:smooth:svo:");
+  trace.lane === "presentation" && /:lighting-(?:cone|gi):smooth:svo:/.test(trace.context);
 
 const stabilizePhaseLayout = (trace: PerformanceTrace | undefined) => {
   if (!trace) return undefined;

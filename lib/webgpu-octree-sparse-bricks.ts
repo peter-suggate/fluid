@@ -37,8 +37,10 @@ import { WebGPUSvoWideFanout } from "./webgpu-svo-wide-fanout";
 import { packSvoCompactHierarchy } from "./svo-compact-hierarchy";
 import { WebGpuSvoCompactHierarchy } from "./webgpu-svo-compact-hierarchy";
 import { WebGpuSvoNodeMipPyramid } from "./webgpu-svo-node-mip-pyramid";
+import { WebGpuSvoTetrahedralRadiance } from "./webgpu-svo-tetrahedral-radiance";
 import { WebGpuSvoBrickOccupancyBuilder } from "./webgpu-svo-brick-occupancy";
 import { buildSvoStaticNodeMipPublication } from "./svo-static-node-mips";
+import { buildSvoStaticEmissiveRadiancePublication } from "./svo-static-emissive-radiance";
 import { planSparseSceneDomain } from "./sparse-scene-domain";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "./voxel-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
@@ -533,6 +535,7 @@ export class OctreeSparseBrickWorld {
   private readonly wideFanout?: WebGPUSvoWideFanout;
   private readonly compactHierarchy?: WebGpuSvoCompactHierarchy;
   private readonly nodeMipPyramid?: WebGpuSvoNodeMipPyramid;
+  private readonly tetrahedralRadiance?: WebGpuSvoTetrahedralRadiance;
   private published = false;
   private proxiesPublished = false;
   private destroyed = false;
@@ -599,6 +602,7 @@ export class OctreeSparseBrickWorld {
     // world lattice. It deliberately excludes fluid lanes: water transport
     // and topology remain owned by the canonical simulation octree.
     let nodeMipPyramid: WebGpuSvoNodeMipPyramid | undefined;
+    let tetrahedralRadiance: WebGpuSvoTetrahedralRadiance | undefined;
     let nodeMipWorldOrigin_m: readonly [number, number, number] | undefined;
     try {
       const maximumDirectoryPages = Math.min(8_192, Number(device.limits?.maxTextureDimension2D) || 8_192);
@@ -614,12 +618,43 @@ export class OctreeSparseBrickWorld {
       if (!nodeMipPyramid.publish().published || !nodeMipPyramid.visibleGeneration()) {
         nodeMipPyramid.destroy();
         nodeMipPyramid = undefined;
+      } else {
+        // Radiance is a fail-soft derived view over the already-published
+        // opacity topology. A failed emitter build must never discard opacity.
+        try {
+          const radiance = buildSvoStaticEmissiveRadiancePublication(
+            staticMips, staticLightingDomain, environmentPrimitives, {
+              samplesPerAxis: 2,
+              primaryDirectionalLight: {
+                towardLightDirection: scene.lighting?.directional?.direction ?? [-0.45, 0.86, 0.28],
+                colorLinear: scene.lighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
+                intensity: scene.lighting?.directional?.intensity ?? 1,
+              },
+            },
+          );
+          if (radiance.injectedBaseTexelCount > 0) {
+            tetrahedralRadiance = new WebGpuSvoTetrahedralRadiance(device);
+            tetrahedralRadiance.beginGeneration(radiance.plan);
+            for (const page of radiance.interiors) {
+              if (page.certifiedBlack) tetrahedralRadiance.certifyBlackPage(page.key);
+              else tetrahedralRadiance.uploadInteriorPage(page.key, page.packedInterleaved);
+            }
+            if (!tetrahedralRadiance.publish().published || !tetrahedralRadiance.visibleGeneration()) {
+              tetrahedralRadiance.destroy();
+              tetrahedralRadiance = undefined;
+            }
+          }
+        } catch {
+          tetrahedralRadiance?.destroy();
+          tetrahedralRadiance = undefined;
+        }
       }
     } catch {
       nodeMipPyramid?.destroy();
       nodeMipPyramid = undefined;
     }
     this.nodeMipPyramid = nodeMipPyramid;
+    this.tetrahedralRadiance = tetrahedralRadiance;
     const solverOriginBricks = this.solverGridOriginCells.map((value) => value / brickSize);
     if (solverOriginBricks.some((value) => !Number.isInteger(value))) throw new Error("Shared sparse scene origin must align to the fluid brick lattice");
     const leafByCoordinate = new Map<string, number>();
@@ -888,11 +923,14 @@ export class OctreeSparseBrickWorld {
       nodeMipPyramid: this.nodeMipPyramid?.visibleGeneration() && {
         ...this.nodeMipPyramid.visibleGeneration()!,
         worldOrigin_m: nodeMipWorldOrigin_m,
+        worldExtent_m: staticLightingDomain.sceneDimensionsCells.map((cells, axis) => cells * staticLightingDomain.cellSize_m[axis]) as [number, number, number],
       },
+      tetrahedralRadiance: this.tetrahedralRadiance?.visibleGeneration(),
       derivedRenderAllocationBytes: {
         wideFanout: this.wideFanout?.allocatedBytes ?? 0,
         compactHierarchy: this.compactHierarchy?.allocatedBytes ?? 0,
         nodeMipPyramid: this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0,
+        tetrahedralRadiance: this.tetrahedralRadiance?.telemetry().allocatedBytes ?? 0,
       },
       revision: 1
     };
@@ -902,7 +940,8 @@ export class OctreeSparseBrickWorld {
       + this.pbrMaterialBuffer.size + this.lightBuffer.size + this.environmentLightingBuffer.size + this.structuralPublicationState.size
       + this.proxyVoxelizer.allocatedBytes + (this.wideFanout?.allocatedBytes ?? 0)
       + (this.compactHierarchy?.allocatedBytes ?? 0)
-      + (this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0);
+      + (this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0)
+      + (this.tetrahedralRadiance?.telemetry().allocatedBytes ?? 0);
   }
 
   get allocatedBytes(): number { return this.baseAllocatedBytes + (this.inspection?.allocatedBytes ?? 0); }
@@ -1071,6 +1110,7 @@ export class OctreeSparseBrickWorld {
     this.wideFanout?.destroy();
     this.compactHierarchy?.destroy();
     this.nodeMipPyramid?.destroy();
+    this.tetrahedralRadiance?.destroy();
     for (const buffer of [...this.sourceBuffers, this.pbrMaterialBuffer, this.lightBuffer, this.environmentLightingBuffer, this.structuralPublicationState, ...(this.inspection?.buffers ?? [])]) buffer.destroy();
   }
 }

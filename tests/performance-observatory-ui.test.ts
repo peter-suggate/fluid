@@ -60,7 +60,7 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
   assert.doesNotMatch(grid, /activity-clock-notice/);
   assert.match(panel, /const PHASE_LAYOUT/);
   assert.match(panel, /const SVO_CONE_PRESENTATION_PHASE_LAYOUT/);
-  assert.match(panel, /trace\.context\.includes\(":lighting-cone:smooth:svo:"\)/);
+  assert.match(panel, /lighting-\(\?:cone\|gi\)/);
   for (const phase of [
     "water-caustics",
     "svo-cone-lighting",

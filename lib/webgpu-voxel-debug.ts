@@ -292,8 +292,15 @@ export interface SparseVoxelSceneRenderSource {
   compactHierarchy?: import("./webgpu-svo-compact-hierarchy").WebGpuSvoCompactHierarchySource;
   /** Optional complete sparse opacity generation derived from static canonical-world geometry. */
   nodeMipPyramid?: import("./webgpu-svo-node-mip-pyramid").WebGpuSvoNodeMipVisibleGeneration;
+  /** Optional directional exitant-radiance generation sharing the opacity page plan and slots. */
+  tetrahedralRadiance?: import("./webgpu-svo-tetrahedral-radiance").WebGpuSvoTetrahedralRadianceVisibleGeneration;
   /** Renderer-derived allocation telemetry; absent capabilities report zero bytes. */
-  derivedRenderAllocationBytes?: Readonly<{ wideFanout: number; compactHierarchy?: number; nodeMipPyramid?: number }>;
+  derivedRenderAllocationBytes?: Readonly<{
+    wideFanout: number;
+    compactHierarchy?: number;
+    nodeMipPyramid?: number;
+    tetrahedralRadiance?: number;
+  }>;
   /** Allows the caller to expose buffer replacement without implementation coupling. */
   revision: number;
 }
