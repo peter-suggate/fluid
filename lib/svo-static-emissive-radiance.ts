@@ -24,6 +24,8 @@ export interface SvoStaticEmissiveRadianceOptions {
   includeProxy?: (proxy: EnvironmentProxyPrimitive) => boolean;
   /** Optional first-bounce direct illumination; omission retains the emissive-only fast path. */
   primaryDirectionalLight?: SvoStaticPrimaryDirectionalLight;
+  /** Inject physical point/area lights derived from emissive proxies tagged `light`. */
+  injectAuthoredProxyLights?: boolean;
 }
 
 export interface SvoStaticPrimaryDirectionalLight {
@@ -61,6 +63,8 @@ export interface SvoStaticEmissiveRadiancePublication {
   injectedBaseTexelCount: number;
   directLightSampleCount: number;
   shadowedDirectLightSampleCount: number;
+  localLightSampleCount: number;
+  shadowedLocalLightSampleCount: number;
   blackPageCount: number;
   packedInteriorBytes: number;
 }
@@ -129,6 +133,20 @@ interface CanonicalDirectionalLight {
 interface InjectionCounts {
   directLightSamples: number;
   shadowedDirectLightSamples: number;
+  localLightSamples: number;
+  shadowedLocalLightSamples: number;
+}
+
+interface CanonicalLocalLight {
+  source: EnvironmentProxyPrimitive;
+  kind: "point" | "sphere" | "rectangle";
+  position_m: Triple;
+  direction: Triple;
+  colorLinear: SvoRadianceRgb;
+  intensity: number;
+  range_m: number;
+  radius_m: number;
+  area_m2: number;
 }
 
 /** Signed-distance estimates are exact for boxes/cylinders/capsules/tori and conservative for ellipsoids/cones. */
@@ -206,11 +224,13 @@ function visibleToDirectionalLight(
   point: Triple,
   receiver: EnvironmentProxyPrimitive,
   occluders: readonly EnvironmentProxyPrimitive[],
-  light: CanonicalDirectionalLight,
+  towardLight: Triple,
+  shadowDistance_m: number,
+  source?: EnvironmentProxyPrimitive,
 ): boolean {
-  const origin = point.map((value, axis) => value + light.towardLightDirection[axis] * 1e-5) as Triple;
-  return !occluders.some((proxy) => proxy !== receiver
-    && rayIntersectsProxyBounds(origin, light.towardLightDirection, light.shadowDistance_m, proxy));
+  const origin = point.map((value, axis) => value + towardLight[axis] * 1e-5) as Triple;
+  return !occluders.some((proxy) => proxy !== receiver && proxy !== source
+    && rayIntersectsProxyBounds(origin, towardLight, shadowDistance_m, proxy));
 }
 
 function canonicalDirectionalLight(
@@ -241,6 +261,72 @@ function canonicalDirectionalLight(
   };
 }
 
+function proxyLightRadius(proxy: EnvironmentProxyPrimitive, bounding: boolean): number {
+  if (proxy.kind === "box") {
+    const dimensions = [proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z];
+    return bounding ? Math.max(...dimensions) : Math.cbrt(dimensions[0] * dimensions[1] * dimensions[2]);
+  }
+  if (proxy.kind === "cylinder") return bounding ? Math.max(proxy.radius_m, proxy.halfHeight_m) : Math.cbrt(proxy.radius_m ** 2 * proxy.halfHeight_m);
+  if (proxy.kind === "capsule") return bounding ? proxy.halfLength_m + proxy.radius_m : proxy.radius_m;
+  if (proxy.kind === "torus") return bounding ? proxy.majorRadius_m + proxy.minorRadius_m : proxy.minorRadius_m;
+  if (proxy.kind === "cone") {
+    const widest = Math.max(proxy.baseRadius_m, proxy.topRadius_m);
+    return bounding ? Math.max(widest, proxy.halfHeight_m) : Math.cbrt(widest ** 2 * proxy.halfHeight_m);
+  }
+  return Math.max(proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z);
+}
+
+/** Matches the authored-light classification, range, and source dimensions used by svo-light-abi.ts. */
+function localLightForProxy(proxy: EnvironmentProxyPrimitive): CanonicalLocalLight | undefined {
+  if (!(proxy.material.emission > 0) || !proxy.tags.includes("light")) return undefined;
+  const common = {
+    source: proxy,
+    position_m: [proxy.center_m.x, proxy.center_m.y, proxy.center_m.z] as Triple,
+    colorLinear: [...proxy.material.colorLinear] as SvoRadianceRgb,
+    intensity: proxy.material.emission,
+    range_m: proxy.tags.includes("point-light")
+      ? Math.min(4.5, Math.max(1, 3 * Math.sqrt(proxy.material.emission)))
+      : Math.max(1, 6 * Math.sqrt(proxy.material.emission)),
+  };
+  if (proxy.tags.includes("point-light")) return {
+    ...common, kind: "point", direction: [0, -1, 0], radius_m: proxyLightRadius(proxy, true), area_m2: 0,
+  };
+  if (proxy.kind !== "box") {
+    const radius_m = proxyLightRadius(proxy, false);
+    return { ...common, kind: "sphere", direction: [0, -1, 0], radius_m, area_m2: 4 * Math.PI * radius_m ** 2 };
+  }
+  const dimensions = [proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z] as Triple;
+  const normalAxis = dimensions.indexOf(Math.min(...dimensions));
+  const authored = authoredNormal(proxy);
+  const direction = authored ?? [0, 0, 0] as Triple;
+  if (!authored) direction[normalAxis] = -1;
+  const surface = dimensions.filter((_, axis) => axis !== normalAxis);
+  return { ...common, kind: "rectangle", direction, radius_m: 0, area_m2: 4 * surface[0] * surface[1] };
+}
+
+interface LocalLightSample { towardLight: Triple; radiance: Triple; shadowDistance_m: number }
+
+function sampleLocalLight(light: CanonicalLocalLight, point: Triple): LocalLightSample | undefined {
+  const offset = light.position_m.map((value, axis) => value - point[axis]) as Triple;
+  const distanceSquared = dot(offset, offset);
+  if (distanceSquared <= 1e-10 || distanceSquared >= light.range_m ** 2) return undefined;
+  const distance = Math.sqrt(distanceSquared), towardLight = offset.map((value) => value / distance) as Triple;
+  const rangeFade = Math.max(0, 1 - distance / light.range_m) ** 2;
+  let shapeScale = 1 / Math.max(1, distanceSquared);
+  if (light.kind === "sphere") shapeScale = light.area_m2 / Math.max(light.area_m2, distanceSquared);
+  else if (light.kind === "rectangle") {
+    const emitterFacing = Math.max(0, -dot(light.direction, towardLight));
+    shapeScale = emitterFacing * light.area_m2 / Math.max(light.area_m2, distanceSquared);
+  }
+  const scale = light.intensity * rangeFade * shapeScale;
+  if (!(scale > 0)) return undefined;
+  return {
+    towardLight,
+    radiance: light.colorLinear.map((channel) => channel * scale) as Triple,
+    shadowDistance_m: light.kind === "point" ? Math.max(0, distance - light.radius_m) : distance,
+  };
+}
+
 function createFloatInterior(): Float32Array<ArrayBuffer> {
   return new Float32Array(SVO_NODE_MIP_LAYOUT.interiorSize ** 3 * SVO_TETRAHEDRAL_RADIANCE_LAYOUT.directionCount * 3);
 }
@@ -256,6 +342,7 @@ function buildBaseInterior(
   emissive: ReadonlySet<EnvironmentProxyPrimitive>,
   samplesPerAxis: number,
   light: CanonicalDirectionalLight | undefined,
+  localLights: readonly CanonicalLocalLight[],
   occluders: readonly EnvironmentProxyPrimitive[],
   counts: InjectionCounts,
 ): Float32Array<ArrayBuffer> {
@@ -285,13 +372,26 @@ function buildBaseInterior(
           const incidence = Math.max(0, dot(surface.normal, light.towardLightDirection));
           if (incidence > 0) {
             counts.directLightSamples += 1;
-            if (visibleToDirectionalLight(point, proxy, occluders, light)) {
+            if (visibleToDirectionalLight(point, proxy, occluders, light.towardLightDirection, light.shadowDistance_m)) {
               for (let channel = 0; channel < 3; channel += 1) {
                 emitted[channel] += proxy.material.colorLinear[channel] * light.colorLinear[channel]
                   * light.intensity * incidence / Math.PI;
               }
             } else counts.shadowedDirectLightSamples += 1;
           }
+        }
+        for (const localLight of localLights) {
+          if (localLight.source === proxy) continue;
+          const direct = sampleLocalLight(localLight, point);
+          if (!direct) continue;
+          const incidence = Math.max(0, dot(surface.normal, direct.towardLight));
+          if (!(incidence > 0)) continue;
+          counts.localLightSamples += 1;
+          if (visibleToDirectionalLight(point, proxy, occluders, direct.towardLight, direct.shadowDistance_m, localLight.source)) {
+            for (let channel = 0; channel < 3; channel += 1) {
+              emitted[channel] += proxy.material.colorLinear[channel] * direct.radiance[channel] * incidence / Math.PI;
+            }
+          } else counts.shadowedLocalLightSamples += 1;
         }
         const sample = svoTetrahedralLambertianEmission(emitted, surface.normal, 1 / sampleCount);
         for (let direction = 0; direction < 4; direction += 1) for (let channel = 0; channel < 3; channel += 1) {
@@ -360,16 +460,22 @@ export function buildSvoStaticEmissiveRadiancePublication(
     authoredNormal(proxy); // Validate conflicts even if capacity omitted its page.
   }
   const light = canonicalDirectionalLight(options.primaryDirectionalLight, domain);
+  const localLights = options.injectAuthoredProxyLights
+    ? environmentPrimitives.map(localLightForProxy).filter((value): value is CanonicalLocalLight => value !== undefined)
+    : [];
   // Direct bounce visits every authored surface. With no light, retain the
   // original emissive-only set and avoid all visibility work.
-  const surfaces = light ? environmentPrimitives : emissive;
+  const surfaces = light || localLights.length > 0 ? environmentPrimitives : emissive;
   const emissiveSet = new Set(emissive);
-  const counts: InjectionCounts = { directLightSamples: 0, shadowedDirectLightSamples: 0 };
+  const counts: InjectionCounts = {
+    directLightSamples: 0, shadowedDirectLightSamples: 0,
+    localLightSamples: 0, shadowedLocalLightSamples: 0,
+  };
 
   const values = new Map<string, Float32Array<ArrayBuffer>>();
   for (const { key } of opacity.plan.pages.filter(({ key }) => key.level === 0)) {
     values.set(interiorKey(0, key.coordinate), buildBaseInterior(
-      key.coordinate, domain, surfaces, emissiveSet, samplesPerAxis, light, environmentPrimitives, counts,
+      key.coordinate, domain, surfaces, emissiveSet, samplesPerAxis, light, localLights, environmentPrimitives, counts,
     ));
   }
   const maximumLevel = Math.max(0, ...opacity.plan.pages.map(({ key }) => key.level));
@@ -392,6 +498,8 @@ export function buildSvoStaticEmissiveRadiancePublication(
     injectedBaseTexelCount: base.reduce((sum, page) => sum + page.nonBlackTexelCount, 0),
     directLightSampleCount: counts.directLightSamples,
     shadowedDirectLightSampleCount: counts.shadowedDirectLightSamples,
+    localLightSampleCount: counts.localLightSamples,
+    shadowedLocalLightSampleCount: counts.shadowedLocalLightSamples,
     blackPageCount: interiors.filter(({ certifiedBlack }) => certifiedBlack).length,
     packedInteriorBytes: interiors.length * SVO_NODE_MIP_LAYOUT.interiorSize ** 3 * SVO_TETRAHEDRAL_RADIANCE_LAYOUT.bytesPerTexel,
   };

@@ -40,11 +40,11 @@ test("right panel width defaults to performance width and clamps resize input", 
   useUIStore.setState(initial, true);
 });
 
-test("presentation defaults to beautiful sparse voxels", () => {
+test("presentation defaults to global-illuminated sparse voxels", () => {
   const initial = useUIStore.getInitialState();
   useUIStore.setState(initial, true);
   assert.equal(useUIStore.getState().svoRenderMode, "svo");
-  assert.equal(useUIStore.getState().svoLightingMode, "cone");
+  assert.equal(useUIStore.getState().svoLightingMode, "gi");
   assert.equal(useUIStore.getState().svoShadowsEnabled, true);
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, true);
   useUIStore.getState().setSvoRenderMode("svo");

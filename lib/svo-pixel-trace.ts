@@ -338,6 +338,7 @@ export const SVO_PIXEL_TRACE_LAYERS = [
   "exact",
   "shadow-rays",
   "cones",
+  "gi-cones",
 ] as const;
 
 export type SvoPixelTraceLayer = typeof SVO_PIXEL_TRACE_LAYERS[number];
@@ -372,6 +373,7 @@ const LAYER_SOURCE: readonly { layer: SvoPixelTraceLayer; label: string; descrip
   { layer: "exact", label: "Exact tests", description: "Analytic surface intersections issued from tagged cells.", swatch: "#45c6bc", width_px: 1.8 },
   { layer: "shadow-rays", label: "Shadow rays", description: "Surface-to-light visibility queries, one per light sample.", swatch: "#ff7ad9", width_px: 1.6 },
   { layer: "cones", label: "Cone samples", description: "Coverage-pyramid taps stitched into cones: a ring at the cone's width, the mip voxel it read, coloured by level.", swatch: "#c2a6ff", width_px: 1.2 },
+  { layer: "gi-cones", label: "GI hemisphere", description: "Wide diffuse-radiance cones fanned across the upper hemisphere from the shaded surface.", swatch: "#ffb454", width_px: 1.8 },
 ];
 
 export const SVO_PIXEL_TRACE_LAYER_DEFINITIONS: Readonly<Record<SvoPixelTraceLayer, SvoPixelTraceLayerDefinition>> = Object.freeze(
@@ -392,8 +394,8 @@ export function svoPixelTraceLayerForKind(kind: SvoPixelTraceKind): SvoPixelTrac
     case SVO_PIXEL_TRACE_KINDS.primaryHit: return "exact";
     case SVO_PIXEL_TRACE_KINDS.shadowRay: return "shadow-rays";
     case SVO_PIXEL_TRACE_KINDS.coneSample:
-    case SVO_PIXEL_TRACE_KINDS.occlusionConeSample:
-    case SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample: return "cones";
+    case SVO_PIXEL_TRACE_KINDS.occlusionConeSample: return "cones";
+    case SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample: return "gi-cones";
   }
 }
 
@@ -701,7 +703,7 @@ export function buildSvoPixelTraceGeometry(
   // taps of the same march be joined rim to rim: on its own a tap is a ring, and
   // a scatter of rings does not read as a cone widening with distance.
   const coneGroups = new Map<string, SvoPixelTraceRecord[]>();
-  if (enabled.has("cones")) {
+  if (enabled.has("cones") || enabled.has("gi-cones")) {
     for (const record of trace.records) {
       if (record.kind !== SVO_PIXEL_TRACE_KINDS.coneSample
         && record.kind !== SVO_PIXEL_TRACE_KINDS.occlusionConeSample
@@ -710,13 +712,26 @@ export function buildSvoPixelTraceGeometry(
       if (group) group.push(record); else coneGroups.set(coneKey(record), [record]);
     }
     for (const group of coneGroups.values()) {
+      const coneLayer = svoPixelTraceLayerForKind(group[0].kind);
+      if (!enabled.has(coneLayer)) continue;
       const axis = group[0].b;
       const [tangent, bitangent] = orthonormalBasis(axis);
+      const first = group[0];
+      if (coneLayer === "gi-cones" && trace.hit) {
+        const apexStyle: SegmentStyle = {
+          layer: coneLayer, order: first.order, intensity: 0.8, kind: first.kind, widthBoost: 1.05,
+        };
+        for (const azimuth of CONE_ENVELOPE_AZIMUTHS) {
+          push(trace.hit.position_m, ringPoint(first.a, tangent, bitangent, first.tEnter_m, azimuth), apexStyle);
+        }
+      }
       for (let index = 1; index < group.length; index += 1) {
         const previous = group[index - 1], current = group[index];
         const style: SegmentStyle = {
-          layer: "cones", order: current.order, intensity: 0.34, kind: current.kind,
-          widthBoost: 0.75, colorLinear: svoPixelTraceMipColorLinear(current.level),
+          layer: coneLayer, order: current.order,
+          intensity: coneLayer === "gi-cones" ? 0.78 : 0.34, kind: current.kind,
+          widthBoost: coneLayer === "gi-cones" ? 1.1 : 0.75,
+          colorLinear: coneLayer === "gi-cones" ? undefined : svoPixelTraceMipColorLinear(current.level),
         };
         for (const azimuth of CONE_ENVELOPE_AZIMUTHS) {
           push(
@@ -730,14 +745,13 @@ export function buildSvoPixelTraceGeometry(
       // its shadow ray drawn along the same line, and two lines on one axis is
       // clutter, but an occlusion fan has nothing else to say where it pointed.
       const last = group[group.length - 1];
-      const first = group[0];
       if (last !== first && (last.kind === SVO_PIXEL_TRACE_KINDS.occlusionConeSample
         || last.kind === SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample)) {
         const axisLength_m = Math.hypot(last.a[0] - first.a[0], last.a[1] - first.a[1], last.a[2] - first.a[2]);
-        push(first.a, last.a, {
-          layer: "cones", order: last.order, intensity: 0.5, kind: last.kind,
-          dash_m: Math.max(1e-4, axisLength_m / 6), widthBoost: 0.9, arrow: true,
-          colorLinear: svoPixelTraceMipColorLinear(last.level),
+        push(coneLayer === "gi-cones" && trace.hit ? trace.hit.position_m : first.a, last.a, {
+          layer: coneLayer, order: last.order, intensity: coneLayer === "gi-cones" ? 0.9 : 0.5, kind: last.kind,
+          dash_m: Math.max(1e-4, axisLength_m / 6), widthBoost: coneLayer === "gi-cones" ? 1.2 : 0.9, arrow: true,
+          colorLinear: coneLayer === "gi-cones" ? undefined : svoPixelTraceMipColorLinear(last.level),
         });
       }
     }
@@ -820,7 +834,9 @@ export function buildSvoPixelTraceGeometry(
         const coverage = Math.max(0, Math.min(1, record.tExit_m));
         const colorLinear = svoPixelTraceMipColorLinear(record.level);
         pushRing(record.a, record.b, record.tEnter_m, {
-          layer, order: record.order, kind: record.kind, intensity: 0.28 + 0.72 * coverage, colorLinear,
+          layer, order: record.order, kind: record.kind,
+          intensity: record.kind === SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample ? 0.82 : 0.28 + 0.72 * coverage,
+          colorLinear: record.kind === SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample ? undefined : colorLinear,
         });
         // The voxel the tap actually read, at its true width: the cone picked
         // this level because the level's voxel is about as wide as the cone is
@@ -872,9 +888,9 @@ export function svoPixelTraceNarrative(trace: SvoPixelTrace): readonly SvoPixelT
   const rejected = kinds.get(SVO_PIXEL_TRACE_KINDS.childRejected) ?? 0;
   const accepted = kinds.get(SVO_PIXEL_TRACE_KINDS.childAccepted) ?? 0;
   const cells = kinds.get(SVO_PIXEL_TRACE_KINDS.brickCell) ?? 0;
-  const cones = (kinds.get(SVO_PIXEL_TRACE_KINDS.coneSample) ?? 0)
-    + (kinds.get(SVO_PIXEL_TRACE_KINDS.occlusionConeSample) ?? 0)
-    + (kinds.get(SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample) ?? 0);
+  const visibilityCones = (kinds.get(SVO_PIXEL_TRACE_KINDS.coneSample) ?? 0)
+    + (kinds.get(SVO_PIXEL_TRACE_KINDS.occlusionConeSample) ?? 0);
+  const giCones = kinds.get(SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample) ?? 0;
   const shadows = kinds.get(SVO_PIXEL_TRACE_KINDS.shadowRay) ?? 0;
   const steps: SvoPixelTraceNarrativeStep[] = [
     {
@@ -913,18 +929,18 @@ export function svoPixelTraceNarrative(trace: SvoPixelTrace): readonly SvoPixelT
     const gi = trace.globalIllumination;
     const radiance = gi.radiance.map((channel) => Math.max(0, channel).toFixed(2)).join(" / ");
     steps.push({
-      id: "gi", label: "Gather global illumination", layer: "cones",
+      id: "gi", label: "Gather global illumination", layer: "gi-cones",
       detail: gi.ready
-        ? `bounced RGB ${radiance}; broad diffuse visibility ${Math.round(Math.max(0, Math.min(1, gi.visibility)) * 100)}%`
+        ? `${gi.coneCount} wide cones across the upper hemisphere; bounced RGB ${radiance}; broad diffuse visibility ${Math.round(Math.max(0, Math.min(1, gi.visibility)) * 100)}%`
         : "GLOBAL was selected, but the generation-matched tetrahedral radiance atlas was unavailable",
       value: gi.ready ? `${gi.coneCount} cones · ${gi.coneTaps} taps` : "fallback",
     });
   }
-  if (cones > 0 || counters.mipSteps > 0) {
+  if (visibilityCones > 0 || giCones > 0 || counters.mipSteps > 0) {
     const ladder = svoPixelTraceMipLadder(trace);
     const coarsest = ladder[ladder.length - 1];
     steps.push({
-      id: "cones", label: "March the coverage pyramid", layer: "cones",
+      id: "cones", label: "March the coverage pyramid", layer: visibilityCones > 0 ? "cones" : "gi-cones",
       // The level is the whole story of a cone tap: the wider the cone has grown
       // by the time it reaches a sample, the blurrier the level it is allowed to
       // read, and the cheaper that sample is.

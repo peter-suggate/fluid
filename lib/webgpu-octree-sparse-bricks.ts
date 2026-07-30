@@ -630,6 +630,7 @@ export class OctreeSparseBrickWorld {
                 colorLinear: scene.lighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
                 intensity: scene.lighting?.directional?.intensity ?? 1,
               },
+              injectAuthoredProxyLights: true,
             },
           );
           if (radiance.injectedBaseTexelCount > 0) {

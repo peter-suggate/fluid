@@ -320,7 +320,7 @@ test("production renderer mode omits the SVO default and serializes explicit ras
   assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "svo");
 });
 
-test("SVO lighting round-trips exact direct while cone remains the canonical fail-soft default", () => {
+test("SVO lighting round-trips explicit modes while GI remains the finished-image default", () => {
   const direct = parseQueryState("?render=svo&svoLighting=direct");
   assert.equal(direct.ui.svoRenderMode, "svo");
   assert.equal(direct.ui.svoLightingMode, "direct");
@@ -336,9 +336,6 @@ test("SVO lighting round-trips exact direct while cone remains the canonical fai
 
   const cone = parseQueryState("?svoLighting=cone");
   assert.equal(cone.ui.svoLightingMode, "cone");
-
-  const gi = parseQueryState("?svoLighting=gi");
-  assert.equal(gi.ui.svoLightingMode, "gi");
   const coneQuery = serializeQueryState("?svoLighting=direct", {
     presetId: cone.presetId,
     scene: cone.scene,
@@ -347,8 +344,20 @@ test("SVO lighting round-trips exact direct while cone remains the canonical fai
     quality: cone.quality,
     overrides: cone.overrides,
   }, cone.ui);
-  assert.equal(new URLSearchParams(coneQuery).has("svoLighting"), false);
-  assert.equal(parseQueryState("?svoLighting=invalid").ui.svoLightingMode, "cone");
+  assert.equal(new URLSearchParams(coneQuery).get("svoLighting"), "cone");
+
+  const gi = parseQueryState("?svoLighting=gi");
+  assert.equal(gi.ui.svoLightingMode, "gi");
+  const giQuery = serializeQueryState("?svoLighting=direct", {
+    presetId: gi.presetId,
+    scene: gi.scene,
+  }, {
+    methodId: gi.methodId,
+    quality: gi.quality,
+    overrides: gi.overrides,
+  }, gi.ui);
+  assert.equal(new URLSearchParams(giQuery).has("svoLighting"), false);
+  assert.equal(parseQueryState("?svoLighting=invalid").ui.svoLightingMode, "gi");
 });
 
 test("SVO shadows and ambient occlusion round-trip as independent finished-image options", () => {

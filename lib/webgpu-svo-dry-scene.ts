@@ -255,6 +255,7 @@ export const SVO_DRY_VISIBILITY_FLAGS = Object.freeze({
   ambientOcclusion: 1 << 3,
   globalIllumination: 1 << 4,
   globalIlluminationOcclusion: 1 << 5,
+  globalIlluminationRequested: 1 << 6,
 } as const);
 
 export const SVO_TERRAIN_FAST_MIN_VERTICAL = 0.35;
@@ -3022,7 +3023,8 @@ export class SparseVoxelDrySceneRenderer {
       | (shadowsEnabled ? SVO_DRY_VISIBILITY_FLAGS.exactShadow : 0)
       | (coneFallback && (shadowsEnabled || ambientOcclusionEnabled) || giReady ? SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested : 0)
       | (giReady ? SVO_DRY_VISIBILITY_FLAGS.globalIllumination : 0)
-      | (giReady && ambientOcclusionEnabled ? SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion : 0);
+      | (giReady && ambientOcclusionEnabled ? SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion : 0)
+      | (this.lightingMode === "gi" ? SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested : 0);
     words.set([pbrMaterials.count, pbrMaterials.revision, pbrMaterials.strideBytes, visibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
     const tuning = this.renderTuning;
     words.set([

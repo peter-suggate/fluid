@@ -14,8 +14,8 @@ export type SvoLightingOptions = Readonly<{
   ambientOcclusionEnabled: boolean;
 }>;
 
-/** Cone lighting is fail-soft: unavailable caches retain exact direct SVO lighting. */
-export const DEFAULT_SVO_LIGHTING_MODE: SvoLightingMode = "cone";
+/** GI is the finished-image default; unavailable radiance fails soft to cone lighting. */
+export const DEFAULT_SVO_LIGHTING_MODE: SvoLightingMode = "gi";
 
 /** The presentation preset aims for the finished image; each effect remains independently switchable. */
 export const DEFAULT_SVO_LIGHTING_OPTIONS: SvoLightingOptions = Object.freeze({

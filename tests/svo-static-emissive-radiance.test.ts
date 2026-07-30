@@ -155,3 +155,35 @@ test("omitting the primary light retains emissive-only surface sampling", () => 
   assert.equal(radiance.directLightSampleCount, 0);
   assert.equal(radiance.shadowedDirectLightSampleCount, 0);
 });
+
+test("tagged authored point lights inject their dominant local bounce", () => {
+  const reflector = box("reflector", [4, 4, 4], [1, 2, 2], 0, [], [1, 1, 1]);
+  const lamp = box("warm-lamp", [6.5, 4, 4], [.2, .2, .2], 11, ["light", "point-light"], [1, .4, .1]);
+  const primitives = [reflector, lamp];
+  const opacity = buildSvoStaticNodeMipPublication(scene(), domain(), primitives, { generation: 15, levelCount: 1 });
+  const emissionOnly = buildSvoStaticEmissiveRadiancePublication(opacity, domain(), primitives);
+  const weakDirectional = buildSvoStaticEmissiveRadiancePublication(opacity, domain(), primitives, {
+    primaryDirectionalLight: { towardLightDirection: [1, 0, 0], colorLinear: [1, 1, 1], intensity: .09 },
+  });
+  const localBounce = buildSvoStaticEmissiveRadiancePublication(opacity, domain(), primitives, { injectAuthoredProxyLights: true });
+  const emissionPage = emissionOnly.interiors.find(({ key }) => key.coordinate.every((value) => value === 0))!;
+  const weakPage = weakDirectional.interiors.find(({ key }) => key.coordinate.every((value) => value === 0))!;
+  const bouncePage = localBounce.interiors.find(({ key }) => key.coordinate.every((value) => value === 0))!;
+  assert.equal(word(emissionPage, 0, 4, 3, 3), 0, "the receiver has no authored emission of its own");
+  const bounced = unpackSvoRadianceRgb9e5(word(bouncePage, 0, 4, 3, 3));
+  const weak = unpackSvoRadianceRgb9e5(word(weakPage, 0, 4, 3, 3));
+  assert.ok(bounced[0] > .1, "the local intensity-11 fixture must produce visible first-bounce energy");
+  assert.ok(bounced[0] > 10 * weak[0], "the dominant local lamp must materially exceed the garden's 0.09 directional key");
+  assert.ok(bounced[0] > bounced[1] && bounced[1] > bounced[2], "the bounce retains the fixture's warm spectrum");
+  assert.ok(localBounce.localLightSampleCount > 0);
+  assert.equal(localBounce.shadowedLocalLightSampleCount, 0);
+  assert.equal(localBounce.directLightSampleCount, 0);
+
+  const blocker = box("blocker", [5.75, 4, 4], [.2, 2, 2]);
+  const blockedPrimitives = [reflector, blocker, lamp];
+  const blockedOpacity = buildSvoStaticNodeMipPublication(scene(), domain(), blockedPrimitives, { generation: 16, levelCount: 1 });
+  const blocked = buildSvoStaticEmissiveRadiancePublication(blockedOpacity, domain(), blockedPrimitives, { injectAuthoredProxyLights: true });
+  const blockedPage = blocked.interiors.find(({ key }) => key.coordinate.every((value) => value === 0))!;
+  assert.equal(word(blockedPage, 0, 4, 3, 3), 0, "another proxy blocks the finite receiver-to-lamp segment");
+  assert.ok(blocked.shadowedLocalLightSampleCount > 0);
+});

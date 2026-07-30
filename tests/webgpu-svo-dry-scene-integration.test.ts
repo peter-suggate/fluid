@@ -29,7 +29,7 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
 
 test("SVO presentation is the WebGPU default while raster remains selectable", () => {
   assert.equal(DEFAULT_SVO_RENDER_MODE, "svo");
-  assert.equal(DEFAULT_SVO_LIGHTING_MODE, "cone");
+  assert.equal(DEFAULT_SVO_LIGHTING_MODE, "gi");
   assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS, { shadowsEnabled: true, ambientOcclusionEnabled: true });
   expectSource(rendererSource, /svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE/,
     "callers which do not override presentation must use sparse voxels");

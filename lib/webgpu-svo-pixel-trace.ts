@@ -60,6 +60,7 @@ export interface SvoPixelTraceProbeOptions {
     readonly ambientOcclusion: number;
     readonly globalIllumination: number;
     readonly globalIlluminationOcclusion: number;
+    readonly globalIlluminationRequested: number;
   };
   /** Mirrors SVO_DRY_SCENE_CAMERA_SETTLED_WGSL. */
   readonly cameraSettledExpression: string;
@@ -508,9 +509,9 @@ fn probeGiConeMarch(detail:u32,origin:vec3f,directionIn:vec3f,maximumSteps:u32)-
 }
 
 fn probeGlobalIllumination(position:vec3f,normal:vec3f){
-  if((dry.materialPublication.w&${options.visibilityFlags.globalIllumination}u)==0u){return;}
+  if((dry.materialPublication.w&${options.visibilityFlags.globalIlluminationRequested}u)==0u){return;}
   probeGiState=${SVO_PIXEL_TRACE_GI_STATE.enabled}u;
-  if(!dryTetraRadianceReady()){return;}
+  if((dry.materialPublication.w&${options.visibilityFlags.globalIllumination}u)==0u||!dryTetraRadianceReady()){return;}
   probeGiState|=${SVO_PIXEL_TRACE_GI_STATE.ready}u;
   let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
   let origin=position+normalize(normal)*minimumVoxel*max(dry.tuningRays1.z,1.0);

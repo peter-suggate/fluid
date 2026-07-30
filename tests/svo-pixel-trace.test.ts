@@ -160,8 +160,8 @@ test("a trace reports the shipping GI gather state, energy, visibility, and wide
   const encoded = encodeTraceBuffer({
     counters: { mipSteps: 3 },
     records: [
-      { kind: SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample, level: 1, detail: 0 },
-      { kind: SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample, level: 2, detail: 1 },
+      { kind: SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample, level: 1, detail: 0, a: [1, 2, 4], b: [0, 1, 0], tEnter: 0.25 },
+      { kind: SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample, level: 2, detail: 0, a: [1, 3, 4], b: [0, 1, 0], tEnter: 0.5 },
     ],
   });
   encoded.words[SVO_PIXEL_TRACE_HEADER.giState] = SVO_PIXEL_TRACE_GI_STATE.enabled | SVO_PIXEL_TRACE_GI_STATE.ready;
@@ -175,9 +175,29 @@ test("a trace reports the shipping GI gather state, energy, visibility, and wide
   assert.equal(trace.globalIllumination.coneTaps, 31);
   assert.ok(Math.abs(trace.globalIllumination.visibility - 0.42) < 1e-6);
   assert.deepEqual(trace.records.map(({ kind }) => kind), [13, 13]);
+  assert.equal(svoPixelTraceLayerForKind(SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample), "gi-cones");
   assert.deepEqual(svoPixelTraceMipLadder(trace).map(({ level }) => level), [1, 2]);
   const gi = svoPixelTraceNarrative(trace).find(({ id }) => id === "gi");
-  assert.match(gi?.detail ?? "", /bounced RGB 0\.30 \/ 0\.20 \/ 0\.10; broad diffuse visibility 42%/);
+  assert.match(gi?.detail ?? "", /4 wide cones across the upper hemisphere; bounced RGB 0\.30 \/ 0\.20 \/ 0\.10; broad diffuse visibility 42%/);
+  assert.equal(gi?.layer, "gi-cones");
+  const giGeometry = buildSvoPixelTraceGeometry(trace, { layers: ["gi-cones"] });
+  assert.ok(giGeometry.countsByLayer["gi-cones"] > 0);
+  assert.ok(Math.abs(giGeometry.segments[11] - 0.8) < 1e-6,
+    "the apex stays bright even though the replay deliberately omits per-tap opacity");
+  SVO_PIXEL_TRACE_LAYER_DEFINITIONS["gi-cones"].colorLinear.forEach((channel, index) => {
+    assert.ok(Math.abs(giGeometry.segments[8 + index] - channel) < 1e-6, "the hemisphere rails use their own warm colour");
+  });
+  assert.equal(buildSvoPixelTraceGeometry(trace, { layers: ["cones"] }).countsByLayer["gi-cones"], 0);
+});
+
+test("a requested but unavailable GI atlas is explicit instead of masquerading as cone lighting", () => {
+  const encoded = encodeTraceBuffer();
+  encoded.words[SVO_PIXEL_TRACE_HEADER.giState] = SVO_PIXEL_TRACE_GI_STATE.enabled;
+  const trace = decodeSvoPixelTrace(encoded.words, encoded.floats);
+  assert.ok(trace?.globalIllumination && !trace.globalIllumination.ready);
+  const gi = svoPixelTraceNarrative(trace).find(({ id }) => id === "gi");
+  assert.equal(gi?.value, "fallback");
+  assert.match(gi?.detail ?? "", /radiance atlas was unavailable/);
 });
 
 test("a miss decodes without a hit even when a distance word survives", () => {
