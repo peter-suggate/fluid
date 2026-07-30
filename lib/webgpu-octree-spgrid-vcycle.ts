@@ -1118,6 +1118,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateOperatorRowsPipeline: GPUComputePipeline;
   private readonly accurateOperatorRowsGroup: GPUBindGroup;
   private readonly accurateOperatorRowsDispatch: readonly [number, number, number];
+  private readonly accurateImageDeltaParams: GPUBuffer;
   /**
    * Measurement-only control arm for the direct half of the operator image.
    * The shader retains the exact pre-image chase for the differential harness;
@@ -1426,7 +1427,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       // One page-status word plus eighteen resolved destination rows per row.
       // At the mini lane's live count this is ~113 KB; it is sized off the
       // planned row capacity so a topology growth cannot outrun it.
-      size: this.plan.rowCapacity * 19 * 4,
+      size: 2 * this.plan.rowCapacity * 19 * 4,
       usage: storage,
     });
     this.accurateAdjointRows = device.createBuffer({
@@ -1435,9 +1436,18 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       // the image index and the accurateTerms index are the same arithmetic.
       // This is 144 of the 163 words per row accurateTerms already carries, and
       // it is sized off the same planned row capacity for the same reason.
-      size: this.plan.rowCapacity * ADJOINT_ROW_WORDS * 4,
+      size: 2 * this.plan.rowCapacity * ADJOINT_ROW_WORDS * 4,
       usage: storage,
     });
+    this.accurateImageDeltaParams = device.createBuffer({
+      label: "SPGrid accurate A2 persistent-image delta layout",
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.accurateImageDeltaParams, 0, new Uint32Array([
+      delta.controlOffsetWords, delta.newToOldOffsetWords,
+      delta.dirtyRowsOffsetWords, deltaCountControlWord,
+    ]));
     const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
       regularInterior: "applyRegularInterior",
       transitionInterior: "applyTransitionInterior",
@@ -1483,7 +1493,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     });
     this.accurateOperatorRowsPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · compile operator rows", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "buildAccurateOperatorRows" },
+      compute: { module: accurateModule, entryPoint: "buildAccurateOperatorRows",
+        constants: { persistentImageCarry: typeof process === "undefined"
+          || process.env.FLUID_SPGRID_PERSISTENT_IMAGES !== "0" ? 1 : 0 } },
     });
     this.accurateOperatorRowsGroup = device.createBindGroup({
       label: "SPGrid accurate A2 · operator image bindings",
@@ -1495,12 +1507,16 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         { binding: 9, resource: { buffer: source.topologyMetrics } },
         { binding: 11, resource: { buffer: this.accurateWorksetLayout } },
         { binding: 13, resource: { buffer: this.accurateOperatorRows } },
+        { binding: 15, resource: { buffer: this.accurateImageDeltaParams } },
+        { binding: 16, resource: { buffer: this.source.rowDelta.rows } },
       ],
     });
     this.accurateOperatorRowsDispatch = dispatchFor(this.plan.rowCapacity * 19);
     this.accurateAdjointRowsPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · compile fine-adjoint rows", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "buildAccurateAdjointRows" },
+      compute: { module: accurateModule, entryPoint: "buildAccurateAdjointRows",
+        constants: { persistentImageCarry: typeof process === "undefined"
+          || process.env.FLUID_SPGRID_PERSISTENT_IMAGES !== "0" ? 1 : 0 } },
     });
     this.accurateAdjointRowsGroup = device.createBindGroup({
       label: "SPGrid accurate A2 · fine-adjoint image bindings",
@@ -1512,6 +1528,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         { binding: 9, resource: { buffer: source.topologyMetrics } },
         { binding: 11, resource: { buffer: this.accurateWorksetLayout } },
         { binding: 14, resource: { buffer: this.accurateAdjointRows } },
+        { binding: 15, resource: { buffer: this.accurateImageDeltaParams } },
+        { binding: 16, resource: { buffer: this.source.rowDelta.rows } },
       ],
     });
     this.accurateAdjointRowsDispatch = dispatchFor(this.plan.rowCapacity * ADJOINT_ROW_WORDS);
@@ -1579,6 +1597,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       + this.candidateGhosts.size + this.committedInputs.size
       + this.accurateWorksetLayout.size + this.accurateClassDispatch.size
       + this.accurateOperatorRows.size + this.accurateAdjointRows.size
+      + this.accurateImageDeltaParams.size
       + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0);
   }
 
@@ -2031,6 +2050,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
     this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy(); this.accurateTerms.destroy();
     this.accurateOperatorRows.destroy(); this.accurateAdjointRows.destroy();
+    this.accurateImageDeltaParams.destroy();
     for (const buffer of [...this.params, ...this.candidateParams]) buffer.destroy();
   }
 }
