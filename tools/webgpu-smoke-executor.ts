@@ -1045,12 +1045,10 @@ async function runGPU(
     values.fineLevelSetBandCells = octreeFineBandOverride;
   }
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
-  // The factor-1 coarse baseline is this project's Aanjaneya variant with no
-  // separate fine SPGrid. It still publishes sparse current-phi pages, but
-  // their same-resolution row restriction is optional evidence rather than
-  // the paper's mandatory fine-to-background transfer receipt.
+  // Resolution one still owns a separate sparse interface band. Only the
+  // explicit liquid-row-only diagnostic lacks the fine-to-background receipt.
   const hasSeparateFineLevelSetBand = method.id === "octree"
-    && values.globalFineLevelSetFactor !== "1";
+    && values.coarseOnlySurfaceTracking !== true;
   if (method.id === "octree" && octreePressureRowCapacityOverride !== undefined) {
     values.pressureRowCapacity = octreePressureRowCapacityOverride;
   }

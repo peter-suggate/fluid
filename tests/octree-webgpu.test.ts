@@ -133,14 +133,26 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   "dry-boundary adaptivity is the production default");
   assert.equal(octreeSolverOptions(defaultScene, "balanced", {
     ...octreeMethod.presetFor("balanced"), globalFineLevelSetFactor: "1",
-  }).octree.fluidGatedBoundaryRefinement, false,
-  "coarse factor 1 must retain the full-duration wall-climb topology");
+  }).octree.fluidGatedBoundaryRefinement, true,
+  "factor-1 surface tracking must not silently disable dry-boundary adaptivity");
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...octreeMethod.presetFor("balanced"), globalFineLevelSetFactor: "1",
+  }).octree.coarseOnlySurfaceTracking, false,
+  "surface resolution one must retain the sparse air-side interface band");
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...octreeMethod.presetFor("balanced"), globalFineLevelSetFactor: "1",
+    coarseOnlySurfaceTracking: true,
+  }).octree.coarseOnlySurfaceTracking, true,
+  "the liquid-row-only surface remains available only as an explicit diagnostic");
   assert.equal(octreeSolverOptions(defaultScene, "balanced", {
     ...octreeMethod.presetFor("balanced"), fluidGatedBoundaryRefinement: false,
   }).octree.fluidGatedBoundaryRefinement, false,
   "the unconditional Dawn control must remain selectable");
   assert.match(octreeSource, /function octreeLeafSize\(value: number\): 2 \| 4 \| 8 \| 16 \| 32/);
   assert.match(octreeSource, /rounded >= 32/);
+  assert.match(octreeSource,
+    /this\.coarseOnlySurfaceTracking\s*=\s*options\.coarseOnlySurfaceTracking\s*===\s*true/,
+    "the allocation owner must not infer surface authority from resolution");
   const interfaceBand = octreeMethod.params.find((spec) => spec.key === "interfaceRefinementBandCells");
   assert.ok(interfaceBand && interfaceBand.kind === "number" && interfaceBand.tier === "fine"
     && interfaceBand.label === "Band reach" && interfaceBand.default === 4);
@@ -892,11 +904,11 @@ test("eligible octrees select persistent MGPCG by default with a hierarchical or
   assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "1" }), true);
   assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "0" }), false);
   assert.match(octreeSource,
-    /globalFineLevelSet\?\.plan\.fineFactor !== 1\s*&& WebGPUOctreePersistentMGPCG\.selects\(rowCapacity\)/,
-    "factor 1 must not construct the persistent experiment");
+    /this\.persistentMGPCG\s*=\s*new WebGPUOctreePersistentMGPCG/,
+    "the sparse factor-1 interface band must retain the production pressure executor");
   assert.match(octreeSource,
-    /const persistent = this\.globalFineLevelSet\?\.plan\.fineFactor !== 1\s*&& octreePersistentMGPCGEnabled\(\) \? this\.persistentMGPCG : undefined;/,
-    "factor 1 must not select a dormant persistent executor at encode time");
+    /const persistent\s*=\s*!this\.coarseOnlySurfaceTracking[\s\S]*octreePersistentMGPCGEnabled\(\)\s*\?\s*this\.persistentMGPCG\s*:\s*undefined;/,
+    "only the liquid-row-only diagnostic must select the legacy executor");
 });
 
 test("octree delegates every capacity to the direct-curvature PCG authority", () => {
@@ -921,7 +933,7 @@ test("compact face authority shapes only a stale-safe factor-one encode prefix",
   assert.match(encode,
     /const fullSolveBudget\s*=\s*this\.pipelinedMGPCG\.iterationBudget/);
   assert.match(encode,
-    /selectOctreeFactorOneEncodedSolveTail[\s\S]*factorOne:[\s\S]*fineFactor\s*===\s*1/);
+    /selectOctreeFactorOneEncodedSolveTail[\s\S]*factorOne:\s*this\.coarseOnlySurfaceTracking/);
   assert.match(encode,
     /this\.info\.pressureIterationBudget\s*=\s*solveBudget[\s\S]*this\.info\.pressureIterationHardBudget\s*=\s*this\.solveTailPolicy\.hardOuterIterationCeiling/);
   assert.match(encode,
@@ -1075,7 +1087,7 @@ test("structured solve dispatches are class-exact and convergence gated", () => 
     "the deleted variable-row executor must not return to the topology shader");
 });
 
-test("boundary coarsening preserves the established pressure shell and hysteresis", () => {
+test("fine adaptive pressure keeps its compact shell while factor one retains hysteresis", () => {
   assert.match(octreeProjectionShader,
     /fn pressureRefinementEvidence\(origin: vec3u, size: u32\)[\s\S]*inflowProtectionIntersects\(origin, size\)/,
     "authored pressure apertures must retain local topology protection");
@@ -1084,25 +1096,32 @@ test("boundary coarsening preserves the established pressure shell and hysteresi
     octreeProjectionShader.indexOf("fn pressureRetentionAt"),
   );
   assert.match(refinementEvidence,
-    /fineLeafSummary\(origin, size\)[\s\S]*gradingLayers \* max\(2\.0, f32\(size\)\)[\s\S]*if \(crossesInterface\) \{ return true; \}[\s\S]*observedNearInterface && \(summary\.complete \|\| fineSummaryFactor == 1u\)/,
-    "both arms must retain the established candidate-scaled pressure shell");
-  assert.doesNotMatch(refinementEvidence, /fluidGatedBoundaryRefinement/,
-    "boundary policy must not alter pressure refinement evidence");
+    /retainedProtectionWidth[\s\S]*gradingLayers \* max\(2\.0, f32\(size\)\)[\s\S]*compactProtectionWidth[\s\S]*gradingLayers \* max\(0\.0, f32\(size\) - 2\.0\)[\s\S]*fineSummaryFactor == 1u/,
+    "factor one retains the wide shell while fine factor-4\/8 runs stay compact");
+  assert.match(refinementEvidence,
+    /fineSummaryFactor != 1u && size <= 2u[\s\S]*return false/,
+    "factor-4\/8 proximity must not inflate representable size-two cuts to unit pressure rows");
+  assert.doesNotMatch(refinementEvidence,
+    /fineSummaryFactor == 1u && size < 4u\) \{ return true; \}/,
+    "factor-1 positive air must not force every dry size-two leaf to unit size");
+  assert.match(refinementEvidence,
+    /crossesInterface = summary\.minimumPhi <= 0\.0 && summary\.maximumPhi >= 0\.0[\s\S]*if \(crossesInterface\) \{ return true; \}[\s\S]*summary\.complete \|\| fineSummaryFactor == 1u/,
+    "factor-1 summaries must retain crossing and finite near-interface pressure support");
   assert.match(octreeProjectionShader,
     /classifyTopologyTileSignature[\s\S]*pressureRefinementEvidence\(unpackOrigin\(owner\.packedOrigin\), owner\.size\)[\s\S]*compaction\[base \+ 4u\] = TILE_SIGNATURE_VALID_MAGIC/,
     "the structural signature must hash current spatial pressure evidence");
   assert.match(octreeProjectionShader,
-    /currentEvidence = tileEvidenceReduction\[0\] != 0u[\s\S]*PRESSURE_RETENTION_GENERATIONS[\s\S]*retention << 24u/,
-    "both arms must retain the established three-generation pressure hysteresis");
+    /retainPressureHysteresis = fineSummaryFactor == 1u[\s\S]*currentEvidence = retainPressureHysteresis[\s\S]*PRESSURE_RETENTION_GENERATIONS[\s\S]*retention << 24u/,
+    "tile-wide hysteresis must be retained only where there is no finer support lattice");
   assert.match(octreeProjectionShader,
-    /fn leafNeedsRefinement[\s\S]*pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*if \(!denseSolidField && !crossesClosedWall\) \{ return pressureRetained; \}/,
-    "solid-free dam scenes must preserve interior pressure retention before the cheap exit");
+    /fn leafNeedsRefinement[\s\S]*pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*fineSummaryFactor == 1u[\s\S]*if \(!denseSolidField && !crossesClosedWall\) \{ return pressureRetained; \}/,
+    "only factor one preserves interior pressure retention");
   assert.match(octreeProjectionShader,
     /fn boundaryLiquidMinimumPhi[\s\S]*if \(summary\.found\) \{ return summary\.minimumPhi; \}[\s\S]*3\.402823e38[\s\S]*coarse\.leafSize == 0u/,
     "the authoritative positive-air complement must not masquerade as a near-interface distance");
   assert.match(octreeProjectionShader,
-    /fn refineCoarseBlock[\s\S]*pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained && \(!fluidGatedBoundaryRefinement \|\| !crossesBoundary\)/,
-    "large dyadic leaves must ignore only unrelated retention at a dry boundary crossing");
+    /fn refineCoarseBlock[\s\S]*pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*fineSummaryFactor == 1u[\s\S]*pressureRetained && \(!fluidGatedBoundaryRefinement \|\| !crossesBoundary\)/,
+    "large dyadic leaves must apply the same factor-specific retention policy");
 });
 
 test("retired topology tiles invalidate their old frontier identities", () => {

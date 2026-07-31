@@ -8,6 +8,8 @@ import { WebGPUOctreeCoarseLevelSet } from "../lib/webgpu-octree-coarse-levelset
 import {
   OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_ERROR,
+  OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
+  OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_VALID,
   WebGPUOctreePowerCoarseLevelSet,
   octreePowerCoarseLevelSetShader,
@@ -70,6 +72,15 @@ test("WP8 planner is compact-row bounded and exposes independent coarse/fine dia
     "recurring encode uses cached immutable bindings with dynamic uniform offsets");
   assert.doesNotMatch(encode, /Math\.ceil\(maximumRows/,
     "the host cannot recover a capacity-shaped row dispatch");
+});
+
+test("fine modes retain the exact row-directory ABI while coarse-only opts into a dense complement", () => {
+  const fine = planOctreePowerCoarseLevelSet(32);
+  assert.equal(fine.sampleDirectoryBytes, OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
+    + 32 * OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES);
+  const coarseOnly = planOctreePowerCoarseLevelSet(32, 0, 0, 64);
+  assert.equal(coarseOnly.sampleDirectoryBytes, OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
+    + (32 + 64) * OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES);
 });
 
 test("rejected fine correction preserves every byte of the prior coarse authority", () => {

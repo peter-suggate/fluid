@@ -364,7 +364,8 @@ function finePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [num
     ? value : undefined;
 }
 
-function coarsePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [number, number, number]): { phi: number; positiveAir: boolean } {
+function coarsePhiAt(snapshot: Pick<CompactOctreeFieldSnapshot, "coarseDirectory">,
+  position: readonly [number, number, number]): { phi: number; positiveAir: boolean } {
   const words = snapshot.coarseDirectory;
   const rowCount = words[2], maximumLeafSize = words[3];
   const dimensions = [words[4], words[5], words[6]] as const;
@@ -399,6 +400,69 @@ function coarsePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [n
   // The production sampler defines an absent containing leaf as the compact
   // directory's positive-air complement, not as zero or an aggregate value.
   return { phi: physicalCellSize * maximumLeafSize, positiveAir: true };
+}
+
+/** Reconstruct the factor-one surface directly from its sole compact coarse
+ * publication.  This is the diagnostic counterpart of the production
+ * `coarse-levelset-sampling` consumer; it deliberately does not invent a
+ * global-fine worklist in order to reuse the factor-4/8 reader. */
+export function reconstructCoarseOnlyOctreeOccupancyField(
+  coarseDirectory: Uint32Array,
+  generation: number,
+  dimensions: readonly [number, number, number],
+): { field: Float32Array; coarseSamples: number; positiveAirSamples: number } {
+  if (coarseDirectory.length < 8 || coarseDirectory[0] !== OCTREE_POWER_COARSE_LEVELSET_VALID) {
+    throw new Error(`Coarse-only octree QA publication is not valid: state=${coarseDirectory[0] ?? "missing"}, generation=${coarseDirectory[1] ?? "missing"}, rows=${coarseDirectory[2] ?? "missing"}`);
+  }
+  if ((coarseDirectory[1] & 0x3fff_ffff) !== (generation & 0x3fff_ffff)) {
+    throw new Error("Coarse-only octree QA generation is stale");
+  }
+  const rowCount = coarseDirectory[2];
+  const rowCapacity = (coarseDirectory.length - 8) / 8;
+  if (!Number.isSafeInteger(rowCapacity) || rowCount < 1 || rowCount > rowCapacity) {
+    throw new Error("Coarse-only octree QA directory has an invalid row count");
+  }
+  if (dimensions.some((value, axis) => coarseDirectory[4 + axis] !== value)) {
+    throw new Error("Coarse-only octree QA dimensions differ from the requested field");
+  }
+  const h = finiteFloat(coarseDirectory, 7);
+  if (!(h > 0)) throw new Error("Coarse-only octree QA cell width is invalid");
+  let priorLevel = -1, priorMorton = -1;
+  for (let slot = 0; slot < rowCount; slot += 1) {
+    const base = 8 + slot * 8, cellPlusOne = coarseDirectory[base], size = coarseDirectory[base + 1];
+    const value = finiteFloat(coarseDirectory, base + 2);
+    const minimum = finiteFloat(coarseDirectory, base + 3);
+    const maximum = finiteFloat(coarseDirectory, base + 4);
+    const requiredFlags = OCTREE_COARSE_PHI_FLAG.valid | OCTREE_COARSE_PHI_FLAG.finite;
+    if (cellPlusOne === 0 || size === 0 || (size & (size - 1)) !== 0
+      || (coarseDirectory[base + 5] & requiredFlags) !== requiredFlags
+      || !Number.isFinite(value) || !Number.isFinite(minimum) || !Number.isFinite(maximum)
+      || minimum > value || value > maximum) {
+      throw new Error(`Coarse-only octree QA row ${slot} is malformed: ${JSON.stringify({
+        cellPlusOne, size, value, minimum, maximum,
+        flags: coarseDirectory[base + 5], row: coarseDirectory[base + 6],
+      })}`);
+    }
+    const level = 31 - Math.clz32(size), morton = coarseMorton(cellPlusOne - 1, dimensions);
+    if (level < priorLevel || (level === priorLevel && morton <= priorMorton)) {
+      throw new Error("Coarse-only octree QA directory is not strictly sorted");
+    }
+    priorLevel = level; priorMorton = morton;
+  }
+  const field = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
+  let positiveAirSamples = 0;
+  const snapshot = { coarseDirectory };
+  for (let z = 0; z < dimensions[2]; z += 1) {
+    for (let y = 0; y < dimensions[1]; y += 1) {
+      for (let x = 0; x < dimensions[0]; x += 1) {
+        const sample = coarsePhiAt(snapshot, [(x + 0.5) * h, (y + 0.5) * h, (z + 0.5) * h]);
+        if (sample.positiveAir) positiveAirSamples += 1;
+        field[x + dimensions[0] * (y + dimensions[1] * z)] =
+          Math.min(1, Math.max(0, 0.5 - sample.phi / h));
+      }
+    }
+  }
+  return { field, coarseSamples: field.length, positiveAirSamples };
 }
 
 /**

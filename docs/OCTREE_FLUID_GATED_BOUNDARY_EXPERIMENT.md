@@ -130,17 +130,25 @@ The 62-step Dawn A/B is:
 | Terminal pressure iterations | 5 | 5 |
 | Field MAE / RMSE | 0 / 0 | 0 / 0 |
 | Wet IoU / centroid distance | 1 / 0 cells | 1 / 0 cells |
-| Simulation wall time | 6,523 ms | 6,989 ms |
-| Wall time per step | 105.213 ms | 112.724 ms |
+| Simulation wall time | 7,038 ms | 6,792 ms |
+| Wall time per step | 113.524 ms | 109.551 ms |
 
 The terminal gated mesh places 64 size-two leaves at origin Y=14 and another 27
 at Y=12, opening the drained ceiling region while retaining current pressure
 support below it. The A/B fields are bit-identical, both arms have the same
 pressure rows and convergence receipt, and both reported zero WebGPU validation
-errors. The final current-profile sample is 6.7% slower on this deliberately
-small domain, inside the 10% regression gate. Earlier paired samples ranged
-from 1% through 6%; the pressure solve remains structurally identical, while
-dynamic topology work accounts for the small-domain overhead.
+errors. The latest control-first sample is 3.5% faster on the adaptive arm.
+Earlier order-swapped and control-first samples ranged from 0.32% faster to
+0.52% slower, so the small-domain steady-state effect is noise-scale to a small
+win; the pressure solve remains structurally identical. The automated gate
+rejects a slowdown above 10%.
+
+Construction is reported separately from simulation time. In the reversed
+sample it took 1,920 ms for adaptive versus 1,787 ms for the control. The
+adaptive cold bootstrap must query liquid distance before a published summary
+exists, so a modest one-time cost is expected; sequential shader compilation
+also makes this measurement order-sensitive. It is not included in the
+per-step performance gate.
 
 ### Per-step convergence gate
 
@@ -154,6 +162,86 @@ can race the following generation and has reported transient zero-row samples
 even while the step snapshot is valid. This diagnostic timing is not used as
 the product wall-clock measurement. The production solve-tail policy remains
 unchanged.
+
+The strict audit passes all 62 snapshots exactly. The current baseline exhausts
+its encoded solve budget during the early portion of this test; the complete
+failure/convergence sequence is identical in both arms. That is an existing
+solve-tail profile, not an adaptive-boundary difference.
+
+## Factor-1 water-box far-wall gate
+
+The interactive water-box can explicitly select factor-1 surface tracking.
+Two independent policies previously defeated dry-boundary adaptivity there:
+
+1. method construction silently selected unconditional boundaries whenever
+   factor 1 was active;
+2. factor-1 pressure evidence forced every size-two leaf to unit size before
+   checking whether its B4 summary contained liquid.
+
+The method no longer opts factor 1 out of the production default. Factor-1
+pressure evidence still preserves unit cells for any B4 summary containing
+liquid, but a positive-air B4 now proceeds through the normal distance and
+boundary decisions. This removes dry detail without changing wet pressure
+resolution.
+
+The construction-time Dawn gate uses the exact `24 x 18 x 16` water-box,
+factor 1, maximum leaf 32, and band reach 3:
+
+| Metric | Unconditional control | Adaptive default |
+| --- | ---: | ---: |
+| Structural leaves | 5,792 | 2,901 |
+| Pressure rows | 1,352 | 1,352 |
+| Initial field MAE / RMSE | - | 0 / 0 |
+| Far X strip | 864 x size 1 | 16 x size 2; 16 x size 4 |
+| Far Z strip | 1,296 x size 1 | 176 x size 2; 5 x size 4 |
+
+Thus both dry far walls contain no unit leaves in the adaptive arm. The gate is
+`npm run test:webgpu:water-box-boundary-adaptivity`; it also rejects pressure,
+volume, field, or WebGPU-validation differences.
+
+### Mini16 factor-1 zero-refinement control
+
+The factor-1 comparison must keep two independent controls separate. `off`
+disables only dry-boundary gating; `zero` sets octree adaptivity to zero and
+therefore publishes all 4,096 unit leaves. The latter exposed a surface-state
+bug that pressure A/B tests could not diagnose: the liquid-row-only factor-1
+directory had no air-side degrees of freedom, so even the fully refined
+pressure arm stopped at the original dam face (`maximumX = 9`). Redistancing
+the live liquid rows cannot create a value in a missing dry row.
+
+Factor 1 now uses its sparse B4 interface band as the production authority.
+That band is still at octree resolution and local to the interface, but it
+includes the positive-air halo required for outward semi-Lagrangian transport.
+The liquid-row-only directory remains an explicit diagnostic path rather than
+being selected merely because the factor is one.
+
+At 44 steps (`t = 0.176 s`) on Dawn/Metal, maximum leaf 32 and band reach 3:
+
+| Metric | Zero refinement | Adaptive default |
+| --- | ---: | ---: |
+| Structural leaves | 4,096 | 3,872 |
+| Maximum wet X / Z | 11 / 11 | 11 / 11 |
+| Mass beyond original X=9 face | 106.108258 | 106.599017 |
+| Field MAE / wet IoU | - | 0.0003399 / 1.0 |
+| Centroid distance | - | 0.00304 cells |
+| Clean wall time | 113.964 ms/step | 111.423 ms/step |
+
+The gated and ungated adaptive fields are bit-identical. The benchmark pins
+the zero-refinement comparison (MAE below 0.001, identical wet support and
+front extent, centroid below 0.01 cells, leading mass within 1%, fewer leaves,
+and no more than 10% wall-clock slowdown).
+
+This endpoint comparison is not a license to replace the paper's factor-4
+surface representation with pressure rows. Dawn startup measurements expose
+the distinction: after two 4 ms steps, the factor-1 band has only 0.112
+cell-equivalents beyond the authored face in the zero-refinement arm and has
+not resolved x=10, whereas factor 4 resolves x=10 and 18.914 cell-equivalents.
+The factor-4 adaptive field remains within 0.00035 MAE of zero-refinement
+pressure. Section 5 deliberately separates the adaptive background pressure
+octree from a higher-resolution sparse interface grid; dry pressure cells may
+coarsen without reducing that interface resolution. Factor 4 therefore
+remains the product/paper default, while factor 1 is a lower-resolution
+surface experiment and liquid-row-only transport is diagnostic-only.
 
 ## Current conclusion
 

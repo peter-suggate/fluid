@@ -9,6 +9,7 @@ import type { SparseVoxelRenderSource, SparseVoxelSceneRenderSource } from "../w
 import type { WebGPUFineLevelSetBrickSource } from "../webgpu-octree-fine-levelset-bricks";
 import type { GPUInitializationPhase } from "../gpu-initialization";
 import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
+import type { CoarseLevelSetConsumerSource } from "../octree-consumer-sampling";
 
 /**
  * Method plugin contract.
@@ -93,6 +94,8 @@ export interface GPUSolverInstance {
   readonly initialSparseAuthorityReady?: boolean;
   /** Row-independent, globally indexed sparse fine level-set bricks. */
   readonly globalFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
+  /** Compact moving surface used when coarse-1 deliberately has no fine band. */
+  readonly coarseLevelSetSource?: CoarseLevelSetConsumerSource;
   /** Diagnostic-only; never participates in authority selection. */
   readonly globalFineTransportControl?: GPUBuffer;
   readonly globalFineRedistanceControl?: GPUBuffer;

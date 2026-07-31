@@ -1644,15 +1644,19 @@ fn resolveDescriptor(descriptor:u32)->vec2u{let boundary=(descriptor>>24u)&63u;l
 // no catalog case or extension layer, so resolveAirSupportTopology persists
 // reason/detail in those two otherwise-unused words before failing closed.
 // reason 1 = malformed owner, 2 = ratio beyond 2:1, 3 = mixed finer/coarser.
-fn descriptorForIdentity(origin:vec3u,size:u32)->vec3u{var sizes:array<u32,18>;var boundary=0u;var finer=false;var coarser=false;
+fn descriptorForIdentity(origin:vec3u,size:u32)->vec3u{var sizes:array<u32,18>;var finer=false;var coarser=false;
   var firstFiner=31u;var firstCoarser=31u;
   for(var bit=0u;bit<18u;bit+=1u){let direction=DIRECTIONS[bit];var probe=vec3i(0);
     for(var axis=0u;axis<3u;axis+=1u){probe[axis]=select(select(i32(origin[axis]+size/2u),i32(origin[axis]+size),direction[axis]>0),i32(origin[axis])-1,direction[axis]<0);}
-    if(any(probe<vec3i(0))||any(probe>=vec3i(p.dimensions))){if(bit<6u){boundary|=1u<<bit;}sizes[bit]=size;continue;}
+    // Air rows use the interior Delaunay fan and apply authored wall/open
+    // behavior while constructing ordinary faces below. Encoding a clipped
+    // boundary case here asks the liquid power catalog for positive-air-only
+    // transition combinations which it intentionally does not contain.
+    if(any(probe<vec3i(0))||any(probe>=vec3i(p.dimensions))){sizes[bit]=size;continue;}
     let owner=octreeOwnerPageLookup(probe);if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){return vec3u(INVALID,1u,(bit&31u)|((owner.size&63u)<<8u)|((owner.status&0xffffu)<<16u));}
     if(owner.size*2u<size||owner.size>size*2u){return vec3u(INVALID,2u,(bit&31u)|((owner.size&63u)<<8u)|((size&63u)<<16u));}
     sizes[bit]=owner.size;if(owner.size<size){finer=true;firstFiner=min(firstFiner,bit);}if(owner.size>size){coarser=true;firstCoarser=min(firstCoarser,bit);}}
-  if(finer&&coarser){return vec3u(INVALID,3u,(firstFiner&31u)|((firstCoarser&31u)<<5u));}var descriptor=boundary<<24u;if(!coarser){for(var bit=0u;bit<18u;bit+=1u){if(sizes[bit]==size){descriptor|=1u<<bit;}}}
+  if(finer&&coarser){return vec3u(INVALID,3u,(firstFiner&31u)|((firstCoarser&31u)<<5u));}var descriptor=0u;if(!coarser){for(var bit=0u;bit<18u;bit+=1u){if(sizes[bit]==size){descriptor|=1u<<bit;}}}
   else{let child=(origin/vec3u(size))&vec3u(1u);descriptor|=0x80000000u|child.x|(child.y<<1u)|(child.z<<2u);
     let outward=vec3i(select(-1,1,child.x==1u),select(-1,1,child.y==1u),select(-1,1,child.z==1u));
     let wanted=array<vec3i,6>(vec3i(outward.x,0,0),vec3i(0,outward.y,0),vec3i(0,0,outward.z),

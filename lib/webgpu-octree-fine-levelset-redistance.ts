@@ -368,6 +368,14 @@ export class WebGPUFineLevelSetRedistance {
    * group per immutable pipeline instead of rebuilding 12–14 auto-layout
    * groups on the host for every accepted simulation step. */
   private readonly bindGroups = new Map<GPUComputePipeline, Map<string, GPUBindGroup>>();
+  private lastEncodedStridesValue: readonly number[] = [];
+
+  /**
+   * The JFA ladder the most recent encode emitted, warm/cold arguments already
+   * applied. Empty until the first encode. Diagnostic-only: no scheduling
+   * decision reads it.
+   */
+  get lastEncodedStrides(): readonly number[] { return this.lastEncodedStridesValue; }
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
     /** Exact delta/support publication produced by the topology transaction. */
@@ -515,6 +523,10 @@ export class WebGPUFineLevelSetRedistance {
     const strides = planFineLevelSetJFAStrides(
       bandCells, maximumDisplacementFineCells, warmStart ? 2 : 5);
     if (strides.length > FINE_LEVELSET_JFA_MAX_PASSES) throw new RangeError("Fine JFA pass budget exceeded");
+    // Retained so provenance diagnostics compare the observed hops against the
+    // ladder this encode actually emitted, rather than against a re-derivation
+    // that could drift from the warm/cold arguments chosen here.
+    this.lastEncodedStridesValue = strides;
     // The fixed B4 lookup and support directory cover radius-one and
     // radius-two page footprints. Build recurring target closures for that
     // common schedule; still-wider transforms retain the support-wide oracle.

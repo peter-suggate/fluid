@@ -61,8 +61,10 @@ test("fine-to-coarse restriction rejects an unpublished or stale fine source", (
     /fnpublishRestriction[\s\S]*if\(control\.flags==0u\)[\s\S]*else\{control\.count=0xffffffffu/,
     "a rejected fine source must poison the downstream coarse correction rather than publish an empty correction");
   assert.match(shader,
-    /control\.rowCount=min\(rowCountSource\[0\],p\.rowCapacity\);if\(control\.rowCount<arrayLength\(&rowOffsets\)\)\{rowOffsets\[control\.rowCount\]=control\.rowCount;\}else\{control\.flags\|=CAPACITY;\}/,
-    "the CSR sentinel must terminate the live row prefix consumed by the coarse correction");
+    /letpublishedRows=select\(0u,rowCountSource\[p\.rowCountOffsetWords\],p\.rowCountOffsetWords<arrayLength\(&rowCountSource\)\);control\.rowCount=min\(publishedRows,p\.rowCapacity\);if\(control\.rowCount<arrayLength\(&rowOffsets\)\)\{rowOffsets\[control\.rowCount\]=control\.rowCount;\}else\{control\.flags\|=CAPACITY;\}/,
+    "the CSR sentinel must terminate the accepted epoch's live row prefix");
+  assert.match(encode, /u\[18\]=rowCountOffsetWords/,
+    "the caller-selected accepted-control word must reach the GPU restriction parameters");
   assert.doesNotMatch(shader, /rowOffsets\[p\.rowCapacity\]=p\.rowCapacity/,
     "allocation capacity is not the terminal offset when fewer rows are live");
   assert.match(encode, /prepare:\[0,2,7,9,13,14,15\]/,

@@ -74,6 +74,7 @@ export class WebGPUFineToCoarseLevelSet {
   private readonly pipelines: Record<string, GPUComputePipeline>;
   private cachedBindings?: {
     readonly fineParams: GPUBuffer; readonly headers: GPUBuffer; readonly rowCount: GPUBuffer;
+    readonly rowCountOffsetWords: number;
     readonly topologyControl: GPUBuffer; readonly groups: Readonly<Record<string, GPUBindGroup>>;
   };
   private destroyed = false;
@@ -133,6 +134,9 @@ export class WebGPUFineToCoarseLevelSet {
   /** Record exact restriction into the caller's publication pass. */
   encode(broker: PassBroker, fine: WebGPUFineLevelSetBrickSource, input: {
     headers: GPUBuffer; rowCount: GPUBuffer;
+    /** Word containing the row count in `rowCount`. The accepted structured
+     * control publishes it at word two; legacy compact-count buffers use zero. */
+    rowCountOffsetWords?: number;
     /** Control for the topology transaction that produced `fine`. */
     topologyControl: GPUBuffer;
     /** Accept a same-command, validated fine candidate whose commit is deliberately
@@ -150,11 +154,17 @@ export class WebGPUFineToCoarseLevelSet {
     f.set(fine.plan.domainOrigin, 8); f[11] = fine.plan.fineCellWidth;
     u.set([fine.plan.maximumResidentBricks, fine.generation, this.plan.rowCapacity, sampleCount,
       this.plan.rowCapacity, input.allowValidatedProvisional ? 1 : 0], 12);
+    const rowCountOffsetWords = input.rowCountOffsetWords ?? 0;
+    if (!Number.isSafeInteger(rowCountOffsetWords) || rowCountOffsetWords < 0) {
+      throw new RangeError("Fine-to-coarse row-count word offset must be non-negative");
+    }
+    u[18] = rowCountOffsetWords;
     u.set(input.dimensions, 20); u[23] = input.maximumLeafSize; f[24] = input.physicalCellSize;
     this.device.queue.writeBuffer(this.params, 0, data);
     const cached = this.cachedBindings;
     let groups = cached?.fineParams === fine.params && cached.headers === input.headers
       && cached.rowCount === input.rowCount && cached.topologyControl === input.topologyControl
+      && cached.rowCountOffsetWords === rowCountOffsetWords
       ? cached.groups : undefined;
     if (!groups) {
       const buffers = new Map<number, GPUBuffer>([[0, this.params], [1, fine.metadata], [2, fine.worklist],
@@ -172,7 +182,8 @@ export class WebGPUFineToCoarseLevelSet {
         return [name, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
           entries: bindings.map((binding) => ({ binding, resource: { buffer: buffers.get(binding)! } })) })];
       })));
-      this.cachedBindings = { fineParams: fine.params, headers: input.headers, rowCount: input.rowCount,
+      this.cachedBindings = { fineParams: fine.params, headers: input.headers,
+        rowCount: input.rowCount, rowCountOffsetWords,
         topologyControl: input.topologyControl, groups };
     }
     const run = (name: string) => { const pipeline = this.pipelines[name]!;
@@ -204,7 +215,8 @@ export class WebGPUFineToCoarseLevelSet {
 export const fineToCoarseLevelSetWGSL = /* wgsl */ `
 ${fineLevelSetLinearWorkgroupWGSL}
 struct P{brickDims:vec3u,brickResolution:u32,sampleDims:vec3u,samplesPerBrick:u32,origin:vec3f,fineWidth:f32,
- pageCapacity:u32,generation:u32,rowCapacity:u32,sampleCapacity:u32,directoryCapacity:u32,reserved:u32,dimensions:vec3u,maxLeaf:u32,cellWidth:f32}
+ pageCapacity:u32,generation:u32,rowCapacity:u32,sampleCapacity:u32,directoryCapacity:u32,reserved:u32,
+ rowCountOffsetWords:u32,pad0:u32,dimensions:vec3u,maxLeaf:u32,cellWidth:f32}
 struct H{cell:u32,a:u32,b:u32,size:u32,x:f32,y:f32,z:u32,w:u32,g:vec4f}
 struct C{count:u32,maximumPerRow:u32,flags:u32,unacceptedRows:u32,rowCount:u32,valid:u32,firstUnownedLiquid:u32,maximumUnownedLiquidMagnitude:u32}
 struct Aggregate{centerPhi:f32,minimumPhi:f32,maximumPhi:f32,valid:u32,sampleCount:u32,error:u32,pad:array<u32,6>}
@@ -274,7 +286,7 @@ var<workgroup> rowCounts:array<u32,64>;var<workgroup> rowErrors:array<u32,64>;
 var<workgroup> rowMasks:array<u32,64>;var<workgroup> rowCombinedMasks:array<u32,64>;var<workgroup> rowCorners:array<f32,512>;
 var<workgroup> diagnosticCounts:array<u32,64>;var<workgroup> diagnosticFirst:array<u32,64>;
 var<workgroup> diagnosticMagnitude:array<f32,64>;var<workgroup> diagnosticErrors:array<u32,64>;
-@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i==0u){control.count=0u;control.maximumPerRow=1u;control.flags=0u;control.unacceptedRows=0u;control.rowCount=min(rowCountSource[0],p.rowCapacity);if(control.rowCount<arrayLength(&rowOffsets)){rowOffsets[control.rowCount]=control.rowCount;}else{control.flags|=CAPACITY;}control.valid=0u;control.firstUnownedLiquid=INVALID;control.maximumUnownedLiquidMagnitude=0u;var topologyReady=false;if(arrayLength(&topologyControl)>=8u){let committed=topologyControl[4]==1u;let provisional=p.reserved!=0u&&topologyControl[3]>0u&&topologyControl[4]==0u;
+@compute @workgroup_size(64)fn prepareRestriction(@builtin(global_invocation_id)g:vec3u){let i=g.x;if(i==0u){control.count=0u;control.maximumPerRow=1u;control.flags=0u;control.unacceptedRows=0u;let publishedRows=select(0u,rowCountSource[p.rowCountOffsetWords],p.rowCountOffsetWords<arrayLength(&rowCountSource));control.rowCount=min(publishedRows,p.rowCapacity);if(control.rowCount<arrayLength(&rowOffsets)){rowOffsets[control.rowCount]=control.rowCount;}else{control.flags|=CAPACITY;}control.valid=0u;control.firstUnownedLiquid=INVALID;control.maximumUnownedLiquidMagnitude=0u;var topologyReady=false;if(arrayLength(&topologyControl)>=8u){let committed=topologyControl[4]==1u;let provisional=p.reserved!=0u&&topologyControl[3]>0u&&topologyControl[4]==0u;
  // A downstream-rejected target is replaced in-place by the prior complete
  // fine publication and retagged for this generation. Restricting that exact
  // rollback field is required to republish the paper's separate coarse

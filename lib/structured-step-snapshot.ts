@@ -58,6 +58,9 @@ export interface StructuredStepSnapshotStamp {
   readonly dt_s: number;
   readonly submittedTime_s: number;
   readonly hostFineGeneration: number;
+  /** Coarse-1 stores its compact-directory header in the fixed scalar slot;
+   * it never allocates a fine worklist merely to satisfy diagnostics. */
+  readonly surfaceKind?: "fine" | "coarse";
 }
 
 export interface StructuredStepSnapshotRecord {
@@ -224,10 +227,12 @@ export function structuredAuthorityStepHealth(
 ): StructuredAuthorityStepHealth {
   const { structured, boundary, fineHeader } = record.snapshot;
   const fine = unpackFineWorklistHeader(fineHeader);
+  const coarseOnly = record.stamp.surfaceKind === "coarse";
   const epochState = unpackTopologyEpochState(record.snapshot.topologyEpochState);
   const airSupport = unpackAirSupportFailure(record.snapshot.airSupportFailure);
   const governor = unpackFineTransportGovernor(record.snapshot.fineTransportGovernor);
-  const publishedFineGeneration = fine.generation;
+  const publishedFineGeneration = coarseOnly
+    ? Number(fineHeader[1] ?? 0) >>> 0 : fine.generation;
   const velocityValid = structured.flags === 0 && structured.rowCount > 0
     && structured.epoch > 0 && structured.activeBank <= 1;
   const boundaryValid = boundary.flags === 0
@@ -247,8 +252,8 @@ export function structuredAuthorityStepHealth(
     velocityValid,
     boundaryValid,
     receiptValid: velocityValid && boundaryValid,
-    activeFineBricks: fine.capacityOverflow ? 0 : fine.activeBricks,
-    fineBandCapacityOverflow: fine.capacityOverflow,
+    activeFineBricks: coarseOnly ? 0 : fine.capacityOverflow ? 0 : fine.activeBricks,
+    fineBandCapacityOverflow: coarseOnly ? false : fine.capacityOverflow,
     topologyEpochError: epochState.error,
     topologyFlipReady: epochState.flipReady,
     // An absent segment must never read as "healthy zero": the producer only
@@ -293,6 +298,7 @@ export function structuredStepWorkObservation(
   const has = (segment: StructuredAuditRecordSegment) =>
     record.presentSegments.includes(segment);
   const fine = unpackFineWorklistHeader(record.snapshot.fineHeader);
+  const coarseOnly = record.stamp.surfaceKind === "coarse";
   const epochState = unpackTopologyEpochState(record.snapshot.topologyEpochState);
   const airSupport = unpackAirSupportFailure(record.snapshot.airSupportFailure);
   const governor = unpackFineTransportGovernor(record.snapshot.fineTransportGovernor);
@@ -312,9 +318,9 @@ export function structuredStepWorkObservation(
         .map((level) => level.dirtyFlags)
       : undefined,
     airSupportErrorFlags: has("airSupportFailure") ? airSupport.errorFlags : undefined,
-    fineActiveBricks: has("fine")
+    fineActiveBricks: has("fine") && !coarseOnly
       ? (fine.capacityOverflow ? 0 : fine.activeBricks) : undefined,
-    fineBandCapacityOverflow: has("fine") && fine.capacityOverflow,
+    fineBandCapacityOverflow: has("fine") && !coarseOnly && fine.capacityOverflow,
     transportScheduleValid: has("fineTransportGovernor")
       ? governor.scheduleValid : undefined,
     transportActiveSubsteps: has("fineTransportGovernor")

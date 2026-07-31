@@ -84,6 +84,7 @@ import {
 } from "./webgpu-octree-work-accounting";
 import { WebGPUOctreeCoarseLevelSet } from "./webgpu-octree-coarse-levelset";
 import { WebGPUOctreePowerCoarseLevelSet } from "./webgpu-octree-power-coarse-levelset";
+import { WebGPUOctreeCoarseSummary } from "./webgpu-octree-coarse-summary";
 import { WebGPUFineToCoarseLevelSet } from "./webgpu-octree-fine-to-coarse-levelset";
 import { planFineLevelSetBricks } from "./octree-fine-levelset-bricks";
 import {
@@ -341,7 +342,7 @@ export function octreeFluidGatedBoundaryWouldRefine(input: {
 
 export interface OctreeProjectionOptions {
   maximumLeafSize?: 2 | 4 | 8 | 16 | 32;
-  /** Authored opt-in for the experimental liquid-proximity boundary gate. */
+  /** Default liquid-proximity boundary gate; false selects the unconditional control. */
   fluidGatedBoundaryRefinement?: boolean;
   /** Renderer-owned refinement of authored-environment bricks. */
   environmentBrickRefinementLevels?: number;
@@ -365,6 +366,9 @@ export interface OctreeProjectionOptions {
   fineLevelSetBandCells?: number;
   /** Authoritative domain-global Section 5 narrow-band factor. */
   globalFineLevelSetFactor?: 1 | 4 | 8;
+  /** Diagnostic direct-row surface transport. Production factor one retains
+   * a sparse same-resolution band so the interface owns an air-side halo. */
+  coarseOnlySurfaceTracking?: boolean;
   /** Explicit physical brick cap for the global factor-1/factor-4/factor-8 publication. */
   globalFineLevelSetMaximumBricks?: number;
   /** Advanced safety override for the compact pressure-row arena. */
@@ -612,6 +616,11 @@ export interface OctreeTopologyLeafCensus {
   readonly leafCountsBySize: Readonly<Record<string, number>>;
   /** Coarse leaf origins per finest-grid Y layer; diagnostic spatial profile. */
   readonly coarseLeafCountsByOriginY: readonly number[];
+  /** Leaf-size histograms intersecting each three-cell world-boundary strip. */
+  readonly boundaryStripLeafCountsBySize: Readonly<Record<
+    "xLow" | "xHigh" | "yLow" | "yHigh" | "zLow" | "zHigh",
+    Readonly<Record<string, number>>
+  >>;
 }
 
 export function censusOctreeTopologyLeaves(
@@ -624,6 +633,15 @@ export function censusOctreeTopologyLeaves(
   }
   const counts = new Map<number, number>();
   const coarseLeafCountsByOriginY = new Array<number>(plan.dimensions[1]).fill(0);
+  const boundaryCounts = {
+    xLow: new Map<number, number>(), xHigh: new Map<number, number>(),
+    yLow: new Map<number, number>(), yHigh: new Map<number, number>(),
+    zLow: new Map<number, number>(), zHigh: new Map<number, number>(),
+  };
+  const addBoundary = (face: keyof typeof boundaryCounts, size: number) => {
+    const faceCounts = boundaryCounts[face];
+    faceCounts.set(size, (faceCounts.get(size) ?? 0) + 1);
+  };
   const identities = new Set<string>();
   let representedCells = 0;
   for (let z = 0; z < plan.dimensions[2]; z += 1) {
@@ -639,6 +657,14 @@ export function censusOctreeTopologyLeaves(
         identities.add(identity);
         counts.set(owner.size, (counts.get(owner.size) ?? 0) + 1);
         if (owner.size > 1) coarseLeafCountsByOriginY[owner.origin[1]]! += 1;
+        const high = owner.origin.map((coordinate) => coordinate + owner.size);
+        const strip = OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS;
+        if (owner.origin[0] < strip) addBoundary("xLow", owner.size);
+        if (high[0]! > plan.dimensions[0] - strip) addBoundary("xHigh", owner.size);
+        if (owner.origin[1] < strip) addBoundary("yLow", owner.size);
+        if (high[1]! > plan.dimensions[1] - strip) addBoundary("yHigh", owner.size);
+        if (owner.origin[2] < strip) addBoundary("zLow", owner.size);
+        if (high[2]! > plan.dimensions[2] - strip) addBoundary("zHigh", owner.size);
         representedCells += owner.size ** 3;
       }
     }
@@ -648,6 +674,13 @@ export function censusOctreeTopologyLeaves(
       .sort(([left], [right]) => left - right)
       .map(([size, count]) => [String(size), count]),
   );
+  const boundaryStripLeafCountsBySize = Object.fromEntries(
+    Object.entries(boundaryCounts).map(([face, faceCounts]) => [face,
+      Object.freeze(Object.fromEntries([...faceCounts.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([size, count]) => [String(size), count]))),
+    ]),
+  ) as OctreeTopologyLeafCensus["boundaryStripLeafCountsBySize"];
   return Object.freeze({
     generation: Number(ownerWords[7] ?? 0) >>> 0,
     residentOwnerPages: Number(ownerWords[1] ?? 0) >>> 0,
@@ -655,6 +688,7 @@ export function censusOctreeTopologyLeaves(
     representedCells,
     leafCountsBySize: Object.freeze(leafCountsBySize),
     coarseLeafCountsByOriginY: Object.freeze(coarseLeafCountsByOriginY),
+    boundaryStripLeafCountsBySize: Object.freeze(boundaryStripLeafCountsBySize),
   });
 }
 
@@ -1364,6 +1398,7 @@ export class WebGPUOctreeProjection {
   private globalFineTransportB?: WebGPUFineLevelSetTransport;
   private lastGlobalFineTransport?: WebGPUFineLevelSetTransport;
   private readonly globalFineSummaries?: WebGPUFineLevelSetSummaries;
+  private coarseOnlySummary?: WebGPUOctreeCoarseSummary;
   private readonly unpublishedFineSummaryDirectory: GPUBuffer;
   private surfaceStateAccountingBytes = 0;
   private powerCoarseLevelSet?: WebGPUOctreeCoarseLevelSet;
@@ -1508,6 +1543,9 @@ export class WebGPUOctreeProjection {
   private readonly interfaceRefinementBandCells: number;
   private readonly surfaceRefinementGradingLayers: number;
   private readonly fineLevelSetBandCells: number;
+  /** Explicit diagnostic liquid-row-only authority. Surface factor one is
+   * normally a sparse B4 interface band with positive-air support. */
+  private readonly coarseOnlySurfaceTracking: boolean;
   private pipelinedMGPCG!: WebGPUOctreePipelinedMGPCG;
   /**
    * Single-dispatch executor for small domains (Part D). Present only when the
@@ -1607,6 +1645,10 @@ export class WebGPUOctreeProjection {
     // follows the master band exactly.
     this.fineLevelSetBandCells = Math.max(0, Math.min(32,
       Math.round(options.fineLevelSetBandCells ?? this.interfaceRefinementBandCells)));
+    // Factor one is represented only by compact octree rows. Enforce this at
+    // the allocation boundary so no caller or authored scene can accidentally
+    // pay for a redundant same-resolution fine grid.
+    this.coarseOnlySurfaceTracking = options.globalFineLevelSetFactor === 1;
     // Analytic dam/tank scenes can construct compact topology and first fine seeds
     // phi without allocating or uploading a box-sized bootstrap texture.
     // Explicitly seeded brick geometry is not one of those closed-form shapes,
@@ -2115,6 +2157,7 @@ export class WebGPUOctreeProjection {
       this.workAccounting.setAuthorityBytes("fine-seed-adapter",
         this.fineSeedAdapter.plan.allocatedBytes);
         const globalFineFactor = options.globalFineLevelSetFactor ?? 4;
+        if (!this.coarseOnlySurfaceTracking) {
           if (!this.fineSeedAdapter) {
             throw new RangeError("Global fine level-set authority requires compact fine-seed leaves");
           }
@@ -2212,6 +2255,7 @@ export class WebGPUOctreeProjection {
           this.workAccounting.setAuthorityBytes("fine-page-pool", allocated);
           this.info.globalFineLevelSetResidentBrickCapacity = globalPlan.maximumResidentBricks;
           this.info.globalFineLevelSetLogicalBrickCount = globalPlan.logicalBrickCount;
+        }
     this.sparseBrickWorldAccountedBytes = this.sparseBrickWorld?.allocatedBytes ?? 0;
     if (!deferPipelineCompilation) this.createPipelinesSync();
     this.writeParams();
@@ -2274,7 +2318,8 @@ export class WebGPUOctreeProjection {
       denseSolidField: this.hasDenseSolidCells ? 1 : 0,
       fluidGatedBoundaryRefinement: this.fluidGatedBoundaryRefinement ? 1 : 0,
       topologyCandidateView: candidateTopology ? 1 : 0,
-      fineSummaryFactor: this.globalFineLevelSet?.plan.fineFactor ?? 4,
+      fineSummaryFactor: this.coarseOnlySurfaceTracking
+        ? 1 : this.globalFineLevelSet?.plan.fineFactor ?? 4,
       structuralDescriptorDelta: octreePowerStructuralDeltaRequested() ? 1 : 0,
     };
   }
@@ -2692,9 +2737,13 @@ export class WebGPUOctreeProjection {
       candidateHistory: this.candidatePressureHistory,
       rowCapacity,
     });
-    const factorOneAggregate = this.globalFineLevelSet?.plan.fineFactor === 1
-      && (typeof process === "undefined"
-        || process.env.FLUID_OCTREE_GEOMETRIC_AGGREGATE_MG !== "0");
+    // Coarse-only was stable before the later dense aggregate experiment.
+    // Keep that experiment opt-in: its row-owner shadow can reject a live
+    // adaptive generation (stage 105), which stops pressure entirely and is
+    // the observed energy-loss regression.
+    const factorOneAggregate = this.coarseOnlySurfaceTracking
+      && typeof process !== "undefined"
+      && process.env.FLUID_OCTREE_GEOMETRIC_AGGREGATE_MG === "1";
     // Degree four was introduced with the factor-one aggregate experiment,
     // but it changes the mini-dam impulse response and damps the late wall
     // climb. Preserve the established factor-one dynamics by default; degree
@@ -2743,7 +2792,7 @@ export class WebGPUOctreeProjection {
       maximumIterations: this.solveTailPolicy.encodedOuterIterations,
       hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
       factorOneCombinedReductionDrains:
-        this.globalFineLevelSet?.plan.fineFactor === 1
+        factorOneAggregate
         && octreePipelinedMGPCGCombinedReductionDrainsEnabled(),
     });
     // Part D: the same iteration, one dispatch, one 256-lane workgroup. The
@@ -2757,7 +2806,7 @@ export class WebGPUOctreeProjection {
     // iterations on the same rows. Keep factor 4/8 on their existing
     // persistent path and use the robust representation for the coarse-only
     // authority.
-    if (this.globalFineLevelSet?.plan.fineFactor !== 1
+    if (!this.coarseOnlySurfaceTracking
       && WebGPUOctreePersistentMGPCG.selects(rowCapacity)) {
       const smootherDegree = this.firstOrderVCycle.smootherContract?.degree;
       if (smootherDegree === undefined) {
@@ -2798,7 +2847,28 @@ export class WebGPUOctreeProjection {
       this.device, this.powerCoarseLevelSet, this.powerTopology.source,
       structured.plan.slotCapacity * 16,
       airSupportLayout,
+      this.coarseOnlySurfaceTracking ? airSupportLayout.ownerDirectoryCellCapacity : 0,
     );
+    if (this.coarseOnlySurfaceTracking) {
+      const coarseCell = {
+        x: this.scene.container.width_m / this.dims.nx,
+        y: this.scene.container.height_m / this.dims.ny,
+        z: this.scene.container.depth_m / this.dims.nz,
+      };
+      this.coarseOnlySummary = new WebGPUOctreeCoarseSummary(this.device,
+        this.powerCoarseLevelSetSchedule.sampleSource,
+        [this.dims.nx, this.dims.ny, this.dims.nz], {
+          arena: this.powerCoarseLevelSetSchedule.selectorRows,
+          layout: airSupportLayout,
+          rowVelocities: structuredSource.rowVelocities,
+          initialPhi: initialOctreeLevelSet(this.scene, this.dims, coarseCell),
+          physicalCellSize: coarseCell.x,
+          timestep_s: this.scene.numerics.maxDt_s,
+        });
+      this.info.allocatedBytes += this.coarseOnlySummary.plan.allocatedBytes;
+      this.workAccounting.setAuthorityBytes("coarse-summary",
+        this.coarseOnlySummary.plan.allocatedBytes);
+    }
     const coarseDirectory = this.powerCoarseLevelSetSchedule.sampleSource.directory;
     // Binding 15 is the compact coarse-phi directory for the mandatory power
     // topology/pressure authority.
@@ -2812,15 +2882,17 @@ export class WebGPUOctreeProjection {
       fromB: this.createProjectionGroup(this.pressureB, this.candidatePressure, coarseDirectory,
         this.candidateLeafHeaders),
     };
+    const pressureSummaryDirectory = this.globalFineSummaries?.directory
+      ?? this.coarseOnlySummary?.directory ?? this.unpublishedFineSummaryDirectory;
     this.fineSummarySizingGroup = this.createProjectionGroup(
-      this.globalFineSummaries?.directory ?? this.unpublishedFineSummaryDirectory, this.pressureB,
+      pressureSummaryDirectory, this.pressureB,
       coarseDirectory);
     // Structural dirtiness compares the current pressure-owner decisions, not
     // the fine payload transaction. This stable group keeps the fine summary,
     // persistent topology-tile membership, and compact coarse authority
     // together across A/B fine generations.
     this.topologyDecisionGroup = this.createProjectionGroup(
-      this.globalFineSummaries?.directory ?? this.unpublishedFineSummaryDirectory,
+      pressureSummaryDirectory,
       this.topologyResidency.topologyTileStateBuffer,
       coarseDirectory,
     );
@@ -3589,7 +3661,8 @@ export class WebGPUOctreeProjection {
 
   private topologyMaintenanceFrozen(): boolean {
     const freezeAfter = octreeFreezeTopologyAfter();
-    return freezeAfter !== undefined && this.globalFineBootstrapped
+    return freezeAfter !== undefined
+      && (this.globalFineBootstrapped || this.powerCoarseLevelSetBootstrapped)
       && this.activePowerGeneration >= freezeAfter;
   }
 
@@ -3684,7 +3757,7 @@ export class WebGPUOctreeProjection {
     // A pending target is not redistanced/committed yet. The ready flip may
     // only demand support from the currently settled fine publication.
     const fine = this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB;
-    if (!descriptor || !topology || !structured || !boundary || !epoch || !fine) {
+    if (!descriptor || !topology || !structured || !boundary || !epoch) {
       throw new Error("Inactive topology epoch requires every coupled power authority");
     }
     const generation = this.candidatePowerGeneration;
@@ -3745,7 +3818,7 @@ export class WebGPUOctreeProjection {
       const freezeAfter = octreeFreezeTopologyAfter();
       if (freezeAfter !== undefined && this.activePowerGeneration >= freezeAfter) return;
     }
-    if (!descriptor || !topology || !structured || !boundary || !epoch || !fine
+    if (!descriptor || !topology || !structured || !boundary || !epoch
       || this.candidatePowerGeneration === 0) {
       throw new Error("Ready topology flip requires a complete inactive coupled candidate");
     }
@@ -3946,7 +4019,7 @@ export class WebGPUOctreeProjection {
     const fullSolveBudget = this.pipelinedMGPCG.iterationBudget;
     const tailSelection = selectOctreeFactorOneEncodedSolveTail({
       enabled: octreeFactorOnePredictedSolveTailEnabled(),
-      factorOne: this.globalFineLevelSet?.plan.fineFactor === 1,
+      factorOne: this.coarseOnlySurfaceTracking,
       nextStep: options?.step ?? 0,
       fullEncodedOuterIterations: fullSolveBudget,
       observation: options?.step === undefined
@@ -3986,7 +4059,7 @@ export class WebGPUOctreeProjection {
     // Part D executor selection. It lives here, in the projection host, and
     // never inside the hierarchical executor's own encode — that encode is the
     // single-schedule authority and a test stringifies it to prove it.
-    const persistent = this.globalFineLevelSet?.plan.fineFactor !== 1
+    const persistent = !this.coarseOnlySurfaceTracking
       && octreePersistentMGPCGEnabled() ? this.persistentMGPCG : undefined;
     if (persistent) {
       persistent.encodeSolve(solveBroker, {
@@ -4031,7 +4104,8 @@ export class WebGPUOctreeProjection {
     }
     splitProductionPhase(undefined, "structuredProjection");
     encoder = this.encodePendingFineSettlement(encoder, options?.productionBoundary);
-    if (this.powerTimestep_s > 0 && !this.topologyMaintenanceFrozen()) {
+    if (!this.coarseOnlySurfaceTracking
+      && this.powerTimestep_s > 0 && !this.topologyMaintenanceFrozen()) {
       if (!this.airVelocitySupport || !this.globalFineBootstrapped) {
         throw new Error("Live Section 5 support refresh requires the settled fine generation");
       }
@@ -4076,7 +4150,12 @@ export class WebGPUOctreeProjection {
     }
     const correction = this.fineToPowerCoarseLevelSet.encode(broker, fine, {
       headers: this.leafHeaders,
-      rowCount: this.compaction,
+      // Adaptive candidate construction updates `compaction` before the
+      // accepted row headers/geometry flip. Restrict the transported fine
+      // generation over the immutable accepted structured epoch instead of
+      // mixing candidate N+1's count with accepted N's row identities.
+      rowCount: structured.control,
+      rowCountOffsetWords: 2,
       topologyControl: topology.control,
       dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
       physicalCellSize: this.scene.container.width_m / this.dims.nx,
@@ -4086,7 +4165,7 @@ export class WebGPUOctreeProjection {
     this.powerCoarseLevelSetSchedule.encode(broker, {
       headers: this.leafHeaders,
       structured,
-      rowCount: this.compaction,
+      rowCount: { buffer: structured.control, offset: 2 * 4, size: 4 },
       fineCorrection: {
         rowOffsets: correction.rowOffsets,
         contributions: correction.contributions,
@@ -4259,6 +4338,7 @@ export class WebGPUOctreeProjection {
             maximumLeafSize: this.maxLeafSize,
             generation: this.powerCoarseLevelSetGeneration & 0x3fff_ffff,
           });
+          this.coarseOnlySummary?.encode(preparationBroker);
           this.powerCoarseLevelSetBootstrapped = true;
           coarseBootstrappedThisStep = true;
         }
@@ -4416,6 +4496,47 @@ export class WebGPUOctreeProjection {
           if (productionBoundary) {
             encoder = productionBoundary("structuredProjectionTail", encoder);
           }
+        }
+      } else if (this.coarseOnlySurfaceTracking && this.powerCoarseLevelSetSchedule
+        && structuredSource) {
+        // Historical coarse-only mode: compact octree phi is the sole moving
+        // surface authority. Advance it directly; no global fine topology,
+        // page publication, transport, redistance, summary, restriction or
+        // volume-correction object exists in this configuration.
+        if (!coarseBootstrappedThisStep && this.powerCoarseLevelSetBootstrapped) {
+          this.powerCoarseLevelSetGeneration =
+            (this.powerCoarseLevelSetGeneration + 1) & 0x3fff_ffff;
+          if (this.powerCoarseLevelSetGeneration === 0) {
+            this.powerCoarseLevelSetGeneration = 1;
+          }
+          this.powerCoarseLevelSetSchedule.encode(preparationBroker, {
+            headers: this.leafHeaders,
+            structured: structuredSource,
+            rowCount: this.compaction,
+          }, {
+            dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
+            physicalCellSize: this.scene.container.width_m / this.dims.nx,
+            dt: dt_s,
+            maximumLeafSize: this.maxLeafSize,
+            generation: this.powerCoarseLevelSetGeneration,
+          });
+          this.coarseOnlySummary?.encode(preparationBroker);
+        }
+        encoder = preparationBroker.commandEncoder();
+        if (!this.airVelocitySupport || this.activePowerGeneration === 0) {
+          throw new Error("Coarse-only surface tracking requires Section 5 air support");
+        }
+        const supportBroker = new PassBroker(encoder);
+        this.airVelocitySupport.encode(supportBroker, this.activePowerGeneration,
+          undefined, this.airSupportGravityImpulse(dt_s), "settled-fine");
+        // Cold bootstrap precedes the first air-support publication. Rebuild
+        // the compact coarse tracker immediately afterward so generation zero
+        // starts from complete velocity/owner support rather than an empty bank.
+        if (coarseBootstrappedThisStep) this.coarseOnlySummary?.encode(supportBroker);
+        supportBroker.fence("coarse-only air support published");
+        encoder = supportBroker.commandEncoder();
+        if (productionBoundary) {
+          encoder = productionBoundary("structuredProjectionTail", encoder);
         }
       } else {
         throw new Error("Authoritative Section 5 fine-band pipeline is incomplete");
@@ -4643,12 +4764,16 @@ export class WebGPUOctreeProjection {
       phi: { buffer: fine.phi },
       topologyControl: { buffer: fineTopology.control },
       redistanceControl: { buffer: fineRedistance.control },
+      seeds: { buffer: fine.workA },
       // The derived widths come from the planner the solver itself runs, so the
       // view cannot drift from the band that was actually allocated.
       bands: {
         pressureBandCells: this.interfaceRefinementBandCells,
         surfaceBandCells: this.fineLevelSetBandCells,
         ...planFineLevelSetBandFineCells(this.fineLevelSetBandCells, fine.plan.fineFactor),
+        // The ladder the redistancer actually emitted, not a re-derivation: the
+        // warm and cold paths choose different repair counts.
+        ladderStrides: fineRedistance.lastEncodedStrides,
       },
     } : undefined;
     return {
@@ -4677,6 +4802,10 @@ export class WebGPUOctreeProjection {
         tileCapacity: this.topologyResidency.tileCapacity,
       },
       ...(fineBandLifecycle ? { fineBandLifecycle } : {}),
+      pressureRows: {
+        dimensions: [this.dims.nx, this.dims.ny, this.dims.nz] as const,
+        rowCapacity: this.pressureCapacity.rowCapacity,
+      },
       generation: this.powerAttemptGeneration,
     };
   }
@@ -5277,6 +5406,41 @@ export class WebGPUOctreeProjection {
       ...(this.globalFineSeeds ? { seedControl: this.globalFineSeeds.buffer } : {}),
     };
   }
+  /** Renderer-only view of the sole moving surface in coarse-1 mode. */
+  get coarseLevelSetSource() {
+    const coarse = this.powerCoarseLevelSetSchedule?.sampleSource;
+    if (!this.coarseOnlySurfaceTracking || !this.powerCoarseLevelSetBootstrapped || !coarse) {
+      return undefined;
+    }
+    return {
+      kind: "coarse-levelset-sampling" as const,
+      directory: { buffer: coarse.directory },
+      control: { buffer: coarse.control },
+      rowCapacity: coarse.rowCapacity,
+      sampleDimensions: [this.dims.nx, this.dims.ny, this.dims.nz] as const,
+      physicalCellSize: this.scene.container.width_m / this.dims.nx,
+      domainOrigin: [0, 0, 0] as const,
+      generation: this.powerCoarseLevelSetGeneration & 0x3fff_ffff,
+    };
+  }
+  /**
+   * The published fine generation paired with the redistancer that produced it.
+   *
+   * Flood-provenance diagnostics need both: the buffers hold the seed links,
+   * and only the redistancer knows which ladder the last encode emitted after
+   * the warm/cold arguments were applied. Returning them together stops a
+   * consumer pairing a generation with a schedule that did not build it.
+   */
+  get globalFineFloodProvenanceSource(): Readonly<{
+    source: WebGPUFineLevelSetBrickSource;
+    encodedStrides: readonly number[];
+  }> | undefined {
+    const source = this.globalFineLevelSetSource;
+    const redistance = this.globalFinePublishedIsA
+      ? this.globalFineRedistanceA : this.globalFineRedistanceB;
+    if (!source || !redistance || redistance.lastEncodedStrides.length === 0) return undefined;
+    return Object.freeze({ source, encodedStrides: redistance.lastEncodedStrides });
+  }
   /** Diagnostic-only status for the transport most recently encoded. */
   get globalFineTransportControl(): GPUBuffer | undefined { return this.lastGlobalFineTransport?.control; }
   /** Rejection-only raw producer deltas for both retained transport slots. */
@@ -5605,13 +5769,17 @@ export class WebGPUOctreeProjection {
   async readGlobalFineLevelSetDiagnostics() {
     const fine = this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB;
     const topology = this.globalFinePublishedIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
-    if (!fine || !topology || !this.globalFineSeeds) return undefined;
+    if ((!fine || !topology || !this.globalFineSeeds) && !this.coarseOnlySurfaceTracking) {
+      return undefined;
+    }
     const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 780,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine structured QA diagnostics" });
-    encoder.copyBufferToBuffer(this.globalFineSeeds.buffer, 0, readback, 0, 8);
-    encoder.copyBufferToBuffer(topology.control, 0, readback, 8, 36);
-    encoder.copyBufferToBuffer(fine.worklist, 0, readback, 44, 20);
+    if (this.globalFineSeeds) {
+      encoder.copyBufferToBuffer(this.globalFineSeeds.buffer, 0, readback, 0, 8);
+    }
+    if (topology) encoder.copyBufferToBuffer(topology.control, 0, readback, 8, 36);
+    if (fine) encoder.copyBufferToBuffer(fine.worklist, 0, readback, 44, 20);
     if (this.powerCoarseLevelSetSchedule) {
       encoder.copyBufferToBuffer(this.powerCoarseLevelSetSchedule.control, 0, readback, 64, 64);
     }
@@ -5679,8 +5847,10 @@ export class WebGPUOctreeProjection {
       encoder.copyBufferToBuffer(this.airVelocitySupport.scratch, 51 * 4,
         readback, 728, 36);
     }
-    encoder.copyBufferToBuffer(topology.pageDelta, 0, readback, 608, 64);
-    encoder.copyBufferToBuffer(topology.control, 48, readback, 764, 16);
+    if (topology) {
+      encoder.copyBufferToBuffer(topology.pageDelta, 0, readback, 608, 64);
+      encoder.copyBufferToBuffer(topology.control, 48, readback, 764, 16);
+    }
     this.device.queue.submit([encoder.finish()]);
     let copiedWords: number[];
     try {
@@ -5716,7 +5886,7 @@ export class WebGPUOctreeProjection {
         airSupportFallbacks: Array.from(words.slice(180, 182)),
         airSupportTopologyFailureLatch: Array.from(words.slice(182, 191)),
         fineTopologyFailureLatch: Array.from(words.slice(191, 195)),
-        configuredFineGeneration: fine.generation, fineGenerationSlot: fine.generationSlot,
+        configuredFineGeneration: fine?.generation ?? 0, fineGenerationSlot: fine?.generationSlot ?? 0,
         scheduledFineGeneration: this.globalFineGeneration, currentFineIsA: this.globalFinePublishedIsA };
     const liveFirstError = diagnostics.airSupportControl[1] ?? 0xffff_ffff;
     const precedingFirstError = diagnostics.firstAirSupportFailure[1] ?? 0xffff_ffff;
@@ -5739,8 +5909,9 @@ export class WebGPUOctreeProjection {
   readFluidBrickResidencyStats() { return this.topologyResidency.readStats(); }
   readFluidBulkBrickResidencyStats() { return this.sparseBrickWorld?.readBulkResidencyStats(); }
   encodeSparseBrickWorld(encoder: GPUCommandEncoder, _dt_s = 0) {
-    if (!this.globalFineBootstrapped || !this.fineSeedAdapter) {
-      throw new Error("Sparse render publication requires the compact fine-seed authority");
+    if ((!this.globalFineBootstrapped && !this.powerCoarseLevelSetBootstrapped)
+      || !this.fineSeedAdapter) {
+      throw new Error("Sparse render publication requires a settled surface authority and compact seeds");
     }
     const source=this.fineSeedAdapter.source;
     const bulkResidency = this.sparseBrickWorld?.bulkResidency;
@@ -5799,6 +5970,7 @@ export class WebGPUOctreeProjection {
     this.rowRedundancyCensus?.destroy();
     this.globalFineSeeds?.destroy(); this.globalFineLevelSet?.destroy();
     this.globalFineSummaries?.destroy();
+    this.coarseOnlySummary?.destroy();
     this.fineSeedAdapter?.destroy();
     this.fineToPowerCoarseLevelSet?.destroy();
     this.airVelocitySupport?.destroy(); this.powerCoarseLevelSetSchedule?.destroy();
@@ -5961,17 +6133,22 @@ fn coarseMorton(cell:u32)->u32{let d=dims();let q=vec3u(cell%d.x,(cell/d.x)%d.y,
 fn coarseLookup(cell:u32,size:u32)->u32{let count=min(coarseWord(2u),(arrayLength(&bulkWorklist)-8u)/8u);let wantedLevel=31u-countLeadingZeros(size);let wantedMorton=coarseMorton(cell);var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let base=8u+middle*8u;let entryLevel=31u-countLeadingZeros(coarseWord(base+1u));let entryMorton=coarseMorton(coarseWord(base)-1u);if(entryLevel<wantedLevel||(entryLevel==wantedLevel&&entryMorton<wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let base=8u+low*8u;if(coarseWord(base)==cell+1u&&coarseWord(base+1u)==size){return base;}}return 0xffffffffu;}
 fn correctedCoarsePhi(point:vec3f)->CorrectedCoarsePhi{
   if(!coarseDirectoryAuthority()||any(point<vec3f(0.0))||any(point>=vec3f(dims()))){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
-  let q=vec3u(floor(point));var size=1u;let maximumLeaf=coarseWord(3u);
+  let q=vec3u(floor(point));let denseCell=q.x+dims().x*(q.y+dims().y*q.z);
+  let volume=dims().x*dims().y*dims().z;let actualCapacity=(arrayLength(&bulkWorklist)-8u)/8u;
+  if((coarseWord(1u)&0x40000000u)!=0u&&actualCapacity>=volume){let denseBase=8u+(actualCapacity-volume+denseCell)*8u;
+    let value=bitcast<f32>(coarseWord(denseBase+2u));let flags=coarseWord(denseBase+5u);
+    if(coarseWord(denseBase)==denseCell+1u&&coarseWord(denseBase+1u)==1u&&(flags&9u)==9u&&coarseFinite(value)){
+      return CorrectedCoarsePhi(true,value,value,value,1u);}}
+  var size=1u;let maximumLeaf=coarseWord(3u);
   loop{let origin=(q/vec3u(size))*vec3u(size);let cell=origin.x+dims().x*(origin.y+dims().y*origin.z);let base=coarseLookup(cell,size);
     if(base!=0xffffffffu){let value=bitcast<f32>(coarseWord(base+2u));let minimum=bitcast<f32>(coarseWord(base+3u));let maximum=bitcast<f32>(coarseWord(base+4u));let flags=coarseWord(base+5u);
       if((flags&9u)!=9u||!coarseFinite(value)||!coarseFinite(minimum)||!coarseFinite(maximum)||minimum>maximum||value<minimum||value>maximum){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
       return CorrectedCoarsePhi(true,value,minimum,maximum,size);}
     if(size>=maximumLeaf){break;}size*=2u;
   }
-  // Publication is all-or-nothing: every live liquid/interface row writes its
-  // sorted slot before state becomes PUBLISHED. A miss in a valid directory is the
-  // explicit positive-air complement, never an unknown sparse hole.
-  let air=bitcast<f32>(coarseWord(7u))*f32(maximumLeaf);
+  // Fine-backed modes have no dense complement. Their valid sparse directory
+  // still defines every miss as positive air.
+  let air=0.5*bitcast<f32>(coarseWord(7u));
   return CorrectedCoarsePhi(true,air,air,air,0u);
 }
 fn coarseClassificationPhi(sample:CorrectedCoarsePhi)->f32{
@@ -6436,6 +6613,7 @@ fn frontierTopologyReuseBase() -> u32 { return frontierPublicationBase() + 13u; 
 fn dirtyFailureBase() -> u32 { return frontierTopologyReuseBase() + 1u; }
 const FRONTIER_REUSE_MAGIC: u32 = 0x46525553u;
 const FRONTIER_FAILED_MAGIC: u32 = 0x4641494cu;
+const COARSE_PREDICTED_WET_MAGIC: u32 = 0x43505754u;
 const DIRTY_FAILURE_TILE_COUNTS: u32 = 1u;
 const DIRTY_FAILURE_TILE_SIGNATURE: u32 = 2u;
 const DIRTY_FAILURE_RETIRED_TILE: u32 = 3u;
@@ -6612,7 +6790,15 @@ fn classifyTopologyTileSignature(
   let priorState = compaction[base + 4u];
   let valid = (priorState & TILE_SIGNATURE_VALID_MASK) == TILE_SIGNATURE_VALID_MAGIC;
   let priorRetention = select(0u, priorState >> 24u, valid);
-  let currentEvidence = tileEvidenceReduction[0] != 0u;
+  // Factor 4/8 already carry a fine pressure shell. Publishing tile-wide
+  // hysteresis for their fluid-gated topology grows that shell after the
+  // first advance and changes the mini-dam impulse response. Factor 1 needs
+  // the retention because it has no finer pressure-support lattice. Boundary
+  // policy stays orthogonal: the unconditional control may still split dry
+  // wall leaves without widening the liquid pressure shell.
+  let retainPressureHysteresis = fineSummaryFactor == 1u;
+  let currentEvidence = retainPressureHysteresis
+    && tileEvidenceReduction[0] != 0u;
   let retention = select(select(0u, priorRetention - 1u, priorRetention > 0u),
     PRESSURE_RETENTION_GENERATIONS, currentEvidence);
   next.x ^= topologyDecisionHash(0x68bc21ebu ^ retention);
@@ -7024,8 +7210,10 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     // samples in its level-zero B4 entry. A unit pressure owner can therefore
     // consume its own advected phi sign without inventing a finer surface
     // hierarchy or falling back to the previous coarse frontier.
-    if (factorOne && size == 1u && samplesPerBrick == 64u
-        && fineSummaryWord(base + 5u) == 1u) {
+    if (factorOne && size == 1u
+        && ((samplesPerBrick == 64u && fineSummaryWord(base + 5u) == 1u)
+          || (result.coarseAuthority && fineSummaryWord(base + 4u) == 64u
+            && fineSummaryWord(base + 5u) == 1u))) {
       let local = origin & vec3u(3u);
       let bit = local.x + 4u * (local.y + 4u * local.z);
       let word = bit >> 5u; let mask = 1u << (bit & 31u);
@@ -7043,11 +7231,11 @@ fn powerClosedWallStripIntersects(origin: vec3u, size: u32) -> bool {
     u32(ceil(max(0.0, params.solve.w))));
   let high = origin + vec3u(size);
   let d = dims();
-  // x+/-, z+/-, and the floor are closed for every container.  The ceiling
-  // participates only for an authored closed-top scene (flag bit 1).  Any
-  // intersecting leaf splits all the way to unit owners, putting wall samples
-  // on the regular-cube Section 5 interpolation path instead of asking the
-  // interior Delaunay catalog for sites outside the domain.
+  // x+/-, z+/-, and the floor are closed for every container. The ceiling
+  // participates only for an authored closed-top scene (flag bit 1). This
+  // identifies candidates for the regular-cube Section 5 wall path; the
+  // unconditional control splits all of them to unit owners, while the
+  // adaptive policy retains that resolution only when liquid is nearby.
   return origin.x < min(width, d.x) || high.x > d.x - min(width, d.x)
     || origin.z < min(width, d.z) || high.z > d.z - min(width, d.z)
     || origin.y < min(width, d.y)
@@ -7074,14 +7262,12 @@ fn inflowProtectionIntersects(origin: vec3u, size: u32) -> bool {
 
 fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   if (inflowProtectionIntersects(origin, size)) { return true; }
-  // Factor 1 is the sole surface tracker at the finest octree-cell lattice.
-  // Once adaptive pressure refinement reaches a size-2 leaf, split it once
-  // more so ghost-fluid pressure consumes phi at that same cell centre. This
-  // is independent of summary publication timing; larger octree levels stay
-  // adaptive and no finer surface representation is introduced.
-  if (fineSummaryFactor == 1u && size < 4u) { return true; }
   let summary = fineLeafSummary(origin, size);
   if (!summary.found) { return false; }
+  // Factor one has no finer surface lattice from which to recover outward
+  // motion. Keep both wet and dry children of each represented B4 block at
+  // unit pressure resolution; this is the coarse air-side support halo, not a
+  // second level-set field.
   // The fine-summary values and cell spacing are physical. Two authored
   // bands are retained here: the requested interface band and one additional
   // displacement/support ring the width of this leaf's own edge. This spatial
@@ -7090,19 +7276,32 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // boundary. It also keeps the coarse and fine publication clocks coherent
   // across transported frames.
   //
-  // This pressure-side support is independent of whether dry boundary
-  // crossings are allowed to remain coarse. Coupling the two changes the
-  // pressure discretization and can alter both convergence and fluid motion.
   let cellWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
   let gradingLayers = f32(max(1u, params.pressureCapacity.z));
-  let protectionWidth = (max(1.0, params.solve.w)
+  let retainedProtectionWidth = (max(1.0, params.solve.w)
     + gradingLayers * max(2.0, f32(size))) * cellWidth;
+  // The fine factor-4/8 gated path already owns sub-cell interface support.
+  // Preserve its compact pressure band: only the reach beyond the smallest
+  // merge candidate needs to scale with this leaf. Factor 1 keeps the wider
+  // shell used by its sole coarse surface tracker.
+  let compactProtectionWidth = (max(1.0, params.solve.w)
+    + gradingLayers * max(0.0, f32(size) - 2.0)) * cellWidth;
+  let protectionWidth = select(compactProtectionWidth, retainedProtectionWidth,
+    fineSummaryFactor == 1u);
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
   // A sign crossing is positive refinement evidence even when the narrow-band
   // publication does not fill the candidate leaf's entire volume. Requiring a
   // complete size-8/16 summary here strands factor-1 surface bricks inside the
   // coarse leaf and prevents the later per-level passes from ever seeing them.
   if (crossesInterface) { return true; }
+  // A size-two adaptive pressure row can represent the factor-4/8 free-surface
+  // cut directly. Splitting every merely-near row to unit size inflated the
+  // first recurring mini-dam frontier from 1,248 to 1,500 rows and exhausted
+  // the solve tail, damping the bottom-front expansion from step two onward.
+  if (fineSummaryFactor != 1u && size <= 2u) {
+    return false;
+  }
+  if (summary.coarseAuthority) { return false; }
   let observedNearInterface = summary.minimumAbsolutePhi <= protectionWidth;
   // Factor 4/8 can use the merged corrected-coarse interval to prove complete
   // distance evidence. Factor 1 deliberately publishes a fine-only hierarchy
@@ -7152,7 +7351,8 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   // interior pressure shell, but must not let unrelated evidence elsewhere in
   // the same 8-cubed tile pin a locally dry wall or terrain crossing.
   if (pressureRefinementEvidence(origin, size)) { return true; }
-  let pressureRetained = pressureRetentionAt(origin) > 0u;
+  let pressureRetained = pressureRetentionAt(origin) > 0u
+    && fineSummaryFactor == 1u;
   let adaptivity = f32(params.control.x) / 1000.0;
   if (adaptivity <= 0.0) { return true; }
   let crossesClosedWall = powerClosedWallStripIntersects(origin, size);
@@ -7301,7 +7501,8 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
         <= params.solve.w * params.cellRelax.x;
     }
     let pressureEvidence = pressureRefinementEvidence(origin, size);
-    let pressureRetained = pressureRetentionAt(origin) > 0u;
+    let pressureRetained = pressureRetentionAt(origin) > 0u
+      && fineSummaryFactor == 1u;
     // Preserve the production pressure hysteresis everywhere except a locally
     // dry boundary crossing. Current spatial evidence still overrides the gate
     // and splits before liquid contact.
@@ -8583,7 +8784,17 @@ fn emitLeaves(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocati
       pressureOut[row] = select(0.0, warm, (params.pressureCapacity.w & 1u) != 0u);
     }
     let acceptedOwner=ownerAtIndex(cell);
-    leafHeaders[row] = LeafHeader(cell, 0u, 0u, acceptedOwner.size, 0.0, 0.0, 0u, 0u, vec4f(0.0));
+    // A genuinely new factor-one row was admitted by the compact advected
+    // summary. Preserve that classification across the topology flip so the
+    // sole coarse phi field can seed the row even though no prior directory
+    // entry exists at this identity.
+    let predictedWet = fineSummaryFactor == 1u && previousRow == 0xffffffffu;
+    // Crossing happens under a sub-cell CFL step, so seed just inside the
+    // interface. Redistance owns the magnitude after the sign handoff.
+    let predictedPhi = -0.05 * f32(acceptedOwner.size) * params.cellRelax.x;
+    leafHeaders[row] = LeafHeader(cell, 0u, 0u, acceptedOwner.size, 0.0, 0.0,
+      select(0u, bitcast<u32>(predictedPhi), predictedWet),
+      select(0u, COARSE_PREDICTED_WET_MAGIC, predictedWet), vec4f(0.0));
     markAcceptedOwner(unpackOrigin(acceptedOwner.packedOrigin));
   }
 }

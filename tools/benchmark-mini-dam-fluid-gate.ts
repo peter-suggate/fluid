@@ -15,6 +15,7 @@ import {
 interface Arm {
   readonly label: string;
   readonly gated: boolean;
+  readonly adaptivity: 0 | 1;
   readonly maximumLeafSize: 2 | 4 | 8 | 16 | 32;
   readonly interfaceBandCells: number;
 }
@@ -47,8 +48,8 @@ interface Result {
 
 const parseArm = (source: string): Arm => {
   const [mode, leafText, bandText] = source.split(":");
-  assert.ok(mode === "off" || mode === "on",
-    `arm "${source}" must start with off or on`);
+  assert.ok(mode === "off" || mode === "on" || mode === "zero",
+    `arm "${source}" must start with off, on, or zero`);
   const maximumLeafSize = Number(leafText);
   assert.ok(maximumLeafSize === 2 || maximumLeafSize === 4
     || maximumLeafSize === 8 || maximumLeafSize === 16
@@ -61,12 +62,36 @@ const parseArm = (source: string): Arm => {
   return {
     label: source,
     gated: mode === "on",
+    adaptivity: mode === "zero" ? 0 : 1,
     maximumLeafSize,
     interfaceBandCells,
   };
 };
 
 const rounded = (value: number, digits = 3) => Number(value.toFixed(digits));
+const fieldAdvance = (field: Float32Array, threshold = 0.01) => {
+  let maximumX = -1, maximumZ = -1, leadingMass = 0;
+  for (let z = 0; z < 16; z += 1) for (let y = 0; y < 16; y += 1) {
+    for (let x = 0; x < 16; x += 1) {
+      const value = field[x + 16 * (y + 16 * z)]!;
+      if (value >= threshold) { maximumX = Math.max(maximumX, x); maximumZ = Math.max(maximumZ, z); }
+      if (x >= 10) leadingMass += value;
+    }
+  }
+  return { maximumX, maximumZ, leadingMass: rounded(leadingMass, 6) };
+};
+const layerAdvance = (field: Float32Array, y: number, threshold = 0.01) => {
+  let maximumX = -1, maximumZ = -1, leadingMass = 0;
+  for (let z = 0; z < 16; z += 1) for (let x = 0; x < 16; x += 1) {
+    const value = field[x + 16 * (y + 16 * z)]!;
+    if (value >= threshold) {
+      maximumX = Math.max(maximumX, x);
+      maximumZ = Math.max(maximumZ, z);
+    }
+    if (x >= 10) leadingMass += value;
+  }
+  return { maximumX, maximumZ, leadingMass: rounded(leadingMass, 6) };
+};
 const tracePhaseTotals = (trace: {
   readonly phases: readonly { readonly id: string; readonly duration_ms: number }[];
 } | undefined): Readonly<Record<string, number>> | null => {
@@ -80,8 +105,12 @@ const tracePhaseTotals = (trace: {
 };
 const traceRequested = process.env.FLUID_MINI_DAM_TRACE === "1";
 const auditEveryStep = process.env.FLUID_MINI_DAM_AUDIT_EVERY_STEP === "1";
+const surfaceTrackingFactor = Number(process.env.FLUID_MINI_DAM_FINE_FACTOR ?? 4);
+assert.ok(surfaceTrackingFactor === 1 || surfaceTrackingFactor === 4
+  || surfaceTrackingFactor === 8,
+"FLUID_MINI_DAM_FINE_FACTOR must be 1, 4, or 8");
 const steps = Number(process.env.FLUID_MINI_DAM_STEPS ?? 62);
-assert.ok(Number.isSafeInteger(steps) && steps > 0);
+assert.ok(Number.isSafeInteger(steps) && steps >= 0);
 const arms = (process.env.FLUID_MINI_DAM_ARMS ?? "off:2,on:2,off:4,on:4")
   .split(",")
   .filter(Boolean)
@@ -141,7 +170,8 @@ try {
       ...octreeMethod.presetFor("balanced"),
       maximumLeafSize: String(arm.maximumLeafSize),
       interfaceRefinementBandCells: arm.interfaceBandCells,
-      globalFineLevelSetFactor: "4",
+      globalFineLevelSetFactor: String(surfaceTrackingFactor),
+      octreeAdaptivity: arm.adaptivity,
       secondaryParticles: "off",
     };
     const constructionStarted = performance.now();
@@ -199,7 +229,7 @@ try {
       arm,
       construction_ms,
       simulationWall_ms,
-      wallPerStep_ms: simulationWall_ms / steps,
+      wallPerStep_ms: steps > 0 ? simulationWall_ms / steps : 0,
       initialTopology,
       topology,
       field: fieldReadback.field,
@@ -215,22 +245,32 @@ try {
   }
 
   const report = results.map((result) => {
-    const control = results.find((candidate) =>
-      !candidate.arm.gated
+    const zeroRefinement = results.find((candidate) =>
+      candidate.arm.adaptivity === 0
       && candidate.arm.maximumLeafSize === result.arm.maximumLeafSize
       && candidate.arm.interfaceBandCells === result.arm.interfaceBandCells);
-    const fieldDifference = control
+    const ungatedAdaptive = results.find((candidate) =>
+      candidate.arm.adaptivity === 1
+      && !candidate.arm.gated
+      && candidate.arm.maximumLeafSize === result.arm.maximumLeafSize
+      && candidate.arm.interfaceBandCells === result.arm.interfaceBandCells);
+    const reference = zeroRefinement ?? ungatedAdaptive;
+    const fieldDifference = reference
       ? compareScalarFields(
         result.field,
-        control.field,
+        reference.field,
         16,
         16,
         16,
       )
       : null;
+    const gateDifference = result.arm.gated && ungatedAdaptive
+      ? compareScalarFields(result.field, ungatedAdaptive.field, 16, 16, 16)
+      : null;
     return {
       arm: result.arm.label,
       gated: result.arm.gated,
+      adaptivity: result.arm.adaptivity,
       maximumLeafSize: result.arm.maximumLeafSize,
       interfaceBandCells: result.arm.interfaceBandCells,
       construction_ms: rounded(result.construction_ms),
@@ -250,9 +290,13 @@ try {
       pressureIterations: result.pressureIterations,
       representedVolumeCellSum: rounded(result.representedVolumeCellSum, 6),
       fieldCellSum: rounded(result.fieldSummary.cellSum, 6),
+      fieldAdvance: fieldAdvance(result.field),
+      bottomAdvance: layerAdvance(result.field, 0),
+      layerOneAdvance: layerAdvance(result.field, 1),
       fieldDifference,
-      speedupVsControl: control
-        ? rounded(control.simulationWall_ms / result.simulationWall_ms, 4)
+      gateDifference,
+      speedupVsControl: reference
+        ? rounded(reference.simulationWall_ms / result.simulationWall_ms, 4)
         : null,
     };
   });
@@ -260,6 +304,7 @@ try {
   console.log(JSON.stringify({
     phase: "mini-dam-fluid-gate-benchmark",
     steps,
+    surfaceTrackingFactor,
     results: report,
     validationErrors,
   }));
@@ -275,8 +320,89 @@ try {
       assert.ok(result.pressureIterations < 10,
         "the corrected adaptive topology must converge inside the encoded pressure tail");
     }
+    if (surfaceTrackingFactor === 4) {
+      const zeroRefinement = results.find(({ arm }) => arm.adaptivity === 0);
+      const gatedAdaptive = results.find(({ arm }) => arm.adaptivity === 1 && arm.gated
+        && arm.maximumLeafSize === 32 && arm.interfaceBandCells === 3);
+      if (zeroRefinement && gatedAdaptive) {
+        const zeroAdvance = fieldAdvance(zeroRefinement.field);
+        const adaptiveAdvance = fieldAdvance(gatedAdaptive.field);
+        assert.deepEqual(
+          [adaptiveAdvance.maximumX, adaptiveAdvance.maximumZ],
+          [zeroAdvance.maximumX, zeroAdvance.maximumZ],
+          "the first adaptive factor-4 step must preserve the zero-refinement front extent",
+        );
+        assert.ok(adaptiveAdvance.maximumX >= 10 && adaptiveAdvance.maximumZ >= 10,
+          "the paper-resolution mini16 surface must resolve the front beyond its authored face immediately");
+        const difference = compareScalarFields(
+          gatedAdaptive.field, zeroRefinement.field, 16, 16, 16);
+        assert.ok(difference.meanAbsoluteError < 0.001,
+          `first-step adaptive factor-4 MAE ${difference.meanAbsoluteError} is not close to zero refinement`);
+        assert.ok(Math.abs(adaptiveAdvance.leadingMass - zeroAdvance.leadingMass)
+          <= zeroAdvance.leadingMass * 0.02,
+        "first-step adaptive factor-4 leading mass must stay within 2% of zero refinement");
+        assert.ok(gatedAdaptive.topology.topologyLeaves
+          < zeroRefinement.topology.topologyLeaves,
+        "first-step factor-4 adaptivity must retain fewer leaves than zero refinement");
+      }
+    }
   }
-  if (steps === 62 || steps === 400) {
+  if (steps === 44 && surfaceTrackingFactor === 1) {
+    const zeroRefinement = results.find(({ arm }) => arm.adaptivity === 0);
+    const ungatedAdaptive = results.find(({ arm }) => arm.adaptivity === 1 && !arm.gated);
+    const gatedAdaptive = results.find(({ arm }) => arm.adaptivity === 1 && arm.gated);
+    if (zeroRefinement && ungatedAdaptive && gatedAdaptive) {
+      const gateDifference = compareScalarFields(
+        gatedAdaptive.field, ungatedAdaptive.field, 16, 16, 16);
+      assert.equal(gateDifference.meanAbsoluteError, 0,
+        "the boundary gate must not alter the factor-1 adaptive mini16 field");
+      const zeroDifference = compareScalarFields(
+        gatedAdaptive.field, zeroRefinement.field, 16, 16, 16);
+      assert.ok(zeroDifference.meanAbsoluteError < 0.001,
+        `factor-1 adaptive mini16 MAE ${zeroDifference.meanAbsoluteError} is not close to zero refinement`);
+      assert.equal(zeroDifference.wetIntersectionOverUnion, 1,
+        "factor-1 adaptive mini16 must preserve the zero-refinement wet support");
+      assert.ok(zeroDifference.centroidDistanceCells !== null
+        && zeroDifference.centroidDistanceCells < 0.01,
+        `factor-1 adaptive mini16 centroid drifted ${zeroDifference.centroidDistanceCells} cells`);
+      const adaptiveAdvance = fieldAdvance(gatedAdaptive.field);
+      const zeroAdvance = fieldAdvance(zeroRefinement.field);
+      assert.deepEqual(
+        [adaptiveAdvance.maximumX, adaptiveAdvance.maximumZ],
+        [zeroAdvance.maximumX, zeroAdvance.maximumZ],
+        "factor-1 adaptive mini16 must advance as far as zero refinement",
+      );
+      assert.ok(Math.abs(adaptiveAdvance.leadingMass - zeroAdvance.leadingMass)
+        <= Math.max(0.01, zeroAdvance.leadingMass * 0.01),
+      "factor-1 adaptive mini16 leading mass must stay within 1% of zero refinement");
+      assert.ok(gatedAdaptive.topology.topologyLeaves < zeroRefinement.topology.topologyLeaves,
+        "factor-1 adaptive mini16 must retain fewer leaves than zero refinement");
+      if (auditEveryStep) {
+        assert.deepEqual(gatedAdaptive.pressureProfile, zeroRefinement.pressureProfile,
+          "factor-1 adaptive mini16 pressure receipt must match zero refinement");
+      }
+      const maximumSlowdown = Number(process.env.FLUID_MINI_DAM_MAX_SLOWDOWN ?? 1.1);
+      assert.ok(gatedAdaptive.simulationWall_ms
+        <= zeroRefinement.simulationWall_ms * maximumSlowdown,
+      `factor-1 adaptive mini16 wall time regressed by ${rounded(100 * (gatedAdaptive.simulationWall_ms / zeroRefinement.simulationWall_ms - 1), 2)}%`);
+    }
+  }
+  if (steps === 8 && surfaceTrackingFactor === 4) {
+    for (const adaptive of results.filter(({ arm }) => arm.adaptivity === 1
+      && arm.gated && arm.maximumLeafSize === 32 && arm.interfaceBandCells === 4)) {
+      const bottom = layerAdvance(adaptive.field, 0);
+      const layerOne = layerAdvance(adaptive.field, 1);
+      assert.ok(bottom.leadingMass >= 1.85,
+        `factor-4 mini16 bottom front stalled at ${bottom.leadingMass} leading cells`);
+      assert.ok(layerOne.leadingMass >= 1.65,
+        `factor-4 mini16 first layer stalled at ${layerOne.leadingMass} leading cells`);
+      assert.ok(bottom.leadingMass - layerOne.leadingMass >= 0.15,
+        "factor-4 mini16 must develop its early floor-running front");
+      assert.ok(adaptive.pressureIterations < 10,
+        "factor-4 mini16 must not exhaust its pressure tail after the topology update");
+    }
+  }
+  if ((steps === 62 || steps === 400) && surfaceTrackingFactor === 4) {
     for (const gated of results.filter(({ arm }) =>
       arm.gated && arm.maximumLeafSize === 32 && arm.interfaceBandCells === 3)) {
       const control = results.find(({ arm }) => !arm.gated
@@ -284,8 +410,13 @@ try {
         && arm.interfaceBandCells === gated.arm.interfaceBandCells);
       if (!control) continue;
       const difference = compareScalarFields(gated.field, control.field, 16, 16, 16);
-      assert.equal(difference.meanAbsoluteError, 0,
-        `gated dry-boundary coarsening must preserve the ${steps}-step mini16 field exactly`);
+      assert.ok(difference.meanAbsoluteError < 1e-6,
+        `gated dry-boundary coarsening changed the ${steps}-step mini16 field by MAE ${difference.meanAbsoluteError}`);
+      assert.equal(difference.wetIntersectionOverUnion, 1,
+        `gated dry-boundary coarsening changed the ${steps}-step mini16 wet support`);
+      assert.ok(difference.centroidDistanceCells !== null
+        && difference.centroidDistanceCells < 1e-5,
+      `gated dry-boundary coarsening moved the ${steps}-step mini16 centroid by ${difference.centroidDistanceCells} cells`);
       assert.equal(gated.pressureRows, control.pressureRows,
         `boundary coarsening must not change the ${steps}-step mini16 pressure discretization`);
       assert.equal(gated.pressureIterations, control.pressureIterations,

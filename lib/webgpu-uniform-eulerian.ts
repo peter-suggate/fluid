@@ -1014,6 +1014,7 @@ export class WebGPUUniformEulerianSolver {
         // is the width every lane was measured at before the two separated.
         fineLevelSetBandCells: options.octree.fineLevelSetBandCells,
         globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor ?? 4,
+        coarseOnlySurfaceTracking: options.octree.coarseOnlySurfaceTracking === true,
         globalFineLevelSetMaximumBricks: options.octree.globalFineLevelSetMaximumBricks,
         pressureRowCapacity: options.octree.pressureRowCapacity,
       }, options.deferPipelineCompilation);
@@ -1578,6 +1579,7 @@ fn recordPhysicsPhaseBoundary(
   get octreeTechniqueDebugSource() { return this.octreeProjection?.techniqueDebugSource; }
   get initialSparseAuthorityReady() { return !this.octreeProjection || this.initialSparseAuthorityPublished; }
   get globalFineLevelSetSource() { return this.octreeProjection?.globalFineLevelSetSource; }
+  get coarseLevelSetSource() { return this.octreeProjection?.coarseLevelSetSource; }
   /** QA-only passthrough for reproducing recurring frontier phase decisions. */
   get globalFineSummaryDirectory() { return this.octreeProjection?.globalFineSummaryDirectory; }
   get globalFineSummaryDebug() { return this.octreeProjection?.globalFineSummaryDebug; }
@@ -2276,7 +2278,9 @@ fn recordPhysicsPhaseBoundary(
       const velocityControl = this.structuredVelocityControl;
       const boundaryControl = this.structuredBoundaryControl;
       const fine = this.globalFineLevelSetSource;
-      if (velocityControl && boundaryControl && fine) {
+      const coarse = this.coarseLevelSetSource;
+      const surfaceHeader = fine?.worklist ?? coarse?.directory.buffer;
+      if (velocityControl && boundaryControl && surfaceHeader) {
         // Slot count derives from the in-flight ceiling: an under-sized ring
         // makes `encode` skip the record when every slot is mapping, and a
         // missing `step-snapshot` stage latches a permanent sequence fault
@@ -2295,7 +2299,7 @@ fn recordPhysicsPhaseBoundary(
         if (this.stepSnapshotRing.encode(encoder, {
           structuredVelocityControl: velocityControl,
           structuredBoundaryControl: boundaryControl,
-          fineWorklist: fine.worklist,
+          fineWorklist: surfaceHeader,
           mgpcgControl: this.mgpcgControl,
           fineVolumeControl: this.globalFineVolumeControl,
           projectionEnergyStats: this.structuredProjectionEnergyStats,
@@ -2307,7 +2311,8 @@ fn recordPhysicsPhaseBoundary(
           step: this.info.encodedSteps ?? 0,
           dt_s: dt,
           submittedTime_s: this.lastTime,
-          hostFineGeneration: fine.generation,
+          hostFineGeneration: fine?.generation ?? coarse!.generation,
+          surfaceKind: fine ? "fine" : "coarse",
         })) this.stepSequenceRecorder.record("step-snapshot");
         else if (!this.stepSnapshotFaulted) {
           // The producer must never skip. It is not a lost diagnostic: the

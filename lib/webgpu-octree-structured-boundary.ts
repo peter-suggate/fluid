@@ -1,6 +1,9 @@
 /** Transactional dynamic free-surface/solid coefficients for structured families. */
 
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
+
+type StructuredBoundaryFineSource = Pick<WebGPUFineLevelSetBrickSource,
+"params" | "metadata" | "worklist" | "flags" | "phi">;
 import {
   makeOctreePowerCoarseLevelSetSampleWGSL,
   type OctreePowerCoarseLevelSetSampleSource,
@@ -72,6 +75,11 @@ export class WebGPUStructuredBoundaryCoefficients {
   private readonly dispatch: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly inertSolidStorage?: GPUBuffer;
+  /** Bind-layout sentinels for coarse-only tracking. `FineP.width == 0`
+   * makes every shader query return compact coarse phi before touching the
+   * remaining bindings; these buffers are not a resident surface band. */
+  private readonly inertFineParams: GPUBuffer;
+  private readonly inertFineStorage: GPUBuffer;
   private readonly prepareCandidate: GPUComputePipeline;
   private readonly prepareAccepted: GPUComputePipeline;
   private readonly classify: GPUComputePipeline;
@@ -140,6 +148,15 @@ export class WebGPUStructuredBoundaryCoefficients {
       usage: storage });
     this.params = device.createBuffer({ label: "Structured boundary parameters", size: 144,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.inertFineParams = device.createBuffer({
+      // FineP is 72 bytes of fields rounded to its 16-byte uniform alignment.
+      label: "Coarse-only structured boundary fine-parameter sentinel", size: 80,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.inertFineStorage = device.createBuffer({
+      label: "Coarse-only structured boundary fine-storage sentinel", size: 32,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
     if (!resources.solid) {
       this.inertSolidStorage = device.createBuffer({ label: "Inert structured solid SDF binding", size: 80,
         usage: storage });
@@ -190,25 +207,35 @@ export class WebGPUStructuredBoundaryCoefficients {
       + this.candidateMask.size + this.candidates.size + this.candidateSolidNormalVelocities.size
       + this.control.size + this.candidateControl.size + this.dispatch.size + this.params.size + this.worksets.size
       + this.worksetClasses.size + this.worksetBlocks.size
+      + this.inertFineParams.size + this.inertFineStorage.size
       + (this.inertSolidStorage?.size ?? 0);
   }
 
-  private groups(fine: Pick<WebGPUFineLevelSetBrickSource,
-    "params" | "metadata" | "worklist" | "flags" | "phi">,
+  private groups(fine: StructuredBoundaryFineSource | undefined,
     structuredControl: GPUBuffer, authority: StructuredControlAuthority): readonly GPUBindGroup[] {
-    let byControl = this.groupsByFineParams.get(fine.params);
-    if (!byControl) { byControl = new WeakMap(); this.groupsByFineParams.set(fine.params, byControl); }
+    const selectedFine: StructuredBoundaryFineSource = fine ?? {
+      params: this.inertFineParams,
+      metadata: this.inertFineStorage,
+      worklist: this.inertFineStorage,
+      flags: this.inertFineStorage,
+      phi: this.inertFineStorage,
+    };
+    let byControl = this.groupsByFineParams.get(selectedFine.params);
+    if (!byControl) {
+      byControl = new WeakMap();
+      this.groupsByFineParams.set(selectedFine.params, byControl);
+    }
     const cached = byControl.get(structuredControl);
     const cachedGroups = authority === "candidate-ready" ? cached?.candidateReady : cached?.accepted;
     if (cachedGroups) return cachedGroups;
     const { structured, solid } = this.resources;
     const section63 = structured.section63;
-    const fparams = fine.params;
+    const fparams = selectedFine.params;
     const inertSolid = this.inertSolidStorage;
     const buffers: Record<number, GPUBuffer> = { 0: this.params, 1: structuredControl,
       2: structured.authority, 3: structured.rowGeometry, 4: this.resources.coarse.directory,
-      5: fparams, 6: fine.worklist, 7: fine.metadata,
-      8: fine.flags, 9: fine.phi, 10: solid?.arena ?? inertSolid!,
+      5: fparams, 6: selectedFine.worklist, 7: selectedFine.metadata,
+      8: selectedFine.flags, 9: selectedFine.phi, 10: solid?.arena ?? inertSolid!,
       11: this.candidates, 12: this.candidateMask, 13: this.liquidMask,
       14: section63.coefficients, 16: this.candidateControl, 17: this.dispatch,
       18: this.worksets, 19: this.resources.rigidBodies, 20: this.solidNormalVelocities,
@@ -248,8 +275,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     return groups;
   }
 
-  private encodeFromStructuredControl(broker: PassBroker, fine: Pick<WebGPUFineLevelSetBrickSource,
-    "params" | "metadata" | "worklist" | "flags" | "phi">,
+  private encodeFromStructuredControl(broker: PassBroker, fine: StructuredBoundaryFineSource | undefined,
     structuredControl: GPUBuffer, authority: StructuredControlAuthority): void {
     if (this.destroyed) throw new Error("Structured boundary coefficients are destroyed");
     const groups = this.groups(fine, structuredControl, authority);
@@ -327,14 +353,12 @@ export class WebGPUStructuredBoundaryCoefficients {
   /** Build an inactive boundary publication from a structured candidate that
    * has reached its candidate-ready magic. This path never accepts committed
    * structured-control semantics. */
-  encodeCandidate(broker: PassBroker, fine: Pick<WebGPUFineLevelSetBrickSource,
-    "params" | "metadata" | "worklist" | "flags" | "phi">,
+  encodeCandidate(broker: PassBroker, fine: StructuredBoundaryFineSource | undefined,
     structuredCandidateControl: GPUBuffer): void {
     this.encodeFromStructuredControl(broker, fine, structuredCandidateControl, "candidate-ready");
   }
 
-  private encodeAcceptedCandidate(broker: PassBroker, fine: Pick<WebGPUFineLevelSetBrickSource,
-    "params" | "metadata" | "worklist" | "flags" | "phi">): void {
+  private encodeAcceptedCandidate(broker: PassBroker, fine: StructuredBoundaryFineSource | undefined): void {
     this.encodeFromStructuredControl(broker, fine, this.resources.structured.control, "accepted");
   }
 
@@ -345,8 +369,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     pass.dispatchWorkgroups(1);
   }
 
-  encode(broker: PassBroker, fine: Pick<WebGPUFineLevelSetBrickSource,
-    "params" | "metadata" | "worklist" | "flags" | "phi">): void {
+  encode(broker: PassBroker, fine: StructuredBoundaryFineSource | undefined): void {
     this.encodeAcceptedCandidate(broker, fine);
     this.encodeReadyCommit(broker);
   }
@@ -362,7 +385,8 @@ export class WebGPUStructuredBoundaryCoefficients {
     if (this.destroyed) return; this.destroyed = true;
     for (const buffer of [this.liquidMask, this.solidNormalVelocities, this.candidateMask, this.candidates,
       this.candidateSolidNormalVelocities, this.worksetClasses, this.worksetBlocks,
-      this.control, this.candidateControl, this.dispatch, this.params, this.inertSolidStorage]) buffer?.destroy();
+      this.control, this.candidateControl, this.dispatch, this.params, this.inertSolidStorage,
+      this.inertFineParams, this.inertFineStorage]) buffer?.destroy();
     this.worksets.destroy();
   }
 }

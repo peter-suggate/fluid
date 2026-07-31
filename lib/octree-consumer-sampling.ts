@@ -114,6 +114,37 @@ export interface GlobalFineLevelSetConsumerSource {
   readonly generation: number;
 }
 
+/** Compact background-octree phi presented without any Section-5 fine band. */
+export interface CoarseLevelSetConsumerSource {
+  readonly kind: "coarse-levelset-sampling";
+  readonly directory: GPUBufferBinding;
+  readonly control: GPUBufferBinding;
+  readonly rowCapacity: number;
+  readonly sampleDimensions: readonly [number, number, number];
+  readonly physicalCellSize: number;
+  readonly domainOrigin: readonly [number, number, number];
+  readonly generation: number;
+}
+
+export function validateCoarseLevelSetConsumerSource(source: CoarseLevelSetConsumerSource): void {
+  if (source.kind !== "coarse-levelset-sampling") throw new RangeError("Coarse source kind is invalid");
+  for (const value of source.sampleDimensions) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > 0xffff) {
+      throw new RangeError("Coarse sample dimensions must be positive 16-bit integers");
+    }
+  }
+  if (!Number.isSafeInteger(source.rowCapacity) || source.rowCapacity < 1) {
+    throw new RangeError("Coarse phi row capacity must be a positive integer");
+  }
+  if (!Number.isSafeInteger(source.generation) || source.generation < 1) {
+    throw new RangeError("Coarse phi generation must be a positive integer");
+  }
+  if (!Number.isFinite(source.physicalCellSize) || source.physicalCellSize <= 0
+    || source.domainOrigin.some((value) => !Number.isFinite(value))) {
+    throw new RangeError("Coarse phi physical coordinates must be finite with positive spacing");
+  }
+}
+
 /** CPU mirror of the renderer's fail-closed Section-5 publication gate.
  *
  * Aanjaneya et al. (2017), Section 5 (local source:

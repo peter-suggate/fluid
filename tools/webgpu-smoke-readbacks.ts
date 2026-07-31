@@ -30,6 +30,7 @@ import {
 } from "../lib/terrain";
 import {
   compactOctreePublicationHeaderEvidence,
+  reconstructCoarseOnlyOctreeOccupancyField,
   reconstructCompactOctreeOccupancyField,
   type CompactOctreeFieldEvidence,
 } from "./webgpu-smoke-compact-field";
@@ -847,6 +848,7 @@ export async function smokeRenderHybridPresentation(
     pipeline.setVolume(solver.surfaceFieldTexture ?? solver.volumeTexture,
       solver.columnBaseTexture ?? columnFallback);
     pipeline.setGlobalFineLevelSet(globalFineLevelSet);
+    pipeline.setCoarseLevelSet(solver.coarseLevelSetSource);
     pipeline.ensureSize(width, height);
     const capture = async (label: string, revision: number) => {
       const frameStarted = performance.now();
@@ -885,7 +887,9 @@ export async function smokeRenderHybridPresentation(
         const wallCornerCapPixels: [number, number, number, number] = [0, 0, 0, 0];
         const wallCornerMaximumY_m: [number, number, number, number] = [0, 0, 0, 0];
         const damExposedCornerCapPixels: [number, number] = [0, 0];
-        const fineCellWidth = globalFineLevelSet?.fineCellWidth ?? scene.voxelDomain.finestCellSize_m;
+        const fineCellWidth = globalFineLevelSet?.fineCellWidth
+          ?? solver.coarseLevelSetSource?.physicalCellSize
+          ?? scene.voxelDomain.finestCellSize_m;
         const wallPlaneTolerance = Math.max(5e-4, 0.08 * fineCellWidth);
         const cornerTangentialBand = 0.4 * fineCellWidth;
         const dam = damBreakFractions(scene.container.fillFraction);
@@ -1475,6 +1479,31 @@ export async function readCubicVolumeField(
   requireSpatialField = false,
 ): Promise<CubicVolumeFieldReadback> {
   const { nx, ny, nz, storedNy, gridKind } = solver.info;
+  const coarseOnly = gridKind === "octree" && !solver.globalFineLevelSetSource
+    ? solver.coarseLevelSetSource : undefined;
+  if (coarseOnly) {
+    const [directoryBytes, controlBytes] = await Promise.all([
+      readBufferBinding(device, coarseOnly.directory, 32 + coarseOnly.rowCapacity * 32),
+      readBufferBinding(device, coarseOnly.control, 64),
+    ]);
+    const directoryWords = new Uint32Array(directoryBytes.buffer,
+      directoryBytes.byteOffset, directoryBytes.byteLength / 4);
+    if (directoryWords[0] !== 0x8000_0000) {
+      const controlWords = new Uint32Array(controlBytes.buffer,
+        controlBytes.byteOffset, controlBytes.byteLength / 4);
+      throw new Error(`Coarse-only octree QA publication rejected: directory=${JSON.stringify(
+        Array.from(directoryWords.slice(0, 8)))}, control=${JSON.stringify(Array.from(controlWords))}`);
+    }
+    const reconstructed = reconstructCoarseOnlyOctreeOccupancyField(
+      directoryWords,
+      coarseOnly.generation,
+      [nx, ny, nz],
+    );
+    return {
+      field: reconstructed.field,
+      summary: summarizeScalarField(reconstructed.field, nx, ny, nz),
+    };
+  }
   const compactPaged = solver.info.gridKind === "octree" && Boolean(solver.globalFineLevelSetSource);
   if (compactPaged) {
     const source = solver.globalFineLevelSetSource;
@@ -1555,9 +1584,14 @@ export async function readCubicVolumeField(
     try {
       reconstructed = reconstructCompactOctreeOccupancyField(compactSnapshot, [nx, ny, nz]);
     } catch (error) {
-      const candidateFailure = await (solver as GPUSolverInstance & { octreeProjection?: {
+      const failureProjection = (solver as GPUSolverInstance & { octreeProjection?: {
         readPowerFrontierFailure(): Promise<unknown>;
-      } }).octreeProjection?.readPowerFrontierFailure();
+        readGlobalFineLevelSetDiagnostics(): Promise<unknown>;
+      } }).octreeProjection;
+      const [candidateFailure, fineFailure] = await Promise.all([
+        failureProjection?.readPowerFrontierFailure(),
+        failureProjection?.readGlobalFineLevelSetDiagnostics(),
+      ]);
       const accurateClassDispatchBinding = (solver as GPUSolverInstance & {
         workAccountingBuffers?: { accurateClassDispatch?: GPUBufferBinding };
       }).workAccountingBuffers?.accurateClassDispatch;
@@ -1583,7 +1617,7 @@ export async function readCubicVolumeField(
           ? readBufferBinding(device, pressureBuffers.mgpcgResidual,
             pressureBuffers.mgpcgResidual.size!) : undefined,
         pressureBuffers?.acceptedRows
-          ? readBufferBinding(device, pressureBuffers.acceptedRows, 24) : undefined,
+          ? readBufferBinding(device, pressureBuffers.acceptedRows, 44) : undefined,
       ]);
       const vectorSummary = (bytes: Uint8Array | undefined) => {
         if (!bytes) return undefined;
@@ -1614,7 +1648,7 @@ export async function readCubicVolumeField(
           return value;
         })() : undefined;
       const acceptedRows = acceptedRowsBytes
-        ? new Uint32Array(acceptedRowsBytes.buffer, acceptedRowsBytes.byteOffset, 6) : undefined;
+        ? new Uint32Array(acceptedRowsBytes.buffer, acceptedRowsBytes.byteOffset, 11) : undefined;
       const coefficientSource = pressureBuffers?.section63Coefficients;
       const coefficientSamples = coefficientSource && acceptedRows && preconditionedSummary
         ? await Promise.all(Array.from(new Set([0, 1, preconditionedSummary.minimumRow,
@@ -1636,8 +1670,10 @@ export async function readCubicVolumeField(
         preconditionedImage: vectorSummary(preconditionedImageBytes),
         residual: residualSummary,
         preconditionedDotResidual,
+        acceptedRows: acceptedRows ? Array.from(acceptedRows) : undefined,
         coefficientSamples,
         candidateFailure,
+        fineFailure,
         error: error instanceof Error ? error.message : String(error) }));
       await dumpFineRedistancePageDeltaForensics(device, solver, source, compactSnapshot);
       throw error;

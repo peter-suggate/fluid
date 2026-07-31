@@ -13,7 +13,9 @@ import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
 } from "./webgpu-octree-power-coarse-levelset";
 import {
+  validateCoarseLevelSetConsumerSource,
   validateGlobalFineLevelSetConsumerSource,
+  type CoarseLevelSetConsumerSource,
   type GlobalFineLevelSetConsumerSource,
 } from "./octree-consumer-sampling";
 import { globalFineClassifiedEmitShader, globalFineClassifiedScanShader } from "./webgpu-water-global-fine-tetra";
@@ -88,6 +90,7 @@ export interface WaterRenderDiagnostics extends WaterSurfacePresentationDiagnost
 
 export type WaterSurfaceGeometrySource =
   | "global-fine-coarse"
+  | "compact-coarse"
   | "retained-previous"
   | "empty"
   | "volume";
@@ -104,9 +107,12 @@ export function waterSurfaceGeometrySource(
   globalFineAttached: boolean,
   vertexCount: number,
   authorityLatch: number,
+  coarseAttached = false,
 ): WaterSurfaceGeometrySource {
-  if (!globalFineAttached) return vertexCount > 0 ? "volume" : "empty";
-  if (authorityLatch !== 0) return "global-fine-coarse";
+  if (!globalFineAttached && !coarseAttached) return vertexCount > 0 ? "volume" : "empty";
+  if (authorityLatch !== 0) return coarseAttached && !globalFineAttached
+    ? "compact-coarse" : "global-fine-coarse";
+  if (coarseAttached) return vertexCount > 0 ? "retained-previous" : "empty";
   return vertexCount > 0 ? "retained-previous" : "empty";
 }
 
@@ -1088,6 +1094,7 @@ export class RasterWaterPipeline {
   private dryInterfaceClearsEncoded = false;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
   private globalFineLevelSet?: GlobalFineLevelSetConsumerSource;
+  private coarseLevelSet?: CoarseLevelSetConsumerSource;
   private globalFineRenderParams?: GPUBuffer;
   private fallbackSparsePageTable?: GPUBuffer;
   private fallbackSparseActivePages?: GPUBuffer;
@@ -1100,6 +1107,7 @@ export class RasterWaterPipeline {
   private lastSurfaceDiagnostics?: WaterRenderDiagnostics;
   private lastSurfaceDiagnosticEncodeAt_ms = -Infinity;
   private pendingSurfaceDiagnosticGlobalFine = false;
+  private pendingSurfaceDiagnosticCoarse = false;
   private pendingSurfaceDiagnosticGlobalFineGeneration?: number;
 
   constructor(
@@ -1249,20 +1257,51 @@ export class RasterWaterPipeline {
       && previous.coarsePhiRowCapacity === source.coarsePhiRowCapacity
       && previous.topologyControl?.buffer === source.topologyControl?.buffer)) return;
     this.globalFineLevelSet = source;
-    if (source && this.globalFineRenderParams) {
-      const bytes = new ArrayBuffer(112); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
-      u32.set([...source.sampleDimensions, source.brickResolution], 0);
-      u32.set([...source.brickDimensions, source.samplesPerBrick], 4);
-      u32.set([source.pageCapacity, 7, source.pageCapacity, source.generation], 8);
-      f32.set([...source.domainOrigin, source.fineCellWidth], 12); f32[16] = source.fineFactor;
-      this.device.queue.writeBuffer(this.globalFineRenderParams, 0, bytes);
-    }
+    this.writeCompactRenderParams();
     this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false;
     // Keep same-shaped geometry alive across A/B source publication. The next
     // encode still calls ensureGeometry(), so a genuine dimension change
     // reallocates; clearing the key here destroyed A before B could prove its
     // tags and defeated the fail-closed retained-mesh contract.
     this.rebuildBindGroups();
+  }
+
+  /** Selects the moving compact-octree surface without enabling a fine band. */
+  setCoarseLevelSet(source: CoarseLevelSetConsumerSource | undefined) {
+    if (source) validateCoarseLevelSetConsumerSource(source);
+    const previous = this.coarseLevelSet;
+    if (previous === source || (previous && source
+      && previous.generation === source.generation
+      && previous.directory.buffer === source.directory.buffer
+      && previous.control.buffer === source.control.buffer
+      && previous.rowCapacity === source.rowCapacity)) return;
+    this.coarseLevelSet = source;
+    this.writeCompactRenderParams();
+    this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false;
+    this.rebuildBindGroups();
+  }
+
+  private writeCompactRenderParams() {
+    if (!this.globalFineRenderParams) return;
+    const fine = this.globalFineLevelSet;
+    const coarse = this.coarseLevelSet;
+    const source = fine ?? coarse;
+    if (!source) return;
+    const bytes = new ArrayBuffer(112); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
+    if (fine) {
+      u32.set([...fine.sampleDimensions, fine.brickResolution], 0);
+      u32.set([...fine.brickDimensions, fine.samplesPerBrick], 4);
+      u32.set([fine.pageCapacity, 7, fine.pageCapacity, fine.generation], 8);
+      f32.set([...fine.domainOrigin, fine.fineCellWidth], 12); f32[16] = fine.fineFactor;
+    } else {
+      const dimensions = coarse!.sampleDimensions;
+      u32.set([...dimensions, 4], 0);
+      u32.set(dimensions.map((value) => Math.ceil(value / 4)).concat(64), 4);
+      // Table state 6 is the renderer-private compact-coarse publication mode.
+      u32.set([1, 6, 1, coarse!.generation], 8);
+      f32.set([...coarse!.domainOrigin, coarse!.physicalCellSize], 12); f32[16] = 1;
+    }
+    this.device.queue.writeBuffer(this.globalFineRenderParams, 0, bytes);
   }
 
   setSecondaryParticles(pipeline: SecondaryParticleRenderPipeline | undefined) {
@@ -1301,6 +1340,7 @@ export class RasterWaterPipeline {
     this.surfaceDiagnosticReadback = this.device.createBuffer({ label: "Water render diagnostics", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     encoder.copyBufferToBuffer(this.indirectBuffer, 0, this.surfaceDiagnosticReadback, 0, 32);
     this.pendingSurfaceDiagnosticGlobalFine = Boolean(this.globalFineLevelSet);
+    this.pendingSurfaceDiagnosticCoarse = Boolean(this.coarseLevelSet);
     this.pendingSurfaceDiagnosticGlobalFineGeneration = this.globalFineLevelSet?.generation;
     this.surfaceDiagnosticPending = true;
   }
@@ -1314,9 +1354,13 @@ export class RasterWaterPipeline {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
       const globalFineAttached = this.pendingSurfaceDiagnosticGlobalFine;
+      const coarseAttached = this.pendingSurfaceDiagnosticCoarse;
       const globalFineAttachedGeneration = this.pendingSurfaceDiagnosticGlobalFineGeneration;
-      const surfaceGeometrySource = waterSurfaceGeometrySource(globalFineAttached, words[0], words[6]);
+      const surfaceGeometrySource = waterSurfaceGeometrySource(
+        globalFineAttached, words[0], words[6], coarseAttached,
+      );
       const meshPublicationGeneration = (surfaceGeometrySource === "global-fine-coarse"
+        || surfaceGeometrySource === "compact-coarse"
         || surfaceGeometrySource === "retained-previous") && words[7] !== 0xffff_ffff
         ? words[7] : undefined;
       this.lastSurfaceDiagnostics = {
@@ -1401,6 +1445,8 @@ export class RasterWaterPipeline {
   private rebuildBindGroups() {
     this.compositeBindGroups = new WeakMap();
     const globalFine = this.globalFineLevelSet;
+    const coarse = this.coarseLevelSet;
+    const coarseDirectory = globalFine?.coarsePhiDirectory ?? coarse?.directory;
     if (this.extractLayout && this.volume && this.columnBases && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseParams && this.fallbackSparseControl) this.extractBindGroup = this.device.createBindGroup({ layout: this.extractLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 2, resource: this.columnBases.createView() }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 7, resource: { buffer: this.fallbackSparsePageTable } },
@@ -1419,7 +1465,7 @@ export class RasterWaterPipeline {
       { binding: 10, resource: { buffer: this.globalFineRenderParams } },
       { binding: 11, resource: globalFine?.flags ?? { buffer: this.fallbackSparseControl } },
       { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } },
-      { binding: 16, resource: globalFine?.coarsePhiDirectory ?? { buffer: this.fallbackSparseControl } },
+      { binding: 16, resource: coarseDirectory ?? { buffer: this.fallbackSparseControl } },
       { binding: 17, resource: globalFine?.topologyControl ?? { buffer: this.fallbackSparseControl } },
     ] });
     if (this.globalPolygoniseLayout && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.globalCubeOffsets && this.globalFineRenderParams && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseControl) this.globalPolygoniseBindGroup = this.device.createBindGroup({ layout: this.globalPolygoniseLayout, entries: [
@@ -1431,7 +1477,7 @@ export class RasterWaterPipeline {
       { binding: 10, resource: { buffer: this.globalFineRenderParams } },
       { binding: 11, resource: globalFine?.flags ?? { buffer: this.fallbackSparseControl } },
       { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } },
-      { binding: 16, resource: globalFine?.coarsePhiDirectory ?? { buffer: this.fallbackSparseControl } },
+      { binding: 16, resource: coarseDirectory ?? { buffer: this.fallbackSparseControl } },
     ] });
     if (this.prepareLayout && this.indirectBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
@@ -1453,7 +1499,8 @@ export class RasterWaterPipeline {
   }
 
   encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase): RasterWaterEncodeResult | false {
-    const geometryDimensions = this.globalFineLevelSet?.sampleDimensions ?? [nx, ny, nz] as const;
+    const compactSurface = this.globalFineLevelSet ?? this.coarseLevelSet;
+    const geometryDimensions = compactSurface?.sampleDimensions ?? [nx, ny, nz] as const;
     this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
     if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.scenePipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.sceneBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
     const now_ms = performance.now();
@@ -1463,7 +1510,7 @@ export class RasterWaterPipeline {
     const updateSurface = shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms);
     const updateCaustics = this.causticsEnabled && (updateSurface || !this.causticsValid);
     if (updateSurface) {
-      if (this.globalFineLevelSet) {
+      if (compactSurface) {
         // Preserve the last published draw count while the GPU validates the
         // next A/B generation. Classification clears the sentinel only after
         // observing finite tagged fine data or a published compact-coarse
@@ -1486,11 +1533,15 @@ export class RasterWaterPipeline {
         compute.setPipeline(pipeline);compute.setBindGroup(0,group);compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer!,0);
       };
       const globalFine = this.globalFineLevelSet;
-      if (globalFine) {
+      const coarse = this.coarseLevelSet;
+      if (globalFine || coarse) {
         compute.setBindGroup(0, this.globalExtractBindGroup);
-        compute.setPipeline(this.extractGlobalFinePipeline);
-        compute.dispatchWorkgroups(...globalFineSurfaceDispatch(globalFine.pageCapacity, globalFine.samplesPerBrick));
-        if(globalFine.coarsePhiRowCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(globalFine.coarsePhiRowCapacity));}
+        if (globalFine) {
+          compute.setPipeline(this.extractGlobalFinePipeline);
+          compute.dispatchWorkgroups(...globalFineSurfaceDispatch(globalFine.pageCapacity, globalFine.samplesPerBrick));
+        }
+        const coarseRowCapacity = globalFine?.coarsePhiRowCapacity ?? coarse?.rowCapacity;
+        if(coarseRowCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(coarseRowCapacity));}
         compute.end();
         compute=encoder.beginComputePass({label:"Scan and emit classified global fine surface"});
         compute.setBindGroup(0,this.globalPolygoniseBindGroup);

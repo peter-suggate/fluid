@@ -17,6 +17,11 @@ import {
   octreeTechniqueTopologyShader,
 } from "../lib/webgpu-octree-technique-overlay";
 import { octreeTechniqueTetraValidityShader } from "../lib/webgpu-octree-technique-audit-overlay";
+import {
+  fluidBlastRadiusFloodShader,
+  fluidBlastRadiusOverlayShader,
+} from "../lib/webgpu-fluid-blast-radius";
+import { fluidCellTraceGatherShader } from "../lib/webgpu-fluid-cell-trace";
 import { secondaryParticleComputeShader, secondaryParticleOpticalShader } from "../lib/webgpu-secondary-particles";
 import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
@@ -78,6 +83,9 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "octree-technique-lifecycle-overlay": octreeTechniqueLifecycleShader,
   "octree-technique-fine-lifecycle-overlay": octreeTechniqueFineLifecycleShader,
   "octree-technique-tetra-validity-overlay": octreeTechniqueTetraValidityShader,
+  "fluid-blast-radius-flood": fluidBlastRadiusFloodShader,
+  "fluid-blast-radius-overlay": fluidBlastRadiusOverlayShader,
+  "fluid-cell-trace-gather": fluidCellTraceGatherShader,
   "secondary-liquid-particle-optics": secondaryParticleOpticalShader,
   "secondary-liquid-particle-compute": secondaryParticleComputeShader,
   "sparse-brick-dense-field": sparseBrickDenseFieldShader,

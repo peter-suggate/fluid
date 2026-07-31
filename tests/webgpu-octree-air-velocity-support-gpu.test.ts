@@ -252,6 +252,13 @@ test("the second same-epoch Section 5 publication reuses immutable topology and 
     "dynamic fine flags must be forwarded before candidate production retires");
   const topology = shader.slice(shader.indexOf("fnresolveAirSupportTopology"),
     shader.indexOf("fnpublishAirSupportOwnerDirectory"));
+  const descriptor = shader.slice(shader.indexOf("fndescriptorForIdentity"),
+    shader.indexOf("fnresolveAirSupportTopology"));
+  assert.match(descriptor,
+    /if\(any\(probe<vec3i\(0\)\)\|\|any\(probe>=vec3i\(p\.dimensions\)\)\)\{sizes\[bit\]=size;continue;\}/,
+    "positive-air topology must use the interior fan; ordinary faces apply closed/open boundaries later");
+  assert.doesNotMatch(descriptor, /boundary\|=/,
+    "air-only transition identities must not request liquid-only clipped catalog cases");
   assert.match(topology,
     /s\(47u\)!=0u.*stable=r\(at\+5u\)&~\(RECORD_FINE<<6u\).*dynamic=s\(p\.directoryFlagOffset\+recordCell\(item\)\)&RECORD_FINE/s,
     "reused records must refresh generation-dependent fine flags without re-resolving catalog topology");
