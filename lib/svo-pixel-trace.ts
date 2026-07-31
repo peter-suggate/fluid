@@ -12,6 +12,12 @@
  * `webgpu-svo-pixel-trace.ts` (which writes it on the GPU) and the overlay
  * pipeline plus the HUD (which read it), and it is exercised directly by tests.
  */
+import { DECORATION_SEGMENT_FLOATS } from "./visualization-decorations";
+import {
+  decorationVisualization,
+  hasFields,
+  type Visualization,
+} from "./visualization-registry";
 
 export const SVO_PIXEL_TRACE_ABI_VERSION = 3;
 /** "SVT" plus the ABI version, so a stale mapped buffer is never decoded. */
@@ -478,7 +484,12 @@ export function svoPixelTraceMipLadder(trace: SvoPixelTrace): readonly SvoPixelT
     }));
 }
 
-export const SVO_PIXEL_TRACE_SEGMENT_FLOATS = 16;
+/**
+ * One authority for the instance layout, held by the framework this geometry is
+ * drawn through. Kept under the old name so the trace's own call sites read in
+ * its own vocabulary.
+ */
+export const SVO_PIXEL_TRACE_SEGMENT_FLOATS = DECORATION_SEGMENT_FLOATS;
 
 export interface SvoPixelTraceGeometryOptions {
   /** Layers to emit. Absent layers cost nothing at draw time. */
@@ -1080,3 +1091,53 @@ export function resolveSvoPixelTracePinnedFrame(state: {
   const sameView = state.aimCameraKey !== undefined && state.aimCameraKey === state.cameraKey;
   return { refresh: sameView, stale: !sameView };
 }
+
+/* ------------------------------------------------------------------------- */
+/* Visualization: the ray probe, joining the shared overlay by wrapping.      */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * One registry entry per traced layer.
+ *
+ * The geometry builder above is not rewritten to join the framework: it already
+ * emits the shared instance layout in world metres, so each layer's decoration
+ * builds only its own segments and concatenates them into the frame's single
+ * buffer. That is the whole migration for a producer that predates the registry.
+ *
+ * One entry per layer rather than one for the whole trace, because the layers
+ * are what a reader turns on and off — and declaring them here is what lets the
+ * HUD's buttons and their swatches be a read of the catalog rather than a second
+ * hand-maintained list.
+ */
+export const svoPixelTraceVisualizations: readonly Visualization[] = Object.freeze(
+  SVO_PIXEL_TRACE_LAYERS.map((layer) => {
+    const definition = SVO_PIXEL_TRACE_LAYER_DEFINITIONS[layer];
+    return decorationVisualization<SvoPixelTrace>({
+      kind: "decoration",
+      id: `svo-traversal/${layer}`,
+      pass: "SVO traversal",
+      group: layer,
+      label: definition.label,
+      swatch: definition.swatch,
+      description: definition.description,
+      source: "One re-traced camera ray, recorded in execution order by the shipping traversal law",
+      legend: [{ swatch: definition.swatch, label: definition.label }],
+      accepts: (subject): subject is SvoPixelTrace =>
+        hasFields(subject, ["records", "ray", "pixel"])
+        && Array.isArray((subject as SvoPixelTrace).records),
+      // The record list is the picture. Its length plus the trace's identity is
+      // enough: a probe answering the same pixel with the same record count has
+      // not changed what this layer draws.
+      key: (trace, context) =>
+        `${trace.pixel.join("_")}.${trace.requestToken}.${trace.records.length}.${context.widthScale}`,
+      build(trace, context, into) {
+        const geometry = buildSvoPixelTraceGeometry(trace, {
+          layers: [layer], widthScale: context.widthScale,
+        });
+        // World metres already, so the builder's lattice transform is bypassed.
+        into.append(geometry.segments, geometry.segmentCount);
+        return [];
+      },
+    });
+  }),
+);

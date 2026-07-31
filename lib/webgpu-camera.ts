@@ -45,6 +45,27 @@ export function viewportRay(camera: CameraState, ndcX: number, ndcY: number, asp
   };
 }
 
+/**
+ * The ray behind one rendered pixel, at its centre.
+ *
+ * The `+0.5` and the aspect are the render target's, so this is the exact
+ * inverse of what a fragment or gather shader builds for that same pixel. That
+ * exactness is what makes a frozen aim possible: a selection recorded as a
+ * pixel silently names a different cell the moment the camera moves, and one
+ * recorded as a world ray does not.
+ */
+export function viewportRayForPixel(
+  camera: CameraState, pixelX: number, pixelY: number, width: number, height: number,
+): ViewportRay {
+  const across = Math.max(width, 1), down = Math.max(height, 1);
+  return viewportRay(
+    camera,
+    ((pixelX + 0.5) / across) * 2 - 1,
+    1 - ((pixelY + 0.5) / down) * 2,
+    viewportAspect(across, down),
+  );
+}
+
 /** Viewport ray for a pointer event measured against the canvas bounding rect. */
 export function viewportRayForPointer(
   camera: CameraState,

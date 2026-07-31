@@ -2,91 +2,37 @@
 
 import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
 import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "./generated/octree-power-catalog";
-import type { OctreeTechniqueDebugSource } from "./octree-technique-debug";
+import {
+  OCTREE_LIFECYCLE_MEMBERSHIP_PROGRAM,
+  OCTREE_TECHNIQUE_OVERLAY_CODES,
+  OCTREE_TECHNIQUE_PROGRAMS,
+  octreeTechniqueProgramForCode,
+  type OctreeTechniqueDebugSource,
+  type OctreeTechniqueProgramId,
+} from "./octree-technique-debug";
+import {
+  visualizationBindGroupEntries,
+  visualizationBindingPreambleWGSL,
+  type VisualizationProgram,
+} from "./visualization-bindings";
+import { octreeTechniqueSharedWGSL } from "./webgpu-octree-technique-shared";
+import { describeFineFloodLadder } from "./fine-flood-provenance";
+import { WebGPUFluidBlastRadius } from "./webgpu-fluid-blast-radius";
 import { makeFineLevelSetSortedWorklistLookupWGSL } from "./webgpu-octree-fine-levelset-bricks";
 import { PassBroker } from "./webgpu-pass-broker";
 
-const sharedWGSL = /* wgsl */ `
-struct Uniforms {
-  viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f,
-  options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f,
-}
-struct Leaf { originX:u32, originY:u32, originZ:u32, size:u32, flags:u32, pad0:u32, pad1:u32, pad2:u32, phiGradient:vec4f, motion:vec4f }
-struct VertexOutput { @builtin(position) position:vec4f, @location(0) uv:vec2f }
-struct CameraRay { origin:vec3f, direction:vec3f }
-@vertex fn vertexMain(@builtin(vertex_index) index:u32)->VertexOutput {
-  var positions=array<vec2f,3>(vec2f(-1.0,-1.0),vec2f(3.0,-1.0),vec2f(-1.0,3.0));
-  var result:VertexOutput; result.position=vec4f(positions[index],0.0,1.0); result.uv=positions[index]*0.5+0.5; return result;
-}
-fn unpackOrigin(word:u32)->vec3u{return vec3u(word&1023u,(word>>10u)&1023u,(word>>20u)&1023u);}
-fn powerSigns(code:u32)->vec3f { let bits=code&7u; return vec3f(select(1.0,-1.0,(bits&1u)!=0u),select(1.0,-1.0,(bits&2u)!=0u),select(1.0,-1.0,(bits&4u)!=0u)); }
-fn inversePowerTransform(value:vec3f,code:u32)->vec3f {
-  let q=value*powerSigns(code); let permutation=(code/8u)%6u;
-  if(permutation==0u){return q.xyz;}if(permutation==1u){return q.xzy;}if(permutation==2u){return q.yxz;}
-  if(permutation==3u){return q.zxy;}if(permutation==4u){return q.yzx;}return q.zyx;
-}
-fn cameraRay(uv:vec2f)->CameraRay {
-  let ndc=uv*2.0-1.0;let origin=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-origin);
-  var right=cross(forward,vec3f(0.0,1.0,0.0));if(length(right)<1e-5){right=vec3f(1.0,0.0,0.0);}right=normalize(right);let up=normalize(cross(right,forward));
-  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*${CAMERA_TAN_HALF_FOV}+up*ndc.y*${CAMERA_TAN_HALF_FOV});return CameraRay(origin,direction);
-}
-fn boxInterval(ray:CameraRay,minimum:vec3f,maximum:vec3f)->vec2f {
-  let inverse=1.0/select(vec3f(1e-20),ray.direction,abs(ray.direction)>vec3f(1e-20));let a=(minimum-ray.origin)*inverse;let b=(maximum-ray.origin)*inverse;
-  let lo=min(a,b);let hi=max(a,b);return vec2f(max(max(lo.x,lo.y),max(lo.z,0.0)),min(min(hi.x,hi.y),hi.z));
-}
-fn traversalSteps(ray:CameraRay,interval:vec2f)->u32 {
-  let scale=u.gridInfo.xyz/max(u.container.xyz,vec3f(1e-9));
-  let fineTravel=abs(ray.direction*(interval.y-interval.x))*scale;
-  return u32(clamp(ceil(fineTravel.x+fineTravel.y+fineTravel.z+1.0),1.0,512.0));
-}
-fn volumeOpacity()->f32{return clamp(u.debug.y,0.05,1.0);}
-fn composite(accum:vec4f,color:vec3f,alpha:f32)->vec4f {
-  let contribution=(1.0-accum.a)*clamp(alpha,0.0,1.0);
-  return vec4f(accum.rgb+contribution*color,accum.a+contribution);
-}
-fn finishVolume(accum:vec4f)->vec4f {
-  if(accum.a<=0.001){discard;}
-  return vec4f(displayColor(accum.rgb/max(accum.a,1e-6)),accum.a);
-}
-fn raySegmentDistance(ray:CameraRay,a:vec3f,b:vec3f)->vec2f {
-  let edge=b-a;let w=ray.origin-a;let aa=dot(ray.direction,ray.direction);let bb=dot(ray.direction,edge);let cc=max(dot(edge,edge),1e-12);let dd=dot(ray.direction,w);let ee=dot(edge,w);let denominator=aa*cc-bb*bb;
-  var t=select(0.0,(bb*ee-cc*dd)/denominator,abs(denominator)>1e-10);var s=clamp((aa*ee-bb*dd)/max(denominator,1e-10),0.0,1.0);t=max(0.0,(bb*s-dd)/aa);s=clamp((bb*t+ee)/cc,0.0,1.0);t=max(0.0,(bb*s-dd)/aa);
-  return vec2f(length(ray.origin+ray.direction*t-(a+edge*s)),t);
-}
-fn sliceRay(uv:vec2f)->vec4f {
-  let axis=i32(round(u.debug.x)); if(axis<=0||axis>=4){return vec4f(0.0,0.0,0.0,-1.0);}
-  let ray=cameraRay(uv);let origin=ray.origin;let direction=ray.direction;
-  let boundsMin=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z); let dims=max(u.gridInfo.xyz,vec3f(1.0));
-  var denominator=direction.z; var rayOrigin=origin.z; var coordinate=boundsMin.z+(floor(clamp(u.debug.y,0.0,0.999999)*dims.z)+0.5)*u.container.z/dims.z;
-  if(axis==2){denominator=direction.x;rayOrigin=origin.x;coordinate=boundsMin.x+(floor(clamp(u.debug.y,0.0,0.999999)*dims.x)+0.5)*u.container.x/dims.x;}
-  if(axis==3){denominator=direction.y;rayOrigin=origin.y;coordinate=(floor(clamp(u.debug.y,0.0,0.999999)*dims.y)+0.5)*u.container.y/dims.y;}
-  if(abs(denominator)<=1e-6){return vec4f(0.0,0.0,0.0,-1.0);} let distance=(coordinate-rayOrigin)/denominator;
-  return vec4f(origin+direction*distance,distance);
-}
-fn worldToFine(point:vec3f)->vec3f { let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z); return (point-minimum)/u.container.xyz*u.gridInfo.xyz; }
-fn fineToWorld(point:vec3f)->vec3f { let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z); return minimum+point/u.gridInfo.xyz*u.container.xyz; }
-fn slice2(point:vec3f)->vec2f { let axis=i32(round(u.debug.x)); if(axis==1){return point.xy;}if(axis==2){return point.zy;}return point.xz; }
-fn segmentDistance(point:vec2f,a:vec2f,b:vec2f)->f32 { let edge=b-a;let t=clamp(dot(point-a,edge)/max(dot(edge,edge),1e-10),0.0,1.0);return length(point-(a+t*edge)); }
-fn segmentDistance3(point:vec3f,a:vec3f,b:vec3f)->f32 { let edge=b-a;let t=clamp(dot(point-a,edge)/max(dot(edge,edge),1e-10),0.0,1.0);return length(point-(a+t*edge)); }
-fn leafOrigin(leaf:Leaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
-fn leafContains(leaf:Leaf,pointFine:vec3f)->bool { let origin=vec3f(leafOrigin(leaf)); return leaf.size>0u&&all(pointFine>=origin)&&all(pointFine<origin+vec3f(f32(leaf.size))); }
-fn displayColor(linear:vec3f)->vec3f { let mapped=linear/(linear+vec3f(1.0));return pow(max(mapped,vec3f(0.0)),vec3f(1.0/2.2)); }
-fn compositeDisplay(accum:vec4f,linearColor:vec3f,alpha:f32)->vec4f{return composite(accum,displayColor(linearColor),alpha);}
-fn finishDisplayVolume(accum:vec4f)->vec4f{if(accum.a<=0.001){discard;}return vec4f(accum.rgb/max(accum.a,1e-6),accum.a);}
-`;
+/** Four band widths, four ladder scalars, then four vec4u of prefix reach. */
+export const OCTREE_TECHNIQUE_BAND_PREFIX_WORD_OFFSET = 8;
+export const OCTREE_TECHNIQUE_BAND_CONFIG_BYTES =
+  (OCTREE_TECHNIQUE_BAND_PREFIX_WORD_OFFSET + 16) * 4;
+
 
 export const octreeTechniqueTopologyShader = /* wgsl */ `
-${sharedWGSL}
+${octreeTechniqueSharedWGSL}
 struct Metric { topologyCode:u32, transformAndFlags:u32, volume:f32, reserved:u32 }
 struct TetraHeader { first:u32, count:u32, flags:u32 }
 struct TetraVertex { value:vec4f }
-@group(0) @binding(0) var<uniform> u:Uniforms;
-@group(0) @binding(1) var ownerRows:texture_3d<u32>;
-@group(0) @binding(2) var<storage,read> leaves:array<Leaf>;
-@group(0) @binding(3) var<storage,read> metrics:array<Metric>;
-@group(0) @binding(4) var<storage,read> tetraHeaders:array<TetraHeader>;
-@group(0) @binding(5) var<storage,read> tetrahedra:array<u32>;
-@group(0) @binding(6) var<storage,read> tetraVertices:array<TetraVertex>;
+${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.topology)}
 const INVALID:u32=0xffffffffu; const VALID:u32=0x80000000u;
 fn edgeInk(point:vec2f,a:vec3f,b:vec3f,width:f32)->f32 { return 1.0-smoothstep(width,2.2*width,segmentDistance(point,slice2(fineToWorld(a)),slice2(fineToWorld(b)))); }
 fn topologyFault(row:u32,pointFine:vec3f)->vec4f {
@@ -141,11 +87,11 @@ fn volumeTopology(uv:vec2f,mode:i32)->vec4f {
  * a real compact source instead of the octree renderer's zero-texture fallback.
  */
 export const octreeTechniqueFaceShader = /* wgsl */ `
-${sharedWGSL}
+${octreeTechniqueSharedWGSL}
 struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f }
 struct Metric { topologyCode:u32,transformAndFlags:u32,volume:f32,reserved:u32 }
 struct CatalogSlotGeometry { neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDistance:vec4f }
-@group(0) @binding(0) var<uniform> u:Uniforms;@group(0) @binding(1) var ownerRows:texture_3d<u32>;@group(0) @binding(2) var<storage,read> headers:array<LeafHeader>;@group(0) @binding(3) var<storage,read> metrics:array<Metric>;@group(0) @binding(4) var<storage,read> entryHeaders:array<vec2u>;@group(0) @binding(5) var<storage,read> catalogFaces:array<CatalogSlotGeometry>;
+${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.face)}
 const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;
 fn cellCoord(cell:u32)->vec3u{let d=vec3u(max(u.gridInfo.xyz,vec3f(1.0)));return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}
 fn rowAt(point:vec3f)->u32{return textureLoad(ownerRows,vec3i(clamp(floor(worldToFine(point)),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0))),0).x;}
@@ -160,20 +106,57 @@ fn faceVolume(uv:vec2f,operatorView:bool)->vec4f{let ray=cameraRay(uv);let minim
 `;
 
 export const octreeTechniqueStructuredShader = /* wgsl */ `
-${sharedWGSL}
+${octreeTechniqueSharedWGSL}
 struct LeafHeader { cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f }struct Metric { topologyCode:u32,transformAndFlags:u32,volume:f32,reserved:u32 }struct StructuredParams { words:array<vec4u,16> }
-@group(0) @binding(0) var<uniform> u:Uniforms;@group(0) @binding(1) var ownerRows:texture_3d<u32>;@group(0) @binding(2) var<storage,read> headers:array<LeafHeader>;@group(0) @binding(3) var<storage,read> metrics:array<Metric>;@group(0) @binding(4) var<storage,read> accepted:array<u32>;@group(0) @binding(5) var<storage,read> rowVelocities:array<vec4f>;@group(0) @binding(6) var<uniform> structured:StructuredParams;@group(0) @binding(7) var<storage,read> authority:array<u32>;@group(0) @binding(8) var<storage,read> pressure:array<f32>;
+${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.structured)}
 const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;fn word(i:u32)->u32{return structured.words[i/4u][i%4u];}fn finiteValue(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn cellCoord(cell:u32)->vec3u{let d=vec3u(max(u.gridInfo.xyz,vec3f(1.0)));return vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));}fn rowAt(point:vec3f)->u32{return textureLoad(ownerRows,vec3i(clamp(floor(worldToFine(point)),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0))),0).x;}fn rowValid(row:u32,point:vec3f)->bool{if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)){return false;}let h=headers[row];let origin=vec3f(cellCoord(h.cell));return h.size>0u&&(metrics[row].transformAndFlags&VALID)!=0u&&all(point>=origin)&&all(point<origin+vec3f(f32(h.size)));}fn publicationValid()->bool{return arrayLength(&accepted)>=6u&&accepted[0]==0u&&accepted[3]!=0u;}fn rowCapacity()->u32{return max(1u,word(0u));}fn authorityBase()->u32{return (accepted[4]&1u)*word(15u);}fn heat(value:f32)->vec3f{let t=clamp(value,0.0,1.0);if(t<0.5){return mix(vec3f(0.04,0.20,0.70),vec3f(0.06,0.78,0.55),t*2.0);}return mix(vec3f(0.06,0.78,0.55),vec3f(1.0,0.08,0.025),(t-0.5)*2.0);}
-fn rowSample(row:u32,mode:i32,volume:bool)->vec4f{if(!publicationValid()||row>=accepted[2]||row>=rowCapacity()){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let metric=metrics[row];if(!finiteValue(metric.volume)||metric.volume<=0.0){return vec4f(vec3f(1.0,0.01,0.10),0.94);}if(mode==27||mode==30){let at=(accepted[4]&1u)*rowCapacity()+row;if(at>=arrayLength(&rowVelocities)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let velocity=rowVelocities[at];if(velocity.w<=0.0||any(velocity.xyz!=velocity.xyz)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}if(mode==30){let direction=vec3f(0.5)+0.5*velocity.xyz/max(length(velocity.xyz),1e-6);return vec4f(direction,select(0.88,0.13,volume));}return vec4f(heat(length(velocity.xyz)/max(u.environment.z,1e-4)),select(0.88,0.13,volume));}let base=authorityBase();let maxSlots=word(1u);let slotBase=row*maxSlots;var ownPressure=0.0;if(row<arrayLength(&pressure)){ownPressure=pressure[row];}var largest=0.0;var flux=0.0;for(var local=0u;local<${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u;local+=1u){if(local>=maxSlots){break;}let at=slotBase+local;let handleAt=base+word(29u)+at;let signAt=base+word(30u)+at;if(handleAt>=arrayLength(&authority)||signAt>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let handle=authority[handleAt];if(handle==INVALID||handle>=accepted[5]){continue;}if(mode==29){let valueAt=base+word(16u)+handle;let areaAt=base+word(20u)+handle;let fractionAt=base+word(22u)+handle;if(max(valueAt,max(areaAt,fractionAt))>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}flux+=f32(bitcast<i32>(authority[signAt]))*bitcast<f32>(authority[valueAt])*bitcast<f32>(authority[areaAt])*bitcast<f32>(authority[fractionAt]);}else{let neighborAt=base+word(18u)+handle;let inverseAt=base+word(21u)+handle;if(max(neighborAt,inverseAt)>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let neighbor=authority[neighborAt];var neighborPressure=0.0;if(neighbor<arrayLength(&pressure)){neighborPressure=pressure[neighbor];}largest=max(largest,abs(neighborPressure-ownPressure)*bitcast<f32>(authority[inverseAt]));}}if(mode==28){return vec4f(heat(largest/max(u.environment.z,0.05)),select(0.90,0.13,volume));}let width=f32(headers[row].size)*bitcast<f32>(word(40u));let divergence=flux/max(metric.volume*width*width*width,1e-9);let scaled=clamp(divergence*max(u.environment.y,1e-6),-1.0,1.0);let color=select(mix(vec3f(0.96),vec3f(0.88,0.10,0.08),scaled),mix(vec3f(0.96),vec3f(0.08,0.28,0.88),-scaled),scaled<0.0);return vec4f(color,select(0.92,0.14,volume));}
+/**
+ * The eighteen power-stencil directions, in the operator's own order.
+ *
+ * Six faces then twelve edges, matching \`FLUID_CELL_TRACE_DIRECTIONS\` so the
+ * picker's arrows and this field describe the same couplings.
+ */
+fn stencilDirection(index:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[index];}
+
+/**
+ * Per-row operator cost: the coefficients one apply reads for this unknown.
+ *
+ * \`entryCount\` is the assembled row's stencil width, so it is exactly what the
+ * smoother touches on every sweep, of which there are many per frame. A regular
+ * interior row sits near six; a row straddling a refinement transition climbs
+ * toward the full eighteen the power diagram needs to stay consistent across a
+ * T-junction. So this paints where the adaptivity is charging for itself, which
+ * is a different question from where the fluid is.
+ */
+fn costSample(row:u32,volume:bool)->vec4f{let ceiling=f32(max(word(1u),1u));let entries=f32(headers[row].entryCount);return vec4f(heat(clamp(entries/ceiling,0.0,1.0)),select(0.90,0.13,volume));}
+
+/**
+ * Gather locality: how far apart in the compact array this row's neighbours sit.
+ *
+ * The apply reads \`pressure[neighbour]\` once per coupling, so the spread of
+ * neighbour indices is the access pattern the hardware actually sees — and it is
+ * invisible to any count of arithmetic. Rows whose eighteen neighbours land
+ * within a few hundred indices gather from one region and ride the cache; rows
+ * whose neighbours are tens of thousands apart scatter, and pay bandwidth for it
+ * every sweep. Normalised by the live row count so the same colour means the
+ * same thing at any resolution, and on a log scale because the interesting
+ * difference is between "tens away" and "tens of thousands away", which a linear
+ * ramp flattens into one colour.
+ */
+fn localitySample(row:u32,volume:bool)->vec4f{let header=headers[row];let size=i32(max(header.size,1u));let origin=vec3i(cellCoord(header.cell));let centre=origin+vec3i(size/2);var spread=0u;var live=0u;for(var index=0u;index<18u;index+=1u){let probe=centre+stencilDirection(index)*(size/2+1);if(any(probe<vec3i(0))||any(probe>=vec3i(u.gridInfo.xyz))){continue;}let neighbour=textureLoad(ownerRows,probe,0).x;if(neighbour>=accepted[2]||neighbour==row){continue;}if(!rowValid(neighbour,vec3f(probe)+vec3f(0.5))){continue;}live+=1u;spread=max(spread,u32(abs(i32(neighbour)-i32(row))));}
+// A row with no live coupling is a boundary or isolated unknown, not a locality
+// result; drawing it as "perfectly local" would be a lie the colour cannot undo.
+if(live==0u){return vec4f(vec3f(0.10,0.12,0.18),select(0.35,0.06,volume));}
+let normalized=log2(f32(spread)+1.0)/log2(f32(max(accepted[2],2u)));return vec4f(heat(clamp(normalized,0.0,1.0)),select(0.90,0.13,volume));}
+
+fn rowSample(row:u32,mode:i32,volume:bool)->vec4f{if(!publicationValid()||row>=accepted[2]||row>=rowCapacity()){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let metric=metrics[row];if(!finiteValue(metric.volume)||metric.volume<=0.0){return vec4f(vec3f(1.0,0.01,0.10),0.94);}if(mode==33){return costSample(row,volume);}if(mode==34){return localitySample(row,volume);}if(mode==27||mode==30){let at=(accepted[4]&1u)*rowCapacity()+row;if(at>=arrayLength(&rowVelocities)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let velocity=rowVelocities[at];if(velocity.w<=0.0||any(velocity.xyz!=velocity.xyz)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}if(mode==30){let direction=vec3f(0.5)+0.5*velocity.xyz/max(length(velocity.xyz),1e-6);return vec4f(direction,select(0.88,0.13,volume));}return vec4f(heat(length(velocity.xyz)/max(u.environment.z,1e-4)),select(0.88,0.13,volume));}let base=authorityBase();let maxSlots=word(1u);let slotBase=row*maxSlots;var ownPressure=0.0;if(row<arrayLength(&pressure)){ownPressure=pressure[row];}var largest=0.0;var flux=0.0;for(var local=0u;local<${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u;local+=1u){if(local>=maxSlots){break;}let at=slotBase+local;let handleAt=base+word(29u)+at;let signAt=base+word(30u)+at;if(handleAt>=arrayLength(&authority)||signAt>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let handle=authority[handleAt];if(handle==INVALID||handle>=accepted[5]){continue;}if(mode==29){let valueAt=base+word(16u)+handle;let areaAt=base+word(20u)+handle;let fractionAt=base+word(22u)+handle;if(max(valueAt,max(areaAt,fractionAt))>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}flux+=f32(bitcast<i32>(authority[signAt]))*bitcast<f32>(authority[valueAt])*bitcast<f32>(authority[areaAt])*bitcast<f32>(authority[fractionAt]);}else{let neighborAt=base+word(18u)+handle;let inverseAt=base+word(21u)+handle;if(max(neighborAt,inverseAt)>=arrayLength(&authority)){return vec4f(vec3f(1.0,0.01,0.10),0.94);}let neighbor=authority[neighborAt];var neighborPressure=0.0;if(neighbor<arrayLength(&pressure)){neighborPressure=pressure[neighbor];}largest=max(largest,abs(neighborPressure-ownPressure)*bitcast<f32>(authority[inverseAt]));}}if(mode==28){return vec4f(heat(largest/max(u.environment.z,0.05)),select(0.90,0.13,volume));}let width=f32(headers[row].size)*bitcast<f32>(word(40u));let divergence=flux/max(metric.volume*width*width*width,1e-9);let scaled=clamp(divergence*max(u.environment.y,1e-6),-1.0,1.0);let color=select(mix(vec3f(0.96),vec3f(0.88,0.10,0.08),scaled),mix(vec3f(0.96),vec3f(0.08,0.28,0.88),-scaled),scaled<0.0);return vec4f(color,select(0.92,0.14,volume));}
 fn structuredVolume(uv:vec2f,mode:i32)->vec4f{let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let interval=boxInterval(ray,minimum,minimum+u.container.xyz);if(interval.y<=interval.x){discard;}let steps=traversalSteps(ray,interval);let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;for(var i=0u;i<512u;i+=1u){if(i>=steps||accum.a>0.985){break;}let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);let row=rowAt(point);if(row==previous){continue;}previous=row;if(!rowValid(row,worldToFine(point))){continue;}let sample=rowSample(row,mode,true);accum=composite(accum,sample.rgb,sample.a*volumeOpacity());}return finishVolume(accum);}
 @fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f{let mode=i32(round(u.debug.w));if(i32(round(u.debug.x))==4){return structuredVolume(input.uv,mode);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);if(any(hit.xyz<minimum)||any(hit.xyz>minimum+u.container.xyz)){discard;}let row=rowAt(hit.xyz);if(row==INVALID){discard;}if(!rowValid(row,worldToFine(hit.xyz))){return vec4f(displayColor(vec3f(1.0,0.01,0.10)),0.94);}let sample=rowSample(row,mode,false);return vec4f(displayColor(sample.rgb),sample.a);}
 `;
 
 const octreeLifecycleMembershipShader = /* wgsl */ `
 struct Config { dimensions:vec3u,tileSize:u32,capacity:u32,pad0:u32,pad1:u32,pad2:u32 }
-@group(0) @binding(0) var<storage,read> worklist:array<u32>;
-@group(0) @binding(1) var<storage,read_write> membership:array<u32>;
-@group(0) @binding(2) var<uniform> config:Config;
+${visualizationBindingPreambleWGSL(OCTREE_LIFECYCLE_MEMBERSHIP_PROGRAM)}
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3u) {
   let slot=id.x;if(slot>=config.capacity){return;}let header=16u;
   let activeCount=min(worklist[0],config.capacity);if(slot<activeCount){let tile=worklist[header+slot];if(tile<arrayLength(&membership)){membership[tile]=1u;}}
@@ -181,11 +164,9 @@ struct Config { dimensions:vec3u,tileSize:u32,capacity:u32,pad0:u32,pad1:u32,pad
 }`;
 
 export const octreeTechniqueLifecycleShader = /* wgsl */ `
-${sharedWGSL}
+${octreeTechniqueSharedWGSL}
 struct Config { dimensions:vec3u,tileSize:u32,capacity:u32,pad0:u32,pad1:u32,pad2:u32 }
-@group(0) @binding(0) var<uniform> u:Uniforms;
-@group(0) @binding(1) var<storage,read> membership:array<u32>;
-@group(0) @binding(2) var<uniform> config:Config;
+${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.lifecycle)}
 fn lifecycleAt(point:vec3f)->vec4f {
   let fine=worldToFine(point);let tile=vec3u(clamp(floor(fine/f32(max(config.tileSize,1u))),vec3f(0.0),vec3f(config.dimensions)-vec3f(1.0)));
   let index=tile.x+config.dimensions.x*(tile.y+config.dimensions.y*tile.z);if(index>=config.capacity||index>=arrayLength(&membership)){return vec4f(1.0,0.01,0.06,0.92);}
@@ -201,19 +182,17 @@ fn lifecycleVolume(uv:vec2f)->vec4f {
 }`;
 
 export const octreeTechniqueFineLifecycleShader = /* wgsl */ `
-${sharedWGSL}
+${octreeTechniqueSharedWGSL}
 struct FineParams { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,domainOrigin:vec3f,fineCellWidth:f32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32 }
 struct FineState { color:vec3f,alpha:f32,address:u32 }
-@group(0) @binding(0) var<uniform> u:Uniforms;
-@group(0) @binding(1) var<uniform> fine:FineParams;
-@group(0) @binding(2) var<storage,read> worklist:array<u32>;
-@group(0) @binding(3) var<storage,read> metadata:array<u32>;
-struct BandConfig { pressureBandCells:u32,surfaceBandCells:u32,transportBandFineCells:u32,redistanceBandFineCells:u32 }
-@group(0) @binding(4) var<uniform> bands:BandConfig;
-@group(0) @binding(5) var<storage,read> sampleFlags:array<u32>;
-@group(0) @binding(6) var<storage,read> topologyControl:array<u32>;
-@group(0) @binding(7) var<storage,read> redistanceControl:array<u32>;
-@group(0) @binding(8) var<storage,read> finePhi:array<f32>;
+struct BandConfig {
+  pressureBandCells:u32,surfaceBandCells:u32,transportBandFineCells:u32,redistanceBandFineCells:u32,
+  /** Passes in the ladder the last redistance encode emitted. */
+  ladderPasses:u32,pad0:u32,pad1:u32,pad2:u32,
+  /** Reach of the first k + 1 encoded passes, so colours name real schedule slots. */
+  prefixReach:array<vec4u,4>,
+}
+${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.fine)}
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;
 ${makeFineLevelSetSortedWorklistLookupWGSL("fine", "metadata", "worklist", "pageOf")}
 fn fineAddress(q:vec3i)->u32 {
@@ -316,6 +295,94 @@ fn bandResidency(point:vec3f)->vec4f {
   // Resident past the redistance cutoff: whole-brick dilation and safety rings.
   return vec4f(0.10,0.40,0.30,0.16);
 }
+/**
+ * Where each sample's distance came from.
+ *
+ * The redistance commit leaves the resolved seed index in the work channel, so
+ * the flood's dependency graph is resident after the frame. Colouring a sample
+ * by the leading encoded passes whose combined reach covers its hop turns that
+ * graph into the question worth asking of the schedule: which passes are load
+ * bearing, and where.
+ *
+ * The band views above answer "which cells are resident"; this answers "how far
+ * information had to travel to reach them", which is the cost of residency
+ * rather than its extent.
+ */
+fn floodSampleCell(index:u32)->vec3u {
+  let perBrick=max(fine.samplesPerBrick,1u);
+  let id=index/perBrick;let local=index-id*perBrick;
+  let key=metadata[id*10u+1u];
+  let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);
+  let bz=key/xy;let brickRemainder=key-bz*xy;let by=brickRemainder/max(fine.brickDimensions.x,1u);
+  let brick=vec3u(brickRemainder-by*fine.brickDimensions.x,by,bz);
+  let r=max(fine.brickResolution,1u);
+  let lz=local/(r*r);let localRemainder=local-lz*r*r;let ly=localRemainder/r;
+  return brick*r+vec3u(localRemainder-ly*r,ly,lz);
+}
+/**
+ * Returns 0 for a self-seeded sample, k for a hop the first k encoded passes
+ * cover, and ladderPasses + 1 for a hop deeper than the whole encoded reach.
+ * The last case is not a fault: a warm publication carries and remaps the
+ * previous closest-point field, so a link can be older than this frame's flood.
+ */
+fn floodPass(reach:u32)->u32 {
+  if(reach==0u){return 0u;}
+  for(var k=0u;k<bands.ladderPasses;k+=1u){
+    if(bands.prefixReach[k/4u][k%4u]>=reach){return k+1u;}
+  }
+  return bands.ladderPasses+1u;
+}
+fn floodColor(passIndex:u32)->vec3f {
+  if(passIndex==0u){return vec3f(1.0,1.0,1.0);}
+  if(passIndex>bands.ladderPasses){return vec3f(1.0,0.05,0.72);}
+  let t=f32(passIndex-1u)/max(f32(bands.ladderPasses-1u),1.0);
+  if(t<0.5){return mix(vec3f(0.10,0.28,0.92),vec3f(0.06,0.78,0.80),t*2.0);}
+  return mix(vec3f(0.06,0.78,0.80),vec3f(0.98,0.62,0.08),(t-0.5)*2.0);
+}
+fn floodProvenance(point:vec3f)->vec4f {
+  if(arrayLength(&topologyControl)==0u||topologyControl[0]!=0u
+    ||arrayLength(&redistanceControl)<=4u||redistanceControl[3]==0u||redistanceControl[4]!=0u){
+    return vec4f(1.0,0.01,0.06,0.96);
+  }
+  if(bands.ladderPasses==0u){return vec4f(0.0);}
+  let relative=renderWorldToFine(point);
+  if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return vec4f(0.0);}
+  let address=fineAddress(vec3i(floor(relative)));
+  if(address==INVALID){return vec4f(0.03,0.09,0.28,0.05);}
+  if(address>=arrayLength(&floodSeeds)){return vec4f(1.0,0.01,0.06,0.96);}
+  let seed=floodSeeds[address];
+  // A resident, valid sample with no seed is a correctness fact, not a cost
+  // one, so it gets its own ink rather than the deepest pass colour.
+  if(seed==INVALID||seed>=arrayLength(&sampleFlags)){return vec4f(1.0,0.02,0.14,0.92);}
+  let delta=abs(vec3i(floodSampleCell(seed))-vec3i(floodSampleCell(address)));
+  let passIndex=floodPass(u32(max(max(delta.x,delta.y),delta.z)));
+  if(passIndex==0u){return vec4f(1.0,1.0,1.0,0.85);}
+  if(passIndex>bands.ladderPasses){return vec4f(floodColor(passIndex),0.80);}
+  // Later passes carry less of the field, so they are drawn more strongly:
+  // the view is meant to reveal the tail, not the bulk the first pass closes.
+  let t=f32(passIndex-1u)/max(f32(bands.ladderPasses-1u),1.0);
+  return vec4f(floodColor(passIndex),0.10+0.45*t);
+}
+fn floodProvenanceVolume(uv:vec2f)->vec4f {
+  let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;
+  let interval=boxInterval(ray,minimum,maximum);if(interval.y<=interval.x){discard;}
+  let travel=abs(ray.direction*(interval.y-interval.x))/max(fine.fineCellWidth,1e-9);
+  let steps=u32(clamp(ceil(travel.x+travel.y+travel.z+1.0),1.0,512.0));
+  let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;
+  for(var i=0u;i<512u;i+=1u){
+    if(i>=steps||accum.a>0.985){break;}
+    let point=ray.origin+ray.direction*(interval.x+(f32(i)+0.5)*dt);
+    let relative=renderWorldToFine(point);
+    if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){continue;}
+    let address=fineAddress(vec3i(floor(relative)));
+    if(address==previous){continue;}
+    previous=address;
+    let sample=floodProvenance(point);
+    if(sample.a<=0.001){continue;}
+    accum=composite(accum,sample.rgb,sample.a*volumeOpacity());
+  }
+  return finishVolume(accum);
+}
 fn bandResidencyVolume(uv:vec2f)->vec4f {
   let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;
   let interval=boxInterval(ray,minimum,maximum);if(interval.y<=interval.x){discard;}
@@ -341,32 +408,28 @@ fn globalFinePhiVolume(uv:vec2f)->vec4f {
 }
 @fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f {
   let mode=i32(round(u.debug.w));
-  if(i32(round(u.debug.x))==4){if(mode==25){return globalFinePhiVolume(input.uv);}if(mode==26){return bandResidencyVolume(input.uv);}return fineVolume(input.uv);}
+  if(i32(round(u.debug.x))==4){if(mode==25){return globalFinePhiVolume(input.uv);}if(mode==26){return bandResidencyVolume(input.uv);}if(mode==31){return floodProvenanceVolume(input.uv);}return fineVolume(input.uv);}
   let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let maximum=minimum+u.container.xyz;if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}
+  if(mode==31){let sample=floodProvenance(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}
   if(mode==26){let sample=bandResidency(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}
   if(mode==25){let sample=globalFinePhi(hit.xyz);if(sample.a<=0.001){discard;}return vec4f(displayColor(sample.rgb),sample.a);}let sample=fineState(hit.xyz);if(sample.alpha<=0.001){discard;}return vec4f(displayColor(sample.color),sample.alpha);
 }`;
 
 export class OctreeTechniqueOverlayPipeline {
-  private topologyPipeline?: GPURenderPipeline;
-  private facePipeline?: GPURenderPipeline;
-  private structuredPipeline?: GPURenderPipeline;
-  private lifecyclePipeline?: GPURenderPipeline;
-  private fineLifecyclePipeline?: GPURenderPipeline;
+  /** One render pipeline per declared program, keyed by program id. */
+  private readonly pipelines = new Map<OctreeTechniqueProgramId, GPURenderPipeline>();
+  /** Bind groups for those programs plus the lifecycle membership compute pass. */
+  private readonly groups = new Map<string, GPUBindGroup>();
   private bandConfig?: GPUBuffer;
   private lifecycleMembershipPipeline?: GPUComputePipeline;
   private source?: OctreeTechniqueDebugSource;
   private ownerRows?: GPUTexture;
-  private topologyGroup?: GPUBindGroup;
-  private faceGroup?: GPUBindGroup;
-  private structuredGroup?: GPUBindGroup;
-  private lifecycleGroup?: GPUBindGroup;
-  private fineLifecycleGroup?: GPUBindGroup;
-  private lifecycleMembershipGroup?: GPUBindGroup;
   private lifecycleMembership?: GPUBuffer;
   private lifecycleConfig?: GPUBuffer;
   private lifecycleWorklist?: GPUBuffer;
   private lifecycleCapacity=0;
+  /** Owns its own pipelines and hop field; see `webgpu-fluid-blast-radius.ts`. */
+  private blastRadius?: WebGPUFluidBlastRadius;
 
   constructor(private readonly device: GPUDevice, private readonly targetFormat: GPUTextureFormat,
     private readonly uniformBuffer: GPUBuffer) {}
@@ -386,91 +449,162 @@ export class OctreeTechniqueOverlayPipeline {
   }
 
   async initialize(): Promise<void> {
-    [this.topologyPipeline,this.facePipeline,this.structuredPipeline,this.lifecyclePipeline,this.fineLifecyclePipeline,this.lifecycleMembershipPipeline]=await Promise.all([
-      this.pipeline("Octree topology technique overlay",octreeTechniqueTopologyShader),
-      this.pipeline("Octree generalized-face technique overlay",octreeTechniqueFaceShader),
-      this.pipeline("Octree structured-field technique overlay",octreeTechniqueStructuredShader),
-      this.pipeline("Octree topology-lifecycle overlay",octreeTechniqueLifecycleShader),
-      this.pipeline("Octree fine-band lifecycle overlay",octreeTechniqueFineLifecycleShader),
-      this.computePipeline("Octree topology-lifecycle membership",octreeLifecycleMembershipShader),
-    ]);this.rebuildGroups();
+    // Each program's shader is paired with the declaration that generated its
+    // preamble, so a program cannot be built against a different binding set
+    // than the one its bind group is resolved from.
+    const programs: readonly [OctreeTechniqueProgramId, string][] = [
+      ["topology", octreeTechniqueTopologyShader],
+      ["face", octreeTechniqueFaceShader],
+      ["structured", octreeTechniqueStructuredShader],
+      ["lifecycle", octreeTechniqueLifecycleShader],
+      ["fine", octreeTechniqueFineLifecycleShader],
+    ];
+    const [built, membership] = await Promise.all([
+      Promise.all(programs.map(([id, code]) =>
+        this.pipeline(OCTREE_TECHNIQUE_PROGRAMS[id].label, code))),
+      this.computePipeline(OCTREE_LIFECYCLE_MEMBERSHIP_PROGRAM.label, octreeLifecycleMembershipShader),
+    ]);
+    for (const [index, [id]] of programs.entries()) this.pipelines.set(id, built[index]);
+    this.lifecycleMembershipPipeline = membership;
+    const blastRadius=new WebGPUFluidBlastRadius(this.device,this.targetFormat,this.uniformBuffer);
+    await blastRadius.initialize();
+    this.blastRadius=blastRadius;
+    this.blastRadius.setSource(this.ownerRows,this.source?.pressureRows);
+    this.rebuildGroups();
   }
 
   setSource(source: OctreeTechniqueDebugSource | undefined): void {
     if(this.source===source)return;this.source=source;this.rebuildGroups();
+    this.blastRadius?.setSource(this.ownerRows,source?.pressureRows);
   }
 
   setOwnerRows(ownerRows: GPUTexture | undefined): void {
     if(this.ownerRows===ownerRows)return;this.ownerRows=ownerRows;this.rebuildGroups();
+    this.blastRadius?.setSource(ownerRows,this.source?.pressureRows);
+  }
+
+  /**
+   * What a declared resource key names this frame.
+   *
+   * The programs name their bindings; this is the only place a name becomes a
+   * buffer. A key with nothing behind it returns undefined and refuses the whole
+   * group, because a partially bound program would read whatever the previous
+   * publication happened to leave in that slot.
+   */
+  private resolveResource(key: string): GPUBindingResource | undefined {
+    const source = this.source;
+    if (key === "uniforms") return { buffer: this.uniformBuffer };
+    if (key === "ownerRows") return this.ownerRows?.createView({ dimension: "3d" });
+    if (key === "lifecycleMembership") return this.lifecycleMembership && { buffer: this.lifecycleMembership };
+    if (key === "lifecycleConfig") return this.lifecycleConfig && { buffer: this.lifecycleConfig };
+    if (key === "lifecycleWorklist") return source?.topologyLifecycle?.tileWorklist;
+    if (key === "bandConfig") return this.bandConfig && { buffer: this.bandConfig };
+    if (!source) return undefined;
+    const fine = source.fineBandLifecycle;
+    const fineResources: Readonly<Record<string, GPUBindingResource | undefined>> = {
+      fineParams: fine?.params, fineWorklist: fine?.worklist, fineMetadata: fine?.metadata,
+      fineSampleFlags: fine?.sampleFlags, fineTopologyControl: fine?.topologyControl,
+      fineRedistanceControl: fine?.redistanceControl, finePhi: fine?.phi, fineSeeds: fine?.seeds,
+    };
+    if (key in fineResources) return fineResources[key];
+    const bundle = source as unknown as Record<string, GPUBindingResource | undefined>;
+    return typeof bundle[key] === "object" ? bundle[key] : undefined;
+  }
+
+  private buildGroup(
+    program: VisualizationProgram, pipeline: GPURenderPipeline | GPUComputePipeline | undefined,
+  ): GPUBindGroup | undefined {
+    if (!pipeline) return undefined;
+    const entries = visualizationBindGroupEntries(program, (key) => this.resolveResource(key));
+    if (!entries) return undefined;
+    return this.device.createBindGroup({
+      label: program.label, layout: pipeline.getBindGroupLayout(0), entries: [...entries],
+    });
   }
 
   private rebuildGroups(): void {
-    this.topologyGroup=undefined;this.faceGroup=undefined;this.structuredGroup=undefined;this.lifecycleGroup=undefined;this.fineLifecycleGroup=undefined;this.lifecycleMembershipGroup=undefined;
-    const source=this.source;if(!source)return;const ownerRows=this.ownerRows;
-    if(ownerRows&&this.topologyPipeline)this.topologyGroup=this.device.createBindGroup({layout:this.topologyPipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:ownerRows.createView({dimension:"3d"})},
-      {binding:2,resource:source.leaves},{binding:3,resource:source.topologyMetrics},{binding:4,resource:source.tetrahedronHeaders},
-      {binding:5,resource:source.tetrahedra},{binding:6,resource:source.tetrahedronVertices},
-    ]});
-    if(ownerRows&&this.facePipeline)this.faceGroup=this.device.createBindGroup({layout:this.facePipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:ownerRows.createView({dimension:"3d"})},
-      {binding:2,resource:source.leafHeaders},{binding:3,resource:source.topologyMetrics},
-      {binding:4,resource:source.catalogEntryHeaders},{binding:5,resource:source.catalogFaces},
-    ]});
-    if(ownerRows&&this.structuredPipeline)this.structuredGroup=this.device.createBindGroup({layout:this.structuredPipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:ownerRows.createView({dimension:"3d"})},
-      {binding:2,resource:source.leafHeaders},{binding:3,resource:source.topologyMetrics},
-      {binding:4,resource:source.structuredControl},{binding:5,resource:source.structuredRowVelocities},
-      {binding:6,resource:source.structuredParams},{binding:7,resource:source.structuredAuthority},
-      {binding:8,resource:source.pressure},
-    ]});
-    const lifecycle=source.topologyLifecycle;
-    if(lifecycle){
-      const capacity=Math.max(1,lifecycle.tileCapacity);const worklist=lifecycle.tileWorklist.buffer;
-      if(this.lifecycleWorklist!==worklist||this.lifecycleCapacity!==capacity||!this.lifecycleMembership||!this.lifecycleConfig){
-        this.lifecycleMembership?.destroy();this.lifecycleConfig?.destroy();this.lifecycleWorklist=worklist;this.lifecycleCapacity=capacity;
-        this.lifecycleMembership=this.device.createBuffer({label:"Octree topology lifecycle membership",size:Math.max(4,capacity*4),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-        this.lifecycleConfig=this.device.createBuffer({label:"Octree topology lifecycle overlay config",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.groups.clear();
+    const source = this.source;
+    if (!source) return;
+    // The lifecycle views own two buffers the publication does not supply, so
+    // those are sized before anything is resolved against them.
+    const lifecycle = source.topologyLifecycle;
+    if (lifecycle) {
+      const capacity = Math.max(1, lifecycle.tileCapacity);
+      const worklist = lifecycle.tileWorklist.buffer;
+      if (this.lifecycleWorklist !== worklist || this.lifecycleCapacity !== capacity
+        || !this.lifecycleMembership || !this.lifecycleConfig) {
+        this.lifecycleMembership?.destroy(); this.lifecycleConfig?.destroy();
+        this.lifecycleWorklist = worklist; this.lifecycleCapacity = capacity;
+        this.lifecycleMembership = this.device.createBuffer({ label: "Octree topology lifecycle membership", size: Math.max(4, capacity * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        this.lifecycleConfig = this.device.createBuffer({ label: "Octree topology lifecycle overlay config", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       }
-      this.device.queue.writeBuffer(this.lifecycleConfig,0,new Uint32Array([
-        lifecycle.tileDimensions[0],lifecycle.tileDimensions[1],lifecycle.tileDimensions[2],lifecycle.tileSizeCells,capacity,0,0,0,
+      this.device.queue.writeBuffer(this.lifecycleConfig, 0, new Uint32Array([
+        lifecycle.tileDimensions[0], lifecycle.tileDimensions[1], lifecycle.tileDimensions[2],
+        lifecycle.tileSizeCells, capacity, 0, 0, 0,
       ]));
-      if(this.lifecyclePipeline)this.lifecycleGroup=this.device.createBindGroup({layout:this.lifecyclePipeline.getBindGroupLayout(0),entries:[
-        {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:{buffer:this.lifecycleMembership}},{binding:2,resource:{buffer:this.lifecycleConfig}},
-      ]});
-      if(this.lifecycleMembershipPipeline)this.lifecycleMembershipGroup=this.device.createBindGroup({layout:this.lifecycleMembershipPipeline.getBindGroupLayout(0),entries:[
-        {binding:0,resource:lifecycle.tileWorklist},{binding:1,resource:{buffer:this.lifecycleMembership}},{binding:2,resource:{buffer:this.lifecycleConfig}},
-      ]});
     }
-    const fine=source.fineBandLifecycle;
-    if(fine&&this.fineLifecyclePipeline){
-      if(!this.bandConfig)this.bandConfig=this.device.createBuffer({
-        label:"Octree band-residency overlay config",size:16,
-        usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-      this.device.queue.writeBuffer(this.bandConfig,0,new Uint32Array([
-        Math.max(0,Math.round(fine.bands.pressureBandCells)),
-        Math.max(0,Math.round(fine.bands.surfaceBandCells)),
-        Math.max(0,Math.round(fine.bands.transportBandFineCells)),
-        Math.max(0,Math.round(fine.bands.redistanceBandFineCells)),
-      ]));
-      this.fineLifecycleGroup=this.device.createBindGroup({layout:this.fineLifecyclePipeline.getBindGroupLayout(0),entries:[
-        {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:fine.params},{binding:2,resource:fine.worklist},
-        {binding:3,resource:fine.metadata},{binding:4,resource:{buffer:this.bandConfig}},{binding:5,resource:fine.sampleFlags},
-        {binding:6,resource:fine.topologyControl},{binding:7,resource:fine.redistanceControl},{binding:8,resource:fine.phi},
-      ]});
+    const fine = source.fineBandLifecycle;
+    if (fine) {
+      if (!this.bandConfig) this.bandConfig = this.device.createBuffer({
+        label: "Octree band-residency overlay config", size: OCTREE_TECHNIQUE_BAND_CONFIG_BYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const bandWords = new Uint32Array(OCTREE_TECHNIQUE_BAND_CONFIG_BYTES / 4);
+      bandWords.set([
+        Math.max(0, Math.round(fine.bands.pressureBandCells)),
+        Math.max(0, Math.round(fine.bands.surfaceBandCells)),
+        Math.max(0, Math.round(fine.bands.transportBandFineCells)),
+        Math.max(0, Math.round(fine.bands.redistanceBandFineCells)),
+      ], 0);
+      // An empty ladder means no encode has run yet; the provenance view reads
+      // the pass count and draws nothing rather than binning against no schedule.
+      const ladder = fine.bands.ladderStrides;
+      if (ladder.length > 0) {
+        const { prefixReach } = describeFineFloodLadder(ladder);
+        bandWords[4] = prefixReach.length;
+        bandWords.set(prefixReach, OCTREE_TECHNIQUE_BAND_PREFIX_WORD_OFFSET);
+      }
+      this.device.queue.writeBuffer(this.bandConfig, 0, bandWords);
     }
+    for (const [id, program] of Object.entries(OCTREE_TECHNIQUE_PROGRAMS)) {
+      const group = this.buildGroup(program, this.pipelines.get(id as OctreeTechniqueProgramId));
+      if (group) this.groups.set(id, group);
+    }
+    const membership = this.buildGroup(OCTREE_LIFECYCLE_MEMBERSHIP_PROGRAM, this.lifecycleMembershipPipeline);
+    if (membership) this.groups.set(OCTREE_LIFECYCLE_MEMBERSHIP_PROGRAM.id, membership);
   }
 
   encode(encoder: GPUCommandEncoder, target: GPUTextureView, modeCode: number): boolean {
-    let pipeline:GPURenderPipeline|undefined;let group:GPUBindGroup|undefined;
-    if(modeCode===12||modeCode===14||modeCode===15){pipeline=this.topologyPipeline;group=this.topologyGroup;}
-    else if(modeCode===13||modeCode===16){pipeline=this.facePipeline;group=this.faceGroup;}
-    else if(modeCode>=27&&modeCode<=30){pipeline=this.structuredPipeline;group=this.structuredGroup;}
-    else if(modeCode===17){pipeline=this.lifecyclePipeline;group=this.lifecycleGroup;if(this.lifecycleMembership&&this.lifecycleMembershipPipeline&&this.lifecycleMembershipGroup){const broker=new PassBroker(encoder);broker.clearBuffer(this.lifecycleMembership);const compute=broker.compute({label:"Expand octree topology lifecycle membership"});compute.setPipeline(this.lifecycleMembershipPipeline);compute.setBindGroup(0,this.lifecycleMembershipGroup);compute.dispatchWorkgroups(Math.ceil(this.lifecycleCapacity/64));broker.fence("octree topology lifecycle membership complete");}else{return false;}}
-    else if(modeCode===18||modeCode===25||modeCode===26){pipeline=this.fineLifecyclePipeline;group=this.fineLifecycleGroup;}
-    else{return false;}
-    if(!pipeline||!group)return false;
-    const pass=encoder.beginRenderPass({label:"Octree paper-technique overlay",colorAttachments:[{view:target,loadOp:"load",storeOp:"store"}]});
-    pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.draw(3);pass.end();return true;
+    // The cone owns its own flood and draw, because it needs a compute pass over
+    // the owner map before anything can be shaded. It is the one view that is
+    // not a program of this pipeline, and the catalog says so by declaring no
+    // program for it.
+    if (modeCode === OCTREE_TECHNIQUE_OVERLAY_CODES["blast-radius"]) {
+      return this.blastRadius?.encode(encoder, target) === true;
+    }
+    const programId = octreeTechniqueProgramForCode(modeCode);
+    if (!programId) return false;
+    const pipeline = this.pipelines.get(programId);
+    const group = this.groups.get(programId);
+    if (!pipeline || !group) return false;
+    // The lifecycle view reads a membership mask that only exists once the
+    // worklist has been expanded, so its compute pass runs ahead of the draw.
+    if (programId === "lifecycle") {
+      const membership = this.groups.get(OCTREE_LIFECYCLE_MEMBERSHIP_PROGRAM.id);
+      if (!this.lifecycleMembership || !this.lifecycleMembershipPipeline || !membership) return false;
+      const broker = new PassBroker(encoder);
+      broker.clearBuffer(this.lifecycleMembership);
+      const compute = broker.compute({ label: "Expand octree topology lifecycle membership" });
+      compute.setPipeline(this.lifecycleMembershipPipeline);
+      compute.setBindGroup(0, membership);
+      compute.dispatchWorkgroups(Math.ceil(this.lifecycleCapacity / 64));
+      broker.fence("octree topology lifecycle membership complete");
+    }
+    const pass = encoder.beginRenderPass({
+      label: "Octree paper-technique overlay",
+      colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }],
+    });
+    pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.draw(3); pass.end();
+    return true;
   }
 }

@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { editorToolForShortcut, editorToolIsActive } from "./editor-tools";
+import { stepFluidCellTraceHit } from "./fluid-cell-trace";
 import { propIdFromSelection } from "./editor-props";
 import { simulation } from "./simulation/controller";
 import { useDiagnosticsStore } from "./stores/diagnostics-store";
@@ -54,6 +55,31 @@ export function useEditorShortcuts(): void {
         if (!body) return;
         event.preventDefault();
         ui.setCamera((current) => ({ ...current, target_m: { ...body.position_m } }));
+        return;
+      }
+      // Entering and leaving pick mode. "c" for cell, and no editor tool claims
+      // it; the scene's own toggle carries the same letter so the two cannot
+      // drift apart in a reader's head.
+      if (event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        ui.setFluidCellTraceEnabled(!ui.fluidCellTraceEnabled);
+        return;
+      }
+      // Walking the cell picker along the pointer ray. Bracket keys because the
+      // run is ordered by depth and they read as "further in" / "back out", and
+      // because no editor tool claims them.
+      if (ui.fluidCellTraceEnabled && (event.key === "[" || event.key === "]")) {
+        event.preventDefault();
+        ui.setFluidCellTraceHitIndex(stepFluidCellTraceHit(
+          ui.fluidCellTraceHitIndex, event.key === "]" ? 1 : -1, ui.fluidCellTraceHitCount));
+        return;
+      }
+      // Jumping to the next leaf the surface passes through. Stepping one at a
+      // time crosses a dozen interior cells first, and the interesting cell in a
+      // domain of thousands is almost always one the interface touches.
+      if (ui.fluidCellTraceEnabled && event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        ui.jumpFluidCellTraceToInterface();
         return;
       }
       const tool = editorToolForShortcut(event.key);

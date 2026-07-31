@@ -73,6 +73,11 @@ export function VisualPanel() {
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
   const setPixelTracePinned = useUIStore((state) => state.setPixelTracePinned);
   const requestPixelTracePin = useUIStore((state) => state.requestPixelTracePin);
+  const fluidCellTraceEnabled = useUIStore((state) => state.fluidCellTraceEnabled);
+  const fluidCellTracePinned = useUIStore((state) => state.fluidCellTracePinned);
+  const setFluidCellTraceEnabled = useUIStore((state) => state.setFluidCellTraceEnabled);
+  const setFluidCellTracePinned = useUIStore((state) => state.setFluidCellTracePinned);
+  const requestFluidCellTracePin = useUIStore((state) => state.requestFluidCellTracePin);
 
   const selectedView = SVO_COST_OVERLAY_DEFINITIONS[svoCostOverlay];
   const visualizationAvailable = voxelRenderMode === "smooth";
@@ -259,6 +264,26 @@ export function VisualPanel() {
             : "The heatmap replaces regular rendering and is generated from the work performed for that exact pixel; no field readback is involved."}</footer>
         </div>
         <p className="render-visualization-status">{visualizationAvailable ? "GPU COUNTERS READY" : "SELECTS SVO + FINISHED"}</p>
+      </ControlGroup>
+
+      <ControlGroup title="Cell work under the pointer" note="ONE PRESSURE CELL, GATHERED AND SCHEDULED">
+        <div className="render-toggle-row" role="group" aria-label="Per-cell fluid work diagnostic">
+          <Toggle label="Trace hovered cell" checked={fluidCellTraceEnabled} onChange={setFluidCellTraceEnabled} />
+          <Toggle
+            label="Pin cell"
+            checked={fluidCellTracePinned}
+            disabled={!fluidCellTraceEnabled}
+            // As with the ray probe, the viewport owns which pixel a pin records.
+            onChange={(on) => (on ? requestFluidCellTracePin() : setFluidCellTracePinned(false))}
+          />
+        </div>
+        <p className="panel-note">
+          Hovering the fluid names the pressure cell behind that pixel and reads what the frame published about it:
+          its leaf size and compact row, the assembled operator diagonal and right-hand side, the eighteen power
+          neighbours it couples to and which of them sit at a different resolution. Beside that it reports what the
+          encoded solve does to a row — how many level-0 sweeps re-read its stencil, and how few stages it takes before
+          the cell depends on every other cell. Gathered and scheduled figures are badged separately and never added.
+        </p>
       </ControlGroup>
 
       <ControlGroup title="Ray work under the pointer" note="LIVE 3D TRACE OF ONE PIXEL" open>

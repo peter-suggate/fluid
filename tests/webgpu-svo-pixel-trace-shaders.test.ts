@@ -3,7 +3,7 @@ import test, { after } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { createSvoDrySceneFragmentWGSL, sparseVoxelDrySceneBindGroupLayoutEntries } from "../lib/webgpu-svo-dry-scene";
-import { svoPixelTraceOverlayShader } from "../lib/webgpu-svo-pixel-trace-overlay";
+import { decorationOverlayShader } from "../lib/webgpu-decoration-overlay";
 
 /**
  * Real-device validation for the two shaders the live pixel-trace diagnostic
@@ -71,7 +71,7 @@ const skip = !modulePath && "set WEBGPU_NODE_MODULE for WGSL validation";
 
 test("the trace overlay shader compiles and builds its instanced pipeline", { skip }, async () => {
   const gpuDevice = await device();
-  const module = await compile(gpuDevice, "pixel-trace overlay", svoPixelTraceOverlayShader);
+  const module = await compile(gpuDevice, "pixel-trace overlay", decorationOverlayShader);
   const layout = gpuDevice.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },

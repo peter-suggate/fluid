@@ -35,9 +35,9 @@ import {
   type SvoPixelTraceLayer,
 } from "../lib/svo-pixel-trace";
 import {
-  SVO_PIXEL_TRACE_OVERLAY_INSTANCE_BYTES,
-  svoPixelTraceOverlayShader,
-} from "../lib/webgpu-svo-pixel-trace-overlay";
+  DECORATION_OVERLAY_INSTANCE_BYTES,
+  decorationOverlayShader,
+} from "../lib/webgpu-decoration-overlay";
 import { createSvoPixelTraceProbeWGSL, svoPixelTraceProbeRecordCapacity } from "../lib/webgpu-svo-pixel-trace";
 import {
   createSvoDrySceneFragmentWGSL,
@@ -477,14 +477,14 @@ test("the probe's record group is separate from group zero and configurable", ()
 });
 
 test("the overlay instance layout matches the geometry the host builds", () => {
-  assert.equal(SVO_PIXEL_TRACE_OVERLAY_INSTANCE_BYTES, SVO_PIXEL_TRACE_SEGMENT_FLOATS * 4);
+  assert.equal(DECORATION_OVERLAY_INSTANCE_BYTES, SVO_PIXEL_TRACE_SEGMENT_FLOATS * 4);
   // Four vec4 attributes cover the sixteen interleaved floats.
   for (const location of [0, 1, 2, 3]) {
-    assert.match(svoPixelTraceOverlayShader, new RegExp(`@location\\(${location}\\) `));
+    assert.match(decorationOverlayShader, new RegExp(`@location\\(${location}\\) `));
   }
   // Occlusion ghosts rather than hides, and reversed-Z zero means "nothing here".
-  assert.match(svoPixelTraceOverlayShader, /if \(stored>0\.0\)/);
-  assert.match(svoPixelTraceOverlayShader, /alpha\*=max\(overlay\.viewport\.w,0\.0\)/);
+  assert.match(decorationOverlayShader, /if \(stored>0\.0\)/);
+  assert.match(decorationOverlayShader, /alpha\*=max\(overlay\.viewport\.w,0\.0\)/);
 });
 
 test("a viewport click pins the pixel it aimed at, and the next one goes live", () => {

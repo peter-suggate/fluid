@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
+import { VISUALIZATION_FIELDS } from "@/lib/visualization-catalog";
+import type { FieldVisualization } from "@/lib/visualization-registry";
 import { PerformanceActivityGrid } from "./PerformanceActivityGrid";
 import {
   averagePerformanceTraces,
@@ -125,159 +127,19 @@ const averagedTrace = (traces: PerformanceTrace[], windowSize: number) => {
   return stabilizePhaseLayout(averagePerformanceTraces(window));
 };
 
-type PaperView = {
-  id: string;
-  figure: string;
-  label: string;
-  description: string;
-  source: string;
-  mode: GridOverlayMode;
-  axis: GridOverlayConfig["axis"];
-  legend: readonly { swatch: string; label: string }[];
-};
+/**
+ * The observatory's cards are a read of the visualization catalog.
+ *
+ * Each card's label, description, legend and source live beside the pass that
+ * publishes the data — see `lib/visualization-catalog.ts` — so a colour choice
+ * and the swatch that explains it cannot drift apart across two files. Hidden
+ * fields are modes the overlay can render that no picker offers; they are
+ * declared for the shader harness and deliberately have no card.
+ */
+type PaperView = FieldVisualization & { mode: GridOverlayMode };
 
-const PAPER_VIEWS: readonly PaperView[] = [
-  {
-    id: "layered-grid", figure: "FIG. 6", label: "Fine SDF layer",
-    description: "Interface core, redistanced support, and compact coarse authority outside the fine allocation.",
-    source: "Sparse fine-band hash, sample flags, and publication controls",
-    mode: "fine-band-lifecycle", axis: "volume",
-    legend: [
-      { swatch: "#ff168f", label: "interface core" },
-      { swatch: "#15c8db", label: "valid redistanced sample" },
-      { swatch: "#10255e", label: "compact coarse authority" },
-      { swatch: "#ff1738", label: "failed or stale publication" },
-    ],
-  },
-  {
-    id: "coarse-grid", figure: "FIG. 6/8", label: "Adaptive coarse grid",
-    description: "Current compact leaf scale and refinement transitions throughout the live volume.",
-    source: "Published octree owner map and compact leaf records",
-    mode: "resolution", axis: "volume",
-    legend: [
-      { swatch: "#38adbd", label: "finest compact leaf" },
-      { swatch: "#55a8ba", label: "intermediate dyadic leaf" },
-      { swatch: "#152e7a", label: "coarsest compact leaf" },
-      { swatch: "#ff05b8", label: "missing compact owner" },
-    ],
-  },
-  {
-    id: "sdf", figure: "FIG. 6/7", label: "Fine signed distance",
-    description: "Factor-m φ values, the zero crossing, and the centered-gradient Eikonal residual.",
-    source: "Published Section 5 fine-lattice φ samples",
-    mode: "global-fine-phi", axis: "volume",
-    legend: [
-      { swatch: "linear-gradient(90deg,#1973eb,#f5f5e6,#ed7829)", label: "liquid (−) · zero · air (+)" },
-      { swatch: "#ffffff", label: "φ = 0 crossing" },
-      { swatch: "#f505b8", label: "|∇φ|−1 residual" },
-      { swatch: "#ff0610", label: "missing or rejected support" },
-    ],
-  },
-  {
-    id: "band-residency", figure: "§5", label: "Band slice",
-    description: "Every authored and derived band nested outward from the interface: pressure reach, transported surface band, redistance support, and the dilation halo.",
-    source: "Published Section 5 φ residency and the solver's own band planner",
-    mode: "band-residency", axis: "volume",
-    legend: [
-      { swatch: "#ffffff", label: "φ = 0 interface" },
-      { swatch: "#ff168f", label: "pressure refinement reach" },
-      { swatch: "#15c8db", label: "transported surface band" },
-      { swatch: "#6b54eb", label: "redistance support margin" },
-      { swatch: "#1a664d", label: "dilation / safety rings" },
-      { swatch: "#f5ba1a", label: "pressure reach truncated by residency" },
-    ],
-  },
-  {
-    id: "power-cells", figure: "FIG. 4", label: "Power cells",
-    description: "Pressure sites and exact regular/transition power-cell classification.",
-    source: "Compact leaves, topology descriptors, and generated power catalog",
-    mode: "power-cells", axis: "volume",
-    legend: [
-      { swatch: "#159578", label: "regular Cartesian power cell" },
-      { swatch: "#8c38c7", label: "transition power cell" },
-      { swatch: "#f5ba1a", label: "pressure site" },
-      { swatch: "#ff0303", label: "invalid descriptor or metric" },
-    ],
-  },
-  {
-    id: "power-faces", figure: "FIG. 4", label: "Power face geometry",
-    description: "Primal face planes, dual links, stored normals, and boundary faces.",
-    source: "Published generalized faces, centroids, normals, and incidences",
-    mode: "power-faces", axis: "volume",
-    legend: [
-      { swatch: "#13cfe8", label: "power-face plane" },
-      { swatch: "#8c38c7", label: "dual pressure-site link" },
-      { swatch: "#f5ba1a", label: "stored face normal" },
-      { swatch: "#ff00aa", label: "incomplete publication" },
-    ],
-  },
-  {
-    id: "sparse-pyramid", figure: "FIG. 5", label: "Sparse topology lifecycle",
-    description: "Actual active and retired rebuild tiles; this does not pretend the current implementation has the paper's idealized ghost aliases.",
-    source: "Live topology rebuild tile worklist",
-    mode: "octree-lifecycle", axis: "volume",
-    legend: [
-      { swatch: "#0a193b", label: "unchanged tile" },
-      { swatch: "#16cbdc", label: "active rebuild tile" },
-      { swatch: "#ff6812", label: "retired tile" },
-      { swatch: "#ff1738", label: "invalid lifecycle publication" },
-    ],
-  },
-  {
-    id: "pressure", figure: "§4", label: "Evaluated pressure",
-    description: "Affine pressure potential dt·p/ρ reconstructed from the live leaf degrees of freedom.",
-    source: "Current pressure leaf field",
-    mode: "pressure", axis: "volume",
-    legend: [{ swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "low → high pressure potential" }],
-  },
-  {
-    id: "velocity", figure: "§5", label: "Evaluated velocity",
-    description: "Magnitude of the evaluated projected velocity on every live compact pressure row.",
-    source: "Accepted structured row-velocity publication",
-    mode: "evaluated-velocity", axis: "volume",
-    legend: [
-      { swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "zero → live maximum speed" },
-    ],
-  },
-  {
-    id: "projection", figure: "§4.1", label: "Pressure update Δu",
-    description: "Largest pressure-potential velocity update across the generalized faces incident on each live row.",
-    source: "Current pressure rows, face inverse distances, and accepted adjacency",
-    mode: "projection-update", axis: "volume",
-    legend: [{ swatch: "linear-gradient(90deg,#213a8c,#10a0cc,#38bf57,#fad133,#e63826)", label: "small → large |Δu|" }],
-  },
-  {
-    id: "divergence", figure: "EQ. 2", label: "Divergence closure",
-    description: "Post-projection divergence; the color scale saturates at |∇·u| Δt = 1.",
-    source: "Accepted generalized-face fluxes and physical power-cell volumes",
-    mode: "divergence-closure", axis: "volume",
-    legend: [{ swatch: "linear-gradient(90deg,#1548df,#f5f5f5,#e21a14)", label: "compression (−) · zero · expansion (+)" }],
-  },
-  {
-    id: "extrapolation", figure: "§5", label: "Structured velocity",
-    description: "Projected full-vector reconstruction over the direct six-family authority.",
-    source: "Live structured rows, family slots, and projected CPT seeds",
-    mode: "structured-velocity", axis: "volume",
-    legend: [
-      { swatch: "#ff6666", label: "positive X component" },
-      { swatch: "#66ff66", label: "positive Y component" },
-      { swatch: "#6666ff", label: "positive Z component" },
-      { swatch: "#808080", label: "zero vector" },
-      { swatch: "#ff1738", label: "invalid structured publication" },
-    ],
-  },
-  {
-    id: "operator", figure: "§6.3", label: "Power operator",
-    description: "Largest incident A/d coefficient with publication and reciprocity failures exposed.",
-    source: "Published power Laplacian rows and generalized face graph",
-    mode: "power-operator", axis: "volume",
-    legend: [
-      { swatch: "linear-gradient(90deg,#15489a,#18bf8c,#ed2d12)", label: "low → high incident coefficient" },
-      { swatch: "#f5ba1a", label: "high diagonal or residual contribution" },
-      { swatch: "#ff0303", label: "invalid or asymmetric operator" },
-    ],
-  },
-] as const;
+const PAPER_VIEWS: readonly PaperView[] = VISUALIZATION_FIELDS
+  .filter((field) => !field.hidden) as readonly PaperView[];
 
 export function PerformancePanel() {
   const report = useDiagnosticsStore((state) => state.performanceReport);
@@ -429,7 +291,7 @@ export function PerformancePanel() {
         {PAPER_VIEWS.map((view) => {
           const active = overlayAxis !== "off" && overlayMode === view.mode;
           return <button key={view.id} className={active ? "active" : ""} onClick={() => selectView(view)} aria-pressed={active}>
-            <span>{view.figure}</span><strong>{view.label}</strong><small>{view.description}</small>
+            <span>{view.figure ?? "§"}</span><strong>{view.label}</strong><small>{view.description}</small>
           </button>;
         })}
       </div>
@@ -464,9 +326,9 @@ export function PerformancePanel() {
         <p>{selectedView?.description ?? "This field was selected in the Render panel and reads the existing GPU publication directly."}</p>
         {selectedView && <>
           <small>SOURCE · {selectedView.source}</small>
-          <div className="paper-field-legend" aria-label={`${selectedView.label} legend`}>
+          {selectedView.legend && <div className="paper-field-legend" aria-label={`${selectedView.label} legend`}>
             {selectedView.legend.map((entry) => <span key={entry.label}><i style={{ background: entry.swatch }} />{entry.label}</span>)}
-          </div>
+          </div>}
         </>}
         <footer>{overlayAxis === "volume"
           ? "Orbit the camera to interrogate the ray-integrated live structure; the slider controls front-to-back opacity."

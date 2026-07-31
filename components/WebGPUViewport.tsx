@@ -1,12 +1,28 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { FluidLabRenderer, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
+import { useEffect, useRef, useState , useMemo} from "react";
+import { FluidLabRenderer, type FluidCellTraceConfig, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
 import {
   resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
   type SvoPixelTrace, type SvoPixelTracePinRequest,
 } from "@/lib/svo-pixel-trace";
 import { PixelTraceHud } from "./PixelTraceHud";
+import { FluidCellTraceHud, type FluidCellTraceStatusHint } from "./FluidCellTraceHud";
+import { visualizationIdsForGroups } from "@/lib/visualization-catalog";
+import {
+  fluidCellTraceScheduleFor,
+  stepFluidCellTraceHit,
+  type FluidCellTrace,
+  type FluidCellTraceSchedule,
+} from "@/lib/fluid-cell-trace";
+import type { FineBandCellContext } from "@/lib/fine-band-cell-model";
+import {
+  blastRadiusLevelsToSingleCell,
+  growBlastRadius,
+  planBlastRadiusSchedule,
+  summarizeBlastRadius,
+} from "@/lib/fluid-blast-radius";
+import { planOctreeSolveTail } from "@/lib/octree-solve-tail-policy";
 import { getMethod } from "@/lib/methods";
 import { canonicalScene, type CameraState } from "@/lib/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
@@ -95,6 +111,10 @@ interface GPUViewportRenderBinding {
     renderer: FluidLabRenderer,
   ) => PixelTraceConfig | undefined;
   readonly publishPixelTrace: (renderer: FluidLabRenderer) => void;
+  readonly fluidCellTraceDrawConfig: (
+    ui: ReturnType<typeof useUIStore.getState>,
+  ) => FluidCellTraceConfig | undefined;
+  readonly publishFluidCellTrace: (renderer: FluidLabRenderer) => void;
 }
 
 type GPUViewportWindow = Window & {
@@ -138,6 +158,18 @@ export function WebGPUViewport() {
   const setPixelTraceEnabled = useUIStore((state) => state.setPixelTraceEnabled);
   const setPixelTracePinned = useUIStore((state) => state.setPixelTracePinned);
   const requestPixelTracePin = useUIStore((state) => state.requestPixelTracePin);
+  const fluidCellTraceEnabled = useUIStore((state) => state.fluidCellTraceEnabled);
+  const fluidCellTracePinned = useUIStore((state) => state.fluidCellTracePinned);
+  const fluidCellTraceLayers = useUIStore((state) => state.fluidCellTraceLayers);
+  const fluidCellTraceHitIndex = useUIStore((state) => state.fluidCellTraceHitIndex);
+  const setFluidCellTraceHitIndex = useUIStore((state) => state.setFluidCellTraceHitIndex);
+  const setFluidCellTraceEnabled = useUIStore((state) => state.setFluidCellTraceEnabled);
+  const jumpFluidCellTraceToInterface = useUIStore((state) => state.jumpFluidCellTraceToInterface);
+  const setFluidCellTracePinned = useUIStore((state) => state.setFluidCellTracePinned);
+  const requestFluidCellTracePin = useUIStore((state) => state.requestFluidCellTracePin);
+  const toggleFluidCellTraceLayer = useUIStore((state) => state.toggleFluidCellTraceLayer);
+  const fluidCellTraceExpanded = useUIStore((state) => state.fluidCellTraceExpanded);
+  const toggleFluidCellTraceExpanded = useUIStore((state) => state.toggleFluidCellTraceExpanded);
   const togglePixelTraceLayer = useUIStore((state) => state.togglePixelTraceLayer);
   const [pixelTraceState, setPixelTraceState] = useState<{
     trace: SvoPixelTrace | undefined;
@@ -149,6 +181,67 @@ export function WebGPUViewport() {
   const pixelTrace = pixelTraceState.trace;
   /** Latest pointer position in viewport fractions; read by the render loop. */
   const tracePointerRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
+  /** Pointer the cell trace is frozen on, and a pending pin awaiting its aim. */
+  const cellTracePinnedRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
+  const cellTracePinRequestRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
+  const cellTraceRevisionRef = useRef(-1);
+  const [fluidCellTrace, setFluidCellTraceValue] = useState<FluidCellTrace | undefined>(undefined);
+  const [fluidCellTraceStatus, setFluidCellTraceStatus] = useState<FluidCellTraceStatusHint>("waiting");
+  /**
+   * Band widths and the ladder that ran, refreshed with the trace.
+   *
+   * Read on the same revision tick as the trace rather than per frame: the
+   * widths only change when the planner reruns, and a HUD that re-rendered on
+   * every frame to restate them would cost more than the diagnostic does.
+   */
+  const [fluidCellFineBand, setFluidCellFineBand] = useState<FineBandCellContext | undefined>(undefined);
+  /**
+   * The encoded solve schedule for the traced cell's own domain.
+   *
+   * Derived from the trace rather than from the live scene so a cell and the
+   * schedule shown beside it always describe the same grid, and recomputed only
+   * when the domain changes rather than per frame.
+   */
+  const fluidCellSolve = useMemo<{
+    readonly schedule: FluidCellTraceSchedule;
+    readonly policy: { outerIterations: number; levels: number; smoothsPerLevel: number };
+  } | undefined>(() => {
+    const dimensions = fluidCellTrace?.dimensions;
+    if (!dimensions || dimensions.some((extent) => !Number.isInteger(extent) || extent < 1)) return undefined;
+    const tail = planOctreeSolveTail({
+      finestDimensions: dimensions, maximumLeafSize: 32,
+      initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
+      movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
+    });
+    // Chebyshev degree two is the shipped smoother contract.
+    const policy = {
+      outerIterations: tail.encodedOuterIterations,
+      levels: blastRadiusLevelsToSingleCell(dimensions),
+      smoothsPerLevel: 2,
+    };
+    const schedule = planBlastRadiusSchedule(policy);
+    const summary = summarizeBlastRadius(
+      growBlastRadius({
+        dimensions, schedule,
+        cell: [dimensions[0] >> 1, dimensions[1] >> 1, dimensions[2] >> 1],
+      }), schedule, dimensions);
+    return {
+      policy,
+      schedule: fluidCellTraceScheduleFor({
+        dimensions, ...policy,
+        stagesToGlobal: summary.stagesToGlobal, stageCount: summary.stageCount,
+      }),
+    };
+  }, [fluidCellTrace?.dimensions]);
+  const fluidCellTraceSchedule = fluidCellSolve?.schedule;
+  /**
+   * The solve policy the draw config hands the cone decorator.
+   *
+   * Mirrored into a ref because the draw config is called from the animation
+   * frame rather than from a render, so it cannot close over the memo.
+   */
+  const fluidCellPolicyRef = useRef(fluidCellSolve?.policy);
+  fluidCellPolicyRef.current = fluidCellSolve?.policy;
   /**
    * A click waiting for the probe to answer its own pixel. While one is held the
    * probe traces the clicked position rather than the live pointer, so the ray
@@ -163,6 +256,14 @@ export function WebGPUViewport() {
   const tracePinnedRef = useRef<{ normalizedX: number; normalizedY: number; cameraKey: string } | null>(null);
   /** Press origin of a gesture that could still turn out to be a pinning click. */
   const tracePinGestureRef = useRef<{ id: number; downX: number; downY: number } | null>(null);
+  /**
+   * The same gesture for the cell picker.
+   *
+   * Tracked apart from the ray probe's because both can be enabled at once and
+   * one click should pin both — sharing a ref would let whichever armed first
+   * swallow the other's pin.
+   */
+  const cellTracePinGestureRef = useRef<{ id: number; downX: number; downY: number } | null>(null);
   /** Pin transitions restart the reveal sweep; live hover always shows it whole. */
   const traceRevealRef = useRef({ pinned: false, startedAt_ms: 0 });
   const tracePublishRef = useRef<{
@@ -181,6 +282,66 @@ export function WebGPUViewport() {
    */
   const pixelTraceCameraKey = (view: CameraState): string =>
     `${view.azimuth_rad}|${view.elevation_rad}|${view.distance_m}|${view.target_m.x},${view.target_m.y},${view.target_m.z}`;
+
+  const fluidCellTraceDrawConfig = (
+    ui: ReturnType<typeof useUIStore.getState>,
+  ): FluidCellTraceConfig | undefined => {
+    if (!ui.fluidCellTraceEnabled) {
+      cellTracePinRequestRef.current = null; cellTracePinnedRef.current = null; return undefined;
+    }
+    // A pinned cell keeps its own pointer, and a pending click outranks the live
+    // pointer, so the gather stays on the clicked pixel until it comes back.
+    const pointer = (ui.fluidCellTracePinned ? cellTracePinnedRef.current : null)
+      ?? cellTracePinRequestRef.current ?? tracePointerRef.current;
+    if (!pointer) return undefined;
+    return {
+      normalizedX: pointer.normalizedX, normalizedY: pointer.normalizedY,
+      pinned: ui.fluidCellTracePinned,
+      hitIndex: ui.fluidCellTraceHitIndex,
+      // The store keeps the reader's own vocabulary — "stencil", "cone" — and
+      // the catalog ids are what the assembler enables, so the mapping happens
+      // here rather than making either side learn the other's names.
+      layers: visualizationIdsForGroups(ui.fluidCellTraceLayers),
+      ...(fluidCellPolicyRef.current ? { solvePolicy: fluidCellPolicyRef.current } : {}),
+    };
+  };
+
+  const publishFluidCellTrace = (renderer: FluidLabRenderer) => {
+    const ui = useUIStore.getState();
+    if (!ui.fluidCellTraceEnabled) return;
+    // A pin asked for from the panel or the HUD becomes the same request a click
+    // makes, so both record an exact aim and neither can re-aim afterwards.
+    if (ui.fluidCellTracePinRequested && !ui.fluidCellTracePinned
+      && !cellTracePinRequestRef.current && tracePointerRef.current) {
+      cellTracePinRequestRef.current = { ...tracePointerRef.current };
+    }
+    if (cellTracePinRequestRef.current && !ui.fluidCellTracePinned) {
+      cellTracePinnedRef.current = cellTracePinRequestRef.current;
+      cellTracePinRequestRef.current = null;
+      ui.setFluidCellTracePinned(true);
+    }
+    setFluidCellTraceStatus(renderer.fluidCellTraceReady
+      ? (renderer.latestFluidCellTrace ? "ready" : "waiting")
+      : "compiling");
+    const revision = renderer.fluidCellTraceRevision;
+    if (revision === cellTraceRevisionRef.current) return;
+    cellTraceRevisionRef.current = revision;
+    const trace = renderer.latestFluidCellTrace;
+    setFluidCellTraceValue(trace);
+    setFluidCellFineBand(renderer.fluidCellTraceFineBand);
+    // The gather clamps the requested step to the run it actually walked, so the
+    // store follows what it settled on. Without this a run that shortens under
+    // the pointer would strand the index past its end, and the next `[` would
+    // step back from a position that was never shown.
+    ui.setFluidCellTraceHitCount(trace?.hits.length ?? 0);
+    // Which of those leaves the surface passes through, so the keyboard and the
+    // HUD can both jump to one without either holding the trace itself.
+    ui.setFluidCellTraceInterfaceHits((trace?.hits ?? []).reduce<number[]>(
+      (indices, hit, index) => (hit.holdsInterface ? [...indices, index] : indices), []));
+    if (trace && trace.hits.length > 0 && trace.hitIndex !== ui.fluidCellTraceHitIndex) {
+      ui.setFluidCellTraceHitIndex(trace.hitIndex);
+    }
+  };
 
   const pixelTraceDrawConfig = (
     ui: ReturnType<typeof useUIStore.getState>,
@@ -305,6 +466,36 @@ export function WebGPUViewport() {
    * armed, because a paint dab is a click too and flip-flopping the pin under
    * every dab would be nothing but noise.
    */
+  /**
+   * Click the viewport to freeze the cell under the pointer; click again to
+   * follow it.
+   *
+   * The HUD footnote has promised this since the picker landed and only the HUD
+   * button delivered it, so the documented gesture did nothing. Pinning by
+   * click is the whole point of the tool: a cell you cannot hold still cannot be
+   * orbited, and orbiting is how the stencil and the interface patch become
+   * legible.
+   */
+  const resolveFluidCellTracePinGesture = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const gesture = cellTracePinGestureRef.current;
+    cellTracePinGestureRef.current = null;
+    if (!gesture || gesture.id !== event.pointerId || event.type === "pointercancel") return;
+    // A drag is an orbit, not a pick.
+    if (Math.hypot(event.clientX - gesture.downX, event.clientY - gesture.downY) > CLICK_SLOP_PX) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    // A click is a pointer observation in its own right: without this a click
+    // that never moved first would have nowhere to aim.
+    tracePointerRef.current = {
+      normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
+      normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
+    };
+    const ui = useUIStore.getState();
+    // Releasing needs no handshake — there is nothing to wait for — so unpin is
+    // immediate while pinning goes through the request the frame loop aims.
+    if (ui.fluidCellTracePinned) ui.setFluidCellTracePinned(false);
+    else ui.requestFluidCellTracePin();
+  };
+
   const resolvePixelTracePinGesture = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const gesture = tracePinGestureRef.current;
     tracePinGestureRef.current = null;
@@ -419,6 +610,8 @@ export function WebGPUViewport() {
       },
       pixelTraceDrawConfig,
       publishPixelTrace,
+    fluidCellTraceDrawConfig,
+    publishFluidCellTrace,
     };
     // React Fast Refresh deliberately cleans up and replays effects, including
     // effects with an empty dependency list. Vinext's RSC program reload can
@@ -614,12 +807,14 @@ export function WebGPUViewport() {
             },
             ui.svoRenderTuning,
             activeBinding.pixelTraceDrawConfig(ui, renderer),
+            activeBinding.fluidCellTraceDrawConfig(ui),
           );
         } catch (error: unknown) {
           void stopGPU(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
           return;
         }
         activeBinding.publishPixelTrace(renderer);
+        activeBinding.publishFluidCellTrace(renderer);
         simulation.recordFrame(metrics, renderer.presentationResolution);
         activeBinding.publishFrameRate(frameRate.sampleCompleted(renderer.completedPresentationCount, performance.now()));
         if (metrics.presentationSubmitted) {
@@ -915,10 +1110,11 @@ export function WebGPUViewport() {
     // Arm before any of the early returns below claim the press: the release, not
     // the press, is what decides whether this was a click.
     const traceUI = useUIStore.getState();
-    tracePinGestureRef.current = traceUI.pixelTraceEnabled && traceUI.activeTool === "select"
-      && event.button === 0 && !event.shiftKey
+    const pickGesture = traceUI.activeTool === "select" && event.button === 0 && !event.shiftKey
       ? { id: event.pointerId, downX: event.clientX, downY: event.clientY }
       : null;
+    tracePinGestureRef.current = traceUI.pixelTraceEnabled ? pickGesture : null;
+    cellTracePinGestureRef.current = traceUI.fluidCellTraceEnabled ? pickGesture : null;
     // pointerRef is a ref, so clearing hover here is what actually re-renders
     // the chip away for the duration of the gesture.
     setHover(null);
@@ -1093,6 +1289,7 @@ export function WebGPUViewport() {
     // Ahead of the pointer-id guard below: a pin gesture is tracked separately,
     // so it must resolve even on the releases the pointer machine ignores.
     resolvePixelTracePinGesture(event);
+    resolveFluidCellTracePinGesture(event);
     const active = pointerRef.current;
     if (active?.id !== event.pointerId) return;
     // An interrupted gesture is not a click, so it must not move the selection.
@@ -1149,6 +1346,28 @@ export function WebGPUViewport() {
       onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
       onContextMenu={(event) => event.preventDefault()}
     />
+    {/* Pick mode, beside the frame rate rather than four scrolls into a
+        collapsed panel section. It is a mode and not an action — it changes
+        what a click on the scene means — so it reads as a pressed state with
+        the gesture spelled out, and it names the pinned case separately because
+        that is the state a reader can get stuck in without noticing. */}
+    <button
+      type="button"
+      className="scene-pick-toggle"
+      data-testid="cell-pick-toggle"
+      aria-pressed={fluidCellTraceEnabled}
+      data-pinned={fluidCellTracePinned ? "true" : "false"}
+      onClick={() => setFluidCellTraceEnabled(!fluidCellTraceEnabled)}
+      title={fluidCellTraceEnabled
+        ? (fluidCellTracePinned
+          ? "A cell is pinned — click the scene to follow the pointer again, or press C to leave pick mode"
+          : "Hover the fluid to inspect the pressure cell behind that pixel; click to pin it. Press C to leave pick mode.")
+        : "Inspect one pressure cell: what the frame published about it, and what the fine band did to it. Shortcut: C"}
+    >
+      <i aria-hidden="true" />
+      <span>{fluidCellTraceEnabled ? (fluidCellTracePinned ? "Cell pinned" : "Picking cell") : "Pick cell"}</span>
+      <small>C</small>
+    </button>
     <output
       ref={fpsRef}
       className="fps-meter"
@@ -1257,6 +1476,25 @@ export function WebGPUViewport() {
         onClose={() => setPixelTraceEnabled(false)}
       />
     </>}
+    {fluidCellTraceEnabled && <FluidCellTraceHud
+      trace={fluidCellTrace}
+      schedule={fluidCellTraceSchedule}
+      fineBand={fluidCellFineBand}
+      enabledLayers={fluidCellTraceLayers}
+      pinned={fluidCellTracePinned}
+      probeStatus={fluidCellTraceStatus}
+      pointerSeen={tracePointerRef.current !== null}
+      expanded={fluidCellTraceExpanded}
+      onToggleExpanded={toggleFluidCellTraceExpanded}
+      onToggleLayer={toggleFluidCellTraceLayer}
+      onStepHit={(delta) => setFluidCellTraceHitIndex(stepFluidCellTraceHit(
+        fluidCellTraceHitIndex, delta, fluidCellTrace?.hits.length ?? 0))}
+      onJumpToInterface={jumpFluidCellTraceToInterface}
+      // Pinning asks; unpinning is immediate. The ask is what carries the aim.
+      onTogglePinned={() => (fluidCellTracePinned
+        ? setFluidCellTracePinned(false) : requestFluidCellTracePin())}
+      onClose={() => setFluidCellTraceEnabled(false)}
+    />}
     {failure && <div
       className={`viewport-failure-alert tone-${failure.tone}`}
       data-testid="viewport-failure-alert"

@@ -1,31 +1,48 @@
-import { SVO_PIXEL_TRACE_SEGMENT_FLOATS, type SvoPixelTraceGeometry } from "./svo-pixel-trace";
+import { DECORATION_SEGMENT_FLOATS } from "./visualization-decorations";
 
 /**
- * Draws a decoded pixel trace as 3D line work over the finished frame.
+ * Draws one frame's assembled decorations as 3D line work over the finished image.
  *
- * Everything the diagnostic shows is a world-space segment (see
- * `buildSvoPixelTraceGeometry`), so one instanced draw covers the whole
- * overlay: each instance expands to a screen-space-thickened quad whose width
- * is constant in device pixels, which is what keeps a 5 cm brick edge legible
- * from across the scene without turning a near box into a slab. An instance
- * carrying a non-zero head width becomes an arrowhead at its end point instead
- * of a shaft, so directional work says which way it went.
+ * Every decoration any pass contributes is a world-space segment (see
+ * `visualization-decorations.ts`), so a single instanced draw covers the whole
+ * overlay however many passes fed it: each instance expands to a
+ * screen-space-thickened quad whose width is constant in device pixels, which
+ * is what keeps a 5 cm brick edge legible from across the scene without turning
+ * a near box into a slab. An instance carrying a non-zero head width becomes an
+ * arrowhead at its end point instead of a shaft, so directional work says which
+ * way it went.
  *
  * The camera basis is the same one every dry-scene entry point builds, so the
- * projection here is the exact forward transform of the ray the probe traced:
- * the drawn boxes land on the pixels whose work they describe.
+ * projection here is the exact forward transform of the ray a probe traced and
+ * of the `worldToFine` a solver shader inverted: what is drawn lands on the
+ * pixels whose work it describes.
  *
  * Occluded line work is not hidden, it is ghosted. A wireframe that vanished
  * behind the surface it explains would hide the traversal, and the whole point
  * is to see the boxes the ray walked through — including the ones inside the
  * thing it eventually hit.
  */
-export const SVO_PIXEL_TRACE_OVERLAY_UNIFORM_BYTES = 96;
-export const SVO_PIXEL_TRACE_OVERLAY_INSTANCE_BYTES = SVO_PIXEL_TRACE_SEGMENT_FLOATS * 4;
-/** Segments beyond this are dropped rather than silently growing GPU memory. */
-export const SVO_PIXEL_TRACE_OVERLAY_MAXIMUM_SEGMENTS = 65_536;
+export const DECORATION_OVERLAY_UNIFORM_BYTES = 96;
 
-export interface SvoPixelTraceOverlayCamera {
+/**
+ * The whole contract a built geometry has to satisfy to be drawn here.
+ *
+ * Nothing in this pipeline is specific to any one producer: a segment is two
+ * world points with a colour, a width and a dash. `assembleDecorations` merges
+ * every enabled contributor into one of these, and a producer that already
+ * emits the instance layout joins by concatenation rather than by rewrite.
+ */
+export interface DecorationGeometry {
+  /** Interleaved per-instance data; see DECORATION_SEGMENT_FLOATS. */
+  readonly segments: Float32Array<ArrayBuffer>;
+  readonly segmentCount: number;
+}
+
+export const DECORATION_OVERLAY_INSTANCE_BYTES = DECORATION_SEGMENT_FLOATS * 4;
+/** Segments beyond this are dropped rather than silently growing GPU memory. */
+export const DECORATION_OVERLAY_MAXIMUM_SEGMENTS = 65_536;
+
+export interface DecorationOverlayCamera {
   readonly position_m: readonly [number, number, number];
   readonly forward: readonly [number, number, number];
   readonly right: readonly [number, number, number];
@@ -35,8 +52,8 @@ export interface SvoPixelTraceOverlayCamera {
   readonly aspect: number;
 }
 
-export interface SvoPixelTraceOverlayFrame {
-  readonly camera: SvoPixelTraceOverlayCamera;
+export interface DecorationOverlayFrame {
+  readonly camera: DecorationOverlayCamera;
   readonly viewportWidth: number;
   readonly viewportHeight: number;
   /** 0 replays the trace from the camera outward; 1 shows all of it. */
@@ -50,7 +67,7 @@ export interface SvoPixelTraceOverlayFrame {
   readonly depthNear_m: number;
 }
 
-export const svoPixelTraceOverlayShader = /* wgsl */ `
+export const decorationOverlayShader = /* wgsl */ `
 struct TraceOverlayUniforms {
   // xyz camera position, w tan(halfFov)
   cameraPosition:vec4f,
@@ -199,7 +216,7 @@ fn traceNdc(view:vec3f)->vec2f {
 `;
 
 /** Instanced segment overlay for one decoded pixel trace. */
-export class SparseVoxelPixelTraceOverlay {
+export class DecorationOverlay {
   private pipeline?: GPURenderPipeline;
   private layout?: GPUBindGroupLayout;
   private bindGroup?: GPUBindGroup;
@@ -210,45 +227,45 @@ export class SparseVoxelPixelTraceOverlay {
   private fallbackDepthView?: GPUTextureView;
   private boundDepthView?: GPUTextureView;
   private segmentCount = 0;
-  private readonly uniformData = new Float32Array(new ArrayBuffer(SVO_PIXEL_TRACE_OVERLAY_UNIFORM_BYTES));
+  private readonly uniformData = new Float32Array(new ArrayBuffer(DECORATION_OVERLAY_UNIFORM_BYTES));
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly targetFormat: GPUTextureFormat) {}
 
   async initialize(): Promise<void> {
-    const module = this.device.createShaderModule({ label: "Sparse voxel pixel-trace overlay", code: svoPixelTraceOverlayShader });
+    const module = this.device.createShaderModule({ label: "Decoration overlay", code: decorationOverlayShader });
     const info = await module.getCompilationInfo();
     const errors = info.messages.filter((message) => message.type === "error");
     if (errors.length > 0) {
-      throw new Error(`Sparse voxel pixel-trace overlay:\n${errors.map((error) => `${error.lineNum}:${error.linePos} ${error.message}`).join("\n")}`);
+      throw new Error(`Decoration overlay:\n${errors.map((error) => `${error.lineNum}:${error.linePos} ${error.message}`).join("\n")}`);
     }
     this.uniforms = this.device.createBuffer({
-      label: "Sparse voxel pixel-trace overlay uniforms",
-      size: SVO_PIXEL_TRACE_OVERLAY_UNIFORM_BYTES,
+      label: "Decoration overlay uniforms",
+      size: DECORATION_OVERLAY_UNIFORM_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.fallbackDepth = this.device.createTexture({
-      label: "Sparse voxel pixel-trace overlay depth fallback",
+      label: "Decoration overlay depth fallback",
       size: [1, 1],
       format: "depth32float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     });
     this.fallbackDepthView = this.fallbackDepth.createView();
     this.layout = this.device.createBindGroupLayout({
-      label: "Sparse voxel pixel-trace overlay bindings",
+      label: "Decoration overlay bindings",
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "depth" } },
       ],
     });
     this.pipeline = await this.device.createRenderPipelineAsync({
-      label: "Sparse voxel pixel-trace overlay",
+      label: "Decoration overlay",
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
       vertex: {
         module,
         entryPoint: "vertexMain",
         buffers: [{
-          arrayStride: SVO_PIXEL_TRACE_OVERLAY_INSTANCE_BYTES,
+          arrayStride: DECORATION_OVERLAY_INSTANCE_BYTES,
           stepMode: "instance",
           attributes: [
             { shaderLocation: 0, offset: 0, format: "float32x4" },
@@ -284,7 +301,7 @@ export class SparseVoxelPixelTraceOverlay {
     if (!view) return;
     if (this.bindGroup && this.boundDepthView === view) return;
     this.bindGroup = this.device.createBindGroup({
-      label: "Sparse voxel pixel-trace overlay bind group",
+      label: "Decoration overlay bind group",
       layout: this.layout,
       entries: [
         { binding: 0, resource: { buffer: this.uniforms } },
@@ -298,22 +315,22 @@ export class SparseVoxelPixelTraceOverlay {
    * Upload one built geometry. Returns the number of segments that will draw;
    * an over-capacity trace is truncated and reported rather than dropped whole.
    */
-  setGeometry(geometry: SvoPixelTraceGeometry): number {
+  setGeometry(geometry: DecorationGeometry): number {
     if (this.destroyed) return 0;
-    const requested = Math.min(geometry.segmentCount, SVO_PIXEL_TRACE_OVERLAY_MAXIMUM_SEGMENTS);
+    const requested = Math.min(geometry.segmentCount, DECORATION_OVERLAY_MAXIMUM_SEGMENTS);
     this.segmentCount = requested;
     if (requested === 0) return 0;
     if (!this.instances || this.instanceCapacity < requested) {
       this.instances?.destroy();
       // Grow in powers of two so a dense hover does not reallocate per frame.
-      this.instanceCapacity = Math.min(SVO_PIXEL_TRACE_OVERLAY_MAXIMUM_SEGMENTS, 2 ** Math.ceil(Math.log2(Math.max(256, requested))));
+      this.instanceCapacity = Math.min(DECORATION_OVERLAY_MAXIMUM_SEGMENTS, 2 ** Math.ceil(Math.log2(Math.max(256, requested))));
       this.instances = this.device.createBuffer({
-        label: "Sparse voxel pixel-trace overlay segments",
-        size: this.instanceCapacity * SVO_PIXEL_TRACE_OVERLAY_INSTANCE_BYTES,
+        label: "Decoration overlay segments",
+        size: this.instanceCapacity * DECORATION_OVERLAY_INSTANCE_BYTES,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       });
     }
-    const floats = requested * SVO_PIXEL_TRACE_SEGMENT_FLOATS;
+    const floats = requested * DECORATION_SEGMENT_FLOATS;
     this.device.queue.writeBuffer(this.instances, 0, geometry.segments, 0, floats);
     return requested;
   }
@@ -324,7 +341,7 @@ export class SparseVoxelPixelTraceOverlay {
     encoder: GPUCommandEncoder,
     target: GPUTextureView,
     sceneDepth: GPUTextureView | undefined,
-    frame: SvoPixelTraceOverlayFrame,
+    frame: DecorationOverlayFrame,
   ): boolean {
     if (!this.ready || !this.instances || this.segmentCount === 0) return false;
     this.rebuildBindGroup(sceneDepth);
@@ -342,7 +359,7 @@ export class SparseVoxelPixelTraceOverlay {
     data.set([sceneDepth ? 1 : 0, Math.max(1e-3, frame.revealSoftness ?? 0.08), 0, 0], 20);
     this.device.queue.writeBuffer(this.uniforms!, 0, data);
     const pass = encoder.beginRenderPass({
-      label: "Sparse voxel pixel-trace overlay",
+      label: "Decoration overlay",
       colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }],
     });
     pass.setPipeline(this.pipeline!);

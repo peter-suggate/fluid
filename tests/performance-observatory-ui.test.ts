@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { VISUALIZATION_FIELDS } from "../lib/visualization-catalog";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
@@ -21,6 +22,12 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
   const panel = source("../components/PerformancePanel.tsx");
   const grid = source("../components/PerformanceActivityGrid.tsx");
 
+  // The cards are a read of the visualization catalog, so what they offer is
+  // asserted against the declarations rather than against this file's source.
+  assert.match(panel, /VISUALIZATION_FIELDS\s*\n\s*\.filter\(\(field\) => !field\.hidden\)/,
+    "the observatory should build its cards from the catalog");
+  const cards = VISUALIZATION_FIELDS.filter((field) => !field.hidden);
+  const modes = new Set(cards.map((field) => field.mode));
   for (const mode of [
     "fine-band-lifecycle",
     "resolution",
@@ -32,10 +39,18 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
     "projection-update",
     "divergence-closure",
     "structured-velocity",
-  ]) assert.match(panel, new RegExp(`mode: "${mode}"`), mode);
+    "flood-provenance",
+    "blast-radius",
+    // The cost pair: what each unknown charges, and how scattered its gather is.
+    "row-cost",
+    "stencil-locality",
+  ]) assert.ok(modes.has(mode), mode);
 
-  assert.equal((panel.match(/axis: "volume"/g) ?? []).length, 13,
+  assert.equal(cards.length, 17);
+  assert.ok(cards.every((field) => field.axis === "volume"),
     "every observatory card defaults to its volume presentation");
+  assert.ok(cards.every((field) => (field.legend?.length ?? 0) > 0),
+    "every card carries the legend its colours are read with");
   assert.match(panel, /if \(overlayAxis === "off"\) \{[\s\S]*setOverlayAxis\(view\.axis\)/,
     "a card should use its volume default only when no presentation is active");
   assert.doesNotMatch(panel, /setOverlayMode\(view\.mode\);\s*setOverlayAxis\(view\.axis\);/,
@@ -52,7 +67,10 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
   assert.match(panel, />VOLUME<\/button>/);
   assert.match(panel, />HIDE<\/button>/);
   assert.match(panel, /type="range"/);
-  assert.match(panel, /source:/);
+  assert.match(panel, /SOURCE · \{selectedView\.source\}/,
+    "the inspector should name where the selected field's numbers come from");
+  assert.ok(cards.every((field) => field.source),
+    "every card declares its source beside the publication it reads");
   assert.match(panel, /traces\.length === 3 && traces\.every\(performanceTraceIsExact\)/);
   assert.match(grid, /performanceTraceAccounting\(trace\)\.exact/);
   assert.match(grid, /ACCOUNTING LEDGERS/);

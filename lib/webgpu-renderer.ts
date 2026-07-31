@@ -12,13 +12,18 @@ import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./en
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { SparseVoxelDebugRenderer, type SparseVoxelRenderSource, type SparseVoxelSceneRenderSource, type VoxelRenderMode } from "./webgpu-voxel-debug";
-import { CAMERA_TAN_HALF_FOV, viewportAspect } from "./webgpu-camera";
+import { CAMERA_TAN_HALF_FOV, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
 import {
-  buildSvoPixelTraceGeometry,
   type SvoPixelTrace,
   type SvoPixelTraceLayer,
 } from "./svo-pixel-trace";
-import { SparseVoxelPixelTraceOverlay } from "./webgpu-svo-pixel-trace-overlay";
+import { DecorationOverlay } from "./webgpu-decoration-overlay";
+import { VISUALIZATION_CATALOG } from "./visualization-catalog";
+import { assembleDecorations } from "./visualization-registry";
+import { containerDecorationSpace } from "./visualization-decorations";
+import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
+import type { FluidCellTrace } from "./fluid-cell-trace";
+import type { FineBandCellContext } from "./fine-band-cell-model";
 import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, type SparseVoxelDrySceneData } from "./webgpu-svo-dry-scene";
 import {
   buildSvoScenePrimitives,
@@ -130,7 +135,8 @@ export type OptionalRendererPipeline =
   | "voxel-debug"
   | "svo-dry-scene"
   | "secondary-particles"
-  | "pixel-trace-overlay";
+  | "decoration-overlay"
+  | "fluid-cell-trace";
 
 /**
  * Live pixel-trace diagnostic state.
@@ -150,6 +156,47 @@ export type PixelTraceStatus =
   /** Armed and able, but no trace has been read back yet. */
   | "waiting"
   | "live";
+
+/**
+ * Request for the per-cell fluid work diagnostic.
+ *
+ * Selection is a pixel, exactly as for the ray probe: the gather shader marches
+ * that camera ray to decide which pressure cell the pointer means, so the two
+ * diagnostics share one gesture and one camera transform.
+ */
+export interface FluidCellTraceConfig {
+  /** Viewport fractions, 0..1 from the top-left. */
+  readonly normalizedX: number;
+  readonly normalizedY: number;
+  /**
+   * A pinned cell stops re-aiming, so orbiting cannot silently reselect it.
+   *
+   * It does not change what is drawn or reported: a hovered cell shows exactly
+   * what a pinned one shows, because needing to commit before you can read
+   * anything is what makes a picker tedious to explore with. Pinning is for
+   * holding a cell still while the camera moves around it, nothing more.
+   */
+  readonly pinned: boolean;
+  /**
+   * Which leaf along the ray to describe, nearest first. The pointer alone can
+   * only ever name the first, which on a liquid is a surface cell; stepping this
+   * is how an interior unknown gets selected. Clamped to the run in the shader.
+   */
+  readonly hitIndex?: number;
+  /** Visualization ids to draw. Absent draws nothing for this selection. */
+  readonly layers?: readonly string[];
+  readonly widthScale?: number;
+  /**
+   * Solve policy the dependency cone is grown against. Supplied by the caller
+   * because the tail policy lives with the solver, not with the picked cell;
+   * absent simply means no cone.
+   */
+  readonly solvePolicy?: {
+    readonly outerIterations: number;
+    readonly levels: number;
+    readonly smoothsPerLevel: number;
+  };
+}
 
 export interface PixelTraceConfig {
   /** Viewport fractions, 0..1 from the top-left. */
@@ -186,6 +233,7 @@ export function optionalRendererPipelineRequests(
   simulationRunning: boolean,
   secondaryParticlesAvailable: boolean,
   pixelTraceActive = false,
+  fluidCellTraceActive = false,
 ): OptionalRendererPipeline[] {
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
@@ -199,7 +247,10 @@ export function optionalRendererPipelineRequests(
   requested.push("svo-dry-scene");
   if (simulationRunning && secondaryParticlesAvailable) requested.push("secondary-particles");
   // The trace overlay is only meaningful over the sparse path it explains.
-  if (pixelTraceActive && voxelRenderMode === "smooth") requested.push("pixel-trace-overlay");
+  if (pixelTraceActive && voxelRenderMode === "smooth") requested.push("decoration-overlay");
+  // The cell gather reads published octree topology, not the presentation, so
+  // it is requested independently of the voxel representation in use.
+  if (fluidCellTraceActive) requested.push("fluid-cell-trace", "decoration-overlay");
   return requested;
 }
 
@@ -403,11 +454,16 @@ export class FluidLabRenderer {
   private gridOverlayPipeline?: GridOverlayPipeline;
   private techniqueOverlayPipeline?: OctreeTechniqueOverlayPipeline;
   private techniqueAuditOverlayPipeline?: OctreeTechniqueAuditOverlayPipeline;
-  private pixelTraceOverlayPipeline?: SparseVoxelPixelTraceOverlay;
+  private decorationOverlayPipeline?: DecorationOverlay;
+  private fluidCellTracePipeline?: WebGPUFluidCellTrace;
+  private latestFluidCellTraceValue?: FluidCellTrace;
+  private fluidCellTraceRevisionValue = 0;
+  private fluidCellTraceReadInFlight = false;
   /** Latest decoded trace, and a revision the UI polls instead of a callback. */
   private latestPixelTraceValue?: SvoPixelTrace;
   private pixelTraceRevisionValue = 0;
-  private pixelTraceGeometryKey = "";
+  /** Identity of the assembled decorations currently uploaded. */
+  private decorationGeometryKey = "";
   private pixelTraceReadInFlight = false;
   /**
    * Everything a trace's answer depends on except the camera and the pixel: the
@@ -607,6 +663,19 @@ export class FluidLabRenderer {
         pipeline.setOwnerRows(this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture!);
       },
     );
+    if (wants.has("fluid-cell-trace")) this.ensureOptionalPipeline(
+      "fluid-cell-trace", this.fluidCellTracePipeline,
+      (device) => new WebGPUFluidCellTrace(device, this.uniformBuffer!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => {
+        this.fluidCellTracePipeline = pipeline;
+        pipeline.setSource(
+          this.gpuFluid?.octreeTechniqueDebugSource,
+          this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture!,
+        );
+      },
+      (pipeline) => pipeline.destroy(),
+    );
     if (wants.has("technique-audit-overlay")) this.ensureOptionalPipeline(
       "technique-audit-overlay", this.techniqueAuditOverlayPipeline,
       (device) => new OctreeTechniqueAuditOverlayPipeline(device, this.format!, this.uniformBuffer!),
@@ -643,11 +712,11 @@ export class FluidLabRenderer {
       },
       (pipeline) => pipeline.destroy(),
     );
-    if (wants.has("pixel-trace-overlay")) this.ensureOptionalPipeline(
-      "pixel-trace-overlay", this.pixelTraceOverlayPipeline,
-      (device) => new SparseVoxelPixelTraceOverlay(device, this.format!),
+    if (wants.has("decoration-overlay")) this.ensureOptionalPipeline(
+      "decoration-overlay", this.decorationOverlayPipeline,
+      (device) => new DecorationOverlay(device, this.format!),
       (pipeline) => pipeline.initialize(),
-      (pipeline) => { this.pixelTraceOverlayPipeline = pipeline; },
+      (pipeline) => { this.decorationOverlayPipeline = pipeline; },
       (pipeline) => pipeline.destroy(),
     );
     if (wants.has("secondary-particles")) this.ensureOptionalPipeline(
@@ -750,6 +819,46 @@ export class FluidLabRenderer {
     return this.pixelTraceSceneRevisionOfTrace !== this.pixelTraceSceneRevisionValue;
   }
 
+  get latestFluidCellTrace(): FluidCellTrace | undefined { return this.latestFluidCellTraceValue; }
+  get fluidCellTraceRevision(): number { return this.fluidCellTraceRevisionValue; }
+  /** Ready once the gather pipeline exists and has a published topology to read. */
+  get fluidCellTraceReady(): boolean { return this.fluidCellTracePipeline?.ready === true; }
+
+  /**
+   * The band widths and redistance ladder the HUD reads a cell against.
+   *
+   * Frame-wide rather than per-cell, so it stays out of the trace ABI: copying
+   * these into every record would invite the two to disagree, and the whole
+   * point of reading the planner's own output is that it cannot. Undefined on a
+   * scene with no fine band, which is what makes the HUD's fine-band panels
+   * conditional rather than empty.
+   */
+  get fluidCellTraceFineBand(): FineBandCellContext | undefined {
+    const bands = this.gpuFluid?.octreeTechniqueDebugSource?.fineBandLifecycle?.bands;
+    if (!bands) return undefined;
+    return {
+      widths: {
+        pressureBandCells: bands.pressureBandCells,
+        surfaceBandCells: bands.surfaceBandCells,
+        transportBandFineCells: bands.transportBandFineCells,
+        redistanceBandFineCells: bands.redistanceBandFineCells,
+      },
+      ladderStrides: bands.ladderStrides,
+    };
+  }
+
+  private pumpFluidCellTraceReadback(): void {
+    const pipeline = this.fluidCellTracePipeline;
+    if (!pipeline || this.fluidCellTraceReadInFlight) return;
+    this.fluidCellTraceReadInFlight = true;
+    void pipeline.read().then((trace) => {
+      if (this.disposed || this.deviceLost || this.fluidCellTracePipeline !== pipeline || !trace) return;
+      this.latestFluidCellTraceValue = trace;
+      this.fluidCellTraceRevisionValue += 1;
+    }).catch(() => { /* A superseded or unmapped readback is not a frame error. */ })
+      .finally(() => { this.fluidCellTraceReadInFlight = false; });
+  }
+
   private pumpPixelTraceReadback(): void {
     const pipeline = this.svoDryScenePipeline;
     if (!pipeline || this.pixelTraceReadInFlight) return;
@@ -766,20 +875,65 @@ export class FluidLabRenderer {
       .finally(() => { this.pixelTraceReadInFlight = false; });
   }
 
-  private encodePixelTraceOverlay(
+  /**
+   * Draw every decoration this frame's selections produce, in one call.
+   *
+   * The renderer does not know what any of them are. It supplies the lattice,
+   * the selections and which ids are on; `assembleDecorations` asks each pass's
+   * declaration whether it can draw any of them and merges what comes back. A
+   * frame holding both a traced ray and a picked cell therefore costs the same
+   * one upload and one draw as either alone.
+   *
+   * The assembled key is the drawn content, not a revision counter, so orbiting
+   * a frozen selection or holding the pointer still re-uploads nothing — which
+   * matters because the cell gather re-runs every frame regardless.
+   */
+  private encodeDecorationOverlay(
     encoder: GPUCommandEncoder,
     basis: ReturnType<typeof cameraBasis>,
-    config: PixelTraceConfig,
+    scene: SceneDescription,
+    pixelTrace: PixelTraceConfig | undefined,
+    fluidCellTrace: FluidCellTraceConfig | undefined,
   ): void {
-    const overlay = this.pixelTraceOverlayPipeline, trace = this.latestPixelTraceValue;
-    if (!overlay?.ready || !trace || !this.presentationTexture) return;
-    // Rebuild the segment buffer only when the trace or the requested layers
-    // change: orbiting a pinned trace is a uniform update, not a re-upload.
-    const key = `${this.pixelTraceRevisionValue}|${config.layers.join(",")}|${config.widthScale ?? 1}`;
-    if (key !== this.pixelTraceGeometryKey) {
-      const geometry = buildSvoPixelTraceGeometry(trace, { layers: config.layers, widthScale: config.widthScale });
-      overlay.setGeometry(geometry);
-      this.pixelTraceGeometryKey = key;
+    const overlay = this.decorationOverlayPipeline;
+    if (!overlay?.ready || !this.presentationTexture) return;
+    const cellTrace = fluidCellTrace ? this.latestFluidCellTraceValue : undefined;
+    const subjects: unknown[] = [];
+    if (pixelTrace && this.latestPixelTraceValue) subjects.push(this.latestPixelTraceValue);
+    if (cellTrace) {
+      // The picked cell, plus what the derived decorators need to grow their own
+      // views of it. Each declaration narrows this itself, so adding a field for
+      // one of them cannot disturb the others.
+      subjects.push(fluidCellTrace?.solvePolicy
+        ? { ...cellTrace, solvePolicy: fluidCellTrace.solvePolicy }
+        : cellTrace);
+    }
+    if (subjects.length === 0) {
+      if (this.decorationGeometryKey !== "") { overlay.clear(); this.decorationGeometryKey = ""; }
+      return;
+    }
+    const dimensions = cellTrace?.dimensions
+      ?? (this.gpuFluid?.octreeTechniqueDebugSource?.pressureRows.dimensions);
+    const enabledIds = new Set<string>([
+      ...(pixelTrace?.layers ?? []).map((layer) => `svo-traversal/${layer}`),
+      ...(fluidCellTrace?.layers ?? []),
+    ]);
+    const assembled = assembleDecorations({
+      definitions: VISUALIZATION_CATALOG,
+      subjects,
+      // Both producers place work through this lattice; the ray probe's records
+      // are already world metres and bypass it by appending directly.
+      space: containerDecorationSpace(
+        (dimensions ?? [1, 1, 1]) as readonly [number, number, number],
+        [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
+      ),
+      emphasis: fluidCellTrace && !fluidCellTrace.pinned ? "hover" : "selected",
+      widthScale: pixelTrace?.widthScale ?? fluidCellTrace?.widthScale,
+      enabled: (definition) => enabledIds.has(definition.id),
+    });
+    if (assembled.key !== this.decorationGeometryKey) {
+      overlay.setGeometry(assembled.geometry);
+      this.decorationGeometryKey = assembled.key;
     }
     const width = this.presentationTexture.width, height = this.presentationTexture.height;
     overlay.encode(encoder, this.cachedTextureView(this.presentationTexture), this.pixelTraceSceneDepthView(), {
@@ -793,8 +947,10 @@ export class FluidLabRenderer {
       },
       viewportWidth: width,
       viewportHeight: height,
-      reveal: config.reveal,
-      occludedAlpha: config.occludedAlpha,
+      // Only the ray probe's work is a sequence, so only it has a sweep to
+      // reveal; everything else is emitted at order zero and always drawn.
+      reveal: pixelTrace?.reveal ?? 1,
+      occludedAlpha: pixelTrace?.occludedAlpha,
       depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
     });
   }
@@ -1027,11 +1183,13 @@ export class FluidLabRenderer {
     this.waterPipeline?.setGlobalFineLevelSet(globalFineLevelSet
       ? createGlobalFineLevelSetConsumerSource(globalFineLevelSet)
       : undefined);
+    this.waterPipeline?.setCoarseLevelSet(this.gpuFluid?.coarseLevelSetSource);
     this.gridOverlayPipeline?.setVolume(texture, columnBases, gridCells, velocity, pressureSamples, divergence, pressure);
     this.techniqueOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
     this.techniqueOverlayPipeline?.setOwnerRows(pressureSamples);
     this.techniqueAuditOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
     this.techniqueAuditOverlayPipeline?.setOwnerRows(pressureSamples);
+    this.fluidCellTracePipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource, pressureSamples);
   }
 
   private solverKey(scene:SceneDescription,config:SimulationRunConfig){return gpuSceneSolverKey(scene,config);}
@@ -1310,7 +1468,8 @@ export class FluidLabRenderer {
       : initialRasterPresentationReadiness({
           solverAttached: true,
           initialSparseAuthorityReady: pending.solver.initialSparseAuthorityReady === true,
-          globalFineAttached: Boolean(pending.solver.globalFineLevelSetSource),
+          globalFineAttached: Boolean(pending.solver.globalFineLevelSetSource
+            || pending.solver.coarseLevelSetSource),
           surfaceSourceAttached: this.globalFineWaterAttached,
           surfaceExtractionSubmitted: pending.submitted,
           presentationFenceCompleted: true,
@@ -1446,7 +1605,7 @@ export class FluidLabRenderer {
   /** Frames whose presentation submission has actually finished on the GPU. */
   get completedPresentationCount(): number { return this.completedPresentations; }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig, fluidCellTrace?: FluidCellTraceConfig): RendererFrameMetrics {
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
       ? new CPUPerformanceTrace(
@@ -1473,7 +1632,15 @@ export class FluidLabRenderer {
       this.resetPresentationTrace();
     }
     const basis = cameraBasis(camera), position = basis.position;
-    if (backend === "webgpu" && gridOverlay?.axis !== "off") this.gpuFluid?.ensureGridDiagnosticTextures?.();
+    // The owner map is allocated lazily and materialized only once something
+    // asks for it. The cell picker reads that same map, so gating the request
+    // on a grid overlay left the picker resolving every pixel against a
+    // zero-filled texture: row 0 everywhere, whose header decodes as a 1³ leaf
+    // at the origin with no couplings. Asking for it whenever the picker is on
+    // is what makes a pick land on the cell under the pointer.
+    if (backend === "webgpu" && (gridOverlay?.axis !== "off" || fluidCellTrace)) {
+      this.gpuFluid?.ensureGridDiagnosticTextures?.();
+    }
     const sceneRuntime = planSceneRuntime(scene);
     const svoSceneConfig: SimulationRunConfig = {
       ...config,
@@ -1489,7 +1656,7 @@ export class FluidLabRenderer {
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, voxelRenderMode, this.simulationRunning,
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
-      pixelTraceRequested,
+      pixelTraceRequested, Boolean(fluidCellTrace),
     ));
     // The probe's answer depends on the scene epoch, the presentation, and the
     // traversal tuning as much as on the pixel. Tracking them as one revision is
@@ -1510,11 +1677,35 @@ export class FluidLabRenderer {
         Math.floor(Math.max(0, Math.min(1, pixelTrace!.normalizedX)) * width),
         Math.floor(Math.max(0, Math.min(1, pixelTrace!.normalizedY)) * height),
       );
-    } else if (!pixelTraceRequested) {
+    }
+    // The step along the ray applies to a pinned selection too: freezing the ray
+    // is exactly when walking into the interior along it becomes useful.
+    if (fluidCellTrace) this.fluidCellTracePipeline?.setHitIndex(fluidCellTrace.hitIndex ?? 0);
+    // A pinned cell stops re-aiming, so orbiting cannot silently reselect it.
+    // Freezing the pixel was not enough to do that: the gather still marched a
+    // ray built from that pixel and the *current* camera, so panning swung the
+    // ray and the pin slid onto whatever moved under it. The aim is recorded in
+    // world space instead, from the same pixel centre the shader would have
+    // used, and simply stops being updated once pinned.
+    if (fluidCellTrace && !fluidCellTrace.pinned) {
+      const width = this.presentationTexture.width, height = this.presentationTexture.height;
+      const pixelX = Math.floor(Math.max(0, Math.min(1, fluidCellTrace.normalizedX)) * width);
+      const pixelY = Math.floor(Math.max(0, Math.min(1, fluidCellTrace.normalizedY)) * height);
+      this.fluidCellTracePipeline?.requestPixel(pixelX, pixelY);
+      const aim = viewportRayForPixel(camera, pixelX, pixelY, width, height);
+      this.fluidCellTracePipeline?.setAim(aim.origin, aim.direction);
+    } else if (!fluidCellTrace) {
+      // Leaving pick mode drops the frozen aim, so re-entering starts from the
+      // pointer rather than answering the cell picked a scene ago.
+      this.fluidCellTracePipeline?.clearAim();
+      if (this.latestFluidCellTraceValue) {
+        this.latestFluidCellTraceValue = undefined;
+        this.fluidCellTraceRevisionValue += 1;
+      }
+    }
+    if (!pixelTraceRequested) {
       this.svoDryScenePipeline?.clearPixelTraceRequest();
-      this.pixelTraceOverlayPipeline?.clear();
       if (this.latestPixelTraceValue) { this.latestPixelTraceValue = undefined; this.pixelTraceRevisionValue += 1; }
-      this.pixelTraceGeometryKey = "";
     }
     // Raw voxel/brick inspection is opt-in. Keeping the source detached in
     // smooth presentation avoids a second capacity-sized GPU instance arena
@@ -1548,10 +1739,13 @@ export class FluidLabRenderer {
     // follows the newly published generation without any CPU field copy.
     if (readyGPUFluid?.globalFineLevelSetSource) {
       this.waterPipeline.setGlobalFineLevelSet(createGlobalFineLevelSetConsumerSource(readyGPUFluid.globalFineLevelSetSource));
+    } else {
+      this.waterPipeline.setGlobalFineLevelSet(undefined);
     }
+    this.waterPipeline.setCoarseLevelSet(readyGPUFluid?.coarseLevelSetSource);
     const globalFineWaterReady = Boolean(readyGPUFluid
       && readyGPUFluid.initialSparseAuthorityReady
-      && readyGPUFluid.globalFineLevelSetSource);
+      && (readyGPUFluid.globalFineLevelSetSource || readyGPUFluid.coarseLevelSetSource));
     if (readyGPUFluid && globalFineWaterReady !== this.globalFineWaterAttached) {
       this.globalFineWaterAttached = globalFineWaterReady;
       this.updateRenderSources(
@@ -1564,7 +1758,7 @@ export class FluidLabRenderer {
         readyGPUFluid.gridPressureTexture ?? this.scalarFallbackTexture,
       );
     }
-    if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const compactSurface=Boolean(this.gpuFluid.globalFineLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);}
+    if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {const compactSurface=Boolean(this.gpuFluid.globalFineLevelSetSource||this.gpuFluid.coarseLevelSetSource);this.gridOverlayPipeline?.setVolume(compactSurface?this.scalarFallbackTexture:this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture);}
     cpuTrace?.transition({ id: "scene-upload", label: "Scene and field uploads" });
     if (backend === "cpu-reference") this.uploadFluid(fluid);
     const cameraStabilityKey = [
@@ -1749,7 +1943,7 @@ export class FluidLabRenderer {
       && !pendingInitialRaster.submitted
       && pendingInitialRaster.solver === readyGPUFluid
       && readyGPUFluid.initialSparseAuthorityReady === true
-      && Boolean(readyGPUFluid.globalFineLevelSetSource)
+      && Boolean(readyGPUFluid.globalFineLevelSetSource || readyGPUFluid.coarseLevelSetSource)
       && this.globalFineWaterAttached
       && rasterResult.surfaceUpdated
       ? pendingInitialRaster
@@ -1804,6 +1998,21 @@ export class FluidLabRenderer {
       });
       inspectionOverlayEncoded = true;
     }
+    // The gather is a compute pass over published topology, so it is encoded
+    // whether or not any overlay drew this frame.
+    // The readback is pumped after the submit, not here: `mapAsync` puts the
+    // buffer into a pending map state immediately, and a buffer with a map
+    // pending may not appear in a submit — including the very submit that
+    // carries this copy. Mapping before submitting rejects the whole command
+    // buffer, so the frame that was gathering the cell also fails to present.
+    if (fluidCellTrace) {
+      // Lazy allocation means the owner map may have arrived after the last
+      // source refresh; `setSource` is a no-op once it stops changing.
+      this.fluidCellTracePipeline?.setSource(
+        this.gpuFluid?.octreeTechniqueDebugSource,
+        this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture);
+      this.fluidCellTracePipeline?.encode(encoder);
+    }
     if (gridOverlay && gridOverlay.axis !== "off") {
       const overlayView=this.presentationTexture.createView();
       // Generic texture fields and compact paper publications each own both
@@ -1831,8 +2040,10 @@ export class FluidLabRenderer {
       if (pixelTraceProbing && this.svoDryScenePipeline?.encodePixelTrace(encoder)) {
         this.pixelTraceEncodedSceneRevision = this.pixelTraceSceneRevisionValue;
       }
-      this.encodePixelTraceOverlay(encoder, basis, pixelTrace);
     }
+    // One assembled draw for every decoration any pass contributed this frame.
+    this.encodeDecorationOverlay(
+      encoder, basis, scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace);
     closeFixedPresentationPhase();
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}]});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
@@ -1863,6 +2074,7 @@ export class FluidLabRenderer {
       if(!this.disposed&&!this.deviceLost&&this.device===completedPresentationDevice)this.completedPresentations+=1;
     }).catch(retirePresentation);
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
+    if (fluidCellTrace) this.pumpFluidCellTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
     const presentationTraceRead = hardwarePresentationTrace
       ? hardwarePresentationTrace.read()

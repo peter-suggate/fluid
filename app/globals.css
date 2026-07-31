@@ -100,6 +100,25 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 /* A click pins the traced ray, so the pointer is aiming rather than grabbing. */
 .gpu-canvas[data-pixel-trace="live"] { cursor: crosshair; }
 .gpu-canvas[data-pixel-trace="live"]:active { cursor: grabbing; }
+/* Pick mode, in the scene's top-right strip beside the frame rate. Matches the
+   FPS meter's height and treatment so the two read as one cluster; sits to its
+   left and grows leftward, so a long frame-rate string can never collide. */
+.scene-pick-toggle { position: absolute; z-index: 6; top: 15px; right: 108px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: rgba(5,18,16,.76); color: var(--muted); font: 700 9px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; cursor: pointer; backdrop-filter: blur(14px); }
+.scene-pick-toggle:hover { border-color: rgba(131,241,209,.45); color: #b8cac7; }
+/* A reticle rather than a word: the control arms a pointer gesture, and the
+   glyph is what makes that legible before the label is read. */
+.scene-pick-toggle i { position: relative; width: 11px; height: 11px; flex: none; border: 1px solid currentColor; border-radius: 50%; opacity: .75; }
+.scene-pick-toggle i::before, .scene-pick-toggle i::after { content: ""; position: absolute; background: currentColor; }
+.scene-pick-toggle i::before { left: 50%; top: -3px; bottom: -3px; width: 1px; margin-left: -.5px; }
+.scene-pick-toggle i::after { top: 50%; left: -3px; right: -3px; height: 1px; margin-top: -.5px; }
+.scene-pick-toggle small { padding: 1px 4px; border: 1px solid var(--line); color: var(--dim); font: 700 7px/1 var(--mono); }
+.scene-pick-toggle[aria-pressed="true"] { border-color: rgba(131,241,209,.55); background: rgba(15,199,204,.12); color: var(--accent-strong); }
+.scene-pick-toggle[aria-pressed="true"] i { opacity: 1; }
+/* Pinned is a state a reader can sit in without noticing, so it gets the amber
+   the rest of the HUD already uses for a frozen selection. */
+.scene-pick-toggle[aria-pressed="true"][data-pinned="true"] { border-color: rgba(242,171,78,.6); background: rgba(242,171,78,.12); color: var(--amber); }
+@media (max-width: 720px) { .scene-pick-toggle span, .scene-pick-toggle small { display: none; } .scene-pick-toggle { padding: 0 8px; } }
+
 .fps-meter { position: absolute; z-index: 5; top: 15px; right: 16px; min-width: 76px; height: 31px; padding: 0 10px; display: grid; place-items: center; border: 1px solid rgba(131,241,209,.24); background: rgba(5,18,16,.76); color: var(--accent-strong); font: 700 10px/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: .03em; pointer-events: none; backdrop-filter: blur(14px); }
 .viewport-topline { position: absolute; inset: 15px 16px auto; display: flex; align-items: start; justify-content: space-between; gap: 12px; pointer-events: none; }
 .viewport-topline > * { pointer-events: auto; }
@@ -481,6 +500,15 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pixel-trace-actions button { min-height: 22px; padding: 0 7px; border: 1px solid var(--line); background: transparent; color: var(--muted); font: 700 7px/1 var(--mono); letter-spacing: .07em; text-transform: uppercase; cursor: pointer; }
 .pixel-trace-actions button:hover { border-color: rgba(194,166,255,.5); color: #d9c8ff; }
 .pixel-trace-actions button[aria-pressed="true"] { border-color: rgba(242,171,78,.55); background: rgba(242,171,78,.1); color: var(--amber); }
+.pixel-trace-actions button:disabled { opacity: .32; cursor: default; }
+.pixel-trace-actions button:disabled:hover { border-color: var(--line); color: var(--muted); }
+.fluid-cell-depth { display: flex; align-items: center; gap: 3px; }
+.fluid-cell-depth b { padding: 0 2px; color: var(--accent); font: 700 8px/1 var(--mono); font-variant-numeric: tabular-nums; }
+/* Jumps by content rather than by one step. Coloured to the interface patch it
+   aims at, so the control and the leaves it targets on the ray read as one
+   gesture rather than two unrelated ones. */
+.pixel-trace-actions button.fluid-cell-jump { border-color: rgba(245,245,230,.28); color: #e8e8dc; font-size: 10px; }
+.pixel-trace-actions button.fluid-cell-jump:not(:disabled):hover { border-color: rgba(245,245,230,.7); background: rgba(245,245,230,.08); color: #ffffff; }
 .pixel-trace-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 7px; }
 .pixel-trace-headline strong { color: var(--accent-strong); font: 600 19px/1 var(--mono); font-variant-numeric: tabular-nums; }
 .pixel-trace-headline span { color: var(--muted); font: 8px/1.3 var(--mono); }
@@ -512,6 +540,47 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pixel-trace-layers button:hover { border-color: rgba(194,166,255,.45); }
 .pixel-trace-layers button i { width: 8px; height: 2px; flex: none; }
 .pixel-trace-layers button small { color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Fine-band cell inspection. The span bar is the orienting graphic: one axis
+   from liquid to air, the leaf's half-diagonal at each end, the pressure row's
+   own value marked on it. Everything else in the panel is a detail of it. */
+.fine-band-span { display: grid; gap: 5px; padding-top: 8px; border-top: 1px solid rgba(168,226,215,.07); }
+.fine-band-span > small { color: var(--dim); font: 8px/1.45 var(--mono); }
+.fine-band-span-track { position: relative; height: 16px; border: 1px solid var(--line); background: linear-gradient(90deg, rgba(25,115,235,.42), rgba(245,245,230,.16) 50%, rgba(237,120,41,.42)); }
+/* The published record: what the pressure row will read. */
+.fine-band-span-track .record { position: absolute; top: 2px; height: 5px; background: rgba(216,232,228,.85); }
+/* What the fine band actually holds. Drawn under the record so a disagreement
+   between the two reads as two offset bars rather than one ambiguous one. */
+.fine-band-span-track .probes { position: absolute; bottom: 2px; height: 3px; background: rgba(255,22,143,.8); }
+.fine-band-span-track .zero { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,.55); }
+.fine-band-span-track .centre { position: absolute; top: 50%; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: #ffffff; box-shadow: 0 0 6px rgba(255,255,255,.7); }
+.fine-band-span-scale { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.fine-band-span-scale em { color: var(--muted); font: 7px/1 var(--mono); font-style: normal; }
+.fine-band-span-scale output { color: var(--accent); font: 700 9px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.fine-band-warning { margin: 0; padding: 5px 7px; border-left: 2px solid rgba(247,198,109,.65); background: rgba(247,198,109,.07); color: #e8cf9d; font: 8px/1.45 var(--mono); }
+.fine-band-warning[data-failed="true"] { border-left-color: rgba(255,23,56,.75); background: rgba(255,23,56,.08); color: #f2b3ba; }
+
+/* Two-up context: where the cell sits in the nest, and which flood pass paid
+   for it. Neither earns a full row on its own. */
+.fine-band-context { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding-top: 8px; border-top: 1px solid rgba(168,226,215,.07); }
+@media (max-width: 520px) { .fine-band-context { grid-template-columns: minmax(0, 1fr); } }
+/* min-width:0 is what stops a long output line from forcing the grid columns
+   wider than the HUD and spilling one panel over the other. */
+.fine-band-nest, .fine-band-ladder { display: grid; gap: 4px; align-content: start; min-width: 0; }
+.fine-band-nest > small, .fine-band-ladder > small { color: var(--dim); font: 8px/1.35 var(--mono); }
+.fine-band-nest > output, .fine-band-ladder > output { color: var(--muted); font: 7px/1.35 var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+/* Four bars on one axis: the authored widths and the derived ones, all
+   converted to finest cells so nesting is visible rather than arithmetic. */
+.fine-band-nest-rows { position: relative; display: grid; gap: 2px; padding: 2px 0; }
+.fine-band-nest-rows > span { position: relative; display: block; height: 4px; }
+.fine-band-nest-rows > span i { display: block; height: 3px; min-width: 1px; }
+/* The cell's own distance to the surface, through every band at once. */
+.fine-band-nest-rows > b { position: absolute; top: -1px; bottom: -1px; width: 1px; background: #ffffff; box-shadow: 0 0 5px rgba(255,255,255,.6); }
+.fine-band-ladder-track { display: flex; height: 9px; border: 1px solid var(--line); overflow: hidden; }
+.fine-band-ladder-track i { display: block; height: 100%; min-width: 1px; }
+/* A tight crossing is a near-singular coefficient; the strip says so in colour
+   as well as in the number, so the hazardous face is findable at a glance. */
+.fine-band-crossings span em { color: #e8cf9d; }
+
 .pixel-trace-note { margin: 0; color: var(--dim); font: 8px/1.45 var(--mono); }
 .pixel-trace-footnote { color: rgba(79,105,101,.85); }
 .pixel-trace-reticle { position: absolute; z-index: 7; transform: translate(-50%, -50%); pointer-events: none; }
@@ -791,3 +860,51 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .001ms !important; }
 }
+
+/* Cell-trace HUD: gathered lines are facts about the frame, scheduled lines are
+   what the command graph encodes. Badging them keeps the two from reading alike. */
+.pixel-trace-hud[data-trace="fluid-cell"] { border-color: rgba(98,205,176,.32); }
+.pixel-trace-hud[data-trace="fluid-cell"] > header small { color: #82d5c1; }
+.pixel-trace-steps li[data-evidence="scheduled"] output { color: var(--amber); }
+.pixel-trace-steps li[data-evidence="scheduled"] b::after { content: "scheduled"; margin-left: 6px; padding: 1px 4px; border: 1px solid rgba(242,171,78,.4); color: var(--amber); font: 700 6px/1.4 var(--mono); letter-spacing: .07em; text-transform: uppercase; vertical-align: middle; }
+
+/* The cell HUD's first page. Four figures and a legend are what a reader needs
+   to decide whether this cell is worth studying; the account below them is one
+   disclosure away, because leading with it made every hover a wall of text. */
+.fluid-cell-figures { margin: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+.fluid-cell-figures > div { display: grid; gap: 3px; padding: 6px 7px; background: rgba(6,12,20,.92); }
+.fluid-cell-figures dt { display: flex; align-items: center; gap: 4px; color: var(--dim); font: 700 7px/1 var(--mono); letter-spacing: .07em; text-transform: uppercase; }
+.fluid-cell-figures dt i { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+.fluid-cell-figures dd { margin: 0; color: #d8e8e4; font: 600 14px/1 var(--mono); font-variant-numeric: tabular-nums; cursor: help; }
+/* Same badging rule as the steps below: a scheduled figure never reads like a
+   measured one, whatever else the panel is showing. */
+.fluid-cell-figures div[data-evidence="scheduled"] dd { color: var(--amber); }
+.fluid-cell-figures div[data-alert="true"] dd { color: #ee8aa2; }
+
+/* Legend and switchboard in one list: the mark, what it means, and whether it
+   is drawn. Every value in it is read from the pass that draws the line work. */
+.visualization-legend { margin: 0; padding: 8px 0 0; border-top: 1px solid var(--line); list-style: none; display: flex; flex-wrap: wrap; gap: 3px 4px; }
+.visualization-legend[data-expanded="true"] { display: grid; gap: 6px; }
+.visualization-legend > li > button { display: flex; align-items: center; gap: 6px; min-height: 21px; padding: 0 6px; border: 1px solid var(--line); background: transparent; color: var(--dim); font: 700 7px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; cursor: pointer; }
+.visualization-legend[data-expanded="true"] > li > button { width: 100%; }
+.visualization-legend > li > button[aria-pressed="true"] { border-color: var(--line-strong); background: rgba(255,255,255,.035); color: #b8cac7; }
+.visualization-legend > li > button:hover { border-color: rgba(194,166,255,.45); }
+.visualization-legend > li > button small { margin-left: auto; padding-left: 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Off and empty rows stay in the list — the row is also the switch, and
+   flicking a layer off to see under it and back on is the whole gesture. */
+.visualization-legend > li[data-enabled="false"] > button { opacity: .55; }
+.visualization-legend > li[data-empty="true"] > button { color: var(--dim); }
+.visualization-legend > li[data-empty="true"] > button small { opacity: .55; }
+.visualization-legend ul { margin: 3px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.visualization-legend ul li { display: flex; align-items: center; gap: 6px; padding-left: 7px; color: var(--dim); font: 8px/1.45 var(--mono); }
+/* The first entry is what this row's own mark means, so it lines up under the
+   label rather than repeating the glyph beside it. */
+.visualization-legend ul li[data-primary="true"] { padding-left: 31px; color: var(--muted); }
+.legend-mark { flex: none; }
+
+.pixel-trace-disclosure { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 24px; padding: 0 8px; border: 1px solid var(--line); background: transparent; color: #b8cac7; font: 700 7px/1 var(--mono); letter-spacing: .09em; text-transform: uppercase; cursor: pointer; }
+.pixel-trace-disclosure::before { content: "\25B8"; color: var(--muted); }
+.pixel-trace-disclosure[aria-expanded="true"]::before { content: "\25BE"; }
+.pixel-trace-disclosure:hover { border-color: rgba(194,166,255,.5); }
+.pixel-trace-disclosure em { margin-left: auto; padding: 2px 5px; border: 1px solid rgba(98,205,176,.3); background: rgba(98,205,176,.07); color: #82d5c1; font: 700 7px/1 var(--mono); font-style: normal; letter-spacing: .06em; }
+.pixel-trace-disclosure em[data-failed="true"] { border-color: rgba(226,104,132,.42); background: rgba(226,104,132,.09); color: #ee8aa2; }

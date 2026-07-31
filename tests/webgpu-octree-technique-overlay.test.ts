@@ -7,9 +7,19 @@ import { OCTREE_TECHNIQUE_OVERLAY_CODES, OCTREE_TECHNIQUE_OVERLAY_MODES,
 import { OctreeTechniqueOverlayPipeline } from "../lib/webgpu-octree-technique-overlay";
 import { OctreeTechniqueAuditOverlayPipeline } from "../lib/webgpu-octree-technique-audit-overlay";
 
-const overlaySource = readFileSync(new URL("../lib/webgpu-octree-technique-overlay.ts", import.meta.url), "utf8");
+// The camera/slice/volume helpers live in their own module so the blast-radius
+// view can reuse them without closing an import cycle. They are still part of
+// every technique shader's text, so the source assertions below span both.
+const overlaySource = [
+  readFileSync(new URL("../lib/webgpu-octree-technique-shared.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("../lib/webgpu-octree-technique-overlay.ts", import.meta.url), "utf8"),
+].join("\n");
 const auditOverlaySource = readFileSync(new URL("../lib/webgpu-octree-technique-audit-overlay.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+import { VISUALIZATION_FIELDS } from "../lib/visualization-catalog";
+import { OCTREE_TECHNIQUE_PROGRAMS, OCTREE_TECHNIQUE_PROGRAM_FOR_MODE } from "../lib/octree-technique-debug";
+import { visualizationBindingPreambleWGSL } from "../lib/visualization-bindings";
+
 const performancePanelSource = readFileSync(new URL("../components/PerformancePanel.tsx", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 const fineBricksSource = readFileSync(
@@ -56,12 +66,21 @@ test("the band-residency view compares both authored bands against actual reside
   assert.match(overlaySource,
     /if\(fineAddress\(q\+delta\)==INVALID\|\|fineAddress\(q-delta\)==INVALID\)\{truncated=true;\}/,
     "a truncated pressure reach must be detected from residency, not assumed");
-  assert.match(overlaySource, /\{binding:4,resource:\{buffer:this\.bandConfig\}\}/,
+  // The slot is generated from the program declaration now, so what matters is
+  // that the band config is a binding of the program the view renders through.
+  assert.ok(
+    OCTREE_TECHNIQUE_PROGRAMS.fine.bindings.some((binding) => binding.resource === "bandConfig"),
     "the authored widths must reach the shader");
   assert.equal(OCTREE_TECHNIQUE_OVERLAY_CODES["band-residency"], 26);
-  assert.match(overlaySource, /modeCode===18\|\|modeCode===25\|\|modeCode===26/,
-    "the mode must route to the fine publication pipeline that owns phi residency");
-  assert.match(performancePanelSource, /mode: "band-residency", axis: "volume"/);
+  // Routing is a catalog declaration now, not a branch chain in encode().
+  for (const mode of ["fine-band-lifecycle", "global-fine-phi", "band-residency"] as const) {
+    assert.equal(OCTREE_TECHNIQUE_PROGRAM_FOR_MODE[mode], "fine",
+      "the mode must route to the fine publication program that owns phi residency");
+  }
+  // The card is a catalog declaration now, not a literal in the panel.
+  const bandCard = VISUALIZATION_FIELDS.find((field) => field.mode === "band-residency");
+  assert.ok(bandCard, "band-residency should be declared as a field view");
+  assert.equal(bandCard!.axis, "volume");
 });
 
 test("fine lifecycle uses the generation word rather than the active-page count", () => {
@@ -99,9 +118,13 @@ test("categorical power volumes preserve their slice palettes", () => {
 });
 
 test("technique overlay composes directly from compact topology and fine publications", () => {
-  assert.match(overlaySource, /loadOp:"load",storeOp:"store"/);
-  assert.match(overlaySource, /tetrahedronHeaders/);
-  assert.match(overlaySource, /@binding\(8\) var<storage,read> finePhi:array<f32>/,
+  assert.match(overlaySource, /loadOp: ?"load", ?storeOp: ?"store"/);
+  assert.ok(
+    OCTREE_TECHNIQUE_PROGRAMS.topology.bindings.some((binding) => binding.resource === "tetrahedronHeaders"),
+    "the topology program must bind the published tetrahedron headers");
+  assert.match(
+    visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.fine),
+    /@binding\(8\) var<storage,read> finePhi:array<f32>;/,
     "the paper phi view must read the direct factor-m field without a CPU mirror");
   assert.match(overlaySource, /abs\(length\(gradient\)-1\.0\)/,
     "the paper phi view must expose signed-distance Eikonal residual");
@@ -112,15 +135,25 @@ test("technique overlay composes directly from compact topology and fine publica
   assert.match(overlaySource, /i32\(round\(u\.debug\.x\)\)==4/);
   assert.match(overlaySource, /return globalFinePhiVolume\(input\.uv\)/,
     "fine phi must retain its own volume presentation");
-  assert.match(overlaySource, /modeCode===13\|\|modeCode===16/,
-    "power faces and the power operator must route to their real catalog pipeline");
-  assert.match(overlaySource, /modeCode>=27&&modeCode<=30/,
-    "compact velocity, projection, and divergence fields must route to structured authority");
+  for (const mode of ["power-faces", "power-operator"] as const) {
+    assert.equal(OCTREE_TECHNIQUE_PROGRAM_FOR_MODE[mode], "face",
+      "power faces and the power operator must route to their real catalog program");
+  }
+  for (const mode of ["evaluated-velocity", "projection-update", "divergence-closure",
+    "structured-velocity"] as const) {
+    assert.equal(OCTREE_TECHNIQUE_PROGRAM_FOR_MODE[mode], "structured",
+      "compact velocity, projection, and divergence fields must route to structured authority");
+  }
   assert.match(overlaySource, /if\(mode==30\)\{let direction=/,
     "structured velocity must show vector direction instead of duplicating evaluated speed");
-  assert.match(overlaySource, /source\.catalogEntryHeaders/);
-  assert.match(overlaySource, /source\.structuredAuthority/);
-  assert.match(overlaySource, /source\.pressure/);
+  assert.ok(
+    OCTREE_TECHNIQUE_PROGRAMS.face.bindings.some((binding) => binding.resource === "catalogEntryHeaders"),
+    "the face program must bind the generated catalog entry headers");
+  for (const resource of ["structuredAuthority", "pressure"]) {
+    assert.ok(
+      OCTREE_TECHNIQUE_PROGRAMS.structured.bindings.some((binding) => binding.resource === resource),
+      `the structured program must bind ${resource}`);
+  }
   assert.match(auditOverlaySource, /let volume=i32\(round\(u\.debug\.x\)\)==4/);
   assert.match(rendererSource,
     /techniqueOverlayPipeline\?\.setSource\(this\.gpuFluid\?\.octreeTechniqueDebugSource\)/);
@@ -131,10 +164,11 @@ test("technique overlay composes directly from compact topology and fine publica
 });
 
 test("performance observatory owns topology, fine, pressure, and velocity inspection", () => {
+  const cardLabels = new Set(VISUALIZATION_FIELDS.filter((field) => !field.hidden).map((field) => field.label));
   for (const label of ["Fine SDF layer", "Adaptive coarse grid", "Fine signed distance",
     "Band slice", "Power cells", "Power face geometry", "Sparse topology lifecycle",
     "Evaluated pressure", "Evaluated velocity", "Pressure update Δu", "Divergence closure",
-    "Structured velocity", "Power operator"]) assert.match(performancePanelSource, new RegExp(`label: "${label}"`));
+    "Structured velocity", "Power operator"]) assert.ok(cardLabels.has(label), label);
   assert.match(performancePanelSource, /aria-label="Paper field view plane"/);
   assert.match(performancePanelSource, />VOLUME<\/button>/);
   assert.match(performancePanelSource, />HIDE<\/button>/);
