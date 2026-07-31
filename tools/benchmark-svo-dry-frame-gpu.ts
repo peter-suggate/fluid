@@ -55,7 +55,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
@@ -114,6 +114,7 @@ const sourceProvenance = () => {
   const renderPaths = git("ls-files", "-co", "--exclude-standard")
     .split("\n")
     .filter((file) => /^(?:lib\/(?:webgpu-svo|webgpu-static-svo|svo-|scenes\.ts|paper-scenarios\.ts|environments\.ts|voxel-scenery\/)|tools\/benchmark-svo-dry-frame-gpu\.ts)/.test(file))
+    .filter((file) => existsSync(path.resolve(repoRoot, file)))
     .sort();
   const renderHash = createHash("sha256");
   for (const file of renderPaths) {

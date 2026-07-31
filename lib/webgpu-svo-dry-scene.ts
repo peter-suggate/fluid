@@ -164,6 +164,9 @@ export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
   // fragment-stage storage-buffer ceiling while replacing directory searches.
   { binding: 20, type: "texture-3d-uint" as const },
   ...[21, 22, 23, 24].map((binding) => ({ binding, type: "texture-3d-float" as const })),
+  // Exact zero-radiance certificate by physical page slot. Keeping this in a
+  // sampled uint texture avoids another fragment-stage storage buffer.
+  { binding: 25, type: "texture-2d-uint" as const },
 ] as const);
 
 export function sparseVoxelDrySceneBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
@@ -171,7 +174,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(): GPUBindGroupLayoutE
   // inputs, but not material shading, glass, or dormant traversal variants.
   // Keeping those fragment-only also stays below WebGPU's per-stage storage
   // binding limit on Apple GPUs.
-  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
   // Raster analytic impostors consume only the camera uniform and their
   // source record arena in the vertex stage.
   const vertexBindings = new Set([0, 1, 10]);
@@ -766,8 +769,8 @@ fn dryNodeMipDirectFind(level:u32,coordinate:vec3u)->u32{
     ? /* wgsl */ `if(dry.nodeMipDirect.w!=0u){return dryNodeMipDirectFind(level,coordinate);}`
     : "";
   const pageOrigin = options.directPageTable
-    ? /* wgsl */ `if(dry.nodeMipDirect.w!=0u){let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));*pageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u);}else{let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);}`
-    : /* wgsl */ `let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);`;
+    ? /* wgsl */ `if(dry.nodeMipDirect.w!=0u){let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));*pageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u,pageIndex,0u);}else{let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u,pageIndex,0u);}`
+    : /* wgsl */ `let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);*pageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u,pageIndex,0u);`;
   const zeroRegion = options.emptySpaceElision
     ? /* wgsl */ `struct DryConeZeroRegion{minimum:vec3f,maximum:vec3f,valid:u32}
 fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNodeMipPageCache>)->DryConeZeroRegion{
@@ -877,7 +880,7 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   // nothing to the blend.
   const visibility = options.emptySpaceElision
     ? /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
-  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
+  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
   var zeroRegion=DryConeZeroRegion(vec3f(0.0),vec3f(0.0),0u);
   for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}
     let position=origin_m+direction*distance;let level=min(u32(max(floor(lod),0.0)),dry.nodeMip.z-1u);
@@ -902,12 +905,12 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   return ${coneResult};
 }`
     : /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
-  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
+  if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
   for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return ${coneMiss};}${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}distance+=max(stepWidth,minimumVoxel*.25);}${emitterLadderWGSL}
   return ${coneResult};
 }`;
   return /* wgsl */ `struct DryNodeMipLookup{sample:SvoNodeMipSample,valid:u32}
-struct DryNodeMipPageCache{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32}
+struct DryNodeMipPageCache{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32,pageIndex:u32,blackRadiance:u32}
 ${morton}
 fn dryNodeMipCompare(entry:SvoNodeMipDirectoryEntry,level:u32,morton:vec2u)->i32{
   if(entry.level<level){return -1;}if(entry.level>level){return 1;}if(entry.mortonHigh<morton.y){return -1;}if(entry.mortonHigh>morton.y){return 1;}if(entry.mortonLow<morton.x){return -1;}if(entry.mortonLow>morton.x){return 1;}return 0;
@@ -922,7 +925,7 @@ fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPage
   let level=min(u32(max(floor(lodIn),0.0)),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));let virtualVoxel=(position_m-dry.nodeMipOrigin.xyz)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
   if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let pageCoordinate=vec3u(pageFloor);
   if((*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=pageCoordinate)){
-    *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
+    *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u,0xffffffffu,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
     if(pageIndex!=0xffffffffu){${pageOrigin}}
   }
   if((*pageCache).resident==0u){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);return DryNodeMipLookup(svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,(*pageCache).pageOrigin,local),1u);
@@ -1642,6 +1645,7 @@ struct DryHit {
 @group(0) @binding(22) var tetraRadianceLobe1:texture_3d<f32>;
 @group(0) @binding(23) var tetraRadianceLobe2:texture_3d<f32>;
 @group(0) @binding(24) var tetraRadianceLobe3:texture_3d<f32>;
+@group(0) @binding(25) var tetraRadianceBlackPages:texture_2d<u32>;
 
 ${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
@@ -1661,16 +1665,18 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
   if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return SvoTetraRadianceConeSourceSample(0.0,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
   let pageCoordinate=vec3u(pageFloor);
   if(dryGiPageCache.generation!=dry.nodeMip.x||dryGiPageCache.level!=level||any(dryGiPageCache.coordinate!=pageCoordinate)){
-    dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
+    dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u,0xffffffffu,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
     if(pageIndex!=0xffffffffu){
-      if(dry.nodeMipDirect.w!=0u){let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u);}
-      else{let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u);}
+      let black=textureLoad(tetraRadianceBlackPages,vec2u(pageIndex,0u),0).x;
+      if(dry.nodeMipDirect.w!=0u){let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);let atlasPages=max(dry.nodeMipAtlas.xyz/vec3u(physical),vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,atlasPage*physical,dry.nodeMip.x,1u,pageIndex,black);}
+      else{let entry=svoNodeMipDirectoryEntry(nodeMipDirectory,pageIndex);dryGiPageCache=DryNodeMipPageCache(pageCoordinate,level,entry.pageOrigin,entry.generation,1u,pageIndex,black);}
     }
   }
   if(dryGiPageCache.resident==0u){return SvoTetraRadianceConeSourceSample(0.0,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
   let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);
   let opacity=svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,dryGiPageCache.pageOrigin,local);
   if(!dryTetraRadianceReady()){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,0u);}
+  if(dryGiPageCache.blackRadiance!=0u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
   let uv=svoNodeMipAtlasUv(dryGiPageCache.pageOrigin,local,textureDimensions(tetraRadianceLobe0));
   return SvoTetraRadianceConeSourceSample(opacity.solidMean,svoTetraSample(tetraRadianceLobe0,tetraRadianceLobe1,tetraRadianceLobe2,tetraRadianceLobe3,nodeMipSampler,uv),1u,1u);
 }
@@ -1683,7 +1689,7 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
   let coneCount=clamp(u32(round(dry.giCones.y)),3u,4u);let perConeBudget=max(1u,min(64u,dry.tuningCounts0.y)/coneCount);
   for(var coneIndex=0u;coneIndex<4u;coneIndex+=1u){
     if(coneIndex>=coneCount){break;}let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0);
-    dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+    dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
     let sceneExit=dryNodeMipSceneExitDistance(origin,direction);let rigidHit=nearestBodyIgnoring(origin,direction,ignoredBodyOwner);let rigidBlocked=rigidHit.t<sceneExit;
     let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,min(sceneExit,rigidHit.t),perConeBudget,.995,.0039215686,1u));
     let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);dryMipSteps+=result.coneTaps;
@@ -2566,6 +2572,10 @@ export class SparseVoxelDrySceneRenderer {
   private readonly nodeMipFallbackSampler: GPUSampler;
   private readonly tetrahedralRadianceFallback: readonly [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
   private readonly tetrahedralRadianceFallbackViews: readonly [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
+  private readonly tetrahedralRadianceBlackFallback: GPUTexture;
+  private readonly tetrahedralRadianceBlackFallbackView: GPUTextureView;
+  private tetrahedralRadianceBlackPages?: GPUTexture;
+  private tetrahedralRadianceBlackPagesView?: GPUTextureView;
   private readonly fluidCoverageFallback: GPUTexture;
   private readonly fluidCoverageFallbackView: GPUTextureView;
   private fluidCoverage?: WebGpuSvoFluidCoverage;
@@ -2648,6 +2658,13 @@ export class SparseVoxelDrySceneRenderer {
       size: [1, 1, 1], dimension: "3d", format: "rgb9e5ufloat", usage: GPUTextureUsage.TEXTURE_BINDING,
     })) as unknown as readonly [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
     this.tetrahedralRadianceFallbackViews = this.tetrahedralRadianceFallback.map((texture) => texture.createView({ dimension: "3d" })) as unknown as readonly [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
+    this.tetrahedralRadianceBlackFallback = device.createTexture({
+      label: "Sparse voxel tetrahedral-radiance black-page fallback",
+      size: [1, 1],
+      format: "r32uint",
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.tetrahedralRadianceBlackFallbackView = this.tetrahedralRadianceBlackFallback.createView();
     // Zero-initialized, and the packed frame reports invalid alongside it, so a
     // scene with no solver never samples this and never shows a water shadow.
     this.fluidCoverageFallback = device.createTexture({ label: "Sparse voxel fluid coverage fallback", size: [1, 1, 1], dimension: "3d", format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING });
@@ -3403,6 +3420,7 @@ export class SparseVoxelDrySceneRenderer {
     this.temporalAccumulator.invalidate();
     this.source = source;
     this.scene = scene;
+    this.updateTetrahedralRadianceBlackPages(source?.tetrahedralRadiance);
     this.coneFanoutLightCount = Math.min(source?.lights?.count ?? 1, SVO_CONE_FANOUT_CONTRACT.maximumLights);
     if (this.coneFanoutFrameBuffer && this.conePrepassWidth && this.conePrepassHeight) {
       this.device.queue.writeBuffer(this.coneFanoutFrameBuffer, 0, packSvoConeFanoutFrame({
@@ -3451,6 +3469,38 @@ export class SparseVoxelDrySceneRenderer {
       this.device.queue.writeBuffer(this.thickGlassUniformBuffer, 0, packSparseVoxelDrySceneThickGlassArena(scene));
     }
     this.rebuild();
+  }
+
+  /**
+   * Materializes the source owner's exact black-slot set as a sampled bit
+   * plane. It changes only with the immutable radiance publication, never with
+   * the camera, so normal frames do no uploads or allocation work.
+   */
+  private updateTetrahedralRadianceBlackPages(
+    radiance: SparseVoxelSceneRenderSource["tetrahedralRadiance"],
+  ): void {
+    this.tetrahedralRadianceBlackPages?.destroy();
+    this.tetrahedralRadianceBlackPages = undefined;
+    this.tetrahedralRadianceBlackPagesView = undefined;
+    if (!radiance?.blackSlots?.size || radiance.plan.pages.length === 0) return;
+    const flags = new Uint32Array(radiance.plan.pages.length);
+    for (const slot of radiance.blackSlots) {
+      if (slot >= 0 && slot < flags.length) flags[slot] = 1;
+    }
+    const texture = this.device.createTexture({
+      label: `Sparse voxel tetrahedral-radiance black pages generation ${radiance.generation}`,
+      size: [flags.length, 1],
+      format: "r32uint",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.device.queue.writeTexture(
+      { texture },
+      flags,
+      { bytesPerRow: flags.byteLength },
+      [flags.length, 1],
+    );
+    this.tetrahedralRadianceBlackPages = texture;
+    this.tetrahedralRadianceBlackPagesView = texture.createView();
   }
 
   /**
@@ -3662,6 +3712,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 22, resource: tetrahedralRadiance?.views[1] ?? this.tetrahedralRadianceFallbackViews[1] },
       { binding: 23, resource: tetrahedralRadiance?.views[2] ?? this.tetrahedralRadianceFallbackViews[2] },
       { binding: 24, resource: tetrahedralRadiance?.views[3] ?? this.tetrahedralRadianceFallbackViews[3] },
+      { binding: 25, resource: this.tetrahedralRadianceBlackPagesView ?? this.tetrahedralRadianceBlackFallbackView },
     ] });
     this.coneFanoutSceneBindGroup = this.coneFanout && this.coneFanoutSceneLayout
       ? this.device.createBindGroup({
@@ -4270,6 +4321,10 @@ export class SparseVoxelDrySceneRenderer {
     this.nodeMipFallbackDirectory.destroy();
     this.nodeMipFallbackDirectPageTable.destroy();
     this.tetrahedralRadianceFallback.forEach((texture) => texture.destroy());
+    this.tetrahedralRadianceBlackFallback.destroy();
+    this.tetrahedralRadianceBlackPages?.destroy();
+    this.tetrahedralRadianceBlackPages = undefined;
+    this.tetrahedralRadianceBlackPagesView = undefined;
     this.gBufferTargets.destroy();
     this.temporalAccumulator.destroy();
     this.pickingReadback.destroy();

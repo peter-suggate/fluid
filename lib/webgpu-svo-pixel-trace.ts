@@ -357,8 +357,8 @@ fn probeConeMarch(kind:u32,detail:u32,origin_m:vec3f,direction:vec3f,aperture:f3
   let tangent=tan(aperture*.5);
   var distance=minimumVoxel*.75;
   var transmittance=1.0;
-  var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
-  var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+  var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
+  var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
   let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;
   var budget=clamp(dry.tuningCounts0.y,1u,48u);
   let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
@@ -497,7 +497,7 @@ fn probeContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32){
 fn probeGiConeMarch(detail:u32,origin:vec3f,directionIn:vec3f,maximumSteps:u32)->SvoTetraRadianceConeResult{
   let direction=normalize(directionIn);let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
   let maximumDistance=dryNodeMipSceneExitDistance(origin,direction);let config=SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,maximumDistance,maximumSteps,.995,.0039215686,1u);
-  dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u);
+  dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
   let result=svoTetraRadianceConeTrace(config);let tangent=tan(dry.giCones.x*.5);var distance=minimumVoxel*.5;
   for(var boundedStep=0u;boundedStep<64u;boundedStep+=1u){
     if(boundedStep>=result.coneTaps||distance>=maximumDistance){break;}
@@ -540,7 +540,7 @@ fn probeGlobalIllumination(position:vec3f,normal:vec3f){
   probeMaximumDepth=0u;probeShadowNodeVisits=0u;probeShadowLeafVisits=0u;probeShadowWork=0u;
   probeMipSteps=0u;probeFailure=0u;probeShadedLights=0u;
   probeGiState=0u;probeGiConeTaps=0u;probeGiConeCount=0u;probeGiVisibility=1.0;probeGiRadiance=vec3f(0.0);
-  dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;dryShadowTracingEnabled=1u;
+  dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;
   dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;
   dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;
   dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;

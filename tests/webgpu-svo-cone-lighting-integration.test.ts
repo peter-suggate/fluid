@@ -149,15 +149,20 @@ test("cone steps reuse a matching mip page and search only on page, LOD, or gene
   const lookupStart = svoDrySceneShader.indexOf("fn dryNodeMipAt(");
   const lookupEnd = svoDrySceneShader.indexOf("struct DryConeVisibility", lookupStart);
   const lookup = svoDrySceneShader.slice(lookupStart, lookupEnd);
-  assert.match(svoDrySceneShader, /struct DryNodeMipPageCache\{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32\}/);
+  assert.match(svoDrySceneShader, /struct DryNodeMipPageCache\{coordinate:vec3u,level:u32,pageOrigin:vec3u,generation:u32,resident:u32,pageIndex:u32,blackRadiance:u32\}/);
   assert.match(lookup, /pageCache:ptr<function,DryNodeMipPageCache>/);
   assert.match(lookup, /generation!=dry\.nodeMip\.x\|\|\(\*pageCache\)\.level!=level\|\|any\(\(\*pageCache\)\.coordinate!=pageCoordinate\)/);
-  assert.match(lookup, /\*pageCache=DryNodeMipPageCache\(pageCoordinate,level,vec3u\(0u\),dry\.nodeMip\.x,0u\);let pageIndex=dryNodeMipFind\(level,pageCoordinate\)/,
+  assert.match(lookup, /\*pageCache=DryNodeMipPageCache\(pageCoordinate,level,vec3u\(0u\),dry\.nodeMip\.x,0u,0xffffffffu,0u\);let pageIndex=dryNodeMipFind\(level,pageCoordinate\)/,
     "the queried key is cached as non-resident before searching so failed searches are reusable");
-  assert.match(lookup, /pageIndex!=0xffffffffu[^]*\*pageCache=DryNodeMipPageCache\(pageCoordinate,level,entry\.pageOrigin,entry\.generation,1u\)/);
+  assert.match(lookup, /pageIndex!=0xffffffffu[^]*\*pageCache=DryNodeMipPageCache\(pageCoordinate,level,entry\.pageOrigin,entry\.generation,1u,pageIndex,0u\)/);
   assert.match(lookup, /if\(\(\*pageCache\)\.resident==0u\)\{return DryNodeMipLookup\(SvoNodeMipSample\(0\.0,0\.0,0\.0,0\.0\),1u\);\}/,
     "cached sparse-directory misses sample as transparent without another search");
   assert.match(svoDrySceneShader, /var pageCache=DryNodeMipPageCache\([^]*dryNodeMipAt\([^]*&pageCache\)/);
+  assert.match(svoDrySceneShader, /let black=textureLoad\(tetraRadianceBlackPages,vec2u\(pageIndex,0u\),0\)\.x/);
+  assert.match(svoDrySceneShader, /if\(dryGiPageCache\.blackRadiance!=0u\)/);
+  assert.match(svoDrySceneShader,
+    /return SvoTetraRadianceConeSourceSample\(opacity\.solidMean,SvoTetraRadiance\(vec3f\(0\.0\),vec3f\(0\.0\),vec3f\(0\.0\),vec3f\(0\.0\)\),1u,1u\)/,
+    "a certified-black page remains a valid sample while avoiding all four lobe fetches");
 
   const coherentSteps = Array.from({ length: 48 }, (_, step) => ({
     generation: 17,
