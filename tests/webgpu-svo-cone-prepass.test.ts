@@ -99,9 +99,12 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
   }
   assert.doesNotMatch(rendererSource, /lightingMode/,
     "GLOBAL must not retain a selectable lighting backend");
-  assert.match(rendererSource, /label: "Sparse voxel reduced-rate opaque shading"[^]*shade\.setPipeline\(this\.conePrepassShadePipeline!\)/,
-    "GLOBAL must always produce the reduced GI target");
-  assert.match(rendererSource, /label: "Sparse voxel reduced-rate environmental GI"[^]*gi\.setPipeline\(this\.conePrepassShadePipeline!\)/,
+  assert.match(rendererSource, /label: "Sparse voxel persistent world GI cache"[^]*gi\.setPipeline\(this\.worldGiFramePipeline!\)[^]*gi\.setPipeline\(this\.worldGiCachePipeline!\)/,
+    "split GLOBAL must produce the reduced GI target through the persistent world-space cache");
+  const compactVisibility = rendererSource.indexOf('label: "Sparse voxel compact cone visibility"');
+  const persistentGi = rendererSource.indexOf('label: "Sparse voxel persistent world GI cache"', compactVisibility);
+  const deferredLighting = rendererSource.indexOf('label: "Sparse voxel deferred dry lighting"', persistentGi);
+  assert.ok(compactVisibility >= 0 && persistentGi > compactVisibility && deferredLighting > persistentGi,
     "split GLOBAL must evaluate environmental GI after current-frame compact visibility and before deferred lighting");
 });
 
