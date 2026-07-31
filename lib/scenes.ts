@@ -24,6 +24,7 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   quality: "balanced",
   overrides: Object.freeze({
     maximumLeafSize: "2",
+    fluidGatedBoundaryRefinement: true,
     interfaceRefinementBandCells: 3,
     globalFineLevelSetFactor: "4",
   }),

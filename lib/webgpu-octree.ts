@@ -298,17 +298,21 @@ export const FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV =
 /**
  * Experimental paper-compatible boundary policy.
  *
- * The default keeps interface/inflow/hysteresis protection unchanged, but
+ * The opt-in keeps interface/inflow/hysteresis protection unchanged, but
  * permits a boundary-crossing leaf to remain coarse until liquid approaches
- * within the authored interface band. Setting the experiment variable to zero
- * restores unconditional unit-cell wall and terrain refinement for A/Bs.
+ * within the authored interface band. The production default retains
+ * unconditional unit-cell wall and terrain refinement.
  */
 export function octreeFluidGatedBoundariesRequested(
   environment?: Readonly<Record<string, string | undefined>>,
+  authoredDefault = false,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.[FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV] !== "0";
+  const override = resolved?.[FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV];
+  if (override === "1") return true;
+  if (override === "0") return false;
+  return authoredDefault;
 }
 
 /** CPU mirror of the shader's final boundary branch for unit tests/tooling. */
@@ -331,6 +335,8 @@ export function octreeFluidGatedBoundaryWouldRefine(input: {
 
 export interface OctreeProjectionOptions {
   maximumLeafSize?: 2 | 4 | 8 | 16 | 32;
+  /** Authored opt-in for the experimental liquid-proximity boundary gate. */
+  fluidGatedBoundaryRefinement?: boolean;
   /** Renderer-owned refinement of authored-environment bricks. */
   environmentBrickRefinementLevels?: number;
   /** 0 = finest cells everywhere; 1 = full distance-graded coarsening. */
@@ -1495,6 +1501,7 @@ export class WebGPUOctreeProjection {
   private buildDirtyFrontierDeltaPipeline!: GPUComputePipeline;
   private materializePipeline!: GPUComputePipeline;
   private readonly maxLeafSize: 2 | 4 | 8 | 16 | 32;
+  private readonly fluidGatedBoundaryRefinement: boolean;
   private readonly topologyTileSize: number;
   private readonly adaptivity: number;
   private readonly interfaceRefinementBandCells: number;
@@ -1567,6 +1574,9 @@ export class WebGPUOctreeProjection {
   ) {
     const count = dims.nx * dims.ny * dims.nz;
     this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 16);
+    this.fluidGatedBoundaryRefinement = octreeFluidGatedBoundariesRequested(
+      undefined, options.fluidGatedBoundaryRefinement ?? false,
+    );
     this.solveTailPolicy = planOctreeSolveTail({
       finestDimensions: [dims.nx, dims.ny, dims.nz],
       maximumLeafSize: this.maxLeafSize as 2 | 4 | 8 | 16 | 32,
@@ -2261,7 +2271,7 @@ export class WebGPUOctreeProjection {
       rowIndexedPressure: 1,
       sparseTopologyTileStates: this.topologyResidency.allocationPlan.sparseKeyPools ? 1 : 0,
       denseSolidField: this.hasDenseSolidCells ? 1 : 0,
-      fluidGatedBoundaryRefinement: octreeFluidGatedBoundariesRequested() ? 1 : 0,
+      fluidGatedBoundaryRefinement: this.fluidGatedBoundaryRefinement ? 1 : 0,
       topologyCandidateView: candidateTopology ? 1 : 0,
       fineSummaryFactor: this.globalFineLevelSet?.plan.fineFactor ?? 4,
       structuralDescriptorDelta: octreePowerStructuralDeltaRequested() ? 1 : 0,

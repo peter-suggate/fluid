@@ -12,11 +12,13 @@ import {
   planOctreeOwnerPages,
 } from "../lib/webgpu-octree-owner-pages";
 
-test("fluid-gated boundary refinement is the default with an explicit control arm", () => {
-  assert.equal(octreeFluidGatedBoundariesRequested({}), true);
+test("fluid-gated boundary refinement is opt-in with an unconditional general default", () => {
+  assert.equal(octreeFluidGatedBoundariesRequested({}), false);
+  assert.equal(octreeFluidGatedBoundariesRequested({}, true), true,
+    "an authored validation profile may opt in");
   assert.equal(octreeFluidGatedBoundariesRequested({
     [FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV]: "0",
-  }), false);
+  }, true), false, "the control-arm environment override wins over an authored opt-in");
   assert.equal(octreeFluidGatedBoundariesRequested({
     [FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV]: "1",
   }), true);

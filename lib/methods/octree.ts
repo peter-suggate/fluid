@@ -36,6 +36,10 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
     velocityTransport: "maccormack" as const,
     octree: {
       maximumLeafSize: maximumLeafSize(values.maximumLeafSize ?? 16),
+      // Hidden authored policy: the compact power-validation profile has
+      // validated this experiment, while general interactive scenes retain
+      // unconditional boundary refinement.
+      fluidGatedBoundaryRefinement: values.fluidGatedBoundaryRefinement === true,
       environmentBrickRefinementLevels: typeof values.svoEnvironmentBrickRefinementLevels === "number"
         ? values.svoEnvironmentBrickRefinementLevels : undefined,
       // Pressure topology is a method setting, not a solver setting. Keep the

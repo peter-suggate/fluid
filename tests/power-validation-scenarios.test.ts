@@ -153,6 +153,7 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
     quality: "balanced",
     overrides: {
       maximumLeafSize: "2",
+      fluidGatedBoundaryRefinement: true,
       interfaceRefinementBandCells: 3,
       globalFineLevelSetFactor: "4",
     },

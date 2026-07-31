@@ -19,11 +19,12 @@ invariant.
 
 ## Experimental rule
 
-Fluid-gated refinement is the default. Restore unconditional boundary
-refinement for the control arm with:
+Fluid-gated refinement remains an experiment. The compact power-validation
+profile opts in explicitly. For an otherwise unconditional scene, enable it
+with:
 
 ```sh
-FLUID_OCTREE_FLUID_GATED_BOUNDARIES=0
+FLUID_OCTREE_FLUID_GATED_BOUNDARIES=1
 ```
 
 The current interface and inflow predicates run first. A
@@ -158,13 +159,20 @@ therefore keeps the compact topology and selects `k=8`.
 
 The idea works structurally and is supported by the paper: dry terrain detail
 drops by more than an order of magnitude without changing the wet pressure
-frontier in the measured large scene. It is now the default boundary policy;
-setting `FLUID_OCTREE_FLUID_GATED_BOUNDARIES=0` retains the unconditional
-control. With the corrected `k=8` shell, the mini dam moving-interface case
-preserves adaptivity through
-its first advance, coarsens the drained ceiling region, and has exact 62-step
-field parity. Its wall time is currently tied with the unconditional control.
-A larger moving-terrain soak is still needed to establish the same parity and
-recover the remaining topology-candidate overhead. The existing
-`garden-dam-break` control currently fails its cold bootstrap with no liquid-row
-frontier, so it cannot yet provide that unbiased moving-contact A/B.
+frontier in the measured large scene. With the corrected `k=8` shell, the mini
+dam moving-interface case preserves adaptivity through its first advance,
+coarsens the drained ceiling region, and has exact 62-step field parity. Its
+wall time is currently tied with the unconditional control.
+
+The regular `dam-break-ui` scene exposed an authority-cutover gap when the
+experiment was made the default: generation 3 activated a different pressure
+row set while the coarse fine-level-set publication still retained generation
+2, so topology, transport, and volume rolled back together. Until that
+cross-topology migration is implemented and validated, general interactive
+scenes retain unconditional boundary refinement. The compact k=8
+power-validation profile keeps its authored opt-in to preserve the corrected
+compact experiment. A larger moving-terrain soak is also still needed to
+establish parity and recover the remaining
+topology-candidate overhead. The existing `garden-dam-break` control
+currently fails its cold bootstrap with no liquid-row frontier, so it cannot
+yet provide that unbiased moving-contact A/B.

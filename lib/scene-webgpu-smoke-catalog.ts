@@ -338,6 +338,7 @@ function lane(options: LaneOptions): SceneWebGPUSmokeLane {
 
 const octreePowerOverrides = {
   maximumLeafSize: "2",
+  fluidGatedBoundaryRefinement: true,
   interfaceRefinementBandCells: 3,
   globalFineLevelSetFactor: "4",
 } as const;
