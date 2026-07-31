@@ -73,7 +73,7 @@ test("paused solver attachment publications cannot suppress the continuous prese
   const sourceAttach = attach.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData");
   const repaint = attach.indexOf("this.pausedPresentationRevision+=1", sourceAttach);
   assert.ok(sourceAttach >= 0 && repaint > sourceAttach,
-    "the repaint revision must publish only after the warmed SVO and temporal-ready renderer source attaches");
+    "the repaint revision must publish only after the warmed SVO renderer source attaches");
   assert.equal((attach.match(/pausedPresentationRevision\+=1/g) ?? []).length, 1,
     "one successful transactional attach requests one paused repaint");
   assert.doesNotMatch(viewportSource, /renderer\.presentationRevision|pausedPresentation/,

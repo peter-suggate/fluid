@@ -20,7 +20,6 @@
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
  *      _RADIANCE_RECONSTRUCTION (nearest | gated-linear | joint-bilateral | wide-relight | full-res-relight),
- *      FLUID_SVO_DRY_FRAME_LIGHTING (direct | cone | gi, default cone),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
  *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default canonical-parametric),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
@@ -41,8 +40,8 @@
  *      the requested cone scale), FLUID_SVO_DRY_FRAME_CAMERA_MOVING (1 publishes
  *      the camera-changing sentinel, times the moving tier against the settled
  *      tier, and reports settle-pop luminance stats plus moving/settled PNGs).
- *      FLUID_SVO_DRY_FRAME_TEMPORAL_FRAME publishes an explicit settled frame
- *      index (default -1) for checkerboard/coherence validation.
+ *      FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_MOTION=1 marks one body as moving
+ *      so the localized persistent-GI invalidation path can be timed.
  *      FLUID_SVO_DRY_FRAME_TIMING=wall bypasses timestamp queries and measures
  *      serialized submit-to-fence wall time (useful on Dawn builds where a
  *      timestamp-query feature is exposed but query resolution is unreliable).
@@ -79,7 +78,6 @@ import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UN
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
-import { SVO_LIGHTING_MODES, type SvoLightingMode } from "../lib/svo-render-mode";
 import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
@@ -141,7 +139,6 @@ const rawOutPath = process.env.FLUID_SVO_DRY_FRAME_RAW_OUT;
 const configuredRawOutPath = process.env.FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT;
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION ?? "full-res-relight";
-const lightingModeRaw = process.env.FLUID_SVO_DRY_FRAME_LIGHTING ?? "cone";
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
@@ -166,9 +163,7 @@ const renderBrickSize = renderBrickSizeRaw === undefined ? undefined : Number(re
  * settle-pop luminance statistics, and a moving-tier PNG.
  */
 const cameraMoving = process.env.FLUID_SVO_DRY_FRAME_CAMERA_MOVING === "1";
-const settledTemporalFrame = Number(process.env.FLUID_SVO_DRY_FRAME_TEMPORAL_FRAME ?? -1);
-assert.ok(Number.isInteger(settledTemporalFrame) && settledTemporalFrame >= -1,
-  "FLUID_SVO_DRY_FRAME_TEMPORAL_FRAME must be an integer >= -1");
+const syntheticRigidMotion = process.env.FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_MOTION === "1";
 /**
  * M1 Max 1280x720 scale-1 baseline; scale 1 must keep the WGSL byte-identical.
  * Re-baselined for the tuned cone marcher, whose three deliberate pieces all
@@ -194,9 +189,6 @@ assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
 assert.ok([1, 0.5, 0.25, 0.125].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, 0.25, or 0.125");
 assert.ok(["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstructionRaw),
   "FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
-assert.ok((SVO_LIGHTING_MODES as readonly string[]).includes(lightingModeRaw),
-  "FLUID_SVO_DRY_FRAME_LIGHTING must be direct, cone, or gi");
-const lightingMode = lightingModeRaw as SvoLightingMode;
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
   "FLUID_SVO_DRY_FRAME_PROFILE_SECONDS must be a non-negative number");
 assert.ok(renderBrickSize === undefined || renderBrickSize === 4 || renderBrickSize === 8,
@@ -312,14 +304,12 @@ function packViewUniforms(
   const position = cameraPosition(camera);
   // options.x: DEFAULT_SVO_RENDER_DIAGNOSTICS maximumTraversalDepth(21)*512 + maximumNodeVisits(256).
   const diagnosticControl = 21 * 512 + 256;
-  // viewport.w: svoDrySceneTemporalFrame with a stable camera and no temporal
-  // accumulation eligibility (shadowTemporalFrame = -1) -> -1. The moving tier
-  // is measured by publishing the same SVO_CAMERA_CHANGING_FRAME sentinel the
-  // renderer emits while the camera is in motion, which is the only input the
-  // dry shader's moving-quality switches read.
-  const temporalFrame = (cameraMovingOverride ?? cameraMoving) ? SVO_CAMERA_CHANGING_FRAME : settledTemporalFrame;
+  // viewport.w carries only the camera-quality tier: the changing sentinel or
+  // the stable sentinel. Temporal accumulation and checkerboard phase no longer
+  // share this lane.
+  const cameraState = (cameraMovingOverride ?? cameraMoving) ? SVO_CAMERA_CHANGING_FRAME : -1;
   const uniform = new Float32Array([
-    width, height, 0, temporalFrame,
+    width, height, 0, cameraState,
     position.x, position.y, position.z, overlay?.mode ?? 0,
     camera.target_m.x, camera.target_m.y, camera.target_m.z, overlay ? overlay.opacity : 0.82,
     scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
@@ -457,7 +447,6 @@ const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuff
   shadingPath, screenSpaceTerminationPixels, rayCoherenceMode, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
-renderer.setLightingMode(lightingMode);
 renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
   coneRadianceReconstruction: radianceReconstruction });
 function applyLighting(scale: SvoConeLightingScale, shadows = shadowsEnabled, ambientOcclusion = ambientOcclusionEnabled): void {
@@ -470,6 +459,19 @@ if (coneScale !== 1) {
 }
 renderer.setSource(source, drySceneData);
 renderer.ensureSize(width, height);
+let syntheticRigidMotionBuffer: GPUBuffer | undefined;
+if (syntheticRigidMotion) {
+  const wordsPerRecord = 128 / Uint32Array.BYTES_PER_ELEMENT;
+  const records = new Float32Array(12 * wordsPerRecord);
+  records[19] = 0.01; // linearVelocityDisplacement.w: nonzero swept displacement
+  syntheticRigidMotionBuffer = device.createBuffer({
+    label: "Bench synthetic moving rigid-body sidecar",
+    size: records.byteLength,
+    usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(syntheticRigidMotionBuffer, 0, records);
+  renderer.setRigidMotionSource(syntheticRigidMotionBuffer);
+}
 
 const target = device.createTexture({
   label: "Bench dry-scene radianceDepth target",
@@ -489,7 +491,7 @@ function encodeFrame(
   reuseKey = primaryCoherenceKey,
   tracePhase?: (phase: GPUTimestampPhase) => void,
 ): void {
-  const result = renderer.encode(encoder, target, undefined, reuseKey, tracePhase);
+  const result = renderer.encode(encoder, target, reuseKey, tracePhase);
   assert.ok(result && result.encoded, "production dry-scene encode declined the frame (raster fallback)");
 }
 
@@ -1080,7 +1082,6 @@ const result = {
     sceneId: scene.sceneId,
     environment: environmentId,
     quality: "balanced",
-    lightingMode,
     rasterGlassDiscovery,
     rasterRigidDiscovery,
     rasterRigidForced,
@@ -1089,7 +1090,6 @@ const result = {
     ambientOcclusionEnabled,
     coneLightingScale: coneScale,
     coneFanout,
-    temporalAccumulation: false,
     grid: { nx: solver.info.nx, ny: solver.info.ny, nz: solver.info.nz },
     brickSize: source.structural!.domain.brickSize,
     authoredBrickSize: scene.voxelDomain.brickSize_cells,
@@ -1112,6 +1112,7 @@ const result = {
     thickGlassStatus: resolveSparseVoxelThickGlassBinderStatus(drySceneData),
     lightCount: source.lights?.count ?? 0,
     rigidBodyCount: scene.rigidBodies.length,
+    syntheticRigidMotion,
     terrain: Boolean(scene.terrain),
     nodeMipPyramid: { ready: coneMipReady, generation: nodeMip?.generation ?? 0, pages: nodeMip?.plan.pages.length ?? 0 },
     tetrahedralRadiance: {
@@ -1154,6 +1155,7 @@ log(`Baseline written to ${outPath}`);
 console.log(JSON.stringify(result, null, 2));
 
 renderer.destroy();
+syntheticRigidMotionBuffer?.destroy();
 target.destroy();
 uniformBuffer.destroy();
 bodyBuffer.destroy();

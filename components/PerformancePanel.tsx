@@ -53,7 +53,7 @@ const PHASE_LAYOUT: Readonly<Record<PerformanceTrace["lane"], readonly [PaperPha
   ],
   presentation: [
     ["surface-extraction", "Surface extraction + caustics"],
-    ["dry-scene", "Dry scene + temporal lighting"],
+    ["dry-scene", "Dry scene lighting"],
     ["water-interfaces", "Water interfaces"],
     ["optical-composite", "Optical composite"],
     ["inspection-overlay", "Inspection overlays"],
@@ -70,7 +70,6 @@ const SVO_CONE_PRESENTATION_PHASE_LAYOUT: readonly [PaperPhaseId, string][] = [
   ["svo-primary", "SVO primary visibility"],
   ["svo-rigid", "SVO rigid discovery"],
   ["svo-glass", "SVO thin-glass discovery"],
-  ["svo-temporal", "SVO temporal resolve"],
   ["dry-scene", "Raster dry-scene fallback"],
   ["water-front-interface", "Water + spray front interface"],
   ["water-back-interface", "Water + spray back interface"],
@@ -81,7 +80,7 @@ const SVO_CONE_PRESENTATION_PHASE_LAYOUT: readonly [PaperPhaseId, string][] = [
 ] as const;
 
 const isSvoConePresentationTrace = (trace: PerformanceTrace) =>
-  trace.lane === "presentation" && /:lighting-(?:cone|gi):smooth:svo:/.test(trace.context);
+  trace.lane === "presentation" && /:gi:smooth:/.test(trace.context);
 
 const stabilizePhaseLayout = (trace: PerformanceTrace | undefined) => {
   if (!trace) return undefined;

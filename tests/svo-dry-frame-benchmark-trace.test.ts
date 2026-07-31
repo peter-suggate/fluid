@@ -38,12 +38,9 @@ test("SVO dry-frame benchmark can force serialized wall timing without changing 
   assert.match(source, /device\.queue\.onSubmittedWorkDone\(\)/);
 });
 
-test("SVO dry-frame benchmark reproduces every production lighting mode", () => {
-  assert.match(source, /FLUID_SVO_DRY_FRAME_LIGHTING \(direct \| cone \| gi, default cone\)/);
-  assert.match(source, /SVO_LIGHTING_MODES/);
-  assert.match(source, /renderer\.setLightingMode\(lightingMode\)/);
-  assert.match(source, /lightingMode,/);
-  assert.doesNotMatch(source, /lightingMode: "cone"/);
+test("SVO dry-frame benchmark measures only the production GLOBAL path", () => {
+  assert.doesNotMatch(source, /FLUID_SVO_DRY_FRAME_LIGHTING|SVO_LIGHTING_MODES|setLightingMode|lightingMode/);
+  assert.match(source, /renderer\.setLightingOptions/);
 });
 
 test("SVO dry-frame benchmark exposes a render-only brick-size override and topology accounting", () => {

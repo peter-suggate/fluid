@@ -4,7 +4,7 @@
 (cone-traced shadows + AO) with minimal visual degradation.
 **Baseline:** 25.9 ms median → **target ≈ 5.2 ms** (garden-svo-lighting, 660×662,
 Apple M1 Max / Metal, split shading, cone scale 0.5). This also happens to land the
-frame inside the long-standing `svo-baseline-contract.ts` budgets (4–8 ms
+frame inside the retired raster/SVO comparison suite's historical budget (4–8 ms
 presentation p95) for the first time.
 
 Date: 2026-07-30. Branch context: `perf/structured-cutover` (render work rides

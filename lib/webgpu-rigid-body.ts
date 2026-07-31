@@ -207,7 +207,7 @@ const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
 export class WebGPURigidBodySystem {
   readonly stateBuffer: GPUBuffer;
   readonly renderBuffer: GPUBuffer;
-  /** GPU-authored 128-byte records used by temporal reprojection and swept preactivation. */
+  /** GPU-authored 128-byte records used by surface motion and swept preactivation. */
   readonly motionBuffer: GPUBuffer;
   private readonly stateScratch: GPUBuffer;
   private readonly renderScratch: GPUBuffer;

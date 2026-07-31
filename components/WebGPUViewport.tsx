@@ -122,7 +122,6 @@ export function WebGPUViewport() {
   const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
-  const svoRenderMode = useUIStore((state) => state.svoRenderMode);
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
   const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
   const svoMaximumNodeVisits = useUIStore((state) => state.svoMaximumNodeVisits);
@@ -518,7 +517,6 @@ export function WebGPUViewport() {
         canonicalMethodValues: canonicalSafeMethodValues,
         exactScene: canonicalScene(sceneState.scene) === canonicalScene(getScenePreset("water-box-dam-break").create()),
         voxelRenderMode: ui.voxelRenderMode,
-        svoRenderMode: ui.svoRenderMode,
         diagnosticsOpen: ui.diagnosticsOpen,
         rightPanel: ui.rightPanel,
         gridOverlayAxis: ui.gridOverlayAxis,
@@ -605,8 +603,6 @@ export function WebGPUViewport() {
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             getScenePreset(sceneState.presetId).background,
             ui.voxelRenderMode,
-            ui.svoRenderMode,
-            ui.svoLightingMode,
             {
               shadowsEnabled: ui.svoShadowsEnabled,
               ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
@@ -1240,7 +1236,7 @@ export function WebGPUViewport() {
       <i /><span>{hover.label}</span>
       <small>{hover.position_m.x.toFixed(2)} · {hover.position_m.y.toFixed(2)} · {hover.position_m.z.toFixed(2)} m</small>
     </div>}
-    {pixelTraceEnabled && svoRenderMode === "svo" && voxelRenderMode === "smooth" && <>
+    {pixelTraceEnabled && voxelRenderMode === "smooth" && <>
       {traceReticle?.visible && <div
         className="pixel-trace-reticle"
         data-testid="pixel-trace-reticle"
@@ -1280,7 +1276,7 @@ export function WebGPUViewport() {
     >
       <i /><span>{failure.locationLabel ?? "first recorded failure"}</span>
     </div>}
-    {svoCostOverlay !== "off" && svoRenderMode === "svo" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-cost-legend">
+    {svoCostOverlay !== "off" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-cost-legend">
       <header><span>SVO · {svoOverlayDefinition.label}</span><span>depth ≤ {svoMaximumTraversalDepth} · visits ≤ {svoMaximumNodeVisits}</span></header>
       <div className="svo-cost-ramp" style={{ background: svoOverlayRamp }} />
       <footer><span>{svoOverlayDefinition.legend[0].label}</span><span>{svoOverlayDefinition.legend.at(-1)?.label}</span></footer>

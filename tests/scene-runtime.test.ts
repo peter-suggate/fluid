@@ -63,7 +63,7 @@ test("dry static scenes mark fluid and transport gates not required", () => {
   scene.systems = { fluid: false };
   scene.container.fillFraction = 0;
 
-  const plan = planSceneRuntime(scene, { methodId: "octree" });
+  const plan = planSceneRuntime(scene);
   assert.equal(plan.fluidSolver, false);
   assert.equal(plan.capabilities["water-presentation"], false);
   assert.equal(plan.readiness.fluidAuthority.state, "not-required");

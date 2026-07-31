@@ -5,7 +5,6 @@ import {
   type SvoPrimitiveRay,
   type SvoPrimitiveRayHit,
 } from "./svo-primitive-abi";
-import { SVO_TEMPORAL_HISTORY_THRESHOLDS } from "./svo-temporal-history";
 import { packMaterialOwner, SPARSE_BRICK_NO_OWNER, unpackMaterialOwner } from "./sparse-brick-octree";
 import type { SvoAabb, SvoVec3 } from "./webgpu-svo-traversal";
 
@@ -82,6 +81,8 @@ export interface SvoPrimitiveMotionRayHit extends SvoPrimitiveRayHit {
 
 const EPSILON = 1e-12;
 const UINT32_MAX = 0xffff_ffff;
+const MAXIMUM_CONTINUOUS_RIGID_MOTION_M = 0.5;
+const MAXIMUM_CONTINUOUS_RIGID_MOTION_CELLS = 2;
 
 function finiteVec3Tuple(value: SvoVec3, label: string): void {
   if (value.length !== 3 || value.some((component) => !Number.isFinite(component))) throw new RangeError(`${label} must contain three finite components`);
@@ -144,8 +145,8 @@ export function svoPrimitiveBoundingRadius(primitive: SvoFinitePrimitiveDescript
 export function svoPrimitiveTemporalMotionLimit(cellSize_m: number): number {
   if (!Number.isFinite(cellSize_m) || cellSize_m <= 0) throw new RangeError("Primitive motion cell size must be finite and positive");
   return Math.min(
-    SVO_TEMPORAL_HISTORY_THRESHOLDS.maximumRigidMotion_m,
-    SVO_TEMPORAL_HISTORY_THRESHOLDS.maximumRigidMotion_cell * cellSize_m,
+    MAXIMUM_CONTINUOUS_RIGID_MOTION_M,
+    MAXIMUM_CONTINUOUS_RIGID_MOTION_CELLS * cellSize_m,
   );
 }
 

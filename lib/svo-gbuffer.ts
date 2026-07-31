@@ -1,4 +1,3 @@
-import { encodeSvoTemporalNormal, packSvoTemporalHitKey, type SvoTemporalHitKey } from "./svo-temporal-history";
 import type { SvoVec3 } from "./webgpu-svo-traversal";
 
 export type SvoGBufferFormat = "rgba16float" | "rgba16uint" | "rgba32uint" | "depth32float";
@@ -336,22 +335,7 @@ export function svoGBufferHardBoxFeatureNormal(localPosition_m: SvoVec3, halfExt
   return { normal, featureId: SVO_GBUFFER_FEATURES.boxFaceX + axis };
 }
 
-/** Existing six-word/24-byte temporal key, built from quantized core MRT values. */
-export function makeSvoGBufferTemporalKey(pixel: SvoGBufferHit): Uint32Array<ArrayBuffer> {
-  const quantized = unpackSvoGBufferPixel(packSvoGBufferPixel(pixel));
-  if (quantized.status !== "hit") throw new Error("A temporal key requires a valid G-buffer hit");
-  const temporal: SvoTemporalHitKey = {
-    depth_m: quantized.depth_m, geometricNormal: quantized.geometricNormal, shadingNormal: quantized.shadingNormal,
-    materialId: quantized.materialId, ownerId: quantized.ownerId,
-    mediumBefore: quantized.mediumBefore, mediumAfter: quantized.mediumAfter,
-    localTopologyGeneration: quantized.localTopologyGeneration,
-  };
-  return packSvoTemporalHitKey(temporal);
-}
-
-export function makeSvoGBufferTemporalNormalWord(normal: SvoVec3): number { return encodeSvoTemporalNormal(normal); }
-
-/** Binding-free three-MRT fragment output and matching decode/key helpers. */
+/** Binding-free three-MRT fragment output and matching geometry helpers. */
 export const svoGBufferWGSL = /* wgsl */ `
 const SVO_GBUFFER_VALID_SURFACE:u32=1u;const SVO_GBUFFER_MISS:u32=2u;const SVO_GBUFFER_DEPTH_VALID:u32=4u;
 const SVO_GBUFFER_GEOMETRIC_NORMAL_VALID:u32=8u;const SVO_GBUFFER_SHADING_NORMAL_VALID:u32=16u;
@@ -360,7 +344,6 @@ const SVO_GBUFFER_FIELD_NONE:u32=0u;const SVO_GBUFFER_FEATURE_SMOOTH:u32=0u;cons
 const SVO_GBUFFER_MAX_VELOCITY_M_S:f32=64.0;
 struct SvoGBufferTargets{@location(0) radianceDepth:vec4f,@location(1) packedSurface:vec4u,@location(2) identityMedia:vec4u}
 struct SvoGBufferFeatureNormal{normal:vec3f,featureId:u32}
-struct SvoGBufferTemporalKey{depth_m:f32,geometricNormalOct:u32,shadingNormalOct:u32,materialOwner:u32,media:u32,localTopologyGeneration:u32}
 fn svoGBufferSignNotZero(value:f32)->f32{return select(1.0,-1.0,value<0.0);}
 fn svoGBufferOctCoordinates(normalIn:vec3f)->vec2f{let normal=normalize(normalIn);var result=normal.xy/(abs(normal.x)+abs(normal.y)+abs(normal.z));if(normal.z<0.0){let old=result;result=vec2f((1.0-abs(old.y))*svoGBufferSignNotZero(old.x),(1.0-abs(old.x))*svoGBufferSignNotZero(old.y));}return result;}
 fn svoGBufferPackNormalOct8(normal:vec3f)->u32{let encoded=svoGBufferOctCoordinates(normal);let x=i32(round(clamp(encoded.x,-1.0,1.0)*127.0));let y=i32(round(clamp(encoded.y,-1.0,1.0)*127.0));return ((u32(y)&0xffu)<<8u)|(u32(x)&0xffu);}
@@ -369,8 +352,6 @@ fn svoGBufferPackVelocity(velocity_m_s:vec3f,motionKind:u32)->u32{let scaled=vec
 fn svoGBufferMetadata(fieldSource:u32,flags:u32,failure:u32,featureId:u32)->u32{return (fieldSource&15u)|((flags&0xffffu)<<4u)|((failure&255u)<<20u)|((featureId&15u)<<28u);}
 fn svoGBufferReconstructWorld(origin_m:vec3f,rayDirection:vec3f,linearDepth_m:f32)->vec3f{return origin_m+normalize(rayDirection)*linearDepth_m;}
 fn svoGBufferHardBoxFeatureNormal(localPosition_m:vec3f,halfExtents_m:vec3f)->SvoGBufferFeatureNormal{let q=abs(localPosition_m)-halfExtents_m;var axis=0u;if(q.y>q.x){axis=1u;}if(q.z>q[axis]){axis=2u;}var normal=vec3f(0.0);normal[axis]=svoGBufferSignNotZero(localPosition_m[axis]);return SvoGBufferFeatureNormal(normal,SVO_GBUFFER_FEATURE_BOX_X+axis);}
-fn svoGBufferPackTemporalNormal(normal:vec3f)->u32{let encoded=svoGBufferOctCoordinates(normal);let x=i32(round(clamp(encoded.x,-1.0,1.0)*32767.0));let y=i32(round(clamp(encoded.y,-1.0,1.0)*32767.0));return ((u32(y)&0xffffu)<<16u)|(u32(x)&0xffffu);}
-fn svoGBufferTemporalKey(targets:SvoGBufferTargets)->SvoGBufferTemporalKey{let normals=targets.packedSurface.x;let geometric=svoGBufferUnpackNormalOct8(normals&0xffffu);let shading=svoGBufferUnpackNormalOct8(normals>>16u);return SvoGBufferTemporalKey(targets.radianceDepth.w,svoGBufferPackTemporalNormal(geometric),svoGBufferPackTemporalNormal(shading),(targets.identityMedia.y<<16u)|(targets.identityMedia.x&0xffffu),(targets.identityMedia.w<<16u)|(targets.identityMedia.z&0xffffu),targets.packedSurface.y);}
 fn svoGBufferMiss(radianceLinear:vec3f,fieldSource:u32,localGeneration:u32,failure:u32,flags:u32)->SvoGBufferTargets{return SvoGBufferTargets(vec4f(max(radianceLinear,vec3f(0.0)),0.0),vec4u(0u,localGeneration,0u,svoGBufferMetadata(fieldSource,flags|SVO_GBUFFER_MISS,failure,0u)),vec4u(0u));}
 fn svoGBufferSurface(radianceLinear:vec3f,linearDepth_m:f32,geometricNormal:vec3f,shadingNormal:vec3f,identityMedia:vec4u,velocity_m_s:vec3f,motionKind:u32,fieldSource:u32,localGeneration:u32,flags:u32,featureId:u32)->SvoGBufferTargets{let canonical=SVO_GBUFFER_VALID_SURFACE|SVO_GBUFFER_DEPTH_VALID|SVO_GBUFFER_GEOMETRIC_NORMAL_VALID|SVO_GBUFFER_SHADING_NORMAL_VALID|SVO_GBUFFER_MEDIA_VALID;let normals=svoGBufferPackNormalOct8(geometricNormal)|(svoGBufferPackNormalOct8(shadingNormal)<<16u);return SvoGBufferTargets(vec4f(max(radianceLinear,vec3f(0.0)),linearDepth_m),vec4u(normals,localGeneration,svoGBufferPackVelocity(velocity_m_s,motionKind),svoGBufferMetadata(fieldSource,flags|canonical,0u,featureId)),identityMedia);}
 `;

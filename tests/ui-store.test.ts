@@ -43,17 +43,14 @@ test("right panel width defaults to performance width and clamps resize input", 
 test("presentation defaults to global-illuminated sparse voxels", () => {
   const initial = useUIStore.getInitialState();
   useUIStore.setState(initial, true);
-  assert.equal(useUIStore.getState().svoRenderMode, "svo");
-  assert.equal(useUIStore.getState().svoLightingMode, "gi");
+  assert.equal(useUIStore.getState().voxelRenderMode, "smooth");
+  assert.equal("svoRenderMode" in useUIStore.getState(), false);
+  assert.equal("svoLightingMode" in useUIStore.getState(), false);
   assert.equal(useUIStore.getState().svoShadowsEnabled, true);
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, true);
-  useUIStore.getState().setSvoRenderMode("svo");
-  useUIStore.getState().setSvoLightingMode("direct");
-  useUIStore.getState().setSvoLightingMode("gi");
+  assert.equal(useUIStore.getState().svoRenderTuning.stationaryPrimaryReuseEnabled, false);
   useUIStore.getState().setSvoShadowsEnabled(false);
   useUIStore.getState().setSvoAmbientOcclusionEnabled(false);
-  assert.equal(useUIStore.getState().svoRenderMode, "svo");
-  assert.equal(useUIStore.getState().svoLightingMode, "gi");
   assert.equal(useUIStore.getState().svoShadowsEnabled, false);
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, false);
   useUIStore.setState(initial, true);

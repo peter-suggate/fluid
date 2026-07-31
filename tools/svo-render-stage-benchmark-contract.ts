@@ -1,6 +1,6 @@
-export const SVO_RENDER_STAGE_BENCHMARK_SCHEMA_VERSION = 2;
+export const SVO_RENDER_STAGE_BENCHMARK_SCHEMA_VERSION = 3;
 
-export type SVORenderStageBenchmarkVariant = "production" | "full-rate-shadows" | "primary-only";
+export type SVORenderStageBenchmarkVariant = "production" | "primary-only";
 
 export interface SVORenderStageBenchmarkResolution {
   readonly width: number;
@@ -13,7 +13,7 @@ export interface SVORenderStageBenchmarkRun {
   readonly cycleIndex: number;
   readonly variant: SVORenderStageBenchmarkVariant;
   readonly url: string;
-  readonly query: Readonly<Record<"svoShadows" | "svoAO" | "svoTemporal", "0" | "1">>;
+  readonly query: Readonly<Record<"svoShadows" | "svoAO", "0" | "1">>;
   readonly expectedPerformanceContextFragment: string;
   readonly outputResolution: SVORenderStageBenchmarkResolution;
   readonly internalResolution: SVORenderStageBenchmarkResolution;
@@ -23,7 +23,7 @@ export interface SVORenderStageBenchmarkRun {
 
 export interface SVORenderStageBenchmarkPlan {
   readonly schemaVersion: typeof SVO_RENDER_STAGE_BENCHMARK_SCHEMA_VERSION;
-  readonly purpose: "fixed-resolution-svo-scene-temporal-isolation";
+  readonly purpose: "fixed-resolution-svo-lighting-isolation";
   readonly revision: string;
   readonly runs: readonly SVORenderStageBenchmarkRun[];
   readonly captureInstructions: readonly string[];
@@ -34,16 +34,12 @@ const variants: Readonly<Record<SVORenderStageBenchmarkVariant, {
   readonly expectedPerformanceContextFragment: string;
 }>> = Object.freeze({
   production: Object.freeze({
-    query: Object.freeze({ svoShadows: "1", svoAO: "1", svoTemporal: "1" }),
-    expectedPerformanceContextFragment: "shadow-on:ao-on:temporal-on:lighting-cone:smooth:svo",
-  }),
-  "full-rate-shadows": Object.freeze({
-    query: Object.freeze({ svoShadows: "1", svoAO: "1", svoTemporal: "0" }),
-    expectedPerformanceContextFragment: "shadow-on:ao-on:temporal-off:lighting-cone:smooth:svo",
+    query: Object.freeze({ svoShadows: "1", svoAO: "1" }),
+    expectedPerformanceContextFragment: "shadow-on:ao-on:gi:smooth",
   }),
   "primary-only": Object.freeze({
-    query: Object.freeze({ svoShadows: "0", svoAO: "0", svoTemporal: "0" }),
-    expectedPerformanceContextFragment: "shadow-off:ao-off:temporal-off:lighting-cone:smooth:svo",
+    query: Object.freeze({ svoShadows: "0", svoAO: "0" }),
+    expectedPerformanceContextFragment: "shadow-off:ao-off:gi:smooth",
   }),
 });
 
@@ -91,14 +87,14 @@ export function buildSVORenderStageBenchmarkPlan(options: {
   }
   return Object.freeze({
     schemaVersion: SVO_RENDER_STAGE_BENCHMARK_SCHEMA_VERSION,
-    purpose: "fixed-resolution-svo-scene-temporal-isolation",
+    purpose: "fixed-resolution-svo-lighting-isolation",
     revision: options.revision,
     runs: Object.freeze(runs),
     captureInstructions: Object.freeze([
       `Lock both the browser viewport and internal render target to ${resolution.width}x${resolution.height}; reject responsive or scaled samples.`,
       "Reset the identical scene, camera, solver checkpoint, and performance history before every run.",
       "Append a frame only when the generic presentation trace sampleId advances; retain warmups and complete PerformanceReports.",
-      "Validate the run's shadow/temporal fragment in the performance context and reject fallback renderer frames.",
+      "Validate the run's lighting fragment in the performance context and reject fallback renderer frames.",
       "Compare the generic dry-scene phase across variants while retaining the exact presentation total.",
     ]),
   });

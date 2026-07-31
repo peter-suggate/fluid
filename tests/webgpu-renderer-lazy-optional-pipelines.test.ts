@@ -6,10 +6,10 @@ import { optionalRendererPipelineRequests } from "../lib/webgpu-renderer";
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 
-test("paused raster-water startup requests no optional renderer pipelines", () => {
+test("GLOBAL startup always requests the sparse renderer", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
-    { axis: "off", position: 0.5 }, "smooth", "raster", false, true,
-  ), []);
+    { axis: "off", position: 0.5 }, "smooth", false, true,
+  ), ["svo-dry-scene"]);
 
   const initializeStart = rendererSource.indexOf("private async initializeInternal(): Promise<void>");
   const recoveryStart = rendererSource.indexOf("private scheduleDeviceRecovery", initializeStart);
@@ -25,20 +25,20 @@ test("paused raster-water startup requests no optional renderer pipelines", () =
 
 test("each optional pipeline has an explicit first-use condition", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
-    { axis: "z", position: 0.5, mode: "structure" }, "smooth", "raster", false, false,
-  ), ["grid-overlay"]);
+    { axis: "z", position: 0.5, mode: "structure" }, "smooth", false, false,
+  ), ["grid-overlay", "svo-dry-scene"]);
   assert.deepEqual(optionalRendererPipelineRequests(
-    { axis: "volume", position: 0.5, mode: "power-cells" }, "smooth", "raster", false, false,
-  ), ["technique-overlay", "technique-audit-overlay"]);
+    { axis: "volume", position: 0.5, mode: "power-cells" }, "smooth", false, false,
+  ), ["technique-overlay", "technique-audit-overlay", "svo-dry-scene"]);
   assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "raw-voxels", "svo", false, false,
-  ), ["voxel-debug"], "inspection wins over the production SVO renderer");
+    undefined, "raw-voxels", false, false,
+  ), ["voxel-debug", "svo-dry-scene"], "structural inspection overlays the GLOBAL renderer");
   assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "smooth", "svo", false, false,
+    undefined, "smooth", false, false,
   ), ["svo-dry-scene"]);
   assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "smooth", "raster", true, true,
-  ), ["secondary-particles"]);
+    undefined, "smooth", true, true,
+  ), ["svo-dry-scene", "secondary-particles"]);
 });
 
 test("first-use compilation is single-flight and fails closed per device", () => {
@@ -57,27 +57,28 @@ test("first-use compilation is single-flight and fails closed per device", () =>
     "completion asks a paused scene for exactly another presentation opportunity");
 });
 
-test("dry SVO startup reports both expensive pipeline compilations", () => {
+test("dry SVO startup compiles only the GLOBAL presentation pipeline", () => {
   assert.match(drySceneSource, /initialize\(progress\?: \(label: string, completed: number, total: number\) => void\)/);
-  assert.match(drySceneSource, /progress\?\.\("Compiling sparse dry-scene pipeline", 0, 2\)/);
-  assert.match(drySceneSource, /progress\?\.\("Compiling sparse temporal accumulation", 1, 2\)/);
+  assert.match(drySceneSource, /progress\?\.\("Compiling sparse dry-scene pipeline", 0, 1\)/);
+  assert.match(drySceneSource, /progress\?\.\("Sparse presentation pipeline compiled", 1, 1\)/);
+  assert.doesNotMatch(drySceneSource, /SparseVoxelTemporalAccumulator|Compiling sparse temporal accumulation|svo-temporal/);
   assert.match(rendererSource, /pipeline\.initialize\(\(label, completed\) => this\.reportSvoPipelineProgress\(label, completed\)\)/,
     "the lazy optional pipeline must forward compilation stages to the viewport status flow");
   assert.match(rendererSource, /label: "Sparse garden renderer attached"[^]*completed: 3, total: 4/);
   assert.match(rendererSource, /label: "Submitting first sparse garden frame"[^]*completed: 3, total: 4/);
 });
 
-test("production enables exact static-primary coherence only for safe scene states", () => {
-  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"canonical-parametric"[^]*"split", 0, "static-primary", true, true\)/,
-    "the production renderer must opt into the measured split/coherence and analytic-raster policy");
-  assert.match(rendererSource, /const primaryCoherenceKey = !sceneRuntime\.fluidSolver \|\| !this\.simulationRunning[^]*shadowStabilityKey[^]*sceneEpoch/,
-    "static worlds and paused solvers must use the complete caller-owned key");
-  assert.match(rendererSource, /encode\(replacementEncoder, target, temporalFrame, primaryCoherenceKey, tracePhase\)/,
+test("production exposes exact static-primary coherence behind a default-off safe-scene gate", () => {
+  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"canonical-parametric"[^]*"split", 0, "static-primary", true, true, true\)/,
+    "the production renderer must retain the measured split/coherence and analytic-raster capability");
+  assert.match(rendererSource, /const primaryCoherenceKey = activeSvoTuning\.stationaryPrimaryReuseEnabled[^]*!sceneRuntime\.fluidSolver \|\| !this\.simulationRunning[^]*presentationCoherenceKey[^]*sceneEpoch/,
+    "the opt-in must still restrict complete caller-owned keys to static worlds and paused solvers");
+  assert.match(rendererSource, /encode\(replacementEncoder, target, primaryCoherenceKey, tracePhase\)/,
     "the safe key must reach the renderer cache; running fluid scenes pass undefined");
   assert.match(drySceneSource, /this\.rayCoherenceMode, useSplit && usePrepass, primaryFrameKey/,
     "coherence must fail closed until a reduced prepass makes primary output parity-invariant");
-  assert.match(drySceneSource, /const relightSplit = usePrepass[^]*coneRadianceReconstruction === "wide-relight"[^]*coneRadianceReconstruction === "full-res-relight"[^]*this\.shadingPath === "auto-relight" && relightSplit/,
-    "the automatic diagnostic mode must remain available");
+  assert.doesNotMatch(drySceneSource, /const relightSplit|lightingMode/,
+    "retired lighting-mode selection must not remain in the GLOBAL renderer");
   assert.match(drySceneSource, /this\.shadingPath === "auto-relight" && relight && this\.coneScale !== 1[^]*ensureConeLightingPrepass/,
     "selecting relight must asynchronously compile its split variant while the inline path remains available");
 });

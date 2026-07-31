@@ -46,12 +46,13 @@ function source(): SparseVoxelRenderSource {
   } as unknown as SparseVoxelRenderSource;
 }
 
-test("lighting quality, shadows, and ambient occlusion write independent visibility flags", () => {
+test("GLOBAL lighting and its visibility effects write independent flags", () => {
   assert.deepEqual(SVO_DRY_VISIBILITY_FLAGS, {
     exactContact: 1, exactShadow: 2, coneLightingRequested: 4, ambientOcclusion: 8,
     globalIllumination: 16, globalIlluminationOcclusion: 32, globalIlluminationRequested: 64,
   });
-  assert.match(drySource, /const coneFallback = this\.lightingMode === "cone" \|\| \(this\.lightingMode === "gi" && !giReady\)/);
+  assert.match(drySource, /const coneFallback = !giReady/);
+  assert.doesNotMatch(drySource, /lightingMode|setLightingMode/);
   const previousBufferUsage = globalThis.GPUBufferUsage, previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, {
     GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, MAP_READ: 8 },
@@ -71,7 +72,6 @@ test("lighting quality, shadows, and ambient occlusion write independent visibil
   } as unknown as GPUDevice;
   try {
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
-    renderer.setLightingMode("cone");
     renderer.setSource(source(), svoDrySceneFixture);
     const params = () => writes.filter(({ label }) => label === "Sparse voxel dry scene parameters");
     const flagWord = (write: { words: Uint32Array }) => write.words[SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset + 3];
@@ -84,17 +84,10 @@ test("lighting quality, shadows, and ambient occlusion write independent visibil
     renderer.setLightingOptions({ shadowsEnabled: false, ambientOcclusionEnabled: false });
     assert.equal(flagWord(params().at(-1)!) & (SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.exactShadow | SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion), 0);
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true });
-    renderer.setLightingMode("direct");
-    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, SVO_DRY_VISIBILITY_FLAGS.exactShadow);
-    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, 0);
-    renderer.setLightingMode("cone");
-    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested);
-    renderer.setLightingMode("gi");
     const fallbackFlags = flagWord(params().at(-1)!);
     assert.equal(fallbackFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested,
       SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested, "the probe can diagnose a requested GI atlas that is unavailable");
     assert.equal(fallbackFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, 0);
-    renderer.setLightingMode("cone");
     const giSource = source() as unknown as SparseVoxelRenderSource & Record<string, unknown>;
     const plan = { generation: 1, complete: true, pages: [{ key: { generation: 1, level: 0, coordinate: [0, 0, 0] }, slot: 0 }], atlas: { texels: [10, 10, 10] } };
     Object.assign(giSource, {
@@ -102,7 +95,6 @@ test("lighting quality, shadows, and ambient occlusion write independent visibil
       tetrahedralRadiance: { generation: 1, plan, views: [{}, {}, {}, {}] },
     });
     renderer.setSource(giSource as unknown as SparseVoxelRenderSource, svoDrySceneFixture);
-    renderer.setLightingMode("gi");
     const giFlags = flagWord(params().at(-1)!);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, SVO_DRY_VISIBILITY_FLAGS.globalIllumination);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested,

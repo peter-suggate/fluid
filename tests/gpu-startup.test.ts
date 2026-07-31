@@ -40,7 +40,6 @@ test("safe browser bring-up fails closed when the bounded workload drifts", () =
     canonicalMethodValues,
     exactScene: true,
     voxelRenderMode: "smooth",
-    svoRenderMode: "raster",
     diagnosticsOpen: false,
     rightPanel: null,
     gridOverlayAxis: "off",

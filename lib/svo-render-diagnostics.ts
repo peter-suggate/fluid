@@ -54,13 +54,13 @@ export const DEFAULT_SVO_RENDER_DIAGNOSTICS: SvoRenderDiagnostics = Object.freez
 /** Shared high-contrast ramp used by every scalar work view. */
 export const SVO_COST_SEQUENTIAL_LEGEND = Object.freeze([
   { at: 0, color: "#08051f", label: "None" },
-  { at: 0.16, color: "#2447ff", label: "Low" },
-  { at: 0.34, color: "#00d9ff", label: "Light" },
-  { at: 0.52, color: "#00ff85", label: "Moderate" },
-  { at: 0.69, color: "#eaff00", label: "High" },
-  { at: 0.84, color: "#ff8500", label: "Heavy" },
-  { at: 0.95, color: "#ff174d", label: "Near limit" },
-  { at: 1, color: "#ffffff", label: "Limit" },
+  { at: 0.16, color: "#2447ff", label: "Very low" },
+  { at: 0.34, color: "#00d9ff", label: "Low" },
+  { at: 0.52, color: "#00ff85", label: "Medium" },
+  { at: 0.69, color: "#eaff00", label: "Elevated" },
+  { at: 0.84, color: "#ff8500", label: "High" },
+  { at: 0.95, color: "#ff174d", label: "Very high" },
+  { at: 1, color: "#ffffff", label: "Peak" },
 ] as const satisfies readonly SvoCostOverlayLegendStop[]);
 
 const sequential = SVO_COST_SEQUENTIAL_LEGEND;

@@ -83,11 +83,11 @@ test("render panel contains rendering controls only; solver fields stay in perfo
   assert.doesNotMatch(panelSource, /useMethodStore|gridOverlay|paperPipeline|finePublicationGate/);
   assert.doesNotMatch(panelSource, />Solver grid<|Paper pipeline inspector|CFL load|Projected divergence/);
   assert.match(panelSource, /RENDER OBSERVATORY/);
-  assert.match(panelSource, /SCENE REPRESENTATION/);
+  assert.match(panelSource, /GLOBAL SVO VIEW/);
   assert.match(panelSource, /LIVE PER-PIXEL SCENE HEATMAPS/);
 });
 
-test("dry shader measures topology, payload refinement, mip, and shadow work before applying the heatmap", () => {
+test("dry shader measures and contrast-normalizes live traversal work before applying the heatmap", () => {
   assert.match(svoDrySceneShader, /fn dryConfiguredMapping\(\)->SvoMapping/);
   assert.match(svoDrySceneShader, /mapping\.maxVisits=min\(mapping\.maxVisits,dryDiagnosticMaximumNodeVisits\(\)\)/);
   assert.match(svoDrySceneShader, /fn dryTraverse\([^]*svoTraverseWithDepthLimit/);
@@ -98,7 +98,15 @@ test("dry shader measures topology, payload refinement, mip, and shadow work bef
   assert.match(svoDrySceneShader, /dryPrimaryExactTests\+=1u/);
   assert.match(svoDrySceneShader, /dryShadowNodeVisits\+=result\.nodeVisits/);
   assert.match(svoDrySceneShader, /dryMipSteps\+=1u/);
-  assert.match(svoDrySceneShader, /fn dryLogCost\([^]*log2\(1\.0\+max\(value,0\.0\)\)/);
+  assert.match(svoDrySceneShader, /fn dryNormalizedCost\(value:f32,reference:f32\)[^]*if\(!\(value>0\.0\)\)\{return 0\.0;\}/,
+    "zero work must remain the dark palette floor");
+  assert.match(svoDrySceneShader, /return clamp\(\.14\+\.86\*pow\(logarithmic,\.55\),0\.0,1\.0\)/,
+    "nonzero work receives a concave contrast lift");
+  assert.match(svoDrySceneShader, /depthReference=f32\(max\(1u,min\(dryDiagnosticMaximumDepth\(\),dry\.mapping\.maximumDepth\)\)\)/);
+  assert.match(svoDrySceneShader, /visibilityRayBudget=f32\(max\(dry\.tuningCounts0\.z\+dry\.tuningCounts1\.y,1u\)\)/);
+  assert.match(svoDrySceneShader, /voxelReference=primaryLeafBudget\*f32\(max\(dry\.mapping\.brickSize,1u\)\)/);
+  assert.doesNotMatch(svoDrySceneShader, /dryLogCost|1536\.0|384\.0/,
+    "heatmaps must not normalize ordinary work against unreachable hard-coded ceilings");
   assert.match(svoDrySceneShader, /primaryCost\*vec3f\(0\.0,\.851,1\.0\)[^]*shadowCost\*vec3f\(1\.0,\.078,\.576\)[^]*mipCost\*vec3f\(1\.0,\.902,0\.0\)/);
   assert.match(svoDrySceneShader, /return vec4f\(overlayColor,radianceDepth\.a\)/);
   assert.doesNotMatch(svoDrySceneShader, /mix\(radianceDepth\.rgb,overlayColor/);
@@ -113,5 +121,5 @@ test("reduced cone lighting visualizes prepass reuse and full-resolution fallbac
   assert.match(reducedShader, new RegExp(`mode==${prepassMode}u`));
   assert.match(reducedShader, /dryPrepassState==1u[^]*vec3f\(0\.0,\.9,1\.0\)/);
   assert.match(reducedShader, /dryConeFallback==1u[^]*vec3f\(1\.0,\.09,\.30\)/);
-  assert.match(reducedShader, /dryPrepassData0=vec4f\(1\.0\);dryPrepassData1=vec4f\(1\.0\);dryPrepassData2=vec4f\(1\.0\);dryPrepassRadiance=vec4f\(0\.0\);dryPrepassState=0u;dryPrepassRadianceState=0u;dryConeFallback=0u/);
+  assert.match(reducedShader, /dryPrepassData0=vec4f\(1\.0\);dryPrepassData1=vec4f\(1\.0\);dryPrepassData2=vec4f\(1\.0\);dryPrepassRadiance=vec4f\(0\.0\);dryPrepassGi=vec4f\(0\.0,0\.0,0\.0,1\.0\);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryConeFallback=0u/);
 });

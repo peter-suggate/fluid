@@ -63,7 +63,6 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   gpuStatus: { state: "initializing", label: "Initializing WebGPU" },
   gpuInfo: null,
   effectiveRendererStatus: {
-    requestedMode: "svo",
     effectiveMode: "raster",
     fallbackReason: "missing-source",
   },

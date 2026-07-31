@@ -26,7 +26,6 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
     gridOverlayAxis: "z",
     gridOverlaySlice: 0.7,
     voxelRenderMode: "brick-grid",
-    svoRenderMode: "svo",
     camera: { ...initialUI.camera, distance_m: 4.2 }
   });
   const parsed = parseQueryState(query);
@@ -40,7 +39,6 @@ test("query state round-trips method, scene, quality, and sparse overrides", () 
   assert.equal(parsed.ui.gridOverlayAxis, "z");
   assert.equal(parsed.ui.gridOverlaySlice, 0.7);
   assert.equal(parsed.ui.voxelRenderMode, "brick-grid");
-  assert.equal(parsed.ui.svoRenderMode, "svo");
   assert.equal(parsed.ui.camera.distance_m, 4.2);
   assert.deepEqual(parsed.overrides, {
     "tall-cell": { pressureCycles: 5 },
@@ -299,65 +297,29 @@ test("legacy presentation choices are removed from canonical links", () => {
   assert.equal(params.has("fps"), false);
 });
 
-test("production renderer mode omits the SVO default and serializes explicit raster", () => {
-  const parsed = parseQueryState("?render=svo");
-  assert.equal(parsed.ui.svoRenderMode, "svo");
-
-  const scene = getScenePreset(parsed.presetId).create();
-  const sparse = serializeQueryState("", { presetId: parsed.presetId, scene }, {
-    methodId: parsed.methodId,
-    quality: parsed.quality,
-    overrides: parsed.overrides
-  }, parsed.ui);
-  assert.equal(new URLSearchParams(sparse).has("render"), false);
-
-  const raster = serializeQueryState("?render=svo", { presetId: parsed.presetId, scene }, {
-    methodId: parsed.methodId,
-    quality: parsed.quality,
-    overrides: parsed.overrides
-  }, { ...parsed.ui, svoRenderMode: "raster" });
-  assert.equal(new URLSearchParams(raster).get("render"), "raster");
-  assert.equal(parseQueryState("?render=invalid").ui.svoRenderMode, "svo");
-});
-
-test("SVO lighting round-trips explicit modes while GI remains the finished-image default", () => {
-  const direct = parseQueryState("?render=svo&svoLighting=direct");
-  assert.equal(direct.ui.svoRenderMode, "svo");
-  assert.equal(direct.ui.svoLightingMode, "direct");
-  const directQuery = serializeQueryState("?svoLighting=stale", {
-    presetId: direct.presetId,
-    scene: direct.scene,
-  }, {
-    methodId: direct.methodId,
-    quality: direct.quality,
-    overrides: direct.overrides,
-  }, direct.ui);
-  assert.equal(new URLSearchParams(directQuery).get("svoLighting"), "direct");
-
-  const cone = parseQueryState("?svoLighting=cone");
-  assert.equal(cone.ui.svoLightingMode, "cone");
-  const coneQuery = serializeQueryState("?svoLighting=direct", {
-    presetId: cone.presetId,
-    scene: cone.scene,
-  }, {
-    methodId: cone.methodId,
-    quality: cone.quality,
-    overrides: cone.overrides,
-  }, cone.ui);
-  assert.equal(new URLSearchParams(coneQuery).get("svoLighting"), "cone");
-
-  const gi = parseQueryState("?svoLighting=gi");
-  assert.equal(gi.ui.svoLightingMode, "gi");
-  const giQuery = serializeQueryState("?svoLighting=direct", {
-    presetId: gi.presetId,
-    scene: gi.scene,
-  }, {
-    methodId: gi.methodId,
-    quality: gi.quality,
-    overrides: gi.overrides,
-  }, gi.ui);
-  assert.equal(new URLSearchParams(giQuery).has("svoLighting"), false);
-  assert.equal(parseQueryState("?svoLighting=invalid").ui.svoLightingMode, "gi");
+test("retired renderer and lighting modes are ignored and removed from canonical links", () => {
+  for (const search of [
+    "?render=raster",
+    "?render=svo",
+    "?svoLighting=direct",
+    "?svoLighting=cone",
+    "?svoLighting=gi",
+  ]) {
+    const parsed = parseQueryState(search);
+    assert.equal("svoRenderMode" in parsed.ui, false);
+    assert.equal("svoLightingMode" in parsed.ui, false);
+    const query = serializeQueryState(search, {
+      presetId: parsed.presetId,
+      scene: parsed.scene,
+    }, {
+      methodId: parsed.methodId,
+      quality: parsed.quality,
+      overrides: parsed.overrides,
+    }, parsed.ui);
+    const canonical = new URLSearchParams(query);
+    assert.equal(canonical.has("render"), false);
+    assert.equal(canonical.has("svoLighting"), false);
+  }
 });
 
 test("SVO shadows and ambient occlusion round-trip as independent finished-image options", () => {

@@ -13,7 +13,6 @@ import {
   SVO_GBUFFER_RENDER_TARGET_CONTRACT,
 } from "../lib/webgpu-svo-gbuffer-targets";
 import { SparseVoxelDrySceneRenderer, svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelTemporalFrameState } from "../lib/webgpu-svo-temporal-accumulator";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const waterSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
@@ -78,7 +77,7 @@ test("auxiliary renderer-owned targets preserve the exact compact G-buffer contr
     depthCompare: "greater",
   });
   assert.equal(arena.ensureSize(320, 180), true);
-  assert.equal(arena.ensureSize(320, 180), false, "an unchanged size retains temporal resources");
+  assert.equal(arena.ensureSize(320, 180), false, "an unchanged size retains G-buffer resources");
   assert.deepEqual(textures.map(({ descriptor }) => descriptor.format), ["rgba32uint", "rgba16uint", "depth32float"]);
   assert.ok(textures.every(({ descriptor }) => Array.isArray(descriptor.size) && descriptor.size[0] === 320 && descriptor.size[1] === 180));
   assert.deepEqual(arena.textures && {
@@ -101,7 +100,7 @@ test("production dry pass writes three MRTs plus reversed-Z without changing loc
   const textures: MockTexture[] = [], pipelineDescriptors: GPURenderPipelineDescriptor[] = [];
   const renderer = new SparseVoxelDrySceneRenderer(mockDevice(textures, pipelineDescriptors), {} as GPUBuffer, {} as GPUBuffer);
   await renderer.initialize();
-  assert.equal(pipelineDescriptors.length, 2, "direct visibility and temporal resolve compile as separate bounded passes");
+  assert.equal(pipelineDescriptors.length, 1, "the dry renderer compiles no post-frame temporal pass");
   const descriptor = pipelineDescriptors[0];
   assert.deepEqual(Array.from(descriptor.fragment!.targets).map((target) => target?.format), ["rgba16float", "rgba32uint", "rgba16uint"]);
   assert.deepEqual(descriptor.depthStencil, { format: "depth32float", depthWriteEnabled: true, depthCompare: "greater" });
@@ -132,26 +131,11 @@ test("production dry pass writes three MRTs plus reversed-Z without changing loc
   const reusableView = { label: "reusable dry HDR" } as GPUTextureView;
   const reusableTexture = { width: 64, height: 48, createView: () => reusableView } as GPUTexture;
   const passesBeforeReuse = passCount;
-  const firstReusable = renderer.encode(encoder, reusableTexture, undefined, "fixed-camera-and-bodies");
-  const secondReusable = renderer.encode(encoder, reusableTexture, undefined, "fixed-camera-and-bodies");
+  const firstReusable = renderer.encode(encoder, reusableTexture, "fixed-camera-and-bodies");
+  const secondReusable = renderer.encode(encoder, reusableTexture, "fixed-camera-and-bodies");
   assert.ok(firstReusable && secondReusable);
-  assert.equal(passCount, passesBeforeReuse + 1, "an unchanged non-temporal dry frame is rendered once and then reused");
+  assert.equal(passCount, passesBeforeReuse + 1, "an unchanged dry frame is rendered once and then reused");
   assert.equal(secondReusable.sampledTargetView, firstReusable.sampledTargetView);
-  const temporalFrame: SparseVoxelTemporalFrameState = {
-    camera: { position_m: [0, 0, 0], forward: [0, 0, -1], right: [1, 0, 0], up: [0, 1, 0] },
-    deltaTime_s: 0,
-    cellSize_m: 0.025,
-    paused: true,
-    composition: "dry-before-raster-water",
-  };
-  const passesBeforeTemporalReuse = passCount;
-  const firstTemporal = renderer.encode(encoder, reusableTexture, temporalFrame, "fixed-temporal-frame");
-  const secondTemporal = renderer.encode(encoder, reusableTexture, temporalFrame, "fixed-temporal-frame");
-  const reusedTemporal = renderer.encode(encoder, reusableTexture, temporalFrame, "fixed-temporal-frame");
-  assert.ok(firstTemporal && secondTemporal && reusedTemporal);
-  assert.equal(passCount, passesBeforeTemporalReuse + 4,
-    "both checkerboard phases render and resolve before an unchanged temporal frame is reused");
-  assert.equal(reusedTemporal.sampledTargetView, secondTemporal.sampledTargetView);
   renderer.destroy();
   assert.throws(() => new SparseVoxelDrySceneRenderer(mockDevice([]), {} as GPUBuffer, {} as GPUBuffer, "bgra8unorm"), /location 0 must use rgba16float/);
 });

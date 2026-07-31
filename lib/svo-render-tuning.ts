@@ -25,8 +25,8 @@ export interface SvoRenderTuning {
   readonly environmentBrickRefinementLevels: number;
   readonly coneLightingScale: SvoConeLightingScale;
   readonly coneRadianceReconstruction: SvoConeRadianceReconstruction;
-  readonly temporalEnabled: boolean;
-  readonly checkerboardShadowsEnabled: boolean;
+  /** Reuse an exact primary G-buffer while an eligible camera and scene remain unchanged. */
+  readonly stationaryPrimaryReuseEnabled: boolean;
   readonly primaryLeafVisits: number;
   readonly coneStepBudget: number;
   readonly maximumShadedLights: number;
@@ -56,9 +56,6 @@ export interface SvoRenderTuning {
   readonly giConeCount: number;
   readonly coneNormalEscapeCells: number;
   readonly coneEmitterClearanceCells: number;
-  readonly temporalMaximumSamples: number;
-  readonly temporalVarianceSigma: number;
-  readonly temporalDepthToleranceScale: number;
 }
 
 export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
@@ -69,8 +66,7 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   // relighting preserves material and edge detail at either reduced rate.
   coneLightingScale: 0.5,
   coneRadianceReconstruction: "full-res-relight",
-  temporalEnabled: true,
-  checkerboardShadowsEnabled: true,
+  stationaryPrimaryReuseEnabled: false,
   primaryLeafVisits: 48,
   coneStepBudget: 48,
   maximumShadedLights: 8,
@@ -98,9 +94,6 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   giConeCount: 4,
   coneNormalEscapeCells: 0.5,
   coneEmitterClearanceCells: 3,
-  temporalMaximumSamples: 32,
-  temporalVarianceSigma: 2,
-  temporalDepthToleranceScale: 1,
 });
 
 export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
@@ -119,21 +112,18 @@ export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
     visibilityNodeVisits: 48,
     visibilityLeafVisits: 12,
     visibilityWorkItems: 320,
-    temporalMaximumSamples: 16,
   }),
   balanced: DEFAULT_SVO_RENDER_TUNING,
   quality: Object.freeze({
     ...DEFAULT_SVO_RENDER_TUNING,
     resolutionScale: 1,
     coneLightingScale: 0.5 as const,
-    checkerboardShadowsEnabled: false,
     primaryLeafVisits: 128,
     coneStepBudget: 48,
     giConeCount: 4,
     visibilityNodeVisits: 128,
     visibilityLeafVisits: 32,
     visibilityWorkItems: 1024,
-    temporalMaximumSamples: 48,
   }),
 });
 
@@ -162,8 +152,7 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     ),
     coneLightingScale,
     coneRadianceReconstruction,
-    temporalEnabled: Boolean(value.temporalEnabled),
-    checkerboardShadowsEnabled: Boolean(value.checkerboardShadowsEnabled),
+    stationaryPrimaryReuseEnabled: Boolean(value.stationaryPrimaryReuseEnabled),
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),
     coneStepBudget: integer(value.coneStepBudget, 1, 48),
     maximumShadedLights: integer(value.maximumShadedLights, 1, 8),
@@ -189,9 +178,6 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     giConeCount: integer(value.giConeCount ?? DEFAULT_SVO_RENDER_TUNING.giConeCount, 3, 4),
     coneNormalEscapeCells: bounded(value.coneNormalEscapeCells, 0, 2),
     coneEmitterClearanceCells: bounded(value.coneEmitterClearanceCells, 0, 8),
-    temporalMaximumSamples: integer(value.temporalMaximumSamples, 1, 128),
-    temporalVarianceSigma: bounded(value.temporalVarianceSigma, 0.5, 4),
-    temporalDepthToleranceScale: bounded(value.temporalDepthToleranceScale, 0.25, 4),
   };
 }
 

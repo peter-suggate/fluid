@@ -14,7 +14,6 @@ import {
   SVO_GBUFFER_PRECISION,
   decodeSvoGBufferFloat16,
   encodeSvoGBufferFloat16,
-  makeSvoGBufferTemporalKey,
   packSvoGBufferPixel,
   reconstructSvoGBufferWorldPosition,
   svoGBufferHardBoxFeatureNormal,
@@ -22,7 +21,6 @@ import {
   unpackSvoGBufferPixel,
   type SvoGBufferHit,
 } from "../lib/svo-gbuffer";
-import { packSvoTemporalHitKey } from "../lib/svo-temporal-history";
 
 function close(actual: number, expected: number, tolerance: number) {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} should be within ${tolerance} of ${expected}`);
@@ -161,20 +159,6 @@ test("hard boxes select one stable authored feature at faces, edges, and corners
   });
 });
 
-test("temporal construction remains the exact existing six-word 24-byte ABI after core quantization", () => {
-  const quantized = unpackSvoGBufferPixel(packSvoGBufferPixel(hit));
-  assert.equal(quantized.status, "hit");
-  const expected = packSvoTemporalHitKey({
-    depth_m: quantized.depth_m, geometricNormal: quantized.geometricNormal, shadingNormal: quantized.shadingNormal,
-    materialId: quantized.materialId, ownerId: quantized.ownerId,
-    mediumBefore: quantized.mediumBefore, mediumAfter: quantized.mediumAfter,
-    localTopologyGeneration: quantized.localTopologyGeneration,
-  });
-  const key = makeSvoGBufferTemporalKey(hit);
-  assert.equal(key.byteLength, 24);
-  assert.deepEqual(key, expected);
-});
-
 test("invalid core values and attachment shapes fail at the ABI boundary", () => {
   assert.throws(() => packSvoGBufferPixel({ ...hit, depth_m: 65_505 }), /depth/);
   assert.throws(() => packSvoGBufferPixel({ ...hit, materialId: 0x1_0000 }), /Material ID/);
@@ -183,13 +167,12 @@ test("invalid core values and attachment shapes fail at the ABI boundary", () =>
   assert.throws(() => unpackSvoGBufferPixel({ ...malformed, debugSidecar: new Uint32Array(3) }), /attachment lengths/);
 });
 
-test("WGSL mirror is binding-free, three-target, temporally compatible, and preserves hard box ties", () => {
+test("WGSL mirror is binding-free, three-target, and preserves hard box ties", () => {
   assert.doesNotMatch(svoGBufferWGSL, /@group|@binding/);
   for (let location = 0; location < 3; location += 1) assert.match(svoGBufferWGSL, new RegExp(`@location\\(${location}\\)`));
   assert.doesNotMatch(svoGBufferWGSL, /@location\([3-9]/);
-  assert.match(svoGBufferWGSL, /struct SvoGBufferTemporalKey\{[\s\S]*depth_m:f32[\s\S]*localTopologyGeneration:u32/);
+  assert.doesNotMatch(svoGBufferWGSL, /TemporalKey|PackTemporal/);
   assert.match(svoGBufferWGSL, /origin_m\+normalize\(rayDirection\)\*linearDepth_m/);
   assert.match(svoGBufferWGSL, /if\(q\.y>q\.x\)\{axis=1u;\}if\(q\.z>q\[axis\]\)\{axis=2u;\}/);
   assert.match(svoGBufferWGSL, /SVO_GBUFFER_FEATURE_BOX_X\+axis/);
-  assert.match(svoGBufferWGSL, /targets\.identityMedia\.y<<16u/);
 });

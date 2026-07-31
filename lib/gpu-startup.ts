@@ -46,7 +46,6 @@ export interface SafeBrowserGPUBringupConfig {
   readonly canonicalMethodValues: Readonly<Record<string, unknown>>;
   readonly exactScene: boolean;
   readonly voxelRenderMode: string;
-  readonly svoRenderMode: string;
   readonly diagnosticsOpen: boolean;
   readonly rightPanel: string | null;
   readonly gridOverlayAxis: string;
@@ -65,7 +64,7 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     .filter((key) => !safeVariantKeys.has(key))
     .filter((key) => JSON.stringify(values[key]) !== JSON.stringify(canonical[key]));
   const approvedQueryKeys = new Set([
-    "gpu", "method", "scene", "quality", "render", "voxels",
+    "gpu", "method", "scene", "quality", "voxels",
     "param.octree.globalFineLevelSetFactor",
     "param.octree.maximumLeafSize",
     "param.octree.interfaceRefinementBandCells",
@@ -82,7 +81,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
     config.voxelRenderMode !== "smooth" && "voxel inspection must be smooth/off",
-    config.svoRenderMode !== "raster" && "renderer must be raster",
     config.diagnosticsOpen && "diagnostics panel must remain closed",
     config.rightPanel !== null && "all right-side panels must remain closed",
     config.gridOverlayAxis !== "off" && "grid overlays must remain off",

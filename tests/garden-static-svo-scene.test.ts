@@ -18,7 +18,7 @@ test("garden SVO lighting preset is a valid fluid-free static scene", () => {
   assert.equal(preset.group, "Garden");
   assert.equal(scene.sceneId, "garden-svo-lighting-study");
   assert.equal(scene.systems?.fluid, false);
-  const runtimePlan = planSceneRuntime(scene, { methodId: "octree", renderMode: "svo" });
+  const runtimePlan = planSceneRuntime(scene);
   assert.equal(runtimePlan.staticWorld, true);
   assert.equal(runtimePlan.fluidSolver, false);
   assert.equal(runtimePlan.rigidCoupling, false);
@@ -143,7 +143,7 @@ test("static SVO startup bypasses the simulation solver and t=0 raster gate", ()
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const staticSource = readFileSync(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url), "utf8");
 
-  assert.match(renderer, /planSceneRuntime\(scene,\{methodId:config\.methodId\}\)\.fluidSolver/);
+  assert.match(renderer, /planSceneRuntime\(scene\)\.fluidSolver/);
   assert.match(renderer, /WebGPUStaticSvoScene\.create/);
   assert.match(renderer, /backend === "webgpu" \|\| !sceneRuntime\.fluidSolver[^]*this\.currentGPUFluid\(scene, svoSceneConfig, time_s\)/,
     "fluid-disabled scenes must request their renderer-owned GPU source even under the CPU reference method");

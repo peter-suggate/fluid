@@ -2,12 +2,8 @@ import { create } from "zustand";
 import { bodySelection, DEFAULT_EDITOR_TOOL, selectedBodyIdOf, type EditorSelection, type EditorTool } from "../editor-tools";
 import { defaultCamera, type CameraState, type RigidShape, type ScenePropShape } from "../model";
 import {
-  DEFAULT_SVO_LIGHTING_MODE,
   DEFAULT_SVO_LIGHTING_OPTIONS,
-  DEFAULT_SVO_RENDER_MODE,
-  type SvoLightingMode,
-  type SvoRenderMode,
-} from "../svo-render-mode";
+} from "../svo-render-options";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoCostOverlayMode } from "../svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../svo-render-tuning";
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../svo-pixel-trace";
@@ -54,10 +50,6 @@ interface UIStore {
   gridOverlayMode: GridOverlayMode;
   /** Unified sparse-brick representation: smooth surface, raw voxels, or brick bounds. */
   voxelRenderMode: VoxelRenderMode;
-  /** Production scene presentation; independent of sparse inspection overlays. */
-  svoRenderMode: SvoRenderMode;
-  /** Exact direct visibility or the generation-checked wide-mip cone cache. */
-  svoLightingMode: SvoLightingMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   svoCostOverlay: SvoCostOverlayMode;
@@ -94,8 +86,6 @@ interface UIStore {
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
-  setSvoRenderMode: (mode: SvoRenderMode) => void;
-  setSvoLightingMode: (mode: SvoLightingMode) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSvoCostOverlay: (mode: SvoCostOverlayMode) => void;
@@ -125,8 +115,6 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
   voxelRenderMode: "smooth",
-  svoRenderMode: DEFAULT_SVO_RENDER_MODE,
-  svoLightingMode: DEFAULT_SVO_LIGHTING_MODE,
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   svoCostOverlay: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlay,
@@ -154,8 +142,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
   setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
-  setSvoRenderMode: (svoRenderMode) => set({ svoRenderMode }),
-  setSvoLightingMode: (svoLightingMode) => set({ svoLightingMode }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSvoCostOverlay: (svoCostOverlay) => set({ svoCostOverlay }),

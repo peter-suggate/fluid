@@ -31,7 +31,7 @@ import {
 } from "./webgpu-fluid-brick-residency";
 
 export type VoxelRenderMode = "smooth" | "raw-voxels" | "surface-voxels" | "brick-grid" | "occupied-bricks";
-/** Sparse inspection is deliberately unavailable to the production hybrid mode. */
+/** Structural overlays drawn on top of the production GLOBAL presentation. */
 export type VoxelDebugMode = Exclude<VoxelRenderMode, "smooth">;
 
 export const SPARSE_VOXEL_DEBUG_RECORD_STRIDE = 48;

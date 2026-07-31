@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-import { DEFAULT_SVO_LIGHTING_MODE, DEFAULT_SVO_LIGHTING_OPTIONS, DEFAULT_SVO_RENDER_MODE } from "../lib/svo-render-mode";
+import { DEFAULT_SVO_LIGHTING_OPTIONS } from "../lib/svo-render-options";
 import {
   canEncodeSparseVoxelDryScene,
   SVO_DRY_SCENE_BINDING_CONTRACT,
@@ -27,15 +27,12 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
   assert.ok(pattern.test(source), message);
 }
 
-test("SVO presentation is the WebGPU default while raster remains selectable", () => {
-  assert.equal(DEFAULT_SVO_RENDER_MODE, "svo");
-  assert.equal(DEFAULT_SVO_LIGHTING_MODE, "gi");
+test("GLOBAL SVO is the sole production presentation", () => {
   assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS, { shadowsEnabled: true, ambientOcclusionEnabled: true });
-  expectSource(rendererSource, /svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE/,
-    "callers which do not override presentation must use sparse voxels");
-  expectSource(rendererSource, /DEFAULT_SVO_LIGHTING_MODE[^]*DEFAULT_SVO_RENDER_MODE[^]*type SvoLightingMode[^]*type SvoRenderMode[^]*from "\.\/svo-render-mode"/,
-    "renderer must consume the canonical render and lighting toggles");
-  expectSource(viewportSource, /ui\.svoLightingMode,[^]*shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*overlay: ui\.svoCostOverlay/,
+  assert.doesNotMatch(rendererSource, /svoRenderMode|svoLightingMode|SvoRenderMode|SvoLightingMode/);
+  expectSource(rendererSource, /type SvoLightingOptions[^]*from "\.\/svo-render-options"/,
+    "renderer must retain only GLOBAL visibility effects");
+  expectSource(viewportSource, /ui\.voxelRenderMode,[^]*shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*overlay: ui\.svoCostOverlay/,
     "viewport must pass lighting effects before the diagnostics argument in the renderer contract");
 });
 
@@ -65,10 +62,10 @@ test("the legacy procedural environment never appears while sparse presentation 
     "the pending clear shows the environment's ambient light at far scene depth");
   expectSource(rendererSource, /setPendingSvoBackground\(\s*svoPresentationExpected \? svoEnvironmentAmbientBackgroundLinear\(environmentId, scene\.lighting\?\.environment\) : undefined,\s*\)/,
     "the renderer must claim the dry scene for sparse presentation before the pipeline can publish one");
-  expectSource(rendererSource, /const svoPresentationExpected = useSvoDryScene\s*&& !this\.failedOptionalPipelines\.has\("svo-dry-scene"\)/,
+  expectSource(rendererSource, /const svoPresentationExpected = !this\.failedOptionalPipelines\.has\("svo-dry-scene"\)/,
     "a scene that has genuinely fallen back keeps the raster room rather than a flat placeholder");
-  // Raster and voxel-inspection modes are still whole pictures drawn by the
-  // legacy scene shader, so it must remain reachable when SVO is not selected.
+  // The legacy scene shader remains reachable only as an automatic fail-soft
+  // path while GLOBAL resources are unavailable.
   assert.match(waterSource, /scene\.setPipeline\(this\.scenePipeline\)/);
 });
 
@@ -150,7 +147,7 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), [
     { binding: 11, type: "read-only-storage" }, { binding: 12, type: "read-only-storage" },
   ]);
-  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-9).map(({ binding, type }) => [binding, type]), [
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-10).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
     // Evolving fluid coverage shares the node-mip sampler rather than adding a
     // second one: both want clamp-to-edge linear filtering.
@@ -158,6 +155,7 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
     [20, "texture-3d-uint"],
     [21, "texture-3d-float"], [22, "texture-3d-float"],
     [23, "texture-3d-float"], [24, "texture-3d-float"],
+    [25, "texture-2d-uint"],
   ], "cone lighting must consume sampled resources rather than another fragment storage buffer");
   assert.match(drySceneSource, /nodeMip\?\.view \?\? this\.nodeMipFallbackAtlasView/);
   assert.match(drySceneSource, /nodeMip\?\.sampler \?\? this\.nodeMipFallbackSampler/);
@@ -209,22 +207,22 @@ test("renderer atomically replaces structural sources before retiring the previo
     "renderer teardown must destroy direct-renderer-owned GPU resources");
 });
 
-test("SVO is offered to the water pipeline only for smooth production presentation", () => {
-  expectSource(rendererSource, /svoRenderMode === "svo" && voxelRenderMode === "smooth"/,
-    "inspection modes and the production renderer are separate switches");
+test("SVO is offered to the water pipeline beneath every structural view", () => {
+  expectSource(rendererSource, /const drySceneReplacement = \(/,
+    "structural views must preserve GLOBAL as their underlying presentation");
   expectSource(rendererSource, /this\.svoDryScenePipeline\?\.encode\(/,
     "SVO mode must offer a replacement encoder");
   expectSource(rendererSource, /this\.waterPipeline\.encode\([^]*drySceneReplacement/s,
     "the replacement callback must target the water pipeline's internal HDR dry-scene attachment");
 });
 
-test("raw voxels and brick-grid remain independent clear-and-replace inspection modes", () => {
+test("raw voxels and brick-grid are overlays on the GLOBAL frame", () => {
   assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? this\.gpuFluid\?\.sparseVoxelRenderSource : undefined/,
     "debug mode materialization must remain gated by inspection visibility");
   assert.match(rendererSource, /this\.voxelDebugPipeline\?\.setSource\(this\.voxelInspectionSource\)/,
     "debug modes consume expanded records only while inspection is visible");
   assert.match(rendererSource, /if \(voxelRenderMode !== "smooth" && this\.voxelDebugDepth\)/);
   assert.match(rendererSource, /mode: voxelRenderMode/);
-  assert.match(rendererSource, /colorLoadOp: "clear"/,
-    "inspection remains a complete representation switch, not an SVO dry-scene overlay");
+  assert.match(rendererSource, /Structural views diagnose the same GLOBAL frame[^]*colorLoadOp: "load"/,
+    "inspection must alpha-blend over the GLOBAL dry scene");
 });

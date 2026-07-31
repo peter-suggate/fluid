@@ -25,7 +25,7 @@ test("octree smooth presentation keeps analytic solids and glass", () => {
     "a completed physics step must not be used as a proxy for the warmed t=0 authority");
 });
 
-test("raw voxel and brick-grid inspection retain the GPU sparse source", () => {
+test("raw voxel and brick-grid inspection overlay the GLOBAL GPU sparse source", () => {
   assert.match(rendererSource, /voxelRenderMode !== "smooth" && this\.gpuFluid/);
   assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? this\.gpuFluid\?\.sparseVoxelRenderSource : undefined/,
     "capacity-sized debug instance buffers attach only while inspection is visible");
@@ -33,7 +33,8 @@ test("raw voxel and brick-grid inspection retain the GPU sparse source", () => {
     "smooth production SVO consumes the structural source without activating inspection records");
   assert.match(rendererSource, /if \(voxelRenderMode !== "smooth" && this\.voxelDebugDepth\)/);
   assert.match(rendererSource, /mode: voxelRenderMode/);
-  assert.match(rendererSource, /colorLoadOp: "clear"/);
+  assert.match(rendererSource, /Structural views diagnose the same GLOBAL frame[^]*colorLoadOp: "load"/);
+  assert.match(rendererSource, /const drySceneReplacement = \(/);
   assert.match(uniformEulerianSource, /Initial sparse authority: \$\{descriptor\.label\}/);
   assert.match(uniformEulerianSource, /this\.octreeProjection\.encodeInitialSparseAuthorityPhase\(initialSparseScene, phase\)/);
   assert.deepEqual(OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES.map(({ id }) => id), [

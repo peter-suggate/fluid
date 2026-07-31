@@ -114,7 +114,7 @@ test("producer gates only expanded records and always reaches structural finaliz
 test("renderer lazily attaches inspection before solver submission and services paused repaints", () => {
   const source = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const modeControl = source.indexOf("this.voxelInspectionSource = requestedVoxelDebugGeneration >= 0");
-  const solverSubmit = source.indexOf("this.submitPreparedGPUFluid(readyGPUFluid", modeControl);
+  const solverSubmit = source.indexOf("this.submitPreparedGPUFluid(", modeControl);
   const encoderCreation = source.indexOf("createCommandEncoder({ label: \"Fluid Lab frame\" })", solverSubmit);
   const pausedPublication = source.indexOf("this.voxelInspectionSource?.inspectionPublication?.encodePending?.(encoder)", encoderCreation);
   assert.ok(modeControl >= 0 && solverSubmit > modeControl, "inspection must attach before solver encode");

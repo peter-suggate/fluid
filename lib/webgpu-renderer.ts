@@ -31,14 +31,9 @@ import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "./svo-terrain-material";
 import { svoEnvironmentAmbientBackgroundLinear } from "./svo-environment-lighting";
 import {
-  DEFAULT_SVO_LIGHTING_MODE,
   DEFAULT_SVO_LIGHTING_OPTIONS,
-  DEFAULT_SVO_RENDER_MODE,
-  type SvoLightingMode,
   type SvoLightingOptions,
-  type SvoRenderMode,
-} from "./svo-render-mode";
-import type { SparseVoxelTemporalFrameState } from "./webgpu-svo-temporal-accumulator";
+} from "./svo-render-options";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "./svo-render-tuning";
 import { isGPUInitializationAbort } from "./gpu-initialization";
@@ -66,21 +61,7 @@ import { usePerformanceInstrumentationStore } from "./stores/performance-instrum
 export type SimulationBackend = "webgpu" | "cpu-reference";
 /** One item executing and one queued keeps the GPU busy without visible FIFO bursts. */
 export const BROWSER_GPU_THROUGHPUT_DEPTH = 2;
-export const SVO_SHADOW_HISTORY_WARMUP_FRAMES = 2;
 export const SVO_CAMERA_CHANGING_FRAME = -2;
-
-export function svoShadowTemporalFrame(enabled: boolean, stableFrames: number, presentationFrameIndex: number): number {
-  return enabled && stableFrames >= SVO_SHADOW_HISTORY_WARMUP_FRAMES
-    ? Math.max(0, Math.floor(presentationFrameIndex)) % 16_777_216
-    : -1;
-}
-
-/** Preserve shadow-temporal eligibility while also publishing camera motion to dry-scene shading. */
-export function svoDrySceneTemporalFrame(shadowTemporalFrame: number, cameraStableFrames: number): number {
-  return cameraStableFrames >= SVO_SHADOW_HISTORY_WARMUP_FRAMES
-    ? shadowTemporalFrame
-    : SVO_CAMERA_CHANGING_FRAME;
-}
 
 /** Submit one solver advance toward the prepared simulation clock. */
 export function submitNextPreparedGPUAdvance(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[]) {
@@ -195,14 +176,13 @@ export interface PixelTraceConfig {
 }
 
 /**
- * Pipeline compilation requested by the current presentation mode. Explicit
- * raster mode requests none of these; the WebGPU default requests the sparse
- * dry-scene renderer alongside the authoritative water path.
+ * Pipeline compilation requested by the current presentation. The sparse
+ * dry-scene renderer owns the finished view alongside the authoritative water
+ * path; structural diagnostics are optional overlays on that same frame.
  */
 export function optionalRendererPipelineRequests(
   gridOverlay: GridOverlayConfig | undefined,
   voxelRenderMode: VoxelRenderMode,
-  svoRenderMode: SvoRenderMode,
   simulationRunning: boolean,
   secondaryParticlesAvailable: boolean,
   pixelTraceActive = false,
@@ -216,10 +196,10 @@ export function optionalRendererPipelineRequests(
     }
   }
   if (voxelRenderMode !== "smooth") requested.push("voxel-debug");
-  if (svoRenderMode === "svo" && voxelRenderMode === "smooth") requested.push("svo-dry-scene");
+  requested.push("svo-dry-scene");
   if (simulationRunning && secondaryParticlesAvailable) requested.push("secondary-particles");
   // The trace overlay is only meaningful over the sparse path it explains.
-  if (pixelTraceActive && svoRenderMode === "svo" && voxelRenderMode === "smooth") requested.push("pixel-trace-overlay");
+  if (pixelTraceActive && voxelRenderMode === "smooth") requested.push("pixel-trace-overlay");
   return requested;
 }
 
@@ -240,7 +220,7 @@ export function structuralMethodValues(config: SimulationRunConfig): MethodParam
 /** Static renderer worlds are method-independent; fluid worlds require a GPU solver factory. */
 export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: string): boolean {
   const method = getMethod(methodId);
-  return !planSceneRuntime(scene, { methodId }).fluidSolver || Boolean(method.createSolver || method.createSolverAsync);
+  return !planSceneRuntime(scene).fluidSolver || Boolean(method.createSolver || method.createSolverAsync);
 }
 
 /**
@@ -260,7 +240,7 @@ export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: s
  * response, without moving these boundaries again.
  */
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `fluid-${planSceneRuntime(scene, { methodId: config.methodId }).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.lighting ?? null)}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.top}:${scene.container.fluidWallMode}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.lighting ?? null)}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.top}:${scene.container.fluidWallMode}`;
 }
 
 /**
@@ -318,12 +298,10 @@ export type SvoRendererFallbackReason =
   | "unsupported-glass-cutout"
   | "missing-pbr-materials"
   | "missing-lighting-publications"
-  | "pipeline-compile-failure"
-  | "inspection-mode";
+  | "pipeline-compile-failure";
 
 export interface EffectiveRendererStatus {
-  requestedMode: SvoRenderMode;
-  effectiveMode: SvoRenderMode;
+  effectiveMode: "svo" | "raster";
   fallbackReason?: SvoRendererFallbackReason;
 }
 
@@ -334,24 +312,20 @@ export interface EffectiveRendererConditions {
   glassSupported?: boolean;
   materialsSupported?: boolean;
   lightingSupported?: boolean;
-  inspectionMode: boolean;
   svoEncoded: boolean;
 }
 
 /** Resolve one frame's production renderer without changing simulation state. */
 export function resolveEffectiveRendererStatus(
-  requestedMode: SvoRenderMode,
   conditions: EffectiveRendererConditions,
 ): EffectiveRendererStatus {
-  if (requestedMode === "raster") return { requestedMode, effectiveMode: "raster" };
-  if (conditions.inspectionMode) return { requestedMode, effectiveMode: "raster", fallbackReason: "inspection-mode" };
-  if (!conditions.pipelineAvailable) return { requestedMode, effectiveMode: "raster", fallbackReason: "pipeline-compile-failure" };
-  if (!conditions.terrainSupported) return { requestedMode, effectiveMode: "raster", fallbackReason: "unsupported-terrain" };
-  if (conditions.glassSupported === false) return { requestedMode, effectiveMode: "raster", fallbackReason: "unsupported-glass-cutout" };
-  if (conditions.materialsSupported === false) return { requestedMode, effectiveMode: "raster", fallbackReason: "missing-pbr-materials" };
-  if (conditions.lightingSupported === false) return { requestedMode, effectiveMode: "raster", fallbackReason: "missing-lighting-publications" };
-  if (!conditions.sourceAvailable || !conditions.svoEncoded) return { requestedMode, effectiveMode: "raster", fallbackReason: "missing-source" };
-  return { requestedMode, effectiveMode: "svo" };
+  if (!conditions.pipelineAvailable) return { effectiveMode: "raster", fallbackReason: "pipeline-compile-failure" };
+  if (!conditions.terrainSupported) return { effectiveMode: "raster", fallbackReason: "unsupported-terrain" };
+  if (conditions.glassSupported === false) return { effectiveMode: "raster", fallbackReason: "unsupported-glass-cutout" };
+  if (conditions.materialsSupported === false) return { effectiveMode: "raster", fallbackReason: "missing-pbr-materials" };
+  if (conditions.lightingSupported === false) return { effectiveMode: "raster", fallbackReason: "missing-lighting-publications" };
+  if (!conditions.sourceAvailable || !conditions.svoEncoded) return { effectiveMode: "raster", fallbackReason: "missing-source" };
+  return { effectiveMode: "svo" };
 }
 
 export interface RendererFrameMetrics {
@@ -367,7 +341,7 @@ export interface RendererFrameMetrics {
 
 const PRESENTATION_TRACE_PHASES: readonly GPUTimestampPhase[] = [
   { id: "surface-extraction", label: "Surface extraction + caustics" },
-  { id: "dry-scene", label: "Dry scene + temporal lighting" },
+  { id: "dry-scene", label: "Dry scene lighting" },
   { id: "water-interfaces", label: "Front/back water interfaces" },
   { id: "optical-composite", label: "Optical composite" },
   { id: "inspection-overlay", label: "Inspection overlays" },
@@ -484,13 +458,7 @@ export class FluidLabRenderer {
   private svoMaterialsSupported = true;
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
-  /** Internal A/B: temporal-off also restores full-rate shadow visibility. */
-  private svoTemporalAccumulationEnabled = DEFAULT_SVO_RENDER_TUNING.temporalEnabled;
-  private presentationFrameIndex = 0;
   private svoCameraStabilityKey = "";
-  private svoCameraStableFrames = 0;
-  private svoShadowStabilityKey = "";
-  private svoShadowStableFrames = 0;
   private svoRenderDiagnosticsKey = "";
   private gpuPendingBatches = 0;
   private presentationsInFlight = 0;
@@ -547,7 +515,7 @@ export class FluidLabRenderer {
 
   private publishEffectiveRendererStatus(status: EffectiveRendererStatus) {
     const previous = this.lastEffectiveRendererStatus;
-    if (previous?.requestedMode === status.requestedMode && previous.effectiveMode === status.effectiveMode && previous.fallbackReason === status.fallbackReason) return;
+    if (previous?.effectiveMode === status.effectiveMode && previous.fallbackReason === status.fallbackReason) return;
     this.lastEffectiveRendererStatus = status;
     this.effectiveRendererStatusCallback?.(status);
   }
@@ -1229,7 +1197,7 @@ export class FluidLabRenderer {
     // GPUSolverInstance branch.
     const create:Promise<GPUSolverInstance>=prepare().then(async ():Promise<GPUSolverInstance>=>{
       if(abort.signal.aborted||this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
-      if (!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver) {
+      if (!planSceneRuntime(scene).fluidSolver) {
         const refinement = config.values.svoEnvironmentBrickRefinementLevels;
         return WebGPUStaticSvoScene.create(device, scene, config.quality, report, abort.signal, {
           environmentBrickRefinementLevels: typeof refinement === "number" ? refinement : undefined,
@@ -1245,7 +1213,7 @@ export class FluidLabRenderer {
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
       this.gpuFluid=solver;this.gpuFluidKey=key;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
-      const staticRenderScene=!planSceneRuntime(scene,{methodId:config.methodId}).fluidSolver;
+      const staticRenderScene=!planSceneRuntime(scene).fluidSolver;
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
       if(staticRenderScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Static SVO scene ready; fluid authority intentionally bypassed";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false};}
       else if(fencedInitialRaster){solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false};}
@@ -1478,7 +1446,7 @@ export class FluidLabRenderer {
   /** Frames whose presentation submission has actually finished on the GPU. */
   get completedPresentationCount(): number { return this.completedPresentations; }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoRenderMode: SvoRenderMode = DEFAULT_SVO_RENDER_MODE, svoLightingMode: SvoLightingMode = DEFAULT_SVO_LIGHTING_MODE, svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
       ? new CPUPerformanceTrace(
@@ -1489,29 +1457,24 @@ export class FluidLabRenderer {
       : undefined;
     if (!this.device || this.disposed || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const activeSvoTuning = normalizeSvoRenderTuning(svoTuning);
-    this.svoTemporalAccumulationEnabled = activeSvoTuning.temporalEnabled
-      && (typeof location === "undefined" || new URLSearchParams(location.search).get("svoTemporal") !== "0");
     this.resize(activeSvoTuning.resolutionScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
-    if (svoRenderMode !== "svo" || voxelRenderMode !== "smooth") { this.svoPickingAvailable = false; this.lastSvoPickingBodies = []; }
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
-    const activeSvoDiagnostics = svoRenderMode !== "svo" || voxelRenderMode !== "smooth"
-      ? DEFAULT_SVO_RENDER_DIAGNOSTICS : requestedSvoDiagnostics;
+    const activeSvoDiagnostics = requestedSvoDiagnostics;
     const tuningKey = svoRenderTuningKey(activeSvoTuning);
     const diagnosticsKey = `${activeSvoDiagnostics.overlay}:${activeSvoDiagnostics.maximumTraversalDepth}:${activeSvoDiagnostics.maximumNodeVisits}:${tuningKey}`;
     if (diagnosticsKey !== this.svoRenderDiagnosticsKey) {
       this.svoRenderDiagnosticsKey = diagnosticsKey;
-      this.svoDryScenePipeline?.invalidateTemporalHistory();
       this.resetPresentationTrace();
     }
-    const presentationContext = `${config.methodId}:${config.quality}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:temporal-${this.svoTemporalAccumulationEnabled ? "on" : "off"}:lighting-${svoLightingMode}:${voxelRenderMode}:${svoRenderMode}:tuning-${tuningKey}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:gi:${voxelRenderMode}:tuning-${tuningKey}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
     }
     const basis = cameraBasis(camera), position = basis.position;
     if (backend === "webgpu" && gridOverlay?.axis !== "off") this.gpuFluid?.ensureGridDiagnosticTextures?.();
-    const sceneRuntime = planSceneRuntime(scene, { methodId: config.methodId, renderMode: svoRenderMode });
+    const sceneRuntime = planSceneRuntime(scene);
     const svoSceneConfig: SimulationRunConfig = {
       ...config,
       values: {
@@ -1522,9 +1485,9 @@ export class FluidLabRenderer {
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
       ? this.currentGPUFluid(scene, svoSceneConfig, time_s)
       : undefined;
-    const pixelTraceRequested = Boolean(pixelTrace) && svoRenderMode === "svo" && voxelRenderMode === "smooth";
+    const pixelTraceRequested = Boolean(pixelTrace) && voxelRenderMode === "smooth";
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
-      gridOverlay, voxelRenderMode, svoRenderMode, this.simulationRunning,
+      gridOverlay, voxelRenderMode, this.simulationRunning,
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
       pixelTraceRequested,
     ));
@@ -1610,11 +1573,9 @@ export class FluidLabRenderer {
       basis.right.x, basis.right.y, basis.right.z,
       basis.up.x, basis.up.y, basis.up.z,
     ].join("|");
-    if (cameraStabilityKey !== this.svoCameraStabilityKey) {
-      this.svoCameraStabilityKey = cameraStabilityKey;
-      this.svoCameraStableFrames = 0;
-    } else this.svoCameraStableFrames += 1;
-    const shadowStabilityKey = [
+    const cameraChanging = cameraStabilityKey !== this.svoCameraStabilityKey;
+    this.svoCameraStabilityKey = cameraStabilityKey;
+    const presentationCoherenceKey = [
       this.gpuFluidGeneration, scene.sceneId, scene.randomSeed, environmentId, diagnosticsKey, selectedBodyId ?? "",
       cameraStabilityKey,
       ...bodies.flatMap((body) => [
@@ -1624,16 +1585,6 @@ export class FluidLabRenderer {
         body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z,
       ]),
     ].join("|");
-    const checkerboardShadowsEligible = this.svoTemporalAccumulationEnabled && activeSvoTuning.checkerboardShadowsEnabled && svoLightingOptions.shadowsEnabled
-      && svoRenderMode === "svo" && voxelRenderMode === "smooth" && requestedSvoDiagnostics.overlay === "off";
-    if (!checkerboardShadowsEligible || shadowStabilityKey !== this.svoShadowStabilityKey) {
-      this.svoShadowStabilityKey = checkerboardShadowsEligible ? shadowStabilityKey : "";
-      this.svoShadowStableFrames = 0;
-      this.svoDryScenePipeline?.invalidateTemporalHistory();
-    } else this.svoShadowStableFrames += 1;
-    const shadowTemporalFrame = svoShadowTemporalFrame(checkerboardShadowsEligible, this.svoShadowStableFrames, this.presentationFrameIndex);
-    const drySceneTemporalFrame = svoDrySceneTemporalFrame(shadowTemporalFrame, this.svoCameraStableFrames);
-    this.presentationFrameIndex += 1;
     const techniqueModeCode = gridOverlay?.mode && isOctreeTechniqueOverlayMode(gridOverlay.mode)
       ? OCTREE_TECHNIQUE_OVERLAY_CODES[gridOverlay.mode]
       : 0;
@@ -1644,7 +1595,7 @@ export class FluidLabRenderer {
       this.techniqueOverlayPipeline?.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
     }
     const uniform = new Float32Array([
-      this.presentationTexture.width, this.presentationTexture.height, time_s, drySceneTemporalFrame,
+      this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
       position.x, position.y, position.z, svoCostOverlayCode(activeSvoDiagnostics.overlay),
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
@@ -1695,7 +1646,6 @@ export class FluidLabRenderer {
     }
     this.advanceSceneryAnimation();
     this.svoDryScenePipeline?.setRigidBodyCount(bodies.length);
-    this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
     this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
@@ -1708,9 +1658,7 @@ export class FluidLabRenderer {
     const presentationTraceSampleId = shouldTracePresentation
       ? ++this.presentationTraceSampleId
       : 0;
-    const traceDetailedSvoRenderPath = svoRenderMode === "svo"
-      && voxelRenderMode === "smooth"
-      && (svoLightingMode === "cone" || svoLightingMode === "gi");
+    const traceDetailedSvoRenderPath = true;
     const presentationTrace = shouldTracePresentation
       && !this.hardwarePresentationTraceInvalid
       && GPUStageTimestampRecorder.supported(this.device)
@@ -1753,49 +1701,31 @@ export class FluidLabRenderer {
     this.svoDryScenePipeline?.setFluidCoverage(this.ensureFluidCoverage(readyGPUFluid, scene));
     this.secondaryParticlePipeline?.setSource(backend === "webgpu" ? this.gpuFluid?.secondaryParticles : undefined);
     let svoEncoded = false;
-    const useSvoDryScene = svoRenderMode === "svo" && voxelRenderMode === "smooth";
-    if (!useSvoDryScene) this.svoDryScenePipeline?.invalidateTemporalHistory();
-    const drySceneReplacement = useSvoDryScene
-      ? (replacementEncoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, tracePhase?: (phase: GPUTimestampPhase) => void) => {
-        const cellSize_m = this.svoDryScenePipeline?.temporalCellSize_m ?? 0;
-        const temporalFrame: SparseVoxelTemporalFrameState | undefined = this.svoTemporalAccumulationEnabled ? {
-          camera: {
-            position_m: [basis.position.x, basis.position.y, basis.position.z],
-            forward: [basis.forward.x, basis.forward.y, basis.forward.z],
-            right: [basis.right.x, basis.right.y, basis.right.z],
-            up: [basis.up.x, basis.up.y, basis.up.z],
-          },
-          deltaTime_s: this.simulationRunning ? gpuInfo?.lastDt_s ?? 0 : 0,
-          cellSize_m,
-          paused: !this.simulationRunning,
-          composition: "dry-before-raster-water",
-          maximumSamples: activeSvoTuning.temporalMaximumSamples,
-          varianceSigma: activeSvoTuning.temporalVarianceSigma,
-          depthToleranceScale: activeSvoTuning.temporalDepthToleranceScale,
-        } : undefined;
-        if (!temporalFrame) this.svoDryScenePipeline?.invalidateTemporalHistory();
-        // Primary visibility is immutable only for a static dry scene or a
-        // paused solver. Source replacement and authored primitive animation
-        // invalidate the renderer-owned cache; this caller key additionally
-        // covers camera, viewport, bodies, selection, tuning and environment.
-        // Running fluid scenes fail closed to a fresh primary trace.
-        const primaryCoherenceKey = !sceneRuntime.fluidSolver || !this.simulationRunning
-          ? `${shadowStabilityKey}|viewport=${this.presentationTexture!.width}x${this.presentationTexture!.height}|scene=${this.svoDryScenePipeline?.sceneEpoch ?? 0}`
-          : undefined;
-        const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, temporalFrame, primaryCoherenceKey, tracePhase) ?? false;
-        svoEncoded = Boolean(replacementResult);
-        if (!replacementResult) this.svoDryScenePipeline?.invalidateTemporalHistory();
-        return replacementResult;
-      }
-      : undefined;
+    const drySceneReplacement = (
+      replacementEncoder: GPUCommandEncoder,
+      target: GPUTexture | GPUTextureView,
+      tracePhase?: (phase: GPUTimestampPhase) => void,
+    ) => {
+      // Primary visibility is immutable only for a static dry scene or a
+      // paused solver. Source replacement and authored primitive animation
+      // invalidate the renderer-owned cache; this caller key additionally
+      // covers camera, viewport, bodies, selection, tuning and environment.
+      // Running fluid scenes fail closed to a fresh primary trace.
+      const primaryCoherenceKey = activeSvoTuning.stationaryPrimaryReuseEnabled
+        && (!sceneRuntime.fluidSolver || !this.simulationRunning)
+        ? `${presentationCoherenceKey}|viewport=${this.presentationTexture!.width}x${this.presentationTexture!.height}|scene=${this.svoDryScenePipeline?.sceneEpoch ?? 0}`
+        : undefined;
+      const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, primaryCoherenceKey, tracePhase) ?? false;
+      svoEncoded = Boolean(replacementResult);
+      return replacementResult;
+    };
     this.waterPipeline.setSceneHasFluid(Boolean(sceneRuntime.fluidSolver));
     // Sparse presentation owns the dry scene for the whole session. Frames it
     // cannot publish yet show the environment's own ambient light, never the
     // legacy procedural room, which is a different set from the authored one.
     // A scene that has actually fallen back keeps the raster room, because
     // there it is the whole picture rather than a placeholder.
-    const svoPresentationExpected = useSvoDryScene
-      && !this.failedOptionalPipelines.has("svo-dry-scene")
+    const svoPresentationExpected = !this.failedOptionalPipelines.has("svo-dry-scene")
       && this.svoTerrainSupported && this.svoGlassSupported && this.svoMaterialsSupported
       && this.svoLightingSupported;
     this.waterPipeline.setPendingSvoBackground(
@@ -1840,16 +1770,15 @@ export class FluidLabRenderer {
         completed: 3, total: 4, startedAt_ms: initialStaticSvoSubmission.startedAt_ms, kind: "startup", retainingPrevious: false,
       });
     }
-    this.svoPickingAvailable = useSvoDryScene && svoEncoded;
+    this.svoPickingAvailable = svoEncoded;
     this.lastSvoPickingBodies = this.svoPickingAvailable ? bodies.slice(0, 12) : [];
-    this.publishEffectiveRendererStatus(resolveEffectiveRendererStatus(svoRenderMode, {
+    this.publishEffectiveRendererStatus(resolveEffectiveRendererStatus({
       pipelineAvailable: this.svoPipelineAvailable,
       sourceAvailable: this.svoSourceAvailable,
       terrainSupported: this.svoTerrainSupported,
       glassSupported: this.svoGlassSupported,
       materialsSupported: this.svoMaterialsSupported,
       lightingSupported: this.svoLightingSupported,
-      inspectionMode: voxelRenderMode !== "smooth",
       svoEncoded,
     }));
     let inspectionOverlayEncoded = false;
@@ -1860,10 +1789,9 @@ export class FluidLabRenderer {
         colorTarget: this.presentationTexture.createView(),
         depthTarget: this.voxelDebugDepth.createView(),
         depthLoadOp: "clear",
-        // Inspection is a representation switch, not a subtle overlay. Clear
-        // the smooth hybrid frame so contiguous voxels and brick bounds remain
-        // unmistakable even for a still, fully filled region.
-        colorLoadOp: "clear",
+        // Structural views diagnose the same GLOBAL frame. Alpha-blended
+        // geometry must preserve the cone-traced presentation underneath.
+        colorLoadOp: "load",
         viewProjection: voxelViewProjectionMatrix(camera, this.presentationTexture.width / Math.max(1, this.presentationTexture.height), 0.01, camera.distance_m + sceneExtent * 3),
         cameraPosition: [position.x, position.y, position.z],
         containerBounds: {

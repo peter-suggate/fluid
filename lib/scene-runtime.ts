@@ -1,10 +1,4 @@
 import type { SceneDescription } from "./model";
-import type { SvoRenderMode } from "./svo-render-mode";
-
-export interface SceneRuntimeRequest {
-  methodId?: string;
-  renderMode?: SvoRenderMode;
-}
 
 export interface SceneRuntimeContent {
   /** Explicit subsystem ownership. Omission remains enabled for legacy scenes. */
@@ -55,7 +49,6 @@ export interface SceneRuntimePlan {
 /** Derive runtime ownership from scene content/capabilities, not preset IDs. */
 export function planSceneRuntime(
   scene: Pick<SceneDescription, "systems" | "terrain" | "rigidBodies">,
-  request: SceneRuntimeRequest = {},
 ): SceneRuntimePlan {
   // Do not infer this from fillFraction. Legacy scenes that intentionally
   // start empty still own a solver, while an explicit false is authoritative.
@@ -63,7 +56,7 @@ export function planSceneRuntime(
   const dynamicRigidBodyCount = scene.rigidBodies.filter(({ motion }) => motion !== "static").length;
   const rigidDynamics = dynamicRigidBodyCount > 0;
   const rigidCoupling = fluidEnabled && rigidDynamics;
-  const sparseVoxelPresentation = request.renderMode === "svo" || request.methodId === "octree" || !fluidEnabled;
+  const sparseVoxelPresentation = true;
   const capabilities: Record<SceneRuntimeCapability, boolean> = {
     "static-world": true,
     "rigid-dynamics": rigidDynamics,

@@ -64,6 +64,17 @@ test("cone prepass tuning preserves every supported spatial rate", () => {
     "the production moving and settled scales are both prewarmed");
 });
 
+test("stationary primary visibility reuse is explicit and defaults off", () => {
+  assert.equal(DEFAULT_SVO_RENDER_TUNING.stationaryPrimaryReuseEnabled, false);
+  assert.equal(SVO_RENDER_TUNING_PRESETS.performance.stationaryPrimaryReuseEnabled, false);
+  assert.equal(SVO_RENDER_TUNING_PRESETS.balanced.stationaryPrimaryReuseEnabled, false);
+  assert.equal(SVO_RENDER_TUNING_PRESETS.quality.stationaryPrimaryReuseEnabled, false);
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    stationaryPrimaryReuseEnabled: true,
+  }).stationaryPrimaryReuseEnabled, true);
+});
+
 test("shadow cone aperture is exposed in the initially open cone controls", () => {
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   assert.match(panel, /ControlGroup title="Cone tracing"[^>]* open>/);
@@ -102,15 +113,19 @@ test("global illumination exposes image-shaping controls with cinematic balanced
   for (const label of ["GI bounce", "GI occlusion", "Diffuse environment", "Direct key", "GI cones", "GI cone aperture"]) {
     assert.ok(panel.includes(`label="${label}"`), `${label} is live-tunable`);
   }
-  assert.match(svoDrySceneShader, /indirect\+=select\(vec3f\(0\.0\),result\.radiance,finiteRadiance\)\*weight;[^]*visibility\+=select\(1\.0,result\.transmittance,finiteVisibility\)\*weight/,
+  assert.match(svoDrySceneShader, /indirect\+=select\(vec3f\(0\.0\),result\.radiance,finiteRadiance\)\*weight;[^]*let visibleThroughStatic=select\(1\.0,result\.transmittance,finiteVisibility\);[^]*visibility\+=select\(visibleThroughStatic,0\.0,rigidBlocked\)\*weight/,
     "one fail-soft GI gather must supply both bounced light and broad occlusion");
   assert.match(svoDrySceneShader, /direct\*directScale\+indirectDiffuse/);
 });
 
-test("temporal history caps are halved consistently across quality presets", () => {
-  assert.equal(SVO_RENDER_TUNING_PRESETS.performance.temporalMaximumSamples, 16);
-  assert.equal(DEFAULT_SVO_RENDER_TUNING.temporalMaximumSamples, 32);
-  assert.equal(SVO_RENDER_TUNING_PRESETS.quality.temporalMaximumSamples, 48);
+test("retired temporal and interlaced-shadow tuning cannot re-enter a preset", () => {
+  for (const preset of Object.values(SVO_RENDER_TUNING_PRESETS)) {
+    assert.equal("temporalEnabled" in preset, false);
+    assert.equal("checkerboardShadowsEnabled" in preset, false);
+    assert.equal("temporalMaximumSamples" in preset, false);
+  }
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(panel, /Interlaced shadows|Temporal resolve|Maximum history|Variance clamp/);
 });
 
 test("radiance reconstruction modes normalize and remain available for live visual A/B", () => {

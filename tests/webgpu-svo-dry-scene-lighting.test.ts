@@ -15,9 +15,6 @@ import {
 } from "../lib/webgpu-svo-dry-scene";
 import {
   SVO_CAMERA_CHANGING_FRAME,
-  SVO_SHADOW_HISTORY_WARMUP_FRAMES,
-  svoDrySceneTemporalFrame,
-  svoShadowTemporalFrame,
 } from "../lib/webgpu-renderer";
 
 const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
@@ -66,29 +63,15 @@ test("dry-scene direct PBR is geometry-normal aware and hard visibility modulate
     "zero-radiance area samples, including back-facing emitters, must never launch visibility rays");
 });
 
-test("checkerboard hard visibility is enabled only with temporal reconstruction", () => {
-  assert.match(rendererSource, /new URLSearchParams\(location\.search\)\.get\("svoTemporal"\) !== "0"/);
-  assert.equal(SVO_SHADOW_HISTORY_WARMUP_FRAMES, 2);
-  assert.equal(svoShadowTemporalFrame(true, 0, 12), -1);
-  assert.equal(svoShadowTemporalFrame(true, 1, 12), -1);
-  assert.equal(svoShadowTemporalFrame(true, 2, 12), 12);
-  assert.equal(svoShadowTemporalFrame(false, 20, 12), -1);
-  assert.equal(svoDrySceneTemporalFrame(12, 0), SVO_CAMERA_CHANGING_FRAME);
-  assert.equal(svoDrySceneTemporalFrame(-1, 2), -1,
-    "a settled camera remains distinguishable when checkerboard shadows are disabled");
-  assert.equal(svoDrySceneTemporalFrame(12, 2), 12);
-  assert.match(rendererSource, /shadowStabilityKey !== this\.svoShadowStabilityKey[^]*this\.svoDryScenePipeline\?\.invalidateTemporalHistory\(\)/,
-    "camera, body, scene, or diagnostic changes must force a full-rate shadow frame and discard stale shadows");
-  assert.match(rendererSource, /shadowTemporalFrame = svoShadowTemporalFrame\(checkerboardShadowsEligible, this\.svoShadowStableFrames, this\.presentationFrameIndex\)/);
-  assert.match(rendererSource, /cameraStabilityKey !== this\.svoCameraStabilityKey[^]*this\.svoCameraStableFrames = 0[^]*drySceneTemporalFrame = svoDrySceneTemporalFrame\(shadowTemporalFrame, this\.svoCameraStableFrames\)/,
-    "camera movement must be detected from the view basis, independently of pointer state");
-  assert.match(svoDrySceneShader, /temporalShadowSampling=uniforms\.viewport\.w>=0\.0&&\(dry\.materialPublication\.w&2u\)!=0u/);
-  assert.match(svoDrySceneShader, /shadowParity==0u/);
-  assert.match(svoDrySceneShader, /dryShadowTracingEnabled==0u\)\{return vec3f\(1\.0\);\}/);
-  assert.match(svoDrySceneShader, /dryShadowTracingEnabled=select\(checkerboardShadow,1u,globalIllumination\)/,
-    "GLOBAL consumes deterministic shadow visibility on every pixel even when temporal reconstruction is active");
-  assert.match(svoDrySceneShader, /DRY_GBUFFER_SHADOW_DEFERRED<<20u/,
-    "deferred visibility must be explicit in the G-buffer rather than inferred from color");
+test("GLOBAL shadow visibility has no temporal accumulation or checkerboard deferral", () => {
+  assert.match(rendererSource, /const cameraChanging = cameraStabilityKey !== this\.svoCameraStabilityKey/);
+  assert.match(rendererSource, /cameraChanging \? SVO_CAMERA_CHANGING_FRAME : -1/,
+    "the retained camera lane selects only moving versus settled quality");
+  assert.doesNotMatch(rendererSource + drySceneSource,
+    /svoTemporal|TemporalAccumulator|temporalAccumulator|checkerboardShadow|checkerboardShadows|shadowParity|SHADOW_DEFERRED/);
+  assert.doesNotMatch(svoDrySceneShader, /dryShadowTracingEnabled|temporalShadowSampling/);
+  assert.match(svoDrySceneShader, /if\(\(dry\.materialPublication\.w&2u\)==0u\)\{return vec3f\(1\.0\);\}[^]*let maximumDistance=/,
+    "enabled shadows proceed directly to deterministic visibility work");
 });
 
 test("the moving-quality tier reduces cone work on the camera-changing sentinel but keeps every term present", () => {
@@ -98,7 +81,7 @@ test("the moving-quality tier reduces cone work on the camera-changing sentinel 
   assert.equal(SVO_DRY_SCENE_CAMERA_SETTLED_WGSL, "uniforms.viewport.w>=-1.0");
   assert.ok(SVO_CAMERA_CHANGING_FRAME < -1,
     "the moving sentinel must fall outside the settled predicate's accepted range");
-  assert.equal(svoDrySceneTemporalFrame(-1, 0), SVO_CAMERA_CHANGING_FRAME);
+  assert.match(rendererSource, /cameraChanging \? SVO_CAMERA_CHANGING_FRAME : -1/);
 
   // AO stays present while moving: one cone rather than none, so settling
   // changes the estimate's noise, not whether the ambient term exists.
@@ -204,13 +187,12 @@ test("cone visibility is generation-checked and falls back to exact SVO visibili
 test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {
   assert.match(svoDrySceneShader, /if\(\(dry\.materialPublication\.w&2u\)==0u\)\{return vec3f\(1\.0\);\}/,
     "the shadow-disabled production path must return before traversal");
-  assert.match(rendererSource, /checkerboardShadowsEligible = this\.svoTemporalAccumulationEnabled && activeSvoTuning\.checkerboardShadowsEnabled && svoLightingOptions\.shadowsEnabled/,
-    "the user-facing shadow option must drive the temporally reconstructed visibility path");
+  assert.doesNotMatch(rendererSource, /checkerboard|svoTemporalAccumulation|invalidateTemporalHistory/);
   assert.match(svoDrySceneShader, /publicationState\[0\]==0u[^]*SVO_VIS_STEP_INVALID/);
   assert.match(svoDrySceneShader, /SVO_STATUS_WORK_EXHAUSTED\|\|leaf\.status==SVO_STATUS_STACK_OVERFLOW\|\|leaf\.status==SVO_STATUS_SOURCE_OVERFLOW[^]*SVO_VIS_STEP_EXHAUSTED/);
   assert.match(svoDrySceneShader, /fn svoVisibilityFail\([^]*vec3f\(0\.0\)/,
     "shared invalid/exhausted/occluded results must carry zero direct visibility");
-  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, temporalFrame\?: SparseVoxelTemporalFrameState, reuseKey\?: string[^)]*\): DrySceneReplacementResult \| false/);
+  assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, reuseKey\?: string, tracePhase\?: RenderPathTracePhase\): DrySceneReplacementResult \| false/);
   assert.doesNotMatch(drySceneSource, /timestampWrites|TimestampRange/,
     "SVO presentation work must be covered by the enclosing generic trace only");
   assert.match(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"Dry scene"/,

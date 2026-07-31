@@ -97,9 +97,11 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     assert.match(reduced, /if\(hit\.t>=DRY_MISS\)[^]*dryPrepassRadianceState==1u&&hit\.motionKind==DRY_GBUFFER_MOTION_STATIC[^]*let position=ro\+rd\*hit\.t;let surface=dryEvaluateSurfaceMaterial/,
       "exact-matched static radiance must return before full-resolution procedural material evaluation");
   }
-  assert.match(rendererSource, /this\.lightingMode === "gi"[^]*coneRadianceReconstruction !== "wide-relight"[^]*Sparse voxel reduced-rate opaque shading/,
-    "GLOBAL must produce the reduced GI target even when material radiance remains full-resolution relight");
-  assert.match(rendererSource, /if \(this\.lightingMode === "gi"\)[^]*Sparse voxel reduced-rate environmental GI[^]*conePrepassShadePipeline/,
+  assert.doesNotMatch(rendererSource, /lightingMode/,
+    "GLOBAL must not retain a selectable lighting backend");
+  assert.match(rendererSource, /label: "Sparse voxel reduced-rate opaque shading"[^]*shade\.setPipeline\(this\.conePrepassShadePipeline!\)/,
+    "GLOBAL must always produce the reduced GI target");
+  assert.match(rendererSource, /label: "Sparse voxel reduced-rate environmental GI"[^]*gi\.setPipeline\(this\.conePrepassShadePipeline!\)/,
     "split GLOBAL must evaluate environmental GI after current-frame compact visibility and before deferred lighting");
 });
 

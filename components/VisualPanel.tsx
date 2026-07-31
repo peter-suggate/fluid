@@ -26,7 +26,6 @@ const rendererFallbackLabels = {
   "missing-pbr-materials": "production PBR material table is unavailable",
   "missing-lighting-publications": "production light/environment publications are unavailable",
   "pipeline-compile-failure": "SVO pipeline failed to compile",
-  "inspection-mode": "a sparse inspection view is active",
 } as const;
 
 const visualizationGradient = (mode: SvoCostOverlayMode) => mode === "off"
@@ -56,10 +55,6 @@ export function VisualPanel() {
   const effectiveRendererStatus = useDiagnosticsStore((state) => state.effectiveRendererStatus);
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
   const setVoxelRenderMode = useUIStore((state) => state.setVoxelRenderMode);
-  const svoRenderMode = useUIStore((state) => state.svoRenderMode);
-  const setSvoRenderMode = useUIStore((state) => state.setSvoRenderMode);
-  const svoLightingMode = useUIStore((state) => state.svoLightingMode);
-  const setSvoLightingMode = useUIStore((state) => state.setSvoLightingMode);
   const svoShadowsEnabled = useUIStore((state) => state.svoShadowsEnabled);
   const setSvoShadowsEnabled = useUIStore((state) => state.setSvoShadowsEnabled);
   const svoAmbientOcclusionEnabled = useUIStore((state) => state.svoAmbientOcclusionEnabled);
@@ -80,7 +75,7 @@ export function VisualPanel() {
   const requestPixelTracePin = useUIStore((state) => state.requestPixelTracePin);
 
   const selectedView = SVO_COST_OVERLAY_DEFINITIONS[svoCostOverlay];
-  const visualizationAvailable = svoRenderMode === "svo" && voxelRenderMode === "smooth";
+  const visualizationAvailable = voxelRenderMode === "smooth";
   const tuningKey = svoRenderTuningKey(tuning);
   const activePreset = (Object.keys(SVO_RENDER_TUNING_PRESETS) as SvoRenderTuningPreset[])
     .find((preset) => svoRenderTuningKey(SVO_RENDER_TUNING_PRESETS[preset]) === tuningKey);
@@ -91,21 +86,17 @@ export function VisualPanel() {
 
   const selectVisualization = (mode: SvoCostOverlayMode) => {
     const nextMode = mode === svoCostOverlay && mode !== "off" ? "off" : mode;
-    if (nextMode !== "off") { setSvoRenderMode("svo"); setVoxelRenderMode("smooth"); }
+    if (nextMode !== "off") setVoxelRenderMode("smooth");
     setSvoCostOverlay(nextMode);
-  };
-  const selectRenderer = (mode: "raster" | "svo") => {
-    setSvoRenderMode(mode);
-    if (mode === "raster") setSvoCostOverlay("off");
   };
   const selectRepresentation = (mode: Parameters<typeof setVoxelRenderMode>[0]) => {
     setVoxelRenderMode(mode);
     if (mode !== "smooth") setSvoCostOverlay("off");
   };
-  // The trace explains the sparse path, so arming it selects that path rather
-  // than silently doing nothing over the raster renderer.
+  // The trace explains the finished sparse path, so arming it leaves any
+  // representation inspection view before probing.
   const enablePixelTrace = (enabled: boolean) => {
-    if (enabled) { setSvoRenderMode("svo"); setVoxelRenderMode("smooth"); }
+    if (enabled) setVoxelRenderMode("smooth");
     setPixelTraceEnabled(enabled);
   };
 
@@ -114,16 +105,12 @@ export function VisualPanel() {
     <header className="performance-panel-header render-panel-header">
       <div><span>RENDER OBSERVATORY</span><h2>SVO performance tuning</h2></div>
       <div className="performance-panel-header-actions">
-        <div className="measurement-mode" role="group" aria-label="Renderer">
-          <button type="button" aria-pressed={svoRenderMode === "svo"} onClick={() => selectRenderer("svo")}>SVO</button>
-          <button type="button" aria-pressed={svoRenderMode === "raster"} onClick={() => selectRenderer("raster")}>RASTER</button>
-        </div>
         <button className="panel-close" type="button" onClick={() => setRightPanel(null)} aria-label="Close render panel">×</button>
       </div>
       <div className="render-status-line">
         <span className={effectiveRendererStatus.effectiveMode === "svo" ? "online" : ""} />
-        <strong data-testid="effective-renderer-status">{effectiveRendererStatus.effectiveMode === "svo" ? "SVO ACTIVE" : "RASTER ACTIVE"}</strong>
-        <code>{Math.round(tuning.resolutionScale * 100)}% · cone {tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`} · {tuning.temporalEnabled ? "TAA" : "RAW"}</code>
+        <strong data-testid="effective-renderer-status">{effectiveRendererStatus.effectiveMode === "svo" ? "SVO GI ACTIVE" : "RASTER FALLBACK"}</strong>
+        <code>{Math.round(tuning.resolutionScale * 100)}% · cone {tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`}</code>
       </div>
     </header>
 
@@ -135,15 +122,10 @@ export function VisualPanel() {
     </div>
 
     <div className="render-groups">
-      <ControlGroup title="Presentation" note="path · representation · rate" open>
+      <ControlGroup title="Presentation" note="GLOBAL view · rate" open>
         <div className="render-segment-row">
-          <div><span>LIGHTING PATH</span><div role="group" aria-label="SVO lighting quality">
-            <button className={svoLightingMode === "direct" ? "active" : ""} disabled={svoRenderMode !== "svo"} onClick={() => setSvoLightingMode("direct")}>DIRECT</button>
-            <button className={svoLightingMode === "cone" ? "active" : ""} disabled={svoRenderMode !== "svo"} onClick={() => setSvoLightingMode("cone")}>BEAUTIFUL</button>
-            <button className={svoLightingMode === "gi" ? "active" : ""} disabled={svoRenderMode !== "svo"} onClick={() => setSvoLightingMode("gi")}>GLOBAL</button>
-          </div></div>
-          <div><span>SCENE REPRESENTATION</span><div role="group" aria-label="Scene representation">
-            <button className={voxelRenderMode === "smooth" ? "active" : ""} onClick={() => selectRepresentation("smooth")}>FINISHED</button>
+          <div><span>GLOBAL SVO VIEW</span><div role="group" aria-label="Global SVO view">
+            <button className={voxelRenderMode === "smooth" ? "active" : ""} onClick={() => selectRepresentation("smooth")}>SHADED</button>
             <button className={voxelRenderMode === "raw-voxels" ? "active" : ""} onClick={() => selectRepresentation("raw-voxels")}>RAW</button>
             <button className={voxelRenderMode === "surface-voxels" ? "active" : ""} onClick={() => selectRepresentation("surface-voxels")}>SURFACE</button>
             <button className={voxelRenderMode === "brick-grid" ? "active" : ""} onClick={() => selectRepresentation("brick-grid")}>BRICKS</button>
@@ -151,11 +133,8 @@ export function VisualPanel() {
           </div></div>
         </div>
         <div className="render-toggle-row" role="group" aria-label="SVO lighting effects">
-          <Toggle label="Shadows" checked={svoShadowsEnabled} disabled={svoRenderMode !== "svo"} onChange={setSvoShadowsEnabled} />
-          <Toggle label="AO" checked={svoAmbientOcclusionEnabled} disabled={svoRenderMode !== "svo"} onChange={setSvoAmbientOcclusionEnabled} />
-          <Toggle label="Temporal" checked={tuning.temporalEnabled} onChange={(value) => updateTuning("temporalEnabled", value)} />
-          <Toggle label="Interlaced shadows" checked={tuning.checkerboardShadowsEnabled} disabled={!tuning.temporalEnabled}
-            onChange={(value) => updateTuning("checkerboardShadowsEnabled", value)} />
+          <Toggle label="Shadows" checked={svoShadowsEnabled} onChange={setSvoShadowsEnabled} />
+          <Toggle label="AO" checked={svoAmbientOcclusionEnabled} onChange={setSvoAmbientOcclusionEnabled} />
         </div>
         <div className="svo-control-grid">
           <RangeControl label="Render resolution" unit="%" value={tuning.resolutionScale * 100} min={35} max={100} step={1} displayDigits={0}
@@ -181,6 +160,11 @@ export function VisualPanel() {
       </ControlGroup>
 
       <ControlGroup title="Primary tracing" note="camera ray work caps" open>
+        <div className="render-toggle-row" role="group" aria-label="SVO primary tracing optimizations">
+          <Toggle label="Reuse stationary visibility" checked={tuning.stationaryPrimaryReuseEnabled}
+            hint="Reuse the exact primary G-buffer for an unchanged camera in static scenes or while simulation is paused."
+            onChange={(value) => updateTuning("stationaryPrimaryReuseEnabled", value)} />
+        </div>
         <div className="svo-control-grid">
           <RangeControl label="Maximum traversal depth" unit="levels" value={svoMaximumTraversalDepth} min={1} max={21} step={1} displayDigits={0} onChange={setSvoMaximumTraversalDepth}
             hint="Hierarchy depth accepted by every camera traversal." />
@@ -246,14 +230,6 @@ export function VisualPanel() {
             hint="Wider cones take larger march steps and produce softer shadows; narrower cones preserve sharper shadows but require more taps." />
           <RangeControl label="Normal escape" unit="cells" value={tuning.coneNormalEscapeCells} min={0} max={2} step={0.05} displayDigits={2} onChange={(value) => updateTuning("coneNormalEscapeCells", value)} modified={modified("coneNormalEscapeCells")} onReset={resetTuning("coneNormalEscapeCells")} />
           <RangeControl label="Emitter clearance" unit="cells" value={tuning.coneEmitterClearanceCells} min={0} max={8} step={0.25} displayDigits={2} onChange={(value) => updateTuning("coneEmitterClearanceCells", value)} modified={modified("coneEmitterClearanceCells")} onReset={resetTuning("coneEmitterClearanceCells")} />
-        </div>
-      </ControlGroup>
-
-      <ControlGroup title="Temporal resolve" note="history stability">
-        <div className="svo-control-grid">
-          <RangeControl label="Maximum history" unit="samples" value={tuning.temporalMaximumSamples} min={1} max={128} step={1} displayDigits={0} onChange={(value) => updateTuning("temporalMaximumSamples", value)} modified={modified("temporalMaximumSamples")} onReset={resetTuning("temporalMaximumSamples")} />
-          <RangeControl label="Variance clamp" unit="σ" value={tuning.temporalVarianceSigma} min={0.5} max={4} step={0.1} displayDigits={1} onChange={(value) => updateTuning("temporalVarianceSigma", value)} modified={modified("temporalVarianceSigma")} onReset={resetTuning("temporalVarianceSigma")} />
-          <RangeControl label="Depth tolerance" unit="×" value={tuning.temporalDepthToleranceScale} min={0.25} max={4} step={0.05} displayDigits={2} onChange={(value) => updateTuning("temporalDepthToleranceScale", value)} modified={modified("temporalDepthToleranceScale")} onReset={resetTuning("temporalDepthToleranceScale")} />
         </div>
       </ControlGroup>
 

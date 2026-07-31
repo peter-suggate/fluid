@@ -11,56 +11,43 @@ const ready: EffectiveRendererConditions = {
   glassSupported: true,
   materialsSupported: true,
   lightingSupported: true,
-  inspectionMode: false,
   svoEncoded: true,
 };
 
-test("effective renderer status preserves explicit raster and reports the SVO default lifecycle", () => {
-  assert.deepEqual(resolveEffectiveRendererStatus("raster", {
-    pipelineAvailable: false,
-    sourceAvailable: false,
-    terrainSupported: false,
-    inspectionMode: false,
-    svoEncoded: false,
-  }), { requestedMode: "raster", effectiveMode: "raster" });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", ready), {
-    requestedMode: "svo",
+test("effective renderer status reports the GLOBAL SVO lifecycle", () => {
+  assert.deepEqual(resolveEffectiveRendererStatus(ready), {
     effectiveMode: "svo",
   });
   assert.deepEqual(useDiagnosticsStore.getInitialState().effectiveRendererStatus, {
-    requestedMode: "svo",
     effectiveMode: "raster",
     fallbackReason: "missing-source",
   });
 });
 
 test("effective renderer status distinguishes required SVO fallbacks", () => {
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, sourceAvailable: false, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-source",
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, sourceAvailable: false, svoEncoded: false }), {
+    effectiveMode: "raster", fallbackReason: "missing-source",
   });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, terrainSupported: false, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "unsupported-terrain",
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, terrainSupported: false, svoEncoded: false }), {
+    effectiveMode: "raster", fallbackReason: "unsupported-terrain",
   });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, glassSupported: false, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "unsupported-glass-cutout",
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, glassSupported: false, svoEncoded: false }), {
+    effectiveMode: "raster", fallbackReason: "unsupported-glass-cutout",
   });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, materialsSupported: false, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-pbr-materials",
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, materialsSupported: false, svoEncoded: false }), {
+    effectiveMode: "raster", fallbackReason: "missing-pbr-materials",
   });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, lightingSupported: false, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "missing-lighting-publications",
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, lightingSupported: false, svoEncoded: false }), {
+    effectiveMode: "raster", fallbackReason: "missing-lighting-publications",
   });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, pipelineAvailable: false, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "pipeline-compile-failure",
-  });
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, inspectionMode: true, svoEncoded: false }), {
-    requestedMode: "svo", effectiveMode: "raster", fallbackReason: "inspection-mode",
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, pipelineAvailable: false, svoEncoded: false }), {
+    effectiveMode: "raster", fallbackReason: "pipeline-compile-failure",
   });
 });
 
 test("supported analytic garden terrain can report effective SVO", () => {
-  assert.deepEqual(resolveEffectiveRendererStatus("svo", { ...ready, terrainSupported: true, svoEncoded: true }), {
-    requestedMode: "svo", effectiveMode: "svo",
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, terrainSupported: true, svoEncoded: true }), {
+    effectiveMode: "svo",
   });
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   assert.match(renderer, /terrainMaterialId:scenePrimitives\.analyticTerrain\?\.materialId/);
@@ -73,7 +60,7 @@ test("renderer publishes effective status through the viewport diagnostics bridg
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
-  assert.match(renderer, /publishEffectiveRendererStatus\(resolveEffectiveRendererStatus\(svoRenderMode/);
+  assert.match(renderer, /publishEffectiveRendererStatus\(resolveEffectiveRendererStatus\(\{/);
   assert.match(renderer, /const replacementResult = this\.svoDryScenePipeline\?\.encode/);
   assert.match(renderer, /svoEncoded = Boolean\(replacementResult\)/);
   assert.match(renderer, /canEncodeSparseVoxelDryScene\(sparseSceneSource,drySceneData\)/);

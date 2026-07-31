@@ -410,7 +410,7 @@ class SimulationController {
     const scene = source ?? sceneStore.scene;
     if (source) sceneStore.setScene(source, presetId);
     this.bodies = initializeRigidBodies(scene.rigidBodies);
-    const runtimePlan = planSceneRuntime(scene, { methodId: useMethodStore.getState().methodId });
+    const runtimePlan = planSceneRuntime(scene);
     this.fluidSolver = this.backend === "cpu-reference" && runtimePlan.fluidSolver ? this.buildFluidSolver(scene) : undefined;
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
     this.rateWallClock = 0; this.rateSimTime = 0;
@@ -442,7 +442,7 @@ class SimulationController {
     const scene = preset.create();
     this.reset(scene, preset.id);
     useUIStore.getState().setCamera(cameraForPreset(preset));
-    const runtimePlan = planSceneRuntime(scene, { methodId: useMethodStore.getState().methodId });
+    const runtimePlan = planSceneRuntime(scene);
     useRuntimeStore.getState().setNotice(!runtimePlan.fluidSolver
       ? `${preset.name} loaded · fluid solver disabled`
       : `${preset.name} loaded · dt ${scene.numerics.fixedDt_s.toFixed(4)} s`);

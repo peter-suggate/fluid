@@ -175,7 +175,6 @@ const PHASE_COLORS: Partial<Record<PaperPhaseId, string>> = {
   "svo-primary": "#667dd0",
   "svo-rigid": "#5d91be",
   "svo-glass": "#6c9fd2",
-  "svo-temporal": "#8571d8",
   "dry-scene": "#657dcd",
   "water-front-interface": "#48a8ce",
   "water-back-interface": "#348fb9",

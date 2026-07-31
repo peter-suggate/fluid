@@ -9,7 +9,8 @@ test("cone-traced SVO presentation records every encoded render-path item", () =
   const water = source("../lib/webgpu-water-pipeline.ts");
   const dry = source("../lib/webgpu-svo-dry-scene.ts");
 
-  assert.match(renderer, /svoRenderMode === "svo"[^]*voxelRenderMode === "smooth"[^]*svoLightingMode === "cone" \|\| svoLightingMode === "gi"/);
+  assert.match(renderer, /const traceDetailedSvoRenderPath = true/);
+  assert.doesNotMatch(renderer, /svoRenderMode|svoLightingMode/);
   assert.match(renderer, /new GPUStageTimestampRecorder\(/);
   assert.match(renderer, /const detailedPresentationTrace = traceDetailedSvoRenderPath \? presentationTrace : undefined/);
   assert.match(renderer, /completeDetailedPresentationPhase\(\{ id: "inspection-overlay"/);
@@ -23,12 +24,13 @@ test("cone-traced SVO presentation records every encoded render-path item", () =
     "optical-composite",
   ]) assert.match(water, new RegExp(`tracePhase\\?\\.\\(\\{ id: "${phase}"`), phase);
 
-  for (const phase of ["svo-cone-lighting", "svo-environment-gi", "svo-primary", "svo-rigid", "svo-glass", "svo-temporal"]) {
+  for (const phase of ["svo-cone-lighting", "svo-environment-gi", "svo-primary", "svo-rigid", "svo-glass"]) {
     assert.match(dry, new RegExp(`tracePhase\\?\\.\\(\\{ id: "${phase}"`), phase);
   }
+  assert.doesNotMatch(dry, /svo-temporal|temporal resolve/i);
 });
 
-test("fluid-only presentation keeps the compact fixed trace", () => {
+test("fallback instrumentation retains the compact fixed trace helper", () => {
   const renderer = source("../lib/webgpu-renderer.ts");
 
   assert.match(renderer, /if \(phase && !traceDetailedSvoRenderPath\) presentationTrace\?\.completePhase/);

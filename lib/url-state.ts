@@ -5,15 +5,7 @@ import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } f
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { DEFAULT_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, useUIStore, type RightPanel } from "./stores/ui-store";
-import {
-  DEFAULT_SVO_LIGHTING_MODE,
-  DEFAULT_SVO_LIGHTING_OPTIONS,
-  DEFAULT_SVO_RENDER_MODE,
-  isSvoLightingMode,
-  isSvoRenderMode,
-  type SvoLightingMode,
-  type SvoRenderMode,
-} from "./svo-render-mode";
+import { DEFAULT_SVO_LIGHTING_OPTIONS } from "./svo-render-options";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 import type { VoxelRenderMode } from "./webgpu-voxel-debug";
@@ -75,8 +67,6 @@ type UIQueryState = {
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
   voxelRenderMode: VoxelRenderMode;
-  svoRenderMode: SvoRenderMode;
-  svoLightingMode: SvoLightingMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
 };
@@ -195,8 +185,6 @@ export function parseQueryState(search: string): QueryState {
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
   const voxels = query.get("voxels");
-  const render = query.get("render");
-  const svoLighting = query.get("svoLighting");
   const requestedPanel = query.get("panel");
   const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
     ? requestedPanel
@@ -229,8 +217,6 @@ export function parseQueryState(search: string): QueryState {
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
       voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "surface-voxels" || voxels === "brick-grid" || voxels === "occupied-bricks" ? voxels : initialUI.voxelRenderMode,
-      svoRenderMode: isSvoRenderMode(render) ? render : DEFAULT_SVO_RENDER_MODE,
-      svoLightingMode: isSvoLightingMode(svoLighting) ? svoLighting : DEFAULT_SVO_LIGHTING_MODE,
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
     }
@@ -256,8 +242,6 @@ export function serializeQueryState(
   query.set("method", methodState.methodId);
   query.set("scene", sceneState.presetId);
   query.set("quality", methodState.quality);
-  if (uiState.svoRenderMode !== DEFAULT_SVO_RENDER_MODE) query.set("render", uiState.svoRenderMode);
-  if (uiState.svoLightingMode !== DEFAULT_SVO_LIGHTING_MODE) query.set("svoLighting", uiState.svoLightingMode);
   if (uiState.svoShadowsEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled) query.set("svoShadows", uiState.svoShadowsEnabled ? "1" : "0");
   if (uiState.svoAmbientOcclusionEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled) query.set("svoAO", uiState.svoAmbientOcclusionEnabled ? "1" : "0");
   if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);

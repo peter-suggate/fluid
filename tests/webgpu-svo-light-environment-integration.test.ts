@@ -94,7 +94,8 @@ test("directional, point, sphere, and rectangle lighting share bounded stable vi
   assert.match(svoDrySceneShader, /SVO_LIGHT_DIRECTIONAL/);
   assert.match(svoDrySceneShader, /SVO_LIGHT_SPHERE_AREA/);
   assert.match(svoDrySceneShader, /SVO_LIGHT_RECTANGLE_AREA/);
-  assert.match(svoDrySceneShader, /sampleBudget>=8u/);
+  assert.match(svoDrySceneShader, /sampleBudget>=dry\.tuningCounts0\.z/,
+    "the live bounded light budget gates both light and sample iteration");
   assert.match(svoDrySceneShader, /sampleIndex<2u/);
   assert.match(svoDrySceneShader, /let emitterFacing=max\(dot\(normalize\(light\.directionCone\.xyz\),-towardLight\),0\.0\)/,
     "one-sided rectangle emitters cannot leak light through their back face");

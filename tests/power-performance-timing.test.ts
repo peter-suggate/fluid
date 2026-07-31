@@ -130,9 +130,9 @@ test("performance UI exposes one matrix with three independent closed ledgers an
 
 test("production SVO submits every presentation and reuses only exact static primary visibility", () => {
   assert.doesNotMatch(renderer, /drySceneReuseKey|Sparse voxel dry scene reuse timestamp/);
-  assert.match(renderer, /const primaryCoherenceKey = !sceneRuntime\.fluidSolver \|\| !this\.simulationRunning/,
+  assert.match(renderer, /const primaryCoherenceKey = activeSvoTuning\.stationaryPrimaryReuseEnabled[^]*!sceneRuntime\.fluidSolver \|\| !this\.simulationRunning/,
     "running fluid scenes must fail closed to a fresh primary trace");
-  assert.match(renderer, /svoDryScenePipeline\?\.encode\(replacementEncoder, target, temporalFrame, primaryCoherenceKey, tracePhase\)/,
+  assert.match(renderer, /svoDryScenePipeline\?\.encode\(replacementEncoder, target, primaryCoherenceKey, tracePhase\)/,
     "every submitted presentation must still execute current cone visibility and deferred shading");
   assert.doesNotMatch(viewport, /pausedPresentation|continuousPerformancePresentation/,
     "all paused scenes must keep submitting completion-gated presentations");

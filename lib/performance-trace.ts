@@ -34,7 +34,6 @@ export type PaperPhaseId =
   | "svo-primary"
   | "svo-rigid"
   | "svo-glass"
-  | "svo-temporal"
   | "dry-scene"
   | "water-front-interface"
   | "water-back-interface"

@@ -44,7 +44,6 @@ import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../l
 import { sparseSceneProxyVoxelizationShader } from "../lib/webgpu-sparse-scene-proxies";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 import { svoThickGlassWGSL } from "../lib/svo-thick-glass";
-import { sparseVoxelTemporalAccumulatorShader } from "../lib/webgpu-svo-temporal-accumulator";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
 import { structuredFineLevelSetTransportWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
@@ -109,7 +108,6 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "sparse-scene-proxy-voxelization": sparseSceneProxyVoxelizationShader,
   "sparse-voxel-dry-scene": svoDrySceneShader,
   "sparse-voxel-thick-glass-library": svoThickGlassWGSL,
-  "sparse-voxel-temporal-accumulation": sparseVoxelTemporalAccumulatorShader,
 };
 const directory = mkdtempSync(join(tmpdir(), "fluid-water-wgsl-"));
 // Naga still rejects the standardized `enable subgroups` directive. These

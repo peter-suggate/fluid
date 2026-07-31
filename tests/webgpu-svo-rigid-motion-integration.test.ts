@@ -14,7 +14,6 @@ import {
   SVO_DRY_RIGID_MOTION_UNIFORM_BYTES,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
-import { sparseVoxelTemporalAccumulatorShader } from "../lib/webgpu-svo-temporal-accumulator";
 
 const rigidSource = readFileSync(new URL("../lib/webgpu-rigid-body.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -82,13 +81,11 @@ test("production dry pass uses a renderer-owned uniform mirror within the fragme
     "body movement or roster changes may select precompiled paths but never compile a shader");
 });
 
-test("G-buffer identity gates exact surface velocity and moving-rigid temporal reprojection", () => {
+test("G-buffer identity gates exact rigid-surface motion publication without a temporal consumer", () => {
   assert.match(svoDrySceneShader, /svoPrimitiveMotionOwnerId\(record\)==hit\.ownerId/);
   assert.match(svoDrySceneShader, /svoPrimitiveMotionMaterialId\(record\)==dryResolvedMaterialId\(hit\)/);
   assert.match(svoDrySceneShader, /transformValid=distance\(record\.currentPositionDt\.xyz,bodies\[hit\.ownerId\]\.positionRadius\.xyz\)<=1e-5/);
   assert.match(svoDrySceneShader, /svoPrimitiveMotionVelocityAt\(record,worldSurfacePosition_m\)/);
   assert.match(svoDrySceneShader, /motionVelocity[\s\S]*?motionGeneration[\s\S]*?motionValid[\s\S]*?svoGBufferSurface/);
-  assert.match(sparseVoxelTemporalAccumulatorShader, /temporalVelocity\(packed\.z\)/);
-  assert.match(sparseVoxelTemporalAccumulatorShader, /previousWorld=world-velocity\*temporal\.control\.y/);
-  assert.match(sparseVoxelTemporalAccumulatorShader, /supportedMotion=motionKind==SVO_TEMPORAL_MOTION_STATIC\|\|motionKind==SVO_TEMPORAL_MOTION_RIGID/);
+  assert.doesNotMatch(drySource, /TemporalAccumulator|temporalAccumulator|temporalFrame/);
 });
