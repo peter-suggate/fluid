@@ -317,7 +317,9 @@ function decodePrecedingRejectedIdentity(packed: number | undefined, detail: num
 
 function solverValues(): MethodParamValues {
   const values = octreeMethod.presetFor("balanced");
-  values.globalFineLevelSetFactor = process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR ?? "4";
+  values.globalFineLevelSetFactor = process.env.FLUID_FINE_FACTOR
+    ?? process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR
+    ?? "4";
   return values;
 }
 

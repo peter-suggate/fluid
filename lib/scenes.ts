@@ -29,6 +29,22 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
+/**
+ * Shared coarse-only dam experiment. The surface field and pressure octree use
+ * the same lattice; size-16 leaves preserve a materially coarse far field while
+ * three grading layers expose the intermediate dyadic shells.
+ */
+export const COARSE_ONLY_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "octree",
+  quality: "balanced",
+  overrides: Object.freeze({
+    maximumLeafSize: "16",
+    interfaceRefinementBandCells: 3,
+    surfaceRefinementGradingLayers: 3,
+    globalFineLevelSetFactor: "1",
+  }),
+});
+
 /** Fixed WebGPU pool for the room-sized scene's physically unchanged water.
  * The initial paper-style publication occupies 3,114 pages, but Section 5
  * rebuilds around the deformed surface: a floor-spanning sheet needs the
@@ -160,6 +176,32 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
   scene.fluid.surfaceTension_N_m = 0;
   delete scene.fluid.inflow;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+/**
+ * The minimal dam break at four times the linear resolution. All physical
+ * geometry, fluid properties, and time integration settings are inherited
+ * unchanged; only the finest octree/surface lattice changes from 16³ to 64³.
+ */
+export function createMinimalPowerDamBreak64Scene(): SceneDescription {
+  const scene = createMinimalPowerDamBreakScene();
+  scene.sceneId = "minimal-power-dam-break-64";
+  scene.voxelDomain = {
+    ...scene.voxelDomain,
+    finestCellSize_m: scene.voxelDomain.finestCellSize_m / 4,
+  };
+  return scene;
+}
+
+/** The same physical mini dam on the midpoint 32³ coarse-only lattice. */
+export function createMinimalPowerDamBreak32Scene(): SceneDescription {
+  const scene = createMinimalPowerDamBreakScene();
+  scene.sceneId = "minimal-power-dam-break-32";
+  scene.voxelDomain = {
+    ...scene.voxelDomain,
+    finestCellSize_m: scene.voxelDomain.finestCellSize_m / 2,
+  };
   return scene;
 }
 
@@ -601,6 +643,26 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     background: "default",
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     create: createMinimalPowerDamBreakScene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
+  },
+  {
+    id: "minimal-power-dam-break-32",
+    name: "Octree · minimal dam break 32³",
+    group: "Comparisons",
+    description: "The same 0.8 m analytic mini dam at 0.025 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
+    background: "default",
+    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    create: createMinimalPowerDamBreak32Scene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
+  },
+  {
+    id: "minimal-power-dam-break-64",
+    name: "Octree · minimal dam break 64³",
+    group: "Comparisons",
+    description: "The same 0.8 m analytic mini dam at 0.0125 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
+    background: "default",
+    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    create: createMinimalPowerDamBreak64Scene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
   },
   {

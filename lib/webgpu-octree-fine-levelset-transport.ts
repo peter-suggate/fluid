@@ -57,6 +57,19 @@ export function fineTransportB4AddressingEnabled(
     && environment?.[FLUID_FINE_TRANSPORT_B4_ADDRESSING_ENV] !== "0";
 }
 
+export const FLUID_COARSE_PHI_BFECC_ENV = "FLUID_COARSE_PHI_BFECC";
+/** Optional factor-1 quality ladder from the coarse-only plan.  It remains
+ * opt-in until its moving-surface benefit clears the volume/energy acceptance
+ * gates; factor-4/8 always retain the established transport regardless of the
+ * switch. */
+export function coarsePhiBFECCEnabled(
+  fineFactor: number,
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return fineFactor === 1 && environment?.[FLUID_COARSE_PHI_BFECC_ENV] === "1";
+}
+
 export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP = 4_096;
 export const FINE_LEVELSET_TRANSPORT_MAXIMUM_ENCODED_SUBSTEPS = 64;
@@ -142,7 +155,7 @@ export function planFineLevelSetGPUTransport(queryCapacity: number,
 
 export function planFineLevelSetGPUTransportPasses(
   _plan: Pick<FineLevelSetGPUTransportPlan, "chunkCount">,
-  _segmentCount: 4 | 8,
+  _segmentCount: 1 | 4 | 8,
 ): FineLevelSetGPUTransportPassPlan {
   return { chunkCount: 1, segmentCount: FINE_LEVELSET_TRANSPORT_MAXIMUM_ENCODED_SUBSTEPS,
     passesPerSegment: 0, passesPerChunk: 1, encodedPasses: 10 };
@@ -207,6 +220,8 @@ export class WebGPUFineLevelSetTransport {
   private readonly publishWorksetsPipeline: GPUComputePipeline;
   private readonly compactWorksetsPipeline: GPUComputePipeline;
   private readonly transportPipelines: readonly GPUComputePipeline[];
+  private readonly reversePipelines: readonly GPUComputePipeline[];
+  private readonly correctionPipelines: readonly GPUComputePipeline[];
   private readonly reduceStatusPipeline: GPUComputePipeline;
   private readonly summarizePipeline: GPUComputePipeline;
   private readonly commitPipeline: GPUComputePipeline;
@@ -223,6 +238,8 @@ export class WebGPUFineLevelSetTransport {
   private readonly publishWorksetsGroup: GPUBindGroup;
   private readonly compactWorksetsGroup: GPUBindGroup;
   private readonly transportGroups: readonly GPUBindGroup[];
+  private readonly reverseGroups: readonly GPUBindGroup[];
+  private readonly correctionGroups: readonly GPUBindGroup[];
   private readonly reduceStatusGroup: GPUBindGroup;
   private readonly summarizeGroup: GPUBindGroup;
   private readonly commitGroup: GPUBindGroup;
@@ -239,6 +256,8 @@ export class WebGPUFineLevelSetTransport {
   private censusStaging?: GPUBuffer;
   private censusPhase: "idle" | "copied" | "mapping" = "idle";
   private censusStep = 0;
+  private readonly bfeccEnabled: boolean;
+  private readonly reversePhi?: GPUBuffer;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
@@ -262,8 +281,12 @@ export class WebGPUFineLevelSetTransport {
       throw new RangeError("Structured fine transport air-support authority is invalid or undersized");
     }
     this.queryCapacity = source.plan.maximumResidentBricks * source.plan.samplesPerBrick;
-    this.plan = planFineLevelSetGPUTransport(this.queryCapacity, this.queryCapacity,
+    this.bfeccEnabled = coarsePhiBFECCEnabled(source.plan.fineFactor);
+    const basePlan = planFineLevelSetGPUTransport(this.queryCapacity, this.queryCapacity,
       source.plan.maximumResidentBricks);
+    const bfeccScratchBytes = this.bfeccEnabled ? this.queryCapacity * 4 : 0;
+    this.plan = Object.freeze({ ...basePlan,
+      allocatedBytes: basePlan.allocatedBytes + bfeccScratchBytes });
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     const pieces = [topology.catalogVolumes, topology.catalogFaces,
       topology.catalogTetrahedronHeaders, topology.catalogTetrahedronVertices,
@@ -303,6 +326,10 @@ export class WebGPUFineLevelSetTransport {
       pageCapacity: source.plan.maximumResidentBricks, maximumDisplacementOffsetWords: 7,
       candidateKeysOffsetWords: 8,
       changedKeysOffsetWords: 8 + source.plan.maximumResidentBricks };
+    if (this.bfeccEnabled) {
+      this.reversePhi = device.createBuffer({ label: "Factor-1 bounded MacCormack reverse phi",
+        size: bfeccScratchBytes, usage: storage });
+    }
     const module = device.createShaderModule({ label: "Direct structured fine level-set transport",
       code: structuredFineLevelSetTransportWGSL });
     const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
@@ -320,6 +347,10 @@ export class WebGPUFineLevelSetTransport {
     // at every trajectory point. Only validity-aware common/rare variants are
     // required; page-anchor transition specialization would be unsound.
     this.transportPipelines = ["transportRegularCommonPhi", "transportRegularRarePhi"].map(make);
+    this.reversePipelines = this.bfeccEnabled
+      ? ["reverseRegularCommonPhi", "reverseRegularRarePhi"].map(make) : [];
+    this.correctionPipelines = this.bfeccEnabled
+      ? ["correctRegularCommonPhi", "correctRegularRarePhi"].map(make) : [];
     this.reduceStatusPipeline = make("reduceStructuredFineTransportStatus");
     this.summarizePipeline = make("summarizeStructuredFineTransport");
     this.commitPipeline = make("commitStructuredFineTransport");
@@ -339,6 +370,7 @@ export class WebGPUFineLevelSetTransport {
       // shader's enabled bit makes that state publish zero work.
       [20, air?.arena ?? structured.rowVelocities],
       [21, air?.boundaryControl ?? structured.control],
+      ...(this.reversePhi ? [[10, this.reversePhi] as const] : []),
     ]);
     const group = (pipeline: GPUComputePipeline, bindings: readonly number[]) =>
       device.createBindGroup({ label: `${pipeline.label} fine transport bindings ${bindings.join(",")}`,
@@ -358,6 +390,10 @@ export class WebGPUFineLevelSetTransport {
     this.compactWorksetsGroup = group(this.compactWorksetsPipeline, [0,2,9,13]);
     this.transportGroups = this.transportPipelines.map((pipeline, index) => group(pipeline,
       FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS[index]!));
+    this.reverseGroups = this.reversePipelines.map((pipeline) => group(pipeline,
+      [0,1,2,3,5,6,10,12,13,20]));
+    this.correctionGroups = this.correctionPipelines.map((pipeline) => group(pipeline,
+      [0,1,2,3,4,5,6,10,12,13,20]));
     // Summary uses metadata only to retain the first rejected sample's stable
     // fine-lattice position; only the final reduction publishes the control.
     this.reduceStatusGroup = group(this.reduceStatusPipeline, [0,1,2,13]);
@@ -450,6 +486,20 @@ export class WebGPUFineLevelSetTransport {
       transport.dispatchWorkgroupsIndirect(this.indirectDispatch,
         (4 + 7 * FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES[index]! + 4) * 4);
     });
+    this.reversePipelines.forEach((pipeline, index) => {
+      const reverse = broker.compute({ label: `Reverse factor-1 predicted phi ${classNames[index]}` });
+      reverse.setPipeline(pipeline); reverse.setBindGroup(0, this.reverseGroups[index]!);
+      reverse.dispatchWorkgroupsIndirect(this.indirectDispatch,
+        (4 + 7 * FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES[index]! + 4) * 4);
+    });
+    this.correctionPipelines.forEach((pipeline, index) => {
+      const correction = broker.compute({
+        label: `Apply bounded factor-1 MacCormack correction ${classNames[index]}`,
+      });
+      correction.setPipeline(pipeline); correction.setBindGroup(0, this.correctionGroups[index]!);
+      correction.dispatchWorkgroupsIndirect(this.indirectDispatch,
+        (4 + 7 * FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES[index]! + 4) * 4);
+    });
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after fine characteristic transport");
     }
@@ -514,6 +564,7 @@ export class WebGPUFineLevelSetTransport {
     if (this.destroyed) return; this.destroyed = true;
     this.params.destroy(); this.control.destroy(); this.governor.destroy(); this.indirectDispatch.destroy();
     this.samplingCatalog.destroy();
+    this.reversePhi?.destroy();
     this.topologyDelta.buffer.destroy();
   }
 }

@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
 import { planOctreeCoarsePhi } from "../lib/webgpu-octree-coarse-levelset";
 import { fineLevelSetRedistanceAllocatedBytes } from "../lib/webgpu-octree-fine-levelset-redistance";
-import { planFineLevelSetGPUSummaries } from "../lib/webgpu-octree-fine-levelset-summary";
+import { FINE_LEVELSET_SUMMARY_ENTRY_WORDS,
+  planFineLevelSetGPUSummaries } from "../lib/webgpu-octree-fine-levelset-summary";
 import { fineLevelSetLeafSeedAllocatedBytes, FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES } from
   "../lib/webgpu-octree-fine-levelset-topology";
 import { planFineLevelSetGPUTransport } from "../lib/webgpu-octree-fine-levelset-transport";
@@ -146,8 +147,9 @@ test("fine summary budgets a bounded sparse paged directory and compact active m
     Math.min(summary.hierarchyTopLevelPages, summary.entryCapacity));
   assert.equal(summary.directoryBytes,
     (16 + summary.hierarchyTopLevelPages
-      + summary.directoryPageCapacity * summary.directoryPageSize + summary.entryCapacity * 8) * 4);
-  assert.equal(summary.fineEntriesBytes, summary.entryCapacity * 32);
+      + summary.directoryPageCapacity * summary.directoryPageSize
+      + summary.entryCapacity * FINE_LEVELSET_SUMMARY_ENTRY_WORDS) * 4);
+  assert.equal(summary.fineEntriesBytes, summary.entryCapacity * FINE_LEVELSET_SUMMARY_ENTRY_WORDS * 4);
   assert.equal(summary.keyStateBytes, summary.entryCapacity * 8,
     "fine references and corrected-coarse rows exist only for compact active ranks");
   assert.equal(summary.rankStateBytes, summary.entryCapacity * 8);
@@ -175,7 +177,8 @@ test("fine summary hierarchy metadata scales with active capacity plus top-level
   assert.ok(summary.directoryPageCapacity <= summary.entryCapacity);
   assert.equal(summary.directoryWords,
     16 + summary.hierarchyTopLevelPages
-      + summary.directoryPageCapacity * summary.directoryPageSize + summary.entryCapacity * 8);
+      + summary.directoryPageCapacity * summary.directoryPageSize
+      + summary.entryCapacity * FINE_LEVELSET_SUMMARY_ENTRY_WORDS);
 });
 
 test("parallel total-volume scratch is bounded by compact directory and resident fine samples", () => {

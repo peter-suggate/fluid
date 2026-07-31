@@ -108,7 +108,7 @@ export interface GlobalFineLevelSetConsumerSource {
   readonly brickResolution: 4;
   readonly samplesPerBrick: number;
   readonly pageCapacity: number;
-  readonly fineFactor: 4 | 8;
+  readonly fineFactor: 1 | 4 | 8;
   readonly fineCellWidth: number;
   readonly domainOrigin: readonly [number, number, number];
   readonly generation: number;
@@ -168,8 +168,8 @@ export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevel
   if (source.brickResolution !== 4 && source.brickResolution !== 8) {
     throw new RangeError("Global fine brick resolution must be 4 or 8");
   }
-  if (source.fineFactor !== 4 && source.fineFactor !== 8) {
-    throw new RangeError("Global fine factor must be 4 or 8");
+  if (source.fineFactor !== 1 && source.fineFactor !== 4 && source.fineFactor !== 8) {
+    throw new RangeError("Global fine factor must be 1, 4, or 8");
   }
   if (source.samplesPerBrick !== source.brickResolution ** 3) {
     throw new RangeError("Global fine sample stride must equal brickResolution cubed");

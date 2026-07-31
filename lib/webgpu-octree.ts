@@ -91,7 +91,8 @@ import {
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
-import { FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, planFineLevelSetGPUSummaries,
+import { FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, FINE_LEVELSET_SUMMARY_ENTRY_WORDS,
+  planFineLevelSetGPUSummaries,
   WebGPUFineLevelSetSummaries } from "./webgpu-octree-fine-levelset-summary";
 import {
   planFineLevelSetBandFineCells,
@@ -253,17 +254,6 @@ const octreePipelineCache = new WeakMap<GPUDevice, Map<string, OctreePipelineCac
 const octreeRowDeltaCensusEnabled = (): boolean =>
   typeof process !== "undefined" && process.env?.FLUID_OCTREE_ROW_DELTA_CENSUS === "1";
 
-export const FLUID_DIRTY_ORACLE_ENV = "FLUID_DIRTY_ORACLE";
-/** Deliberately quality-invalid discovery arm. It prices only membership
- * change plus the existing row one-ring; never use this as product authority. */
-export function octreeDirtyOracleMembershipRequested(
-  environment?: Readonly<Record<string, string | undefined>>,
-): boolean {
-  const resolved = environment
-    ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.[FLUID_DIRTY_ORACLE_ENV] === "membership";
-}
-
 export const FLUID_POWER_STRUCTURAL_DELTA_ENV = "FLUID_POWER_STRUCTURAL_DELTA";
 /** Exact experimental arm: descriptors consume only changes to the anchor and
  * the paper's 18 owner probes. Broad remains the production default until the
@@ -302,6 +292,12 @@ export interface OctreeProjectionOptions {
   /** Pure-phase cells farther from liquid/solid interfaces than this finest-cell band may remain coarse. */
   interfaceRefinementBandCells?: number;
   /**
+   * Number of candidate-cell widths retained at each dyadic pressure level
+   * around the surface. One preserves the sharpest legal 2:1 transition;
+   * larger values create progressively wider intermediate-level shells.
+   */
+  surfaceRefinementGradingLayers?: number;
+  /**
    * Half-width of the Section 5 high-resolution surface-tracking band, in
    * finest octree cells. The product master control supplies the same authored
    * reach as the pressure band above; the separate option remains only for
@@ -310,8 +306,8 @@ export interface OctreeProjectionOptions {
    */
   fineLevelSetBandCells?: number;
   /** Authoritative domain-global Section 5 narrow-band factor. */
-  globalFineLevelSetFactor?: 4 | 8;
-  /** Explicit physical brick cap for the global factor-4/factor-8 publication. */
+  globalFineLevelSetFactor?: 1 | 4 | 8;
+  /** Explicit physical brick cap for the global factor-1/factor-4/factor-8 publication. */
   globalFineLevelSetMaximumBricks?: number;
   /** Advanced safety override for the compact pressure-row arena. */
   pressureRowCapacity?: number;
@@ -1336,6 +1332,7 @@ export class WebGPUOctreeProjection {
   private readonly topologyTileSize: number;
   private readonly adaptivity: number;
   private readonly interfaceRefinementBandCells: number;
+  private readonly surfaceRefinementGradingLayers: number;
   private readonly fineLevelSetBandCells: number;
   private pipelinedMGPCG!: WebGPUOctreePipelinedMGPCG;
   /**
@@ -1424,6 +1421,8 @@ export class WebGPUOctreeProjection {
     this.balanceRounds = 2 * Math.max(1, Math.ceil(Math.log2(this.maxLeafSize)));
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
+    this.surfaceRefinementGradingLayers = Math.max(1, Math.min(4,
+      Math.round(options.surfaceRefinementGradingLayers ?? 1)));
     // Product configurations couple Section 5 surface reach to pressure reach.
     // A distinct value is admitted only for diagnostic fault injection; unset
     // follows the master band exactly.
@@ -2015,7 +2014,9 @@ export class WebGPUOctreeProjection {
                 : undefined }
             : undefined;
           this.globalFineSeeds = new WebGPUFineLevelSetLeafSeeds(
-            device, this.globalFineSourceB, exactAnalyticFineSeed);
+            device, this.globalFineSourceB, exactAnalyticFineSeed, {
+              maximumSourceLeaves: this.pressureCapacity.rowCapacity,
+            });
           this.globalFineSummaries = new WebGPUFineLevelSetSummaries(device, globalPlan,
             this.pressureCapacity.rowCapacity);
           // The core topology layout is already at the activity-eligible
@@ -2091,7 +2092,7 @@ export class WebGPUOctreeProjection {
       sparseTopologyTileStates: this.topologyResidency.allocationPlan.sparseKeyPools ? 1 : 0,
       denseSolidField: this.hasDenseSolidCells ? 1 : 0,
       topologyCandidateView: candidateTopology ? 1 : 0,
-      dirtyOracleMembership: octreeDirtyOracleMembershipRequested() ? 1 : 0,
+      fineSummaryFactor: this.globalFineLevelSet?.plan.fineFactor ?? 4,
       structuralDescriptorDelta: octreePowerStructuralDeltaRequested() ? 1 : 0,
     };
   }
@@ -2426,10 +2427,11 @@ export class WebGPUOctreeProjection {
       rowDelta: rowDelta.rows,
       rowDeltaControlOffsetWords: rowDelta.controlOffsetWords,
       rowDeltaNewToOldOffsetWords: rowDelta.newToOldOffsetWords,
-      // Record two is the exact current-row schedule for both fresh and
-      // identity-reused frontier publications.
+      // Record one is the complete previous/current-row schedule for both
+      // fresh and identity-reused frontier publications. Record two is the
+      // merge schedule and is deliberately zero on an identity reuse.
       rowDispatch: this.topologyCandidateDispatch,
-      rowDispatchOffsetBytes: 24,
+      rowDispatchOffsetBytes: 12,
       currentCandidatePressure: this.candidatePressure,
       candidateHistory: this.candidatePressureHistory,
       rowCapacity,
@@ -2472,9 +2474,16 @@ export class WebGPUOctreeProjection {
     // Part D: the same iteration, one dispatch, one 256-lane workgroup. The
     // gate is the ALLOCATED row capacity, which is known here at construction;
     // it is deliberately not a GPU-side live row count, because shaping the
-    // encode from a readback would break the step-sequencing contract. Both
-    // executors stay constructed, so the env flag can A/B them at any time.
-    if (WebGPUOctreePersistentMGPCG.selects(rowCapacity)) {
+    // encode from a readback would break the step-sequencing contract.
+    // The single-workgroup executor's compact Section 4.3 recurrence loses
+    // preconditioner positivity after repeated factor-1 authority generations
+    // on the otherwise exactly representable hydrostatic plane. The established
+    // hierarchical A/B executor remains positive and converges in 4--5
+    // iterations on the same rows. Keep factor 4/8 on their existing
+    // persistent path and use the robust representation for the coarse-only
+    // authority.
+    if (this.globalFineLevelSet?.plan.fineFactor !== 1
+      && WebGPUOctreePersistentMGPCG.selects(rowCapacity)) {
       const smootherDegree = this.firstOrderVCycle.smootherContract?.degree;
       if (smootherDegree === undefined) {
         throw new Error("Persistent MGPCG requires the published V-cycle smoother contract");
@@ -2503,7 +2512,7 @@ export class WebGPUOctreeProjection {
       });
     }
     // The paper evolves coarse octree phi regardless of whether the optional
-    // factor-4/factor-8 interface band exists. It is also the complete
+    // factor-1/factor-4/factor-8 interface band exists. It is also the complete
     // inside/outside and cell-centre boundary authority in coarse-only mode.
     this.powerCoarseLevelSet = new WebGPUOctreeCoarseLevelSet(this.device, rowCapacity);
     const airSupportLayout = planOctreeAirVelocitySupport(
@@ -2645,7 +2654,19 @@ export class WebGPUOctreeProjection {
       dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
       closedBoundaryMask: structuredClosedBoundaryMask(this.scene.container.top === "closed"),
       maximumLeafSize: this.maxLeafSize,
-      maximumDisplacementFineCells: this.globalFineLevelSet?.plan.fineFactor ?? 4,
+      // Air-extension demand must cover the complete characteristic and the
+      // terminal interpolation owner around it. Using one fine factor happened
+      // to cover the oversampled factor-4/8 bricks, but factor 1 packs four
+      // coarse cells into each brick: its RK2 midpoint/backtrace reaches two
+      // owners away and the velocity interpolation at that point reaches one
+      // owner farther. Omitting that last owner leaves otherwise-valid
+      // transported samples with no velocity authority.
+      maximumDisplacementFineCells: this.globalFineLevelSet
+        ? (this.globalFineLevelSet.plan.fineFactor === 1
+          ? planFineLevelSetBandFineCells(this.fineLevelSetBandCells, 1)
+            .maximumBacktraceFineCells + 1
+          : this.globalFineLevelSet.plan.fineFactor)
+        : 4,
       ...(this.globalFineSourceA && this.globalFineSourceB ? {
         fineSources: [this.globalFineSourceA, this.globalFineSourceB] as const,
         transportBandFineCells: planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
@@ -2915,12 +2936,14 @@ export class WebGPUOctreeProjection {
       this.scene.numerics.maxDt_s,
       analyticBootstrapSelector
     ]);
+    // pressureCapacity.z carries the surface grading width because the
+    // projection uniform ABI already reserves this otherwise-unused word.
     new Uint32Array(data, 128, 4).set([
       this.pressureCapacity.rowCapacity,
       this.analyticSparseBootstrap
         ? (this.scene.fluid.initialCondition === "dam-break" ? 2 : 1)
         : 0,
-      0,
+      this.surfaceRefinementGradingLayers,
       1,
     ]);
     const dam = sceneDamBreakFractions(this.scene);
@@ -3599,12 +3622,10 @@ export class WebGPUOctreeProjection {
     deltaFinalize.setPipeline(this.publishRowDeltaPipeline);
     deltaFinalize.dispatchWorkgroups(1);
     deltaFinalize.setPipeline(this.publishReusedRowDeltaPipeline);
-    // Record 1 is the dirty-row schedule and is intentionally zero when the
-    // immutable frontier is reused. Record 2 retains the full current-row
-    // schedule needed to rewrite identity maps and stamp the new generation.
-    // Dispatching reuse from record 1 left an otherwise valid zero-delta
-    // candidate carrying the previous generation forever.
-    deltaFinalize.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 24);
+    // Reuse makes the merge schedule in record 2 empty. Record 1 retains the
+    // full previous-row schedule needed to rewrite both identity maps and
+    // stamp the new generation even when the frontier itself is immutable.
+    deltaFinalize.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 12);
     if (previousPressureForTemporalHistory) {
       const historyRemap = this.pressureHistoryRemap;
       if (!historyRemap) throw new Error("Temporal predictor requires pressure history remap");
@@ -3657,7 +3678,8 @@ export class WebGPUOctreeProjection {
     // Part D executor selection. It lives here, in the projection host, and
     // never inside the hierarchical executor's own encode — that encode is the
     // single-schedule authority and a test stringifies it to prove it.
-    const persistent = octreePersistentMGPCGEnabled() ? this.persistentMGPCG : undefined;
+    const persistent = this.globalFineLevelSet?.plan.fineFactor !== 1
+      && octreePersistentMGPCGEnabled() ? this.persistentMGPCG : undefined;
     if (persistent) {
       persistent.encodeSolve(solveBroker, {
         pressureSeed: pressureIn,
@@ -5534,7 +5556,7 @@ override sparseTopologyTileStates: u32 = 0u;
 override denseSolidField: bool = true;
 override frontierSortStage: u32 = 0u;
 override topologyCandidateView: u32 = 0u;
-override dirtyOracleMembership: bool = false;
+override fineSummaryFactor: u32 = 4u;
 override structuralDescriptorDelta: bool = false;
 struct Owner { packedOrigin: u32, size: u32 }
 struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f }
@@ -6466,10 +6488,11 @@ fn buildDirtyFrontierDelta() {
       break;
     }
     let structural = compaction[tileChangeFlagsBase() + tileIndex] == generation;
-    // X-3 probe: membership-only intentionally ignores changed wet/fraction
-    // decisions. Structural membership still carries the existing one-ring
-    // through markRowDeltaRing. This is a bound, not a sound product mode.
-    let wet = !dirtyOracleMembership && (changed & TILE_SIGNATURE_FRONTIER_CHANGED) != 0u;
+    // The row frontier is a function of the exact structural and wet/dry
+    // decision fingerprints. A membership-only shortcut is not sound here:
+    // free-surface fractions and Section 4 coefficients can change while row
+    // identity remains stable.
+    let wet = (changed & TILE_SIGNATURE_FRONTIER_CHANGED) != 0u;
     if (structural || wet) {
       if (dirtyCount >= capacity) {
         rejectDirtyAuthority(DIRTY_FAILURE_FRONTIER_OVERFLOW, 2u, slot, tileIndex,
@@ -6543,6 +6566,8 @@ struct FineLeafSummary {
   complete: bool,
   coarseAuthority: bool,
   centerValid: bool,
+  exactCellValid: bool,
+  exactCellNegative: bool,
   centerPhi: f32,
   minimumPhi: f32,
   maximumPhi: f32,
@@ -6558,16 +6583,28 @@ fn fineSummaryOrderedFloat(value: u32) -> f32 {
 fn fineSummaryLength() -> u32 { return arrayLength(&pressureIn); }
 fn fineSummaryWord(index: u32) -> u32 { return bitcast<u32>(pressureIn[index]); }
 fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
-  var result = FineLeafSummary(false, false, false, false, 0.0,
+  var result = FineLeafSummary(false, false, false, false, false, false, 0.0,
     3.402823e38, -3.402823e38, 3.402823e38);
   if (fineSummaryLength() < 16u || fineSummaryWord(0u) != 0u
       || fineSummaryWord(9u) != 0x80000000u) { return result; }
   let baseDims = vec3u(fineSummaryWord(4u), fineSummaryWord(5u), fineSummaryWord(6u));
   let cellDims = dims();
-  if (any(cellDims == vec3u(0u)) || any(baseDims % cellDims != vec3u(0u))) { return result; }
-  let ratios = baseDims / cellDims; let bricksPerCell = ratios.x;
-  if (bricksPerCell == 0u || any(ratios != vec3u(bricksPerCell))) { return result; }
-  var brickSide = size * bricksPerCell; var level = 0u;
+  if (any(cellDims == vec3u(0u))) { return result; }
+  let factorOne = fineSummaryFactor == 1u;
+  var bricksPerCell = 0u;
+  if (factorOne) {
+    if (any(baseDims != (cellDims + vec3u(3u)) / 4u)) { return result; }
+  } else {
+    if (any(baseDims % cellDims != vec3u(0u))) { return result; }
+    let ratios = baseDims / cellDims; bricksPerCell = ratios.x;
+    if (bricksPerCell == 0u || any(ratios != vec3u(bricksPerCell))) { return result; }
+  }
+  // One factor-1 B4 leaf spans four finest cells per axis. Sizes 1 and 2
+  // deliberately consume that containing leaf's conservative interval; size
+  // 4 is the first exact geometric match, and each larger dyadic size climbs
+  // one summary level per doubling.
+  var brickSide = select(size * bricksPerCell, max(1u, size / 4u), factorOne);
+  var level = 0u;
   if (brickSide == 0u || (brickSide & (brickSide - 1u)) != 0u) { return result; }
   var levelOffset = 0u; var levelDims = baseDims;
   var remaining = brickSide;
@@ -6578,7 +6615,8 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     remaining >>= 1u; level += 1u;
   }
   if (level > fineSummaryWord(7u)) { return result; }
-  let brickOrigin = origin * bricksPerCell;
+  let brickOrigin = select(origin * bricksPerCell, origin / 4u, factorOne);
+  if (factorOne && size >= 4u && any(origin % vec3u(size) != vec3u(0u))) { return result; }
   if (any(brickOrigin % vec3u(brickSide) != vec3u(0u))) { return result; }
   let coordinate = brickOrigin / brickSide;
   if (any(coordinate >= levelDims)) { return result; }
@@ -6594,7 +6632,7 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
       || topLevelPages != expectedTopLevelPages || pagePoolOffset > fineSummaryLength()
       || entryOffset < pagePoolOffset
       || (entryOffset - pagePoolOffset) % ${FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE}u != 0u
-      || capacity > (fineSummaryLength() - entryOffset) / 8u) { return result; }
+      || capacity > (fineSummaryLength() - entryOffset) / ${FINE_LEVELSET_SUMMARY_ENTRY_WORDS}u) { return result; }
   let directoryPageCapacity = (entryOffset - pagePoolOffset) / ${FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE}u;
   // The publisher owns a bounded sparse two-level hierarchy-key -> active-rank directory.
   // Refinement therefore performs one page load, one rank load, and one compact entry load;
@@ -6606,7 +6644,7 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
   if (pageWord >= entryOffset) { return result; }
   let rankPlusOne = fineSummaryWord(pageWord);
   if (rankPlusOne != 0u && rankPlusOne <= capacity) {
-    let base = entryOffset + (rankPlusOne - 1u) * 8u;
+    let base = entryOffset + (rankPlusOne - 1u) * ${FINE_LEVELSET_SUMMARY_ENTRY_WORDS}u;
     if (fineSummaryWord(base) != key) { return result; }
     let minimumPhi = fineSummaryOrderedFloat(fineSummaryWord(base + 1u));
     let maximumPhi = fineSummaryOrderedFloat(fineSummaryWord(base + 2u));
@@ -6629,11 +6667,28 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     // fine centre: pure-coarse entries have zero fine counts and therefore
     // fail fineComplete without overloading centerPhi=0 as evidence.
     // Section 5 requires the new octree to consume the current advected level
-    // set. The summary publication evaluates the eight fine samples around
-    // this dyadic node's own geometric centre, so the evidence applies to
-    // every pressure-leaf size and remains independent of interval coverage.
-    result.centerValid = (entryFlags & 0x3fc00000u) == 0x3fc00000u
+    // set. At factor 4/8 the summary node and pressure leaf share a geometric
+    // centre. At factor 1 the B4 node is larger than size-1/2 pressure leaves,
+    // so only its interval is conservative for them; its centre becomes exact
+    // at size 4 and above. Requiring fineComplete also excludes a pure-coarse
+    // collision from masquerading as that fine centre.
+    let centerMatchesLeaf = !factorOne || size >= 4u;
+    result.centerValid = centerMatchesLeaf
+      && (!factorOne || fineComplete)
+      && (entryFlags & 0x3fc00000u) == 0x3fc00000u
       && fineSummaryFinite(result.centerPhi);
+    // Factor 1 packs the exact validity and phase of all 4^3 finest-cell
+    // samples in its level-zero B4 entry. A unit pressure owner can therefore
+    // consume its own advected phi sign without inventing a finer surface
+    // hierarchy or falling back to the previous coarse frontier.
+    if (factorOne && size == 1u && samplesPerBrick == 64u
+        && fineSummaryWord(base + 5u) == 1u) {
+      let local = origin & vec3u(3u);
+      let bit = local.x + 4u * (local.y + 4u * local.z);
+      let word = bit >> 5u; let mask = 1u << (bit & 31u);
+      result.exactCellValid = (fineSummaryWord(base + 8u + word) & mask) != 0u;
+      result.exactCellNegative = (fineSummaryWord(base + 10u + word) & mask) != 0u;
+    }
     return result;
   }
   return result;
@@ -6676,6 +6731,12 @@ fn inflowProtectionIntersects(origin: vec3u, size: u32) -> bool {
 
 fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   if (inflowProtectionIntersects(origin, size)) { return true; }
+  // Factor 1 is the sole surface tracker at the finest octree-cell lattice.
+  // Once adaptive pressure refinement reaches a size-2 leaf, split it once
+  // more so ghost-fluid pressure consumes phi at that same cell centre. This
+  // is independent of summary publication timing; larger octree levels stay
+  // adaptive and no finer surface representation is introduced.
+  if (fineSummaryFactor == 1u && size < 4u) { return true; }
   let summary = fineLeafSummary(origin, size);
   if (!summary.found) { return false; }
   // The fine-summary values and cell spacing are physical. Two authored
@@ -6688,18 +6749,29 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   //
   // The ring scales with the CANDIDATE leaf, not with the configured maximum
   // leaf. A leaf may only survive when the interface clears the authored band
-  // by its own edge length, which is the standard 2:1 graded-octree sizing
-  // criterion and is what makes each dyadic size occupy its own shell. Sizing
-  // the ring by the maximum leaf instead made the protected region uniform
-  // across every size, so raising the maximum leaf widened a uniformly FINE
-  // band (16 -> a 20-cell band, 32 -> a 36-cell band) instead of coarsening
-  // the calm interior. The max(2, size) floor is the smallest dyadic merge
-  // candidate, so every maximum-leaf-2 validation lane keeps exactly the ring
-  // it has today.
+  // by N of its own edge lengths, which makes each dyadic size occupy a
+  // controllable shell. N=1 preserves the sharpest legal 2:1 transition;
+  // larger N implements progressive surface grading without widening the
+  // independently tracked Section 5 band. Sizing by the maximum leaf instead
+  // would widen a uniformly FINE band rather than grade the calm interior.
+  // The max(2, size) floor is the smallest dyadic merge candidate.
   let cellWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
-  let protectionWidth = (max(1.0, params.solve.w) + max(2.0, f32(size))) * cellWidth;
+  let gradingLayers = f32(max(1u, params.pressureCapacity.z));
+  let protectionWidth = (max(1.0, params.solve.w)
+    + gradingLayers * max(2.0, f32(size))) * cellWidth;
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
-  return summary.complete && (crossesInterface || summary.minimumAbsolutePhi <= protectionWidth);
+  // A sign crossing is positive refinement evidence even when the narrow-band
+  // publication does not fill the candidate leaf's entire volume. Requiring a
+  // complete size-8/16 summary here strands factor-1 surface bricks inside the
+  // coarse leaf and prevents the later per-level passes from ever seeing them.
+  if (crossesInterface) { return true; }
+  let observedNearInterface = summary.minimumAbsolutePhi <= protectionWidth;
+  // Factor 4/8 can use the merged corrected-coarse interval to prove complete
+  // distance evidence. Factor 1 deliberately publishes a fine-only hierarchy
+  // because size-1/2/4 coarse rows collide on a B4 key; an observed finite
+  // near-interface sample is still safe positive evidence. Incomplete absence
+  // remains false and therefore never invents refinement away from the band.
+  return observedNearInterface && (summary.complete || fineSummaryFactor == 1u);
 }
 
 fn pressureRetentionAt(origin: vec3u) -> u32 {
@@ -7085,7 +7157,8 @@ fn currentPressureOwnerWet(owner: Owner) -> bool {
   // does not exist yet at t=0.
   if(bootstrapPhiEnabled()){return wet;}
   if(fine.found){
-    if(fine.centerValid){wet=fine.centerPhi<0.0;}
+    if(fine.exactCellValid){wet=fine.exactCellNegative;}
+    else if(fine.centerValid){wet=fine.centerPhi<0.0;}
     // A coarse-only summary is the paper's separate octree level set, not a
     // license to reclassify the same cell through a second surface authority.
     // Keep liquidOwner's exact coarse-centre decision so frontier membership

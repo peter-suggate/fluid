@@ -138,6 +138,9 @@ test("missing or stale node-mip samples enter exact bounded visibility rather th
   // exact bounded traversal below instead of returning a lit surface.
   assert.match(visibility, /let cone=dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*let raw=vec3f\(cone\.transmittance\)\*dryFluidTransmittance\(cone\.fluidDepth_m\);return mix\(vec3f\(1\.0\),raw,dry\.tuningRays0\.y\);\}/);
   assert.ok(visibility.indexOf("svoTraceVisibility", visibility.indexOf("dryConeVisibility")) > visibility.indexOf("dryConeVisibility"));
+  assert.doesNotMatch(drySource,
+    /coneLightingRequested[^\n]*globalIllumination[^\n]*==0u/,
+    "GLOBAL reuses hierarchical shadow visibility instead of forcing exact SVO rays for every light");
   assert.match(svoDrySceneShader, /fn dryNodeMipReady\(\)->bool\{return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&dry\.nodeMip\.x==publicationState\[2\]/,
     "cone use is fenced to the matching structural static-geometry revision");
 });

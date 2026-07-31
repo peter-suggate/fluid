@@ -1155,7 +1155,12 @@ export class RasterWaterPipeline {
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
     this.prepareLayout = this.device.createBindGroupLayout({ label: "Water extraction prepare bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -1417,11 +1422,16 @@ export class RasterWaterPipeline {
       { binding: 16, resource: globalFine?.coarsePhiDirectory ?? { buffer: this.fallbackSparseControl } },
       { binding: 17, resource: globalFine?.topologyControl ?? { buffer: this.fallbackSparseControl } },
     ] });
-    if (this.globalPolygoniseLayout && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.globalCubeOffsets && this.globalFineRenderParams) this.globalPolygoniseBindGroup = this.device.createBindGroup({ layout: this.globalPolygoniseLayout, entries: [
+    if (this.globalPolygoniseLayout && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.globalCubeOffsets && this.globalFineRenderParams && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseControl) this.globalPolygoniseBindGroup = this.device.createBindGroup({ layout: this.globalPolygoniseLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 3, resource: { buffer: this.vertexBuffer } },
       { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 6, resource: { buffer: this.globalCubeValues } }, { binding: 7, resource: { buffer: this.globalCubeOffsets } },
+      { binding: 8, resource: globalFine?.worklist ?? { buffer: this.fallbackSparseActivePages } },
+      { binding: 9, resource: globalFine?.phi ?? { buffer: this.fallbackSparsePhi } },
       { binding: 10, resource: { buffer: this.globalFineRenderParams } },
+      { binding: 11, resource: globalFine?.flags ?? { buffer: this.fallbackSparseControl } },
+      { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } },
+      { binding: 16, resource: globalFine?.coarsePhiDirectory ?? { buffer: this.fallbackSparseControl } },
     ] });
     if (this.prepareLayout && this.indirectBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }

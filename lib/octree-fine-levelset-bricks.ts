@@ -59,7 +59,7 @@ export const FINE_LEVELSET_SAMPLE_FLAGS = Object.freeze({
   negative: 1 << 4,
 } as const);
 
-export type FineLevelSetFactor = 4 | 8;
+export type FineLevelSetFactor = 1 | 4 | 8;
 export type FineLevelSetBrickResolution = 4;
 export type FineLevelSetVec3 = readonly [number, number, number];
 
@@ -163,8 +163,8 @@ export function planFineLevelSetBricks(options: FineLevelSetBrickPlanOptions): F
   if (!Number.isFinite(options.finestCellWidth) || options.finestCellWidth <= 0) {
     throw new RangeError("Fine level-set finest cell width must be finite and positive");
   }
-  if (options.fineFactor !== 4 && options.fineFactor !== 8) {
-    throw new RangeError("Fine level-set factor must be 4 or 8");
+  if (options.fineFactor !== 1 && options.fineFactor !== 4 && options.fineFactor !== 8) {
+    throw new RangeError("Fine level-set factor must be 1, 4, or 8");
   }
   if (options.brickResolution !== 4) {
     throw new RangeError("Fine level-set brick resolution must be the production 4x4x4 shape");

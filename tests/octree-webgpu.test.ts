@@ -101,6 +101,7 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "legacy quality tiers must not obscure the explicit power-method controls");
   assert.deepEqual(octreeMethod.params.map((spec) => spec.key), [
     "globalFineLevelSetFactor", "maximumLeafSize", "interfaceRefinementBandCells",
+    "surfaceRefinementGradingLayers",
   ], "the product UI must not expose a retired pressure path");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "surfaceColumns"), false,
     "scene voxelDomain is the sole spatial-resolution authority");
@@ -132,9 +133,13 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   "the product control exposes the five coupled experimental reach levels");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "fineLevelSetBandCells"), false,
     "the surface width is derived from the single product knob");
+  const surfaceGrading = octreeMethod.params.find((spec) => spec.key === "surfaceRefinementGradingLayers");
+  assert.ok(surfaceGrading && surfaceGrading.kind === "number"
+    && surfaceGrading.default === 1 && surfaceGrading.min === 1 && surfaceGrading.max === 4,
+  "progressive grading must remain an explicit, legacy-preserving experiment");
   const globalFine = octreeMethod.params.find((spec) => spec.key === "globalFineLevelSetFactor");
   assert.ok(globalFine && globalFine.kind === "select" && globalFine.default === "4" && globalFine.tier === "coarse");
-  assert.deepEqual(globalFine.options.map((option) => option.value), ["4", "8"]);
+  assert.deepEqual(globalFine.options.map((option) => option.value), ["1", "4", "8"]);
   for (const quality of ["balanced", "high", "ultra"] as const) {
     const preset = octreeMethod.presetFor(quality);
     assert.equal(preset.globalFineLevelSetFactor, "4", `${quality} must default to the paper's factor-4 band`);
@@ -148,6 +153,7 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "projection consumes compact coarse phi plus the factor-m global-fine band");
   assert.doesNotMatch(`${octreeSource}\n${uniformSolverSource}`, /airRefinementBandCells/);
   assert.match(uniformSolverSource, /interfaceRefinementBandCells: options\.octree\.interfaceRefinementBandCells \?\? 4/);
+  assert.match(uniformSolverSource, /surfaceRefinementGradingLayers: options\.octree\.surfaceRefinementGradingLayers \?\? 1/);
   const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
   assert.doesNotMatch(methodSource, /faceVelocityTransport|powerDiagramProjection|leafSolver/);
   assert.match(methodSource, /globalFineLevelSetFactor: globalFineLevelSetFactor/);
@@ -981,8 +987,8 @@ test("pressure topology retains published fine-interface support across generati
     octreeProjectionShader.indexOf("fn pressureRetentionAt"),
   );
   assert.match(refinementEvidence,
-    /fineLeafSummary\(origin, size\)[\s\S]*summary\.complete[\s\S]*crossesInterface \|\| summary\.minimumAbsolutePhi <= protectionWidth/,
-    "the accepted Section 5 summary must retain the pressure-side interface and hysteresis band");
+    /fineLeafSummary\(origin, size\)[\s\S]*gradingLayers \* max\(2\.0, f32\(size\)\)[\s\S]*if \(crossesInterface\) \{ return true; \}[\s\S]*observedNearInterface && \(summary\.complete \|\| fineSummaryFactor == 1u\)/,
+    "partial factor-1 surface evidence must drive every coarse-to-fine pass while absent evidence remains inert");
   assert.match(octreeProjectionShader,
     /classifyTopologyTileSignature[\s\S]*pressureRefinementEvidence\(unpackOrigin\(owner\.packedOrigin\), owner\.size\)[\s\S]*priorRetention - 1u[\s\S]*PRESSURE_RETENTION_GENERATIONS[\s\S]*retention << 24u/,
     "the structural signature must refresh from current pressure evidence and otherwise decay retention");

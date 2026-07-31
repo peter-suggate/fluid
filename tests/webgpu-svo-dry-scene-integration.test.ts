@@ -95,6 +95,15 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
     "ray hits must not run the bounded ellipsoid closest-point distance solve to recover a normal");
   assert.match(drySceneSource, /fn nearestBodyIgnoring\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,
     "primary rays must reject distant dynamic bodies in world space before exact local intersection");
+  assert.match(drySceneSource,
+    /fn dryGlobalIllumination\(position:vec3f,normal:vec3f,ignoredBodyOwner:u32\)[^]*let rigidHit=nearestBodyIgnoring\(origin,direction,ignoredBodyOwner\)[^]*min\(sceneExit,rigidHit\.t\)[^]*select\(visibleThroughStatic,0\.0,rigidBlocked\)/,
+    "environmental GI must clip static radiance cones against the live rigid overlay in the current frame");
+  assert.match(drySceneSource,
+    /ignoredBodyOwner=select\(DRY_OWNER_NONE,hit\.ownerId,hit\.motionKind==DRY_GBUFFER_MOTION_RIGID\)/,
+    "a rigid GI receiver must ignore only itself while static receivers test every live body");
+  assert.match(drySceneSource,
+    /rootIndex=0u;rootIndex<2u[^]*candidate=\(-b\+select\(-root,root,rootIndex!=0u\)\)\/a/,
+    "capsule and cylinder side intersections must retain the positive exit root for inside rays");
   for (const binding of ["structural.control", "structural.nodes", "structural.leaves", "structural.materialOwners", "structural.publication.state", "source.pbrMaterials!.binding"]) {
     assert.ok(drySceneSource.includes(binding), `direct rendering must bind ${binding}`);
   }

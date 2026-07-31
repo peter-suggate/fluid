@@ -20,11 +20,17 @@
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
  *      _RADIANCE_RECONSTRUCTION (nearest | gated-linear | joint-bilateral | wide-relight | full-res-relight),
+ *      FLUID_SVO_DRY_FRAME_LIGHTING (direct | cone | gi, default cone),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
  *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default canonical-parametric),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
  *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only static-world override),
  *      FLUID_SVO_DRY_FRAME_SHADING (inline | split | auto-relight; default auto-relight),
+ *      FLUID_SVO_DRY_FRAME_RASTER_GLASS (1 enables coverage-scaled pane discovery),
+ *      FLUID_SVO_DRY_FRAME_RASTER_RIGID (1 enables current-frame rigid impostor discovery),
+ *      FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE (1 forces the raster arm below its adaptive body-count crossover),
+ *      FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION (1 measures cumulative authored-light shadow cost),
+ *      FLUID_SVO_DRY_FRAME_CONE_FANOUT (1 enables deterministic one-cone-per-lane fan-out),
  *      FLUID_SVO_DRY_FRAME_COHERENCE (off | static-primary; default off;
  *      static-primary requires split and reuses exact primary visibility),
  *      FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS (0 disables; diagnostic canonical primary-ray proxy),
@@ -40,6 +46,8 @@
  *      FLUID_SVO_DRY_FRAME_TIMING=wall bypasses timestamp queries and measures
  *      serialized submit-to-fence wall time (useful on Dawn builds where a
  *      timestamp-query feature is exposed but query resolution is unreliable).
+ *      FLUID_SVO_DRY_FRAME_PHASE_TRACE=1 captures one configured frame as
+ *      individually timestamped production render stages before timing.
  *      FLUID_SVO_DRY_FRAME_PROFILE_SECONDS runs a clean, continuously submitted
  *      render-only frame loop for external xctrace attachment and exits before
  *      the benchmark's timestamp queries, A/Bs, or readbacks.
@@ -55,7 +63,12 @@ import zlib from "node:zlib";
 import { environmentIndex, type EnvironmentId } from "../lib/environments";
 import { cameraPosition } from "../lib/math";
 import { defaultCamera, type CameraState, type SceneDescription } from "../lib/model";
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
+import {
+  DynamicGPUPerformanceTraceRecorder,
+  GPUPerformanceTraceRecorder,
+  type GPUTimestampPhase,
+  type PerformanceTrace,
+} from "../lib/performance-trace";
 import { boundingRadius, initializeRigidBodies } from "../lib/rigid-body";
 import { getScenePreset } from "../lib/scenes";
 import { buildSvoSceneGlass } from "../lib/svo-scene-glass";
@@ -66,6 +79,7 @@ import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UN
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
+import { SVO_LIGHTING_MODES, type SvoLightingMode } from "../lib/svo-render-mode";
 import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
@@ -76,6 +90,7 @@ import {
   SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL,
   SparseVoxelDrySceneRenderer,
   svoConePrepassSize,
+  svoDryRigidPrimaryStrategy,
   type SparseVoxelDrySceneData,
   type SvoBrickOccupancyMode,
   type SvoConeLightingScale,
@@ -125,14 +140,21 @@ const rawOutPath = process.env.FLUID_SVO_DRY_FRAME_RAW_OUT;
 const configuredRawOutPath = process.env.FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT;
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION ?? "full-res-relight";
+const lightingModeRaw = process.env.FLUID_SVO_DRY_FRAME_LIGHTING ?? "cone";
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
 const forceWallTiming = process.env.FLUID_SVO_DRY_FRAME_TIMING === "wall";
+const phaseTraceEnabled = process.env.FLUID_SVO_DRY_FRAME_PHASE_TRACE === "1";
 const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "canonical-parametric";
 const brickOccupancyModeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY ?? "off";
 const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "auto-relight";
+const rasterGlassDiscovery = process.env.FLUID_SVO_DRY_FRAME_RASTER_GLASS === "1";
+const rasterRigidDiscovery = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID === "1";
+const rasterRigidForced = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE === "1";
+const lightAttributionEnabled = process.env.FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION === "1";
+const coneFanout = process.env.FLUID_SVO_DRY_FRAME_CONE_FANOUT === "1";
 const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
 const renderBrickSizeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_SIZE;
@@ -171,6 +193,9 @@ assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
 assert.ok([1, 0.5, 0.25, 0.125].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, 0.25, or 0.125");
 assert.ok(["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstructionRaw),
   "FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
+assert.ok((SVO_LIGHTING_MODES as readonly string[]).includes(lightingModeRaw),
+  "FLUID_SVO_DRY_FRAME_LIGHTING must be direct, cone, or gi");
+const lightingMode = lightingModeRaw as SvoLightingMode;
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
   "FLUID_SVO_DRY_FRAME_PROFILE_SECONDS must be a non-negative number");
 assert.ok(renderBrickSize === undefined || renderBrickSize === 4 || renderBrickSize === 8,
@@ -427,10 +452,13 @@ const bodies = packBodies(scene);
 device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count));
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
-const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels, rayCoherenceMode);
+const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
+  shadingPath, screenSpaceTerminationPixels, rayCoherenceMode, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
-renderer.setLightingMode(process.env.FLUID_SVO_DRY_FRAME_LIGHTING === "direct" ? "direct" : "cone");
-renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale, coneRadianceReconstruction: radianceReconstruction });
+renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
+renderer.setLightingMode(lightingMode);
+renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
+  coneRadianceReconstruction: radianceReconstruction });
 function applyLighting(scale: SvoConeLightingScale, shadows = shadowsEnabled, ambientOcclusion = ambientOcclusionEnabled): void {
   renderer.setLightingOptions({ shadowsEnabled: shadows, ambientOcclusionEnabled: ambientOcclusion, coneLightingScale: scale });
 }
@@ -455,8 +483,12 @@ const target = device.createTexture({
 const primaryCoherenceKey = rayCoherenceMode === "static-primary"
   ? JSON.stringify({ scenePresetId, width, height, camera, bodyCount: bodies.count, sourceRevision: source.revision })
   : undefined;
-function encodeFrame(encoder: GPUCommandEncoder): void {
-  const result = renderer.encode(encoder, target, undefined, primaryCoherenceKey);
+function encodeFrame(
+  encoder: GPUCommandEncoder,
+  reuseKey = primaryCoherenceKey,
+  tracePhase?: (phase: GPUTimestampPhase) => void,
+): void {
+  const result = renderer.encode(encoder, target, undefined, reuseKey, tracePhase);
   assert.ok(result && result.encoded, "production dry-scene encode declined the frame (raster fallback)");
 }
 
@@ -481,6 +513,27 @@ if (coneScale !== 1 && profileSeconds <= 0) {
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
+
+let traceSampleId = 0;
+let configuredPhaseTrace: PerformanceTrace | undefined;
+if (phaseTraceEnabled && profileSeconds <= 0 && GPUPerformanceTraceRecorder.supported(device)) {
+  for (let attempt = 0; attempt < 3 && !configuredPhaseTrace; attempt += 1) {
+    const encoder = device.createCommandEncoder({ label: `SVO configured phase trace ${attempt}` });
+    const recorder = new DynamicGPUPerformanceTraceRecorder(device, ++traceSampleId, "presentation", "svo-dry-frame:configured");
+    recorder.begin(encoder);
+    encodeFrame(encoder, primaryCoherenceKey === undefined ? undefined : `${primaryCoherenceKey}|phase-trace-${attempt}`,
+      (phase) => recorder.completePhase(encoder, phase));
+    recorder.resolve(encoder);
+    device.queue.submit([encoder.finish()]);
+    configuredPhaseTrace = await recorder.read();
+  }
+  assert.ok(configuredPhaseTrace, "configured GPU phase trace did not resolve");
+  const restore = device.createCommandEncoder({ label: "SVO phase-trace cache restore" });
+  encodeFrame(restore);
+  device.queue.submit([restore.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  assert.deepEqual(validationErrors, [], "GPU validation errors during configured phase trace");
+}
 
 // ---------------------------------------------------------------------------
 // Clean external-profiler lane. Each frame is one command buffer containing
@@ -535,7 +588,6 @@ if (profileSeconds > 0) {
 // in-flight passes overlap on Metal and would inflate each pass's span.
 // ---------------------------------------------------------------------------
 let timingMethod: string;
-let traceSampleId = 0;
 async function timeFrames(count: number, label: string): Promise<number[]> {
   const samples: number[] = [];
   if (GPUPerformanceTraceRecorder.supported(device) && !forceWallTiming) {
@@ -624,6 +676,7 @@ if (coneScale !== 1) {
 // Attribution at the configured rate: full config, AO off, shadows off, both.
 // ---------------------------------------------------------------------------
 const attribution_ms: Record<string, number> = {};
+let lightAttribution_ms: Array<{ lightCount: number; median_ms: number; incremental_ms: number }> | undefined;
 if (coneScale !== 1) {
   for (const [key, shadows, ambientOcclusion] of [
     ["full", true, true],
@@ -642,6 +695,40 @@ if (coneScale !== 1) {
   }
   applyLighting(coneScale);
   assert.deepEqual(validationErrors, [], "GPU validation errors during attribution timing");
+
+  if (lightAttributionEnabled) {
+    lightAttribution_ms = [];
+    applyLighting(coneScale, true, false);
+    let previous = attribution_ms.bothOff;
+    const authoredLightCount = Math.min(
+      source.lights?.count ?? 0,
+      DEFAULT_SVO_RENDER_TUNING.maximumShadedLights,
+    );
+    for (let lightCount = 1; lightCount <= authoredLightCount; lightCount += 1) {
+      renderer.setRenderTuning({
+        ...DEFAULT_SVO_RENDER_TUNING,
+        coneLightingScale: coneScale,
+        coneRadianceReconstruction: radianceReconstruction,
+        maximumShadedLights: lightCount,
+      });
+      for (let index = 0; index < 2; index += 1) {
+        const encoder = device.createCommandEncoder({ label: `Light attribution warmup ${lightCount}` });
+        encodeFrame(encoder);
+        device.queue.submit([encoder.finish()]);
+      }
+      await device.queue.onSubmittedWorkDone();
+      const measured = median(await timeFrames(6, `Light attribution ${lightCount}`));
+      lightAttribution_ms.push({ lightCount, median_ms: measured, incremental_ms: measured - previous });
+      previous = measured;
+    }
+    renderer.setRenderTuning({
+      ...DEFAULT_SVO_RENDER_TUNING,
+      coneLightingScale: coneScale,
+      coneRadianceReconstruction: radianceReconstruction,
+    });
+    applyLighting(coneScale);
+    assert.deepEqual(validationErrors, [], "GPU validation errors during authored-light attribution timing");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +1054,7 @@ const result = {
     p95_ms: percentile95(samples),
     samples_ms: samples,
   },
+  configuredPhaseTrace,
   coneLighting: {
     scale: coneScale,
     radianceReconstruction,
@@ -980,6 +1068,7 @@ const result = {
       reduced_ms: interleaved.reduced_ms,
     } : undefined,
     attribution_ms: coneScale !== 1 ? attribution_ms : undefined,
+    lightAttribution_ms,
     errorStats,
     fallback,
     images,
@@ -990,10 +1079,15 @@ const result = {
     sceneId: scene.sceneId,
     environment: environmentId,
     quality: "balanced",
-    lightingMode: "cone",
+    lightingMode,
+    rasterGlassDiscovery,
+    rasterRigidDiscovery,
+    rasterRigidForced,
+    rigidPrimaryStrategy: svoDryRigidPrimaryStrategy(rasterRigidForced ? 12 : bodies.count, rasterRigidDiscovery),
     shadowsEnabled,
     ambientOcclusionEnabled,
     coneLightingScale: coneScale,
+    coneFanout,
     temporalAccumulation: false,
     grid: { nx: solver.info.nx, ny: solver.info.ny, nz: solver.info.nz },
     brickSize: source.structural!.domain.brickSize,
@@ -1019,6 +1113,12 @@ const result = {
     rigidBodyCount: scene.rigidBodies.length,
     terrain: Boolean(scene.terrain),
     nodeMipPyramid: { ready: coneMipReady, generation: nodeMip?.generation ?? 0, pages: nodeMip?.plan.pages.length ?? 0 },
+    tetrahedralRadiance: {
+      ready: source.tetrahedralRadiance !== undefined,
+      generation: source.tetrahedralRadiance?.generation ?? 0,
+      pages: source.tetrahedralRadiance?.plan.pages.length ?? 0,
+      blackPages: source.tetrahedralRadiance?.blackSlots.size ?? 0,
+    },
     wideFanout: Boolean(source.wideFanout),
     compactHierarchy: source.compactHierarchy ? {
       ready: true,

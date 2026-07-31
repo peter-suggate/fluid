@@ -136,7 +136,7 @@ export interface CompactOctreeFieldReconstruction extends CompactOctreeFieldEvid
   readonly field: Float32Array;
 }
 
-/** Required factor-4 acceptance proof; a plausible coarse-only field is insufficient. */
+/** Required fine-band acceptance proof; a plausible coarse-only field is insufficient. */
 export function compactOctreeFieldEvidenceIsAcceptable(evidence: CompactOctreeFieldEvidence): boolean {
   const cleanCurrentTopology = evidence.topologyFlags === 0
     && evidence.topologyPublished === true && evidence.topologyRolledBack === false

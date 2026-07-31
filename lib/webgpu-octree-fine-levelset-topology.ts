@@ -179,16 +179,20 @@ export interface FineLevelSetTopologyBandPlan
 export interface FineLevelSetLeafBrickBounds {
   readonly first: readonly [number, number, number];
   readonly last: readonly [number, number, number];
+  /** Retained for the factor-4/factor-8 API. Fractional at factor 1. */
   readonly bricksPerFinestCell: number;
+  /** Integer inverse mapping used when several finest cells share one brick. */
+  readonly finestCellsPerBrick?: number;
   readonly brickCount: number;
 }
 
 /**
  * CPU mirror of the FineSeedLeaf -> global fine-page mapping used by the seed
- * shader.  With B4 pages, factor four maps a finest cell to one page while
- * factor eight maps it to the complete 2 x 2 x 2 page block.  Keeping this
- * mapping explicit prevents octree row IDs or the one-page factor-4 shortcut
- * from leaking into factor-8 topology publication.
+ * shader. With B4 pages, factor one maps four finest cells per axis to one
+ * page, factor four maps a finest cell to one page, and factor eight maps it
+ * to the complete 2 x 2 x 2 page block. Keeping this mapping explicit
+ * prevents octree row IDs or the one-page factor-4 shortcut from leaking into
+ * either coarse-baseline or factor-8 topology publication.
  */
 export function planFineLevelSetLeafBrickBounds(
   plan: Pick<WebGPUFineLevelSetBrickSource["plan"],
@@ -196,8 +200,9 @@ export function planFineLevelSetLeafBrickBounds(
   origin: readonly [number, number, number],
   size: number,
 ): FineLevelSetLeafBrickBounds {
-  if (plan.brickResolution !== 4 || (plan.fineFactor !== 4 && plan.fineFactor !== 8)) {
-    throw new RangeError("Fine leaf mapping requires a factor-4/factor-8 B4 lattice");
+  if (plan.brickResolution !== 4
+    || (plan.fineFactor !== 1 && plan.fineFactor !== 4 && plan.fineFactor !== 8)) {
+    throw new RangeError("Fine leaf mapping requires a factor-1/factor-4/factor-8 B4 lattice");
   }
   if (!Number.isSafeInteger(size) || size < 1
     || origin.some((value, axis) => !Number.isSafeInteger(value) || value < 0
@@ -205,11 +210,19 @@ export function planFineLevelSetLeafBrickBounds(
     throw new RangeError("Fine leaf mapping is outside the finest-cell domain");
   }
   const bricksPerFinestCell = plan.fineFactor / plan.brickResolution;
-  const first = origin.map((value) => value * bricksPerFinestCell) as [number, number, number];
+  const finestCellsPerBrick = plan.brickResolution / plan.fineFactor;
+  // Mirror the shader's integer mapping exactly. In particular, factor 1 is
+  // many-to-one: all finest cells in [4k, 4k + 3] seed brick k.
+  const first = origin.map((value) =>
+    Math.floor(value * plan.fineFactor / plan.brickResolution)) as [number, number, number];
   const last = origin.map((value, axis) => Math.min(plan.brickDimensions[axis] - 1,
-    (value + size) * bricksPerFinestCell - 1)) as [number, number, number];
+    Math.floor(((value + size) * plan.fineFactor - 1) / plan.brickResolution))) as [number, number, number];
   const brickCount = (last[0] - first[0] + 1) * (last[1] - first[1] + 1) * (last[2] - first[2] + 1);
-  return { first, last, bricksPerFinestCell, brickCount };
+  return {
+    first, last, bricksPerFinestCell,
+    ...(finestCellsPerBrick > 1 ? { finestCellsPerBrick } : {}),
+    brickCount,
+  };
 }
 
 /** Converts the Section 5 physical support requirements to block rings.
@@ -354,11 +367,19 @@ function powerOfTwoCapacity(value: number): number {
   return capacity;
 }
 
-export function fineLevelSetLeafSeedAllocatedBytes(maximumResidentBricks: number): number {
+export function fineLevelSetLeafSeedAllocatedBytes(
+  maximumResidentBricks: number,
+  minimumRawRecordCapacity = 0,
+): number {
   if (!Number.isSafeInteger(maximumResidentBricks) || maximumResidentBricks < 1) {
     throw new RangeError("Fine seed resident capacity must be positive");
   }
-  const sortCapacity = powerOfTwoCapacity(Math.max(256, 2 * maximumResidentBricks));
+  if (!Number.isSafeInteger(minimumRawRecordCapacity) || minimumRawRecordCapacity < 0) {
+    throw new RangeError("Fine seed raw-record capacity must be a non-negative integer");
+  }
+  const sortCapacity = powerOfTwoCapacity(
+    Math.max(256, 2 * maximumResidentBricks, minimumRawRecordCapacity),
+  );
   // Header + sorted keys/tags/planes, parameters, one four-word record arena,
   // one bounded block-prefix arena, and eight control words. The former
   // ping-pong radix records and 256-bin histograms are deliberately absent.
@@ -422,13 +443,15 @@ export interface FineLevelSetPageDeltaLayout {
   readonly totalBytes: number;
 }
 
-export const FINE_LEVELSET_DIRTY_ORACLE_ENV = "FLUID_DIRTY_ORACLE";
-export function fineLevelSetDirtyOracleMembershipRequested(
+export const FINE_LEVELSET_REASON_CONES_ENV = "FLUID_FINE_REASON_CONES";
+/** Product default. `0` retains the previous, sound broad-interface cone as a
+ * clean measurement control; malformed values fail closed to the product path. */
+export function fineLevelSetReasonConesRequested(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.[FINE_LEVELSET_DIRTY_ORACLE_ENV] === "membership";
+  return resolved?.[FINE_LEVELSET_REASON_CONES_ENV] !== "0";
 }
 
 export function planFineLevelSetPageDeltaLayout(pageCapacity: number): FineLevelSetPageDeltaLayout {
@@ -462,6 +485,49 @@ export function planFineLevelSetPageDeltaLayout(pageCapacity: number): FineLevel
     totalWords, totalBytes: totalWords * 4 };
 }
 
+export interface FineLevelSetLeafSeedSourceCapacity {
+  /** Maximum compact octree leaf/candidate records bound to either seed path. */
+  readonly maximumSourceLeaves: number;
+}
+
+/**
+ * Factor-1 expands source leaves before deterministic sort/run deduplication.
+ * Bound that raw stream independently of resident pages: as many as 4^3
+ * finest leaves can legitimately share one B4 brick.
+ *
+ * The production octree supplies both source bounds. Direct users that omit
+ * them receive the conservative domain bound of one finest-cell record per
+ * finest cell. Factor 4/8 intentionally return zero so their established
+ * `2 * maximumResidentBricks` allocation remains bit-for-bit unchanged.
+ */
+export function maximumFineLevelSetLeafSeedRawRecords(
+  plan: Pick<WebGPUFineLevelSetBrickSource["plan"],
+  "fineFactor" | "brickResolution" | "logicalBrickCount">,
+  source?: FineLevelSetLeafSeedSourceCapacity,
+): number {
+  if (plan.fineFactor !== 1) return 0;
+  if (plan.brickResolution !== 4) {
+    throw new RangeError("Factor-1 leaf seed sizing requires the production B4 lattice");
+  }
+  const domainBound = plan.logicalBrickCount * plan.brickResolution ** 3;
+  if (!Number.isSafeInteger(domainBound)) {
+    throw new RangeError("Factor-1 leaf seed record bound exceeds exact integer range");
+  }
+  if (!source) return domainBound;
+  if (!Number.isSafeInteger(source.maximumSourceLeaves) || source.maximumSourceLeaves < 1) {
+    throw new RangeError("Fine seed source-leaf capacity must be positive");
+  }
+  // Source leaves do not overlap. Sub-B4 leaves each emit one (possibly
+  // duplicate) record and are bounded by the leaf count. Leaves at least B4
+  // emit their disjoint brick volume, bounded by the logical brick domain.
+  // Adding those two populations is conservative for a mixed-size frontier.
+  const sourceBound = source.maximumSourceLeaves + plan.logicalBrickCount;
+  if (!Number.isSafeInteger(sourceBound)) {
+    throw new RangeError("Fine seed source record bound exceeds exact integer range");
+  }
+  return Math.min(domainBound, sourceBound);
+}
+
 /** GPU-only bridge from existing compact FineSeedLeaf/core candidates to global brick keys. */
 export class WebGPUFineLevelSetLeafSeeds {
   readonly buffer: GPUBuffer;
@@ -478,9 +544,26 @@ export class WebGPUFineLevelSetLeafSeeds {
 
   constructor(private readonly device: GPUDevice, readonly target: WebGPUFineLevelSetBrickSource,
     analytic?: { initialCondition: "dam-break" | "tank-fill"; fillFraction: number;
-      damBreakDimensions?: readonly [number, number, number] }) {
-    this.sortCapacity = powerOfTwoCapacity(Math.max(256, 2 * target.plan.maximumResidentBricks));
-    this.allocatedBytes = fineLevelSetLeafSeedAllocatedBytes(target.plan.maximumResidentBricks);
+      damBreakDimensions?: readonly [number, number, number] },
+    sourceCapacity?: FineLevelSetLeafSeedSourceCapacity) {
+    const rawRecordCapacity = maximumFineLevelSetLeafSeedRawRecords(
+      target.plan, sourceCapacity,
+    );
+    this.sortCapacity = powerOfTwoCapacity(Math.max(
+      256, 2 * target.plan.maximumResidentBricks, rawRecordCapacity,
+    ));
+    const scratchBytes = (5 * this.sortCapacity + 8) * 4;
+    const maximumBindingBytes = Math.min(
+      device.limits.maxStorageBufferBindingSize,
+      device.limits.maxBufferSize,
+    );
+    if (scratchBytes > maximumBindingBytes) {
+      throw new RangeError(`Fine seed deterministic sort scratch requires ${scratchBytes} bytes, `
+        + `exceeding the device storage-buffer binding limit ${maximumBindingBytes}`);
+    }
+    this.allocatedBytes = fineLevelSetLeafSeedAllocatedBytes(
+      target.plan.maximumResidentBricks, rawRecordCapacity,
+    );
     this.buffer = device.createBuffer({ label: "global fine brick seed keys",
       size: (8 + 10 * target.plan.maximumResidentBricks) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
@@ -984,6 +1067,7 @@ export class WebGPUFineLevelSetTopology {
       { binding: 22, resource: resource(this.dispatchMeta) },
       { binding: 23, resource: resource(publication.kind === "delta"
         ? publication.producer.buffer : this.emptySeeds) },
+      ...extraPublishEntries,
     ];
     const publishEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: resource(this.params) }, { binding: 3, resource: resource(this.next.metadata) },
@@ -1060,7 +1144,7 @@ export class WebGPUFineLevelSetTopology {
       run(this.discoverPipeline, discoverEntries, "Discover cold global fine interface bricks",
         Math.ceil(plan.maximumResidentBricks / 64), [0, 1, 2, 3, 4, 18, 21]);
       run(this.externalSeedPipeline, discoverEntries, "Insert cold global fine seed bricks",
-        Math.ceil(plan.maximumResidentBricks / 64), [0, 8, 14, 18, 21]);
+        Math.ceil(plan.maximumResidentBricks / 64), [0, 8, 9, 14, 18, 21]);
       runIdentity(this.reduceTopologyErrorRecordsPipeline, discoverEntries,
         topologyErrorBlocks, 1, [0, 20, 21]);
       runIdentity(this.reduceTopologyErrorGroupsPipeline, discoverEntries,
@@ -1119,7 +1203,7 @@ export class WebGPUFineLevelSetTopology {
       const algorithmDiagnostics = octreeAlgorithmDiagnosticsEnabled();
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic before recurring fine-band scatter");
       runIdentity(this.publishRecurringSparseBandPipeline, discoverEntries,
-        1, 1, [0, 6, 7, 14, 16, 19, 21, 22, 23],
+        1, 1, [0, 6, 7, 14, 15, 16, 19, 21, 22, 23],
         "Publish recurring sparse fine band (compact seed classification and rank)");
       // The cubic halo is a pair grid, not a per-seed loop: one invocation per
       // (compact seed, halo offset) issuing one idempotent OR. Sizing it needs
@@ -1132,7 +1216,7 @@ export class WebGPUFineLevelSetTopology {
         FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES);
       runIndirect(this.scatterRecurringSeedHaloPipeline, discoverEntries,
         "Scatter recurring fine-band seed halos",
-        FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT, [0, 7, 19, 21, 23]);
+        FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT, [0, 7, 15, 19, 21, 23]);
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scatter");
       const recurringBlocks = Math.ceil(plan.logicalBrickCount / 256);
       const recurringSuperBlocks = Math.ceil(recurringBlocks / 256);
@@ -1152,7 +1236,7 @@ export class WebGPUFineLevelSetTopology {
       runIdentity(this.finalizeRecurringSparseBandPipeline, discoverEntries,
         1, 1, [0, 7, 20, 21]);
       runIdentity(this.scatterRecurringSparseBandPipeline, discoverEntries,
-        recurringBlocks, 1, [0, 6, 7, 20, 21]);
+        recurringBlocks, 1, [0, 6, 7, 15, 20, 21]);
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scan");
     }
     if (publication.kind === "bootstrap") {
@@ -1252,7 +1336,7 @@ export class WebGPUFineLevelSetTopology {
     runIndirect(this.carryWorkPipeline, lifecycleEntries, "Gather compact global fine work A/B payloads",
       8, [0, 3, 4, 7, 14, 16, 24, 25, 26, 30, 31]);
     runIndirect(this.snapshotPipeline, lifecycleEntries, "Snapshot exact global fine rollback pages",
-      4, [0, 7, 10, 15, 16, 21, 25]);
+      4, [0, 7, 10, 15, 16, 21, 24, 25]);
     runIndirect(this.initializePipeline, lifecycleEntries, "Initialize added global fine samples",
       2, [0, 3, 5, 6, 7, 8, 14, 15, 21,
         ...extraPublishEntries.map((entry) => entry.binding)]);
@@ -1369,7 +1453,7 @@ export class WebGPUFineLevelSetTopology {
 
 export function makeFineLevelSetTopologyWGSL(
   coarsePhiWGSL: string,
-  dirtyOracleMembership = fineLevelSetDirtyOracleMembershipRequested(),
+  reasonCones = fineLevelSetReasonConesRequested(),
   deltaRadiusMask = typeof process === "undefined"
     || process.env.FLUID_FINE_DELTA_RADIUS_MASK !== "0",
   deltaNeighborQuery = typeof process !== "undefined"
@@ -1377,7 +1461,7 @@ export function makeFineLevelSetTopologyWGSL(
 ): string {
   return /* wgsl */ `
 	const INVALID:u32=0xffffffffu;const VALID:u32=1u;const CAPACITY:u32=1u;const NONFINITE:u32=4u;const MALFORMED:u32=8u;
-const DIRTY_ORACLE_MEMBERSHIP:bool=${dirtyOracleMembership ? "true" : "false"};
+const REASON_CONES:bool=${reasonCones ? "true" : "false"};
 const DELTA_RADIUS_MASK:bool=${deltaRadiusMask ? "true" : "false"};
 const DELTA_NEIGHBOR_QUERY:bool=${deltaNeighborQuery ? "true" : "false"};
 const DELTA_DIRTY:u32=0x100u;const DELTA_SUPPORT:u32=0x200u;
@@ -1472,7 +1556,8 @@ fn currentFinePublished()->bool{return arrayLength(&currentWorklist)>=7u&&curren
  &&currentWorklist[2]==params.pageCapacity&&(currentWorklist[3]&3u)==3u&&currentWorklist[5]==1u&&currentWorklist[6]==1u;}
 fn currentFinePopulated()->bool{return currentFinePublished()&&currentWorklist[1]>0u;}
 fn exactAnalyticSeedPhi(finestPoint:vec3f)->f32{if(arrayLength(&externalSeeds)<4u){return 3.402823e38;}let mode=externalSeeds[2u];let fill=bitcast<f32>(externalSeeds[3u]);if(mode==0u||!finite(fill)||fill<0.0||fill>1.0){return 3.402823e38;}let extent=vec3f(params.sampleDimensions)*params.fineCellWidth;let point=params.domainOrigin+finestPoint*(params.fineCellWidth*f32(params.fineFactor));if(mode==1u){return point.y-fill*extent.y;}let heightFraction=max(0.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);let damOffset=4u+10u*params.pageCapacity;var authored=vec3f(0.0);if(arrayLength(&externalSeeds)>=damOffset+3u){authored=vec3f(bitcast<f32>(externalSeeds[damOffset]),bitcast<f32>(externalSeeds[damOffset+1u]),bitcast<f32>(externalSeeds[damOffset+2u]));}let damDimensions=select(fallback,authored,any(authored>vec3f(0.0)));let exposedMaximum=params.domainOrigin+damDimensions;let q=point-exposedMaximum;return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
-fn externalSeedPhi(key:u32,finestPoint:vec3f)->f32{if(params.affineSeeds==0u||currentFinePopulated()){return 3.402823e38;}let analytic=exactAnalyticSeedPhi(finestPoint);if(finite(analytic)){return analytic;}let tagged=externalSeedTaggedValue(key);if(tagged==INVALID){return 3.402823e38;}let seed=tagged&0x7fffffffu;if(seed>=params.pageCapacity){return 3.402823e38;}let planeBase=4u+2u*params.pageCapacity;let base=planeBase+seed*8u;let leafOrigin=vec3f(vec3u(externalSeeds[base],externalSeeds[base+1u],externalSeeds[base+2u]));let size=f32(externalSeeds[base+3u]);let centre=leafOrigin+vec3f(0.5*size);let value=bitcast<f32>(externalSeeds[base+4u]);let gradient=vec3f(bitcast<f32>(externalSeeds[base+5u]),bitcast<f32>(externalSeeds[base+6u]),bitcast<f32>(externalSeeds[base+7u]));return value+dot(gradient,finestPoint-centre);}
+fn externalSeedPhi(key:u32,finestPoint:vec3f)->f32{if(params.affineSeeds==0u||currentFinePopulated()){return 3.402823e38;}let analytic=exactAnalyticSeedPhi(finestPoint);if(finite(analytic)){return analytic;}if(params.fineFactor==1u){return 3.402823e38;}let tagged=externalSeedTaggedValue(key);if(tagged==INVALID){return 3.402823e38;}let seed=tagged&0x7fffffffu;if(seed>=params.pageCapacity){return 3.402823e38;}let planeBase=4u+2u*params.pageCapacity;let base=planeBase+seed*8u;let leafOrigin=vec3f(vec3u(externalSeeds[base],externalSeeds[base+1u],externalSeeds[base+2u]));let size=f32(externalSeeds[base+3u]);let centre=leafOrigin+vec3f(0.5*size);let value=bitcast<f32>(externalSeeds[base+4u]);let gradient=vec3f(bitcast<f32>(externalSeeds[base+5u]),bitcast<f32>(externalSeeds[base+6u]),bitcast<f32>(externalSeeds[base+7u]));return value+dot(gradient,finestPoint-centre);}
+fn externalSeedClassificationPhi(key:u32,finestPoint:vec3f)->f32{let seeded=externalSeedPhi(key,finestPoint);if(finite(seeded)||params.fineFactor!=1u){return seeded;}let position=params.domainOrigin+finestPoint*(params.fineCellWidth*f32(params.fineFactor));return sampleCoarseOctreePhi(position);}
 // The initial A/B source is a deliberately published empty generation. It is
 // still a cold start: classify ordinary analytic/affine leaf keys by an actual
 // zero crossing so only interface blocks precede the paper's one-ring
@@ -1480,7 +1565,7 @@ fn externalSeedPhi(key:u32,finestPoint:vec3f)->f32{if(params.affineSeeds==0u||cu
 // and last sample centres. A face can lie exactly between two SPGrid pages;
 // centre-only bounds then reject both pages and punch a vertical gap in the
 // high-resolution interface band.
-fn externalAffineInterfaceBrick(key:u32)->bool{if(params.affineSeeds==0u||currentFinePopulated()){return false;}let brick=unpackBrick(key);let first=vec3f(brick*params.brickResolution)/f32(params.fineFactor);let last=vec3f((brick+vec3u(1u))*params.brickResolution)/f32(params.fineFactor);var minimum=3.402823e38;var maximum=-3.402823e38;for(var corner=0u;corner<8u;corner+=1u){let point=vec3f(select(first.x,last.x,(corner&1u)!=0u),select(first.y,last.y,(corner&2u)!=0u),select(first.z,last.z,(corner&4u)!=0u));let value=externalSeedPhi(key,point);if(!finite(value)){return false;}minimum=min(minimum,value);maximum=max(maximum,value);}return minimum<=0.0&&maximum>=0.0;}
+fn externalAffineInterfaceBrick(key:u32)->bool{if(params.affineSeeds==0u||currentFinePopulated()){return false;}let brick=unpackBrick(key);let first=vec3f(brick*params.brickResolution)/f32(params.fineFactor);let last=vec3f((brick+vec3u(1u))*params.brickResolution)/f32(params.fineFactor);var minimum=3.402823e38;var maximum=-3.402823e38;for(var corner=0u;corner<8u;corner+=1u){let point=vec3f(select(first.x,last.x,(corner&1u)!=0u),select(first.y,last.y,(corner&2u)!=0u),select(first.z,last.z,(corner&4u)!=0u));let value=externalSeedClassificationPhi(key,point);if(!finite(value)){return false;}minimum=min(minimum,value);maximum=max(maximum,value);}return minimum<=0.0&&maximum>=0.0;}
 fn linearInvocation(wid:vec3u,nwg:vec3u,local:u32)->u32{return fineLinearWorkgroup(wid,nwg)*64u+local;}
 fn indirectLinearInvocation(wid:vec3u,local:u32)->u32{
  return (wid.y*params.maxWorkgroups+wid.x)*64u+local;
@@ -1593,6 +1678,7 @@ fn recurringProducerCount()->u32{return min(transportDelta[0],params.pageCapacit
 fn recurringProducerChanged(index:u32)->u32{return transportDelta[8u+params.pageCapacity+index];}
 var<workgroup> recurringFlags:u32;
 var<workgroup> recurringSeedLanes:array<u32,256>;
+var<workgroup> recurringRepairLanes:array<u32,256>;
 // The logical brick key is already a perfect dense address. Scatter each
 // compact seed's bounded Chebyshev halo into that address space: bit zero is
 // exact seed membership and bit one is desired-band membership. Atomic OR is
@@ -1681,7 +1767,7 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
   }
  }
  storageBarrier();workgroupBarrier();
- var localSeeds=0u;let producerCount=recurringProducerCount();
+ var localSeeds=0u;var localRepairs=0u;let producerCount=recurringProducerCount();
  let inflowKey=recurringInflowSeedKey();let ownsInflow=local==0u&&inflowKey!=INVALID;
  if(ownsInflow){localSeeds+=1u;}
  for(var item=local;item<producerCount;item+=256u){
@@ -1695,10 +1781,13 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
   }
   sparseCandidates[item]=interfaceKey;
   if(interfaceKey!=INVALID){localSeeds+=1u;}
+  localRepairs+=select(0u,1u,producerChangedContains(key));
  }
- errorOrLanes[local]=localError;recurringSeedLanes[local]=localSeeds;workgroupBarrier();var width=128u;
+ errorOrLanes[local]=localError;recurringSeedLanes[local]=localSeeds;
+ recurringRepairLanes[local]=localRepairs;workgroupBarrier();var width=128u;
  loop{if(width==0u){break;}if(local<width){errorOrLanes[local]|=errorOrLanes[local+width];}
   if(local<width){recurringSeedLanes[local]+=recurringSeedLanes[local+width];}
+  if(local<width){recurringRepairLanes[local]+=recurringRepairLanes[local+width];}
   workgroupBarrier();width>>=1u;}
  // Rank the lane counts so every lane owns a contiguous run of the seed list.
  // Each lane rereads only the producers it classified, so the compacted order
@@ -1718,8 +1807,19 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
   var ranked=select(0u,recurringSeedLanes[0],recurringFlags==0u);
   // The pair grid is seeds*volume invocations. Refuse to author a wrapped
   // count: an under-sized halo dispatch would silently under-cover the band.
-  let volume=recurringHaloVolume();let deltaVolume=select(0u,deltaRadiusVolume(),DELTA_RADIUS_MASK);
-  let producers=recurringProducerCount();
+  let volume=recurringHaloVolume();
+  let producers=producerCount;
+  // Transport authors repair as a subset of broad membership, and the
+  // compact producer stream contains each live physical page at most once.
+  // Counting every broad key with its exact per-page repair marker is therefore
+  // a collision-free set-equality fingerprint, not a hash or count heuristic.
+  let broadIsExact=REASON_CONES&&recurringRepairLanes[0]==producers;
+  pageDelta[10]=select(0u,2u,broadIsExact);
+  // The clean control always scatters the sound broad cone. Product reuses it
+  // only when the exact repair fingerprint proves the two producer sets equal;
+  // otherwise the later classifier walks the compact reason stream directly.
+  let deltaVolume=select(0u,deltaRadiusVolume(),
+    DELTA_RADIUS_MASK&&(!REASON_CONES||broadIsExact));
   var bandPairs=0u;var deltaPairs=0u;
   if(volume==0u||ranked>(0xffffffffu-255u)/volume){recurringFlags|=CAPACITY;ranked=0u;}
   else{bandPairs=ranked*volume;
@@ -1744,7 +1844,8 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  let bandPairs=seeds*volume;
  if(pair<bandPairs){let seed=pair/volume;
   recurringScatterMembership(sparseCandidates[recurringSeedSlot(seed)],pair-seed*volume);return;}
- if(DELTA_RADIUS_MASK){let deltaPair=pair-bandPairs;let deltaVolume=deltaRadiusVolume();
+ if(DELTA_RADIUS_MASK&&(!REASON_CONES||pageDelta[10]==2u)){
+  let deltaPair=pair-bandPairs;let deltaVolume=deltaRadiusVolume();
   let producer=deltaPair/deltaVolume;if(producer<recurringProducerCount()){
    recurringScatterDeltaRadii(recurringProducerChanged(producer),deltaPair-producer*deltaVolume);}}
 }
@@ -1769,7 +1870,8 @@ fn recurringDesiredTotal()->u32{let count=desiredLogicalCount();if(count==0u){re
  @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
  let key=wid.x*256u+local;if(key>=desiredLogicalCount()){return;}
  let membership=atomicLoad(&topologyErrors[key]);
- atomicStore(&topologyErrors[key],select(0u,membership&(DELTA_DIRTY|DELTA_SUPPORT),DELTA_RADIUS_MASK));
+ atomicStore(&topologyErrors[key],select(0u,membership&(DELTA_DIRTY|DELTA_SUPPORT),
+  DELTA_RADIUS_MASK&&(!REASON_CONES||pageDelta[10]==2u)));
  if(control[0]==0u&&(membership&2u)!=0u){
   let output=desiredScan[key];if(output<params.pageCapacity){targetB[7u+output]=key;}
  }
@@ -1810,7 +1912,7 @@ fn identityScanScratch(stream:u32,index:u32)->u32{return identityScanScratchOffs
 fn carriedPage(key:u32)->u32{let old=currentLookup(key);if(old==INVALID||old>=params.pageCapacity){return INVALID;}
  let base=old*10u;return select(INVALID,old,currentMetadata[base+1u]==key&&currentMetadata[base+2u]==params.currentGeneration);}
 fn identityCandidate(stream:u32,item:u32)->bool{
- if(pageDelta[10]==1u){
+ if((pageDelta[10]&1u)!=0u){
   if(item>=min(control[2],params.pageCapacity)){return false;}
   if(stream==0u){return pageDelta[dirtyCandidatesOffset()+item]!=INVALID;}
   if(stream==1u){return pageDelta[supportCandidatesOffset()+item]!=INVALID;}
@@ -1823,7 +1925,7 @@ fn identityCandidate(stream:u32,item:u32)->bool{
  return pageDelta[dirtyPagesOffset()+item]!=0u;
 }
 fn identityPrefix(stream:u32,item:u32)->u32{
- if(pageDelta[10]==1u){
+ if((pageDelta[10]&1u)!=0u){
   if(stream==0u){return pageDelta[changedKeysOffset()+item];}
   if(stream==1u){return pageDelta[changedKeysOffset()+params.pageCapacity+item];}
   if(stream==2u){return desiredCandidates[item];}
@@ -1834,7 +1936,7 @@ fn identityPrefix(stream:u32,item:u32)->u32{
  return pageDelta[changedKeysOffset()+item];
 }
 fn writeIdentityPrefix(stream:u32,item:u32,value:u32){
- if(pageDelta[10]==1u){
+ if((pageDelta[10]&1u)!=0u){
   if(stream==0u){pageDelta[changedKeysOffset()+item]=value;}
   else if(stream==1u){pageDelta[changedKeysOffset()+params.pageCapacity+item]=value;}
   else if(stream==2u){desiredCandidates[item]=value;}
@@ -2019,7 +2121,8 @@ fn identityTotal(stream:u32,count:u32)->u32{
 }
 @compute @workgroup_size(1) fn prepareFinePageDeltaExpansion(){if(control[0]!=0u){return;}let desired=min(control[2],params.pageCapacity);
  let changedDesired=identityTotal(0u,desired);let changed=changedDesired+min(pageDelta[12],params.pageCapacity);
- pageDelta[0]=changed;pageDelta[10]=1u;pageDelta[13]=changedDesired;
+ let broadIsExact=pageDelta[10]==2u;
+ pageDelta[0]=changed;pageDelta[10]=1u|select(0u,2u,broadIsExact);pageDelta[13]=changedDesired;
  writeDeltaDispatch(lifecycleDispatchOffset()+9u,(changed+63u)/64u);
  let affectedGroups=(max(desired,min(pageDelta[12],params.pageCapacity))+63u)/64u;
  writeDeltaDispatch(lifecycleDispatchOffset()+12u,affectedGroups);writeIndirectDispatch(3u,affectedGroups);}
@@ -2043,6 +2146,12 @@ fn changedNeighborRadii(key:u32)->vec2u{
 }
 fn interfaceNeighborRadii(key:u32)->vec2u{
  if(params.recurringDelta==0u){return changedNeighborRadii(key);}
+ // The transport producer's exact repair count is a GPU-resident fingerprint.
+ // When it equals broad interface membership, the already-scattered mask is
+ // exact and costs no extra scheduling. Otherwise classify from the compact
+ // repair/addition/retirement stream; every reason retains the complete
+ // authored dirty/support radii required by Aanjaneya §5 fast marching.
+ if(REASON_CONES&&(pageDelta[10]&2u)==0u){return changedNeighborRadii(key);}
  if(DELTA_RADIUS_MASK){let membership=atomicLoad(&topologyErrors[key]);
   return vec2u(select(0u,1u,(membership&DELTA_DIRTY)!=0u),
     select(0u,1u,(membership&DELTA_SUPPORT)!=0u));}
@@ -2061,21 +2170,6 @@ fn interfaceNeighborRadii(key:u32)->vec2u{
   let distance=max(delta.x,max(delta.y,delta.z));dirty|=select(0u,1u,distance<=i32(params.dirtyHaloRings));
   support|=select(0u,1u,distance<=i32(params.supportHaloRings));}
  return vec2u(dirty,support);
-}
-// X-3 quality-invalid arm. Only newly allocated and retired logical page keys
-// seed a one-brick Chebyshev ring. Transport/fraction changes are ignored on
-// purpose so this measures the classification ceiling rather than correctness.
-fn membershipNeighborRadii(key:u32)->vec2u{
- if(key>=desiredLogicalCount()){return vec2u(0u);}let origin=vec3i(unpackBrick(key));
- let added=min(pageDelta[11],params.pageCapacity);let retired=min(pageDelta[12],params.pageCapacity);
- var hit=0u;
- for(var item=0u;item<added&&hit==0u;item+=1u){let id=pageDelta[addedPagesOffset()+item];
-  if(id<params.pageCapacity&&sourceC[id*10u+2u]==params.nextGeneration){let changedKey=sourceC[id*10u+1u];
-   let delta=abs(origin-vec3i(unpackBrick(changedKey)));hit|=select(0u,1u,max(delta.x,max(delta.y,delta.z))<=1);}}
- for(var item=0u;item<retired&&hit==0u;item+=1u){let id=pageDelta[retiredPagesOffset()+item];
-  if(id<params.pageCapacity&&currentMetadata[id*10u+2u]==params.currentGeneration){let changedKey=currentMetadata[id*10u+1u];
-   let delta=abs(origin-vec3i(unpackBrick(changedKey)));hit|=select(0u,1u,max(delta.x,max(delta.y,delta.z))<=1);}}
- return vec2u(hit);
 }
 fn repairNeighbor(key:u32)->bool{
  if(key>=desiredLogicalCount()){return false;}let origin=vec3i(unpackBrick(key));
@@ -2096,8 +2190,7 @@ fn repairNeighbor(key:u32)->bool{
  if(work<desired){let id=sourceD[7u+work];var error=0u;var key=INVALID;
   if(id>=params.pageCapacity||sourceC[id*10u+2u]!=params.nextGeneration){error=MALFORMED;}
   else{key=sourceC[id*10u+1u];if(key>=desiredLogicalCount()){error=MALFORMED;}}
-  let affected=select(vec2u(0u),select(interfaceNeighborRadii(key),membershipNeighborRadii(key),
-    DIRTY_ORACLE_MEMBERSHIP),error==0u);
+  let affected=select(vec2u(0u),interfaceNeighborRadii(key),error==0u);
   let carried=error==0u&&currentMetadata[id*10u+1u]==key&&currentMetadata[id*10u+2u]==params.currentGeneration;
   // Dirty is the complete physical output halo, not merely the pages whose
   // phase mask changed. Every carried page inside this radius must receive the
@@ -2137,6 +2230,11 @@ fn repairNeighbor(key:u32)->bool{
   if(id<params.pageCapacity){pageDelta[rollbackPagesOffset()+carriedDirty+item]=id;}}
 }
 @compute @workgroup_size(1) fn finalizeFinePageDelta(){if(control[0]!=0u||pageDelta[15]!=VALID){return;}
+ // Reassert the target epoch at the publication point. The clear pass writes
+ // it initially, but redistance consumes this finalized record, not scratch
+ // initialization; keeping the epoch write beside the finalized counts makes
+ // identity/full-domain deltas obey the same immutable generation contract.
+ pageDelta[1]=params.nextGeneration;
  let desired=min(control[2],params.pageCapacity);let retired=min(pageDelta[12],params.pageCapacity);
  let dirty=identityTotal(0u,desired);let support=identityTotal(1u,desired);
  let rollback=identityTotal(2u,desired)+retired;
@@ -2173,7 +2271,11 @@ fn repairNeighbor(key:u32)->bool{
  if(item<retired){let id=pageDelta[retiredPagesOffset()+item];if(id<params.pageCapacity&&currentMetadata[id*10u+2u]==params.currentGeneration){
    pageDelta[changedKeysOffset()+dirty+item]=currentMetadata[id*10u+1u];}}
 }
-@compute @workgroup_size(64) fn snapshotDeltaPayload(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[14]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[rollbackPagesOffset()+work];if(id>=params.pageCapacity||currentMetadata[id*10u+2u]!=params.currentGeneration){error=MALFORMED;}else if(local<params.samplesPerBrick){let index=id*params.samplesPerBrick+local;let value=bitcast<f32>(currentPhi[index]);if(!finite(value)){error=NONFINITE;}else{payloadSnapshot[index]=value;}}}publishTopologyError(work,local,error,laneActive);}
+@compute @workgroup_size(64) fn snapshotDeltaPayload(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[14]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[rollbackPagesOffset()+work];if(id>=params.pageCapacity||currentMetadata[id*10u+2u]!=params.currentGeneration){error=MALFORMED;}else if(local<params.samplesPerBrick){let index=id*params.samplesPerBrick+local;
+ // Invalid narrow-band samples intentionally carry no signed-distance
+ // payload. They are not rollback corruption and must not poison an otherwise
+ // valid page snapshot when factor 1 reuses a whole B4 page.
+ if((currentFlags[index]&VALID)==0u){payloadSnapshot[index]=3.402823e38;}else{let value=bitcast<f32>(currentPhi[index]);if(!finite(value)){error=NONFINITE;}else{payloadSnapshot[index]=value;}}}}publishTopologyError(work,local,error,laneActive);}
 @compute @workgroup_size(64) fn initializeDesiredSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[11]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity){error=MALFORMED;}else if(local<params.samplesPerBrick){let key=sourceC[id*10u+1u];let index=id*params.samplesPerBrick+local;if(index<arrayLength(&targetA)&&index<arrayLength(&targetB)){let brick=unpackBrick(key);let coord=localCoord(local);let q=brick*params.brickResolution+coord;if(any(q>=params.sampleDimensions)){targetA[index]=0u;targetB[index]=0u;}else{let position=params.domainOrigin+(vec3f(q)+vec3f(0.5))*params.fineCellWidth;var value=sampleCoarseOctreePhi(position);let seeded=externalSeedPhi(key,(vec3f(q)+vec3f(0.5))/f32(params.fineFactor));if(finite(seeded)){value=seeded;}value=applyInflowPhi(value,position);if(!finite(value)){error=NONFINITE;}else{let encoded=bitcast<u32>(value);targetA[index]=VALID|select(0u,16u,value<0.0);targetB[index]=encoded;}}}}}publishTopologyError(work,local,error,laneActive);}
 @compute @workgroup_size(64) fn initializeDesiredWorkSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);if(work>=pageDelta[11]||control[0]!=0u){return;}let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity||local>=params.samplesPerBrick){return;}let index=id*params.samplesPerBrick+local;nextWorkA[index]=INVALID;nextWorkB[index]=INVALID;}
 @compute @workgroup_size(64) fn linkDesiredNeighbors(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){

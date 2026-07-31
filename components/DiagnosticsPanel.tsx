@@ -38,9 +38,23 @@ export function DiagnosticsPanel() {
   const backend = simulation.backend;
   const selectedBody = bodies.find((body) => body.description.id === selectedBodyId);
   const requestedGlobalFineFactor = Number(methodValues.globalFineLevelSetFactor);
-  const globalFineRequested = requestedGlobalFineFactor === 4 || requestedGlobalFineFactor === 8;
+  const globalFineRequested = requestedGlobalFineFactor === 1
+    || requestedGlobalFineFactor === 4
+    || requestedGlobalFineFactor === 8;
+  const reportedPressureRows = (gpuInfo?.pressureRequiredRows ?? 0) > 0
+    ? gpuInfo?.pressureRequiredRows
+    : undefined;
+  // Pressure rows remain GPU-resident in the production browser path. A stats
+  // sample can therefore carry the accepted solve receipt before (or without)
+  // a row-count readback. Do not turn that observability gap into a false
+  // "publication failed" warning: completed iterations plus convergence prove
+  // that a nonempty accepted system was solved.
+  const acceptedPressureSolve = (gpuInfo?.quadtreePressureIterationsUsed ?? 0) > 0
+    && gpuInfo?.quadtreePressureConverged === true;
   const resolvedPowerPublished = Boolean(gpuInfo?.powerDiagramAuthoritative)
-    && (gpuInfo?.pressureRequiredRows ?? 0) > 0;
+    && (reportedPressureRows !== undefined || acceptedPressureSolve);
+  const pressureRowsLabel = reportedPressureRows?.toLocaleString()
+    ?? (acceptedPressureSolve ? "GPU-resident" : "—");
   const publishedPowerSolver = gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid")
     ? "POWER + SECTION 4.3"
     : "POWER PUBLISHED";
@@ -67,11 +81,11 @@ export function DiagnosticsPanel() {
         {fluidState && fluidRenderState && <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />}
         {fluidState && <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />}
         <MetricCard label={gpuInfo?.gridKind === "quadtree-tall-cell" ? "GPU quadtree tall cells" : gpuInfo?.gridKind === "octree" ? "GPU octree" : gpuInfo?.gridKind === "uniform" ? "GPU uniform grid" : "GPU tall grid"} value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${gpuInfo.ny} cubic-equivalent Y · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
-        <MetricCard label={gpuInfo?.gridKind === "uniform" ? "Uniform allocation" : gpuInfo?.gridKind === "octree" ? "Octree pressure rows" : "Tall-cell span"} value={gpuInfo?.gridKind === "uniform" ? gpuInfo.cellCount.toLocaleString() : gpuInfo?.gridKind === "octree" ? gpuInfo.activeSampleCount?.toLocaleString() ?? "—" : gpuInfo?.maximumTallCellHeight !== undefined ? String(gpuInfo.maximumTallCellHeight) : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
+        <MetricCard label={gpuInfo?.gridKind === "uniform" ? "Uniform allocation" : gpuInfo?.gridKind === "octree" ? "Octree pressure rows" : "Tall-cell span"} value={gpuInfo?.gridKind === "uniform" ? gpuInfo.cellCount.toLocaleString() : gpuInfo?.gridKind === "octree" ? pressureRowsLabel : gpuInfo?.maximumTallCellHeight !== undefined ? String(gpuInfo.maximumTallCellHeight) : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
         {gpuInfo?.gridKind === "octree" && gpuInfo.frontierListCapacity !== undefined && <MetricCard
           label="Octree frontier publication"
           value={`${gpuInfo.frontierRequiredLeaves?.toLocaleString() ?? "—"} / ${gpuInfo.frontierListCapacity.toLocaleString()}`}
-          unit={`${gpuInfo.frontierCapacityOverflow ? "FRONTIER OVERFLOW" : "frontier capacity clear"} · ${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} / ${gpuInfo.pressureRowCapacity?.toLocaleString() ?? "—"} resolved rows · ${gpuInfo.pressureCapacityOverflow ? "ROW OVERFLOW" : "row capacity clear"}`}
+          unit={`${gpuInfo.frontierCapacityOverflow ? "FRONTIER OVERFLOW" : "frontier capacity clear"} · ${pressureRowsLabel} / ${gpuInfo.pressureRowCapacity?.toLocaleString() ?? "—"} resolved rows${reportedPressureRows === undefined && acceptedPressureSolve ? " · count readback pending" : ""} · ${gpuInfo.pressureCapacityOverflow ? "ROW OVERFLOW" : "row capacity clear"}`}
           tone={gpuInfo.frontierCapacityOverflow || gpuInfo.pressureCapacityOverflow
             ? "warn"
             : gpuInfo.frontierRequiredLeaves !== undefined ? "good" : "neutral"}
@@ -93,7 +107,9 @@ export function DiagnosticsPanel() {
           tone={gpuInfo.globalFineLevelSetEnabled && ((gpuInfo.globalFineSeedError ?? 0) !== 0
             || (gpuInfo.globalFineTopologyFlags ?? 0) !== 0 || gpuInfo.globalFinePublished === false)
             ? "warn"
-            : gpuInfo.globalFineLevelSetEnabled && (gpuInfo.globalFineLevelSetFactor === 4 || gpuInfo.globalFineLevelSetFactor === 8) ? "good" : "neutral"}
+            : gpuInfo.globalFineLevelSetEnabled && (gpuInfo.globalFineLevelSetFactor === 1
+              || gpuInfo.globalFineLevelSetFactor === 4
+              || gpuInfo.globalFineLevelSetFactor === 8) ? "good" : "neutral"}
         />}
         {gpuInfo?.gridKind === "octree" && <MetricCard
           testId="initial-raster-surface-state"
@@ -135,7 +151,7 @@ export function DiagnosticsPanel() {
             : (gpuInfo.encodedSteps ?? 0) > 0
               ? "POWER PUBLICATION FAILED"
               : "POWER PENDING"}
-          unit={`${gpuInfo.pressureRequiredRows?.toLocaleString() ?? "—"} resolved rows · fixed case-local handles · ${gpuInfo.pressureSolver ?? "solver pending"}`}
+          unit={`${pressureRowsLabel} resolved rows${reportedPressureRows === undefined && acceptedPressureSolve ? " · count readback pending" : ""} · fixed case-local handles · ${gpuInfo.pressureSolver ?? "solver pending"}`}
           tone={resolvedPowerPublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"}
         />}
         <MetricCard label={octreePressurePotential ? "GPU pressure-potential maximum" : "GPU pressure maximum"} value={gpuInfo?.maxPressure_Pa !== undefined ? gpuInfo.maxPressure_Pa.toExponential(2) : "—"} unit={`${octreePressurePotential ? "m²/s · stored dt·p/ρ" : "Pa"} at ${formatGridLocation(gpuInfo?.maxPressureLocation)}`} />

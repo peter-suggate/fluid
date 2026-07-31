@@ -78,6 +78,12 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
       "the gated-linear mode must use the resident linear sampler without another pass");
     assert.match(reduced, /accumulatedRadiance\+=textureLoad\(dryPrepassRadianceTexture,texel,0\)\*weight;radianceWeightSum\+=weight/,
       "joint-bilateral mode must reuse the visibility guide weights for edge-aware radiance reconstruction");
+    assert.match(reduced, /materialPublication\.w&16u\)!=0u\)\{accumulatedGi\+=textureLoad\(dryPrepassRadianceTexture,texel,0\)\*weight;giWeightSum\+=weight/,
+      "GLOBAL must reconstruct current-frame environmental GI only from exact-identity neighbours");
+    assert.match(reduced, /if\(giWeightSum>=0\.05\)\{dryPrepassGi=accumulatedGi\/giWeightSum;dryPrepassGiState=1u;\}/,
+      "insufficient geometry-guided GI support must leave the full-resolution cone fallback active");
+    assert.match(reduced, /if\(dryPrepassGiState==1u\)\{return DryGlobalIllumination/,
+      "a valid reduced GI surface summary must return before any full-resolution 3D cone taps");
     assert.match(reduced, /let weight=bilinear\*select\(guidedWeight,1\.0,dry\.tuningCounts2\.w==3u\)/,
       "wide relight must aggressively reconstruct shadow factors with unmodified bilinear weights");
     assert.match(reduced, /tuningCounts2\.w!=3u&&dry\.tuningCounts2\.w!=4u&&bestRadianceWeight>0\.0/,
@@ -86,11 +92,15 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     assert.match(reduced, /let opaque=DryHit\(geometry\.x,dryPrepassDecodeNormal\(geometry\.yz\),identity&0xffffu,identity>>16u/);
     assert.match(reduced, /return vec4f\(shadeDryOpaque\(opaque,ro,rd\),opaque\.t\)/,
       "the isolated reduced-rate pass must shade the reconstructed coarse hit without another primary trace");
+    assert.match(reduced, /materialPublication\.w&16u\)!=0u\)\{dryPrepassGiState=0u;let ignoredBodyOwner=select\(DRY_OWNER_NONE,opaque\.ownerId,opaque\.motionKind==DRY_GBUFFER_MOTION_RIGID\);let gi=dryGlobalIllumination\(ro\+rd\*opaque\.t,opaque\.normal,ignoredBodyOwner\);return vec4f\(gi\.radiance,gi\.visibility\)/,
+      "GLOBAL's reduced target must store only reusable indirect radiance and occlusion, not a baked material closure");
     assert.match(reduced, /if\(hit\.t>=DRY_MISS\)[^]*dryPrepassRadianceState==1u&&hit\.motionKind==DRY_GBUFFER_MOTION_STATIC[^]*let position=ro\+rd\*hit\.t;let surface=dryEvaluateSurfaceMaterial/,
       "exact-matched static radiance must return before full-resolution procedural material evaluation");
   }
-  assert.match(rendererSource, /coneRadianceReconstruction !== "wide-relight"[^]*coneRadianceReconstruction !== "full-res-relight"[^]*Sparse voxel reduced-rate opaque shading/,
-    "both relight modes must omit the reduced shading pass whose radiance they deliberately do not consume");
+  assert.match(rendererSource, /this\.lightingMode === "gi"[^]*coneRadianceReconstruction !== "wide-relight"[^]*Sparse voxel reduced-rate opaque shading/,
+    "GLOBAL must produce the reduced GI target even when material radiance remains full-resolution relight");
+  assert.match(rendererSource, /if \(this\.lightingMode === "gi"\)[^]*Sparse voxel reduced-rate environmental GI[^]*conePrepassShadePipeline/,
+    "split GLOBAL must evaluate environmental GI after current-frame compact visibility and before deferred lighting");
 });
 
 test("automatic relight composition contains the isolated primary and lighting entries", () => {

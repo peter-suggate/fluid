@@ -404,6 +404,13 @@ if (octreeInterfaceBandOverride !== undefined
   && (!Number.isInteger(octreeInterfaceBandOverride) || octreeInterfaceBandOverride < 0)) {
   throw new Error("FLUID_OCTREE_INTERFACE_BAND must be a non-negative integer");
 }
+const octreeSurfaceGradingOverride = process.env.FLUID_OCTREE_SURFACE_GRADING === undefined
+  ? undefined : Number(process.env.FLUID_OCTREE_SURFACE_GRADING);
+if (octreeSurfaceGradingOverride !== undefined
+  && (!Number.isInteger(octreeSurfaceGradingOverride)
+    || octreeSurfaceGradingOverride < 1 || octreeSurfaceGradingOverride > 4)) {
+  throw new Error("FLUID_OCTREE_SURFACE_GRADING must be an integer from 1 through 4");
+}
 // Section 5 surface-band thickness, independent of the pressure band above.
 // Unset leaves the projection on the pressure band, so an A/B against a lane's
 // recorded numbers only needs this one variable.
@@ -432,9 +439,13 @@ if (storageBindingLimitOverride !== undefined
   && (!Number.isSafeInteger(storageBindingLimitOverride) || storageBindingLimitOverride < 1)) {
   throw new Error("FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES must be a positive integer");
 }
-const octreeGlobalFineFactorOverride = process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR;
-if (octreeGlobalFineFactorOverride !== undefined && !["4", "8"].includes(octreeGlobalFineFactorOverride)) {
-  throw new Error("FLUID_OCTREE_GLOBAL_FINE_FACTOR must be 4 or 8");
+// Stage-1 coarse-baseline spelling. Keep the established long name as a
+// compatibility alias for existing lanes; the explicit short name wins so a
+// caller can override a lane table that still pins the paper's factor 4.
+const octreeGlobalFineFactorOverride =
+  process.env.FLUID_FINE_FACTOR ?? process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR;
+if (octreeGlobalFineFactorOverride !== undefined && !["1", "4", "8"].includes(octreeGlobalFineFactorOverride)) {
+  throw new Error("FLUID_FINE_FACTOR/FLUID_OCTREE_GLOBAL_FINE_FACTOR must be 1, 4, or 8");
 }
 const powerGenerationAuditLog = process.env.FLUID_POWER_GENERATION_AUDIT_LOG !== "0";
 const powerCandidateAuditRequested = process.env.FLUID_POWER_CANDIDATE_AUDIT === "1";
@@ -1019,10 +1030,19 @@ async function runGPU(
   if (method.id === "octree" && octreeInterfaceBandOverride !== undefined) {
     values.interfaceRefinementBandCells = octreeInterfaceBandOverride;
   }
+  if (method.id === "octree" && octreeSurfaceGradingOverride !== undefined) {
+    values.surfaceRefinementGradingLayers = octreeSurfaceGradingOverride;
+  }
   if (method.id === "octree" && octreeFineBandOverride !== undefined) {
     values.fineLevelSetBandCells = octreeFineBandOverride;
   }
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
+  // The factor-1 coarse baseline is this project's Aanjaneya variant with no
+  // separate fine SPGrid. It still publishes sparse current-phi pages, but
+  // their same-resolution row restriction is optional evidence rather than
+  // the paper's mandatory fine-to-background transfer receipt.
+  const hasSeparateFineLevelSetBand = method.id === "octree"
+    && values.globalFineLevelSetFactor !== "1";
   if (method.id === "octree" && octreePressureRowCapacityOverride !== undefined) {
     values.pressureRowCapacity = octreePressureRowCapacityOverride;
   }
@@ -2319,7 +2339,8 @@ async function runGPU(
             TRIPWIRE_RECORD.coarseBytes);
           const coarse = unpackOctreePowerCoarseLevelSetControl(coarseWords);
           const restrictionAudit = auditSection5FineRestriction(restriction, coarse);
-          if (restrictionAudit.failure && !retainedBackgroundOctree) {
+          if (restrictionAudit.failure && hasSeparateFineLevelSetBand
+            && !retainedBackgroundOctree) {
             trip("restriction-unaccepted", { reason: restrictionAudit.failure,
               ...restrictionAudit, restrictionControl: Array.from(restrictionWords),
               coarseControl: Array.from(coarseWords) });

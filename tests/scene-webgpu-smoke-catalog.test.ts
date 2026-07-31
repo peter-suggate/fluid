@@ -261,6 +261,13 @@ test("ceiling smoke follows its dedicated band-1 UI profile only", () => {
     "core-webgpu-health", "volume-and-topology", "octree-authority", "performance",
   ]);
   assert.deepEqual(performance.hooks, []);
+  const baseline = getSceneWebGPUSmokeLane("ceiling-slab-drop", "coarse-baseline-post-impact");
+  assert.deepEqual(baseline.stop, { simulatedTime_s: 0.4, exactSteps: 100, maxDt_s: 0.004 });
+  assert.equal(baseline.methods[0].overrides.globalFineLevelSetFactor, "1");
+  assert.equal(baseline.methods[0].overrides.interfaceRefinementBandCells, 1);
+  assert.deepEqual(baseline.diagnostics.map(({ id }) => id), [
+    "core-webgpu-health", "volume-and-topology", "octree-authority", "global-fine-publication",
+  ]);
   for (const id of ["corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const) {
     assert.equal(getSceneWebGPUSmokeLane(id).methods[0]
       .overrides.interfaceRefinementBandCells, 3);

@@ -125,6 +125,7 @@ export class WebGPUFineToCoarseLevelSet {
     this.pipelines = {
       prepare: pipeline("prepareRestriction"),
       restrict: pipeline("restrictCoarseRows"),
+      reconstructFactorOne: pipeline("reconstructFactorOneRows"),
       publish: pipeline("publishRestriction"),
     };
   }
@@ -163,6 +164,7 @@ export class WebGPUFineToCoarseLevelSet {
       const used: Record<string, number[]> = {
       prepare: [0, 2, 7, 9, 13, 14, 15],
       restrict: [0, 1, 2, 3, 4, 5, 8, 9, 12, 13],
+      reconstructFactorOne: [0, 1, 2, 3, 4, 5, 8, 12, 13],
       publish: [8, 13],
       };
       groups = Object.freeze(Object.fromEntries(Object.entries(used).map(([name, bindings]) => {
@@ -181,6 +183,14 @@ export class WebGPUFineToCoarseLevelSet {
     const restrict = broker.compute({ label: "Fine-to-coarse restriction · restrict" });
     restrict.setPipeline(this.pipelines.restrict!); restrict.setBindGroup(0, groups.restrict!);
     restrict.dispatchWorkgroupsIndirect(this.dispatch, 0);
+    if (fine.plan.fineFactor === 1) {
+      const reconstruct = broker.compute({
+        label: "Fine-to-coarse restriction · factor-1 trilinear cell reconstruction",
+      });
+      reconstruct.setPipeline(this.pipelines.reconstructFactorOne!);
+      reconstruct.setBindGroup(0, groups.reconstructFactorOne!);
+      reconstruct.dispatchWorkgroupsIndirect(this.dispatch, 0);
+    }
     run("publish");
     broker.fence("fine-to-coarse restriction complete");
     return this.result;
@@ -226,6 +236,39 @@ fn finePage(key:u32)->u32{
  return select(INVALID,id,id<p.pageCapacity&&base+2u<arrayLength(&metadata)
   &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==p.generation);
 }
+struct FineValue{value:f32,valid:u32,error:u32}
+fn fineValueAt(q0:vec3i)->FineValue{
+ let q=vec3u(clamp(q0,vec3i(0),vec3i(p.sampleDims)-vec3i(1)));
+ let brick=q/p.brickResolution;let id=finePage(packBrick(brick));
+ if(id==INVALID){return FineValue(0.,0u,0u);}
+ let local=q-brick*p.brickResolution;
+ let index=id*p.samplesPerBrick+local.x+p.brickResolution*(local.y+p.brickResolution*local.z);
+ if(index>=arrayLength(&flags)||index>=arrayLength(&phi)){return FineValue(0.,0u,CAPACITY);}
+ if((flags[index]&VALID)==0u){return FineValue(0.,0u,0u);}
+ let value=phi[index];if(!finite(value)){return FineValue(0.,0u,NONFINITE);}
+ return FineValue(value,1u,0u);
+}
+// At factor 1 the single sample owned by a finest row is its cell centre, not
+// eight coincident cell corners. Reconstruct the 3x3x3 knot set of the
+// piecewise-trilinear field over that physical cell. Its 27 values comprise
+// the centre, face/edge midpoints, and corners, and therefore bound every
+// trilinear subcell without inventing a finer persistent level-set band.
+fn factorOneCellProbe(origin:vec3u,ordinal:u32)->FineValue{
+ let mode=vec3u(ordinal%3u,(ordinal/3u)%3u,ordinal/9u);
+ let low=vec3i(origin)+vec3i(select(vec3u(0u),vec3u(1u),mode==vec3u(0u)))*vec3i(-1);
+ let t=vec3f(select(vec3u(0u),vec3u(1u),mode!=vec3u(1u)))*.5;
+ var sum=0.;var weight=0.;var error=0u;
+ for(var corner=0u;corner<8u;corner+=1u){
+  let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+  let choose=vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u);
+  let w=select(1.-t.x,t.x,choose.x)*select(1.-t.y,t.y,choose.y)*select(1.-t.z,t.z,choose.z);
+  if(w==0.){continue;}let sample=fineValueAt(low+offset);error|=sample.error;
+  if(sample.valid==0u){return FineValue(0.,0u,error);}
+  sum+=w*sample.value;weight+=w;
+ }
+ if(weight>.999){return FineValue(sum,1u,error);}
+ return FineValue(0.,0u,error);
+}
 var<workgroup> rowMinimum:array<f32,64>;var<workgroup> rowMaximum:array<f32,64>;
 var<workgroup> rowCounts:array<u32,64>;var<workgroup> rowErrors:array<u32,64>;
 var<workgroup> rowMasks:array<u32,64>;var<workgroup> rowCombinedMasks:array<u32,64>;var<workgroup> rowCorners:array<f32,512>;
@@ -242,7 +285,54 @@ var<workgroup> diagnosticMagnitude:array<f32,64>;var<workgroup> diagnosticErrors
  let rollback=(topologyControl[0]&DOWNSTREAM_ROLLBACK)!=0u&&topologyControl[4]==1u
   &&topologyControl[5]==1u&&topologyControl[7]!=0u;
  topologyReady=(topologyControl[0]==0u&&(committed||provisional)&&topologyControl[5]==0u&&topologyControl[7]==0u)||rollback;}if(arrayLength(&worklist)<7u||!topologyReady){control.flags|=UNPUBLISHED_SOURCE;}else if(worklist[0]!=p.generation||worklist[2]!=p.pageCapacity||(worklist[3]&3u)!=3u||worklist[5]!=1u||worklist[6]!=1u){control.flags|=UNPUBLISHED_SOURCE;}let count=select(control.rowCount,0u,control.flags!=0u);let x=min(count,65535u);rowDispatch[0]=x;rowDispatch[1]=select(1u,(count+x-1u)/x,x>0u);rowDispatch[2]=1u;}}
-@compute @workgroup_size(64)fn restrictCoarseRows(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let r=fineLinearWorkgroup(w,n);if(lid==0u&&r<p.rowCapacity){if(r<arrayLength(&aggregates)){aggregates[r]=Aggregate(0.,0.,0.,0u,0u,0u,array<u32,6>());}if(r<arrayLength(&out)){out[r]=Contribution(0.,0.,0.,0u);}if(r<arrayLength(&rowOffsets)){rowOffsets[r]=r;}}var minimum=3.402823e38;var maximum=-3.402823e38;var count=0u;var error=0u;var mask=0u;for(var corner=0u;corner<8u;corner+=1u){rowCorners[lid*8u+corner]=0.;}if(r<control.rowCount&&r<arrayLength(&headers)){let h=headers[r];let ratioF=p.cellWidth/p.fineWidth;let ratio=u32(round(ratioF));if(h.size==0u||ratio==0u||abs(f32(ratio)-ratioF)>1e-5){error=CAPACITY;}else{let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let first=o*ratio;let last=min((o+vec3u(h.size))*ratio,p.sampleDims);let firstBrick=first/p.brickResolution;let lastBrick=(last+vec3u(p.brickResolution-1u))/p.brickResolution;let extent=lastBrick-firstBrick;let brickCount=extent.x*extent.y*extent.z;let center=(vec3f(o)+.5*f32(h.size))*p.cellWidth;for(var ordinal=0u;ordinal<brickCount;ordinal+=1u){let bx=ordinal%extent.x;let yz=ordinal/extent.x;let brick=firstBrick+vec3u(bx,yz%extent.y,yz/extent.y);let id=finePage(packBrick(brick));if(id==INVALID){continue;}for(var local=lid;local<p.samplesPerBrick;local+=64u){let q=brick*p.brickResolution+localCoord(local);if(any(q<first)||any(q>=last)){continue;}let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)==0u){continue;}let value=phi[index];if(!finite(value)){error|=NONFINITE;continue;}count+=1u;minimum=min(minimum,value);maximum=max(maximum,value);let x=p.origin+(vec3f(q)+.5)*p.fineWidth;let d=x-center;let centerDelta=abs(abs(d)-vec3f(.5*p.fineWidth));let tolerance=2e-5*max(p.cellWidth,p.fineWidth);if(all(centerDelta<=vec3f(tolerance))){let corner=select(0u,1u,d.x>0.)+select(0u,2u,d.y>0.)+select(0u,4u,d.z>0.);mask|=1u<<corner;rowCorners[lid*8u+corner]=value;}}}}}rowMinimum[lid]=minimum;rowMaximum[lid]=maximum;rowCounts[lid]=count;rowErrors[lid]=error;rowMasks[lid]=mask;rowCombinedMasks[lid]=mask;workgroupBarrier();var width=32u;loop{if(width==0u){break;}if(lid<width){rowMinimum[lid]=min(rowMinimum[lid],rowMinimum[lid+width]);rowMaximum[lid]=max(rowMaximum[lid],rowMaximum[lid+width]);rowCounts[lid]+=rowCounts[lid+width];rowErrors[lid]|=rowErrors[lid+width];rowCombinedMasks[lid]|=rowCombinedMasks[lid+width];}workgroupBarrier();width>>=1u;}if(lid==0u&&r<control.rowCount&&r<arrayLength(&aggregates)){var centerPhi=0.;if(rowCombinedMasks[0]==255u){for(var corner=0u;corner<8u;corner+=1u){var cornerPhi=0.;for(var lane=0u;lane<64u;lane+=1u){if((rowMasks[lane]&(1u<<corner))!=0u){cornerPhi=rowCorners[lane*8u+corner];}}centerPhi+=.125*cornerPhi;}}let accepted=rowErrors[0]==0u&&rowCounts[0]>0u&&rowCombinedMasks[0]==255u;let aggregate=Aggregate(centerPhi,rowMinimum[0],rowMaximum[0],select(0u,1u,accepted),rowCounts[0],rowErrors[0],array<u32,6>());aggregates[r]=aggregate;if(accepted&&r<arrayLength(&out)){out[r]=Contribution(aggregate.centerPhi,aggregate.minimumPhi,aggregate.maximumPhi,1u);}}}
+@compute @workgroup_size(64)fn restrictCoarseRows(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let r=fineLinearWorkgroup(w,n);if(lid==0u&&r<p.rowCapacity){if(r<arrayLength(&aggregates)){aggregates[r]=Aggregate(0.,0.,0.,0u,0u,0u,array<u32,6>());}if(r<arrayLength(&out)){out[r]=Contribution(0.,0.,0.,0u);}if(r<arrayLength(&rowOffsets)){rowOffsets[r]=r;}}var minimum=3.402823e38;var maximum=-3.402823e38;var count=0u;var error=0u;var mask=0u;for(var corner=0u;corner<8u;corner+=1u){rowCorners[lid*8u+corner]=0.;}if(r<control.rowCount&&r<arrayLength(&headers)){let h=headers[r];let ratioF=p.cellWidth/p.fineWidth;let ratio=u32(round(ratioF));if(h.size==0u||ratio==0u||abs(f32(ratio)-ratioF)>1e-5){error=CAPACITY;}else{let o=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,h.cell/(p.dimensions.x*p.dimensions.y));let first=o*ratio;let last=min((o+vec3u(h.size))*ratio,p.sampleDims);let firstBrick=first/p.brickResolution;let lastBrick=(last+vec3u(p.brickResolution-1u))/p.brickResolution;let extent=lastBrick-firstBrick;let brickCount=extent.x*extent.y*extent.z;let center=(vec3f(o)+.5*f32(h.size))*p.cellWidth;for(var ordinal=0u;ordinal<brickCount;ordinal+=1u){let bx=ordinal%extent.x;let yz=ordinal/extent.x;let brick=firstBrick+vec3u(bx,yz%extent.y,yz/extent.y);let id=finePage(packBrick(brick));if(id==INVALID){continue;}for(var local=lid;local<p.samplesPerBrick;local+=64u){let q=brick*p.brickResolution+localCoord(local);if(any(q<first)||any(q>=last)){continue;}let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)==0u){continue;}let value=phi[index];if(!finite(value)){error|=NONFINITE;continue;}count+=1u;minimum=min(minimum,value);maximum=max(maximum,value);if(ratio==1u&&h.size==1u){mask=255u;for(var corner=0u;corner<8u;corner+=1u){rowCorners[lid*8u+corner]=value;}}else{let x=p.origin+(vec3f(q)+.5)*p.fineWidth;let d=x-center;let centerDelta=abs(abs(d)-vec3f(.5*p.fineWidth));let tolerance=2e-5*max(p.cellWidth,p.fineWidth);if(all(centerDelta<=vec3f(tolerance))){let corner=select(0u,1u,d.x>0.)+select(0u,2u,d.y>0.)+select(0u,4u,d.z>0.);mask|=1u<<corner;rowCorners[lid*8u+corner]=value;}}}}}}rowMinimum[lid]=minimum;rowMaximum[lid]=maximum;rowCounts[lid]=count;rowErrors[lid]=error;rowMasks[lid]=mask;rowCombinedMasks[lid]=mask;workgroupBarrier();var width=32u;loop{if(width==0u){break;}if(lid<width){rowMinimum[lid]=min(rowMinimum[lid],rowMinimum[lid+width]);rowMaximum[lid]=max(rowMaximum[lid],rowMaximum[lid+width]);rowCounts[lid]+=rowCounts[lid+width];rowErrors[lid]|=rowErrors[lid+width];rowCombinedMasks[lid]|=rowCombinedMasks[lid+width];}workgroupBarrier();width>>=1u;}if(lid==0u&&r<control.rowCount&&r<arrayLength(&aggregates)){var centerPhi=0.;if(rowCombinedMasks[0]==255u){for(var corner=0u;corner<8u;corner+=1u){var cornerPhi=0.;for(var lane=0u;lane<64u;lane+=1u){if((rowMasks[lane]&(1u<<corner))!=0u){cornerPhi=rowCorners[lane*8u+corner];}}centerPhi+=.125*cornerPhi;}}let accepted=rowErrors[0]==0u&&rowCounts[0]>0u&&rowCombinedMasks[0]==255u;let aggregate=Aggregate(centerPhi,rowMinimum[0],rowMaximum[0],select(0u,1u,accepted),rowCounts[0],rowErrors[0],array<u32,6>());aggregates[r]=aggregate;if(accepted&&r<arrayLength(&out)){out[r]=Contribution(aggregate.centerPhi,aggregate.minimumPhi,aggregate.maximumPhi,1u);}}}
+// Factor 1 has one cell-centred sample per finest pressure row. Replace the
+// legacy coincident-corner aggregate with the exact knot envelope of the local
+// piecewise-trilinear reconstruction. The centre drives the downstream
+// occupancy fraction; the envelope retains sign-crossing/interface evidence.
+// An incomplete 3x3x3 knot set publishes no correction, preserving the prior
+// coarse value instead of manufacturing interface evidence from a partial
+// sparse stencil.
+@compute @workgroup_size(64)fn reconstructFactorOneRows(
+ @builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,
+ @builtin(num_workgroups)n:vec3u){
+ let row=fineLinearWorkgroup(w,n);
+ let inBounds=row<control.rowCount&&row<arrayLength(&headers)
+  &&row<arrayLength(&aggregates)&&row<arrayLength(&out);
+ var h=H(0u,0u,0u,0u,0.,0.,0u,0u,vec4f(0.));if(inBounds){h=headers[row];}
+ let ratioF=p.cellWidth/p.fineWidth;let ratio=u32(round(ratioF));
+ let enabled=inBounds&&h.size==1u&&ratio==1u&&abs(f32(ratio)-ratioF)<=1e-5;
+ if(lid==0u&&enabled){aggregates[row]=Aggregate(0.,0.,0.,0u,0u,0u,array<u32,6>());
+  out[row]=Contribution(0.,0.,0.,0u);}
+ var minimum=3.402823e38;var maximum=-3.402823e38;
+ var count=0u;var error=0u;var mask=0u;
+ for(var corner=0u;corner<8u;corner+=1u){rowCorners[lid*8u+corner]=0.;}
+ let origin=vec3u(h.cell%p.dimensions.x,(h.cell/p.dimensions.x)%p.dimensions.y,
+  h.cell/(p.dimensions.x*p.dimensions.y));
+ if(enabled&&lid<27u){
+  let probe=factorOneCellProbe(origin,lid);error|=probe.error;
+  if(probe.valid!=0u){minimum=probe.value;maximum=probe.value;count=1u;
+   if(lid==13u){mask=255u;for(var corner=0u;corner<8u;corner+=1u){
+    rowCorners[lid*8u+corner]=probe.value;}}}
+ }
+ rowMinimum[lid]=minimum;rowMaximum[lid]=maximum;rowCounts[lid]=count;
+ rowErrors[lid]=error;rowMasks[lid]=mask;rowCombinedMasks[lid]=mask;
+ workgroupBarrier();
+ var width=32u;loop{if(width==0u){break;}if(lid<width){
+  rowMinimum[lid]=min(rowMinimum[lid],rowMinimum[lid+width]);
+  rowMaximum[lid]=max(rowMaximum[lid],rowMaximum[lid+width]);
+  rowCounts[lid]+=rowCounts[lid+width];rowErrors[lid]|=rowErrors[lid+width];
+  rowCombinedMasks[lid]|=rowCombinedMasks[lid+width];}
+  workgroupBarrier();width>>=1u;}
+ if(lid==0u&&enabled){
+  let accepted=rowErrors[0]==0u&&rowCounts[0]==27u&&rowCombinedMasks[0]==255u;
+  let centerPhi=rowCorners[13u*8u];
+  let aggregate=Aggregate(centerPhi,rowMinimum[0],rowMaximum[0],
+   select(0u,1u,accepted),rowCounts[0],rowErrors[0],array<u32,6>());
+  aggregates[row]=aggregate;
+  if(accepted){out[row]=Contribution(centerPhi,rowMinimum[0],rowMaximum[0],1u);}
+ }
+}
 // A row is accepted only when all eight corner samples are resident and valid.
 // An unaccepted row raises no error, writes no contribution, and leaves the
 // coarse level set uncorrected, so narrowing the fine band silently deletes the

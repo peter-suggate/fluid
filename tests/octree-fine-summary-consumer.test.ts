@@ -10,6 +10,7 @@ import {
 import {
   FINE_LEVELSET_SUMMARY_CENTER_COMPLETE,
   FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY,
+  FINE_LEVELSET_SUMMARY_ENTRY_WORDS,
   fineLevelSetSummaryRefinementSignal,
   planFineLevelSetSummaryLeafLookup,
 } from "../lib/webgpu-octree-fine-levelset-summary";
@@ -76,21 +77,27 @@ test("summary sizing aliases binding 4 without adding storage bindings or pressu
     "the only pressureIn access reachable from summary-bound refinement is the raw bitcast reader");
   assert.doesNotMatch(callGraph, /pressureOut\[/);
   assert.match(callGraph,
-    /let pageRankPlusOne = fineSummaryWord\(16u \+ key \/ 32u\);[\s\S]*let rankPlusOne = fineSummaryWord\(pageWord\);[\s\S]*let base = entryOffset \+ \(rankPlusOne - 1u\) \* 8u/,
+    new RegExp(`let pageRankPlusOne = fineSummaryWord\\(16u \\+ key \\/ 32u\\);[\\s\\S]*let rankPlusOne = fineSummaryWord\\(pageWord\\);[\\s\\S]*let base = entryOffset \\+ \\(rankPlusOne - 1u\\) \\* ${FINE_LEVELSET_SUMMARY_ENTRY_WORDS}u`),
     "simulation topology uses bounded direct page/rank loads followed by one compact mip entry load");
   assert.doesNotMatch(callGraph, /while \(lo < hi\)|while\(low<high\)|recordLowerBound/,
     "fine-summary physics consumers must not search the active mip");
   assert.match(callGraph,
-    /result\.centerPhi = bitcast<f32>\(fineSummaryWord\(base \+ 7u\)\);[\s\S]*result\.centerValid = \(entryFlags & 0x3fc00000u\) == 0x3fc00000u/,
-    "word 7 is the exact current fine phi at every dyadic summary node centre");
+    /if \(crossesInterface\) \{ return true; \}[\s\S]*observedNearInterface && \(summary\.complete \|\| fineSummaryFactor == 1u\)/,
+    "factor-1 partial summaries must positively refine the containing coarse leaf");
   assert.match(callGraph,
-    /let fineComplete = fineSummaryWord\(base \+ 5u\) == expectedBricks[\s\S]*result\.complete = result\.coarseAuthority \|\| fineComplete;[\s\S]*result\.centerValid = \(entryFlags & 0x3fc00000u\) == 0x3fc00000u/,
-    "exact centre evidence is independent of whole sparse-brick completeness");
+    /result\.centerPhi = bitcast<f32>\(fineSummaryWord\(base \+ 7u\)\);[\s\S]*let centerMatchesLeaf = !factorOne \|\| size >= 4u;[\s\S]*result\.centerValid = centerMatchesLeaf[\s\S]*fineSummaryFinite\(result\.centerPhi\)/,
+    "word 7 is exact only where the factor-1 B4 node matches the pressure leaf centre");
+  assert.match(callGraph,
+    /if \(factorOne && size == 1u && samplesPerBrick == 64u[\s\S]*let bit = local\.x \+ 4u \* \(local\.y \+ 4u \* local\.z\);[\s\S]*result\.exactCellValid = \(fineSummaryWord\(base \+ 8u \+ word\) & mask\) != 0u;[\s\S]*result\.exactCellNegative = \(fineSummaryWord\(base \+ 10u \+ word\) & mask\) != 0u;/,
+    "factor-1 unit leaves consume their own validity and phase bit from the containing B4 entry");
+  assert.match(callGraph,
+    /let fineComplete = fineSummaryWord\(base \+ 5u\) == expectedBricks[\s\S]*result\.complete = result\.coarseAuthority \|\| fineComplete;[\s\S]*\(!factorOne \|\| fineComplete\)[\s\S]*fineSummaryFinite\(result\.centerPhi\)/,
+    "factor-1 centre classification requires the complete containing B4 stencil");
   assert.doesNotMatch(callGraph, /result\.centerValid =[^;]*!result\.coarseAuthority/,
     "a unified fine+coarse entry must retain its exact fine phase classifier");
   assert.match(octreeProjectionShader,
-    /if\(fine\.found\)\{[\s\S]*if\(fine\.centerValid\)\{wet=fine\.centerPhi<0\.0;\}/,
-    "recurring pressure leaves of every size consume their current complete centre stencil");
+    /if\(fine\.found\)\{[\s\S]*if\(fine\.exactCellValid\)\{wet=fine\.exactCellNegative;\}[\s\S]*else if\(fine\.centerValid\)\{wet=fine\.centerPhi<0\.0;\}/,
+    "factor-1 unit leaves prefer exact current phase while geometrically matching leaves retain centre stencils");
 });
 
 test("incremental topology separates structural refinement from wet frontier decisions", () => {
@@ -114,6 +121,8 @@ test("incremental topology separates structural refinement from wet frontier dec
   assert.match(dirty,
     /fn buildDirtyFrontierDelta\(\)[\s\S]*changed & TILE_SIGNATURE_FRONTIER_CHANGED[\s\S]*tileFrontierChangeFlagsBase\(\) \+ tileIndex[\s\S]*compaction\[dirtyListBase\(\) \+ dirtyCount\] = tileIndex/,
     "wet membership changes must feed only the compact liquid frontier");
+  assert.doesNotMatch(source, /dirtyOracleMembership|FLUID_DIRTY_ORACLE/,
+    "the rejected membership-plus-one-ring oracle must not remain callable");
   assert.doesNotMatch(dirty,
     /if \(wet\) \{ compaction\[tileChangeFlagsBase\(\)/,
     "wet-only changes must not enter the structural topology/residency stamps");

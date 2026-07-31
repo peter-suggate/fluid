@@ -14,6 +14,14 @@ test("SVO dry-frame benchmark uses the generic one-shot GPU trace", () => {
   assert.doesNotMatch(source, /createQuerySet|resolveQuerySet|timestampWrites|GPU(?:Compute|Render)PassTimestampWrites/);
 });
 
+test("SVO dry-frame benchmark can capture the configured production phase partition", () => {
+  assert.match(source, /FLUID_SVO_DRY_FRAME_PHASE_TRACE=1/);
+  assert.match(source, /new DynamicGPUPerformanceTraceRecorder\(/);
+  assert.match(source, /attempt < 3 && !configuredPhaseTrace/);
+  assert.match(source, /recorder\.completePhase\(encoder, phase\)/);
+  assert.match(source, /configuredPhaseTrace,/);
+});
+
 test("SVO dry-frame benchmark exposes a clean render-only xctrace lane", () => {
   assert.match(source, /FLUID_SVO_DRY_FRAME_PROFILE_SECONDS/);
   assert.match(source, /FLUID_SVO_DRY_FRAME_SCENE/);
@@ -28,6 +36,14 @@ test("SVO dry-frame benchmark can force serialized wall timing without changing 
   assert.match(source, /const forceWallTiming = process\.env\.FLUID_SVO_DRY_FRAME_TIMING === "wall"/);
   assert.match(source, /GPUPerformanceTraceRecorder\.supported\(device\) && !forceWallTiming/);
   assert.match(source, /device\.queue\.onSubmittedWorkDone\(\)/);
+});
+
+test("SVO dry-frame benchmark reproduces every production lighting mode", () => {
+  assert.match(source, /FLUID_SVO_DRY_FRAME_LIGHTING \(direct \| cone \| gi, default cone\)/);
+  assert.match(source, /SVO_LIGHTING_MODES/);
+  assert.match(source, /renderer\.setLightingMode\(lightingMode\)/);
+  assert.match(source, /lightingMode,/);
+  assert.doesNotMatch(source, /lightingMode: "cone"/);
 });
 
 test("SVO dry-frame benchmark exposes a render-only brick-size override and topology accounting", () => {

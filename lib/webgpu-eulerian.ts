@@ -75,7 +75,7 @@ export interface GPUEulerianInfo {
   globalFineLevelSetLogicalBrickCount?: number;
   /** Global, uniformly indexed sparse fine narrow-band level set. */
   globalFineLevelSetEnabled?: boolean;
-  globalFineLevelSetFactor?: 4 | 8;
+  globalFineLevelSetFactor?: 1 | 4 | 8;
   /** Static sparse fine-transport schedule; these host-known values require no readback. */
   globalFineTransportQueryCapacity?: number;
   globalFineTransportChunkCapacity?: number;

@@ -161,10 +161,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .viewport-failure-marker.tone-stale i::before, .viewport-failure-marker.tone-stale i::after { background: #d7a8ff; }
 .viewport-failure-marker.tone-stale span { border-color: rgba(190,117,255,.52); background: rgba(20,8,31,.9); color: #d7a8ff; }
 @keyframes viewport-failure-pulse { 0%,100% { transform: scale(.9); opacity: .72; } 50% { transform: scale(1.14); opacity: 1; } }
-.physics-stage-badge { position: absolute; right: 17px; bottom: 57px; width: 178px; padding: 9px 10px; display: grid; gap: 3px; border: 1px solid rgba(247,198,109,.18); border-left-color: var(--amber); background: rgba(5,18,16,.76); backdrop-filter: blur(14px); pointer-events: none; }
-.physics-stage-badge strong { color: var(--amber); font: 700 8px/1 var(--mono); letter-spacing: .08em; }
-.physics-stage-badge span { color: #c8d9d5; font-size: 9px; }
-.physics-stage-badge small { color: var(--dim); font: 7px/1 var(--mono); text-transform: uppercase; }
 .gpu-fallback { position: absolute; left: 50%; top: 50%; width: min(390px, 80%); transform: translate(-50%,-50%); padding: 28px; text-align: center; border: 1px solid rgba(247,198,109,.24); background: rgba(7,20,18,.94); }
 .gpu-fallback strong { color: var(--amber); }
 .gpu-initializing { border-color: var(--line-strong); }

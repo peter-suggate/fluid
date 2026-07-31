@@ -139,5 +139,6 @@ test("primary pane optics are exact, two-sided, identity preserving, and one-que
 test("pane shadows use nearest-event bounded transmission rather than opaque substitution", () => {
   assert.match(svoDrySceneShader, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,false\)/);
   assert.match(svoDrySceneShader, /dryVisibilityTransmissionStep\([^]*glassTransmission/);
-  assert.match(svoDrySceneShader, /SvoVisibilityBudget\(256u,64u,2048u,4u\),true/);
+  assert.match(svoDrySceneShader, /SvoVisibilityBudget\(dry\.tuningCounts1\.w,dry\.tuningCounts2\.x,dry\.tuningCounts2\.y,dry\.tuningCounts2\.z\),true/,
+    "pane transmission must share the published bounded visibility tuning");
 });

@@ -10,9 +10,12 @@ import { OCTREE_SECTION43_MINI_SHELL_DEPTH, OCTREE_SECTION43_PRODUCTION_SHELL_DE
   planOctreeSolveTail } from "../lib/octree-solve-tail-policy";
 import {
   CEILING_DROP_METHOD_PROFILE,
+  COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
   LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
   POWER_VALIDATION_METHOD_PROFILE,
   createLargeHydrostaticScene,
+  createMinimalPowerDamBreak32Scene,
+  createMinimalPowerDamBreak64Scene,
   createMinimalPowerDamBreakScene,
   getScenePreset,
 } from "../lib/scenes";
@@ -76,6 +79,32 @@ test("minimal power dam uses a two-level authoritative analytic initializer in a
   assert.ok(Math.abs(dam.width * dam.height * dam.depth - scene.container.fillFraction) < 1e-12);
 });
 
+test("32- and 64-cubed coarse-only dams preserve the mini dam's physical experiment", () => {
+  const mini = createMinimalPowerDamBreakScene();
+  for (const [dimension, refined] of [
+    [32, createMinimalPowerDamBreak32Scene()],
+    [64, createMinimalPowerDamBreak64Scene()],
+  ] as const) {
+    assert.deepEqual(validateScene(refined), []);
+    assert.equal(refined.sceneId, `minimal-power-dam-break-${dimension}`);
+    assert.deepEqual(refined.container, mini.container);
+    assert.deepEqual(refined.fluid, mini.fluid);
+    assert.deepEqual(refined.numerics, mini.numerics);
+    assert.deepEqual(refined.rigidBodies, mini.rigidBodies);
+    assert.deepEqual(refined.voxelDomain, {
+      finestCellSize_m: mini.voxelDomain.finestCellSize_m * 16 / dimension,
+      brickSize_cells: 8,
+    });
+    for (const quality of ["balanced", "high", "ultra"] as GPUQuality[]) {
+      const layout = createTallCellLayout(refined, quality);
+      assert.deepEqual([layout.nx, layout.fineNy, layout.nz], [dimension, dimension, dimension]);
+    }
+    const dam = damBreakFractions(refined.container.fillFraction);
+    assert.equal(dam.width * dimension, 5 * dimension / 8);
+    assert.equal(dam.depth * dimension, 5 * dimension / 8);
+  }
+});
+
 test("both power-validation scenes are shared by presets and the smoke registry", () => {
   for (const id of ["hydrostatic-power-large-offset", "minimal-power-dam-break"] as const) {
     const preset = getScenePreset(id);
@@ -93,6 +122,29 @@ test("both power-validation scenes are shared by presets and the smoke registry"
   const dam = createSmokeScenario("minimal-power-dam-break");
   assert.equal(dam.oracleSteps, 500);
   assert.equal(dam.target_s, 2);
+});
+
+test("32- and 64-cubed dam presets pin the coarse-only progressive-refinement experiment", () => {
+  assert.deepEqual(COARSE_ONLY_POWER_DAM_METHOD_PROFILE, {
+    methodId: "octree",
+    quality: "balanced",
+    overrides: {
+      maximumLeafSize: "16",
+      interfaceRefinementBandCells: 3,
+      surfaceRefinementGradingLayers: 3,
+      globalFineLevelSetFactor: "1",
+    },
+  });
+  for (const id of ["minimal-power-dam-break-32", "minimal-power-dam-break-64"] as const) {
+    const preset = getScenePreset(id);
+    assert.equal(preset.methodProfile, COARSE_ONLY_POWER_DAM_METHOD_PROFILE);
+    assert.equal(preset.create().sceneId, id);
+    const smoke = createSmokeScenario(id);
+    assert.deepEqual(smoke.scene, preset.create());
+    assert.deepEqual(smoke.methodProfile, COARSE_ONLY_POWER_DAM_METHOD_PROFILE);
+    assert.equal(smoke.oracleSteps, 1);
+    assert.equal(smoke.target_s, 0.004);
+  }
 });
 
 test("power-validation UI presets carry the exact authoritative Dawn method profile", () => {

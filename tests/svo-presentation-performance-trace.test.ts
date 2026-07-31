@@ -23,7 +23,7 @@ test("cone-traced SVO presentation records every encoded render-path item", () =
     "optical-composite",
   ]) assert.match(water, new RegExp(`tracePhase\\?\\.\\(\\{ id: "${phase}"`), phase);
 
-  for (const phase of ["svo-cone-lighting", "svo-primary", "svo-temporal"]) {
+  for (const phase of ["svo-cone-lighting", "svo-environment-gi", "svo-primary", "svo-rigid", "svo-glass", "svo-temporal"]) {
     assert.match(dry, new RegExp(`tracePhase\\?\\.\\(\\{ id: "${phase}"`), phase);
   }
 });

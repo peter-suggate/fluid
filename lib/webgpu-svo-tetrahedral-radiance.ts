@@ -83,11 +83,14 @@ export interface WebGpuSvoTetrahedralRadianceVisibleGeneration {
   generation: number;
   /** The exact opacity node-mip topology; page slots and atlas origins are shared. */
   plan: SvoNodeMipPyramidPlan;
+  /** Exact zero-radiance slots; safe to consume without sampling any radiance lobe. */
+  blackSlots: ReadonlySet<number>;
   textures: readonly [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
   views: readonly [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
 }
 
 interface OwnedGeneration extends WebGpuSvoTetrahedralRadianceVisibleGeneration {
+  blackSlots: Set<number>;
   uploadedSlots: Set<number>;
   payloadComplete: boolean;
   apronsComplete: boolean;
@@ -98,6 +101,7 @@ export interface WebGpuSvoTetrahedralRadianceTelemetry {
   candidateGeneration: number;
   residentPages: number;
   uploadedPages: number;
+  blackPages: number;
   allocatedBytes: number;
   fallback: "none" | "previous-complete-generation" | "unavailable";
 }
@@ -119,6 +123,7 @@ function createGeneration(device: GPUDevice, plan: SvoNodeMipPyramidPlan): Owned
     plan,
     textures,
     views,
+    blackSlots: new Set<number>(),
     uploadedSlots: new Set<number>(),
     payloadComplete: plan.pages.length === 0,
     apronsComplete: plan.pages.length === 0,
@@ -208,6 +213,7 @@ export class WebGpuSvoTetrahedralRadiance {
     const candidate = this.requireCandidate(key.generation);
     const page = matchingPage(candidate, key);
     if (!page) throw new Error("SVO tetrahedral-radiance black-page key is not resident in the candidate plan");
+    candidate.blackSlots.add(page.slot);
     markPageComplete(candidate, page.slot);
   }
 
@@ -235,8 +241,8 @@ export class WebGpuSvoTetrahedralRadiance {
 
   visibleGeneration(): WebGpuSvoTetrahedralRadianceVisibleGeneration | undefined {
     if (!this.visible) return undefined;
-    const { generation, plan, textures, views } = this.visible;
-    return { generation, plan, textures, views };
+    const { generation, plan, textures, views, blackSlots } = this.visible;
+    return { generation, plan, textures, views, blackSlots };
   }
 
   telemetry(): WebGpuSvoTetrahedralRadianceTelemetry {
@@ -246,6 +252,7 @@ export class WebGpuSvoTetrahedralRadiance {
       candidateGeneration: this.candidate?.generation ?? 0,
       residentPages: source?.plan.residentPageCount ?? 0,
       uploadedPages: this.candidate?.uploadedSlots.size ?? this.visible?.uploadedSlots.size ?? 0,
+      blackPages: source?.blackSlots.size ?? 0,
       allocatedBytes: (this.visible ? svoTetrahedralRadianceAtlasBytes(this.visible.plan) : 0)
         + (this.candidate ? svoTetrahedralRadianceAtlasBytes(this.candidate.plan) : 0),
       fallback: this.candidate

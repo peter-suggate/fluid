@@ -11,7 +11,10 @@ import {
   WebGPUFineLevelSetBricks,
   fineLevelSetBrickSamplingWGSL,
 } from "../lib/webgpu-octree-fine-levelset-bricks";
-import { unpackFineLevelSetGPUTransportControl } from
+import {
+  structuredFineLevelSetTransportWGSL,
+  unpackFineLevelSetGPUTransportControl,
+} from
   "../lib/webgpu-octree-fine-levelset-transport";
 import {
   FINE_LEVELSET_JFA_B4_ADDRESSING_ENV,
@@ -395,23 +398,45 @@ test("fine page delta publishes exact XOR keys and separate dirty/JFA-support se
     "the writable page-delta header must not retain duplicate indirect command records");
 });
 
-test("production delta-radius scatter makes recurring affected-page classification O(1)", () => {
+test("production dirty classification uses fingerprint-gated broad or exact reason cones", () => {
   const shader = makeFineLevelSetTopologyWGSL(
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
   ).replace(/\s+/g, "");
   assert.match(shader, /constDELTA_RADIUS_MASK:bool=true/);
   assert.match(shader,
     /fnrecurringHaloRadius\(\)->u32\{returncontrol\[6\];\}.*fnrecurringScatterDeltaRadii.*radius=i32\(params\.supportHaloRings\)/s,
-    "only the compact changed-producer stream must scatter through the complete support radius");
+    "the exact promotion-reason stream must scatter through the complete support radius");
   assert.match(shader,
-    /bandPairs=ranked\*volume;.*deltaPairs=producers\*deltaVolume;.*bandPairs\+deltaPairs/s,
-    "the existing halo dispatch must combine interface-band and exact delta-radius pairs");
+    /broadIsExact=REASON_CONES&&recurringRepairLanes\[0\]==producers[\s\S]*deltaVolume=select\(0u,deltaRadiusVolume\(\),DELTA_RADIUS_MASK&&\(!REASON_CONES\|\|broadIsExact\)\)/,
+    "the clean control and exact-fingerprint fast path retain the sound broad-interface cone");
+  const transport = structuredFineLevelSetTransportWGSL.replace(/\s+/g, "");
+  assert.match(transport,
+    /membership=pageChanged\[0\]!=0u\|\|before\|\|after;letrepair=pageChanged\[0\]!=0u\|\|\(\(before\|\|after\)&&pageValueChanged\[0\]!=0u\)/,
+    "repair must remain a subset of broad membership for the count gate to prove exact set equality");
+  assert.match(shader,
+    /fnprepareFinePageDeltaExpansion[\s\S]*broadIsExact=pageDelta\[10\]==2u[\s\S]*pageDelta\[10\]=1u\|select\(0u,2u,broadIsExact\)/,
+    "the GPU fingerprint verdict must survive exact identity assignment");
+  assert.match(shader,
+    /fninterfaceNeighborRadii[\s\S]*if\(REASON_CONES&&\(pageDelta\[10\]&2u\)==0u\)\{returnchangedNeighborRadii\(key\);\}[\s\S]*if\(DELTA_RADIUS_MASK\)/,
+    "a non-identical broad fingerprint must fall back to exact repair/addition/retirement cones");
+  assert.doesNotMatch(shader, /scatterFinePromotionReasonCones|writeIndirectDispatch\(10u/,
+    "reason narrowing must not add a dispatch to exact-broad generations");
   assert.match(shader,
     /fninterfaceNeighborRadii.*if\(DELTA_RADIUS_MASK\).*atomicLoad\(&topologyErrors\[key\]\).*DELTA_DIRTY.*DELTA_SUPPORT/s,
     "each desired page must classify from its dense logical-key mask");
   assert.match(shader,
     /reduceTopologyErrorRecords.*atomicLoad\(&topologyErrors\[work\]\)&\(CAPACITY\|NONFINITE\|MALFORMED\)/s,
     "radius bits must not enter the fail-closed lifecycle error reduction");
+});
+
+test("membership-plus-one-ring fine dirty oracle is deleted", () => {
+  const shader = makeFineLevelSetTopologyWGSL(
+    "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",
+  );
+  assert.doesNotMatch(shader, /DIRTY_ORACLE_MEMBERSHIP|membershipNeighborRadii/);
+  assert.doesNotMatch(readFileSync(
+    new URL("../lib/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8"),
+  /FLUID_DIRTY_ORACLE/);
 });
 
 test("opt-in fine delta neighbor query uses the producer's dense changed marker", () => {

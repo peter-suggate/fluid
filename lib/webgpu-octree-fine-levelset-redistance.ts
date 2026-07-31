@@ -463,9 +463,11 @@ export class WebGPUFineLevelSetRedistance {
   }
 
   encode(broker: PassBroker, options: FineLevelSetGPURedistanceOptions): void {
-    if ((this.source.plan.fineFactor !== 4 && this.source.plan.fineFactor !== 8)
+    if ((this.source.plan.fineFactor !== 1
+      && this.source.plan.fineFactor !== 4
+      && this.source.plan.fineFactor !== 8)
       || this.source.plan.brickResolution !== 4) {
-      throw new RangeError("GPU fine JFA-CPT requires a factor-4/factor-8 B4 generation");
+      throw new RangeError("GPU fine JFA-CPT requires a factor-1/factor-4/factor-8 B4 generation");
     }
     if (!Number.isSafeInteger(options.bandCells) || options.bandCells < 1 || options.bandCells > 256) {
       throw new RangeError("Fine redistance bandCells must be an integer in [1, 256]");

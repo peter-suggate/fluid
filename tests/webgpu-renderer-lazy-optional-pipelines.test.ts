@@ -68,8 +68,8 @@ test("dry SVO startup reports both expensive pipeline compilations", () => {
 });
 
 test("production enables exact static-primary coherence only for safe scene states", () => {
-  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"canonical-parametric"[^]*"split", 0, "static-primary"\)/,
-    "the production renderer must opt into the measured split/coherence policy");
+  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"canonical-parametric"[^]*"split", 0, "static-primary", true, true\)/,
+    "the production renderer must opt into the measured split/coherence and analytic-raster policy");
   assert.match(rendererSource, /const primaryCoherenceKey = !sceneRuntime\.fluidSolver \|\| !this\.simulationRunning[^]*shadowStabilityKey[^]*sceneEpoch/,
     "static worlds and paused solvers must use the complete caller-owned key");
   assert.match(rendererSource, /encode\(replacementEncoder, target, temporalFrame, primaryCoherenceKey, tracePhase\)/,

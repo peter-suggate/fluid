@@ -63,13 +63,23 @@ test("production dry pass uses a renderer-owned uniform mirror within the fragme
     .filter(({ type }) => type === "read-only-storage").length, 10);
   assert.match(svoDrySceneShader, /@binding\(14\) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>/);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.find(({ binding }) => binding === 14), { binding: 14, type: "uniform" });
-  assert.match(drySource, /const visibility = GPUShaderStage\.FRAGMENT \| \(computeBindings\.has\(binding\) \? GPUShaderStage\.COMPUTE : 0\)/);
+  assert.match(drySource, /const visibility = GPUShaderStage\.FRAGMENT[^]*computeBindings\.has\(binding\)[^]*vertexBindings\.has\(binding\)/,
+    "the shared body buffer stays reachable from precompiled fragment, compute, and raster vertex paths");
   assert.match(drySource, /return \{ binding, visibility, buffer: \{ type \} \}/);
   assert.match(drySource, /copyBufferToBuffer\(this\.rigidMotionSource, 0, this\.rigidMotionUniformBuffer, 0, SVO_DRY_RIGID_MOTION_UNIFORM_BYTES\)/);
   assert.match(rendererSource, /setRigidMotionSource\(backend === "webgpu" \? this\.gpuFluid\?\.rigidMotionBuffer : undefined\)/);
   assert.match(methodsSource, /readonly rigidMotionBuffer\?: GPUBuffer/);
   assert.match(restrictedSource, /get rigidMotionBuffer\(\)\{return this\.rigidSystem\.motionBuffer;\}/);
   assert.match(uniformSource, /get rigidMotionBuffer\(\) \{ return this\.rigidSystem\.motionBuffer; \}/);
+  assert.match(rendererSource, /this\.bodyBuffer = device\.createBuffer\([^]*GPUBufferUsage\.STORAGE \| GPUBufferUsage\.UNIFORM \| GPUBufferUsage\.COPY_DST/,
+    "one stable body allocation must serve analytic, raster, and SVO lighting paths");
+  assert.match(rendererSource, /queue\.writeBuffer\(this\.bodyBuffer, 0, bodyData\)/,
+    "CPU rigid motion must publish by replacing buffer contents only");
+  assert.match(rendererSource, /copyBufferToBuffer\(residentRigidBuffer, 0, this\.bodyBuffer, 0, 12 \* 16 \* 4\)/,
+    "GPU-resident rigid motion must reach the same stable buffer before rendering");
+  const strategy = drySource.slice(drySource.indexOf("setRigidBodyCount("), drySource.indexOf("private async ensureRasterGlassPipeline"));
+  assert.doesNotMatch(strategy, /create(?:Compute|Render)Pipeline|checkedModule|compile|ensure[A-Z]/,
+    "body movement or roster changes may select precompiled paths but never compile a shader");
 });
 
 test("G-buffer identity gates exact surface velocity and moving-rigid temporal reprojection", () => {

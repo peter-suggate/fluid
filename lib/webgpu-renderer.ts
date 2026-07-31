@@ -664,7 +664,7 @@ export class FluidLabRenderer {
       // Canonical-parametric removes the wide/canonical hybrid cursor and was
       // revalidated against split full-res relighting: 12.55 ms versus
       // 22.10-23.60 ms hybrid at 660x662 with identical output hashes.
-      (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float", "canonical-parametric", "off", "split", 0, "static-primary"),
+      (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float", "canonical-parametric", "off", "split", 0, "static-primary", true, true, true),
       (pipeline) => pipeline.initialize((label, completed) => this.reportSvoPipelineProgress(label, completed)),
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;
@@ -1694,6 +1694,7 @@ export class FluidLabRenderer {
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
     this.advanceSceneryAnimation();
+    this.svoDryScenePipeline?.setRigidBodyCount(bodies.length);
     this.svoDryScenePipeline?.setLightingMode(svoLightingMode);
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.

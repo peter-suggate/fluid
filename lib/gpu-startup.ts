@@ -60,13 +60,16 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
   const query = new URLSearchParams(config.search);
   const values = config.methodValues;
   const canonical = config.canonicalMethodValues;
+  const safeVariantKeys = new Set(["globalFineLevelSetFactor", "surfaceRefinementGradingLayers"]);
   const parameterDrift = [...new Set([...Object.keys(values), ...Object.keys(canonical)])]
+    .filter((key) => !safeVariantKeys.has(key))
     .filter((key) => JSON.stringify(values[key]) !== JSON.stringify(canonical[key]));
   const approvedQueryKeys = new Set([
     "gpu", "method", "scene", "quality", "render", "voxels",
     "param.octree.globalFineLevelSetFactor",
     "param.octree.maximumLeafSize",
     "param.octree.interfaceRefinementBandCells",
+    "param.octree.surfaceRefinementGradingLayers",
   ]);
   const unapprovedQueryKeys = [...new Set([...query.keys()].filter((key) => !approvedQueryKeys.has(key)))];
   return [
@@ -74,7 +77,8 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     config.methodId !== "octree" && "method must be octree",
     config.quality !== "balanced" && "quality must be balanced",
     !config.exactScene && "scene parameters must match the authored dam-break preset",
-    values.globalFineLevelSetFactor !== "4" && "global fine level set must be factor 4",
+    !["1", "4", "8"].includes(String(values.globalFineLevelSetFactor))
+      && "global fine level set must be factor 1, 4, or 8",
     values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
     config.voxelRenderMode !== "smooth" && "voxel inspection must be smooth/off",

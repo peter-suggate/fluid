@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  octreeDirtyOracleMembershipRequested,
   octreeFreezeTopologyAfter,
   octreePowerStructuralDeltaRequested,
 } from "../lib/webgpu-octree";
-import { fineLevelSetDirtyOracleMembershipRequested } from
+import { fineLevelSetReasonConesRequested } from
   "../lib/webgpu-octree-fine-levelset-topology";
 import { powerRedundancyCensusEnabled } from "../lib/webgpu-power-redundancy-census";
 import { analyzeCostAndChange } from "../tools/analyze-power-liquids-cost-change";
@@ -38,12 +37,12 @@ test("X-7 timestep overrides preserve simulated time and exact step count", () =
   assert.throws(() => powerDamLaneWithDt("large", 0.003, 2), /integer multiple/);
 });
 
-test("X-2/X-3/X-4 probe switches are explicit and fail closed", () => {
+test("discovery switches and the sound reason-cone control are explicit and fail closed", () => {
   assert.equal(powerRedundancyCensusEnabled({ FLUID_REDUNDANCY_CENSUS: "1" }), true);
   assert.equal(powerRedundancyCensusEnabled({ FLUID_REDUNDANCY_CENSUS: "true" }), false);
-  assert.equal(octreeDirtyOracleMembershipRequested({ FLUID_DIRTY_ORACLE: "membership" }), true);
-  assert.equal(fineLevelSetDirtyOracleMembershipRequested({ FLUID_DIRTY_ORACLE: "membership" }), true);
-  assert.equal(octreeDirtyOracleMembershipRequested({ FLUID_DIRTY_ORACLE: "wide" }), false);
+  assert.equal(fineLevelSetReasonConesRequested({}), true);
+  assert.equal(fineLevelSetReasonConesRequested({ FLUID_FINE_REASON_CONES: "0" }), false);
+  assert.equal(fineLevelSetReasonConesRequested({ FLUID_FINE_REASON_CONES: "membership" }), true);
   assert.equal(octreePowerStructuralDeltaRequested({}), false);
   assert.equal(octreePowerStructuralDeltaRequested({ FLUID_POWER_STRUCTURAL_DELTA: "0" }), false);
   assert.equal(octreePowerStructuralDeltaRequested({ FLUID_POWER_STRUCTURAL_DELTA: "1" }), true);

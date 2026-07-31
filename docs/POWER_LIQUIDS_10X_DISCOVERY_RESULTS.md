@@ -217,6 +217,39 @@ pipeline fast enough.
 5. Re-derive every winning probe under the normal GPU-resident scheduling and
    generation contracts before shipping it.
 
+### Sound dirty-oracle follow-through
+
+The quality-invalid `FLUID_DIRTY_ORACLE=membership` arm has been deleted from
+both the pressure-row and fine-page classifiers. Coarse promotion is now
+unconditionally gated by the existing exact structural and wet/dry decision
+fingerprints. In the fine lane, Section 5 interface membership is used only to
+allocate the new SPGrid band; after exact desired/current identity assignment,
+transported closest-point repairs, additions, and retirements author complete
+dirty and JFA-support dependency cones. Malformed producers, wrapped pair
+counts, generation mismatches, topology errors, capacity overflow, and failed
+downstream publication still reject the generation.
+
+`FLUID_FINE_REASON_CONES=0` retains the previous sound broad-interface cone as
+a clean measurement control. It does not revive the invalid membership oracle.
+The reproducible large-lane comparison is:
+
+```sh
+npm run measure:power-liquids-reason-cones -- --steps=120
+```
+
+It runs normal-scheduling control/candidate/control/candidate, leaves every
+tripwire enabled, requires exact terminal-counter parity with the clean
+control, and reports both correctness and median wall time.
+
+The 2026-07-31 120-step large-lane run passed every tripwire and matched the
+clean control's terminal counters exactly (6,690 active/desired fine bricks,
+2/10 pressure iterations). Median wall was 39.458 ms/advance for the broad
+clean control and 39.429 ms/advance for reason cones, a noise-level -0.07%.
+This validates the sound replacement but does not claim a large-lane speedup:
+on this window the GPU fingerprint usually proves broad membership and exact
+repair membership identical, so the product correctly reuses the already
+scattered broad cone without adding a dispatch.
+
 ## Product follow-through: exact image tasks and phase packing
 
 The first follow-through pass implemented exact A/B compiled SPGrid images.

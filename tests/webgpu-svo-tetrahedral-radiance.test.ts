@@ -135,6 +135,7 @@ test("GPU owner allocates four shared-slot RGB9E5 atlases and deinterleaves phys
     candidateGeneration: 0,
     residentPages: 1,
     uploadedPages: 1,
+    blackPages: 0,
     allocatedBytes: 32_000,
     fallback: "none",
   });
@@ -195,6 +196,8 @@ test("black-certified pages complete publication idempotently without queue writ
   assert.equal(owner.telemetry().uploadedPages, 2);
   assert.equal(owner.publish().published, true);
   assert.equal(owner.visibleGeneration()?.generation, 5);
+  assert.deepEqual([...owner.visibleGeneration()!.blackSlots], [0, 1]);
+  assert.equal(owner.telemetry().blackPages, 2);
   assert.throws(() => owner.certifyBlackPage({ generation: 5, level: 0, coordinate: [2, 0, 0] }),
     /candidate generation/, "published candidates may no longer be mutated");
   owner.destroy();

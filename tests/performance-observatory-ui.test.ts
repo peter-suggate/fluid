@@ -64,7 +64,10 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
   for (const phase of [
     "water-caustics",
     "svo-cone-lighting",
+    "svo-environment-gi",
     "svo-primary",
+    "svo-rigid",
+    "svo-glass",
     "svo-temporal",
     "water-front-interface",
     "water-back-interface",

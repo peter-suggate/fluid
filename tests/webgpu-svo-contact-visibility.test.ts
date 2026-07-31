@@ -36,12 +36,9 @@ test("contact traversal has a fixed low sample and per-sample work budget", () =
   assert.match(contact, new RegExp(
     `sampleIndex<${SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount}u`,
   ));
-  assert.match(contact, new RegExp(
-    `SvoVisibilityBudget\\(${SVO_CONTACT_VISIBILITY_CONTRACT.maximumNodeVisitsPerSample}u,`
-    + `${SVO_CONTACT_VISIBILITY_CONTRACT.maximumLeafVisitsPerSample}u,`
-    + `${SVO_CONTACT_VISIBILITY_CONTRACT.maximumWorkItemsPerSample}u,`
-    + `${SVO_CONTACT_VISIBILITY_CONTRACT.maximumIntersectionsPerSample}u\\)`,
-  ));
+  assert.match(contact,
+    /SvoVisibilityBudget\(dry\.tuningCounts1\.w,dry\.tuningCounts2\.x,dry\.tuningCounts2\.y,dry\.tuningCounts2\.z\)/,
+    "contact traversal must consume the live bounded render-tuning budgets");
   assert.match(contact, /result\.status==SVO_VIS_STATUS_INVALID\|\|result\.status==SVO_VIS_STATUS_EXHAUSTED[^]*return vec3f\(0\.0\)/,
     "invalid or exhausted secondary work must fail the complete estimate closed");
   assert.match(contact, /clamp\(visibility\/f32\(2\),vec3f\(0\.0\),vec3f\(1\.0\)\)/,
@@ -72,10 +69,9 @@ test("cone AO drops to a single cone while the camera is changing, never to zero
   assert.ok(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES >= 1,
     "AO must stay present while moving so settling changes noise, not whether ambient exists");
   assert.ok(SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES < SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES);
-  assert.match(contact, new RegExp(
-    `coneSampleCount=select\\(${SVO_DRY_SCENE_MOVING_AO_CONE_SAMPLES}u,`
-    + `${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u,uniforms\\.viewport\\.w>=-1\\.0\\)`,
-  ));
+  assert.match(contact,
+    /coneSampleCount=select\(dry\.tuningCounts1\.z,dry\.tuningCounts1\.y,uniforms\.viewport\.w>=-1\.0\)/,
+    "moving and settled cone counts must remain live GPU tuning state");
   assert.match(contact, new RegExp(
     `sampleIndex<${SVO_DRY_SCENE_STABLE_AO_CONE_SAMPLES}u[^]*sampleIndex>=coneSampleCount`,
   ));
@@ -88,7 +84,7 @@ test("cone AO drops to a single cone while the camera is changing, never to zero
 test("contact visibility attenuates indirect diffuse only and adds no storage binding", () => {
   const shade = shaderFunction("shadeDryOpaque", "shadeThinGlass");
   assert.match(shade, /let contactVisibility=dryContactVisibility\(position,hit\.normal,hit\.featureId,hit\.ownerId\)/);
-  assert.match(shade, /let gi=dryGlobalIllumination\(position,hit\.normal\)/);
+  assert.match(shade, /let ignoredBodyOwner=select\(DRY_OWNER_NONE,hit\.ownerId,hit\.motionKind==DRY_GBUFFER_MOTION_RIGID\);let gi=dryGlobalIllumination\(position,hit\.normal,ignoredBodyOwner\)/);
   assert.match(shade, /let diffuseEnvironment=[^;]*\*contactVisibility\*gi\.visibility\*diffuseEnvironmentScale\/UNIFIED_PI/);
   assert.match(shade, /let specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*fresnel/);
   assert.match(shade, /let indirectDiffuse=diffuseColor\*gi\.radiance/);

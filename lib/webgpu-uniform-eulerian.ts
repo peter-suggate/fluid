@@ -1007,6 +1007,7 @@ export class WebGPUUniformEulerianSolver {
         maximumLeafSize: options.octree.maximumLeafSize ?? 16,
         adaptivity: options.octree.adaptivity ?? 1,
         interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
+        surfaceRefinementGradingLayers: options.octree.surfaceRefinementGradingLayers ?? 1,
         // Left undefined the projection falls back to the pressure band, which
         // is the width every lane was measured at before the two separated.
         fineLevelSetBandCells: options.octree.fineLevelSetBandCells,

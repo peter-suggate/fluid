@@ -1,4 +1,4 @@
-import type { FineLevelSetBrickPlan } from "./octree-fine-levelset-bricks";
+import type { FineLevelSetBrickPlan, FineLevelSetFactor } from "./octree-fine-levelset-bricks";
 import { fineLevelSetLinearWorkgroupWGSL } from "./webgpu-fine-levelset-dispatch";
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
 import type { FineLevelSetPageDeltaLayout } from "./webgpu-octree-fine-levelset-topology";
@@ -8,6 +8,7 @@ export const FINE_LEVELSET_SUMMARY_VALID = 0x8000_0000;
 export const FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY = 0x8000_0000;
 export const FINE_LEVELSET_SUMMARY_CENTER_COMPLETE = 0x3fc0_0000;
 export const FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE = 32;
+export const FINE_LEVELSET_SUMMARY_ENTRY_WORDS = 12;
 export const FINE_LEVELSET_SUMMARY_ERROR = Object.freeze({ capacity: 1, staleGeneration: 4,
   nonfinite: 8 } as const);
 
@@ -54,16 +55,28 @@ export function planFineLevelSetSummaryLeafLookup(
   baseDimensions: readonly [number, number, number],
   finestCellDimensions: readonly [number, number, number],
   origin: readonly [number, number, number], size: number, samplesPerBrick = 64,
+  fineFactor?: FineLevelSetFactor,
 ): FineLevelSetSummaryLeafLookup {
   if (!Number.isInteger(size) || size < 1 || (size & (size - 1)) !== 0) {
     throw new RangeError("Fine-summary leaf size must be a positive power of two");
   }
+  const factorOneShape = baseDimensions.every((value, axis) =>
+    value === Math.ceil(finestCellDimensions[axis] / 4));
+  const factorOne = fineFactor === 1 || (fineFactor === undefined && factorOneShape
+    && baseDimensions.some((value, axis) => value < finestCellDimensions[axis]));
+  if (factorOne && !factorOneShape) {
+    throw new RangeError("Factor-1 fine-summary dimensions must contain four finest cells per B4 leaf");
+  }
   const ratios = baseDimensions.map((value, axis) => value / finestCellDimensions[axis]);
   const bricksPerCell = ratios[0];
-  if (!Number.isInteger(bricksPerCell) || bricksPerCell < 1 || ratios.some((value) => value !== bricksPerCell)) {
-    throw new RangeError("Fine-summary lattice must contain an equal integer brick count per finest cell");
+  if (!factorOne && (!Number.isInteger(bricksPerCell) || bricksPerCell < 1
+    || ratios.some((value) => value !== bricksPerCell))) {
+    throw new RangeError("Fine-summary lattice must be factor-1 or contain an equal integer brick count per finest cell");
   }
-  const brickSide = size * bricksPerCell;
+  // A factor-1 B4 summary leaf covers four finest cells per axis. Unit and
+  // size-2 pressure leaves therefore share its conservative interval; size 4
+  // is the first pressure leaf whose geometry exactly matches that node.
+  const brickSide = factorOne ? Math.max(1, size / 4) : size * bricksPerCell;
   if (!Number.isSafeInteger(brickSide) || (brickSide & (brickSide - 1)) !== 0) {
     throw new RangeError("Fine-summary leaf brick span must be a safe power of two");
   }
@@ -73,7 +86,11 @@ export function planFineLevelSetSummaryLeafLookup(
     levelOffset += dimensions[0] * dimensions[1] * dimensions[2];
     dimensions = dimensions.map((value) => Math.ceil(value / 2)) as [number, number, number];
   }
-  const coordinate = origin.map((value) => (value * bricksPerCell) / brickSide);
+  const brickOrigin = origin.map((value) => factorOne ? Math.floor(value / 4) : value * bricksPerCell);
+  if (factorOne && size >= 4 && origin.some((value) => value % size !== 0)) {
+    throw new RangeError("Octree leaf origin is not aligned to its factor-1 fine-summary node");
+  }
+  const coordinate = brickOrigin.map((value) => value / brickSide);
   if (coordinate.some((value) => !Number.isInteger(value))) {
     throw new RangeError("Octree leaf origin is not aligned to its fine-summary node");
   }
@@ -93,7 +110,7 @@ export function fineLevelSetSummaryDirectEntryBase(words: Uint32Array, key: numb
     || topLevelPages !== Math.ceil(hierarchyKeyCapacity / pageSize)
     || 16 + topLevelPages > entryOffset || entryOffset > words.length
     || (entryOffset - 16 - topLevelPages) % pageSize !== 0
-    || entryCapacity > Math.floor((words.length - entryOffset) / 8)
+    || entryCapacity > Math.floor((words.length - entryOffset) / FINE_LEVELSET_SUMMARY_ENTRY_WORDS)
     || 16 + Math.floor(key / pageSize) >= words.length) return undefined;
   const pageRankPlusOne = words[16 + Math.floor(key / pageSize)]!;
   const pagePoolOffset = 16 + topLevelPages;
@@ -103,8 +120,8 @@ export function fineLevelSetSummaryDirectEntryBase(words: Uint32Array, key: numb
   if (rankWord >= entryOffset || rankWord >= words.length) return undefined;
   const rankPlusOne = words[rankWord]!;
   if (rankPlusOne === 0 || rankPlusOne > entryCapacity) return undefined;
-  const base = entryOffset + (rankPlusOne - 1) * 8;
-  if (base + 7 >= words.length || words[base] !== key) return undefined;
+  const base = entryOffset + (rankPlusOne - 1) * FINE_LEVELSET_SUMMARY_ENTRY_WORDS;
+  if (base + FINE_LEVELSET_SUMMARY_ENTRY_WORDS - 1 >= words.length || words[base] !== key) return undefined;
   return base;
 }
 
@@ -148,17 +165,17 @@ export function planFineLevelSetGPUSummaries(plan: FineLevelSetBrickPlan,
   const hierarchyTopLevelPages = Math.ceil(hierarchyKeyCapacity / directoryPageSize);
   const directoryPageCapacity = Math.min(hierarchyTopLevelPages, Math.max(1, entryCapacity));
   const directoryWords = 16 + hierarchyTopLevelPages + directoryPageCapacity * directoryPageSize
-    + Math.max(1, entryCapacity) * 8;
+    + Math.max(1, entryCapacity) * FINE_LEVELSET_SUMMARY_ENTRY_WORDS;
   if (!Number.isSafeInteger(directoryWords) || directoryWords >= 0xffff_ffff) {
     throw new RangeError("Fine summary sparse directory exceeds the u32 ABI");
   }
   const directoryBytes = directoryWords * 4;
-  const fineEntriesBytes = Math.max(1, entryCapacity) * 32;
+  const fineEntriesBytes = Math.max(1, entryCapacity) * FINE_LEVELSET_SUMMARY_ENTRY_WORDS * 4;
   const keyStateBytes = Math.max(1, entryCapacity) * 8;
   const rankStateBytes = Math.max(1, entryCapacity) * 8;
   const pageStateBytes = Math.max(1, directoryPageCapacity) * 8;
   const workStateBytes = 256; const indirectBytes = 48;
-  const parameterBytes = levelOffsets.length * 96;
+  const parameterBytes = levelOffsets.length * 112;
   return { maximumResidentBricks: plan.maximumResidentBricks, maximumLevel: levelOffsets.length - 1,
     fineEntryCapacity, coarseEntryCapacity, entryCapacity, hierarchyKeyCapacity, directoryPageSize,
     hierarchyTopLevelPages, directoryPageCapacity, directoryWords, directoryBytes, fineEntriesBytes,
@@ -256,6 +273,7 @@ export class WebGPUFineLevelSetSummaries {
       data[23] = pageDelta.layout.changedKeysOffsetWords;
       data[24] = this.device.limits.maxComputeWorkgroupsPerDimension;
       data[25] = this.plan.directoryPageCapacity; data[26] = this.plan.hierarchyTopLevelPages;
+      data[27] = this.finePlan.fineFactor;
       this.device.queue.writeBuffer(this.params[level], 0, data);
     }
     const delta = pageDelta.buffer; const coarseDirectory = coarse.directory;
@@ -379,8 +397,9 @@ const COARSE_AUTHORITY:u32=0x80000000u;const CENTER_COMPLETE:u32=0x3fc00000u;con
 struct P{baseDims:vec3u,samplesPerBrick:u32,pageCapacity:u32,entryCapacity:u32,generation:u32,level:u32,
  levelOffset:u32,levelKeyCount:u32,levelDims:vec3u,maximumLevel:u32,hierarchyKeyCapacity:u32,
  worklistHeaderWords:u32,coarseEntryCapacity:u32,finestDims:vec3u,changedKeysOffset:u32,maxWorkgroups:u32,
- directoryPageCapacity:u32,topLevelPageCount:u32}
-struct Entry{key:u32,minimumPhi:u32,maximumPhi:u32,minimumAbsolutePhi:u32,samples:u32,bricks:u32,flags:u32,centerPhi:u32}
+ directoryPageCapacity:u32,topLevelPageCount:u32,fineFactor:u32}
+struct Entry{key:u32,minimumPhi:u32,maximumPhi:u32,minimumAbsolutePhi:u32,samples:u32,bricks:u32,flags:u32,centerPhi:u32,
+ validMaskLow:u32,validMaskHigh:u32,negativeMaskLow:u32,negativeMaskHigh:u32}
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,physicalVolume:f32}
 struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,physicalCellSize:f32,entries:array<CoarseEntry>}
 struct CoarseDeltaRecord{cellPlusOne:u32,size:u32,row:u32,flags:u32}
@@ -400,11 +419,12 @@ struct CoarseDelta{count:u32,generation:u32,flags:u32,valid:u32,pad:array<u32,12
 var<workgroup>minimumPhi:array<f32,64>;var<workgroup>maximumPhi:array<f32,64>;
 var<workgroup>minimumAbsolutePhi:array<f32,64>;var<workgroup>validSamples:array<u32,64>;
 var<workgroup>errors:array<u32,64>;var<workgroup>children:array<Entry,8>;
+var<workgroup>exactValid:array<u32,64>;var<workgroup>exactNegative:array<u32,64>;
 var<workgroup>centerBits:array<u32,8>;var<workgroup>centerStates:array<u32,8>;
 var<workgroup>publishErrors:array<u32,256>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}
-fn emptyEntry(key:u32)->Entry{return Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u);}
+fn emptyEntry(key:u32)->Entry{return Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u,0u,0u,0u,0u);}
 fn present(e:Entry)->bool{return e.samples!=0u||e.bricks!=0u||(e.flags&CENTER_COMPLETE)!=0u;}
 fn decodedOrdered(bits:u32)->f32{return bitcast<f32>(select(~bits,bits^0x80000000u,(bits&0x80000000u)!=0u));}
 fn publishedEntryValid(e:Entry)->bool{let centerState=e.flags&CENTER_COMPLETE;
@@ -414,22 +434,29 @@ fn publishedEntryValid(e:Entry)->bool{let centerState=e.flags&CENTER_COMPLETE;
  if(hasSamples){if(e.bricks>p.pageCapacity||e.bricks>INVALID/p.samplesPerBrick
    ||e.samples>e.bricks*p.samplesPerBrick){return false;}let lo=decodedOrdered(e.minimumPhi);
   let hi=decodedOrdered(e.maximumPhi);let ma=bitcast<f32>(e.minimumAbsolutePhi);
-  return finite(lo)&&finite(hi)&&finite(ma)&&lo<=hi&&ma>=0.0;}
+  var masksValid=(e.negativeMaskLow&~e.validMaskLow)==0u&&(e.negativeMaskHigh&~e.validMaskHigh)==0u;
+  if(p.fineFactor==1u&&e.key<p.baseDims.x*p.baseDims.y*p.baseDims.z){
+   masksValid=masksValid&&e.samples==countOneBits(e.validMaskLow)+countOneBits(e.validMaskHigh);
+  }else{masksValid=masksValid&&(e.validMaskLow|e.validMaskHigh|e.negativeMaskLow|e.negativeMaskHigh)==0u;}
+  return masksValid&&finite(lo)&&finite(hi)&&finite(ma)&&lo<=hi&&ma>=0.0;}
  if((e.flags&COARSE_AUTHORITY)!=0u){let lo=decodedOrdered(e.minimumPhi);let hi=decodedOrdered(e.maximumPhi);
   let ma=bitcast<f32>(e.minimumAbsolutePhi);return finite(lo)&&finite(hi)&&finite(ma)&&lo<=hi&&ma>=0.0;}
  return e.minimumPhi==INVALID&&e.maximumPhi==0u&&e.minimumAbsolutePhi==bitcast<u32>(3.402823e38);}
 fn combine(a:Entry,b:Entry)->Entry{return Entry(a.key,min(a.minimumPhi,b.minimumPhi),max(a.maximumPhi,b.maximumPhi),
- min(a.minimumAbsolutePhi,b.minimumAbsolutePhi),a.samples+b.samples,a.bricks+b.bricks,a.flags|b.flags,0u);}
+ min(a.minimumAbsolutePhi,b.minimumAbsolutePhi),a.samples+b.samples,a.bricks+b.bricks,a.flags|b.flags,0u,0u,0u,0u,0u);}
 fn dirLoad(word:u32)->u32{return atomicLoad(&directory[word]);}fn dirStore(word:u32,value:u32){atomicStore(&directory[word],value);}
 fn topWord(key:u32)->u32{return 16u+key/${FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE}u;}fn pagePoolOffset()->u32{return 16u+p.topLevelPageCount;}
 fn pageWord(page:u32,key:u32)->u32{return pagePoolOffset()+page*${FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE}u+(key&${FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE - 1}u);}
-fn entryOffset()->u32{return pagePoolOffset()+p.directoryPageCapacity*${FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE}u;}fn entryBase(rank:u32)->u32{return entryOffset()+rank*8u;}
+fn entryOffset()->u32{return pagePoolOffset()+p.directoryPageCapacity*${FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE}u;}
+fn entryBase(rank:u32)->u32{return entryOffset()+rank*${FINE_LEVELSET_SUMMARY_ENTRY_WORDS}u;}
 fn rankForKey(key:u32)->u32{if(key>=p.hierarchyKeyCapacity){return INVALID;}let pagePlusOne=dirLoad(topWord(key));
  if(pagePlusOne==0u||pagePlusOne==INVALID||pagePlusOne>p.directoryPageCapacity){return INVALID;}
  let rankPlusOne=dirLoad(pageWord(pagePlusOne-1u,key));return select(INVALID,rankPlusOne-1u,rankPlusOne>0u&&rankPlusOne<=p.entryCapacity);}
 fn storePublic(rank:u32,e:Entry){let base=entryBase(rank);dirStore(base,e.key);dirStore(base+1u,e.minimumPhi);
  dirStore(base+2u,e.maximumPhi);dirStore(base+3u,e.minimumAbsolutePhi);dirStore(base+4u,e.samples);
- dirStore(base+5u,e.bricks);dirStore(base+6u,e.flags);dirStore(base+7u,e.centerPhi);}
+ dirStore(base+5u,e.bricks);dirStore(base+6u,e.flags);dirStore(base+7u,e.centerPhi);
+ dirStore(base+8u,e.validMaskLow);dirStore(base+9u,e.validMaskHigh);
+ dirStore(base+10u,e.negativeMaskLow);dirStore(base+11u,e.negativeMaskHigh);}
 fn validWorklist()->bool{return p.worklistHeaderWords==7u&&arrayLength(&worklist)>=7u&&worklist[0]==p.generation
  &&worklist[2]==p.pageCapacity&&(worklist[3]&3u)==3u&&worklist[5]==1u&&worklist[6]==1u
  &&worklist[1]<=p.pageCapacity&&7u+worklist[1]<=arrayLength(&worklist);}
@@ -444,11 +471,25 @@ fn hierarchyKey(baseKey:u32,targetLevel:u32)->u32{let xy=p.baseDims.x*p.baseDims
  let rem=baseKey-z*xy;let y=rem/p.baseDims.x;var q=vec3u(rem-y*p.baseDims.x,y,z);var dims=p.baseDims;var offset=0u;
  for(var level=0u;level<targetLevel;level+=1u){offset+=dims.x*dims.y*dims.z;dims=(dims+vec3u(1u))/2u;q/=2u;}
  return offset+q.x+dims.x*(q.y+dims.y*q.z);}
-fn coarseHierarchyKey(cellPlusOne:u32,size:u32)->u32{let ratio=p.baseDims/p.finestDims;
- if(cellPlusOne==0u||size==0u||(size&(size-1u))!=0u||ratio.x==0u||any(ratio!=vec3u(ratio.x))){return INVALID;}
+fn coarseHierarchyKey(cellPlusOne:u32,size:u32)->u32{
+ if(cellPlusOne==0u||size==0u||(size&(size-1u))!=0u){return INVALID;}
  let cell=cellPlusOne-1u;if(cell>=p.finestDims.x*p.finestDims.y*p.finestDims.z){return INVALID;}
- let side=size*ratio.x;if(side==0u||(side&(side-1u))!=0u){return INVALID;}let origin=vec3u(cell%p.finestDims.x,
- (cell/p.finestDims.x)%p.finestDims.y,cell/(p.finestDims.x*p.finestDims.y));let brickOrigin=origin*ratio.x;
+ let origin=vec3u(cell%p.finestDims.x,(cell/p.finestDims.x)%p.finestDims.y,
+  cell/(p.finestDims.x*p.finestDims.y));
+ // At factor 1 a B4 summary leaf contains 4^3 finest cells. Sizes 1, 2,
+ // and 4 map to that level-zero key, while larger dyadic leaves advance one
+ // hierarchy level per doubling beyond size 4. Coarse rows are deliberately
+ // not attached to these colliding keys; factor-1 consumers fall back to the
+ // direct coarse authority when fine evidence is unavailable.
+ if(p.fineFactor==1u){if(any(p.baseDims!=(p.finestDims+vec3u(3u))/4u)){return INVALID;}
+  let side=max(1u,size/4u);let brickOrigin=origin/4u;
+  if(size>=4u&&any(origin%vec3u(size)!=vec3u(0u))){return INVALID;}
+  if(any(brickOrigin%vec3u(side)!=vec3u(0u))){return INVALID;}
+  let level=31u-countLeadingZeros(side);let base=brickOrigin.x+p.baseDims.x*(brickOrigin.y+p.baseDims.y*brickOrigin.z);
+  return hierarchyKey(base,level);}
+ let ratio=p.baseDims/p.finestDims;
+ if(ratio.x==0u||any(ratio!=vec3u(ratio.x))){return INVALID;}
+ let side=size*ratio.x;if(side==0u||(side&(side-1u))!=0u){return INVALID;}let brickOrigin=origin*ratio.x;
  if(any(brickOrigin%vec3u(side)!=vec3u(0u))){return INVALID;}let level=31u-countLeadingZeros(side);
  let base=brickOrigin.x+p.baseDims.x*(brickOrigin.y+p.baseDims.y*brickOrigin.z);return hierarchyKey(base,level);}
 fn changedKey(index:u32)->u32{if(atomicLoad(&state[1])==1u){let id=worklist[7u+index];let m=id*10u;
@@ -468,8 +509,13 @@ fn coarseAuthoritative()->bool{let generation=p.generation&0x3fffffffu;return p.
  &&p.changedKeysOffset+pageDelta[0]<=arrayLength(&pageDelta);let mode=select(2u,1u,cold);
  let valid=fineValid&&coarseValid&&(cold||deltaValid);let fineCount=select(pageDelta[0],worklist[1],cold);
  atomicStore(&state[0],select(STALE,0u,valid));atomicStore(&state[1],mode);atomicStore(&state[2],select(0u,fineCount,valid));
- atomicStore(&state[3],select(0u,coarse.rowCount,valid&&p.coarseEntryCapacity!=0u));
- atomicStore(&state[4],select(0u,coarseDelta.count,valid&&!cold&&p.coarseEntryCapacity!=0u));
+ // Factor-1 size-1/2/4 rows collide on one B4 hierarchy key, so a single
+ // atomic coarseRows slot cannot represent them without a nondeterministic
+ // last-writer centre/interval. Publish a fine-only summary at factor 1;
+ // consumers retain their direct coarse authority whenever that summary is
+ // absent or lacks a geometrically matching centre.
+ atomicStore(&state[3],select(0u,coarse.rowCount,valid&&p.coarseEntryCapacity!=0u&&p.fineFactor!=1u));
+ atomicStore(&state[4],select(0u,coarseDelta.count,valid&&!cold&&p.coarseEntryCapacity!=0u&&p.fineFactor!=1u));
  atomicStore(&state[5],p.generation);atomicStore(&state[9],INVALID);atomicStore(&state[12],atomicLoad(&state[8]));dirStore(9u,0u);
  writeDispatch(16u,atomicLoad(&state[2]),256u);writeDispatch(19u,atomicLoad(&state[3]),256u);
  writeDispatch(22u,atomicLoad(&state[4]),256u);}
@@ -586,10 +632,12 @@ fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;
  var keyPlusOne=0u;if(rankInRange){keyPlusOne=atomicLoad(&rankKeys[rank]);}let key=select(0u,keyPlusOne-1u,keyPlusOne!=0u);
  let enabled=rankInRange&&keyPlusOne!=0u&&key>=p.levelOffset&&key<p.levelOffset+p.levelKeyCount;
  if(lid==0u&&rank<high&&!rankInRange){setError(CAPACITY,rank);}var lo=3.402823e38;var hi=-3.402823e38;
- var ma=3.402823e38;var count=0u;var failure=0u;if(enabled){let page=finePage(key);if(page!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){
+ var ma=3.402823e38;var count=0u;var failure=0u;exactValid[lid]=0u;exactNegative[lid]=0u;
+ if(enabled){let page=finePage(key);if(page!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){
   let index=page*p.samplesPerBrick+local;if(index>=arrayLength(&sampleFlags)||index>=arrayLength(&finePhi)){failure|=CAPACITY;continue;}
   if((sampleFlags[index]&VALID)==0u){continue;}let value=bitcast<f32>(finePhi[index]);if(!finite(value)){failure|=NONFINITE;continue;}
-  lo=min(lo,value);hi=max(hi,value);ma=min(ma,abs(value));count+=1u;}}}
+  lo=min(lo,value);hi=max(hi,value);ma=min(ma,abs(value));count+=1u;
+  if(p.fineFactor==1u&&p.samplesPerBrick==64u){exactValid[lid]=1u;exactNegative[lid]=select(0u,1u,value<0.0);}}}}
  minimumPhi[lid]=lo;maximumPhi[lid]=hi;minimumAbsolutePhi[lid]=ma;validSamples[lid]=count;errors[lid]=failure;workgroupBarrier();
  for(var stride=32u;stride>0u;stride>>=1u){if(lid<stride){minimumPhi[lid]=min(minimumPhi[lid],minimumPhi[lid+stride]);
   maximumPhi[lid]=max(maximumPhi[lid],maximumPhi[lid+stride]);minimumAbsolutePhi[lid]=min(minimumAbsolutePhi[lid],minimumAbsolutePhi[lid+stride]);
@@ -597,6 +645,9 @@ fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;
  if(lid<8u){var center=vec2u(0u);if(enabled){center=centerSampleAt(key,lid);}centerBits[lid]=center.x;centerStates[lid]=center.y;}workgroupBarrier();
  if(lid==0u&&enabled){var value=emptyEntry(key);value.flags=errors[0];if(validSamples[0]>0u){value.minimumPhi=ordered(minimumPhi[0]);
   value.maximumPhi=ordered(maximumPhi[0]);value.minimumAbsolutePhi=bitcast<u32>(minimumAbsolutePhi[0]);value.samples=validSamples[0];value.bricks=1u;}
+  if(p.fineFactor==1u&&p.samplesPerBrick==64u){for(var bit=0u;bit<32u;bit+=1u){
+   value.validMaskLow|=exactValid[bit]<<bit;value.validMaskHigh|=exactValid[bit+32u]<<bit;
+   value.negativeMaskLow|=exactNegative[bit]<<bit;value.negativeMaskHigh|=exactNegative[bit+32u]<<bit;}}
   fineEntries[rank]=finishCenter(value);}}
 @compute @workgroup_size(64)fn recomputeFineSummaryParents(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let rank=fineLinearWorkgroup(wid,n);
@@ -612,7 +663,11 @@ fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;
   centerBits[lid]=center.x;centerStates[lid]=center.y;}workgroupBarrier();
  if(lid==0u&&enabled){var value=emptyEntry(key);for(var child=0u;child<8u;child+=1u){if(present(children[child])){value=combine(value,children[child]);}}
   fineEntries[rank]=finishCenter(value);}}
-fn coarseEntryAt(key:u32,rank:u32)->Entry{var value=emptyEntry(key);let rowPlusOne=atomicLoad(&coarseRows[rank]);if(rowPlusOne==0u){return value;}
+fn coarseEntryAt(key:u32,rank:u32)->Entry{var value=emptyEntry(key);
+ // Defensive mirror of the factor-1 scheduling gate: never interpret a
+ // colliding sub-brick coarseRows representative as B4 summary authority.
+ if(p.fineFactor==1u){return value;}
+ let rowPlusOne=atomicLoad(&coarseRows[rank]);if(rowPlusOne==0u){return value;}
  let row=rowPlusOne-1u;if(row>=coarse.rowCount||row>=arrayLength(&coarse.entries)){value.flags=STALE;return value;}let e=coarse.entries[row];
  if(coarseHierarchyKey(e.cellPlusOne,e.size)!=key||(e.flags&9u)!=9u||!finite(e.phi)||!finite(e.minimumPhi)||!finite(e.maximumPhi)){value.flags=STALE;return value;}
  value.minimumPhi=ordered(e.minimumPhi);value.maximumPhi=ordered(e.maximumPhi);value.minimumAbsolutePhi=bitcast<u32>(select(min(abs(e.minimumPhi),abs(e.maximumPhi)),0.0,e.minimumPhi<=0.0&&e.maximumPhi>=0.0));

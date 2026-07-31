@@ -4,9 +4,10 @@ import type { GPUQuality } from "../tall-cell-grid";
 import type { SceneDescription } from "../model";
 
 const params: MethodParamSpec[] = [
-  { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "4", tier: "coarse", options: [{ value: "4", label: "4× fine band · paper default" }, { value: "8", label: "8× fine band · experimental" }], hint: "The paper tracks the interface on a separate 4× or 8× sparse narrow band." },
+  { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "4", tier: "coarse", options: [{ value: "1", label: "1× coarse baseline · experimental" }, { value: "4", label: "4× fine band · paper default" }, { value: "8", label: "8× fine band · experimental" }], hint: "Track on a separate sparse narrow band at octree resolution (1×) or the paper's 4×/8× fine resolution." },
   { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "16", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells" }], hint: "Largest dyadic octree cell away from interfaces. The topology remains strictly 2:1 graded for valid power-diagram stencils." },
   { kind: "number", key: "interfaceRefinementBandCells", label: "Band reach", unit: "level", min: 0, max: 4, step: 1, digits: 0, default: 4, tier: "fine", hint: "One coupled reach level for pressure refinement and Section 5 surface tracking. Experimental level 0 uses one fine brick; level 1 retains the two-finest-cell moving-surface floor while still reducing pressure reach and recurring residency. Level 4 is the paper/default reach." },
+  { kind: "number", key: "surfaceRefinementGradingLayers", label: "Surface grading", unit: "layers", min: 1, max: 4, step: 1, digits: 0, default: 1, tier: "fine", hint: "Intermediate pressure-cell layers retained per octree level around the surface. 1 is the existing sharp 2:1 transition; 3 is the progressive-refinement experiment." },
 ];
 
 const maximumLeafSize = (value: unknown): 2 | 4 | 8 | 16 | 32 => {
@@ -14,7 +15,11 @@ const maximumLeafSize = (value: unknown): 2 | 4 | 8 | 16 | 32 => {
   return numeric >= 32 ? 32 : numeric >= 16 ? 16 : numeric >= 8 ? 8 : numeric <= 2 ? 2 : 4;
 };
 
-const globalFineLevelSetFactor = (value: unknown): 4 | 8 => Number(value) >= 8 ? 8 : 4;
+const globalFineLevelSetFactor = (value: unknown): 1 | 4 | 8 => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 4;
+  return numeric === 1 ? 1 : numeric >= 8 ? 8 : 4;
+};
 
 /** Canonical browser/native construction options for the power-octree method. */
 export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality, values: MethodParamValues) => {
@@ -37,6 +42,7 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
       // same adaptive octree when comparing the two pressure implementations.
       adaptivity: 1,
       interfaceRefinementBandCells: bandReachCells,
+      surfaceRefinementGradingLayers: numberValue(values, params, "surfaceRefinementGradingLayers"),
       fineLevelSetBandCells: diagnosticFineBand,
       globalFineLevelSetFactor: globalFineLevelSetFactor(values.globalFineLevelSetFactor),
       // Hidden authored/harness override for scenes whose fluid footprint is
@@ -72,6 +78,7 @@ export const octreeMethod: SimulationMethod = {
   presetFor: () => ({
     maximumLeafSize: "16",
     interfaceRefinementBandCells: 4,
+    surfaceRefinementGradingLayers: 1,
     globalFineLevelSetFactor: "4",
   }),
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, octreeSolverOptions(scene, quality, values)),

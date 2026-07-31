@@ -77,6 +77,7 @@
     "benchmark:power-liquids-clean-room": "node --import tsx tools/benchmark-power-liquids-clean-room.ts",
     "benchmark:power-dam-mini": "node --import tsx tools/benchmark-power-dam.ts --lane=mini",
     "benchmark:power-dam-large": "node --import tsx tools/benchmark-power-dam.ts --lane=large",
+    "measure:power-liquids-reason-cones": "node --import tsx tools/measure-power-liquids-reason-cones.ts",
     "benchmark:power-dam-hydrostatic": "node --import tsx tools/benchmark-power-dam.ts --lane=hydrostatic",
     "benchmark:power-dam-moving-interface": "node --import tsx tools/benchmark-power-dam.ts --lane=moving-interface",
     "benchmark:power-dam-quiescent": "node --import tsx tools/benchmark-power-dam.ts --lane=quiescent",

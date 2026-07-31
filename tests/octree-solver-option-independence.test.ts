@@ -7,6 +7,7 @@ test("octree exposes one production pressure authority", () => {
   const commonValues = {
     maximumLeafSize: "16",
     interfaceRefinementBandCells: 4,
+    surfaceRefinementGradingLayers: 1,
     globalFineLevelSetFactor: "4",
   };
   const options = octreeSolverOptions(defaultScene, "balanced", {
@@ -15,6 +16,10 @@ test("octree exposes one production pressure authority", () => {
 
   assert.equal("powerPressureSolver" in options.octree, false);
   assert.equal(options.octree.adaptivity, 1);
+  assert.equal(options.octree.surfaceRefinementGradingLayers, 1);
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...commonValues, surfaceRefinementGradingLayers: 3,
+  }).octree.surfaceRefinementGradingLayers, 3);
   assert.equal(octreeSolverOptions(defaultScene, "balanced", {
     ...commonValues, globalFineLevelSetMaximumBricks: 6_144,
   }).octree.globalFineLevelSetMaximumBricks, 6_144);

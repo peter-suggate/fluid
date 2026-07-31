@@ -6,7 +6,8 @@ import { FineLevelSetBrickOracle, packFineLevelSetBrickKey, planFineLevelSetBric
 import { WebGPUFineLevelSetBricks, type WebGPUFineLevelSetBrickSource } from
   "../lib/webgpu-octree-fine-levelset-bricks";
 import { FINE_LEVELSET_SUMMARY_CENTER_COMPLETE, FINE_LEVELSET_SUMMARY_CONSUMERS,
-  FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, FINE_LEVELSET_SUMMARY_VALID,
+  FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, FINE_LEVELSET_SUMMARY_ENTRY_WORDS,
+  FINE_LEVELSET_SUMMARY_VALID,
   fineLevelSetSummaryDirectEntryBase,
   fineLevelSetSummaryWGSL, planFineLevelSetGPUSummaries,
   planFineLevelSetSummaryLeafLookup, WebGPUFineLevelSetSummaries } from
@@ -132,11 +133,11 @@ test("direct summary lookup is differential-exact against a key map and fails cl
     if (page === undefined) { page = pageRanks.size; pageRanks.set(top, page); words[16 + top] = page + 1; }
     const rankWord = 16 + plan.hierarchyTopLevelPages + page * plan.directoryPageSize
       + key % plan.directoryPageSize;
-    words[rankWord] = rank + 1; words[words[8]! + rank * 8] = key;
+    words[rankWord] = rank + 1; words[words[8]! + rank * FINE_LEVELSET_SUMMARY_ENTRY_WORDS] = key;
   });
   for (let key = 0; key < plan.hierarchyKeyCapacity; key += 1) {
     const expected = keys.indexOf(key); const base = fineLevelSetSummaryDirectEntryBase(words, key);
-    assert.equal(base, expected < 0 ? undefined : words[8]! + expected * 8);
+    assert.equal(base, expected < 0 ? undefined : words[8]! + expected * FINE_LEVELSET_SUMMARY_ENTRY_WORDS);
   }
   words[9] = 0; assert.equal(fineLevelSetSummaryDirectEntryBase(words, keys[0]!), undefined);
   words[9] = FINE_LEVELSET_SUMMARY_VALID;
@@ -316,4 +317,43 @@ test("Dawn publishes exact factor-4/factor-8 fine cell-centre phase outside the 
     summaries.destroy(); owner.destroy(); authority.destroy(); readback.destroy();
   }
   device.destroy();
+});
+
+test("Dawn publishes all 64 factor-1 finest-cell phase bits in B4 sample order", {
+  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE",
+}, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter(); assert.ok(adapter);
+  const device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+  const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [4, 4, 4],
+    finestCellWidth: 1, fineFactor: 1, brickResolution: 4, maximumResidentBricks: 1 });
+  const owner = new WebGPUFineLevelSetBricks(device, plan);
+  const summaries = new WebGPUFineLevelSetSummaries(device, plan);
+  const oracle = new FineLevelSetBrickOracle(plan);
+  oracle.publishInterfaceAndRing([0], ([x]) => x - 2);
+  const source = owner.uploadGeneration(oracle.exportGPUGeneration());
+  const authority = device.createBuffer({ size: 80,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const encoder = device.createCommandEncoder(); const broker = new PassBroker(encoder);
+  summaries.encode(broker, source, { buffer: authority, layout: { changedKeysOffsetWords: 16 } },
+    { directory: authority, control: authority, delta: authority,
+      deltaHeaderWords: 16, deltaRecordWords: 4 });
+  device.queue.submit([broker.finish()]); await device.queue.onSubmittedWorkDone();
+  const readback = device.createBuffer({ size: summaries.plan.directoryBytes,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const copy = device.createCommandEncoder();
+  copy.copyBufferToBuffer(summaries.directory, 0, readback, 0, summaries.plan.directoryBytes);
+  device.queue.submit([copy.finish()]); await device.queue.onSubmittedWorkDone();
+  await readback.mapAsync(GPUMapMode.READ);
+  const words = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
+  const base = findSummaryEntry(words, 0); assert.notEqual(base, undefined);
+  assert.equal(words[base! + 4], 64); assert.equal(words[base! + 5], 1);
+  assert.equal(words[base! + 8], 0xffff_ffff); assert.equal(words[base! + 9], 0xffff_ffff);
+  assert.equal(words[base! + 10], 0x3333_3333); assert.equal(words[base! + 11], 0x3333_3333,
+    "x-fastest B4 bits must classify x=0/1 as wet for every y/z");
+  summaries.destroy(); owner.destroy(); authority.destroy(); readback.destroy(); device.destroy();
 });

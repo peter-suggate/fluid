@@ -85,6 +85,8 @@ test("checkerboard hard visibility is enabled only with temporal reconstruction"
   assert.match(svoDrySceneShader, /temporalShadowSampling=uniforms\.viewport\.w>=0\.0&&\(dry\.materialPublication\.w&2u\)!=0u/);
   assert.match(svoDrySceneShader, /shadowParity==0u/);
   assert.match(svoDrySceneShader, /dryShadowTracingEnabled==0u\)\{return vec3f\(1\.0\);\}/);
+  assert.match(svoDrySceneShader, /dryShadowTracingEnabled=select\(checkerboardShadow,1u,globalIllumination\)/,
+    "GLOBAL consumes deterministic shadow visibility on every pixel even when temporal reconstruction is active");
   assert.match(svoDrySceneShader, /DRY_GBUFFER_SHADOW_DEFERRED<<20u/,
     "deferred visibility must be explicit in the G-buffer rather than inferred from color");
 });

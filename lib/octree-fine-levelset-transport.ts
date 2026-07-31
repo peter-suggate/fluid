@@ -48,6 +48,21 @@ export function traceFineLevelSetDeparture(
   if (!Number.isSafeInteger(segments) || segments < 1 || segments > 64) {
     throw new RangeError("Fine level-set trace segments must be an integer in [1, 64]");
   }
+  if (segments === 1) {
+    const startVelocity = sampleVelocity(start);
+    if (startVelocity.some((value) => !Number.isFinite(value))) {
+      return { departure: [start[0], start[1], start[2]], segments: 0, finite: false };
+    }
+    const midpoint = start.map((value, axis) =>
+      value - 0.5 * dt * startVelocity[axis]!) as [number, number, number];
+    const midpointVelocity = sampleVelocity(midpoint);
+    if (midpointVelocity.some((value) => !Number.isFinite(value))) {
+      return { departure: midpoint, segments: 0, finite: false };
+    }
+    const departure = start.map((value, axis) =>
+      value - dt * midpointVelocity[axis]!) as [number, number, number];
+    return { departure, segments: 1, finite: departure.every(Number.isFinite) };
+  }
   const departure: [number, number, number] = [start[0], start[1], start[2]];
   const segmentDt = dt / segments;
   for (let segment = 0; segment < segments; segment += 1) {

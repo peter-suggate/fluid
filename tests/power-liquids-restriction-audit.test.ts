@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { auditSection5FineRestriction } from "../lib/power-liquids-restriction-audit";
+
+test("the factor-1 no-fine-band variant does not claim the paper's separate-band restriction receipt", () => {
+  const executor = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
+  assert.match(executor,
+    /const hasSeparateFineLevelSetBand = method\.id === "octree"\s*&& values\.globalFineLevelSetFactor !== "1";/);
+  assert.match(executor,
+    /if \(restrictionAudit\.failure && hasSeparateFineLevelSetBand\s*&& !retainedBackgroundOctree\)/);
+});
 
 const restriction = (unacceptedRows: number, rowCount = 363_336) => ({
   contributionCount: rowCount,
