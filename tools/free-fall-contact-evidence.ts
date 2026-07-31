@@ -47,6 +47,8 @@ export function freeFallContactAttribution(
   gravity: readonly [number, number, number],
   time_s: number,
   analyticCentroidY_cells: number,
+  seedFootprint?: Readonly<{ originX: number; originZ: number; size: number }>,
+  fineUpperSurfaceField?: Float32Array,
 ) {
   const [nx, ny, nz] = grid;
   const g = Math.hypot(gravity[0], gravity[1], gravity[2]);
@@ -69,12 +71,22 @@ export function freeFallContactAttribution(
   const cells = new Map<number, CellBucket>();
   const columns = new Map<number, ColumnBucket>();
   let worstColumn: { i: number; k: number; verticalWalls: number; lag_cells: number } | undefined;
+  let bestColumn: { i: number; k: number; verticalWalls: number; lag_cells: number } | undefined;
   let worstCell: { i: number; j: number; k: number; contacts: number; shortfallFraction: number } | undefined;
+  let bestCell: { i: number; j: number; k: number; contacts: number; shortfallFraction: number } | undefined;
+  let footprintRimLag = 0, footprintRimColumns = 0;
+  let footprintCenterLag = 0, footprintCenterColumns = 0;
+  let footprintTopCenter = 0, footprintTopCenterColumns = 0;
+  let footprintTopShoulder = 0, footprintTopShoulderColumns = 0;
+  let footprintTopCenterSpeed = 0, footprintTopCenterSpeedColumns = 0;
+  let footprintTopShoulderSpeed = 0, footprintTopShoulderSpeedColumns = 0;
   for (let k = 0; k < nz; k += 1) for (let i = 0; i < nx; i += 1) {
     let columnAmount = 0, weightedY = 0;
+    let topCell = -1;
     for (let j = 0; j < ny; j += 1) {
       const amount = alpha[i + nx * (j + ny * k)] ?? 0;
       if (!(amount > 0)) continue;
+      topCell = j;
       columnAmount += amount; weightedY += amount * (j + 0.5);
       if (!(amount >= 0.5)) continue;
       const contacts = (i === 0 ? 1 : 0) + (i === nx - 1 ? 1 : 0) + (j === 0 ? 1 : 0)
@@ -102,6 +114,9 @@ export function freeFallContactAttribution(
       if (!worstCell || shortfallFraction > worstCell.shortfallFraction) {
         worstCell = { i, j, k, contacts, shortfallFraction };
       }
+      if (!bestCell || shortfallFraction < bestCell.shortfallFraction) {
+        bestCell = { i, j, k, contacts, shortfallFraction };
+      }
       // An overhead wall is one whose outward normal opposes gravity, which on
       // this lattice is the +gravity-facing extreme of the gravity-aligned
       // axis. It is the only wall that can hold liquid up.
@@ -125,6 +140,40 @@ export function freeFallContactAttribution(
     const verticalWalls = (i === 0 ? 1 : 0) + (i === nx - 1 ? 1 : 0)
       + (k === 0 ? 1 : 0) + (k === nz - 1 ? 1 : 0);
     const lag_cells = weightedY / columnAmount - analyticCentroidY_cells;
+    if (seedFootprint && i >= seedFootprint.originX && i < seedFootprint.originX + seedFootprint.size
+      && k >= seedFootprint.originZ && k < seedFootprint.originZ + seedFootprint.size) {
+      const localX = i - seedFootprint.originX, localZ = k - seedFootprint.originZ;
+      const rim = localX === 0 || localZ === 0
+        || localX === seedFootprint.size - 1 || localZ === seedFootprint.size - 1;
+      if (rim) { footprintRimLag += lag_cells; footprintRimColumns += 1; }
+      else if (localX >= 2 && localZ >= 2
+        && localX <= seedFootprint.size - 3 && localZ <= seedFootprint.size - 3) {
+        footprintCenterLag += lag_cells; footprintCenterColumns += 1;
+      }
+      // Compare the authoritative fine-phi upper interface, not compact
+      // occupancy. A coarse cell-centre phi is also a distance to the side
+      // faces, so treating its occupancy as a height creates a false crown.
+      const topY_cells = fineUpperSurfaceField?.[i + nx * k] ?? NaN;
+      const centerStart = Math.floor((seedFootprint.size - 2) / 2);
+      const center = localX >= centerStart && localX < centerStart + 2
+        && localZ >= centerStart && localZ < centerStart + 2;
+      const shoulder = localX >= 2 && localX < seedFootprint.size - 2
+        && localZ >= 2 && localZ < seedFootprint.size - 2 && !center;
+      if (Number.isFinite(topY_cells)) {
+        if (center) { footprintTopCenter += topY_cells; footprintTopCenterColumns += 1; }
+        else if (shoulder) { footprintTopShoulder += topY_cells; footprintTopShoulderColumns += 1; }
+      }
+      if (velocity && topCell >= 0) {
+        const cell = i + nx * (topCell + ny * k);
+        const along = (velocity[3 * cell] ?? NaN) * unit[0]
+          + (velocity[3 * cell + 1] ?? NaN) * unit[1]
+          + (velocity[3 * cell + 2] ?? NaN) * unit[2];
+        if (Number.isFinite(along)) {
+          if (center) { footprintTopCenterSpeed += along; footprintTopCenterSpeedColumns += 1; }
+          else if (shoulder) { footprintTopShoulderSpeed += along; footprintTopShoulderSpeedColumns += 1; }
+        }
+      }
+    }
     let bucket = columns.get(verticalWalls);
     if (!bucket) {
       bucket = { verticalWalls, columns: 0, lagSum: 0, maximumLag: -Infinity };
@@ -134,6 +183,9 @@ export function freeFallContactAttribution(
     bucket.maximumLag = Math.max(bucket.maximumLag, lag_cells);
     if (!worstColumn || lag_cells > worstColumn.lag_cells) {
       worstColumn = { i, k, verticalWalls, lag_cells };
+    }
+    if (!bestColumn || lag_cells < bestColumn.lag_cells) {
+      bestColumn = { i, k, verticalWalls, lag_cells };
     }
   }
   const round = (value: number) => Number(value.toFixed(4));
@@ -158,9 +210,40 @@ export function freeFallContactAttribution(
         maximumLag_cells: round(bucket.maximumLag),
       })),
     ...(worstColumn ? { worstColumn: { ...worstColumn, lag_cells: round(worstColumn.lag_cells) } } : {}),
+    ...(bestColumn ? { bestColumn: { ...bestColumn, lag_cells: round(bestColumn.lag_cells) } } : {}),
+    ...(worstColumn && bestColumn ? {
+      columnLagSpread_cells: round(worstColumn.lag_cells - bestColumn.lag_cells),
+    } : {}),
     ...(worstCell ? { worstCell: { ...worstCell, shortfallFraction: round(worstCell.shortfallFraction) } } : {}),
+    ...(bestCell ? { bestCell: { ...bestCell, shortfallFraction: round(bestCell.shortfallFraction) } } : {}),
+    ...(worstCell && bestCell ? {
+      velocityShortfallSpread: round(worstCell.shortfallFraction - bestCell.shortfallFraction),
+    } : {}),
+    ...(footprintCenterColumns > 0 && footprintRimColumns > 0 ? {
+      footprintColumnLag: {
+        centerMean_cells: round(footprintCenterLag / footprintCenterColumns),
+        rimMean_cells: round(footprintRimLag / footprintRimColumns),
+        centerToRim_cells: round(footprintCenterLag / footprintCenterColumns
+          - footprintRimLag / footprintRimColumns),
+        centerColumns: footprintCenterColumns,
+        rimColumns: footprintRimColumns,
+      },
+    } : {}),
+    ...(footprintTopCenterColumns > 0 && footprintTopShoulderColumns > 0 ? {
+      footprintTopSurface: {
+        centerMeanY_cells: round(footprintTopCenter / footprintTopCenterColumns),
+        shoulderMeanY_cells: round(footprintTopShoulder / footprintTopShoulderColumns),
+        centerProtrusion_cells: round(footprintTopCenter / footprintTopCenterColumns
+          - footprintTopShoulder / footprintTopShoulderColumns),
+        centerColumns: footprintTopCenterColumns,
+        shoulderColumns: footprintTopShoulderColumns,
+        ...(footprintTopCenterSpeedColumns > 0 && footprintTopShoulderSpeedColumns > 0 ? {
+          centerMeanSpeed_m_s: round(footprintTopCenterSpeed / footprintTopCenterSpeedColumns),
+          shoulderMeanSpeed_m_s: round(footprintTopShoulderSpeed / footprintTopShoulderSpeedColumns),
+        } : {}),
+      },
+    } : {}),
   };
 }
 
 export type FreeFallContactAttribution = ReturnType<typeof freeFallContactAttribution>;
-

@@ -2142,6 +2142,7 @@ export class WebGPUOctreeProjection {
           // Without one of the two, no leaf seeds the band at all and every
           // downstream fine/coarse publication is empty.
           bootstrapLevelSet: this.surfaceState.texture,
+          openTopBoundary: scene.container.top !== "closed",
           deferPipelineCompilation,
           ...(analyticSparseBootstrap ? {
             analyticInitialCondition: scene.fluid.initialCondition,
@@ -4429,7 +4430,7 @@ export class WebGPUOctreeProjection {
             safetyBrickRings: 1,
           }, true, this.globalFineBootstrapped
             ? { kind: "delta", producer: publicationTransport!.topologyDelta }
-            : { kind: "bootstrap" }, inflow);
+            : { kind: "bootstrap" }, inflow, this.scene.container.top !== "closed");
           encoder = topologyBroker.commandEncoder();
           splitProductionPhase("brickEngineA", "fineTopology");
         } else {
@@ -4447,7 +4448,7 @@ export class WebGPUOctreeProjection {
             safetyBrickRings: 1,
           }, true, this.globalFineBootstrapped
             ? { kind: "delta", producer: publicationTransport!.topologyDelta }
-            : { kind: "bootstrap" }, inflow);
+            : { kind: "bootstrap" }, inflow, this.scene.container.top !== "closed");
           encoder = topologyBroker.commandEncoder();
           splitProductionPhase("brickEngineA", "fineTopology");
         }

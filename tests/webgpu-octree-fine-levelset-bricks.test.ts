@@ -464,6 +464,12 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
   assert.match(wgsl, /@compute@workgroup_size\(64\)fnclearDesiredGeneration/);
   assert.match(wgsl, /@compute@workgroup_size\(64\)fndiscoverInterfaceBricks/);
   assert.match(wgsl, /@compute@workgroup_size\(64\)fninsertExternalSeeds/);
+  assert.match(wgsl,
+    /fnexternalClosedTopBrick[\s\S]*params\.boundary\.x[\s\S]*brick\.y\+1u==params\.brickDimensions\.y/,
+    "a closed-lid contact page is a cold interface seed without an in-domain sign edge");
+  assert.match(wgsl,
+    /fnbootstrapClosedTopPhi[\s\S]*max\(value,position\.y-top\)[\s\S]*fninitializeDesiredSamples[\s\S]*value=bootstrapClosedTopPhi/,
+    "new lid-contact pages receive the unit-slope virtual-wall extension before redistance");
   assert.match(wgsl, /fnsortSparseCandidates[\s\S]*workgroupBarrier/,
     "each bounded expansion is globally sorted before publication");
   assert.match(wgsl,
@@ -561,6 +567,13 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
   assert.match(finalize,
     /constpass=broker\.compute[\s\S]*broker\.fence\("finedeferredsettlementdispatchpublication"\)[\s\S]*dispatchWorkgroupsIndirect\(this\.indirectDispatch,0\)[\s\S]*broker\.fence\("globalfinetopologypublicationcomplete"\)/,
     "publication validation authors one exact settlement dispatch before the semantic publication fence");
+  const transportWGSL = structuredFineLevelSetTransportWGSL.replace(/\s+/g, "");
+  assert.match(transportWGSL,
+    /fntransportClosedVirtualNeighbor[\s\S]*dir==3u&&q\.y\+1u==p\.sampleDims\.y&&p\.openTop==0u/,
+    "transport preserves the closed-lid virtual neighbor while the surface separates");
+  assert.match(transportWGSL,
+    /fncommitStructuredFineTransport[\s\S]*transportClosedVirtualNeighbor\(globalQ,dir\)[\s\S]*newInterface\|=/,
+    "recurring topology retains the virtual interface until an ordinary fine crossing exists");
 });
 
 test("direct recurring identity scatter exactly matches per-output membership", () => {
@@ -729,8 +742,8 @@ test("fine topology keeps cold failure unpublished and confines affine seeds to 
   assert.ok(supportBounds.every(([first, last]) => (first - alignedFace) <= 0 && (last - alignedFace) >= 0),
     "both page supports must admit their shared zero face for deterministic one-ring ownership");
   assert.match(shader,
-    /letkey=externalSeeds\[4u\+seed\];if\(!externalAffineInterfaceBrick\(key\)\)\{return;\}/,
-    "the published-empty t0 path cannot collapse to a zero interface prefix or seed the entire affine leaf set");
+    /letkey=externalSeeds\[4u\+seed\];if\(!externalAffineInterfaceBrick\(key\)&&!externalClosedTopBrick\(key\)\)\{return;\}/,
+    "the published-empty t0 path admits only ordinary crossings and the closed-lid separating interface");
   assert.match(shader,
     /letcurrentCount=select\(0u,min\(currentWorklist\[1\],params\.pageCapacity\),currentPublished\)[\s\S]*sourceD\[3\]=select\(0u,3u,currentPublished\);sourceD\[4\]=\(currentCount\+63u\)\/64u;sourceD\[5\]=1u;sourceD\[6\]=1u;control\[4\]=select\(0u,1u,currentPublished\);control\[5\]=1u/,
     "parallel rollback keeps a cold failure unpublished and only republishes a validated current generation");

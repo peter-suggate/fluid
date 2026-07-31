@@ -43,7 +43,8 @@ export type SceneWebGPUEvidenceCollectorId =
   | "collocated-velocity";
 
 export type SceneWebGPUEvidenceCollectionPhase = "checkpoint" | "terminal";
-export type SceneWebGPUEvidenceSource = "compact velocity" | "collocated velocity";
+export type SceneWebGPUEvidenceSource = "compact velocity" | "collocated velocity"
+  | "fine upper surface";
 
 /** Scene-declared adapter for evidence that cannot be collected generically. */
 export interface SceneWebGPUEvidenceCollector {

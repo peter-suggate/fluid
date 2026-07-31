@@ -57,6 +57,7 @@ import {
   readCubicVolumeField as readCubicVolumeFieldSnapshot,
   readFloatTexture2D,
   readFloatTexture3D,
+  readFineUpperSurfaceField,
   readFluidBrickSnapshot,
   readGlobalFineGenerationDiagnostics,
   readSparseVoxelStats,
@@ -894,6 +895,9 @@ async function runGPU(
   const applicableTerminalCollectors = evidenceCollectors.filter((collector) => collector.phase === "terminal"
     && (!collector.methods || collector.methods.includes(method.id as WebGPUSmokeMethodId)));
   const terminalSources = new Set(applicableTerminalCollectors.flatMap((collector) => collector.requires ?? []));
+  const applicableCheckpointCollectors = evidenceCollectors.filter((collector) => collector.phase === "checkpoint"
+    && (!collector.methods || collector.methods.includes(method.id as WebGPUSmokeMethodId)));
+  const checkpointSources = new Set(applicableCheckpointCollectors.flatMap((collector) => collector.requires ?? []));
   const authoredProfile = scenario.lane.methods.find((entry) => entry.id === method.id);
   // Validation presets are authored once for the UI. Native Dawn starts from
   // that exact quality/profile and only then applies explicitly requested
@@ -2044,10 +2048,15 @@ async function runGPU(
         : undefined;
       const globalFineGeneration = verifyGlobalFineGenerationTransition && method.id === "octree"
         ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
+      const fineUpperSurfaceField = checkpointSources.has("fine upper surface") && method.id === "octree"
+        ? await readFineUpperSurfaceField(device, solver,
+          [solver.info.nx, solver.info.ny, solver.info.nz])
+        : undefined;
       const collected = collectSceneEvidence(sceneEvidenceCollectorRegistry, evidenceCollectors, "checkpoint", {
         scene, method: method.id as WebGPUSmokeMethodId, grid: [solver.info.nx, solver.info.ny, solver.info.nz],
         time_s: solver.info.submittedTime_s ?? 0, volumeField: cubic.field,
         ...(compactVelocityField ? { velocityField: compactVelocityField } : {}),
+        ...(fineUpperSurfaceField ? { fineUpperSurfaceField } : {}),
       });
       for (const capability of collected.available) collectedEvidence.add(capability);
       checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary,

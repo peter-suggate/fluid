@@ -19,6 +19,17 @@ export interface FreeFallContactDiagnosticParameters {
   minimumMeasuredToAnalyticDropRatio: number;
   maximumMeasuredToAnalyticDropRatio: number;
   maximumDropHeadroom_cells: number;
+  /** Maximum pre-impact difference between the slowest and fastest liquid
+   * column centroids. The exact free-fall solution is a rigid translation. */
+  maximumColumnLagSpread_cells?: number;
+  /** Maximum pre-impact spread of gravity-axis velocity shortfall. */
+  maximumVelocityShortfallSpread?: number;
+  /** Maximum amount by which the authored footprint's central 4x4 columns may
+   * lag its one-cell rim before impact. */
+  maximumCenterToRimLag_cells?: number;
+  /** Maximum upper-interface height of the central 2x2 authored columns above
+   * the surrounding inner shoulder. */
+  maximumCenterProtrusion_cells?: number;
   minimumPreImpactCheckpoints: number;
   releaseCheckTime_s: number;
   maximumCeilingWetCellsAfterRelease: number;
@@ -97,6 +108,12 @@ function seamShortfallExcess(checkpoint: Readonly<Record<string, unknown>>): {
   if (baseline === undefined || seamValues.length === 0) return undefined;
   const seam = Math.max(...seamValues);
   return { baseline, seam, excess: seam - baseline };
+}
+
+function freeFallAttribution(checkpoint: Readonly<Record<string, unknown>>):
+Readonly<Record<string, unknown>> | undefined {
+  const evidence = recordValue(checkpoint.evidence);
+  return recordValue(checkpoint.attribution ?? evidence?.["free-fall-contact-attribution"]);
 }
 
 function recordPathValue(value: unknown, ...path: readonly string[]): Readonly<Record<string, unknown>> | undefined {
@@ -183,6 +200,69 @@ export function evaluateFreeFallContactDiagnostic(input: {
             expected: { maximumDrop_cells: maximum }, actual: { measuredDrop_cells: measuredDrop },
           }));
         }
+        const attribution = freeFallAttribution(checkpoint);
+        const columnSpread = numberValue(attribution?.columnLagSpread_cells);
+        const maximumColumnSpread = input.parameters.maximumColumnLagSpread_cells;
+        if (maximumColumnSpread !== undefined) findings.push(hookFinding({
+          id: `${method}.column-lag-spread.${index}`, method,
+          passed: columnSpread !== undefined && columnSpread <= maximumColumnSpread,
+          message: columnSpread === undefined
+            ? `free-fall column-shape attribution is unavailable at t=${time_s.toFixed(2)} s`
+            : columnSpread <= maximumColumnSpread
+              ? `free-fall columns remained level at t=${time_s.toFixed(2)} s`
+              : `free-fall columns span ${columnSpread.toFixed(3)} cells of vertical lag at t=${time_s.toFixed(2)} s; the exact solution is a rigid translation`,
+          expected: { maximumSpread_cells: maximumColumnSpread },
+          actual: attribution ? {
+            spread_cells: columnSpread,
+            bestColumn: attribution.bestColumn,
+            worstColumn: attribution.worstColumn,
+          } : undefined,
+        }));
+        const velocitySpread = numberValue(attribution?.velocityShortfallSpread);
+        const maximumVelocitySpread = input.parameters.maximumVelocityShortfallSpread;
+        if (maximumVelocitySpread !== undefined) findings.push(hookFinding({
+          id: `${method}.velocity-shortfall-spread.${index}`, method,
+          passed: velocitySpread !== undefined && velocitySpread <= maximumVelocitySpread,
+          message: velocitySpread === undefined
+            ? `free-fall velocity-shape attribution is unavailable at t=${time_s.toFixed(2)} s`
+            : velocitySpread <= maximumVelocitySpread
+              ? `free-fall gravity-axis velocity remained uniform at t=${time_s.toFixed(2)} s`
+              : `free-fall gravity-axis velocity shortfall spans ${velocitySpread.toFixed(3)} at t=${time_s.toFixed(2)} s`,
+          expected: { maximumSpread: maximumVelocitySpread },
+          actual: attribution ? {
+            spread: velocitySpread,
+            bestCell: attribution.bestCell,
+            worstCell: attribution.worstCell,
+          } : undefined,
+        }));
+        const footprintLag = recordValue(attribution?.footprintColumnLag);
+        const centerToRim = numberValue(footprintLag?.centerToRim_cells);
+        const maximumCenterToRim = input.parameters.maximumCenterToRimLag_cells;
+        if (maximumCenterToRim !== undefined) findings.push(hookFinding({
+          id: `${method}.center-to-rim-lag.${index}`, method,
+          passed: centerToRim !== undefined && centerToRim <= maximumCenterToRim,
+          message: centerToRim === undefined
+            ? `free-fall footprint-shape attribution is unavailable at t=${time_s.toFixed(2)} s`
+            : centerToRim <= maximumCenterToRim
+              ? `free-fall footprint center kept pace with its rim at t=${time_s.toFixed(2)} s`
+              : `free-fall footprint center lags its rim by ${centerToRim.toFixed(3)} cells at t=${time_s.toFixed(2)} s`,
+          expected: { maximumCenterToRimLag_cells: maximumCenterToRim },
+          actual: footprintLag,
+        }));
+        const topSurface = recordValue(attribution?.footprintTopSurface);
+        const centerProtrusion = numberValue(topSurface?.centerProtrusion_cells);
+        const maximumCenterProtrusion = input.parameters.maximumCenterProtrusion_cells;
+        if (maximumCenterProtrusion !== undefined) findings.push(hookFinding({
+          id: `${method}.center-protrusion.${index}`, method,
+          passed: centerProtrusion !== undefined && centerProtrusion <= maximumCenterProtrusion,
+          message: centerProtrusion === undefined
+            ? `free-fall upper-interface attribution is unavailable at t=${time_s.toFixed(2)} s`
+            : centerProtrusion <= maximumCenterProtrusion
+              ? `free-fall upper interface remained level at t=${time_s.toFixed(2)} s`
+              : `free-fall upper-interface center protrudes by ${centerProtrusion.toFixed(3)} cells at t=${time_s.toFixed(2)} s`,
+          expected: { maximumCenterProtrusion_cells: maximumCenterProtrusion },
+          actual: topSurface,
+        }));
       }
 
       if (input.parameters.includeCornerSeams === true

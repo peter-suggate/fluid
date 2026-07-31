@@ -83,6 +83,83 @@ export async function readBufferBinding(device: GPUDevice, binding: GPUBufferBin
   return bytes;
 }
 
+/** Read the authoritative sparse fine phi and locate its upper zero crossing
+ * in every coarse x/z column. Heights are returned in coarse-cell units. */
+export async function readFineUpperSurfaceField(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+  coarseDimensions: readonly [number, number, number],
+): Promise<Float32Array | undefined> {
+  const source = solver.globalFineLevelSetSource;
+  if (!source) return undefined;
+  const { plan } = source;
+  if (plan.finestCellDimensions.some((value, axis) => value !== coarseDimensions[axis])) return undefined;
+  const pageCapacity = plan.maximumResidentBricks;
+  const payloadWords = pageCapacity * plan.samplesPerBrick;
+  const [worklistBytes, metadataBytes, flagsBytes, phiBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: source.worklist }, (7 + pageCapacity) * 4),
+    readBufferBinding(device, { buffer: source.metadata }, pageCapacity * 40),
+    readBufferBinding(device, { buffer: source.flags }, payloadWords * 4),
+    readBufferBinding(device, { buffer: source.phi }, payloadWords * 4),
+  ]);
+  const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
+  const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4);
+  const flags = new Uint32Array(flagsBytes.buffer, flagsBytes.byteOffset, flagsBytes.byteLength / 4);
+  const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+  const pages = new Map<number, number>();
+  const activePages = Math.min(worklist[1] ?? 0, pageCapacity);
+  for (let work = 0; work < activePages; work += 1) {
+    const id = worklist[7 + work] ?? 0xffff_ffff;
+    if (id >= pageCapacity || metadata[10 * id + 2] !== source.generation) continue;
+    pages.set(metadata[10 * id + 1]!, id);
+  }
+  const [fineNx, fineNy] = plan.sampleDimensions;
+  const brickResolution = plan.brickResolution;
+  const sample = (qx: number, qy: number, qz: number): number | undefined => {
+    const bx = Math.floor(qx / brickResolution), by = Math.floor(qy / brickResolution);
+    const bz = Math.floor(qz / brickResolution);
+    const key = bx + plan.brickDimensions[0] * (by + plan.brickDimensions[1] * bz);
+    const id = pages.get(key);
+    if (id === undefined) return undefined;
+    const local = qx % brickResolution + brickResolution * ((qy % brickResolution)
+      + brickResolution * (qz % brickResolution));
+    const index = id * plan.samplesPerBrick + local;
+    const value = phi[index];
+    return (flags[index]! & 1) !== 0 && Number.isFinite(value) ? value : undefined;
+  };
+  const fineColumnHeight = (qx: number, qz: number): number | undefined => {
+    let previousValue: number | undefined, previousY = -1;
+    let highest: number | undefined;
+    for (let qy = 0; qy < fineNy; qy += 1) {
+      const value = sample(qx, qy, qz);
+      if (value === undefined) { previousValue = undefined; previousY = -1; continue; }
+      if (previousValue !== undefined && previousY + 1 === qy && previousValue < 0 && value >= 0) {
+        const denominator = value - previousValue;
+        const fraction = denominator > 0 ? -previousValue / denominator : 0;
+        highest = previousY + 0.5 + fraction;
+      }
+      previousValue = value; previousY = qy;
+    }
+    if (previousY === fineNy - 1 && previousValue !== undefined && previousValue < 0) highest = fineNy;
+    return highest;
+  };
+  const [nx, , nz] = coarseDimensions;
+  const factor = plan.fineFactor;
+  const result = new Float32Array(nx * nz); result.fill(Number.NaN);
+  for (let k = 0; k < nz; k += 1) for (let i = 0; i < nx; i += 1) {
+    let total = 0, count = 0;
+    for (let oz = 0; oz < factor; oz += 1) for (let ox = 0; ox < factor; ox += 1) {
+      const qx = factor * i + ox, qz = factor * k + oz;
+      if (qx >= fineNx) continue;
+      const height = fineColumnHeight(qx, qz);
+      if (height === undefined) continue;
+      total += height / factor; count += 1;
+    }
+    if (count > 0) result[i + nx * k] = total / count;
+  }
+  return result;
+}
+
 export async function readBufferBindingsPacked(
   device: GPUDevice,
   bindings: readonly { binding: GPUBufferBinding; byteLength: number }[],

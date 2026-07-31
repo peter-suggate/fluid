@@ -397,8 +397,10 @@ const FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT = 9;
 const FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS = 10;
 const FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES =
   FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES;
+const FINE_LEVELSET_TOPOLOGY_PARAMETER_BYTES = 160;
 export const FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES =
-  64 + 112 + 8 + 64 + 32 + FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES;
+  64 + FINE_LEVELSET_TOPOLOGY_PARAMETER_BYTES + 8 + 64 + 32
+  + FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES;
 
 /** GPU ABI for one exact fine-page topology/phase delta.
  *
@@ -921,7 +923,8 @@ export class WebGPUFineLevelSetTopology {
       + this.pageDeltaLayout.totalBytes + FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES + sampleBytes
       + (desiredCandidateWords + desiredScanWords + this.sparseCandidateCapacity
         + current.plan.maximumResidentBricks + topologyScratchWords) * 4;
-    this.params = device.createBuffer({ label: "fine-levelset topology params", size: 144,
+    this.params = device.createBuffer({ label: "fine-levelset topology params",
+      size: FINE_LEVELSET_TOPOLOGY_PARAMETER_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.emptySeeds = device.createBuffer({ label: "empty global fine seeds", size: 8,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -1029,7 +1032,8 @@ export class WebGPUFineLevelSetTopology {
     extraPublishEntries: readonly GPUBindGroupEntry[] = [], band?: FineLevelSetTopologyBand,
     deferPublication = false,
     publication: FineLevelSetTopologyPublication = { kind: "bootstrap" },
-    inflow?: SurfaceInflowState): void {
+    inflow?: SurfaceInflowState,
+    openTopBoundary = false): void {
     const plan = this.current.plan;
     const bandPlan = planFineLevelSetTopologyBand(plan.brickResolution, band ?? {
       maximumBacktraceFineCells: 0,
@@ -1041,7 +1045,8 @@ export class WebGPUFineLevelSetTopology {
     // transport + interpolation + signed-distance support before JFA-CPT
     // starts; no distance pass is permitted to mutate page tables.
     const dilationBrickRings = bandPlan.dilationBrickRings;
-    const bytes = new ArrayBuffer(144); const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
+    const bytes = new ArrayBuffer(FINE_LEVELSET_TOPOLOGY_PARAMETER_BYTES);
+    const u32 = new Uint32Array(bytes); const f32 = new Float32Array(bytes);
     u32.set(plan.brickDimensions, 0); u32[3] = plan.brickResolution;
     u32.set(plan.sampleDimensions, 4); u32[7] = plan.samplesPerBrick;
     f32.set(plan.domainOrigin, 8); f32[11] = plan.fineCellWidth;
@@ -1077,6 +1082,7 @@ export class WebGPUFineLevelSetTopology {
       f32.set([inflow.velocity_m_s.x, inflow.velocity_m_s.y,
         inflow.velocity_m_s.z, inflow.strength], 32);
     }
+    u32[36] = openTopBoundary ? 1 : 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
     this.device.queue.writeBuffer(this.control, 0, new Uint32Array(8));
     const resource = (buffer: GPUBuffer) => ({ buffer });
@@ -1496,7 +1502,7 @@ const DELTA_NEIGHBOR_QUERY:bool=${deltaNeighborQuery ? "true" : "false"};
 const DELTA_DIRTY:u32=0x100u;const DELTA_SUPPORT:u32=0x200u;
 struct Params { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,sparseCandidateCapacity:u32,pageCapacity:u32,currentGeneration:u32,nextGeneration:u32,fineFactor:u32,affineSeeds:u32,dilationBrickRings:u32,deferPublication:u32,dirtyHaloRings:u32,supportHaloRings:u32,maxWorkgroups:u32,recurringDelta:u32,scanRecordCapacity:u32,redistanceBandFineCells:u32,interpolationSupportFineCells:u32,safetyBrickRings:u32,
- inflowPositionRadius:vec4f,inflowVelocityStrength:vec4f }
+ inflowPositionRadius:vec4f,inflowVelocityStrength:vec4f,boundary:vec4u }
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read_write> sourceA:array<u32>;
 @group(0) @binding(2) var<storage,read_write> sourceB:array<u32>;
@@ -1595,6 +1601,11 @@ fn externalSeedClassificationPhi(key:u32,finestPoint:vec3f)->f32{let seeded=exte
 // centre-only bounds then reject both pages and punch a vertical gap in the
 // high-resolution interface band.
 fn externalAffineInterfaceBrick(key:u32)->bool{if(params.affineSeeds==0u||currentFinePopulated()){return false;}let brick=unpackBrick(key);let first=vec3f(brick*params.brickResolution)/f32(params.fineFactor);let last=vec3f((brick+vec3u(1u))*params.brickResolution)/f32(params.fineFactor);var minimum=3.402823e38;var maximum=-3.402823e38;for(var corner=0u;corner<8u;corner+=1u){let point=vec3f(select(first.x,last.x,(corner&1u)!=0u),select(first.y,last.y,(corner&2u)!=0u),select(first.z,last.z,(corner&4u)!=0u));let value=externalSeedClassificationPhi(key,point);if(!finite(value)){return false;}minimum=min(minimum,value);maximum=max(maximum,value);}return minimum<=0.0&&maximum>=0.0;}
+// A free surface can be born by separation from a closed lid before there is
+// an in-domain sign-changing edge. Keep the liquid top-cutoff brick as an
+// interface seed so Section 5's fine band exists during that sub-cell interval.
+fn externalClosedTopBrick(key:u32)->bool{if(params.boundary.x!=0u||currentFinePopulated()){return false;}let brick=unpackBrick(key);return brick.y+1u==params.brickDimensions.y;}
+fn bootstrapClosedTopPhi(key:u32,position:vec3f,value:f32)->f32{if(!externalClosedTopBrick(key)||value>=0.0){return value;}let top=params.domainOrigin.y+f32(params.sampleDimensions.y)*params.fineCellWidth;return max(value,position.y-top);}
 fn linearInvocation(wid:vec3u,nwg:vec3u,local:u32)->u32{return fineLinearWorkgroup(wid,nwg)*64u+local;}
 fn indirectLinearInvocation(wid:vec3u,local:u32)->u32{
  return (wid.y*params.maxWorkgroups+wid.x)*64u+local;
@@ -1624,8 +1635,13 @@ fn producerInterfaceContains(key:u32)->bool{if(params.recurringDelta==0u||arrayL
 	@compute @workgroup_size(64) fn clearFinePageDelta(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let item=linearInvocation(wid,nwg,local);if(item<16u){pageDelta[item]=0u;}if(item<21u){pageDelta[lifecycleDispatchOffset()+item]=0u;}if(item<6u){pageDelta[promotionCountsOffset()+item]=0u;}if(item<${3 * FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS}u){indirectDispatch[item]=0u;}if(item==1u){pageDelta[1]=params.nextGeneration;}}
 @compute @workgroup_size(64) fn clearDesiredGeneration(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let item=linearInvocation(wid,nwg,local);if(item<7u+params.pageCapacity){targetB[item]=INVALID;}if(item<9u&&item!=6u){control[item]=0u;}if(item==6u){control[6]=params.dilationBrickRings;}}
 @compute @workgroup_size(64) fn clearTopologyErrors(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work<params.pageCapacity){atomicStore(&topologyErrors[work],0u);}}
-@compute @workgroup_size(64) fn discoverInterfaceBricks(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work>=params.pageCapacity){return;}desiredCandidates[work]=INVALID;let activeCount=min(sourceB[1],params.pageCapacity);if(work>=activeCount){return;}let id=sourceB[7u+work];if(id>=params.pageCapacity||sourceA[id*10u+2u]!=params.currentGeneration){atomicOr(&topologyErrors[work],MALFORMED);return;}var interfaceBrick=false;var malformed=false;for(var sample=0u;sample<params.samplesPerBrick&&!interfaceBrick;sample+=1u){let index=id*params.samplesPerBrick+sample;if((sourceC[index]&VALID)==0u){continue;}let center=bitcast<f32>(sourceD[index]);if(!finite(center)){malformed=true;continue;}for(var direction=0u;direction<6u;direction+=1u){let neighbor=currentNeighbor(id,sample,direction);if(neighbor==INVALID||(sourceC[neighbor]&VALID)==0u){continue;}let other=bitcast<f32>(sourceD[neighbor]);if(finite(other)&&(other<0.0)!=(center<0.0)){interfaceBrick=true;break;}}}desiredCandidates[work]=select(INVALID,sourceA[id*10u+1u],interfaceBrick);if(malformed){desiredCandidates[work]=INVALID;atomicOr(&topologyErrors[work],MALFORMED);}}
-@compute @workgroup_size(64) fn insertExternalSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let seed=linearInvocation(wid,nwg,local);if(seed>=params.pageCapacity){return;}let output=params.pageCapacity+seed;desiredCandidates[output]=INVALID;if(currentFinePopulated()||arrayLength(&externalSeeds)<4u){return;}let rawCount=externalSeeds[0];let available=arrayLength(&externalSeeds)-4u;if(seed>=min(rawCount,min(params.pageCapacity,available))){return;}if(externalSeeds[1]!=0u||rawCount>params.pageCapacity||rawCount>available){atomicOr(&topologyErrors[seed],MALFORMED);return;}let key=externalSeeds[4u+seed];if(!externalAffineInterfaceBrick(key)){return;}if(key<params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z){desiredCandidates[output]=key;}else{atomicOr(&topologyErrors[seed],MALFORMED);}}
+fn closedVirtualNeighbor(q:vec3u,direction:u32)->bool{
+ return (direction==0u&&q.x==0u)||(direction==1u&&q.x+1u==params.sampleDimensions.x)
+  ||(direction==2u&&q.y==0u)||(direction==3u&&q.y+1u==params.sampleDimensions.y&&params.boundary.x==0u)
+  ||(direction==4u&&q.z==0u)||(direction==5u&&q.z+1u==params.sampleDimensions.z);
+}
+@compute @workgroup_size(64) fn discoverInterfaceBricks(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work>=params.pageCapacity){return;}desiredCandidates[work]=INVALID;let activeCount=min(sourceB[1],params.pageCapacity);if(work>=activeCount){return;}let id=sourceB[7u+work];if(id>=params.pageCapacity||sourceA[id*10u+2u]!=params.currentGeneration){atomicOr(&topologyErrors[work],MALFORMED);return;}let brick=unpackBrick(sourceA[id*10u+1u]);var interfaceBrick=false;var malformed=false;for(var sample=0u;sample<params.samplesPerBrick&&!interfaceBrick;sample+=1u){let index=id*params.samplesPerBrick+sample;if((sourceC[index]&VALID)==0u){continue;}let center=bitcast<f32>(sourceD[index]);if(!finite(center)){malformed=true;continue;}let q=brick*params.brickResolution+localCoord(sample);for(var direction=0u;direction<6u;direction+=1u){let neighbor=currentNeighbor(id,sample,direction);var other=3.402823e38;if(neighbor!=INVALID&&(sourceC[neighbor]&VALID)!=0u){other=bitcast<f32>(sourceD[neighbor]);}else if(closedVirtualNeighbor(q,direction)){other=center+params.fineCellWidth;}if(finite(other)&&(other<0.0)!=(center<0.0)){interfaceBrick=true;break;}}}desiredCandidates[work]=select(INVALID,sourceA[id*10u+1u],interfaceBrick);if(malformed){desiredCandidates[work]=INVALID;atomicOr(&topologyErrors[work],MALFORMED);}}
+@compute @workgroup_size(64) fn insertExternalSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let seed=linearInvocation(wid,nwg,local);if(seed>=params.pageCapacity){return;}let output=params.pageCapacity+seed;desiredCandidates[output]=INVALID;if(currentFinePopulated()||arrayLength(&externalSeeds)<4u){return;}let rawCount=externalSeeds[0];let available=arrayLength(&externalSeeds)-4u;if(seed>=min(rawCount,min(params.pageCapacity,available))){return;}if(externalSeeds[1]!=0u||rawCount>params.pageCapacity||rawCount>available){atomicOr(&topologyErrors[seed],MALFORMED);return;}let key=externalSeeds[4u+seed];if(!externalAffineInterfaceBrick(key)&&!externalClosedTopBrick(key)){return;}if(key<params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z){desiredCandidates[output]=key;}else{atomicOr(&topologyErrors[seed],MALFORMED);}}
 fn desiredLogicalCount()->u32{return params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;}
 fn seedRecordPresent(item:u32)->bool{
  let key=desiredCandidates[item];if(key>=desiredLogicalCount()){return false;}
@@ -2305,7 +2321,7 @@ fn repairNeighbor(key:u32)->bool{
  // payload. They are not rollback corruption and must not poison an otherwise
  // valid page snapshot when factor 1 reuses a whole B4 page.
  if((currentFlags[index]&VALID)==0u){payloadSnapshot[index]=3.402823e38;}else{let value=bitcast<f32>(currentPhi[index]);if(!finite(value)){error=NONFINITE;}else{payloadSnapshot[index]=value;}}}}publishTopologyError(work,local,error,laneActive);}
-@compute @workgroup_size(64) fn initializeDesiredSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[11]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity){error=MALFORMED;}else if(local<params.samplesPerBrick){let key=sourceC[id*10u+1u];let index=id*params.samplesPerBrick+local;if(index<arrayLength(&targetA)&&index<arrayLength(&targetB)){let brick=unpackBrick(key);let coord=localCoord(local);let q=brick*params.brickResolution+coord;if(any(q>=params.sampleDimensions)){targetA[index]=0u;targetB[index]=0u;}else{let position=params.domainOrigin+(vec3f(q)+vec3f(0.5))*params.fineCellWidth;var value=sampleCoarseOctreePhi(position);let seeded=externalSeedPhi(key,(vec3f(q)+vec3f(0.5))/f32(params.fineFactor));if(finite(seeded)){value=seeded;}value=applyInflowPhi(value,position);if(!finite(value)){error=NONFINITE;}else{let encoded=bitcast<u32>(value);targetA[index]=VALID|select(0u,16u,value<0.0);targetB[index]=encoded;}}}}}publishTopologyError(work,local,error,laneActive);}
+@compute @workgroup_size(64) fn initializeDesiredSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[11]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity){error=MALFORMED;}else if(local<params.samplesPerBrick){let key=sourceC[id*10u+1u];let index=id*params.samplesPerBrick+local;if(index<arrayLength(&targetA)&&index<arrayLength(&targetB)){let brick=unpackBrick(key);let coord=localCoord(local);let q=brick*params.brickResolution+coord;if(any(q>=params.sampleDimensions)){targetA[index]=0u;targetB[index]=0u;}else{let position=params.domainOrigin+(vec3f(q)+vec3f(0.5))*params.fineCellWidth;var value=sampleCoarseOctreePhi(position);let seeded=externalSeedPhi(key,(vec3f(q)+vec3f(0.5))/f32(params.fineFactor));if(finite(seeded)){value=seeded;}value=bootstrapClosedTopPhi(key,position,value);value=applyInflowPhi(value,position);if(!finite(value)){error=NONFINITE;}else{let encoded=bitcast<u32>(value);targetA[index]=VALID|select(0u,16u,value<0.0);targetB[index]=encoded;}}}}}publishTopologyError(work,local,error,laneActive);}
 @compute @workgroup_size(64) fn initializeDesiredWorkSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);if(work>=pageDelta[11]||control[0]!=0u){return;}let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity||local>=params.samplesPerBrick){return;}let index=id*params.samplesPerBrick+local;nextWorkA[index]=INVALID;nextWorkB[index]=INVALID;}
 @compute @workgroup_size(64) fn linkDesiredNeighbors(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){
  let work=fineLinearWorkgroup(wid,nwg);if(work>=sourceD[1]||control[0]!=0u){return;}

@@ -267,6 +267,8 @@ test("structured power lanes own exhaustive thresholds and raster policy", () =>
 test("ceiling smoke follows its dedicated band-1 UI profile only", () => {
   const defaultLane = getSceneWebGPUSmokeLane("ceiling-slab-drop");
   assert.equal(defaultLane.methods[0].overrides.interfaceRefinementBandCells, 1);
+  assert.equal(defaultLane.collect.evidenceCollectors?.[0]?.requires?.includes("fine upper surface"), true);
+  assert.equal(hook(defaultLane, "free-fall-contact").parameters?.maximumCenterProtrusion_cells, 0.05);
   const performance = getSceneWebGPUSmokeLane("ceiling-slab-drop", "performance");
   assert.equal(performance.methods[0].overrides.interfaceRefinementBandCells, 1);
   assert.equal(performance.collect.performanceProfile, true);

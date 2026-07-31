@@ -18,7 +18,7 @@ test("fine-seed adapter allocation follows compact rows, not domain depth", () =
     rowCapacity: 100,
     leafBytes: 6_400,
     candidateBytes: 800,
-    allocatedBytes: 13_876,
+    allocatedBytes: 13_892,
   });
   assert.equal(planOctreeFineSeedAdapter(100).allocatedBytes, plan.allocatedBytes);
   assert.throws(() => planOctreeFineSeedAdapter(0), /must be positive/);
@@ -52,6 +52,9 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
     "a missing or rejected structured authority must reject the candidate generation");
   assert.match(octreeFineSeedAdapterShader, /let flags=LIVE\|candidateFlags/,
     "all live leaves must remain directory-addressable even when they have no fine page");
+  assert.match(octreeFineSeedAdapterShader,
+    /let virtualInterface=!openTop&&origin\.y\+header\.size>=dims\(\)\.y&&centrePhi<0\.0/,
+    "closed-lid liquid leaves seed the nascent separating interface");
   assert.match(octreeFineSeedAdapterShader, /struct CoarsePhi \{ phi:f32, minimumPhi:f32, maximumPhi:f32, flags:u32 \}/);
   assert.match(octreeFineSeedAdapterShader, /fn coarsePublicationValid\(\)/,
     "fine-seed selection must consume the compact coarse publication directly");
@@ -231,9 +234,9 @@ test("Dawn adapts live compact rows into global-fine seed candidates without den
       { row: new Uint32Array(candidateCopy)[10], flags: new Uint32Array(candidateCopy)[11] },
     ].sort((a, b) => a.row - b.row);
     assert.deepEqual(published, [
-      { row: 0, flags: OCTREE_FINE_SEED_STATE.halo },
+      { row: 0, flags: OCTREE_FINE_SEED_STATE.core },
       { row: 1, flags: OCTREE_FINE_SEED_STATE.core },
-    ]);
+    ], "the negative closed-lid leaf is a virtual-interface core seed");
     assert.deepEqual([...leafWords.slice(0, 4)], [0, 0, 0, 1]);
     assert.deepEqual([...leafWords.slice(16, 20)], [1, 0, 0, 1]);
     assert.equal(leafFloats[12], 3); assert.equal(leafFloats[13], 0); assert.equal(leafFloats[14], 0);

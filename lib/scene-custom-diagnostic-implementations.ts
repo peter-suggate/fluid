@@ -99,6 +99,10 @@ const freeFallContact = defineSceneHookImplementation({
     const includeCornerSeams = boolean(context.parameters, "includeCornerSeams");
     const seamEvaluationStart_s = numeric(context.parameters, "seamEvaluationStart_s");
     const maximumSeamShortfallExcess = numeric(context.parameters, "maximumSeamShortfallExcess");
+    const maximumColumnLagSpread_cells = numeric(context.parameters, "maximumColumnLagSpread_cells");
+    const maximumVelocityShortfallSpread = numeric(context.parameters, "maximumVelocityShortfallSpread");
+    const maximumCenterToRimLag_cells = numeric(context.parameters, "maximumCenterToRimLag_cells");
+    const maximumCenterProtrusion_cells = numeric(context.parameters, "maximumCenterProtrusion_cells");
     if (includeCornerSeams === true
       && (seamEvaluationStart_s === undefined || maximumSeamShortfallExcess === undefined)) {
       return parameterFailure("free-fall-contact", ["seamEvaluationStart_s", "maximumSeamShortfallExcess"]);
@@ -111,6 +115,10 @@ const freeFallContact = defineSceneHookImplementation({
         ...(includeCornerSeams === undefined ? {} : { includeCornerSeams }),
         ...(seamEvaluationStart_s === undefined ? {} : { seamEvaluationStart_s }),
         ...(maximumSeamShortfallExcess === undefined ? {} : { maximumSeamShortfallExcess }),
+        ...(maximumColumnLagSpread_cells === undefined ? {} : { maximumColumnLagSpread_cells }),
+        ...(maximumVelocityShortfallSpread === undefined ? {} : { maximumVelocityShortfallSpread }),
+        ...(maximumCenterToRimLag_cells === undefined ? {} : { maximumCenterToRimLag_cells }),
+        ...(maximumCenterProtrusion_cells === undefined ? {} : { maximumCenterProtrusion_cells }),
       } as unknown as FreeFallContactDiagnosticParameters,
       methods: context.selectedMethods,
     });

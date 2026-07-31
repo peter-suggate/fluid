@@ -81,6 +81,37 @@ test("free-fall contact evaluates the analytic drop and both ceiling representat
   assert.equal(failed.find(({ id }) => id === "octree.ceiling-wet.2")?.passed, false);
 });
 
+test("free-fall contact rejects a protruding fine upper surface", () => {
+  const scene = cloneScene(defaultScene);
+  scene.container.height_m = 0.8;
+  const grid = [16, 16, 16] as const;
+  const findings = evaluateFreeFallContactDiagnostic({
+    scene,
+    evidence: evidence({ octree: {
+      run: { simulatedTime_s: 0.1 },
+      field: { grid, checkpoints: [{
+        time_s: 0.02,
+        centroidY_cells: 12,
+        ceilingWetCells: 0,
+        ceilingContactPixels: 0,
+        attribution: { footprintTopSurface: { centerProtrusion_cells: 0.08 } },
+      }] },
+    } }),
+    methods: ["octree"],
+    parameters: {
+      minimumRunTime_s: 0.1, evaluationStart_s: 0.02, impactTime_s: 0.29,
+      preImpactMargin_s: 0.02, minimumMeasuredToAnalyticDropRatio: 0.6,
+      maximumMeasuredToAnalyticDropRatio: 1.45, maximumDropHeadroom_cells: 0.5,
+      minimumPreImpactCheckpoints: 0, releaseCheckTime_s: 1,
+      maximumCeilingWetCellsAfterRelease: 0, maximumCeilingPixelsAfterRelease: 0,
+      maximumCenterProtrusion_cells: 0.05,
+    },
+  });
+  const finding = findings.find(({ id }) => id === "octree.center-protrusion.0");
+  assert.equal(finding?.passed, false);
+  assert.deepEqual(finding?.actual, { centerProtrusion_cells: 0.08 });
+});
+
 test("minimal dam ceiling separation derives wet cells from checkpoint fields", () => {
   const scene = cloneScene(defaultScene);
   const grid = [4, 4, 4] as const;
