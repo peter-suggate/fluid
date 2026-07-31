@@ -8,6 +8,7 @@
  */
 
 import { PassBroker } from "./webgpu-pass-broker";
+import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const OCTREE_ANALYTIC_BOOTSTRAP_PARAMETER_BYTES = 32;
 
@@ -94,14 +95,19 @@ export class WebGPUOctreeAnalyticBootstrapWorklist {
   private readonly tileWorklist: GPUBuffer;
   private readonly tileStates: GPUBuffer;
   private readonly group: GPUBindGroup;
-  private readonly emit: GPUComputePipeline;
+  private emit!: GPUComputePipeline;
+  private readonly pipelineLayout: GPUPipelineLayout;
+  private shaderModule?: GPUShaderModule;
+  private readonly pipelinesDeferred: boolean;
 
   constructor(
     private readonly device: GPUDevice,
     tileWorklist: GPUBuffer,
     tileStates: GPUBuffer,
     readonly plan: OctreeAnalyticBootstrapWorklistPlan,
+    deferPipelineCompilation = false,
   ) {
+    this.pipelinesDeferred = deferPipelineCompilation;
     this.tileWorklist = tileWorklist;
     this.tileStates = tileStates;
     const [tx, ty, tz] = plan.tileDimensions;
@@ -141,21 +147,29 @@ export class WebGPUOctreeAnalyticBootstrapWorklist {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
     ] });
-    const shaderModule = device.createShaderModule({
-      label: "Analytic octree bootstrap worklist shader",
-      code: octreeAnalyticBootstrapWorklistShader,
-    });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    this.emit = device.createComputePipeline({
-      label: "Emit analytic octree bootstrap tiles",
-      layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "emitAnalyticTopologyWorklist" },
-    });
+    this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    if (!deferPipelineCompilation) this.emit = device.createComputePipeline(this.descriptor());
     this.group = device.createBindGroup({ layout, entries: [
       { binding: 0, resource: { buffer: tileWorklist } },
       { binding: 1, resource: { buffer: tileStates } },
       { binding: 2, resource: { buffer: this.params } },
     ] });
+  }
+
+  private descriptor(): GPUComputePipelineDescriptor {
+    this.shaderModule ??= this.device.createShaderModule({
+      label: "Analytic octree bootstrap worklist shader",
+      code: octreeAnalyticBootstrapWorklistShader,
+    });
+    return { label: "Emit analytic octree bootstrap tiles", layout: this.pipelineLayout,
+      compute: { module: this.shaderModule, entryPoint: "emitAnalyticTopologyWorklist" } };
+  }
+
+  initializationTasks(): GPUInitializationTask[] {
+    if (!this.pipelinesDeferred) return [];
+    return [{ id: "octree.analytic-bootstrap.pipeline.emit", phase: "adaptive-topology",
+      label: "Compile analytic bootstrap worklist",
+      run: async () => { this.emit = await this.device.createComputePipelineAsync(this.descriptor()); } }];
   }
 
   encode(encoder: GPUCommandEncoder): void {

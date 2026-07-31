@@ -8,6 +8,7 @@
  * hysteresis window.
  */
 import { PassBroker } from "./webgpu-pass-broker";
+import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const FLUID_BRICK_RESIDENT = 1;
 export const FLUID_BRICK_CORE = 2;
@@ -99,6 +100,8 @@ export interface FluidBrickResidencyOptions {
   fineSeedCandidateBrickCapacity?: number;
   /** Sparse topology-tile key slots. See `fineSeedCandidateBrickCapacity`. */
   fineSeedCandidateTileCapacity?: number;
+  /** Move shader/pipeline creation into the shared staged startup runner. */
+  deferPipelineCompilation?: boolean;
 }
 
 export interface FluidBrickResidencyAllocationPlan {
@@ -1120,14 +1123,23 @@ export class GPUFluidBrickResidency {
   private readonly fineSeedCandidateLayout: GPUBindGroupLayout;
   private readonly fineSeedCandidatePublishLayout: GPUBindGroupLayout;
   private readonly fineSeedCandidateCommitLayout: GPUBindGroupLayout;
-  private readonly classifyPipeline: GPUComputePipeline;
-  private readonly classifySweptPipeline: GPUComputePipeline;
-  private readonly expandDownstreamPipeline: GPUComputePipeline;
-  private readonly emitWorklistPipeline: GPUComputePipeline;
-  private readonly emitTopologyTilesPipeline: GPUComputePipeline;
-  private readonly finalizePipeline: GPUComputePipeline;
-  private readonly fineSeedCandidatePipelines: readonly GPUComputePipeline[];
-  private readonly commitFineSeedCandidatesPipeline: GPUComputePipeline;
+  private classifyPipeline!: GPUComputePipeline;
+  private classifySweptPipeline!: GPUComputePipeline;
+  private expandDownstreamPipeline!: GPUComputePipeline;
+  private emitWorklistPipeline!: GPUComputePipeline;
+  private emitTopologyTilesPipeline!: GPUComputePipeline;
+  private finalizePipeline!: GPUComputePipeline;
+  private fineSeedCandidatePipelines: GPUComputePipeline[] = [];
+  private commitFineSeedCandidatesPipeline!: GPUComputePipeline;
+  private readonly pipelineLayout: GPUPipelineLayout;
+  private readonly surfaceLayout: GPUPipelineLayout;
+  private readonly surfacePublishLayout: GPUPipelineLayout;
+  private readonly commitPipelineLayout: GPUPipelineLayout;
+  private shaderModule?: GPUShaderModule;
+  private surfaceModule?: GPUShaderModule;
+  private commitModule?: GPUShaderModule;
+  private readonly fineSeedCandidateEntryPoints: readonly string[];
+  private readonly pipelinesDeferred: boolean;
   private destroyed = false;
 
   constructor(
@@ -1137,6 +1149,7 @@ export class GPUFluidBrickResidency {
     options: FluidBrickResidencyOptions = {},
   ) {
     this.device = device;
+    this.pipelinesDeferred = options.deferPipelineCompilation === true;
     this.brickSize = options.brickSize ?? 8;
     if (this.brickSize !== 4 && this.brickSize !== 8) throw new RangeError("Fluid brick size must be 4 or 8");
     for (const [axis, value] of dimensions.entries()) if (!Number.isInteger(value) || value < 1) throw new RangeError(`Fluid dimension ${axis} must be positive`);
@@ -1219,7 +1232,6 @@ export class GPUFluidBrickResidency {
       | (options.includeWholeDomainPressureSupport ? 8 : 0);
     floats.set([haloCells * Math.max(...cellSize), retireAfterFrames, 0, schedulerFlags], 8);
     device.queue.writeBuffer(this.params, 0, parameterData);
-    const shaderModule = device.createShaderModule({ label: "Fluid brick residency shader", code: fluidBrickResidencyShader });
     this.layout = device.createBindGroupLayout({ label: "Fluid brick residency layout", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
@@ -1231,13 +1243,7 @@ export class GPUFluidBrickResidency {
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    this.classifyPipeline = device.createComputePipeline({ label: "Classify fluid brick residency", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "classify" } });
-    this.classifySweptPipeline = device.createComputePipeline({ label: "Classify fluid brick residency with swept support", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "classifySwept" } });
-    this.expandDownstreamPipeline = device.createComputePipeline({ label: "Expand fluid brick residency downstream", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "expandDownstream" } });
-    this.emitWorklistPipeline = device.createComputePipeline({ label: "Emit fluid brick worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "emitWorklist" } });
-    this.emitTopologyTilesPipeline = device.createComputePipeline({ label: "Emit topology tile worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "emitTopologyTiles" } });
-    this.finalizePipeline = device.createComputePipeline({ label: "Finalize fluid brick worklists", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalize" } });
+    this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
     this.fineSeedCandidateLayout=device.createBindGroupLayout({label:"Fine-seed brick residency candidate layout",entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
@@ -1264,19 +1270,12 @@ export class GPUFluidBrickResidency {
       {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
       {binding:11,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
     ]});
-    const surfaceModule=device.createShaderModule({label:"Fine-seed brick residency shader",code:this.currentAllocationPlan.sparseKeyPools?sparseFineSeedCandidateResidencyShader:fineSeedCandidateResidencyShader});
-    const surfaceLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateLayout]});
-    const surfacePublishLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidatePublishLayout]});
-    const fineSeedCandidateEntryPoints = this.currentAllocationPlan.sparseKeyPools
+    this.surfaceLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateLayout]});
+    this.surfacePublishLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidatePublishLayout]});
+    this.fineSeedCandidateEntryPoints = this.currentAllocationPlan.sparseKeyPools
       ? ["publishFineSeedCandidateResidency"]
       : ["prepareFineSeedCandidateResidency", "markFineSeedCandidateResidency",
         "resolveFineSeedCandidateResidency", "publishFineSeedCandidateResidency"];
-    this.fineSeedCandidatePipelines = fineSeedCandidateEntryPoints.map((entryPoint,index) =>
-      device.createComputePipeline({
-        label:`${entryPoint} · deterministic fine-seed-candidate residency`,
-        layout:!this.currentAllocationPlan.sparseKeyPools&&index===3?surfacePublishLayout:surfaceLayout,
-        compute:{module:surfaceModule,entryPoint},
-      }));
     this.fineSeedCandidateCommitLayout=device.createBindGroupLayout({label:"Fine-seed brick residency commit layout",entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -1287,10 +1286,85 @@ export class GPUFluidBrickResidency {
       {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
     ]});
-    const commitModule=device.createShaderModule({label:"Fine-seed brick residency commit shader",code:fineSeedCandidateCommitShader});
-    this.commitFineSeedCandidatesPipeline=device.createComputePipeline({label:"Commit fine-seed-candidate residency",layout:device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateCommitLayout]}),compute:{module:commitModule,entryPoint:"commitFineSeedCandidates"}});
+    this.commitPipelineLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateCommitLayout]});
+    if (!options.deferPipelineCompilation) this.createPipelinesSync();
     // The texture binding changes with the projection's ping-pong surface and
     // is therefore created in encode(). Keep the common resources resident.
+  }
+
+  private mainDescriptor(entryPoint: string, label: string): GPUComputePipelineDescriptor {
+    this.shaderModule ??= this.device.createShaderModule({
+      label: "Fluid brick residency shader", code: fluidBrickResidencyShader,
+    });
+    return { label, layout: this.pipelineLayout, compute: { module: this.shaderModule, entryPoint } };
+  }
+
+  private surfaceDescriptor(entryPoint: string, index: number): GPUComputePipelineDescriptor {
+    this.surfaceModule ??= this.device.createShaderModule({ label: "Fine-seed brick residency shader",
+      code: this.currentAllocationPlan.sparseKeyPools
+        ? sparseFineSeedCandidateResidencyShader : fineSeedCandidateResidencyShader });
+    return { label: `${entryPoint} · deterministic fine-seed-candidate residency`,
+      layout: !this.currentAllocationPlan.sparseKeyPools && index === 3
+        ? this.surfacePublishLayout : this.surfaceLayout,
+      compute: { module: this.surfaceModule, entryPoint } };
+  }
+
+  private commitDescriptor(): GPUComputePipelineDescriptor {
+    this.commitModule ??= this.device.createShaderModule({
+      label: "Fine-seed brick residency commit shader", code: fineSeedCandidateCommitShader,
+    });
+    return { label: "Commit fine-seed-candidate residency", layout: this.commitPipelineLayout,
+      compute: { module: this.commitModule, entryPoint: "commitFineSeedCandidates" } };
+  }
+
+  private readonly mainPipelineDefinitions = [
+    ["classify", "Classify fluid brick residency"],
+    ["classifySwept", "Classify fluid brick residency with swept support"],
+    ["expandDownstream", "Expand fluid brick residency downstream"],
+    ["emitWorklist", "Emit fluid brick worklists"],
+    ["emitTopologyTiles", "Emit topology tile worklists"],
+    ["finalize", "Finalize fluid brick worklists"],
+  ] as const;
+
+  private assignMainPipeline(index: number, pipeline: GPUComputePipeline): void {
+    if (index === 0) this.classifyPipeline = pipeline;
+    else if (index === 1) this.classifySweptPipeline = pipeline;
+    else if (index === 2) this.expandDownstreamPipeline = pipeline;
+    else if (index === 3) this.emitWorklistPipeline = pipeline;
+    else if (index === 4) this.emitTopologyTilesPipeline = pipeline;
+    else if (index === 5) this.finalizePipeline = pipeline;
+    else throw new RangeError(`Unknown fluid-residency pipeline index ${index}`);
+  }
+
+  private createPipelinesSync(): void {
+    this.mainPipelineDefinitions.forEach(([entryPoint, label], index) =>
+      this.assignMainPipeline(index, this.device.createComputePipeline(this.mainDescriptor(entryPoint, label))));
+    this.fineSeedCandidatePipelines = this.fineSeedCandidateEntryPoints.map((entryPoint, index) =>
+      this.device.createComputePipeline(this.surfaceDescriptor(entryPoint, index)));
+    this.commitFineSeedCandidatesPipeline = this.device.createComputePipeline(this.commitDescriptor());
+  }
+
+  initializationTasks(): GPUInitializationTask[] {
+    if (!this.pipelinesDeferred) return [];
+    const main = this.mainPipelineDefinitions.map(([entryPoint, label], index) => ({
+      id: `octree.residency.pipeline.${entryPoint}`, phase: "adaptive-topology" as const,
+      label: `Compile residency · ${label}`,
+      run: async () => this.assignMainPipeline(index,
+        await this.device.createComputePipelineAsync(this.mainDescriptor(entryPoint, label))),
+    }));
+    const surface = this.fineSeedCandidateEntryPoints.map((entryPoint, index) => ({
+      id: `octree.residency.pipeline.${entryPoint}`, phase: "adaptive-topology" as const,
+      label: `Compile residency · ${entryPoint}`,
+      run: async () => { this.fineSeedCandidatePipelines[index] =
+        await this.device.createComputePipelineAsync(this.surfaceDescriptor(entryPoint, index)); },
+    }));
+    return [...main, ...surface, {
+      id: "octree.residency.pipeline.commitFineSeedCandidates",
+      phase: "adaptive-topology" as const,
+      label: "Compile fine-seed residency commit",
+      run: async () => { this.commitFineSeedCandidatesPipeline =
+        await this.device.createComputePipelineAsync(this.commitDescriptor()); },
+    }];
   }
 
   /** GPU-owned per-brick state words, consumable by sibling schedulers (atlas). */

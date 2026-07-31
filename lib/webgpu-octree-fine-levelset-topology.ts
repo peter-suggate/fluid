@@ -5,6 +5,7 @@ import { PassBroker } from "./webgpu-pass-broker";
 import type { FineLevelSetTransportTopologyDelta } from "./webgpu-octree-fine-levelset-transport";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
+import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const FINE_LEVELSET_TOPOLOGY_ERROR = Object.freeze({
   capacity: 1 << 0,
@@ -535,7 +536,12 @@ export class WebGPUFineLevelSetLeafSeeds {
   private readonly params: GPUBuffer;
   private readonly scratch: GPUBuffer;
   private readonly sortCapacity: number;
-  private readonly pipelines: Record<string, GPUComputePipeline>;
+  private readonly pipelines: Record<string, GPUComputePipeline> = {};
+  private shaderModule?: GPUShaderModule;
+  private static readonly entryPoints = ["clearSeedState", "classifySourceBlocks",
+    "scanSourceBlocks", "emitSourceRecords", "sortSeedRecords",
+    "classifySeedRuns", "scanSeedRuns", "emitSeedRuns"] as const;
+  private readonly pipelinesDeferred: boolean;
   private readonly bindGroupCache: {
     readonly entryPoint: string;
     readonly entries: readonly GPUBindGroupEntry[];
@@ -545,7 +551,9 @@ export class WebGPUFineLevelSetLeafSeeds {
   constructor(private readonly device: GPUDevice, readonly target: WebGPUFineLevelSetBrickSource,
     analytic?: { initialCondition: "dam-break" | "tank-fill"; fillFraction: number;
       damBreakDimensions?: readonly [number, number, number] },
-    sourceCapacity?: FineLevelSetLeafSeedSourceCapacity) {
+    sourceCapacity?: FineLevelSetLeafSeedSourceCapacity,
+    deferPipelineCompilation = false) {
+    this.pipelinesDeferred = deferPipelineCompilation;
     const rawRecordCapacity = maximumFineLevelSetLeafSeedRawRecords(
       target.plan, sourceCapacity,
     );
@@ -584,14 +592,35 @@ export class WebGPUFineLevelSetLeafSeeds {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.scratch = device.createBuffer({ label: "global fine deterministic seed transaction",
       size: (5 * this.sortCapacity + 8) * 4, usage: GPUBufferUsage.STORAGE });
-    const shaderModule = device.createShaderModule({ label: "FineSeedLeaf to global fine seeds", code: fineLevelSetLeafSeedWGSL });
-    const entryPoints = ["clearSeedState", "classifySourceBlocks",
-      "scanSourceBlocks", "emitSourceRecords",
-      "sortSeedRecords",
-      "classifySeedRuns", "scanSeedRuns", "emitSeedRuns"];
-    this.pipelines = Object.fromEntries(entryPoints.map((entryPoint) => [entryPoint,
-      device.createComputePipeline({ label: `Global fine seed ${entryPoint}`, layout: "auto",
-        compute: { module: shaderModule, entryPoint } })]));
+    if (!deferPipelineCompilation) this.createPipelinesSync();
+  }
+
+  private createShaderModule(): GPUShaderModule {
+    return this.shaderModule ??= this.device.createShaderModule({
+      label: "FineSeedLeaf to global fine seeds", code: fineLevelSetLeafSeedWGSL,
+    });
+  }
+
+  private descriptor(entryPoint: string): GPUComputePipelineDescriptor {
+    return { label: `Global fine seed ${entryPoint}`, layout: "auto",
+      compute: { module: this.createShaderModule(), entryPoint } };
+  }
+
+  private createPipelinesSync(): void {
+    for (const entryPoint of WebGPUFineLevelSetLeafSeeds.entryPoints) {
+      this.pipelines[entryPoint] = this.device.createComputePipeline(this.descriptor(entryPoint));
+    }
+  }
+
+  initializationTasks(): GPUInitializationTask[] {
+    if (!this.pipelinesDeferred) return [];
+    return WebGPUFineLevelSetLeafSeeds.entryPoints.map((entryPoint) => ({
+      id: `octree.global-fine-seeds.pipeline.${entryPoint}`,
+      phase: "adaptive-topology" as const,
+      label: `Compile global fine seeds · ${entryPoint}`,
+      run: async () => { this.pipelines[entryPoint] =
+        await this.device.createComputePipelineAsync(this.descriptor(entryPoint)); },
+    }));
   }
 
   private bindingBytes(binding: GPUBufferBinding): number {

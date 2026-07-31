@@ -4,6 +4,7 @@ import type { RigidBodyState } from "./rigid-body";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "./svo-primitive-motion";
 import { sceneHasTerrain } from "./terrain";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
+import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const GPU_RIGID_BODY_CAPACITY = 12;
 export const GPU_RIGID_STATE_FLOATS = 32;
@@ -213,10 +214,13 @@ export class WebGPURigidBodySystem {
   private readonly renderScratch: GPUBuffer;
   private readonly motionScratch: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
-  private readonly pipeline: GPUComputePipeline;
-  private readonly bindGroup: GPUBindGroup;
-  private readonly pickPipeline: GPUComputePipeline;
-  private readonly pickBindGroup: GPUBindGroup;
+  private pipeline!: GPUComputePipeline;
+  private bindGroup!: GPUBindGroup;
+  private pickPipeline!: GPUComputePipeline;
+  private pickBindGroup!: GPUBindGroup;
+  private shaderModule?: GPUShaderModule;
+  private readonly pipelinesRequired: boolean;
+  private readonly pipelinesDeferred: boolean;
   private readonly pickParamsBuffer: GPUBuffer;
   private readonly pickResultBuffer: GPUBuffer;
   private bodyIds: string[] = [];
@@ -227,7 +231,11 @@ export class WebGPURigidBodySystem {
   private selectedIndex = -1;
   private motionGenerations: number[] = [];
 
-  constructor(private readonly device: GPUDevice, private readonly scene: SceneDescription, readonly exchangeBuffer: GPUBuffer, terrainTexture: GPUTexture) {
+  constructor(private readonly device: GPUDevice, private readonly scene: SceneDescription,
+    readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture: GPUTexture,
+    deferPipelineCompilation = false) {
+    this.pipelinesRequired = scene.rigidBodies.length > 0;
+    this.pipelinesDeferred = deferPipelineCompilation;
     this.stateBuffer = device.createBuffer({ label: "GPU authoritative rigid-body state", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderBuffer = device.createBuffer({ label: "GPU rigid-body render records", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionBuffer = device.createBuffer({ label: "GPU rigid primitive motion sidecar", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -237,20 +245,55 @@ export class WebGPURigidBodySystem {
     this.paramsBuffer = device.createBuffer({ label: "GPU rigid-body step parameters", size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickParamsBuffer = device.createBuffer({ label: "GPU rigid-body pick ray", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickResultBuffer = device.createBuffer({ label: "GPU rigid-body pick result", size: GPU_RIGID_PICK_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const shaderModule = device.createShaderModule({ label: "GPU resident rigid-body solver", code: gpuRigidBodyShader });
-    this.pipeline = device.createComputePipeline({ label: "GPU resident rigid-body integrate/contact", layout: "auto", compute: { module: shaderModule, entryPoint: "integrate" } });
-    this.bindGroup = device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: this.stateBuffer } }, { binding: 1, resource: { buffer: exchangeBuffer } },
-      { binding: 2, resource: { buffer: this.renderBuffer } }, { binding: 3, resource: { buffer: this.paramsBuffer } },
+    if (this.pipelinesRequired && !deferPipelineCompilation) this.createPipelinesSync();
+  }
+
+  private descriptor(entryPoint: "integrate" | "pickRigidBody"): GPUComputePipelineDescriptor {
+    this.shaderModule ??= this.device.createShaderModule({
+      label: "GPU resident rigid-body solver", code: gpuRigidBodyShader,
+    });
+    return { label: entryPoint === "integrate"
+      ? "GPU resident rigid-body integrate/contact" : "GPU resident rigid-body ray pick",
+      layout: "auto", compute: { module: this.shaderModule, entryPoint } };
+  }
+
+  private createIntegrationBindings(): void {
+    this.bindGroup = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.stateBuffer } },
+      { binding: 1, resource: { buffer: this.exchangeBuffer } },
+      { binding: 2, resource: { buffer: this.renderBuffer } },
+      { binding: 3, resource: { buffer: this.paramsBuffer } },
       { binding: 7, resource: { buffer: this.motionBuffer } },
-      { binding: 4, resource: terrainTexture.createView() }
+      { binding: 4, resource: this.terrainTexture.createView() },
     ] });
-    this.pickPipeline = device.createComputePipeline({ label: "GPU resident rigid-body ray pick", layout: "auto", compute: { module: shaderModule, entryPoint: "pickRigidBody" } });
-    this.pickBindGroup = device.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: [
+  }
+
+  private createPickBindings(): void {
+    this.pickBindGroup = this.device.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: this.stateBuffer } },
       { binding: 5, resource: { buffer: this.pickParamsBuffer } },
-      { binding: 6, resource: { buffer: this.pickResultBuffer } }
+      { binding: 6, resource: { buffer: this.pickResultBuffer } },
     ] });
+  }
+
+  private createPipelinesSync(): void {
+    this.pipeline = this.device.createComputePipeline(this.descriptor("integrate"));
+    this.createIntegrationBindings();
+    this.pickPipeline = this.device.createComputePipeline(this.descriptor("pickRigidBody"));
+    this.createPickBindings();
+  }
+
+  initializationTasks(): GPUInitializationTask[] {
+    if (!this.pipelinesRequired || !this.pipelinesDeferred) return [];
+    return [
+      { id: "rigid.pipeline.integrate", phase: "solver-pipelines",
+        label: "Compile rigid-body integration",
+        run: async () => { this.pipeline = await this.device.createComputePipelineAsync(
+          this.descriptor("integrate")); this.createIntegrationBindings(); } },
+      { id: "rigid.pipeline.pick", phase: "solver-pipelines", label: "Compile rigid-body picking",
+        run: async () => { this.pickPipeline = await this.device.createComputePipelineAsync(
+          this.descriptor("pickRigidBody")); this.createPickBindings(); } },
+    ];
   }
 
   syncBodies(bodies: readonly RigidBodyState[]) {

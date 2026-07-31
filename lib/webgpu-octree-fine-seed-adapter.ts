@@ -15,6 +15,7 @@ import {
   type OctreeFineSeedLeafResources,
 } from "./octree-fine-seed-leaves";
 import { OCTREE_COARSE_PHI_FLAG } from "./octree-coarse-levelset";
+import type { GPUInitializationTask } from "./gpu-initialization";
 
 /**
  * Candidate publication control:
@@ -93,6 +94,7 @@ export interface OctreeFineSeedAdapterOptions {
    * kernel actually samples.
    */
   readonly bootstrapLevelSet: GPUTexture;
+  readonly deferPipelineCompilation?: boolean;
 }
 
 export interface OctreeFineSeedAdapterSource extends OctreeFineSeedLeafResources {
@@ -224,9 +226,14 @@ export class WebGPUOctreeFineSeedAdapter {
   private readonly bootstrapLevelSet:GPUTexture;
   private structuredVelocity?:DirectStructuredVelocitySource;
   private coarsePhi?:OctreeFineSeedAdapterCoarsePhiSource;
-  private readonly buildPipeline: GPUComputePipeline;
-  private readonly planDispatchPipeline: GPUComputePipeline;
-  private readonly publishCandidatesPipeline: GPUComputePipeline;
+  private buildPipeline!: GPUComputePipeline;
+  private planDispatchPipeline!: GPUComputePipeline;
+  private publishCandidatesPipeline!: GPUComputePipeline;
+  private readonly pipelineLayout: GPUPipelineLayout;
+  private readonly candidatePipelineLayout: GPUPipelineLayout;
+  private shaderModule?: GPUShaderModule;
+  private candidateModule?: GPUShaderModule;
+  private readonly pipelinesDeferred: boolean;
   private selectBindGroup: GPUBindGroup;
   private readonly selectLayout:GPUBindGroupLayout;
   private coarsePhiBindings=false;
@@ -240,6 +247,7 @@ export class WebGPUOctreeFineSeedAdapter {
     options: OctreeFineSeedAdapterOptions,
   ) {
     this.device=device;this.topology=topology;
+    this.pipelinesDeferred = options.deferPipelineCompilation === true;
     this.bootstrapLevelSet=options.bootstrapLevelSet;
     this.plan=planOctreeFineSeedAdapter(rowCapacity);
     const dimensions = topology.dimensions;
@@ -321,13 +329,7 @@ export class WebGPUOctreeFineSeedAdapter {
       { binding: 12, visibility: GPUShaderStage.COMPUTE,
         texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     ] });
-    const shaderModule = device.createShaderModule({ label: "Octree topology to fine-level-set seeds", code: octreeFineSeedAdapterShader });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    this.buildPipeline = device.createComputePipeline({
-      label: "Build octree fine-seed leaves",
-      layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "buildFineSeedLeaves" },
-    });
+    this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
     this.selectLayout = device.createBindGroupLayout({ label: "Octree fine-seed candidate selection layout", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -340,26 +342,52 @@ export class WebGPUOctreeFineSeedAdapter {
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
-    const candidateModule = device.createShaderModule({
-      label: "Octree fine-seed candidate publication",
-      code: octreeFineSeedCandidateShader,
-    });
-    const candidatePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.selectLayout] });
-    this.planDispatchPipeline = device.createComputePipeline({
-      label: "Publish exact octree fine-seed dispatch",
-      layout: candidatePipelineLayout,
-      compute: { module: candidateModule, entryPoint: "publishFineSeedAdapterDispatch" },
-    });
-    this.publishCandidatesPipeline = device.createComputePipeline({
-      label: "Publish exact octree fine-seed candidates",
-      layout: candidatePipelineLayout,
-      compute: {
-        module: candidateModule,
-        entryPoint: "publishFineSeedCandidates",
-      },
-    });
+    this.candidatePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.selectLayout] });
+    if (!options.deferPipelineCompilation) this.createPipelinesSync();
     this.selectBindGroup = this.createSelectBindGroup();
     this.bindGroup = this.createBindGroup();
+  }
+
+  private buildDescriptor(): GPUComputePipelineDescriptor {
+    this.shaderModule ??= this.device.createShaderModule({
+      label: "Octree topology to fine-level-set seeds", code: octreeFineSeedAdapterShader,
+    });
+    return { label: "Build octree fine-seed leaves", layout: this.pipelineLayout,
+      compute: { module: this.shaderModule, entryPoint: "buildFineSeedLeaves" } };
+  }
+
+  private candidateDescriptor(entryPoint: "publishFineSeedAdapterDispatch" | "publishFineSeedCandidates"): GPUComputePipelineDescriptor {
+    this.candidateModule ??= this.device.createShaderModule({
+      label: "Octree fine-seed candidate publication", code: octreeFineSeedCandidateShader,
+    });
+    return { label: entryPoint === "publishFineSeedAdapterDispatch"
+      ? "Publish exact octree fine-seed dispatch" : "Publish exact octree fine-seed candidates",
+      layout: this.candidatePipelineLayout, compute: { module: this.candidateModule, entryPoint } };
+  }
+
+  private createPipelinesSync(): void {
+    this.buildPipeline = this.device.createComputePipeline(this.buildDescriptor());
+    this.planDispatchPipeline = this.device.createComputePipeline(
+      this.candidateDescriptor("publishFineSeedAdapterDispatch"));
+    this.publishCandidatesPipeline = this.device.createComputePipeline(
+      this.candidateDescriptor("publishFineSeedCandidates"));
+  }
+
+  initializationTasks(): GPUInitializationTask[] {
+    if (!this.pipelinesDeferred) return [];
+    return [
+      { id: "octree.fine-seeds.pipeline.build", phase: "adaptive-topology",
+        label: "Compile compact fine-seed builder",
+        run: async () => { this.buildPipeline = await this.device.createComputePipelineAsync(this.buildDescriptor()); } },
+      { id: "octree.fine-seeds.pipeline.plan", phase: "adaptive-topology",
+        label: "Compile fine-seed dispatch planner",
+        run: async () => { this.planDispatchPipeline = await this.device.createComputePipelineAsync(
+          this.candidateDescriptor("publishFineSeedAdapterDispatch")); } },
+      { id: "octree.fine-seeds.pipeline.publish", phase: "adaptive-topology",
+        label: "Compile fine-seed candidate publisher",
+        run: async () => { this.publishCandidatesPipeline = await this.device.createComputePipelineAsync(
+          this.candidateDescriptor("publishFineSeedCandidates")); } },
+    ];
   }
 
   private createSelectBindGroup(){return this.device.createBindGroup({ label: "Octree fine-seed candidate selection bindings", layout: this.selectLayout, entries: [

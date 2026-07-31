@@ -8,6 +8,7 @@
  */
 
 import { PassBroker } from "./webgpu-pass-broker";
+import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const OCTREE_OWNER_BRICK_SIZE = 8 as const;
 export const OCTREE_OWNER_PAGE_VOXELS = OCTREE_OWNER_BRICK_SIZE ** 3;
@@ -1248,18 +1249,24 @@ export class WebGPUOctreeSimulationOwnerPages {
   private readonly params: GPUBuffer;
   private readonly analyticParams?: GPUBuffer;
   private readonly scratch: GPUBuffer;
-  private readonly buildCandidate: GPUComputePipeline;
-  private readonly commitCandidate: GPUComputePipeline;
-  private readonly commit: GPUComputePipeline;
+  private buildCandidate!: GPUComputePipeline;
+  private commitCandidate!: GPUComputePipeline;
+  private commit!: GPUComputePipeline;
+  private readonly pipelineLayout: GPUPipelineLayout;
+  private shaderModule?: GPUShaderModule;
+  private readonly sortCapacity: number;
+  private readonly pipelinesDeferred: boolean;
   private readonly analyticBootstrap?: OctreeAnalyticOwnerBootstrapSource;
   private readonly analyticGroup?: GPUBindGroup;
   private readonly topologyResidency?: OctreeOwnerTopologyResidencySource;
   private readonly topologyGroup?: GPUBindGroup;
 
-  constructor(device: GPUDevice, dimensions: OctreeOwnerCoordinate,
+  constructor(private readonly device: GPUDevice, dimensions: OctreeOwnerCoordinate,
     options: OctreeOwnerPagePlanOptions = {}, analyticBootstrap?: OctreeAnalyticOwnerBootstrapSource,
-    topologyResidency?: OctreeOwnerTopologyResidencySource) {
+    topologyResidency?: OctreeOwnerTopologyResidencySource,
+    deferPipelineCompilation = false) {
     this.analyticBootstrap = analyticBootstrap;
+    this.pipelinesDeferred = deferPipelineCompilation;
     this.topologyResidency = topologyResidency;
     if (analyticBootstrap && !topologyResidency) {
       throw new Error("Analytic owner bootstrap requires the coupled topology epoch source");
@@ -1369,17 +1376,9 @@ export class WebGPUOctreeSimulationOwnerPages {
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
-    const lifecycleModule = device.createShaderModule({ label: "Deterministic simulation octree owner pages",
-      code: octreeDeterministicOwnerPageLifecycleShader });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const pipeline = (entryPoint: string, constants?: Record<string, number>) =>
-      device.createComputePipeline({
-        layout: pipelineLayout, compute: { module: lifecycleModule, entryPoint, constants },
-      });
-    this.buildCandidate = pipeline("buildOwnerPageCandidate", { SORT_CAPACITY: sortCapacity });
-    this.commitCandidate = pipeline("commitOwnerPageCandidate",
-      { SORT_CAPACITY: sortCapacity });
-    this.commit = pipeline("commitOwnerPageGeneration");
+    this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    this.sortCapacity = sortCapacity;
+    if (!deferPipelineCompilation) this.createPipelinesSync();
     const lifecycleEntries = (
       worklist: GPUBuffer,
       params: GPUBuffer,
@@ -1409,6 +1408,49 @@ export class WebGPUOctreeSimulationOwnerPages {
     }
     this.allocatedBytes = this.arena.size + this.params.size + (this.analyticParams?.size ?? 0)
       + this.scratch.size;
+  }
+
+  private createShaderModule(): GPUShaderModule {
+    return this.shaderModule ??= this.device.createShaderModule({
+      label: "Deterministic simulation octree owner pages",
+      code: octreeDeterministicOwnerPageLifecycleShader,
+    });
+  }
+
+  private pipelineDescriptor(entryPoint: string, constants?: Record<string, number>): GPUComputePipelineDescriptor {
+    return { layout: this.pipelineLayout, compute: {
+      module: this.createShaderModule(), entryPoint, constants,
+    } };
+  }
+
+  private createPipelinesSync(): void {
+    this.buildCandidate = this.device.createComputePipeline(
+      this.pipelineDescriptor("buildOwnerPageCandidate", { SORT_CAPACITY: this.sortCapacity }),
+    );
+    this.commitCandidate = this.device.createComputePipeline(
+      this.pipelineDescriptor("commitOwnerPageCandidate", { SORT_CAPACITY: this.sortCapacity }),
+    );
+    this.commit = this.device.createComputePipeline(this.pipelineDescriptor("commitOwnerPageGeneration"));
+  }
+
+  initializationTasks(): GPUInitializationTask[] {
+    if (!this.pipelinesDeferred) return [];
+    return [
+      { id: "octree.owner-pages.shader", phase: "adaptive-topology",
+        label: "Create owner-page lifecycle shader", run: () => { this.createShaderModule(); } },
+      { id: "octree.owner-pages.pipeline.build", phase: "adaptive-topology",
+        label: "Compile owner-page candidate builder", dependencies: ["octree.owner-pages.shader"],
+        run: async () => { this.buildCandidate = await this.device.createComputePipelineAsync(
+          this.pipelineDescriptor("buildOwnerPageCandidate", { SORT_CAPACITY: this.sortCapacity })); } },
+      { id: "octree.owner-pages.pipeline.commit-candidate", phase: "adaptive-topology",
+        label: "Compile owner-page candidate commit", dependencies: ["octree.owner-pages.shader"],
+        run: async () => { this.commitCandidate = await this.device.createComputePipelineAsync(
+          this.pipelineDescriptor("commitOwnerPageCandidate", { SORT_CAPACITY: this.sortCapacity })); } },
+      { id: "octree.owner-pages.pipeline.commit", phase: "adaptive-topology",
+        label: "Compile owner-page generation commit", dependencies: ["octree.owner-pages.shader"],
+        run: async () => { this.commit = await this.device.createComputePipelineAsync(
+          this.pipelineDescriptor("commitOwnerPageGeneration")); } },
+    ];
   }
 
   /** Tail of substep N: prepare the next page records/payload, but do not

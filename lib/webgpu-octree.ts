@@ -25,6 +25,12 @@ import {
 } from "./webgpu-fluid-brick-residency";
 import type { GPUInitializationTask } from "./gpu-initialization";
 import {
+  planGPUShaderCapabilities,
+  planGPUShaderTasks,
+  type GPUShaderCapabilityPlan,
+  type GPUShaderTaskDefinition,
+} from "./gpu-shader-plan";
+import {
   fetchGeneratedOctreePowerCatalog,
   decodeGeneratedOctreePowerCatalog,
   OCTREE_GENERATED_POWER_CATALOG_MANIFEST,
@@ -253,9 +259,9 @@ interface OctreePipelineCacheEntry {
   refine: Map<number, OctreePipelineVariants>;
   refineCoarse: Map<number, OctreePipelineVariants>;
   balanceCoarse: Map<number, OctreePipelineVariants>;
-  materialize: GPUComputePipeline;
 }
 const octreePipelineCache = new WeakMap<GPUDevice, Map<string, OctreePipelineCacheEntry>>();
+const octreeDiagnosticPipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
 
 /** Diagnostic-only census of the exact per-generation row-delta control header.
  * Off unless `FLUID_OCTREE_ROW_DELTA_CENSUS=1`; it adds bounded header copies and a
@@ -1426,10 +1432,11 @@ export class WebGPUOctreeProjection {
   private readonly pipelineLayout: GPUPipelineLayout;
   private readonly frontierSortLayout: GPUBindGroupLayout;
   private readonly frontierSortPipelineLayout: GPUPipelineLayout;
-  private readonly shader: GPUShaderModule;
+  private shader?: GPUShaderModule;
+  private readonly projectionShaderCode: string;
   private readonly diagnosticLayout: GPUBindGroupLayout;
   private readonly diagnosticPipelineLayout: GPUPipelineLayout;
-  private readonly diagnosticShader: GPUShaderModule;
+  private diagnosticShader?: GPUShaderModule;
   private readonly surfaceState: WebGPUQuadtreeSurfaceState;
   private readonly sparseBrickWorld?: OctreeSparseBrickWorld;
   private readonly topologyResidency: GPUFluidBrickResidency;
@@ -1493,7 +1500,7 @@ export class WebGPUOctreeProjection {
   private classifyTopologyTileSignaturePipeline!: GPUComputePipeline;
   private buildDirtyTileDeltaPipeline!: GPUComputePipeline;
   private buildDirtyFrontierDeltaPipeline!: GPUComputePipeline;
-  private materializePipeline!: GPUComputePipeline;
+  private materializePipeline?: GPUComputePipeline;
   private readonly maxLeafSize: 2 | 4 | 8 | 16 | 32;
   private readonly fluidGatedBoundaryRefinement: boolean;
   private readonly topologyTileSize: number;
@@ -1740,6 +1747,7 @@ export class WebGPUOctreeProjection {
         fineSeedCandidatesOnly: true,
         fineSeedCandidateBrickCapacity: sparseSchedulerPools?.brickCapacity,
         fineSeedCandidateTileCapacity: sparseSchedulerPools?.tileCapacity,
+        deferPipelineCompilation,
       },
     );
     if (analyticBootstrapPlan) {
@@ -1760,6 +1768,7 @@ export class WebGPUOctreeProjection {
           sparseStateCapacity: this.topologyResidency.allocationPlan.sparseKeyPools
             ? this.topologyResidency.tilePublicationCapacity : undefined,
         },
+        deferPipelineCompilation,
       );
     }
     this.surfaceState = new WebGPUQuadtreeSurfaceState(
@@ -1813,6 +1822,7 @@ export class WebGPUOctreeProjection {
           frontierListCapacity: this.frontierAllocation.listCapacity,
         },
       },
+      deferPipelineCompilation,
     );
     this.topology = this.ownerPages.arena;
     const pressureSlots = this.pressureCapacity.rowCapacity;
@@ -1953,10 +1963,7 @@ export class WebGPUOctreeProjection {
     );
     this.projectionActivityShaderKey = this.projectionActivity.enabled
       ? projectionShaderVariant.cacheKey : undefined;
-    this.shader = device.createShaderModule({
-      label: "GPU-resident octree projection",
-      code: projectionShaderVariant.code,
-    });
+    this.projectionShaderCode = projectionShaderVariant.code;
     this.groups = {
       ab: this.createProjectionGroup(this.pressureA, this.pressureB),
       ba: this.createProjectionGroup(this.pressureB, this.pressureA),
@@ -1987,7 +1994,6 @@ export class WebGPUOctreeProjection {
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
     ] });
     this.diagnosticPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.diagnosticLayout] });
-    this.diagnosticShader = device.createShaderModule({ label: "GPU octree overlay materialization", code: octreeDiagnosticShader });
     const coldRecords: number[] = [
       Math.ceil(dims.nx / 4), Math.ceil(dims.ny / 4), Math.ceil(dims.nz / 4),
       Math.ceil(dims.nx / 8), Math.ceil(dims.ny / 8), Math.ceil(dims.nz / 8),
@@ -2094,6 +2100,7 @@ export class WebGPUOctreeProjection {
           // Without one of the two, no leaf seeds the band at all and every
           // downstream fine/coarse publication is empty.
           bootstrapLevelSet: this.surfaceState.texture,
+          deferPipelineCompilation,
           ...(analyticSparseBootstrap ? {
             analyticInitialCondition: scene.fluid.initialCondition,
             initialFillFraction: scene.container.fillFraction,
@@ -2190,9 +2197,9 @@ export class WebGPUOctreeProjection {
           this.globalFineSeeds = new WebGPUFineLevelSetLeafSeeds(
             device, this.globalFineSourceB, exactAnalyticFineSeed, {
               maximumSourceLeaves: this.pressureCapacity.rowCapacity,
-            });
+            }, deferPipelineCompilation);
           this.globalFineSummaries = new WebGPUFineLevelSetSummaries(device, globalPlan,
-            this.pressureCapacity.rowCapacity);
+            this.pressureCapacity.rowCapacity, deferPipelineCompilation);
           // The core topology layout is already at the activity-eligible
           // nine-storage budget. Refinement reuses pressure binding 4 for this
           // raw read-only directory instead of adding a tenth binding.
@@ -2237,13 +2244,13 @@ export class WebGPUOctreeProjection {
 
   private descriptor(entryPoint: string): GPUComputePipelineDescriptor {
     return { layout: this.pipelineLayout, compute: {
-      module: this.shader,
+      module: this.requireProjectionShader(),
       entryPoint,
       constants: this.pipelineConstants(this.topologyCandidateEntryPoint(entryPoint)),
     } };
   }
   private refinementDescriptor(entryPoint: string, size: number): GPUComputePipelineDescriptor {
-    return { layout: this.pipelineLayout, compute: { module: this.shader, entryPoint, constants: {
+    return { layout: this.pipelineLayout, compute: { module: this.requireProjectionShader(), entryPoint, constants: {
       ...this.pipelineConstants(true), targetRefinementSize: size,
     } } };
   }
@@ -2251,7 +2258,7 @@ export class WebGPUOctreeProjection {
     return {
       layout: this.frontierSortPipelineLayout,
       compute: {
-        module: this.shader,
+        module: this.requireProjectionShader(),
         entryPoint: "sortFrontierCandidates",
         constants: { ...this.pipelineConstants(true), frontierSortStage: stage },
       },
@@ -2272,7 +2279,33 @@ export class WebGPUOctreeProjection {
     };
   }
   private diagnosticDescriptor(): GPUComputePipelineDescriptor {
+    this.diagnosticShader ??= this.device.createShaderModule({
+      label: "GPU octree overlay materialization",
+      code: octreeDiagnosticShader,
+    });
     return { layout: this.diagnosticPipelineLayout, compute: { module: this.diagnosticShader, entryPoint: "materializeOctreeFields", constants: { rowIndexedPressure: 1 } } };
+  }
+
+  private requireProjectionShader(): GPUShaderModule {
+    if (!this.shader) throw new Error("Octree projection shader module has not been initialized");
+    return this.shader;
+  }
+
+  private createProjectionShaderModule(): void {
+    this.shader ??= this.device.createShaderModule({
+      label: "GPU-resident octree projection",
+      code: this.projectionShaderCode,
+    });
+  }
+
+  private shaderCapabilities(diagnosticOverlays = false): GPUShaderCapabilityPlan {
+    return planGPUShaderCapabilities(this.scene, {
+      solver: "octree",
+      fineInterface: Boolean(this.globalFineLevelSet),
+      distributedFrontierSort: !this.useLocalFrontierCandidateSort,
+      diagnosticOverlays,
+      logicalActivity: this.projectionActivity.enabled,
+    });
   }
 
   private registerProjectionPipeline<T extends GPUComputePipeline>(pipeline: T): T {
@@ -2323,6 +2356,7 @@ export class WebGPUOctreeProjection {
       constants: stableEntries(this.pipelineConstants()),
       candidateConstants: stableEntries(this.pipelineConstants(true)),
       reachability: stableEntries(reachability),
+      shaderCapabilities: this.shaderCapabilities().cacheKey,
       frontierSortStages: Math.ceil(Math.log2(Math.max(1, this.frontierAllocation.listCapacity))),
       requiredEntryPoints: WebGPUOctreeProjection.pipelineEntryPoints
         .filter((entryPoint) => octreeProjectionPipelineRequired(entryPoint, reachability)),
@@ -2338,7 +2372,6 @@ export class WebGPUOctreeProjection {
     this.refineLevelPipelines.clear(); entry.refine.forEach((value, key) => this.refineLevelPipelines.set(key, value));
     this.refineCoarsePipelines.clear(); entry.refineCoarse.forEach((value, key) => this.refineCoarsePipelines.set(key, value));
     this.balanceCoarsePipelines.clear(); entry.balanceCoarse.forEach((value, key) => this.balanceCoarsePipelines.set(key, value));
-    this.materializePipeline = entry.materialize;
   }
 
   private publishPipelineCache() {
@@ -2368,11 +2401,11 @@ export class WebGPUOctreeProjection {
       ][index]),
       frontierSort: [...this.frontierCandidateSortPipelines],
       refine: new Map(this.refineLevelPipelines), refineCoarse: new Map(this.refineCoarsePipelines), balanceCoarse: new Map(this.balanceCoarsePipelines),
-      materialize: this.materializePipeline,
     });
   }
 
   private createPipelinesSync() {
+    this.createProjectionShaderModule();
     const compiled: GPUComputePipeline[] = [];
     WebGPUOctreeProjection.pipelineEntryPoints.forEach((entryPoint, index) => {
       if (this.basePipelineRequired(entryPoint)) {
@@ -2417,7 +2450,6 @@ export class WebGPUOctreeProjection {
           this.refinementDescriptor("balanceTopologyCoarseDelta", size))),
       });
     }
-    this.materializePipeline = this.device.createComputePipeline(this.diagnosticDescriptor());
     this.publishPipelineCache();
   }
 
@@ -2429,6 +2461,11 @@ export class WebGPUOctreeProjection {
   /** Allocate the dense scientific-overlay fields only after inspection asks for them. */
   ensureDiagnosticTextures(): boolean {
     if (this.diagnosticGroups) return false;
+    this.materializePipeline = octreeDiagnosticPipelineCache.get(this.device);
+    if (!this.materializePipeline) {
+      this.materializePipeline = this.device.createComputePipeline(this.diagnosticDescriptor());
+      octreeDiagnosticPipelineCache.set(this.device, this.materializePipeline);
+    }
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
     const size: GPUExtent3D = [this.dims.nx, this.dims.ny, this.dims.nz];
     this.topologyDiagnosticTexture = this.device.createTexture({ label: "Octree overlay topology", size, dimension: "3d", format: "rg32uint", usage });
@@ -2454,21 +2491,44 @@ export class WebGPUOctreeProjection {
   initializationTasks(): GPUInitializationTask[] {
     const cached = octreePipelineCache.get(this.device)?.get(this.pipelineCacheKey());
     const entries = WebGPUOctreeProjection.pipelineEntryPoints;
-    const tasks: GPUInitializationTask[] = cached
-      ? [{ id: "octree.pipeline-cache", phase: "adaptive-topology", label: "Reuse compiled adaptive programs", run: () => this.applyPipelineCache(cached) }]
-      : [];
+    const tasks: GPUInitializationTask[] = [
+      ...this.topologyResidency.initializationTasks(),
+      ...(this.analyticBootstrapWorklist?.initializationTasks() ?? []),
+      ...this.ownerPages.initializationTasks(),
+      ...(this.fineSeedAdapter?.initializationTasks() ?? []),
+      ...(this.globalFineSeeds?.initializationTasks() ?? []),
+      ...(this.globalFineSummaries?.initializationTasks() ?? []),
+      ...(cached
+        ? [{ id: "octree.pipeline-cache", phase: "adaptive-topology" as const,
+          label: "Reuse compiled adaptive programs", run: () => this.applyPipelineCache(cached) }]
+        : []),
+    ];
     const compiled = new Array<GPUComputePipeline>(entries.length);
+    const capabilities = this.shaderCapabilities();
+    const shaderDefinitions: GPUShaderTaskDefinition[] = [];
     let lastRequiredBaseIndex = -1;
     if (!cached) entries.forEach((entryPoint, index) => {
       if (this.basePipelineRequired(entryPoint)) lastRequiredBaseIndex = index;
     });
+    if (!cached) {
+      shaderDefinitions.push({
+        id: "octree.shader.projection",
+        phase: "adaptive-topology",
+        label: "Create reachable octree shader module",
+        requires: ["adaptive-topology"],
+        compile: () => this.createProjectionShaderModule(),
+      });
+    }
     if (!cached) entries.forEach((entryPoint, index) => {
       if (!this.basePipelineRequired(entryPoint)) return;
-      tasks.push({
+      shaderDefinitions.push({
         id: `octree.pipeline.${entryPoint}`,
         phase: "adaptive-topology",
         label: `Compile octree ${entryPoint}`,
-        run: async () => {
+        requires: entryPoint === "rasterizeSolids" || entryPoint === "rasterizeSolidsDelta"
+          ? ["solid-fields"] : ["adaptive-topology"],
+        dependencies: ["octree.shader.projection"],
+        compile: async () => {
           compiled[index] = this.registerProjectionPipeline(
             await this.device.createComputePipelineAsync(this.descriptor(entryPoint)),
           );
@@ -2485,11 +2545,13 @@ export class WebGPUOctreeProjection {
       const frontierSortStages = Math.ceil(Math.log2(Math.max(1, this.frontierAllocation.listCapacity)));
       const frontierSort = new Array<GPUComputePipeline>(frontierSortStages + 1);
       for (let stage = 0; stage <= frontierSortStages; stage += 1) {
-        tasks.push({
+        shaderDefinitions.push({
           id: `octree.pipeline.frontier-sort.${stage}`,
           phase: "adaptive-topology",
           label: `Compile octree frontier merge stage ${stage}`,
-          run: async () => {
+          requires: ["distributed-frontier-sort"],
+          dependencies: ["octree.shader.projection"],
+          compile: async () => {
             frontierSort[stage] = this.registerProjectionPipeline(
               await this.device.createComputePipelineAsync(this.frontierSortDescriptor(stage)),
             );
@@ -2505,11 +2567,13 @@ export class WebGPUOctreeProjection {
         ["full", "refineTopology"],
         ["delta", "refineTopologyDelta"],
       ] as const;
-      definitions.forEach(([variant, entryPoint], index) => tasks.push({
+      definitions.forEach(([variant, entryPoint], index) => shaderDefinitions.push({
         id: `octree.pipeline.refine.${size}.${variant}`,
         phase: "adaptive-topology",
         label: `Compile octree refinement ${size} · ${variant}`,
-        run: async () => {
+        requires: ["adaptive-topology"],
+        dependencies: ["octree.shader.projection"],
+        compile: async () => {
           level[variant] = this.registerProjectionPipeline(
             await this.device.createComputePipelineAsync(this.refinementDescriptor(entryPoint, size)),
           );
@@ -2525,11 +2589,13 @@ export class WebGPUOctreeProjection {
         const pipelines: Partial<OctreePipelineVariants> = {};
         const prefix = operation === "refine" ? "refineTopologyCoarse" : "balanceTopologyCoarse";
         const definitions = [["full", prefix], ["delta", `${prefix}Delta`]] as const;
-        definitions.forEach(([variant, entryPoint], index) => tasks.push({
+        definitions.forEach(([variant, entryPoint], index) => shaderDefinitions.push({
           id: `octree.pipeline.${operation}-coarse.${size}.${variant}`,
           phase: "adaptive-topology",
           label: `Compile octree coarse ${operation} ${size} · ${variant}`,
-          run: async () => {
+          requires: ["adaptive-topology"],
+          dependencies: ["octree.shader.projection"],
+          compile: async () => {
             pipelines[variant] = this.registerProjectionPipeline(
               await this.device.createComputePipelineAsync(this.refinementDescriptor(entryPoint, size)),
             );
@@ -2542,31 +2608,44 @@ export class WebGPUOctreeProjection {
         }));
       }
     }
+    tasks.push(...planGPUShaderTasks(capabilities, shaderDefinitions));
     if (!cached) {
-      tasks.push({ id: "octree.pipeline.materialize", phase: "adaptive-topology", label: "Compile octree overlay materialization", run: async () => { this.materializePipeline = await this.device.createComputePipelineAsync(this.diagnosticDescriptor()); } });
       tasks.push({ id: "octree.pipeline-cache.publish", phase: "adaptive-topology", label: "Publish compiled octree pipelines", run: () => this.publishPipelineCache() });
     } else if (tasks.length > 1) {
       tasks.push({ id: "octree.pipeline-cache.publish", phase: "adaptive-topology", label: "Publish compiled adaptive variants", run: () => this.publishPipelineCache() });
     }
-    if (!this.powerDescriptor) tasks.push({
-      id: "octree.power-catalog",
+    if (!this.powerDescriptor) {
+      let catalog: GeneratedOctreePowerCatalogViews | undefined;
+      tasks.push({
+      id: "octree.power-catalog.load",
       phase: "adaptive-topology",
-      label: "Load and allocate octree power-diagram catalog",
+      label: "Load octree power-diagram catalog",
       run: async (signal) => {
         try {
           const trace = typeof process !== "undefined" && process.env?.FLUID_POWER_INIT_TRACE === "1";
           if (trace) console.log(JSON.stringify({ phase: "power-init", label: "catalog-load", status: "started" }));
           if (signal.aborted) throw new DOMException("Power catalog initialization aborted", "AbortError");
-          const catalog = await loadGeneratedOctreePowerCatalog();
+          catalog = await loadGeneratedOctreePowerCatalog();
           if (trace) console.log(JSON.stringify({ phase: "power-init", label: "catalog-load", status: "finished" }));
           if (signal.aborted) throw new DOMException("Power catalog initialization aborted", "AbortError");
-          this.initializeNativePowerAuthority(catalog);
         } catch (error) {
           this.info.powerDiagramReady = false;
           throw error;
         }
       },
-    });
+      });
+      tasks.push({
+        id: "octree.power-authority.allocate",
+        phase: "allocation",
+        label: "Allocate reachable power-solver capabilities",
+        dependencies: ["octree.power-catalog.load"],
+        run: () => {
+          if (!catalog) throw new Error("Octree power catalog was not loaded");
+          try { this.initializeNativePowerAuthority(catalog); }
+          catch (error) { this.info.powerDiagramReady = false; throw error; }
+        },
+      });
+    }
     return tasks;
   }
 
@@ -3970,7 +4049,7 @@ export class WebGPUOctreeProjection {
    * The first overlay request materializes immediately, so reset-time grid
    * inspection never decodes zero-initialized topology storage as finest 1^3. */
   encodeOverlayMaterialization(encoder: GPUCommandEncoder, pressureInA = this.latestPressureInA) {
-    if (!this.diagnosticGroups) return false;
+    if (!this.diagnosticGroups || !this.materializePipeline) return false;
     const broker = new PassBroker(encoder);
     const materialize = broker.compute({ label: "Materialize octree overlay fields" });
     materialize.setPipeline(this.materializePipeline);

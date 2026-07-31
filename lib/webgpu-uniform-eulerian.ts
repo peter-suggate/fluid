@@ -68,6 +68,7 @@ import { planUniformHostAllocation, type UniformHostAllocationPlan } from "./oct
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPURigidBodySystem } from "./webgpu-rigid-body";
 import { GPUInitializationTaskRunner, type GPUInitializationTask } from "./gpu-initialization";
+import { planGPUShaderCapabilities } from "./gpu-shader-plan";
 import {
   FINE_LEVELSET_VOLUME_VALID,
   unpackFineLevelSetGPUVolumeControl,
@@ -930,7 +931,8 @@ export class WebGPUUniformEulerianSolver {
       this.sharpenBuffer = device.createBuffer({ label: "Uniform sharpening deposits", size: this.hostAllocation.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     }
     this.rigidExchangeBuffer = device.createBuffer({ size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchangeBuffer, this.terrainTexture);
+    this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchangeBuffer,
+      this.terrainTexture, options.deferPipelineCompilation);
     this.rigidBuffer = this.rigidSystem.stateBuffer;
     this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
     let prepLayout: GPUBindGroupLayout | undefined;
@@ -1200,13 +1202,21 @@ fn recordPhysicsPhaseBoundary(
     const runner=new GPUInitializationTaskRunner((snapshot)=>onProgress(snapshot.label,snapshot.completed,snapshot.total,snapshot.phase,snapshot.taskId),signal);
     let solver:WebGPUUniformEulerianSolver|undefined;
     try{
-      await runner.run([{id:"solver.allocate",phase:"allocation",label:options.octree||options.quadtreeTallCells?"Allocate adaptive solver resources":"Allocate uniform solver resources",run:()=>{solver=new WebGPUUniformEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true});}}]);
+      const capabilityPlan=planGPUShaderCapabilities(scene,{
+        solver:options.octree?"octree":options.quadtreeTallCells?"quadtree":"uniform",
+        fineInterface:Boolean(options.octree),
+        logicalActivity:performanceShaderVariant().enabled,
+      });
+      await runner.run([
+        {id:"solver.capabilities",phase:"planning",label:`Resolve ${capabilityPlan.values.size} scene-required GPU capabilities`,run:()=>{}},
+        {id:"solver.allocate",phase:"allocation",label:options.octree||options.quadtreeTallCells?"Allocate capability-selected solver resources":"Allocate uniform solver resources",dependencies:["solver.capabilities"],run:()=>{solver=new WebGPUUniformEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true});}},
+      ]);
       await runner.run(solver!.initializationTasks());
       return solver!;
     }catch(error){solver?.destroy();throw error;}
   }
   private initializationTasks():GPUInitializationTask[]{
-    const tasks:GPUInitializationTask[]=[];
+    const tasks:GPUInitializationTask[]=[...this.rigidSystem.initializationTasks()];
     if (this.hostAllocation) {
       const cached=uniformPipelineCache.get(this.device)?.get(this.velocityTransport);
       if(cached)tasks.push({id:"uniform.pipeline-cache",phase:"solver-pipelines",label:"Reuse compiled simulation programs",run:()=>this.assignPipelines(cached)});

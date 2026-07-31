@@ -3,6 +3,7 @@ import { fineLevelSetLinearWorkgroupWGSL } from "./webgpu-fine-levelset-dispatch
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
 import type { FineLevelSetPageDeltaLayout } from "./webgpu-octree-fine-levelset-topology";
 import { PassBroker } from "./webgpu-pass-broker";
+import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const FINE_LEVELSET_SUMMARY_VALID = 0x8000_0000;
 export const FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY = 0x8000_0000;
@@ -192,7 +193,18 @@ export class WebGPUFineLevelSetSummaries {
   private readonly directoryPageReferences: GPUBuffer; private readonly freeDirectoryPages: GPUBuffer;
   private readonly workState: GPUBuffer; private readonly indirect: GPUBuffer;
   private readonly params: readonly GPUBuffer[];
-  private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
+  private readonly pipelines: Record<string, GPUComputePipeline> = {};
+  private shaderModule?: GPUShaderModule;
+  private static readonly entryPoints = [
+    "prepareFineSummaryDirect", "validateFineSummaryDelta", "validateFineSummaryCoarse",
+    "retireFineSummaryCoarse", "removeFineSummaryPages", "addFineSummaryPages",
+    "prepareFineSummaryPageReclamation", "reclaimFineSummaryDirectoryPages",
+    "ensureFineSummaryDirectoryPages", "ensureFineSummaryCoarseDirectoryPages",
+    "ensureFineSummaryRanks", "ensureFineSummaryCoarseRanks",
+    "publishFineSummaryCoarseRows", "prepareFineSummaryRecompute", "recomputeFineSummaryBase",
+    "recomputeFineSummaryParents", "publishFineSummaryDirect",
+  ] as const;
+  private readonly pipelinesDeferred: boolean;
   private cachedGroups?: {
     readonly sourceParams: GPUBuffer; readonly metadata: GPUBuffer; readonly worklist: GPUBuffer;
     readonly flags: GPUBuffer; readonly phi: GPUBuffer; readonly delta: GPUBuffer;
@@ -216,7 +228,8 @@ export class WebGPUFineLevelSetSummaries {
   }
 
   constructor(private readonly device: GPUDevice, readonly finePlan: FineLevelSetBrickPlan,
-    coarseEntryCapacity = 0) {
+    coarseEntryCapacity = 0, deferPipelineCompilation = false) {
+    this.pipelinesDeferred = deferPipelineCompilation;
     this.plan = planFineLevelSetGPUSummaries(finePlan, coarseEntryCapacity);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     const make = (label: string, size: number) => device.createBuffer({ label, size: Math.max(4, size), usage: storage });
@@ -237,19 +250,32 @@ export class WebGPUFineLevelSetSummaries {
       label: `global fine direct summary parameters level ${level}`, size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     }));
-    const shaderModule = device.createShaderModule({ label: "global fine direct summary hierarchy",
-      code: fineLevelSetSummaryWGSL });
-    const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
-      compute: { module: shaderModule, entryPoint } });
-    this.pipelines = Object.freeze(Object.fromEntries([
-      "prepareFineSummaryDirect", "validateFineSummaryDelta", "validateFineSummaryCoarse",
-      "retireFineSummaryCoarse", "removeFineSummaryPages", "addFineSummaryPages",
-      "prepareFineSummaryPageReclamation", "reclaimFineSummaryDirectoryPages",
-      "ensureFineSummaryDirectoryPages", "ensureFineSummaryCoarseDirectoryPages",
-      "ensureFineSummaryRanks", "ensureFineSummaryCoarseRanks",
-      "publishFineSummaryCoarseRows", "prepareFineSummaryRecompute", "recomputeFineSummaryBase",
-      "recomputeFineSummaryParents", "publishFineSummaryDirect",
-    ].map((entryPoint) => [entryPoint, pipeline(entryPoint)])));
+    if (!deferPipelineCompilation) this.createPipelinesSync();
+  }
+
+  private descriptor(entryPoint: string): GPUComputePipelineDescriptor {
+    this.shaderModule ??= this.device.createShaderModule({
+      label: "global fine direct summary hierarchy", code: fineLevelSetSummaryWGSL,
+    });
+    return { label: entryPoint, layout: "auto",
+      compute: { module: this.shaderModule, entryPoint } };
+  }
+
+  private createPipelinesSync(): void {
+    for (const entryPoint of WebGPUFineLevelSetSummaries.entryPoints) {
+      this.pipelines[entryPoint] = this.device.createComputePipeline(this.descriptor(entryPoint));
+    }
+  }
+
+  initializationTasks(): GPUInitializationTask[] {
+    if (!this.pipelinesDeferred) return [];
+    return WebGPUFineLevelSetSummaries.entryPoints.map((entryPoint) => ({
+      id: `octree.fine-summary.pipeline.${entryPoint}`,
+      phase: "adaptive-topology" as const,
+      label: `Compile fine summary · ${entryPoint}`,
+      run: async () => { this.pipelines[entryPoint] =
+        await this.device.createComputePipelineAsync(this.descriptor(entryPoint)); },
+    }));
   }
 
   encode(broker: PassBroker, source: WebGPUFineLevelSetBrickSource,

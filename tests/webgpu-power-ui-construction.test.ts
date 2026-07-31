@@ -74,8 +74,23 @@ test("Dawn constructs the exact production power UI graph at the portable storag
   assert.equal(device.limits.maxStorageBuffersPerShaderStage, PORTABLE_STORAGE_BUFFER_LIMIT,
     "the regression must not inherit a non-portable adapter storage-buffer limit");
   let bindGroupSequence = 0;
+  let constructorShaderModules = 0;
+  let constructorPipelines = 0;
+  let constructingSolver = false;
   const solverDevice = new Proxy(device, {
     get(target, property) {
+      if (property === "createShaderModule") {
+        return (descriptor: GPUShaderModuleDescriptor) => {
+          if (constructingSolver) constructorShaderModules += 1;
+          return target.createShaderModule(descriptor);
+        };
+      }
+      if (property === "createComputePipeline") {
+        return (descriptor: GPUComputePipelineDescriptor) => {
+          if (constructingSolver) constructorPipelines += 1;
+          return target.createComputePipeline(descriptor);
+        };
+      }
       if (property === "createBindGroup") {
         return (descriptor: GPUBindGroupDescriptor) => {
           const sequence = bindGroupSequence++;
@@ -101,10 +116,19 @@ test("Dawn constructs the exact production power UI graph at the portable storag
   try {
     const scenario = createSmokeScenario("dam-break-ui");
     const values = octreeMethod.presetFor("balanced");
-    solver = new WebGPUUniformEulerianSolver(solverDevice, scenario.scene, "balanced", undefined, {
-      ...octreeSolverOptions(scenario.scene, "balanced", values),
-      deferPipelineCompilation: true,
-    });
+    constructingSolver = true;
+    try {
+      solver = new WebGPUUniformEulerianSolver(solverDevice, scenario.scene, "balanced", undefined, {
+        ...octreeSolverOptions(scenario.scene, "balanced", values),
+        deferPipelineCompilation: true,
+      });
+    } finally {
+      constructingSolver = false;
+    }
+    assert.equal(constructorShaderModules, 0,
+      "capability allocation must not create shader modules before staged initialization");
+    assert.equal(constructorPipelines, 0,
+      "capability allocation must not synchronously compile pipelines");
 
     // Exercise the exact production task list through its construction
     // boundary. Warmup is deliberately excluded: this gate catches shader,
