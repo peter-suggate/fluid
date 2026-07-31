@@ -42,6 +42,8 @@
  *      tier, and reports settle-pop luminance stats plus moving/settled PNGs).
  *      FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_MOTION=1 marks one body as moving
  *      so the localized persistent-GI invalidation path can be timed.
+ *      FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_TRANSITION=1 pre-warms static GI,
+ *      then marks that body moving and reports its first six frames.
  *      FLUID_SVO_DRY_FRAME_TIMING=wall bypasses timestamp queries and measures
  *      serialized submit-to-fence wall time (useful on Dawn builds where a
  *      timestamp-query feature is exposed but query resolution is unreliable).
@@ -164,6 +166,7 @@ const renderBrickSize = renderBrickSizeRaw === undefined ? undefined : Number(re
  */
 const cameraMoving = process.env.FLUID_SVO_DRY_FRAME_CAMERA_MOVING === "1";
 const syntheticRigidMotion = process.env.FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_MOTION === "1";
+const syntheticRigidTransition = process.env.FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_TRANSITION === "1";
 /**
  * M1 Max 1280x720 scale-1 baseline; scale 1 must keep the WGSL byte-identical.
  * Re-baselined for the tuned cone marcher, whose three deliberate pieces all
@@ -460,7 +463,7 @@ if (coneScale !== 1) {
 renderer.setSource(source, drySceneData);
 renderer.ensureSize(width, height);
 let syntheticRigidMotionBuffer: GPUBuffer | undefined;
-if (syntheticRigidMotion) {
+if (syntheticRigidMotion || syntheticRigidTransition) {
   const wordsPerRecord = 128 / Uint32Array.BYTES_PER_ELEMENT;
   const records = new Float32Array(12 * wordsPerRecord);
   records[19] = 0.01; // linearVelocityDisplacement.w: nonzero swept displacement
@@ -470,7 +473,7 @@ if (syntheticRigidMotion) {
     usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(syntheticRigidMotionBuffer, 0, records);
-  renderer.setRigidMotionSource(syntheticRigidMotionBuffer);
+  if (syntheticRigidMotion) renderer.setRigidMotionSource(syntheticRigidMotionBuffer);
 }
 
 const target = device.createTexture({
@@ -629,6 +632,20 @@ async function timeFrames(count: number, label: string): Promise<number[]> {
 
 timingMethod = GPUPerformanceTraceRecorder.supported(device) && !forceWallTiming
   ? "generic-performance-trace" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
+let rigidMotionTransition_ms: number[] | undefined;
+if (syntheticRigidTransition) {
+  // Re-establish a genuinely warm reduced static-world cache after the scale-1
+  // A/B warmup switched the active pipeline bundle.
+  for (let index = 0; index < Math.max(4, warmups); index += 1) {
+    const encoder = device.createCommandEncoder({ label: `Rigid transition static warmup ${index}` });
+    encodeFrame(encoder);
+    device.queue.submit([encoder.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  renderer.setRigidMotionSource(syntheticRigidMotionBuffer);
+  rigidMotionTransition_ms = await timeFrames(6, "Rigid motion transition");
+  assert.deepEqual(validationErrors, [], "GPU validation errors during rigid-motion transition");
+}
 const samples = await timeFrames(cycles, "Bench");
 assert.equal(samples.length, cycles);
 assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
@@ -1077,6 +1094,7 @@ const result = {
     images,
   },
   movingTier,
+  rigidMotionTransition_ms,
   scene: {
     presetId: scenePresetId,
     sceneId: scene.sceneId,
@@ -1113,6 +1131,7 @@ const result = {
     lightCount: source.lights?.count ?? 0,
     rigidBodyCount: scene.rigidBodies.length,
     syntheticRigidMotion,
+    syntheticRigidTransition,
     terrain: Boolean(scene.terrain),
     nodeMipPyramid: { ready: coneMipReady, generation: nodeMip?.generation ?? 0, pages: nodeMip?.plan.pages.length ?? 0 },
     tetrahedralRadiance: {

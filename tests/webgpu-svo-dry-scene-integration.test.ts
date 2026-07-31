@@ -90,13 +90,13 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
     "occupied SVO payload cells must use the shared five-kind analytic ray contract");
   assert.doesNotMatch(primitiveHit, /svoEvaluatePrimitive|svoPrimitiveDistance_m|svoEllipsoidClosestPoint_m/,
     "ray hits must not run the bounded ellipsoid closest-point distance solve to recover a normal");
-  assert.match(drySceneSource, /fn nearestBodyIgnoring\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,
+  assert.match(drySceneSource, /fn nearestBodyMaskIgnoring\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,
     "primary rays must reject distant dynamic bodies in world space before exact local intersection");
   assert.match(drySceneSource,
-    /fn dryGlobalIllumination\(position:vec3f,normal:vec3f,ignoredBodyOwner:u32\)[^]*if\(dryWorldGiIgnoreRigidBodies==0u\)\{rigidHit=nearestBodyIgnoring\(origin,direction,ignoredBodyOwner\);\}[^]*min\(sceneExit,rigidHit\.t\)[^]*select\(visibleThroughStatic,0\.0,rigidBlocked\)/,
+    /fn dryGlobalIllumination\(position:vec3f,normal:vec3f,ignoredBodyOwner:u32\)[^]*if\(dryWorldGiIgnoreRigidBodies==0u\)\{rigidHit=nearestBodyMaskIgnoring\(origin,direction,ignoredBodyOwner,dryWorldGiBodyMask\);\}[^]*min\(sceneExit,rigidHit\.t\)[^]*select\(visibleThroughStatic,0\.0,rigidBlocked\)/,
     "environmental GI must clip static radiance cones against the live rigid overlay in the current frame");
   assert.match(drySceneSource,
-    /if\(localizedMotion&&dryWorldGiDynamicInfluence\(position,ignoredBodyOwner\)\)[^]*dryWorldGiIgnoreRigidBodies=0u[^]*dryGlobalIllumination\(position,opaque\.normal,ignoredBodyOwner\)/,
+    /if\(influence\.movingMask!=0u\)[^]*dryWorldGiIgnoreRigidBodies=0u[^]*dryGlobalIllumination\(position,opaque\.normal,ignoredBodyOwner\)/,
     "moving rigid bodies must force exact body-aware GI only inside their conservative local influence");
   assert.match(drySceneSource,
     /ignoredBodyOwner=select\(DRY_OWNER_NONE,hit\.ownerId,hit\.motionKind==DRY_GBUFFER_MOTION_RIGID\)/,

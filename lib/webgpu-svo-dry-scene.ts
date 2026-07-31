@@ -1002,9 +1002,11 @@ export const SVO_DRY_CONE_PREPASS_CONTRACT = Object.freeze({
 export const SVO_DRY_WORLD_GI_CACHE_CONTRACT = Object.freeze({
   entryCount: 1 << 18,
   entryBytes: 16,
+  probeBytes: 8,
+  payloadBytes: 8,
   probeCount: 4,
   allocatedBytes: (1 << 18) * 16,
-  frameBytes: 80,
+  frameBytes: 128,
   dynamicInfluenceCells: 12,
   dynamicInfluenceBodyRadii: 3,
 } as const);
@@ -1545,10 +1547,15 @@ fn dryPrepassStore(coordinate:vec2i,opaque:DryHit,ro:vec3f,rd:vec3f){if(!(opaque
 }
 ` : "";
   const worldGiCacheHelpersWGSL = reduced && split ? /* wgsl */ `
-struct DryWorldGiCacheEntry{state:atomic<u32>,signature:u32,radianceRg:u32,radianceBv:u32}
-struct DryWorldGiCache{entries:array<DryWorldGiCacheEntry>}
+struct DryWorldGiCacheMetadata{state:atomic<u32>,signature:u32}
+struct DryWorldGiCachePayload{radianceRg:u32,radianceBv:u32}
+struct DryWorldGiCache{
+  metadata:array<DryWorldGiCacheMetadata,${SVO_DRY_WORLD_GI_CACHE_CONTRACT.entryCount}>,
+  payload:array<DryWorldGiCachePayload,${SVO_DRY_WORLD_GI_CACHE_CONTRACT.entryCount}>,
+}
 struct DryWorldGiCacheKey{readyState:u32,signature:u32,start:u32}
 struct DryWorldGiCacheLookup{value:DryGlobalIllumination,hit:u32,claimSlot:u32,claimState:u32}
+struct DryWorldGiBodyInfluence{bodyMask:u32,movingMask:u32,signature:u32}
 struct DryWorldGiFrame{
   bodySignature:u32,
   movingBodyCount:u32,
@@ -1558,6 +1565,7 @@ struct DryWorldGiFrame{
   cameraForwardAspect:vec4f,
   cameraRight:vec4f,
   cameraUp:vec4f,
+  bodySignatures:array<u32,12>,
 }
 @group(2) @binding(7) var<storage,read_write> dryWorldGiCache:DryWorldGiCache;
 @group(2) @binding(8) var dryWorldGiOutput:texture_storage_2d<rgba16float,write>;
@@ -1566,7 +1574,23 @@ fn dryWorldGiHash(valueIn:u32)->u32{
   var value=valueIn;value^=value>>16u;value*=0x7feb352du;value^=value>>15u;value*=0x846ca68bu;return value^(value>>16u);
 }
 fn dryWorldGiHashAdd(hash:u32,value:u32)->u32{return dryWorldGiHash(hash^(value+0x9e3779b9u+(hash<<6u)+(hash>>2u)));}
-fn dryWorldGiKey(position:vec3f,normalIn:vec3f)->DryWorldGiCacheKey{
+fn dryWorldGiMorton4(value:vec3u)->u32{
+  var morton=0u;
+  for(var bit=0u;bit<4u;bit+=1u){
+    morton|=((value.x>>bit)&1u)<<(bit*3u);
+    morton|=((value.y>>bit)&1u)<<(bit*3u+1u);
+    morton|=((value.z>>bit)&1u)<<(bit*3u+2u);
+  }
+  return morton;
+}
+fn dryWorldGiSpatialStart(quantized:vec3i)->u32{
+  let coordinate=vec3u(max(quantized,vec3i(0)));
+  let tileHash=dryWorldGiHashAdd(dryWorldGiHashAdd(coordinate.x>>4u,coordinate.y>>4u),coordinate.z>>4u);
+  // Morton-local low bits keep neighbouring shader lanes in the same cache
+  // lines; six hashed high bits distribute repeating world tiles.
+  return ((tileHash&63u)<<12u)|dryWorldGiMorton4(coordinate&vec3u(15u));
+}
+fn dryWorldGiKey(position:vec3f,normalIn:vec3f,bodyNamespace:u32)->DryWorldGiCacheKey{
   let cell=max(dry.mapping.cellSize,vec3f(1e-6));let quantized=vec3i(floor((position-dry.nodeMipOrigin.xyz)/(cell*.25)));
   // Prepass normals are decoded normalized; preserving that contract avoids a
   // normalize in every cache query.
@@ -1578,18 +1602,18 @@ fn dryWorldGiKey(position:vec3f,normalIn:vec3f)->DryWorldGiCacheKey{
   first=dryWorldGiHashAdd(first,bitcast<u32>(dry.giCones.x));first=dryWorldGiHashAdd(first,u32(round(dry.giCones.y)));
   first=dryWorldGiHashAdd(first,dry.tuningCounts0.y);first=dryWorldGiHashAdd(first,bitcast<u32>(dry.giLighting.x));
   first=dryWorldGiHashAdd(first,bitcast<u32>(dry.giLighting.y));first=dryWorldGiHashAdd(first,dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u);
-  let bodyNamespace=select(0x4f1bbcdcu,dryWorldGiFrame.bodySignature,dryWorldGiFrame.movingBodyCount==0u);
   let second=dryWorldGiHashAdd(dryWorldGiHash(first^0x68bc21ebu),bodyNamespace);
-  let ready=(first&0x3fffffffu)|0x80000000u;return DryWorldGiCacheKey(ready,second,first&${SVO_DRY_WORLD_GI_CACHE_CONTRACT.entryCount - 1}u);
+  let ready=(first&0x3fffffffu)|0x80000000u;return DryWorldGiCacheKey(ready,second,dryWorldGiSpatialStart(quantized));
 }
 fn dryWorldGiFind(key:DryWorldGiCacheKey)->DryWorldGiCacheLookup{
   var claimSlot=0xffffffffu;var claimState=0u;
   for(var probe=0u;probe<${SVO_DRY_WORLD_GI_CACHE_CONTRACT.probeCount}u;probe+=1u){
-    let slot=(key.start+probe*probe)&${SVO_DRY_WORLD_GI_CACHE_CONTRACT.entryCount - 1}u;let state=atomicLoad(&dryWorldGiCache.entries[slot].state);
-    if(state==key.readyState&&dryWorldGiCache.entries[slot].signature==key.signature){
-      let rg=unpack2x16float(dryWorldGiCache.entries[slot].radianceRg);let bv=unpack2x16float(dryWorldGiCache.entries[slot].radianceBv);
-      let verifiedState=atomicLoad(&dryWorldGiCache.entries[slot].state);
-      if(verifiedState==key.readyState&&dryWorldGiCache.entries[slot].signature==key.signature){
+    let slot=(key.start+probe*probe)&${SVO_DRY_WORLD_GI_CACHE_CONTRACT.entryCount - 1}u;let state=atomicLoad(&dryWorldGiCache.metadata[slot].state);
+    if(state==key.readyState&&dryWorldGiCache.metadata[slot].signature==key.signature){
+      let payload=dryWorldGiCache.payload[slot];
+      let rg=unpack2x16float(payload.radianceRg);let bv=unpack2x16float(payload.radianceBv);
+      let verifiedState=atomicLoad(&dryWorldGiCache.metadata[slot].state);
+      if(verifiedState==key.readyState&&dryWorldGiCache.metadata[slot].signature==key.signature){
         return DryWorldGiCacheLookup(DryGlobalIllumination(vec3f(rg,bv.x),bv.y),1u,claimSlot,claimState);
       }
     }
@@ -1601,24 +1625,30 @@ fn dryWorldGiFind(key:DryWorldGiCacheKey)->DryWorldGiCacheLookup{
   return DryWorldGiCacheLookup(DryGlobalIllumination(vec3f(0.0),1.0),0u,claimSlot,claimState);
 }
 fn dryWorldGiInsert(key:DryWorldGiCacheKey,slot:u32,claimState:u32,value:DryGlobalIllumination){
-  if(slot==0xffffffffu){return;}let claimed=atomicCompareExchangeWeak(&dryWorldGiCache.entries[slot].state,claimState,1u);
-  if(!claimed.exchanged){return;}dryWorldGiCache.entries[slot].signature=key.signature;
-  dryWorldGiCache.entries[slot].radianceRg=pack2x16float(value.radiance.xy);
-  dryWorldGiCache.entries[slot].radianceBv=pack2x16float(vec2f(value.radiance.z,value.visibility));
-  atomicStore(&dryWorldGiCache.entries[slot].state,key.readyState);
+  if(slot==0xffffffffu){return;}let claimed=atomicCompareExchangeWeak(&dryWorldGiCache.metadata[slot].state,claimState,1u);
+  if(!claimed.exchanged){return;}dryWorldGiCache.metadata[slot].signature=key.signature;
+  dryWorldGiCache.payload[slot].radianceRg=pack2x16float(value.radiance.xy);
+  dryWorldGiCache.payload[slot].radianceBv=pack2x16float(vec2f(value.radiance.z,value.visibility));
+  atomicStore(&dryWorldGiCache.metadata[slot].state,key.readyState);
 }
-fn dryWorldGiDynamicInfluence(position:vec3f,ignoredBodyOwner:u32)->bool{
+fn dryWorldGiBodyInfluence(position:vec3f,ignoredBodyOwner:u32)->DryWorldGiBodyInfluence{
   let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
   let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
+  var bodyMask=0u;var movingMask=0u;var signature=0x4f1bbcdcu;
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}if(bodyIndex==ignoredBodyOwner){continue;}let body=bodies[bodyIndex];
     let influence=body.positionRadius.w+max(
       minimumVoxel*${SVO_DRY_WORLD_GI_CACHE_CONTRACT.dynamicInfluenceCells}.0,
       body.positionRadius.w*${SVO_DRY_WORLD_GI_CACHE_CONTRACT.dynamicInfluenceBodyRadii}.0);
     let delta=position-body.positionRadius.xyz;
-    if(dot(delta,delta)<=influence*influence){return true;}
+    if(dot(delta,delta)<=influence*influence){
+      let bodyBit=1u<<bodyIndex;bodyMask|=bodyBit;
+      signature=dryWorldGiHashAdd(signature,dryWorldGiFrame.bodySignatures[bodyIndex]);
+      let motion=rigidMotion[bodyIndex];
+      if(motion.linearVelocityDisplacement.w>1e-7||motion.angularVelocityAngle.w>1e-7){movingMask|=bodyBit;}
+    }
   }
-  return false;
+  return DryWorldGiBodyInfluence(bodyMask,movingMask,signature);
 }
 ` : "";
   const worldGiCacheEntryWGSL = reduced && split ? /* wgsl */ `
@@ -1627,12 +1657,14 @@ fn dryWorldGiDynamicInfluence(position:vec3f,ignoredBodyOwner:u32)->bool{
   var signature=dryWorldGiHashAdd(0x27d4eb2du,bodyCount);var movingBodyCount=0u;
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}let body=bodies[bodyIndex];let motion=rigidMotion[bodyIndex];
-    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.x));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.y));
-    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.z));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.w));
-    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.x));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.y));
-    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.z));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.w));
-    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.x));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.y));
-    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.z));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.w));
+    var bodySignature=dryWorldGiHashAdd(0x85ebca6bu,bodyIndex);
+    bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.positionRadius.x));bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.positionRadius.y));
+    bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.positionRadius.z));bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.positionRadius.w));
+    bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.halfSizeShape.x));bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.halfSizeShape.y));
+    bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.halfSizeShape.z));bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.halfSizeShape.w));
+    bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.orientation.x));bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.orientation.y));
+    bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.orientation.z));bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.orientation.w));
+    dryWorldGiFrame.bodySignatures[bodyIndex]=bodySignature;signature=dryWorldGiHashAdd(signature,bodySignature);
     if(motion.linearVelocityDisplacement.w>1e-7||motion.angularVelocityAngle.w>1e-7){movingBodyCount+=1u;}
   }
   let origin=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-origin);
@@ -1657,16 +1689,20 @@ fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
   let opaque=DryHit(geometry.x,dryPrepassDecodeNormal(geometry.yz),identity&0xffffu,identity>>16u,metadata&15u,(metadata>>4u)&15u,(metadata>>8u)&3u,(metadata>>10u)&1u,0.0,vec3u(0u));
   let ray=dryWorldGiFrameRay(globalId.xy,dimensions);let position=ray[0]+ray[1]*opaque.t;
   let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);
-  let localizedMotion=dryWorldGiFrame.movingBodyCount!=0u;
-  if(localizedMotion&&dryWorldGiDynamicInfluence(position,ignoredBodyOwner)){
-    dryWorldGiIgnoreRigidBodies=0u;dryPrepassGiState=0u;
+  let influence=dryWorldGiBodyInfluence(position,ignoredBodyOwner);
+  // Only a moving body's own bounded neighbourhood is recomputed. A cached
+  // static-body neighbourhood is keyed solely by the bodies local to it, so an
+  // unrelated moving body cannot invalidate that cache line.
+  if(influence.movingMask!=0u){
+    dryWorldGiIgnoreRigidBodies=0u;dryWorldGiBodyMask=influence.bodyMask;dryPrepassGiState=0u;
     let dynamicValue=dryGlobalIllumination(position,opaque.normal,ignoredBodyOwner);
     textureStore(dryWorldGiOutput,coordinate,vec4f(dynamicValue.radiance,dynamicValue.visibility));return;
   }
-  let key=dryWorldGiKey(position,opaque.normal);let cached=dryWorldGiFind(key);
+  let bodyAware=influence.bodyMask!=0u;let bodyNamespace=select(0x4f1bbcdcu,influence.signature,bodyAware);
+  let key=dryWorldGiKey(position,opaque.normal,bodyNamespace);let cached=dryWorldGiFind(key);
   if(cached.hit!=0u){textureStore(dryWorldGiOutput,coordinate,vec4f(cached.value.radiance,cached.value.visibility));return;}
-  dryWorldGiIgnoreRigidBodies=select(0u,1u,localizedMotion);dryPrepassGiState=0u;
-  let value=dryGlobalIllumination(position,opaque.normal,select(ignoredBodyOwner,DRY_OWNER_NONE,localizedMotion));
+  dryWorldGiIgnoreRigidBodies=select(1u,0u,bodyAware);dryWorldGiBodyMask=influence.bodyMask;dryPrepassGiState=0u;
+  let value=dryGlobalIllumination(position,opaque.normal,select(DRY_OWNER_NONE,ignoredBodyOwner,bodyAware));
   dryWorldGiInsert(key,cached.claimSlot,cached.claimState,value);
   textureStore(dryWorldGiOutput,coordinate,vec4f(value.radiance,value.visibility));
 }
@@ -1819,7 +1855,7 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
     if(coneIndex>=coneCount){break;}let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0);
     dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
     let sceneExit=dryNodeMipSceneExitDistance(origin,direction);var rigidHit=missHit();
-    if(dryWorldGiIgnoreRigidBodies==0u){rigidHit=nearestBodyIgnoring(origin,direction,ignoredBodyOwner);}
+    if(dryWorldGiIgnoreRigidBodies==0u){rigidHit=nearestBodyMaskIgnoring(origin,direction,ignoredBodyOwner,dryWorldGiBodyMask);}
     let rigidBlocked=rigidHit.t<sceneExit;
     let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,min(sceneExit,rigidHit.t),perConeBudget,.995,.0039215686,1u));
     let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);dryMipSteps+=result.coneTaps;
@@ -1859,6 +1895,7 @@ const DRY_GBUFFER_WORK_EXHAUSTED:u32=2u;const DRY_GBUFFER_INVALID_FIELD:u32=3u;
 const DRY_REVERSED_Z_NEAR_M:f32=${SVO_DRY_SCENE_REVERSED_Z_NEAR_M};
 var<private> dryVisibilityIgnoredOwner:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;
 var<private> dryWorldGiIgnoreRigidBodies:u32;
+var<private> dryWorldGiBodyMask:u32=0xffffffffu;
 var<private> dryPrimaryNodeVisits:u32;var<private> dryPrimaryLeafVisits:u32;var<private> dryPrimaryEmptyBrickSkips:u32;var<private> dryPrimaryVoxelWorkItems:u32;var<private> dryPrimaryExactTests:u32;var<private> dryPrimaryMaximumDepth:u32;var<private> dryShadowNodeVisits:u32;var<private> dryShadowLeafVisits:u32;var<private> dryShadowWorkItems:u32;var<private> dryMipSteps:u32;var<private> dryTraversalFailure:u32;
 fn dryConfiguredMapping()->SvoMapping{
   var mapping=dry.mapping;
@@ -2082,9 +2119,10 @@ fn bodyBoundingSphereVisible(ro:vec3f,rd:vec3f,body:BodyGPU,tMin:f32,tMax:f32)->
   return dot(closest-body.positionRadius.xyz,closest-body.positionRadius.xyz)<=radius*radius;
 }
 
-fn nearestBodyIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32)->DryHit {
-  var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
+fn nearestBodyMaskIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32,bodyMask:u32)->DryHit {
+  var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner||(bodyMask&(1u<<index))==0u){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
 }
+fn nearestBodyIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32)->DryHit{return nearestBodyMaskIgnoring(ro,rd,ignoredOwner,0xffffffffu);}
 ${prepassBodyBlockerWGSL}
 fn nearestBody(ro:vec3f,rd:vec3f)->DryHit{return nearestBodyIgnoring(ro,rd,DRY_OWNER_NONE);}
 

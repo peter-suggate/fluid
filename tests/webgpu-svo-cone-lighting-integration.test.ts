@@ -189,9 +189,11 @@ test("reduced split GI uses a bounded camera-independent world cache", () => {
   assert.deepEqual(SVO_DRY_WORLD_GI_CACHE_CONTRACT, {
     entryCount: 262_144,
     entryBytes: 16,
+    probeBytes: 8,
+    payloadBytes: 8,
     probeCount: 4,
     allocatedBytes: 4_194_304,
-    frameBytes: 80,
+    frameBytes: 128,
     dynamicInfluenceCells: 12,
     dynamicInfluenceBodyRadii: 3,
   });
@@ -206,16 +208,25 @@ test("reduced split GI uses a bounded camera-independent world cache", () => {
   assert.match(key, /dry\.nodeMip\.x/);
   assert.match(shader, /@compute @workgroup_size\(1\) fn dryWorldGiFrameMain/);
   assert.match(shader, /dryWorldGiFrame\.cameraForwardAspect=vec4f\(forward,/);
-  assert.match(key, /select\(0x4f1bbcdcu,dryWorldGiFrame\.bodySignature,dryWorldGiFrame\.movingBodyCount==0u\)/,
-    "static bodies may specialize the fast cache, while active motion switches to one stable body-independent namespace");
+  assert.match(key, /dryWorldGiSpatialStart\(quantized\)/,
+    "neighbouring world samples must retain a spatially coherent cache-set index");
   assert.doesNotMatch(key, /positionRadius|orientation/);
   assert.match(shader, /motion\.linearVelocityDisplacement\.w>1e-7\|\|motion\.angularVelocityAngle\.w>1e-7/);
-  assert.match(shader, /fn dryWorldGiDynamicInfluence\([^]*dot\(delta,delta\)<=influence\*influence/);
-  assert.match(shader, /if\(localizedMotion&&dryWorldGiDynamicInfluence\(position,ignoredBodyOwner\)\)\{[^]*dryWorldGiIgnoreRigidBodies=0u/);
-  assert.match(shader, /dryWorldGiIgnoreRigidBodies=select\(0u,1u,localizedMotion\);dryPrepassGiState=0u;/,
-    "moving frames cache body-independent GI, while motionless frames retain the faster body-aware result");
-  assert.match(shader, /atomicCompareExchangeWeak\(&dryWorldGiCache\.entries\[slot\]\.state,claimState,1u\)/);
-  assert.match(shader, /atomicStore\(&dryWorldGiCache\.entries\[slot\]\.state,key\.readyState\)/,
+  assert.match(shader, /fn dryWorldGiBodyInfluence\([^]*dot\(delta,delta\)<=influence\*influence/);
+  assert.match(shader, /bodyMask\|=bodyBit[^]*signature=dryWorldGiHashAdd\(signature,dryWorldGiFrame\.bodySignatures\[bodyIndex\]\)/,
+    "each receiver namespace must include only bodies in its conservative influence");
+  assert.match(shader, /if\(influence\.movingMask!=0u\)\{[^]*dryWorldGiBodyMask=influence\.bodyMask/,
+    "only a locally influential moving body may force an exact GI retrace");
+  assert.match(shader, /let bodyAware=influence\.bodyMask!=0u;let bodyNamespace=select\(0x4f1bbcdcu,influence\.signature,bodyAware\)/,
+    "unrelated body motion must not change a static neighbourhood's cache namespace");
+  assert.match(shader, /dryWorldGiIgnoreRigidBodies=select\(1u,0u,bodyAware\);dryWorldGiBodyMask=influence\.bodyMask;dryPrepassGiState=0u;/,
+    "only bounded body neighbourhoods specialize cached GI with rigid geometry");
+  assert.match(shader, /nearestBodyMaskIgnoring\(origin,direction,ignoredBodyOwner,dryWorldGiBodyMask\)/,
+    "cached GI cones must test only the bodies represented by their local cache key");
+  assert.match(shader, /struct DryWorldGiCache\{[^]*metadata:array<DryWorldGiCacheMetadata,262144>[^]*payload:array<DryWorldGiCachePayload,262144>/,
+    "miss probes must scan packed metadata without pulling the half-float payload plane");
+  assert.match(shader, /atomicCompareExchangeWeak\(&dryWorldGiCache\.metadata\[slot\]\.state,claimState,1u\)/);
+  assert.match(shader, /atomicStore\(&dryWorldGiCache\.metadata\[slot\]\.state,key\.readyState\)/,
     "the ready state must publish after the packed half-float payload");
   assert.match(shader, /if\(state!=1u\)\{claimSlot=slot;claimState=state;\}/,
     "a moving camera may replace an old ready entry but never a writer in progress");
