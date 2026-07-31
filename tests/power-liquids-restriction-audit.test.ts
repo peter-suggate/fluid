@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { auditSection5FineRestriction } from "../lib/power-liquids-restriction-audit";
 
-test("only the explicit coarse-only diagnostic skips the separate-band restriction receipt", () => {
+test("factor one skips the separate-band restriction receipt", () => {
   const executor = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
   assert.match(executor,
-    /const hasSeparateFineLevelSetBand = method\.id === "octree"\s*&& values\.coarseOnlySurfaceTracking !== true;/);
+    /const hasSeparateFineLevelSetBand = method\.id === "octree"\s*&& Number\(values\.globalFineLevelSetFactor\) !== 1;/);
   assert.match(executor,
     /if \(restrictionAudit\.failure && hasSeparateFineLevelSetBand\s*&& !retainedBackgroundOctree\)/);
 });

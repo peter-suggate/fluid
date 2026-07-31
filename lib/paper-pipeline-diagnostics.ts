@@ -40,6 +40,8 @@ export function paperPipelineStages(
   const t0Ready = info.initialSparseAuthorityReady === true;
   const powerGeneration = info.powerDiagramGeneration;
   const fineGeneration = info.globalFineGeneration;
+  const coarseOnlySurface = info.globalFineLevelSetEnabled === false
+    && info.globalFineLevelSetFactor === 1;
   const stages: PaperPipelineStage[] = [];
 
   stages.push(info.gpuValidationError
@@ -76,13 +78,17 @@ export function paperPipelineStages(
     : (info.globalFineCoarseLevelSetFlags ?? 0) !== 0
       ? ` · coarse φ 0x${hexadecimalUint32(info.globalFineCoarseLevelSetFlags ?? 0)}`
       : "";
-  stages.push(fineHealthy
+  stages.push(coarseOnlySurface
+    ? { id: "fine", section: "§5", label: "Octree φ interface", state: "COARSE-ONLY", tone: "healthy", generation: generation(powerGeneration), detail: "Factor-one φ is transported directly on the accepted adaptive octree rows; no separate fine-band publication is allocated." }
+    : fineHealthy
     ? { id: "fine", section: "§5", label: "Fine φ interface & support band", state: "PUBLISHED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.globalFineSeedCount ?? 0} interface seeds · ${info.globalFineInterfaceBricks ?? 0} interface → ${info.globalFineActiveBricks ?? 0} active bricks` }
     : fineRejected
       ? { id: "fine", section: "§5", label: "Fine φ interface & support band", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: `seed fault ${info.globalFineSeedError ?? 0} · topology 0x${hexadecimalUint32(info.globalFineTopologyFlags ?? 0)} · downstream 0x${hexadecimalUint32(info.globalFineDownstreamFinalizeReason ?? 0)}${coarseFailure}` }
       : pending("fine", "§5", "Fine φ interface & support band", "Waiting for interface seeds, neighbor ring, and same-generation publication."));
 
-  stages.push(info.globalFineRedistanceCommitted === true
+  stages.push(coarseOnlySurface
+    ? { id: "redistance", section: "§5", label: "Octree φ redistance", state: "COARSE-ONLY", tone: "healthy", generation: generation(powerGeneration), detail: "The compact coarse summary redistances and corrects the direct octree φ authority." }
+    : info.globalFineRedistanceCommitted === true
     ? { id: "redistance", section: "§5", label: "Fine φ redistance", state: "COMMITTED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.globalFineRedistanceSeeds ?? 0} seeds · ${info.globalFineRedistanceUnresolvedCells ?? 0} unresolved samples` }
     : info.globalFineRedistanceCommitted === false && t0Ready
       ? { id: "redistance", section: "§5", label: "Fine φ redistance", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: `${info.globalFineRedistanceUnresolvedCells ?? 0} unresolved samples from ${info.globalFineRedistanceSeeds ?? 0} seeds` }
@@ -108,7 +114,9 @@ export function paperPipelineStages(
     + (info.globalFineTransportNonfiniteVelocity ?? 0)
     + (info.globalFineTransportStructuredAuthorityUnavailable ?? 0)
     + (info.globalFineTransportVelocityUnavailable ?? 0);
-  stages.push(info.globalFineTransportCommitted === true
+  stages.push(coarseOnlySurface
+    ? { id: "transport", section: "§5", label: "Octree φ advection", state: "DIRECT", tone: "healthy", generation: generation(powerGeneration), detail: "Surface transport is committed through the accepted power-row authority without a separate fine-band transaction." }
+    : info.globalFineTransportCommitted === true
     ? transportFaults === 0
       ? { id: "transport", section: "§5", label: "Fine φ advection", state: "COMMITTED", tone: "healthy", generation: generation(fineGeneration), detail: "The projected structured field sampled successfully throughout the transported band." }
       : { id: "transport", section: "§5", label: "Fine φ advection", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: `${transportFaults} unavailable or non-finite transport samples; the transaction is not valid paper authority.` }
@@ -139,6 +147,8 @@ export function paperPipelineStages(
     : "generation evidence unavailable";
   stages.push(!water
     ? pending("raster", "render", "Fine/coarse raster surface", "Waiting for bounded renderer diagnostics.")
+    : coarseOnlySurface && water.surfaceGeometrySource === "compact-coarse"
+      ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "CURRENT", tone: "healthy", generation: generation(powerGeneration), detail: "Raster geometry is drawn from the current compact-coarse octree φ authority." }
     : water.surfaceGeometrySource === "global-fine-coarse" && water.globalFineCrossingPublished && rasterGenerationCurrent
       ? { id: "raster", section: "render", label: "Fine/coarse raster surface", state: "CURRENT", tone: "healthy", generation: generation(fineGeneration), detail: `Raster geometry is attached to the admitted same-generation global-fine/coarse zero crossing · ${rasterGenerations}.` }
       : water.surfaceGeometrySource === "global-fine-coarse" && water.globalFineCrossingPublished

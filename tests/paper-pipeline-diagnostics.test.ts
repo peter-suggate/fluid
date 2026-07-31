@@ -33,6 +33,28 @@ test("paper pipeline inspector reports the direct structured authority chain", (
   assert.equal(stages.find((stage) => stage.id === "raster")?.state, "CURRENT");
 });
 
+test("factor-one coarse-only surface authority is not reported as a rejected fine band", () => {
+  const stages = paperPipelineStages(info({
+    initialSparseAuthorityReady: true, encodedSteps: 2,
+    powerDiagramAuthoritative: true, powerDiagramGeneration: 4,
+    pressureRequiredRows: 1_632, pressureCapacityOverflow: false,
+    structuredVelocityValid: true, structuredBoundaryValid: true,
+    structuredVelocityGeneration: 4,
+    pressureSolver: "Section 4.3 hybrid MGPCG", pressureRelativeResidual: 1e-5,
+    globalFineLevelSetEnabled: false, globalFineLevelSetFactor: 1,
+    globalFinePublished: false, globalFineRedistanceCommitted: false,
+    globalFineTransportCommitted: false,
+  }), {
+    surfaceGeometrySource: "compact-coarse", globalFineAttached: false,
+    globalFineCrossingPublished: false, presentationFallbackActive: false,
+  });
+  assert.equal(stages.find((stage) => stage.id === "fine")?.state, "COARSE-ONLY");
+  assert.equal(stages.find((stage) => stage.id === "redistance")?.state, "COARSE-ONLY");
+  assert.equal(stages.find((stage) => stage.id === "transport")?.state, "DIRECT");
+  assert.equal(stages.find((stage) => stage.id === "raster")?.state, "CURRENT");
+  assert.equal(stages.some((stage) => stage.tone === "rejected"), false);
+});
+
 test("pipeline inspector rejects a non-M1 pressure authority", () => {
   const pressure = paperPipelineStages(info({
     initialSparseAuthorityReady: true, encodedSteps: 1,

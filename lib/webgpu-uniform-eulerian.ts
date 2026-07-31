@@ -1831,7 +1831,7 @@ fn recordPhysicsPhaseBoundary(
       globalFineLevelSetResidentBrickCapacity: octree.globalFineLevelSetResidentBrickCapacity,
       globalFineLevelSetLogicalBrickCount: octree.globalFineLevelSetLogicalBrickCount,
       globalFineLevelSetEnabled: projection.globalFineLevelSetSource !== undefined,
-      globalFineLevelSetFactor: projection.globalFineLevelSetSource?.plan.fineFactor,
+      globalFineLevelSetFactor: projection.surfaceTrackingFactor,
       globalFineTransportQueryCapacity: octree.globalFineTransportQueryCapacity,
       globalFineTransportChunkCapacity: octree.globalFineTransportChunkCapacity,
       globalFineTransportChunkCount: octree.globalFineTransportChunkCount,

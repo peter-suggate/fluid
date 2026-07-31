@@ -1045,10 +1045,12 @@ async function runGPU(
     values.fineLevelSetBandCells = octreeFineBandOverride;
   }
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
-  // Resolution one still owns a separate sparse interface band. Only the
-  // explicit liquid-row-only diagnostic lacks the fine-to-background receipt.
+  // Factor one transports phi directly on the accepted octree rows and owns
+  // no separate sparse fine-band publication.
   const hasSeparateFineLevelSetBand = method.id === "octree"
-    && values.coarseOnlySurfaceTracking !== true;
+    && Number(values.globalFineLevelSetFactor) !== 1;
+  const verifyGlobalFineGenerationTransition = globalFineGenerationTransitionRequested
+    && hasSeparateFineLevelSetBand;
   if (method.id === "octree" && octreePressureRowCapacityOverride !== undefined) {
     values.pressureRowCapacity = octreePressureRowCapacityOverride;
   }
@@ -1133,9 +1135,9 @@ async function runGPU(
   const initialFluidBrickStats = sparseStatsRequested && sparseSource
     ? await readFluidBrickSnapshot(device, sparseSource)
     : undefined;
-  const initialGlobalFineGeneration = globalFineGenerationTransitionRequested && method.id === "octree"
+  const initialGlobalFineGeneration = verifyGlobalFineGenerationTransition && method.id === "octree"
     ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
-  const initialGlobalFineRaster = globalFineGenerationTransitionRequested && method.id === "octree"
+  const initialGlobalFineRaster = verifyGlobalFineGenerationTransition && method.id === "octree"
     ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true) : undefined;
   if (initialGlobalFineRaster) {
     // Emit the pre-step renderer evidence immediately.  A later simulation
@@ -2038,9 +2040,9 @@ async function runGPU(
       }
       const raster = rasterCheckpointRequested && method.id === "octree"
         ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
-          globalFineGenerationTransitionRequested)
+          verifyGlobalFineGenerationTransition)
         : undefined;
-      const globalFineGeneration = globalFineGenerationTransitionRequested && method.id === "octree"
+      const globalFineGeneration = verifyGlobalFineGenerationTransition && method.id === "octree"
         ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
       const collected = collectSceneEvidence(sceneEvidenceCollectorRegistry, evidenceCollectors, "checkpoint", {
         scene, method: method.id as WebGPUSmokeMethodId, grid: [solver.info.nx, solver.info.ny, solver.info.nz],
@@ -2664,7 +2666,7 @@ async function runGPU(
   // a wiring failure rather than evaluating the solver's actual state.
   const finalGlobalFineGeneration = method.id === "octree"
     ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
-  const finalGlobalFineRaster = globalFineGenerationTransitionRequested && method.id === "octree"
+  const finalGlobalFineRaster = verifyGlobalFineGenerationTransition && method.id === "octree"
     ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true) : undefined;
   const sparseVoxelStats = sparseStatsRequested && sparseSource
     ? await readSparseVoxelStats(device, sparseSource, seedBrickBounds)

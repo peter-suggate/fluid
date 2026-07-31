@@ -5406,6 +5406,11 @@ export class WebGPUOctreeProjection {
       ...(this.globalFineSeeds ? { seedControl: this.globalFineSeeds.buffer } : {}),
     };
   }
+  /** Authored surface resolution even when factor one deliberately allocates
+   * no separate global-fine source. */
+  get surfaceTrackingFactor(): 1 | 4 | 8 {
+    return this.coarseOnlySurfaceTracking ? 1 : this.globalFineLevelSet?.plan.fineFactor ?? 4;
+  }
   /** Renderer-only view of the sole moving surface in coarse-1 mode. */
   get coarseLevelSetSource() {
     const coarse = this.powerCoarseLevelSetSchedule?.sampleSource;

@@ -82,6 +82,19 @@ test("a retained raster remains visible even when simulation products are health
   assert.equal(failure?.title, "WATER MESH STALE");
 });
 
+test("factor-one compact-coarse presentation does not raise a fine-band rejection", () => {
+  const coarse = healthyInfo({
+    globalFineLevelSetEnabled: false, globalFineLevelSetFactor: 1,
+    globalFinePublished: false, globalFineRedistanceCommitted: false,
+    globalFineTransportCommitted: false,
+  });
+  const water: WaterSurfacePresentationDiagnostics = {
+    surfaceGeometrySource: "compact-coarse", globalFineAttached: false,
+    globalFineCrossingPublished: false, presentationFallbackActive: false,
+  };
+  assert.equal(viewportFailureIndicator(coarse, water, scene), undefined);
+});
+
 test("missing structured telemetry at t=0 does not masquerade as a water update rejection", () => {
   const current: WaterSurfacePresentationDiagnostics = {
     surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true,

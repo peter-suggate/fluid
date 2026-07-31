@@ -83,6 +83,23 @@ test("whole-step authority lag is exact and pipeline-independent", async () => {
   assert.equal(health.receiptValid, true, "stale-but-valid is the damping mode, not a collapse");
 });
 
+test("coarse-only snapshots mask publication state from the generation", async () => {
+  const { device } = fakeDevice();
+  const ring = new StructuredStepSnapshotRing(device, 3);
+  const coarse = sources(0, 7);
+  assert.ok(ring.encode(fakeEncoder(), {
+    ...coarse,
+    fineWorklist: new FakeBuffer(28,
+      [0x8000_0000, 0x4000_0008, 21, 32, 24, 18, 16]) as unknown as GPUBuffer,
+  }, { ...stamp(6), surfaceKind: "coarse" }));
+  const record = await ring.readLatest();
+  assert.ok(record);
+  const health = structuredAuthorityStepHealth(record);
+  assert.equal(health.publishedFineGeneration, 8);
+  assert.equal(health.authorityLagSteps, 0);
+  assert.equal(health.fineBandCapacityOverflow, false);
+});
+
 test("an incoherent boundary epoch invalidates the receipt", async () => {
   const { device } = fakeDevice();
   const ring = new StructuredStepSnapshotRing(device, 3);

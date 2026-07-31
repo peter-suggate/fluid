@@ -232,7 +232,9 @@ export function structuredAuthorityStepHealth(
   const airSupport = unpackAirSupportFailure(record.snapshot.airSupportFailure);
   const governor = unpackFineTransportGovernor(record.snapshot.fineTransportGovernor);
   const publishedFineGeneration = coarseOnly
-    ? Number(fineHeader[1] ?? 0) >>> 0 : fine.generation;
+    // The compact coarse-directory generation shares its high two bits with
+    // the publication state. Compare only the 30-bit generation payload.
+    ? (Number(fineHeader[1] ?? 0) & 0x3fff_ffff) >>> 0 : fine.generation;
   const velocityValid = structured.flags === 0 && structured.rowCount > 0
     && structured.epoch > 0 && structured.activeBank <= 1;
   const boundaryValid = boundary.flags === 0
