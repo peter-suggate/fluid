@@ -6,9 +6,11 @@ import { pathToFileURL } from "node:url";
 import { SVO_MATERIAL_RECORD_STRIDE_BYTES } from "../lib/svo-material-abi";
 import { SVO_FLUID_COVERAGE_LAYOUT } from "../lib/svo-fluid-coverage";
 import {
+  createSvoDrySceneFragmentWGSL,
   SparseVoxelDrySceneRenderer,
   SVO_DRY_SCENE_PARAMS_LAYOUT,
   SVO_DRY_VISIBILITY_FLAGS,
+  SVO_DRY_WORLD_GI_CACHE_CONTRACT,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
@@ -191,6 +193,43 @@ test("cone steps reuse a matching mip page and search only on page, LOD, or gene
   assert.equal(searches, 1, "repeated samples in one non-resident sparse page reuse the negative lookup");
 });
 
+test("reduced split GI uses a bounded camera-independent world cache", () => {
+  assert.deepEqual(SVO_DRY_WORLD_GI_CACHE_CONTRACT, {
+    entryCount: 262_144,
+    entryBytes: 16,
+    probeCount: 4,
+    allocatedBytes: 4_194_304,
+    frameBytes: 80,
+    dynamicInfluenceCells: 12,
+    dynamicInfluenceBodyRadii: 3,
+  });
+  const shader = createSvoDrySceneFragmentWGSL(0.5, "canonical-parametric", "off", "split");
+  const keyStart = shader.indexOf("fn dryWorldGiKey(");
+  const keyEnd = shader.indexOf("fn dryWorldGiFind(", keyStart);
+  const key = shader.slice(keyStart, keyEnd);
+  assert.ok(keyStart >= 0 && keyEnd > keyStart);
+  assert.doesNotMatch(key, /cameraPosition|cameraTarget|viewport/,
+    "camera motion changes queried world samples but must not invalidate their cached values");
+  assert.match(key, /position-dry\.nodeMipOrigin/);
+  assert.match(key, /dry\.nodeMip\.x/);
+  assert.match(shader, /@compute @workgroup_size\(1\) fn dryWorldGiFrameMain/);
+  assert.match(shader, /dryWorldGiFrame\.cameraForwardAspect=vec4f\(forward,/);
+  assert.match(key, /select\(0x4f1bbcdcu,dryWorldGiFrame\.bodySignature,dryWorldGiFrame\.movingBodyCount==0u\)/,
+    "static bodies may specialize the fast cache, while active motion switches to one stable body-independent namespace");
+  assert.doesNotMatch(key, /positionRadius|orientation/);
+  assert.match(shader, /motion\.linearVelocityDisplacement\.w>1e-7\|\|motion\.angularVelocityAngle\.w>1e-7/);
+  assert.match(shader, /fn dryWorldGiDynamicInfluence\([^]*dot\(delta,delta\)<=influence\*influence/);
+  assert.match(shader, /if\(localizedMotion&&dryWorldGiDynamicInfluence\(position,ignoredBodyOwner\)\)\{[^]*dryWorldGiIgnoreRigidBodies=0u/);
+  assert.match(shader, /dryWorldGiIgnoreRigidBodies=select\(0u,1u,localizedMotion\);dryPrepassGiState=0u;/,
+    "moving frames cache body-independent GI, while motionless frames retain the faster body-aware result");
+  assert.match(shader, /atomicCompareExchangeWeak\(&dryWorldGiCache\.entries\[slot\]\.state,claimState,1u\)/);
+  assert.match(shader, /atomicStore\(&dryWorldGiCache\.entries\[slot\]\.state,key\.readyState\)/,
+    "the ready state must publish after the packed half-float payload");
+  assert.match(shader, /if\(state!=1u\)\{claimSlot=slot;claimState=state;\}/,
+    "a moving camera may replace an old ready entry but never a writer in progress");
+  assert.match(shader, /@compute @workgroup_size\(8,8\) fn dryWorldGiCacheMain/);
+});
+
 test("node-mip sampling publishes its own world origin inside the static uniform block", () => {
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset, 60);
   // The static-lighting block still ends exactly where it always did. Evolving
@@ -242,6 +281,12 @@ test("production dry shader compiles sampled node-mip atlas and uint directory b
     const module = device.createShaderModule({ label: "Cone-lighting dry shader validation", code: svoDrySceneShader });
     const info = await module.getCompilationInfo();
     assert.deepEqual(info.messages.filter(({ type }) => type === "error"), []);
+    const cacheModule = device.createShaderModule({
+      label: "Persistent world GI cache validation",
+      code: createSvoDrySceneFragmentWGSL(0.5, "canonical-parametric", "off", "split"),
+    });
+    const cacheInfo = await cacheModule.getCompilationInfo();
+    assert.deepEqual(cacheInfo.messages.filter(({ type }) => type === "error"), []);
     assert.match(svoDrySceneShader, /@binding\(16\) var nodeMipAtlas:texture_3d<f32>/);
     assert.match(svoDrySceneShader, /@binding\(18\) var nodeMipDirectory:texture_2d<u32>/);
     assert.match(svoDrySceneShader, /@binding\(20\) var nodeMipPageTable:texture_3d<u32>/);

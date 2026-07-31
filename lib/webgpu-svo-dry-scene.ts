@@ -174,7 +174,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(): GPUBindGroupLayoutE
   // inputs, but not material shading, glass, or dormant traversal variants.
   // Keeping those fragment-only also stays below WebGPU's per-stage storage
   // binding limit on Apple GPUs.
-  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
   // Raster analytic impostors consume only the camera uniform and their
   // source record arena in the vertex stage.
   const vertexBindings = new Set([0, 1, 10]);
@@ -1000,6 +1000,17 @@ export const SVO_DRY_CONE_PREPASS_CONTRACT = Object.freeze({
   fallbackWeightThreshold: 0.05,
 } as const);
 
+/** Persistent camera-independent cache used by the reduced split GI pass. */
+export const SVO_DRY_WORLD_GI_CACHE_CONTRACT = Object.freeze({
+  entryCount: 1 << 18,
+  entryBytes: 16,
+  probeCount: 4,
+  allocatedBytes: (1 << 18) * 16,
+  frameBytes: 80,
+  dynamicInfluenceCells: 12,
+  dynamicInfluenceBodyRadii: 3,
+} as const);
+
 /** Prepass target dimensions derived from the presentation size, never below 1x1. */
 export function svoConePrepassSize(width: number, height: number, scale: SvoConeLightingScale): readonly [number, number] {
   return [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
@@ -1544,6 +1555,133 @@ fn dryPrepassStore(coordinate:vec2i,opaque:DryHit,ro:vec3f,rd:vec3f){if(!(opaque
   let queueCount=atomicLoad(&dryPrepassBoundaryQueue.count);if(globalId.x>=queueCount){return;}let dimensions=textureDimensions(dryPrepassGeometryWrite);let packedCoordinate=dryPrepassBoundaryQueue.coordinates[globalId.x];let coordinate=vec2u(packedCoordinate%dimensions.x,packedCoordinate/dimensions.x);let ray=dryPrepassRay(coordinate,dimensions);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryShadowTracingEnabled=1u;let opaque=traceOpaqueScene(ray[0],ray[1]);dryPrepassStore(vec2i(coordinate),opaque,ray[0],ray[1]);
 }
 ` : "";
+  const worldGiCacheHelpersWGSL = reduced && split ? /* wgsl */ `
+struct DryWorldGiCacheEntry{state:atomic<u32>,signature:u32,radianceRg:u32,radianceBv:u32}
+struct DryWorldGiCache{entries:array<DryWorldGiCacheEntry>}
+struct DryWorldGiCacheKey{readyState:u32,signature:u32,start:u32}
+struct DryWorldGiCacheLookup{value:DryGlobalIllumination,hit:u32,claimSlot:u32,claimState:u32}
+struct DryWorldGiFrame{
+  bodySignature:u32,
+  movingBodyCount:u32,
+  bodyCount:u32,
+  reserved:u32,
+  cameraPosition:vec4f,
+  cameraForwardAspect:vec4f,
+  cameraRight:vec4f,
+  cameraUp:vec4f,
+}
+@group(2) @binding(7) var<storage,read_write> dryWorldGiCache:DryWorldGiCache;
+@group(2) @binding(8) var dryWorldGiOutput:texture_storage_2d<rgba16float,write>;
+@group(2) @binding(9) var<storage,read_write> dryWorldGiFrame:DryWorldGiFrame;
+fn dryWorldGiHash(valueIn:u32)->u32{
+  var value=valueIn;value^=value>>16u;value*=0x7feb352du;value^=value>>15u;value*=0x846ca68bu;return value^(value>>16u);
+}
+fn dryWorldGiHashAdd(hash:u32,value:u32)->u32{return dryWorldGiHash(hash^(value+0x9e3779b9u+(hash<<6u)+(hash>>2u)));}
+fn dryWorldGiKey(position:vec3f,normalIn:vec3f)->DryWorldGiCacheKey{
+  let cell=max(dry.mapping.cellSize,vec3f(1e-6));let quantized=vec3i(floor((position-dry.nodeMipOrigin.xyz)/(cell*.25)));
+  // Prepass normals are decoded normalized; preserving that contract avoids a
+  // normalize in every cache query.
+  let normal=normalIn;let normalByte=vec3u(round(clamp(normal*.5+vec3f(.5),vec3f(0.0),vec3f(1.0))*255.0));
+  let packedNormal=normalByte.x|(normalByte.y<<8u)|(normalByte.z<<16u);
+  var first=dryWorldGiHashAdd(0x811c9dc5u,bitcast<u32>(quantized.x));
+  first=dryWorldGiHashAdd(first,bitcast<u32>(quantized.y));first=dryWorldGiHashAdd(first,bitcast<u32>(quantized.z));
+  first=dryWorldGiHashAdd(first,packedNormal);first=dryWorldGiHashAdd(first,dry.nodeMip.x);
+  first=dryWorldGiHashAdd(first,bitcast<u32>(dry.giCones.x));first=dryWorldGiHashAdd(first,u32(round(dry.giCones.y)));
+  first=dryWorldGiHashAdd(first,dry.tuningCounts0.y);first=dryWorldGiHashAdd(first,bitcast<u32>(dry.giLighting.x));
+  first=dryWorldGiHashAdd(first,bitcast<u32>(dry.giLighting.y));first=dryWorldGiHashAdd(first,dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u);
+  let bodyNamespace=select(0x4f1bbcdcu,dryWorldGiFrame.bodySignature,dryWorldGiFrame.movingBodyCount==0u);
+  let second=dryWorldGiHashAdd(dryWorldGiHash(first^0x68bc21ebu),bodyNamespace);
+  let ready=(first&0x3fffffffu)|0x80000000u;return DryWorldGiCacheKey(ready,second,first&${SVO_DRY_WORLD_GI_CACHE_CONTRACT.entryCount - 1}u);
+}
+fn dryWorldGiFind(key:DryWorldGiCacheKey)->DryWorldGiCacheLookup{
+  var claimSlot=0xffffffffu;var claimState=0u;
+  for(var probe=0u;probe<${SVO_DRY_WORLD_GI_CACHE_CONTRACT.probeCount}u;probe+=1u){
+    let slot=(key.start+probe*probe)&${SVO_DRY_WORLD_GI_CACHE_CONTRACT.entryCount - 1}u;let state=atomicLoad(&dryWorldGiCache.entries[slot].state);
+    if(state==key.readyState&&dryWorldGiCache.entries[slot].signature==key.signature){
+      let rg=unpack2x16float(dryWorldGiCache.entries[slot].radianceRg);let bv=unpack2x16float(dryWorldGiCache.entries[slot].radianceBv);
+      let verifiedState=atomicLoad(&dryWorldGiCache.entries[slot].state);
+      if(verifiedState==key.readyState&&dryWorldGiCache.entries[slot].signature==key.signature){
+        return DryWorldGiCacheLookup(DryGlobalIllumination(vec3f(rg,bv.x),bv.y),1u,claimSlot,claimState);
+      }
+    }
+    if(state==0u){claimSlot=slot;claimState=0u;break;}
+    // A ready entry is safe to replace after a compare-exchange claim. Never
+    // select state 1, which denotes a writer currently publishing its payload.
+    if(state!=1u){claimSlot=slot;claimState=state;}
+  }
+  return DryWorldGiCacheLookup(DryGlobalIllumination(vec3f(0.0),1.0),0u,claimSlot,claimState);
+}
+fn dryWorldGiInsert(key:DryWorldGiCacheKey,slot:u32,claimState:u32,value:DryGlobalIllumination){
+  if(slot==0xffffffffu){return;}let claimed=atomicCompareExchangeWeak(&dryWorldGiCache.entries[slot].state,claimState,1u);
+  if(!claimed.exchanged){return;}dryWorldGiCache.entries[slot].signature=key.signature;
+  dryWorldGiCache.entries[slot].radianceRg=pack2x16float(value.radiance.xy);
+  dryWorldGiCache.entries[slot].radianceBv=pack2x16float(vec2f(value.radiance.z,value.visibility));
+  atomicStore(&dryWorldGiCache.entries[slot].state,key.readyState);
+}
+fn dryWorldGiDynamicInfluence(position:vec3f,ignoredBodyOwner:u32)->bool{
+  let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+  let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
+  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+    if(bodyIndex>=bodyCount){break;}if(bodyIndex==ignoredBodyOwner){continue;}let body=bodies[bodyIndex];
+    let influence=body.positionRadius.w+max(
+      minimumVoxel*${SVO_DRY_WORLD_GI_CACHE_CONTRACT.dynamicInfluenceCells}.0,
+      body.positionRadius.w*${SVO_DRY_WORLD_GI_CACHE_CONTRACT.dynamicInfluenceBodyRadii}.0);
+    let delta=position-body.positionRadius.xyz;
+    if(dot(delta,delta)<=influence*influence){return true;}
+  }
+  return false;
+}
+` : "";
+  const worldGiCacheEntryWGSL = reduced && split ? /* wgsl */ `
+@compute @workgroup_size(1) fn dryWorldGiFrameMain(){
+  let bodyCount=min(u32(round(max(uniforms.options.z,0.0))),12u);
+  var signature=dryWorldGiHashAdd(0x27d4eb2du,bodyCount);var movingBodyCount=0u;
+  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+    if(bodyIndex>=bodyCount){break;}let body=bodies[bodyIndex];let motion=rigidMotion[bodyIndex];
+    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.x));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.y));
+    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.z));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.positionRadius.w));
+    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.x));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.y));
+    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.z));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.halfSizeShape.w));
+    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.x));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.y));
+    signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.z));signature=dryWorldGiHashAdd(signature,bitcast<u32>(body.orientation.w));
+    if(motion.linearVelocityDisplacement.w>1e-7||motion.angularVelocityAngle.w>1e-7){movingBodyCount+=1u;}
+  }
+  let origin=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-origin);
+  let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  dryWorldGiFrame.bodySignature=signature;dryWorldGiFrame.movingBodyCount=movingBodyCount;dryWorldGiFrame.bodyCount=bodyCount;
+  dryWorldGiFrame.cameraPosition=vec4f(origin,0.0);
+  dryWorldGiFrame.cameraForwardAspect=vec4f(forward,uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72);
+  dryWorldGiFrame.cameraRight=vec4f(right,0.0);dryWorldGiFrame.cameraUp=vec4f(up,0.0);
+}
+fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
+  let uv=vec2f((f32(coordinate.x)+.5)/f32(dimensions.x),1.0-(f32(coordinate.y)+.5)/f32(dimensions.y));
+  let ndc=uv*2.0-1.0;let rd=normalize(dryWorldGiFrame.cameraForwardAspect.xyz
+    +dryWorldGiFrame.cameraRight.xyz*ndc.x*dryWorldGiFrame.cameraForwardAspect.w
+    +dryWorldGiFrame.cameraUp.xyz*ndc.y*.72);
+  return mat2x3f(dryWorldGiFrame.cameraPosition.xyz,rd);
+}
+@compute @workgroup_size(8,8) fn dryWorldGiCacheMain(@builtin(global_invocation_id) globalId:vec3u){
+  let dimensions=textureDimensions(dryWorldGiOutput);if(any(globalId.xy>=dimensions)){return;}let coordinate=vec2i(globalId.xy);
+  let geometry=textureLoad(dryPrepassGeometryTexture,coordinate,0);
+  if(geometry.x<=0.0){textureStore(dryWorldGiOutput,coordinate,vec4f(0.0,0.0,0.0,1.0));return;}
+  let identity=textureLoad(dryPrepassIdentityTexture,coordinate,0).x;let metadata=u32(round(geometry.w));
+  let opaque=DryHit(geometry.x,dryPrepassDecodeNormal(geometry.yz),identity&0xffffu,identity>>16u,metadata&15u,(metadata>>4u)&15u,(metadata>>8u)&3u,(metadata>>10u)&1u,0.0,vec3u(0u));
+  let ray=dryWorldGiFrameRay(globalId.xy,dimensions);let position=ray[0]+ray[1]*opaque.t;
+  let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);
+  let localizedMotion=dryWorldGiFrame.movingBodyCount!=0u;
+  if(localizedMotion&&dryWorldGiDynamicInfluence(position,ignoredBodyOwner)){
+    dryWorldGiIgnoreRigidBodies=0u;dryPrepassGiState=0u;
+    let dynamicValue=dryGlobalIllumination(position,opaque.normal,ignoredBodyOwner);
+    textureStore(dryWorldGiOutput,coordinate,vec4f(dynamicValue.radiance,dynamicValue.visibility));return;
+  }
+  let key=dryWorldGiKey(position,opaque.normal);let cached=dryWorldGiFind(key);
+  if(cached.hit!=0u){textureStore(dryWorldGiOutput,coordinate,vec4f(cached.value.radiance,cached.value.visibility));return;}
+  dryWorldGiIgnoreRigidBodies=select(0u,1u,localizedMotion);dryPrepassGiState=0u;
+  let value=dryGlobalIllumination(position,opaque.normal,select(ignoredBodyOwner,DRY_OWNER_NONE,localizedMotion));
+  dryWorldGiInsert(key,cached.claimSlot,cached.claimState,value);
+  textureStore(dryWorldGiOutput,coordinate,vec4f(value.radiance,value.visibility));
+}
+` : "";
   return /* wgsl */ `
 ${svoTerrainMaterialWGSL}
 ${svoMaterialWGSL}
@@ -1681,6 +1819,7 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
   return SvoTetraRadianceConeSourceSample(opacity.solidMean,svoTetraSample(tetraRadianceLobe0,tetraRadianceLobe1,tetraRadianceLobe2,tetraRadianceLobe3,nodeMipSampler,uv),1u,1u);
 }
 struct DryGlobalIllumination{radiance:vec3f,visibility:f32}
+${worldGiCacheHelpersWGSL}
 fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryGlobalIllumination{
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u||!dryTetraRadianceReady()){return DryGlobalIllumination(vec3f(0.0),1.0);}
   ${prepassGiShortcutWGSL}
@@ -1690,7 +1829,9 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
   for(var coneIndex=0u;coneIndex<4u;coneIndex+=1u){
     if(coneIndex>=coneCount){break;}let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0);
     dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
-    let sceneExit=dryNodeMipSceneExitDistance(origin,direction);let rigidHit=nearestBodyIgnoring(origin,direction,ignoredBodyOwner);let rigidBlocked=rigidHit.t<sceneExit;
+    let sceneExit=dryNodeMipSceneExitDistance(origin,direction);var rigidHit=missHit();
+    if(dryWorldGiIgnoreRigidBodies==0u){rigidHit=nearestBodyIgnoring(origin,direction,ignoredBodyOwner);}
+    let rigidBlocked=rigidHit.t<sceneExit;
     let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,min(sceneExit,rigidHit.t),perConeBudget,.995,.0039215686,1u));
     let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);dryMipSteps+=result.coneTaps;
     // Sparse GI is fail-soft. A non-finite texture/filter result must not
@@ -1706,7 +1847,7 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
   let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u)!=0u);
   return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength));
 }
-${prepassDeclarationsWGSL}${splitDeclarationsWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
+${prepassDeclarationsWGSL}${splitDeclarationsWGSL}${worldGiCacheEntryWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
 fn dryDiagnosticMaximumNodeVisits()->u32{return clamp(dryDiagnosticControl()&511u,1u,256u);}
 fn dryDiagnosticMaximumDepth()->u32{return clamp(dryDiagnosticControl()>>9u,1u,21u);}
 fn dryTraverse(ray:SvoRay,mapping:SvoMapping)->SvoTraversalHit{return svoTraverseWithDepthLimit(ray,mapping,dryDiagnosticMaximumDepth());}
@@ -1729,6 +1870,7 @@ const DRY_GBUFFER_WORK_EXHAUSTED:u32=2u;const DRY_GBUFFER_INVALID_FIELD:u32=3u;
 const DRY_GBUFFER_SHADOW_DEFERRED:u32=8u;
 const DRY_REVERSED_Z_NEAR_M:f32=${SVO_DRY_SCENE_REVERSED_Z_NEAR_M};
 var<private> dryVisibilityIgnoredOwner:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;var<private> dryShadowTracingEnabled:u32;
+var<private> dryWorldGiIgnoreRigidBodies:u32;
 var<private> dryPrimaryNodeVisits:u32;var<private> dryPrimaryLeafVisits:u32;var<private> dryPrimaryEmptyBrickSkips:u32;var<private> dryPrimaryVoxelWorkItems:u32;var<private> dryPrimaryExactTests:u32;var<private> dryPrimaryMaximumDepth:u32;var<private> dryShadowNodeVisits:u32;var<private> dryShadowLeafVisits:u32;var<private> dryShadowWorkItems:u32;var<private> dryMipSteps:u32;var<private> dryTraversalFailure:u32;
 fn dryConfiguredMapping()->SvoMapping{
   var mapping=dry.mapping;
@@ -2451,6 +2593,8 @@ interface SvoDrySplitPipelineBundle {
   readonly prepassReset?: GPUComputePipeline;
   readonly prepassCoherent?: GPUComputePipeline;
   readonly prepassBoundary?: GPUComputePipeline;
+  readonly worldGiFrame?: GPUComputePipeline;
+  readonly worldGiCache?: GPUComputePipeline;
 }
 
 interface SvoDryConePipelineBundle {
@@ -2478,6 +2622,13 @@ export class SparseVoxelDrySceneRenderer {
   private conePrepassResetPipeline?: GPUComputePipeline;
   private conePrepassCoherentPipeline?: GPUComputePipeline;
   private conePrepassBoundaryPipeline?: GPUComputePipeline;
+  private worldGiFramePipeline?: GPUComputePipeline;
+  private worldGiCachePipeline?: GPUComputePipeline;
+  private worldGiCacheLayout?: GPUBindGroupLayout;
+  private worldGiCacheBindGroup?: GPUBindGroup;
+  private worldGiCacheBuffer?: GPUBuffer;
+  private worldGiFrameBuffer?: GPUBuffer;
+  private worldGiCacheDirty = true;
   private coneFanoutWorkerPipeline?: GPUComputePipeline;
   private coneFanoutReducerPipeline?: GPUComputePipeline;
   private coneFanoutSceneLayout?: GPUBindGroupLayout;
@@ -2768,6 +2919,8 @@ export class SparseVoxelDrySceneRenderer {
     this.conePrepassResetPipeline = bundle.prepassReset;
     this.conePrepassCoherentPipeline = bundle.prepassCoherent;
     this.conePrepassBoundaryPipeline = bundle.prepassBoundary;
+    this.worldGiFramePipeline = bundle.worldGiFrame;
+    this.worldGiCachePipeline = bundle.worldGiCache;
     this.splitPipelineScale = scale;
     this.ensureSplitTargets();
     this.ensureConePrepassTargets();
@@ -2900,6 +3053,28 @@ export class SparseVoxelDrySceneRenderer {
         ],
       });
     }
+    if (scale !== 1 && !this.worldGiCacheLayout) {
+      this.worldGiCacheLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel persistent world GI cache",
+        entries: [
+          { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          { binding: 8, visibility: GPUShaderStage.COMPUTE,
+            storageTexture: { access: "write-only", format: SVO_DRY_CONE_PREPASS_CONTRACT.radianceFormat } },
+          { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ],
+      });
+      this.worldGiCacheBuffer = this.device.createBuffer({
+        label: "Sparse voxel persistent world GI cache entries",
+        size: SVO_DRY_WORLD_GI_CACHE_CONTRACT.allocatedBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.worldGiFrameBuffer = this.device.createBuffer({
+        label: "Sparse voxel persistent world GI frame prelude",
+        size: SVO_DRY_WORLD_GI_CACHE_CONTRACT.frameBytes,
+        usage: GPUBufferUsage.STORAGE,
+      });
+      this.worldGiCacheDirty = true;
+    }
     this.splitVisibilityLayout ??= this.device.createBindGroupLayout({
       label: "Sparse voxel split visibility outputs",
       entries: [
@@ -2932,7 +3107,7 @@ export class SparseVoxelDrySceneRenderer {
       ]);
       const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
       const visibilityLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitVisibilityLayout] });
-      const [visibility, rasterRigidVisibility, lighting, prepassReset, prepassCoherent, prepassBoundary] = await Promise.all([
+      const [visibility, rasterRigidVisibility, lighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache] = await Promise.all([
         this.device.createRenderPipelineAsync({
         label: `Sparse voxel primary visibility (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
         layout: visibilityLayout,
@@ -2984,8 +3159,18 @@ export class SparseVoxelDrySceneRenderer {
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!] }),
         compute: { module, entryPoint: "dryPrepassBoundaryMain" },
       }),
+      scale === 1 ? Promise.resolve(undefined) : this.device.createComputePipelineAsync({
+        label: "Sparse voxel world GI frame prelude",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassShadeLayout!, this.worldGiCacheLayout!] }),
+        compute: { module, entryPoint: "dryWorldGiFrameMain" },
+      }),
+      scale === 1 ? Promise.resolve(undefined) : this.device.createComputePipelineAsync({
+        label: "Sparse voxel persistent world GI cache",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassShadeLayout!, this.worldGiCacheLayout!] }),
+        compute: { module, entryPoint: "dryWorldGiCacheMain" },
+      }),
       ]);
-      const bundle = { visibility, rasterRigidVisibility, lighting, prepassReset, prepassCoherent, prepassBoundary };
+      const bundle = { visibility, rasterRigidVisibility, lighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache };
       this.splitPipelineBundles.set(scale, bundle);
       return bundle;
     })();
@@ -3151,9 +3336,9 @@ export class SparseVoxelDrySceneRenderer {
       this.conePrepassShadeLayout ??= this.device.createBindGroupLayout({
         label: "Sparse voxel cone-prepass shading inputs",
         entries: [
-          { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint" } },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
-          { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint" } },
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, texture: { sampleType: "uint" } },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" } },
+          { binding: 2, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, texture: { sampleType: "uint" } },
         ],
       });
       const [prepassGeometryPipeline, prepassVisibilityPipeline, prepassShadePipeline, reducedPipeline] = await Promise.all([
@@ -3253,6 +3438,7 @@ export class SparseVoxelDrySceneRenderer {
     if (this.conePrepassVisibility && this.conePrepassGeometry && this.conePrepassIdentity && this.conePrepassRadiance
       && this.conePrepassWidth === width && this.conePrepassHeight === height
       && (!this.conePrepassComputeLayout || (this.conePrepassBoundaryQueue && this.conePrepassComputeBindGroup))
+      && (!this.worldGiCacheLayout || this.worldGiCacheBindGroup)
       && (!this.coneFanout || (this.coneFanoutReceiver && this.coneFanoutTemporary
         && this.coneFanoutWorkerBindGroup && this.coneFanoutReducerBindGroup))) return;
     this.releaseConePrepassTargets();
@@ -3356,6 +3542,17 @@ export class SparseVoxelDrySceneRenderer {
         { binding: 2, resource: this.conePrepassIdentityView },
       ],
     });
+    if (this.worldGiCacheLayout && this.worldGiCacheBuffer && this.worldGiFrameBuffer) {
+      this.worldGiCacheBindGroup = this.device.createBindGroup({
+        label: "Sparse voxel persistent world GI cache resources",
+        layout: this.worldGiCacheLayout,
+        entries: [
+          { binding: 7, resource: { buffer: this.worldGiCacheBuffer } },
+          { binding: 8, resource: this.conePrepassRadianceView },
+          { binding: 9, resource: { buffer: this.worldGiFrameBuffer } },
+        ],
+      });
+    }
     if (this.conePrepassComputeLayout) {
       this.conePrepassBoundaryQueue = this.device.createBuffer({
         label: "Sparse voxel compact cone-boundary queue",
@@ -3408,6 +3605,7 @@ export class SparseVoxelDrySceneRenderer {
     this.conePrepassComputeBindGroup = undefined;
     this.conePrepassVisibilityBindGroup = undefined;
     this.conePrepassShadeBindGroup = undefined;
+    this.worldGiCacheBindGroup = undefined;
     this.conePrepassWidth = 0;
     this.conePrepassHeight = 0;
   }
@@ -3418,6 +3616,7 @@ export class SparseVoxelDrySceneRenderer {
     this.clearReusableFrame();
     this.clearPrimaryVisibilityCache();
     this.temporalAccumulator.invalidate();
+    this.worldGiCacheDirty = true;
     this.source = source;
     this.scene = scene;
     this.updateTetrahedralRadianceBlackPages(source?.tetrahedralRadiance);
@@ -3525,6 +3724,7 @@ export class SparseVoxelDrySceneRenderer {
     this.device.queue.writeBuffer(this.primitiveBuffer, offset, records);
     this.clearReusableFrame();
     this.clearPrimaryVisibilityCache();
+    this.worldGiCacheDirty = true;
     return true;
   }
 
@@ -3554,8 +3754,10 @@ export class SparseVoxelDrySceneRenderer {
     if (options.shadowsEnabled === this.lightingOptions.shadowsEnabled
       && options.ambientOcclusionEnabled === this.lightingOptions.ambientOcclusionEnabled
       && coneLightingScale === this.coneScale) return;
+    const invalidateWorldGi = options.ambientOcclusionEnabled !== this.lightingOptions.ambientOcclusionEnabled;
     this.lightingOptions = { shadowsEnabled: options.shadowsEnabled, ambientOcclusionEnabled: options.ambientOcclusionEnabled };
     this.coneScale = coneLightingScale;
+    if (invalidateWorldGi) this.worldGiCacheDirty = true;
     if (coneLightingScale !== 1) {
       const coneBundle = this.conePipelineBundles.get(coneLightingScale);
       if (coneBundle) this.activateConePipelineBundle(coneLightingScale, coneBundle);
@@ -3579,6 +3781,7 @@ export class SparseVoxelDrySceneRenderer {
     this.renderTuning = normalized;
     this.clearReusableFrame();
     this.temporalAccumulator.invalidate();
+    this.worldGiCacheDirty = true;
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) this.writeParams(this.source, this.scene);
     const relight = normalized.coneRadianceReconstruction === "wide-relight"
       || normalized.coneRadianceReconstruction === "full-res-relight";
@@ -4001,6 +4204,8 @@ export class SparseVoxelDrySceneRenderer {
       && Boolean(activeSplitVisibilityPipeline && this.splitLightingPipeline
         && (!usePrepass || (this.conePrepassResetPipeline && this.conePrepassCoherentPipeline && this.conePrepassBoundaryPipeline
           && this.conePrepassComputeBindGroup && this.conePrepassBoundaryQueue
+          && this.worldGiFramePipeline && this.worldGiCachePipeline && this.worldGiCacheBindGroup
+          && this.worldGiCacheBuffer && this.worldGiFrameBuffer
           && (!this.coneFanout || (this.coneFanoutWorkerPipeline && this.coneFanoutReducerPipeline
             && this.coneFanoutSceneBindGroup && this.coneFanoutWorkerBindGroup && this.coneFanoutReducerBindGroup))))
         && (!this.rasterGlassDiscovery || (this.rasterGlassPipeline && this.rasterGlassBindGroup && this.splitGlassKeyView && this.splitGlassDepthView))
@@ -4189,23 +4394,27 @@ export class SparseVoxelDrySceneRenderer {
         }
         tracePhase?.({ id: "svo-cone-lighting", label: "SVO compacted cone lighting" });
 
-        // GLOBAL's dominant environmental cones are evaluated at the same
-        // current-frame surface samples as visibility. Deferred lighting then
-        // performs deterministic, geometry-guided reconstruction and traces
-        // full-rate cones only at discontinuities.
         if (this.lightingMode === "gi") {
-          const gi = encoder.beginRenderPass({
-            label: "Sparse voxel reduced-rate environmental GI",
-            colorAttachments: [
-              { view: this.conePrepassRadianceView!, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" },
-            ],
-          });
-          gi.setPipeline(this.conePrepassShadePipeline!);
-          gi.setBindGroup(0, this.bindGroup);
-          gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
-          gi.draw(3);
-          gi.end();
-          tracePhase?.({ id: "svo-environment-gi", label: "SVO reduced-rate environmental GI" });
+        // The cache is world-space and source-owned: camera motion changes
+        // which keys are queried but never invalidates entries. Only source,
+        // authored-scene, or lighting-contract changes clear it.
+        if (this.worldGiCacheDirty) {
+          encoder.clearBuffer(this.worldGiCacheBuffer!);
+          this.worldGiCacheDirty = false;
+        }
+        const gi = encoder.beginComputePass({ label: "Sparse voxel persistent world GI cache" });
+        gi.setPipeline(this.worldGiFramePipeline!);
+        gi.setBindGroup(0, this.bindGroup);
+        gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
+        gi.setBindGroup(2, this.worldGiCacheBindGroup!);
+        gi.dispatchWorkgroups(1);
+        gi.setPipeline(this.worldGiCachePipeline!);
+        gi.setBindGroup(0, this.bindGroup);
+        gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
+        gi.setBindGroup(2, this.worldGiCacheBindGroup!);
+        gi.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
+        gi.end();
+        tracePhase?.({ id: "svo-environment-gi", label: "SVO persistent world-space environmental GI" });
         }
       }
 
@@ -4294,11 +4503,19 @@ export class SparseVoxelDrySceneRenderer {
     this.conePrepassResetPipeline = undefined;
     this.conePrepassCoherentPipeline = undefined;
     this.conePrepassBoundaryPipeline = undefined;
+    this.worldGiFramePipeline = undefined;
+    this.worldGiCachePipeline = undefined;
     this.coneFanoutWorkerPipeline = undefined;
     this.coneFanoutReducerPipeline = undefined;
     this.coneFanoutSceneBindGroup = undefined;
     this.splitPipelineScale = undefined;
     this.releaseConePrepassTargets();
+    this.worldGiCacheBuffer?.destroy();
+    this.worldGiFrameBuffer?.destroy();
+    this.worldGiCacheBuffer = undefined;
+    this.worldGiFrameBuffer = undefined;
+    this.worldGiCacheLayout = undefined;
+    this.worldGiCacheDirty = true;
     this.conePrepassGeometryPipeline = undefined;
     this.conePrepassVisibilityPipeline = undefined;
     this.conePrepassShadePipeline = undefined;
