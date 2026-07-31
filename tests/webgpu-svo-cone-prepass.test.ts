@@ -124,6 +124,52 @@ test("automatic relight composition contains the isolated primary and lighting e
     "the relight path must run full-resolution primary visibility before the two compact cone kernels");
 });
 
+test("occupancy experiments alter only their intended reduced-shader mechanisms", () => {
+  const stripped = createSvoDrySceneFragmentWGSL(
+    0.25, "canonical-parametric", "off", "split", 0, false, false, false, false,
+    { stripDiagnostics: true },
+  );
+  assert.match(stripped, /fn dryCostOverlay\(radianceDepth:vec4f\)->vec4f\{return radianceDepth;\}/);
+  assert.doesNotMatch(stripped,
+    /dryPrimaryNodeVisits|dryPrimaryLeafVisits|dryPrimaryVoxelWorkItems|dryShadowNodeVisits|dryMipSteps|dryTraversalFailure/);
+
+  const inlineBoundaries = createSvoDrySceneFragmentWGSL(
+    0.25, "canonical-parametric", "off", "split", 0, false, false, false, false,
+    { inlineConeBoundaries: true },
+  );
+  assert.match(inlineBoundaries, /if\(!homogeneous\)\{let opaque=traceOpaqueScene/);
+  assert.doesNotMatch(inlineBoundaries, /if\(!homogeneous\)\{let queueIndex=atomicAdd/);
+
+  const uncachedGi = createSvoDrySceneFragmentWGSL(
+    0.25, "canonical-parametric", "off", "split", 0, false, false, false, false,
+    { dropGiPageCache: true },
+  );
+  assert.doesNotMatch(uncachedGi, /var<private> dryGiPageCache/);
+  assert.match(uncachedGi, /fn svoTetraRadianceConeLoad[^]*var pageCache=DryNodeMipPageCache/);
+
+  const half = createSvoDrySceneFragmentWGSL(
+    0.25, "canonical-parametric", "off", "split", 0, false, false, false, false,
+    { halfPrecisionLighting: true },
+  );
+  assert.match(half, /^enable f16;/);
+  assert.match(half, /var<private> dryPrepassData0:vec4h/);
+  assert.doesNotMatch(half, /var<private> dryPrepassData0:vec4f/);
+
+  const shortStack = createSvoDrySceneFragmentWGSL(
+    0.25, "canonical-parametric", "off", "split", 0, false, false, false, false,
+    { shortTraversalStack: true },
+  );
+  assert.match(shortStack, /const SVO_STACK_CAPACITY: u32 = 16u/);
+  assert.match(shortStack, /stack: array<SvoStackEntry, 16>/);
+  assert.doesNotMatch(shortStack, /array<SvoStackEntry, 32>/);
+  assert.equal(createSvoDrySceneFragmentWGSL(1), svoDrySceneShader,
+    "all occupancy experiments remain opt-in and preserve scale-1 production bytes");
+  assert.equal(createSvoDrySceneFragmentWGSL(
+    1, "hybrid", "off", "inline", 0, false, false, false, false,
+    { stripDiagnostics: true },
+  ), svoDrySceneShader, "diagnostic stripping must never alter the full-rate overlay shader");
+});
+
 test("prepass target contract and sizing", () => {
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityFormat, "rg32uint");
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.visibilityTargetCount, 1);

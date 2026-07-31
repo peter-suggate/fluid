@@ -175,16 +175,22 @@ export class WebGPUOctreeTopologyEpoch {
     this.validateExpectedGeneration(expectedGeneration);
     const pass = broker.compute({ label: "Open coupled topology ready-commit gate" });
     pass.setPipeline(this.commitGatePipeline); pass.setBindGroup(0, this.commitGateGroup); pass.dispatchWorkgroups(1);
-    broker.fence("coupled topology ready-commit gate resolved");
+    // The gate and exact-dispatch preparation communicate only through
+    // ordinary storage. WebGPU orders storage accesses between dispatches in
+    // one compute pass, so a pass boundary here was stronger than required.
     const prepareRows = broker.compute({ label: "Prepare exact accepted topology row commit" });
     prepareRows.setPipeline(this.prepareCommitRowsPipeline);
     prepareRows.setBindGroup(0, this.prepareCommitRowsGroup);
     prepareRows.dispatchWorkgroups(1);
+    // Keep the sole true boundary in this chain: the next dispatch consumes
+    // the GPU-authored INDIRECT record.
     broker.fence("accepted topology row commit dispatch prepared");
     const rows = broker.compute({ label: "Commit accepted topology row identities and pressure seed" });
     rows.setPipeline(this.commitRowsPipeline); rows.setBindGroup(0, this.commitRowsGroup);
     rows.dispatchWorkgroupsIndirect(this.commitRowsDispatch, 0);
-    broker.fence("accepted topology rows published");
+    // Leave this pass open for the owner-page and coupled-authority commit
+    // singletons. Their storage handoffs are ordered in-pass, and the caller
+    // owns the eventual publication boundary.
   }
 
   destroy(): void {

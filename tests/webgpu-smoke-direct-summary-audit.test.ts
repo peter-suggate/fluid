@@ -55,4 +55,10 @@ test("fine-generation probes read the direct page directory after the current he
     "fine-generation probes must not truncate the current seven-word worklist ABI");
   assert.match(diagnostics, /const directoryBase = 7 \+ pageCapacity/,
     "probe lookup must use the current direct-directory offset");
+  assert.match(diagnostics,
+    /readBufferBinding\(device, \{ buffer: source\.topologyControl \}, 48\)/,
+    "fine-generation probes must retain sticky rejection words 10 and 11");
+  assert.match(diagnostics,
+    /topologyLatchedFinalizeReason: topology\[10\][\s\S]*topologyFirstRejectedGeneration: topology\[11\] >>> 16[\s\S]*topologyRejectionCount: topology\[11\] & 0xffff/,
+    "fine-generation diagnostics must expose rejected-but-recovered publications");
 });

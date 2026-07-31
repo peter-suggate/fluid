@@ -86,6 +86,23 @@ export interface OctreeFirstOrderSPDVCycle {
     readonly solverControl: GPUBuffer;
     readonly rowCount: GPUBuffer;
   }): void;
+  /**
+   * Optional split encoding for callers that already own a convergence-gate
+   * publication pass. Both methods must be supplied together. The gate writes
+   * only indirect records; the body consumes them after the caller's fence.
+   */
+  encodeCorrectionGate?(pass: GPUComputePassEncoder, input: {
+    readonly rhs: GPUBuffer;
+    readonly correction: GPUBuffer;
+    readonly solverControl: GPUBuffer;
+    readonly rowCount: GPUBuffer;
+  }): void;
+  encodeCorrectionBody?(broker: PassBroker, input: {
+    readonly rhs: GPUBuffer;
+    readonly correction: GPUBuffer;
+    readonly solverControl: GPUBuffer;
+    readonly rowCount: GPUBuffer;
+  }): void;
 }
 
 export function normalizeOctreeSection43BoundarySmoothing(

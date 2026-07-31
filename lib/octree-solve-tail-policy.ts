@@ -10,20 +10,32 @@ export const OCTREE_SOLVE_TAIL_MINIMUM_OUTER_ITERATIONS = 4;
 export const OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS = 10;
 /** Validation/diagnostic ceiling. It is deliberately not host-encoded. */
 export const OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING = 16;
+export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT =
+  "FLUID_OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL";
+/**
+ * Two iterations of headroom covered every adjacent-step change in the
+ * measured factor-one mini-dam trace (the steady solve uses four, while the
+ * impact transient reaches six). The selector below still refuses stale,
+ * topology-changing, failed, or non-adjacent evidence.
+ */
+export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_SAFETY_MARGIN = 2;
 export const OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE = 1e-4;
 /** Section 4.3 reports k≈8 as a general choice. */
 export const OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH = 8;
-/** The live 16-cubed, two-level dam sweep found k=4 to be the best symmetric
- * shell: it retained 3--8 iteration convergence over 500 steps while removing
- * nearly half the repeated band applies. */
-export const OCTREE_SECTION43_MINI_SHELL_DEPTH = 4;
 /**
- * Validated finest-cell envelope for the small two-level k=4 formulation.
+ * The fluid-gated 16-cubed dam needs k=6 when size-two cells remain adaptive
+ * outside actual interface crossings. k=4 was sufficient only while the
+ * first recurring topology publication flooded the domain with unit cells;
+ * k=6 preserves the ten-iteration convergence envelope on the compact system.
+ */
+export const OCTREE_SECTION43_MINI_SHELL_DEPTH = 6;
+/**
+ * Validated finest-cell envelope for the small two-level k=6 formulation.
  *
  * This is deliberately capacity-shaped rather than an axis-length test: the
  * 24x16x24 ceiling drop is still a small 9,216-cell system. The envelope is
  * independent of which MGPCG executor is selected: ceiling-drop now uses the
- * row-parallel solver while retaining the separately validated k=4 shell. The
+ * row-parallel solver while retaining the separately validated k=6 shell. The
  * next larger authored two-level validation profile (32x24x16) remains on k=8.
  * Finest-cell count is an immutable conservative bound, so this selection
  * never depends on a readback or a previous advance.
@@ -52,6 +64,124 @@ export interface OctreeSolveTailPolicy {
   readonly boundarySmoothingIterations: number;
   readonly sceneComplexityScore: number;
   readonly reasons: readonly string[];
+}
+
+export interface OctreeFactorOneSolveTailObservation {
+  /** Step whose end-of-step snapshot published this evidence. */
+  readonly step: number;
+  /** MGPCG control word 2 from that same step. */
+  readonly publishedIterationCount: number;
+  /** MGPCG control words 0/1 proved a successful converged solve. */
+  readonly converged: boolean;
+  /** Accepted structured-authority epoch in the same snapshot. */
+  readonly acceptedTopologyEpoch: number;
+  /** Hash of the candidate that the next step may commit. */
+  readonly topologyHash: number;
+  /**
+   * End-of-step candidate verdict. Combined with `topologyHash`, this
+   * distinguishes an identity publication from a real topology change.
+   */
+  readonly topologyFlipReady: boolean;
+  readonly topologyEpochError: number;
+}
+
+export interface OctreeFactorOneSolveTailSelection {
+  readonly encodedOuterIterations: number;
+  readonly usedHistory: boolean;
+  readonly reason:
+    | "disabled"
+    | "not-factor-one"
+    | "missing-history"
+    | "non-adjacent-history"
+    | "invalid-history"
+    | "topology-change"
+    | "predicted";
+}
+
+export function octreeFactorOnePredictedSolveTailEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  // Explicit-on until the required impact-transient A/B has proved
+  // `executedIterations < encodedIterations` on every shortened advance.
+  return resolved?.[OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT] === "1";
+}
+
+/**
+ * Select an encode-only outer schedule from a step-coherent previous result.
+ *
+ * This never changes either numerical ceiling: `fullEncodedOuterIterations`
+ * remains the production envelope and the separate hard ceiling stays 16.
+ * The same-step GPU residual remains convergence authority. If prediction
+ * headroom were ever exhausted, MGPCG sees this selected encoded envelope,
+ * marks the solve fatal, and publishes only the prior seed (fail closed).
+ */
+export function selectOctreeFactorOneEncodedSolveTail(
+  options: {
+    readonly enabled: boolean;
+    readonly factorOne: boolean;
+    readonly nextStep: number;
+    readonly fullEncodedOuterIterations: number;
+    readonly observation?: OctreeFactorOneSolveTailObservation;
+    /** Prior snapshot's candidate hash; that candidate is active this step. */
+    readonly precedingTopologyHash?: number;
+    readonly safetyMargin?: number;
+  },
+): OctreeFactorOneSolveTailSelection {
+  const full = options.fullEncodedOuterIterations;
+  if (!Number.isSafeInteger(full)
+    || full < OCTREE_SOLVE_TAIL_MINIMUM_OUTER_ITERATIONS
+    || full > OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS) {
+    throw new RangeError("Factor-one solve-tail full envelope is outside the paper bounds");
+  }
+  if (!Number.isSafeInteger(options.nextStep) || options.nextStep < 0) {
+    throw new RangeError("Factor-one solve-tail next step must be a non-negative integer");
+  }
+  const fallback = (
+    reason: Exclude<OctreeFactorOneSolveTailSelection["reason"], "predicted">,
+  ): OctreeFactorOneSolveTailSelection => Object.freeze({
+    encodedOuterIterations: full, usedHistory: false, reason,
+  });
+  if (!options.enabled) return fallback("disabled");
+  if (!options.factorOne) return fallback("not-factor-one");
+  const observation = options.observation;
+  if (!observation) return fallback("missing-history");
+  if (observation.step + 1 !== options.nextStep) {
+    return fallback("non-adjacent-history");
+  }
+  if (options.precedingTopologyHash === undefined) {
+    return fallback("missing-history");
+  }
+  const validInteger = (value: number) => Number.isSafeInteger(value) && value >= 0;
+  if (!observation.converged || !validInteger(observation.publishedIterationCount)
+    || observation.publishedIterationCount > full
+    || !validInteger(observation.acceptedTopologyEpoch)
+    || !validInteger(observation.topologyHash)
+    || !validInteger(observation.topologyEpochError)
+    || observation.topologyEpochError !== 0) {
+    return fallback("invalid-history");
+  }
+  // At snapshot N-1, its candidate hash is the topology that step N commits.
+  // Snapshot N's candidate is the topology step N+1 may commit. Equal hashes
+  // prove the selected schedule does not cross a topology change even though
+  // the monotonically stamped epoch itself ordinarily advances.
+  if (options.precedingTopologyHash !== observation.topologyHash) {
+    return fallback("topology-change");
+  }
+  const margin = options.safetyMargin
+    ?? OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_SAFETY_MARGIN;
+  if (!Number.isSafeInteger(margin) || margin < 1) {
+    throw new RangeError("Factor-one solve-tail safety margin must be a positive integer");
+  }
+  return Object.freeze({
+    encodedOuterIterations: Math.min(full, Math.max(
+      OCTREE_SOLVE_TAIL_MINIMUM_OUTER_ITERATIONS,
+      observation.publishedIterationCount + margin,
+    )),
+    usedHistory: true,
+    reason: "predicted" as const,
+  });
 }
 
 function validateProfile(profile: OctreeSolveTailSceneProfile): void {

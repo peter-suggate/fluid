@@ -271,6 +271,7 @@ export interface StructuredStepWorkObservation {
   /** MGPCG control word 1. */
   readonly solveConverged?: boolean;
   readonly acceptedEpoch: number;
+  readonly topologyHash?: number;
   /** Topology-epoch verdict: the flip token and its poison word. */
   readonly topologyFlipReady?: boolean;
   readonly topologyEpochError?: number;
@@ -303,6 +304,7 @@ export function structuredStepWorkObservation(
     solveConverged: has("mgpcg")
       ? Number(mgpcg[MGPCG_CONTROL.converged] ?? 0) !== 0 : undefined,
     acceptedEpoch: record.snapshot.structured.epoch,
+    topologyHash: has("topologyEpoch") ? epochState.topologyHash : undefined,
     topologyFlipReady: has("topologyEpoch") ? epochState.flipReady : undefined,
     topologyEpochError: has("topologyEpoch") ? epochState.error : undefined,
     spgridLevelDirty: has("spgridLevelDelta")

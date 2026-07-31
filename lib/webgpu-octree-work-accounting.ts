@@ -354,6 +354,8 @@ export interface OctreePressureSolveGPUControls {
 export interface OctreePressureSolveAccountingPlan {
   readonly rowCapacity: number;
   readonly maximumOuterIterations: number;
+  /** Outer scalar reductions fold their 128-row blocks inside one workgroup. */
+  readonly combinedReductionDrains?: boolean;
   readonly classWorkgroupSize?: 64;
   readonly maximumNeighborSlots: number;
   readonly classApplyEncodedDispatches: number;
@@ -755,23 +757,28 @@ function decodeOctreePressureSolveWorkUnchecked(
     });
   }
   const partialLanes = liveReductionPartials * (plan.reductionLanes ?? 128);
+  const combinedReductionDrains = plan.combinedReductionDrains === true;
+  const outerPartialReductions = combinedReductionDrains
+    ? 1
+    : iterations + 1 + priorUpdates;
   const outerLayer = layer({
     scheduledLanes: 2 + liveRowLanes * (4 + iterations + priorUpdates)
-      + partialLanes * (iterations + 1 + priorUpdates)
+      + partialLanes * outerPartialReductions
       + (plan.reductionLanes ?? 128) * (2 * plan.maximumOuterIterations + 1),
     activeLanes: 2 + liveRows * (4 + iterations + priorUpdates)
-      + partialLanes * (iterations + 1 + priorUpdates)
+      + partialLanes * outerPartialReductions
       + (plan.reductionLanes ?? 128) * reductions,
     activePages: 0,
     worksets: 1,
     encodedIterations: plan.maximumOuterIterations,
     executedIterations: iterations,
-    encodedDispatches: 8 + 6 * plan.maximumOuterIterations,
+    encodedDispatches: 8 + (combinedReductionDrains ? 4 : 6)
+      * plan.maximumOuterIterations,
     executedDispatches: 8 + 2 * plan.maximumOuterIterations
-      + 2 * iterations + 2 * priorUpdates,
+      + (combinedReductionDrains ? 1 : 2) * (iterations + priorUpdates),
     reductionPasses: reductions,
     estimatedBytesMoved: liveRows * (56 + iterations * 72)
-      + liveReductionPartials * 32 * reductions,
+      + liveReductionPartials * 32 * (combinedReductionDrains ? 1 : reductions),
   });
   const layers = Object.freeze({
     "class-applies": classApplies,

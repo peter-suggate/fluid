@@ -15,6 +15,7 @@ test("render xctrace profiler captures external Metal counters and anchors real 
   assert.match(profiler, /--reuse-trace/);
   assert.match(profiler, /--reuse-tables/);
   assert.match(profiler, /CounterRowSelector/);
+  assert.match(profiler, /FLUID_SVO_DRY_FRAME_ISOLATE_PASS_ENCODERS: timingOnly \? "0" : "1"/);
 });
 
 test("render profiles preserve enough variant and source identity for controlled A/Bs", () => {
@@ -37,6 +38,23 @@ test("frame detection prefers the render prepass over an equally periodic interi
     ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"]);
   assert.equal(detected.anchor, "Sparse voxel cone-lighting prepass");
   assert.equal(detected.boundaries.length, 8);
+});
+
+test("frame detection tolerates one externally delayed render frame", () => {
+  const intervals = Array.from({ length: 80 }, (_, frame) => {
+    const delayedStart = frame >= 40 ? 75_000 : 0;
+    return {
+      start: frame * 20_000 + delayedStart,
+      duration: 8_000,
+      label: "Sparse voxel primary visibility",
+      encoders: ["Sparse voxel primary visibility"],
+      channel: "Fragment",
+      merged: false,
+    };
+  });
+  const detected = detectFrames(intervals, ["Sparse voxel primary visibility"]);
+  assert.equal(detected.anchor, "Sparse voxel primary visibility");
+  assert.equal(detected.boundaries.length, 80);
 });
 
 test("frame reports render with rendering vocabulary", () => {

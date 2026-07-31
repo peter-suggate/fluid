@@ -367,9 +367,19 @@ export const detectFrames = (
     for (let index = 1; index < starts.length; index += 1) {
       deltas.push(starts[index] - starts[index - 1]);
     }
-    const mean = deltas.reduce((sum, value) => sum + value, 0) / deltas.length;
+    // One WindowServer preemption or shader-service hiccup must not make an
+    // otherwise periodic frame anchor disappear. Estimate cadence from the
+    // central 90% once the window is long enough, while retaining the full
+    // occurrence list as the actual frame boundaries.
+    const orderedDeltas = [...deltas].sort((left, right) => left - right);
+    const trim = orderedDeltas.length >= 20 ? Math.floor(orderedDeltas.length * 0.05) : 0;
+    const cadenceDeltas = trim > 0
+      ? orderedDeltas.slice(trim, orderedDeltas.length - trim) : orderedDeltas;
+    const mean = cadenceDeltas.reduce((sum, value) => sum + value, 0) / cadenceDeltas.length;
     if (!(mean > 0)) continue;
-    const variance = deltas.reduce((sum, value) => sum + (value - mean) ** 2, 0) / deltas.length;
+    const variance = cadenceDeltas.reduce(
+      (sum, value) => sum + (value - mean) ** 2, 0,
+    ) / cadenceDeltas.length;
     const cv = Math.sqrt(variance) / mean;
     if (cv > 0.35) continue;
     candidates.push({ label, count: starts.length, cv, starts });

@@ -37,8 +37,8 @@ test("octree projection constructs exactly one MGPCG implementation", () => {
   assert.doesNotMatch(octreeSource, /pressureSolverMode|WebGPUOctreePowerGalerkin|this\.galerkin/);
   assert.match(octreeSource, /new WebGPUOctreeSPGridVCycle/);
   assert.match(octreeSource,
-    /new WebGPUOctreeSPGridVCycle[\s\S]*preSmoothingIterations: 4, postSmoothingIterations: 4/,
-    "production M1 uses the strongest page-resident polynomial without another dispatch");
+    /FLUID_OCTREE_FACTOR1_M1_DEGREE === "2" \? 2 : 4[\s\S]*new WebGPUOctreeSPGridVCycle[\s\S]*preSmoothingIterations: factorOneM1Degree,[\s\S]*postSmoothingIterations: factorOneM1Degree/,
+    "production M1 defaults to degree four and retains an exact factor-1 degree-two A/B");
   assert.match(octreeSource, /new WebGPUOctreeSection43HybridPreconditioner/);
   assert.match(octreeSource,
     /relativeTolerance:\s*this\.solveTailPolicy\.relativeTolerance/,
@@ -79,7 +79,10 @@ test("SPGrid publishes live indirect work before the dependency-ordered MGPCG so
   assert.match(pipelinedSource, /get encodedDispatchCount\(\): number/);
   assert.doesNotMatch(pipelinedSource, /get encodedPassCount\(\): number/,
     "dispatch telemetry must not preserve the retired one-pass-per-dispatch model");
-  assert.match(pipelinedSource, /readonly encodedPassTransitionCountPerIteration = 4/);
+  assert.match(pipelinedSource,
+    /readonly encodedPassTransitionCountPerIteration: 2 \| 4/);
+  assert.match(pipelinedSource,
+    /this\.encodedPassTransitionCountPerIteration =\s*this\.usesCombinedReductionDrains \? 2 : 4/);
   assert.doesNotMatch(spgridCycleSource, /sharedPass|GPUCommandEncoder|beginComputePass|pass\.end\(\)/,
     "SPGrid must consume one broker authority without retaining raw-pass compatibility");
   assert.match(spgridCycleSource, /encodeCorrection\(broker: PassBroker/);
@@ -129,7 +132,7 @@ test("the pipelined preconditioner remains one fixed proof-carrying V-cycle", ()
     /export type OctreePipelinedFixedPreconditioner = OctreeFirstOrderSPDVCycle/);
   assert.equal(pipelinedSource.match(/preconditioner\.encodeCorrection\(broker/g)?.length, 2);
   assert.match(hybridSource,
-    /this\.runRows\(pass, "formInnerResidual", resources\);[\s\S]*firstOrderVCycle\.encodeCorrection[\s\S]*this\.runRows\(pass, "addInnerCorrection", resources\)/,
+    /operator\.encodeResidualBody![\s\S]*this\.runRows\(pass, "formInnerResidual", resources\);[\s\S]*inner\.encodeCorrectionBody![\s\S]*this\.runRows\(pass, "addInnerCorrection", resources\)/,
     "the L1 correction must remain between the matching L2 halves");
   assert.match(hybridSource,
     /iteration < this\.boundarySmoothingIterations[\s\S]*formInnerResidual[\s\S]*iteration < this\.boundarySmoothingIterations/,

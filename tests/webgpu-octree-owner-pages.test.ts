@@ -38,7 +38,8 @@ test("recurring owner lifecycle separates inactive preparation from next-boundar
   assert.equal((prepare.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 2);
   assert.equal((commit.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 1);
   assert.match(prepare, /broker\.fence\("inactive owner-page generation prepared"\)/);
-  assert.match(commit, /broker\.fence\("ready owner-page generation published"\)/);
+  assert.doesNotMatch(commit, /broker\.fence/,
+    "the ready singleton must stay in the caller's coupled storage pass");
   assert.doesNotMatch(`${prepare}\n${commit}`,
     /dispatchWorkgroupsIndirect|this\.indirect|sortCandidates|FLUID_BRICK_|hash|compatibility/);
 });

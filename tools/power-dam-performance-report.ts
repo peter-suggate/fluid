@@ -6,6 +6,10 @@ import {
 } from "../lib/performance-trace";
 import type { GPUDataFlowManifest } from "./webgpu-data-flow-manifest";
 import type { OctreeWorkSnapshot } from "../lib/webgpu-octree-work-accounting";
+import {
+  buildPowerDamPressureKernelProfile,
+  type PowerDamPressureKernelProfile,
+} from "./power-dam-pressure-kernel-profile";
 
 export interface PowerDamCommandBucket {
   readonly calls: number;
@@ -174,6 +178,9 @@ export interface PowerDamPerformanceSummary {
   /** Non-invasive beginning/end timestamps attached to the existing compute
    * passes of a bounded number of recurring command buffers. */
   readonly passTimestamps?: PowerDamPassTimestampReport;
+  /** Targeted, label-isolated pressure solve attribution derived from the raw
+   * pass timestamps. Present only when pressure labels were captured. */
+  readonly pressureKernelProfile?: PowerDamPressureKernelProfile;
   readonly algorithmDiagnostics?: Readonly<Record<string, unknown>>;
   /** Machine-readable lineage captured from actual pipeline/bind-group/dispatch
    * state during the same advances as fine GPU timestamps. */
@@ -517,6 +524,9 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
     && passCounts.unownedCalls === 0;
   const unattributedComputePasses = passCounts.unownedCalls
     + Math.abs((audit?.computePasses ?? 0) - passCounts.totalCalls);
+  const pressureKernelProfile = result.gpuPassTimestamps
+    ? buildPowerDamPressureKernelProfile(result.gpuPassTimestamps)
+    : undefined;
   return {
     scenario: result.scenario,
     method: result.method,
@@ -581,7 +591,10 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
         }],
       )),
     } } : {}),
-    ...(result.gpuPassTimestamps ? { passTimestamps: result.gpuPassTimestamps } : {}),
+    ...(result.gpuPassTimestamps ? {
+      passTimestamps: result.gpuPassTimestamps,
+      ...(pressureKernelProfile ? { pressureKernelProfile } : {}),
+    } : {}),
     ...(result.algorithmDiagnostics ? { algorithmDiagnostics: result.algorithmDiagnostics } : {}),
     ...(result.gpuDataFlowManifest ? { dataFlow: result.gpuDataFlowManifest } : {}),
     ...(trace ? { physicsTrace: {

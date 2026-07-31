@@ -4,12 +4,18 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { auditWGSLComputeBindingReachability } from "../lib/wgsl-binding-reachability";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 
 import {
+  dilateFactorOneAirSupportDemand,
   decodeOctreeAirSupportGPUFirstError,
+  factorOneAirSupportFrontierIndirectRecords,
+  encodeOctreeAirSupportReconstructionHandoff,
   octreeAirSupportChangedFrontierEnabled,
   octreeAirSupportCompactFineCellsEnabled,
   octreeAirSupportCompactFineDemandEnabled,
+  octreeAirSupportIndirectFrontierGateEnabled,
+  octreeAirSupportReconstructionCompactPassEnabled,
   octreeAirSupportTopologyReuseEnabled,
   OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE,
   OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS,
@@ -53,6 +59,77 @@ test("Section 5 changed-frontier defaults on and retains a construction-stable d
   assert.equal(octreeAirSupportChangedFrontierEnabled({}), true);
   assert.equal(octreeAirSupportChangedFrontierEnabled({ FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER: "1" }), true);
   assert.equal(octreeAirSupportChangedFrontierEnabled({ FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER: "0" }), false);
+});
+
+test("factor-1 frontier indirect convergence gate stays opt-in after a losing wall-clock A/B", () => {
+  assert.equal(octreeAirSupportIndirectFrontierGateEnabled({}), false);
+  assert.equal(octreeAirSupportIndirectFrontierGateEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE: "1",
+  }), true);
+  assert.equal(octreeAirSupportIndirectFrontierGateEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE: "0",
+  }), false);
+});
+
+test("Section 5 fixed-point reconstruction shares one pass by default", () => {
+  assert.equal(octreeAirSupportReconstructionCompactPassEnabled({}), true);
+  assert.equal(octreeAirSupportReconstructionCompactPassEnabled({
+    FLUID_AIR_SUPPORT_RECONSTRUCT_COMPACT_PASS: "0",
+  }), false);
+  const encode = (environment: Readonly<Record<string, string | undefined>>) => {
+    const events: string[] = [];
+    let index = 0;
+    const encoder = {
+      beginComputePass(descriptor?: GPUComputePassDescriptor) {
+        const pass = ++index;
+        events.push(`begin:${descriptor?.label}`);
+        return { end() { events.push(`end:${pass}`); } };
+      },
+      finish() { events.push("finish"); return {}; },
+    } as unknown as GPUCommandEncoder;
+    const broker = new PassBroker(encoder, { isolateLabels: false });
+    broker.compute({ label: "March Section 5 fixed point" });
+    encodeOctreeAirSupportReconstructionHandoff(broker, environment);
+    broker.compute({ label: "Reconstruct Section 5 vectors" });
+    broker.finish();
+    return { passes: broker.computePassCount, events };
+  };
+  assert.deepEqual(encode({}), {
+    passes: 1,
+    events: ["begin:March Section 5 fixed point", "end:1", "finish"],
+  });
+  assert.deepEqual(encode({ FLUID_AIR_SUPPORT_RECONSTRUCT_COMPACT_PASS: "0" }), {
+    passes: 2,
+    events: [
+      "begin:March Section 5 fixed point", "end:1",
+      "begin:Reconstruct Section 5 vectors", "end:2", "finish",
+    ],
+  });
+});
+
+test("factor-1 frontier schedules zero every post-convergence dispatch", () => {
+  assert.deepEqual(factorOneAirSupportFrontierIndirectRecords(35, 7), [
+    2, 1, 1,
+    1, 1, 1,
+    3, 1, 1,
+  ]);
+  assert.deepEqual(factorOneAirSupportFrontierIndirectRecords(35, 0), [
+    0, 1, 1,
+    0, 1, 1,
+    0, 1, 1,
+  ]);
+  assert.deepEqual(factorOneAirSupportFrontierIndirectRecords(35, 7, false), [
+    0, 1, 1,
+    0, 1, 1,
+    0, 1, 1,
+  ]);
+  assert.throws(() => factorOneAirSupportFrontierIndirectRecords(-1, 0), /non-negative/);
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  assert.match(shader,
+    /fnfinalizeRetainedAirSupportMarchSchedule.*p\.fineFactor==1u&&\(p\.capturePreceding&8u\)!=0u.*writeDispatch\(10u.*writeDispatch\(13u.*writeDispatch\(16u/s);
+  assert.match(shader,
+    /fnadvanceAirSupportChangedFrontier.*letwaveActive=s\(0u\)==0u&&changed!=0u.*writeDispatch\(10u.*writeDispatch\(13u.*writeDispatch\(16u/s,
+    "the singleton must publish zero records on convergence or failure");
 });
 
 test("fine demand defaults to a GPU-authored live-page launch and retains the capacity A/B", () => {
@@ -212,6 +289,38 @@ test("fine-band demand reduces a brick to its distinct owner cells before emitti
   assert.match(demand, /atomicStore\(&markFineBaseSplit,1u\)/);
   assert.match(demand, /if\(atomicLoad\(&markFineBaseSplit\)!=0u\)\{if\(inBand\)\{markFineBandDemandNeighborhood\(base\)/,
     "a split brick must retain the exact per-sample neighbourhood emit");
+});
+
+test("factor-1 separable demand dilation equals the brute-force cubic neighbourhood", () => {
+  const dimensions = [7, 5, 6] as const;
+  const [nx, ny, nz] = dimensions;
+  const source = new Uint8Array(nx * ny * nz);
+  // Exercise boundaries, separated components, and overlapping cubes.
+  for (const [x, y, z] of [[0, 0, 0], [6, 4, 5], [3, 2, 3], [4, 1, 2], [1, 4, 1]]) {
+    source[x + nx * (y + ny * z)] = 1;
+  }
+  const brute = (radius: number) => {
+    const result = new Uint8Array(source.length);
+    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+      for (let x = 0; x < nx; x += 1) {
+        for (let dz = -radius; dz <= radius; dz += 1) {
+          for (let dy = -radius; dy <= radius; dy += 1) {
+            for (let dx = -radius; dx <= radius; dx += 1) {
+              const qx = x + dx, qy = y + dy, qz = z + dz;
+              if (qx >= 0 && qx < nx && qy >= 0 && qy < ny && qz >= 0 && qz < nz
+                && source[qx + nx * (qy + ny * qz)] !== 0) {
+                result[x + nx * (y + ny * z)] = 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    return result;
+  };
+  for (const radius of [0, 1, 3]) {
+    assert.deepEqual(dilateFactorOneAirSupportDemand(dimensions, source, radius), brute(radius));
+  }
 });
 
 // The candidate arena is provisioned for rowCapacity rows; only the accepted
@@ -471,8 +580,8 @@ test("direct air rows and support identities share one fail-closed face transact
 test("host defaults to the exact changed frontier and retains the preceding fixed dense oracle", () => {
   const encode = compact(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
   assert.match(encode, /dispatchWorkgroups\(1\).*updateIndirectBuffer/);
-  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 4,
-    "identity work, face work, and the retained march must all remain GPU scheduled");
+  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 6,
+    "identity, face, retained-march, and factor-1 convergence schedules must remain GPU authored");
   for (const [name, offset] of [["clearAirSupportDirectory", 0], ["clearAirSupportTags", 12],
     ["emitAirSupportCandidates", 24], ["markAndScanAirSupportCandidates", 36]] as const) {
     assert.match(encode, new RegExp(`run\\("${name}",${offset}\\)`));
@@ -495,7 +604,17 @@ test("host defaults to the exact changed frontier and retains the preceding fixe
   assert.match(encode, /validateAirSupportFrontierReciprocity.*compactAirSupportSeedFrontier.*refreshRetainedAirSupportFaceValues.*finalizeRetainedAirSupportMarchSchedule.*broker\.fence\("Section5ordinary-faceseedspublished"\)/s);
   assert.match(encode, /broker\.fence\("Section5ordinary-faceseedspublished"\).*updateIndirectBuffer\(this\.scratch,32\*4,this\.indirect,48,12\).*clearBuffer\(this\.scratch,32\*4,6\*4\)/s,
     "the GPU reuse decision must replace the march schedule only across an indirect-copy visibility boundary");
-  assert.match(encode, /marchAirSupportFacesChangedFrontier.*dispatchWorkgroups\(3\).*broker\.fence\("Section5closest-facefixedpointpublished"\)/s);
+  assert.match(encode,
+    /indirectFrontierGate=changedFrontier&&octreeAirSupportIndirectFrontierGateEnabled\(\)&&fineSlot!==.*this\.inputs\.fineSources\[fineSlot\]\.plan\.fineFactor===1/,
+    "only factor 1 may replace the factor-4/8 march graph with convergence-gated records");
+  assert.match(encode,
+    /if\(indirectFrontierGate\)\{broker\.updateIndirectBuffer\(this\.scratch,10\*4,this\.indirect,0,3\*12\)/,
+    "the initial factor-1 records need a storage-to-indirect visibility boundary");
+  assert.match(encode,
+    /advanceAirSupportChangedFrontier.*dispatchWorkgroupsIndirect\(this\.indirect,12\).*updateIndirectBuffer\(this\.scratch,10\*4,this\.indirect,0,3\*12\).*marchAirSupportFacesChangedFrontier.*dispatchWorkgroupsIndirect\(this\.indirect,24\)/s,
+    "each proven singleton must gate all later wave phases, singletons, and the residual tail");
+  assert.match(encode,
+    /marchAirSupportFacesChangedFrontier.*dispatchWorkgroups\(3\).*encodeOctreeAirSupportReconstructionHandoff\(broker\)/s);
   assert.match(encode, /changedFrontier=octreeAirSupportChangedFrontierEnabled\(\)/,
     "the A/B decision must not alter construction or resource layout");
   assert.match(encode, /if\(changedFrontier\).*compactAirSupportSeedFrontier.*else\{for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX/s);
@@ -508,6 +627,10 @@ test("host defaults to the exact changed frontier and retains the preceding fixe
   assert.equal(OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES, 12);
   assert.doesNotMatch(encode, /maximumRelaxationWaves|prepareAirSupportContinuation|for\(letlayer/,
     "the host must not encode a scene/domain propagation bound");
+  const implementation = compact(readFileSync(
+    new URL("../lib/webgpu-octree-air-velocity-support-gpu.ts", import.meta.url), "utf8"));
+  assert.match(implementation, /WGSLhasnodevice-widebarrier.*last-workgrouplatch/,
+    "the unsafe singleton-folding no-go must remain documented beside the retained boundary");
 });
 
 test("entry bind sets exactly match the reachable staging transaction", () => {
@@ -521,6 +644,9 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
     resolveAirSupportTopology: [0,3,7,8,11,12,13,14],
     prepareFineBandAirSupportDemand: [0,7,26],
     markFineBandAirSupportDemand: [0,7,25,26,27,28],
+    dilateFineBandAirSupportDemandX: [0,7],
+    dilateFineBandAirSupportDemandY: [0,7],
+    dilateFineBandAirSupportDemandZ: [0,7],
     closeFineBandAirSupportInterpolationDemand: [0,2,3,4,5,6,7,11,12,13,14],
     emitFineBandAirSupportCandidates: [0,2,3,7,11],
     publishAirSupportOwnerDirectory: [0,2,3,7,8,9,11],
@@ -531,11 +657,11 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
     seedRetainedAirSupportFaces: [0,1,2,7,8,15,16,18,20,21,23],
     compactAirSupportSeedFrontier: [0,7,19,29],
     refreshRetainedAirSupportFaceValues: [7,19,20],
-    finalizeRetainedAirSupportMarchSchedule: [7,29],
+    finalizeRetainedAirSupportMarchSchedule: [0,7,29],
     expandAirSupportChangedFrontier: [0,7,23,29],
     relaxAirSupportChangedFrontier: [0,7,19,20,23,29],
     commitAirSupportChangedFrontier: [0,7,19,20,29],
-    advanceAirSupportChangedFrontier: [29],
+    advanceAirSupportChangedFrontier: [0,7,29],
     marchAirSupportFacesChangedFrontier: [0,7,19,20,23,29],
     extendAirSupportFacesAtoB: [0,7,19,20,23],
     extendAirSupportFacesBtoA: [0,7,19,20,23],

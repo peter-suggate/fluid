@@ -168,7 +168,7 @@ test("native sparse pyramid allocation is bounded by row capacity, not dense dom
     "the UI plan exercises transfer publication beyond the largest level arena");
   assert.ok(ui.stateBytes <= 128 * 1024 * 1024);
   assert.ok(ui.topologyBytes <= 128 * 1024 * 1024);
-  assert.equal(wide.dispatchBytes, wide.levelCount * 48 + 8);
+  assert.equal(wide.dispatchBytes, wide.levelCount * 48 + 20);
   assert.equal(wide.capturePageCount, Math.ceil(wide.rowCapacity / 64));
   assert.equal(wide.capturePageStateBytes, (12 + 4 * wide.capturePageCount) * 4);
   assert.ok(!("cellCount" in wide));
@@ -401,7 +401,7 @@ test("global M1 smoother consumes the published column index between synchronize
     "candidate publication must resolve all 27 physical neighbours before commit");
   const smoother = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn relaxChebyshev("),
-    octreeSPGridVCycleShader.indexOf("fn correctionTransfer("),
+    octreeSPGridVCycleShader.indexOf("fn aggregateResolve("),
   );
   assert.match(smoother, /applied\(slot,src\)/);
   assert.doesNotMatch(smoother, /pageSlots|workgroupBarrier|\bfind\(|\bdirectoryLookup\(/,
@@ -476,14 +476,48 @@ test("accurate A2 stages wide direct terms before an ordered row fold", () => {
   // named property is unchanged and is what the pattern still pins: dependent
   // terms are produced independently, then folded in channel order.
   assert.match(octreeSPGridAccurateOperatorShader,
-    /fn stageDirectTerm[\s\S]*accurateTerms\[destination\]=term;[\s\S]*fn stageAdjointCandidate[\s\S]*accurateTerms\[destination\]=c\*\(x-inputVector\[other\]\);[\s\S]*fn finalizeStagedRow[\s\S]*value\+=accurateTerms\[row\*162u\+channel\]/,
+    /fn stageDirectTerm[\s\S]*accurateTerms\[destination\]=term;[\s\S]*fn stageAdjointCandidate[\s\S]*accurateTerms\[destination\]=c\*\(x-inputVector\[other\]\);[\s\S]*fn foldStagedRow[\s\S]*value\+=accurateTerms\[row\*162u\+channel\]/,
     "dependent channel terms must be produced independently then folded in channel order");
   // The fold itself must stay serial, in one lane's registers, in ascending
   // child-then-candidate order. Widening the producer must never become a
   // reassociation of the sum.
   assert.match(octreeSPGridAccurateOperatorShader,
-    /fn finalizeStagedRow[\s\S]*for\(var child=0u;child<8u;child\+=1u\)\{for\(var candidate=0u;candidate<18u;candidate\+=1u\)\{\s*value\+=accurateTerms\[row\*162u\+18u\+child\*18u\+candidate\];/,
+    /fn foldStagedRow[\s\S]*for\(var child=0u;child<8u;child\+=1u\)\{for\(var candidate=0u;candidate<18u;candidate\+=1u\)\{\s*value\+=accurateTerms\[row\*162u\+18u\+child\*18u\+candidate\];/,
     "the E^T fold must keep the serial ascending order the single-lane walk used");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn finalizeStagedRow\(row:u32\)\{\s*let folded=foldStagedRow\(row\);if\(folded\.valid\)\{outputVector\[row\]=folded\.value;\}/,
+    "ordinary A2 application must publish the shared ordered fold unchanged");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /fn finalizeStagedResidualRow[\s\S]*let folded=foldStagedRow\(row\)[\s\S]*residualRhs\[row\]-folded\.value[\s\S]*outputVector\[row\]=residual/,
+    "the residual specialization must subtract only after the shared ordered A2 fold");
+  assert.deepEqual(
+    reachableWGSLBindings(octreeSPGridAccurateOperatorShader, "applyAcceptedUnion"),
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    "the serial union-row arm must fit the portable ten-storage-buffer limit",
+  );
+  assert.deepEqual(
+    reachableWGSLBindings(
+      octreeSPGridAccurateOperatorShader, "applyCompiledAcceptedUnion",
+    ),
+    [0, 1, 2, 3, 4, 5, 10, 11, 13, 14],
+    "compiled ordinary inline A2 reaches exactly eight storage buffers and two uniforms",
+  );
+  assert.deepEqual(
+    reachableWGSLBindings(
+      octreeSPGridAccurateOperatorShader, "applyCompiledMergedBand",
+    ),
+    [0, 1, 2, 3, 4, 5, 9, 10, 11, 13, 14],
+    "compiled merged-band inline A2 adds only the metric class buffer: nine storage total",
+  );
+  const compiledInline = octreeSPGridAccurateOperatorShader.slice(
+    octreeSPGridAccurateOperatorShader.indexOf("fn applyCompiledRow"),
+    octreeSPGridAccurateOperatorShader.indexOf("// One linear, prefetchable load"),
+  );
+  assert.doesNotMatch(compiledInline, /pageSlot|pageFor|topology\[|state\[/,
+    "compiled inline A2 must contain no topology/state address chase");
+  assert.match(compiledInline,
+    /for\(var channel=0u;channel<18u;channel\+=1u\)[\s\S]*value\+=c\*\(x-inputVector\[code\]\)[\s\S]*for\(var child=0u;child<8u;child\+=1u\)[\s\S]*for\(var candidate=0u;candidate<18u;candidate\+=1u\)[\s\S]*value\+=c\*\(x-inputVector\[other\]\)/,
+    "compiled inline A2 must retain direct-then-child/candidate ascending association");
   // RENEGOTIATED with the same change: the adjoint lane count per row goes from
   // 8 (one per child, each walking eighteen candidates in sequence) to 144.
   assert.match(octreeSPGridAccurateOperatorShader,
@@ -616,6 +650,24 @@ test("fixed LDLT bottom operation is exact, linear, symmetric, and positive", ()
 
 test("GPU correction owns transfers by fine slot and shares one exact adjoint mapping", () => {
   assert.match(octreeSPGridVCycleShader,
+    /fn geometricAggregateTransfer\(\)->bool\{return \(p\.solve\.y&2u\)!=0u;\}/,
+    "the factor-1 aggregate transfer must have an immutable uniform selector");
+  assert.match(octreeSPGridVCycleShader,
+    /if\(\(flags&GHOST\)==0u\)\{return select\(8u,1u,geometricAggregateTransfer\(\)\);\}/,
+    "factor-1 cells publish one parent record while adaptive cells retain eight");
+  assert.match(octreeSPGridVCycleShader,
+    /else if\(geometricAggregateTransfer\(\)\)\{[\s\S]*cResolve\(l\+1u,q\/2u\)[\s\S]*cAppendTransfer\(l,base,fine,coarse,1\.0\)/,
+    "the aggregate record must be the unit-weight 2x2x2 parent");
+  assert.match(octreeSPGridVCycleShader,
+    /if\(geometricAggregateTransfer\(\)&&fanOut!=1u\)\{candidateReport\(l\);\}/,
+    "candidate setup must reject any aggregate slot outside the total q-to-q/2 mapping");
+  assert.match(octreeSPGridVCycleShader,
+    /fn coarseRestrictAggregate\(l:u32,lane:u32\)[\s\S]*let coarse=workSlot\(l\+1u,lane\)[\s\S]*for\(var child=0u;child<8u;child\+=1u\)[\s\S]*sum\+=weight\*residual/,
+    "the fused aggregate tail must restrict independent parents through arithmetic children");
+  assert.equal((octreeSPGridVCycleShader.match(
+    /targetCount=topology\[fineCountBase\(l\)\+fine\]/g) ?? []).length, 2,
+    "only the generic parallel and fused prolongation branches consume the published fan-out");
+  assert.match(octreeSPGridVCycleShader,
     /fn prepareCorrectionDispatches\(\)[\s\S]*local==2u\|\|local==5u\|\|local==9u[\s\S]*value=0u/,
     "convergence zeros every selected-row, transfer, and page record before correction");
   assert.match(octreeSPGridVCycleShader, /clearCorrection[\s\S]*r<rows\(\)&&!stopped\(\)/,
@@ -703,7 +755,7 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     "fineHead+corner prolongation and ascending parent-chain restriction stay exact transposes");
   const correctionTransfer = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn correctionTransfer("),
-    octreeSPGridVCycleShader.indexOf("fn restrictAndGhostAccumulate"),
+    octreeSPGridVCycleShader.indexOf("// Record-parallel staging for E^T"),
   );
   assert.match(correctionTransfer,
     /first=topology\[fineHeadBase\(l\)\+fine\][\s\S]*record=first\+corner/);
@@ -711,12 +763,42 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     "recurring prolongation must consume setup-published transfer indices directly");
   assert.match(octreeSPGridVCycleShader, /fn restrictAndGhostAccumulate/);
   assert.match(octreeSPGridVCycleShader, /fn prolongAndGhostPropagate/);
-  assert.equal(octreeSPGridVCycleShader.match(/correctionTransfer\(l,fine,corner\)/g)?.length, 1,
-    "fine-owned prolongation consumes the same immutable transfer rule used by setup");
+  assert.equal(octreeSPGridVCycleShader.match(/correctionTransfer\(l,fine,corner\)/g)?.length, 2,
+    "generic wide and fused coarse prolongation consume the same immutable transfer rule");
+  const aggregateTarget = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn aggregateResolve("),
+    octreeSPGridVCycleShader.indexOf("fn correctionTransfer("),
+  );
+  assert.match(aggregateTarget,
+    /fn aggregateResolve[\s\S]*directoryLookup\(l,min\(q,dims\(l\)-vec3u\(1u\)\),false\)[\s\S]*q=decode\(state\[at\(KEY,l,fine\)\],l\)[\s\S]*aggregateResolve\(l\+1u,q\/2u\)/,
+    "factor-1 prolongation must derive its unique parent from the fine coordinate");
+  assert.doesNotMatch(aggregateTarget, /transferWord|fineHeadBase|fineCountBase|parentHeadBase/,
+    "factor-1 prolongation must not read the transfer arena");
+  const aggregateWide = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn restrictAggregateWide("),
+    octreeSPGridVCycleShader.indexOf("// Section 4.2 GhostValueAccumulate"),
+  );
+  assert.match(aggregateWide,
+    /childQ=parentQ\*2u\+vec3u\(lane&1u,\(lane>>1u\)&1u,\(lane>>2u\)&1u\)/,
+    "wide factor-1 restriction must assign one arithmetic child to each of eight lanes");
+  assert.match(aggregateWide,
+    /for\(var child=0u;child<8u;child\+=1u\)[\s\S]*sum\+=weight\*restrictResidual\[child\]/,
+    "wide factor-1 restriction must fold child bits in deterministic ascending order");
+  assert.doesNotMatch(aggregateWide, /transferWord|fineHeadBase|fineCountBase|parentHeadBase/,
+    "wide factor-1 restriction must not read the transfer arena");
+  const aggregateTail = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn coarseRestrictAggregate("),
+    octreeSPGridVCycleShader.indexOf("fn coarseRestrict(", octreeSPGridVCycleShader.indexOf("fn coarseRestrictAggregate(")),
+  );
+  assert.doesNotMatch(aggregateTail, /transferWord|fineHeadBase|fineCountBase|parentHeadBase|transferCount/,
+    "fused factor-1 restriction must not read the transfer arena");
   const prolong = octreeSPGridVCycleShader.slice(octreeSPGridVCycleShader.indexOf("fn prolongAndGhostPropagate"),
     octreeSPGridVCycleShader.indexOf("fn publish", octreeSPGridVCycleShader.indexOf("fn prolongAndGhostPropagate")));
   assert.doesNotMatch(prolong, /atomicAddF/,
     "one fine invocation owns its complete prolongation sum");
+  assert.match(prolong,
+    /if\(geometricAggregateTransfer\(\)\)\{let coarse=aggregateCorrectionTarget\(l,fine\)/,
+    "wide factor-1 prolongation must select the recordless parent path");
   // E^T's matrix entry must be the record's stored weight - the same word E
   // reads - multiplied by the ghost-aware level residual, and folded in
   // ascending record order. Pin those three properties rather than one
@@ -724,16 +806,16 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
   const restrictBody = octreeSPGridVCycleShader.slice(
     octreeSPGridVCycleShader.indexOf("fn restrictAndGhostAccumulate"),
     octreeSPGridVCycleShader.indexOf("fn exactBottom"));
-  assert.equal(restrictBody.match(/bitcast<f32>\(topology\[transferWord\(l,\w+,2u\)\]\)/g)?.length, 1,
-    "restriction reads exactly one transfer-arena float: the record's stored weight");
+  assert.equal(restrictBody.match(/bitcast<f32>\(topology\[transferWord\(l,\w+,2u\)\]\)/g)?.length, 2,
+    "only wide and fused generic restriction read the stored record weight");
   assert.doesNotMatch(restrictBody, /bitcast<f32>\(topology\[transferWord\(l,\w+,(?:0u|1u|3u)\)\]\)/,
     "no other transfer word may be reinterpreted as a weight");
   assert.match(restrictBody, /residual=select\(-product,loadf\(RHS,l,fine\)-product,!ghost\)/,
     "restriction restricts the ghost-aware level residual, never a raw value");
   assert.match(restrictBody, /[Ww]eight\w*(?:\[\w+\])?\*\w*[Rr]esidual\w*(?:\[\w+\])?/,
     "each accumulated term is that record's stored weight times its residual");
-  assert.doesNotMatch(restrictBody, /subgroup\w*\(|span<<|>>1u/,
-    "restriction must fold in ascending record order, never by a reassociating tree");
+  assert.doesNotMatch(restrictBody, /subgroup\w*\(|span<</,
+    "restriction must fold in its explicit ascending order, never by a reassociating tree");
   assert.match(octreeSPGridVCycleShader, /transfer\.weight\*loadf\(A,l\+1u,transfer\.coarse\)/);
   assert.match(octreeSPGridVCycleShader, /const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u/);
   assert.match(octreeSPGridVCycleShader, /fn cMergeClass/);
@@ -826,14 +908,17 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
   assert.equal(OCTREE_SPGRID_CAPTURE_CONTROL_WORD.sourceGeneration, 10,
     "the coupled epoch must consume the explicit topology-source generation word");
   assert.match(octreeSPGridVCycleShader,
-    /fn sourceControlReady\(\)->bool[\s\S]*p\.solve\.y==0u[\s\S]*acceptedRows\[0\]==0u[\s\S]*p\.solve\.y==1u[\s\S]*acceptedRows\[0\]==STRUCTURED_CANDIDATE_READY/,
+    /fn candidateSource\(\)->bool\{return \(p\.solve\.y&1u\)!=0u;\}[\s\S]*fn sourceControlReady\(\)->bool[\s\S]*!candidateSource\(\)[\s\S]*acceptedRows\[0\]==0u[\s\S]*acceptedRows\[0\]==STRUCTURED_CANDIDATE_READY/,
     "candidate and accepted structured controls must use explicit, disjoint source modes");
   assert.match(octreeSPGridVCycleShader,
-    /fn sourceGeneration\(\)->u32\{return select\(0u,select\(acceptedRows\[3\],acceptedRows\[4\],p\.solve\.y==1u\),sourceControlReady\(\)\);\}/,
+    /fn sourceGeneration\(\)->u32\{return select\(0u,select\(acceptedRows\[3\],acceptedRows\[4\],candidateSource\(\)\),sourceControlReady\(\)\);\}/,
     "candidate capture must read the candidate epoch rather than its slot count");
   assert.match(octreeSPGridVCycleShader,
-    /fn acceptedBank\(\)->u32\{return select\(acceptedRows\[4\],acceptedRows\[5\],p\.solve\.y==1u\)&1u;\}/,
+    /fn acceptedBank\(\)->u32\{return select\(acceptedRows\[4\],acceptedRows\[5\],candidateSource\(\)\)&1u;\}/,
     "candidate capture must read the candidate bank rather than its epoch");
+  assert.match(octreeSPGridVCycleShader,
+    /fn geometricAggregateTransfer\(\)->bool\{return \(p\.solve\.y&2u\)!=0u;\}[\s\S]*return select\(8u,1u,geometricAggregateTransfer\(\)\)/,
+    "factor-1 aggregate transfer must be orthogonal to the source-authority bit");
   assert.match(octreeSPGridVCycleShader,
     /fn beginL1CapturePlan\(\)[\s\S]*if\(!sourceControlReady\(\)\|\|acceptedRows\[2\]>p\.capacity\.x/,
     "candidate capture setup must accept the explicit candidate-ready magic");
@@ -881,12 +966,15 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
     "the deleted all-capacity recovery path must not remain in the pipeline ABI");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.clearCorrection, [0, 3, 7, 9],
     "correction clearing observes the solver stop gate before writing output");
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.prepareCorrectionDispatches, [0, 6, 7, 19],
-    "one singleton owns the zero-x convergence publication for every MG level");
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.prepareCorrectionDispatches, [0, 3, 6, 7, 19],
+    "one singleton owns the zero-x level records and live-row schedule");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.zeroVectors, [0, 4, 5, 6, 7],
     "vector clearing observes the solver stop gate before touching sparse slots");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.seedRhs, [0, 3, 4, 5, 7, 8, 11],
     "native-level RHS seeding reads fixed row geometry");
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.seedRhsAndClearCorrection,
+    [0, 3, 4, 5, 7, 8, 9, 11],
+    "factor-1 initialization is the exact reachable-resource union of clear and seed");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.restrictAndGhostAccumulate, [0, 4, 5, 6, 7],
     "parent-owned restriction reads only compact transfer/state storage");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.publish, [0, 3, 4, 5, 7, 9, 11],
@@ -926,8 +1014,8 @@ test("one correction gates then executes exact indirect records with cached desc
   broker.fence("correction complete");
   assert.equal(passes - setupPasses, 2);
   assert.equal(dispatches - before, cycle.encodedCorrectionDispatchCount);
-  assert.equal(cycle.encodedCorrectionDispatchCount, 34,
-    "one gate plus globally synchronized degree-two phases own the correction schedule");
+  assert.equal(cycle.encodedCorrectionDispatchCount, 22,
+    "two parallel levels plus a barrier-synchronized small tail own the correction schedule");
   assert.equal(cycle.encodedPassTransitionCount, 1);
   assert.equal(cycle.diagnostics.bottomOperation, "exact-single-cell");
   assert.equal(cycle.diagnostics.coarsestDegreesOfFreedom, 1);
@@ -938,6 +1026,102 @@ test("one correction gates then executes exact indirect records with cached desc
   broker.fence("correction complete");
   assert.equal(groups, firstGroups, "repeated solves allocate no new bind groups");
   cycle.destroy();
+});
+
+test("factor-1 dense correction replaces sparse recurring work and its kill switch preserves fusion", () => {
+  Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
+  const buffer = (size: number, usage = 31) =>
+    ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const encode = (
+    geometricAggregateTransfers: boolean,
+    denseEnabled = true,
+  ) => {
+    const device = {
+      queue: { writeBuffer() {} },
+      createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+      createShaderModule: () => ({}),
+      createComputePipeline: ({ label }: { label: string }) =>
+        ({ label, getBindGroupLayout: () => ({}) }),
+      createBindGroup: () => ({}),
+    } as unknown as GPUDevice;
+    const previous = process.env.FLUID_OCTREE_FACTOR1_DENSE_MG;
+    process.env.FLUID_OCTREE_FACTOR1_DENSE_MG = denseEnabled ? "1" : "0";
+    let cycle: WebGPUOctreeSPGridVCycle;
+    try {
+      cycle = new WebGPUOctreeSPGridVCycle(device, spgridSource(buffer, 128, 8 * 512), {
+        dimensions: [16, 16, 16], rowCapacity: 128, maximumLevels: 5,
+        finestCellWidth: 1, geometricAggregateTransfers,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.FLUID_OCTREE_FACTOR1_DENSE_MG;
+      else process.env.FLUID_OCTREE_FACTOR1_DENSE_MG = previous;
+    }
+    const entries: string[] = [];
+    let current = "";
+    const pass = {
+      setPipeline(pipeline: { label: string }) {
+        current = pipeline.label
+          .replace("SPGrid V-cycle · ", "")
+          .replace("Factor-1 dense M1 · ", "");
+      },
+      setBindGroup() {},
+      dispatchWorkgroups() { entries.push(current); },
+      dispatchWorkgroupsIndirect() { entries.push(current); },
+      end() {},
+    } as unknown as GPUComputePassEncoder;
+    const broker = new PassBroker({
+      beginComputePass: () => pass,
+    } as unknown as GPUCommandEncoder);
+    cycle.encodeCorrection(broker, {
+      rowCount: buffer(64), solverControl: buffer(64),
+      rhs: buffer(512), correction: buffer(512),
+    });
+    broker.fence("correction complete");
+    const result = {
+      entries,
+      dispatches: cycle.encodedCorrectionDispatchCount,
+      initializationDispatches: cycle.diagnostics.correctionInitializationDispatchCount,
+    };
+    cycle.destroy();
+    return result;
+  };
+  const generic = encode(false);
+  const factorOneSparse = encode(true, false);
+  const factorOneDense = encode(true);
+  assert.equal(generic.dispatches, 22);
+  assert.equal(factorOneSparse.dispatches, 21,
+    "the kill switch preserves the fused sparse factor-1 fallback");
+  assert.equal(factorOneDense.dispatches, 15,
+    "degree-two dense factor-1 correction also fuses native publication");
+  assert.equal(generic.initializationDispatches, 2);
+  assert.equal(factorOneSparse.initializationDispatches, 1);
+  assert.equal(factorOneDense.initializationDispatches, 1);
+  assert.equal(generic.entries.filter((entry) => entry === "clearCorrection").length, 1);
+  assert.equal(generic.entries.filter((entry) => entry === "seedRhs").length, 1);
+  assert.equal(generic.entries.includes("seedRhsAndClearCorrection"), false,
+    "factor-4/8 fallback retains the original clear/seed ABI and schedule");
+  assert.equal(factorOneSparse.entries.includes("clearCorrection"), false);
+  assert.equal(factorOneSparse.entries.includes("seedRhs"), false);
+  assert.equal(factorOneSparse.entries.filter(
+    (entry) => entry === "seedRhsAndClearCorrection",
+  ).length, 1);
+  assert.equal(factorOneSparse.entries.filter((entry) => entry === "zeroVectors").length,
+    generic.entries.filter((entry) => entry === "zeroVectors").length,
+    "fusion must not widen or duplicate any sparse-slot clear");
+  assert.equal(factorOneDense.entries.includes("zeroVectors"), false);
+  assert.equal(factorOneDense.entries.filter(
+    (entry) => entry === "initializeDenseCorrection",
+  ).length, 1);
+  assert.equal(factorOneDense.entries.at(0), "prepareDenseCorrectionDispatches");
+  assert.equal(factorOneDense.entries.at(-1), "smoothDenseBtoA0AndPublish");
+
+  const fused = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn seedRhsAndClearCorrection"),
+    octreeSPGridVCycleShader.indexOf("fn stencilDirection"),
+  );
+  assert.match(fused,
+    /let r=rowIndex\(g\);if\(r<rows\(\)&&!stopped\(\)\)\{outputCorrection\[r\]=0\.0;seedNativeRhs\(r\);\}/,
+    "one stop gate and one accepted-row index must own both independent writes");
 });
 
 test("accurate A2 encodes one gate, one wide term stage, and one ordered fold", () => {
@@ -970,13 +1154,236 @@ test("accurate A2 encodes one gate, one wide term stage, and one ordered fold", 
   assert.equal(cycle.accurateOperator.encodedMergedBandDispatchCount, 3);
   assert.equal(direct, 1); assert.equal(indirect, 6,
     "the shell union stages direct and adjoint terms before its ordered row fold");
+  const residualRhs = buffer(512), residual = buffer(512);
+  assert.ok(cycle.accurateOperator.encodeGate);
+  assert.ok(cycle.accurateOperator.encodeResidualBody);
+  cycle.accurateOperator.encodeGate!(pass, input, residual, solverControl);
+  broker.fence("A2 residual gate complete");
+  cycle.accurateOperator.encodeResidualBody!(
+    broker, input, residualRhs, residual, solverControl,
+  );
+  broker.fence("A2 residual complete");
+  assert.equal(direct, 2); assert.equal(indirect, 9,
+    "the fused residual keeps the three A2 body stages and adds no residual dispatch");
   const firstGroups = groups;
   cycle.accurateOperator.encode(broker, input, output, solverControl);
   cycle.accurateOperator.encodeMergedBandWorkset(broker, input, output, solverControl,
     mergedWorksets, mergedDispatch, mergedLayout, 48);
+  cycle.accurateOperator.encodeGate!(pass, input, residual, solverControl);
+  cycle.accurateOperator.encodeResidualBody!(
+    broker, input, residualRhs, residual, solverControl,
+  );
   broker.fence("A2 repeated");
   assert.equal(groups, firstGroups, "immutable A2 bind groups must be reused");
   cycle.destroy();
+});
+
+test("factor-1 inline accurate A2 defaults on and deletes only ordinary staged body dispatches", () => {
+  Object.assign(globalThis, {
+    GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
+  });
+  const buffer = (size: number, usage = 31) =>
+    ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const encode = (factorOne: boolean, mode: "default" | "on" | "off") => {
+    let direct = 0, indirect = 0;
+    const device = {
+      queue: { writeBuffer() {} },
+      createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+      createShaderModule: () => ({}),
+      createComputePipeline: ({ label }: { label: string }) =>
+        ({ label, getBindGroupLayout: () => ({}) }),
+      createBindGroup: () => ({}),
+    } as unknown as GPUDevice;
+    const previous = process.env.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2;
+    if (mode === "on") process.env.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2 = "1";
+    else if (mode === "off") process.env.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2 = "0";
+    else delete process.env.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2;
+    let cycle: WebGPUOctreeSPGridVCycle;
+    try {
+      cycle = new WebGPUOctreeSPGridVCycle(device, spgridSource(buffer, 128, 8 * 512), {
+        dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1,
+        geometricAggregateTransfers: factorOne,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2;
+      else process.env.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2 = previous;
+    }
+    const pass = {
+      setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() { direct += 1; },
+      dispatchWorkgroupsIndirect() { indirect += 1; }, end() {},
+    } as unknown as GPUComputePassEncoder;
+    const broker = new PassBroker({
+      beginComputePass: () => pass,
+    } as unknown as GPUCommandEncoder);
+    const input = buffer(512), output = buffer(512), control = buffer(64);
+    cycle.accurateOperator.encode(broker, input, output, control);
+    broker.fence("ordinary apply complete");
+    const ordinary = { direct, indirect };
+    const beforeResidual = { direct, indirect };
+    cycle.accurateOperator.encodeGate!(pass, input, output, control);
+    broker.fence("residual gate complete");
+    cycle.accurateOperator.encodeResidualBody!(
+      broker, input, buffer(512), output, control,
+    );
+    broker.fence("residual body complete");
+    const result = {
+      encoded: cycle.accurateOperator.encodedDispatchCount,
+      residualEncoded: cycle.accurateOperator.encodedResidualDispatchCount,
+      ordinary,
+      residual: {
+        direct: direct - beforeResidual.direct,
+        indirect: indirect - beforeResidual.indirect,
+      },
+    };
+    cycle.destroy();
+    return result;
+  };
+  assert.deepEqual(encode(true, "default"), {
+    encoded: 2, residualEncoded: 4,
+    ordinary: { direct: 1, indirect: 1 },
+    residual: { direct: 1, indirect: 3 },
+  });
+  assert.deepEqual(encode(true, "on"), encode(true, "default"),
+    "explicit enablement must retain the shipping factor-1 graph");
+  assert.equal(encode(false, "on").encoded, 4,
+    "factor-4/8 cannot select the factor-1 path");
+  assert.equal(encode(true, "off").encoded, 4,
+    "the explicit kill switch restores staged ordinary A2");
+});
+
+test("factor-1 inline merged-band A2 defaults on with an isolated staged fallback", () => {
+  Object.assign(globalThis, {
+    GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
+  });
+  const buffer = (size: number, usage = 31) =>
+    ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const encode = (factorOne: boolean, mode: "default" | "on" | "off") => {
+    let indirect = 0;
+    const device = {
+      queue: { writeBuffer() {} },
+      createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+      createShaderModule: () => ({}),
+      createComputePipeline: ({ label }: { label: string }) =>
+        ({ label, getBindGroupLayout: () => ({}) }),
+      createBindGroup: () => ({}),
+    } as unknown as GPUDevice;
+    const previous = process.env.FLUID_OCTREE_FACTOR1_INLINE_MERGED_BAND_A2;
+    if (mode === "on") process.env.FLUID_OCTREE_FACTOR1_INLINE_MERGED_BAND_A2 = "1";
+    else if (mode === "off") process.env.FLUID_OCTREE_FACTOR1_INLINE_MERGED_BAND_A2 = "0";
+    else delete process.env.FLUID_OCTREE_FACTOR1_INLINE_MERGED_BAND_A2;
+    let cycle: WebGPUOctreeSPGridVCycle;
+    try {
+      cycle = new WebGPUOctreeSPGridVCycle(device, spgridSource(buffer, 128, 8 * 512), {
+        dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1,
+        geometricAggregateTransfers: factorOne,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.FLUID_OCTREE_FACTOR1_INLINE_MERGED_BAND_A2;
+      else process.env.FLUID_OCTREE_FACTOR1_INLINE_MERGED_BAND_A2 = previous;
+    }
+    const pass = {
+      setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {},
+      dispatchWorkgroupsIndirect() { indirect += 1; }, end() {},
+    } as unknown as GPUComputePassEncoder;
+    const broker = new PassBroker({
+      beginComputePass: () => pass,
+    } as unknown as GPUCommandEncoder);
+    cycle.accurateOperator.encodeMergedBandWorkset(
+      broker, buffer(512), buffer(512), buffer(64), buffer(4096),
+      buffer(84, GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE), buffer(16), 48,
+    );
+    broker.fence("merged-band apply complete");
+    const result = {
+      encoded: cycle.accurateOperator.encodedMergedBandDispatchCount,
+      indirect,
+    };
+    cycle.destroy();
+    return result;
+  };
+  assert.deepEqual(encode(true, "default"), { encoded: 1, indirect: 1 });
+  assert.deepEqual(encode(true, "on"), { encoded: 1, indirect: 1 });
+  assert.deepEqual(encode(true, "off"), { encoded: 3, indirect: 3 });
+  assert.deepEqual(encode(false, "on"), { encoded: 3, indirect: 3 },
+    "factor-4/8 cannot select the factor-1 path");
+});
+
+test("compiled-image inline A2 is explicit-on, factor-1-only, and keeps both one-dispatch graphs", () => {
+  Object.assign(globalThis, {
+    GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
+  });
+  const buffer = (size: number, usage = 31) =>
+    ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const run = (factorOne: boolean, enabled: boolean) => {
+    const selected: string[] = [];
+    const groupBindings = new Map<string, number[]>();
+    const device = {
+      queue: { writeBuffer() {} },
+      createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+      createShaderModule: () => ({}),
+      createComputePipeline: ({ label }: { label: string }) =>
+        ({ label, getBindGroupLayout: () => ({}) }),
+      createBindGroup: ({ label, entries }: GPUBindGroupDescriptor) => {
+        groupBindings.set(String(label), Array.from(entries, (entry) => entry.binding));
+        return {};
+      },
+    } as unknown as GPUDevice;
+    const previous = process.env.FLUID_OCTREE_FACTOR1_COMPILED_INLINE_A2;
+    if (enabled) process.env.FLUID_OCTREE_FACTOR1_COMPILED_INLINE_A2 = "1";
+    else delete process.env.FLUID_OCTREE_FACTOR1_COMPILED_INLINE_A2;
+    let cycle: WebGPUOctreeSPGridVCycle;
+    try {
+      cycle = new WebGPUOctreeSPGridVCycle(
+        device, spgridSource(buffer, 128, 8 * 512), {
+          dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1,
+          geometricAggregateTransfers: factorOne,
+        },
+      );
+    } finally {
+      if (previous === undefined) delete process.env.FLUID_OCTREE_FACTOR1_COMPILED_INLINE_A2;
+      else process.env.FLUID_OCTREE_FACTOR1_COMPILED_INLINE_A2 = previous;
+    }
+    const pass = {
+      setPipeline(pipeline: { label: string }) { selected.push(pipeline.label); },
+      setBindGroup() {}, dispatchWorkgroups() {}, dispatchWorkgroupsIndirect() {}, end() {},
+    } as unknown as GPUComputePassEncoder;
+    const broker = new PassBroker({
+      beginComputePass: () => pass,
+    } as unknown as GPUCommandEncoder);
+    const input = buffer(512), output = buffer(512), control = buffer(64);
+    cycle.accurateOperator.encode(broker, input, output, control);
+    cycle.accurateOperator.encodeMergedBandWorkset(
+      broker, input, output, control, buffer(4096),
+      buffer(84, GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE), buffer(16), 48,
+    );
+    broker.fence("compiled inline applies complete");
+    const result = {
+      selected,
+      ordinary: cycle.accurateOperator.encodedDispatchCount,
+      merged: cycle.accurateOperator.encodedMergedBandDispatchCount,
+      ordinaryBindings: groupBindings.get(
+        "SPGrid Section 6.3 · compiled-image accepted row union bindings",
+      ),
+      mergedBindings: groupBindings.get(
+        "SPGrid Section 6.3 · compiled-image inline merged-band bindings",
+      ),
+    };
+    cycle.destroy();
+    return result;
+  };
+  const control = run(true, false);
+  assert.equal(control.selected.some((label) => label.includes("compiled-image")), false,
+    "default inline A2 remains the current topology-chase control");
+  const compiled = run(true, true);
+  assert.equal(compiled.ordinary, 2);
+  assert.equal(compiled.merged, 1);
+  assert.ok(compiled.selected.includes(
+    "SPGrid accurate A2 · compiled-image accepted row union"));
+  assert.ok(compiled.selected.includes(
+    "SPGrid Section 6.3 · compiled-image inline merged-band rows"));
+  assert.deepEqual(compiled.ordinaryBindings, [0, 1, 2, 3, 4, 5, 10, 11, 13, 14]);
+  assert.deepEqual(compiled.mergedBindings, [0, 1, 2, 3, 4, 5, 9, 10, 11, 13, 14]);
+  assert.equal(run(false, true).selected.some((label) => label.includes("compiled-image")), false,
+    "the explicit arm cannot escape factor one");
 });
 
 test("resolved-row persistent executor is absent at every production capacity", () => {
@@ -1261,15 +1668,14 @@ test("correction covers the shared L1/L2 pressure-row domain and uses live slot 
   // have exactly the same pressure variables. Clear, seed, and publish must
   // therefore cover accepted rows directly: level zero's sparse slot count
   // excludes valid native coarser rows on an adaptive octree.
-  assert.equal(direct, 4,
-    "the convergence publisher plus all three pressure-row stages are direct");
+  assert.equal(direct, 2,
+    "only the convergence publisher and coarse tail are direct");
   assert.equal(offsets.length, cycle.encodedCorrectionDispatchCount - direct);
   assert.equal(sources.size, 1, "all correction work must consume the dedicated indirect buffer");
   assert.ok(offsets.includes(8), "level zero consumes its live slot record");
-  assert.ok(offsets.includes((cycle.plan.levelCount - 1) * 48 + 8), "the bottom level uses its own live slot record");
   assert.ok(offsets.every((offset) => offset % 48 === 8 || offset % 48 === 20),
   "kernels consume published slot or parent-slot records");
-  assert.equal(offsets.filter((offset) => offset % 48 === 20).length, cycle.plan.levelCount - 1);
+  assert.equal(offsets.filter((offset) => offset % 48 === 20).length, 2);
   assert.equal(offsets.filter((offset) => offset % 48 === 36).length, 0,
     "no page-local multi-phase smoother may bypass global dispatch ordering");
   cycle.destroy();
@@ -1301,7 +1707,8 @@ test("Dawn accepts the native sparse V-cycle shader", {
     "linkCandidatePageNeighbours", "buildCandidateStencils", "publishCandidateSpectralBounds",
     "validateCandidateHierarchy", "commitCandidateLevels",
     "finalizeLifecycle", "prepareCorrectionDispatches", "clearCorrection", "zeroVectors", "seedRhs",
-    "restrictAndGhostAccumulate", "exactBottom",
+    "seedRhsAndClearCorrection",
+    "restrictAndGhostAccumulate", "coarseVcycleTail", "exactBottom",
     "smoothChebyshevAtoB0", "smoothChebyshevBtoA0",
     "smoothChebyshevAtoB1", "smoothChebyshevBtoA1",
     "smoothChebyshevAtoB2", "smoothChebyshevBtoA2",
@@ -1326,7 +1733,9 @@ test("Dawn accepts the four class-specialized accurate operator and convergence 
   for (const [code, entryPoints] of [
     [octreeSPGridAccurateOperatorShader, ["applyRegularInterior",
       "applyTransitionInterior", "applyPhysicalBoundary", "applyTransitionBoundary",
-      "applyMergedBand", "stageAcceptedUnionTerms", "stageMergedBandTerms",
+      "applyMergedBand", "applyAcceptedUnion",
+      "applyCompiledMergedBand", "applyCompiledAcceptedUnion",
+      "stageAcceptedUnionTerms", "stageMergedBandTerms",
       "stageAcceptedUnionAdjoints", "stageMergedBandAdjoints",
       "finalizeStagedUnionRows", "buildAccurateOperatorRows"]],
     [octreeSPGridAccurateDispatchGateShader, ["prepareAccurateDispatches"]],
@@ -1339,6 +1748,23 @@ test("Dawn accepts the four class-specialized accurate operator and convergence 
       device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
     }
   }
+  device.destroy();
+});
+
+test("Dawn null compiles the accurate operator module", {
+  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for null WGSL compilation",
+}, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU; globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const adapter = await dawn.create(["backend=null"]).requestAdapter();
+  assert.ok(adapter);
+  const device = await adapter.requestDevice();
+  const module = device.createShaderModule({ code: octreeSPGridAccurateOperatorShader });
+  const info = await module.getCompilationInfo();
+  assert.deepEqual(info.messages.filter((message) => message.type === "error")
+    .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
   device.destroy();
 });
 

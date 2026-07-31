@@ -15,6 +15,7 @@ import {
   mergeCompensatedF32,
   octreeCompensatedF32WGSL,
   octreePipelinedMGPCGActivityShader,
+  octreePipelinedMGPCGCombinedReductionDrainsEnabled,
   octreePipelinedMGPCGColdStartEnabled,
   octreePipelinedMGPCGTemporalPredictorEnabled,
   octreePipelinedMGPCGTemporalPredictorAlpha,
@@ -70,6 +71,54 @@ test("pipelined planner exposes residual and direct-curvature reductions", () =>
     /remain in \[4,10\]/);
   assert.throws(() => planOctreePipelinedMGPCG({ rowCapacity: 1,
     maximumIterations: 4, hardIterationCeiling: 15 }), /fixed at 16/);
+});
+
+test("combined reduction drains are explicit-on until the factor-1 A/B passes", () => {
+  assert.equal(octreePipelinedMGPCGCombinedReductionDrainsEnabled({}), false);
+  assert.equal(octreePipelinedMGPCGCombinedReductionDrainsEnabled({
+    FLUID_OCTREE_FACTOR1_COMBINED_REDUCTION_DRAINS: "0",
+  }), false);
+  assert.equal(octreePipelinedMGPCGCombinedReductionDrainsEnabled({
+    FLUID_OCTREE_FACTOR1_COMBINED_REDUCTION_DRAINS: "1",
+  }), true);
+});
+
+test("combined drains preserve the exact compensated 128-row block association", () => {
+  const zero = (): CompensatedF32 => [0, 0];
+  const reduceTree = (input: readonly CompensatedF32[]): CompensatedF32 => {
+    const lanes = Array.from({ length: 128 }, (_, lane) => input[lane] ?? zero());
+    for (let width = 64; width > 0; width >>= 1) {
+      for (let lane = 0; lane < width; lane += 1) {
+        lanes[lane] = mergeCompensatedF32(lanes[lane]!, lanes[lane + width]!);
+      }
+    }
+    return lanes[0]!;
+  };
+  const values = Array.from({ length: 1_537 }, (_, index) =>
+    Math.fround(index % 5 === 0 ? 1e8 : index % 5 === 1 ? -1e8 : (index % 17) - 8));
+  const stagedPartials: CompensatedF32[] = [];
+  for (let base = 0; base < values.length; base += 128) {
+    stagedPartials.push(reduceTree(Array.from({ length: 128 }, (_, lane) =>
+      addCompensatedF32(zero(), values[base + lane] ?? 0))));
+  }
+  const oldFinish = reduceTree(Array.from({ length: 128 }, (_, lane) =>
+    lane < stagedPartials.length
+      ? mergeCompensatedF32(zero(), stagedPartials[lane]!)
+      : zero()));
+  const combinedBlocks = stagedPartials.map((partial) => partial);
+  const combinedFinish = reduceTree(Array.from({ length: 128 }, (_, lane) =>
+    lane < combinedBlocks.length
+      ? mergeCompensatedF32(zero(), combinedBlocks[lane]!)
+      : zero()));
+  assert.deepEqual(combinedFinish, oldFinish,
+    "sequential workgroup blocks must reproduce the old partial/finish tree bit-for-bit");
+  assert.match(octreePipelinedMGPCGShader,
+    /var<workgroup> combinedBlocks: array<MergedScalars, 32>/);
+  assert.match(octreePipelinedMGPCGShader,
+    /fn reduceAndFinishMerged[\s\S]*for \(var block = 0u; block < blocks; block \+= 1u\)[\s\S]*let row = block \* REDUCTION_LANES \+ lane[\s\S]*combinedBlocks\[block\] = merged\[0\][\s\S]*mergeScalars\(local, combinedBlocks\[lane\]\)[\s\S]*finishMergedTotal\(merged\[0\]\)/);
+  assert.match(octreePipelinedMGPCGShader,
+    /fn reduceAndFinishDirectionCurvature[\s\S]*local\.delta = addCompensatedF32\(local\.delta, d \* image\)[\s\S]*finishDirectionCurvatureTotal\(merged\[0\]\)/,
+    "combined curvature must retain direct p^T A2 p instead of a recurrence");
 });
 
 test("pipelined solve row count comes only from the accepted structured authority", () => {
@@ -309,7 +358,8 @@ test("MGPCG activity variant is conditional, exhaustive, bounded, and storage-sa
   });
   const activitySource = octreePipelinedMGPCGActivityShader(enabled);
   const descriptors = Object.values(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS);
-  assert.equal(descriptors.length, 12);
+  assert.equal(descriptors.length, 14,
+    "the two combined drains remain fully instrumented beside the A/B control");
   assert.equal((activitySource.match(/fluidGpuLogicalActivitySubgroup\(/g) ?? []).length,
     descriptors.length,
   "every compute entry point has one uniform active-lane ballot at entry");
@@ -369,6 +419,18 @@ test("construction rejects an unproven preconditioner before allocating GPU stat
   assert.equal(allocations, 0);
 });
 
+test("combined drains reject capacities above the measured factor-1 ceiling", () => {
+  assert.throws(() => new WebGPUOctreePipelinedMGPCG(
+    {} as GPUDevice,
+    {} as never,
+    {
+      rowCapacity: 4_097,
+      maximumIterations: 4,
+      factorOneCombinedReductionDrains: true,
+    },
+  ), /row capacity at most 4,096/);
+});
+
 test("construction rejects a device without subgroups instead of compiling a fallback", () => {
   const buffer = (size: number) => ({ size }) as GPUBuffer;
   let allocations = 0;
@@ -398,7 +460,7 @@ test("construction rejects a device without subgroups instead of compiling a fal
   assert.equal(allocations, 0);
 });
 
-test("orchestrator encodes direct direction curvature after every live update", () => {
+test("factor-1 combined drains remove exactly two outer dispatches and transitions", () => {
   Object.assign(globalThis, {
     GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
   });
@@ -407,6 +469,7 @@ test("orchestrator encodes direct direction curvature after every live update", 
   const pipelines: string[] = [];
   const createdPipelines: GPUComputePipeline[] = [];
   const modules: string[] = [];
+  const parameterWrites: number[][] = [];
   const stageBindings = new Map<string, number[]>();
   const buffer = (size: number, label = "external") =>
     ({ size, label, destroy() { this.destroyed = true; } }) as MockBuffer;
@@ -416,7 +479,15 @@ test("orchestrator encodes direct direction curvature after every live update", 
       maxComputeInvocationsPerWorkgroup: 1024,
       maxComputeWorkgroupStorageSize: 32 * 1024,
     },
-    queue: { writeBuffer() {} },
+    queue: {
+      writeBuffer(_target: GPUBuffer, _offset: number, source: BufferSource) {
+        parameterWrites.push(Array.from(
+          new Uint32Array(source instanceof ArrayBuffer
+            ? source : source.buffer, source instanceof ArrayBuffer ? 0 : source.byteOffset,
+          Math.floor(source.byteLength / Uint32Array.BYTES_PER_ELEMENT)),
+        ));
+      },
+    },
     createBuffer(descriptor: GPUBufferDescriptor) {
       const result = buffer(Number(descriptor.size), String(descriptor.label));
       buffers.push(result);
@@ -468,7 +539,10 @@ test("orchestrator encodes direct direction curvature after every live update", 
   };
   usePerformanceInstrumentationStore.getState().setMode("activity");
   const solver = new WebGPUOctreePipelinedMGPCG(
-    device, source, { rowCapacity: 64, maximumIterations: 4 },
+    device, source, {
+      rowCapacity: 64, maximumIterations: 10,
+      factorOneCombinedReductionDrains: true,
+    },
   );
   usePerformanceInstrumentationStore.getState().setMode("off");
   assert.equal(createdPipelines.length, Object.keys(OCTREE_PIPELINED_MGPCG_ACTIVITY_TASKS).length);
@@ -512,17 +586,22 @@ test("orchestrator encodes direct direction curvature after every live update", 
   solver.encode(new PassBroker(encoder), {
     pressureSeed: buffer(4 * 64),
     pressureOut: buffer(4 * 64),
+    encodedIterationBudget: 4,
   });
 
   assert.equal(setups, 1);
   assert.equal(corrections, 5, "initial M plus one fixed M application per outer iteration");
-  assert.equal(pipelines.filter((name) => name === "finishMergedReduction").length, 5,
-    "initialization plus each outer iteration has one residual reduction finish");
-  assert.equal(pipelines.filter((name) => name === "finishDirectionCurvature").length, 4);
+  assert.equal(pipelines.filter((name) => name === "finishMergedReduction").length, 1,
+    "only initialization retains the staged residual reduction");
+  assert.equal(pipelines.filter((name) => name === "reduceAndFinishMerged").length, 4);
+  assert.equal(pipelines.filter(
+    (name) => name === "reduceAndFinishDirectionCurvature",
+  ).length, 4);
+  assert.equal(pipelines.filter((name) => name === "finishDirectionCurvature").length, 0);
   assert.equal(pipelines.filter((name) => name === "resolved-row-operator").length, 6,
     "one initial A(x) plus A(Mr) for the initial and every outer recurrence");
-  assert.equal(pipelines.filter((name) => name === "reduceMergedPartials").length, 5);
-  assert.equal(pipelines.filter((name) => name === "reduceDirectionCurvaturePartials").length, 4);
+  assert.equal(pipelines.filter((name) => name === "reduceMergedPartials").length, 1);
+  assert.equal(pipelines.filter((name) => name === "reduceDirectionCurvaturePartials").length, 0);
   const initialReduction = pipelinePasses.findIndex(({ name }) => name === "reduceMergedPartials");
   const initialDirections = pipelinePasses.findIndex(({ name }) => name === "initializeDirections");
   const initialFinish = pipelinePasses.findIndex(({ name }) => name === "finishMergedReduction");
@@ -533,13 +612,25 @@ test("orchestrator encodes direct direction curvature after every live update", 
     "the GPU-zeroed initial direction tail must be consumed in a later pass");
   assert.deepEqual(indirectOffsets, [
     0, 0, 32, 48,
-    0, 32, 48, 16,
-    64, 96, 112, 80,
-    128, 160, 176, 144,
-    192, 224, 240, 208,
+    0, 48,
+    64, 112,
+    128, 176,
+    192, 240,
     0,
   ]);
   assert.equal(solver.reductionsPerOuterIteration, 2);
+  assert.equal(solver.encodedPassTransitionCountPerIteration, 2);
+  assert.equal(solver.encodedDispatchCount, 119,
+    "allocation and the production graph retain the ten-iteration envelope");
+  assert.equal(solver.encodedDispatchCountFor(4), 59);
+  assert.equal(solver.encodedDispatchCountFor(6), 79,
+    "four dead outer iterations remove forty encoded dispatch records in this fixture");
+  assert.equal(parameterWrites[0]?.[1], 10,
+    "construction publishes the immutable production envelope");
+  assert.deepEqual(parameterWrites.at(-1), [4],
+    "encode publishes the selected prefix so GPU exhaustion remains fail closed");
+  assert.throws(() => solver.encodedDispatchCountFor(3), /planned envelope/);
+  assert.throws(() => solver.encodedDispatchCountFor(11), /planned envelope/);
   assert.deepEqual(modules, [
     "Octree pipelined MGPCG · M1 Max 128-lane subgroups",
   ], "only the measured target module is compiled");
@@ -550,17 +641,48 @@ test("orchestrator encodes direct direction curvature after every live update", 
     "Pipelined MGPCG · formInitialResidual": [0, 2, 8, 12, 13, 16],
     "Pipelined MGPCG · reduceMergedPartials": [0, 2, 8, 9, 10, 13, 14, 16],
     "Pipelined MGPCG · finishMergedReduction": [0, 2, 13, 14, 15],
-    "Pipelined MGPCG · reduceDirectionCurvaturePartials": [0, 2, 11, 12, 13, 14],
-    "Pipelined MGPCG · finishDirectionCurvature": [0, 2, 13, 14, 15],
+    "Pipelined MGPCG · reduceAndFinishMerged": [0, 2, 8, 9, 10, 13, 15, 16],
+    "Pipelined MGPCG · reduceAndFinishDirectionCurvature": [0, 2, 11, 12, 13, 15],
     "Pipelined MGPCG · initializeDirections": [0, 2, 9, 10, 11, 12, 13],
     "Pipelined MGPCG · advancePCGState": [0, 2, 7, 8, 11, 12, 13],
     "Pipelined MGPCG · updateDirections": [0, 2, 9, 11, 13],
     "Pipelined MGPCG · finalizeAndPublish": [0, 2, 5, 6, 7, 13],
-  }, "every stage bind group must contain exactly its statically reachable shader bindings");
+  }, "every combined-path stage bind group must contain its exact reachable shader bindings");
   assert.ok(buffers.some((candidate) =>
     candidate.label === "Pipelined MGPCG GPU-zeroed outer tail"));
   solver.destroy();
   assert.ok(buffers.every((candidate) => candidate.destroyed));
+});
+
+test("Dawn accepts both combined reduction-drain entry points", {
+  skip: !process.env.WEBGPU_NODE_MODULE
+    && "set WEBGPU_NODE_MODULE for combined reduction WGSL validation",
+}, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU;
+    globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter();
+  assert.ok(adapter);
+  const device = await adapter.requestDevice({ requiredFeatures: ["subgroups"] });
+  device.pushErrorScope("validation");
+  const module = device.createShaderModule({ code: octreePipelinedMGPCGShader });
+  const info = await module.getCompilationInfo();
+  assert.deepEqual(info.messages.filter((message) => message.type === "error").map(
+    (message) => `${message.lineNum}:${message.linePos} ${message.message}`,
+  ), []);
+  for (const entryPoint of [
+    "reduceAndFinishMerged", "reduceAndFinishDirectionCurvature",
+  ]) {
+    device.createComputePipeline({
+      layout: "auto", compute: { module, entryPoint },
+    });
+  }
+  const validation = await device.popErrorScope();
+  assert.equal(validation, null, validation?.message);
+  device.destroy();
 });
 
 test("Dawn executes a manufactured one-row solve through direct-curvature PCG", {

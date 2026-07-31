@@ -1396,6 +1396,21 @@ fn recordPhysicsPhaseBoundary(
     const prediction = this.stepPredictions.take(record.stamp.step);
     if (!prediction) return;
     const observation = structuredStepWorkObservation(record);
+    if (observation.executedSolveIterations !== undefined
+      && observation.solveConverged !== undefined
+      && observation.topologyFlipReady !== undefined
+      && observation.topologyEpochError !== undefined
+      && observation.topologyHash !== undefined) {
+      this.octreeProjection?.observeFactorOneSolveTail({
+        step: observation.step,
+        publishedIterationCount: observation.executedSolveIterations,
+        converged: observation.solveConverged,
+        acceptedTopologyEpoch: observation.acceptedEpoch,
+        topologyHash: observation.topologyHash,
+        topologyFlipReady: observation.topologyFlipReady,
+        topologyEpochError: observation.topologyEpochError,
+      });
+    }
     const failures = physicsStepPredictionFailures(prediction, {
       step: observation.step,
       executedSolveIterations: observation.executedSolveIterations,
@@ -2155,6 +2170,7 @@ fn recordPhysicsPhaseBoundary(
             this.info.ny,
             this.info.nz,
             {
+              step: this.info.encodedSteps ?? 0,
               productionBoundary: physicsTrace || shouldCaptureLogicalActivity ? (phase, completedEncoder) => {
                 return completePhysicsPhase(completedEncoder, OCTREE_SEMANTIC_TRACE_PHASE[phase]);
               } : undefined,

@@ -9,6 +9,8 @@ import {
   validateOctreeTopologyCandidate,
   type OctreeTopologyEpochState,
 } from "../lib/webgpu-octree-topology-epoch";
+import { WebGPUOctreeSimulationOwnerPages } from "../lib/webgpu-octree-owner-pages";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 
 function state(): OctreeTopologyEpochState {
   return {
@@ -110,6 +112,66 @@ test("GPU row publication is candidate-isolated and requires the successful epoc
   assert.match(octreeTopologyEpochWGSL,
     /retained=select\(0u,acceptedStructured\[2u\][\s\S]*rowCountControl\[0u\]=select\(retained,epoch\.rowCount,commit\)/,
     "a rejected candidate must restore the row count from accepted Section 4 authority, not rejection scratch");
+});
+
+test("ready topology singleton handoffs retain only the storage-to-indirect boundary", () => {
+  const events: string[] = [];
+  let passIndex = 0;
+  const encoder = {
+    beginComputePass(descriptor?: GPUComputePassDescriptor) {
+      const index = ++passIndex;
+      events.push(`begin:${descriptor?.label}`);
+      return {
+        setPipeline(pipeline: unknown) { events.push(`pipeline:${pipeline}`); },
+        setBindGroup(_index: number, group: unknown) { events.push(`group:${group}`); },
+        dispatchWorkgroups(count: number) { events.push(`dispatch:${count}`); },
+        dispatchWorkgroupsIndirect(buffer: unknown, offset: number) {
+          events.push(`indirect:${buffer}@${offset}`);
+        },
+        end() { events.push(`end:${index}`); },
+      };
+    },
+  } as unknown as GPUCommandEncoder;
+  const broker = new PassBroker(encoder, { isolateLabels: false });
+  const epoch = {
+    destroyed: false,
+    validateExpectedGeneration() {},
+    commitGatePipeline: "gate-pipeline",
+    commitGateGroup: "gate-group",
+    prepareCommitRowsPipeline: "prepare-pipeline",
+    prepareCommitRowsGroup: "prepare-group",
+    commitRowsPipeline: "rows-pipeline",
+    commitRowsGroup: "rows-group",
+    commitRowsDispatch: "rows-dispatch",
+  } as unknown as WebGPUOctreeTopologyEpoch;
+  WebGPUOctreeTopologyEpoch.prototype.encodeReadyCommitGate.call(epoch, broker, 7);
+
+  assert.equal(broker.computePassCount, 2,
+    "gate+prepare share one pass; the indirect row consumer opens the second");
+  assert.equal(broker.hasOpenComputePass, true,
+    "accepted rows must leave the coupled storage commit pass open");
+
+  const ownerPages = {
+    destroyed: false,
+    topologyResidency: {},
+    topologyGroup: "owner-group",
+    commit: "owner-pipeline",
+  } as unknown as WebGPUOctreeSimulationOwnerPages;
+  WebGPUOctreeSimulationOwnerPages.prototype.encodeReadyCommit.call(ownerPages, broker);
+  assert.equal(broker.computePassCount, 2,
+    "owner publication must join the accepted-row storage pass");
+  broker.fence("downstream publication boundary");
+
+  assert.deepEqual(events, [
+    "begin:Open coupled topology ready-commit gate",
+    "pipeline:gate-pipeline", "group:gate-group", "dispatch:1",
+    "pipeline:prepare-pipeline", "group:prepare-group", "dispatch:1",
+    "end:1",
+    "begin:Commit accepted topology row identities and pressure seed",
+    "pipeline:rows-pipeline", "group:rows-group", "indirect:rows-dispatch@0",
+    "group:owner-group", "pipeline:owner-pipeline", "dispatch:1",
+    "end:2",
+  ]);
 });
 
 test("coupled validation decodes descriptor and SPGrid candidate control ABIs exactly", () => {

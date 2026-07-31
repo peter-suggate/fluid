@@ -248,6 +248,20 @@ test("structured power lanes own exhaustive thresholds and raster policy", () =>
   assert.ok(moving.acceptance.some(({ id, expected }) => id === "minimal-power-variational-residual" && expected === 3.5e-6));
   assert.ok(moving.acceptance.some(({ id, expected }) => id === "fine-transport-unavailable" && expected === 0.08));
   assert.ok(moving.hooks.some(({ id }) => id === "water-raster-integrity"));
+
+  const coarseSurface = getSceneWebGPUSmokeLane("minimal-power-dam-break-32", "surface-regression");
+  assert.deepEqual(coarseSurface.stop, { simulatedTime_s: 0.5, exactSteps: 125, maxDt_s: 0.004 });
+  assert.equal(coarseSurface.methods[0].overrides.globalFineLevelSetFactor, "1");
+  assert.equal(coarseSurface.collect.raster, "checkpoints");
+  assert.equal(coarseSurface.collect.checkpointEvery_s, 0.5);
+  assert.ok(coarseSurface.acceptance.some(({ id, expected }) =>
+    id === "coarse-surface-interface-area" && expected === 1.1));
+  assert.ok(coarseSurface.acceptance.some(({ id, expected }) =>
+    id === "coarse-surface-active-cubes" && expected === 5_200));
+  assert.ok(coarseSurface.acceptance.some(({ id, expected }) =>
+    id === "coarse-surface-resident-pages" && expected === 480));
+  assert.ok(coarseSurface.acceptance.some(({ id, expected }) =>
+    id === "coarse-surface-no-rejected-generations" && expected === 0));
 });
 
 test("ceiling smoke follows its dedicated band-1 UI profile only", () => {

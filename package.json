@@ -98,6 +98,7 @@
     "cleanup:artifacts": "node --import tsx tools/cleanup-profile-artifacts.ts",
     "profile:power-dam-mini": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --profile",
     "profile:power-dam-mini:pressure-micro": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --profile --pass-timestamps --isolate-pass-labels --pressure-micro-stages --steps=125",
+    "profile:power-dam-mini:pressure-kernels": "FLUID_FINE_FACTOR=${FLUID_FINE_FACTOR:-1} node --import tsx tools/benchmark-power-dam.ts --lane=mini --pressure-kernel-profile --steps=125",
     "profile:power-dam-mini:fine": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --fine-timestamps",
     "profile:power-dam-ui": "FLUID_MAX_PRESSURE_NON_SOLVE_MS=${FLUID_MAX_PRESSURE_NON_SOLVE_MS:-4} node --import tsx tools/benchmark-power-dam.ts --lane=ui --profile",
     "capture:octree-regression-mini": "node --import tsx tools/benchmark-power-dam.ts --lane=mini --profile --artifact=artifacts/octree-regression/mini.json",

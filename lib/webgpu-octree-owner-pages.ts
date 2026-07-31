@@ -1438,7 +1438,9 @@ export class WebGPUOctreeSimulationOwnerPages {
     pass.setBindGroup(0, this.topologyGroup);
     pass.setPipeline(this.commit);
     pass.dispatchWorkgroups(1);
-    broker.fence("ready owner-page generation published");
+    // The coupled ready-commit caller immediately follows with storage-only
+    // authority commits on the same broker. Dispatch ordering supplies their
+    // visibility; the caller closes the publication pass after Section 5.
   }
 
   /** One-time GPU-only analytic candidate preparation. The ordinary coupled

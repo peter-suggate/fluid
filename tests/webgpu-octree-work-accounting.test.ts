@@ -208,6 +208,28 @@ test("pressure solve telemetry decodes all fixed layers and a zero-work converge
   assert.equal(accounting.snapshot().stages["pressure-solve"].reductionPasses, 2);
 });
 
+test("combined outer drains account for one physical reduction workgroup", () => {
+  const controls = pressureControls(2);
+  const staged = decodeOctreePressureSolveWork(controls, pressurePlan);
+  const combined = decodeOctreePressureSolveWork(controls, {
+    ...pressurePlan,
+    combinedReductionDrains: true,
+  });
+  assert.equal(staged.blocker, null);
+  assert.equal(combined.blocker, null);
+
+  const oldOuter = staged.report!.layers["outer-pipelined-mgpcg"]!;
+  const newOuter = combined.report!.layers["outer-pipelined-mgpcg"]!;
+  assert.equal(newOuter.encodedDispatches, oldOuter.encodedDispatches
+    - 2 * pressurePlan.maximumOuterIterations);
+  assert.equal(newOuter.executedDispatches, oldOuter.executedDispatches - 3);
+  assert.equal(newOuter.scheduledLanes, oldOuter.scheduledLanes - 3 * 128);
+  assert.equal(newOuter.activeLanes, oldOuter.activeLanes - 3 * 128);
+  assert.equal(newOuter.estimatedBytesMoved, oldOuter.estimatedBytesMoved - 3 * 32);
+  assert.equal(newOuter.reductionPasses, oldOuter.reductionPasses,
+    "the exact arithmetic reductions survive even though their global partial dispatches do not");
+});
+
 test("pressure telemetry gives an initially converged solve no nested tail credit", () => {
   const decoded = decodeOctreePressureSolveWork(pressureControls(0), pressurePlan);
   assert.equal(decoded.blocker, null);

@@ -962,6 +962,28 @@ export type SvoDryRayCoherenceMode = "off" | "static-primary";
 
 export type SvoDryPrimaryCoherenceDecision = "trace" | "reuse";
 
+/**
+ * Dawn occupancy experiments. Every arm remains independently selectable for
+ * controlled A/Bs; only the safe reduced-split diagnostic diet is enabled by
+ * the renderer default.
+ */
+export interface SvoDryOptimizationExperiments {
+  /** Remove the production cost-overlay counters from reduced split shaders. */
+  readonly stripDiagnostics?: boolean;
+  /** Trace incoherent 2x2 receivers in the coherent kernel instead of queueing them. */
+  readonly inlineConeBoundaries?: boolean;
+  /** Replace the one-thread queue-reset dispatch with a Dawn/Metal blit clear. */
+  readonly clearConeQueueWithBlit?: boolean;
+  /** Keep guided-upsample accumulators in native f16 registers. */
+  readonly halfPrecisionLighting?: boolean;
+  /** Drop the invocation-private GI page cache and re-fetch the direct table. */
+  readonly dropGiPageCache?: boolean;
+  /** Halve the canonical traversal stack for bounded-depth occupancy experiments. */
+  readonly shortTraversalStack?: boolean;
+  /** Quarter the canonical traversal stack as an overflow/fallback probe. */
+  readonly tinyTraversalStack?: boolean;
+}
+
 /** Pure policy seam used by the renderer and by fail-closed contract tests. */
 export function svoDryPrimaryCoherenceDecision(
   mode: SvoDryRayCoherenceMode,
@@ -1066,6 +1088,7 @@ export function createSvoDrySceneFragmentWGSL(
   rasterRigidDiscovery = false,
   /** Reduced split-only experiment: execute one deterministic cone per compute lane. */
   coneFanout = false,
+  experiments: SvoDryOptimizationExperiments = {},
 ): string {
   if (pixelProbe && (coneLightingScale !== 1 || shadingPath !== "inline")) {
     throw new RangeError("The pixel-trace probe requires the inline, full-rate dry-scene composition");
@@ -1098,6 +1121,16 @@ export function createSvoDrySceneFragmentWGSL(
   }
   const reduced = coneLightingScale !== 1;
   const split = shadingPath !== "inline";
+  // Full-rate/inline shaders still own the diagnostic overlay. The reduced
+  // split shaders are never selected while that overlay is active, so their
+  // counters are dead production state and can be removed safely.
+  const stripDiagnostics = experiments.stripDiagnostics === true && reduced && split;
+  if (experiments.halfPrecisionLighting && !reduced) {
+    throw new RangeError("Half-precision lighting is restricted to reduced-rate shaders");
+  }
+  const inlineBoundaryWGSL = experiments.inlineConeBoundaries
+    ? "let opaque=traceOpaqueScene(ray[0],ray[1]);dryPrepassStore(coordinate,opaque,ray[0],ray[1]);return;"
+    : "let queueIndex=atomicAdd(&dryPrepassBoundaryQueue.count,1u);dryPrepassBoundaryQueue.coordinates[queueIndex]=globalId.y*dimensions.x+globalId.x;return;";
   const canonicalTraversal = traversalMode === "canonical" || traversalMode === "canonical-parametric";
   const wideTraversalWGSL = canonicalTraversal || traversalMode === "compact"
     ? ""
@@ -1105,7 +1138,8 @@ export function createSvoDrySceneFragmentWGSL(
   const compactTraversalWGSL = traversalMode === "compact" ? createWebgpuSvoCompactTraversalWGSL(11) : "";
   const compactTraversal = traversalMode === "compact";
   const canonicalTraversalWGSL = createWebgpuSvoTraversalWGSL({ control: 2, nodes: 3, leaves: 4,
-    childEnumeration: traversalMode === "canonical-parametric" ? "parametric" : "aabb" });
+    childEnumeration: traversalMode === "canonical-parametric" ? "parametric" : "aabb",
+    stackCapacity: experiments.tinyTraversalStack ? 8 : experiments.shortTraversalStack ? 16 : 32 });
   const screenSpaceTraversalWGSL = screenSpaceTerminationPixels > 0
     ? createSvoScreenSpaceTraversalWGSL(canonicalTraversalWGSL) : "";
   const leafAccessWGSL = compactTraversal ? /* wgsl */ `
@@ -1539,7 +1573,7 @@ fn dryPrepassStore(coordinate:vec2i,opaque:DryHit,ro:vec3f,rd:vec3f){if(!(opaque
   if(allMiss){dryPrepassStore(coordinate,missHit(),ray[0],ray[1]);return;}
   let referenceGeometry=primaryGeometry[3];let referenceIdentity=primaryIdentity[3];var homogeneous=referenceGeometry.w<DRY_MISS;
   for(var sample=0u;sample<3u;sample+=1u){let geometry=primaryGeometry[sample];let hit=geometry.w<DRY_MISS;let sameIdentity=(primaryIdentity[sample].x&0x8000ffffu)==(referenceIdentity.x&0x8000ffffu)&&primaryIdentity[sample].y==referenceIdentity.y;let depthClose=abs(geometry.w-referenceGeometry.w)<=max(.0001,.01*referenceGeometry.w);let normalClose=dot(normalize(geometry.xyz),normalize(referenceGeometry.xyz))>=.9999;homogeneous=homogeneous&&hit&&sameIdentity&&depthClose&&normalClose;}
-  if(!homogeneous){let queueIndex=atomicAdd(&dryPrepassBoundaryQueue.count,1u);dryPrepassBoundaryQueue.coordinates[queueIndex]=globalId.y*dimensions.x+globalId.x;return;}
+  if(!homogeneous){${inlineBoundaryWGSL}}
   let metadata=referenceIdentity.y;let packedMaterial=referenceIdentity.x;let material=select(packedMaterial&0xffffu,0x80000000u|(packedMaterial&0xffffu),(packedMaterial&0x80000000u)!=0u);let opaque=DryHit(referenceGeometry.w,normalize(referenceGeometry.xyz),material,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));dryPrepassStore(coordinate,opaque,ray[0],ray[1]);
 }
 @compute @workgroup_size(64) fn dryPrepassBoundaryMain(@builtin(global_invocation_id) globalId:vec3u){
@@ -1707,7 +1741,7 @@ fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
   textureStore(dryWorldGiOutput,coordinate,vec4f(value.radiance,value.visibility));
 }
 ` : "";
-  return /* wgsl */ `
+  let shader = /* wgsl */ `
 ${svoTerrainMaterialWGSL}
 ${svoMaterialWGSL}
 ${svoProceduralMaterialWGSL}
@@ -2524,6 +2558,87 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u),0.0);
 }
 ${splitEntryWGSL}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions()) : ""}`;
+  if (stripDiagnostics) {
+    const counterNames = [
+      "dryPrimaryNodeVisits", "dryPrimaryLeafVisits", "dryPrimaryEmptyBrickSkips",
+      "dryPrimaryVoxelWorkItems", "dryPrimaryExactTests", "dryPrimaryMaximumDepth",
+      "dryShadowNodeVisits", "dryShadowLeafVisits", "dryShadowWorkItems",
+      "dryMipSteps", "dryTraversalFailure",
+    ];
+    // The overlay is the only observer of these invocation-private values.
+    // Make it a passthrough first, then erase every counter write and declaration
+    // so Tint cannot conservatively keep their live ranges.
+    shader = shader.replace(
+      /fn dryNormalizedCost[\s\S]*?(?=fn dryBoundThickGlassOwner)/,
+      "fn dryCostOverlay(radianceDepth:vec4f)->vec4f{return radianceDepth;}\n",
+    );
+    for (const name of counterNames) {
+      shader = shader
+        .replace(new RegExp(`var<private> ${name}:u32;`, "g"), "")
+        .replace(new RegExp(`${name}=(?:max\\([^;]+\\)|select\\([^;]+\\)|[^;]+);`, "g"), "")
+        .replace(new RegExp(`${name}\\+=([^;]+);`, "g"), "");
+    }
+  }
+  if (experiments.dropGiPageCache) {
+    shader = shader.replace("var<private> dryGiPageCache:DryNodeMipPageCache;", "");
+    const loadStart = shader.indexOf("fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceConeSourceSample{");
+    const loadEnd = shader.indexOf("struct DryGlobalIllumination", loadStart);
+    if (loadStart < 0 || loadEnd < 0) throw new Error("GI page-cache source drifted");
+    const prefix = shader.slice(0, loadStart);
+    const load = shader.slice(loadStart, loadEnd)
+      .replace("{\n  if(!dryNodeMipReady())", "{\n  var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);\n  if(!dryNodeMipReady())")
+      .replaceAll("dryGiPageCache", "pageCache");
+    const suffix = shader.slice(loadEnd)
+      .replaceAll("dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);", "");
+    shader = prefix + load + suffix;
+  }
+  if (experiments.halfPrecisionLighting) {
+    const original = "var accumulated0=vec4f(0.0);var accumulated1=vec4f(0.0);var accumulated2=vec4f(0.0);var weightSum=0.0;"
+      + "\n  var accumulatedRadiance=vec4f(0.0);var radianceWeightSum=0.0;var accumulatedGi=vec4f(0.0);var giWeightSum=0.0;";
+    const half = "var accumulated0=vec4h(0.0h);var accumulated1=vec4h(0.0h);var accumulated2=vec4h(0.0h);var weightSum=0.0h;"
+      + "\n  var accumulatedRadiance=vec4h(0.0h);var radianceWeightSum=0.0h;var accumulatedGi=vec4h(0.0h);var giWeightSum=0.0h;";
+    if (!shader.includes(original)) throw new Error("Half-precision accumulator source drifted");
+    shader = `enable f16;\n${shader.replace(original, half)
+      .replace("accumulated0+=dryPrepassUnpack0(packed)*weight;", "accumulated0+=vec4h(dryPrepassUnpack0(packed))*f16(weight);")
+      .replace("accumulated1+=dryPrepassUnpack1(packed)*weight;", "accumulated1+=vec4h(dryPrepassUnpack1(packed))*f16(weight);")
+      .replace("accumulated2+=dryPrepassUnpack2(packed)*weight;", "accumulated2+=vec4h(dryPrepassUnpack2(packed))*f16(weight);")
+      .replace("accumulatedGi+=textureLoad(dryPrepassRadianceTexture,texel,0)*weight;giWeightSum+=weight;",
+        "accumulatedGi+=vec4h(textureLoad(dryPrepassRadianceTexture,texel,0))*f16(weight);giWeightSum+=f16(weight);")
+      .replace("accumulatedRadiance+=textureLoad(dryPrepassRadianceTexture,texel,0)*weight;radianceWeightSum+=weight;",
+        "accumulatedRadiance+=vec4h(textureLoad(dryPrepassRadianceTexture,texel,0))*f16(weight);radianceWeightSum+=f16(weight);")
+      .replace("weightSum+=weight;", "weightSum+=f16(weight);")
+      .replace("if(weightSum<", "if(f32(weightSum)<")
+      .replace("dryPrepassData0=accumulated0/weightSum;dryPrepassData1=accumulated1/weightSum;dryPrepassData2=accumulated2/weightSum;",
+        "dryPrepassData0=accumulated0/weightSum;dryPrepassData1=accumulated1/weightSum;dryPrepassData2=accumulated2/weightSum;")
+      .replace("if(giWeightSum>=", "if(f32(giWeightSum)>=")
+      .replace("dryPrepassGi=accumulatedGi/giWeightSum;", "dryPrepassGi=accumulatedGi/giWeightSum;")
+      .replace("&&radianceWeightSum>1e-6", "&&f32(radianceWeightSum)>1e-6")
+      .replace("dryPrepassRadiance=accumulatedRadiance/radianceWeightSum;",
+        "dryPrepassRadiance=accumulatedRadiance/radianceWeightSum;")
+      .replaceAll("var<private> dryPrepassData0:vec4f;", "var<private> dryPrepassData0:vec4h;")
+      .replaceAll("var<private> dryPrepassData1:vec4f;", "var<private> dryPrepassData1:vec4h;")
+      .replaceAll("var<private> dryPrepassData2:vec4f;", "var<private> dryPrepassData2:vec4h;")
+      .replaceAll("var<private> dryPrepassRadiance:vec4f;", "var<private> dryPrepassRadiance:vec4h;")
+      .replaceAll("var<private> dryPrepassGi:vec4f;", "var<private> dryPrepassGi:vec4h;")
+      .replace("return dryPrepassData0[index];", "return f32(dryPrepassData0[index]);")
+      .replace("return dryPrepassData1[index-4u];", "return f32(dryPrepassData1[index-4u]);")
+      .replace("return dryPrepassData2[min(index-8u,3u)];", "return f32(dryPrepassData2[min(index-8u,3u)]);")
+      .replaceAll("dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);",
+        "dryPrepassData0=vec4h(1.0h);dryPrepassData1=vec4h(1.0h);dryPrepassData2=vec4h(1.0h);dryPrepassRadiance=vec4h(0.0h);dryPrepassGi=vec4h(0.0h,0.0h,0.0h,1.0h);")
+      .replace("dryPrepassData0.x*(prepassUnblocked/f32(prepassSamples))",
+        "f32(dryPrepassData0.x)*(prepassUnblocked/f32(prepassSamples))")
+      .replace("return max(dryPrepassRadiance.rgb,vec3f(0.0));",
+        "return max(vec3f(dryPrepassRadiance.rgb),vec3f(0.0));")
+      .replace("return DryGlobalIllumination(max(dryPrepassGi.rgb,vec3f(0.0)),clamp(dryPrepassGi.a,0.0,1.0));",
+        "return DryGlobalIllumination(max(vec3f(dryPrepassGi.rgb),vec3f(0.0)),clamp(f32(dryPrepassGi.a),0.0,1.0));")
+      .replaceAll("dryPrepassData0=dryPrepassUnpack0(packed);dryPrepassData1=dryPrepassUnpack1(packed);dryPrepassData2=dryPrepassUnpack2(packed);",
+        "dryPrepassData0=vec4h(dryPrepassUnpack0(packed));dryPrepassData1=vec4h(dryPrepassUnpack1(packed));dryPrepassData2=vec4h(dryPrepassUnpack2(packed));")
+      .replace("dryPrepassRadiance=textureSampleLevel(dryPrepassRadianceTexture,nodeMipSampler,pixel/max(uniforms.viewport.xy,vec2f(1.0)),0.0);",
+        "dryPrepassRadiance=vec4h(textureSampleLevel(dryPrepassRadianceTexture,nodeMipSampler,pixel/max(uniforms.viewport.xy,vec2f(1.0)),0.0));")
+      .replace("dryPrepassRadiance=textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0);",
+        "dryPrepassRadiance=vec4h(textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0));")}`;
+  }
+  return shader;
 }
 
 const drySceneShader = createSvoDrySceneFragmentWGSL(1);
@@ -2808,6 +2923,7 @@ export class SparseVoxelDrySceneRenderer {
     private readonly rasterGlassDiscovery = false,
     private readonly rasterRigidDiscovery = false,
     private readonly coneFanout = false,
+    private readonly experiments: SvoDryOptimizationExperiments = { stripDiagnostics: true },
   ) {
     if (targetFormat !== SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat) {
       throw new Error(`Sparse voxel dry scene location 0 must use ${SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat}`);
@@ -3123,15 +3239,18 @@ export class SparseVoxelDrySceneRenderer {
     });
     const layout = this.layout;
     const vertexModule = this.vertexModule;
+    const shaderExperiments = scale === 1 && this.experiments.halfPrecisionLighting
+      ? { ...this.experiments, halfPrecisionLighting: false }
+      : this.experiments;
     const compile = (async (): Promise<SvoDrySplitPipelineBundle> => {
       const [module, rasterRigidModule] = await Promise.all([
         checkedModule(this.device, `Sparse voxel dry scene split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
           createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split", 0, false,
-            this.rasterGlassDiscovery, false, this.coneFanout && scale !== 1)),
+            this.rasterGlassDiscovery, false, this.coneFanout && scale !== 1, shaderExperiments)),
         this.rasterRigidDiscovery
           ? checkedModule(this.device, `Sparse voxel dry scene raster-rigid split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
             createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split", 0, false,
-              this.rasterGlassDiscovery, true, this.coneFanout && scale !== 1))
+              this.rasterGlassDiscovery, true, this.coneFanout && scale !== 1, shaderExperiments))
           : Promise.resolve(undefined),
       ]);
       const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
@@ -3345,7 +3464,8 @@ export class SparseVoxelDrySceneRenderer {
       return;
     }
     const compile = (async (): Promise<SvoDryConePipelineBundle> => {
-      const module = await checkedModule(this.device, `Sparse voxel dry scene cone prepass (x${scale}, ${this.traversalMode}, brick-${this.brickOccupancyMode})`, createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode));
+      const module = await checkedModule(this.device, `Sparse voxel dry scene cone prepass (x${scale}, ${this.traversalMode}, brick-${this.brickOccupancyMode})`,
+        createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "inline", 0, false, false, false, false, this.experiments));
       this.conePrepassLayout ??= this.device.createBindGroupLayout({
         label: "Sparse voxel cone-prepass outputs",
         entries: [
@@ -3586,7 +3706,7 @@ export class SparseVoxelDrySceneRenderer {
       this.conePrepassBoundaryQueue = this.device.createBuffer({
         label: "Sparse voxel compact cone-boundary queue",
         size: 4 * (1 + width * height),
-        usage: GPUBufferUsage.STORAGE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
       });
       this.conePrepassComputeBindGroup = this.device.createBindGroup({
         label: "Sparse voxel compact cone-prepass output binding",
@@ -3979,6 +4099,13 @@ export class SparseVoxelDrySceneRenderer {
     this.clearPrimaryVisibilityCache();
   }
 
+  /** Copies the compacted boundary count for offline Dawn experiment diagnosis. */
+  copyConeBoundaryCount(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    if (!this.conePrepassBoundaryQueue) return false;
+    encoder.copyBufferToBuffer(this.conePrepassBoundaryQueue, 0, target, 0, 4);
+    return true;
+  }
+
   /** Auxiliary MRTs and reversed-Z depth for picking and split shading. */
   get gBufferTextures(): SparseVoxelGBufferTextures | undefined {
     return this.gBufferTargets.textures;
@@ -4339,19 +4466,24 @@ export class SparseVoxelDrySceneRenderer {
       }
 
       if (usePrepass) {
+        if (this.experiments.clearConeQueueWithBlit) encoder.clearBuffer(this.conePrepassBoundaryQueue!, 0, 4);
         const coherent = encoder.beginComputePass({ label: "Sparse voxel compact cone visibility" });
-        coherent.setPipeline(this.conePrepassResetPipeline!);
-        coherent.setBindGroup(0, this.bindGroup);
-        coherent.setBindGroup(1, this.conePrepassComputeBindGroup!);
-        coherent.setBindGroup(splitGroup, this.splitLightingBindGroup!);
-        coherent.dispatchWorkgroups(1);
+        if (!this.experiments.clearConeQueueWithBlit && !this.experiments.inlineConeBoundaries) {
+          coherent.setPipeline(this.conePrepassResetPipeline!);
+          coherent.setBindGroup(0, this.bindGroup);
+          coherent.setBindGroup(1, this.conePrepassComputeBindGroup!);
+          coherent.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+          coherent.dispatchWorkgroups(1);
+        }
         coherent.setPipeline(this.conePrepassCoherentPipeline!);
         coherent.setBindGroup(0, this.bindGroup);
         coherent.setBindGroup(1, this.conePrepassComputeBindGroup!);
         coherent.setBindGroup(splitGroup, this.splitLightingBindGroup!);
         coherent.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
-        coherent.setPipeline(this.conePrepassBoundaryPipeline!);
-        coherent.dispatchWorkgroups(Math.ceil(this.conePrepassWidth * this.conePrepassHeight / 64));
+        if (!this.experiments.inlineConeBoundaries) {
+          coherent.setPipeline(this.conePrepassBoundaryPipeline!);
+          coherent.dispatchWorkgroups(Math.ceil(this.conePrepassWidth * this.conePrepassHeight / 64));
+        }
         coherent.end();
         if (this.coneFanout) {
           const fanout = encoder.beginComputePass({ label: "Sparse voxel cone sample fan-out" });

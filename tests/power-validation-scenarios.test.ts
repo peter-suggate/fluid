@@ -180,7 +180,7 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
   }
 });
 
-test("ceiling UI resolves band 1 and k=4 while larger authored profiles retain k=8", () => {
+test("ceiling UI resolves band 1 and k=6 while larger authored profiles retain k=8", () => {
   const planPreset = (id: "ceiling-slab-drop" | "hydrostatic-power-large-offset" | "ocean-seiche") => {
     const preset = getScenePreset(id);
     const scene = preset.create();

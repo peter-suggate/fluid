@@ -5,9 +5,12 @@ import {
   OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY,
   OCTREE_SECTION43_MINI_SHELL_DEPTH,
   OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT,
+  OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT,
   OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
   countOctreePressureCommands,
+  octreeFactorOnePredictedSolveTailEnabled,
   planOctreeSolveTail,
+  selectOctreeFactorOneEncodedSolveTail,
   type OctreeSolveTailSceneProfile,
 } from "../lib/octree-solve-tail-policy";
 import { solveOctreePipelinedPCG } from "../lib/octree-pipelined-pcg";
@@ -50,6 +53,96 @@ const PROFILES = Object.freeze({
   },
 } satisfies Record<string, OctreeSolveTailSceneProfile>);
 
+test("factor-one predicted tail is explicit-on and fails to the full envelope", () => {
+  assert.equal(octreeFactorOnePredictedSolveTailEnabled({}), false);
+  assert.equal(octreeFactorOnePredictedSolveTailEnabled({
+    [OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT]: "0",
+  }), false);
+  assert.equal(octreeFactorOnePredictedSolveTailEnabled({
+    [OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT]: "1",
+  }), true);
+  const common = {
+    enabled: true, factorOne: true, nextStep: 42,
+    fullEncodedOuterIterations: 10,
+  } as const;
+  assert.deepEqual(selectOctreeFactorOneEncodedSolveTail(common), {
+    encodedOuterIterations: 10, usedHistory: false, reason: "missing-history",
+  });
+  assert.equal(selectOctreeFactorOneEncodedSolveTail({
+    ...common,
+    observation: {
+      step: 40, publishedIterationCount: 4, converged: true,
+      acceptedTopologyEpoch: 7, topologyHash: 70,
+      topologyFlipReady: false, topologyEpochError: 0,
+    },
+    precedingTopologyHash: 70,
+  }).reason, "non-adjacent-history");
+  for (const observation of [
+    { step: 41, publishedIterationCount: 4, converged: false,
+      acceptedTopologyEpoch: 7, topologyHash: 70,
+      topologyFlipReady: false, topologyEpochError: 0 },
+    { step: 41, publishedIterationCount: 4, converged: true,
+      acceptedTopologyEpoch: 7, topologyHash: 70,
+      topologyFlipReady: false, topologyEpochError: 1 },
+  ]) {
+    assert.equal(selectOctreeFactorOneEncodedSolveTail({
+      ...common, observation, precedingTopologyHash: 70,
+    }).reason, "invalid-history");
+  }
+  for (const selection of [
+    selectOctreeFactorOneEncodedSolveTail({
+      ...common,
+      observation: {
+        step: 41, publishedIterationCount: 4, converged: true,
+        acceptedTopologyEpoch: 8, topologyHash: 81,
+        topologyFlipReady: true, topologyEpochError: 0,
+      },
+      precedingTopologyHash: 80,
+    }),
+    selectOctreeFactorOneEncodedSolveTail({
+      ...common,
+      observation: {
+        step: 41, publishedIterationCount: 4, converged: true,
+        acceptedTopologyEpoch: 8, topologyHash: 81,
+        topologyFlipReady: false, topologyEpochError: 0,
+      },
+      precedingTopologyHash: 80,
+    }),
+  ]) {
+    assert.deepEqual(selection, {
+      encodedOuterIterations: 10, usedHistory: false, reason: "topology-change",
+    });
+  }
+  assert.deepEqual(selectOctreeFactorOneEncodedSolveTail({
+    ...common,
+    observation: {
+      step: 41, publishedIterationCount: 4, converged: true,
+      acceptedTopologyEpoch: 7, topologyHash: 70,
+      topologyFlipReady: true, topologyEpochError: 0,
+    },
+    precedingTopologyHash: 70,
+  }), {
+    encodedOuterIterations: 6, usedHistory: true, reason: "predicted",
+  });
+  assert.deepEqual(selectOctreeFactorOneEncodedSolveTail({
+    ...common,
+    observation: {
+      step: 41, publishedIterationCount: 9, converged: true,
+      acceptedTopologyEpoch: 7, topologyHash: 70,
+      topologyFlipReady: false, topologyEpochError: 0,
+    },
+    precedingTopologyHash: 70,
+  }), {
+    encodedOuterIterations: 10, usedHistory: true, reason: "predicted",
+  });
+  assert.equal(selectOctreeFactorOneEncodedSolveTail({
+    ...common, factorOne: false,
+  }).reason, "not-factor-one");
+  assert.equal(selectOctreeFactorOneEncodedSolveTail({
+    ...common, enabled: false,
+  }).reason, "disabled");
+});
+
 test("solve-tail policy encodes the paper upper envelope and keeps scene score as telemetry", () => {
   const mini = planOctreeSolveTail(PROFILES.miniDam);
   const quiescent = planOctreeSolveTail(PROFILES.quiescent);
@@ -64,7 +157,7 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
   assert.equal(OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY, 9_216);
   assert.equal(planOctreeSolveTail(PROFILES.ceilingDrop).boundarySmoothingIterations,
     OCTREE_SECTION43_MINI_SHELL_DEPTH,
-    "the 24x16x24 ceiling keeps its validated k=4 shell independent of executor choice");
+    "the 24x16x24 ceiling keeps its validated k=6 shell independent of executor choice");
   for (const policy of [quiescent, river, planOctreeSolveTail(PROFILES.uiDam),
     planOctreeSolveTail(PROFILES.largerTwoLevel), planOctreeSolveTail(PROFILES.ocean)]) {
     assert.ok(policy.encodedOuterIterations >= 4
@@ -94,8 +187,8 @@ test("solve-tail policy admits an explicit symmetric Section 4.3 shell-depth exp
 
 test("selected Section 4.3 shell has deterministic five-level command counts", () => {
   const expectedCounts = new Map<OctreeSolveTailSceneProfile, number>([
-    [PROFILES.miniDam, 696],
-    [PROFILES.ceilingDrop, 696],
+    [PROFILES.miniDam, 784],
+    [PROFILES.ceilingDrop, 784],
     [PROFILES.largerTwoLevel, 872],
     [PROFILES.uiDam, 872],
     [PROFILES.quiescent, 872],
@@ -122,7 +215,7 @@ test("selected Section 4.3 shell has deterministic five-level command counts", (
     firstOrderSetupDispatches: 10,
     firstOrderCorrectionDispatches: 26,
     boundarySmoothingIterations: OCTREE_SECTION43_MINI_SHELL_DEPTH,
-  }).encodedPressureDispatches, 696,
+  }).encodedPressureDispatches, 784,
   "the maximum encoded envelope includes the selected mini matching shell");
   assert.equal(countOctreePressureCommands({
     encodedOuterIterations: 10,

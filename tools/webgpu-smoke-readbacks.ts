@@ -382,6 +382,10 @@ export interface GlobalFineGenerationDiagnostics {
   topologyRolledBack?: boolean;
   /** Downstream finalization reason mask: topology=1, redistance=2, volume=4, transport=8. */
   topologyFinalizeReason?: number;
+  /** Sticky downstream reason mask across recovered/retained publications. */
+  topologyLatchedFinalizeReason?: number;
+  topologyFirstRejectedGeneration?: number;
+  topologyRejectionCount?: number;
   phiBitXor: number;
   phiBitSum: number;
   phiSum: number;
@@ -498,7 +502,10 @@ export async function readGlobalFineGenerationDiagnostics(
       : Promise.resolve(undefined),
     source.seedControl ? readBufferBinding(device, { buffer: source.seedControl }, 8) : Promise.resolve(undefined),
     source.topologyControl
-      ? readBufferBinding(device, { buffer: source.topologyControl }, 32)
+      // Words 10..11 are sticky rejection evidence; the first eight words are
+      // cleared when the next generation begins, so a 32-byte read can hide a
+      // rejected-but-recovered update.
+      ? readBufferBinding(device, { buffer: source.topologyControl }, 48)
       : Promise.resolve(undefined),
     transportControl ? readBufferBinding(device, { buffer: transportControl }, 64) : Promise.resolve(undefined),
     redistanceControl
@@ -700,6 +707,9 @@ export async function readGlobalFineGenerationDiagnostics(
       topologyDesiredBricks: topology[2], topologyActivatedBricks: topology[3],
       topologyPublished: topology[4] !== 0, topologyRolledBack: topology[5] !== 0,
       topologyFinalizeReason: topology[7],
+      topologyLatchedFinalizeReason: topology[10],
+      topologyFirstRejectedGeneration: topology[11] >>> 16,
+      topologyRejectionCount: topology[11] & 0xffff,
       topologyRequiredDesiredBricks: (topology[0] & 1) !== 0 ? topology[6] : topology[2],
       topologyRequiredDesiredBricksExact: (topology[0] & 1) === 0,
       topologyDilationBrickRings: topology[0] === 0 ? topology[6] : 0 } : {}),

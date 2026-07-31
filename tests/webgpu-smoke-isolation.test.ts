@@ -340,6 +340,14 @@ test("compact and structured publication rejection reports exact authority evide
     "audit copies must go through the shared ABI writer the UI ring also uses");
   assert.doesNotMatch(generationAudit, /await awaitAdvanceCompletion|readBufferBinding|mapAsync/,
     "the recurring structured audit must not fence or map the GPU queue");
+  assertContainsInOrder(smoke, [
+    "const enableAuthoredStructuredEnergyProbe",
+    "powerGenerationAuditRequested || collectStabilityEnvelope || energyEverySteps > 0",
+    'process.env.FLUID_STRUCTURED_ENERGY_PROBE = "1"',
+    "let solver: GPUSolverInstance",
+    "finally {",
+    "delete process.env.FLUID_STRUCTURED_ENERGY_PROBE",
+  ], "authored audit collection must enable the energy producer before constructing structured dynamics");
   const terminalAudit = normalizeWhitespace(smoke.slice(
     smoke.indexOf("if (powerGenerationAuditSnapshot)",
       smoke.indexOf("const simulationWall_ms")),

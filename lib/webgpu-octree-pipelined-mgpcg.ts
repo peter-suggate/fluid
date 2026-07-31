@@ -145,6 +145,12 @@ export interface OctreePipelinedMGPCGOptions {
   readonly temporalPredictor?: boolean;
   readonly temporalPredictorMode?: "fixed" | "current-operator";
   readonly temporalPredictorAlpha?: number;
+  /**
+   * Factor-1 measurement arm: replace each outer partial/finish reduction
+   * pair with one exact-association 128-lane drain. Callers must prove factor
+   * one; the executor independently enforces the measured 4,096-row ceiling.
+   */
+  readonly factorOneCombinedReductionDrains?: boolean;
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -239,10 +245,40 @@ export interface OctreePipelinedLinearOperator {
   /** Every class/page launch consumes a solve-control-gated indirect record. */
   readonly convergenceTail: "gpu-zero-indirect";
   readonly encodedDispatchCount: number;
+  /** Dispatches used by encodeResidualBody when it intentionally retains a
+   * different portable binding shape from the ordinary apply. */
+  readonly encodedResidualDispatchCount?: number;
   encode(
     broker: PassBroker,
     input: GPUBuffer,
     output: GPUBuffer,
+    solverControl: GPUBuffer,
+  ): void;
+  /** Optional split form used to co-publish independent indirect schedules. */
+  encodeGate?(
+    pass: GPUComputePassEncoder,
+    input: GPUBuffer,
+    output: GPUBuffer,
+    solverControl: GPUBuffer,
+  ): void;
+  encodeBody?(
+    broker: PassBroker,
+    input: GPUBuffer,
+    output: GPUBuffer,
+    solverControl: GPUBuffer,
+  ): void;
+  /**
+   * Optional body-only specialization for a caller that needs
+   * `residualRhs - A * input`. It consumes the same convergence gate as
+   * encodeBody and writes the residual directly, avoiding an intermediate
+   * operator-image round trip. Implementations must preserve encodeBody's
+   * exact per-row operator fold before the final subtraction.
+   */
+  encodeResidualBody?(
+    broker: PassBroker,
+    input: GPUBuffer,
+    residualRhs: GPUBuffer,
+    residual: GPUBuffer,
     solverControl: GPUBuffer,
   ): void;
 }
@@ -348,6 +384,11 @@ export interface OctreePipelinedMGPCGSolve {
   /** Accepted row-remapped temporal secant p[n-1] - p[n-2]. */
   readonly pressureHistory?: GPUBuffer;
   readonly pressureOut: GPUBuffer;
+  /**
+   * Encode-only schedule shaping. Allocation and the production envelope stay
+   * at `plan.maximumIterations`; this may select only a prefix inside it.
+   */
+  readonly encodedIterationBudget?: number;
 }
 
 /**
@@ -406,6 +447,14 @@ export function octreePipelinedMGPCGTemporalPredictorAlpha(
   return Number.isFinite(parsed) && parsed >= -1 && parsed <= 2 ? parsed : 0.25;
 }
 
+/** Explicit-on until the factor-1 combined reduction A/B has passed. */
+export function octreePipelinedMGPCGCombinedReductionDrainsEnabled(
+  environment: Record<string, string | undefined> | undefined =
+    typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_OCTREE_FACTOR1_COMBINED_REDUCTION_DRAINS === "1";
+}
+
 export type OctreePipelinedMGPCGPipelineName =
   | "initializeControlAndDispatch"
   | "validateAuthority"
@@ -413,8 +462,10 @@ export type OctreePipelinedMGPCGPipelineName =
   | "formInitialResidual"
   | "reduceMergedPartials"
   | "finishMergedReduction"
+  | "reduceAndFinishMerged"
   | "reduceDirectionCurvaturePartials"
   | "finishDirectionCurvature"
+  | "reduceAndFinishDirectionCurvature"
   | "initializeDirections"
   | "advancePCGState"
   | "updateDirections"
@@ -467,8 +518,10 @@ Record<PipelineName, OctreePipelinedMGPCGActivityTaskDescriptor>
   formInitialResidual: mgpcgActivityTask("formInitialResidual", "form-initial-residual", "MGPCG · form initial residual"),
   reduceMergedPartials: mgpcgActivityTask("reduceMergedPartials", "reduce-merged-partials", "MGPCG · reduce residual scalars"),
   finishMergedReduction: mgpcgActivityTask("finishMergedReduction", "finish-merged-reduction", "MGPCG · finish residual reduction"),
+  reduceAndFinishMerged: mgpcgActivityTask("reduceAndFinishMerged", "combined-merged-reduction", "MGPCG · combined residual reduction drain"),
   reduceDirectionCurvaturePartials: mgpcgActivityTask("reduceDirectionCurvaturePartials", "reduce-direction-curvature", "MGPCG · reduce direction curvature"),
   finishDirectionCurvature: mgpcgActivityTask("finishDirectionCurvature", "finish-direction-curvature", "MGPCG · finish direction curvature"),
+  reduceAndFinishDirectionCurvature: mgpcgActivityTask("reduceAndFinishDirectionCurvature", "combined-direction-curvature", "MGPCG · combined direction-curvature drain"),
   initializeDirections: mgpcgActivityTask("initializeDirections", "initialize-directions", "MGPCG · initialize search direction"),
   advancePCGState: mgpcgActivityTask("advancePCGState", "advance-pcg-state", "MGPCG · advance pressure and residual"),
   updateDirections: mgpcgActivityTask("updateDirections", "update-directions", "MGPCG · update search direction"),
@@ -482,8 +535,10 @@ const PIPELINE_BINDINGS: Readonly<Record<PipelineName, readonly number[]>> = Obj
   formInitialResidual: [0, 2, 8, 12, 13, 16],
   reduceMergedPartials: [0, 2, 8, 9, 10, 13, 14, 16],
   finishMergedReduction: [0, 2, 13, 14, 15],
+  reduceAndFinishMerged: [0, 2, 8, 9, 10, 13, 15, 16],
   reduceDirectionCurvaturePartials: [0, 2, 11, 12, 13, 14],
   finishDirectionCurvature: [0, 2, 13, 14, 15],
+  reduceAndFinishDirectionCurvature: [0, 2, 11, 12, 13, 15],
   initializeDirections: [0, 2, 9, 10, 11, 12, 13],
   advancePCGState: [0, 2, 7, 8, 11, 12, 13],
   updateDirections: [0, 2, 9, 11, 13],
@@ -523,8 +578,9 @@ export class WebGPUOctreePipelinedMGPCG {
   readonly iterationBudget: number;
   readonly control: GPUBuffer;
   readonly allocatedBytes: number;
-  readonly encodedPassTransitionCountPerIteration = 4;
+  readonly encodedPassTransitionCountPerIteration: 2 | 4;
   readonly reductionsPerOuterIteration = 2 as const;
+  readonly usesCombinedReductionDrains: boolean;
   /**
    * True in production: `initializeState` begins from `solve.pressureSeed`.
    * False only under the `FLUID_OCTREE_PRESSURE_COLD_START` measurement arm.
@@ -540,9 +596,11 @@ export class WebGPUOctreePipelinedMGPCG {
   }
 
   get workAccountingPlan(): Readonly<{ rowCapacity: number; maximumIterations: number;
+    combinedReductionDrains: boolean;
     reductionLanes: 128; reductionPartialCount: number }> {
     return Object.freeze({ rowCapacity: this.plan.rowCapacity,
       maximumIterations: this.plan.maximumIterations,
+      combinedReductionDrains: this.usesCombinedReductionDrains,
       reductionLanes: this.plan.reductionLanes,
       reductionPartialCount: this.plan.reductionPartialCount });
   }
@@ -558,6 +616,7 @@ export class WebGPUOctreePipelinedMGPCG {
   private readonly temporalGroups = new Map<TemporalPredictorPipelineName, CachedGroup[]>();
   private readonly relativeTolerance: number;
   private readonly absoluteTolerance: number;
+  private parameterIterationBudget: number;
   private destroyed = false;
 
   constructor(
@@ -567,6 +626,16 @@ export class WebGPUOctreePipelinedMGPCG {
   ) {
     this.plan = planOctreePipelinedMGPCG(options);
     this.iterationBudget = this.plan.maximumIterations;
+    this.parameterIterationBudget = this.plan.maximumIterations;
+    this.usesCombinedReductionDrains =
+      options.factorOneCombinedReductionDrains === true;
+    if (this.usesCombinedReductionDrains && this.plan.rowCapacity > 4_096) {
+      throw new RangeError(
+        "Factor-1 combined reduction drains require row capacity at most 4,096",
+      );
+    }
+    this.encodedPassTransitionCountPerIteration =
+      this.usesCombinedReductionDrains ? 2 : 4;
     const preconditioner = source.preconditioner;
     if (!preconditioner || preconditioner.operatorOrder !== 1
       || preconditioner.isSymmetricPositiveDefinite !== true
@@ -730,6 +799,17 @@ export class WebGPUOctreePipelinedMGPCG {
   }
 
   get encodedDispatchCount(): number {
+    return this.encodedDispatchCountFor(this.plan.maximumIterations);
+  }
+
+  encodedDispatchCountFor(encodedIterationBudget: number): number {
+    if (!Number.isSafeInteger(encodedIterationBudget)
+      || encodedIterationBudget < 4
+      || encodedIterationBudget > this.plan.maximumIterations) {
+      throw new RangeError(
+        "Pipelined MGPCG encoded iteration budget must remain inside the planned envelope",
+      );
+    }
     const setup = this.source.preconditioner.encodedSetupDispatchCount ?? 0;
     const correction = this.source.preconditioner.encodedCorrectionDispatchCount;
     const apply = this.source.operator.encodedDispatchCount;
@@ -738,12 +818,32 @@ export class WebGPUOctreePipelinedMGPCG {
     // direction + A(direction) + direct-curvature reduction/finish,
     // and one fail-closed publication.
     const temporalPrelude = this.usesCurrentOperatorTemporalPredictor ? apply + 3 : 0;
+    const outerDispatches = this.usesCombinedReductionDrains ? 4 : 6;
     return 8 + 2 * apply + setup + correction + temporalPrelude
-      + this.plan.maximumIterations * (6 + apply + correction);
+      + encodedIterationBudget * (outerDispatches + apply + correction);
   }
 
   encode(broker: PassBroker, solve: OctreePipelinedMGPCGSolve): void {
     this.assertLive();
+    const encodedIterationBudget =
+      solve.encodedIterationBudget ?? this.plan.maximumIterations;
+    // Keep the GPU exhaustion gate identical to the graph actually encoded.
+    // If a prediction ever lacks enough headroom, `finishMergedTotal` marks
+    // the solve fatal and final publication retains pressureSeed.
+    if (!Number.isSafeInteger(encodedIterationBudget)
+      || encodedIterationBudget < 4
+      || encodedIterationBudget > this.plan.maximumIterations) {
+      throw new RangeError(
+        "Pipelined MGPCG encoded iteration budget must remain inside the planned envelope",
+      );
+    }
+    if (encodedIterationBudget !== this.parameterIterationBudget) {
+      this.device.queue.writeBuffer(
+        this.params, Uint32Array.BYTES_PER_ELEMENT,
+        new Uint32Array([encodedIterationBudget]),
+      );
+      this.parameterIterationBudget = encodedIterationBudget;
+    }
     const vectorBytes = this.plan.rowCapacity * 4;
     if (solve.pressureSeed.size < vectorBytes || solve.pressureOut.size < vectorBytes) {
       throw new RangeError("Pipelined MGPCG solve buffers are smaller than the planned capacity");
@@ -817,7 +917,7 @@ export class WebGPUOctreePipelinedMGPCG {
     pass = broker.compute({ label: "Pipelined MGPCG direction initialization" });
     this.runOuterIndirect(pass, "initializeDirections", 0, 3, resources);
 
-    for (let iteration = 0; iteration < this.plan.maximumIterations; iteration += 1) {
+    for (let iteration = 0; iteration < encodedIterationBudget; iteration += 1) {
       pass = broker.compute({ label: `Pipelined MGPCG outer iteration ${iteration}` });
       this.runIndirect(pass, "advancePCGState", iteration, 0, resources);
       preconditioner.encodeCorrection(broker, {
@@ -826,13 +926,20 @@ export class WebGPUOctreePipelinedMGPCG {
         solverControl: this.control,
         rowCount: this.source.rowCount,
       });
-      pass = broker.compute({ label: "Pipelined MGPCG merged partial reduction" });
-      this.runIndirect(pass, "reduceMergedPartials", iteration, 2, resources);
-      // The finishing workgroup reads every partial and mutates future
-      // indirect records, so it owns the single global reduction boundary.
-      broker.fence("pipelined MGPCG merged partials complete");
-      pass = broker.compute({ label: "Pipelined MGPCG merged reduction finish" });
-      this.runDirect(pass, "finishMergedReduction", [1, 1, 1], resources);
+      if (this.usesCombinedReductionDrains) {
+        pass = broker.compute({
+          label: "Pipelined MGPCG combined merged reduction drain",
+        });
+        this.runDirect(pass, "reduceAndFinishMerged", [1, 1, 1], resources);
+      } else {
+        pass = broker.compute({ label: "Pipelined MGPCG merged partial reduction" });
+        this.runIndirect(pass, "reduceMergedPartials", iteration, 2, resources);
+        // The finishing workgroup reads every partial and mutates future
+        // indirect records, so it owns the single global reduction boundary.
+        broker.fence("pipelined MGPCG merged partials complete");
+        pass = broker.compute({ label: "Pipelined MGPCG merged reduction finish" });
+        this.runDirect(pass, "finishMergedReduction", [1, 1, 1], resources);
+      }
       broker.fence("pipelined MGPCG convergence-tail publication");
       pass = broker.compute({ label: "Pipelined MGPCG direction update" });
       this.runIndirect(pass, "updateDirections", iteration, 3, resources);
@@ -840,11 +947,22 @@ export class WebGPUOctreePipelinedMGPCG {
         broker, this.source.vectors.direction, this.source.vectors.directionImage,
         this.control,
       );
-      pass = broker.compute({ label: "Pipelined MGPCG direct direction curvature" });
-      this.runIndirect(pass, "reduceDirectionCurvaturePartials", iteration, 1, resources);
-      broker.fence("pipelined MGPCG direct curvature partials complete");
-      pass = broker.compute({ label: "Pipelined MGPCG direct curvature finish" });
-      this.runDirect(pass, "finishDirectionCurvature", [1, 1, 1], resources);
+      if (this.usesCombinedReductionDrains) {
+        pass = broker.compute({
+          label: "Pipelined MGPCG combined direct-curvature drain",
+        });
+        this.runDirect(
+          pass, "reduceAndFinishDirectionCurvature", [1, 1, 1], resources,
+        );
+      } else {
+        pass = broker.compute({ label: "Pipelined MGPCG direct direction curvature" });
+        this.runIndirect(
+          pass, "reduceDirectionCurvaturePartials", iteration, 1, resources,
+        );
+        broker.fence("pipelined MGPCG direct curvature partials complete");
+        pass = broker.compute({ label: "Pipelined MGPCG direct curvature finish" });
+        this.runDirect(pass, "finishDirectionCurvature", [1, 1, 1], resources);
+      }
       broker.fence("pipelined MGPCG direct curvature publication");
     }
     pass = broker.compute({ label: "Pipelined MGPCG fail-closed publication" });
@@ -1406,6 +1524,7 @@ fn formInitialResidual(@builtin(global_invocation_id) global: vec3u) {
 }
 
 var<workgroup> merged: array<MergedScalars, ${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE}>;
+var<workgroup> combinedBlocks: array<MergedScalars, 32>;
 
 @compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
 fn reduceMergedPartials(
@@ -1436,18 +1555,7 @@ ${targetSubgroupReductionWGSL}
   if (lane == 0u) { partials[workgroup.x] = merged[0]; }
 }
 
-@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
-fn finishMergedReduction(
-  @builtin(local_invocation_index) lane: u32,
-  @builtin(subgroup_invocation_id) subgroupLane: u32,
-  @builtin(subgroup_size) subgroupSize: u32,
-) {
-  var local = zeroMergedScalars();
-  for (var partial = lane; partial < livePartialCount(); partial += REDUCTION_LANES) {
-    local = mergeScalars(local, partials[partial]);
-  }
-${targetSubgroupReductionWGSL}
-  if (lane != 0u) { return; }
+fn finishMergedTotal(total: MergedScalars) {
   let initial = atomicLoad(&control[3]) == 0u;
   if (failed()) {
     if (initial) { zeroAllOuterDispatches(); }
@@ -1457,7 +1565,6 @@ ${targetSubgroupReductionWGSL}
   // A converged earlier reduction already zeroed every remaining indirect
   // record. The fixed singleton tail must not recount stale partials.
   if (atomicLoad(&control[1]) != 0u) { return; }
-  let total = merged[0];
   let gamma = compensatedValue(total.gamma);
   let delta = compensatedValue(total.delta);
   let rr = compensatedValue(total.rr);
@@ -1535,6 +1642,57 @@ ${targetSubgroupReductionWGSL}
   }
 }
 
+@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
+fn finishMergedReduction(
+  @builtin(local_invocation_index) lane: u32,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  var local = zeroMergedScalars();
+  for (var partial = lane; partial < livePartialCount(); partial += REDUCTION_LANES) {
+    local = mergeScalars(local, partials[partial]);
+  }
+${targetSubgroupReductionWGSL}
+  if (lane == 0u) { finishMergedTotal(merged[0]); }
+}
+
+@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
+fn reduceAndFinishMerged(
+  @builtin(local_invocation_index) lane: u32,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  let blocks = livePartialCount();
+  for (var block = 0u; block < blocks; block += 1u) {
+    var local = zeroMergedScalars();
+    let row = block * REDUCTION_LANES + lane;
+    let initial = atomicLoad(&control[3]) == 0u;
+    if (row < rows() && !stopped()) {
+      let r = residual[row];
+      let u = preconditioned[row];
+      let w = preconditionedImage[row];
+      let b = -rhs[row];
+      if (!finite(r) || !finite(u) || (initial && !finite(w))) {
+        reportAt(ERROR_NONFINITE, 4u, row);
+      } else {
+        local.gamma = addCompensatedF32(local.gamma, r * u);
+        if (initial) { local.delta = addCompensatedF32(local.delta, u * w); }
+        local.rr = addCompensatedF32(local.rr, r * r);
+        if (initial) { local.bb = addCompensatedF32(local.bb, b * b); }
+      }
+    }
+${targetSubgroupReductionWGSL}
+    if (lane == 0u) { combinedBlocks[block] = merged[0]; }
+    workgroupBarrier();
+  }
+  var local = zeroMergedScalars();
+  if (lane < blocks) {
+    local = mergeScalars(local, combinedBlocks[lane]);
+  }
+${targetSubgroupReductionWGSL}
+  if (lane == 0u) { finishMergedTotal(merged[0]); }
+}
+
 @compute @workgroup_size(64)
 fn initializeDirections(@builtin(global_invocation_id) global: vec3u) {
   let row = global.x;
@@ -1594,20 +1752,10 @@ ${targetSubgroupReductionWGSL}
   if (lane == 0u) { partials[workgroup.x] = merged[0]; }
 }
 
-@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
-fn finishDirectionCurvature(
-  @builtin(local_invocation_index) lane: u32,
-  @builtin(subgroup_invocation_id) subgroupLane: u32,
-  @builtin(subgroup_size) subgroupSize: u32,
-) {
-  var local = zeroMergedScalars();
-  for (var partial = lane; partial < livePartialCount(); partial += REDUCTION_LANES) {
-    local = mergeScalars(local, partials[partial]);
-  }
-${targetSubgroupReductionWGSL}
-  if (lane != 0u || stopped()) { return; }
+fn finishDirectionCurvatureTotal(total: MergedScalars) {
+  if (stopped()) { return; }
   atomicAdd(&control[3], 1u);
-  let curvature = merged[0].delta;
+  let curvature = total.delta;
   let direct = compensatedValue(curvature);
   let gamma = compensatedValue(pairAt(12u));
   if (!finite(direct) || !(direct > 0.0)) {
@@ -1623,6 +1771,51 @@ ${targetSubgroupReductionWGSL}
   }
   storePair(14u, curvature);
   storePair(16u, CompensatedF32(alpha, 0.0));
+}
+
+@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
+fn finishDirectionCurvature(
+  @builtin(local_invocation_index) lane: u32,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  var local = zeroMergedScalars();
+  for (var partial = lane; partial < livePartialCount(); partial += REDUCTION_LANES) {
+    local = mergeScalars(local, partials[partial]);
+  }
+${targetSubgroupReductionWGSL}
+  if (lane == 0u) { finishDirectionCurvatureTotal(merged[0]); }
+}
+
+@compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
+fn reduceAndFinishDirectionCurvature(
+  @builtin(local_invocation_index) lane: u32,
+  @builtin(subgroup_invocation_id) subgroupLane: u32,
+  @builtin(subgroup_size) subgroupSize: u32,
+) {
+  let blocks = livePartialCount();
+  for (var block = 0u; block < blocks; block += 1u) {
+    var local = zeroMergedScalars();
+    let row = block * REDUCTION_LANES + lane;
+    if (row < rows() && !stopped()) {
+      let d = direction[row];
+      let image = directionImage[row];
+      if (!finite(d) || !finite(image)) {
+        reportAt(ERROR_NONFINITE, 15u, row);
+      } else {
+        local.delta = addCompensatedF32(local.delta, d * image);
+      }
+    }
+${targetSubgroupReductionWGSL}
+    if (lane == 0u) { combinedBlocks[block] = merged[0]; }
+    workgroupBarrier();
+  }
+  var local = zeroMergedScalars();
+  if (lane < blocks) {
+    local = mergeScalars(local, combinedBlocks[lane]);
+  }
+${targetSubgroupReductionWGSL}
+  if (lane == 0u) { finishDirectionCurvatureTotal(merged[0]); }
 }
 
 @compute @workgroup_size(64)
@@ -1696,6 +1889,10 @@ const MGPCG_ACTIVITY_ENTRIES: readonly MGPCGActivityEntry[] = [
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
     injectWorkgroupId: true, meaningfulWhen: "true",
     activeWhen: "lane < livePartialCount()" },
+  { entryPoint: "reduceAndFinishMerged", workgroupLaneCount: 128,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
+    injectWorkgroupId: true, meaningfulWhen: "!stopped()",
+    activeWhen: "lane < min(rows(), REDUCTION_LANES) && !stopped()" },
   { entryPoint: "initializeDirections", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,
@@ -1719,6 +1916,10 @@ const MGPCG_ACTIVITY_ENTRIES: readonly MGPCGActivityEntry[] = [
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
     injectWorkgroupId: true, meaningfulWhen: "!stopped()",
     activeWhen: "lane < livePartialCount() && !stopped()" },
+  { entryPoint: "reduceAndFinishDirectionCurvature", workgroupLaneCount: 128,
+    workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
+    injectWorkgroupId: true, meaningfulWhen: "!stopped()",
+    activeWhen: "lane < min(rows(), REDUCTION_LANES) && !stopped()" },
   { entryPoint: "finalizeAndPublish", workgroupLaneCount: 64,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "activityLocalInvocationIndex",
     injectWorkgroupId: true, injectLocalInvocationIndex: true,

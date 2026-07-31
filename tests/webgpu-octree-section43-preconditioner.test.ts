@@ -3,6 +3,8 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
   WebGPUOctreeSection43HybridPreconditioner,
+  octreeSection43FusedAccurateResidualEnabled,
+  octreeSection43FusedInnerGateEnabled,
   octreeSection43HybridPreconditionerShader,
 } from "../lib/webgpu-octree-section43-preconditioner";
 import { PassBroker } from "../lib/webgpu-pass-broker";
@@ -13,6 +15,17 @@ test("Section 4.3 row domain follows the accepted structured authority", () => {
   assert.doesNotMatch(octreeSection43HybridPreconditionerShader,
     /fn rows\(\) -> u32 \{[^}]*rowCount\[0\]/,
     "the mutable candidate compaction count is not the accepted pressure-row ABI");
+});
+
+test("Section 4.3 co-publishes independent inner schedules by default", () => {
+  assert.equal(octreeSection43FusedInnerGateEnabled({}), true);
+  assert.equal(octreeSection43FusedInnerGateEnabled({
+    FLUID_OCTREE_FUSED_INNER_GATE: "0",
+  }), false);
+  assert.equal(octreeSection43FusedAccurateResidualEnabled({}), true);
+  assert.equal(octreeSection43FusedAccurateResidualEnabled({
+    FLUID_OCTREE_FUSED_ACCURATE_RESIDUAL: "0",
+  }), false);
 });
 
 test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4.3 correction", () => {
@@ -62,15 +75,21 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
     },
     encodeSetup() { order.push("L1-setup"); },
     encodeCorrection() { order.push("L1-correction"); },
+    encodeCorrectionGate() { order.push("L1-gate"); },
+    encodeCorrectionBody() { order.push("L1-correction"); },
   };
   const hybrid = new WebGPUOctreeSection43HybridPreconditioner(device, {
     rowCount,
     firstOrderVCycle: inner,
     secondOrderOperator: {
       convergenceTail: "gpu-zero-indirect",
-      encodedDispatchCount: 4,
+      encodedDispatchCount: 2,
+      encodedResidualDispatchCount: 4,
       encodedMergedBandDispatchCount: 1,
       encode() { order.push("L2-apply"); },
+      encodeGate() { order.push("L2-gate"); },
+      encodeBody() { order.push("L2-apply"); },
+      encodeResidualBody() { order.push("L2-residual"); },
       encodeWorksets() { order.push("L2-band-apply"); },
       encodeMergedBandWorkset() { order.push("L2-band-merged"); },
     },
@@ -123,11 +142,12 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
     "L1-setup",
     // §4.3(1) J^k(0, q) -> p1, leaving p1 in hybridA.
     "prepareCorrectionDispatches",
+    "L1-gate",
+    "L2-gate",
     "smoothZeroToB",
     ...preHalf,
     // §4.3(2) r1 = q - L2 p1 over every accepted row, then M1 r1.
-    "L2-apply",
-    "formInnerResidual",
+    "L2-residual",
     "L1-correction",
     // §4.3(3) p2 = p1 + M1 r1, then the matching even-k sweeps ending in B.
     "addInnerCorrection",
@@ -136,13 +156,18 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
   ]);
   assert.equal(hybrid.boundarySmoothingIterations, 8);
   assert.equal(hybrid.encodedSetupDispatchCount, 10);
-  assert.equal(hybrid.encodedPassTransitionCount, 4,
-    "setup keeps two publication boundaries; correction adds its own gate and the L2 apply gate");
+  assert.equal(hybrid.encodedPassTransitionCount, 2,
+    "the correction co-publishes the hybrid, L2, and L1 schedules behind one boundary");
   // Gate, four row stages, 15 band smooths, 15 merged band applies, one exact
   // four-class L2 apply, and the inner page-parallel V-cycle.
-  assert.equal(hybrid.encodedCorrectionDispatchCount, 5 + 2 * 15 + 4 + 3);
+  assert.equal(hybrid.encodedCorrectionDispatchCount, 4 + 2 * 15 + 4 + 3,
+    "the fused residual retains its three-stage body even when ordinary A2 is one body dispatch");
   assert.equal(hybrid.workAccountingPlan.mergedBandApplies, 15);
-  assert.equal(hybrid.workAccountingPlan.avoidedBandDispatches, 45);
+  assert.equal(hybrid.workAccountingPlan.avoidedBandDispatches, 15);
+  assert.equal(hybrid.workAccountingPlan.fusedAccurateResidual, true);
+  assert.equal(hybrid.workAccountingPlan.avoidedRowDispatches, 1);
+  assert.equal(order.includes("formInnerResidual"), false,
+    "the accurate ordered fold must write the inner residual directly");
   assert.equal(order.includes("L2-band-apply"), false,
     "the compact shell no longer invokes the four-class workset path");
   assert.deepEqual(publishCorrectionBindings, [0, 5, 7, 12, 17],
@@ -152,6 +177,29 @@ test("Section 4.3 hybrid publishes the shell once and schedules the parallel §4
   assert.equal(bindGroupCount, cachedBindGroups,
     "an identical recurring correction must reuse every immutable bind group");
   hybrid.destroy();
+
+  const fallback = new WebGPUOctreeSection43HybridPreconditioner(device, {
+    rowCount,
+    firstOrderVCycle: inner,
+    secondOrderOperator: {
+      convergenceTail: "gpu-zero-indirect",
+      encodedDispatchCount: 4,
+      encodedMergedBandDispatchCount: 1,
+      encode() {},
+      encodeGate() {},
+      encodeBody() {},
+      encodeWorksets() {},
+      encodeMergedBandWorkset() {},
+    },
+    section63: { coefficients: buffer(2 * 64 * 19 * 4), control: buffer(32),
+      topology: buffer(4), state: buffer(4), geometry: buffer(64 * 16),
+      metrics: buffer(64 * 16), layout: buffer(64) },
+  }, { rowCapacity: 64 });
+  assert.equal(fallback.workAccountingPlan.fusedAccurateResidual, false);
+  assert.equal(fallback.workAccountingPlan.avoidedRowDispatches, 0);
+  assert.equal(fallback.encodedCorrectionDispatchCount, 5 + 2 * 15 + 4 + 3,
+    "operators without the residual finalizer retain the materialized-image fallback");
+  fallback.destroy();
 });
 
 test("Section 4.3 hybrid shader keeps a race-free zero sweep and shared shell operator", () => {

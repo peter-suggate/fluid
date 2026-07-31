@@ -19,6 +19,45 @@ import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 
 const ROW_CLASSES = [0, 1, 2, 3] as const;
 const FAMILY_CLASSES = [5, 6, 7, 8] as const;
+/** Class four is unused by recurring dynamics, so prepare reuses its indirect
+ * record for one workgroup per class-7/8 boundary face. */
+export const STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES = 4 * 12;
+
+/**
+ * Default-on A/B switch for flattening the order-free class-7/8 carry test.
+ *
+ * A zero restores the former per-face serial six-neighbour walks exactly.
+ * Selection is construction-stable so one dynamics instance never mixes
+ * cached and uncached carry decisions.
+ */
+export function structuredBoundaryAdvectionFlatteningEnabled(
+  environment: Readonly<Record<string, string | undefined>> | undefined =
+    typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_STRUCTURED_BOUNDARY_ADVECT_FLAT !== "0";
+}
+
+/**
+ * Default-on collapse of dispatch handoffs that exchange only ordinary
+ * storage. A zero restores the historical pass splits for exact A/B.
+ */
+export function structuredDynamicsPlainStoragePassCompactionEnabled(
+  environment: Readonly<Record<string, string | undefined>> | undefined =
+    typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_STRUCTURED_DYNAMICS_COMPACT_PASS !== "0";
+}
+
+/** CPU oracle for the shader's independent six-direction Boolean reduction. */
+export function structuredRowTouchesDryProbeOracle(
+  liquid: boolean,
+  directionTouchesDry: readonly boolean[],
+): boolean {
+  if (directionTouchesDry.length !== 6) {
+    throw new RangeError("Structured dry-row oracle requires six directional probes");
+  }
+  return !liquid || directionTouchesDry.some(Boolean);
+}
 /**
  * Bounded GPU relaxation budget for the Section 5 ordinary-face march.
  *
@@ -250,7 +289,7 @@ export interface StructuredDynamicsResources {
  * dedicated air-support producer after projection.
  */
 export class WebGPUStructuredVelocityDynamics {
-  readonly encodedAdvectionDispatchCount = 9;
+  readonly encodedAdvectionDispatchCount: 9 | 10;
   readonly encodedForceDivergenceDispatchCount = 10;
   readonly encodedProjectionDispatchCount = 13;
   readonly allocatedBytes: number;
@@ -270,6 +309,7 @@ export class WebGPUStructuredVelocityDynamics {
   private readonly params: readonly [GPUBuffer, GPUBuffer, GPUBuffer];
   private readonly prepare: GPUComputePipeline;
   private readonly topologyTransfer: GPUComputePipeline;
+  private readonly boundaryDryProbe?: GPUComputePipeline;
   private readonly advection: readonly GPUComputePipeline[];
   private readonly advectionCommit: readonly GPUComputePipeline[];
   private readonly force: readonly GPUComputePipeline[];
@@ -286,6 +326,11 @@ export class WebGPUStructuredVelocityDynamics {
     WeakMap<GPUBuffer, WeakMap<GPUBuffer, GPUBindGroup>>>();
   /** Encode the four energy summarizers only when a host actually reads them. */
   private readonly projectionEnergyProbe = structuredProjectionEnergyProbeEnabled();
+  /** Construction-stable exact A/B for the class-7/8 carry gate. */
+  private readonly flattenedBoundaryAdvection = structuredBoundaryAdvectionFlatteningEnabled();
+  /** Storage-only dispatch handoffs share a pass unless the legacy A/B asks. */
+  private readonly compactPlainStoragePass =
+    structuredDynamicsPlainStoragePassCompactionEnabled();
   /** Diagnostic-only per-class dispatch-width census; see `censusTick`. */
   private readonly censusEnabled = structuredWorksetCensusEnabled();
   private censusStaging?: GPUBuffer;
@@ -373,7 +418,14 @@ export class WebGPUStructuredVelocityDynamics {
       layout: "auto", compute: { module: shaderModule, entryPoint: name } });
     this.prepare = make("prepareStructuredDynamics");
     this.topologyTransfer = make("transferStructuredTopologyCandidate");
-    this.advection = FAMILY_CLASSES.map((value) => make(`advectStructuredClass${value}`));
+    this.boundaryDryProbe = this.flattenedBoundaryAdvection
+      ? make("classifyStructuredBoundaryDryProbes")
+      : undefined;
+    this.advection = FAMILY_CLASSES.map((value) => make(
+      this.flattenedBoundaryAdvection && value >= 7
+        ? `advectStructuredFlattenedClass${value}`
+        : `advectStructuredClass${value}`,
+    ));
     this.advectionCommit = FAMILY_CLASSES.map((value) => make(`commitAdvectedStructuredClass${value}`));
     this.force = FAMILY_CLASSES.map((value) => make(`forceStructuredClass${value}`));
     this.divergence = ROW_CLASSES.map((value) => make(`divergenceStructuredClass${value}`));
@@ -385,6 +437,7 @@ export class WebGPUStructuredVelocityDynamics {
     this.summarizePostProjectionEnergy = make("summarizeStructuredPostProjectionEnergy");
     this.summarizeStartEnergy = make("summarizeStructuredStartEnergy");
     this.summarizePostAdvectionEnergy = make("summarizeStructuredPostAdvectionEnergy");
+    this.encodedAdvectionDispatchCount = this.flattenedBoundaryAdvection ? 10 : 9;
     this.allocatedBytes = catalogBytes + this.dispatch.size
       + this.projectionEnergyStats.size
       + 3 * 256;
@@ -543,16 +596,27 @@ export class WebGPUStructuredVelocityDynamics {
     const params = this.update(0, dt, 1, [0, 0, 0], inflow); this.encodePrepare(broker, params);
     this.censusTick(broker);
     this.encodeProjectionEnergy(broker, params, "start");
+    if (this.boundaryDryProbe) {
+      const pass = broker.compute({ label: "Flatten structured boundary carry probes" });
+      pass.setPipeline(this.boundaryDryProbe);
+      pass.setBindGroup(0, this.group(this.boundaryDryProbe,
+        [0, 1, 2, 3, 11, 16, 17], params));
+      pass.dispatchWorkgroupsIndirect(this.dispatch,
+        STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES);
+    }
     this.encodeClasses(broker, this.advection, FAMILY_CLASSES, [0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18], params,
       "Advect structured family class");
-    // The staggered regular sampler reads neighbouring face degrees of
-    // freedom while every lane produces its own destination, so destinations
-    // stage into the inactive authority bank and become the accepted values
-    // only after this fence closes the intra-dispatch race window.
-    broker.fence("structured advected destinations staged");
+    // The sampler writes only the inactive bank; commit runs as a later
+    // dispatch and reads that bank as ordinary storage. In-pass dispatch
+    // ordering closes the race without a pass boundary.
+    if (!this.compactPlainStoragePass) {
+      broker.fence("structured advected destinations staged");
+    }
     this.encodeClasses(broker, this.advectionCommit, FAMILY_CLASSES, [0, 1, 2, 11, 17, 18], params,
       "Commit advected structured family class");
-    broker.fence("structured advected destinations committed");
+    // Keep this boundary: the next dynamics prepare rewrites `this.dispatch`
+    // as storage after advection and commit consumed it as INDIRECT.
+    broker.fence("structured indirect arguments retired after advection");
     this.encodeProjectionEnergy(broker, params, "advected");
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after structured advection commit");
@@ -574,7 +638,11 @@ export class WebGPUStructuredVelocityDynamics {
       [0, 1, 2, 3, 4, 5, 6, 16, 17, 18, 24], params));
     pass.dispatchWorkgroupsIndirect(this.resources.structured.liveRowDispatch,
       OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES);
-    broker.fence("changed topology face velocities transferred");
+    // The following reconstruction consumes only the transferred ordinary
+    // storage and reuses the same already-published indirect buffer.
+    if (!this.compactPlainStoragePass) {
+      broker.fence("changed topology face velocities transferred");
+    }
   }
 
   // The divergence RHS is dimensional: rhs = rho*flux/dt. `encodeProjection`
@@ -773,6 +841,18 @@ fn prepareStructuredDynamics(){
     indirect[out+1u]=select(1u,worksets[base+5u],valid);
     indirect[out+2u]=select(1u,worksets[base+6u],valid);
   }
+  // Dynamics has no class-4 recurring kernel. Reuse that otherwise-dead
+  // record for one workgroup per class-7/8 face, concatenating the two
+  // accepted worklists without materializing another list.
+  let base7=wbase(7u);let base8=wbase(8u);
+  let flatValid=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid()
+    &&worksets[base7]==acc(3u)&&worksets[base8]==acc(3u);
+  let flatCount=select(0u,worksets[base7+1u]+worksets[base8+1u],flatValid);
+  let flatX=min(65535u,flatCount);
+  var flatY=1u;if(flatX!=0u){flatY=(flatCount+flatX-1u)/flatX;}
+  indirect[12u]=flatX;
+  indirect[13u]=flatY;
+  indirect[14u]=1u;
 }
 
 fn value(handle:u32)->f32{return bitcast<f32>(a[abase()+p.valuesOffset+handle]);}
@@ -1298,6 +1378,14 @@ var<workgroup> transferCandidateBank:u32;
 var<workgroup> transferOwner:u32;
 var<workgroup> transferPoint:vec4f;
 var<workgroup> transferNormal:vec4f;
+// A face whose owner becomes liquid during this topology transition did not
+// carry a liquid degree of freedom at the beginning of the substep. The air
+// extension is an end-state velocity, so installing all of it before the
+// first liquid projection counts the same frontier momentum twice. A coarse
+// face also acquires its liquid support across that transition, so centre both
+// the support and velocity activation: 1/2 * 1/2 = 1/4. The following
+// force/projection stages then advance it over the full accepted substep.
+const NEWLY_WET_VELOCITY_RAMP:f32=.25;
 fn reduceTransferProbe(lid:u32)->u32{
   workgroupBarrier();
   for(var width=64u;width>0u;width>>=1u){
@@ -1348,7 +1436,7 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
   // a COPY of the closest projected face value — never an interpolant
   // evaluated outside its element (which extends the frontier velocity
   // gradient one cell and ratchets the corner jet, measured at +45% ME).
-  if(lid==0u){let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;transferOld=invalidVector();if(!ownerInsideOld){transferOld=extendedOwnerVelocity(point);}}
+  if(lid==0u){let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;transferOld=invalidVector();if(!ownerInsideOld){let extended=extendedOwnerVelocity(point);if(vectorValid(extended)){transferOld=vec4f(NEWLY_WET_VELOCITY_RAMP*extended.xyz,1.);}}}
   let uniformNeighbor=workgroupUniformLoad(&transferNeighbor);let initialOld=workgroupUniformLoad(&transferOld);
   var ownerAnchor=INVALID;var neighborAnchor=INVALID;
   if(!vectorValid(initialOld)){
@@ -1413,6 +1501,20 @@ fn characteristicSample(row:u32,point:vec3f)->vec4f{
   if(vectorValid(extended)){return extended;}
   return pinned;
 }
+fn rowTouchesDryDirection(row:u32,direction:u32)->bool{
+  if(row>=acc(2u)||liquidAt(row)==0u){return true;}
+  let rg=rowGeometry[rbase()+row];
+  let h=f32(rg.y)*p.physical.x;
+  let d=dimensions();
+  let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
+  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
+  let extent=vec3f(d)*p.physical.x;
+  var probe=center;
+  probe[direction/2u]+=select(-h,h,(direction&1u)==1u);
+  if(any(probe<vec3f(0.))||any(probe>=extent)){return false;}
+  let other=acceptedRowContaining(probe);
+  return other==INVALID||other>=acc(2u)||liquidAt(other)==0u;
+}
 // A row is "dynamic" when it is dry or borders air: exactly the band whose
 // power-cell geometry main's identity key would have invalidated, forcing a
 // re-trace. The accepted row set holds ONLY liquid rows, so "borders air"
@@ -1421,22 +1523,71 @@ fn characteristicSample(row:u32,point:vec3f)->vec4f{
 // is a wall, not air; a deep column against a wall still carries.
 fn rowTouchesDry(row:u32)->bool{
   if(row>=acc(2u)||liquidAt(row)==0u){return true;}
-  let rg=rowGeometry[rbase()+row];
-  let h=f32(rg.y)*p.physical.x;
-  let d=dimensions();
-  let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
-  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
-  let extent=vec3f(d)*p.physical.x;
   for(var direction=0u;direction<6u;direction+=1u){
-    var probe=center;
-    probe[direction/2u]+=select(-h,h,(direction&1u)==1u);
-    if(any(probe<vec3f(0.))||any(probe>=extent)){continue;}
-    let other=acceptedRowContaining(probe);
-    if(other==INVALID||other>=acc(2u)||liquidAt(other)==0u){return true;}
+    if(rowTouchesDryDirection(row,direction)){return true;}
   }
   return false;
 }
-fn advect(cls:u32,index:u32){
+// The inactive authority bank is already the advection transaction's scratch
+// (its value channel holds nextValue). Its owner/neighbor channels are not
+// read until a future topology candidate rewrites the entire bank, so they
+// provide two collision-free u32 cache words per accepted face.
+fn dryOwnerCacheAt(handle:u32)->u32{return (1u-bank())*p.authorityWords+p.ownerOffset+handle;}
+fn dryNeighborCacheAt(handle:u32)->u32{return (1u-bank())*p.authorityWords+p.neighborOffset+handle;}
+fn rowTouchesDryCached(handle:u32,neighborSide:bool)->bool{
+  let at=select(dryOwnerCacheAt(handle),dryNeighborCacheAt(handle),neighborSide);
+  return a[at]!=0u;
+}
+
+var<workgroup> dryProbePartial:array<u32,64>;
+var<workgroup> dryProbeHandle:u32;
+var<workgroup> dryProbeOwner:u32;
+var<workgroup> dryProbeNeighbor:u32;
+var<workgroup> dryProbeEligible:u32;
+// One workgroup owns one class-7/8 face. Lanes 0..5 perform the owner's six
+// independent neighbour probes; lanes 8..13 do the neighbour row. Two
+// eight-lane OR trees reproduce rowTouchesDry without changing the
+// directory search, liquid test, physical-wall rule, or carry predicate.
+@compute @workgroup_size(64)fn classifyStructuredBoundaryDryProbes(
+  @builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)lid:u32
+){
+  if(lid==0u){
+    let flatIndex=g.x+g.y*65535u;
+    let count7=worksets[wbase(7u)+1u];
+    var cls=7u;var index=flatIndex;
+    if(flatIndex>=count7){cls=8u;index=flatIndex-count7;}
+    let handle=workItem(cls,index);
+    dryProbeHandle=handle;dryProbeOwner=INVALID;dryProbeNeighbor=INVALID;dryProbeEligible=0u;
+    if(handle!=INVALID&&handle<acc(5u)){
+      let lo=owner(handle);let hi=neighbor(handle);
+      dryProbeOwner=lo;dryProbeNeighbor=hi;
+      let carriedMarker=bitcast<f32>(a[abase()+p.centroidOffset+4u*handle+3u]);
+      dryProbeEligible=select(0u,1u,carriedMarker>.5&&hi!=INVALID);
+    }
+  }
+  workgroupBarrier();
+  let handle=dryProbeHandle;let eligible=dryProbeEligible!=0u;
+  var dry=0u;
+  if(eligible&&lid<16u){
+    let local=lid&7u;
+    if(local<6u){
+      let row=select(dryProbeOwner,dryProbeNeighbor,lid>=8u);
+      dry=select(0u,1u,rowTouchesDryDirection(row,local));
+    }
+  }
+  dryProbePartial[lid]=dry;
+  workgroupBarrier();
+  for(var width=4u;width>0u;width>>=1u){
+    if(lid<16u&&(lid&7u)<width){dryProbePartial[lid]|=dryProbePartial[lid+width];}
+    workgroupBarrier();
+  }
+  if(handle!=INVALID&&handle<acc(5u)){
+    if(lid==0u){a[dryOwnerCacheAt(handle)]=select(1u,dryProbePartial[0],eligible);}
+    if(lid==8u){a[dryNeighborCacheAt(handle)]=select(1u,dryProbePartial[8],eligible);}
+  }
+}
+
+fn advect(cls:u32,index:u32,flattenedDryRows:bool){
   let handle=workItem(cls,index);
   if(handle==INVALID||handle>=acc(5u)){return;}
   if(!supportPublicationValid()){
@@ -1505,12 +1656,20 @@ fn advect(cls:u32,index:u32){
   // free-surface (or wall) face: never carried. Closed-wall faces already
   // returned through the aperture==0 branch above.
   let hiRow=neighbor(handle);
-  if(carriedMarker>.5&&hiRow!=INVALID&&!rowTouchesDry(row)&&!rowTouchesDry(hiRow)){
-    let n=normal(handle);
-    let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
-    if(!finite3(n)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
-    transportMetrics[handle]=vec4f(prior*n*area,0.);
-    return;
+  if(carriedMarker>.5&&hiRow!=INVALID){
+    var deepInterior=false;
+    if(flattenedDryRows){
+      deepInterior=!rowTouchesDryCached(handle,false)&&!rowTouchesDryCached(handle,true);
+    }else{
+      deepInterior=!rowTouchesDry(row)&&!rowTouchesDry(hiRow);
+    }
+    if(deepInterior){
+      let n=normal(handle);
+      let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
+      if(!finite3(n)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
+      transportMetrics[handle]=vec4f(prior*n*area,0.);
+      return;
+    }
   }
   var adv=invalidVector();
   if(useTransition){adv=transitionSample(row,x);}else{adv=regularSample(row,x);}
@@ -1533,10 +1692,12 @@ fn advect(cls:u32,index:u32){
   setNextValue(handle,projected);
   transportMetrics[handle]=vec4f(projected*n*area,.5*area*max(0.,prior*prior-projected*projected));
 }
-@compute @workgroup_size(64)fn advectStructuredClass5(@builtin(global_invocation_id)g:vec3u){advect(5u,classItem(g));}
-@compute @workgroup_size(64)fn advectStructuredClass6(@builtin(global_invocation_id)g:vec3u){advect(6u,classItem(g));}
-@compute @workgroup_size(64)fn advectStructuredClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,classItem(g));}
-@compute @workgroup_size(64)fn advectStructuredClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,classItem(g));}
+@compute @workgroup_size(64)fn advectStructuredClass5(@builtin(global_invocation_id)g:vec3u){advect(5u,classItem(g),false);}
+@compute @workgroup_size(64)fn advectStructuredClass6(@builtin(global_invocation_id)g:vec3u){advect(6u,classItem(g),false);}
+@compute @workgroup_size(64)fn advectStructuredClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,classItem(g),false);}
+@compute @workgroup_size(64)fn advectStructuredClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,classItem(g),false);}
+@compute @workgroup_size(64)fn advectStructuredFlattenedClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,classItem(g),true);}
+@compute @workgroup_size(64)fn advectStructuredFlattenedClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,classItem(g),true);}
 
 fn commitAdvected(cls:u32,index:u32){
   let handle=workItem(cls,index);

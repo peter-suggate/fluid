@@ -7,6 +7,8 @@ import { PassBroker } from "../lib/webgpu-pass-broker";
 import { WebGPUOctreePowerTopology } from "../lib/webgpu-octree-power-topology";
 import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 import {
+  OCTREE_STRUCTURED_FINALIZE_LANES,
+  OCTREE_STRUCTURED_FINALIZE_WORKGROUP_BYTES,
   OCTREE_STRUCTURED_GPU_ERROR,
   WebGPUDirectStructuredVelocityAuthority,
   directStructuredVelocityPublicationWGSL,
@@ -18,6 +20,57 @@ import {
 // shader variant instead of the solver-owned activity binding session.
 usePerformanceInstrumentationStore.getState().setMode("timeline");
 
+const finalizePublicationOrder = (
+  rowClasses: readonly number[],
+  familyClasses: readonly number[],
+  transferPending: readonly boolean[],
+  lanes: number,
+): readonly (readonly number[])[] => {
+  assert.equal(familyClasses.length, transferPending.length);
+  const laneCounts = Array.from({ length: lanes }, () => Array<number>(9).fill(0));
+  const rowChunk = Math.ceil(rowClasses.length / lanes);
+  const slotChunk = Math.ceil(familyClasses.length / lanes);
+  for (let lane = 0; lane < lanes; lane += 1) {
+    const local = laneCounts[lane]!;
+    const rowLast = Math.min((lane + 1) * rowChunk, rowClasses.length);
+    for (let row = lane * rowChunk; row < rowLast; row += 1) local[rowClasses[row]!] += 1;
+    const slotLast = Math.min((lane + 1) * slotChunk, familyClasses.length);
+    for (let handle = lane * slotChunk; handle < slotLast; handle += 1) {
+      local[familyClasses[handle]!] += 1;
+      if (transferPending[handle]) local[4] += 1;
+    }
+  }
+  const lanePrefixes = Array.from({ length: lanes }, () => Array<number>(9).fill(0));
+  const running = Array<number>(9).fill(0);
+  for (let lane = 0; lane < lanes; lane += 1) {
+    for (let cls = 0; cls < 9; cls += 1) {
+      lanePrefixes[lane]![cls] = running[cls]!;
+      running[cls]! += laneCounts[lane]![cls]!;
+    }
+  }
+  const worksets = Array.from({ length: 9 }, (_, cls) => Array<number>(running[cls]));
+  for (let lane = 0; lane < lanes; lane += 1) {
+    const prefix = [...lanePrefixes[lane]!];
+    const rowLast = Math.min((lane + 1) * rowChunk, rowClasses.length);
+    for (let row = lane * rowChunk; row < rowLast; row += 1) {
+      const cls = rowClasses[row]!;
+      worksets[cls]![prefix[cls]!] = row;
+      prefix[cls]! += 1;
+    }
+    const slotLast = Math.min((lane + 1) * slotChunk, familyClasses.length);
+    for (let handle = lane * slotChunk; handle < slotLast; handle += 1) {
+      const cls = familyClasses[handle]!;
+      worksets[cls]![prefix[cls]!] = handle;
+      prefix[cls]! += 1;
+      if (transferPending[handle]) {
+        worksets[4]![prefix[4]!] = handle;
+        prefix[4]! += 1;
+      }
+    }
+  }
+  return worksets;
+};
+
 test("direct structured authority has six fixed families and nine disjoint worksets", () => {
   const plan = planStructuredVelocityGPU(128, 30, 256);
   assert.equal(plan.slotCapacity, 3_840);
@@ -25,6 +78,65 @@ test("direct structured authority has six fixed families and nine disjoint works
   assert.equal(plan.offsets.rowFamilyHandles + 6 * 128, plan.offsets.rowFamilySlots);
   assert.equal(plan.authorityWords, plan.offsets.rowFamilySlots + 48 * 128);
   assert.equal(plan.worksetBytes, 9 * plan.worksetStrideWords * 4);
+});
+
+test("256-lane publication finalization preserves the stable 64-lane class order", () => {
+  let state = 0x7a11_ce55;
+  const random = (): number => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return state >>> 0;
+  };
+  const sizes = [0, 1, 2, 63, 64, 65, 127, 255, 256, 257, 1_023, 4_097];
+  for (let iteration = 0; iteration < 128; iteration += 1) {
+    const rowCount = iteration < sizes.length ? sizes[iteration]! : random() % 2_048;
+    const slotCount = iteration < sizes.length ? sizes[sizes.length - 1 - iteration]! : random() % 8_192;
+    const rowClasses = Array.from({ length: rowCount }, () => random() % 4);
+    const familyClasses = Array.from({ length: slotCount }, () => 5 + random() % 4);
+    const transferPending = Array.from({ length: slotCount }, () => (random() & 7) === 0);
+    const expected = Array.from({ length: 9 }, () => [] as number[]);
+    rowClasses.forEach((cls, row) => expected[cls]!.push(row));
+    familyClasses.forEach((cls, handle) => {
+      expected[cls]!.push(handle);
+      if (transferPending[handle]) expected[4]!.push(handle);
+    });
+    const legacy = finalizePublicationOrder(rowClasses, familyClasses, transferPending, 64);
+    const widened = finalizePublicationOrder(rowClasses, familyClasses, transferPending, 256);
+    assert.deepEqual(legacy, expected, `legacy stable order at iteration ${iteration}`);
+    assert.deepEqual(widened, legacy, `widened stable order at iteration ${iteration}`);
+  }
+});
+
+test("publication finalization uses one portable 256-lane workgroup", () => {
+  assert.equal(OCTREE_STRUCTURED_FINALIZE_LANES, 256);
+  assert.equal(OCTREE_STRUCTURED_FINALIZE_WORKGROUP_BYTES, 9_216);
+  assert.ok(OCTREE_STRUCTURED_FINALIZE_WORKGROUP_BYTES <= 16 * 1_024,
+    "shared count scan must fit WebGPU's minimum workgroup-storage limit");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /var<workgroup> finalCounts:array<u32,2304>;/);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /@compute @workgroup_size\(256\)fn finalizeStructuredPublication/);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /rowChunk=\(rows\+255u\)\/256u;[\s\S]*slotChunk=\(slots\+255u\)\/256u/);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /for\(var width=1u;width<256u;width<<=1u\)/);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /let count=finalCounts\[cls\*256u\+255u\]/);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /publishExactRowDispatch\(21u,finalCounts\[255u\]\+finalCounts\[511u\]\+finalCounts\[767u\]\+finalCounts\[1023u\]\);publishExactRowDispatch\(24u,finalCounts\[511u\]\+finalCounts\[1023u\]\)/);
+  assert.doesNotMatch(directStructuredVelocityPublicationWGSL, /finalCounts\[cls\*64u/);
+
+  const prototype = WebGPUDirectStructuredVelocityAuthority.prototype as unknown as
+    Record<string, () => void>;
+  const encode = prototype.encodeCandidatePasses.toString();
+  const stage = encode.slice(encode.indexOf("Finalize direct structured publication"),
+    encode.indexOf("direct structured publication finalized"));
+  assert.ok(stage.length > 0, "finalize host stage must remain present");
+  assert.match(stage, /setPipeline\(this\.finalizePipeline\)/);
+  assert.equal([...stage.matchAll(/dispatchWorkgroups\(1\)/g)].length, 1,
+    "all 256 lanes must remain in one direct workgroup");
+  assert.doesNotMatch(stage, /dispatchWorkgroupsIndirect/);
 });
 
 test("packed A/B structured authority derives a device-safe aligned row ceiling", () => {

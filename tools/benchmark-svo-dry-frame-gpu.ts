@@ -30,6 +30,11 @@
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE (1 forces the raster arm below its adaptive body-count crossover),
  *      FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION (1 measures cumulative authored-light shadow cost),
  *      FLUID_SVO_DRY_FRAME_CONE_FANOUT (1 enables deterministic one-cone-per-lane fan-out),
+ *      FLUID_SVO_DRY_FRAME_STRIP_DIAGNOSTICS / _INLINE_CONE_BOUNDARIES /
+ *      _CLEAR_CONE_QUEUE_BLIT / _F16 / _DROP_GI_PAGE_CACHE
+ *      / _SHORT_STACK
+ *      / _TINY_STACK
+ *      (1 enables the named Dawn experiment),
  *      FLUID_SVO_DRY_FRAME_COHERENCE (off | static-primary; default off;
  *      static-primary requires split and reuses exact primary visibility),
  *      FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS (0 disables; diagnostic canonical primary-ray proxy),
@@ -82,6 +87,10 @@ import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from ".
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
 import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
 import {
+  createPassEncoderIsolationScratch,
+  isolateComputePassEncoders,
+} from "./webgpu-pass-encoder-isolation";
+import {
   buildSparseVoxelDrySceneLightingMirrors,
   canConsumeSparseVoxelPbrMaterials,
   canEncodeSparseVoxelDryScene,
@@ -97,6 +106,7 @@ import {
   type SvoDryTraversalMode,
   type SvoDryShadingPath,
   type SvoDryRayCoherenceMode,
+  type SvoDryOptimizationExperiments,
 } from "../lib/webgpu-svo-dry-scene";
 import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
 
@@ -145,6 +155,9 @@ const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
+const profileBatch = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_BATCH ?? 1);
+const isolateProfilePassEncoders = process.env.FLUID_SVO_DRY_FRAME_ISOLATE_PASS_ENCODERS === "1";
+const readConeBoundaryCount = process.env.FLUID_SVO_DRY_FRAME_BOUNDARY_COUNT === "1";
 const forceWallTiming = process.env.FLUID_SVO_DRY_FRAME_TIMING === "wall";
 const phaseTraceEnabled = process.env.FLUID_SVO_DRY_FRAME_PHASE_TRACE === "1";
 const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "canonical-parametric";
@@ -155,6 +168,15 @@ const rasterRigidDiscovery = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID === "1
 const rasterRigidForced = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE === "1";
 const lightAttributionEnabled = process.env.FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION === "1";
 const coneFanout = process.env.FLUID_SVO_DRY_FRAME_CONE_FANOUT === "1";
+const optimizationExperiments: SvoDryOptimizationExperiments = {
+  stripDiagnostics: process.env.FLUID_SVO_DRY_FRAME_STRIP_DIAGNOSTICS === "1",
+  inlineConeBoundaries: process.env.FLUID_SVO_DRY_FRAME_INLINE_CONE_BOUNDARIES === "1",
+  clearConeQueueWithBlit: process.env.FLUID_SVO_DRY_FRAME_CLEAR_CONE_QUEUE_BLIT === "1",
+  halfPrecisionLighting: process.env.FLUID_SVO_DRY_FRAME_F16 === "1",
+  dropGiPageCache: process.env.FLUID_SVO_DRY_FRAME_DROP_GI_PAGE_CACHE === "1",
+  shortTraversalStack: process.env.FLUID_SVO_DRY_FRAME_SHORT_STACK === "1",
+  tinyTraversalStack: process.env.FLUID_SVO_DRY_FRAME_TINY_STACK === "1",
+};
 const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
 const renderBrickSizeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_SIZE;
@@ -194,6 +216,8 @@ assert.ok(["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-r
   "FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
   "FLUID_SVO_DRY_FRAME_PROFILE_SECONDS must be a non-negative number");
+assert.ok(Number.isSafeInteger(profileBatch) && profileBatch >= 1,
+  "FLUID_SVO_DRY_FRAME_PROFILE_BATCH must be a positive integer");
 assert.ok(renderBrickSize === undefined || renderBrickSize === 4 || renderBrickSize === 8,
   "FLUID_SVO_DRY_FRAME_BRICK_SIZE must be 4 or 8");
 assert.ok(["hybrid", "canonical", "canonical-parametric", "compact", "wide"].includes(traversalModeRaw),
@@ -374,9 +398,13 @@ const adapterInfo = {
 assert.ok(adapterInfo.vendor || adapterInfo.architecture || adapterInfo.description,
   "adapter info is empty — refusing to report a benchmark that may not have run on real hardware");
 const timestampsSupported = adapter.features.has("timestamp-query");
+const f16Requested = optimizationExperiments.halfPrecisionLighting === true;
+assert.ok(!f16Requested || adapter.features.has("shader-f16"),
+  "FLUID_SVO_DRY_FRAME_F16=1 requires Dawn shader-f16 support");
 const device = await adapter.requestDevice({
   requiredFeatures: [
     ...(timestampsSupported ? ["timestamp-query" as GPUFeatureName] : []),
+    ...(f16Requested ? ["shader-f16" as GPUFeatureName] : []),
   ],
   requiredLimits: requiredFluidDeviceLimits(adapter.limits),
 });
@@ -447,7 +475,8 @@ device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, envir
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
-  shadingPath, screenSpaceTerminationPixels, rayCoherenceMode, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout);
+  shadingPath, screenSpaceTerminationPixels, rayCoherenceMode, rasterGlassDiscovery, rasterRigidDiscovery, coneFanout,
+  optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
 renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
@@ -482,6 +511,8 @@ const target = device.createTexture({
   format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat,
   usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
 });
+const passEncoderIsolationScratch = isolateProfilePassEncoders
+  ? createPassEncoderIsolationScratch(device) : undefined;
 
 // Deliberately explicit: this benchmark scene, camera, viewport, and rigid-body
 // publication are frozen. Production callers must construct an equivalent key
@@ -494,7 +525,9 @@ function encodeFrame(
   reuseKey = primaryCoherenceKey,
   tracePhase?: (phase: GPUTimestampPhase) => void,
 ): void {
-  const result = renderer.encode(encoder, target, reuseKey, tracePhase);
+  const instrumentedEncoder = passEncoderIsolationScratch
+    ? isolateComputePassEncoders(encoder, passEncoderIsolationScratch) : encoder;
+  const result = renderer.encode(instrumentedEncoder, target, reuseKey, tracePhase);
   assert.ok(result && result.encoded, "production dry-scene encode declined the frame (raster fallback)");
 }
 
@@ -519,6 +552,23 @@ if (coneScale !== 1 && profileSeconds <= 0) {
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
+
+let coneBoundaryCount: number | undefined;
+if (readConeBoundaryCount && coneScale !== 1) {
+  const readback = device.createBuffer({
+    label: "Bench cone-boundary count readback",
+    size: 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder({ label: "Bench cone-boundary count" });
+  encodeFrame(encoder);
+  assert.ok(renderer.copyConeBoundaryCount(encoder, readback), "cone-boundary queue unavailable");
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  coneBoundaryCount = new Uint32Array(readback.getMappedRange())[0];
+  readback.unmap();
+  readback.destroy();
+}
 
 let traceSampleId = 0;
 let configuredPhaseTrace: PerformanceTrace | undefined;
@@ -559,25 +609,26 @@ if (profileSeconds > 0) {
   let frame = 0;
   while (performance.now() - profileStarted < profileSeconds * 1000) {
     const encoder = device.createCommandEncoder({ label: `SVO render frame ${frame}` });
-    encodeFrame(encoder);
+    for (let repeat = 0; repeat < profileBatch; repeat += 1) encodeFrame(encoder);
     const submitted = performance.now();
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
-    samples_ms.push(performance.now() - submitted);
-    frame += 1;
+    samples_ms.push((performance.now() - submitted) / profileBatch);
+    frame += profileBatch;
   }
   const sorted = [...samples_ms].sort((left, right) => left - right);
   const result = {
     phase: "result",
     scene: scenePresetId,
     frames: samples_ms.length,
-    renderWall_ms: samples_ms.reduce((sum, value) => sum + value, 0),
+    renderWall_ms: samples_ms.reduce((sum, value) => sum + value, 0) * profileBatch,
     medianFrame_ms: median(samples_ms),
     p95Frame_ms: percentile95(samples_ms),
     minimumFrame_ms: sorted[0] ?? 0,
     maximumFrame_ms: sorted[sorted.length - 1] ?? 0,
     resolution: { width, height },
     coneScale,
+    profileBatch,
   };
   console.log(JSON.stringify(result));
   renderer.destroy();
@@ -1042,6 +1093,7 @@ const result = {
   brickOccupancyMode,
   shadingPath,
   rayCoherenceMode,
+  optimizationExperiments,
   screenSpaceTermination: {
     thresholdPixels: screenSpaceTerminationPixels,
     mode: screenSpaceTerminationPixels > 0 ? "diagnostic-conservative-aabb-proxy" : "exact",
@@ -1079,6 +1131,11 @@ const result = {
     scale: coneScale,
     radianceReconstruction,
     prepassResolution: coneScale !== 1 ? svoConePrepassSize(width, height, coneScale) : undefined,
+    boundaryQueue: coneBoundaryCount === undefined ? undefined : {
+      receivers: coneBoundaryCount,
+      totalReceivers: svoConePrepassSize(width, height, coneScale).reduce((product, value) => product * value, 1),
+      fraction: coneBoundaryCount / svoConePrepassSize(width, height, coneScale).reduce((product, value) => product * value, 1),
+    },
     interleaved: interleaved ? {
       referenceMedian_ms: median(interleaved.reference_ms),
       reducedMedian_ms: median(interleaved.reduced_ms),

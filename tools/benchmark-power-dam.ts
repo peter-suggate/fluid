@@ -21,6 +21,7 @@ import {
   powerDamLaneWithSteps,
   type PowerDamRuntimeLane as RuntimeLane,
 } from "./power-dam-lane-environment";
+import { POWER_DAM_PRESSURE_KERNEL_LABEL_PREFIXES } from "./power-dam-pressure-kernel-profile";
 
 const args = new Set(process.argv.slice(2));
 const requestedLane = process.argv.find((argument) => argument.startsWith("--lane="))
@@ -35,7 +36,9 @@ if (quiescent && requestedLane === "ui") {
 const lane = (requestedLane === "quiescent" ? "moving-interface" : requestedLane) as RuntimeLane;
 const traceProfile = args.has("--profile");
 const fineTimestamps = args.has("--fine-timestamps");
-const passTimestamps = args.has("--pass-timestamps") || args.has("--algorithm-diagnostics");
+const pressureKernelProfile = args.has("--pressure-kernel-profile");
+const passTimestamps = args.has("--pass-timestamps") || args.has("--algorithm-diagnostics")
+  || pressureKernelProfile;
 // Superseded by --isolate-pass-labels, and it never worked: splitting Metal
 // encoders cannot separate dispatches WebGPU recorded into ONE pass, which is
 // what the broker does. Kept because its +0.9 ms on a 168-pass frame is a
@@ -48,7 +51,7 @@ if (isolatePassEncoders && !passTimestamps) {
 // pass, so a label's timestamps bracket that label's dispatches and nothing
 // else. Costs extra pass launches, so the frame is inflated: read the ranking,
 // never the ms/advance.
-const isolatePassLabels = args.has("--isolate-pass-labels");
+const isolatePassLabels = args.has("--isolate-pass-labels") || pressureKernelProfile;
 if (isolatePassLabels && !passTimestamps) {
   throw new Error("--isolate-pass-labels requires --pass-timestamps; on its own it only makes the frame slower");
 }
@@ -56,6 +59,12 @@ const pressureMicroStages = args.has("--pressure-micro-stages");
 if (pressureMicroStages && (!passTimestamps || !isolatePassLabels)) {
   throw new Error("--pressure-micro-stages requires --pass-timestamps and --isolate-pass-labels");
 }
+if (pressureMicroStages && pressureKernelProfile) {
+  throw new Error("--pressure-micro-stages and --pressure-kernel-profile select different timestamp scopes");
+}
+const pressureTimestampPrefixes = pressureMicroStages
+  ? ["SPGrid accurate A2 -", "SPGrid Section 6.3 -"]
+  : pressureKernelProfile ? [...POWER_DAM_PRESSURE_KERNEL_LABEL_PREFIXES] : [];
 if (quiescent && fineTimestamps) {
   throw new Error("--quiescent cannot use --fine-timestamps until the runner can timestamp only a trailing window");
 }
@@ -103,12 +112,15 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
         process.env.FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS ?? "25",
       FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS:
         process.env.FLUID_GPU_PASS_TIMESTAMP_SKIP_COMMAND_BUFFERS ?? "40",
-      ...(pressureMicroStages ? {
+      ...(pressureTimestampPrefixes.length > 0 ? {
         // Retain every split A2 stage while declining unrelated labels before
-        // they consume query slots. This fits the hardware-safe 2,048-query
-        // set even though a fully isolated advance has ~3,400 stages.
+        // they consume query slots. Scope PassBroker isolation to those same
+        // prefixes: unrelated work keeps the production pass graph, reducing
+        // both launch perturbation and timestamp capacity pressure.
         FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES:
-          "SPGrid accurate A2 -,SPGrid Section 6.3 -",
+          pressureTimestampPrefixes.join(","),
+        FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES:
+          pressureTimestampPrefixes.join(","),
       } : {}),
     } : {}),
     FLUID_ALGORITHM_DIAGNOSTICS: args.has("--algorithm-diagnostics") ? "1" : "0",
@@ -439,6 +451,14 @@ if (jsonOnly) {
       .slice(0, 40)) {
       console.log(`GPU compute pass: ${label}: ${(bucket.total_ms / captures).toFixed(3)} ms/advance · ${bucket.mean_ms.toFixed(3)} ms mean · ${bucket.samples} samples`);
     }
+  }
+  if (summary.pressureKernelProfile) {
+    const profile = summary.pressureKernelProfile;
+    console.log(`pressure-kernel GPU attribution: ${profile.exact ? "exact" : "INCOMPLETE"}; ${profile.instrumentedPressurePerAdvance_ms.toFixed(3)} ms/instrumented advance across ${profile.capturedAdvances} captures`);
+    for (const [region, bucket] of Object.entries(profile.byRegion)) {
+      console.log(`pressure region: ${region}: ${bucket.totalPerAdvance_ms.toFixed(3)} ms/advance · ${(100 * bucket.shareOfPressure).toFixed(1)}% · ${bucket.samples} samples`);
+    }
+    for (const warning of profile.warnings) console.log(`pressure profile note: ${warning}`);
   }
   if (summary.dataFlow) {
     const dispatches = summary.dataFlow.passes.reduce((sum, pass) => sum + pass.dispatches, 0);

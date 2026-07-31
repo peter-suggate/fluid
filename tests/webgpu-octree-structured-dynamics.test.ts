@@ -5,9 +5,15 @@ import { pathToFileURL } from "node:url";
 import { unpackOctreePowerRowTemplateSlot } from "../lib/octree-power-catalog";
 import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
 import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
+import { PassBroker } from "../lib/webgpu-pass-broker";
 import {
   decodeStructuredProjectionEnergy,
+  STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES,
   STRUCTURED_PROJECTION_ENERGY_WORDS,
+  WebGPUStructuredVelocityDynamics,
+  structuredBoundaryAdvectionFlatteningEnabled,
+  structuredDynamicsPlainStoragePassCompactionEnabled,
+  structuredRowTouchesDryProbeOracle,
   structuredVelocityDynamicsWGSL,
 } from "../lib/webgpu-octree-structured-dynamics";
 
@@ -41,11 +47,12 @@ function slotBankBase(wgsl: string, bank: number, slotCapacity: number): number 
   return resolved.split("*").reduce((product, term) => product * Number(term), 1);
 }
 
-const entries = ["prepareStructuredDynamics",
+const entries = ["prepareStructuredDynamics", "classifyStructuredBoundaryDryProbes",
   "summarizeStructuredPreProjectionEnergy", "summarizeStructuredPostProjectionEnergy",
   ...[5, 6, 7, 8].flatMap((value) => [`advectStructuredClass${value}`,
     `commitAdvectedStructuredClass${value}`, `forceStructuredClass${value}`,
     `projectStructuredClass${value}`]),
+  "advectStructuredFlattenedClass7", "advectStructuredFlattenedClass8",
   ...[0, 1, 2, 3].flatMap((value) => [`divergenceStructuredClass${value}`,
     `reconstructStructuredClass${value}`,
     `exchangeStructuredBodyImpulseClass${value}`]),
@@ -534,7 +541,69 @@ test("staggered weights reproduce a face's own value exactly at its centre", () 
   }
 });
 
-test("advection destinations stage into the inactive bank and commit after a fence", () => {
+test("class-7/8 carry probes flatten the exact order-free Boolean reduction", () => {
+  assert.equal(structuredBoundaryAdvectionFlatteningEnabled({}), true,
+    "the measured boundary optimization is production-default");
+  assert.equal(structuredBoundaryAdvectionFlatteningEnabled({
+    FLUID_STRUCTURED_BOUNDARY_ADVECT_FLAT: "0",
+  }), false, "zero retains the serial trajectory oracle");
+  assert.equal(structuredBoundaryAdvectionFlatteningEnabled({
+    FLUID_STRUCTURED_BOUNDARY_ADVECT_FLAT: "1",
+  }), true);
+  assert.equal(STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES, 48,
+    "the flattened schedule owns the otherwise-unused class-4 record");
+
+  // Exhaust the six independent directional outcomes. The scalar reference
+  // is deliberately written without Array.some so this checks the exported
+  // oracle's exact Boolean operation rather than repeating its implementation.
+  for (const liquid of [false, true]) {
+    for (let mask = 0; mask < 64; mask += 1) {
+      const probes = Array.from({ length: 6 }, (_, direction) =>
+        (mask & (1 << direction)) !== 0);
+      let serial = !liquid;
+      for (let direction = 0; direction < 6 && !serial; direction += 1) {
+        if (probes[direction]) serial = true;
+      }
+      assert.equal(structuredRowTouchesDryProbeOracle(liquid, probes), serial,
+        `liquid=${liquid}, mask=${mask}`);
+    }
+  }
+  assert.throws(() => structuredRowTouchesDryProbeOracle(true, [false]), /six directional/);
+
+  const prepare = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn prepareStructuredDynamics("),
+    structuredVelocityDynamicsWGSL.indexOf("fn value("));
+  assert.match(prepare,
+    /base7=wbase\(7u\);let base8=wbase\(8u\)[\s\S]*flatCount=select\(0u,worksets\[base7\+1u\]\+worksets\[base8\+1u\],[\s\S]*indirect\[12u\]=flatX/,
+    "class 4 must concatenate the accepted class-7/8 counts into one face-wide dispatch");
+
+  const flattened = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn rowTouchesDryDirection("),
+    structuredVelocityDynamicsWGSL.indexOf("fn advect("));
+  assert.match(flattened,
+    /lid<16u[\s\S]*local=lid&7u[\s\S]*rowTouchesDryDirection\(row,local\)/,
+    "owner and neighbour directions must occupy separate lanes");
+  assert.match(flattened,
+    /for\(var width=4u;width>0u;width>>=1u\)[\s\S]*dryProbePartial\[lid\]\|=dryProbePartial\[lid\+width\]/,
+    "the only combine is an order-free Boolean OR tree");
+  assert.match(flattened,
+    /\(1u-bank\(\)\)\*p\.authorityWords\+p\.ownerOffset\+handle[\s\S]*\(1u-bank\(\)\)\*p\.authorityWords\+p\.neighborOffset\+handle/,
+    "cache words must live in inactive-bank channels that the next candidate rewrites");
+
+  const host = dynamicsHost.slice(dynamicsHost.indexOf("encodeAdvection("),
+    dynamicsHost.indexOf("encodeForcesAndDivergence("));
+  const flatAt = host.indexOf("Flatten structured boundary carry probes");
+  const advectAt = host.indexOf("Advect structured family class");
+  assert.ok(flatAt >= 0 && advectAt > flatAt,
+    "the cache dispatch must precede its class-7/8 consumers");
+  assert.doesNotMatch(host.slice(flatAt, advectAt), /broker\.fence/,
+    "the extra dispatch remains in the existing advection pass");
+  assert.match(dynamicsHost,
+    /this\.encodedAdvectionDispatchCount = this\.flattenedBoundaryAdvection \? 10 : 9/,
+    "the A/B accounting is exactly one dispatch and zero implicit work");
+});
+
+test("advection destinations stage into the inactive bank and commit in dispatch order", () => {
   // The staggered sampler reads neighbouring face degrees of freedom, so a
   // lane writing its destination into the accepted bank mid-dispatch would
   // race the reads and advect some faces through a partially updated field.
@@ -559,12 +628,96 @@ test("advection destinations stage into the inactive bank and commit after a fen
   const encodeAdvection = dynamicsHost.slice(dynamicsHost.indexOf("encodeAdvection("),
     dynamicsHost.indexOf("encodeForcesAndDivergence("));
   const advectAt = encodeAdvection.indexOf("Advect structured family class");
-  const fenceAt = encodeAdvection.indexOf("broker.fence(");
   const commitAt = encodeAdvection.indexOf("Commit advected structured family class");
-  assert.ok(advectAt >= 0 && fenceAt > advectAt && commitAt > fenceAt,
-    "the commit dispatches must sit behind a fence that closes the race window");
+  assert.ok(advectAt >= 0 && commitAt > advectAt);
+  assert.match(encodeAdvection,
+    /if \(!this\.compactPlainStoragePass\) \{[\s\S]*structured advected destinations staged[\s\S]*\}[\s\S]*Commit advected structured family class/,
+    "only the legacy A/B splits the ordinary-storage handoff");
   assert.match(encodeAdvection, /this\.advectionCommit, FAMILY_CLASSES, \[0, 1, 2, 11, 17, 18\]/,
     "commit binds exactly the workset, authority, and support-control interface");
+});
+
+test("structured plain-storage handoffs remove exactly two recurring passes", () => {
+  assert.equal(structuredDynamicsPlainStoragePassCompactionEnabled({}), true);
+  assert.equal(structuredDynamicsPlainStoragePassCompactionEnabled({
+    FLUID_STRUCTURED_DYNAMICS_COMPACT_PASS: "0",
+  }), false);
+
+  const encoder = (events: string[]) => ({
+    beginComputePass(descriptor?: GPUComputePassDescriptor) {
+      events.push(`begin:${descriptor?.label}`);
+      return {
+        setPipeline() {},
+        setBindGroup() {},
+        dispatchWorkgroups() { events.push("dispatch"); },
+        dispatchWorkgroupsIndirect() { events.push("indirect"); },
+        end() { events.push("end"); },
+      };
+    },
+    finish() { events.push("finish"); return {}; },
+  } as unknown as GPUCommandEncoder);
+
+  const advectionPasses = (compactPass: boolean) => {
+    const events: string[] = [];
+    const broker = new PassBroker(encoder(events), { isolateLabels: false });
+    const dynamics = {
+      destroyed: false,
+      compactPlainStoragePass: compactPass,
+      update() { return {} as GPUBuffer; },
+      encodePrepare(passBroker: PassBroker) {
+        passBroker.compute({ label: "Prepare" }).dispatchWorkgroups(1);
+        passBroker.fence("indirect published");
+      },
+      censusTick() {},
+      encodeProjectionEnergy() {},
+      boundaryDryProbe: undefined,
+      advection: [],
+      advectionCommit: [],
+      encodeClasses(passBroker: PassBroker, _pipelines: unknown, _classes: unknown,
+        _bindings: unknown, _params: unknown, label: string) {
+        passBroker.compute({ label }).dispatchWorkgroupsIndirect({} as GPUBuffer, 0);
+      },
+    } as unknown as WebGPUStructuredVelocityDynamics;
+    WebGPUStructuredVelocityDynamics.prototype.encodeAdvection.call(dynamics, broker, 1 / 60);
+    broker.finish();
+    return { passes: broker.computePassCount, events };
+  };
+  const compactAdvection = advectionPasses(true);
+  const splitAdvection = advectionPasses(false);
+  assert.equal(compactAdvection.passes, 2);
+  assert.equal(splitAdvection.passes, 3);
+  assert.deepEqual(compactAdvection.events, [
+    "begin:Prepare", "dispatch", "end",
+    "begin:Advect structured family class", "indirect", "indirect", "end", "finish",
+  ]);
+
+  const transferPasses = (compactPass: boolean) => {
+    const events: string[] = [];
+    const broker = new PassBroker(encoder(events), { isolateLabels: false });
+    const dynamics = {
+      destroyed: false,
+      compactPlainStoragePass: compactPass,
+      params: [{}],
+      topologyTransfer: {},
+      resources: { structured: { liveRowDispatch: {} } },
+      group() { return {}; },
+    } as unknown as WebGPUStructuredVelocityDynamics;
+    WebGPUStructuredVelocityDynamics.prototype.encodeTopologyTransferCandidate.call(
+      dynamics, broker,
+    );
+    broker.compute({ label: "Reconstruct transferred structured rows" })
+      .dispatchWorkgroupsIndirect({} as GPUBuffer, 0);
+    broker.finish();
+    return { passes: broker.computePassCount, events };
+  };
+  const compactTransfer = transferPasses(true);
+  const splitTransfer = transferPasses(false);
+  assert.equal(compactTransfer.passes, 1);
+  assert.equal(splitTransfer.passes, 2);
+  assert.deepEqual(compactTransfer.events, [
+    "begin:Transfer accepted velocity to changed topology faces",
+    "indirect", "indirect", "end", "finish",
+  ]);
 });
 
 test("gravity is a body force on the liquid, never on dry extension-carrier faces", () => {
@@ -584,6 +737,18 @@ test("gravity is a body force on the liquid, never on dry extension-carrier face
   assert.match(dynamicsHost,
     /this\.force, FAMILY_CLASSES, \[0, 1, 2, 11, 16, 17, 22\], params/,
     "the force stage must bind the accepted liquid classification it gates on");
+});
+
+test("newly wetted topology faces activate extrapolated velocity at the temporal midpoint", () => {
+  const transfer = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("const NEWLY_WET_VELOCITY_RAMP"),
+    structuredVelocityDynamicsWGSL.indexOf("fn nextValueAt("),
+  );
+  assert.match(transfer, /const NEWLY_WET_VELOCITY_RAMP:f32=\.25;/,
+    "newly liquid degrees of freedom must center both support and velocity activation");
+  assert.match(transfer,
+    /!ownerInsideOld[\s\S]*extendedOwnerVelocity\(point\)[\s\S]*NEWLY_WET_VELOCITY_RAMP\*extended\.xyz/,
+    "only newly wetted owners ramp the accepted air-extension velocity");
 });
 
 test("authored inflow is prescribed before divergence and restored after projection", () => {

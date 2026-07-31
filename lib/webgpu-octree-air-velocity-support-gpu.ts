@@ -115,6 +115,75 @@ export function decodeOctreeAirSupportGPUFirstError(packed: number) {
   return Object.freeze({ stage: word >>> 24, item: word & 0x00ff_ffff });
 }
 
+/**
+ * CPU oracle for the factor-1 three-axis demand dilation. A separable
+ * max/boolean dilation by radius r is exactly the cubic Chebyshev
+ * neighbourhood `[-r,r]^3`; this helper pins the GPU transformation
+ * bit-for-bit without depending on shader execution.
+ */
+export function dilateFactorOneAirSupportDemand(
+  dimensions: readonly [number, number, number],
+  source: Uint8Array,
+  radius: number,
+): Uint8Array {
+  if (dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
+    || !Number.isSafeInteger(radius) || radius < 0) {
+    throw new RangeError("Factor-1 demand dilation requires positive dimensions and a non-negative radius");
+  }
+  const [nx, ny, nz] = dimensions;
+  const volume = nx * ny * nz;
+  if (source.length !== volume) {
+    throw new RangeError("Factor-1 demand mask size does not match its dimensions");
+  }
+  const axisPass = (input: Uint8Array, axis: 0 | 1 | 2): Uint8Array => {
+    const output = new Uint8Array(volume);
+    for (let z = 0; z < nz; z += 1) {
+      for (let y = 0; y < ny; y += 1) {
+        for (let x = 0; x < nx; x += 1) {
+          const q = [x, y, z];
+          for (let delta = -radius; delta <= radius; delta += 1) {
+            q[axis] = (axis === 0 ? x : axis === 1 ? y : z) + delta;
+            if (q[axis] < 0 || q[axis] >= dimensions[axis]) continue;
+            const index = q[0] + nx * (q[1] + ny * q[2]);
+            if (input[index] !== 0) {
+              output[x + nx * (y + ny * z)] = 1;
+              break;
+            }
+          }
+        }
+      }
+    }
+    return output;
+  };
+  return axisPass(axisPass(axisPass(source, 0), 1), 2);
+}
+
+/** CPU oracle for the three factor-1 frontier records published by the
+ * singleton wave advance: occupancy-wide phase work, the next singleton, and
+ * the exact residual tail. A converged or failed wave publishes three zero
+ * records, so every later host-authored wave dispatches zero workgroups. */
+export function factorOneAirSupportFrontierIndirectRecords(
+  faceRows: number,
+  changedFaces: number,
+  clean = true,
+): readonly number[] {
+  if (!Number.isSafeInteger(faceRows) || faceRows < 0
+    || !Number.isSafeInteger(changedFaces) || changedFaces < 0) {
+    throw new RangeError("Factor-1 frontier schedules require non-negative integer counts");
+  }
+  const active = clean && changedFaces > 0;
+  const dispatchFor = (count: number, size: number): readonly [number, number, number] => {
+    const groups = Math.ceil(count / size);
+    const x = Math.min(groups, 65_535);
+    return [x, x > 0 ? Math.ceil(groups / x) : 1, 1];
+  };
+  return Object.freeze([
+    ...(active ? dispatchFor(12 * faceRows, OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE) : [0, 1, 1]),
+    ...(active ? [1, 1, 1] : [0, 1, 1]),
+    ...(active ? [3, 1, 1] : [0, 1, 1]),
+  ]);
+}
+
 /** Same-epoch Section 5 identity/topology reuse is the production path. An
  * explicit zero retains the full rebuild as a process-local A/B oracle. */
 export function octreeAirSupportTopologyReuseEnabled(
@@ -134,6 +203,18 @@ export function octreeAirSupportChangedFrontierEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER !== "0";
+}
+
+/** Factor-1 wave convergence can be copied into indirect records for profiling.
+ * It is opt-in because the 24 extra pass boundaries cost more than the empty
+ * post-convergence dispatches on the coarse mini lane. Factor 4/8 never select
+ * this specialization. */
+export function octreeAirSupportIndirectFrontierGateEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE === "1";
 }
 
 /** GPU-authored live-page demand dispatch is the production path. Explicit
@@ -156,6 +237,27 @@ export function octreeAirSupportCompactFineCellsEnabled(
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS === "1";
 }
 
+/** The march and reconstruction exchange only face/storage payloads while
+ * reading the same immutable indirect record. Zero restores the old split. */
+export function octreeAirSupportReconstructionCompactPassEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_AIR_SUPPORT_RECONSTRUCT_COMPACT_PASS !== "0";
+}
+
+/** Encode the optional boundary between the Section 5 fixed point and its
+ * storage-only reconstruction. Tests call this production helper directly. */
+export function encodeOctreeAirSupportReconstructionHandoff(
+  broker: PassBroker,
+  environment?: Readonly<Record<string, string | undefined>>,
+): void {
+  if (!octreeAirSupportReconstructionCompactPassEnabled(environment)) {
+    broker.fence("Section 5 closest-face fixed point published");
+  }
+}
+
 /** Exact per-entry bind reachability. Binding zero/eleven are uniforms; all
  * other entries are storage resources and no pipeline reaches more than ten. */
 export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
@@ -171,6 +273,9 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   resolveAirSupportTopology: Object.freeze([0,3,7,8,11,12,13,14]),
   prepareFineBandAirSupportDemand: Object.freeze([0,7,26]),
   markFineBandAirSupportDemand: Object.freeze([0,7,25,26,27,28]),
+  dilateFineBandAirSupportDemandX: Object.freeze([0,7]),
+  dilateFineBandAirSupportDemandY: Object.freeze([0,7]),
+  dilateFineBandAirSupportDemandZ: Object.freeze([0,7]),
   closeFineBandAirSupportInterpolationDemand: Object.freeze([0,2,3,4,5,6,7,11,12,13,14]),
   emitFineBandAirSupportCandidates: Object.freeze([0,2,3,7,11]),
   publishAirSupportOwnerDirectory: Object.freeze([0,2,3,7,8,9,11]),
@@ -181,11 +286,11 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   seedRetainedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,20,21,23]),
   compactAirSupportSeedFrontier: Object.freeze([0,7,19,29]),
   refreshRetainedAirSupportFaceValues: Object.freeze([7,19,20]),
-  finalizeRetainedAirSupportMarchSchedule: Object.freeze([7,29]),
+  finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29]),
   expandAirSupportChangedFrontier: Object.freeze([0,7,23,29]),
   relaxAirSupportChangedFrontier: Object.freeze([0,7,19,20,23,29]),
   commitAirSupportChangedFrontier: Object.freeze([0,7,19,20,29]),
-  advanceAirSupportChangedFrontier: Object.freeze([29]),
+  advanceAirSupportChangedFrontier: Object.freeze([0,7,29]),
   marchAirSupportFacesChangedFrontier: Object.freeze([0,7,19,20,23,29]),
   extendAirSupportFacesAtoB: Object.freeze([0,7,19,20,23]),
   extendAirSupportFacesBtoA: Object.freeze([0,7,19,20,23]),
@@ -301,7 +406,10 @@ export function planOctreeAirVelocitySupportGPU(
   offsets.rowIndex = offsets.directoryFlags + domainVolume;
   offsets.blockCounts = offsets.rowIndex + domainVolume;
   offsets.blockOffsets = offsets.blockCounts + candidateBlockCapacity;
-  const scratchWords = offsets.blockOffsets + candidateBlockCapacity;
+  // A dense one-bit (stored as u32) source mask backs the factor-1 demand
+  // dilation. Keeping it as a separate terminal arena lets the closure read a
+  // stable mask while it publishes the final directory flags.
+  const scratchWords = offsets.blockOffsets + candidateBlockCapacity + 2 * domainVolume;
   const scratchBytes = scratchWords * 4;
   const indirectBytes = OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS * 12;
   return Object.freeze({ rowCapacity, slotCapacity, domainVolume, candidateStride, fineCandidateOffset,
@@ -498,6 +606,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     };
     const fineOnlyEntries = new Set<OctreeAirSupportGPUEntryPoint>([
       "prepareFineBandAirSupportDemand", "markFineBandAirSupportDemand",
+      "dilateFineBandAirSupportDemandX", "dilateFineBandAirSupportDemandY",
+      "dilateFineBandAirSupportDemandZ",
       "closeFineBandAirSupportInterpolationDemand",
       "emitFineBandAirSupportCandidates",
     ]);
@@ -535,7 +645,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     gravityDt: readonly [number, number, number] = [0, 0, 0],
     changedFrontier = octreeAirSupportChangedFrontierEnabled(),
     compactFineDemand = octreeAirSupportCompactFineDemandEnabled(),
-    compactFineCells = octreeAirSupportCompactFineCellsEnabled()): ArrayBuffer {
+    compactFineCells = octreeAirSupportCompactFineCellsEnabled(),
+    indirectFrontierGate = octreeAirSupportIndirectFrontierGateEnabled()): ArrayBuffer {
     if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 1 || expectedEpoch > 0xffff_ffff) {
       throw new RangeError("Air-support expected epoch must be a published uint32 generation");
     }
@@ -566,7 +677,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       this.inputs.structured.plan.offsets.rowSlotSigns,
       this.inputs.structured.plan.offsets.rowCatalogSlots,
       (this.publicationCount > 0 ? 1 : 0) | (changedFrontier ? 2 : 0)
-        | (compactFineCells ? 4 : 0),
+        | (compactFineCells ? 4 : 0) | (indirectFrontierGate ? 8 : 0),
       this.plan.faceAdjacencyStride,
       this.plan.support.ownerDirectoryOffsetWords,
       this.plan.fineCandidateOffset,
@@ -591,7 +702,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   }
 
   encode(broker: PassBroker, expectedEpoch: number, fineSlot?: 0 | 1,
-    gravityDt?: readonly [number, number, number]): void {
+    gravityDt?: readonly [number, number, number],
+    site: "topology-commit" | "settled-fine" = "settled-fine"): void {
     if (this.destroyed) throw new Error("Air-support GPU producer is destroyed");
     if (fineSlot !== undefined && !this.inputs.fineSources) {
       throw new Error("Air-support fine-demand slot requires configured A/B fine sources");
@@ -600,12 +712,17 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     this.parameterSlot = parameterSlot === 0 ? 1 : 0;
     const changedFrontier = octreeAirSupportChangedFrontierEnabled();
     const compactFineDemand = octreeAirSupportCompactFineDemandEnabled();
+    const indirectFrontierGate = changedFrontier
+      && octreeAirSupportIndirectFrontierGateEnabled()
+      && fineSlot !== undefined
+      && this.inputs.fineSources![fineSlot].plan.fineFactor === 1;
     const params = this.params[parameterSlot], groups = this.groups[parameterSlot];
     this.device.queue.writeBuffer(params, 0,
       this.parameterData(expectedEpoch, fineSlot, gravityDt ?? [0, 0, 0], changedFrontier,
-        compactFineDemand, octreeAirSupportCompactFineCellsEnabled()));
+        compactFineDemand, octreeAirSupportCompactFineCellsEnabled(), indirectFrontierGate));
     this.publicationCount += 1;
-    let pass = broker.compute({ label: "Initialize structured air-support publication" });
+    const siteLabel = (label: string) => `${label} · ${site}`;
+    let pass = broker.compute({ label: siteLabel("Initialize structured air-support publication") });
     pass.setPipeline(this.pipelines.beginAirSupportPublication!);
     pass.setBindGroup(0, groups.beginAirSupportPublication!);
     pass.dispatchWorkgroups(1);
@@ -619,7 +736,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0,
       (fineSlot === undefined || !compactFineDemand ? 4 : 5) * 12);
     broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
-    pass = broker.compute({ label: "Publish structured air-support identities" });
+    pass = broker.compute({ label: siteLabel("Publish structured air-support identities") });
     const run = (name: keyof typeof this.pipelines, indirectOffset?: number) => {
       pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, groups[name]!);
       if (indirectOffset === undefined) pass.dispatchWorkgroups(1);
@@ -637,6 +754,15 @@ export class WebGPUOctreeAirVelocitySupportProducer {
         const capacity = this.inputs.fineSources![fineSlot].plan.maximumResidentBricks;
         const x = Math.min(capacity, this.device.limits.maxComputeWorkgroupsPerDimension);
         pass.dispatchWorkgroups(x, Math.ceil(capacity / x));
+      }
+      if (this.inputs.fineSources![fineSlot].plan.fineFactor === 1) {
+        const dilationGroups = Math.ceil(this.plan.domainVolume / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE);
+        for (const name of ["dilateFineBandAirSupportDemandX",
+          "dilateFineBandAirSupportDemandY", "dilateFineBandAirSupportDemandZ"] as const) {
+          pass.setPipeline(this.pipelines[name]!);
+          pass.setBindGroup(0, groups[name]!);
+          pass.dispatchWorkgroups(dilationGroups);
+        }
       }
       pass.setPipeline(this.pipelines.closeFineBandAirSupportInterpolationDemand!);
       pass.setBindGroup(0, groups.closeFineBandAirSupportInterpolationDemand!);
@@ -663,7 +789,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     // These indirect-publication words have completed their schedule lifetime.
     // Reuse them for terminal march depth and convergence state.
     broker.clearBuffer(this.scratch, 32 * 4, 6 * 4);
-    pass = broker.compute({ label: "Extrapolate structured ordinary faces and reconstruct support vectors" });
+    pass = broker.compute({ label: siteLabel("Extrapolate structured ordinary faces and reconstruct support vectors") });
     pass.setPipeline(this.pipelines.resolveAirSupportFaceAdjacency!);
     pass.setBindGroup(0, groups.resolveAirSupportFaceAdjacency!);
     pass.dispatchWorkgroupsIndirect(this.indirect, 60);
@@ -706,11 +832,14 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       // republishes the original face schedule. The INDIRECT copy is the
       // required visibility boundary between that GPU decision and the march.
       broker.updateIndirectBuffer(this.scratch, 32 * 4, this.indirect, 48, 12);
+      if (indirectFrontierGate) {
+        broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0, 3 * 12);
+      }
       broker.clearBuffer(this.scratch, 32 * 4, 6 * 4);
     }
-    pass = broker.compute({ label: changedFrontier
+    pass = broker.compute({ label: siteLabel(changedFrontier
       ? "March Section 5 sparse changed frontier to a fixed point"
-      : "March Section 5 fixed domain-wide oracle to a fixed point" });
+      : "March Section 5 fixed domain-wide oracle to a fixed point") });
     // One workgroup owns each independent velocity-axis graph. Seeds authored
     // the initial queues; every subsequent queue contains only faces whose
     // value actually changed. The shader expands those changes through the
@@ -723,24 +852,40 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       // broad. Each phase maps packed (axis,local-frontier-index) lanes across
       // the live face schedule; settled faces never execute extendFace. The
       // one-thread advance only publishes counts/reset state between dispatch
-      // barriers. The persistent tail remains the exact unbounded authority.
+      // barriers. It cannot safely be folded into the last commit workgroup:
+      // WGSL has no device-wide barrier, and a hand-rolled last-workgroup latch
+      // would allow the winner to observe incomplete storage writes. Factor 1
+      // instead lets this proven singleton publish the next phase, singleton,
+      // and residual-tail indirect records. The persistent tail remains the
+      // exact unbounded authority.
       for (let wave = 0; wave < OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES; wave += 1) {
         pass.setPipeline(this.pipelines.expandAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.expandAirSupportChangedFrontier!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+        pass.dispatchWorkgroupsIndirect(this.indirect, indirectFrontierGate ? 0 : 48);
         pass.setPipeline(this.pipelines.relaxAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.relaxAirSupportChangedFrontier!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+        pass.dispatchWorkgroupsIndirect(this.indirect, indirectFrontierGate ? 0 : 48);
         pass.setPipeline(this.pipelines.commitAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.commitAirSupportChangedFrontier!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+        pass.dispatchWorkgroupsIndirect(this.indirect, indirectFrontierGate ? 0 : 48);
         pass.setPipeline(this.pipelines.advanceAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.advanceAirSupportChangedFrontier!);
-        pass.dispatchWorkgroups(1);
+        if (indirectFrontierGate) {
+          pass.dispatchWorkgroupsIndirect(this.indirect, 12);
+          // The singleton's storage-authored schedules need a usage-scope
+          // boundary before becoming INDIRECT. This copy is deliberately host
+          // encoded; it replaces an unsafe cross-workgroup completion latch.
+          broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0, 3 * 12);
+          pass = broker.compute({ label: siteLabel(
+            "March Section 5 sparse changed frontier to a fixed point") });
+        } else {
+          pass.dispatchWorkgroups(1);
+        }
       }
       pass.setPipeline(this.pipelines.marchAirSupportFacesChangedFrontier!);
       pass.setBindGroup(0, groups.marchAirSupportFacesChangedFrontier!);
-      pass.dispatchWorkgroups(3);
+      if (indirectFrontierGate) pass.dispatchWorkgroupsIndirect(this.indirect, 24);
+      else pass.dispatchWorkgroups(3);
     } else {
       for (let wave = 0; wave < OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES; wave += 1) {
         if (wave % OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP === 0) {
@@ -761,12 +906,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       pass.setBindGroup(0, groups.marchAirSupportFacesToFixedPoint!);
       pass.dispatchWorkgroups(3);
     }
-    const compactReconstructionPass = typeof process !== "undefined"
-      && process.env.FLUID_AIR_SUPPORT_RECONSTRUCT_COMPACT_PASS === "1";
-    if (!compactReconstructionPass) {
-      broker.fence("Section 5 closest-face fixed point published");
-    }
-    pass = broker.compute({ label: "Reconstruct Section 5 air-support vectors" });
+    encodeOctreeAirSupportReconstructionHandoff(broker);
+    pass = broker.compute({ label: siteLabel("Reconstruct Section 5 air-support vectors") });
     pass.setPipeline(this.pipelines.reconstructAirSupportVectors!);
     pass.setBindGroup(0, groups.reconstructAirSupportVectors!);
     pass.dispatchWorkgroupsIndirect(this.indirect, 60);
@@ -919,6 +1060,8 @@ fn level(size:u32)->u32{return 31u-countLeadingZeros(size);}
 // disagree is two rows claiming one origin cell, which is not an octree and is
 // failed closed where the slot is authored.
 fn rowIndexAt(cell:u32)->u32{return p.directoryFlagOffset+p.domainVolume+cell;}
+fn fineDemandSourceAt(cell:u32)->u32{return arrayLength(&scratch)-2u*p.domainVolume+cell;}
+fn fineDemandTemporaryAt(cell:u32)->u32{return arrayLength(&scratch)-p.domainVolume+cell;}
 fn publishedRow(cell:u32,size:u32)->u32{if(cell>=p.domainVolume){return INVALID;}
   let row=s(rowIndexAt(cell));if(row>=s(2u)){return INVALID;}
   let g=rowGeometry[s(4u)*p.rowCapacity+row];
@@ -1090,8 +1233,10 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
 @compute @workgroup_size(256)fn clearAirSupportDirectory(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
   if(s(47u)!=0u){if(item<p.domainVolume){let at=p.directoryFlagOffset+item;
-      sw(at,s(at)&~(QUERY_FINE|RECORD_FINE));}return;}
-  if(item<p.domainVolume){sw(p.directoryWinnerOffset+item,INVALID);}else if(item<2u*p.domainVolume){sw(p.directoryFlagOffset+item-p.domainVolume,0u);}
+      sw(at,s(at)&~(QUERY_FINE|RECORD_FINE));sw(fineDemandSourceAt(item),0u);
+      sw(fineDemandTemporaryAt(item),0u);}return;}
+  if(item<p.domainVolume){sw(p.directoryWinnerOffset+item,INVALID);sw(fineDemandSourceAt(item),0u);
+    sw(fineDemandTemporaryAt(item),0u);}else if(item<2u*p.domainVolume){sw(p.directoryFlagOffset+item-p.domainVolume,0u);}
   else if(item<3u*p.domainVolume){sw(rowIndexAt(item-2u*p.domainVolume),INVALID);}}
 // The dense row index is authored here, in the dispatch after the clear above,
 // so the atomicMin below never races that clear. One accepted row owns one
@@ -1183,12 +1328,17 @@ var<workgroup> markFineBaseSplit:atomic<u32>;
     if(any(q>=p.fineSampleDims)){fail(index,ERROR_SOURCE);continue;}
     let sampleBase=q/p.fineFactor;
     if(inBand&&any(sampleBase!=base)){atomicStore(&markFineBaseSplit,1u);}
-    base=sampleBase;inBand=true;}
+    base=sampleBase;inBand=true;
+    // At factor one every sample is already a distinct base cell. Publish a
+    // stable source mask now; the dense closure below performs one
+    // neighbourhood read per destination and only one final flag atomic.
+    if(p.fineFactor==1u){atomicStore(&scratch[fineDemandSourceAt(cellOf(base))],1u);}}
   if(inBand){atomicMin(&markFineBaseCell,cellOf(base));}
   workgroupBarrier();
   let sharedCell=atomicLoad(&markFineBaseCell);
   if(inBand&&cellOf(base)!=sharedCell){atomicStore(&markFineBaseSplit,1u);}
   workgroupBarrier();
+  if(p.fineFactor==1u){return;}
   if(atomicLoad(&markFineBaseSplit)!=0u){if(inBand){markFineBandDemandNeighborhood(base);}return;}
   if(sharedCell==INVALID){return;}
   // Uniform brick: spread its one neighbourhood across the workgroup's lanes.
@@ -1237,13 +1387,46 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
   return exact;
 }
 
+fn fineDemandAxisTap(q:vec3i,axis:u32,delta:i32)->vec3i{
+ if(axis==0u){return q+vec3i(delta,0,0);}
+ if(axis==1u){return q+vec3i(0,delta,0);}
+ return q+vec3i(0,0,delta);
+}
+fn dilateFineDemandAxis(item:u32,axis:u32,sourceTemporary:bool){
+ if(item>=p.domainVolume||p.fineFactor!=1u||s(0u)!=0u){return;}
+ let q=vec3i(coord(item));
+ let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
+ var demanded=false;
+ for(var delta=-i32(radius);delta<=i32(radius)&&!demanded;delta+=1){
+  let source=fineDemandAxisTap(q,axis,delta);
+  if(all(source>=vec3i(0))&&all(source<vec3i(p.dimensions))){
+   let cell=cellOf(vec3u(source));
+   demanded=select(s(fineDemandSourceAt(cell)),s(fineDemandTemporaryAt(cell)),
+     sourceTemporary)!=0u;
+  }
+ }
+ let value=select(0u,1u,demanded);
+ if(sourceTemporary){sw(fineDemandSourceAt(item),value);}
+ else{sw(fineDemandTemporaryAt(item),value);}
+}
+@compute @workgroup_size(256)fn dilateFineBandAirSupportDemandX(
+ @builtin(global_invocation_id)g:vec3u){dilateFineDemandAxis(g.x,0u,false);}
+@compute @workgroup_size(256)fn dilateFineBandAirSupportDemandY(
+ @builtin(global_invocation_id)g:vec3u){dilateFineDemandAxis(g.x,1u,true);}
+@compute @workgroup_size(256)fn dilateFineBandAirSupportDemandZ(
+ @builtin(global_invocation_id)g:vec3u){dilateFineDemandAxis(g.x,2u,false);}
+
 // Section 5 samples the dual mesh: trilinear interpolation needs the 27-cell
 // logical stencil, while transition interpolation needs every tetra selector
 // of the locally resolved power case. Publish that exact one-hop closure once;
 // recurring transport then performs only dense owner/tag gathers.
 @compute @workgroup_size(256)fn closeFineBandAirSupportInterpolationDemand(@builtin(global_invocation_id)g:vec3u){
   let invocation=g.x;var item=invocation;
-  if(compactFineDemandActive()){
+  if(p.fineFactor==1u){
+    if(item>=p.domainVolume||s(0u)!=0u){return;}
+    let demanded=s(fineDemandTemporaryAt(item))!=0u;
+    if(demanded){publishFineDemand(item,QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}
+  }else if(compactFineDemandActive()){
     if(invocation>=s(28u)){return;}item=candidateAt(fineCandidateBase()+invocation).cell;
   }
   if(item>=p.domainVolume||s(0u)!=0u||(s(p.directoryFlagOffset+item)&QUERY_FINE)==0u){return;}
@@ -1756,6 +1939,11 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   var clean=s(0u)==0u;if(retained&&s(25u)!=s(49u)){failTopology(10u,s(25u));clean=false;}
   if(retained){atomicStore(&faceFrontier[10u],1u);}
   writeDispatch(32u,select(vec3u(0u,1u,1u),dispatchFor(s(29u),256u),clean&&!retained));
+  if(p.fineFactor==1u&&(p.capturePreceding&8u)!=0u){
+    let waveActive=clean&&!retained;
+    writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(s(29u),256u),waveActive));
+    writeDispatch(13u,select(vec3u(0u,1u,1u),vec3u(1u),waveActive));
+    writeDispatch(16u,select(vec3u(0u,1u,1u),vec3u(3u,1u,1u),waveActive));}
   atomicStore(&faceFrontier[11u],select(0u,RETAINED_GRAPH_VALID,clean));}
 // The carrier stores squared Euclidean distance. sqrt is strictly monotone on
 // non-negative finite values, so it cannot change the closest-seed ordering;
@@ -1897,7 +2085,11 @@ fn packedFrontierLane(packed:u32)->vec2u{return vec2u(packed%3u,packed/3u);}
 @compute @workgroup_size(1)fn advanceAirSupportChangedFrontier(){
   var changed=0u;for(var axis=0u;axis<3u;axis+=1u){let count=atomicLoad(&faceFrontier[6u+axis]);changed+=count;
     atomicStore(&faceFrontier[axis],count);atomicStore(&faceFrontier[3u+axis],0u);atomicStore(&faceFrontier[6u+axis],0u);}
-  atomicAdd(&faceFrontier[9u],1u);if(changed==0u){atomicStore(&faceFrontier[10u],1u);}}
+  atomicAdd(&faceFrontier[9u],1u);if(changed==0u){atomicStore(&faceFrontier[10u],1u);}
+  if(p.fineFactor==1u&&(p.capturePreceding&8u)!=0u){let waveActive=s(0u)==0u&&changed!=0u;
+    writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(12u*(s(2u)+s(8u)),256u),waveActive));
+    writeDispatch(13u,select(vec3u(0u,1u,1u),vec3u(1u),waveActive));
+    writeDispatch(16u,select(vec3u(0u,1u,1u),vec3u(3u,1u,1u),waveActive));}}
 @compute @workgroup_size(256)fn marchAirSupportFacesChangedFrontier(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u){let axis=wid.x;
   if(lane==0u){frontierFaceRows=s(2u)+s(8u);frontierCurrentCount=atomicLoad(&faceFrontier[axis]);

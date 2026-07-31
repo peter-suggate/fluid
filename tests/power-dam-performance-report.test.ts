@@ -9,6 +9,10 @@ import {
   powerDamResultWindow,
   summarizePowerDamPerformance,
 } from "../tools/power-dam-performance-report";
+import {
+  buildPowerDamPressureKernelProfile,
+  powerDamPressureKernelRegion,
+} from "../tools/power-dam-pressure-kernel-profile";
 
 const physicsTrace = (phases: PerformanceTrace["phases"]): PerformanceTrace => ({
   sampleId: 1,
@@ -32,6 +36,9 @@ test("UI throughput command enforces the final Power Liquids authority gates", (
     "the throughput command has no sampled physics trace; profile acceptance owns the pressure-system gate");
   assert.match(packageJson.scripts["profile:power-dam-ui"],
     /FLUID_MAX_PRESSURE_NON_SOLVE_MS=\$\{FLUID_MAX_PRESSURE_NON_SOLVE_MS:-4\}/);
+  assert.match(packageJson.scripts["profile:power-dam-mini:pressure-kernels"],
+    /FLUID_FINE_FACTOR=\$\{FLUID_FINE_FACTOR:-1\}.*--pressure-kernel-profile/,
+    "the pressure-kernel profiler must default to the specialized factor-1 lane");
   assert.equal(packageJson.scripts["benchmark:power-dam-quiescent"],
     "node --import tsx tools/benchmark-power-dam.ts --lane=quiescent");
   assert.match(packageJson.scripts["test:power-liquids-structure"],
@@ -112,6 +119,85 @@ test("fine GPU pass timestamps normalize by sampled advances, not the full smoke
   });
   assert.equal(summary.fineTimestamps?.summedPassPerAdvance_ms, 12);
   assert.equal(summary.fineTimestamps?.byLabel["Fine topology"]?.totalPerAdvance_ms, 12);
+});
+
+test("pressure kernel timestamps roll up into optimization regions", () => {
+  const bucket = (samples: number, total_ms: number) => ({
+    samples, total_ms, mean_ms: total_ms / samples,
+    minimum_ms: total_ms / samples, maximum_ms: total_ms / samples,
+  });
+  const profile = buildPowerDamPressureKernelProfile({
+    capturedCommandBuffers: 2,
+    measuredPasses: 10,
+    invalidPasses: 0,
+    capacityOverflows: 0,
+    summedPass_ms: 15,
+    encoderIsolated: false,
+    labelIsolated: true,
+    labelPrefixes: [
+      "Pipelined MGPCG", "Section 4.3", "Factor-1 dense M1", "SPGrid V-cycle",
+      "SPGrid accurate A2", "SPGrid Section 6.3",
+    ],
+    span_ms: 40,
+    coverageRatio: 0.375,
+    byLabel: {
+      "SPGrid V-cycle - restrict level 0": bucket(4, 8),
+      "SPGrid V-cycle - coarse V-cycle tail levels 2-bottom": bucket(2, 4),
+      "Section 4.3 hybrid inner residual": bucket(2, 2),
+      "Factor-1 dense M1 - pre-smooth level 0": bucket(2, 3),
+      "Pipelined MGPCG merged reduction finish": bucket(2, 1),
+      "Fine JFA - flood stride 4": bucket(2, 99),
+    },
+  });
+  assert.equal(profile?.exact, true);
+  assert.equal(profile?.completePressureScope, true);
+  assert.equal(profile?.instrumentedPressurePerAdvance_ms, 9);
+  assert.equal(profile?.byRegion["vcycle.transfer.restrict.level-0"]?.totalPerAdvance_ms, 4);
+  assert.equal(profile?.byRegion["vcycle.coarse-tail"]?.totalPerAdvance_ms, 2);
+  assert.equal(profile?.byRegion["preconditioner.inner-residual"]?.totalPerAdvance_ms, 1);
+  assert.equal(profile?.byRegion["preconditioner.dense.smoothing.pre.level-0"]
+    ?.totalPerAdvance_ms, 1.5);
+  assert.equal(profile?.byRegion["outer.reductions"]?.totalPerAdvance_ms, 0.5);
+  assert.equal(profile?.byLabel["Fine JFA - flood stride 4"], undefined,
+    "unrelated timestamp labels must not contaminate pressure totals");
+});
+
+test("a micro-stage timestamp filter cannot claim a complete pressure profile", () => {
+  const profile = buildPowerDamPressureKernelProfile({
+    capturedCommandBuffers: 1,
+    measuredPasses: 1,
+    invalidPasses: 0,
+    capacityOverflows: 0,
+    summedPass_ms: 1,
+    encoderIsolated: false,
+    labelIsolated: true,
+    labelPrefixes: ["SPGrid accurate A2 -", "SPGrid Section 6.3 -"],
+    span_ms: 2,
+    coverageRatio: 0.5,
+    byLabel: {
+      "SPGrid accurate A2 - parallel direct terms": {
+        samples: 1, total_ms: 1, mean_ms: 1, minimum_ms: 1, maximum_ms: 1,
+      },
+    },
+  });
+  assert.equal(profile?.completePressureScope, false);
+  assert.equal(profile?.exact, false);
+  assert.ok(profile?.warnings.some((warning) => /partial/.test(warning)));
+});
+
+test("pressure kernel taxonomy exposes transfer direction and hierarchy level", () => {
+  assert.equal(powerDamPressureKernelRegion("SPGrid V-cycle · pre-smooth level 1"),
+    "vcycle.smoothing.pre.level-1");
+  assert.equal(powerDamPressureKernelRegion("SPGrid V-cycle - prolong level 0"),
+    "vcycle.transfer.prolong.level-0");
+  assert.equal(powerDamPressureKernelRegion("Factor-1 dense M1 - restrict level 1"),
+    "preconditioner.dense.transfer.restrict.level-1");
+  assert.equal(powerDamPressureKernelRegion("Factor-1 dense M1 - tail levels 2-bottom"),
+    "preconditioner.dense.coarse-tail");
+  assert.equal(powerDamPressureKernelRegion(
+    "SPGrid Section 6.3 - parallel merged-band adjoint children"),
+  "operator.band.adjoint-children");
+  assert.equal(powerDamPressureKernelRegion("unrelated stage"), undefined);
 });
 
 test("quiescent paired-prefix window subtracts cumulative work and retains terminal counters", () => {

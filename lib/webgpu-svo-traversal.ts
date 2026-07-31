@@ -1109,6 +1109,8 @@ export interface WebgpuSvoTraversalBindings {
   leaves?: number;
   /** Experimental internal-node expansion; omitted keeps the production shader byte-identical. */
   childEnumeration?: "aabb" | "parametric";
+  /** Experimental private stack capacity; omitted keeps the 32-entry production stack. */
+  stackCapacity?: 8 | 16 | 32;
 }
 
 /** Remap the helper's three bindings when composing it into a larger renderer shader. */
@@ -1118,12 +1120,16 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
   const nodes = bindings.nodes ?? 1;
   const leaves = bindings.leaves ?? 2;
   const childEnumeration = bindings.childEnumeration ?? "aabb";
+  const stackCapacity = bindings.stackCapacity ?? 32;
   for (const [label, value] of Object.entries({ group, control, nodes, leaves })) {
     if (!Number.isInteger(value) || value < 0) throw new RangeError(`SVO WGSL ${label} must be a non-negative integer`);
   }
   if (new Set([control, nodes, leaves]).size !== 3) throw new RangeError("SVO WGSL bindings must be distinct");
   if (childEnumeration !== "aabb" && childEnumeration !== "parametric") {
     throw new RangeError("SVO WGSL child enumeration must be aabb or parametric");
+  }
+  if (stackCapacity !== 8 && stackCapacity !== 16 && stackCapacity !== 32) {
+    throw new RangeError("SVO WGSL stack capacity must be 8, 16, or 32");
   }
   let source = webgpuSvoTraversalWGSL;
   if (childEnumeration === "parametric") {
@@ -1136,6 +1142,11 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
       parametricContinuationExpansion(sectionBetween(source, continuationBegin, continuationEnd)));
     source = replaceSection(source, restartBegin, restartEnd,
       parametricRestartExpansion(sectionBetween(source, restartBegin, restartEnd)));
+  }
+  if (stackCapacity !== 32) {
+    source = source
+      .replace("const SVO_STACK_CAPACITY: u32 = 32u;", `const SVO_STACK_CAPACITY: u32 = ${stackCapacity}u;`)
+      .replaceAll("array<SvoStackEntry, 32>", `array<SvoStackEntry, ${stackCapacity}>`);
   }
   return source
     .replace("@group(0) @binding(0) var<storage, read> svoControl", `@group(${group}) @binding(${control}) var<storage, read> svoControl`)

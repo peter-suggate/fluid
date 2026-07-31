@@ -325,7 +325,7 @@ const writeReport = async (
       FLUID_EXPECT_GRID: `${width}x${height}`,
       FLUID_GPU_ISOLATE_PASS_LABELS: "1",
       FLUID_GPU_ISOLATE_PASS_LABEL_PREFIXES: "Sparse voxel",
-      FLUID_GPU_ISOLATE_PASS_ENCODERS: "0",
+      FLUID_GPU_ISOLATE_PASS_ENCODERS: timingOnly ? "0" : "1",
       FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
       FLUID_SVO_DRY_FRAME_SHADING: shading,
       FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
@@ -441,6 +441,7 @@ const main = async (): Promise<void> => {
         FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
         FLUID_SVO_DRY_FRAME_SHADING: shading,
         FLUID_SVO_DRY_FRAME_PROFILE_SECONDS: String(counterSeconds + 9),
+        FLUID_SVO_DRY_FRAME_ISOLATE_PASS_ENCODERS: timingOnly ? "0" : "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

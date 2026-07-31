@@ -82,6 +82,26 @@ type CachedGroup = {
   readonly group: GPUBindGroup;
 };
 
+/** A/B kill switch for the storage-publication fusion. Production is fused. */
+export function octreeSection43FusedInnerGateEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_FUSED_INNER_GATE !== "0";
+}
+
+/** A/B kill switch for folding q-A2p into the accurate operator's ordered
+ * finalizer. Production is fused; zero restores the materialized A2 image and
+ * the separate full-row residual dispatch. */
+export function octreeSection43FusedAccurateResidualEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_FUSED_ACCURATE_RESIDUAL !== "0";
+}
+
 /**
  * Proof-carrying fixed preconditioner consumed by the pipelined outer solve.
  * The class exposes only the ordinary correction interface: the L2 shell is
@@ -98,7 +118,8 @@ implements OctreeFirstOrderSPDVCycle {
   readonly allocatedBytes: number;
   readonly boundarySmoothingIterations: number;
   readonly workAccountingPlan: Readonly<{ boundarySweeps: number; encodedSetupDispatches: number;
-    encodedCorrectionDispatches: number; mergedBandApplies: number; avoidedBandDispatches: number }>;
+    encodedCorrectionDispatches: number; mergedBandApplies: number; avoidedBandDispatches: number;
+    fusedAccurateResidual: boolean; avoidedRowDispatches: number }>;
 
   private readonly params: GPUBuffer;
   private readonly hybridA: GPUBuffer;
@@ -116,6 +137,7 @@ implements OctreeFirstOrderSPDVCycle {
   private readonly bandOperatorLayout: GPUBuffer;
   private readonly pipelines: Readonly<Record<HybridStage, GPUComputePipeline>>;
   private readonly groups = new Map<HybridStage, CachedGroup[]>();
+  private readonly fusedAccurateResidual: boolean;
   private destroyed = false;
 
   /** Exact GPU-published shell intersections, exposed only for post-submit
@@ -256,18 +278,35 @@ implements OctreeFirstOrderSPDVCycle {
     this.encodedSetupDispatchCount = (inner.encodedSetupDispatchCount ?? 0)
       + 5 + OCTREE_SECTION43_BOUNDARY_BAND_LAYERS;
     const mergedBandApplies = 2 * this.boundarySmoothingIterations - 1;
-    // One convergence-gate publisher, four row-wide stages (zero sweep, inner
-    // residual, M1 seeding, publication), one compact band smooth plus the
-    // operator's staged merged-band apply per matched sweep after the zero
-    // sweep, one exact row-wide L2 apply, and the page-parallel L1 V-cycle.
-    this.encodedCorrectionDispatchCount = 5
+    this.fusedAccurateResidual = octreeSection43FusedInnerGateEnabled()
+      && octreeSection43FusedAccurateResidualEnabled()
+      && source.secondOrderOperator.encodeGate !== undefined
+      && source.secondOrderOperator.encodeBody !== undefined
+      && source.secondOrderOperator.encodeResidualBody !== undefined;
+    const exactL2ApplyDispatches = this.fusedAccurateResidual
+      ? (source.secondOrderOperator.encodedResidualDispatchCount
+        ?? source.secondOrderOperator.encodedDispatchCount)
+      : source.secondOrderOperator.encodedDispatchCount;
+    // One convergence-gate publisher, the zero/M1-seed/publication row stages,
+    // and (only on the unfused A/B arm) a separate inner-residual row stage; one
+    // compact band smooth plus the operator's staged merged-band apply per
+    // matched sweep after the zero sweep; one exact row-wide L2 apply; and the
+    // page-parallel L1 V-cycle.
+    this.encodedCorrectionDispatchCount = 5 - Number(this.fusedAccurateResidual)
       + (1 + source.secondOrderOperator.encodedMergedBandDispatchCount) * mergedBandApplies
-      + source.secondOrderOperator.encodedDispatchCount
+      + exactL2ApplyDispatches
       + inner.encodedCorrectionDispatchCount;
     // Setup keeps its accepted-row and compact-band boundaries. Correction
     // adds its own gate boundary plus the exact L2 apply's gate boundary; the
     // inner V-cycle reports its own.
-    this.encodedPassTransitionCount = (inner.encodedPassTransitionCount ?? 0) + 4;
+    const fusedInnerGate = octreeSection43FusedInnerGateEnabled()
+      && inner.encodeCorrectionGate !== undefined
+      && inner.encodeCorrectionBody !== undefined;
+    const fusedOperatorGate = octreeSection43FusedInnerGateEnabled()
+      && source.secondOrderOperator.encodeGate !== undefined
+      && source.secondOrderOperator.encodeBody !== undefined;
+    this.encodedPassTransitionCount = (inner.encodedPassTransitionCount ?? 0)
+      + 4 - Number(fusedInnerGate) - Number(fusedOperatorGate);
     this.allocatedBytes = this.params.size + 7 * vectorBytes
       + this.bandWorksets.size + this.bandDispatch.size
       + this.gatedRowDispatch.size + this.gatedBandDispatch.size;
@@ -277,7 +316,9 @@ implements OctreeFirstOrderSPDVCycle {
       mergedBandApplies,
       avoidedBandDispatches: mergedBandApplies
         * (source.secondOrderOperator.encodedDispatchCount
-          - source.secondOrderOperator.encodedMergedBandDispatchCount) });
+          - source.secondOrderOperator.encodedMergedBandDispatchCount),
+      fusedAccurateResidual: this.fusedAccurateResidual,
+      avoidedRowDispatches: Number(this.fusedAccurateResidual) });
   }
 
   encodeSetup(
@@ -324,6 +365,26 @@ implements OctreeFirstOrderSPDVCycle {
     // remains encoded and dispatches no workgroups.
     let pass = broker.compute({ label: "Section 4.3 convergence-gated correction records" });
     this.runDirect(pass, "prepareCorrectionDispatches", resources);
+    const inner = this.source.firstOrderVCycle;
+    const splitInner = octreeSection43FusedInnerGateEnabled()
+      && inner.encodeCorrectionGate !== undefined
+      && inner.encodeCorrectionBody !== undefined;
+    if (splitInner) inner.encodeCorrectionGate!(pass, {
+      rhs: this.innerRhs,
+      correction: this.innerCorrection,
+      solverControl: input.solverControl,
+      rowCount: input.rowCount,
+    });
+    const operator = this.source.secondOrderOperator;
+    const splitOperator = this.fusedAccurateResidual
+      || (octreeSection43FusedInnerGateEnabled()
+        && operator.encodeGate !== undefined
+        && operator.encodeBody !== undefined);
+    if (splitOperator) operator.encodeGate!(
+      pass, this.hybridA,
+      this.fusedAccurateResidual ? this.innerRhs : this.operatorImage,
+      input.solverControl,
+    );
     broker.fence("Section 4.3 correction dispatch publication");
 
     // §4.3(1): J^k(0, q) -> p1. The first sweep starts from the exact zero
@@ -337,17 +398,26 @@ implements OctreeFirstOrderSPDVCycle {
 
     // §4.3(2): r1 = q - L2 p1 over every accepted row, then the page-parallel
     // symmetric first-order V-cycle. p1 now lives in hybridA.
-    this.source.secondOrderOperator.encode(
-      broker, this.hybridA, this.operatorImage, input.solverControl,
-    );
-    pass = broker.compute({ label: "Section 4.3 hybrid inner residual" });
-    this.runRows(pass, "formInnerResidual", resources);
-    this.source.firstOrderVCycle.encodeCorrection(broker, {
+    if (this.fusedAccurateResidual) {
+      operator.encodeResidualBody!(
+        broker, this.hybridA, input.rhs, this.innerRhs, input.solverControl,
+      );
+    } else {
+      if (splitOperator) operator.encodeBody!(
+        broker, this.hybridA, this.operatorImage, input.solverControl,
+      );
+      else operator.encode(broker, this.hybridA, this.operatorImage, input.solverControl);
+      pass = broker.compute({ label: "Section 4.3 hybrid inner residual" });
+      this.runRows(pass, "formInnerResidual", resources);
+    }
+    const innerInput = {
       rhs: this.innerRhs,
       correction: this.innerCorrection,
       solverControl: input.solverControl,
       rowCount: input.rowCount,
-    });
+    };
+    if (splitInner) inner.encodeCorrectionBody!(broker, innerInput);
+    else inner.encodeCorrection(broker, innerInput);
 
     // §4.3(3): p2 = p1 + M1 r1 seeds both ping-pong states, then the identical
     // matched even-k schedule starts B->A and therefore leaves z in hybridB.

@@ -8,7 +8,7 @@ import { resolveMethodValues } from "../lib/methods/types";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { enumerateOctreeFrontierCandidateLattice, fineLevelSetWarmStartRequested, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePersistentMGPCGEnabled, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { enumerateOctreeFrontierCandidateLattice, expandOctreePressureRowAffectedOneRing, fineLevelSetWarmStartRequested, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, OCTREE_PRESSURE_ROW_ONE_RING_DIRECTION_COUNT, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePersistentMGPCGEnabled, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import {
   octreePipelinedMGPCGShader,
   WebGPUOctreePipelinedMGPCG,
@@ -89,8 +89,8 @@ test("paper grading preserves catalog-valid co-spherical masks", () => {
     /fn repairPaperRatioNeighbors[\s\S]*neighbor\.size > 2u \* size[\s\S]*for \(var parity = 0u; parity < 8u;/,
     "unit leaves at a sparse tile seam must repair a 4:1 lookup neighbor without publishing that tile as pressure work");
   assert.match(octreeSource,
-    /balanceRounds\s*=\s*2\s*\*\s*Math\.max\(1,\s*Math\.ceil\(Math\.log2\(this\.maxLeafSize\)\)\)/,
-    "strong grading must budget both mixed-ring and renewed 2:1 propagation");
+    /this\.balanceRounds = octreeBalanceRounds\(this\.maxLeafSize\)/,
+    "strong grading must use the immutable maximum-leaf round plan");
 });
 
 test("octree is a registered GPU method with dam-break defaults", () => {
@@ -408,6 +408,27 @@ test("compact scan scratch feeds the class-specialized structured authority", ()
   assert.doesNotMatch(octreeProjectionShader,
     /frontier\[rowDelta(?:Flags|Prefix|BlockTotals|CarriedBlocks)Base\(\)/,
     "scan scratch must never inherit the frontier binding's atomic ABI");
+  assert.match(octreeProjectionShader,
+    /fn scatterDirtyRowDelta[\s\S]*let encoded=frontier\[rowDeltaNewToOldBase\(\)\+row\][\s\S]*compaction\[rowDeltaFlagsBase\(\)\+row\]=[\s\S]*encoded&ROW_DELTA_AFFECTED/,
+    "the complete initial affected image must be snapshotted before propagation");
+  assert.match(octreeProjectionShader,
+    /const ROW_DELTA_RING_DIRECTION_COUNT:u32=18u[\s\S]*const ROW_DELTA_RING_DIRECTIONS=array<vec3i,18>/,
+    "the cooperative row kernel must cover the exact face-and-edge direction set");
+  assert.match(octreeProjectionShader,
+    /var<workgroup> rowDeltaRingVotes:array<u32,32>[\s\S]*@compute @workgroup_size\(32\)[\s\S]*fn markRowDeltaRing[\s\S]*lane<ROW_DELTA_RING_DIRECTION_COUNT[\s\S]*for\(var stride=16u;stride>0u;stride\/=2u\)[\s\S]*if\(lane==0u&&live&&rowDeltaRingVotes\[0u\]!=0u\)/,
+    "one 32-lane workgroup per row must reduce the eighteen direction votes deterministically");
+  const ring = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn rowDeltaRingDirectionAffected"),
+    octreeProjectionShader.indexOf("fn scanAffectedRowDeltaBlocks"),
+  );
+  assert.match(ring, /compaction\[rowDeltaFlagsBase\(\)\+neighbor\]/,
+    "both row-ring lanes must read the immutable affected snapshot");
+  assert.doesNotMatch(ring,
+    /frontier\[rowDeltaNewToOldBase\(\)\+neighbor\][^\n]*ROW_DELTA_AFFECTED/,
+    "same-dispatch publications must never become propagation inputs");
+  assert.match(ring,
+    /@compute @workgroup_size\(256\)[\s\S]*fn markRowDeltaRingBlocks[\s\S]*rowDeltaRingDirectionAffected/,
+    "capacities beyond a one-dimensional exact extent retain a snapshot-correct fallback");
   assert.doesNotMatch(octreeProjectionShader,
     /@compute @workgroup_size\(1\)\s*fn (?:sortFrontierRows|prepareRowDelta|classifyRowDelta|markRowDeltaRing|compactRowDelta)/,
     "no row-sized frontier or row-delta stage may execute as a singleton loop");
@@ -436,8 +457,20 @@ test("unchanged octree generations zero every bulk topology and frontier schedul
     /classifyFrontierCarryPipeline[\s\S]*topologyCandidateDispatch,\s*12[\s\S]*mergeFrontierRowsPipeline[\s\S]*topologyCandidateDispatch,\s*24/);
   assert.doesNotMatch(rebuild, /dispatchWorkgroups\(this\.linearBlocks\)/,
     "the topology stage must not retain capacity-sized direct launches");
-  assert.equal((rows.match(/dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 12\)/g) ?? []).length, 6,
-    "every row-sized delta stage consumes the live or identity-reuse schedule");
+  assert.equal((rows.match(/dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 12\)/g) ?? []).length, 5,
+    "block-shaped scans and identity reuse retain the live-row block schedule");
+  assert.match(rows,
+    /setPipeline\(this\.useCooperativeRowDeltaRing[\s\S]*this\.markRowDeltaRingPipeline\s*:\s*this\.markRowDeltaRingBlocksPipeline\)[\s\S]*dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch,\s*this\.useCooperativeRowDeltaRing\s*\?\s*36\s*:\s*12\)/,
+    "the mini lane consumes the exact row-count record while large capacities retain the block fallback");
+  assert.match(rebuild,
+    /copyBufferToBuffer\(this\.compaction,\s*16,\s*this\.topologyCandidateDispatch,\s*36,\s*12\)/,
+    "the fourth immutable indirect record must be staged from the exact row-count triple");
+  assert.match(octreeSource,
+    /this\.useCooperativeRowDeltaRing\s*=\s*this\.frontierAllocation\.listCapacity[\s\S]*device\.limits\.maxComputeWorkgroupsPerDimension/,
+    "construction must select cooperative publication only when every row fits the exact 1-D dispatch");
+  assert.match(octreeProjectionShader,
+    /compaction\[4\]=0u;compaction\[5\]=1u;compaction\[6\]=1u;[\s\S]*FRONTIER_FAILED_MAGIC[\s\S]*compaction\[4\]=0u;compaction\[5\]=1u;compaction\[6\]=1u;/,
+    "reuse and rejected candidates must both zero the cooperative row schedule");
   assert.doesNotMatch(rows, /prepareRowDeltaPipeline|classifyRowDeltaPipeline|finalizeRowDeltaClassificationPipeline/,
     "the canonical sorted frontier merge must publish exact row maps without a second binary-search join");
   assert.doesNotMatch(rows, /dispatchWorkgroups\(this\.linearBlocks\)/);
@@ -533,6 +566,30 @@ test("exact power-row merge retires a same-origin size change and dirties carrie
     "fine-summary generation or phi-band mask change dirties an otherwise exact carried row");
 });
 
+test("pressure-row affected publication expands exactly one snapshotted ring", () => {
+  assert.equal(OCTREE_PRESSURE_ROW_ONE_RING_DIRECTION_COUNT, 18);
+  const neighbours = Array.from({ length: 4 }, () =>
+    new Array<number>(OCTREE_PRESSURE_ROW_ONE_RING_DIRECTION_COUNT).fill(-1));
+  neighbours[0]![0] = 1;
+  neighbours[1]![0] = 0; neighbours[1]![1] = 2;
+  neighbours[2]![0] = 1; neighbours[2]![1] = 3;
+  neighbours[3]![0] = 2;
+  const first = expandOctreePressureRowAffectedOneRing(
+    [true, false, false, false], neighbours,
+  );
+  assert.deepEqual(first, [true, true, false, false],
+    "a row reached during this publication must not cascade through the same dispatch");
+  assert.deepEqual(expandOctreePressureRowAffectedOneRing(first, neighbours),
+    [true, true, true, false],
+    "a second explicit publication advances the chain by exactly one more ring");
+  assert.deepEqual(expandOctreePressureRowAffectedOneRing(
+    [false, false, false, false], neighbours, true,
+  ), [true, true, true, true], "membership changes retain the conservative full-row rebuild");
+  assert.throws(() => expandOctreePressureRowAffectedOneRing(
+    [true], [[-1]],
+  ), /exactly eighteen/);
+});
+
 test("retired fixed-reference hydrostatic A/B and its backing kernels are deleted", () => {
   for (const method of simulationMethods) {
     assert.equal(method.params.some((spec) => spec.key === "hydrostaticSplit"), false);
@@ -593,8 +650,8 @@ test("structured boundary publication owns the variational solid constraint", ()
   assert.doesNotMatch(octreeProjectionShader, /fn assembleSystem|fn assembleCoarseSystem/,
     "the deleted variable-row assembly shader must remain absent");
   assert.match(octreeProjectionShader,
-    /if \(crossesSolidBoundary\) \{ return true; \}/,
-    "solid interfaces must force finest octree leaves");
+    /crossesBoundary = crossesClosedWall \|\| \(denseSolidField && crossesSolidBoundary\)[\s\S]*if \(!fluidGatedBoundaryRefinement\) \{ return true; \}[\s\S]*boundaryLiquidMinimumPhi[\s\S]*minimumPhi <= params\.solve\.w \* params\.cellRelax\.x/,
+    "the control must refine every solid interface while the experiment gates dry crossings by the liquid look-ahead band");
 });
 
 test("octree topology is genuinely three-dimensional and 2:1 balanced", () => {
@@ -627,10 +684,11 @@ test("coarse topology loops remain runtime-bounded at maximum leaf 16 and 32", (
   assert.match(refine, /let size = workgroupUniformLoad\(&refineRuntimeSize\)/);
   assert.match(refine, /for \(var flat = lid; flat < solidCellsInLeaf; flat \+= 128u\)/,
     "the cubic solid predicate must be distributed across the coarse workgroup");
-  assert.match(refine, /refineSolidRange\[lid\] = solidRange[\s\S]*stride = 64u/,
-    "coarse lanes must reduce their solid ranges cooperatively");
-  assert.match(octreeProjectionShader, /if \(!denseSolidField\) \{ return false; \}/,
-    "solid-free scenes must specialize away the entire cubic storage traversal");
+  assert.match(refine, /refineBoundaryRange\[lid\] = boundaryRange[\s\S]*stride = 64u/,
+    "coarse lanes must reduce solid range and liquid phi cooperatively");
+  assert.match(octreeProjectionShader,
+    /if \(!denseSolidField && !crossesClosedWall\) \{ return false; \}/,
+    "solid-free interior scenes must specialize away the entire cubic storage traversal");
   assert.match(balance, /let size = workgroupUniformLoad\(&balanceRuntimeSize\)/);
   assert.doesNotMatch(refine, /let size = targetRefinementSize/,
     "pipeline specialization must not unroll the size-cubed scan at 16/32");
@@ -814,12 +872,21 @@ test("eligible octrees select persistent MGPCG by default with a hierarchical or
   assert.equal(octreePersistentMGPCGEnabled({}), true);
   assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "1" }), true);
   assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "0" }), false);
+  assert.match(octreeSource,
+    /globalFineLevelSet\?\.plan\.fineFactor !== 1\s*&& WebGPUOctreePersistentMGPCG\.selects\(rowCapacity\)/,
+    "factor 1 must not construct the persistent experiment");
+  assert.match(octreeSource,
+    /const persistent = this\.globalFineLevelSet\?\.plan\.fineFactor !== 1\s*&& octreePersistentMGPCGEnabled\(\) \? this\.persistentMGPCG : undefined;/,
+    "factor 1 must not select a dormant persistent executor at encode time");
 });
 
 test("octree delegates every capacity to the direct-curvature PCG authority", () => {
   const encode = WebGPUOctreePipelinedMGPCG.prototype.encode.toString();
   assert.doesNotMatch(encode, /executionMode|persistentMGPCG|WebGPUOctreeMGPCG/);
-  assert.match(encode, /iteration\s*<\s*this\.plan\.maximumIterations/);
+  assert.match(encode, /iteration\s*<\s*encodedIterationBudget/);
+  assert.match(encode,
+    /encodedIterationBudget[\s\S]*this\.device\.queue\.writeBuffer\([\s\S]*this\.params/,
+    "the GPU exhaustion gate must receive the exact host-encoded prefix");
   assert.match(encode, /"reduceMergedPartials"/);
   assert.match(encode, /"finishMergedReduction"/);
   assert.match(encode, /"updateDirections"/);
@@ -830,14 +897,25 @@ test("octree delegates every capacity to the direct-curvature PCG authority", ()
     "the projection host must not retain a second solver schedule");
 });
 
-test("compact face authority keeps the selected solver's immutable budget", () => {
+test("compact face authority shapes only a stale-safe factor-one encode prefix", () => {
   const encode = WebGPUOctreeProjection.prototype.encode.toString();
   assert.match(encode,
-    /const solveBudget\s*=\s*this\.pipelinedMGPCG\.iterationBudget/);
+    /const fullSolveBudget\s*=\s*this\.pipelinedMGPCG\.iterationBudget/);
+  assert.match(encode,
+    /selectOctreeFactorOneEncodedSolveTail[\s\S]*factorOne:[\s\S]*fineFactor\s*===\s*1/);
   assert.match(encode,
     /this\.info\.pressureIterationBudget\s*=\s*solveBudget[\s\S]*this\.info\.pressureIterationHardBudget\s*=\s*this\.solveTailPolicy\.hardOuterIterationCeiling/);
-  assert.doesNotMatch(encode, /faceTransport\)\s*return|updateSolveBudget/,
-    "face transport and CPU diagnostics must not shorten the recorded pressure solve");
+  assert.match(encode,
+    /encodedIterationBudget:\s*solveBudget/,
+    "recorded accounting and the GPU exhaustion gate consume the same selected prefix");
+  assert.doesNotMatch(encode, /faceTransport\)\s*return|pressureIterationsUsed/,
+    "live transport state and racing solver telemetry must not shape the schedule");
+  assert.match(uniformSolverSource,
+    /structuredStepWorkObservation\(record\)[\s\S]*observeFactorOneSolveTail\(\{[\s\S]*publishedIterationCount:\s*observation\.executedSolveIterations[\s\S]*acceptedTopologyEpoch:\s*observation\.acceptedEpoch/,
+    "the selector may consume only the step-coherent snapshot observation");
+  assert.match(uniformSolverSource,
+    /this\.octreeProjection\.encode\([\s\S]*step:\s*this\.info\.encodedSteps/,
+    "the encoded solve and its snapshot must share one exact step stamp");
 });
 
 test("projection WGSL contains only topology and compact-row publication authority", () => {
@@ -978,26 +1056,32 @@ test("structured solve dispatches are class-exact and convergence gated", () => 
     "the deleted variable-row executor must not return to the topology shader");
 });
 
-test("pressure topology retains published fine-interface support across generations", () => {
+test("pressure topology follows current fine-interface support without tile-wide retention", () => {
   assert.match(octreeProjectionShader,
     /fn pressureRefinementEvidence\(origin: vec3u, size: u32\)[\s\S]*inflowProtectionIntersects\(origin, size\)/,
     "authored pressure apertures must retain local topology protection");
   const refinementEvidence = octreeProjectionShader.slice(
     octreeProjectionShader.indexOf("fn pressureRefinementEvidence"),
-    octreeProjectionShader.indexOf("fn pressureRetentionAt"),
+    octreeProjectionShader.indexOf("fn pressureRefinementProtected"),
   );
   assert.match(refinementEvidence,
-    /fineLeafSummary\(origin, size\)[\s\S]*gradingLayers \* max\(2\.0, f32\(size\)\)[\s\S]*if \(crossesInterface\) \{ return true; \}[\s\S]*observedNearInterface && \(summary\.complete \|\| fineSummaryFactor == 1u\)/,
-    "partial factor-1 surface evidence must drive every coarse-to-fine pass while absent evidence remains inert");
+    /fineLeafSummary\(origin, size\)[\s\S]*gradingLayers \* max\(0\.0, f32\(size\) - 2\.0\)[\s\S]*if \(crossesInterface\) \{ return true; \}[\s\S]*if \(size <= 2u\) \{[\s\S]*return false;[\s\S]*observedNearInterface && \(summary\.complete \|\| fineSummaryFactor == 1u\)/,
+    "size-two power cells must split only on an actual crossing while coarser candidates retain progressive grading");
   assert.match(octreeProjectionShader,
-    /classifyTopologyTileSignature[\s\S]*pressureRefinementEvidence\(unpackOrigin\(owner\.packedOrigin\), owner\.size\)[\s\S]*priorRetention - 1u[\s\S]*PRESSURE_RETENTION_GENERATIONS[\s\S]*retention << 24u/,
-    "the structural signature must refresh from current pressure evidence and otherwise decay retention");
+    /classifyTopologyTileSignature[\s\S]*pressureRefinementEvidence\(unpackOrigin\(owner\.packedOrigin\), owner\.size\)[\s\S]*compaction\[base \+ 4u\] = TILE_SIGNATURE_VALID_MAGIC/,
+    "the structural signature must hash current spatial pressure evidence");
+  assert.doesNotMatch(octreeProjectionShader,
+    /PRESSURE_RETENTION_GENERATIONS|fn pressureRetentionAt|priorRetention|retention << 24u/,
+    "tile activity must not retain unrelated dry cells");
   assert.match(octreeProjectionShader,
-    /fn pressureRefinementProtected[\s\S]*pressureRefinementEvidence\(origin, size\) \|\| pressureRetentionAt\(origin\) > 0u/,
-    "refinement protection must union current evidence with retained history without self-refresh");
+    /fn pressureRefinementProtected\(origin: vec3u, size: u32\) -> bool \{[\s\S]*return pressureRefinementEvidence\(origin, size\);/,
+    "refinement protection must be a current spatial decision");
   assert.match(octreeProjectionShader,
-    /fn leafNeedsRefinement[\s\S]*pressureRefinementProtected\(origin, size\)[\s\S]*if \(!denseSolidField\) \{ return false; \}/,
+    /fn leafNeedsRefinement[\s\S]*pressureRefinementProtected\(origin, size\)[\s\S]*if \(!denseSolidField && !crossesClosedWall\) \{ return false; \}/,
     "solid-free dam scenes must refine interface support before the cheap solid-free exit");
+  assert.match(octreeProjectionShader,
+    /fn boundaryLiquidMinimumPhi[\s\S]*if \(summary\.found\) \{ return summary\.minimumPhi; \}[\s\S]*3\.402823e38[\s\S]*coarse\.leafSize == 0u/,
+    "the authoritative positive-air complement must not masquerade as a near-interface distance");
   assert.match(octreeProjectionShader,
     /fn refineCoarseBlock[\s\S]*pressureRefinementProtected\(origin, size\)/,
     "large dyadic leaves must use the same protection predicate as fine leaves");

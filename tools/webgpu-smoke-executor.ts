@@ -503,6 +503,7 @@ const hierarchyOverride = process.env.FLUID_HIERARCHY === undefined ? undefined 
 const checkpointEvery_s = Number(process.env.FLUID_CHECKPOINT_EVERY_S ?? 0);
 const energyEverySteps = Number(process.env.FLUID_ENERGY_EVERY_STEPS ?? 0);
 const globalFineGenerationTransitionRequested = process.env.FLUID_GLOBAL_FINE_GENERATION_TRANSITION === "1";
+const octreeTopologyCensusRequested = process.env.FLUID_OCTREE_TOPOLOGY_CENSUS === "1";
 // Publication-transition acceptance needs the existing bounded renderer
 // counter readback so it can distinguish global fine/coarse authority from an
 // adaptive or retained presentation fallback. This is QA-only and adds no
@@ -883,6 +884,13 @@ async function runGPU(
   const powerGenerationAuditLog = options.powerGenerationAuditLog;
   const powerAuditEverySteps = options.powerAuditEverySteps;
   const evidenceCollectors = options.evidenceCollectors;
+  const declaredDtPattern = scenario.lane.stop.dtPattern_s;
+  const regressionDtPattern = Array.isArray(declaredDtPattern)
+    ? declaredDtPattern.filter((value): value is number => typeof value === "number"
+      && Number.isFinite(value) && value > 0)
+    : [];
+  const perturbCadence = regressionDtPattern.length > 0;
+  const collectStabilityEnvelope = perturbCadence || stabilityEnvelopeRequested;
   const applicableTerminalCollectors = evidenceCollectors.filter((collector) => collector.phase === "terminal"
     && (!collector.methods || collector.methods.includes(method.id as WebGPUSmokeMethodId)));
   const terminalSources = new Set(applicableTerminalCollectors.flatMap((collector) => collector.requires ?? []));
@@ -1067,26 +1075,41 @@ async function runGPU(
       : createSingleTallCellProbeControlLayout(scene, solverQuality, device.limits.maxTextureDimension3D, singleTallCellProbe)
     : undefined;
   const resultMethod = singleTallCellProbe && method.id === "uniform" ? "tall-cell-control" : method.id;
-  const solver = probeLayout
-    ? new WebGPUEulerianSolver(instrumentedDevice, scene, solverQuality, undefined, {
-      layoutOverride: probeLayout,
-      pressureCycles: typeof values.pressureCycles === "number" ? values.pressureCycles : 2,
-      pressureWarmStart: values.pressureWarmStart !== "off",
-      velocityTransport: values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack",
-      volumeControl: values.volumeControl !== "off",
-      referenceVolumeScale: typeof values.referenceVolumeScale === "number" ? values.referenceVolumeScale : undefined,
-      hierarchicalExtrapolation: values.hierarchicalExtrapolation !== "off"
-    })
-    : method.id === "octree" && method.createSolverAsync
-      // The power catalog and fenced t=0 sparse authority are initialization
-      // tasks in the production browser path. Dawn must use the same async
-      // constructor even when authority came from an authored UI profile
-      // instead of a command-line override.
-      ? await method.createSolverAsync(instrumentedDevice, scene, solverQuality, values, undefined, (progress) => {
-        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
-          record: "solver-initialization", ...progress }));
+  // The structured dynamics instance decides whether to encode its projection-
+  // energy summaries while it is constructed. Authored lane collection is
+  // resolved above without rewriting process.env, so propagate that resolved
+  // requirement across construction or every later audit snapshot contains the
+  // intentionally unpublished zero buffer. Preserve an explicit caller override.
+  const previousStructuredEnergyProbe = process.env.FLUID_STRUCTURED_ENERGY_PROBE;
+  const enableAuthoredStructuredEnergyProbe = previousStructuredEnergyProbe === undefined
+    && method.id === "octree"
+    && (powerGenerationAuditRequested || collectStabilityEnvelope || energyEverySteps > 0);
+  if (enableAuthoredStructuredEnergyProbe) process.env.FLUID_STRUCTURED_ENERGY_PROBE = "1";
+  let solver: GPUSolverInstance;
+  try {
+    solver = probeLayout
+      ? new WebGPUEulerianSolver(instrumentedDevice, scene, solverQuality, undefined, {
+        layoutOverride: probeLayout,
+        pressureCycles: typeof values.pressureCycles === "number" ? values.pressureCycles : 2,
+        pressureWarmStart: values.pressureWarmStart !== "off",
+        velocityTransport: values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack",
+        volumeControl: values.volumeControl !== "off",
+        referenceVolumeScale: typeof values.referenceVolumeScale === "number" ? values.referenceVolumeScale : undefined,
+        hierarchicalExtrapolation: values.hierarchicalExtrapolation !== "off"
       })
-      : method.createSolver!(instrumentedDevice, scene, solverQuality, values);
+      : method.id === "octree" && method.createSolverAsync
+        // The power catalog and fenced t=0 sparse authority are initialization
+        // tasks in the production browser path. Dawn must use the same async
+        // constructor even when authority came from an authored UI profile
+        // instead of a command-line override.
+        ? await method.createSolverAsync(instrumentedDevice, scene, solverQuality, values, undefined, (progress) => {
+          console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+            record: "solver-initialization", ...progress }));
+        })
+        : method.createSolver!(instrumentedDevice, scene, solverQuality, values);
+  } finally {
+    if (enableAuthoredStructuredEnergyProbe) delete process.env.FLUID_STRUCTURED_ENERGY_PROBE;
+  }
   const construction_ms = performance.now() - constructionStarted;
   const actualGrid: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
   if (expectedGridOverride && actualGrid.some((value, axis) => value !== expectedGridOverride[axis])) {
@@ -1255,13 +1278,6 @@ async function runGPU(
   let firstStructuredRejectStep: number | undefined;
   let lastProgressAt_ms = runStarted;
   let lastProgressSteps = 0;
-  const declaredDtPattern = scenario.lane.stop.dtPattern_s;
-  const regressionDtPattern = Array.isArray(declaredDtPattern)
-    ? declaredDtPattern.filter((value): value is number => typeof value === "number"
-      && Number.isFinite(value) && value > 0)
-    : [];
-  const perturbCadence = regressionDtPattern.length > 0;
-  const collectStabilityEnvelope = perturbCadence || stabilityEnvelopeRequested;
   const stabilityEnvelope: StabilityEnvelope | undefined = collectStabilityEnvelope ? {
     peakLiquidSpeed_m_s: 0, peakComponentCfl: 0, peakKineticEnergyProxy: 0,
     maximumProjectionEnergyRatio: 0, projectionEnergySampleCount: 0,
@@ -2517,9 +2533,29 @@ async function runGPU(
   // so it costs the wall nothing. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3.
   if (method.id === "octree") {
     const projection = (solver as unknown as {
-      octreeProjection?: { readSolveDiagnostics(): Promise<void> };
+      octreeProjection?: {
+        readSolveDiagnostics(): Promise<void>;
+        readTopologyLeafCensus(): Promise<{
+          generation: number;
+          residentOwnerPages: number;
+          topologyLeaves: number;
+          representedCells: number;
+          leafCountsBySize: Readonly<Record<string, number>>;
+        }>;
+      };
     }).octreeProjection;
-    if (projection) await projection.readSolveDiagnostics();
+    if (projection) {
+      await projection.readSolveDiagnostics();
+      if (octreeTopologyCensusRequested) {
+        const census = await projection.readTopologyLeafCensus();
+        console.log(JSON.stringify({
+          scenario: scenarioId,
+          method: method.id,
+          phase: "octree-topology-census",
+          ...census,
+        }));
+      }
+    }
   }
   const info = { ...await solver.readStats() };
   // The compact paper path never dispatches the dense velocity reduction.
