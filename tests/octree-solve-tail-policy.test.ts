@@ -157,7 +157,7 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
   assert.equal(OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY, 9_216);
   assert.equal(planOctreeSolveTail(PROFILES.ceilingDrop).boundarySmoothingIterations,
     OCTREE_SECTION43_MINI_SHELL_DEPTH,
-    "the 24x16x24 ceiling keeps its validated k=6 shell independent of executor choice");
+    "the 24x16x24 ceiling keeps its validated k=8 shell independent of executor choice");
   for (const policy of [quiescent, river, planOctreeSolveTail(PROFILES.uiDam),
     planOctreeSolveTail(PROFILES.largerTwoLevel), planOctreeSolveTail(PROFILES.ocean)]) {
     assert.ok(policy.encodedOuterIterations >= 4
@@ -187,8 +187,8 @@ test("solve-tail policy admits an explicit symmetric Section 4.3 shell-depth exp
 
 test("selected Section 4.3 shell has deterministic five-level command counts", () => {
   const expectedCounts = new Map<OctreeSolveTailSceneProfile, number>([
-    [PROFILES.miniDam, 784],
-    [PROFILES.ceilingDrop, 784],
+    [PROFILES.miniDam, 872],
+    [PROFILES.ceilingDrop, 872],
     [PROFILES.largerTwoLevel, 872],
     [PROFILES.uiDam, 872],
     [PROFILES.quiescent, 872],
@@ -215,7 +215,7 @@ test("selected Section 4.3 shell has deterministic five-level command counts", (
     firstOrderSetupDispatches: 10,
     firstOrderCorrectionDispatches: 26,
     boundarySmoothingIterations: OCTREE_SECTION43_MINI_SHELL_DEPTH,
-  }).encodedPressureDispatches, 784,
+  }).encodedPressureDispatches, 872,
   "the maximum encoded envelope includes the selected mini matching shell");
   assert.equal(countOctreePressureCommands({
     encodedOuterIterations: 10,

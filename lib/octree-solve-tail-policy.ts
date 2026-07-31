@@ -23,19 +23,22 @@ export const OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE = 1e-4;
 /** Section 4.3 reports k≈8 as a general choice. */
 export const OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH = 8;
 /**
- * The fluid-gated 16-cubed dam needs k=6 when size-two cells remain adaptive
- * outside actual interface crossings. k=4 was sufficient only while the
- * first recurring topology publication flooded the domain with unit cells;
- * k=6 preserves the ten-iteration convergence envelope on the compact system.
+ * The compact fluid-gated 16-cubed dam needs the paper's k=8 shell.
+ *
+ * k=4 was sufficient only while the first recurring topology publication
+ * flooded the domain with unit cells. k=6 appeared valid when only terminal
+ * solve control was inspected, but the per-step Dawn tripwire exposed
+ * non-convergence at steps 31, 36, and 37. k=8 preserves the ten-iteration
+ * convergence envelope without restoring tile-wide refinement retention.
  */
-export const OCTREE_SECTION43_MINI_SHELL_DEPTH = 6;
+export const OCTREE_SECTION43_MINI_SHELL_DEPTH = 8;
 /**
- * Validated finest-cell envelope for the small two-level k=6 formulation.
+ * Validated finest-cell envelope for the small two-level k=8 formulation.
  *
  * This is deliberately capacity-shaped rather than an axis-length test: the
  * 24x16x24 ceiling drop is still a small 9,216-cell system. The envelope is
  * independent of which MGPCG executor is selected: ceiling-drop now uses the
- * row-parallel solver while retaining the separately validated k=6 shell. The
+ * row-parallel solver while retaining the separately validated k=8 shell. The
  * next larger authored two-level validation profile (32x24x16) remains on k=8.
  * Finest-cell count is an immutable conservative bound, so this selection
  * never depends on a readback or a previous advance.

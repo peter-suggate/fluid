@@ -61,9 +61,9 @@ The host-side dead-tail predictor is implemented but remains explicit-on via
 `FLUID_OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL=1`. With an immediately adjacent,
 converged, unchanged-topology observation, a prior four-iteration solve plus
 the two-iteration margin would encode six iterations. At the current graph
-that removes 4 x 53 = 212 records, taking the factor-1 MGPCG audit from about
-683 to 471 dispatches under the current k=6 mini shell. Normal throughput
-deliberately receives none of this saving: its snapshots are mapped only at
+that removes four encoded outer iterations. The exact record count must be
+remeasured under the corrected k=8 mini shell. Normal throughput deliberately
+receives none of this saving: its snapshots are mapped only at
 sampling/end points, not before the
 next encode, so the adjacency guard restores the full ten-iteration envelope.
 Adding a recurring map would introduce the CPU/GPU synchronization the plan

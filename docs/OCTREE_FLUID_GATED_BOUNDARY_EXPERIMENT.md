@@ -113,9 +113,9 @@ no tile-wide temporal retention. More importantly, an authoritative sparse
 positive-air complement is treated as outside the active fluid band instead
 of as a measured distance of one maximum-leaf width. That nominal 0.10 m value
 was smaller than the mini dam's 0.15 m look-ahead and therefore refined every
-dry boundary strip indefinitely. The compact pressure system needs a slightly
-stronger Section 4.3 boundary shell; the small two-level default is therefore
-`k=6` instead of `k=4`.
+dry boundary strip indefinitely. The compact pressure system needs the paper's
+production Section 4.3 boundary shell; the small two-level default is therefore
+`k=8` instead of `k=4`.
 
 At one step the corrected default preserves its initial 2,752 leaves (2,560
 size one and 192 size two), not 4,096, and converges in 9 of the unchanged 10
@@ -143,13 +143,25 @@ the expected upward migration into air as the reservoir drains. The A/B fields
 are bit-identical, both arms converged MGPCG, and both reported zero WebGPU
 validation errors. Wall time is effectively tied in this sample (0.08%).
 
+### Per-step convergence correction
+
+The original 62-step report inspected the terminal MGPCG control and therefore
+missed transient failures earlier in the same run. The later per-step Dawn
+tripwire exposed `ERROR_NONCONVERGENCE` at steps 31, 36, and 37 with `k=6`;
+each exhausted the ten encoded outer iterations and retained the pressure seed.
+The same validated 125-step compact-topology run passes with `k=8`. Restoring
+the former three-generation tile-wide pressure-retention policy also makes the
+run pass, but needlessly pins unrelated dry leaves. The production correction
+therefore keeps the compact topology and selects `k=8`.
+
 ## Current conclusion
 
 The idea works structurally and is supported by the paper: dry terrain detail
 drops by more than an order of magnitude without changing the wet pressure
 frontier in the measured large scene. It is now the default boundary policy;
 setting `FLUID_OCTREE_FLUID_GATED_BOUNDARIES=0` retains the unconditional
-control. The mini dam moving-interface case now preserves adaptivity through
+control. With the corrected `k=8` shell, the mini dam moving-interface case
+preserves adaptivity through
 its first advance, coarsens the drained ceiling region, and has exact 62-step
 field parity. Its wall time is currently tied with the unconditional control.
 A larger moving-terrain soak is still needed to establish the same parity and
