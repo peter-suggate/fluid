@@ -337,13 +337,13 @@ function lane(options: LaneOptions): SceneWebGPUSmokeLane {
 }
 
 const octreePowerOverrides = {
-  maximumLeafSize: "2",
+  maximumLeafSize: "32",
   interfaceRefinementBandCells: 3,
   globalFineLevelSetFactor: "4",
 } as const;
 const largePowerDamOverrides = {
   ...octreePowerOverrides,
-  maximumLeafSize: "16",
+  maximumLeafSize: "32",
   interfaceRefinementBandCells: 1,
   globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
 } as const;
@@ -795,7 +795,7 @@ const suiteList = [
   suite("twin-dam-collision", "Opposed seeded reservoirs collapsing into an oblique collision", twinDamScene, {
     default: lane({ target_s: 1, oracleSteps: 2, cpuOracle: false, collect: { stabilityEnvelope: true, fieldStats: "checkpoints", checkpointEvery_s: 0.1 } }),
   }),
-  suite("hydrostatic-power-two-level", "16-cubed settled unit/two-cell power grid", () => getScenePreset("hydrostatic-power-two-level").create(), {
+  suite("hydrostatic-power-two-level", "16-cubed settled leaf-32 power grid", () => getScenePreset("hydrostatic-power-two-level").create(), {
     default: lane({ target_s: 0.2, exactSteps: 50, maxDt_s: 0.004, oracleSteps: 50, cpuOracle: false,
       methods: methods(["octree"], { octree: octreePowerOverrides }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.2, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
@@ -804,7 +804,7 @@ const suiteList = [
         { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [16, 16, 16] },
         { id: "hydrostatic-power-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift", operator: "at-most", expected: 1e-4 }] }),
   }),
-  suite("hydrostatic-power-large-offset", "32x24x16 cell-cut two-level power grid", () => getScenePreset("hydrostatic-power-large-offset").create(), {
+  suite("hydrostatic-power-large-offset", "32x24x16 cell-cut leaf-32 power grid", () => getScenePreset("hydrostatic-power-large-offset").create(), {
     default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: { ...octreePowerOverrides, interfaceRefinementBandCells: 4 } }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
@@ -815,7 +815,7 @@ const suiteList = [
       hooks: [{ id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
         parameters: standardWaterRasterParameters }] }),
   }),
-  suite("minimal-power-dam-break", "Minimal dynamic two-level analytic dam", () => getScenePreset("minimal-power-dam-break").create(), {
+  suite("minimal-power-dam-break", "Minimal dynamic leaf-32 analytic dam", () => getScenePreset("minimal-power-dam-break").create(), {
     default: lane({ target_s: 2, exactSteps: 500, maxDt_s: 0.004, oracleSteps: 500, cpuOracle: false,
       methods: methods(["octree"], { octree: octreePowerOverrides }), timeout_ms: 240_000,
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.1, energyEverySteps: 50, spatialField: true, stabilityEnvelope: true, structuredValidation: true,

@@ -58,7 +58,7 @@ test("non-additive seeds still replace the base initial condition", () => {
     "replace-mode seeds must suppress the base pool exactly as before");
 });
 
-test("ocean scene is registered in the UI presets and the smoke harness with leaf-32 requested", () => {
+test("ocean scene is registered in the UI presets and the smoke harness with leaf 32", () => {
   const preset = getScenePreset("ocean-seiche");
   assert.equal(preset.id, "ocean-seiche", "the preset must exist rather than fall back to the default scene");
   assert.match(preset.description, /32/);

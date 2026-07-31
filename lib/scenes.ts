@@ -23,7 +23,7 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   methodId: "octree",
   quality: "balanced",
   overrides: Object.freeze({
-    maximumLeafSize: "2",
+    maximumLeafSize: "32",
     interfaceRefinementBandCells: 3,
     globalFineLevelSetFactor: "4",
   }),
@@ -38,7 +38,7 @@ export const COARSE_ONLY_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze
   methodId: "octree",
   quality: "balanced",
   overrides: Object.freeze({
-    maximumLeafSize: "16",
+    maximumLeafSize: "32",
     interfaceRefinementBandCells: 3,
     surfaceRefinementGradingLayers: 3,
     globalFineLevelSetFactor: "1",
@@ -58,7 +58,7 @@ export const LARGE_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...POWER_VALIDATION_METHOD_PROFILE,
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    maximumLeafSize: "16",
+    maximumLeafSize: "32",
     interfaceRefinementBandCells: 1,
     globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
   }),
@@ -75,7 +75,7 @@ export const CEILING_DROP_METHOD_PROFILE: MethodProfile = Object.freeze({
 });
 
 /** The larger offset tank needs one additional interface-support cell to keep
- * its unit/two-cell Section 5 band inside complete catalog support. This mirrors the
+ * its adaptive Section 5 band inside complete catalog support. This mirrors the
  * isolated Dawn oracle instead of inheriting the tiny 16-cubed profile. */
 export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...POWER_VALIDATION_METHOD_PROFILE,
@@ -119,7 +119,7 @@ export function createTinyHydrostaticScene(): SceneDescription {
 
 /**
  * A larger hydrostatic oracle with an intentionally cell-cut free surface.
- * Its 32x24x16 lattice is deep enough for a materially larger unit/two-cell
+ * Its 32x24x16 lattice is deep enough for a materially larger adaptive
  * pressure layout while remaining small enough for an isolated Dawn smoke.
  */
 export function createLargeHydrostaticScene(): SceneDescription {
@@ -619,7 +619,7 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     id: "hydrostatic-power-two-level",
     name: "Octree · tiny hydrostatic",
     group: "Comparisons",
-    description: "A 16³ settled tank for the first power-diagram oracle. With Maximum leaf 2³ and interface band 3, its wet pressure grid contains both unit and two-cell leaves.",
+    description: "A 16³ settled tank for the first power-diagram oracle. Maximum leaf 32³ matches every other authored scene while interface band 3 keeps the surface support explicit.",
     background: "default",
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     create: createTinyHydrostaticScene,
@@ -629,7 +629,7 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     id: "hydrostatic-power-large-offset",
     name: "Octree · larger hydrostatic",
     group: "Comparisons",
-    description: "A 32x24x16 settled tank with a cell-cut free surface. Maximum leaf 2³ exercises a larger unit/two-cell pressure layout than the tiny oracle.",
+    description: "A 32x24x16 settled tank with a cell-cut free surface. Maximum leaf 32³ matches every other authored scene while exercising a larger adaptive pressure layout than the tiny oracle.",
     background: "default",
     methodProfile: LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
     create: createLargeHydrostaticScene,
@@ -669,7 +669,7 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     id: "large-power-dam-break",
     name: "Octree · 20× dam break",
     group: "Comparisons",
-    description: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using maximum leaf 16³ and a band-1 interface.",
+    description: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using maximum leaf 32³ and a band-1 interface.",
     background: "default",
     methodProfile: LARGE_POWER_DAM_METHOD_PROFILE,
     create: createLargePowerDamBreakScene,

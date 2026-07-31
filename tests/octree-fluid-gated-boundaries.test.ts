@@ -12,13 +12,13 @@ import {
   planOctreeOwnerPages,
 } from "../lib/webgpu-octree-owner-pages";
 
-test("fluid-gated boundary refinement is opt-in with an unconditional general default", () => {
-  assert.equal(octreeFluidGatedBoundariesRequested({}), false);
-  assert.equal(octreeFluidGatedBoundariesRequested({}, true), true,
-    "an authored validation profile may opt in");
+test("fluid-gated boundary refinement is the default with an exact control override", () => {
+  assert.equal(octreeFluidGatedBoundariesRequested({}), true);
+  assert.equal(octreeFluidGatedBoundariesRequested({}, false), false,
+    "an authored validation profile may select the unconditional control");
   assert.equal(octreeFluidGatedBoundariesRequested({
     [FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV]: "0",
-  }, true), false, "the control-arm environment override wins over an authored opt-in");
+  }), false, "the control-arm environment override wins over the production default");
   assert.equal(octreeFluidGatedBoundariesRequested({
     [FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV]: "1",
   }), true);
@@ -78,7 +78,26 @@ test("both fine and cooperative coarse refinement use the same fluid gate", () =
   assert.match(coarse,
     /boundaryDecision = crossesBoundary[\s\S]*fluidGatedBoundaryRefinement && crossesBoundary[\s\S]*boundaryLiquidMinimumPhi[\s\S]*params\.solve\.w \* params\.cellRelax\.x/);
   assert.match(coarse,
-    /decision = pressureRefinementProtected\(origin, size\)[\s\S]*boundaryDecision/);
+    /pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*pressureRetained && \(!fluidGatedBoundaryRefinement \|\| !crossesBoundary\)[\s\S]*boundaryDecision/);
+});
+
+test("boundary gating preserves pressure support and rejects only unrelated tile retention", () => {
+  const evidence = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn pressureRefinementEvidence"),
+    octreeProjectionShader.indexOf("fn pressureRetentionAt"),
+  );
+  assert.doesNotMatch(evidence, /fluidGatedBoundaryRefinement/,
+    "the gate must not change the spatial pressure shell");
+  assert.match(octreeProjectionShader,
+    /currentEvidence = tileEvidenceReduction\[0\] != 0u/,
+    "the gate must not disable pressure hysteresis publication");
+  const fine = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn leafNeedsRefinement"),
+    octreeProjectionShader.indexOf("fn splitLeaf"),
+  );
+  assert.match(fine,
+    /pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*if \(crossesBoundary\)[\s\S]*return minimumPhi <= params\.solve\.w \* params\.cellRelax\.x[\s\S]*if \(pressureRetained\)/,
+    "current local evidence must win, while tile-wide retention is considered only after a dry-boundary rejection");
 });
 
 test("topology census deduplicates one coarse leaf spanning owner pages", () => {

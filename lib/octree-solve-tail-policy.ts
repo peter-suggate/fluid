@@ -22,16 +22,16 @@ export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_SAFETY_MARGIN = 2;
 export const OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE = 1e-4;
 /** Section 4.3 reports k≈8 as a general choice. */
 export const OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH = 8;
-/** The parity topology's 16-cubed dam sweep selects the established k=4 shell. */
+/** The retained compact leaf-2 experiment selects the established k=4 shell. */
 export const OCTREE_SECTION43_MINI_SHELL_DEPTH = 4;
 /**
- * Validated finest-cell envelope for the small two-level k=4 formulation.
+ * Validated finest-cell envelope for the retained leaf-2 k=4 experiment.
  *
  * This is deliberately capacity-shaped rather than an axis-length test: the
  * 24x16x24 ceiling drop is still a small 9,216-cell system. The envelope is
  * independent of which MGPCG executor is selected: ceiling-drop now uses the
  * row-parallel solver while retaining the separately validated k=4 shell. The
- * next larger authored two-level validation profile (32x24x16) remains on k=8.
+ * Every authored scene now defaults to leaf 32 and therefore remains on k=8.
  * Finest-cell count is an immutable conservative bound, so this selection
  * never depends on a readback or a previous advance.
  */

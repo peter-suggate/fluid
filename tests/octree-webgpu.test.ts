@@ -111,8 +111,8 @@ test("octree is a registered GPU method with dam-break defaults", () => {
     "the factor-4 authoritative lattice must remain an integer cubic refinement");
   assert.ok(Math.abs(defaultScene.container.width_m / layout.nx - defaultScene.container.height_m / layout.fineNy) < 1e-12);
   assert.ok(Math.abs(defaultScene.container.width_m / layout.nx - defaultScene.container.depth_m / layout.nz) < 1e-12);
-  assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "16");
-  assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "16");
+  assert.equal(octreeMethod.presetFor("balanced").maximumLeafSize, "32");
+  assert.equal(octreeMethod.presetFor("high").maximumLeafSize, "32");
   assert.equal(octreeMethod.params.some((spec) => spec.key === "secondaryParticles"), false,
     "unsupported spray must not be exposed by compact power-face authority");
   assert.match(octreeMethod.detail, /no topology readbacks/);
@@ -121,8 +121,24 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(octreeMethod.description, /sparse-pyramid hybrid MGPCG pressure solve/);
   const maximumLeaf = octreeMethod.params.find((spec) => spec.key === "maximumLeafSize");
   assert.ok(maximumLeaf && maximumLeaf.kind === "select");
-  assert.equal(maximumLeaf.default, "16");
-  assert.deepEqual(maximumLeaf.options.map((option) => option.value), ["2", "4", "8", "16", "32"]);
+  assert.equal(maximumLeaf.default, "32");
+  assert.deepEqual(maximumLeaf.options.map((option) => option.value), ["2", "4", "8", "16", "32"],
+    "the UI must retain every supported topology-depth choice");
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...octreeMethod.presetFor("balanced"), maximumLeafSize: "2",
+  }).octree.maximumLeafSize, 2,
+  "an explicit UI or Dawn leaf-size experiment must reach the solver");
+  assert.equal(octreeSolverOptions(defaultScene, "balanced",
+    octreeMethod.presetFor("balanced")).octree.fluidGatedBoundaryRefinement, true,
+  "dry-boundary adaptivity is the production default");
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...octreeMethod.presetFor("balanced"), globalFineLevelSetFactor: "1",
+  }).octree.fluidGatedBoundaryRefinement, false,
+  "coarse factor 1 must retain the full-duration wall-climb topology");
+  assert.equal(octreeSolverOptions(defaultScene, "balanced", {
+    ...octreeMethod.presetFor("balanced"), fluidGatedBoundaryRefinement: false,
+  }).octree.fluidGatedBoundaryRefinement, false,
+  "the unconditional Dawn control must remain selectable");
   assert.match(octreeSource, /function octreeLeafSize\(value: number\): 2 \| 4 \| 8 \| 16 \| 32/);
   assert.match(octreeSource, /rounded >= 32/);
   const interfaceBand = octreeMethod.params.find((spec) => spec.key === "interfaceRefinementBandCells");
@@ -156,7 +172,7 @@ test("octree is a registered GPU method with dam-break defaults", () => {
   assert.match(uniformSolverSource, /surfaceRefinementGradingLayers: options\.octree\.surfaceRefinementGradingLayers \?\? 1/);
   const methodSource = readFileSync(new URL("../lib/methods/octree.ts", import.meta.url), "utf8");
   assert.doesNotMatch(methodSource, /faceVelocityTransport|powerDiagramProjection|leafSolver/);
-  assert.match(methodSource, /globalFineLevelSetFactor: globalFineLevelSetFactor/);
+  assert.match(methodSource, /globalFineLevelSetFactor: fineFactor/);
   assert.doesNotMatch(octreeSource, /extrapolationSweeps|requestedExtrapolationSweeps/);
   assert.equal(octreeMethod.params.some((spec) => spec.key === "pressureWarmStart"), false,
     "pressure warm-start policy is an internal solver detail, not a product setting");
@@ -1059,35 +1075,34 @@ test("structured solve dispatches are class-exact and convergence gated", () => 
     "the deleted variable-row executor must not return to the topology shader");
 });
 
-test("pressure topology follows current fine-interface support without tile-wide retention", () => {
+test("boundary coarsening preserves the established pressure shell and hysteresis", () => {
   assert.match(octreeProjectionShader,
     /fn pressureRefinementEvidence\(origin: vec3u, size: u32\)[\s\S]*inflowProtectionIntersects\(origin, size\)/,
     "authored pressure apertures must retain local topology protection");
   const refinementEvidence = octreeProjectionShader.slice(
     octreeProjectionShader.indexOf("fn pressureRefinementEvidence"),
-    octreeProjectionShader.indexOf("fn pressureRefinementProtected"),
+    octreeProjectionShader.indexOf("fn pressureRetentionAt"),
   );
   assert.match(refinementEvidence,
-    /fineLeafSummary\(origin, size\)[\s\S]*gradingLayers \* max\(0\.0, f32\(size\) - 2\.0\)[\s\S]*if \(crossesInterface\) \{ return true; \}[\s\S]*if \(size <= 2u\) \{[\s\S]*return false;[\s\S]*observedNearInterface && \(summary\.complete \|\| fineSummaryFactor == 1u\)/,
-    "size-two power cells must split only on an actual crossing while coarser candidates retain progressive grading");
+    /fineLeafSummary\(origin, size\)[\s\S]*gradingLayers \* max\(2\.0, f32\(size\)\)[\s\S]*if \(crossesInterface\) \{ return true; \}[\s\S]*observedNearInterface && \(summary\.complete \|\| fineSummaryFactor == 1u\)/,
+    "both arms must retain the established candidate-scaled pressure shell");
+  assert.doesNotMatch(refinementEvidence, /fluidGatedBoundaryRefinement/,
+    "boundary policy must not alter pressure refinement evidence");
   assert.match(octreeProjectionShader,
     /classifyTopologyTileSignature[\s\S]*pressureRefinementEvidence\(unpackOrigin\(owner\.packedOrigin\), owner\.size\)[\s\S]*compaction\[base \+ 4u\] = TILE_SIGNATURE_VALID_MAGIC/,
     "the structural signature must hash current spatial pressure evidence");
-  assert.doesNotMatch(octreeProjectionShader,
-    /PRESSURE_RETENTION_GENERATIONS|fn pressureRetentionAt|priorRetention|retention << 24u/,
-    "tile activity must not retain unrelated dry cells");
   assert.match(octreeProjectionShader,
-    /fn pressureRefinementProtected\(origin: vec3u, size: u32\) -> bool \{[\s\S]*return pressureRefinementEvidence\(origin, size\);/,
-    "refinement protection must be a current spatial decision");
+    /currentEvidence = tileEvidenceReduction\[0\] != 0u[\s\S]*PRESSURE_RETENTION_GENERATIONS[\s\S]*retention << 24u/,
+    "both arms must retain the established three-generation pressure hysteresis");
   assert.match(octreeProjectionShader,
-    /fn leafNeedsRefinement[\s\S]*pressureRefinementProtected\(origin, size\)[\s\S]*if \(!denseSolidField && !crossesClosedWall\) \{ return false; \}/,
-    "solid-free dam scenes must refine interface support before the cheap solid-free exit");
+    /fn leafNeedsRefinement[\s\S]*pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*if \(!denseSolidField && !crossesClosedWall\) \{ return pressureRetained; \}/,
+    "solid-free dam scenes must preserve interior pressure retention before the cheap exit");
   assert.match(octreeProjectionShader,
     /fn boundaryLiquidMinimumPhi[\s\S]*if \(summary\.found\) \{ return summary\.minimumPhi; \}[\s\S]*3\.402823e38[\s\S]*coarse\.leafSize == 0u/,
     "the authoritative positive-air complement must not masquerade as a near-interface distance");
   assert.match(octreeProjectionShader,
-    /fn refineCoarseBlock[\s\S]*pressureRefinementProtected\(origin, size\)/,
-    "large dyadic leaves must use the same protection predicate as fine leaves");
+    /fn refineCoarseBlock[\s\S]*pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained && \(!fluidGatedBoundaryRefinement \|\| !crossesBoundary\)/,
+    "large dyadic leaves must ignore only unrelated retention at a dry boundary crossing");
 });
 
 test("retired topology tiles invalidate their old frontier identities", () => {

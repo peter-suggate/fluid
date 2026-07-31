@@ -17,24 +17,28 @@ The repository's unit-cell closed-wall strip and unconditional
 solid-crossing split are therefore implementation policy, not a paper
 invariant.
 
-## Experimental rule
+## Production rule
 
-Fluid-gated refinement remains an experiment. Enable it explicitly with:
+Fluid-gated refinement is the default. The former unconditional policy remains
+available as an exact validation control with:
 
 ```sh
-FLUID_OCTREE_FLUID_GATED_BOUNDARIES=1
+FLUID_OCTREE_FLUID_GATED_BOUNDARIES=0
 ```
 
-The current interface and inflow predicates run first. A
-leaf crossing a closed wall or the terrain/solid boundary is then split when
-its conservative minimum liquid phi is within the authored interface band.
-This is important during cold bootstrap, before the fine-summary hierarchy
-exists; testing only negative phi there changes the mesh too late and
-measurably changes the dam-break trajectory. Recurring pressure refinement
-retains a size-scaled grading ring for candidates larger than size two. The
-final size-two to size-one split requires an actual interface sign crossing:
-the power discretization represents a nearby free surface on the adaptive
-cell, so proximity alone is not a reason to make a unit cell.
+The existing interface and inflow predicates run first and are identical in
+both arms. Pressure refinement keeps the production candidate-scaled support
+ring and three-generation topology retention. A leaf crossing a closed wall or
+the terrain/solid boundary is then split when its conservative minimum liquid
+phi is within the authored interface band. This is important during cold
+bootstrap, before the fine-summary hierarchy exists; testing only negative phi
+there changes the mesh too late and measurably changes the dam-break trajectory.
+
+Pressure retention is stored per 8-cubed topology tile. It may preserve an
+interior pressure shell, but it is deliberately ignored when its only effect
+would be to pin an unrelated, locally dry boundary crossing. Current local
+pressure evidence still wins before that boundary decision, so approaching
+fluid refines the cell before contact.
 
 This gives the intended lifecycle:
 
@@ -46,7 +50,11 @@ This gives the intended lifecycle:
 Recurring generations use the already-published fine/coarse minimum-phi
 summary. Only cold bootstrap scans the imported/analytic phi cells.
 
-## Measurement
+## Earlier large-scene structural measurement
+
+The following garden result established the size of the opportunity in the
+original prototype. It is retained as historical evidence, not as a parity
+gate for the corrected boundary-only policy above.
 
 Scene: `garden-pond`, grid `120 x 40 x 88`, maximum leaf 16, two accepted
 steps at `dt=1/120 s`, Apple M1 Max Metal backend.
@@ -90,35 +98,24 @@ Scene: `minimal-power-dam-break`, grid `16 x 16 x 16`, 62 accepted steps at
 `dt = 0.004 s`, Apple M1 Max Metal/Dawn backend, interface band 3, global-fine
 factor 4.
 
-The first moving-interface run exposed a cold-bootstrap defect in the
-experiment. Before the fine-summary hierarchy exists, the gate tested only
-`phi < 0`, so dry boundary leaves inside the authored interface look-ahead
-were not split soon enough. At maximum leaf size 2 this produced:
+The reverted implementation bundled three independent changes under the gate:
 
-- scalar-field MAE 0.004536 and RMSE 0.014810;
-- 1.2407% relative volume difference;
-- wet-cell IoU 0.98330;
-- 0.0394-cell centroid displacement.
+1. dry wall/terrain crossings could remain coarse;
+2. the free-surface pressure support ring was narrowed;
+3. three-generation pressure-topology retention was disabled.
 
-The corrected bootstrap/fallback test compares conservative minimum phi with
-the authored interface-band distance. A second defect appeared after the first
-advance: the recurring proximity predicate added the full interface band to
-the final size-two split, covering almost the entire tiny domain and replacing
-the adaptive topology with 4,096 unit leaves. Tile-wide retention prolonged
-the same error.
+That changed the pressure discretization rather than merely removing dry
+boundary detail. At step 62 it reduced pressure rows from 1,475 to 1,348,
+shifted the reconstructed field to wet-cell IoU 0.966 and a 0.073-cell
+centroid displacement, and increased wall time from 70.8 to 125.5 ms/step.
 
-The recurring rule now splits size-two cells only on a sign crossing and has
-no tile-wide temporal retention. More importantly, an authoritative sparse
-positive-air complement is treated as outside the active fluid band instead
-of as a measured distance of one maximum-leaf width. That nominal 0.10 m value
-was smaller than the mini dam's 0.15 m look-ahead and therefore refined every
-dry boundary strip indefinitely. The compact pressure system needs the paper's
-production Section 4.3 boundary shell; the small two-level default is therefore
-`k=8` instead of `k=4`.
-
-At one step the corrected default preserves its initial 2,752 leaves (2,560
-size one and 192 size two), not 4,096, and converges in 9 of the unchanged 10
-outer iterations.
+The correction makes the gate boundary-only. Both arms use the same production
+pressure support and retention. Tile retention is ignored only for a locally
+dry boundary candidate with no current pressure evidence. An authoritative
+sparse positive-air complement is also treated as outside the active fluid
+band instead of as a measured distance of one maximum-leaf width; as fluid
+approaches, a real fine/coarse summary replaces that complement and triggers
+pre-contact refinement.
 
 The 62-step Dawn A/B is:
 
@@ -126,52 +123,50 @@ The 62-step Dawn A/B is:
 | --- | ---: | ---: |
 | Initial structural leaves | 3,648 | 2,752 |
 | Initial leaf histogram | 3,584 x size 1; 64 x size 2 | 2,560 x size 1; 192 x size 2 |
-| Terminal structural leaves | 3,858 | 2,948 |
-| Terminal leaf histogram | 3,824 x size 1; 34 x size 2 | 2,784 x size 1; 164 x size 2 |
-| Terminal field cell sum | 1,475.369294 | 1,475.369294 |
-| Terminal pressure rows | 1,324 | 1,324 |
+| Terminal structural leaves | 4,096 | 3,270 |
+| Terminal leaf histogram | 4,096 x size 1 | 3,152 x size 1; 118 x size 2 |
+| Terminal field cell sum | 1,474.008386 | 1,474.008386 |
+| Terminal pressure rows | 1,453 | 1,453 |
 | Terminal pressure iterations | 5 | 5 |
 | Field MAE / RMSE | 0 / 0 | 0 / 0 |
 | Wet IoU / centroid distance | 1 / 0 cells | 1 / 0 cells |
-| Simulation wall time | 7,099 ms | 7,093 ms |
-| Wall time per step | 114.496 ms | 114.404 ms |
+| Simulation wall time | 6,523 ms | 6,989 ms |
+| Wall time per step | 105.213 ms | 112.724 ms |
 
-The terminal gated mesh places 64 size-two leaves at origin Y=14, coarsening
-the entire top two-cell slab; another 27 occur at Y=12 and 28 at Y=10. This is
-the expected upward migration into air as the reservoir drains. The A/B fields
-are bit-identical, both arms converged MGPCG, and both reported zero WebGPU
-validation errors. Wall time is effectively tied in this sample (0.08%).
+The terminal gated mesh places 64 size-two leaves at origin Y=14 and another 27
+at Y=12, opening the drained ceiling region while retaining current pressure
+support below it. The A/B fields are bit-identical, both arms have the same
+pressure rows and convergence receipt, and both reported zero WebGPU validation
+errors. The final current-profile sample is 6.7% slower on this deliberately
+small domain, inside the 10% regression gate. Earlier paired samples ranged
+from 1% through 6%; the pressure solve remains structurally identical, while
+dynamic topology work accounts for the small-domain overhead.
 
-### Per-step convergence correction
+### Per-step convergence gate
 
-The original 62-step report inspected the terminal MGPCG control and therefore
-missed transient failures earlier in the same run. The later per-step Dawn
-tripwire exposed `ERROR_NONCONVERGENCE` at steps 31, 36, and 37 with `k=6`;
-each exhausted the ten encoded outer iterations and retained the pressure seed.
-The same validated 125-step compact-topology run passes with `k=8`. Restoring
-the former three-generation tile-wide pressure-retention policy also makes the
-run pass, but needlessly pins unrelated dry leaves. The production correction
-therefore keeps the compact topology and selects `k=8`.
+Terminal diagnostics alone previously hid transient failures. The benchmark's
+`FLUID_MINI_DAM_AUDIT_EVERY_STEP=1` mode therefore serializes diagnostic
+readback after every accepted step and requires the immutable 62-step snapshot
+sequence (step, executed iterations, convergence, authority lag, prediction
+failures, and overflow) to match the unconditional control. It deliberately
+does not compare the separately submitted live compaction receipt: that probe
+can race the following generation and has reported transient zero-row samples
+even while the step snapshot is valid. This diagnostic timing is not used as
+the product wall-clock measurement. The production solve-tail policy remains
+unchanged.
 
 ## Current conclusion
 
 The idea works structurally and is supported by the paper: dry terrain detail
 drops by more than an order of magnitude without changing the wet pressure
-frontier in the measured large scene. With the corrected `k=8` shell, the mini
-dam moving-interface case preserves adaptivity through its first advance,
-coarsens the drained ceiling region, and has exact 62-step field parity. Its
-wall time is currently tied with the unconditional control.
+frontier in the measured large scene. The corrected implementation is now the
+default, with maximum leaf size 32. It changes only dry boundary ownership;
+the pressure shell, temporal retention, solve tail, transport, and surface
+publication remain the production policies.
 
-The regular `dam-break-ui` scene exposed an authority-cutover gap when the
-experiment was made the default: generation 3 activated a different pressure
-row set while the coarse fine-level-set publication still retained generation
-2, so topology, transport, and volume rolled back together. Until that
-cross-topology migration is implemented and validated, general interactive
-scenes retain unconditional boundary refinement, including the compact k=4
-power-validation profile used for morning-parity validation. The fluid gate,
-narrower candidate-relative pressure shell, and disabled temporal retention
-remain one explicit experiment rather than changing production physics. A
-larger moving-terrain soak is also still needed to establish parity and recover the remaining
-topology-candidate overhead. The existing `garden-dam-break` control
-currently fails its cold bootstrap with no liquid-row frontier, so it cannot
-yet provide that unbiased moving-contact A/B.
+On mini16 the default preserves adaptivity through its first advance, coarsens
+the drained ceiling region, removes 826 terminal structural leaves, and is
+bit-identical to the former policy after 62 steps. The exact control remains
+available through `FLUID_OCTREE_FLUID_GATED_BOUNDARIES=0`. Larger moving-terrain
+and inflow soaks remain useful performance coverage, but a result or pressure
+profile divergence is a correctness failure rather than an accepted tradeoff.

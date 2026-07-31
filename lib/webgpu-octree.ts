@@ -302,16 +302,16 @@ export const FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV =
   "FLUID_OCTREE_FLUID_GATED_BOUNDARIES";
 
 /**
- * Experimental paper-compatible boundary policy.
+ * Paper-compatible adaptive boundary policy.
  *
- * The opt-in keeps interface/inflow/hysteresis protection unchanged, but
+ * The default keeps interface/inflow/hysteresis protection unchanged, but
  * permits a boundary-crossing leaf to remain coarse until liquid approaches
- * within the authored interface band. The production default retains
- * unconditional unit-cell wall and terrain refinement.
+ * within the authored interface band. Setting the environment override to 0
+ * retains unconditional unit-cell wall and terrain refinement as a control.
  */
 export function octreeFluidGatedBoundariesRequested(
   environment?: Readonly<Record<string, string | undefined>>,
-  authoredDefault = false,
+  authoredDefault = true,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
@@ -1576,7 +1576,7 @@ export class WebGPUOctreeProjection {
     const count = dims.nx * dims.ny * dims.nz;
     this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 16);
     this.fluidGatedBoundaryRefinement = octreeFluidGatedBoundariesRequested(
-      undefined, options.fluidGatedBoundaryRefinement ?? false,
+      undefined, options.fluidGatedBoundaryRefinement ?? true,
     );
     this.solveTailPolicy = planOctreeSolveTail({
       finestDimensions: [dims.nx, dims.ny, dims.nz],
@@ -2695,9 +2695,13 @@ export class WebGPUOctreeProjection {
     const factorOneAggregate = this.globalFineLevelSet?.plan.fineFactor === 1
       && (typeof process === "undefined"
         || process.env.FLUID_OCTREE_GEOMETRIC_AGGREGATE_MG !== "0");
+    // Degree four was introduced with the factor-one aggregate experiment,
+    // but it changes the mini-dam impulse response and damps the late wall
+    // climb. Preserve the established factor-one dynamics by default; degree
+    // four remains available as an explicit performance/quality experiment.
     const factorOneM1Degree = factorOneAggregate
       && typeof process !== "undefined"
-      && process.env.FLUID_OCTREE_FACTOR1_M1_DEGREE === "2" ? 2 : 4;
+      && process.env.FLUID_OCTREE_FACTOR1_M1_DEGREE === "4" ? 4 : 2;
     this.firstOrderVCycle = new WebGPUOctreeSPGridVCycle(this.device, {
       ...section63Source, rowGeometry: structuredSource.rowGeometry, rowDelta,
     }, { dimensions: [this.dims.nx, this.dims.ny, this.dims.nz], rowCapacity,
@@ -2707,9 +2711,9 @@ export class WebGPUOctreeProjection {
       // and its exact transpose instead of materialising eight trilinear
       // records. Adaptive factor-4/8 lanes keep the generic transfer.
       geometricAggregateTransfers: factorOneAggregate,
-      // The degree-four polynomial stays inside the same page-resident GPU
-      // dispatch and strengthens the paper's first-order M1 V-cycle without
-      // adding a pass, buffer, or global-memory stencil sweep.
+      // Degree two preserves the established factor-one motion envelope.
+      // Degree four stays opt-in while its changed impulse response is
+      // evaluated independently.
       preSmoothingIterations: factorOneM1Degree,
       postSmoothingIterations: factorOneM1Degree });
     // Immediate production cutover: A2 is E^T B E over spatial 8x8x4 pages.
@@ -6400,7 +6404,7 @@ const RIGID_SNAPSHOT_MAGIC: u32 = 0x52424744u;
 // Structural word 4 packs a 24-bit validity tag and an 8-bit temporal
 // retention counter. Current refinement evidence refreshes the counter to
 // three; absence only decrements it, so retained protection cannot self-refresh.
-// The experimental fluid-gated policy explicitly suppresses this retention.
+// Boundary gating is deliberately orthogonal to this pressure-side policy.
 const TILE_SIGNATURE_VALID_MAGIC: u32 = 0x0053474eu;
 const TILE_SIGNATURE_VALID_MASK: u32 = 0x00ffffffu;
 const PRESSURE_RETENTION_GENERATIONS: u32 = 3u;
@@ -6608,7 +6612,7 @@ fn classifyTopologyTileSignature(
   let priorState = compaction[base + 4u];
   let valid = (priorState & TILE_SIGNATURE_VALID_MASK) == TILE_SIGNATURE_VALID_MAGIC;
   let priorRetention = select(0u, priorState >> 24u, valid);
-  let currentEvidence = !fluidGatedBoundaryRefinement && tileEvidenceReduction[0] != 0u;
+  let currentEvidence = tileEvidenceReduction[0] != 0u;
   let retention = select(select(0u, priorRetention - 1u, priorRetention > 0u),
     PRESSURE_RETENTION_GENERATIONS, currentEvidence);
   next.x ^= topologyDecisionHash(0x68bc21ebu ^ retention);
@@ -7086,32 +7090,19 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // boundary. It also keeps the coarse and fine publication clocks coherent
   // across transported frames.
   //
-  // The parity path scales the ring with the candidate leaf. The compact
-  // fluid-gated experiment uses only the excess over the smallest merge
-  // candidate so it can measure a narrower pressure topology independently.
+  // This pressure-side support is independent of whether dry boundary
+  // crossings are allowed to remain coarse. Coupling the two changes the
+  // pressure discretization and can alter both convergence and fluid motion.
   let cellWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
   let gradingLayers = f32(max(1u, params.pressureCapacity.z));
-  let parityProtectionWidth = (max(1.0, params.solve.w)
+  let protectionWidth = (max(1.0, params.solve.w)
     + gradingLayers * max(2.0, f32(size))) * cellWidth;
-  let compactProtectionWidth = (max(1.0, params.solve.w)
-    + gradingLayers * max(0.0, f32(size) - 2.0)) * cellWidth;
-  let protectionWidth = select(parityProtectionWidth, compactProtectionWidth,
-    fluidGatedBoundaryRefinement);
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
   // A sign crossing is positive refinement evidence even when the narrow-band
   // publication does not fill the candidate leaf's entire volume. Requiring a
   // complete size-8/16 summary here strands factor-1 surface bricks inside the
   // coarse leaf and prevents the later per-level passes from ever seeing them.
   if (crossesInterface) { return true; }
-  // The power discretization supports free-surface cuts on adaptive cells.
-  // Do not turn the authored proximity band into mandatory unit cells: for a
-  // maximum leaf size of two that band covers almost the complete 16-cubed
-  // mini dam after the first recurring summary publication. An actual sign
-  // crossing still split above; proximity at this final level is represented
-  // by the adaptive pressure row itself.
-  if (fluidGatedBoundaryRefinement && size <= 2u) {
-    return false;
-  }
   let observedNearInterface = summary.minimumAbsolutePhi <= protectionWidth;
   // Factor 4/8 can use the merged corrected-coarse interval to prove complete
   // distance evidence. Factor 1 deliberately publishes a fine-only hierarchy
@@ -7130,11 +7121,6 @@ fn pressureRetentionAt(origin: vec3u) -> u32 {
   let state = compaction[tileSignatureBase() + TILE_SIGNATURE_WORDS * tileIndex + 4u];
   return select(0u, state >> 24u,
     (state & TILE_SIGNATURE_VALID_MASK) == TILE_SIGNATURE_VALID_MAGIC);
-}
-
-fn pressureRefinementProtected(origin: vec3u, size: u32) -> bool {
-  return pressureRefinementEvidence(origin, size)
-    || (!fluidGatedBoundaryRefinement && pressureRetentionAt(origin) > 0u);
 }
 
 // The recurring summary/coarse hierarchies already carry a conservative
@@ -7161,14 +7147,19 @@ fn boundaryLiquidMinimumPhi(origin: vec3u, size: u32, bootstrapMinimum: f32) -> 
 }
 
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
-  if (pressureRefinementProtected(origin, size)) { return true; }
+  // Current spatial pressure evidence always wins. Temporal retention is
+  // considered only after classifying the candidate: it may preserve an
+  // interior pressure shell, but must not let unrelated evidence elsewhere in
+  // the same 8-cubed tile pin a locally dry wall or terrain crossing.
+  if (pressureRefinementEvidence(origin, size)) { return true; }
+  let pressureRetained = pressureRetentionAt(origin) > 0u;
   let adaptivity = f32(params.control.x) / 1000.0;
   if (adaptivity <= 0.0) { return true; }
   let crossesClosedWall = powerClosedWallStripIntersects(origin, size);
   // Empty/open mini-dam scenes bind only a format-valid solid sentinel. Fine
   // interface and inflow protection have already been resolved above, so the
   // remaining expensive predicate is solid-only.
-  if (!denseSolidField && !crossesClosedWall) { return false; }
+  if (!denseSolidField && !crossesClosedWall) { return pressureRetained; }
   var minimumSolid = 1.0; var maximumSolid = 0.0;
   var minimumPhi = 3.402823e38;
   for (var z = 0u; z < size; z += 1u) { for (var y = 0u; y < size; y += 1u) { for (var x = 0u; x < size; x += 1u) {
@@ -7186,10 +7177,9 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   if (crossesBoundary) {
     if (!fluidGatedBoundaryRefinement) { return true; }
     minimumPhi = boundaryLiquidMinimumPhi(origin, size, minimumPhi);
-    if (minimumPhi <= params.solve.w * params.cellRelax.x) {
-      return true;
-    }
+    return minimumPhi <= params.solve.w * params.cellRelax.x;
   }
+  if (pressureRetained) { return true; }
   if (minimumSolid >= 1.0 - 1e-5) { return false; }
   return false;
 }
@@ -7310,8 +7300,14 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
       boundaryDecision = boundaryLiquidMinimumPhi(origin, size, range.z)
         <= params.solve.w * params.cellRelax.x;
     }
-    let decision = pressureRefinementProtected(origin, size)
-      || adaptivity <= 0.0 || boundaryDecision;
+    let pressureEvidence = pressureRefinementEvidence(origin, size);
+    let pressureRetained = pressureRetentionAt(origin) > 0u;
+    // Preserve the production pressure hysteresis everywhere except a locally
+    // dry boundary crossing. Current spatial evidence still overrides the gate
+    // and splits before liquid contact.
+    let pressureDecision = pressureEvidence
+      || (pressureRetained && (!fluidGatedBoundaryRefinement || !crossesBoundary));
+    let decision = pressureDecision || adaptivity <= 0.0 || boundaryDecision;
     atomicStore(&refineDecision, select(0u, 1u, decision));
   }
   workgroupBarrier();

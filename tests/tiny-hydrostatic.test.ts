@@ -47,7 +47,7 @@ test("tiny hydrostatic oracle is shared by the UI preset and smoke registry", ()
   assert.deepEqual(smoke.scene.voxelDomain, preset.create().voxelDomain);
 });
 
-test("tiny hydrostatic isolated Dawn command pins the two-level paper path", () => {
+test("tiny hydrostatic isolated Dawn command pins the universal leaf-32 default", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
     scripts: Record<string, string>;
   };
@@ -57,7 +57,7 @@ test("tiny hydrostatic isolated Dawn command pins the two-level paper path", () 
   assert.match(command, /FLUID_TARGET_S=0\.2/);
   assert.match(command, /FLUID_ORACLE_STEPS=50/);
   assert.match(command, /FLUID_EXPECT_EXACT_STEPS=50/);
-  assert.match(command, /FLUID_MAXIMUM_LEAF_SIZE=2/);
+  assert.match(command, /FLUID_MAXIMUM_LEAF_SIZE=32/);
   assert.match(command, /FLUID_OCTREE_INTERFACE_BAND=3/);
   assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
   assert.match(command, /FLUID_POWER_GENERATION_AUDIT=1/);

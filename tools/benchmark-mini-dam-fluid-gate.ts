@@ -4,6 +4,7 @@ import { octreeMethod } from "../lib/methods/octree";
 import type { GPUSolverInstance } from "../lib/methods/types";
 import { createMinimalPowerDamBreakScene } from "../lib/scenes";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 import { compareScalarFields } from "./webgpu-smoke-scenarios";
 import { readCubicVolumeField } from "./webgpu-smoke-readbacks";
 import {
@@ -14,7 +15,7 @@ import {
 interface Arm {
   readonly label: string;
   readonly gated: boolean;
-  readonly maximumLeafSize: 2 | 4 | 8 | 16;
+  readonly maximumLeafSize: 2 | 4 | 8 | 16 | 32;
   readonly interfaceBandCells: number;
 }
 
@@ -40,6 +41,8 @@ interface Result {
   readonly pressureIterations: number;
   readonly representedVolumeCellSum: number;
   readonly traceTotal_ms: number | null;
+  readonly tracePhases_ms: Readonly<Record<string, number>> | null;
+  readonly pressureProfile: readonly Readonly<Record<string, unknown>>[] | null;
 }
 
 const parseArm = (source: string): Arm => {
@@ -48,8 +51,9 @@ const parseArm = (source: string): Arm => {
     `arm "${source}" must start with off or on`);
   const maximumLeafSize = Number(leafText);
   assert.ok(maximumLeafSize === 2 || maximumLeafSize === 4
-    || maximumLeafSize === 8 || maximumLeafSize === 16,
-  `arm "${source}" must use leaf size 2, 4, 8, or 16`);
+    || maximumLeafSize === 8 || maximumLeafSize === 16
+    || maximumLeafSize === 32,
+  `arm "${source}" must use leaf size 2, 4, 8, 16, or 32`);
   const interfaceBandCells = bandText === undefined ? 3 : Number(bandText);
   assert.ok(Number.isInteger(interfaceBandCells)
     && interfaceBandCells >= 0 && interfaceBandCells <= 32,
@@ -63,6 +67,19 @@ const parseArm = (source: string): Arm => {
 };
 
 const rounded = (value: number, digits = 3) => Number(value.toFixed(digits));
+const tracePhaseTotals = (trace: {
+  readonly phases: readonly { readonly id: string; readonly duration_ms: number }[];
+} | undefined): Readonly<Record<string, number>> | null => {
+  if (!trace) return null;
+  const totals: Record<string, number> = {};
+  for (const phase of trace.phases) {
+    totals[phase.id] = (totals[phase.id] ?? 0) + phase.duration_ms;
+  }
+  return Object.fromEntries(Object.entries(totals)
+    .map(([id, duration_ms]) => [id, rounded(duration_ms)]));
+};
+const traceRequested = process.env.FLUID_MINI_DAM_TRACE === "1";
+const auditEveryStep = process.env.FLUID_MINI_DAM_AUDIT_EVERY_STEP === "1";
 const steps = Number(process.env.FLUID_MINI_DAM_STEPS ?? 62);
 assert.ok(Number.isSafeInteger(steps) && steps > 0);
 const arms = (process.env.FLUID_MINI_DAM_ARMS ?? "off:2,on:2,off:4,on:4")
@@ -78,6 +95,7 @@ await acquireWebGPUExclusiveLock(
   "tools/benchmark-mini-dam-fluid-gate.ts",
 );
 try {
+  usePerformanceInstrumentationStore.getState().setEnabled(traceRequested);
   const modulePath = process.env.WEBGPU_NODE_MODULE
     ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
   const { create, globals } = await import(pathToFileURL(modulePath).href) as {
@@ -149,12 +167,25 @@ try {
     }).octreeProjection;
     assert.ok(projection, "octree projection was not exposed");
     const initialTopology = await projection.readTopologyLeafCensus();
+    const pressureProfile: Array<Readonly<Record<string, unknown>>> = [];
 
     const simulationStarted = performance.now();
     for (let step = 1; step <= steps; step += 1) {
       const requestedTime_s = step * scene.numerics.fixedDt_s!;
       while (!solver.advanceTo(requestedTime_s, [])) {
         await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (auditEveryStep) {
+        const sample = await solver.readStats();
+        pressureProfile.push({
+          step,
+          snapshotStep: sample.structuredSnapshotStep ?? 0,
+          snapshotIterations: sample.structuredSnapshotExecutedSolveIterations ?? 0,
+          snapshotConverged: sample.structuredSnapshotSolveConverged ?? false,
+          authorityLagSteps: sample.structuredAuthorityLagSteps ?? 0,
+          predictionFailures: sample.stepPredictionFailures ?? [],
+          capacityOverflow: sample.pressureCapacityOverflow ?? false,
+        });
       }
     }
     await device.queue.onSubmittedWorkDone();
@@ -177,6 +208,8 @@ try {
       pressureIterations: info.quadtreePressureIterationsUsed ?? 0,
       representedVolumeCellSum: info.representedVolumeCellSum ?? 0,
       traceTotal_ms: info.physicsTrace?.total_ms ?? null,
+      tracePhases_ms: tracePhaseTotals(info.physicsTrace),
+      pressureProfile: auditEveryStep ? pressureProfile : null,
     });
     solver.destroy();
   }
@@ -205,6 +238,8 @@ try {
       wallPerStep_ms: rounded(result.wallPerStep_ms),
       traceTotal_ms: result.traceTotal_ms === null
         ? null : rounded(result.traceTotal_ms),
+      tracePhases_ms: result.tracePhases_ms,
+      pressureProfile: result.pressureProfile,
       initialTopologyLeaves: result.initialTopology.topologyLeaves,
       initialLeafCountsBySize: result.initialTopology.leafCountsBySize,
       initialCoarseLeavesByOriginY: result.initialTopology.coarseLeafCountsByOriginY,
@@ -241,10 +276,40 @@ try {
         "the corrected adaptive topology must converge inside the encoded pressure tail");
     }
   }
+  if (steps === 62 || steps === 400) {
+    for (const gated of results.filter(({ arm }) =>
+      arm.gated && arm.maximumLeafSize === 32 && arm.interfaceBandCells === 3)) {
+      const control = results.find(({ arm }) => !arm.gated
+        && arm.maximumLeafSize === gated.arm.maximumLeafSize
+        && arm.interfaceBandCells === gated.arm.interfaceBandCells);
+      if (!control) continue;
+      const difference = compareScalarFields(gated.field, control.field, 16, 16, 16);
+      assert.equal(difference.meanAbsoluteError, 0,
+        `gated dry-boundary coarsening must preserve the ${steps}-step mini16 field exactly`);
+      assert.equal(gated.pressureRows, control.pressureRows,
+        `boundary coarsening must not change the ${steps}-step mini16 pressure discretization`);
+      assert.equal(gated.pressureIterations, control.pressureIterations,
+        `boundary coarsening must not change the ${steps}-step mini16 pressure convergence profile`);
+      if (auditEveryStep) {
+        const mismatch = gated.pressureProfile?.findIndex((sample, index) =>
+          JSON.stringify(sample) !== JSON.stringify(control.pressureProfile?.[index])) ?? -1;
+        assert.equal(mismatch, -1,
+          `boundary coarsening changed the mini16 pressure receipt at step ${mismatch + 1}: control=${JSON.stringify(control.pressureProfile?.[mismatch])} gated=${JSON.stringify(gated.pressureProfile?.[mismatch])}`);
+      }
+      assert.equal(gated.representedVolumeCellSum, control.representedVolumeCellSum,
+        "boundary coarsening must not change represented mini16 volume");
+      assert.ok(gated.topology.topologyLeaves < control.topology.topologyLeaves,
+        "the gated arm must actually remove dry mini16 boundary leaves");
+      const maximumSlowdown = Number(process.env.FLUID_MINI_DAM_MAX_SLOWDOWN ?? 1.1);
+      assert.ok(gated.simulationWall_ms <= control.simulationWall_ms * maximumSlowdown,
+        `default mini16 wall time regressed by ${rounded(100 * (gated.simulationWall_ms / control.simulationWall_ms - 1), 2)}%`);
+    }
+  }
   assert.deepEqual(validationErrors, [],
     `WebGPU validation errors: ${validationErrors.join("; ")}`);
   device.destroy();
 } finally {
+  usePerformanceInstrumentationStore.getState().setEnabled(false);
   delete process.env.FLUID_OCTREE_FLUID_GATED_BOUNDARIES;
   await releaseWebGPUExclusiveLock();
 }

@@ -215,7 +215,7 @@ test("the ceiling profiler uses the authored band-1 fast formulation", async () 
   assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_LANE, "performance");
   assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_EXPECT_GRID,
     "24,16,24");
-  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_MAXIMUM_LEAF_SIZE, "2");
+  assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_MAXIMUM_LEAF_SIZE, "32");
   assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_OCTREE_INTERFACE_BAND, "1");
   assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_OCTREE_GLOBAL_FINE_FACTOR, "4");
   const smokeSource = await readFile(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
@@ -224,11 +224,11 @@ test("the ceiling profiler uses the authored band-1 fast formulation", async () 
     "performance captures must rely on exact execution and packed final authority, not disabled scene collectors");
 });
 
-test("the large dam profiler pins leaf-16 and band-1", () => {
+test("the large dam profiler pins leaf-32 and band-1", () => {
   const lane = POWER_DAM_LANE_ENVIRONMENT.large;
   assert.equal(lane.FLUID_SCENE, "large-power-dam-break");
   assert.equal(lane.FLUID_EXPECT_GRID, "64,20,64");
-  assert.equal(lane.FLUID_MAXIMUM_LEAF_SIZE, "16");
+  assert.equal(lane.FLUID_MAXIMUM_LEAF_SIZE, "32");
   assert.equal(lane.FLUID_OCTREE_INTERFACE_BAND, "1");
 });
 

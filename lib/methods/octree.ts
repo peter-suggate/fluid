@@ -5,13 +5,13 @@ import type { SceneDescription } from "../model";
 
 const params: MethodParamSpec[] = [
   { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "4", tier: "coarse", options: [{ value: "1", label: "1× coarse baseline · experimental" }, { value: "4", label: "4× fine band · paper default" }, { value: "8", label: "8× fine band · experimental" }], hint: "Track on a separate sparse narrow band at octree resolution (1×) or the paper's 4×/8× fine resolution." },
-  { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "16", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells" }], hint: "Largest dyadic octree cell away from interfaces. The topology remains strictly 2:1 graded for valid power-diagram stencils." },
+  { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "32", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells · default" }], hint: "Largest dyadic octree cell away from interfaces. Every authored scene defaults to 32, and the topology remains strictly 2:1 graded for valid power-diagram stencils." },
   { kind: "number", key: "interfaceRefinementBandCells", label: "Band reach", unit: "level", min: 0, max: 4, step: 1, digits: 0, default: 4, tier: "fine", hint: "One coupled reach level for pressure refinement and Section 5 surface tracking. Experimental level 0 uses one fine brick; level 1 retains the two-finest-cell moving-surface floor while still reducing pressure reach and recurring residency. Level 4 is the paper/default reach." },
   { kind: "number", key: "surfaceRefinementGradingLayers", label: "Surface grading", unit: "layers", min: 1, max: 4, step: 1, digits: 0, default: 1, tier: "fine", hint: "Intermediate pressure-cell layers retained per octree level around the surface. 1 is the existing sharp 2:1 transition; 3 is the progressive-refinement experiment." },
 ];
 
 const maximumLeafSize = (value: unknown): 2 | 4 | 8 | 16 | 32 => {
-  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 4;
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 32;
   return numeric >= 32 ? 32 : numeric >= 16 ? 16 : numeric >= 8 ? 8 : numeric <= 2 ? 2 : 4;
 };
 
@@ -24,6 +24,7 @@ const globalFineLevelSetFactor = (value: unknown): 1 | 4 | 8 => {
 /** Canonical browser/native construction options for the power-octree method. */
 export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality, values: MethodParamValues) => {
   const bandReachCells = numberValue(values, params, "interfaceRefinementBandCells");
+  const fineFactor = globalFineLevelSetFactor(values.globalFineLevelSetFactor);
   // Not a product control. Keep the fine-only override available to the Dawn
   // harness for fault injection and planner isolation without letting normal
   // configurations drift into the restriction-starvation pairing.
@@ -35,11 +36,13 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
     densitySharpening: false,
     velocityTransport: "maccormack" as const,
     octree: {
-      maximumLeafSize: maximumLeafSize(values.maximumLeafSize ?? 16),
-      // Hidden authored policy: the compact power-validation profile has
-      // validated this experiment, while general interactive scenes retain
-      // unconditional boundary refinement.
-      fluidGatedBoundaryRefinement: values.fluidGatedBoundaryRefinement === true,
+      maximumLeafSize: maximumLeafSize(values.maximumLeafSize ?? 32),
+      // The factor-4/8 path has long-run parity with dry-boundary coarsening.
+      // Factor 1 does not: enabling the gate changes its later wall-climb and
+      // energy curve. Keep coarse factor 1 on the established topology while
+      // retaining an explicit boolean override for both A/B directions.
+      fluidGatedBoundaryRefinement: typeof values.fluidGatedBoundaryRefinement === "boolean"
+        ? values.fluidGatedBoundaryRefinement : fineFactor !== 1,
       environmentBrickRefinementLevels: typeof values.svoEnvironmentBrickRefinementLevels === "number"
         ? values.svoEnvironmentBrickRefinementLevels : undefined,
       // Pressure topology is a method setting, not a solver setting. Keep the
@@ -48,7 +51,7 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
       interfaceRefinementBandCells: bandReachCells,
       surfaceRefinementGradingLayers: numberValue(values, params, "surfaceRefinementGradingLayers"),
       fineLevelSetBandCells: diagnosticFineBand,
-      globalFineLevelSetFactor: globalFineLevelSetFactor(values.globalFineLevelSetFactor),
+      globalFineLevelSetFactor: fineFactor,
       // Hidden authored/harness override for scenes whose fluid footprint is
       // intentionally much smaller than the container. The generic fallback
       // remains the conservative domain-cross-section estimate.
@@ -80,7 +83,7 @@ export const octreeMethod: SimulationMethod = {
   params,
   pressureMapping: "The production lane uses the matrix-free Section 4.3 hybrid MGPCG authority over the current adaptive liquid frontier. Failure is terminal for the publication; no alternate pressure solver is retained.",
   presetFor: () => ({
-    maximumLeafSize: "16",
+    maximumLeafSize: "32",
     interfaceRefinementBandCells: 4,
     surfaceRefinementGradingLayers: 1,
     globalFineLevelSetFactor: "4",

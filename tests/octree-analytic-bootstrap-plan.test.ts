@@ -70,23 +70,22 @@ test("large mini-dam keeps the final owner-probe tile out of topology work", () 
   assert.equal(plan.ownerPageTileCount, 192);
 });
 
-test("large scene's authored mini reservoir stays compact at leaf-16 and band 1", () => {
+test("large scene's authored mini reservoir uses leaf 32 and band 1", () => {
   const input: OctreeAnalyticBootstrapInput = {
-    dimensions: [64, 20, 64], containerSize: [3.2, 1, 3.2], tileSizeCells: 16,
+    dimensions: [64, 20, 64], containerSize: [3.2, 1, 3.2], tileSizeCells: 32,
     initialCondition: "dam-break", fillFraction: (0.22 * 0.8 ** 3) / (3.2 * 1 * 3.2),
     damBreakDimensions: [0.5, 0.736, 0.5], interfaceBandCells: 1,
   };
   const compact = planOctreeAnalyticBootstrapBounds(input);
   const oracle = planOctreeAnalyticBootstrap(input);
   assert.deepEqual(compact.damBreak, { width: 0.15625, height: 0.736, depth: 0.15625 });
-  assert.deepEqual(compact.tileDimensions, [4, 2, 4]);
+  assert.deepEqual(compact.tileDimensions, [2, 1, 2]);
   assert.deepEqual(compact.activeTileLimits,
-    { minimum: [0, 0, 0], maximumExclusive: [2, 2, 2] });
-  assert.equal(compact.activeTileCount, 8,
-    "cold topology must not seed all 32 leaf-16 tiles for a corner-localized reservoir");
+    { minimum: [0, 0, 0], maximumExclusive: [2, 1, 2] });
+  assert.equal(compact.activeTileCount, 4);
   assert.deepEqual(compact.ownerPageTileLimits,
-    { minimum: [0, 0, 0], maximumExclusive: [3, 2, 3] });
-  assert.equal(compact.ownerPageTileCount, 18);
+    { minimum: [0, 0, 0], maximumExclusive: [2, 1, 2] });
+  assert.equal(compact.ownerPageTileCount, 4);
   assert.deepEqual(compact.activeTileLimits, oracle.activeTileLimits);
   assert.ok(sampleOctreeAnalyticBootstrapPhi(input, [-1.55, 0.2, -1.55]) < 0);
   assert.ok(sampleOctreeAnalyticBootstrapPhi(input, [-1, 0.2, -1.55]) > 0);

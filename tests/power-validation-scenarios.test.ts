@@ -6,7 +6,7 @@ import { getSceneWebGPUSmokeLane } from "../lib/scene-webgpu-smoke-catalog";
 import { damBreakFractions } from "../lib/initial-fluid";
 import { getMethod, resolveMethodValues } from "../lib/methods";
 import { validateScene } from "../lib/model";
-import { OCTREE_SECTION43_MINI_SHELL_DEPTH, OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+import { OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
   planOctreeSolveTail } from "../lib/octree-solve-tail-policy";
 import {
   CEILING_DROP_METHOD_PROFILE,
@@ -50,7 +50,7 @@ test("larger hydrostatic oracle is a 32x24x16 body-free tank with a quarter-cell
   }
 });
 
-test("minimal power dam uses a two-level authoritative analytic initializer in a 16-cubed tank", () => {
+test("minimal power dam uses an authoritative analytic initializer in a 16-cubed leaf-32 tank", () => {
   const scene = createMinimalPowerDamBreakScene();
   assert.deepEqual(validateScene(scene), []);
   assert.deepEqual(scene.container, {
@@ -129,7 +129,7 @@ test("32- and 64-cubed dam presets pin the coarse-only progressive-refinement ex
     methodId: "octree",
     quality: "balanced",
     overrides: {
-      maximumLeafSize: "16",
+      maximumLeafSize: "32",
       interfaceRefinementBandCells: 3,
       surfaceRefinementGradingLayers: 3,
       globalFineLevelSetFactor: "1",
@@ -152,7 +152,7 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
     methodId: "octree",
     quality: "balanced",
     overrides: {
-      maximumLeafSize: "2",
+      maximumLeafSize: "32",
       interfaceRefinementBandCells: 3,
       globalFineLevelSetFactor: "4",
     },
@@ -180,7 +180,7 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
   }
 });
 
-test("authored validation profiles retain their proven compact and production shells", () => {
+test("authored validation profiles share the leaf-32 production shell", () => {
   const planPreset = (id: "ceiling-slab-drop" | "hydrostatic-power-large-offset" | "ocean-seiche") => {
     const preset = getScenePreset(id);
     const scene = preset.create();
@@ -209,9 +209,9 @@ test("authored validation profiles retain their proven compact and production sh
   assert.deepEqual(ceiling.dimensions, [24, 16, 24]);
   assert.equal(ceiling.values.interfaceRefinementBandCells, 1);
   assert.equal(ceiling.values.globalFineLevelSetFactor, "4");
-  assert.equal(ceiling.values.maximumLeafSize, "2");
+  assert.equal(ceiling.values.maximumLeafSize, "32");
   assert.equal(ceiling.policy.boundarySmoothingIterations,
-    OCTREE_SECTION43_MINI_SHELL_DEPTH);
+    OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH);
 
   for (const id of ["hydrostatic-power-large-offset", "ocean-seiche"] as const) {
     assert.equal(planPreset(id).policy.boundarySmoothingIterations,
@@ -227,7 +227,7 @@ test("isolated Dawn commands pin the authored adaptive power configurations", ()
   assert.match(hydro, /FLUID_SCENE=hydrostatic-power-large-offset/);
   assert.match(hydro, /FLUID_EXPECT_GRID=32,24,16/);
   assert.match(hydro, /FLUID_EXPECT_EXACT_STEPS=1/);
-  assert.match(hydro, /FLUID_MAXIMUM_LEAF_SIZE=2/);
+  assert.match(hydro, /FLUID_MAXIMUM_LEAF_SIZE=32/);
   assert.match(hydro, /FLUID_OCTREE_INTERFACE_BAND=4/);
 
   const dam = packageJson.scripts["test:webgpu:minimal-power-dam-break"];
@@ -237,7 +237,7 @@ test("isolated Dawn commands pin the authored adaptive power configurations", ()
   assert.match(dam, /FLUID_EXPECT_EXACT_STEPS=500/);
   assert.match(dam, /FLUID_CHECKPOINT_EVERY_S=0\.1/);
   assert.match(dam, /FLUID_EXPECT_GRID=16,16,16/);
-  assert.match(dam, /FLUID_MAXIMUM_LEAF_SIZE=2/);
+  assert.match(dam, /FLUID_MAXIMUM_LEAF_SIZE=32/);
   assert.match(dam, /FLUID_OCTREE_INTERFACE_BAND=3/);
   assert.match(dam, /FLUID_POWER_AUDIT_EVERY_STEPS=1/);
   assert.match(dam, /FLUID_WEBGPU_SMOKE_TIMEOUT_MS=240000/);

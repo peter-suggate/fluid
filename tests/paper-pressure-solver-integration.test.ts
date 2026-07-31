@@ -37,8 +37,8 @@ test("octree projection constructs exactly one MGPCG implementation", () => {
   assert.doesNotMatch(octreeSource, /pressureSolverMode|WebGPUOctreePowerGalerkin|this\.galerkin/);
   assert.match(octreeSource, /new WebGPUOctreeSPGridVCycle/);
   assert.match(octreeSource,
-    /FLUID_OCTREE_FACTOR1_M1_DEGREE === "2" \? 2 : 4[\s\S]*new WebGPUOctreeSPGridVCycle[\s\S]*preSmoothingIterations: factorOneM1Degree,[\s\S]*postSmoothingIterations: factorOneM1Degree/,
-    "production M1 defaults to degree four and retains an exact factor-1 degree-two A/B");
+    /FLUID_OCTREE_FACTOR1_M1_DEGREE === "4" \? 4 : 2[\s\S]*new WebGPUOctreeSPGridVCycle[\s\S]*preSmoothingIterations: factorOneM1Degree,[\s\S]*postSmoothingIterations: factorOneM1Degree/,
+    "production M1 defaults to the established degree-two motion and retains an exact factor-1 degree-four A/B");
   assert.match(octreeSource, /new WebGPUOctreeSection43HybridPreconditioner/);
   assert.match(octreeSource,
     /relativeTolerance:\s*this\.solveTailPolicy\.relativeTolerance/,

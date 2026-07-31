@@ -273,7 +273,7 @@ test("loading the minimal power dam applies its reproducible Dawn solver profile
     const values = resolvedMethodValues(method);
     assert.equal(method.methodId, "octree");
     assert.equal(method.quality, "balanced");
-    assert.equal(values.maximumLeafSize, "2");
+    assert.equal(values.maximumLeafSize, "32");
     assert.equal(values.interfaceRefinementBandCells, 3);
     assert.equal(values.globalFineLevelSetFactor, "4");
   } finally {

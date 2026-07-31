@@ -205,7 +205,7 @@ test("inflow, migration, brick coverage, hose, and ocean policies are scene-auth
 test("authored lanes carry formerly runner-owned method and sampling decisions", () => {
   const large = getSceneWebGPUSmokeLane("large-power-dam-break");
   assert.deepEqual(large.methods.map(({ id }) => id), ["octree"]);
-  assert.equal(large.methods[0].overrides.maximumLeafSize, "16");
+  assert.equal(large.methods[0].overrides.maximumLeafSize, "32");
   assert.equal(large.methods[0].overrides.interfaceRefinementBandCells, 1);
   assert.equal(large.methods[0].overrides.globalFineLevelSetMaximumBricks, 32_768);
 
@@ -232,7 +232,7 @@ test("authored lanes carry formerly runner-owned method and sampling decisions",
 test("structured power lanes own exhaustive thresholds and raster policy", () => {
   const hydrostatic = getSceneWebGPUSmokeLane("hydrostatic-power-two-level");
   assert.deepEqual(hydrostatic.stop, { simulatedTime_s: 0.2, exactSteps: 50, maxDt_s: 0.004 });
-  assert.equal(hydrostatic.methods[0].overrides.maximumLeafSize, "2");
+  assert.equal(hydrostatic.methods[0].overrides.maximumLeafSize, "32");
   assert.equal(hydrostatic.methods[0].overrides.interfaceRefinementBandCells, 3);
   assert.equal(hydrostatic.collect.powerGenerationAudit && hydrostatic.collect.powerGenerationAudit.everySteps, 1);
   assert.ok(hydrostatic.acceptance.some(({ id, expected }) => id === "hydrostatic-power-volume-drift" && expected === 1e-4));

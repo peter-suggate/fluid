@@ -17,37 +17,37 @@ import { solveOctreePipelinedPCG } from "../lib/octree-pipelined-pcg";
 
 const PROFILES = Object.freeze({
   miniDam: {
-    finestDimensions: [16, 16, 16], maximumLeafSize: 2,
+    finestDimensions: [16, 16, 16], maximumLeafSize: 32,
     initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
     movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
   },
   ceilingDrop: {
-    finestDimensions: [24, 16, 24], maximumLeafSize: 2,
+    finestDimensions: [24, 16, 24], maximumLeafSize: 32,
     initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
     movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-4,
   },
   largerTwoLevel: {
-    finestDimensions: [32, 24, 16], maximumLeafSize: 2,
+    finestDimensions: [32, 24, 16], maximumLeafSize: 32,
     initialCondition: "tank-fill", hasInflow: false, hasTerrain: false,
     movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-4,
   },
   uiDam: {
-    finestDimensions: [24, 18, 16], maximumLeafSize: 16,
+    finestDimensions: [24, 18, 16], maximumLeafSize: 32,
     initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
     movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
   },
   quiescent: {
-    finestDimensions: [48, 24, 24], maximumLeafSize: 16,
+    finestDimensions: [48, 24, 24], maximumLeafSize: 32,
     initialCondition: "tank-fill", hasInflow: false, hasTerrain: false,
     movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-6,
   },
   river: {
-    finestDimensions: [96, 16, 16], maximumLeafSize: 16,
+    finestDimensions: [96, 16, 16], maximumLeafSize: 32,
     initialCondition: "tank-fill", hasInflow: true, hasTerrain: true,
     movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
   },
   ocean: {
-    finestDimensions: [320, 96, 80], maximumLeafSize: 32,
+    finestDimensions: [320, 96, 80], maximumLeafSize: 16,
     initialCondition: "tank-fill", hasInflow: false, hasTerrain: false,
     movingRigidBodyCount: 0, closedTop: true, requestedRelativeTolerance: 1e-4,
   },
@@ -153,11 +153,11 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
     river.encodedOuterIterations,
   ], [10, 10, 10]);
   assert.equal(mini.boundarySmoothingIterations,
-    OCTREE_SECTION43_MINI_SHELL_DEPTH);
+    OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH);
   assert.equal(OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY, 9_216);
   assert.equal(planOctreeSolveTail(PROFILES.ceilingDrop).boundarySmoothingIterations,
-    OCTREE_SECTION43_MINI_SHELL_DEPTH,
-    "the 24x16x24 ceiling keeps its validated k=4 shell independent of executor choice");
+    OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
+    "the 24x16x24 ceiling shares the production k=8 shell at leaf 32");
   for (const policy of [quiescent, river, planOctreeSolveTail(PROFILES.uiDam),
     planOctreeSolveTail(PROFILES.largerTwoLevel), planOctreeSolveTail(PROFILES.ocean)]) {
     assert.ok(policy.encodedOuterIterations >= 4
@@ -187,8 +187,8 @@ test("solve-tail policy admits an explicit symmetric Section 4.3 shell-depth exp
 
 test("selected Section 4.3 shell has deterministic five-level command counts", () => {
   const expectedCounts = new Map<OctreeSolveTailSceneProfile, number>([
-    [PROFILES.miniDam, 696],
-    [PROFILES.ceilingDrop, 696],
+    [PROFILES.miniDam, 872],
+    [PROFILES.ceilingDrop, 872],
     [PROFILES.largerTwoLevel, 872],
     [PROFILES.uiDam, 872],
     [PROFILES.quiescent, 872],

@@ -176,8 +176,8 @@ test("invalid external query values fall back to validated defaults", () => {
  * A profiled preset is only valid at the solver settings it authors. The scene
  * picker applies them via `applyProfile`, so a bare link, a reload, or the very
  * first load must resolve to the same configuration — otherwise the UI runs a
- * validation scene at the method's generic quality defaults (leaf 16 / band 4
- * instead of the authored leaf 2 / band 3) while every panel claims the scene
+ * validation scene at the method's generic quality defaults (band 4 instead
+ * of the authored band 3) while every panel claims the scene
  * is loaded, and no Dawn lane reproduces what the UI is actually running.
  */
 test("a bare link to a profiled preset resolves to that preset's authored method profile", () => {
@@ -191,7 +191,7 @@ test("a bare link to a profiled preset resolves to that preset's authored method
 
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
-  assert.equal(values.maximumLeafSize, "2");
+  assert.equal(values.maximumLeafSize, "32");
   assert.equal(values.interfaceRefinementBandCells, 3);
   assert.equal(values.globalFineLevelSetFactor, "4");
 
@@ -210,7 +210,7 @@ test("a bare ceiling-drop link hydrates the dedicated band-1 UI profile", () => 
   const parsed = parseQueryState("?scene=ceiling-slab-drop");
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
-  assert.equal(values.maximumLeafSize, "2");
+  assert.equal(values.maximumLeafSize, "32");
   assert.equal(values.interfaceRefinementBandCells, 1);
   assert.equal(values.globalFineLevelSetFactor, "4");
   assert.deepEqual(parsed.overrides[profile.methodId], { ...profile.overrides });
@@ -223,8 +223,16 @@ test("an explicit param key overrides one value of a profiled preset", () => {
     parsed.overrides[parsed.methodId] ?? {});
   assert.equal(values.interfaceRefinementBandCells, 0);
   // Every other authored setting is still the profile's.
-  assert.equal(values.maximumLeafSize, "2");
+  assert.equal(values.maximumLeafSize, "32");
   assert.equal(values.globalFineLevelSetFactor, "4");
+});
+
+test("an explicit scene link can still select a non-default maximum leaf size", () => {
+  const parsed = parseQueryState(
+    "?scene=minimal-power-dam-break&param.octree.maximumLeafSize=2");
+  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
+    parsed.overrides[parsed.methodId] ?? {});
+  assert.equal(values.maximumLeafSize, "2");
 });
 
 test("retired octree authority switches cannot re-enter through shared links", () => {

@@ -133,7 +133,7 @@ test("Dawn keeps the band-1 minimal dam current through generation 15", {
       FLUID_FIELD_STATS: "1",
       FLUID_RASTER_CHECKPOINTS: "0",
       FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1",
-      FLUID_MAXIMUM_LEAF_SIZE: "2",
+      FLUID_MAXIMUM_LEAF_SIZE: "32",
       FLUID_OCTREE_INTERFACE_BAND: "1",
       FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
       FLUID_POWER_GENERATION_AUDIT: "1",

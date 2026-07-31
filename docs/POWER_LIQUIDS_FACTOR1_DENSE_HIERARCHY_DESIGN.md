@@ -13,8 +13,10 @@ fallback. Both arms had identical terminal counters and zero validation
 errors. Dense correction removes 55 MGPCG records per advance (839 to 784),
 for a paired mean wall saving of 1.847 ms (7.9%).
 
-Subsequent factor-1 work retained degree-four Chebyshev smoothing and made the
-existing inline accepted-row A2 kernel the ordinary-apply default. Inline A2
+Subsequent factor-1 work kept degree-four Chebyshev smoothing as an explicit
+experiment while restoring degree two by default for the established mini-dam
+impulse response, and made the existing inline accepted-row A2 kernel the
+ordinary-apply default. Inline A2
 keeps the convergence gate, replaces its three staged body dispatches with one
 dispatch, and leaves residual A2 staged. It removes another 24 dispatches per
 mini advance. Clean A/B measurements were 20.538/21.212 ms inline versus
