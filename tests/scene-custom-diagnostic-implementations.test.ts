@@ -8,7 +8,10 @@ import {
 import { evaluateFieldVelocityParityDiagnostic } from "../lib/scene-field-velocity-parity-diagnostic";
 import { evaluateFreeFallContactDiagnostic } from "../lib/scene-free-fall-contact-diagnostic";
 import { evaluateGardenBrickMigrationDiagnostic } from "../lib/scene-garden-brick-migration-diagnostic";
-import { evaluateMinimalDamMotionDiagnostic } from "../lib/scene-minimal-dam-diagnostic";
+import {
+  evaluateMinimalDamCeilingSeparation,
+  evaluateMinimalDamMotionDiagnostic,
+} from "../lib/scene-minimal-dam-diagnostic";
 import { evaluateQuadtreeDamParityDiagnostic } from "../lib/scene-quadtree-dam-parity-diagnostic";
 import { evaluateSettlingDiagnostic } from "../lib/scene-settling-diagnostic";
 import { evaluateWaterRasterIntegrityDiagnostic } from "../lib/scene-water-raster-integrity-diagnostic";
@@ -76,6 +79,28 @@ test("free-fall contact evaluates the analytic drop and both ceiling representat
     },
   });
   assert.equal(failed.find(({ id }) => id === "octree.ceiling-wet.2")?.passed, false);
+});
+
+test("minimal dam ceiling separation derives wet cells from checkpoint fields", () => {
+  const scene = cloneScene(defaultScene);
+  const grid = [4, 4, 4] as const;
+  const field = new Float32Array(64);
+  field[3 * grid[0]] = 1;
+  const findings = evaluateMinimalDamCeilingSeparation({
+    scene,
+    evidence: evidence({ octree: { run: { simulatedTime_s: 2 }, field: { grid,
+      checkpoints: [{ time_s: 1.5, field, raster: { ceilingContactPixels: 0,
+        reverseView: { ceilingContactPixels: { front: 0, back: 0 } } } }] } } }),
+    methods: ["octree"],
+    parameters: {
+      evaluateAfter_s: 1.5,
+      wetCellsStart_s: 1.5,
+      ceilingWetCellLimits: [{ maximum: 1 }],
+      contactPixelsStart_s: 1.5,
+      ceilingContactPixelLimits: [{ maximum: 0 }],
+    },
+  });
+  assert.equal(findings.find(({ id }) => id === "octree.ceiling-wet.0")?.passed, true);
 });
 
 test("free-fall corner seam shortfall is compared with contact-free liquid", () => {

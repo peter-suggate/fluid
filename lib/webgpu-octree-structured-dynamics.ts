@@ -1378,14 +1378,6 @@ var<workgroup> transferCandidateBank:u32;
 var<workgroup> transferOwner:u32;
 var<workgroup> transferPoint:vec4f;
 var<workgroup> transferNormal:vec4f;
-// A face whose owner becomes liquid during this topology transition did not
-// carry a liquid degree of freedom at the beginning of the substep. The air
-// extension is an end-state velocity, so installing all of it before the
-// first liquid projection counts the same frontier momentum twice. A coarse
-// face also acquires its liquid support across that transition, so centre both
-// the support and velocity activation: 1/2 * 1/2 = 1/4. The following
-// force/projection stages then advance it over the full accepted substep.
-const NEWLY_WET_VELOCITY_RAMP:f32=.25;
 fn reduceTransferProbe(lid:u32)->u32{
   workgroupBarrier();
   for(var width=64u;width>0u;width>>=1u){
@@ -1436,7 +1428,7 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
   // a COPY of the closest projected face value — never an interpolant
   // evaluated outside its element (which extends the frontier velocity
   // gradient one cell and ratchets the corner jet, measured at +45% ME).
-  if(lid==0u){let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;transferOld=invalidVector();if(!ownerInsideOld){let extended=extendedOwnerVelocity(point);if(vectorValid(extended)){transferOld=vec4f(NEWLY_WET_VELOCITY_RAMP*extended.xyz,1.);}}}
+  if(lid==0u){let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;transferOld=invalidVector();if(!ownerInsideOld){transferOld=extendedOwnerVelocity(point);}}
   let uniformNeighbor=workgroupUniformLoad(&transferNeighbor);let initialOld=workgroupUniformLoad(&transferOld);
   var ownerAnchor=INVALID;var neighborAnchor=INVALID;
   if(!vectorValid(initialOld)){

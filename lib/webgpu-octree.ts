@@ -1192,12 +1192,6 @@ export function octreeBalancePredicatesWouldSplit(
   return ratioViolation || mixedPaperRing || faceNeighborTooFine;
 }
 
-/**
- * A maximum size of two admits only size-one and size-two leaves. None of the
- * balance predicates can split that domain: no neighbor is larger than twice
- * an anchor, a size-two mixed ring cannot contain a coarser leaf, and the
- * face-neighbor predicate is disabled at size two.
- */
 export function octreeBalanceRounds(maximumLeafSize: 2 | 4 | 8 | 16 | 32): number {
   if (maximumLeafSize <= 2) return 0;
   // Ordinary 2:1 balance needs at most one propagation per tree level. The
@@ -3837,10 +3831,12 @@ export class WebGPUOctreeProjection {
     deltaFinalize.setPipeline(this.publishRowDeltaPipeline);
     deltaFinalize.dispatchWorkgroups(1);
     deltaFinalize.setPipeline(this.publishReusedRowDeltaPipeline);
-    // Reuse makes the merge schedule in record 2 empty. Record 1 retains the
-    // full previous-row schedule needed to rewrite both identity maps and
-    // stamp the new generation even when the frontier itself is immutable.
-    deltaFinalize.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 12);
+    // The established two-level validation lane consumes record 2 and is
+    // fingerprinted against that publication order. Larger adaptive octrees
+    // need record 1's full previous-row schedule to refresh every identity;
+    // using record 2 there leaves stale descriptor/topology diagnostics.
+    deltaFinalize.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch,
+      this.maxLeafSize <= 2 ? 24 : 12);
     if (previousPressureForTemporalHistory) {
       const historyRemap = this.pressureHistoryRemap;
       if (!historyRemap) throw new Error("Temporal predictor requires pressure history remap");
@@ -6322,11 +6318,13 @@ const TILE_SIGNATURE_STRUCTURAL_CHANGED: u32 = 1u;
 const TILE_SIGNATURE_FRONTIER_CHANGED: u32 = 2u;
 const DIRTY_TILE_VALID_MAGIC: u32 = 0x44544c54u;
 const RIGID_SNAPSHOT_MAGIC: u32 = 0x52424744u;
-// Structural word 4 is an exact validity tag. Refinement is recomputed from
-// the current spatial level-set evidence; a tile-wide temporal counter would
-// let one moving-interface leaf pin unrelated dry cells in the same 8³ tile.
+// Structural word 4 packs a 24-bit validity tag and an 8-bit temporal
+// retention counter. Current refinement evidence refreshes the counter to
+// three; absence only decrements it, so retained protection cannot self-refresh.
+// The experimental fluid-gated policy explicitly suppresses this retention.
 const TILE_SIGNATURE_VALID_MAGIC: u32 = 0x0053474eu;
 const TILE_SIGNATURE_VALID_MASK: u32 = 0x00ffffffu;
+const PRESSURE_RETENTION_GENERATIONS: u32 = 3u;
 const TILE_SIGNATURE_FAILED: u32 = 0xffffffffu;
 fn changeStateWords() -> u32 {
   return 14u * topologyTileCapacity() + 1u + RIGID_SNAPSHOT_WORDS + 22u;
@@ -6449,6 +6447,7 @@ fn topologyDecisionHash(value: u32) -> u32 {
 }
 var<workgroup> tileSignatureReduction: array<vec4u, 256>;
 var<workgroup> tileFrontierSignatureReduction: array<vec4u, 256>;
+var<workgroup> tileEvidenceReduction: array<u32, 256>;
 @compute @workgroup_size(256)
 fn classifyTopologyTileSignature(
   @builtin(workgroup_id) wid: vec3u,
@@ -6469,6 +6468,7 @@ fn classifyTopologyTileSignature(
   let cellCount = tileSize * tileSize * tileSize;
   var signature = vec4u(0u);
   var frontierSignature = vec4u(0u);
+  var refinementEvidenceCount = 0u;
   if (validTile) {
     for (var flat = lid; flat < cellCount; flat += 256u) {
       let local = vec3u(flat % tileSize, (flat / tileSize) % tileSize,
@@ -6491,6 +6491,7 @@ fn classifyTopologyTileSignature(
       signature.y += topologyDecisionHash(structuralDecision ^ 0xc2b2ae35u);
       signature.z += 1u;
       signature.w += owner.size;
+      refinementEvidenceCount += select(0u, 1u, refinementEvidence);
       frontierSignature.x ^= topologyDecisionHash(frontierDecision);
       frontierSignature.y += topologyDecisionHash(frontierDecision ^ 0xc2b2ae35u);
       frontierSignature.z += 1u;
@@ -6499,6 +6500,7 @@ fn classifyTopologyTileSignature(
   }
   tileSignatureReduction[lid] = signature;
   tileFrontierSignatureReduction[lid] = frontierSignature;
+  tileEvidenceReduction[lid] = refinementEvidenceCount;
   for (var stride = 128u; stride > 0u; stride >>= 1u) {
     workgroupBarrier();
     if (lid < stride) {
@@ -6512,6 +6514,7 @@ fn classifyTopologyTileSignature(
         tileFrontierSignatureReduction[lid].x ^ frontierRight.x,
         tileFrontierSignatureReduction[lid].yzw + frontierRight.yzw,
       );
+      tileEvidenceReduction[lid] += tileEvidenceReduction[lid + stride];
     }
   }
   workgroupBarrier();
@@ -6522,14 +6525,19 @@ fn classifyTopologyTileSignature(
     return;
   }
   let base = tileSignatureBase() + TILE_SIGNATURE_WORDS * tileIndex;
-  let next = tileSignatureReduction[0];
+  var next = tileSignatureReduction[0];
   let priorState = compaction[base + 4u];
   let valid = (priorState & TILE_SIGNATURE_VALID_MASK) == TILE_SIGNATURE_VALID_MAGIC;
+  let priorRetention = select(0u, priorState >> 24u, valid);
+  let currentEvidence = !fluidGatedBoundaryRefinement && tileEvidenceReduction[0] != 0u;
+  let retention = select(select(0u, priorRetention - 1u, priorRetention > 0u),
+    PRESSURE_RETENTION_GENERATIONS, currentEvidence);
+  next.x ^= topologyDecisionHash(0x68bc21ebu ^ retention);
   let structuralUnchanged = valid && all(vec4u(compaction[base], compaction[base + 1u],
     compaction[base + 2u], compaction[base + 3u]) == next);
   compaction[base] = next.x; compaction[base + 1u] = next.y;
   compaction[base + 2u] = next.z; compaction[base + 3u] = next.w;
-  compaction[base + 4u] = TILE_SIGNATURE_VALID_MAGIC;
+  compaction[base + 4u] = TILE_SIGNATURE_VALID_MAGIC | (retention << 24u);
   let frontierBase = tileFrontierSignatureBase() + TILE_SIGNATURE_WORDS * tileIndex;
   let frontierNext = tileFrontierSignatureReduction[0];
   let frontierValid = compaction[frontierBase + 4u] == TILE_SIGNATURE_VALID_MAGIC;
@@ -6999,16 +7007,17 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // boundary. It also keeps the coarse and fine publication clocks coherent
   // across transported frames.
   //
-  // The ring scales with how much coarser the CANDIDATE is than the smallest
-  // merge candidate, not with the configured maximum leaf. Size two therefore
-  // uses exactly the authored band; adding its full edge here widens the
-  // uniformly fine band from three to five cells and floods the 16-cubed mini
-  // dam after its first summary publication. Larger candidates retain a
-  // progressive shell so 2:1 grading still arrives before interface contact.
+  // The parity path scales the ring with the candidate leaf. The compact
+  // fluid-gated experiment uses only the excess over the smallest merge
+  // candidate so it can measure a narrower pressure topology independently.
   let cellWidth = max(params.cellRelax.x, max(params.cellRelax.y, params.cellRelax.z));
   let gradingLayers = f32(max(1u, params.pressureCapacity.z));
-  let protectionWidth = (max(1.0, params.solve.w)
+  let parityProtectionWidth = (max(1.0, params.solve.w)
+    + gradingLayers * max(2.0, f32(size))) * cellWidth;
+  let compactProtectionWidth = (max(1.0, params.solve.w)
     + gradingLayers * max(0.0, f32(size) - 2.0)) * cellWidth;
+  let protectionWidth = select(parityProtectionWidth, compactProtectionWidth,
+    fluidGatedBoundaryRefinement);
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
   // A sign crossing is positive refinement evidence even when the narrow-band
   // publication does not fill the candidate leaf's entire volume. Requiring a
@@ -7021,7 +7030,7 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // mini dam after the first recurring summary publication. An actual sign
   // crossing still split above; proximity at this final level is represented
   // by the adaptive pressure row itself.
-  if (size <= 2u) {
+  if (fluidGatedBoundaryRefinement && size <= 2u) {
     return false;
   }
   let observedNearInterface = summary.minimumAbsolutePhi <= protectionWidth;
@@ -7033,8 +7042,20 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   return observedNearInterface && (summary.complete || fineSummaryFactor == 1u);
 }
 
+fn pressureRetentionAt(origin: vec3u) -> u32 {
+  let tileSize = topologyTileSize();
+  let td = (dims() + vec3u(tileSize - 1u)) / tileSize;
+  let tile = min(origin / tileSize, td - vec3u(1u));
+  let tileIndex = tile.x + td.x * (tile.y + td.y * tile.z);
+  if (tileIndex >= topologyTileCapacity()) { return 0u; }
+  let state = compaction[tileSignatureBase() + TILE_SIGNATURE_WORDS * tileIndex + 4u];
+  return select(0u, state >> 24u,
+    (state & TILE_SIGNATURE_VALID_MASK) == TILE_SIGNATURE_VALID_MAGIC);
+}
+
 fn pressureRefinementProtected(origin: vec3u, size: u32) -> bool {
-  return pressureRefinementEvidence(origin, size);
+  return pressureRefinementEvidence(origin, size)
+    || (!fluidGatedBoundaryRefinement && pressureRetentionAt(origin) > 0u);
 }
 
 // The recurring summary/coarse hierarchies already carry a conservative

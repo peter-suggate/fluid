@@ -3,6 +3,7 @@ import type { SceneDescription } from "./model";
 import {
   arrayPath,
   fieldCheckpoints,
+  gridFromDiagnostics,
   hookFinding,
   numberPath,
   numberValue,
@@ -58,6 +59,29 @@ function aggregateCeilingContactPixels(raster: unknown): number | undefined {
   return samples.every((sample) => numberValue(sample) !== undefined)
     ? samples.reduce<number>((sum, sample) => sum + (numberValue(sample) ?? 0), 0)
     : undefined;
+}
+
+function checkpointCeilingWetCells(
+  checkpoint: Readonly<Record<string, unknown>>,
+  grid: readonly [number, number, number] | undefined,
+): number | undefined {
+  const normalized = numberValue(checkpoint.ceilingWetCells);
+  if (normalized !== undefined) return normalized;
+  if (!grid) return undefined;
+  const field = checkpoint.field;
+  const cellCount = grid[0] * grid[1] * grid[2];
+  if (field === null || typeof field !== "object" || !("length" in field)
+      || Number((field as ArrayLike<number>).length) !== cellCount) return undefined;
+  let wet = 0;
+  const [nx, ny, nz] = grid;
+  for (let z = 0; z < nz; z += 1) {
+    for (let y = Math.max(0, ny - 2); y < ny; y += 1) {
+      for (let x = 0; x < nx; x += 1) {
+        if (Number((field as ArrayLike<number>)[x + nx * (y + ny * z)]) > 0.5) wet += 1;
+      }
+    }
+  }
+  return wet;
 }
 
 export function evaluateMinimalDamMotionDiagnostic(input: {
@@ -153,12 +177,13 @@ export function evaluateMinimalDamCeilingSeparation(input: {
   for (const [method, diagnostics] of selectedMethodDiagnostics(input.evidence, input.methods)) {
     const elapsed = runTime(diagnostics);
     if (elapsed === undefined || elapsed < input.parameters.evaluateAfter_s - 1e-9) continue;
+    const grid = gridFromDiagnostics(diagnostics);
     fieldCheckpoints(diagnostics).forEach((raw, index) => {
       const checkpoint = recordValue(raw);
       const time_s = numberValue(checkpoint?.time_s);
       if (!checkpoint || time_s === undefined) return;
       if (time_s >= input.parameters.wetCellsStart_s - 1e-9) {
-        const wet = numberValue(checkpoint.ceilingWetCells);
+        const wet = checkpointCeilingWetCells(checkpoint, grid);
         const limit = scheduledLimit(input.parameters.ceilingWetCellLimits, time_s);
         findings.push(hookFinding({
           id: `${method}.ceiling-wet.${index}`, method,

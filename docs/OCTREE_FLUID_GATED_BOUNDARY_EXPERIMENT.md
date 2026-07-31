@@ -19,9 +19,7 @@ invariant.
 
 ## Experimental rule
 
-Fluid-gated refinement remains an experiment. The compact power-validation
-profile opts in explicitly. For an otherwise unconditional scene, enable it
-with:
+Fluid-gated refinement remains an experiment. Enable it explicitly with:
 
 ```sh
 FLUID_OCTREE_FLUID_GATED_BOUNDARIES=1
@@ -169,10 +167,11 @@ experiment was made the default: generation 3 activated a different pressure
 row set while the coarse fine-level-set publication still retained generation
 2, so topology, transport, and volume rolled back together. Until that
 cross-topology migration is implemented and validated, general interactive
-scenes retain unconditional boundary refinement. The compact k=8
-power-validation profile keeps its authored opt-in to preserve the corrected
-compact experiment. A larger moving-terrain soak is also still needed to
-establish parity and recover the remaining
+scenes retain unconditional boundary refinement, including the compact k=4
+power-validation profile used for morning-parity validation. The fluid gate,
+narrower candidate-relative pressure shell, and disabled temporal retention
+remain one explicit experiment rather than changing production physics. A
+larger moving-terrain soak is also still needed to establish parity and recover the remaining
 topology-candidate overhead. The existing `garden-dam-break` control
 currently fails its cold bootstrap with no liquid-row frontier, so it cannot
 yet provide that unbiased moving-contact A/B.

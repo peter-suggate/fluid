@@ -338,7 +338,6 @@ function lane(options: LaneOptions): SceneWebGPUSmokeLane {
 
 const octreePowerOverrides = {
   maximumLeafSize: "2",
-  fluidGatedBoundaryRefinement: true,
   interfaceRefinementBandCells: 3,
   globalFineLevelSetFactor: "4",
 } as const;
@@ -819,7 +818,7 @@ const suiteList = [
   suite("minimal-power-dam-break", "Minimal dynamic two-level analytic dam", () => getScenePreset("minimal-power-dam-break").create(), {
     default: lane({ target_s: 2, exactSteps: 500, maxDt_s: 0.004, oracleSteps: 500, cpuOracle: false,
       methods: methods(["octree"], { octree: octreePowerOverrides }), timeout_ms: 240_000,
-      collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.1, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
+      collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.1, energyEverySteps: 50, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
         raster: "checkpoints", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
       diagnostics: [...exhaustivePowerDiagnostics(0.01),
         { id: "authoritative-water-raster", methods: ["octree"], parameters: minimalDamRasterParameters }],

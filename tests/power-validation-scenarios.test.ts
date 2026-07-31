@@ -153,7 +153,6 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
     quality: "balanced",
     overrides: {
       maximumLeafSize: "2",
-      fluidGatedBoundaryRefinement: true,
       interfaceRefinementBandCells: 3,
       globalFineLevelSetFactor: "4",
     },
@@ -181,7 +180,7 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
   }
 });
 
-test("small and larger authored validation profiles retain the proven k=8 shell", () => {
+test("authored validation profiles retain their proven compact and production shells", () => {
   const planPreset = (id: "ceiling-slab-drop" | "hydrostatic-power-large-offset" | "ocean-seiche") => {
     const preset = getScenePreset(id);
     const scene = preset.create();
@@ -291,6 +290,8 @@ test("moving dam Dawn regression crosses the former rejection and checks structu
   const complete = getSceneWebGPUSmokeLane("minimal-power-dam-break");
   assert.equal(complete.collect.structuredValidation, true,
     "every audited moving generation must use the direct structured authority contract");
+  assert.equal(complete.collect.energyEverySteps, 50,
+    "the complete moving-dam lane must collect the mechanical-energy evidence its hook declares");
   assert.equal(complete.acceptance.find((rule) => rule.id === "minimal-power-variational-residual")?.expected, 3.5e-6,
     "moving free-surface incompressibility must be gated by the Eq. (3)-form operator residual");
   const rasterParameters = complete.hooks.find((hook) => hook.id === "water-raster-integrity")?.parameters;

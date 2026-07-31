@@ -457,8 +457,11 @@ test("unchanged octree generations zero every bulk topology and frontier schedul
     /classifyFrontierCarryPipeline[\s\S]*topologyCandidateDispatch,\s*12[\s\S]*mergeFrontierRowsPipeline[\s\S]*topologyCandidateDispatch,\s*24/);
   assert.doesNotMatch(rebuild, /dispatchWorkgroups\(this\.linearBlocks\)/,
     "the topology stage must not retain capacity-sized direct launches");
-  assert.equal((rows.match(/dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 12\)/g) ?? []).length, 5,
-    "block-shaped scans and identity reuse retain the live-row block schedule");
+  assert.equal((rows.match(/dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 12\)/g) ?? []).length, 4,
+    "block-shaped scans retain the live-row block schedule");
+  assert.match(rows,
+    /dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch,\s*this\.maxLeafSize <= 2 \? 24 : 12\)/,
+    "the two-level parity lane must retain record two without weakening larger-octree identity refresh");
   assert.match(rows,
     /setPipeline\(this\.useCooperativeRowDeltaRing[\s\S]*this\.markRowDeltaRingPipeline\s*:\s*this\.markRowDeltaRingBlocksPipeline\)[\s\S]*dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch,\s*this\.useCooperativeRowDeltaRing\s*\?\s*36\s*:\s*12\)/,
     "the mini lane consumes the exact row-count record while large capacities retain the block fallback");
