@@ -102,7 +102,10 @@ test("the trace overlay shader compiles and builds its instanced pipeline", { sk
 
 test("the pixel-trace probe compiles inside every dry-scene traversal composition", { skip }, async () => {
   const gpuDevice = await device();
-  for (const traversal of ["hybrid", "canonical", "canonical-parametric", "compact", "wide"] as const) {
+  // `raster-primary` included: the probe runs beside a rasterized frame too, and
+  // there it takes a different branch — no instrumented hierarchy walk, plus the
+  // terrain bracket and rigid proxy records.
+  for (const traversal of ["hybrid", "canonical", "canonical-parametric", "compact", "wide", "raster-primary"] as const) {
     await compile(gpuDevice, `pixel-trace probe (${traversal})`,
       createSvoDrySceneFragmentWGSL(1, traversal, "off", "inline", 0, true));
   }

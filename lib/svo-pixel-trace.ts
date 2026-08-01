@@ -1,16 +1,27 @@
 /**
- * Pixel-trace ABI: the record format a single instrumented camera ray writes,
- * and the host decode that turns it into drawable 3D geometry.
+ * Pixel-trace ABI: the record format the probes write for one pixel, and the
+ * host decode that turns it into drawable 3D geometry.
  *
- * One pixel of the shipping dry-scene shader is re-traced by a probe entry
- * point that appends a record for every unit of work it performs — each
- * hierarchy node it opens, each child box it tests and rejects, each leaf brick
- * it enters, each fine cell its DDA steps, each analytic surface test it
- * issues, and each cone sample its shadow, ambient-occlusion, and global-
- * illumination marches take.
+ * There are two shapes of answer here because the renderer has two ways of
+ * resolving primary visibility, and they perform genuinely different work.
+ *
+ * - `traced`: one camera ray is re-marched by a probe that mirrors the
+ *   shipping megakernel, appending a record per unit of work — each hierarchy
+ *   node it opens, each child box it rejects, each leaf brick it enters, each
+ *   fine cell its DDA steps.
+ * - `raster`: there is no per-pixel search to mirror. A compute pass emitted one
+ *   proxy box per resident brick and the rasterizer's depth test picked the
+ *   winner, so the records describe *which proxies covered this pixel*, what
+ *   each one's fragment cost, and which of them won.
+ *
+ * Everything from the surface onward — shadow rays, cone marches, ambient
+ * occlusion, global illumination — is shared, because the deferred lighting pass
+ * is the same in both.
+ *
  * Nothing here knows about WebGPU: the layout is the contract between
- * `webgpu-svo-pixel-trace.ts` (which writes it on the GPU) and the overlay
- * pipeline plus the HUD (which read it), and it is exercised directly by tests.
+ * `webgpu-svo-pixel-trace.ts` and `webgpu-svo-brick-raster-probe.ts` (which
+ * write it on the GPU) and the overlay pipeline plus the HUD (which read it),
+ * and it is exercised directly by tests.
  */
 import { DECORATION_SEGMENT_FLOATS } from "./visualization-decorations";
 import {
@@ -19,10 +30,15 @@ import {
   type Visualization,
 } from "./visualization-registry";
 
-export const SVO_PIXEL_TRACE_ABI_VERSION = 3;
+export const SVO_PIXEL_TRACE_ABI_VERSION = 4;
 /** "SVT" plus the ABI version, so a stale mapped buffer is never decoded. */
-export const SVO_PIXEL_TRACE_MAGIC = 0x53565403;
-export const SVO_PIXEL_TRACE_HEADER_WORDS = 40;
+export const SVO_PIXEL_TRACE_MAGIC = 0x53565404;
+/**
+ * Words 0..39 carry exactly what version 3 carried, so the traced probe's
+ * writes did not move; 40.. describe the raster primary, which version 3 had no
+ * way to express. Records begin at a multiple of four either way.
+ */
+export const SVO_PIXEL_TRACE_HEADER_WORDS = 64;
 export const SVO_PIXEL_TRACE_RECORD_WORDS = 12;
 export const SVO_PIXEL_TRACE_DEFAULT_RECORD_CAPACITY = 4096;
 export const SVO_PIXEL_TRACE_MAXIMUM_RECORD_CAPACITY = 65536;
@@ -86,6 +102,25 @@ export const SVO_PIXEL_TRACE_KINDS = Object.freeze({
   rigidTest: 12,
   /** One opacity/radiance tap from a wide diffuse global-illumination cone. */
   globalIlluminationConeSample: 13,
+  /**
+   * Raster primary: one brick proxy whose box covers this pixel — that is, one
+   * fragment the rasterizer produced here. `a`/`b` are the proxy AABB, `level`
+   * is the sort bucket, `detail` is the instance index in draw order, and
+   * `tEnter`/`tExit` are the ray interval its fragment clamped to.
+   */
+  brickProxy: 14,
+  /**
+   * The full leaf AABB of a proxy, drawn around the occupied sub-box the
+   * emitter actually published. The gap between them is the occupancy word
+   * doing its job, which is otherwise invisible.
+   */
+  leafBounds: 15,
+  /** A rigid impostor proxy covering this pixel, plus its analytic test. */
+  rigidProxy: 16,
+  /** The thin-glass pane key the discovery pass wrote at this pixel. */
+  glassPane: 17,
+  /** The reduced-rate cone-lighting texel this pixel's visibility came from. */
+  prepassTexel: 18,
 } as const);
 
 export type SvoPixelTraceKind = typeof SVO_PIXEL_TRACE_KINDS[keyof typeof SVO_PIXEL_TRACE_KINDS];
@@ -105,6 +140,27 @@ export const SVO_PIXEL_TRACE_FLAGS = Object.freeze({
   emitterAnchored: 1 << 5,
   /** Work stopped here because a shader budget was exhausted. */
   budgetExhausted: 1 << 6,
+  /** Raster primary: this proxy's fragment won the depth test. It is the pixel. */
+  depthWinner: 1 << 7,
+  /**
+   * Shaded, found a surface, and lost the depth test to something nearer.
+   * Distinct from {@link discarded}: this fragment wrote a depth that was then
+   * beaten, which is a different outcome from never writing one.
+   */
+  depthLoser: 1 << 8,
+  /**
+   * The in-brick DDA found no surface, so the fragment discarded. It still cost
+   * a full invocation, which is why it is never folded in with the instances
+   * the cull rejected before the draw.
+   */
+  discarded: 1 << 9,
+  /**
+   * A tile-based hidden-surface pass could legally have killed this fragment
+   * before it shaded. Whether it did is not observable from inside the shader,
+   * so anything carrying this bit is reported as an upper bound, never as work
+   * that certainly happened.
+   */
+  hsrEligible: 1 << 10,
 } as const);
 
 /** Probe status. Mirrors the traversal status codes plus probe-only outcomes. */
@@ -168,9 +224,94 @@ export const SVO_PIXEL_TRACE_HEADER = Object.freeze({
   giRadiance: 36,
   /** bit 0: GLOBAL selected; bit 1: radiance publication ready. */
   giState: 39,
+
+  /* Words 40.. describe the raster primary. Zero throughout on a traced frame. */
+
+  /** {@link SVO_PIXEL_TRACE_PRIMARY_MODE}: how primary visibility was resolved. */
+  primaryMode: 40,
+  /** {@link SVO_PIXEL_TRACE_STAGES}: which passes contributed to this record set. */
+  stagesPresent: 41,
+  /** Leaves the emitter walked. Frame-wide, not per-pixel. */
+  residentLeaves: 42,
+  /** Leaves rejected as empty from the published occupancy word. Frame-wide. */
+  emptyBricks: 43,
+  /** Proxies rejected by the frustum test. Frame-wide. */
+  frustumCulled: 44,
+  /** Proxies that survived emission and were bucketed. Frame-wide. */
+  candidatesEmitted: 45,
+  /** Instances the indirect draw submitted. Frame-wide. */
+  instancesDrawn: 46,
+  /** Proxies whose box the camera ray pierces — the overdraw at this pixel. */
+  coveringProxies: 47,
+  /** Covering proxies whose DDA found a surface; the rest discarded. */
+  proxiesWithSurface: 48,
+  /** Covering proxies a hidden-surface pass could have killed before shading. */
+  hsrEligibleProxies: 49,
+  /** Draw-order index of the proxy that won the depth test. */
+  winnerInstanceIndex: 50,
+  /** Sort bucket the winner landed in, of {@link SVO_PIXEL_TRACE_SORT_BUCKETS}. */
+  winnerSortBucket: 51,
+  /** DDA cells stepped across *every* covering proxy, not just the winner. */
+  ddaCellsAcrossProxies: 52,
+  // Word 53 is reserved. A terrain *step* count would have to be produced by a
+  // counter inside the shared `terrainField`, and the scale-1 production string
+  // is gated byte-for-byte by the frame fingerprint. The terrain record carries
+  // the bracketed interval and the outcome instead, which the probe can state
+  // without touching production code and without guessing at a number.
+  /** {@link SVO_PIXEL_TRACE_PREPASS_STATE}. */
+  prepassState: 54,
 } as const);
 
 export const SVO_PIXEL_TRACE_GI_STATE = Object.freeze({ enabled: 1 << 0, ready: 1 << 1 } as const);
+
+/**
+ * How primary visibility was resolved for the frame this trace came from.
+ *
+ * This is the diagnostic's honesty switch. The two modes perform different work
+ * and therefore have different things to say; a picker that showed one mode's
+ * vocabulary over the other's frame would be describing a shader that did not
+ * run. Carried in the record rather than read from the live renderer so a pinned
+ * trace keeps explaining the frame it was actually taken from.
+ */
+export const SVO_PIXEL_TRACE_PRIMARY_MODE = Object.freeze({ traced: 0, raster: 1 } as const);
+
+export type SvoPixelTracePrimaryMode = keyof typeof SVO_PIXEL_TRACE_PRIMARY_MODE;
+
+/**
+ * Passes that contributed to this record set.
+ *
+ * A pass that did not run is absent, never zero: "no rigid bodies in this scene"
+ * and "the rigid pass found nothing at this pixel" are different facts and the
+ * HUD renders them differently.
+ */
+export const SVO_PIXEL_TRACE_STAGES = Object.freeze({
+  brickCull: 1 << 0,
+  brickRaster: 1 << 1,
+  terrain: 1 << 2,
+  rigid: 1 << 3,
+  glass: 1 << 4,
+  conePrepass: 1 << 5,
+  deferredLighting: 1 << 6,
+} as const);
+
+export type SvoPixelTraceStage = keyof typeof SVO_PIXEL_TRACE_STAGES;
+
+/**
+ * Reduced-rate cone lighting.
+ *
+ * Only "did the frame run one" is recorded, and it is stamped by the host: the
+ * probe is composed inline at full rate by construction, so it cannot observe
+ * the reduced pass beside it. Whether *this* pixel was a boundary pixel resolved
+ * inline is a fact only the reduced shader holds, and it is deliberately not
+ * guessed at here.
+ */
+export const SVO_PIXEL_TRACE_PREPASS_STATE = Object.freeze({
+  /** The frame ran reduced-rate cone lighting. */
+  active: 1 << 0,
+} as const);
+
+/** Buckets the brick emitter's counting sort quantizes min view depth into. */
+export const SVO_PIXEL_TRACE_SORT_BUCKETS = 1024;
 
 export type SvoTraceVec3 = readonly [number, number, number];
 
@@ -202,9 +343,43 @@ export interface SvoPixelTraceRecord {
   readonly tExit_m: number;
 }
 
+/**
+ * What the raster primary did to find this pixel's surface.
+ *
+ * The cull counters are read verbatim from the sort-state buffer the frame's own
+ * emission pass wrote, so they are measured rather than mirrored. They are
+ * frame-wide: they describe one camera's worth of work, not this pixel's, and
+ * the HUD is careful never to add them to per-pixel figures.
+ */
+export interface SvoPixelTraceRaster {
+  readonly residentLeaves: number;
+  readonly emptyBricks: number;
+  readonly frustumCulled: number;
+  readonly candidatesEmitted: number;
+  readonly instancesDrawn: number;
+  /** Proxies covering this pixel: the fragments the rasterizer produced here. */
+  readonly coveringProxies: number;
+  /** Of those, the ones whose in-brick DDA found a surface. */
+  readonly proxiesWithSurface: number;
+  /**
+   * Covering proxies a tile-based hidden-surface pass could have killed before
+   * shading. `coveringProxies - hsrEligibleProxies` is the count that certainly
+   * shaded; the total is the upper bound.
+   */
+  readonly hsrEligibleProxies: number;
+  /** Absent when nothing won — a sky pixel, or terrain in front of every brick. */
+  readonly winner?: { readonly instanceIndex: number; readonly sortBucket: number };
+  /** DDA cells stepped across every covering proxy, winner and losers alike. */
+  readonly ddaCellsAcrossProxies: number;
+}
+
 export interface SvoPixelTrace {
   readonly version: number;
   readonly status: SvoPixelTraceStatus;
+  /** How primary visibility was resolved; decides what vocabulary applies. */
+  readonly primaryMode: SvoPixelTracePrimaryMode;
+  /** Passes that contributed to this record set. */
+  readonly stages: readonly SvoPixelTraceStage[];
   readonly pixel: readonly [number, number];
   readonly requestToken: number;
   readonly ray: { readonly origin_m: SvoTraceVec3; readonly direction: SvoTraceVec3 };
@@ -217,6 +392,15 @@ export interface SvoPixelTrace {
     readonly featureId: number;
   };
   readonly counters: SvoPixelTraceCounters;
+  /** Present exactly when `primaryMode` is `raster`. */
+  readonly raster?: SvoPixelTraceRaster;
+  /**
+   * Whether the two probes agree about where the surface is. Present only on a
+   * merged raster trace, where there are two independent answers to compare.
+   */
+  readonly primaryParity?: SvoPixelTracePrimaryParity;
+  /** Present when the frame ran reduced-rate cone lighting. */
+  readonly conePrepass?: { readonly active: true };
   readonly globalIllumination?: {
     readonly ready: boolean;
     readonly coneTaps: number;
@@ -283,6 +467,14 @@ export function decodeSvoPixelTrace(words: Uint32Array, floats: Float32Array): S
   const origin_m = vec3(floats, header.rayOrigin);
   const minimumVoxel = floats[header.minimumVoxel];
   const giState = words[header.giState];
+  const raster = words[header.primaryMode] === SVO_PIXEL_TRACE_PRIMARY_MODE.raster;
+  const stageBits = words[header.stagesPresent];
+  const prepass = words[header.prepassState];
+  // A winner is only claimed when a proxy record carries the bit. The header's
+  // index alone cannot distinguish "instance 0 won" from "nothing won", and a
+  // sky pixel legitimately has no winner at all.
+  const winnerRecorded = records.some((record) => record.kind === SVO_PIXEL_TRACE_KINDS.brickProxy
+    && (record.flags & SVO_PIXEL_TRACE_FLAGS.depthWinner) !== 0);
   const hit = status === SVO_PIXEL_TRACE_STATUS.hit && Number.isFinite(distance_m) && distance_m > 0
     ? {
       position_m: origin_m.map((value, axis) => value + direction[axis] * distance_m) as unknown as SvoTraceVec3,
@@ -296,6 +488,9 @@ export function decodeSvoPixelTrace(words: Uint32Array, floats: Float32Array): S
   return {
     version: SVO_PIXEL_TRACE_ABI_VERSION,
     status: status as SvoPixelTraceStatus,
+    primaryMode: raster ? "raster" : "traced",
+    stages: (Object.keys(SVO_PIXEL_TRACE_STAGES) as SvoPixelTraceStage[])
+      .filter((stage) => (stageBits & SVO_PIXEL_TRACE_STAGES[stage]) !== 0),
     pixel: [words[header.pixelX], words[header.pixelY]],
     requestToken: words[header.requestToken],
     ray: { origin_m, direction },
@@ -314,6 +509,21 @@ export function decodeSvoPixelTrace(words: Uint32Array, floats: Float32Array): S
       traversalFailure: words[header.traversalFailure],
       shadedLights: words[header.shadedLights],
     },
+    raster: raster ? {
+      residentLeaves: words[header.residentLeaves],
+      emptyBricks: words[header.emptyBricks],
+      frustumCulled: words[header.frustumCulled],
+      candidatesEmitted: words[header.candidatesEmitted],
+      instancesDrawn: words[header.instancesDrawn],
+      coveringProxies: words[header.coveringProxies],
+      proxiesWithSurface: words[header.proxiesWithSurface],
+      hsrEligibleProxies: words[header.hsrEligibleProxies],
+      winner: winnerRecorded
+        ? { instanceIndex: words[header.winnerInstanceIndex], sortBucket: words[header.winnerSortBucket] }
+        : undefined,
+      ddaCellsAcrossProxies: words[header.ddaCellsAcrossProxies],
+    } : undefined,
+    conePrepass: (prepass & SVO_PIXEL_TRACE_PREPASS_STATE.active) !== 0 ? { active: true } : undefined,
     globalIllumination: (giState & SVO_PIXEL_TRACE_GI_STATE.enabled) !== 0 ? {
       ready: (giState & SVO_PIXEL_TRACE_GI_STATE.ready) !== 0,
       coneTaps: words[header.giConeTaps],
@@ -327,6 +537,93 @@ export function decodeSvoPixelTrace(words: Uint32Array, floats: Float32Array): S
   };
 }
 
+/**
+ * Agreement between the two probes about where this pixel's surface is.
+ *
+ * The raster probe elects a winner from the frame's own instance list; the
+ * lighting probe resolves the same surface the shipping deferred pass does.
+ * They are independent routes to one answer, and the renderer's claim is that
+ * the raster and traced primaries are bit-identical. So a disagreement here is
+ * not noise to be smoothed over — it is that claim failing, and the HUD says so
+ * rather than quietly preferring one number.
+ */
+export interface SvoPixelTracePrimaryParity {
+  readonly agrees: boolean;
+  readonly rasterDistance_m: number;
+  readonly lightingDistance_m: number;
+}
+
+/**
+ * Record that the frame ran reduced-rate cone lighting.
+ *
+ * Stamped by the host because only the host knows: the probe is composed inline
+ * at full rate, so from inside it the reduced pass beside it is invisible. This
+ * matters because it changes what the drawn cones mean — at reduced rate they
+ * are the full-rate mirror of visibility this pixel was *given*, not the cones
+ * that were marched for it.
+ */
+export function withSvoPixelTraceConePrepass(
+  trace: SvoPixelTrace | undefined,
+  active: boolean,
+): SvoPixelTrace | undefined {
+  if (!trace || !active) return trace;
+  return {
+    ...trace,
+    stages: trace.stages.includes("conePrepass") ? trace.stages : [...trace.stages, "conePrepass"],
+    conePrepass: { active: true },
+  };
+}
+
+/**
+ * Fold the raster primary probe's answer into the lighting probe's.
+ *
+ * Two probes because the renderer has two seams: finding the surface (now the
+ * rasterizer's job, explained by `primary`) and lighting it (still a fragment
+ * pass, mirrored by `lighting`). Either may be absent — the primary probe does
+ * not run in traced mode, and neither has answered on the first frame.
+ */
+export function mergeSvoPixelTrace(
+  lighting: SvoPixelTrace | undefined,
+  primary: SvoPixelTrace | undefined,
+): SvoPixelTrace | undefined {
+  if (!primary) return lighting;
+  if (!lighting) return primary;
+  // Two probes answering two different pixels cannot be composed into one
+  // account of either. This happens while the pointer moves and one readback
+  // lands a frame before the other; showing the newer alone beats splicing.
+  if (lighting.pixel[0] !== primary.pixel[0] || lighting.pixel[1] !== primary.pixel[1]) {
+    return primary.requestToken >= lighting.requestToken ? primary : lighting;
+  }
+  const records = [...primary.records, ...lighting.records]
+    .map((record, order) => ({ ...record, order }));
+  const rasterDistance_m = primary.hit?.distance_m ?? Number.POSITIVE_INFINITY;
+  const lightingDistance_m = lighting.hit?.distance_m ?? Number.POSITIVE_INFINITY;
+  const bothMissed = !primary.hit && !lighting.hit;
+  // Compared against the finest voxel, not an absolute epsilon: the two routes
+  // solve the same analytic surface but enter its cell from intervals clamped
+  // differently, so agreement is "the same surface", not "the same float".
+  const tolerance_m = Math.max(1e-4, (lighting.minimumVoxel_m ?? primary.minimumVoxel_m ?? 0.01) * 0.5);
+  return {
+    ...lighting,
+    primaryMode: "raster",
+    stages: [...new Set([...primary.stages, ...lighting.stages])],
+    raster: primary.raster,
+    records,
+    droppedRecords: primary.droppedRecords + lighting.droppedRecords,
+    minimumVoxel_m: lighting.minimumVoxel_m ?? primary.minimumVoxel_m,
+    primaryParity: {
+      // A raster winner is only one contributor to the pixel: terrain, a rigid
+      // body or a glass pane can legitimately sit in front of every brick, and
+      // the lighting probe sees those. Disagreement is only claimed when the
+      // raster probe found a surface the lighting probe does not corroborate.
+      agrees: bothMissed || !primary.hit || Math.abs(rasterDistance_m - lightingDistance_m) <= tolerance_m
+        || lightingDistance_m < rasterDistance_m,
+      rasterDistance_m,
+      lightingDistance_m,
+    },
+  };
+}
+
 /* ------------------------------------------------------------------------- */
 /* Presentation: palette, layers, and the segment geometry the overlay draws. */
 /* ------------------------------------------------------------------------- */
@@ -334,20 +631,55 @@ export function decodeSvoPixelTrace(words: Uint32Array, floats: Float32Array): S
 /**
  * Layers are what the user toggles. Each owns a colour and a legend line, and
  * every record maps to exactly one layer.
+ *
+ * This is the union across both primary modes; {@link svoPixelTraceLayersForMode}
+ * is the subset a given trace can actually populate. The union is what the
+ * visualization registry and the persisted layer selection are keyed on, so
+ * switching primary mode never invalidates either.
  */
 export const SVO_PIXEL_TRACE_LAYERS = [
   "primary-ray",
   "hierarchy",
   "rejected",
   "bricks",
+  "proxies",
+  "proxy-losers",
+  "winner",
   "cells",
   "exact",
+  "terrain",
+  "rigid",
   "shadow-rays",
   "cones",
   "gi-cones",
+  "prepass",
 ] as const;
 
 export type SvoPixelTraceLayer = typeof SVO_PIXEL_TRACE_LAYERS[number];
+
+/**
+ * Layers each primary mode can populate.
+ *
+ * `hierarchy`, `rejected` and `bricks` are absent from the raster set rather
+ * than renamed into it: nothing in a raster frame corresponds to a per-pixel
+ * octree descent, and a layer that draws a plausible fiction is worse than one
+ * that is simply not offered. Symmetrically the traced mode has no proxies to
+ * show, because it never built any.
+ */
+const MODE_LAYERS: Readonly<Record<SvoPixelTracePrimaryMode, readonly SvoPixelTraceLayer[]>> = Object.freeze({
+  traced: Object.freeze([
+    "primary-ray", "hierarchy", "rejected", "bricks", "cells", "exact",
+    "terrain", "rigid", "shadow-rays", "cones", "gi-cones", "prepass",
+  ]) as readonly SvoPixelTraceLayer[],
+  raster: Object.freeze([
+    "primary-ray", "proxies", "proxy-losers", "winner", "cells", "exact",
+    "terrain", "rigid", "shadow-rays", "cones", "gi-cones", "prepass",
+  ]) as readonly SvoPixelTraceLayer[],
+});
+
+export function svoPixelTraceLayersForMode(mode: SvoPixelTracePrimaryMode): readonly SvoPixelTraceLayer[] {
+  return MODE_LAYERS[mode];
+}
 
 export interface SvoPixelTraceLayerDefinition {
   readonly layer: SvoPixelTraceLayer;
@@ -371,15 +703,21 @@ function linearFromHex(hex: string): readonly [number, number, number] {
 }
 
 const LAYER_SOURCE: readonly { layer: SvoPixelTraceLayer; label: string; description: string; swatch: `#${string}`; width_px: number }[] = [
-  { layer: "primary-ray", label: "Primary ray", description: "The camera ray as arrows, one per brick it walked and one per gap it skipped.", swatch: "#f2ab4e", width_px: 2.4 },
+  { layer: "primary-ray", label: "Primary ray", description: "The camera ray, solid to the surface that won this pixel and faint beyond it.", swatch: "#f2ab4e", width_px: 2.4 },
   { layer: "hierarchy", label: "Nodes opened", description: "Octree boxes the ray entered and expanded, brightest at the deepest level.", swatch: "#7fd4ff", width_px: 1.3 },
   { layer: "rejected", label: "Boxes rejected", description: "Children tested by the same slab arithmetic and thrown away.", swatch: "#e2687f", width_px: 1.0 },
   { layer: "bricks", label: "Leaf bricks", description: "Terminal leaves reached; each holds one brick of cells.", swatch: "#ffe066", width_px: 2.0 },
+  { layer: "proxies", label: "Proxies drawn", description: "Every brick proxy whose box covers this pixel — one fragment each, shaded whatever the depth test later decided. Coloured by draw order, cool first to warm last.", swatch: "#7fd4ff", width_px: 1.3 },
+  { layer: "proxy-losers", label: "Proxies beaten", description: "Covering proxies that lost: dashed where the brick held no surface and the fragment discarded, dimmed where it found one behind the winner.", swatch: "#e2687f", width_px: 1.0 },
+  { layer: "winner", label: "Winning brick", description: "The proxy whose fragment won the depth test, with its full leaf box as a hairline — the gap between them is the published occupancy tightening the draw.", swatch: "#ffe066", width_px: 2.0 },
   { layer: "cells", label: "Brick cells", description: "Fine cells the in-brick DDA stepped through.", swatch: "#9fb4c0", width_px: 1.0 },
   { layer: "exact", label: "Exact tests", description: "Analytic surface intersections issued from tagged cells.", swatch: "#45c6bc", width_px: 1.8 },
+  { layer: "terrain", label: "Terrain march", description: "Heightfield bracket and refinement probes from the background pass every pixel pays.", swatch: "#8fbf6a", width_px: 1.4 },
+  { layer: "rigid", label: "Rigid impostors", description: "Analytic body proxies covering this pixel and the intersections they issued.", swatch: "#d98b5f", width_px: 1.6 },
   { layer: "shadow-rays", label: "Shadow rays", description: "Surface-to-light visibility queries, one per light sample.", swatch: "#ff7ad9", width_px: 1.6 },
   { layer: "cones", label: "Cone samples", description: "Coverage-pyramid taps stitched into cones: a ring at the cone's width, the mip voxel it read, coloured by level.", swatch: "#c2a6ff", width_px: 1.2 },
   { layer: "gi-cones", label: "GI hemisphere", description: "Wide diffuse-radiance cones fanned across the upper hemisphere from the shaded surface.", swatch: "#ffb454", width_px: 1.8 },
+  { layer: "prepass", label: "Prepass texel", description: "The coarse cone-lighting texel this pixel's visibility was read from, drawn as its footprint on the surface.", swatch: "#6fa8d6", width_px: 1.2 },
 ];
 
 export const SVO_PIXEL_TRACE_LAYER_DEFINITIONS: Readonly<Record<SvoPixelTraceLayer, SvoPixelTraceLayerDefinition>> = Object.freeze(
@@ -387,6 +725,11 @@ export const SVO_PIXEL_TRACE_LAYER_DEFINITIONS: Readonly<Record<SvoPixelTraceLay
     unknown as Record<SvoPixelTraceLayer, SvoPixelTraceLayerDefinition>,
 );
 
+/**
+ * Default layer for a kind, for the kinds whose layer does not depend on the
+ * outcome recorded in their flags. A proxy's layer does, so prefer
+ * {@link svoPixelTraceLayerForRecord} wherever a whole record is in hand.
+ */
 export function svoPixelTraceLayerForKind(kind: SvoPixelTraceKind): SvoPixelTraceLayer {
   switch (kind) {
     case SVO_PIXEL_TRACE_KINDS.hierarchyNode:
@@ -395,14 +738,39 @@ export function svoPixelTraceLayerForKind(kind: SvoPixelTraceKind): SvoPixelTrac
     case SVO_PIXEL_TRACE_KINDS.leafBrick: return "bricks";
     case SVO_PIXEL_TRACE_KINDS.brickCell: return "cells";
     case SVO_PIXEL_TRACE_KINDS.exactTest:
-    case SVO_PIXEL_TRACE_KINDS.rigidTest:
-    case SVO_PIXEL_TRACE_KINDS.terrainStep:
     case SVO_PIXEL_TRACE_KINDS.primaryHit: return "exact";
+    case SVO_PIXEL_TRACE_KINDS.rigidTest:
+    case SVO_PIXEL_TRACE_KINDS.rigidProxy: return "rigid";
+    case SVO_PIXEL_TRACE_KINDS.terrainStep: return "terrain";
     case SVO_PIXEL_TRACE_KINDS.shadowRay: return "shadow-rays";
     case SVO_PIXEL_TRACE_KINDS.coneSample:
     case SVO_PIXEL_TRACE_KINDS.occlusionConeSample: return "cones";
     case SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample: return "gi-cones";
+    case SVO_PIXEL_TRACE_KINDS.brickProxy: return "proxies";
+    case SVO_PIXEL_TRACE_KINDS.leafBounds: return "winner";
+    // The pane key is an identity the lighting pass reads, not geometry the
+    // primary produced; it is reported in the narrative and drawn by nothing.
+    case SVO_PIXEL_TRACE_KINDS.glassPane: return "exact";
+    case SVO_PIXEL_TRACE_KINDS.prepassTexel: return "prepass";
   }
+}
+
+/**
+ * Layer for one record, which for a brick proxy depends on how it ended.
+ *
+ * Winner, beaten, and discarded are three different costs with three different
+ * meanings, and separating them is the whole point of the raster picker: the
+ * losers are the overdraw, and the discarded ones are fragments that ran a full
+ * DDA for nothing.
+ */
+export function svoPixelTraceLayerForRecord(record: Pick<SvoPixelTraceRecord, "kind" | "flags">): SvoPixelTraceLayer {
+  if (record.kind === SVO_PIXEL_TRACE_KINDS.brickProxy) {
+    if ((record.flags & SVO_PIXEL_TRACE_FLAGS.depthWinner) !== 0) return "winner";
+    return (record.flags & (SVO_PIXEL_TRACE_FLAGS.depthLoser | SVO_PIXEL_TRACE_FLAGS.discarded)) !== 0
+      ? "proxy-losers"
+      : "proxies";
+  }
+  return svoPixelTraceLayerForKind(record.kind);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -451,6 +819,42 @@ export function svoPixelTraceMipFootprint_m(trace: SvoPixelTrace, level: number)
   const minimum = trace.minimumVoxel_m;
   if (!minimum || !Number.isFinite(level)) return undefined;
   return minimum * 2 ** Math.max(0, Math.floor(level));
+}
+
+/* ------------------------------------------------------------------------- */
+/* Draw order: the ramp a proxy is coloured by.                                */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Cool for the first proxy drawn, warm for the last.
+ *
+ * A proxy's position in the draw order is the only thing the counting sort
+ * controls, and the sort is the raster primary's one real performance lever: it
+ * exists so tile-based hidden-surface removal gets to reject occluded bricks
+ * before shading them. Colouring by order makes the question "did the sort put
+ * the winner near the front?" answerable at a glance, which a flat layer colour
+ * cannot. Deliberately the same device as the mip ladder above.
+ */
+export const SVO_PIXEL_TRACE_ORDER_SWATCHES: readonly `#${string}`[] = Object.freeze([
+  "#7fd4ff", "#9ec6ff", "#c0b4fb", "#dda6ea", "#f09cc8", "#ff9fa0",
+]);
+
+const ORDER_COLORS_LINEAR: readonly (readonly [number, number, number])[] =
+  Object.freeze(SVO_PIXEL_TRACE_ORDER_SWATCHES.map(linearFromHex));
+
+/** `position` of `total`, 0-based. A single proxy sits at the cool end. */
+function orderRampIndex(position: number, total: number): number {
+  if (!Number.isFinite(position) || total <= 1) return 0;
+  const span = SVO_PIXEL_TRACE_ORDER_SWATCHES.length - 1;
+  return Math.max(0, Math.min(span, Math.round((position / (total - 1)) * span)));
+}
+
+export function svoPixelTraceOrderSwatch(position: number, total: number): `#${string}` {
+  return SVO_PIXEL_TRACE_ORDER_SWATCHES[orderRampIndex(position, total)];
+}
+
+function svoPixelTraceOrderColorLinear(position: number, total: number): readonly [number, number, number] {
+  return ORDER_COLORS_LINEAR[orderRampIndex(position, total)];
 }
 
 export interface SvoPixelTraceMipRung {
@@ -514,6 +918,11 @@ const BOX_EDGES: readonly (readonly [number, number])[] = Object.freeze([
   [4, 5], [5, 7], [7, 6], [6, 4],
   [0, 4], [1, 5], [2, 6], [3, 7],
 ]);
+
+/** Diagonal of a box, used to scale dash periods to whatever the box is. */
+function distanceBetween(from: SvoTraceVec3, to: SvoTraceVec3): number {
+  return Math.hypot(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+}
 
 function boxCorner(minimum: SvoTraceVec3, maximum: SvoTraceVec3, index: number): SvoTraceVec3 {
   return [
@@ -679,7 +1088,30 @@ export function buildSvoPixelTraceGeometry(
   // stretch the ray actually advanced through — a brick it walked, or the empty
   // space it skipped to reach the next one — so the picture carries the march
   // order and its direction, which is the thing a static line hides.
-  if (enabled.has("primary-ray")) {
+  //
+  // Under the raster primary there is no such march to draw: nothing walked this
+  // ray, so the chain would be an invention. The ray is drawn as one arrow to
+  // the surface that won, and the depth ladder below carries the ordering story
+  // instead — which is the honest form of it, because the proxies covering a
+  // pixel were shaded concurrently rather than in sequence.
+  const rasterPrimary = trace.primaryMode === "raster";
+  if (enabled.has("primary-ray") && rasterPrimary) {
+    const terminus_m = trace.hit?.distance_m
+      ?? Math.max(1, ...trace.records
+        .filter((record) => record.kind === SVO_PIXEL_TRACE_KINDS.brickProxy)
+        .map((record) => record.tExit_m));
+    push(origin_m, along(terminus_m), {
+      layer: "primary-ray", order: 0, intensity: 1, kind: SVO_PIXEL_TRACE_KINDS.primaryHit,
+      widthBoost: 1.35, arrow: true,
+    });
+    if (!trace.hit) {
+      push(along(terminus_m), along(terminus_m * 1.35 + 1), {
+        layer: "primary-ray", order: orderCount, intensity: 0.4, kind: SVO_PIXEL_TRACE_KINDS.primaryHit,
+        dash_m: 0.3, widthBoost: 0.7, arrow: true,
+      });
+    }
+  }
+  if (enabled.has("primary-ray") && !rasterPrimary) {
     const rayStyle = (order: number, intensity: number, dash_m: number, widthBoost: number): SegmentStyle => ({
       layer: "primary-ray", order, intensity, kind: SVO_PIXEL_TRACE_KINDS.primaryHit, dash_m, widthBoost, arrow: true,
     });
@@ -768,8 +1200,53 @@ export function buildSvoPixelTraceGeometry(
     }
   }
 
+  // Proxies are coloured by their rank among the proxies covering *this pixel*,
+  // not by their absolute instance index: the reader is comparing the handful
+  // that competed here, and a global index would put them all in one colour.
+  const proxyRank = new Map<number, number>();
+  const proxies = trace.records.filter((record) => record.kind === SVO_PIXEL_TRACE_KINDS.brickProxy);
+  proxies.forEach((record, index) => proxyRank.set(record.order, index));
+
+  // The depth ladder: one rung per covering proxy, drawn across the ray at the
+  // interval that proxy's fragment clamped to. Read along the ray it is the
+  // tournament in profile — how many boxes competed, how deep they stacked, and
+  // where the winner sat among them.
+  if (rasterPrimary && proxies.length > 0) {
+    const [tangent, bitangent] = orthonormalBasis(direction);
+    const rung_m = Math.max(1e-4, (trace.minimumVoxel_m ?? 0.05) * 1.6);
+    for (const record of proxies) {
+      const layer = svoPixelTraceLayerForRecord(record);
+      if (!enabled.has(layer)) continue;
+      const rank = proxyRank.get(record.order) ?? 0;
+      const winner = (record.flags & SVO_PIXEL_TRACE_FLAGS.depthWinner) !== 0;
+      const discarded = (record.flags & SVO_PIXEL_TRACE_FLAGS.discarded) !== 0;
+      const style: SegmentStyle = {
+        layer, order: record.order, kind: record.kind,
+        intensity: winner ? 1 : discarded ? 0.4 : 0.62,
+        widthBoost: winner ? 1.5 : 0.9,
+        dash_m: discarded ? rung_m / 4 : 0,
+        colorLinear: svoPixelTraceOrderColorLinear(rank, proxies.length),
+      };
+      // A tick across the ray at entry, and a shaft spanning the interval the
+      // fragment was allowed to walk.
+      const entry = along(record.tEnter_m);
+      push(
+        [entry[0] - tangent[0] * rung_m, entry[1] - tangent[1] * rung_m, entry[2] - tangent[2] * rung_m],
+        [entry[0] + tangent[0] * rung_m, entry[1] + tangent[1] * rung_m, entry[2] + tangent[2] * rung_m],
+        style,
+      );
+      const offset = rung_m * (0.35 + 0.55 * rank);
+      const shaftFrom = along(record.tEnter_m), shaftTo = along(record.tExit_m);
+      push(
+        [shaftFrom[0] + bitangent[0] * offset, shaftFrom[1] + bitangent[1] * offset, shaftFrom[2] + bitangent[2] * offset],
+        [shaftTo[0] + bitangent[0] * offset, shaftTo[1] + bitangent[1] * offset, shaftTo[2] + bitangent[2] * offset],
+        { ...style, widthBoost: (style.widthBoost ?? 1) * 0.8 },
+      );
+    }
+  }
+
   for (const record of trace.records) {
-    const layer = svoPixelTraceLayerForKind(record.kind);
+    const layer = svoPixelTraceLayerForRecord(record);
     if (!enabled.has(layer)) continue;
     switch (record.kind) {
       case SVO_PIXEL_TRACE_KINDS.hierarchyNode:
@@ -827,6 +1304,51 @@ export function buildSvoPixelTraceGeometry(
           layer, order: record.order, intensity: 0.7, kind: record.kind, dash_m: 0.1, widthBoost: 0.8, arrow: true,
         });
         break;
+      case SVO_PIXEL_TRACE_KINDS.brickProxy: {
+        // The box the rasterizer drew. Its colour is where it sat in the draw
+        // order; its treatment is how it ended.
+        const winner = (record.flags & SVO_PIXEL_TRACE_FLAGS.depthWinner) !== 0;
+        const discarded = (record.flags & SVO_PIXEL_TRACE_FLAGS.discarded) !== 0;
+        const uncertain = (record.flags & SVO_PIXEL_TRACE_FLAGS.hsrEligible) !== 0;
+        pushBox(record.a, record.b, {
+          layer, order: record.order, kind: record.kind,
+          colorLinear: svoPixelTraceOrderColorLinear(proxyRank.get(record.order) ?? 0, Math.max(1, proxies.length)),
+          widthBoost: winner ? 1.25 : 0.85,
+          // A fragment the tiler may have killed is drawn fainter than one that
+          // certainly ran: the picture must not assert work it cannot observe.
+          intensity: (winner ? 1 : discarded ? 0.45 : 0.62) * (uncertain ? 0.6 : 1),
+          dash_m: discarded ? Math.max(1e-4, distanceBetween(record.a, record.b) / 12) : 0,
+        });
+        break;
+      }
+      case SVO_PIXEL_TRACE_KINDS.leafBounds:
+        // Hairline, so the occupied sub-box nested inside it stays the subject.
+        pushBox(record.a, record.b, {
+          layer, order: record.order, kind: record.kind, intensity: 0.4, widthBoost: 0.55,
+          dash_m: Math.max(1e-4, distanceBetween(record.a, record.b) / 16),
+        });
+        break;
+      case SVO_PIXEL_TRACE_KINDS.rigidProxy:
+        pushBox(record.a, record.b, {
+          layer, order: record.order, kind: record.kind, widthBoost: 0.9,
+          intensity: (record.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0 ? 1 : 0.5,
+          dash_m: (record.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0 ? 0 : 0.12,
+        });
+        break;
+      case SVO_PIXEL_TRACE_KINDS.prepassTexel: {
+        // The coarse texel's footprint where it lands on the surface, plus the
+        // segment from the shaded point to it — the provenance of the visibility
+        // this pixel was given rather than the visibility it computed.
+        pushBox(record.a, record.b, {
+          layer, order: record.order, kind: record.kind, widthBoost: 0.8,
+          intensity: (record.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0 ? 0.85 : 0.45,
+          dash_m: (record.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0
+            ? Math.max(1e-4, distanceBetween(record.a, record.b) / 10) : 0,
+        });
+        break;
+      }
+      // Identity the lighting pass reads, not geometry the primary produced.
+      case SVO_PIXEL_TRACE_KINDS.glassPane: break;
       case SVO_PIXEL_TRACE_KINDS.shadowRay: {
         const occluded = (record.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0;
         push(record.a, record.b, {
@@ -884,11 +1406,102 @@ export interface SvoPixelTraceNarrativeStep {
   readonly detail: string;
   readonly value: string;
   readonly layer?: SvoPixelTraceLayer;
+  /**
+   * This step's figures describe one camera's worth of work, not this pixel's.
+   * The HUD badges them separately and never adds them to per-pixel totals.
+   */
+  readonly frameWide?: boolean;
 }
 
 function metres(value: number): string {
   if (!Number.isFinite(value)) return "—";
   return value >= 100 ? `${value.toFixed(0)} m` : value >= 1 ? `${value.toFixed(2)} m` : `${(value * 100).toFixed(1)} cm`;
+}
+
+function integer(value: number): string {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)).toLocaleString() : "—";
+}
+
+/**
+ * The raster primary's account of itself: a ladder of passes, in encoder order.
+ *
+ * The first step is deliberately badged as frame-wide. The cull walks every
+ * resident leaf once per camera, not once per pixel, and quietly presenting its
+ * counters beside per-pixel ones would overstate what this pixel cost by orders
+ * of magnitude.
+ */
+function rasterNarrative(trace: SvoPixelTrace, kinds: Map<number, number>): SvoPixelTraceNarrativeStep[] {
+  const raster = trace.raster;
+  const cells = kinds.get(SVO_PIXEL_TRACE_KINDS.brickCell) ?? 0;
+  const exact = kinds.get(SVO_PIXEL_TRACE_KINDS.exactTest) ?? 0;
+  const steps: SvoPixelTraceNarrativeStep[] = [];
+  if (raster) {
+    steps.push({
+      id: "cull", label: "Emit and cull bricks", layer: "proxies", frameWide: true,
+      detail: `${integer(raster.residentLeaves)} resident leaves, less ${integer(raster.emptyBricks)} empty`
+        + ` and ${integer(raster.frustumCulled)} outside the frustum, sorted into ${SVO_PIXEL_TRACE_SORT_BUCKETS} depth buckets`,
+      value: `${integer(raster.instancesDrawn)} drawn`,
+    });
+  }
+  // The terrain record states the interval the secant march bracketed and how it
+  // ended. Not a step count: producing one honestly would need a counter inside
+  // the shared heightfield sampler, and that string is fingerprint-gated.
+  const terrain = trace.records.find((record) => record.kind === SVO_PIXEL_TRACE_KINDS.terrainStep);
+  steps.push({
+    id: "background", label: "Draw the background", layer: "terrain",
+    detail: terrain
+      ? `the heightfield march every pixel pays, bracketed over ${metres(terrain.tEnter_m)}–${metres(terrain.tExit_m)};`
+        + ((terrain.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0
+          ? " its depth is what the bricks then had to beat"
+          : " it found no ground, so the bricks competed against the far plane")
+      : "no terrain in this scene; the background pass wrote the miss encoding and cleared the depth",
+    value: terrain ? ((terrain.flags & SVO_PIXEL_TRACE_FLAGS.hit) !== 0 ? metres(terrain.tExit_m) : "miss") : "none",
+  });
+  if (raster) {
+    // The one number worth reading: how many fragments this pixel cost.
+    const certain = Math.max(0, raster.coveringProxies - raster.hsrEligibleProxies);
+    const bound = raster.hsrEligibleProxies > 0 ? `${integer(certain)}–${integer(raster.coveringProxies)}` : integer(raster.coveringProxies);
+    steps.push({
+      id: "proxies", label: "Rasterize brick proxies", layer: "proxies",
+      detail: `${integer(raster.proxiesWithSurface)} of them found a surface and wrote a depth;`
+        + ` the rest ran a full DDA and discarded`
+        + (raster.hsrEligibleProxies > 0
+          ? `. ${integer(raster.hsrEligibleProxies)} sat behind the winner, so the tiler may have killed them before shading`
+          : ""),
+      value: `${bound} proxies`,
+    });
+    steps.push({
+      id: "winner", label: "Resolve the depth test", layer: "winner",
+      detail: raster.winner
+        ? `instance ${integer(raster.winner.instanceIndex)} of ${integer(raster.instancesDrawn)} drawn, from depth bucket ${integer(raster.winner.sortBucket)}`
+          + ` — leaves partition space, so nearest wins outright`
+        : "no proxy won: this pixel is background, terrain, or a body",
+      value: raster.winner ? `#${integer(raster.winner.instanceIndex)}` : "none",
+    });
+    steps.push({
+      id: "cells", label: "Walk the winning brick", layer: "cells",
+      detail: raster.ddaCellsAcrossProxies > cells
+        ? `${integer(raster.ddaCellsAcrossProxies)} cells were stepped in total across every covering proxy, winner and beaten alike`
+        : "a bounded DDA inside one 8³ brick; a tagged cell is a maybe, never a yes",
+      value: `${integer(cells)} cells`,
+    });
+  }
+  steps.push({
+    id: "exact", label: "Solve the surface", layer: "exact",
+    detail: trace.hit
+      ? `hit at ${metres(trace.hit.distance_m)}, owner ${trace.hit.ownerId === 0xffff ? "none" : trace.hit.ownerId}, material ${trace.hit.materialId}`
+      : "no analytic surface at this pixel",
+    value: `${integer(exact)} tests`,
+  });
+  const rigidProxies = kinds.get(SVO_PIXEL_TRACE_KINDS.rigidProxy) ?? 0;
+  if (rigidProxies > 0) {
+    steps.push({
+      id: "rigid", label: "Rasterize rigid impostors", layer: "rigid",
+      detail: "analytic body proxies covering this pixel, depth-tested against the bricks",
+      value: `${integer(rigidProxies)} proxies`,
+    });
+  }
+  return steps;
 }
 
 /** Human-readable account of what the shader did, in the order it did it. */
@@ -903,32 +1516,48 @@ export function svoPixelTraceNarrative(trace: SvoPixelTrace): readonly SvoPixelT
     + (kinds.get(SVO_PIXEL_TRACE_KINDS.occlusionConeSample) ?? 0);
   const giCones = kinds.get(SVO_PIXEL_TRACE_KINDS.globalIlluminationConeSample) ?? 0;
   const shadows = kinds.get(SVO_PIXEL_TRACE_KINDS.shadowRay) ?? 0;
-  const steps: SvoPixelTraceNarrativeStep[] = [
-    {
-      id: "descend", label: "Descend the hierarchy", layer: "hierarchy",
-      detail: `${accepted} child boxes entered, ${rejected} rejected by the slab test`,
-      value: `${counters.nodeVisits} nodes`,
-    },
-    {
-      id: "leaves", label: "Reach leaf bricks", layer: "bricks",
-      detail: counters.emptyBrickSkips > 0
-        ? `${counters.emptyBrickSkips} crossed without a surface before the hit`
-        : "front-to-back order let the first occupied brick finish the ray",
-      value: `${counters.leafVisits} bricks`,
-    },
-    {
-      id: "cells", label: "Walk the brick", layer: "cells",
-      detail: `${cells} cells stepped; a tagged cell is a maybe, never a yes`,
-      value: `${counters.voxelWork} cells`,
-    },
-    {
-      id: "exact", label: "Solve the surface", layer: "exact",
-      detail: trace.hit
-        ? `hit at ${metres(trace.hit.distance_m)}, owner ${trace.hit.ownerId === 0xffff ? "none" : trace.hit.ownerId}, material ${trace.hit.materialId}`
-        : "no analytic surface along this ray",
-      value: `${counters.exactTests} tests`,
-    },
-  ];
+  // Only the primary differs between modes. Everything from the surface onward
+  // is one deferred lighting pass either way, so the tail below is shared.
+  const steps: SvoPixelTraceNarrativeStep[] = trace.primaryMode === "raster"
+    ? rasterNarrative(trace, kinds)
+    : [
+      {
+        id: "descend", label: "Descend the hierarchy", layer: "hierarchy",
+        detail: `${accepted} child boxes entered, ${rejected} rejected by the slab test`,
+        value: `${counters.nodeVisits} nodes`,
+      },
+      {
+        id: "leaves", label: "Reach leaf bricks", layer: "bricks",
+        detail: counters.emptyBrickSkips > 0
+          ? `${counters.emptyBrickSkips} crossed without a surface before the hit`
+          : "front-to-back order let the first occupied brick finish the ray",
+        value: `${counters.leafVisits} bricks`,
+      },
+      {
+        id: "cells", label: "Walk the brick", layer: "cells",
+        detail: `${cells} cells stepped; a tagged cell is a maybe, never a yes`,
+        value: `${counters.voxelWork} cells`,
+      },
+      {
+        id: "exact", label: "Solve the surface", layer: "exact",
+        detail: trace.hit
+          ? `hit at ${metres(trace.hit.distance_m)}, owner ${trace.hit.ownerId === 0xffff ? "none" : trace.hit.ownerId}, material ${trace.hit.materialId}`
+          : "no analytic surface along this ray",
+        value: `${counters.exactTests} tests`,
+      },
+    ];
+  if (trace.conePrepass) {
+    steps.push({
+      id: "prepass", label: "Read the cone prepass", layer: "prepass",
+      // Deliberately not claiming which texel served this pixel: the reduced
+      // shader rejects boundary pixels and resolves them inline, and only that
+      // shader knows which happened here. The probe runs at full rate beside it.
+      detail: "the frame ran cone lighting at reduced rate, so some of this pixel's visibility"
+        + " was read from a coarse texel rather than marched for it; the cones drawn below are the"
+        + " full-rate mirror, which is the upper bound on what it cost",
+      value: "reduced",
+    });
+  }
   if (shadows > 0 || counters.shadowNodeVisits > 0) {
     steps.push({
       id: "shadow", label: "Query visibility", layer: "shadow-rays",
@@ -975,9 +1604,49 @@ export function svoPixelTraceNarrative(trace: SvoPixelTrace): readonly SvoPixelT
 
 /** Total drawable work, used for the HUD's headline number. */
 export function svoPixelTraceTotalWork(trace: SvoPixelTrace): number {
+  return svoPixelTraceStageCosts(trace).reduce((total, stage) => total + stage.work, 0);
+}
+
+/**
+ * One entry per pass that spent per-pixel work on this pixel, in encoder order.
+ *
+ * Deliberately per-pixel only: the brick cull is frame-wide and is excluded, so
+ * the bar sums to something a reader can honestly compare between two pixels.
+ * Units are work items — cells stepped, rays issued, taps taken — not time; the
+ * probe counts what the shader did, and turning that into milliseconds would be
+ * a guess this diagnostic has no basis for.
+ */
+export interface SvoPixelTraceStageCost {
+  readonly id: string;
+  readonly label: string;
+  readonly layer: SvoPixelTraceLayer;
+  readonly work: number;
+}
+
+export function svoPixelTraceStageCosts(trace: SvoPixelTrace): readonly SvoPixelTraceStageCost[] {
   const counters = trace.counters;
-  return counters.nodeVisits + counters.leafVisits + counters.voxelWork
-    + counters.exactTests + counters.shadowNodeVisits + counters.shadowLeafVisits + counters.mipSteps;
+  const stages: SvoPixelTraceStageCost[] = [];
+  // Terrain is deliberately absent: its cost is a march this probe brackets but
+  // does not count, and inventing a work figure to fill a bar segment would make
+  // every other segment a lie by comparison. It is reported as an outcome.
+  if (trace.primaryMode === "raster") {
+    // Every covering proxy's DDA, not just the winner's: the beaten fragments
+    // are the overdraw, and hiding them would make the pass look free.
+    const primary = trace.raster?.ddaCellsAcrossProxies ?? counters.voxelWork;
+    if (primary > 0) stages.push({ id: "primary", label: "Brick raster", layer: "proxies", work: primary });
+  } else {
+    const primary = counters.nodeVisits + counters.leafVisits + counters.voxelWork;
+    if (primary > 0) stages.push({ id: "primary", label: "Traversal", layer: "hierarchy", work: primary });
+  }
+  if (counters.exactTests > 0) {
+    stages.push({ id: "exact", label: "Exact tests", layer: "exact", work: counters.exactTests });
+  }
+  const shadow = counters.shadowNodeVisits + counters.shadowLeafVisits;
+  if (shadow > 0) stages.push({ id: "shadow", label: "Shadow rays", layer: "shadow-rays", work: shadow });
+  if (counters.mipSteps > 0) {
+    stages.push({ id: "cones", label: "Cone taps", layer: "cones", work: counters.mipSteps });
+  }
+  return stages;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1109,13 +1778,36 @@ export function resolveSvoPixelTracePinnedFrame(state: {
  * HUD's buttons and their swatches be a read of the catalog rather than a second
  * hand-maintained list.
  */
+/**
+ * The pass each layer's work belongs to, matching the labels the frame encoder
+ * emits. A layer that named the wrong pass would send a reader to the wrong line
+ * of the profile.
+ */
+const LAYER_PASS: Readonly<Record<SvoPixelTraceLayer, string>> = Object.freeze({
+  "primary-ray": "SVO primary visibility",
+  hierarchy: "SVO primary visibility",
+  rejected: "SVO primary visibility",
+  bricks: "SVO primary visibility",
+  proxies: "SVO primary brick raster",
+  "proxy-losers": "SVO primary brick raster",
+  winner: "SVO primary brick raster",
+  cells: "SVO primary brick raster",
+  exact: "SVO primary visibility",
+  terrain: "SVO primary background and terrain",
+  rigid: "SVO analytic rigid discovery",
+  "shadow-rays": "SVO deferred dry lighting",
+  cones: "SVO deferred dry lighting",
+  "gi-cones": "SVO deferred dry lighting",
+  prepass: "SVO cone-lighting prepass",
+});
+
 export const svoPixelTraceVisualizations: readonly Visualization[] = Object.freeze(
   SVO_PIXEL_TRACE_LAYERS.map((layer) => {
     const definition = SVO_PIXEL_TRACE_LAYER_DEFINITIONS[layer];
     return decorationVisualization<SvoPixelTrace>({
       kind: "decoration",
       id: `svo-traversal/${layer}`,
-      pass: "SVO traversal",
+      pass: LAYER_PASS[layer],
       group: layer,
       label: definition.label,
       swatch: definition.swatch,

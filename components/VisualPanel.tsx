@@ -322,12 +322,16 @@ export function VisualPanel() {
           />
         </div>
         <p className="panel-note">
-          Hovering the viewport re-traces that exact pixel with an instrumented mirror of the shipping shader and draws
-          its work in the scene: the octree boxes the ray opened, the children it rejected, the leaf bricks and fine
-          cells it walked, the analytic surface tests it issued, and the shadow and occlusion cones it marched. The ray
-          itself is an arrow chain — one arrow per brick it walked and per empty stretch it skipped — and each cone is
-          stitched from its taps, coloured by the mip level that tap was allowed to read. Click the viewport to freeze
-          that exact ray and orbit around its work; click again to follow the pointer.
+          Hovering the viewport reports what the frame actually did to produce that one pixel, and draws it in the
+          scene. Under rasterized primary visibility that is a tournament, not a walk: every brick proxy whose box
+          covers the pixel is drawn as a box coloured by its place in the draw order, each one a fragment that ran a
+          bounded DDA, with the beaten ones dashed where the brick held no surface and dimmed where it simply sat
+          behind the winner. The winning brick keeps its full leaf box as a hairline, so the published occupancy
+          tightening the draw is visible. Under traced primary visibility the same panel shows the walk instead — the
+          octree boxes the ray opened, the children it rejected, the bricks and cells it stepped. Lighting is the same
+          either way: shadow rays, and cones stitched from their taps and coloured by the mip level each tap was
+          allowed to read. Click the viewport to freeze that exact pixel and orbit around its work; click again to
+          follow the pointer.
         </p>
         <p className="render-visualization-status">{visualizationAvailable ? "PROBE READY" : "SELECTS SVO + FINISHED"}</p>
       </ControlGroup>

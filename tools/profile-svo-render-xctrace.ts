@@ -8,9 +8,9 @@
  * Usage:
  *   node --import tsx tools/profile-svo-render-xctrace.ts
  *     [--scene=hose-tank] [--resolution=660x662]
- *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide]
+ *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide|raster-primary]
  *     [--shading=inline|split|auto-relight]
- *     [--cone-scale=0.5|0.25|0.125] [--warmups=4]
+ *     [--cone-scale=0.5|0.25|0.125] [--cone-tracing=cones|exact|off] [--warmups=4]
  *     [--radiance-reconstruction=nearest|gated-linear|joint-bilateral|wide-relight|full-res-relight]
  *     [--counter-seconds=3] [--counter-reduction=100] [--out=DIR]
  *     [--timing-only] [--reuse-trace] [--reuse-tables]
@@ -35,6 +35,7 @@ import {
   releaseWebGPUExclusiveLockSync,
   WEBGPU_EXCLUSIVE_LOCK,
 } from "./webgpu-smoke-isolation";
+import { SVO_DRY_TRAVERSAL_MODES, type SvoDryTraversalMode } from "../lib/webgpu-svo-dry-scene";
 import { buildFrameReport, renderFrameReportHtml, type FrameReport } from "./xctrace-frame-report";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
 
@@ -49,8 +50,8 @@ if (!/^[a-zA-Z0-9._-]+$/.test(variant)) {
   throw new Error("--variant may contain only letters, digits, dot, underscore, and dash");
 }
 const traversal = flag("traversal") ?? "hybrid";
-if (!["hybrid", "canonical", "canonical-parametric", "compact", "wide"].includes(traversal)) {
-  throw new Error("--traversal must be hybrid, canonical, canonical-parametric, compact, or wide");
+if (!SVO_DRY_TRAVERSAL_MODES.includes(traversal as SvoDryTraversalMode)) {
+  throw new Error(`--traversal must be one of ${SVO_DRY_TRAVERSAL_MODES.join(", ")}`);
 }
 const shading = flag("shading") ?? "inline";
 if (!["inline", "split", "auto-relight"].includes(shading)) throw new Error("--shading must be inline, split, or auto-relight");
@@ -68,9 +69,15 @@ const counterReduction = Number(flag("counter-reduction") ?? 100);
 if (!Number.isFinite(counterReduction) || counterReduction < 1) {
   throw new Error("--counter-reduction must be at least 1");
 }
-const coneScale = Number(flag("cone-scale") ?? 0.5);
-if (![0.5, 0.25, 0.125].includes(coneScale)) {
-  throw new Error("--cone-scale must be 0.5, 0.25, or 0.125 so the profiled pass graph includes the cone prepass");
+const coneTracing = flag("cone-tracing") ?? "cones";
+if (!["cones", "exact", "off"].includes(coneTracing)) {
+  throw new Error("--cone-tracing must be cones, exact, or off");
+}
+const coneScale = Number(flag("cone-scale") ?? (coneTracing === "cones" ? 0.5 : 1));
+if (coneTracing === "cones" ? ![0.5, 0.25, 0.125].includes(coneScale) : coneScale !== 1) {
+  throw new Error(coneTracing === "cones"
+    ? "--cone-scale must be 0.5, 0.25, or 0.125 so the profiled pass graph includes the cone prepass"
+    : "--cone-scale must be 1 when --cone-tracing withholds the cone stages");
 }
 const radianceReconstruction = flag("radiance-reconstruction") ?? "full-res-relight";
 if (!["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstruction)) {
@@ -257,22 +264,30 @@ const assertRenderReport = (report: FrameReport): void => {
     || report.counters.exclusiveCoverage <= 0)) {
     failures.push("occupancy/ALU counters did not cover the render window");
   }
-  const splitRelight = (shading === "split" || shading === "auto-relight")
+  // Withholding the cone stages collapses the effective scale to 1: split
+  // shading keeps its two full-rate passes and the inline path keeps its single
+  // pass, but no cone prepass or compact cone visibility is encoded at all.
+  const split = shading === "split" || shading === "auto-relight";
+  const splitRelight = split
     && (radianceReconstruction === "wide-relight" || radianceReconstruction === "full-res-relight");
-  const expectedLabels = splitRelight
+  const expectedLabels = split
     ? ["Sparse voxel primary visibility", "Sparse voxel deferred dry lighting"]
-    : ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"];
+    : coneTracing === "cones"
+      ? ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"]
+      : ["Sparse voxel dry scene"];
   for (const label of expectedLabels) {
     const pass = report.passes.find((candidate) => candidate.label === label);
     if (!pass || (!timingOnly && (pass.counterSamples === 0 || pass.occupancy === undefined || pass.alu === undefined))) {
       failures.push(`${label} has no attributed occupancy/ALU samples`);
     }
   }
-  if (splitRelight) {
-    const compactConeLabel = "Sparse voxel compact cone visibility";
-    if (!report.passes.some((candidate) => candidate.label === compactConeLabel)) {
-      failures.push(`${compactConeLabel} has no attributed GPU interval`);
-    }
+  const compactConeLabel = "Sparse voxel compact cone visibility";
+  const compactCone = report.passes.some((candidate) => candidate.label === compactConeLabel);
+  if (splitRelight && coneTracing === "cones" && !compactCone) {
+    failures.push(`${compactConeLabel} has no attributed GPU interval`);
+  }
+  if (coneTracing !== "cones" && compactCone) {
+    failures.push(`${compactConeLabel} ran with --cone-tracing=${coneTracing}`);
   }
   if (failures.length > 0) throw new Error(`render xctrace report rejected: ${failures.join("; ")}`);
 };
@@ -329,6 +344,7 @@ const writeReport = async (
       FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
       FLUID_SVO_DRY_FRAME_SHADING: shading,
       FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
+      FLUID_SVO_DRY_FRAME_CONE_TRACING: coneTracing,
       FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION: radianceReconstruction,
     },
     tracedPid,
@@ -367,7 +383,7 @@ const main = async (): Promise<void> => {
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, extraction, result, tracedPid);
     await writeFile(capturePath, `${JSON.stringify({
-      variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
       ...priorCapture,
       source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
@@ -386,7 +402,7 @@ const main = async (): Promise<void> => {
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, policy, result, tracedPid);
     await writeFile(capturePath, `${JSON.stringify({
-      variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
       ...priorCapture,
       source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
@@ -406,7 +422,7 @@ const main = async (): Promise<void> => {
   // interrupted, `--reuse-trace` must retain the source fingerprint from the
   // capture rather than accidentally claiming the source state at rebuild time.
   await writeFile(capturePath, `${JSON.stringify({
-    state: "capturing", variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene,
+    state: "capturing", variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene,
     resolution: { width, height }, counterSeconds, counterReduction, source,
     tracePath, startedAt: new Date().toISOString(),
   }, null, 2)}\n`);
@@ -437,6 +453,7 @@ const main = async (): Promise<void> => {
         FLUID_SVO_DRY_FRAME_HEIGHT: String(height),
         FLUID_SVO_DRY_FRAME_WARMUPS: String(warmups),
         FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
+        FLUID_SVO_DRY_FRAME_CONE_TRACING: coneTracing,
         FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION: radianceReconstruction,
         FLUID_SVO_DRY_FRAME_TRAVERSAL: traversal,
         FLUID_SVO_DRY_FRAME_SHADING: shading,
@@ -509,7 +526,7 @@ const main = async (): Promise<void> => {
     const report = await writeReport(tables, policy, result, child.pid);
     await writeFile(capturePath, `${JSON.stringify({
       state: "complete",
-      variant, traversal, shading, coneScale, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
       source,
       worker: result, tracePath, capturedAt: new Date().toISOString(),
     }, null, 2)}\n`);

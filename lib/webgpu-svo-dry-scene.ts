@@ -87,6 +87,12 @@ import {
   svoBrickRasterSortStateBytes,
   SVO_BRICK_RASTER_CONTRACT,
 } from "./webgpu-svo-brick-raster";
+import {
+  createSvoBrickRasterProbeWGSL,
+  svoBrickRasterProbeBindGroupLayoutEntries,
+  SparseVoxelBrickRasterProbeBuffers,
+  SVO_BRICK_RASTER_PROBE_CONTRACT,
+} from "./webgpu-svo-brick-raster-probe";
 import { createSvoScreenSpaceTraversalWGSL } from "./svo-screen-space-termination";
 import {
   DEFAULT_SVO_RENDER_TUNING,
@@ -100,7 +106,12 @@ import {
   createSvoPixelTraceProbeWGSL,
   type SvoPixelTraceProbeOptions,
 } from "./webgpu-svo-pixel-trace";
-import type { SvoPixelTrace } from "./svo-pixel-trace";
+import {
+  mergeSvoPixelTrace,
+  withSvoPixelTraceConePrepass,
+  type SvoPixelTrace,
+  type SvoPixelTracePrimaryMode,
+} from "./svo-pixel-trace";
 
 export interface SparseVoxelDrySceneData {
   /** Packed `SvoPrimitiveRecord` values in dense environment-owner order. */
@@ -1103,9 +1114,19 @@ export type SparseVoxelDrySceneLightingOptions = SvoLightingOptions & {
  */
 export const SVO_DRY_SCENE_PIXEL_PROBE_GROUP = 1;
 
-/** Constants the pixel-trace probe mirrors, passed instead of imported so the probe module stays free of this one. */
-export function svoDryScenePixelProbeOptions(): SvoPixelTraceProbeOptions {
+/**
+ * Constants the pixel-trace probe mirrors, passed instead of imported so the
+ * probe module stays free of this one.
+ *
+ * `primaryMode` is not a constant: it decides whether the probe instruments a
+ * hierarchy walk at all, and instrumenting one the frame did not perform is the
+ * defect this argument exists to prevent.
+ */
+export function svoDryScenePixelProbeOptions(
+  primaryMode: SvoPixelTracePrimaryMode = "traced",
+): SvoPixelTraceProbeOptions {
   return {
+    primaryMode,
     group: SVO_DRY_SCENE_PIXEL_PROBE_GROUP,
     coneLodBlendBandWidth: SVO_DRY_CONE_LOD_BLEND_BAND_WIDTH,
     maximumShadedLights: SVO_DRY_SCENE_MAX_SHADED_LIGHTS,
@@ -1189,7 +1210,15 @@ export function createSvoDrySceneFragmentWGSL(
     : "let queueIndex=atomicAdd(&dryPrepassBoundaryQueue.count,1u);dryPrepassBoundaryQueue.coordinates[queueIndex]=globalId.y*dimensions.x+globalId.x;return;";
   // Secondary rays keep the measured production traversal; only the primary
   // changes shape in raster-primary mode.
-  const secondaryTraversalMode = rasterPrimary ? "canonical-parametric" : traversalMode;
+  //
+  // Keyed on the traversal mode alone, not on whether *this* composition emits
+  // the raster entries. The inline compositions of this module — the diagnostic
+  // megakernel, the pixel probe — do not rasterize, but they run beside a frame
+  // that does, and their secondaries must be the traversal that frame's
+  // secondaries use. Gating this on the split path instead left "raster-primary"
+  // matching neither the canonical nor the compact branch below, so those
+  // compositions silently fell through to the wide-fanout cursor.
+  const secondaryTraversalMode = traversalMode === "raster-primary" ? "canonical-parametric" : traversalMode;
   const hsrProbe = experiments.rasterPrimaryHsrProbe === true;
   const noFragmentDepth = hsrProbe || experiments.rasterPrimaryNoFragmentDepth === true;
   if (noFragmentDepth && !rasterPrimary) {
@@ -2819,7 +2848,7 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u),0.0);
 }
-${splitEntryWGSL}${rasterPrimaryEntryWGSL}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions()) : ""}`;
+${splitEntryWGSL}${rasterPrimaryEntryWGSL}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(traversalMode === "raster-primary" ? "raster" : "traced")) : ""}`;
   if (stripDiagnostics) {
     const counterNames = [
       "dryPrimaryNodeVisits", "dryPrimaryLeafVisits", "dryPrimaryEmptyBrickSkips",
@@ -3128,6 +3157,17 @@ export class SparseVoxelDrySceneRenderer {
   private brickSortStateBuffer?: GPUBuffer;
   private brickLeafCapacity = 0;
   private brickCullCompilation?: Promise<void>;
+  /**
+   * Raster-primary pixel probe: reads this frame's own instance list and cull
+   * counters to explain how the depth test found the pixel. Compiled on first
+   * trace request and only while the raster primary is the active mode.
+   */
+  private brickProbeLayout?: GPUBindGroupLayout;
+  private brickProbeBindGroup?: GPUBindGroup;
+  private brickProbePipeline?: GPUComputePipeline;
+  private brickProbeBuffers?: SparseVoxelBrickRasterProbeBuffers;
+  private brickProbeCompilation?: Promise<void>;
+  private brickProbeReadPending = false;
   private layout?: GPUBindGroupLayout;
   private bindGroup?: GPUBindGroup;
   private vertexModule?: GPUShaderModule;
@@ -3218,6 +3258,8 @@ export class SparseVoxelDrySceneRenderer {
   private probeRequest?: { pixelX: number; pixelY: number; token: number };
   private probeEncodedToken = 0;
   private probeReadPending = false;
+  /** Whether the frame the pending probe was encoded beside ran the cone prepass. */
+  private probeEncodedConePrepass = false;
 
   constructor(
     private readonly device: GPUDevice,
@@ -3580,6 +3622,50 @@ export class SparseVoxelDrySceneRenderer {
     this.brickDrawBindGroup = undefined;
   }
 
+  /**
+   * The raster-primary probe's module and pipeline.
+   *
+   * Deliberately compiled beside the ray probe rather than with the frame's
+   * pipelines: a session that never opens the diagnostic never pays for it. It
+   * is also the only pipeline here that binds the instance list read-only,
+   * which is what makes it an observer of the frame rather than a participant.
+   */
+  private async ensureBrickRasterProbe(): Promise<void> {
+    if (!this.rasterPrimary || this.brickProbePipeline) return;
+    this.brickProbeCompilation ??= (async () => {
+      try {
+        this.brickProbeLayout = this.device.createBindGroupLayout({
+          label: "Sparse voxel raster-primary probe bindings",
+          entries: svoBrickRasterProbeBindGroupLayoutEntries(),
+        });
+        const module = await checkedModule(this.device, "Sparse voxel raster-primary probe",
+          createSvoBrickRasterProbeWGSL({
+            // The shipping brick fragment writes its own depth unless the
+            // experiment removes it, and that is exactly what decides whether
+            // the covering-proxy count is exact or an upper bound.
+            fragmentDepthWritten: !this.experiments.rasterPrimaryHsrProbe
+              && !this.experiments.rasterPrimaryNoFragmentDepth,
+            tanHalfFov: 0.72,
+          }));
+        this.brickProbeBuffers = new SparseVoxelBrickRasterProbeBuffers(this.device);
+        this.brickProbePipeline = await this.device.createComputePipelineAsync({
+          label: "Sparse voxel raster-primary probe",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickProbeLayout] }),
+          compute: { module, entryPoint: SVO_BRICK_RASTER_PROBE_CONTRACT.entryPoint },
+        });
+        this.rebuildBrickRasterBindGroups();
+      } catch (error) {
+        // A missing primary probe degrades the diagnostic to its lighting half
+        // rather than failing it: the ray probe still explains the shading.
+        this.brickProbePipeline = undefined;
+        this.brickProbeBuffers?.destroy();
+        this.brickProbeBuffers = undefined;
+        console.warn("Sparse voxel raster-primary probe unavailable", error);
+      }
+    })();
+    await this.brickProbeCompilation;
+  }
+
   private rebuildBrickRasterBindGroups(): void {
     const structural = this.source?.structural;
     if (!this.rasterPrimary || !structural || !this.brickCullLayout || !this.brickDrawLayout
@@ -3605,6 +3691,33 @@ export class SparseVoxelDrySceneRenderer {
       layout: this.brickDrawLayout,
       entries: [{ binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding, resource: { buffer: this.brickInstanceBuffer } }],
     });
+    // The primitive arena is republished with the scene, so the probe's group is
+    // rebuilt here rather than at compile time: without it there is nothing for
+    // the in-brick DDA to resolve an owner tag against.
+    if (this.brickProbeLayout && this.brickProbeBuffers && this.probeBuffers && this.primitiveBuffer) {
+      const probe = SVO_BRICK_RASTER_PROBE_CONTRACT.bindings;
+      this.brickProbeBindGroup = this.device.createBindGroup({
+        label: "Sparse voxel raster-primary probe binding",
+        layout: this.brickProbeLayout,
+        entries: [
+          { binding: probe.uniforms, resource: { buffer: this.uniformBuffer } },
+          // Mapping plus metadata: the DDA needs the primitive base owner and
+          // count, which sit immediately after the mapping prefix.
+          { binding: probe.params, resource: { buffer: this.paramsBuffer, offset: 0, size: SVO_BRICK_RASTER_PROBE_CONTRACT.paramsBindingBytes } },
+          // One request buffer shared with the ray probe, so the two cannot
+          // answer different pixels for the same frame.
+          { binding: probe.request, resource: { buffer: this.probeBuffers.request } },
+          { binding: probe.control, resource: structural.control },
+          { binding: probe.nodes, resource: structural.nodes },
+          { binding: probe.leaves, resource: structural.leaves },
+          { binding: probe.materialOwners, resource: structural.materialOwners },
+          { binding: probe.primitives, resource: { buffer: this.primitiveBuffer } },
+          { binding: probe.instances, resource: { buffer: this.brickInstanceBuffer } },
+          { binding: probe.sortState, resource: { buffer: this.brickSortStateBuffer } },
+          { binding: probe.records, resource: this.brickProbeBuffers.recordsView },
+        ],
+      });
+    }
   }
 
   /**
@@ -4755,7 +4868,12 @@ export class SparseVoxelDrySceneRenderer {
       pixelY: Math.max(0, Math.min(height - 1, pixelY)),
       token: (this.probeRequest?.token ?? 0) + 1,
     };
-    void this.ensurePixelProbe();
+    // The raster half explains how the depth test found the pixel; it only
+    // exists when the raster primary is the active mode, and it compiles on the
+    // same first request rather than at startup. It is sequenced after the ray
+    // probe because it binds that probe's request buffer — one request, so the
+    // two halves cannot answer different pixels for the same frame.
+    void this.ensurePixelProbe().then(() => this.ensureBrickRasterProbe());
   }
 
   clearPixelTraceRequest(): void { this.probeRequest = undefined; }
@@ -4877,9 +4995,26 @@ export class SparseVoxelDrySceneRenderer {
     pass.draw(3);
     pass.end();
     if (!this.probeBuffers.encodeReadback(encoder)) return false;
+    // The raster-primary half runs against the instance list this frame's cull
+    // already published, which is why it is encoded here rather than beside the
+    // cull: by now the buffer holds the very set the draw consumed.
+    this.encodeBrickRasterProbe(encoder);
     this.probeEncodedToken = request.token;
     this.probeReadPending = true;
     return true;
+  }
+
+  private encodeBrickRasterProbe(encoder: GPUCommandEncoder): void {
+    if (!this.rasterPrimary || !this.brickProbePipeline || !this.brickProbeBindGroup
+      || !this.brickProbeBuffers || this.brickProbeReadPending) return;
+    const pass = encoder.beginComputePass({ label: "Sparse voxel raster-primary probe" });
+    pass.setPipeline(this.brickProbePipeline);
+    pass.setBindGroup(0, this.brickProbeBindGroup);
+    // One workgroup: the lanes stride the instance list between them, and the
+    // ordering and election that follow are a single-lane epilogue.
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    this.brickProbeReadPending = this.brickProbeBuffers.encodeReadback(encoder);
   }
 
   /**
@@ -4893,10 +5028,23 @@ export class SparseVoxelDrySceneRenderer {
     // pixel it was asked about and the next frame supersedes it. Only a resource
     // or source epoch change makes the recorded world-space boxes meaningless.
     const generation = this.pickingFrameToken;
+    const current = () => this.pickingFrameToken === generation;
     try {
-      return await this.probeBuffers.read(() => this.pickingFrameToken === generation);
+      // Both halves are mapped together and folded into one account of the
+      // pixel. The raster half is optional throughout: in traced mode it never
+      // runs, and if its pipeline failed the lighting half still stands alone.
+      const [lighting, primary] = await Promise.all([
+        this.probeBuffers.read(current),
+        this.brickProbeReadPending && this.brickProbeBuffers
+          ? this.brickProbeBuffers.read(current)
+          : Promise.resolve(undefined),
+      ]);
+      // The prepass flag is the host's to add: the probe is composed inline at
+      // full rate, so from inside it the reduced pass beside it is invisible.
+      return withSvoPixelTraceConePrepass(mergeSvoPixelTrace(lighting, primary), this.probeEncodedConePrepass);
     } finally {
       this.probeReadPending = false;
+      this.brickProbeReadPending = false;
     }
   }
 
@@ -4917,6 +5065,9 @@ export class SparseVoxelDrySceneRenderer {
         && this.conePrepassBindGroup && this.conePrepassVisibilityBindGroup && this.conePrepassShadeBindGroup && this.conePrepassVisibilityView
         && this.conePrepassGeometryView && this.conePrepassIdentityView && this.conePrepassRadianceView);
     const effectiveScale: SvoConeLightingScale = usePrepass ? this.coneScale : 1;
+    // Recorded for the probe, which is encoded after this frame's passes and
+    // cannot observe the reduced pass from inside its own full-rate composition.
+    this.probeEncodedConePrepass = usePrepass;
     const splitRequested = this.shadingPath === "split";
     const activeSplitVisibilityPipeline = this.rasterRigidActive
       ? this.splitRasterRigidVisibilityPipeline
@@ -5226,6 +5377,11 @@ export class SparseVoxelDrySceneRenderer {
     this.probePipeline = undefined;
     this.probeRequest = undefined;
     this.probeReadPending = false;
+    this.brickProbeBuffers?.destroy();
+    this.brickProbeBuffers = undefined;
+    this.brickProbeBindGroup = undefined;
+    this.brickProbePipeline = undefined;
+    this.brickProbeReadPending = false;
     this.brickCandidateBuffer?.destroy();
     this.brickInstanceBuffer?.destroy();
     this.brickSortStateBuffer?.destroy();

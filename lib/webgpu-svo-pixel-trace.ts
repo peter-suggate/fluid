@@ -7,13 +7,17 @@ import {
   SVO_PIXEL_TRACE_KINDS,
   SVO_PIXEL_TRACE_MAGIC,
   SVO_PIXEL_TRACE_MAXIMUM_RECORD_CAPACITY,
+  SVO_PIXEL_TRACE_PREPASS_STATE,
+  SVO_PIXEL_TRACE_PRIMARY_MODE,
   SVO_PIXEL_TRACE_RECORD_WORDS,
+  SVO_PIXEL_TRACE_STAGES,
   SVO_PIXEL_TRACE_STATUS,
   SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS,
   decodeSvoPixelTrace,
   svoPixelTraceBufferBytes,
   svoPixelTraceTextureRows,
   type SvoPixelTrace,
+  type SvoPixelTracePrimaryMode,
 } from "./svo-pixel-trace";
 
 /**
@@ -64,6 +68,17 @@ export interface SvoPixelTraceProbeOptions {
   };
   /** Mirrors SVO_DRY_SCENE_CAMERA_SETTLED_WGSL. */
   readonly cameraSettledExpression: string;
+  /**
+   * How the frame this probe runs beside resolves primary visibility.
+   *
+   * In `raster` mode the instrumented hierarchy walk below is simply not run.
+   * Nothing marched this ray through the octree — a compute pass emitted brick
+   * proxies and the depth test picked between them — so recording a descent
+   * would be recording a shader that did not execute. The companion compute
+   * probe in `webgpu-svo-brick-raster-probe.ts` explains the primary instead,
+   * and this entry point keeps what is still true of it: the lighting.
+   */
+  readonly primaryMode: SvoPixelTracePrimaryMode;
 }
 
 export function svoPixelTraceProbeRecordCapacity(options: Pick<SvoPixelTraceProbeOptions, "recordCapacity">): number {
@@ -86,6 +101,12 @@ export function createSvoPixelTraceProbeWGSL(options: SvoPixelTraceProbeOptions)
   const flags = SVO_PIXEL_TRACE_FLAGS;
   const bandStart = (1 - options.coneLodBlendBandWidth).toFixed(8);
   const bandScale = (1 / options.coneLodBlendBandWidth).toFixed(8);
+  const raster = options.primaryMode === "raster";
+  // Stages this entry point can speak for. The primary is absent under raster
+  // because the compute probe owns it there; claiming it here would let a
+  // missing companion look like a frame that drew no bricks.
+  const stages = SVO_PIXEL_TRACE_STAGES.terrain | SVO_PIXEL_TRACE_STAGES.rigid
+    | SVO_PIXEL_TRACE_STAGES.deferredLighting | (raster ? 0 : SVO_PIXEL_TRACE_STAGES.brickRaster);
   return /* wgsl */ `
 // ---------------------------------------------------------------------------
 // Live pixel-trace probe. Records the work one camera ray performs.
@@ -529,6 +550,47 @@ fn probeGlobalIllumination(position:vec3f,normal:vec3f){
   probeGiVisibility=mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength);
 }
 
+// The interval the terrain secant march brackets before it searches, mirrored
+// from traceTerrain's own setup. Only the bracket is mirrored, not the search:
+// a step count would need a counter inside the shared heightfield sampler, and
+// that string is gated byte-for-byte by the frame fingerprint. Recording where
+// the march was allowed to look, and how it ended, needs neither.
+fn probeRecordTerrain(ro:vec3f,rd:vec3f,terrain:DryHit){
+  if(!terrainEnabled()){return;}
+  let sceneScale=max(max(uniforms.container.x,uniforms.container.y),uniforms.container.z);
+  let ceiling=terrainCeiling();
+  var t0=0.005;
+  if(ro.y>ceiling){
+    if(rd.y>=-0.0005){return;}
+    t0=(ceiling-ro.y)/rd.y;
+  }
+  var t1=t0+10.0*sceneScale;
+  if(rd.y<-0.0005){t1=min(t1,(-0.02-ro.y)/rd.y);}
+  else if(rd.y>0.0005){t1=min(t1,max(t0,(ceiling-ro.y)/rd.y));}
+  if(t1<=t0){return;}
+  let found=terrain.t<DRY_MISS;
+  probeRecord(${kinds.terrainStep}u,0u,0u,select(0u,${flags.hit}u,found),
+    ro+rd*t0,ro+rd*select(t1,terrain.t,found),t0,select(t1,terrain.t,found));
+}
+
+// Every body whose bounding sphere this ray pierces: the impostor pass's own
+// coverage test, which is the guard the dynamic-frame work added in front of the
+// per-body loop. A pierced sphere is a proxy that reached the analytic test;
+// only the nearest of them becomes the pixel.
+fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
+  let bodyCount=min(u32(round(uniforms.options.z)),12u);
+  for(var index=0u;index<12u;index+=1u){
+    if(index>=bodyCount){break;}
+    let body=bodies[index];
+    if(!bodyBoundingSphereVisible(ro,rd,body,0.0,DRY_MISS)){continue;}
+    let radius=max(body.positionRadius.w,0.0);
+    let center=body.positionRadius.xyz;
+    let won=rigid.t<DRY_MISS&&rigid.ownerId==index;
+    probeRecord(${kinds.rigidProxy}u,0u,index,select(0u,${flags.hit}u,won),
+      center-vec3f(radius),center+vec3f(radius),0.0,select(0.0,rigid.t,won));
+  }
+}
+
 @fragment fn dryProbeMain(input:VertexOut)->@location(0) vec4f{
   // One writer only. The probe target is 1x1, so every other invocation in the
   // rasterizer's quad returns here before it can touch storage. This is an
@@ -558,15 +620,26 @@ fn probeGlobalIllumination(position:vec3f,normal:vec3f){
   let up=normalize(cross(right,forward));
   let rd=normalize(forward+right*ndc.x*viewport.x/viewport.y*.72+up*ndc.y*.72);
 
-  let staticHit=probeTraceStatic(ro,rd);
-  // Compose the authoritative hit from the instrumented static result plus the
-  // same terrain and rigid intersectors as traceDrySolidScene. Calling
-  // traceOpaqueScene here would traverse the complete static SVO a second time
-  // and makes Dawn specialize two independent primary traversers into this one
-  // diagnostic fragment pipeline.
+  ${raster
+    ? `// Raster primary: the octree was not walked for this pixel, so nothing here
+  // instruments a walk. The static surface comes from the production tracer
+  // uninstrumented — the renderer's own claim is that the raster and traced
+  // primaries are bit-identical, and the companion compute probe elects the
+  // winner independently so the host can check that claim rather than assume it.
+  let staticHit=traceStaticSolidScene(ro,rd);`
+    : `let staticHit=probeTraceStatic(ro,rd);`}
+  // Compose the authoritative hit from the static result plus the same terrain
+  // and rigid intersectors as traceDrySolidScene. Calling traceOpaqueScene here
+  // would traverse the complete static SVO a second time and makes Dawn
+  // specialize two independent primary traversers into this one pipeline.
   var opaque=staticHit;
   let terrain=traceTerrain(ro,rd);if(terrain.t<opaque.t){opaque=terrain;}
   let rigid=nearestBody(ro,rd);if(rigid.t<opaque.t){opaque=rigid;}
+  // Both passes run for every pixel in the raster frame — terrain in the
+  // background draw, bodies in the impostor draw — so both are recorded whether
+  // or not they ended up owning the pixel.
+  probeRecordTerrain(ro,rd,terrain);
+  probeRecordRigidProxies(ro,rd,rigid);
   var status=${SVO_PIXEL_TRACE_STATUS.miss}u;
   if(opaque.t<DRY_MISS){
     status=${SVO_PIXEL_TRACE_STATUS.hit}u;
@@ -625,6 +698,27 @@ fn probeGlobalIllumination(position:vec3f,normal:vec3f){
   probeWriteFloat(${header.giRadiance + 1}u,probeGiRadiance.y);
   probeWriteFloat(${header.giRadiance + 2}u,probeGiRadiance.z);
   probeWriteWord(${header.giState}u,probeGiState);
+
+  // Written unconditionally, including the zeroes. The record texture persists
+  // between frames, so a mode word left alone would let one frame's raster
+  // answer leak into the next frame's traced one.
+  probeWriteWord(${header.primaryMode}u,${raster ? SVO_PIXEL_TRACE_PRIMARY_MODE.raster : SVO_PIXEL_TRACE_PRIMARY_MODE.traced}u);
+  // The prepass stage is stamped by the host, not written here: the probe is
+  // composed inline at full rate by construction, so it has no way to observe
+  // whether the frame beside it ran a reduced-rate cone prepass.
+  probeWriteWord(${header.stagesPresent}u,${stages}u);
+  probeWriteWord(${header.residentLeaves}u,0u);
+  probeWriteWord(${header.emptyBricks}u,0u);
+  probeWriteWord(${header.frustumCulled}u,0u);
+  probeWriteWord(${header.candidatesEmitted}u,0u);
+  probeWriteWord(${header.instancesDrawn}u,0u);
+  probeWriteWord(${header.coveringProxies}u,0u);
+  probeWriteWord(${header.proxiesWithSurface}u,0u);
+  probeWriteWord(${header.hsrEligibleProxies}u,0u);
+  probeWriteWord(${header.winnerInstanceIndex}u,0u);
+  probeWriteWord(${header.winnerSortBucket}u,0u);
+  probeWriteWord(${header.ddaCellsAcrossProxies}u,0u);
+  probeWriteWord(${header.prepassState}u,0u);
   return vec4f(0.0);
 }
 `;

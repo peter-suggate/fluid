@@ -30,8 +30,12 @@ import {
   svoPixelTraceTextureRows,
   svoPixelTraceWordCount,
   svoPixelTraceLayerForKind,
+  svoPixelTraceLayerForRecord,
   svoPixelTraceNarrative,
+  svoPixelTraceStageCosts,
   svoPixelTraceTotalWork,
+  mergeSvoPixelTrace,
+  withSvoPixelTraceConePrepass,
   type SvoPixelTraceLayer,
 } from "../lib/svo-pixel-trace";
 import {
@@ -745,4 +749,170 @@ test("a pinned ray's aim is only ever recorded from a request, never invented", 
   assert.match(viewport, /ui\.pixelTracePinRequested && !ui\.pixelTracePinned/);
   // While pinned the probe traces the pinned pixel, not wherever the pointer went.
   assert.match(viewport, /const pointer = pinnedAt \?\? tracePinRequestRef\.current \?\? tracePointerRef\.current;/);
+});
+
+/* ------------------------------------------------------------------------- */
+/* The raster primary                                                         */
+/* ------------------------------------------------------------------------- */
+
+/** A minimal raster trace: three proxies competing, one of them the winner. */
+function rasterTrace(options: {
+  proxies?: readonly { instance: number; bucket: number; cells: number; flags: number; tEnter: number; tExit: number }[];
+  counters?: Partial<Record<keyof typeof SVO_PIXEL_TRACE_HEADER, number>>;
+  hitDistance?: number;
+  status?: number;
+} = {}) {
+  const proxies = options.proxies ?? [
+    { instance: 2, bucket: 8, cells: 9, flags: SVO_PIXEL_TRACE_FLAGS.discarded, tEnter: 1, tExit: 2 },
+    { instance: 7, bucket: 21, cells: 4, flags: SVO_PIXEL_TRACE_FLAGS.depthWinner | SVO_PIXEL_TRACE_FLAGS.hit, tEnter: 2, tExit: 3 },
+    { instance: 11, bucket: 33, cells: 6, flags: SVO_PIXEL_TRACE_FLAGS.depthLoser, tEnter: 3, tExit: 4 },
+  ];
+  const { words, floats } = encodeTraceBuffer({
+    status: options.status ?? SVO_PIXEL_TRACE_STATUS.hit,
+    hitDistance: options.hitDistance ?? 2.5,
+    counters: {
+      primaryMode: 1,
+      coveringProxies: proxies.length,
+      proxiesWithSurface: proxies.filter((proxy) => (proxy.flags & SVO_PIXEL_TRACE_FLAGS.discarded) === 0).length,
+      residentLeaves: 4096, emptyBricks: 900, frustumCulled: 2600, candidatesEmitted: 596, instancesDrawn: 596,
+      winnerInstanceIndex: 7, winnerSortBucket: 21,
+      ddaCellsAcrossProxies: proxies.reduce((total, proxy) => total + proxy.cells, 0),
+      ...options.counters,
+    },
+    records: proxies.map((proxy) => ({
+      kind: SVO_PIXEL_TRACE_KINDS.brickProxy,
+      level: (proxy.bucket & 0xffff) | (proxy.cells << 16),
+      detail: proxy.instance,
+      flags: proxy.flags,
+      tEnter: proxy.tEnter,
+      tExit: proxy.tExit,
+    })),
+  });
+  const trace = decodeSvoPixelTrace(words, floats);
+  assert.ok(trace);
+  return trace;
+}
+
+test("a raster trace never narrates a per-pixel octree descent", () => {
+  const steps = svoPixelTraceNarrative(rasterTrace());
+  const prose = steps.map((step) => `${step.label} ${step.detail}`).join(" ").toLowerCase();
+  // These are the sentences the picker used to assert on every default frame.
+  // Nothing walked this ray, so none of them may appear.
+  for (const claim of ["descend the hierarchy", "slab test", "rejected by", "crossed without a surface"]) {
+    assert.ok(!prose.includes(claim), `a raster frame must not claim "${claim}"`);
+  }
+  assert.ok(steps.some((step) => step.id === "proxies"));
+  assert.ok(steps.some((step) => step.id === "winner"));
+  // The cull is one camera's work, not this pixel's, and has to say so.
+  const cull = steps.find((step) => step.id === "cull");
+  assert.ok(cull?.frameWide, "the cull step must be badged frame-wide");
+  assert.ok(!steps.some((step) => step.id !== "cull" && step.frameWide));
+});
+
+test("a traced trace still narrates the traversal it really performed", () => {
+  const { words, floats } = encodeTraceBuffer({
+    counters: { nodeVisits: 31, leafVisits: 4, emptyBrickSkips: 3, voxelWork: 40, exactTests: 2 },
+    records: [{ kind: SVO_PIXEL_TRACE_KINDS.hierarchyNode }],
+  });
+  const trace = decodeSvoPixelTrace(words, floats);
+  assert.ok(trace);
+  assert.equal(trace.primaryMode, "traced");
+  assert.equal(trace.raster, undefined);
+  const steps = svoPixelTraceNarrative(trace);
+  assert.ok(steps.some((step) => step.id === "descend"));
+  assert.ok(steps.some((step) => step.id === "leaves"));
+  assert.ok(!steps.some((step) => step.id === "proxies"), "a traced frame builds no proxies");
+});
+
+test("a proxy's layer is the outcome it reached, not merely its kind", () => {
+  const winner = { kind: SVO_PIXEL_TRACE_KINDS.brickProxy, flags: SVO_PIXEL_TRACE_FLAGS.depthWinner };
+  const beaten = { kind: SVO_PIXEL_TRACE_KINDS.brickProxy, flags: SVO_PIXEL_TRACE_FLAGS.depthLoser };
+  const discarded = { kind: SVO_PIXEL_TRACE_KINDS.brickProxy, flags: SVO_PIXEL_TRACE_FLAGS.discarded };
+  assert.equal(svoPixelTraceLayerForRecord(winner), "winner");
+  assert.equal(svoPixelTraceLayerForRecord(beaten), "proxy-losers");
+  // A fragment that ran a full DDA and found nothing is not the same cost as one
+  // the cull rejected, and it is not the same outcome as losing on depth.
+  assert.equal(svoPixelTraceLayerForRecord(discarded), "proxy-losers");
+  assert.equal(svoPixelTraceLayerForKind(SVO_PIXEL_TRACE_KINDS.brickProxy), "proxies");
+});
+
+test("the stage bar counts only work the probe actually counted", () => {
+  const trace = rasterTrace({ counters: { exactTests: 3, mipSteps: 40, shadowNodeVisits: 5, shadowLeafVisits: 2 } });
+  const stages = svoPixelTraceStageCosts(trace);
+  const ids = stages.map((stage) => stage.id);
+  // The cull is frame-wide, and terrain is a march this probe brackets but never
+  // counts; a segment for either would be invented.
+  assert.ok(!ids.includes("cull"));
+  assert.ok(!ids.includes("terrain"));
+  // Primary cost is every covering proxy's DDA, not just the winner's: the
+  // beaten fragments are the overdraw and hiding them makes the pass look free.
+  assert.equal(stages.find((stage) => stage.id === "primary")?.work, 19);
+  assert.equal(svoPixelTraceTotalWork(trace), stages.reduce((total, stage) => total + stage.work, 0));
+});
+
+test("merging the two probes composes one account and checks the parity claim", () => {
+  const primary = rasterTrace({ hitDistance: 2.5 });
+  const { words, floats } = encodeTraceBuffer({
+    hitDistance: 2.5,
+    minimumVoxel: 0.05,
+    counters: { mipSteps: 12 },
+    records: [{ kind: SVO_PIXEL_TRACE_KINDS.coneSample }, { kind: SVO_PIXEL_TRACE_KINDS.shadowRay }],
+  });
+  const lighting = decodeSvoPixelTrace(words, floats);
+  assert.ok(lighting);
+  const merged = mergeSvoPixelTrace(lighting, primary);
+  assert.ok(merged);
+  assert.equal(merged.primaryMode, "raster");
+  assert.equal(merged.raster?.coveringProxies, 3);
+  // Primary records first, then lighting, renumbered so the reveal sweep runs in
+  // the order the frame did the work.
+  assert.equal(merged.records.length, primary.records.length + lighting.records.length);
+  assert.deepEqual(merged.records.map((record) => record.order), [0, 1, 2, 3, 4]);
+  assert.equal(merged.primaryParity?.agrees, true);
+});
+
+test("a raster winner the shading path does not corroborate is reported, not smoothed over", () => {
+  const primary = rasterTrace({ hitDistance: 2.5 });
+  const disagreeing = encodeTraceBuffer({ hitDistance: 9, minimumVoxel: 0.05 });
+  const lighting = decodeSvoPixelTrace(disagreeing.words, disagreeing.floats);
+  assert.ok(lighting);
+  assert.equal(mergeSvoPixelTrace(lighting, primary)?.primaryParity?.agrees, false);
+  // Something nearer than the winning brick — terrain, a body, a pane — is not a
+  // disagreement: those legitimately sit in front of every brick.
+  const nearer = encodeTraceBuffer({ hitDistance: 1.2, minimumVoxel: 0.05 });
+  const closer = decodeSvoPixelTrace(nearer.words, nearer.floats);
+  assert.ok(closer);
+  assert.equal(mergeSvoPixelTrace(closer, primary)?.primaryParity?.agrees, true);
+});
+
+test("two probes answering different pixels are never spliced into one account", () => {
+  const primary = rasterTrace();
+  const elsewhere = encodeTraceBuffer({ pixel: [99, 99] });
+  const lighting = decodeSvoPixelTrace(elsewhere.words, elsewhere.floats);
+  assert.ok(lighting);
+  const merged = mergeSvoPixelTrace(lighting, primary);
+  // One of the two, whole — never a hit from one pixel wearing the other's work.
+  assert.ok(merged === lighting || merged === primary);
+});
+
+test("either probe alone still produces a usable account", () => {
+  const primary = rasterTrace();
+  assert.equal(mergeSvoPixelTrace(undefined, primary), primary);
+  const { words, floats } = encodeTraceBuffer({});
+  const lighting = decodeSvoPixelTrace(words, floats);
+  assert.equal(mergeSvoPixelTrace(lighting, undefined), lighting);
+  assert.equal(mergeSvoPixelTrace(undefined, undefined), undefined);
+});
+
+test("the host stamps the reduced-rate prepass the probe cannot see", () => {
+  const { words, floats } = encodeTraceBuffer({});
+  const trace = decodeSvoPixelTrace(words, floats);
+  assert.ok(trace);
+  assert.equal(trace.conePrepass, undefined);
+  const stamped = withSvoPixelTraceConePrepass(trace, true);
+  assert.equal(stamped?.conePrepass?.active, true);
+  assert.ok(stamped?.stages.includes("conePrepass"));
+  // Stamping is idempotent: a second frame must not duplicate the stage.
+  assert.deepEqual(withSvoPixelTraceConePrepass(stamped, true)?.stages, stamped?.stages);
+  assert.equal(withSvoPixelTraceConePrepass(trace, false), trace);
 });

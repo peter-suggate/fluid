@@ -520,10 +520,39 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pixel-trace-steps li { display: grid; grid-template-columns: 8px 1fr auto; gap: 2px 8px; align-items: baseline; padding: 6px 0; border-top: 1px solid rgba(168,226,215,.07); }
 .pixel-trace-steps li i { grid-row: span 2; width: 6px; height: 6px; margin-top: 4px; border-radius: 50%; background: var(--dim); }
 .pixel-trace-steps li b { color: #d8e8e4; font: 600 10px/1.25 var(--sans); }
+/* A frame-wide step is badged rather than styled down: its figures are real and
+   worth reading, they just do not belong to this pixel and must never be added
+   to the per-pixel totals above. */
+.pixel-trace-steps li b em { margin-left: 5px; padding: 1px 4px; border: 1px solid rgba(194,166,255,.35); color: #b49bf0; font: 700 6px/1.5 var(--mono); font-style: normal; letter-spacing: .08em; text-transform: uppercase; vertical-align: middle; }
 .pixel-trace-steps li output { color: var(--accent); font: 700 9px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
 .pixel-trace-steps li small { grid-column: 2 / span 2; color: var(--dim); font: 8px/1.45 var(--mono); }
 .pixel-trace-steps li.pixel-trace-empty { grid-template-columns: 1fr; border-top: 0; }
 .pixel-trace-steps li.pixel-trace-empty small { grid-column: 1; }
+/* Where the pixel's counted work went, by pass. Segment widths are the shares
+   themselves, so the bar cannot disagree with the percentages beneath it. */
+.pixel-trace-stages { display: grid; gap: 5px; }
+.pixel-trace-stage-bar { display: flex; height: 7px; overflow: hidden; border: 1px solid var(--line); background: rgba(255,255,255,.02); }
+.pixel-trace-stage-bar span { min-width: 2px; opacity: .78; }
+.pixel-trace-stage-bar span + span { border-left: 1px solid rgba(6,12,20,.7); }
+.pixel-trace-stage-keys { display: flex; flex-wrap: wrap; gap: 3px 8px; }
+.pixel-trace-stage-keys span { display: flex; align-items: center; gap: 4px; }
+.pixel-trace-stage-keys i { width: 7px; height: 2px; flex: none; }
+.pixel-trace-stage-keys b { color: var(--dim); font: 700 7px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; }
+.pixel-trace-stage-keys output { color: var(--muted); font: 700 8px/1 var(--mono); font-variant-numeric: tabular-nums; }
+/* The depth ladder: one rung per fragment the rasterizer produced here, in draw
+   order. The winner is filled, a discarded brick is hollow and dashed, and a
+   brick that found a surface behind the winner sits between the two. */
+.pixel-trace-ladder { display: grid; gap: 5px; padding-top: 8px; border-top: 1px solid rgba(168,226,215,.07); }
+.pixel-trace-ladder > small { color: var(--dim); font: 8px/1.45 var(--mono); }
+.pixel-trace-ladder > div { display: flex; flex-wrap: wrap; gap: 3px; }
+.pixel-trace-ladder span { display: flex; align-items: center; gap: 4px; min-height: 19px; padding: 0 5px; border: 1px solid; background: rgba(255,255,255,.02); }
+.pixel-trace-ladder span i { width: 6px; height: 6px; flex: none; border-radius: 1px; opacity: .35; }
+.pixel-trace-ladder span b { color: var(--muted); font: 700 7px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.pixel-trace-ladder span output { color: var(--dim); font: 7px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.pixel-trace-ladder span[data-outcome="winner"] { background: rgba(255,224,102,.12); }
+.pixel-trace-ladder span[data-outcome="winner"] i { opacity: 1; }
+.pixel-trace-ladder span[data-outcome="winner"] b { color: #ffe066; }
+.pixel-trace-ladder span[data-outcome="discarded"] { border-style: dashed; opacity: .62; }
 .pixel-trace-hud[data-stale="true"] { border-color: rgba(247,198,109,.5); }
 .pixel-trace-restale { padding: 6px 8px; border-left: 2px solid rgba(247,198,109,.65); background: rgba(247,198,109,.07); color: #e8cf9d; }
 .pixel-trace-mips { display: grid; gap: 5px; padding-top: 8px; border-top: 1px solid rgba(168,226,215,.07); }

@@ -1,12 +1,17 @@
 "use client";
 
 import {
+  SVO_PIXEL_TRACE_FLAGS,
+  SVO_PIXEL_TRACE_KINDS,
   SVO_PIXEL_TRACE_LAYERS,
   SVO_PIXEL_TRACE_LAYER_DEFINITIONS,
   SVO_PIXEL_TRACE_STATUS,
-  svoPixelTraceLayerForKind,
+  svoPixelTraceLayerForRecord,
+  svoPixelTraceLayersForMode,
   svoPixelTraceMipLadder,
   svoPixelTraceNarrative,
+  svoPixelTraceOrderSwatch,
+  svoPixelTraceStageCosts,
   svoPixelTraceTotalWork,
   type SvoPixelTrace,
   type SvoPixelTraceLayer,
@@ -46,7 +51,7 @@ function blockedReason(probeStatus: PixelTraceStatus, pointerSeen: boolean): { h
   if (probeStatus === "path-inactive") {
     return {
       headline: "sparse path inactive",
-      detail: "This frame is on the raster fallback, so there is no octree traversal to record. The Presentation group above reports why.",
+      detail: "This frame is not being drawn by the sparse voxel renderer, so there is no primary-visibility work to record. The Presentation group above reports why.",
     };
   }
   if (probeStatus === "compiling") {
@@ -89,16 +94,25 @@ export function PixelTraceHud({
   const blocked = trace ? undefined : blockedReason(probeStatus, pointerSeen);
   const counts = new Map<SvoPixelTraceLayer, number>();
   for (const record of trace?.records ?? []) {
-    const layer = svoPixelTraceLayerForKind(record.kind);
+    const layer = svoPixelTraceLayerForRecord(record);
     counts.set(layer, (counts.get(layer) ?? 0) + 1);
   }
   const narrative = trace ? svoPixelTraceNarrative(trace) : [];
   const mipLadder = trace ? svoPixelTraceMipLadder(trace) : [];
+  const stages = trace ? svoPixelTraceStageCosts(trace) : [];
   const totalWork = trace ? svoPixelTraceTotalWork(trace) : 0;
   const status = trace ? STATUS_LABEL[trace.status] ?? "unknown" : blocked?.headline ?? "waiting for the probe";
   const failed = trace?.status === SVO_PIXEL_TRACE_STATUS.invalid
     || trace?.status === SVO_PIXEL_TRACE_STATUS.exhausted
     || probeStatus === "unsupported";
+  // Only the layers this frame's primary can populate are offered. A control
+  // that can never draw anything is worse than an absent one: it invites the
+  // reader to conclude the work happened and simply found nothing.
+  const offeredLayers = trace ? svoPixelTraceLayersForMode(trace.primaryMode) : SVO_PIXEL_TRACE_LAYERS;
+  // The depth ladder, as a compact strip: one rung per proxy that covered this
+  // pixel, in draw order, so the tournament reads at a glance.
+  const proxies = (trace?.records ?? []).filter((record) => record.kind === SVO_PIXEL_TRACE_KINDS.brickProxy);
+  const parity = trace?.primaryParity;
 
   return (
     <div
@@ -136,11 +150,84 @@ export function PixelTraceHud({
         <p className="pixel-trace-blocked" data-failed={failed ? "true" : "false"}>{blocked?.detail}</p>
       )}
 
+      {/* Where that work went, by pass. Counted work items only — the brick cull
+          is frame-wide and excluded, and terrain is a march this probe brackets
+          but does not count, so neither gets a segment it has not earned. */}
+      {stages.length > 0 && totalWork > 0 && (
+        <div className="pixel-trace-stages" data-testid="pixel-trace-stages">
+          <div className="pixel-trace-stage-bar">
+            {stages.map((stage) => (
+              <span
+                key={stage.id}
+                title={`${stage.label}: ${stage.work.toLocaleString()} work items`}
+                style={{
+                  flexGrow: stage.work,
+                  background: SVO_PIXEL_TRACE_LAYER_DEFINITIONS[stage.layer].swatch,
+                }}
+              />
+            ))}
+          </div>
+          <div className="pixel-trace-stage-keys">
+            {stages.map((stage) => (
+              <span key={stage.id}>
+                <i style={{ background: SVO_PIXEL_TRACE_LAYER_DEFINITIONS[stage.layer].swatch }} />
+                <b>{stage.label}</b>
+                <output>{Math.round((stage.work / totalWork) * 100)}%</output>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* The depth ladder. Every rung is a fragment the rasterizer produced at
+          this pixel; the filled one won. Colour is draw order, so a sort that
+          put the winner near the front reads as a cool rung early on. */}
+      {proxies.length > 0 && (
+        <div className="pixel-trace-ladder" data-testid="pixel-trace-ladder">
+          <small>
+            {proxies.length} brick {proxies.length === 1 ? "proxy" : "proxies"} covered this pixel, in draw order —
+            each ran a bounded DDA before the depth test chose between them
+          </small>
+          <div>
+            {proxies.map((record, index) => {
+              const winner = (record.flags & SVO_PIXEL_TRACE_FLAGS.depthWinner) !== 0;
+              const discarded = (record.flags & SVO_PIXEL_TRACE_FLAGS.discarded) !== 0;
+              const cells = record.level >>> 16;
+              return (
+                <span
+                  key={record.order}
+                  data-outcome={winner ? "winner" : discarded ? "discarded" : "beaten"}
+                  style={{ borderColor: svoPixelTraceOrderSwatch(index, proxies.length) }}
+                  title={winner
+                    ? `Instance ${record.detail} won the depth test after ${cells} cells`
+                    : discarded
+                      ? `Instance ${record.detail} stepped ${cells} cells, found no surface, and discarded`
+                      : `Instance ${record.detail} found a surface behind the winner after ${cells} cells`}
+                >
+                  <i style={{ background: svoPixelTraceOrderSwatch(index, proxies.length) }} />
+                  <b>#{record.detail}</b>
+                  <output>{cells}</output>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {parity && !parity.agrees && (
+        <p className="pixel-trace-note pixel-trace-restale">
+          The two probes disagree about this pixel: the brick raster elected a surface at{" "}
+          {parity.rasterDistance_m.toFixed(3)} m, the shading path resolved one at{" "}
+          {parity.lightingDistance_m.toFixed(3)} m. The raster and traced primaries are supposed to be
+          bit-identical, so this is that claim failing rather than a rounding difference.
+        </p>
+      )}
+
       {trace && <ol className="pixel-trace-steps">
         {narrative.map((step) => (
-          <li key={step.id} data-layer={step.layer ?? "none"}>
+          <li key={step.id} data-layer={step.layer ?? "none"} data-frame-wide={step.frameWide ? "true" : "false"}>
             <i style={step.layer ? { background: SVO_PIXEL_TRACE_LAYER_DEFINITIONS[step.layer].swatch } : undefined} />
-            <b>{step.label}</b>
+            <b>{step.label}{step.frameWide && <em title="Counted once per camera, not for this pixel">frame</em>}</b>
             <output>{step.value}</output>
             <small>{step.detail}</small>
           </li>
@@ -171,7 +258,7 @@ export function PixelTraceHud({
       )}
 
       <div className="pixel-trace-layers">
-        {SVO_PIXEL_TRACE_LAYERS.map((layer) => {
+        {offeredLayers.map((layer) => {
           const definition = SVO_PIXEL_TRACE_LAYER_DEFINITIONS[layer];
           const active = enabledLayers.includes(layer);
           return (
@@ -198,7 +285,12 @@ export function PixelTraceHud({
         </p>
       )}
       <p className="pixel-trace-note pixel-trace-footnote">
-        Recorded by a probe that mirrors the shipping traversal, brick walk, and cone step law.
+        {trace?.primaryMode === "raster"
+          // Naming the source of each half matters: the cull figures are read
+          // off the frame's own buffers, so they are measurements, while the
+          // lighting is a mirror and can only ever be as true as its law.
+          ? "Primary work is read from the frame's own instance list and cull counters; the brick walk and cone steps are mirrored from the shipping law."
+          : "Recorded by a probe that mirrors the shipping traversal, brick walk, and cone step law."}
         {pinned
           ? " Pinned: orbit to inspect the frozen ray, or click the viewport to follow the pointer again."
           : " Click the viewport to freeze the ray under the pointer and orbit around its work."}

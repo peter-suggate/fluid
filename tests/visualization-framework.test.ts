@@ -24,6 +24,7 @@ import {
   visualizationsForGroups,
 } from "../lib/visualization-catalog";
 import { legendRows } from "../components/VisualizationLegend";
+import { SVO_PIXEL_TRACE_LAYERS, svoPixelTraceLayersForMode } from "../lib/svo-pixel-trace";
 import {
   FLUID_CELL_TRACE_ABI_VERSION,
   FLUID_CELL_TRACE_DIRECTIONS,
@@ -528,14 +529,48 @@ test("an invalid space assembles nothing rather than emitting NaN geometry", () 
 /* The wrapped producer                                                       */
 /* ------------------------------------------------------------------------- */
 
-test("every SVO traversal layer is declared, one entry each", () => {
-  const svo = VISUALIZATION_CATALOG.filter((entry) => entry.pass === "SVO traversal");
-  assert.equal(svo.length, 9);
+test("every pixel-trace layer is declared, one entry each, beside the pass that produces it", () => {
+  const svo = VISUALIZATION_CATALOG.filter((entry) => entry.id.startsWith("svo-traversal/"));
+  assert.equal(svo.length, SVO_PIXEL_TRACE_LAYERS.length);
   for (const entry of svo) {
     assert.equal(entry.kind, "decoration");
     assert.ok(ALL_IDS.has(entry.id));
-    assert.ok(entry.id.startsWith("svo-traversal/"));
   }
+  // The picker's layers span several passes now, because the raster primary
+  // spread the work that one traversal megakernel used to do across a cull, a
+  // background draw and an instanced brick draw. A layer naming a pass the frame
+  // never encodes would send a reader to the wrong line of the profile.
+  const encoded = new Set([
+    "SVO primary visibility", "SVO primary brick raster", "SVO primary background and terrain",
+    "SVO analytic rigid discovery", "SVO deferred dry lighting", "SVO cone-lighting prepass",
+  ]);
+  for (const entry of svo) assert.ok(encoded.has(entry.pass), `${entry.id} names an unencoded pass: ${entry.pass}`);
+});
+
+test("the layers offered for a mode are exactly the ones that mode can populate", () => {
+  const traced = svoPixelTraceLayersForMode("traced");
+  const raster = svoPixelTraceLayersForMode("raster");
+  for (const layers of [traced, raster]) {
+    for (const layer of layers) assert.ok(SVO_PIXEL_TRACE_LAYERS.includes(layer));
+    assert.equal(new Set(layers).size, layers.length, "a mode may not offer a layer twice");
+  }
+  // Nothing in a raster frame corresponds to a per-pixel octree descent, and the
+  // traced path never builds a proxy. Offering either across the seam would put
+  // a control in the panel that can only ever draw nothing.
+  for (const absent of ["hierarchy", "rejected", "bricks"] as const) {
+    assert.ok(traced.includes(absent));
+    assert.ok(!raster.includes(absent), `${absent} cannot exist in a raster frame`);
+  }
+  for (const absent of ["proxies", "proxy-losers", "winner"] as const) {
+    assert.ok(raster.includes(absent));
+    assert.ok(!traced.includes(absent), `${absent} cannot exist in a traced frame`);
+  }
+  // The union is what the registry and the persisted selection are keyed on, so
+  // switching primary mode must never invalidate either.
+  assert.deepEqual(
+    [...new Set([...traced, ...raster])].sort(),
+    [...SVO_PIXEL_TRACE_LAYERS].sort(),
+  );
 });
 
 test("the eighteen power directions are what the stencil decorator draws", () => {
