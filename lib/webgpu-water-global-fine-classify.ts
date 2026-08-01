@@ -124,42 +124,38 @@ fn halfCellCrossing(inside:f32,outside:f32)->bool{
   return finite(inside)&&finite(outside)&&inside<0.0&&outside>0.0&&denominator>0.0
     &&abs((-inside/denominator)-0.5)<=SHARP_CORNER_HALF_CELL_EPSILON;
 }
-// A signed distance to an axis-aligned liquid box has one inside x/z corner,
-// two equally distant side samples, and an extruded profile in y. A single
-// tetrahedral scalar cube rounds that exact L-shaped zero set into the
-// shrunken corner visible in the renderer. Recognize only this sharp,
-// vertically extruded configuration and give each plane its own cube values,
-// just as the tank-edge caps above have separate owners.
-fn classifySharpInteriorXZCorner(base:vec3i,scale:i32)->bool{
+fn emitSharpBoxPlane(base:vec3i,scale:i32,raw:ptr<function,array<f32,8>>,inside:vec3u,axis:u32,clipMask:u32){
+  let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+  var v=array<f32,8>();var lo=1.0;var hi=0.0;for(var i=0u;i<8u;i+=1u){let c=vec3u(o[i]);var source=inside;source[axis]=c[axis];v[i]=occupancy((*raw)[cubeCornerIndex(source.x,source.y,source.z)]);lo=min(lo,v[i]);hi=max(hi,v[i]);}
+  let highBits=(inside.x<<11u)|(inside.y<<12u)|(inside.z<<13u);
+  // Bits 8..10 clip the two tangential extents, 11..13 select their
+  // low/high halves, and 14..15 identify the plane normal. A nonzero clip
+  // mask is also the direct-quad discriminator in the scan/emission passes.
+  emitClassifiedCubeTagged(base,scale,lo,hi,vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]),(clipMask<<8u)|highBits|(axis<<14u));
+}
+// Marching tetrahedra is not invariant under the box's reflection group at a
+// sharp edge or trihedral corner: its fixed 0--6 body diagonal chamfers an
+// exact L-shaped zero set. Recognize only the exact half-cell box patterns and
+// give each Cartesian face its own rectangular owner. Moving/non-box
+// interfaces stay on the ordinary conforming tetrahedral path.
+fn classifySharpInteriorBoxFeature(base:vec3i,scale:i32)->bool{
   let dims=vec3i(params.sampleDimensions);if(base.x<=0||base.z<=0||base.x>=dims.x||base.z>=dims.z){return false;}
   let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
   var raw=array<f32,8>();for(var i=0;i<8;i+=1){let p=base+o[i]*scale;raw[i]=phi(vec3i(p.x-1,max(p.y-1,0),p.z-1));}
-  let bottom=array<u32,4>(0u,1u,4u,5u);let top=array<u32,4>(3u,2u,7u,6u);let tolerance=0.15*params.settings.w;
-  var inside=INVALID;
-  for(var q=0u;q<4u;q+=1u){let sx=q^1u;let sz=q^2u;let sd=q^3u;
-    let extruded=abs(raw[bottom[q]]-raw[top[q]])<=tolerance&&abs(raw[bottom[sx]]-raw[top[sx]])<=tolerance&&abs(raw[bottom[sz]]-raw[top[sz]])<=tolerance&&abs(raw[bottom[sd]]-raw[top[sd]])<=tolerance;
-    let sharp=raw[bottom[q]]<0.0&&raw[top[q]]<0.0&&raw[bottom[sx]]>0.0&&raw[top[sx]]>0.0&&raw[bottom[sz]]>0.0&&raw[top[sz]]>0.0&&raw[bottom[sd]]>0.0&&raw[top[sd]]>0.0;
-    let halfClipped=halfCellCrossing(raw[bottom[q]],raw[bottom[sx]])
-      &&halfCellCrossing(raw[bottom[q]],raw[bottom[sz]])
-      &&halfCellCrossing(raw[top[q]],raw[top[sx]])
-      &&halfCellCrossing(raw[top[q]],raw[top[sz]]);
-    if(extruded&&sharp&&halfClipped){inside=q;break;}
+  // One inside sample and seven outside samples is a trihedral box corner.
+  for(var q=0u;q<8u;q+=1u){let inside=vec3u(q&1u,(q>>1u)&1u,(q>>2u)&1u);let qi=cubeCornerIndex(inside.x,inside.y,inside.z);if(raw[qi]>=0.0){continue;}var isolated=true;for(var z=0u;z<2u;z+=1u){for(var y=0u;y<2u;y+=1u){for(var x=0u;x<2u;x+=1u){let index=cubeCornerIndex(x,y,z);if(index!=qi&&raw[index]<=0.0){isolated=false;}}}}
+    var half=true;for(var axis=0u;axis<3u;axis+=1u){var neighbor=inside;neighbor[axis]=1u-neighbor[axis];half=half&&halfCellCrossing(raw[qi],raw[cubeCornerIndex(neighbor.x,neighbor.y,neighbor.z)]);}
+    if(isolated&&half){for(var axis=0u;axis<3u;axis+=1u){emitSharpBoxPlane(base,scale,&raw,inside,axis,7u^(1u<<axis));}return true;}
   }
-  if(inside==INVALID){return false;}
-  let insideX=inside&1u;let insideZ=(inside>>1u)&1u;var vx=array<f32,8>();var vz=array<f32,8>();var xlo=1.0;var xhi=0.0;var zlo=1.0;var zhi=0.0;
-  for(var i=0u;i<8u;i+=1u){let c=vec3u(o[i]);vx[i]=occupancy(raw[cubeCornerIndex(c.x,c.y,insideZ)]);vz[i]=occupancy(raw[cubeCornerIndex(insideX,c.y,c.z)]);xlo=min(xlo,vx[i]);xhi=max(xhi,vx[i]);zlo=min(zlo,vz[i]);zhi=max(zhi,vz[i]);}
-  // Descriptor bits 8..9 select the cap plane; bits 10..11 select which
-  // half-cube is liquid. Polygonisation clips only positions, preserving the
-  // exact axis normal encoded by vx/vz.
-  let sideTag=(insideX<<10u)|(insideZ<<11u);
-  emitClassifiedCubeTagged(base,scale,xlo,xhi,vec4f(vx[0],vx[1],vx[2],vx[3]),vec4f(vx[4],vx[5],vx[6],vx[7]),(1u<<8u)|sideTag);
-  emitClassifiedCubeTagged(base,scale,zlo,zhi,vec4f(vz[0],vz[1],vz[2],vz[3]),vec4f(vz[4],vz[5],vz[6],vz[7]),(2u<<8u)|sideTag);
-  return true;
+  // Two adjacent inside samples and six outside samples form a sharp edge.
+  for(var edgeAxis=0u;edgeAxis<3u;edgeAxis+=1u){for(var side=0u;side<4u;side+=1u){var inside=vec3u(0u);var bit=0u;for(var axis=0u;axis<3u;axis+=1u){if(axis!=edgeAxis){inside[axis]=(side>>bit)&1u;bit+=1u;}}var other=inside;other[edgeAxis]=1u;let i0=cubeCornerIndex(inside.x,inside.y,inside.z);let i1=cubeCornerIndex(other.x,other.y,other.z);if(raw[i0]>=0.0||raw[i1]>=0.0){continue;}var isolated=true;for(var z=0u;z<2u;z+=1u){for(var y=0u;y<2u;y+=1u){for(var x=0u;x<2u;x+=1u){let index=cubeCornerIndex(x,y,z);if(index!=i0&&index!=i1&&raw[index]<=0.0){isolated=false;}}}}var half=true;for(var axis=0u;axis<3u;axis+=1u){if(axis==edgeAxis){continue;}var n0=inside;n0[axis]=1u-n0[axis];var n1=other;n1[axis]=1u-n1[axis];half=half&&halfCellCrossing(raw[i0],raw[cubeCornerIndex(n0.x,n0.y,n0.z)])&&halfCellCrossing(raw[i1],raw[cubeCornerIndex(n1.x,n1.y,n1.z)]);}
+    if(isolated&&half){for(var axis=0u;axis<3u;axis+=1u){if(axis!=edgeAxis){emitSharpBoxPlane(base,scale,&raw,inside,axis,7u^((1u<<axis)|(1u<<edgeAxis)));}}return true;}
+  }}return false;
 }
 fn classifyScaled(base:vec3i,scale:i32){
   let dims=vec3i(params.sampleDimensions);let xWall=base.x==0||base.x==dims.x;let zWall=base.z==0||base.z==dims.z;
   if(xWall&&zWall){classifyScaledForWall(base,scale,1u);classifyScaledForWall(base,scale,2u);return;}
-  if(!xWall&&!zWall&&classifySharpInteriorXZCorner(base,scale)){return;}
+  if(!xWall&&!zWall&&classifySharpInteriorBoxFeature(base,scale)){return;}
   classifyScaledForWall(base,scale,0u);
 }
 @compute @workgroup_size(256)
@@ -175,7 +171,14 @@ fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),1);}}}
 }
 @compute @workgroup_size(256)
-fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){let slot=group.x+group.y*65535u;if(!validCurrentPublication()){return;}if(slot>=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries))){return;}let entry=powerCoarseSamples.entries[slot];if(entry.cellPlusOne==0u||(entry.flags&1u)==0u||entry.size==0u){return;}let d=powerCoarseSamples.dimensions;let cell=entry.cellPlusOne-1u;let origin=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));let factor=max(1u,u32(round(params.cellAndDt.x)));let scale=entry.size*factor;let base=vec3i(origin*factor+vec3u(1u));
+fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)local:u32){if(!validCurrentPublication()){return;}
+  // Coarse-1 publishes an authoritative dense complement as well as the
+  // compact wet-row directory. Classifying only row-owned lower anchors
+  // misses every face whose lower sample lies in the dry complement (the two
+  // low-side vertical faces of a box). Scan the small factor-1 lattice once so
+  // every cube has exactly one Cartesian lower-anchor owner.
+  if(params.table.y==6u){let stream=(group.x+group.y*65535u)*256u+local;let cubeDims=params.sampleDimensions+vec3u(1u);let total=cubeDims.x*cubeDims.y*cubeDims.z;if(stream>=total){return;}let z=stream/(cubeDims.x*cubeDims.y);let remainder=stream-z*cubeDims.x*cubeDims.y;let y=remainder/cubeDims.x;let x=remainder-y*cubeDims.x;classifyScaled(vec3i(i32(x),i32(y),i32(z)),1);return;}
+  let slot=group.x+group.y*65535u;if(slot>=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries))){return;}let entry=powerCoarseSamples.entries[slot];if(entry.cellPlusOne==0u||(entry.flags&1u)==0u||entry.size==0u){return;}let d=powerCoarseSamples.dimensions;let cell=entry.cellPlusOne-1u;let origin=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));let factor=max(1u,u32(round(params.cellAndDt.x)));let scale=entry.size*factor;let base=vec3i(origin*factor+vec3u(1u));
   // Coarse fallback is sampled on the same unit fine lattice as the narrow
   // band. Emitting one scaled tetrahedral cube beside unit fine cubes creates
   // non-conforming diagonals and visible T-junction slits. Each coarse leaf

@@ -10,6 +10,7 @@ import {
 import { createGlobalFineLevelSetConsumerSource } from "../lib/octree-consumer-sampling";
 import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
 import {
+  compactCoarseSurfaceDispatch,
   globalFineCoarseSurfaceDispatch,
   globalFineSurfaceDispatch,
   RasterWaterPipeline,
@@ -17,7 +18,8 @@ import {
   WATER_INTERFACE_CULL_MODES,
   waterSurfaceGeometrySource,
 } from "../lib/webgpu-water-pipeline";
-import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
+import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders,
+  globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
 import {
   GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON,
   globalFineSurfaceClassificationShader,
@@ -25,7 +27,7 @@ import {
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 
-test("hard-clipped sharp corner caps admit only four half-cell zero crossings", () => {
+test("hard-clipped sharp box features require exact half-cell zero crossings", () => {
   assert.ok(GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON <= 1e-3);
   const eligible = (inside: number, outside: number) =>
     inside < 0 && outside > 0
@@ -38,13 +40,14 @@ test("hard-clipped sharp corner caps admit only four half-cell zero crossings", 
     "an evolved 0.55-cell crossing must use the ordinary conforming tetra mesh");
   const compact = globalFineSurfaceClassificationShader.replace(/\s+/g, "");
   const helper = compact.slice(compact.indexOf("fnhalfCellCrossing("),
-    compact.indexOf("//Asigneddistancetoanaxis-alignedliquidbox"));
+    compact.indexOf("fnemitSharpBoxPlane("));
   assert.match(helper,
     /inside<0\.0&&outside>0\.0&&denominator>0\.0&&abs\(\(-inside\/denominator\)-0\.5\)<=SHARP_CORNER_HALF_CELL_EPSILON/);
-  const classifier = compact.slice(compact.indexOf("fnclassifySharpInteriorXZCorner("),
-    compact.indexOf("fnclassifyScaled(", compact.indexOf("fnclassifySharpInteriorXZCorner(")));
-  assert.equal(classifier.match(/halfCellCrossing\(/g)?.length, 4,
-    "bottom/top x/z crossings must all match the polygonizer's hardcoded half-cube clips");
+  const classifier = compact.slice(compact.indexOf("fnclassifySharpInteriorBoxFeature("),
+    compact.indexOf("fnclassifyScaled(", compact.indexOf("fnclassifySharpInteriorBoxFeature(")));
+  assert.match(classifier,
+    /for\(varaxis=0u;axis<3u;axis\+=1u\)[\s\S]*halfCellCrossing[\s\S]*isolated&&half[\s\S]*emitSharpBoxPlane/,
+    "all corner and edge axes must match the polygonizer's hardcoded half-cube clips");
   assert.doesNotMatch(classifier, /letsymmetric=/,
     "a broad signed-value tolerance must not admit visibly off-center moving corners");
 });
@@ -167,6 +170,54 @@ test("global fine side-wall caps meet at the exact x/z tank edge", () => {
   "the two independently owned caps must share the exact tank-corner edge");
 });
 
+test("sharp box face owners are explicit nondegenerate rectangles", () => {
+  const compactClassifier = globalFineSurfaceClassificationShader.replace(/\s+/g, "");
+  assert.match(compactClassifier,
+    /emitClassifiedCubeTagged\([^;]*\(clipMask<<8u\)\|highBits\|\(axis<<14u\)\)/,
+    "the descriptor must retain the face-normal axis independently of its tangential clip mask");
+  const compactScan = globalFineClassifiedScanShader.replace(/\s+/g, "");
+  assert.match(compactScan,
+    /if\(clipMask!=0u\)\{localTotal\+=6u;\}/,
+    "a sharp face must allocate exactly two triangles instead of six squeezed tetrahedra");
+  assert.match(compactScan,
+    /if\(clipMask!=0u\)\{offsets\[i\*6u\]=cursor;cursor\+=6u;/,
+    "only the first emission lane may own the two-triangle rectangle");
+  const compactEmit = globalFineClassifiedEmitShader.replace(/\s+/g, "");
+  assert.match(compactEmit,
+    /fndirectPatch\([\s\S]*tri\(cursor,a,b,c,n,false\);tri\(cursor,a,c,d,n,false\);/,
+    "the sharp owner must emit one complete rectangle with a shared diagonal");
+  assert.match(compactEmit,
+    /if\(clipMask!=0u\)\{if\(tetrahedron==0u\)\{directPatch/,
+    "the combined production shader must bypass tetrahedral clipping for sharp rectangles");
+
+  const patch = (axis: 0 | 1 | 2, mask: number, highBits: number) => {
+    const lo = [0, 0, 0], hi = [1, 1, 1];
+    for (let tangent = 0; tangent < 3; tangent += 1) if ((mask & (1 << tangent)) !== 0) {
+      const high = (highBits & (1 << tangent)) !== 0;
+      lo[tangent] = high ? 0.5 : 0;
+      hi[tangent] = high ? 1 : 0.5;
+    }
+    const a = [...lo] as [number, number, number];
+    const b = [...lo] as [number, number, number];
+    const c = [...hi] as [number, number, number];
+    const d = [...lo] as [number, number, number];
+    a[axis] = b[axis] = c[axis] = d[axis] = 0.5;
+    if (axis === 0) { b[1] = hi[1]; d[2] = hi[2]; }
+    else if (axis === 1) { b[2] = hi[2]; d[0] = hi[0]; }
+    else { b[0] = hi[0]; d[1] = hi[1]; }
+    return [[a, b, c], [a, c, d]] as const;
+  };
+  for (const axis of [0, 1, 2] as const) for (const mask of [1, 2, 3, 4, 5, 6]) {
+    if ((mask & (1 << axis)) !== 0) continue;
+    for (let highBits = 0; highBits < 8; highBits += 1) {
+      const triangles = patch(axis, mask, highBits);
+      const twiceArea = triangles.map(([a, b, c]) => Math.hypot(...cross(subtract(b, a), subtract(c, a))));
+      assert.ok(twiceArea.every((area) => area > 0), `axis ${axis}, mask ${mask} must not collapse a triangle`);
+      assert.equal(twiceArea[0], twiceArea[1], `axis ${axis}, mask ${mask} must cover both halves of the rectangle`);
+    }
+  }
+});
+
 function compactCoarsePlane(device: GPUDevice): GPUBuffer {
   const capacity=8, bytes=new ArrayBuffer(32+capacity*32), u32=new Uint32Array(bytes), f32=new Float32Array(bytes);
   u32.set([0x80000000,1,capacity,1,2,2,2],0);f32[7]=1;
@@ -181,6 +232,8 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.throws(() => globalFineSurfaceDispatch(0, 64), /positive integers/);
   assert.deepEqual(globalFineCoarseSurfaceDispatch(8_192), [8_192, 1, 1]);
   assert.deepEqual(globalFineCoarseSurfaceDispatch(65_536), [65_535, 2, 1]);
+  assert.deepEqual(compactCoarseSurfaceDispatch([32, 16, 32]), [73, 1, 1]);
+  assert.throws(() => compactCoarseSurfaceDispatch([32, 0, 32]), /positive integers/);
   assert.match(surfaceExtractionShader, /sparseActivePages\[1u\]!=sparseParams\.brickDims\.w/,
     "a stale worklist generation must fail closed");
   assert.match(globalFineSurfaceClassificationShader, /sampleCoarseOctreePhi/,
@@ -203,17 +256,23 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     /if\(xWall&&zWall\)\{classifyScaledForWall\(base,scale,1u\);classifyScaledForWall\(base,scale,2u\);return;\}/,
     "an x/z edge cube must publish two wall-owned caps rather than one diagonal scalar-field chamfer");
   assert.match(globalFineSurfaceClassificationShader,
-    /fn classifySharpInteriorXZCorner[\s\S]*extruded&&sharp&&halfClipped[\s\S]*emitClassifiedCubeTagged\(base,scale,xlo,xhi[\s\S]*emitClassifiedCubeTagged\(base,scale,zlo,zhi/,
-    "an exact half-cell axis-aligned liquid corner must retain its two independently owned faces");
+    /fn classifySharpInteriorBoxFeature[\s\S]*One inside sample and seven outside[\s\S]*Two adjacent inside samples and six outside[\s\S]*emitSharpBoxPlane/,
+    "exact half-cell box edges and trihedral corners must retain independently owned faces");
   assert.match(globalFineClassifiedEmitShader,
-    /fn clipped[\s\S]*mode==1u[\s\S]*r\.z=base\.z\+scale\*select\(\.5\*q\.z,\.5\+\.5\*q\.z,high\)[\s\S]*mode==2u[\s\S]*r\.x=base\.x\+scale\*select\(\.5\*q\.x,\.5\+\.5\*q\.x,high\)/,
-    "separate corner owners must terminate on their shared half-cell edge rather than occlude each other");
+    /fn directPatch[\s\S]*mask=\(descriptor>>8u\)&7u[\s\S]*axis=\(descriptor>>14u\)&3u[\s\S]*tri\(cursor,a,b,c,n,false\);tri\(cursor,a,c,d,n,false\)/,
+    "separate box-face owners must be complete rectangles terminating on shared half-cell edges");
   assert.match(globalFineSurfaceClassificationShader,
     /if\(p\.x<=0\|\|p\.x>=dims\.x\+1\)\{[\s\S]*wallMode!=2u[\s\S]*if\(p\.z<=0\|\|p\.z>=dims\.z\+1\)\{[\s\S]*wallMode!=1u/,
     "each edge cap must mirror only through its tangential wall and retain air across its owned normal wall");
   assert.match(globalFineSurfaceClassificationShader,
     /@builtin\(workgroup_id\)group:vec3u,@builtin\(local_invocation_index\)local:u32[\s\S]*for\(var index=local;index<total;index\+=256u\)/,
     "one workgroup must cooperatively subdivide a coarse leaf instead of risking a scalar scale-cubed loop");
+  assert.match(globalFineSurfaceClassificationShader,
+    /if\(params\.table\.y==6u\)[\s\S]*cubeDims=params\.sampleDimensions\+vec3u\(1u\)[\s\S]*classifyScaled\(vec3i\(i32\(x\),i32\(y\),i32\(z\)\),1\)/,
+    "factor-1 compact coarse rendering must classify every dense-complement cube exactly once");
+  assert.match(RasterWaterPipeline.prototype.encode.toString(),
+    /else if\(coarse\)[\s\S]*compactCoarseSurfaceDispatch\(coarse\.sampleDimensions\)/,
+    "compact coarse rendering must dispatch the dense lattice instead of wet rows only");
   assert.match(globalFineClassifiedScanShader, /let published=atomicLoad\(&args\.vertexAllocator\)!=0xffffffffu/,
     "an unpublished A/B generation must retain the previous surface draw count");
   assert.match(globalFineClassifiedScanShader,
@@ -236,7 +295,7 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     "global extraction must preserve the mesh generation while resetting firstInstance and the private authority latch");
   const completeDiagnostics = RasterWaterPipeline.prototype.completeSurfaceDiagnostics.toString();
   assert.match(completeDiagnostics,
-    /meshPublicationGeneration=\(surfaceGeometrySource==="global-fine-coarse"\|\|surfaceGeometrySource==="retained-previous"\)&&words\[7\]!==(?:0xffffffff|4294967295)\?words\[7\]:(?:undefined|void 0)/,
+    /meshPublicationGeneration=\(surfaceGeometrySource==="global-fine-coarse"\|\|surfaceGeometrySource==="compact-coarse"\|\|surfaceGeometrySource==="retained-previous"\)&&words\[7\]!==(?:0xffffffff|4294967295)\?words\[7\]:(?:undefined|void 0)/,
     "presentation diagnostics must report the generation committed by the GPU mesh publication");
   assert.doesNotMatch(completeDiagnostics, /lastRasterMeshPublicationGeneration/,
     "presentation diagnostics must not infer retained mesh authority from host attachment history");

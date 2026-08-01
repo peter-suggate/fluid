@@ -220,6 +220,23 @@ export function globalFineCoarseSurfaceDispatch(rowCapacity: number): readonly [
   return [x, y, 1] as const;
 }
 
+/** One invocation per factor-1 compact-coarse lattice cube. The dense
+ * complement is authoritative in this mode, so scanning the lattice gives
+ * dry-side and wet-side faces the same unique lower-anchor owner. */
+export function compactCoarseSurfaceDispatch(
+  sampleDimensions: readonly [number, number, number],
+): readonly [number, number, number] {
+  if (sampleDimensions.some((value) => !Number.isSafeInteger(value) || value < 1)) {
+    throw new RangeError("Compact coarse extraction dimensions must be positive integers");
+  }
+  const cubes = sampleDimensions.reduce((product, value) => product * (value + 1), 1);
+  const groups = Math.ceil(cubes / 256);
+  const x = Math.min(65_535, groups);
+  const y = Math.ceil(groups / 65_535);
+  if (y > 65_535) throw new RangeError("Compact coarse extraction exceeds the WebGPU dispatch limit");
+  return [x, y, 1] as const;
+}
+
 export const surfaceExtractionShader = /* wgsl */ `
 struct Uniforms {
   viewport: vec4f,
@@ -1316,6 +1333,14 @@ export class RasterWaterPipeline {
     return texture ? { texture, dimensions: [texture.width, texture.height, 1] as [number, number, number] } : undefined;
   }
 
+  /** Smoke-only source for an exact unordered symmetry audit of the emitted mesh. */
+  diagnosticSurfaceVertexSource() {
+    return this.vertexBuffer && this.activeCubeBuffer && this.globalCubeOffsets
+      ? { buffer: this.vertexBuffer, strideBytes: 32,
+        classifiedCubes: this.activeCubeBuffer, classifiedOffsets: this.globalCubeOffsets }
+      : undefined;
+  }
+
   /** Latest bounded GPU readback proving what surface geometry is presented. */
   get surfaceRenderDiagnostics() { return this.lastSurfaceDiagnostics; }
 
@@ -1393,16 +1418,16 @@ export class RasterWaterPipeline {
     // also covers breaking sheets and entrained blobs while imposing a hard
     // 64 MiB ceiling on adversarial checkerboard fields.
     const maxVertices = surfaceVertexCapacity(nx, ny, nz);
-    this.vertexBuffer = this.device.createBuffer({ label: `Extracted water surface (${maxVertices} vertices)`, size: maxVertices * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.vertexBuffer = this.device.createBuffer({ label: `Extracted water surface (${maxVertices} vertices)`, size: maxVertices * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     // The first 16 bytes are the standard draw-indirect ABI. Renderer-private
     // counters, global-fine authority latch, and GPU-published mesh generation
     // trail it; firstInstance must stay zero unless the optional
     // indirect-first-instance feature is enabled.
     this.indirectBuffer = this.device.createBuffer({ label: "Water indirect draw arguments and extraction counters", size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.device.queue.writeBuffer(this.indirectBuffer, 28, new Uint32Array([0xffff_ffff]));
-    this.activeCubeBuffer = this.device.createBuffer({ label: "Water surface cube worklist", size: activeCubeCapacity(maxVertices) * 8, usage: GPUBufferUsage.STORAGE });
+    this.activeCubeBuffer = this.device.createBuffer({ label: "Water surface cube worklist", size: activeCubeCapacity(maxVertices) * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.globalCubeValues = this.device.createBuffer({ label: "Global fine classified cube values", size: activeCubeCapacity(maxVertices) * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.globalCubeOffsets = this.device.createBuffer({ label: "Global fine tetrahedron offsets", size: activeCubeCapacity(maxVertices) * 6 * 4, usage: GPUBufferUsage.STORAGE });
+    this.globalCubeOffsets = this.device.createBuffer({ label: "Global fine tetrahedron offsets", size: activeCubeCapacity(maxVertices) * 6 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.globalFineEmitWorkgroups=Math.ceil(activeCubeCapacity(maxVertices)/64);
     this.geometryKey = key; this.extractedRevision = -1; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
   }
@@ -1540,8 +1565,8 @@ export class RasterWaterPipeline {
           compute.setPipeline(this.extractGlobalFinePipeline);
           compute.dispatchWorkgroups(...globalFineSurfaceDispatch(globalFine.pageCapacity, globalFine.samplesPerBrick));
         }
-        const coarseRowCapacity = globalFine?.coarsePhiRowCapacity ?? coarse?.rowCapacity;
-        if(coarseRowCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(coarseRowCapacity));}
+        if(globalFine?.coarsePhiRowCapacity){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...globalFineCoarseSurfaceDispatch(globalFine.coarsePhiRowCapacity));}
+        else if(coarse){compute.setPipeline(this.extractGlobalCoarsePipeline);compute.dispatchWorkgroups(...compactCoarseSurfaceDispatch(coarse.sampleDimensions));}
         compute.end();
         compute=encoder.beginComputePass({label:"Scan and emit classified global fine surface"});
         compute.setBindGroup(0,this.globalPolygoniseBindGroup);
