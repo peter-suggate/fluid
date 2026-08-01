@@ -1,12 +1,9 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
-import { getMethod } from "@/lib/methods";
-import { defaultCamera } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
 import { startQueryStateSync } from "@/lib/url-state";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useMethodStore } from "@/lib/stores/method-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { WebGPUViewport } from "./WebGPUViewport";
@@ -20,15 +17,12 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
-import type { GPUStatus } from "@/lib/webgpu-renderer";
-import { getEnvironmentPreset } from "@/lib/environments";
-import { getScenePreset } from "@/lib/scenes";
-import { useSceneStore } from "@/lib/stores/scene-store";
+import type { ResourceActivity, ResourcePluginDefinition } from "@/lib/resource-readiness";
+import { resourceActivities } from "@/lib/resource-readiness";
 import { requestManualGPUStart } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 import { useEditorShortcuts } from "@/lib/use-editor-shortcuts";
 import { MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH } from "@/lib/stores/ui-store";
-import { paperPipelineHealthFlags } from "@/lib/paper-pipeline-diagnostics";
 
 function RightPanelResizer() {
   const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
@@ -74,30 +68,32 @@ function RightPanelResizer() {
   />;
 }
 
-function GPUInitializationPanel({ status }: { status: Extract<GPUStatus, { state: "initializing" }> }) {
+function GPUInitializationPanel({ activity, plugin }: {
+  activity: ResourceActivity;
+  plugin: ResourcePluginDefinition;
+}) {
   const [now, setNow] = useState(() => performance.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(performance.now()), 100); return () => window.clearInterval(timer); }, []);
-  const completed = status.completed ?? 0, total = status.total ?? 0;
-  const elapsed_s = Math.max(0, now - (status.startedAt_ms ?? now)) / 1000;
-  const rebuilding = status.kind === "rebuild";
-  const phaseCopy: Record<string, string> = {
-    planning: "Determining which GPU resources and programs are invalidated.",
-    allocation: "Allocating replacement textures and buffers. This stage can briefly occupy the browser's GPU process.",
-    "solver-pipelines": "Compiling simulation programs. Input may be delayed while the graphics driver finishes an individual program.",
-    "adaptive-topology": "Compiling adaptive topology and pressure programs.",
-    "secondary-particles": "Preparing secondary-liquid programs.",
-    upload: "Uploading initial simulation fields.",
-    warmup: "Submitting the initial scene and waiting for GPU completion.",
-    attach: "Atomically attaching the warmed replacement.",
-  };
-  return <div className={`${rebuilding ? "gpu-build-card" : "gpu-fallback"} gpu-initializing`} role="status" aria-live="polite" aria-busy="true">
-    <div className="gpu-build-heading"><i aria-hidden="true" /><strong>{rebuilding ? "Applying simulation settings" : "Starting WebGPU"}</strong></div>
-    {status.operation && <p className="gpu-build-operation">{status.operation}</p>}
-    <p>{status.label}</p>
-    <progress max={Math.max(1, total)} {...(total > 0 ? { value: Math.min(completed, total) } : {})} aria-label="GPU initialization progress" />
-    <div className="gpu-progress-summary"><span>{total > 0 ? `${completed} / ${total} stages` : "Planning work…"}</span><span>{elapsed_s.toFixed(1)} s</span></div>
-    <p className="gpu-stage-explanation">{phaseCopy[status.phase ?? "planning"] ?? "Preparing the replacement GPU state."}</p>
-    {rebuilding && <small>{status.retainingPrevious ? "The previous GPU frame remains visible. " : "The viewport will resume when the replacement is ready. "}Simulation is paused at t = 0 until attachment; another structural change will supersede this build.</small>}
+  const completed = activity.completed, total = activity.total;
+  const elapsed_s = Math.max(0, now - activity.startedAt_ms) / 1000;
+  const finalizing = total > 0 && completed >= total;
+  const heading = activity.lane === "platform" ? "Starting WebGPU"
+    : activity.lane === "fluid" && activity.operation ? "Applying simulation settings"
+    : activity.lane === "fluid" ? "Preparing fluid"
+    : activity.lane === "svo" ? "Preparing sparse presentation" : "Preparing tool";
+  const explanation = plugin.phaseCopy?.[activity.phase]
+    ?? "Preparing this resource independently from the rest of the product.";
+  return <div className="gpu-build-card gpu-initializing" role="status" aria-live="polite">
+    <div className="gpu-build-heading"><i aria-hidden="true" /><strong>{heading}</strong></div>
+    {activity.operation && <p className="gpu-build-operation">{activity.operation}</p>}
+    <p>{activity.label}</p>
+    <progress max={Math.max(1, total)} {...(total > 0 && !finalizing ? { value: Math.min(completed, total) } : {})} aria-label="GPU initialization progress" />
+    <div className="gpu-progress-summary"><span>{finalizing ? "Finalizing…" : total > 0 ? `${completed} / ${total} tasks` : "Planning work…"}</span><span>{elapsed_s.toFixed(1)} s</span></div>
+    <p className="gpu-stage-explanation">{explanation}</p>
+    {elapsed_s >= 10 && <p className="gpu-task-wait">Still working on this task. Elapsed time remains live when the GPU driver exposes no intermediate counters.</p>}
+    <small>{activity.retainingPrevious
+      ? "The attached generation remains usable. "
+      : "The editor, camera, panels, and file actions remain available. "}{plugin.blocks === "transport" ? "Simulation transport unlocks when authoritative fluid is fenced." : "This work does not block product interaction."}</small>
   </div>;
 }
 
@@ -105,25 +101,15 @@ export function FluidLab() {
   const safeBringup = useSafeBrowserGPUBringup() === true;
   const runState = useRuntimeStore((state) => state.runState);
   const simulationTime = useRuntimeStore((state) => state.simulationTime);
-  const methodId = useMethodStore((state) => state.methodId);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
-  const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const setCamera = useUIStore((state) => state.setCamera);
+  const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
   const diagnosticsOpen = useUIStore((state) => state.diagnosticsOpen);
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
   const rightPanel = useUIStore((state) => state.rightPanel);
   const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
-  const presetId = useSceneStore((state) => state.presetId);
-  const fluidState = useDiagnosticsStore((state) => state.fluidState);
-  const method = getMethod(methodId);
-  const backend = method.backend === "cpu" ? "cpu-reference" : "webgpu";
-  const environment = getEnvironmentPreset(getScenePreset(presetId).background);
-  const healthFlags = backend === "webgpu"
-    ? [...(gpuInfo?.stabilityFlags ?? []), ...(gpuInfo?.nonFiniteCount ? ["non-finite-values"] : []),
-      ...(gpuInfo?.gridKind === "octree" ? paperPipelineHealthFlags(gpuInfo) : [])]
-    : [...(fluidState?.nanCount ? ["non-finite-values"] : []), ...(fluidState && !fluidState.pressureConverged ? ["pressure-not-converged"] : [])];
+  const activities = resourceActivities(resourceReadiness);
 
   useLayoutEffect(() => startQueryStateSync(() => simulation.reset()), []);
   useEditorShortcuts();
@@ -135,51 +121,32 @@ export function FluidLab() {
     return () => cancelAnimationFrame(frame);
   }, []);
 
-  const setPresetCamera = (preset: "front" | "side" | "top" | "reset") => {
-    if (preset === "reset") setCamera(defaultCamera);
-    else if (preset === "front") setCamera({ ...defaultCamera, azimuth_rad: 0, elevation_rad: 0.08 });
-    else if (preset === "side") setCamera({ ...defaultCamera, azimuth_rad: Math.PI / 2, elevation_rad: 0.08 });
-    else setCamera({ ...defaultCamera, azimuth_rad: 0, elevation_rad: 1.34, distance_m: 2.25 });
-  };
 
   return (
     <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"}>
-      <section className="viewport-shell" aria-busy={gpuStatus.state === "initializing"} data-gpu-transition={gpuStatus.state === "initializing" ? gpuStatus.kind ?? "startup" : gpuStatus.state}>
+      <section className="viewport-shell" data-resource-active={activities.length > 0} data-gpu-transition={activities.at(-1)?.lane ?? resourceReadiness.platform.state}>
         <WebGPUViewport />
         <EditorToolbar />
         <div className="viewport-topline">
           <div className="topline-left">
             <SceneOverlay />
-            <div className="topline-status">
-              <div className={`gpu-badge state-${gpuStatus.state}`}><span className={`status-dot ${gpuStatus.state === "ready" ? "online" : "warning"}`} /><strong>{gpuStatus.state === "ready" ? "WEBGPU" : gpuStatus.state.toUpperCase()}</strong><span>{gpuStatus.label}</span></div>
-              {runState === "running" && gpuStatus.state === "ready" && (
-                <button
-                  className={`health-chip${healthFlags.length ? " alert" : ""}`}
-                  onClick={() => setDiagnosticsOpen(true)}
-                  title={healthFlags.length ? "Instrumented stability gates are firing — click for live diagnostics" : "All instrumented stability gates clear — click for live diagnostics"}
-                  data-testid="health-chip"
-                >
-                  <span className={`status-dot ${healthFlags.length ? "warning" : "online"}`} />
-                  <strong>{healthFlags.length ? "ALERT" : "STABLE"}</strong>
-                  {healthFlags.length > 0 && <span>{healthFlags.join(" · ")}</span>}
-                </button>
-              )}
-            </div>
           </div>
         </div>
         <SceneScaleOverlay />
         <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
-        <div className="camera-toolbar" aria-label="Camera controls">
-          <button onClick={() => setPresetCamera("reset")}>Reset</button><button onClick={() => setPresetCamera("front")}>Front</button><button onClick={() => setPresetCamera("side")}>Side</button><button onClick={() => setPresetCamera("top")}>Top</button>
-          <span>drag body to move · drag to orbit · ⇧ drag pan · wheel zoom</span>
-        </div>
         <nav className="utility-panel-tabs" aria-label="Viewport panels">
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
           <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>
           <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAGNOSTICS</button>
           <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Measured work and paper fields">PERFORMANCE</button>
         </nav>
-        {gpuStatus.state === "initializing" && <GPUInitializationPanel status={gpuStatus} />}
+        {activities.length > 0 && <div className="resource-activity-tray" aria-label="Resource tasks">
+          {activities.map((activity) => <GPUInitializationPanel
+            key={activity.id}
+            activity={activity}
+            plugin={resourceReadiness.plugins[activity.pluginId].plugin}
+          />)}
+        </div>}
         {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">
           <strong>WebGPU startup paused for safety</strong>
           <p>{safeBringup

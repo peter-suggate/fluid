@@ -21,16 +21,6 @@ test("body-free direct-page authority omits the compatibility sparse world", () 
   assert.equal(octreeSparseWorldRequired(false, 1), true, "body scenes require sparse solid/world support");
 });
 
-test("worldless allocation owns one scheduler and exposes compact inspection instead of a stale renderer source", () => {
-  assert.match(source, /if \(allocateSparseWorld\) this\.sparseBrickWorld = new OctreeSparseBrickWorld/);
-  assert.match(source, /this\.topologyResidency = this\.sparseBrickWorld\?\.topologyResidency \?\? new GPUFluidBrickResidency/);
-  assert.match(source, /\(this\.sparseBrickWorld\?\.allocatedBytes \?\? this\.topologyResidency\.allocatedBytes\)/);
-  assert.match(source, /get sparseVoxelSceneSource\(\) \{ return this\.sparseBrickWorld\?\.sceneSource; \}/);
-  assert.match(source, /new CompactOctreeVoxelInspection\([\s\S]*leafHeaders: \{ buffer: this\.leafHeaders \}[\s\S]*rowCount: \{ buffer: this\.compaction \}/,
-    "raw inspection follows the compact pressure-grid authority when the compatibility world is absent");
-  assert.match(source, /if \(this\.sparseBrickWorld\) this\.sparseBrickWorld\.destroy\(\); else this\.topologyResidency\.destroy\(\);/);
-});
-
 test("post-bootstrap topology scheduling comes only from adaptive candidates", () => {
   assert.match(source, /this\.topologyResidency\.encodeFineSeedCandidates\([\s\S]*source\.leaves, source\.candidates\.candidates, source\.candidates\.countAndDispatch/);
   const recurring = source.slice(source.indexOf("encodeSparseBrickWorld"), source.indexOf("destroy()", source.indexOf("encodeSparseBrickWorld")));

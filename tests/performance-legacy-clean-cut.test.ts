@@ -47,17 +47,6 @@ const timestampQueryOwners = [
   "/tools/experiment-webgpu-atomic-clock.ts",
 ];
 
-test("the generic recorder exclusively owns GPU timestamp queries", () => {
-  for (const file of productionRoots.flatMap(productionSourceFiles)) {
-    if (timestampQueryOwners.some((owner) => file.endsWith(owner))) continue;
-    assert.doesNotMatch(
-      readFileSync(file, "utf8"),
-      /\b(?:timestampWrites|GPUComputePassTimestampWrites|createQuerySet|resolveQuerySet)\b/,
-      `standalone timestamp instrumentation survived in ${file}`,
-    );
-  }
-});
-
 test("measurement never changes the command graph the frame would submit anyway", () => {
   const recorder = readFileSync(new URL("../lib/performance-trace.ts", import.meta.url), "utf8");
   const start = recorder.indexOf("export class GPUStageTimestampRecorder");

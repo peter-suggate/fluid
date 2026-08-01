@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync , writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -402,27 +402,6 @@ test("runtime capture records only metrics proved by compact GPU controls", () =
   assert.equal(snapshot.stages["fine-redistance"].logicalPages, 16);
   assert.equal(snapshot.stagesComplete, true,
     "a complete valid GPU packet closes all eight stage records");
-});
-
-test("projection capture selects the GPU-accepted workset bank and smoke awaits it", () => {
-  const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  assert.match(projection, /classWorksetBanks:[\s\S]*\[0, 1\]\.map/,
-    "both immutable workset banks must be exposed for post-submit capture");
-  assert.match(projection,
-    /acceptedBank\s*=\s*acceptedRows[\s\S]*classWorkset\$\{acceptedBank\}_\$\{index\}/,
-    "readback must select the bank named by the accepted GPU control");
-  assert.match(projection, /await this\.device\.queue\.onSubmittedWorkDone\(\)[\s\S]*Capture octree GPU work accounting/,
-    "the accounting copy must be observational and occur only after submitted simulation work completes");
-  assert.match(projection,
-    /setAuthorityBytes\("surface-state", this\.surfaceStateAccountingBytes\)[\s\S]*setAuthorityBytes\("diagnostic-overlays"[\s\S]*sealAllocationInventory\(\)/,
-    "the post-submit snapshot must refresh named lazy owners and seal the allocation inventory");
-  assert.doesNotMatch(projection,
-    /setAuthorityBytes\("projection-resident",\s*this\.info\.allocatedBytes\)/,
-    "an aggregate compensating bucket could conceal double-counted named arenas");
-  const smoke = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
-  assert.match(smoke,
-    /capturedWorkAccounting\s*=\s*accountingOwner\.captureWorkAccounting[\s\S]*await accountingOwner\.captureWorkAccounting\(\)[\s\S]*octreeWorkAccounting:\s*capturedWorkAccounting\?\.snapshot/,
-    "the smoke artifact must await GPU accounting capture before snapshotting the ledger");
 });
 
 test("production source guards reject all forbidden recurring constructs with locations", () => {

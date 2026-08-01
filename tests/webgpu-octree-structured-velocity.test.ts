@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  OCTREE_POWER_ROW_CLASS,
+  
   buildResolvedPowerRowsPublication,
   planResolvedPowerRows,
 } from "../lib/webgpu-octree-power-resolved-rows";

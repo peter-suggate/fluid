@@ -8,6 +8,9 @@ import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-ta
 import {
   createSvoBrickRasterCullWGSL,
   svoBrickRasterCullBindGroupLayoutEntries,
+  svoBrickRasterCoverageBindGroupLayoutEntries,
+  svoBrickRasterCoverageCandidateBytes,
+  svoBrickRasterCoverageCountBytes,
   svoBrickRasterDrawBindGroupLayoutEntries,
   svoBrickRasterInstanceBytes,
   svoBrickRasterSortStateBytes,
@@ -32,6 +35,9 @@ test("brick instances are sized, keyed and bound so the sorted list reaches the 
   assert.equal(SVO_BRICK_RASTER_CONTRACT.instanceStrideBytes, 32);
   assert.equal(SVO_BRICK_RASTER_CONTRACT.verticesPerInstance, 36);
   assert.equal(svoBrickRasterInstanceBytes(1024), 1024 * 32);
+  assert.equal(svoBrickRasterCoverageCountBytes(1500, 1500), 1500 * 1500 * 4);
+  assert.equal(svoBrickRasterCoverageCandidateBytes(1500, 1500),
+    1500 * 1500 * 4 * SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel);
   assert.equal(svoBrickRasterSortStateBytes(), (8 + SVO_BRICK_RASTER_CONTRACT.sortBuckets) * 4);
   // Sort key and node index share one word; the key must not eat a real node.
   assert.equal(SVO_BRICK_RASTER_CONTRACT.nodeIndexMask + 1, 2 ** SVO_BRICK_RASTER_CONTRACT.sortKeyShift);
@@ -51,6 +57,21 @@ test("brick instances are sized, keyed and bound so the sorted list reaches the 
     visibility: GPUShaderStage.VERTEX,
     buffer: { type: "read-only-storage" },
   }]);
+  assert.deepEqual(svoBrickRasterCoverageBindGroupLayoutEntries(), [
+    { binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding,
+      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      buffer: { type: "read-only-storage" } },
+    {
+      binding: SVO_BRICK_RASTER_CONTRACT.coverageCountBinding,
+      visibility: GPUShaderStage.FRAGMENT,
+      buffer: { type: "storage" },
+    },
+    {
+      binding: SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding,
+      visibility: GPUShaderStage.FRAGMENT,
+      buffer: { type: "storage" },
+    },
+  ]);
   assert.equal(SVO_BRICK_RASTER_CONTRACT.colorAttachmentBytesPerSample,
     FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE);
   assert.equal(SVO_BRICK_RASTER_CONTRACT.colorAttachmentBytesPerSample, 16 + 8 + 16 + 8);
@@ -118,6 +139,34 @@ test("the raster-primary fragment reuses the production leaf tracer and writes d
     /requires raster glass discovery/);
 });
 
+test("conservative coverage moves expensive leaf tracing into one exact per-pixel resolve", () => {
+  const shader = createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, true, true);
+  const coverageStart = shader.indexOf(`@fragment fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.coverage}`);
+  const resolveHelperStart = shader.indexOf("fn dryBrickCoveragePixel", coverageStart);
+  const resolveStart = shader.indexOf(`@fragment fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.resolve}`);
+  const overflowStart = shader.indexOf(`@fragment fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.overflowResolve}`);
+  const directStart = shader.indexOf("struct DryBrickRasterOut", overflowStart);
+  assert.ok(coverageStart > 0 && resolveStart > coverageStart && overflowStart > resolveStart && directStart > overflowStart);
+  const coverage = shader.slice(coverageStart, resolveHelperStart);
+  const resolve = shader.slice(resolveHelperStart, overflowStart);
+  const overflow = shader.slice(overflowStart, directStart);
+  assert.match(coverage, /atomicAdd\(&svoBrickCoverageCounts\[pixel\],1u\)/);
+  assert.doesNotMatch(coverage, /traceLeafPayload|frag_depth/,
+    "the high-overdraw raster stage must only publish conservative coverage");
+  assert.match(coverage, /svoBrickCoverageCandidates\[address\]=input\.instanceIndex;\}\s*discard;/,
+    "ordinary conservative fragments stop after their cheap candidate write");
+  assert.match(resolve, /return dryBrickCoverageResolve\(input\.position\.xy\)/);
+  assert.doesNotMatch(resolve, /discard|traceStaticSolidScene/,
+    "the normal exact resolve is one fragment per pixel and carries no canonical traversal stack");
+  assert.match(shader, /let payload=traceLeafPayload\(ro,rd,leaf\)/,
+    "candidate resolution must reuse the production exact leaf tracer");
+  assert.match(overflow, /atomicLoad\(&svoBrickCoverageCounts\[pixel\]\)<=[0-9]+u\)\{discard;\}/);
+  assert.match(overflow, /let payload=traceLeafPayload\(ro,rd,leaf\)/,
+    "overflow reuses the direct brick arithmetic, so capacity changes cost but never parity");
+  assert.doesNotMatch(overflow, /traceStaticSolidScene/,
+    "canonical brick-boundary tie arithmetic must not leak into the raster control comparison");
+});
+
 test("raster-primary resolves static primitive overlap with exact per-primitive depth", () => {
   const shader = createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, true, true);
   const { entryPoints } = SVO_STATIC_PRIMITIVE_RASTER_CONTRACT;
@@ -148,16 +197,16 @@ test("raster-primary resolves static primitive overlap with exact per-primitive 
     "the conservative proxy vertex can read the primitive arena");
 });
 
-test("the brick depth experiments stay timing-only probes off the production path", () => {
+test("the direct brick arm and its depth experiments stay controls off the production path", () => {
   const build = (experiments: SvoDryOptimizationExperiments): string =>
     createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, true, true, false, experiments);
   // From the output struct, so the slice covers the frag_depth declaration the
   // brick fragment returns as well as the body that produces it.
   const brickFragment = (shader: string): string => shader.slice(shader.indexOf("struct DryBrickRasterOut"));
 
-  // Production keeps both, and both are why this GPU shades every overlapping
-  // proxy: a fragment whose depth and coverage are unknown until it has been
-  // shaded cannot be hidden-surface-removed.
+  // The historical direct control keeps both. Production uses the conservative
+  // coverage/resolve entries above, but retaining this exact arm makes the
+  // recorded baseline and its two probes re-measurable.
   const production = brickFragment(build({}));
   assert.match(production, /@builtin\(frag_depth\) hardwareDepth:f32/);
   assert.match(production, /discard/);
@@ -175,7 +224,7 @@ test("the brick depth experiments stay timing-only probes off the production pat
   assert.doesNotMatch(probe, /@builtin\(frag_depth\)/);
   assert.doesNotMatch(probe, /discard/);
 
-  for (const experiments of [{ rasterPrimaryNoFragmentDepth: true }, { rasterPrimaryHsrProbe: true }]) {
+  for (const experiments of [{ rasterPrimaryDirect: true }, { rasterPrimaryNoFragmentDepth: true }, { rasterPrimaryHsrProbe: true }]) {
     assert.throws(() => createSvoDrySceneFragmentWGSL(1, "canonical-parametric", "off", "split",
       0, false, false, false, false, experiments), /only apply to raster-primary/);
   }

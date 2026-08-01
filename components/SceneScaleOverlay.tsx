@@ -1,7 +1,8 @@
 "use client";
 
 import { simulation } from "@/lib/simulation/controller";
-import { useSceneStore } from "@/lib/stores/scene-store";
+import { useDisplayScene } from "@/lib/stores/scene-draft-store";
+import { useUIStore } from "@/lib/stores/ui-store";
 import { sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "@/lib/scene-scale";
 import { fluidBodyBox, fluidBodyBoxVolume_m3 } from "@/lib/editor-fluid-body";
 
@@ -10,6 +11,12 @@ import { fluidBodyBox, fluidBodyBoxVolume_m3 } from "@/lib/editor-fluid-body";
  * configuration panel: these are the two edits worth making dozens of times
  * while watching the result, and a popover you have to open first is the wrong
  * home for them.
+ *
+ * Shown only while the shape tool is armed. The viewport is already ringed with
+ * chrome on all four edges, and a permanent fourth cluster is how a workbench
+ * stops being readable — so these ride the one mode they belong to. Arming it
+ * is a single keypress, and it is also what puts the handles on the scene, so
+ * "edit the geometry" is one decision rather than several scattered ones.
  *
  * The two scale rows are deliberately separate because they cost different
  * things, and the row says which: a world step keeps the lattice and re-seeds
@@ -36,11 +43,15 @@ const AXES: ReadonlyArray<{
 ];
 
 export function SceneScaleOverlay() {
-  const scene = useSceneStore((state) => state.scene);
+  const shapeMode = useUIStore((state) => state.activeTool === "bounds");
+  // The display scene, so the litres and the extents count up as a shape drag
+  // is happening rather than jumping when it lands.
+  const scene = useDisplayScene();
   const summary = sceneScaleSummary(scene);
   const body = fluidBodyBox(scene);
   const fluidEnabled = scene.systems?.fluid !== false;
   const [nx, ny, nz] = summary.dimensions;
+  if (!shapeMode) return null;
 
   const step = (axis: SceneScaleAxis, factor: SceneScaleFactor) => {
     const option = sceneScaleOption(summary, axis, factor);

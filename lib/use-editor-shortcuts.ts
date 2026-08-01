@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect } from "react";
-import { editorToolForShortcut, editorToolIsActive } from "./editor-tools";
+import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
+import { DEFAULT_EDITOR_TOOL, editorToolForShortcut, editorToolIsActive } from "./editor-tools";
 import { stepFluidCellTraceHit } from "./fluid-cell-trace";
 import { propIdFromSelection } from "./editor-props";
 import { simulation } from "./simulation/controller";
@@ -16,9 +17,9 @@ function editingText(target: EventTarget | null): boolean {
 }
 
 /**
- * Editor keyboard chassis: tool arming, undo/redo, selection escape, delete,
- * and focus-on-selection. Registered once by the shell so shortcuts work
- * wherever focus happens to be, not only over the canvas.
+ * Editor keyboard chassis: tool arming, camera framing, undo/redo, selection
+ * escape, delete, and focus-on-selection. Registered once by the shell so
+ * shortcuts work wherever focus happens to be, not only over the canvas.
  */
 export function useEditorShortcuts(): void {
   useEffect(() => {
@@ -82,10 +83,21 @@ export function useEditorShortcuts(): void {
         ui.jumpFluidCellTraceToInterface();
         return;
       }
+      // Camera framing. These replaced a permanent four-button toolbar; `0` in
+      // particular is the only way back from a camera orbited into nowhere, so
+      // it must exist somewhere even though the buttons do not.
+      const framing = cameraFramingForKey(event.key);
+      if (framing) {
+        event.preventDefault();
+        ui.setCamera(cameraForFraming(framing));
+        return;
+      }
       const tool = editorToolForShortcut(event.key);
       if (tool && editorToolIsActive(tool)) {
         event.preventDefault();
-        ui.setActiveTool(tool);
+        // Pressing the armed tool's own key disarms it, so every mode can be
+        // left the same way it was entered rather than only via Escape.
+        ui.setActiveTool(ui.activeTool === tool ? DEFAULT_EDITOR_TOOL : tool);
       }
     };
     window.addEventListener("keydown", onKeyDown);

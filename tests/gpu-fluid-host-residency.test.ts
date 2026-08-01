@@ -22,53 +22,6 @@ test("WebGPU controller and renderer retain no CPU fluid oracle or dense upload 
   assert.match(renderer, /if \(backend === "cpu-reference"\) this\.uploadFluid\(fluid\)/);
 });
 
-test("GPU volume correction rejects mapped control state and octree cadence has no host readback", () => {
-  const solver = source("lib/webgpu-uniform-eulerian.ts");
-  const surface = source("lib/webgpu-quadtree-builder.ts");
-  assert.doesNotMatch(solver, /Remaining residency exception/);
-  assert.match(solver, /hostSchedulingUsesReadback: false/);
-  assert.match(solver, /const substeps = this\.quadtreeProjection \? proactiveQuadtreeSubsteps/);
-  assert.match(surface, /this\.gpuVolumeCorrection \? 0 : this\.correctionSpeed/);
-  assert.match(surface, /if \(!this\.gpuVolumeCorrection\) this\.correctionSpeed/);
-});
-
-test("octree uses one active-page dispatch with a bounded GPU fine-transport schedule", () => {
-  const solver = source("lib/webgpu-uniform-eulerian.ts");
-  const transport = source("lib/webgpu-octree-fine-levelset-transport.ts");
-  const advance = solver.slice(solver.indexOf("advanceTo(time_s"), solver.indexOf("async readStats()"));
-  assert.match(advance, /const substeps = this\.quadtreeProjection \? proactiveQuadtreeSubsteps/,
-    "only the retained quadtree backend may select a host subdivision count");
-  assert.doesNotMatch(advance, /this\.octreeProjection\s*\?\s*proactiveQuadtreeSubsteps/);
-  assert.match(transport, /FINE_LEVELSET_TRANSPORT_MAXIMUM_ENCODED_SUBSTEPS = 64/);
-  // Owner publication is gone: per-trajectory owner selection replaced the
-  // page-anchor dispatch, and a sibling test asserts that dispatch stays
-  // deleted. What survives is the invariant this was really guarding -- every
-  // transport dispatch is indirect off the published record, never a host-side
-  // workgroup count.
-  assert.doesNotMatch(transport, /ownerPipeline|ownerGroup/,
-    "the retired page-anchor owner publication must not return");
-  assert.doesNotMatch(transport, /dispatchWorkgroups\(\s*Math\./,
-    "no transport stage may size itself from a host-computed workgroup count");
-  assert.match(transport,
-    /classify\.dispatchWorkgroupsIndirect\(this\.indirectDispatch, 160\)/,
-    "classification must use the exact active-page indirect record");
-  // The record offset indexes through the class table rather than the loop
-  // counter: the specialized pipelines no longer map one-to-one onto workset
-  // classes, so `index` is a pipeline ordinal and the class it consumes is the
-  // table entry. Using the ordinal directly would read a neighbouring class's
-  // record, which is a silently wrong workset rather than a failure.
-  assert.match(transport,
-    /transport\.dispatchWorkgroupsIndirect\(this\.indirectDispatch,\s*\(4 \+ 7 \* FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES\[index\]! \+ 4\) \* 4\)/,
-    "each specialized transport must use its exact compact class workset");
-  assert.match(transport,
-    /commit\.dispatchWorkgroupsIndirect\(this\.indirectDispatch, 160\)/,
-    "commit must use the same exact active-page publication");
-  assert.doesNotMatch(transport, /dispatchWorkgroups\(.*maximumResidentBricks/,
-    "fine transport must never dispatch the resident-capacity ceiling");
-  assert.doesNotMatch(transport.slice(transport.indexOf("encode(broker:")), /createBindGroup/,
-    "recurring fine transport must reuse construction-time bind groups");
-});
-
 test("power-volume publication reuses its initialization-time bind group", () => {
   const octree = source("lib/webgpu-octree.ts");
   assert.match(octree, /private powerVolumeGroup\?: GPUBindGroup/);

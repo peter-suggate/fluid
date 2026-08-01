@@ -21,10 +21,15 @@ function preset(id: string): SceneDescription {
   return getScenePreset(id).create();
 }
 
-test("shape mode is an implemented tool with its own shortcut", () => {
-  const tool = getEditorTool("shape");
+test("the bounds tool is named after what it edits", () => {
+  // It was called SHAPE, which is ambiguous — shape what? A user hunting for
+  // "how do I edit the fluid / tank bounds" has to be able to find it by name
+  // in a strip of seven near-identical rows.
+  const tool = getEditorTool("bounds");
   assert.equal(tool.status, "active");
-  assert.equal(tool.shortcut, "s");
+  assert.equal(tool.shortcut, "b");
+  assert.equal(tool.label, "BOUNDS");
+  assert.match(tool.hint, /tank or the water/);
 });
 
 test("the tank box is the container interior, resting on the floor", () => {
@@ -114,20 +119,42 @@ test("a resize that leaves the lattice alone is not announced as structural", ()
   assert.deepEqual(tankLatticeForExtents(scene, grown)[0], before[0] + 4);
 });
 
-test("a shape drag previews without touching the document", () => {
-  // The cost of this feature is entirely in when the document is written: the
-  // water body and the tank both live in the solver's rebuild key, so a
-  // per-move write asks the renderer to re-seed at pointer rate. The viewport
-  // holds the dragged box in local state and spends one write on release.
+test("every direct-manipulation drag previews without touching the document", () => {
+  // The cost of these gestures is entirely in when the document is written: the
+  // water body, the tank, the fill level, the hose, and the terrain all live in
+  // the solver's rebuild key, so a per-move write asks the renderer to re-seed
+  // at pointer rate. Each drag writes the draft store and spends one document
+  // write on release.
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
-  const move = viewport.slice(viewport.indexOf('if (active.action === "shape-handle") {'));
-  const moveBody = move.slice(0, move.indexOf("\n    }"));
-  assert.match(moveBody, /setShapePreview\(/, "the drag must update the preview");
-  assert.doesNotMatch(moveBody, /patchScene|patchContainer|patchFluid|commitEdit|shapeFluidBody|resizeTank/,
-    "a shape drag must not write the scene document while the pointer is down");
+  const branches = ["shape-handle", "fill-level", "inflow-handle", "terrain-handle"];
+  const move = viewport.slice(viewport.indexOf("const pointerMove ="), viewport.indexOf("const pointerUp ="));
+  for (const branch of branches) {
+    const start = move.indexOf(`if (active.action === "${branch}") {`);
+    assert.ok(start >= 0, `${branch} must have a pointer-move branch`);
+    const body = move.slice(start, move.indexOf("\n    }", start));
+    assert.match(body, /updateDraft\(/, `${branch} must propose through the draft store`);
+    assert.doesNotMatch(body, /patchScene|patchContainer|patchFluid|commitEdit|commitDraft/,
+      `${branch} must not write the scene document while the pointer is down`);
+  }
 
   const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
   assert.match(controller, /shapeFluidBody\(box: FluidBodyBox\)/,
     "there must be no per-move variant that a caller could reach for");
-  assert.match(controller, /resizeTank\(box: FluidBodyBox\)/);
+  assert.match(controller, /commitDraft\(options: \{ announceRebuild\?: string \} = \{\}\)/);
+});
+
+test("only geometry-preserving drafts are presented to the renderer", () => {
+  // The renderer draws the fluid from solver-owned textures. Presenting a
+  // container the solver did not allocate for would tear, so the render loop
+  // pins the solver to the committed scene and presents a draft only for
+  // terrain, which cannot move the lattice.
+  const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+  assert.match(viewport, /draft\?\.subject === "terrain"\s*\n?\s*\? applySceneDraft\(scene, draft\)\s*\n?\s*: scene/,
+    "only a terrain draft may reach the renderer");
+  assert.match(viewport, /renderer\.setSimulationScene\(presentationScene === scene \? undefined : scene\)/,
+    "presenting a draft must pin the solver to the committed scene");
+
+  const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+  assert.match(renderer, /this\.currentGPUFluid\(this\.simulationScene \?\? scene, svoSceneConfig, time_s\)/,
+    "the rebuild key must read the pinned scene, never the presented one");
 });

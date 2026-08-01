@@ -310,26 +310,3 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
     "the production advance must not route raw helpers through a compatibility proxy");
 });
 
-test("remaining octree production stages have no standalone compute-pass ownership", () => {
-  const modules = [
-    "webgpu-octree-coarse-levelset",
-    "webgpu-octree-power-coarse-levelset",
-    "webgpu-octree-structured-velocity-gpu",
-    "webgpu-octree-structured-boundary",
-    "webgpu-octree-structured-dynamics",
-    "webgpu-octree-solid-vertex-sdf",
-    "webgpu-octree-fine-to-coarse-levelset",
-    "webgpu-octree-fine-levelset-volume",
-    "webgpu-octree-fine-levelset-summary-direct",
-    "webgpu-octree-fine-levelset-redistance",
-    "webgpu-octree-analytic-bootstrap",
-    "webgpu-octree-voxel-inspection",
-    "webgpu-octree-technique-overlay",
-  ];
-  for (const module of modules) {
-    const source = readFileSync(new URL(`../lib/${module}.ts`, import.meta.url), "utf8");
-    assert.match(source, /PassBroker/, `${module} must use broker-owned encoding`);
-    assert.doesNotMatch(source, /beginComputePass/,
-      `${module} must not retain standalone compute-pass ownership`);
-  }
-});

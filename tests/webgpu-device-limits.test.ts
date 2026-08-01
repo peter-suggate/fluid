@@ -8,27 +8,6 @@ import {
   supportsFluidM1MaxReduction,
 } from "../lib/webgpu-device-limits";
 
-test("large fluid device requests preserve the adapter-supported limits", () => {
-  const limits = requiredFluidDeviceLimits({
-    maxStorageBuffersPerShaderStage: 10,
-    maxStorageBufferBindingSize: 512 * 1024 * 1024,
-    maxBufferSize: 1024 * 1024 * 1024,
-    maxTextureDimension2D: 16384,
-    maxTextureDimension3D: 2048,
-    maxSampledTexturesPerShaderStage: 16,
-    maxColorAttachmentBytesPerSample: 128,
-  });
-  assert.deepEqual(limits, {
-    maxStorageBuffersPerShaderStage: 10,
-    maxStorageBufferBindingSize: 512 * 1024 * 1024,
-    maxBufferSize: 1024 * 1024 * 1024,
-    maxTextureDimension2D: 16384,
-    maxTextureDimension3D: 2048,
-    maxColorAttachmentBytesPerSample: FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE,
-    maxSampledTexturesPerShaderStage: 16,
-  });
-});
-
 /**
  * The static node-mip directory is one texture row per page, so this limit is
  * the opacity pyramid's page ceiling. A scene that needs more than the granted

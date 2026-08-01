@@ -154,6 +154,7 @@ const encodesPerSample = Number(process.env.FLUID_SVO_DRY_FRAME_ENCODES_PER_SAMP
 const outPath = process.env.FLUID_SVO_DRY_FRAME_OUT ?? "/tmp/svo-bench/baseline.json";
 const rawOutPath = process.env.FLUID_SVO_DRY_FRAME_RAW_OUT;
 const configuredRawOutPath = process.env.FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT;
+const gBufferRawPrefix = process.env.FLUID_SVO_DRY_FRAME_GBUFFER_RAW_PREFIX;
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION ?? "full-res-relight";
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
@@ -188,6 +189,7 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   dropGiPageCache: process.env.FLUID_SVO_DRY_FRAME_DROP_GI_PAGE_CACHE === "1",
   shortTraversalStack: process.env.FLUID_SVO_DRY_FRAME_SHORT_STACK === "1",
   tinyTraversalStack: process.env.FLUID_SVO_DRY_FRAME_TINY_STACK === "1",
+  rasterPrimaryDirect: process.env.FLUID_SVO_DRY_FRAME_DIRECT_BRICK === "1",
   rasterPrimaryNoFragmentDepth: process.env.FLUID_SVO_DRY_FRAME_NO_FRAG_DEPTH === "1",
   rasterPrimaryHsrProbe: process.env.FLUID_SVO_DRY_FRAME_HSR_PROBE === "1",
 };
@@ -988,6 +990,12 @@ const [packedSurfaceBytes, identityMediaBytes, hardwareDepthBytes] = await Promi
   captureTextureBytes(referenceGBuffer.identityMedia, 8, "Bench identity-media fingerprint"),
   captureTextureBytes(referenceGBuffer.hardwareDepth, 4, "Bench hardware-depth fingerprint", "depth-only"),
 ]);
+if (gBufferRawPrefix) {
+  mkdirSync(path.dirname(gBufferRawPrefix), { recursive: true });
+  writeFileSync(`${gBufferRawPrefix}-packed-surface.bin`, packedSurfaceBytes);
+  writeFileSync(`${gBufferRawPrefix}-identity-media.bin`, identityMediaBytes);
+  writeFileSync(`${gBufferRawPrefix}-hardware-depth.bin`, hardwareDepthBytes);
+}
 let reducedRows: Uint32Array | undefined;
 let overlayRows: Uint32Array | undefined;
 let orbitReturnRows: Uint32Array | undefined;

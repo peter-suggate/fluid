@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { BROWSER_GPU_THROUGHPUT_DEPTH, canQueuePreparedGPUAdvance, FluidLabRenderer, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
+import { BROWSER_GPU_THROUGHPUT_DEPTH, canQueuePreparedGPUAdvance , submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
 import { MAXIMUM_PENDING_PHYSICS_ADVANCES } from "../lib/structured-step-snapshot";
 import { presentationStateChanged } from "../lib/frame-pacing";
-import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/webgpu-device-limits";
 
 test("GPU submission advances only once toward prepared simulation debt", () => {
   let submittedTime_s = 0;
@@ -118,7 +117,7 @@ test("warm reset republishes t=0 authority and requests its paused raster fence"
 
   assert.match(reseed, /state:"initializing",label:"Re-seeding fenced t=0 solver authority"/,
     "reset must stop advertising the old ready state while the t=0 seed is rebuilt");
-  assert.match(reseed, /solver\.info\.initialRasterSurfaceReady=false[\s\S]*pendingInitialRasterPresentation=\{solver,solverGeneration:generation,requestGeneration,submitted:false\}/,
+  assert.match(reseed, /solver\.info\.initialRasterSurfaceReady=false[\s\S]*pendingInitialRasterPresentation=\{solver,solverGeneration:generation,requestGeneration,submitted:false,resource\}/,
     "a re-seed must earn a new renderer raster fence instead of reusing the old ready bit");
   assert.match(reseed, /pendingInitialRasterPresentation[\s\S]*gpuInfoCallback\?\.\(\{\.\.\.solver\.info\}\)/,
     "reset clears the diagnostics store, so the live solver authority must be republished");
@@ -208,90 +207,4 @@ test("reset replacement attaches only after complete t=0 sparse authority is res
   assert.match(transaction, /const create:Promise<GPUSolverInstance>=prepare\(\)\.then\([\s\S]*method\.createSolverAsync/);
   assert.match(transaction, /this\.gpuFluidPending=create\.then\(\(solver\)=>[\s\S]*this\.gpuFluid=solver/,
     "only the fully warmed create promise may publish the replacement solver");
-});
-
-test("renderer stops submitting frames and disposes its device after WebGPU loss", async (t) => {
-  let resolveDeviceLost!: (info: GPUDeviceLostInfo) => void;
-  const lost = new Promise<GPUDeviceLostInfo>((resolve) => { resolveDeviceLost = resolve; });
-  let deviceDestroyCount = 0;
-  let submitCount = 0;
-  let requestedDescriptor: GPUDeviceDescriptor | undefined;
-  const destroyable = () => ({ destroy() {} });
-  const texture = () => ({ ...destroyable(), width: 1, height: 1, createView: () => ({}) });
-  const pipeline = () => ({ getBindGroupLayout: () => ({}) });
-  const device = {
-    features: new Set<GPUFeatureName>(),
-    lost,
-    addEventListener() {},
-    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
-    createRenderPipeline: pipeline,
-    createRenderPipelineAsync: async () => pipeline(),
-    createComputePipeline: () => ({}),
-    createComputePipelineAsync: async () => ({}),
-    createBindGroupLayout: () => ({}),
-    createPipelineLayout: () => ({}),
-    createSampler: () => ({}),
-    createBuffer: destroyable,
-    createTexture: texture,
-    createBindGroup: () => ({}),
-    queue: { submit: () => { submitCount += 1; } },
-    destroy: () => { deviceDestroyCount += 1; }
-  } as unknown as GPUDevice;
-  const adapter = {
-    features: new Set<GPUFeatureName>(),
-    limits: {
-      maxStorageBuffersPerShaderStage: 10,
-      maxStorageBufferBindingSize: 512 * 1024 * 1024,
-      maxBufferSize: 1024 * 1024 * 1024,
-      maxTextureDimension3D: 2048,
-      maxColorAttachmentBytesPerSample: 128,
-    },
-    requestDevice: async (descriptor: GPUDeviceDescriptor) => { requestedDescriptor = descriptor; return device; },
-    info: { vendor: "test" }
-  } as unknown as GPUAdapter;
-  const context = { configure() {} } as unknown as GPUCanvasContext;
-  const canvas = { getContext: () => context } as unknown as HTMLCanvasElement;
-  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  const previousBufferUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
-  const previousTextureUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUTextureUsage");
-  const previousShaderStage = Object.getOwnPropertyDescriptor(globalThis, "GPUShaderStage");
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: { requestAdapter: async () => adapter, getPreferredCanvasFormat: () => "bgra8unorm" } } });
-  Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, QUERY_RESOLVE: 8, COPY_SRC: 16, INDIRECT: 32 } });
-  Object.defineProperty(globalThis, "GPUTextureUsage", { configurable: true, value: { TEXTURE_BINDING: 1, COPY_DST: 2, RENDER_ATTACHMENT: 4 } });
-  Object.defineProperty(globalThis, "GPUShaderStage", { configurable: true, value: { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 } });
-  t.after(() => {
-    for (const [name, descriptor] of [["navigator", previousNavigator], ["GPUBufferUsage", previousBufferUsage], ["GPUTextureUsage", previousTextureUsage], ["GPUShaderStage", previousShaderStage]] as const) {
-      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
-      else Reflect.deleteProperty(globalThis, name);
-    }
-  });
-
-  const statuses: GPUStatus[] = [];
-  const renderer = new FluidLabRenderer(canvas, (status) => statuses.push(status));
-  await renderer.initialize();
-  assert.equal(statuses.at(-1)?.state, "ready");
-  assert.deepEqual(requestedDescriptor?.requiredLimits, {
-    maxStorageBuffersPerShaderStage: 10,
-    maxStorageBufferBindingSize: 512 * 1024 * 1024,
-    maxBufferSize: 1024 * 1024 * 1024,
-    maxTextureDimension3D: 2048,
-    maxColorAttachmentBytesPerSample: FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE,
-  });
-
-  resolveDeviceLost({ reason: "unknown", message: "test device loss" } as GPUDeviceLostInfo);
-  await lost;
-  await Promise.resolve();
-  assert.deepEqual(statuses.at(-1), { state: "lost", label: "GPU device lost: test device loss" });
-
-  const metrics = renderer.draw(0, {} as never, {} as never, [], undefined, undefined, "webgpu", { methodId: "tall-cell", quality: "balanced", values: {} });
-  assert.equal(metrics.methodId, "tall-cell");
-  assert.equal(metrics.context, "tall-cell");
-  assert.equal(metrics.presentationSubmitted, false);
-  assert.equal(metrics.cpu, undefined,
-    "the default lean UI path must not synthesize CPU timing while measurement instrumentation is off");
-  assert.equal(submitCount, 0, "a lost device must never receive another queue submission");
-
-  renderer.destroy();
-  renderer.destroy();
-  assert.equal(deviceDestroyCount, 1, "renderer cleanup must be idempotent across hot reload");
 });

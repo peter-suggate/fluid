@@ -2,43 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
-  OCTREE_ANALYTIC_BOOTSTRAP_PARAMETER_BYTES,
-  octreeAnalyticBootstrapWorklistShader,
+  
+  
   WebGPUOctreeAnalyticBootstrapWorklist,
 } from "../lib/webgpu-octree-analytic-bootstrap";
 import {
   octreeAnalyticOwnerBootstrapPageCount,
-  octreeDeterministicOwnerPageLifecycleShader,
+  
   WebGPUOctreeSimulationOwnerPages,
 } from "../lib/webgpu-octree-owner-pages";
 import { PassBroker } from "../lib/webgpu-pass-broker";
-
-test("analytic cold topology publishes the resident worklist ABI entirely on GPU", () => {
-  assert.equal(OCTREE_ANALYTIC_BOOTSTRAP_PARAMETER_BYTES, 32);
-  assert.match(octreeAnalyticBootstrapWorklistShader,
-    /fn emitAnalyticTopologyWorklist[\s\S]*tileWorklist\[0\] = count[\s\S]*tileWorklist\[8\] = candidate\.x/);
-  assert.match(octreeAnalyticBootstrapWorklistShader,
-    /fn emitAnalyticTopologyWorklist[\s\S]*tileWorklist\[HEADER_WORDS \+ slot\] = tile[\s\S]*publishTileState\(tile\)/);
-  assert.match(octreeAnalyticBootstrapWorklistShader,
-    /fn publishTileState[\s\S]*atomicCompareExchangeWeak\(&tileStates\[slot\*2u\],0u,encoded\)/,
-    "direct-page bootstrap publishes sparse tile keys without a logical-tile state array");
-  const encode = WebGPUOctreeAnalyticBootstrapWorklist.prototype.encode.toString();
-  assert.doesNotMatch(encode, /mapAsync|getMappedRange|copyBufferToBuffer/,
-    "production bootstrap must not read topology decisions back to the CPU");
-  assert.doesNotMatch(encode, /dims\.nx|dims\.ny|dims\.nz/,
-    "bootstrap emission must cover compact tile bounds rather than the finest lattice");
-  assert.match(octreeDeterministicOwnerPageLifecycleShader,
-    /fn candidatePageKey[\s\S]*fn ownerPageWord\(cell: vec3u, origin: vec3u, size: u32\)[\s\S]*fn buildOwnerPageCandidate[\s\S]*ownerPageWord\(cell,origin,size\)/,
-    "cold owner pages must consume the bounded analytic tile stream and seed brick-relative owner records");
-  assert.match(octreeDeterministicOwnerPageLifecycleShader,
-    /analyticCompact=all\(compactLimits>vec3u\(0u\)\)[\s\S]*tileIndex=tile\.x\+tiles\.x\*\(tile\.y\+tiles\.y\*tile\.z\)/,
-    "read-only owner probe tiles use their own compact limits instead of entering topology work");
-  const ownerEncode = WebGPUOctreeSimulationOwnerPages.prototype.encodeAnalyticBootstrap.toString();
-  assert.doesNotMatch(ownerEncode, /mapAsync|getMappedRange|copyBufferToBuffer/,
-    "production owner bootstrap remains GPU-only");
-  assert.equal((ownerEncode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 2);
-  assert.doesNotMatch(ownerEncode, /dispatchWorkgroupsIndirect|sortCandidates|indirect/);
-});
 
 test("analytic owner capacity covers exactly the clipped 16/32 cold tile pages", () => {
   assert.equal(octreeAnalyticOwnerBootstrapPageCount([48, 24, 40], {

@@ -1,6 +1,6 @@
 "use client";
 
-import { EDITOR_TOOLS, getEditorTool } from "@/lib/editor-tools";
+import { DEFAULT_EDITOR_TOOL, EDITOR_TOOLS } from "@/lib/editor-tools";
 import type { RigidShape, ScenePropShape } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
 import { useEditorHistoryStore } from "@/lib/stores/history-store";
@@ -22,9 +22,19 @@ const PROP_SHAPES: ReadonlyArray<{ shape: ScenePropShape; label: string }> = [
 /**
  * Left-edge tool strip, mirroring the right-edge utility tabs.
  *
- * Tools whose pointer behaviour has not landed are rendered disabled with the
- * plan phase in their tooltip rather than hidden: the chassis is visible, and
- * a click cannot silently do nothing.
+ * Only tools that actually do something are listed. Unimplemented ones used to
+ * be rendered disabled so "the chassis is visible", but a permanently dead
+ * button is a row of noise in a strip a user has to scan to find the mode they
+ * want — they stay declared in `EDITOR_TOOLS` with their plan phase, and appear
+ * here the moment their status flips to active.
+ *
+ * Each tool's hint lives in its tooltip rather than in a paragraph pinned under
+ * the strip: the armed tool announces itself in the viewport when it has
+ * something to say.
+ *
+ * Clicking the armed tool disarms it, back to the default. A mode you can enter
+ * but not leave by the same control you entered it with is a trap, and the
+ * keyboard agrees: the tool's own shortcut toggles it too.
  */
 export function EditorToolbar() {
   const activeTool = useUIStore((state) => state.activeTool);
@@ -35,23 +45,19 @@ export function EditorToolbar() {
   const setPropShape = useUIStore((state) => state.setPropShape);
   const canUndo = useEditorHistoryStore((state) => state.past.length > 0);
   const canRedo = useEditorHistoryStore((state) => state.future.length > 0);
-  const spec = getEditorTool(activeTool);
 
   return (
     <div className="editor-toolbar" data-active-tool={activeTool}>
       <nav className="editor-tool-strip" aria-label="Editor tools">
-        {EDITOR_TOOLS.map((tool) => (
+        {EDITOR_TOOLS.filter((tool) => tool.status === "active").map((tool) => (
           <button
             key={tool.id}
             type="button"
             className={activeTool === tool.id ? "active" : ""}
-            disabled={tool.status !== "active"}
             aria-pressed={activeTool === tool.id}
             data-testid={`editor-tool-${tool.id}`}
-            title={tool.status === "active"
-              ? `${tool.label} (${tool.shortcut.toUpperCase()}) · ${tool.hint}`
-              : `${tool.label} — not yet implemented · ${tool.phase}`}
-            onClick={() => setActiveTool(tool.id)}
+            title={`${tool.label} (${tool.shortcut.toUpperCase()}) · ${tool.hint}`}
+            onClick={() => setActiveTool(activeTool === tool.id ? DEFAULT_EDITOR_TOOL : tool.id)}
           >
             <strong>{tool.label}</strong><small>{tool.shortcut.toUpperCase()}</small>
           </button>
@@ -93,7 +99,6 @@ export function EditorToolbar() {
           ))}
         </div>
       )}
-      <p className="editor-tool-hint" data-testid="editor-tool-hint">{spec.hint}</p>
     </div>
   );
 }

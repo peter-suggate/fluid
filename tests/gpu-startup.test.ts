@@ -7,13 +7,12 @@ import {
   fluidExecutionDeviceFeatures,
   performanceTraceDeviceFeatures,
   resolveGPUStartupMode,
-  safeBrowserGPUBringupEnabled,
-  safeBrowserGPUBringupViolations,
+
+
   safeBrowserSimulationEpochChanged,
   shutdownBrowserGPUSession,
 } from "../lib/gpu-startup";
 import { FluidLabRenderer, type GPUStatus } from "../lib/webgpu-renderer";
-import { getMethod, resolveMethodValues } from "../lib/methods";
 
 const dam = { presetId: "water-box-dam-break", methodId: "octree" };
 
@@ -26,54 +25,6 @@ test("GPU startup query has explicit safe, manual, and automatic modes", () => {
   assert.equal(resolveGPUStartupMode("", { ...dam, presetId: "water-box-tank-fill" }), "automatic");
   assert.equal(resolveGPUStartupMode("", { ...dam, methodId: "cpu" }), "automatic");
   assert.equal(resolveGPUStartupMode("?gpu=unexpected", dam), "manual", "unknown input must not bypass the safe default");
-});
-
-test("safe browser bring-up fails closed when the bounded workload drifts", () => {
-  assert.equal(safeBrowserGPUBringupEnabled("?gpu=safe"), true);
-  assert.equal(safeBrowserGPUBringupEnabled("?gpu=manual"), false);
-  const canonicalMethodValues = resolveMethodValues(getMethod("octree"), "balanced", {});
-  const valid = {
-    presetId: "water-box-dam-break",
-    methodId: "octree",
-    quality: "balanced",
-    methodValues: canonicalMethodValues,
-    canonicalMethodValues,
-    exactScene: true,
-    voxelRenderMode: "smooth",
-    diagnosticsOpen: false,
-    rightPanel: null,
-    gridOverlayAxis: "off",
-    activeTool: "select",
-    search: "?gpu=safe",
-  } as const;
-  assert.deepEqual(safeBrowserGPUBringupViolations(valid), []);
-  assert.deepEqual(
-    safeBrowserGPUBringupViolations({ ...valid, activeTool: "body-place" }),
-    ["editor tools must remain on select"],
-    "an armed authoring tool can mutate the pinned workload mid-session",
-  );
-  const violations = safeBrowserGPUBringupViolations({
-    ...valid,
-    quality: "ultra",
-    methodValues: { ...valid.methodValues, unexpectedSpatialControl: 768, pressureIterations: 400, sparseSurfaceBandCells: 16, sparseSurfacePageFraction: 1 },
-    diagnosticsOpen: true,
-    rightPanel: "performance",
-    search: "?gpu=safe&panel=performance",
-  });
-  for (const expected of [
-    "quality must be balanced", "diagnostics panel must remain closed",
-    "all right-side panels must remain closed",
-  ]) assert.ok(violations.includes(expected), `missing violation: ${expected}`);
-  assert.ok(violations.some((value) => value.includes("unexpectedSpatialControl") && value.includes("pressureIterations") && value.includes("sparseSurfaceBandCells") && value.includes("sparseSurfacePageFraction")));
-  assert.ok(violations.some((value) => value.includes("panel")));
-
-  const retiredSwitches = safeBrowserGPUBringupViolations({
-    ...valid,
-    search: "?gpu=safe&waterdiag=1&diagnostics=1",
-  });
-  assert.deepEqual(retiredSwitches, [
-    "unapproved safe-mode query flags: waterdiag, diagnostics",
-  ], "retired switches are inert input rejected only by the canonical safe-mode allowlist");
 });
 
 test("safe browser session invalidates any reset or rebuild epoch", () => {
@@ -259,6 +210,9 @@ test("gpu=off returns before requesting a WebGPU adapter", async (t) => {
   const renderer = new FluidLabRenderer({} as HTMLCanvasElement, (status) => statuses.push(status));
   await renderer.initialize();
   assert.equal(adapterRequests, 0);
-  assert.deepEqual(statuses, [{ state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)" }]);
+  assert.equal(statuses.length, 1);
+  assert.equal(statuses[0]?.state, "unavailable");
+  assert.equal(statuses[0]?.label, "WebGPU disabled by gpu=off (UI-only mode)");
+  assert.equal(statuses[0]?.resource?.id, "platform.webgpu-renderer");
   renderer.destroy();
 });

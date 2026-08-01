@@ -13,7 +13,7 @@
 
 export type EditorTool =
   | "select"
-  | "shape"
+  | "bounds"
   | "body-place"
   | "prop-place"
   | "terrain-raise"
@@ -52,10 +52,10 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
   // its handles cover the whole scene rather than one picked object, and a mode
   // that showed them permanently would swallow every click meant for a body.
   {
-    id: "shape",
-    label: "SHAPE",
-    shortcut: "s",
-    hint: "drag a face, edge, or corner to resize the tank or the water · the shape previews while you drag and is simulated on release",
+    id: "bounds",
+    label: "BOUNDS",
+    shortcut: "b",
+    hint: "drag a face, edge, or corner to resize the tank or the water · the new bounds preview while you drag and are simulated on release",
     status: "active",
   },
   {

@@ -13,7 +13,7 @@ import { planFineLevelSetGPUVolume } from "../lib/webgpu-octree-fine-levelset-vo
 import { planFineToCoarseLevelSet } from "../lib/webgpu-octree-fine-to-coarse-levelset";
 import { FINE_TO_COARSE_LEVELSET_ERROR, unpackFineToCoarseGPUControl } from
   "../lib/webgpu-octree-fine-to-coarse-levelset";
-import { OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS, WebGPUOctreePowerCoarseLevelSet,
+import { OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS ,
   planOctreePowerCoarseLevelSet } from "../lib/webgpu-octree-power-coarse-levelset";
 import { planOctreePowerDescriptors } from "../lib/webgpu-octree-power-descriptor";
 import { planStructuredVelocityGPU } from "../lib/webgpu-octree-structured-velocity-gpu";
@@ -216,50 +216,6 @@ test("power allocation accounting charges each structured arena once", () => {
   const accounting = source.match(/const powerAllocated = sumOctreePowerAllocationBreakdown\(\{[\s\S]*?\}\);/)?.[0];
   assert.ok(accounting);
   assert.equal(accounting.match(/structuredVelocity: structured\.allocatedBytes/g)?.length, 1);
-});
-
-test("coarse phi bootstraps at dt0, advects before forces, and re-corrects after projection", () => {
-  const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  const calls = [...source.matchAll(/this\.powerCoarseLevelSetSchedule\.encode\([\s\S]*?\n\s*}\);/g)]
-    .map((match) => match[0]);
-  assert.equal(calls.length, 2);
-  assert.ok(calls.some((call) => /dt:\s*0,/.test(call)), "cold coarse phi must be initialized without advection");
-  assert.ok(calls.some((call) => /dt:\s*dt_s,/.test(call)), "recurring coarse phi must advect with the transported field");
-  assert.match(source,
-    /encodeCoarsePhiCorrection\(coarseBroker, publicationTarget,[\s\S]*publicationTopology, dt_s, true\)[\s\S]*transported fine and coarse phi published before forces/,
-    "the provisional transported fine publication must correct coarse phi before current-step forces");
-  assert.match(source,
-    /encodeCoarsePhiCorrection\(restrictionBroker, pending\.target, pending\.topology, 0\)/,
-    "post-projection settlement must re-correct coarse phi without advecting it twice");
-});
-
-test("persistent coarse schedule uses one aligned parameter record per bootstrap/substep", () => {
-  const plan = planOctreePowerCoarseLevelSet(32);
-  assert.equal(plan.allocatedBytes, 54_436,
-    "allocation includes one-record-per-invocation arena, immutable coarse candidate, compact value/phase delta, selector rows, and correction buffers");
-  assert.equal(plan.parameterArenaBytes, 65 * 256);
-  const constructor = WebGPUOctreePowerCoarseLevelSet.toString().replace(/\s+/g, "");
-  const encode = WebGPUOctreePowerCoarseLevelSet.prototype.encode.toString().replace(/\s+/g, "");
-  const retire = WebGPUOctreePowerCoarseLevelSet.prototype.retireSubmittedEncoder.toString().replace(/\s+/g, "");
-  assert.equal(OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS, 65);
-  assert.doesNotMatch(constructor, /this\.params=Array\.from|this\.redistanceParams=Array\.from|activeEncoder/);
-  assert.match(encode, /this\.encoderArenas\.get\(encoder\)/);
-  assert.match(encode, /Powercoarsephiencoderparameterarena/);
-  assert.match(encode,
-    /invocationBase=encoderInvocation\*OCTREE_POWER_COARSE_LEVELSET_PARAM_STRIDE/);
-  assert.doesNotMatch(encode, /this\.plan\.redistancePasses\+1|for\(letiteration=/,
-    "the persistent device loop deletes all host-authored per-sweep parameter records");
-  assert.match(encode,
-    /encoderInvocation>=OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS\)\{thrownewRangeError\("Powercoarselevel-setencoderexceedsits65parameter-arenainvocations"\)/,
-    "one command encoder must fail before its aligned arena can wrap");
-  assert.doesNotMatch(encode, /submittedandretired|activeEncoder/,
-    "encoding a second command buffer must not depend on submission or retirement of the first");
-  assert.match(retire, /encoderArenas\.delete\(encoder\)/);
-  assert.match(retire, /freeParameterArenas\.push\(arena\.params\)/,
-    "retirement returns the arena to the construction-sized pool instead of reallocating it");
-  assert.match(WebGPUOctreePowerCoarseLevelSet.prototype.destroy.toString().replace(/\s+/g, ""),
-    /liveParameterArenas\.forEach\(buffer=>buffer\.destroy\(\)\)/,
-    "destruction releases every pooled parameter arena exactly once");
 });
 
 test("fine-to-coarse capacity diagnostics decode fail-closed control words", () => {

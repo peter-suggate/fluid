@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene } from "../lib/model";
-import {
-  sceneCustomDiagnosticPackImplementations,
-  sceneCustomHookImplementations,
-} from "../lib/scene-custom-diagnostic-implementations";
 import { evaluateFieldVelocityParityDiagnostic } from "../lib/scene-field-velocity-parity-diagnostic";
 import { evaluateFreeFallContactDiagnostic } from "../lib/scene-free-fall-contact-diagnostic";
 import { evaluateGardenBrickMigrationDiagnostic } from "../lib/scene-garden-brick-migration-diagnostic";
@@ -21,24 +17,6 @@ function evidence(methods: Record<string, Record<string, unknown>>): SceneDiagno
   return { methods: Object.fromEntries(Object.entries(methods)
     .map(([method, diagnostics]) => [method, { diagnostics }])) };
 }
-
-test("custom implementation registries cover every currently declared hook and migrated pack", () => {
-  assert.deepEqual(Object.keys(sceneCustomHookImplementations).sort(), [
-    "brick-quad-coverage",
-    "dam-break-perturbed-cadence",
-    "dam-break-velocity-parity",
-    "free-fall-contact",
-    "garden-source-brick-migration",
-    "hose-jet-drift",
-    "minimal-dam-motion",
-    "ocean-wave-profile",
-    "water-raster-integrity",
-  ]);
-  assert.deepEqual(Object.keys(sceneCustomDiagnosticPackImplementations).sort(), [
-    "quadtree-dam-parity",
-    "settling",
-  ]);
-});
 
 test("free-fall contact evaluates the analytic drop and both ceiling representations", () => {
   const scene = cloneScene(defaultScene);

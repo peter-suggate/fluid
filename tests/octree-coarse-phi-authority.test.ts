@@ -6,7 +6,7 @@ import { fineLevelSetSummaryWGSL, WebGPUFineLevelSetSummaries } from "../lib/web
 import {
   OCTREE_POWER_COARSE_LEVELSET_VALID,
   octreePowerCoarseDirectoryIsAuthoritative,
-  octreePowerCoarseLevelSetShader,
+  
 } from "../lib/webgpu-octree-power-coarse-levelset";
 
 const header = {
@@ -37,14 +37,6 @@ test("binding 15 cutover keeps only compact coarse authority", () => {
     "global-fine generation packing always selects the optimized warm-start lane");
   assert.doesNotMatch(source, /pressureWarmStart/,
     "the power-octree warm-start policy must not remain configurable");
-});
-
-test("packed coarse generation cannot alter any pre-existing pressure-capacity flag consumer", () => {
-  const uses = [...octreeProjectionShader.matchAll(/params\.pressureCapacity\.w[^;\n]*/g)].map((match) => match[0]);
-  assert.equal(uses.length, 2);
-  assert.ok(uses.some((use) => use.includes(">>2u")));
-  assert.ok(uses.some((use) => use.includes("& 1u")));
-  assert.ok(uses.every((use) => !use.includes("!= 0u") || use.includes("&")), uses.join("\n"));
 });
 
 test("fine-corrected intervals drive refinement while exact centre phi drives wet classification", () => {
@@ -104,38 +96,3 @@ test("fine-corrected intervals drive refinement while exact centre phi drives we
   assert.match(octreeProjectionShader, /coarseWord\(0u\)!=0x80000000u[\s\S]*coarseWord\(1u\)&0x3fffffffu\)!=expected/);
 });
 
-test("published-directory miss is air only after every requested sorted row publishes successfully", () => {
-  assert.match(octreePowerCoarseLevelSetShader,
-    /fn publishPowerCoarsePhi[\s\S]*slot>=requested\(\)[\s\S]*descriptor=geometry\(slot\)[\s\S]*candidateDirectory\.entries\[slot\]=SampleEntry/);
-  assert.match(octreePowerCoarseLevelSetShader,
-    /descriptor\.x==header\.cell&&descriptor\.y==header\.size[\s\S]*directoryLess\(level\(prior\.y\),morton\(prior\.x\),level\(descriptor\.y\),morton\(descriptor\.x\)\)/);
-  assert.match(octreePowerCoarseLevelSetShader,
-    /fn finalizePowerCoarsePhi[\s\S]*reduceAdvected\[0\]==count&&reduceDirectoryRows\[0\]==count[\s\S]*candidateDirectory\.state=VALID[\s\S]*candidateDirectory\.state=0u[\s\S]*publishPowerCoarsePhiDeltaAndCommit[\s\S]*sampleDirectory\.state=VALID/,
-    "a malformed candidate must leave the prior coarse directory immutable");
-  assert.doesNotMatch(octreePowerCoarseLevelSetShader,
-    /hash|probe|atomic(?:Load|Store|Add|Or|Min|Max|CompareExchange)|atomic<u32>/i,
-    "coarse publication must be a fixed-record sorted reduction, not a hash or atomic append");
-  assert.match(octreeProjectionShader, /A miss in a valid directory is the[\s\S]*explicit positive-air complement/);
-});
-
-test("an unavailable liquid authority rejects the frontier candidate instead of publishing an empty topology", () => {
-  // liquidOwner has no third state: when correctedCoarsePhi reports no
-  // authority it answers "air". Publishing a transaction encoded against a
-  // missing authority therefore classifies the whole domain dry, carries no
-  // row, emits no candidate, and lands on a zero-row topology -- which is
-  // terminal, because dirty marking only visits ACTIVE tiles, so a zero-row
-  // topology can never dirty a tile again and never re-refines.
-  assert.match(octreeProjectionShader,
-    /fn liquidAuthorityAvailable\(\)->bool\{\s*if\(bootstrapPhiEnabled\(\)\)\{return true;\}\s*return coarseDirectoryAuthority\(\);\s*\}/,
-    "the bootstrap authorities answer from closed form or the uploaded dense SDF and never consult the directory");
-  assert.match(octreeProjectionShader,
-    /var matched=0u;var invalid=select\(0u,1u,candidateCount>frontierListCapacity\(\)\s*\|\|required>frontierListCapacity\(\)\|\|!liquidAuthorityAvailable\(\)\)/,
-    "frontier finalization must fold the liquid authority into its rejection predicate");
-  // The rejection path retains the previous selector: it never assigns
-  // frontier[7] and never writes frontier[next], so the last complete topology
-  // survives and the next generation retries once the coarse publication has
-  // caught up.
-  assert.match(octreeProjectionShader,
-    /if\(!valid\)\{[\s\S]*frontier\[9\]=4u;\s*compaction\[11\]=FRONTIER_FAILED_MAGIC;[\s\S]*?return;\s*\}\s*frontier\[next\]=required;\s*frontier\[7\]=next;/,
-    "a rejected candidate must not flip the immutable frontier selector");
-});

@@ -36,6 +36,12 @@ export const SVO_BRICK_RASTER_CONTRACT = Object.freeze({
   scanWorkgroupSize: 256,
   scatterWorkgroupSize: 64,
   /**
+   * Fixed per-pixel conservative candidate arena. Garden's measured proxy
+   * crossings are p90=9 and max=18 at 1500 square; twenty-four covers that
+   * measured tail while an exact direct fallback handles every overflow.
+   */
+  coverageCandidatesPerPixel: 24,
+  /**
    * packedSurface(16) + identityMedia(8) + splitGeometry(16) + splitIdentity(8).
    * Every plane the deferred lighting pass consumes is a depth-tested colour
    * attachment; nothing in this pass writes an untested storage texture.
@@ -56,6 +62,8 @@ export const SVO_BRICK_RASTER_CONTRACT = Object.freeze({
   }),
   /** The dry-scene split group carries the sorted list into the vertex stage. */
   instanceDrawBinding: 2,
+  coverageCountBinding: 3,
+  coverageCandidateBinding: 4,
   /** `SvoMapping` prefix of `DryParams`; bound directly so the two cannot drift. */
   mappingBindingBytes: 48,
   sortStateHeaderWords: 8,
@@ -65,6 +73,9 @@ export const SVO_BRICK_RASTER_CONTRACT = Object.freeze({
     scatter: "svoBrickScatterMain" as const,
     vertex: "svoBrickRasterVertex" as const,
     fragment: "svoBrickRasterFragment" as const,
+    coverage: "svoBrickCoverageFragment" as const,
+    resolve: "svoBrickCoverageResolveFragment" as const,
+    overflowResolve: "svoBrickCoverageOverflowFragment" as const,
     background: "dryRasterPrimaryBackgroundMain" as const,
   }),
 });
@@ -79,6 +90,18 @@ export function svoBrickRasterInstanceBytes(leafCapacity: number): number {
     throw new RangeError("Brick-raster leaf capacity must be a positive safe integer");
   }
   return leafCapacity * SVO_BRICK_RASTER_CONTRACT.instanceStrideBytes;
+}
+
+export function svoBrickRasterCoverageCountBytes(width: number, height: number): number {
+  if (!Number.isSafeInteger(width) || width < 1 || !Number.isSafeInteger(height) || height < 1) {
+    throw new RangeError("Brick-raster coverage dimensions must be positive safe integers");
+  }
+  return width * height * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+export function svoBrickRasterCoverageCandidateBytes(width: number, height: number): number {
+  return svoBrickRasterCoverageCountBytes(width, height)
+    * SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel;
 }
 
 /** Standalone group-zero layout for the emission, scan and scatter passes. */
@@ -98,13 +121,36 @@ export function svoBrickRasterCullBindGroupLayoutEntries(): GPUBindGroupLayoutEn
   ];
 }
 
-/** Vertex-stage view of the sorted list. Read-only storage is vertex-legal. */
+/**
+ * The direct control reads only the sorted instances. The production coverage
+ * arm additionally appends instance indices per pixel, then reads the same
+ * arena from its one-fragment-per-pixel resolve. Counts remain atomic because
+ * overlapping proxy fragments are unordered by the rasterizer.
+ */
 export function svoBrickRasterDrawBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
   return [{
     binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding,
     visibility: GPUShaderStage.VERTEX,
     buffer: { type: "read-only-storage" },
   }];
+}
+
+export function svoBrickRasterCoverageBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
+  return [
+    { binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding,
+      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      buffer: { type: "read-only-storage" } },
+    {
+      binding: SVO_BRICK_RASTER_CONTRACT.coverageCountBinding,
+      visibility: GPUShaderStage.FRAGMENT,
+      buffer: { type: "storage" },
+    },
+    {
+      binding: SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding,
+      visibility: GPUShaderStage.FRAGMENT,
+      buffer: { type: "storage" },
+    },
+  ];
 }
 
 /**

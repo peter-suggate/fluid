@@ -3,8 +3,11 @@ import test from "node:test";
 import { validateScene, type SceneDescription, type Vec3 } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { sceneCellSizes_m } from "../lib/scene-lattice";
+import { projectToViewport } from "../lib/webgpu-camera";
 import {
   dragFluidBodyBox,
+  fluidBodyEdgeSegment,
+  shapeHandleAtPointer,
   fluidBodyBox,
   fluidBodyBoxPatch,
   fluidBodyBoxVolume_m3,
@@ -240,4 +243,67 @@ test("the box round-trips: authoring it and reading it back returns the same box
     assert.ok(Math.abs(reread.min[axis] - moved.min[axis]) < 1e-9, `min ${axis}`);
     assert.ok(Math.abs(reread.max[axis] - moved.max[axis]) < 1e-9, `max ${axis}`);
   }
+});
+
+test("an edge handle spans the whole edge it grabs", () => {
+  const box = { min: { x: -1, y: 0, z: -2 }, max: { x: 1, y: 3, z: 2 } };
+  // "+0-" fixes max x and min z, leaving y free: the edge runs the box's height.
+  const handle = fluidBodyHandleById(box, "+0-")!;
+  const segment = fluidBodyEdgeSegment(box, handle);
+  assert.ok(segment);
+  assert.deepEqual(segment.from, { x: 1, y: 0, z: -2 });
+  assert.deepEqual(segment.to, { x: 1, y: 3, z: -2 });
+});
+
+test("only edges have a segment; faces and corners are points", () => {
+  const box = { min: { x: -1, y: 0, z: -1 }, max: { x: 1, y: 2, z: 1 } };
+  assert.equal(fluidBodyEdgeSegment(box, fluidBodyHandleById(box, "+00")!), undefined);
+  assert.equal(fluidBodyEdgeSegment(box, fluidBodyHandleById(box, "+++")!), undefined);
+  for (const handle of fluidBodyHandles(box).filter((entry) => entry.kind === "edge")) {
+    const segment = fluidBodyEdgeSegment(box, handle);
+    assert.ok(segment, `${handle.id} must span an edge`);
+    // Exactly one axis varies along an edge — the one the handle leaves free.
+    const varying = (["x", "y", "z"] as const).filter((axis) => segment.from[axis] !== segment.to[axis]);
+    assert.equal(varying.length, 1);
+    assert.equal(handle.sides[varying[0]!], undefined);
+  }
+});
+
+test("every edge segment lies on the box it came from", () => {
+  const box = { min: { x: -1, y: 0, z: -2 }, max: { x: 1, y: 3, z: 2 } };
+  for (const handle of fluidBodyHandles(box).filter((entry) => entry.kind === "edge")) {
+    const segment = fluidBodyEdgeSegment(box, handle)!;
+    for (const end of [segment.from, segment.to]) {
+      for (const axis of ["x", "y", "z"] as const) {
+        assert.ok(end[axis] === box.min[axis] || end[axis] === box.max[axis],
+          `${handle.id} endpoint is off the box on ${axis}`);
+      }
+    }
+  }
+});
+
+test("an edge is grabbable along its length, not just at its midpoint", () => {
+  const scene = preset("water-box-dam-break");
+  const box = fluidBodyBox(scene);
+  assert.ok(box);
+  const camera = { azimuth_rad: 0.72, elevation_rad: 0.42, distance_m: 2.65, target_m: { x: 0, y: 0.38, z: 0 } };
+  const [width, height] = [1200, 800];
+  const candidates = [{ target: "fluid" as const, box }];
+
+  // Find an edge whose whole span projects in front of the camera, then aim a
+  // quarter of the way along it — nowhere near the midpoint a square would use.
+  const edge = fluidBodyHandles(box).filter((handle) => handle.kind === "edge")
+    .map((handle) => ({ handle, segment: fluidBodyEdgeSegment(box, handle)! }))
+    .map(({ handle, segment }) => ({
+      handle,
+      ends: [segment.from, segment.to].map((point) => projectToViewport(point, camera, width, height)),
+    }))
+    .find(({ ends }) => ends.every((end) => end.visible && end.depth_m > 1e-6));
+  assert.ok(edge, "fixture must present at least one fully visible edge");
+
+  const [from, to] = edge.ends.map((end) => ({ x: end.leftFraction * width, y: end.topFraction * height }));
+  const quarter = { x: from!.x + 0.25 * (to!.x - from!.x), y: from!.y + 0.25 * (to!.y - from!.y) };
+  const pick = shapeHandleAtPointer(candidates, camera, width, height, quarter);
+  assert.ok(pick, "a point on the drawn edge must grab something");
+  assert.equal(pick.handleId, edge.handle.id, "and it must be the edge under the pointer");
 });

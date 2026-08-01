@@ -33,11 +33,13 @@ import { useUIStore } from "../stores/ui-store";
 import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
+import { resourceInteractionGates } from "../resource-readiness";
 import { addProp, createPropAt, findProp, propSelectionId, removeProp, updateProp } from "../editor-props";
 import { scaleScene as scaleSceneBy, sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../scene-scale";
 import { sceneLatticeDimensions } from "../scene-lattice";
 import { fluidBodyBox, fluidBodyBoxPatch, scaleFluidBodyVolume, type FluidBodyBox } from "../editor-fluid-body";
 import { tankResizeIsStructural, tankResizePatch } from "../editor-tank";
+import { useSceneDraftStore, type SceneDraftSubject } from "../stores/scene-draft-store";
 import type { ScenePropDescription, ScenePropShape } from "../model";
 import {
   browserSceneLibraryStorage,
@@ -167,7 +169,7 @@ class SimulationController {
 
   private webgpuTransportReady(): boolean {
     const diagnostics = useDiagnosticsStore.getState();
-    if (diagnostics.gpuStatus.state !== "ready") return false;
+    if (!resourceInteractionGates(diagnostics.resourceReadiness, true).transportInteractive) return false;
     return useMethodStore.getState().methodId !== "octree"
       || (diagnostics.gpuInfo?.initialSparseAuthorityReady === true
         && diagnostics.gpuInfo?.initialRasterSurfaceReady === true);
@@ -195,6 +197,9 @@ class SimulationController {
   constructor() {
     const scene = useSceneStore.getState().scene;
     if (this.backend === "cpu-reference") this.fluidSolver = this.buildFluidSolver(scene);
+    // A reset lands on a different scene, so a proposal made against the old
+    // one describes nothing. Drop it before anything can draw from it.
+    useSceneDraftStore.getState().clearDraft();
     this.bodies = initializeRigidBodies(scene.rigidBodies);
     this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
     useDiagnosticsStore.getState().set({
@@ -423,6 +428,21 @@ class SimulationController {
     this.pendingCpuActivity = undefined;
     this.kinematicDrag = null;
     if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
+    const diagnosticsStore = useDiagnosticsStore.getState();
+    if (this.backend === "webgpu" && runtimePlan.fluidSolver
+      && diagnosticsStore.resourceReadiness.fluid.state !== "preparing") {
+      diagnosticsStore.set({ gpuStatus: {
+        state: "initializing",
+        label: "Preparing fenced t=0 fluid resources",
+        phase: "planning",
+        completed: 0,
+        total: 0,
+        startedAt_ms: performance.now(),
+        kind: "rebuild",
+        retainingPrevious: false,
+        resource: getMethod(useMethodStore.getState().methodId).resource,
+      } });
+    }
     this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
     useDiagnosticsStore.getState().set({ fluidState: this.fluidSolver?.diagnostics ?? null, fluidRenderState: this.fluidSolver?.getRenderState() ?? null, gpuInfo: null, waterSurfacePresentation: null, couplingState: { displacedVolume_m3: 0, bodyImpulse_N_s: { x: 0, y: 0, z: 0 }, fluidReactionImpulse_N_s: { x: 0, y: 0, z: 0 }, momentumClosureError_N_s: 0, coupledBodyCount: 0 }, samples: [], performanceReport: emptyPerformanceReport, performanceReports: [] });
     const runtime = useRuntimeStore.getState();
@@ -482,6 +502,7 @@ class SimulationController {
       kind: "rebuild",
       operation,
       retainingPrevious: current.state === "ready" || (current.state === "initializing" && Boolean(current.retainingPrevious)),
+      resource: getMethod(useMethodStore.getState().methodId).resource,
     } });
   }
 
@@ -820,6 +841,41 @@ class SimulationController {
         }, identity))
         : baseFrame);
     }
+  }
+
+  // ---- draft manipulation --------------------------------------------------
+
+  /**
+   * Open a direct-manipulation gesture: the draft store takes the proposals,
+   * and the document is not touched until `commitDraft`.
+   */
+  beginDraft(subject: SceneDraftSubject, label: string) {
+    useSceneDraftStore.getState().beginDraft(subject, label);
+    this.beginEdit(label);
+  }
+
+  /**
+   * Land the open draft on the document — one write, one re-seed, one undo
+   * entry — or drop it if the gesture was interrupted.
+   *
+   * `announceRebuild` is for the gestures that move the lattice (the tank), so
+   * the status line names the edit that is costing the pause instead of
+   * reporting an anonymous rebuild.
+   */
+  commitDraft(options: { announceRebuild?: string } = {}) {
+    const draftStore = useSceneDraftStore.getState();
+    const draft = draftStore.draft;
+    draftStore.clearDraft();
+    if (!draft) { this.cancelEdit(); return false; }
+    if (options.announceRebuild) this.announceGPURebuild(options.announceRebuild);
+    useSceneStore.getState().patchScene(draft.patch);
+    return this.commitEdit(undefined, { reseed: true });
+  }
+
+  /** Abandon the open gesture, leaving the committed scene untouched. */
+  cancelDraft() {
+    useSceneDraftStore.getState().clearDraft();
+    this.cancelEdit();
   }
 
   // ---- scene scale ---------------------------------------------------------

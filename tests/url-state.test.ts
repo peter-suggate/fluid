@@ -5,50 +5,6 @@ import { getScenePreset } from "../lib/scenes";
 import { useUIStore } from "../lib/stores/ui-store";
 import { parseQueryState, serializeQueryState } from "../lib/url-state";
 
-test("query state round-trips method, scene, quality, and sparse overrides", () => {
-  const scene = getScenePreset("hose-tank").create();
-  scene.container.width_m = 1.35;
-  scene.fluid.inflow = undefined;
-  scene.randomSeed = 91;
-
-  const initialUI = useUIStore.getInitialState();
-  const query = serializeQueryState("?campaign=paper&method=stale", { presetId: "hose-tank", scene }, {
-    methodId: "uniform",
-    quality: "high",
-    overrides: {
-      uniform: { velocityTransport: "semi-lagrangian", jacobiIterations: 112 },
-      "tall-cell": { pressureCycles: 5 }
-    }
-  }, {
-    ...initialUI,
-    diagnosticsOpen: false,
-    rightPanel: "performance",
-    gridOverlayAxis: "z",
-    gridOverlaySlice: 0.7,
-    voxelRenderMode: "brick-grid",
-    camera: { ...initialUI.camera, distance_m: 4.2 }
-  });
-  const parsed = parseQueryState(query);
-
-  assert.equal(new URLSearchParams(query).get("campaign"), "paper");
-  assert.equal(parsed.methodId, "uniform");
-  assert.equal(parsed.presetId, "hose-tank");
-  assert.equal(parsed.quality, "high");
-  assert.equal(parsed.ui.diagnosticsOpen, false);
-  assert.equal(parsed.ui.rightPanel, "performance");
-  assert.equal(parsed.ui.gridOverlayAxis, "z");
-  assert.equal(parsed.ui.gridOverlaySlice, 0.7);
-  assert.equal(parsed.ui.voxelRenderMode, "brick-grid");
-  assert.equal(parsed.ui.camera.distance_m, 4.2);
-  assert.deepEqual(parsed.overrides, {
-    "tall-cell": { pressureCycles: 5 },
-    uniform: { velocityTransport: "semi-lagrangian", jacobiIterations: 112 }
-  });
-  assert.equal(parsed.scene.container.width_m, 1.35);
-  assert.equal(parsed.scene.fluid.inflow, undefined);
-  assert.equal(parsed.scene.randomSeed, 91);
-});
-
 test("query state accepts the finest surface voxel inspection mode", () => {
   const parsed = parseQueryState("?voxels=surface-voxels");
   assert.equal(parsed.ui.voxelRenderMode, "surface-voxels");

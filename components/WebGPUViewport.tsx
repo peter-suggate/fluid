@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState , useMemo} from "react";
-import { FluidLabRenderer, type FluidCellTraceConfig, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
+import { FluidLabRenderer, webGPUPlatformResourcePlugin, type FluidCellTraceConfig, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
 import {
   resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
   type SvoPixelTrace, type SvoPixelTracePinRequest,
@@ -27,6 +27,7 @@ import { getMethod } from "@/lib/methods";
 import { canonicalScene, type CameraState } from "@/lib/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
 import { boundingRadius, createBodyDescription, type RigidBodyState } from "@/lib/rigid-body";
+import type { SceneDescription } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
 import { simulationRecording } from "@/lib/simulation/recording";
 import { projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
@@ -63,9 +64,13 @@ import {
   dragFluidBodyBox,
   fluidBodyBox,
   fluidBodyBoxCorners,
+  fluidBodyBoxPatch,
+  fluidBodyEdgeSegment,
   fluidBodyHandleAxis,
   fluidBodyHandleById,
+  fluidBodyHandleLabel,
   fluidBodyHandles,
+  shapeHandleAtPointer,
   FLUID_BODY_BOX_EDGES,
   FLUID_BODY_HANDLE_TOLERANCE_PX,
   type FluidBodyBox,
@@ -74,9 +79,9 @@ import {
 import {
   dragTankExtents,
   tankBox,
-  tankBoxForExtents,
   tankHandleIsGrabbable,
   tankLatticeForExtents,
+  tankResizePatch,
 } from "@/lib/editor-tank";
 import {
   applyTerrainFeatureDrag,
@@ -88,6 +93,7 @@ import {
 } from "@/lib/editor-terrain";
 import { SelectionFlyout } from "./SelectionFlyout";
 import { useSceneStore } from "@/lib/stores/scene-store";
+import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore } from "@/lib/stores/scene-draft-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useUIStore } from "@/lib/stores/ui-store";
@@ -156,7 +162,11 @@ export function WebGPUViewport() {
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
   const setDiagnosticsOpen = useUIStore((state) => state.setDiagnosticsOpen);
-  const scene = useSceneStore((state) => state.scene);
+  // Presentation reads the display scene, so every handle, outline and readout
+  // below follows an open drag. The physics still reads the committed store —
+  // the render loop and the commit paths go through `useSceneStore` directly.
+  const scene = useDisplayScene();
+  const sceneDraft = useSceneDraftStore((state) => state.draft);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
@@ -170,16 +180,15 @@ export function WebGPUViewport() {
   const selection = useUIStore((state) => state.selection);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const [hover, setHover] = useState<EditorHover | null>(null);
-  /**
-   * The box a shape drag is currently proposing, held here rather than in the
-   * scene document so the gesture costs nothing but a redraw. React state, not
-   * a ref, because the outline and the handles have to follow the pointer.
-   */
-  const [shapePreview, setShapePreview] = useState<{
+  /** Handle under the pointer in shape mode, so it can announce what it does. */
+  const [shapeHover, setShapeHover] = useState<{
     target: "fluid" | "tank";
-    box: FluidBodyBox;
+    handleId: string;
     label: string;
+    leftFraction: number;
+    topFraction: number;
   } | null>(null);
+
   const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
   const pixelTraceLayers = useUIStore((state) => state.pixelTraceLayers);
@@ -585,20 +594,43 @@ export function WebGPUViewport() {
   // the solver's seed key — writing per pointer-move asked the renderer to
   // re-seed dozens of times a second, which is exactly the hitch that made the
   // gesture unusable. Preview here, simulate on release.
-  const shapeMode = activeTool === "shape";
+  const shapeMode = activeTool === "bounds";
+  /** Both boxes, in the order the pick resolves ties: water first. */
+  const shapeHandleCandidates = (source: SceneDescription) => [
+    { target: "fluid" as const, box: fluidBodyBox(source) },
+    { target: "tank" as const, box: tankBox(source), grabbable: tankHandleIsGrabbable },
+  ];
+  // `scene` is already the proposed scene, so the handles need no separate
+  // preview path: they are simply the handles of the box the scene describes.
   const shapeTargetBox = (target: "fluid" | "tank") =>
-    shapePreview?.target === target ? shapePreview.box : target === "tank" ? tankBox(scene) : fluidBodyBox(scene);
+    target === "tank" ? tankBox(scene) : fluidBodyBox(scene);
   const projectHandles = (box: FluidBodyBox | undefined, keep: (handle: ReturnType<typeof fluidBodyHandles>[number]) => boolean) =>
-    box && fluidBodyHandles(box).filter(keep).map((handle) => ({
-      ...handle,
-      projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
-    }));
+    box && fluidBodyHandles(box).filter(keep).map((handle) => {
+      // An edge is drawn as the edge itself, so it carries its two endpoints
+      // rather than only the midpoint a square would have sat on.
+      const segment = fluidBodyEdgeSegment(box, handle);
+      return {
+        ...handle,
+        projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
+        ends: segment && [segment.from, segment.to]
+          .map((point) => projectToViewport(point, camera, viewportSize.width, viewportSize.height)),
+      };
+    });
   const fluidBodyGizmo = shapeMode ? projectHandles(shapeTargetBox("fluid"), () => true) : undefined;
   const tankGizmo = shapeMode ? projectHandles(shapeTargetBox("tank"), tankHandleIsGrabbable) : undefined;
   // Only the box actually being dragged is outlined: an outline on both would
   // be two wireframes fighting for the same silhouette.
-  const shapeOutline = shapePreview
-    ? fluidBodyBoxCorners(shapePreview.box)
+  const shapeSubject = sceneDraft?.subject === "tank" ? "tank"
+    : sceneDraft?.subject === "fluid-body" ? "fluid" : undefined;
+  const shapeOutlineBox = shapeSubject ? shapeTargetBox(shapeSubject) : undefined;
+  const shapeSizeLabel = (subject: "fluid" | "tank", box: FluidBodyBox) => {
+    const size = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
+    const metres = size.map((value) => value.toFixed(2)).join(" × ");
+    if (subject !== "tank") return `${metres} m`;
+    return `${metres} m · ${tankLatticeForExtents(scene, { width_m: size[0]!, height_m: size[1]!, depth_m: size[2]! }).join("×")}`;
+  };
+  const shapeOutline = shapeOutlineBox
+    ? fluidBodyBoxCorners(shapeOutlineBox)
       .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
     : undefined;
   const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
@@ -694,7 +726,7 @@ export function WebGPUViewport() {
       methodId: useMethodStore.getState().methodId,
     });
     if (startupMode() === "off") {
-      diagnostics.set({ gpuStatus: { state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)" } });
+      diagnostics.set({ gpuStatus: { state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)", resource: webGPUPlatformResourcePlugin } });
       return;
     }
     let running = true;
@@ -713,8 +745,12 @@ export function WebGPUViewport() {
         // progress arrives from the renderer.
         const rendererOnlyReady = status.state === "ready" && status.label === "WebGPU renderer ready"
           && getMethod(useMethodStore.getState().methodId).backend === "webgpu";
+        // Close the platform plugin before opening the fluid plugin. Replacing
+        // this event used to leave the completed 4/4 renderer task permanently
+        // active while its label claimed the solver was being prepared.
+        if (rendererOnlyReady) useDiagnosticsStore.getState().set({ gpuStatus: status });
         const reportedStatus = rendererOnlyReady
-          ? { state: "initializing" as const, label: "Renderer ready; preparing fenced t=0 solver authority", phase: "warmup", completed: 0, total: 1, startedAt_ms: performance.now(), kind: "startup" as const }
+          ? { state: "initializing" as const, label: "Renderer ready; preparing fenced t=0 solver authority", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" as const, resource: getMethod(useMethodStore.getState().methodId).resource }
           : status;
         const gpuStatus = reportedStatus.state === "initializing" && current.state === "initializing" && current.operation
           ? { ...reportedStatus, operation: current.operation, kind: reportedStatus.kind ?? current.kind, retainingPrevious: reportedStatus.retainingPrevious ?? current.retainingPrevious }
@@ -775,7 +811,7 @@ export function WebGPUViewport() {
       running = false;
       useRuntimeStore.getState().setRunState("paused");
       cancelAnimationFrame(frame);
-      if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: "Stopping WebGPU; waiting for initialization and solver tasks to drain" } });
+      if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: "Stopping WebGPU; waiting for initialization and solver tasks to drain", resource: webGPUPlatformResourcePlugin } });
       const pendingLease = leaseAcquisition;
       const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
       const reproduction = dawnReproductionForGPUFailure(label);
@@ -784,7 +820,7 @@ export function WebGPUViewport() {
         releaseGPULease = undefined;
         stopping = false;
         stopped = true;
-        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel, reproduction } });
+        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel, reproduction, resource: webGPUPlatformResourcePlugin } });
       })();
       return stopPromise;
     }
@@ -793,7 +829,7 @@ export function WebGPUViewport() {
       if (safeBringup) {
         const violations = safeViolations();
         if (violations.length > 0) {
-          diagnostics.set({ gpuStatus: { state: "manual", label: `Safe WebGPU start refused: ${violations.join("; ")}` } });
+          diagnostics.set({ gpuStatus: { state: "manual", label: `Safe WebGPU start refused: ${violations.join("; ")}`, resource: webGPUPlatformResourcePlugin } });
           return;
         }
         useRuntimeStore.getState().setRunState("paused");
@@ -802,7 +838,7 @@ export function WebGPUViewport() {
       initializationStarted = true;
       window.removeEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
       unsubscribeAutomaticStart();
-      diagnostics.set({ gpuStatus: { state: "initializing", label: "Acquiring exclusive browser WebGPU lease", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" } });
+      diagnostics.set({ gpuStatus: { state: "initializing", label: "Acquiring exclusive browser WebGPU lease", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
       const lockManager = "locks" in navigator
         ? navigator.locks as Parameters<typeof acquireBrowserGPULease>[0]
         : undefined;
@@ -814,12 +850,12 @@ export function WebGPUViewport() {
       if (lease.status !== "acquired") {
         initializationStarted = false;
         if (safeBringup || lease.status !== "unsupported") {
-          diagnostics.set({ gpuStatus: { state: "manual", label: `WebGPU start refused: ${lease.message}` } });
+          diagnostics.set({ gpuStatus: { state: "manual", label: `WebGPU start refused: ${lease.message}`, resource: webGPUPlatformResourcePlugin } });
           window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
           return;
         }
       } else releaseGPULease = lease.release;
-      diagnostics.set({ gpuStatus: { state: "initializing", label: "Initializing WebGPU", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" } });
+      diagnostics.set({ gpuStatus: { state: "initializing", label: "Initializing WebGPU", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
       void renderer.initialize().then(async () => {
       if (!alive || stopping || stopped) return;
       const status = useDiagnosticsStore.getState().gpuStatus;
@@ -832,6 +868,16 @@ export function WebGPUViewport() {
         frame = requestAnimationFrame(render);
         const sceneState = useSceneStore.getState();
         const scene = sceneState.scene;
+        // A terrain proposal redraws the ground immediately; it cannot move the
+        // lattice, so presenting it against the committed solver is safe. Every
+        // other draft is overlay-only — reshaping the tank or the water does
+        // change the geometry the solver owns, and drawing the fluid at a size
+        // it was not allocated for would tear. Those wait for the release.
+        const draft = useSceneDraftStore.getState().draft;
+        const presentationScene = draft?.subject === "terrain"
+          ? applySceneDraft(scene, draft)
+          : scene;
+        renderer.setSimulationScene(presentationScene === scene ? undefined : scene);
         const ui = useUIStore.getState();
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
@@ -842,7 +888,7 @@ export function WebGPUViewport() {
         let metrics;
         try {
           metrics = renderer.draw(
-            simulation.time(), scene, ui.camera, state.bodies, ui.selectedBodyId,
+            simulation.time(), presentationScene, ui.camera, state.bodies, ui.selectedBodyId,
             state.fluidRenderState ?? undefined, simulation.backend,
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method), simulationEpoch: runtime.simulationEpoch },
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
@@ -900,7 +946,7 @@ export function WebGPUViewport() {
     const pageHide = () => { void stopGPU("WebGPU stopped during page close", false); };
     window.addEventListener("pagehide", pageHide, { once: true });
     if (startupMode() === "manual" || startupMode() === "safe") {
-      diagnostics.set({ gpuStatus: { state: "manual", label: "WebGPU is waiting for explicit startup" } });
+      diagnostics.set({ gpuStatus: { state: "manual", label: "WebGPU is waiting for explicit startup", resource: webGPUPlatformResourcePlugin } });
       window.addEventListener(GPU_MANUAL_START_EVENT, beginInitialization);
     } else beginInitialization();
     let cleanupTimer: number | undefined;
@@ -1049,6 +1095,7 @@ export function WebGPUViewport() {
     }
     if (!best) return false;
     pointerRef.current = { id: event.pointerId, action: "inflow-handle", kind: best.kind, anchor: best.anchor };
+    simulation.beginDraft("inflow", best.kind === "center" ? "Moved the hose" : "Aimed the hose");
     simulation.beginEdit(best.kind === "center" ? "Moved the hose" : "Aimed the hose");
     return true;
   };
@@ -1080,7 +1127,7 @@ export function WebGPUViewport() {
     );
     if (distance_px > FILL_HANDLE_TOLERANCE_PX) return false;
     pointerRef.current = { id: event.pointerId, action: "fill-level" };
-    simulation.beginEdit("Set fill level");
+    simulation.beginDraft("fill-level", "Set fill level");
     return true;
   };
 
@@ -1094,50 +1141,20 @@ export function WebGPUViewport() {
    */
   const beginShapeDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const ui = useUIStore.getState();
-    if (ui.activeTool !== "shape") return false;
-    const scene = useSceneStore.getState().scene;
+    if (ui.activeTool !== "bounds") return false;
     const rect = event.currentTarget.getBoundingClientRect();
-    const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
-    const rank = { corner: 0, edge: 1, face: 2 } as const;
-    let best: { target: "fluid" | "tank"; handleId: string; box: FluidBodyBox; distance_px: number; rank: number } | undefined;
-    const candidates: ReadonlyArray<{ target: "fluid" | "tank"; box: FluidBodyBox | undefined; grabbable: (handle: FluidBodyHandle) => boolean }> = [
-      { target: "fluid", box: fluidBodyBox(scene), grabbable: () => true },
-      { target: "tank", box: tankBox(scene), grabbable: tankHandleIsGrabbable },
-    ];
-    for (const candidate of candidates) {
-      if (!candidate.box) continue;
-      for (const handle of fluidBodyHandles(candidate.box)) {
-        if (!candidate.grabbable(handle)) continue;
-        const projection = projectToViewport(handle.position_m, ui.camera, rect.width, rect.height);
-        if (!(projection.depth_m > 1e-6)) continue;
-        const distance_px = Math.hypot(
-          pointer.x - projection.leftFraction * rect.width,
-          pointer.y - projection.topFraction * rect.height);
-        if (distance_px > FLUID_BODY_HANDLE_TOLERANCE_PX) continue;
-        const entry = { target: candidate.target, handleId: handle.id, box: candidate.box, distance_px, rank: rank[handle.kind] };
-        // The water wins outright: the tank encloses it, so a tie means the
-        // pointer is over the body the user can actually see there.
-        if (!best || (best.target === entry.target
-          ? entry.rank < best.rank || (entry.rank === best.rank && entry.distance_px < best.distance_px)
-          : entry.target === "fluid")) best = entry;
-      }
-    }
-    if (!best) return false;
+    const pick = shapeHandleAtPointer(
+      shapeHandleCandidates(displaySceneSnapshot()), ui.camera, rect.width, rect.height,
+      { x: event.clientX - rect.left, y: event.clientY - rect.top });
+    if (!pick) return false;
     pointerRef.current = {
       id: event.pointerId, action: "shape-handle",
-      target: best.target, handleId: best.handleId, box: best.box,
+      target: pick.target, handleId: pick.handleId, box: pick.box,
     };
-    setShapePreview({ target: best.target, box: best.box, label: shapeLabel(best.target, best.box, scene) });
-    simulation.beginEdit(best.target === "tank" ? "Resized the tank" : "Reshaped the water body");
+    setShapeHover(null);
+    simulation.beginDraft(pick.target === "tank" ? "tank" : "fluid-body",
+      pick.target === "tank" ? "Resized the tank" : "Reshaped the water body");
     return true;
-  };
-
-  /** Size readout carried beside the dragged box. */
-  const shapeLabel = (target: "fluid" | "tank", box: FluidBodyBox, scene: ReturnType<typeof useSceneStore.getState>["scene"]) => {
-    const size = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
-    if (target !== "tank") return `${size.map((value) => value.toFixed(2)).join(" × ")} m`;
-    const lattice = tankLatticeForExtents(scene, { width_m: size[0], height_m: size[1], depth_m: size[2] });
-    return `${size.map((value) => value.toFixed(2)).join(" × ")} m · ${lattice.join("×")}`;
   };
 
   /**
@@ -1178,7 +1195,7 @@ export function WebGPUViewport() {
     }
     if (!best) return false;
     pointerRef.current = { id: event.pointerId, action: "terrain-handle", index, kind: best.kind, anchor: best.anchor };
-    simulation.beginEdit(`Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`);
+    simulation.beginDraft("terrain", `Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`);
     return true;
   };
 
@@ -1330,6 +1347,25 @@ export function WebGPUViewport() {
       normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
     };
     if (!active) {
+      // In shape mode the handles are the interface, so the hover that matters
+      // is which one is under the pointer — not what is behind it.
+      if (useUIStore.getState().activeTool === "bounds") {
+        const pick = shapeHandleAtPointer(
+          shapeHandleCandidates(displaySceneSnapshot()), useUIStore.getState().camera,
+          rect.width, rect.height,
+          { x: event.clientX - rect.left, y: event.clientY - rect.top });
+        const projection = pick && projectToViewport(
+          pick.handle.position_m, useUIStore.getState().camera, rect.width, rect.height);
+        setShapeHover(pick && projection
+          ? {
+            target: pick.target, handleId: pick.handleId,
+            label: fluidBodyHandleLabel(pick.handle),
+            leftFraction: projection.leftFraction, topFraction: projection.topFraction,
+          }
+          : null);
+        setHover(null);
+        return;
+      }
       // Analytic hover: no GPU readback, so it is safe at pointer-move rate.
       const ray = pointerRay(event);
       setHover(hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray) ?? null);
@@ -1339,15 +1375,17 @@ export function WebGPUViewport() {
     if (active.action === "pick") return;
     if (active.action === "inflow-handle") {
       const ray = pointerRay(event);
-      const sceneStore = useSceneStore.getState();
-      const inflow = sceneStore.scene.fluid.inflow;
+      const committed = useSceneStore.getState().scene;
+      const inflow = committed.fluid.inflow;
       if (!inflow) return;
       // Both handles drag in the camera plane through their own anchor, so a
       // hose can be aimed in any direction rather than only along an axis.
       const point = planeHit(ray.origin, ray.direction, active.anchor, cameraBasis(useUIStore.getState().camera).forward);
-      sceneStore.patchFluid({ inflow: active.kind === "center"
-        ? moveInflow(inflow, point, sceneStore.scene.container)
-        : aimInflow(inflow, point) });
+      useSceneDraftStore.getState().updateDraft({
+        fluid: { ...committed.fluid, inflow: active.kind === "center"
+          ? moveInflow(inflow, point, committed.container)
+          : aimInflow(inflow, point) },
+      });
       return;
     }
     if (active.action === "fluid-paint") {
@@ -1358,36 +1396,42 @@ export function WebGPUViewport() {
       const point = shapeHandlePoint(active.box, active.handleId, pointerRay(event));
       const handle = fluidBodyHandleById(active.box, active.handleId);
       if (!point || !handle) return;
-      const scene = useSceneStore.getState().scene;
-      // Dragged from the box the gesture opened on, not from a box that is
-      // itself following the pointer, so a handle cannot walk away under it.
-      const box = active.target === "tank"
-        ? tankBoxForExtents(dragTankExtents(scene, handle, point))
-        : dragFluidBodyBox(active.box, handle, point, scene);
-      // Preview only. Nothing here touches the scene document, so the solver
-      // is neither re-seeded nor rebuilt until the pointer comes up.
-      setShapePreview({ target: active.target, box, label: shapeLabel(active.target, box, scene) });
+      // Against the committed scene, and from the box the gesture opened on:
+      // resolving the drag against its own output would let the handle walk
+      // away from the pointer, and against the draft it would drift.
+      const committed = useSceneStore.getState().scene;
+      // The draft, not the document. The solver is neither re-seeded nor
+      // rebuilt until the pointer comes up.
+      useSceneDraftStore.getState().updateDraft(active.target === "tank"
+        ? tankResizePatch(committed, dragTankExtents(committed, handle, point))
+        : fluidBodyBoxPatch(committed, dragFluidBodyBox(active.box, handle, point, committed)));
       return;
     }
     if (active.action === "fill-level") {
       const ray = pointerRay(event);
-      const sceneStore = useSceneStore.getState();
-      const corner = fillLevelHandlePosition(sceneStore.scene);
+      const committed = useSceneStore.getState().scene;
+      // The handle rides the *proposed* surface, so it tracks the pointer.
+      const corner = fillLevelHandlePosition(displaySceneSnapshot());
       const point = closestPointOnAxis(ray.origin, ray.direction, corner, GIZMO_AXIS_DIRECTIONS.y);
       if (!point) return;
-      sceneStore.patchContainer({ fillFraction: fillFractionForHeight(sceneStore.scene, point.y) });
+      useSceneDraftStore.getState().updateDraft({
+        container: { ...committed.container, fillFraction: fillFractionForHeight(committed, point.y) },
+      });
       return;
     }
     if (active.action === "terrain-handle") {
       const point = terrainHandlePoint(active, pointerRay(event));
       if (!point) return;
-      const sceneStore = useSceneStore.getState();
-      const terrain = sceneStore.scene.terrain;
+      const committed = useSceneStore.getState().scene;
+      const terrain = committed.terrain;
       if (!terrain) return;
-      // Terrain is absent from gpuSceneSolverKey, so patching the document
-      // mid-drag repaints the ground without churning the solver. The commit
-      // is what re-seeds it.
-      sceneStore.patchScene({ terrain: applyTerrainFeatureDrag(terrain, active.index, active.kind, point, sceneStore.scene.container) });
+      // Terrain *is* in the seed tier, so this cannot patch the document: it
+      // would re-seed the solver on every pointer-move. The draft redraws the
+      // ground — the render loop presents terrain proposals — and the release
+      // is what re-seeds.
+      useSceneDraftStore.getState().updateDraft({
+        terrain: applyTerrainFeatureDrag(terrain, active.index, active.kind, point, committed.container),
+      });
       return;
     }
     if (active.action === "gizmo-axis" || active.action === "gizmo-free") {
@@ -1451,21 +1495,29 @@ export function WebGPUViewport() {
     pointerRef.current = null;
     if (active.action === "body") { simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end"); return; }
     // Terrain reaches the solver only through a re-seed.
-    if (active.action === "terrain-handle") { simulation.commitEdit(undefined, { reseed: true }); return; }
+    if (active.action === "terrain-handle") {
+      if (cancelled) { simulation.cancelDraft(); return; }
+      simulation.commitDraft();
+      return;
+    }
     // Brick seeds and fill fraction are already in the solver key, so the
     // document write alone invalidates it; the reseed makes the edit start
     // from a defined t=0 instead of mid-flight.
     if (active.action === "shape-handle") {
-      const preview = shapePreview;
-      setShapePreview(null);
       // A cancelled gesture keeps the scene it started with; only a real
       // release is allowed to spend a re-seed.
-      if (cancelled || !preview) { simulation.cancelEdit(); return; }
-      if (active.target === "tank") simulation.resizeTank(preview.box);
-      else simulation.shapeFluidBody(preview.box);
+      if (cancelled) { simulation.cancelDraft(); return; }
+      simulation.commitDraft(active.target === "tank" ? { announceRebuild: "Resize the tank" } : {});
       return;
     }
-    if (active.action === "fluid-paint" || active.action === "fill-level" || active.action === "inflow-handle") {
+    if (active.action === "fill-level" || active.action === "inflow-handle") {
+      if (cancelled) { simulation.cancelDraft(); return; }
+      simulation.commitDraft();
+      return;
+    }
+    // Painting writes brick seeds as the stroke crosses each brick, so its
+    // document write is already once-per-brick rather than once-per-move.
+    if (active.action === "fluid-paint") {
       simulation.commitEdit(undefined, { reseed: true });
       return;
     }
@@ -1493,11 +1545,12 @@ export function WebGPUViewport() {
       data-camera-azimuth={camera.azimuth_rad.toFixed(6)}
       data-camera-elevation={camera.elevation_rad.toFixed(6)}
       data-pixel-trace={pixelTraceEnabled && activeTool === "select" && !pixelTracePinned ? "live" : undefined}
+      data-shape-grab={shapeHover ? "true" : undefined}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
-      onPointerLeave={() => setHover(null)}
+      onPointerLeave={() => { setHover(null); setShapeHover(null); }}
       onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
       onContextMenu={(event) => event.preventDefault()}
     />
@@ -1575,7 +1628,7 @@ export function WebGPUViewport() {
         .map(([from, to]) => (
           <line
             key={`${from}-${to}`}
-            className={`shape-outline target-${shapePreview!.target}`}
+            className={`shape-outline target-${shapeSubject}`}
             x1={shapeOutline[from]!.leftFraction * viewportSize.width}
             y1={shapeOutline[from]!.topFraction * viewportSize.height}
             x2={shapeOutline[to]!.leftFraction * viewportSize.width}
@@ -1583,25 +1636,53 @@ export function WebGPUViewport() {
           />
         ))}
       {[{ target: "tank", handles: tankGizmo }, { target: "fluid", handles: fluidBodyGizmo }].flatMap(({ target, handles }) =>
-        (handles ?? []).filter((handle) => handle.projection.depth_m > 1e-6).map((handle) => (
-          <rect
-            key={`${target}-${handle.id}`}
-            className={`shape-handle target-${target} handle-${handle.kind}`}
-            data-handle={`${target}:${handle.id}`}
-            x={handle.projection.leftFraction * viewportSize.width - (handle.kind === "face" ? 4 : 3)}
-            y={handle.projection.topFraction * viewportSize.height - (handle.kind === "face" ? 4 : 3)}
-            width={handle.kind === "face" ? 8 : 6}
-            height={handle.kind === "face" ? 8 : 6}
-          />
-        )))}
+        (handles ?? []).filter((handle) => handle.projection.depth_m > 1e-6).map((handle) => {
+          const className = `shape-handle target-${target} handle-${handle.kind}${
+            shapeHover?.target === target && shapeHover.handleId === handle.id ? " hovered" : ""}`;
+          const ends = handle.ends?.every((end) => end.depth_m > 1e-6) ? handle.ends : undefined;
+          return ends
+            ? <line
+              key={`${target}-${handle.id}`}
+              className={className}
+              data-handle={`${target}:${handle.id}`}
+              x1={ends[0]!.leftFraction * viewportSize.width}
+              y1={ends[0]!.topFraction * viewportSize.height}
+              x2={ends[1]!.leftFraction * viewportSize.width}
+              y2={ends[1]!.topFraction * viewportSize.height}
+            />
+            : <rect
+              key={`${target}-${handle.id}`}
+              className={className}
+              data-handle={`${target}:${handle.id}`}
+              x={handle.projection.leftFraction * viewportSize.width - (handle.kind === "face" ? 4 : 3)}
+              y={handle.projection.topFraction * viewportSize.height - (handle.kind === "face" ? 4 : 3)}
+              width={handle.kind === "face" ? 8 : 6}
+              height={handle.kind === "face" ? 8 : 6}
+            />;
+        }))}
     </svg>}
-    {shapeMode && shapePreview && shapeOutline?.[7]?.visible && <div
-      className={`shape-readout target-${shapePreview.target}`}
+    {shapeMode && shapeHover && !pointerRef.current && <div
+      className={`shape-hover-chip target-${shapeHover.target}`}
+      data-testid="shape-hover-chip"
+      style={{ left: `${shapeHover.leftFraction * 100}%`, top: `${shapeHover.topFraction * 100}%` }}
+      aria-hidden="true"
+    >
+      <strong>{shapeHover.target === "tank" ? "TANK" : "WATER"}</strong>
+      <span>{shapeHover.label}</span>
+    </div>}
+    {shapeMode && !sceneDraft && <div className="shape-legend" data-testid="shape-legend" aria-hidden="true">
+      <span><i className="swatch-fluid" />WATER</span>
+      <span><i className="swatch-tank" />TANK</span>
+      <small>drag a face, edge or corner · simulates on release</small>
+    </div>}
+    {shapeMode && shapeSubject && shapeOutlineBox && shapeOutline?.[7]?.visible && <div
+      className={`shape-readout target-${shapeSubject}`}
       data-testid="shape-readout"
       style={{ left: `${shapeOutline[7]!.leftFraction * 100}%`, top: `${shapeOutline[7]!.topFraction * 100}%` }}
       aria-hidden="true"
     >
-      <strong>{shapePreview.target === "tank" ? "TANK" : "WATER"}</strong><span>{shapePreview.label}</span>
+      <strong>{shapeSubject === "tank" ? "TANK" : "WATER"}</strong>
+      <span>{shapeSizeLabel(shapeSubject, shapeOutlineBox)}</span>
     </div>}
     {inflowGizmo && inflowGizmo.every((handle) => handle.projection.depth_m > 1e-6) && <svg
       className="editor-gizmo editor-inflow-gizmo"

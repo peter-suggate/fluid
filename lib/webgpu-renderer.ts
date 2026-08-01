@@ -25,7 +25,7 @@ import { containerDecorationSpace } from "./visualization-decorations";
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, type SparseVoxelDrySceneData, type SvoDryRigidBounds } from "./webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds } from "./webgpu-svo-dry-scene";
 import {
   buildSvoScenePrimitives,
   packSvoScenePrimitiveAnimation,
@@ -54,7 +54,7 @@ import {
 } from "./gpu-startup";
 import { OctreeTechniqueAuditOverlayPipeline } from "./webgpu-octree-technique-audit-overlay";
 import { initialRasterPresentationReadiness, requiresFencedInitialRasterPresentation } from "./gpu-t0-presentation";
-import { WebGPUStaticSvoScene } from "./webgpu-static-svo-scene";
+import { staticSvoSceneResourcePlugin, WebGPUStaticSvoScene } from "./webgpu-static-svo-scene";
 import { planSceneRuntime } from "./scene-runtime";
 import type { GPUFailureReproduction } from "./webgpu-failure-reproduction";
 import {
@@ -65,6 +65,21 @@ import {
   type PerformanceTrace,
 } from "./performance-trace";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
+import type { ResourcePluginDefinition } from "./resource-readiness";
+
+/** Device/canvas resources owned by FluidLabRenderer, declared beside their initializer. */
+export const webGPUPlatformResourcePlugin: ResourcePluginDefinition = Object.freeze({
+  id: "platform.webgpu-renderer",
+  lane: "platform",
+  label: "WebGPU renderer platform",
+  provides: ["renderer"] as const,
+  blocks: "viewport",
+  phaseCopy: {
+    planning: "Acquiring the browser GPU and selecting device capabilities.",
+    renderer: "Preparing the canvas and minimum presentation resources.",
+    "water-renderer": "Compiling the raster fallback used during progressive loading.",
+  },
+});
 
 export type SimulationBackend = "webgpu" | "cpu-reference";
 /** One item executing and one queued keeps the GPU busy without visible FIFO bursts. */
@@ -368,13 +383,14 @@ export type GPUStatus =
       /** User-facing description captured synchronously when a setting changes. */
       operation?: string;
       retainingPrevious?: boolean;
+      resource?: ResourcePluginDefinition;
     }
-  | { state: "ready"; label: string; adapter: string }
-  | { state: "blocked"; label: string }
-  | { state: "manual"; label: string }
-  | { state: "stopping"; label: string }
-  | { state: "unavailable"; label: string; reproduction?: GPUFailureReproduction }
-  | { state: "lost"; label: string };
+  | { state: "ready"; label: string; adapter: string; resource?: ResourcePluginDefinition }
+  | { state: "blocked"; label: string; resource?: ResourcePluginDefinition }
+  | { state: "manual"; label: string; resource?: ResourcePluginDefinition }
+  | { state: "stopping"; label: string; resource?: ResourcePluginDefinition }
+  | { state: "unavailable"; label: string; reproduction?: GPUFailureReproduction; resource?: ResourcePluginDefinition }
+  | { state: "lost"; label: string; resource?: ResourcePluginDefinition };
 
 export type SvoRendererFallbackReason =
   | "missing-source"
@@ -478,6 +494,7 @@ interface PendingInitialRasterPresentation {
   readonly solver: GPUSolverInstance;
   readonly solverGeneration: number;
   readonly requestGeneration: number;
+  readonly resource?: ResourcePluginDefinition;
   submitted: boolean;
 }
 
@@ -726,6 +743,7 @@ export class FluidLabRenderer {
     this.onStatus({
       state: "initializing", label, phase: "presentation", completed, total: 4,
       startedAt_ms: pending?.startedAt_ms ?? this.svoPipelineStartedAt_ms, kind: "startup", retainingPrevious: false,
+      resource: svoPresentationResourcePlugin,
     });
   }
 
@@ -736,6 +754,7 @@ export class FluidLabRenderer {
     this.onStatus({
       state: "initializing", label: "Sparse garden renderer attached", phase: "presentation",
       completed: 3, total: 4, startedAt_ms: pending.startedAt_ms, kind: "startup", retainingPrevious: false,
+      resource: svoPresentationResourcePlugin,
     });
   }
 
@@ -744,7 +763,7 @@ export class FluidLabRenderer {
     if (!pending) return;
     this.pendingStaticSvoPresentation = undefined;
     const detail = error instanceof Error && error.message ? `: ${error.message}` : "";
-    this.onStatus({ state: "blocked", label: `Sparse garden renderer unavailable${detail}` });
+    this.onStatus({ state: "blocked", label: `Sparse garden renderer unavailable${detail}`, resource: svoPresentationResourcePlugin });
   }
 
   private ensureRequestedOptionalPipelines(requested: readonly OptionalRendererPipeline[]) {
@@ -1117,22 +1136,22 @@ export class FluidLabRenderer {
 
   private async initializeInternal(): Promise<void> {
     const startedAt_ms=performance.now();
-    const progress=(label:string,completed:number,total=4,phase="renderer")=>this.onStatus({state:"initializing",label,phase,completed,total,startedAt_ms});
+    const progress=(label:string,completed:number,total=4,phase="renderer")=>this.onStatus({state:"initializing",label,phase,completed,total,startedAt_ms,resource:webGPUPlatformResourcePlugin});
     // UI-only browser automation must be safe even if a caller accidentally
     // invokes initialize(): return before navigator.gpu or solver creation.
     if (typeof location !== "undefined" && new URLSearchParams(location.search).get("gpu") === "off") {
-      this.onStatus({ state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)" });
+      this.onStatus({ state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)", resource: webGPUPlatformResourcePlugin });
       return;
     }
     progress("Requesting WebGPU adapter",0);
     if (!("gpu" in navigator)) {
-      this.onStatus({ state: "unavailable", label: "WebGPU is not available in this browser" });
+      this.onStatus({ state: "unavailable", label: "WebGPU is not available in this browser", resource: webGPUPlatformResourcePlugin });
       return;
     }
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
     if (this.disposed) return;
     if (!adapter) {
-      this.onStatus({ state: "unavailable", label: "No compatible GPU adapter was found" });
+      this.onStatus({ state: "unavailable", label: "No compatible GPU adapter was found", resource: webGPUPlatformResourcePlugin });
       return;
     }
     progress("Requesting GPU device",1);
@@ -1143,7 +1162,7 @@ export class FluidLabRenderer {
     const context = this.canvas.getContext("webgpu");
     if (!context) {
       device.destroy();
-      this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created" });
+      this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created", resource: webGPUPlatformResourcePlugin });
       return;
     }
     this.device = device;
@@ -1173,7 +1192,7 @@ export class FluidLabRenderer {
       // Breadcrumbs for hang diagnosis: the last known solver state narrows a
       // watchdog reset down to a stage without needing a reproduction.
       if (fluid) console.error("GPU device lost mid-simulation", { reason: info.reason, message: info.message, submittedTime_s: fluid.info.submittedTime_s, completedTime_s: fluid.info.completedTime_s, pendingBatches: this.gpuPendingBatches, encodedSteps: fluid.info.encodedSteps, physicsTrace: fluid.info.physicsTrace });
-      this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}` });
+      this.onStatus({ state: "lost", label: `GPU device lost: ${info.message || info.reason}`, resource: webGPUPlatformResourcePlugin });
       this.scheduleDeviceRecovery(info.reason);
     }).catch((error: unknown) => {
       if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);
@@ -1209,7 +1228,7 @@ export class FluidLabRenderer {
     const info = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     this.adapterName = info ? [info.vendor, info.architecture].filter(Boolean).join(" · ") || "WebGPU adapter" : "WebGPU adapter";
     progress("Renderer ready; preparing solver",4);
-    this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: this.adapterName });
+    this.onStatus({ state: "ready", label: "WebGPU renderer ready", adapter: this.adapterName, resource: webGPUPlatformResourcePlugin });
   }
 
   /**
@@ -1251,7 +1270,7 @@ export class FluidLabRenderer {
     try {
       await this.initialize();
     } catch (error) {
-      this.onStatus({ state: "unavailable", label: error instanceof Error ? `GPU recovery failed: ${error.message}` : "GPU recovery failed" });
+      this.onStatus({ state: "unavailable", label: error instanceof Error ? `GPU recovery failed: ${error.message}` : "GPU recovery failed", resource: webGPUPlatformResourcePlugin });
     }
   }
 
@@ -1339,7 +1358,8 @@ export class FluidLabRenderer {
     if(gpuSceneStructuralKey(scene,config)!==this.attachedStructuralKey)return false;
     const generation=this.gpuFluidGeneration,requestGeneration=this.gpuFluidRequestGeneration;
     this.reseedInFlight=true;
-    this.onStatus({state:"initializing",label:"Re-seeding fenced t=0 solver authority",phase:"warmup",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false});
+    const resource=getMethod(config.methodId).resource;
+    this.onStatus({state:"initializing",label:"Re-seeding fenced t=0 solver authority",phase:"warmup",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false,resource});
     void solver.reseed(scene).then((reseeded)=>{
       // Anything that replaced or invalidated the solver mid-flight wins.
       if(this.disposed||this.gpuFluid!==solver||this.gpuFluidGeneration!==generation
@@ -1355,9 +1375,9 @@ export class FluidLabRenderer {
       solver.info.initialRasterSurfaceState="pending";
       solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication after re-seed";
       this.globalFineWaterAttached=false;
-      this.pendingInitialRasterPresentation={solver,solverGeneration:generation,requestGeneration,submitted:false};
+      this.pendingInitialRasterPresentation={solver,solverGeneration:generation,requestGeneration,submitted:false,resource};
       this.gpuInfoCallback?.({...solver.info});
-      this.onStatus({state:"initializing",label:"Re-seeded solver ready; publishing fenced t=0 raster surface",phase:"presentation",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false});
+      this.onStatus({state:"initializing",label:"Re-seeded solver ready; publishing fenced t=0 raster surface",phase:"presentation",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false,resource});
     }).catch(()=>{
       if(!this.disposed&&this.gpuFluid===solver&&this.gpuFluidGeneration===generation
         &&this.gpuFluidRequestGeneration===requestGeneration)this.beginGPUFluidInitialization(scene,config,key);
@@ -1446,6 +1466,8 @@ export class FluidLabRenderer {
   private beginGPUFluidInitialization(scene:SceneDescription,config:SimulationRunConfig,key:string){
     if(!this.device||this.disposed||this.deviceLost)return;
     const method=getMethod(config.methodId);if(!canInitializeGPUSceneSource(scene,config.methodId))return;
+    const staticRenderScene=!planSceneRuntime(scene).fluidSolver;
+    const initializationResource=staticRenderScene?staticSvoSceneResourcePlugin:method.resource;
     this.gpuFluidInitializationAbort?.abort();
     const abort=new AbortController();this.gpuFluidInitializationAbort=abort;
     const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
@@ -1457,7 +1479,7 @@ export class FluidLabRenderer {
     // transaction. Only the warmed candidate is allowed to replace it.
     this.gpuFluidPendingKey=key;
     let reportedCompleted=0,reportedTotal=1;
-    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number})=>{if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous)});};
+    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number})=>{if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
     let previousDestroyedForReset=false;
     const prepare=async()=>{
       if(!drainPreviousForReset||!previous)return;
@@ -1500,10 +1522,9 @@ export class FluidLabRenderer {
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
       this.gpuFluid=solver;this.gpuFluidKey=key;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
-      const staticRenderScene=!planSceneRuntime(scene).fluidSolver;
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
       if(staticRenderScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Static SVO scene ready; fluid authority intentionally bypassed";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false};}
-      else if(fencedInitialRaster){solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false};}
+      else if(fencedInitialRaster){solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false,resource:method.resource};}
       else{solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Direct solver field attached; sparse raster fence not required";this.pendingInitialRasterPresentation=undefined;}
       this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;
       const sparseSceneSource=solver.sparseVoxelSceneSource;
@@ -1538,15 +1559,35 @@ export class FluidLabRenderer {
       if(staticRenderScene){
         if(this.failedOptionalPipelines.has("svo-dry-scene"))this.failPendingStaticSvoPresentation();
         else if(this.svoDryScenePipeline)this.reportStaticSvoAttachment();
-        else{const pipelineProgress=this.svoPipelineProgress??{label:"Compiling sparse dry-scene pipeline",completed:0};this.onStatus({state:"initializing",...pipelineProgress,phase:"presentation",total:4,startedAt_ms,kind:"startup",retainingPrevious:false});}
+        else{const pipelineProgress=this.svoPipelineProgress??{label:"Compiling sparse dry-scene pipeline",completed:0};this.onStatus({state:"initializing",...pipelineProgress,phase:"presentation",total:4,startedAt_ms,kind:"startup",retainingPrevious:false,resource:svoPresentationResourcePlugin});}
       }
       this.pausedPresentationRevision+=1;
       if(previous&&previous!==solver&&!previousDestroyedForReset)this.retireGPUFluid(previous);
       this.gpuInfoCallback?.(solver.info);
-      if(!staticRenderScene&&fencedInitialRaster)this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false});
-      else if(!staticRenderScene)this.onStatus({state:"ready",label:"WebGPU direct-field solver ready",adapter:this.adapterName});
-    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(previous)this.onStatus({state:"ready",label:error instanceof Error?`Solver rebuild failed; previous solver retained: ${error.message}`:"Solver rebuild failed; previous solver retained",adapter:this.adapterName});else this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed"});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
+      if(!staticRenderScene&&fencedInitialRaster)this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false,resource:method.resource});
+      else if(!staticRenderScene)this.onStatus({state:"ready",label:"WebGPU direct-field solver ready",adapter:this.adapterName,resource:method.resource});
+    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingInitialRasterPresentation=undefined;this.pendingStaticSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(previous)this.onStatus({state:"ready",label:error instanceof Error?`Solver rebuild failed; previous solver retained: ${error.message}`:"Solver rebuild failed; previous solver retained",adapter:this.adapterName,resource:initializationResource});else this.onStatus({state:"unavailable",label:error instanceof Error?`GPU initialization failed: ${error.message}`:"GPU initialization failed",resource:initializationResource});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
   }
+
+  /**
+   * Scene the solver is keyed against, when it differs from the one being
+   * drawn.
+   *
+   * Direct manipulation proposes a scene before it commits one (see
+   * `scene-draft-store`). A proposal that only changes what the *ground* looks
+   * like should redraw immediately, but must not reach the rebuild key — the
+   * solver would re-seed on every pointer-move. Setting this pins the solver to
+   * the committed scene while `draw` presents the proposed one.
+   *
+   * Only safe for proposals that cannot change the lattice: the renderer draws
+   * the fluid from solver-owned textures, so presenting different container
+   * extents than the solver allocated would tear. The viewport is what enforces
+   * that, by pinning only for drafts it knows are geometry-preserving.
+   */
+  setSimulationScene(scene: SceneDescription | undefined) {
+    this.simulationScene = scene;
+  }
+  private simulationScene?: SceneDescription;
 
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number) {
     if (!this.device || this.disposed || this.deviceLost) return undefined;
@@ -1612,8 +1653,8 @@ export class FluidLabRenderer {
     this.pendingInitialRasterPresentation = undefined;
     this.gpuInfoCallback?.(pending.solver.info);
     this.pausedPresentationRevision += 1;
-    if (outcome.ready) this.onStatus({ state: "ready", label: outcome.label, adapter: this.adapterName });
-    else this.onStatus({ state: "blocked", label: outcome.label });
+    if (outcome.ready) this.onStatus({ state: "ready", label: outcome.label, adapter: this.adapterName, resource: pending.resource });
+    else this.onStatus({ state: "blocked", label: outcome.label, resource: pending.resource });
   }
 
   private settleStaticSvoPresentation(pending: PendingStaticSvoPresentation) {
@@ -1622,7 +1663,7 @@ export class FluidLabRenderer {
       || this.gpuFluidRequestGeneration !== pending.requestGeneration || !pending.attached || !pending.submitted) return;
     this.pendingStaticSvoPresentation = undefined;
     this.pausedPresentationRevision += 1;
-    this.onStatus({ state: "ready", label: "Static SVO renderer ready", adapter: this.adapterName });
+    this.onStatus({ state: "ready", label: "Static SVO renderer ready", adapter: this.adapterName, resource: svoPresentationResourcePlugin });
   }
 
   private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1) {
@@ -1782,7 +1823,7 @@ export class FluidLabRenderer {
       },
     };
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
-      ? this.currentGPUFluid(scene, svoSceneConfig, time_s)
+      ? this.currentGPUFluid(this.simulationScene ?? scene, svoSceneConfig, time_s)
       : undefined;
     const pixelTraceRequested = Boolean(pixelTrace) && voxelRenderMode === "smooth";
     // Ahead of the sweep, so a toggled traversal retires the old pipeline and is
@@ -2098,6 +2139,7 @@ export class FluidLabRenderer {
       this.onStatus({
         state: "initializing", label: "Submitting first sparse garden frame", phase: "presentation",
         completed: 3, total: 4, startedAt_ms: initialStaticSvoSubmission.startedAt_ms, kind: "startup", retainingPrevious: false,
+        resource: svoPresentationResourcePlugin,
       });
     }
     this.svoPickingAvailable = svoEncoded;

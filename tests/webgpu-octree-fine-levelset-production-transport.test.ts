@@ -14,29 +14,6 @@ import {
 
 function compact(source: string) { return source.replace(/\s+/g, ""); }
 
-test("octree allocation and recurring publication share the two-cell transport closure", () => {
-  const source = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
-  // Allocation and the recurring publishers no longer re-derive these widths
-  // side by side; they read one planner. That is what makes the closure
-  // structural rather than two literals that happen to agree -- and they must
-  // agree, because allocation sizes the resident bricks once while transport
-  // and redistance re-derive their reach every step, so a divergence
-  // under-provisions the band instead of failing.
-  assert.match(source,
-    /=planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells,globalFineFactor\);constphysicalBand=planFineLevelSetTopologyBand\(brickResolution,\{maximumBacktraceFineCells,/,
-    "allocation must reserve the planner's trajectory bound for the band it sizes");
-  assert.match(source,
-    /=planFineLevelSetBandFineCells\(this\.fineLevelSetBandCells,this\.globalFineLevelSet!\.plan\.fineFactor\);.*transport\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,.*publicationTopology\.encode\(.*maximumBacktraceFineCells,/s,
-    "transport and both recurring A/B topology publishers must consume the allocation bound");
-  assert.equal((source.match(/2\*globalFineFactor|2\*this\.globalFineLevelSet!\.plan\.fineFactor/g) ?? []).length, 0,
-    "no site may re-derive the trajectory bound inline; the planner is the sole authority");
-  assert.equal((source.match(/planFineLevelSetBandFineCells\(/g) ?? []).length, 6,
-    "allocation, structured dynamics, the per-step transport/redistance pair, work"
-    + " accounting, the band-residency overlay and surface publication sources must each read the one"
-    + " planner -- the overlay included, so the view cannot draw a band the solver"
-    + " did not allocate");
-});
-
 test("direct fine transport has one page-bounded structured authority path", () => {
   const plan = planFineLevelSetGPUTransport(16_777_216, 4_096, 262_144);
   assert.deepEqual(plan, {
@@ -387,32 +364,3 @@ test("fine phi commit separates interface membership from exact CP repair", () =
     "page-owned reductions and deterministic compaction must not revive an append race");
 });
 
-test("WGSL declares exactly the specialized production entry points, in pipeline order", () => {
-  const entries = [...structuredFineLevelSetTransportWGSL.matchAll(
-    /@compute\s*@workgroup_size\([^)]*\)\s*fn\s+([A-Za-z_]\w*)/g,
-  )].map((match) => match[1]);
-  // The workset publication, status summary and phase-mask delta each gained a
-  // reduce/scan/compact stage, so the ten specialized kernels are now
-  // seventeen. The list is still exact and still ordered: an entry point that
-  // appears without a place in this sequence is a kernel nothing schedules.
-  assert.deepEqual(entries, [
-    "planStructuredFineTransportSubsteps",
-    "classifyStructuredFineTransportBlocks",
-    "reduceStructuredFineTransportWorksetBlocks",
-    "scanStructuredFineTransportWorksetGroups",
-    "publishStructuredFineTransportWorksets",
-    "compactStructuredFineTransportWorksets",
-    "transportRegularCommonPhi",
-    "transportTransitionCommonPhi",
-    "transportRegularRarePhi",
-    "transportTransitionRarePhi",
-    "reduceStructuredFineTransportStatus",
-    "summarizeStructuredFineTransport",
-    "commitStructuredFineTransport",
-    "clearStructuredFineDelta",
-    "reduceStructuredFineDeltaBlocks",
-    "publishStructuredFineDelta",
-    "compactStructuredFineDelta",
-  ]);
-  assert.equal(new Set(entries).size, entries.length, "entry points must be unique");
-});

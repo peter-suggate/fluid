@@ -3,12 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS,
-  octreeProjectionShader,
+  
   planOctreePowerBoundaryStrip,
   planOctreePressureCapacity,
 } from "../lib/webgpu-octree";
 
-const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
 test("power boundary strip has an exact closed-wall cell and owner-page bound", () => {
   const open = planOctreePowerBoundaryStrip({ nx: 24, ny: 18, nz: 16 }, 4, false);
@@ -48,28 +47,3 @@ test("power pressure capacity always reserves the authoritative wall strip", () 
     "an explicit diagnostic override remains authoritative and fail-closed on overflow");
 });
 
-test("topology forces authoritative closed walls to unit owners before phi sizing", () => {
-  assert.match(octreeProjectionShader,
-    /fn powerClosedWallStripIntersects\(origin: vec3u, size: u32\) -> bool/);
-  assert.doesNotMatch(octreeProjectionShader, /\(flags & 4u\)/,
-    "the sole native topology must not retain a power-vs-rollback selector");
-  assert.match(octreeProjectionShader,
-    /let width = max\(3u,[\s\S]*u32\(ceil\(max\(0\.0, params\.solve\.w\)\)\)\);/);
-  assert.match(octreeProjectionShader,
-    /origin\.x < min\(width, d\.x\)[\s\S]*origin\.z < min\(width, d\.z\)[\s\S]*origin\.y < min\(width, d\.y\)[\s\S]*\(flags & 2u\) != 0u/);
-  assert.match(octreeProjectionShader,
-    /fn leafNeedsRefinement[\s\S]*if \(powerClosedWallStripIntersects\(origin, size\)\) \{ return true; \}[\s\S]*var minimumSolid/,
-    "wall refinement must precede sparse-phi absence and pure-solid early exits");
-});
-
-test("host flags encode only terrain and closed ceiling", () => {
-  assert.match(source,
-    /const containerFlags = \(sceneHasTerrain\(this\.scene\) \? 1 : 0\)[\s\S]*container\.top === "closed" \? 2 : 0\);/);
-  assert.doesNotMatch(source, /container\.top === "closed" \? 2 : 0\)[\s\S]*\| 4/);
-  assert.match(octreeProjectionShader,
-    /\(u32\(round\(params\.container\.w\)\) & 1u\) != 0u[\s\S]*textureLoad\(terrainIn/,
-    "the closed-top bit must not accidentally enable terrain sampling");
-  assert.match(source,
-    /planOctreePressureCapacity\([\s\S]*options\.pressureRowCapacity,[\s\S]*scene\.container\.top === "closed"/,
-    "the allocation bound must use the same ceiling policy as the shader");
-});

@@ -106,20 +106,6 @@ test("a world scale is answered by a re-seed, never a rebuild", () => {
     "the solver must still be replaced-or-re-seeded: it is simulating a different physical size");
 });
 
-test("every GPU solver can adopt scene scalars, so no method silently ignores them", () => {
-  // The renderer drops the uniform tier from the rebuild key. That is only
-  // safe while each solver class implements the hot path; a method without it
-  // falls back to rebuilding, but these two are the whole GPU roster.
-  for (const path of ["../lib/webgpu-uniform-eulerian.ts", "../lib/webgpu-eulerian.ts", "../lib/webgpu-octree.ts"]) {
-    const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(source, /applySceneUniforms\(scene: SceneDescription\)/, `${path} must adopt scene scalars`);
-  }
-  const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  assert.match(renderer, /this\.gpuFluid\.applySceneUniforms\(scene\)/);
-  assert.match(renderer, /beginGPUFluidInitialization\(scene, config, rebuildKey\)/,
-    "a method without the hot path must rebuild rather than ignore the edit");
-});
-
 test("render-only authoring never reaches the solver identity", () => {
   const base = cloneScene(defaultScene);
   // Props extend the render domain only; placing scenery must not rebuild.

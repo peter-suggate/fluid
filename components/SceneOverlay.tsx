@@ -26,7 +26,15 @@ export function SceneOverlay() {
       <span className="brand-mark" title="Fluid Lab · WebGPU CFD workbench">FL</span>
       <label className="scene-overlay-preset" title={active?.description}>
         <span className="visually-hidden">Scene preset</span>
-        <select aria-label="Scene preset" value={presetId} onChange={(event) => simulation.loadPreset(event.target.value)}>
+        {/* Release focus once the choice is made. A focused <select> counts as
+            text editing to the shortcut chassis, so leaving it focused silently
+            kills every single-key shortcut — you pick a scene, press a tool
+            key, and nothing happens for no visible reason. */}
+        <select
+          aria-label="Scene preset"
+          value={presetId}
+          onChange={(event) => { simulation.loadPreset(event.target.value); event.target.blur(); }}
+        >
           {groups.map((group) => (
             <optgroup key={group} label={group}>
               {scenePresets.filter((preset) => preset.group === group).map((preset) => (

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import {
   bodySelection,
   CLICK_SLOP_PX,
@@ -86,4 +87,16 @@ test("selection generalizes the body id without losing the body projection", () 
   assert.equal(selectedBodyIdOf({ kind: "inflow", id: "hose" }), undefined);
 
   useUIStore.setState(initial, true);
+});
+
+test("an armed tool can be disarmed by the control that armed it", () => {
+  // Entering a mode you can only leave via Escape is a trap: the button and the
+  // key that armed it both have to let go of it again.
+  const toolbar = readFileSync(new URL("../components/EditorToolbar.tsx", import.meta.url), "utf8");
+  assert.match(toolbar, /setActiveTool\(activeTool === tool\.id \? DEFAULT_EDITOR_TOOL : tool\.id\)/,
+    "clicking the armed tool must return to the default tool");
+
+  const shortcuts = readFileSync(new URL("../lib/use-editor-shortcuts.ts", import.meta.url), "utf8");
+  assert.match(shortcuts, /ui\.setActiveTool\(ui\.activeTool === tool \? DEFAULT_EDITOR_TOOL : tool\)/,
+    "pressing the armed tool's own key must toggle it off");
 });

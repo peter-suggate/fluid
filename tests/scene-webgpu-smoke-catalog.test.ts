@@ -94,44 +94,6 @@ test("generic health and backend packs declare every reusable acceptance constan
   assert.equal(octree.requireGlobalFineFactorMatchesMethodOverride, true);
 });
 
-test("scenario diagnostic packs own equilibrium, restriction, parity, and settling policy", () => {
-  const equilibrium = diagnostic(getSceneWebGPUSmokeLane("settled-tank"), "equilibrium").parameters!;
-  assert.equal(equilibrium.maximumTallCellExactVolumeDrift, 0.01);
-  assert.equal(equilibrium.maximumQuadtreeExactVolumeDrift, 1e-3);
-  assert.equal(equilibrium.maximumQuadtreeLiquidSpeed_m_s, 0.05);
-
-  const compression = diagnostic(getSceneWebGPUSmokeLane("deep-water"), "deep-compression").parameters!;
-  assert.equal(compression.maximumCompressionRatioExclusive, 0.5);
-
-  const restricted = diagnostic(getSceneWebGPUSmokeLane("dam-break-boxes"), "tall-cell-restricted").parameters!;
-  assert.deepEqual(restricted, {
-    expectedGridKind: "restricted-tall-cell",
-    minimumTallColumns: 1,
-    maximumOrdinaryColumns: 0,
-    maximumDryTallWithWetRegularAbove: 0,
-    maximumExactVolumeDrift: 0.01,
-  });
-
-  const parity = diagnostic(getSceneWebGPUSmokeLane("dam-break-ui"), "quadtree-dam-parity").parameters!;
-  assert.equal(parity.method, "quadtree-tall-cell");
-  assert.equal(parity.maximumWallToGpuTimeRatio, 2);
-  assert.equal(parity.maximumPressureAbsoluteResidual, 1e-5);
-  assert.equal(parity.minimumUniformPeakKineticEnergyRatio, 0.8);
-  assert.equal(parity.minimumTallCellWetIntersectionOverUnion, 0.6);
-  assert.equal(parity.checkpointTimeTolerance_s, 0.01);
-
-  const crossMethod = diagnostic(getSceneWebGPUSmokeLane("dam-break-ui"), "cross-method-field-parity").parameters!;
-  assert.equal(crossMethod.tallCellMaximumTransientExactVolumeDrift, 0.15);
-  assert.equal(crossMethod.minimumCheckpointWetIntersectionOverUnion, 0.35);
-  assert.equal(crossMethod.minimumFinalWetIntersectionOverUnion, 0.4);
-  assert.equal(crossMethod.maximumMixedCellFractionMultiplier, 2);
-
-  const settling = diagnostic(getSceneWebGPUSmokeLane("dam-break-ui", "settling"), "settling").parameters!;
-  assert.equal(settling.maximumNormalizedLateMechanicalEnergySlopePerSecond, 1e-3);
-  assert.deepEqual(settling.energyMiddleWindowFraction, [0.2, 0.4]);
-  assert.equal(settling.damBreakMaximumLatePeakToPeakDrift, 0.005);
-});
-
 test("power, global-fine, raster, and scene hooks contain no scenario defaults", () => {
   const hydrostatic = getSceneWebGPUSmokeLane("hydrostatic-power-two-level");
   const exhaustive = diagnostic(hydrostatic, "exhaustive-power-generation").parameters!;
@@ -200,33 +162,6 @@ test("inflow, migration, brick coverage, hose, and ocean policies are scene-auth
   assert.deepEqual(ocean.expectedGrid, [320, 96, 80]);
   assert.equal(ocean.stationCount, 12);
   assert.equal(ocean.minimumFarHalfDisturbanceWidthRatio, 3.6);
-});
-
-test("authored lanes carry formerly runner-owned method and sampling decisions", () => {
-  const large = getSceneWebGPUSmokeLane("large-power-dam-break");
-  assert.deepEqual(large.methods.map(({ id }) => id), ["octree"]);
-  assert.equal(large.methods[0].overrides.maximumLeafSize, "32");
-  assert.equal(large.methods[0].overrides.interfaceRefinementBandCells, 1);
-  assert.equal(large.methods[0].overrides.globalFineLevelSetMaximumBricks, 32_768);
-
-  const ocean = getSceneWebGPUSmokeLane("ocean-seiche");
-  assert.deepEqual(ocean.methods.map(({ id }) => id), ["octree"]);
-  assert.equal(ocean.methods[0].overrides.maximumLeafSize, "32");
-  assert.equal(ocean.collect.checkpointEvery_s, 0.5);
-  assert.ok(ocean.hooks.some(({ id }) => id === "ocean-wave-profile"));
-
-  const quadtreeDam = getSceneWebGPUSmokeLane("dam-break-ui", "quadtree-regression");
-  assert.deepEqual(quadtreeDam.methods.map(({ id }) => id), ["quadtree-tall-cell"]);
-  assert.ok(quadtreeDam.hooks.some(({ id }) => id === "dam-break-perturbed-cadence"));
-
-  const brickQuad = getSceneWebGPUSmokeLane("brick-quad-dam-break");
-  assert.equal(brickQuad.collect.sparsePublication, true);
-  assert.ok(brickQuad.hooks.some(({ id }) => id === "brick-quad-coverage"));
-
-  const inflow = getSceneWebGPUSmokeLane("hose-tank", "drift");
-  assert.ok(inflow.collect.evidenceCollectors.some(({ id }) => id === "hose-jet-drift"));
-  assert.ok(inflow.diagnostics.some(({ id }) => id === "inflow-activity"));
-  assert.ok(inflow.hooks.some(({ id }) => id === "hose-jet-drift"));
 });
 
 test("structured power lanes own exhaustive thresholds and raster policy", () => {

@@ -1,6 +1,7 @@
 import { damBreakFractions } from "./initial-fluid";
 import { sceneCellSizes_m } from "./scene-lattice";
-import type { SceneDescription, Vec3 } from "./model";
+import { projectToViewport } from "./webgpu-camera";
+import type { CameraState, SceneDescription, Vec3 } from "./model";
 
 /**
  * Direct manipulation of the initial water body.
@@ -188,6 +189,122 @@ export function scaleFluidBodyBox(
     if (max[axis] - min[axis] < minimum) max[axis] = min[axis] + minimum;
   });
   return { min, max };
+}
+
+/**
+ * The box edge an edge handle grabs, as a segment.
+ *
+ * An edge handle fixes two axes and leaves one free; the edge runs the whole
+ * span of that free axis. Drawing the segment rather than a square at its
+ * midpoint is what makes the handle look like the thing it moves — and it is
+ * far easier to hit, which is why `shapeHandleAtPointer` measures against the
+ * segment too rather than against the midpoint the square used to sit on.
+ */
+export function fluidBodyEdgeSegment(
+  box: FluidBodyBox,
+  handle: FluidBodyHandle,
+): { from: Vec3; to: Vec3 } | undefined {
+  if (handle.kind !== "edge") return undefined;
+  const free = AXES.find((axis) => handle.sides[axis] === undefined);
+  if (!free) return undefined;
+  return {
+    from: { ...handle.position_m, [free]: box.min[free] },
+    to: { ...handle.position_m, [free]: box.max[free] },
+  };
+}
+
+/** Pixel distance from a point to a segment, clamped to the segment. */
+function distanceToSegment_px(
+  point: { x: number; y: number },
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+): number {
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared < 1e-9) return Math.hypot(point.x - from.x, point.y - from.y);
+  const t = Math.max(0, Math.min(1,
+    ((point.x - from.x) * dx + (point.y - from.y) * dy) / lengthSquared));
+  return Math.hypot(point.x - (from.x + t * dx), point.y - (from.y + t * dy));
+}
+
+/**
+ * What a handle does, for the chip shown when the pointer is over it.
+ *
+ * Handles are the whole interface, so they have to say what they are: a grid of
+ * unlabelled squares is a puzzle, not a control. The axes matter more than the
+ * kind — "this moves X and Z" is the thing you cannot work out by looking.
+ */
+export function fluidBodyHandleLabel(handle: FluidBodyHandle): string {
+  const axes = AXES.filter((axis) => handle.sides[axis]).map((axis) => axis.toUpperCase());
+  return `${handle.kind} · ${axes.join(" ")}`;
+}
+
+export interface ShapeHandleCandidate {
+  readonly target: "fluid" | "tank";
+  readonly box: FluidBodyBox | undefined;
+  /** Handles this target does not offer, e.g. the tank's floor. */
+  readonly grabbable?: (handle: FluidBodyHandle) => boolean;
+}
+
+export interface ShapeHandlePick {
+  readonly target: "fluid" | "tank";
+  readonly handleId: string;
+  readonly box: FluidBodyBox;
+  readonly handle: FluidBodyHandle;
+}
+
+/**
+ * The handle under a pointer, in canvas pixels.
+ *
+ * Shared by the grab and the hover highlight so they can never disagree: a
+ * highlight that pointed at a different handle than the press would take is
+ * worse than no highlight at all.
+ *
+ * Corners beat edges beat faces, because the more constrained handle is the one
+ * that could not have been reached any other way; and the water beats the tank
+ * outright, because the tank encloses it, so a tie means the pointer is over the
+ * body actually visible there.
+ */
+export function shapeHandleAtPointer(
+  candidates: readonly ShapeHandleCandidate[],
+  camera: CameraState,
+  width: number,
+  height: number,
+  pointer: { x: number; y: number },
+  tolerance_px = FLUID_BODY_HANDLE_TOLERANCE_PX,
+): ShapeHandlePick | undefined {
+  const rank = { corner: 0, edge: 1, face: 2 } as const;
+  let best: (ShapeHandlePick & { distance_px: number; rank: number }) | undefined;
+  for (const candidate of candidates) {
+    if (!candidate.box) continue;
+    for (const handle of fluidBodyHandles(candidate.box)) {
+      if (candidate.grabbable && !candidate.grabbable(handle)) continue;
+      const projection = projectToViewport(handle.position_m, camera, width, height);
+      if (!(projection.depth_m > 1e-6)) continue;
+      // An edge is drawn as the whole segment, so it must be grabbable along
+      // its whole length: measuring to the midpoint would leave most of what
+      // the user can see un-clickable.
+      const segment = fluidBodyEdgeSegment(candidate.box, handle);
+      const ends = segment && [segment.from, segment.to]
+        .map((point) => projectToViewport(point, camera, width, height));
+      const distance_px = ends && ends.every((end) => end.depth_m > 1e-6)
+        ? distanceToSegment_px(pointer,
+          { x: ends[0]!.leftFraction * width, y: ends[0]!.topFraction * height },
+          { x: ends[1]!.leftFraction * width, y: ends[1]!.topFraction * height })
+        : Math.hypot(
+          pointer.x - projection.leftFraction * width,
+          pointer.y - projection.topFraction * height);
+      if (distance_px > tolerance_px) continue;
+      const entry = {
+        target: candidate.target, handleId: handle.id, box: candidate.box, handle,
+        distance_px, rank: rank[handle.kind],
+      };
+      if (!best || (best.target === entry.target
+        ? entry.rank < best.rank || (entry.rank === best.rank && entry.distance_px < best.distance_px)
+        : entry.target === "fluid")) best = entry;
+    }
+  }
+  return best && { target: best.target, handleId: best.handleId, box: best.box, handle: best.handle };
 }
 
 /** The eight corners, indexed so bit 0/1/2 selects the max side of x/y/z. */

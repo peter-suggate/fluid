@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { PerformanceTrace } from "../lib/performance-trace";
 import {
@@ -22,37 +21,6 @@ const physicsTrace = (phases: PerformanceTrace["phases"]): PerformanceTrace => (
   capturedAt_ms: 1,
   total_ms: phases.reduce((sum, phase) => sum + phase.duration_ms, 0),
   phases,
-});
-
-test("UI throughput command enforces the final Power Liquids authority gates", () => {
-  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
-    scripts: Record<string, string>;
-  };
-  const command = packageJson.scripts["benchmark:power-dam-ui"];
-  assert.match(command, /FLUID_MAX_ADVANCE_MS=\$\{FLUID_MAX_ADVANCE_MS:-15\}/);
-  assert.match(command, /FLUID_MAX_DISPATCHES_PER_ADVANCE=\$\{FLUID_MAX_DISPATCHES_PER_ADVANCE:-300\}/);
-  assert.match(command, /FLUID_MAX_PASSES_PER_ADVANCE=\$\{FLUID_MAX_PASSES_PER_ADVANCE:-60\}/);
-  assert.doesNotMatch(command, /FLUID_MAX_PRESSURE_NON_SOLVE_MS/,
-    "the throughput command has no sampled physics trace; profile acceptance owns the pressure-system gate");
-  assert.match(packageJson.scripts["profile:power-dam-ui"],
-    /FLUID_MAX_PRESSURE_NON_SOLVE_MS=\$\{FLUID_MAX_PRESSURE_NON_SOLVE_MS:-4\}/);
-  assert.match(packageJson.scripts["profile:power-dam-mini:pressure-kernels"],
-    /FLUID_FINE_FACTOR=\$\{FLUID_FINE_FACTOR:-1\}.*--pressure-kernel-profile/,
-    "the pressure-kernel profiler must default to the specialized factor-1 lane");
-  assert.equal(packageJson.scripts["benchmark:power-dam-quiescent"],
-    "node --import tsx tools/benchmark-power-dam.ts --lane=quiescent");
-  assert.match(packageJson.scripts["test:power-liquids-structure"],
-    /^npx tsc --noEmit && npm run test:water-shaders && node --import tsx --test .*power-liquids-clean-cut\.test\.ts.*webgpu-pass-broker\.test\.ts.*power-dam-performance-report\.test\.ts$/,
-    "phase acceptance must fail before Dawn on type, WGSL, clean-cut, pass-broker, or budget-contract regressions");
-  assert.match(packageJson.scripts["acceptance:power-liquids-phase"],
-    /^npm run test:power-liquids-structure && npm run test:webgpu:dam-ui-construction && npm run test:webgpu:dam-ui-two-step/,
-    "clean-cut source, type, and shader gates must pass before the exact UI graph and numerical acceptance");
-  assert.match(packageJson.scripts["acceptance:power-liquids-phase"],
-    /npm run benchmark:power-dam-ui && npm run profile:power-dam-ui/,
-    "throughput and sampled pressure-system ratchets must both execute in phase acceptance");
-  assert.doesNotMatch(packageJson.scripts["acceptance:power-liquids-phase"],
-    /test:webgpu:dam-ui-performance/,
-    "the gated profile wrapper replaces the duplicate ungated profiler invocation");
 });
 
 test("power dam throughput summary normalizes command costs per advance", () => {

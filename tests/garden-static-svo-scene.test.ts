@@ -145,7 +145,11 @@ test("static SVO startup bypasses the simulation solver and t=0 raster gate", ()
 
   assert.match(renderer, /planSceneRuntime\(scene\)\.fluidSolver/);
   assert.match(renderer, /WebGPUStaticSvoScene\.create/);
-  assert.match(renderer, /backend === "webgpu" \|\| !sceneRuntime\.fluidSolver[^]*this\.currentGPUFluid\(scene, svoSceneConfig, time_s\)/,
+  // The scene argument is `this.simulationScene ?? scene`: a direct-manipulation
+  // draft may be presented while the solver stays pinned to the committed scene
+  // (see scene-draft-store). What this asserts is unchanged — the request is
+  // still made for fluid-disabled scenes under the CPU reference method.
+  assert.match(renderer, /backend === "webgpu" \|\| !sceneRuntime\.fluidSolver[^]*this\.currentGPUFluid\(this\.simulationScene \?\? scene, svoSceneConfig, time_s\)/,
     "fluid-disabled scenes must request their renderer-owned GPU source even under the CPU reference method");
   assert.match(renderer, /svoEnvironmentBrickRefinementLevels: activeSvoTuning\.environmentBrickRefinementLevels/,
     "render tuning must participate in sparse-world rebuild identity");

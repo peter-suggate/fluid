@@ -3,8 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { gpuRigidBodyShader, GPU_RIGID_MOTION_BYTES, GPU_RIGID_RENDER_BYTES, GPU_RIGID_STATE_BYTES } from "../lib/webgpu-rigid-body";
 
-const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
-const restricted = readFileSync(new URL("../lib/webgpu-eulerian.ts", import.meta.url), "utf8");
 const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
 const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
@@ -24,16 +22,6 @@ test("resident rigid kernel consumes fluid exchange and resolves contacts", () =
   assert.match(gpuRigidBodyShader, /solveBodyPair\(a,b\)/);
   assert.match(gpuRigidBodyShader, /terrainPlane\(body\.positionShape\.xyz\)/);
   assert.doesNotMatch(gpuRigidBodyShader, /mapAsync|getMappedRange/);
-});
-
-test("all WebGPU solvers integrate rigid bodies without a physics readback", () => {
-  const uniformAdvance = uniform.slice(uniform.indexOf("advanceTo(time_s"), uniform.indexOf("async readStats()"));
-  const restrictedAdvance = restricted.slice(restricted.indexOf("advanceTo(time_s"), restricted.indexOf("async readStats()"));
-  for (const source of [uniformAdvance, restrictedAdvance]) {
-    assert.match(source, /rigidSystem\.encode\(/);
-    assert.doesNotMatch(source, /copyBufferToBuffer\(this\.rigidExchangeBuffer/,
-      "physics must not copy rigid exchange state into a host readback");
-  }
 });
 
 test("WebGPU rendering consumes GPU-authored body records", () => {

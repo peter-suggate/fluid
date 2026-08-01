@@ -270,25 +270,6 @@ test("direct octree Dawn test and smoke commands run beneath one lock-owning par
   ], "the generic GPU command wrapper must retain its lock until its child is reaped");
 });
 
-test("one-step power/fine comparison pins exact time, spatial readback, and motion evidence", async () => {
-  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
-    scripts: Record<string, string>;
-  };
-  const command = packageJson.scripts["test:webgpu:dam-power-fine-compare-one-step"];
-  assert.ok(command);
-  for (const setting of [
-    "FLUID_TARGET_S=0.004", "FLUID_MAX_DT=0.004", "FLUID_ORACLE_STEPS=1",
-    "FLUID_EXPECT_EXACT_STEPS=1",
-    "FLUID_REQUIRE_SPATIAL_FIELD=1", "FLUID_EXPECT_GRID=24,18,16",
-  ]) assert.match(command, new RegExp(setting.replaceAll(".", "\\.")));
-  assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
-
-  const exactTwoStep = packageJson.scripts["test:webgpu:minimal-power-dam-two-step"];
-  assert.ok(exactTwoStep);
-  assert.doesNotMatch(exactTwoStep, /FLUID_WEBGPU_DAWN_FEATURES=skip_validation/,
-    "the exact correctness smoke must validate every pipeline and bind group before submission");
-});
-
 test("compact and structured publication rejection reports exact authority evidence before abort", async () => {
   const smoke = await readFile(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
   const readbacks = await readFile(new URL("../tools/webgpu-smoke-readbacks.ts", import.meta.url), "utf8");

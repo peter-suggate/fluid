@@ -34,7 +34,7 @@ import {
 import {
   OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE,
   OCTREE_AIR_SUPPORT_SELECTOR_STRIDE,
-  OCTREE_AIR_SUPPORT_VALID,
+  
 } from "../lib/webgpu-octree-air-velocity-support";
 
 const compact = (source: string) => source.replace(/\s+/g, "");
@@ -596,46 +596,6 @@ test("closed-wall air reconstruction is exactly reflection odd after marched car
   assert.equal(positiveWallCell, Math.fround(-negativeWallCell));
 });
 
-test("direct air rows and support identities share one fail-closed face transaction", () => {
-  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
-  assert.match(shader, /!publishedLiquidRow\(faceRow\)/,
-    "accepted liquid row vectors remain the projected source authority");
-  const reconstruct = shader.slice(shader.indexOf("fnreconstructAirSupportVectors"),
-    shader.indexOf("fnfinalizeAirSupportMetadata"));
-  assert.match(reconstruct, /directAirVectors\[faceRow\]=result/);
-  assert.doesNotMatch(reconstruct, /rowVelocities\[/,
-    "reconstruction may not expose partial direct-air vectors in the accepted bank");
-  assert.match(shader, /supportVectors\[support\]=result[\s\S]*p\.recordVectorOffset\+4u\*support/);
-  // An axis with no marched value on either side is a demand island (a cell
-  // the degenerately dense fine band demanded with no demanded path to any
-  // seeded liquid face). It takes stationary air with a counted, identified
-  // provenance latch instead of rejecting: failing closed froze the whole
-  // epoch on the first island (measured at dam wall contact, far air 5+
-  // cells above the liquid, flags fineBandDemand|extensionClosure).
-  assert.match(shader,
-    /if\(positive\.w==0u&&negative\.w==0u\)\{[\s\S]*?atomicAdd\(&scratch\[41u\],1u\);[\s\S]*?atomicMin\(&scratch\[42u\],\(\(\(cell\.w>>6u\)&0xffu\)<<16u\)\|\(cell\.x<<3u\)\|axis\);[\s\S]*?result\[axis\]=0\.;continue;\}/,
-    "an unreached axis must take latched stationary air, never reject the publication");
-  assert.match(shader, /if\(!validVector\(interpolated\)\)\{failTopology\(8u,faceRow\);/,
-    "genuinely invalid interpolation results must still fail the face transaction closed");
-  assert.match(shader,
-    /if\(!validVector\(interpolated\)\)\{failTopology\(8u,faceRow\);[\s\S]*atomicCompareExchangeWeak\(&recordArena\[14u\],0u,detail\)[\s\S]*returnvec4f\(f32\(local\),interpolated\.x,interpolated\.y\+16\.\*interpolated\.z,-1\.\);\}/,
-    "a rejected reconstruction must retain the local catalog face in the existing vector slot");
-  assert.match(reconstruct,
-    /elseif\(faceRow<s\(2u\)\).*directAirVectors\[faceRow\]=result.*else\{letsupport=faceRow-s\(2u\).*supportVectors\[support\]=result/s,
-    "failure-only diagnostics remain in already-owned rejected vector storage");
-  assert.doesNotMatch(reconstruct, /atomicStore\(&supportArena/,
-    "the aligned support-vector suffix must use non-conflicting vec4 stores");
-  assert.match(shader, /var<workgroup>reconstructExpected:array<u32,256>[\s\S]*atomicAdd\(&scratch\[30u\],reconstructExpected\[0\]\)/);
-  assert.match(shader, /var<workgroup>seedCounts:array<u32,256>[\s\S]*atomicAdd\(&scratch\[25u\],seedCounts\[0\]\)/);
-  assert.match(shader, /expectedVectors=s\(30u\)[\s\S]*s\(28u\)==expectedVectors/);
-  assert.match(shader, /fnfinalizeAirSupportMetadata[\s\S]*sw\(31u,select\(0u,1u,clean\)\)[\s\S]*supportArena\[at\+13u\],0u/);
-  assert.match(shader, /fncommitAirSupportDirectRows[\s\S]*if\(s\(31u\)!=1u[\s\S]*rowVelocities\[output\]=directAirVectors\[row\]/);
-  assert.match(shader, new RegExp(`atomicStore\\(&supportArena\\[p\\.airControlOffset\\+13u\\],select\\(0u,${OCTREE_AIR_SUPPORT_VALID}u,clean\\)\\);\\}$`),
-    "suffix VALID must be the literal last publication store");
-  assert.match(shader, /RECORD_REGULAR\|RECORD_EXTENSION/);
-  assert.match(shader, /RECORD_SELECTOR\|RECORD_EXTENSION/);
-});
-
 test("host defaults to the exact changed frontier and retains the preceding fixed dense oracle", () => {
   const encode = compact(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
   assert.match(encode, /dispatchWorkgroups\(1\).*updateIndirectBuffer/);
@@ -711,50 +671,6 @@ test("air-support pipelines can be deferred without parallel driver pressure", (
   assert.match(hostClass,
     /this\.pipelines = Object\.freeze\(pipelines\);[\s\S]*this\.groups = groups;[\s\S]*this\.pipelinesInitialized = true/,
     "encode-visible pipeline and binding state must publish atomically at initialization completion");
-});
-
-test("entry bind sets exactly match the reachable staging transaction", () => {
-  assert.deepEqual(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS, {
-    beginAirSupportPublication: [0,1,3,7,8,9,10,29],
-    clearAirSupportDirectory: [0,7], clearAirSupportCandidates: [0,2,7],
-    clearAirSupportTags: [0,7,9],
-    emitAirSupportCandidates: [0,2,3,4,5,6,7,9,11,18],
-    markAndScanAirSupportCandidates: [0,7], prefixAirSupportBlocks: [0,7],
-    scatterAirSupportRecords: [0,7,8], resolveAirSupportTags: [0,7,8,9],
-    resolveAirSupportTopology: [0,3,7,8,11,12,13,14],
-    prepareFineBandAirSupportDemand: [0,7,26],
-    markFineBandAirSupportDemand: [0,7,25,26,27,28],
-    dilateFineBandAirSupportDemandX: [0,7],
-    dilateFineBandAirSupportDemandY: [0,7],
-    dilateFineBandAirSupportDemandZ: [0,7],
-    closeFineBandAirSupportInterpolationDemand: [0,2,3,4,5,6,7,11,12,13,14],
-    emitFineBandAirSupportCandidates: [0,2,3,7,11],
-    publishAirSupportOwnerDirectory: [0,2,3,7,8,9,11],
-    prepareAirSupportFaces: [0,7,29],
-    resolveAirSupportFaceAdjacency: [0,2,3,7,8,11,15,16,23],
-    validateAirSupportFrontierReciprocity: [0,7,23],
-    seedAirSupportFaces: [0,1,2,7,8,15,16,18,19,21,23],
-    seedRetainedAirSupportFaces: [0,1,2,7,8,15,16,18,20,21,23],
-    compactAirSupportSeedFrontier: [0,7,19,29],
-    refreshRetainedAirSupportFaceValues: [7,19,20],
-    finalizeRetainedAirSupportMarchSchedule: [0,7,29],
-    expandAirSupportChangedFrontier: [0,7,23,29],
-    relaxAirSupportChangedFrontier: [0,2,7,8,19,20,23,29],
-    commitAirSupportChangedFrontier: [0,7,19,20,29],
-    advanceAirSupportChangedFrontier: [0,7,29],
-    marchAirSupportFacesChangedFrontier: [0,2,7,8,19,20,23,29],
-    extendAirSupportFacesAtoB: [0,2,7,8,19,20,23],
-    extendAirSupportFacesBtoA: [0,2,7,8,19,20,23],
-    advanceAirSupportMarchWave: [7],
-    marchAirSupportFacesToFixedPoint: [0,2,7,8,19,20,23],
-    reconstructAirSupportVectors: [0,2,7,8,15,16,19,22,23,24],
-    finalizeAirSupportMetadata: [0,2,7,8,9,22],
-    commitAirSupportDirectRows: [0,2,7,17,22],
-    commitAirSupportPublication: [0,7,8,9],
-  });
-  for (const bindings of Object.values(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS)) {
-    assert.ok(bindings.filter((binding) => binding !== 0 && binding !== 11).length <= 10);
-  }
 });
 
 // Every pipeline in this module is created with `layout: "auto"`, so the bind

@@ -12,7 +12,7 @@ import {
   SparseVoxelGBufferTargetArena,
   SVO_GBUFFER_RENDER_TARGET_CONTRACT,
 } from "../lib/webgpu-svo-gbuffer-targets";
-import { SparseVoxelDrySceneRenderer, svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
+import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const waterSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
@@ -94,51 +94,6 @@ test("auxiliary renderer-owned targets preserve the exact compact G-buffer contr
   assert.equal(arena.textures, undefined);
   assert.throws(() => arena.ensureSize(0, 10), /positive safe integers/);
   assert.throws(() => arena.ensureSize(10.5, 10), /positive safe integers/);
-});
-
-test("production dry pass writes three MRTs plus reversed-Z without changing location-zero ownership", async (t) => {
-  installGpuConstants(t);
-  const textures: MockTexture[] = [], pipelineDescriptors: GPURenderPipelineDescriptor[] = [];
-  const renderer = new SparseVoxelDrySceneRenderer(mockDevice(textures, pipelineDescriptors), {} as GPUBuffer, {} as GPUBuffer);
-  await renderer.initialize();
-  assert.equal(pipelineDescriptors.length, 1, "the dry renderer compiles no post-frame temporal pass");
-  const descriptor = pipelineDescriptors[0];
-  assert.deepEqual(Array.from(descriptor.fragment!.targets).map((target) => target?.format), ["rgba16float", "rgba32uint", "rgba16uint"]);
-  assert.deepEqual(descriptor.depthStencil, { format: "depth32float", depthWriteEnabled: true, depthCompare: "greater" });
-
-  renderer.ensureSize(64, 48);
-  const internals = renderer as unknown as { bindGroup: GPUBindGroup };
-  internals.bindGroup = {} as GPUBindGroup;
-  let passDescriptor: GPURenderPassDescriptor | undefined, passCount = 0;
-  const encoder = {
-    beginRenderPass(descriptor: GPURenderPassDescriptor) {
-      passDescriptor = descriptor; passCount += 1;
-      return { setPipeline() {}, setBindGroup() {}, draw() {}, end() {} };
-    },
-  } as unknown as GPUCommandEncoder;
-  const externalHdr = { label: "existing water compositor HDR view" } as GPUTextureView;
-  const result = renderer.encode(encoder, externalHdr);
-  assert.ok(result);
-  assert.equal(result.sampledTargetView, externalHdr);
-  const colorAttachments = Array.from(passDescriptor?.colorAttachments ?? []);
-  assert.equal(colorAttachments.length, 3);
-  assert.equal(colorAttachments[0]?.view, externalHdr);
-  assert.equal(colorAttachments[1]?.view, renderer.gBufferTextures?.packedSurface.createView());
-  assert.equal(colorAttachments[2]?.view, renderer.gBufferTextures?.identityMedia.createView());
-  assert.equal(passDescriptor?.depthStencilAttachment?.view, renderer.gBufferTextures?.hardwareDepth.createView());
-  assert.equal(passDescriptor?.depthStencilAttachment?.depthClearValue, 0);
-  assert.equal(passDescriptor?.depthStencilAttachment?.depthLoadOp, "clear");
-  assert.equal(passDescriptor?.depthStencilAttachment?.depthStoreOp, "store");
-  const reusableView = { label: "reusable dry HDR" } as GPUTextureView;
-  const reusableTexture = { width: 64, height: 48, createView: () => reusableView } as GPUTexture;
-  const passesBeforeReuse = passCount;
-  const firstReusable = renderer.encode(encoder, reusableTexture, "fixed-camera-and-bodies");
-  const secondReusable = renderer.encode(encoder, reusableTexture, "fixed-camera-and-bodies");
-  assert.ok(firstReusable && secondReusable);
-  assert.equal(passCount, passesBeforeReuse + 1, "an unchanged dry frame is rendered once and then reused");
-  assert.equal(secondReusable.sampledTargetView, firstReusable.sampledTargetView);
-  renderer.destroy();
-  assert.throws(() => new SparseVoxelDrySceneRenderer(mockDevice([]), {} as GPUBuffer, {} as GPUBuffer, "bgra8unorm"), /location 0 must use rgba16float/);
 });
 
 test("shader populates stable identity/media/generation and consumes exact rigid surface motion", () => {

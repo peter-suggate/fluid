@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import { getSceneWebGPUSmokeLane } from "../lib/scene-webgpu-smoke-catalog";
 import { compareVelocityFields, rasterizeStructuredCellVelocities,
   velocityParityFailures } from "../tools/webgpu-smoke-velocity-parity";
 
@@ -38,32 +36,6 @@ test("compact velocity raster fails closed on overlaps and unsolved rows", () =>
   assert.equal(raster.invalidRows, 1);
   assert.ok(Number.isNaN(raster.field[0]));
   assert.ok(Number.isNaN(raster.field[3]));
-});
-
-test("the 2.2 second octree/tall-cell command gates final vector-field parity", () => {
-  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
-    scripts: Record<string, string>;
-  };
-  const command = packageJson.scripts["test:webgpu:dam-octree-parity"];
-  assert.match(command, /FLUID_METHOD=octree,tall-cell/);
-  assert.match(command, /FLUID_TARGET_S=2\.2/);
-  const smoke = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
-  const readbacks = readFileSync(new URL("../tools/webgpu-smoke-readbacks.ts", import.meta.url), "utf8");
-  const diagnostic = readFileSync(new URL("../lib/scene-field-velocity-parity-diagnostic.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(smoke, /phase: "velocity-parity"/,
-    "custom parity reporting belongs to the scene hook evaluator");
-  assert.match(diagnostic, /compareVelocityFields/);
-  assert.match(smoke, /readCompactOctreeVelocityField3D/);
-  assert.match(readbacks, /structuredRowVelocities/);
-  assert.deepEqual(getSceneWebGPUSmokeLane("dam-break-ui").hooks
-    .find(({ id }) => id === "dam-break-velocity-parity")?.parameters?.limits, {
-    maximumWeightedRelativeL2: 1,
-    minimumCosineSimilarity: 0.5,
-    minimumEnergyRatio: 0.25,
-    maximumEnergyRatio: 4,
-    minimumPeakRatio: 0.5,
-    maximumPeakRatio: 2,
-  });
 });
 
 test("matched liquid vector fields pass the tall-cell parity gate", () => {

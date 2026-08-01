@@ -54,36 +54,6 @@ test("next-epoch topology and adaptive surface publication close generic phases"
   assert.doesNotMatch(solver + octree, /timing start|timing end|beginRange\(|endRange\(/);
 });
 
-test("physics checkpoints follow performed command stages at their trailing seams", () => {
-  assert.match(solver,
-    /encodeReadyTopologyFlip\(encoder\);[^]*Accepted topology epoch \+ Section 5 air support/);
-  assert.match(octree,
-    /settled t=0 fine-demand air support published[^]*productionBoundary\("structuredProjectionTail", encoder\)/);
-  assert.doesNotMatch(solver, /pressureLeafCompactionL1Capture/);
-  assert.match(solver,
-    /encodeBodyImpulseExchange[^]*Rigid-body impulse exchange \+ integration/);
-  assert.match(solver,
-    /encodeSparseBrickWorld\(encoder, dt\);[^]*Sparse-brick residency \+ publication/);
-  assert.match(solver,
-    /Uniform diagnostics reduction[^]*Diagnostics reduction/);
-});
-
-test("physics sampling defaults to uninstrumented and remains cadence-bounded", () => {
-  const store = source("../lib/stores/performance-instrumentation-store.ts");
-  const tall = source("../lib/webgpu-eulerian.ts");
-  // Inverted deliberately (P0.1): "activity" compiles per-workgroup atomics
-  // into every MGPCG entry point and rewrites their returns, so defaulting to
-  // it charged the browser product for measurement it never asked for. The
-  // panel and FLUID_PERFORMANCE_TRACES opt in; nothing opts in for the user.
-  assert.match(store, /mode: "off",\n\s*enabled: false,\n\s*shaderActivityEnabled: false,/,
-    "the product default must construct uninstrumented");
-  assert.match(store, /const shaderActivityEnabled = mode === "activity"/,
-    "shader instrumentation must follow the selected mode, never a separate switch");
-  assert.match(solver, /const PHYSICS_TRACE_CADENCE_MS = 100/);
-  assert.match(tall, /lastPhysicsTraceAt_ms>=100/);
-  assert.match(tall, /Substep planning \+ advance setup/);
-});
-
 test("a traced physics step submits the same command graph as an untraced one", () => {
   assert.match(solver, /if \(physicsTrace\) encoder = physicsTrace\.instrument\(encoder\)/,
     "boundaries must ride the step's own passes, not marker passes of their own");

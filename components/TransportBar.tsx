@@ -11,21 +11,8 @@ import { useMethodStore } from "@/lib/stores/method-store";
 import { requestManualGPUStop } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 import { planSceneRuntime } from "@/lib/scene-runtime";
+import { resourceInteractionGates } from "@/lib/resource-readiness";
 
-function TimingSlider({ label, unit, value, min, max, step, integer = false, detail, onCommit, disabled = false }: { label: string; unit: string; value: number; min: number; max: number; step: number; integer?: boolean; detail: (value: number) => string; onCommit: (value: number) => void; disabled?: boolean }) {
-  const [draft, setDraft] = useState(value);
-  const [entry, setEntry] = useState(String(value));
-  const normalize = (raw: number) => Math.min(max, Math.max(min, integer ? Math.round(raw) : raw));
-  const commit = (raw: number) => {
-    if (!Number.isFinite(raw)) { setEntry(String(draft)); return; }
-    const next = normalize(raw);
-    setDraft(next);
-    setEntry(String(next));
-    onCommit(next);
-  };
-  const updateFromRange = (raw: number) => { const next = normalize(raw); setDraft(next); setEntry(String(next)); };
-  return <label title={`Adjust ${label.toLowerCase()}`}><span>{label}</span><input disabled={disabled} type="range" min={min} max={max} step={step} value={draft} onChange={(event) => updateFromRange(Number(event.currentTarget.value))} onPointerUp={() => commit(draft)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) commit(Number(event.currentTarget.value)); }} aria-label={`${label} slider`} /><span className="timing-entry"><input disabled={disabled} type="number" min={min} max={max} step={step} inputMode={integer ? "numeric" : "decimal"} value={entry} onChange={(event) => { const raw = event.currentTarget.value; setEntry(raw); const next = Number(raw); if (raw !== "" && Number.isFinite(next)) setDraft(normalize(next)); }} onBlur={() => commit(Number(entry))} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(Number(entry)); } else if (event.key === "Escape") { event.preventDefault(); setEntry(String(value)); setDraft(value); } }} aria-label={`${label} exact value`} /><b>{unit}</b></span><small>{detail(draft)}</small></label>;
-}
 
 export function TransportBar() {
   const runState = useRuntimeStore((state) => state.runState);
@@ -37,9 +24,8 @@ export function TransportBar() {
   const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
   const staticRenderScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
-  const patchNumerics = useSceneStore((state) => state.patchNumerics);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
-  const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
+  const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const methodId = useMethodStore((state) => state.methodId);
   const recordingStatus = useRecordingStore((state) => state.status);
@@ -53,32 +39,13 @@ export function TransportBar() {
   const [safeStepRequested, setSafeStepRequested] = useState(false);
   const webgpu = simulation.backend === "webgpu";
   const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * maxDt;
-  const applyingGPUSettings = gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild";
+  const applyingGPUSettings = resourceReadiness.fluid.state === "preparing"
+    && Boolean(resourceReadiness.fluid.activity?.operation);
+  const interaction = resourceInteractionGates(resourceReadiness, !staticRenderScene);
   const initialSceneReady = methodId !== "octree" || (gpuInfo?.initialSparseAuthorityReady === true
     && gpuInfo?.initialRasterSurfaceReady === true);
-  const transportLocked = staticRenderScene || (webgpu && (gpuStatus.state !== "ready" || !initialSceneReady));
+  const transportLocked = staticRenderScene || (webgpu && (!interaction.transportInteractive || !initialSceneReady));
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
-  const fixedRate_hz = 1 / fixedDt;
-  const gpuStepRate_hz = 1 / maxDt;
-  const commitNumerics = (patch: Parameters<typeof patchNumerics>[0]) => {
-    const wasRunning = useRuntimeStore.getState().runState === "running";
-    patchNumerics(patch);
-    simulation.applyAndResetFluid();
-    if (wasRunning) useRuntimeStore.getState().setRunState("running");
-  };
-  const commitFixedRate = (raw_hz: number) => {
-    const rate_hz = Math.max(1, raw_hz);
-    const seconds = 1 / rate_hz;
-    if (!Number.isFinite(seconds)) return;
-    if (Math.abs(seconds - fixedDt) < 1e-9) return;
-    commitNumerics({ fixedDt_s: seconds, maxDt_s: Math.max(maxDt, seconds) });
-  };
-  const commitGpuStepRate = (raw_hz: number) => {
-    const rate_hz = Math.max(1, raw_hz);
-    const seconds = Math.max(fixedDt, 1 / rate_hz);
-    if (!Number.isFinite(seconds) || Math.abs(seconds - maxDt) < 1e-9) return;
-    commitNumerics({ maxDt_s: seconds });
-  };
   const importScene = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -115,10 +82,6 @@ export function TransportBar() {
         {simRate !== null && <small className="sim-rate" title={webgpu ? "Queue-confirmed simulated seconds completed per wall-clock second" : "Simulated seconds completed per wall-clock second"}>ACTUAL ×{simRate.toFixed(2)}</small>}
         {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
-        <div className="transport-timing" aria-label="Simulation timestep controls">
-          <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`fixed-${fixedDt}`} label="FIXED STEP" unit="Hz" value={fixedRate_hz} min={Math.min(30, fixedRate_hz)} max={Math.max(2000, fixedRate_hz)} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms rigid`} onCommit={commitFixedRate} />
-          <TimingSlider disabled={transportLocked || browserSafetyLocked} key={`gpu-${fixedDt}-${maxDt}`} label="GPU STEP" unit="Hz" value={gpuStepRate_hz} min={1} max={fixedRate_hz} step={0.01} detail={(value) => `${(1000 / value).toFixed(2)} ms max`} onCommit={commitGpuStepRate} />
-        </div>
         {staticRenderScene
           ? <span className="continuous-run" title="This preset initializes the static sparse scene and renderer only.">STATIC SVO · FLUID SOLVER DISABLED</span>
           : webgpu
@@ -126,7 +89,7 @@ export function TransportBar() {
           : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}
       </div>
       <div className="file-actions">
-        <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{applyingGPUSettings ? `GPU SETTINGS · ${gpuStatus.operation ?? gpuStatus.label}` : notice}</span>
+        <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{applyingGPUSettings ? `GPU SETTINGS · ${resourceReadiness.fluid.activity?.operation ?? resourceReadiness.fluid.label}` : notice}</span>
         {recording && recordingStatus !== "recording" && <button onClick={() => simulationRecording.open()}>Playback</button>}
         <button disabled={browserSafetyLocked} onClick={() => { if (!simulation.loadLocalScene()) fileRef.current?.click(); }}>Load</button>
         <button disabled={browserSafetyLocked} onClick={() => fileRef.current?.click()}>Import</button>
