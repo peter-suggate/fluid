@@ -7,6 +7,12 @@ import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
 import type { MetricSample } from "../model";
 import type { WaterSurfacePresentationDiagnostics } from "../webgpu-water-pipeline";
 import type { PerformanceTrace } from "../performance-trace";
+import {
+  initialResourceReadiness,
+  reduceGPUResourceEvidence,
+  reduceGPUResourceStatus,
+  type ResourceReadinessSnapshot,
+} from "../resource-readiness";
 
 export interface PerformanceReport {
   methodId: string;
@@ -42,6 +48,8 @@ interface DiagnosticsStore {
   fluidRenderState: EulerianRenderState | null;
   couplingState: CouplingDiagnostics;
   gpuStatus: GPUStatus;
+  /** Capability-oriented readiness. Unlike gpuStatus, independent work cannot overwrite another lane. */
+  resourceReadiness: ResourceReadinessSnapshot;
   gpuInfo: GPUEulerianInfo | null;
   effectiveRendererStatus: EffectiveRendererStatus;
   waterSurfacePresentation: WaterSurfacePresentationDiagnostics | null;
@@ -61,6 +69,7 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   fluidRenderState: null,
   couplingState: emptyCoupling,
   gpuStatus: { state: "initializing", label: "Initializing WebGPU" },
+  resourceReadiness: initialResourceReadiness(),
   gpuInfo: null,
   effectiveRendererStatus: {
     effectiveMode: "raster",
@@ -72,7 +81,18 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   samples: [],
   performanceReport: emptyPerformanceReport,
   performanceReports: [],
-  set: (patch) => set(patch),
+  set: (patch) => set((state) => {
+    let resourceReadiness = state.resourceReadiness;
+    if (patch.gpuStatus) resourceReadiness = reduceGPUResourceStatus(resourceReadiness, patch.gpuStatus);
+    if ("gpuInfo" in patch || "effectiveRendererStatus" in patch) {
+      resourceReadiness = reduceGPUResourceEvidence(
+        resourceReadiness,
+        patch.gpuInfo ?? state.gpuInfo,
+        patch.effectiveRendererStatus ?? state.effectiveRendererStatus,
+      );
+    }
+    return { ...patch, resourceReadiness };
+  }),
   pushPerformanceReport: (report, sample) => set((state) => ({
     performanceReport: report,
     performanceReports: [...state.performanceReports.slice(-239), report],

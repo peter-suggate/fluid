@@ -10,6 +10,7 @@ import type { WebGPUFineLevelSetBrickSource } from "../webgpu-octree-fine-levels
 import type { GPUInitializationPhase } from "../gpu-initialization";
 import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
 import type { CoarseLevelSetConsumerSource } from "../octree-consumer-sampling";
+import type { ResourcePluginDefinition } from "../resource-readiness";
 
 /**
  * Method plugin contract.
@@ -177,6 +178,8 @@ export interface SimulationMethod {
   detail: string;
   /** Where the authoritative fluid state lives. */
   backend: "webgpu" | "cpu";
+  /** Resource lifecycle declaration, colocated with the method that owns its initialization. */
+  resource?: ResourcePluginDefinition;
   /** Per-quality flavour text for the quality selector. */
   qualityLabels: Record<GPUQuality, string>;
   /** Hide the generic quality selector when the method exposes its relevant

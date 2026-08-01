@@ -43,14 +43,14 @@ export function MethodPanel() {
   const quality = useMethodStore((state) => state.quality);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const fluidRenderState = useDiagnosticsStore((state) => state.fluidRenderState);
-  const gpuStatus = useDiagnosticsStore((state) => state.gpuStatus);
+  const fluidResource = useDiagnosticsStore((state) => state.resourceReadiness.fluid);
   const method = getMethod(methodId);
   const coarse = method.params.filter((spec) => spec.tier === "coarse");
   const fine = method.params.filter((spec) => spec.tier === "fine");
   return (
-    <section data-testid="method-panel" aria-busy={gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild"}>
+    <section data-testid="method-panel" aria-busy={fluidResource.state === "preparing"}>
       <div className="popover-section-heading"><h3>Method</h3><span>{method.backend === "webgpu" ? "WebGPU f32" : "CPU binary64"}</span></div>
-      {gpuStatus.state === "initializing" && gpuStatus.kind === "rebuild" && <div className="method-apply-state" role="status"><i aria-hidden="true" /><span><strong>APPLYING</strong>{gpuStatus.operation ?? gpuStatus.label}</span></div>}
+      {fluidResource.state === "preparing" && fluidResource.activity?.operation && <div className="method-apply-state" role="status"><i aria-hidden="true" /><span><strong>APPLYING</strong>{fluidResource.activity.operation}</span></div>}
       <Segmented
         ariaLabel="Simulation method"
         value={methodId}
@@ -86,8 +86,8 @@ export function MethodPanel() {
       </div>}
       {coarse.filter((spec) => spec.kind !== "select").map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
       {methodId === "octree" && isOctreePersistentMGPCGSolverLabel(gpuInfo?.pressureSolver) && <div className="grid-readout" title="Actual GPU convergence work compared with the currently encoded safety cap">
-        <strong>{gpuInfo.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo.quadtreePressureIterationBudget ?? "—"}</strong>
-        <span>PCG iterations executed / cap · {gpuInfo.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo.quadtreePressureConverged ? "converged" : "cap exhausted"} · {gpuInfo.quadtreeMultigridLevelCount ?? "—"} pyramid levels · {gpuInfo.quadtreeMultigridCoarsestDofs ?? "—"} coarse DOFs</span>
+        <strong>{gpuInfo!.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo!.quadtreePressureIterationBudget ?? "—"}</strong>
+        <span>PCG iterations executed / cap · {gpuInfo!.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo!.quadtreePressureConverged ? "converged" : "cap exhausted"} · {gpuInfo!.quadtreeMultigridLevelCount ?? "—"} pyramid levels · {gpuInfo!.quadtreeMultigridCoarsestDofs ?? "—"} coarse DOFs</span>
       </div>}
       {fine.length > 0 && <details className="advanced-params">
         <summary>Advanced</summary>

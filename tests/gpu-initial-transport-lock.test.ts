@@ -11,9 +11,11 @@ const viewportSource = readFileSync(new URL("../components/WebGPUViewport.tsx", 
 const safeModeHookSource = readFileSync(new URL("../lib/use-safe-browser-gpu-bringup.ts", import.meta.url), "utf8");
 const methodTypesSource = readFileSync(new URL("../lib/methods/types.ts", import.meta.url), "utf8");
 
-test("WebGPU transport stays locked until the fenced structured t=0 authority is ready", () => {
+test("WebGPU transport is capability-gated until the fenced structured t=0 authority is ready", () => {
   assert.match(transportSource, /initialSceneReady = methodId !== "octree" \|\| \(gpuInfo\?\.initialSparseAuthorityReady === true[\s\S]*gpuInfo\?\.initialRasterSurfaceReady === true\)/);
-  assert.match(transportSource, /transportLocked = staticRenderScene \|\| \(webgpu && \(gpuStatus\.state !== "ready" \|\| !initialSceneReady\)\)/);
+  assert.match(transportSource, /resourceInteractionGates\(resourceReadiness, !staticRenderScene\)/);
+  assert.match(transportSource, /transportLocked = staticRenderScene \|\| \(webgpu && \(!interaction\.transportInteractive \|\| !initialSceneReady\)\)/);
+  assert.match(controllerSource, /resourceInteractionGates\(diagnostics\.resourceReadiness, true\)\.transportInteractive/);
   assert.match(controllerSource, /backend === "webgpu" && !this\.webgpuTransportReady\(\)/);
   const phaseWarmup = solverSource.slice(
     solverSource.indexOf("private async publishInitialSparseScenePhase"),
@@ -40,7 +42,7 @@ test("WebGPU transport stays locked until the fenced structured t=0 authority is
     /if \(!structuredReady \|\| !boundaryReady\)[\s\S]*throw new Error[\s\S]*this\.applyGlobalFineDiagnostics\(fine!\)/,
     "the accepted queue-fenced t=0 controls must replace stale dynamic-step diagnostics");
   assert.match(rendererSource, /solver\.initialSparseAuthorityReady!==true\)\{solver\.destroy\(\);throw new Error/);
-  assert.match(viewportSource, /status\.label === "WebGPU renderer ready"[\s\S]*preparing fenced t=0 solver authority/);
+  assert.match(viewportSource, /status\.label === "WebGPU renderer ready"[\s\S]*preparing fenced t=0 solver authority[\s\S]*resource: getMethod/);
 });
 
 test("t=0 rejection reports the exact structured velocity and boundary controls", () => {

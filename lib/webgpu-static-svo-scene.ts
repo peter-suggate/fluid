@@ -3,6 +3,20 @@ import type { GPUEulerianInfo } from "./webgpu-eulerian";
 import type { GPUSolverInstance } from "./methods/types";
 import { createTallCellLayout, type GPUQuality } from "./tall-cell-grid";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
+import type { ResourcePluginDefinition } from "./resource-readiness";
+
+/** Colocated lifecycle declaration for static-world voxel preprocessing. */
+export const staticSvoSceneResourcePlugin: ResourcePluginDefinition = Object.freeze({
+  id: "scene.static-svo-source",
+  lane: "svo",
+  label: "Static sparse world source",
+  provides: ["static-world"] as const,
+  blocks: "nothing",
+  phaseCopy: {
+    allocation: "Building the authored sparse world source progressively.",
+    warmup: "Uploading and fencing the static sparse world publication.",
+  },
+});
 
 export interface StaticSvoSceneOptions {
   /**
