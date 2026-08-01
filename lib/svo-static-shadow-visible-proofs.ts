@@ -20,6 +20,14 @@ export interface SvoStaticShadowVisibleProofOptions {
   completeStaticBlockerBounds?: readonly SvoStaticShadowAabb[];
   /** Level-zero is the useful receiver lookup today; defaults to level zero only. */
   receiverLevels?: readonly number[];
+  /**
+   * How far the consumer promises to keep tracing exactly, in page diagonals.
+   * Two is the smallest sound choice that excuses a receiver's whole 26-page
+   * neighbourhood, because a corner neighbour's farthest point is exactly two
+   * diagonals away. Raising it buys more certificates and costs a longer local
+   * trace; see docs/plan-cached-static-visibility.md for the measured curve.
+   */
+  localTraceReachPageDiagonals?: number;
 }
 
 export interface SvoStaticShadowVisibleProofLightCoverage {
@@ -46,6 +54,13 @@ export interface SvoStaticShadowVisibleProofPublication {
   includesNodeMipSamplingSupport: false;
   requiresExactLocalPageTrace: true;
   requiresCurrentFrameRigidOverlay: true;
+  /**
+   * Metres of exact tracing a certified receiver still owes. Every blocker the
+   * proof excused lies wholly within this distance of the receiver page, so a
+   * consumer that clips its static traversal any shorter reintroduces the light
+   * leaks the certificate was supposed to be free of.
+   */
+  localTraceReach_m: number;
   proofs: readonly WebGpuSvoStaticShadowProof[];
   coverage: readonly SvoStaticShadowVisibleProofLightCoverage[];
   visiblePageLightPairs: number;
@@ -66,13 +81,21 @@ function aabbForPage(
   return { minimum, maximum };
 }
 
-function contains(outer: SvoStaticShadowAabb, inner: SvoStaticShadowAabb): boolean {
-  return outer.minimum.every((value, axis) => inner.minimum[axis] >= value && inner.maximum[axis] <= outer.maximum[axis]);
-}
-
-function overlaps(left: SvoStaticShadowAabb, right: SvoStaticShadowAabb): boolean {
-  return left.minimum.every((value, axis) => left.maximum[axis] >= right.minimum[axis]
-    && right.maximum[axis] >= value);
+/**
+ * Farthest any point of `blocker` can lie from any point of `receiver`. A
+ * blocker within the consumer's local-trace reach by this measure is found by
+ * that trace from *every* point of the receiver page, which is what makes
+ * excusing it from the proof sound — the shaded point is not known at bake time.
+ */
+function maximumSeparation_m(receiver: SvoStaticShadowAabb, blocker: SvoStaticShadowAabb): number {
+  let total = 0;
+  for (let axis = 0; axis < 3; axis += 1) {
+    total += Math.max(
+      Math.abs(blocker.maximum[axis] - receiver.minimum[axis]),
+      Math.abs(receiver.maximum[axis] - blocker.minimum[axis]),
+    ) ** 2;
+  }
+  return Math.sqrt(total);
 }
 
 /**
@@ -128,17 +151,91 @@ function emitterBounds(light: SvoLightRecord): SvoStaticShadowAabb {
 }
 
 /**
- * Conservative superset of every segment from the receiver box to the finite
- * emitter support. A false result is therefore a mathematical clear proof;
- * a true result remains unknown and takes the exact path.
+ * How far a certified receiver still has to trace.
+ *
+ * A `visible` certificate withholds nothing about the receiver page's own
+ * contents — every blocker it excused was strictly inside that page — so the
+ * consumer keeps tracing locally and only skips the remainder. A ray leaving
+ * any interior point of a box has left the box by its diameter, so the page
+ * diagonal is a sufficient clip for every ray direction and every light kind.
+ * This is the whole return on a certificate: centimetres of traversal in place
+ * of a scene-length ray.
  */
-function finiteLightBeamIntersectsAabb(receiver: SvoStaticShadowAabb, blocker: SvoStaticShadowAabb, light: SvoLightRecord): boolean {
+export function svoStaticShadowLocalTraceReach_m(pageSize_m: Triple, level = 0): number {
+  if (!Number.isSafeInteger(level) || level < 0) throw new RangeError("Static-shadow page level must be a non-negative integer");
+  if (pageSize_m.length !== 3 || pageSize_m.some((value) => !Number.isFinite(value) || value <= 0)) {
+    throw new RangeError("Static-shadow page size must contain three positive finite metres");
+  }
+  return Math.hypot(...pageSize_m) * 2 ** level;
+}
+
+/**
+ * Shader twin of `svoStaticShadowLocalTraceReach_m`. Both sides must agree on
+ * the metre count, so the formula is authored once and asserted in both.
+ */
+export const svoStaticShadowLocalTraceWGSL = /* wgsl */ `
+fn svoStaticShadowLocalTraceReach_m(cellSize_m:vec3f,interiorSize:u32,level:u32)->f32{
+  return length(cellSize_m*f32(interiorSize))*exp2(f32(level));
+}
+`;
+
+function centreAndHalfExtent(bounds: SvoStaticShadowAabb): readonly [Triple, Triple] {
+  const centre = bounds.minimum.map((value, axis) => (value + bounds.maximum[axis]) / 2) as unknown as Triple;
+  const half = bounds.maximum.map((value, axis) => (value - bounds.minimum[axis]) / 2) as unknown as Triple;
+  return [centre, half];
+}
+
+/**
+ * Conservative test for the bundle of segments joining the receiver box to a
+ * finite emitter's support. A false result is a mathematical clear proof; a
+ * true result remains unknown and takes the exact path.
+ *
+ * Every hull point is `(1-t)a + t b` for `a` in the receiver and `b` in the
+ * emitter, so its offset from the centre segment is bounded per axis by
+ * `(1-t)receiverHalf + t emitterHalf <= max(receiverHalf, emitterHalf)`. The
+ * hull therefore sits inside the centre segment grown by that per-axis margin,
+ * which turns the bundle into one ray/slab test against the grown blocker.
+ *
+ * The union AABB of receiver and emitter is also a superset, but a ruinously
+ * loose one: for a floor page under a ceiling fixture it spans the entire
+ * column between them, so every intervening page vetoes the proof and finite
+ * lights certify nothing. That looseness is what made point and area fixtures —
+ * the lights whose count actually drives frame time — pay a full scene ray per
+ * receiver.
+ */
+export function svoFinitePageBeamIntersectsAabb(
+  receiver: SvoStaticShadowAabb,
+  blocker: SvoStaticShadowAabb,
+  light: SvoLightRecord,
+): boolean {
   const emitter = emitterBounds(light);
-  const sweptBounds: SvoStaticShadowAabb = {
-    minimum: receiver.minimum.map((value, axis) => Math.min(value, emitter.minimum[axis])) as unknown as Triple,
-    maximum: receiver.maximum.map((value, axis) => Math.max(value, emitter.maximum[axis])) as unknown as Triple,
-  };
-  return overlaps(sweptBounds, blocker);
+  const [receiverCentre, receiverHalf] = centreAndHalfExtent(receiver);
+  const [emitterCentre, emitterHalf] = centreAndHalfExtent(emitter);
+  const offset = emitterCentre.map((value, axis) => value - receiverCentre[axis]);
+  const separation = Math.hypot(...offset);
+  // An emitter inside the receiver page has no single shadow direction; the
+  // exact trace owns it.
+  if (!(separation > 1e-12) || !Number.isFinite(separation)) return true;
+  const margin = receiverHalf.map((value, axis) => Math.max(value, emitterHalf[axis]));
+  let first = 0;
+  let last = separation;
+  for (let axis = 0; axis < 3; axis += 1) {
+    const minimum = blocker.minimum[axis] - margin[axis];
+    const maximum = blocker.maximum[axis] + margin[axis];
+    const component = offset[axis] / separation;
+    if (Math.abs(component) <= 1e-12) {
+      // Half-open page ownership: boundary-only contact belongs to one local
+      // page and cannot certify a remote volume blocker.
+      if (receiverCentre[axis] <= minimum || receiverCentre[axis] >= maximum) return false;
+      continue;
+    }
+    const a = (minimum - receiverCentre[axis]) / component;
+    const b = (maximum - receiverCentre[axis]) / component;
+    first = Math.max(first, Math.min(a, b));
+    last = Math.min(last, Math.max(a, b));
+    if (last < first) return false;
+  }
+  return last > first;
 }
 
 function blockerPagesFromBounds(
@@ -173,12 +270,19 @@ function validatesExactTopology(staticMips: SvoStaticNodeMipPublication, shadowP
  * Produces mathematically conservative VISIBLE certificates for hard rays.
  *
  * Level-zero node-mip pages are a conservative AABB cover of every selected
- * authored/terrain blocker. The receiver page is excluded because integration
- * retains an exact local trace until that page is exited. Any remote page whose
- * conservative AABB intersects the page-to-light hard-ray swept volume makes
- * the result unknown. Unknown pairs publish nothing and therefore use the exact
- * path. The production cone marcher needs an aperture/filter-footprint inflated
- * proof and must not consume these certificates.
+ * authored/terrain blocker. Blockers within `localTraceReach_m` of the receiver
+ * page are excused, because integration keeps tracing exactly that far and will
+ * find them itself. Any remaining page whose conservative AABB intersects the
+ * page-to-light hard-ray swept volume makes the result unknown. Unknown pairs
+ * publish nothing and therefore use the exact path. The production cone marcher
+ * needs an aperture/filter-footprint inflated proof and must not consume these
+ * certificates.
+ *
+ * The reach is the whole economics of this producer, and the measured curve is
+ * unkind: short reaches certify almost nothing in a furnished room, and the
+ * reaches that certify most of the scene are a large fraction of the scene
+ * diagonal, so the local trace they mandate costs about what the full ray did.
+ * docs/plan-cached-static-visibility.md records the numbers.
  */
 export function buildSvoStaticShadowVisibleProofs(
   staticMips: SvoStaticNodeMipPublication,
@@ -194,6 +298,13 @@ export function buildSvoStaticShadowVisibleProofs(
         || light.revision !== shadowPlan.lightRevision)) {
     throw new Error("Static-shadow visible proofs require the exact authored-light revision and order");
   }
+  const diagonals = options.localTraceReachPageDiagonals ?? 2;
+  if (!Number.isFinite(diagonals) || diagonals < 1) {
+    // Below one diagonal the receiver's own page is not even excused, so the
+    // proof would contradict the local trace it depends on.
+    throw new RangeError("Static-shadow local-trace reach must be at least one page diagonal");
+  }
+  const localTraceReach_m = svoStaticShadowLocalTraceReach_m(staticMips.basePageSize_m) * diagonals;
   const totalPageLightPairs = shadowPlan.pages.length * lights.length;
   const completeBlockerBounds = options.completeStaticBlockerBounds;
   const suppliedCompleteCover = completeBlockerBounds !== undefined
@@ -208,6 +319,7 @@ export function buildSvoStaticShadowVisibleProofs(
       includesNodeMipSamplingSupport: false,
       requiresExactLocalPageTrace: true,
       requiresCurrentFrameRigidOverlay: true,
+      localTraceReach_m,
       proofs: [],
       coverage: lights.map((light) => ({
         lightId: light.lightId,
@@ -239,11 +351,12 @@ export function buildSvoStaticShadowVisibleProofs(
       const light = lights[lightIndex];
       let remoteBlocker = false;
       for (const blocker of blockerBounds) {
-        // The local exact trace owns every blocker page wholly inside the receiver page.
-        if (contains(receiverBounds, blocker)) continue;
+        // The local exact trace owns every blocker it is guaranteed to reach
+        // from whichever point of this page ends up being shaded.
+        if (maximumSeparation_m(receiverBounds, blocker) <= localTraceReach_m) continue;
         const intersects = light.kind === "directional"
           ? svoDirectionalPageBeamIntersectsAabb(receiverBounds, blocker, light.direction)
-          : finiteLightBeamIntersectsAabb(receiverBounds, blocker, light);
+          : svoFinitePageBeamIntersectsAabb(receiverBounds, blocker, light);
         if (intersects) {
           remoteBlocker = true;
           break;
@@ -271,6 +384,7 @@ export function buildSvoStaticShadowVisibleProofs(
     includesNodeMipSamplingSupport: false,
     requiresExactLocalPageTrace: true,
     requiresCurrentFrameRigidOverlay: true,
+    localTraceReach_m,
     proofs,
     coverage,
     visiblePageLightPairs: proofs.length,

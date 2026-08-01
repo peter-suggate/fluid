@@ -3,12 +3,14 @@ import test from "node:test";
 
 import type { SceneDescription } from "../lib/model";
 import type { SparseSceneDomainPlan } from "../lib/sparse-scene-domain";
-import { buildSvoSceneLights } from "../lib/svo-light-abi";
+import { buildSvoSceneLights, canonicalSvoLightRecord } from "../lib/svo-light-abi";
 import { buildSvoStaticNodeMipPublication } from "../lib/svo-static-node-mips";
 import { planSvoStaticShadowField } from "../lib/svo-static-shadow-field";
 import {
   buildSvoStaticShadowVisibleProofs,
   svoDirectionalPageBeamIntersectsAabb,
+  svoFinitePageBeamIntersectsAabb,
+  svoStaticShadowLocalTraceReach_m,
 } from "../lib/svo-static-shadow-visible-proofs";
 import type { EnvironmentProxyPrimitive } from "../lib/voxel-environments";
 
@@ -55,7 +57,14 @@ function build(proxies: readonly EnvironmentProxyPrimitive[], direction: readonl
     revision: 7, maximumRecords: 1, directionalDirection: direction,
   });
   const plan = planSvoStaticShadowField(mips.plan, lights);
-  return { mips, lights, plan, publication: buildSvoStaticShadowVisibleProofs(mips, lights.records, plan) };
+  // One diagonal excuses the receiver's own page and nothing else, which is the
+  // narrowest sound reach and keeps these beam assertions about the beam. The
+  // fixture's pages are 8 m across, so the production default of two diagonals
+  // would put this entire 24 m scene inside the local trace.
+  return {
+    mips, lights, plan,
+    publication: buildSvoStaticShadowVisibleProofs(mips, lights.records, plan, { localTraceReachPageDiagonals: 1 }),
+  };
 }
 
 test("parallel page beam uses an exact Minkowski ray/slab intersection", () => {
@@ -101,6 +110,7 @@ test("a caller-supplied complete proxy cover safely recovers proofs when sampled
   // the omitted +X pages are nevertheless present in the supplied proof cover.
   const result = build(proxies, [-1, 0, 0], 1);
   const publication = buildSvoStaticShadowVisibleProofs(result.mips, result.lights.records, result.plan, {
+    localTraceReachPageDiagonals: 1,
     completeStaticBlockerBounds: proxies.map(({ aabb_m }) => ({
       minimum: [aabb_m.min.x, aabb_m.min.y, aabb_m.min.z],
       maximum: [aabb_m.max.x, aabb_m.max.y, aabb_m.max.z],
@@ -117,4 +127,55 @@ test("topology or light revision mismatches cannot produce reusable proofs", () 
   });
   assert.throws(() => buildSvoStaticShadowVisibleProofs(first.mips, changedLights.records, first.plan),
     /exact authored-light revision/);
+});
+
+test("the local-trace reach is published and must cover at least the receiver's own page", () => {
+  const first = build([box("a", 0, 0)], [1, 0, 0]);
+  const pageDiagonal = Math.hypot(...first.mips.basePageSize_m);
+  assert.equal(svoStaticShadowLocalTraceReach_m(first.mips.basePageSize_m), pageDiagonal);
+  // Coarser receiver levels cover proportionally more world per page.
+  assert.equal(svoStaticShadowLocalTraceReach_m(first.mips.basePageSize_m, 2), pageDiagonal * 4);
+  assert.equal(
+    buildSvoStaticShadowVisibleProofs(first.mips, first.lights.records, first.plan,
+      { localTraceReachPageDiagonals: 1 }).localTraceReach_m,
+    pageDiagonal,
+  );
+  // The default keeps the whole 26-page neighbourhood inside the local trace.
+  assert.equal(
+    buildSvoStaticShadowVisibleProofs(first.mips, first.lights.records, first.plan).localTraceReach_m,
+    pageDiagonal * 2,
+  );
+  assert.throws(() => buildSvoStaticShadowVisibleProofs(first.mips, first.lights.records, first.plan,
+    { localTraceReachPageDiagonals: 0.5 }), /at least one page diagonal/);
+});
+
+test("reach excuses exactly the blockers the local trace is guaranteed to reach", () => {
+  // A corner neighbour's farthest point is exactly two page diagonals away, so
+  // two diagonals is the smallest reach that owns the full neighbourhood — and
+  // one diagonal must own nothing beyond the receiver page itself.
+  const blocked = build([box("receiver", 0, 0), box("ahead", 8, 0)], [1, 0, 0]);
+  assert.equal(blocked.publication.proofs.length, 1, "one diagonal leaves the blocked page exact");
+  const excused = buildSvoStaticShadowVisibleProofs(blocked.mips, blocked.lights.records, blocked.plan,
+    { localTraceReachPageDiagonals: 2 });
+  assert.equal(excused.proofs.length, 2,
+    "two diagonals hand the adjacent blocker to the local trace, so both pages certify");
+});
+
+test("finite emitters use the hull margin, not the union of receiver and emitter bounds", () => {
+  const receiver = { minimum: [0, 0, 0] as const, maximum: [2, 2, 2] as const };
+  const light = canonicalSvoLightRecord({
+    lightId: 5, ownerId: 0, revision: 1, kind: "point",
+    position_m: [1, 40, 1], range_m: 100, direction: [0, -1, 0],
+    colorLinear: [1, 1, 1], intensity: 1,
+    axisU: [1, 0, 0], halfWidth_m: 0, axisV: [0, 0, 1], halfHeight_m: 0, radius_m: .5,
+    sourceKey: "test/point",
+  });
+  // Directly between the receiver and a ceiling fixture: a genuine blocker.
+  assert.equal(svoFinitePageBeamIntersectsAabb(receiver,
+    { minimum: [0, 10, 0], maximum: [2, 12, 2] }, light), true);
+  // Beside that column. The union AABB of receiver and emitter spans the whole
+  // shaft between them and would have called this a blocker too, which is what
+  // reduced finite lights to certifying nothing at all in a furnished room.
+  assert.equal(svoFinitePageBeamIntersectsAabb(receiver,
+    { minimum: [20, 10, 0], maximum: [22, 12, 2] }, light), false);
 });
