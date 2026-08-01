@@ -4,6 +4,7 @@ import {
   type OctreeFirstOrderSPDVCycle,
 } from "./webgpu-octree-section43-contract";
 import { PassBroker } from "./webgpu-pass-broker";
+import { planOctreeVCycleParallelLevels } from "./octree-solve-tail-policy";
 import type { OctreePipelinedWorksetLinearOperator } from "./webgpu-octree-pipelined-mgpcg";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 import {
@@ -385,6 +386,9 @@ export interface OctreeSPGridVCyclePlan {
    * this maximum; arena addressing uses levelCapacities/levelOffsets. */
   readonly levelStride: number;
   readonly transferStride: number;
+  /** Dense cell cardinality of each level's domain, finest first. The V-cycle
+   * launch shape is authored from this immutable geometry. */
+  readonly levelDomainCells: readonly number[];
   readonly levelCapacities: readonly number[];
   readonly levelOffsets: readonly number[];
   readonly totalLevelSlots: number;
@@ -846,11 +850,17 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   // level. A level cannot contain more unique coordinates than its domain,
   // so cap each power-of-two hash arena by that exact domain cardinality.
   const maximumSparseSlots = nextPowerOfTwo(rowCapacity * 16);
-  const levelCapacities = Array.from({ length: levelCount }, (_, level) => {
+  // Exact dense cardinality of each level's domain. This is the immutable
+  // geometry the V-cycle launch shape is authored from; it never depends on
+  // how many of those cells a given generation happens to activate.
+  const levelDomainCells = Array.from({ length: levelCount }, (_, level) => {
     const scale = 2 ** level;
-    const domainCells = options.dimensions
+    return options.dimensions
       .map((value) => Math.ceil(value / scale))
       .reduce((product, value) => product * value, 1);
+  });
+  const levelCapacities = Array.from({ length: levelCount }, (_, level) => {
+    const domainCells = levelDomainCells[level]!;
     // Preserve the original open-address table's <=50% load guarantee even
     // when a coarse level occupies every coordinate in its dense domain.
     return nextPowerOfTwo(Math.min(maximumSparseSlots, 2 * domainCells));
@@ -907,6 +917,7 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   const capturePageCount = Math.ceil(rowCapacity / CAPTURE_PAGE_ROWS);
   const capturePageStateBytes = (CAPTURE_PUBLICATION_WORDS + 4 * capturePageCount) * 4;
   return { rowCapacity, levelCount, levelStride, transferStride,
+    levelDomainCells: Object.freeze(levelDomainCells),
     levelCapacities: Object.freeze(levelCapacities),
     levelOffsets: Object.freeze(levelOffsets), totalLevelSlots,
     transferCapacities: Object.freeze(transferCapacities),
@@ -1166,6 +1177,14 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly denseShadow?: WebGPUFactorOneDensePressureShadow;
   /** Recurring dense M1 correction; the accurate A2 operator remains unchanged. */
   private readonly denseCorrection?: WebGPUOctreeFactorOneDenseCorrection;
+  /**
+   * Leading levels the correction runs as wide per-level dispatches; the rest
+   * join the one-workgroup tail. Authored from immutable level geometry, so
+   * the command graph never depends on a readback or a previous advance.
+   */
+  private get vcycleParallelLevels(): number {
+    return planOctreeVCycleParallelLevels(this.plan.levelDomainCells);
+  }
   private readonly levelDispatch: readonly [number, number, number];
   private readonly clearDispatch: readonly [number, number, number];
   private readonly pageDispatch: readonly [number, number, number];
@@ -1797,11 +1816,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5
       + (this.hierarchicalExecutorCompiled ? 2 : 0)
       + denseShadowSetupDispatchCount;
-    // The two widest levels retain fully parallel, globally synchronized
-    // Jacobi dispatches. The remaining <=63-cell tail fits in one workgroup,
-    // whose barriers provide identical phase ordering without serializing the
-    // 276-cell level-one restriction.
-    const parallelLevels = Math.min(2, l - 1);
+    // The widest levels retain fully parallel, globally synchronized Jacobi
+    // dispatches. Only the levels that fit in one workgroup join the tail,
+    // whose barriers then provide identical phase ordering without serializing
+    // a level's restriction parent-chain walk one coarse cell at a time.
+    const parallelLevels = this.vcycleParallelLevels;
     const correctionInitializationDispatchCount =
       this.fusedCorrectionInitialization ? 1 as const : 2 as const;
     const sparseCorrectionDispatchCount = l + 3 + correctionInitializationDispatchCount
@@ -2094,7 +2113,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     for (let level = 0; level < this.plan.levelCount; level += 1) this.runIndirect(pass, "zeroVectors", level, input, false);
     this.runRowIndirect(pass, this.fusedCorrectionInitialization
       ? "seedRhsAndClearCorrection" : "seedRhs", 0, input);
-    const parallelLevels = Math.min(2, this.plan.levelCount - 1);
+    const parallelLevels = this.vcycleParallelLevels;
     for (let level = 0; level < parallelLevels; level += 1) {
       this.smooth(staged(`pre-smooth level ${level}`), level, false, input);
       this.runIndirect(staged(`restrict level ${level}`),

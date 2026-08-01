@@ -39,6 +39,88 @@ export const OCTREE_SECTION43_MINI_FINEST_CELL_CAPACITY = 24 * 16 * 24;
 export const OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT =
   "FLUID_OCTREE_SECTION43_SHELL_DEPTH";
 
+/**
+ * Cells the one-workgroup V-cycle tail may own per level.
+ *
+ * The first-order multigrid preconditioner of section 4.3 runs its widest
+ * levels as globally synchronized per-level dispatches and folds the remaining
+ * coarse levels into a single 64-lane workgroup, whose own barriers supply the
+ * same phase ordering without paying a dispatch for a handful of cells. That
+ * trade is only favourable while the tail really is a handful of cells: the
+ * tail smooths, restricts, prolongs and walks parent chains for *every* level
+ * it owns, serially, on one GPU core.
+ *
+ * The cut used to be the literal constant two, authored against a 16-cubed
+ * domain where level two holds 64 cells. On a 32-cell domain that same
+ * constant hands the tail 293 cells and measured **29.4 ms/advance at 0.1 %
+ * compute occupancy** — 22 % of the frame on one core — because level two now
+ * has 256 cells and its restriction walks 256 parent chains one at a time.
+ * Deriving the cut from the level geometry keeps the authored behaviour on
+ * every domain that fits the original assumption and widens it on the ones
+ * that never did.
+ */
+export const OCTREE_VCYCLE_TAIL_WORKGROUP_CELLS = 64;
+/**
+ * Wide levels the correction always keeps, whatever the geometry says.
+ *
+ * This is the former hardcoded cut, retained as a floor rather than a cap, so
+ * the selection below can only ever *add* wide levels. Every domain that
+ * already satisfied the "<=63-cell tail" assumption therefore keeps its exact
+ * command graph, and only the domains that never did are widened.
+ */
+export const OCTREE_VCYCLE_MINIMUM_PARALLEL_LEVELS = 2;
+/** Validation and rollback lever. Setting this to a level's own cell count
+ * reproduces any earlier cut, including the former hardcoded two. */
+export const OCTREE_VCYCLE_TAIL_CELLS_ENVIRONMENT = "FLUID_OCTREE_VCYCLE_TAIL_CELLS";
+
+function resolveVCycleTailCells(
+  environment?: Readonly<Record<string, string | undefined>>,
+): number {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const text = resolved?.[OCTREE_VCYCLE_TAIL_CELLS_ENVIRONMENT];
+  if (text === undefined) return OCTREE_VCYCLE_TAIL_WORKGROUP_CELLS;
+  const cells = Number(text);
+  if (!Number.isSafeInteger(cells) || cells < 1) {
+    throw new RangeError(`${OCTREE_VCYCLE_TAIL_CELLS_ENVIRONMENT} must be a positive integer`);
+  }
+  return cells;
+}
+
+/**
+ * Number of leading V-cycle levels to run as wide per-level dispatches.
+ *
+ * `levelCells[i]` is the cell count of level `i`, finest first. The tail
+ * begins at the first level small enough for one workgroup, so the returned
+ * value is that level's index -- never below the authored floor, and never so
+ * deep that the tail loses the exact one-cell bottom it must still solve.
+ *
+ * This selects a launch shape only. Every level is smoothed, restricted and
+ * prolonged by the same expressions either way -- the tail's `coarseSmooth` /
+ * `coarseRestrict` / `coarseProlong` are transcriptions of the dispatched
+ * kernels' bodies, and both fold through the same canonical sums -- so the
+ * arithmetic per cell, and with it the D4 symmetry of the preconditioner, does
+ * not depend on where this cut falls.
+ */
+export function planOctreeVCycleParallelLevels(
+  levelCells: readonly number[],
+  workgroupCells: number = resolveVCycleTailCells(),
+): number {
+  if (levelCells.length < 2) {
+    throw new RangeError("A V-cycle hierarchy needs at least two levels");
+  }
+  if (levelCells.some((cells) => !Number.isSafeInteger(cells) || cells < 1)) {
+    throw new RangeError("V-cycle level cell counts must be positive safe integers");
+  }
+  if (!Number.isSafeInteger(workgroupCells) || workgroupCells < 1) {
+    throw new RangeError("V-cycle tail workgroup capacity must be a positive integer");
+  }
+  const firstTailLevel = levelCells.findIndex((cells) => cells <= workgroupCells);
+  const wide = firstTailLevel < 0 ? levelCells.length - 1 : firstTailLevel;
+  return Math.min(levelCells.length - 1,
+    Math.max(OCTREE_VCYCLE_MINIMUM_PARALLEL_LEVELS, wide));
+}
+
 export interface OctreeSolveTailSceneProfile {
   readonly finestDimensions: readonly [number, number, number];
   readonly maximumLeafSize: 2 | 4 | 8 | 16 | 32;

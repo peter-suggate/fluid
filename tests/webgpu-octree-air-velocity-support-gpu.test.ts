@@ -670,7 +670,7 @@ test("host defaults to the exact changed frontier and retains the preceding fixe
     "the A/B decision must not alter construction or resource layout");
   assert.match(encode, /if\(changedFrontier\).*compactAirSupportSeedFrontier.*else\{for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX/s);
   assert.match(encode,
-    /for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES.*expandAirSupportChangedFrontier.*relaxAirSupportChangedFrontier.*commitAirSupportChangedFrontier.*advanceAirSupportChangedFrontier.*marchAirSupportFacesChangedFrontier/s,
+    /constfrontierWaves=octreeAirSupportParallelFrontierWaves\(\);for\(letwave=0;wave<frontierWaves.*expandAirSupportChangedFrontier.*relaxAirSupportChangedFrontier.*commitAirSupportChangedFrontier.*advanceAirSupportChangedFrontier.*marchAirSupportFacesChangedFrontier/s,
     "the sparse default must batch useful frontier work across occupancy-wide dispatches before its exact residual tail");
   assert.equal(OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES, 12);
   assert.match(encode, /for\(letwave=0;wave<OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES.*advanceAirSupportMarchWave.*marchAirSupportFacesToFixedPoint/s);

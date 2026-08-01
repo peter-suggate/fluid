@@ -61,6 +61,29 @@ export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES = 12;
 export const OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP = 2;
 /** Occupancy-wide sparse waves before the exact residual frontier tail. */
 export const OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES = 12;
+/**
+ * Measurement lever for the wide-wave prefix length.
+ *
+ * The prefix is a fixed count, never a scene or domain propagation bound: the
+ * persistent tail below remains the exact unbounded authority and decides when
+ * the fixed point is reached. Changing this only moves work between the two,
+ * because a wave whose frontier is already empty dispatches zero workgroups.
+ */
+export const OCTREE_AIR_SUPPORT_FRONTIER_WAVES_ENVIRONMENT =
+  "FLUID_OCTREE_AIR_SUPPORT_FRONTIER_WAVES";
+export function octreeAirSupportParallelFrontierWaves(
+  environment?: Readonly<Record<string, string | undefined>>,
+): number {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const text = resolved?.[OCTREE_AIR_SUPPORT_FRONTIER_WAVES_ENVIRONMENT];
+  if (text === undefined) return OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES;
+  const waves = Number(text);
+  if (!Number.isSafeInteger(waves) || waves < 0) {
+    throw new RangeError(`${OCTREE_AIR_SUPPORT_FRONTIER_WAVES_ENVIRONMENT} must be a non-negative integer`);
+  }
+  return waves;
+}
 /** Words 41/42 are the stationary-air fallback latch: count of face patches
  * the march never reached, and the first such (cell<<3)|axis identity.
  * Words 43-46 retain the construction-stable dense oracle's march ledger; the
@@ -958,7 +981,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       // instead lets this proven singleton publish the next phase, singleton,
       // and residual-tail indirect records. The persistent tail remains the
       // exact unbounded authority.
-      for (let wave = 0; wave < OCTREE_AIR_SUPPORT_GPU_PARALLEL_FRONTIER_WAVES; wave += 1) {
+      const frontierWaves = octreeAirSupportParallelFrontierWaves();
+      for (let wave = 0; wave < frontierWaves; wave += 1) {
         pass.setPipeline(this.pipelines.expandAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.expandAirSupportChangedFrontier!);
         pass.dispatchWorkgroupsIndirect(this.indirect, indirectFrontierGate ? 0 : 48);

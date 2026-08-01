@@ -3,6 +3,7 @@ import {
   OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION,
 } from "./webgpu-octree-section43-contract";
 import type { PassBroker } from "./webgpu-pass-broker";
+import { planOctreeVCycleParallelLevels } from "./octree-solve-tail-policy";
 import {
   FACTOR_ONE_DENSE_GPU_PUBLICATION_WORD,
   FACTOR_ONE_DENSE_GPU_WORKLIST_RECORD_WORDS,
@@ -395,7 +396,7 @@ export class WebGPUOctreeFactorOneDenseCorrection {
       (Object.keys(FACTOR_ONE_DENSE_CORRECTION_BINDINGS) as DensePipelineName[])
         .map((name) => [name, make(name)]),
     )) as Readonly<Record<DensePipelineName, GPUComputePipeline>>;
-    const parallelLevels = Math.min(2, layout.levelCount - 1);
+    const parallelLevels = planOctreeVCycleParallelLevels(layout.levelVolumes);
     this.encodedCorrectionDispatchCount = 3
       + parallelLevels * (2 * this.degree + 2);
     this.allocatedBytes = this.dispatches.size
@@ -429,7 +430,7 @@ export class WebGPUOctreeFactorOneDenseCorrection {
     let pass = broker.compute({ label: "Factor-1 dense M1 · initialize correction" });
     this.runIndirect(pass, "initializeDenseCorrection", 0,
       this.source.layout.levelCount * BYTES_PER_LEVEL, input);
-    const parallelLevels = Math.min(2, this.source.layout.levelCount - 1);
+    const parallelLevels = planOctreeVCycleParallelLevels(this.source.layout.levelVolumes);
     for (let level = 0; level < parallelLevels; level += 1) {
       this.smooth(broker, level, false, input);
       this.runIndirect(broker.compute({

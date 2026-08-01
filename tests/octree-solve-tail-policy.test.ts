@@ -7,9 +7,12 @@ import {
   OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT,
   OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT,
   OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
+  OCTREE_VCYCLE_MINIMUM_PARALLEL_LEVELS,
+  OCTREE_VCYCLE_TAIL_WORKGROUP_CELLS,
   countOctreePressureCommands,
   octreeFactorOnePredictedSolveTailEnabled,
   planOctreeSolveTail,
+  planOctreeVCycleParallelLevels,
   selectOctreeFactorOneEncodedSolveTail,
   type OctreeSolveTailSceneProfile,
 } from "../lib/octree-solve-tail-policy";
@@ -374,4 +377,48 @@ test("solve-tail policy rejects malformed or out-of-envelope command inputs", ()
     mergedBandOperatorDispatches: 1, firstOrderSetupDispatches: 10,
     firstOrderCorrectionDispatches: 26, boundarySmoothingIterations: 3,
   }), /must be even/);
+});
+
+/** Dense cell cardinality of each V-cycle level, finest first. */
+const vcycleLevelCells = (dimensions: readonly number[]): number[] => {
+  const levels = Math.max(2, Math.ceil(Math.log2(Math.max(...dimensions))) + 1);
+  return Array.from({ length: levels }, (_, level) => dimensions
+    .map((value) => Math.ceil(value / 2 ** level))
+    .reduce((product, value) => product * value, 1));
+};
+
+test("the V-cycle tail keeps only the levels one workgroup can own", () => {
+  assert.equal(OCTREE_VCYCLE_TAIL_WORKGROUP_CELLS, 64);
+  assert.equal(OCTREE_VCYCLE_MINIMUM_PARALLEL_LEVELS, 2);
+  // Every domain whose level two already fitted the authored "<=63-cell tail"
+  // assumption keeps its exact former command graph. This is what makes the
+  // selection safe to apply to the shipping mini lane without a Gate-B run.
+  for (const dimensions of [[8, 8, 8], [16, 16, 16], [12, 16, 16]]) {
+    assert.equal(planOctreeVCycleParallelLevels(vcycleLevelCells(dimensions)),
+      OCTREE_VCYCLE_MINIMUM_PARALLEL_LEVELS, dimensions.join("x"));
+  }
+  // Domains that never fitted it are widened by exactly the levels that do
+  // not fit. The 32-cell symmetric-expansion oracle is the measured case: its
+  // level two holds 256 cells, and leaving it in the one-workgroup tail cost
+  // 29.4 ms/advance at 0.1% compute occupancy.
+  assert.deepEqual(vcycleLevelCells([32, 16, 32]), [16384, 2048, 256, 32, 4, 1]);
+  assert.equal(planOctreeVCycleParallelLevels(vcycleLevelCells([32, 16, 32])), 3);
+  assert.equal(planOctreeVCycleParallelLevels(vcycleLevelCells([24, 16, 24])), 3);
+  assert.equal(planOctreeVCycleParallelLevels(vcycleLevelCells([64, 20, 64])), 4);
+  // The tail always retains at least the exact one-cell bottom it solves.
+  for (const dimensions of [[8, 8, 8], [32, 16, 32], [64, 20, 64], [320, 96, 80]]) {
+    const cells = vcycleLevelCells(dimensions);
+    assert.ok(planOctreeVCycleParallelLevels(cells) <= cells.length - 1);
+    assert.ok(planOctreeVCycleParallelLevels(cells)
+      >= OCTREE_VCYCLE_MINIMUM_PARALLEL_LEVELS);
+  }
+});
+
+test("V-cycle level selection rejects malformed hierarchies", () => {
+  assert.throws(() => planOctreeVCycleParallelLevels([4096]), /at least two levels/);
+  assert.throws(() => planOctreeVCycleParallelLevels([4096, 0]), /positive safe integers/);
+  assert.throws(() => planOctreeVCycleParallelLevels([4096, 64], 0),
+    /workgroup capacity must be a positive integer/);
+  // The rollback lever reproduces any earlier cut, including the former two.
+  assert.equal(planOctreeVCycleParallelLevels(vcycleLevelCells([32, 16, 32]), 256), 2);
 });
