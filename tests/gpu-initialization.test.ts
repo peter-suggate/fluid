@@ -58,7 +58,9 @@ test("GPU initialization tasks can report progress inside one pipeline family", 
 
 test("GPU initialization paints phase changes and batches same-phase work", async () => {
   const originalAnimationFrame = globalThis.requestAnimationFrame;
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
   let animationFrames = 0;
+  Object.defineProperty(globalThis, "document", { configurable: true, value: {} });
   globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
     animationFrames += 1;
     callback(0);
@@ -85,6 +87,30 @@ test("GPU initialization paints phase changes and batches same-phase work", asyn
   } finally {
     if (originalAnimationFrame) globalThis.requestAnimationFrame = originalAnimationFrame;
     else delete (globalThis as { requestAnimationFrame?: typeof requestAnimationFrame }).requestAnimationFrame;
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else Reflect.deleteProperty(globalThis, "document");
+  }
+});
+
+test("GPU worker initialization yields without waiting for presentation rAF", async () => {
+  const originalAnimationFrame = globalThis.requestAnimationFrame;
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  let animationFrames = 0;
+  Reflect.deleteProperty(globalThis, "document");
+  globalThis.requestAnimationFrame = (() => {
+    animationFrames += 1;
+    throw new Error("worker startup must not schedule presentation rAF");
+  }) as typeof requestAnimationFrame;
+  try {
+    const runner = new GPUInitializationTaskRunner(() => {}, new AbortController().signal);
+    await runner.run([{ id: "allocate", phase: "allocation", label: "Allocate", run() {} }]);
+    assert.equal(animationFrames, 0);
+    assert.equal(runner.completedCount, 1);
+  } finally {
+    if (originalAnimationFrame) globalThis.requestAnimationFrame = originalAnimationFrame;
+    else delete (globalThis as { requestAnimationFrame?: typeof requestAnimationFrame }).requestAnimationFrame;
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else Reflect.deleteProperty(globalThis, "document");
   }
 });
 

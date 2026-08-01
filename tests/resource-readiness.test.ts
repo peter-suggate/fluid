@@ -112,3 +112,26 @@ test("the UI presents concurrent plugin work without treating all progress as a 
     "the solver handoff must not reuse the renderer's completed task count");
   assert.match(transport, /resourceInteractionGates\(resourceReadiness, !staticRenderScene\)/);
 });
+
+test("WebGPU resource work is worker-owned and frame traffic is bounded", () => {
+  const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../lib/webgpu-render-worker-client.ts", import.meta.url), "utf8");
+  const worker = readFileSync(new URL("../lib/webgpu-render-worker.ts", import.meta.url), "utf8");
+  const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+  const initialization = readFileSync(new URL("../lib/gpu-initialization.ts", import.meta.url), "utf8");
+
+  assert.match(viewport, /new WebGPURenderWorkerClient\(canvas/);
+  assert.doesNotMatch(viewport, /new FluidLabRenderer\(/,
+    "React must never construct the WebGPU runtime in the UI realm");
+  assert.match(client, /transferControlToOffscreen\(\)/);
+  assert.match(client, /new Worker\(new URL\("\.\/webgpu-render-worker\.ts", import\.meta\.url\)/);
+  assert.match(client, /if \(this\.frameInFlight\) this\.queuedFrame = message/,
+    "busy initialization must retain only the latest UI snapshot");
+  assert.match(client, /performance\.now\(\) - Math\.max\(0, message\.workerNow_ms - message\.status\.startedAt_ms\)/,
+    "worker-relative task clocks must be translated before the UI renders elapsed time");
+  assert.match(worker, /renderer = new FluidLabRenderer\(/);
+  assert.match(worker, /runtime\.setViewportSize/);
+  assert.match(renderer, /HTMLCanvasElement \| OffscreenCanvas/);
+  assert.match(initialization, /typeof document !== "undefined" && typeof requestAnimationFrame === "function"/,
+    "worker startup must not wait on a presentation rAF that cannot fire yet");
+});

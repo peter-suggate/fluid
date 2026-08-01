@@ -43,8 +43,12 @@ const yieldForPaint = () => new Promise<void>((resolve) => {
   // Resuming a promise directly inside requestAnimationFrame still runs its
   // continuation before the browser paints that frame. Put the task onto the
   // following macrotask so the status React just committed is actually
-  // visible before shader compilation or a large GPU allocation begins.
-  if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(resolve, 0));
+  // visible before shader compilation or a large GPU allocation begins. A
+  // dedicated worker has no UI paint to wait for, and worker rAF is not a
+  // bootstrap scheduler: browsers may withhold it until the OffscreenCanvas
+  // has presented once. Yield one macrotask there so initialization cannot
+  // deadlock before its first frame.
+  if (typeof document !== "undefined" && typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(resolve, 0));
   else setTimeout(resolve, 0);
 });
 

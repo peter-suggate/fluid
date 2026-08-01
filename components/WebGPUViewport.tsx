@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState , useMemo} from "react";
-import { FluidLabRenderer, webGPUPlatformResourcePlugin, type FluidCellTraceConfig, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
+import { webGPUPlatformResourcePlugin, type FluidCellTraceConfig, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
+import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "@/lib/webgpu-render-worker-client";
 import {
   resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
   type SvoPixelTrace, type SvoPixelTracePinRequest,
@@ -118,7 +119,7 @@ type Vec3 = RigidBodyState["position_m"];
 
 interface GPUViewportLifecycle {
   readonly canvas: HTMLCanvasElement;
-  readonly renderer: FluidLabRenderer;
+  readonly renderer: FluidLabRendererHandle;
   /** Point the retained render loop at the current component's refs/state. */
   readonly rebind: (binding: GPUViewportRenderBinding) => void;
   /** Cancel the teardown queued by React's development effect replay. */
@@ -133,13 +134,13 @@ interface GPUViewportRenderBinding {
   readonly publishFrameRate: (fps: number | undefined) => void;
   readonly pixelTraceDrawConfig: (
     ui: ReturnType<typeof useUIStore.getState>,
-    renderer: FluidLabRenderer,
+    renderer: FluidLabRendererHandle,
   ) => PixelTraceConfig | undefined;
-  readonly publishPixelTrace: (renderer: FluidLabRenderer) => void;
+  readonly publishPixelTrace: (renderer: FluidLabRendererHandle) => void;
   readonly fluidCellTraceDrawConfig: (
     ui: ReturnType<typeof useUIStore.getState>,
   ) => FluidCellTraceConfig | undefined;
-  readonly publishFluidCellTrace: (renderer: FluidLabRenderer) => void;
+  readonly publishFluidCellTrace: (renderer: FluidLabRendererHandle) => void;
 }
 
 type GPUViewportWindow = Window & {
@@ -157,7 +158,7 @@ const PIXEL_TRACE_HUD_INTERVAL_MS = 110;
 export function WebGPUViewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fpsRef = useRef<HTMLOutputElement>(null);
-  const rendererRef = useRef<FluidLabRenderer | null>(null);
+  const rendererRef = useRef<FluidLabRendererHandle | null>(null);
   const gpuLifecycleRef = useRef<GPUViewportLifecycle | null>(null);
   const camera = useUIStore((state) => state.camera);
   const setCamera = useUIStore((state) => state.setCamera);
@@ -343,7 +344,7 @@ export function WebGPUViewport() {
     };
   };
 
-  const publishFluidCellTrace = (renderer: FluidLabRenderer) => {
+  const publishFluidCellTrace = (renderer: FluidLabRendererHandle) => {
     const ui = useUIStore.getState();
     if (!ui.fluidCellTraceEnabled) return;
     // A pin asked for from the panel or the HUD becomes the same request a click
@@ -382,7 +383,7 @@ export function WebGPUViewport() {
 
   const pixelTraceDrawConfig = (
     ui: ReturnType<typeof useUIStore.getState>,
-    renderer: FluidLabRenderer,
+    renderer: FluidLabRendererHandle,
   ): PixelTraceConfig | undefined => {
     if (!ui.pixelTraceEnabled) { tracePinRequestRef.current = null; tracePinnedRef.current = null; return undefined; }
     const pinnedAt = ui.pixelTracePinned ? tracePinnedRef.current : null;
@@ -418,7 +419,7 @@ export function WebGPUViewport() {
     };
   };
 
-  const publishPixelTrace = (renderer: FluidLabRenderer) => {
+  const publishPixelTrace = (renderer: FluidLabRendererHandle) => {
     const status = renderer.pixelTraceStatus;
     const pointerSeen = tracePointerRef.current !== null;
     const revision = renderer.pixelTraceRevision;
@@ -731,9 +732,8 @@ export function WebGPUViewport() {
     }
     let running = true;
     let releaseGPULease: (() => void) | undefined;
-    const renderer = new FluidLabRenderer(
-      canvas,
-      (status) => {
+    const renderer = new WebGPURenderWorkerClient(canvas, {
+      onStatus: (status) => {
         if (status.state === "lost" || status.state === "unavailable") {
           running = false;
           queueMicrotask(() => { if (initializationStarted && !stopping && !stopped) void stopGPU(status.label); });
@@ -757,11 +757,10 @@ export function WebGPUViewport() {
           : reportedStatus;
         useDiagnosticsStore.getState().set({ gpuStatus });
       },
-      (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
-      undefined,
-      (time_s) => simulation.gpuAdvanceCompleted(time_s),
-      (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus })
-    );
+      onGPUInfo: (info) => useDiagnosticsStore.getState().set({ gpuInfo: info }),
+      onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s),
+      onEffectiveRendererStatus: (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus }),
+    });
     let safeSimulationEpoch: number | undefined;
     const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
       const submittedTime_s = renderer.setSimulationRunning(runState === "running");

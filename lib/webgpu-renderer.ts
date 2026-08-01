@@ -664,10 +664,21 @@ export class FluidLabRenderer {
     && automaticGPURecoveryEnabled(location.search);
   /** A t=0 rebuild must not overlap the old solver's queue or allocation. */
   private timelineResetPending = false;
+  /** CSS viewport supplied by the main thread when this renderer owns an
+   * OffscreenCanvas. HTML canvases continue to derive it locally. */
+  private workerViewport?: { width: number; height: number; devicePixelRatio: number };
 
   get presentationRevision(): number { return this.pausedPresentationRevision; }
 
-  constructor(private readonly canvas: HTMLCanvasElement, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
+  constructor(private readonly canvas: HTMLCanvasElement | OffscreenCanvas, private readonly onStatus: (status: GPUStatus) => void, onGPUInfo?: (info: GPUEulerianInfo) => void, onGPURigidLoads?: (loads: GPURigidLoad[]) => void, onGPUAdvanceCompleted?: (time_s: number) => void, onEffectiveRendererStatus?: (status: EffectiveRendererStatus) => void) { this.gpuInfoCallback = onGPUInfo; this.gpuRigidLoadCallback = onGPURigidLoads; this.gpuAdvanceCompletedCallback = onGPUAdvanceCompleted; this.effectiveRendererStatusCallback = onEffectiveRendererStatus; }
+
+  setViewportSize(width: number, height: number, devicePixelRatio = 1): void {
+    this.workerViewport = {
+      width: Math.max(1, width),
+      height: Math.max(1, height),
+      devicePixelRatio: Math.max(0.25, Math.min(2, devicePixelRatio)),
+    };
+  }
 
   private publishEffectiveRendererStatus(status: EffectiveRendererStatus) {
     const previous = this.lastEffectiveRendererStatus;
@@ -1159,7 +1170,7 @@ export class FluidLabRenderer {
     const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
     const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
     if (this.disposed) { device.destroy(); return; }
-    const context = this.canvas.getContext("webgpu");
+    const context = this.canvas.getContext("webgpu") as GPUCanvasContext | null;
     if (!context) {
       device.destroy();
       this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created", resource: webGPUPlatformResourcePlugin });
@@ -1744,9 +1755,11 @@ export class FluidLabRenderer {
 
   resize(renderScale = 1): void {
     if (this.disposed || this.deviceLost) return;
-    const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    const width = Math.max(1, Math.floor(this.canvas.clientWidth * ratio));
-    const height = Math.max(1, Math.floor(this.canvas.clientHeight * ratio));
+    const htmlCanvas = "clientWidth" in this.canvas ? this.canvas : undefined;
+    const ratio = this.workerViewport?.devicePixelRatio
+      ?? Math.min(globalThis.devicePixelRatio || 1, 2);
+    const width = Math.max(1, Math.floor((this.workerViewport?.width ?? htmlCanvas?.clientWidth ?? this.canvas.width) * ratio));
+    const height = Math.max(1, Math.floor((this.workerViewport?.height ?? htmlCanvas?.clientHeight ?? this.canvas.height) * ratio));
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
       this.canvas.height = height;

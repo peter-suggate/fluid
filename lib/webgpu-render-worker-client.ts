@@ -1,0 +1,255 @@
+import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
+import type {
+  EffectiveRendererStatus,
+  FluidLabRenderer,
+  GPUStatus,
+  RendererFrameMetrics,
+} from "./webgpu-renderer";
+
+type DrawArguments = Parameters<FluidLabRenderer["draw"]>;
+type PickArguments = Parameters<FluidLabRenderer["pickRigidBody"]>;
+type PickResult = Awaited<ReturnType<FluidLabRenderer["pickRigidBody"]>>;
+
+export interface WebGPURenderWorkerSnapshot {
+  presentationRevision: number;
+  presentationResolution: string;
+  completedPresentationCount: number;
+  latestPixelTrace: FluidLabRenderer["latestPixelTrace"];
+  pixelTraceRevision: number;
+  pixelTraceAvailable: boolean;
+  pixelTraceStatus: FluidLabRenderer["pixelTraceStatus"];
+  pixelTraceAnswersRequest: boolean;
+  pixelTraceStale: boolean;
+  latestFluidCellTrace: FluidLabRenderer["latestFluidCellTrace"];
+  fluidCellTraceRevision: number;
+  fluidCellTraceReady: boolean;
+  fluidCellTraceFineBand: FluidLabRenderer["fluidCellTraceFineBand"];
+}
+
+export type WebGPURenderWorkerRequest =
+  | { type: "attach"; canvas: OffscreenCanvas }
+  | { type: "initialize"; requestId: number }
+  | { type: "draw"; frameId: number; args: DrawArguments; viewport: { width: number; height: number; devicePixelRatio: number } }
+  | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
+  | { type: "set-simulation-running"; running: boolean }
+  | { type: "reset-simulation-timeline" }
+  | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
+  | { type: "shutdown"; requestId: number };
+
+export type WebGPURenderWorkerResponse =
+  | { type: "attached" }
+  | { type: "status"; status: GPUStatus; workerNow_ms: number }
+  | { type: "gpu-info"; info: GPUEulerianInfo }
+  | { type: "rigid-loads"; loads: GPURigidLoad[] }
+  | { type: "advance-completed"; time_s: number }
+  | { type: "effective-renderer-status"; status: EffectiveRendererStatus }
+  | { type: "initialized"; requestId: number }
+  | { type: "frame"; frameId: number; metrics: RendererFrameMetrics; snapshot: WebGPURenderWorkerSnapshot }
+  | { type: "pick-result"; requestId: number; result: PickResult }
+  | { type: "shutdown-complete"; requestId: number }
+  | { type: "request-failed"; requestId: number; message: string };
+
+interface WorkerClientCallbacks {
+  onStatus(status: GPUStatus): void;
+  onGPUInfo?(info: GPUEulerianInfo): void;
+  onGPURigidLoads?(loads: GPURigidLoad[]): void;
+  onGPUAdvanceCompleted?(time_s: number): void;
+  onEffectiveRendererStatus?(status: EffectiveRendererStatus): void;
+}
+
+const EMPTY_SNAPSHOT: WebGPURenderWorkerSnapshot = {
+  presentationRevision: 0,
+  presentationResolution: "worker starting",
+  completedPresentationCount: 0,
+  latestPixelTrace: undefined,
+  pixelTraceRevision: 0,
+  pixelTraceAvailable: false,
+  pixelTraceStatus: "path-inactive",
+  pixelTraceAnswersRequest: false,
+  pixelTraceStale: false,
+  latestFluidCellTrace: undefined,
+  fluidCellTraceRevision: 0,
+  fluidCellTraceReady: false,
+  fluidCellTraceFineBand: undefined,
+};
+
+/**
+ * Main-thread façade for the worker-owned renderer.
+ *
+ * Every public method is non-blocking. Frame requests are latest-wins: while
+ * the worker is allocating or compiling, the UI can keep painting and only
+ * the newest pending camera/scene snapshot is retained.
+ */
+export class WebGPURenderWorkerClient {
+  private readonly worker: Worker;
+  private requestId = 0;
+  private frameId = 0;
+  private frameInFlight = false;
+  private queuedFrame?: Extract<WebGPURenderWorkerRequest, { type: "draw" }>;
+  private completedMetrics?: RendererFrameMetrics;
+  private snapshot: WebGPURenderWorkerSnapshot = EMPTY_SNAPSHOT;
+  private latestGPUInfo?: GPUEulerianInfo;
+  private stopped = false;
+  private failed = false;
+  private readonly requests = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
+
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly callbacks: WorkerClientCallbacks,
+  ) {
+    if (typeof canvas.transferControlToOffscreen !== "function") {
+      throw new Error("This browser cannot move WebGPU rendering off the main thread");
+    }
+    this.worker = new Worker(new URL("./webgpu-render-worker.ts", import.meta.url), {
+      type: "module",
+      name: "fluid-lab-webgpu-runtime",
+    });
+    this.worker.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerResponse>) => this.receive(event.data));
+    this.worker.addEventListener("error", (event) => {
+      const error = new Error(event.message || "WebGPU runtime worker failed");
+      this.failed = true;
+      this.rejectAll(error);
+      this.callbacks.onStatus({ state: "unavailable", label: error.message });
+    });
+    this.worker.addEventListener("messageerror", () => {
+      const error = new Error("WebGPU runtime worker returned an unserializable result");
+      this.failed = true;
+      this.rejectAll(error);
+      this.callbacks.onStatus({ state: "unavailable", label: error.message });
+    });
+    const offscreen = canvas.transferControlToOffscreen();
+    this.worker.postMessage({ type: "attach", canvas: offscreen } satisfies WebGPURenderWorkerRequest, [offscreen]);
+  }
+
+  get presentationRevision() { return this.snapshot.presentationRevision; }
+  get presentationResolution() { return this.snapshot.presentationResolution; }
+  get completedPresentationCount() { return this.snapshot.completedPresentationCount; }
+  get latestPixelTrace() { return this.snapshot.latestPixelTrace; }
+  get pixelTraceRevision() { return this.snapshot.pixelTraceRevision; }
+  get pixelTraceAvailable() { return this.snapshot.pixelTraceAvailable; }
+  get pixelTraceStatus() { return this.snapshot.pixelTraceStatus; }
+  get pixelTraceAnswersRequest() { return this.snapshot.pixelTraceAnswersRequest; }
+  get pixelTraceStale() { return this.snapshot.pixelTraceStale; }
+  get latestFluidCellTrace() { return this.snapshot.latestFluidCellTrace; }
+  get fluidCellTraceRevision() { return this.snapshot.fluidCellTraceRevision; }
+  get fluidCellTraceReady() { return this.snapshot.fluidCellTraceReady; }
+  get fluidCellTraceFineBand() { return this.snapshot.fluidCellTraceFineBand; }
+
+  initialize(): Promise<void> {
+    return this.request<void>({ type: "initialize", requestId: this.nextRequestId() });
+  }
+
+  draw(...args: DrawArguments): RendererFrameMetrics {
+    const metrics = this.completedMetrics ?? {
+      context: "webgpu-worker-pending",
+      methodId: args[7].methodId,
+      presentationSubmitted: false,
+    };
+    this.completedMetrics = undefined;
+    const rect = this.canvas.getBoundingClientRect();
+    const message: Extract<WebGPURenderWorkerRequest, { type: "draw" }> = {
+      type: "draw",
+      frameId: ++this.frameId,
+      args,
+      viewport: {
+        width: Math.max(1, rect.width),
+        height: Math.max(1, rect.height),
+        devicePixelRatio: Math.min(globalThis.devicePixelRatio || 1, 2),
+      },
+    };
+    if (this.frameInFlight) this.queuedFrame = message;
+    else this.sendFrame(message);
+    return metrics;
+  }
+
+  setSimulationScene(scene: DrawArguments[1] | undefined): void {
+    this.post({ type: "set-simulation-scene", scene });
+  }
+
+  setSimulationRunning(running: boolean): number | undefined {
+    this.post({ type: "set-simulation-running", running });
+    return this.latestGPUInfo?.submittedTime_s;
+  }
+
+  resetSimulationTimeline(): void {
+    this.post({ type: "reset-simulation-timeline" });
+  }
+
+  pickRigidBody(...args: PickArguments): Promise<PickResult> {
+    return this.request<PickResult>({ type: "pick-rigid-body", requestId: this.nextRequestId(), args });
+  }
+
+  shutdown(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    this.stopped = true;
+    if (this.failed) {
+      this.worker.terminate();
+      return Promise.resolve();
+    }
+    return this.request<void>({ type: "shutdown", requestId: this.nextRequestId() })
+      .finally(() => { this.worker.terminate(); });
+  }
+
+  private nextRequestId() { return ++this.requestId; }
+
+  private request<T>(message: Extract<WebGPURenderWorkerRequest, { requestId: number }>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.requests.set(message.requestId, { resolve: (value) => resolve(value as T), reject });
+      this.worker.postMessage(message);
+    });
+  }
+
+  private post(message: WebGPURenderWorkerRequest): void {
+    if (!this.stopped) this.worker.postMessage(message);
+  }
+
+  private sendFrame(message: Extract<WebGPURenderWorkerRequest, { type: "draw" }>): void {
+    if (this.stopped) return;
+    this.frameInFlight = true;
+    this.worker.postMessage(message);
+  }
+
+  private settle(requestId: number, value?: unknown, error?: string): void {
+    const request = this.requests.get(requestId);
+    if (!request) return;
+    this.requests.delete(requestId);
+    if (error) request.reject(new Error(error));
+    else request.resolve(value);
+  }
+
+  private receive(message: WebGPURenderWorkerResponse): void {
+    if (message.type === "status") {
+      const status = message.status.state === "initializing" && message.status.startedAt_ms !== undefined
+        ? { ...message.status,
+          // `performance.now()` is realm-relative. Preserve elapsed worker
+          // time while translating its origin into the document's clock.
+          startedAt_ms: performance.now() - Math.max(0, message.workerNow_ms - message.status.startedAt_ms) }
+        : message.status;
+      this.callbacks.onStatus(status);
+    }
+    else if (message.type === "gpu-info") {
+      this.latestGPUInfo = message.info;
+      this.callbacks.onGPUInfo?.(message.info);
+    } else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
+    else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);
+    else if (message.type === "effective-renderer-status") this.callbacks.onEffectiveRendererStatus?.(message.status);
+    else if (message.type === "initialized" || message.type === "shutdown-complete") this.settle(message.requestId);
+    else if (message.type === "pick-result") this.settle(message.requestId, message.result);
+    else if (message.type === "request-failed") this.settle(message.requestId, undefined, message.message);
+    else if (message.type === "frame") {
+      this.snapshot = message.snapshot;
+      this.completedMetrics = message.metrics;
+      this.frameInFlight = false;
+      const queued = this.queuedFrame;
+      this.queuedFrame = undefined;
+      if (queued) this.sendFrame(queued);
+    }
+  }
+
+  private rejectAll(error: Error): void {
+    for (const request of this.requests.values()) request.reject(error);
+    this.requests.clear();
+  }
+}
+
+export type FluidLabRendererHandle = WebGPURenderWorkerClient;

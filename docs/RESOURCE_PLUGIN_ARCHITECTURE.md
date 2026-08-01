@@ -11,6 +11,23 @@ The architecture follows the render-pass visualization framework:
 - the runtime aggregates a small protocol and never switches on owner names;
 - UI gates actions by capabilities, not by whether any work is in progress.
 
+## Execution boundary
+
+The browser UI never owns WebGPU work. `WebGPURenderWorkerClient` transfers the
+canvas to a dedicated module worker, and that worker owns the adapter, device,
+shader compilation, resource graphs, preprocessing, queue submission, and
+readback. React only sends serializable intent and receives resource events.
+
+Frame requests are latest-wins. If allocation or compilation is busy, one
+pending frame snapshot is replaced with the newest scene/camera state instead
+of building an unbounded message queue. This keeps pointer input, React paints,
+the elapsed-time clock, panels, and file actions responsive even when a browser
+GPU call does not expose intermediate progress.
+
+The worker boundary is architectural, not an optimization toggle. A browser
+without `transferControlToOffscreen()` fails explicitly instead of silently
+falling back to synchronous construction on the main thread.
+
 ## Colocated plugin contract
 
 Each resource owner exports a `ResourcePluginDefinition` containing:
