@@ -9,6 +9,7 @@ import {
   createSvoDrySceneFragmentWGSL,
   SparseVoxelDrySceneRenderer,
   SVO_DRY_CONE_PREPASS_CONTRACT,
+  SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT,
   svoConePrepassSize,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
@@ -16,6 +17,35 @@ import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
+
+test("the Phase-1 voxel visibility cache is runtime-demanded, bounded, and fail-soft", () => {
+  const cached = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "split", 0,
+    false, false, false, false, { voxelLightCache: true });
+  const uncached = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "split", 0,
+    false, false, false, false, { voxelLightCache: false });
+
+  assert.equal(SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.populationBudget, 16_384);
+  assert.equal(SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.format, "rg32uint");
+  assert.match(cached, /@compute @workgroup_size\(8,8\) fn dryVoxelLightDemandMain/);
+  assert.match(cached, /atomicOr\(&dryVoxelLightRequests\[word\],bit\)/,
+    "the frame-local request bitset must deduplicate pixels naming one voxel");
+  assert.match(cached, /@compute @workgroup_size\(64\) fn dryVoxelLightPopulateMain/);
+  assert.match(cached, /dryConeVisibility\(ray\.origin_m\+normal\*escape/,
+    "population reuses the live cone marcher at runtime; no baked visibility input exists");
+  assert.match(cached, /dryVoxelLightConsumerEligible=select\(0u,1u,hit\.motionKind==DRY_GBUFFER_MOTION_STATIC\)/);
+  assert.match(cached, /if\(cachedVoxelVisibility\.y>0\.0\)[^]*nearestBodyIgnoring/,
+    "cached static visibility retains the current-frame rigid blocker overlay");
+  assert.match(cached, /dryCurrentLightSlot=0xffffffffu/,
+    "missing or rejected exclusive-tier entries must continue into the live fallback chain");
+  assert.doesNotMatch(uncached, /dryVoxelLightDemandMain|dryVoxelLightPopulateMain|dryVoxelLightCacheRead/);
+
+  assert.match(rendererSource, /if \(usePrepass && !this\.voxelLightExclusive\)/,
+    "the settled eligible tier cuts over by withholding the old screen-space cone pass");
+  assert.match(rendererSource, /setVoxelLightCacheEnabled\(enabled: boolean\)/,
+    "production retains an immediate runtime fallback switch");
+  assert.match(rendererSource, /this\.invalidateVoxelLightCache\(\)/,
+    "authored dynamic changes invalidate runtime entries instead of relying on pre-baked data");
+});
 
 test("scale 1 preserves the production shader byte-for-byte (fingerprint contract)", () => {
   assert.equal(createSvoDrySceneFragmentWGSL(1), svoDrySceneShader,

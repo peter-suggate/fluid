@@ -158,6 +158,7 @@ const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION ?? "full-res-relight";
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
+const globalIlluminationEnabled = process.env.FLUID_SVO_DRY_FRAME_GI !== "0";
 const coneTracingModeRaw = process.env.FLUID_SVO_DRY_FRAME_CONE_TRACING ?? "cones";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
@@ -177,7 +178,10 @@ const rasterRigidDiscovery = rasterPrimary || process.env.FLUID_SVO_DRY_FRAME_RA
 const rasterRigidForced = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE === "1";
 const lightAttributionEnabled = process.env.FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION === "1";
 const coneFanout = process.env.FLUID_SVO_DRY_FRAME_CONE_FANOUT === "1";
+const maximumShadedLights = Number(process.env.FLUID_SVO_DRY_FRAME_MAX_LIGHTS ?? DEFAULT_SVO_RENDER_TUNING.maximumShadedLights);
+const readVoxelLightCounters = process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_COUNTERS === "1";
 const optimizationExperiments: SvoDryOptimizationExperiments = {
+  voxelLightCache: process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
   inlineConeBoundaries: process.env.FLUID_SVO_DRY_FRAME_INLINE_CONE_BOUNDARIES === "1",
   clearConeQueueWithBlit: process.env.FLUID_SVO_DRY_FRAME_CLEAR_CONE_QUEUE_BLIT === "1",
   halfPrecisionLighting: process.env.FLUID_SVO_DRY_FRAME_F16 === "1",
@@ -187,6 +191,7 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   rasterPrimaryNoFragmentDepth: process.env.FLUID_SVO_DRY_FRAME_NO_FRAG_DEPTH === "1",
   rasterPrimaryHsrProbe: process.env.FLUID_SVO_DRY_FRAME_HSR_PROBE === "1",
 };
+const voxelLightCacheEnabled = optimizationExperiments.voxelLightCache !== false;
 const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
 const renderBrickSizeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_SIZE;
@@ -197,6 +202,7 @@ const renderBrickSize = renderBrickSizeRaw === undefined ? undefined : Number(re
  * settle-pop luminance statistics, and a moving-tier PNG.
  */
 const cameraMoving = process.env.FLUID_SVO_DRY_FRAME_CAMERA_MOVING === "1";
+const orbitStabilityEnabled = process.env.FLUID_SVO_DRY_FRAME_ORBIT_STABILITY === "1";
 const syntheticRigidMotion = process.env.FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_MOTION === "1";
 const syntheticRigidTransition = process.env.FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_TRANSITION === "1";
 /**
@@ -221,6 +227,9 @@ const modulePath = process.env.WEBGPU_NODE_MODULE
 assert.ok(Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0);
 assert.ok(Number.isSafeInteger(warmups) && warmups >= 0 && Number.isSafeInteger(cycles) && cycles > 0);
 assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
+assert.ok(Number.isSafeInteger(maximumShadedLights) && maximumShadedLights >= 1
+  && maximumShadedLights <= DEFAULT_SVO_RENDER_TUNING.maximumShadedLights,
+"FLUID_SVO_DRY_FRAME_MAX_LIGHTS must be between 1 and the production maximum");
 assert.ok([1, 0.5, 0.25, 0.125].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, 0.25, or 0.125");
 assert.ok(["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstructionRaw),
   "FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
@@ -437,6 +446,7 @@ log(`Adapter: ${JSON.stringify(adapterInfo)} timestamps=${timestampsSupported}`)
 const preset = getScenePreset(scenePresetId);
 const scene = preset.create();
 const camera: CameraState = { ...defaultCamera, ...preset.camera, target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m) } };
+let activeCamera: CameraState = camera;
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
 
 const solver = await WebGPUStaticSvoScene.create(
@@ -447,7 +457,10 @@ const solver = await WebGPUStaticSvoScene.create(
   undefined,
   renderBrickSize === undefined ? {} : { renderBrickSize },
 );
-const source = solver.sparseVoxelSceneSource;
+const publishedSource = solver.sparseVoxelSceneSource;
+const source = globalIlluminationEnabled || !publishedSource
+  ? publishedSource
+  : { ...publishedSource, tetrahedralRadiance: undefined };
 assert.ok(source?.structural, "static SVO world did not publish a structural scene source");
 
 // Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly.
@@ -489,7 +502,7 @@ assert.ok(coneMipReady, "node-mip pyramid unavailable — cone lighting would si
 const uniformBuffer = device.createBuffer({ label: "Bench view uniforms", size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 const bodyBuffer = device.createBuffer({ label: "Bench rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 const bodies = packBodies(scene);
-device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count));
+device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count));
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
@@ -497,8 +510,16 @@ const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuff
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
-renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
-  coneRadianceReconstruction: radianceReconstruction });
+const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
+  coneRadianceReconstruction: radianceReconstruction, maximumShadedLights,
+  ...(globalIlluminationEnabled ? {} : {
+    giBounceStrength: 0,
+    giOcclusionStrength: 0,
+    giEnvironmentStrength: 0,
+    giDirectStrength: 0,
+  }),
+};
+renderer.setRenderTuning(configuredRenderTuning);
 function applyLighting(scale: SvoConeLightingScale, shadows = shadowsEnabled, ambientOcclusion = ambientOcclusionEnabled): void {
   renderer.setLightingOptions({ shadowsEnabled: shadows, ambientOcclusionEnabled: ambientOcclusion, coneLightingScale: scale, coneTracingMode });
 }
@@ -739,6 +760,32 @@ const samples = await timeFrames(cycles, "Bench");
 assert.equal(samples.length, cycles);
 assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
 
+let warmConeVisibilityProbe: { method: string; median_ms: number; p95_ms: number; samples_ms: number[] } | undefined;
+if (coneScale !== 1) {
+  const probeSamples: number[] = [];
+  const probeCycles = Math.max(8, cycles);
+  // The probe command buffer contains only this production compute pass.
+  // Serialized queue-wall timing is used deliberately: Metal may schedule
+  // marker timestamp encoders around storage-texture dependencies out of
+  // timestamp order, while submit->fence preserves an honest A/B duration.
+  const method = "serialized-submit-to-fence-single-production-pass";
+  for (let cycle = 0; cycle < probeCycles; cycle += 1) {
+    const encoder = device.createCommandEncoder({ label: `Warm cone-visibility probe ${cycle}` });
+    assert.ok(renderer.encodeWarmConeVisibilityProbe(encoder), "warm cone-visibility probe unavailable");
+    const started = performance.now();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    probeSamples.push(performance.now() - started);
+  }
+  warmConeVisibilityProbe = {
+    method,
+    median_ms: median(probeSamples),
+    p95_ms: percentile95(probeSamples),
+    samples_ms: probeSamples,
+  };
+  assert.deepEqual(validationErrors, [], "GPU validation errors during warm cone-visibility probe");
+}
+
 // ---------------------------------------------------------------------------
 // Moving-quality tier: the samples above already ran with the camera-changing
 // sentinel published, so only the settled tier needs a paired measurement.
@@ -746,7 +793,7 @@ assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
 // ---------------------------------------------------------------------------
 function writeViewUniforms(moving: boolean, overlay?: { mode: number; opacity: number }): void {
   renderer.setDiagnosticOverlayActive(Boolean(overlay?.mode));
-  device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, camera, environmentId, solver.info, bodies.count, overlay, moving));
+  device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count, overlay, moving));
 }
 let movingTierTiming: { moving_ms: number[]; settled_ms: number[] } | undefined;
 if (cameraMoving) {
@@ -772,12 +819,15 @@ if (coneScale !== 1) {
   const reference_ms: number[] = [];
   const reduced_ms: number[] = [];
   for (let cycle = 0; cycle < cycles; cycle += 1) {
+    renderer.setVoxelLightCacheEnabled(false);
     applyLighting(1);
     reference_ms.push((await timeFrames(1, `A/B reference ${cycle}`))[0]);
+    renderer.setVoxelLightCacheEnabled(voxelLightCacheEnabled);
     applyLighting(coneScale);
     reduced_ms.push((await timeFrames(1, `A/B reduced ${cycle}`))[0]);
   }
   interleaved = { reference_ms, reduced_ms };
+  renderer.setVoxelLightCacheEnabled(voxelLightCacheEnabled);
   assert.deepEqual(validationErrors, [], "GPU validation errors during interleaved A/B");
 }
 
@@ -834,10 +884,37 @@ if (coneScale !== 1) {
       ...DEFAULT_SVO_RENDER_TUNING,
       coneLightingScale: coneScale,
       coneRadianceReconstruction: radianceReconstruction,
+      maximumShadedLights,
     });
     applyLighting(coneScale);
     assert.deepEqual(validationErrors, [], "GPU validation errors during authored-light attribution timing");
   }
+}
+
+let voxelLightCacheCounters: {
+  distinctHitVoxels: number; missingVoxels: number; cacheHits: number; queuedVoxels: number;
+  populatedVoxels: number; rejectedPixelsOrVoxels: number; overflowVoxels: number;
+  dirtyPages: number; allocatedBytes: number;
+} | undefined;
+if (readVoxelLightCounters) {
+  const readback = device.createBuffer({ label: "Bench voxel-light cache counters", size: 32,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder({ label: "Bench voxel-light cache demand counters" });
+  encodeFrame(encoder);
+  assert.ok(renderer.copyVoxelLightCacheCounters(encoder, readback), "voxel-light cache counters unavailable");
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const words = new Uint32Array(readback.getMappedRange());
+  voxelLightCacheCounters = {
+    distinctHitVoxels: words[0], missingVoxels: words[1], cacheHits: words[2], queuedVoxels: words[3],
+    populatedVoxels: words[4], rejectedPixelsOrVoxels: words[5], overflowVoxels: words[6],
+    dirtyPages: 0,
+    allocatedBytes: renderer.voxelLightCacheAllocatedBytes,
+  };
+  readback.unmap();
+  readback.destroy();
+  assert.ok(voxelLightCacheCounters.distinctHitVoxels < width * height,
+    "distinct voxel demand must remain below the pixel count");
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +978,7 @@ function relativeLuminance(pixels: Float32Array, pixelIndex: number): number {
 // meaning under FLUID_SVO_DRY_FRAME_CAMERA_MOVING and doubles as the proof
 // that the moving tier leaves the settled frame untouched.
 writeViewUniforms(false);
+renderer.setVoxelLightCacheEnabled(false);
 applyLighting(1);
 const referenceRows = await captureFrame("Bench fingerprint frame");
 const referenceGBuffer = renderer.gBufferTextures;
@@ -912,11 +990,13 @@ const [packedSurfaceBytes, identityMediaBytes, hardwareDepthBytes] = await Promi
 ]);
 let reducedRows: Uint32Array | undefined;
 let overlayRows: Uint32Array | undefined;
+let orbitReturnRows: Uint32Array | undefined;
 // Settle-pop capture: the same scale and lighting, differing only in the
 // camera-motion sentinel, so the delta isolates the moving tier.
 let settledTierRows: Uint32Array | undefined;
 let movingTierRows: Uint32Array | undefined;
 if (cameraMoving) {
+  renderer.setVoxelLightCacheEnabled(voxelLightCacheEnabled);
   applyLighting(coneScale);
   log("Capturing settled-tier frame for settle-pop statistics");
   settledTierRows = await captureFrame("Bench settled tier frame");
@@ -928,7 +1008,41 @@ if (cameraMoving) {
   assert.deepEqual(validationErrors, [], "GPU validation errors during moving-tier capture");
 }
 if (coneScale !== 1) {
+  renderer.setVoxelLightCacheEnabled(voxelLightCacheEnabled);
   applyLighting(coneScale);
+  // The timing/attribution lanes deliberately switch presentation variants.
+  // Re-establish the documented settled-cache state immediately before the
+  // quality/orbit reference so a cold fill cannot masquerade as camera
+  // instability or inflate the cache's image error.
+  if (voxelLightCacheEnabled) {
+    for (let frame = 0; frame < 8; frame += 1) {
+      const encoder = device.createCommandEncoder({ label: `Voxel-light quality warm ${frame}` });
+      encodeFrame(encoder, undefined);
+      device.queue.submit([encoder.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+    if (orbitStabilityEnabled) {
+      // Settle both endpoints once before taking the A reference. The measured
+      // A->B->A traversal below then tests camera independence of a warm
+      // demand cache, rather than counting legitimate first-sighting fills as
+      // lighting shimmer.
+      activeCamera = { ...camera, azimuth_rad: camera.azimuth_rad + 0.4 };
+      writeViewUniforms(false);
+      for (let frame = 0; frame < 8; frame += 1) {
+        const encoder = device.createCommandEncoder({ label: `Voxel-light orbit prewarm ${frame}` });
+        encodeFrame(encoder, undefined);
+        device.queue.submit([encoder.finish()]);
+      }
+      activeCamera = camera;
+      writeViewUniforms(false);
+      for (let frame = 0; frame < 8; frame += 1) {
+        const encoder = device.createCommandEncoder({ label: `Voxel-light reference prewarm ${frame}` });
+        encodeFrame(encoder, undefined);
+        device.queue.submit([encoder.finish()]);
+      }
+      await device.queue.onSubmittedWorkDone();
+    }
+  }
   log("Capturing reduced frame for quality statistics");
   reducedRows = await captureFrame("Bench reduced frame");
   log("Capturing fallback-band diagnostic frame");
@@ -937,6 +1051,28 @@ if (coneScale !== 1) {
   writeViewUniforms(false);
   await device.queue.onSubmittedWorkDone();
   assert.deepEqual(validationErrors, [], "GPU validation errors during quality capture");
+}
+if (orbitStabilityEnabled) {
+  assert.ok(coneScale !== 1 && reducedRows, "orbit stability requires a reduced configured capture");
+  assert.equal(rayCoherenceMode, "off", "orbit stability requires primary coherence off");
+  activeCamera = { ...camera, azimuth_rad: camera.azimuth_rad + 0.4 };
+  writeViewUniforms(false);
+  for (let frame = 0; frame < 8; frame += 1) {
+    const encoder = device.createCommandEncoder({ label: `Voxel-light orbit warm ${frame}` });
+    encodeFrame(encoder, undefined);
+    device.queue.submit([encoder.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  activeCamera = camera;
+  writeViewUniforms(false);
+  for (let frame = 0; frame < 8; frame += 1) {
+    const encoder = device.createCommandEncoder({ label: `Voxel-light orbit return warm ${frame}` });
+    encodeFrame(encoder, undefined);
+    device.queue.submit([encoder.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  orbitReturnRows = await captureFrame("Bench voxel-light orbit return frame");
+  assert.deepEqual(validationErrors, [], "GPU validation errors during voxel-light orbit stability capture");
 }
 
 // Reference frame (scale 1) carries the bit-exact fingerprint contract.
@@ -987,15 +1123,26 @@ log(`Reference (scale 1) image hash 0x${imageHash.toString(16).padStart(8, "0")}
 // Quality: per-pixel relative luminance error over lit pixels, PNGs, and the
 // guided-upsample fallback-band percentage from the mode-10 diagnostic overlay.
 // ---------------------------------------------------------------------------
-interface ErrorStats { litPixels: number; mean: number; p95: number; max: number; denominatorFloor: number }
+interface ErrorStats {
+  litPixels: number; mean: number; p95: number; max: number; denominatorFloor: number;
+  maximumPixel: { x: number; y: number; baselineLuminance: number; candidateLuminance: number };
+}
 /** Relative luminance error of `candidate` against `baseline` over baseline-lit pixels. */
 function luminanceErrorStats(baseline: Float32Array, candidate: Float32Array): ErrorStats {
   const denominatorFloor = 0.01;
   const errors: number[] = [];
+  let maximumPixel = { x: 0, y: 0, baselineLuminance: 0, candidateLuminance: 0 };
+  let maximumError = -1;
   for (let pixel = 0; pixel < width * height; pixel += 1) {
     const baselineY = relativeLuminance(baseline, pixel);
     if (!(baselineY > 1e-4)) continue;
-    errors.push(Math.abs(relativeLuminance(candidate, pixel) - baselineY) / Math.max(baselineY, denominatorFloor));
+    const candidateY = relativeLuminance(candidate, pixel);
+    const error = Math.abs(candidateY - baselineY) / Math.max(baselineY, denominatorFloor);
+    errors.push(error);
+    if (error > maximumError) {
+      maximumError = error;
+      maximumPixel = { x: pixel % width, y: Math.floor(pixel / width), baselineLuminance: baselineY, candidateLuminance: candidateY };
+    }
   }
   errors.sort((a, b) => a - b);
   return {
@@ -1004,29 +1151,16 @@ function luminanceErrorStats(baseline: Float32Array, candidate: Float32Array): E
     p95: errors[Math.min(errors.length - 1, Math.ceil(0.95 * errors.length) - 1)] ?? 0,
     max: errors[errors.length - 1] ?? 0,
     denominatorFloor,
+    maximumPixel,
   };
 }
 let errorStats: ErrorStats | undefined;
+let orbitStability: { differingPackedWords: number; maxRelativeLuminanceError: number; stable: boolean } | undefined;
 let fallback: { percentOfHitPixels: number; hitPixels: number; fallbackPixels: number } | undefined;
 let images: Record<string, string> | undefined;
 if (coneScale !== 1 && reducedRows && overlayRows) {
   const reducedPixels = decodePixels(reducedRows);
-  const denominatorFloor = 0.01;
-  const errors: number[] = [];
-  for (let pixel = 0; pixel < width * height; pixel += 1) {
-    const referenceY = relativeLuminance(referencePixels, pixel);
-    if (!(referenceY > 1e-4)) continue;
-    const reducedY = relativeLuminance(reducedPixels, pixel);
-    errors.push(Math.abs(reducedY - referenceY) / Math.max(referenceY, denominatorFloor));
-  }
-  errors.sort((a, b) => a - b);
-  errorStats = {
-    litPixels: errors.length,
-    mean: errors.reduce((sum, value) => sum + value, 0) / Math.max(1, errors.length),
-    p95: errors[Math.min(errors.length - 1, Math.ceil(0.95 * errors.length) - 1)] ?? 0,
-    max: errors[errors.length - 1] ?? 0,
-    denominatorFloor,
-  };
+  errorStats = luminanceErrorStats(referencePixels, reducedPixels);
 
   // PNGs: reference, reduced, and an 8x-amplified luminance-difference image.
   const outDirectory = path.dirname(outPath);
@@ -1067,6 +1201,14 @@ if (coneScale !== 1 && reducedRows && overlayRows) {
     if (overlayPixels[pixel * 4] > 0.5 && overlayPixels[pixel * 4 + 1] < 0.4) fallbackPixels += 1;
   }
   fallback = { percentOfHitPixels: 100 * fallbackPixels / Math.max(1, hitPixels), hitPixels, fallbackPixels };
+}
+if (reducedRows && orbitReturnRows) {
+  let differingPackedWords = 0;
+  for (let index = 0; index < reducedRows.length; index += 1) if (reducedRows[index] !== orbitReturnRows[index]) differingPackedWords += 1;
+  const stats = luminanceErrorStats(decodePixels(reducedRows), decodePixels(orbitReturnRows));
+  orbitStability = { differingPackedWords, maxRelativeLuminanceError: stats.max,
+    stable: differingPackedWords === 0 || stats.max <= 1e-3 };
+  assert.ok(orbitStability.stable, `voxel-light orbit return changed static lighting: ${JSON.stringify(orbitStability)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,11 +1325,14 @@ const result = {
       reduced_ms: interleaved.reduced_ms,
     } : undefined,
     attribution_ms: coneScale !== 1 ? attribution_ms : undefined,
+    warmVisibilityProbe: warmConeVisibilityProbe,
     lightAttribution_ms,
     errorStats,
     fallback,
     images,
   },
+  voxelLightCache: voxelLightCacheCounters,
+  orbitStability,
   movingTier,
   rigidMotionTransition_ms,
   scene: {
@@ -1201,6 +1346,8 @@ const result = {
     rigidPrimaryStrategy: svoDryRigidPrimaryStrategy(rasterRigidForced ? 12 : bodies.count, rasterRigidDiscovery),
     shadowsEnabled,
     ambientOcclusionEnabled,
+    globalIlluminationEnabled,
+    maximumShadedLights,
     coneLightingScale: coneScale,
     coneFanout,
     grid: { nx: solver.info.nx, ny: solver.info.ny, nz: solver.info.nz },

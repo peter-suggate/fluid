@@ -4,6 +4,7 @@ type FluidAdapterLimits = Pick<GPUSupportedLimits,
   | "maxBufferSize"
   | "maxTextureDimension2D"
   | "maxTextureDimension3D"
+  | "maxSampledTexturesPerShaderStage"
   | "maxColorAttachmentBytesPerSample"
 >;
 
@@ -35,6 +36,10 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
     // exact traversal for the whole frame.
     maxTextureDimension2D: limits.maxTextureDimension2D,
     maxTextureDimension3D: limits.maxTextureDimension3D,
+    // The Phase-1 voxel-light lane is the seventeenth sampled texture in the
+    // deferred fragment stage. Request the adapter value; capability checks in
+    // the renderer still fail closed on devices that cannot expose it.
+    maxSampledTexturesPerShaderStage: limits.maxSampledTexturesPerShaderStage,
     // Requested, never assumed: adapters that cannot grant this still produce a
     // valid device, and the raster-primary renderer fails closed against the
     // granted device limit rather than against this request.

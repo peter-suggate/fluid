@@ -1,10 +1,53 @@
 # SVO Voxel-Space Light Cache — Implementation Handoff
 
-Status: planned, not started. This document is the handoff for moving per-light
-visibility (and later irradiance) from screen-space per-frame evaluation into a
-persistent per-voxel cache. Target: collapse the lighting portion of the frame
-(currently ~61% of GPU time) to cost proportional to *what changed*, not *what
-is on screen*.
+Status: **Phase 0 and Phase 1 implemented and gated (2026-08-02)**. Phases 2–4
+remain planned. The implementation moves directional-light visibility from
+screen-space per-frame evaluation into a persistent, runtime-populated
+per-voxel cache.
+
+This is **not pre-baked lighting or visibility**. No offline artifact is read or
+published. The GPU discovers demand from the current exact split G-buffer,
+deduplicates it, runs the existing live cone marcher for missing voxels, and
+stores only runtime results. Source/topology/authored-primitive and relevant
+march-tuning changes advance the cache epoch; rigid blockers remain live; fluid
+attachment and unsupported configurations fail closed to the existing live
+path. Camera motion never invalidates world-space entries.
+
+### Phase 0/1 completion record
+
+Quiet garden evidence is retained in
+`artifacts/render-voxel-light-cache/phase0-baseline/benchmark.json` and
+`artifacts/render-voxel-light-cache/phase1-cache/benchmark.json`. Both captures
+are 660×662, raster-primary, split shading, one directional light, AO/GI off,
+12 warmups and the same render-source fingerprint on an M1 Max/Metal backend.
+
+| Gate | Cache off | Phase 1 warm | Verdict |
+|---|---:|---:|---|
+| Compact cone-visibility production pass (serialized single-pass median) | 4.009 ms | 0.044 ms (pass withheld) | **98.9% reduction; pass ≥70%** |
+| Whole configured frame median | 5.046 ms | 2.949 ms | **41.6% reduction** |
+| Distinct visible voxels / pixels | — | 18,209 / 436,920 | **4.2%; mapping sane** |
+| Missing / queued / overflow voxels after warmup | — | 0 / 0 / 0 | **drained** |
+| Cache resident memory | — | 13,824,000 B | **13.18 MiB** |
+| Mean / p95 relative luminance error vs inline | 0.000773 / 0.001690 | 0.001019 / 0.003518 | boundary-localized; see PNGs |
+| Maximum relative luminance error vs inline | 0.601055 | 0.250451 | **below old prepass bound** |
+| Warm A→B→A orbit return | — | 0 differing packed words; 0 max error | **bit exact** |
+
+The Phase 1 route is the default only inside its audited eligibility envelope:
+split shading, node-mip/direct page table available, one shaded directional
+light, AO off, no published tetrahedral GI, no fluid attachment, and sufficient
+sampled-texture limits. In that tier the old screen-space cone pass is not
+encoded. Missing, rejected, dirty, dynamic, or ineligible content continues
+through the live cone/exact chain. `setVoxelLightCacheEnabled(false)` remains a
+runtime A/B and emergency fallback switch. Raster-primary visibility is
+unchanged and remains primary.
+
+The initial `profile-svo-render-xctrace.ts` attach attempts did not acquire the
+short-lived Node worker before it exited on this machine; their logs are kept
+under `phase0-baseline/xctrace-attach-failed/`. The gate therefore uses a
+serialized command buffer containing only the exact production compact-cone
+pass, plus the existing hardware-timestamp whole-frame lane. The profiler
+remains unchanged; a future Instruments capture should launch the workload
+under Instruments instead of relying on late PID attachment.
 
 ## 1. Why — baseline evidence
 
@@ -38,11 +81,12 @@ primary visibility (9.94 ms) then dominates and is out of scope here.
 Shade lighting at *surface voxel* granularity, store it in the atlas, and have
 the deferred lighting pass interpolate it instead of marching cones:
 
-1. **Populate**: for each *requested, dirty* surface voxel, run the existing
+1. **Populate at runtime**: for each *requested, dirty* surface voxel, run the existing
    cone march once from the voxel center and write per-light visibility into a
    new atlas lane. Static voxels compute once and persist across frames.
 2. **Consume**: `dryLightingMain` replaces the screen-space prepass-plane read
-   with a trilinear tap of the voxel lane (normal-weighted, apron-backed),
+   with a voxel-lane read (nearest in Phase 1; trilinear, normal-weighted and
+   apron-backed from Phase 2),
    then applies the existing full-rate analytic rigid-body correction.
 3. **Amortize**: steady-state cost ≈ (voxels whose lighting changed) +
    (voxels newly on screen), bounded by a per-frame budget with the live cone
@@ -78,20 +122,20 @@ interpolation, Ward 1992 irradiance gradients for sparse-point interpolation.
 **New lane: per-voxel per-light visibility**, sharing node-mip page slots and
 the direct page table (same virtual→physical mapping, no new directory).
 
-- Format: one `rg32uint` 3D texture at node-mip physical layout (10³ per
-  page). 64 bits/voxel packed identically to the screen prepass plane
-  (`dryPrepassPack` family, `lib/webgpu-svo-dry-scene.ts:1310–1317`):
-  channel 0 = AO (Phase 3), channels 1..8 = per-light 7-bit visibility for
-  the first `SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights` lights.
-  Reusing the packing means the consumer diff is minimal.
-- Plus a per-page metadata word (staleness epoch + per-light dirty bits),
-  CPU-mirrored, following the tetra-radiance publication pattern.
+- Phase 1 format: one `rg32uint` 3D texture at node-mip physical layout (10³
+  per page). Channel x stores slot-zero visibility quantized to 16 bits plus
+  one (zero remains the missing/rejected sentinel); channel y stores the
+  16-bit runtime lighting epoch and an octahedral representative normal.
+  Multi-light packing remains Phase 2 work.
+- Phase 1 uses one global runtime epoch. Per-page/per-light dirty metadata
+  remains a Phase 2/3 refinement; correctness currently invalidates the whole
+  slot-zero epoch for authored/topology changes.
 - Memory: 8 B/voxel × 1000 texels/page = 8,000 B/page. Hose-tank ceiling
   8,192 pages ≈ 65.5 MiB; garden 1,715 pages ≈ 13.7 MiB. Sits beside the
   tetra atlas's ~125 MiB ceiling — acceptable, but note it in the tuning docs.
-- Apron: 1-texel apron filled from neighbor pages (existing
-  `createSvoNodeMipPageWithApron` pattern) so the consumer's trilinear tap
-  never branches on page edges.
+- The physical atlas reserves the existing one-texel apron, but Phase 1 uses
+  nearest sampling and does not publish apron values. Apron fill is required
+  when Phase 2 enables trilinear sampling.
 - Trilinear interpolation of packed `rg32uint` is manual (8 taps + unpack +
   weight). If that costs too much in the consumer, fall back to nearest tap
   first (Phase 1 gate allows it) and revisit with an `rgba8unorm`
@@ -172,20 +216,28 @@ of distance. This finally gives the proofs a consumer; measure hit-rate with
 Branch discipline: per repo policy, no stash/checkout/reset in this worktree;
 work directly on a feature branch cut from `perf/structured-cutover`'s tip.
 
-### Phase 0 — instrumentation (½ day)
-- Add counters: distinct hit voxels/frame, dirty pages/frame (garden and
-  hose-tank), via `lib/svo-pixel-trace.ts` header counters.
-- Capture quiet-GPU baselines with `tools/profile-svo-render-xctrace.ts`
-  (the 2026-07-31 capture was contended; §9 of the 5X handoff shows contended
-  captures mislead).
-- **Gate**: measured visible-voxel count confirms the ~50–150K estimate; if
-  it's ≳ pixel count something in the mapping is wrong — stop and re-scope.
+### Phase 0 — instrumentation — **complete**
+- Added frame-wide GPU counters for distinct hits, misses, cache hits, queued,
+  populated, rejected, overflow and resident bytes. They are copied directly
+  from the demand queue by `copyVoxelLightCacheCounters`; this intentionally
+  supersedes the proposed pixel-trace header because these are frame-wide
+  values rather than one picked pixel's trace. Warm static `dirtyPages` is 0;
+  localized page-dirty accounting remains Phase 3 work.
+- Captured a quiet-GPU garden baseline with the benchmark's isolated
+  production-pass and whole-frame lanes. Instruments attach failure is noted
+  in the completion record above. (The 2026-07-31 capture was contended; §9 of
+  the 5X handoff shows contended captures mislead.)
+- **Gate passed**: 18,209 distinct visible voxels is well below 436,920 pixels.
 
-### Phase 1 — static single-light vertical slice (garden, 2–3 days)
-- Storage lane + request bitmask + population kernel + consumer tier, one
-  directional light, no fluid, no invalidation beyond lighting epoch,
-  nearest-tap sampling allowed.
-- **Gates** (all via `tools/benchmark-svo-dry-frame-gpu.ts` on garden):
+### Phase 1 — static single-light vertical slice — **complete**
+- Added the storage lane, request bitmask, bounded population kernel and
+  nearest-tap consumer tier for one directional light. Fluid remains on the
+  live path until Phase 3 supplies localized invalidation.
+- The implementation is dynamically safe: source replacement and authored
+  primitive/tuning changes advance the epoch, rigid motion is overlaid live,
+  and fluid disables this Phase 1 tier. This is broader correctness coverage
+  than the original static-only slice, not offline baking.
+- **Gates passed** (all via `tools/benchmark-svo-dry-frame-gpu.ts` on garden):
   (a) settled-camera frames: cone-visibility pass cost drops ≥70% once warm;
   (b) diff PNGs vs. `shadingPath:"inline"` ground truth show error confined
   to shadow-boundary neighborhoods, max luminance error < the existing

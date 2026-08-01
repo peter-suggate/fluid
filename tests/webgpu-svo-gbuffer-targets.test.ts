@@ -38,6 +38,7 @@ function installGpuConstants(t: test.TestContext): void {
 
 function mockDevice(textures: MockTexture[], renderDescriptors: GPURenderPipelineDescriptor[] = []): GPUDevice {
   return {
+    limits: { maxSampledTexturesPerShaderStage: 16 },
     createTexture(descriptor: GPUTextureDescriptor) {
       const view = { label: `${descriptor.label} view` } as GPUTextureView;
       const texture = {

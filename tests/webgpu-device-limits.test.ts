@@ -15,6 +15,7 @@ test("large fluid device requests preserve the adapter-supported limits", () => 
     maxBufferSize: 1024 * 1024 * 1024,
     maxTextureDimension2D: 16384,
     maxTextureDimension3D: 2048,
+    maxSampledTexturesPerShaderStage: 16,
     maxColorAttachmentBytesPerSample: 128,
   });
   assert.deepEqual(limits, {
@@ -24,6 +25,7 @@ test("large fluid device requests preserve the adapter-supported limits", () => 
     maxTextureDimension2D: 16384,
     maxTextureDimension3D: 2048,
     maxColorAttachmentBytesPerSample: FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE,
+    maxSampledTexturesPerShaderStage: 16,
   });
 });
 
@@ -42,6 +44,7 @@ test("node-mip page ceiling requests the adapter value, not the WebGPU default",
     maxStorageBufferBindingSize: 1,
     maxBufferSize: 1,
     maxTextureDimension3D: 1,
+    maxSampledTexturesPerShaderStage: 16,
     maxColorAttachmentBytesPerSample: 128,
   };
   assert.equal(
@@ -68,6 +71,7 @@ test("colour-attachment request never exceeds the adapter and never drops below 
     maxBufferSize: 1,
     maxTextureDimension2D: 8192,
     maxTextureDimension3D: 1,
+    maxSampledTexturesPerShaderStage: 16,
   };
   assert.equal(requiredFluidDeviceLimits({ ...base, maxColorAttachmentBytesPerSample: 32 })
     .maxColorAttachmentBytesPerSample, 32);

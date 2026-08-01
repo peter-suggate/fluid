@@ -15,6 +15,7 @@ import {
 } from "./svo-environment-lighting";
 import {
   SVO_LIGHT_MAXIMUM_RECORDS,
+  SVO_LIGHT_KINDS,
   SVO_LIGHT_RECORD_STRIDE_BYTES,
   SVO_LIGHT_RECORD_WORDS,
   buildSvoSceneLights,
@@ -1509,6 +1510,7 @@ struct DryVoxelLightQueue{
 @group(${voxelLightCacheGroup}) @binding(4) var<storage,read_write> dryVoxelLightQueue:DryVoxelLightQueue;
 @group(${voxelLightCacheGroup}) @binding(5) var<storage,read> dryVoxelLightPages:array<vec4u>;
 ${reduced ? "" : "var<private> dryCurrentLightSlot:u32;"}
+var<private> dryVoxelLightConsumerEligible:u32;
 fn dryVoxelLightPackNormal(normalIn:vec3f)->u32{
   let normal=normalize(normalIn);var oct=normal.xy/(abs(normal.x)+abs(normal.y)+abs(normal.z));
   if(normal.z<0.0){oct=(vec2f(1.0)-abs(oct.yx))*select(vec2f(-1.0),vec2f(1.0),oct>=vec2f(0.0));}
@@ -1516,13 +1518,13 @@ fn dryVoxelLightPackNormal(normalIn:vec3f)->u32{
 }
 fn dryVoxelLightUnpackNormal(packed:u32)->vec3f{
   let oct=vec2f(f32(packed&255u),f32((packed>>8u)&255u))/255.0*2.0-1.0;
-  var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));if(normal.z<0.0){normal.xy=(vec2f(1.0)-abs(normal.yx))*select(vec2f(-1.0),vec2f(1.0),normal.xy>=vec2f(0.0));}return normalize(normal);
+  var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));if(normal.z<0.0){let folded=(vec2f(1.0)-abs(normal.yx))*select(vec2f(-1.0),vec2f(1.0),normal.xy>=vec2f(0.0));normal=vec3f(folded,normal.z);}return normalize(normal);
 }
 fn dryVoxelLightAddress(position:vec3f)->DryVoxelLightAddress{
   if((dryVoxelLight.control.w&1u)==0u||dry.nodeMipDirect.w==0u){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
-  let virtual=floor((position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize,vec3f(1e-6)));
-  if(any(virtual<vec3f(0.0))){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
-  let voxel=vec3u(virtual);let pageCoordinate=voxel/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let pageIndex=dryNodeMipFind(0u,pageCoordinate);
+  let virtualVoxelFloor=floor((position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize,vec3f(1e-6)));
+  if(any(virtualVoxelFloor<vec3f(0.0))){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
+  let voxel=vec3u(virtualVoxelFloor);let pageCoordinate=voxel/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let pageIndex=dryNodeMipFind(0u,pageCoordinate);
   if(pageIndex==0xffffffffu||pageIndex>=dryVoxelLight.control.x){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
   let local=voxel-pageCoordinate*${SVO_NODE_MIP_LAYOUT.interiorSize}u;
   let localIndex=local.x+local.y*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local.z*${SVO_NODE_MIP_LAYOUT.interiorSize ** 2}u;
@@ -1531,7 +1533,7 @@ fn dryVoxelLightAddress(position:vec3f)->DryVoxelLightAddress{
   return DryVoxelLightAddress(atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local,pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u+localIndex,1u);
 }
 fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
-  if(dryCurrentLightSlot!=0u){return vec2f(0.0);}
+  if(dryCurrentLightSlot!=0u||dryVoxelLightConsumerEligible==0u){return vec2f(0.0);}
   let address=dryVoxelLightAddress(position);if(address.valid==0u){return vec2f(0.0);}
   let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xy;
   if(encoded.x==0u||(encoded.y>>16u)!=(dryVoxelLight.control.z&0xffffu)){return vec2f(0.0);}
@@ -1542,7 +1544,7 @@ fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
   let dimensions=textureDimensions(drySplitGeometryRead);if(any(id.xy>=dimensions)){return;}
   let coordinate=vec2i(id.xy);let geometry=drySplitGeometryAt(coordinate);if(!(geometry.w>0.0&&geometry.w<DRY_MISS)){return;}
   let metadata=drySplitIdentityAt(coordinate).y;let motionKind=(metadata>>24u)&3u;let feature=(metadata>>16u)&15u;
-  if(motionKind!=DRY_GBUFFER_MOTION_STATIC||feature!=SVO_FEATURE_SMOOTH){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
+  if(motionKind!=DRY_GBUFFER_MOTION_STATIC){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
   let uv=vec2f((f32(id.x)+.5)/f32(dimensions.x),1.0-(f32(id.y)+.5)/f32(dimensions.y));let ndc=uv*2.0-1.0;
   let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
   let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);let position=ro+rd*geometry.w;
@@ -1550,11 +1552,17 @@ fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
   let word=address.voxelIndex>>5u;let bit=1u<<(address.voxelIndex&31u);let previous=atomicOr(&dryVoxelLightRequests[word],bit);if((previous&bit)!=0u){return;}
   atomicAdd(&dryVoxelLightQueue.distinct,1u);let packedNormal=dryVoxelLightPackNormal(geometry.xyz);
   let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xy;
+  if(encoded.x==0u&&(encoded.y>>16u)==(dryVoxelLight.control.z&0xffffu)&&(encoded.y&0xffffu)==0xffffu){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
   if(encoded.x!=0u&&(encoded.y>>16u)==(dryVoxelLight.control.z&0xffffu)){
     if(dot(normalize(geometry.xyz),dryVoxelLightUnpackNormal(encoded.y&0xffffu))>=.9){atomicAdd(&dryVoxelLightQueue.hits,1u);}else{atomicAdd(&dryVoxelLightQueue.rejected,1u);}return;
   }
   atomicAdd(&dryVoxelLightQueue.misses,1u);let queueIndex=atomicAdd(&dryVoxelLightQueue.queued,1u);
   if(queueIndex<dryVoxelLight.control.y){dryVoxelLightQueue.entries[queueIndex]=vec2u(address.voxelIndex,packedNormal);}else{atomicAdd(&dryVoxelLightQueue.overflow,1u);}
+}
+fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
+  let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
+  let atlas=atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local;
+  textureStore(dryVoxelLightCacheWrite,vec3i(atlas),vec4u(0u,((dryVoxelLight.control.z&0xffffu)<<16u)|0xffffu,0u,0u));atomicAdd(&dryVoxelLightQueue.rejected,1u);
 }
 @compute @workgroup_size(64) fn dryVoxelLightPopulateMain(@builtin(global_invocation_id) id:vec3u){
   let count=min(atomicLoad(&dryVoxelLightQueue.queued),dryVoxelLight.control.y);if(id.x>=count){return;}
@@ -1564,18 +1572,18 @@ fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
   let page=dryVoxelLightPages[pageIndex];if(page.w!=0u){return;}let worldVoxel=page.xyz*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local;
   let position=dry.nodeMipOrigin.xyz+(vec3f(worldVoxel)+vec3f(.5))*dry.mapping.cellSize;let normal=dryVoxelLightUnpackNormal(entry.y);
   var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let coverage=dryNodeMipAt(position,0.0,&pageCache);
-  if(coverage.valid==0u||(coverage.sample.solidMaximum>.85&&coverage.sample.solidMean<.08)){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
+  if(coverage.valid==0u||(coverage.sample.solidMaximum>.85&&coverage.sample.solidMean<.08)){dryVoxelLightReject(pageIndex,local);return;}
   let light=dryLighting.lights[0];if(dryLighting.metadata.x==0u||light.identity.x!=SVO_LIGHT_DIRECTIONAL||light.identity.w!=dryLighting.metadata.y){return;}
   let sample=dryLightSample(light,0u,position);var visibility=0.0;
-  if(sample.valid!=0u&&dot(normal,sample.towardLight)>0.0){let maximumDistance=directionalLightSceneExitDistance(position,sample.towardLight);let ray=dryBiasedVisibilityRayUnit(position,normal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let escape=cell*dry.tuningRays1.z;let coneMaximum=max(0.0,ray.tMax_m-escape*dot(normal,sample.towardLight));let cone=dryConeVisibility(ray.origin_m+normal*escape,sample.towardLight,dry.tuningRays1.y,coneMaximum,normal,false);if(cone.valid==0u){return;}visibility=cone.transmittance;}
+  if(sample.valid!=0u&&dot(normal,sample.towardLight)>0.0){let maximumDistance=directionalLightSceneExitDistance(position,sample.towardLight);let ray=dryBiasedVisibilityRayUnit(position,normal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let escape=cell*dry.tuningRays1.z;let coneMaximum=max(0.0,ray.tMax_m-escape*dot(normal,sample.towardLight));let cone=dryConeVisibility(ray.origin_m+normal*escape,sample.towardLight,dry.tuningRays1.y,coneMaximum,normal,false);if(cone.valid==0u){dryVoxelLightReject(pageIndex,local);return;}visibility=cone.transmittance;}
   let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
   let atlas=atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local;let packed=u32(round(clamp(visibility,0.0,1.0)*65534.0))+1u;
   textureStore(dryVoxelLightCacheWrite,vec3i(atlas),vec4u(packed,((dryVoxelLight.control.z&0xffffu)<<16u)|(entry.y&0xffffu),0u,0u));atomicAdd(&dryVoxelLightQueue.populated,1u);
 }
 ` : "";
-  const voxelLightCacheShortcutWGSL = voxelLightCache ? /* wgsl */ `let cachedVoxelVisibility=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxelVisibility.y>0.0){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(cachedVoxelVisibility.x,0.0,rigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}` : "";
+  const voxelLightCacheShortcutWGSL = voxelLightCache ? /* wgsl */ `let cachedVoxelVisibility=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxelVisibility.y>0.0){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(cachedVoxelVisibility.x,0.0,rigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}if(dryCurrentLightSlot==0u&&(dryVoxelLight.control.w&2u)!=0u){dryCurrentLightSlot=0xffffffffu;}` : "";
   const prepassResolveCallWGSL = reduced
-    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryConeFallback=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}`
+    ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryConeFallback=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}${voxelLightCache ? "if((dryVoxelLight.control.w&2u)!=0u){dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;}" : ""}`
     : "";
   const prepassShadowShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassState==1u&&dryCurrentLightSlot<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u){let prepassRigidBlocked=anyBodyBlockerIgnoring(ray.origin_m,towardLight,ownerId,ray.tMax_m);let raw=select(dryPrepassChannel(1u+dryCurrentLightSlot),0.0,prepassRigidBlocked);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}`
@@ -1794,6 +1802,7 @@ fn dryBrickRasterOut(surface:DryRasterPrimaryOut)->DryBrickRasterOut{
 }
 fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
   dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
+  ${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,opaque.motionKind==DRY_GBUFFER_MOTION_STATIC);" : ""}
   let position=ro+rd*opaque.t;let geometricNormal=normalize(opaque.normal);
   var visibility0=vec4f(1.0);var visibility1=vec4f(1.0);var visibility2=vec4f(1.0);
   // AO cones exclude rigid blockers; those stay exact at full resolution.
@@ -1826,6 +1835,7 @@ fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
       let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
       let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;
       let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);
+      ${voxelLightCache ? "dryCurrentLightSlot=lightIndex;let cachedVoxel=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxel.y>0.0){let packedVisibility=mix(1.0,cachedVoxel.x,dry.tuningRays0.y);if(lightIndex<3u){visibility0[1u+lightIndex]=packedVisibility;}else if(lightIndex<7u){visibility1[lightIndex-3u]=packedVisibility;}else{visibility2.x=packedVisibility;}continue;}" : ""}
       var visibility=0.0;
       for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
         if(sampleIndex>=sampleCount){continue;}
@@ -2779,7 +2789,7 @@ fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   return DrySurfaceMaterial(base,roughness,material.emissiveRoughness.xyz+selectedEmission,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,regionId,variationFlags,1u,0u);
 }
 fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
-  if(hit.t>=DRY_MISS){return dryEnvironment(rd,0.0);}${screenSpaceProxyShadeWGSL}${prepassRadianceShortcutWGSL}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
+  if(hit.t>=DRY_MISS){return dryEnvironment(rd,0.0);}${screenSpaceProxyShadeWGSL}${prepassRadianceShortcutWGSL}${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,hit.motionKind==DRY_GBUFFER_MOTION_STATIC);" : ""}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
   if(surface.valid==0u){return vec3f(0.0);}
   let directClosure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);var direct=vec3f(0.0);var sampleBudget=0u;
   let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;
@@ -3126,6 +3136,7 @@ export class SparseVoxelDrySceneRenderer {
   private voxelLightEpoch = 1;
   private voxelLightActive = false;
   private voxelLightExclusive = false;
+  private voxelLightUserEnabled = true;
   private coneFanoutWorkerPipeline?: GPUComputePipeline;
   private coneFanoutReducerPipeline?: GPUComputePipeline;
   private coneFanoutSceneLayout?: GPUBindGroupLayout;
@@ -3371,7 +3382,8 @@ export class SparseVoxelDrySceneRenderer {
       checkedModule(this.device, `Sparse voxel dry scene fragment (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
         this.traversalMode === "hybrid" && this.brickOccupancyMode === "off" && this.screenSpaceTerminationPixels === 0
           ? drySceneShader : createSvoDrySceneFragmentWGSL(1, this.traversalMode, this.brickOccupancyMode, this.shadingPath, this.screenSpaceTerminationPixels,
-            false, this.rasterPrimary && this.rasterGlassDiscovery, this.rasterPrimary && this.rasterRigidDiscovery)),
+            false, this.rasterPrimary && this.rasterGlassDiscovery, this.rasterPrimary && this.rasterRigidDiscovery, false,
+            { ...this.experiments, voxelLightCache: false })),
     ]);
     this.layout = this.device.createBindGroupLayout({ label: "Sparse voxel dry scene bindings", entries: sparseVoxelDrySceneBindGroupLayoutEntries() });
     this.pipeline = await this.device.createRenderPipelineAsync({
@@ -3895,11 +3907,12 @@ export class SparseVoxelDrySceneRenderer {
           : []),
       ],
     });
-    const voxelLightCacheEnabled = this.experiments.voxelLightCache !== false;
+    const voxelLightCacheEnabled = this.experiments.voxelLightCache !== false
+      && this.device.limits.maxSampledTexturesPerShaderStage >= 17;
     if (voxelLightCacheEnabled && !this.voxelLightConsumerLayout) {
       this.voxelLightConsumerLayout = this.device.createBindGroupLayout({ label: "Sparse voxel directional-light cache consumer", entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint", viewDimension: "3d" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ] });
       this.voxelLightDemandLayout = this.device.createBindGroupLayout({ label: "Sparse voxel directional-light cache demand", entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
@@ -3916,9 +3929,12 @@ export class SparseVoxelDrySceneRenderer {
     }
     const layout = this.layout;
     const vertexModule = this.vertexModule;
-    const shaderExperiments = scale === 1 && this.experiments.halfPrecisionLighting
+    const shaderExperimentsBase = scale === 1 && this.experiments.halfPrecisionLighting
       ? { ...this.experiments, halfPrecisionLighting: false }
       : this.experiments;
+    const shaderExperiments = voxelLightCacheEnabled
+      ? shaderExperimentsBase
+      : { ...shaderExperimentsBase, voxelLightCache: false };
     const compile = (async (): Promise<SvoDrySplitPipelineBundle> => {
       const [module, rasterRigidModule] = await Promise.all([
         checkedModule(this.device, `Sparse voxel dry scene split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
@@ -4001,27 +4017,27 @@ export class SparseVoxelDrySceneRenderer {
       }),
       scale === 1 ? Promise.resolve(undefined) : this.device.createComputePipelineAsync({
         label: "Sparse voxel compact cone queue reset",
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!] }),
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
         compute: { module, entryPoint: "dryPrepassResetMain" },
       }),
       scale === 1 ? Promise.resolve(undefined) : this.device.createComputePipelineAsync({
         label: "Sparse voxel coherent cone visibility from primary hits",
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!] }),
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
         compute: { module, entryPoint: "dryPrepassCoherentMain" },
       }),
       scale === 1 ? Promise.resolve(undefined) : this.device.createComputePipelineAsync({
         label: "Sparse voxel compact boundary cone visibility",
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!] }),
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassComputeLayout!, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
         compute: { module, entryPoint: "dryPrepassBoundaryMain" },
       }),
       scale === 1 ? Promise.resolve(undefined) : this.device.createComputePipelineAsync({
         label: "Sparse voxel world GI frame prelude",
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassShadeLayout!, this.worldGiCacheLayout!] }),
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassShadeLayout!, this.worldGiCacheLayout!, ...cacheConsumerLayouts] }),
         compute: { module, entryPoint: "dryWorldGiFrameMain" },
       }),
       scale === 1 ? Promise.resolve(undefined) : this.device.createComputePipelineAsync({
         label: "Sparse voxel persistent world GI cache",
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassShadeLayout!, this.worldGiCacheLayout!] }),
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassShadeLayout!, this.worldGiCacheLayout!, ...cacheConsumerLayouts] }),
         compute: { module, entryPoint: "dryWorldGiCacheMain" },
       }),
       voxelLightCacheEnabled ? this.device.createComputePipelineAsync({
@@ -4520,6 +4536,112 @@ export class SparseVoxelDrySceneRenderer {
     this.conePrepassHeight = 0;
   }
 
+  private releaseVoxelLightCache(): void {
+    this.voxelLightTexture?.destroy();
+    this.voxelLightParamsBuffer?.destroy();
+    this.voxelLightRequestBuffer?.destroy();
+    this.voxelLightQueueBuffer?.destroy();
+    this.voxelLightPageBuffer?.destroy();
+    this.voxelLightTexture = undefined;
+    this.voxelLightTextureView = undefined;
+    this.voxelLightParamsBuffer = undefined;
+    this.voxelLightRequestBuffer = undefined;
+    this.voxelLightQueueBuffer = undefined;
+    this.voxelLightPageBuffer = undefined;
+    this.voxelLightConsumerBindGroup = undefined;
+    this.voxelLightDemandBindGroup = undefined;
+    this.voxelLightPopulateBindGroup = undefined;
+    this.voxelLightPageCount = 0;
+    this.voxelLightActive = false;
+    this.voxelLightExclusive = false;
+  }
+
+  private writeVoxelLightCacheParams(): void {
+    if (!this.voxelLightParamsBuffer || !this.source?.nodeMipPyramid) return;
+    const nodeMip = this.source.nodeMipPyramid;
+    const active = this.voxelLightUserEnabled && this.voxelLightPageCount > 0 && !this.fluidCoverage
+      && (this.lightingOptions.coneTracingMode ?? "cones") === "cones"
+      && this.lightingOptions.shadowsEnabled;
+    const exclusive = active && this.renderTuning.maximumShadedLights === 1
+      && !this.lightingOptions.ambientOcclusionEnabled
+      && !this.source.tetrahedralRadiance;
+    this.voxelLightActive = active;
+    this.voxelLightExclusive = exclusive;
+    this.device.queue.writeBuffer(this.voxelLightParamsBuffer, 0, new Uint32Array([
+      this.voxelLightPageCount,
+      SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.populationBudget,
+      this.voxelLightEpoch,
+      (active ? 1 : 0) | (exclusive ? 2 : 0),
+      ...nodeMip.plan.atlas.pages,
+      0,
+    ]));
+  }
+
+  private invalidateVoxelLightCache(): void {
+    if (!this.voxelLightParamsBuffer) return;
+    this.voxelLightEpoch = this.voxelLightEpoch >= 0xffff ? 1 : this.voxelLightEpoch + 1;
+    this.writeVoxelLightCacheParams();
+  }
+
+  private ensureVoxelLightCache(source: SparseVoxelSceneRenderSource | undefined, scene: SparseVoxelDrySceneData | undefined): void {
+    this.releaseVoxelLightCache();
+    const nodeMip = source?.nodeMipPyramid;
+    const firstKind = scene?.lightRecords?.[24];
+    if (this.experiments.voxelLightCache === false
+      || !this.voxelLightConsumerLayout || !this.voxelLightDemandLayout || !this.voxelLightPopulateLayout) return;
+    const eligible = Boolean(nodeMip?.plan.complete && nodeMip.directPageTableReady
+      && nodeMip.plan.pages.length > 0 && firstKind === SVO_LIGHT_KINDS.directional);
+    this.voxelLightEpoch = this.voxelLightEpoch >= 0xffff ? 1 : this.voxelLightEpoch + 1;
+    this.voxelLightPageCount = eligible ? nodeMip!.plan.pages.length : 0;
+    this.voxelLightTexture = this.device.createTexture({
+      label: `Sparse voxel directional-light visibility generation ${nodeMip?.generation ?? 0}`,
+      size: eligible ? nodeMip!.plan.atlas.texels : [1, 1, 1],
+      dimension: "3d",
+      format: SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.format,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+    });
+    this.voxelLightTextureView = this.voxelLightTexture.createView({ dimension: "3d" });
+    this.voxelLightParamsBuffer = this.device.createBuffer({ label: "Sparse voxel directional-light cache parameters", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.voxelLightRequestBuffer = this.device.createBuffer({
+      label: "Sparse voxel directional-light request bitset",
+      size: Math.max(4, this.voxelLightPageCount * SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.requestWordsPerPage * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.voxelLightQueueBuffer = this.device.createBuffer({
+      label: "Sparse voxel directional-light population queue",
+      size: SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.queueHeaderWords * 4
+        + SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.populationBudget * SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.queueEntryWords * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.voxelLightPageBuffer = this.device.createBuffer({
+      label: "Sparse voxel directional-light virtual pages",
+      size: Math.max(16, this.voxelLightPageCount * 16),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const pageWords = new Uint32Array(this.voxelLightPageCount * 4);
+    if (eligible) {
+      for (const page of nodeMip!.plan.pages) pageWords.set([...page.key.coordinate, page.key.level], page.slot * 4);
+      this.device.queue.writeBuffer(this.voxelLightPageBuffer, 0, pageWords);
+    }
+    this.writeVoxelLightCacheParams();
+    this.voxelLightConsumerBindGroup = this.device.createBindGroup({ label: "Sparse voxel directional-light cache consumer", layout: this.voxelLightConsumerLayout, entries: [
+      { binding: 0, resource: this.voxelLightTextureView },
+      { binding: 1, resource: { buffer: this.voxelLightParamsBuffer } },
+    ] });
+    this.voxelLightDemandBindGroup = this.device.createBindGroup({ label: "Sparse voxel directional-light cache demand", layout: this.voxelLightDemandLayout, entries: [
+      { binding: 0, resource: this.voxelLightTextureView },
+      { binding: 1, resource: { buffer: this.voxelLightParamsBuffer } },
+      { binding: 3, resource: { buffer: this.voxelLightRequestBuffer } },
+      { binding: 4, resource: { buffer: this.voxelLightQueueBuffer } },
+    ] });
+    this.voxelLightPopulateBindGroup = this.device.createBindGroup({ label: "Sparse voxel directional-light cache population", layout: this.voxelLightPopulateLayout, entries: [
+      { binding: 1, resource: { buffer: this.voxelLightParamsBuffer } },
+      { binding: 2, resource: this.voxelLightTextureView },
+      { binding: 4, resource: { buffer: this.voxelLightQueueBuffer } },
+      { binding: 5, resource: { buffer: this.voxelLightPageBuffer } },
+    ] });
+  }
+
   setSource(source: SparseVoxelSceneRenderSource | undefined, scene: SparseVoxelDrySceneData | undefined): void {
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
@@ -4528,6 +4650,7 @@ export class SparseVoxelDrySceneRenderer {
     this.worldGiCacheDirty = true;
     this.source = source;
     this.scene = scene;
+    this.ensureVoxelLightCache(source, scene);
     this.updateTetrahedralRadianceBlackPages(source?.tetrahedralRadiance);
     this.coneFanoutLightCount = Math.min(source?.lights?.count ?? 1, SVO_CONE_FANOUT_CONTRACT.maximumLights);
     if (this.coneFanoutFrameBuffer && this.conePrepassWidth && this.conePrepassHeight) {
@@ -4634,6 +4757,7 @@ export class SparseVoxelDrySceneRenderer {
     this.clearReusableFrame();
     this.clearPrimaryVisibilityCache();
     this.worldGiCacheDirty = true;
+    this.invalidateVoxelLightCache();
     return true;
   }
 
@@ -4654,6 +4778,7 @@ export class SparseVoxelDrySceneRenderer {
       || coneTracingMode !== previousConeTracingMode;
     this.lightingOptions = { shadowsEnabled: options.shadowsEnabled, ambientOcclusionEnabled: options.ambientOcclusionEnabled, coneTracingMode };
     this.coneScale = coneLightingScale;
+    this.writeVoxelLightCacheParams();
     if (invalidateWorldGi) this.worldGiCacheDirty = true;
     if (coneLightingScale !== 1) {
       const coneBundle = this.conePipelineBundles.get(coneLightingScale);
@@ -4674,7 +4799,16 @@ export class SparseVoxelDrySceneRenderer {
   setRenderTuning(tuning: SvoRenderTuning): void {
     const normalized = normalizeSvoRenderTuning(tuning);
     if (Object.keys(normalized).every((key) => normalized[key as keyof SvoRenderTuning] === this.renderTuning[key as keyof SvoRenderTuning])) return;
+    const invalidateVoxelVisibility = normalized.coneStepBudget !== this.renderTuning.coneStepBudget
+      || normalized.shadowBiasCells !== this.renderTuning.shadowBiasCells
+      || normalized.shadowConeAperture !== this.renderTuning.shadowConeAperture
+      || normalized.coneNormalEscapeCells !== this.renderTuning.coneNormalEscapeCells;
     this.renderTuning = normalized;
+    // Screen rate, reconstruction, light-loop count, AO and GI controls do
+    // not change the cached slot-zero visibility. Keeping its epoch across
+    // those presentation-only changes is what makes camera/view-tier A/Bs a
+    // valid warm-cache measurement. March-shape changes still invalidate.
+    if (invalidateVoxelVisibility) this.invalidateVoxelLightCache();
     this.clearReusableFrame();
     this.worldGiCacheDirty = true;
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) this.writeParams(this.source, this.scene);
@@ -4853,7 +4987,16 @@ export class SparseVoxelDrySceneRenderer {
   setFluidCoverage(coverage: WebGpuSvoFluidCoverage | undefined): void {
     if (this.fluidCoverage === coverage) return;
     this.fluidCoverage = coverage;
+    this.writeVoxelLightCacheParams();
     this.rebuild();
+  }
+
+  /** Runtime A/B and emergency fallback switch; disabling never destroys cached data. */
+  setVoxelLightCacheEnabled(enabled: boolean): void {
+    if (this.voxelLightUserEnabled === enabled) return;
+    this.voxelLightUserEnabled = enabled;
+    this.writeVoxelLightCacheParams();
+    this.clearReusableFrame();
   }
 
   setRigidMotionSource(source: GPUBuffer | undefined): void {
@@ -4882,6 +5025,71 @@ export class SparseVoxelDrySceneRenderer {
     if (!this.conePrepassBoundaryQueue) return false;
     encoder.copyBufferToBuffer(this.conePrepassBoundaryQueue, 0, target, 0, 4);
     return true;
+  }
+
+  /** Copies the eight Phase-0/1 demand counters from the most recently encoded frame. */
+  copyVoxelLightCacheCounters(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    if (!this.voxelLightQueueBuffer) return false;
+    encoder.copyBufferToBuffer(
+      this.voxelLightQueueBuffer,
+      0,
+      target,
+      0,
+      SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.queueHeaderWords * 4,
+    );
+    return true;
+  }
+
+  /**
+   * Benchmark seam for the documented warm-cache gate. The caller first
+   * encodes ordinary settled frames, then this method repeats only the exact
+   * production compact cone-visibility pass over the retained split G-buffer.
+   * It never substitutes for encode() in the renderer's shipping path.
+   */
+  encodeWarmConeVisibilityProbe(encoder: GPUCommandEncoder): boolean {
+    if (this.coneScale === 1 || this.conePipelineScale !== this.coneScale
+      || this.splitPipelineScale !== this.coneScale || !this.conePrepassResetPipeline
+      || !this.conePrepassCoherentPipeline || !this.conePrepassBoundaryPipeline
+      || !this.conePrepassComputeBindGroup || !this.splitLightingBindGroup
+      || !this.conePrepassBoundaryQueue || !this.targetWidth || !this.targetHeight) return false;
+    // This is the principal Phase-1 win: once the single-light cache owns the
+    // complete direct-visibility tier, production does not encode the
+    // screen-space cone pass. Missing/rejected voxels fall through to the live
+    // per-pixel chain in dryLightVisibility.
+    if (this.voxelLightExclusive) return true;
+    const splitGroup = 2;
+    const cacheBindings = this.experiments.voxelLightCache !== false
+      && this.device.limits.maxSampledTexturesPerShaderStage >= 17;
+    if (cacheBindings && !this.voxelLightConsumerBindGroup) return false;
+    if (this.experiments.clearConeQueueWithBlit) encoder.clearBuffer(this.conePrepassBoundaryQueue, 0, 4);
+    const pass = encoder.beginComputePass({ label: "Sparse voxel compact cone visibility (warm probe)" });
+    if (!this.experiments.clearConeQueueWithBlit && !this.experiments.inlineConeBoundaries) {
+      pass.setPipeline(this.conePrepassResetPipeline);
+      pass.setBindGroup(0, this.bindGroup!);
+      pass.setBindGroup(1, this.conePrepassComputeBindGroup);
+      pass.setBindGroup(splitGroup, this.splitLightingBindGroup);
+      if (cacheBindings) pass.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
+      pass.dispatchWorkgroups(1);
+    }
+    pass.setPipeline(this.conePrepassCoherentPipeline);
+    pass.setBindGroup(0, this.bindGroup!);
+    pass.setBindGroup(1, this.conePrepassComputeBindGroup);
+    pass.setBindGroup(splitGroup, this.splitLightingBindGroup);
+    if (cacheBindings) pass.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
+    pass.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
+    if (!this.experiments.inlineConeBoundaries) {
+      pass.setPipeline(this.conePrepassBoundaryPipeline);
+      pass.dispatchWorkgroups(Math.ceil(this.conePrepassWidth * this.conePrepassHeight / 64));
+    }
+    pass.end();
+    return true;
+  }
+
+  get voxelLightCacheAllocatedBytes(): number {
+    const nodeMip = this.source?.nodeMipPyramid;
+    return this.voxelLightPageCount > 0 && nodeMip
+      ? nodeMip.plan.atlas.capacity * SVO_NODE_MIP_LAYOUT.physicalSize ** 3 * SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.bytesPerTexel
+      : 0;
   }
 
   /** Auxiliary MRTs and reversed-Z depth for picking and split shading. */
@@ -5163,6 +5371,9 @@ export class SparseVoxelDrySceneRenderer {
       && this.brickEmitPipeline && this.brickScanPipeline && this.brickScatterPipeline
       && this.brickCullBindGroup && this.brickDrawBindGroup && this.brickSortStateBuffer
       && this.splitOpaqueIdentityView);
+    const voxelLightBindingsRequired = this.experiments.voxelLightCache !== false
+      && this.device.limits.maxSampledTexturesPerShaderStage >= 17;
+    const voxelLightBindingsReady = Boolean(this.voxelLightConsumerBindGroup);
     const useSplit = splitRequested && !this.splitDiagnosticsActive
       && this.splitPipelineScale === effectiveScale
       && (!this.rasterPrimary || brickRasterReady)
@@ -5176,6 +5387,7 @@ export class SparseVoxelDrySceneRenderer {
         && (!this.rasterGlassDiscovery || (this.rasterGlassPipeline && this.rasterGlassBindGroup && this.splitGlassKeyView && this.splitGlassDepthView))
         && (!this.rasterRigidActive || (this.rasterRigidPipeline && this.rasterRigidBridgePipeline
           && this.rasterRigidInputBindGroup && this.rasterRigidBindGroup && this.rasterRigidPrimaryGeometryView))
+        && (!voxelLightBindingsRequired || voxelLightBindingsReady)
         && this.splitVisibilityBindGroup && this.splitLightingBindGroup && this.splitGeometryView);
     const frameKey = reuseKey === undefined ? undefined : `${reuseKey}|cone=${effectiveScale}|shading=${useSplit ? "split" : "inline"}|rasterRigid=${this.rasterRigidActive}`;
     const primaryFrameKey = reuseKey === undefined ? undefined : `${reuseKey}|primary=${useSplit ? "split" : "inline"}|rasterRigid=${this.rasterRigidActive}`;
@@ -5339,7 +5551,31 @@ export class SparseVoxelDrySceneRenderer {
           : undefined;
       }
 
-      if (usePrepass) {
+      if (this.voxelLightActive && this.voxelLightDemandPipeline && this.voxelLightPopulatePipeline
+        && this.voxelLightDemandBindGroup && this.voxelLightPopulateBindGroup
+        && this.voxelLightRequestBuffer && this.voxelLightQueueBuffer) {
+        encoder.clearBuffer(this.voxelLightRequestBuffer);
+        encoder.clearBuffer(this.voxelLightQueueBuffer, 0, SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.queueHeaderWords * 4);
+        const cacheGroup = splitGroup + 1;
+        const demand = encoder.beginComputePass({ label: "Sparse voxel directional-light cache demand" });
+        demand.setPipeline(this.voxelLightDemandPipeline);
+        demand.setBindGroup(0, this.bindGroup);
+        if (usePrepass) demand.setBindGroup(1, this.conePrepassBindGroup!);
+        demand.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+        demand.setBindGroup(cacheGroup, this.voxelLightDemandBindGroup);
+        demand.dispatchWorkgroups(Math.ceil(this.targetWidth / 8), Math.ceil(this.targetHeight / 8));
+        demand.end();
+        const populate = encoder.beginComputePass({ label: "Sparse voxel directional-light cache population" });
+        populate.setPipeline(this.voxelLightPopulatePipeline);
+        populate.setBindGroup(0, this.bindGroup);
+        if (usePrepass) populate.setBindGroup(1, this.conePrepassBindGroup!);
+        populate.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+        populate.setBindGroup(cacheGroup, this.voxelLightPopulateBindGroup);
+        populate.dispatchWorkgroups(Math.ceil(SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.populationBudget / 64));
+        populate.end();
+      }
+
+      if (usePrepass && !this.voxelLightExclusive) {
         if (this.experiments.clearConeQueueWithBlit) encoder.clearBuffer(this.conePrepassBoundaryQueue!, 0, 4);
         const coherent = encoder.beginComputePass({ label: "Sparse voxel compact cone visibility" });
         if (!this.experiments.clearConeQueueWithBlit && !this.experiments.inlineConeBoundaries) {
@@ -5347,12 +5583,14 @@ export class SparseVoxelDrySceneRenderer {
           coherent.setBindGroup(0, this.bindGroup);
           coherent.setBindGroup(1, this.conePrepassComputeBindGroup!);
           coherent.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+          if (voxelLightBindingsRequired) coherent.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
           coherent.dispatchWorkgroups(1);
         }
         coherent.setPipeline(this.conePrepassCoherentPipeline!);
         coherent.setBindGroup(0, this.bindGroup);
         coherent.setBindGroup(1, this.conePrepassComputeBindGroup!);
         coherent.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+        if (voxelLightBindingsRequired) coherent.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
         coherent.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
         if (!this.experiments.inlineConeBoundaries) {
           coherent.setPipeline(this.conePrepassBoundaryPipeline!);
@@ -5393,11 +5631,13 @@ export class SparseVoxelDrySceneRenderer {
         gi.setBindGroup(0, this.bindGroup);
         gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
         gi.setBindGroup(2, this.worldGiCacheBindGroup!);
+        if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
         gi.dispatchWorkgroups(1);
         gi.setPipeline(this.worldGiCachePipeline!);
         gi.setBindGroup(0, this.bindGroup);
         gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
         gi.setBindGroup(2, this.worldGiCacheBindGroup!);
+        if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
         gi.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
         gi.end();
         tracePhase?.({ id: "svo-environment-gi", label: "SVO persistent world-space environmental GI" });
@@ -5414,6 +5654,7 @@ export class SparseVoxelDrySceneRenderer {
       lighting.setBindGroup(0, this.bindGroup);
       if (usePrepass) lighting.setBindGroup(1, this.conePrepassBindGroup!);
       lighting.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+      if (voxelLightBindingsRequired) lighting.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
       // Two complementary depth tests partition the frame: the sky shader takes
       // the miss pixels and the full deferred shader takes the rest. Sky first
       // so the expensive draw is the one still in flight when the pass ends.
@@ -5512,6 +5753,12 @@ export class SparseVoxelDrySceneRenderer {
     this.coneFanoutSceneBindGroup = undefined;
     this.splitPipelineScale = undefined;
     this.releaseConePrepassTargets();
+    this.releaseVoxelLightCache();
+    this.voxelLightDemandPipeline = undefined;
+    this.voxelLightPopulatePipeline = undefined;
+    this.voxelLightConsumerLayout = undefined;
+    this.voxelLightDemandLayout = undefined;
+    this.voxelLightPopulateLayout = undefined;
     this.worldGiCacheBuffer?.destroy();
     this.worldGiFrameBuffer?.destroy();
     this.worldGiCacheBuffer = undefined;
