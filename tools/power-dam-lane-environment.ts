@@ -8,7 +8,7 @@
  * number the benchmark gates on.
  */
 
-export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop";
+export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion";
 
 export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<string, string>> = {
   mini: {
@@ -56,6 +56,17 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     // post-frame diagnosis must not discard an otherwise complete xctrace.
     FLUID_POWER_STAGE_AUDIT: "1",
     FLUID_POWER_AUDIT_EVERY_STEPS: "1", FLUID_STABILITY_ENVELOPE: "1",
+  },
+  "symmetric-expansion": {
+    // The D4 symmetry oracle scene, at the fine factor its `fine-factor-4`
+    // correctness lane uses. `performance` is the same solver configuration
+    // without the evidence collectors, so a change scored here can be
+    // re-gated on symmetry without changing the scene.
+    FLUID_SCENE: "symmetric-expansion", FLUID_LANE: "performance",
+    FLUID_TARGET_S: "0.248",
+    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
+    FLUID_EXPECT_GRID: "32,16,32", FLUID_MAXIMUM_LEAF_SIZE: "32",
+    FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
   "ceiling-drop": {
     FLUID_SCENE: "ceiling-slab-drop", FLUID_TARGET_S: "0.024",

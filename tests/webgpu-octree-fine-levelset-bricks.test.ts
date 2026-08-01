@@ -993,6 +993,9 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
   assert.match(fineLevelSetJFACPTWGSL,
     /fn materializedClosestPoint\(index:u32\)[^}]*flags\[index\]>>SAMPLE_FLAG_BITS[^}]*CP_FRACTION_MASK/,
     "flood comparisons must read the cached closest point without re-walking neighboring phi");
+  assert.match(fineLevelSetJFACPTWGSL,
+    /CP_FRACTION_SCALE:f32=16777216\.[\s\S]*quantized=min\(u32\(round\([\s\S]*CP_FRACTION_SCALE\)\),CP_FRACTION_MASK\)/,
+    "half-cell crossings must be represented exactly by the power-of-two fraction codec");
   assert.doesNotMatch(fineLevelSetJFACPTWGSL,
     /fn materializedClosestPoint\([^}]*sampleIndex|fn materializedClosestPoint\([^}]*pageOf/,
     "cached closest-point lookup must not perform a sparse hash lookup");

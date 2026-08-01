@@ -135,6 +135,15 @@ implements OctreeFirstOrderSPDVCycle {
   private readonly gatedRowDispatch: GPUBuffer;
   private readonly gatedBandDispatch: GPUBuffer;
   private readonly bandOperatorLayout: GPUBuffer;
+  private readonly symmetryStageAudit?: {
+    preSmoothed: GPUBuffer;
+    zeroSmoothed: GPUBuffer;
+    firstOperatorImage: GPUBuffer;
+    firstSmoothed: GPUBuffer;
+    innerResidual: GPUBuffer;
+    innerCorrection: GPUBuffer;
+    postCorrected: GPUBuffer;
+  };
   private readonly pipelines: Readonly<Record<HybridStage, GPUComputePipeline>>;
   private readonly groups = new Map<HybridStage, CachedGroup[]>();
   private readonly fusedAccurateResidual: boolean;
@@ -159,6 +168,8 @@ implements OctreeFirstOrderSPDVCycle {
       bandDispatch: this.bandDispatch,
     });
   }
+
+  get symmetryStageAuditBuffers() { return this.symmetryStageAudit; }
 
   constructor(
     private readonly device: GPUDevice,
@@ -210,6 +221,20 @@ implements OctreeFirstOrderSPDVCycle {
     this.bandA = vector("Section 4.3 hybrid boundary band A");
     this.bandB = vector("Section 4.3 hybrid boundary band B");
     this.operatorImage = vector("Section 4.3 hybrid resolved L2 image");
+    if (typeof process !== "undefined" && process.env?.FLUID_SYMMETRY_STAGE_AUDIT === "1") {
+      const audit = (label: string) => device.createBuffer({
+        label, size: vectorBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+      this.symmetryStageAudit = {
+        preSmoothed: audit("Section 4.3 symmetry audit · p1"),
+        zeroSmoothed: audit("Section 4.3 symmetry audit · zero sweep"),
+        firstOperatorImage: audit("Section 4.3 symmetry audit · first L2 image"),
+        firstSmoothed: audit("Section 4.3 symmetry audit · first nonzero sweep"),
+        innerResidual: audit("Section 4.3 symmetry audit · r1"),
+        innerCorrection: audit("Section 4.3 symmetry audit · M1 r1"),
+        postCorrected: audit("Section 4.3 symmetry audit · p1 + M1 r1"),
+      };
+    }
     this.bandWorksets = device.createBuffer({
       label: "Section 4.3 compact A/B class-intersection worksets",
       size: 2 * worksetBankStrideWords * 4,
@@ -392,9 +417,14 @@ implements OctreeFirstOrderSPDVCycle {
     // band-restricted L2 apply of the state it reads.
     pass = broker.compute({ label: "Section 4.3 hybrid pre-smoothing shell" });
     this.runRows(pass, "smoothZeroToB", resources);
+    if (this.symmetryStageAudit) broker.copyBufferToBuffer(
+      this.hybridB, 0, this.symmetryStageAudit.zeroSmoothed, 0, this.hybridB.size);
     for (let iteration = 1; iteration < this.boundarySmoothingIterations; iteration += 1) {
-      this.encodeBandSweep(broker, resources, (iteration & 1) === 1, input.solverControl);
+      this.encodeBandSweep(broker, resources, (iteration & 1) === 1, input.solverControl,
+        iteration === 1 ? this.symmetryStageAudit : undefined);
     }
+    if (this.symmetryStageAudit) broker.copyBufferToBuffer(
+      this.hybridA, 0, this.symmetryStageAudit.preSmoothed, 0, this.hybridA.size);
 
     // §4.3(2): r1 = q - L2 p1 over every accepted row, then the page-parallel
     // symmetric first-order V-cycle. p1 now lives in hybridA.
@@ -410,6 +440,8 @@ implements OctreeFirstOrderSPDVCycle {
       pass = broker.compute({ label: "Section 4.3 hybrid inner residual" });
       this.runRows(pass, "formInnerResidual", resources);
     }
+    if (this.symmetryStageAudit) broker.copyBufferToBuffer(
+      this.innerRhs, 0, this.symmetryStageAudit.innerResidual, 0, this.innerRhs.size);
     const innerInput = {
       rhs: this.innerRhs,
       correction: this.innerCorrection,
@@ -418,11 +450,15 @@ implements OctreeFirstOrderSPDVCycle {
     };
     if (splitInner) inner.encodeCorrectionBody!(broker, innerInput);
     else inner.encodeCorrection(broker, innerInput);
+    if (this.symmetryStageAudit) broker.copyBufferToBuffer(
+      this.innerCorrection, 0, this.symmetryStageAudit.innerCorrection, 0, this.innerCorrection.size);
 
     // §4.3(3): p2 = p1 + M1 r1 seeds both ping-pong states, then the identical
     // matched even-k schedule starts B->A and therefore leaves z in hybridB.
     pass = broker.compute({ label: "Section 4.3 hybrid post-smoothing shell" });
     this.runRows(pass, "addInnerCorrection", resources);
+    if (this.symmetryStageAudit) broker.copyBufferToBuffer(
+      this.hybridA, 0, this.symmetryStageAudit.postCorrected, 0, this.hybridA.size);
     for (let iteration = 0; iteration < this.boundarySmoothingIterations; iteration += 1) {
       this.encodeBandSweep(broker, resources, (iteration & 1) === 0, input.solverControl);
     }
@@ -441,6 +477,7 @@ implements OctreeFirstOrderSPDVCycle {
     resources: readonly (GPUBuffer | undefined)[],
     fromB: boolean,
     solverControl: GPUBuffer,
+    audit?: { firstOperatorImage: GPUBuffer; firstSmoothed: GPUBuffer },
   ): void {
     this.source.secondOrderOperator.encodeMergedBandWorkset(
       broker,
@@ -452,11 +489,15 @@ implements OctreeFirstOrderSPDVCycle {
       this.bandOperatorLayout,
       BAND_UNION_DISPATCH_OFFSET_BYTES,
     );
+    if (audit) broker.copyBufferToBuffer(
+      this.operatorImage, 0, audit.firstOperatorImage, 0, this.operatorImage.size);
     this.runBand(broker.compute({
       label: fromB
         ? "Section 4.3 hybrid band smooth B to A"
         : "Section 4.3 hybrid band smooth A to B",
     }), fromB ? "smoothBtoA" : "smoothAtoB", resources);
+    if (audit) broker.copyBufferToBuffer(
+      fromB ? this.hybridA : this.hybridB, 0, audit.firstSmoothed, 0, this.hybridA.size);
   }
 
   private resources(
@@ -583,6 +624,7 @@ implements OctreeFirstOrderSPDVCycle {
     this.gatedRowDispatch.destroy();
     this.gatedBandDispatch.destroy();
     this.bandOperatorLayout.destroy();
+    for (const buffer of Object.values(this.symmetryStageAudit ?? {})) buffer.destroy();
   }
 }
 

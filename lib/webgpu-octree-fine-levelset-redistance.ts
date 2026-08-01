@@ -11,6 +11,33 @@ import {
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 
+interface FineLevelSetRedistancePipelineBundle {
+  readonly publishSupportMaskPipeline: GPUComputePipeline;
+  readonly jfaRefreshClosestPointsPipeline: GPUComputePipeline;
+  readonly jfaRefreshDirtyClosestPointsPipeline: GPUComputePipeline;
+  readonly jfaSeedPipeline: GPUComputePipeline;
+  readonly jfaABPipelines: ReadonlyMap<number, GPUComputePipeline>;
+  readonly jfaBAPipelines: ReadonlyMap<number, GPUComputePipeline>;
+  readonly jfaResolveAToBPipeline: GPUComputePipeline;
+  readonly jfaResolveBToCanonicalPipeline: GPUComputePipeline;
+  readonly jfaResolveDirtyAToBPipeline: GPUComputePipeline;
+  readonly jfaResolveDirtyBToCanonicalPipeline: GPUComputePipeline;
+  readonly jfaValidatePipeline: GPUComputePipeline;
+  readonly jfaPrepareWarmFallbackPipeline: GPUComputePipeline;
+  readonly jfaResetFrontiersPipeline: GPUComputePipeline;
+  readonly jfaClearFrontierMasksPipeline: GPUComputePipeline;
+  readonly jfaMarkDirtyFrontierPipeline: GPUComputePipeline;
+  readonly jfaBuildFrontierPipeline: GPUComputePipeline;
+  readonly jfaFinalizeFrontiersPipeline: GPUComputePipeline;
+  readonly jfaFinalizePipeline: GPUComputePipeline;
+  readonly jfaCommitPipeline: GPUComputePipeline;
+}
+
+const fineLevelSetRedistancePipelineCache = new WeakMap<GPUDevice,
+  Map<string, FineLevelSetRedistancePipelineBundle>>();
+const fineLevelSetRedistancePipelineCompilations = new WeakMap<GPUDevice,
+  Map<string, Promise<FineLevelSetRedistancePipelineBundle>>>();
+
 export interface FineLevelSetGPURedistanceOptions {
   /** Required signed-distance width, measured in fine cells. */
   bandCells: number;
@@ -31,6 +58,16 @@ export interface FineLevelSetGPURedistanceOptions {
   closedBoundary?: boolean;
   /** An open top exempts the +y wall from the closed-wall virtual crossing. */
   openTopBoundary?: boolean;
+}
+
+export interface FineLevelSetRedistanceConstructionOptions {
+  /** Leave shader-module and pipeline creation to {@link initializePipelines}. */
+  readonly deferPipelineCompilation?: boolean;
+  /** Largest immutable, power-of-two JFA stride this instance may dispatch.
+   * Use {@link maximumFineLevelSetJFAStride} to derive it from the largest
+   * redistance band the owning solver can request. Pipelines above this bound
+   * are not compiled. */
+  readonly maximumRequiredJfaStride?: number;
 }
 
 /** The exact immutable page-delta ABI authored by fine topology.
@@ -131,6 +168,13 @@ export function planFineLevelSetJFAStrides(
   // The publication still fails closed if all five cannot reach a seed.
   for (let repair = 0; repair < collarRepairPasses; repair += 1) strides.push(1);
   return strides;
+}
+
+/** Largest compile-time-specialized stride reachable by a cold publication
+ * of `bandCells`. Cold publication is the construction-time upper bound:
+ * carried/warm schedules clamp their reach to the same physical band. */
+export function maximumFineLevelSetJFAStride(bandCells: number): number {
+  return planFineLevelSetJFAStrides(bandCells, bandCells, 0)[0]!;
 }
 
 export interface FineLevelSetJFAFrontierStage {
@@ -345,25 +389,31 @@ export class WebGPUFineLevelSetRedistance {
   private readonly frontierPublished: GPUBuffer;
   private readonly frontierParams: GPUBuffer;
   private readonly params: GPUBuffer;
-  private readonly publishSupportMaskPipeline: GPUComputePipeline;
-  private readonly jfaRefreshClosestPointsPipeline: GPUComputePipeline;
-  private readonly jfaRefreshDirtyClosestPointsPipeline: GPUComputePipeline;
-  private readonly jfaSeedPipeline: GPUComputePipeline;
-  private readonly jfaABPipelines: ReadonlyMap<number, GPUComputePipeline>;
-  private readonly jfaBAPipelines: ReadonlyMap<number, GPUComputePipeline>;
-  private readonly jfaResolveAToBPipeline: GPUComputePipeline;
-  private readonly jfaResolveBToCanonicalPipeline: GPUComputePipeline;
-  private readonly jfaResolveDirtyAToBPipeline: GPUComputePipeline;
-  private readonly jfaResolveDirtyBToCanonicalPipeline: GPUComputePipeline;
-  private readonly jfaValidatePipeline: GPUComputePipeline;
-  private readonly jfaPrepareWarmFallbackPipeline: GPUComputePipeline;
-  private readonly jfaResetFrontiersPipeline: GPUComputePipeline;
-  private readonly jfaClearFrontierMasksPipeline: GPUComputePipeline;
-  private readonly jfaMarkDirtyFrontierPipeline: GPUComputePipeline;
-  private readonly jfaBuildFrontierPipeline: GPUComputePipeline;
-  private readonly jfaFinalizeFrontiersPipeline: GPUComputePipeline;
-  private readonly jfaFinalizePipeline: GPUComputePipeline;
-  private readonly jfaCommitPipeline: GPUComputePipeline;
+  private publishSupportMaskPipeline!: GPUComputePipeline;
+  private jfaRefreshClosestPointsPipeline!: GPUComputePipeline;
+  private jfaRefreshDirtyClosestPointsPipeline!: GPUComputePipeline;
+  private jfaSeedPipeline!: GPUComputePipeline;
+  private jfaABPipelines!: ReadonlyMap<number, GPUComputePipeline>;
+  private jfaBAPipelines!: ReadonlyMap<number, GPUComputePipeline>;
+  private jfaResolveAToBPipeline!: GPUComputePipeline;
+  private jfaResolveBToCanonicalPipeline!: GPUComputePipeline;
+  private jfaResolveDirtyAToBPipeline!: GPUComputePipeline;
+  private jfaResolveDirtyBToCanonicalPipeline!: GPUComputePipeline;
+  private jfaValidatePipeline!: GPUComputePipeline;
+  private jfaPrepareWarmFallbackPipeline!: GPUComputePipeline;
+  private jfaResetFrontiersPipeline!: GPUComputePipeline;
+  private jfaClearFrontierMasksPipeline!: GPUComputePipeline;
+  private jfaMarkDirtyFrontierPipeline!: GPUComputePipeline;
+  private jfaBuildFrontierPipeline!: GPUComputePipeline;
+  private jfaFinalizeFrontiersPipeline!: GPUComputePipeline;
+  private jfaFinalizePipeline!: GPUComputePipeline;
+  private jfaCommitPipeline!: GPUComputePipeline;
+  private readonly pipelineActivity: GPULogicalActivityAdoptionContext;
+  private readonly pipelineCacheKey: string;
+  private readonly pipelineShaderCode: string;
+  /** Largest compile-time-specialized stride present in both ping-pong maps. */
+  readonly maximumRequiredJfaStride: number;
+  private pipelineInitialization?: Promise<void>;
   /** Every resource bound by redistance is construction-stable. Retain one
    * group per immutable pipeline instead of rebuilding 12–14 auto-layout
    * groups on the host for every accepted simulation step. */
@@ -379,7 +429,20 @@ export class WebGPUFineLevelSetRedistance {
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
     /** Exact delta/support publication produced by the topology transaction. */
-    readonly delta: FineLevelSetRedistanceDeltaAuthority) {
+    readonly delta: FineLevelSetRedistanceDeltaAuthority,
+    construction: FineLevelSetRedistanceConstructionOptions | boolean = {}) {
+    // Retain the boolean form while callers migrate to the named construction
+    // options; new reach-bounded call sites should always use the object form.
+    const constructionOptions = typeof construction === "boolean"
+      ? { deferPipelineCompilation: construction }
+      : construction;
+    const maximumRequiredJfaStride = constructionOptions.maximumRequiredJfaStride ?? 256;
+    if (!FINE_LEVELSET_JFA_LOOKUP_STRIDES.includes(maximumRequiredJfaStride as never)) {
+      throw new RangeError(
+        "Fine JFA maximumRequiredJfaStride must be a power of two in [1, 256]",
+      );
+    }
+    this.maximumRequiredJfaStride = maximumRequiredJfaStride;
     const pageCapacity = source.plan.maximumResidentBricks;
     if (delta.pageDeltaLayout.headerWords !== 16
       || delta.pageDeltaLayout.dirtyPagesOffsetWords !== 16 + 2 * pageCapacity
@@ -435,9 +498,105 @@ export class WebGPUFineLevelSetRedistance {
         ? fineLevelSetJFACPTB4AddressingWGSL : fineLevelSetJFACPTWGSL),
       `octree/fine-redistance-jfa/${jfaProfile.cacheKey}${this.b4Addressing ? "/b4-addressing" : ""}`,
     );
-    const jfaModule = device.createShaderModule({ label: "fine-levelset JFA closest-point transform",
-      code: jfaVariant.code });
-    const jfaPipeline = (entryPoint: string, stride?: number) => device.createComputePipeline({
+    this.pipelineActivity = jfaActivity;
+    // The shader source is identical, but the bundle's immutable pipeline
+    // catalog is not. Include its upper bound so a smaller earlier solver can
+    // never poison a later solver's cache or in-flight compilation.
+    this.pipelineCacheKey = `${jfaVariant.cacheKey}/maximum-jfa-stride-${maximumRequiredJfaStride}`;
+    this.pipelineShaderCode = jfaVariant.code;
+    if (constructionOptions.deferPipelineCompilation) return;
+    let deviceCache = fineLevelSetRedistancePipelineCache.get(device);
+    if (!deviceCache) {
+      deviceCache = new Map();
+      fineLevelSetRedistancePipelineCache.set(device, deviceCache);
+    }
+    let pipelines = deviceCache.get(this.pipelineCacheKey);
+    if (!pipelines) {
+      const jfaModule = device.createShaderModule({ label: "fine-levelset JFA closest-point transform",
+        code: jfaVariant.code });
+      const jfaPipeline = (entryPoint: string, stride?: number) => device.createComputePipeline({
+        label: `fine JFA-CPT ${entryPoint}${stride === undefined ? "" : ` stride ${stride}`}`,
+        layout: "auto",
+        compute: {
+          module: jfaModule,
+          entryPoint,
+          ...(stride === undefined ? {} : { constants: { JFA_STRIDE: stride } }),
+        },
+      });
+      const immutableStrides = FINE_LEVELSET_JFA_LOOKUP_STRIDES.filter(
+        (stride) => stride <= maximumRequiredJfaStride);
+      pipelines = {
+        publishSupportMaskPipeline: jfaPipeline("publishSupportPageMask"),
+        jfaRefreshClosestPointsPipeline: jfaPipeline("refreshClosestPointCodes"),
+        jfaRefreshDirtyClosestPointsPipeline: jfaPipeline("refreshDirtyClosestPointCodes"),
+        jfaSeedPipeline: jfaPipeline("seedClosestPoints"),
+        jfaABPipelines: new Map(immutableStrides.map((stride) =>
+          [stride, jfaActivity.registerPipeline(jfaPipeline("jumpFloodAToB", stride))])),
+        jfaBAPipelines: new Map(immutableStrides.map((stride) =>
+          [stride, jfaActivity.registerPipeline(jfaPipeline("jumpFloodBToA", stride))])),
+        jfaResolveAToBPipeline: jfaPipeline("resolveClosestPointsAToB"),
+        jfaResolveBToCanonicalPipeline: jfaPipeline("resolveClosestPointsBToCanonical"),
+        jfaResolveDirtyAToBPipeline: jfaPipeline("resolveDirtyClosestPointsAToB"),
+        jfaResolveDirtyBToCanonicalPipeline: jfaPipeline("resolveDirtyClosestPointsBToCanonical"),
+        jfaValidatePipeline: jfaPipeline("validateJFADistances"),
+        jfaPrepareWarmFallbackPipeline: jfaPipeline("prepareWarmFallbackDispatch"),
+        jfaResetFrontiersPipeline: jfaPipeline("resetJFAFrontiers"),
+        jfaClearFrontierMasksPipeline: jfaPipeline("clearJFAFrontierMasks"),
+        jfaMarkDirtyFrontierPipeline: jfaPipeline("markDirtyJFAFrontier"),
+        jfaBuildFrontierPipeline: jfaPipeline("buildJFAFrontierStage"),
+        jfaFinalizeFrontiersPipeline: jfaPipeline("finalizeJFAFrontierDispatches"),
+        jfaFinalizePipeline: jfaPipeline("finalizeJFADistances"),
+        jfaCommitPipeline: jfaPipeline("commitJFADistances"),
+      };
+      deviceCache.set(this.pipelineCacheKey, pipelines);
+    }
+    this.publishSupportMaskPipeline = pipelines.publishSupportMaskPipeline;
+    this.jfaRefreshClosestPointsPipeline = pipelines.jfaRefreshClosestPointsPipeline;
+    this.jfaRefreshDirtyClosestPointsPipeline = pipelines.jfaRefreshDirtyClosestPointsPipeline;
+    this.jfaSeedPipeline = pipelines.jfaSeedPipeline;
+    this.jfaABPipelines = pipelines.jfaABPipelines;
+    this.jfaBAPipelines = pipelines.jfaBAPipelines;
+    this.jfaResolveAToBPipeline = pipelines.jfaResolveAToBPipeline;
+    this.jfaResolveBToCanonicalPipeline = pipelines.jfaResolveBToCanonicalPipeline;
+    this.jfaResolveDirtyAToBPipeline = pipelines.jfaResolveDirtyAToBPipeline;
+    this.jfaResolveDirtyBToCanonicalPipeline = pipelines.jfaResolveDirtyBToCanonicalPipeline;
+    this.jfaValidatePipeline = pipelines.jfaValidatePipeline;
+    this.jfaPrepareWarmFallbackPipeline = pipelines.jfaPrepareWarmFallbackPipeline;
+    this.jfaResetFrontiersPipeline = pipelines.jfaResetFrontiersPipeline;
+    this.jfaClearFrontierMasksPipeline = pipelines.jfaClearFrontierMasksPipeline;
+    this.jfaMarkDirtyFrontierPipeline = pipelines.jfaMarkDirtyFrontierPipeline;
+    this.jfaBuildFrontierPipeline = pipelines.jfaBuildFrontierPipeline;
+    this.jfaFinalizeFrontiersPipeline = pipelines.jfaFinalizeFrontiersPipeline;
+    this.jfaFinalizePipeline = pipelines.jfaFinalizePipeline;
+    this.jfaCommitPipeline = pipelines.jfaCommitPipeline;
+  }
+
+  private installPipelineBundle(pipelines: FineLevelSetRedistancePipelineBundle): void {
+    this.publishSupportMaskPipeline = pipelines.publishSupportMaskPipeline;
+    this.jfaRefreshClosestPointsPipeline = pipelines.jfaRefreshClosestPointsPipeline;
+    this.jfaRefreshDirtyClosestPointsPipeline = pipelines.jfaRefreshDirtyClosestPointsPipeline;
+    this.jfaSeedPipeline = pipelines.jfaSeedPipeline;
+    this.jfaABPipelines = pipelines.jfaABPipelines;
+    this.jfaBAPipelines = pipelines.jfaBAPipelines;
+    this.jfaResolveAToBPipeline = pipelines.jfaResolveAToBPipeline;
+    this.jfaResolveBToCanonicalPipeline = pipelines.jfaResolveBToCanonicalPipeline;
+    this.jfaResolveDirtyAToBPipeline = pipelines.jfaResolveDirtyAToBPipeline;
+    this.jfaResolveDirtyBToCanonicalPipeline = pipelines.jfaResolveDirtyBToCanonicalPipeline;
+    this.jfaValidatePipeline = pipelines.jfaValidatePipeline;
+    this.jfaPrepareWarmFallbackPipeline = pipelines.jfaPrepareWarmFallbackPipeline;
+    this.jfaResetFrontiersPipeline = pipelines.jfaResetFrontiersPipeline;
+    this.jfaClearFrontierMasksPipeline = pipelines.jfaClearFrontierMasksPipeline;
+    this.jfaMarkDirtyFrontierPipeline = pipelines.jfaMarkDirtyFrontierPipeline;
+    this.jfaBuildFrontierPipeline = pipelines.jfaBuildFrontierPipeline;
+    this.jfaFinalizeFrontiersPipeline = pipelines.jfaFinalizeFrontiersPipeline;
+    this.jfaFinalizePipeline = pipelines.jfaFinalizePipeline;
+    this.jfaCommitPipeline = pipelines.jfaCommitPipeline;
+  }
+
+  private async compilePipelineBundleAsync(): Promise<FineLevelSetRedistancePipelineBundle> {
+    const jfaModule = this.device.createShaderModule({ label: "fine-levelset JFA closest-point transform",
+      code: this.pipelineShaderCode });
+    const jfaPipeline = (entryPoint: string, stride?: number) => this.device.createComputePipelineAsync({
       label: `fine JFA-CPT ${entryPoint}${stride === undefined ? "" : ` stride ${stride}`}`,
       layout: "auto",
       compute: {
@@ -446,31 +605,81 @@ export class WebGPUFineLevelSetRedistance {
         ...(stride === undefined ? {} : { constants: { JFA_STRIDE: stride } }),
       },
     });
-    this.publishSupportMaskPipeline = jfaPipeline("publishSupportPageMask");
-    this.jfaRefreshClosestPointsPipeline = jfaPipeline("refreshClosestPointCodes");
-    this.jfaRefreshDirtyClosestPointsPipeline = jfaPipeline("refreshDirtyClosestPointCodes");
-    this.jfaSeedPipeline = jfaPipeline("seedClosestPoints");
-    const immutableStrides = Array.from({ length: 9 }, (_, index) => 1 << index);
-    this.jfaABPipelines = new Map(immutableStrides.map((stride) =>
-      [stride, jfaActivity.registerPipeline(jfaPipeline("jumpFloodAToB", stride))]));
-    this.jfaBAPipelines = new Map(immutableStrides.map((stride) =>
-      [stride, jfaActivity.registerPipeline(jfaPipeline("jumpFloodBToA", stride))]));
-    this.jfaResolveAToBPipeline = jfaPipeline("resolveClosestPointsAToB");
-    this.jfaResolveBToCanonicalPipeline = jfaPipeline("resolveClosestPointsBToCanonical");
-    this.jfaResolveDirtyAToBPipeline = jfaPipeline("resolveDirtyClosestPointsAToB");
-    this.jfaResolveDirtyBToCanonicalPipeline = jfaPipeline("resolveDirtyClosestPointsBToCanonical");
-    this.jfaValidatePipeline = jfaPipeline("validateJFADistances");
-    this.jfaPrepareWarmFallbackPipeline = jfaPipeline("prepareWarmFallbackDispatch");
-    this.jfaResetFrontiersPipeline = jfaPipeline("resetJFAFrontiers");
-    this.jfaClearFrontierMasksPipeline = jfaPipeline("clearJFAFrontierMasks");
-    this.jfaMarkDirtyFrontierPipeline = jfaPipeline("markDirtyJFAFrontier");
-    this.jfaBuildFrontierPipeline = jfaPipeline("buildJFAFrontierStage");
-    this.jfaFinalizeFrontiersPipeline = jfaPipeline("finalizeJFAFrontierDispatches");
-    this.jfaFinalizePipeline = jfaPipeline("finalizeJFADistances");
-    this.jfaCommitPipeline = jfaPipeline("commitJFADistances");
+    const publishSupportMaskPipeline = await jfaPipeline("publishSupportPageMask");
+    const jfaRefreshClosestPointsPipeline = await jfaPipeline("refreshClosestPointCodes");
+    const jfaRefreshDirtyClosestPointsPipeline = await jfaPipeline("refreshDirtyClosestPointCodes");
+    const jfaSeedPipeline = await jfaPipeline("seedClosestPoints");
+    const immutableStrides = FINE_LEVELSET_JFA_LOOKUP_STRIDES.filter(
+      (stride) => stride <= this.maximumRequiredJfaStride);
+    const jfaABPipelines = new Map<number, GPUComputePipeline>();
+    for (const stride of immutableStrides) {
+      jfaABPipelines.set(stride, this.pipelineActivity.registerPipeline(
+        await jfaPipeline("jumpFloodAToB", stride)));
+    }
+    const jfaBAPipelines = new Map<number, GPUComputePipeline>();
+    for (const stride of immutableStrides) {
+      jfaBAPipelines.set(stride, this.pipelineActivity.registerPipeline(
+        await jfaPipeline("jumpFloodBToA", stride)));
+    }
+    return {
+      publishSupportMaskPipeline,
+      jfaRefreshClosestPointsPipeline,
+      jfaRefreshDirtyClosestPointsPipeline,
+      jfaSeedPipeline,
+      jfaABPipelines,
+      jfaBAPipelines,
+      jfaResolveAToBPipeline: await jfaPipeline("resolveClosestPointsAToB"),
+      jfaResolveBToCanonicalPipeline: await jfaPipeline("resolveClosestPointsBToCanonical"),
+      jfaResolveDirtyAToBPipeline: await jfaPipeline("resolveDirtyClosestPointsAToB"),
+      jfaResolveDirtyBToCanonicalPipeline: await jfaPipeline("resolveDirtyClosestPointsBToCanonical"),
+      jfaValidatePipeline: await jfaPipeline("validateJFADistances"),
+      jfaPrepareWarmFallbackPipeline: await jfaPipeline("prepareWarmFallbackDispatch"),
+      jfaResetFrontiersPipeline: await jfaPipeline("resetJFAFrontiers"),
+      jfaClearFrontierMasksPipeline: await jfaPipeline("clearJFAFrontierMasks"),
+      jfaMarkDirtyFrontierPipeline: await jfaPipeline("markDirtyJFAFrontier"),
+      jfaBuildFrontierPipeline: await jfaPipeline("buildJFAFrontierStage"),
+      jfaFinalizeFrontiersPipeline: await jfaPipeline("finalizeJFAFrontierDispatches"),
+      jfaFinalizePipeline: await jfaPipeline("finalizeJFADistances"),
+      jfaCommitPipeline: await jfaPipeline("commitJFADistances"),
+    };
+  }
+
+  initializePipelines(): Promise<void> {
+    if (this.publishSupportMaskPipeline) return Promise.resolve();
+    if (this.pipelineInitialization) return this.pipelineInitialization;
+    this.pipelineInitialization = (async () => {
+      let deviceCache = fineLevelSetRedistancePipelineCache.get(this.device);
+      if (!deviceCache) {
+        deviceCache = new Map();
+        fineLevelSetRedistancePipelineCache.set(this.device, deviceCache);
+      }
+      let pipelines = deviceCache.get(this.pipelineCacheKey);
+      if (!pipelines) {
+        let compilations = fineLevelSetRedistancePipelineCompilations.get(this.device);
+        if (!compilations) {
+          compilations = new Map();
+          fineLevelSetRedistancePipelineCompilations.set(this.device, compilations);
+        }
+        let compilation = compilations.get(this.pipelineCacheKey);
+        if (!compilation) {
+          compilation = this.compilePipelineBundleAsync().then((compiled) => {
+            const published = deviceCache!.get(this.pipelineCacheKey) ?? compiled;
+            deviceCache!.set(this.pipelineCacheKey, published);
+            return published;
+          }).finally(() => { compilations!.delete(this.pipelineCacheKey); });
+          compilations.set(this.pipelineCacheKey, compilation);
+        }
+        pipelines = await compilation;
+      }
+      this.installPipelineBundle(pipelines);
+    })();
+    return this.pipelineInitialization;
   }
 
   encode(broker: PassBroker, options: FineLevelSetGPURedistanceOptions): void {
+    if (!this.publishSupportMaskPipeline) {
+      throw new Error("Fine redistance pipelines are not initialized");
+    }
     if ((this.source.plan.fineFactor !== 1
       && this.source.plan.fineFactor !== 4
       && this.source.plan.fineFactor !== 8)
@@ -523,6 +732,11 @@ export class WebGPUFineLevelSetRedistance {
     const strides = planFineLevelSetJFAStrides(
       bandCells, maximumDisplacementFineCells, warmStart ? 2 : 5);
     if (strides.length > FINE_LEVELSET_JFA_MAX_PASSES) throw new RangeError("Fine JFA pass budget exceeded");
+    if (strides.some((stride) => stride > this.maximumRequiredJfaStride)) {
+      throw new RangeError(
+        `Fine JFA schedule requires stride ${strides[0]}, above the immutable compiled maximum ${this.maximumRequiredJfaStride}`,
+      );
+    }
     // Retained so provenance diagnostics compare the observed hops against the
     // ladder this encode actually emitted, rather than against a re-derivation
     // that could drift from the warm/cold arguments chosen here.
@@ -808,7 +1022,7 @@ ${fineLevelSetLinearWorkgroupWGSL}
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;const NEGATIVE:u32=16u;const LARGE:f32=3.402823e38;
 // Direction seven is the nonzero cache sentinel for a quantized zero
 // fraction; materialization treats every direction >= 6 as the sample centre.
-const SAMPLE_FLAG_BITS:u32=5u;const CP_FRACTION_MASK:u32=0x00ffffffu;const CP_FRACTION_SCALE:f32=16777215.;
+const SAMPLE_FLAG_BITS:u32=5u;const CP_FRACTION_MASK:u32=0x00ffffffu;const CP_FRACTION_SCALE:f32=16777216.;
 const STALE:u32=4u;const NONFINITE:u32=8u;
 override JFA_STRIDE:u32=1u;
 ${fineLevelSetJFATapLookupWGSL}
@@ -925,7 +1139,7 @@ fn carriedSeed(index:u32)->u32{
 // toward it — the surface of a film separating from the lid stays
 // representable even though every in-lattice neighbor is still liquid.
 // Deeper liquid (center <= -fineWidth) wets the wall and seeds nothing.
-fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=bitcast<f32>(phi[index]);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);var other=0.;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){if(p.closed==0u||(p.openTop!=0u&&direction==3u)){continue;}other=center+p.fineWidth;}else{let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}other=bitcast<f32>(phi[neighbor]);}if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}}if(bestDirection==INVALID){return INVALID;}let quantized=u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE));if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
+fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=bitcast<f32>(phi[index]);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);var other=0.;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){if(p.closed==0u||(p.openTop!=0u&&direction==3u)){continue;}other=center+p.fineWidth;}else{let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}other=bitcast<f32>(phi[neighbor]);}if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}}if(bestDirection==INVALID){return INVALID;}let quantized=min(u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE)),CP_FRACTION_MASK);if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
 fn hasCachedClosestPoint(index:u32)->bool{return (flags[index]>>SAMPLE_FLAG_BITS)!=0u;}
 @compute @workgroup_size(64)fn refreshClosestPointCodes(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)nw:vec3u){
  let id=activePage(wid,nw);if(id==INVALID||lid>=p.samplesPerBrick){return;}let index=id*p.samplesPerBrick+lid;let brick=unpackBrick(metadata[id*10u+1u]);let q=brick*p.brickResolution+localCoord(lid);let persistent=flags[index]&((1u<<SAMPLE_FLAG_BITS)-1u);flags[index]=persistent;if(any(q>=p.sampleDims)||!finite(bitcast<f32>(phi[index]))){return;}let closest=seedClosestPointCode(q,index);if(closest!=INVALID){flags[index]=persistent|(closest<<SAMPLE_FLAG_BITS);}

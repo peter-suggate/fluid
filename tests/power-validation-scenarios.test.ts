@@ -207,6 +207,16 @@ test("authored validation profiles share the leaf-32 production shell", () => {
 
   const ceiling = planPreset("ceiling-slab-drop");
   assert.deepEqual(ceiling.dimensions, [24, 16, 24]);
+  const ceilingScene = getScenePreset("ceiling-slab-drop").create();
+  const globalFineSpacing = Math.min(
+    ceilingScene.container.width_m / ceiling.dimensions[0],
+    ceilingScene.container.height_m / ceiling.dimensions[1],
+    ceilingScene.container.depth_m / ceiling.dimensions[2],
+  );
+  assert.ok(ceiling.dimensions.every((cells, axis) =>
+    cells * globalFineSpacing >= [ceilingScene.container.width_m,
+      ceilingScene.container.height_m, ceilingScene.container.depth_m][axis]!),
+  "the lid-flush analytic seed must remain within every global-fine domain extent");
   assert.equal(ceiling.values.interfaceRefinementBandCells, 1);
   assert.equal(ceiling.values.globalFineLevelSetFactor, "4");
   assert.equal(ceiling.values.maximumLeafSize, "32");

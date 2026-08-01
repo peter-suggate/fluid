@@ -2,6 +2,7 @@ import type { SceneEvidenceCollectorRegistry } from "./scene-evidence-collector-
 import { freeFallContactAttribution, freeFallOracle } from "./free-fall-contact-evidence";
 import { auditHoseJetDrift } from "./webgpu-hose-drift";
 import { inflowOutletCenter } from "../lib/inflow-boundary";
+import { measureFluidSymmetry } from "../lib/fluid-symmetry-diagnostic";
 
 export const sceneEvidenceCollectorRegistry: SceneEvidenceCollectorRegistry = {
   "free-fall-contact-attribution": {
@@ -43,6 +44,41 @@ export const sceneEvidenceCollectorRegistry: SceneEvidenceCollectorRegistry = {
     collect: ({ volumeField, velocityField, compactVelocityEvidence }) => {
       if (!velocityField) throw new Error("collocated velocity requires a velocity field");
       return { field: velocityField, volume: volumeField, compactRaster: compactVelocityEvidence };
+    },
+  },
+  "fluid-symmetry": {
+    id: "fluid-symmetry",
+    phase: "checkpoint",
+    collect: ({ grid, time_s, volumeField, velocityField, pressureField,
+      pressureRhsField, pressureDiagonalField, pressureSection63DiagonalField, pressureSection63CaseIdField,
+      pressureInitialResidualField,
+      pressureInitialPreconditionedField, pressureInitialPreconditionedImageField,
+      pressurePreconditionerPreSmoothedField, pressurePreconditionerInnerResidualField,
+      pressurePreconditionerZeroSmoothedField, pressurePreconditionerFirstOperatorImageField,
+      pressurePreconditionerFirstSmoothedField,
+      pressurePreconditionerInnerCorrectionField, pressurePreconditionerPostCorrectedField,
+      topologyField }) => {
+      if (!velocityField || !pressureField || !pressureRhsField || !pressureDiagonalField || !topologyField) {
+        throw new Error("fluid symmetry requires compact velocity, pressure operator, and topology evidence");
+      }
+      return measureFluidSymmetry({
+        time_s, grid, volume: volumeField, velocity: velocityField,
+        pressure: pressureField, rhs: pressureRhsField, diagonal: pressureDiagonalField,
+        section63Diagonal: pressureSection63DiagonalField,
+        section63CaseId: pressureSection63CaseIdField,
+        initialResidual: pressureInitialResidualField,
+        initialPreconditioned: pressureInitialPreconditionedField,
+        initialPreconditionedImage: pressureInitialPreconditionedImageField,
+        preconditionerPreSmoothed: pressurePreconditionerPreSmoothedField,
+        preconditionerZeroSmoothed: pressurePreconditionerZeroSmoothedField,
+        preconditionerFirstOperatorImage: pressurePreconditionerFirstOperatorImageField,
+        preconditionerFirstSmoothed: pressurePreconditionerFirstSmoothedField,
+        preconditionerInnerResidual: pressurePreconditionerInnerResidualField,
+        preconditionerInnerCorrection: pressurePreconditionerInnerCorrectionField,
+        preconditionerPostCorrected: pressurePreconditionerPostCorrectedField,
+        topology: topologyField,
+        wallLiquidThreshold: 1e-4,
+      });
     },
   },
 };

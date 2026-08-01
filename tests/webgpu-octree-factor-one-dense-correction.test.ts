@@ -56,7 +56,10 @@ test("dense M1 kernels preserve native/ghost semantics and direct aggregate adjo
     "one occupied-index dispatch must replace every level clear and the accepted-row seed");
   assert.match(factorOneDenseCorrectionWGSL,
     /let directions=array<vec3i,6>\(vec3i\(1,0,0\),vec3i\(-1,0,0\),vec3i\(0,1,0\),vec3i\(0,-1,0\),vec3i\(0,0,1\),vec3i\(0,0,-1\)\)/,
-    "the six-face M1 expression must retain its established floating-point order");
+    "the dense M1 expression must retain all six face terms");
+  assert.match(factorOneDenseCorrectionWGSL,
+    /var terms:array<f32,6>[\s\S]*terms\[k\]=c\*loadf\(sourceBase,n\)[\s\S]*sorted6Sum\(terms\)/,
+    "the six face terms must fold independently of horizontal-axis permutation");
   assert.match(factorOneDenseCorrectionWGSL,
     /let c=f32\(1u<<l\)\*bitcast<f32>\(p\.numerics\.y\)/,
     "each present face uses the exact level-scaled finest-cell coefficient");
@@ -67,8 +70,8 @@ test("dense M1 kernels preserve native/ghost semantics and direct aggregate adjo
     /residual=select\(-product,loadf\(p\.offsets0\.w,fine\)-product,\(flag\(fine\)&GHOST\)==0u\)/,
     "ghost restriction contributes -A*x while native/MG cells contribute rhs-A*x");
   assert.match(factorOneDenseCorrectionWGSL,
-    /for\(var child=0u;child<8u;child\+=1u\)\{sum\+=childResidual\[child\]/,
-    "wide restriction must fold child bits in deterministic x-fast order");
+    /values\[child\]=childResidual\[child\][\s\S]*sorted8Sum\(values\)/,
+    "wide restriction must fold child residuals independently of D4 child permutation");
   assert.match(factorOneDenseCorrectionWGSL,
     /fn smoothOne\(g:vec3u,src:u32,dst:u32,phase:u32\)\{let i=vectorItem\(g\);let l=level\(\);if\(i<volume\(l\)[\s\S]*let s=levelBase\(l\)\+i;if\(flag\(s\)!=0u\)/,
     "wide smoothing must scan the dense x-fast volume and reject empty flags");

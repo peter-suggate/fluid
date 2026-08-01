@@ -36,6 +36,58 @@ test("GPU initialization rejects duplicate and unsatisfied task dependencies", a
   await assert.rejects(() => dependent.run([{ id: "late", phase: "warmup", label: "Late", dependencies: ["missing"], run() {} }]), /ran before missing/);
 });
 
+test("GPU initialization tasks can report progress inside one pipeline family", async () => {
+  const snapshots: Array<{ taskId: string; label: string; completed: number; total: number }> = [];
+  const runner = new GPUInitializationTaskRunner(
+    (snapshot) => snapshots.push(snapshot), new AbortController().signal);
+
+  await runner.run([{
+    id: "dynamics", phase: "solver-pipelines", label: "Compile dynamics",
+    run: async (_signal, report) => {
+      report?.("Compile dynamics: prepare (0/2)");
+      await Promise.resolve();
+      report?.("Compile dynamics: project (1/2)");
+    },
+  }]);
+
+  assert.ok(snapshots.some(({ label, completed, total }) =>
+    label === "Compile dynamics: prepare (0/2)" && completed === 0 && total === 1));
+  assert.ok(snapshots.some(({ label, completed, total }) =>
+    label === "Compile dynamics: project (1/2)" && completed === 0 && total === 1));
+});
+
+test("GPU initialization paints phase changes and batches same-phase work", async () => {
+  const originalAnimationFrame = globalThis.requestAnimationFrame;
+  let animationFrames = 0;
+  globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    animationFrames += 1;
+    callback(0);
+    return animationFrames;
+  }) as typeof requestAnimationFrame;
+  try {
+    const runner = new GPUInitializationTaskRunner(() => {}, new AbortController().signal);
+    await runner.run(Array.from({ length: 20 }, (_, index) => ({
+      id: `pipeline-${index}`,
+      phase: "solver-pipelines" as const,
+      label: `Pipeline ${index}`,
+      run: async () => {},
+    })));
+    assert.equal(animationFrames, 3, "twenty tiny pipeline tasks should paint in three bounded batches");
+
+    await runner.run([{ id: "upload", phase: "upload", label: "Upload", run() {} }]);
+    assert.equal(animationFrames, 4, "a new phase must paint before it starts");
+
+    await runner.run([{
+      id: "forced-paint", phase: "upload", label: "Large upload",
+      paintBeforeRun: true, run() {},
+    }]);
+    assert.equal(animationFrames, 5, "heavy synchronous tasks can request an immediate paint");
+  } finally {
+    if (originalAnimationFrame) globalThis.requestAnimationFrame = originalAnimationFrame;
+    else delete (globalThis as { requestAnimationFrame?: typeof requestAnimationFrame }).requestAnimationFrame;
+  }
+});
+
 test("power-octree method values are structural after unsupported spray is removed", () => {
   const config = { methodId: "octree", quality: "balanced" as const, values: { maximumLeafSize: "16" } };
   assert.deepEqual(structuralMethodValues(config), { maximumLeafSize: "16" });
@@ -49,11 +101,26 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
   const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
   const fluidLab = readFileSync(new URL("../components/FluidLab.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(uniform, /projectionPipelineCount|secondaryPipelines/);
-  assert.match(runner, /requestAnimationFrame\(\(\) => setTimeout\(resolve, 0\)\)/, "task work must begin after the reported stage can paint");
+  assert.match(runner, /requestAnimationFrame\(\(\) => setTimeout\(resolve, 0\)\)/, "batched work must begin after the reported stage can paint");
+  assert.match(runner, /task\.phase !== this\.lastPaintedPhase[\s\S]*this\.tasksSincePaint >= TASKS_PER_PAINT/,
+    "phase transitions and bounded same-phase batches must remain visible");
   assert.match(uniform, /initializationTasks\(\)/);
   assert.match(uniform, /uniformPipelineCache/, "structural rebuilds must reuse immutable programs");
   assert.match(octree, /initializationTasks\(\): GPUInitializationTask\[\]/);
   assert.match(octree, /octreePipelineCache/);
+  for (const family of ["spgrid", "fine-topology", "fine-redistance", "air-support", "structured-dynamics"]) {
+    assert.match(octree, new RegExp(`id: "octree\\.power-pipelines\\.${family}"`),
+      `${family} must compile after buffer-only power-authority allocation`);
+  }
+  assert.match(octree, /deferPipelineCompilation: this\.deferPipelineCompilation[\s\S]*this\.pressureExecutor === "persistent"/,
+    "persistent SPGrid setup must defer its pipeline family in the async UI path");
+  assert.match(octree, /this\.airVelocitySupport = new WebGPUOctreeAirVelocitySupportProducer\([\s\S]*?this\.deferPipelineCompilation\);/,
+    "air support must preserve allocation while deferring its pipeline family");
+  assert.match(octree, /this\.structuredDynamics = new WebGPUStructuredVelocityDynamics\([\s\S]*?this\.deferPipelineCompilation\);/,
+    "structured dynamics must preserve allocation while deferring its pipeline family");
+  assert.match(octree,
+    /Compile structured dynamics: \$\{entryPoint\} \(\$\{completed\}\/\$\{total\}\)/,
+    "the UI must identify the exact structured program currently owning the driver");
   assert.match(octree, /for \(let size = Math\.min\(8, this\.maxLeafSize\); size >= 2;/,
     "startup should warm only regular refinement variants the immutable solver can dispatch");
   assert.match(octree, /for \(let size = this\.maxLeafSize; size >= 16;/,

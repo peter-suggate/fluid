@@ -465,7 +465,8 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   assert.doesNotMatch(march, /tagForIdentity|faceRowForTag|octreeOwnerPageLookup|catalogNeighbor|caseHeader/,
     "the face march must be a pure indexed gather over published adjacency");
   assert.match(shader,
-    /fnbetterFace\(candidate:vec4u,best:vec4u\).*candidateDistanceSquared=bitcast<f32>\(candidate\.y\).*candidateDistanceSquared<bestDistanceSquared.*candidateDistanceSquared==bestDistanceSquared&&candidate\.z<best\.z/s);
+    /fnbetterFace\(item:u32,candidate:vec4u,best:vec4u\).*candidateDistanceSquared=bitcast<f32>\(candidate\.y\).*candidateMagnitude=abs\(bitcast<f32>\(candidate\.x\)\).*candidateDistanceSquared==bestDistanceSquared.*candidateMagnitude<bestMagnitude/s,
+    "equidistant closest faces must first use reflection-invariant normal-speed magnitude");
   // The carrier metric is the true Euclidean distance to the ORIGINAL seed
   // patch (candidate.z, preserved verbatim through every copy) — the
   // closest-point-transform ranking. Accumulating per-hop path length made
@@ -478,10 +479,13 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   // changed, from re-resolving the row's cell and running coord() to reading
   // the origin/extent resolveAirSupportFaceAdjacency published for that row.
   assert.match(march,
-    /delta=center-faceCenter\(candidate\.z\);letdistanceSquared=dot\(delta,delta\)/,
+    /distanceSquared=faceDistanceSquared\(item,candidate\.z\)/,
     "the relaxation must rank sources by squared Euclidean distance to the original seed, not accumulated hop length");
   assert.match(shader, /fnrowSeedDistance.*returnsqrt\(bestSquared\)/s,
     "physical distance is recovered once per row for the detached-air gravity ramp");
+  assert.match(shader,
+    /fnrowSeedDistance\(faceRow:u32\)->f32[\s\S]*ownedFaceQuadrant\(faceRow,axis,quadrant\)[\s\S]*adjacencyNegative\(faceRow,axis,quadrant\)[\s\S]*ownedFaceQuadrant\(negativeRow,axis,negativeQuadrant\)/,
+    "the scalar seed distance must include both incident sides because reflection reverses face ownership");
   assert.doesNotMatch(march, /length\(/,
     "the inner candidate scan must not pay a square root for an ordering-only metric");
   assert.match(shader,
@@ -493,12 +497,9 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   assert.match(shader,
     /letcell=faceCell\(faceRow\);if\(cell\.x==INVALID\)\{failTopology\(7u,faceRow\);return;\}setAdjacencyGeometry\(faceRow,cell\)/,
     "face-row geometry must be resolved by the adjacency publication, from the same faceCell the reader used to call");
-  // `center` is the marching patch's own centre and the published face count,
-  // read once per lane. They were previously re-derived on each of up to 120
-  // candidates, which is where Section 5's per-lane cost went.
-  assert.match(march,
-    /letcenter=faceCenter\(item\);/,
-    "the marching patch's own centre is loop-invariant and must leave the candidate scan");
+  // The old floating-point centre is not recomputed in the candidate scan;
+  // exact quarter-grid distance is delegated to faceDistanceSquared.
+  assert.doesNotMatch(march, /letcenter=faceCenter\(item\);/);
   const candidateScan = march.slice(march.indexOf("for(varlocalFace"),
     march.indexOf("letchanged=any(best!=current)"));
   assert.ok(candidateScan.length > 0);
@@ -537,11 +538,54 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   assert.doesNotMatch(march, /sum\+=|weight\+=/,
     "marching copies one deterministic closest source and never averages");
   assert.match(shader, /letcentroid=anchorCenter\+f32\(cell\.y\)\*inverseTransform\(slot\.areaCentroid\.yzw,transform\)/);
-  assert.match(shader, /regularVectorAt\(faceRow,centroid\)[\s\S]*dot\(interpolated\.xyz,normal\)/);
-  assert.match(shader, /positive\.w==0u&&u32\(origin\[axis\]\)\+cell\.y==p\.dimensions\[axis\][\s\S]*p\.closedBoundaryMask/,
-    "positive closed walls supply only their exact stationary-solid normal sample");
-  assert.match(shader, /negativeRow!=INVALID[\s\S]*u32\(origin\[axis\]\)==0u&&\(p\.closedBoundaryMask/,
-    "negative closed walls supply the matching exact stationary-solid sample");
+  assert.match(shader, /regularVectorAt\(faceRow,centroid\)[\s\S]*canonicalAirSupportDot\(interpolated\.xyz,normal\)/);
+  assert.match(shader,
+    /fncanonicalAirSupportSum\(values:array<f32,31>,count:u32\)[\s\S]*termsX\[local\]=term\.x[\s\S]*canonicalAirSupportSum\(termsX,header\.y\)/,
+    "reflected catalog incidences must reconstruct one exact support vector");
+  assert.match(shader,
+    /lett=round\(clamp\(\(point\[axis\]-origin\[axis\]\)\/f32\(cell\.y\),0\.,1\.\)\*65536\.\)\/65536\.;terms\[termCount\]=canonicalAirSupportPair/,
+    "opposite cell sides must use complementary dyadic interpolation weights");
+  assert.match(shader,
+    /if\(coordinate<\.5\)\{fixedMask\|=bit;\}elseif\(coordinate>\.5\)[\s\S]*for\(varquadrant=0u;quadrant<4u;quadrant\+=1u\)[\s\S]*canonicalAirSupportSum\(terms,termCount\)\/f32\(termCount\)/,
+    "a power centroid on a transverse patch seam must average every incident quadrant");
+  assert.match(shader,
+    /fncanonicalSeedOffset\(item:u32,seed:u32\)->vec3i[\s\S]*powerTransformVector\(faceCenterQuarter\(seed\)-faceCenterQuarter\(item\),faceCell\(faceRow\)\.w&63u\)[\s\S]*fnbetterFace\(item:u32,candidate:vec4u,best:vec4u\)/,
+    "equal-distance closest faces must be ordered in the destination's canonical frame, never by absolute row id");
+  assert.match(shader,
+    /fnfaceDistanceSquared\(item:u32,seed:u32\)->f32[\s\S]*faceCenterQuarter\(item\)-faceCenterQuarter\(seed\)[\s\S]*return\.0625\*f32\(squared\)[\s\S]*distanceSquared=faceDistanceSquared\(item,candidate\.z\)/,
+    "reflected closest-face distances must be exact quarter-grid integers before conversion to f32");
+  assert.match(shader,
+    /positive\.w==0u&&u32\(origin\[axis\]\)\+cell\.y==p\.dimensions\[axis\][\s\S]*p\.closedBoundaryMask/,
+    "a positive closed wall supplies stationary solid only when the air march has no carrier");
+  assert.match(shader,
+    /else\{negative=incidentFaces\[[\s\S]*if\(negative\.w==0u&&u32\(origin\[axis\]\)==0u&&\(p\.closedBoundaryMask/,
+    "the negative closed wall must consume its cached carrier before the same stationary fallback");
+  assert.match(shader,
+    /fnclosestSeedFaceAt\(faceRow:u32,axis:u32,quadrant:u32,positive:bool\)[\s\S]*signedFaceCenterQuarter[\s\S]*bitcast<f32>\(candidate\.y\)!=0\.[\s\S]*fncompleteAirSupportIncidentFaces[\s\S]*s\(50u\)!=0u[\s\S]*completion=faceA\[retained\.z\][\s\S]*completion=closestSeedFaceAt\(faceRow,axis,quadrant,false\)[\s\S]*else\{negative=incidentFaces\[/,
+    "a missing negative owner must cache its closest seeded ordinary face once per publication");
+});
+
+test("closed-wall air reconstruction is exactly reflection odd after marched carriers arrive", () => {
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  const regular = shader.slice(shader.indexOf("fnregularVectorAt"),
+    shader.indexOf("fnrowSeedDistance"));
+  assert.match(regular,
+    /if\(positive\.w==0u&&u32\(origin\[axis\]\)\+cell\.y==p\.dimensions\[axis\].*positive=vec4u\(bitcast<u32>\(0\.\),0u,INVALID,1u\)/s);
+  assert.match(regular,
+    /negative=incidentFaces\[.*if\(negative\.w==0u&&u32\(origin\[axis\]\)==0u/s);
+  const completion = shader.slice(shader.indexOf("fncompleteAirSupportIncidentFaces"),
+    shader.indexOf("fnextendFace"));
+  assert.match(completion, /if\(adjacencyNegative\(faceRow,axis,quadrant\)==INVALID\)\{/);
+  assert.doesNotMatch(completion, /closedBoundaryMask/,
+    "closed-wall air needs the same missing-side carrier cache as interior air");
+
+  // Case 0 reconstructs the two axis faces with coefficients -1/2 and +1/2.
+  // Both domain signs consume the reflected marched value; zero remains only
+  // the symmetric no-carrier fallback.
+  const interior = Math.fround(2.7745232582092285);
+  const negativeWallCell = Math.fround(0.5 * Math.fround(interior + interior));
+  const positiveWallCell = Math.fround(0.5 * Math.fround(-interior - interior));
+  assert.equal(positiveWallCell, Math.fround(-negativeWallCell));
 });
 
 test("direct air rows and support identities share one fail-closed face transaction", () => {
@@ -640,6 +684,27 @@ test("host defaults to the exact changed frontier and retains the preceding fixe
     "the unsafe singleton-folding no-go must remain documented beside the retained boundary");
 });
 
+test("air-support pipelines can be deferred without parallel driver pressure", () => {
+  const host = readFileSync(new URL("../lib/webgpu-octree-air-velocity-support-gpu.ts", import.meta.url), "utf8");
+  const hostClass = host.slice(host.indexOf("export class WebGPUOctreeAirVelocitySupportProducer"),
+    host.indexOf("export const octreeAirVelocitySupportPublicationWGSL"));
+  assert.match(hostClass,
+    /constructor\([\s\S]*deferPipelineCompilation = false\)[\s\S]*if \(!deferPipelineCompilation\) this\.createPipelinesSync\(\)/,
+    "existing direct construction must retain synchronous pipeline creation by default");
+  const initialize = hostClass.slice(hostClass.indexOf("async initializePipelines()"),
+    hostClass.indexOf("private parameterData("));
+  assert.match(initialize,
+    /for \(const entryPoint of this\.pipelineEntryPoints\(\)\) \{[\s\S]*await this\.device\.createComputePipelineAsync/,
+    "air-support compilation must await one auto-layout pipeline at a time");
+  assert.doesNotMatch(initialize, /Promise\.all/,
+    "air-support compilation must not fan out driver work");
+  assert.match(initialize, /this\.assignPipelineState\(pipelines\)/,
+    "pipeline-dependent bind groups must be built only after the complete compile set");
+  assert.match(hostClass,
+    /this\.pipelines = Object\.freeze\(pipelines\);[\s\S]*this\.groups = groups;[\s\S]*this\.pipelinesInitialized = true/,
+    "encode-visible pipeline and binding state must publish atomically at initialization completion");
+});
+
 test("entry bind sets exactly match the reachable staging transaction", () => {
   assert.deepEqual(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS, {
     beginAirSupportPublication: [0,1,3,7,8,9,10,29],
@@ -666,14 +731,14 @@ test("entry bind sets exactly match the reachable staging transaction", () => {
     refreshRetainedAirSupportFaceValues: [7,19,20],
     finalizeRetainedAirSupportMarchSchedule: [0,7,29],
     expandAirSupportChangedFrontier: [0,7,23,29],
-    relaxAirSupportChangedFrontier: [0,7,19,20,23,29],
+    relaxAirSupportChangedFrontier: [0,2,7,8,19,20,23,29],
     commitAirSupportChangedFrontier: [0,7,19,20,29],
     advanceAirSupportChangedFrontier: [0,7,29],
-    marchAirSupportFacesChangedFrontier: [0,7,19,20,23,29],
-    extendAirSupportFacesAtoB: [0,7,19,20,23],
-    extendAirSupportFacesBtoA: [0,7,19,20,23],
+    marchAirSupportFacesChangedFrontier: [0,2,7,8,19,20,23,29],
+    extendAirSupportFacesAtoB: [0,2,7,8,19,20,23],
+    extendAirSupportFacesBtoA: [0,2,7,8,19,20,23],
     advanceAirSupportMarchWave: [7],
-    marchAirSupportFacesToFixedPoint: [0,7,19,20,23],
+    marchAirSupportFacesToFixedPoint: [0,2,7,8,19,20,23],
     reconstructAirSupportVectors: [0,2,7,8,15,16,19,22,23,24],
     finalizeAirSupportMetadata: [0,2,7,8,9,22],
     commitAirSupportDirectRows: [0,2,7,17,22],

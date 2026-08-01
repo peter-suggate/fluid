@@ -108,12 +108,24 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
     "the snapshot must not retain a full-capacity leaf loop");
 });
 
+test("cold bootstrap samples the geometric centre of even-sized leaves symmetrically", () => {
+  assert.match(octreeFineSeedAdapterShader,
+    /let lattice=point-vec3f\(0\.5\);let base=vec3i\(floor\(lattice\)\);let t=fract\(lattice\)/,
+    "the dense cell-centred field must be interpolated at non-cell-centred leaf positions");
+  assert.match(octreeFineSeedAdapterShader,
+    /centrePhi=bootstrapPhi\(centre\)/,
+    "the affine value and the affine evaluation origin must name the same geometric point");
+  assert.doesNotMatch(octreeFineSeedAdapterShader,
+    /sampleCell=vec3i\(clamp\(vec3u\(centre\)/,
+    "even leaf centres must not be rounded toward the positive lattice direction");
+});
+
 test("fine-seed candidates cut over from analytic t=0 to compact coarse phi", () => {
   assert.match(octreeFineSeedAdapterShader, /let coarse=coarseRowValid\(row\)/);
   assert.match(octreeFineSeedAdapterShader, /if\(!coarse&&params\.selection\.z==0u\)\{return;\}/,
     "a missing recurring coarse publication preserves the prior compact leaf generation");
   assert.match(octreeFineSeedAdapterShader,
-    /if\(coarse\)\{let sample=coarsePhi\[row\];centrePhi=sample\.phi;minimumPhi=sample\.minimumPhi;maximumPhi=sample\.maximumPhi;\}else\{let sampleCell=[\s\S]*bootstrapPhi/,
+    /if\(coarse\)\{let sample=coarsePhi\[row\];centrePhi=sample\.phi;minimumPhi=sample\.minimumPhi;maximumPhi=sample\.maximumPhi;\}else\{centrePhi=bootstrapPhi\(centre\);gradient=[\s\S]*bootstrapPhi/,
     "bootstrap phi is a cold-start seed only; recurring classification comes from compact coarse phi");
   // The cold-start seed dispatches over both bootstrap authorities: scenes
   // with no closed-form surface read the imported dense level set instead.
@@ -129,7 +141,7 @@ test("fine-seed candidates cut over from analytic t=0 to compact coarse phi", ()
   assert.equal(octreeFineSeedAdapterShader.match(/textureLoad/g)?.length, 1,
     "the dense bootstrap level set has exactly one sample site");
   assert.match(octreeFineSeedAdapterShader,
-    /fn bootstrapTexturePhi\(point:vec3f\)->f32\{\s*return textureLoad\(/,
+    /fn bootstrapTexturePhi\(point:vec3f\)->f32\{[\s\S]*value\+=weight\*textureLoad\(/,
     "the only textureLoad belongs to the mode-gated cold-start helper");
 });
 

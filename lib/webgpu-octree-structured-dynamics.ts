@@ -19,6 +19,17 @@ import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 
 const ROW_CLASSES = [0, 1, 2, 3] as const;
 const FAMILY_CLASSES = [5, 6, 7, 8] as const;
+type StructuredDynamicsPipelineBundle = Readonly<Record<string, GPUComputePipeline>>;
+type StructuredDynamicsPipelineProgress =
+  (entryPoint: string, completed: number, total: number) => void;
+interface StructuredDynamicsPipelineCompilation {
+  readonly promise: Promise<StructuredDynamicsPipelineBundle>;
+  readonly listeners: Set<StructuredDynamicsPipelineProgress>;
+}
+const structuredDynamicsPipelineCache = new WeakMap<GPUDevice,
+  Map<string, StructuredDynamicsPipelineBundle>>();
+const structuredDynamicsPipelineCompilations = new WeakMap<GPUDevice,
+  Map<string, StructuredDynamicsPipelineCompilation>>();
 /** Class four is unused by recurring dynamics, so prepare reuses its indirect
  * record for one workgroup per class-7/8 boundary face. */
 export const STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES = 4 * 12;
@@ -265,6 +276,9 @@ export interface StructuredDynamicsResources {
   /** Authoritative GPU rigid state; the same 32-float-per-body records the
    * boundary producer samples for apertures and solid normal velocities. */
   readonly rigidBodies: GPUBuffer;
+  /** Construction-stable active roster. Zero omits the four body-impulse
+   * pipelines; the scene rebuilds the solver when this roster changes. */
+  readonly bodyCount: number;
   /** Resident twelve-i32-per-body fixed-point exchange the GPU rigid
    * integrator consumes. Slots 0..2 carry the linear impulse and 3..5 the
    * angular impulse, both scaled by 1e6; see `gpuRigidBodyShader`. */
@@ -306,22 +320,32 @@ export class WebGPUStructuredVelocityDynamics {
   readonly catalogOffsetsWords: readonly [number, number, number, number, number];
   /** Nine accepted class dispatch records, one vec3u per workset class. */
   readonly dispatch: GPUBuffer;
+  /** Diagnostic-only A/B face values captured immediately after candidate
+   * topology transfer, followed by accepted and candidate control headers. */
+  readonly topologyTransferAudit?: GPUBuffer;
+  /** Diagnostic-only accepted geometry/value and inactive-bank characteristic
+   * records captured immediately after advection commit. */
+  readonly advectionSymmetryAudit?: GPUBuffer;
   private readonly params: readonly [GPUBuffer, GPUBuffer, GPUBuffer];
-  private readonly prepare: GPUComputePipeline;
-  private readonly topologyTransfer: GPUComputePipeline;
-  private readonly boundaryDryProbe?: GPUComputePipeline;
-  private readonly advection: readonly GPUComputePipeline[];
-  private readonly advectionCommit: readonly GPUComputePipeline[];
-  private readonly force: readonly GPUComputePipeline[];
-  private readonly divergence: readonly GPUComputePipeline[];
-  private readonly separation: readonly GPUComputePipeline[];
-  private readonly bodyImpulse: readonly GPUComputePipeline[];
-  private readonly projection: readonly GPUComputePipeline[];
-  private readonly reconstruct: readonly GPUComputePipeline[];
-  private readonly summarizePreProjectionEnergy: GPUComputePipeline;
-  private readonly summarizePostProjectionEnergy: GPUComputePipeline;
-  private readonly summarizeStartEnergy: GPUComputePipeline;
-  private readonly summarizePostAdvectionEnergy: GPUComputePipeline;
+  private readonly shaderModule: GPUShaderModule;
+  private readonly pipelineCacheKey: string;
+  private prepare!: GPUComputePipeline;
+  private topologyTransfer!: GPUComputePipeline;
+  private boundaryDryProbe?: GPUComputePipeline;
+  private advection!: readonly GPUComputePipeline[];
+  private advectionCommit!: readonly GPUComputePipeline[];
+  private force!: readonly GPUComputePipeline[];
+  private divergence!: readonly GPUComputePipeline[];
+  private separation!: readonly GPUComputePipeline[];
+  private bodyImpulse!: readonly GPUComputePipeline[];
+  private projection!: readonly GPUComputePipeline[];
+  private reconstruct!: readonly GPUComputePipeline[];
+  private summarizePreProjectionEnergy!: GPUComputePipeline;
+  private summarizePostProjectionEnergy!: GPUComputePipeline;
+  private summarizeStartEnergy!: GPUComputePipeline;
+  private summarizePostAdvectionEnergy!: GPUComputePipeline;
+  private pipelinesInitialized = false;
+  private pipelineInitialization?: Promise<void>;
   private readonly groups = new WeakMap<GPUComputePipeline,
     WeakMap<GPUBuffer, WeakMap<GPUBuffer, GPUBindGroup>>>();
   /** Encode the four energy summarizers only when a host actually reads them. */
@@ -338,7 +362,8 @@ export class WebGPUStructuredVelocityDynamics {
   private censusStep = 0;
   private destroyed = false;
 
-  constructor(private readonly device: GPUDevice, private readonly resources: StructuredDynamicsResources) {
+  constructor(private readonly device: GPUDevice, private readonly resources: StructuredDynamicsResources,
+    deferPipelineCompilation = false) {
     const { structured, topology } = resources;
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || resources.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
@@ -349,6 +374,8 @@ export class WebGPUStructuredVelocityDynamics {
       || resources.solidNormalVelocities.size < structured.plan.slotCapacity * 2 * 4
       || resources.rigidBodies.size < GPU_RIGID_BODY_CAPACITY * 8 * 16
       || resources.rigidExchange.size < GPU_RIGID_BODY_CAPACITY * 12 * 4
+      || !Number.isSafeInteger(resources.bodyCount) || resources.bodyCount < 0
+      || resources.bodyCount > GPU_RIGID_BODY_CAPACITY
       || !Number.isSafeInteger(resources.selectorStride) || resources.selectorStride < 1
       || !Number.isSafeInteger(resources.selectorOffsetWords) || resources.selectorOffsetWords < 0
       || resources.selectorRows.size < (resources.selectorOffsetWords
@@ -388,6 +415,22 @@ export class WebGPUStructuredVelocityDynamics {
       size: STRUCTURED_PROJECTION_ENERGY_WORDS * 4,
       usage: storage,
     });
+    if (typeof process !== "undefined" && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1") {
+      this.topologyTransferAudit = device.createBuffer({
+        label: "Structured topology-transfer symmetry audit",
+        size: 2 * structured.plan.slotCapacity * 4 + 2 * 128
+          + structured.plan.slotCapacity * 16,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+      this.advectionSymmetryAudit = device.createBuffer({
+        label: "Structured advection symmetry audit",
+        // Header, then fifteen slot-shaped words for each authority bank:
+        // value, owner, neighbor, metadata, area, inverse distance, fraction,
+        // normal vec4, and centroid vec4.
+        size: 128 + 2 * 15 * structured.plan.slotCapacity * 4,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+    }
     this.params = [0, 1, 2].map((stage) => device.createBuffer({
       label: `Structured dynamics parameters ${stage}`, size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -403,6 +446,7 @@ export class WebGPUStructuredVelocityDynamics {
       topology.reconstructionDataOffsetBytes / 4,
     ], 0);
     words.set(Object.values(structured.plan.offsets), 18);
+    words[39] = this.topologyTransferAudit ? 1 : 0;
     floats[40] = resources.physicalCellSize;
     words[48] = resources.selectorOffsetWords;
     words[49] = resources.selectorStride;
@@ -413,34 +457,152 @@ export class WebGPUStructuredVelocityDynamics {
     words[54] = resources.airSupportLayout.ownerDirectoryOffsetWords;
     words[55] = resources.airSupportLayout.ownerDirectoryCellCapacity;
     for (const buffer of this.params) device.queue.writeBuffer(buffer, 0, words.buffer);
-    const shaderModule = device.createShaderModule({ label: "Structured velocity dynamics", code: structuredVelocityDynamicsWGSL });
-    const make = (name: string) => device.createComputePipeline({ label: name,
-      layout: "auto", compute: { module: shaderModule, entryPoint: name } });
-    this.prepare = make("prepareStructuredDynamics");
-    this.topologyTransfer = make("transferStructuredTopologyCandidate");
-    this.boundaryDryProbe = this.flattenedBoundaryAdvection
-      ? make("classifyStructuredBoundaryDryProbes")
-      : undefined;
-    this.advection = FAMILY_CLASSES.map((value) => make(
-      this.flattenedBoundaryAdvection && value >= 7
-        ? `advectStructuredFlattenedClass${value}`
-        : `advectStructuredClass${value}`,
-    ));
-    this.advectionCommit = FAMILY_CLASSES.map((value) => make(`commitAdvectedStructuredClass${value}`));
-    this.force = FAMILY_CLASSES.map((value) => make(`forceStructuredClass${value}`));
-    this.divergence = ROW_CLASSES.map((value) => make(`divergenceStructuredClass${value}`));
-    this.separation = ROW_CLASSES.map((value) => make(`separateStructuredClass${value}`));
-    this.bodyImpulse = ROW_CLASSES.map((value) => make(`exchangeStructuredBodyImpulseClass${value}`));
-    this.projection = FAMILY_CLASSES.map((value) => make(`projectStructuredClass${value}`));
-    this.reconstruct = ROW_CLASSES.map((value) => make(`reconstructStructuredClass${value}`));
-    this.summarizePreProjectionEnergy = make("summarizeStructuredPreProjectionEnergy");
-    this.summarizePostProjectionEnergy = make("summarizeStructuredPostProjectionEnergy");
-    this.summarizeStartEnergy = make("summarizeStructuredStartEnergy");
-    this.summarizePostAdvectionEnergy = make("summarizeStructuredPostAdvectionEnergy");
+    this.shaderModule = device.createShaderModule({
+      label: "Structured velocity dynamics", code: structuredVelocityDynamicsWGSL,
+    });
+    // The roster captures every construction-stable reachability decision
+    // (flattening, body exchange, and energy diagnostics). The audit bit names
+    // the only source variant that can retain the same entry-point roster.
+    this.pipelineCacheKey = `${this.advectionSymmetryAudit ? "advection-audit" : "production"}\0${
+      this.pipelineEntryPoints().join("\0")}`;
+    if (!deferPipelineCompilation) this.createPipelinesSync();
     this.encodedAdvectionDispatchCount = this.flattenedBoundaryAdvection ? 10 : 9;
     this.allocatedBytes = catalogBytes + this.dispatch.size
       + this.projectionEnergyStats.size
+      + (this.topologyTransferAudit?.size ?? 0)
+      + (this.advectionSymmetryAudit?.size ?? 0)
       + 3 * 256;
+  }
+
+  private pipelineEntryPoints(): readonly string[] {
+    return [
+      "prepareStructuredDynamics", "transferStructuredTopologyCandidate",
+      ...(this.flattenedBoundaryAdvection ? ["classifyStructuredBoundaryDryProbes"] : []),
+      ...FAMILY_CLASSES.map((value) => this.flattenedBoundaryAdvection && value >= 7
+        ? `advectStructuredFlattenedClass${value}` : `advectStructuredClass${value}`),
+      ...FAMILY_CLASSES.map((value) => `commitAdvectedStructuredClass${value}`),
+      ...FAMILY_CLASSES.map((value) => `forceStructuredClass${value}`),
+      ...ROW_CLASSES.map((value) => `divergenceStructuredClass${value}`),
+      ...ROW_CLASSES.map((value) => `separateStructuredClass${value}`),
+      ...(this.resources.bodyCount === 0 ? []
+        : ROW_CLASSES.map((value) => `exchangeStructuredBodyImpulseClass${value}`)),
+      ...FAMILY_CLASSES.map((value) => `projectStructuredClass${value}`),
+      ...ROW_CLASSES.map((value) => `reconstructStructuredClass${value}`),
+      ...(this.projectionEnergyProbe ? [
+        "summarizeStructuredPreProjectionEnergy", "summarizeStructuredPostProjectionEnergy",
+        "summarizeStructuredStartEnergy", "summarizeStructuredPostAdvectionEnergy",
+      ] : []),
+    ];
+  }
+
+  private pipelineDescriptor(entryPoint: string): GPUComputePipelineDescriptor {
+    return { label: entryPoint, layout: "auto",
+      compute: { module: this.shaderModule, entryPoint } };
+  }
+
+  private assignPipelines(pipelines: Readonly<Record<string, GPUComputePipeline>>): void {
+    this.prepare = pipelines.prepareStructuredDynamics!;
+    this.topologyTransfer = pipelines.transferStructuredTopologyCandidate!;
+    this.boundaryDryProbe = this.flattenedBoundaryAdvection
+      ? pipelines.classifyStructuredBoundaryDryProbes : undefined;
+    this.advection = FAMILY_CLASSES.map((value) => pipelines[
+      this.flattenedBoundaryAdvection && value >= 7
+        ? `advectStructuredFlattenedClass${value}` : `advectStructuredClass${value}`]!);
+    this.advectionCommit = FAMILY_CLASSES.map((value) => pipelines[`commitAdvectedStructuredClass${value}`]!);
+    this.force = FAMILY_CLASSES.map((value) => pipelines[`forceStructuredClass${value}`]!);
+    this.divergence = ROW_CLASSES.map((value) => pipelines[`divergenceStructuredClass${value}`]!);
+    this.separation = ROW_CLASSES.map((value) => pipelines[`separateStructuredClass${value}`]!);
+    this.bodyImpulse = this.resources.bodyCount === 0 ? []
+      : ROW_CLASSES.map((value) => pipelines[`exchangeStructuredBodyImpulseClass${value}`]!);
+    this.projection = FAMILY_CLASSES.map((value) => pipelines[`projectStructuredClass${value}`]!);
+    this.reconstruct = ROW_CLASSES.map((value) => pipelines[`reconstructStructuredClass${value}`]!);
+    if (this.projectionEnergyProbe) {
+      this.summarizePreProjectionEnergy = pipelines.summarizeStructuredPreProjectionEnergy!;
+      this.summarizePostProjectionEnergy = pipelines.summarizeStructuredPostProjectionEnergy!;
+      this.summarizeStartEnergy = pipelines.summarizeStructuredStartEnergy!;
+      this.summarizePostAdvectionEnergy = pipelines.summarizeStructuredPostAdvectionEnergy!;
+    }
+    this.pipelinesInitialized = true;
+  }
+
+  private createPipelinesSync(): void {
+    let deviceCache = structuredDynamicsPipelineCache.get(this.device);
+    if (!deviceCache) {
+      deviceCache = new Map();
+      structuredDynamicsPipelineCache.set(this.device, deviceCache);
+    }
+    let pipelines = deviceCache.get(this.pipelineCacheKey);
+    if (!pipelines) {
+      const compiled: Record<string, GPUComputePipeline> = {};
+      for (const entryPoint of this.pipelineEntryPoints()) {
+        compiled[entryPoint] = this.device.createComputePipeline(this.pipelineDescriptor(entryPoint));
+      }
+      pipelines = Object.freeze(compiled);
+      deviceCache.set(this.pipelineCacheKey, pipelines);
+    }
+    this.assignPipelines(pipelines);
+  }
+
+  async initializePipelines(
+    onProgress: StructuredDynamicsPipelineProgress = () => {},
+  ): Promise<void> {
+    if (this.destroyed) throw new Error("Structured dynamics is destroyed");
+    if (this.pipelinesInitialized) return;
+    if (this.pipelineInitialization) return this.pipelineInitialization;
+    this.pipelineInitialization = (async () => {
+      const entryPoints = this.pipelineEntryPoints();
+      let deviceCache = structuredDynamicsPipelineCache.get(this.device);
+      if (!deviceCache) {
+        deviceCache = new Map();
+        structuredDynamicsPipelineCache.set(this.device, deviceCache);
+      }
+      let pipelines = deviceCache.get(this.pipelineCacheKey);
+      if (!pipelines) {
+        let compilations = structuredDynamicsPipelineCompilations.get(this.device);
+        if (!compilations) {
+          compilations = new Map();
+          structuredDynamicsPipelineCompilations.set(this.device, compilations);
+        }
+        let compilation = compilations.get(this.pipelineCacheKey);
+        if (!compilation) {
+          const listeners = new Set<StructuredDynamicsPipelineProgress>();
+          // Start on the next microtask so two instances initialized together
+          // both subscribe before the first per-entry progress notification.
+          const promise = Promise.resolve().then(async () => {
+            const compiled: Record<string, GPUComputePipeline> = {};
+            for (let index = 0; index < entryPoints.length; index += 1) {
+              const entryPoint = entryPoints[index]!;
+              onProgress(entryPoint, index, entryPoints.length);
+              for (const listener of listeners) listener(entryPoint, index, entryPoints.length);
+              compiled[entryPoint] = await this.device.createComputePipelineAsync(
+                this.pipelineDescriptor(entryPoint));
+              onProgress(entryPoint, index + 1, entryPoints.length);
+              for (const listener of listeners) listener(entryPoint, index + 1, entryPoints.length);
+            }
+            return Object.freeze(compiled);
+          }).then((compiled) => {
+            const published = deviceCache!.get(this.pipelineCacheKey) ?? compiled;
+            deviceCache!.set(this.pipelineCacheKey, published);
+            return published;
+          }).finally(() => { compilations!.delete(this.pipelineCacheKey); });
+          compilation = { promise, listeners };
+          compilations.set(this.pipelineCacheKey, compilation);
+        } else {
+          compilation.listeners.add(onProgress);
+        }
+        try {
+          pipelines = await compilation.promise;
+        } finally {
+          compilation.listeners.delete(onProgress);
+        }
+      }
+      this.assignPipelines(pipelines);
+    })();
+    return this.pipelineInitialization;
+  }
+
+  private requirePipelines(): void {
+    if (!this.pipelinesInitialized) throw new Error("Structured dynamics pipelines are not initialized");
   }
 
   private update(stage: 0 | 1 | 2, dt: number, density: number,
@@ -475,7 +637,7 @@ export class WebGPUStructuredVelocityDynamics {
    * the force/divergence stage never sample a body.
    */
   private updateCouplingBodies(count: number): void {
-    if (!Number.isSafeInteger(count) || count < 0 || count > GPU_RIGID_BODY_CAPACITY) {
+    if (!Number.isSafeInteger(count) || count < 0 || count > this.resources.bodyCount) {
       throw new RangeError("Structured dynamics coupling body count is out of range");
     }
     this.device.queue.writeBuffer(this.params[2], 152, new Uint32Array([count]));
@@ -593,6 +755,7 @@ export class WebGPUStructuredVelocityDynamics {
 
   encodeAdvection(broker: PassBroker, dt: number, inflow?: SurfaceInflowState): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
+    this.requirePipelines();
     const params = this.update(0, dt, 1, [0, 0, 0], inflow); this.encodePrepare(broker, params);
     this.censusTick(broker);
     this.encodeProjectionEnergy(broker, params, "start");
@@ -617,6 +780,27 @@ export class WebGPUStructuredVelocityDynamics {
     // Keep this boundary: the next dynamics prepare rewrites `this.dispatch`
     // as storage after advection and commit consumed it as INDIRECT.
     broker.fence("structured indirect arguments retired after advection");
+    const advectionSymmetryAudit = this.advectionSymmetryAudit;
+    if (advectionSymmetryAudit) {
+      const { structured } = this.resources;
+      const plan = structured.plan, slotBytes = plan.slotCapacity * 4;
+      broker.copyBufferToBuffer(structured.control, 0, advectionSymmetryAudit, 0, 128);
+      const scalarFields = [plan.offsets.values, plan.offsets.ownerRows,
+        plan.offsets.neighborRows, plan.offsets.metadata, plan.offsets.areas,
+        plan.offsets.inverseDistances, plan.offsets.fractions] as const;
+      for (let bank = 0; bank < 2; bank += 1) {
+        const destinationBase = 128 + bank * 15 * slotBytes;
+        scalarFields.forEach((field, index) => broker.copyBufferToBuffer(structured.authority,
+          (bank * plan.authorityWords + field) * 4, advectionSymmetryAudit,
+          destinationBase + index * slotBytes, slotBytes));
+        broker.copyBufferToBuffer(structured.authority,
+          (bank * plan.authorityWords + plan.offsets.normals) * 4,
+          advectionSymmetryAudit, destinationBase + 7 * slotBytes, 4 * slotBytes);
+        broker.copyBufferToBuffer(structured.authority,
+          (bank * plan.authorityWords + plan.offsets.centroids) * 4,
+          advectionSymmetryAudit, destinationBase + 11 * slotBytes, 4 * slotBytes);
+      }
+    }
     this.encodeProjectionEnergy(broker, params, "advected");
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after structured advection commit");
@@ -628,6 +812,7 @@ export class WebGPUStructuredVelocityDynamics {
    * bit-for-bit by the publisher and bypass this interpolation. */
   encodeTopologyTransferCandidate(broker: PassBroker): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
+    this.requirePipelines();
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic before topology velocity transfer");
     }
@@ -638,6 +823,23 @@ export class WebGPUStructuredVelocityDynamics {
       [0, 1, 2, 3, 4, 5, 6, 16, 17, 18, 24], params));
     pass.dispatchWorkgroupsIndirect(this.resources.structured.liveRowDispatch,
       OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES);
+    if (this.topologyTransferAudit) {
+      broker.fence("capture topology-transfer symmetry audit");
+      const { structured } = this.resources;
+      const valueBytes = structured.plan.slotCapacity * 4;
+      broker.copyBufferToBuffer(structured.authority,
+        structured.plan.offsets.values * 4, this.topologyTransferAudit, 0, valueBytes);
+      broker.copyBufferToBuffer(structured.authority,
+        (structured.plan.authorityWords + structured.plan.offsets.values) * 4,
+        this.topologyTransferAudit, valueBytes, valueBytes);
+      broker.copyBufferToBuffer(structured.control, 0,
+        this.topologyTransferAudit, 2 * valueBytes, 128);
+      broker.copyBufferToBuffer(structured.candidateControl, 0,
+        this.topologyTransferAudit, 2 * valueBytes + 128, 128);
+      broker.copyBufferToBuffer(this.transportMetrics, 0,
+        this.topologyTransferAudit, 2 * valueBytes + 256,
+        structured.plan.slotCapacity * 16);
+    }
     // The following reconstruction consumes only the transferred ordinary
     // storage and reuses the same already-published indirect buffer.
     if (!this.compactPlainStoragePass) {
@@ -654,6 +856,7 @@ export class WebGPUStructuredVelocityDynamics {
   encodeForcesAndDivergence(broker: PassBroker, dt: number, density: number,
     gravity: readonly [number, number, number], inflow?: SurfaceInflowState): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
+    this.requirePipelines();
     const params = this.update(1, dt, density, gravity, inflow); this.encodePrepare(broker, params);
     this.encodeClasses(broker, this.force, FAMILY_CLASSES, [0, 1, 2, 11, 16, 17, 22], params,
       "Force and constrain structured family class");
@@ -674,6 +877,7 @@ export class WebGPUStructuredVelocityDynamics {
     couplingBodyCount = 0,
     inflow?: SurfaceInflowState): void {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
+    this.requirePipelines();
     const params = this.update(2, dt, density, gravity, inflow); this.encodePrepare(broker, params);
     this.updateCouplingBodies(couplingBodyCount);
     // Publish the lagged unilateral-contact active set from the solved
@@ -713,6 +917,8 @@ export class WebGPUStructuredVelocityDynamics {
     if (this.destroyed) return; this.destroyed = true;
     this.catalog.destroy(); this.dispatch.destroy();
     this.projectionEnergyStats.destroy();
+    this.topologyTransferAudit?.destroy();
+    this.advectionSymmetryAudit?.destroy();
     this.params.forEach((buffer) => buffer.destroy());
   }
 }
@@ -792,6 +998,8 @@ fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<=vec3f(3.402823e38));}
 fn invalidVector()->vec4f{return vec4f(0.,0.,0.,-1.);}
 fn vectorValid(v:vec4f)->bool{return v.w>0.&&finite3(v.xyz);}
+fn canonicalVelocityDot(a:vec3f,b:vec3f)->f32{
+  return canonicalInterpolation4(array<f32,4>(a.x*b.x,a.y*b.y,a.z*b.z,0.));}
 fn bitsf(at:u32)->f32{return bitcast<f32>(catalog[at]);}
 fn dimensions()->vec3u{return vec3u(p.dimensionX,p.dimensionY,p.dimensionZ);}
 fn signs(code:u32)->vec3f{let b=code&7u;return vec3f(select(1.,-1.,(b&1u)!=0u),select(1.,-1.,(b&2u)!=0u),select(1.,-1.,(b&4u)!=0u));}
@@ -960,24 +1168,54 @@ fn taggedVelocity(tag:u32)->vec4f{
   let sample=transportMetrics[at];
   return select(invalidVector(),vec4f(sample.xyz,1.),vectorValid(sample));
 }
+fn extendedOwnerTag(q:vec3u)->u32{
+  let d=dimensions();let volume=d.x*d.y*d.z;
+  if(volume==0u||p.ownerDirectoryCellCapacity<volume||any(q>=d)){return INVALID;}
+  let cell=q.x+d.x*(q.y+d.y*q.z);let at=p.ownerDirectoryOffsetWords+4u*cell;
+  if(at>4u*arrayLength(&transportMetrics)||4u*arrayLength(&transportMetrics)-at<4u){return INVALID;}
+  let tag=supportWord(at);let origin=supportWord(at+1u);let size=supportWord(at+2u);
+  if(tag==INVALID||origin==INVALID||size==0u){return INVALID;}
+  let oq=vec3u(origin%d.x,(origin/d.x)%d.y,origin/(d.x*d.y));
+  return select(INVALID,tag,all(q>=oq)&&all(q<oq+vec3u(size)));
+}
 // Section 5 extrapolates the projected velocity outside the liquid before
 // level-set transport. A newly wet pressure row therefore initializes from
 // that accepted extended field when no old liquid row contains its face. The
 // dense finest-cell directory names the exact octree owner and its published
 // row/support vector; this is the same authority consumed by fine transport.
+//
+// A power-face centroid may lie exactly on a regular-grid face. Selecting only
+// floor(point/h) then makes the result depend on the final float32 rounding:
+// reflection exchanges the low and high incident cells, but 14.000001 and
+// 18.000000 both select their high cell. Section 5 defines one interpolated
+// field, not an owner-sided trace. Preserve the single-owner fast path away
+// from seams; on a face/edge/corner canonically fold each DISTINCT incident
+// owner limit. Deduplication prevents a coarse owner from receiving extra
+// weight merely because several finest directory cells name it.
 fn extendedOwnerVelocity(point:vec3f)->vec4f{
   if(!finite3(point)||!supportPublicationValid()){return invalidVector();}
   let d=dimensions();let volume=d.x*d.y*d.z;
   if(volume==0u||p.ownerDirectoryCellCapacity<volume){return invalidVector();}
   let upper=max(vec3f(d)-vec3f(1e-4),vec3f(0.));
-  let q=vec3u(floor(clamp(point/p.physical.x,vec3f(0.),upper)));
-  let cell=q.x+d.x*(q.y+d.y*q.z);let at=p.ownerDirectoryOffsetWords+4u*cell;
-  if(at>4u*arrayLength(&transportMetrics)||4u*arrayLength(&transportMetrics)-at<4u){return invalidVector();}
-  let tag=supportWord(at);let origin=supportWord(at+1u);let size=supportWord(at+2u);
-  if(tag==INVALID||origin==INVALID||size==0u){return invalidVector();}
-  let oq=vec3u(origin%d.x,(origin/d.x)%d.y,origin/(d.x*d.y));
-  if(any(q<oq)||any(q>=oq+vec3u(size))){return invalidVector();}
-  return taggedVelocity(tag);
+  let grid=clamp(point/p.physical.x,vec3f(0.),upper);let rounded=round(grid);
+  var seamMask=0u;for(var axis=0u;axis<3u;axis+=1u){
+    if(abs(grid[axis]-rounded[axis])<=1e-5){seamMask|=1u<<axis;}}
+  if(seamMask==0u){let tag=extendedOwnerTag(vec3u(floor(grid)));return taggedVelocity(tag);}
+  var tags:array<u32,8>;var xTerms:array<f32,8>;var yTerms:array<f32,8>;var zTerms:array<f32,8>;var count=0u;
+  for(var mask=0u;mask<8u;mask+=1u){
+    if((mask&~seamMask)!=0u){continue;}var q=vec3i(floor(grid));var inside=true;
+    for(var axis=0u;axis<3u;axis+=1u){if((seamMask&(1u<<axis))!=0u){
+      q[axis]=i32(rounded[axis])+select(-1,0,(mask&(1u<<axis))!=0u);}}
+    if(any(q<vec3i(0))||any(q>=vec3i(d))){inside=false;}if(!inside){continue;}
+    let tag=extendedOwnerTag(vec3u(q));if(tag==INVALID){continue;}
+    var duplicate=false;for(var prior=0u;prior<count;prior+=1u){if(tags[prior]==tag){duplicate=true;}}
+    if(duplicate){continue;}let sample=taggedVelocity(tag);if(!vectorValid(sample)){continue;}
+    tags[count]=tag;xTerms[count]=sample.x;yTerms[count]=sample.y;zTerms[count]=sample.z;count+=1u;
+  }
+  if(count==0u){return invalidVector();}if(count==1u){return taggedVelocity(tags[0]);}
+  let inverseCount=1./f32(count);let result=inverseCount*vec3f(canonicalInterpolation8(xTerms,count),
+    canonicalInterpolation8(yTerms,count),canonicalInterpolation8(zTerms,count));
+  return select(invalidVector(),vec4f(result,1.),finite3(result));
 }
 fn axisNeighbor(row:u32,axis:u32,positive:bool)->u32{
   if(row>=acc(2u)||axis>=3u){return INVALID;}
@@ -990,6 +1228,50 @@ fn regularTag(row:u32,offset:vec3i)->u32{
   if(row>=acc(2u)||any(offset<vec3i(-1))||any(offset>vec3i(1))){return INVALID;}
   let local=u32(offset.x+1)+3u*u32(offset.y+1)+9u*u32(offset.z+1);
   return supportWord(p.regularTagOffsetWords+27u*row+local);
+}
+// All catalog geometry is authored on an exact canonical lattice, while its
+// resolved world coordinates acquire different final ulps on opposite sides
+// of the domain (center + offset versus center - offset). Snap interpolation
+// coordinates, not stored state, to a dyadic subcell lattice before choosing
+// weights. Reflections and x/z rotations then reach bit-identical canonical
+// coordinates without materially changing the Section 5 characteristic.
+fn snapInterpolationCoordinate(value:f32)->f32{
+  return round(value*65536.)/65536.;
+}
+fn snapInterpolationCoordinates(value:vec3f)->vec3f{
+  return vec3f(snapInterpolationCoordinate(value.x),
+    snapInterpolationCoordinate(value.y),snapInterpolationCoordinate(value.z));
+}
+// Construct a semi-Lagrangian characteristic in the same row-local canonical
+// frame as Section 5's cube/tetrahedron interpolant. Absolute world-space
+// subtraction rounds opposite sides of the domain differently, and a global
+// frame still leaves reflected transition cases with different catalog
+// transforms. In canonical cell coordinates a reflection is only a sign flip
+// and x/z rotation is only a permutation before the shared dyadic snap.
+fn characteristicPoint(row:u32,x:vec3f,dt:f32,velocity:vec3f)->vec3f{
+  if(row>=acc(2u)){return x-dt*velocity;}
+  let rg=rowGeometry[rbase()+row];let d=dimensions();
+  let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
+  let extent=f32(rg.y)*p.physical.x;
+  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
+  let transform=metrics[row].transformAndFlags&63u;
+  let local=snapInterpolationCoordinates(powerTransform((x-center)/extent,transform));
+  let displacement=snapInterpolationCoordinates(dt*powerTransform(velocity,transform)/extent);
+  let traced=snapInterpolationCoordinates(local-displacement);
+  return center+extent*inverseTransform(traced,transform);
+}
+// A shared face's stored owner is always the low-coordinate row. Reflection
+// exchanges that arbitrary storage side, but it does not exchange the
+// physical side into which a backward characteristic departs. Select the
+// incident row on the upstream side of the face (opposite the velocity's
+// normal direction) before constructing the row-local snapped point. This is
+// also the local dual element that contains the characteristic for an
+// infinitesimal step, matching Section 5's containing-element interpolation.
+fn characteristicIncidentRow(handle:u32,velocity:vec3f)->u32{
+  let low=owner(handle);let high=neighbor(handle);
+  if(high==INVALID||high==low){return low;}
+  let normalVelocity=canonicalVelocityDot(velocity,normal(handle));
+  return select(high,low,normalVelocity>=0.);
 }
 // Aanjaneya et al. 2017, Section 5: "For improved efficiency and accuracy in
 // regular regions away from level transitions, we revert to standard per-axis
@@ -1024,16 +1306,16 @@ fn faceAxisValue(handle:u32,axis:u32)->vec2f{
   // recover the signed world-axis component exactly, never an average.
   return vec2f(select(-sample,sample,n[axis]>0.),1.);
 }
-// One axis-normal face plane of the staggered stencil. The face's published
-// degree of freedom is authoritative whenever an incident cell is a live
-// same-size regular row; an incident Section 5 support cell contributes its
-// published extended vector component instead. An in-domain cell that
-// resolves to a transition row, a different size, or no publication makes
-// the whole sample ineligible (status 0) so the caller falls back to the
-// paper's cube/tetra interpolant rather than substituting zero or an average.
+// One axis-normal face plane of the staggered stencil. Section 5 permits this
+// optimization only in regular regions. Every incident cell must therefore be
+// a live, wet, same-size regular row; a support/dry cell is the extrapolated
+// free-surface band, not a regular liquid region. Reject that entire staggered
+// sample so the caller uses the paper's cube/tetra interpolant over the
+// already-published extended vectors. Mixing exact wet face DOFs with copied
+// cell vectors made the result depend on which side of a reflected free face
+// supplied the plane.
 fn staggeredPlaneValue(anchor:u32,rg:vec4u,origin:vec3f,h:f32,axis:u32,plane:i32,transverse:vec3i)->vec2f{
-  var faceFound=false;var face=0.;
-  var supportFound=false;var support=0.;
+  var faceTerms=array<f32,4>(0.,0.,0.,0.);var faceCount=0u;
   let d=dimensions();
   for(var candidate=0u;candidate<2u;candidate+=1u){
     let cellAt=plane-i32(candidate);
@@ -1043,34 +1325,17 @@ fn staggeredPlaneValue(anchor:u32,rg:vec4u,origin:vec3f,h:f32,axis:u32,plane:i32
     var offset=transverse;offset[axis]=cellAt;
     let tag=regularTag(anchor,offset);
     if(tag==INVALID){return vec2f(0.,0.);}
-    if((tag&SUPPORT_TAG)!=0u){
-      let extended=taggedVelocity(tag);
-      if(!vectorValid(extended)){return vec2f(0.,0.);}
-      if(!supportFound){support=extended[axis];supportFound=true;}
-      continue;
-    }
+    if((tag&SUPPORT_TAG)!=0u){return vec2f(0.,0.);}
     // A same-size live neighbour qualifies regardless of caseId — its face
     // handle is validated axis-normal and finite below, which is the real
     // requirement. A genuinely irregular neighbour fails that check instead.
     if(tag>=acc(2u)||rowGeometry[rbase()+tag].y!=rg.y){return vec2f(0.,0.);}
-    // A dry live row's face degrees of freedom receive no gravity, no
-    // projection update, and are never rewritten by the Section 5 march, so
-    // they lag the liquid by a full substep at exactly the free surface.
-    // Contribute the row's committed Section 5 extended vector instead, the
-    // same closest-interface copy a support cell supplies; a wet incident
-    // cell on the same plane still wins with its exact face value below.
-    if(liquidAt(tag)==0u){
-      let extended=taggedVelocity(tag);
-      if(!vectorValid(extended)){return vec2f(0.,0.);}
-      if(!supportFound){support=extended[axis];supportFound=true;}
-      continue;
-    }
+    if(liquidAt(tag)==0u){return vec2f(0.,0.);}
     let resolved=faceAxisValue(regularFaceHandle(tag,axis,candidate==1u),axis);
     if(resolved.y==0.){return vec2f(0.,0.);}
-    if(!faceFound){face=resolved.x;faceFound=true;}
+    faceTerms[faceCount]=resolved.x;faceCount+=1u;
   }
-  if(faceFound){return vec2f(face,1.);}
-  if(supportFound){return vec2f(support,1.);}
+  if(faceCount>0u){return vec2f(canonicalInterpolation4(faceTerms)/f32(faceCount),1.);}
   return vec2f(0.,0.);
 }
 fn staggeredComponent(anchor:u32,rg:vec4u,origin:vec3f,h:f32,x:vec3f,axis:u32)->vec2f{
@@ -1084,36 +1349,43 @@ fn staggeredComponent(anchor:u32,rg:vec4u,origin:vec3f,h:f32,x:vec3f,axis:u32)->
     if(other==axis){continue;}
     sample[other]=clamp(sample[other],.5*h,f32(d[other])*p.physical.x-.5*h);
   }
-  let along=(sample[axis]-origin[axis])/h;
+  let center=origin+vec3f(.5*h);
+  // Form all weights in the anchor-centred frame. Subtracting the absolute
+  // origin independently on opposite sides of the domain leaves different
+  // final ulps before the dyadic snap; the centred coordinate is the actual
+  // Section 5 interpolation coordinate and transforms exactly under D4.
+  let local=snapInterpolationCoordinates((sample-center)/h);
+  let along=local[axis]+.5;
   let plane=clamp(i32(floor(along)),-1,1);
-  var tAlong=clamp(along-f32(plane),0.,1.);
+  var tAlong=snapInterpolationCoordinate(clamp(along-f32(plane),0.,1.));
   // Measure-zero snap: a face centre must keep weight one on its own value
   // under floating-point dust, mirroring the old-mesh epsilon discipline at
   // interpolation-element boundaries.
   if(tAlong<1e-5){tAlong=0.;}else if(tAlong>1.-1e-5){tAlong=1.;}
-  let center=origin+vec3f(.5*h);
   var low=vec3i(0);
   var tTransverse=vec3f(0.);
   for(var other=0u;other<3u;other+=1u){
     if(other==axis){continue;}
-    if(sample[other]<center[other]){low[other]=-1;}
-    let lowCenter=center[other]+f32(low[other])*h;
-    var t=clamp((sample[other]-lowCenter)/h,0.,1.);
+    if(local[other]<0.){low[other]=-1;}
+    var t=clamp(local[other]-f32(low[other]),0.,1.);
     if(t<1e-5){t=0.;}else if(t>1.-1e-5){t=1.;}
     tTransverse[other]=t;
   }
-  var result=0.;
+  var terms:array<f32,8>;var termCount=0u;
   for(var corner=0u;corner<8u;corner+=1u){
-    var weight=select(1.-tAlong,tAlong,(corner&1u)!=0u);
+    let alongWeight=select(1.-tAlong,tAlong,(corner&1u)!=0u);
+    var transverseWeights=vec2f(1.);var transverseCount=0u;
     var offset=vec3i(0);
     var bit=1u;
     for(var other=0u;other<3u;other+=1u){
       if(other==axis){continue;}
       let high=(corner&(1u<<bit))!=0u;
-      weight*=select(1.-tTransverse[other],tTransverse[other],high);
+      transverseWeights[transverseCount]=select(1.-tTransverse[other],tTransverse[other],high);
+      transverseCount+=1u;
       offset[other]=low[other]+select(0,1,high);
       bit+=1u;
     }
+    let weight=canonicalProduct3(alongWeight,transverseWeights.x,transverseWeights.y);
     if(weight<=0.){continue;}
     for(var other=0u;other<3u;other+=1u){
       if(other==axis){continue;}
@@ -1122,8 +1394,9 @@ fn staggeredComponent(anchor:u32,rg:vec4u,origin:vec3f,h:f32,x:vec3f,axis:u32)->
     }
     let resolved=staggeredPlaneValue(anchor,rg,origin,h,axis,plane+i32(corner&1u),offset);
     if(resolved.y==0.){return vec2f(0.,0.);}
-    result+=weight*resolved.x;
+    terms[termCount]=weight*resolved.x;termCount+=1u;
   }
+  let result=canonicalInterpolation8(terms,termCount);
   if(!finite(result)){return vec2f(0.,0.);}
   return vec2f(result,1.);
 }
@@ -1163,20 +1436,32 @@ fn cellSample(anchor:u32,x:vec3f)->vec4f{
     if(sampleX[axis]<center[axis]){lowOffset[axis]=-1;}
   }
   let lowCenter=center+vec3f(lowOffset)*h;
-  let t=clamp((sampleX-lowCenter)/h,vec3f(0),vec3f(1));
-  var result=vec3f(0.);
+  let t=snapInterpolationCoordinates(clamp((sampleX-lowCenter)/h,vec3f(0),vec3f(1)));
+  var termsX:array<f32,8>;var termsY:array<f32,8>;var termsZ:array<f32,8>;
+  var termCount=0u;
   for(var corner=0u;corner<8u;corner+=1u){
-    let weight=select(1.-t.x,t.x,(corner&1u)!=0u)*select(1.-t.y,t.y,(corner&2u)!=0u)*select(1.-t.z,t.z,(corner&4u)!=0u);
+    let weight=canonicalProduct3(select(1.-t.x,t.x,(corner&1u)!=0u),
+      select(1.-t.y,t.y,(corner&2u)!=0u),select(1.-t.z,t.z,(corner&4u)!=0u));
     if(weight<=0.){continue;}
     var offset=lowOffset+vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
-    let requestedCenter=center+vec3f(offset)*h;
+    var requestedCenter=center+vec3f(offset)*h;
     for(var axis=0u;axis<3u;axis+=1u){
       if(requestedCenter[axis]<.5*h||requestedCenter[axis]>f32(d[axis])*p.physical.x-.5*h){offset[axis]=0;}
     }
-    let sample=taggedVelocity(regularTag(anchor,offset));
+    requestedCenter=center+vec3f(offset)*h;
+    // Consume the same dense, geometric Section 5 owner publication as
+    // arbitrary-point extension. The row-relative regular-tag cache is built
+    // through floating world centres and can name opposite half-open owners
+    // after reflection at the advancing domain boundary.
+    let sample=extendedOwnerVelocity(requestedCenter);
     if(!vectorValid(sample)){return invalidVector();}
-    result+=weight*sample.xyz;
+    let term=weight*sample.xyz;
+    termsX[termCount]=term.x;termsY[termCount]=term.y;termsZ[termCount]=term.z;
+    termCount+=1u;
   }
+  let result=vec3f(canonicalInterpolation8(termsX,termCount),
+    canonicalInterpolation8(termsY,termCount),
+    canonicalInterpolation8(termsZ,termCount));
   if(!finite3(result)){return invalidVector();}
   return vec4f(result,1.);
 }
@@ -1219,54 +1504,88 @@ fn selectorVelocity(row:u32,selectorIndex:u32,selector:vec4f)->vec4f{
   }
   return velocitySample(row);
 }
-fn tetraWeights(point:vec3f,x:vec3f,y:vec3f,z:vec3f)->vec4f{
-  let d=dot(x,cross(y,z));
-  if(!finite(d)||abs(d)<1e-10){return vec4f(-2.);}
-  let a0=dot(point,cross(y,z))/d;
-  let a1=dot(x,cross(point,z))/d;
-  let a2=dot(x,cross(y,point))/d;
-  return vec4f(1.-a0-a1-a2,a0,a1,a2);
+fn canonicalProduct3(a:f32,b:f32,c:f32)->f32{
+  var factors=array<f32,3>(a,b,c);
+  for(var i=1u;i<3u;i+=1u){let value=factors[i];var j=i;
+    loop{if(j==0u||abs(factors[j-1u])<=abs(value)){break;}factors[j]=factors[j-1u];j-=1u;}
+    factors[j]=value;}
+  return factors[0]*factors[1]*factors[2];
 }
-fn transitionSample(row:u32,x:vec3f)->vec4f{
-  if(row>=acc(2u)||!finite3(x)){return vec4f(255.,20.,f32(row),-1.);}
-  let rg=rowGeometry[rbase()+row];
-  let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
-  let extent=f32(rg.y)*p.physical.x;
-  if(!finite(extent)||extent<=0.){return vec4f(255.,21.,extent,-1.);}
-  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
-  let local=powerTransform((x-center)/extent,metrics[row].transformAndFlags&63u);
-  let thAt=p.tetraHeaderOffset+3u*metrics[row].caseId;
-  let first=catalog[thAt];
-  let count=catalog[thAt+1u];
-  for(var ti=0u;ti<count;ti+=1u){
-    let packed=catalog[p.tetraOffset+first+ti];
-    let selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);
+fn canonicalDeterminant(a:vec3f,b:vec3f,c:vec3f)->f32{
+  var terms:array<f32,8>;
+  terms[0]=canonicalProduct3(a.x,b.y,c.z);
+  terms[1]=canonicalProduct3(a.y,b.z,c.x);
+  terms[2]=canonicalProduct3(a.z,b.x,c.y);
+  terms[3]=-canonicalProduct3(a.z,b.y,c.x);
+  terms[4]=-canonicalProduct3(a.y,b.x,c.z);
+  terms[5]=-canonicalProduct3(a.x,b.z,c.y);
+  return canonicalInterpolation8(terms,6u);
+}
+fn tetraWeights(point:vec3f,x:vec3f,y:vec3f,z:vec3f)->vec4f{
+  let d=canonicalDeterminant(x,y,z);
+  if(!finite(d)||abs(d)<1e-10){return vec4f(-2.);}
+  let a0=canonicalDeterminant(point,y,z)/d;
+  let a1=canonicalDeterminant(x,point,z)/d;
+  let a2=canonicalDeterminant(x,y,point)/d;
+  var complementTerms=array<f32,4>(1.,-a0,-a1,-a2);
+  return vec4f(canonicalInterpolation4(complementTerms),a0,a1,a2);
+}
+fn tetraSelectorGeometry(selector:u32)->vec4f{let at=p.tetraVertexOffset+4u*selector;
+  return vec4f(bitsf(at),bitsf(at+1u),bitsf(at+2u),bitsf(at+3u));}
+fn transformedD4Selector(selector:u32,transform:u32)->u32{if(selector>=p.tetraVertexCount){return INVALID;}
+  let source=tetraSelectorGeometry(selector);let wanted=powerTransform(source.xyz,transform);
+  for(var candidate=0u;candidate<p.tetraVertexCount;candidate+=1u){let value=tetraSelectorGeometry(candidate);
+    if(all(value.xyz==wanted)&&value.w==source.w){return candidate;}}
+  return INVALID;}
+fn transitionFanSample(row:u32,localPoint:vec3f,first:u32,count:u32,transform:u32)->vec4f{
+  for(var ti=0u;ti<count;ti+=1u){let packed=catalog[p.tetraOffset+first+ti];
+    var selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);
+    if(transform!=0u){selectors=vec3u(transformedD4Selector(selectors.x,transform),
+      transformedD4Selector(selectors.y,transform),transformedD4Selector(selectors.z,transform));}
     if(any(selectors>=vec3u(p.tetraVertexCount))){return vec4f(f32(ti),22.,f32(p.tetraVertexCount),-1.);}
-    let va=p.tetraVertexOffset+4u*selectors.x;
-    let vb=p.tetraVertexOffset+4u*selectors.y;
-    let vc=p.tetraVertexOffset+4u*selectors.z;
-    let sa=vec4f(bitsf(va),bitsf(va+1u),bitsf(va+2u),bitsf(va+3u));
-    let sb=vec4f(bitsf(vb),bitsf(vb+1u),bitsf(vb+2u),bitsf(vb+3u));
-    let sc=vec4f(bitsf(vc),bitsf(vc+1u),bitsf(vc+2u),bitsf(vc+3u));
-    let weights=tetraWeights(local,sa.xyz,sb.xyz,sc.xyz);
-    if(all(weights>=vec4f(-2e-6))&&all(weights<=vec4f(1.000002))){
-      // Barycentric vertices with zero weight do not contribute to the
-      // paper's tetrahedral interpolant. Avoid requiring an extrapolated air
-      // row for those vertices, but keep every positive contributor strict.
-      var positive=max(weights,vec4f(0.));
-      let positiveSum=dot(positive,vec4f(1.));
-      if(!finite(positiveSum)||positiveSum<=0.){return vec4f(f32(ti),25.,positiveSum,-1.);}
-      positive/=positiveSum;
-      var result=vec3f(0.);
-      if(positive.x>0.){let v0=velocitySample(row);if(!vectorValid(v0)){return vec4f(f32(ti),23.,f32(row),-1.);}result+=positive.x*v0.xyz;}
-      if(positive.y>0.){let v1=selectorVelocity(row,selectors.x,sa);if(!vectorValid(v1)){return v1;}result+=positive.y*v1.xyz;}
-      if(positive.z>0.){let v2=selectorVelocity(row,selectors.y,sb);if(!vectorValid(v2)){return v2;}result+=positive.z*v2.xyz;}
-      if(positive.w>0.){let v3=selectorVelocity(row,selectors.z,sc);if(!vectorValid(v3)){return v3;}result+=positive.w*v3.xyz;}
-      if(!finite3(result)){return invalidVector();}
-      return vec4f(result,1.);
-    }
-  }
-  return vec4f(255.,24.,f32(count),-1.);
+    let sa=tetraSelectorGeometry(selectors.x);let sb=tetraSelectorGeometry(selectors.y);let sc=tetraSelectorGeometry(selectors.z);
+    let weights=tetraWeights(localPoint,sa.xyz,sb.xyz,sc.xyz);
+    if(all(weights>=vec4f(-2e-6))&&all(weights<=vec4f(1.000002))){var positive=max(weights,vec4f(0.));
+      let positiveSum=canonicalInterpolation4(array<f32,4>(positive.x,positive.y,positive.z,positive.w));
+      if(!finite(positiveSum)||positiveSum<=0.){return vec4f(f32(ti),25.,positiveSum,-1.);}positive/=positiveSum;
+      var termsX=array<f32,4>(0.,0.,0.,0.);var termsY=array<f32,4>(0.,0.,0.,0.);
+      var termsZ=array<f32,4>(0.,0.,0.,0.);
+      if(positive.x>0.){let v0=velocitySample(row);if(!vectorValid(v0)){return vec4f(f32(ti),23.,f32(row),-1.);}let term=positive.x*v0.xyz;termsX[0]=term.x;termsY[0]=term.y;termsZ[0]=term.z;}
+      if(positive.y>0.){let v1=selectorVelocity(row,selectors.x,sa);if(!vectorValid(v1)){return v1;}let term=positive.y*v1.xyz;termsX[1]=term.x;termsY[1]=term.y;termsZ[1]=term.z;}
+      if(positive.z>0.){let v2=selectorVelocity(row,selectors.y,sb);if(!vectorValid(v2)){return v2;}let term=positive.z*v2.xyz;termsX[2]=term.x;termsY[2]=term.y;termsZ[2]=term.z;}
+      if(positive.w>0.){let v3=selectorVelocity(row,selectors.z,sc);if(!vectorValid(v3)){return v3;}let term=positive.w*v3.xyz;termsX[3]=term.x;termsY[3]=term.y;termsZ[3]=term.z;}
+      let result=vec3f(canonicalInterpolation4(termsX),canonicalInterpolation4(termsY),canonicalInterpolation4(termsZ));
+      if(!finite3(result)){return invalidVector();}return vec4f(result,1.);}}
+  return vec4f(255.,24.,f32(count),-1.);}
+fn transitionSample(row:u32,x:vec3f)->vec4f{
+  if(row>=acc(2u)||!finite3(x)){return vec4f(255.,20.,f32(row),-1.);}let rg=rowGeometry[rbase()+row];
+  let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));let extent=f32(rg.y)*p.physical.x;
+  if(!finite(extent)||extent<=0.){return vec4f(255.,21.,extent,-1.);}let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
+  let local=snapInterpolationCoordinates(powerTransform((x-center)/extent,metrics[row].transformAndFlags&63u));
+  let thAt=p.tetraHeaderOffset+3u*metrics[row].caseId;let first=catalog[thAt];let count=catalog[thAt+1u];
+  // Fan closure depends only on immutable catalog topology. The generator
+  // publishes its exact D4 mask in the header; reproving it here nested a
+  // selector-catalog search inside every characteristic sample.
+  // The row transform can permute world vertical onto any canonical axis.
+  // Conjugating horizontal D4 by that transform therefore selects the full
+  // stabilizer of canonical x, y, or z. The catalog packs the exact fan
+  // closure mask for all three groups; selecting the conjugate group is what
+  // makes a physical reflection independent of case canonicalization.
+  let rowTransform=metrics[row].transformAndFlags&63u;
+  let canonicalVertical=abs(powerTransform(vec3f(0.,1.,0.),rowTransform));
+  let fixedAxis=select(select(2u,1u,canonicalVertical.y>.5),0u,canonicalVertical.x>.5);
+  let symmetryMask=(catalog[thAt+2u]>>(8u+8u*fixedAxis))&255u;
+  let d4=array<u32,24>(0u,2u,4u,6u,8u,10u,12u,14u,
+    0u,1u,4u,5u,40u,41u,44u,45u,
+    0u,1u,2u,3u,16u,17u,18u,19u);var xTerms:array<f32,8>;
+  var yTerms:array<f32,8>;var zTerms:array<f32,8>;var sampleCount=0u;
+  for(var symmetry=0u;symmetry<8u;symmetry+=1u){let transform=d4[8u*fixedAxis+symmetry];
+    if((symmetryMask&(1u<<symmetry))==0u){continue;}
+    let sample=transitionFanSample(row,local,first,count,transform);if(!vectorValid(sample)){return sample;}
+    xTerms[sampleCount]=sample.x;yTerms[sampleCount]=sample.y;zTerms[sampleCount]=sample.z;sampleCount+=1u;}
+  if(sampleCount==0u){return vec4f(255.,27.,f32(count),-1.);}let inverseCount=1./f32(sampleCount);
+  return vec4f(inverseCount*vec3f(canonicalInterpolation8(xTerms,sampleCount),
+    canonicalInterpolation8(yTerms,sampleCount),canonicalInterpolation8(zTerms,sampleCount)),1.);
 }
 
 // Aanjaneya et al. 2017 Section 5
@@ -1299,6 +1618,11 @@ fn adjacentInterpolationElementSample(anchor:u32,point:vec3f)->vec4f{
   }
   return invalidVector();
 }
+fn incidentInterpolationElementSample(anchor:u32,point:vec3f)->vec4f{
+  var sample=interpolationElementSample(anchor,point);
+  if(vectorValid(sample)){return sample;}
+  return adjacentInterpolationElementSample(anchor,point);
+}
 
 // Resolve the accepted leaf containing a physical point. The row directory is
 // ordered by (level, Morton), so split children can find their old parent and
@@ -1311,6 +1635,12 @@ fn acceptedDirectoryFind(cell:u32,size:u32)->u32{
   let wantedLevel=directoryLevel(size);let wantedMorton=mortonCell(cell);var low=0u;var high=min(acc(2u),p.rowCapacity);
   while(low<high){let middle=low+(high-low)/2u;let entry=rowGeometry[rbase()+middle];if(directoryLess(entry,wantedLevel,wantedMorton)){low=middle+1u;}else{high=middle;}}
   if(low<acc(2u)){let entry=rowGeometry[rbase()+low];if(entry.x==cell&&entry.y==size){return low;}}
+  return INVALID;
+}
+fn acceptedRowContainingFinestCell(finest:vec3u)->u32{
+  let d=dimensions();if(any(finest>=d)){return INVALID;}let maximum=max(d.x,max(d.y,d.z));var size=1u;
+  for(var level=0u;level<31u;level+=1u){if(size>maximum){break;}let origin=(finest/vec3u(size))*size;
+    let cell=origin.x+d.x*(origin.y+d.y*origin.z);let row=acceptedDirectoryFind(cell,size);if(row!=INVALID){return row;}size<<=1u;}
   return INVALID;
 }
 // Single-entry memoization of the leaf walk. This is a PURE memoization: it
@@ -1355,6 +1685,21 @@ fn candidateRowCenter(candidateBank:u32,row:u32)->vec3f{
   let rg=rowGeometry[candidateBank*p.rowCapacity+row];let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
   return (vec3f(q)+.5*f32(rg.y))*p.physical.x;
 }
+// A candidate centre on an old leaf/free-surface seam has no unique half-open
+// owner. It is interior only when EVERY finest cell incident on that exact
+// half-grid point names the same accepted leaf; otherwise Section 5's
+// extrapolated frontier, not an arbitrary low/high old-row trace, is the old
+// field authority. Integer doubled coordinates keep the predicate exactly D4.
+fn candidateRowCenterInsideOld(candidateBank:u32,row:u32)->bool{
+  if(row>=p.rowCapacity){return false;}let rg=rowGeometry[candidateBank*p.rowCapacity+row];let d=dimensions();
+  let origin=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));let doubled=2u*origin+vec3u(rg.y);
+  var seamMask=0u;for(var axis=0u;axis<3u;axis+=1u){if((doubled[axis]&1u)==0u){seamMask|=1u<<axis;}}
+  var resolved=INVALID;for(var mask=0u;mask<8u;mask+=1u){if((mask&~seamMask)!=0u){continue;}var q=vec3i(doubled/2u);
+    for(var axis=0u;axis<3u;axis+=1u){if((seamMask&(1u<<axis))!=0u&&(mask&(1u<<axis))==0u){q[axis]-=1;}}
+    if(any(q<vec3i(0))||any(q>=vec3i(d))){continue;}let incident=acceptedRowContainingFinestCell(vec3u(q));
+    if(incident==INVALID||(resolved!=INVALID&&incident!=resolved)){return false;}resolved=incident;}
+  return resolved!=INVALID;
+}
 fn oldFieldAt(anchor:u32,point:vec3f)->vec4f{
   if(anchor==INVALID){return invalidVector();}var sample=invalidVector();if(regularTag(anchor,vec3i(0))!=anchor){sample=transitionSample(anchor,point);}else{sample=regularSample(anchor,point);}
   // Interpolation can leave its local closure at a newly exposed face. The
@@ -1376,6 +1721,7 @@ var<workgroup> transferHandle:u32;
 var<workgroup> transferDisposition:u32;
 var<workgroup> transferCandidateBank:u32;
 var<workgroup> transferOwner:u32;
+var<workgroup> transferInterior:vec2u;
 var<workgroup> transferPoint:vec4f;
 var<workgroup> transferNormal:vec4f;
 fn reduceTransferProbe(lid:u32)->u32{
@@ -1413,6 +1759,7 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
 @compute @workgroup_size(128)fn transferStructuredTopologyCandidate(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)lid:u32){
   if(lid==0u){
     let index=g.x+g.y*65535u;let handle=candidateTransferItem(index);transferHandle=handle;transferDisposition=3u;
+    transferInterior=vec2u(0u);
     if(handle!=INVALID&&atomicLoad(&candidate[6])!=0u&&handle<atomicLoad(&candidate[3])){
       let candidateBank=atomicLoad(&candidate[5])&1u;let base=candidateBank*p.authorityWords;transferCandidateBank=candidateBank;
       let marker=bitcast<f32>(a[base+p.centroidOffset+4u*handle+3u]);
@@ -1428,22 +1775,31 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
   // a COPY of the closest projected face value — never an interpolant
   // evaluated outside its element (which extends the frontier velocity
   // gradient one cell and ratchets the corner jet, measured at +45% ME).
-  if(lid==0u){let ownerInsideOld=acceptedRowContaining(candidateRowCenter(candidateBank,candidateOwner))!=INVALID;transferOld=invalidVector();if(!ownerInsideOld){transferOld=extendedOwnerVelocity(point);}}
-  let uniformNeighbor=workgroupUniformLoad(&transferNeighbor);let initialOld=workgroupUniformLoad(&transferOld);
+  let uniformNeighbor=workgroupUniformLoad(&transferNeighbor);
+  if(lid==0u){let ownerInsideOld=candidateRowCenterInsideOld(candidateBank,candidateOwner);
+    let neighborInsideOld=uniformNeighbor!=INVALID&&candidateRowCenterInsideOld(candidateBank,uniformNeighbor);
+    transferInterior=vec2u(select(0u,1u,ownerInsideOld),select(0u,1u,neighborInsideOld));
+    transferOld=invalidVector();if(!ownerInsideOld&&!neighborInsideOld){transferOld=extendedOwnerVelocity(point);}}
+  let initialOld=workgroupUniformLoad(&transferOld);
+  let interior=workgroupUniformLoad(&transferInterior);
   var ownerAnchor=INVALID;var neighborAnchor=INVALID;
   if(!vectorValid(initialOld)){
-    ownerAnchor=oldAnchor(candidateBank,candidateOwner,n,lid);
-    if(uniformNeighbor!=INVALID){neighborAnchor=oldAnchor(candidateBank,uniformNeighbor,-n,lid);}
+    if(interior.x!=0u){ownerAnchor=oldAnchor(candidateBank,candidateOwner,n,lid);}
+    if(interior.y!=0u){neighborAnchor=oldAnchor(candidateBank,uniformNeighbor,-n,lid);}
     if(lid==0u){let ownerField=oldFieldAt(ownerAnchor,point);var neighborField=invalidVector();if(uniformNeighbor!=INVALID&&neighborAnchor!=ownerAnchor){neighborField=oldFieldAt(neighborAnchor,point);}
-    // Resolve the two-sided ambiguity the way main's sampleOldIncident did:
-    // one interpolated sample through the incident owner-side element, never a
-    // mean of two independent closures — averaging both sides low-passes every
-    // newly created interface face on every topology change.
+    // Reflection may exchange the arbitrary stored owner with its neighbour.
+    // A one-sided old frontier has one geometric authority regardless of that
+    // ordering. Only a genuinely two-sided old face has two valid limits; fold
+    // that unavoidable ambiguity canonically so the transfer commutes with D4.
     transferOld=ownerField;if(!vectorValid(ownerField)){transferOld=neighborField;}
+    if(vectorValid(ownerField)&&vectorValid(neighborField)){
+      transferOld=vec4f(.5*vec3f(canonicalInterpolation4(array<f32,4>(ownerField.x,neighborField.x,0.,0.)),
+        canonicalInterpolation4(array<f32,4>(ownerField.y,neighborField.y,0.,0.)),
+        canonicalInterpolation4(array<f32,4>(ownerField.z,neighborField.z,0.,0.))),1.);}
     if(!vectorValid(transferOld)){transferOld=extendedOwnerVelocity(point);}}
     _ = workgroupUniformLoad(&transferOld);
   }
-  if(lid==0u){if(!vectorValid(transferOld)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=dot(transferOld.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);}
+  if(lid==0u){if(!vectorValid(transferOld)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=canonicalVelocityDot(transferOld.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);if(p.padB!=0u&&handle<arrayLength(&transportMetrics)){let debugFlags=select(0u,1u,vectorValid(initialOld))|select(0u,2u,ownerAnchor!=INVALID)|select(0u,4u,neighborAnchor!=INVALID);transportMetrics[handle]=vec4f(transferOld.xyz,bitcast<f32>(debugFlags));}}
 }
 
 // Characteristic sources must be this substep's prior face values: the
@@ -1455,6 +1811,43 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
 // kernels copy the staged words back bit-exactly.
 fn nextValueAt(handle:u32)->u32{return (1u-bank())*p.authorityWords+p.valuesOffset+handle;}
 fn setNextValue(handle:u32,v:f32){a[nextValueAt(handle)]=bitcast<u32>(v);}
+fn debugAdvectionWord(offset:u32,handle:u32,value:f32){
+  if(p.padB!=0u){a[(1u-bank())*p.authorityWords+offset+handle]=bitcast<u32>(value);}
+}
+fn debugAdvection3(offset:u32,handle:u32,value:vec3f){
+  let at=(1u-bank())*p.authorityWords+offset+4u*handle;
+  if(p.padB!=0u){a[at]=bitcast<u32>(value.x);a[at+1u]=bitcast<u32>(value.y);a[at+2u]=bitcast<u32>(value.z);}
+}
+// Local Delaunay meshes are authored per cell (Section 5's "slight
+// subtlety"). A characteristic exactly on an octree seam is therefore
+// incident to multiple equally valid local stars. Resolving only floor(x)
+// makes the interpolant depend on the positive-coordinate side. Evaluate the
+// original point through every distinct incident leaf and canonically fold the
+// valid limits; off-seam points retain the ordinary single-anchor hot path.
+fn seamInterpolationSample(point:vec3f)->vec4f{
+  let grid=point/p.physical.x;var seamMask=0u;
+  for(var axis=0u;axis<3u;axis+=1u){
+    if(abs(grid[axis]-round(grid[axis]))<=1e-5){seamMask|=1u<<axis;}}
+  if(seamMask==0u){return invalidVector();}
+  var rows:array<u32,8>;var rowCount=0u;var xTerms:array<f32,8>;
+  var yTerms:array<f32,8>;var zTerms:array<f32,8>;var sampleCount=0u;
+  for(var corner=0u;corner<8u;corner+=1u){
+    // Only seam axes contribute distinct probes. Keeping the surviving corner
+    // order preserves the canonical fold bit-for-bit while reducing a common
+    // one-axis seam from eight directory walks to two.
+    if((corner&(~seamMask))!=0u){continue;}var probe=point;
+    for(var axis=0u;axis<3u;axis+=1u){if((seamMask&(1u<<axis))!=0u){
+      probe[axis]+=select(-1e-4,1e-4,(corner&(1u<<axis))!=0u)*p.physical.x;}}
+    let candidate=acceptedRowContaining(probe);if(candidate==INVALID||candidate>=acc(2u)){continue;}
+    var duplicate=false;for(var prior=0u;prior<rowCount;prior+=1u){duplicate=duplicate||rows[prior]==candidate;}
+    if(duplicate){continue;}rows[rowCount]=candidate;rowCount+=1u;
+    let sample=incidentInterpolationElementSample(candidate,point);if(!vectorValid(sample)){continue;}
+    xTerms[sampleCount]=sample.x;yTerms[sampleCount]=sample.y;zTerms[sampleCount]=sample.z;sampleCount+=1u;
+  }
+  if(sampleCount==0u){return invalidVector();}let inverseCount=1./f32(sampleCount);
+  return vec4f(inverseCount*vec3f(canonicalInterpolation8(xTerms,sampleCount),
+    canonicalInterpolation8(yTerms,sampleCount),canonicalInterpolation8(zTerms,sampleCount)),1.);
+}
 // Sample the accepted field at an arbitrary characteristic point. Main's
 // old-mesh advection re-resolved the containing leaf for every sample point
 // (owner(x)); pinning one face's owner closure for the whole midpoint trace
@@ -1466,6 +1859,7 @@ fn setNextValue(handle:u32,v:f32){a[nextValueAt(handle)]=bitcast<u32>(v);}
 // fallback so a point on a directory seam never rejects a face that the
 // owner-local closure could serve.
 fn characteristicSample(row:u32,point:vec3f)->vec4f{
+  let seam=seamInterpolationSample(point);if(vectorValid(seam)){return seam;}
   var anchor=acceptedRowContaining(point);
   if(anchor!=INVALID&&anchor<acc(2u)){
     var sample=interpolationElementSample(anchor,point);
@@ -1492,6 +1886,41 @@ fn characteristicSample(row:u32,point:vec3f)->vec4f{
   let extended=extendedOwnerVelocity(point);
   if(vectorValid(extended)){return extended;}
   return pinned;
+}
+// A stored face has an arbitrary low-coordinate owner. Reflections exchange
+// that owner with the other incident row, so choosing only owner(handle) at
+// the measure-zero face centre selects different dual stars on mirrored
+// faces. Section 5 defines one field on the dual mesh, not an owner-sided
+// field. Resolve the seam by canonically averaging both valid incident
+// element limits; at a free surface there is only one liquid-side limit.
+fn faceCharacteristicSample(handle:u32,point:vec3f)->vec4f{
+  let low=owner(handle);let high=neighbor(handle);
+  // At a one-sided free-surface face, Section 5's published extension is the
+  // unique outside-field authority. Use it for tangential components while
+  // imposing this face's exact stored u dot n. The former owner-local
+  // tetrahedral sample did not reproduce the face DOF and a reflected local
+  // fan could therefore launch different midpoint characteristics.
+  if(high==INVALID){
+    let extended=extendedOwnerVelocity(point);
+    let n=normal(handle);let normalValue=value(handle);
+    if(vectorValid(extended)&&finite3(n)&&finite(normalValue)){
+      let corrected=extended.xyz+(normalValue-canonicalVelocityDot(extended.xyz,n))*n;
+      if(finite3(corrected)){return vec4f(corrected,1.);}
+    }
+  }
+  let lowSample=incidentInterpolationElementSample(low,point);
+  var highSample=invalidVector();
+  if(high!=INVALID&&high!=low){highSample=incidentInterpolationElementSample(high,point);}
+  if(vectorValid(lowSample)&&vectorValid(highSample)){
+    let result=.5*vec3f(
+      canonicalInterpolation4(array<f32,4>(lowSample.x,highSample.x,0.,0.)),
+      canonicalInterpolation4(array<f32,4>(lowSample.y,highSample.y,0.,0.)),
+      canonicalInterpolation4(array<f32,4>(lowSample.z,highSample.z,0.,0.)));
+    if(finite3(result)){return vec4f(result,1.);}
+  }
+  if(vectorValid(lowSample)){return lowSample;}
+  if(vectorValid(highSample)){return highSample;}
+  return characteristicSample(low,point);
 }
 fn rowTouchesDryDirection(row:u32,direction:u32)->bool{
   if(row>=acc(2u)||liquidAt(row)==0u){return true;}
@@ -1590,17 +2019,19 @@ fn advect(cls:u32,index:u32,flattenedDryRows:bool){
     return;
   }
   let row=owner(handle);
-  // Follow the exact owner-local closure committed by the Section 5 producer.
-  // A face class is transition when either incident row is nonuniform, so it
-  // cannot choose this owner's basis. Conversely, a nominal case-zero owner
-  // with a body-diagonal coarse neighbour has no cube tags and uses the
-  // retained case-zero Delaunay fan. The centre cube tag is the producer's
-  // unambiguous marker: every complete regular closure publishes the row id.
-  let centerTag=regularTag(row,vec3i(0));
-  let useTransition=centerTag!=row;
   let x=centroid(handle);
   let prior=value(handle);
   setNextValue(handle,prior);
+  if(p.padB!=0u){
+    debugAdvectionWord(p.ownerOffset,handle,3.402823e38);
+    debugAdvectionWord(p.neighborOffset,handle,3.402823e38);
+    debugAdvectionWord(p.metadataOffset,handle,3.402823e38);
+    debugAdvectionWord(p.areaOffset,handle,3.402823e38);
+    debugAdvectionWord(p.inverseOffset,handle,3.402823e38);
+    debugAdvectionWord(p.fractionOffset,handle,3.402823e38);
+    debugAdvection3(p.normalOffset,handle,vec3f(3.402823e38));
+    debugAdvection3(p.centroidOffset,handle,vec3f(3.402823e38));
+  }
   let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
   if(!finite(aperture)||aperture<0.||aperture>1.){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
   // The source is an application boundary condition around the paper's
@@ -1663,22 +2094,31 @@ fn advect(cls:u32,index:u32,flattenedDryRows:bool){
       return;
     }
   }
-  var adv=invalidVector();
-  if(useTransition){adv=transitionSample(row,x);}else{adv=regularSample(row,x);}
+  var adv=faceCharacteristicSample(handle,x);
   if(!vectorValid(adv)){transportMetrics[handle]=adv;rejectVector(1u,handle,adv,cls);return;}
+  debugAdvectionWord(p.ownerOffset,handle,adv.x);
+  debugAdvectionWord(p.neighborOffset,handle,adv.y);
+  debugAdvectionWord(p.metadataOffset,handle,adv.z);
   // Second-order midpoint backtrace, as main's old-mesh advection performed
   // (v0 at the face, vm at the half-step, departure from vm). A first-order
   // Euler trace dissipates O(dt^2*|v|*|grad v|) per step, which measured as
   // mechanical-energy retention decaying to 0.83 by t=0.24 s on the mini dam
   // while the midpoint scheme holds ~0.99.
-  let midpoint=x-.5*p.physical.y*adv.xyz;
-  let middle=characteristicSample(row,midpoint);
+  let midpointRow=characteristicIncidentRow(handle,adv.xyz);
+  let midpoint=characteristicPoint(midpointRow,x,.5*p.physical.y,adv.xyz);
+  debugAdvectionWord(p.areaOffset,handle,midpoint.x);
+  debugAdvectionWord(p.inverseOffset,handle,midpoint.y);
+  debugAdvectionWord(p.fractionOffset,handle,midpoint.z);
+  let middle=characteristicSample(midpointRow,midpoint);
   if(!vectorValid(middle)){transportMetrics[handle]=middle;rejectVector(1u,handle,middle,cls);return;}
-  let departure=x-p.physical.y*middle.xyz;
-  let transported=characteristicSample(row,departure);
+  debugAdvection3(p.normalOffset,handle,middle.xyz);
+  let departureRow=characteristicIncidentRow(handle,middle.xyz);
+  let departure=characteristicPoint(departureRow,x,p.physical.y,middle.xyz);
+  debugAdvection3(p.centroidOffset,handle,departure);
+  let transported=characteristicSample(departureRow,departure);
   if(!vectorValid(transported)){transportMetrics[handle]=transported;rejectVector(2u,handle,transported,cls);return;}
   let n=normal(handle);
-  let projected=dot(transported.xyz,n);
+  let projected=canonicalVelocityDot(transported.xyz,n);
   let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
   if(!finite(projected)||!finite(area)||area<=0.||!finite(prior)){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
   setNextValue(handle,projected);
@@ -1846,7 +2286,7 @@ fn forceFamily(cls:u32,index:u32){
   if(lo>=acc(2u)||(hi!=INVALID&&hi>=acc(2u))){rejectSample(12u,handle);return;}
   let wet=liquidAt(lo)!=0u||(hi!=INVALID&&liquidAt(hi)!=0u);
   if(!wet){return;}
-  let forced=value(handle)+p.physical.y*dot(p.gravity.xyz,normal(handle));
+  let forced=value(handle)+p.physical.y*canonicalVelocityDot(p.gravity.xyz,normal(handle));
   if(!finite(forced)){rejectSample(11u,handle);return;}
   setValue(handle,forced);
 }
@@ -1859,7 +2299,7 @@ fn divergenceRow(cls:u32,index:u32){
   let row=workItem(cls,index);
   if(row==INVALID||row>=acc(2u)){return;}
   if(liquidAt(row)==0u){rhs[row]=0.;return;}
-  var flux=0.;
+  var fluxTerms:array<f32,31>;
   let count=rowSlotCount(row);
   if(count>p.maxSlots){rhs[row]=0.;rejectSample(20u,row);return;}
   for(var local=0u;local<count;local+=1u){
@@ -1874,8 +2314,9 @@ fn divergenceRow(cls:u32,index:u32){
     if(!finite(sign)||!finite(area)||!finite(aperture)||aperture<0.||aperture>1.||!finite(solid)||!finite(sample)){rhs[row]=0.;rejectSample(22u,row);return;}
     let prescribed=inflowNormalVelocity(handle);
     let boundaryVelocity=select(aperture*sample+(1.-aperture)*solid,prescribed.x,prescribed.y>0.);
-    flux+=sign*area*boundaryVelocity;
+    fluxTerms[local]=sign*area*boundaryVelocity;
   }
+  let flux=canonicalReconstructionSum(fluxTerms,count);
   if(!finite(flux)||!finite(p.physical.y)||p.physical.y<0.
     ||!finite(p.physical.z)||p.physical.z<=0.){rhs[row]=0.;rejectSample(23u,row);return;}
   // The fenced t=0 publication is the exact zero-length member of the same
@@ -1932,10 +2373,12 @@ fn markSeparationRow(cls:u32,index:u32){
   if(liquidAt(row)!=0u&&weight>1e-6){
     let solved=pressure[row];
     let count=rowSlotCount(row);
-    // Complementarity hysteresis. Strict tension (p < 0) opens a face; an
-    // already open face renews while the solved contact pressure stays below
-    // a quarter of the one-cell hydrostatic contact scale rho g h, and only
-    // genuine positive contact pressure re-closes it. Without renewal this
+    // Complementarity hysteresis. Pressure below a quarter of the one-cell
+    // hydrostatic scale rho g h is numerically indistinguishable from release,
+    // so it opens or renews the face; only genuine contact pressure re-closes
+    // it. Requiring the first solve to cross zero held the initially stationary
+    // top layer for one substep even though gravity had already released it.
+    // Without renewal this
     // mark was an unconditional per-epoch overwrite: a separated film solves
     // p ~ 0, loses its mark the very next epoch, re-welds to the lid through
     // the closed face's divergence row, and falls at an open/closed duty
@@ -1945,7 +2388,7 @@ fn markSeparationRow(cls:u32,index:u32){
     let previousBits=previous&63u;
     let age=(acc(3u)-(previous>>6u))&0x3ffffffu;
     let contact=.25*p.physical.z*weight*p.physical.x;
-    let opening=finite(solved)&&solved<0.;
+    let opening=finite(solved)&&solved<contact;
     let renewing=finite(solved)&&previousBits!=0u&&age<=2u&&solved<contact;
     if((opening||renewing)&&count<=p.maxSlots){
       // Gravity-relative, axis-free: a closed world face separates when its
@@ -2094,12 +2537,47 @@ fn projectFamily(cls:u32,index:u32){
 @compute @workgroup_size(64)fn projectStructuredClass7(@builtin(global_invocation_id)g:vec3u){projectFamily(7u,classItem(g));}
 @compute @workgroup_size(64)fn projectStructuredClass8(@builtin(global_invocation_id)g:vec3u){projectFamily(8u,classItem(g));}
 
+fn canonicalInterpolation8(values:array<f32,8>,count:u32)->f32{
+  var sorted=values;
+  for(var i=1u;i<count;i+=1u){let value=sorted[i];var j=i;
+    loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}
+    sorted[j]=value;
+  }
+  var sum=0.;var i=0u;
+  loop{if(i>=count){break;}let magnitude=abs(sorted[i]);var balance=0;var j=i;
+    loop{if(j>=count||abs(sorted[j])!=magnitude){break;}
+      if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}
+    sum+=f32(balance)*magnitude;i=j;
+  }
+  return sum;
+}
+fn canonicalInterpolation4(values:array<f32,4>)->f32{
+  var widened:array<f32,8>;
+  for(var i=0u;i<4u;i+=1u){widened[i]=values[i];}
+  return canonicalInterpolation8(widened,4u);
+}
+fn canonicalReconstructionSum(values:array<f32,31>,count:u32)->f32{
+  var sorted=values;
+  for(var i=1u;i<count;i+=1u){let value=sorted[i];var j=i;
+    loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}
+    sorted[j]=value;
+  }
+  var sum=0.;var i=0u;
+  loop{
+    if(i>=count){break;}
+    let magnitude=abs(sorted[i]);var balance=0;var j=i;
+    loop{if(j>=count||abs(sorted[j])!=magnitude){break;}
+      if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}
+    sum+=f32(balance)*magnitude;i=j;
+  }
+  return sum;
+}
 fn reconstructRow(cls:u32,index:u32){
   let row=workItem(cls,index);
   if(row==INVALID||row>=acc(2u)){return;}
   let header=caseHeader(metrics[row].caseId);
   if(header.y>p.maxSlots){rejectSample(50u,row);return;}
-  var canonical=vec3f(0.);
+  var termsX:array<f32,31>;var termsY:array<f32,31>;var termsZ:array<f32,31>;
   for(var local=0u;local<header.y;local+=1u){
     let at=row*p.maxSlots+local;
     let handle=a[abase()+p.rowHandleOffset+at];
@@ -2111,8 +2589,10 @@ fn reconstructRow(cls:u32,index:u32){
     let reconstruction=p.denseOffset+p.reconstructionOffset+3u*global;
     let coefficient=vec3f(bitsf(reconstruction),bitsf(reconstruction+1u),bitsf(reconstruction+2u));
     if(!finite(sample)||!finite3(coefficient)){rejectSample(53u,row);return;}
-    canonical+=coefficient*sample;
+    let term=coefficient*sample;termsX[local]=term.x;termsY[local]=term.y;termsZ[local]=term.z;
   }
+  let canonical=vec3f(canonicalReconstructionSum(termsX,header.y),
+    canonicalReconstructionSum(termsY,header.y),canonicalReconstructionSum(termsZ,header.y));
   let projected=inverseTransform(canonical,metrics[row].transformAndFlags&63u);
   if(!finite3(projected)){rejectSample(54u,row);return;}
   rowVelocity[rbase()+row]=vec4f(projected,1.);

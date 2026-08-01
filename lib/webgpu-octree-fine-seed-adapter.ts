@@ -499,10 +499,21 @@ fn coord(cell:u32)->vec3u{return vec3u(cell%dims().x,(cell/dims().x)%dims().y,ce
 fn leafOrigin(leaf:FineSeedLeaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn valid(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(dims()));}
 @group(0) @binding(12) var bootstrapLevelSetIn:texture_3d<f32>;
-// Cell-unit sample of the imported dense t=0 level set. Mode 3 scenes have no
-// closed-form surface, so this replaces analyticInitialPhi for them.
+// Cell-unit sample of the imported dense t=0 level set. Texture values live at
+// coarse cell centres, while an even-sized octree leaf has its geometric centre
+// on a cell boundary. Interpolate in the cell-centred lattice instead of
+// rounding that centre toward +x/+y/+z; the latter shifts opposite faces in the
+// same world direction and destroys reflection symmetry by half a coarse cell.
 fn bootstrapTexturePhi(point:vec3f)->f32{
-  return textureLoad(bootstrapLevelSetIn,clamp(vec3i(floor(point)),vec3i(0),vec3i(dims())-vec3i(1)),0).x;}
+  let lattice=point-vec3f(0.5);let base=vec3i(floor(lattice));let t=fract(lattice);
+  var value=0.0;for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let high=vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u);
+    let weight=select(1.0-t.x,t.x,high.x)*select(1.0-t.y,t.y,high.y)
+      *select(1.0-t.z,t.z,high.z);
+    value+=weight*textureLoad(bootstrapLevelSetIn,
+      clamp(base+offset,vec3i(0),vec3i(dims())-vec3i(1)),0).x;
+  }return value;}
 fn bootstrapPhi(point:vec3f)->f32{
   if(params.selection.z==3u){return bootstrapTexturePhi(point);}
   return analyticInitialPhi(point);}
@@ -534,7 +545,7 @@ fn structuredVelocityRowValid(row:u32)->bool{
   return velocity.w==1.0&&finite(velocity.x)&&finite(velocity.y)&&finite(velocity.z);
 }
 @compute @workgroup_size(64) fn buildFineSeedLeaves(@builtin(global_invocation_id) gid:vec3u){
-  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&fineSeedLeaves)){return;}let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!structuredVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){return;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;}else{let sampleCell=vec3i(clamp(vec3u(centre),vec3u(0),dims()-vec3u(1)));centrePhi=bootstrapPhi(vec3f(sampleCell)+vec3f(0.5));gradient=vec3f(0.5*(bootstrapPhi(vec3f(sampleCell+vec3i(1,0,0))+vec3f(0.5))-bootstrapPhi(vec3f(sampleCell-vec3i(1,0,0))+vec3f(0.5))),0.5*(bootstrapPhi(vec3f(sampleCell+vec3i(0,1,0))+vec3f(0.5))-bootstrapPhi(vec3f(sampleCell-vec3i(0,1,0))+vec3f(0.5))),0.5*(bootstrapPhi(vec3f(sampleCell+vec3i(0,0,1))+vec3f(0.5))-bootstrapPhi(vec3f(sampleCell-vec3i(0,0,1))+vec3f(0.5))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let openTop=bitcast<u32>(params.damDimensions.w)!=0u;
+  let row=gid.x;if(row>=params.dimsCapacity.w||row>=arrayLength(&leafHeaders)||row>=arrayLength(&fineSeedLeaves)){return;}let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!structuredVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;return;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){return;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;}else{centrePhi=bootstrapPhi(centre);gradient=vec3f(0.5*(bootstrapPhi(centre+vec3f(1,0,0))-bootstrapPhi(centre-vec3f(1,0,0))),0.5*(bootstrapPhi(centre+vec3f(0,1,0))-bootstrapPhi(centre-vec3f(0,1,0))),0.5*(bootstrapPhi(centre+vec3f(0,0,1))-bootstrapPhi(centre-vec3f(0,0,1))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let openTop=bitcast<u32>(params.damDimensions.w)!=0u;
   // Liquid against a closed lid has no in-domain sign-changing edge. Publish
   // the cutoff leaf so the fine topology exists while that surface separates.
   let virtualInterface=!openTop&&origin.y+header.size>=dims().y&&centrePhi<0.0;let core=(minimumPhi<=0.0&&maximumPhi>=0.0)||virtualInterface;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=structuredRowVelocities[structuredVelocityRowIndex(row)].xyz;fineSeedLeaves[row]=FineSeedLeaf(origin.x,origin.y,origin.z,header.size,flags,fineSeedLeaves[row].pad0,0u,0u,vec4f(centrePhi,gradient),vec4f(motion,length(motion)));

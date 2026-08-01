@@ -53,11 +53,13 @@ import {
   inspectTallVolumeGaps,
   readBufferBinding,
   readBufferBindingsPacked,
+  readCompactOctreePressureState3D,
   readCompactOctreeVelocityField3D,
   readCubicVolumeField as readCubicVolumeFieldSnapshot,
   readFloatTexture2D,
   readFloatTexture3D,
   readFineUpperSurfaceField,
+  readFinePhiSymmetrySource,
   readFluidBrickSnapshot,
   readGlobalFineGenerationDiagnostics,
   readSparseVoxelStats,
@@ -233,6 +235,7 @@ interface ResolvedSceneRunOptions {
   stabilityEnvelope: boolean;
   energyEverySteps: number;
   sparseStats: boolean;
+  rasterInitialFinal: boolean;
   rasterCheckpoints: boolean;
   globalFineGeneration: boolean;
   powerGenerationAudit: boolean;
@@ -264,6 +267,7 @@ function resolveSceneRunOptions(scenario: SmokeScenario): ResolvedSceneRunOption
     energyEverySteps: process.env.FLUID_ENERGY_EVERY_STEPS === undefined
       ? collect.energyEverySteps ?? 0 : energyEverySteps,
     sparseStats: environmentBoolean("FLUID_SPARSE_STATS", collect.sparsePublication),
+    rasterInitialFinal: collect.raster === "initial-final",
     rasterCheckpoints: environmentBoolean("FLUID_RASTER_CHECKPOINTS", collect.raster === "checkpoints"),
     globalFineGeneration: environmentBoolean("FLUID_GLOBAL_FINE_GENERATION_TRANSITION", collect.globalFineGeneration),
     powerGenerationAudit: environmentBoolean("FLUID_POWER_GENERATION_AUDIT", powerAudit !== false),
@@ -879,6 +883,7 @@ async function runGPU(
   const stabilityEnvelopeRequested = options.stabilityEnvelope;
   const energyEverySteps = options.energyEverySteps;
   const sparseStatsRequested = options.sparseStats;
+  const rasterInitialFinalRequested = options.rasterInitialFinal;
   const rasterCheckpointRequested = options.rasterCheckpoints;
   const globalFineGenerationTransitionRequested = options.globalFineGeneration;
   const powerGenerationAuditRequested = options.powerGenerationAudit;
@@ -1141,14 +1146,34 @@ async function runGPU(
     : undefined;
   const initialGlobalFineGeneration = verifyGlobalFineGenerationTransition && method.id === "octree"
     ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
-  const initialGlobalFineRaster = verifyGlobalFineGenerationTransition && method.id === "octree"
-    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true) : undefined;
+  const initialGlobalFineRaster = rasterInitialFinalRequested && method.id === "octree"
+    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
+      verifyGlobalFineGenerationTransition)
+    : undefined;
   if (initialGlobalFineRaster) {
     // Emit the pre-step renderer evidence immediately.  A later simulation
     // transaction may deliberately reject and roll back, but that must not
     // hide whether reset-time global-fine rasterization was already visible.
     console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
       phase: "initial-global-fine-raster", ...initialGlobalFineRaster }));
+    if (process.env.FLUID_RASTER_MESH_SYMMETRY === "1") {
+      const mesh = initialGlobalFineRaster.surfaceMeshSymmetry;
+      const phi = initialGlobalFineRaster.finePhiSymmetry;
+      const sharp = initialGlobalFineRaster.sharpPatchRaster;
+      // Factor one has no separate fine publication. Its fixed tetrahedral
+      // diagonal can produce reflection-dependent floating-point normals even
+      // when the geometric vertex set is exactly symmetric, so use position
+      // coverage for the missing-face oracle in that mode.
+      if (!mesh || !sharp || sharp.patchCount === 0 || sharp.invalidPatchCount !== 0
+        || (hasSeparateFineLevelSetBand
+          ? mesh.exactMismatchCount !== 0 : mesh.exactPositionMismatchCount !== 0)
+        || mesh.nonFiniteCount !== 0
+        || (hasSeparateFineLevelSetBand && !phi)
+        || (phi && (phi.supportMismatchCount !== 0 || phi.exactValueMismatchCount !== 0
+          || phi.nonFiniteCount !== 0 || phi.maximumAbsoluteError !== 0))) {
+        throw new Error(`initial global-fine raster oracle rejected: ${JSON.stringify({ mesh, phi, sharp })}`);
+      }
+    }
   }
   if (powerGenerationAuditRequested && method.id === "octree") {
     const initialAudit = solver as GPUSolverInstance & {
@@ -2042,6 +2067,10 @@ async function runGPU(
           }
         }
       }
+      const compactPressureState = checkpointSources.has("compact pressure") && method.id === "octree"
+        ? await readCompactOctreePressureState3D(device, solver,
+          [solver.info.nx, solver.info.ny, solver.info.nz])
+        : undefined;
       const raster = rasterCheckpointRequested && method.id === "octree"
         ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
           verifyGlobalFineGenerationTransition)
@@ -2057,6 +2086,36 @@ async function runGPU(
         time_s: solver.info.submittedTime_s ?? 0, volumeField: cubic.field,
         ...(compactVelocityField ? { velocityField: compactVelocityField } : {}),
         ...(fineUpperSurfaceField ? { fineUpperSurfaceField } : {}),
+        ...(compactPressureState ? {
+          pressureField: compactPressureState.pressure,
+          pressureRhsField: compactPressureState.rhs,
+          pressureDiagonalField: compactPressureState.diagonal,
+          ...(compactPressureState.section63Diagonal ? {
+            pressureSection63DiagonalField: compactPressureState.section63Diagonal } : {}),
+          ...(compactPressureState.section63CaseId ? {
+            pressureSection63CaseIdField: compactPressureState.section63CaseId } : {}),
+          ...(compactPressureState.initialResidual ? {
+            pressureInitialResidualField: compactPressureState.initialResidual } : {}),
+          ...(compactPressureState.initialPreconditioned ? {
+            pressureInitialPreconditionedField: compactPressureState.initialPreconditioned } : {}),
+          ...(compactPressureState.initialPreconditionedImage ? {
+            pressureInitialPreconditionedImageField: compactPressureState.initialPreconditionedImage } : {}),
+          ...(compactPressureState.preconditionerPreSmoothed ? {
+            pressurePreconditionerPreSmoothedField: compactPressureState.preconditionerPreSmoothed } : {}),
+          ...(compactPressureState.preconditionerZeroSmoothed ? {
+            pressurePreconditionerZeroSmoothedField: compactPressureState.preconditionerZeroSmoothed } : {}),
+          ...(compactPressureState.preconditionerFirstOperatorImage ? {
+            pressurePreconditionerFirstOperatorImageField: compactPressureState.preconditionerFirstOperatorImage } : {}),
+          ...(compactPressureState.preconditionerFirstSmoothed ? {
+            pressurePreconditionerFirstSmoothedField: compactPressureState.preconditionerFirstSmoothed } : {}),
+          ...(compactPressureState.preconditionerInnerResidual ? {
+            pressurePreconditionerInnerResidualField: compactPressureState.preconditionerInnerResidual } : {}),
+          ...(compactPressureState.preconditionerInnerCorrection ? {
+            pressurePreconditionerInnerCorrectionField: compactPressureState.preconditionerInnerCorrection } : {}),
+          ...(compactPressureState.preconditionerPostCorrected ? {
+            pressurePreconditionerPostCorrectedField: compactPressureState.preconditionerPostCorrected } : {}),
+          topologyField: compactPressureState.topology,
+        } : {}),
       });
       for (const capability of collected.available) collectedEvidence.add(capability);
       checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary,
@@ -2675,8 +2734,78 @@ async function runGPU(
   // a wiring failure rather than evaluating the solver's actual state.
   const finalGlobalFineGeneration = method.id === "octree"
     ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
-  const finalGlobalFineRaster = verifyGlobalFineGenerationTransition && method.id === "octree"
-    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true) : undefined;
+  const finalGlobalFineRaster = rasterInitialFinalRequested && method.id === "octree"
+    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
+      verifyGlobalFineGenerationTransition)
+    : undefined;
+  if (process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1" && method.id === "octree") {
+    const levelSet = solver.surfaceFieldTexture
+      ? await readFloatTexture3D(device, solver.surfaceFieldTexture, info.nx, info.ny, info.nz)
+      : undefined;
+    if (levelSet) {
+      let exactMismatchCount = 0, maximumAbsoluteError = 0;
+      for (let z = 0; z < info.nz; z += 1) for (let y = 0; y < info.ny; y += 1) {
+        for (let x = 0; x < info.nx; x += 1) {
+          const source = levelSet[x + info.nx * (y + info.ny * z)]!;
+          for (const [tx, tz] of [[info.nx - 1 - x, z], [x, info.nz - 1 - z], [z, x]] as const) {
+            const target = levelSet[tx + info.nx * (y + info.ny * tz)]!;
+            if (!Object.is(source, target)) exactMismatchCount += 1;
+            maximumAbsoluteError = Math.max(maximumAbsoluteError, Math.abs(source - target));
+          }
+        }
+      }
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-bootstrap-level-set",
+        metrics: { exactMismatchCount, maximumAbsoluteError } }));
+    }
+    const coarseSource = solver.coarseLevelSetSource;
+    if (coarseSource) {
+      const directory = coarseSource.directory.buffer;
+      const bytes = await readBufferBinding(device, { buffer: directory }, directory.size);
+      const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+      const floats = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+      const entryCount = (words.length - 8) / 8, volume = info.nx * info.ny * info.nz;
+      const denseStart = entryCount - volume;
+      let exactMismatchCount = 0, maximumAbsoluteError = 0;
+      let first: Record<string, unknown> | undefined;
+      let worst: Record<string, unknown> | undefined;
+      for (let z = 0; z < info.nz; z += 1) for (let y = 0; y < info.ny; y += 1) {
+        for (let x = 0; x < info.nx; x += 1) {
+          const at = x + info.nx * (y + info.ny * z);
+          const source = floats[8 + 8 * (denseStart + at) + 2]!;
+          for (const [transform, tx, tz] of [
+            ["reflect-x", info.nx - 1 - x, z],
+            ["reflect-z", x, info.nz - 1 - z],
+            ["swap-xz", z, x],
+          ] as const) {
+            const targetAt = tx + info.nx * (y + info.ny * tz);
+            const target = floats[8 + 8 * (denseStart + targetAt) + 2]!;
+            const absoluteError = Math.abs(source - target);
+            if (!Object.is(source, target)) {
+              exactMismatchCount += 1;
+              const detail = { transform, source: [x, y, z], target: [tx, y, tz],
+                sourceValue: source, targetValue: target, absoluteError };
+              first ??= detail;
+              if (!worst || absoluteError > Number(worst.absoluteError)) worst = detail;
+            }
+            maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
+          }
+        }
+      }
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-coarse-level-set", generation: words[1],
+        metrics: { exactMismatchCount, maximumAbsoluteError, first, worst } }));
+    }
+    const pair = (solver as GPUSolverInstance & { globalFineSourceDebugPair?: {
+      a: WebGPUFineLevelSetBrickSource; b: WebGPUFineLevelSetBrickSource; publishedIsA: boolean;
+    } }).globalFineSourceDebugPair;
+    if (pair) {
+      const transported = pair.publishedIsA ? pair.b : pair.a;
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-fine-transport",
+        metrics: await readFinePhiSymmetrySource(device, transported) }));
+    }
+  }
   const sparseVoxelStats = sparseStatsRequested && sparseSource
     ? await readSparseVoxelStats(device, sparseSource, seedBrickBounds)
     : undefined;

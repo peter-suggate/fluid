@@ -11,8 +11,9 @@ import { PassBroker } from "./webgpu-pass-broker";
 import { planOctreeSurfaceStateAllocation } from "./octree-surface-allocation";
 import { planOctreeAnalyticBootstrapBounds } from "./octree-analytic-bootstrap";
 import { WebGPUOctreeAnalyticBootstrapWorklist } from "./webgpu-octree-analytic-bootstrap";
-import { combineInitialBrickWet, initialFluidBrickContainsCell, sceneDamBreakFractions } from "./initial-fluid";
+import { combineInitialBrickWet, initialFluidBrickContainsCell, initialFluidBrickUnionBounds, sceneDamBreakFractions } from "./initial-fluid";
 import { signedDistanceFromVolume } from "./quadtree-tall-cell-grid";
+import { initialLiquidPhi } from "./tall-cell-grid";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPUQuadtreeSurfaceState, type SurfaceInflowState } from "./webgpu-quadtree-builder";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
@@ -50,9 +51,11 @@ import { WebGPUOctreeAirVelocitySupportProducer } from "./webgpu-octree-air-velo
 import { WebGPUOctreeSolidVertexSdf } from "./webgpu-octree-solid-vertex-sdf";
 import {
   OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
+  normalizeOctreeSection43BoundarySmoothing,
   type OctreeFirstOrderSPDVCycle,
 } from "./webgpu-octree-section43-contract";
 import {
+  OCTREE_PIPELINED_PCG_CONTROL_BYTES,
   WebGPUOctreePipelinedMGPCG,
   octreePipelinedMGPCGCombinedReductionDrainsEnabled,
   type OctreePipelinedWorksetLinearOperator,
@@ -93,6 +96,7 @@ import {
 } from "./webgpu-octree-fine-levelset-bricks";
 import {
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
+  maximumFineLevelSetJFAStride,
   planFineLevelSetJFAStrides,
   WebGPUFineLevelSetRedistance,
 } from "./webgpu-octree-fine-levelset-redistance";
@@ -206,6 +210,18 @@ export interface OctreeProjectionWorkAccountingBuffers {
   readonly mgpcgPreconditioned: GPUBufferBinding;
   readonly mgpcgPreconditionedImage: GPUBufferBinding;
   readonly mgpcgResidual: GPUBufferBinding;
+  /** The live divergence RHS consumed by MGPCG, not the cached header value. */
+  readonly pressureRhs: GPUBufferBinding;
+  readonly symmetryInitialResidual?: GPUBufferBinding;
+  readonly symmetryInitialPreconditioned?: GPUBufferBinding;
+  readonly symmetryInitialPreconditionedImage?: GPUBufferBinding;
+  readonly symmetryPreconditionerPreSmoothed?: GPUBufferBinding;
+  readonly symmetryPreconditionerZeroSmoothed?: GPUBufferBinding;
+  readonly symmetryPreconditionerFirstOperatorImage?: GPUBufferBinding;
+  readonly symmetryPreconditionerFirstSmoothed?: GPUBufferBinding;
+  readonly symmetryPreconditionerInnerResidual?: GPUBufferBinding;
+  readonly symmetryPreconditionerInnerCorrection?: GPUBufferBinding;
+  readonly symmetryPreconditionerPostCorrected?: GPUBufferBinding;
   /** One-bank sizing view over the packed A/B Section 6.3 coefficients. */
   readonly section63Coefficients: GPUBufferBinding;
   readonly outerControl: GPUBufferBinding;
@@ -470,6 +486,26 @@ export function octreePersistentMGPCGEnabled(
   return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG !== "0";
 }
 
+export type OctreePressureExecutorKind = "persistent" | "hierarchical";
+
+/**
+ * Resolve the pressure executor before any pressure pipeline is constructed.
+ * The persistent executor is deliberately not a hot runtime switch: keeping
+ * the hierarchical oracle reachable in the same instance made Dawn compile
+ * every fallback pipeline even though production never encoded it.
+ */
+export function selectOctreePressureExecutor(
+  rowCapacity: number,
+  coarseOnlySurfaceTracking: boolean,
+  environment?: Readonly<Record<string, string | undefined>>,
+): OctreePressureExecutorKind {
+  return !coarseOnlySurfaceTracking
+    && octreePersistentMGPCGEnabled(environment)
+    && WebGPUOctreePersistentMGPCG.selects(rowCapacity, environment)
+    ? "persistent"
+    : "hierarchical";
+}
+
 export function octreeSparseWorldRequired(
   hasTerrain: boolean,
   rigidBodyCount: number,
@@ -561,6 +597,8 @@ export function planOctreePowerBoundaryStrip(
 
 export interface OctreeProjectionPipelineReachability {
   readonly solidRasterization: boolean;
+  readonly localFrontierCandidateSort: boolean;
+  readonly cooperativeRowDeltaRing: boolean;
 }
 
 /** Compile only entry points reachable from the immutable solver configuration. */
@@ -568,8 +606,22 @@ export function octreeProjectionPipelineRequired(
   entryPoint: string,
   config: OctreeProjectionPipelineReachability,
 ): boolean {
+  // These entry points exist only as specialization templates. Every encoded
+  // fine refinement selects a target-size pipeline from `refineLevelPipelines`.
+  if (entryPoint === "refineTopology" || entryPoint === "refineTopologyDelta") {
+    return false;
+  }
   if (entryPoint === "rasterizeSolids" || entryPoint === "rasterizeSolidsDelta") {
     return config.solidRasterization;
+  }
+  if (entryPoint === "sortFrontierCandidatesLocal") {
+    return config.localFrontierCandidateSort;
+  }
+  if (entryPoint === "markRowDeltaRing") {
+    return config.cooperativeRowDeltaRing;
+  }
+  if (entryPoint === "markRowDeltaRingBlocks") {
+    return !config.cooperativeRowDeltaRing;
   }
   return true;
 }
@@ -1250,6 +1302,7 @@ type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
     levelCapacities: readonly number[]; encodedCorrectionDispatches: number;
     persistentEnabled: boolean; persistentMaximumIterations: number }>;
   readHierarchyCensus(): Promise<Readonly<{ levels: readonly Readonly<Record<string, number>>[] }>>;
+  initializePipelines(onProgress?: (label: string, completed: number, total: number) => void): Promise<void>;
   encodeCapture(broker: PassBroker): void;
   readonly candidateControl: GPUBuffer;
   /** Copy source for the step-snapshot ring (A4). Never bound by this file. */
@@ -1296,6 +1349,7 @@ export const OCTREE_PROJECTION_FRONTIER_SORT_BUFFER_LAYOUT = Object.freeze([
   { binding: 2, type: "storage" },
   { binding: 3, type: "storage" },
   { binding: 6, type: "uniform" },
+  { binding: 7, type: "uniform" },
   { binding: 9, type: "storage" },
   { binding: 13, type: "storage" },
 ] as const);
@@ -1373,7 +1427,7 @@ export class WebGPUOctreeProjection {
   private readonly ownerPages: WebGPUOctreeSimulationOwnerPages;
   private readonly pressureA: GPUBuffer;
   private readonly pressureB: GPUBuffer;
-  private readonly pipelinedMGPCGVectors: OctreePipelinedMGPCGVectors;
+  private readonly pipelinedMGPCGVectors?: OctreePipelinedMGPCGVectors;
   private readonly compaction: GPUBuffer;
   private readonly leafHeaders: GPUBuffer;
   private readonly candidateLeafHeaders: GPUBuffer;
@@ -1467,6 +1521,7 @@ export class WebGPUOctreeProjection {
   private readonly pipelineLayout: GPUPipelineLayout;
   private readonly frontierSortLayout: GPUBindGroupLayout;
   private readonly frontierSortPipelineLayout: GPUPipelineLayout;
+  private readonly frontierSortStageParams?: GPUBuffer;
   private shader?: GPUShaderModule;
   private readonly projectionShaderCode: string;
   private readonly diagnosticLayout: GPUBindGroupLayout;
@@ -1480,7 +1535,7 @@ export class WebGPUOctreeProjection {
   private groups: { ab: GPUBindGroup; ba: GPUBindGroup };
   private candidateRowGroups: { fromA: GPUBindGroup; fromB: GPUBindGroup };
   private fineSummarySizingGroup: GPUBindGroup;
-  private readonly frontierSortGroup: GPUBindGroup;
+  private readonly frontierSortGroups: readonly GPUBindGroup[];
   /** Current fine/coarse classification plus persistent topology-tile membership. */
   private topologyDecisionGroup?: GPUBindGroup;
   private denseBootstrapPhiReleased = false;
@@ -1546,16 +1601,15 @@ export class WebGPUOctreeProjection {
   /** Explicit diagnostic liquid-row-only authority. Surface factor one is
    * normally a sparse B4 interface band with positive-air support. */
   private readonly coarseOnlySurfaceTracking: boolean;
-  private pipelinedMGPCG!: WebGPUOctreePipelinedMGPCG;
-  /**
-   * Single-dispatch executor for small domains (Part D). Present only when the
-   * ALLOCATED row capacity is inside the authored threshold; the hierarchical
-   * `pipelinedMGPCG` remains constructed and selectable either way.
-   */
+  private readonly pressureExecutor: OctreePressureExecutorKind;
+  private pressureSolverControl!: GPUBuffer;
+  private ownsPressureSolverControl = false;
+  private pipelinedMGPCG?: WebGPUOctreePipelinedMGPCG;
+  /** Single-dispatch executor selected at construction for eligible domains. */
   private persistentMGPCG?: WebGPUOctreePersistentMGPCG;
   private firstOrderVCycle!: OctreeFirstOrderVCycleImplementation;
-  private section43HybridPreconditioner!: WebGPUOctreeSection43HybridPreconditioner;
-  private resolvedLinearOperator!: OctreePipelinedWorksetLinearOperator;
+  private section43HybridPreconditioner?: WebGPUOctreeSection43HybridPreconditioner;
+  private resolvedLinearOperator?: OctreePipelinedWorksetLinearOperator;
   private structuredVelocity?: WebGPUDirectStructuredVelocityAuthority;
   private structuredBoundary?: WebGPUStructuredBoundaryCoefficients;
   private topologyEpoch?: WebGPUOctreeTopologyEpoch;
@@ -1609,7 +1663,7 @@ export class WebGPUOctreeProjection {
     private readonly dims: { nx: number; ny: number; nz: number },
     private readonly resources: OctreeProjectionResources,
     options: OctreeProjectionOptions,
-    deferPipelineCompilation = false
+    private readonly deferPipelineCompilation = false
   ) {
     const count = dims.nx * dims.ny * dims.nz;
     this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 16);
@@ -1699,6 +1753,10 @@ export class WebGPUOctreeProjection {
       scene.container.top === "closed",
       scene.container.fillFraction,
       deviceRowLimit,
+    );
+    this.pressureExecutor = selectOctreePressureExecutor(
+      this.pressureCapacity.rowCapacity,
+      this.coarseOnlySurfaceTracking,
     );
     // The immutable pressure-row capacity selects the production lane. Every
     // capacity owned by one persistent workgroup must fit that executor's
@@ -1875,14 +1933,16 @@ export class WebGPUOctreeProjection {
       size: Math.max(4, pressureSlots * 4),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    this.pipelinedMGPCGVectors = Object.freeze({
-      pressure: recurrenceVector("Octree pipelined MGPCG pressure"),
-      residual: recurrenceVector("Octree pipelined MGPCG residual"),
-      preconditioned: recurrenceVector("Octree pipelined MGPCG preconditioned residual"),
-      preconditionedImage: recurrenceVector("Octree pipelined MGPCG A(Mr)"),
-      direction: recurrenceVector("Octree pipelined MGPCG direction"),
-      directionImage: recurrenceVector("Octree pipelined MGPCG A(direction)"),
-    });
+    if (this.pressureExecutor === "hierarchical") {
+      this.pipelinedMGPCGVectors = Object.freeze({
+        pressure: recurrenceVector("Octree pipelined MGPCG pressure"),
+        residual: recurrenceVector("Octree pipelined MGPCG residual"),
+        preconditioned: recurrenceVector("Octree pipelined MGPCG preconditioned residual"),
+        preconditionedImage: recurrenceVector("Octree pipelined MGPCG A(Mr)"),
+        direction: recurrenceVector("Octree pipelined MGPCG direction"),
+        directionImage: recurrenceVector("Octree pipelined MGPCG A(direction)"),
+      });
+    }
     // The scan totals are dead after leaf emission. The tail then doubles as
     // twelve resident rank-six generalized body-response vectors, avoiding a
     // ninth storage binding on minimum-limit WebGPU devices.
@@ -2016,16 +2076,39 @@ export class WebGPUOctreeProjection {
     };
     this.fineSummarySizingGroup = this.createProjectionGroup(
       this.unpublishedFineSummaryDirectory, this.pressureB);
-    this.frontierSortGroup = this.device.createBindGroup({
-      layout: this.frontierSortLayout,
-      entries: [
-        { binding: 2, resource: { buffer: this.compaction } },
-        { binding: 3, resource: { buffer: this.topology } },
-        { binding: 6, resource: { buffer: this.params } },
-        { binding: 9, resource: { buffer: this.frontierSortScratch } },
-        { binding: 13, resource: { buffer: this.leafFrontier } },
-      ],
-    });
+    const frontierSortStageCount = this.useLocalFrontierCandidateSort
+      ? 0 : Math.ceil(Math.log2(Math.max(1, this.frontierAllocation.listCapacity))) + 1;
+    const frontierSortStageStride = Math.max(
+      16, this.device.limits.minUniformBufferOffsetAlignment ?? 256,
+    );
+    this.frontierSortStageParams = frontierSortStageCount > 0
+      ? this.device.createBuffer({
+        label: "Immutable frontier merge-sort stage records",
+        size: frontierSortStageCount * frontierSortStageStride,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      })
+      : undefined;
+    if (this.frontierSortStageParams) {
+      const records = new Uint32Array(frontierSortStageCount * frontierSortStageStride / 4);
+      for (let stage = 0; stage < frontierSortStageCount; stage += 1) {
+        records[stage * frontierSortStageStride / 4] = stage;
+      }
+      this.device.queue.writeBuffer(this.frontierSortStageParams, 0, records);
+    }
+    this.frontierSortGroups = this.frontierSortStageParams
+      ? Array.from({ length: frontierSortStageCount }, (_, stage) => this.device.createBindGroup({
+        layout: this.frontierSortLayout,
+        entries: [
+          { binding: 2, resource: { buffer: this.compaction } },
+          { binding: 3, resource: { buffer: this.topology } },
+          { binding: 6, resource: { buffer: this.params } },
+          { binding: 7, resource: { buffer: this.frontierSortStageParams!,
+            offset: stage * frontierSortStageStride, size: 16 } },
+          { binding: 9, resource: { buffer: this.frontierSortScratch } },
+          { binding: 13, resource: { buffer: this.leafFrontier } },
+        ],
+      }))
+      : [];
     this.diagnosticLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -2061,10 +2144,11 @@ export class WebGPUOctreeProjection {
         + this.pressureA.size + this.pressureB.size + this.candidatePressure.size
         + this.candidatePressureHistory.size + this.acceptedPressureHistory.size
         + this.leafHeaders.size + this.candidateLeafHeaders.size + this.frontierSortScratch.size
+        + (this.frontierSortStageParams?.size ?? 0)
         + this.leafFrontier.size + this.compaction.size + this.unpublishedFineSummaryDirectory.size
         + this.solveStats.size + this.solveDispatch.size + this.topologyCandidateDispatch.size
         + this.params.size + this.coldDispatch.size
-        + Object.values(this.pipelinedMGPCGVectors)
+        + Object.values(this.pipelinedMGPCGVectors ?? {})
           .reduce((bytes, buffer) => bytes + buffer.size, 0)
         + (this.sparseBrickWorld?.allocatedBytes ?? this.topologyResidency.allocatedBytes)
         + (this.analyticBootstrapWorklist?.allocatedBytes ?? 0),
@@ -2097,7 +2181,7 @@ export class WebGPUOctreeProjection {
       globalFineTransportVertexScratchBytes: 0,
     };
     this.surfaceStateAccountingBytes = surfaceStateAllocation.allocatedBytes;
-    const recurrenceVectorBytes = Object.values(this.pipelinedMGPCGVectors)
+    const recurrenceVectorBytes = Object.values(this.pipelinedMGPCGVectors ?? {})
       .reduce((bytes, buffer) => bytes + buffer.size, 0);
     this.workAccounting.setAuthorityBytes("owner-pages", this.ownerPages.allocatedBytes);
     this.workAccounting.setAuthorityBytes("solid-cells", this.solidCells.size);
@@ -2106,6 +2190,7 @@ export class WebGPUOctreeProjection {
       this.pressureA.size + this.pressureB.size + this.candidatePressure.size
       + this.candidatePressureHistory.size + this.acceptedPressureHistory.size
       + this.leafHeaders.size + this.candidateLeafHeaders.size + this.frontierSortScratch.size
+      + (this.frontierSortStageParams?.size ?? 0)
       + this.leafFrontier.size + this.compaction.size + this.unpublishedFineSummaryDirectory.size
       + this.solveStats.size + this.solveDispatch.size + this.topologyCandidateDispatch.size
       + this.params.size + this.coldDispatch.size);
@@ -2228,7 +2313,20 @@ export class WebGPUOctreeProjection {
           this.globalFineLevelSet = new WebGPUFineLevelSetBricks(device, globalPlan);
           this.globalFineSourceA = this.globalFineLevelSet.initializeEmptyGPUGeneration(1);
           this.globalFineSourceB = this.globalFineLevelSet.prepareGPUGeneration(2);
-          const exactAnalyticFineSeed = this.analyticSparseBootstrap
+          const brickUnionBounds = initialFluidBrickUnionBounds(
+            this.scene, [dims.nx, dims.ny, dims.nz], this.scene.voxelDomain.brickSize_cells,
+          );
+          const exactAnalyticFineSeed = brickUnionBounds
+            ? { initialCondition: "box" as const,
+              // Fine SPGrid coordinates are container-local while authored
+              // scene x/z coordinates are centred about the tank origin.
+              minimum: [brickUnionBounds.minimum.x + 0.5 * this.scene.container.width_m,
+                brickUnionBounds.minimum.y,
+                brickUnionBounds.minimum.z + 0.5 * this.scene.container.depth_m] as const,
+              maximum: [brickUnionBounds.maximum.x + 0.5 * this.scene.container.width_m,
+                brickUnionBounds.maximum.y,
+                brickUnionBounds.maximum.z + 0.5 * this.scene.container.depth_m] as const }
+            : this.analyticSparseBootstrap
             && (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
             ? { initialCondition: this.scene.fluid.initialCondition,
               fillFraction: this.scene.container.fillFraction,
@@ -2299,13 +2397,13 @@ export class WebGPUOctreeProjection {
       ...this.pipelineConstants(true), targetRefinementSize: size,
     } } };
   }
-  private frontierSortDescriptor(stage: number): GPUComputePipelineDescriptor {
+  private frontierSortDescriptor(): GPUComputePipelineDescriptor {
     return {
       layout: this.frontierSortPipelineLayout,
       compute: {
         module: this.requireProjectionShader(),
         entryPoint: "sortFrontierCandidates",
-        constants: { ...this.pipelineConstants(true), frontierSortStage: stage },
+        constants: this.pipelineConstants(true),
       },
     };
   }
@@ -2387,6 +2485,8 @@ export class WebGPUOctreeProjection {
   private pipelineReachability(): OctreeProjectionPipelineReachability {
     return {
       solidRasterization: this.hasDenseSolidCells,
+      localFrontierCandidateSort: this.useLocalFrontierCandidateSort,
+      cooperativeRowDeltaRing: this.useCooperativeRowDeltaRing,
     };
   }
 
@@ -2403,7 +2503,7 @@ export class WebGPUOctreeProjection {
       candidateConstants: stableEntries(this.pipelineConstants(true)),
       reachability: stableEntries(reachability),
       shaderCapabilities: this.shaderCapabilities().cacheKey,
-      frontierSortStages: Math.ceil(Math.log2(Math.max(1, this.frontierAllocation.listCapacity))),
+      maximumLeafSize: this.maxLeafSize,
       requiredEntryPoints: WebGPUOctreeProjection.pipelineEntryPoints
         .filter((entryPoint) => octreeProjectionPipelineRequired(entryPoint, reachability)),
       ...(this.projectionActivityShaderKey
@@ -2465,13 +2565,9 @@ export class WebGPUOctreeProjection {
     // successfully compiled program as a substitute authority.
     this.assignPipelines(compiled);
     if (!this.useLocalFrontierCandidateSort) {
-      const frontierSortStages = Math.ceil(Math.log2(Math.max(1, this.frontierAllocation.listCapacity)));
-      this.frontierCandidateSortPipelines = Array.from(
-        { length: frontierSortStages + 1 },
-        (_, stage) => this.registerProjectionPipeline(
-          this.device.createComputePipeline(this.frontierSortDescriptor(stage)),
-        ),
-      );
+      this.frontierCandidateSortPipelines = [this.registerProjectionPipeline(
+        this.device.createComputePipeline(this.frontierSortDescriptor()),
+      )];
     }
     // Sizes 16 and 32 use the coarse worklist kernels below. The immutable
     // maximum participates in the cache key, so variants above it cannot be
@@ -2588,23 +2684,18 @@ export class WebGPUOctreeProjection {
       });
     });
     if (!cached && !this.useLocalFrontierCandidateSort) {
-      const frontierSortStages = Math.ceil(Math.log2(Math.max(1, this.frontierAllocation.listCapacity)));
-      const frontierSort = new Array<GPUComputePipeline>(frontierSortStages + 1);
-      for (let stage = 0; stage <= frontierSortStages; stage += 1) {
-        shaderDefinitions.push({
-          id: `octree.pipeline.frontier-sort.${stage}`,
-          phase: "adaptive-topology",
-          label: `Compile octree frontier merge stage ${stage}`,
-          requires: ["distributed-frontier-sort"],
-          dependencies: ["octree.shader.projection"],
-          compile: async () => {
-            frontierSort[stage] = this.registerProjectionPipeline(
-              await this.device.createComputePipelineAsync(this.frontierSortDescriptor(stage)),
-            );
-            if (stage === frontierSortStages) this.frontierCandidateSortPipelines = frontierSort;
-          },
-        });
-      }
+      shaderDefinitions.push({
+        id: "octree.pipeline.frontier-sort",
+        phase: "adaptive-topology",
+        label: "Compile octree frontier merge sort",
+        requires: ["distributed-frontier-sort"],
+        dependencies: ["octree.shader.projection"],
+        compile: async () => {
+          this.frontierCandidateSortPipelines = [this.registerProjectionPipeline(
+            await this.device.createComputePipelineAsync(this.frontierSortDescriptor()),
+          )];
+        },
+      });
     }
     for (let size = Math.min(8, this.maxLeafSize); size >= 2; size >>= 1) {
       if (cached?.refine.has(size)) continue;
@@ -2691,6 +2782,69 @@ export class WebGPUOctreeProjection {
           catch (error) { this.info.powerDiagramReady = false; throw error; }
         },
       });
+      if (this.deferPipelineCompilation) {
+        if (this.pressureExecutor === "persistent") tasks.push({
+          id: "octree.power-pipelines.spgrid",
+          phase: "solver-pipelines",
+          label: "Compile persistent SPGrid topology programs",
+          dependencies: ["octree.power-authority.allocate"],
+          run: () => this.firstOrderVCycle!.initializePipelines(),
+        });
+        if (this.globalFineSourceA && this.globalFineSourceB) {
+          tasks.push({
+            id: "octree.power-pipelines.fine-topology",
+            phase: "solver-pipelines",
+            label: "Compile fine topology programs",
+            dependencies: ["octree.power-authority.allocate"],
+            run: async () => {
+              await this.globalFineTopologyAB!.initializePipelines();
+              await this.globalFineTopologyBA!.initializePipelines();
+            },
+          }, {
+            id: "octree.power-pipelines.fine-redistance",
+            phase: "solver-pipelines",
+            label: "Compile fine redistance programs",
+            dependencies: ["octree.power-authority.allocate"],
+            run: async () => {
+              await this.globalFineRedistanceA!.initializePipelines();
+              await this.globalFineRedistanceB!.initializePipelines();
+            },
+          }, {
+            id: "octree.power-pipelines.fine-transport",
+            phase: "solver-pipelines",
+            label: "Compile fine transport programs",
+            dependencies: ["octree.power-authority.allocate"],
+            run: async () => {
+              await this.globalFineTransportA!.initializePipelines();
+              await this.globalFineTransportB!.initializePipelines();
+            },
+          }, {
+            id: "octree.power-pipelines.fine-volume",
+            phase: "solver-pipelines",
+            label: "Compile fine volume-correction programs",
+            dependencies: ["octree.power-authority.allocate"],
+            run: async () => {
+              await this.globalFineVolumeA!.initializePipelines();
+              await this.globalFineVolumeB!.initializePipelines();
+            },
+          });
+        }
+        tasks.push({
+          id: "octree.power-pipelines.air-support",
+          phase: "solver-pipelines",
+          label: "Compile structured air-support programs",
+          dependencies: ["octree.power-authority.allocate"],
+          run: () => this.airVelocitySupport!.initializePipelines(),
+        }, {
+          id: "octree.power-pipelines.structured-dynamics",
+          phase: "solver-pipelines",
+          label: "Compile structured dynamics programs",
+          dependencies: ["octree.power-authority.allocate"],
+          run: (_signal, report) => this.structuredDynamics!.initializePipelines(
+            (entryPoint, completed, total) => report?.(
+              `Compile structured dynamics: ${entryPoint} (${completed}/${total})`)),
+        });
+      }
     }
     return tasks;
   }
@@ -2761,58 +2915,25 @@ export class WebGPUOctreeProjection {
       // and its exact transpose instead of materialising eight trilinear
       // records. Adaptive factor-4/8 lanes keep the generic transfer.
       geometricAggregateTransfers: factorOneAggregate,
+      compileHierarchicalExecutor: this.pressureExecutor === "hierarchical",
+      deferPipelineCompilation: this.deferPipelineCompilation
+        && this.pressureExecutor === "persistent",
       // Degree two preserves the established factor-one motion envelope.
       // Degree four stays opt-in while its changed impulse response is
       // evaluated independently.
       preSmoothingIterations: factorOneM1Degree,
       postSmoothingIterations: factorOneM1Degree });
-    // Immediate production cutover: A2 is E^T B E over spatial 8x8x4 pages.
-    // Explicit resolved rows remain only in the CPU differential oracle.
-    this.resolvedLinearOperator = this.firstOrderVCycle.accurateOperator;
-    this.section43HybridPreconditioner = new WebGPUOctreeSection43HybridPreconditioner(this.device, {
-      rowCount: this.compaction,
-      firstOrderVCycle: this.firstOrderVCycle, secondOrderOperator: this.resolvedLinearOperator,
-      section63: { coefficients: section63Source.coefficients,
-        control: section63Source.control, metrics: section63Source.topologyMetrics,
-        ...this.firstOrderVCycle.section63Topology },
-    }, { rowCapacity, boundarySmoothingIterations: this.solveTailPolicy.boundarySmoothingIterations,
-    });
-    this.pipelinedMGPCG = new WebGPUOctreePipelinedMGPCG(this.device, {
-      coefficients: section63Source.coefficients, rhs: this.structuredDivergenceRhs,
-      rowCount: this.compaction,
-      rowDispatch: structuredSource.liveRowDispatch,
-      acceptedAuthority: structuredSource.control,
-      operator: this.resolvedLinearOperator, preconditioner: this.section43HybridPreconditioner,
-      vectors: this.pipelinedMGPCGVectors,
-    }, {
-      rowCapacity,
-      // Preserve the established f32 graphics-solve contract. The scene's
-      // tighter CPU-reference tolerance must not become an accuracy/default
-      // change hidden inside the production representation cutover.
-      relativeTolerance: this.solveTailPolicy.relativeTolerance,
-      maximumIterations: this.solveTailPolicy.encodedOuterIterations,
-      hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
-      factorOneCombinedReductionDrains:
-        factorOneAggregate
-        && octreePipelinedMGPCGCombinedReductionDrainsEnabled(),
-    });
-    // Part D: the same iteration, one dispatch, one 256-lane workgroup. The
-    // gate is the ALLOCATED row capacity, which is known here at construction;
-    // it is deliberately not a GPU-side live row count, because shaping the
-    // encode from a readback would break the step-sequencing contract.
-    // The single-workgroup executor's compact Section 4.3 recurrence loses
-    // preconditioner positivity after repeated factor-1 authority generations
-    // on the otherwise exactly representable hydrostatic plane. The established
-    // hierarchical A/B executor remains positive and converges in 4--5
-    // iterations on the same rows. Keep factor 4/8 on their existing
-    // persistent path and use the robust representation for the coarse-only
-    // authority.
-    if (!this.coarseOnlySurfaceTracking
-      && WebGPUOctreePersistentMGPCG.selects(rowCapacity)) {
+    if (this.pressureExecutor === "persistent") {
       const smootherDegree = this.firstOrderVCycle.smootherContract?.degree;
       if (smootherDegree === undefined) {
         throw new Error("Persistent MGPCG requires the published V-cycle smoother contract");
       }
+      this.pressureSolverControl = this.device.createBuffer({
+        label: "Persistent MGPCG shared solve control",
+        size: OCTREE_PIPELINED_PCG_CONTROL_BYTES,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      });
+      this.ownsPressureSolverControl = true;
       const spgrid = this.firstOrderVCycle.section63Topology;
       this.persistentMGPCG = new WebGPUOctreePersistentMGPCG(this.device, {
         dimensions: [this.dims.nx, this.dims.ny, this.dims.nz], rowCapacity,
@@ -2826,15 +2947,52 @@ export class WebGPUOctreeProjection {
         worksetStrideWords: section63Source.worksetStrideWords,
         worksetBankStrideWords: section63Source.worksetBankStrideWords,
         rhs: this.structuredDivergenceRhs,
-        control: this.pipelinedMGPCG.control,
+        control: this.pressureSolverControl,
       }, {
         maximumIterations: this.solveTailPolicy.encodedOuterIterations,
         boundarySmoothingIterations:
-          this.section43HybridPreconditioner.boundarySmoothingIterations,
+          normalizeOctreeSection43BoundarySmoothing(
+            this.solveTailPolicy.boundarySmoothingIterations,
+          ),
         chebyshevDegree: smootherDegree,
         boundaryBandLayers: OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
         relativeTolerance: this.solveTailPolicy.relativeTolerance,
       });
+    } else {
+      // Immediate production cutover: A2 is E^T B E over spatial 8x8x4 pages.
+      // Explicit resolved rows remain only in the CPU differential oracle.
+      this.resolvedLinearOperator = this.firstOrderVCycle.accurateOperator;
+      this.section43HybridPreconditioner = new WebGPUOctreeSection43HybridPreconditioner(this.device, {
+        rowCount: this.compaction,
+        firstOrderVCycle: this.firstOrderVCycle, secondOrderOperator: this.resolvedLinearOperator,
+        section63: { coefficients: section63Source.coefficients,
+          control: section63Source.control, metrics: section63Source.topologyMetrics,
+          ...this.firstOrderVCycle.section63Topology },
+      }, { rowCapacity, boundarySmoothingIterations: this.solveTailPolicy.boundarySmoothingIterations,
+      });
+      if (!this.pipelinedMGPCGVectors) {
+        throw new Error("Hierarchical MGPCG requires its recurrence vectors");
+      }
+      this.pipelinedMGPCG = new WebGPUOctreePipelinedMGPCG(this.device, {
+        coefficients: section63Source.coefficients, rhs: this.structuredDivergenceRhs,
+        rowCount: this.compaction,
+        rowDispatch: structuredSource.liveRowDispatch,
+        acceptedAuthority: structuredSource.control,
+        operator: this.resolvedLinearOperator, preconditioner: this.section43HybridPreconditioner,
+        vectors: this.pipelinedMGPCGVectors,
+      }, {
+        rowCapacity,
+        // Preserve the established f32 graphics-solve contract. The scene's
+        // tighter CPU-reference tolerance must not become an accuracy/default
+        // change hidden inside the production representation cutover.
+        relativeTolerance: this.solveTailPolicy.relativeTolerance,
+        maximumIterations: this.solveTailPolicy.encodedOuterIterations,
+        hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
+        factorOneCombinedReductionDrains:
+          factorOneAggregate
+          && octreePipelinedMGPCGCombinedReductionDrainsEnabled(),
+      });
+      this.pressureSolverControl = this.pipelinedMGPCG.control;
     }
     // The paper evolves coarse octree phi regardless of whether the optional
     // factor-1/factor-4/factor-8 interface band exists. It is also the complete
@@ -2907,9 +3065,11 @@ export class WebGPUOctreeProjection {
       const compactCoarse = this.powerCoarseLevelSetSchedule.sampleSource;
       this.globalFineTopologyAB = new WebGPUFineLevelSetTopology(
         this.device, this.globalFineSourceA, this.globalFineSourceB, compactCoarse.wgsl(9),
+        this.deferPipelineCompilation,
       );
       this.globalFineTopologyBA = new WebGPUFineLevelSetTopology(
         this.device, this.globalFineSourceB, this.globalFineSourceA, compactCoarse.wgsl(9),
+        this.deferPipelineCompilation,
       );
       if (powerRedundancyCensusEnabled()) {
         this.redundancyCensus = new WebGPUFineRedundancyCensus(
@@ -2931,9 +3091,21 @@ export class WebGPUOctreeProjection {
       // the topology transaction that authors that destination.
       this.globalFineRedistanceA = new WebGPUFineLevelSetRedistance(
         this.device, this.globalFineSourceA, this.globalFineTopologyBA,
+        {
+          deferPipelineCompilation: this.deferPipelineCompilation,
+          maximumRequiredJfaStride: maximumFineLevelSetJFAStride(
+            planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
+              this.globalFineSourceA.plan.fineFactor).redistanceBandFineCells),
+        },
       );
       this.globalFineRedistanceB = new WebGPUFineLevelSetRedistance(
         this.device, this.globalFineSourceB, this.globalFineTopologyAB,
+        {
+          deferPipelineCompilation: this.deferPipelineCompilation,
+          maximumRequiredJfaStride: maximumFineLevelSetJFAStride(
+            planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
+              this.globalFineSourceB.plan.fineFactor).redistanceBandFineCells),
+        },
       );
     }
     if (sceneHasTerrain(this.scene) || this.scene.rigidBodies.length > 0) {
@@ -2991,7 +3163,7 @@ export class WebGPUOctreeProjection {
       rowCountControl: this.compaction,
     }, { rowCapacity, slotCapacity: structured.plan.slotCapacity,
       catalogVersion: OCTREE_GENERATED_POWER_CATALOG_MANIFEST.version,
-      carryPressureHistory: this.pipelinedMGPCG.usesTemporalPredictor });
+      carryPressureHistory: this.pipelinedMGPCG?.usesTemporalPredictor ?? false });
     this.airVelocitySupport = new WebGPUOctreeAirVelocitySupportProducer(this.device, {
       structured: structuredSource,
       topology: this.powerTopology.source,
@@ -3020,7 +3192,7 @@ export class WebGPUOctreeProjection {
         transportBandFineCells: planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
           this.globalFineSourceA.plan.fineFactor).transportBandFineCells,
       } : {}),
-    });
+    }, this.deferPipelineCompilation);
     if (powerRedundancyCensusEnabled()) {
       const packedRowBankWords = rowCapacity * 4;
       this.rowRedundancyCensus = new WebGPURowRedundancyCensus(
@@ -3072,10 +3244,11 @@ export class WebGPUOctreeProjection {
       selectorStride: this.powerCoarseLevelSetSchedule!.selectorStride,
       selectorOffsetWords: this.powerCoarseLevelSetSchedule!.plan.selectorOffsetWords,
       airSupportLayout,
+      bodyCount: this.scene.rigidBodies.length,
       dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
       physicalCellSize: this.scene.container.width_m / this.dims.nx,
       closedBoundaryMask: structuredClosedBoundaryMask(this.scene.container.top === "closed"),
-    });
+    }, this.deferPipelineCompilation);
     if (this.globalFineSourceA && this.globalFineSourceB) {
       const fineTransportResources = {
         structured: structuredSource, topology: this.powerTopology.source,
@@ -3089,9 +3262,11 @@ export class WebGPUOctreeProjection {
         maximumLeafSize: this.maxLeafSize,
       };
       this.globalFineTransportA = new WebGPUFineLevelSetTransport(
-        this.device, this.globalFineSourceA, fineTransportResources);
+        this.device, this.globalFineSourceA, fineTransportResources,
+        this.deferPipelineCompilation);
       this.globalFineTransportB = new WebGPUFineLevelSetTransport(
-        this.device, this.globalFineSourceB, fineTransportResources);
+        this.device, this.globalFineSourceB, fineTransportResources,
+        this.deferPipelineCompilation);
     }
     this.powerVolumes = this.device.createBuffer({ label: "Octree physical power-cell volumes", size: rowCapacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -3107,9 +3282,11 @@ export class WebGPUOctreeProjection {
         sampleRowCapacity: this.powerCoarseLevelSetSchedule!.sampleSource.rowCapacity };
       this.globalFineVolumeA = new WebGPUFineLevelSetVolumeCorrection(
         this.device, this.globalFineSourceA, coarseVolumeSource,
+        undefined, this.deferPipelineCompilation,
       );
       this.globalFineVolumeB = new WebGPUFineLevelSetVolumeCorrection(
         this.device, this.globalFineSourceB, coarseVolumeSource, this.globalFineVolumeA.control,
+        this.deferPipelineCompilation,
       );
     }
     this.powerVolumeParams = this.device.createBuffer({ label: "Octree power-volume parameters", size: 16,
@@ -3171,8 +3348,10 @@ export class WebGPUOctreeProjection {
     this.workAccounting.setAuthorityBytes("power", powerAllocated);
     this.workAccounting.setAuthorityBytes("fine-level-set", fineAllocated);
     this.workAccounting.setScratchBytes("pressure-mgpcg",
-      this.pipelinedMGPCG.plan.ownedBytes + this.section43HybridPreconditioner.allocatedBytes
-      + (this.persistentMGPCG?.allocatedBytes ?? 0));
+      (this.pipelinedMGPCG?.plan.ownedBytes ?? 0)
+      + (this.section43HybridPreconditioner?.allocatedBytes ?? 0)
+      + (this.persistentMGPCG?.allocatedBytes ?? 0)
+      + (this.ownsPressureSolverControl ? this.pressureSolverControl.size : 0));
     this.workAccounting.setScratchBytes("multigrid", this.firstOrderVCycle.allocatedBytes);
     this.workAccounting.sealAllocationInventory();
     this.info.powerDiagramReady = true;
@@ -3622,9 +3801,13 @@ export class WebGPUOctreeProjection {
       candidateSort.setPipeline(this.sortFrontierCandidatesLocalPipeline);
       candidateSort.dispatchWorkgroups(1);
     } else {
-      candidateSort.setBindGroup(0, this.frontierSortGroup);
-      for (const pipeline of this.frontierCandidateSortPipelines) {
-        candidateSort.setPipeline(pipeline);
+      const pipeline = this.frontierCandidateSortPipelines[0];
+      if (!pipeline || this.frontierSortGroups.length === 0) {
+        throw new Error("Distributed frontier sort pipeline is unavailable");
+      }
+      candidateSort.setPipeline(pipeline);
+      for (const group of this.frontierSortGroups) {
+        candidateSort.setBindGroup(0, group);
         candidateSort.dispatchWorkgroupsIndirect(this.topologyCandidateDispatch, 0);
       }
     }
@@ -3651,7 +3834,7 @@ export class WebGPUOctreeProjection {
       encoder,
       "Inactive octree pressure-row candidate",
       this.latestPressureInA ? this.candidateRowGroups.fromA : this.candidateRowGroups.fromB,
-      this.pipelinedMGPCG.usesTemporalPredictor
+      this.pipelinedMGPCG?.usesTemporalPredictor
         ? (this.latestPressureInA ? this.pressureB : this.pressureA)
         : undefined,
     );
@@ -3789,7 +3972,7 @@ export class WebGPUOctreeProjection {
       terrainEnabled: sceneHasTerrain(this.scene), bodyCount: this.scene.rigidBodies.length });
     boundary.encodeCandidate(broker, fine, structured.candidateControl);
     this.firstOrderVCycle.encodeCandidateSetup(broker, {
-      solverControl: this.pipelinedMGPCG.control, rowCount: this.compaction,
+      solverControl: this.pressureSolverControl, rowCount: this.compaction,
       sourceControl: structured.candidateControl,
       topologyMetrics: topology.candidateMetrics,
     });
@@ -3832,7 +4015,7 @@ export class WebGPUOctreeProjection {
     structured.encodeReadyCommit(broker);
     boundary.encodeReadyCommit(broker);
     this.firstOrderVCycle.encodeReadySetupCommit(broker, {
-      solverControl: this.pipelinedMGPCG.control, rowCount: this.compaction,
+      solverControl: this.pressureSolverControl, rowCount: this.compaction,
     });
     if (!this.airVelocitySupport) {
       throw new Error("Ready topology flip requires the Section 5 air-support producer");
@@ -3853,9 +4036,11 @@ export class WebGPUOctreeProjection {
 
   finishTopologyCandidate() { this.info.topologyReuseCount += 1; }
   get pressureSolverLabel() {
-    const budget = this.pipelinedMGPCG?.iterationBudget ?? this.info.pressureIterationBudget;
+    const budget = this.persistentMGPCG?.iterationBudget
+      ?? this.pipelinedMGPCG?.iterationBudget
+      ?? this.info.pressureIterationBudget;
     const levels = this.firstOrderVCycle?.plan.levelCount ?? 0;
-    return `Octree power MGPCG · direct d·Ad curvature · Section 4.3 hybrid fixed schedule · up to ${budget} iterations · ${levels}-level L1 V-cycle`;
+    return `Octree power MGPCG · ${this.pressureExecutor} executor · Section 4.3 hybrid fixed schedule · up to ${budget} iterations · ${levels}-level L1 V-cycle`;
   }
 
   /**
@@ -4017,7 +4202,9 @@ export class WebGPUOctreeProjection {
     },
     scope: "complete" | "power-operator-only" = "complete",
   ): GPUCommandEncoder {
-    const fullSolveBudget = this.pipelinedMGPCG.iterationBudget;
+    const fullSolveBudget = this.persistentMGPCG?.iterationBudget
+      ?? this.pipelinedMGPCG?.iterationBudget
+      ?? this.solveTailPolicy.encodedOuterIterations;
     const tailSelection = selectOctreeFactorOneEncodedSolveTail({
       enabled: octreeFactorOnePredictedSolveTailEnabled(),
       factorOne: this.coarseOnlySurfaceTracking,
@@ -4057,11 +4244,7 @@ export class WebGPUOctreeProjection {
     const pressureOut = initialInA ? this.pressureB : this.pressureA;
     if (!this.structuredVelocity) throw new Error("Pressure solve requires the accepted structured authority");
     const solveBroker = new PassBroker(encoder);
-    // Part D executor selection. It lives here, in the projection host, and
-    // never inside the hierarchical executor's own encode — that encode is the
-    // single-schedule authority and a test stringifies it to prove it.
-    const persistent = !this.coarseOnlySurfaceTracking
-      && octreePersistentMGPCGEnabled() ? this.persistentMGPCG : undefined;
+    const persistent = this.persistentMGPCG;
     if (persistent) {
       persistent.encodeSolve(solveBroker, {
         pressureSeed: pressureIn,
@@ -4072,10 +4255,13 @@ export class WebGPUOctreeProjection {
         // worklists and dispatch words the kernel then reads, so it must run —
         // and must run before the dispatchMeta staging copy.
         this.firstOrderVCycle.encodeSetup(setupBroker, {
-          solverControl: this.pipelinedMGPCG.control, rowCount: this.compaction,
+          solverControl: this.pressureSolverControl, rowCount: this.compaction,
         });
       });
     } else {
+      if (!this.pipelinedMGPCG) {
+        throw new Error("Hierarchical pressure executor was not constructed");
+      }
       this.pipelinedMGPCG.encode(solveBroker, {
         pressureSeed: pressureIn,
         pressureHistory: this.acceptedPressureHistory,
@@ -4561,7 +4747,7 @@ export class WebGPUOctreeProjection {
     // race the next rebuild's worklist copy over the compaction header. It
     // carries [overflow, required rows, required entries, exact dispatch xyz,
     // sum r^2, sum b^2] from the latest solve.
-    const solverControl = this.pipelinedMGPCG.control;
+    const solverControl = this.pressureSolverControl;
     const solverBytes = 64;
     const readback = this.device.createBuffer({
       label: "Octree live pressure-row diagnostics",
@@ -4613,7 +4799,7 @@ export class WebGPUOctreeProjection {
    * Regular simulation scheduling never consumes this readback; the paused
    * t=0 transport gate uses it only after every initialization phase fenced. */
   async readMGPCGDiagnostics() {
-    const solverControl = this.pipelinedMGPCG.control;
+    const solverControl = this.pressureSolverControl;
     const readback = this.device.createBuffer({
       label: "Octree t=0 MGPCG authority diagnostics",
       size: 64,
@@ -4724,7 +4910,7 @@ export class WebGPUOctreeProjection {
   get structuredAuthority() { return this.structuredVelocity?.source.authority; }
   get structuredWorksets() { return this.structuredVelocity?.source.familyWorksets.regularInterior.buffer; }
   /** QA-only MGPCG status; simulation authority consumes this buffer directly on GPU. */
-  get mgpcgControl() { return this.pipelinedMGPCG.control; }
+  get mgpcgControl() { return this.pressureSolverControl; }
   /** QA-only identity of the sparse fine source sampled by the last face build. */
   get powerBoundaryFineSource() { return this.lastPowerBoundaryFineSource; }
   /** QA-only exact sparse source sampled by the last power-boundary build.
@@ -4792,6 +4978,12 @@ export class WebGPUOctreeProjection {
       structuredControl: { buffer: structured.control },
       pressure: { buffer: this.latestPressureInA ? this.pressureA : this.pressureB },
       leafHeaders: { buffer: this.leafHeaders },
+      // Optional: a scene can reach a publication before the power-coarse
+      // level set has one, and the cell trace reads zero flags as "never
+      // corrected" rather than as a phi of zero.
+      ...(this.powerCoarseLevelSetSchedule
+        ? { coarsePhi: { buffer: this.powerCoarseLevelSetSchedule.sampleSource.values } }
+        : {}),
       topologyLifecycle: {
         tileWorklist: { buffer: this.topologyResidency.tileWorklist },
         tileDimensions: [
@@ -5177,8 +5369,9 @@ export class WebGPUOctreeProjection {
     const spgrid = this.firstOrderVCycle;
     const outer = this.pipelinedMGPCG;
     const hybrid = this.section43HybridPreconditioner;
+    const vectors = this.pipelinedMGPCGVectors;
     const boundary = this.structuredBoundary;
-    if (!structured || !spgrid || !outer || !hybrid || !boundary) return undefined;
+    if (!structured || !spgrid || !outer || !hybrid || !vectors || !boundary) return undefined;
     const spgridPlan = spgrid.workAccountingPlan;
     const outerPlan = outer.workAccountingPlan;
     const fine = this.globalFineLevelSetSource;
@@ -5186,6 +5379,7 @@ export class WebGPUOctreeProjection {
       ? this.globalFineTopologyBA : this.globalFineTopologyAB;
     const spgridBuffers = spgrid.workAccountingBuffers;
     const outerBuffers = outer.workAccountingBuffers;
+    const symmetryAudit = outer.symmetryStageAuditBuffers;
     const hybridBuffers = hybrid.workAccountingBuffers;
     const worksetBuffer = structured.section63.worksets.regularInterior.buffer;
     const worksetStrideBytes = structured.plan.worksetStrideWords * 4;
@@ -5211,12 +5405,36 @@ export class WebGPUOctreeProjection {
       spgridDispatch: { buffer: spgridBuffers.dispatch,
         size: spgridPlan.levelCount * 12 * 4 + 8 },
       accurateClassDispatch: { buffer: spgridBuffers.accurateClassDispatch, size: 29 * 4 },
-      mgpcgPreconditioned: { buffer: this.pipelinedMGPCGVectors.preconditioned,
+      mgpcgPreconditioned: { buffer: vectors.preconditioned,
         size: outer.workAccountingPlan.rowCapacity * 4 },
-      mgpcgPreconditionedImage: { buffer: this.pipelinedMGPCGVectors.preconditionedImage,
+      mgpcgPreconditionedImage: { buffer: vectors.preconditionedImage,
         size: outer.workAccountingPlan.rowCapacity * 4 },
-      mgpcgResidual: { buffer: this.pipelinedMGPCGVectors.residual,
+      mgpcgResidual: { buffer: vectors.residual,
         size: outer.workAccountingPlan.rowCapacity * 4 },
+      pressureRhs: { buffer: this.structuredDivergenceRhs!,
+        size: outer.workAccountingPlan.rowCapacity * 4 },
+      ...(symmetryAudit ? {
+        symmetryInitialResidual: { buffer: symmetryAudit.initialResidual,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryInitialPreconditioned: { buffer: symmetryAudit.initialPreconditioned,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryInitialPreconditionedImage: { buffer: symmetryAudit.initialPreconditionedImage,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryPreconditionerPreSmoothed: { buffer: symmetryAudit.preconditionerPreSmoothed,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryPreconditionerZeroSmoothed: { buffer: symmetryAudit.preconditionerZeroSmoothed,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryPreconditionerFirstOperatorImage: { buffer: symmetryAudit.preconditionerFirstOperatorImage,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryPreconditionerFirstSmoothed: { buffer: symmetryAudit.preconditionerFirstSmoothed,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryPreconditionerInnerResidual: { buffer: symmetryAudit.preconditionerInnerResidual,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryPreconditionerInnerCorrection: { buffer: symmetryAudit.preconditionerInnerCorrection,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+        symmetryPreconditionerPostCorrected: { buffer: symmetryAudit.preconditionerPostCorrected,
+          size: outer.workAccountingPlan.rowCapacity * 4 },
+      } : {}),
       section63Coefficients: { buffer: structured.section63.coefficients,
         size: structured.section63.coefficientBankStrideWords * 4 },
       outerControl: { buffer: outerBuffers.control, size: Math.min(128, outerBuffers.control.size) },
@@ -5258,8 +5476,7 @@ export class WebGPUOctreeProjection {
       spgridLevelCount: spgrid.workAccountingPlan.levelCount,
       spgridEncodedCorrectionDispatches: spgrid.workAccountingPlan.encodedCorrectionDispatches,
       spgridLevelCapacities: spgrid.workAccountingPlan.levelCapacities,
-      persistentEnabled: octreePersistentMGPCGEnabled()
-        && this.persistentMGPCG !== undefined,
+      persistentEnabled: this.persistentMGPCG !== undefined,
       ...(this.persistentMGPCG ? {
         persistentMaximumIterations: this.persistentMGPCG.iterationBudget,
       } : {}),
@@ -5465,8 +5682,10 @@ export class WebGPUOctreeProjection {
     if (!this.globalFineSourceA || !this.globalFineSourceB) return undefined;
     const source = (fine: WebGPUFineLevelSetBrickSource) => ({
       generation: fine.generation,
+      plan: fine.plan,
       metadata: fine.metadata,
       worklist: fine.worklist,
+      flags: fine.flags,
       phi: fine.phi,
       workA: fine.workA,
       rollbackPhi: fine.rollbackPhi,
@@ -5479,6 +5698,29 @@ export class WebGPUOctreeProjection {
       b: source(this.globalFineSourceB),
       publishedIsA: this.globalFinePublishedIsA,
     };
+  }
+  get structuredBoundarySymmetryDebug() {
+    const boundary = this.structuredBoundary, structured = this.structuredVelocity?.source;
+    const dynamics = this.structuredDynamics;
+    if (!boundary || !structured || !dynamics) return undefined;
+    return { control: boundary.control, candidates: boundary.candidates,
+      authority: structured.authority, plan: structured.plan,
+      rowGeometry: structured.rowGeometry,
+      rowVelocities: structured.rowVelocities,
+      selectorRows: this.powerCoarseLevelSetSchedule!.selectorRows,
+      selectorOffsetWords: dynamics.selectorOffsetWords,
+      selectorStride: dynamics.selectorStride,
+      supportVectorOffsetWords: this.airVelocitySupport!.plan.support.supportVectorOffsetWords,
+      ownerDirectoryOffsetWords: this.airVelocitySupport!.plan.support.ownerDirectoryOffsetWords,
+      supportCapacity: this.airVelocitySupport!.plan.support.supportCapacity,
+      supportRecordArena: this.airVelocitySupport!.recordArena,
+      supportRecordOffsetWords: this.airVelocitySupport!.plan.records.recordOffsetWords,
+      supportFaces: this.airVelocitySupport!.faceA,
+      supportScratch: this.airVelocitySupport!.scratch,
+      supportFaceAdjacency: this.airVelocitySupport!.faceAdjacency,
+      supportFaceAdjacencyStride: this.airVelocitySupport!.plan.faceAdjacencyStride,
+      topologyTransferAudit: dynamics.topologyTransferAudit,
+      advectionSymmetryAudit: dynamics.advectionSymmetryAudit };
   }
   /** Diagnostic-only status for the redistance transaction that produced the current fine slot. */
   get globalFineRedistanceControl(): GPUBuffer | undefined {
@@ -5947,7 +6189,8 @@ export class WebGPUOctreeProjection {
     // TypeError that replaces the failure the caller is about to rethrow.
     this.pipelinedMGPCG?.destroy();
     this.persistentMGPCG?.destroy();
-    for (const buffer of Object.values(this.pipelinedMGPCGVectors)) buffer.destroy();
+    if (this.ownsPressureSolverControl) this.pressureSolverControl?.destroy();
+    for (const buffer of Object.values(this.pipelinedMGPCGVectors ?? {})) buffer.destroy();
     this.section43HybridPreconditioner?.destroy();
     this.firstOrderVCycle?.destroy();
     this.topologyEpoch?.destroy();
@@ -5963,7 +6206,8 @@ export class WebGPUOctreeProjection {
     this.compaction.destroy(); this.leafHeaders.destroy(); this.candidateLeafHeaders.destroy();
     this.candidatePressure.destroy(); this.candidatePressureHistory.destroy();
     this.acceptedPressureHistory.destroy();
-    this.frontierSortScratch.destroy(); this.leafFrontier.destroy();
+    this.frontierSortScratch.destroy(); this.frontierSortStageParams?.destroy();
+    this.leafFrontier.destroy();
     this.solveDispatch.destroy(); this.solidCells.destroy(); this.solveStats.destroy();
     this.unpublishedFineSummaryDirectory.destroy();
     this.compactVoxelInspection?.destroy();
@@ -6048,12 +6292,27 @@ export function octreePowerVolumeActivityShader(activity: GPULogicalActivityAdop
   return `${octreePowerVolumeShader.slice(0, start)}${instrumentedSignature}{${entry}${body}${exit}${octreePowerVolumeShader.slice(bodyEnd)}`;
 }
 
-function initialOctreeLevelSet(
+export function initialOctreeLevelSet(
   scene: SceneDescription,
   dims: { nx: number; ny: number; nz: number },
   cell: { x: number; y: number; z: number }
 ) {
   const { nx, ny, nz } = dims;
+  // Explicit brick seeds are a union of exact axis-aligned boxes. Preserve
+  // that analytic signed distance at cell centres instead of rebuilding it
+  // from binary occupancy, whose Euclidean transform rounds the very corners
+  // used by the symmetry oracle before the first GPU command is submitted.
+  if ((scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0 && !sceneHasTerrain(scene)) {
+    const phi = new Float32Array(nx * ny * nz);
+    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+      phi[x + nx * (y + ny * z)] = initialLiquidPhi(scene, {
+        x: -0.5 * scene.container.width_m + (x + 0.5) * cell.x,
+        y: (y + 0.5) * cell.y,
+        z: -0.5 * scene.container.depth_m + (z + 0.5) * cell.z,
+      }, [nx, ny, nz]);
+    }
+    return phi;
+  }
   const alpha = new Float32Array(nx * ny * nz);
   const dam = sceneDamBreakFractions(scene);
   const terrainHeights = terrainColumnHeights(scene, nx, nz);
@@ -6074,7 +6333,6 @@ override rowIndexedPressure: bool = true;
 override sparseTopologyTileStates: u32 = 0u;
 override denseSolidField: bool = true;
 override fluidGatedBoundaryRefinement: bool = true;
-override frontierSortStage: u32 = 0u;
 override topologyCandidateView: u32 = 0u;
 override fineSummaryFactor: u32 = 4u;
 override structuralDescriptorDelta: bool = false;
@@ -6094,6 +6352,7 @@ struct SolidCell { fraction: f32, owner: i32 }
 @group(0) @binding(4) var<storage, read_write> pressureIn: array<f32>;
 @group(0) @binding(5) var<storage, read_write> pressureOut: array<f32>;
 @group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<uniform> frontierSortParams: vec4u;
 @group(0) @binding(8) var<storage, read_write> leafHeaders: array<LeafHeader>;
 @group(0) @binding(9) var<storage, read_write> frontierSortScratch: array<u32>;
 @group(0) @binding(10) var<storage, read_write> rigidBodies: array<RigidBody, 12>;
@@ -8051,7 +8310,7 @@ fn sortFrontierCandidates(@builtin(global_invocation_id)gid:vec3u){
   if(any(dims()>vec3u(1024u))||count>arrayLength(&frontierSortScratch)){
     if(row==0u){compaction[pressureControlBase()]=4u;}return;
   }
-  let stage=frontierSortStage;
+  let stage=frontierSortParams.x;
   let stages=frontierSortStageCount(count);
   if(stage==stages){
     if((stages&1u)!=0u&&row<count){candidateSortStore(row,candidateSortLoad(row,false),true);}

@@ -13,6 +13,22 @@ export interface SceneCheckpointEvidenceContext {
   readonly time_s: number;
   readonly volumeField: Float32Array;
   readonly velocityField?: Float32Array;
+  readonly pressureField?: Float32Array;
+  readonly pressureRhsField?: Float32Array;
+  readonly pressureDiagonalField?: Float32Array;
+  readonly pressureSection63DiagonalField?: Float32Array;
+  readonly pressureSection63CaseIdField?: Uint32Array;
+  readonly pressureInitialResidualField?: Float32Array;
+  readonly pressureInitialPreconditionedField?: Float32Array;
+  readonly pressureInitialPreconditionedImageField?: Float32Array;
+  readonly pressurePreconditionerPreSmoothedField?: Float32Array;
+  readonly pressurePreconditionerZeroSmoothedField?: Float32Array;
+  readonly pressurePreconditionerFirstOperatorImageField?: Float32Array;
+  readonly pressurePreconditionerFirstSmoothedField?: Float32Array;
+  readonly pressurePreconditionerInnerResidualField?: Float32Array;
+  readonly pressurePreconditionerInnerCorrectionField?: Float32Array;
+  readonly pressurePreconditionerPostCorrectedField?: Float32Array;
+  readonly topologyField?: Uint32Array;
   /** Authoritative fine-phi upper-interface height, in coarse-cell units, for
    * each coarse x/z column. NaN denotes a column without an upper crossing. */
   readonly fineUpperSurfaceField?: Float32Array;

@@ -31,7 +31,10 @@ export interface GPUInitializationTask {
   phase: GPUInitializationPhase;
   label: string;
   dependencies?: readonly string[];
-  run(signal: AbortSignal): void | Promise<void>;
+  /** Force a paint immediately before this task. Phase changes and long
+   * same-phase batches already paint automatically. */
+  paintBeforeRun?: boolean;
+  run(signal: AbortSignal, report?: (label: string) => void): void | Promise<void>;
 }
 
 export type GPUInitializationSnapshotReporter = (snapshot: GPUInitializationSnapshot) => void;
@@ -45,10 +48,16 @@ const yieldForPaint = () => new Promise<void>((resolve) => {
   else setTimeout(resolve, 0);
 });
 
+/** Bound the amount of initialization work that can run between visible
+ * progress updates without paying one full animation frame per small shader. */
+const TASKS_PER_PAINT = 8;
+
 export class GPUInitializationTaskRunner {
   private readonly registered = new Set<string>();
   private readonly completed = new Set<string>();
   private total = 0;
+  private lastPaintedPhase?: GPUInitializationPhase;
+  private tasksSincePaint = TASKS_PER_PAINT;
 
   constructor(
     private readonly report: GPUInitializationSnapshotReporter,
@@ -71,33 +80,42 @@ export class GPUInitializationTaskRunner {
     this.register(tasks);
     for (const task of tasks) {
       if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
-      for (const dependency of task.dependencies ?? []) {
-        if (!this.completed.has(dependency)) throw new Error(`GPU initialization task ${task.id} ran before ${dependency}`);
+      this.assertDependenciesComplete(task);
+      this.reportTask(task, task.label);
+      // Paint every phase transition immediately, then periodically within a
+      // long phase. Pipeline compilation stays sequential, but a large set no
+      // longer adds one full animation frame per tiny async pipeline task.
+      // Callers can retain the old before-task fence for exceptional heavy
+      // synchronous work with `paintBeforeRun`.
+      const shouldPaint = task.paintBeforeRun
+        || task.phase !== this.lastPaintedPhase
+        || this.tasksSincePaint >= TASKS_PER_PAINT;
+      if (shouldPaint) {
+        await yieldForPaint();
+        this.lastPaintedPhase = task.phase;
+        this.tasksSincePaint = 0;
       }
-      this.report({
-        phase: task.phase,
-        taskId: task.id,
-        label: task.label,
-        completed: this.completed.size,
-        total: this.total,
-      });
-      // Let React commit the new stage before a synchronous allocation or CPU
-      // packing task begins. Expensive CPU planners should still be split or
-      // moved to a worker, but they can no longer run before their stage is
-      // visible.
-      await yieldForPaint();
       if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
-      await task.run(this.signal);
+      await task.run(this.signal, (label) => this.reportTask(task, label));
+      this.tasksSincePaint += 1;
       this.completed.add(task.id);
-      this.report({
-        phase: task.phase,
-        taskId: task.id,
-        label: task.label,
-        completed: this.completed.size,
-        total: this.total,
-      });
+      this.reportTask(task, task.label);
     }
   }
+
+  private assertDependenciesComplete(task: GPUInitializationTask) {
+    for (const dependency of task.dependencies ?? []) {
+      if (!this.completed.has(dependency)) {
+        throw new Error(`GPU initialization task ${task.id} ran before ${dependency}`);
+      }
+    }
+  }
+
+  private reportTask(task: GPUInitializationTask, label: string) {
+    this.report({ phase: task.phase, taskId: task.id, label,
+      completed: this.completed.size, total: this.total });
+  }
+
 }
 
 export function isGPUInitializationAbort(error: unknown) {

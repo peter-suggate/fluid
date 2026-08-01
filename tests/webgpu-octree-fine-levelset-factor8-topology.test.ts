@@ -79,8 +79,11 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     /fn exactAnalyticSeedPhi[\s\S]*heightFraction=max\(0\.92,fill\)[\s\S]*length\(max\(q,vec3f\(0\.0\)\)\)\+min\(max\(q\.x,max\(q\.y,q\.z\)\),0\.0\)/,
     "the cold authored dam is sampled exactly on the independent fine SPGrid instead of flattened to a coarse leaf plane");
   assert.match(topology,
-    /damOffset=4u\+10u\*params\.pageCapacity[\s\S]*damDimensions=select\(fallback,authored[\s\S]*exposedMaximum=params\.domainOrigin\+damDimensions/,
+    /tail=4u\+10u\*params\.pageCapacity[\s\S]*damDimensions=select\(fallback,authored[\s\S]*exposedMaximum=params\.domainOrigin\+damDimensions/,
     "the global fine cold seed reads authored absolute reservoir extents from its ABI tail");
+  assert.match(topology,
+    /mode==3u[\s\S]*minimum=vec3f[\s\S]*maximum=vec3f[\s\S]*abs\(finestPoint\*f32\(params\.fineFactor\)-centre\)-half/,
+    "a rectangular brick union is sampled as its exact box SDF on the cold fine grid");
   assert.match(topology,
     /exposedMaximum=params\.domainOrigin\+damDimensions[\s\S]*let q=point-exposedMaximum/,
     "cold fine phi must not create interfaces on the three closed tank-contact planes");

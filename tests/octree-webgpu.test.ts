@@ -8,7 +8,7 @@ import { resolveMethodValues } from "../lib/methods/types";
 import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { defaultScene } from "../lib/model";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { enumerateOctreeFrontierCandidateLattice, expandOctreePressureRowAffectedOneRing, fineLevelSetWarmStartRequested, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, OCTREE_PRESSURE_ROW_ONE_RING_DIRECTION_COUNT, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePersistentMGPCGEnabled, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, WebGPUOctreeProjection } from "../lib/webgpu-octree";
+import { enumerateOctreeFrontierCandidateLattice, expandOctreePressureRowAffectedOneRing, fineLevelSetWarmStartRequested, mergeOctreePowerRowIdentities, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, OCTREE_PRESSURE_ROW_ONE_RING_DIRECTION_COUNT, octreeDensePhiReleaseReady, octreeDiagnosticShader, octreePersistentMGPCGEnabled, octreeProjectionPipelineRequired, octreeProjectionShader, planOctreeCompactionAllocation, planOctreeLeafFrontierAllocation, planOctreePressureCapacity, selectOctreePressureExecutor, WebGPUOctreeProjection } from "../lib/webgpu-octree";
 import {
   octreePipelinedMGPCGShader,
   WebGPUOctreePipelinedMGPCG,
@@ -32,8 +32,25 @@ const packageManifest = JSON.parse(readFileSync(new URL("../package.json", impor
 test("row-indexed octree startup skips the unreachable dense Jacobi specialization", () => {
   const product = {
     solidRasterization: false,
+    localFrontierCandidateSort: true,
+    cooperativeRowDeltaRing: true,
   } as const;
   assert.equal(octreeProjectionPipelineRequired("rasterizeSolids", product), false);
+  assert.equal(octreeProjectionPipelineRequired("refineTopology", product), false);
+  assert.equal(octreeProjectionPipelineRequired("refineTopologyDelta", product), false,
+    "generic refinement entry points are specialization templates, not base pipelines");
+  assert.equal(octreeProjectionPipelineRequired("sortFrontierCandidatesLocal", product), true);
+  assert.equal(octreeProjectionPipelineRequired("sortFrontierCandidatesLocal", {
+    ...product, localFrontierCandidateSort: false,
+  }), false, "large domains must not compile the unused local sorter");
+  assert.equal(octreeProjectionPipelineRequired("markRowDeltaRing", product), true);
+  assert.equal(octreeProjectionPipelineRequired("markRowDeltaRingBlocks", product), false);
+  assert.equal(octreeProjectionPipelineRequired("markRowDeltaRing", {
+    ...product, cooperativeRowDeltaRing: false,
+  }), false);
+  assert.equal(octreeProjectionPipelineRequired("markRowDeltaRingBlocks", {
+    ...product, cooperativeRowDeltaRing: false,
+  }), true, "only the reachable row-delta ring implementation is compiled");
   assert.equal(octreeProjectionPipelineRequired("buildDirtyTileDelta", product), true,
     "paged power authority always compiles its exact compact delta consumer");
   assert.equal(octreeProjectionPipelineRequired("rasterizeSolidsDelta", {
@@ -71,6 +88,10 @@ test("octree pipeline cache keys include stable constants and reachability", () 
     "specializations with different sparse-layout constants must not alias");
   assert.match(cacheKey, /reachability: stableEntries\(reachability\)/,
     "immutable solver reachability must participate in the cache identity");
+  assert.match(cacheKey, /maximumLeafSize: this\.maxLeafSize/,
+    "refinement map shape must participate in the bundle cache identity");
+  assert.doesNotMatch(cacheKey, /frontierSortStages/,
+    "runtime-stage sorting must share its compiled pipeline across frontier capacities");
   assert.match(cacheKey, /requiredEntryPoints:[\s\S]*octreeProjectionPipelineRequired\(entryPoint, reachability\)/,
     "the cache identity must retain the exact reachable base-program set");
   assert.match(cacheKey, /\.sort\(\(\[left\], \[right\]\) => left < right \? -1 : left > right \? 1 : 0\)/,
@@ -406,16 +427,22 @@ test("compact scan scratch feeds the class-specialized structured authority", ()
   assert.match(octreeProjectionShader,
     /var<workgroup> frontierLocalSortCells:array<u32,4096>[\s\S]*fn sortFrontierCandidatesLocal[\s\S]*workgroupUniformLoad\(&frontierLocalSortCells\[0u\]\)[\s\S]*frontierLocalCellLess/,
     "the complete mini-dam frontier must sort cooperatively in the portable 16 KiB workgroup floor");
-  assert.match(octreeProjectionShader, /override frontierSortStage: u32 = 0u/);
+  assert.doesNotMatch(octreeProjectionShader, /override frontierSortStage/,
+    "a runtime stage record must replace per-stage pipeline specialization");
+  assert.match(octreeProjectionShader,
+    /@binding\(7\) var<uniform> frontierSortParams: vec4u;[\s\S]*let stage=frontierSortParams\.x/,
+    "the distributed sorter reads its immutable dispatch-stage record at runtime");
   assert.match(octreeSource,
-    /if \(this\.useLocalFrontierCandidateSort\) \{[\s\S]*sortFrontierCandidatesLocalPipeline[\s\S]*dispatchWorkgroups\(1\)[\s\S]*\} else \{[\s\S]*for \(const pipeline of this\.frontierCandidateSortPipelines\)[\s\S]*dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 0\)/,
+    /if \(this\.useLocalFrontierCandidateSort\) \{[\s\S]*sortFrontierCandidatesLocalPipeline[\s\S]*dispatchWorkgroups\(1\)[\s\S]*\} else \{[\s\S]*const pipeline = this\.frontierCandidateSortPipelines\[0\][\s\S]*for \(const group of this\.frontierSortGroups\)[\s\S]*dispatchWorkgroupsIndirect\(this\.topologyCandidateDispatch, 0\)/,
     "construction-time capacity selection must replace thirteen mini-dam launches while retaining the large-domain fallback");
   assert.match(octreeSource,
     /this\.useLocalFrontierCandidateSort = this\.frontierAllocation\.listCapacity <= 4096/,
     "the shared-sort lane must be selected once from immutable capacity");
   assert.match(octreeSource,
-    /if \(!cached && !this\.useLocalFrontierCandidateSort\) \{[\s\S]*octree\.pipeline\.frontier-sort/,
-    "mini-dam construction must not compile the unused global sort specializations");
+    /if \(!cached && !this\.useLocalFrontierCandidateSort\) \{[\s\S]*id: "octree\.pipeline\.frontier-sort"/,
+    "mini-dam construction must not compile the unused single global sort pipeline");
+  assert.doesNotMatch(octreeSource, /frontier-sort\.\$\{stage\}|frontierSortDescriptor\(stage\)/,
+    "distributed sort stages must share one compiled pipeline");
   assert.doesNotMatch(octreeSource, /advanceFrontierCandidateSort/,
     "the deleted mutable stage-counter dispatch must not return");
   assert.match(octreeProjectionShader,
@@ -899,16 +926,26 @@ test("recurring fine redistance keeps its warm start as the production default",
     "the cold path remains available only as an explicit process-local oracle");
 });
 
-test("eligible octrees select persistent MGPCG by default with a hierarchical oracle", () => {
+test("eligible octrees select exactly one MGPCG executor at construction", () => {
   assert.equal(octreePersistentMGPCGEnabled({}), true);
   assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "1" }), true);
   assert.equal(octreePersistentMGPCGEnabled({ FLUID_OCTREE_PERSISTENT_MGPCG: "0" }), false);
+  assert.equal(selectOctreePressureExecutor(4_096, false, {}), "persistent");
+  assert.equal(selectOctreePressureExecutor(4_097, false, {}), "hierarchical");
+  assert.equal(selectOctreePressureExecutor(
+    4_096, false, { FLUID_OCTREE_PERSISTENT_MGPCG: "0" },
+  ), "hierarchical");
+  assert.equal(selectOctreePressureExecutor(4_096, true, {}), "hierarchical",
+    "the liquid-row-only diagnostic retains its robust hierarchical executor");
   assert.match(octreeSource,
     /this\.persistentMGPCG\s*=\s*new WebGPUOctreePersistentMGPCG/,
     "the sparse factor-1 interface band must retain the production pressure executor");
   assert.match(octreeSource,
-    /const persistent\s*=\s*!this\.coarseOnlySurfaceTracking[\s\S]*octreePersistentMGPCGEnabled\(\)\s*\?\s*this\.persistentMGPCG\s*:\s*undefined;/,
-    "only the liquid-row-only diagnostic must select the legacy executor");
+    /compileHierarchicalExecutor:\s*this\.pressureExecutor\s*===\s*"hierarchical"/,
+    "the construction plan must prune SPGrid fallback pipelines too");
+  assert.doesNotMatch(WebGPUOctreeProjection.prototype.encode.toString(),
+    /octreePersistentMGPCGEnabled/,
+    "executor selection must not remain a hot encode-time switch");
 });
 
 test("octree delegates every capacity to the direct-curvature PCG authority", () => {

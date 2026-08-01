@@ -288,20 +288,31 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   refreshRetainedAirSupportFaceValues: Object.freeze([7,19,20]),
   finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29]),
   expandAirSupportChangedFrontier: Object.freeze([0,7,23,29]),
-  relaxAirSupportChangedFrontier: Object.freeze([0,7,19,20,23,29]),
+  relaxAirSupportChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29]),
   commitAirSupportChangedFrontier: Object.freeze([0,7,19,20,29]),
   advanceAirSupportChangedFrontier: Object.freeze([0,7,29]),
-  marchAirSupportFacesChangedFrontier: Object.freeze([0,7,19,20,23,29]),
-  extendAirSupportFacesAtoB: Object.freeze([0,7,19,20,23]),
-  extendAirSupportFacesBtoA: Object.freeze([0,7,19,20,23]),
+  marchAirSupportFacesChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29]),
+  extendAirSupportFacesAtoB: Object.freeze([0,2,7,8,19,20,23]),
+  extendAirSupportFacesBtoA: Object.freeze([0,2,7,8,19,20,23]),
   advanceAirSupportMarchWave: Object.freeze([7]),
-  marchAirSupportFacesToFixedPoint: Object.freeze([0,7,19,20,23]),
-  reconstructAirSupportVectors: Object.freeze([0,2,7,8,15,16,19,22,23,24]),
+  marchAirSupportFacesToFixedPoint: Object.freeze([0,2,7,8,19,20,23]),
+  completeAirSupportIncidentFaces: Object.freeze([0,2,7,8,19,23,30]),
+  reconstructAirSupportVectors: Object.freeze([0,2,7,8,15,16,19,22,23,24,30]),
   finalizeAirSupportMetadata: Object.freeze([0,2,7,8,9,22]),
   commitAirSupportDirectRows: Object.freeze([0,2,7,17,22]),
   commitAirSupportPublication: Object.freeze([0,7,8,9]),
 } as const);
 export type OctreeAirSupportGPUEntryPoint = keyof typeof OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS;
+
+type OctreeAirSupportGPUPipelineBundle = Readonly<Record<string, GPUComputePipeline>>;
+
+/** Pipelines contain no instance resources; all buffers live in the bind
+ * groups assembled by `assignPipelineState`. Keep one exact entry-point bundle
+ * per device and let concurrently initialized producers join the same work. */
+const octreeAirSupportPipelineCache = new WeakMap<GPUDevice,
+  Map<string, OctreeAirSupportGPUPipelineBundle>>();
+const octreeAirSupportPipelineCompilations = new WeakMap<GPUDevice,
+  Map<string, Promise<OctreeAirSupportGPUPipelineBundle>>>();
 
 export interface OctreeAirVelocitySupportGPUPlan {
   readonly rowCapacity: number;
@@ -417,7 +428,7 @@ export function planOctreeAirVelocitySupportGPU(
     faceAdjacencyStride, faceAdjacencyBytes, faceFrontierBytes, directAirVectorBytes,
     support, records, scratchWords,
     scratchBytes, indirectBytes, offsets: Object.freeze(offsets),
-    allocatedBytes: support.totalBytes + records.allocatedBytes + 2 * faceBytes + faceAdjacencyBytes + faceFrontierBytes + directAirVectorBytes
+    allocatedBytes: support.totalBytes + records.allocatedBytes + 3 * faceBytes + faceAdjacencyBytes + faceFrontierBytes + directAirVectorBytes
       + scratchBytes + indirectBytes + 512 });
 }
 
@@ -481,25 +492,31 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   readonly indirect: GPUBuffer;
   readonly faceA: GPUBuffer;
   readonly faceB: GPUBuffer;
+  readonly incidentFaces: GPUBuffer;
   readonly faceAdjacency: GPUBuffer;
   readonly faceFrontier: GPUBuffer;
   readonly directAirVectors: GPUBuffer;
   readonly allocatedBytes: number;
   private readonly params: readonly [GPUBuffer, GPUBuffer];
   private readonly ownerParams: GPUBuffer;
-  private readonly pipelines: Readonly<Record<string, GPUComputePipeline>>;
-  private readonly groups: readonly [Readonly<Record<string, GPUBindGroup>>,
+  private readonly shaderModule: GPUShaderModule;
+  private readonly pipelineCacheKey: string;
+  private pipelines!: Readonly<Record<string, GPUComputePipeline>>;
+  private groups!: readonly [Readonly<Record<string, GPUBindGroup>>,
     Readonly<Record<string, GPUBindGroup>>];
-  private readonly fineDemandGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
+  private fineDemandGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
     readonly [GPUBindGroup, GPUBindGroup]];
-  private readonly fineDemandScheduleGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
+  private fineDemandScheduleGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
     readonly [GPUBindGroup, GPUBindGroup]];
   private readonly ownsArena: boolean;
+  private pipelinesInitialized = false;
+  private pipelineInitialization?: Promise<void>;
   private destroyed = false;
   private publicationCount = 0;
   private parameterSlot: 0 | 1 = 0;
 
-  constructor(private readonly device: GPUDevice, private readonly inputs: OctreeAirVelocitySupportGPUInputs) {
+  constructor(private readonly device: GPUDevice, private readonly inputs: OctreeAirVelocitySupportGPUInputs,
+    deferPipelineCompilation = false) {
     const { structured, topology, owners } = inputs;
     const finePlansMatch = !inputs.fineSources || (() => {
       const [a, b] = inputs.fineSources.map((source) => source.plan);
@@ -553,6 +570,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       size: this.plan.faceBytes, usage: storage });
     this.faceB = device.createBuffer({ label: "Structured ordinary-face extension B",
       size: this.plan.faceBytes, usage: storage });
+    this.incidentFaces = device.createBuffer({ label: "Retained missing incident-face closure",
+      size: this.plan.faceBytes, usage: storage });
     this.faceAdjacency = device.createBuffer({ label: "Published structured ordinary-face adjacency",
       size: this.plan.faceAdjacencyBytes, usage: storage });
     this.faceFrontier = device.createBuffer({ label: "Structured ordinary-face changed frontier",
@@ -574,26 +593,41 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       ownerPlan.ownerDirectoryOffsetWords, ownerPlan.ownerPagesOffsetWords,
       ownerPlan.capacity, ownerPlan.pageVoxels,
     ]));
-    const shaderModule = device.createShaderModule({ label: "Structured positive-air identity publication",
+    this.shaderModule = device.createShaderModule({ label: "Structured positive-air identity publication",
       code: octreeAirVelocitySupportPublicationWGSL });
-    const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-      layout: "auto", compute: { module: shaderModule, entryPoint } });
-    const entries = Object.keys(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS) as OctreeAirSupportGPUEntryPoint[];
-    this.pipelines = Object.freeze(Object.fromEntries(entries.map((entry) => [entry, make(entry)])));
+    this.pipelineCacheKey = this.pipelineEntryPoints().join("\0");
+    if (!deferPipelineCompilation) this.createPipelinesSync();
+    this.allocatedBytes = this.plan.allocatedBytes + 256
+      - (inputs.sharedArena ? this.plan.support.totalBytes : 0);
+  }
+
+  private pipelineEntryPoints(): readonly OctreeAirSupportGPUEntryPoint[] {
+    return Object.keys(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS) as OctreeAirSupportGPUEntryPoint[];
+  }
+
+  private pipelineDescriptor(entryPoint: OctreeAirSupportGPUEntryPoint): GPUComputePipelineDescriptor {
+    return { label: entryPoint, layout: "auto",
+      compute: { module: this.shaderModule, entryPoint } };
+  }
+
+  private assignPipelineState(pipelines: Readonly<Record<string, GPUComputePipeline>>): void {
+    const { structured, topology, owners } = this.inputs;
+    const entries = this.pipelineEntryPoints();
     const buffers = new Map<number, GPUBuffer>([
       [1, structured.control], [2, structured.rowGeometry],
-      [3, owners.arena], [4, topology.catalogTetrahedronHeaders],
-      [5, topology.catalogTetrahedra], [6, topology.catalogTetrahedronVertices],
+      [3, owners.arena], [4, topology.catalogTetrahedronHeaders!],
+      [5, topology.catalogTetrahedra!], [6, topology.catalogTetrahedronVertices!],
       [7, this.scratch], [8, this.recordArena], [9, this.arena],
-      [10, inputs.boundaryEpoch.buffer], [11, this.ownerParams],
+      [10, this.inputs.boundaryEpoch.buffer], [11, this.ownerParams],
       [12, topology.sameOrFinerDirect], [13, topology.sameOrCoarserDirect],
       [14, topology.catalogLookup], [15, topology.catalogFaces],
       [16, topology.reconstructionData], [17, structured.rowVelocities],
-      [18, inputs.liquidMask], [19, this.faceA], [20, this.faceB],
+      [18, this.inputs.liquidMask], [19, this.faceA], [20, this.faceB],
       [21, structured.authority], [22, this.directAirVectors],
-      [23, this.faceAdjacency], [24, this.arena], [29, this.faceFrontier],
-      ...(inputs.fineSources ? [[25, inputs.fineSources[0].metadata], [26, inputs.fineSources[0].worklist],
-        [27, inputs.fineSources[0].flags], [28, inputs.fineSources[0].phi]] as const : []),
+      [23, this.faceAdjacency], [24, this.arena], [29, this.faceFrontier], [30, this.incidentFaces],
+      ...(this.inputs.fineSources ? [[25, this.inputs.fineSources[0].metadata],
+        [26, this.inputs.fineSources[0].worklist], [27, this.inputs.fineSources[0].flags],
+        [28, this.inputs.fineSources[0].phi]] as const : []),
     ]);
     const resource = (params: GPUBuffer, entry: OctreeAirSupportGPUEntryPoint,
       binding: number): GPUBufferBinding => {
@@ -607,38 +641,103 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     const fineOnlyEntries = new Set<OctreeAirSupportGPUEntryPoint>([
       "prepareFineBandAirSupportDemand", "markFineBandAirSupportDemand",
       "dilateFineBandAirSupportDemandX", "dilateFineBandAirSupportDemandY",
-      "dilateFineBandAirSupportDemandZ",
-      "closeFineBandAirSupportInterpolationDemand",
+      "dilateFineBandAirSupportDemandZ", "closeFineBandAirSupportInterpolationDemand",
       "emitFineBandAirSupportCandidates",
     ]);
-    const configuredEntries = entries.filter((entry) => inputs.fineSources || !fineOnlyEntries.has(entry));
+    const configuredEntries = entries.filter((entry) => this.inputs.fineSources
+      || !fineOnlyEntries.has(entry));
     const makeGroups = (params: GPUBuffer) => Object.freeze(Object.fromEntries(
-      configuredEntries.map((entry) => [entry,
-        device.createBindGroup({ layout: this.pipelines[entry]!.getBindGroupLayout(0),
-          entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS[entry]
-            .map((binding) => ({ binding, resource: resource(params, entry, binding) })) }),
-      ])));
-    this.groups = Object.freeze(this.params.map(makeGroups)) as unknown as
+      configuredEntries.map((entry) => [entry, this.device.createBindGroup({
+        layout: pipelines[entry]!.getBindGroupLayout(0),
+        entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS[entry]
+          .map((binding) => ({ binding, resource: resource(params, entry, binding) })),
+      })])));
+    const groups = Object.freeze(this.params.map(makeGroups)) as unknown as
       readonly [Readonly<Record<string, GPUBindGroup>>, Readonly<Record<string, GPUBindGroup>>];
-    if (inputs.fineSources) {
+    let fineDemandGroups: typeof this.fineDemandGroups;
+    let fineDemandScheduleGroups: typeof this.fineDemandScheduleGroups;
+    if (this.inputs.fineSources) {
       const makeFineGroup = (entry: "prepareFineBandAirSupportDemand" | "markFineBandAirSupportDemand",
-        params: GPUBuffer, fine: WebGPUFineLevelSetBrickSource) => device.createBindGroup({
-        layout: this.pipelines[entry]!.getBindGroupLayout(0),
+        params: GPUBuffer, fine: WebGPUFineLevelSetBrickSource) => this.device.createBindGroup({
+        layout: pipelines[entry]!.getBindGroupLayout(0),
         entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS[entry].map((binding) => ({
           binding, resource: { buffer: binding === 0 ? params
           : binding === 25 ? fine.metadata
           : binding === 26 ? fine.worklist : binding === 27 ? fine.flags : binding === 28 ? fine.phi
             : buffers.get(binding)! } })),
       });
-      this.fineDemandGroups = Object.freeze(this.params.map((params) => Object.freeze(
-        inputs.fineSources!.map((fine) => makeFineGroup("markFineBandAirSupportDemand", params, fine))))) as unknown as
-          readonly [readonly [GPUBindGroup, GPUBindGroup], readonly [GPUBindGroup, GPUBindGroup]];
-      this.fineDemandScheduleGroups = Object.freeze(this.params.map((params) => Object.freeze(
-        inputs.fineSources!.map((fine) => makeFineGroup("prepareFineBandAirSupportDemand", params, fine))))) as unknown as
-          readonly [readonly [GPUBindGroup, GPUBindGroup], readonly [GPUBindGroup, GPUBindGroup]];
+      fineDemandGroups = Object.freeze(this.params.map((params) => Object.freeze(
+        this.inputs.fineSources!.map((fine) => makeFineGroup("markFineBandAirSupportDemand", params, fine))))) as unknown as
+          NonNullable<typeof this.fineDemandGroups>;
+      fineDemandScheduleGroups = Object.freeze(this.params.map((params) => Object.freeze(
+        this.inputs.fineSources!.map((fine) => makeFineGroup("prepareFineBandAirSupportDemand", params, fine))))) as unknown as
+          NonNullable<typeof this.fineDemandScheduleGroups>;
     }
-    this.allocatedBytes = this.plan.allocatedBytes + 256
-      - (inputs.sharedArena ? this.plan.support.totalBytes : 0);
+    // Publish the pipeline-dependent state only after every pipeline and bind
+    // group has been created, so encode can never observe a partial set.
+    this.pipelines = Object.freeze(pipelines);
+    this.groups = groups;
+    this.fineDemandGroups = fineDemandGroups;
+    this.fineDemandScheduleGroups = fineDemandScheduleGroups;
+    this.pipelinesInitialized = true;
+  }
+
+  private createPipelinesSync(): void {
+    let deviceCache = octreeAirSupportPipelineCache.get(this.device);
+    if (!deviceCache) {
+      deviceCache = new Map();
+      octreeAirSupportPipelineCache.set(this.device, deviceCache);
+    }
+    let pipelines = deviceCache.get(this.pipelineCacheKey);
+    if (!pipelines) {
+      const compiled: Record<string, GPUComputePipeline> = {};
+      for (const entryPoint of this.pipelineEntryPoints()) {
+        compiled[entryPoint] = this.device.createComputePipeline(this.pipelineDescriptor(entryPoint));
+      }
+      pipelines = Object.freeze(compiled);
+      deviceCache.set(this.pipelineCacheKey, pipelines);
+    }
+    this.assignPipelineState(pipelines);
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.destroyed) throw new Error("Air-support GPU producer is destroyed");
+    if (this.pipelinesInitialized) return;
+    if (this.pipelineInitialization) return this.pipelineInitialization;
+    this.pipelineInitialization = (async () => {
+      let deviceCache = octreeAirSupportPipelineCache.get(this.device);
+      if (!deviceCache) {
+        deviceCache = new Map();
+        octreeAirSupportPipelineCache.set(this.device, deviceCache);
+      }
+      let pipelines = deviceCache.get(this.pipelineCacheKey);
+      if (!pipelines) {
+        let compilations = octreeAirSupportPipelineCompilations.get(this.device);
+        if (!compilations) {
+          compilations = new Map();
+          octreeAirSupportPipelineCompilations.set(this.device, compilations);
+        }
+        let compilation = compilations.get(this.pipelineCacheKey);
+        if (!compilation) {
+          compilation = (async () => {
+            const compiled: Record<string, GPUComputePipeline> = {};
+            for (const entryPoint of this.pipelineEntryPoints()) {
+              compiled[entryPoint] = await this.device.createComputePipelineAsync(
+                this.pipelineDescriptor(entryPoint));
+            }
+            return Object.freeze(compiled);
+          })().then((compiled) => {
+            const published = deviceCache!.get(this.pipelineCacheKey) ?? compiled;
+            deviceCache!.set(this.pipelineCacheKey, published);
+            return published;
+          }).finally(() => { compilations!.delete(this.pipelineCacheKey); });
+          compilations.set(this.pipelineCacheKey, compilation);
+        }
+        pipelines = await compilation;
+      }
+      this.assignPipelineState(pipelines);
+    })();
+    return this.pipelineInitialization;
   }
 
   private parameterData(expectedEpoch: number, fineSlot?: 0 | 1,
@@ -705,6 +804,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     gravityDt?: readonly [number, number, number],
     site: "topology-commit" | "settled-fine" = "settled-fine"): void {
     if (this.destroyed) throw new Error("Air-support GPU producer is destroyed");
+    if (!this.pipelinesInitialized) throw new Error("Air-support GPU pipelines are not initialized");
     if (fineSlot !== undefined && !this.inputs.fineSources) {
       throw new Error("Air-support fine-demand slot requires configured A/B fine sources");
     }
@@ -906,6 +1006,9 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       pass.setBindGroup(0, groups.marchAirSupportFacesToFixedPoint!);
       pass.dispatchWorkgroups(3);
     }
+    pass.setPipeline(this.pipelines.completeAirSupportIncidentFaces!);
+    pass.setBindGroup(0, groups.completeAirSupportIncidentFaces!);
+    pass.dispatchWorkgroupsIndirect(this.indirect, 48);
     encodeOctreeAirSupportReconstructionHandoff(broker);
     pass = broker.compute({ label: siteLabel("Reconstruct Section 5 air-support vectors") });
     pass.setPipeline(this.pipelines.reconstructAirSupportVectors!);
@@ -933,7 +1036,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.ownsArena) this.arena.destroy();
-    for (const buffer of [this.recordArena, this.scratch, this.faceA, this.faceB, this.faceAdjacency, this.faceFrontier,
+    for (const buffer of [this.recordArena, this.scratch, this.faceA, this.faceB, this.incidentFaces, this.faceAdjacency, this.faceFrontier,
       this.directAirVectors, this.indirect, this.ownerParams, ...this.params]) buffer.destroy();
   }
 }
@@ -999,6 +1102,7 @@ struct CatalogSlotGeometry {neighborOffsetSize:vec4f,areaCentroid:vec4f,normalIn
 // GPU-authored sparse propagation queues. Layout: 16 control words, two
 // face-capacity queue banks, then one generation mark per face slot.
 @group(0)@binding(29)var<storage,read_write>faceFrontier:array<atomic<u32>>;
+@group(0)@binding(30)var<storage,read_write>incidentFaces:array<vec4u>;
 ${octreeOwnerPageLookupWgsl}
 const INVALID:u32=${OCTREE_AIR_SUPPORT_INVALID}u;
 const SUPPORT_TAG:u32=${OCTREE_AIR_SUPPORT_TAG}u;
@@ -1876,6 +1980,21 @@ fn faceCenter(item:u32)->vec3f{
   let g=adjacencyGeometry(faceRow);let origin=vec3f(g.xyz);let extent=f32(g.w);var center=origin+vec3f(.5*extent);
   center[axis]=origin[axis]+extent;var transverse=0u;for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
     center[a]=origin[a]+select(.25,.75,(quadrant&(1u<<transverse))!=0u)*extent;transverse+=1u;}return center;}
+fn faceCenterQuarter(item:u32)->vec3i{
+  let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let quadrant=local%4u;
+  let g=adjacencyGeometry(faceRow);let origin=vec3i(g.xyz);let extent=i32(g.w);
+  var center=4*origin+vec3i(2*extent);center[axis]=4*origin[axis]+4*extent;
+  var transverse=0u;for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
+    center[a]=4*origin[a]+select(extent,3*extent,(quadrant&(1u<<transverse))!=0u);transverse+=1u;}
+  return center;}
+fn signedFaceCenterQuarter(faceRow:u32,axis:u32,quadrant:u32,positive:bool)->vec3i{
+  let g=adjacencyGeometry(faceRow);let origin=vec3i(g.xyz);let extent=i32(g.w);
+  var center=4*origin+vec3i(2*extent);
+  center[axis]=4*origin[axis]+select(0,4*extent,positive);
+  var transverse=0u;for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
+    center[a]=4*origin[a]+select(extent,3*extent,(quadrant&(1u<<transverse))!=0u);transverse+=1u;}
+  return center;}
 
 fn frontierAxisCapacity()->u32{return 4u*p.faceCellCapacity;}
 fn frontierQueueBase(bank:u32,axis:u32)->u32{return 16u+bank*p.faceCapacity+axis*frontierAxisCapacity();}
@@ -1953,10 +2072,75 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
 // non-negative finite values, so it cannot change the closest-seed ordering;
 // doing it in every candidate visit was pure work. The one consumer that needs
 // physical distance (the detached-air gravity ramp) takes one sqrt per row.
-fn betterFace(candidate:vec4u,best:vec4u)->bool{let candidateDistanceSquared=bitcast<f32>(candidate.y);
+fn canonicalSeedOffset(item:u32,seed:u32)->vec3i{
+  let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  return powerTransformVector(faceCenterQuarter(seed)-faceCenterQuarter(item),faceCell(faceRow).w&63u);}
+fn canonicalOffsetLess(a:vec3i,b:vec3i)->bool{
+  return a.x<b.x||(a.x==b.x&&(a.y<b.y||(a.y==b.y&&a.z<b.z)));}
+fn faceDistanceSquared(item:u32,seed:u32)->f32{
+  let delta=faceCenterQuarter(item)-faceCenterQuarter(seed);
+  let squared=delta.x*delta.x+delta.y*delta.y+delta.z*delta.z;
+  return .0625*f32(squared);}
+fn betterFace(item:u32,candidate:vec4u,best:vec4u)->bool{let candidateDistanceSquared=bitcast<f32>(candidate.y);
   let bestDistanceSquared=bitcast<f32>(best.y);
+  // Section 5 copies the value of the face closest to the free surface but
+  // leaves exactly equidistant seeds unspecified. A spatial ordering cannot
+  // resolve a seed orbit without breaking one of its reflection stabilizers.
+  // Normal-velocity magnitude is invariant under every axis reflection and
+  // permutation, so use it before the canonical spatial fallback.
+  let candidateMagnitude=abs(bitcast<f32>(candidate.x));let bestMagnitude=abs(bitcast<f32>(best.x));
   return candidate.w!=0u&&finiteValue(candidateDistanceSquared)&&(best.w==0u||candidateDistanceSquared<bestDistanceSquared
-    ||(candidateDistanceSquared==bestDistanceSquared&&candidate.z<best.z));}
+    ||(candidateDistanceSquared==bestDistanceSquared
+      &&(candidateMagnitude<bestMagnitude||(candidateMagnitude==bestMagnitude
+        &&(canonicalOffsetLess(canonicalSeedOffset(item,candidate.z),canonicalSeedOffset(item,best.z))
+          ||(all(canonicalSeedOffset(item,candidate.z)==canonicalSeedOffset(item,best.z))&&candidate.z<best.z))))));}
+// An air leaf may be demanded even when the octree has no allocated leaf on
+// its negative side. Positive-only patch ownership then has no stored record
+// for one of the ordinary faces incident to this dual-mesh node. Recover that
+// face directly from the same Section 5 closest-free-surface seed authority;
+// duplicating the opposite face would make the answer depend on ownership.
+fn closestSeedFaceAt(faceRow:u32,axis:u32,quadrant:u32,positive:bool)->vec4u{
+  let requested=signedFaceCenterQuarter(faceRow,axis,quadrant,positive);
+  let transform=faceCell(faceRow).w&63u;var best=vec4u(0u);var bestSquared=0x7fffffffu;
+  var bestMagnitude=3.402823e38;var bestOffset=vec3i(0);
+  let faceCount=s(29u);
+  for(var item=4u*axis;item<faceCount;item+=${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u){
+    for(var candidateQuadrant=0u;candidateQuadrant<4u;candidateQuadrant+=1u){
+      let candidateItem=item+candidateQuadrant;let candidate=faceA[candidateItem];
+      if(candidate.w==0u||bitcast<f32>(candidate.y)!=0.){continue;}
+      let delta=faceCenterQuarter(candidate.z)-requested;
+      let squared=u32(delta.x*delta.x+delta.y*delta.y+delta.z*delta.z);
+      let magnitude=abs(bitcast<f32>(candidate.x));
+      let offset=powerTransformVector(delta,transform);
+      if(best.w==0u||squared<bestSquared||(squared==bestSquared
+          &&(magnitude<bestMagnitude||(magnitude==bestMagnitude
+            &&(canonicalOffsetLess(offset,bestOffset)
+              ||(all(offset==bestOffset)&&candidate.z<best.z)))))){
+        best=candidate;bestSquared=squared;bestMagnitude=magnitude;bestOffset=offset;}
+    }
+  }
+  if(best.w!=0u){best.y=bitcast<u32>(.0625*f32(bestSquared));}
+  return best;}
+@compute @workgroup_size(256)fn completeAirSupportIncidentFaces(
+  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u,
+  @builtin(num_workgroups)groups:vec3u){
+  let item=linearItem(wid,lane,groups,256u);if(item>=s(29u)||s(0u)!=0u){return;}
+  let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  let axis=local/4u;let quadrant=local%4u;let cell=faceCell(faceRow);
+  var completion=vec4u(0u);
+  // Section 5 extrapolates the liquid velocity through the air band even when
+  // that band meets a solid wall.  Publish the missing negative-side carrier
+  // at a closed wall too; regularVectorAt then uses the same marched trace on
+  // both domain signs, with stationary solid as the no-carrier fallback.
+  if(adjacencyNegative(faceRow,axis,quadrant)==INVALID){
+    let retained=incidentFaces[item];
+    if(s(50u)!=0u&&retained.w!=0u&&retained.z<s(29u)&&faceA[retained.z].w!=0u){
+      completion=faceA[retained.z];completion.y=retained.y;
+    }else{completion=closestSeedFaceAt(faceRow,axis,quadrant,false);}
+  }
+  incidentFaces[item]=completion;
+}
 // Everything the 30x4 candidate scan needs about the marching patch itself is
 // loop-invariant: the published face count and this patch's own centre. They
 // used to be re-derived on every candidate — up to 119 redundant repeats per
@@ -1969,7 +2153,6 @@ fn betterFace(candidate:vec4u,best:vec4u)->bool{let candidateDistanceSquared=bit
 fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[item],readA);
   let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;var best=current;
   let faceCount=s(29u);
-  let center=faceCenter(item);
   let incidence=adjacencyIncidentCount(faceRow);if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(item,ERROR_CAPACITY);return false;}
   for(var localFace=0u;localFace<incidence;localFace+=1u){let otherRow=adjacencyIncident(faceRow,localFace);
     if(otherRow==INVALID){continue;}let sourceBase=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis;
@@ -1981,9 +2164,9 @@ fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[it
         // Accumulating per-hop path length instead made the metric an
         // axis-graph geodesic (Manhattan-like), which under-drives diagonal
         // spreading and squares off the dam front.
-        let delta=center-faceCenter(candidate.z);let distanceSquared=dot(delta,delta);
+        let distanceSquared=faceDistanceSquared(item,candidate.z);
         if(!finiteValue(distanceSquared)){fail(item,ERROR_SOURCE);continue;}candidate.y=bitcast<u32>(distanceSquared);}
-      if(betterFace(candidate,best)){best=candidate;}}}
+      if(betterFace(item,candidate,best)){best=candidate;}}}
   let changed=any(best!=current);if(readA){faceB[item]=best;}else{faceA[item]=best;}return changed;}
 
 // Construction-stable dense oracle retained for exact A/B isolation. It is
@@ -2130,18 +2313,50 @@ fn packedFrontierLane(packed:u32)->vec2u{return vec2u(packed%3u,packed/3u);}
 
 fn quadrantAt(cell:vec4u,axis:u32,point:vec3f)->u32{let origin=vec3f(coord(cell.x));var result=0u;var transverse=0u;
   for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}if(point[a]>=origin[a]+.5*f32(cell.y)){result|=1u<<transverse;}transverse+=1u;}return result;}
-fn ownedFace(faceRow:u32,axis:u32,point:vec3f)->vec4u{let cell=faceCell(faceRow);let quadrant=quadrantAt(cell,axis,point);
+fn ownedFaceQuadrant(faceRow:u32,axis:u32,quadrant:u32)->vec4u{
   return faceA[faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant];}
+fn canonicalAirSupportSum(values:array<f32,31>,count:u32)->f32{
+  var sorted=values;
+  for(var i=1u;i<count;i+=1u){let value=sorted[i];var j=i;
+    loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}
+    sorted[j]=value;}
+  var sum=0.;var i=0u;
+  loop{if(i>=count){break;}let magnitude=abs(sorted[i]);var balance=0;var j=i;
+    loop{if(j>=count||abs(sorted[j])!=magnitude){break;}
+      if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}
+    sum+=f32(balance)*magnitude;i=j;}
+  return sum;}
+fn canonicalAirSupportPair(a:f32,b:f32)->f32{
+  var values:array<f32,31>;values[0]=a;values[1]=b;
+  return canonicalAirSupportSum(values,2u);}
+fn canonicalAirSupportDot(a:vec3f,b:vec3f)->f32{
+  var values:array<f32,31>;values[0]=a.x*b.x;values[1]=a.y*b.y;values[2]=a.z*b.z;
+  return canonicalAirSupportSum(values,3u);}
 // Interpolate the marched regular-octree face field at an arbitrary power-face
 // centroid, then project that vector onto the power-face normal.
 fn regularVectorAt(faceRow:u32,point:vec3f)->vec4f{let cell=faceCell(faceRow);let origin=vec3f(coord(cell.x));var result=vec3f(0.);
-  for(var axis=0u;axis<3u;axis+=1u){var positive=ownedFace(faceRow,axis,point);
-    if(positive.w==0u&&u32(origin[axis])+cell.y==p.dimensions[axis]
-        &&(p.closedBoundaryMask&(1u<<(2u*axis+1u)))!=0u){positive=vec4u(bitcast<u32>(0.),0u,INVALID,1u);}
-    let quadrant=quadrantAt(cell,axis,point);let negativeRow=adjacencyNegative(faceRow,axis,quadrant);var negative=vec4u(0u);
-    if(negativeRow!=INVALID){negative=ownedFace(negativeRow,axis,point);}
-    else if(u32(origin[axis])==0u&&(p.closedBoundaryMask&(1u<<(2u*axis)))!=0u){negative=vec4u(bitcast<u32>(0.),0u,INVALID,1u);}
-    if(positive.w==0u&&negative.w==0u){
+  for(var axis=0u;axis<3u;axis+=1u){
+    var fixedMask=0u;var fixedBits=0u;var transverse=0u;
+    for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}
+      let coordinate=round(clamp((point[a]-origin[a])/f32(cell.y),0.,1.)*65536.)/65536.;
+      let bit=1u<<transverse;if(coordinate<.5){fixedMask|=bit;}
+      else if(coordinate>.5){fixedMask|=bit;fixedBits|=bit;}transverse+=1u;}
+    var terms:array<f32,31>;var termCount=0u;
+    for(var quadrant=0u;quadrant<4u;quadrant+=1u){if((quadrant&fixedMask)!=fixedBits){continue;}
+      var positive=ownedFaceQuadrant(faceRow,axis,quadrant);
+      // In an AIR reconstruction Section 5's marched face is authoritative up
+      // to the wall.  A closed wall supplies the stationary-solid value only
+      // when this side has no carrier; applying zero unconditionally pins a
+      // receding lid film while the opposite domain sign consumes extension.
+      if(positive.w==0u&&u32(origin[axis])+cell.y==p.dimensions[axis]
+          &&(p.closedBoundaryMask&(1u<<(2u*axis+1u)))!=0u){positive=vec4u(bitcast<u32>(0.),0u,INVALID,1u);}
+      let negativeRow=adjacencyNegative(faceRow,axis,quadrant);var negative=vec4u(0u);
+      if(negativeRow!=INVALID){let negativeCell=faceCell(negativeRow);
+        let negativeQuadrant=select(quadrant,quadrantAt(negativeCell,axis,point),negativeCell.y!=cell.y);
+        negative=ownedFaceQuadrant(negativeRow,axis,negativeQuadrant);}
+      else{negative=incidentFaces[faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant];
+        if(negative.w==0u&&u32(origin[axis])==0u&&(p.closedBoundaryMask&(1u<<(2u*axis)))!=0u){negative=vec4u(bitcast<u32>(0.),0u,INVALID,1u);}}
+      if(positive.w==0u&&negative.w==0u){
       // No marched value on either side: this cell's face-graph component
       // holds no seeded liquid face. Since emitFineBandAirSupportCandidates
       // now enrolls every accepted air leaf, the march domain is the paper's
@@ -2152,21 +2367,38 @@ fn regularVectorAt(faceRow:u32,point:vec3f)->vec4f{let cell=faceCell(faceRow);le
       // failing closed instead froze the whole epoch on the first island.
       atomicAdd(&scratch[41u],1u);
       atomicMin(&scratch[42u],(((cell.w>>6u)&0xffu)<<16u)|(cell.x<<3u)|axis);
-      result[axis]=0.;continue;}
-    let positiveValue=bitcast<f32>(select(negative.x,positive.x,positive.w!=0u));let negativeValue=bitcast<f32>(select(positive.x,negative.x,negative.w!=0u));
-    let t=clamp((point[axis]-origin[axis])/f32(cell.y),0.,1.);result[axis]=mix(negativeValue,positiveValue,t);}
+        terms[termCount]=0.;termCount+=1u;continue;}
+      let positiveValue=bitcast<f32>(select(negative.x,positive.x,positive.w!=0u));let negativeValue=bitcast<f32>(select(positive.x,negative.x,negative.w!=0u));
+      let t=round(clamp((point[axis]-origin[axis])/f32(cell.y),0.,1.)*65536.)/65536.;
+      terms[termCount]=canonicalAirSupportPair((1.-t)*negativeValue,t*positiveValue);termCount+=1u;}
+    result[axis]=canonicalAirSupportSum(terms,termCount)/f32(termCount);}
   return vec4f(result,1.);}
 
 // Euclidean distance from this row's nearest marched face patch to its
 // original seed patch — the free-surface proximity the march already carries.
 fn rowSeedDistance(faceRow:u32)->f32{var bestSquared=3.402823e38;
-  for(var local=0u;local<${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;local+=1u){
-    let sample=faceA[faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+local];
-    if(sample.w!=0u){bestSquared=min(bestSquared,bitcast<f32>(sample.y));}}
+  // faceA owns only each cell's positive-axis patches.  A reflection reverses
+  // that ownership: this row's positive face maps to the reflected row's
+  // negative face, which is stored on its negative neighbour.  The gravity
+  // ramp is a cell-centred scalar, so measure the closest carrier over both
+  // sides of every incident face.  Looking at the owned half alone gives
+  // reflected cells different ramps even when the marched field is exact.
+  for(var axis=0u;axis<3u;axis+=1u){for(var quadrant=0u;quadrant<4u;quadrant+=1u){
+    let positive=ownedFaceQuadrant(faceRow,axis,quadrant);
+    if(positive.w!=0u){bestSquared=min(bestSquared,bitcast<f32>(positive.y));}
+    let negativeRow=adjacencyNegative(faceRow,axis,quadrant);
+    if(negativeRow!=INVALID){
+      let point=faceCenter(faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant);
+      let negativeQuadrant=quadrantAt(faceCell(negativeRow),axis,point);
+      let negative=ownedFaceQuadrant(negativeRow,axis,negativeQuadrant);
+      if(negative.w!=0u){bestSquared=min(bestSquared,bitcast<f32>(negative.y));}
+    }
+  }}
   return sqrt(bestSquared);}
 fn reconstructedFaceVector(faceRow:u32)->vec4f{let cell=faceCell(faceRow);let caseId=cell.z;let transform=cell.w&63u;let header=caseHeader(caseId);
   if(header.x==INVALID||header.x>arrayLength(&catalogFaces)||header.y>arrayLength(&catalogFaces)-header.x){fail(faceRow,ERROR_CATALOG);return vec4f(0.,0.,0.,-1.);}
-  var canonical=vec3f(0.);let anchorCenter=vec3f(coord(cell.x))+.5*f32(cell.y);
+  var termsX:array<f32,31>;var termsY:array<f32,31>;var termsZ:array<f32,31>;
+  let anchorCenter=vec3f(coord(cell.x))+.5*f32(cell.y);
   for(var local=0u;local<header.y;local+=1u){let global=header.x+local;let slot=catalogFaces[global];
     let centroid=anchorCenter+f32(cell.y)*inverseTransform(slot.areaCentroid.yzw,transform);let interpolated=regularVectorAt(faceRow,centroid);
     if(!validVector(interpolated)){failTopology(8u,faceRow);
@@ -2175,9 +2407,12 @@ fn reconstructedFaceVector(faceRow:u32)->vec4f{let cell=faceCell(faceRow);let ca
       loop{let exchange=atomicCompareExchangeWeak(&recordArena[14u],0u,detail);
         if(exchange.exchanged||exchange.old_value!=0u){break;}}
       return vec4f(f32(local),interpolated.x,interpolated.y+16.*interpolated.z,-1.);}let normal=normalize(inverseTransform(slot.normalInverseDistance.xyz,transform));
-    let sample=dot(interpolated.xyz,normal);let coefficient=p.reconstructionOffset+3u*global;
+    let sample=canonicalAirSupportDot(interpolated.xyz,normal);let coefficient=p.reconstructionOffset+3u*global;
     if(coefficient+2u>=arrayLength(&denseCatalog)||!finiteValue(sample)){fail(faceRow,ERROR_CATALOG);return vec4f(0.,0.,0.,-1.);}
-    canonical+=vec3f(bitsf(coefficient),bitsf(coefficient+1u),bitsf(coefficient+2u))*sample;}
+    let term=vec3f(bitsf(coefficient),bitsf(coefficient+1u),bitsf(coefficient+2u))*sample;
+    termsX[local]=term.x;termsY[local]=term.y;termsZ[local]=term.z;}
+  let canonical=vec3f(canonicalAirSupportSum(termsX,header.y),
+    canonicalAirSupportSum(termsY,header.y),canonicalAirSupportSum(termsZ,header.y));
   // Gravity over the extension band. A sub-grid film (ceiling sheet, wall-seam
   // band) owns no liquid rows, so nothing ever integrated the body force into
   // the only field that transports its phi — and near seams the closest liquid

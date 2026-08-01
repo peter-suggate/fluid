@@ -502,10 +502,11 @@ fn powerCoarseDenseValue(cell:u32,volume:u32)->f32{let invalidPhi=3.402823e38;le
  if(capacity<volume){return invalidPhi;}let dense=powerCoarseSamples.entries[capacity-volume+cell];
  if(dense.cellPlusOne!=cell+1u||dense.size!=1u||(dense.flags&${OCTREE_COARSE_PHI_FLAG.valid | OCTREE_COARSE_PHI_FLAG.finite}u)!=${OCTREE_COARSE_PHI_FLAG.valid | OCTREE_COARSE_PHI_FLAG.finite}u||dense.phi!=dense.phi){return invalidPhi;}return dense.phi;}
 fn powerCoarseDenseSample(grid:vec3f)->f32{let invalidPhi=3.402823e38;if((powerCoarseSamples.generation&0x40000000u)==0u){return invalidPhi;}let d=powerCoarseSamples.dimensions;let volume=d.x*d.y*d.z;
- let lattice=clamp(grid-vec3f(0.5),vec3f(0.0),vec3f(d)-vec3f(1.0));let base=vec3u(floor(lattice));let fraction=fract(lattice);var value=0.0;
+ let lattice=clamp(grid-vec3f(0.5),vec3f(0.0),vec3f(d)-vec3f(1.0));let base=vec3u(floor(lattice));let fraction=fract(lattice);var terms:array<f32,8>;
  for(var corner=0u;corner<8u;corner+=1u){let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=min(base+o,d-vec3u(1u));
   let cell=q.x+d.x*(q.y+d.y*q.z);let sample=powerCoarseDenseValue(cell,volume);if(!(sample<invalidPhi)){return invalidPhi;}
-  let weight=select(1.0-fraction.x,fraction.x,o.x!=0u)*select(1.0-fraction.y,fraction.y,o.y!=0u)*select(1.0-fraction.z,fraction.z,o.z!=0u);value+=weight*sample;}return value;}
+  let wx=select(1.0-fraction.x,fraction.x,o.x!=0u);let wy=select(1.0-fraction.y,fraction.y,o.y!=0u);let wz=select(1.0-fraction.z,fraction.z,o.z!=0u);terms[corner]=(wx*wz)*wy*sample;}
+ for(var i=1u;i<8u;i+=1u){let term=terms[i];var j=i;loop{if(j==0u||terms[j-1u]<=term){break;}terms[j]=terms[j-1u];j-=1u;}terms[j]=term;}var value=0.;for(var i=0u;i<8u;i+=1u){value+=terms[i];}return value;}
 fn sampleCoarseOctreePhi(position:vec3f)->f32{let invalidPhi=3.402823e38;if(powerCoarseSamples.state!=0x80000000u||!(powerCoarseSamples.physicalCellSize>0.0)){return invalidPhi;}let rawGrid=position/powerCoarseSamples.physicalCellSize;let halfGrid=.5*round(2.*rawGrid);let grid=select(rawGrid,halfGrid,abs(rawGrid-halfGrid)<=vec3f(1e-4));if(any(grid<vec3f(0.0))||any(grid>=vec3f(powerCoarseSamples.dimensions))){return invalidPhi;}
  let dense=powerCoarseDenseSample(grid);if(dense<invalidPhi){return dense;}let q=vec3u(floor(grid));var size=1u;loop{let origin=(q/vec3u(size))*vec3u(size);let cell=origin.x+powerCoarseSamples.dimensions.x*(origin.y+powerCoarseSamples.dimensions.y*origin.z);let slot=powerCoarseLookup(cell,size);if(slot!=0xffffffffu){let entry=powerCoarseSamples.entries[slot];if((entry.flags&${OCTREE_COARSE_PHI_FLAG.valid}u)!=0u){return entry.phi;}return invalidPhi;}if(size>=powerCoarseSamples.maximumLeafSize){break;}size*=2u;}return 0.5*powerCoarseSamples.physicalCellSize;}
 `;

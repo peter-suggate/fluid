@@ -16,6 +16,7 @@ import {
   decodeOctreeSPGridHierarchyCensus,
   octreeSPGridAccurateDispatchGateShader,
   octreeSPGridAccurateOperatorShader,
+  octreeSPGridPipelineNamesForExecutor,
   octreeSPGridVCycleShader,
   planOctreeSPGridVCycle,
   spgridRowCapacityForBindingLimit,
@@ -78,6 +79,98 @@ const spgridSource = (
     classDispatchOffsetBytes: 24,
   };
 };
+
+test("persistent SPGrid construction compiles setup but not hierarchical solve pipelines", () => {
+  const persistent = octreeSPGridPipelineNamesForExecutor(false);
+  const hierarchical = octreeSPGridPipelineNamesForExecutor(true);
+  assert.equal(persistent.includes("beginL1CapturePlan"), true);
+  assert.equal(persistent.includes("buildCandidateStencils"), true);
+  assert.equal(persistent.includes("finalizeLifecycle"), true);
+  for (const unreachable of ["prepareCorrectionDispatches", "zeroVectors",
+    "smoothChebyshevAtoB0", "restrictAndGhostAccumulate", "publish"] as const) {
+    assert.equal(persistent.includes(unreachable), false, `${unreachable} must be pruned`);
+    assert.equal(hierarchical.includes(unreachable), true, `${unreachable} remains in fallback`);
+  }
+  assert.equal(hierarchical.length, Object.keys(OCTREE_SPGRID_VCYCLE_BINDINGS).length);
+});
+
+test("persistent SPGrid constructor creates only reachable setup pipelines", () => {
+  Object.assign(globalThis, {
+    GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
+  });
+  const labels: string[] = [];
+  const buffer = (size: number, usage = 31) =>
+    ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const device = {
+    queue: { writeBuffer() {} },
+    createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+    createShaderModule: () => ({}),
+    createComputePipeline: ({ label }: { label: string }) => {
+      labels.push(label);
+      return { label, getBindGroupLayout: () => ({}) };
+    },
+    createBindGroup: () => ({}),
+  } as unknown as GPUDevice;
+  const cycle = new WebGPUOctreeSPGridVCycle(
+    device,
+    spgridSource(buffer, 128, 8 * 512),
+    { dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1,
+      compileHierarchicalExecutor: false },
+  );
+  assert.equal(labels.length, octreeSPGridPipelineNamesForExecutor(false).length);
+  assert.equal(labels.every((label) => label.startsWith("SPGrid V-cycle · ")), true);
+  assert.equal(labels.some((label) => /accurate A2|Section 6\.3/.test(label)), false);
+  assert.equal(cycle.encodedCorrectionDispatchCount, 0);
+  assert.throws(() => cycle.accurateOperator, /was not compiled/);
+  assert.ok(cycle.section63Topology.state);
+  cycle.destroy();
+});
+
+test("persistent SPGrid defers and sequentially initializes reachable setup pipelines", async () => {
+  Object.assign(globalThis, {
+    GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
+  });
+  const syncLabels: string[] = [], asyncLabels: string[] = [], progress: string[] = [];
+  let activeCompilations = 0, maximumActiveCompilations = 0;
+  const buffer = (size: number, usage = 31) =>
+    ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
+  const device = {
+    queue: { writeBuffer() {} },
+    createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
+    createShaderModule: () => ({}),
+    createComputePipeline: ({ label }: { label: string }) => {
+      syncLabels.push(label); return { label, getBindGroupLayout: () => ({}) };
+    },
+    createComputePipelineAsync: async ({ label }: { label: string }) => {
+      asyncLabels.push(label);
+      activeCompilations += 1;
+      maximumActiveCompilations = Math.max(maximumActiveCompilations, activeCompilations);
+      await Promise.resolve();
+      activeCompilations -= 1;
+      return { label, getBindGroupLayout: () => ({}) };
+    },
+    createBindGroup: () => ({}),
+  } as unknown as GPUDevice;
+  const cycle = new WebGPUOctreeSPGridVCycle(
+    device,
+    spgridSource(buffer, 128, 8 * 512),
+    { dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1,
+      compileHierarchicalExecutor: false, deferPipelineCompilation: true },
+  );
+  assert.deepEqual(syncLabels, [], "allocation must create no pipeline synchronously");
+  assert.ok(cycle.section63Topology.state, "topology state remains allocated before compilation");
+  await cycle.initializePipelines((label, completed, total) => {
+    progress.push(`${label}:${completed}/${total}`);
+  });
+  const expected = octreeSPGridPipelineNamesForExecutor(false)
+    .map((entryPoint) => `SPGrid V-cycle · ${entryPoint}`);
+  assert.deepEqual(asyncLabels, expected);
+  assert.equal(maximumActiveCompilations, 1, "pipeline compilation must remain sequential");
+  assert.equal(progress.length, 2 * expected.length);
+  await cycle.initializePipelines();
+  assert.equal(asyncLabels.length, expected.length, "initialization must be idempotent");
+  cycle.destroy();
+});
 
 /** Executable model of scanCandidateTransfers: a Hillis-Steele inclusive block
  * scan of the per-fine fan-out with a lane-0 carry, read back as the exclusive
@@ -474,16 +567,16 @@ test("accurate A2 stages wide direct terms before an ordered row fold", () => {
   // adjoint producer is now `stageAdjointCandidate`, one lane per (row, child,
   // candidate), so it writes ONE term rather than a child's eighteen. The
   // named property is unchanged and is what the pattern still pins: dependent
-  // terms are produced independently, then folded in channel order.
+  // terms are produced independently, then folded canonically per D4 orbit.
   assert.match(octreeSPGridAccurateOperatorShader,
-    /fn stageDirectTerm[\s\S]*accurateTerms\[destination\]=term;[\s\S]*fn stageAdjointCandidate[\s\S]*accurateTerms\[destination\]=c\*\(x-inputVector\[other\]\);[\s\S]*fn foldStagedRow[\s\S]*value\+=accurateTerms\[row\*162u\+channel\]/,
-    "dependent channel terms must be produced independently then folded in channel order");
-  // The fold itself must stay serial, in one lane's registers, in ascending
-  // child-then-candidate order. Widening the producer must never become a
-  // reassociation of the sum.
+    /fn stageDirectTerm[\s\S]*accurateTerms\[destination\]=term;[\s\S]*fn stageAdjointCandidate[\s\S]*accurateTerms\[destination\]=c\*\(x-inputVector\[other\]\);[\s\S]*fn stagedSortedDirectSum[\s\S]*sorted18Sum\(values\)/,
+    "dependent channel terms must be produced independently then folded canonically");
+  // Each child owns an eighteen-term multiset and the eight child sums form a
+  // second multiset. Sorting both levels makes the fold invariant when a cube
+  // transform permutes candidates and children.
   assert.match(octreeSPGridAccurateOperatorShader,
-    /fn foldStagedRow[\s\S]*for\(var child=0u;child<8u;child\+=1u\)\{for\(var candidate=0u;candidate<18u;candidate\+=1u\)\{\s*value\+=accurateTerms\[row\*162u\+18u\+child\*18u\+candidate\];/,
-    "the E^T fold must keep the serial ascending order the single-lane walk used");
+    /fn stagedSortedAdjointSum[\s\S]*values\[candidate\]=accurateTerms\[row\*162u\+18u\+child\*18u\+candidate\][\s\S]*children\[child\]=sorted18Sum\(values\)[\s\S]*sorted8Sum\(children\)/,
+    "the E^T fold must be invariant to child and candidate permutations");
   assert.match(octreeSPGridAccurateOperatorShader,
     /fn finalizeStagedRow\(row:u32\)\{\s*let folded=foldStagedRow\(row\);if\(folded\.valid\)\{outputVector\[row\]=folded\.value;\}/,
     "ordinary A2 application must publish the shared ordered fold unchanged");
@@ -662,7 +755,7 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     /if\(geometricAggregateTransfer\(\)&&fanOut!=1u\)\{candidateReport\(l\);\}/,
     "candidate setup must reject any aggregate slot outside the total q-to-q/2 mapping");
   assert.match(octreeSPGridVCycleShader,
-    /fn coarseRestrictAggregate\(l:u32,lane:u32\)[\s\S]*let coarse=workSlot\(l\+1u,lane\)[\s\S]*for\(var child=0u;child<8u;child\+=1u\)[\s\S]*sum\+=weight\*residual/,
+    /fn coarseRestrictAggregate\(l:u32,lane:u32\)[\s\S]*let coarse=workSlot\(l\+1u,lane\)[\s\S]*for\(var child=0u;child<8u;child\+=1u\)[\s\S]*values\[child\]=weight\*residual[\s\S]*canonical8Sum\(values\)/,
     "the fused aggregate tail must restrict independent parents through arithmetic children");
   assert.equal((octreeSPGridVCycleShader.match(
     /targetCount=topology\[fineCountBase\(l\)\+fine\]/g) ?? []).length, 2,
@@ -782,8 +875,8 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     /childQ=parentQ\*2u\+vec3u\(lane&1u,\(lane>>1u\)&1u,\(lane>>2u\)&1u\)/,
     "wide factor-1 restriction must assign one arithmetic child to each of eight lanes");
   assert.match(aggregateWide,
-    /for\(var child=0u;child<8u;child\+=1u\)[\s\S]*sum\+=weight\*restrictResidual\[child\]/,
-    "wide factor-1 restriction must fold child bits in deterministic ascending order");
+    /for\(var child=0u;child<8u;child\+=1u\)[\s\S]*values\[child\]=weight\*restrictResidual\[child\][\s\S]*canonical8Sum\(values\)/,
+    "wide factor-1 restriction must fold arithmetic children independently of D4 permutation");
   assert.doesNotMatch(aggregateWide, /transferWord|fineHeadBase|fineCountBase|parentHeadBase/,
     "wide factor-1 restriction must not read the transfer arena");
   const aggregateTail = octreeSPGridVCycleShader.slice(
@@ -871,8 +964,14 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     /fn publishCandidateSpectralBounds[\s\S]*selectedCount\(l\)[\s\S]*selectedWorkSlot\(l,i\)/,
     "the spectral proof must cover the same accepted worklist as a stencil-only rebuild");
   assert.match(octreeSPGridVCycleShader,
-    /acceptedOff\+=max\(0\.0,c\)[\s\S]*diagonal=max\(0\.0,acceptedDiagonal-acceptedOff\)/,
-    "M1 must import L2's boundary reaction while retaining its symmetric first-order graph");
+    /acceptedTerms\[channel\]=max\(0\.0,c\)[\s\S]*acceptedOff=canonical18Sum\(acceptedTerms\)[\s\S]*diagonal=max\(0\.0,acceptedDiagonal-acceptedOff\)/,
+    "M1 must import L2's boundary reaction with a channel-permutation-invariant fold");
+  assert.match(applied,
+    /var terms:array<f32,18>[\s\S]*terms\[k\]=c\*bitcast<f32>[\s\S]*canonical18Sum\(terms\)/,
+    "the recurring M1 stencil must be invariant to D4 channel permutations");
+  assert.match(octreeSPGridVCycleShader,
+    /values\[corner\]=p\.reserved\.x\*transfer\.weight\*loadf\(A,l\+1u,transfer\.coarse\)[\s\S]*canonical8Sum\(values\)/,
+    "prolongation must canonically fold the eight symmetry-permuted parent corners");
   assert.match(octreeSPGridVCycleShader,
     /var acceptedFine=\(flags&ACTIVE\)!=0u\s*&&encodedOwner>0u/,
     // `docs/papers/aanjaneya-2017-power-liquids.txt`, Section 4.3 states that

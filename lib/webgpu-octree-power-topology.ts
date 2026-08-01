@@ -210,6 +210,20 @@ export function planOctreePowerTopology(rowCapacityValue: number, catalog: Gener
       + topologyPublicationArenaBytes(rowCapacity) };
 }
 
+interface OctreePowerTopologyPipelineBundle {
+  readonly layout: GPUBindGroupLayout;
+  readonly preparePipeline: GPUComputePipeline;
+  readonly resolvePipeline: GPUComputePipeline;
+  readonly stagePipeline: GPUComputePipeline;
+  readonly prefixPipeline: GPUComputePipeline;
+  readonly scatterPipeline: GPUComputePipeline;
+  readonly commitPipeline: GPUComputePipeline;
+  readonly finalizePipeline: GPUComputePipeline;
+}
+
+const octreePowerTopologyPipelineCache = new WeakMap<GPUDevice,
+  OctreePowerTopologyPipelineBundle>();
+
 export class WebGPUOctreePowerTopology {
   readonly plan: OctreePowerTopologyPlan;
   readonly metrics: GPUBuffer;
@@ -328,32 +342,48 @@ export class WebGPUOctreePowerTopology {
     this.catalogLookup.unmap();
     this.sameOrFinerDirect = upload("Octree power same/finer direct lookup", catalog.sameOrFinerDirect);
     this.sameOrCoarserDirect = upload("Octree power same/coarser direct lookup", catalog.sameOrCoarserDirect);
-    this.layout = device.createBindGroupLayout({ label: "Octree power topology layout", entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-    ] });
-    const shaderModule = device.createShaderModule({ label: "Octree power topology", code: octreePowerTopologyShader });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    this.preparePipeline = device.createComputePipeline({ label: "Prepare octree power topology", layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "preparePowerTopology" } });
-    this.resolvePipeline = device.createComputePipeline({ label: "Resolve octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "resolvePowerTopology" } });
-    this.stagePipeline = device.createComputePipeline({ label: "Stage exact octree power topology delta", layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "stagePowerTopologyDelta" } });
-    this.prefixPipeline = device.createComputePipeline({ label: "Prefix exact octree power topology blocks", layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "prefixPowerTopologyDelta" } });
-    this.scatterPipeline = device.createComputePipeline({ label: "Scatter exact octree power topology publication rows", layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "scatterPowerTopologyDelta" } });
-    this.commitPipeline = device.createComputePipeline({ label: "Commit exact octree power topology publication rows", layout: pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "commitPowerTopologyDelta" } });
-    this.finalizePipeline = device.createComputePipeline({ label: "Finalize octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalizePowerTopology" } });
+    let pipelines = octreePowerTopologyPipelineCache.get(device);
+    if (!pipelines) {
+      const layout = device.createBindGroupLayout({ label: "Octree power topology layout", entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      ] });
+      const shaderModule = device.createShaderModule({
+        label: "Octree power topology", code: octreePowerTopologyShader });
+      const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+      pipelines = {
+        layout,
+        preparePipeline: device.createComputePipeline({ label: "Prepare octree power topology", layout: pipelineLayout,
+          compute: { module: shaderModule, entryPoint: "preparePowerTopology" } }),
+        resolvePipeline: device.createComputePipeline({ label: "Resolve octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "resolvePowerTopology" } }),
+        stagePipeline: device.createComputePipeline({ label: "Stage exact octree power topology delta", layout: pipelineLayout,
+          compute: { module: shaderModule, entryPoint: "stagePowerTopologyDelta" } }),
+        prefixPipeline: device.createComputePipeline({ label: "Prefix exact octree power topology blocks", layout: pipelineLayout,
+          compute: { module: shaderModule, entryPoint: "prefixPowerTopologyDelta" } }),
+        scatterPipeline: device.createComputePipeline({ label: "Scatter exact octree power topology publication rows", layout: pipelineLayout,
+          compute: { module: shaderModule, entryPoint: "scatterPowerTopologyDelta" } }),
+        commitPipeline: device.createComputePipeline({ label: "Commit exact octree power topology publication rows", layout: pipelineLayout,
+          compute: { module: shaderModule, entryPoint: "commitPowerTopologyDelta" } }),
+        finalizePipeline: device.createComputePipeline({ label: "Finalize octree power topology", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "finalizePowerTopology" } }),
+      };
+      octreePowerTopologyPipelineCache.set(device, pipelines);
+    }
+    this.layout = pipelines.layout;
+    this.preparePipeline = pipelines.preparePipeline;
+    this.resolvePipeline = pipelines.resolvePipeline;
+    this.stagePipeline = pipelines.stagePipeline;
+    this.prefixPipeline = pipelines.prefixPipeline;
+    this.scatterPipeline = pipelines.scatterPipeline;
+    this.commitPipeline = pipelines.commitPipeline;
+    this.finalizePipeline = pipelines.finalizePipeline;
   }
 
   private createGroup(descriptors: GPUBuffer, rowDelta: OctreePowerRowDeltaSource): GPUBindGroup {

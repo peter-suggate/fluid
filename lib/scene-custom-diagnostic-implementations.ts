@@ -425,6 +425,122 @@ const waterRasterIntegrity = defineSceneHookImplementation({
   },
 });
 
+const fluidSymmetry = defineSceneHookImplementation({
+  id: "fluid-symmetry",
+  evaluate: (context) => {
+    const keys = ["maximumVolumeAbsoluteError", "maximumVelocityAbsoluteError_m_s",
+      "maximumPressureAbsoluteError", "maximumRhsAbsoluteError", "maximumDiagonalAbsoluteError",
+      "minimumCheckpointCount", "maximumWallContactStepSpread"] as const;
+    const limits = requiredNumbers(context.parameters, keys);
+    const requireExactTopology = boolean(context.parameters, "requireExactTopology");
+    const requireAllWallsReached = boolean(context.parameters, "requireAllWallsReached");
+    const requirePressureStageAudit = boolean(context.parameters, "requirePressureStageAudit") ?? false;
+    if (!limits || requireExactTopology === undefined || requireAllWallsReached === undefined) {
+      return parameterFailure("fluid-symmetry", [...keys, "requireExactTopology", "requireAllWallsReached"]);
+    }
+    return context.selectedMethods.flatMap((method) => {
+      const diagnostics = recordValue(context.getMethod(method)?.diagnostics);
+      const checkpoints = diagnostics ? fieldCheckpoints(diagnostics) : [];
+      const observations = checkpoints.flatMap((value, step) => {
+        const checkpoint = recordValue(value);
+        const observation = recordPath(checkpoint, "evidence", "fluid-symmetry");
+        const time_s = numberPath(checkpoint, "time_s");
+        return observation && time_s !== undefined ? [{ step: step + 1, time_s, observation }] : [];
+      });
+      const fieldLimits = [
+        ["volume", limits.maximumVolumeAbsoluteError],
+        ["velocity", limits.maximumVelocityAbsoluteError_m_s],
+        ["pressure", limits.maximumPressureAbsoluteError],
+        ["rhs", limits.maximumRhsAbsoluteError],
+        ["diagonal", limits.maximumDiagonalAbsoluteError],
+        ...(requirePressureStageAudit ? [
+          ["initialResidual", 0],
+          ["section63Diagonal", 0],
+          ["section63CaseId", 0],
+          ["initialPreconditioned", 0],
+          ["initialPreconditionedImage", 0],
+          ["preconditionerPreSmoothed", 0],
+          ["preconditionerZeroSmoothed", 0],
+          ["preconditionerFirstOperatorImage", 0],
+          ["preconditionerFirstSmoothed", 0],
+          ["preconditionerInnerResidual", 0],
+          ["preconditionerInnerCorrection", 0],
+          ["preconditionerPostCorrected", 0],
+        ] as const : []),
+      ] as const;
+      const findings: RuntimeDiagnosticFinding[] = [];
+      findings.push(hookFinding({
+        id: `${method}.checkpoint-count`, method,
+        passed: observations.length >= limits.minimumCheckpointCount,
+        message: observations.length >= limits.minimumCheckpointCount
+          ? "every required symmetry checkpoint was collected"
+          : "symmetry evidence ended before the required checkpoint count",
+        expected: { minimum: limits.minimumCheckpointCount }, actual: observations.length,
+      }));
+      for (const [field, maximum] of fieldLimits) {
+        const firstFailure = observations.find(({ observation }) => {
+          const metrics = recordValue(observation[field]);
+          const error = numberPath(metrics, "maximumAbsoluteError");
+          const nonFinite = numberPath(metrics, "nonFiniteCount");
+          return error === undefined || nonFinite === undefined || error > maximum || nonFinite > 0;
+        });
+        const maximumObserved = observations.reduce((value, { observation }) =>
+          Math.max(value, numberPath(recordValue(observation[field]), "maximumAbsoluteError") ?? Infinity), 0);
+        findings.push(hookFinding({
+          id: `${method}.${field}`, method, passed: !firstFailure,
+          message: firstFailure
+            ? `${field} first lost D4 symmetry at step ${firstFailure.step}, t=${firstFailure.time_s.toFixed(3)} s`
+            : `${field} retained D4 symmetry at every checkpoint`,
+          expected: { maximumAbsoluteError: maximum, nonFiniteCount: 0 },
+          actual: firstFailure ? {
+            step: firstFailure.step, time_s: firstFailure.time_s,
+            metrics: firstFailure.observation[field], maximumObserved,
+          } : { maximumObserved },
+        }));
+      }
+      const firstTopologyFailure = requireExactTopology ? observations.find(({ observation }) => {
+        const topology = recordValue(observation.topology);
+        return numberPath(topology, "exactMismatchCount") !== 0
+          || numberPath(topology, "nonFiniteCount") !== 0;
+      }) : undefined;
+      findings.push(hookFinding({
+        id: `${method}.topology`, method, passed: !firstTopologyFailure,
+        message: firstTopologyFailure
+          ? `adaptive topology first lost exact D4 symmetry at step ${firstTopologyFailure.step}, t=${firstTopologyFailure.time_s.toFixed(3)} s`
+          : "adaptive topology retained exact D4 symmetry at every checkpoint",
+        expected: { exactMismatchCount: 0, nonFiniteCount: 0 },
+        actual: firstTopologyFailure ? {
+          step: firstTopologyFailure.step, time_s: firstTopologyFailure.time_s,
+          metrics: firstTopologyFailure.observation.topology,
+        } : undefined,
+      }));
+
+      const wallNames = ["negativeX", "positiveX", "negativeZ", "positiveZ"] as const;
+      const contactSteps = Object.fromEntries(wallNames.map((wall) => {
+        const contact = observations.find(({ observation }) =>
+          recordPath(observation, "walls", wall)?.touched === true);
+        return [wall, contact?.step];
+      })) as Record<typeof wallNames[number], number | undefined>;
+      const reachedSteps = Object.values(contactSteps).filter((value): value is number => value !== undefined);
+      const spread = reachedSteps.length === 4 ? Math.max(...reachedSteps) - Math.min(...reachedSteps) : Infinity;
+      const wallsPassed = requireAllWallsReached
+        ? reachedSteps.length === 4 && spread <= limits.maximumWallContactStepSpread
+        : reachedSteps.length < 4 || spread <= limits.maximumWallContactStepSpread;
+      findings.push(hookFinding({
+        id: `${method}.wall-contact`, method, passed: wallsPassed,
+        message: wallsPassed ? (reachedSteps.length === 4
+          ? "all four walls were reached on the same accepted step"
+          : "wall contact is not required by this diagnostic lane")
+          : "the four wall-contact steps are absent or asymmetric",
+        expected: { reachedWalls: requireAllWallsReached ? 4 : undefined,
+          maximumStepSpread: limits.maximumWallContactStepSpread },
+        actual: { contactSteps, stepSpread: spread },
+      }));
+      return findings;
+    });
+  },
+});
+
 export const sceneCustomHookImplementations = Object.freeze({
   "free-fall-contact": freeFallContact,
   "garden-source-brick-migration": gardenSourceBrickMigration,
@@ -435,6 +551,7 @@ export const sceneCustomHookImplementations = Object.freeze({
   "hose-jet-drift": hoseJetDrift,
   "dam-break-perturbed-cadence": damBreakPerturbedCadence,
   "water-raster-integrity": waterRasterIntegrity,
+  "fluid-symmetry": fluidSymmetry,
 }) satisfies SceneHookRegistry;
 
 const settling = defineDiagnosticPackImplementation({

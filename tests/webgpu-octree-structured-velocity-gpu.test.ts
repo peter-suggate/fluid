@@ -249,6 +249,9 @@ test("changed topology faces remain pending for old-field transfer while exact c
     /fn carryValue\([^)]*\)->vec2f[\s\S]*return vec2f\(bitcast<f32>\([\s\S]*?valuesOffset[\s\S]*?\),1\.0\);/,
     "an exact old face identity must carry its value and publish the transfer-skip marker");
   assert.match(directStructuredVelocityPublicationWGSL,
+    /fn carryValue\(row:u32,neighbor:u32,geo:ResolvedSlotGeometry\)[\s\S]*other!=oldNeighbor[\s\S]*centroid[\s\S]*geo\.centroid[\s\S]*normal[\s\S]*geo\.normal[\s\S]*geo\.area/,
+    "carry identity must use incident rows and world geometry, never catalog-local orientation numbering");
+  assert.match(directStructuredVelocityPublicationWGSL,
     /centroidOffset\+4u\*handle\+3u\]=bitcast<u32>\(carried\.y\)/,
     "the otherwise-unused centroid lane owns the candidate-only carry marker");
   assert.doesNotMatch(directStructuredVelocityPublicationWGSL,
@@ -285,6 +288,20 @@ test("Dawn Metal compiles every direct structured publication stage", {
   const error = await device.popErrorScope();
   assert.equal(error, null, error?.message);
   device.destroy();
+});
+
+test("publication velocity reconstruction is permutation invariant and exactly odd", () => {
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn canonicalPublicationSum\(values:array<f32,31>,count:u32\)/);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /abs\(sorted\[j-1u\]\)<=abs\(value\)[\s\S]*balance\+=1[\s\S]*balance-=1[\s\S]*f32\(balance\)\*magnitude/,
+    "reflected equal-magnitude incidences must cancel before the f32 fold");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /termsX\[local\]=term\.x;termsY\[local\]=term\.y;termsZ\[local\]=term\.z[\s\S]*canonicalPublicationSum\(termsX,h\.y\)/,
+    "the topology handoff must use the same order-free reconstruction as recurring dynamics");
+  assert.doesNotMatch(directStructuredVelocityPublicationWGSL,
+    /fn reconstructStructuredCellVelocity[^}]*canonical\+=/,
+    "catalog slot order must not determine the reconstructed velocity");
 });
 
 test("rejected packed A/B publication preserves every accepted byte", {

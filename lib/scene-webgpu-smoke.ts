@@ -40,10 +40,11 @@ export type SceneWebGPURasterPolicy = "none" | "initial-final" | "checkpoints";
 export type SceneWebGPUEvidenceCollectorId =
   | "free-fall-contact-attribution"
   | "hose-jet-drift"
-  | "collocated-velocity";
+  | "collocated-velocity"
+  | "fluid-symmetry";
 
 export type SceneWebGPUEvidenceCollectionPhase = "checkpoint" | "terminal";
-export type SceneWebGPUEvidenceSource = "compact velocity" | "collocated velocity"
+export type SceneWebGPUEvidenceSource = "compact velocity" | "collocated velocity" | "compact pressure"
   | "fine upper surface";
 
 /** Scene-declared adapter for evidence that cannot be collected generically. */
@@ -115,7 +116,8 @@ export type SceneWebGPUHookId =
   | "free-fall-contact"
   | "dam-break-velocity-parity"
   | "dam-break-perturbed-cadence"
-  | "water-raster-integrity";
+  | "water-raster-integrity"
+  | "fluid-symmetry";
 
 /**
  * Hooks identify pure, scene-specific post-processing.  They declare all

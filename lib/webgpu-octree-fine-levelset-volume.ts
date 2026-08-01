@@ -13,6 +13,25 @@ const FINE_LEVELSET_VOLUME_INDIRECT_BYTES = 16;
 export const FLUID_FINE_VOLUME_CADENCE_ENV = "FLUID_FINE_VOLUME_CADENCE";
 const volumeCadenceTicks = new WeakMap<GPUBuffer, number>();
 
+interface FineLevelSetVolumePipelineBundle {
+  readonly resetPipeline: GPUComputePipeline;
+  readonly addReferencePipeline: GPUComputePipeline;
+  readonly coarsePartialPipeline: GPUComputePipeline;
+  readonly prepareCoarseDispatchPipeline: GPUComputePipeline;
+  readonly coarseFinalizePipeline: GPUComputePipeline;
+  readonly prepareFineDispatchPipeline: GPUComputePipeline;
+  readonly finePartialPipeline: GPUComputePipeline;
+  readonly fineFinalizePipeline: GPUComputePipeline;
+  readonly applyPipeline: GPUComputePipeline;
+  readonly correctedFinalizePipeline: GPUComputePipeline;
+  readonly measuredFinalizePipeline: GPUComputePipeline;
+}
+
+const fineLevelSetVolumePipelineCache = new WeakMap<GPUDevice,
+  Map<string, FineLevelSetVolumePipelineBundle>>();
+const fineLevelSetVolumePipelineCompilations = new WeakMap<GPUDevice,
+  Map<string, Promise<FineLevelSetVolumePipelineBundle>>>();
+
 /** Project-specific correction cadence. The paper path does not require this
  * global phi offset; cadence one preserves the existing product behavior. */
 export function fineLevelSetVolumeCadence(
@@ -103,24 +122,29 @@ export class WebGPUFineLevelSetVolumeCorrection {
   private readonly reductionScratch: GPUBuffer;
   private readonly fineDispatch: GPUBuffer;
   private readonly coarseDispatch: GPUBuffer;
-  private readonly resetPipeline: GPUComputePipeline;
-  private readonly addReferencePipeline: GPUComputePipeline;
-  private readonly coarsePartialPipeline: GPUComputePipeline;
-  private readonly prepareCoarseDispatchPipeline: GPUComputePipeline;
-  private readonly coarseFinalizePipeline: GPUComputePipeline;
-  private readonly prepareFineDispatchPipeline: GPUComputePipeline;
-  private readonly finePartialPipeline: GPUComputePipeline;
-  private readonly fineFinalizePipeline: GPUComputePipeline;
-  private readonly applyPipeline: GPUComputePipeline;
-  private readonly correctedFinalizePipeline: GPUComputePipeline;
-  private readonly measuredFinalizePipeline: GPUComputePipeline;
+  private resetPipeline!: GPUComputePipeline;
+  private addReferencePipeline!: GPUComputePipeline;
+  private coarsePartialPipeline!: GPUComputePipeline;
+  private prepareCoarseDispatchPipeline!: GPUComputePipeline;
+  private coarseFinalizePipeline!: GPUComputePipeline;
+  private prepareFineDispatchPipeline!: GPUComputePipeline;
+  private finePartialPipeline!: GPUComputePipeline;
+  private fineFinalizePipeline!: GPUComputePipeline;
+  private applyPipeline!: GPUComputePipeline;
+  private correctedFinalizePipeline!: GPUComputePipeline;
+  private measuredFinalizePipeline!: GPUComputePipeline;
+  private readonly pipelineActivity: GPULogicalActivityAdoptionContext;
+  private readonly pipelineCacheKey: string;
+  private readonly pipelineShaderCode: string;
+  private pipelineInitialization?: Promise<void>;
   private readonly groups = new Map<GPUComputePipeline, GPUBindGroup>();
   private readonly ownsControl: boolean;
   private pendingReferenceVolume = 0;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
-    private readonly coarse: FineLevelSetVolumeCoarseSource, sharedControl?: GPUBuffer) {
+    private readonly coarse: FineLevelSetVolumeCoarseSource, sharedControl?: GPUBuffer,
+    deferPipelineCompilation = false) {
     if (!Number.isSafeInteger(coarse.sampleRowCapacity) || coarse.sampleRowCapacity < 1) {
       throw new RangeError("Fine volume coarse row-directory capacity must be positive");
     }
@@ -157,25 +181,55 @@ export class WebGPUFineLevelSetVolumeCorrection {
       fineLevelSetVolumeActivityShader(volumeActivity),
       `octree/fine-volume-correction/${volumeProfile.cacheKey}`,
     );
-    const shaderModule = device.createShaderModule({
-      label: "global fine total-volume correction",
-      code: volumeVariant.code,
-    });
-    const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
-      compute: { module: shaderModule, entryPoint } });
-    this.resetPipeline = pipeline("resetVolumeControl");
-    this.addReferencePipeline = pipeline("addReferenceVolume");
-    this.prepareCoarseDispatchPipeline = pipeline("prepareCoarseVolumeDispatch");
-    this.coarsePartialPipeline = pipeline("reduceCoarseVolumePartials");
-    this.coarseFinalizePipeline = pipeline("finalizeCoarseVolume");
-    this.prepareFineDispatchPipeline = pipeline("prepareFineVolumeDispatch");
-    this.finePartialPipeline = pipeline("reduceFineOverlapPartials");
-    this.fineFinalizePipeline = pipeline("finalizeFineVolume");
-    this.applyPipeline = volumeActivity.registerPipeline(pipeline("applyFineVolumeCorrection"));
-    this.correctedFinalizePipeline = pipeline("finalizeCorrectedFineVolume");
-    this.measuredFinalizePipeline = pipeline("finalizeMeasuredFineVolume");
+    this.pipelineActivity = volumeActivity;
+    this.pipelineCacheKey = volumeVariant.cacheKey;
+    this.pipelineShaderCode = volumeVariant.code;
+    if (deferPipelineCompilation) return;
+    let deviceCache = fineLevelSetVolumePipelineCache.get(device);
+    if (!deviceCache) {
+      deviceCache = new Map();
+      fineLevelSetVolumePipelineCache.set(device, deviceCache);
+    }
+    let pipelines = deviceCache.get(volumeVariant.cacheKey);
+    if (!pipelines) {
+      const shaderModule = device.createShaderModule({
+        label: "global fine total-volume correction",
+        code: volumeVariant.code,
+      });
+      const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
+        compute: { module: shaderModule, entryPoint } });
+      pipelines = {
+        resetPipeline: pipeline("resetVolumeControl"),
+        addReferencePipeline: pipeline("addReferenceVolume"),
+        prepareCoarseDispatchPipeline: pipeline("prepareCoarseVolumeDispatch"),
+        coarsePartialPipeline: pipeline("reduceCoarseVolumePartials"),
+        coarseFinalizePipeline: pipeline("finalizeCoarseVolume"),
+        prepareFineDispatchPipeline: pipeline("prepareFineVolumeDispatch"),
+        finePartialPipeline: pipeline("reduceFineOverlapPartials"),
+        fineFinalizePipeline: pipeline("finalizeFineVolume"),
+        applyPipeline: volumeActivity.registerPipeline(pipeline("applyFineVolumeCorrection")),
+        correctedFinalizePipeline: pipeline("finalizeCorrectedFineVolume"),
+        measuredFinalizePipeline: pipeline("finalizeMeasuredFineVolume"),
+      };
+      deviceCache.set(volumeVariant.cacheKey, pipelines);
+    }
+    this.installPipelineBundle(pipelines);
+  }
+
+  private installPipelineBundle(pipelines: FineLevelSetVolumePipelineBundle): void {
+    this.resetPipeline = pipelines.resetPipeline;
+    this.addReferencePipeline = pipelines.addReferencePipeline;
+    this.prepareCoarseDispatchPipeline = pipelines.prepareCoarseDispatchPipeline;
+    this.coarsePartialPipeline = pipelines.coarsePartialPipeline;
+    this.coarseFinalizePipeline = pipelines.coarseFinalizePipeline;
+    this.prepareFineDispatchPipeline = pipelines.prepareFineDispatchPipeline;
+    this.finePartialPipeline = pipelines.finePartialPipeline;
+    this.fineFinalizePipeline = pipelines.fineFinalizePipeline;
+    this.applyPipeline = pipelines.applyPipeline;
+    this.correctedFinalizePipeline = pipelines.correctedFinalizePipeline;
+    this.measuredFinalizePipeline = pipelines.measuredFinalizePipeline;
     const cache = (pipeline: GPUComputePipeline, entries: readonly [number, GPUBuffer][]) => {
-      this.groups.set(pipeline, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
+      this.groups.set(pipeline, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
         entries: entries.map(([binding, buffer]) => ({ binding, resource: { buffer } })) }));
     };
     cache(this.resetPipeline, [[5, this.control]]);
@@ -201,6 +255,66 @@ export class WebGPUFineLevelSetVolumeCorrection {
       [6, this.coarseParams], [12, this.reductionScratch]]);
   }
 
+  private async compilePipelineBundleAsync(): Promise<FineLevelSetVolumePipelineBundle> {
+    const shaderModule = this.device.createShaderModule({
+      label: "global fine total-volume correction",
+      code: this.pipelineShaderCode,
+    });
+    const pipeline = (entryPoint: string) => this.device.createComputePipelineAsync({
+      label: entryPoint,
+      layout: "auto",
+      compute: { module: shaderModule, entryPoint },
+    });
+    const resetPipeline = await pipeline("resetVolumeControl");
+    const addReferencePipeline = await pipeline("addReferenceVolume");
+    const prepareCoarseDispatchPipeline = await pipeline("prepareCoarseVolumeDispatch");
+    const coarsePartialPipeline = await pipeline("reduceCoarseVolumePartials");
+    const coarseFinalizePipeline = await pipeline("finalizeCoarseVolume");
+    const prepareFineDispatchPipeline = await pipeline("prepareFineVolumeDispatch");
+    const finePartialPipeline = await pipeline("reduceFineOverlapPartials");
+    const fineFinalizePipeline = await pipeline("finalizeFineVolume");
+    const applyPipeline = this.pipelineActivity.registerPipeline(
+      await pipeline("applyFineVolumeCorrection"));
+    const correctedFinalizePipeline = await pipeline("finalizeCorrectedFineVolume");
+    const measuredFinalizePipeline = await pipeline("finalizeMeasuredFineVolume");
+    return { resetPipeline, addReferencePipeline, prepareCoarseDispatchPipeline,
+      coarsePartialPipeline, coarseFinalizePipeline, prepareFineDispatchPipeline,
+      finePartialPipeline, fineFinalizePipeline, applyPipeline,
+      correctedFinalizePipeline, measuredFinalizePipeline };
+  }
+
+  initializePipelines(): Promise<void> {
+    if (this.resetPipeline) return Promise.resolve();
+    if (this.pipelineInitialization) return this.pipelineInitialization;
+    this.pipelineInitialization = (async () => {
+      let deviceCache = fineLevelSetVolumePipelineCache.get(this.device);
+      if (!deviceCache) {
+        deviceCache = new Map();
+        fineLevelSetVolumePipelineCache.set(this.device, deviceCache);
+      }
+      let pipelines = deviceCache.get(this.pipelineCacheKey);
+      if (!pipelines) {
+        let compilations = fineLevelSetVolumePipelineCompilations.get(this.device);
+        if (!compilations) {
+          compilations = new Map();
+          fineLevelSetVolumePipelineCompilations.set(this.device, compilations);
+        }
+        let compilation = compilations.get(this.pipelineCacheKey);
+        if (!compilation) {
+          compilation = this.compilePipelineBundleAsync().then((compiled) => {
+            const published = deviceCache!.get(this.pipelineCacheKey) ?? compiled;
+            deviceCache!.set(this.pipelineCacheKey, published);
+            return published;
+          }).finally(() => { compilations!.delete(this.pipelineCacheKey); });
+          compilations.set(this.pipelineCacheKey, compilation);
+        }
+        pipelines = await compilation;
+      }
+      this.installPipelineBundle(pipelines);
+    })();
+    return this.pipelineInitialization;
+  }
+
   /**
    * Record the paper-path volume measurement without mutating phi.  The
    * Aanjaneya narrow-band scheme does not apply a global level-set offset;
@@ -224,6 +338,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
 
   private encodePasses(broker: PassBroker, applyCorrection: boolean): void {
     if (this.destroyed) throw new Error("Fine volume correction is destroyed");
+    if (!this.resetPipeline) throw new Error("Fine volume pipelines are not initialized");
     const cadence = applyCorrection ? fineLevelSetVolumeCadence() : 1;
     const tick = (volumeCadenceTicks.get(this.control) ?? 0) + 1;
     volumeCadenceTicks.set(this.control, tick);

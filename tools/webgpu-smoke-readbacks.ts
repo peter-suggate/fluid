@@ -52,6 +52,8 @@ import {
   rasterizeStructuredCellVelocities,
   type CompactVelocityRaster,
 } from "./webgpu-smoke-velocity-parity";
+import { rasterMeshSymmetryMetrics, sharpPatchRasterMetrics,
+  type RasterMeshSymmetryMetrics, type SharpPatchRasterMetrics } from "./raster-mesh-symmetry";
 
 export async function readFloatTexture3D(device: GPUDevice, texture: GPUTexture, width: number, height: number, depth: number) {
   const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
@@ -363,6 +365,12 @@ export interface HybridPresentationSmokeStats {
   vertexAllocator?: number;
   vertexCapacity?: number;
   activeCubeCapacity?: number;
+  /** Exact unordered D4 audit of emitted position+normal records. */
+  surfaceMeshSymmetry?: RasterMeshSymmetryMetrics;
+  /** Production classified-cube/offset/vertex audit for explicit sharp rectangles. */
+  sharpPatchRaster?: SharpPatchRasterMetrics;
+  /** Exact D4 audit of every valid sparse fine-phi sample feeding extraction. */
+  finePhiSymmetry?: FinePhiSymmetryMetrics;
   narrowVerticalSlits: NarrowVerticalSlitMetrics;
   enclosedSurfaceHoles: {
     front: EnclosedSurfaceHoleMetrics;
@@ -417,6 +425,81 @@ export interface HybridPresentationSmokeStats {
     retainedBackInterfaceHash: number;
     retainedFrontInterfaceBounds_m?: readonly [readonly [number, number, number], readonly [number, number, number]];
   };
+}
+
+export interface FinePhiSymmetryMetrics {
+  readonly validSamples: number;
+  readonly comparedSamples: number;
+  readonly supportMismatchCount: number;
+  readonly exactValueMismatchCount: number;
+  readonly nonFiniteCount: number;
+  readonly maximumAbsoluteError: number;
+}
+
+export async function readFinePhiSymmetrySource(
+  device: GPUDevice,
+  source: Pick<WebGPUFineLevelSetBrickSource, "plan" | "generation" | "worklist" | "metadata" | "flags" | "phi">,
+): Promise<FinePhiSymmetryMetrics> {
+  const { plan } = source, capacity = plan.maximumResidentBricks;
+  const payloadWords = capacity * plan.samplesPerBrick;
+  const [worklistBytes, metadataBytes, flagsBytes, phiBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: source.worklist }, (7 + capacity) * 4),
+    readBufferBinding(device, { buffer: source.metadata }, capacity * 40),
+    readBufferBinding(device, { buffer: source.flags }, payloadWords * 4),
+    readBufferBinding(device, { buffer: source.phi }, payloadWords * 4),
+  ]);
+  const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
+  const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4);
+  const flags = new Uint32Array(flagsBytes.buffer, flagsBytes.byteOffset, flagsBytes.byteLength / 4);
+  const phiWords = new Uint32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+  const [nx, ny, nz] = plan.sampleDimensions;
+  if (nx !== nz) throw new Error("Horizontal fine-phi D4 audit requires equal x/z dimensions");
+  const denseWords = new Uint32Array(nx * ny * nz), valid = new Uint8Array(nx * ny * nz);
+  const r = plan.brickResolution, active = Math.min(worklist[1] ?? 0, capacity);
+  let validSamples = 0, nonFiniteCount = 0;
+  for (let work = 0; work < active; work += 1) {
+    const id = worklist[7 + work] ?? 0xffff_ffff;
+    if (id >= capacity || metadata[id * 10 + 2] !== source.generation) continue;
+    const key = metadata[id * 10 + 1]!;
+    const bz = Math.floor(key / (plan.brickDimensions[0] * plan.brickDimensions[1]));
+    const rem = key - bz * plan.brickDimensions[0] * plan.brickDimensions[1];
+    const by = Math.floor(rem / plan.brickDimensions[0]), bx = rem - by * plan.brickDimensions[0];
+    for (let local = 0; local < plan.samplesPerBrick; local += 1) {
+      const qx = bx * r + local % r, qy = by * r + Math.floor(local / r) % r;
+      const qz = bz * r + Math.floor(local / (r * r));
+      const payload = id * plan.samplesPerBrick + local;
+      if (qx >= nx || qy >= ny || qz >= nz || (flags[payload]! & 1) === 0) continue;
+      const bits = phiWords[payload]!, exponent = bits & 0x7f80_0000;
+      if (exponent === 0x7f80_0000) { nonFiniteCount += 1; continue; }
+      const at = qx + nx * (qy + ny * qz);
+      valid[at] = 1; denseWords[at] = bits; validSamples += 1;
+    }
+  }
+  const transforms = [
+    (x: number, z: number) => [nx - 1 - x, z] as const,
+    (x: number, z: number) => [x, nz - 1 - z] as const,
+    (x: number, z: number) => [z, x] as const,
+  ];
+  const asFloat = new Float32Array(denseWords.buffer);
+  let comparedSamples = 0, supportMismatchCount = 0, exactValueMismatchCount = 0, maximumAbsoluteError = 0;
+  for (const transform of transforms) for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const at = x + nx * (y + ny * z);
+    if (!valid[at]) continue;
+    comparedSamples += 1;
+    const [tx, tz] = transform(x, z), target = tx + nx * (y + ny * tz);
+    if (!valid[target]) { supportMismatchCount += 1; continue; }
+    const sourceBits = (denseWords[at]! & 0x7fff_ffff) === 0 ? 0 : denseWords[at]!;
+    const targetBits = (denseWords[target]! & 0x7fff_ffff) === 0 ? 0 : denseWords[target]!;
+    if (sourceBits !== targetBits) exactValueMismatchCount += 1;
+    maximumAbsoluteError = Math.max(maximumAbsoluteError, Math.abs(asFloat[at]! - asFloat[target]!));
+  }
+  return { validSamples, comparedSamples, supportMismatchCount, exactValueMismatchCount,
+    nonFiniteCount, maximumAbsoluteError };
+}
+
+async function readFinePhiSymmetry(device: GPUDevice, solver: GPUSolverInstance): Promise<FinePhiSymmetryMetrics | undefined> {
+  const source = solver.globalFineLevelSetSource;
+  return source ? readFinePhiSymmetrySource(device, source) : undefined;
 }
 
 export interface GlobalFineGenerationDiagnostics {
@@ -919,6 +1002,9 @@ export async function smokeRenderHybridPresentation(
     const globalFineLevelSet = solver.globalFineLevelSetSource
       ? createGlobalFineLevelSetConsumerSource(solver.globalFineLevelSetSource)
       : undefined;
+    const finePhiSymmetry = process.env.FLUID_RASTER_MESH_SYMMETRY === "1"
+      ? await readFinePhiSymmetry(device, solver)
+      : undefined;
     if (verifyGlobalFineAuthorityTransition && !globalFineLevelSet) {
       throw new Error("Global-fine authority transition requested without a published source");
     }
@@ -949,6 +1035,37 @@ export async function smokeRenderHybridPresentation(
         device.queue.submit([encoder.finish()]);
         const presentationDiagnostics = await pipeline.completeSurfaceDiagnostics();
         await device.queue.onSubmittedWorkDone();
+        let surfaceMeshSymmetry: RasterMeshSymmetryMetrics | undefined;
+        let sharpPatchRaster: SharpPatchRasterMetrics | undefined;
+        if (process.env.FLUID_RASTER_MESH_SYMMETRY === "1" && presentationDiagnostics?.vertexCount) {
+          const source = pipeline.diagnosticSurfaceVertexSource();
+          if (!source) throw new Error("Raster mesh symmetry requested without an emitted vertex source");
+          const vertexBytes = presentationDiagnostics.vertexCount * source.strideBytes;
+          const cubeBytes = presentationDiagnostics.activeCubeCount * 8;
+          const offsetBytes = presentationDiagnostics.activeCubeCount * 6 * 4;
+          const byteLength = vertexBytes + cubeBytes + offsetBytes;
+          const meshReadback = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+          try {
+            const meshEncoder = device.createCommandEncoder({ label: "Read exact raster mesh symmetry" });
+            meshEncoder.copyBufferToBuffer(source.buffer, 0, meshReadback, 0, vertexBytes);
+            meshEncoder.copyBufferToBuffer(source.classifiedCubes, 0, meshReadback, vertexBytes, cubeBytes);
+            meshEncoder.copyBufferToBuffer(source.classifiedOffsets, 0, meshReadback,
+              vertexBytes + cubeBytes, offsetBytes);
+            device.queue.submit([meshEncoder.finish()]);
+            await meshReadback.mapAsync(GPUMapMode.READ);
+            const mapped = meshReadback.getMappedRange();
+            const vertices = new Float32Array(mapped, 0, presentationDiagnostics.vertexCount * 8);
+            const cubes = new Uint32Array(mapped, vertexBytes, presentationDiagnostics.activeCubeCount * 2);
+            const offsets = new Uint32Array(mapped, vertexBytes + cubeBytes,
+              presentationDiagnostics.activeCubeCount * 6);
+            surfaceMeshSymmetry = rasterMeshSymmetryMetrics(vertices, presentationDiagnostics.vertexCount);
+            sharpPatchRaster = sharpPatchRasterMetrics(vertices, presentationDiagnostics.vertexCount,
+              cubes, offsets, presentationDiagnostics.activeCubeCount);
+            meshReadback.unmap();
+          } finally {
+            meshReadback.destroy();
+          }
+        }
         await interfaceReadback.mapAsync(GPUMapMode.READ);
         const interfaceWords = new Uint16Array(interfaceReadback.getMappedRange());
         const interfaceRowWords = interfaceBytesPerRow / 2;
@@ -1073,6 +1190,8 @@ export async function smokeRenderHybridPresentation(
           narrowVerticalSlits,
           enclosedSurfaceHoles,
           surfaceSteps,
+          ...(surfaceMeshSymmetry ? { surfaceMeshSymmetry } : {}),
+          ...(sharpPatchRaster ? { sharpPatchRaster } : {}),
           ceilingContactPixels: { front: frontCeilingContactPixels, back: backCeilingContactPixels },
           wallCornerCapPixels,
           wallCornerMaximumY_m,
@@ -1153,6 +1272,7 @@ export async function smokeRenderHybridPresentation(
       damExposedCornerCapPixels: reverse.damExposedCornerCapPixels,
       ...(reverse.frontInterfaceBounds_m ? { frontInterfaceBounds_m: reverse.frontInterfaceBounds_m } : {}),
     }, rendererValidationErrorCount: 0, rendererUncapturedErrorCount: 0,
+      ...(finePhiSymmetry ? { finePhiSymmetry } : {}),
       ...(globalFineAuthorityTransition ? { globalFineAuthorityTransition } : {}) };
   } finally {
     if (rendererValidationScopeActive) await device.popErrorScope().catch(() => null);
@@ -1378,6 +1498,916 @@ export async function readCompactOctreeVelocityField3D(
       && control.epoch > 0 && control.activeBank < 2,
     rowCount,
     reconstructedRows,
+  };
+}
+
+export interface CompactOctreePressureStateRaster {
+  readonly pressure: Float32Array;
+  readonly rhs: Float32Array;
+  readonly diagonal: Float32Array;
+  readonly section63Diagonal?: Float32Array;
+  readonly section63CaseId?: Uint32Array;
+  readonly initialResidual?: Float32Array;
+  readonly initialPreconditioned?: Float32Array;
+  readonly initialPreconditionedImage?: Float32Array;
+  readonly preconditionerPreSmoothed?: Float32Array;
+  readonly preconditionerZeroSmoothed?: Float32Array;
+  readonly preconditionerFirstOperatorImage?: Float32Array;
+  readonly preconditionerFirstSmoothed?: Float32Array;
+  readonly preconditionerInnerResidual?: Float32Array;
+  readonly preconditionerInnerCorrection?: Float32Array;
+  readonly preconditionerPostCorrected?: Float32Array;
+  readonly topology: Uint32Array;
+  readonly coveredCells: number;
+  readonly overlapCells: number;
+  readonly invalidRows: number;
+  readonly rowCount: number;
+  readonly publicationValid: boolean;
+}
+
+/**
+ * Expand the compact pressure unknown and its adaptive leaf size onto the
+ * finest QA lattice. This is diagnostic-only: production continues to consume
+ * the compact row buffers directly.
+ */
+export async function readCompactOctreePressureState3D(
+  device: GPUDevice,
+  solver: GPUSolverInstance,
+  dimensions: readonly [number, number, number],
+): Promise<CompactOctreePressureStateRaster | undefined> {
+  const structured = solver as GPUSolverInstance & { structuredVelocityControl?: GPUBuffer };
+  const controlBuffer = structured.structuredVelocityControl;
+  const headerBuffer = solver.powerLeafHeaders;
+  const pressureBuffer = solver.powerPressureBuffer;
+  if (!controlBuffer || !headerBuffer || !pressureBuffer) return undefined;
+  const controlBytes = await readBufferBinding(device, { buffer: controlBuffer }, 24);
+  const control = unpackStructuredVelocityControl(new Uint32Array(
+    controlBytes.buffer, controlBytes.byteOffset, controlBytes.byteLength / 4));
+  const rowCount = control.rowCount;
+  if (rowCount === 0 || rowCount * 48 > headerBuffer.size || rowCount * 4 > pressureBuffer.size) return undefined;
+  const stageBuffers = (solver as GPUSolverInstance & { workAccountingBuffers?: {
+    pressureRhs?: GPUBufferBinding;
+    symmetryInitialResidual?: GPUBufferBinding;
+    symmetryInitialPreconditioned?: GPUBufferBinding;
+    symmetryInitialPreconditionedImage?: GPUBufferBinding;
+    symmetryPreconditionerPreSmoothed?: GPUBufferBinding;
+    symmetryPreconditionerZeroSmoothed?: GPUBufferBinding;
+    symmetryPreconditionerFirstOperatorImage?: GPUBufferBinding;
+    symmetryPreconditionerFirstSmoothed?: GPUBufferBinding;
+    symmetryPreconditionerInnerResidual?: GPUBufferBinding;
+    symmetryPreconditionerInnerCorrection?: GPUBufferBinding;
+    symmetryPreconditionerPostCorrected?: GPUBufferBinding;
+    section63Coefficients?: GPUBufferBinding;
+  } }).workAccountingBuffers;
+  const topologyMetricsBuffer = (solver as GPUSolverInstance & {
+    powerTopologyMetrics?: GPUBuffer;
+  }).powerTopologyMetrics;
+  const [headerBytes, pressureBytes, rhsBytes, initialResidualBytes, initialPreconditionedBytes,
+    initialPreconditionedImageBytes, preSmoothedBytes, zeroSmoothedBytes,
+    firstOperatorImageBytes, firstSmoothedBytes, innerResidualBytes,
+    innerCorrectionBytes, postCorrectedBytes, section63Bytes, topologyMetricBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: headerBuffer }, rowCount * 48),
+    readBufferBinding(device, { buffer: pressureBuffer }, rowCount * 4),
+    stageBuffers?.pressureRhs
+      ? readBufferBinding(device, stageBuffers.pressureRhs, rowCount * 4) : undefined,
+    stageBuffers?.symmetryInitialResidual
+      ? readBufferBinding(device, stageBuffers.symmetryInitialResidual, rowCount * 4) : undefined,
+    stageBuffers?.symmetryInitialPreconditioned
+      ? readBufferBinding(device, stageBuffers.symmetryInitialPreconditioned, rowCount * 4) : undefined,
+    stageBuffers?.symmetryInitialPreconditionedImage
+      ? readBufferBinding(device, stageBuffers.symmetryInitialPreconditionedImage, rowCount * 4) : undefined,
+    stageBuffers?.symmetryPreconditionerPreSmoothed
+      ? readBufferBinding(device, stageBuffers.symmetryPreconditionerPreSmoothed, rowCount * 4) : undefined,
+    stageBuffers?.symmetryPreconditionerZeroSmoothed
+      ? readBufferBinding(device, stageBuffers.symmetryPreconditionerZeroSmoothed, rowCount * 4) : undefined,
+    stageBuffers?.symmetryPreconditionerFirstOperatorImage
+      ? readBufferBinding(device, stageBuffers.symmetryPreconditionerFirstOperatorImage, rowCount * 4) : undefined,
+    stageBuffers?.symmetryPreconditionerFirstSmoothed
+      ? readBufferBinding(device, stageBuffers.symmetryPreconditionerFirstSmoothed, rowCount * 4) : undefined,
+    stageBuffers?.symmetryPreconditionerInnerResidual
+      ? readBufferBinding(device, stageBuffers.symmetryPreconditionerInnerResidual, rowCount * 4) : undefined,
+    stageBuffers?.symmetryPreconditionerInnerCorrection
+      ? readBufferBinding(device, stageBuffers.symmetryPreconditionerInnerCorrection, rowCount * 4) : undefined,
+    stageBuffers?.symmetryPreconditionerPostCorrected
+      ? readBufferBinding(device, stageBuffers.symmetryPreconditionerPostCorrected, rowCount * 4) : undefined,
+    stageBuffers?.section63Coefficients
+      ? readBufferBinding(device, {
+        buffer: stageBuffers.section63Coefficients.buffer,
+        offset: control.activeBank * Number(stageBuffers.section63Coefficients.size),
+      }, rowCount * 19 * 4) : undefined,
+    topologyMetricsBuffer
+      ? readBufferBinding(device, { buffer: topologyMetricsBuffer }, rowCount * 16) : undefined,
+  ]);
+  const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+  const headerFloats = new Float32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+  const rows = new Float32Array(pressureBytes.buffer, pressureBytes.byteOffset, rowCount);
+  const rhsRows = rhsBytes
+    ? new Float32Array(rhsBytes.buffer, rhsBytes.byteOffset, rowCount) : undefined;
+  const stageRows = [initialResidualBytes, initialPreconditionedBytes,
+    initialPreconditionedImageBytes, preSmoothedBytes, zeroSmoothedBytes,
+    firstOperatorImageBytes, firstSmoothedBytes, innerResidualBytes,
+    innerCorrectionBytes, postCorrectedBytes].map((bytes) => bytes
+    ? new Float32Array(bytes.buffer, bytes.byteOffset, rowCount) : undefined);
+  const section63Rows = section63Bytes
+    ? new Float32Array(section63Bytes.buffer, section63Bytes.byteOffset, rowCount * 19) : undefined;
+  const topologyMetricWords = topologyMetricBytes
+    ? new Uint32Array(topologyMetricBytes.buffer, topologyMetricBytes.byteOffset, rowCount * 4) : undefined;
+  const boundaryDebug = (solver as GPUSolverInstance & { structuredBoundarySymmetryDebug?: {
+    control: GPUBuffer; candidates: GPUBuffer; authority: GPUBuffer; rowGeometry: GPUBuffer;
+    rowVelocities: GPUBuffer;
+    selectorRows: GPUBuffer; selectorOffsetWords: number; selectorStride: number;
+    supportVectorOffsetWords: number; ownerDirectoryOffsetWords: number; supportCapacity: number;
+    supportRecordArena: GPUBuffer; supportRecordOffsetWords: number;
+    supportFaces: GPUBuffer; supportScratch: GPUBuffer; supportFaceAdjacency: GPUBuffer;
+    supportFaceAdjacencyStride: number;
+    topologyTransferAudit?: GPUBuffer;
+    advectionSymmetryAudit?: GPUBuffer;
+    plan: { authorityWords: number; maximumCaseSlots: number; slotCapacity: number; rowCapacity: number; offsets: {
+      rowSlotHandles: number; ownerRows: number; neighborRows: number;
+      areas: number; inverseDistances: number; normals: number; centroids: number;
+    } };
+  } }).structuredBoundarySymmetryDebug;
+  const boundaryDebugBytes = typeof process !== "undefined"
+    && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1" && boundaryDebug
+    ? await Promise.all([
+      readBufferBinding(device, { buffer: boundaryDebug.control }, 24),
+      readBufferBinding(device, { buffer: boundaryDebug.authority }, boundaryDebug.authority.size),
+      readBufferBinding(device, { buffer: boundaryDebug.candidates }, boundaryDebug.candidates.size),
+      readBufferBinding(device, { buffer: boundaryDebug.selectorRows,
+        offset: boundaryDebug.selectorOffsetWords * 4 }, rowCount * boundaryDebug.selectorStride * 4),
+      readBufferBinding(device, { buffer: boundaryDebug.selectorRows,
+        offset: boundaryDebug.supportVectorOffsetWords * 4 }, boundaryDebug.supportCapacity * 16),
+      readBufferBinding(device, { buffer: boundaryDebug.supportRecordArena,
+        offset: boundaryDebug.supportRecordOffsetWords * 4 }, boundaryDebug.supportCapacity * 8 * 4),
+      readBufferBinding(device, { buffer: boundaryDebug.supportFaces }, boundaryDebug.supportFaces.size),
+      readBufferBinding(device, { buffer: boundaryDebug.supportFaceAdjacency },
+        boundaryDebug.supportFaceAdjacency.size),
+      readBufferBinding(device, { buffer: boundaryDebug.selectorRows },
+        boundaryDebug.plan.slotCapacity * 16),
+      readBufferBinding(device, { buffer: boundaryDebug.rowVelocities }, boundaryDebug.rowVelocities.size),
+      boundaryDebug.topologyTransferAudit
+        ? readBufferBinding(device, { buffer: boundaryDebug.topologyTransferAudit },
+          boundaryDebug.topologyTransferAudit.size) : undefined,
+      readBufferBinding(device, { buffer: boundaryDebug.supportScratch }, 60 * 4),
+      readBufferBinding(device, { buffer: boundaryDebug.selectorRows,
+        offset: boundaryDebug.ownerDirectoryOffsetWords * 4 },
+      dimensions[0] * dimensions[1] * dimensions[2] * 16),
+      readBufferBinding(device, { buffer: boundaryDebug.rowGeometry }, boundaryDebug.rowGeometry.size),
+      boundaryDebug.advectionSymmetryAudit
+        ? readBufferBinding(device, { buffer: boundaryDebug.advectionSymmetryAudit },
+          boundaryDebug.advectionSymmetryAudit.size) : undefined,
+    ]) : undefined;
+  const [nx, ny, nz] = dimensions;
+  const cellCount = nx * ny * nz;
+  const pressure = new Float32Array(cellCount);
+  pressure.fill(Number.NaN);
+  const rhs = new Float32Array(cellCount);
+  rhs.fill(Number.NaN);
+  const diagonal = new Float32Array(cellCount);
+  diagonal.fill(Number.NaN);
+  const section63Diagonal = section63Rows ? new Float32Array(cellCount) : undefined;
+  section63Diagonal?.fill(Number.NaN);
+  const section63CaseId = topologyMetricWords ? new Uint32Array(cellCount) : undefined;
+  const stageFields = stageRows.map((values) => values ? new Float32Array(cellCount) : undefined);
+  for (const field of stageFields) field?.fill(Number.NaN);
+  const topology = new Uint32Array(cellCount);
+  const owners = new Int32Array(cellCount);
+  owners.fill(-1);
+  let coveredCells = 0, overlapCells = 0, invalidRows = 0;
+  for (let row = 0; row < rowCount; row += 1) {
+    const cell = headers[12 * row] >>> 0;
+    const size = headers[12 * row + 3] >>> 0;
+    const value = rows[row];
+    const origin = [cell % nx, Math.floor(cell / nx) % ny, Math.floor(cell / (nx * ny))] as const;
+    const valid = size > 0 && cell < cellCount && Number.isFinite(value)
+      && origin[0] + size <= nx && origin[1] + size <= ny && origin[2] + size <= nz;
+    if (!valid) invalidRows += 1;
+    if (size === 0 || cell >= cellCount
+      || origin[0] + size > nx || origin[1] + size > ny || origin[2] + size > nz) continue;
+    for (let z = origin[2]; z < origin[2] + size; z += 1) {
+      for (let y = origin[1]; y < origin[1] + size; y += 1) {
+        for (let x = origin[0]; x < origin[0] + size; x += 1) {
+          const index = x + nx * (y + ny * z);
+          if (owners[index] >= 0) {
+            overlapCells += 1;
+            pressure[index] = Number.NaN;
+            topology[index] = 0;
+            continue;
+          }
+          owners[index] = row;
+          coveredCells += 1;
+          topology[index] = size;
+          if (valid) {
+            pressure[index] = value;
+            // MGPCG consumes the live dynamics RHS. The header slot is a
+            // topology-era cache and can remain symmetric after dynamics has
+            // already introduced a discrepancy.
+            rhs[index] = rhsRows?.[row] ?? headerFloats[12 * row + 5]!;
+            diagonal[index] = headerFloats[12 * row + 4]!;
+            if (section63Diagonal) section63Diagonal[index] = section63Rows![19 * row]!;
+            if (section63CaseId) section63CaseId[index] = topologyMetricWords![4 * row]!;
+            for (let stage = 0; stage < stageFields.length; stage += 1) {
+              if (stageFields[stage] && stageRows[stage]) stageFields[stage]![index] = stageRows[stage]![row]!;
+            }
+          }
+        }
+      }
+    }
+  }
+  if (typeof process !== "undefined" && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+    && boundaryDebug && boundaryDebugBytes) {
+    const words = new Uint32Array(boundaryDebugBytes[1].buffer,
+      boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+    const floats = new Float32Array(boundaryDebugBytes[1].buffer,
+      boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+    const { plan } = boundaryDebug;
+    const base = control.activeBank * plan.authorityWords;
+    const handles = new Set<number>();
+    for (let row = 0; row < rowCount; row += 1) {
+      for (let local = 0; local < plan.maximumCaseSlots; local += 1) {
+        const handle = words[base + plan.offsets.rowSlotHandles
+          + row * plan.maximumCaseSlots + local] ?? 0xffff_ffff;
+        if (handle < plan.slotCapacity) handles.add(handle);
+      }
+    }
+    const quantize = (value: number) => Math.round(value * 1e6);
+    const key = (point: readonly number[], normal: readonly number[], area: number) =>
+      `${point.map(quantize).join(",")}|${normal.map(quantize).join(",")}|${quantize(area)}`;
+    const faces = new Map<string, { handle: number; value: number }>();
+    for (const handle of handles) {
+      const point = Array.from(floats.subarray(base + plan.offsets.centroids + 4 * handle,
+        base + plan.offsets.centroids + 4 * handle + 3));
+      const normal = Array.from(floats.subarray(base + plan.offsets.normals + 4 * handle,
+        base + plan.offsets.normals + 4 * handle + 3));
+      const area = floats[base + plan.offsets.areas + handle]!;
+      faces.set(key(point, normal, area), { handle, value: floats[base + plan.offsets.values + handle]! });
+    }
+    const extent = [nx, ny, nz].map((count) => count * solver.info.cellSize_m);
+    const transforms = [
+      { name: "reflect-x", point: (v: readonly number[]) => [extent[0]! - v[0]!, v[1]!, v[2]!],
+        vector: (v: readonly number[]) => [-v[0]!, v[1]!, v[2]!] },
+      { name: "reflect-z", point: (v: readonly number[]) => [v[0]!, v[1]!, extent[2]! - v[2]!],
+        vector: (v: readonly number[]) => [v[0]!, v[1]!, -v[2]!] },
+      { name: "swap-xz", point: (v: readonly number[]) => [v[2]!, v[1]!, v[0]!],
+        vector: (v: readonly number[]) => [v[2]!, v[1]!, v[0]!] },
+    ] as const;
+    let comparedValues = 0, exactMismatchCount = 0, missingMatches = 0, maximumAbsoluteError = 0;
+    let first: Record<string, unknown> | undefined, worst: Record<string, unknown> | undefined;
+    for (const handle of handles) {
+      const point = Array.from(floats.subarray(base + plan.offsets.centroids + 4 * handle,
+        base + plan.offsets.centroids + 4 * handle + 3));
+      const normal = Array.from(floats.subarray(base + plan.offsets.normals + 4 * handle,
+        base + plan.offsets.normals + 4 * handle + 3));
+      const area = floats[base + plan.offsets.areas + handle]!;
+      const sourceValue = floats[base + plan.offsets.values + handle]!;
+      for (const transform of transforms) {
+        const targetPoint = transform.point(point), targetNormal = transform.vector(normal);
+        let target = faces.get(key(targetPoint, targetNormal, area));
+        let expectedValue = sourceValue;
+        if (!target) {
+          target = faces.get(key(targetPoint, targetNormal.map((value) => -value), area));
+          expectedValue = -sourceValue;
+        }
+        if (!target) { missingMatches += 1; continue; }
+        comparedValues += 1;
+        // Signed zero is the same physical face-normal velocity. Preserve the
+        // stricter bit-exact comparison for every non-zero value.
+        if (expectedValue === target.value) continue;
+        exactMismatchCount += 1;
+        const absoluteError = Math.abs(expectedValue - target.value);
+        const detail = { transform: transform.name, sourceHandle: handle, targetHandle: target.handle,
+          point, targetPoint, normal, targetNormal, sourceValue, expectedValue,
+          targetValue: target.value, absoluteError };
+        first ??= detail;
+        if (!worst || absoluteError > Number(worst.absoluteError)) worst = detail;
+        maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
+      }
+    }
+    console.log(JSON.stringify({ phase: "fluid-symmetry-face-values",
+      metrics: { activeFaces: handles.size, comparedValues, exactMismatchCount,
+        missingMatches, maximumAbsoluteError, first, worst } }));
+    const advectionAuditBytes = boundaryDebugBytes[14];
+    if (advectionAuditBytes) {
+      const auditWords = new Uint32Array(advectionAuditBytes.buffer,
+        advectionAuditBytes.byteOffset, advectionAuditBytes.byteLength / 4);
+      const auditFloats = new Float32Array(advectionAuditBytes.buffer,
+        advectionAuditBytes.byteOffset, advectionAuditBytes.byteLength / 4);
+      const auditBank = auditWords[4]! & 1, debugBank = 1 - auditBank;
+      const auditHandleCount = Math.min(auditWords[5] ?? 0, plan.slotCapacity);
+      const record = (bank: number) => 32 + bank * 15 * plan.slotCapacity;
+      const activeRecord = record(auditBank), debugRecord = record(debugBank);
+      const auditFaces = new Map<string, { handle: number; value: number }>();
+      for (let handle = 0; handle < auditHandleCount; handle += 1) {
+        const normalAt = activeRecord + 7 * plan.slotCapacity + 4 * handle;
+        const centroidAt = activeRecord + 11 * plan.slotCapacity + 4 * handle;
+        const point = Array.from(auditFloats.subarray(centroidAt, centroidAt + 3));
+        const normal = Array.from(auditFloats.subarray(normalAt, normalAt + 3));
+        const area = auditFloats[activeRecord + 4 * plan.slotCapacity + handle]!;
+        if (!Number.isFinite(area) || !(area > 0) || point.some((value) => !Number.isFinite(value))
+          || normal.some((value) => !Number.isFinite(value))) continue;
+        auditFaces.set(key(point, normal, area), {
+          handle, value: auditFloats[activeRecord + handle]!,
+        });
+      }
+      const vectorAt = (offset: number, handle: number) =>
+        Array.from(auditFloats.subarray(debugRecord + offset + 4 * handle,
+          debugRecord + offset + 4 * handle + 3));
+      const scalarVectorAt = (offset: number, handle: number) => [
+        auditFloats[debugRecord + (offset + 0) * plan.slotCapacity + handle]!,
+        auditFloats[debugRecord + (offset + 1) * plan.slotCapacity + handle]!,
+        auditFloats[debugRecord + (offset + 2) * plan.slotCapacity + handle]!,
+      ];
+      const compareTriple = (source: readonly number[], target: readonly number[],
+        expected: readonly number[]) => ({ source, target, expected,
+        exact: source.every((value, component) => expected[component] === target[component]),
+        errors: source.map((_value, component) =>
+          Math.abs(expected[component]! - target[component]!)) });
+      const rowGeometryWords = new Uint32Array(boundaryDebugBytes[13].buffer,
+        boundaryDebugBytes[13].byteOffset, boundaryDebugBytes[13].byteLength / 4);
+      const rowAtPoint = (sample: readonly number[]) => {
+        const q = sample.map((value, axis) => Math.max(0, Math.min(
+          dimensions[axis]! - 1, Math.floor(value / solver.info.cellSize_m))));
+        return owners[q[0]! + nx * (q[1]! + ny * q[2]!)] ?? -1;
+      };
+      const rowDetail = (row: number) => row < 0 ? undefined : ({ row,
+        geometry: Array.from(rowGeometryWords.subarray(
+          4 * (control.activeBank * plan.rowCapacity + row),
+          4 * (control.activeBank * plan.rowCapacity + row) + 4)),
+        metric: topologyMetricWords
+          ? Array.from(topologyMetricWords.subarray(4 * row, 4 * row + 4)) : undefined,
+      });
+      let auditCompared = 0, auditMismatches = 0, auditMissing = 0, auditMaximum = 0;
+      let auditFirst: Record<string, unknown> | undefined;
+      let auditWorst: Record<string, unknown> | undefined;
+      for (let handle = 0; handle < auditHandleCount; handle += 1) {
+        const normalAt = activeRecord + 7 * plan.slotCapacity + 4 * handle;
+        const centroidAt = activeRecord + 11 * plan.slotCapacity + 4 * handle;
+        const point = Array.from(auditFloats.subarray(centroidAt, centroidAt + 3));
+        const normal = Array.from(auditFloats.subarray(normalAt, normalAt + 3));
+        const area = auditFloats[activeRecord + 4 * plan.slotCapacity + handle]!;
+        const sourceValue = auditFloats[activeRecord + handle]!;
+        if (!Number.isFinite(area) || !(area > 0) || point.some((value) => !Number.isFinite(value))
+          || normal.some((value) => !Number.isFinite(value))) continue;
+        for (const transform of transforms) {
+          const targetPoint = transform.point(point), targetNormal = transform.vector(normal);
+          let target = auditFaces.get(key(targetPoint, targetNormal, area));
+          let expectedValue = sourceValue;
+          if (!target) {
+            target = auditFaces.get(key(targetPoint, targetNormal.map((value) => -value), area));
+            expectedValue = -sourceValue;
+          }
+          if (!target) { auditMissing += 1; continue; }
+          auditCompared += 1;
+          if (expectedValue === target.value) continue;
+          auditMismatches += 1;
+          const absoluteError = Math.abs(expectedValue - target.value);
+          const adv = scalarVectorAt(1, handle), targetAdv = scalarVectorAt(1, target.handle);
+          const midpoint = scalarVectorAt(4, handle), targetMidpoint = scalarVectorAt(4, target.handle);
+          const middle = vectorAt(7 * plan.slotCapacity, handle);
+          const targetMiddle = vectorAt(7 * plan.slotCapacity, target.handle);
+          const departure = vectorAt(11 * plan.slotCapacity, handle);
+          const targetDeparture = vectorAt(11 * plan.slotCapacity, target.handle);
+          const sourceMidpointRow = rowAtPoint(midpoint);
+          const targetMidpointRow = rowAtPoint(targetMidpoint);
+          const sourceDepartureRow = rowAtPoint(departure);
+          const targetDepartureRow = rowAtPoint(targetDeparture);
+          const detail = { transform: transform.name, sourceHandle: handle,
+            targetHandle: target.handle, point, targetPoint, normal, targetNormal,
+            sourceValue, expectedValue, targetValue: target.value, absoluteError,
+            sourceOwner: auditWords[activeRecord + plan.slotCapacity + handle],
+            targetOwner: auditWords[activeRecord + plan.slotCapacity + target.handle],
+            sourceNeighbor: auditWords[activeRecord + 2 * plan.slotCapacity + handle],
+            targetNeighbor: auditWords[activeRecord + 2 * plan.slotCapacity + target.handle],
+            sourceOwnerMetric: topologyMetricWords
+              ? Array.from(topologyMetricWords.subarray(4 * auditWords[
+                activeRecord + plan.slotCapacity + handle]!, 4 * auditWords[
+                activeRecord + plan.slotCapacity + handle]! + 4)) : undefined,
+            targetOwnerMetric: topologyMetricWords
+              ? Array.from(topologyMetricWords.subarray(4 * auditWords[
+                activeRecord + plan.slotCapacity + target.handle]!, 4 * auditWords[
+                activeRecord + plan.slotCapacity + target.handle]! + 4)) : undefined,
+            faceSample: compareTriple(adv, targetAdv, transform.vector(adv)),
+            midpoint: compareTriple(midpoint, targetMidpoint, transform.point(midpoint)),
+            midpointSample: compareTriple(middle, targetMiddle, transform.vector(middle)),
+            departure: compareTriple(departure, targetDeparture, transform.point(departure)),
+            sourceMidpointRow: rowDetail(sourceMidpointRow),
+            targetMidpointRow: rowDetail(targetMidpointRow),
+            sourceDepartureRow: rowDetail(sourceDepartureRow),
+            targetDepartureRow: rowDetail(targetDepartureRow) };
+          auditFirst ??= detail;
+          if (!auditWorst || absoluteError > Number(auditWorst.absoluteError)) auditWorst = detail;
+          auditMaximum = Math.max(auditMaximum, absoluteError);
+        }
+      }
+      console.log(JSON.stringify({ phase: "fluid-symmetry-advection-face-values",
+        generation: auditWords[3], activeBank: auditBank,
+        metrics: { activeFaces: auditFaces.size, comparedValues: auditCompared,
+          exactMismatchCount: auditMismatches, missingMatches: auditMissing,
+          maximumAbsoluteError: auditMaximum, first: auditFirst, worst: auditWorst } }));
+    }
+    const supportScratchBytes = boundaryDebugBytes[11];
+    if (supportScratchBytes) {
+      const supportScratch = new Uint32Array(supportScratchBytes.buffer,
+        supportScratchBytes.byteOffset, supportScratchBytes.byteLength / 4);
+      const supportFaces = new Uint32Array(boundaryDebugBytes[6].buffer,
+        boundaryDebugBytes[6].byteOffset, boundaryDebugBytes[6].byteLength / 4);
+      const supportFaceValues = new Float32Array(boundaryDebugBytes[6].buffer,
+        boundaryDebugBytes[6].byteOffset, boundaryDebugBytes[6].byteLength / 4);
+      const supportAdjacency = new Uint32Array(boundaryDebugBytes[7].buffer,
+        boundaryDebugBytes[7].byteOffset, boundaryDebugBytes[7].byteLength / 4);
+      const faceRows = Math.min((supportScratch[2] ?? 0) + (supportScratch[8] ?? 0),
+        Math.floor(supportFaces.length / 48));
+      type OrdinaryFace = { item: number; axis: number; center: number[]; extent: number;
+        value: number; distanceSquared: number; seed: number };
+      const ordinaryFaces: OrdinaryFace[] = [];
+      const geometry = (row: number) => {
+        const at = (row + 1) * boundaryDebug.supportFaceAdjacencyStride - 4;
+        return { origin: Array.from(supportAdjacency.subarray(at, at + 3)),
+          extent: supportAdjacency[at + 3] ?? 0 };
+      };
+      for (let row = 0; row < faceRows; row += 1) {
+        const { origin, extent } = geometry(row);
+        for (let local = 0; local < 12; local += 1) {
+          const item = 12 * row + local, axis = Math.floor(local / 4), quadrant = local % 4;
+          if ((supportFaces[4 * item + 3] ?? 0) === 0) continue;
+          const center = origin.map((value) => 4 * value + 2 * extent);
+          center[axis] = 4 * origin[axis]! + 4 * extent;
+          let transverse = 0;
+          for (let a = 0; a < 3; a += 1) if (a !== axis) {
+            center[a] = 4 * origin[a]!
+              + ((quadrant & (1 << transverse)) !== 0 ? 3 : 1) * extent;
+            transverse += 1;
+          }
+          ordinaryFaces.push({ item, axis, center, extent,
+            value: supportFaceValues[4 * item]!,
+            distanceSquared: supportFaceValues[4 * item + 1]!,
+            seed: supportFaces[4 * item + 2]! });
+        }
+      }
+      const ordinaryKey = (axis: number, center: readonly number[], extent: number) =>
+        `${axis}|${center.join(",")}|${extent}`;
+      const ordinaryByGeometry = new Map(ordinaryFaces.map((face) =>
+        [ordinaryKey(face.axis, face.center, face.extent), face] as const));
+      const quarterDimensions = [4 * nx, 4 * ny, 4 * nz];
+      const ordinaryTransforms = [
+        { name: "reflect-x", axis: (axis: number) => axis,
+          point: (v: readonly number[]) => [quarterDimensions[0]! - v[0]!, v[1]!, v[2]!],
+          sign: (axis: number) => axis === 0 ? -1 : 1 },
+        { name: "reflect-z", axis: (axis: number) => axis,
+          point: (v: readonly number[]) => [v[0]!, v[1]!, quarterDimensions[2]! - v[2]!],
+          sign: (axis: number) => axis === 2 ? -1 : 1 },
+        { name: "swap-xz", axis: (axis: number) => axis === 0 ? 2 : axis === 2 ? 0 : 1,
+          point: (v: readonly number[]) => [v[2]!, v[1]!, v[0]!], sign: () => 1 },
+      ];
+      const auditOrdinary = (seedsOnly: boolean) => {
+        let compared = 0, mismatches = 0, missing = 0, maximumAbsoluteError = 0;
+        let firstMismatch: Record<string, unknown> | undefined;
+        for (const source of ordinaryFaces) {
+          if (seedsOnly && source.distanceSquared !== 0) continue;
+          for (const transform of ordinaryTransforms) {
+            const targetAxis = transform.axis(source.axis);
+            const targetCenter = transform.point(source.center);
+            const target = ordinaryByGeometry.get(ordinaryKey(targetAxis, targetCenter, source.extent));
+            if (!target || (seedsOnly && target.distanceSquared !== 0)) { missing += 1; continue; }
+            compared += 1;
+            const expected = transform.sign(source.axis) * source.value;
+            const distanceMatches = source.distanceSquared === target.distanceSquared;
+            if (expected === target.value && distanceMatches) continue;
+            mismatches += 1;
+            const absoluteError = Math.abs(expected - target.value);
+            maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
+            firstMismatch ??= { transform: transform.name, source, target,
+              expected, targetCenter, distanceMatches, absoluteError };
+          }
+        }
+        return { faces: ordinaryFaces.length, compared, mismatches, missing,
+          maximumAbsoluteError, firstMismatch };
+      };
+      console.log(JSON.stringify({ phase: "fluid-symmetry-air-support-faces",
+        control: { directRows: supportScratch[2], supportRows: supportScratch[8],
+          faceCount: supportScratch[29], retained: supportScratch[50] },
+        seeds: auditOrdinary(true), marched: auditOrdinary(false) }));
+      const supportRecords = new Uint32Array(boundaryDebugBytes[5].buffer,
+        boundaryDebugBytes[5].byteOffset, boundaryDebugBytes[5].byteLength / 4);
+      const supportVectors = new Float32Array(boundaryDebugBytes[4].buffer,
+        boundaryDebugBytes[4].byteOffset, boundaryDebugBytes[4].byteLength / 4);
+      const supportCount = Math.min(supportScratch[8] ?? 0, boundaryDebug.supportCapacity);
+      const supportByCell = new Map<string, number>();
+      for (let support = 0; support < supportCount; support += 1) {
+        const at = 8 * support;
+        const cell = supportRecords[at]! + nx * (supportRecords[at + 1]!
+          + ny * supportRecords[at + 2]!);
+        supportByCell.set(`${cell}|${supportRecords[at + 3]}`, support);
+      }
+      let supportCompared = 0, supportMismatches = 0, supportMissing = 0;
+      let supportMaximumAbsoluteError = 0;
+      let supportFirstMismatch: Record<string, unknown> | undefined;
+      for (let support = 0; support < supportCount; support += 1) {
+        const at = 8 * support;
+        const origin = Array.from(supportRecords.subarray(at, at + 3));
+        const size = supportRecords[at + 3]!;
+        const source = Array.from(supportVectors.subarray(4 * support, 4 * support + 4));
+        for (const transform of ordinaryTransforms) {
+          const transformedMinimum = transform.point(origin.map((value) => 4 * value)
+            .map((value, axis) => transform.sign(axis) < 0 ? value + 4 * size : value));
+          const targetOrigin = transformedMinimum.map((value) => Math.round(value / 4));
+          const targetCell = targetOrigin[0]! + nx * (targetOrigin[1]! + ny * targetOrigin[2]!);
+          const targetSupport = supportByCell.get(`${targetCell}|${size}`);
+          if (targetSupport === undefined) { supportMissing += 1; continue; }
+          supportCompared += 1;
+          const target = Array.from(supportVectors.subarray(4 * targetSupport, 4 * targetSupport + 4));
+          const expected = transform.name === "reflect-x"
+            ? [-source[0]!, source[1]!, source[2]!, source[3]!]
+            : transform.name === "reflect-z"
+              ? [source[0]!, source[1]!, -source[2]!, source[3]!]
+              : [source[2]!, source[1]!, source[0]!, source[3]!];
+          const componentErrors = expected.map((value, component) => Math.abs(value - target[component]!));
+          if (expected.every((value, component) => value === target[component])) continue;
+          supportMismatches += 1;
+          const absoluteError = Math.max(...componentErrors);
+          supportMaximumAbsoluteError = Math.max(supportMaximumAbsoluteError, absoluteError);
+          supportFirstMismatch ??= { transform: transform.name, support, targetSupport,
+            origin, targetOrigin, size, source, expected, target, componentErrors };
+        }
+      }
+      console.log(JSON.stringify({ phase: "fluid-symmetry-air-support-vectors",
+        metrics: { supportCount, supportCompared, supportMismatches, supportMissing,
+          supportMaximumAbsoluteError, supportFirstMismatch } }));
+      const ownerDirectoryBytes = boundaryDebugBytes[12];
+      if (ownerDirectoryBytes) {
+        const directory = new Uint32Array(ownerDirectoryBytes.buffer,
+          ownerDirectoryBytes.byteOffset, ownerDirectoryBytes.byteLength / 4);
+        const rowVelocities = new Float32Array(boundaryDebugBytes[9].buffer,
+          boundaryDebugBytes[9].byteOffset, boundaryDebugBytes[9].byteLength / 4);
+        const activeRowBase = control.activeBank * plan.rowCapacity;
+        const resolvedDirectoryVector = (cell: number) => {
+          const tag = directory[4 * cell] ?? 0xffff_ffff;
+          if (tag === 0xffff_ffff) return undefined;
+          if ((tag & 0x8000_0000) !== 0) {
+            const support = tag & 0x7fff_ffff;
+            return support < supportCount
+              ? Array.from(supportVectors.subarray(4 * support, 4 * support + 4)) : undefined;
+          }
+          return tag < rowCount ? Array.from(rowVelocities.subarray(
+            4 * (activeRowBase + tag), 4 * (activeRowBase + tag + 1))) : undefined;
+        };
+        let directoryCompared = 0, directoryMismatches = 0;
+        let directoryMaximumAbsoluteError = 0;
+        let directoryFirstMismatch: Record<string, unknown> | undefined;
+        const discreteTransforms = [
+          { name: "reflect-x", point: (q: readonly number[]) => [nx - 1 - q[0]!, q[1]!, q[2]!],
+            vector: (v: readonly number[]) => [-v[0]!, v[1]!, v[2]!, v[3]!] },
+          { name: "reflect-z", point: (q: readonly number[]) => [q[0]!, q[1]!, nz - 1 - q[2]!],
+            vector: (v: readonly number[]) => [v[0]!, v[1]!, -v[2]!, v[3]!] },
+          { name: "swap-xz", point: (q: readonly number[]) => [q[2]!, q[1]!, q[0]!],
+            vector: (v: readonly number[]) => [v[2]!, v[1]!, v[0]!, v[3]!] },
+        ];
+        for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+          for (let x = 0; x < nx; x += 1) {
+            const cell = x + nx * (y + ny * z), source = resolvedDirectoryVector(cell);
+            if (!source) continue;
+            for (const transform of discreteTransforms) {
+              const targetQ = transform.point([x, y, z]);
+              const targetCell = targetQ[0]! + nx * (targetQ[1]! + ny * targetQ[2]!);
+              const target = resolvedDirectoryVector(targetCell);
+              if (!target) continue;
+              directoryCompared += 1;
+              const expected = transform.vector(source);
+              if (expected.every((value, component) => value === target[component])) continue;
+              directoryMismatches += 1;
+              const componentErrors = expected.map((value, component) => Math.abs(value - target[component]!));
+              const absoluteError = Math.max(...componentErrors);
+              directoryMaximumAbsoluteError = Math.max(directoryMaximumAbsoluteError, absoluteError);
+              directoryFirstMismatch ??= { transform: transform.name, sourceCell: [x, y, z],
+                targetCell: targetQ, sourceDirectory: Array.from(directory.subarray(4 * cell, 4 * cell + 4)),
+                targetDirectory: Array.from(directory.subarray(4 * targetCell, 4 * targetCell + 4)),
+                source, expected, target, componentErrors };
+            }
+          }
+        }
+        console.log(JSON.stringify({ phase: "fluid-symmetry-air-owner-directory",
+          metrics: { directoryCompared, directoryMismatches,
+            directoryMaximumAbsoluteError, directoryFirstMismatch } }));
+      }
+    }
+    const transferBytes = boundaryDebugBytes[10];
+    if (transferBytes) {
+      const transferWords = new Uint32Array(transferBytes.buffer,
+        transferBytes.byteOffset, transferBytes.byteLength / 4);
+      const transferFloats = new Float32Array(transferBytes.buffer,
+        transferBytes.byteOffset, transferBytes.byteLength / 4);
+      const rowGeometryWords = new Uint32Array(boundaryDebugBytes[13].buffer,
+        boundaryDebugBytes[13].byteOffset, boundaryDebugBytes[13].byteLength / 4);
+      const acceptedControlOffset = 2 * plan.slotCapacity;
+      const candidateControlOffset = acceptedControlOffset + 32;
+      const transferDebugOffset = candidateControlOffset + 32;
+      const candidateControl = transferWords.subarray(candidateControlOffset,
+        candidateControlOffset + 32);
+      const candidateBank = (candidateControl[5] ?? 0) & 1;
+      const candidateRowCount = Math.min(candidateControl[2] ?? 0, plan.rowCapacity);
+      const candidateBase = candidateBank * plan.authorityWords;
+      const acceptedGeometryBank = control.activeBank * plan.rowCapacity;
+      const acceptedRowForGeometry = (candidateRow: number) => {
+        const candidateAt = 4 * (candidateBank * plan.rowCapacity + candidateRow);
+        const cell = rowGeometryWords[candidateAt], size = rowGeometryWords[candidateAt + 1];
+        for (let row = 0; row < rowCount; row += 1) {
+          const acceptedAt = 4 * (acceptedGeometryBank + row);
+          if (rowGeometryWords[acceptedAt] === cell && rowGeometryWords[acceptedAt + 1] === size) return row;
+        }
+        return 0xffff_ffff;
+      };
+      const candidateHandles = new Set<number>();
+      for (let row = 0; row < candidateRowCount; row += 1) {
+        for (let local = 0; local < plan.maximumCaseSlots; local += 1) {
+          const handle = words[candidateBase + plan.offsets.rowSlotHandles
+            + row * plan.maximumCaseSlots + local] ?? 0xffff_ffff;
+          if (handle < plan.slotCapacity) candidateHandles.add(handle);
+        }
+      }
+      const candidateFaces = new Map<string, { handle: number; value: number }>();
+      for (const handle of candidateHandles) {
+        const point = Array.from(floats.subarray(candidateBase + plan.offsets.centroids + 4 * handle,
+          candidateBase + plan.offsets.centroids + 4 * handle + 3));
+        const normal = Array.from(floats.subarray(candidateBase + plan.offsets.normals + 4 * handle,
+          candidateBase + plan.offsets.normals + 4 * handle + 3));
+        const area = floats[candidateBase + plan.offsets.areas + handle]!;
+        candidateFaces.set(key(point, normal, area), { handle,
+          value: transferFloats[candidateBank * plan.slotCapacity + handle]! });
+      }
+      let candidateComparedValues = 0, candidateExactMismatchCount = 0;
+      let candidateMissingMatches = 0, candidateMaximumAbsoluteError = 0;
+      let candidateFirst: Record<string, unknown> | undefined;
+      let candidateWorst: Record<string, unknown> | undefined;
+      for (const handle of candidateHandles) {
+        const point = Array.from(floats.subarray(candidateBase + plan.offsets.centroids + 4 * handle,
+          candidateBase + plan.offsets.centroids + 4 * handle + 3));
+        const normal = Array.from(floats.subarray(candidateBase + plan.offsets.normals + 4 * handle,
+          candidateBase + plan.offsets.normals + 4 * handle + 3));
+        const area = floats[candidateBase + plan.offsets.areas + handle]!;
+        const sourceValue = transferFloats[candidateBank * plan.slotCapacity + handle]!;
+        for (const transform of transforms) {
+          const targetPoint = transform.point(point), targetNormal = transform.vector(normal);
+          let target = candidateFaces.get(key(targetPoint, targetNormal, area));
+          let expectedValue = sourceValue;
+          if (!target) {
+            target = candidateFaces.get(key(targetPoint, targetNormal.map((value) => -value), area));
+            expectedValue = -sourceValue;
+          }
+          if (!target) { candidateMissingMatches += 1; continue; }
+          candidateComparedValues += 1;
+          if (expectedValue === target.value) continue;
+          candidateExactMismatchCount += 1;
+          const absoluteError = Math.abs(expectedValue - target.value);
+          const detail = { transform: transform.name, sourceHandle: handle, targetHandle: target.handle,
+            point, targetPoint, normal, targetNormal, sourceValue, expectedValue,
+            targetValue: target.value, absoluteError,
+            sourceExtendedVector: Array.from(transferFloats.subarray(
+              transferDebugOffset + 4 * handle, transferDebugOffset + 4 * handle + 3)),
+            targetExtendedVector: Array.from(transferFloats.subarray(
+              transferDebugOffset + 4 * target.handle, transferDebugOffset + 4 * target.handle + 3)),
+            sourceDebugFlags: transferWords[transferDebugOffset + 4 * handle + 3],
+            targetDebugFlags: transferWords[transferDebugOffset + 4 * target.handle + 3],
+            sourceOwner: words[candidateBase + plan.offsets.ownerRows + handle],
+            sourceNeighbor: words[candidateBase + plan.offsets.neighborRows + handle],
+            targetOwner: words[candidateBase + plan.offsets.ownerRows + target.handle],
+            targetNeighbor: words[candidateBase + plan.offsets.neighborRows + target.handle],
+            sourceOwnerGeometry: Array.from(rowGeometryWords.subarray(
+              4 * (candidateBank * plan.rowCapacity
+                + words[candidateBase + plan.offsets.ownerRows + handle]!),
+              4 * (candidateBank * plan.rowCapacity
+                + words[candidateBase + plan.offsets.ownerRows + handle]!) + 4)),
+            targetOwnerGeometry: Array.from(rowGeometryWords.subarray(
+              4 * (candidateBank * plan.rowCapacity
+                + words[candidateBase + plan.offsets.ownerRows + target.handle]!),
+              4 * (candidateBank * plan.rowCapacity
+                + words[candidateBase + plan.offsets.ownerRows + target.handle]!) + 4)),
+            sourceCarryMarker: floats[candidateBase + plan.offsets.centroids + 4 * handle + 3],
+            targetCarryMarker: floats[candidateBase + plan.offsets.centroids + 4 * target.handle + 3],
+            sourceMetadata: words[candidateBase + plan.offsets.metadata + handle],
+            targetMetadata: words[candidateBase + plan.offsets.metadata + target.handle] };
+          Object.assign(detail, {
+            sourceOwnerAcceptedIdentity: acceptedRowForGeometry(Number(detail.sourceOwner)),
+            targetOwnerAcceptedIdentity: acceptedRowForGeometry(Number(detail.targetOwner)),
+          });
+          candidateFirst ??= detail;
+          if (!candidateWorst || absoluteError > Number(candidateWorst.absoluteError)) candidateWorst = detail;
+          candidateMaximumAbsoluteError = Math.max(candidateMaximumAbsoluteError, absoluteError);
+        }
+      }
+      console.log(JSON.stringify({ phase: "fluid-symmetry-topology-transfer-face-values",
+        acceptedControl: Array.from(transferWords.subarray(acceptedControlOffset,
+          acceptedControlOffset + 16)),
+        candidateControl: Array.from(candidateControl.subarray(0, 16)),
+        metrics: { candidateBank, candidateRowCount, activeFaces: candidateHandles.size,
+          comparedValues: candidateComparedValues, exactMismatchCount: candidateExactMismatchCount,
+          missingMatches: candidateMissingMatches, maximumAbsoluteError: candidateMaximumAbsoluteError,
+          first: candidateFirst, worst: candidateWorst } }));
+    }
+  }
+  if (typeof process !== "undefined" && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+    && section63Rows && topologyMetricWords) {
+    outer: for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+      const sourceIndex = x + nx * (y + ny * z);
+      const targetIndex = z + nx * (y + ny * x);
+      const sourceRow = owners[sourceIndex]!, targetRow = owners[targetIndex]!;
+      if (sourceRow >= 0 && targetRow >= 0
+        && !Object.is(section63Diagonal![sourceIndex], section63Diagonal![targetIndex])) {
+        const debugSlots = (row: number) => {
+          if (!boundaryDebug || !boundaryDebugBytes) return undefined;
+          const controlWords = new Uint32Array(boundaryDebugBytes[0].buffer,
+            boundaryDebugBytes[0].byteOffset, boundaryDebugBytes[0].byteLength / 4);
+          const words = new Uint32Array(boundaryDebugBytes[1].buffer,
+            boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+          const floats = new Float32Array(boundaryDebugBytes[1].buffer,
+            boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+          const candidates = new Float32Array(boundaryDebugBytes[2].buffer,
+            boundaryDebugBytes[2].byteOffset, boundaryDebugBytes[2].byteLength / 4);
+          const { plan } = boundaryDebug, base = (controlWords[5] ?? 0) * plan.authorityWords;
+          const result = [];
+          for (let local = 0; local < plan.maximumCaseSlots; local += 1) {
+            const handle = words[base + plan.offsets.rowSlotHandles
+              + row * plan.maximumCaseSlots + local] ?? 0xffff_ffff;
+            if (handle === 0xffff_ffff) continue;
+            result.push({ local, handle,
+              owner: words[base + plan.offsets.ownerRows + handle],
+              neighbor: words[base + plan.offsets.neighborRows + handle],
+              area: floats[base + plan.offsets.areas + handle],
+              inverseDistance: floats[base + plan.offsets.inverseDistances + handle],
+              normal: Array.from(floats.subarray(base + plan.offsets.normals + 4 * handle,
+                base + plan.offsets.normals + 4 * handle + 3)),
+              centroid: Array.from(floats.subarray(base + plan.offsets.centroids + 4 * handle,
+                base + plan.offsets.centroids + 4 * handle + 3)),
+              aperture: floats[base + plan.offsets.fractions + handle],
+              scale: floats[base + plan.offsets.pressureScales + handle] });
+          }
+          return result;
+        };
+        console.log(JSON.stringify({ phase: "fluid-symmetry-section63-row",
+          transform: "swap-xz", source: [x, y, z], target: [z, y, x],
+          structuredBank: control.activeBank,
+          boundaryBank: boundaryDebugBytes
+            ? new Uint32Array(boundaryDebugBytes[0].buffer, boundaryDebugBytes[0].byteOffset, 6)[5]
+            : undefined,
+          sourceRow, targetRow,
+          sourceMetric: Array.from(topologyMetricWords.subarray(4 * sourceRow, 4 * sourceRow + 4)),
+          targetMetric: Array.from(topologyMetricWords.subarray(4 * targetRow, 4 * targetRow + 4)),
+          sourceCoefficients: Array.from(section63Rows.subarray(19 * sourceRow, 19 * sourceRow + 19)),
+          targetCoefficients: Array.from(section63Rows.subarray(19 * targetRow, 19 * targetRow + 19)),
+          sourceSlots: debugSlots(sourceRow), targetSlots: debugSlots(targetRow) }));
+        break outer;
+      }
+    }
+  }
+  if (typeof process !== "undefined" && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+    && boundaryDebug && boundaryDebugBytes) {
+    outerRhs: for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+      const sourceIndex = x + nx * (y + ny * z);
+      const targetX = nx - 1 - x;
+      const targetIndex = targetX + nx * (y + ny * z);
+      if (Object.is(rhs[sourceIndex], rhs[targetIndex])) continue;
+      const words = new Uint32Array(boundaryDebugBytes[1].buffer,
+        boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+      const floats = new Float32Array(boundaryDebugBytes[1].buffer,
+        boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+      const controlWords = new Uint32Array(boundaryDebugBytes[0].buffer,
+        boundaryDebugBytes[0].byteOffset, 6);
+      const selectorWords = new Uint32Array(boundaryDebugBytes[3].buffer,
+        boundaryDebugBytes[3].byteOffset, boundaryDebugBytes[3].byteLength / 4);
+      const selectorFloats = new Float32Array(boundaryDebugBytes[8].buffer,
+        boundaryDebugBytes[8].byteOffset, boundaryDebugBytes[8].byteLength / 4);
+      const supportVectors = new Float32Array(boundaryDebugBytes[4].buffer,
+        boundaryDebugBytes[4].byteOffset, boundaryDebugBytes[4].byteLength / 4);
+      const supportRecords = new Uint32Array(boundaryDebugBytes[5].buffer,
+        boundaryDebugBytes[5].byteOffset, boundaryDebugBytes[5].byteLength / 4);
+      const supportFaces = new Uint32Array(boundaryDebugBytes[6].buffer,
+        boundaryDebugBytes[6].byteOffset, boundaryDebugBytes[6].byteLength / 4);
+      const supportFaceValues = new Float32Array(boundaryDebugBytes[6].buffer,
+        boundaryDebugBytes[6].byteOffset, boundaryDebugBytes[6].byteLength / 4);
+      const supportAdjacency = new Uint32Array(boundaryDebugBytes[7].buffer,
+        boundaryDebugBytes[7].byteOffset, boundaryDebugBytes[7].byteLength / 4);
+      const rowVelocities = new Float32Array(boundaryDebugBytes[9].buffer,
+        boundaryDebugBytes[9].byteOffset, boundaryDebugBytes[9].byteLength / 4);
+      const { plan } = boundaryDebug;
+      const base = control.activeBank * plan.authorityWords;
+      const auditBase = (1 - control.activeBank) * plan.authorityWords;
+      const slots = (row: number) => {
+        const result = [];
+        for (let local = 0; local < plan.maximumCaseSlots; local += 1) {
+          const at = row * plan.maximumCaseSlots + local;
+          const handle = words[base + plan.offsets.rowSlotHandles + at] ?? 0xffff_ffff;
+          if (handle === 0xffff_ffff) continue;
+          const sign = new Int32Array(words.buffer,
+            words.byteOffset + 4 * (base + plan.offsets.rowSlotSigns + at), 1)[0]!;
+          const area = floats[base + plan.offsets.areas + handle]!;
+          const aperture = floats[base + plan.offsets.fractions + handle]!;
+          const value = floats[base + plan.offsets.values + handle]!;
+          result.push({ local, handle,
+            owner: words[base + plan.offsets.ownerRows + handle],
+            neighbor: words[base + plan.offsets.neighborRows + handle],
+            metadata: words[base + plan.offsets.metadata + handle],
+            sign, area, aperture, value,
+            transportAdv: Array.from(selectorFloats.subarray(4 * handle, 4 * handle + 4)),
+            normal: Array.from(floats.subarray(base + plan.offsets.normals + 4 * handle,
+              base + plan.offsets.normals + 4 * handle + 3)),
+            centroid: Array.from(floats.subarray(base + plan.offsets.centroids + 4 * handle,
+              base + plan.offsets.centroids + 4 * handle + 3)),
+            auditAdv: Array.from(floats.subarray(auditBase + plan.offsets.normals + 4 * handle,
+              auditBase + plan.offsets.normals + 4 * handle + 3)),
+            auditMiddle: Array.from(floats.subarray(auditBase + plan.offsets.centroids + 4 * handle,
+              auditBase + plan.offsets.centroids + 4 * handle + 3)),
+            auditTransported: [floats[auditBase + plan.offsets.areas + handle],
+              floats[auditBase + plan.offsets.inverseDistances + handle],
+              floats[auditBase + plan.offsets.fractions + handle]],
+            term: sign * area * aperture * value });
+        }
+        return result;
+      };
+      const sourceRow = owners[sourceIndex]!, targetRow = owners[targetIndex]!;
+      const selectors = (row: number) => Array.from({ length: boundaryDebug.selectorStride },
+        (_, selector) => ({ selector, tag: selectorWords[row * boundaryDebug.selectorStride + selector]! }))
+        .filter(({ tag }) => tag !== 0xffff_ffff)
+        .map(({ selector, tag }) => ({ selector, tag,
+          ...((tag & 0x8000_0000) !== 0
+            ? { support: Array.from(supportVectors.subarray(
+              4 * (tag & 0x7fff_ffff), 4 * (tag & 0x7fff_ffff) + 4)),
+              supportCell: Array.from(supportRecords.subarray(
+                8 * (tag & 0x7fff_ffff), 8 * (tag & 0x7fff_ffff) + 6)),
+              supportFaceCell: Array.from(supportAdjacency.subarray(
+                (rowCount + (tag & 0x7fff_ffff) + 1) * boundaryDebug.supportFaceAdjacencyStride - 4,
+                (rowCount + (tag & 0x7fff_ffff) + 1) * boundaryDebug.supportFaceAdjacencyStride)),
+              supportNegativeRows: Array.from(supportAdjacency.subarray(
+                (rowCount + (tag & 0x7fff_ffff)) * boundaryDebug.supportFaceAdjacencyStride + 31,
+                (rowCount + (tag & 0x7fff_ffff)) * boundaryDebug.supportFaceAdjacencyStride + 43)),
+              supportNegativeCarriers: Array.from({ length: 12 }, (_, local) => {
+                const faceRow = rowCount + (tag & 0x7fff_ffff);
+                const negativeRow = supportAdjacency[
+                  faceRow * boundaryDebug.supportFaceAdjacencyStride + 31 + local]!;
+                const axis = Math.floor(local / 4);
+                return { local, negativeRow,
+                  candidates: negativeRow === 0xffff_ffff ? [] : Array.from({ length: 4 }, (_, quadrant) => {
+                    const item = 12 * negativeRow + 4 * axis + quadrant;
+                    return { quadrant, value: supportFaceValues[4 * item],
+                      distanceSquared: supportFaceValues[4 * item + 1],
+                      seed: supportFaces[4 * item + 2], valid: supportFaces[4 * item + 3] };
+                  }) };
+              }),
+              supportCarriers: Array.from({ length: 12 }, (_, local) => {
+                const item = 12 * (rowCount + (tag & 0x7fff_ffff)) + local;
+                const seed = supportFaces[4 * item + 2]!;
+                const seedRow = Math.floor(seed / 12), seedLocal = seed % 12;
+                const geometryAt = (seedRow + 1) * boundaryDebug.supportFaceAdjacencyStride - 4;
+                const origin = Array.from(supportAdjacency.subarray(geometryAt, geometryAt + 3));
+                const extent = supportAdjacency[geometryAt + 3]!;
+                const axis = Math.floor(seedLocal / 4), quadrant = seedLocal % 4;
+                const centerQuarter = origin.map((value) => 4 * value + 2 * extent);
+                if (Number.isFinite(axis) && axis < 3) centerQuarter[axis] = 4 * origin[axis]! + 4 * extent;
+                let transverse = 0;
+                for (let a = 0; a < 3; a += 1) if (a !== axis) {
+                  centerQuarter[a] = 4 * origin[a]!
+                    + ((quadrant & (1 << transverse)) !== 0 ? 3 : 1) * extent;
+                  transverse += 1;
+                }
+                return { local, value: supportFaceValues[4 * item],
+                  distanceSquared: supportFaceValues[4 * item + 1], seed,
+                  valid: supportFaces[4 * item + 3], seedCenterQuarter: centerQuarter };
+              }) }
+            : { rowCell: headers[12 * tag], rowSize: headers[12 * tag + 3] }) }));
+      console.log(JSON.stringify({ phase: "fluid-symmetry-rhs-row",
+        transform: "reflect-x", source: [x, y, z], target: [targetX, y, z],
+        sourceRow, targetRow, sourceRhs: rhs[sourceIndex], targetRhs: rhs[targetIndex],
+        sourceMetric: topologyMetricWords
+          ? Array.from(topologyMetricWords.subarray(4 * sourceRow, 4 * sourceRow + 4)) : undefined,
+        targetMetric: topologyMetricWords
+          ? Array.from(topologyMetricWords.subarray(4 * targetRow, 4 * targetRow + 4)) : undefined,
+        sourceRowVelocity: Array.from(rowVelocities.subarray(
+          4 * (control.activeBank * plan.rowCapacity + sourceRow),
+          4 * (control.activeBank * plan.rowCapacity + sourceRow + 1))),
+        targetRowVelocity: Array.from(rowVelocities.subarray(
+          4 * (control.activeBank * plan.rowCapacity + targetRow),
+          4 * (control.activeBank * plan.rowCapacity + targetRow + 1))),
+        sourceSelectorDetails: selectors(sourceRow).filter(({ selector }) => selector === 36),
+        targetSelectorDetails: selectors(targetRow).filter(({ selector }) => selector === 36),
+        sourceSlots: slots(sourceRow), targetSlots: slots(targetRow) }));
+      break outerRhs;
+    }
+  }
+  return {
+    pressure, rhs, diagonal,
+    ...(section63Diagonal ? { section63Diagonal } : {}),
+    ...(section63CaseId ? { section63CaseId } : {}),
+    ...(stageFields[0] ? { initialResidual: stageFields[0] } : {}),
+    ...(stageFields[1] ? { initialPreconditioned: stageFields[1] } : {}),
+    ...(stageFields[2] ? { initialPreconditionedImage: stageFields[2] } : {}),
+    ...(stageFields[3] ? { preconditionerPreSmoothed: stageFields[3] } : {}),
+    ...(stageFields[4] ? { preconditionerZeroSmoothed: stageFields[4] } : {}),
+    ...(stageFields[5] ? { preconditionerFirstOperatorImage: stageFields[5] } : {}),
+    ...(stageFields[6] ? { preconditionerFirstSmoothed: stageFields[6] } : {}),
+    ...(stageFields[7] ? { preconditionerInnerResidual: stageFields[7] } : {}),
+    ...(stageFields[8] ? { preconditionerInnerCorrection: stageFields[8] } : {}),
+    ...(stageFields[9] ? { preconditionerPostCorrected: stageFields[9] } : {}),
+    topology, coveredCells, overlapCells, invalidRows, rowCount,
+    publicationValid: control.flags === 0 && control.firstError === 0xffff_ffff
+      && control.epoch > 0 && coveredCells === cellCount && overlapCells === 0 && invalidRows === 0,
   };
 }
 

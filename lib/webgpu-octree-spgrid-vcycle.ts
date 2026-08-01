@@ -606,6 +606,15 @@ export interface OctreeSPGridVCycleOptions {
   readonly preSmoothingIterations?: number;
   readonly postSmoothingIterations?: number;
   readonly bottomIterations?: number;
+  /**
+   * Compile the page-parallel correction and accurate A2 executor used by the
+   * hierarchical outer solve. Persistent MGPCG still requires the hierarchy's
+   * transactional setup pipelines and buffers, but transcribes both applies
+   * inside its single kernel.
+   */
+  readonly compileHierarchicalExecutor?: boolean;
+  /** Allocate persistent hierarchy state now and compile its setup pipelines later. */
+  readonly deferPipelineCompilation?: boolean;
 }
 
 export interface SPGridScaledSpectralBounds {
@@ -996,6 +1005,25 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "restrictAndGhostAccumulate" | "coarseVcycleTail" | "exactBottom"
   | "prolongAndGhostPropagate" | "publish";
 
+const OCTREE_SPGRID_HIERARCHICAL_ONLY_PIPELINES = new Set<OctreeSPGridVCyclePipelineName>([
+  "prepareCorrectionDispatches", "clearCorrection", "zeroVectors", "seedRhs",
+  "seedRhsAndClearCorrection", "smoothChebyshevAtoB0", "smoothChebyshevBtoA0",
+  "smoothChebyshevAtoB1", "smoothChebyshevBtoA1", "smoothChebyshevAtoB2",
+  "smoothChebyshevBtoA2", "smoothChebyshevAtoB3", "smoothChebyshevBtoA3",
+  "restrictAndGhostAccumulate", "coarseVcycleTail", "exactBottom",
+  "prolongAndGhostPropagate", "publish",
+]);
+
+/** Pipeline reachability mirror used by construction and non-GPU tests. */
+export function octreeSPGridPipelineNamesForExecutor(
+  compileHierarchicalExecutor: boolean,
+): readonly OctreeSPGridVCyclePipelineName[] {
+  const names = Object.keys(OCTREE_SPGRID_VCYCLE_BINDINGS) as OctreeSPGridVCyclePipelineName[];
+  return Object.freeze(compileHierarchicalExecutor
+    ? names
+    : names.filter((name) => !OCTREE_SPGRID_HIERARCHICAL_ONLY_PIPELINES.has(name)));
+}
+
 export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
   beginL1CapturePlan: [0, 3, 6, 13, 14, 18],
   // The row scan no longer reaches the level-delta arena (14): markDirtyFrom
@@ -1099,8 +1127,14 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   readonly encodedCorrectionPassTransitionCount = 1;
   readonly encodedSetupDispatchCount: number;
   readonly encodedCorrectionDispatchCount: number;
+  private accurateOperatorInstance?: OctreePipelinedWorksetLinearOperator;
   /** Accurate second-order executor over four disjoint topology classes. */
-  readonly accurateOperator: OctreePipelinedWorksetLinearOperator;
+  get accurateOperator(): OctreePipelinedWorksetLinearOperator {
+    if (!this.accurateOperatorInstance) {
+      throw new Error("SPGrid accurate A2 executor was not compiled");
+    }
+    return this.accurateOperatorInstance;
+  }
   readonly smootherContract;
   readonly diagnostics: Readonly<{ levelCount: number; coarsestCapacity: number; maximumTransferRecordsPerLevel: number;
     denseShadowSetupDispatchCount: number;
@@ -1136,26 +1170,26 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly clearDispatch: readonly [number, number, number];
   private readonly pageDispatch: readonly [number, number, number];
   private readonly accurateWorksetLayout: GPUBuffer;
-  private readonly accurateGatePipeline: GPUComputePipeline;
-  private readonly accurateClassDispatch: GPUBuffer;
-  private readonly accurateClassPipelines: Readonly<Record<AccurateClass, GPUComputePipeline>>;
-  private readonly accurateMergedTermPipeline: GPUComputePipeline;
-  private readonly accurateMergedAdjointPipeline: GPUComputePipeline;
-  private readonly accurateMergedUnionPipeline: GPUComputePipeline;
-  private readonly accurateUnionPipeline: GPUComputePipeline;
+  private readonly accurateGatePipeline!: GPUComputePipeline;
+  private readonly accurateClassDispatch!: GPUBuffer;
+  private readonly accurateClassPipelines!: Readonly<Record<AccurateClass, GPUComputePipeline>>;
+  private readonly accurateMergedTermPipeline!: GPUComputePipeline;
+  private readonly accurateMergedAdjointPipeline!: GPUComputePipeline;
+  private readonly accurateMergedUnionPipeline!: GPUComputePipeline;
+  private readonly accurateUnionPipeline!: GPUComputePipeline;
   private readonly accurateCompiledMergedUnionPipeline?: GPUComputePipeline;
   private readonly accurateCompiledUnionPipeline?: GPUComputePipeline;
-  private readonly accurateTermPipeline: GPUComputePipeline;
-  private readonly accurateAdjointPipeline: GPUComputePipeline;
-  private readonly accurateFinalizePipeline: GPUComputePipeline;
-  private readonly accurateResidualFinalizePipeline: GPUComputePipeline;
-  private readonly accurateTerms: GPUBuffer;
+  private readonly accurateTermPipeline!: GPUComputePipeline;
+  private readonly accurateAdjointPipeline!: GPUComputePipeline;
+  private readonly accurateFinalizePipeline!: GPUComputePipeline;
+  private readonly accurateResidualFinalizePipeline!: GPUComputePipeline;
+  private readonly accurateTerms!: GPUBuffer;
   /** Per-epoch compiled operator image: 19 u32 per row, indices only. */
-  private readonly accurateOperatorRows: GPUBuffer;
-  private readonly accurateOperatorRowsPipeline: GPUComputePipeline;
-  private readonly accurateOperatorRowsGroup: GPUBindGroup;
-  private readonly accurateImageDeltaParams: GPUBuffer;
-  private readonly accurateImageEpochs: GPUBuffer;
+  private readonly accurateOperatorRows!: GPUBuffer;
+  private readonly accurateOperatorRowsPipeline!: GPUComputePipeline;
+  private readonly accurateOperatorRowsGroup!: GPUBindGroup;
+  private readonly accurateImageDeltaParams!: GPUBuffer;
+  private readonly accurateImageEpochs!: GPUBuffer;
   /**
    * Measurement-only control arm for the direct half of the operator image.
    * The shader retains the exact pre-image chase for the differential harness;
@@ -1182,17 +1216,22 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly adjointByChase = typeof process !== "undefined"
     && process.env?.FLUID_SPGRID_ADJOINT_BY_CHASE === "1";
   /** Per-epoch compiled fine-adjoint image: 144 u32 per row, indices only. */
-  private readonly accurateAdjointRows: GPUBuffer;
-  private readonly accurateAdjointRowsPipeline: GPUComputePipeline;
-  private readonly accurateAdjointRowsGroup: GPUBindGroup;
+  private readonly accurateAdjointRows!: GPUBuffer;
+  private readonly accurateAdjointRowsPipeline!: GPUComputePipeline;
+  private readonly accurateAdjointRowsGroup!: GPUBindGroup;
   private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
-  private readonly pipelines: Readonly<Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>>;
+  private readonly setupShaderModule: GPUShaderModule;
+  private pipelines: Readonly<Partial<Record<
+    OctreeSPGridVCyclePipelineName, GPUComputePipeline
+  >>> = Object.freeze({});
+  private pipelineInitialization?: Promise<void>;
   private readonly groups = new Map<string, CachedGroup>();
   private readonly pre: number;
   private readonly post: number;
   private readonly fusedCorrectionInitialization: boolean;
+  private readonly hierarchicalExecutorCompiled: boolean;
   private lastSetupInput?: { readonly solverControl: GPUBuffer; readonly rowCount: GPUBuffer };
   private preparedCaptureSource?: OctreeSPGridSetupSource;
   private candidateSetupInput?: OctreeSPGridSetupSource;
@@ -1202,6 +1241,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   get workAccountingBuffers(): Readonly<{
     dispatch: GPUBuffer; capture: GPUBuffer; accurateClassDispatch: GPUBuffer;
   }> {
+    if (!this.hierarchicalExecutorCompiled) {
+      throw new Error("SPGrid hierarchical work accounting is not compiled");
+    }
     return Object.freeze({ dispatch: this.dispatchMeta, capture: this.capturePageState,
       accurateClassDispatch: this.accurateClassDispatch });
   }
@@ -1284,6 +1326,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   constructor(private readonly device: GPUDevice, private readonly source: OctreeSPGridVCycleSource,
     options: OctreeSPGridVCycleOptions) {
     this.plan = planOctreeSPGridVCycle(options);
+    this.hierarchicalExecutorCompiled = options.compileHierarchicalExecutor !== false;
+    if (options.deferPipelineCompilation && this.hierarchicalExecutorCompiled) {
+      throw new Error("Deferred SPGrid compilation currently requires the persistent executor");
+    }
     this.inlineAccurateA2 = options.geometricAggregateTransfers === true
       && typeof process !== "undefined"
       && process.env?.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2 !== "0";
@@ -1498,10 +1544,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       { length: this.plan.levelCount }, (_, level) => makeParams(level, "accepted")));
     this.candidateParams = Object.freeze(Array.from(
       { length: this.plan.levelCount }, (_, level) => makeParams(level, "candidate")));
-    const shaderModule = device.createShaderModule({ label: "Paper native sparse SPGrid V-cycle", code: octreeSPGridVCycleShader });
-    const make = (entryPoint: OctreeSPGridVCyclePipelineName) => device.createComputePipeline({ label: `SPGrid V-cycle · ${entryPoint}`,
-      layout: "auto", compute: { module: shaderModule, entryPoint } });
-    this.pipelines = Object.freeze(Object.fromEntries((Object.keys(OCTREE_SPGRID_VCYCLE_BINDINGS) as OctreeSPGridVCyclePipelineName[]).map((name) => [name, make(name)])) as Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>);
+    this.setupShaderModule = device.createShaderModule({
+      label: "Paper native sparse SPGrid V-cycle", code: octreeSPGridVCycleShader,
+    });
+    if (!options.deferPipelineCompilation) {
+      this.pipelines = this.createPipelinesSync();
+    }
+    if (this.hierarchicalExecutorCompiled) {
     const accurateModule = device.createShaderModule({
       label: "SPGrid accurate A2 class-specialized row apply", code: octreeSPGridAccurateOperatorShader,
     });
@@ -1682,7 +1731,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         { binding: 17, resource: { buffer: this.accurateImageEpochs } },
       ],
     });
-    this.accurateOperator = Object.freeze({
+    this.accurateOperatorInstance = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
       // Factor 1 defaults to one convergence gate plus the already-validated
       // inline accepted-row apply. Other factors, and the explicit A/B arm,
@@ -1734,6 +1783,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
           { buffer: worksets }, mergedDispatch, worksetLayout, mergedDispatchOffsetBytes);
       },
     });
+    }
     const l = this.plan.levelCount;
     // Three exact L1-capture dispatches (plan, the page-parallel row scan, and
     // its work-list reduction), the two-dispatch unchanged-input skip probe,
@@ -1744,7 +1794,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // ride the same pass.
     // Keep this exact for command and active/scheduled accounting.
     const denseShadowSetupDispatchCount = this.denseShadow?.encodedSetupDispatchCount ?? 0;
-    this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5 + 2
+    this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5
+      + (this.hierarchicalExecutorCompiled ? 2 : 0)
       + denseShadowSetupDispatchCount;
     // The two widest levels retain fully parallel, globally synchronized
     // Jacobi dispatches. The remaining <=63-cell tail fits in one workgroup,
@@ -1755,8 +1806,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       this.fusedCorrectionInitialization ? 1 as const : 2 as const;
     const sparseCorrectionDispatchCount = l + 3 + correctionInitializationDispatchCount
       + parallelLevels * (this.pre + this.post + 2);
-    this.encodedCorrectionDispatchCount =
-      this.denseCorrection?.encodedCorrectionDispatchCount ?? sparseCorrectionDispatchCount;
+    this.encodedCorrectionDispatchCount = this.hierarchicalExecutorCompiled
+      ? (this.denseCorrection?.encodedCorrectionDispatchCount ?? sparseCorrectionDispatchCount)
+      : 0;
     this.diagnostics = Object.freeze({ levelCount: l,
       denseShadowSetupDispatchCount,
       coarsestCapacity: this.plan.levelCapacities[this.plan.levelCount - 1],
@@ -1775,12 +1827,65 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.allocatedBytes = this.plan.allocatedBytes + this.capturedGeometry.size + this.candidateCapturedGeometry.size
       + this.candidateTopology.size + this.candidateState.size + this.candidateDispatch.size
       + this.candidateGhosts.size + this.committedInputs.size
-      + this.accurateWorksetLayout.size + this.accurateClassDispatch.size
-      + this.accurateOperatorRows.size + this.accurateAdjointRows.size
-      + this.accurateImageDeltaParams.size + this.accurateImageEpochs.size
+      + this.accurateWorksetLayout.size + (this.accurateClassDispatch?.size ?? 0)
+      + (this.accurateOperatorRows?.size ?? 0) + (this.accurateAdjointRows?.size ?? 0)
+      + (this.accurateImageDeltaParams?.size ?? 0) + (this.accurateImageEpochs?.size ?? 0)
       + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0)
       + (this.denseShadow?.allocatedBytes ?? 0)
       + (this.denseCorrection?.allocatedBytes ?? 0);
+  }
+
+  private pipelineDescriptor(
+    entryPoint: OctreeSPGridVCyclePipelineName,
+  ): GPUComputePipelineDescriptor {
+    return {
+      label: `SPGrid V-cycle · ${entryPoint}`,
+      layout: "auto",
+      compute: { module: this.setupShaderModule, entryPoint },
+    };
+  }
+
+  private createPipelinesSync(): Readonly<Partial<Record<
+    OctreeSPGridVCyclePipelineName, GPUComputePipeline
+  >>> {
+    return Object.freeze(Object.fromEntries(
+      octreeSPGridPipelineNamesForExecutor(this.hierarchicalExecutorCompiled)
+        .map((entryPoint) => [
+          entryPoint,
+          this.device.createComputePipeline(this.pipelineDescriptor(entryPoint)),
+        ]),
+    ));
+  }
+
+  /** Sequential compilation keeps driver pressure bounded during startup. */
+  async initializePipelines(
+    onProgress: (label: string, completed: number, total: number) => void = () => {},
+  ): Promise<void> {
+    this.assertLive();
+    const names = octreeSPGridPipelineNamesForExecutor(this.hierarchicalExecutorCompiled);
+    if (names.every((name) => this.pipelines[name] !== undefined)) return;
+    if (!this.pipelineInitialization) {
+      this.pipelineInitialization = (async () => {
+        const compiled: Partial<Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>> = {};
+        for (let index = 0; index < names.length; index += 1) {
+          const entryPoint = names[index];
+          const label = `SPGrid V-cycle · ${entryPoint}`;
+          onProgress(label, index, names.length);
+          compiled[entryPoint] = await this.device.createComputePipelineAsync(
+            this.pipelineDescriptor(entryPoint),
+          );
+          this.assertLive();
+          onProgress(label, index + 1, names.length);
+        }
+        // Setup bind groups are keyed by the caller-supplied solve control,
+        // row-count authority and candidate/accepted source mode. Publish the
+        // complete pipeline map atomically; `bind` then materializes and caches
+        // each dependent group on its first encode with those live resources.
+        this.groups.clear();
+        this.pipelines = Object.freeze(compiled);
+      })();
+    }
+    await this.pipelineInitialization;
   }
 
   encodeCapture(broker: PassBroker): void {
@@ -1882,11 +1987,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       || this.candidateSetupInput.solverControl !== input.solverControl) {
       throw new Error("SPGrid ready commit requires the matching inactive hierarchy candidate");
     }
-    const imageDispatch = this.source.classDispatch;
-    if (!imageDispatch) {
-      throw new Error("SPGrid image compilation requires structured live-row task records");
-    }
-    const imageDispatchBase = this.source.classDispatchOffsetBytes ?? 0;
     const candidate = this.candidateSetupInput;
     const pass = broker.compute({ label: "SPGrid V-cycle · publish validated exact level deltas" });
     this.run(pass, "commitChangedL1", 0, input,
@@ -1901,24 +2001,24 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // fingerprint (or none), so the next probe can never skip a stale build.
     this.run(pass, "publishCommittedInputs", 0, candidate,
       this.plan.rowDispatch, this.candidateCapturedGeometry);
-    // Compile the Section 6.3 operator's addressing for the epoch this pass
-    // just published. It reads only what the dispatches above wrote (pages,
-    // brick masks, ranked slots, FLAGS/OWNER, captured geometry), and WebGPU
-    // orders storage between dispatches in one pass, so the image is exact the
-    // instant the commit is. Every apply for the rest of the epoch then gathers
-    // through it instead of re-running the chase.
-    pass.setPipeline(this.accurateOperatorRowsPipeline);
-    pass.setBindGroup(0, this.accurateOperatorRowsGroup);
-    pass.dispatchWorkgroupsIndirect(imageDispatch,
-      imageDispatchBase + ACCURATE_SOURCE_IMAGE_ROW_RECORD_BYTES);
-    // The fine-adjoint half, on the same inputs and in the same pass, for the
-    // same reason. This one carries the larger share: the adjoint stage is
-    // entered by every merged-band apply, 165 of them per advance on the mini
-    // lane, and each lane used to run two dependent page/brick/rank chases.
-    pass.setPipeline(this.accurateAdjointRowsPipeline);
-    pass.setBindGroup(0, this.accurateAdjointRowsGroup);
-    pass.dispatchWorkgroupsIndirect(imageDispatch,
-      imageDispatchBase + ACCURATE_SOURCE_IMAGE_TRANSITION_RECORD_BYTES);
+    if (this.hierarchicalExecutorCompiled) {
+      const imageDispatch = this.source.classDispatch;
+      if (!imageDispatch) {
+        throw new Error("SPGrid image compilation requires structured live-row task records");
+      }
+      const imageDispatchBase = this.source.classDispatchOffsetBytes ?? 0;
+      // Compile the Section 6.3 operator's addressing for the epoch this pass
+      // just published. The persistent executor transcribes these applies and
+      // therefore neither compiles nor publishes the fallback operator image.
+      pass.setPipeline(this.accurateOperatorRowsPipeline);
+      pass.setBindGroup(0, this.accurateOperatorRowsGroup);
+      pass.dispatchWorkgroupsIndirect(imageDispatch,
+        imageDispatchBase + ACCURATE_SOURCE_IMAGE_ROW_RECORD_BYTES);
+      pass.setPipeline(this.accurateAdjointRowsPipeline);
+      pass.setBindGroup(0, this.accurateAdjointRowsGroup);
+      pass.dispatchWorkgroupsIndirect(imageDispatch,
+        imageDispatchBase + ACCURATE_SOURCE_IMAGE_TRANSITION_RECORD_BYTES);
+    }
     // Publish the shadow only after sparse lifecycle acceptance and after the
     // sparse pass's final direct consumers. The shadow also requires its
     // candidate epoch to equal the sparse published capture generation,
@@ -1944,6 +2044,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
 
   encodeCorrection(broker: PassBroker, input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
+    this.assertHierarchicalExecutorCompiled();
     let pass = broker.compute({ label: "SPGrid V-cycle · publish convergence-gated level records" });
     this.encodeCorrectionGate(pass, input);
     broker.fence("SPGrid V-cycle convergence-gated indirect publication");
@@ -1953,6 +2054,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   encodeCorrectionGate(pass: GPUComputePassEncoder,
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
+    this.assertHierarchicalExecutorCompiled();
     if (this.denseCorrection) {
       this.denseCorrection.encodeCorrectionGate(pass, input);
       return;
@@ -1963,6 +2065,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   encodeCorrectionBody(broker: PassBroker,
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
+    this.assertHierarchicalExecutorCompiled();
     if (this.denseCorrection) {
       this.denseCorrection.encodeCorrectionBody(broker, input);
       return;
@@ -2040,6 +2143,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       sourceControl?: GPUBuffer; topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode },
     geometry = this.capturedGeometry): void {
     const pipeline = this.pipelines[name];
+    if (!pipeline) {
+      throw new Error(`SPGrid pipeline ${name} is not initialized`);
+    }
     const sourceMode = input.sourceMode ?? "accepted";
     const key = `${name}:${level}:${geometry === this.candidateCapturedGeometry ? "candidate" : "accepted"}:${sourceMode}`;
     const cached = this.groups.get(key);
@@ -2413,6 +2519,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     return cached;
   }
 
+  private assertHierarchicalExecutorCompiled(): void {
+    if (!this.hierarchicalExecutorCompiled) {
+      throw new Error("SPGrid hierarchical correction executor was not compiled");
+    }
+  }
+
   private assertLive(): void { if (this.destroyed) throw new Error("SPGrid V-cycle is destroyed"); }
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true; this.groups.clear(); this.accurateBindings.length = 0;
@@ -2424,9 +2536,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
     this.denseCorrection?.destroy();
     this.denseShadow?.destroy();
-    this.accurateWorksetLayout.destroy(); this.accurateClassDispatch.destroy(); this.accurateTerms.destroy();
-    this.accurateOperatorRows.destroy(); this.accurateAdjointRows.destroy();
-    this.accurateImageDeltaParams.destroy(); this.accurateImageEpochs.destroy();
+    this.accurateWorksetLayout.destroy(); this.accurateClassDispatch?.destroy();
+    this.accurateTerms?.destroy();
+    this.accurateOperatorRows?.destroy(); this.accurateAdjointRows?.destroy();
+    this.accurateImageDeltaParams?.destroy(); this.accurateImageEpochs?.destroy();
     for (const buffer of [...this.params, ...this.candidateParams]) buffer.destroy();
   }
 }
@@ -2829,6 +2942,33 @@ fn coefficientForDirection(row:u32,metric:Metric,direction:vec3i)->f32{
  let channel=section63ChannelForDirection(metric.transformAndFlags&63u,direction);
  if(channel>=18u){return 0.0;}
  return section63Coefficients[coefficientBase(row)+1u+channel];}
+fn d4Four(a:f32,b:f32,c:f32,d:f32)->f32{let ab=min(a,b)+max(a,b);let cd=min(c,d)+max(c,d);return min(ab,cd)+max(ab,cd);}
+fn sorted18Sum(values:array<f32,18>)->f32{var sorted=values;for(var i=1u;i<18u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.;for(var i=0u;i<18u;i+=1u){sum+=sorted[i];}return sum;}
+fn sorted8Sum(values:array<f32,8>)->f32{var sorted=values;for(var i=1u;i<8u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.;for(var i=0u;i<8u;i+=1u){sum+=sorted[i];}return sum;}
+fn sortedCoefficientSum(row:u32)->f32{var values:array<f32,18>;let base=coefficientBase(row);for(var channel=0u;channel<18u;channel+=1u){values[channel]=section63Coefficients[base+1u+channel];}return sorted18Sum(values);}
+fn d4CoefficientSum(row:u32,m:Metric)->f32{
+ let horizontal=d4Four(coefficientForDirection(row,m,vec3i(1,0,0)),coefficientForDirection(row,m,vec3i(-1,0,0)),coefficientForDirection(row,m,vec3i(0,0,1)),coefficientForDirection(row,m,vec3i(0,0,-1)));
+ let vertical=coefficientForDirection(row,m,vec3i(0,1,0))+coefficientForDirection(row,m,vec3i(0,-1,0));
+ let upper=d4Four(coefficientForDirection(row,m,vec3i(1,1,0)),coefficientForDirection(row,m,vec3i(-1,1,0)),coefficientForDirection(row,m,vec3i(0,1,1)),coefficientForDirection(row,m,vec3i(0,1,-1)));
+ let lower=d4Four(coefficientForDirection(row,m,vec3i(1,-1,0)),coefficientForDirection(row,m,vec3i(-1,-1,0)),coefficientForDirection(row,m,vec3i(0,-1,1)),coefficientForDirection(row,m,vec3i(0,-1,-1)));
+ let diagonal=d4Four(coefficientForDirection(row,m,vec3i(1,0,1)),coefficientForDirection(row,m,vec3i(-1,0,-1)),coefficientForDirection(row,m,vec3i(1,0,-1)),coefficientForDirection(row,m,vec3i(-1,0,1)));
+ return((horizontal+vertical)+upper)+(lower+diagonal);}
+fn directWorldTerm(row:u32,m:Metric,q:vec3u,l:u32,page:u32,levelDims:vec3i,slotBase:u32,x:f32,direction:vec3i)->f32{
+ let channel=section63ChannelForDirection(m.transformAndFlags&63u,direction);if(channel>=18u){return 0.0;}
+ let c=section63Coefficients[coefficientBase(row)+1u+channel];if(c==0.0){return 0.0;}
+ let targetQ=vec3i(q)+direction;if(any(targetQ<vec3i(0))||any(targetQ>=levelDims)){reportAt(2u,27u,row);return 0.0;}
+ let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);return 0.0;}
+ let flags=state[atBase(FLAGS,slotBase,slot)];if((flags&MG_ONLY)!=0u){return 0.0;}
+ let encoded=state[atBase(OWNER,slotBase,slot)];if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);return 0.0;}
+ return c*(x-inputVector[encoded-1u]);}
+fn d4DirectSum(row:u32,m:Metric,q:vec3u,l:u32,page:u32,levelDims:vec3i,slotBase:u32,x:f32)->f32{
+ let horizontal=d4Four(directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(1,0,0)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(-1,0,0)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,0,1)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,0,-1)));
+ let vertical=directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,1,0))+directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,-1,0));
+ let upper=d4Four(directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(1,1,0)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(-1,1,0)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,1,1)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,1,-1)));
+ let lower=d4Four(directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(1,-1,0)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(-1,-1,0)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,-1,1)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(0,-1,-1)));
+ let diagonal=d4Four(directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(1,0,1)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(-1,0,-1)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(1,0,-1)),directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,vec3i(-1,0,1)));
+ return((horizontal+vertical)+upper)+(lower+diagonal);}
+fn sortedDirectSum(row:u32,m:Metric,q:vec3u,l:u32,page:u32,levelDims:vec3i,slotBase:u32,x:f32)->f32{var values:array<f32,18>;for(var channel=0u;channel<18u;channel+=1u){values[channel]=directWorldTerm(row,m,q,l,page,levelDims,slotBase,x,worldDirection(canonicalDirection(channel),m.transformAndFlags&63u));}return sorted18Sum(values);}
 // "Which row does this stencil direction reach", as the once-per-epoch image
 // builder asks it: every guard the inline walk applies, in the inline walk's
 // order, with each report returned as a stage code instead of raised, so a
@@ -2905,23 +3045,36 @@ fn resolveAdjointCandidate(row:u32,child:u32,candidate:u32)->u32{
 // eight fine-level aliases. Each alias gathers the (at most eighteen) active
 // page neighbours that point to it. This is E^T by construction: it reads the
 // same owner incidence used by propagation and performs no scatter atomic.
-fn finerAdjoint(row:u32,h:vec4u,q:vec3u,l:u32,x:f32)->f32{if(l==0u){return 0.0;}let fine=l-1u;var result=0.0;
- // Both depend only on the fine level, and the inner candidate loop runs up to
- // 8x18 times per row. Lifting them past the l==0 guard keeps the evaluation
- // set identical; both are pure and total, so no report or float moves.
- let fineDims=vec3i(dims(fine));let fineBase=levelBase(fine);
- for(var child=0u;child<8u;child+=1u){let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
-  let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}if(ghostPage>=levelCapacity(fine)){reportAt(2u,31u,row);continue;}
-  let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);
-  if(ghost==INVALID||(state[at(FLAGS,fine,ghost)]&GHOST)==0u||state[at(OWNER,fine,ghost)]!=row+1u){continue;}
-  for(var candidateDirection=0u;candidateDirection<18u;candidateDirection+=1u){let delta=canonicalDirection(candidateDirection);let activeQ=vec3i(ghostQ)-delta;
-   if(any(activeQ<vec3i(0))||any(activeQ>=fineDims)){continue;}let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
-   if(activeSlot==INVALID||(state[atBase(FLAGS,fineBase,activeSlot)]&ACTIVE)==0u){continue;}let encoded=state[atBase(OWNER,fineBase,activeSlot)];
-   if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);continue;}let other=encoded-1u;let otherMetric=metrics[other];
-   let c=coefficientForDirection(other,otherMetric,delta);
-   if(c>0.0){result+=c*(x-inputVector[other]);}
-  }
- }return result;}
+fn finerAdjointTerm(row:u32,q:vec3u,l:u32,x:f32,child:u32,delta:vec3i)->f32{
+ if(l==0u){return 0.0;}let fine=l-1u;let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
+ let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){return 0.0;}if(ghostPage>=levelCapacity(fine)){reportAt(2u,31u,row);return 0.0;}
+ let ghost=pageSlot(fine,ghostPage,ghostQ,ghostQ,row);let fineBase=levelBase(fine);
+ if(ghost==INVALID||(state[atBase(FLAGS,fineBase,ghost)]&GHOST)==0u||state[atBase(OWNER,fineBase,ghost)]!=row+1u){return 0.0;}
+ let activeQ=vec3i(ghostQ)-delta;if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){return 0.0;}
+ let activeSlot=pageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
+ if(activeSlot==INVALID||(state[atBase(FLAGS,fineBase,activeSlot)]&ACTIVE)==0u){return 0.0;}
+ let encoded=state[atBase(OWNER,fineBase,activeSlot)];if(encoded==0u||encoded>capacity()){reportAt(2u,24u,row);return 0.0;}
+ let other=encoded-1u;let c=coefficientForDirection(other,metrics[other],delta);
+ return select(0.0,c*(x-inputVector[other]),c>0.0);}
+fn d4FinerChildSum(row:u32,q:vec3u,l:u32,x:f32,child:u32)->f32{
+ let horizontal=d4Four(finerAdjointTerm(row,q,l,x,child,vec3i(1,0,0)),finerAdjointTerm(row,q,l,x,child,vec3i(-1,0,0)),finerAdjointTerm(row,q,l,x,child,vec3i(0,0,1)),finerAdjointTerm(row,q,l,x,child,vec3i(0,0,-1)));
+ let vertical=finerAdjointTerm(row,q,l,x,child,vec3i(0,1,0))+finerAdjointTerm(row,q,l,x,child,vec3i(0,-1,0));
+ let upper=d4Four(finerAdjointTerm(row,q,l,x,child,vec3i(1,1,0)),finerAdjointTerm(row,q,l,x,child,vec3i(-1,1,0)),finerAdjointTerm(row,q,l,x,child,vec3i(0,1,1)),finerAdjointTerm(row,q,l,x,child,vec3i(0,1,-1)));
+ let lower=d4Four(finerAdjointTerm(row,q,l,x,child,vec3i(1,-1,0)),finerAdjointTerm(row,q,l,x,child,vec3i(-1,-1,0)),finerAdjointTerm(row,q,l,x,child,vec3i(0,-1,1)),finerAdjointTerm(row,q,l,x,child,vec3i(0,-1,-1)));
+ let diagonal=d4Four(finerAdjointTerm(row,q,l,x,child,vec3i(1,0,1)),finerAdjointTerm(row,q,l,x,child,vec3i(-1,0,-1)),finerAdjointTerm(row,q,l,x,child,vec3i(1,0,-1)),finerAdjointTerm(row,q,l,x,child,vec3i(-1,0,1)));
+ return((horizontal+vertical)+upper)+(lower+diagonal);}
+fn sortedFinerChildSum(row:u32,q:vec3u,l:u32,x:f32,child:u32)->f32{
+ var values:array<f32,18>;
+ for(var candidate=0u;candidate<18u;candidate+=1u){
+  values[candidate]=finerAdjointTerm(row,q,l,x,child,canonicalDirection(candidate));
+ }
+ return sorted18Sum(values);
+}
+fn finerAdjoint(row:u32,h:vec4u,q:vec3u,l:u32,x:f32)->f32{
+ if(l==0u){return 0.0;}
+ var children:array<f32,8>;
+ for(var child=0u;child<8u;child+=1u){children[child]=sortedFinerChildSum(row,q,l,x,child);}
+ return sorted8Sum(children);}
 fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
  let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
  let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
@@ -2931,14 +3084,9 @@ fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=array
  // twice per surviving channel. All three are pure functions of l and m, so
  // lifting them changes no address, no report, and no float.
  let levelDims=vec3i(dims(l));let transform=m.transformAndFlags&63u;let slotBase=levelBase(l);
- let x=inputVector[row];var sum=0.0;
- for(var channel=0u;channel<18u;channel+=1u){sum+=section63Coefficients[base+1u+channel];}
- var value=max(0.0,section63Coefficients[base]-sum)*x;
- for(var channel=0u;channel<18u;channel+=1u){let c=section63Coefficients[base+1u+channel];if(c==0.0){continue;}
-  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),transform);if(any(targetQ<vec3i(0))||any(targetQ>=levelDims)){reportAt(2u,27u,row);continue;}
-  let slot=pageSlot(l,page,q,vec3u(targetQ),row);if(slot==INVALID){reportAt(2u,28u,row);continue;}let flags=state[atBase(FLAGS,slotBase,slot)];
-  if((flags&MG_ONLY)!=0u){continue;}let encoded=state[atBase(OWNER,slotBase,slot)];if(encoded==0u||encoded>capacity()){reportAt(2u,29u,row);continue;}
-  value+=c*(x-inputVector[encoded-1u]);}
+ let x=inputVector[row];let sum=sortedCoefficientSum(row);
+ var value=max(0.0,section63Coefficients[base]-sum)*x
+  +sortedDirectSum(row,m,q,l,page,levelDims,slotBase,x);
  value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}}
 
 // One-lane compiled-image counterpart of applyRow. It preserves applyRow's
@@ -3156,6 +3304,30 @@ fn stageAdjointCandidateByChase(row:u32,child:u32,candidate:u32){let base=row*16
 }
 
 struct StagedRowFold{value:f32,valid:bool}
+fn stagedDirectWorldTerm(row:u32,m:Metric,direction:vec3i)->f32{
+ let channel=section63ChannelForDirection(m.transformAndFlags&63u,direction);
+ if(channel>=18u){return 0.;}return accurateTerms[row*162u+channel];
+}
+fn stagedD4DirectSum(row:u32,m:Metric)->f32{
+ let horizontal=d4Four(stagedDirectWorldTerm(row,m,vec3i(1,0,0)),stagedDirectWorldTerm(row,m,vec3i(-1,0,0)),stagedDirectWorldTerm(row,m,vec3i(0,0,1)),stagedDirectWorldTerm(row,m,vec3i(0,0,-1)));
+ let vertical=stagedDirectWorldTerm(row,m,vec3i(0,1,0))+stagedDirectWorldTerm(row,m,vec3i(0,-1,0));
+ let upper=d4Four(stagedDirectWorldTerm(row,m,vec3i(1,1,0)),stagedDirectWorldTerm(row,m,vec3i(-1,1,0)),stagedDirectWorldTerm(row,m,vec3i(0,1,1)),stagedDirectWorldTerm(row,m,vec3i(0,1,-1)));
+ let lower=d4Four(stagedDirectWorldTerm(row,m,vec3i(1,-1,0)),stagedDirectWorldTerm(row,m,vec3i(-1,-1,0)),stagedDirectWorldTerm(row,m,vec3i(0,-1,1)),stagedDirectWorldTerm(row,m,vec3i(0,-1,-1)));
+ let diagonal=d4Four(stagedDirectWorldTerm(row,m,vec3i(1,0,1)),stagedDirectWorldTerm(row,m,vec3i(-1,0,-1)),stagedDirectWorldTerm(row,m,vec3i(1,0,-1)),stagedDirectWorldTerm(row,m,vec3i(-1,0,1)));
+ return((horizontal+vertical)+upper)+(lower+diagonal);
+}
+fn stagedSortedDirectSum(row:u32)->f32{var values:array<f32,18>;for(var channel=0u;channel<18u;channel+=1u){values[channel]=accurateTerms[row*162u+channel];}return sorted18Sum(values);}
+fn stagedSortedAdjointSum(row:u32)->f32{
+ var children:array<f32,8>;
+ for(var child=0u;child<8u;child+=1u){
+  var values:array<f32,18>;
+  for(var candidate=0u;candidate<18u;candidate+=1u){
+   values[candidate]=accurateTerms[row*162u+18u+child*18u+candidate];
+  }
+  children[child]=sorted18Sum(values);
+ }
+ return sorted8Sum(children);
+}
 fn foldStagedRow(row:u32)->StagedRowFold{
  if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)
   ||row>=arrayLength(&inputVector)||row*162u+162u>arrayLength(&accurateTerms)){
@@ -3163,12 +3335,9 @@ fn foldStagedRow(row:u32)->StagedRowFold{
  let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
  if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){
   reportAt(1u,26u,row);return StagedRowFold(0.0,false);}
- let x=inputVector[row];var sum=0.0;
- for(var channel=0u;channel<18u;channel+=1u){sum+=section63Coefficients[base+1u+channel];}
- var value=max(0.0,section63Coefficients[base]-sum)*x;
- for(var channel=0u;channel<18u;channel+=1u){value+=accurateTerms[row*162u+channel];}
- if(m.caseId!=0u){for(var child=0u;child<8u;child+=1u){for(var candidate=0u;candidate<18u;candidate+=1u){
-  value+=accurateTerms[row*162u+18u+child*18u+candidate];}}}
+ let x=inputVector[row];let sum=sortedCoefficientSum(row);
+ var value=max(0.0,section63Coefficients[base]-sum)*x+stagedSortedDirectSum(row);
+ if(m.caseId!=0u){value+=stagedSortedAdjointSum(row);}
  if(!finite(value)){reportAt(4u,30u,row);return StagedRowFold(0.0,false);}
  return StagedRowFold(value,true);
 }
@@ -4395,9 +4564,10 @@ fn logicalPageOrigin(l:u32,dense:u32)->vec3u{let d=logicalPageDims(l);
   if(acceptedFine){let row=encodedOwner-1u;acceptedBase=(acceptedBank()*p.capacity.x+row)*19u;
    if(acceptedBase+19u>arrayLength(&acceptedCoefficients)){
     candidateReport(l);acceptedFine=false;
-   }else{let acceptedDiagonal=acceptedCoefficients[acceptedBase];var acceptedOff=0.0;
+   }else{let acceptedDiagonal=acceptedCoefficients[acceptedBase];var acceptedTerms:array<f32,18>;
     for(var channel=0u;channel<18u;channel+=1u){let c=acceptedCoefficients[acceptedBase+1u+channel];
-     if(!finite(c)||c<0.0){candidateReport(l);acceptedFine=false;}acceptedOff+=max(0.0,c);}
+     if(!finite(c)||c<0.0){candidateReport(l);acceptedFine=false;}acceptedTerms[channel]=max(0.0,c);}
+    let acceptedOff=canonical18Sum(acceptedTerms);
     if(!finite(acceptedDiagonal)||!(acceptedDiagonal>0.0)||!finite(acceptedOff)){
      candidateReport(l);acceptedFine=false;
     }else if(acceptedFine){
@@ -4530,6 +4700,8 @@ fn seedNativeRhs(r:u32){let v=inputRhs[r];let native=firstTrailingBit(sourceRowG
 // any read, write, stop-gate, row-domain, or floating-point operation.
 @compute @workgroup_size(64) fn seedRhsAndClearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){outputCorrection[r]=0.0;seedNativeRhs(r);}}
 fn stencilDirection(k:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[k];}
+fn canonical18Sum(values:array<f32,18>)->f32{var sorted=values;for(var i=1u;i<18u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.0;for(var i=0u;i<18u;i+=1u){sum+=sorted[i];}return sum;}
+fn canonical8Sum(values:array<f32,8>)->f32{var sorted=values;for(var i=1u;i<8u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.0;for(var i=0u;i<8u;i+=1u){sum+=sorted[i];}return sum;}
 // Section 4.6. The eighteen spokes consume the column indices setup published
 // beside the coefficients instead of re-deriving each one through the global
 // brick/rank directory. Every retained term is bit-identical: a spoke is taken
@@ -4552,10 +4724,11 @@ fn applied(slot:u32,source:u32)->f32{let l=level();
  let span=totalLevelSlots();let capacity=levelCapacity(l);let base=levelBase(l);
  let coefficientBase=XP*span+base+slot;let columnBase=neighbourBase()+base+slot;
  let sourceBase=source*span+base;
- var value=loadf(DIAG,l,slot)*bitcast<f32>(state[sourceBase+slot]);
+ var terms:array<f32,18>;
  for(var k=0u;k<18u;k+=1u){let c=bitcast<f32>(state[coefficientBase+k*span]);if(c==0.0){continue;}
   let other=topology[columnBase+k*span];if(other>=capacity){reportAt(OVERFLOW,75u,slot);continue;}
-  value-=c*bitcast<f32>(state[sourceBase+other]);}return value;}
+  terms[k]=c*bitcast<f32>(state[sourceBase+other]);}
+ return loadf(DIAG,l,slot)*bitcast<f32>(state[sourceBase+slot])-canonical18Sum(terms);}
 fn smoothable(l:u32,s:u32)->bool{return(state[at(FLAGS,l,s)]&GHOST)==0u;}
 fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
  let upper=loadf(SPECTRAL,l,0u);let lower=upper/30.0;
@@ -4641,11 +4814,12 @@ fn restrictAggregateWide(l:u32,coarse:u32,lane:u32){
  restrictRecord[lane]=failed;restrictResidual[lane]=residual;
  workgroupBarrier();
  if(lane==0u){
-  var sum=0.0;var anyFailed=false;let weight=p.reserved.x;
+  var values:array<f32,8>;var anyFailed=false;let weight=p.reserved.x;
   for(var child=0u;child<8u;child+=1u){
    anyFailed=anyFailed||restrictRecord[child]!=0u;
-   sum+=weight*restrictResidual[child];
+   values[child]=weight*restrictResidual[child];
   }
+  let sum=canonical8Sum(values);
   if(!anyFailed){
    if(!finite(sum)){reportAt(OVERFLOW,87u,coarse);}
    else{storef(RHS,l+1u,coarse,loadf(RHS,l+1u,coarse)+sum);}
@@ -4691,7 +4865,9 @@ fn restrictAggregateWide(l:u32,coarse:u32,lane:u32){
   restrictWeight[lane]=weight;restrictResidual[lane]=residual;
   workgroupBarrier();
   if(lane==0u){var folded=restrictSum;
-   for(var t=0u;t<staged;t+=1u){folded+=restrictWeight[t]*restrictResidual[t];}
+   for(var t=0u;t<staged;t+=1u){restrictResidual[t]=restrictWeight[t]*restrictResidual[t];}
+   for(var t=1u;t<staged;t+=1u){let value=restrictResidual[t];var j=t;loop{if(j==0u||restrictResidual[j-1u]<=value){break;}restrictResidual[j]=restrictResidual[j-1u];j-=1u;}restrictResidual[j]=value;}
+   for(var t=0u;t<staged;t+=1u){folded+=restrictResidual[t];}
    restrictSum=folded;}
   workgroupBarrier();
  }
@@ -4713,13 +4889,13 @@ fn coarseApplied(l:u32,slot:u32,source:u32)->f32{
  let span=totalLevelSlots();let capacity=levelCapacity(l);let base=levelBase(l);
  let coefficientBase=XP*span+base+slot;let columnBase=neighbourBase()+base+slot;
  let sourceBase=source*span+base;
- var value=loadf(DIAG,l,slot)*bitcast<f32>(state[sourceBase+slot]);
+ var terms:array<f32,18>;
  for(var k=0u;k<18u;k+=1u){
   let c=bitcast<f32>(state[coefficientBase+k*span]);if(c==0.0){continue;}
   let other=topology[columnBase+k*span];
   if(other>=capacity){reportAt(OVERFLOW,75u,slot);continue;}
-  value-=c*bitcast<f32>(state[sourceBase+other]);}
- return value;
+  terms[k]=c*bitcast<f32>(state[sourceBase+other]);}
+ return loadf(DIAG,l,slot)*bitcast<f32>(state[sourceBase+slot])-canonical18Sum(terms);
 }
 fn coarseSmoothPhase(l:u32,src:u32,dst:u32,phase:u32,lane:u32){
  let n=count(l);
@@ -4752,7 +4928,7 @@ fn coarseRestrictAggregate(l:u32,lane:u32){
  if(lane>=n||stopped()){return;}
  let coarse=workSlot(l+1u,lane);
  let parentQ=decode(state[at(KEY,l+1u,coarse)],l+1u);
- var sum=0.0;let weight=p.reserved.x;
+ var values:array<f32,8>;let weight=p.reserved.x;
  for(var child=0u;child<8u;child+=1u){
   let childQ=parentQ*2u+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
   if(any(childQ>=dims(l))){continue;}
@@ -4761,8 +4937,9 @@ fn coarseRestrictAggregate(l:u32,lane:u32){
   let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;
   let product=coarseApplied(l,fine,A);
   let residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
-  sum+=weight*residual;
+  values[child]=weight*residual;
  }
+ let sum=canonical8Sum(values);
  if(!finite(sum)){reportAt(OVERFLOW,87u,coarse);}
  else{storef(RHS,l+1u,coarse,loadf(RHS,l+1u,coarse)+sum);}
 }
@@ -4808,7 +4985,9 @@ fn coarseRestrict(l:u32,lane:u32){
    restrictWeight[lane]=weight;restrictResidual[lane]=residual;
    workgroupBarrier();
    if(lane==0u){var folded=restrictSum;
-    for(var t=0u;t<staged;t+=1u){folded+=restrictWeight[t]*restrictResidual[t];}
+    for(var t=0u;t<staged;t+=1u){restrictResidual[t]=restrictWeight[t]*restrictResidual[t];}
+    for(var t=1u;t<staged;t+=1u){let value=restrictResidual[t];var j=t;loop{if(j==0u||restrictResidual[j-1u]<=value){break;}restrictResidual[j]=restrictResidual[j-1u];j-=1u;}restrictResidual[j]=value;}
+    for(var t=0u;t<staged;t+=1u){folded+=restrictResidual[t];}
     restrictSum=folded;
    }
    workgroupBarrier();
@@ -4831,13 +5010,14 @@ fn coarseProlong(l:u32,lane:u32){
    let coarse=aggregateCorrectionTarget(l,fine);if(coarse==INVALID){continue;}
    value+=p.reserved.x*loadf(A,l+1u,coarse);
   }else{
-   let targetCount=topology[fineCountBase(l)+fine];var failed=false;
+   let targetCount=topology[fineCountBase(l)+fine];var failed=false;var values:array<f32,8>;
    for(var corner=0u;corner<targetCount;corner+=1u){
     let transfer=correctionTransfer(l,fine,corner);
     if(transfer.coarse==INVALID){failed=true;break;}
-    value+=p.reserved.x*transfer.weight*loadf(A,l+1u,transfer.coarse);
+    values[corner]=p.reserved.x*transfer.weight*loadf(A,l+1u,transfer.coarse);
    }
    if(failed){continue;}
+   value+=canonical8Sum(values);
   }
   if(!finite(value)){reportAt(NONFINITE,91u,fine);}else{storef(A,l,fine,value);}
  }
@@ -4878,9 +5058,10 @@ fn coarseProlong(l:u32,lane:u32){
  let fine=workSlot(l,i);let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;var value=select(loadf(A,l,fine),0.0,ghost);
  if(geometricAggregateTransfer()){let coarse=aggregateCorrectionTarget(l,fine);if(coarse==INVALID){return;}
   value+=p.reserved.x*loadf(A,l+1u,coarse);
- }else{let targetCount=topology[fineCountBase(l)+fine];
+ }else{let targetCount=topology[fineCountBase(l)+fine];var values:array<f32,8>;
   for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse==INVALID){return;}
-   value+=p.reserved.x*transfer.weight*loadf(A,l+1u,transfer.coarse);}}
+   values[corner]=p.reserved.x*transfer.weight*loadf(A,l+1u,transfer.coarse);}
+  value+=canonical8Sum(values);}
  if(!finite(value)){reportAt(NONFINITE,91u,fine);}else{storef(A,l,fine,value);}}
 @compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){let native=firstTrailingBit(sourceRowGeometry(r).y);
  let v=loadf(A,native,rowMap(native,r));if(!finite(v)){reportAt(NONFINITE,92u,r);}else{outputCorrection[r]=v;}}}

@@ -12,6 +12,7 @@ import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_VALID,
   WebGPUOctreePowerCoarseLevelSet,
+  makeOctreePowerCoarseLevelSetSampleWGSL,
   octreePowerCoarseLevelSetShader,
   planOctreePowerCoarseLevelSet,
   unpackOctreePowerCoarseLevelSetControl,
@@ -81,6 +82,16 @@ test("fine modes retain the exact row-directory ABI while coarse-only opts into 
   const coarseOnly = planOctreePowerCoarseLevelSet(32, 0, 0, 64);
   assert.equal(coarseOnly.sampleDirectoryBytes, OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES
     + (32 + 64) * OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES);
+});
+
+test("coarse dense sampling is D4 invariant at dyadic face centres", () => {
+  const sample = makeOctreePowerCoarseLevelSetSampleWGSL();
+  assert.match(sample,
+    /halfGrid=\.5\*round\(2\.\*rawGrid\)[\s\S]*select\(rawGrid,halfGrid,abs\(rawGrid-halfGrid\)<=vec3f\(1e-4\)\)/,
+    "roundoff-sized half-grid errors must snap to identical mirrored coordinates");
+  assert.match(sample,
+    /var terms:array<f32,8>[\s\S]*terms\[corner\]=\(wx\*wz\)\*wy\*sample[\s\S]*terms\[j-1u\]<=term[\s\S]*value\+=terms\[i\]/,
+    "trilinear corner contributions must fold independently of x/z corner permutation");
 });
 
 test("rejected fine correction preserves every byte of the prior coarse authority", () => {

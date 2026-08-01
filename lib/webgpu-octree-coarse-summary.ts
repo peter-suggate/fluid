@@ -211,6 +211,8 @@ struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32
 @group(0)@binding(5)var<storage,read>rowVelocities:array<vec4f>;
 fn linear(w:vec3u,n:vec3u,l:u32)->u32{return (w.x+w.y*n.x)*256u+l;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
+fn canonicalSum8(values:array<f32,8>)->f32{var sorted=values;for(var i=1u;i<8u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.;var i=0u;loop{if(i>=8u){break;}let magnitude=abs(sorted[i]);var balance=0;var j=i;loop{if(j>=8u||abs(sorted[j])!=magnitude){break;}if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}sum+=f32(balance)*magnitude;i=j;}return sum;}
+fn canonicalWeight(a:f32,b:f32,c:f32)->f32{var factors=array<f32,3>(a,b,c);for(var i=1u;i<3u;i+=1u){let value=factors[i];var j=i;loop{if(j==0u||factors[j-1u]<=value){break;}factors[j]=factors[j-1u];j-=1u;}factors[j]=value;}return factors[0]*factors[1]*factors[2];}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}
 fn topWord(key:u32)->u32{return 16u+key/PAGE_SIZE;}
 fn poolOffset()->u32{return 16u+p.topPages;}
@@ -244,21 +246,22 @@ fn extrapolatedCoarseAt(point:vec3f)->vec2f{let direct=coarseAt(point);if(direct
  return select(vec2f(0.0),vec2f(best,1.0),found);}
 fn interpolatedCoarseAt(point:vec3f)->vec2f{let upper=max(vec3f(p.dims)-vec3f(0.5),vec3f(0.5));
  let x=clamp(point,vec3f(0.5),upper);let low=vec3i(floor(x-vec3f(0.5)));let t=x-(vec3f(low)+vec3f(0.5));
- var value=0.0;var total=0.0;
+ var terms:array<f32,8>;var weights:array<f32,8>;
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
   let q=clamp(low+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let sample=extrapolatedCoarseAt(vec3f(q)+vec3f(0.5));
-  let weight=select(1.0-t.x,t.x,(corner&1u)!=0u)*select(1.0-t.y,t.y,(corner&2u)!=0u)
-   *select(1.0-t.z,t.z,(corner&4u)!=0u);if(weight>0.0&&sample.y!=0.0){value+=weight*sample.x;total+=weight;}}
+  let weight=canonicalWeight(select(1.0-t.x,t.x,(corner&1u)!=0u),select(1.0-t.y,t.y,(corner&2u)!=0u),select(1.0-t.z,t.z,(corner&4u)!=0u));if(weight>0.0&&sample.y!=0.0){terms[corner]=weight*sample.x;weights[corner]=weight;}}
+ let value=canonicalSum8(terms);let total=canonicalSum8(weights);
  return select(vec2f(0.0),vec2f(value/max(total,1e-12),1.0),total>0.999);}
-fn densePhiAt(bank:u32,point:vec3f)->vec2f{let upper=max(vec3f(p.dims)-vec3f(0.5),vec3f(0.5));
- let x=clamp(point,vec3f(0.5),upper);let low=vec3i(floor(x-vec3f(0.5)));let t=x-(vec3f(low)+vec3f(0.5));
- var value=0.0;
+struct AxisSample{low:i32,lowWeight:f32,highWeight:f32}
+fn centeredAxisSample(value:f32,dimension:u32)->AxisSample{let half=0.5*f32(dimension);let bounded=clamp(value,-half+0.5,half-0.5);let positiveLattice=(half-0.5)+abs(bounded);let positiveLow=i32(floor(positiveLattice));let fraction=fract(positiveLattice);if(bounded>=0.0){return AxisSample(positiveLow,1.0-fraction,fraction);}if(fraction==0.0){return AxisSample(i32(dimension)-1-positiveLow,1.0,0.0);}return AxisSample(i32(dimension)-2-positiveLow,fraction,1.0-fraction);}
+fn densePhiAtCentered(bank:u32,point:vec3f)->vec2f{let ax=centeredAxisSample(point.x,p.dims.x);let ay=centeredAxisSample(point.y,p.dims.y);let az=centeredAxisSample(point.z,p.dims.z);
+ var terms:array<f32,8>;
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
-  let q=clamp(low+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let item=u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));
+  let q=clamp(vec3i(ax.low,ay.low,az.low)+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let item=u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));
   let at=phiWord(bank,item);if(at>=arrayLength(&directory)){return vec2f(0.0);}let sample=bitcast<f32>(atomicLoad(&directory[at]));
-  if(!finite(sample)){return vec2f(0.0);}let weight=select(1.0-t.x,t.x,(corner&1u)!=0u)
-   *select(1.0-t.y,t.y,(corner&2u)!=0u)*select(1.0-t.z,t.z,(corner&4u)!=0u);value+=weight*sample;}
- return vec2f(value,1.0);}
+  if(!finite(sample)){return vec2f(0.0);}let weight=canonicalWeight(select(ax.lowWeight,ax.highWeight,(corner&1u)!=0u),select(ay.lowWeight,ay.highWeight,(corner&2u)!=0u),select(az.lowWeight,az.highWeight,(corner&4u)!=0u));terms[corner]=weight*sample;}
+ return vec2f(canonicalSum8(terms),1.0);}
+fn densePhiAt(bank:u32,point:vec3f)->vec2f{return densePhiAtCentered(bank,point-0.5*vec3f(p.dims));}
 fn airPublished()->bool{return p.airControl+15u<arrayLength(&air)&&air[p.airControl]==0u
  &&air[p.airControl+13u]==0x41565350u&&air[p.airControl+14u]==2u;}
 fn supportIdentity(item:u32)->vec4u{if(!airPublished()||item>=p.domainVolume){return vec4u(INVALID);}
@@ -269,15 +272,15 @@ fn supportVelocity(tag:u32)->vec4f{if(tag==INVALID){return vec4f(0.0);}var v=vec
  else{let support=tag&0x7fffffffu;if(support>=air[p.airControl+6u]){return vec4f(0.0);}let at=p.airVectors+4u*support;
   if(at+3u>=arrayLength(&air)){return vec4f(0.0);}v=vec4f(bitcast<f32>(air[at]),bitcast<f32>(air[at+1u]),bitcast<f32>(air[at+2u]),bitcast<f32>(air[at+3u]));}
  return select(vec4f(0.0),v,finite(v.x)&&finite(v.y)&&finite(v.z)&&v.w>0.0);}
-fn velocityAtPoint(point:vec3f)->vec4f{let upper=max(vec3f(p.dims)-vec3f(0.5),vec3f(0.5));
- let x=clamp(point,vec3f(0.5),upper);let low=vec3i(floor(x-vec3f(0.5)));let t=x-(vec3f(low)+vec3f(0.5));
- var result=vec3f(0.0);var total=0.0;
+fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.dims.x);let ay=centeredAxisSample(point.y,p.dims.y);let az=centeredAxisSample(point.z,p.dims.z);
+ var termsX:array<f32,8>;var termsY:array<f32,8>;var termsZ:array<f32,8>;var weights:array<f32,8>;
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
-  let q=clamp(low+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let item=u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));
-  let v=supportVelocity(supportIdentity(item).x);let weight=select(1.0-t.x,t.x,(corner&1u)!=0u)
-   *select(1.0-t.y,t.y,(corner&2u)!=0u)*select(1.0-t.z,t.z,(corner&4u)!=0u);
-  if(weight>0.0&&v.w>0.0){result+=weight*v.xyz;total+=weight;}}
+  let q=clamp(vec3i(ax.low,ay.low,az.low)+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let item=u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));
+  let v=supportVelocity(supportIdentity(item).x);let weight=canonicalWeight(select(ax.lowWeight,ax.highWeight,(corner&1u)!=0u),select(ay.lowWeight,ay.highWeight,(corner&2u)!=0u),select(az.lowWeight,az.highWeight,(corner&4u)!=0u));
+  if(weight>0.0&&v.w>0.0){termsX[corner]=weight*v.x;termsY[corner]=weight*v.y;termsZ[corner]=weight*v.z;weights[corner]=weight;}}
+ let result=vec3f(canonicalSum8(termsX),canonicalSum8(termsY),canonicalSum8(termsZ));let total=canonicalSum8(weights);
  return select(vec4f(0.0),vec4f(result/max(total,1e-12),1.0),total>0.999);}
+fn velocityAtPoint(point:vec3f)->vec4f{return velocityAtCentered(point-0.5*vec3f(p.dims));}
 fn supportBase(item:u32)->u32{if(item>=p.domainVolume){return INVALID;}
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));
  let b=q/4u;return b.x+p.baseDims.x*(b.y+p.baseDims.y*b.z);}
@@ -341,9 +344,9 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));let point=vec3f(q)+vec3f(0.5);
  let initialized=atomicLoad(&state[16])!=0u;let readBank=atomicLoad(&state[17])&1u;let writeBank=select(0u,1u-readBank,initialized);
  var sample=select(interpolatedCoarseAt(point),densePhiAt(readBank,point),initialized);let h=coarse.physicalCellSize;
- let velocity=velocityAtPoint(point);if(initialized&&velocity.w>0.0){let midpoint=point-(0.5*p.time.x/h)*velocity.xyz;
-  let middleVelocity=velocityAtPoint(midpoint);let traced=select(velocity,middleVelocity,middleVelocity.w>0.0);
-  let transported=densePhiAt(readBank,point-(p.time.x/h)*traced.xyz);if(transported.y!=0.0){sample=transported;}}
+ let domainCenter=0.5*vec3f(p.dims);let centered=point-domainCenter;let velocity=velocityAtCentered(centered);if(initialized&&velocity.w>0.0){let midpoint=centered-(0.5*p.time.x/h)*velocity.xyz;
+  let middleVelocity=velocityAtCentered(midpoint);let traced=select(velocity,middleVelocity,middleVelocity.w>0.0);
+  let departure=centered-(p.time.x/h)*traced.xyz;let transported=densePhiAtCentered(readBank,departure);if(transported.y!=0.0){sample=transported;}}
  let predicted=select(coarse.physicalCellSize,sample.x,sample.y!=0.0);let at=phiWord(writeBank,item);
  if(at>=arrayLength(&directory)||!finite(predicted)){atomicOr(&state[2],4u);return;}atomicStore(&directory[at],bitcast<u32>(predicted));
  atomicAdd(&state[18],1u);}

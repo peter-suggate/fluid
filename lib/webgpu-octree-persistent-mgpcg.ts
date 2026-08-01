@@ -76,8 +76,10 @@ export function octreePersistentMGPCGLargeCapacityRequested(
   return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG_LARGE === "1";
 }
 
-function persistentMGPCGRowThreshold(): number {
-  return octreePersistentMGPCGLargeCapacityRequested()
+function persistentMGPCGRowThreshold(
+  environment?: Readonly<Record<string, string | undefined>>,
+): number {
+  return octreePersistentMGPCGLargeCapacityRequested(environment)
     ? OCTREE_PERSISTENT_MGPCG_LARGE_ROW_THRESHOLD
     : OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD;
 }
@@ -570,9 +572,12 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   }
 
   /** Row-count gate the encode site consults; see the threshold's docs. */
-  static selects(rowCapacity: number): boolean {
+  static selects(
+    rowCapacity: number,
+    environment?: Readonly<Record<string, string | undefined>>,
+  ): boolean {
     return Number.isSafeInteger(rowCapacity) && rowCapacity > 0
-      && rowCapacity <= persistentMGPCGRowThreshold();
+      && rowCapacity <= persistentMGPCGRowThreshold(environment);
   }
 
   get iterationBudget(): number { return this.options.maximumIterations; }

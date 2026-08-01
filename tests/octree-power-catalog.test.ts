@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { constructOctreePowerCell, createOctreePowerSite, type OctreePowerSite } from "../lib/octree-power-geometry";
 import {
   OCTREE_POWER_CATALOG_FACE_FLOATS,
+  OCTREE_POWER_CATALOG_D4_MASK_SHIFT,
+  OCTREE_POWER_CATALOG_D4_MASK_BITS,
+  OCTREE_POWER_CATALOG_D4_TRANSFORMS_BY_FIXED_AXIS,
   OCTREE_POWER_RECONSTRUCTION_FLOATS,
   OCTREE_POWER_ROW_TEMPLATE_FLAGS,
   OCTREE_POWER_ROW_TEMPLATE_FLOATS,
@@ -285,6 +288,37 @@ test("every nonuniform tetra selector set contains every power-face neighbor", (
   }
   assert.equal(checked, 6_474,
     "the exhaustive nonuniform catalog is the authority for terminal support closure");
+});
+
+test("generated tetra headers publish exact immutable D4 fan-closure masks for every fixed axis", () => {
+  const bytes = readFileSync(join(process.cwd(), "lib/generated/octree-power-catalog.bin"));
+  const views = decodeGeneratedOctreePowerCatalog(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const vertices = Array.from({ length: views.tetrahedronVertexData.length / 4 }, (_, selector) =>
+    Array.from(views.tetrahedronVertexData.slice(4 * selector, 4 * selector + 4)));
+  const selectorByGeometry = new Map(vertices.map((geometry, selector) => [JSON.stringify(geometry), selector]));
+  const transformed = OCTREE_POWER_CATALOG_D4_TRANSFORMS_BY_FIXED_AXIS.map((transforms) =>
+    transforms.map((code) => vertices.map((geometry) => selectorByGeometry.get(JSON.stringify([
+      ...transformPowerVector([geometry[0]!, geometry[1]!, geometry[2]!], OCTREE_CUBE_TRANSFORMS[code]),
+      geometry[3]!,
+    ])))));
+  for (let entry = 0; entry < views.tetrahedronHeaders.length / 3; entry += 1) {
+    const first = views.tetrahedronHeaders[3 * entry]!;
+    const count = views.tetrahedronHeaders[3 * entry + 1]!;
+    const used = new Set<number>();
+    for (let local = 0; local < count; local += 1) {
+      const packed = views.tetrahedronData[first + local]!;
+      used.add(packed & 255); used.add((packed >>> 8) & 255); used.add((packed >>> 16) & 255);
+    }
+    for (let axis = 0; axis < 3; axis += 1) {
+      const expected = transformed[axis]!.reduce((mask, selectors, symmetry) =>
+        [...used].every((selector) => selectors[selector] !== undefined && used.has(selectors[selector]!))
+          ? mask | (1 << symmetry) : mask, 0);
+      const actual = views.tetrahedronHeaders[3 * entry + 2]!
+        >>> (OCTREE_POWER_CATALOG_D4_MASK_SHIFT + axis * OCTREE_POWER_CATALOG_D4_MASK_BITS) & 0xff;
+      assert.equal(actual, expected, `entry ${entry} fixed-axis ${axis} D4 mask`);
+    }
+  }
 });
 
 test("direct quotient lookup reconstructs non-canonical world geometry", () => {

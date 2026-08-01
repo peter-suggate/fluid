@@ -63,7 +63,10 @@ test("structured boundary update is canonical, transactional, and face-graph fre
     "only the theta histogram may accumulate atomically in the boundary update");
   assert.match(structuredBoundaryCoefficientWGSL, /fn fineSample\(/);
   assert.match(structuredBoundaryCoefficientWGSL,
-    /let lattice=\(x-fp\.origin\)\/fp\.width-vec3f\(\.5\)[\s\S]*for\(var corner=0u;corner<8u;corner\+=1u\)[\s\S]*if\(sample\.y==0\.\)\{return vec2f\(coarsePhi,0\.\);\}/,
+    /fn bootstrapTexturePhi[\s\S]*point\/p\.physical\.x-vec3f\(\.5\)[\s\S]*round\(2\.\*raw\)[\s\S]*for\(var corner=0u;corner<8u;corner\+=1u\)/,
+    "bootstrap texture sampling must use the snapped cell-centred trilinear lattice");
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /var lattice=\(x-fp\.origin\)\/fp\.width-vec3f\(\.5\)[\s\S]*for\(var corner=0u;corner<8u;corner\+=1u\)[\s\S]*if\(sample\.y==0\.\)\{return vec2f\(coarsePhi,0\.\);\}/,
     "face pressure must use complete trilinear samples on the cell-centred fine lattice");
   assert.match(structuredBoundaryCoefficientWGSL, /fn solidAt\(/);
   assert.match(structuredBoundaryCoefficientWGSL,
@@ -90,6 +93,9 @@ test("structured boundary update is canonical, transactional, and face-graph fre
   assert.match(structuredBoundaryCoefficientWGSL,
     /let direction=vec3i\(round\(slot\.areaCentroid\.yzw\+\.5\*slot\.normalInverseDistance\.xyz\)\)/,
     "dynamic rows must use the same centroid-plus-half-normal channel map as the generated 19-channel catalog");
+  assert.match(structuredBoundaryCoefficientWGSL,
+    /var diagonalTerms:array<f32,31>[\s\S]*diagonalTerms\[local\]=coefficient[\s\S]*diagonalTerms\[j-1u\]<=value[\s\S]*sum\+=diagonalTerms\[i\]/,
+    "the Section 6.3 diagonal must be independent of incident-slot permutation");
   assert.match(structuredBoundaryCoefficientWGSL,
     /scatterStructuredRowWorksets[\s\S]*dynamicWorksets\[worksetBase\(cls\)\+7u\+worksetBlocks\[cls\*worksetBlockStride\(\)\+wg\.x\]\+worksetBlockOffset\(lane\)\]=row/,
     "current free-surface coefficients must publish actual disjoint row and family worksets");

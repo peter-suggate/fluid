@@ -44,7 +44,7 @@ export interface GPUEulerianInfo {
   /** Renderer-owned gate: a warmed octree is not transport-ready until its first t=0 raster publication is fenced. */
   initialRasterSurfaceReady?: boolean;
   /** Honest distinction between GPU-only authority, a readback-confirmed crossing, and fail-closed startup. */
-  initialRasterSurfaceState?: "pending" | "gpu-authoritative" | "crossing-confirmed" | "failed-closed";
+  initialRasterSurfaceState?: "pending" | "gpu-authoritative" | "compact-confirmed" | "crossing-confirmed" | "failed-closed";
   initialRasterSurfaceDiagnostic?: string;
   cellSize_m: number;
   pressureIterations: number;

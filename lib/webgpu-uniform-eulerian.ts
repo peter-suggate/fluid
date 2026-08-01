@@ -1588,6 +1588,7 @@ fn recordPhysicsPhaseBoundary(
     return this.octreeProjection?.globalFineTransportDeltaDebugPair;
   }
   get globalFineSourceDebugPair() { return this.octreeProjection?.globalFineSourceDebugPair; }
+  get structuredBoundarySymmetryDebug() { return this.octreeProjection?.structuredBoundarySymmetryDebug; }
   get globalFineRedistanceControl() { return this.octreeProjection?.globalFineRedistanceControl; }
   get globalFinePageDeltaDebug() { return this.octreeProjection?.globalFinePageDeltaDebug; }
   get globalFinePageDeltaDebugPair() { return this.octreeProjection?.globalFinePageDeltaDebugPair; }

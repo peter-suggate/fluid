@@ -45,7 +45,7 @@ test("octree projection layout families reserve an activity-safe storage slot", 
 
   assert.equal(frontierSort.storageCount, 4);
   assert.deepEqual(frontierSort.storageBindings, [2, 3, 9, 13]);
-  assert.deepEqual(frontierSort.uniformBindings, [6]);
+  assert.deepEqual(frontierSort.uniformBindings, [6, 7]);
   assert.ok(frontierSort.storageCount + 1 <= 10,
     "the exceptional large-frontier sort must also remain activity eligible");
 });
@@ -168,9 +168,8 @@ test("Dawn accepts every activity-enabled split projection pipeline layout", {
   device.pushErrorScope("validation");
   for (const entryPoint of computeEntryPoints) {
     const frontierSort = entryPoint === "sortFrontierCandidates";
-    const constants: Record<string, number> | undefined = frontierSort
-      ? { frontierSortStage: 1 }
-      : entryPoint.includes("TopologyCoarse") ? { targetRefinementSize: 16 } : undefined;
+    const constants: Record<string, number> | undefined = entryPoint.includes("TopologyCoarse")
+      ? { targetRefinementSize: 16 } : undefined;
     device.createComputePipeline({ layout: frontierSort ? sortLayout : coreLayout, compute: {
       module: shaderModule,
       entryPoint,

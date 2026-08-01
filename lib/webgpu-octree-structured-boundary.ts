@@ -21,6 +21,25 @@ interface StructuredBoundaryGroupCache {
   readonly accepted?: readonly GPUBindGroup[];
 }
 
+interface StructuredBoundaryPipelineBundle {
+  readonly prepareCandidate: GPUComputePipeline;
+  readonly prepareAccepted: GPUComputePipeline;
+  readonly classify: GPUComputePipeline;
+  readonly resolve: GPUComputePipeline;
+  readonly resolveSolid: GPUComputePipeline;
+  readonly commit: GPUComputePipeline;
+  readonly rebuild: GPUComputePipeline;
+  readonly countRowClasses: GPUComputePipeline;
+  readonly countFamilyClasses: GPUComputePipeline;
+  readonly scanWorksetBlocks: GPUComputePipeline;
+  readonly scatterRowWorksets: GPUComputePipeline;
+  readonly scatterFamilyWorksets: GPUComputePipeline;
+  readonly accept: GPUComputePipeline;
+}
+
+const structuredBoundaryPipelineCache = new WeakMap<GPUDevice,
+  StructuredBoundaryPipelineBundle>();
+
 export interface StructuredBoundaryResources {
   readonly structured: DirectStructuredVelocitySource;
   /** Identity-keyed coarse phi from the accepted pre-adaptation topology.
@@ -70,7 +89,8 @@ export class WebGPUStructuredBoundaryCoefficients {
   private readonly worksetBlocks: GPUBuffer;
   /** Inactive logical-row mask exposed only for the X-2 diagnostic census. */
   readonly candidateMask: GPUBuffer;
-  private readonly candidates: GPUBuffer;
+  /** QA-visible resolved aperture/ghost scale pairs, one vec2f per family. */
+  readonly candidates: GPUBuffer;
   private readonly candidateSolidNormalVelocities: GPUBuffer;
   private readonly dispatch: GPUBuffer;
   private readonly params: GPUBuffer;
@@ -182,23 +202,42 @@ export class WebGPUStructuredBoundaryCoefficients {
       resources.analyticBootstrap?.initialCondition === "tank-fill" ? 1
         : resources.analyticBootstrap?.initialCondition === "dam-break" ? 2 : 0], 32);
     device.queue.writeBuffer(this.params, 0, words.buffer);
-    const module = device.createShaderModule({ label: "Structured boundary coefficients",
-      code: structuredBoundaryCoefficientWGSL });
-    const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-      layout: "auto", compute: { module, entryPoint } });
-    this.prepareCandidate = make("prepareStructuredBoundaryCandidate");
-    this.prepareAccepted = make("prepareStructuredBoundaryAccepted");
-    this.classify = make("classifyStructuredLiquidRows");
-    this.resolve = make("resolveStructuredBoundarySlots");
-    this.resolveSolid = make("resolveStructuredSolidSlots");
-    this.commit = make("commitStructuredBoundarySlots");
-    this.rebuild = make("rebuildStructuredBoundaryRows");
-    this.countRowClasses = make("countStructuredRowClasses");
-    this.countFamilyClasses = make("countStructuredFamilyClasses");
-    this.scanWorksetBlocks = make("scanStructuredWorksetBlocks");
-    this.scatterRowWorksets = make("scatterStructuredRowWorksets");
-    this.scatterFamilyWorksets = make("scatterStructuredFamilyWorksets");
-    this.accept = make("acceptStructuredBoundary");
+    let pipelines = structuredBoundaryPipelineCache.get(device);
+    if (!pipelines) {
+      const shaderModule = device.createShaderModule({ label: "Structured boundary coefficients",
+        code: structuredBoundaryCoefficientWGSL });
+      const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
+        layout: "auto", compute: { module: shaderModule, entryPoint } });
+      pipelines = {
+        prepareCandidate: make("prepareStructuredBoundaryCandidate"),
+        prepareAccepted: make("prepareStructuredBoundaryAccepted"),
+        classify: make("classifyStructuredLiquidRows"),
+        resolve: make("resolveStructuredBoundarySlots"),
+        resolveSolid: make("resolveStructuredSolidSlots"),
+        commit: make("commitStructuredBoundarySlots"),
+        rebuild: make("rebuildStructuredBoundaryRows"),
+        countRowClasses: make("countStructuredRowClasses"),
+        countFamilyClasses: make("countStructuredFamilyClasses"),
+        scanWorksetBlocks: make("scanStructuredWorksetBlocks"),
+        scatterRowWorksets: make("scatterStructuredRowWorksets"),
+        scatterFamilyWorksets: make("scatterStructuredFamilyWorksets"),
+        accept: make("acceptStructuredBoundary"),
+      };
+      structuredBoundaryPipelineCache.set(device, pipelines);
+    }
+    this.prepareCandidate = pipelines.prepareCandidate;
+    this.prepareAccepted = pipelines.prepareAccepted;
+    this.classify = pipelines.classify;
+    this.resolve = pipelines.resolve;
+    this.resolveSolid = pipelines.resolveSolid;
+    this.commit = pipelines.commit;
+    this.rebuild = pipelines.rebuild;
+    this.countRowClasses = pipelines.countRowClasses;
+    this.countFamilyClasses = pipelines.countFamilyClasses;
+    this.scanWorksetBlocks = pipelines.scanWorksetBlocks;
+    this.scatterRowWorksets = pipelines.scatterRowWorksets;
+    this.scatterFamilyWorksets = pipelines.scatterFamilyWorksets;
+    this.accept = pipelines.accept;
     this.acceptGroup = device.createBindGroup({ layout: this.accept.getBindGroupLayout(0), entries: [
       { binding: 16, resource: { buffer: this.candidateControl } },
       { binding: 22, resource: { buffer: this.control } },
@@ -431,8 +470,16 @@ fn loadFine(q:vec3i)->vec2f{if(any(q<vec3i(0))||any(q>=vec3i(fp.sampleDimensions
 fn fineSample(x:vec3f,coarsePhi:f32)->vec2f{if(!(fp.width>0.)||fp.brickResolution==0u){return vec2f(coarsePhi,0.);}var lattice=(x-fp.origin)/fp.width-vec3f(.5);let maximum=vec3f(fp.sampleDimensions)-vec3f(1.);let endpointTolerance=1e-4;if(any(lattice<vec3f(-endpointTolerance))||any(lattice>maximum+vec3f(endpointTolerance))){return vec2f(coarsePhi,0.);}lattice=clamp(lattice,vec3f(0.),maximum);let base=vec3i(floor(lattice));let fraction=fract(lattice);var value=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let weight=select(1.-fraction.x,fraction.x,o.x==1)*select(1.-fraction.y,fraction.y,o.y==1)*select(1.-fraction.z,fraction.z,o.z==1);if(weight==0.){continue;}let sample=loadFine(base+o);if(sample.y==0.){return vec2f(coarsePhi,0.);}value+=weight*sample.x;}return vec2f(value,1.);}
 fn authoredAnalyticPhiAvailable()->bool{return p.damDimensions.w==1.||p.damDimensions.w==2.;}
 fn analyticInitialPhi(point:vec3f)->f32{let extent=vec3f(p.dimensions.xyz)*p.physical.x;let world=point-vec3f(.5*extent.x,0.,.5*extent.z);let fill=bitcast<f32>(p.pad.w);if(p.pad.z==1u||p.damDimensions.w==1.){return world.y-fill*extent.y;}let heightFraction=max(.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);let authored=any(p.damDimensions.xyz>vec3f(0.));let damDimensions=select(fallback,p.damDimensions.xyz,authored);let exposedMaximum=vec3f(-.5*extent.x+damDimensions.x,damDimensions.y,-.5*extent.z+damDimensions.z);let q=world-exposedMaximum;return length(max(q,vec3f(0.)))+min(max(q.x,max(q.y,q.z)),0.);}
-fn bootstrapTexturePhi(point:vec3f)->f32{let c=vec3i(floor(point/p.physical.x));
- return textureLoad(bootstrapLevelSetIn,clamp(c,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)),0).x;}
+// Texture values live at cell centres. Structured face centres lie on the
+// half-cell boundary between those samples, so flooring the world coordinate
+// shifts both opposite faces in the same lattice direction and destroys
+// reflection symmetry. Interpolate in the cell-centred lattice, matching the
+// fine-seed bootstrap sampler. Snap only roundoff-sized half-cell errors so
+// mirrored dyadic face centres publish identical interpolation weights.
+fn bootstrapTexturePhi(point:vec3f)->f32{
+ let raw=point/p.physical.x-vec3f(.5);let half=.5*round(2.*raw);
+ let lattice=select(raw,half,abs(raw-half)<=vec3f(1e-4));let base=vec3i(floor(lattice));let t=fract(lattice);
+ var value=0.;for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let high=vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u);let weight=select(1.-t.x,t.x,high.x)*select(1.-t.y,t.y,high.y)*select(1.-t.z,t.z,high.z);value+=weight*textureLoad(bootstrapLevelSetIn,clamp(base+offset,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)),0).x;}return value;}
 fn coarseValue(point:vec3f)->vec2f{if(p.pad.z==3u){return vec2f(bootstrapTexturePhi(point),1.);}
  if(p.pad.z!=0u){return vec2f(analyticInitialPhi(point),1.);}let generation=powerCoarseSamples.generation&0x3fffffffu;let expected=control.epoch&0x3fffffffu;if(powerCoarseSamples.state!=0x80000000u||generation!=expected||any(powerCoarseSamples.dimensions!=p.dimensions.xyz)||abs(powerCoarseSamples.physicalCellSize-p.physical.x)>1e-5*max(powerCoarseSamples.physicalCellSize,p.physical.x)){return select(vec2f(1.,0.),vec2f(analyticInitialPhi(point),1.),authoredAnalyticPhiAvailable());}let value=sampleCoarseOctreePhi(point);let valid=finite(value)&&value<3.402823e38;return vec2f(value,select(0.,1.,valid));}
 fn publishStructuredBoundarySetup(rowCount:u32,slotCount:u32,generation:u32,bank:u32,valid:bool){atomicStore(&control.flags,select(1u,0u,valid));atomicStore(&control.firstError,select(0u,INVALID,valid));control.rows=select(0u,rowCount,valid);control.slots=select(0u,slotCount,valid);control.epoch=select(0u,generation,valid);control.bank=select(0u,bank,valid);control.published=0u;for(var b=0u;b<8u;b+=1u){atomicStore(&control.theta[b],0u);}let rowBlocks=(control.rows+63u)/64u;dispatch[0]=rowBlocks;dispatch[1]=1u;dispatch[2]=1u;let slotBlocks=(control.slots+63u)/64u;let slotX=max(1u,min(65535u,slotBlocks));dispatch[3]=slotX;dispatch[4]=(slotBlocks+slotX-1u)/slotX;dispatch[5]=1u;}
@@ -520,7 +567,7 @@ recordTheta(scale);candidates[h]=vec2f(aperture,scale);}
 @compute @workgroup_size(64)fn commitStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=foldedItem(g);if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}a[abase()+p.offset1.x+h]=bitcast<u32>(candidates[h].x);a[abase()+p.offset1.y+h]=bitcast<u32>(candidates[h].y);solidVelocity[sbase()+h]=candidateSolidVelocity[h];}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}
 fn channelForCatalogSlot(global:u32)->u32{if(global>=arrayLength(&catalogSlots)){return INVALID;}let slot=catalogSlots[global];let direction=vec3i(round(slot.areaCentroid.yzw+.5*slot.normalInverseDistance.xyz));for(var channel=0u;channel<18u;channel+=1u){if(all(direction==canonicalDirection(channel))){return channel+1u;}}return INVALID;}
-@compute @workgroup_size(64)fn rebuildStructuredBoundaryRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows||atomicLoad(&control.flags)!=0u){return;}liquid[lbase()+row]=candidateLiquid[row];let base=section63Base()+row*19u;if(base+19u>arrayLength(&rows)){fail(row,64u);return;}for(var channel=0u;channel<19u;channel+=1u){rows[base+channel]=0u;}var d=select(1.,0.,candidateLiquid[row]!=0u);for(var local=0u;local<p.counts.z;local+=1u){let at=row*p.counts.z+local;let h=a[abase()+p.offset2.y+at];if(h==INVALID||h>=control.slots){continue;}let lo=handleOwner(h);let hi=handleNeighbor(h);let other=select(lo,hi,lo==row);let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);let coefficient=bitcast<f32>(a[abase()+p.offset0.z+h])*bitcast<f32>(a[abase()+p.offset0.w+h])*aperture*scale;if(candidateLiquid[row]==0u||coefficient<=0.){continue;}d+=coefficient;if(other!=INVALID&&other<control.rows&&other!=row&&candidateLiquid[other]!=0u){let global=a[abase()+p.offset2.w+at];let channel=channelForCatalogSlot(global);if(channel==INVALID){fail(row,64u);continue;}rows[base+channel]=bitcast<u32>(bitcast<f32>(rows[base+channel])+coefficient);}}rows[base]=bitcast<u32>(d);if(row+1u==control.rows){control.published=control.epoch;}}
+@compute @workgroup_size(64)fn rebuildStructuredBoundaryRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows||atomicLoad(&control.flags)!=0u){return;}liquid[lbase()+row]=candidateLiquid[row];let base=section63Base()+row*19u;if(base+19u>arrayLength(&rows)){fail(row,64u);return;}for(var channel=0u;channel<19u;channel+=1u){rows[base+channel]=0u;}var diagonalTerms:array<f32,31>;for(var local=0u;local<31u;local+=1u){diagonalTerms[local]=0.;}for(var local=0u;local<p.counts.z;local+=1u){let at=row*p.counts.z+local;let h=a[abase()+p.offset2.y+at];if(h==INVALID||h>=control.slots){continue;}let lo=handleOwner(h);let hi=handleNeighbor(h);let other=select(lo,hi,lo==row);let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);let coefficient=bitcast<f32>(a[abase()+p.offset0.z+h])*bitcast<f32>(a[abase()+p.offset0.w+h])*aperture*scale;if(candidateLiquid[row]==0u||coefficient<=0.){continue;}diagonalTerms[local]=coefficient;let global=a[abase()+p.offset2.w+at];let channel=channelForCatalogSlot(global);if(channel==INVALID){fail(row,64u);continue;}if(other!=INVALID&&other<control.rows&&other!=row&&candidateLiquid[other]!=0u){rows[base+channel]=bitcast<u32>(bitcast<f32>(rows[base+channel])+coefficient);}}for(var i=1u;i<31u;i+=1u){let value=diagonalTerms[i];var j=i;loop{if(j==0u||diagonalTerms[j-1u]<=value){break;}diagonalTerms[j]=diagonalTerms[j-1u];j-=1u;}diagonalTerms[j]=value;}var sum=0.;for(var i=0u;i<31u;i+=1u){sum+=diagonalTerms[i];}let d=select(1.,sum,candidateLiquid[row]!=0u);rows[base]=bitcast<u32>(d);if(row+1u==control.rows){control.published=control.epoch;}}
 fn rowTransition(row:u32)->bool{let at=rbase()+row;return row<control.rows&&at<arrayLength(&geometry)&&geometry[at].z!=0u;}
 fn dynamicRowClass(row:u32)->u32{let base=section63Base()+row*19u;var off=0.;for(var channel=1u;channel<19u;channel+=1u){off+=bitcast<f32>(rows[base+channel]);}let boundary=bitcast<f32>(rows[base])>off+max(1e-6,1e-5*abs(off));return select(select(0u,2u,boundary),select(1u,3u,boundary),rowTransition(row));}
 // A row's class is read once per row and up to twice per incident slot. The

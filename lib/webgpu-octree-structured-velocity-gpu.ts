@@ -30,6 +30,21 @@ export const OCTREE_STRUCTURED_FINALIZE_WORKGROUP_BYTES =
 const OCTREE_STRUCTURED_GPU_DISPATCH_BYTES =
   OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES + 36;
 
+interface StructuredVelocityPipelineBundle {
+  readonly beginPipeline: GPUComputePipeline;
+  readonly classifyPipeline: GPUComputePipeline;
+  readonly countFamiliesPipeline: GPUComputePipeline;
+  readonly prefixPipeline: GPUComputePipeline;
+  readonly scatterPipeline: GPUComputePipeline;
+  readonly section63Pipeline: GPUComputePipeline;
+  readonly finalizePipeline: GPUComputePipeline;
+  readonly reconstructPipeline: GPUComputePipeline;
+  readonly acceptPipeline: GPUComputePipeline;
+}
+
+const structuredVelocityPipelineCache = new WeakMap<GPUDevice,
+  Map<string, StructuredVelocityPipelineBundle>>();
+
 export const OCTREE_STRUCTURED_GPU_ERROR = Object.freeze({
   source: 1 << 0,
   capacity: 1 << 1,
@@ -293,21 +308,42 @@ export class WebGPUDirectStructuredVelocityAuthority {
       directStructuredVelocityPublicationActivityShader(publicationActivity),
       `octree/structured-publication/${publicationProfile.cacheKey}`,
     );
-    const activityModule = device.createShaderModule({ label: "Direct six-family structured velocity publication",
-      code: publicationVariant.code });
-    const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-      layout: "auto", compute: { module: activityModule, entryPoint } });
-    this.beginPipeline = pipeline("beginStructuredPublication");
-    this.classifyPipeline = publicationActivity.registerPipeline(
-      pipeline("classifyStructuredCatalogSlots"),
-    );
-    this.countFamiliesPipeline = pipeline("countStructuredRowFamilies");
-    this.prefixPipeline = pipeline("prefixStructuredFamilies");
-    this.scatterPipeline = pipeline("scatterStructuredFamilySlots");
-    this.section63Pipeline = pipeline("publishSection63Rows");
-    this.finalizePipeline = pipeline("finalizeStructuredPublication");
-    this.reconstructPipeline = pipeline("reconstructStructuredCellVelocity");
-    this.acceptPipeline = pipeline("acceptStructuredPublication");
+    let deviceCache = structuredVelocityPipelineCache.get(device);
+    if (!deviceCache) {
+      deviceCache = new Map();
+      structuredVelocityPipelineCache.set(device, deviceCache);
+    }
+    let pipelines = deviceCache.get(publicationVariant.cacheKey);
+    if (!pipelines) {
+      const activityModule = device.createShaderModule({
+        label: "Direct six-family structured velocity publication",
+        code: publicationVariant.code,
+      });
+      const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
+        layout: "auto", compute: { module: activityModule, entryPoint } });
+      pipelines = {
+        beginPipeline: pipeline("beginStructuredPublication"),
+        classifyPipeline: publicationActivity.registerPipeline(
+          pipeline("classifyStructuredCatalogSlots")),
+        countFamiliesPipeline: pipeline("countStructuredRowFamilies"),
+        prefixPipeline: pipeline("prefixStructuredFamilies"),
+        scatterPipeline: pipeline("scatterStructuredFamilySlots"),
+        section63Pipeline: pipeline("publishSection63Rows"),
+        finalizePipeline: pipeline("finalizeStructuredPublication"),
+        reconstructPipeline: pipeline("reconstructStructuredCellVelocity"),
+        acceptPipeline: pipeline("acceptStructuredPublication"),
+      };
+      deviceCache.set(publicationVariant.cacheKey, pipelines);
+    }
+    this.beginPipeline = pipelines.beginPipeline;
+    this.classifyPipeline = pipelines.classifyPipeline;
+    this.countFamiliesPipeline = pipelines.countFamiliesPipeline;
+    this.prefixPipeline = pipelines.prefixPipeline;
+    this.scatterPipeline = pipelines.scatterPipeline;
+    this.section63Pipeline = pipelines.section63Pipeline;
+    this.finalizePipeline = pipelines.finalizePipeline;
+    this.reconstructPipeline = pipelines.reconstructPipeline;
+    this.acceptPipeline = pipelines.acceptPipeline;
     const unpublishedBytes = new ArrayBuffer(OCTREE_STRUCTURED_GPU_CONTROL_BYTES);
     const unpublished = new Uint32Array(unpublishedBytes);
     unpublished[0] = OCTREE_STRUCTURED_GPU_ERROR.source;
@@ -729,9 +765,14 @@ var<workgroup> familyLane:array<u32,384>;
 fn oldRow(newRow:u32)->u32{if(p.newToOldOffset+newRow>=arrayLength(&rowDelta)){return INVALID;}let encoded=rowDelta[p.newToOldOffset+newRow]&0x3fffffffu;return select(INVALID,encoded-1u,encoded!=0u);}fn candidateEpoch()->u32{return select(0u,rowDelta[p.deltaControlOffset+7u],p.deltaControlOffset+7u<arrayLength(&rowDelta));}
 // x is the carried value; y marks an exact face identity. Changed topology
 // faces remain pending for the old-field transfer instead of becoming zero.
-fn carryValue(row:u32,neighbor:u32,family:u32,orientation:u32)->vec2f{if(control.projected==0u){return vec2f(0.0);}let oldOwner=oldRow(row);if(oldOwner==INVALID){return vec2f(0.0);}let oldNeighbor=select(INVALID,oldRow(neighbor),neighbor!=INVALID);if(neighbor!=INVALID&&oldNeighbor==INVALID){return vec2f(0.0);}
+fn carryValue(row:u32,neighbor:u32,geo:ResolvedSlotGeometry)->vec2f{if(control.projected==0u){return vec2f(0.0);}let oldOwner=oldRow(row);if(oldOwner==INVALID){return vec2f(0.0);}let oldNeighbor=select(INVALID,oldRow(neighbor),neighbor!=INVALID);if(neighbor!=INVALID&&oldNeighbor==INVALID){return vec2f(0.0);}
   let accepted=acceptedAuthorityBase();
-  for(var local=0u;local<p.maxSlots;local+=1u){let handle=authority[accepted+p.rowHandleOffset+rowBase(oldOwner)+local];if(handle==INVALID||handle>=p.slotCapacity){continue;}let slotMetadata=authority[accepted+p.metadataOffset+handle];if((slotMetadata&7u)!=family||((slotMetadata>>3u)&7u)!=orientation){continue;}let other=authority[accepted+p.neighborOffset+handle];if(other==oldNeighbor){return vec2f(bitcast<f32>(authority[accepted+p.valuesOffset+handle]),1.0);}}return vec2f(0.0);}
+  for(var local=0u;local<p.maxSlots;local+=1u){let handle=authority[accepted+p.rowHandleOffset+rowBase(oldOwner)+local];if(handle==INVALID||handle>=p.slotCapacity){continue;}let other=authority[accepted+p.neighborOffset+handle];if(other!=oldNeighbor){continue;}
+    let centroid=accepted+p.centroidOffset+4u*handle;let normal=accepted+p.normalOffset+4u*handle;
+    let exact=authority[centroid]==bitcast<u32>(geo.centroid.x)&&authority[centroid+1u]==bitcast<u32>(geo.centroid.y)&&authority[centroid+2u]==bitcast<u32>(geo.centroid.z)
+      &&authority[normal]==bitcast<u32>(geo.normal.x)&&authority[normal+1u]==bitcast<u32>(geo.normal.y)&&authority[normal+2u]==bitcast<u32>(geo.normal.z)
+      &&authority[accepted+p.areaOffset+handle]==bitcast<u32>(geo.area)&&authority[accepted+p.inverseOffset+handle]==bitcast<u32>(geo.inverseDistance);
+    if(exact){return vec2f(bitcast<f32>(authority[accepted+p.valuesOffset+handle]),1.0);}}return vec2f(0.0);}
 
 // One invocation per (row, catalog slot). The rank a slot used to inherit from
 // the running \`ranks[family]\` counter is recomputed here as "owner slots of the
@@ -743,7 +784,7 @@ fn carryValue(row:u32,neighbor:u32,family:u32,orientation:u32)->vec2f{if(control
   let base=candidateAuthorityBase();let at=rowBase(row)+local;let ownerMeta=authority[base+p.rowOwnerMetadataOffset+at];if(((ownerMeta>>6u)&1u)==0u){return;}let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;
   var rank=0u;for(var earlier=0u;earlier<local;earlier+=1u){let earlierMeta=authority[base+p.rowOwnerMetadataOffset+rowBase(row)+earlier];if(((earlierMeta>>6u)&1u)!=0u&&(earlierMeta&7u)==family){rank+=1u;}}
   let handle=control.familyOffsets[family]+authority[base+p.rowFamilyPrefixOffset+familyIndex(row,family)]+rank;if(handle>=control.slotCount){fail(row,ERROR_CAPACITY);return;}let neighbor=authority[base+p.rowNeighborOffset+at];let geo=geometry(row,local);let global=authority[base+p.rowCatalogOffset+at];
-  let carried=carryValue(row,neighbor,family,orientation);authority[base+p.rowHandleOffset+at]=handle;authority[base+p.valuesOffset+handle]=bitcast<u32>(carried.x);authority[base+p.ownerOffset+handle]=row;authority[base+p.neighborOffset+handle]=neighbor;authority[base+p.metadataOffset+handle]=family|(orientation<<3u)|(global<<6u)|(((ownerMeta>>7u)&1u)<<30u);authority[base+p.areaOffset+handle]=bitcast<u32>(geo.area);authority[base+p.inverseOffset+handle]=bitcast<u32>(geo.inverseDistance);authority[base+p.fractionOffset+handle]=bitcast<u32>(1.0);authority[base+p.pressureScaleOffset+handle]=bitcast<u32>(1.0);authority[base+p.normalOffset+4u*handle]=bitcast<u32>(geo.normal.x);authority[base+p.normalOffset+4u*handle+1u]=bitcast<u32>(geo.normal.y);authority[base+p.normalOffset+4u*handle+2u]=bitcast<u32>(geo.normal.z);authority[base+p.normalOffset+4u*handle+3u]=0u;authority[base+p.centroidOffset+4u*handle]=bitcast<u32>(geo.centroid.x);authority[base+p.centroidOffset+4u*handle+1u]=bitcast<u32>(geo.centroid.y);authority[base+p.centroidOffset+4u*handle+2u]=bitcast<u32>(geo.centroid.z);authority[base+p.centroidOffset+4u*handle+3u]=bitcast<u32>(carried.y);}
+  let carried=carryValue(row,neighbor,geo);authority[base+p.rowHandleOffset+at]=handle;authority[base+p.valuesOffset+handle]=bitcast<u32>(carried.x);authority[base+p.ownerOffset+handle]=row;authority[base+p.neighborOffset+handle]=neighbor;authority[base+p.metadataOffset+handle]=family|(orientation<<3u)|(global<<6u)|(((ownerMeta>>7u)&1u)<<30u);authority[base+p.areaOffset+handle]=bitcast<u32>(geo.area);authority[base+p.inverseOffset+handle]=bitcast<u32>(geo.inverseDistance);authority[base+p.fractionOffset+handle]=bitcast<u32>(1.0);authority[base+p.pressureScaleOffset+handle]=bitcast<u32>(1.0);authority[base+p.normalOffset+4u*handle]=bitcast<u32>(geo.normal.x);authority[base+p.normalOffset+4u*handle+1u]=bitcast<u32>(geo.normal.y);authority[base+p.normalOffset+4u*handle+2u]=bitcast<u32>(geo.normal.z);authority[base+p.normalOffset+4u*handle+3u]=0u;authority[base+p.centroidOffset+4u*handle]=bitcast<u32>(geo.centroid.x);authority[base+p.centroidOffset+4u*handle+1u]=bitcast<u32>(geo.centroid.y);authority[base+p.centroidOffset+4u*handle+2u]=bitcast<u32>(geo.centroid.z);authority[base+p.centroidOffset+4u*handle+3u]=bitcast<u32>(carried.y);}
 
 @compute @workgroup_size(64)fn publishSection63Rows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);
   for(var axisSlot=0u;axisSlot<6u;axisSlot+=1u){authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+axisSlot]=INVALID;}for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let neighbor=authority[candidateAuthorityBase()+p.rowNeighborOffset+at];let ownerMeta=authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at];var handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];var sign=1;if(((ownerMeta>>6u)&1u)==0u){let reverse=authority[candidateAuthorityBase()+p.rowReciprocalOffset+at];if(neighbor==INVALID||reverse==INVALID){atomicOr(&control.flags,ERROR_RECIPROCITY);continue;}handle=authority[candidateAuthorityBase()+p.rowHandleOffset+rowBase(neighbor)+reverse];sign=-1;}if(handle==INVALID||handle>=control.slotCount){atomicOr(&control.flags,ERROR_CAPACITY);continue;}authority[candidateAuthorityBase()+p.rowHandleOffset+at]=handle;authority[candidateAuthorityBase()+p.rowSignOffset+at]=bitcast<u32>(sign);let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;authority[candidateAuthorityBase()+p.rowFamilySlotOffset+authority[candidateAuthorityBase()+p.rowFamilyHandleOffset+familyIndex(row,family)]+orientation]=handle;let localGeometry=geometry(row,local);let worldNormal=localGeometry.normal;if(neighbor!=INVALID&&headers[neighbor].size==headers[row].size){let absoluteNormal=abs(worldNormal);let axis=select(select(2u,1u,absoluteNormal.y>absoluteNormal.z),0u,absoluteNormal.x>max(absoluteNormal.y,absoluteNormal.z));let transverse=dot(absoluteNormal,vec3f(1.0))-absoluteNormal[axis];if(absoluteNormal[axis]>.9999&&transverse<1e-4){let direction=2u*axis+select(0u,1u,worldNormal[axis]>0.0);authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+direction]=neighbor;}}}
@@ -759,7 +800,23 @@ var<workgroup> finalCounts:array<u32,${9 * OCTREE_STRUCTURED_FINALIZE_LANES}>;
   for(var row=rowFirst;row<rowLast;row+=1u){let cls=rowClass(row);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=row;prefix[cls]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){let cls=familyClass(handle);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=handle;prefix[cls]+=1u;let marker=bitcast<f32>(authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]);if(marker<=.5){let transferRank=prefix[4u];worksets[worksetBankBase()+worksetBase(4u)+7u+transferRank]=handle;control.transferHandles[transferRank]=handle;prefix[4u]+=1u;}}workgroupBarrier();
   if(lane==0u){let clean=atomicLoad(&control.flags)==0u&&control.slotCount<=p.slotCapacity;let epoch=candidateEpoch();publicationDispatch[18u]=0u;publicationDispatch[19u]=1u;publicationDispatch[20u]=1u;publicationDispatch[21u]=0u;publicationDispatch[22u]=1u;publicationDispatch[23u]=1u;publicationDispatch[24u]=0u;publicationDispatch[25u]=1u;publicationDispatch[26u]=1u;for(var cls=0u;cls<9u;cls+=1u){let count=finalCounts[cls*${OCTREE_STRUCTURED_FINALIZE_LANES}u+${OCTREE_STRUCTURED_FINALIZE_LANES - 1}u];let groups=select((count+63u)/64u,count,cls==4u);let groupsX=max(1u,min(65535u,groups));let groupsY=(groups+groupsX-1u)/groupsX;let base=worksetBase(cls);worksets[worksetBankBase()+base]=epoch;worksets[worksetBankBase()+base+1u]=count;worksets[worksetBankBase()+base+2u]=select(p.rowCapacity,p.slotCapacity,cls>=4u);worksets[worksetBankBase()+base+3u]=3u;worksets[worksetBankBase()+base+4u]=groupsX;worksets[worksetBankBase()+base+5u]=groupsY;worksets[worksetBankBase()+base+6u]=1u;if(clean&&cls<=4u){let dispatch=6u+3u*cls;publicationDispatch[dispatch]=groupsX;publicationDispatch[dispatch+1u]=groupsY;publicationDispatch[dispatch+2u]=1u;}}if(clean){publishExactRowDispatch(21u,finalCounts[255u]+finalCounts[511u]+finalCounts[767u]+finalCounts[1023u]);publishExactRowDispatch(24u,finalCounts[511u]+finalCounts[1023u]);}if(clean&&epoch!=0u){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}}}
 
-@compute @workgroup_size(64)fn reconstructStructuredCellVelocity(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var canonical=vec3f(0.0);for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];if(handle==INVALID||handle>=control.slotCount){rowVelocities[rowBankBase()+row]=vec4f(0.0);return;}let sample=f32(bitcast<i32>(authority[candidateAuthorityBase()+p.rowSignOffset+at]))*bitcast<f32>(authority[candidateAuthorityBase()+p.valuesOffset+handle]);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];let r=p.reconstructionOffset+3u*global;canonical+=vec3f(bitcast<f32>(dense[r]),bitcast<f32>(dense[r+1u]),bitcast<f32>(dense[r+2u]))*sample;}let hrow=headers[row];rowVelocities[rowBankBase()+row]=vec4f(inverseStructuredTransform(canonical,m.transformAndFlags&63u),1.0);rowGeometry[rowBankBase()+row]=vec4u(hrow.cell,hrow.size,m.caseId,m.transformAndFlags);}
+fn canonicalPublicationSum(values:array<f32,31>,count:u32)->f32{
+  var sorted=values;
+  for(var i=1u;i<count;i+=1u){let value=sorted[i];var j=i;
+    loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}
+    sorted[j]=value;
+  }
+  var sum=0.;var i=0u;
+  loop{
+    if(i>=count){break;}
+    let magnitude=abs(sorted[i]);var balance=0;var j=i;
+    loop{if(j>=count||abs(sorted[j])!=magnitude){break;}
+      if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}
+    sum+=f32(balance)*magnitude;i=j;
+  }
+  return sum;
+}
+@compute @workgroup_size(64)fn reconstructStructuredCellVelocity(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var termsX:array<f32,31>;var termsY:array<f32,31>;var termsZ:array<f32,31>;for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];if(handle==INVALID||handle>=control.slotCount){rowVelocities[rowBankBase()+row]=vec4f(0.0);return;}let sample=f32(bitcast<i32>(authority[candidateAuthorityBase()+p.rowSignOffset+at]))*bitcast<f32>(authority[candidateAuthorityBase()+p.valuesOffset+handle]);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];let r=p.reconstructionOffset+3u*global;let term=vec3f(bitcast<f32>(dense[r]),bitcast<f32>(dense[r+1u]),bitcast<f32>(dense[r+2u]))*sample;termsX[local]=term.x;termsY[local]=term.y;termsZ[local]=term.z;}let canonical=vec3f(canonicalPublicationSum(termsX,h.y),canonicalPublicationSum(termsY,h.y),canonicalPublicationSum(termsZ,h.y));let hrow=headers[row];rowVelocities[rowBankBase()+row]=vec4f(inverseStructuredTransform(canonical,m.transformAndFlags&63u),1.0);rowGeometry[rowBankBase()+row]=vec4u(hrow.cell,hrow.size,m.caseId,m.transformAndFlags);}
 
 @compute @workgroup_size(1)fn acceptStructuredPublication(){if(atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}atomicStore(&acceptedControl[1],INVALID);atomicStore(&acceptedControl[2],control.rowCount);atomicStore(&acceptedControl[3],control.epoch);atomicStore(&acceptedControl[4],control.activeBank);atomicStore(&acceptedControl[5],control.slotCount);atomicStore(&acceptedControl[0],0u);}
 `;

@@ -455,6 +455,14 @@ export function octreePipelinedMGPCGCombinedReductionDrainsEnabled(
   return environment?.FLUID_OCTREE_FACTOR1_COMBINED_REDUCTION_DRAINS === "1";
 }
 
+/** QA-only snapshots bracketing the first Section 4.3 preconditioner apply. */
+export function octreePipelinedMGPCGSymmetryStageAuditEnabled(
+  environment: Record<string, string | undefined> | undefined =
+    typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_SYMMETRY_STAGE_AUDIT === "1";
+}
+
 export type OctreePipelinedMGPCGPipelineName =
   | "initializeControlAndDispatch"
   | "validateAuthority"
@@ -590,6 +598,19 @@ export class WebGPUOctreePipelinedMGPCG {
   readonly usesCurrentOperatorTemporalPredictor: boolean;
   readonly temporalPredictorAlpha: number;
 
+  get symmetryStageAuditBuffers(): Readonly<{
+    initialResidual: GPUBuffer;
+    initialPreconditioned: GPUBuffer;
+    initialPreconditionedImage: GPUBuffer;
+    preconditionerPreSmoothed: GPUBuffer;
+    preconditionerZeroSmoothed: GPUBuffer;
+    preconditionerFirstOperatorImage: GPUBuffer;
+    preconditionerFirstSmoothed: GPUBuffer;
+    preconditionerInnerResidual: GPUBuffer;
+    preconditionerInnerCorrection: GPUBuffer;
+    preconditionerPostCorrected: GPUBuffer;
+  }> | undefined { return this.symmetryStageAudit; }
+
   /** GPU-authored records suitable for the existing diagnostics readback. */
   get workAccountingBuffers(): Readonly<{ control: GPUBuffer; indirectTail: GPUBuffer }> {
     return Object.freeze({ control: this.control, indirectTail: this.outerDispatch });
@@ -608,6 +629,18 @@ export class WebGPUOctreePipelinedMGPCG {
   private readonly params: GPUBuffer;
   private readonly partials: GPUBuffer;
   private readonly outerDispatch: GPUBuffer;
+  private readonly symmetryStageAudit?: {
+    initialResidual: GPUBuffer;
+    initialPreconditioned: GPUBuffer;
+    initialPreconditionedImage: GPUBuffer;
+    preconditionerPreSmoothed: GPUBuffer;
+    preconditionerZeroSmoothed: GPUBuffer;
+    preconditionerFirstOperatorImage: GPUBuffer;
+    preconditionerFirstSmoothed: GPUBuffer;
+    preconditionerInnerResidual: GPUBuffer;
+    preconditionerInnerCorrection: GPUBuffer;
+    preconditionerPostCorrected: GPUBuffer;
+  };
   private readonly pipelines: Readonly<Record<PipelineName, GPUComputePipeline>>;
   private readonly temporalPipelines?: Readonly<Record<
     TemporalPredictorPipelineName, GPUComputePipeline
@@ -706,6 +739,24 @@ export class WebGPUOctreePipelinedMGPCG {
       size: this.plan.indirectBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC,
     });
+    if (octreePipelinedMGPCGSymmetryStageAuditEnabled()) {
+      const auditBuffer = (label: string) => device.createBuffer({
+        label, size: this.plan.rowCapacity * 4,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+      this.symmetryStageAudit = {
+        initialResidual: auditBuffer("MGPCG symmetry audit · initial residual"),
+        initialPreconditioned: auditBuffer("MGPCG symmetry audit · first M r"),
+        initialPreconditionedImage: auditBuffer("MGPCG symmetry audit · first A M r"),
+        preconditionerPreSmoothed: auditBuffer("MGPCG symmetry audit · first p1"),
+        preconditionerZeroSmoothed: auditBuffer("MGPCG symmetry audit · first zero sweep"),
+        preconditionerFirstOperatorImage: auditBuffer("MGPCG symmetry audit · first L2 image"),
+        preconditionerFirstSmoothed: auditBuffer("MGPCG symmetry audit · first nonzero sweep"),
+        preconditionerInnerResidual: auditBuffer("MGPCG symmetry audit · first r1"),
+        preconditionerInnerCorrection: auditBuffer("MGPCG symmetry audit · first M1 r1"),
+        preconditionerPostCorrected: auditBuffer("MGPCG symmetry audit · first p1 + M1 r1"),
+      };
+    }
     const words = new Uint32Array(16), floats = new Float32Array(words.buffer);
     words[0] = this.plan.rowCapacity;
     words[1] = this.plan.maximumIterations;
@@ -890,6 +941,10 @@ export class WebGPUOctreePipelinedMGPCG {
       this.runOuterIndirect(pass, "formInitialResidual", 0, 0, resources);
     }
 
+    const symmetryAudit = this.symmetryStageAudit;
+    if (symmetryAudit) broker.copyBufferToBuffer(
+      this.source.vectors.residual, 0, symmetryAudit.initialResidual, 0, vectorBytes);
+
     const preconditioner = this.source.preconditioner;
     preconditioner.encodeSetup(broker, {
       solverControl: this.control,
@@ -901,10 +956,36 @@ export class WebGPUOctreePipelinedMGPCG {
       solverControl: this.control,
       rowCount: this.source.rowCount,
     });
+    if (symmetryAudit) broker.copyBufferToBuffer(
+      this.source.vectors.preconditioned, 0, symmetryAudit.initialPreconditioned, 0, vectorBytes);
+    const preconditionerAudit = symmetryAudit
+      ? (preconditioner as OctreePipelinedFixedPreconditioner & { symmetryStageAuditBuffers?: {
+        preSmoothed: GPUBuffer; zeroSmoothed: GPUBuffer;
+        firstOperatorImage: GPUBuffer; firstSmoothed: GPUBuffer; innerResidual: GPUBuffer;
+        innerCorrection: GPUBuffer; postCorrected: GPUBuffer;
+      } }).symmetryStageAuditBuffers : undefined;
+    if (preconditionerAudit) {
+      broker.copyBufferToBuffer(preconditionerAudit.preSmoothed, 0,
+        symmetryAudit!.preconditionerPreSmoothed, 0, vectorBytes);
+      broker.copyBufferToBuffer(preconditionerAudit.zeroSmoothed, 0,
+        symmetryAudit!.preconditionerZeroSmoothed, 0, vectorBytes);
+      broker.copyBufferToBuffer(preconditionerAudit.firstOperatorImage, 0,
+        symmetryAudit!.preconditionerFirstOperatorImage, 0, vectorBytes);
+      broker.copyBufferToBuffer(preconditionerAudit.firstSmoothed, 0,
+        symmetryAudit!.preconditionerFirstSmoothed, 0, vectorBytes);
+      broker.copyBufferToBuffer(preconditionerAudit.innerResidual, 0,
+        symmetryAudit!.preconditionerInnerResidual, 0, vectorBytes);
+      broker.copyBufferToBuffer(preconditionerAudit.innerCorrection, 0,
+        symmetryAudit!.preconditionerInnerCorrection, 0, vectorBytes);
+      broker.copyBufferToBuffer(preconditionerAudit.postCorrected, 0,
+        symmetryAudit!.preconditionerPostCorrected, 0, vectorBytes);
+    }
     this.source.operator.encode(
       broker, this.source.vectors.preconditioned, this.source.vectors.preconditionedImage,
       this.control,
     );
+    if (symmetryAudit) broker.copyBufferToBuffer(
+      this.source.vectors.preconditionedImage, 0, symmetryAudit.initialPreconditionedImage, 0, vectorBytes);
     pass = broker.compute({ label: "Pipelined MGPCG initial merged reduction" });
     this.runOuterIndirect(pass, "reduceMergedPartials", 0, 2, resources);
     broker.fence("pipelined MGPCG initial merged partials complete");
@@ -1129,6 +1210,7 @@ export class WebGPUOctreePipelinedMGPCG {
     this.params.destroy();
     this.partials.destroy();
     this.outerDispatch.destroy();
+    for (const buffer of Object.values(this.symmetryStageAudit ?? {})) buffer.destroy();
   }
 }
 

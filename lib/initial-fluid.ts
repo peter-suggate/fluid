@@ -44,6 +44,52 @@ function seedCell(scene: SceneDescription, seed: Vec3, dimensions: readonly [num
   };
 }
 
+export interface InitialFluidBrickUnionBounds {
+  readonly minimum: Vec3;
+  readonly maximum: Vec3;
+}
+
+/** Returns exact world-space bounds when the authored brick seeds form one
+ * completely filled axis-aligned box. Disconnected or L-shaped unions return
+ * undefined rather than being silently replaced by their bounding box. */
+export function initialFluidBrickUnionBounds(
+  scene: SceneDescription,
+  dimensions: readonly [number, number, number],
+  brickSize = INITIAL_FLUID_BRICK_SIZE,
+): InitialFluidBrickUnionBounds | undefined {
+  const seeds = scene.fluid.initialBrickSeeds_m;
+  if (!seeds?.length || scene.fluid.initialBrickSeedsAdditive) return undefined;
+  const cells = seeds.map((seed) => seedCell(scene, seed, dimensions));
+  const bricks = new Set(cells.map((cell) => [Math.floor(cell.x / brickSize),
+    Math.floor(cell.y / brickSize), Math.floor(cell.z / brickSize)].join(",")));
+  const coordinates = [...bricks].map((key) => key.split(",").map(Number) as [number, number, number]);
+  const minimumBrick = [0, 1, 2].map((axis) =>
+    Math.min(...coordinates.map((q) => q[axis]!))) as [number, number, number];
+  const maximumBrick = [0, 1, 2].map((axis) =>
+    Math.max(...coordinates.map((q) => q[axis]!))) as [number, number, number];
+  const expected = (maximumBrick[0] - minimumBrick[0] + 1)
+    * (maximumBrick[1] - minimumBrick[1] + 1)
+    * (maximumBrick[2] - minimumBrick[2] + 1);
+  if (bricks.size !== expected) return undefined;
+  for (let bz = minimumBrick[2]; bz <= maximumBrick[2]; bz += 1)
+    for (let by = minimumBrick[1]; by <= maximumBrick[1]; by += 1)
+      for (let bx = minimumBrick[0]; bx <= maximumBrick[0]; bx += 1)
+        if (!bricks.has(`${bx},${by},${bz}`)) return undefined;
+  const c = scene.container;
+  const h = [c.width_m / dimensions[0], c.height_m / dimensions[1], c.depth_m / dimensions[2]] as const;
+  const origin = [minimumBrick[0] * brickSize, minimumBrick[1] * brickSize,
+    minimumBrick[2] * brickSize] as const;
+  const end = [Math.min(dimensions[0], (maximumBrick[0] + 1) * brickSize),
+    Math.min(dimensions[1], (maximumBrick[1] + 1) * brickSize),
+    Math.min(dimensions[2], (maximumBrick[2] + 1) * brickSize)] as const;
+  return {
+    minimum: { x: -0.5 * c.width_m + origin[0] * h[0], y: origin[1] * h[1],
+      z: -0.5 * c.depth_m + origin[2] * h[2] },
+    maximum: { x: -0.5 * c.width_m + end[0] * h[0], y: end[1] * h[1],
+      z: -0.5 * c.depth_m + end[2] * h[2] },
+  };
+}
+
 /** True when a finest cell belongs to any explicitly seeded initial brick. */
 export function initialFluidBrickContainsCell(
   scene: SceneDescription,

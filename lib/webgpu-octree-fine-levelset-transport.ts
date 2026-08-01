@@ -82,6 +82,30 @@ export const FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS = Object.freeze([
 ] as const);
 const FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES = Object.freeze([0, 2] as const);
 
+interface FineLevelSetTransportPipelineBundle {
+  readonly planPipeline: GPUComputePipeline;
+  readonly classifyPipeline: GPUComputePipeline;
+  readonly reduceWorksetsPipeline: GPUComputePipeline;
+  readonly scanWorksetsPipeline: GPUComputePipeline;
+  readonly publishWorksetsPipeline: GPUComputePipeline;
+  readonly compactWorksetsPipeline: GPUComputePipeline;
+  readonly transportPipelines: readonly GPUComputePipeline[];
+  readonly reversePipelines: readonly GPUComputePipeline[];
+  readonly correctionPipelines: readonly GPUComputePipeline[];
+  readonly reduceStatusPipeline: GPUComputePipeline;
+  readonly summarizePipeline: GPUComputePipeline;
+  readonly commitPipeline: GPUComputePipeline;
+  readonly clearDeltaPipeline: GPUComputePipeline;
+  readonly reduceDeltaPipeline: GPUComputePipeline;
+  readonly deltaPipeline: GPUComputePipeline;
+  readonly compactDeltaPipeline: GPUComputePipeline;
+}
+
+const fineLevelSetTransportPipelineCache = new WeakMap<GPUDevice,
+  Map<string, FineLevelSetTransportPipelineBundle>>();
+const fineLevelSetTransportPipelineCompilations = new WeakMap<GPUDevice,
+  Map<string, Promise<FineLevelSetTransportPipelineBundle>>>();
+
 export interface FineLevelSetGPUTransportControl {
   departureOutsideBand: number;
   nonfiniteVelocity: number;
@@ -213,40 +237,43 @@ export class WebGPUFineLevelSetTransport {
   /** Copy-published indirect records. Keeping this buffer INDIRECT-only avoids
    * aliasing the writable governor in any compute synchronization scope. */
   private readonly indirectDispatch: GPUBuffer;
-  private readonly planPipeline: GPUComputePipeline;
-  private readonly classifyPipeline: GPUComputePipeline;
-  private readonly reduceWorksetsPipeline: GPUComputePipeline;
-  private readonly scanWorksetsPipeline: GPUComputePipeline;
-  private readonly publishWorksetsPipeline: GPUComputePipeline;
-  private readonly compactWorksetsPipeline: GPUComputePipeline;
-  private readonly transportPipelines: readonly GPUComputePipeline[];
-  private readonly reversePipelines: readonly GPUComputePipeline[];
-  private readonly correctionPipelines: readonly GPUComputePipeline[];
-  private readonly reduceStatusPipeline: GPUComputePipeline;
-  private readonly summarizePipeline: GPUComputePipeline;
-  private readonly commitPipeline: GPUComputePipeline;
-  private readonly clearDeltaPipeline: GPUComputePipeline;
-  private readonly reduceDeltaPipeline: GPUComputePipeline;
-  private readonly deltaPipeline: GPUComputePipeline;
-  private readonly compactDeltaPipeline: GPUComputePipeline;
+  private planPipeline!: GPUComputePipeline;
+  private classifyPipeline!: GPUComputePipeline;
+  private reduceWorksetsPipeline!: GPUComputePipeline;
+  private scanWorksetsPipeline!: GPUComputePipeline;
+  private publishWorksetsPipeline!: GPUComputePipeline;
+  private compactWorksetsPipeline!: GPUComputePipeline;
+  private transportPipelines!: readonly GPUComputePipeline[];
+  private reversePipelines!: readonly GPUComputePipeline[];
+  private correctionPipelines!: readonly GPUComputePipeline[];
+  private reduceStatusPipeline!: GPUComputePipeline;
+  private summarizePipeline!: GPUComputePipeline;
+  private commitPipeline!: GPUComputePipeline;
+  private clearDeltaPipeline!: GPUComputePipeline;
+  private reduceDeltaPipeline!: GPUComputePipeline;
+  private deltaPipeline!: GPUComputePipeline;
+  private compactDeltaPipeline!: GPUComputePipeline;
   private readonly samplingCatalog: GPUBuffer;
   private readonly samplingOffsets: readonly number[];
-  private readonly planGroup: GPUBindGroup;
-  private readonly classifyGroup: GPUBindGroup;
-  private readonly reduceWorksetsGroup: GPUBindGroup;
-  private readonly scanWorksetsGroup: GPUBindGroup;
-  private readonly publishWorksetsGroup: GPUBindGroup;
-  private readonly compactWorksetsGroup: GPUBindGroup;
-  private readonly transportGroups: readonly GPUBindGroup[];
-  private readonly reverseGroups: readonly GPUBindGroup[];
-  private readonly correctionGroups: readonly GPUBindGroup[];
-  private readonly reduceStatusGroup: GPUBindGroup;
-  private readonly summarizeGroup: GPUBindGroup;
-  private readonly commitGroup: GPUBindGroup;
-  private readonly clearDeltaGroup: GPUBindGroup;
-  private readonly reduceDeltaGroup: GPUBindGroup;
-  private readonly deltaGroup: GPUBindGroup;
-  private readonly compactDeltaGroup: GPUBindGroup;
+  private planGroup!: GPUBindGroup;
+  private classifyGroup!: GPUBindGroup;
+  private reduceWorksetsGroup!: GPUBindGroup;
+  private scanWorksetsGroup!: GPUBindGroup;
+  private publishWorksetsGroup!: GPUBindGroup;
+  private compactWorksetsGroup!: GPUBindGroup;
+  private transportGroups!: readonly GPUBindGroup[];
+  private reverseGroups!: readonly GPUBindGroup[];
+  private correctionGroups!: readonly GPUBindGroup[];
+  private reduceStatusGroup!: GPUBindGroup;
+  private summarizeGroup!: GPUBindGroup;
+  private commitGroup!: GPUBindGroup;
+  private clearDeltaGroup!: GPUBindGroup;
+  private reduceDeltaGroup!: GPUBindGroup;
+  private deltaGroup!: GPUBindGroup;
+  private compactDeltaGroup!: GPUBindGroup;
+  private readonly pipelineCacheKey: string;
+  private readonly pipelineConstants: Readonly<Record<string, number>>;
+  private pipelineInitialization?: Promise<void>;
   /** 256-page blocks the widened publication trio classifies and scatters. */
   private readonly scanBlocks: number;
   /** 256-word blocks covering the interface delta's cleared header and stream. */
@@ -261,7 +288,8 @@ export class WebGPUFineLevelSetTransport {
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
-    private readonly resources: StructuredFineTransportResources) {
+    private readonly resources: StructuredFineTransportResources,
+    deferPipelineCompilation = false) {
     const { structured, topology } = resources;
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || !Number.isSafeInteger(resources.maximumLeafSize) || resources.maximumLeafSize < 1
@@ -330,34 +358,74 @@ export class WebGPUFineLevelSetTransport {
       this.reversePhi = device.createBuffer({ label: "Factor-1 bounded MacCormack reverse phi",
         size: bfeccScratchBytes, usage: storage });
     }
-    const module = device.createShaderModule({ label: "Direct structured fine level-set transport",
-      code: structuredFineLevelSetTransportWGSL });
-    const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
-      compute: { module, entryPoint, constants: {
-        stagedFineAddressing: fineTransportStagedAddressingRequested() ? 1 : 0,
-        b4FineAddressing: fineTransportB4AddressingEnabled(source.plan) ? 1 : 0,
-      } } });
-    this.planPipeline = make("planStructuredFineTransportSubsteps");
-    this.classifyPipeline = make("classifyStructuredFineTransportBlocks");
-    this.reduceWorksetsPipeline = make("reduceStructuredFineTransportWorksetBlocks");
-    this.scanWorksetsPipeline = make("scanStructuredFineTransportWorksetGroups");
-    this.publishWorksetsPipeline = make("publishStructuredFineTransportWorksets");
-    this.compactWorksetsPipeline = make("compactStructuredFineTransportWorksets");
-    // transitionSample dynamically selects trilinear or tetrahedral sampling
-    // at every trajectory point. Only validity-aware common/rare variants are
-    // required; page-anchor transition specialization would be unsound.
-    this.transportPipelines = ["transportRegularCommonPhi", "transportRegularRarePhi"].map(make);
-    this.reversePipelines = this.bfeccEnabled
-      ? ["reverseRegularCommonPhi", "reverseRegularRarePhi"].map(make) : [];
-    this.correctionPipelines = this.bfeccEnabled
-      ? ["correctRegularCommonPhi", "correctRegularRarePhi"].map(make) : [];
-    this.reduceStatusPipeline = make("reduceStructuredFineTransportStatus");
-    this.summarizePipeline = make("summarizeStructuredFineTransport");
-    this.commitPipeline = make("commitStructuredFineTransport");
-    this.clearDeltaPipeline = make("clearStructuredFineDelta");
-    this.reduceDeltaPipeline = make("reduceStructuredFineDeltaBlocks");
-    this.deltaPipeline = make("publishStructuredFineDelta");
-    this.compactDeltaPipeline = make("compactStructuredFineDelta");
+    const stagedFineAddressing = fineTransportStagedAddressingRequested() ? 1 : 0;
+    const b4FineAddressing = fineTransportB4AddressingEnabled(source.plan) ? 1 : 0;
+    this.pipelineCacheKey = JSON.stringify({ stagedFineAddressing, b4FineAddressing,
+      bfeccEnabled: this.bfeccEnabled });
+    this.pipelineConstants = Object.freeze({ stagedFineAddressing, b4FineAddressing });
+    if (deferPipelineCompilation) return;
+    let deviceCache = fineLevelSetTransportPipelineCache.get(device);
+    if (!deviceCache) {
+      deviceCache = new Map();
+      fineLevelSetTransportPipelineCache.set(device, deviceCache);
+    }
+    let pipelines = deviceCache.get(this.pipelineCacheKey);
+    if (!pipelines) {
+      const shaderModule = device.createShaderModule({ label: "Direct structured fine level-set transport",
+        code: structuredFineLevelSetTransportWGSL });
+      const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
+        compute: { module: shaderModule, entryPoint, constants: {
+          stagedFineAddressing: fineTransportStagedAddressingRequested() ? 1 : 0,
+          b4FineAddressing: fineTransportB4AddressingEnabled(source.plan) ? 1 : 0,
+        } } });
+      pipelines = {
+        planPipeline: make("planStructuredFineTransportSubsteps"),
+        classifyPipeline: make("classifyStructuredFineTransportBlocks"),
+        reduceWorksetsPipeline: make("reduceStructuredFineTransportWorksetBlocks"),
+        scanWorksetsPipeline: make("scanStructuredFineTransportWorksetGroups"),
+        publishWorksetsPipeline: make("publishStructuredFineTransportWorksets"),
+        compactWorksetsPipeline: make("compactStructuredFineTransportWorksets"),
+        // transitionSample dynamically selects trilinear or tetrahedral sampling
+        // at every trajectory point. Only validity-aware common/rare variants are
+        // required; page-anchor transition specialization would be unsound.
+        transportPipelines: ["transportRegularCommonPhi", "transportRegularRarePhi"].map(make),
+        reversePipelines: this.bfeccEnabled
+          ? ["reverseRegularCommonPhi", "reverseRegularRarePhi"].map(make) : [],
+        correctionPipelines: this.bfeccEnabled
+          ? ["correctRegularCommonPhi", "correctRegularRarePhi"].map(make) : [],
+        reduceStatusPipeline: make("reduceStructuredFineTransportStatus"),
+        summarizePipeline: make("summarizeStructuredFineTransport"),
+        commitPipeline: make("commitStructuredFineTransport"),
+        clearDeltaPipeline: make("clearStructuredFineDelta"),
+        reduceDeltaPipeline: make("reduceStructuredFineDeltaBlocks"),
+        deltaPipeline: make("publishStructuredFineDelta"),
+        compactDeltaPipeline: make("compactStructuredFineDelta"),
+      };
+      deviceCache.set(this.pipelineCacheKey, pipelines);
+    }
+    this.installPipelineBundle(pipelines);
+  }
+
+  private installPipelineBundle(pipelines: FineLevelSetTransportPipelineBundle): void {
+    const { device, source } = this;
+    const { structured, topology } = this.resources;
+    const air = this.resources.airSupport;
+    this.planPipeline = pipelines.planPipeline;
+    this.classifyPipeline = pipelines.classifyPipeline;
+    this.reduceWorksetsPipeline = pipelines.reduceWorksetsPipeline;
+    this.scanWorksetsPipeline = pipelines.scanWorksetsPipeline;
+    this.publishWorksetsPipeline = pipelines.publishWorksetsPipeline;
+    this.compactWorksetsPipeline = pipelines.compactWorksetsPipeline;
+    this.transportPipelines = pipelines.transportPipelines;
+    this.reversePipelines = pipelines.reversePipelines;
+    this.correctionPipelines = pipelines.correctionPipelines;
+    this.reduceStatusPipeline = pipelines.reduceStatusPipeline;
+    this.summarizePipeline = pipelines.summarizePipeline;
+    this.commitPipeline = pipelines.commitPipeline;
+    this.clearDeltaPipeline = pipelines.clearDeltaPipeline;
+    this.reduceDeltaPipeline = pipelines.reduceDeltaPipeline;
+    this.deltaPipeline = pipelines.deltaPipeline;
+    this.compactDeltaPipeline = pipelines.compactDeltaPipeline;
     const all = new Map<number, GPUBuffer>([
       [0, this.params], [1, source.metadata], [2, source.worklist], [3, source.flags], [4, source.phi],
       // workA is persistent closest-point identity. The distance lane workB is
@@ -405,8 +473,91 @@ export class WebGPUFineLevelSetTransport {
     this.compactDeltaGroup = group(this.compactDeltaPipeline, [0,2,8,13]);
   }
 
+  private async compilePipelineBundleAsync(): Promise<FineLevelSetTransportPipelineBundle> {
+    const shaderModule = this.device.createShaderModule({
+      label: "Direct structured fine level-set transport",
+      code: structuredFineLevelSetTransportWGSL,
+    });
+    const make = (entryPoint: string) => this.device.createComputePipelineAsync({
+      label: entryPoint,
+      layout: "auto",
+      compute: { module: shaderModule, entryPoint, constants: { ...this.pipelineConstants } },
+    });
+    const planPipeline = await make("planStructuredFineTransportSubsteps");
+    const classifyPipeline = await make("classifyStructuredFineTransportBlocks");
+    const reduceWorksetsPipeline = await make("reduceStructuredFineTransportWorksetBlocks");
+    const scanWorksetsPipeline = await make("scanStructuredFineTransportWorksetGroups");
+    const publishWorksetsPipeline = await make("publishStructuredFineTransportWorksets");
+    const compactWorksetsPipeline = await make("compactStructuredFineTransportWorksets");
+    const transportPipelines: GPUComputePipeline[] = [];
+    for (const entryPoint of ["transportRegularCommonPhi", "transportRegularRarePhi"]) {
+      transportPipelines.push(await make(entryPoint));
+    }
+    const reversePipelines: GPUComputePipeline[] = [];
+    const correctionPipelines: GPUComputePipeline[] = [];
+    if (this.bfeccEnabled) {
+      for (const entryPoint of ["reverseRegularCommonPhi", "reverseRegularRarePhi"]) {
+        reversePipelines.push(await make(entryPoint));
+      }
+      for (const entryPoint of ["correctRegularCommonPhi", "correctRegularRarePhi"]) {
+        correctionPipelines.push(await make(entryPoint));
+      }
+    }
+    return {
+      planPipeline,
+      classifyPipeline,
+      reduceWorksetsPipeline,
+      scanWorksetsPipeline,
+      publishWorksetsPipeline,
+      compactWorksetsPipeline,
+      transportPipelines,
+      reversePipelines,
+      correctionPipelines,
+      reduceStatusPipeline: await make("reduceStructuredFineTransportStatus"),
+      summarizePipeline: await make("summarizeStructuredFineTransport"),
+      commitPipeline: await make("commitStructuredFineTransport"),
+      clearDeltaPipeline: await make("clearStructuredFineDelta"),
+      reduceDeltaPipeline: await make("reduceStructuredFineDeltaBlocks"),
+      deltaPipeline: await make("publishStructuredFineDelta"),
+      compactDeltaPipeline: await make("compactStructuredFineDelta"),
+    };
+  }
+
+  initializePipelines(): Promise<void> {
+    if (this.planPipeline) return Promise.resolve();
+    if (this.pipelineInitialization) return this.pipelineInitialization;
+    this.pipelineInitialization = (async () => {
+      let deviceCache = fineLevelSetTransportPipelineCache.get(this.device);
+      if (!deviceCache) {
+        deviceCache = new Map();
+        fineLevelSetTransportPipelineCache.set(this.device, deviceCache);
+      }
+      let pipelines = deviceCache.get(this.pipelineCacheKey);
+      if (!pipelines) {
+        let compilations = fineLevelSetTransportPipelineCompilations.get(this.device);
+        if (!compilations) {
+          compilations = new Map();
+          fineLevelSetTransportPipelineCompilations.set(this.device, compilations);
+        }
+        let compilation = compilations.get(this.pipelineCacheKey);
+        if (!compilation) {
+          compilation = this.compilePipelineBundleAsync().then((compiled) => {
+            const published = deviceCache!.get(this.pipelineCacheKey) ?? compiled;
+            deviceCache!.set(this.pipelineCacheKey, published);
+            return published;
+          }).finally(() => { compilations!.delete(this.pipelineCacheKey); });
+          compilations.set(this.pipelineCacheKey, compilation);
+        }
+        pipelines = await compilation;
+      }
+      this.installPipelineBundle(pipelines);
+    })();
+    return this.pipelineInitialization;
+  }
+
   encode(broker: PassBroker, options: FineLevelSetGPUTransportOptions): PassBroker {
     if (this.destroyed) throw new Error("Fine level-set transport is destroyed");
+    if (!this.planPipeline) throw new Error("Fine transport pipelines are not initialized");
     if (!Number.isFinite(options.timestep) || options.timestep < 0) {
       throw new RangeError("Fine level-set transport timestep must be finite and non-negative");
     }

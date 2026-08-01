@@ -239,11 +239,14 @@ fn writeRecord(at:u32,groups:u32){let x=max(1u,min(65535u,groups));dispatches[at
 fn localCoord(l:u32,s:u32)->vec3u{let d=dims(l);let local=s-levelBase(l);let yz=local/d.x;
  return vec3u(local-yz*d.x,yz%d.y,yz/d.y);}
 fn directSlot(l:u32,q:vec3u)->u32{let d=dims(l);return levelBase(l)+q.x+d.x*(q.y+d.y*q.z);}
+fn sorted6Sum(values:array<f32,6>)->f32{var sorted=values;for(var i=1u;i<6u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.0;for(var i=0u;i<6u;i+=1u){sum+=sorted[i];}return sum;}
+fn sorted8Sum(values:array<f32,8>)->f32{var sorted=values;for(var i=1u;i<8u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.0;for(var i=0u;i<8u;i+=1u){sum+=sorted[i];}return sum;}
 fn applied(l:u32,s:u32,sourceBase:u32)->f32{let q=localCoord(l,s);let d=dims(l);let c=f32(1u<<l)*bitcast<f32>(p.numerics.y);
- var value=loadf(p.offsets0.z,s)*loadf(sourceBase,s);
+ var terms:array<f32,6>;
  let directions=array<vec3i,6>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1));
  for(var k=0u;k<6u;k+=1u){let other=vec3i(q)+directions[k];if(any(other<vec3i(0))||any(other>=vec3i(d))){continue;}
-  let n=directSlot(l,vec3u(other));if(flag(n)!=0u){value-=c*loadf(sourceBase,n);}}return value;}
+  let n=directSlot(l,vec3u(other));if(flag(n)!=0u){terms[k]=c*loadf(sourceBase,n);}}
+ return loadf(p.offsets0.z,s)*loadf(sourceBase,s)-sorted6Sum(terms);}
 fn chebyshevWeight(l:u32,phase:u32)->f32{let upper=loadf(p.offsets1.z,l);let lower=upper*${OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION};
  if(!(lower>0.0)||!(upper>lower)||!finite(upper)){reportAt(NONPOSITIVE,76u,l);return 0.0;}
  let centre=0.5*(upper+lower);let radius=0.5*(upper-lower);
@@ -273,7 +276,7 @@ fn restrictParent(l:u32,coarse:u32,lane:u32){var residual=0.0;var failed=0u;if(l
  let child=parent*2u+vec3u(lane&1u,(lane>>1u)&1u,(lane>>2u)&1u);if(all(child<dims(l))){let fine=directSlot(l,child);
   if(flag(fine)!=0u){let product=applied(l,fine,p.offsets1.x);residual=select(-product,loadf(p.offsets0.w,fine)-product,(flag(fine)&GHOST)==0u);}}}
  if(lane<8u){childResidual[lane]=residual;childFailed[lane]=failed;}workgroupBarrier();
- if(lane==0u&&coarse!=INVALID){var sum=0.0;var anyFailed=false;for(var child=0u;child<8u;child+=1u){sum+=childResidual[child];anyFailed=anyFailed||childFailed[child]!=0u;}
+ if(lane==0u&&coarse!=INVALID){var values:array<f32,8>;var anyFailed=false;for(var child=0u;child<8u;child+=1u){values[child]=childResidual[child];anyFailed=anyFailed||childFailed[child]!=0u;}let sum=sorted8Sum(values);
   if(anyFailed||!finite(sum)){reportAt(OVERFLOW,87u,coarse);}else{storef(p.offsets0.w,coarse,loadf(p.offsets0.w,coarse)+sum);}}}
 @compute @workgroup_size(64)fn restrictDenseAggregate(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lane:u32){
  let l=level();let i=parentItem(wg);var coarse=INVALID;if(i<count(l+1u)&&!stopped()){coarse=workSlot(l+1u,i);}
@@ -291,10 +294,10 @@ fn tailSmooth(l:u32,reverse:bool,lane:u32){for(var step=0u;step<p.shape.w;step+=
  if((step&1u)==0u){tailSmoothPhase(l,p.offsets1.x,p.offsets1.y,phase,publish,lane);}else{tailSmoothPhase(l,p.offsets1.y,p.offsets1.x,phase,publish,lane);}
  storageBarrier();workgroupBarrier();}}
 fn tailRestrict(l:u32,lane:u32){if(l+1u>=levels()){return;}let n=count(l+1u);for(var i=lane;i<n;i+=64u){if(stopped()){continue;}
- let coarse=workSlot(l+1u,i);if(coarse!=INVALID){let parent=localCoord(l+1u,coarse);var sum=0.0;for(var child=0u;child<8u;child+=1u){
+ let coarse=workSlot(l+1u,i);if(coarse!=INVALID){let parent=localCoord(l+1u,coarse);var values:array<f32,8>;for(var child=0u;child<8u;child+=1u){
   let q=parent*2u+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);if(any(q>=dims(l))){continue;}let fine=directSlot(l,q);
   if(flag(fine)==0u){continue;}let product=applied(l,fine,p.offsets1.x);
-  sum+=select(-product,loadf(p.offsets0.w,fine)-product,(flag(fine)&GHOST)==0u);}
+  values[child]=select(-product,loadf(p.offsets0.w,fine)-product,(flag(fine)&GHOST)==0u);}let sum=sorted8Sum(values);
  if(!finite(sum)){reportAt(OVERFLOW,87u,coarse);}else{storef(p.offsets0.w,coarse,loadf(p.offsets0.w,coarse)+sum);}}}}
 fn tailProlong(l:u32,lane:u32){let n=count(l);for(var i=lane;i<n;i+=64u){if(!stopped()){let fine=workSlot(l,i);if(fine!=INVALID){prolongOne(l,fine);}}}}
 fn tailPublish(l:u32,lane:u32){let n=count(l);for(var i=lane;i<n;i+=64u){if(!stopped()){let s=workSlot(l,i);

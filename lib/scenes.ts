@@ -180,6 +180,42 @@ export function createMinimalPowerDamBreakScene(): SceneDescription {
 }
 
 /**
+ * Smallest brick-authored power-octree scene with an exact horizontal D4
+ * symmetry frame. A 32-cell dyadic domain and a centred 2x1x2 brick body are
+ * the minimum that leave an equal one-brick gap to all four walls; a 24-cell
+ * domain centres one brick geometrically but introduces a non-dyadic root
+ * decomposition that is itself not an invariant of the octree algorithm.
+ */
+export function createSymmetricExpansionScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "symmetric-expansion";
+  scene.duration_s = 1;
+  scene.rigidBodies = [];
+  scene.container = {
+    ...scene.container,
+    width_m: 1.6,
+    height_m: 0.8,
+    depth_m: 1.6,
+    // One centred 0.8 x 0.4 x 0.8 m body in a 1.6 x 0.8 x 1.6 m tank.
+    fillFraction: 1 / 8,
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "tank-fill";
+  scene.fluid.initialBrickSeeds_m = [
+    { x: -0.2, y: 0.2, z: -0.2 }, { x: 0.2, y: 0.2, z: -0.2 },
+    { x: -0.2, y: 0.2, z: 0.2 }, { x: 0.2, y: 0.2, z: 0.2 },
+  ];
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.initialDamBreakDimensions_m;
+  delete scene.fluid.inflow;
+  scene.fluid.surfaceTension_N_m = 0;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
+
+/**
  * The minimal dam break at four times the linear resolution. All physical
  * geometry, fluid properties, and time integration settings are inherited
  * unchanged; only the finest octree/surface lattice changes from 16³ to 64³.
@@ -261,25 +297,31 @@ export type FreeFallDropSceneId = "ceiling-slab-drop" | "corner-brick-drop"
 function createFreeFallDropScene(id: FreeFallDropSceneId): SceneDescription {
   const lidAttached = id === "ceiling-slab-drop" || id === "corner-brick-drop";
   const cornered = id === "corner-brick-drop" || id === "midair-corner-drop";
+  const finestCellSize_m = 0.05;
+  const dimensions_cells = { x: 24, y: lidAttached ? 16 : 24, z: 24 };
   const scene = cloneScene(defaultScene);
   scene.sceneId = id;
   scene.duration_s = 0.5;
   scene.rigidBodies = [];
   scene.container = {
     ...scene.container,
-    width_m: 1.2,
+    // Derive every physical extent from the authored integer grid. Decimal
+    // literals such as 1.2 / 24 and 0.8 / 16 have different binary rounding;
+    // multiplying by the common authored spacing ensures even the smallest
+    // rounded axis spacing spans a lid-flush analytic box on every axis.
+    width_m: dimensions_cells.x * finestCellSize_m,
     // The lid variants seed the top brick of a two-brick column; the mid-air
     // variants seed the middle brick of a three-brick column. Both leave the
     // same eight cells of clearance beneath, so all four share one analytic
     // trajectory and one impact time.
-    height_m: lidAttached ? 0.8 : 1.2,
-    depth_m: 1.2,
+    height_m: dimensions_cells.y * finestCellSize_m,
+    depth_m: dimensions_cells.z * finestCellSize_m,
     // Ignored: the seeded brick replaces the base fill entirely.
     fillFraction: 512 / (24 * (lidAttached ? 16 : 24) * 24),
     top: "closed",
     fluidWallMode: "free-slip",
   };
-  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.voxelDomain = { finestCellSize_m, brickSize_cells: 8 };
   scene.fluid.initialCondition = "dam-break";
   scene.fluid.initialBrickSeeds_m = [{
     x: cornered ? -0.55 : 0,
@@ -644,6 +686,16 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     methodProfile: POWER_VALIDATION_METHOD_PROFILE,
     create: createMinimalPowerDamBreakScene,
     camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
+  },
+  {
+    id: "symmetric-expansion",
+    name: "Octree · symmetric expansion",
+    group: "Comparisons",
+    description: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank. Its factor-1 Section 5 surface authority avoids the sparse JFA approximation, while Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
+    background: "default",
+    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    create: createSymmetricExpansionScene,
+    camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } }
   },
   {
     id: "minimal-power-dam-break-32",

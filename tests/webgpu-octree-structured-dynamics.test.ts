@@ -67,8 +67,11 @@ test("overhead contact is unilateral: tension marks separation, the next rebuild
   // closed world faces, and the NEXT boundary rebuild opens exactly those
   // faces so the solve itself resolves separation with a p = 0 ghost.
   assert.match(structuredVelocityDynamicsWGSL,
-    /fn markSeparationRow[\s\S]*solved<0\.[\s\S]*dot\(normal\(handle\),up\)>\.5/,
-    "separation marks require solved tension and a gravity-opposed world face");
+    /fn markSeparationRow[\s\S]*let contact=\.25\*p\.physical\.z\*weight\*p\.physical\.x;[\s\S]*let opening=finite\(solved\)&&solved<contact;[\s\S]*dot\(normal\(handle\),up\)>\.5/,
+    "sub-hydrostatic contact pressure must release a gravity-opposed world face immediately");
+  assert.doesNotMatch(structuredVelocityDynamicsWGSL,
+    /let opening=finite\(solved\)&&solved<0\./,
+    "the first stationary top layer must not wait a substep for strict tension");
   assert.match(dynamicsHost, /Mark structured overhead separation/);
   assert.match(structuredBoundaryCoefficientWGSL,
     /if\(boundaryBit!=0u&&\(p\.resolved\.z&boundaryBit\)!=0u\)\{[\s\S]*?aperture=select\(0\.,1\.,separationFresh\(lo,boundaryBit\)\);/,
@@ -77,11 +80,8 @@ test("overhead contact is unilateral: tension marks separation, the next rebuild
     "stale marks re-close so the active set tracks the solved tension");
   // Complementarity hysteresis: a separated film solves p ~ 0, not p < 0, so
   // a mark that required fresh tension every epoch re-welded the film on an
-  // open/closed duty cycle (free-fall drop oracle: top liquid layer saturates
-  // near 0.9 m/s under a 2.8 m/s parabola). An open face therefore renews
-  // below the quarter-cell hydrostatic contact scale and re-closes only under
-  // genuine positive contact pressure; renewal may keep faces tension opened
-  // but never open new ones.
+  // open/closed duty cycle. Renewal may keep faces tension opened but never
+  // open new ones.
   assert.match(structuredVelocityDynamicsWGSL,
     /let contact=\.25\*p\.physical\.z\*weight\*p\.physical\.x;[\s\S]*renewing=finite\(solved\)&&previousBits!=0u&&age<=2u&&solved<contact/,
     "an open separation face renews while contact pressure stays below the hydrostatic contact scale");
@@ -155,6 +155,69 @@ test("structured dynamics owns destination writes and has no general face/incide
   assert.match(structuredVelocityDynamicsWGSL,
     /boundaryControl\[6\]==acc\(3u\)[\s\S]*worksets\[base\]!=acc\(3u\)/,
     "hot dynamics must consume only the current committed dynamic boundary worksets");
+});
+
+test("velocity reconstruction is permutation invariant and exactly odd under reflection", () => {
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn canonicalReconstructionSum\(values:array<f32,31>,count:u32\)/);
+  assert.match(structuredVelocityDynamicsWGSL,
+    /abs\(sorted\[j-1u\]\)<=abs\(value\)[\s\S]*balance\+=1[\s\S]*balance-=1[\s\S]*f32\(balance\)\*magnitude/,
+    "equal-magnitude terms must collapse before summation so negating every term negates the exact f32 result");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /termsX\[local\]=term\.x;termsY\[local\]=term\.y;termsZ\[local\]=term\.z[\s\S]*canonicalReconstructionSum\(termsX,header\.y\)/,
+    "all catalog incidences must enter the canonical component fold");
+});
+
+test("divergence flux is independent of reflected incidence order", () => {
+  const divergence = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceRow("),
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredClass0("));
+  assert.match(divergence, /var fluxTerms:array<f32,31>/);
+  assert.match(divergence,
+    /fluxTerms\[local\]=sign\*area\*boundaryVelocity[\s\S]*canonicalReconstructionSum\(fluxTerms,count\)/,
+    "the paper's integrated face flux must not depend on catalog slot order");
+  assert.doesNotMatch(divergence, /flux\+=/);
+});
+
+test("advection interpolation folds reflected corners canonically", () => {
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn snapInterpolationCoordinate\(value:f32\)->f32\{\s*return round\(value\*65536\.\)\/65536\.;/,
+    "world-space construction dust must resolve to one dyadic canonical coordinate");
+  const staggered = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn staggeredComponent("),
+    structuredVelocityDynamicsWGSL.indexOf("fn staggeredSample("));
+  assert.match(staggered,
+    /weight=canonicalProduct3\(alongWeight,transverseWeights\.x,transverseWeights\.y\)/,
+    "staggered trilinear weights must not depend on which world transverse axis is visited first");
+  assert.match(staggered,
+    /terms\[termCount\]=weight\*resolved\.x;termCount\+=1u;[\s\S]*canonicalInterpolation8\(terms,termCount\)/);
+  const cell = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn cellSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn regularSample("));
+  assert.match(cell, /weight=canonicalProduct3\(select\(1\.-t\.x[\s\S]*select\(1\.-t\.z/,
+    "cube fallback weights must be invariant to horizontal axis permutation");
+  assert.match(cell,
+    /termsX\[termCount\]=term\.x;termsY\[termCount\]=term\.y;termsZ\[termCount\]=term\.z[\s\S]*canonicalInterpolation8\(termsX,termCount\)/);
+  const transition = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn transitionSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn interpolationElementSample("));
+  assert.match(structuredVelocityDynamicsWGSL, /fn transitionFanSample[\s\S]*canonicalInterpolation4\(termsX\)/);
+  assert.match(transition,
+    /let local=snapInterpolationCoordinates\(\s*powerTransform\(\(x-center\)\/extent/);
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn canonicalDeterminant\(a:vec3f,b:vec3f,c:vec3f\)->f32[\s\S]*canonicalProduct3[\s\S]*canonicalInterpolation8\(terms,6u\)/,
+    "tetrahedral determinants must be invariant to permutation of world axes");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn canonicalVelocityDot\(a:vec3f,b:vec3f\)->f32[\s\S]*canonicalInterpolation4[\s\S]*projected=canonicalVelocityDot\(transported\.xyz,n\)/,
+    "power-face projection must not depend on the order of swapped world axes");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /positiveSum=canonicalInterpolation4\(array<f32,4>\(positive\.x,positive\.y,positive\.z,positive\.w\)\)/,
+    "barycentric normalization must not depend on transformed selector order");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /canonicalVertical=abs\(powerTransform\(vec3f\(0\.,1\.,0\.\),rowTransform\)\)[\s\S]*symmetryMask=\(catalog\[thAt\+2u\]>>\(8u\+8u\*fixedAxis\)\)&255u[\s\S]*array<u32,24>[\s\S]*d4\[8u\*fixedAxis\+symmetry\][\s\S]*canonicalInterpolation8\(xTerms,sampleCount\)/,
+    "a symmetric co-spherical link must average the D4 fan conjugated through the row transform");
+  assert.doesNotMatch(structuredVelocityDynamicsWGSL, /tetraFanClosedUnderD4Transform|tetraFanUsesSelector/,
+    "immutable fan closure must be generated once, never reproved inside every sample");
 });
 
 test("transition barycentric sampling requires non-face selector adjacency", () => {
@@ -312,7 +375,7 @@ test("newly wet topology faces inherit the accepted Section 5 air extension", ()
     /words\[54\] = resources\.airSupportLayout\.ownerDirectoryOffsetWords;[\s\S]*words\[55\] = resources\.airSupportLayout\.ownerDirectoryCellCapacity;/,
     "topology transfer must receive the same dense owner directory as fine transport");
   assert.match(structuredVelocityDynamicsWGSL,
-    /fn extendedOwnerVelocity\(point:vec3f\)[\s\S]*supportPublicationValid\(\)[\s\S]*ownerDirectoryOffsetWords\+4u\*cell[\s\S]*taggedVelocity\(tag\)/,
+    /fn extendedOwnerTag\(q:vec3u\)[\s\S]*ownerDirectoryOffsetWords\+4u\*cell[\s\S]*fn extendedOwnerVelocity\(point:vec3f\)[\s\S]*supportPublicationValid\(\)[\s\S]*taggedVelocity\(tag\)/,
     "a new liquid face must resolve its old value from the accepted extrapolated owner vector");
   const transfer = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn transferStructuredTopologyCandidate("),
@@ -328,6 +391,29 @@ test("newly wet topology faces inherit the accepted Section 5 air extension", ()
     "the extended field is used only after exact old-row transfer fails, and missing support still rejects");
   assert.doesNotMatch(transfer, /old=vec4f\(0/,
     "newly wet faces must never be admitted with an invented zero velocity");
+});
+
+test("Section 5 owner-directory sampling canonically folds exact grid seams", () => {
+  const shader = structuredVelocityDynamicsWGSL.replace(/\s+/g, "");
+  const extension = shader.slice(shader.indexOf("fnextendedOwnerTag"), shader.indexOf("fnaxisNeighbor"));
+  assert.match(extension, /seamMask.*abs\(grid\[axis\]-rounded\[axis\]\)<=1e-5/s,
+    "float32-near integer coordinates must resolve as one geometric seam");
+  assert.match(extension, /tags:array<u32,8>.*tags\[prior\]==tag.*duplicate=true/s,
+    "a coarse owner reached through several finest cells must contribute once");
+  assert.match(extension,
+    /canonicalInterpolation8\(xTerms,count\).*canonicalInterpolation8\(yTerms,count\).*canonicalInterpolation8\(zTerms,count\)/s,
+    "incident seam limits must be folded in a permutation-invariant, reflection-odd sum");
+  assert.match(extension, /if\(seamMask==0u\).*extendedOwnerTag\(vec3u\(floor\(grid\)\)\)/s,
+    "off-seam extension samples must retain the single-directory-owner fast path");
+  assert.match(shader,
+    /fncandidateRowCenterInsideOld.*doubled=2u\*origin\+vec3u\(rg\.y\).*incident=acceptedRowContainingFinestCell.*incident!=resolved.*returnfalse/s,
+    "a candidate centre is old-liquid interior only when every incident finest cell names one old leaf");
+  assert.match(shader,
+    /ownerInsideOld=candidateRowCenterInsideOld\(candidateBank,candidateOwner\).*neighborInsideOld=uniformNeighbor!=INVALID&&candidateRowCenterInsideOld\(candidateBank,uniformNeighbor\).*if\(!ownerInsideOld&&!neighborInsideOld\)/s,
+    "topology transfer must classify the unordered incident pair, not one arbitrary stored owner");
+  assert.match(shader,
+    /vectorValid\(ownerField\)&&vectorValid\(neighborField\).*canonicalInterpolation4.*ownerField\.x,neighborField\.x/s,
+    "the genuinely two-sided old-field ambiguity must use a D4-canonical fold");
 });
 
 test("momentum advection consumes the projected extended field on air rows", () => {
@@ -368,27 +454,42 @@ test("regular advection sampling is per-axis face-based with the cube basis as f
   const advection = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn advect("),
     structuredVelocityDynamicsWGSL.indexOf("fn forceFamily("));
-  // The face-centre sample stays on the owner's closure (the staggered basis
-  // reproduces the face's own value there); the midpoint and departure
-  // re-resolve the containing row first, as main's sampleOld resolved
-  // owner(x) per sample point, with the pinned owner row as the fallback.
-  assert.ok(advection.includes("adv=regularSample(row,x)"),
-    "the face-centre sample must route regular rows through the staggered-first sampler");
-  for (const site of ["middle=characteristicSample(row,midpoint)",
-    "transported=characteristicSample(row,departure)"]) {
+  // A reflection exchanges the arbitrary low-coordinate owner of a shared
+  // face. The face-centre seam therefore resolves both incident dual-element
+  // limits, while midpoint and departure samples re-resolve their containing
+  // row as main's sampleOld resolved owner(x) per sample point.
+  assert.ok(advection.includes("adv=faceCharacteristicSample(handle,x)"),
+    "the face-centre sample must not depend on the storage face's owner side");
+  const faceCharacteristic = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn faceCharacteristicSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn rowTouchesDryDirection("));
+  assert.match(faceCharacteristic,
+    /incidentInterpolationElementSample\(low,point\)[\s\S]*incidentInterpolationElementSample\(high,point\)[\s\S]*canonicalInterpolation4/,
+    "a shared face must canonically fold both valid incident element limits");
+  for (const site of ["middle=characteristicSample(midpointRow,midpoint)",
+    "transported=characteristicSample(departureRow,departure)"]) {
     assert.ok(advection.includes(site),
       `trace samples must resolve the containing element per point (${site})`);
   }
+  assert.match(advection,
+    /midpointRow=characteristicIncidentRow\(handle,adv\.xyz\)[\s\S]*midpoint=characteristicPoint\(midpointRow,x,\.5\*p\.physical\.y,adv\.xyz\)[\s\S]*departureRow=characteristicIncidentRow\(handle,middle\.xyz\)[\s\S]*departure=characteristicPoint\(departureRow,x,p\.physical\.y,middle\.xyz\)/,
+    "both midpoint stages must construct characteristics in the reflection-equivariant grid frame");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn characteristicIncidentRow\(handle:u32,velocity:vec3f\)->u32[\s\S]*normalVelocity=canonicalVelocityDot\(velocity,normal\(handle\)\)[\s\S]*select\(high,low,normalVelocity>=0\.\)/,
+    "a shared face must choose the physical upstream incident row, never its arbitrary storage owner");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn characteristicPoint\(row:u32,x:vec3f,dt:f32,velocity:vec3f\)->vec3f[\s\S]*local=snapInterpolationCoordinates\(powerTransform\(\(x-center\)\/extent,transform\)\)[\s\S]*displacement=snapInterpolationCoordinates\(dt\*powerTransform\(velocity,transform\)\/extent\)[\s\S]*traced=snapInterpolationCoordinates\(local-displacement\)[\s\S]*inverseTransform\(traced,transform\)/,
+    "world-space translation must not introduce a side-dependent final ulp before Section 5 interpolation");
   const characteristic = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn characteristicSample("),
     structuredVelocityDynamicsWGSL.indexOf("fn rowTouchesDry("));
   assert.match(characteristic, /acceptedRowContaining\(point\)/,
     "per-point resolution must consult the accepted row directory");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn seamInterpolationSample\(point:vec3f\)[\s\S]*abs\(grid\[axis\]-round\(grid\[axis\]\)\)<=1e-5[\s\S]*acceptedRowContaining\(probe\)[\s\S]*incidentInterpolationElementSample\(candidate,point\)[\s\S]*canonicalInterpolation8[\s\S]*let seam=seamInterpolationSample\(point\)/,
+    "a characteristic on an octree seam must fold every distinct incident local Delaunay limit");
   assert.match(characteristic, /interpolationElementSample\(row,point\)/,
     "the pinned incident row remains the fallback when the directory misses");
-  assert.match(advection,
-    /let centerTag=regularTag\(row,vec3i\(0\)\);[\s\S]*let useTransition=centerTag!=row/,
-    "the producer's published closure marker alone selects the basis: a wall-touching row has a nonzero caseId but keeps axis-normal cube faces and must stay staggered");
   // (row, axis, side) resolves through the publisher's O(1) family-slot map,
   // never a per-slot scan: classifyStructuredCatalogSlots writes
   // rowFamilyHandles[6*row+family] and publishSection63Rows fills
@@ -466,16 +567,18 @@ function staggeredCorners(origin: readonly number[], h: number, extent: readonly
     if (other === axis) continue;
     sample[other] = Math.min(Math.max(sample[other]!, 0.5 * h), extent[other]! - 0.5 * h);
   }
-  const along = (sample[axis]! - origin[axis]!) / h;
+  const snap = (value: number) => Math.round(value * 65_536) / 65_536;
+  const center = origin.map((value) => value + 0.5 * h);
+  const local = sample.map((value, component) => snap((value - center[component]!) / h));
+  const along = local[axis]! + 0.5;
   const plane = Math.min(Math.max(Math.floor(along), -1), 1);
   let tAlong = Math.min(Math.max(along - plane, 0), 1);
   if (tAlong < 1e-5) tAlong = 0; else if (tAlong > 1 - 1e-5) tAlong = 1;
-  const center = origin.map((value) => value + 0.5 * h);
   const low = [0, 0, 0]; const tTransverse = [0, 0, 0];
   for (let other = 0; other < 3; other += 1) {
     if (other === axis) continue;
-    if (sample[other]! < center[other]!) low[other] = -1;
-    let t = Math.min(Math.max((sample[other]! - (center[other]! + low[other]! * h)) / h, 0), 1);
+    if (local[other]! < 0) low[other] = -1;
+    let t = Math.min(Math.max(local[other]! - low[other]!, 0), 1);
     if (t < 1e-5) t = 0; else if (t > 1 - 1e-5) t = 1;
     tTransverse[other] = t;
   }
@@ -498,12 +601,15 @@ function staggeredCorners(origin: readonly number[], h: number, extent: readonly
 
 test("staggered weights reproduce a face's own value exactly at its centre", () => {
   // Pin the WGSL arithmetic the CPU transcription mirrors.
-  assert.match(structuredVelocityDynamicsWGSL, /let along=\(sample\[axis\]-origin\[axis\]\)\/h;/);
+  assert.match(structuredVelocityDynamicsWGSL,
+    /let local=snapInterpolationCoordinates\(\(sample-center\)\/h\);[\s\S]*let along=local\[axis\]\+\.5;/);
   assert.match(structuredVelocityDynamicsWGSL, /let plane=clamp\(i32\(floor\(along\)\),-1,1\);/);
   assert.match(structuredVelocityDynamicsWGSL,
     /if\(tAlong<1e-5\)\{tAlong=0\.;\}else if\(tAlong>1\.-1e-5\)\{tAlong=1\.;\}/,
     "the measure-zero snap keeps weight one on a face's own value under floating-point dust");
-  assert.match(structuredVelocityDynamicsWGSL, /var weight=select\(1\.-tAlong,tAlong,\(corner&1u\)!=0u\);/);
+  assert.match(structuredVelocityDynamicsWGSL,
+    /let alongWeight=select\(1\.-tAlong,tAlong,\(corner&1u\)!=0u\);[\s\S]*weight=canonicalProduct3\(alongWeight,transverseWeights\.x,transverseWeights\.y\)/,
+    "the three basis factors must be multiplied independently of world-axis visitation order");
   assert.match(structuredVelocityDynamicsWGSL,
     /sample\[axis\]=clamp\(sample\[axis\],0\.,f32\(d\[axis\]\)\*p\.physical\.x\);/,
     "the axis-normal face lattice reaches the domain walls exactly");
@@ -804,7 +910,7 @@ test("moving-solid flux is mandatory and liquid classification follows the accep
   assert.match(dynamicsHost, /resources\.liquidMask\.size < structured\.plan\.rowCapacity \* 2 \* 4/);
   assert.match(structuredVelocityDynamicsWGSL, /if\(aperture==0\.\)\{setValue\(handle,solid\);return;\}/);
   assert.match(structuredVelocityDynamicsWGSL,
-    /boundaryVelocity=select\(aperture\*sample\+\(1\.-aperture\)\*solid,prescribed\.x,prescribed\.y>0\.\)[\s\S]*flux\+=sign\*area\*boundaryVelocity/);
+    /boundaryVelocity=select\(aperture\*sample\+\(1\.-aperture\)\*solid,prescribed\.x,prescribed\.y>0\.\)[\s\S]*fluxTerms\[local\]=sign\*area\*boundaryVelocity/);
   assert.match(structuredVelocityDynamicsWGSL,
     /projected=value\(handle\)-p\.physical\.y\*\(pressureHi-pressureLo\)\*inv\*scale\/p\.physical\.z/);
   assert.doesNotMatch(structuredVelocityDynamicsWGSL,
@@ -975,6 +1081,42 @@ test("the body-impulse exchange is the exact adjoint of the divergence solid ter
     "attribution must use the same nearest-body-within-half-a-face predicate as the boundary producer");
   assert.doesNotMatch(exchange, /setValue|rhs\[|outputVector/,
     "the adjoint reads the solved pressure and writes only the resident rigid exchange");
+});
+
+test("zero-body structured dynamics omits body-impulse pipelines", () => {
+  const dynamicsHost = readFileSync(new URL("../lib/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
+  assert.match(dynamicsHost,
+    /this\.resources\.bodyCount === 0 \? \[\][\s\S]*exchangeStructuredBodyImpulseClass/,
+    "a scene without rigid bodies must not create the four impulse pipelines");
+  assert.match(dynamicsHost, /count > this\.resources\.bodyCount/,
+    "runtime coupling cannot exceed the construction-time pipeline roster");
+  assert.match(dynamicsHost,
+    /if \(couplingBodyCount > 0\) \{[\s\S]*this\.bodyImpulse/,
+    "the existing encode gate must remain conditional on active bodies");
+});
+
+test("structured dynamics can defer and sequentially initialize its pipelines", () => {
+  assert.match(dynamicsHost,
+    /constructor\([\s\S]*deferPipelineCompilation = false\)[\s\S]*if \(!deferPipelineCompilation\) this\.createPipelinesSync\(\)/,
+    "existing direct construction must retain synchronous pipeline creation by default");
+  const initialize = dynamicsHost.slice(dynamicsHost.indexOf("async initializePipelines("),
+    dynamicsHost.indexOf("private requirePipelines()"));
+  assert.match(initialize,
+    /for \(let index = 0; index < entryPoints\.length; index \+= 1\) \{[\s\S]*await this\.device\.createComputePipelineAsync/,
+    "deferred compilation must apply backpressure after every individual pipeline");
+  assert.match(initialize,
+    /onProgress\(entryPoint, index, entryPoints\.length\)[\s\S]*createComputePipelineAsync[\s\S]*onProgress\(entryPoint, index \+ 1, entryPoints\.length\)/,
+    "the caller must see which individual program is pending inside the driver");
+  assert.doesNotMatch(initialize, /Promise\.all/,
+    "deferred compilation must not fan out driver work");
+  assert.match(initialize, /this\.assignPipelines\(pipelines\)/,
+    "the complete pipeline set must be published only after sequential compilation");
+  assert.match(dynamicsHost,
+    /this\.resources\.bodyCount === 0 \? \[\][\s\S]*ROW_CLASSES\.map\(\(value\) => `exchangeStructuredBodyImpulseClass/,
+    "the deferred manifest must preserve zero-body pruning");
+  assert.match(dynamicsHost,
+    /\.\.\.\(this\.projectionEnergyProbe \? \[[\s\S]*summarizeStructuredPreProjectionEnergy[\s\S]*\] : \[\]\)/,
+    "disabled energy diagnostics must not compile four unreachable programs");
 });
 
 test("only integrating bodies put the adjoint on the command graph", () => {

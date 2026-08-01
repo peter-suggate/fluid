@@ -13,7 +13,7 @@ import {
   type CubeTransform,
 } from "./octree-power-topology";
 
-export const OCTREE_POWER_CATALOG_VERSION = 5;
+export const OCTREE_POWER_CATALOG_VERSION = 7;
 export const OCTREE_POWER_ROW_TEMPLATE_VERSION = 1;
 export const OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS = 4;
 /** normalized coefficient, normalized area, normalized inverse distance. */
@@ -24,6 +24,16 @@ export const OCTREE_POWER_RECONSTRUCTION_FLOATS = 3;
 export const OCTREE_POWER_CATALOG_FACE_FLOATS = 12;
 export const OCTREE_POWER_CATALOG_TETRAHEDRON_BYTES = 4;
 export const OCTREE_POWER_CATALOG_ENTRY_UNIFORM = 1;
+/** Three axis-stabilizer D4 masks occupy bits 8..31 of tetrahedron flags. */
+export const OCTREE_POWER_CATALOG_D4_MASK_SHIFT = 8;
+export const OCTREE_POWER_CATALOG_D4_MASK_BITS = 8;
+export const OCTREE_POWER_CATALOG_D4_TRANSFORMS = Object.freeze([0, 1, 4, 5, 40, 41, 44, 45] as const);
+/** Cube transforms preserving canonical x, y, or z respectively. */
+export const OCTREE_POWER_CATALOG_D4_TRANSFORMS_BY_FIXED_AXIS = Object.freeze([
+  Object.freeze([0, 2, 4, 6, 8, 10, 12, 14] as const),
+  OCTREE_POWER_CATALOG_D4_TRANSFORMS,
+  Object.freeze([0, 1, 2, 3, 16, 17, 18, 19] as const),
+] as const);
 export const OCTREE_POWER_ROW_TEMPLATE_FLAGS = Object.freeze({
   regularInterior: 1 << 0,
   transition: 1 << 1,
@@ -592,6 +602,11 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
   const selectorByGeometry = new Map(sortedVertexGeometries.map(([key], selector) => [key, selector]));
   const tetrahedronVertexData = new Float32Array(sortedVertexGeometries.length * 4);
   sortedVertexGeometries.forEach(([, geometry], selector) => tetrahedronVertexData.set(geometry, selector * 4));
+  const selectorByTransformedGeometry = OCTREE_POWER_CATALOG_D4_TRANSFORMS_BY_FIXED_AXIS.map((transforms) =>
+    transforms.map((transformCode) => sortedVertexGeometries.map(([, geometry]) => selectorByGeometry.get(JSON.stringify([
+      ...transformPowerVector([geometry[0], geometry[1], geometry[2]], OCTREE_CUBE_TRANSFORMS[transformCode]),
+      geometry[3],
+    ])))));
   const candidates = prepared.map(({ configuration, canonical }) => ({
     configuration, canonical, entry: normalizedEntry(configuration, canonical, selectorByGeometry),
   })).sort((a, b) => Number(regularInteriorEntry(b.entry)) - Number(regularInteriorEntry(a.entry))
@@ -692,8 +707,19 @@ export function buildOctreePowerCatalog(configurations: readonly OctreePowerTopo
         Math.abs(value - (row === column ? 1 : 0)),
       );
     }
+    const usedSelectors = new Set(entry.tetrahedra.flat());
+    const d4Masks = selectorByTransformedGeometry.map((axisTransforms) =>
+      axisTransforms.reduce((mask, transformed, transformIndex) =>
+        [...usedSelectors].every((selector) => transformed[selector] !== undefined
+          && usedSelectors.has(transformed[selector]!)) ? mask | (1 << transformIndex) : mask, 0));
+    if (d4Masks.some((mask) => (mask & 1) === 0)) {
+      throw new Error(`Power catalog entry ${entryIndex} lost an identity D4 fan`);
+    }
+    const d4Flags = d4Masks.reduce((flags, mask, axis) =>
+      flags | (mask << (OCTREE_POWER_CATALOG_D4_MASK_SHIFT + axis * OCTREE_POWER_CATALOG_D4_MASK_BITS)), 0);
     tetrahedronHeaders.set([tetrahedronCursor, entry.tetrahedra.length,
-      entry.uniform ? OCTREE_POWER_CATALOG_ENTRY_UNIFORM : 0], entryIndex * 3);
+      (entry.uniform ? OCTREE_POWER_CATALOG_ENTRY_UNIFORM : 0)
+        | d4Flags], entryIndex * 3);
     for (const tetrahedron of entry.tetrahedra) {
       if (tetrahedron.some((selector) => selector < 0 || selector >= sortedVertexGeometries.length || selector > 0xff)) {
         throw new Error(`Power catalog tetrahedron selector overflow in entry ${entryIndex}`);
