@@ -68,8 +68,15 @@ test("dry SVO startup compiles only the GLOBAL presentation pipeline", () => {
   assert.match(rendererSource, /label: "Submitting first sparse garden frame"[^]*completed: 3, total: 4/);
 });
 
-test("production exposes exact static-primary coherence behind a default-off safe-scene gate", () => {
-  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*"canonical-parametric"[^]*"split", 0, "static-primary", true, true, true\)/,
+test("production rasterizes primary visibility and derives coherence from the traversal it got", () => {
+  assert.match(rendererSource, /const traversal = this\.requestedPrimaryTraversal === "raster"\s*&& device\.limits\.maxColorAttachmentBytesPerSample >= FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE\s*\?\s*"raster-primary" as const : "canonical-parametric" as const/,
+    "production must rasterize the primary wherever the device grants the wider per-sample budget, and fall back rather than fail to construct");
+  // Reuse is worth 28.5 ms of a 49.6 ms traced frame and 7.9 ms of a 29.0 ms
+  // rastered one, where the impostor pass blocks it outright. Deriving the mode
+  // keeps the raster path from advertising a cache that can never fill.
+  assert.match(rendererSource, /const coherence = traversal === "raster-primary" \? "off" as const : "static-primary" as const/,
+    "stationary primary reuse must follow the traversal, not be requested unconditionally");
+  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*traversal, "off", "split", 0, coherence, true, true, true\)/,
     "the production renderer must retain the measured split/coherence and analytic-raster capability");
   assert.match(rendererSource, /const primaryCoherenceKey = activeSvoTuning\.stationaryPrimaryReuseEnabled[^]*!sceneRuntime\.fluidSolver \|\| !this\.simulationRunning[^]*presentationCoherenceKey[^]*sceneEpoch/,
     "the opt-in must still restrict complete caller-owned keys to static worlds and paused solvers");

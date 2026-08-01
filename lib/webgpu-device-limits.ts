@@ -3,7 +3,16 @@ type FluidAdapterLimits = Pick<GPUSupportedLimits,
   | "maxStorageBufferBindingSize"
   | "maxBufferSize"
   | "maxTextureDimension3D"
+  | "maxColorAttachmentBytesPerSample"
 >;
+
+/**
+ * Raster-assisted primary visibility writes packed surface (16 B), identity and
+ * media (8 B), exact primary geometry (16 B) and opaque identity (8 B) as four
+ * depth-tested colour attachments, which is 16 B past the WebGPU default.
+ */
+export const FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE = 48;
+const DEFAULT_COLOR_ATTACHMENT_BYTES_PER_SAMPLE = 32;
 
 /**
  * Limits whose adapter values are required by the large/sparse fluid paths.
@@ -19,6 +28,16 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
     maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
     maxBufferSize: limits.maxBufferSize,
     maxTextureDimension3D: limits.maxTextureDimension3D,
+    // Requested, never assumed: adapters that cannot grant this still produce a
+    // valid device, and the raster-primary renderer fails closed against the
+    // granted device limit rather than against this request.
+    maxColorAttachmentBytesPerSample: Math.max(
+      DEFAULT_COLOR_ATTACHMENT_BYTES_PER_SAMPLE,
+      Math.min(
+        limits.maxColorAttachmentBytesPerSample ?? DEFAULT_COLOR_ATTACHMENT_BYTES_PER_SAMPLE,
+        FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE,
+      ),
+    ),
   };
 }
 

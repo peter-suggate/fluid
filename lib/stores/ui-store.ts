@@ -3,6 +3,8 @@ import { bodySelection, DEFAULT_EDITOR_TOOL, selectedBodyIdOf, type EditorSelect
 import { defaultCamera, type CameraState, type RigidShape, type ScenePropShape } from "../model";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
+  type SvoConeTracingMode,
+  type SvoPrimaryTraversalMode,
 } from "../svo-render-options";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoCostOverlayMode } from "../svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../svo-render-tuning";
@@ -53,6 +55,10 @@ interface UIStore {
   voxelRenderMode: VoxelRenderMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
+  /** Lighting visibility source: cone marches, exact SVO rays, or none at all. */
+  svoConeTracingMode: SvoConeTracingMode;
+  /** How primary visibility is resolved: rasterized brick proxies, or the traversal megakernel. */
+  svoPrimaryTraversal: SvoPrimaryTraversalMode;
   svoCostOverlay: SvoCostOverlayMode;
   svoMaximumTraversalDepth: number;
   svoMaximumNodeVisits: number;
@@ -125,6 +131,8 @@ interface UIStore {
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
+  setSvoConeTracingMode: (mode: SvoConeTracingMode) => void;
+  setSvoPrimaryTraversal: (mode: SvoPrimaryTraversalMode) => void;
   setSvoCostOverlay: (mode: SvoCostOverlayMode) => void;
   setSvoMaximumTraversalDepth: (depth: number) => void;
   setSvoMaximumNodeVisits: (visits: number) => void;
@@ -169,6 +177,8 @@ export const useUIStore = create<UIStore>((set) => ({
   voxelRenderMode: "smooth",
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
+  svoConeTracingMode: DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode ?? "cones",
+  svoPrimaryTraversal: DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster",
   svoCostOverlay: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlay,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
@@ -204,6 +214,8 @@ export const useUIStore = create<UIStore>((set) => ({
   setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
+  setSvoConeTracingMode: (svoConeTracingMode) => set({ svoConeTracingMode }),
+  setSvoPrimaryTraversal: (svoPrimaryTraversal) => set({ svoPrimaryTraversal }),
   setSvoCostOverlay: (svoCostOverlay) => set({ svoCostOverlay }),
   setSvoMaximumTraversalDepth: (svoMaximumTraversalDepth) => set((state) => ({
     svoMaximumTraversalDepth: normalizeSvoRenderDiagnostics({

@@ -68,3 +68,16 @@ test("renderer publishes effective status through the viewport diagnostics bridg
   assert.match(panel, /data-testid="effective-renderer-status"/);
   for (const reason of ["missing-source", "unsupported-terrain", "unsupported-glass-cutout", "missing-pbr-materials", "missing-lighting-publications", "pipeline-compile-failure"]) assert.ok(panel.includes(`"${reason}"`));
 });
+
+test("a pipeline that is rebuilding reports as compiling rather than as a failure", () => {
+  // Startup and a primary-traversal swap both retire the pipeline while its
+  // replacement compiles. Reporting that as a compile failure tells the user
+  // their renderer broke when it is only busy, and the two states are told
+  // apart solely by whether a compile is still in flight.
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready, pipelineAvailable: false, pipelineCompiling: true, svoEncoded: false,
+  }), { effectiveMode: "raster", fallbackReason: "pipeline-compiling" });
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready, pipelineAvailable: false, pipelineCompiling: false, svoEncoded: false,
+  }), { effectiveMode: "raster", fallbackReason: "pipeline-compile-failure" });
+});

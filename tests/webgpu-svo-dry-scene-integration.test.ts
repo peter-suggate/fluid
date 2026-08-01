@@ -28,7 +28,8 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
 }
 
 test("GLOBAL SVO is the sole production presentation", () => {
-  assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS, { shadowsEnabled: true, ambientOcclusionEnabled: true });
+  assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS,
+    { shadowsEnabled: true, ambientOcclusionEnabled: true, coneTracingMode: "cones", primaryTraversal: "raster" });
   assert.doesNotMatch(rendererSource, /svoRenderMode|svoLightingMode|SvoRenderMode|SvoLightingMode/);
   expectSource(rendererSource, /type SvoLightingOptions[^]*from "\.\/svo-render-options"/,
     "renderer must retain only GLOBAL visibility effects");

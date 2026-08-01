@@ -244,9 +244,12 @@ test("node-mip sampling publishes its own world origin inside the static uniform
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset,
     SVO_DRY_SCENE_PARAMS_LAYOUT.fluidCoverageWordOffset + SVO_FLUID_COVERAGE_LAYOUT.frameWords,
     "runtime tuning must immediately follow the 12-word fluid frame");
+  assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.rigidBoundsWordOffset,
+    SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset + 4,
+    "the whole-scene rigid sphere must immediately follow the GI controls");
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes,
-    (SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset + 4) * Uint32Array.BYTES_PER_ELEMENT,
-    "the uniform allocation must end after the GI controls");
+    (SVO_DRY_SCENE_PARAMS_LAYOUT.rigidBoundsWordOffset + 4) * Uint32Array.BYTES_PER_ELEMENT,
+    "the uniform allocation must end after the rigid bounds");
   assert.match(drySource, /floats\.set\(nodeMip\?\.worldOrigin_m \?\? structural\.domain\.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT\.nodeMipOriginWordOffset\)/);
   assert.match(svoDrySceneShader, /virtualVoxel=\(position_m-dry\.nodeMipOrigin\.xyz\)/,
     "topology experiments must not reinterpret an unchanged opacity atlas in the structural tree's coordinate frame");

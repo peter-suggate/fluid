@@ -26,6 +26,7 @@ const rendererFallbackLabels = {
   "missing-pbr-materials": "production PBR material table is unavailable",
   "missing-lighting-publications": "production light/environment publications are unavailable",
   "pipeline-compile-failure": "SVO pipeline failed to compile",
+  "pipeline-compiling": "SVO pipeline is compiling",
 } as const;
 
 const visualizationGradient = (mode: SvoCostOverlayMode) => mode === "off"
@@ -59,6 +60,10 @@ export function VisualPanel() {
   const setSvoShadowsEnabled = useUIStore((state) => state.setSvoShadowsEnabled);
   const svoAmbientOcclusionEnabled = useUIStore((state) => state.svoAmbientOcclusionEnabled);
   const setSvoAmbientOcclusionEnabled = useUIStore((state) => state.setSvoAmbientOcclusionEnabled);
+  const svoConeTracingMode = useUIStore((state) => state.svoConeTracingMode);
+  const setSvoConeTracingMode = useUIStore((state) => state.setSvoConeTracingMode);
+  const svoPrimaryTraversal = useUIStore((state) => state.svoPrimaryTraversal);
+  const setSvoPrimaryTraversal = useUIStore((state) => state.setSvoPrimaryTraversal);
   const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
   const setSvoCostOverlay = useUIStore((state) => state.setSvoCostOverlay);
   const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
@@ -115,7 +120,7 @@ export function VisualPanel() {
       <div className="render-status-line">
         <span className={effectiveRendererStatus.effectiveMode === "svo" ? "online" : ""} />
         <strong data-testid="effective-renderer-status">{effectiveRendererStatus.effectiveMode === "svo" ? "SVO GI ACTIVE" : "RASTER FALLBACK"}</strong>
-        <code>{Math.round(tuning.resolutionScale * 100)}% · cone {tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`}</code>
+        <code>{Math.round(tuning.resolutionScale * 100)}% · cone {svoConeTracingMode !== "cones" ? svoConeTracingMode : tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`}</code>
       </div>
     </header>
 
@@ -138,8 +143,8 @@ export function VisualPanel() {
           </div></div>
         </div>
         <div className="render-toggle-row" role="group" aria-label="SVO lighting effects">
-          <Toggle label="Shadows" checked={svoShadowsEnabled} onChange={setSvoShadowsEnabled} />
-          <Toggle label="AO" checked={svoAmbientOcclusionEnabled} onChange={setSvoAmbientOcclusionEnabled} />
+          <Toggle label="Shadows" checked={svoShadowsEnabled} disabled={svoConeTracingMode === "off"} onChange={setSvoShadowsEnabled} />
+          <Toggle label="AO" checked={svoAmbientOcclusionEnabled} disabled={svoConeTracingMode === "off"} onChange={setSvoAmbientOcclusionEnabled} />
         </div>
         <div className="svo-control-grid">
           <RangeControl label="Render resolution" unit="%" value={tuning.resolutionScale * 100} min={35} max={100} step={1} displayDigits={0}
@@ -149,16 +154,25 @@ export function VisualPanel() {
             onChange={(value) => updateTuning("environmentBrickRefinementLevels", value)}
             modified={modified("environmentBrickRefinementLevels")} onReset={resetTuning("environmentBrickRefinementLevels")}
             hint="Additional SVO subdivision for authored scenery outside the simulation lattice. Changing it rebuilds the sparse world." />
+          <label className="render-discrete-control"><span>Lighting visibility</span><div>
+            {([
+              { mode: "cones", label: "CONES", hint: "Cone-traced soft shadows, AO, and GI, fed by the reduced-rate prepass and world-GI cache." },
+              { mode: "exact", label: "EXACT", hint: "No cone stage runs; shadows and AO use bounded exact SVO visibility rays. Sharp reference shadows, costlier per pixel." },
+              { mode: "off", label: "OFF", hint: "No visibility work at all: unshadowed direct lighting, no AO, no GI. Strictly removes work." },
+            ] as const)
+              .map(({ mode, label, hint }) => <button key={mode} className={svoConeTracingMode === mode ? "active" : ""}
+                title={hint} onClick={() => setSvoConeTracingMode(mode)}>{label}</button>)}
+          </div></label>
           <label className="render-discrete-control"><span>Cone prepass</span><div>
             {([{ scale: 1, label: "FULL" }, { scale: 0.5, label: "2×2" }, { scale: 0.25, label: "4×4" }, { scale: 0.125, label: "8×8" }] as const)
               .map(({ scale, label }) => <button key={scale} className={tuning.coneLightingScale === scale ? "active" : ""}
-                onClick={() => updateTuning("coneLightingScale", scale)}>{label}</button>)}
+                disabled={svoConeTracingMode !== "cones"} onClick={() => updateTuning("coneLightingScale", scale)}>{label}</button>)}
           </div></label>
           <label className="render-discrete-control reconstruction-control"><span>Lighting reconstruction</span><div>
             {([{ mode: "nearest", label: "EXACT" }, { mode: "gated-linear", label: "LINEAR" }, { mode: "joint-bilateral", label: "BILAT" },
               { mode: "wide-relight", label: "WIDE" }, { mode: "full-res-relight", label: "RELIGHT" }] as const)
               .map(({ mode, label }) => <button key={mode} className={tuning.coneRadianceReconstruction === mode ? "active" : ""}
-                disabled={tuning.coneLightingScale === 1} onClick={() => updateTuning("coneRadianceReconstruction", mode)}>{label}</button>)}
+                disabled={tuning.coneLightingScale === 1 || svoConeTracingMode !== "cones"} onClick={() => updateTuning("coneRadianceReconstruction", mode)}>{label}</button>)}
           </div></label>
         </div>
         {effectiveRendererStatus.fallbackReason && <p className="render-inline-warning">SVO fallback: {rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}.</p>}
@@ -167,10 +181,19 @@ export function VisualPanel() {
       <ControlGroup title="Primary tracing" note="camera ray work caps" open>
         <div className="render-toggle-row" role="group" aria-label="SVO primary tracing optimizations">
           <Toggle label="Reuse stationary visibility" checked={tuning.stationaryPrimaryReuseEnabled}
-            hint="Reuse the exact primary G-buffer for an unchanged camera in static scenes or while simulation is paused."
+            disabled={svoPrimaryTraversal === "raster"}
+            hint="Reuse the exact primary G-buffer for an unchanged camera in static scenes or while simulation is paused. The raster primary is cheap enough not to cache, and its impostor pass blocks the reuse anyway."
             onChange={(value) => updateTuning("stationaryPrimaryReuseEnabled", value)} />
         </div>
         <div className="svo-control-grid">
+          <label className="render-discrete-control"><span>Primary visibility</span><div>
+            {([
+              { mode: "raster", label: "RASTER", hint: "Hardware-rasterize the resident bricks as depth-tested proxies. Octree leaves partition space, so the depth test is exact: the image matches TRACED pixel for pixel. 29.0 ms against 49.6 ms at 1500x1500 garden." },
+              { mode: "traced", label: "TRACED", hint: "The full-screen traversal megakernel, where every pixel marches the octree for itself. The reference the raster path is measured against." },
+            ] as const)
+              .map(({ mode, label, hint }) => <button key={mode} className={svoPrimaryTraversal === mode ? "active" : ""}
+                title={hint} onClick={() => setSvoPrimaryTraversal(mode)}>{label}</button>)}
+          </div></label>
           <RangeControl label="Maximum traversal depth" unit="levels" value={svoMaximumTraversalDepth} min={1} max={21} step={1} displayDigits={0} onChange={setSvoMaximumTraversalDepth}
             hint="Hierarchy depth accepted by every camera traversal." />
           <RangeControl label="Maximum node visits" unit="nodes" value={svoMaximumNodeVisits} min={1} max={256} step={1} displayDigits={0} onChange={setSvoMaximumNodeVisits}

@@ -799,6 +799,8 @@ export function WebGPUViewport() {
             {
               shadowsEnabled: ui.svoShadowsEnabled,
               ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
+              coneTracingMode: ui.svoConeTracingMode,
+              primaryTraversal: ui.svoPrimaryTraversal,
             },
             {
               overlay: ui.svoCostOverlay,

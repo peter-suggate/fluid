@@ -4,6 +4,7 @@ import test from "node:test";
 import { BROWSER_GPU_THROUGHPUT_DEPTH, canQueuePreparedGPUAdvance, FluidLabRenderer, submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
 import { MAXIMUM_PENDING_PHYSICS_ADVANCES } from "../lib/structured-step-snapshot";
 import { presentationStateChanged } from "../lib/frame-pacing";
+import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/webgpu-device-limits";
 
 test("GPU submission advances only once toward prepared simulation debt", () => {
   let submittedTime_s = 0;
@@ -243,6 +244,7 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
       maxStorageBufferBindingSize: 512 * 1024 * 1024,
       maxBufferSize: 1024 * 1024 * 1024,
       maxTextureDimension3D: 2048,
+      maxColorAttachmentBytesPerSample: 128,
     },
     requestDevice: async (descriptor: GPUDeviceDescriptor) => { requestedDescriptor = descriptor; return device; },
     info: { vendor: "test" }
@@ -273,6 +275,7 @@ test("renderer stops submitting frames and disposes its device after WebGPU loss
     maxStorageBufferBindingSize: 512 * 1024 * 1024,
     maxBufferSize: 1024 * 1024 * 1024,
     maxTextureDimension3D: 2048,
+    maxColorAttachmentBytesPerSample: FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE,
   });
 
   resolveDeviceLost({ reason: "unknown", message: "test device loss" } as GPUDeviceLostInfo);

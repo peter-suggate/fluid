@@ -21,7 +21,10 @@
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
  *      _RADIANCE_RECONSTRUCTION (nearest | gated-linear | joint-bilateral | wide-relight | full-res-relight),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
- *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide; default canonical-parametric),
+ *      FLUID_SVO_DRY_FRAME_CONE_TRACING (cones | exact | off; default cones;
+ *      matches the UI visibility switch and requires the profiler lane),
+ *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide |
+ *      raster-primary; default canonical-parametric; raster-primary implies both raster arms),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
  *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only static-world override),
  *      FLUID_SVO_DRY_FRAME_SHADING (inline | split | auto-relight; default auto-relight),
@@ -83,6 +86,7 @@ import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "../lib/svo-terrain-material";
 import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } from "../lib/terrain";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import type { SvoConeTracingMode } from "../lib/svo-render-options";
 import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
 import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
@@ -96,6 +100,7 @@ import {
   canEncodeSparseVoxelDryScene,
   resolveSparseVoxelThickGlassBinderStatus,
   SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
+  SVO_DRY_TRAVERSAL_MODES,
   SVO_DRY_SPLIT_RESIDENT_BYTES_PER_PIXEL,
   SparseVoxelDrySceneRenderer,
   svoConePrepassSize,
@@ -153,6 +158,7 @@ const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_FRAME_CONE_SCALE ?? 0.5);
 const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION ?? "full-res-relight";
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
+const coneTracingModeRaw = process.env.FLUID_SVO_DRY_FRAME_CONE_TRACING ?? "cones";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
 const profileBatch = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_BATCH ?? 1);
@@ -163,8 +169,11 @@ const phaseTraceEnabled = process.env.FLUID_SVO_DRY_FRAME_PHASE_TRACE === "1";
 const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "canonical-parametric";
 const brickOccupancyModeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY ?? "off";
 const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "auto-relight";
-const rasterGlassDiscovery = process.env.FLUID_SVO_DRY_FRAME_RASTER_GLASS === "1";
-const rasterRigidDiscovery = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID === "1";
+// Raster-assisted primary visibility unfuses panes and bodies out of the
+// primary fragment shader by construction, so it implies both raster arms.
+const rasterPrimary = (process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "") === "raster-primary";
+const rasterGlassDiscovery = rasterPrimary || process.env.FLUID_SVO_DRY_FRAME_RASTER_GLASS === "1";
+const rasterRigidDiscovery = rasterPrimary || process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID === "1";
 const rasterRigidForced = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE === "1";
 const lightAttributionEnabled = process.env.FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION === "1";
 const coneFanout = process.env.FLUID_SVO_DRY_FRAME_CONE_FANOUT === "1";
@@ -176,6 +185,8 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   dropGiPageCache: process.env.FLUID_SVO_DRY_FRAME_DROP_GI_PAGE_CACHE === "1",
   shortTraversalStack: process.env.FLUID_SVO_DRY_FRAME_SHORT_STACK === "1",
   tinyTraversalStack: process.env.FLUID_SVO_DRY_FRAME_TINY_STACK === "1",
+  rasterPrimaryNoFragmentDepth: process.env.FLUID_SVO_DRY_FRAME_NO_FRAG_DEPTH === "1",
+  rasterPrimaryHsrProbe: process.env.FLUID_SVO_DRY_FRAME_HSR_PROBE === "1",
 };
 const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
 const screenSpaceTerminationPixels = Number(process.env.FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS ?? 0);
@@ -220,8 +231,8 @@ assert.ok(Number.isSafeInteger(profileBatch) && profileBatch >= 1,
   "FLUID_SVO_DRY_FRAME_PROFILE_BATCH must be a positive integer");
 assert.ok(renderBrickSize === undefined || renderBrickSize === 4 || renderBrickSize === 8,
   "FLUID_SVO_DRY_FRAME_BRICK_SIZE must be 4 or 8");
-assert.ok(["hybrid", "canonical", "canonical-parametric", "compact", "wide"].includes(traversalModeRaw),
-  "FLUID_SVO_DRY_FRAME_TRAVERSAL must be hybrid, canonical, canonical-parametric, compact, or wide");
+assert.ok(SVO_DRY_TRAVERSAL_MODES.includes(traversalModeRaw as SvoDryTraversalMode),
+  `FLUID_SVO_DRY_FRAME_TRAVERSAL must be one of ${SVO_DRY_TRAVERSAL_MODES.join(", ")}`);
 assert.ok(["off", "bounds", "macro", "macro-hdda"].includes(brickOccupancyModeRaw),
   "FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY must be off, bounds, macro, or macro-hdda");
 assert.ok(["inline", "split", "auto-relight"].includes(shadingPathRaw),
@@ -232,7 +243,15 @@ assert.ok(rayCoherenceModeRaw === "off" || shadingPathRaw === "split",
   "FLUID_SVO_DRY_FRAME_COHERENCE=static-primary requires FLUID_SVO_DRY_FRAME_SHADING=split");
 assert.ok(Number.isFinite(screenSpaceTerminationPixels) && screenSpaceTerminationPixels >= 0,
   "FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS must be a non-negative finite number");
+assert.ok(["cones", "exact", "off"].includes(coneTracingModeRaw),
+  "FLUID_SVO_DRY_FRAME_CONE_TRACING must be cones, exact, or off");
+// Withholding the cone stages removes the reduced-rate plane the A/B, image
+// comparison, and attribution lanes below are defined against. The external
+// profiler lane times whatever graph is configured, so restrict the switch to it.
+assert.ok(coneTracingModeRaw === "cones" || profileSeconds > 0,
+  "FLUID_SVO_DRY_FRAME_CONE_TRACING other than cones requires FLUID_SVO_DRY_FRAME_PROFILE_SECONDS");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
+const coneTracingMode = coneTracingModeRaw as SvoConeTracingMode;
 const radianceReconstruction = radianceReconstructionRaw as SvoConeRadianceReconstruction;
 const traversalMode = traversalModeRaw as SvoDryTraversalMode;
 const brickOccupancyMode = brickOccupancyModeRaw as SvoBrickOccupancyMode;
@@ -482,10 +501,10 @@ renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
 renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
   coneRadianceReconstruction: radianceReconstruction });
 function applyLighting(scale: SvoConeLightingScale, shadows = shadowsEnabled, ambientOcclusion = ambientOcclusionEnabled): void {
-  renderer.setLightingOptions({ shadowsEnabled: shadows, ambientOcclusionEnabled: ambientOcclusion, coneLightingScale: scale });
+  renderer.setLightingOptions({ shadowsEnabled: shadows, ambientOcclusionEnabled: ambientOcclusion, coneLightingScale: scale, coneTracingMode });
 }
 applyLighting(coneScale);
-if (coneScale !== 1) {
+if (coneTracingMode === "cones" && coneScale !== 1) {
   await renderer.ensureConeLightingPrepass();
   log(`Cone-lighting prepass ready at scale ${coneScale} (${svoConePrepassSize(width, height, coneScale).join("x")})`);
 }
@@ -554,7 +573,7 @@ assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
 
 let coneBoundaryCount: number | undefined;
-if (readConeBoundaryCount && coneScale !== 1) {
+if (readConeBoundaryCount && coneTracingMode === "cones" && coneScale !== 1) {
   const readback = device.createBuffer({
     label: "Bench cone-boundary count readback",
     size: 4,
@@ -604,16 +623,32 @@ if (profileSeconds > 0) {
     scene: scenePresetId,
     resolution: { width, height },
     coneScale,
+    coneTracingMode,
   }));
   const profileStarted = performance.now();
   let frame = 0;
+  // The frame wall is split three ways because the pass timestamps never
+  // accounted for all of it. Dawn records nothing to Metal while the frame is
+  // being encoded — `finish()` is where the whole command buffer is translated
+  // — so CPU translation, queue submission and the actual GPU wait are three
+  // different costs that a single submit-to-fence span silently merges.
+  const encode_ms: number[] = [];
+  const finish_ms: number[] = [];
+  const fence_ms: number[] = [];
   while (performance.now() - profileStarted < profileSeconds * 1000) {
+    const encodeStarted = performance.now();
     const encoder = device.createCommandEncoder({ label: `SVO render frame ${frame}` });
     for (let repeat = 0; repeat < profileBatch; repeat += 1) encodeFrame(encoder);
     const submitted = performance.now();
-    device.queue.submit([encoder.finish()]);
+    const commands = encoder.finish();
+    const finished = performance.now();
+    device.queue.submit([commands]);
     await device.queue.onSubmittedWorkDone();
-    samples_ms.push((performance.now() - submitted) / profileBatch);
+    const completed = performance.now();
+    samples_ms.push((completed - submitted) / profileBatch);
+    encode_ms.push((submitted - encodeStarted) / profileBatch);
+    finish_ms.push((finished - submitted) / profileBatch);
+    fence_ms.push((completed - finished) / profileBatch);
     frame += profileBatch;
   }
   const sorted = [...samples_ms].sort((left, right) => left - right);
@@ -626,8 +661,12 @@ if (profileSeconds > 0) {
     p95Frame_ms: percentile95(samples_ms),
     minimumFrame_ms: sorted[0] ?? 0,
     maximumFrame_ms: sorted[sorted.length - 1] ?? 0,
+    medianJsEncode_ms: median(encode_ms),
+    medianCommandBufferFinish_ms: median(finish_ms),
+    medianSubmitToFence_ms: median(fence_ms),
     resolution: { width, height },
     coneScale,
+    coneTracingMode,
     profileBatch,
   };
   console.log(JSON.stringify(result));
@@ -664,7 +703,7 @@ async function timeFrames(count: number, label: string): Promise<number[]> {
       traceRecorder.resolve(encoder);
       device.queue.submit([encoder.finish()]);
       const trace = await traceRecorder.read();
-      assert.ok(trace, "generic GPU performance trace did not resolve");
+      assert.ok(trace, `generic GPU performance trace did not resolve${validationErrors.length > 0 ? `; device errors: ${validationErrors.join(" | ")}` : ""}`);
       samples.push(trace.total_ms);
     }
   } else {

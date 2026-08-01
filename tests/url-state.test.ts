@@ -434,3 +434,21 @@ test("retired sidebar switches are ignored and removed from canonical links", ()
   assert.equal(params.has("diagnostics"), false);
   assert.equal(params.has("waterdiag"), false);
 });
+
+test("query state carries the primary traversal so a comparison survives reload", () => {
+  const scene = getScenePreset("garden-svo-lighting").create();
+  const method = { methodId: "octree" as const, quality: "balanced" as const, overrides: {} };
+  const traced = parseQueryState("?svoPrimary=traced");
+  assert.equal(traced.ui.svoPrimaryTraversal, "traced");
+  assert.equal(new URLSearchParams(
+    serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, traced.ui),
+  ).get("svoPrimary"), "traced");
+
+  // The default stays out of the URL, and an unreadable value resolves to it
+  // rather than leaving the renderer holding a mode it cannot build.
+  const raster = parseQueryState("?svoPrimary=nonsense");
+  assert.equal(raster.ui.svoPrimaryTraversal, "raster");
+  assert.equal(new URLSearchParams(
+    serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, raster.ui),
+  ).get("svoPrimary"), null);
+});

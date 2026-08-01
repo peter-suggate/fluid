@@ -32,6 +32,7 @@ export type PaperPhaseId =
   | "svo-cone-lighting"
   | "svo-environment-gi"
   | "svo-primary"
+  | "svo-brick-cull"
   | "svo-rigid"
   | "svo-glass"
   | "dry-scene"

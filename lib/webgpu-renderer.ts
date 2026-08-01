@@ -6,7 +6,7 @@ import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
 import { getMethod, type GPUSolverInstance, type MethodParamValues } from "./methods";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
-import { requiredFluidDeviceLimits } from "./webgpu-device-limits";
+import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
 import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
@@ -24,7 +24,7 @@ import { containerDecorationSpace } from "./visualization-decorations";
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, type SparseVoxelDrySceneData } from "./webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, type SparseVoxelDrySceneData, type SvoDryRigidBounds } from "./webgpu-svo-dry-scene";
 import {
   buildSvoScenePrimitives,
   packSvoScenePrimitiveAnimation,
@@ -38,6 +38,7 @@ import { svoEnvironmentAmbientBackgroundLinear } from "./svo-environment-lightin
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoLightingOptions,
+  type SvoPrimaryTraversalMode,
 } from "./svo-render-options";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "./svo-render-tuning";
@@ -349,7 +350,8 @@ export type SvoRendererFallbackReason =
   | "unsupported-glass-cutout"
   | "missing-pbr-materials"
   | "missing-lighting-publications"
-  | "pipeline-compile-failure";
+  | "pipeline-compile-failure"
+  | "pipeline-compiling";
 
 export interface EffectiveRendererStatus {
   effectiveMode: "svo" | "raster";
@@ -358,6 +360,8 @@ export interface EffectiveRendererStatus {
 
 export interface EffectiveRendererConditions {
   pipelineAvailable: boolean;
+  /** A compile is in flight, so an absent pipeline is a rebuild rather than a failure. */
+  pipelineCompiling?: boolean;
   sourceAvailable: boolean;
   terrainSupported: boolean;
   glassSupported?: boolean;
@@ -367,10 +371,49 @@ export interface EffectiveRendererConditions {
 }
 
 /** Resolve one frame's production renderer without changing simulation state. */
+/**
+ * One sphere enclosing every rigid body, for the dry scene's shadow and contact
+ * rays to reject against before they read the body array.
+ *
+ * The centre is the midpoint of the axis-aligned bounds rather than a centroid
+ * of positions: a centroid is pulled toward clusters and leaves an outlier body
+ * near the rim, which inflates the radius for every other ray in the frame.
+ * Returns undefined for an empty scene so the caller publishes "no bodies"
+ * instead of a degenerate sphere at the origin.
+ */
+export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigidBounds | undefined {
+  if (bodies.length === 0) return undefined;
+  const low = [Infinity, Infinity, Infinity];
+  const high = [-Infinity, -Infinity, -Infinity];
+  for (const body of bodies) {
+    const radius = boundingRadius(body);
+    const position = [body.position_m.x, body.position_m.y, body.position_m.z];
+    for (let axis = 0; axis < 3; axis += 1) {
+      low[axis] = Math.min(low[axis], position[axis] - radius);
+      high[axis] = Math.max(high[axis], position[axis] + radius);
+    }
+  }
+  const centre = [0, 1, 2].map((axis) => (low[axis] + high[axis]) / 2) as [number, number, number];
+  let radius = 0;
+  for (const body of bodies) {
+    const position = [body.position_m.x, body.position_m.y, body.position_m.z];
+    radius = Math.max(radius, Math.hypot(...[0, 1, 2].map((axis) => position[axis] - centre[axis]))
+      + boundingRadius(body));
+  }
+  return { centre_m: centre, radius_m: radius };
+}
+
 export function resolveEffectiveRendererStatus(
   conditions: EffectiveRendererConditions,
 ): EffectiveRendererStatus {
-  if (!conditions.pipelineAvailable) return { effectiveMode: "raster", fallbackReason: "pipeline-compile-failure" };
+  // An absent pipeline means two very different things. Startup and a primary
+  // traversal swap both retire it while the replacement compiles, and reporting
+  // that as a compile failure tells the user their renderer broke when it is
+  // merely busy.
+  if (!conditions.pipelineAvailable) {
+    return { effectiveMode: "raster",
+      fallbackReason: conditions.pipelineCompiling ? "pipeline-compiling" : "pipeline-compile-failure" };
+  }
   if (!conditions.terrainSupported) return { effectiveMode: "raster", fallbackReason: "unsupported-terrain" };
   if (conditions.glassSupported === false) return { effectiveMode: "raster", fallbackReason: "unsupported-glass-cutout" };
   if (conditions.materialsSupported === false) return { effectiveMode: "raster", fallbackReason: "missing-pbr-materials" };
@@ -479,6 +522,13 @@ export class FluidLabRenderer {
   private readonly optionalPipelineTasks = new Map<OptionalRendererPipeline, Promise<void>>();
   /** A compile failure is sticky for this device; do not hammer a fragile driver every frame. */
   private readonly failedOptionalPipelines = new Set<OptionalRendererPipeline>();
+  /**
+   * Primary traversal is fixed when the dry-scene pipeline is built, so the
+   * user-facing toggle is recorded here and takes effect by retiring the
+   * pipeline: the next `ensureOptionalPipeline` sweep rebuilds against it.
+   */
+  private requestedPrimaryTraversal: SvoPrimaryTraversalMode =
+    DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster";
   private presentationTexture?: GPUTexture;
   private voxelDebugDepth?: GPUTexture;
   private presentationTextureKey = "";
@@ -574,6 +624,26 @@ export class FluidLabRenderer {
     if (previous?.effectiveMode === status.effectiveMode && previous.fallbackReason === status.fallbackReason) return;
     this.lastEffectiveRendererStatus = status;
     this.effectiveRendererStatusCallback?.(status);
+  }
+
+  /**
+   * Point the dry scene at a different primary traversal. The mode is baked
+   * into the pipeline's shader variants and render-pass shape, so switching it
+   * retires the current pipeline rather than reconfiguring it; the viewport
+   * shows the compile progress it already shows on first attach. A sticky
+   * earlier failure is cleared too, because the mode that failed is not the
+   * mode being asked for now.
+   */
+  private applyPrimaryTraversalRequest(requested: SvoPrimaryTraversalMode): void {
+    if (requested === this.requestedPrimaryTraversal) return;
+    this.requestedPrimaryTraversal = requested;
+    this.failedOptionalPipelines.delete("svo-dry-scene");
+    const retired = this.svoDryScenePipeline;
+    if (!retired) return;
+    this.svoDryScenePipeline = undefined;
+    this.svoPipelineAvailable = false;
+    this.svoPipelineProgress = undefined;
+    try { retired.destroy(); } catch { /* Device loss may have invalidated it already. */ }
   }
 
   private ensureOptionalPipeline<T>(
@@ -701,7 +771,26 @@ export class FluidLabRenderer {
       // Canonical-parametric removes the wide/canonical hybrid cursor and was
       // revalidated against split full-res relighting: 12.55 ms versus
       // 22.10-23.60 ms hybrid at 660x662 with identical output hashes.
-      (device) => new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float", "canonical-parametric", "off", "split", 0, "static-primary", true, true, true),
+      // Raster-primary replaces the full-screen traversal megakernel with a
+      // rasterized brick-proxy pass: 4.89 ms of GPU against the megakernel's
+      // 26.95 ms for primary visibility at 1500x1500 garden, whole frame
+      // 49.62 -> 29.01 ms. It needs four depth-tested colour planes, so a device
+      // that did not grant the wider per-sample budget keeps the traced path
+      // rather than failing to construct.
+      (device) => {
+        const traversal = this.requestedPrimaryTraversal === "raster"
+          && device.limits.maxColorAttachmentBytesPerSample >= FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE
+          ? "raster-primary" as const : "canonical-parametric" as const;
+        // Stationary primary reuse buys whatever the primary costs, and the two
+        // traversals price that very differently. Skipping the megakernel is
+        // worth 28.5 ms of a 49.6 ms frame, so the traced fallback still asks
+        // for it; skipping the raster primary is worth 7.9 ms of 29.0, and the
+        // rigid impostor pass blocks the reuse anyway whenever the scene has
+        // bodies. Asking for it there would only make a dead mode look live.
+        const coherence = traversal === "raster-primary" ? "off" as const : "static-primary" as const;
+        return new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float",
+          traversal, "off", "split", 0, coherence, true, true, true);
+      },
       (pipeline) => pipeline.initialize((label, completed) => this.reportSvoPipelineProgress(label, completed)),
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;
@@ -1626,7 +1715,7 @@ export class FluidLabRenderer {
       this.svoRenderDiagnosticsKey = diagnosticsKey;
       this.resetPresentationTrace();
     }
-    const presentationContext = `${config.methodId}:${config.quality}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:gi:${voxelRenderMode}:tuning-${tuningKey}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:gi:${voxelRenderMode}:tuning-${tuningKey}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -1653,6 +1742,9 @@ export class FluidLabRenderer {
       ? this.currentGPUFluid(scene, svoSceneConfig, time_s)
       : undefined;
     const pixelTraceRequested = Boolean(pixelTrace) && voxelRenderMode === "smooth";
+    // Ahead of the sweep, so a toggled traversal retires the old pipeline and is
+    // rebuilt in the same frame rather than one frame later.
+    this.applyPrimaryTraversalRequest(svoLightingOptions.primaryTraversal ?? "raster");
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, voxelRenderMode, this.simulationRunning,
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
@@ -1839,7 +1931,7 @@ export class FluidLabRenderer {
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
     this.advanceSceneryAnimation();
-    this.svoDryScenePipeline?.setRigidBodyCount(bodies.length);
+    this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies));
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
     this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
@@ -1968,6 +2060,7 @@ export class FluidLabRenderer {
     this.lastSvoPickingBodies = this.svoPickingAvailable ? bodies.slice(0, 12) : [];
     this.publishEffectiveRendererStatus(resolveEffectiveRendererStatus({
       pipelineAvailable: this.svoPipelineAvailable,
+      pipelineCompiling: this.optionalPipelineTasks.has("svo-dry-scene"),
       sourceAvailable: this.svoSourceAvailable,
       terrainSupported: this.svoTerrainSupported,
       glassSupported: this.svoGlassSupported,
