@@ -3,6 +3,7 @@ import type { WaterRenderDiagnostics } from "./webgpu-water-pipeline";
 export type InitialRasterSurfaceState =
   | "pending"
   | "gpu-authoritative"
+  | "compact-confirmed"
   | "crossing-confirmed"
   | "failed-closed";
 
@@ -50,13 +51,24 @@ export function initialRasterPresentationReadiness(
 
   const diagnostic = input.diagnostics;
   if (diagnostic) {
-    const currentCrossing = diagnostic.globalFineCrossingPublished
+    const currentCrossing = diagnostic.globalFineAttached
+      && diagnostic.globalFineCrossingPublished
       && diagnostic.surfaceGeometrySource === "global-fine-coarse";
+    const currentCompact = !diagnostic.globalFineAttached
+      && diagnostic.globalFineAuthorityLatch !== 0
+      && diagnostic.surfaceGeometrySource === "compact-coarse";
     if (diagnostic.vertexCount > 0 && currentCrossing) {
       return {
         ready: true,
         state: "crossing-confirmed",
         label: "WebGPU t=0 ready · global-fine/coarse raster crossing confirmed",
+      };
+    }
+    if (diagnostic.vertexCount > 0 && currentCompact) {
+      return {
+        ready: true,
+        state: "compact-confirmed",
+        label: "WebGPU t=0 ready · compact-coarse raster publication confirmed",
       };
     }
     return {

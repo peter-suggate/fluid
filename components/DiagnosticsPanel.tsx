@@ -115,7 +115,8 @@ export function DiagnosticsPanel() {
           testId="initial-raster-surface-state"
           label="Paused t=0 raster"
           value={gpuInfo.initialRasterSurfaceState === "crossing-confirmed" ? "CROSSING CONFIRMED"
-            : gpuInfo.initialRasterSurfaceState === "gpu-authoritative" ? "GPU PUBLICATION FENCED"
+            : gpuInfo.initialRasterSurfaceState === "compact-confirmed" ? "COMPACT COARSE CONFIRMED"
+              : gpuInfo.initialRasterSurfaceState === "gpu-authoritative" ? "GPU PUBLICATION FENCED"
               : gpuInfo.initialRasterSurfaceState === "failed-closed" ? "FAILED CLOSED" : "PENDING"}
           unit={gpuInfo.initialRasterSurfaceDiagnostic ?? "waiting for warmed solver presentation"}
           tone={gpuInfo.initialRasterSurfaceReady ? "good"

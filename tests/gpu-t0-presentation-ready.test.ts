@@ -21,9 +21,9 @@ function diagnostic(
   return {
     vertexCount, activeCubeCount: vertexCount > 0 ? 1 : 0,
     vertexAllocator: 0xffff_ffff,
-    globalFineAuthorityLatch: surfaceGeometrySource === "global-fine-coarse" ? 1 : 0,
+    globalFineAuthorityLatch: surfaceGeometrySource === "global-fine-coarse" || surfaceGeometrySource === "compact-coarse" ? 1 : 0,
     surfaceGeometrySource,
-    globalFineAttached: true,
+    globalFineAttached: surfaceGeometrySource !== "compact-coarse",
     globalFineCrossingPublished: surfaceGeometrySource === "global-fine-coarse",
     presentationFallbackActive: surfaceGeometrySource === "retained-previous",
   };
@@ -52,10 +52,14 @@ test("paused t=0 stays locked until every solver, source, extraction, and fence 
   });
 });
 
-test("diagnostics mode confirms only a current fine/coarse crossing", () => {
+test("diagnostics mode confirms a current fine/coarse crossing or factor-one compact publication", () => {
   const fine = initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true,
     diagnostics: diagnostic("global-fine-coarse", 12) });
   assert.equal(fine.ready, true); assert.equal(fine.state, "crossing-confirmed");
+
+  const compact = initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true,
+    diagnostics: diagnostic("compact-coarse", 12) });
+  assert.equal(compact.ready, true); assert.equal(compact.state, "compact-confirmed");
 
   const volume = initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true,
     diagnostics: diagnostic("volume", 6) });
@@ -95,7 +99,7 @@ test("renderer publishes ready only after first raster submission completion and
   assert.match(renderer, /state: "blocked", label: outcome\.label/,
     "an empty or retained raster diagnostic must remain attached but fail transport closed");
   assert.doesNotMatch(renderer, /initialRasterGlobalFineRequired|globalFineRequired/);
-  assert.match(renderer, /readyGPUFluid\.initialSparseAuthorityReady === true[\s\S]*Boolean\(readyGPUFluid\.globalFineLevelSetSource\)/);
+  assert.match(renderer, /readyGPUFluid\.initialSparseAuthorityReady === true[\s\S]*Boolean\(readyGPUFluid\.globalFineLevelSetSource \|\| readyGPUFluid\.coarseLevelSetSource\)/);
   assert.match(renderer, /this\.globalFineWaterAttached[\s\S]*rasterResult\.surfaceUpdated/);
   assert.match(controller, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
   assert.match(transport, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
