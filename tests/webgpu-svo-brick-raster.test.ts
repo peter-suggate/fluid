@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { encodeSvoBrickOccupancy } from "../lib/svo-brick-occupancy";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/webgpu-device-limits";
+import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
 import {
   createSvoBrickRasterCullWGSL,
   svoBrickRasterCullBindGroupLayoutEntries,
@@ -13,7 +14,9 @@ import {
   SVO_BRICK_RASTER_BOX_CORNERS,
   SVO_BRICK_RASTER_CONTRACT,
 } from "../lib/webgpu-svo-brick-raster";
-import { createSvoDrySceneFragmentWGSL, SVO_DRY_TRAVERSAL_MODES,
+import { createSvoDrySceneFragmentWGSL, sparseVoxelDrySceneBindGroupLayoutEntries,
+  SVO_DRY_SPLIT_GEOMETRY_FORMAT, SVO_DRY_SPLIT_IDENTITY_FORMAT,
+  SVO_DRY_TRAVERSAL_MODES, SVO_STATIC_PRIMITIVE_RASTER_CONTRACT,
   type SvoDryOptimizationExperiments } from "../lib/webgpu-svo-dry-scene";
 
 const cullShader = createSvoBrickRasterCullWGSL({ reversedZNear_m: 0.01, tanHalfFov: 0.72 });
@@ -115,6 +118,36 @@ test("the raster-primary fragment reuses the production leaf tracer and writes d
     /requires raster glass discovery/);
 });
 
+test("raster-primary resolves static primitive overlap with exact per-primitive depth", () => {
+  const shader = createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, true, true);
+  const { entryPoints } = SVO_STATIC_PRIMITIVE_RASTER_CONTRACT;
+  assert.equal(SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, 36);
+  assert.match(shader, new RegExp(`@vertex fn ${entryPoints.vertex}`));
+  assert.match(shader, new RegExp(`@fragment fn ${entryPoints.fragment}`));
+
+  const vertexStart = shader.indexOf(`@vertex fn ${entryPoints.vertex}`);
+  const fragmentStart = shader.indexOf(`@fragment fn ${entryPoints.fragment}`);
+  const fragment = shader.slice(fragmentStart, shader.indexOf("\n}", fragmentStart) + 2);
+  assert.ok(vertexStart > 0 && fragmentStart > vertexStart);
+  assert.match(shader.slice(vertexStart, fragmentStart), /primitives\[primitiveIndex\]/,
+    "each instance derives conservative coverage from its own analytic record");
+  assert.match(shader, /kind==SVO_KIND_SPHERE/);
+  assert.match(shader, /kind==SVO_KIND_BOX\|\|kind==SVO_KIND_ELLIPSOID/);
+  assert.match(shader, /kind==SVO_KIND_CAPSULE/);
+  assert.match(shader, /kind==SVO_KIND_CYLINDER/);
+  assert.match(shader, /kind==SVO_KIND_TORUS/);
+  assert.match(shader, /kind==SVO_KIND_CONE/);
+  assert.match(fragment, /let exact=primitiveHit\(record,ro,rd,0\.0,DRY_MISS\);/,
+    "the voxel owner is not authoritative at a projected primitive boundary");
+  assert.match(fragment, /return dryRasterPrimarySurface\(exact,ro,rd,camera\[1\]\);/,
+    "the exact hit publishes all four primary planes and analytic frag_depth together");
+  assert.doesNotMatch(fragment, /materialOwners|traceLeafPayload/);
+
+  const primitiveBinding = sparseVoxelDrySceneBindGroupLayoutEntries().find((entry) => entry.binding === 7);
+  assert.ok((primitiveBinding!.visibility & GPUShaderStage.VERTEX) !== 0,
+    "the conservative proxy vertex can read the primitive arena");
+});
+
 test("the brick depth experiments stay timing-only probes off the production path", () => {
   const build = (experiments: SvoDryOptimizationExperiments): string =>
     createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, true, true, false, experiments);
@@ -165,11 +198,44 @@ function device(): Promise<GPUDevice> {
     sharedGpu = create(["backend=metal"]);
     const adapter = await sharedGpu.requestAdapter({ powerPreference: "high-performance" });
     assert.ok(adapter, "no Metal adapter");
-    return adapter.requestDevice();
+    return adapter.requestDevice({ requiredLimits: {
+      maxStorageBuffersPerShaderStage: 10,
+      maxColorAttachmentBytesPerSample: SVO_BRICK_RASTER_CONTRACT.colorAttachmentBytesPerSample,
+    } });
   })();
   return sharedDevice;
 }
 after(async () => { (await sharedDevice)?.destroy(); sharedGpu = undefined; });
+
+test("the raster-primary exact static primitive entries compile on WebGPU",
+  { skip: modulePath ? false : "set WEBGPU_NODE_MODULE" }, async () => {
+    const gpuDevice = await device();
+    const layout = gpuDevice.createBindGroupLayout({ entries: sparseVoxelDrySceneBindGroupLayoutEntries() });
+    for (const scale of [1, 0.5] as const) {
+      const shaderModule = gpuDevice.createShaderModule({
+        code: createSvoDrySceneFragmentWGSL(scale, "raster-primary", "off", "split", 0, false, true, true),
+      });
+      const info = await shaderModule.getCompilationInfo();
+      assert.deepEqual(info.messages.filter((message) => message.type === "error")
+        .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
+      await gpuDevice.createRenderPipelineAsync({
+        layout: gpuDevice.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        vertex: { module: shaderModule, entryPoint: SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex },
+        fragment: { module: shaderModule, entryPoint: SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment, targets: [
+          { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.packedSurfaceFormat },
+          { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.identityMediaFormat },
+          { format: SVO_DRY_SPLIT_GEOMETRY_FORMAT },
+          { format: SVO_DRY_SPLIT_IDENTITY_FORMAT },
+        ] },
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: {
+          format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+          depthWriteEnabled: true,
+          depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+        },
+      });
+    }
+  });
 
 /** Interleave three level-bounded coordinates into the canonical low word. */
 function mortonLow(coordinate: readonly [number, number, number], level: number): number {

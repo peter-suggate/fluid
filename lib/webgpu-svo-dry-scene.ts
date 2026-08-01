@@ -186,7 +186,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(): GPUBindGroupLayoutE
   const computeBindings = new Set([0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
   // Raster analytic impostors consume only the camera uniform and their
   // source record arena in the vertex stage.
-  const vertexBindings = new Set([0, 1, 10]);
+  const vertexBindings = new Set([0, 1, 7, 10]);
   return SVO_DRY_SCENE_BINDING_CONTRACT.map(({ binding, type }): GPUBindGroupLayoutEntry => {
     const visibility = GPUShaderStage.FRAGMENT
       | (computeBindings.has(binding) ? GPUShaderStage.COMPUTE : 0)
@@ -1538,6 +1538,61 @@ fn dryRasterPrimarySurface(opaque:DryHit,ro:vec3f,rd:vec3f,forward:vec3f)->DryRa
 fn dryRasterPrimaryMiss()->DryRasterPrimaryOut{
   let targets=svoGBufferMiss(vec3f(0.0),0u,dryPublicationGeneration(),DRY_GBUFFER_NO_INTERSECTION,0u);
   return DryRasterPrimaryOut(targets.packedSurface,targets.identityMedia,vec4f(0.0,1.0,0.0,DRY_MISS),vec2u(0u,0u),0.0);
+}
+// The brick payload stores one owner per voxel. That is sufficient to find a
+// nearby surface, but it cannot represent a sub-voxel visibility boundary
+// between two projected primitives. Raster one conservative box per authored
+// finite primitive and repeat the shared exact intersection in the fragment;
+// reversed-Z then chooses the true nearest surface across all owners.
+struct DryStaticPrimitiveVertexOut{
+  @builtin(position) position:vec4f,
+  @location(0) @interpolate(flat) primitiveIndex:u32,
+}
+fn dryStaticPrimitiveLocalExtent(kind:u32,dimensions:vec3f)->vec3f{
+  if(kind==SVO_KIND_SPHERE){return vec3f(dimensions.x);}
+  if(kind==SVO_KIND_BOX||kind==SVO_KIND_ELLIPSOID){return dimensions;}
+  if(kind==SVO_KIND_CAPSULE){return vec3f(dimensions.x,dimensions.y+dimensions.x,dimensions.x);}
+  if(kind==SVO_KIND_CYLINDER){return vec3f(dimensions.x,dimensions.y,dimensions.x);}
+  if(kind==SVO_KIND_TORUS){return vec3f(dimensions.x+dimensions.y,dimensions.y,dimensions.x+dimensions.y);}
+  if(kind==SVO_KIND_CONE){let radius=max(dimensions.x,dimensions.z);return vec3f(radius,dimensions.y,radius);}
+  return vec3f(-1.0);
+}
+fn dryStaticPrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
+  let q=orientation/length(orientation);
+  return abs(svoQuaternionRotate(q,vec3f(localExtent.x,0.0,0.0)))
+    +abs(svoQuaternionRotate(q,vec3f(0.0,localExtent.y,0.0)))
+    +abs(svoQuaternionRotate(q,vec3f(0.0,0.0,localExtent.z)))+vec3f(1e-5);
+}
+@vertex fn ${SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex}(
+  @builtin(vertex_index) vertexIndex:u32,
+  @builtin(instance_index) primitiveIndex:u32,
+)->DryStaticPrimitiveVertexOut{
+  var position=vec4f(2.0,2.0,0.0,1.0);
+  if(primitiveIndex>=arrayLength(&primitives)){return DryStaticPrimitiveVertexOut(position,primitiveIndex);}
+  let record=primitives[primitiveIndex];let localExtent=dryStaticPrimitiveLocalExtent(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
+  let orientationLength=length(record.orientation);
+  if(any(localExtent<vec3f(0.0))||!(orientationLength>1e-8)){return DryStaticPrimitiveVertexOut(position,primitiveIndex);}
+  let extent=dryStaticPrimitiveWorldExtent(localExtent,record.orientation);let centre=svoPrimitiveCenter_m(record);let minimum=centre-extent;let maximum=centre+extent;
+  let camera=dryRasterPrimaryCamera();let ro=camera[0];let forward=camera[1];let right=camera[2];let up=camera[3];let aspect=uniforms.viewport.x/max(uniforms.viewport.y,1.0);
+  let margin=vec3f(${4 * SVO_DRY_SCENE_REVERSED_Z_NEAR_M});
+  if(all(ro>=minimum-margin)&&all(ro<=maximum+margin)){
+    var screen=array<vec2f,3>(vec2f(-1.0,-1.0),vec2f(-1.0,3.0),vec2f(3.0,-1.0));
+    if(vertexIndex<3u){position=vec4f(screen[vertexIndex],1.0,1.0);}
+  }else{
+    let world=mix(minimum,maximum,svoBrickBoxCorner(vertexIndex));let relative=world-ro;let viewDepth=dot(relative,forward);
+    position=vec4f(dot(relative,right)/(aspect*.72),dot(relative,up)/.72,DRY_REVERSED_Z_NEAR_M,viewDepth);
+  }
+  return DryStaticPrimitiveVertexOut(position,primitiveIndex);
+}
+@fragment fn ${SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment}(input:DryStaticPrimitiveVertexOut)->DryRasterPrimaryOut{
+  dryRasterPrimaryReset();
+  if(input.primitiveIndex>=dry.metadata.x||input.primitiveIndex>=arrayLength(&primitives)){discard;}
+  let record=primitives[input.primitiveIndex];
+  if(dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){discard;}
+  let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
+  let exact=primitiveHit(record,ro,rd,0.0,DRY_MISS);
+  if(!(exact.t<DRY_MISS)){discard;}
+  return dryRasterPrimarySurface(exact,ro,rd,camera[1]);
 }
 // Background and terrain. The megakernel's octree stack, rigid loop and pane
 // loop are all absent here, which is the register budget this mode buys back.
@@ -2956,6 +3011,14 @@ const rasterPrimaryTargets: GPUColorTargetState[] = [
   { format: SVO_DRY_SPLIT_IDENTITY_FORMAT },
 ];
 
+export const SVO_STATIC_PRIMITIVE_RASTER_CONTRACT = Object.freeze({
+  verticesPerProxy: 36,
+  entryPoints: Object.freeze({
+    vertex: "dryStaticPrimitiveRasterVertex",
+    fragment: "dryStaticPrimitiveRasterFragment",
+  }),
+} as const);
+
 interface SvoDrySplitPipelineBundle {
   readonly visibility: GPURenderPipeline;
   readonly rasterRigidVisibility?: GPURenderPipeline;
@@ -2964,6 +3027,7 @@ interface SvoDrySplitPipelineBundle {
   readonly skyLighting: GPURenderPipeline;
   readonly brickBackground?: GPURenderPipeline;
   readonly brickRaster?: GPURenderPipeline;
+  readonly staticPrimitiveRaster?: GPURenderPipeline;
   readonly prepassReset?: GPUComputePipeline;
   readonly prepassCoherent?: GPUComputePipeline;
   readonly prepassBoundary?: GPUComputePipeline;
@@ -3058,6 +3122,7 @@ export class SparseVoxelDrySceneRenderer {
   private brickScatterPipeline?: GPUComputePipeline;
   private brickRasterPipeline?: GPURenderPipeline;
   private brickBackgroundPipeline?: GPURenderPipeline;
+  private staticPrimitiveRasterPipeline?: GPURenderPipeline;
   private brickCandidateBuffer?: GPUBuffer;
   private brickInstanceBuffer?: GPUBuffer;
   private brickSortStateBuffer?: GPUBuffer;
@@ -3329,6 +3394,7 @@ export class SparseVoxelDrySceneRenderer {
     this.worldGiCachePipeline = bundle.worldGiCache;
     this.brickBackgroundPipeline = bundle.brickBackground;
     this.brickRasterPipeline = bundle.brickRaster;
+    this.staticPrimitiveRasterPipeline = bundle.staticPrimitiveRaster;
     this.splitPipelineScale = scale;
     this.ensureSplitTargets();
     this.ensureConePrepassTargets();
@@ -3795,7 +3861,7 @@ export class SparseVoxelDrySceneRenderer {
         compute: { module, entryPoint: "dryWorldGiCacheMain" },
       }),
       ]);
-      const [brickBackground, brickRaster] = this.rasterPrimary
+      const [brickBackground, brickRaster, staticPrimitiveRaster] = this.rasterPrimary
         ? await Promise.all([
           this.device.createRenderPipelineAsync({
             label: "Sparse voxel primary background and terrain",
@@ -3825,9 +3891,21 @@ export class SparseVoxelDrySceneRenderer {
               depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
             },
           }),
+          this.device.createRenderPipelineAsync({
+            label: "Sparse voxel exact static primitive visibility",
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+            vertex: { module, entryPoint: SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex },
+            fragment: { module, entryPoint: SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment, targets: rasterPrimaryTargets },
+            primitive: { topology: "triangle-list", cullMode: "none" },
+            depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            },
+          }),
         ])
-        : [undefined, undefined];
-      const bundle = { visibility, rasterRigidVisibility, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache, brickBackground, brickRaster };
+        : [undefined, undefined, undefined];
+      const bundle = { visibility, rasterRigidVisibility, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache, brickBackground, brickRaster, staticPrimitiveRaster };
       this.splitPipelineBundles.set(scale, bundle);
       return bundle;
     })();
@@ -4844,6 +4922,7 @@ export class SparseVoxelDrySceneRenderer {
       ? this.splitRasterRigidVisibilityPipeline
       : this.splitVisibilityPipeline;
     const brickRasterReady = Boolean(this.brickBackgroundPipeline && this.brickRasterPipeline
+      && this.staticPrimitiveRasterPipeline
       && this.brickEmitPipeline && this.brickScanPipeline && this.brickScatterPipeline
       && this.brickCullBindGroup && this.brickDrawBindGroup && this.brickSortStateBuffer
       && this.splitOpaqueIdentityView);
@@ -4943,6 +5022,29 @@ export class SparseVoxelDrySceneRenderer {
           visibility.end();
         }
         tracePhase?.({ id: "svo-primary", label: "SVO primary visibility" });
+        if (this.rasterPrimary) {
+          const exactStatic = encoder.beginRenderPass({
+            label: "Sparse voxel exact static primitive visibility",
+            colorAttachments: [
+              { view: gBufferViews.packedSurface, loadOp: "load", storeOp: "store" },
+              { view: gBufferViews.identityMedia, loadOp: "load", storeOp: "store" },
+              { view: this.splitGeometryView!, loadOp: "load", storeOp: "store" },
+              { view: this.splitOpaqueIdentityView!, loadOp: "load", storeOp: "store" },
+            ],
+            depthStencilAttachment: {
+              view: gBufferViews.hardwareDepth,
+              depthLoadOp: "load",
+              depthStoreOp: "store",
+            },
+          });
+          exactStatic.setPipeline(this.staticPrimitiveRasterPipeline!);
+          exactStatic.setBindGroup(0, this.bindGroup);
+          exactStatic.draw(
+            SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy,
+            this.scene!.primitiveRecords.byteLength / SVO_PRIMITIVE_RECORD_STRIDE_BYTES,
+          );
+          exactStatic.end();
+        }
         if (this.rasterRigidActive) {
           const rigid = encoder.beginRenderPass({
             label: "Sparse voxel analytic rigid primary discovery",
@@ -5130,6 +5232,7 @@ export class SparseVoxelDrySceneRenderer {
     this.brickCandidateBuffer = undefined;
     this.brickInstanceBuffer = undefined;
     this.brickSortStateBuffer = undefined;
+    this.staticPrimitiveRasterPipeline = undefined;
     this.brickLeafCapacity = 0;
     this.splitGeometry?.destroy();
     this.splitOpaqueIdentity?.destroy();
