@@ -506,3 +506,50 @@ Note this supersedes §10's attribution of the moving-body penalty to world-GI
 invalidation. The GI cache does still clear on body motion, but the cost that
 showed up in the wall clock was the body loop it forced the fallback path to run,
 not the cache refill.
+
+## 12. Scene coverage — hose-tank was not a raster regression
+
+Reported as "the raster SVO path runs incredibly slowly on hose-tank, while
+garden runs fast". It reproduces in Dawn, but the primary is not what is slow:
+
+```
+FLUID_SVO_DRY_FRAME_SCENE=hose-tank FLUID_SVO_DRY_FRAME_SHADING=split \
+FLUID_SVO_DRY_FRAME_TRAVERSAL=raster-primary FLUID_SVO_DRY_FRAME_PROFILE_SECONDS=5 \
+FLUID_WEBGPU_DAWN_FEATURES=skip_validation ... tools/benchmark-svo-dry-frame-gpu.ts
+```
+
+1280x720, M1 Max, cones on, median frame:
+
+| scene | primary | before | after |
+| --- | --- | --- | --- |
+| hose-tank | raster-primary | 304.6 | **20.1** |
+| hose-tank | canonical-parametric | 323.8 | 31.8 |
+| garden-svo-lighting | raster-primary | 13.3 | 13.3 |
+| garden-svo-lighting | canonical-parametric | 21.8 | 21.8 |
+
+Both hose-tank arms collapsed, and by nearly the same amount, which is the
+signal that the primary was never the variable. The cause is the static
+node-mip opacity pyramid being **withdrawn**: hose-tank is a closed tank inside
+a voxelized conservatory room and needs 10361 directory pages, but the directory
+is one texture row per page and the device had only been granted WebGPU's
+default `maxTextureDimension2D` of 8192. `OctreeSparseBrickWorld` then correctly
+declines to publish — a truncated pyramid is not a coarser pyramid, its dropped
+pages sample as empty air — and cone lighting falls back to exact traversal for
+every shadow and GI ray: a 15x frame cost, reported only as a `console.warn`.
+
+The fix is one line in `requiredFluidDeviceLimits`: request the adapter's
+advertised `maxTextureDimension2D` (16384 on this adapter), exactly as that
+function already does for the storage-buffer and 3D-texture limits. Every scene
+preset that builds a static SVO world now publishes a pyramid; `ocean-seiche`
+and `deep-water-ab` still fail their world build on the unrelated 4 GB geometry
+allocation guard in `lib/sparse-brick-octree.ts`.
+
+Two things this leaves standing. Raster-primary is 1.58x the canonical primary
+on hose-tank, close to the 1.64x it holds on garden, so the cutover generalises
+past the scene it was tuned on. And hose-tank's remaining 1.5x gap to garden is
+geometry, not lighting: `tools/measure-svo-raster-primary-scope.ts` reports
+11047 leaves against garden's 1843, with 204 proxy boxes straddling the camera
+plane (garden has none) because the camera sits inside the room shell. Those are
+drawn correctly — `SVO_BRICK_RASTER_CONTRACT.cullMode` keeps the far faces for
+exactly this case — but they are near-full-screen fragment work, and they are
+the first thing to look at if hose-tank needs to get faster still.

@@ -2,6 +2,7 @@ type FluidAdapterLimits = Pick<GPUSupportedLimits,
   | "maxStorageBuffersPerShaderStage"
   | "maxStorageBufferBindingSize"
   | "maxBufferSize"
+  | "maxTextureDimension2D"
   | "maxTextureDimension3D"
   | "maxColorAttachmentBytesPerSample"
 >;
@@ -27,6 +28,12 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
     maxStorageBuffersPerShaderStage: limits.maxStorageBuffersPerShaderStage,
     maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
     maxBufferSize: limits.maxBufferSize,
+    // The static node-mip directory is one texture row per page, so this limit
+    // is the pyramid's page ceiling. The 8192 default is below what a
+    // room-enclosed scene needs (hose-tank: 10361), and falling short does not
+    // degrade the pyramid, it withdraws it — cone lighting then falls back to
+    // exact traversal for the whole frame.
+    maxTextureDimension2D: limits.maxTextureDimension2D,
     maxTextureDimension3D: limits.maxTextureDimension3D,
     // Requested, never assumed: adapters that cannot grant this still produce a
     // valid device, and the raster-primary renderer fails closed against the

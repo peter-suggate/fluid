@@ -36,7 +36,7 @@ import { planSvoWideFanout } from "./svo-wide-fanout";
 import { WebGPUSvoWideFanout } from "./webgpu-svo-wide-fanout";
 import { packSvoCompactHierarchy } from "./svo-compact-hierarchy";
 import { WebGpuSvoCompactHierarchy } from "./webgpu-svo-compact-hierarchy";
-import { WebGpuSvoNodeMipPyramid } from "./webgpu-svo-node-mip-pyramid";
+import { WebGpuSvoNodeMipPyramid, webGpuSvoNodeMipMaximumPages } from "./webgpu-svo-node-mip-pyramid";
 import { WebGpuSvoTetrahedralRadiance } from "./webgpu-svo-tetrahedral-radiance";
 import { WebGpuSvoBrickOccupancyBuilder } from "./webgpu-svo-brick-occupancy";
 import { buildSvoStaticNodeMipPublication } from "./svo-static-node-mips";
@@ -605,49 +605,75 @@ export class OctreeSparseBrickWorld {
     let tetrahedralRadiance: WebGpuSvoTetrahedralRadiance | undefined;
     let nodeMipWorldOrigin_m: readonly [number, number, number] | undefined;
     try {
-      const maximumDirectoryPages = Math.min(8_192, Number(device.limits?.maxTextureDimension2D) || 8_192);
+      // The directory is one texture row per page, so the 2D height limit is the
+      // only ceiling. A former hard-coded 8192 sat well below it and quietly
+      // discarded the surplus: hose-tank needs 10361 pages, so roughly a sixth
+      // of its static geometry stopped casting shadows and occluding GI, with
+      // nothing reporting it.
+      //
+      // That limit is only as high as the device was *asked* for — see
+      // `requiredFluidDeviceLimits`, which requests the adapter's advertised
+      // maxTextureDimension2D rather than accepting WebGPU's 8192 default.
+      const maximumDirectoryPages = webGpuSvoNodeMipMaximumPages(device);
       const staticMips = buildSvoStaticNodeMipPublication(scene, staticLightingDomain, environmentPrimitives, {
         generation: 1,
         capacity: maximumDirectoryPages,
         samplesPerAxis: 2,
       });
       nodeMipWorldOrigin_m = staticMips.worldOrigin_m;
-      nodeMipPyramid = new WebGpuSvoNodeMipPyramid(device);
-      nodeMipPyramid.beginGeneration(staticMips.plan);
-      for (const page of staticMips.interiors) nodeMipPyramid.uploadInteriorPage(page.key, page.interior);
-      if (!nodeMipPyramid.publish().published || !nodeMipPyramid.visibleGeneration()) {
-        nodeMipPyramid.destroy();
-        nodeMipPyramid = undefined;
+      if (staticMips.omittedBasePageCount > 0) {
+        // A truncated pyramid is not a coarser pyramid, it is a wrong one: the
+        // dropped pages sample as empty air, so light leaks through geometry
+        // that is still on screen. Declining to publish costs the cone
+        // accelerator and GI, and the renderer falls back to exact traversal —
+        // slower, but showing the scene that was authored.
+        //
+        // "Slower" is a cliff, not a taper, so treat this warning as a
+        // performance failure and not a note: hose-tank at 1280x720 on M1 Max
+        // runs 20 ms/frame with the pyramid and 305 ms without it, on both the
+        // raster-primary and canonical-parametric primaries.
+        console.warn(`[svo] static lighting needs ${staticMips.requiredPageCount} node-mip pages but this device`
+          + ` allows ${maximumDirectoryPages}; skipping the opacity pyramid rather than dropping`
+          + ` ${staticMips.omittedBasePageCount} pages of geometry into empty space.`);
+        nodeMipWorldOrigin_m = undefined;
       } else {
-        // Radiance is a fail-soft derived view over the already-published
-        // opacity topology. A failed emitter build must never discard opacity.
-        try {
-          const radiance = buildSvoStaticEmissiveRadiancePublication(
-            staticMips, staticLightingDomain, environmentPrimitives, {
-              samplesPerAxis: 2,
-              primaryDirectionalLight: {
-                towardLightDirection: scene.lighting?.directional?.direction ?? [-0.45, 0.86, 0.28],
-                colorLinear: scene.lighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
-                intensity: scene.lighting?.directional?.intensity ?? 1,
+        nodeMipPyramid = new WebGpuSvoNodeMipPyramid(device);
+        nodeMipPyramid.beginGeneration(staticMips.plan);
+        for (const page of staticMips.interiors) nodeMipPyramid.uploadInteriorPage(page.key, page.interior);
+        if (!nodeMipPyramid.publish().published || !nodeMipPyramid.visibleGeneration()) {
+          nodeMipPyramid.destroy();
+          nodeMipPyramid = undefined;
+        } else {
+          // Radiance is a fail-soft derived view over the already-published
+          // opacity topology. A failed emitter build must never discard opacity.
+          try {
+            const radiance = buildSvoStaticEmissiveRadiancePublication(
+              staticMips, staticLightingDomain, environmentPrimitives, {
+                samplesPerAxis: 2,
+                primaryDirectionalLight: {
+                  towardLightDirection: scene.lighting?.directional?.direction ?? [-0.45, 0.86, 0.28],
+                  colorLinear: scene.lighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
+                  intensity: scene.lighting?.directional?.intensity ?? 1,
+                },
+                injectAuthoredProxyLights: true,
               },
-              injectAuthoredProxyLights: true,
-            },
-          );
-          if (radiance.injectedBaseTexelCount > 0) {
-            tetrahedralRadiance = new WebGpuSvoTetrahedralRadiance(device);
-            tetrahedralRadiance.beginGeneration(radiance.plan);
-            for (const page of radiance.interiors) {
-              if (page.certifiedBlack) tetrahedralRadiance.certifyBlackPage(page.key);
-              else tetrahedralRadiance.uploadInteriorPage(page.key, page.packedInterleaved);
+            );
+            if (radiance.injectedBaseTexelCount > 0) {
+              tetrahedralRadiance = new WebGpuSvoTetrahedralRadiance(device);
+              tetrahedralRadiance.beginGeneration(radiance.plan);
+              for (const page of radiance.interiors) {
+                if (page.certifiedBlack) tetrahedralRadiance.certifyBlackPage(page.key);
+                else tetrahedralRadiance.uploadInteriorPage(page.key, page.packedInterleaved);
+              }
+              if (!tetrahedralRadiance.publish().published || !tetrahedralRadiance.visibleGeneration()) {
+                tetrahedralRadiance.destroy();
+                tetrahedralRadiance = undefined;
+              }
             }
-            if (!tetrahedralRadiance.publish().published || !tetrahedralRadiance.visibleGeneration()) {
-              tetrahedralRadiance.destroy();
-              tetrahedralRadiance = undefined;
-            }
+          } catch {
+            tetrahedralRadiance?.destroy();
+            tetrahedralRadiance = undefined;
           }
-        } catch {
-          tetrahedralRadiance?.destroy();
-          tetrahedralRadiance = undefined;
         }
       }
     } catch {
