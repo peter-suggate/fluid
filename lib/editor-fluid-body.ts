@@ -108,22 +108,6 @@ export function fluidBodyHandleById(box: FluidBodyBox, id: string): FluidBodyHan
   return fluidBodyHandles(box).find((handle) => handle.id === id);
 }
 
-/**
- * A face handle's outward normal. Faces drag along it rather than in the
- * camera plane, because a face has one degree of freedom and constraining the
- * pointer to it is what keeps the drag from sliding sideways.
- */
-export function fluidBodyHandleAxis(handle: FluidBodyHandle): Vec3 | undefined {
-  if (handle.kind !== "face") return undefined;
-  const axis = AXES.find((candidate) => handle.sides[candidate] !== undefined);
-  if (!axis) return undefined;
-  return {
-    x: axis === "x" ? 1 : 0,
-    y: axis === "y" ? 1 : 0,
-    z: axis === "z" ? 1 : 0,
-  };
-}
-
 function snap(value: number, step: number, origin: number): number {
   if (!(step > 0)) return value;
   return origin + Math.round((value - origin) / step) * step;

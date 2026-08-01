@@ -11,7 +11,6 @@ import {
   fluidBodyBox,
   fluidBodyBoxPatch,
   fluidBodyBoxVolume_m3,
-  fluidBodyHandleAxis,
   fluidBodyHandleById,
   fluidBodyHandles,
   fluidBodyLimits,
@@ -43,14 +42,6 @@ test("the body box carries a handle for every face, edge, and corner", () => {
   const corner = fluidBodyHandleById(box, "-+-");
   assert.deepEqual(corner?.position_m, { x: -1, y: 2, z: -1 });
   assert.deepEqual(corner?.sides, { x: "min", y: "max", z: "min" });
-});
-
-test("faces drag along their own normal; edges and corners do not claim one", () => {
-  const box = { min: { x: -1, y: 0, z: -1 }, max: { x: 1, y: 2, z: 1 } };
-  assert.deepEqual(fluidBodyHandleAxis(fluidBodyHandleById(box, "0+0")!), { x: 0, y: 1, z: 0 });
-  assert.deepEqual(fluidBodyHandleAxis(fluidBodyHandleById(box, "00-")!), { x: 0, y: 0, z: 1 });
-  assert.equal(fluidBodyHandleAxis(fluidBodyHandleById(box, "++0")!), undefined);
-  assert.equal(fluidBodyHandleAxis(fluidBodyHandleById(box, "+++")!), undefined);
 });
 
 test("a face drag moves only the side it owns", () => {

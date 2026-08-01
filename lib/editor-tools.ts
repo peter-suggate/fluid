@@ -55,7 +55,7 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     id: "bounds",
     label: "BOUNDS",
     shortcut: "b",
-    hint: "drag a face, edge, or corner to resize the tank or the water · the new bounds preview while you drag and are simulated on release",
+    hint: "drag a face, edge, or corner to resize the tank or the water · press X, Y or Z to move that axis alone, or shift with it to lock that axis out · the new bounds preview while you drag and are simulated on release",
     status: "active",
   },
   {

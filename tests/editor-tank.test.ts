@@ -131,7 +131,16 @@ test("every direct-manipulation drag previews without touching the document", ()
   for (const branch of branches) {
     const start = move.indexOf(`if (active.action === "${branch}") {`);
     assert.ok(start >= 0, `${branch} must have a pointer-move branch`);
-    const body = move.slice(start, move.indexOf("\n    }", start));
+    let body = move.slice(start, move.indexOf("\n    }", start));
+    // A branch may delegate: the bounds drag is resolved by a helper the axis
+    // lock also calls, so it can re-resolve without a pointer move. Follow one
+    // hop and hold the helper to the same contract.
+    const delegate = /\n\s+(\w+)\(active, ray\);/.exec(body)?.[1];
+    if (delegate) {
+      const helper = viewport.indexOf(`const ${delegate} = (`);
+      assert.ok(helper >= 0, `${branch} delegates to ${delegate}, which must exist`);
+      body += viewport.slice(helper, viewport.indexOf("\n  };", helper));
+    }
     assert.match(body, /updateDraft\(/, `${branch} must propose through the draft store`);
     assert.doesNotMatch(body, /patchScene|patchContainer|patchFluid|commitEdit|commitDraft/,
       `${branch} must not write the scene document while the pointer is down`);

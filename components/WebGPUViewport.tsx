@@ -67,7 +67,6 @@ import {
   fluidBodyBoxCorners,
   fluidBodyBoxPatch,
   fluidBodyEdgeSegment,
-  fluidBodyHandleAxis,
   fluidBodyHandleById,
   fluidBodyHandleLabel,
   fluidBodyHandles,
@@ -77,6 +76,13 @@ import {
   type FluidBodyBox,
   type FluidBodyHandle,
 } from "@/lib/editor-fluid-body";
+import {
+  boundsAxisConstraintLabel,
+  boundsDragAxes,
+  boundsDragAxisDirection,
+  constrainBoundsHandle,
+  type BoundsAxisConstraint,
+} from "@/lib/editor-bounds-axis";
 import {
   dragTankExtents,
   tankBox,
@@ -178,6 +184,7 @@ export function WebGPUViewport() {
   const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
   const activeTool = useUIStore((state) => state.activeTool);
+  const boundsAxisConstraint = useUIStore((state) => state.boundsAxisConstraint);
   const selection = useUIStore((state) => state.selection);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const [hover, setHover] = useState<EditorHover | null>(null);
@@ -189,6 +196,12 @@ export function WebGPUViewport() {
     leftFraction: number;
     topFraction: number;
   } | null>(null);
+  /**
+   * The handle a bounds drag is holding. `pointerRef` already carries it, but a
+   * ref cannot redraw the axis-lock readout, and the readout has to name the
+   * handle to explain a lock that leaves it nothing to move.
+   */
+  const [shapeDrag, setShapeDrag] = useState<{ target: "fluid" | "tank"; handleId: string } | null>(null);
 
   const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
@@ -576,7 +589,9 @@ export function WebGPUViewport() {
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
     | { id: number; action: "fill-level" }
-    | { id: number; action: "shape-handle"; target: "fluid" | "tank"; handleId: string; box: FluidBodyBox }
+    // `lastRay` is what lets an axis lock pressed mid-drag re-resolve the drag
+    // where the pointer already is, rather than waiting for the next move.
+    | { id: number; action: "shape-handle"; target: "fluid" | "tank"; handleId: string; box: FluidBodyBox; lastRay?: { origin: Vec3; direction: Vec3 } }
     | { id: number; action: "inflow-handle"; kind: InflowHandleKind; anchor: Vec3 }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
@@ -634,6 +649,16 @@ export function WebGPUViewport() {
     ? fluidBodyBoxCorners(shapeOutlineBox)
       .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
     : undefined;
+  // Which of the held handle's axes survive the lock. None means the lock names
+  // an axis this handle does not own — a face pushed against a constraint
+  // perpendicular to it — and the drag is inert. Saying so is the difference
+  // between a constraint and a gesture that looks broken.
+  const shapeDragAxes = (() => {
+    if (!shapeDrag) return undefined;
+    const box = shapeTargetBox(shapeDrag.target);
+    const handle = box && fluidBodyHandleById(box, shapeDrag.handleId);
+    return handle && boundsDragAxes(handle, boundsAxisConstraint);
+  })();
   const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
     ? projectToViewport(fillLevelHandlePosition(scene), camera, viewportSize.width, viewportSize.height)
     : undefined;
@@ -1151,28 +1176,69 @@ export function WebGPUViewport() {
       target: pick.target, handleId: pick.handleId, box: pick.box,
     };
     setShapeHover(null);
+    setShapeDrag({ target: pick.target, handleId: pick.handleId });
     simulation.beginDraft(pick.target === "tank" ? "tank" : "fluid-body",
       pick.target === "tank" ? "Resized the tank" : "Reshaped the water body");
     return true;
   };
 
   /**
-   * Where a box handle follows the pointer. A face has one degree of freedom,
-   * so it rides its own normal; edges and corners drag in the camera plane and
-   * keep only the components of the sides they own.
+   * Where a box handle follows the pointer. One degree of freedom — a face, or
+   * an edge or corner an axis lock has narrowed to one axis — rides that axis
+   * line; anything freer drags in the camera plane and keeps only the
+   * components of the sides it owns.
    */
   const shapeHandlePoint = (
-    box: FluidBodyBox,
-    handleId: string,
+    handle: FluidBodyHandle,
+    constraint: BoundsAxisConstraint,
     ray: { origin: Vec3; direction: Vec3 },
   ) => {
-    const handle = fluidBodyHandleById(box, handleId);
-    if (!handle) return undefined;
-    const axis = fluidBodyHandleAxis(handle);
+    const axis = boundsDragAxisDirection(handle, constraint);
     return axis
       ? closestPointOnAxis(ray.origin, ray.direction, handle.position_m, axis)
       : planeHit(ray.origin, ray.direction, handle.position_m, cameraBasis(useUIStore.getState().camera).forward);
   };
+
+  /**
+   * Resolve a bounds drag against the pointer ray and preview it.
+   *
+   * Against the committed scene, and from the box the gesture opened on:
+   * resolving the drag against its own output would let the handle walk away
+   * from the pointer, and against the draft it would drift. The write goes to
+   * the draft rather than the document — the solver is neither re-seeded nor
+   * rebuilt until the pointer comes up.
+   *
+   * The axis lock enters here and nowhere else: a constrained handle is simply
+   * the handle with its locked-out sides dropped, so the drag maths below never
+   * learns that constraints exist.
+   */
+  const applyShapeDrag = (
+    active: { target: "fluid" | "tank"; handleId: string; box: FluidBodyBox },
+    ray: { origin: Vec3; direction: Vec3 },
+  ) => {
+    const handle = fluidBodyHandleById(active.box, active.handleId);
+    if (!handle) return;
+    const constraint = useUIStore.getState().boundsAxisConstraint;
+    const point = shapeHandlePoint(handle, constraint, ray);
+    if (!point) return;
+    const constrained = constrainBoundsHandle(handle, constraint);
+    const committed = useSceneStore.getState().scene;
+    useSceneDraftStore.getState().updateDraft(active.target === "tank"
+      ? tankResizePatch(committed, dragTankExtents(committed, constrained, point))
+      : fluidBodyBoxPatch(committed, dragFluidBodyBox(active.box, constrained, point, committed)));
+  };
+
+  // An axis pressed mid-drag re-resolves the drag where the pointer already is,
+  // the way a modal transform does: waiting for the next pointer-move would
+  // leave the preview showing the unconstrained box the user just rejected.
+  useEffect(() => {
+    // The lock is the whole trigger: everything else this reads comes from a
+    // store or a ref at call time, so re-running it on a fresh `applyShapeDrag`
+    // identity would only repeat what the next pointer-move does anyway.
+    const active = pointerRef.current;
+    if (active?.action === "shape-handle" && active.lastRay) applyShapeDrag(active, active.lastRay);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boundsAxisConstraint]);
 
   /** Terrain feature handles are grabbed in screen space, like the body gizmo. */
   const beginTerrainHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1392,18 +1458,9 @@ export function WebGPUViewport() {
       return;
     }
     if (active.action === "shape-handle") {
-      const point = shapeHandlePoint(active.box, active.handleId, pointerRay(event));
-      const handle = fluidBodyHandleById(active.box, active.handleId);
-      if (!point || !handle) return;
-      // Against the committed scene, and from the box the gesture opened on:
-      // resolving the drag against its own output would let the handle walk
-      // away from the pointer, and against the draft it would drift.
-      const committed = useSceneStore.getState().scene;
-      // The draft, not the document. The solver is neither re-seeded nor
-      // rebuilt until the pointer comes up.
-      useSceneDraftStore.getState().updateDraft(active.target === "tank"
-        ? tankResizePatch(committed, dragTankExtents(committed, handle, point))
-        : fluidBodyBoxPatch(committed, dragFluidBodyBox(active.box, handle, point, committed)));
+      const ray = pointerRay(event);
+      pointerRef.current = { ...active, lastRay: ray };
+      applyShapeDrag(active, ray);
       return;
     }
     if (active.action === "fill-level") {
@@ -1503,6 +1560,7 @@ export function WebGPUViewport() {
     // document write alone invalidates it; the reseed makes the edit start
     // from a defined t=0 instead of mid-flight.
     if (active.action === "shape-handle") {
+      setShapeDrag(null);
       // A cancelled gesture keeps the scene it started with; only a real
       // release is allowed to spend a re-seed.
       if (cancelled) { simulation.cancelDraft(); return; }
@@ -1636,8 +1694,11 @@ export function WebGPUViewport() {
         ))}
       {[{ target: "tank", handles: tankGizmo }, { target: "fluid", handles: fluidBodyGizmo }].flatMap(({ target, handles }) =>
         (handles ?? []).filter((handle) => handle.projection.depth_m > 1e-6).map((handle) => {
+          // A lock greys out every handle it leaves nothing to move, so the
+          // ones that still do something are visible before the press.
           const className = `shape-handle target-${target} handle-${handle.kind}${
-            shapeHover?.target === target && shapeHover.handleId === handle.id ? " hovered" : ""}`;
+            shapeHover?.target === target && shapeHover.handleId === handle.id ? " hovered" : ""}${
+            boundsDragAxes(handle, boundsAxisConstraint).length === 0 ? " inert" : ""}`;
           const ends = handle.ends?.every((end) => end.depth_m > 1e-6) ? handle.ends : undefined;
           return ends
             ? <line
@@ -1673,6 +1734,26 @@ export function WebGPUViewport() {
       <span><i className="swatch-fluid" />WATER</span>
       <span><i className="swatch-tank" />TANK</span>
       <small>drag a face, edge or corner · simulates on release</small>
+      <small>X Y Z lock one axis · ⇧ locks a plane</small>
+    </div>}
+    {/* The lock is a mode, so it is stated for as long as it is held — before
+        the press, during the drag, and after the release — rather than only
+        while something is moving. It sits under the legend it replaces during a
+        drag, and it says outright when the held handle owns none of the locked
+        axes, which is the one case where a correct constraint looks like a
+        frozen gesture. */}
+    {shapeMode && boundsAxisConstraint && <div
+      className="shape-axis-lock"
+      data-testid="shape-axis-lock"
+      data-blocked={shapeDragAxes?.length === 0 ? "true" : undefined}
+      aria-hidden="true"
+    >
+      <strong>{boundsAxisConstraintLabel(boundsAxisConstraint)}</strong>
+      <span>{shapeDragAxes?.length === 0
+        ? "this handle moves none of it — press Esc, or grab another handle"
+        : boundsAxisConstraint.length === 1
+          ? "only this axis moves"
+          : "these two axes move"}</span>
     </div>}
     {shapeMode && shapeSubject && shapeOutlineBox && shapeOutline?.[7]?.visible && <div
       className={`shape-readout target-${shapeSubject}`}

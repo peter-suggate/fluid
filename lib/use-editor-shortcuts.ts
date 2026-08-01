@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { boundsAxisForKey, toggleBoundsAxisConstraint } from "./editor-bounds-axis";
 import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
 import { DEFAULT_EDITOR_TOOL, editorToolForShortcut, editorToolIsActive } from "./editor-tools";
 import { stepFluidCellTraceHit } from "./fluid-cell-trace";
@@ -40,8 +41,26 @@ export function useEditorShortcuts(): void {
       }
       if (accelerator || event.altKey) return;
 
+      // Axis constraints, on the letters every 3D editor uses for them. BOUNDS
+      // claims x/y/z outright rather than only while a handle is held: a
+      // constraint you can only reach mid-drag cannot be seen before you commit
+      // to the gesture, and arming one first is how a run of single-axis
+      // adjustments is actually made. The one casualty is `y` for ERASE from
+      // inside BOUNDS, which the toolbar and every other tool key still reach.
+      if (ui.activeTool === "bounds") {
+        const axis = boundsAxisForKey(event.key);
+        if (axis) {
+          event.preventDefault();
+          ui.setBoundsAxisConstraint(toggleBoundsAxisConstraint(
+            ui.boundsAxisConstraint, axis, event.shiftKey ? "plane" : "axis"));
+          return;
+        }
+      }
       if (event.key === "Escape") {
         event.preventDefault();
+        // A mode inside a mode is left from the inside out, so the first Escape
+        // drops the axis lock and the second leaves the tool.
+        if (ui.boundsAxisConstraint) { ui.setBoundsAxisConstraint(undefined); return; }
         ui.setActiveTool("select");
         ui.select(undefined);
         return;

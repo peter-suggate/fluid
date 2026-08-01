@@ -728,6 +728,10 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-shape-gizmo .shape-handle.hovered { stroke-width: 2; }
 .editor-shape-gizmo .target-fluid.hovered { fill: #9dc6ff; stroke: #eaf3ff; }
 .editor-shape-gizmo .target-tank.hovered { fill: #f0ba6e; stroke: #fff1da; }
+/* Under an axis lock, a handle owning none of the locked axes can do nothing.
+   Fading it says which handles are still live without removing them: the lock
+   is a keystroke away from being released, and the box would jump if they went. */
+.editor-shape-gizmo .shape-handle.inert { opacity: .2; }
 .gpu-canvas[data-shape-grab="true"] { cursor: grab; }
 
 /* The mode has to say what it is: two colours and one sentence, sitting in the
@@ -738,6 +742,14 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .shape-legend .swatch-fluid { border-color: #7cb6ff; background: rgba(124,182,255,.5); }
 .shape-legend .swatch-tank { border-color: rgba(240,186,110,.85); background: rgba(240,186,110,.32); }
 .shape-legend small { color: var(--muted); font: 8px/1 var(--mono); }
+
+/* The axis lock, directly under the legend it outlives: it is held state, so it
+   stays on screen between drags rather than only while one is running. */
+.shape-axis-lock { position: absolute; left: 50%; top: 42px; z-index: 12; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid rgba(124,182,255,.55); background: rgba(5,18,16,.9); white-space: nowrap; pointer-events: none; backdrop-filter: blur(16px); }
+.shape-axis-lock strong { color: #9dc6ff; font: 700 9px/1 var(--mono); letter-spacing: .1em; }
+.shape-axis-lock span { color: var(--muted); font: 8px/1 var(--mono); }
+.shape-axis-lock[data-blocked="true"] { border-color: rgba(240,150,110,.65); }
+.shape-axis-lock[data-blocked="true"] strong { color: #f09b6e; }
 
 .shape-hover-chip { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(10px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: rgba(5,18,16,.9); white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
 .shape-hover-chip strong { font: 700 7px/1 var(--mono); letter-spacing: .08em; }

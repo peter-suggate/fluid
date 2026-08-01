@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { bodySelection, DEFAULT_EDITOR_TOOL, selectedBodyIdOf, type EditorSelection, type EditorTool } from "../editor-tools";
+import type { BoundsAxisConstraint } from "../editor-bounds-axis";
 import { defaultCamera, type CameraState, type RigidShape, type ScenePropShape } from "../model";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
@@ -31,6 +32,16 @@ interface UIStore {
   camera: CameraState;
   /** Armed direct-manipulation tool; the pointer machine dispatches on it. */
   activeTool: EditorTool;
+  /**
+   * Axes a bounds drag is allowed to move, or undefined for all three.
+   *
+   * Store state rather than drag state because it outlives the gesture: an axis
+   * armed before the press constrains the drag that follows, and a lock set
+   * mid-drag survives into the next one, which is what a run of single-axis
+   * adjustments actually wants. `setActiveTool` clears it, so it can never leak
+   * out of the mode that draws it.
+   */
+  boundsAxisConstraint: BoundsAxisConstraint;
   /**
    * What the gizmo and the precision flyout act on. `selectedBodyId` is the
    * body-only projection of this, retained because the renderer and the body
@@ -120,6 +131,7 @@ interface UIStore {
   fluidCellTraceExpanded: boolean;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   setActiveTool: (tool: EditorTool) => void;
+  setBoundsAxisConstraint: (constraint: BoundsAxisConstraint) => void;
   select: (selection?: EditorSelection) => void;
   selectBody: (bodyId?: string) => void;
   setPlacementShape: (shape: RigidShape) => void;
@@ -167,6 +179,7 @@ interface UIStore {
 export const useUIStore = create<UIStore>((set) => ({
   camera: defaultCamera,
   activeTool: DEFAULT_EDITOR_TOOL,
+  boundsAxisConstraint: undefined,
   selection: undefined,
   selectedBodyId: undefined,
   placementShape: "sphere",
@@ -201,7 +214,11 @@ export const useUIStore = create<UIStore>((set) => ({
   fluidCellTraceInterfaceHits: [],
   fluidCellTraceExpanded: false,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
-  setActiveTool: (activeTool) => set({ activeTool }),
+  // Leaving BOUNDS drops its axis lock: the lock is only ever drawn by that
+  // mode, and a constraint still armed on the way back in would be a hidden
+  // state that silently ate two thirds of the next drag.
+  setActiveTool: (activeTool) => set({ activeTool, boundsAxisConstraint: undefined }),
+  setBoundsAxisConstraint: (boundsAxisConstraint) => set({ boundsAxisConstraint }),
   select: (selection) => set({ selection, selectedBodyId: selectedBodyIdOf(selection) }),
   selectBody: (selectedBodyId) => set({ selectedBodyId, selection: bodySelection(selectedBodyId) }),
   setPlacementShape: (placementShape) => set({ placementShape }),
