@@ -124,10 +124,15 @@ export interface FineLevelSetRedistanceDeltaAuthority {
  * no pass saving. The lever that did work was arithmetic inside the flood:
  * see `FINE_LEVELSET_JFA_B4_ADDRESSING_ENV`.
  */
+export const FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES = 5;
+export const FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES = 2;
+export const FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES =
+  FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES - FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES;
+
 export function planFineLevelSetJFAStrides(
   bandCells: number,
   maximumDisplacementFineCells = 4,
-  collarRepairPasses = 5,
+  collarRepairPasses = FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES,
 ): readonly number[] {
   if (!Number.isSafeInteger(bandCells) || bandCells < 1 || bandCells > 256) {
     throw new RangeError("Fine redistance bandCells must be an integer in [1, 256]");
@@ -137,7 +142,8 @@ export function planFineLevelSetJFAStrides(
     throw new RangeError("Fine redistance displacement must be an integer in [1, 256]");
   }
   if (!Number.isSafeInteger(collarRepairPasses)
-    || collarRepairPasses < 0 || collarRepairPasses > 5) {
+    || collarRepairPasses < 0
+    || collarRepairPasses > FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES) {
     throw new RangeError("Fine redistance collar repair count must be an integer in [0, 5]");
   }
   let stride = 1;
@@ -730,7 +736,10 @@ export class WebGPUFineLevelSetRedistance {
     // two local collar repairs remains. Cold keeps the five repairs required
     // by the ocean topology expansion.
     const strides = planFineLevelSetJFAStrides(
-      bandCells, maximumDisplacementFineCells, warmStart ? 2 : 5);
+      bandCells, maximumDisplacementFineCells,
+      warmStart
+        ? FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES
+        : FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES);
     if (strides.length > FINE_LEVELSET_JFA_MAX_PASSES) throw new RangeError("Fine JFA pass budget exceeded");
     if (strides.some((stride) => stride > this.maximumRequiredJfaStride)) {
       throw new RangeError(
@@ -879,6 +888,20 @@ export class WebGPUFineLevelSetRedistance {
           pipeline, baseParams, [1, 2, 3, 4, 5, 6, 7, 10, 13, 14], "fallback");
         fallbackInA = !fallbackInA;
       });
+      // The normal warm ladder already includes two local collar repairs.
+      // A fallback means that closure was insufficient, so finish the five
+      // repairs used by the cold exact schedule before resolving. The old
+      // path only replayed the same two-repair ladder and could therefore
+      // reject successive Hose Tank generations with otherwise clean inputs.
+      for (let repair = 0;
+        repair < FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES;
+        repair += 1) {
+        const pipeline = (fallbackInA ? this.jfaABPipelines : this.jfaBAPipelines).get(1)!;
+        run(`Fine JFA - complete support fallback collar repair ${
+          repair + FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES + 1}`,
+          pipeline, baseParams, [1, 2, 3, 4, 5, 6, 7, 10, 13, 14], "fallback");
+        fallbackInA = !fallbackInA;
+      }
       run("Fine JFA - resolve complete support fallback",
         fallbackInA ? this.jfaResolveAToBPipeline : this.jfaResolveBToCanonicalPipeline,
         baseParams, [2, 3, 4, 5, 6, 7, 9, 13, 14], "fallback");

@@ -18,11 +18,14 @@ import {
   "../lib/webgpu-octree-fine-levelset-transport";
 import {
   FINE_LEVELSET_JFA_B4_ADDRESSING_ENV,
+  FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES,
   FINE_LEVELSET_JFA_DIRTY_FRONTIER_ENV,
   FINE_LEVELSET_JFA_FRONTIER_CONTROL_BYTES,
   FINE_LEVELSET_JFA_FRONTIER_STAGES,
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
   FINE_LEVELSET_JFA_LOOKUP_STRIDES,
+  FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES,
+  FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES,
   WebGPUFineLevelSetRedistance,
   fineLevelSetJFAB4AddressingRequested,
   fineLevelSetJFADirtyFrontierEnabled,
@@ -927,6 +930,16 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
   // Cold schedules use bandCells and retain five sparse collar repairs. The
   // recurring schedule consumes the recycle-safe carried transform, so its
   // ladder is shaped by one-step displacement and needs only two repairs.
+  assert.equal(FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES, 5);
+  assert.equal(FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES, 2);
+  assert.equal(FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES, 3);
+  const warmSchedule = planFineLevelSetJFAStrides(
+    23, 8, FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES);
+  assert.deepEqual([
+    ...warmSchedule,
+    ...Array(FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES).fill(1),
+  ], planFineLevelSetJFAStrides(23, 8, FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES),
+  "a triggered warm fallback must finish the same five-pass collar closure as cold publication");
   assert.deepEqual(planFineLevelSetJFAStrides(21), [4, 2, 1, 1, 1, 1, 1, 1]);
   assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [16, 8, 4, 2, 1, 1, 1, 1, 1, 1]);
   assert.deepEqual(planFineLevelSetJFAStrides(8, 8), [8, 4, 2, 1, 1, 1, 1, 1, 1],
@@ -976,6 +989,9 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
   assert.match(encodedJFA,
     /prepare warm fallback[\s\S]*seed full-support fallback[\s\S]*strides\.forEach[\s\S]*complete support fallback[\s\S]*resolve complete support fallback/,
     "a GPU-resident miss must rerun the complete support-wide ladder from a clean seed field");
+  assert.match(encodedJFA,
+    /FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES[\s\S]*complete support fallback collar repair/,
+    "the fallback must append the three cold collar repairs omitted by the warm ladder");
   assert.match(fineLevelSetJFACPTWGSL,
     /let value=bitcast<f32>\(phi\[index\]\);if\(!finite\(value\)\)\{errorFlags\|=NONFINITE/,
     "recurring redistance must reject non-finite transported phi");
@@ -1346,7 +1362,7 @@ test("fine redistance binds exactly the resources reachable from each compute en
         new WebGPUFineLevelSetRedistance(device, {
           ...source, plan: { ...source.plan, fineFactor },
         } as never, redistanceDeltaAuthority(buffer, 1)).encode(
-          coldBroker, { bandCells: 1 });
+          coldBroker, { bandCells: 2 });
         coldBroker.fence("cold redistance parity binding inspection");
       }
     }
