@@ -1,14 +1,11 @@
 import { pathToFileURL } from "node:url";
 import { EulerianFluidSolver } from "../lib/eulerian-solver";
-import { tallCellMethod } from "../lib/methods/tall-cell";
 import type { GPUSolverInstance, SimulationMethod } from "../lib/methods/types";
-import { uniformMethod } from "../lib/methods/uniform";
-import { quadtreeTallCellMethod } from "../lib/methods/quadtree-tall-cell";
 import { octreeMethod } from "../lib/methods/octree";
 import { initializeRigidBodies } from "../lib/rigid-body";
 import type { SceneDescription } from "../lib/model";
-import { createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, createTallCellLayout, tallCellSettings, type SingleTallCellProbeOptions } from "../lib/tall-cell-grid";
-import { WebGPUEulerianSolver, type GPUEulerianInfo, type GPUQuality } from "../lib/webgpu-eulerian";
+import { createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, type SingleTallCellProbeOptions } from "../lib/tall-cell-grid";
+import type { GPUEulerianInfo, GPUQuality } from "../lib/webgpu-eulerian";
 import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
 import { fineTopologyRetainsBackgroundOctree } from "../lib/octree-consumer-sampling";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/webgpu-octree-fine-levelset-bricks";
@@ -67,7 +64,6 @@ import {
   readTallVelocityTexture3D,
   readVelocityTexture3D,
   smokeRenderHybridPresentation,
-  velocityDifferenceMagnitude,
   type FluidBrickSnapshot,
   type GlobalFineGenerationDiagnostics,
   type HybridPresentationSmokeStats,
@@ -89,12 +85,10 @@ import type { OctreeWorkSnapshot } from "../lib/webgpu-octree-work-accounting";
 import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
 import {
   compareScalarFields,
-  compareSingleTallCellNeighborhood,
   createSmokeScenario,
   isSmokeScenarioId,
   smokeScenarioIds,
   summarizeScalarField,
-  summarizeTallCellActivity,
   type ScalarFieldSummary,
   type SmokeScenario,
   type TallCellActivitySummary,
@@ -208,10 +202,10 @@ fn sentinel() { output[0] = 0x4f435452u; }
   }
 }
 
-const availableMethods = [tallCellMethod, quadtreeTallCellMethod, octreeMethod, uniformMethod];
+const availableMethods = [octreeMethod];
 const methodFilter = process.env.FLUID_METHOD?.split(",").map((value) => value.trim()).filter(Boolean);
 const methods = availableMethods.filter((method) => !methodFilter || methodFilter.includes(method.id));
-if (methods.length === 0 || (methodFilter && methodFilter.length !== methods.length)) throw new Error(`Unknown FLUID_METHOD=${process.env.FLUID_METHOD}; expected a comma list of tall-cell, quadtree-tall-cell, octree, or uniform`);
+if (methods.length === 0 || (methodFilter && methodFilter.length !== methods.length)) throw new Error(`Unknown FLUID_METHOD=${process.env.FLUID_METHOD}; expected octree`);
 
 function methodsForScenario(scenario: SmokeScenario): SimulationMethod[] {
   if (methodFilter) return methods;
@@ -1096,17 +1090,7 @@ async function runGPU(
   if (enableAuthoredStructuredEnergyProbe) process.env.FLUID_STRUCTURED_ENERGY_PROBE = "1";
   let solver: GPUSolverInstance;
   try {
-    solver = probeLayout
-      ? new WebGPUEulerianSolver(instrumentedDevice, scene, solverQuality, undefined, {
-        layoutOverride: probeLayout,
-        pressureCycles: typeof values.pressureCycles === "number" ? values.pressureCycles : 2,
-        pressureWarmStart: values.pressureWarmStart !== "off",
-        velocityTransport: values.velocityTransport === "semi-lagrangian" ? "semi-lagrangian" : "maccormack",
-        volumeControl: values.volumeControl !== "off",
-        referenceVolumeScale: typeof values.referenceVolumeScale === "number" ? values.referenceVolumeScale : undefined,
-        hierarchicalExtrapolation: values.hierarchicalExtrapolation !== "off"
-      })
-      : method.id === "octree" && method.createSolverAsync
+    solver = method.id === "octree" && method.createSolverAsync
         // The power catalog and fenced t=0 sparse authority are initialization
         // tasks in the production browser path. Dawn must use the same async
         // constructor even when authority came from an authored UI profile
@@ -1434,12 +1418,10 @@ async function runGPU(
   }
   /** Live control buffers the tripwire record is copied from.
    *
-   * The fine topology control has no dedicated accessor, but the solver's
-   * public `workAccountingBuffers` already publishes it under exactly the
-   * selection `readGlobalFineLevelSetDiagnostics` uses
-   * (`globalFinePublishedIsA ? topologyBA : topologyAB`, i.e. the direction
-   * that produced the currently published source). Reusing it keeps one
-   * selection rule in the codebase instead of a second copy that could drift.
+   * The authoritative global-fine source already carries the topology control
+   * selected by `globalFinePublishedIsA`. Read it directly from that production
+   * source; hierarchical work-accounting buffers were retired and must not be
+   * resurrected merely to feed this QA snapshot.
    * A missing source is a hard failure on a required lane, never a silent
    * skip -- an unevaluable tripwire is what this work item exists to kill. */
   const tripwireSources = () => {
@@ -1447,10 +1429,10 @@ async function runGPU(
       mgpcgControl?: GPUBuffer;
       globalFineRestrictionControl?: GPUBuffer;
       globalFineSummaryDebug?: { coarseControl: GPUBuffer };
-      workAccountingBuffers?: { fineTopologyControl?: GPUBufferBinding };
     };
+    const topologyControl = authority.globalFineLevelSetSource?.topologyControl;
     return {
-      topology: authority.workAccountingBuffers?.fineTopologyControl,
+      topology: topologyControl ? { buffer: topologyControl } : undefined,
       restriction: authority.globalFineRestrictionControl,
       mgpcg: authority.mgpcgControl,
       coarse: authority.globalFineSummaryDebug?.coarseControl,
@@ -3059,25 +3041,6 @@ try {
     const oracleSteps = Math.max(1, Math.round(oracleStepsOverride ?? scenario.oracleSteps));
     const target_s = Math.max(targetOverride ?? scenario.target_s, oracleSteps * scenario.scene.numerics.maxDt_s);
     console.log(JSON.stringify({ scenario: scenarioId, lane: scenario.lane.id, phase: "scenario", description: scenario.description, target_s, oracleSteps, quality, methods: scenarioMethods.map((method) => method.id), cpuOracle: runOptions.runCPUOracle }));
-    if (scenarioMethods.some((method) => method.id === "tall-cell")) {
-      const layout = singleTallCellProbe
-        ? createSingleTallCellProbeLayout(scenario.scene, quality, 2048, singleTallCellProbe)
-        : createTallCellLayout(scenario.scene, quality, 2048,
-          regularLayersOverride === undefined && maximumNeighborDeltaOverride === undefined ? undefined : {
-          ...(regularLayersOverride === undefined ? {} : { regularLayers: regularLayersOverride }),
-          ...(maximumNeighborDeltaOverride === undefined ? {} : { maximumNeighborDelta: maximumNeighborDeltaOverride })
-        });
-      console.log(JSON.stringify({
-        scenario: scenarioId, phase: "interrogation", interrogation: "tall-cell-activity", stage: "planned",
-        cubicGrid: [layout.nx, layout.fineNy, layout.nz], storedNy: layout.packedNy,
-        requestedRegularLayers: regularLayersOverride ?? tallCellSettings[quality].regularLayers,
-        effectiveRegularLayers: layout.settings.regularLayers, compressionRatio: layout.compressionRatio,
-        activeCompressionRatio: layout.activeCompressionRatio, activeSampleCount: layout.activeSampleCount,
-        planning: layout.planning,
-        activity: summarizeTallCellActivity(layout.columnBases, layout.fineNy, layout.settings.regularLayers, layout.nx, layout.nz),
-        singleTallCellProbe: layout.singleTallCellProbe
-      }));
-    }
     const results: GPUSmokeResult[] = [];
     for (const method of scenarioMethods) results.push(await runGPU(scenario, method, target_s, oracleSteps, runOptions));
     const executionFailures = webGPUSmokeExecutionFailures(results, {
@@ -3119,58 +3082,6 @@ try {
           + `${finding.method ? ` (${finding.method})` : ""}: ${finding.message}`),
     ];
     failures.push(...scenarioDiagnosticFailures);
-
-    const tallResult = results.find((result) => result.method === "tall-cell"), uniformResult = results.find((result) => result.method === (singleTallCellProbe ? "tall-cell-control" : "uniform"));
-    if (tallResult && uniformResult) {
-      const ratio = (uniformValue?:number,tallValue?:number) => typeof uniformValue==="number"&&typeof tallValue==="number"&&Number.isFinite(uniformValue)&&Number.isFinite(tallValue)&&tallValue>0 ? uniformValue/tallValue : null;
-      const stages = ["coarse-grid","velocity-advection","pressure-system","pressure-solve","velocity-projection","velocity-extrapolation","adaptive-publication","other"] as const satisfies readonly PaperPhaseId[];
-      const gpuStageSpeedups = Object.fromEntries(stages.map((stage) => [stage,ratio(
-        performancePhase_ms(uniformResult.info.physicsTrace,stage),
-        performancePhase_ms(tallResult.info.physicsTrace,stage),
-      )]));
-      console.log(JSON.stringify({
-        scenario:scenarioId,phase:"performance-comparison",baseline:"uniform",candidate:"tall-cell",
-        tallBackend:tallResult.info.gridKind,wallRuntimeSpeedup:ratio(uniformResult.runtime_ms,tallResult.runtime_ms),
-        constructionSpeedup:ratio(uniformResult.construction_ms,tallResult.construction_ms),gpuStageSpeedups,
-        activeSampleReduction:1-(tallResult.info.activeSampleCount??tallResult.info.cellCount)/(uniformResult.info.activeSampleCount??uniformResult.info.cellCount),
-        properties:{
-          tallRepresentedVolumeDrift:tallResult.info.representedVolumeDrift,uniformRepresentedVolumeDrift:uniformResult.info.representedVolumeDrift,
-          representedVolumeDriftDelta:(tallResult.info.representedVolumeDrift??0)-(uniformResult.info.representedVolumeDrift??0),
-          tallNonFiniteCount:tallResult.info.nonFiniteCount,uniformNonFiniteCount:uniformResult.info.nonFiniteCount,
-          tallPressureRelativeResidual:tallResult.info.pressureRelativeResidual,uniformPressureRelativeResidual:uniformResult.info.pressureRelativeResidual
-        }
-      }));
-      if (singleTallCellProbe) {
-        const layout = createSingleTallCellProbeLayout(scenario.scene, quality, 2048, singleTallCellProbe);
-        const probe = layout.singleTallCellProbe!;
-        console.log(JSON.stringify({
-          scenario: scenarioId, phase: "single-tall-cell-difference", control: "restricted-cubic-limit", candidate: "one-tall-cell",
-          probe, time_s: tallResult.info.simulatedTime_s,
-          global: compareScalarFields(tallResult.finalSummary ? tallResult.checkpoints.at(-1)?.field ?? tallResult.matchedField : tallResult.matchedField, uniformResult.finalSummary ? uniformResult.checkpoints.at(-1)?.field ?? uniformResult.matchedField : uniformResult.matchedField, ...tallResult.grid),
-          locality: compareSingleTallCellNeighborhood(tallResult.matchedField, uniformResult.matchedField, ...tallResult.grid, probe.x, probe.z),
-          velocity: { tall: tallResult.velocitySummary, uniform: uniformResult.velocitySummary }
-        }));
-        const pairCount = Math.min(tallResult.checkpoints.length, uniformResult.checkpoints.length);
-        for (let index = 0; index < pairCount; index += 1) {
-          const tallCheckpoint = tallResult.checkpoints[index], uniformCheckpoint = uniformResult.checkpoints[index];
-          const profileTop = Math.min(tallResult.grid[1], probe.height + 4);
-          const probeProfile = (field: Float32Array) => Array.from({ length: profileTop }, (_, y) => field[probe.x + tallResult.grid[0] * (y + tallResult.grid[1] * probe.z)]);
-          const velocityLocality = (left?: Float32Array, right?: Float32Array) => {
-            if (!left || !right) return undefined;
-            const magnitude = velocityDifferenceMagnitude(left, right);
-            return compareSingleTallCellNeighborhood(magnitude, new Float32Array(magnitude.length), ...tallResult.grid, probe.x, probe.z);
-          };
-          console.log(JSON.stringify({
-            scenario: scenarioId, phase: "single-tall-cell-checkpoint", time_s: tallCheckpoint.time_s, probe,
-            global: compareScalarFields(tallCheckpoint.field, uniformCheckpoint.field, ...tallResult.grid),
-            locality: compareSingleTallCellNeighborhood(tallCheckpoint.field, uniformCheckpoint.field, ...tallResult.grid, probe.x, probe.z),
-            probeVolumeProfile: { candidate: probeProfile(tallCheckpoint.field), control: probeProfile(uniformCheckpoint.field) },
-            velocityBeforeProjection: velocityLocality(tallCheckpoint.preProjectionVelocity, uniformCheckpoint.preProjectionVelocity),
-            velocityAfterProjection: velocityLocality(tallCheckpoint.postProjectionVelocity, uniformCheckpoint.postProjectionVelocity)
-          }));
-        }
-      }
-    }
 
     const grid = results[0].grid;
     const cpu = runOptions.runCPUOracle ? runMatchedCPUOracle(scenario, grid, oracleSteps, runOptions) : undefined;

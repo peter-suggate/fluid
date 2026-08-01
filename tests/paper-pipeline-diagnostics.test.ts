@@ -21,7 +21,7 @@ test("paper pipeline inspector reports the direct structured authority chain", (
     globalFineSeedCount: 42, globalFineSeedError: 0, globalFineTopologyFlags: 0,
     globalFineDownstreamFinalizeReason: 0, globalFineRedistanceCommitted: true,
     globalFineRedistanceUnresolvedCells: 0, globalFineTransportCommitted: true,
-    pressureSolver: "Section 4.3 hybrid MGPCG", pressureRelativeResidual: 8e-5,
+    pressureSolver: "Octree power MGPCG · persistent executor · Section 4.3 fixed schedule", pressureRelativeResidual: 8e-5,
   }), { surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true,
     globalFineAttachedGeneration: 17, meshPublicationGeneration: 17,
     globalFineCrossingPublished: true, presentationFallbackActive: false });
@@ -40,7 +40,7 @@ test("factor-one coarse-only surface authority is not reported as a rejected fin
     pressureRequiredRows: 1_632, pressureCapacityOverflow: false,
     structuredVelocityValid: true, structuredBoundaryValid: true,
     structuredVelocityGeneration: 4,
-    pressureSolver: "Section 4.3 hybrid MGPCG", pressureRelativeResidual: 1e-5,
+    pressureSolver: "Octree power MGPCG · persistent executor · Section 4.3 fixed schedule", pressureRelativeResidual: 1e-5,
     globalFineLevelSetEnabled: false, globalFineLevelSetFactor: 1,
     globalFinePublished: false, globalFineRedistanceCommitted: false,
     globalFineTransportCommitted: false,

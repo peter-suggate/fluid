@@ -1344,6 +1344,14 @@ export class RasterWaterPipeline {
   /** Latest bounded GPU readback proving what surface geometry is presented. */
   get surfaceRenderDiagnostics() { return this.lastSurfaceDiagnostics; }
 
+  /**
+   * The dry-scene HDR plane the compositor consumes: RGB is scene-linear
+   * radiance and alpha is the linear depth water and spray sort against.
+   * Exposed read-only so the render-stage overlay can present the lighting
+   * result before compositing, without a copy.
+   */
+  get drySceneRadianceView(): GPUTextureView | undefined { return this.sceneTextureView; }
+
   private surfaceDiagnosticsFullRateRequested() {
     if (typeof location !== "undefined") {
       const query = new URLSearchParams(location.search);

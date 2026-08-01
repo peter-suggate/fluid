@@ -88,7 +88,6 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
     maximumPressureAbsoluteError: 0,
     maximumRhsAbsoluteError: 0,
     maximumDiagonalAbsoluteError: 0,
-    requirePressureStageAudit: true,
     requireExactTopology: true,
     requireAllWallsReached: false,
     minimumCheckpointCount: 1,
@@ -96,7 +95,8 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   });
   const twoStep = getSceneWebGPUSmokeLane("symmetric-expansion", "two-step");
   assert.equal(twoStep.stop.exactSteps, 2);
-  assert.equal(twoStep.hooks[0]?.parameters?.requirePressureStageAudit, true);
+  assert.equal(twoStep.hooks[0]?.parameters?.requirePressureStageAudit, undefined,
+    "persistent MGPCG no longer exposes the retired staged-preconditioner audit buffers");
   assert.equal(twoStep.hooks[0]?.parameters?.minimumCheckpointCount, 2);
   assert.equal(fine.hooks[0]?.parameters?.requireAllWallsReached, false);
 });

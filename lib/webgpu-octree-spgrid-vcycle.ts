@@ -5,18 +5,8 @@ import {
 } from "./webgpu-octree-section43-contract";
 import { PassBroker } from "./webgpu-pass-broker";
 import { planOctreeVCycleParallelLevels } from "./octree-solve-tail-policy";
-import type { OctreePipelinedWorksetLinearOperator } from "./webgpu-octree-pipelined-mgpcg";
+import type { OctreeWorksetLinearOperator } from "./octree-linear-operator";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
-import {
-  type FactorOneDenseAcceptedView,
-  type FactorOneDenseShadowDifferential,
-  WebGPUFactorOneDensePressureShadow,
-} from "./webgpu-factor-one-dense-pressure-shadow";
-import {
-  factorOneDenseCorrectionSource,
-  octreeFactorOneDenseMGEnabled,
-  WebGPUOctreeFactorOneDenseCorrection,
-} from "./webgpu-octree-factor-one-dense-correction";
 import {
   OCTREE_CUBE_TRANSFORMS,
   inverseCubeTransform,
@@ -600,12 +590,6 @@ export interface OctreeSPGridVCycleOptions {
   readonly dimensions: readonly [number, number, number];
   readonly rowCapacity: number;
   readonly finestCellWidth: number;
-  /**
-   * Use the factor-1 coarse-zero-band transfer: each cell injects into its
-   * unique 2x2x2 parent and restriction uses the exact transpose. Adaptive
-   * lanes retain the cell-centred trilinear eight-parent transfer.
-   */
-  readonly geometricAggregateTransfers?: boolean;
   readonly maximumLevels?: number;
   readonly preSmoothingIterations?: number;
   readonly postSmoothingIterations?: number;
@@ -1087,8 +1071,6 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
 type CachedGroup = { rowCount: GPUBuffer; control: GPUBuffer; geometry: GPUBuffer;
   sourceControl: GPUBuffer; topologyMetrics: GPUBuffer;
   rhs?: GPUBuffer; correction?: GPUBuffer; group: GPUBindGroup };
-type AccurateClass = "regularInterior" | "transitionInterior"
-  | "physicalBoundary" | "transitionBoundary";
 type CachedAccurateApply = {
   readonly input: GPUBuffer;
   readonly output: GPUBuffer;
@@ -1098,23 +1080,18 @@ type CachedAccurateApply = {
   readonly worksetSize?: number;
   readonly worksetLayout: GPUBuffer;
   readonly gateGroup: GPUBindGroup;
-  readonly classGroups: Readonly<Record<AccurateClass, GPUBindGroup>>;
-  readonly unionGroup: GPUBindGroup;
-  readonly compiledUnionGroup?: GPUBindGroup;
   readonly termGroup: GPUBindGroup;
   readonly adjointGroup: GPUBindGroup;
   readonly finalizeGroup: GPUBindGroup;
   readonly residualSource?: GPUBuffer;
   readonly residualFinalizeGroup?: GPUBindGroup;
-  mergedUnionGroup?: GPUBindGroup;
-  compiledMergedUnionGroup?: GPUBindGroup;
   mergedTermGroup?: GPUBindGroup;
   mergedAdjointGroup?: GPUBindGroup;
 };
 
 /**
  * Byte offset of the fifth accurate indirect record: the union of the four
- * accepted row classes, which `applyAcceptedUnion` consumes as one dispatch.
+ * accepted row classes, which the staged row finalizer consumes as one dispatch.
  */
 const ACCURATE_UNION_DISPATCH_OFFSET_BYTES = 4 * 12;
 const ACCURATE_TERM_DISPATCH_OFFSET_BYTES = 5 * 12;
@@ -1138,9 +1115,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   readonly encodedCorrectionPassTransitionCount = 1;
   readonly encodedSetupDispatchCount: number;
   readonly encodedCorrectionDispatchCount: number;
-  private accurateOperatorInstance?: OctreePipelinedWorksetLinearOperator;
+  private accurateOperatorInstance?: OctreeWorksetLinearOperator;
   /** Accurate second-order executor over four disjoint topology classes. */
-  get accurateOperator(): OctreePipelinedWorksetLinearOperator {
+  get accurateOperator(): OctreeWorksetLinearOperator {
     if (!this.accurateOperatorInstance) {
       throw new Error("SPGrid accurate A2 executor was not compiled");
     }
@@ -1148,7 +1125,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   }
   readonly smootherContract;
   readonly diagnostics: Readonly<{ levelCount: number; coarsestCapacity: number; maximumTransferRecordsPerLevel: number;
-    denseShadowSetupDispatchCount: number;
     correctionDispatchCount: number; correctionInitializationDispatchCount: 1 | 2;
     correctionPassTransitions: number; restrictionScatterDispatchCount: number;
     restrictionAtomicAddUpperBound: number; parentGatherDispatchCount: number; parentGatherAtomicAddCount: 0;
@@ -1173,10 +1149,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly candidateGhosts: GPUBuffer;
   /** Exact fingerprint of the inputs the last committed hierarchy consumed. */
   private readonly committedInputs: GPUBuffer;
-  /** Factor-1 transactional dense image; sparse setup remains its authority. */
-  private readonly denseShadow?: WebGPUFactorOneDensePressureShadow;
-  /** Recurring dense M1 correction; the accurate A2 operator remains unchanged. */
-  private readonly denseCorrection?: WebGPUOctreeFactorOneDenseCorrection;
   /**
    * Leading levels the correction runs as wide per-level dispatches; the rest
    * join the one-workgroup tail. Authored from immutable level geometry, so
@@ -1191,13 +1163,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly accurateWorksetLayout: GPUBuffer;
   private readonly accurateGatePipeline!: GPUComputePipeline;
   private readonly accurateClassDispatch!: GPUBuffer;
-  private readonly accurateClassPipelines!: Readonly<Record<AccurateClass, GPUComputePipeline>>;
   private readonly accurateMergedTermPipeline!: GPUComputePipeline;
   private readonly accurateMergedAdjointPipeline!: GPUComputePipeline;
-  private readonly accurateMergedUnionPipeline!: GPUComputePipeline;
-  private readonly accurateUnionPipeline!: GPUComputePipeline;
-  private readonly accurateCompiledMergedUnionPipeline?: GPUComputePipeline;
-  private readonly accurateCompiledUnionPipeline?: GPUComputePipeline;
   private readonly accurateTermPipeline!: GPUComputePipeline;
   private readonly accurateAdjointPipeline!: GPUComputePipeline;
   private readonly accurateFinalizePipeline!: GPUComputePipeline;
@@ -1218,15 +1185,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
    */
   private readonly directByChase = typeof process !== "undefined"
     && process.env?.FLUID_SPGRID_DIRECT_BY_CHASE === "1";
-  /** One invocation owns one accepted A2 row and evaluates the same operator
-   * expression inline, deleting the staged direct/adjoint/fold dispatches. */
-  private readonly inlineAccurateA2: boolean;
-  /** Factor-1 inline path for the much hotter Section 6.3 merged-band apply. */
-  private readonly inlineMergedBandA2: boolean;
-  /** Explicit factor-1 arm: retain the one-dispatch inline graph but gather
-   * destinations from the per-epoch compiled operator images. */
-  private readonly compiledInlineAccurateA2: boolean;
-  private readonly compiledInlineMergedBandA2: boolean;
   /**
    * Measurement-only control arm: run the merged-band adjoint stage through
    * the pre-image chase instead of the compiled image. Set
@@ -1249,7 +1207,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly groups = new Map<string, CachedGroup>();
   private readonly pre: number;
   private readonly post: number;
-  private readonly fusedCorrectionInitialization: boolean;
   private readonly hierarchicalExecutorCompiled: boolean;
   private lastSetupInput?: { readonly solverControl: GPUBuffer; readonly rowCount: GPUBuffer };
   private preparedCaptureSource?: OctreeSPGridSetupSource;
@@ -1269,17 +1226,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
 
   /** Candidate hierarchy/capture report consumed by the coupled epoch reduction. */
   get candidateControl(): GPUBuffer { return this.capturePageState; }
-
-  /** Stage-B shadow publication. Worklist entries are sorted level-local indices. */
-  get factorOneDenseAcceptedView(): FactorOneDenseAcceptedView | undefined {
-    return this.denseShadow?.acceptedView(this.source.rowGeometry);
-  }
-
-  async readFactorOneDenseShadowDifferential(): Promise<
-    FactorOneDenseShadowDifferential | undefined
-  > {
-    return this.denseShadow?.readDifferential();
-  }
 
   /** Accepted physical pages and ghost ownership shared with the Section 4.3 shell. */
   get section63Topology(): Readonly<{
@@ -1349,17 +1295,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     if (options.deferPipelineCompilation && this.hierarchicalExecutorCompiled) {
       throw new Error("Deferred SPGrid compilation currently requires the persistent executor");
     }
-    this.inlineAccurateA2 = options.geometricAggregateTransfers === true
-      && typeof process !== "undefined"
-      && process.env?.FLUID_OCTREE_FACTOR1_SERIAL_ACCURATE_A2 !== "0";
-    this.inlineMergedBandA2 = options.geometricAggregateTransfers === true
-      && typeof process !== "undefined"
-      && process.env?.FLUID_OCTREE_FACTOR1_INLINE_MERGED_BAND_A2 !== "0";
-    const compiledInlineA2 = options.geometricAggregateTransfers === true
-      && typeof process !== "undefined"
-      && process.env?.FLUID_OCTREE_FACTOR1_COMPILED_INLINE_A2 === "1";
-    this.compiledInlineAccurateA2 = compiledInlineA2 && this.inlineAccurateA2;
-    this.compiledInlineMergedBandA2 = compiledInlineA2 && this.inlineMergedBandA2;
     if (!(options.finestCellWidth > 0) || !Number.isFinite(options.finestCellWidth)) throw new RangeError("SPGrid finest cell width must be positive");
     if (source.rowGeometry.size < this.plan.rowCapacity * 32
       || source.control.size < 24
@@ -1397,7 +1332,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     }
     this.pre = Math.max(1, Math.min(8, Math.round(options.preSmoothingIterations ?? 2)));
     this.post = Math.max(1, Math.min(8, Math.round(options.postSmoothingIterations ?? this.pre)));
-    this.fusedCorrectionInitialization = options.geometricAggregateTransfers === true;
     if (this.pre !== this.post) throw new RangeError("SPGrid pre/post smoothing must match to retain symmetry");
     if ((this.pre & 1) !== 0) throw new RangeError("SPGrid smoothing count must be even");
     if (!OCTREE_FIRST_ORDER_CHEBYSHEV_DEGREES.includes(this.pre as 2 | 4)) {
@@ -1435,40 +1369,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.committedInputs = device.createBuffer({ label: "SPGrid committed hierarchy input fingerprint",
       size: (COMMITTED_INPUT_HEADER_WORDS
         + this.plan.rowCapacity * COMMITTED_INPUT_WORDS_PER_ROW) * 4, usage: storage });
-    if (options.geometricAggregateTransfers === true) {
-      this.denseShadow = new WebGPUFactorOneDensePressureShadow(device, {
-        dimensions: options.dimensions,
-        sparsePlan: {
-          levelCount: this.plan.levelCount,
-          levelCapacities: this.plan.levelCapacities,
-          levelOffsets: this.plan.levelOffsets,
-          totalLevelSlots: this.plan.totalLevelSlots,
-          worklistBaseWords: TOPOLOGY_HEADER_WORDS
-            + this.plan.levelCount * this.plan.rowCapacity,
-        },
-        acceptedTopology: this.topology,
-        acceptedState: this.state,
-        acceptedDispatch: this.dispatchMeta,
-        candidateTopology: this.candidateTopology,
-        candidateState: this.candidateState,
-        candidateDispatch: this.candidateDispatch,
-        levelDelta: this.levelDelta,
-        captureControl: this.capturePageState,
-      });
-      if (octreeFactorOneDenseMGEnabled()) {
-        this.denseCorrection = new WebGPUOctreeFactorOneDenseCorrection(
-          device,
-          factorOneDenseCorrectionSource(
-            this.denseShadow.acceptedView(this.source.rowGeometry),
-            this.source.control,
-            this.capturePageState,
-            this.plan.rowCapacity,
-            options.finestCellWidth,
-          ),
-          { smoothingIterations: this.pre as 2 | 4 },
-        );
-      }
-    }
     this.levelDispatch = [this.plan.levelCount, 1, 1];
     this.clearDispatch = dispatchFor(Math.max(this.plan.levelStride, this.plan.rowCapacity,
       DISPATCH_RECORD_WORDS_PER_LEVEL));
@@ -1535,11 +1435,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         this.plan.rowCapacity, this.plan.levelCount, this.plan.levelStride, this.plan.transferStride,
         this.plan.rowDispatch[0], this.plan.slotDispatch[0], this.plan.transferDispatch[0], this.pre]);
       words[12] = this.post;
-      // Low bit selects the source authority. Bit one selects the factor-1
-      // geometric aggregate transfer; both accepted and candidate uniforms
-      // must carry it so a transactional hierarchy commit cannot change E.
-      words[13] = (sourceMode === "candidate" ? 1 : 0)
-        | (options.geometricAggregateTransfers ? 2 : 0);
+      // Low bit selects the accepted or candidate source authority.
+      words[13] = sourceMode === "candidate" ? 1 : 0;
       floats[14] = 1;
       floats[15] = options.finestCellWidth;
       // The high bit is internal parameter metadata, not a buffer offset. It
@@ -1637,17 +1534,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: 16,
       usage: GPUBufferUsage.STORAGE,
     });
-    const accurateEntries: Readonly<Record<AccurateClass, string>> = Object.freeze({
-      regularInterior: "applyRegularInterior",
-      transitionInterior: "applyTransitionInterior",
-      physicalBoundary: "applyPhysicalBoundary",
-      transitionBoundary: "applyTransitionBoundary",
-    });
-    this.accurateClassPipelines = Object.freeze(Object.fromEntries(
-      (Object.keys(accurateEntries) as AccurateClass[]).map((rowClass) => [rowClass,
-        device.createComputePipeline({ label: `SPGrid accurate A2 · ${rowClass}`, layout: "auto",
-          compute: { module: accurateModule, entryPoint: accurateEntries[rowClass] } })]),
-    ) as Record<AccurateClass, GPUComputePipeline>);
     this.accurateMergedTermPipeline = device.createComputePipeline({
       label: "SPGrid Section 6.3 · parallel merged-band direct terms", layout: "auto",
       compute: { module: accurateModule, entryPoint: this.directByChase
@@ -1663,28 +1549,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       compute: { module: accurateModule, entryPoint: this.adjointByChase
         ? "stageMergedBandAdjointsByChase" : "stageMergedBandAdjoints" },
     });
-    this.accurateMergedUnionPipeline = device.createComputePipeline({
-      label: "SPGrid Section 6.3 · inline merged-band rows", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "applyMergedBand" },
-    });
-    this.accurateUnionPipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · accepted row union", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "applyAcceptedUnion" },
-    });
-    this.accurateCompiledMergedUnionPipeline = this.compiledInlineMergedBandA2
-      ? device.createComputePipeline({
-        label: "SPGrid Section 6.3 · compiled-image inline merged-band rows",
-        layout: "auto",
-        compute: { module: accurateModule, entryPoint: "applyCompiledMergedBand" },
-      })
-      : undefined;
-    this.accurateCompiledUnionPipeline = this.compiledInlineAccurateA2
-      ? device.createComputePipeline({
-        label: "SPGrid accurate A2 · compiled-image accepted row union",
-        layout: "auto",
-        compute: { module: accurateModule, entryPoint: "applyCompiledAcceptedUnion" },
-      })
-      : undefined;
     this.accurateTermPipeline = device.createComputePipeline({
       label: "SPGrid accurate A2 · parallel direct terms", layout: "auto",
       compute: { module: accurateModule, entryPoint: this.directByChase
@@ -1752,12 +1616,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     });
     this.accurateOperatorInstance = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
-      // Factor 1 defaults to one convergence gate plus the already-validated
-      // inline accepted-row apply. Other factors, and the explicit A/B arm,
-      // retain wide direct/fine-adjoint stages followed by an ordered row fold.
-      encodedDispatchCount: this.inlineAccurateA2 ? 2 : 4,
+      encodedDispatchCount: 4,
       encodedResidualDispatchCount: 4,
-      encodedMergedBandDispatchCount: this.inlineMergedBandA2 ? 1 : 3,
+      encodedMergedBandDispatchCount: 3,
       encode: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer, solverControl: GPUBuffer) => {
         if (!this.source.classDispatch) {
           throw new Error("SPGrid accurate A2 requires accepted class dispatch publication");
@@ -1812,24 +1673,19 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // and the two once-per-epoch image compiles (direct, fine-adjoint) that
     // ride the same pass.
     // Keep this exact for command and active/scheduled accounting.
-    const denseShadowSetupDispatchCount = this.denseShadow?.encodedSetupDispatchCount ?? 0;
     this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5
-      + (this.hierarchicalExecutorCompiled ? 2 : 0)
-      + denseShadowSetupDispatchCount;
+      + (this.hierarchicalExecutorCompiled ? 2 : 0);
     // The widest levels retain fully parallel, globally synchronized Jacobi
     // dispatches. Only the levels that fit in one workgroup join the tail,
     // whose barriers then provide identical phase ordering without serializing
     // a level's restriction parent-chain walk one coarse cell at a time.
     const parallelLevels = this.vcycleParallelLevels;
-    const correctionInitializationDispatchCount =
-      this.fusedCorrectionInitialization ? 1 as const : 2 as const;
+    const correctionInitializationDispatchCount = 2 as const;
     const sparseCorrectionDispatchCount = l + 3 + correctionInitializationDispatchCount
       + parallelLevels * (this.pre + this.post + 2);
     this.encodedCorrectionDispatchCount = this.hierarchicalExecutorCompiled
-      ? (this.denseCorrection?.encodedCorrectionDispatchCount ?? sparseCorrectionDispatchCount)
-      : 0;
+      ? sparseCorrectionDispatchCount : 0;
     this.diagnostics = Object.freeze({ levelCount: l,
-      denseShadowSetupDispatchCount,
       coarsestCapacity: this.plan.levelCapacities[this.plan.levelCount - 1],
       maximumTransferRecordsPerLevel: Math.max(...this.plan.transferCapacities),
       correctionDispatchCount: this.encodedCorrectionDispatchCount,
@@ -1849,9 +1705,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       + this.accurateWorksetLayout.size + (this.accurateClassDispatch?.size ?? 0)
       + (this.accurateOperatorRows?.size ?? 0) + (this.accurateAdjointRows?.size ?? 0)
       + (this.accurateImageDeltaParams?.size ?? 0) + (this.accurateImageEpochs?.size ?? 0)
-      + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0)
-      + (this.denseShadow?.allocatedBytes ?? 0)
-      + (this.denseCorrection?.allocatedBytes ?? 0);
+      + this.candidateParams.reduce((bytes, buffer) => bytes + buffer.size, 0);
   }
 
   private pipelineDescriptor(
@@ -1989,10 +1843,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.run(staged("build stencils"), "buildCandidateStencils", 0, input, this.plan.slotDispatch, geometry);
     this.run(staged("publish spectral bounds"), "publishCandidateSpectralBounds", 0, input, this.levelDispatch, geometry);
     this.run(staged("validate hierarchy"), "validateCandidateHierarchy", 0, input, [1, 1, 1]);
-    // Stage B only: translate the same selected transactional image into the
-    // direct x-fast candidate arena. Any shadow discrepancy stays in its own
-    // control words and cannot reject or alter the sparse authority.
-    this.denseShadow?.encodeCandidate(broker, input.solverControl);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after SPGrid candidate hierarchy rebuild");
     }
@@ -2038,11 +1888,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       pass.dispatchWorkgroupsIndirect(imageDispatch,
         imageDispatchBase + ACCURATE_SOURCE_IMAGE_TRANSITION_RECORD_BYTES);
     }
-    // Publish the shadow only after sparse lifecycle acceptance and after the
-    // sparse pass's final direct consumers. The shadow also requires its
-    // candidate epoch to equal the sparse published capture generation,
-    // leaving the prior accepted shadow intact otherwise.
-    this.denseShadow?.encodeCommit(broker, input.solverControl);
     // dispatchMeta remains STORAGE-only inside compute passes. Copying its
     // finalized records after the setup boundary gives correction a distinct
     // INDIRECT-only source and avoids a whole-pass storage/indirect conflict.
@@ -2074,10 +1919,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
     this.assertHierarchicalExecutorCompiled();
-    if (this.denseCorrection) {
-      this.denseCorrection.encodeCorrectionGate(pass, input);
-      return;
-    }
     this.run(pass, "prepareCorrectionDispatches", 0, input, [1, 1, 1]);
   }
 
@@ -2085,10 +1926,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
     this.assertHierarchicalExecutorCompiled();
-    if (this.denseCorrection) {
-      this.denseCorrection.encodeCorrectionBody(broker, input);
-      return;
-    }
     let pass = broker.compute({ label: "SPGrid V-cycle · one-pass symmetric correction" });
     // Every stage below re-asks the broker for a pass under its own label. With
     // label isolation OFF -- production, and every wall-clock lane -- `compute()`
@@ -2100,19 +1937,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       broker.compute({ label: `SPGrid V-cycle · ${label}` });
     // Correction clear, RHS seed, and final publication are defined on the
     // accepted pressure-row domain, not on level zero's sparse slot worklist.
-    // Factor-1 fuses the first two operations into one row dispatch below.
     // Aanjaneya et al. §4.3 relies
     // on L1 and L2 having exactly the same pressure variables; dispatching
     // through count(0) silently omitted native coarser rows on an adaptive
     // octree and allowed their correction entries to retain an earlier M1
     // application. The fixed-capacity row dispatch remains convergence-gated
     // in WGSL and covers every live accepted row.
-    if (!this.fusedCorrectionInitialization) {
-      this.runRowIndirect(pass, "clearCorrection", 0, input);
-    }
+    this.runRowIndirect(pass, "clearCorrection", 0, input);
     for (let level = 0; level < this.plan.levelCount; level += 1) this.runIndirect(pass, "zeroVectors", level, input, false);
-    this.runRowIndirect(pass, this.fusedCorrectionInitialization
-      ? "seedRhsAndClearCorrection" : "seedRhs", 0, input);
+    this.runRowIndirect(pass, "seedRhs", 0, input);
     const parallelLevels = this.vcycleParallelLevels;
     for (let level = 0; level < parallelLevels; level += 1) {
       this.smooth(staged(`pre-smooth level ${level}`), level, false, input);
@@ -2249,18 +2082,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       throw new RangeError("SPGrid accurate A2 vectors are smaller than row capacity");
     }
     const cached = this.accurateBinding(input, output, solverControl, worksets, worksetLayout);
-    if (this.inlineAccurateA2) {
-      const pass = broker.compute({ label: "SPGrid accurate A2 - inline accepted rows" });
-      pass.setPipeline(this.accurateCompiledUnionPipeline ?? this.accurateUnionPipeline);
-      pass.setBindGroup(0, cached.compiledUnionGroup ?? cached.unionGroup);
-      pass.dispatchWorkgroupsIndirect(
-        this.accurateClassDispatch, ACCURATE_UNION_DISPATCH_OFFSET_BYTES,
-      );
-      if (octreeAlgorithmDiagnosticsEnabled()) {
-        broker.fence("algorithm diagnostic after inline accurate A2 class apply");
-      }
-      return;
-    }
     let pass = broker.compute({ label: "SPGrid accurate A2 - parallel direct terms" });
     pass.setPipeline(this.accurateTermPipeline); pass.setBindGroup(0, cached.termGroup);
     pass.dispatchWorkgroupsIndirect(this.accurateClassDispatch, ACCURATE_TERM_DISPATCH_OFFSET_BYTES);
@@ -2331,56 +2152,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       throw new RangeError("SPGrid accurate A2 merged-band dispatch offset is invalid");
     }
     const cached = this.accurateBinding(input, output, solverControl, worksets, worksetLayout);
-    if (this.inlineMergedBandA2) {
-      if (this.compiledInlineMergedBandA2 && !cached.compiledMergedUnionGroup) {
-        const pipeline = this.accurateCompiledMergedUnionPipeline;
-        if (!pipeline) throw new Error("Compiled merged-band A2 pipeline is unavailable");
-        cached.compiledMergedUnionGroup = this.device.createBindGroup({
-          label: "SPGrid Section 6.3 · compiled-image inline merged-band bindings",
-          layout: pipeline.getBindGroupLayout(0),
-          entries: [
-            [0, input], [1, output], [2, solverControl], [3, this.source.control],
-            [4, cached.worksets], [5, worksetLayout], [9, this.source.topologyMetrics],
-            [10, this.source.coefficients], [11, this.accurateWorksetLayout],
-            [13, this.accurateOperatorRows], [14, this.accurateAdjointRows],
-          ].map(([binding, buffer]) => ({
-            binding: binding as number,
-            resource: binding === 4
-              ? { buffer: buffer as GPUBuffer, offset: cached.worksetOffset,
-                ...(cached.worksetSize === undefined ? {} : { size: cached.worksetSize }) }
-              : { buffer: buffer as GPUBuffer },
-          })),
-        });
-      } else if (!this.compiledInlineMergedBandA2 && !cached.mergedUnionGroup) {
-        const shared = new Map<number, GPUBufferBinding>([
-          [0, { buffer: input }], [1, { buffer: output }], [2, { buffer: solverControl }],
-          [3, { buffer: this.source.control }],
-          [4, { buffer: cached.worksets, offset: cached.worksetOffset,
-            ...(cached.worksetSize === undefined ? {} : { size: cached.worksetSize }) }],
-          [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
-          [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
-          [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
-          [11, { buffer: this.accurateWorksetLayout }],
-        ]);
-        cached.mergedUnionGroup = this.device.createBindGroup({
-          label: "SPGrid Section 6.3 · inline merged-band bindings",
-          layout: this.accurateMergedUnionPipeline.getBindGroupLayout(0),
-          entries: [...shared].map(([binding, resource]) => ({ binding, resource })),
-        });
-      }
-      const pass = broker.compute({ label: "SPGrid Section 6.3 - inline merged-band rows" });
-      pass.setPipeline(
-        this.accurateCompiledMergedUnionPipeline ?? this.accurateMergedUnionPipeline,
-      );
-      pass.setBindGroup(
-        0, cached.compiledMergedUnionGroup ?? cached.mergedUnionGroup!,
-      );
-      pass.dispatchWorkgroupsIndirect(mergedDispatch, mergedDispatchOffsetBytes);
-      if (octreeAlgorithmDiagnosticsEnabled()) {
-        broker.fence("algorithm diagnostic after inline merged-band A2 apply");
-      }
-      return;
-    }
     if (!cached.mergedTermGroup) {
       const shared = new Map<number, GPUBufferBinding>([
         [0, { buffer: input }], [2, { buffer: solverControl }],
@@ -2479,13 +2250,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
           binding, resource: shared.get(binding)!,
         })),
       });
-      const classGroups = Object.freeze(Object.fromEntries(
-        (Object.keys(this.accurateClassPipelines) as AccurateClass[]).map((rowClass) => [
-          rowClass, makeGroup(this.accurateClassPipelines[rowClass],
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            `SPGrid Section 6.3 · ${rowClass} bindings`),
-        ]),
-      ) as Record<AccurateClass, GPUBindGroup>);
       const gateGroup = this.device.createBindGroup({
         label: "SPGrid accurate A2 · convergence-tail bindings",
         layout: this.accurateGatePipeline.getBindGroupLayout(0),
@@ -2498,9 +2262,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
           { binding: 4, resource: { buffer: this.accurateClassDispatch } },
         ],
       });
-      const unionGroup = makeGroup(this.accurateUnionPipeline,
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-        "SPGrid Section 6.3 · accepted row union bindings");
       shared.set(12, { buffer: this.accurateTerms });
       shared.set(13, { buffer: this.accurateOperatorRows });
       const termGroup = makeGroup(this.accurateTermPipeline,
@@ -2509,11 +2270,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
           : [0, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13],
         "SPGrid Section 6.3 · staged direct-term bindings");
       shared.set(14, { buffer: this.accurateAdjointRows });
-      const compiledUnionGroup = this.accurateCompiledUnionPipeline
-        ? makeGroup(this.accurateCompiledUnionPipeline,
-          [0, 1, 2, 3, 4, 5, 10, 11, 13, 14],
-          "SPGrid Section 6.3 · compiled-image accepted row union bindings")
-        : undefined;
       // Likewise for the fine-adjoint stage: compiled image (14) instead of
       // topology/state.
       const adjointGroup = makeGroup(this.accurateAdjointPipeline,
@@ -2530,8 +2286,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
           "SPGrid Section 6.3 · ordered residual row-fold bindings");
       }
       cached = { input, output, solverControl, worksets: worksets.buffer,
-        worksetOffset, worksetSize, worksetLayout, gateGroup, classGroups, unionGroup,
-        compiledUnionGroup, termGroup, adjointGroup, finalizeGroup,
+        worksetOffset, worksetSize, worksetLayout, gateGroup,
+        termGroup, adjointGroup, finalizeGroup,
         residualSource, residualFinalizeGroup };
       this.accurateBindings.push(cached);
     }
@@ -2553,8 +2309,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.capturePageState.destroy(); this.levelDelta.destroy();
     this.candidateTopology.destroy(); this.candidateState.destroy(); this.candidateDispatch.destroy();
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
-    this.denseCorrection?.destroy();
-    this.denseShadow?.destroy();
     this.accurateWorksetLayout.destroy(); this.accurateClassDispatch?.destroy();
     this.accurateTerms?.destroy();
     this.accurateOperatorRows?.destroy(); this.accurateAdjointRows?.destroy();
@@ -2591,7 +2345,7 @@ fn prepareAccurateDispatches(){
   classDispatch[destination+2u]=select(1u,worksets[source+2u],valid);
   // The union record covers the same rows as the four class records. Its lane
   // count is the exact sum of the published class counts, so the concatenated
-  // walk in applyAcceptedUnion lands on every accepted row and on no other.
+  // staged union walk lands on every accepted row and on no other.
   if(!valid||base+2u>=arrayLength(&worksets)||worksets[base+1u]>worksets[base+2u]){unionValid=false;}
   else{unionRows+=worksets[base+1u];if(cls==1u||cls==3u){transitionRows+=worksets[base+1u];}}
  }
@@ -3094,60 +2848,6 @@ fn finerAdjoint(row:u32,h:vec4u,q:vec3u,l:u32,x:f32)->f32{
  var children:array<f32,8>;
  for(var child=0u;child<8u;child+=1u){children[child]=sortedFinerChildSum(row,q,l,x,child);}
  return sorted8Sum(children);}
-fn applyRow(row:u32){if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)||row>=arrayLength(&inputVector)){reportAt(2u,25u,row);return;}
- let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
- let l=countTrailingZeros(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
- if(page==INVALID||page>=levelCapacity(l)){reportAt(2u,31u,row);return;}
- // Every channel resolved the same three level-invariant quantities. dims(l)
- // and the transform code are cheap; levelBase(l) is not, and it was evaluated
- // twice per surviving channel. All three are pure functions of l and m, so
- // lifting them changes no address, no report, and no float.
- let levelDims=vec3i(dims(l));let transform=m.transformAndFlags&63u;let slotBase=levelBase(l);
- let x=inputVector[row];let sum=sortedCoefficientSum(row);
- var value=max(0.0,section63Coefficients[base]-sum)*x
-  +sortedDirectSum(row,m,q,l,page,levelDims,slotBase,x);
- value+=finerAdjoint(row,h,q,l,x);if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}}
-
-// One-lane compiled-image counterpart of applyRow. It preserves applyRow's
-// exact scalar association: diagonal, eighteen direct channels in ascending
-// order, then eight-by-eighteen fine-adjoint candidates in ascending
-// child/candidate order. Only destination addressing changes. The direct and
-// adjoint images were compiled from applyRow's own resolution helpers at the
-// accepted-epoch commit, so this entry point reaches neither topology nor
-// state and never materializes the 162-word staging image.
-fn applyCompiledRow(row:u32,transition:bool){
- if(row>=capacity()||row>=arrayLength(&inputVector)||row>=arrayLength(&outputVector)){
-  reportAt(2u,25u,row);return;}
- let base=coefficientBase(row);let image=operatorRowBase(row);
- if(base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
- if(image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)||operatorRows[image]!=0u){
-  reportAt(2u,31u,row);return;}
- let x=inputVector[row];var sum=0.0;
- for(var channel=0u;channel<18u;channel+=1u){
-  sum+=section63Coefficients[base+1u+channel];}
- var value=max(0.0,section63Coefficients[base]-sum)*x;
- for(var channel=0u;channel<18u;channel+=1u){
-  let c=section63Coefficients[base+1u+channel];if(c==0.0){continue;}
-  let code=operatorRows[image+1u+channel];
-  if(code>=CHANNEL_CODE_BASE){reportChannelCode(code,row);}
-  else{value+=c*(x-inputVector[code]);}
- }
- if(transition){
-  let adjoint=adjointRowBase(row);
-  if(adjoint+ADJOINT_ROW_WORDS>arrayLength(&adjointRows)){reportAt(2u,31u,row);return;}
-  for(var child=0u;child<8u;child+=1u){
-   for(var candidate=0u;candidate<18u;candidate+=1u){
-    let code=adjointRows[adjoint+child*18u+candidate];
-    if(code>=CHANNEL_CODE_BASE){reportChannelCode(code,row);continue;}
-    let other=code&ADJOINT_ROW_MASK;
-    let c=section63Coefficients[coefficientBase(other)+1u
-      +(code>>ADJOINT_CHANNEL_SHIFT)];
-    if(c>0.0){value+=c*(x-inputVector[other]);}
-   }
-  }
- }
- if(!finite(value)){reportAt(4u,30u,row);}else{outputVector[row]=value;}
-}
 
 // One linear, prefetchable load replaces the five-to-seven-deep dependent
 // chase this used to run per channel: brickRecord, two brick-mask loads and
@@ -3485,49 +3185,6 @@ fn stageUnionItemByChase(item:u32,count:u32,row:u32){let countIndex=stagedCountI
  let rowIndex=stagedRowIdsBase()+item;if(rowIndex>=arrayLength(&accurateTerms)){reportAt(2u,25u,item);return;}
  let row=bitcast<u32>(accurateTerms[rowIndex]);if(row!=INVALID){finalizeStagedResidualRow(row);}}
 
-@compute @workgroup_size(64) fn applyRegularInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),0u);if(!stopped()&&row!=INVALID){applyRow(row);}}
-@compute @workgroup_size(64) fn applyTransitionInterior(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),1u);if(!stopped()&&row!=INVALID){applyRow(row);}}
-@compute @workgroup_size(64) fn applyPhysicalBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),2u);if(!stopped()&&row!=INVALID){applyRow(row);}}
-@compute @workgroup_size(64) fn applyTransitionBoundary(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),3u);if(!stopped()&&row!=INVALID){applyRow(row);}}
-@compute @workgroup_size(64) fn applyMergedBand(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=workRow(linearLane(wg,groups,lane),4u);if(!stopped()&&row!=INVALID){applyRow(row);}}
-// The four published class lists are disjoint and jointly cover every accepted
-// row, so walking them back to back enumerates each accepted row exactly once,
-// with no duplicate and no omission. applyRow never branches on class - the
-// class literal only chose which list a row was read from - so one dispatch
-// over the concatenation performs byte-identical per-row work to the four class
-// dispatches it replaces. Every guard below is workRow's, term for term; a
-// header that fails any of them retires the whole union, which is strictly more
-// fail-closed than retiring one class.
-fn unionRow(item:u32)->u32{var remaining=item;
- for(var cls=0u;cls<4u;cls+=1u){let base=worksetBase(cls);
-  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
-   ||worksets[base+1u]>worksets[base+2u]){return INVALID;}
-  let count=worksets[base+1u];
-  if(remaining<count){
-   if(base+WORKSET_HEADER_WORDS+remaining>=arrayLength(&worksets)){return INVALID;}
-   return worksets[base+WORKSET_HEADER_WORDS+remaining];}
- remaining-=count;}
- return INVALID;}
-fn unionRowAndClass(item:u32)->vec2u{var remaining=item;
- for(var cls=0u;cls<4u;cls+=1u){let base=worksetBase(cls);
-  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
-   ||worksets[base+1u]>worksets[base+2u]){return vec2u(INVALID);}
-  let count=worksets[base+1u];
-  if(remaining<count){
-   if(base+WORKSET_HEADER_WORDS+remaining>=arrayLength(&worksets)){return vec2u(INVALID);}
-   return vec2u(worksets[base+WORKSET_HEADER_WORDS+remaining],cls);}
-  remaining-=count;}
- return vec2u(INVALID);}
-@compute @workgroup_size(64) fn applyAcceptedUnion(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){let row=unionRow(linearLane(wg,groups,lane));if(!stopped()&&row!=INVALID){applyRow(row);}}
-@compute @workgroup_size(64) fn applyCompiledAcceptedUnion(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let item=unionRowAndClass(linearLane(wg,groups,lane));
- if(!stopped()&&item.x!=INVALID){applyCompiledRow(item.x,item.y==1u||item.y==3u);}}
-@compute @workgroup_size(64) fn applyCompiledMergedBand(@builtin(workgroup_id) wg:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let row=workRow(linearLane(wg,groups,lane),4u);
- if(!stopped()&&row!=INVALID){
-  if(row>=arrayLength(&metrics)){reportAt(2u,25u,row);return;}
-  applyCompiledRow(row,metrics[row].caseId!=0u);
- }}
 `;
 
 export const octreeSPGridVCycleShader = /* wgsl */ `
@@ -3576,7 +3233,6 @@ const PAGE_X=8u;const PAGE_Y=8u;const PAGE_Z=4u;
 const STRUCTURED_CANDIDATE_READY=0x5356454cu;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn stopped()->bool{return atomicLoad(&control[0])!=0u||atomicLoad(&control[1])!=0u;}
 fn candidateSource()->bool{return (p.solve.y&1u)!=0u;}
-fn geometricAggregateTransfer()->bool{return (p.solve.y&2u)!=0u;}
 fn sourceControlReady()->bool{if(arrayLength(&acceptedRows)<6u){return false;}if(!candidateSource()){return acceptedRows[0]==0u&&acceptedRows[3]!=0u;}return acceptedRows[0]==STRUCTURED_CANDIDATE_READY&&acceptedRows[4]!=0u;}
 fn sourceGeneration()->u32{return select(0u,select(acceptedRows[3],acceptedRows[4],candidateSource()),sourceControlReady());}
 fn reportAt(flag:u32,stage:u32,index:u32){atomicOr(&control[0],flag);for(var retry=0u;retry<16u;retry+=1u){
@@ -4221,12 +3877,10 @@ fn cornerTarget(q:vec3u,corner:u32)->CoarseCorner{
 // Read side of cInsert: the same boundary clamp, so a coordinate resolves to
 // the slot the ordered insertion claimed for it.
 fn cResolve(l:u32,q:vec3u)->u32{if(l>=levels()){return INVALID;}return cLookup(l,min(q,dims(l)-vec3u(1u)));}
-// Exact fan-out of one fine slot. The adaptive hierarchy uses the original
-// eight cell-centred trilinear parents. The factor-1 coarse-zero-band hierarchy
-// has one unit-weight 2x2x2 aggregate parent. Ghost aliases are unit mappings
-// in both modes.
+// Exact fan-out of one fine slot. Physical cells use the eight cell-centred
+// trilinear parents; ghost aliases are unit mappings.
 fn transferFanOut(l:u32,fine:u32,flags:u32,q:vec3u)->u32{
- if((flags&GHOST)==0u){return select(8u,1u,geometricAggregateTransfer());}
+ if((flags&GHOST)==0u){return 8u;}
  let encodedOwner=selectedState(OWNER,l,fine);
  if(encodedOwner==0u||encodedOwner>rows()){return 0u;}
  let owner=encodedOwner-1u;var coarse=INVALID;
@@ -4256,7 +3910,7 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
  let live=uniformWord(lane,select(0u,1u,transferLive(l)));
  if(live==0u){return;}
  let selected=uniformWord(lane,selectedCount(l));
- let proposalFanOut=select(8u,1u,geometricAggregateTransfer());
+ let proposalFanOut=8u;
  let total=selected*proposalFanOut;
  let coarseLimit=dims(l+1u)-vec3u(1u);
  if(lane==0u){beginClaims(l+1u);}
@@ -4271,7 +3925,7 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
      if(encodedOwner==0u||encodedOwner>rows()){encoded=INVALID;flag=1u;}
      else if(l+1u!=firstTrailingBit(geometry(encodedOwner-1u).y)){
       key=coordKey(min(q/2u,coarseLimit),l+1u);encoded=encodedOwner;flag=1u;}}}
-   else{var parent=select(cornerTarget(q,corner).coordinate,q/2u,geometricAggregateTransfer());
+   else{var parent=cornerTarget(q,corner).coordinate;
     parent=min(parent,coarseLimit);
     key=coordKey(parent,l+1u);
     if(cLookup(l+1u,parent)==INVALID){flag=1u;}}}
@@ -4307,10 +3961,6 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
   let fine=selectedWorkSlot(l,i);
   let fanOut=transferFanOut(l,fine,selectedState(FLAGS,l,fine),
    decode(selectedState(KEY,l,fine),l));
-  // Every accepted aggregate slot must participate in the total q -> q/2
-  // mapping used by recordless correction. In particular, reject malformed
-  // ghost ownership here rather than letting it create a recordless-only edge.
-  if(geometricAggregateTransfer()&&fanOut!=1u){candidateReport(l);}
   candidateTopology[fineCountBase(l)+fine]=fanOut;}
 }
 // Phase 5c (one 256-lane workgroup per level). Exclusive prefix sum over the
@@ -4357,21 +4007,9 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
   if((flags&GHOST)!=0u){let owner=selectedState(OWNER,l,fine)-1u;var coarse=INVALID;
    if(l+1u==firstTrailingBit(geometry(owner).y)){coarse=selectedRowMap(l+1u,owner);}
    else{coarse=cResolve(l+1u,q/2u);}
-   // Recordless aggregate correction reverses the mapping by enumerating the
-   // eight coordinates below a coarse parent. A ghost whose authoritative
-   // owner did not occupy q/2 would violate that geometric inverse, so reject
-   // such a candidate instead of silently publishing a record-only exception.
-   if(geometricAggregateTransfer()&&coarse!=cResolve(l+1u,q/2u)){
-    candidateReport(l);continue;
-   }
    if(coarse==INVALID){candidateReport(l);}
    cAppendTransfer(l,base,fine,coarse,1.0);}
-  else if(geometricAggregateTransfer()){
-   if(owned!=1u){candidateReport(l);continue;}
-   let coarse=cResolve(l+1u,q/2u);
-   if(coarse==INVALID){candidateReport(l);}
-   cAppendTransfer(l,base,fine,coarse,1.0);
-  }else{
+  else{
    if(owned!=8u){candidateReport(l);continue;}
    for(var corner=0u;corner<8u;corner+=1u){let parent=cornerTarget(q,corner);
     let coarse=cResolve(l+1u,parent.coordinate);
@@ -4773,17 +4411,6 @@ fn smoothGlobal(g:vec3u,src:u32,dst:u32,phase:u32){let i=slotIndex(g);let l=leve
 // Return the immutable transfer target owned by one fine slot/corner.
 // Restriction consumes the same records through its parent-owned chains, so
 // E and E^T cannot diverge.
-fn aggregateResolve(l:u32,q:vec3u)->u32{
- if(l>=levels()){return INVALID;}
- return directoryLookup(l,min(q,dims(l)-vec3u(1u)),false);
-}
-fn aggregateCorrectionTarget(l:u32,fine:u32)->u32{
- if(l+1u>=levels()||fine>=levelCapacity(l)){reportAt(OVERFLOW,81u,fine);return INVALID;}
- let q=decode(state[at(KEY,l,fine)],l);
- let coarse=aggregateResolve(l+1u,q/2u);
- if(coarse>=levelCapacity(l+1u)){reportAt(OVERFLOW,84u,fine);return INVALID;}
- return coarse;
-}
 fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{
  if(l+1u>=levels()||fine>=levelCapacity(l)){reportAt(OVERFLOW,81u,fine);return TransferTarget(INVALID,0.0);}
  let first=topology[fineHeadBase(l)+fine];let n=topology[fineCountBase(l)+fine];
@@ -4807,44 +4434,6 @@ var<workgroup> restrictStaged:u32;
 var<workgroup> restrictNext:u32;
 var<workgroup> restrictFailed:u32;
 var<workgroup> restrictSum:f32;
-// Factor-1 aggregate restriction has a geometric inverse: the only possible
-// fine contributors to parent q are 2q + the eight child bits. One lane
-// evaluates each child and lane zero folds child bits 0..7, giving E^T a fixed,
-// deterministic association without touching fineHead, parentHead, or any
-// transfer record. aggregateCorrectionTarget is also the prolongation mapping,
-// so the two directions remain exact transposes.
-fn restrictAggregateWide(l:u32,coarse:u32,lane:u32){
- var residual=0.0;var failed=0u;
- if(lane<8u){
-  let parentQ=decode(state[at(KEY,l+1u,coarse)],l+1u);
-  let childQ=parentQ*2u+vec3u(lane&1u,(lane>>1u)&1u,(lane>>2u)&1u);
-  if(all(childQ<dims(l))){
-   let fine=directoryLookup(l,childQ,false);
-   if(fine!=INVALID){
-    if(aggregateCorrectionTarget(l,fine)!=coarse){
-     reportAt(OVERFLOW,86u,coarse);failed=1u;
-    }else{
-     let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;let product=applied(fine,A);
-     residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
-    }
-   }
-  }
- }
- restrictRecord[lane]=failed;restrictResidual[lane]=residual;
- workgroupBarrier();
- if(lane==0u){
-  var values:array<f32,8>;var anyFailed=false;let weight=p.reserved.x;
-  for(var child=0u;child<8u;child+=1u){
-   anyFailed=anyFailed||restrictRecord[child]!=0u;
-   values[child]=weight*restrictResidual[child];
-  }
-  let sum=canonical8Sum(values);
-  if(!anyFailed){
-   if(!finite(sum)){reportAt(OVERFLOW,87u,coarse);}
-   else{storef(RHS,l+1u,coarse,loadf(RHS,l+1u,coarse)+sum);}
-  }
- }
-}
 // Section 4.2 GhostValueAccumulate is E^T: one coarse owner still owns each sum
 // and no destination synchronization exists, but the owner is now a whole
 // workgroup instead of a lane. Lane 0 walks the immutable chain and stages up to
@@ -4861,7 +4450,6 @@ fn restrictAggregateWide(l:u32,coarse:u32,lane:u32){
  let live=uniformWord(lane,select(0u,1u,l+1u<levels()&&i<count(l+1u)&&!stopped()));
  if(live==0u){return;}
  let coarse=workSlot(l+1u,i);
- if(geometricAggregateTransfer()){restrictAggregateWide(l,coarse,lane);return;}
  let limit=uniformWord(lane,transferCount(l));
  if(lane==0u){restrictNext=topology[parentHeadBase(l)+coarse];
   restrictSum=0.0;restrictFailed=0u;restrictStaged=0u;}
@@ -4938,36 +4526,8 @@ fn coarseSmooth(l:u32,reverse:bool,lane:u32){
   storageBarrier();workgroupBarrier();
   }
 }
-// In the factor-1 aggregate hierarchy a fine cell has one arithmetic parent
-// and each parent has at most its 2x2x2 children. Distinct lanes own distinct
-// parent sums with no atomics or barriers, and every lane folds child bits 0..7
-// in the same deterministic order as restrictAggregateWide.
-fn coarseRestrictAggregate(l:u32,lane:u32){
- let n=count(l+1u);
- if(lane>=n||stopped()){return;}
- let coarse=workSlot(l+1u,lane);
- let parentQ=decode(state[at(KEY,l+1u,coarse)],l+1u);
- var values:array<f32,8>;let weight=p.reserved.x;
- for(var child=0u;child<8u;child+=1u){
-  let childQ=parentQ*2u+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
-  if(any(childQ>=dims(l))){continue;}
-  let fine=directoryLookup(l,childQ,false);if(fine==INVALID){continue;}
-  if(aggregateCorrectionTarget(l,fine)!=coarse){reportAt(OVERFLOW,86u,coarse);return;}
-  let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;
-  let product=coarseApplied(l,fine,A);
-  let residual=select(-product,loadf(RHS,l,fine)-product,!ghost);
-  values[child]=weight*residual;
- }
- let sum=canonical8Sum(values);
- if(!finite(sum)){reportAt(OVERFLOW,87u,coarse);}
- else{storef(RHS,l+1u,coarse,loadf(RHS,l+1u,coarse)+sum);}
-}
 fn coarseRestrict(l:u32,lane:u32){
  if(l+1u>=levels()){return;}
- if(geometricAggregateTransfer()){
-  coarseRestrictAggregate(l,lane);
-  return;
- }
  let n=uniformWord(lane,count(l+1u));let limit=uniformWord(lane,transferCount(l));
  // Tail levels have at most eight coarse owners. Process owners in order but
  // use the whole workgroup for each immutable parent-chain block, matching the
@@ -5025,10 +4585,7 @@ fn coarseProlong(l:u32,lane:u32){
   if(stopped()){continue;}
   let fine=workSlot(l,i);let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;
   var value=select(loadf(A,l,fine),0.0,ghost);
-  if(geometricAggregateTransfer()){
-   let coarse=aggregateCorrectionTarget(l,fine);if(coarse==INVALID){continue;}
-   value+=p.reserved.x*loadf(A,l+1u,coarse);
-  }else{
+  {
    let targetCount=topology[fineCountBase(l)+fine];var failed=false;var values:array<f32,8>;
    for(var corner=0u;corner<targetCount;corner+=1u){
     let transfer=correctionTransfer(l,fine,corner);
@@ -5075,9 +4632,7 @@ fn coarseProlong(l:u32,lane:u32){
 // same E mapping rather than a second dispatch.
 @compute @workgroup_size(64) fn prolongAndGhostPropagate(@builtin(global_invocation_id) g:vec3u){let i=slotIndex(g);let l=level();if(i>=count(l)||stopped()){return;}
  let fine=workSlot(l,i);let ghost=(state[at(FLAGS,l,fine)]&GHOST)!=0u;var value=select(loadf(A,l,fine),0.0,ghost);
- if(geometricAggregateTransfer()){let coarse=aggregateCorrectionTarget(l,fine);if(coarse==INVALID){return;}
-  value+=p.reserved.x*loadf(A,l+1u,coarse);
- }else{let targetCount=topology[fineCountBase(l)+fine];var values:array<f32,8>;
+ {let targetCount=topology[fineCountBase(l)+fine];var values:array<f32,8>;
   for(var corner=0u;corner<targetCount;corner+=1u){let transfer=correctionTransfer(l,fine,corner);if(transfer.coarse==INVALID){return;}
    values[corner]=p.reserved.x*transfer.weight*loadf(A,l+1u,transfer.coarse);}
   value+=canonical8Sum(values);}

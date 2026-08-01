@@ -319,8 +319,8 @@ const octreeAuthority = defineDiagnosticPackImplementation({
       scalar({ id: "topology-errors", method, actual: numberPath(topology, "topology", "invalidCount"), label: "power topology errors",
         expected: { maximum: parameterNumber(context, "maximumTopologyErrors", 0) }, pass: (value) => value <= parameterNumber(context, "maximumTopologyErrors", 0) }),
       truth({ id: "pressure-solver", method, actual: info.pressureSolver, label: "Section 4.3 pressure solver",
-        expected: parameterString(context, "pressureSolverNameIncludes", "Section 4.3 hybrid"),
-        pass: (value) => typeof value === "string" && value.includes(parameterString(context, "pressureSolverNameIncludes", "Section 4.3 hybrid")) }),
+        expected: parameterString(context, "pressureSolverNameIncludes", "persistent executor"),
+        pass: (value) => typeof value === "string" && value.includes(parameterString(context, "pressureSolverNameIncludes", "persistent executor")) }),
     ];
     // Octree authority is a core pack and is also used by timing-only lanes.
     // Dam-break envelope assertions are ancillary: evaluate them only when

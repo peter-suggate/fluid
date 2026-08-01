@@ -125,13 +125,14 @@ test("automatic relight composition contains the isolated primary and lighting e
 });
 
 test("occupancy experiments alter only their intended reduced-shader mechanisms", () => {
-  const stripped = createSvoDrySceneFragmentWGSL(
+  // The per-pixel cost counters are gone from every variant: render stage
+  // views read published planes, so nothing observes an invocation-private
+  // tally and no shader pays to keep one live.
+  const reduced = createSvoDrySceneFragmentWGSL(
     0.25, "canonical-parametric", "off", "split", 0, false, false, false, false,
-    { stripDiagnostics: true },
   );
-  assert.match(stripped, /fn dryCostOverlay\(radianceDepth:vec4f\)->vec4f\{return radianceDepth;\}/);
-  assert.doesNotMatch(stripped,
-    /dryPrimaryNodeVisits|dryPrimaryLeafVisits|dryPrimaryVoxelWorkItems|dryShadowNodeVisits|dryMipSteps|dryTraversalFailure/);
+  assert.doesNotMatch(reduced,
+    /dryCostOverlay|dryPrimaryNodeVisits|dryPrimaryLeafVisits|dryPrimaryVoxelWorkItems|dryShadowNodeVisits|dryMipSteps|dryTraversalFailure/);
 
   const inlineBoundaries = createSvoDrySceneFragmentWGSL(
     0.25, "canonical-parametric", "off", "split", 0, false, false, false, false,
@@ -164,10 +165,6 @@ test("occupancy experiments alter only their intended reduced-shader mechanisms"
   assert.doesNotMatch(shortStack, /array<SvoStackEntry, 32>/);
   assert.equal(createSvoDrySceneFragmentWGSL(1), svoDrySceneShader,
     "all occupancy experiments remain opt-in and preserve scale-1 production bytes");
-  assert.equal(createSvoDrySceneFragmentWGSL(
-    1, "hybrid", "off", "inline", 0, false, false, false, false,
-    { stripDiagnostics: true },
-  ), svoDrySceneShader, "diagnostic stripping must never alter the full-rate overlay shader");
 });
 
 test("prepass target contract and sizing", () => {

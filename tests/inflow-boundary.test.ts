@@ -3,8 +3,6 @@ import test from "node:test";
 import { averageInflowStrength, createInflowGridBoundary, inflowBoundaryWGSL, inflowOutletCenter, integratedInflowVolume } from "../lib/inflow-boundary";
 import { createPaperScenario } from "../lib/paper-scenarios";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { tallCellComputeShader } from "../lib/tall-cell-kernels";
-import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 
 test("hose outlet is a normalized face flux rather than a painted volume", () => {
   const scene = createPaperScenario("hose-tank"), inflow = scene.fluid.inflow!;
@@ -43,13 +41,6 @@ test("step-averaged ramp integrates the configured tap volume", () => {
   assert.ok(Math.abs(integratedInflowVolume(inflow, 0, time) - expectedVolume) < 1e-9);
 });
 
-test("both GPU solvers use the shared conservative boundary-face flux", () => {
-  for (const shader of [legacyUniformComputeShader, tallCellComputeShader]) {
-    assert.match(shader, /inflowBoundaryFlux/);
-    assert.match(shader, /isInflowBoundaryFace/);
-    assert.match(shader, /applyInflowVelocity/);
-    assert.doesNotMatch(shader, /injectInflowDensity/);
-    assert.doesNotMatch(shader, /insideInflow/);
-  }
+test("the conservative boundary-face flux stays loop-free", () => {
   assert.doesNotMatch(inflowBoundaryWGSL, /\bfor\s*\(/, "the shared aperture must not expand quadrature loops into transport pipelines");
 });

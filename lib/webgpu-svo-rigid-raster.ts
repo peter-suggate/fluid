@@ -359,7 +359,8 @@ struct RigidRasterFragmentOut{
   let body=rigidBodies[input.bodyIndex];let hit=rigidBodyHit(origin,direction,body);if(hit.valid==0u){discard;}
   let materialId=rigidResolvedMaterialId(body);let worldSurfacePosition_m=origin+direction*hit.t;let motion=rigidRasterMotionSurface(input.bodyIndex,body,materialId,worldSurfacePosition_m);
   let media=select(vec2u(RIGID_RASTER_MEDIUM_OPAQUE,RIGID_RASTER_MEDIUM_AIR),vec2u(RIGID_RASTER_MEDIUM_AIR,RIGID_RASTER_MEDIUM_OPAQUE),dot(direction,hit.normal)<0.0);
-  let flags=select(0u,SVO_GBUFFER_MOTION_VALID,motion.valid!=0u)|select(SVO_GBUFFER_HARD_FEATURE,0u,hit.featureId==RIGID_RASTER_FEATURE_SMOOTH);
+  let flags=select(0u,SVO_GBUFFER_MOTION_VALID,motion.valid!=0u)|select(SVO_GBUFFER_HARD_FEATURE,0u,hit.featureId==RIGID_RASTER_FEATURE_SMOOTH)
+    |svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_RIGID);
   let targets=svoGBufferSurface(vec3f(0.0),hit.t,hit.normal,hit.normal,vec4u(materialId,input.bodyIndex,media.x,media.y),motion.velocity_m_s,RIGID_RASTER_MOTION_RIGID,RIGID_RASTER_FIELD_ANALYTIC,motion.generation,flags,hit.featureId);
   let viewDepth=hit.t*max(dot(direction,forward),1e-6);return RigidRasterFragmentOut(targets.packedSurface,targets.identityMedia,
     vec2u(bitcast<u32>(hit.t),rigidPackPrimaryGeometryMetadata(hit.normal,input.bodyIndex,hit.featureId,motion.valid)),clamp(RIGID_RASTER_NEAR_M/viewDepth,0.0,1.0));

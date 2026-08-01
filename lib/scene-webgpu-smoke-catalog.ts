@@ -52,9 +52,7 @@ export const sceneWebGPUSmokeIds = [
 
 export type SceneWebGPUSmokeId = typeof sceneWebGPUSmokeIds[number];
 
-const allMethodIds: readonly WebGPUSmokeMethodId[] = [
-  "tall-cell", "quadtree-tall-cell", "octree", "uniform",
-];
+const allMethodIds: readonly WebGPUSmokeMethodId[] = ["octree"];
 
 function methods(
   ids: readonly WebGPUSmokeMethodId[] = allMethodIds,
@@ -116,7 +114,7 @@ const coreDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [
     requirePowerDiagramAuthoritative: true,
     maximumDescriptorErrors: 0,
     maximumTopologyErrors: 0,
-    pressureSolverNameIncludes: "Section 4.3 hybrid",
+    pressureSolverNameIncludes: "persistent executor",
     maximumPressureRelativeResidual: 1e-4,
     maximumPressureRelativeResidualSquared: 1e-8,
     maximumPressureDiagnosticFlags: 0,
@@ -682,28 +680,11 @@ const suiteList = [
       collect: { fieldStats: "final", evidenceCollectors: [{ id: "collocated-velocity", phase: "terminal",
         requires: ["collocated velocity"], provides: ["collocated velocity", "volume field", "compact velocity"] }] },
       maximumRepresentedVolumeDrift: 0.02,
-      diagnostics: [quadtreeDamParityDiagnostic, crossMethodFieldParityDiagnostic],
+      diagnostics: [],
       hooks: [{ id: "dam-break-velocity-parity", requires: ["collocated velocity", "compact velocity", "volume field"],
         parameters: damBreakVelocityParityParameters }] }),
-    "quadtree-regression": lane({ id: "quadtree-regression", target_s: 0.2, oracleSteps: 2, cpuOracle: false,
-      dtPattern_s: [0.004, 0.0035, 0.0025, 0.004],
-      methods: methods(["quadtree-tall-cell"]), collect: { stabilityEnvelope: true, checkpointEvery_s: 0.05, fieldStats: "checkpoints" },
-      diagnostics: [quadtreeDamParityDiagnostic],
-      hooks: [{ id: "dam-break-perturbed-cadence", methods: ["quadtree-tall-cell"], requires: ["step cadence", "topology rebuild counts"], parameters: { dtPattern_s: [0.004, 0.0035, 0.0025, 0.004] } }] }),
     "octree-runtime": lane({ id: "octree-runtime", target_s: 2, exactSteps: 250, maxDt_s: 0.008, oracleSteps: 250, cpuOracle: false,
       methods: methods(["octree"]), collect: { stabilityEnvelope: true, checkpointEvery_s: 0.1, fieldStats: "checkpoints" } }),
-    "power-fine-parity": lane({ id: "power-fine-parity", target_s: 2.2, oracleSteps: 2, cpuOracle: false,
-      methods: methods(["octree", "tall-cell"], { octree: { globalFineLevelSetFactor: "4" }, "tall-cell": { regularLayers: 12 } }),
-      collect: { stabilityEnvelope: true, spatialField: true, sparsePublication: true, raster: "checkpoints", globalFineGeneration: true,
-        checkpointEvery_s: 0.1, fieldStats: "checkpoints", evidenceCollectors: [{ id: "collocated-velocity", phase: "terminal",
-          requires: ["collocated velocity"], provides: ["collocated velocity", "volume field", "compact velocity"] }] },
-      maximumRepresentedVolumeDrift: 0.02,
-      diagnostics: [crossMethodFieldParityDiagnostic,
-        { id: "authoritative-water-raster", methods: ["octree"], parameters: standardWaterRasterParameters }],
-      hooks: [{ id: "dam-break-velocity-parity", requires: ["collocated velocity", "compact velocity", "volume field"],
-          parameters: damBreakVelocityParityParameters },
-        { id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
-          parameters: standardWaterRasterParameters }] }),
     "one-step": lane({ id: "one-step", target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: { globalFineLevelSetFactor: "4" } }),
       collect: { globalFineGeneration: true, fieldStats: "none" } }),
@@ -721,9 +702,6 @@ const suiteList = [
       methods: methods(["octree"]), collect: { fieldStats: "none", performanceProfile: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
     throughput: lane({ id: "throughput", description: "Warm command-throughput lane", target_s: 0.496, exactSteps: 62, maxDt_s: 0.008, oracleSteps: 62, cpuOracle: false,
       methods: methods(["octree"]), collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
-    settling: lane({ id: "settling", target_s: 10, oracleSteps: 2, cpuOracle: false,
-      methods: methods(["tall-cell", "uniform"], { "tall-cell": { regularLayers: 24 }, uniform: {} }),
-      collect: { fieldStats: "final", energyEverySteps: 50 }, diagnostics: [settlingDiagnostic] }),
   }),
 
   suite("settled-tank", "Hydrostatic preservation in a closed level pool", settledTankScene, {
@@ -740,8 +718,6 @@ const suiteList = [
   suite("dam-break-boxes", "Three-dimensional dam break with immersed boxes", () => paperScene("dam-break-boxes"), {
     default: lane({ target_s: Math.max(createPaperScenario("dam-break-boxes").numerics.maxDt_s * 8, 0.05), oracleSteps: 2,
       diagnostics: [tallCellRestrictedDiagnostic] }),
-    conservation: lane({ id: "conservation", target_s: 5, oracleSteps: 2, cpuOracle: false,
-      methods: methods(["tall-cell"], { "tall-cell": { regularLayers: 12 } }), collect: { fieldStats: "final" }, diagnostics: [tallCellRestrictedDiagnostic] }),
   }),
   suite("hose-tank", "Fixed cylindrical inflow into a shallow receiving pool", () => paperScene("hose-tank"), {
     default: lane({ target_s: 0.5, oracleSteps: 2, maximumRepresentedVolumeDrift: false,
@@ -764,9 +740,8 @@ const suiteList = [
     default: lane({ target_s: 0.5, oracleSteps: 2, maximumRepresentedVolumeDrift: false,
       diagnostics: inflowDiagnostics, acceptance: inflowAcceptance }),
   }),
-  suite("deep-water", "Extreme vertical aspect ratio and tall-cell compression", deepWaterScene, {
-    default: lane({ target_s: 0.1, oracleSteps: 1, diagnostics: [equilibriumDiagnostic, deepCompressionDiagnostic],
-      acceptance: [{ id: "compressed", metric: "methods.*.info.compressionRatio", operator: "at-most", expected: 0.5, methods: ["tall-cell", "quadtree-tall-cell"] }] }),
+  suite("deep-water", "Extreme vertical aspect ratio", deepWaterScene, {
+    default: lane({ target_s: 0.1, oracleSteps: 1, diagnostics: [equilibriumDiagnostic] }),
   }),
   suite("garden-pond", "Hydrostatic rest in an organic terrain pool", () => gardenSmokeScene("garden-pond"), {
     default: lane({ target_s: 0.1, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),
@@ -927,7 +902,6 @@ const suiteList = [
             maximumPressureAbsoluteError: 0,
             maximumRhsAbsoluteError: 0,
             maximumDiagonalAbsoluteError: 0,
-            requirePressureStageAudit: true,
             requireExactTopology: true,
             requireAllWallsReached: false,
             minimumCheckpointCount: 1,
@@ -960,7 +934,6 @@ const suiteList = [
             maximumPressureAbsoluteError: 0,
             maximumRhsAbsoluteError: 0,
             maximumDiagonalAbsoluteError: 0,
-            requirePressureStageAudit: true,
             requireExactTopology: true,
             requireAllWallsReached: false,
             minimumCheckpointCount: 2,
@@ -993,7 +966,6 @@ const suiteList = [
             maximumPressureAbsoluteError: 0,
             maximumRhsAbsoluteError: 0,
             maximumDiagonalAbsoluteError: 0,
-            requirePressureStageAudit: true,
             requireExactTopology: true,
             requireAllWallsReached: false,
             minimumCheckpointCount: 3,

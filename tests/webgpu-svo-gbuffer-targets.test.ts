@@ -155,7 +155,9 @@ test("shader populates stable identity/media/generation and consumes exact rigid
   assert.match(svoDrySceneShader, /dryPublicationGeneration\(\)->u32[^]*publicationState\[3\]/,
     "static and analytic history must use the stable static-geometry revision");
   assert.match(svoDrySceneShader, /DRY_REVERSED_Z_NEAR_M\/viewDepth_m/);
-  assert.match(svoDrySceneShader, /svoGBufferMiss\(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u\),0\.0/);
+  assert.match(svoDrySceneShader,
+    /svoGBufferMiss\(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags\(SVO_GBUFFER_PRODUCER_TRACED\)\),0\.0/,
+    "a miss still publishes zero depth, and names the pass that established it");
   assert.match(svoDrySceneShader, /dryMediumPair\(rd,opaque\.normal,DRY_MEDIUM_OPAQUE\)/,
     "the dry scene publishes only opaque media because raster water owns fluid interfaces");
 });

@@ -6,6 +6,7 @@ import type { GPUQuality } from "@/lib/tall-cell-grid";
 import { simulation } from "@/lib/simulation/controller";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
+import { isOctreePersistentMGPCGSolverLabel } from "@/lib/webgpu-octree-section43-contract";
 
 function ParamControl({ spec, methodId }: { spec: MethodParamSpec; methodId: string }) {
   const methodState = useMethodStore();
@@ -55,13 +56,13 @@ export function MethodPanel() {
         value={methodId}
         options={interactiveSimulationMethods.map((candidate) => ({
           value: candidate.id,
-          label: candidate.id === "tall-cell" ? "Regular tall cells" : candidate.shortLabel,
-          title: candidate.id === "tall-cell" ? `Experimental · ${candidate.description}` : candidate.description,
+          label: candidate.shortLabel,
+          title: candidate.description,
         }))}
         onChange={(value) => simulation.setMethod(value)}
       />
       <div className="method-identity" title={method.description}>
-        <strong>{method.label}{methodId === "tall-cell" ? " · Experimental" : ""}</strong>
+        <strong>{method.label}</strong>
         <span>{method.description}</span>
       </div>
       <div className="field-grid">
@@ -79,16 +80,12 @@ export function MethodPanel() {
         <strong>{gpuInfo.nx} × {gpuInfo.ny} × {gpuInfo.nz}</strong>
         <span>{gpuInfo.cellCount.toLocaleString()} samples · {(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB</span>
       </div>}
-      {methodId === "tall-cell" && gpuInfo && <div className={`method-runtime-note${gpuInfo.gridKind === "restricted-tall-cell" ? "" : " warning"}`} role="status">
-        <strong>{gpuInfo.gridKind === "restricted-tall-cell" ? "Restricted tall-cell grid active" : "Uniform-grid fallback active"}</strong>
-        <span>{gpuInfo.gridKind === "restricted-tall-cell" ? `${gpuInfo.regularLayers} regular surface layers · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active storage` : "This scene and surface-band setting leave insufficient depth for a tall cell."}</span>
-      </div>}
       {method.backend === "cpu" && fluidRenderState && <div className="grid-readout" title="The MAC grid the selected cell size actually allocated" data-testid="grid-readout">
         <strong>{fluidRenderState.nx} × {fluidRenderState.ny} × {fluidRenderState.nz}</strong>
         <span>{(fluidRenderState.nx * fluidRenderState.ny * fluidRenderState.nz).toLocaleString()} cells · binary64</span>
       </div>}
       {coarse.filter((spec) => spec.kind !== "select").map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
-      {methodId === "octree" && gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid") && <div className="grid-readout" title="Actual GPU convergence work compared with the currently encoded safety cap">
+      {methodId === "octree" && isOctreePersistentMGPCGSolverLabel(gpuInfo?.pressureSolver) && <div className="grid-readout" title="Actual GPU convergence work compared with the currently encoded safety cap">
         <strong>{gpuInfo.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo.quadtreePressureIterationBudget ?? "—"}</strong>
         <span>PCG iterations executed / cap · {gpuInfo.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo.quadtreePressureConverged ? "converged" : "cap exhausted"} · {gpuInfo.quadtreeMultigridLevelCount ?? "—"} pyramid levels · {gpuInfo.quadtreeMultigridCoarsestDofs ?? "—"} coarse DOFs</span>
       </div>}

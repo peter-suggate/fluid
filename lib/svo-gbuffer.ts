@@ -65,6 +65,31 @@ export const SVO_GBUFFER_FLAGS = Object.freeze({
   staleGeneration: 1 << 14, nonresident: 1 << 15,
 } as const);
 
+/**
+ * Flag bits 9..11 name the pass that published the pixel.
+ *
+ * The raster primary graph writes the same four planes from five separate
+ * draws, and nothing else in the record separates them: a brick payload hit and
+ * an authored primitive hit both publish `analyticPrimitive` with static
+ * motion. These three bits were already allocated inside the metadata word, so
+ * naming the producer costs no bandwidth and no attachment.
+ */
+export const SVO_GBUFFER_PRODUCERS = Object.freeze({
+  unspecified: 0, tracedPrimary: 1, rasterBackground: 2, brickRaster: 3,
+  staticPrimitiveRaster: 4, rigidImpostorRaster: 5, glassDiscovery: 6,
+} as const);
+export type SvoGBufferProducer = typeof SVO_GBUFFER_PRODUCERS[keyof typeof SVO_GBUFFER_PRODUCERS];
+export const SVO_GBUFFER_PRODUCER_SHIFT = 9;
+export const SVO_GBUFFER_PRODUCER_MASK = 7;
+
+export function svoGBufferProducerFlags(producer: SvoGBufferProducer): number {
+  return uint(producer, SVO_GBUFFER_PRODUCER_MASK, "G-buffer producer") << SVO_GBUFFER_PRODUCER_SHIFT;
+}
+
+export function svoGBufferProducerOf(flags: number): SvoGBufferProducer {
+  return (flags >>> SVO_GBUFFER_PRODUCER_SHIFT & SVO_GBUFFER_PRODUCER_MASK) as SvoGBufferProducer;
+}
+
 export const SVO_GBUFFER_FAILURES = Object.freeze({
   none: 0, noIntersection: 1, workExhausted: 2, invalidField: 3,
   staleGeneration: 4, nonresident: 5, invalidRay: 6, mediaStack: 7,
@@ -341,6 +366,10 @@ const SVO_GBUFFER_VALID_SURFACE:u32=1u;const SVO_GBUFFER_MISS:u32=2u;const SVO_G
 const SVO_GBUFFER_GEOMETRIC_NORMAL_VALID:u32=8u;const SVO_GBUFFER_SHADING_NORMAL_VALID:u32=16u;
 const SVO_GBUFFER_MOTION_VALID:u32=32u;const SVO_GBUFFER_MEDIA_VALID:u32=64u;const SVO_GBUFFER_HARD_FEATURE:u32=256u;
 const SVO_GBUFFER_FIELD_NONE:u32=0u;const SVO_GBUFFER_FEATURE_SMOOTH:u32=0u;const SVO_GBUFFER_FEATURE_BOX_X:u32=1u;
+const SVO_GBUFFER_PRODUCER_TRACED:u32=${SVO_GBUFFER_PRODUCERS.tracedPrimary}u;const SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND:u32=${SVO_GBUFFER_PRODUCERS.rasterBackground}u;
+const SVO_GBUFFER_PRODUCER_BRICK:u32=${SVO_GBUFFER_PRODUCERS.brickRaster}u;const SVO_GBUFFER_PRODUCER_STATIC_PRIMITIVE:u32=${SVO_GBUFFER_PRODUCERS.staticPrimitiveRaster}u;
+const SVO_GBUFFER_PRODUCER_RIGID:u32=${SVO_GBUFFER_PRODUCERS.rigidImpostorRaster}u;const SVO_GBUFFER_PRODUCER_GLASS:u32=${SVO_GBUFFER_PRODUCERS.glassDiscovery}u;
+fn svoGBufferProducerFlags(producer:u32)->u32{return (producer&${SVO_GBUFFER_PRODUCER_MASK}u)<<${SVO_GBUFFER_PRODUCER_SHIFT}u;}
 const SVO_GBUFFER_MAX_VELOCITY_M_S:f32=64.0;
 struct SvoGBufferTargets{@location(0) radianceDepth:vec4f,@location(1) packedSurface:vec4u,@location(2) identityMedia:vec4u}
 struct SvoGBufferFeatureNormal{normal:vec3f,featureId:u32}

@@ -17,10 +17,7 @@ test("dry primary static payload traversal resumes one selected near-to-far curs
   assert.match(traceStatic, /dryTraversalCursorBegin\(SvoRay\(ro,minimum,rd,DRY_MISS\),mapping,&continuation\)/);
   assert.match(traceStatic, /dryTraversalCursorNextPrimary\(ray,mapping,&continuation\)/);
   assert.doesNotMatch(traceStatic, /dryTraverse\(/);
-  assert.match(traceStatic, /dryPrimaryNodeVisits\+=leaf\.visits/);
-  assert.match(traceStatic, /dryPrimaryLeafVisits\+=1u/);
   assert.match(traceStatic, new RegExp(`leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget`));
-  assert.match(traceStatic, /if\(!traversalFinished\)\{dryTraversalFailure=max\(dryTraversalFailure,1u\);\}/);
   assert.match(traceStatic, /minimum=leaf\.tExit\+max\(1e-5,length\(dry\.mapping\.cellSize\)\*1e-3\)/);
 });
 

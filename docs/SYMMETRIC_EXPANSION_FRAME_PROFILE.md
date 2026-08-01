@@ -196,7 +196,7 @@ Note for `SYMMETRIC_EXPANSION_ORACLE.md`: its recorded factor-1 divergences
 against this working tree, which reaches step 68 with a wall spread of 0 on
 both arms. That improvement predates this change.
 
-## Defect 2 — Section 5 marches the whole air region (NOT FIXED)
+## Defect 2 — Section 5 relaxes the seeded liquid interior (FIX AUTHORED, UNSCORED)
 
 `March Section 5 sparse changed frontier to a fixed point` is 30.2 ms at
 15.5 % occupancy and 34.4 % ALU — the highest-ALU large stage in the frame, so
@@ -215,15 +215,60 @@ at 62 advances:
 Flat. The propagation work is a fixed quantity that redistributes between the
 wide waves and the 3-workgroup persistent tail; adding waves cannot remove it.
 
-The quantity itself is the defect. Comparing with the mini lane: 16-cubed at
-~64 % air marches in 1.66 ms; this scene is `32 x 16 x 32` at **87.5 % air**
-and marches in 30.2 ms — 5.5x the air cells and 2x the diameter for 18x the
-cost, i.e. roughly `O(air cells x air diameter)`. Section 5 of the paper only
-requires velocity extrapolation into a band wide enough for the advection
-stencil; this implementation extrapolates across the entire air domain. The fix
-is the already-specified but unbuilt *"exact compact seed-to-demand corridor"*
-(`POWER_LIQUIDS_5X_GPU_PLAN.md` §5, `POWER_LIQUIDS_FINE_BAND_10X.md` E-10).
-**This is the single largest remaining item on this scene.**
+### The first reading of this stage was wrong
+
+This section previously concluded, from the mini-lane cost ratio alone, that
+the march "extrapolates across the entire air domain" and that the fix was the
+unbuilt *seed-to-demand corridor* of `POWER_LIQUIDS_5X_GPU_PLAN.md` §5. A
+direct census refutes that. `FLUID_OCTREE_AIR_SUPPORT_CENSUS=1`
+(`WebGPUOctreeProjection.readAirSupportCensus`) publishes the Section 5 control
+header per advance; on this scene at the settled generation:
+
+| quantity | value |
+|---|---:|
+| direct (liquid) rows | 1,152 |
+| support (air corridor) rows | 1,716 |
+| owned face patches | 34,416 |
+| **seed patches** | **13,184** |
+| domain cells | 16,384 |
+
+The marched set is **already the exact corridor**: 1,716 air rows around 1,152
+liquid rows, not the 14,000-cell air region. `reconstructAirSupportVectors`
+consumes precisely that set (`publishedDirectDemandedRow`), so §5's demand
+bound is in place and *no corridor work remains to be done*. The cost is not
+the size of the marched set. It is **cost per visit multiplied by an initial
+frontier that is 38 % of every face in the publication**.
+
+### What the 30 ms actually is
+
+Wave zero's frontier is every seed. The liquid interior is seeded solid —
+13,184 of 13,824 liquid-row patches carry a seed — so nearly every reciprocal
+destination in wave zero is *itself a seed*, and each one was being enqueued
+(one dedup atomic) and then relaxed through the full 30x4 closest-face gather.
+A seeded patch carries squared distance zero and every candidate distance is
+the separation of two distinct owned face centres, so `betterFace` can never
+displace it: **that entire wave-zero relaxation is provably a no-op.**
+
+Three exact removals, all authored behind
+`FLUID_OCTREE_AIR_SUPPORT_MARCH_FASTPATH` (`0` restores the authored source
+for each, so the pair can be scored interleaved):
+
+1. **Settled-seed frontier skip** — `appendFrontierDestination` drops
+   destinations that are already seeds. An unseeded patch on a liquid row keeps
+   its queue slot exactly as before, so no reachable face loses a relay.
+2. **Loop-invariant patch centre** — `faceDistanceSquaredFrom` takes the
+   marching patch's own quarter-cell centre as a value. It was being re-derived
+   for every one of up to 120 candidates.
+3. **Single-bank candidate read** — `select(faceB[x],faceA[x],readA)` is a
+   function call, so both banks were loaded and one discarded. The bank is
+   dispatch-uniform; branching halves the traffic of the hottest loop.
+
+All three compute the same marched field. **None is scored yet**: the
+`symmetric-expansion` and `mini` lanes both stopped constructing partway
+through this work (`Octree pressure capacity exceeds the persistent production
+executor limit`, and `power MGPCG authority is unavailable` on mini), which is
+an unrelated in-flight pressure-executor change in the working tree. The
+numbers belong here once either lane runs again.
 
 ## Levers measured and rejected on this scene
 
@@ -246,7 +291,7 @@ capture, against the 136.2 ms attributed busy:
 | item | ms | status |
 |---|---:|---|
 | coarse V-cycle tail widening | ~26 | **landed**, -9.0 % clean wall |
-| Section 5 demand-corridor march | ~28 | specified, unbuilt (biggest) |
+| Section 5 seed-frontier and candidate-scan removals | ~? of 30 | authored, **unscored** — lanes down |
 | §4.3 merged-band applies (k, or phase packing at 1.8 % occ) | ~8 | needs convergence study |
 | fine transport substeps / staged addressing (E-4, E-5) | ~7 | ladder Wave 1/2 |
 | grading closure from the delta cone (E-3) | ~3 | ladder Wave 1 |

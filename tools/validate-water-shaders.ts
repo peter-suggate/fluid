@@ -31,7 +31,6 @@ import { octreeSPGridAccurateDispatchGateShader, octreeSPGridAccurateOperatorSha
 import { directStructuredVelocityPublicationWGSL } from "../lib/webgpu-octree-structured-velocity-gpu";
 import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
 import { structuredVelocityDynamicsWGSL } from "../lib/webgpu-octree-structured-dynamics";
-import { octreeSection43HybridPreconditionerShader } from "../lib/webgpu-octree-section43-preconditioner";
 import { octreeCoarsePhiBootstrapShader } from "../lib/webgpu-octree-coarse-levelset";
 import { octreePowerCoarseLevelSetShader } from "../lib/webgpu-octree-power-coarse-levelset";
 import { octreePowerDescriptorShader } from "../lib/webgpu-octree-power-descriptor";
@@ -49,7 +48,6 @@ import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../l
 import { sparseSceneProxyVoxelizationShader } from "../lib/webgpu-sparse-scene-proxies";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 import { svoThickGlassWGSL } from "../lib/svo-thick-glass";
-import { legacyUniformComputeShader } from "../lib/webgpu-eulerian";
 import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
 import { structuredFineLevelSetTransportWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
 import { fineLevelSetVolumeCorrectionWGSL } from "../lib/webgpu-octree-fine-levelset-volume";
@@ -98,7 +96,6 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "octree-structured-boundary": structuredBoundaryCoefficientWGSL,
   "octree-structured-dynamics": structuredVelocityDynamicsWGSL,
   "octree-air-velocity-support": octreeAirVelocitySupportPublicationWGSL,
-  "octree-section43-hybrid": octreeSection43HybridPreconditionerShader,
   "octree-coarse-level-set-bootstrap": octreeCoarsePhiBootstrapShader,
   "octree-power-coarse-level-set": octreePowerCoarseLevelSetShader,
   "octree-power-descriptor": octreePowerDescriptorShader,
@@ -112,7 +109,6 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "octree-fine-seed-candidate-commit": fineSeedCandidateCommitShader,
   "octree-fine-seed-adapter": octreeFineSeedAdapterShader,
   "octree-fine-seed-candidates": octreeFineSeedCandidateShader,
-  "shared-eulerian-compute": legacyUniformComputeShader,
   "sparse-scene-proxy-voxelization": sparseSceneProxyVoxelizationShader,
   "sparse-voxel-dry-scene": svoDrySceneShader,
   "sparse-voxel-thick-glass-library": svoThickGlassWGSL,

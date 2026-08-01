@@ -97,6 +97,7 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
   const runner = readFileSync(new URL("../lib/gpu-initialization.ts", import.meta.url), "utf8");
   const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
   const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const spgrid = readFileSync(new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
   const fluidLab = readFileSync(new URL("../components/FluidLab.tsx", import.meta.url), "utf8");
@@ -112,8 +113,8 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
     assert.match(octree, new RegExp(`id: "octree\\.power-pipelines\\.${family}"`),
       `${family} must compile after buffer-only power-authority allocation`);
   }
-  assert.match(octree, /deferPipelineCompilation: this\.deferPipelineCompilation[\s\S]*this\.pressureExecutor === "persistent"/,
-    "persistent SPGrid setup must defer its pipeline family in the async UI path");
+  assert.match(octree, /compileHierarchicalExecutor: false,[\s\S]*deferPipelineCompilation: this\.deferPipelineCompilation/,
+    "persistent SPGrid setup must omit hierarchical programs and defer compilation in the async UI path");
   assert.match(octree, /this\.airVelocitySupport = new WebGPUOctreeAirVelocitySupportProducer\([\s\S]*?this\.deferPipelineCompilation\);/,
     "air support must preserve allocation while deferring its pipeline family");
   assert.match(octree, /this\.structuredDynamics = new WebGPUStructuredVelocityDynamics\([\s\S]*?this\.deferPipelineCompilation\);/,
@@ -127,6 +128,13 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
     "coarse refinement warming should start at the immutable solver maximum");
   assert.doesNotMatch(octree, /for \(let size = 32; size >= 2;/,
     "regular refinement must not compile the coarse-only 16/32 variants");
+  assert.doesNotMatch(octree, /retired factor-one pressure lane|coarseOnlySurfaceTracking\)\s*\{\s*throw/,
+    "factor-one must reach its retained compact-coarse authority instead of failing initialization");
+  assert.match(octree, /this\.coarseOnlySurfaceTracking = options\.globalFineLevelSetFactor === 1/,
+    "factor one must still select the compact-coarse surface authority");
+  assert.doesNotMatch(spgrid,
+    /geometricAggregateTransfers|FactorOneDensePressureShadow|FactorOneDenseCorrection/,
+    "factor one must use the production generic sparse SPGrid path without the retired dense experiment");
   assert.match(uniform, /await this\.device\.queue\.onSubmittedWorkDone\(\)/);
   assert.match(controller, /Preparing GPU work plan/);
   assert.match(fluidLab, /Applying simulation settings/);

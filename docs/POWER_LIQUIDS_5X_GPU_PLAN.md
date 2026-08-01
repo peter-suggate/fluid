@@ -164,8 +164,18 @@ The Section 5 portion of this item landed on 2026-07-29. A GPU-validated
 same-epoch receipt now reuses identities, tags, owner directory, catalog
 topology and face adjacency across the two required publications; dynamic fine
 demand and velocities are refreshed. The remaining work is the same mechanism
-for the other graphs below and replacing Section 5's domain-wide air membership
-with an exact compact seed-to-demand corridor.
+for the other graphs below.
+
+> **Correction, 2026-08-02.** This item used to also call for "replacing
+> Section 5's domain-wide air membership with an exact compact seed-to-demand
+> corridor". A direct census of the published control header
+> (`FLUID_OCTREE_AIR_SUPPORT_CENSUS=1`) shows the membership is **already**
+> that corridor: on `symmetric-expansion` at fine factor 4 the march owns 1,152
+> liquid rows and 1,716 air rows out of a 16,384-cell domain, and
+> `reconstructAirSupportVectors` consumes exactly the demanded set. There is no
+> corridor left to build. The stage's cost is per-visit work over an initial
+> frontier that is 38 % of all face patches — see
+> `SYMMETRIC_EXPANSION_FRAME_PROFILE.md`, Defect 2.
 
 Several low-occupancy tasks rebuild identities and relationships although only
 values changed:

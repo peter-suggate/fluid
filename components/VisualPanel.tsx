@@ -4,10 +4,13 @@ import type { ReactNode } from "react";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import {
-  SVO_COST_OVERLAY_DEFINITIONS,
-  SVO_COST_OVERLAY_LABELS,
-  SVO_COST_OVERLAY_MODES,
-  type SvoCostOverlayMode,
+  SVO_RENDER_STAGE_DEFINITIONS,
+  SVO_RENDER_STAGE_GROUPS,
+  SVO_RENDER_STAGE_LABELS,
+  SVO_RENDER_STAGE_MAXIMUM_LIGHT_SLOT,
+  SVO_RENDER_STAGE_VIEWS,
+  svoRenderStageUsesLightSlot,
+  type SvoRenderStageView,
 } from "@/lib/svo-render-diagnostics";
 import {
   SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
@@ -29,10 +32,22 @@ const rendererFallbackLabels = {
   "pipeline-compiling": "SVO pipeline is compiling",
 } as const;
 
-const visualizationGradient = (mode: SvoCostOverlayMode) => mode === "off"
-  ? "linear-gradient(90deg,#071411,#65b7a4,#f2bc72)"
-  : `linear-gradient(90deg,${SVO_COST_OVERLAY_DEFINITIONS[mode].legend
-    .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
+/**
+ * Categorical palettes read as bands, not as a blend: a stage view names a
+ * class per pixel, and a gradient between two classes would imply a value
+ * between them that the plane never carries.
+ */
+const stageGradient = (view: SvoRenderStageView) => {
+  if (view === "off") return "linear-gradient(90deg,#071411,#65b7a4,#f2bc72)";
+  const { legend, palette } = SVO_RENDER_STAGE_DEFINITIONS[view];
+  if (palette !== "categorical" && palette !== "identity") {
+    return `linear-gradient(90deg,${legend.map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
+  }
+  const band = 100 / legend.length;
+  return `linear-gradient(90deg,${legend
+    .map((stop, index) => `${stop.color} ${(index * band).toFixed(1)}%,${stop.color} ${((index + 1) * band).toFixed(1)}%`)
+    .join(",")})`;
+};
 
 function Toggle({ label, checked, onChange, disabled = false, hint }: {
   label: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; hint?: string;
@@ -64,8 +79,10 @@ export function VisualPanel() {
   const setSvoConeTracingMode = useUIStore((state) => state.setSvoConeTracingMode);
   const svoPrimaryTraversal = useUIStore((state) => state.svoPrimaryTraversal);
   const setSvoPrimaryTraversal = useUIStore((state) => state.setSvoPrimaryTraversal);
-  const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
-  const setSvoCostOverlay = useUIStore((state) => state.setSvoCostOverlay);
+  const svoStageView = useUIStore((state) => state.svoStageView);
+  const setSvoStageView = useUIStore((state) => state.setSvoStageView);
+  const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
+  const setSvoStageLightSlot = useUIStore((state) => state.setSvoStageLightSlot);
   const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
   const setSvoMaximumTraversalDepth = useUIStore((state) => state.setSvoMaximumTraversalDepth);
   const svoMaximumNodeVisits = useUIStore((state) => state.svoMaximumNodeVisits);
@@ -84,7 +101,7 @@ export function VisualPanel() {
   const setFluidCellTracePinned = useUIStore((state) => state.setFluidCellTracePinned);
   const requestFluidCellTracePin = useUIStore((state) => state.requestFluidCellTracePin);
 
-  const selectedView = SVO_COST_OVERLAY_DEFINITIONS[svoCostOverlay];
+  const selectedView = SVO_RENDER_STAGE_DEFINITIONS[svoStageView];
   const visualizationAvailable = voxelRenderMode === "smooth";
   const tuningKey = svoRenderTuningKey(tuning);
   const activePreset = (Object.keys(SVO_RENDER_TUNING_PRESETS) as SvoRenderTuningPreset[])
@@ -94,14 +111,14 @@ export function VisualPanel() {
   const modified = <K extends keyof SvoRenderTuning>(key: K) => tuning[key] !== SVO_RENDER_TUNING_PRESETS.balanced[key];
   const resetTuning = <K extends keyof SvoRenderTuning>(key: K) => () => updateTuning(key, SVO_RENDER_TUNING_PRESETS.balanced[key]);
 
-  const selectVisualization = (mode: SvoCostOverlayMode) => {
-    const nextMode = mode === svoCostOverlay && mode !== "off" ? "off" : mode;
-    if (nextMode !== "off") setVoxelRenderMode("smooth");
-    setSvoCostOverlay(nextMode);
+  const selectStageView = (view: SvoRenderStageView) => {
+    const next = view === svoStageView && view !== "off" ? "off" : view;
+    if (next !== "off") setVoxelRenderMode("smooth");
+    setSvoStageView(next);
   };
   const selectRepresentation = (mode: Parameters<typeof setVoxelRenderMode>[0]) => {
     setVoxelRenderMode(mode);
-    if (mode !== "smooth") setSvoCostOverlay("off");
+    if (mode !== "smooth") setSvoStageView("off");
   };
   // The trace explains the finished sparse path, so arming it leaves any
   // representation inspection view before probing.
@@ -261,32 +278,39 @@ export function VisualPanel() {
         </div>
       </ControlGroup>
 
-      <ControlGroup title="SVO traversal cost" note="LIVE PER-PIXEL SCENE HEATMAPS">
-        <div className="paper-view-grid" role="group" aria-label="SVO cost overlay">
-          {SVO_COST_OVERLAY_MODES.map((mode) => {
-            const view = SVO_COST_OVERLAY_DEFINITIONS[mode];
-            const active = svoCostOverlay === mode;
-            return <button key={mode} type="button" className={active ? "active" : ""} aria-pressed={active} onClick={() => selectVisualization(mode)}>
-              <span>{view.category}</span><strong>{view.label}</strong><small>{view.description}</small>
-              <i className="render-view-palette" style={{ background: visualizationGradient(mode) }} aria-hidden="true" />
-            </button>;
-          })}
+      <ControlGroup title="Render pipeline stages" note="WHAT EACH PASS ACTUALLY WROTE">
+        <div className="paper-view-grid" role="group" aria-label="Render stage view">
+          {SVO_RENDER_STAGE_GROUPS.flatMap((group) =>
+            SVO_RENDER_STAGE_VIEWS.filter((candidate) => SVO_RENDER_STAGE_DEFINITIONS[candidate].group === group))
+            .map((candidate) => {
+              const definition = SVO_RENDER_STAGE_DEFINITIONS[candidate];
+              const active = svoStageView === candidate;
+              return <button key={candidate} type="button" className={active ? "active" : ""} aria-pressed={active} onClick={() => selectStageView(candidate)}>
+                <span>{definition.group}</span><strong>{definition.label}</strong><small>{definition.description}</small>
+                <i className="render-view-palette" style={{ background: stageGradient(candidate) }} aria-hidden="true" />
+              </button>;
+            })}
         </div>
+        {svoRenderStageUsesLightSlot(svoStageView) && <div className="svo-control-grid">
+          <RangeControl label="Cached light slot" unit="slot" value={svoStageLightSlot} min={0} max={SVO_RENDER_STAGE_MAXIMUM_LIGHT_SLOT} step={1} displayDigits={0}
+            onChange={setSvoStageLightSlot}
+            hint="Which of the eight cached per-light visibilities the prepass plane is decoded for." />
+        </div>}
         <div className="paper-view-inspector" aria-live="polite">
           <header>
-            <div><span>ACTIVE VISUALIZATION</span><strong>{SVO_COST_OVERLAY_LABELS[svoCostOverlay]}</strong></div>
-            <code>{svoCostOverlay === "off" ? "production radiance" : "diagnostic signal only"}</code>
+            <div><span>ACTIVE STAGE VIEW</span><strong>{SVO_RENDER_STAGE_LABELS[svoStageView]}</strong></div>
+            <code>{svoStageView === "off" ? "composited frame" : "published plane"}</code>
           </header>
           <p>{selectedView.description}</p>
-          <small>SOURCE · {svoCostOverlay === "off" ? "PRODUCTION SCENE PRESENTATION" : `${selectedView.category.toUpperCase()} SHADER COUNTERS`}</small>
-          <div className="paper-field-legend" aria-label={`${SVO_COST_OVERLAY_LABELS[svoCostOverlay]} legend`}>
-            {selectedView.legend.map((entry) => <span key={entry.label}><i style={{ background: entry.color }} />{entry.label}</span>)}
+          <small>SOURCE · {svoStageView === "off" ? "OPTICAL COMPOSITE" : `${selectedView.group.toUpperCase()} · ${selectedView.plane}`}</small>
+          <div className="paper-field-legend" aria-label={`${SVO_RENDER_STAGE_LABELS[svoStageView]} legend`}>
+            {selectedView.legend.map((entry, index) => <span key={`${entry.label}-${index}`}><i style={{ background: entry.color }} />{entry.label}</span>)}
           </div>
-          <footer>{svoCostOverlay === "off"
-            ? "Choose a view above to replace scene radiance with its per-pixel measurements. Selecting one switches to the finished SVO path automatically."
-            : "The heatmap replaces regular rendering and is generated from the work performed for that exact pixel; no field readback is involved."}</footer>
+          <footer>{svoStageView === "off"
+            ? "Choose a view to replace the presented image with a decode of the plane that stage wrote. Selecting one switches to the finished SVO path automatically."
+            : "Read-only: the overlay is drawn after the optical composite from planes the frame already published, so the frame it explains is the frame that rendered."}</footer>
         </div>
-        <p className="render-visualization-status">{visualizationAvailable ? "GPU COUNTERS READY" : "SELECTS SVO + FINISHED"}</p>
+        <p className="render-visualization-status">{visualizationAvailable ? "STAGE PLANES READY" : "SELECTS SVO + FINISHED"}</p>
       </ControlGroup>
 
       <ControlGroup title="Cell work under the pointer" note="ONE PRESSURE CELL, GATHERED AND SCHEDULED">

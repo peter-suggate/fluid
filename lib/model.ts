@@ -1,4 +1,4 @@
-import sharedDefaultScene from "../native/Sources/FluidMetal/Resources/default-scene.json";
+import sharedDefaultScene from "./default-scene.json";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { EnvironmentId } from "./environments";
 
@@ -94,8 +94,17 @@ export interface SceneDescription {
     surfaceTension_N_m: number;
     gravity_m_s2: Vec3;
     initialCondition: "dam-break" | "tank-fill";
-    /** Optional absolute size of the corner-anchored dam reservoir. */
+    /** Optional absolute size of the dam reservoir. */
     initialDamBreakDimensions_m?: Vec3;
+    /**
+     * Offset of the reservoir's minimum corner from the container's minimum
+     * corner, in metres. Omitted (the legacy shape) anchors the reservoir in
+     * the (-x, 0, -z) corner, which is what the GPU's closed-form t=0 phi
+     * assumes; an authored offset therefore takes the host-rasterized seed
+     * path instead of the analytic bootstrap. Only the box moves — this is what
+     * lets the water body be dragged off the corner and reshaped.
+     */
+    initialDamBreakOrigin_m?: Vec3;
     /**
      * Optional world-space seeds for exact solver bricks. Each seed fills the
      * one brick containing it; multiple seeds create disconnected initial
@@ -246,11 +255,20 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!scene.fluid || scene.fluid.surfaceTension_N_m < 0) errors.push("Surface tension cannot be negative");
   if (!scene.fluid || !["dam-break", "tank-fill"].includes(scene.fluid.initialCondition)) errors.push("Unsupported fluid initial condition");
   const damDimensions = scene.fluid?.initialDamBreakDimensions_m;
+  const damOrigin = scene.fluid?.initialDamBreakOrigin_m;
+  if (damOrigin && !damDimensions) errors.push("Initial dam-break origin requires authored dam-break dimensions");
   if (damDimensions) {
     if (scene.fluid.initialCondition !== "dam-break") errors.push("Initial dam-break dimensions require the dam-break initial condition");
     if (![damDimensions.x, damDimensions.y, damDimensions.z].every((value) => Number.isFinite(value) && value > 0)) {
       errors.push("Initial dam-break dimensions must be positive and finite");
-    } else if (damDimensions.x > c.width_m || damDimensions.y > c.height_m || damDimensions.z > c.depth_m) {
+    } else if (damOrigin && ![damOrigin.x, damOrigin.y, damOrigin.z].every(Number.isFinite)) {
+      errors.push("Initial dam-break origin must be finite");
+    } else if (damOrigin
+      ? damOrigin.x < -1e-9 || damOrigin.y < -1e-9 || damOrigin.z < -1e-9
+        || damOrigin.x + damDimensions.x > c.width_m + 1e-9
+        || damOrigin.y + damDimensions.y > c.height_m + 1e-9
+        || damOrigin.z + damDimensions.z > c.depth_m + 1e-9
+      : damDimensions.x > c.width_m || damDimensions.y > c.height_m || damDimensions.z > c.depth_m) {
       errors.push("Initial dam-break dimensions must fit inside the container");
     } else {
       const damFillFraction = damDimensions.x * damDimensions.y * damDimensions.z

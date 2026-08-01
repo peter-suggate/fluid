@@ -1,5 +1,6 @@
 import { WebGpuSvoFluidCoverage } from "./webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
+import { sceneLatticeDimensions } from "./scene-lattice";
 import type { CameraState, SceneDescription } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
@@ -40,7 +41,8 @@ import {
   type SvoLightingOptions,
   type SvoPrimaryTraversalMode,
 } from "./svo-render-options";
-import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoCostOverlayCode, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
+import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
+import { SparseVoxelRenderStageOverlay } from "./webgpu-svo-stage-overlay";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "./svo-render-tuning";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
@@ -137,7 +139,8 @@ export type OptionalRendererPipeline =
   | "svo-dry-scene"
   | "secondary-particles"
   | "decoration-overlay"
-  | "fluid-cell-trace";
+  | "fluid-cell-trace"
+  | "svo-stage-overlay";
 
 /**
  * Live pixel-trace diagnostic state.
@@ -235,6 +238,7 @@ export function optionalRendererPipelineRequests(
   secondaryParticlesAvailable: boolean,
   pixelTraceActive = false,
   fluidCellTraceActive = false,
+  stageViewActive = false,
 ): OptionalRendererPipeline[] {
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
@@ -252,6 +256,8 @@ export function optionalRendererPipelineRequests(
   // The cell gather reads published octree topology, not the presentation, so
   // it is requested independently of the voxel representation in use.
   if (fluidCellTraceActive) requested.push("fluid-cell-trace", "decoration-overlay");
+  // A session that never opens a render stage view never compiles its pass.
+  if (stageViewActive) requested.push("svo-stage-overlay");
   return requested;
 }
 
@@ -292,16 +298,42 @@ export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: s
  * response, without moving these boundaries again.
  */
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `fluid-${planSceneRuntime(scene).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.lighting ?? null)}:${JSON.stringify(scene.voxelDomain)}:${scene.container.width_m}:${scene.container.height_m}:${scene.container.depth_m}:${scene.container.top}:${scene.container.fluidWallMode}`;
+  // The lattice is keyed in cells, not in metres. Scaling the world multiplies
+  // the container extents and the finest cell size by the same factor, so the
+  // cell counts, every arena sized from them, and every compiled pipeline are
+  // untouched — the structural tier must not claim otherwise and force a
+  // rebuild for what is really a re-seed at a new scale. Authored domain bounds
+  // are measured the same way, in cells, so they survive a scale too.
+  const cellSize_m = scene.voxelDomain.finestCellSize_m;
+  const bounds = scene.voxelDomain.bounds_m;
+  const boundsCells = bounds
+    ? [bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z]
+      .map((value) => Math.round(value / cellSize_m)).join(",")
+    : "none";
+  const lattice = `${sceneLatticeDimensions(scene).join("x")}:${scene.voxelDomain.brickSize_cells}:${boundsCells}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${scene.environment ?? "default"}:${JSON.stringify(scene.lighting ?? null)}:${lattice}:${scene.container.top}:${scene.container.fluidWallMode}`;
 }
 
 /**
  * Scene-derived solver inputs. `scene.terrain` belongs here and was previously
  * absent from the key entirely, so a terrain edit never reached the solver —
  * the editor's terrain handles depend on this being fixed.
+ *
+ * The container extents belong here rather than in the structural tier. A cell
+ * measures `extent / dimension` metres: the dimension is structural, so the
+ * extent is what is left, and the re-seed already recomputes the cell size from
+ * the incoming scene (`WebGPUOctreeProjection.reseed`). It has to stay in some
+ * key — a world scale that changed neither the lattice nor the fill would
+ * otherwise leave the solver running at the old scale.
+ *
+ * `voxelDomain.finestCellSize_m` is deliberately absent: it is a *request*, and
+ * the lattice rounds it. Two cell sizes that round to the same dimensions
+ * describe the same solver, and the size actually simulated is the extent over
+ * that dimension — both already keyed.
  */
 export function gpuSceneSeedKey(scene: SceneDescription): string {
-  return `${scene.container.fillFraction}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.terrain ?? null)}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
+  const c = scene.container;
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.fillFraction}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.terrain ?? null)}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
 }
 
 /** Pure scalars; no lattice or seed depends on them. */
@@ -499,6 +531,7 @@ export class FluidLabRenderer {
   private techniqueAuditOverlayPipeline?: OctreeTechniqueAuditOverlayPipeline;
   private decorationOverlayPipeline?: DecorationOverlay;
   private fluidCellTracePipeline?: WebGPUFluidCellTrace;
+  private svoStageOverlay?: SparseVoxelRenderStageOverlay;
   private latestFluidCellTraceValue?: FluidCellTrace;
   private fluidCellTraceRevisionValue = 0;
   private fluidCellTraceReadInFlight = false;
@@ -732,6 +765,13 @@ export class FluidLabRenderer {
         pipeline.setSource(this.gpuFluid?.octreeTechniqueDebugSource);
         pipeline.setOwnerRows(this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture!);
       },
+    );
+    if (wants.has("svo-stage-overlay")) this.ensureOptionalPipeline(
+      "svo-stage-overlay", this.svoStageOverlay,
+      (device) => new SparseVoxelRenderStageOverlay(device, this.format!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => { this.svoStageOverlay = pipeline; },
+      (pipeline) => pipeline.destroy(),
     );
     if (wants.has("fluid-cell-trace")) this.ensureOptionalPipeline(
       "fluid-cell-trace", this.fluidCellTracePipeline,
@@ -1197,7 +1237,7 @@ export class FluidLabRenderer {
     // guards hold until initialize() completes on the replacement device.
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
-    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined;
+    this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.svoStageOverlay = undefined;
     this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.svoDrySceneSource = undefined; this.svoDrySceneData = undefined; this.sceneryAnimation = undefined; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingStaticSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
@@ -1710,7 +1750,10 @@ export class FluidLabRenderer {
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
     const activeSvoDiagnostics = requestedSvoDiagnostics;
     const tuningKey = svoRenderTuningKey(activeSvoTuning);
-    const diagnosticsKey = `${activeSvoDiagnostics.overlay}:${activeSvoDiagnostics.maximumTraversalDepth}:${activeSvoDiagnostics.maximumNodeVisits}:${tuningKey}`;
+    // The stage view is a presentation choice, not a render choice: it changes
+    // which plane is displayed and nothing that produced one. It still keys the
+    // trace so a captured partition is never labelled with the wrong view.
+    const diagnosticsKey = `${activeSvoDiagnostics.stageView}:${activeSvoDiagnostics.lightSlot}:${activeSvoDiagnostics.maximumTraversalDepth}:${activeSvoDiagnostics.maximumNodeVisits}:${tuningKey}`;
     if (diagnosticsKey !== this.svoRenderDiagnosticsKey) {
       this.svoRenderDiagnosticsKey = diagnosticsKey;
       this.resetPresentationTrace();
@@ -1749,6 +1792,7 @@ export class FluidLabRenderer {
       gridOverlay, voxelRenderMode, this.simulationRunning,
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
       pixelTraceRequested, Boolean(fluidCellTrace),
+      activeSvoDiagnostics.stageView !== "off",
     ));
     // The probe's answer depends on the scene epoch, the presentation, and the
     // traversal tuning as much as on the pixel. Tracking them as one revision is
@@ -1882,7 +1926,7 @@ export class FluidLabRenderer {
     }
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
-      position.x, position.y, position.z, svoCostOverlayCode(activeSvoDiagnostics.overlay),
+      position.x, position.y, position.z, 0,
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       // options.w carries the largest represented adaptive pressure-cell
@@ -2069,6 +2113,20 @@ export class FluidLabRenderer {
       svoEncoded,
     }));
     let inspectionOverlayEncoded = false;
+    // Render stage views replace the composited image with a decode of a plane
+    // an earlier pass published. Encoded first among the inspection overlays so
+    // structural overlays and the ray-trace decoration still draw over it, and
+    // strictly read-only, so the frame it explains is the frame that shipped.
+    if (activeSvoDiagnostics.stageView !== "off" && this.svoStageOverlay?.ready && svoEncoded) {
+      const sceneExtent = Math.hypot(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+      inspectionOverlayEncoded = this.svoStageOverlay.encode(
+        encoder, this.presentationTexture.createView(),
+        activeSvoDiagnostics.stageView, activeSvoDiagnostics.lightSlot,
+        this.presentationTexture.width, this.presentationTexture.height,
+        camera.distance_m + sceneExtent,
+        { ...(this.svoDryScenePipeline?.stagePlanes ?? {}), sceneRadiance: this.waterPipeline.drySceneRadianceView },
+      ) || inspectionOverlayEncoded;
+    }
     if (voxelRenderMode !== "smooth" && this.voxelDebugDepth) {
       const sceneExtent = Math.hypot(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
       this.voxelDebugPipeline?.encode(encoder, {

@@ -702,7 +702,11 @@ export class WebGPUStructuredVelocityDynamics {
       post: this.summarizePostProjectionEnergy }[phase];
     const pass = broker.compute({ label: `Structured dynamics report ${phase} kinetic energy` });
     pass.setPipeline(pipeline);
-    pass.setBindGroup(0, this.group(pipeline, [0, 1, 2, 3, 4, 5, 11, 16, 17, 18, 23], params));
+    // The energy entry points read the accepted value bank through binding 3;
+    // binding 4 (rowVelocity) is only used by reconstruction kernels. Dawn's
+    // auto layout therefore omits it, and supplying it makes bind-group
+    // creation fail validation during the t=0 authority warmup.
+    pass.setBindGroup(0, this.group(pipeline, [0, 1, 2, 3, 5, 11, 16, 17, 18, 23], params));
     pass.dispatchWorkgroups(1);
   }
 

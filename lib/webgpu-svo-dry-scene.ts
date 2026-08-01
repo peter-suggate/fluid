@@ -6,6 +6,7 @@ import {
 } from "./svo-primitive-candidates";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "./svo-primitive-motion";
 import { svoGBufferWGSL } from "./svo-gbuffer";
+import type { SvoRenderStagePlanes } from "./webgpu-svo-stage-overlay";
 import {
   buildSvoEnvironmentLighting,
   SVO_ENVIRONMENT_LIGHTING_RECORD_STRIDE_BYTES,
@@ -74,9 +75,9 @@ import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import { svoFluidCoverageWGSL } from "./svo-fluid-coverage";
 import type { WebGpuSvoFluidCoverage } from "./webgpu-svo-fluid-coverage";
 import { svoNodeMipSamplingWGSL } from "./svo-node-mip-sampling";
+import { SVO_NODE_MIP_LAYOUT } from "./svo-node-mip-pyramid";
 import { svoTetrahedralRadianceWGSL } from "./svo-tetrahedral-radiance";
 import { svoTetrahedralRadianceConeCoreWGSL } from "./svo-tetrahedral-radiance-cone";
-import { svoCostOverlayCode } from "./svo-render-diagnostics";
 import { svoBrickOccupancyWGSL } from "./svo-brick-occupancy";
 import {
   createSvoBrickRasterCullWGSL,
@@ -738,8 +739,8 @@ export interface SvoDryConeMarcherOptions {
  * production dry shader and the A/B cone benchmark. Every variant is bit-exact:
  * optimizations may only change how a value is computed, never the value.
  * Requires bindings/declarations named `dry` (DryParams), `publicationState`,
- * `nodeMipAtlas`, `nodeMipSampler`, `nodeMipDirectory`, `nodeMipPageTable`, the private counter
- * `dryMipSteps`, and the `svoNodeMipSamplingWGSL` library.
+ * `nodeMipAtlas`, `nodeMipSampler`, `nodeMipDirectory`, `nodeMipPageTable`, and
+ * the `svoNodeMipSamplingWGSL` library.
  */
 export function createSvoDryConeMarcherWGSL(options: SvoDryConeMarcherOptions = {}): string {
   const morton = options.branchlessMorton
@@ -894,13 +895,13 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   // nearest-to-light first so a shared budget exhaustion drops mid-air rungs.
   const emitterLadderWGSL = /* wgsl */ `
   if(anchored){var emitterOffset=minimumVoxel*3.0;
-  for(var rung=0u;rung<48u&&budget>0u&&emitterOffset<maximumDistance_m-phaseSplit&&transmittance>.005;rung+=1u){budget-=1u;dryMipSteps+=1u;
+  for(var rung=0u;rung<48u&&budget>0u&&emitterOffset<maximumDistance_m-phaseSplit&&transmittance>.005;rung+=1u){budget-=1u;
     let distance=maximumDistance_m-emitterOffset;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);let remaining=emitterOffset;let stepWidth=emitterOffset*.5;let position=origin_m+direction*distance;
     let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return ${coneMiss};}
     ${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}emitterOffset*=1.5;}}
 `;
   // The elision variant keeps the identical march (step distances, stepIndex
-  // sequence, dryMipSteps accounting, termination) and only replaces the
+  // sequence, termination) and only replaces the
   // fine-level fetch whose trilinear support is provably inside a zero region
   // with the arithmetically identical zero sample: max(0,0*.15)=0 contributes
   // nothing to the blend.
@@ -908,7 +909,7 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
     ? /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
   if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
   var zeroRegion=DryConeZeroRegion(vec3f(0.0),vec3f(0.0),0u);
-  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}
+  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}
     let position=origin_m+direction*distance;let level=min(u32(max(floor(lod),0.0)),dry.nodeMip.z-1u);
     // Tap texels lie within 1.5 level-voxels of the sample position, so the
     // whole trilinear support footprint sits inside this conservative box.
@@ -932,7 +933,7 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
 }`
     : /* wgsl */ `fn dryConeVisibility(origin_m:vec3f,direction:vec3f,aperture:f32,maximumDistance_m:f32,surfaceNormal:vec3f,anchored:bool)->DryConeVisibility{
   if(!dryNodeMipReady()){return ${coneMiss};}let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let tangent=tan(aperture*.5);var distance=minimumVoxel*.75;var transmittance=1.0;${fluidPrologue}var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);var pageCacheCoarse=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let shadowCone=dot(surfaceNormal,surfaceNormal)>.25;var budget=clamp(dry.tuningCounts0.y,1u,48u);let phaseSplit=select(maximumDistance_m,maximumDistance_m*.5,anchored);
-  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;dryMipSteps+=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return ${coneMiss};}${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}distance+=max(stepWidth,minimumVoxel*.25);}${emitterLadderWGSL}
+  for(var stepIndex=0u;stepIndex<48u&&budget>0u&&distance<phaseSplit&&transmittance>.005;stepIndex+=1u){budget-=1u;let diameter=max(minimumVoxel,2.0*distance*tangent);let lod=svoNodeMipLod(diameter,minimumVoxel);${stepWidthExpression}let position=origin_m+direction*distance;let lookup=dryNodeMipAt(position,lod,&pageCache);if(lookup.valid==0u){return ${coneMiss};}${selfCoverageWeight}${blendWeightExpression}${coarseBlendedCoverage}${blendedCoverage}distance+=max(stepWidth,minimumVoxel*.25);}${emitterLadderWGSL}
   return ${coneResult};
 }`;
   return /* wgsl */ `struct DryNodeMipLookup{sample:SvoNodeMipSample,valid:u32}
@@ -1006,8 +1007,8 @@ export type SvoDryPrimaryCoherenceDecision = "trace" | "reuse";
  * the renderer default.
  */
 export interface SvoDryOptimizationExperiments {
-  /** Remove the production cost-overlay counters from reduced split shaders. */
-  readonly stripDiagnostics?: boolean;
+  /** Persistent level-0 voxel visibility for directional light slot zero. */
+  readonly voxelLightCache?: boolean;
   /** Trace incoherent 2x2 receivers in the coherent kernel instead of queueing them. */
   readonly inlineConeBoundaries?: boolean;
   /** Replace the one-thread queue-reset dispatch with a Dawn/Metal blit clear. */
@@ -1089,6 +1090,17 @@ export const SVO_DRY_WORLD_GI_CACHE_CONTRACT = Object.freeze({
   frameBytes: 128,
   dynamicInfluenceCells: 12,
   dynamicInfluenceBodyRadii: 3,
+} as const);
+
+/** Phase-1 static directional-light cache. One bounded queue drains cold demand over several frames. */
+export const SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT = Object.freeze({
+  format: "rg32uint" as GPUTextureFormat,
+  populationBudget: 16_384,
+  queueHeaderWords: 8,
+  queueEntryWords: 2,
+  voxelsPerPage: SVO_NODE_MIP_LAYOUT.interiorSize ** 3,
+  requestWordsPerPage: SVO_NODE_MIP_LAYOUT.interiorSize ** 3 / 32,
+  bytesPerTexel: 8,
 } as const);
 
 /** Prepass target dimensions derived from the presentation size, never below 1x1. */
@@ -1198,10 +1210,10 @@ export function createSvoDrySceneFragmentWGSL(
   }
   const reduced = coneLightingScale !== 1;
   const split = shadingPath !== "inline";
+  const voxelLightCache = split && experiments.voxelLightCache !== false;
   // Full-rate/inline shaders still own the diagnostic overlay. The reduced
   // split shaders are never selected while that overlay is active, so their
   // counters are dead production state and can be removed safely.
-  const stripDiagnostics = experiments.stripDiagnostics === true && reduced && split;
   if (experiments.halfPrecisionLighting && !reduced) {
     throw new RangeError("Half-precision lighting is restricted to reduced-rate shaders");
   }
@@ -1262,7 +1274,7 @@ fn dryScreenSpaceProxyHit(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
   return DryHit(hit.tEnter,normal,0u,DRY_OWNER_NONE,SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(hit.level,0u,0u));
 }
 ` : "";
-  const screenSpaceProxyTraceWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(leaf.status==SVO_STATUS_SCREEN_SPACE_PROXY){dryPrimaryMaximumDepth=max(dryPrimaryMaximumDepth,leaf.level);return dryScreenSpaceProxyHit(ro,rd,leaf);}` : "";
+  const screenSpaceProxyTraceWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(leaf.status==SVO_STATUS_SCREEN_SPACE_PROXY){return dryScreenSpaceProxyHit(ro,rd,leaf);}` : "";
   const screenSpaceProxyShadeWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(hit.fieldSource==DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY){let depthBand=clamp(f32(hit._padding.x)/21.0,0.0,1.0);return mix(vec3f(.02,.06,.18),vec3f(1.0,.04,.72),depthBand);}` : "";
   const traversalCursorWGSL = canonicalTraversal ? /* wgsl */ `
 struct DryTraversalCursor{canonical:SvoTraversalContinuation}
@@ -1332,8 +1344,8 @@ fn traceLeafPayloadFineInterval(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));let tolerance=length(extent)*1.05;
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(cellMinimum))||any(cell>=vec3i(cellMaximum))||entry>intervalExit){break;}
-    dryPrimaryVoxelWorkItems+=1u;let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
-    if(payloadIndex<arrayLength(&materialOwners)){let identity=materialOwners[payloadIndex];let owner=identity>>16u;if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){dryPrimaryExactTests+=1u;let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,intervalExit));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}}
+    let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
+    if(payloadIndex<arrayLength(&materialOwners)){let identity=materialOwners[payloadIndex];let owner=identity>>16u;if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,intervalExit));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}}
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
   return missHit();
@@ -1478,6 +1490,90 @@ fn drySplitIdentityAt(coordinate:vec2i)->vec4u{return textureLoad(drySplitOpaque
 ${splitGlassKeyDeclarationWGSL}
 ${splitRigidReadWGSL}
 ` : "";
+  const voxelLightCacheGroup = splitGroup + 1;
+  const voxelLightCacheWGSL = voxelLightCache ? /* wgsl */ `
+// Persistent world-space visibility for directional light slot zero. The
+// request bitset is frame-local; the atlas texels survive camera motion and
+// carry a 16-bit lighting epoch plus the representative surface normal.
+struct DryVoxelLightCacheParams{control:vec4u,atlasPages:vec4u}
+struct DryVoxelLightAddress{atlas:vec3u,voxelIndex:u32,valid:u32}
+struct DryVoxelLightQueue{
+  distinct:atomic<u32>,misses:atomic<u32>,hits:atomic<u32>,queued:atomic<u32>,
+  populated:atomic<u32>,rejected:atomic<u32>,overflow:atomic<u32>,reserved:atomic<u32>,
+  entries:array<vec2u>,
+}
+@group(${voxelLightCacheGroup}) @binding(0) var dryVoxelLightCacheRead:texture_3d<u32>;
+@group(${voxelLightCacheGroup}) @binding(1) var<uniform> dryVoxelLight:DryVoxelLightCacheParams;
+@group(${voxelLightCacheGroup}) @binding(2) var dryVoxelLightCacheWrite:texture_storage_3d<rg32uint,write>;
+@group(${voxelLightCacheGroup}) @binding(3) var<storage,read_write> dryVoxelLightRequests:array<atomic<u32>>;
+@group(${voxelLightCacheGroup}) @binding(4) var<storage,read_write> dryVoxelLightQueue:DryVoxelLightQueue;
+@group(${voxelLightCacheGroup}) @binding(5) var<storage,read> dryVoxelLightPages:array<vec4u>;
+${reduced ? "" : "var<private> dryCurrentLightSlot:u32;"}
+fn dryVoxelLightPackNormal(normalIn:vec3f)->u32{
+  let normal=normalize(normalIn);var oct=normal.xy/(abs(normal.x)+abs(normal.y)+abs(normal.z));
+  if(normal.z<0.0){oct=(vec2f(1.0)-abs(oct.yx))*select(vec2f(-1.0),vec2f(1.0),oct>=vec2f(0.0));}
+  let encoded=vec2u(round(clamp(oct*.5+.5,vec2f(0.0),vec2f(1.0))*255.0));return encoded.x|(encoded.y<<8u);
+}
+fn dryVoxelLightUnpackNormal(packed:u32)->vec3f{
+  let oct=vec2f(f32(packed&255u),f32((packed>>8u)&255u))/255.0*2.0-1.0;
+  var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));if(normal.z<0.0){normal.xy=(vec2f(1.0)-abs(normal.yx))*select(vec2f(-1.0),vec2f(1.0),normal.xy>=vec2f(0.0));}return normalize(normal);
+}
+fn dryVoxelLightAddress(position:vec3f)->DryVoxelLightAddress{
+  if((dryVoxelLight.control.w&1u)==0u||dry.nodeMipDirect.w==0u){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
+  let virtual=floor((position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize,vec3f(1e-6)));
+  if(any(virtual<vec3f(0.0))){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
+  let voxel=vec3u(virtual);let pageCoordinate=voxel/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let pageIndex=dryNodeMipFind(0u,pageCoordinate);
+  if(pageIndex==0xffffffffu||pageIndex>=dryVoxelLight.control.x){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
+  let local=voxel-pageCoordinate*${SVO_NODE_MIP_LAYOUT.interiorSize}u;
+  let localIndex=local.x+local.y*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local.z*${SVO_NODE_MIP_LAYOUT.interiorSize ** 2}u;
+  let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));
+  let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
+  return DryVoxelLightAddress(atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local,pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u+localIndex,1u);
+}
+fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
+  if(dryCurrentLightSlot!=0u){return vec2f(0.0);}
+  let address=dryVoxelLightAddress(position);if(address.valid==0u){return vec2f(0.0);}
+  let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xy;
+  if(encoded.x==0u||(encoded.y>>16u)!=(dryVoxelLight.control.z&0xffffu)){return vec2f(0.0);}
+  if(dot(normalize(normal),dryVoxelLightUnpackNormal(encoded.y&0xffffu))<.9){return vec2f(0.0);}
+  return vec2f(f32(encoded.x-1u)/65534.0,1.0);
+}
+@compute @workgroup_size(8,8) fn dryVoxelLightDemandMain(@builtin(global_invocation_id) id:vec3u){
+  let dimensions=textureDimensions(drySplitGeometryRead);if(any(id.xy>=dimensions)){return;}
+  let coordinate=vec2i(id.xy);let geometry=drySplitGeometryAt(coordinate);if(!(geometry.w>0.0&&geometry.w<DRY_MISS)){return;}
+  let metadata=drySplitIdentityAt(coordinate).y;let motionKind=(metadata>>24u)&3u;let feature=(metadata>>16u)&15u;
+  if(motionKind!=DRY_GBUFFER_MOTION_STATIC||feature!=SVO_FEATURE_SMOOTH){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
+  let uv=vec2f((f32(id.x)+.5)/f32(dimensions.x),1.0-(f32(id.y)+.5)/f32(dimensions.y));let ndc=uv*2.0-1.0;
+  let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);let position=ro+rd*geometry.w;
+  let address=dryVoxelLightAddress(position);if(address.valid==0u){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
+  let word=address.voxelIndex>>5u;let bit=1u<<(address.voxelIndex&31u);let previous=atomicOr(&dryVoxelLightRequests[word],bit);if((previous&bit)!=0u){return;}
+  atomicAdd(&dryVoxelLightQueue.distinct,1u);let packedNormal=dryVoxelLightPackNormal(geometry.xyz);
+  let encoded=textureLoad(dryVoxelLightCacheRead,vec3i(address.atlas),0).xy;
+  if(encoded.x!=0u&&(encoded.y>>16u)==(dryVoxelLight.control.z&0xffffu)){
+    if(dot(normalize(geometry.xyz),dryVoxelLightUnpackNormal(encoded.y&0xffffu))>=.9){atomicAdd(&dryVoxelLightQueue.hits,1u);}else{atomicAdd(&dryVoxelLightQueue.rejected,1u);}return;
+  }
+  atomicAdd(&dryVoxelLightQueue.misses,1u);let queueIndex=atomicAdd(&dryVoxelLightQueue.queued,1u);
+  if(queueIndex<dryVoxelLight.control.y){dryVoxelLightQueue.entries[queueIndex]=vec2u(address.voxelIndex,packedNormal);}else{atomicAdd(&dryVoxelLightQueue.overflow,1u);}
+}
+@compute @workgroup_size(64) fn dryVoxelLightPopulateMain(@builtin(global_invocation_id) id:vec3u){
+  let count=min(atomicLoad(&dryVoxelLightQueue.queued),dryVoxelLight.control.y);if(id.x>=count){return;}
+  let entry=dryVoxelLightQueue.entries[id.x];let pageIndex=entry.x/${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u;
+  let localIndex=entry.x-pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u;if(pageIndex>=dryVoxelLight.control.x){return;}
+  let local=vec3u(localIndex%${SVO_NODE_MIP_LAYOUT.interiorSize}u,(localIndex/${SVO_NODE_MIP_LAYOUT.interiorSize}u)%${SVO_NODE_MIP_LAYOUT.interiorSize}u,localIndex/${SVO_NODE_MIP_LAYOUT.interiorSize ** 2}u);
+  let page=dryVoxelLightPages[pageIndex];if(page.w!=0u){return;}let worldVoxel=page.xyz*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local;
+  let position=dry.nodeMipOrigin.xyz+(vec3f(worldVoxel)+vec3f(.5))*dry.mapping.cellSize;let normal=dryVoxelLightUnpackNormal(entry.y);
+  var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let coverage=dryNodeMipAt(position,0.0,&pageCache);
+  if(coverage.valid==0u||(coverage.sample.solidMaximum>.85&&coverage.sample.solidMean<.08)){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
+  let light=dryLighting.lights[0];if(dryLighting.metadata.x==0u||light.identity.x!=SVO_LIGHT_DIRECTIONAL||light.identity.w!=dryLighting.metadata.y){return;}
+  let sample=dryLightSample(light,0u,position);var visibility=0.0;
+  if(sample.valid!=0u&&dot(normal,sample.towardLight)>0.0){let maximumDistance=directionalLightSceneExitDistance(position,sample.towardLight);let ray=dryBiasedVisibilityRayUnit(position,normal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));let escape=cell*dry.tuningRays1.z;let coneMaximum=max(0.0,ray.tMax_m-escape*dot(normal,sample.towardLight));let cone=dryConeVisibility(ray.origin_m+normal*escape,sample.towardLight,dry.tuningRays1.y,coneMaximum,normal,false);if(cone.valid==0u){return;}visibility=cone.transmittance;}
+  let atlasPages=max(dryVoxelLight.atlasPages.xyz,vec3u(1u));let atlasPage=vec3u(pageIndex%atlasPages.x,(pageIndex/atlasPages.x)%atlasPages.y,pageIndex/(atlasPages.x*atlasPages.y));
+  let atlas=atlasPage*${SVO_NODE_MIP_LAYOUT.physicalSize}u+vec3u(${SVO_NODE_MIP_LAYOUT.apron}u)+local;let packed=u32(round(clamp(visibility,0.0,1.0)*65534.0))+1u;
+  textureStore(dryVoxelLightCacheWrite,vec3i(atlas),vec4u(packed,((dryVoxelLight.control.z&0xffffu)<<16u)|(entry.y&0xffffu),0u,0u));atomicAdd(&dryVoxelLightQueue.populated,1u);
+}
+` : "";
+  const voxelLightCacheShortcutWGSL = voxelLightCache ? /* wgsl */ `let cachedVoxelVisibility=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxelVisibility.y>0.0){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);let raw=select(cachedVoxelVisibility.x,0.0,rigidBlocker.t<ray.tMax_m);return vec3f(mix(1.0,raw,dry.tuningRays0.y));}` : "";
   const prepassResolveCallWGSL = reduced
     ? /* wgsl */ `dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryConeFallback=0u;dryCurrentLightSlot=0xffffffffu;if(opaque.t<DRY_MISS&&(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)!=0u&&dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}`
     : "";
@@ -1499,22 +1595,19 @@ ${splitRigidReadWGSL}
   return false;
 }
 ` : "";
-  const prepassLightSlotWGSL = reduced ? /* wgsl */ `dryCurrentLightSlot=lightIndex;` : "";
+  const prepassLightSlotWGSL = reduced || voxelLightCache ? /* wgsl */ `dryCurrentLightSlot=lightIndex;` : "";
   const prepassRadianceShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassRadianceState==1u&&hit.motionKind==DRY_GBUFFER_MOTION_STATIC){return max(dryPrepassRadiance.rgb,vec3f(0.0));}`
     : "";
   const prepassGiShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassGiState==1u){return DryGlobalIllumination(max(dryPrepassGi.rgb,vec3f(0.0)),clamp(dryPrepassGi.a,0.0,1.0));}`
     : "";
-  const prepassOverlayWGSL = reduced ? /* wgsl */ `if(mode==${svoCostOverlayCode("prepass-fallback")}u){overlayColor=vec3f(.16,.14,.24);if(dryPrepassState==1u){overlayColor=vec3f(0.0,.9,1.0);}if(dryConeFallback==1u){overlayColor=vec3f(1.0,.09,.30);}}
-  ` : /* wgsl */ `if(mode==${svoCostOverlayCode("prepass-fallback")}u){overlayColor=vec3f(.16,.14,.24);}
-  `;
   const splitVisibilityGlassDiscoveryWGSL = rasterGlassDiscovery
     ? /* wgsl */ `let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(opaque.materialId,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`
     : /* wgsl */ `let glass=traceGlass(ro,rd,0.0,opaque.t,true);let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;let coordinate=vec2i(input.position.xy);textureStore(drySplitGeometryWrite,coordinate,vec4f(opaque.normal,opaque.t));let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);let glassKey=select(0u,glass.recordIndex+1u,glassVisible);let packedOpaqueMaterial=(opaque.materialId&0x8000ffffu)|((glassKey&0x1ffu)<<16u);textureStore(drySplitOpaqueIdentityWrite,coordinate,vec4u(packedOpaqueMaterial,opaqueMetadata,0u,0u));let generation=dryPublicationGeneration();`;
   const splitVisibilityGlassReturnWGSL = rasterGlassDiscovery
     ? ""
-    : /* wgsl */ `if(glassVisible){let record=glassPanes[glass.recordIndex];let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);let targets=svoGBufferSurface(vec3f(0.0),glass.hit.t_m,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID,SVO_FEATURE_SMOOTH);return drySplitVisibilityOut(targets,dryHardwareDepth(glass.hit.t_m,rd,forward));}`;
+    : /* wgsl */ `if(glassVisible){let record=glassPanes[glass.recordIndex];let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);let targets=svoGBufferSurface(vec3f(0.0),glass.hit.t_m,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(svoThinGlassMaterialId(record),svoThinGlassOwnerId(record),media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_GLASS),SVO_FEATURE_SMOOTH);return drySplitVisibilityOut(targets,dryHardwareDepth(glass.hit.t_m,rd,forward));}`;
   const splitOpaqueMaterialDecodeWGSL = rasterGlassDiscovery
     ? /* wgsl */ `let opaqueMaterial=packedOpaqueMaterial;`
     : /* wgsl */ `let opaqueMaterial=select(packedOpaqueMaterial&0xffffu,0x80000000u|(packedOpaqueMaterial&0xffffu),(packedOpaqueMaterial&0x80000000u)!=0u);`;
@@ -1551,21 +1644,22 @@ fn dryRasterPrimaryRay(pixel:vec2f,camera:mat4x3f)->vec3f{
   let uv=vec2f(pixel.x/max(uniforms.viewport.x,1.0),1.0-pixel.y/max(uniforms.viewport.y,1.0));let ndc=uv*2.0-1.0;
   return normalize(camera[1]+camera[2]*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+camera[3]*ndc.y*.72);
 }
-fn dryRasterPrimarySurface(opaque:DryHit,ro:vec3f,rd:vec3f,forward:vec3f)->DryRasterPrimaryOut{
+fn dryRasterPrimarySurface(opaque:DryHit,ro:vec3f,rd:vec3f,forward:vec3f,producer:u32)->DryRasterPrimaryOut{
   let generation=dryPublicationGeneration();
   let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);
   let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);
   let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);
   let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);
   let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);
-  var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u);
+  var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(producer);
   if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
   let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
   let opaqueMetadata=(opaque.ownerId&0xffffu)|((opaque.featureId&15u)<<16u)|((opaque.fieldSource&15u)<<20u)|((opaque.motionKind&3u)<<24u)|((opaque.motionValid&1u)<<26u);
   return DryRasterPrimaryOut(targets.packedSurface,targets.identityMedia,vec4f(opaque.normal,opaque.t),vec2u(opaque.materialId,opaqueMetadata),dryHardwareDepth(opaque.t,rd,forward));
 }
 fn dryRasterPrimaryMiss()->DryRasterPrimaryOut{
-  let targets=svoGBufferMiss(vec3f(0.0),0u,dryPublicationGeneration(),DRY_GBUFFER_NO_INTERSECTION,0u);
+  let targets=svoGBufferMiss(vec3f(0.0),0u,dryPublicationGeneration(),DRY_GBUFFER_NO_INTERSECTION,
+    svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND));
   return DryRasterPrimaryOut(targets.packedSurface,targets.identityMedia,vec4f(0.0,1.0,0.0,DRY_MISS),vec2u(0u,0u),0.0);
 }
 // The brick payload stores one owner per voxel. That is sufficient to find a
@@ -1621,7 +1715,7 @@ fn dryStaticPrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
   let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
   let exact=primitiveHit(record,ro,rd,0.0,DRY_MISS);
   if(!(exact.t<DRY_MISS)){discard;}
-  return dryRasterPrimarySurface(exact,ro,rd,camera[1]);
+  return dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_STATIC_PRIMITIVE);
 }
 // Background and terrain. The megakernel's octree stack, rigid loop and pane
 // loop are all absent here, which is the register budget this mode buys back.
@@ -1629,7 +1723,7 @@ fn dryStaticPrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
   dryRasterPrimaryReset();
   let camera=dryRasterPrimaryCamera();let rd=dryRasterPrimaryRay(input.position.xy,camera);
   let terrain=traceTerrain(camera[0],rd);
-  if(terrain.t<DRY_MISS){return dryRasterPrimarySurface(terrain,camera[0],rd,camera[1]);}
+  if(terrain.t<DRY_MISS){return dryRasterPrimarySurface(terrain,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND);}
   return dryRasterPrimaryMiss();
 }
 @vertex fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.vertex}(@builtin(vertex_index) vertexIndex:u32,@builtin(instance_index) instanceIndex:u32)->SvoBrickRasterVertexOut{
@@ -1679,10 +1773,10 @@ fn dryBrickRasterOut(surface:DryRasterPrimaryOut)->DryBrickRasterOut{
   let payload=traceLeafPayload(ro,rd,leaf);
   ${hsrProbe
     ? `var probe=dryRasterPrimaryMiss();
-  if(payload.t<DRY_MISS){probe=dryRasterPrimarySurface(payload,ro,rd,camera[1]);}
+  if(payload.t<DRY_MISS){probe=dryRasterPrimarySurface(payload,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);}
   return dryBrickRasterOut(probe);`
     : `if(!(payload.t<DRY_MISS)){discard;}
-  return dryBrickRasterOut(dryRasterPrimarySurface(payload,ro,rd,camera[1]));`}
+  return dryBrickRasterOut(dryRasterPrimarySurface(payload,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK));`}
 }
 ` : "";
   const prepassEntryWGSL = reduced ? /* wgsl */ `struct DryPrepassGeometryOut{@location(0) geometry:vec4f,@location(1) identity:u32}
@@ -1793,21 +1887,21 @@ fn drySplitVisibilityOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryVisi
   return DryVisibilityOut(targetsIn.packedSurface,targetsIn.identityMedia,hardwareDepth);
 }
 @fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let opaque=${splitPrimaryTraceWGSL};${splitVisibilityGlassDiscoveryWGSL}
   ${splitVisibilityGlassReturnWGSL}
-  if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
-  return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u),0.0);
+  if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
+  return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
 @fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let coordinate=vec2i(input.position.xy);let geometry=drySplitGeometryAt(coordinate);let opaqueIdentity=drySplitIdentityAt(coordinate);var opaque=missHit();
   let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));}
   ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.terrain.y&&recordIndex<arrayLength(&glassPanes)){let record=glassPanes[recordIndex];let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
-  let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return dryCostOverlay(vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS)));
+  let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 @fragment fn drySkyLightingMain(input:VertexOut)->@location(0) vec4f{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let coordinate=vec2i(input.position.xy);var opaque=missHit();
   // Skipping the G-buffer identity load is most of what makes this entry cheap,
   // but without raster glass discovery the glass key is packed into that very
@@ -1815,7 +1909,7 @@ fn drySplitVisibilityOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryVisi
   ${rasterGlassDiscovery ? "" : "let packedOpaqueMaterial=drySplitIdentityAt(coordinate).x;"}
   var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.terrain.y&&recordIndex<arrayLength(&glassPanes)){let record=glassPanes[recordIndex];let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;
   if(glass.hit.valid!=0u&&glass.hit.t_m<opaque.t){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
-  let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return dryCostOverlay(vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS)));
+  let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 ` : "";
   const prepassVisibilityStoreWGSL = coneFanout
@@ -2169,7 +2263,7 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
     if(dryWorldGiIgnoreRigidBodies==0u){rigidHit=nearestBodyMaskIgnoring(origin,direction,ignoredBodyOwner,dryWorldGiBodyMask);}
     let rigidBlocked=rigidHit.t<sceneExit;
     let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,min(sceneExit,rigidHit.t),perConeBudget,.995,.0039215686,1u));
-    let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);dryMipSteps+=result.coneTaps;
+    let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);
     // Sparse GI is fail-soft. A non-finite texture/filter result must not
     // poison the entire lighting closure (max/clamp preserve NaN), turning an
     // otherwise valid directly-lit surface black. Retain every valid cone and
@@ -2183,7 +2277,7 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
   let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u)!=0u);
   return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength));
 }
-${prepassDeclarationsWGSL}${splitDeclarationsWGSL}${worldGiCacheEntryWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
+${prepassDeclarationsWGSL}${splitDeclarationsWGSL}${voxelLightCacheWGSL}${worldGiCacheEntryWGSL}fn dryDiagnosticControl()->u32{return u32(round(max(uniforms.options.x,0.0)));}
 fn dryDiagnosticMaximumNodeVisits()->u32{return clamp(dryDiagnosticControl()&511u,1u,256u);}
 fn dryDiagnosticMaximumDepth()->u32{return clamp(dryDiagnosticControl()>>9u,1u,21u);}
 fn dryTraverse(ray:SvoRay,mapping:SvoMapping)->SvoTraversalHit{return svoTraverseWithDepthLimit(ray,mapping,dryDiagnosticMaximumDepth());}
@@ -2207,75 +2301,11 @@ const DRY_REVERSED_Z_NEAR_M:f32=${SVO_DRY_SCENE_REVERSED_Z_NEAR_M};
 var<private> dryVisibilityIgnoredOwner:u32;var<private> dryThickGlassEnabled:u32;var<private> dryThickGlassFailure:u32;
 var<private> dryWorldGiIgnoreRigidBodies:u32;
 var<private> dryWorldGiBodyMask:u32=0xffffffffu;
-var<private> dryPrimaryNodeVisits:u32;var<private> dryPrimaryLeafVisits:u32;var<private> dryPrimaryEmptyBrickSkips:u32;var<private> dryPrimaryVoxelWorkItems:u32;var<private> dryPrimaryExactTests:u32;var<private> dryPrimaryMaximumDepth:u32;var<private> dryShadowNodeVisits:u32;var<private> dryShadowLeafVisits:u32;var<private> dryShadowWorkItems:u32;var<private> dryMipSteps:u32;var<private> dryTraversalFailure:u32;
+
 fn dryConfiguredMapping()->SvoMapping{
   var mapping=dry.mapping;
   mapping.maxVisits=min(mapping.maxVisits,dryDiagnosticMaximumNodeVisits());
   return mapping;
-}
-fn dryNormalizedCost(value:f32,reference:f32)->f32{
-  if(!(value>0.0)){return 0.0;}
-  // A reference is the live configured work envelope, not the much larger
-  // compile-time hard ceiling. The concave lift keeps ordinary nonzero work
-  // out of the visually indistinguishable purple floor while preserving zero.
-  let logarithmic=clamp(log2(1.0+value)/log2(1.0+max(reference,1.0)),0.0,1.0);
-  return clamp(.14+.86*pow(logarithmic,.55),0.0,1.0);
-}
-fn dryCostRamp(valueIn:f32)->vec3f{
-  let value=clamp(valueIn,0.0,1.0);
-  if(value<.16){return mix(vec3f(.031,.020,.122),vec3f(.141,.278,1.0),value/.16);}
-  if(value<.34){return mix(vec3f(.141,.278,1.0),vec3f(0.0,.851,1.0),(value-.16)/.18);}
-  if(value<.52){return mix(vec3f(0.0,.851,1.0),vec3f(0.0,1.0,.522),(value-.34)/.18);}
-  if(value<.69){return mix(vec3f(0.0,1.0,.522),vec3f(.918,1.0,0.0),(value-.52)/.17);}
-  if(value<.84){return mix(vec3f(.918,1.0,0.0),vec3f(1.0,.522,0.0),(value-.69)/.15);}
-  if(value<.95){return mix(vec3f(1.0,.522,0.0),vec3f(1.0,.09,.302),(value-.84)/.11);}
-  return mix(vec3f(1.0,.09,.302),vec3f(1.0),(value-.95)/.05);
-}
-fn dryCostOverlay(radianceDepth:vec4f)->vec4f{
-  let mode=u32(round(max(uniforms.cameraPosition.w,0.0)));if(mode==0u){return radianceDepth;}
-  let depthReference=f32(max(1u,min(dryDiagnosticMaximumDepth(),dry.mapping.maximumDepth)));
-  let depthCost=dryNormalizedCost(f32(dryPrimaryMaximumDepth),depthReference);
-  let nodeCost=dryNormalizedCost(f32(dryPrimaryNodeVisits),f32(dryDiagnosticMaximumNodeVisits()));
-  let primaryLeafBudget=f32(max(dry.tuningCounts0.x,1u));
-  let brickCost=dryNormalizedCost(f32(dryPrimaryLeafVisits),primaryLeafBudget);
-  let emptyBrickCost=dryNormalizedCost(f32(dryPrimaryEmptyBrickSkips),primaryLeafBudget);
-  let voxelReference=primaryLeafBudget*f32(max(dry.mapping.brickSize,1u));
-  let voxelCost=dryNormalizedCost(f32(dryPrimaryVoxelWorkItems),voxelReference);
-  let exactTestCost=dryNormalizedCost(f32(dryPrimaryExactTests),primaryLeafBudget);
-  let visibilityRayBudget=f32(max(dry.tuningCounts0.z+dry.tuningCounts1.y,1u));
-  let shadowNodeCost=dryNormalizedCost(f32(dryShadowNodeVisits),f32(dry.tuningCounts1.w)*visibilityRayBudget);
-  let shadowBrickCost=dryNormalizedCost(f32(dryShadowLeafVisits),f32(dry.tuningCounts2.x)*visibilityRayBudget);
-  let shadowVoxelCost=dryNormalizedCost(f32(dryShadowWorkItems),f32(dry.tuningCounts2.y)*visibilityRayBudget);
-  let shadowCost=max(shadowNodeCost,max(shadowBrickCost,shadowVoxelCost));
-  let mipCost=dryNormalizedCost(f32(dryMipSteps),f32(max(dry.tuningCounts0.y,1u))*2.0);
-  let primaryCost=max(max(depthCost,nodeCost),max(max(brickCost,emptyBrickCost),max(voxelCost,exactTestCost)));
-  let compositeCost=1.0-(1.0-primaryCost)*(1.0-shadowCost)*(1.0-mipCost);
-  var cost=depthCost;
-  if(mode==${svoCostOverlayCode("node-visits")}u){cost=nodeCost;}
-  else if(mode==${svoCostOverlayCode("brick-tests")}u){cost=brickCost;}
-  else if(mode==${svoCostOverlayCode("empty-brick-skips")}u){cost=emptyBrickCost;}
-  else if(mode==${svoCostOverlayCode("voxel-work")}u){cost=voxelCost;}
-  else if(mode==${svoCostOverlayCode("exact-tests")}u){cost=exactTestCost;}
-  else if(mode==${svoCostOverlayCode("shadow-node-visits")}u){cost=shadowNodeCost;}
-  else if(mode==${svoCostOverlayCode("shadow-brick-visits")}u){cost=shadowBrickCost;}
-  else if(mode==${svoCostOverlayCode("shadow-voxel-work")}u){cost=shadowVoxelCost;}
-  else if(mode==${svoCostOverlayCode("shadow-work")}u){cost=shadowCost;}
-  else if(mode==${svoCostOverlayCode("mip-steps")}u){cost=mipCost;}
-  else if(mode==${svoCostOverlayCode("total-cost")}u){cost=compositeCost;}
-  var overlayColor=dryCostRamp(cost);
-  if(mode==${svoCostOverlayCode("work-composition")}u){
-    let workSum=primaryCost+shadowCost+mipCost;
-    let workHue=(primaryCost*vec3f(0.0,.851,1.0)+shadowCost*vec3f(1.0,.078,.576)+mipCost*vec3f(1.0,.902,0.0))/max(workSum,1e-5);
-    overlayColor=select(vec3f(.031,.020,.122),mix(vec3f(.031,.020,.122),workHue,.28+.72*compositeCost),workSum>0.0);
-  }
-  ${prepassOverlayWGSL}if(mode==${svoCostOverlayCode("exhaustion")}u){
-    var failure=dryTraversalFailure;
-    overlayColor=select(select(vec3f(.024,.235,.204),vec3f(1.0,.69,0.0),failure==1u),vec3f(1.0,0.0,.72),failure>=2u);
-  }
-  // Diagnostic modes are measurements, not art-direction overlays. Returning
-  // the palette directly keeps scene luminance and material colour from
-  // contaminating the signal; mode zero above remains the sole radiance path.
-  return vec4f(overlayColor,radianceDepth.a);
 }
 fn dryBoundThickGlassOwner(owner:u32)->bool{
   if(dryThickGlassEnabled==0u){return false;}let count=min(thickGlass.metadata.x,${SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES}u);
@@ -2467,11 +2497,11 @@ fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
   let tolerance=length(extent)*1.05;
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>${primaryBrickExitWGSL}){break;}
-    ${primaryMacroSkipWGSL}dryPrimaryVoxelWorkItems+=1u;
+    ${primaryMacroSkipWGSL}
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex<arrayLength(&materialOwners)){
       let identity=materialOwners[payloadIndex];let owner=identity>>16u;
-      if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){dryPrimaryExactTests+=1u;let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,${primaryBrickExitWGSL}));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}
+      if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){let primitiveIndex=owner-dry.metadata.y;if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,${primaryBrickExitWGSL}));let candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);if(candidate.t<DRY_MISS){return candidate;}}}
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z)); if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
@@ -2490,25 +2520,25 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
   for(var leafVisit=0u;leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget;leafVisit+=1u){
     let ray=SvoRay(ro,minimum,rd,DRY_MISS);
     let leaf=dryTraversalCursorNextPrimary(ray,mapping,&continuation);
-    dryPrimaryNodeVisits+=leaf.visits;
+
     ${screenSpaceProxyTraceWGSL}
     if(leaf.status!=SVO_STATUS_HIT){
       traversalFinished=true;
-      if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){dryTraversalFailure=max(dryTraversalFailure,1u);}
-      else if(leaf.status!=SVO_STATUS_MISS){dryTraversalFailure=2u;}
+      if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){}
+      else if(leaf.status!=SVO_STATUS_MISS){}
       break;
     }
-    dryPrimaryLeafVisits+=1u;
-    dryPrimaryMaximumDepth=max(dryPrimaryMaximumDepth,leaf.level);
+
+
     let payloadHit=${primaryLeafTraceCallWGSL}(ro,rd,leaf);
     if(payloadHit.t<DRY_MISS){return payloadHit;}
-    dryPrimaryEmptyBrickSkips+=1u;
+
     minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
   // Reaching the uniform budget without an authoritative hierarchy miss is a
   // traversal exhaustion, not an empty scene. Keep that visible in the
   // existing failure heatmap instead of silently returning black.
-  if(!traversalFinished){dryTraversalFailure=max(dryTraversalFailure,1u);}
+  if(!traversalFinished){}
   return missHit();
 }
 
@@ -2639,6 +2669,7 @@ fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLig
   if((dry.materialPublication.w&2u)==0u){return vec3f(1.0);}
   let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),finiteDistance_m,finiteDistance_m>0.0);if(maximumDistance<=0.0){return vec3f(0.0);}
   let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);
+  ${voxelLightCacheShortcutWGSL}
   // GLOBAL already carries shadowed direct exitance in its radiance atlas.
   // Reuse hierarchical cone visibility for the analytic direct term instead of
   // recasting a full exact SVO ray for every receiver and every authored light.
@@ -2661,7 +2692,7 @@ fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLig
     let cone=dryConeVisibility(ray.origin_m+geometricNormal*coneEscape_m,towardLight,dry.tuningRays1.y,coneMax_m,geometricNormal,finiteDistance_m>0.0);
     if(cone.valid!=0u){let rigidBlocker=nearestBodyIgnoring(ray.origin_m,towardLight,ownerId);if(rigidBlocker.t<ray.tMax_m){return vec3f(1.0-dry.tuningRays0.y);}let raw=vec3f(cone.transmittance)*dryFluidTransmittance(cone.fluidDepth_m);return mix(vec3f(1.0),raw,dry.tuningRays0.y);}}
   dryVisibilityIgnoredOwner=ownerId;
-  let result=svoTraceVisibility(ray,SvoVisibilityBudget(dry.tuningCounts1.w,dry.tuningCounts2.x,dry.tuningCounts2.y,dry.tuningCounts2.z),true,0.001,max(ray.originBias_m,1e-6));dryShadowNodeVisits+=result.nodeVisits;dryShadowLeafVisits+=result.leafVisits;dryShadowWorkItems+=result.workItems;if(result.status==SVO_VIS_STATUS_EXHAUSTED){dryTraversalFailure=max(dryTraversalFailure,1u);}else if(result.status==SVO_VIS_STATUS_INVALID){dryTraversalFailure=2u;}
+  let result=svoTraceVisibility(ray,SvoVisibilityBudget(dry.tuningCounts1.w,dry.tuningCounts2.x,dry.tuningCounts2.y,dry.tuningCounts2.z),true,0.001,max(ray.originBias_m,1e-6));if(result.status==SVO_VIS_STATUS_EXHAUSTED){}else if(result.status==SVO_VIS_STATUS_INVALID){}
   dryVisibilityIgnoredOwner=DRY_OWNER_NONE;
   return mix(vec3f(1.0),result.transmittance,dry.tuningRays0.y);
 }
@@ -2683,7 +2714,7 @@ fn dryContactVisibility(position:vec3f,geometricNormal:vec3f,featureId:u32,owner
   }
   if((dry.materialPublication.w&1u)==0u){return vec3f(1.0);}
   let radius=dryContactVisibilityRadius();if(radius<=0.0){return vec3f(0.0);}let biasCells=select(${SVO_CONTACT_VISIBILITY_CONTRACT.smoothBiasCells},${SVO_CONTACT_VISIBILITY_CONTRACT.hardFeatureBiasCells},featureId!=SVO_FEATURE_SMOOTH);var visibility=vec3f(0.0);
-  for(var sampleIndex=0u;sampleIndex<${SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount}u;sampleIndex+=1u){let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex);let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,direction,radius,dry.mapping.cellSize,biasCells);let result=svoTraceVisibility(ray,SvoVisibilityBudget(dry.tuningCounts1.w,dry.tuningCounts2.x,dry.tuningCounts2.y,dry.tuningCounts2.z),true,0.001,max(ray.originBias_m,1e-6));dryShadowNodeVisits+=result.nodeVisits;dryShadowLeafVisits+=result.leafVisits;dryShadowWorkItems+=result.workItems;if(result.status==SVO_VIS_STATUS_INVALID||result.status==SVO_VIS_STATUS_EXHAUSTED){dryTraversalFailure=select(2u,max(dryTraversalFailure,1u),result.status==SVO_VIS_STATUS_EXHAUSTED);return vec3f(0.0);}visibility+=result.transmittance;}
+  for(var sampleIndex=0u;sampleIndex<${SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount}u;sampleIndex+=1u){let direction=dryContactVisibilityDirection(geometricNormal,featureId,sampleIndex);let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,direction,radius,dry.mapping.cellSize,biasCells);let result=svoTraceVisibility(ray,SvoVisibilityBudget(dry.tuningCounts1.w,dry.tuningCounts2.x,dry.tuningCounts2.y,dry.tuningCounts2.z),true,0.001,max(ray.originBias_m,1e-6));if(result.status==SVO_VIS_STATUS_INVALID||result.status==SVO_VIS_STATUS_EXHAUSTED){return vec3f(0.0);}visibility+=result.transmittance;}
   return mix(vec3f(1.0),clamp(visibility/f32(${SVO_CONTACT_VISIBILITY_CONTRACT.sampleCount}),vec3f(0.0),vec3f(1.0)),dry.tuningRays0.w);
 }
 
@@ -2822,13 +2853,12 @@ fn dryMediumPair(rd:vec3f,geometricNormal:vec3f,surfaceMedium:u32)->vec2u{
 fn dryHardwareDepth(t_m:f32,rd:vec3f,forward:vec3f)->f32{
   if(!(t_m<DRY_MISS)){return 0.0;}let viewDepth_m=t_m*max(dot(rd,forward),1e-6);return clamp(DRY_REVERSED_Z_NEAR_M/viewDepth_m,0.0,1.0);
 }
-fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
-  var targets=targetsIn;
-  targets.radianceDepth=dryCostOverlay(targets.radianceDepth);return DryFragmentOut(targets.radianceDepth,targets.packedSurface,targets.identityMedia,hardwareDepth);
+fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
+  return DryFragmentOut(targets.radianceDepth,targets.packedSurface,targets.identityMedia,hardwareDepth);
 }
 
 @fragment fn fragmentMain(input:VertexOut)->DryFragmentOut {
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;
   // Curved thick glass is compiled separately from this Metal-sensitive pass.
   // Its authored pane therefore remains visible through the exact thin fallback.
   dryThickGlassEnabled=0u;
@@ -2838,38 +2868,17 @@ fn dryFragmentOut(targetsIn:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);let radiance=max(color*vignette,vec3f(0.0));let generation=dryPublicationGeneration();
   if(glassVisible){
     let media=dryMediumPair(rd,glass.hit.geometricNormal,DRY_MEDIUM_GLASS);
-    let targets=svoGBufferSurface(radiance,depth,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(glassSurface.materialId,glassSurface.ownerId,media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID,SVO_FEATURE_SMOOTH);
+    let targets=svoGBufferSurface(radiance,depth,glass.hit.geometricNormal,glass.hit.geometricNormal,vec4u(glassSurface.materialId,glassSurface.ownerId,media.x,media.y),vec3f(0.0),DRY_GBUFFER_MOTION_STATIC,DRY_GBUFFER_FIELD_ANALYTIC,generation,SVO_GBUFFER_MOTION_VALID|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_GLASS),SVO_FEATURE_SMOOTH);
     return dryFragmentOut(targets,dryHardwareDepth(depth,rd,forward));
   }
   if(opaque.t<DRY_MISS){
-    let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
+    let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}
     let targets=svoGBufferSurface(radiance,opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
     return dryFragmentOut(targets,dryHardwareDepth(opaque.t,rd,forward));
   }
-  return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,0u),0.0);
+  return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
 ${splitEntryWGSL}${rasterPrimaryEntryWGSL}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(traversalMode === "raster-primary" ? "raster" : "traced")) : ""}`;
-  if (stripDiagnostics) {
-    const counterNames = [
-      "dryPrimaryNodeVisits", "dryPrimaryLeafVisits", "dryPrimaryEmptyBrickSkips",
-      "dryPrimaryVoxelWorkItems", "dryPrimaryExactTests", "dryPrimaryMaximumDepth",
-      "dryShadowNodeVisits", "dryShadowLeafVisits", "dryShadowWorkItems",
-      "dryMipSteps", "dryTraversalFailure",
-    ];
-    // The overlay is the only observer of these invocation-private values.
-    // Make it a passthrough first, then erase every counter write and declaration
-    // so Tint cannot conservatively keep their live ranges.
-    shader = shader.replace(
-      /fn dryNormalizedCost[\s\S]*?(?=fn dryBoundThickGlassOwner)/,
-      "fn dryCostOverlay(radianceDepth:vec4f)->vec4f{return radianceDepth;}\n",
-    );
-    for (const name of counterNames) {
-      shader = shader
-        .replace(new RegExp(`var<private> ${name}:u32;`, "g"), "")
-        .replace(new RegExp(`${name}=(?:max\\([^;]+\\)|select\\([^;]+\\)|[^;]+);`, "g"), "")
-        .replace(new RegExp(`${name}\\+=([^;]+);`, "g"), "");
-    }
-  }
   if (experiments.dropGiPageCache) {
     shader = shader.replace("var<private> dryGiPageCache:DryNodeMipPageCache;", "");
     const loadStart = shader.indexOf("fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceConeSourceSample{");
@@ -3062,6 +3071,8 @@ interface SvoDrySplitPipelineBundle {
   readonly prepassBoundary?: GPUComputePipeline;
   readonly worldGiFrame?: GPUComputePipeline;
   readonly worldGiCache?: GPUComputePipeline;
+  readonly voxelLightDemand?: GPUComputePipeline;
+  readonly voxelLightPopulate?: GPUComputePipeline;
 }
 
 interface SvoDryConePipelineBundle {
@@ -3097,6 +3108,24 @@ export class SparseVoxelDrySceneRenderer {
   private worldGiCacheBuffer?: GPUBuffer;
   private worldGiFrameBuffer?: GPUBuffer;
   private worldGiCacheDirty = true;
+  private voxelLightDemandPipeline?: GPUComputePipeline;
+  private voxelLightPopulatePipeline?: GPUComputePipeline;
+  private voxelLightConsumerLayout?: GPUBindGroupLayout;
+  private voxelLightDemandLayout?: GPUBindGroupLayout;
+  private voxelLightPopulateLayout?: GPUBindGroupLayout;
+  private voxelLightConsumerBindGroup?: GPUBindGroup;
+  private voxelLightDemandBindGroup?: GPUBindGroup;
+  private voxelLightPopulateBindGroup?: GPUBindGroup;
+  private voxelLightTexture?: GPUTexture;
+  private voxelLightTextureView?: GPUTextureView;
+  private voxelLightParamsBuffer?: GPUBuffer;
+  private voxelLightRequestBuffer?: GPUBuffer;
+  private voxelLightQueueBuffer?: GPUBuffer;
+  private voxelLightPageBuffer?: GPUBuffer;
+  private voxelLightPageCount = 0;
+  private voxelLightEpoch = 1;
+  private voxelLightActive = false;
+  private voxelLightExclusive = false;
   private coneFanoutWorkerPipeline?: GPUComputePipeline;
   private coneFanoutReducerPipeline?: GPUComputePipeline;
   private coneFanoutSceneLayout?: GPUBindGroupLayout;
@@ -3274,7 +3303,7 @@ export class SparseVoxelDrySceneRenderer {
     private readonly rasterGlassDiscovery = false,
     private readonly rasterRigidDiscovery = false,
     private readonly coneFanout = false,
-    private readonly experiments: SvoDryOptimizationExperiments = { stripDiagnostics: true },
+    private readonly experiments: SvoDryOptimizationExperiments = {},
   ) {
     if (targetFormat !== SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat) {
       throw new Error(`Sparse voxel dry scene location 0 must use ${SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat}`);
@@ -3434,6 +3463,8 @@ export class SparseVoxelDrySceneRenderer {
     this.conePrepassBoundaryPipeline = bundle.prepassBoundary;
     this.worldGiFramePipeline = bundle.worldGiFrame;
     this.worldGiCachePipeline = bundle.worldGiCache;
+    this.voxelLightDemandPipeline = bundle.voxelLightDemand;
+    this.voxelLightPopulatePipeline = bundle.voxelLightPopulate;
     this.brickBackgroundPipeline = bundle.brickBackground;
     this.brickRasterPipeline = bundle.brickRaster;
     this.staticPrimitiveRasterPipeline = bundle.staticPrimitiveRaster;
@@ -3864,6 +3895,25 @@ export class SparseVoxelDrySceneRenderer {
           : []),
       ],
     });
+    const voxelLightCacheEnabled = this.experiments.voxelLightCache !== false;
+    if (voxelLightCacheEnabled && !this.voxelLightConsumerLayout) {
+      this.voxelLightConsumerLayout = this.device.createBindGroupLayout({ label: "Sparse voxel directional-light cache consumer", entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+      ] });
+      this.voxelLightDemandLayout = this.device.createBindGroupLayout({ label: "Sparse voxel directional-light cache demand", entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      ] });
+      this.voxelLightPopulateLayout = this.device.createBindGroupLayout({ label: "Sparse voxel directional-light cache population", entries: [
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.format, viewDimension: "3d" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      ] });
+    }
     const layout = this.layout;
     const vertexModule = this.vertexModule;
     const shaderExperiments = scale === 1 && this.experiments.halfPrecisionLighting
@@ -3881,8 +3931,9 @@ export class SparseVoxelDrySceneRenderer {
           : Promise.resolve(undefined),
       ]);
       const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
+      const cacheConsumerLayouts = voxelLightCacheEnabled ? [this.voxelLightConsumerLayout!] : [];
       const visibilityLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitVisibilityLayout] });
-      const [visibility, rasterRigidVisibility, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache] = await Promise.all([
+      const [visibility, rasterRigidVisibility, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate] = await Promise.all([
         this.device.createRenderPipelineAsync({
         label: `Sparse voxel primary visibility (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
         layout: visibilityLayout,
@@ -3914,7 +3965,7 @@ export class SparseVoxelDrySceneRenderer {
       }) : Promise.resolve(undefined),
         this.device.createRenderPipelineAsync({
         label: `Sparse voxel deferred dry lighting x${scale}`,
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout] }),
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout, ...cacheConsumerLayouts] }),
         vertex: { module: vertexModule, entryPoint: "vertexMain" },
         fragment: { module, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
         primitive: { topology: "triangle-list" },
@@ -3934,7 +3985,7 @@ export class SparseVoxelDrySceneRenderer {
       }),
       this.device.createRenderPipelineAsync({
         label: `Sparse voxel deferred sky lighting x${scale}`,
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout] }),
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout, ...cacheConsumerLayouts] }),
         vertex: { module: vertexModule, entryPoint: "vertexMain" },
         fragment: { module, entryPoint: "drySkyLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
         primitive: { topology: "triangle-list" },
@@ -3973,6 +4024,16 @@ export class SparseVoxelDrySceneRenderer {
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.conePrepassShadeLayout!, this.worldGiCacheLayout!] }),
         compute: { module, entryPoint: "dryWorldGiCacheMain" },
       }),
+      voxelLightCacheEnabled ? this.device.createComputePipelineAsync({
+        label: "Sparse voxel directional-light cache demand",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, this.voxelLightDemandLayout!] }),
+        compute: { module, entryPoint: "dryVoxelLightDemandMain" },
+      }) : Promise.resolve(undefined),
+      voxelLightCacheEnabled ? this.device.createComputePipelineAsync({
+        label: "Sparse voxel directional-light cache population",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, this.voxelLightPopulateLayout!] }),
+        compute: { module, entryPoint: "dryVoxelLightPopulateMain" },
+      }) : Promise.resolve(undefined),
       ]);
       const [brickBackground, brickRaster, staticPrimitiveRaster] = this.rasterPrimary
         ? await Promise.all([
@@ -4018,7 +4079,7 @@ export class SparseVoxelDrySceneRenderer {
           }),
         ])
         : [undefined, undefined, undefined];
-      const bundle = { visibility, rasterRigidVisibility, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache, brickBackground, brickRaster, staticPrimitiveRaster };
+      const bundle = { visibility, rasterRigidVisibility, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary, worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate, brickBackground, brickRaster, staticPrimitiveRaster };
       this.splitPipelineBundles.set(scale, bundle);
       return bundle;
     })();
@@ -4826,6 +4887,31 @@ export class SparseVoxelDrySceneRenderer {
   /** Auxiliary MRTs and reversed-Z depth for picking and split shading. */
   get gBufferTextures(): SparseVoxelGBufferTextures | undefined {
     return this.gBufferTargets.textures;
+  }
+
+  /**
+   * Read-only views of every plane this pipeline published for the frame just
+   * encoded. Absent entries are configurations that allocate no such plane —
+   * full-rate cone lighting, a scene without glass, a scene without bodies —
+   * and the stage overlay reports them as absent rather than inventing one.
+   */
+  get stagePlanes(): SvoRenderStagePlanes {
+    const gBuffer = this.gBufferTargets.views;
+    return {
+      packedSurface: gBuffer?.packedSurface,
+      identityMedia: gBuffer?.identityMedia,
+      hardwareDepth: gBuffer?.hardwareDepth,
+      splitGeometry: this.splitGeometryView,
+      splitOpaqueIdentity: this.splitOpaqueIdentityView,
+      splitGlassKey: this.splitGlassKeyView,
+      rigidPrimaryGeometry: this.rasterRigidPrimaryGeometryView,
+      conePrepassVisibility: this.conePrepassVisibilityView,
+      conePrepassGeometry: this.conePrepassGeometryView,
+      conePrepassIdentity: this.conePrepassIdentityView,
+      conePrepassRadiance: this.conePrepassRadianceView,
+      conePrepassWidth: this.conePrepassWidth,
+      conePrepassHeight: this.conePrepassHeight,
+    };
   }
 
   async pickGBuffer(

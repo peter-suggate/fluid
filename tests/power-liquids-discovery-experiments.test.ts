@@ -1,14 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  octreeFreezeTopologyAfter,
-  octreePowerStructuralDeltaRequested,
-} from "../lib/webgpu-octree";
 import { fineLevelSetReasonConesRequested } from
   "../lib/webgpu-octree-fine-levelset-topology";
-import { powerRedundancyCensusEnabled } from "../lib/webgpu-power-redundancy-census";
 import { analyzeCostAndChange } from "../tools/analyze-power-liquids-cost-change";
-import { analyzePowerRedundancy } from "../tools/analyze-power-liquids-redundancy";
 import {
   POWER_DAM_LANE_ENVIRONMENT,
   powerDamLaneWithDt,
@@ -37,19 +31,10 @@ test("X-7 timestep overrides preserve simulated time and exact step count", () =
   assert.throws(() => powerDamLaneWithDt("large", 0.003, 2), /integer multiple/);
 });
 
-test("discovery switches and the sound reason-cone control are explicit and fail closed", () => {
-  assert.equal(powerRedundancyCensusEnabled({ FLUID_REDUNDANCY_CENSUS: "1" }), true);
-  assert.equal(powerRedundancyCensusEnabled({ FLUID_REDUNDANCY_CENSUS: "true" }), false);
+test("the sound reason-cone control is explicit and fails closed", () => {
   assert.equal(fineLevelSetReasonConesRequested({}), true);
   assert.equal(fineLevelSetReasonConesRequested({ FLUID_FINE_REASON_CONES: "0" }), false);
   assert.equal(fineLevelSetReasonConesRequested({ FLUID_FINE_REASON_CONES: "membership" }), true);
-  assert.equal(octreePowerStructuralDeltaRequested({}), false);
-  assert.equal(octreePowerStructuralDeltaRequested({ FLUID_POWER_STRUCTURAL_DELTA: "0" }), false);
-  assert.equal(octreePowerStructuralDeltaRequested({ FLUID_POWER_STRUCTURAL_DELTA: "1" }), true);
-  assert.equal(octreeFreezeTopologyAfter({ FLUID_FREEZE_TOPOLOGY_AFTER: "7" }), 7);
-  assert.equal(octreeFreezeTopologyAfter({}), undefined);
-  assert.throws(() => octreeFreezeTopologyAfter({ FLUID_FREEZE_TOPOLOGY_AFTER: "0" }),
-    /positive integer/);
 });
 
 test("X-6 reconstructs the longest RAW/WAW dependency path", () => {
@@ -133,17 +118,4 @@ test("X-1 trace reduction keeps a semantic boundary clipped by one metadata edge
   const detected = detectFrames(intervals);
   assert.equal(detected.anchor, "Open coupled topology ready-commit gate");
   assert.equal(detected.boundaries.length, 7);
-});
-
-test("X-2 redundancy analysis retains early/middle/late decisions per family", () => {
-  const records = Array.from({ length: 10 }, (_, index) => ({
-    phase: "frame-redundancy-census", sample: index + 1, family: "fine-phi",
-    identicalFraction: 0.8, epsilonIdenticalFraction: 0.9,
-    totalPages: 10, missingPriorPages: index === 0 ? 10 : 0,
-  }));
-  const family = analyzePowerRedundancy(records).families[0]!;
-  assert.equal(family.early.samples, 2);
-  assert.equal(family.late.samples, 2);
-  assert.equal(family.exactDecision, "fund-exact-delta-repair");
-  assert.equal(family.epsilonDecision, "fund-quantized-delta-repair");
 });

@@ -251,8 +251,6 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
     new URL("../lib/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8");
   const fineTransportSource = readFileSync(
     new URL("../lib/webgpu-octree-fine-levelset-transport.ts", import.meta.url), "utf8");
-  const pipelinedMGPCGSource = readFileSync(
-    new URL("../lib/webgpu-octree-pipelined-mgpcg.ts", import.meta.url), "utf8");
   const spgridSource = readFileSync(
     new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
   const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
@@ -302,14 +300,9 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
   assert.doesNotMatch(fineTransportSource,
     /broker\.fence\("fine transport publication complete"\)/,
     "fine transport leaves pass ownership with its caller after publication");
-  for (const [name, source] of [
-    ["pipelined MGPCG", pipelinedMGPCGSource],
-    ["SPGrid V-cycle", spgridSource],
-  ] as const) {
-    assert.match(source, /PassBroker/, `${name} must use broker-owned encoding`);
-    assert.doesNotMatch(source, /GPUCommandEncoder|beginComputePass|new PassBroker/,
-      `${name} must not retain raw encoder or optional-pass ownership paths`);
-  }
+  assert.match(spgridSource, /PassBroker/, "SPGrid V-cycle must use broker-owned encoding");
+  assert.doesNotMatch(spgridSource, /GPUCommandEncoder|beginComputePass|new PassBroker/,
+    "SPGrid V-cycle must not retain raw encoder or optional-pass ownership paths");
   assert.doesNotMatch(octreeSource,
     /this\.powerFaces|this\.powerOperator|this\.powerVelocity|this\.globalFineFaceExtension/,
     "the retired generalized-face graph must not remain in the pressure spine");

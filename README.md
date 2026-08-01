@@ -93,31 +93,10 @@ npm run dev
 
 Use `npm test` for the deterministic shell contract and production build.
 
-## Native macOS / Metal
-
-The repository also includes an Eulerian-only native Metal application tuned
-for Apple Silicon. It shares the canonical default scene with the browser but
-keeps Swift/AppKit and MSL backend code isolated under [`native/`](native/).
-
-```bash
-npm run native:run       # build and launch
-npm run native:app       # create native/.build/Fluid Lab Metal.app
-npm run native:test      # native schema tests
-npm run native:smoke     # Metal device, shader, pipeline, and allocation test
-```
-
-See [`native/README.md`](native/README.md) for architecture and performance
-details.
-
 ## Current numerical boundary
 
 The CPU MAC/PCG path remains the pressure-validation oracle. The GPU path uses
-an f32 restricted tall-cell surface-density field, a ghost-fluid atmospheric
-boundary, a full-cycle multigrid hierarchy with a red-black Gauss-Seidel WebGPU
-smoother, bounded transport, and conservative remapping without global mass
-rescaling.
-The renderer reconstructs the physical volume from the tall bottom cell and
-regular surface band; no equilibrium blend, presentation smoothing, or global
-volume rescaling is applied. Resolved cut-cell traction and an asynchronously
-reduced GPU linear residual remain research work; the UI reports
-post-projection maximum divergence instead.
+an f32 sparse octree with a Power-diagram pressure operator, persistent MGPCG,
+a structured fine level-set band, and GPU-resident topology publication. The
+renderer consumes the octree's SVO and global-fine surface publications; there
+is no dense-uniform or tall-cell runtime fallback.

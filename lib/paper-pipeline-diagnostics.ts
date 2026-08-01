@@ -1,5 +1,6 @@
 import type { GPUEulerianInfo } from "./webgpu-eulerian";
 import type { WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
+import { isOctreePersistentMGPCGSolverLabel } from "./webgpu-octree-section43-contract";
 
 export type PaperPipelineStageTone = "pending" | "healthy" | "warning" | "rejected" | "stale";
 
@@ -124,10 +125,10 @@ export function paperPipelineStages(
       ? { id: "transport", section: "§5", label: "Fine φ advection", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: `${info.globalFineTransportStructuredAuthorityUnavailable ?? 0} structured authority unavailable · ${info.globalFineTransportVelocityUnavailable ?? 0} velocity unavailable` }
       : pending("transport", "§5", "Fine φ advection", "Ready at t=0; the first transport transaction appears after stepping."));
 
-  const section43 = info.pressureSolver?.includes("Section 4.3 hybrid") === true;
-  const pressureSection = section43 ? "§4.3" : "pressure";
+  const persistentSection43 = isOctreePersistentMGPCGSolverLabel(info.pressureSolver);
+  const pressureSection = persistentSection43 ? "§4.3" : "pressure";
   const residual = info.pressureRelativeResidual;
-  stages.push(powerHealthy && section43
+  stages.push(powerHealthy && persistentSection43
     ? (info.encodedSteps ?? 0) === 0
       ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureSolver} · selected operator and fenced t=0 solve are ready; dynamic-step convergence appears after stepping.` }
       : { id: "pressure", section: pressureSection, label: "Pressure projection", state: residual !== undefined && residual <= 1e-4 ? "CONVERGED" : "CHECK", tone: residual !== undefined && residual <= 1e-4 ? "healthy" : "warning", generation: generation(powerGeneration), detail: residual === undefined ? `${info.pressureSolver} · latest solve residual is unavailable` : `${info.pressureSolver} · relative L2 residual ${residual.toExponential(2)} (target 1e-4)` }

@@ -36,8 +36,8 @@ export function requiresFencedInitialRasterPresentation(methodId: string): boole
 /**
  * CPU mirror of the paused t=0 presentation gate. Without an opt-in readback,
  * completion relies on the renderer's GPU-only draw-argument transaction. The
- * The paper path requires the global crossing latch. The retired coarse-only
- * presentation branch has no backing solver authority.
+ * Fine-band modes require the global crossing latch. Factor one instead
+ * admits the compact-coarse latch produced from the sole octree phi field.
  */
 export function initialRasterPresentationReadiness(
   input: InitialRasterPresentationPrerequisites,

@@ -33,7 +33,7 @@ test("GLOBAL SVO is the sole production presentation", () => {
   assert.doesNotMatch(rendererSource, /svoRenderMode|svoLightingMode|SvoRenderMode|SvoLightingMode/);
   expectSource(rendererSource, /type SvoLightingOptions[^]*from "\.\/svo-render-options"/,
     "renderer must retain only GLOBAL visibility effects");
-  expectSource(viewportSource, /ui\.voxelRenderMode,[^]*shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*overlay: ui\.svoCostOverlay/,
+  expectSource(viewportSource, /ui\.voxelRenderMode,[^]*shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*stageView: ui\.svoStageView/,
     "viewport must pass lighting effects before the diagnostics argument in the renderer contract");
 });
 

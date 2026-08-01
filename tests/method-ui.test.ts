@@ -6,15 +6,15 @@ import { interactiveMethodId, interactiveSimulationMethods } from "../lib/method
 const methodPanelSource = readFileSync(new URL("../components/MethodPanel.tsx", import.meta.url), "utf8");
 const urlStateSource = readFileSync(new URL("../lib/url-state.ts", import.meta.url), "utf8");
 
-test("interactive method picker exposes octree and regular tall cells", () => {
-  assert.deepEqual(interactiveSimulationMethods.map((method) => method.id), ["octree", "tall-cell"]);
+test("interactive method picker exposes only the octree runtime", () => {
+  assert.deepEqual(interactiveSimulationMethods.map((method) => method.id), ["octree"]);
   assert.match(methodPanelSource, /ariaLabel="Simulation method"/);
-  assert.match(methodPanelSource, /Regular tall cells/);
-  assert.match(methodPanelSource, /Experimental/);
+  assert.doesNotMatch(methodPanelSource, /Regular tall cells/);
+  assert.doesNotMatch(methodPanelSource, /Experimental/);
 });
 
 test("UI hydration restores supported methods and rejects offline-only methods", () => {
-  assert.equal(interactiveMethodId("tall-cell"), "tall-cell");
+  assert.equal(interactiveMethodId("tall-cell"), "octree");
   assert.equal(interactiveMethodId("octree"), "octree");
   assert.equal(interactiveMethodId("uniform"), "octree");
   assert.match(urlStateSource, /methodId: interactiveMethodId\(state\.methodId\)/);

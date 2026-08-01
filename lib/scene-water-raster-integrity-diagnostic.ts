@@ -1,6 +1,7 @@
 import type { DeepReadonly, SceneDiagnosticEvidence, SceneDiagnosticHookFinding } from "./scene-diagnostics";
 import type { SceneDescription } from "./model";
 import {
+  arrayPath,
   hookFinding,
   numberPath,
   numberValue,
@@ -206,12 +207,29 @@ export function evaluateWaterRasterIntegrityDiagnostic(input: {
   const findings: SceneDiagnosticHookFinding[] = [];
   for (const [method, diagnostics] of selectedMethodDiagnostics(input.evidence, input.methods)) {
     const rasterNamespace = recordPath(diagnostics, "raster") ?? diagnostics;
-    const initial = recordPath(rasterNamespace, "initial") ?? recordPath(diagnostics, "initialGlobalFineRaster");
-    const final = recordPath(rasterNamespace, "final") ?? recordPath(diagnostics, "finalGlobalFineRaster");
-    const initialGeneration = recordPath(rasterNamespace, "initialGeneration")
-      ?? recordPath(diagnostics, "initialGlobalFineGeneration");
-    const finalGeneration = recordPath(rasterNamespace, "finalGeneration")
-      ?? recordPath(diagnostics, "finalGlobalFineGeneration");
+    const checkpoints = (arrayPath(rasterNamespace, "checkpoints")
+      ?? arrayPath(diagnostics, "globalFineGenerationCheckpoints") ?? [])
+      .map(recordValue).filter((value) => value !== undefined);
+    const firstCheckpoint = checkpoints[0], lastCheckpoint = checkpoints.at(-1);
+    // Checkpoint-authored lanes deliberately avoid redundant t=0/final raster
+    // captures. Their first and last checkpoint are the corresponding closure
+    // evidence and must feed the same integrity gate.
+    const explicitInitial = recordPath(rasterNamespace, "initial")
+      ?? recordPath(diagnostics, "initialGlobalFineRaster");
+    const explicitFinal = recordPath(rasterNamespace, "final")
+      ?? recordPath(diagnostics, "finalGlobalFineRaster");
+    const initial = explicitInitial ?? recordPath(firstCheckpoint, "raster");
+    const final = explicitFinal ?? recordPath(lastCheckpoint, "raster");
+    const initialGeneration = explicitInitial
+      ? recordPath(rasterNamespace, "initialGeneration")
+        ?? recordPath(diagnostics, "initialGlobalFineGeneration")
+      : recordPath(firstCheckpoint, "globalFineGeneration")
+        ?? recordPath(diagnostics, "initialGlobalFineGeneration");
+    const finalGeneration = explicitFinal
+      ? recordPath(rasterNamespace, "finalGeneration")
+        ?? recordPath(diagnostics, "finalGlobalFineGeneration")
+      : recordPath(lastCheckpoint, "globalFineGeneration")
+        ?? recordPath(diagnostics, "finalGlobalFineGeneration");
     inspectRaster({ findings, scene: input.scene, method, label: "initial", raster: initial,
       generation: initialGeneration, parameters: input.parameters, initial: true });
     inspectRaster({ findings, scene: input.scene, method, label: "final", raster: final,

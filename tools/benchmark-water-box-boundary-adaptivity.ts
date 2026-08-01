@@ -4,7 +4,6 @@ import { octreeMethod } from "../lib/methods/octree";
 import type { GPUSolverInstance } from "../lib/methods/types";
 import { getScenePreset } from "../lib/scenes";
 import type { OctreeTopologyLeafCensus } from "../lib/webgpu-octree";
-import { FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV } from "../lib/webgpu-octree";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { compareScalarFields } from "./webgpu-smoke-scenarios";
 import { readCubicVolumeField } from "./webgpu-smoke-readbacks";
@@ -66,13 +65,13 @@ try {
 
   const results: Result[] = [];
   for (const gated of [false, true]) {
-    process.env[FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV] = gated ? "1" : "0";
     const scene = getScenePreset("water-box-dam-break").create();
     const values = {
       ...octreeMethod.presetFor("balanced"),
       maximumLeafSize: "32",
       globalFineLevelSetFactor: "1",
       interfaceRefinementBandCells: 3,
+      fluidGatedBoundaryRefinement: gated,
     };
     const started = performance.now();
     const solver = await octreeMethod.createSolverAsync!(
@@ -141,6 +140,5 @@ try {
   assert.deepEqual(validationErrors, []);
   device.destroy();
 } finally {
-  delete process.env[FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV];
   await releaseWebGPUExclusiveLock();
 }

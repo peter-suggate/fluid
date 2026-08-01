@@ -35,44 +35,75 @@ test("terrain is part of the solver identity", () => {
   assert.notEqual(gpuSceneSolverKey(flat, config), gpuSceneSolverKey(sculpted, config));
 });
 
-test("each authoring input lands in exactly one tier", () => {
+test("each authoring input reaches exactly the tiers that must answer it", () => {
   const base = cloneScene(defaultScene);
   const structural = gpuSceneStructuralKey(base, config);
   const seed = gpuSceneSeedKey(base);
   const uniform = gpuSceneUniformKey(base);
 
-  const cases: ReadonlyArray<{ label: string; tier: "structural" | "seed" | "uniform"; mutate: (scene: SceneDescription) => void }> = [
-    { label: "container width", tier: "structural", mutate: (scene) => { scene.container.width_m += 0.3; } },
-    { label: "container top", tier: "structural", mutate: (scene) => { scene.container.top = scene.container.top === "open" ? "closed" : "open"; } },
-    { label: "wall mode", tier: "structural", mutate: (scene) => { scene.container.fluidWallMode = scene.container.fluidWallMode === "no-slip" ? "free-slip" : "no-slip"; } },
-    { label: "voxel domain", tier: "structural", mutate: (scene) => { scene.voxelDomain.finestCellSize_m *= 0.5; } },
-    { label: "fill fraction", tier: "seed", mutate: (scene) => { scene.container.fillFraction = 0.5 * (scene.container.fillFraction + 1); } },
-    { label: "rigid bodies", tier: "seed", mutate: (scene) => { scene.rigidBodies = []; } },
-    { label: "initial condition", tier: "seed", mutate: (scene) => { scene.fluid.initialCondition = scene.fluid.initialCondition === "dam-break" ? "tank-fill" : "dam-break"; } },
-    { label: "brick seeds", tier: "seed", mutate: (scene) => { scene.fluid.initialBrickSeeds_m = [{ x: 0, y: 0.1, z: 0 }]; } },
-    { label: "seed additivity", tier: "seed", mutate: (scene) => { scene.fluid.initialBrickSeedsAdditive = true; } },
-    { label: "terrain", tier: "seed", mutate: (scene) => { scene.terrain = { baseHeight_m: 0.1, features: [] }; } },
-    { label: "density", tier: "uniform", mutate: (scene) => { scene.fluid.density_kg_m3 += 10; } },
-    { label: "viscosity", tier: "uniform", mutate: (scene) => { scene.fluid.dynamicViscosity_Pa_s += 0.01; } },
-    { label: "surface tension", tier: "uniform", mutate: (scene) => { scene.fluid.surfaceTension_N_m += 0.01; } },
-    { label: "gravity", tier: "uniform", mutate: (scene) => { scene.fluid.gravity_m_s2.y *= 0.5; } },
+  // Most inputs still land in one tier. The container extents are the
+  // exception, and deliberately so: the structural tier keys the lattice in
+  // *cells*, while the seed tier keys the extents in metres. An extent edit on
+  // its own moves both — the lattice grows and each cell is a different size —
+  // so it rebuilds. Scaling the world moves the extent and the cell size
+  // together, which leaves the lattice exactly where it was and reaches the
+  // seed tier alone. That is the whole reason a world scale is a re-seed
+  // rather than a rebuild, so it is asserted here beside the tiers it rests on.
+  const cases: ReadonlyArray<{ label: string; tiers: readonly ("structural" | "seed" | "uniform")[]; mutate: (scene: SceneDescription) => void }> = [
+    { label: "container width", tiers: ["structural", "seed"], mutate: (scene) => { scene.container.width_m += 0.3; } },
+    {
+      label: "world scale",
+      tiers: ["seed"],
+      mutate: (scene) => {
+        scene.container.width_m *= 2; scene.container.height_m *= 2; scene.container.depth_m *= 2;
+        scene.voxelDomain.finestCellSize_m *= 2;
+      },
+    },
+    { label: "container top", tiers: ["structural"], mutate: (scene) => { scene.container.top = scene.container.top === "open" ? "closed" : "open"; } },
+    { label: "wall mode", tiers: ["structural"], mutate: (scene) => { scene.container.fluidWallMode = scene.container.fluidWallMode === "no-slip" ? "free-slip" : "no-slip"; } },
+    { label: "voxel domain", tiers: ["structural"], mutate: (scene) => { scene.voxelDomain.finestCellSize_m *= 0.5; } },
+    { label: "fill fraction", tiers: ["seed"], mutate: (scene) => { scene.container.fillFraction = 0.5 * (scene.container.fillFraction + 1); } },
+    { label: "rigid bodies", tiers: ["seed"], mutate: (scene) => { scene.rigidBodies = []; } },
+    { label: "initial condition", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialCondition = scene.fluid.initialCondition === "dam-break" ? "tank-fill" : "dam-break"; } },
+    { label: "dam origin", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialDamBreakOrigin_m = { x: 0.1, y: 0, z: 0 }; } },
+    { label: "brick seeds", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialBrickSeeds_m = [{ x: 0, y: 0.1, z: 0 }]; } },
+    { label: "seed additivity", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialBrickSeedsAdditive = true; } },
+    { label: "terrain", tiers: ["seed"], mutate: (scene) => { scene.terrain = { baseHeight_m: 0.1, features: [] }; } },
+    { label: "density", tiers: ["uniform"], mutate: (scene) => { scene.fluid.density_kg_m3 += 10; } },
+    { label: "viscosity", tiers: ["uniform"], mutate: (scene) => { scene.fluid.dynamicViscosity_Pa_s += 0.01; } },
+    { label: "surface tension", tiers: ["uniform"], mutate: (scene) => { scene.fluid.surfaceTension_N_m += 0.01; } },
+    { label: "gravity", tiers: ["uniform"], mutate: (scene) => { scene.fluid.gravity_m_s2.y *= 0.5; } },
   ];
 
-  for (const { label, tier, mutate } of cases) {
+  for (const { label, tiers, mutate } of cases) {
     const next = edited(mutate);
     const changed = {
       structural: gpuSceneStructuralKey(next, config) !== structural,
       seed: gpuSceneSeedKey(next) !== seed,
       uniform: gpuSceneUniformKey(next) !== uniform,
     };
-    assert.equal(changed[tier], true, `${label} must change the ${tier} tier`);
-    for (const other of ["structural", "seed", "uniform"] as const) {
-      if (other !== tier) assert.equal(changed[other], false, `${label} must not leak into the ${other} tier`);
+    for (const tier of ["structural", "seed", "uniform"] as const) {
+      assert.equal(changed[tier], tiers.includes(tier),
+        `${label} must ${tiers.includes(tier) ? "change" : "not change"} the ${tier} tier`);
     }
-    // Structural and seed changes rebuild; scalars are adopted hot instead.
+    // Structural and seed changes rebuild or re-seed; scalars are adopted hot.
     const rebuilds = gpuSceneSolverKey(next, config) !== gpuSceneSolverKey(cloneScene(defaultScene), config);
-    assert.equal(rebuilds, tier !== "uniform", `${label} must ${tier === "uniform" ? "not " : ""}rebuild`);
+    assert.equal(rebuilds, !(tiers.length === 1 && tiers[0] === "uniform"), `${label} must ${tiers[0] === "uniform" ? "not " : ""}rebuild`);
   }
+});
+
+test("a world scale is answered by a re-seed, never a rebuild", () => {
+  // `tryReseedGPUFluid` gates the warm path on the structural key alone, so
+  // this equality is the single fact that keeps a world scale off the ~350
+  // pipeline rebuild path.
+  const base = cloneScene(defaultScene);
+  const scaled = edited((scene) => {
+    scene.container.width_m *= 2; scene.container.height_m *= 2; scene.container.depth_m *= 2;
+    scene.voxelDomain.finestCellSize_m *= 2;
+  });
+  assert.equal(gpuSceneStructuralKey(scaled, config), gpuSceneStructuralKey(base, config));
+  assert.notEqual(gpuSceneSolverKey(scaled, config), gpuSceneSolverKey(base, config),
+    "the solver must still be replaced-or-re-seeded: it is simulating a different physical size");
 });
 
 test("every GPU solver can adopt scene scalars, so no method silently ignores them", () => {

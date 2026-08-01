@@ -60,6 +60,25 @@ import {
   paintFluidBrick,
 } from "@/lib/editor-fluid";
 import {
+  dragFluidBodyBox,
+  fluidBodyBox,
+  fluidBodyBoxCorners,
+  fluidBodyHandleAxis,
+  fluidBodyHandleById,
+  fluidBodyHandles,
+  FLUID_BODY_BOX_EDGES,
+  FLUID_BODY_HANDLE_TOLERANCE_PX,
+  type FluidBodyBox,
+  type FluidBodyHandle,
+} from "@/lib/editor-fluid-body";
+import {
+  dragTankExtents,
+  tankBox,
+  tankBoxForExtents,
+  tankHandleIsGrabbable,
+  tankLatticeForExtents,
+} from "@/lib/editor-tank";
+import {
   applyTerrainFeatureDrag,
   terrainFeatureAt,
   terrainFeatureHandles,
@@ -75,7 +94,7 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { SmoothedFrameRate } from "@/lib/frame-rate-meter";
 import { getScenePreset } from "@/lib/scenes";
-import { SVO_COST_OVERLAY_DEFINITIONS } from "@/lib/svo-render-diagnostics";
+import { SVO_RENDER_STAGE_DEFINITIONS, svoRenderStageUsesLightSlot } from "@/lib/svo-render-diagnostics";
 import { projectViewportFailure, viewportFailureIndicator } from "@/lib/viewport-failure-diagnostics";
 import { dawnReproductionForGPUFailure } from "@/lib/webgpu-failure-reproduction";
 import {
@@ -141,17 +160,26 @@ export function WebGPUViewport() {
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
-  const svoCostOverlay = useUIStore((state) => state.svoCostOverlay);
+  const svoStageView = useUIStore((state) => state.svoStageView);
+  const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
   const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
-  const svoMaximumTraversalDepth = useUIStore((state) => state.svoMaximumTraversalDepth);
-  const svoMaximumNodeVisits = useUIStore((state) => state.svoMaximumNodeVisits);
-  const svoOverlayDefinition = SVO_COST_OVERLAY_DEFINITIONS[svoCostOverlay];
-  const svoOverlayRamp = `linear-gradient(90deg,${svoOverlayDefinition.legend
+  const svoStageDefinition = SVO_RENDER_STAGE_DEFINITIONS[svoStageView];
+  const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
   const activeTool = useUIStore((state) => state.activeTool);
   const selection = useUIStore((state) => state.selection);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const [hover, setHover] = useState<EditorHover | null>(null);
+  /**
+   * The box a shape drag is currently proposing, held here rather than in the
+   * scene document so the gesture costs nothing but a redraw. React state, not
+   * a ref, because the outline and the handles have to follow the pointer.
+   */
+  const [shapePreview, setShapePreview] = useState<{
+    target: "fluid" | "tank";
+    box: FluidBodyBox;
+    label: string;
+  } | null>(null);
   const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
   const pixelTraceLayers = useUIStore((state) => state.pixelTraceLayers);
@@ -538,6 +566,7 @@ export function WebGPUViewport() {
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
     | { id: number; action: "fill-level" }
+    | { id: number; action: "shape-handle"; target: "fluid" | "tank"; handleId: string; box: FluidBodyBox }
     | { id: number; action: "inflow-handle"; kind: InflowHandleKind; anchor: Vec3 }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
@@ -549,6 +578,29 @@ export function WebGPUViewport() {
     ? projectGizmo(selectedBody.position_m, camera, viewportSize.width, viewportSize.height)
     : undefined;
   const fluidToolArmed = activeTool === "fluid-paint" || activeTool === "fluid-erase";
+  // World-editor mode: the tank and the water body both carry box handles.
+  //
+  // A live drag is drawn from `shapePreview` rather than from the document. The
+  // document is written once, on release, because every scene write invalidates
+  // the solver's seed key — writing per pointer-move asked the renderer to
+  // re-seed dozens of times a second, which is exactly the hitch that made the
+  // gesture unusable. Preview here, simulate on release.
+  const shapeMode = activeTool === "shape";
+  const shapeTargetBox = (target: "fluid" | "tank") =>
+    shapePreview?.target === target ? shapePreview.box : target === "tank" ? tankBox(scene) : fluidBodyBox(scene);
+  const projectHandles = (box: FluidBodyBox | undefined, keep: (handle: ReturnType<typeof fluidBodyHandles>[number]) => boolean) =>
+    box && fluidBodyHandles(box).filter(keep).map((handle) => ({
+      ...handle,
+      projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
+    }));
+  const fluidBodyGizmo = shapeMode ? projectHandles(shapeTargetBox("fluid"), () => true) : undefined;
+  const tankGizmo = shapeMode ? projectHandles(shapeTargetBox("tank"), tankHandleIsGrabbable) : undefined;
+  // Only the box actually being dragged is outlined: an outline on both would
+  // be two wireframes fighting for the same silhouette.
+  const shapeOutline = shapePreview
+    ? fluidBodyBoxCorners(shapePreview.box)
+      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
+    : undefined;
   const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
     ? projectToViewport(fillLevelHandlePosition(scene), camera, viewportSize.width, viewportSize.height)
     : undefined;
@@ -803,7 +855,8 @@ export function WebGPUViewport() {
               primaryTraversal: ui.svoPrimaryTraversal,
             },
             {
-              overlay: ui.svoCostOverlay,
+              stageView: ui.svoStageView,
+              lightSlot: ui.svoStageLightSlot,
               maximumTraversalDepth: ui.svoMaximumTraversalDepth,
               maximumNodeVisits: ui.svoMaximumNodeVisits,
             },
@@ -1031,6 +1084,80 @@ export function WebGPUViewport() {
     return true;
   };
 
+  /**
+   * Grab a box handle in shape mode.
+   *
+   * The water body is offered before the tank, and corners before edges before
+   * faces: the more constrained handle is the one that could not have been
+   * reached any other way, and the three meet within a few pixels of each
+   * other. The tank's floor is not grabbable, so it never competes.
+   */
+  const beginShapeDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const ui = useUIStore.getState();
+    if (ui.activeTool !== "shape") return false;
+    const scene = useSceneStore.getState().scene;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    const rank = { corner: 0, edge: 1, face: 2 } as const;
+    let best: { target: "fluid" | "tank"; handleId: string; box: FluidBodyBox; distance_px: number; rank: number } | undefined;
+    const candidates: ReadonlyArray<{ target: "fluid" | "tank"; box: FluidBodyBox | undefined; grabbable: (handle: FluidBodyHandle) => boolean }> = [
+      { target: "fluid", box: fluidBodyBox(scene), grabbable: () => true },
+      { target: "tank", box: tankBox(scene), grabbable: tankHandleIsGrabbable },
+    ];
+    for (const candidate of candidates) {
+      if (!candidate.box) continue;
+      for (const handle of fluidBodyHandles(candidate.box)) {
+        if (!candidate.grabbable(handle)) continue;
+        const projection = projectToViewport(handle.position_m, ui.camera, rect.width, rect.height);
+        if (!(projection.depth_m > 1e-6)) continue;
+        const distance_px = Math.hypot(
+          pointer.x - projection.leftFraction * rect.width,
+          pointer.y - projection.topFraction * rect.height);
+        if (distance_px > FLUID_BODY_HANDLE_TOLERANCE_PX) continue;
+        const entry = { target: candidate.target, handleId: handle.id, box: candidate.box, distance_px, rank: rank[handle.kind] };
+        // The water wins outright: the tank encloses it, so a tie means the
+        // pointer is over the body the user can actually see there.
+        if (!best || (best.target === entry.target
+          ? entry.rank < best.rank || (entry.rank === best.rank && entry.distance_px < best.distance_px)
+          : entry.target === "fluid")) best = entry;
+      }
+    }
+    if (!best) return false;
+    pointerRef.current = {
+      id: event.pointerId, action: "shape-handle",
+      target: best.target, handleId: best.handleId, box: best.box,
+    };
+    setShapePreview({ target: best.target, box: best.box, label: shapeLabel(best.target, best.box, scene) });
+    simulation.beginEdit(best.target === "tank" ? "Resized the tank" : "Reshaped the water body");
+    return true;
+  };
+
+  /** Size readout carried beside the dragged box. */
+  const shapeLabel = (target: "fluid" | "tank", box: FluidBodyBox, scene: ReturnType<typeof useSceneStore.getState>["scene"]) => {
+    const size = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
+    if (target !== "tank") return `${size.map((value) => value.toFixed(2)).join(" × ")} m`;
+    const lattice = tankLatticeForExtents(scene, { width_m: size[0], height_m: size[1], depth_m: size[2] });
+    return `${size.map((value) => value.toFixed(2)).join(" × ")} m · ${lattice.join("×")}`;
+  };
+
+  /**
+   * Where a box handle follows the pointer. A face has one degree of freedom,
+   * so it rides its own normal; edges and corners drag in the camera plane and
+   * keep only the components of the sides they own.
+   */
+  const shapeHandlePoint = (
+    box: FluidBodyBox,
+    handleId: string,
+    ray: { origin: Vec3; direction: Vec3 },
+  ) => {
+    const handle = fluidBodyHandleById(box, handleId);
+    if (!handle) return undefined;
+    const axis = fluidBodyHandleAxis(handle);
+    return axis
+      ? closestPointOnAxis(ray.origin, ray.direction, handle.position_m, axis)
+      : planeHit(ray.origin, ray.direction, handle.position_m, cameraBasis(useUIStore.getState().camera).forward);
+  };
+
   /** Terrain feature handles are grabbed in screen space, like the body gizmo. */
   const beginTerrainHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const ui = useUIStore.getState();
@@ -1122,6 +1249,7 @@ export function WebGPUViewport() {
     setHover(null);
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
+      if (beginShapeDrag(event)) return;
       if (beginTerrainHandleDrag(event)) return;
       if (beginInflowHandleDrag(event)) return;
       if (beginGizmoDrag(event, ray)) return;
@@ -1226,6 +1354,21 @@ export function WebGPUViewport() {
       pointerRef.current = { ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) };
       return;
     }
+    if (active.action === "shape-handle") {
+      const point = shapeHandlePoint(active.box, active.handleId, pointerRay(event));
+      const handle = fluidBodyHandleById(active.box, active.handleId);
+      if (!point || !handle) return;
+      const scene = useSceneStore.getState().scene;
+      // Dragged from the box the gesture opened on, not from a box that is
+      // itself following the pointer, so a handle cannot walk away under it.
+      const box = active.target === "tank"
+        ? tankBoxForExtents(dragTankExtents(scene, handle, point))
+        : dragFluidBodyBox(active.box, handle, point, scene);
+      // Preview only. Nothing here touches the scene document, so the solver
+      // is neither re-seeded nor rebuilt until the pointer comes up.
+      setShapePreview({ target: active.target, box, label: shapeLabel(active.target, box, scene) });
+      return;
+    }
     if (active.action === "fill-level") {
       const ray = pointerRay(event);
       const sceneStore = useSceneStore.getState();
@@ -1312,6 +1455,16 @@ export function WebGPUViewport() {
     // Brick seeds and fill fraction are already in the solver key, so the
     // document write alone invalidates it; the reseed makes the edit start
     // from a defined t=0 instead of mid-flight.
+    if (active.action === "shape-handle") {
+      const preview = shapePreview;
+      setShapePreview(null);
+      // A cancelled gesture keeps the scene it started with; only a real
+      // release is allowed to spend a re-seed.
+      if (cancelled || !preview) { simulation.cancelEdit(); return; }
+      if (active.target === "tank") simulation.resizeTank(preview.box);
+      else simulation.shapeFluidBody(preview.box);
+      return;
+    }
     if (active.action === "fluid-paint" || active.action === "fill-level" || active.action === "inflow-handle") {
       simulation.commitEdit(undefined, { reseed: true });
       return;
@@ -1409,6 +1562,46 @@ export function WebGPUViewport() {
       aria-hidden="true"
     >
       <i /><span>FILL {(scene.container.fillFraction * 100).toFixed(0)}%</span>
+    </div>}
+    {(fluidBodyGizmo || tankGizmo) && <svg
+      className="editor-gizmo editor-shape-gizmo"
+      data-testid="editor-shape-gizmo"
+      width={viewportSize.width}
+      height={viewportSize.height}
+      aria-hidden="true"
+    >
+      {shapeOutline && FLUID_BODY_BOX_EDGES
+        .filter(([from, to]) => shapeOutline[from]!.depth_m > 1e-6 && shapeOutline[to]!.depth_m > 1e-6)
+        .map(([from, to]) => (
+          <line
+            key={`${from}-${to}`}
+            className={`shape-outline target-${shapePreview!.target}`}
+            x1={shapeOutline[from]!.leftFraction * viewportSize.width}
+            y1={shapeOutline[from]!.topFraction * viewportSize.height}
+            x2={shapeOutline[to]!.leftFraction * viewportSize.width}
+            y2={shapeOutline[to]!.topFraction * viewportSize.height}
+          />
+        ))}
+      {[{ target: "tank", handles: tankGizmo }, { target: "fluid", handles: fluidBodyGizmo }].flatMap(({ target, handles }) =>
+        (handles ?? []).filter((handle) => handle.projection.depth_m > 1e-6).map((handle) => (
+          <rect
+            key={`${target}-${handle.id}`}
+            className={`shape-handle target-${target} handle-${handle.kind}`}
+            data-handle={`${target}:${handle.id}`}
+            x={handle.projection.leftFraction * viewportSize.width - (handle.kind === "face" ? 4 : 3)}
+            y={handle.projection.topFraction * viewportSize.height - (handle.kind === "face" ? 4 : 3)}
+            width={handle.kind === "face" ? 8 : 6}
+            height={handle.kind === "face" ? 8 : 6}
+          />
+        )))}
+    </svg>}
+    {shapeMode && shapePreview && shapeOutline?.[7]?.visible && <div
+      className={`shape-readout target-${shapePreview.target}`}
+      data-testid="shape-readout"
+      style={{ left: `${shapeOutline[7]!.leftFraction * 100}%`, top: `${shapeOutline[7]!.topFraction * 100}%` }}
+      aria-hidden="true"
+    >
+      <strong>{shapePreview.target === "tank" ? "TANK" : "WATER"}</strong><span>{shapePreview.label}</span>
     </div>}
     {inflowGizmo && inflowGizmo.every((handle) => handle.projection.depth_m > 1e-6) && <svg
       className="editor-gizmo editor-inflow-gizmo"
@@ -1516,11 +1709,14 @@ export function WebGPUViewport() {
     >
       <i /><span>{failure.locationLabel ?? "first recorded failure"}</span>
     </div>}
-    {svoCostOverlay !== "off" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-cost-legend">
-      <header><span>SVO · {svoOverlayDefinition.label}</span><span>depth ≤ {svoMaximumTraversalDepth} · visits ≤ {svoMaximumNodeVisits}</span></header>
-      <div className="svo-cost-ramp" style={{ background: svoOverlayRamp }} />
-      <footer><span>{svoOverlayDefinition.legend[0].label}</span><span>{svoOverlayDefinition.legend.at(-1)?.label}</span></footer>
-      <small>{svoOverlayDefinition.description} Adjust its limits and scene blend in Render.</small>
+    {svoStageView !== "off" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-stage-legend">
+      <header>
+        <span>STAGE · {svoStageDefinition.label}</span>
+        <span>{svoRenderStageUsesLightSlot(svoStageView) ? `slot ${svoStageLightSlot} · ` : ""}{svoStageDefinition.plane}</span>
+      </header>
+      <div className="svo-cost-ramp" style={{ background: svoStageRamp }} />
+      <footer><span>{svoStageDefinition.legend[0].label}</span><span>{svoStageDefinition.legend.at(-1)?.label}</span></footer>
+      <small>{svoStageDefinition.description} Pick another stage in Render.</small>
     </div>}
   </>;
 }

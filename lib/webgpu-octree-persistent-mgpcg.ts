@@ -16,9 +16,9 @@
  * buffer, so `StructuredStepSnapshotRing` and the Part-A tripwires are
  * unaffected.
  *
- * Selection is by constructed row capacity against
- * {@link OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD};
- * the hierarchical path stays fully supported and is the big-domain path.
+ * The GPU-published live row count is bounded by
+ * {@link OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD}; provisioned capacity may be
+ * larger because adaptive topology is not known at construction time.
  */
 import { PassBroker } from "./webgpu-pass-broker";
 import {
@@ -53,35 +53,17 @@ export {
 };
 
 /**
- * Authored row-count ceiling for the persistent executor.
+ * Authored live-row ceiling for the persistent executor.
  *
- * Single source of truth is the Section 4.3 contract constant, so the
- * selection gate and the contract can never drift. 4,096 retains the measured
- * mini-lane win; larger constructed systems use the hierarchical path because
- * a single workgroup is one GPU core and loses once row/page-parallel work can
- * saturate the device.
+ * Single source of truth is the persistent-executor contract constant, so the
+ * runtime gate and executor contract cannot drift.
  */
 export const OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD =
   OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY;
-/** Discovery arm for capacity-large/live-small systems. The compact-live-row
- * kernel sizes hot work from the accepted row count; allocated capacity only
- * enlarges storage arenas. Keep this bounded to the shipping large lane until
- * the throughput crossover is measured. */
-export const OCTREE_PERSISTENT_MGPCG_LARGE_ROW_THRESHOLD = 65_536;
-export function octreePersistentMGPCGLargeCapacityRequested(
-  environment?: Readonly<Record<string, string | undefined>>,
-): boolean {
-  const resolved = environment
-    ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG_LARGE === "1";
-}
-
 function persistentMGPCGRowThreshold(
-  environment?: Readonly<Record<string, string | undefined>>,
+  _environment?: Readonly<Record<string, string | undefined>>,
 ): number {
-  return octreePersistentMGPCGLargeCapacityRequested(environment)
-    ? OCTREE_PERSISTENT_MGPCG_LARGE_ROW_THRESHOLD
-    : OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD;
+  return OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD;
 }
 
 /** One 256-lane workgroup, one dispatch. */
@@ -94,6 +76,9 @@ export const OCTREE_PERSISTENT_MGPCG_CONTROL_MARKER = 0x5045_5253;
 export const OCTREE_PERSISTENT_MGPCG_CONTROL = Object.freeze({
   executorMarker: 21,
 } as const);
+
+/** Shared solve-control ABI consumed by the persistent kernel and snapshots. */
+export const OCTREE_PERSISTENT_MGPCG_CONTROL_BYTES = 128;
 
 /**
  * Keep the old capacity-strided arena available as a process-local timing and
@@ -285,13 +270,10 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     private readonly options: OctreePersistentMGPCGOptions,
   ) {
     const rowCapacity = positiveInteger(source.rowCapacity, "Persistent MGPCG row capacity");
-    const rowThreshold = persistentMGPCGRowThreshold();
-    if (rowCapacity > rowThreshold) {
-      throw new RangeError(
-        "Persistent MGPCG row capacity exceeds the authored single-workgroup threshold",
-      );
-    }
-    this.maximumRowCapacity = rowThreshold;
+    // This is provisioned arena capacity, not adaptive work. The exact live
+    // row count is GPU-published only after topology construction, so the
+    // persistent kernel gates that count before doing arithmetic.
+    this.maximumRowCapacity = persistentMGPCGRowThreshold();
     this.plan = planOctreeSPGridVCycle({
       dimensions: source.dimensions,
       rowCapacity,
@@ -370,6 +352,12 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       throw new RangeError("Persistent MGPCG workset staging exceeds the published banks");
     }
 
+    const partialCapacity = Math.ceil(
+      rowCapacity / OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES,
+    );
+    const stagedInputBaseWords = OCTREE_PERSISTENT_MGPCG_HEADER.totalWords
+      + OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT * rowCapacity
+      + partialCapacity * OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS;
     this.arenaWords = octreePersistentMGPCGArenaWords(rowCapacity);
     this.arena = device.createBuffer({
       label: "Persistent MGPCG consolidated row arena",
@@ -391,7 +379,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       options.maximumIterations, options.chebyshevDegree,
       options.boundarySmoothingIterations, options.boundaryBandLayers,
       this.plan.transferStride, this.plan.brickCount, this.plan.pageDirectoryBytes / 4,
-      Math.ceil(rowCapacity / OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES),
+      stagedInputBaseWords,
     ]);
     floats[16] = options.relativeTolerance;
     floats[17] = absoluteTolerance;
@@ -471,10 +459,21 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     this.allocatedBytes = this.arena.size + this.params.size;
   }
 
-  /** Byte offset of a row channel inside the arena. */
+  /** Byte offset of an immutable capacity-strided solve input. */
   channelByteOffset(channel: number): number {
-    return (OCTREE_PERSISTENT_MGPCG_HEADER.totalWords
-      + channel * this.source.rowCapacity) * 4;
+    if (channel !== OCTREE_PERSISTENT_MGPCG_CHANNEL.rhs
+      && channel !== OCTREE_PERSISTENT_MGPCG_CHANNEL.pressureSeed) {
+      throw new RangeError("Persistent MGPCG staging accepts only RHS and pressure seed channels");
+    }
+    const rowCapacity = this.source.rowCapacity;
+    const partialCapacity = Math.ceil(
+      rowCapacity / OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES,
+    );
+    const stagedInputBaseWords = OCTREE_PERSISTENT_MGPCG_HEADER.totalWords
+      + OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT * rowCapacity
+      + partialCapacity * OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS;
+    return (stagedInputBaseWords
+      + (channel - OCTREE_PERSISTENT_MGPCG_CHANNEL.rhs) * rowCapacity) * 4;
   }
 
   /**
@@ -571,13 +570,13 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     return group;
   }
 
-  /** Row-count gate the encode site consults; see the threshold's docs. */
-  static selects(
-    rowCapacity: number,
+  /** Whether an exact GPU-published live row count fits this executor. */
+  static acceptsLiveRows(
+    liveRowCount: number,
     environment?: Readonly<Record<string, string | undefined>>,
   ): boolean {
-    return Number.isSafeInteger(rowCapacity) && rowCapacity > 0
-      && rowCapacity <= persistentMGPCGRowThreshold(environment);
+    return Number.isSafeInteger(liveRowCount) && liveRowCount > 0
+      && liveRowCount <= persistentMGPCGRowThreshold(environment);
   }
 
   get iterationBudget(): number { return this.options.maximumIterations; }

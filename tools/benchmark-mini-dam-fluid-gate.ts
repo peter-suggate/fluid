@@ -160,11 +160,6 @@ try {
 
   const results: Result[] = [];
   for (const arm of arms) {
-    if (arm.gated) {
-      process.env.FLUID_OCTREE_FLUID_GATED_BOUNDARIES = "1";
-    } else {
-      process.env.FLUID_OCTREE_FLUID_GATED_BOUNDARIES = "0";
-    }
     const scene = createMinimalPowerDamBreakScene();
     const values = {
       ...octreeMethod.presetFor("balanced"),
@@ -172,6 +167,7 @@ try {
       interfaceRefinementBandCells: arm.interfaceBandCells,
       globalFineLevelSetFactor: String(surfaceTrackingFactor),
       octreeAdaptivity: arm.adaptivity,
+      fluidGatedBoundaryRefinement: arm.gated,
       secondaryParticles: "off",
     };
     const constructionStarted = performance.now();
@@ -441,6 +437,5 @@ try {
   device.destroy();
 } finally {
   usePerformanceInstrumentationStore.getState().setEnabled(false);
-  delete process.env.FLUID_OCTREE_FLUID_GATED_BOUNDARIES;
   await releaseWebGPUExclusiveLock();
 }

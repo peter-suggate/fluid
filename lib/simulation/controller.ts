@@ -34,6 +34,10 @@ import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
 import { addProp, createPropAt, findProp, propSelectionId, removeProp, updateProp } from "../editor-props";
+import { scaleScene as scaleSceneBy, sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../scene-scale";
+import { sceneLatticeDimensions } from "../scene-lattice";
+import { fluidBodyBox, fluidBodyBoxPatch, scaleFluidBodyVolume, type FluidBodyBox } from "../editor-fluid-body";
+import { tankResizeIsStructural, tankResizePatch } from "../editor-tank";
 import type { ScenePropDescription, ScenePropShape } from "../model";
 import {
   browserSceneLibraryStorage,
@@ -816,6 +820,81 @@ class SimulationController {
         }, identity))
         : baseFrame);
     }
+  }
+
+  // ---- scene scale ---------------------------------------------------------
+
+  /**
+   * Scale the world or the detail by a factor of two.
+   *
+   * A world scale multiplies the extents and the finest cell size together, so
+   * the lattice never moves and the renderer answers with a warm re-seed of the
+   * live solver — no arenas, no pipelines, no shader modules. A detail scale
+   * moves the lattice and therefore rebuilds, which is announced so the status
+   * says which edit is costing the pause.
+   */
+  scaleScene(axis: SceneScaleAxis, factor: SceneScaleFactor) {
+    const sceneStore = useSceneStore.getState();
+    const next = scaleSceneBy(sceneStore.scene, axis, factor);
+    if (!next) {
+      const blocked = sceneScaleOption(sceneScaleSummary(sceneStore.scene), axis, factor).blocked;
+      useRuntimeStore.getState().setNotice(`Scale refused · ${blocked ?? "unavailable at this size"}`);
+      return false;
+    }
+    const label = `${factor > 1 ? "Doubled" : "Halved"} the ${axis === "world" ? "world size" : "detail"}`;
+    if (axis === "detail") this.announceGPURebuild(label);
+    this.beginEdit(label);
+    sceneStore.setScene(next, sceneStore.presetId);
+    this.commitEdit(undefined, { reseed: true });
+    const [nx, ny, nz] = sceneLatticeDimensions(next);
+    useRuntimeStore.getState().setNotice(`${label} · ${nx}×${ny}×${nz} cells at ${next.voxelDomain.finestCellSize_m.toFixed(4)} m`);
+    return true;
+  }
+
+  // ---- initial water body --------------------------------------------------
+
+  /**
+   * Reshape the initial water body.
+   *
+   * Called once, when a shape gesture is released. There is deliberately no
+   * per-move variant: the water body lives in the solver's seed tier, so every
+   * document write asks the renderer to re-seed, and writing on each pointer
+   * move turned a smooth drag into dozens of re-seeds a second. The viewport
+   * previews the box itself and spends the one re-seed here.
+   */
+  shapeFluidBody(box: FluidBodyBox) {
+    const sceneStore = useSceneStore.getState();
+    sceneStore.patchScene(fluidBodyBoxPatch(sceneStore.scene, box));
+    this.commitEdit(undefined, { reseed: true });
+  }
+
+  /**
+   * Resize the tank to a dragged box. Structural — the lattice moves — so this
+   * is announced and, like `shapeFluidBody`, only ever called on release.
+   */
+  resizeTank(box: FluidBodyBox) {
+    const sceneStore = useSceneStore.getState();
+    const extents = {
+      width_m: box.max.x - box.min.x,
+      height_m: box.max.y - box.min.y,
+      depth_m: box.max.z - box.min.z,
+    };
+    if (tankResizeIsStructural(sceneStore.scene, extents)) this.announceGPURebuild("Resize the tank");
+    sceneStore.patchScene(tankResizePatch(sceneStore.scene, extents));
+    this.commitEdit(undefined, { reseed: true });
+  }
+
+  /**
+   * Grow or shrink the water body about its own centre, without a drag.
+   * `volumeFactor` is a volume, so ×2 is twice the water.
+   */
+  scaleFluidBody(volumeFactor: number) {
+    const sceneStore = useSceneStore.getState();
+    const box = fluidBodyBox(sceneStore.scene);
+    if (!box) { useRuntimeStore.getState().setNotice("No water body to resize"); return false; }
+    this.beginEdit(volumeFactor > 1 ? "Grew the water body" : "Shrank the water body");
+    this.shapeFluidBody(scaleFluidBodyVolume(box, volumeFactor, sceneStore.scene));
+    return true;
   }
 
   // ---- persistence -------------------------------------------------------

@@ -84,6 +84,24 @@ export function octreeAirSupportParallelFrontierWaves(
   }
   return waves;
 }
+/**
+ * Rollback and A/B lever for the three exact work removals in the march's
+ * candidate scan: the loop-invariant patch centre, the single-bank candidate
+ * read, and the settled-seed frontier skip. An explicit `0` restores the
+ * authored source for each of them so the pair can be scored interleaved.
+ * Every arm computes the same marched field; see `extendFace`.
+ */
+export const OCTREE_AIR_SUPPORT_MARCH_FAST_PATH_ENVIRONMENT =
+  "FLUID_OCTREE_AIR_SUPPORT_MARCH_FASTPATH";
+export function octreeAirSupportMarchFastPathEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.[OCTREE_AIR_SUPPORT_MARCH_FAST_PATH_ENVIRONMENT] !== "0";
+}
+const octreeAirSupportMarchFastPath = octreeAirSupportMarchFastPathEnabled();
+
 /** Words 41/42 are the stationary-air fallback latch: count of face patches
  * the march never reached, and the first such (cell<<3)|axis identity.
  * Words 43-46 retain the construction-stable dense oracle's march ledger; the
@@ -310,7 +328,7 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   compactAirSupportSeedFrontier: Object.freeze([0,7,19,29]),
   refreshRetainedAirSupportFaceValues: Object.freeze([7,19,20]),
   finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29]),
-  expandAirSupportChangedFrontier: Object.freeze([0,7,23,29]),
+  expandAirSupportChangedFrontier: Object.freeze([0,7,19,23,29]),
   relaxAirSupportChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29]),
   commitAirSupportChangedFrontier: Object.freeze([0,7,19,20,29]),
   advanceAirSupportChangedFrontier: Object.freeze([0,7,29]),
@@ -2101,10 +2119,35 @@ fn canonicalSeedOffset(item:u32,seed:u32)->vec3i{
   return powerTransformVector(faceCenterQuarter(seed)-faceCenterQuarter(item),faceCell(faceRow).w&63u);}
 fn canonicalOffsetLess(a:vec3i,b:vec3i)->bool{
   return a.x<b.x||(a.x==b.x&&(a.y<b.y||(a.y==b.y&&a.z<b.z)));}
-fn faceDistanceSquared(item:u32,seed:u32)->f32{
-  let delta=faceCenterQuarter(item)-faceCenterQuarter(seed);
+// The marching patch's own quarter-cell centre is loop-invariant across the
+// 30x4 candidate scan; only the seed's centre varies. Taking it as a parameter
+// lets extendFace resolve it once per invocation instead of once per candidate.
+// The integer subtraction, the sum of products and the f32 conversion are
+// unchanged and in the same order, so every distance is bit-identical.
+fn faceDistanceSquaredFrom(itemCenter:vec3i,seed:u32)->f32{
+  let delta=itemCenter-faceCenterQuarter(seed);
   let squared=delta.x*delta.x+delta.y*delta.y+delta.z*delta.z;
   return .0625*f32(squared);}
+fn faceDistanceSquared(item:u32,seed:u32)->f32{
+  return faceDistanceSquaredFrom(faceCenterQuarter(item),seed);}
+// select is a function call: both bank operands are evaluated, so every
+// candidate read used to fetch sixteen bytes from faceA AND sixteen from faceB
+// and discard one. The bank is dispatch-uniform, so branching loads exactly the
+// value select would have returned and halves the traffic of the hottest loop.
+fn faceBank(item:u32,readA:bool)->vec4u{${octreeAirSupportMarchFastPath
+  ? "if(readA){return faceA[item];}return faceB[item];"
+  : "return select(faceB[item],faceA[item],readA);"}}
+// A seeded patch carries squared distance zero and is its own seed. Every
+// candidate distance is the separation of two DISTINCT owned face centres --
+// each row owns only its positive faces, and under 2:1 grading the transverse
+// quarter-offsets e/4 and 3e/4 cannot coincide across sizes -- so every
+// candidate distance is strictly positive and betterFace can never displace a
+// seed. Seeds are therefore immutable and extendFace on one is provably a
+// no-op, which makes them safe to drop from a frontier at any point in the
+// march. faceA is the between-wave authority the frontier path already reads.
+fn settledSeedFace(item:u32)->bool{${octreeAirSupportMarchFastPath
+  ? "let carrier=faceA[item];return carrier.w!=0u&&carrier.y==0u&&carrier.z==item;"
+  : "return false;"}}
 fn betterFace(item:u32,candidate:vec4u,best:vec4u)->bool{let candidateDistanceSquared=bitcast<f32>(candidate.y);
   let bestDistanceSquared=bitcast<f32>(best.y);
   // Section 5 copies the value of the face closest to the free surface but
@@ -2174,21 +2217,24 @@ fn closestSeedFaceAt(faceRow:u32,axis:u32,quadrant:u32,positive:bool)->vec4u{
 // loop in Section 5. The per-candidate faceCenter below is now a four-word read
 // of the candidate's own adjacency record — the gather and the divisions are
 // resolved once per face row by resolveAirSupportFaceAdjacency.
-fn extendFace(item:u32,readA:bool)->bool{let current=select(faceB[item],faceA[item],readA);
+fn extendFace(item:u32,readA:bool)->bool{let current=faceBank(item,readA);
   let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;var best=current;
-  let faceCount=s(29u);
+  let faceCount=s(29u);${octreeAirSupportMarchFastPath
+    ? "let itemCenter=faceCenterQuarter(item);" : ""}
   let incidence=adjacencyIncidentCount(faceRow);if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(item,ERROR_CAPACITY);return false;}
   for(var localFace=0u;localFace<incidence;localFace+=1u){let otherRow=adjacencyIncident(faceRow,localFace);
     if(otherRow==INVALID){continue;}let sourceBase=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis;
     for(var quadrant=0u;quadrant<4u;quadrant+=1u){let source=sourceBase+quadrant;
-      if(source>=faceCount){continue;}var candidate=select(faceB[source],faceA[source],readA);if(candidate.w!=0u){
+      if(source>=faceCount){continue;}var candidate=faceBank(source,readA);if(candidate.w!=0u){
         // candidate.z is the ORIGINAL seed patch, preserved verbatim through
         // every copy, so the carrier metric is the true Euclidean distance to
         // the free surface — the reference lane's closest-point transform.
         // Accumulating per-hop path length instead made the metric an
         // axis-graph geodesic (Manhattan-like), which under-drives diagonal
         // spreading and squares off the dam front.
-        let distanceSquared=faceDistanceSquared(item,candidate.z);
+        let distanceSquared=${octreeAirSupportMarchFastPath
+          ? "faceDistanceSquaredFrom(itemCenter,candidate.z)"
+          : "faceDistanceSquared(item,candidate.z)"};
         if(!finiteValue(distanceSquared)){fail(item,ERROR_SOURCE);continue;}candidate.y=bitcast<u32>(distanceSquared);}
       if(betterFace(item,candidate,best)){best=candidate;}}}
   let changed=any(best!=current);if(readA){faceB[item]=best;}else{faceA[item]=best;}return changed;}
@@ -2249,6 +2295,13 @@ var<workgroup> frontierActiveCount:u32;
 var<workgroup> frontierChangedCount:u32;
 var<workgroup> frontierFailed:u32;
 fn appendFrontierDestination(axis:u32,item:u32,generation:u32){
+  // Wave zero's frontier is every seed, and the liquid interior is seeded
+  // solid, so most of its reciprocal destinations are themselves seeds. Those
+  // relax to no-ops (see settledSeedFace), and dropping them here removes both
+  // the dedup atomic and the destination's whole 30x4 candidate scan without
+  // changing which faces the march can still reach through them: an unseeded
+  // face on a liquid row keeps its queue slot exactly as before.
+  if(settledSeedFace(item)){return;}
   let prior=atomicExchange(&faceFrontier[frontierMarkBase()+item],generation);
   if(prior==generation){return;}let at=atomicAdd(&faceFrontier[3u+axis],1u);
   if(at>=frontierAxisCapacity()){fail(item,ERROR_CAPACITY);return;}

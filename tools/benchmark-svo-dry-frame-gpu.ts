@@ -178,7 +178,6 @@ const rasterRigidForced = process.env.FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE ===
 const lightAttributionEnabled = process.env.FLUID_SVO_DRY_FRAME_LIGHT_ATTRIBUTION === "1";
 const coneFanout = process.env.FLUID_SVO_DRY_FRAME_CONE_FANOUT === "1";
 const optimizationExperiments: SvoDryOptimizationExperiments = {
-  stripDiagnostics: process.env.FLUID_SVO_DRY_FRAME_STRIP_DIAGNOSTICS === "1",
   inlineConeBoundaries: process.env.FLUID_SVO_DRY_FRAME_INLINE_CONE_BOUNDARIES === "1",
   clearConeQueueWithBlit: process.env.FLUID_SVO_DRY_FRAME_CLEAR_CONE_QUEUE_BLIT === "1",
   halfPrecisionLighting: process.env.FLUID_SVO_DRY_FRAME_F16 === "1",

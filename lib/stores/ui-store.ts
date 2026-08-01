@@ -6,7 +6,7 @@ import {
   type SvoConeTracingMode,
   type SvoPrimaryTraversalMode,
 } from "../svo-render-options";
-import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoCostOverlayMode } from "../svo-render-diagnostics";
+import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderStageView } from "../svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../svo-render-tuning";
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../svo-pixel-trace";
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
@@ -59,7 +59,10 @@ interface UIStore {
   svoConeTracingMode: SvoConeTracingMode;
   /** How primary visibility is resolved: rasterized brick proxies, or the traversal megakernel. */
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
-  svoCostOverlay: SvoCostOverlayMode;
+  /** Which published render-stage plane replaces the composited image. */
+  svoStageView: SvoRenderStageView;
+  /** Cached light slot the per-light cone visibility view decodes. */
+  svoStageLightSlot: number;
   svoMaximumTraversalDepth: number;
   svoMaximumNodeVisits: number;
   /** Dense runtime tuning surface for the sparse presentation path. */
@@ -133,7 +136,8 @@ interface UIStore {
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSvoConeTracingMode: (mode: SvoConeTracingMode) => void;
   setSvoPrimaryTraversal: (mode: SvoPrimaryTraversalMode) => void;
-  setSvoCostOverlay: (mode: SvoCostOverlayMode) => void;
+  setSvoStageView: (view: SvoRenderStageView) => void;
+  setSvoStageLightSlot: (slot: number) => void;
   setSvoMaximumTraversalDepth: (depth: number) => void;
   setSvoMaximumNodeVisits: (visits: number) => void;
   setSvoRenderTuning: (next: SvoRenderTuning | ((current: SvoRenderTuning) => SvoRenderTuning)) => void;
@@ -179,7 +183,8 @@ export const useUIStore = create<UIStore>((set) => ({
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   svoConeTracingMode: DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode ?? "cones",
   svoPrimaryTraversal: DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster",
-  svoCostOverlay: DEFAULT_SVO_RENDER_DIAGNOSTICS.overlay,
+  svoStageView: DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
+  svoStageLightSlot: DEFAULT_SVO_RENDER_DIAGNOSTICS.lightSlot,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
   svoMaximumNodeVisits: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumNodeVisits,
   svoRenderTuning: DEFAULT_SVO_RENDER_TUNING,
@@ -216,17 +221,27 @@ export const useUIStore = create<UIStore>((set) => ({
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSvoConeTracingMode: (svoConeTracingMode) => set({ svoConeTracingMode }),
   setSvoPrimaryTraversal: (svoPrimaryTraversal) => set({ svoPrimaryTraversal }),
-  setSvoCostOverlay: (svoCostOverlay) => set({ svoCostOverlay }),
+  setSvoStageView: (svoStageView) => set({ svoStageView }),
+  setSvoStageLightSlot: (svoStageLightSlot) => set((state) => ({
+    svoStageLightSlot: normalizeSvoRenderDiagnostics({
+      stageView: state.svoStageView,
+      lightSlot: svoStageLightSlot,
+      maximumTraversalDepth: state.svoMaximumTraversalDepth,
+      maximumNodeVisits: state.svoMaximumNodeVisits,
+    }).lightSlot,
+  })),
   setSvoMaximumTraversalDepth: (svoMaximumTraversalDepth) => set((state) => ({
     svoMaximumTraversalDepth: normalizeSvoRenderDiagnostics({
-      overlay: state.svoCostOverlay,
+      stageView: state.svoStageView,
+      lightSlot: state.svoStageLightSlot,
       maximumTraversalDepth: svoMaximumTraversalDepth,
       maximumNodeVisits: state.svoMaximumNodeVisits,
     }).maximumTraversalDepth,
   })),
   setSvoMaximumNodeVisits: (svoMaximumNodeVisits) => set((state) => ({
     svoMaximumNodeVisits: normalizeSvoRenderDiagnostics({
-      overlay: state.svoCostOverlay,
+      stageView: state.svoStageView,
+      lightSlot: state.svoStageLightSlot,
       maximumTraversalDepth: state.svoMaximumTraversalDepth,
       maximumNodeVisits: svoMaximumNodeVisits,
     }).maximumNodeVisits,

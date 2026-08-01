@@ -17,7 +17,8 @@
  * either provably value-neutral or strictly more fail-closed — are marked
  * `TRANSCRIPTION NOTE` in the source below.
  */
-import { octreeCompensatedF32WGSL } from "./webgpu-octree-pipelined-mgpcg";
+import { octreeCompensatedF32WGSL } from "./octree-compensated-f32.wgsl";
+import { OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY } from "./webgpu-octree-section43-contract";
 import { octreeSection63DirectionChannelWGSL } from "./webgpu-octree-spgrid-vcycle";
 
 /** Row-shaped arena channels. Every channel is `rowCapacity` words. */
@@ -80,14 +81,18 @@ export interface OctreePersistentMGPCGShaderOptions {
 }
 
 /**
- * Word count of the row arena for a given capacity: staging header, the
- * sixteen row channels, then one partial slot per 128-lane virtual group.
+ * Word count of the row arena for a given provisioned capacity: header, the
+ * sixteen row channels, one partial slot per 128-lane virtual group, then two
+ * capacity-strided input channels. Keeping the staged RHS and seed outside the
+ * compact hot channels makes them immutable while the live-row stride is
+ * repacked in place.
  */
 export function octreePersistentMGPCGArenaWords(rowCapacity: number): number {
   const partials = Math.ceil(rowCapacity / OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES);
   return OCTREE_PERSISTENT_MGPCG_HEADER.totalWords
     + OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT * rowCapacity
-    + partials * OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS;
+    + partials * OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS
+    + 2 * rowCapacity;
 }
 
 /**
@@ -124,7 +129,7 @@ struct Params{
  dims:vec4u,       // domain x/y/z, rowCapacity
  hierarchy:vec4u,  // levelCount, levelStride, totalLevelSlots, coefficientBankStrideWords
  shape:vec4u,      // encodedIterations, chebyshevDegree, boundarySweeps, bandLayers
- sizes:vec4u,      // transferStride, totalBrickCount, pageDirectoryWords, partialCapacity
+ sizes:vec4u,      // transferStride, totalBrickCount, pageDirectoryWords, stagedInputBase
  numerics:vec4f,   // relativeTolerance, absoluteTolerance, tiny, damping
  levelCaps:array<vec4u,4>,
  levelBases:array<vec4u,4>,
@@ -155,6 +160,7 @@ const PAGE_RECORD_WORDS=28u;
 const DISPATCH_WORDS=12u;
 const LANES=256u;
 const REDUCTION_LANES=${OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES}u;
+const MAX_LIVE_ROWS=${OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY}u;
 
 // Solve-control error flags. The three producers already share these bit
 // values; keeping the identical encodings is what lets the snapshot ring and
@@ -235,12 +241,13 @@ fn count(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS);}
 fn transferCount(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS+1u);}
 fn pageCount(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS+8u);}
 
-// The source copies land at the stable capacity-strided ABI offsets. All hot
-// vectors use a live-row stride in the production variant, keeping the entire
-// 472-row ceiling solve in a small contiguous working set instead of placing
-// consecutive channels 36 KiB apart. The legacy capacity-strided variant is
-// retained as a process-local A/B oracle.
-fn stagedCh(c:u32,r:u32)->u32{return ARENA_HEADER+c*capacity()+r;}
+// The source copies land after the capacity-shaped hot arena and reduction
+// partials. All hot
+// vectors use a live-row stride in the production variant, keeping the exact
+// adaptive solve in a contiguous working set instead of spacing consecutive
+// channels by the conservative provisioned capacity. The legacy
+// capacity-strided variant is retained as a process-local A/B oracle.
+fn stagedCh(c:u32,r:u32)->u32{return p.sizes.w+(c-CH_RHS)*capacity()+r;}
 fn stagedVload(c:u32,r:u32)->f32{return bitcast<f32>(arena[stagedCh(c,r)]);}
 fn rowStride()->u32{return ${rowStride};}
 fn ch(c:u32,r:u32)->u32{return ARENA_HEADER+c*rowStride()+r;}
@@ -960,6 +967,7 @@ fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters
   // apart without changing any word the snapshot ring or tripwires read.
   atomicStore(&control[21],0x50455253u);
   if(acc(2u)==0u||acc(2u)>capacity()){reportAt(ERR_AUTHORITY,1u,INVALID);}
+  else if(acc(2u)>MAX_LIVE_ROWS){reportAt(ERR_ROW,1u,acc(2u));}
   else if(acc(0u)!=0u||acc(1u)!=INVALID||acc(3u)==0u||acc(4u)>1u||acc(5u)==0u){
    reportAt(ERR_AUTHORITY,1u,INVALID);}
   atomicStore(&control[4],rows());

@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   censusOctreeTopologyLeaves,
-  FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV,
-  octreeFluidGatedBoundariesRequested,
   octreeFluidGatedBoundaryWouldRefine,
   octreeProjectionShader,
 } from "../lib/webgpu-octree";
@@ -11,18 +9,6 @@ import {
   packOctreeOwnerPageWord,
   planOctreeOwnerPages,
 } from "../lib/webgpu-octree-owner-pages";
-
-test("fluid-gated boundary refinement is the default with an exact control override", () => {
-  assert.equal(octreeFluidGatedBoundariesRequested({}), true);
-  assert.equal(octreeFluidGatedBoundariesRequested({}, false), false,
-    "an authored validation profile may select the unconditional control");
-  assert.equal(octreeFluidGatedBoundariesRequested({
-    [FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV]: "0",
-  }), false, "the control-arm environment override wins over the production default");
-  assert.equal(octreeFluidGatedBoundariesRequested({
-    [FLUID_OCTREE_FLUID_GATED_BOUNDARIES_ENV]: "1",
-  }), true);
-});
 
 test("fluid protection arrives before contact while dry boundaries may stay coarse", () => {
   assert.equal(octreeFluidGatedBoundaryWouldRefine({

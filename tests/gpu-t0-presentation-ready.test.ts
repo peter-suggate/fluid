@@ -73,14 +73,14 @@ test("diagnostics mode confirms a current fine/coarse crossing or factor-one com
   assert.equal(initialRasterPresentationReadiness({ ...base, diagnosticsRequired: true }).state, "pending");
 });
 
-test("the retired coarse-only presentation switch and backing path stay deleted", () => {
+test("a missing fine or compact source keeps the presentation pending", () => {
   assert.deepEqual(initialRasterPresentationReadiness({ ...base, globalFineAttached: false }), {
     ready: false,
     state: "pending",
     label: "Waiting for global-fine renderer source",
   });
   const source = readFileSync(new URL("../lib/gpu-t0-presentation.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /globalFineRequired|coarse-only mode|coarse-octree raster/);
+  assert.match(source, /Factor one instead[\s\S]*compact-coarse latch/);
 });
 
 test("renderer publishes ready only after first raster submission completion and controller retains both locks", () => {

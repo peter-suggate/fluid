@@ -1,5 +1,5 @@
 import type { SceneDescription, Vec3 } from "./model";
-import { combineInitialBrickWet, inflowStrength, initialFluidBrickContainsCell, sceneDamBreakFractions } from "./initial-fluid";
+import { combineInitialBrickWet, damBreakBoxContains, inflowStrength, initialFluidBrickContainsCell, sceneDamBreakBox } from "./initial-fluid";
 import {
   CPU_PHYSICS_ACTIVITY_TASKS,
   NOOP_CPU_PERFORMANCE_ACTIVITY_PROFILER,
@@ -134,10 +134,10 @@ export class EulerianFluidSolver {
 
   private initializeOccupancy() {
     const fill = this.scene.container.fillFraction;
-    const dam = sceneDamBreakFractions(this.scene);
+    const dam = sceneDamBreakBox(this.scene);
     for (let k = 0; k < this.nz; k += 1) for (let j = 0; j < this.ny; j += 1) for (let i = 0; i < this.nx; i += 1) {
       const occupied = combineInitialBrickWet(this.scene, initialFluidBrickContainsCell(this.scene, i, j, k, [this.nx, this.ny, this.nz]), this.scene.fluid.initialCondition === "dam-break"
-        ? (i + 0.5) / this.nx <= dam.width && (j + 0.5) / this.ny <= dam.height && (k + 0.5) / this.nz <= dam.depth
+        ? damBreakBoxContains(dam, (i + 0.5) / this.nx, (j + 0.5) / this.ny, (k + 0.5) / this.nz)
         : (j + 0.5) / this.ny <= fill);
       this.fluid[this.cidx(i, j, k)] = occupied ? 255 : 0;
     }

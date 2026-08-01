@@ -22,7 +22,8 @@ export function damBreakFractions(fillFraction: number): DamBreakFractions {
 }
 
 /** Resolves an authored absolute reservoir size, falling back to the legacy
- * fill-derived normalized dam shape. */
+ * fill-derived normalized dam shape. Size only: callers that must honour a
+ * reservoir dragged off the container corner want `sceneDamBreakBox`. */
 export function sceneDamBreakFractions(scene: SceneDescription): DamBreakFractions {
   const dimensions = scene.fluid.initialDamBreakDimensions_m;
   if (!dimensions) return damBreakFractions(scene.container.fillFraction);
@@ -31,6 +32,53 @@ export function sceneDamBreakFractions(scene: SceneDescription): DamBreakFractio
     height: dimensions.y / scene.container.height_m,
     depth: dimensions.z / scene.container.depth_m,
   };
+}
+
+/** Normalized reservoir bounds on each container axis, in [0, 1]. */
+export interface DamBreakBox {
+  readonly min: { x: number; y: number; z: number };
+  readonly max: { x: number; y: number; z: number };
+}
+
+/**
+ * The dam reservoir as a box rather than a size.
+ *
+ * Every seeding path tests cell centres against this. Without an authored
+ * origin the minimum corner is the container's own, which reproduces the
+ * corner-anchored test exactly — `min` is zero, so `fraction > 0` admits every
+ * cell the legacy `fraction <= size` test admitted.
+ */
+export function sceneDamBreakBox(scene: SceneDescription): DamBreakBox {
+  const size = sceneDamBreakFractions(scene);
+  const origin = scene.fluid.initialDamBreakOrigin_m;
+  const c = scene.container;
+  const min = origin
+    ? { x: origin.x / c.width_m, y: origin.y / c.height_m, z: origin.z / c.depth_m }
+    : { x: 0, y: 0, z: 0 };
+  return {
+    min,
+    max: { x: min.x + size.width, y: min.y + size.height, z: min.z + size.depth },
+  };
+}
+
+/** Whether a normalized cell centre lies inside the reservoir. */
+export function damBreakBoxContains(box: DamBreakBox, x: number, y: number, z: number): boolean {
+  return x > box.min.x && x <= box.max.x
+    && y > box.min.y && y <= box.max.y
+    && z > box.min.z && z <= box.max.z;
+}
+
+/**
+ * True when the reservoir has been moved off the container's minimum corner.
+ *
+ * The GPU's closed-form t=0 phi (`analyticInitialPhi`) hard-codes the corner
+ * anchor, so an offset reservoir must fall back to the host-rasterized seed
+ * — the same path terrain, rigid bodies, and brick seeds already take.
+ */
+export function sceneDamBreakIsOffsetFromCorner(scene: SceneDescription): boolean {
+  const origin = scene.fluid.initialDamBreakOrigin_m;
+  if (!origin || !scene.fluid.initialDamBreakDimensions_m) return false;
+  return Math.abs(origin.x) > 1e-9 || Math.abs(origin.y) > 1e-9 || Math.abs(origin.z) > 1e-9;
 }
 
 export const INITIAL_FLUID_BRICK_SIZE = 8;

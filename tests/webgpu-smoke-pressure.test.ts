@@ -85,13 +85,13 @@ test("production pressure acceptance uses only the MGPCG relative residual", () 
   }));
   assert.equal(octreeMGPCGDiagnosticsAreAcceptable(acceptedAbsolute), false);
   assert.equal(octreePowerPressureDiagnosticsAreAcceptable(
-    "Octree power persistent PCG · Section 4.3 hybrid",
+    "Octree power MGPCG · persistent executor · Section 4.3 fixed schedule",
     acceptedAbsolute,
   ), false);
 });
 
 test("stability envelopes have no solver-specific fallback", () => {
-  const mgpcg = "Octree power persistent PCG · Section 4.3 hybrid";
+  const mgpcg = "Octree power MGPCG · persistent executor · Section 4.3 fixed schedule";
   assert.equal(octreePowerPressureEnvelopeIsAcceptable(mgpcg, 3e-3, 9.9e-8), false);
   assert.equal(octreePowerPressureEnvelopeIsAcceptable(mgpcg, 9.9e-5, 2e-7), true);
   assert.equal(octreePowerPressureEnvelopeIsAcceptable(mgpcg, Number.NaN, Number.NaN), false);

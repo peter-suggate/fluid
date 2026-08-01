@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { consumeGPURigidLoad, decodeGPURigidLoad, legacyUniformComputeShader, mergeGPURigidLoads, type GPURigidLoad } from "../lib/webgpu-eulerian";
-import { tallCellComputeShader } from "../lib/tall-cell-kernels";
+import { consumeGPURigidLoad, decodeGPURigidLoad, mergeGPURigidLoads, type GPURigidLoad } from "../lib/webgpu-eulerian";
 
 const load = (impulse: number, interval: number): GPURigidLoad => ({
   bodyId: "body",
@@ -41,20 +40,4 @@ test("rigid exchange decoding averages snapshots without dividing impulses", () 
   assert.equal(decoded.impulse_N_s.x, 0.6);
   assert.equal(decoded.displacedVolume_m3, 0.002);
   assert.deepEqual(decoded.meanFluidVelocity_m_s, { x: 2, y: -1, z: 0.5 });
-});
-
-test("GPU coupling shaders publish twelve-word wet-velocity snapshots", () => {
-  assert.match(legacyUniformComputeShader, /base=bodyIndex\*12u/);
-  assert.match(legacyUniformComputeShader, /let displacedWeight=wetFraction\*solidFraction/);
-  assert.match(legacyUniformComputeShader, /displacedWeight\*ambientVelocity\.x\*10000\.0/);
-  assert.match(tallCellComputeShader, /exchangeBase=owner\*12u/);
-  assert.match(tallCellComputeShader, /alpha\*solid\*ambientVelocity\.x\*1e4/);
-  assert.match(tallCellComputeShader, /var phiNext=phi/);
-  assert.match(tallCellComputeShader, /rigidVelocityAt\(neighborWorld\)\.w==0\.0/);
-  assert.match(tallCellComputeShader, /reaction=-fluidImpulse\*select\(0\.0,1\.0,solid>0\.9\)/,
-    "partially covered collocated cells must not feed their grid-phase impulse back to the body");
-  assert.match(tallCellComputeShader, /fluidOpen\*params\.cellGravity\.w\*dt/,
-    "body-interior liquid samples must not accumulate gravity before rigid coupling");
-  assert.match(tallCellComputeShader, /if\(solidFractionCell\(plus\)>0\.9\)\{v\[axis\]=solidVelocityCell\(plus\)\[axis\];\}else if\(solidFractionCell\(q\)>0\.9\)\{v\[axis\]=solidVelocityCell\(q\)\[axis\];\}/,
-    "projection must apply the same moving-solid face constraint as divergence");
 });

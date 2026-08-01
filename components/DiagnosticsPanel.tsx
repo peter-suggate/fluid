@@ -10,6 +10,7 @@ import { resolvedMethodValues, useMethodStore } from "@/lib/stores/method-store"
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { isOctreePersistentMGPCGSolverLabel } from "@/lib/webgpu-octree-section43-contract";
 
 function formatGridLocation(location?: { x: number; y: number; z: number }) {
   return location ? `[${location.x}, ${location.y}, ${location.z}]` : "location pending";
@@ -55,7 +56,7 @@ export function DiagnosticsPanel() {
     && (reportedPressureRows !== undefined || acceptedPressureSolve);
   const pressureRowsLabel = reportedPressureRows?.toLocaleString()
     ?? (acceptedPressureSolve ? "GPU-resident" : "—");
-  const publishedPowerSolver = gpuInfo?.pressureSolver?.includes("Section 4.3 hybrid")
+  const publishedPowerSolver = isOctreePersistentMGPCGSolverLabel(gpuInfo?.pressureSolver)
     ? "POWER + SECTION 4.3"
     : "POWER PUBLISHED";
   const octreePressurePotential = gpuInfo?.gridKind === "octree";
@@ -80,8 +81,8 @@ export function DiagnosticsPanel() {
         <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState?.contactCount ?? 0} contact solves`} />
         {fluidState && fluidRenderState && <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />}
         {fluidState && <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />}
-        <MetricCard label={gpuInfo?.gridKind === "quadtree-tall-cell" ? "GPU quadtree tall cells" : gpuInfo?.gridKind === "octree" ? "GPU octree" : gpuInfo?.gridKind === "uniform" ? "GPU uniform grid" : "GPU tall grid"} value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${gpuInfo.ny} cubic-equivalent Y · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
-        <MetricCard label={gpuInfo?.gridKind === "uniform" ? "Uniform allocation" : gpuInfo?.gridKind === "octree" ? "Octree pressure rows" : "Tall-cell span"} value={gpuInfo?.gridKind === "uniform" ? gpuInfo.cellCount.toLocaleString() : gpuInfo?.gridKind === "octree" ? pressureRowsLabel : gpuInfo?.maximumTallCellHeight !== undefined ? String(gpuInfo.maximumTallCellHeight) : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
+        <MetricCard label="GPU octree" value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${gpuInfo.ny} cubic-equivalent Y · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
+        <MetricCard label="Octree pressure rows" value={gpuInfo ? pressureRowsLabel : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
         {gpuInfo?.gridKind === "octree" && gpuInfo.frontierListCapacity !== undefined && <MetricCard
           label="Octree frontier publication"
           value={`${gpuInfo.frontierRequiredLeaves?.toLocaleString() ?? "—"} / ${gpuInfo.frontierListCapacity.toLocaleString()}`}
@@ -161,13 +162,7 @@ export function DiagnosticsPanel() {
         <MetricCard label="GPU NaN / infinity" value={gpuInfo?.nonFiniteCount !== undefined ? String(gpuInfo.nonFiniteCount) : "—"} unit="across pre-pressure, pressure, and projected fields" tone={gpuInfo?.nonFiniteCount === 0 ? "good" : "warn"} />
         <MetricCard label={globalFineVolumeEstimate ? "GPU pre-correction occupancy drift" : scene.fluid.inflow ? "GPU net mass change" : "GPU mass drift"} value={gpuInfo?.volumeDrift !== undefined ? (gpuInfo.volumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}${globalFineVolumeEstimate ? " · smoothed occupancy estimate" : ""}`} tone={scene.fluid.inflow ? "neutral" : gpuInfo?.volumeDrift !== undefined && Math.abs(gpuInfo.volumeDrift) < 0.01 ? "good" : "warn"} />
         {!representedVolumeAliasesPrimary && <MetricCard label="GPU represented-volume drift" value={gpuInfo?.representedVolumeDrift !== undefined ? (gpuInfo.representedVolumeDrift * 100).toFixed(2) : "—"} unit={`% · ${telemetrySourceLabel(gpuInfo?.volumeTelemetrySource)}`} tone={gpuInfo?.representedVolumeDrift !== undefined && Math.abs(gpuInfo.representedVolumeDrift) < 0.05 ? "good" : "warn"} />}
-        <MetricCard label={octreePressurePotential && gpuInfo?.volumeControl ? "Global φ-shift supplement" : "Global correction"} value={gpuInfo?.gridKind === "restricted-tall-cell" ? `${gpuInfo.volumeCorrectionDivergenceRate_s?.toFixed(3) ?? "0.000"}` : gpuInfo?.volumeControl ? `${gpuInfo.volumeCorrectionNormalSpeed_cells_s?.toFixed(2) ?? "0.00"}` : "None"} unit={gpuInfo?.gridKind === "restricted-tall-cell" ? `s⁻¹ CM12 divergence rate · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} wet interface cells` : gpuInfo?.volumeControl ? `cells/s normal speed · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} interface cells${octreePressurePotential ? " · engineering supplement, not paper §5" : ""}` : "pairwise conservative face flux"} tone={gpuInfo?.gridKind === "restricted-tall-cell" || gpuInfo?.volumeControl ? "neutral" : "good"} />
-        {gpuInfo?.gridKind === "quadtree-tall-cell" && <>
-          <MetricCard label="Optical layer" value={gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? "Motion-adaptive" : "Fixed depth"} unit={gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? `α ${gpuInfo.quadtreeOpticalAlpha?.toFixed(2) ?? "—"} · ${gpuInfo.quadtreeOpticalMinimumCells ?? "—"}–${gpuInfo.quadtreeOpticalMaximumCells ?? "—"} cells` : "quarter of connected liquid depth"} tone={gpuInfo.quadtreeOpticalLayerMode === "adaptive-motion" ? "good" : "neutral"} />
-          <MetricCard label="Quadtree leaves" value={gpuInfo.quadtreeLeafCount?.toLocaleString() ?? "—"} unit={`2:1 ratio ≤ ${gpuInfo.quadtreeMaximumNeighborRatio ?? "—"}`} />
-          <MetricCard label="Pressure samples" value={gpuInfo.quadtreeLiquidDofCount?.toLocaleString() ?? "—"} unit={`${gpuInfo.quadtreePressureSampleCount?.toLocaleString() ?? "—"} total · ${gpuInfo.quadtreeFaceCount?.toLocaleString() ?? "—"} variational faces`} />
-          <MetricCard label="Tall / ghost rows" value={`${gpuInfo.quadtreeTallSegmentCount ?? "—"} / ${gpuInfo.quadtreeGhostFaceCount ?? "—"}`} unit="segments · corrected inner ghost volumes" />
-        </>}
+        <MetricCard label={octreePressurePotential && gpuInfo?.volumeControl ? "Global φ-shift supplement" : "Global correction"} value={gpuInfo?.volumeControl ? `${gpuInfo.volumeCorrectionNormalSpeed_cells_s?.toFixed(2) ?? "0.00"}` : "None"} unit={gpuInfo?.volumeControl ? `cells/s normal speed · ${gpuInfo.phiInterfaceCellCount?.toFixed(0) ?? "—"} interface cells${octreePressurePotential ? " · engineering supplement, not paper §5" : ""}` : "pairwise conservative face flux"} tone={gpuInfo?.volumeControl ? "neutral" : "good"} />
       </section>
       {selectedBody && <section className="panel-section selected-diagnostics" data-testid="selected-body-diagnostics">
         <div className="section-heading"><h2>{selectedBody.description.name}</h2><span>selected state</span></div>

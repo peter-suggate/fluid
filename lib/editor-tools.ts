@@ -13,6 +13,7 @@
 
 export type EditorTool =
   | "select"
+  | "shape"
   | "body-place"
   | "prop-place"
   | "terrain-raise"
@@ -44,6 +45,17 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     label: "SELECT",
     shortcut: "q",
     hint: "click to select · click empty space or press Esc to deselect · drag a gizmo axis to move · drag the body to throw it",
+    status: "active",
+  },
+  // The world-editor mode: the tank and the water body carry box handles, and
+  // nothing else in the scene claims the pointer. Separate from SELECT because
+  // its handles cover the whole scene rather than one picked object, and a mode
+  // that showed them permanently would swallow every click meant for a body.
+  {
+    id: "shape",
+    label: "SHAPE",
+    shortcut: "s",
+    hint: "drag a face, edge, or corner to resize the tank or the water · the shape previews while you drag and is simulated on release",
     status: "active",
   },
   {

@@ -478,8 +478,16 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
   // ORIGINAL seed patch. Only the way the seed patch's centre is obtained
   // changed, from re-resolving the row's cell and running coord() to reading
   // the origin/extent resolveAirSupportFaceAdjacency published for that row.
+  // Renegotiated by name a second time for the loop-invariant patch centre.
+  // The metric is still the Euclidean distance from this patch's centre to the
+  // centre of the ORIGINAL seed patch; the marching patch's own centre is now
+  // resolved once per invocation instead of once per candidate, which is why
+  // it appears as a value rather than as a re-derivation from `item`.
   assert.match(march,
-    /distanceSquared=faceDistanceSquared\(item,candidate\.z\)/,
+    /letitemCenter=faceCenterQuarter\(item\);/,
+    "the marching patch's own centre must be resolved once, outside the candidate scan");
+  assert.match(march,
+    /distanceSquared=faceDistanceSquaredFrom\(itemCenter,candidate\.z\)/,
     "the relaxation must rank sources by squared Euclidean distance to the original seed, not accumulated hop length");
   assert.match(shader, /fnrowSeedDistance.*returnsqrt\(bestSquared\)/s,
     "physical distance is recovered once per row for the detached-air gravity ramp");
@@ -552,7 +560,7 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
     /fncanonicalSeedOffset\(item:u32,seed:u32\)->vec3i[\s\S]*powerTransformVector\(faceCenterQuarter\(seed\)-faceCenterQuarter\(item\),faceCell\(faceRow\)\.w&63u\)[\s\S]*fnbetterFace\(item:u32,candidate:vec4u,best:vec4u\)/,
     "equal-distance closest faces must be ordered in the destination's canonical frame, never by absolute row id");
   assert.match(shader,
-    /fnfaceDistanceSquared\(item:u32,seed:u32\)->f32[\s\S]*faceCenterQuarter\(item\)-faceCenterQuarter\(seed\)[\s\S]*return\.0625\*f32\(squared\)[\s\S]*distanceSquared=faceDistanceSquared\(item,candidate\.z\)/,
+    /fnfaceDistanceSquaredFrom\(itemCenter:vec3i,seed:u32\)->f32[\s\S]*itemCenter-faceCenterQuarter\(seed\)[\s\S]*return\.0625\*f32\(squared\)[\s\S]*distanceSquared=faceDistanceSquaredFrom\(itemCenter,candidate\.z\)/,
     "reflected closest-face distances must be exact quarter-grid integers before conversion to f32");
   assert.match(shader,
     /positive\.w==0u&&u32\(origin\[axis\]\)\+cell\.y==p\.dimensions\[axis\][\s\S]*p\.closedBoundaryMask/,

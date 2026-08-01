@@ -1,4 +1,4 @@
-import { combineInitialBrickWet, initialFluidBrickContainsCell, initialFluidBrickSignedDistance, sceneDamBreakFractions } from "./initial-fluid";
+import { combineInitialBrickWet, damBreakBoxContains, initialFluidBrickContainsCell, initialFluidBrickSignedDistance, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
 import type { SceneDescription } from "./model";
 import { sceneHasTerrain, terrainColumnHeights, terrainHeightAt } from "./terrain";
 
@@ -142,10 +142,10 @@ function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx
     if ((y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ)) return false;
   }
   const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, fineNy, nz]);
-  const dam = sceneDamBreakFractions(scene);
+  const dam = sceneDamBreakBox(scene);
   const baseWet = scene.fluid.initialCondition === "tank-fill"
     ? (y + 0.5) / fineNy <= scene.container.fillFraction
-    : (x + 0.5) / nx <= dam.width && (y + 0.5) / fineNy <= dam.height && (z + 0.5) / nz <= dam.depth;
+    : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / fineNy, (z + 0.5) / nz);
   return combineInitialBrickWet(scene, brickWet, baseWet);
 }
 
@@ -180,12 +180,16 @@ export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y:
 
 function baseDamBreakPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {
   const c = scene.container;
-  const dam = sceneDamBreakFractions(scene);
-  const half = { x: 0.5 * dam.width * c.width_m, y: 0.5 * dam.height * c.height_m, z: 0.5 * dam.depth * c.depth_m };
+  const dam = sceneDamBreakBox(scene);
+  const half = {
+    x: 0.5 * (dam.max.x - dam.min.x) * c.width_m,
+    y: 0.5 * (dam.max.y - dam.min.y) * c.height_m,
+    z: 0.5 * (dam.max.z - dam.min.z) * c.depth_m,
+  };
   return boxSignedDistance(point, {
-    x: -0.5 * c.width_m + half.x,
-    y: half.y,
-    z: -0.5 * c.depth_m + half.z
+    x: -0.5 * c.width_m + dam.min.x * c.width_m + half.x,
+    y: dam.min.y * c.height_m + half.y,
+    z: -0.5 * c.depth_m + dam.min.z * c.depth_m + half.z
   }, half);
 }
 

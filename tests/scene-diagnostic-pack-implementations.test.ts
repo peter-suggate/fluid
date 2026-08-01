@@ -113,7 +113,7 @@ test("octree authority does not invent dam-envelope failures for timing-only evi
             quadtreeTopologyReadbackBytes: 0,
             powerDiagramReady: true,
             powerDiagramAuthoritative: true,
-            pressureSolver: "Section 4.3 hybrid MGPCG",
+            pressureSolver: "Octree power MGPCG · persistent executor · Section 4.3 fixed schedule",
           },
           octree: {
             powerTopology: {

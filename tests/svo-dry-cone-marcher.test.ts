@@ -132,6 +132,5 @@ test("the production shader embeds the optimized marcher; the baseline variant k
   for (const variant of [optimized, elision, baseline]) {
     assert.match(variant, /fn dryNodeMipAt\(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPageCache>\)->DryNodeMipLookup\{/);
     assert.match(variant, /fn dryNodeMipReady\(\)->bool\{return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&dry\.nodeMip\.x==publicationState\[2\]&&dry\.nodeMip\.y>0u&&dry\.nodeMip\.z>0u;\}/);
-    assert.match(variant, /dryMipSteps\+=1u/);
   }
 });

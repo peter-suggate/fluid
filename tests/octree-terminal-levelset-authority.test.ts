@@ -85,7 +85,7 @@ test("production surface recurrence transports before forces and settles after p
   assert.ok(assembly.indexOf("dynamics.encodeAdvection") < assembly.indexOf("dynamics.encodeForcesAndDivergence"),
     "structured velocity destination advection must precede current-step forces and RHS");
   const solve = compact(WebGPUOctreeProjection.prototype.encode);
-  assert.ok(solve.indexOf("this.pipelinedMGPCG.encode") < solve.indexOf("this.encodeStructuredProjection")
+  assert.ok(solve.indexOf("persistent.encodeSolve") < solve.indexOf("this.encodeStructuredProjection")
     && solve.indexOf("this.encodeStructuredProjection") < solve.indexOf("this.encodePendingFineSettlement"),
   "MGPCG/project/CPT seeding must precede fine redistance and coarse re-correction");
   const settlement = compact(octreeSource.slice(

@@ -12,6 +12,7 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { EditorToolbar } from "./EditorToolbar";
 import { SceneOverlay } from "./SceneOverlay";
+import { SceneScaleOverlay } from "./SceneScaleOverlay";
 import { SceneConfigPopover } from "./SceneConfigPopover";
 import { RigidBodyPanel } from "./RigidBodyTray";
 import { VisualPanel } from "./VisualPanel";
@@ -166,6 +167,7 @@ export function FluidLab() {
             </div>
           </div>
         </div>
+        <SceneScaleOverlay />
         <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
         <div className="camera-toolbar" aria-label="Camera controls">
           <button onClick={() => setPresetCamera("reset")}>Reset</button><button onClick={() => setPresetCamera("front")}>Front</button><button onClick={() => setPresetCamera("side")}>Side</button><button onClick={() => setPresetCamera("top")}>Top</button>

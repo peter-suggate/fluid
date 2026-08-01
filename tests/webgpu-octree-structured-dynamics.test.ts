@@ -252,6 +252,9 @@ test("projection energy uses one coherent face-weighted pair around projection",
   assert.equal(STRUCTURED_PROJECTION_ENERGY_WORDS, 32);
   assert.match(structuredVelocityDynamicsWGSL,
     /binding\(23\)var<storage,read_write>projectionEnergyStats:array<u32>/);
+  assert.match(dynamicsHost,
+    /this\.group\(pipeline, \[0, 1, 2, 3, 5, 11, 16, 17, 18, 23\], params\)/,
+    "the energy bind group must match its auto layout and omit reconstruction-only row velocity");
   assert.match(structuredVelocityDynamicsWGSL,
     /dualVolume=area\/inverseDistance[\s\S]*\.5\*aperture\*dualVolume\*sample\*sample/,
     "all stage reductions must use the identical open-face kinetic-energy measure");

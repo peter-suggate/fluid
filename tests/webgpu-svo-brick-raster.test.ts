@@ -139,8 +139,8 @@ test("raster-primary resolves static primitive overlap with exact per-primitive 
   assert.match(shader, /kind==SVO_KIND_CONE/);
   assert.match(fragment, /let exact=primitiveHit\(record,ro,rd,0\.0,DRY_MISS\);/,
     "the voxel owner is not authoritative at a projected primitive boundary");
-  assert.match(fragment, /return dryRasterPrimarySurface\(exact,ro,rd,camera\[1\]\);/,
-    "the exact hit publishes all four primary planes and analytic frag_depth together");
+  assert.match(fragment, /return dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_STATIC_PRIMITIVE\);/,
+    "the exact hit publishes all four primary planes, its producing-pass tag and analytic frag_depth together");
   assert.doesNotMatch(fragment, /materialOwners|traceLeafPayload/);
 
   const primitiveBinding = sparseVoxelDrySceneBindGroupLayoutEntries().find((entry) => entry.binding === 7);

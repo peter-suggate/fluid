@@ -1,6 +1,4 @@
 import { readFileSync } from "node:fs";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
 export interface CostChangePoint {
   readonly step: number;
@@ -87,33 +85,8 @@ if (process.argv[1]?.endsWith("analyze-power-liquids-cost-change.ts")) {
   const parseLines = (text: string) => text.split(/\r?\n/)
     .filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as Record<string, unknown>]; }
       catch { return []; } });
-  let records: Record<string, unknown>[];
-  if (paths.includes("--run")) {
-    const steps = Number(paths.find((value) => value.startsWith("--steps="))?.slice(8) ?? 500);
-    if (!Number.isSafeInteger(steps) || steps < 1) throw new RangeError("--steps must be positive");
-    const root = fileURLToPath(new URL("..", import.meta.url));
-    const benchmark = fileURLToPath(new URL("./benchmark-power-dam.ts", import.meta.url));
-    const child = spawn(process.execPath, ["--import", "tsx", benchmark, "--lane=large",
-      `--steps=${steps}`, "--forward-ndjson", "--json"], {
-      cwd: root, env: { ...process.env, FLUID_OCTREE_ROW_DELTA_CENSUS: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let output = "";
-    child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { output += chunk; });
-    child.stderr.on("data", (chunk: string) => { output += chunk; });
-    const code = await new Promise<number>((resolve, reject) => {
-      child.once("error", reject); child.once("exit", (value) => resolve(value ?? 1));
-    });
-    if (code !== 0) {
-      const tail = output.split(/\r?\n/).filter(Boolean).slice(-30).join("\n");
-      throw new Error(`cost/change capture exited ${code}${tail ? `\n${tail}` : ""}`);
-    }
-    records = parseLines(output);
-  } else {
-    if (paths.length === 0) throw new Error(
-      "usage: analyze-power-liquids-cost-change.ts LOG.ndjson [...] | --run [--steps=N]");
-    records = paths.flatMap((path) => parseLines(readFileSync(path, "utf8")));
-  }
+  if (paths.length === 0) throw new Error(
+    "usage: analyze-power-liquids-cost-change.ts LOG.ndjson [...]");
+  const records = paths.flatMap((path) => parseLines(readFileSync(path, "utf8")));
   console.log(JSON.stringify(analyzeCostAndChange(records), null, 2));
 }

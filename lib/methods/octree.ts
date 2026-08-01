@@ -52,10 +52,6 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
       surfaceRefinementGradingLayers: numberValue(values, params, "surfaceRefinementGradingLayers"),
       fineLevelSetBandCells: diagnosticFineBand,
       globalFineLevelSetFactor: fineFactor,
-      // Factor one is the coarse octree authority itself. This is a hard
-      // allocation invariant: selecting it must never construct a second,
-      // same-resolution fine-band grid.
-      coarseOnlySurfaceTracking: fineFactor === 1,
       // Hidden authored/harness override for scenes whose fluid footprint is
       // intentionally much smaller than the container. The generic fallback
       // remains the conservative domain-cross-section estimate.
@@ -79,13 +75,13 @@ export const octreeMethod: SimulationMethod = {
   label: "Power-diagram octree",
   shortLabel: "Power octree",
   badge: "POWER OCTREE",
-  description: "GPU-resident adaptive power cells with the sparse-pyramid hybrid MGPCG pressure solve and a high-resolution interface band.",
-  detail: "2:1-graded adaptive pressure cells and six structured velocity families, one production Section 4.3 hybrid MGPCG authority, factor-4 signed-distance narrow band, frame-lagged variational rigid-body coupling, and no topology readbacks or alternate solver path",
+  description: "GPU-resident adaptive power cells with persistent MGPCG pressure and selectable compact-coarse or fine-band surface tracking.",
+  detail: "2:1-graded adaptive pressure cells and six structured velocity families, one persistent Section 4.3 fixed-schedule MGPCG authority, factor-4 signed-distance narrow band, frame-lagged variational rigid-body coupling, and no topology readbacks or alternate solver path",
   backend: "webgpu",
   qualityLabels: { balanced: "paper defaults", high: "paper defaults", ultra: "paper defaults" },
   showQualityControl: false,
   params,
-  pressureMapping: "The production lane uses the matrix-free Section 4.3 hybrid MGPCG authority over the current adaptive liquid frontier. Failure is terminal for the publication; no alternate pressure solver is retained.",
+  pressureMapping: "The production lane uses the matrix-free persistent Section 4.3 fixed-schedule MGPCG authority over the current adaptive liquid frontier. Failure is terminal for the publication; no alternate pressure solver is retained.",
   presetFor: () => ({
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 4,

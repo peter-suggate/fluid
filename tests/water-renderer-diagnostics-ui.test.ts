@@ -12,6 +12,7 @@ test("renderer presentation source reaches the diagnostics store and panel with 
   const pipeline = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
   const controller = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
   const panel = readFileSync(new URL("../components/DiagnosticsPanel.tsx", import.meta.url), "utf8");
+  const methodPanel = readFileSync(new URL("../components/MethodPanel.tsx", import.meta.url), "utf8");
 
   for (const field of ["surfaceGeometrySource", "globalFineAttachedGeneration", "meshPublicationGeneration", "globalFineCrossingPublished", "presentationFallbackActive"]) {
     assert.match(renderer, new RegExp(field), `${field} must cross the renderer metrics boundary`);
@@ -35,7 +36,9 @@ test("renderer presentation source reaches the diagnostics store and panel with 
   assert.doesNotMatch(panel, /ADAPTIVE FALLBACK/);
   assert.match(panel, /RETAINED PREVIOUS MESH/);
   assert.match(panel, /presentation fallback only · solver authority unchanged/);
-  assert.match(panel, /pressureSolver\?\.includes\("Section 4\.3 hybrid"\)/);
+  assert.match(panel, /isOctreePersistentMGPCGSolverLabel\(gpuInfo\?\.pressureSolver\)/);
+  assert.match(methodPanel, /isOctreePersistentMGPCGSolverLabel\(gpuInfo\?\.pressureSolver\)/);
+  assert.doesNotMatch(`${panel}\n${methodPanel}`, /Section 4\.3 hybrid/);
   assert.match(panel, /POWER \+ SECTION 4\.3/,
     "the sole production paper solver must be visible");
   assert.doesNotMatch(panel, /Galerkin|POWER \+ CHEBYSHEV/,
