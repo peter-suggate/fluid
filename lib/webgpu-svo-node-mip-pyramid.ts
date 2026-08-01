@@ -24,6 +24,22 @@ export const WEBGPU_SVO_NODE_MIP_LAYOUT = Object.freeze({
   sampler: Object.freeze({ magFilter: "linear", minFilter: "linear", mipmapFilter: "nearest" } as const),
 } as const);
 
+/**
+ * Largest page count this device can address.
+ *
+ * The sampled directory is a two-texel-wide texture with one *row* per page, so
+ * the binding constraint is the 2D height limit and nothing else. Capping below
+ * it does not save memory — an atlas is only allocated for the pages that are
+ * actually resident — it just silently discards static geometry, which the
+ * marcher then reads as empty air because a non-resident page samples as zero.
+ *
+ * The floor keeps a device that reports no limits usable rather than empty.
+ */
+export function webGpuSvoNodeMipMaximumPages(device: Pick<GPUDevice, "limits">): number {
+  const limit = Number(device.limits?.maxTextureDimension2D);
+  return Number.isSafeInteger(limit) && limit >= 2_048 ? limit : 2_048;
+}
+
 export const WEBGPU_SVO_NODE_MIP_DIRECTORY_ABI = Object.freeze({
   keyTexelX: 0,
   locationTexelX: 1,

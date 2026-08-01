@@ -46,6 +46,17 @@ export interface SvoStaticNodeMipPublication {
   omittedBasePageCount: number;
   proxyCandidatePageCount: number;
   terrainCandidatePageCount: number;
+  /**
+   * Pages the pyramid would need to represent every candidate. Capacity
+   * selection drops base pages in Morton order once the budget is spent, and a
+   * dropped page is indistinguishable from empty space to every consumer: the
+   * marcher samples a non-resident page as zero occupancy, so its geometry
+   * stops casting shadows and stops occluding GI rather than falling back to an
+   * exact trace. A caller that finds `omittedBasePageCount` non-zero is holding
+   * a publication that renders the wrong picture, and must either raise
+   * capacity to this number or decline to publish.
+   */
+  requiredPageCount: number;
 }
 
 type Triple = [number, number, number];
@@ -243,6 +254,15 @@ export function buildSvoStaticNodeMipPublication(
     return ma < mb ? -1 : ma > mb ? 1 : 0;
   });
   const selected = selectedWithinCapacity(orderedCandidates, levelCount, capacity);
+  // What a complete pyramid over every candidate would have cost. Planning is
+  // pure bookkeeping, so asking is cheap, and it turns "some geometry vanished"
+  // into a number the caller can act on.
+  const requiredPageCount = selected.length === orderedCandidates.length
+    ? undefined
+    : planSvoNodeMipPyramid({
+      generation: options.generation, occupiedPages: orderedCandidates, levelCount,
+      capacity: Number.MAX_SAFE_INTEGER,
+    }).requestedPageCount;
   const plan = planSvoNodeMipPyramid({ generation: options.generation, occupiedPages: selected, levelCount, capacity });
   if (!plan.complete) throw new Error("Static SVO node-mip capacity selection produced an incomplete plan");
 
@@ -284,5 +304,6 @@ export function buildSvoStaticNodeMipPublication(
     omittedBasePageCount: candidates.size - selected.length,
     proxyCandidatePageCount: proxyPages.size,
     terrainCandidatePageCount: terrainPages.size,
+    requiredPageCount: requiredPageCount ?? plan.requestedPageCount,
   };
 }
