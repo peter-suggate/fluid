@@ -71,7 +71,11 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       });
     }
   } else if (message.type === "set-simulation-scene") runtime.setSimulationScene(message.scene);
-  else if (message.type === "set-simulation-running") runtime.setSimulationRunning(message.running);
+  else if (message.type === "set-hover-highlight") runtime.setHoverHighlight(message.range);
+  else if (message.type === "set-simulation-running") {
+    const submittedTime_s = runtime.setSimulationRunning(message.running);
+    post({ type: "simulation-running-set", requestId: message.requestId, submittedTime_s });
+  }
   else if (message.type === "reset-simulation-timeline") runtime.resetSimulationTimeline();
   else if (message.type === "pick-rigid-body") {
     void runtime.pickRigidBody(...message.args)

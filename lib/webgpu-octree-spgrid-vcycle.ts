@@ -681,6 +681,9 @@ export interface OctreeSPGridVCycleSource {
   /** Fixed vec4u per row: cell-linear, size-in-finest-cells, physical page, local cell. */
   readonly rowGeometry: GPUBuffer;
   readonly rowDelta: OctreeSPGridL1DeltaSource;
+  /** GPU-authored exact row dispatch. Record zero covers all live rows. */
+  readonly liveRowDispatch?: GPUBuffer;
+  readonly liveRowDispatchOffsetBytes?: number;
   readonly classDispatch?: GPUBuffer;
   readonly classDispatchOffsetBytes?: number;
   readonly worksetStrideWords?: number;
@@ -706,6 +709,17 @@ const DISPATCH_RECORD_BYTES_PER_LEVEL = DISPATCH_RECORD_WORDS_PER_LEVEL * 4;
 // the former full-capacity recovery dispatch.
 // valid/rows followed by a convergence-gated live-row indirect record.
 const DISPATCH_LIFECYCLE_BYTES = 20;
+// Candidate construction writes these records as STORAGE, then the broker
+// copies them into a distinct INDIRECT-only arena.  Keeping them out of the
+// accepted dispatch ABI lets the persistent solver continue consuming the
+// compact per-level records above byte-for-byte.
+const CANDIDATE_SCHEDULE_RECORDS = 11;
+const CANDIDATE_SCHEDULE_BYTES = CANDIDATE_SCHEDULE_RECORDS * 12;
+const CANDIDATE_SCHEDULE = Object.freeze({
+  capture: 0, clear: 12, topologyLevels: 24, transferSlots: 36,
+  bricks: 48, logicalPages: 60, physicalPages: 72, commit: 84,
+  stencilLevels: 96, stencilSlots: 108, topologyRows: 120,
+} as const);
 const CAPTURE_PAGE_ROWS = 64;
 const CAPTURE_PUBLICATION_WORDS = 12;
 const LEVEL_DELTA_WORDS = 8;
@@ -805,18 +819,6 @@ function dispatchFor(capacity: number): readonly [number, number, number] {
   const blocks = Math.ceil(capacity / 64), x = Math.min(65_535, Math.max(1, blocks));
   return [x, Math.max(1, Math.ceil(blocks / x)), 1];
 }
-/**
- * One workgroup per item, folded into two dimensions.
- *
- * X saturates at exactly 65,535, so a kernel recovers its item index as
- * `wg.x + wg.y * 65535u` -- the same constant-stride form the level kernels in
- * this file already use. Below saturation Y is 1 and the stride never applies.
- */
-function workgroupPerItemDispatch(count: number): readonly [number, number, number] {
-  const items = Math.max(1, count), x = Math.min(65_535, items);
-  return [x, Math.ceil(items / x), 1];
-}
-
 export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, "dimensions" | "rowCapacity" | "maximumLevels">): OctreeSPGridVCyclePlan {
   const rowCapacity = positiveInteger(options.rowCapacity, "SPGrid row capacity");
   if (rowCapacity > SPGRID_MAXIMUM_ROW_CAPACITY) {
@@ -983,6 +985,7 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "planL1CaptureDelta" | "reduceL1CaptureDelta"
   | "commitChangedL1" | "finalizeL1CapturePublication"
   | "probeCandidateSkip" | "applyCandidateSkip" | "publishCommittedInputs"
+  | "prepareCandidateSchedules"
   | "clearCandidateLevels" | "buildCandidateLevelSets"
   | "detectCandidateGhosts" | "insertCandidateGhosts"
   | "buildCandidateLevelDeltas" | "countCandidateTransfers" | "scanCandidateTransfers"
@@ -1020,7 +1023,7 @@ export function octreeSPGridPipelineNamesForExecutor(
 }
 
 export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePipelineName, readonly number[]>> = Object.freeze({
-  beginL1CapturePlan: [0, 3, 6, 13, 14, 18],
+  beginL1CapturePlan: [0, 3, 6, 13, 14, 17, 18],
   // The row scan no longer reaches the level-delta arena (14): markDirtyFrom
   // moved with the reduction below.
   planL1CaptureDelta: [0, 1, 3, 11, 13, 18, 20, 21],
@@ -1032,8 +1035,9 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   finalizeL1CapturePublication: [0, 3, 13, 18],
   probeCandidateSkip: [0, 3, 11, 13, 20, 23],
   applyCandidateSkip: [0, 13, 14, 23],
+  prepareCandidateSchedules: [0, 3, 6, 13, 14, 17],
   publishCommittedInputs: [0, 1, 3, 7, 13, 20, 23],
-  clearCandidateLevels: [0, 14, 15, 16, 17],
+  clearCandidateLevels: [0, 3, 6, 14, 15, 16, 17],
   buildCandidateLevelSets: [0, 1, 3, 14, 15, 16, 17],
   detectCandidateGhosts: [0, 1, 3, 14, 16, 20, 21, 22],
   insertCandidateGhosts: [0, 1, 3, 14, 15, 16, 17, 20, 22],
@@ -1051,7 +1055,7 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   buildCandidateStencils: [0, 3, 4, 5, 6, 7, 14, 15, 16, 17, 24],
   publishCandidateSpectralBounds: [0, 4, 6, 14, 15, 16, 17],
   validateCandidateHierarchy: [0, 6, 13, 14, 17],
-  commitCandidateLevels: [0, 4, 5, 6, 13, 14, 15, 16, 17],
+  commitCandidateLevels: [0, 3, 4, 5, 6, 13, 14, 15, 16, 17],
   finalizeLifecycle: [0, 3, 6, 7, 13],
   prepareCorrectionDispatches: [0, 3, 6, 7, 19],
   clearCorrection: [0, 3, 7, 9],
@@ -1090,7 +1094,7 @@ type CachedAccurateApply = {
 };
 
 /**
- * Byte offset of the fifth accurate indirect record: the union of the four
+ * Byte offset of the fifth accurate indirect record: the union of the five
  * accepted row classes, which the staged row finalizer consumes as one dispatch.
  */
 const ACCURATE_UNION_DISPATCH_OFFSET_BYTES = 4 * 12;
@@ -1116,7 +1120,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   readonly encodedSetupDispatchCount: number;
   readonly encodedCorrectionDispatchCount: number;
   private accurateOperatorInstance?: OctreeWorksetLinearOperator;
-  /** Accurate second-order executor over four disjoint topology classes. */
+  /** Accurate second-order executor over five disjoint row classes. */
   get accurateOperator(): OctreeWorksetLinearOperator {
     if (!this.accurateOperatorInstance) {
       throw new Error("SPGrid accurate A2 executor was not compiled");
@@ -1145,6 +1149,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly candidateTopology: GPUBuffer;
   private readonly candidateState: GPUBuffer;
   private readonly candidateDispatch: GPUBuffer;
+  private readonly candidateIndirect: GPUBuffer;
   /** Row-parallel ghost-alias detection record consumed by the ordered insert. */
   private readonly candidateGhosts: GPUBuffer;
   /** Exact fingerprint of the inputs the last committed hierarchy consumed. */
@@ -1157,9 +1162,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private get vcycleParallelLevels(): number {
     return planOctreeVCycleParallelLevels(this.plan.levelDomainCells);
   }
-  private readonly levelDispatch: readonly [number, number, number];
-  private readonly clearDispatch: readonly [number, number, number];
-  private readonly pageDispatch: readonly [number, number, number];
   private readonly accurateWorksetLayout: GPUBuffer;
   private readonly accurateGatePipeline!: GPUComputePipeline;
   private readonly accurateClassDispatch!: GPUBuffer;
@@ -1211,6 +1213,10 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private lastSetupInput?: { readonly solverControl: GPUBuffer; readonly rowCount: GPUBuffer };
   private preparedCaptureSource?: OctreeSPGridSetupSource;
   private candidateSetupInput?: OctreeSPGridSetupSource;
+  /** Diagnostic control arm for proving whether a live-row launch changes
+   * hierarchy bytes. Production always consumes the GPU-authored schedule. */
+  private readonly capacityRowScheduleOracle = typeof process !== "undefined"
+    && process.env?.FLUID_SPGRID_ROW_SCHEDULE_ORACLE === "capacity";
   private destroyed = false;
 
   /** GPU-authored controls suitable for the runtime's diagnostics readback. */
@@ -1226,6 +1232,79 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
 
   /** Candidate hierarchy/capture report consumed by the coupled epoch reduction. */
   get candidateControl(): GPUBuffer { return this.capturePageState; }
+
+  /** Diagnostics-only immutable snapshot of the accepted M1 publication.
+   * Callers may inspect exact D4/epoch invariants, but no returned word feeds
+   * scheduling or a later GPU submission. */
+  async readPublishedHierarchyForDiagnostics(): Promise<Readonly<{
+    plan: OctreeSPGridVCyclePlan;
+    state: Uint32Array;
+    topology: Uint32Array;
+    dispatch: Uint32Array;
+  }>> {
+    this.assertLive();
+    const stateBytes = this.state.size, topologyBytes = this.topology.size;
+    const dispatchBytes = this.dispatchMeta.size;
+    const readback = this.device.createBuffer({
+      label: "SPGrid accepted hierarchy diagnostic readback",
+      size: stateBytes + topologyBytes + dispatchBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Read SPGrid accepted hierarchy diagnostics",
+    });
+    encoder.copyBufferToBuffer(this.state, 0, readback, 0, stateBytes);
+    encoder.copyBufferToBuffer(this.topology, 0, readback, stateBytes, topologyBytes);
+    encoder.copyBufferToBuffer(this.dispatchMeta, 0, readback,
+      stateBytes + topologyBytes, dispatchBytes);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const mapped = readback.getMappedRange();
+      return Object.freeze({
+        plan: this.plan,
+        state: Uint32Array.from(new Uint32Array(mapped, 0, stateBytes / 4)),
+        topology: Uint32Array.from(new Uint32Array(mapped, stateBytes, topologyBytes / 4)),
+        dispatch: Uint32Array.from(new Uint32Array(mapped, stateBytes + topologyBytes,
+          dispatchBytes / 4)),
+      });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Failure-only exact candidate state. This is never used for scheduling;
+   * it identifies the first level whose compact hierarchy transaction
+   * rejected without widening the recurring snapshot ring. */
+  async readCandidateFailureDiagnostics(): Promise<Readonly<{
+    levelDelta: readonly number[]; candidateDispatch: readonly number[];
+  }>> {
+    this.assertLive();
+    const dispatchBytes = this.plan.dispatchBytes + CANDIDATE_SCHEDULE_BYTES;
+    const readback = this.device.createBuffer({
+      label: "SPGrid candidate failure diagnostics",
+      size: this.plan.levelDeltaBytes + dispatchBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({ label: "Read SPGrid candidate failure diagnostics" });
+    encoder.copyBufferToBuffer(this.levelDelta, 0, readback, 0, this.plan.levelDeltaBytes);
+    encoder.copyBufferToBuffer(this.candidateDispatch, 0, readback,
+      this.plan.levelDeltaBytes, dispatchBytes);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      const deltaWords = this.plan.levelDeltaBytes / 4;
+      return Object.freeze({
+        levelDelta: Object.freeze(Array.from(words.slice(0, deltaWords))),
+        candidateDispatch: Object.freeze(Array.from(words.slice(deltaWords))),
+      });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
 
   /** Accepted physical pages and ghost ownership shared with the Section 4.3 shell. */
   get section63Topology(): Readonly<{
@@ -1348,7 +1427,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.capturedGeometry = device.createBuffer({ label: "SPGrid captured fixed row geometry", size: this.plan.rowCapacity * 16, usage: storage });
     this.candidateCapturedGeometry = device.createBuffer({ label: "SPGrid candidate fixed row geometry", size: this.plan.rowCapacity * 16, usage: storage });
-    this.topology = device.createBuffer({ label: "SPGrid native sparse topology/worklists/transfers", size: this.plan.topologyBytes, usage: storage });
+    this.topology = device.createBuffer({ label: "SPGrid native sparse topology/worklists/transfers",
+      size: this.plan.topologyBytes, usage: storage });
     this.state = device.createBuffer({ label: "SPGrid six-face stencils and vectors", size: this.plan.stateBytes, usage: storage });
     this.dispatchMeta = device.createBuffer({ label: "SPGrid worklist counts and published dispatches", size: this.plan.dispatchBytes,
       usage: storage | GPUBufferUsage.COPY_SRC });
@@ -1362,17 +1442,16 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: this.plan.topologyBytes, usage: storage });
     this.candidateState = device.createBuffer({ label: "SPGrid immutable candidate stencil state",
       size: this.plan.stateBytes, usage: storage });
-    this.candidateDispatch = device.createBuffer({ label: "SPGrid immutable candidate dispatch records",
-      size: this.plan.dispatchBytes, usage: storage });
+    this.candidateDispatch = device.createBuffer({ label: "SPGrid candidate counts and live schedules",
+      size: this.plan.dispatchBytes + CANDIDATE_SCHEDULE_BYTES,
+      usage: storage | GPUBufferUsage.COPY_SRC });
+    this.candidateIndirect = device.createBuffer({ label: "SPGrid candidate live indirect schedules",
+      size: CANDIDATE_SCHEDULE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     this.candidateGhosts = device.createBuffer({ label: "SPGrid candidate ghost-alias detection records",
       size: this.plan.rowCapacity * GHOST_SCRATCH_WORDS_PER_ROW * 4, usage: storage });
     this.committedInputs = device.createBuffer({ label: "SPGrid committed hierarchy input fingerprint",
       size: (COMMITTED_INPUT_HEADER_WORDS
         + this.plan.rowCapacity * COMMITTED_INPUT_WORDS_PER_ROW) * 4, usage: storage });
-    this.levelDispatch = [this.plan.levelCount, 1, 1];
-    this.clearDispatch = dispatchFor(Math.max(this.plan.levelStride, this.plan.rowCapacity,
-      DISPATCH_RECORD_WORDS_PER_LEVEL));
-    this.pageDispatch = dispatchFor(Math.max(1, this.plan.pageDirectoryBytes / 4));
     // Memoized level tables. Entries below levelCount are the exact allocation
     // authority (plan.levelCapacities/levelOffsets); the padding entries repeat
     // the same closed form so an out-of-range probe cannot read stale storage.
@@ -1673,7 +1752,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // and the two once-per-epoch image compiles (direct, fine-adjoint) that
     // ride the same pass.
     // Keep this exact for command and active/scheduled accounting.
-    this.encodedSetupDispatchCount = 3 + 2 + 1 + 17 + 1 + 5
+    this.encodedSetupDispatchCount = 3 + 2 + 2 + 17 + 1 + 5
       + (this.hierarchicalExecutorCompiled ? 2 : 0);
     // The widest levels retain fully parallel, globally synchronized Jacobi
     // dispatches. Only the levels that fit in one workgroup join the tail,
@@ -1701,6 +1780,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       smootherLookup: "published-column-index" as const });
     this.allocatedBytes = this.plan.allocatedBytes + this.capturedGeometry.size + this.candidateCapturedGeometry.size
       + this.candidateTopology.size + this.candidateState.size + this.candidateDispatch.size
+      + this.candidateIndirect.size
       + this.candidateGhosts.size + this.committedInputs.size
       + this.accurateWorksetLayout.size + (this.accurateClassDispatch?.size ?? 0)
       + (this.accurateOperatorRows?.size ?? 0) + (this.accurateAdjointRows?.size ?? 0)
@@ -1773,6 +1853,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     input: OctreeSPGridSetupSource): void {
     const pass = broker.compute({ label: "SPGrid V-cycle · select setup delta and capture changed L1" });
     this.run(pass, "beginL1CapturePlan", 0, input, [1, 1, 1]);
+    broker.updateIndirectBuffer(this.candidateDispatch, this.plan.dispatchBytes,
+      this.candidateIndirect, CANDIDATE_SCHEDULE.capture, 12);
     // Label isolation only; see encodeCorrection. Production returns this same
     // open pass and drops the label.
     //
@@ -1781,8 +1863,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // the ones that survive are the distinct dirty pages, and they now run
     // concurrently across the machine instead of down the lanes of a single
     // workgroup. Measured at 6.40 ms/advance over two calls before this split.
-    this.run(broker.compute({ label: "SPGrid V-cycle · capture plan L1 delta" }),
-      "planL1CaptureDelta", 0, input, workgroupPerItemDispatch(this.plan.rowCapacity));
+    this.runCandidateIndirect(broker.compute({ label: "SPGrid V-cycle · capture plan L1 delta" }),
+      "planL1CaptureDelta", 0, input, 0);
     this.run(broker.compute({ label: "SPGrid V-cycle · capture reduce L1 delta" }),
       "reduceL1CaptureDelta", 0, input, [1, 1, 1]);
     this.preparedCaptureSource = input;
@@ -1808,7 +1890,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // count or any row's fixed geometry/Section 6.3 case differs from the exact
     // fingerprint of the last successfully committed build, and only an
     // unstamped generation is allowed to retire the per-level dirty flags.
-    this.run(pass, "probeCandidateSkip", 0, input, this.plan.rowDispatch);
+    this.runLiveRows(pass, "probeCandidateSkip", 0, input);
     const geometry = this.candidateCapturedGeometry;
     // Label isolation only; see encodeCorrection. Every `staged()` below returns
     // the pass opened above when `FLUID_GPU_ISOLATE_PASS_LABELS` is off, and the
@@ -1818,30 +1900,48 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     const staged = (label: string): GPUComputePassEncoder =>
       broker.compute({ label: `SPGrid V-cycle · candidate ${label}` });
     this.run(staged("apply skip"), "applyCandidateSkip", 0, input, [1, 1, 1]);
-    // One workgroup per work item; see the kernel. Same shape as the capture
-    // row scan above, and most workgroups exit on the eligibility test.
-    this.run(staged("commit changed L1"), "commitChangedL1", 0, input,
-      workgroupPerItemDispatch(this.plan.rowCapacity), geometry);
+    this.run(staged("prepare live schedules"), "prepareCandidateSchedules", 0, input,
+      [1, 1, 1], geometry);
+    broker.updateIndirectBuffer(this.candidateDispatch, this.plan.dispatchBytes,
+      this.candidateIndirect, 0, CANDIDATE_SCHEDULE_BYTES);
+    this.runCandidateIndirect(staged("commit changed L1"), "commitChangedL1", 0, input,
+      CANDIDATE_SCHEDULE.capture, geometry);
     // Ordered data-parallel candidate construction. Each phase is its own
     // dispatch so per-level and inter-phase ordering is carried by dispatch
     // boundaries instead of statement order inside a single invocation.
-    this.run(staged("clear levels"), "clearCandidateLevels", 0, input, this.clearDispatch, geometry);
-    this.run(staged("build level sets"), "buildCandidateLevelSets", 0, input, this.levelDispatch, geometry);
-    this.run(staged("detect ghosts"), "detectCandidateGhosts", 0, input, this.plan.rowDispatch, geometry);
-    this.run(staged("insert ghosts"), "insertCandidateGhosts", 0, input, this.levelDispatch, geometry);
+    this.runCandidateIndirect(staged("clear levels"), "clearCandidateLevels", 0, input,
+      CANDIDATE_SCHEDULE.clear, geometry);
+    this.runCandidateIndirect(staged("build level sets"), "buildCandidateLevelSets", 0, input,
+      CANDIDATE_SCHEDULE.topologyLevels, geometry);
+    this.runCandidateIndirect(staged("detect ghosts"), "detectCandidateGhosts", 0, input,
+      CANDIDATE_SCHEDULE.topologyRows, geometry);
+    this.runCandidateIndirect(staged("insert ghosts"), "insertCandidateGhosts", 0, input,
+      CANDIDATE_SCHEDULE.topologyLevels, geometry);
     this.run(staged("build level deltas"), "buildCandidateLevelDeltas", 0, input, [1, 1, 1], geometry);
-    this.run(staged("count transfers"), "countCandidateTransfers", 0, input, this.plan.slotDispatch, geometry);
-    this.run(staged("scan transfers"), "scanCandidateTransfers", 0, input, this.levelDispatch, geometry);
-    this.run(staged("write transfers"), "writeCandidateTransfers", 0, input, this.plan.slotDispatch, geometry);
-    this.run(staged("link parent chains"), "linkCandidateParentChains", 0, input, this.levelDispatch, geometry);
-    this.run(staged("mark brick occupancy"), "markCandidateBrickOccupancy", 0, input, this.plan.brickDispatch, geometry);
-    this.run(staged("rank bricks"), "rankCandidateBricks", 0, input, this.levelDispatch, geometry);
-    this.run(staged("scatter ranked slots"), "scatterCandidateRankedSlots", 0, input, this.plan.brickDispatch, geometry);
-    this.run(staged("mark page occupancy"), "markCandidatePageOccupancy", 0, input, this.pageDispatch, geometry);
-    this.run(staged("compact pages"), "compactCandidatePages", 0, input, this.levelDispatch, geometry);
-    this.run(staged("link page neighbours"), "linkCandidatePageNeighbours", 0, input, this.pageDispatch, geometry);
-    this.run(staged("build stencils"), "buildCandidateStencils", 0, input, this.plan.slotDispatch, geometry);
-    this.run(staged("publish spectral bounds"), "publishCandidateSpectralBounds", 0, input, this.levelDispatch, geometry);
+    this.runCandidateIndirect(staged("count transfers"), "countCandidateTransfers", 0, input,
+      CANDIDATE_SCHEDULE.transferSlots, geometry);
+    this.runCandidateIndirect(staged("scan transfers"), "scanCandidateTransfers", 0, input,
+      CANDIDATE_SCHEDULE.topologyLevels, geometry);
+    this.runCandidateIndirect(staged("write transfers"), "writeCandidateTransfers", 0, input,
+      CANDIDATE_SCHEDULE.transferSlots, geometry);
+    this.runCandidateIndirect(staged("link parent chains"), "linkCandidateParentChains", 0, input,
+      CANDIDATE_SCHEDULE.topologyLevels, geometry);
+    this.runCandidateIndirect(staged("mark brick occupancy"), "markCandidateBrickOccupancy", 0, input,
+      CANDIDATE_SCHEDULE.bricks, geometry);
+    this.runCandidateIndirect(staged("rank bricks"), "rankCandidateBricks", 0, input,
+      CANDIDATE_SCHEDULE.topologyLevels, geometry);
+    this.runCandidateIndirect(staged("scatter ranked slots"), "scatterCandidateRankedSlots", 0, input,
+      CANDIDATE_SCHEDULE.bricks, geometry);
+    this.runCandidateIndirect(staged("mark page occupancy"), "markCandidatePageOccupancy", 0, input,
+      CANDIDATE_SCHEDULE.logicalPages, geometry);
+    this.runCandidateIndirect(staged("compact pages"), "compactCandidatePages", 0, input,
+      CANDIDATE_SCHEDULE.topologyLevels, geometry);
+    this.runCandidateIndirect(staged("link page neighbours"), "linkCandidatePageNeighbours", 0, input,
+      CANDIDATE_SCHEDULE.physicalPages, geometry);
+    this.runCandidateIndirect(staged("build stencils"), "buildCandidateStencils", 0, input,
+      CANDIDATE_SCHEDULE.stencilSlots, geometry);
+    this.runCandidateIndirect(staged("publish spectral bounds"), "publishCandidateSpectralBounds", 0, input,
+      CANDIDATE_SCHEDULE.stencilLevels, geometry);
     this.run(staged("validate hierarchy"), "validateCandidateHierarchy", 0, input, [1, 1, 1]);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after SPGrid candidate hierarchy rebuild");
@@ -1858,18 +1958,16 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     }
     const candidate = this.candidateSetupInput;
     const pass = broker.compute({ label: "SPGrid V-cycle · publish validated exact level deltas" });
-    this.run(pass, "commitChangedL1", 0, input,
-      workgroupPerItemDispatch(this.plan.rowCapacity), this.capturedGeometry);
+    this.runCandidateIndirect(pass, "commitChangedL1", 0, input,
+      CANDIDATE_SCHEDULE.capture, this.capturedGeometry);
     this.run(pass, "finalizeL1CapturePublication", 0, input, [1, 1, 1]);
-    this.run(pass, "commitCandidateLevels", 0, input,
-      dispatchFor(Math.max(this.plan.levelStride, this.plan.brickCount,
-        ...this.plan.transferCapacities)));
+    this.runCandidateIndirect(pass, "commitCandidateLevels", 0, input,
+      CANDIDATE_SCHEDULE.commit);
     this.run(pass, "finalizeLifecycle", 0, input, [1, 1, 1]);
     // Fingerprint the exact inputs this hierarchy consumed, and only after the
     // lifecycle gate accepted it. A rejected epoch leaves the previous
     // fingerprint (or none), so the next probe can never skip a stale build.
-    this.run(pass, "publishCommittedInputs", 0, candidate,
-      this.plan.rowDispatch, this.candidateCapturedGeometry);
+    this.runLiveRows(pass, "publishCommittedInputs", 0, candidate, this.candidateCapturedGeometry);
     if (this.hierarchicalExecutorCompiled) {
       const imageDispatch = this.source.classDispatch;
       if (!imageDispatch) {
@@ -1984,11 +2082,38 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     pass.dispatchWorkgroupsIndirect(this.indirectDispatch,
       this.plan.levelCount * DISPATCH_RECORD_BYTES_PER_LEVEL + 8);
   }
+  private runLiveRows(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
+    input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
+      sourceControl?: GPUBuffer; topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode },
+    geometry = this.capturedGeometry): void {
+    if (this.capacityRowScheduleOracle) {
+      this.run(pass, name, level, input, this.plan.rowDispatch, geometry);
+      return;
+    }
+    const dispatch = this.source.liveRowDispatch;
+    if (!dispatch) {
+      // Unit-test and third-party synthetic sources predating the live-count
+      // ABI retain the bounded path. The production structured authority
+      // always publishes this record.
+      this.run(pass, name, level, input, this.plan.rowDispatch, geometry);
+      return;
+    }
+    this.bind(pass, name, level, input, geometry);
+    pass.dispatchWorkgroupsIndirect(dispatch, this.source.liveRowDispatchOffsetBytes ?? 0);
+  }
   private run(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
       sourceControl?: GPUBuffer; topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode },
     dispatch: readonly [number, number, number], geometry = this.capturedGeometry): void {
     this.bind(pass, name, level, input, geometry); pass.dispatchWorkgroups(...dispatch);
+  }
+  private runCandidateIndirect(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName,
+    level: number,
+    input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
+      sourceControl?: GPUBuffer; topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode },
+    offset: number, geometry = this.capturedGeometry): void {
+    this.bind(pass, name, level, input, geometry);
+    pass.dispatchWorkgroupsIndirect(this.candidateIndirect, offset);
   }
   private bind(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
@@ -2305,7 +2430,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     if (this.destroyed) return; this.destroyed = true; this.groups.clear(); this.accurateBindings.length = 0;
     this.capturedGeometry.destroy(); this.candidateCapturedGeometry.destroy();
     this.topology.destroy(); this.state.destroy(); this.dispatchMeta.destroy();
-    this.indirectDispatch.destroy();
+    this.indirectDispatch.destroy(); this.candidateIndirect.destroy();
     this.capturePageState.destroy(); this.levelDelta.destroy();
     this.candidateTopology.destroy(); this.candidateState.destroy(); this.candidateDispatch.destroy();
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
@@ -2317,7 +2442,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   }
 }
 
-/** Accurate second-order matrix-free apply over four accepted row classes. */
+/** Accurate second-order matrix-free apply over five accepted row classes. */
 export const octreeSPGridAccurateDispatchGateShader = /* wgsl */ `
 @group(0) @binding(0) var<storage,read> solverControl:array<u32>;
 @group(0) @binding(1) var<storage,read> worksets:array<u32>;
@@ -2336,14 +2461,15 @@ fn prepareAccurateDispatches(){
  let solveLive=activeSolve();
  let bank=select(0u,accepted[4]&1u,arrayLength(&accepted)>4u);
  var unionRows=0u;var transitionRows=0u;var unionValid=true;
- for(var cls=0u;cls<4u;cls+=1u){
+ for(var cls=0u;cls<5u;cls+=1u){
   let base=bank*worksetLayout.y+cls*worksetLayout.x;
-  let source=base+4u;let destination=cls*3u;
+  let source=base+4u;
   let valid=source+2u<arrayLength(&worksets);
-  classDispatch[destination]=select(0u,worksets[source],solveLive&&valid);
-  classDispatch[destination+1u]=select(1u,worksets[source+1u],valid);
-  classDispatch[destination+2u]=select(1u,worksets[source+2u],valid);
-  // The union record covers the same rows as the four class records. Its lane
+  if(cls<4u){let destination=cls*3u;
+   classDispatch[destination]=select(0u,worksets[source],solveLive&&valid);
+   classDispatch[destination+1u]=select(1u,worksets[source+1u],valid);
+   classDispatch[destination+2u]=select(1u,worksets[source+2u],valid);}
+  // The union record covers the same rows as the five class records. Its lane
   // count is the exact sum of the published class counts, so the concatenated
   // staged union walk lands on every accepted row and on no other.
   if(!valid||base+2u>=arrayLength(&worksets)||worksets[base+1u]>worksets[base+2u]){unionValid=false;}
@@ -2572,6 +2698,10 @@ const ADJOINT_CHANNEL_SHIFT=20u;
 // what makes this encoding unambiguous, and it is asserted by the differential
 // harness rather than left to this comment.
 const CHANNEL_CODE_BASE=0xffff0000u;
+// Word-zero bit proving the row used the topology-regular image builder.  The
+// row destination words remain ordinary row ids/codes; coefficients are never
+// cached here, so GFM theta and cut fractions remain the shared face authority.
+const HYBRID_REGULAR_ROW=0x80000000u;
 // primary 0 / secondary 0: the direction resolved to a multigrid-only slot.
 // The stencil contributes nothing and reports nothing, exactly as the inline
 // walk's continue did.
@@ -2768,6 +2898,28 @@ fn resolveDirectChannel(l:u32,page:u32,q:vec3u,levelDims:vec3i,slotBase:u32,
  let encoded=state[atBase(OWNER,slotBase,resolved.x)];
  if(encoded==0u||encoded>capacity()){return channelCode(29u,0u);}
  return encoded-1u;}
+// A topology-regular row has only its six Cartesian faces.  The accepted page
+// transaction already proved physical adjacency and every brick's mask/rank
+// publication, so repeating pageSlotCoded's page-origin and general-direction
+// checks on those six faces is redundant.  This direct page-neighbour/rank
+// path retains every capacity/owner guard and fails closed with the same codes.
+fn resolveRegularChannel(l:u32,page:u32,q:vec3u,slotBase:u32,transform:u32,channel:u32)->u32{
+ let direction=worldDirection(canonicalDirection(channel),transform);let absolute=abs(direction);
+ if(absolute.x+absolute.y+absolute.z!=1){return CHANNEL_SKIP;}
+ let targetQ=vec3i(q)+direction;if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){return channelCode(27u,0u);}
+ let targetCell=vec3u(targetQ);let shape=vec3u(8u,8u,4u);let delta=vec3i(targetCell/shape)-vec3i(q/shape);
+ if(any(delta<vec3i(-1))||any(delta>vec3i(1))){return channelCode(28u,21u);}
+ let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));let physical=pageNeighbour(l,page,ordinal);
+ if(physical==INVALID){return channelCode(28u,0u);}
+ let record=brickRecord(l,targetCell);let bit=localBit(targetCell);let low=topology[record+1u];let high=topology[record+2u];
+ if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return channelCode(28u,0u);}
+ let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
+ if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
+ let ranked=topology[record+3u]+rank;let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
+ if(slot>=levelCapacity(l)){return channelCode(28u,23u);}
+ let flags=state[atBase(FLAGS,slotBase,slot)];if((flags&MG_ONLY)!=0u){return CHANNEL_SKIP;}
+ let encoded=state[atBase(OWNER,slotBase,slot)];if(encoded==0u||encoded>capacity()){return channelCode(29u,0u);}
+ return encoded-1u;}
 // Replay a coded resolution's reports in the order the inline walk raised
 // them: pageSlot's own stage first, then the caller's. reportAt claims the
 // first error by compare-exchange, so preserving per-lane order preserves the
@@ -2866,7 +3018,7 @@ fn stageDirectTerm(row:u32,channel:u32){let destination=row*162u+channel;
  if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
  let c=section63Coefficients[base+1u+channel];var term=0.0;
  if(c!=0.0){let image=operatorRowBase(row);
-  if(image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)||operatorRows[image]!=0u){reportAt(2u,31u,row);return;}
+  if(image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)||(operatorRows[image]&~HYBRID_REGULAR_ROW)!=0u){reportAt(2u,31u,row);return;}
   let code=operatorRows[image+1u+channel];
   if(code>=CHANNEL_CODE_BASE){reportChannelCode(code,row);}
   else{term=c*(inputVector[row]-inputVector[code]);}}
@@ -2906,10 +3058,17 @@ fn buildOperatorRow(row:u32,word:u32,predecessor:u32){
  if(h.y!=0u&&m.error==0u&&(m.transformAndFlags&0x80000000u)!=0u){
   l=countTrailingZeros(h.y);q=originOf(h)/(1u<<l);page=pageFor(l,q);
   if(page!=INVALID&&page<levelCapacity(l)){status=0u;}}
- if(word==0u){operatorRows[image]=status;return;}
+ let regular=m.caseId==0u&&(m.transformAndFlags&0x3f00u)==0u;
+ if(word==0u&&regular&&status==0u){let base=coefficientBase(row);
+  if(base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);status=26u;}
+  else{for(var channel=6u;channel<18u;channel+=1u){
+   if(section63Coefficients[base+1u+channel]!=0.0){reportAt(1u,32u,row);status=32u;break;}}}}
+ if(word==0u){operatorRows[image]=status|select(0u,HYBRID_REGULAR_ROW,regular&&status==0u);return;}
  if(status!=0u){operatorRows[image+word]=CHANNEL_SKIP;return;}
- operatorRows[image+word]=resolveDirectChannel(l,page,q,vec3i(dims(l)),levelBase(l),
-  m.transformAndFlags&63u,word-1u);
+ if(regular){operatorRows[image+word]=resolveRegularChannel(
+   l,page,q,levelBase(l),m.transformAndFlags&63u,word-1u);
+ }else{operatorRows[image+word]=resolveDirectChannel(
+   l,page,q,vec3i(dims(l)),levelBase(l),m.transformAndFlags&63u,word-1u);}
 }
 @compute @workgroup_size(32) fn buildAccurateOperatorRows(@builtin(workgroup_id) wg:vec3u,
  @builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -3076,11 +3235,19 @@ fn validWorkCount(cls:u32)->u32{let base=worksetBase(cls);
   ||worksets[base+1u]>worksets[base+2u]){return 0u;}
  return worksets[base+1u];}
 fn acceptedUnionCount()->u32{var count=0u;
- for(var cls=0u;cls<4u;cls+=1u){let base=worksetBase(cls);
+ for(var cls=0u;cls<5u;cls+=1u){let base=worksetBase(cls);
   if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
    ||worksets[base+1u]>worksets[base+2u]){return 0u;}
   count+=worksets[base+1u];}
  return count;}
+fn unionRow(item:u32)->u32{var remaining=item;
+ for(var cls=0u;cls<5u;cls+=1u){let base=worksetBase(cls);
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+   ||worksets[base+1u]>worksets[base+2u]){return INVALID;}
+  let count=worksets[base+1u];if(remaining<count){
+   if(base+WORKSET_HEADER_WORDS+remaining>=arrayLength(&worksets)){return INVALID;}
+   return worksets[base+WORKSET_HEADER_WORDS+remaining];}remaining-=count;}
+ return INVALID;}
 // A fine ghost can point to a coarse owner only at a coarse/fine interface.
 // Section 6.3 classifies exactly those rows as transition classes 1 and 3;
 // regular and physical-only rows therefore have an identically zero E^T tail.
@@ -3422,6 +3589,7 @@ fn contactCoord(own:vec4u,other:vec4u,l:u32)->vec3u{let scale=1u<<l;let begin=or
   ||capturePages.sourceGeneration==0u||capturePages.sourceGeneration!=deltaControl(7u)
   ||!deltaAccepted(n)){captureReport(OVERFLOW);}
  if(!previousValid()&&publishedGeneration!=0u){captureReport(OVERFLOW);}
+ writeCandidateSchedule(0u,select(captureWorkCount(),0u,captureFailed()),1u);
 }
 // Page-parallel L1 validation. One WORKGROUP owns one work item and its
 // sixty-four lanes own that page's sixty-four rows, so the per-row
@@ -3437,9 +3605,8 @@ fn contactCoord(own:vec4u,other:vec4u,l:u32)->vec3u{let scale=1u<<l;let begin=or
 // work-list reduction that follows reads its own dispatch's output.
 @compute @workgroup_size(64) fn planL1CaptureDelta(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
- // Two-dimensional work index: workgroupPerItemDispatch pins X at exactly
- // 65,535 once the row capacity saturates one dimension, so this stride is
- // that extent. Below saturation wg.y is always zero.
+ // The GPU-authored record folds exact work items into two dimensions and
+ // pins X at 65,535 only when the live count needs a second dimension.
  let generation=captureGeneration();let work=wg.x+wg.y*65535u;
  // Out-of-range pages and non-unique work items contribute nothing to the page
  // records; reduceL1CaptureDelta re-derives their flags from the same work
@@ -3525,9 +3692,7 @@ fn contactCoord(own:vec4u,other:vec4u,l:u32)->vec3u{let scale=1u<<l;let begin=or
 // lane 0, under the identical eligibility test.
 @compute @workgroup_size(64) fn commitChangedL1(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
- // Two-dimensional work index: workgroupPerItemDispatch pins X at exactly
- // 65,535 once the row capacity saturates one dimension, so this stride is
- // that extent. Below saturation wg.y is always zero.
+ // The matching GPU-authored record uses the same fixed two-dimensional fold.
  let generation=captureGeneration();let work=wg.x+wg.y*65535u;
  let page=captureWorkPage(work);
  if(work>=captureWorkCount()||page>=captureExpectedPages()||!captureWorkUnique(work,page)
@@ -3585,6 +3750,59 @@ fn committedRowBase(r:u32)->u32{return COMMITTED_HEADER+r*COMMITTED_STRIDE;}
  // a topology/case change, so the finest stencil must follow every publication.
  levelDelta[deltaAt(0u,1u)]=DELTA_STENCIL;
 }
+fn candidateScheduleBase()->u32{return levels()*DISPATCH_WORDS+5u;}
+fn writeCandidateSchedule(record:u32,items:u32,lanes:u32){
+ let blocks=(items+lanes-1u)/lanes;let x=min(65535u,blocks);let at=candidateScheduleBase()+record*3u;
+ candidateDispatch[at]=x;candidateDispatch[at+1u]=select(1u,(blocks+x-1u)/x,x>0u);
+ candidateDispatch[at+2u]=1u;
+}
+@compute @workgroup_size(1) fn prepareCandidateSchedules(){
+ var topologyLevelItems=0u;var stencilLevelItems=0u;var transferSlotItems=0u;
+ var stencilSlotItems=0u;var topologyRowItems=0u;var clearItems=0u;var brickItems=0u;
+ var logicalPageItems=0u;var physicalPageItems=0u;var commitItems=0u;
+ for(var l=0u;l<levels();l+=1u){
+  let priorTransfers=candidateDispatch[l*DISPATCH_WORDS+1u];
+  let priorSlots=candidateDispatch[l*DISPATCH_WORDS];
+  let priorPages=candidateDispatch[l*DISPATCH_WORDS+8u];
+  candidateDispatch[l*DISPATCH_WORDS+9u]=priorTransfers;
+  candidateDispatch[l*DISPATCH_WORDS+10u]=priorSlots;
+  candidateDispatch[l*DISPATCH_WORDS+11u]=priorPages;
+  let topology=topologyDirty(l);let stencil=stencilDirty(l);
+  let transfer=l+1u<levels()&&(topology||topologyDirty(l+1u));
+  if(topology||stencil||transfer){commitItems=l+1u;}
+  if(topology||transfer){topologyLevelItems=l+1u;}
+  if(stencil){stencilLevelItems=l+1u;}
+  var selected=count(l);
+  if(topology){
+   // Sixteen is the proven maximum support expansion per live row. This is a
+   // launch bound only; the inserter remains the fail-closed capacity authority.
+   let liveBound=16u*rows();
+   selected=min(levelCapacity(l),liveBound);
+   topologyRowItems=rows();
+   clearItems=max(clearItems,max(max(priorSlots,priorPages),max(rows(),previousRows())));}
+  if(stencil){stencilSlotItems=max(stencilSlotItems,selected);}
+  if(transfer){var coarseSelected=count(l+1u);
+   if(topologyDirty(l+1u)){coarseSelected=min(levelCapacity(l+1u),16u*rows());}
+   transferSlotItems=max(transferSlotItems,max(selected,coarseSelected));
+   clearItems=max(clearItems,max(priorSlots,priorTransfers));}
+ }
+ // The current directory builders still traverse dense brick/page identity on
+ // dirty epochs. Their compact touched-identity replacement is a separate
+ // cutover; clean epochs publish zero work here.
+ if(topologyLevelItems!=0u){brickItems=p.totals.y;logicalPageItems=p.totals.z;
+  physicalPageItems=p.totals.z;}
+ let failed=captureFailed();
+ writeCandidateSchedule(1u,select(clearItems,0u,failed),64u);
+ writeCandidateSchedule(2u,select(topologyLevelItems,0u,failed),1u);
+ writeCandidateSchedule(3u,select(transferSlotItems,0u,failed),64u);
+ writeCandidateSchedule(4u,select(brickItems,0u,failed),64u);
+ writeCandidateSchedule(5u,select(logicalPageItems,0u,failed),64u);
+ writeCandidateSchedule(6u,select(physicalPageItems,0u,failed),64u);
+ writeCandidateSchedule(7u,select(commitItems,0u,failed),1u);
+ writeCandidateSchedule(8u,select(stencilLevelItems,0u,failed),1u);
+ writeCandidateSchedule(9u,select(stencilSlotItems,0u,failed),64u);
+ writeCandidateSchedule(10u,select(topologyRowItems,0u,failed),64u);
+}
 @compute @workgroup_size(64) fn clearCorrection(@builtin(global_invocation_id) g:vec3u){let r=rowIndex(g);if(r<rows()&&!stopped()){outputCorrection[r]=0.0;}}
 fn cAt(c:u32,l:u32,s:u32)->u32{return c*totalLevelSlots()+levelBase(l)+s;}
 fn cCount(l:u32)->u32{return candidateDispatch[l*DISPATCH_WORDS];}
@@ -3593,6 +3811,7 @@ fn cRowMap(l:u32,r:u32)->u32{return candidateTopology[rowMapBase()+l*p.capacity.
 fn cLoadf(c:u32,l:u32,s:u32)->f32{return bitcast<f32>(candidateState[cAt(c,l,s)]);}
 fn cStoref(c:u32,l:u32,s:u32,v:f32){candidateState[cAt(c,l,s)]=bitcast<u32>(v);}
 fn candidateReport(l:u32){levelDelta[deltaAt(l,4u)]|=DELTA_ERROR;}
+fn candidateReportCode(l:u32,code:u32){levelDelta[deltaAt(l,4u)]|=DELTA_ERROR|code;}
 fn cMergeClass(index:u32,incoming:u32){let old=candidateState[index];var merged=MG_ONLY;
  if((old&ACTIVE)!=0u||(incoming&ACTIVE)!=0u){merged=ACTIVE;}else if((old&GHOST)!=0u||(incoming&GHOST)!=0u){merged=GHOST;}
  candidateState[index]=merged;}
@@ -3744,18 +3963,29 @@ fn packChunkFlags(lane:u32){
   let dirtyTopology=topologyDirty(l);
   let dirtyTransfer=l+1u<levels()&&(dirtyTopology||topologyDirty(l+1u));
   if(dirtyTopology){
-   if(i==0u){levelDelta[deltaAt(l,4u)]=0u;}
-   if(i<levelCapacity(l)){candidateState[cAt(KEY,l,i)]=0u;
-    candidateState[cAt(FLAGS,l,i)]=0u;candidateState[cAt(OWNER,l,i)]=0u;
-    candidateTopology[workBase()+levelBase(l)+i]=INVALID;}
-   if(i<p.capacity.x){candidateTopology[rowMapBase()+l*p.capacity.x+i]=INVALID;}
-   if(i<DISPATCH_WORDS){candidateDispatch[l*DISPATCH_WORDS+i]=0u;}
+   let priorSlots=candidateDispatch[l*DISPATCH_WORDS+10u];
+   let priorPages=candidateDispatch[l*DISPATCH_WORDS+11u];
+   if(i==0u){levelDelta[deltaAt(l,4u)]=0u;
+    candidateDispatch[l*DISPATCH_WORDS]=0u;candidateDispatch[l*DISPATCH_WORDS+8u]=0u;}
+   if(i<priorSlots){let slot=cWorkSlot(l,i);
+    if(slot>=levelCapacity(l)){candidateReport(l);}else{
+     candidateState[cAt(KEY,l,slot)]=0u;candidateState[cAt(FLAGS,l,slot)]=0u;
+     candidateState[cAt(OWNER,l,slot)]=0u;}}
+   if(i<max(rows(),previousRows())){candidateTopology[rowMapBase()+l*p.capacity.x+i]=INVALID;}
+   if(i<priorPages){let key=candidateTopology[pageRecord(l,i)];
+    if(key==0u){candidateReport(l);}else{let q=decode(key,l)/vec3u(8u,8u,4u);let d=logicalPageDims(l);
+     if(any(q>=d)){candidateReport(l);}else{
+      candidateTopology[pageDirectoryBase()+pageLevelOffset(l)+q.x+d.x*(q.y+d.y*q.z)]=INVALID;}}}
   }
   if(dirtyTransfer){
    if(i==0u){candidateDispatch[l*DISPATCH_WORDS+1u]=0u;}
-   if(i<levelCapacity(l)){candidateTopology[parentHeadBase(l)+i]=INVALID;
-    candidateTopology[parentTailBase(l)+i]=INVALID;
-    candidateTopology[fineHeadBase(l)+i]=INVALID;candidateTopology[fineCountBase(l)+i]=0u;}
+   let priorFine=candidateDispatch[l*DISPATCH_WORDS+10u];
+   if(i<priorFine){let fine=cWorkSlot(l,i);if(fine>=levelCapacity(l)){candidateReport(l);}else{
+    candidateTopology[fineHeadBase(l)+fine]=INVALID;candidateTopology[fineCountBase(l)+fine]=0u;}}
+   let priorCoarse=candidateDispatch[(l+1u)*DISPATCH_WORDS+10u];
+   if(i<priorCoarse){let coarse=cWorkSlot(l+1u,i);if(coarse>=levelCapacity(l+1u)){candidateReport(l);}else{
+    candidateTopology[parentHeadBase(l)+coarse]=INVALID;
+    candidateTopology[parentTailBase(l)+coarse]=INVALID;}}
   }
  }
 }
@@ -3957,11 +4187,19 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
 @compute @workgroup_size(64) fn countCandidateTransfers(@builtin(global_invocation_id) g:vec3u){
  let i=boundedLinearIndex(g);
  for(var l=0u;l+1u<levels();l+=1u){
- if(!transferLive(l)||i>=selectedCount(l)){continue;}
-  let fine=selectedWorkSlot(l,i);
-  let fanOut=transferFanOut(l,fine,selectedState(FLAGS,l,fine),
-   decode(selectedState(KEY,l,fine),l));
-  candidateTopology[fineCountBase(l)+fine]=fanOut;}
+  if(!transferLive(l)){continue;}
+  // Initialize the exact live identities that the new epoch will link. The
+  // prior-identity retirement pass cannot cover cold-start slots or coarse
+  // slots newly introduced by this rebuild; leaving their zero-filled tails
+  // intact makes record 0 look like a valid predecessor and splices distinct
+  // parent chains together.
+  if(i<selectedCount(l+1u)){let coarse=selectedWorkSlot(l+1u,i);
+   candidateTopology[parentHeadBase(l)+coarse]=INVALID;
+   candidateTopology[parentTailBase(l)+coarse]=INVALID;}
+  if(i<selectedCount(l)){let fine=selectedWorkSlot(l,i);
+   candidateTopology[fineHeadBase(l)+fine]=INVALID;
+   candidateTopology[fineCountBase(l)+fine]=transferFanOut(l,fine,
+    selectedState(FLAGS,l,fine),decode(selectedState(KEY,l,fine),l));}}
 }
 // Phase 5c (one 256-lane workgroup per level). Exclusive prefix sum over the
 // fan-out in workset order. This reproduces the former append counter exactly:
@@ -4090,39 +4328,25 @@ fn brickCell(origin:vec3u,bit:u32)->vec3u{return origin+vec3u(bit%4u,(bit/4u)%4u
  candidateTopology[record+1u]=low;candidateTopology[record+2u]=high;candidateTopology[record+3u]=0u;
 }
 // Phase 7 (one 256-lane workgroup per level). The ranked base is a prefix sum
-// over the level's bricks in dense order; the block scan reproduces it exactly
-// because integer addition is associative, and the levels still run
-// concurrently as one workgroup each.
+// over the level's bricks in dense order.
 @compute @workgroup_size(256) fn rankCandidateBricks(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
- let l=wg.x;
- let live=uniformWord(lane,select(0u,1u,l<levels()&&topologyDirty(l)));
- if(live==0u){return;}
- let generation=levelDelta[deltaAt(l,0u)];
- let first=directoryBase()+16u+brickLevelOffset(l)*4u;
- let n=uniformWord(lane,brickCount(l));
- if(lane==0u){levelDelta[deltaAt(l,6u)]=generation;chunkCarry=0u;}
- workgroupBarrier();
- for(var block=0u;block<n;block+=CHUNK){
-  let b=block+lane;var occupancy=0u;var record=0u;
-  if(b<n){record=first+b*4u;
-   occupancy=countOneBits(candidateTopology[record+1u])+countOneBits(candidateTopology[record+2u]);}
+ let l=wg.x;let live=uniformWord(lane,select(0u,1u,l<levels()&&topologyDirty(l)));
+ if(live==0u){return;}let generation=levelDelta[deltaAt(l,0u)];
+ let first=directoryBase()+16u+brickLevelOffset(l)*4u;let n=uniformWord(lane,brickCount(l));
+ if(lane==0u){levelDelta[deltaAt(l,6u)]=generation;chunkCarry=0u;}workgroupBarrier();
+ for(var block=0u;block<n;block+=CHUNK){let b=block+lane;var occupancy=0u;var record=0u;
+  if(b<n){record=first+b*4u;occupancy=countOneBits(candidateTopology[record+1u])+countOneBits(candidateTopology[record+2u]);}
   let inclusive=blockInclusiveSum(lane,occupancy);
   if(b<n){candidateTopology[record+3u]=chunkCarry+inclusive-occupancy;}
-  storageBarrier();workgroupBarrier();
-  if(lane==0u){chunkCarry=chunkCarry+chunkScan[CHUNK-1u];}
-  workgroupBarrier();
- }
- if(lane==0u){
-  if(chunkCarry!=cCount(l)){candidateReport(l);}
+  storageBarrier();workgroupBarrier();if(lane==0u){chunkCarry+=chunkScan[CHUNK-1u];}workgroupBarrier();}
+ if(lane==0u){if(chunkCarry!=cCount(l)){candidateReport(l);}
   candidateTopology[directoryBase()+2u+l]=generation;}
 }
-// Phase 8 (brick parallel). Each brick owns a disjoint ranked range, so the
-// compact slot vector is written without contention and in mask-rank order.
+// Phase 8 (brick parallel). Each brick owns a disjoint ranked range.
 @compute @workgroup_size(64) fn scatterCandidateRankedSlots(@builtin(global_invocation_id) g:vec3u){
  let index=boundedLinearIndex(g);if(index>=totalBrickCount()){return;}
- let located=brickOfIndex(index);let l=located.x;
- if(l>=levels()||!topologyDirty(l)){return;}
+ let located=brickOfIndex(index);let l=located.x;if(l>=levels()||!topologyDirty(l)){return;}
  let origin=brickOrigin(l,located.y);let record=directoryBase()+16u+index*4u;
  let low=candidateTopology[record+1u];let high=candidateTopology[record+2u];
  let base=rankedSlotsBase()+levelBase(l)+candidateTopology[record+3u];var rank=0u;
@@ -4130,62 +4354,38 @@ fn brickCell(origin:vec3u,bit:u32)->vec3u{return origin+vec3u(bit%4u,(bit/4u)%4u
   let word=select(low,high,bit>=32u);if(((word>>(bit&31u))&1u)==0u){continue;}
   candidateTopology[base+rank]=cLookup(l,brickCell(origin,bit));rank+=1u;}
 }
-fn pageOfIndex(index:u32)->vec2u{
- var l=levels();var local=0u;
- for(var k=0u;k<levels();k+=1u){let begin=pageLevelOffset(k);
-  if(index>=begin&&index<begin+logicalPageCount(k)){l=k;local=index-begin;}}
- return vec2u(l,local);
-}
 fn logicalPageOrigin(l:u32,dense:u32)->vec3u{let d=logicalPageDims(l);
  return vec3u(dense%d.x,(dense/d.x)%d.y,dense/(d.x*d.y))*vec3u(8u,8u,4u);}
-// Phase 9 (logical-page parallel). Marks raw occupancy in the page directory
-// word the compaction is about to overwrite, so no scratch storage is needed.
+fn pageOfIndex(index:u32)->vec2u{var l=levels();var local=0u;
+ for(var k=0u;k<levels();k+=1u){let begin=pageLevelOffset(k);
+  if(index>=begin&&index<begin+logicalPageCount(k)){l=k;local=index-begin;}}
+ return vec2u(l,local);}
+// Phase 9 (logical-page parallel). Marks raw occupancy in the page directory.
 @compute @workgroup_size(64) fn markCandidatePageOccupancy(@builtin(global_invocation_id) g:vec3u){
  let index=boundedLinearIndex(g);if(index>=p.totals.z){return;}
- let located=pageOfIndex(index);let l=located.x;
- if(l>=levels()||!topologyDirty(l)){return;}
+ let located=pageOfIndex(index);let l=located.x;if(l>=levels()||!topologyDirty(l)){return;}
  let origin=logicalPageOrigin(l,located.y);let extent=dims(l);var occupied=false;
  for(var by=0u;by<2u;by+=1u){for(var bx=0u;bx<2u;bx+=1u){let q=origin+vec3u(4u*bx,4u*by,0u);
-   if(any(q>=extent)){continue;}let record=brickRecord(l,q);
-   occupied=occupied||candidateTopology[record+1u]!=0u||candidateTopology[record+2u]!=0u;}}
- candidateTopology[pageDirectoryBase()+pageLevelOffset(l)+located.y]=select(0u,1u,occupied);
-}
-// Phase 10 (one 256-lane workgroup per level). Physical page identifiers stay
-// assigned in dense logical order - the block scan publishes exactly the serial
-// running counter - which is the identity the halo staging depends on. The
-// overflow branch is unchanged in outcome: the occupied-page running total is
-// monotone, so every rank at or beyond the level capacity is invalidated just
-// as the serial sticky flag did, and the published count is zeroed on the same
-// predicate (some occupied page reached rank levelCapacity).
+  if(any(q>=extent)){continue;}let record=brickRecord(l,q);
+  occupied=occupied||candidateTopology[record+1u]!=0u||candidateTopology[record+2u]!=0u;}}
+ candidateTopology[pageDirectoryBase()+pageLevelOffset(l)+located.y]=select(0u,1u,occupied);}
+// Phase 10 (one 256-lane workgroup per level). Compact occupied logical pages.
 @compute @workgroup_size(256) fn compactCandidatePages(@builtin(workgroup_id) wg:vec3u,
  @builtin(local_invocation_index) lane:u32){
- let l=wg.x;
- let live=uniformWord(lane,select(0u,1u,l<levels()&&topologyDirty(l)));
- if(live==0u){return;}
- let logicalPages=uniformWord(lane,logicalPageCount(l));
- let directory=pageDirectoryBase()+pageLevelOffset(l);
- let limit=levelCapacity(l);
- if(lane==0u){chunkCarry=0u;}
- workgroupBarrier();
- for(var block=0u;block<logicalPages;block+=CHUNK){
-  let dense=block+lane;var occupied=0u;
+ let l=wg.x;let live=uniformWord(lane,select(0u,1u,l<levels()&&topologyDirty(l)));
+ if(live==0u){return;}let logicalPages=uniformWord(lane,logicalPageCount(l));
+ let directory=pageDirectoryBase()+pageLevelOffset(l);let limit=levelCapacity(l);
+ if(lane==0u){chunkCarry=0u;}workgroupBarrier();
+ for(var block=0u;block<logicalPages;block+=CHUNK){let dense=block+lane;var occupied=0u;
   if(dense<logicalPages&&candidateTopology[directory+dense]!=0u){occupied=1u;}
-  let inclusive=blockInclusiveSum(lane,occupied);
-  let pageTotal=chunkCarry+inclusive-occupied;
-  if(dense<logicalPages){
-   if(occupied==0u||pageTotal>=limit){
-    if(occupied!=0u){candidateReport(l);}
-    candidateTopology[directory+dense]=INVALID;}
-   else{candidateTopology[pageRecord(l,pageTotal)]=coordKey(logicalPageOrigin(l,dense),l);
+  let inclusive=blockInclusiveSum(lane,occupied);let pageTotal=chunkCarry+inclusive-occupied;
+  if(dense<logicalPages){if(occupied==0u||pageTotal>=limit){if(occupied!=0u){candidateReport(l);}
+    candidateTopology[directory+dense]=INVALID;}else{
+    candidateTopology[pageRecord(l,pageTotal)]=coordKey(logicalPageOrigin(l,dense),l);
     candidateTopology[directory+dense]=pageTotal;}}
-  storageBarrier();workgroupBarrier();
-  if(lane==0u){chunkCarry=chunkCarry+chunkScan[CHUNK-1u];}
-  workgroupBarrier();
- }
- if(lane==0u){candidateDispatch[l*DISPATCH_WORDS+8u]=select(chunkCarry,0u,chunkCarry>limit);}
-}
-// Phase 11 (page parallel). The immutable 27-entry physical record is a pure
-// read of the compacted directory.
+  storageBarrier();workgroupBarrier();if(lane==0u){chunkCarry+=chunkScan[CHUNK-1u];}workgroupBarrier();}
+ if(lane==0u){candidateDispatch[l*DISPATCH_WORDS+8u]=select(chunkCarry,0u,chunkCarry>limit);}}
+// Phase 11 (page parallel). The immutable record is a pure read of the compacted directory.
 @compute @workgroup_size(64) fn linkCandidatePageNeighbours(@builtin(global_invocation_id) g:vec3u){
  let index=boundedLinearIndex(g);if(index>=p.totals.z){return;}
  let located=pageOfIndex(index);let l=located.x;let page=located.y;
@@ -4220,13 +4420,13 @@ fn logicalPageOrigin(l:u32,dense:u32)->vec3u{let d=logicalPageDims(l);
   var acceptedBase=0u;
   if(acceptedFine){let row=encodedOwner-1u;acceptedBase=(acceptedBank()*p.capacity.x+row)*19u;
    if(acceptedBase+19u>arrayLength(&acceptedCoefficients)){
-    candidateReport(l);acceptedFine=false;
+    candidateReportCode(l,0x100u);acceptedFine=false;
    }else{let acceptedDiagonal=acceptedCoefficients[acceptedBase];var acceptedTerms:array<f32,18>;
     for(var channel=0u;channel<18u;channel+=1u){let c=acceptedCoefficients[acceptedBase+1u+channel];
-     if(!finite(c)||c<0.0){candidateReport(l);acceptedFine=false;}acceptedTerms[channel]=max(0.0,c);}
+     if(!finite(c)||c<0.0){candidateReportCode(l,0x200u);acceptedFine=false;}acceptedTerms[channel]=max(0.0,c);}
     let acceptedOff=canonical18Sum(acceptedTerms);
     if(!finite(acceptedDiagonal)||!(acceptedDiagonal>0.0)||!finite(acceptedOff)){
-     candidateReport(l);acceptedFine=false;
+     candidateReportCode(l,0x400u);acceptedFine=false;
     }else if(acceptedFine){
      // Aanjaneya et al. Section 4.3 uses a first-order M1 with the same
      // boundary conditions as L2. Keep the symmetric first-order grid graph,
@@ -4260,8 +4460,8 @@ var<workgroup> spectralLane:array<f32,64>;
  if(live){let n=selectedCount(l);
   for(var i=lane;i<n;i+=64u){let s=selectedWorkSlot(l,i);let d=cLoadf(DIAG,l,s);var off=0.0;
    for(var k=0u;k<18u;k+=1u){let c=cLoadf(XP+k,l,s);
-    if(!finite(c)||c<0.0){candidateReport(l);}off+=abs(c);}
-   if(!finite(d)||!(d>0.0)||!finite(off)||off>d*(1.0+1e-4)){candidateReport(l);}
+    if(!finite(c)||c<0.0){candidateReportCode(l,0x800u);}off+=abs(c);}
+   if(!finite(d)||!(d>0.0)||!finite(off)||off>d*(1.0+1e-4)){candidateReportCode(l,0x1000u);}
    else{upper=max(upper,1.0+off/d);}}}
  spectralLane[lane]=upper;workgroupBarrier();
  if(lane==0u&&live){var total=1.0;
@@ -4278,36 +4478,65 @@ var<workgroup> spectralLane:array<f32,64>;
    captureReport(OVERFLOW);return;}}
  if(selectedCount(levels()-1u)!=1u){captureReport(OVERFLOW);}
 }
-fn commitCandidateLevelAt(l:u32,i:u32){
+fn commitCandidateBrickForKey(l:u32,key:u32){
+ if(key==0u){return;}let q=decode(key,l);let source=brickRecord(l,q);
+ for(var w=0u;w<4u;w+=1u){topology[source+w]=candidateTopology[source+w];}
+}
+fn commitCandidateSlot(l:u32,slot:u32,whole:bool,stencil:bool){
+ if(slot>=levelCapacity(l)){captureReport(OVERFLOW);return;}
+ if(stencil){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,slot)]=candidateState[cAt(c,l,slot)];}
+  for(var k=0u;k<18u;k+=1u){topology[neighbourAt(k,l,slot)]=candidateTopology[neighbourAt(k,l,slot)];}}
+ if(whole){for(var c=0u;c<STATE_CHANNELS;c+=1u){state[at(c,l,slot)]=candidateState[cAt(c,l,slot)];}}
+}
+fn commitCandidateLevelAt(l:u32){
  let topologyChanged=topologyDirty(l);
  let transferChanged=topologyChanged||(l+1u<levels()&&topologyDirty(l+1u));
  if(!topologyChanged&&!stencilDirty(l)&&!transferChanged){return;}
  if(captureFailed()||levelDelta[deltaAt(l,4u)]!=0u){return;}
- if(stencilDirty(l)&&i<levelCapacity(l)){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}}
- // The eighteen coefficients publish under the stencil gate above and again
- // inside the whole-channel topology copy below, so their column indices
- // publish under the union of both, at the identical index and dispatch. A
- // coefficient and the slot it was accumulated against can then never reach an
- // accepted epoch apart, whichever gate carried them.
- if((stencilDirty(l)||topologyChanged)&&i<levelCapacity(l)){
-  for(var k=0u;k<18u;k+=1u){topology[neighbourAt(k,l,i)]=candidateTopology[neighbourAt(k,l,i)];}}
- if(topologyChanged&&i<levelCapacity(l)){for(var c=0u;c<STATE_CHANNELS;c+=1u){state[at(c,l,i)]=candidateState[cAt(c,l,i)];}
-  topology[workBase()+levelBase(l)+i]=candidateTopology[workBase()+levelBase(l)+i];
-  topology[rankedSlotsBase()+levelBase(l)+i]=candidateTopology[rankedSlotsBase()+levelBase(l)+i];}
- if(topologyChanged&&i<candidateDispatch[l*DISPATCH_WORDS+8u]){let page=pageRecord(l,i);
-  for(var word=0u;word<28u;word+=1u){topology[page+word]=candidateTopology[page+word];}}
- if(topologyChanged&&i<logicalPageCount(l)){let pageIndex=pageDirectoryBase()+pageLevelOffset(l)+i;
-  topology[pageIndex]=candidateTopology[pageIndex];}
- if(topologyChanged&&i<p.capacity.x){topology[rowMapBase()+l*p.capacity.x+i]=candidateTopology[rowMapBase()+l*p.capacity.x+i];}
- if(transferChanged&&l+1u<levels()&&i<levelCapacity(l)){topology[parentHeadBase(l)+i]=candidateTopology[parentHeadBase(l)+i];
-  topology[parentTailBase(l)+i]=candidateTopology[parentTailBase(l)+i];
-  topology[fineHeadBase(l)+i]=candidateTopology[fineHeadBase(l)+i];
-  topology[fineCountBase(l)+i]=candidateTopology[fineCountBase(l)+i];}
- if(transferChanged&&l+1u<levels()&&i<transferCapacity(l)){for(var w=0u;w<4u;w+=1u){
-  topology[transferWord(l,i,w)]=candidateTopology[transferWord(l,i,w)];}}
- if(topologyChanged&&i<brickCount(l)){let record=directoryBase()+16u+(brickLevelOffset(l)+i)*4u;
-  for(var w=0u;w<4u;w+=1u){topology[record+w]=candidateTopology[record+w];}}
- if(i==0u){if(stencilDirty(l)){state[at(SPECTRAL,l,0u)]=levelDelta[deltaAt(l,7u)];}
+ let oldSlots=count(l);let newSlots=selectedCount(l);let stencil=stencilDirty(l);
+ if(topologyChanged){
+  // Empty bricks are part of the accepted directory contract too: their
+  // current-generation stamp proves that a failed occupancy lookup is an
+  // authoritative miss rather than stale topology. Copying only bricks that
+  // contain live slots leaves queried neighbouring empties on the prior
+  // generation and makes directoryLookup fail closed. The touched-directory
+  // cutover may narrow this loop only after it publishes both occupied and
+  // queried-empty brick identities.
+  for(var brick=0u;brick<brickCount(l);brick+=1u){let record=directoryBase()+16u+
+    (brickLevelOffset(l)+brick)*4u;
+   for(var word=0u;word<4u;word+=1u){topology[record+word]=candidateTopology[record+word];}}
+  // Retired accepted identities must publish the candidate's cleared words;
+  // new identities publish their claimed words. Their union is the complete
+  // sparse replacement for the old level-capacity channel sweep.
+  for(var i=0u;i<oldSlots;i+=1u){let slot=workSlot(l,i);commitCandidateSlot(l,slot,true,true);}
+  for(var i=0u;i<newSlots;i+=1u){let slot=cWorkSlot(l,i);commitCandidateSlot(l,slot,true,true);
+   topology[workBase()+levelBase(l)+i]=slot;
+   topology[rankedSlotsBase()+levelBase(l)+i]=candidateTopology[rankedSlotsBase()+levelBase(l)+i];}
+  for(var r=0u;r<max(rows(),previousRows());r+=1u){topology[rowMapBase()+l*p.capacity.x+r]=candidateTopology[rowMapBase()+l*p.capacity.x+r];}
+  let oldPages=pageCount(l);for(var i=0u;i<oldPages;i+=1u){let key=pageKey(l,i);if(key==0u){captureReport(OVERFLOW);continue;}
+   let q=decode(key,l)/vec3u(8u,8u,4u);let d=logicalPageDims(l);
+   if(any(q>=d)){captureReport(OVERFLOW);}else{let at=pageDirectoryBase()+pageLevelOffset(l)+q.x+d.x*(q.y+d.y*q.z);
+    topology[at]=candidateTopology[at];}}
+  let newPages=candidateDispatch[l*DISPATCH_WORDS+8u];for(var i=0u;i<newPages;i+=1u){let page=pageRecord(l,i);
+   for(var word=0u;word<28u;word+=1u){topology[page+word]=candidateTopology[page+word];}
+   let q=decode(candidateTopology[page],l)/vec3u(8u,8u,4u);let d=logicalPageDims(l);
+   if(any(q>=d)){captureReport(OVERFLOW);}else{let at=pageDirectoryBase()+pageLevelOffset(l)+q.x+d.x*(q.y+d.y*q.z);
+    topology[at]=candidateTopology[at];}}
+ }
+ if(stencil&&!topologyChanged){for(var i=0u;i<newSlots;i+=1u){commitCandidateSlot(l,selectedWorkSlot(l,i),false,true);}}
+ if(transferChanged&&l+1u<levels()){
+  for(var i=0u;i<count(l);i+=1u){let fine=workSlot(l,i);topology[fineHeadBase(l)+fine]=candidateTopology[fineHeadBase(l)+fine];
+   topology[fineCountBase(l)+fine]=candidateTopology[fineCountBase(l)+fine];}
+  for(var i=0u;i<selectedCount(l);i+=1u){let fine=selectedWorkSlot(l,i);topology[fineHeadBase(l)+fine]=candidateTopology[fineHeadBase(l)+fine];
+   topology[fineCountBase(l)+fine]=candidateTopology[fineCountBase(l)+fine];}
+  for(var i=0u;i<count(l+1u);i+=1u){let coarse=workSlot(l+1u,i);topology[parentHeadBase(l)+coarse]=candidateTopology[parentHeadBase(l)+coarse];
+   topology[parentTailBase(l)+coarse]=candidateTopology[parentTailBase(l)+coarse];}
+  for(var i=0u;i<selectedCount(l+1u);i+=1u){let coarse=selectedWorkSlot(l+1u,i);topology[parentHeadBase(l)+coarse]=candidateTopology[parentHeadBase(l)+coarse];
+   topology[parentTailBase(l)+coarse]=candidateTopology[parentTailBase(l)+coarse];}
+  let records=max(transferCount(l),candidateDispatch[l*DISPATCH_WORDS+1u]);for(var i=0u;i<records;i+=1u){
+   if(i>=transferCapacity(l)){captureReport(OVERFLOW);break;}for(var w=0u;w<4u;w+=1u){topology[transferWord(l,i,w)]=candidateTopology[transferWord(l,i,w)];}}
+ }
+ if(stencil){state[at(SPECTRAL,l,0u)]=levelDelta[deltaAt(l,7u)];}
   if(topologyChanged){dispatchMeta[l*DISPATCH_WORDS]=candidateDispatch[l*DISPATCH_WORDS];
    dispatchMeta[l*DISPATCH_WORDS+8u]=candidateDispatch[l*DISPATCH_WORDS+8u];
    topology[directoryBase()+2u+l]=candidateTopology[directoryBase()+2u+l];
@@ -4322,10 +4551,10 @@ fn commitCandidateLevelAt(l:u32,i:u32){
   dispatchMeta[l*DISPATCH_WORDS+6u]=select(1u,(parentSlots+65534u)/65535u,parentSlots>0u);
   dispatchMeta[l*DISPATCH_WORDS+7u]=1u;
   let pages=dispatchMeta[l*DISPATCH_WORDS+8u];dispatchMeta[l*DISPATCH_WORDS+9u]=pages;
-  dispatchMeta[l*DISPATCH_WORDS+10u]=1u;dispatchMeta[l*DISPATCH_WORDS+11u]=1u;}
+  dispatchMeta[l*DISPATCH_WORDS+10u]=1u;dispatchMeta[l*DISPATCH_WORDS+11u]=1u;
 }
-@compute @workgroup_size(64) fn commitCandidateLevels(@builtin(global_invocation_id) g:vec3u){
- let i=boundedLinearIndex(g);for(var l=0u;l<levels();l+=1u){commitCandidateLevelAt(l,i);}
+@compute @workgroup_size(1) fn commitCandidateLevels(@builtin(global_invocation_id) g:vec3u){
+ let l=g.x;if(l<levels()){commitCandidateLevelAt(l);}
 }
 @compute @workgroup_size(1) fn finalizeLifecycle(){let base=lifecycleBase();if(atomicLoad(&control[0])==0u&&!captureFailed()){
  dispatchMeta[base]=1u;dispatchMeta[base+1u]=rows();return;}

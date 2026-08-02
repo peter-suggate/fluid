@@ -660,6 +660,25 @@ fn succeedRow(row:u32,descriptor:u32){
 fn descriptorValid(descriptor:u32)->bool{return descriptor!=INVALID&&(descriptor&0x40000000u)==0u;}
 fn descriptorFlags(descriptor:u32)->u32{return select(CAPACITY,descriptor&127u,(descriptor&0x40000000u)!=0u);}
 fn dirtyCount()->u32{return rowDelta[params.delta.x+5u];}
+fn descriptorCandidateScratchReusable()->bool{
+  let candidate=controlArena.candidate;let authority=controlArena.authority;
+  return candidate.rowCount==authority.rowCount&&candidate.validCount==authority.validCount
+    &&candidate.errorCount==0u&&candidate.firstInvalid==INVALID&&candidate.flags==0u
+    &&candidate.sameOrFinerCount==authority.sameOrFinerCount
+    &&candidate.sameOrCoarserCount==authority.sameOrCoarserCount
+    &&candidate.generation==authority.generation;
+}
+fn exactDescriptorIdentity(requested:u32,reusableScratch:bool)->bool{
+  if(!deltaAccepted(requested)||params.delta.x+15u>=arrayLength(&rowDelta)){return false;}
+  let base=params.delta.x;
+  return rowDelta[base+1u]==requested&&rowDelta[base+2u]==requested
+    &&rowDelta[base+3u]==0u&&rowDelta[base+4u]==0u&&rowDelta[base+5u]==0u
+    &&rowDelta[base+6u]==0u&&rowDelta[base+15u]==1u
+    &&controlArena.authority.rowCount==requested
+    &&controlArena.authority.validCount==requested
+    &&controlArena.authority.errorCount==0u&&controlArena.authority.flags==0u&&reusableScratch
+    &&pagedOwnerPublicationValid();
+}
 fn dispatchFor(count:u32)->vec3u{
   let groups=(count+63u)/64u;let x=min(groups,65535u);
   return vec3u(x,select(1u,(groups+x-1u)/x,x>0u),1u);
@@ -684,6 +703,7 @@ var<workgroup> publicationCounts:array<vec4u,256>;
 var<workgroup> publicationFailures:array<vec4u,256>;
 @compute @workgroup_size(1) fn preparePowerDescriptors(){
   let requested=rowDelta[params.delta.x];
+  let reusableScratch=descriptorCandidateScratchReusable();
   controlArena.candidate=Control(requested,0u,0u,INVALID,0u,0u,0u,generation());
   controlArena.blockDispatch=vec3u(0u,1u,1u);
   controlArena.commitDispatch=vec3u(0u,1u,1u);
@@ -698,6 +718,15 @@ var<workgroup> publicationFailures:array<vec4u,256>;
         ||controlArena.authority.validCount!=previous||controlArena.authority.errorCount!=0u
         ||controlArena.authority.flags!=0u))){
     rejectCandidate(0u,CAPACITY);return;
+  }
+  if(exactDescriptorIdentity(requested,reusableScratch)){
+    controlArena.candidate=controlArena.authority;
+    controlArena.candidate.generation=generation();
+    // INVALID is a private exact-carry marker. All row-shaped indirect
+    // records remain zero; the prefix singleton still traverses its uniform
+    // barriers but must not replace the carried counters with empty sums.
+    controlArena.publicationCount=INVALID;
+    return;
   }
   let blocks=(requested+255u)/256u;
   let required=blockSummaryBase()+9u*blocks;
@@ -820,7 +849,7 @@ var<workgroup> publicationFailures:array<vec4u,256>;
       publicationFailures[lane].y=min(publicationFailures[lane].y,publicationFailures[lane+stride].y);
       publicationFailures[lane].z+=publicationFailures[lane+stride].z;
     }workgroupBarrier();}
-  if(lane==0u){let total=publicationCounts[0];let failed=publicationFailures[0];let published=publicationScan[255];
+  if(lane==0u&&controlArena.publicationCount!=INVALID){let total=publicationCounts[0];let failed=publicationFailures[0];let published=publicationScan[255];
     indirectDispatch[blockOffsetBase()+blocks]=published;controlArena.publicationCount=published;
     controlArena.candidate.validCount=total.x;controlArena.candidate.sameOrFinerCount=total.y;
     controlArena.candidate.sameOrCoarserCount=total.z;controlArena.candidate.errorCount+=total.w;

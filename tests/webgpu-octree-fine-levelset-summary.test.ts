@@ -61,7 +61,14 @@ function findSummaryEntry(words: Uint32Array, key: number): number | undefined {
 
 test("fine-summary publication mutates a direct rank directory without sort, merge, or search", () => {
   const encode = WebGPUFineLevelSetSummaries.prototype.encode.toString();
-  assert.match(encode, /pageDelta[\s\S]*updateIndirectBuffer/);
+  assert.doesNotMatch(encode, /updateIndirectBuffer|copyBufferToBuffer/,
+    "summary dispatch args must be GPU-authored without copy staging");
+  assert.match(encode,
+    /fine-summary mutation dispatch publication[\s\S]*fine-summary reclamation dispatch publication[\s\S]*fine-summary recompute dispatch publication/,
+    "each distinct STORAGE-to-INDIRECT arena retains one explicit legality boundary");
+  assert.match(fineLevelSetSummaryWGSL,
+    /@binding\(18\)var<storage,read_write>publishedDispatch:array<u32>[\s\S]*fn publishDispatch/,
+    "singleton producers must write the exact dispatch records directly");
   assert.match(encode, /removeFineSummaryPages[\s\S]*addFineSummaryPages[\s\S]*publishFineSummaryCoarseRows/);
   assert.match(encode, /recomputeFineSummaryBase[\s\S]*recomputeFineSummaryParents[\s\S]*publishFineSummaryDirect/);
   assert.doesNotMatch(encode, /sort|merge|recordScratch|carryRecords/);

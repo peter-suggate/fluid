@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP,
   FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS,
+  fineTransportQuiescenceEnabled,
   fineTransportB4AddressingEnabled,
   fineTransportStagedAddressingRequested,
   planFineLevelSetGPUTransport,
@@ -23,8 +24,9 @@ test("direct fine transport has one page-bounded structured authority path", () 
     topologyDeltaBytes: (8 + 3 * 262_144) * 4,
     pageStatusBytes: 262_144 * 12,
     worksetBytes: 128 + 262_144 * 4,
+    activitySnapshotBytes: 262_144 * 4,
     controlBytes: 64,
-    allocatedBytes: 320 + 262_144 * 12 + 128 + 262_144 * 4
+    allocatedBytes: 320 + 262_144 * 12 + 128 + 2 * 262_144 * 4
       + (8 + 3 * 262_144) * 4 + 64 + 2 * 512,
   });
   assert.deepEqual(planFineLevelSetGPUTransportPasses(plan, 8), {
@@ -104,6 +106,17 @@ test("recurring transport publishes two validity classes before atomic commit", 
     /state\[base\+4u\]=u32\(ceil\(f32\(counts\[cls\]\)\/64\.\)\)/,
     "the class page count must not be divided by the within-page workgroup width");
   assert.match(encode, /commit\.dispatchWorkgroupsIndirect\(this\.indirectDispatch,160\)/);
+  assert.match(compact(structuredFineLevelSetTransportWGSL),
+    /letactivePages=select\(select\(0u,pages,scheduleValid\),0u,sleeping\);state\[40\]=activePages.*state\[43\]=\(activePages\+255u\)\/256u;state\[44\]=1u;state\[45\]=1u/s,
+    "the GPU governor must publish the exact live-page block dispatch");
+  assert.equal([...encode.matchAll(/runLiveBlocks\(/g)].length, 5,
+    "workset/status/delta reduce and scatter must all consume the live block publication");
+  assert.match(encode,
+    /dispatchWorkgroupsIndirect\(this\.indirectDispatch,43\*4\)/,
+    "packed phi maintenance must never launch its scan blocks from allocation capacity");
+  assert.doesNotMatch(encode,
+    /(?:reduceWorksetsPipeline|compactWorksetsPipeline|reduceStatusPipeline|reduceDeltaPipeline|compactDeltaPipeline)[\s\S]{0,180}this\.scanBlocks/,
+    "allocation-sized scratch must not shape recurring packed-stream work");
   assert.doesNotMatch(encode, /dispatchWorkgroupsIndirect\(this\.governor/,
     "the writable governor must never also be consumed as INDIRECT in a compute scope");
   assert.doesNotMatch(encode, /faceBand|powerFace|velocityPrepass|fallback|legacy|createBindGroup/i);
@@ -141,7 +154,7 @@ test("WGSL fails closed unless generation, epoch, and accepted A\/B bank agree",
     /maximumBacktraceFineCells>2\*plan\.fineFactor.*Finetransportdisplacementboundexceedsitsconfiguredsupportdepth/s,
     "the host API must admit the two-finest-cell UI trajectory but reject anything beyond its reserved support");
   assert.match(shader,
-    /letvalid=structuredValid\(\)&&airPublicationValid\(\).*scheduleValid=valid&&governorInvalid\[0\]==0u&&required<=64u&&displacement<=p\.maxBacktrace.*activeSteps=select\(0u,required,scheduleValid\)/s,
+    /letvalid=structuredValid\(\)&&airPublicationValid\(\).*scheduleValid=valid&&governorInvalid\[0\]==0u&&required<=64u&&displacement<=p\.maxBacktrace.*activeSteps=select\(select\(0u,required,scheduleValid\),0u,sleeping\)/s,
     "invalid velocity or an over-bound characteristic must publish zero work");
   assert.match(shader,
     /state\[32\]=select\(0u,accepted\[2\],scheduleValid\).*state\[33\]=select\(0u,activeBank\(\),scheduleValid\).*state\[34\]=select\(0u,accepted\[3\],scheduleValid\)/s,
@@ -158,6 +171,42 @@ test("WGSL fails closed unless generation, epoch, and accepted A\/B bank agree",
     /maximum=max\(maximum,length\(v\.xyz\)\).*ceil\(d\.maximumSpeed\*p\.dt\/p\.h\)/s,
     "transport displacement telemetry must measure the sampled speed times dt over fine-cell width");
   assert.doesNotMatch(shader, /rowDirectory|powerFaceControl|faceBandControl|velocitySampleControl|fallback|legacy/i);
+});
+
+test("quiescent fine pages sleep only behind exact conservative wake predicates", () => {
+  const shader = compact(structuredFineLevelSetTransportWGSL);
+  const octree = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
+  assert.match(shader,
+    /activitySnapshot\[work\]!=key.*metadata\[id\*10u\+3u\]&PAGE_DIRTY.*activitySnapshot\[work\]=key/s,
+    "logical page replacement or an exact fine repair must wake transport");
+  assert.match(shader,
+    /letold=vec4u\(catalog\[at\],catalog\[at\+1u\],catalog\[at\+2u\],catalog\[at\+3u\]\).*any\(old!=m\)/s,
+    "a changed structured pressure-row metric must wake transport before its snapshot is refreshed");
+  assert.match(shader,
+    /letsleeping=scheduleValid&&state\[46\]!=0u&&state\[47\]==0u&&governorChanged\[0\]==0u&&displacementCells<=p\.inflowTiming\.y&&inflowStrength\(\)==0\.&&p\.inflowTiming\.z==0\./,
+    "sleep requires a prior snapshot, an empty exact repair set, stable dependency identities, sub-epsilon speed, no inflow, and no moving boundary");
+  assert.match(shader,
+    /if\(state\[50\]!=0u\)\{control\.committed=1u;control\.maxDisplacement=0u;return;\}/,
+    "sleep must publish a valid identity transport rather than masquerade as rejected work");
+  assert.match(shader,
+    /letcount=select\(carry,0u,state\[50\]!=0u\).*if\(state\[50\]==0u\)\{state\[47\]=repairs;state\[51\]=count;\}/s,
+    "sleep must publish a valid zero-change delta while retaining the exact empty repair proof");
+  assert.match(octree, /dynamicBoundary:this\.scene\.rigidBodies\.length>0/,
+    "any authored rigid body conservatively disables the sleep lane");
+  const plan = shader.slice(shader.indexOf("fnplanStructuredFineTransportSubsteps"),
+    shader.indexOf("fnunpackBrick"));
+  assert.doesNotMatch(plan, /phi|hash|fingerprint/i,
+    "phi remains a packed rebuild/carry payload; the sleep predicate reads identities and speed, never phi hashes");
+});
+
+test("fine transport quiescence is default-on with an exact differential off switch", () => {
+  assert.equal(fineTransportQuiescenceEnabled({}), true);
+  assert.equal(fineTransportQuiescenceEnabled({ FLUID_FINE_TRANSPORT_QUIESCENCE: "1" }), true);
+  assert.equal(fineTransportQuiescenceEnabled({ FLUID_FINE_TRANSPORT_QUIESCENCE: "0" }), false);
+  const encode = compact(WebGPUFineLevelSetTransport.prototype.encode.toString());
+  assert.match(encode,
+    /fineTransportQuiescenceEnabled\(\)\?FINE_LEVELSET_QUIESCENCE_DISPLACEMENT_EPSILON_CELLS:-1/,
+    "the differential arm must change only the GPU-authored sleep tolerance");
 });
 
 test("sparse-page classification ignores unowned sample slots but rejects corrupt owned phi", () => {
@@ -358,9 +407,11 @@ test("fine phi commit separates interface membership from exact CP repair", () =
     /fnpublishStructuredFineDelta.*delta\[7\]=control\.maxDisplacement/s,
     "the topology delta must carry the measured complete-characteristic reach");
   assert.match(shader,
-    /fnclearStructuredFineDelta.*i>=8u\+p\.pageCapacity&&i<8u\+2u\*p\.pageCapacity.*delta\[i\]=0u/s,
-    "delta compaction clears only its middle stream and preserves dense exact CP-repair records");
+    /fnclearStructuredFineDelta.*if\(lid<8u\)\{delta\[lid\]=0u;\}/s,
+    "delta compaction clears only its fixed header; its count makes stale compact-tail words unreachable");
+  assert.doesNotMatch(shader,
+    /fnclearStructuredFineDelta[\s\S]*?p\.pageCapacity[\s\S]*?fnreduceStructuredFineDeltaBlocks/,
+    "delta clearing must preserve both dense page classifications and do no capacity-shaped work");
   assert.doesNotMatch(shader, /atomic/,
     "page-owned reductions and deterministic compaction must not revive an append race");
 });
-

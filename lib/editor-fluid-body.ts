@@ -1,7 +1,22 @@
 import { damBreakFractions } from "./initial-fluid";
+import {
+  boxCenter,
+  boxHandles,
+  boxResizeDrag,
+  moveHandles,
+  pickSolidBox,
+  positionFields,
+  resizeBox,
+  WORLD_FRAME,
+  type BoxExtent,
+  type BoxResizePolicy,
+  type BoxSides,
+  type EditorEntity,
+  type EditorEntityContext,
+  type EditorEntityDefinition,
+} from "./editor-entity";
 import { sceneCellSizes_m } from "./scene-lattice";
-import { projectToViewport } from "./webgpu-camera";
-import type { CameraState, SceneDescription, Vec3 } from "./model";
+import type { SceneDescription, Vec3 } from "./model";
 
 /**
  * Direct manipulation of the initial water body.
@@ -22,29 +37,14 @@ import type { CameraState, SceneDescription, Vec3 } from "./model";
  * solver rather than building a new one.
  */
 
-export interface FluidBodyBox {
-  readonly min: Vec3;
-  readonly max: Vec3;
-}
+/** A water-body box is an ordinary box extent; the name survives its callers. */
+export type FluidBodyBox = BoxExtent;
 
-export type FluidBodyHandleKind = "face" | "edge" | "corner";
-
-export interface FluidBodyHandle {
-  /** Stable sign triple, e.g. `+00` for the +x face, `+-+` for a corner. */
-  readonly id: string;
-  readonly kind: FluidBodyHandleKind;
-  readonly position_m: Vec3;
-  /** Which side of which axis the handle moves; absent axes are untouched. */
-  readonly sides: Readonly<Partial<Record<keyof Vec3, "min" | "max">>>;
-}
-
-export const FLUID_BODY_HANDLE_TOLERANCE_PX = 9;
+export const FLUID_BODY_SELECTION_ID = "fluid-body";
 /** Cells of thickness the body may never drop below on any axis. */
 export const FLUID_BODY_MINIMUM_CELLS = 1;
 
 const AXES: readonly (keyof Vec3)[] = Object.freeze(["x", "y", "z"]);
-const SIGNS = Object.freeze([-1, 0, 1] as const);
-const SIGN_CHARACTERS: Readonly<Record<string, string>> = Object.freeze({ "-1": "-", "0": "0", "1": "+" });
 
 /** World-space bounds the body may occupy: the container interior. */
 export function fluidBodyLimits(scene: SceneDescription): FluidBodyBox {
@@ -83,64 +83,35 @@ export function fluidBodyBox(scene: SceneDescription): FluidBodyBox | undefined 
   return { min, max: { x: min.x + size.x, y: min.y + size.y, z: min.z + size.z } };
 }
 
-/** The 26 handles of the box, in a stable order. */
-export function fluidBodyHandles(box: FluidBodyBox): FluidBodyHandle[] {
-  const handles: FluidBodyHandle[] = [];
-  for (const sx of SIGNS) for (const sy of SIGNS) for (const sz of SIGNS) {
-    const signs = { x: sx, y: sy, z: sz };
-    const active = AXES.filter((axis) => signs[axis] !== 0);
-    if (active.length === 0) continue;
-    const sides: Partial<Record<keyof Vec3, "min" | "max">> = {};
-    for (const axis of active) sides[axis] = signs[axis] < 0 ? "min" : "max";
-    handles.push({
-      id: AXES.map((axis) => SIGN_CHARACTERS[String(signs[axis])]).join(""),
-      kind: active.length === 1 ? "face" : active.length === 2 ? "edge" : "corner",
-      position_m: Object.fromEntries(AXES.map((axis) => [axis, signs[axis] === 0
-        ? 0.5 * (box.min[axis] + box.max[axis])
-        : signs[axis] < 0 ? box.min[axis] : box.max[axis]])) as unknown as Vec3,
-      sides,
-    });
-  }
-  return handles;
-}
-
-export function fluidBodyHandleById(box: FluidBodyBox, id: string): FluidBodyHandle | undefined {
-  return fluidBodyHandles(box).find((handle) => handle.id === id);
-}
-
-function snap(value: number, step: number, origin: number): number {
-  if (!(step > 0)) return value;
-  return origin + Math.round((value - origin) / step) * step;
-}
-
 /**
- * Move the sides a handle owns to the dragged point.
+ * How the water body reshapes: onto the finest lattice, inside the container,
+ * never thinner than a cell.
  *
- * Each moved side snaps to the finest lattice, because that is the resolution
- * at which the seed actually changes: an unsnapped box edge lands mid-cell,
- * where it wets nothing new and the handle appears to do nothing. Sides are
- * clamped against the container and against their opposite side, so pushing a
- * face through the body stops at a minimum thickness instead of inverting it.
+ * The lattice is the resolution at which the seed actually changes — an
+ * unsnapped box edge lands mid-cell, where it wets nothing new and the handle
+ * appears to do nothing.
  */
+export function fluidBodyResizePolicy(scene: SceneDescription): BoxResizePolicy {
+  const cell = sceneCellSizes_m(scene);
+  return {
+    snap_m: [cell[0]!, cell[1]!, cell[2]!],
+    limits: fluidBodyLimits(scene),
+    minimum_m: [
+      FLUID_BODY_MINIMUM_CELLS * cell[0]!,
+      FLUID_BODY_MINIMUM_CELLS * cell[1]!,
+      FLUID_BODY_MINIMUM_CELLS * cell[2]!,
+    ],
+  };
+}
+
+/** Move the sides a handle owns to the dragged point. */
 export function dragFluidBodyBox(
   box: FluidBodyBox,
-  handle: FluidBodyHandle,
+  sides: BoxSides,
   point: Vec3,
   scene: SceneDescription,
 ): FluidBodyBox {
-  const limits = fluidBodyLimits(scene);
-  const cell = sceneCellSizes_m(scene);
-  const min = { ...box.min }, max = { ...box.max };
-  AXES.forEach((axis, index) => {
-    const side = handle.sides[axis];
-    if (!side) return;
-    const step = cell[index]!;
-    const minimum = FLUID_BODY_MINIMUM_CELLS * step;
-    const target = snap(point[axis], step, limits.min[axis]);
-    if (side === "max") max[axis] = Math.min(limits.max[axis], Math.max(min[axis] + minimum, target));
-    else min[axis] = Math.max(limits.min[axis], Math.min(max[axis] - minimum, target));
-  });
-  return { min, max };
+  return resizeBox(box, sides, point, fluidBodyResizePolicy(scene));
 }
 
 /**
@@ -158,6 +129,8 @@ export function scaleFluidBodyBox(
   const limits = fluidBodyLimits(scene);
   const cell = sceneCellSizes_m(scene);
   const min = { ...box.min }, max = { ...box.max };
+  const snap = (value: number, step: number, origin: number) =>
+    step > 0 ? origin + Math.round((value - origin) / step) * step : value;
   AXES.forEach((axis, index) => {
     const step = cell[index]!;
     const minimum = FLUID_BODY_MINIMUM_CELLS * step;
@@ -176,135 +149,29 @@ export function scaleFluidBodyBox(
 }
 
 /**
- * The box edge an edge handle grabs, as a segment.
+ * Slide the body without reshaping it, held inside the container.
  *
- * An edge handle fixes two axes and leaves one free; the edge runs the whole
- * span of that free axis. Drawing the segment rather than a square at its
- * midpoint is what makes the handle look like the thing it moves — and it is
- * far easier to hit, which is why `shapeHandleAtPointer` measures against the
- * segment too rather than against the midpoint the square used to sit on.
+ * A box already touching a wall stops there rather than being squashed against
+ * it: the gesture is a move, so it must never silently change the volume.
  */
-export function fluidBodyEdgeSegment(
+export function moveFluidBodyBox(
   box: FluidBodyBox,
-  handle: FluidBodyHandle,
-): { from: Vec3; to: Vec3 } | undefined {
-  if (handle.kind !== "edge") return undefined;
-  const free = AXES.find((axis) => handle.sides[axis] === undefined);
-  if (!free) return undefined;
-  return {
-    from: { ...handle.position_m, [free]: box.min[free] },
-    to: { ...handle.position_m, [free]: box.max[free] },
-  };
-}
-
-/** Pixel distance from a point to a segment, clamped to the segment. */
-function distanceToSegment_px(
-  point: { x: number; y: number },
-  from: { x: number; y: number },
-  to: { x: number; y: number },
-): number {
-  const dx = to.x - from.x, dy = to.y - from.y;
-  const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared < 1e-9) return Math.hypot(point.x - from.x, point.y - from.y);
-  const t = Math.max(0, Math.min(1,
-    ((point.x - from.x) * dx + (point.y - from.y) * dy) / lengthSquared));
-  return Math.hypot(point.x - (from.x + t * dx), point.y - (from.y + t * dy));
-}
-
-/**
- * What a handle does, for the chip shown when the pointer is over it.
- *
- * Handles are the whole interface, so they have to say what they are: a grid of
- * unlabelled squares is a puzzle, not a control. The axes matter more than the
- * kind — "this moves X and Z" is the thing you cannot work out by looking.
- */
-export function fluidBodyHandleLabel(handle: FluidBodyHandle): string {
-  const axes = AXES.filter((axis) => handle.sides[axis]).map((axis) => axis.toUpperCase());
-  return `${handle.kind} · ${axes.join(" ")}`;
-}
-
-export interface ShapeHandleCandidate {
-  readonly target: "fluid" | "tank";
-  readonly box: FluidBodyBox | undefined;
-  /** Handles this target does not offer, e.g. the tank's floor. */
-  readonly grabbable?: (handle: FluidBodyHandle) => boolean;
-}
-
-export interface ShapeHandlePick {
-  readonly target: "fluid" | "tank";
-  readonly handleId: string;
-  readonly box: FluidBodyBox;
-  readonly handle: FluidBodyHandle;
-}
-
-/**
- * The handle under a pointer, in canvas pixels.
- *
- * Shared by the grab and the hover highlight so they can never disagree: a
- * highlight that pointed at a different handle than the press would take is
- * worse than no highlight at all.
- *
- * Corners beat edges beat faces, because the more constrained handle is the one
- * that could not have been reached any other way; and the water beats the tank
- * outright, because the tank encloses it, so a tie means the pointer is over the
- * body actually visible there.
- */
-export function shapeHandleAtPointer(
-  candidates: readonly ShapeHandleCandidate[],
-  camera: CameraState,
-  width: number,
-  height: number,
-  pointer: { x: number; y: number },
-  tolerance_px = FLUID_BODY_HANDLE_TOLERANCE_PX,
-): ShapeHandlePick | undefined {
-  const rank = { corner: 0, edge: 1, face: 2 } as const;
-  let best: (ShapeHandlePick & { distance_px: number; rank: number }) | undefined;
-  for (const candidate of candidates) {
-    if (!candidate.box) continue;
-    for (const handle of fluidBodyHandles(candidate.box)) {
-      if (candidate.grabbable && !candidate.grabbable(handle)) continue;
-      const projection = projectToViewport(handle.position_m, camera, width, height);
-      if (!(projection.depth_m > 1e-6)) continue;
-      // An edge is drawn as the whole segment, so it must be grabbable along
-      // its whole length: measuring to the midpoint would leave most of what
-      // the user can see un-clickable.
-      const segment = fluidBodyEdgeSegment(candidate.box, handle);
-      const ends = segment && [segment.from, segment.to]
-        .map((point) => projectToViewport(point, camera, width, height));
-      const distance_px = ends && ends.every((end) => end.depth_m > 1e-6)
-        ? distanceToSegment_px(pointer,
-          { x: ends[0]!.leftFraction * width, y: ends[0]!.topFraction * height },
-          { x: ends[1]!.leftFraction * width, y: ends[1]!.topFraction * height })
-        : Math.hypot(
-          pointer.x - projection.leftFraction * width,
-          pointer.y - projection.topFraction * height);
-      if (distance_px > tolerance_px) continue;
-      const entry = {
-        target: candidate.target, handleId: handle.id, box: candidate.box, handle,
-        distance_px, rank: rank[handle.kind],
-      };
-      if (!best || (best.target === entry.target
-        ? entry.rank < best.rank || (entry.rank === best.rank && entry.distance_px < best.distance_px)
-        : entry.target === "fluid")) best = entry;
-    }
+  centre_m: Vec3,
+  scene: SceneDescription,
+): FluidBodyBox {
+  const limits = fluidBodyLimits(scene);
+  const min = { ...box.min }, max = { ...box.max };
+  for (const axis of AXES) {
+    const half = 0.5 * (box.max[axis] - box.min[axis]);
+    const room = 0.5 * (limits.max[axis] - limits.min[axis]);
+    const centre = half >= room
+      ? 0.5 * (limits.min[axis] + limits.max[axis])
+      : Math.min(limits.max[axis] - half, Math.max(limits.min[axis] + half, centre_m[axis]));
+    min[axis] = centre - half;
+    max[axis] = centre + half;
   }
-  return best && { target: best.target, handleId: best.handleId, box: best.box, handle: best.handle };
+  return { min, max };
 }
-
-/** The eight corners, indexed so bit 0/1/2 selects the max side of x/y/z. */
-export function fluidBodyBoxCorners(box: FluidBodyBox): Vec3[] {
-  return Array.from({ length: 8 }, (_unused, index) => ({
-    x: index & 1 ? box.max.x : box.min.x,
-    y: index & 2 ? box.max.y : box.min.y,
-    z: index & 4 ? box.max.z : box.min.z,
-  }));
-}
-
-/** Corner index pairs of the twelve edges, for drawing the box outline. */
-export const FLUID_BODY_BOX_EDGES: ReadonlyArray<readonly [number, number]> = Object.freeze(
-  [0, 1, 2, 3, 4, 5, 6, 7].flatMap((index) => [1, 2, 4]
-    .map((bit) => [index, index ^ bit] as const)
-    .filter(([from, to]) => from < to)));
 
 /**
  * Grow or shrink the body by a factor of its *volume*, which is what the
@@ -370,3 +237,65 @@ export function fluidBodyBoxPatch(
     },
   };
 }
+
+// ---- entity ---------------------------------------------------------------
+
+function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefined {
+  const scene = context.scene;
+  const box = fluidBodyBox(scene);
+  if (!box) return undefined;
+  const size = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
+  return {
+    selection: { kind: "fluid-body", id: FLUID_BODY_SELECTION_ID },
+    label: "WATER",
+    tone: "fluid",
+    frame: WORLD_FRAME,
+    box,
+    sizeLabel: `${size.map((value) => value.toFixed(2)).join(" × ")} m`,
+    handles: [
+      ...boxHandles(box, {
+        drag: boxResizeDrag(box, fluidBodyResizePolicy(scene),
+          (next) => fluidBodyBoxPatch(scene, next)),
+      }),
+      // The reservoir moves because `initialDamBreakOrigin_m` exists to let it:
+      // that field is the whole reason the body can leave the container's corner.
+      ...moveHandles(boxCenter(box),
+        (centre) => fluidBodyBoxPatch(scene, moveFluidBodyBox(box, centre, scene))),
+    ],
+    draftSubject: "fluid-body",
+    editLabel: (handle) => handle.space === "world"
+      ? "Moved the water body" : "Reshaped the water body",
+    fields: positionFields(boxCenter(box),
+      (centre) => fluidBodyBoxPatch(scene, moveFluidBodyBox(box, centre, scene))),
+  };
+}
+
+/**
+ * The water body is clicked on its seed box.
+ *
+ * That box is where the water will be at t=0 rather than where the solver has
+ * since carried it, so a click late in a run selects the reservoir from a place
+ * the water has already left. That is the honest target: the box is the thing
+ * the handles move, and picking what is drawn instead would mean picking a
+ * simulation result that no edit can reach.
+ */
+export const fluidBodyEntity: EditorEntityDefinition = {
+  kind: "fluid-body",
+  surfacedBy: (tool) => tool === "select",
+  instances: (context) => {
+    const entity = fluidBodyEntityFor(context);
+    return entity ? [entity] : [];
+  },
+  find: (context, id) => {
+    if (id !== FLUID_BODY_SELECTION_ID) return undefined;
+    return fluidBodyEntityFor(context);
+  },
+  pick: (context, ray) => {
+    const box = fluidBodyBox(context.scene);
+    if (!box) return undefined;
+    const distance_m = pickSolidBox(ray, box);
+    return distance_m === undefined
+      ? undefined
+      : { selection: { kind: "fluid-body", id: FLUID_BODY_SELECTION_ID }, distance_m };
+  },
+};

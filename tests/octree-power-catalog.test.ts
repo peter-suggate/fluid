@@ -215,6 +215,7 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
   );
   assert.ok(views.tetrahedronData.length > 0);
   assert.equal(views.tetrahedronVertexData.length, 75 * 4);
+  assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.tetrahedronVertexCount, 75);
   assert.ok([...views.sameOrFinerDirect].every((packed) => packed !== 0xffff_ffff
     && (packed & 0xffff) < OCTREE_GENERATED_POWER_CATALOG_MANIFEST.configurationCount
     && (packed >>> 16) < 48));

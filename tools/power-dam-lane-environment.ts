@@ -8,7 +8,7 @@
  * number the benchmark gates on.
  */
 
-export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion";
+export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic-tiny" | "large-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion";
 
 export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<string, string>> = {
   mini: {
@@ -20,6 +20,18 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
   large: {
     FLUID_SCENE: "large-power-dam-break", FLUID_TARGET_S: "2",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500",
+    FLUID_EXPECT_GRID: "64,20,64", FLUID_MAXIMUM_LEAF_SIZE: "32",
+    FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
+  },
+  "hydrostatic-tiny": {
+    FLUID_SCENE: "hydrostatic-power-two-level", FLUID_TARGET_S: "0.96",
+    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "240", FLUID_EXPECT_EXACT_STEPS: "240",
+    FLUID_EXPECT_GRID: "16,16,16", FLUID_MAXIMUM_LEAF_SIZE: "32",
+    FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
+  },
+  "large-hydrostatic": {
+    FLUID_SCENE: "large-power-hydrostatic", FLUID_TARGET_S: "0.96",
+    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "240", FLUID_EXPECT_EXACT_STEPS: "240",
     FLUID_EXPECT_GRID: "64,20,64", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },

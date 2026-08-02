@@ -10,7 +10,8 @@ import {
   gpuSceneStructuralKey,
   type SimulationRunConfig,
 } from "../lib/webgpu-renderer";
-import { fluidBodyBox, fluidBodyBoxPatch, dragFluidBodyBox, fluidBodyHandleById } from "../lib/editor-fluid-body";
+import { fluidBodyBox, fluidBodyBoxPatch, dragFluidBodyBox } from "../lib/editor-fluid-body";
+import { sides } from "./helpers/editor-entities";
 
 const config: SimulationRunConfig = {
   methodId: "octree", quality: "balanced", values: {}, simulationEpoch: 0,
@@ -47,7 +48,7 @@ test("a draft never reaches the solver's rebuild identity", () => {
   const scene = preset("water-box-dam-break");
   const box = fluidBodyBox(scene);
   assert.ok(box);
-  const dragged = dragFluidBodyBox(box, fluidBodyHandleById(box, "+00")!,
+  const dragged = dragFluidBodyBox(box, sides("+00"),
     { x: box.max.x + 0.2, y: 0, z: 0 }, scene);
   const draft = { subject: "fluid-body" as const, label: "drag", patch: fluidBodyBoxPatch(scene, dragged) };
 
@@ -84,7 +85,7 @@ test("committing a draft yields a scene that still validates", () => {
   const scene = preset("water-box-dam-break");
   const box = fluidBodyBox(scene);
   assert.ok(box);
-  const dragged = dragFluidBodyBox(box, fluidBodyHandleById(box, "+++")!,
+  const dragged = dragFluidBodyBox(box, sides("+++"),
     { x: 0.4, y: 0.6, z: 0.3 }, scene);
   const committed = applySceneDraft(scene, {
     subject: "fluid-body", label: "drag", patch: fluidBodyBoxPatch(scene, dragged),

@@ -176,7 +176,7 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
       ? ["commitCandidateGeneration", "markFineSeedCandidateResidency", "markTileRing", "prepareFineSeedCandidateResidency",
         "publishFineSeedCandidateResidency", "recordDenseError", "resolveFineSeedCandidateResidency"]
       : graph.name === "direct structured velocity publication"
-        ? ["acceptStructuredPublication", "beginStructuredPublication", "fail", "finalizeStructuredPublication",
+        ? ["acceptStructuredPublication", "beginStructuredPublication", "exactIdentityCarry", "fail", "finalizeStructuredPublication",
           "publishSection63Rows", "reconstructStructuredCellVelocity", "scatterStructuredFamilySlots"]
       : graph.name === "structured boundary coefficients"
         // `worksetPublicationEnabled` holds the transaction gate the single
@@ -186,7 +186,8 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
         // into a fixed seven-bucket control, chosen around the 1e-2 theta
         // floor. It accumulates a diagnostic count, never a face coefficient,
         // and takes no ordering on the publication.
-        ? ["acceptStructuredBoundary", "commitStructuredBoundarySlots", "fail", "publishStructuredBoundarySetup",
+        ? ["acceptStructuredBoundary", "boundaryLiquidIdentityEligible", "classifyStructuredLiquidRows", "commitStructuredBoundarySlots", "fail",
+          "prepareStructuredBoundaryAccepted", "prepareStructuredBoundaryCandidate", "publishStructuredBoundarySetup",
           "rebuildStructuredBoundaryRows", "recordTheta", "resolveStructuredBoundarySlots",
           "resolveStructuredSolidSlots", "worksetPublicationEnabled"]
       : graph.name === "structured velocity dynamics"
@@ -197,8 +198,17 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
         // its compact changed-face workset. The two candidate-transfer
         // functions are the usual fail-closed pair: store the error code, keep
         // the lowest failing handle with atomicMin.
-        ? ["acc", "accumulateBodyImpulse", "candidateTransferItem", "rejectCandidateTransfer", "rejectSample",
-          "rejectVector", "transferStructuredTopologyCandidate"]
+        // `prepareStructuredDynamics` resets the accepted transaction report.
+        // `countOutOfCorridorRead` is a coverage census only: it accumulates a
+        // count and the lowest missing finest cell into two reserved control
+        // words and takes no ordering on the publication. It deliberately does
+        // NOT touch the error word -- every owner probe is speculative and has
+        // a fallback, so rejecting there invalidated the rest of the advance.
+        // `rejectOwnerDirectoryBounds` keeps the fail-closed rejection for the
+        // case that has no fallback: a directory outside its own arena.
+        ? ["acc", "accumulateBodyImpulse", "candidateTransferItem", "countOutOfCorridorRead",
+          "prepareStructuredDynamics", "rejectCandidateTransfer", "rejectOwnerDirectoryBounds",
+          "rejectSample", "rejectVector", "transferStructuredTopologyCandidate"]
       : graph.name === "fine level-set summaries"
         ? ["addFineBase", "addFineSummaryPages", "changedKey", "coarseEntryAt", "dirLoad", "dirStore",
           "ensureDirectoryPage", "ensureFineSummaryCoarseDirectoryPages", "ensureFineSummaryCoarseRanks",
@@ -233,15 +243,18 @@ test("fine-summary builder publishes one exact indirect extent for the rank-inde
   const prepare = graph.functions.get("prepareFineSummaryRecompute");
   assert.notEqual(prepare, undefined);
   assert.match(prepare!,
-    /writeDispatch\(28u,select\(0u,atomicLoad\(&state\[7\]\),atomicLoad\(&state\[0\]\)==0u\),1u\)/,
+    /let count=select\(0u,atomicLoad\(&state\[7\]\),atomicLoad\(&state\[0\]\)==0u\);writeDispatch\(28u,count,1u\);[\s\S]*publishDispatch\(0u,count,1u\)/,
     "the transaction publishes one workgroup per allocated active-mip rank and zero work on rejection");
   for (const retired of ["prepareFineSummaryDelta", "sortFineSummaryTiles", "mergeFineSummary",
     "recordLowerBound", "committedFineAt"]) {
     assert.equal(graph.functions.has(retired), false, `${retired} must stay deleted from the recurring summary graph`);
   }
   const encode = WebGPUFineLevelSetSummaries.prototype.encode.toString();
-  assert.match(encode, /updateIndirectBuffer\(this\.workState,\s*28\s*\*\s*4,\s*this\.indirect,\s*36,\s*12\)/,
-    "the active-rank dispatch must be copied once into the immutable indirect arena");
+  assert.doesNotMatch(encode, /updateIndirectBuffer|copyBufferToBuffer/,
+    "the active-rank dispatch must be GPU-authored directly, without staging copies");
+  assert.match(encode,
+    /fine-summary recompute dispatch publication[\s\S]*this\.recomputeDispatch,\s*0/,
+    "the direct dispatch arena must cross one explicit storage-to-indirect legality boundary");
   assert.match(encode,
     /indirect\("recomputeFineSummaryBase"[\s\S]*for\s*\(let level\s*=\s*1;level\s*<=\s*this\.plan\.maximumLevel[\s\S]*indirect\("recomputeFineSummaryParents"/,
     "the base and every parent mip level must share the exact active-rank extent");

@@ -9,7 +9,9 @@ import {
 } from "./webgpu-octree-structured-velocity-gpu";
 import {
   OCTREE_AIR_SUPPORT_LAYOUT_VERSION,
+  OCTREE_AIR_SUPPORT_OWNER_HASH,
   OCTREE_AIR_SUPPORT_VALID,
+  octreeAirSupportOwnerHashStartWGSL,
   type OctreeAirVelocitySupportLayout,
 } from "./webgpu-octree-air-velocity-support";
 import type { PassBroker } from "./webgpu-pass-broker";
@@ -46,6 +48,14 @@ export function structuredBoundaryAdvectionFlatteningEnabled(
     typeof process !== "undefined" ? process.env : undefined,
 ): boolean {
   return environment?.FLUID_STRUCTURED_BOUNDARY_ADVECT_FLAT !== "0";
+}
+
+/** Diagnostic A/B for the exact-identity deep-interior carry optimization. */
+export function structuredDeepIdentityCarryEnabled(
+  environment: Readonly<Record<string, string | undefined>> | undefined =
+    typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_STRUCTURED_DEEP_IDENTITY_CARRY !== "0";
 }
 
 /**
@@ -352,6 +362,8 @@ export class WebGPUStructuredVelocityDynamics {
   private readonly projectionEnergyProbe = structuredProjectionEnergyProbeEnabled();
   /** Construction-stable exact A/B for the class-7/8 carry gate. */
   private readonly flattenedBoundaryAdvection = structuredBoundaryAdvectionFlatteningEnabled();
+  /** Construction-stable diagnostic gate for the deep-interior identity carry. */
+  private readonly deepIdentityCarry = structuredDeepIdentityCarryEnabled();
   /** Storage-only dispatch handoffs share a pass unless the legacy A/B asks. */
   private readonly compactPlainStoragePass =
     structuredDynamicsPlainStoragePassCompactionEnabled();
@@ -446,7 +458,14 @@ export class WebGPUStructuredVelocityDynamics {
       topology.reconstructionDataOffsetBytes / 4,
     ], 0);
     words.set(Object.values(structured.plan.offsets), 18);
-    words[39] = this.topologyTransferAudit ? 1 : 0;
+    // Diagnostic-only A/B: bit 0 captures topology-transfer intermediates;
+    // bits 1..5 capture inactive authority owner/neighbor, metadata, scalar
+    // geometry, normals, and centroids. This retains the production command
+    // graph while isolating which supposedly-dead scratch changes it.
+    const debugWriteMask = typeof process !== "undefined"
+      ? Number(process.env.FLUID_STRUCTURED_DEBUG_WRITE_MASK ?? 0) : 0;
+    words[39] = this.topologyTransferAudit ? 63
+      : Number.isInteger(debugWriteMask) ? debugWriteMask & 63 : 0;
     floats[40] = resources.physicalCellSize;
     words[48] = resources.selectorOffsetWords;
     words[49] = resources.selectorStride;
@@ -455,7 +474,7 @@ export class WebGPUStructuredVelocityDynamics {
     words[52] = resources.airSupportLayout.supportVectorOffsetWords;
     words[53] = resources.airSupportLayout.supportCapacity;
     words[54] = resources.airSupportLayout.ownerDirectoryOffsetWords;
-    words[55] = resources.airSupportLayout.ownerDirectoryCellCapacity;
+    words[55] = resources.airSupportLayout.ownerDirectorySlotCapacity;
     for (const buffer of this.params) device.queue.writeBuffer(buffer, 0, words.buffer);
     this.shaderModule = device.createShaderModule({
       label: "Structured velocity dynamics", code: structuredVelocityDynamicsWGSL,
@@ -464,6 +483,7 @@ export class WebGPUStructuredVelocityDynamics {
     // (flattening, body exchange, and energy diagnostics). The audit bit names
     // the only source variant that can retain the same entry-point roster.
     this.pipelineCacheKey = `${this.advectionSymmetryAudit ? "advection-audit" : "production"}\0${
+      this.deepIdentityCarry ? "deep-carry" : "trace-all"}\0${
       this.pipelineEntryPoints().join("\0")}`;
     if (!deferPipelineCompilation) this.createPipelinesSync();
     this.encodedAdvectionDispatchCount = this.flattenedBoundaryAdvection ? 4 : 3;
@@ -493,7 +513,9 @@ export class WebGPUStructuredVelocityDynamics {
 
   private pipelineDescriptor(entryPoint: string): GPUComputePipelineDescriptor {
     return { label: entryPoint, layout: "auto",
-      compute: { module: this.shaderModule, entryPoint } };
+      compute: { module: this.shaderModule, entryPoint, constants: {
+        deepIdentityCarryEnabled: this.deepIdentityCarry ? 1 : 0,
+      } } };
   }
 
   private assignPipelines(pipelines: Readonly<Record<string, GPUComputePipeline>>): void {
@@ -605,7 +627,11 @@ export class WebGPUStructuredVelocityDynamics {
     if (!(dt >= 0) || !Number.isFinite(dt) || !(density > 0) || !Number.isFinite(density)
       || gravity.some((value) => !Number.isFinite(value))) throw new RangeError("Invalid structured dynamics parameters");
     const bytes = new ArrayBuffer(28), floats = new Float32Array(bytes);
-    floats[0] = dt; floats[1] = density; floats.set(gravity, 3);
+    // physical.w is otherwise padding. Carry the authored dynamics stage so
+    // the already-required prepare singleton can reset the corridor-miss
+    // tripwire exactly once per substep, without another dispatch or host
+    // scheduling decision.
+    floats[0] = dt; floats[1] = density; floats[2] = stage; floats.set(gravity, 3);
     this.device.queue.writeBuffer(this.params[stage], 164, bytes);
     const inflowBytes = new ArrayBuffer(32), inflowFloats = new Float32Array(inflowBytes);
     if (inflow) {
@@ -925,7 +951,8 @@ export class WebGPUStructuredVelocityDynamics {
 }
 
 export const structuredVelocityDynamicsWGSL = /* wgsl */ `
-struct P{rowCapacity:u32,slotCapacity:u32,maxSlots:u32,authorityWords:u32,worksetStride:u32,worksetBankStride:u32,dimensionX:u32,dimensionY:u32,dimensionZ:u32,closedMask:u32,denseOffset:u32,slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,tetraVertexCount:u32,templateHeaderOffset:u32,reconstructionOffset:u32,valuesOffset:u32,ownerOffset:u32,neighborOffset:u32,metadataOffset:u32,areaOffset:u32,inverseOffset:u32,fractionOffset:u32,pressureScaleOffset:u32,normalOffset:u32,centroidOffset:u32,rowNeighborOffset:u32,rowReciprocalOffset:u32,rowOwnerMetadataOffset:u32,rowHandleOffset:u32,rowSignOffset:u32,rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,bodyCount:u32,padB:u32,physical:vec4f,gravity:vec4f,selectorOffsetWords:u32,selectorStride:u32,regularTagOffsetWords:u32,supportControlOffsetWords:u32,supportVectorOffsetWords:u32,supportCapacity:u32,ownerDirectoryOffsetWords:u32,ownerDirectoryCellCapacity:u32,inflowPositionRadius:vec4f,inflowVelocity:vec4f}
+override deepIdentityCarryEnabled:bool=true;
+struct P{rowCapacity:u32,slotCapacity:u32,maxSlots:u32,authorityWords:u32,worksetStride:u32,worksetBankStride:u32,dimensionX:u32,dimensionY:u32,dimensionZ:u32,closedMask:u32,denseOffset:u32,slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,tetraVertexCount:u32,templateHeaderOffset:u32,reconstructionOffset:u32,valuesOffset:u32,ownerOffset:u32,neighborOffset:u32,metadataOffset:u32,areaOffset:u32,inverseOffset:u32,fractionOffset:u32,pressureScaleOffset:u32,normalOffset:u32,centroidOffset:u32,rowNeighborOffset:u32,rowReciprocalOffset:u32,rowOwnerMetadataOffset:u32,rowHandleOffset:u32,rowSignOffset:u32,rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,bodyCount:u32,padB:u32,physical:vec4f,gravity:vec4f,selectorOffsetWords:u32,selectorStride:u32,regularTagOffsetWords:u32,supportControlOffsetWords:u32,supportVectorOffsetWords:u32,supportCapacity:u32,ownerDirectoryOffsetWords:u32,ownerDirectorySlotCapacity:u32,inflowPositionRadius:vec4f,inflowVelocity:vec4f}
 struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 struct SlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDistance:vec4f}
 
@@ -975,11 +1002,40 @@ fn rejectVector(stage:u32,index:u32,detail:vec4f,cls:u32){
     atomicStore(&accepted[10],cls);
   }
 }
+// Coverage census for the sparse Section-5 corridor. Words 11/12 hold the
+// count of owner probes that found no published identity and the first such
+// finest cell; the existing stage-0 prepare singleton resets them, so this
+// adds no scan, pass, dispatch, or readback.
+//
+// This deliberately does NOT reject the generation. extendedOwnerVelocity is
+// a speculative probe at all five of its call sites -- each one tests
+// vectorValid and falls through to an incident-row or pinned-element sample
+// -- so a cell outside the corridor is an ordinary "no published extension
+// here" answer, not a coverage failure. Poisoning accepted[0] on that
+// answer invalidated every later workset in the same advance. Under-coverage
+// that would actually corrupt is caught where the value is consumed, by the
+// existing publication receipts and the supportPublicationValid gate; this
+// census is what makes a shrinking corridor visible before then.
+fn countOutOfCorridorRead(q:vec3u){
+  let d=dimensions();let cell=q.x+d.x*(q.y+d.y*q.z);
+  if(arrayLength(&accepted)>=13u){
+    atomicAdd(&accepted[11],1u);atomicMin(&accepted[12],cell);
+  }
+}
+// A directory that cannot address its own arena is a layout fault. Unlike a
+// corridor miss there is no correct answer to fall back to, so this keeps the
+// fail-closed rejection.
+fn rejectOwnerDirectoryBounds(q:vec3u){
+  let d=dimensions();let cell=q.x+d.x*(q.y+d.y*q.z);
+  countOutOfCorridorRead(q);
+  atomicOr(&accepted[0],ERROR_SAMPLE);
+  atomicMin(&accepted[1],(9u<<24u)|(cell&0x00ffffffu));
+}
 // The active authority bank, resolved once per invocation.
 //
-// The ONLY writes to the accepted control anywhere in this module are
-// rejectSample and rejectVector, which target indices 0, 1 and 6..10 -- see the
-// two functions directly above. Indices 2 (pressure-row count), 3 (generation),
+// The only writes to the accepted authority header in this module are the
+// rejection helpers above (indices 0, 1, and 6..12) plus the stage-0 tripwire
+// reset below. Indices 2 (pressure-row count), 3 (generation),
 // 4 (active bank) and 5 (family handle count) are republished between
 // dispatches, behind a fence, and are read-only for the whole lifetime of an
 // invocation. The compiler cannot hoist this itself because accepted is an
@@ -1003,6 +1059,17 @@ fn canonicalVelocityDot(a:vec3f,b:vec3f)->f32{
   return canonicalInterpolation4(array<f32,4>(a.x*b.x,a.y*b.y,a.z*b.z,0.));}
 fn bitsf(at:u32)->f32{return bitcast<f32>(catalog[at]);}
 fn dimensions()->vec3u{return vec3u(p.dimensionX,p.dimensionY,p.dimensionZ);}
+// Build row centres about the domain centre from an integer doubled-cell
+// offset.  Direct (q + size/2) * h construction gives reflected rows
+// unrelated last bits because the large positive coordinate is rounded before
+// the symmetry is applied.  The centred offset is exactly odd under every
+// horizontal D4 transform; adding the shared domain centre is postponed until
+// the final world-space address is required.
+fn domainWorldCenter()->vec3f{return .5*vec3f(dimensions())*p.physical.x;}
+fn rowCenteredGridOffset(rg:vec4u)->vec3f{
+  let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
+  return .5*vec3f(vec3i(2u*q+vec3u(rg.y))-vec3i(d));
+}
 fn signs(code:u32)->vec3f{let b=code&7u;return vec3f(select(1.,-1.,(b&1u)!=0u),select(1.,-1.,(b&2u)!=0u),select(1.,-1.,(b&4u)!=0u));}
 fn inverseTransform(v:vec3f,code:u32)->vec3f{let q=v*signs(code);let k=(code/8u)%6u;if(k==0u){return q;}if(k==1u){return q.xzy;}if(k==2u){return q.yxz;}if(k==3u){return q.zxy;}if(k==4u){return q.yzx;}return q.zyx;}
 fn powerTransform(v:vec3f,code:u32)->vec3f{let k=(code/8u)%6u;var q=v;if(k==1u){q=v.xzy;}else if(k==2u){q=v.yxz;}else if(k==3u){q=v.yzx;}else if(k==4u){q=v.zxy;}else if(k==5u){q=v.zyx;}return q*signs(code);}
@@ -1064,6 +1131,9 @@ fn candidateTransferItem(index:u32)->u32{
 
 @compute @workgroup_size(1)
 fn prepareStructuredDynamics(){
+  if(p.physical.w<.5&&arrayLength(&accepted)>=13u){
+    atomicStore(&accepted[11],0u);atomicStore(&accepted[12],INVALID);
+  }
   for(var cls=0u;cls<9u;cls+=1u){
     let base=wbase(cls);
     let valid=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid()&&worksets[base]==acc(3u);
@@ -1196,20 +1266,33 @@ fn taggedVelocity(tag:u32)->vec4f{
   let sample=transportMetrics[at];
   return select(invalidVector(),vec4f(sample.xyz,1.),vectorValid(sample));
 }
+${octreeAirSupportOwnerHashStartWGSL("ownerHashStart")}
 fn extendedOwnerTag(q:vec3u)->u32{
-  let d=dimensions();let volume=d.x*d.y*d.z;
-  if(volume==0u||p.ownerDirectoryCellCapacity<volume||any(q>=d)){return INVALID;}
-  let cell=q.x+d.x*(q.y+d.y*q.z);let at=p.ownerDirectoryOffsetWords+4u*cell;
-  if(at>4u*arrayLength(&transportMetrics)||4u*arrayLength(&transportMetrics)-at<4u){return INVALID;}
-  let tag=supportWord(at);let origin=supportWord(at+1u);let size=supportWord(at+2u);
-  if(tag==INVALID||origin==INVALID||size==0u){return INVALID;}
-  let oq=vec3u(origin%d.x,(origin/d.x)%d.y,origin/(d.x*d.y));
-  return select(INVALID,tag,all(q>=oq)&&all(q<oq+vec3u(size)));
+  let d=dimensions();let capacity=p.ownerDirectorySlotCapacity;
+  if(capacity==0u||any(q>=d)){return INVALID;}
+  // Probe the containing dyadic identity at each authored leaf size; one hash
+  // record represents an entire coarse leaf.
+  var size=${OCTREE_AIR_SUPPORT_OWNER_HASH.maximumLeafSize}u;
+  loop{let origin=(q/vec3u(size))*vec3u(size);
+    let originCell=origin.x+d.x*(origin.y+d.y*origin.z);
+    let start=ownerHashStart(originCell,size,capacity);
+    for(var probe=0u;probe<min(capacity,${OCTREE_AIR_SUPPORT_OWNER_HASH.maximumProbes}u);probe+=1u){
+      let at=p.ownerDirectoryOffsetWords
+        +${OCTREE_AIR_SUPPORT_OWNER_HASH.recordWords}u*((start+probe)%capacity);
+      // A directory that does not fit its own arena is an ABI fault, not a
+      // corridor miss: reject the generation rather than answer from it.
+      if(at>4u*arrayLength(&transportMetrics)||4u*arrayLength(&transportMetrics)-at<4u){
+        rejectOwnerDirectoryBounds(q);return INVALID;}
+      let storedKey=supportWord(at);if(storedKey==0u){break;}let storedOrigin=storedKey-1u;
+      let storedSize=supportWord(at+1u);if(storedOrigin==originCell&&storedSize==size){
+        let tag=supportWord(at+2u);return select(INVALID,tag,tag!=INVALID);}}
+    if(size==1u){break;}size>>=1u;}
+  countOutOfCorridorRead(q);return INVALID;
 }
 // Section 5 extrapolates the projected velocity outside the liquid before
 // level-set transport. A newly wet pressure row therefore initializes from
 // that accepted extended field when no old liquid row contains its face. The
-// dense finest-cell directory names the exact octree owner and its published
+// adaptive identity hash names the exact octree owner and its published
 // row/support vector; this is the same authority consumed by fine transport.
 //
 // A power-face centroid may lie exactly on a regular-grid face. Selecting only
@@ -1223,7 +1306,7 @@ fn extendedOwnerTag(q:vec3u)->u32{
 fn extendedOwnerVelocity(point:vec3f)->vec4f{
   if(!finite3(point)||!supportPublicationValid()){return invalidVector();}
   let d=dimensions();let volume=d.x*d.y*d.z;
-  if(volume==0u||p.ownerDirectoryCellCapacity<volume){return invalidVector();}
+  if(volume==0u||p.ownerDirectorySlotCapacity==0u){return invalidVector();}
   let upper=max(vec3f(d)-vec3f(1e-4),vec3f(0.));
   let grid=clamp(point/p.physical.x,vec3f(0.),upper);let rounded=round(grid);
   var seamMask=0u;for(var axis=0u;axis<3u;axis+=1u){
@@ -1270,6 +1353,14 @@ fn snapInterpolationCoordinates(value:vec3f)->vec3f{
   return vec3f(snapInterpolationCoordinate(value.x),
     snapInterpolationCoordinate(value.y),snapInterpolationCoordinate(value.z));
 }
+// Convert through the shared domain centre before snapping.  Unlike
+// point/h, this coordinate is exactly odd under horizontal reflection and is
+// merely permuted by x/z exchange.  The dyadic snap is an intentional
+// arithmetic barrier: it prevents backend fast-math from reassociating the
+// centred expression back into the asymmetric absolute-world construction.
+fn centeredGridPoint(point:vec3f)->vec3f{
+  return snapInterpolationCoordinates((point-domainWorldCenter())/p.physical.x);
+}
 // Construct a semi-Lagrangian characteristic in the same row-local canonical
 // frame as Section 5's cube/tetrahedron interpolant. Absolute world-space
 // subtraction rounds opposite sides of the domain differently, and a global
@@ -1278,15 +1369,16 @@ fn snapInterpolationCoordinates(value:vec3f)->vec3f{
 // and x/z rotation is only a permutation before the shared dyadic snap.
 fn characteristicPoint(row:u32,x:vec3f,dt:f32,velocity:vec3f)->vec3f{
   if(row>=acc(2u)){return x-dt*velocity;}
-  let rg=rowGeometry[rbase()+row];let d=dimensions();
-  let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
-  let extent=f32(rg.y)*p.physical.x;
-  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
+  let rg=rowGeometry[rbase()+row];
+  let rowSize=f32(rg.y);let extent=rowSize*p.physical.x;
   let transform=metrics[row].transformAndFlags&63u;
-  let local=snapInterpolationCoordinates(powerTransform((x-center)/extent,transform));
+  let local=snapInterpolationCoordinates(powerTransform(
+    (centeredGridPoint(x)-rowCenteredGridOffset(rg))/rowSize,transform));
   let displacement=snapInterpolationCoordinates(dt*powerTransform(velocity,transform)/extent);
   let traced=snapInterpolationCoordinates(local-displacement);
-  return center+extent*inverseTransform(traced,transform);
+  let centeredGrid=snapInterpolationCoordinates(rowCenteredGridOffset(rg)
+    +rowSize*inverseTransform(traced,transform));
+  return domainWorldCenter()+centeredGrid*p.physical.x;
 }
 // A shared face's stored owner is always the low-coordinate row. Reflection
 // exchanges that arbitrary storage side, but it does not exchange the
@@ -1451,20 +1543,28 @@ fn staggeredSample(anchor:u32,x:vec3f)->vec4f{
 fn cellSample(anchor:u32,x:vec3f)->vec4f{
   if(anchor>=acc(2u)||!finite3(x)){return invalidVector();}
   let rg=rowGeometry[rbase()+anchor];
-  let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
+  let d=dimensions();
   let h=f32(rg.y)*p.physical.x;
   if(!finite(h)||h<=0.){return invalidVector();}
-  // Cell-centred velocity has a constant physical-boundary extension. This
-  // is the production basis at a domain wall: a missing live interior row
-  // still rejects, while the basis never requests an exterior row.
-  let sampleX=clamp(x,vec3f(.5*h),vec3f(d)*p.physical.x-vec3f(.5*h));
-  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
+  // Cell-centred velocity has a constant physical-boundary extension. Keep
+  // both the cube weights and its eight requested centres in centred-grid
+  // units. This is the second symmetry-sensitive round trip after
+  // characteristicPoint: returning the corrected midpoint to absolute world
+  // space and independently subtracting a large positive cube centre changed
+  // the chosen/interpolated support vector on reflected free-surface rows.
+  // A missing live interior row still rejects, while the basis never requests
+  // an exterior row.
+  let rowSize=f32(rg.y);let halfDomain=.5*vec3f(d);
+  let sampleGrid=clamp(centeredGridPoint(x),-halfDomain+vec3f(.5*rowSize),
+    halfDomain-vec3f(.5*rowSize));
+  let centerGrid=rowCenteredGridOffset(rg);
   var lowOffset=vec3i(0);
   for(var axis=0u;axis<3u;axis+=1u){
-    if(sampleX[axis]<center[axis]){lowOffset[axis]=-1;}
+    if(sampleGrid[axis]<centerGrid[axis]){lowOffset[axis]=-1;}
   }
-  let lowCenter=center+vec3f(lowOffset)*h;
-  let t=snapInterpolationCoordinates(clamp((sampleX-lowCenter)/h,vec3f(0),vec3f(1)));
+  let lowCenterGrid=centerGrid+vec3f(lowOffset)*rowSize;
+  let t=snapInterpolationCoordinates(clamp((sampleGrid-lowCenterGrid)/rowSize,
+    vec3f(0),vec3f(1)));
   var termsX:array<f32,8>;var termsY:array<f32,8>;var termsZ:array<f32,8>;
   var termCount=0u;
   for(var corner=0u;corner<8u;corner+=1u){
@@ -1472,11 +1572,13 @@ fn cellSample(anchor:u32,x:vec3f)->vec4f{
       select(1.-t.y,t.y,(corner&2u)!=0u),select(1.-t.z,t.z,(corner&4u)!=0u));
     if(weight<=0.){continue;}
     var offset=lowOffset+vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
-    var requestedCenter=center+vec3f(offset)*h;
+    var requestedGrid=centerGrid+vec3f(offset)*rowSize;
     for(var axis=0u;axis<3u;axis+=1u){
-      if(requestedCenter[axis]<.5*h||requestedCenter[axis]>f32(d[axis])*p.physical.x-.5*h){offset[axis]=0;}
+      if(requestedGrid[axis]<-halfDomain[axis]+.5*rowSize
+        ||requestedGrid[axis]>halfDomain[axis]-.5*rowSize){offset[axis]=0;}
     }
-    requestedCenter=center+vec3f(offset)*h;
+    requestedGrid=centerGrid+vec3f(offset)*rowSize;
+    let requestedCenter=domainWorldCenter()+requestedGrid*p.physical.x;
     // Consume the same dense, geometric Section 5 owner publication as
     // arbitrary-point extension. The row-relative regular-tag cache is built
     // through floating world centres and can name opposite half-open owners
@@ -1587,9 +1689,11 @@ fn transitionFanSample(row:u32,localPoint:vec3f,first:u32,count:u32,transform:u3
   return vec4f(255.,24.,f32(count),-1.);}
 fn transitionSample(row:u32,x:vec3f)->vec4f{
   if(row>=acc(2u)||!finite3(x)){return vec4f(255.,20.,f32(row),-1.);}let rg=rowGeometry[rbase()+row];
-  let d=dimensions();let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));let extent=f32(rg.y)*p.physical.x;
-  if(!finite(extent)||extent<=0.){return vec4f(255.,21.,extent,-1.);}let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
-  let local=snapInterpolationCoordinates(powerTransform((x-center)/extent,metrics[row].transformAndFlags&63u));
+  let extent=f32(rg.y)*p.physical.x;
+  if(!finite(extent)||extent<=0.){return vec4f(255.,21.,extent,-1.);}
+  let local=snapInterpolationCoordinates(powerTransform(
+    (centeredGridPoint(x)-rowCenteredGridOffset(rg))/f32(rg.y),
+    metrics[row].transformAndFlags&63u));
   let thAt=p.tetraHeaderOffset+3u*metrics[row].caseId;let first=catalog[thAt];let count=catalog[thAt+1u];
   // Fan closure depends only on immutable catalog topology. The generator
   // publishes its exact D4 mask in the header; reproving it here nested a
@@ -1827,7 +1931,7 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
     if(!vectorValid(transferOld)){transferOld=extendedOwnerVelocity(point);}}
     _ = workgroupUniformLoad(&transferOld);
   }
-  if(lid==0u){if(!vectorValid(transferOld)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=canonicalVelocityDot(transferOld.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);if(p.padB!=0u&&handle<arrayLength(&transportMetrics)){let debugFlags=select(0u,1u,vectorValid(initialOld))|select(0u,2u,ownerAnchor!=INVALID)|select(0u,4u,neighborAnchor!=INVALID);transportMetrics[handle]=vec4f(transferOld.xyz,bitcast<f32>(debugFlags));}}
+  if(lid==0u){if(!vectorValid(transferOld)){if(rejectCandidateTransfer(handle)&&arrayLength(&candidate)>=16u){atomicStore(&candidate[9],candidateOwner);atomicStore(&candidate[10],candidateNeighbor);atomicStore(&candidate[11],ownerAnchor);atomicStore(&candidate[12],neighborAnchor);atomicStore(&candidate[13],bitcast<u32>(point.x));atomicStore(&candidate[14],bitcast<u32>(point.y));atomicStore(&candidate[15],bitcast<u32>(point.z));}return;}let projected=canonicalVelocityDot(transferOld.xyz,n);if(!finite(projected)){_ = rejectCandidateTransfer(handle);return;}a[base+p.valuesOffset+handle]=bitcast<u32>(projected);if((p.padB&1u)!=0u&&handle<arrayLength(&transportMetrics)){let debugFlags=select(0u,1u,vectorValid(initialOld))|select(0u,2u,ownerAnchor!=INVALID)|select(0u,4u,neighborAnchor!=INVALID);transportMetrics[handle]=vec4f(transferOld.xyz,bitcast<f32>(debugFlags));}}
 }
 
 // Characteristic sources must be this substep's prior face values: the
@@ -1840,11 +1944,16 @@ fn rejectCandidateTransfer(handle:u32)->bool{atomicStore(&candidate[0],ERROR_SAM
 fn nextValueAt(handle:u32)->u32{return (1u-bank())*p.authorityWords+p.valuesOffset+handle;}
 fn setNextValue(handle:u32,v:f32){a[nextValueAt(handle)]=bitcast<u32>(v);}
 fn debugAdvectionWord(offset:u32,handle:u32,value:f32){
-  if(p.padB!=0u){a[(1u-bank())*p.authorityWords+offset+handle]=bitcast<u32>(value);}
+  var mask=0u;
+  if(offset==p.ownerOffset||offset==p.neighborOffset){mask=2u;}
+  else if(offset==p.metadataOffset){mask=4u;}
+  else if(offset==p.areaOffset||offset==p.inverseOffset||offset==p.fractionOffset){mask=8u;}
+  if((p.padB&mask)!=0u){a[(1u-bank())*p.authorityWords+offset+handle]=bitcast<u32>(value);}
 }
 fn debugAdvection3(offset:u32,handle:u32,value:vec3f){
   let at=(1u-bank())*p.authorityWords+offset+4u*handle;
-  if(p.padB!=0u){a[at]=bitcast<u32>(value.x);a[at+1u]=bitcast<u32>(value.y);a[at+2u]=bitcast<u32>(value.z);}
+  let mask=select(32u,16u,offset==p.normalOffset);
+  if((p.padB&mask)!=0u){a[at]=bitcast<u32>(value.x);a[at+1u]=bitcast<u32>(value.y);a[at+2u]=bitcast<u32>(value.z);}
 }
 // Local Delaunay meshes are authored per cell (Section 5's "slight
 // subtlety"). A characteristic exactly on an octree seam is therefore
@@ -1952,16 +2061,12 @@ fn faceCharacteristicSample(handle:u32,point:vec3f)->vec4f{
 }
 fn rowTouchesDryDirection(row:u32,direction:u32)->bool{
   if(row>=acc(2u)||liquidAt(row)==0u){return true;}
-  let rg=rowGeometry[rbase()+row];
-  let h=f32(rg.y)*p.physical.x;
-  let d=dimensions();
+  let rg=rowGeometry[rbase()+row];let d=dimensions();
   let q=vec3u(rg.x%d.x,(rg.x/d.x)%d.y,rg.x/(d.x*d.y));
-  let center=(vec3f(q)+.5*f32(rg.y))*p.physical.x;
-  let extent=vec3f(d)*p.physical.x;
-  var probe=center;
-  probe[direction/2u]+=select(-h,h,(direction&1u)==1u);
-  if(any(probe<vec3f(0.))||any(probe>=extent)){return false;}
-  let other=acceptedRowContaining(probe);
+  let dimension=direction/2u;let positive=(direction&1u)!=0u;var probe=q;
+  if(positive){if(q[dimension]+rg.y>=d[dimension]){return false;}probe[dimension]+=rg.y;}
+  else{if(q[dimension]==0u){return false;}probe[dimension]-=1u;}
+  let other=acceptedRowContainingFinestCell(probe);
   return other==INVALID||other>=acc(2u)||liquidAt(other)==0u;
 }
 // A row is "dynamic" when it is dry or borders air: exactly the band whose
@@ -1993,6 +2098,13 @@ var<workgroup> dryProbeHandle:u32;
 var<workgroup> dryProbeOwner:u32;
 var<workgroup> dryProbeNeighbor:u32;
 var<workgroup> dryProbeEligible:u32;
+// A changed-topology publication marks exact identities per face in
+// centroid.w. The exact-topology fast path deliberately skips that scatter,
+// so its accepted receipt carries the equivalent all-live-faces proof in word
+// 13. Treating the receipt as the marker preserves HEAD's advection semantics
+// without reintroducing any row, slot, or compiled-image work.
+fn faceIdentityCarried(handle:u32)->bool{return acc(13u)!=0u
+  ||bitcast<f32>(a[abase()+p.centroidOffset+4u*handle+3u])>.5;}
 // One workgroup owns one class-7/8 face. Lanes 0..5 perform the owner's six
 // independent neighbour probes; lanes 8..13 do the neighbour row. Two
 // eight-lane OR trees reproduce rowTouchesDry without changing the
@@ -2010,8 +2122,7 @@ var<workgroup> dryProbeEligible:u32;
     if(handle!=INVALID&&handle<acc(5u)){
       let lo=owner(handle);let hi=neighbor(handle);
       dryProbeOwner=lo;dryProbeNeighbor=hi;
-      let carriedMarker=bitcast<f32>(a[abase()+p.centroidOffset+4u*handle+3u]);
-      dryProbeEligible=select(0u,1u,carriedMarker>.5&&hi!=INVALID);
+      dryProbeEligible=select(0u,1u,faceIdentityCarried(handle)&&hi!=INVALID);
     }
   }
   workgroupBarrier();
@@ -2050,16 +2161,14 @@ fn advect(cls:u32,index:u32,flattenedDryRows:bool){
   let x=centroid(handle);
   let prior=value(handle);
   setNextValue(handle,prior);
-  if(p.padB!=0u){
-    debugAdvectionWord(p.ownerOffset,handle,3.402823e38);
-    debugAdvectionWord(p.neighborOffset,handle,3.402823e38);
-    debugAdvectionWord(p.metadataOffset,handle,3.402823e38);
-    debugAdvectionWord(p.areaOffset,handle,3.402823e38);
-    debugAdvectionWord(p.inverseOffset,handle,3.402823e38);
-    debugAdvectionWord(p.fractionOffset,handle,3.402823e38);
-    debugAdvection3(p.normalOffset,handle,vec3f(3.402823e38));
-    debugAdvection3(p.centroidOffset,handle,vec3f(3.402823e38));
-  }
+  debugAdvectionWord(p.ownerOffset,handle,3.402823e38);
+  debugAdvectionWord(p.neighborOffset,handle,3.402823e38);
+  debugAdvectionWord(p.metadataOffset,handle,3.402823e38);
+  debugAdvectionWord(p.areaOffset,handle,3.402823e38);
+  debugAdvectionWord(p.inverseOffset,handle,3.402823e38);
+  debugAdvectionWord(p.fractionOffset,handle,3.402823e38);
+  debugAdvection3(p.normalOffset,handle,vec3f(3.402823e38));
+  debugAdvection3(p.centroidOffset,handle,vec3f(3.402823e38));
   let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
   if(!finite(aperture)||aperture<0.||aperture>1.){transportMetrics[handle]=invalidVector();rejectSample(3u,handle);return;}
   // The source is an application boundary condition around the paper's
@@ -2102,12 +2211,11 @@ fn advect(cls:u32,index:u32,flattenedDryRows:bool){
   // semi-Lagrangian cost exactly where main pays it; deep-interior faces
   // carry exactly, removing the dt-independent whole-field resampling loss
   // measured at up to ~3.5%/step of kinetic energy at the dam-break impact.
-  let carriedMarker=bitcast<f32>(a[abase()+p.centroidOffset+4u*handle+3u]);
   // The accepted row set is liquid-only, so a face with no neighbour row is a
   // free-surface (or wall) face: never carried. Closed-wall faces already
   // returned through the aperture==0 branch above.
   let hiRow=neighbor(handle);
-  if(carriedMarker>.5&&hiRow!=INVALID){
+  if(deepIdentityCarryEnabled&&faceIdentityCarried(handle)&&hiRow!=INVALID){
     var deepInterior=false;
     if(flattenedDryRows){
       deepInterior=!rowTouchesDryCached(handle,false)&&!rowTouchesDryCached(handle,true);

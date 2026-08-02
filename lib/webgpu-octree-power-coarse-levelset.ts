@@ -3,6 +3,7 @@
 import { OCTREE_COARSE_PHI_BYTES, OCTREE_COARSE_PHI_FLAG } from "./octree-coarse-levelset";
 import { OCTREE_FINE_PHI_CONTRIBUTION_BYTES, type OctreeCoarsePhiCorrectionInput,
   type WebGPUOctreeCoarseLevelSet } from "./webgpu-octree-coarse-levelset";
+import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "./generated/octree-power-catalog";
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { DirectStructuredVelocitySource } from "./webgpu-octree-structured-velocity-gpu";
 import type { OctreeAirVelocitySupportLayout } from "./webgpu-octree-air-velocity-support";
@@ -14,9 +15,11 @@ export const OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES = 32;
 export const OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES = 32;
 export const OCTREE_POWER_COARSE_LEVELSET_DELTA_HEADER_WORDS = 16;
 export const OCTREE_POWER_COARSE_LEVELSET_DELTA_RECORD_WORDS = 4;
-/** Catalog geometry byte-packs vertex selectors, fixing the direct adjacency
- * row stride at the complete u8 selector domain. */
-export const OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE = 256;
+/** The selector bytes address the generated global table, whose exact extent
+ * is smaller than the u8 ABI ceiling. Coarse rows and air tags time-alias this
+ * direct-indexed region, so both use the same manifest-proven width. */
+export const OCTREE_POWER_COARSE_LEVELSET_SELECTOR_STRIDE =
+  OCTREE_GENERATED_POWER_CATALOG_MANIFEST.tetrahedronVertexCount;
 /** One cold bootstrap plus the solver's bounded 64 encoded surface substeps. */
 export const OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS = 65;
 /** Portable dynamic-uniform/storage binding alignment. Each command encoder

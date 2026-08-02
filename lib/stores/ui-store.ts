@@ -1,7 +1,16 @@
 import { create } from "zustand";
 import { bodySelection, DEFAULT_EDITOR_TOOL, selectedBodyIdOf, type EditorSelection, type EditorTool } from "../editor-tools";
-import type { BoundsAxisConstraint } from "../editor-bounds-axis";
-import { defaultCamera, type CameraState, type RigidShape, type ScenePropShape } from "../model";
+import type { AxisConstraint } from "../editor-axis-constraint";
+import { defaultCamera, type CameraState, type RigidShape } from "../model";
+
+/**
+ * The scenery shapes the place tool offers.
+ *
+ * A subset of the scenery vocabulary on purpose: a torus or a capsule is
+ * authored by its run or its ring, which a single click on a surface has no way
+ * to say. These three are the ones a point and a size fully determine.
+ */
+export type SceneryPropKind = "box" | "cylinder" | "ellipsoid";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoConeTracingMode,
@@ -33,15 +42,15 @@ interface UIStore {
   /** Armed direct-manipulation tool; the pointer machine dispatches on it. */
   activeTool: EditorTool;
   /**
-   * Axes a bounds drag is allowed to move, or undefined for all three.
+   * Axes a handle drag is allowed to move, or undefined for all three.
    *
    * Store state rather than drag state because it outlives the gesture: an axis
    * armed before the press constrains the drag that follows, and a lock set
    * mid-drag survives into the next one, which is what a run of single-axis
    * adjustments actually wants. `setActiveTool` clears it, so it can never leak
-   * out of the mode that draws it.
+   * out of a mode that was drawing it.
    */
-  boundsAxisConstraint: BoundsAxisConstraint;
+  axisConstraint: AxisConstraint;
   /**
    * What the gizmo and the precision flyout act on. `selectedBodyId` is the
    * body-only projection of this, retained because the renderer and the body
@@ -51,8 +60,8 @@ interface UIStore {
   selectedBodyId?: string;
   /** Shape the body-place tool drops on the next click. */
   placementShape: RigidShape;
-  /** Shape the prop-place tool rests on the next surface. */
-  propShape: ScenePropShape;
+  /** Shape the scenery-place tool rests on the next surface. */
+  propShape: SceneryPropKind;
   sceneModalOpen: boolean;
   diagnosticsOpen: boolean;
   rightPanel: RightPanel;
@@ -131,11 +140,11 @@ interface UIStore {
   fluidCellTraceExpanded: boolean;
   setCamera: (next: CameraState | ((current: CameraState) => CameraState)) => void;
   setActiveTool: (tool: EditorTool) => void;
-  setBoundsAxisConstraint: (constraint: BoundsAxisConstraint) => void;
+  setAxisConstraint: (constraint: AxisConstraint) => void;
   select: (selection?: EditorSelection) => void;
   selectBody: (bodyId?: string) => void;
   setPlacementShape: (shape: RigidShape) => void;
-  setPropShape: (shape: ScenePropShape) => void;
+  setPropShape: (shape: SceneryPropKind) => void;
   setSceneModalOpen: (open: boolean) => void;
   setDiagnosticsOpen: (open: boolean) => void;
   setRightPanel: (panel: RightPanel) => void;
@@ -179,7 +188,7 @@ interface UIStore {
 export const useUIStore = create<UIStore>((set) => ({
   camera: defaultCamera,
   activeTool: DEFAULT_EDITOR_TOOL,
-  boundsAxisConstraint: undefined,
+  axisConstraint: undefined,
   selection: undefined,
   selectedBodyId: undefined,
   placementShape: "sphere",
@@ -214,11 +223,11 @@ export const useUIStore = create<UIStore>((set) => ({
   fluidCellTraceInterfaceHits: [],
   fluidCellTraceExpanded: false,
   setCamera: (next) => set((state) => ({ camera: typeof next === "function" ? next(state.camera) : next })),
-  // Leaving BOUNDS drops its axis lock: the lock is only ever drawn by that
-  // mode, and a constraint still armed on the way back in would be a hidden
-  // state that silently ate two thirds of the next drag.
-  setActiveTool: (activeTool) => set({ activeTool, boundsAxisConstraint: undefined }),
-  setBoundsAxisConstraint: (boundsAxisConstraint) => set({ boundsAxisConstraint }),
+  // Changing tools drops the axis lock: it is only ever drawn while handles are
+  // on screen, and a constraint still armed on the way into the next mode would
+  // be a hidden state that silently ate two thirds of the next drag.
+  setActiveTool: (activeTool) => set({ activeTool, axisConstraint: undefined }),
+  setAxisConstraint: (axisConstraint) => set({ axisConstraint }),
   select: (selection) => set({ selection, selectedBodyId: selectedBodyIdOf(selection) }),
   selectBody: (selectedBodyId) => set({ selectedBodyId, selection: bodySelection(selectedBodyId) }),
   setPlacementShape: (placementShape) => set({ placementShape }),

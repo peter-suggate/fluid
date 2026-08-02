@@ -71,6 +71,27 @@ export interface OctreePersistentMGPCGShaderOptions {
    * repacked into this live prefix once at kernel entry.
    */
   readonly compactLiveRows?: boolean;
+  /** Diagnostic A/B: retain the class-0 arithmetic but use the full page-slot
+   * resolver, localizing address reduction independently of the hybrid split. */
+  readonly regularAddressOracle?: boolean;
+  /** Diagnostic A/B: add the full fine-level adjoint to class-0 rows. */
+  readonly regularAdjointOracle?: boolean;
+  /** Diagnostic A/B: retain reduced addressing but visit all 18 channels. */
+  readonly regularAllChannelsOracle?: boolean;
+  /** Diagnostic A/B: classify the Section 4.3 shell from the original row
+   * predicate while leaving the hybrid A2 apply enabled. */
+  readonly section63BandOracle?: boolean;
+  /** Diagnostic A/B: route class 0 through the unmodified full A2 row. */
+  readonly fullApplyOracle?: boolean;
+  /** Diagnostic A/B: restore the original linear full-row apply traversal. */
+  readonly linearApplyOracle?: boolean;
+  /** Diagnostic-only: publish one internal channel through pressureOut after
+   * the solve so the Dawn symmetry oracle can localize a broken sub-map. */
+  readonly diagnosticOutputChannel?: number;
+  /** Diagnostic-only snapshots reuse the two staged-input regions after P1. */
+  readonly diagnosticStageCapture?: "initialPreconditioned" | "vcyclePhase0"
+    | "vcyclePresmooth" | "vcycleRestrict" | "vcycleProlong" | "vcyclePostsmooth"
+    | "section43Boundary" | "section43First" | "section43Inputs";
   /** Compile-time-only profiler hooks. Omitted production output remains
    * byte-for-byte free of profiler declarations, builtins, and calls. */
   readonly activity?: Readonly<{
@@ -102,13 +123,11 @@ export function octreePersistentMGPCGArenaWords(rowCapacity: number): number {
  * into a SIGSEGV rather than a message.
  */
 export const OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES =
-  // pageSlots + pageA + pageB + pageRhs over the 10x10x6 halo
-  4 * 600 * 4
   // merged: array<MergedScalars, 128>, eight f32 each
-  + 128 * 8 * 4
+  128 * 8 * 4
   // scan: array<u32, 256> for the deterministic band compaction
   + 256 * 4
-  // uniform-load scalars (rows, levels, partials, pages, counts, halt flags)
+  // uniform-load scalars (rows, levels, partials, counts, halt flags)
   + 64;
 
 export function octreePersistentMGPCGWGSL(
@@ -116,6 +135,77 @@ export function octreePersistentMGPCGWGSL(
 ): string {
   const iterations = options.maximumIterations;
   const rowStride = options.compactLiveRows === false ? "capacity()" : "wRows";
+  const regularSlotLookup = options.regularAddressOracle
+    ? "opPageSlot(l,page,q,vec3u(targetQ),row)"
+    : "regularPageSlot(l,page,q,vec3u(targetQ),row)";
+  const regularAdjoint = options.regularAdjointOracle
+    ? " + finerAdjoint(row,q,l,x,inCh)" : "";
+  const regularChannelCount = options.regularAllChannelsOracle ? 18 : 6;
+  const bandInitialization = options.section63BandOracle
+    ? `for(var row=lane;row<liveRows;row+=LANES){if(!stopped()){
+       ustore(CH_BANDA,row,select(0u,1u,section63Class(row)>=2u));}}`
+    : `for(var cls=0u;cls<5u;cls+=1u){let n=worksetCount(cls);
+     for(var item=lane;item<n;item+=LANES){let row=worksetRow(cls,item);
+      if(stopped()){continue;}
+      if(row>=liveRows||!validDiagonal(row)||!validSection63Row(row)){
+       reportAt(ERR_ROW,10u,row);continue;}
+      if(cls==0u&&!regularCoefficientTailValid(row)){continue;}
+      ustore(CH_BANDA,row,select(0u,1u,cls!=0u&&cls!=4u));}}`;
+  const classZeroApply = options.fullApplyOracle
+    ? "applyRow(row,inCh,outCh)" : "applyRegularRow(row,inCh,outCh)";
+  const allRowsApply = options.linearApplyOracle
+    ? `for(var row=lane;row<liveRows;row+=LANES){if(!stopped()){applyRow(row,inCh,outCh);}}`
+    : `for(var cls=0u;cls<5u;cls+=1u){let n=worksetCount(cls);
+     for(var item=lane;item<n;item+=LANES){let row=worksetRow(cls,item);
+      if(!stopped()&&row<liveRows){if(cls==0u){${classZeroApply};}else if(cls==4u){applyIdentityRow(row,inCh,outCh);}else{applyRow(row,inCh,outCh);}}}}`;
+  const diagnosticOutputChannel = options.diagnosticOutputChannel
+    ?? OCTREE_PERSISTENT_MGPCG_CHANNEL.pressure;
+  const captureInitialResidual = options.diagnosticStageCapture
+    && options.diagnosticStageCapture !== "section43Boundary"
+    && options.diagnosticStageCapture !== "section43First"
+    && options.diagnosticStageCapture !== "section43Inputs"
+    ? "arena[stagedCh(CH_RHS,row)]=bitcast<u32>(value);" : "";
+  const captureInitialPreconditioned = options.diagnosticStageCapture === "initialPreconditioned"
+    ? `for(var row=lane;row<liveRows;row+=LANES){if(!stopped()){
+       arena[stagedCh(CH_SEED,row)]=bitcast<u32>(vload(CH_PRE,row));}}
+      storageBarrier();workgroupBarrier();` : "";
+  const captureNative = (stage: OctreePersistentMGPCGShaderOptions["diagnosticStageCapture"],
+    level: string, channel: string) => options.diagnosticStageCapture === stage
+    ? `if(atomicLoad(&control[3])==0u){for(var r=lane;r<rows();r+=LANES){
+       let native=firstTrailingBit(geometry[r].y);if(native==${level}){
+        arena[stagedCh(CH_SEED,r)]=state[at(${channel},native,rowMap(native,r))];}}}` : "";
+  const captureVcyclePhase0 = options.diagnosticStageCapture === "vcyclePhase0"
+    ? `if(l==0u){${captureNative("vcyclePhase0", "l", "S_B")}}` : "";
+  const captureVcyclePresmooth = captureNative("vcyclePresmooth", "l", "S_A");
+  const captureVcycleRestrict = captureNative("vcycleRestrict", "l+1u", "S_RHS");
+  const captureVcycleProlong = captureNative("vcycleProlong", "l", "S_A");
+  const captureVcyclePostsmooth = captureNative("vcyclePostsmooth", "l", "S_A");
+  const captureSection43Presmooth = options.diagnosticStageCapture === "section43Boundary"
+    ? `if(atomicLoad(&control[3])==0u){for(var r=lane;r<liveRows;r+=LANES){
+       arena[stagedCh(CH_RHS,r)]=bitcast<u32>(vload(CH_HA,r));}}
+      storageBarrier();workgroupBarrier();` : "";
+  const captureSection43InnerRhs = options.diagnosticStageCapture === "section43Boundary"
+    ? `if(atomicLoad(&control[3])==0u){for(var r=lane;r<liveRows;r+=LANES){
+       arena[stagedCh(CH_SEED,r)]=bitcast<u32>(vload(CH_INNER_RHS,r));}}
+      storageBarrier();workgroupBarrier();` : "";
+  const captureSection43Initial = options.diagnosticStageCapture === "section43First"
+    ? `if(atomicLoad(&control[3])==0u){for(var r=lane;r<liveRows;r+=LANES){
+       arena[stagedCh(CH_RHS,r)]=bitcast<u32>(vload(CH_HB,r));}}
+      storageBarrier();workgroupBarrier();` : "";
+  const captureSection43First = options.diagnosticStageCapture === "section43First"
+    ? `if(iteration==1u&&atomicLoad(&control[3])==0u){for(var r=lane;r<liveRows;r+=LANES){
+       arena[stagedCh(CH_SEED,r)]=bitcast<u32>(vload(CH_HA,r));}}
+      storageBarrier();workgroupBarrier();` : "";
+  const captureSection43Inputs = options.diagnosticStageCapture === "section43Inputs"
+    ? `if(atomicLoad(&control[3])==0u){for(var r=lane;r<liveRows;r+=LANES){
+       arena[stagedCh(CH_RHS,r)]=bitcast<u32>(vload(rhsCh,r));
+       arena[stagedCh(CH_SEED,r)]=bitcast<u32>(diagonalAt(r));}}
+      storageBarrier();workgroupBarrier();` : "";
+  if (!Number.isSafeInteger(diagnosticOutputChannel)
+    || diagnosticOutputChannel < 0
+    || diagnosticOutputChannel >= OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT) {
+    throw new RangeError("Persistent MGPCG diagnostic output channel is invalid");
+  }
   const activityParameters = options.activity?.parameters
     ? `,\n ${options.activity.parameters}` : "";
   const activityEnter = options.activity?.enter ? `\n ${options.activity.enter}` : "";
@@ -131,6 +221,7 @@ struct Params{
  shape:vec4u,      // encodedIterations, chebyshevDegree, boundarySweeps, bandLayers
  sizes:vec4u,      // transferStride, totalBrickCount, pageDirectoryWords, stagedInputBase
  numerics:vec4f,   // relativeTolerance, absoluteTolerance, tiny, damping
+ worksets:vec4u,   // seven-word class stride, A/B bank stride, reserved
  levelCaps:array<vec4u,4>,
  levelBases:array<vec4u,4>,
  brickOffsets:array<vec4u,4>,
@@ -146,6 +237,8 @@ struct Params{
 @group(0) @binding(6) var<storage,read> metrics:array<Metric>;
 @group(0) @binding(7) var<storage,read_write> control:array<atomic<u32>>;
 @group(0) @binding(8) var<storage,read_write> pressureOut:array<f32>;
+@group(0) @binding(9) var<storage,read> dynamicWorksets:array<u32>;
+@group(0) @binding(10) var<storage,read> acceptedBoundary:array<u32>;
 
 const INVALID=0xffffffffu;
 const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
@@ -153,9 +246,6 @@ const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;
 const S_KEY=0u;const S_FLAGS=1u;const S_DIAG=2u;const S_XP=3u;
 const S_YZMM=20u;const S_RHS=21u;const S_A=22u;const S_B=23u;
 const S_OWNER=24u;const S_SPECTRAL=25u;const STATE_CHANNELS=26u;
-const PAGE_X=8u;const PAGE_Y=8u;const PAGE_Z=4u;
-const HALO_X=10u;const HALO_Y=10u;const HALO_Z=6u;
-const PAGE_ELEMENTS=256u;const HALO_ELEMENTS=600u;
 const PAGE_RECORD_WORDS=28u;
 const DISPATCH_WORDS=12u;
 const LANES=256u;
@@ -195,16 +285,11 @@ const CH_BANDLIST=${OCTREE_PERSISTENT_MGPCG_CHANNEL.bandList}u;
 const CH_RHS=${OCTREE_PERSISTENT_MGPCG_CHANNEL.rhs}u;
 const CH_SEED=${OCTREE_PERSISTENT_MGPCG_CHANNEL.pressureSeed}u;
 
-var<workgroup> pageSlots:array<u32,600>;
-var<workgroup> pageA:array<f32,600>;
-var<workgroup> pageBw:array<f32,600>;
-var<workgroup> pageRhs:array<f32,600>;
 var<workgroup> merged:array<MergedScalars,${OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES}>;
 var<workgroup> scan:array<u32,256>;
 var<workgroup> wRows:u32;
 var<workgroup> wLevels:u32;
 var<workgroup> wPartials:u32;
-var<workgroup> wPages:u32;
 var<workgroup> wBand:u32;
 var<workgroup> wHalt:u32;
 var<workgroup> wInitial:u32;
@@ -228,14 +313,46 @@ fn storePair(word:u32,value:CompensatedF32){
  atomicStore(&control[word+1u],bitcast<u32>(value.lo));}
 
 // ---------------------------------------------------------------------------
-// Staged authority tables. accepted, dispatchMeta and the four accepted
-// workset class headers are copied into the arena header by encodeSolve, which
-// is what keeps this kernel at eight storage bindings.
+// Accepted boundary authority and its banked memberships are read directly.
+// This removes nine staging copies and, more importantly, keeps the class
+// membership and coefficient bank under one live epoch selection.
 // ---------------------------------------------------------------------------
-fn acc(word:u32)->u32{return arena[H_ACCEPTED+word];}
+fn acc(word:u32)->u32{return acceptedBoundary[word];}
 fn capacity()->u32{return p.dims.w;}
 fn rows()->u32{return min(acc(2u),capacity());}
-fn acceptedBank()->u32{return acc(4u)&1u;}
+fn acceptedEpoch()->u32{return acc(4u);}
+fn acceptedBank()->u32{return acc(5u)&1u;}
+fn worksetBase(cls:u32)->u32{return acceptedBank()*p.worksets.y+cls*p.worksets.x;}
+fn worksetCount(cls:u32)->u32{return dynamicWorksets[worksetBase(cls)+1u];}
+fn worksetRow(cls:u32,item:u32)->u32{return dynamicWorksets[worksetBase(cls)+7u+item];}
+fn validateAcceptedRowPartition()->u32{
+ if(arrayLength(&acceptedBoundary)<7u||acc(0u)!=0u||acc(1u)!=INVALID
+  ||acc(2u)==0u||acc(2u)>capacity()||acc(3u)==0u||acceptedEpoch()==0u
+  ||acc(5u)>1u||acc(6u)!=acceptedEpoch()){return 1u;}
+ var counts:array<u32,5>;var cursor:array<u32,5>;var total=0u;
+ for(var cls=0u;cls<5u;cls+=1u){
+  let base=worksetBase(cls);if(base+7u>arrayLength(&dynamicWorksets)){return 0x100u+cls*16u;}
+  let n=dynamicWorksets[base+1u];let blocks=(n+63u)/64u;let dx=max(1u,min(65535u,blocks));
+  if(dynamicWorksets[base]!=acceptedEpoch()){return 0x101u+cls*16u;}
+  if(n>rows()){return 0x102u+cls*16u;}
+  if(dynamicWorksets[base+2u]<rows()){return 0x103u+cls*16u;}
+  if(dynamicWorksets[base+3u]!=3u){return 0x104u+cls*16u;}
+  if(dynamicWorksets[base+4u]!=dx){return 0x105u+cls*16u;}
+  if(dynamicWorksets[base+5u]!=(blocks+dx-1u)/dx){return 0x106u+cls*16u;}
+  if(dynamicWorksets[base+6u]!=1u){return 0x107u+cls*16u;}
+  if(base+7u+n>arrayLength(&dynamicWorksets)){return 0x108u+cls*16u;}
+  counts[cls]=n;cursor[cls]=0u;total+=n;}
+ if(total!=rows()){return 0x200u;}
+ // Each class list is index-ordered. A five-way merge therefore proves the
+ // complete exact partition in O(rows) reads: a duplicate leaves a value
+ // below the expected row, and an omission advances the minimum above it.
+ for(var expected=0u;expected<rows();expected+=1u){
+  var best=INVALID;var owner=INVALID;
+  for(var cls=0u;cls<5u;cls+=1u){if(cursor[cls]<counts[cls]){
+   let candidate=worksetRow(cls,cursor[cls]);if(candidate<best){best=candidate;owner=cls;}}}
+  if(best!=expected||owner==INVALID){return 0x201u;}cursor[owner]+=1u;}
+ for(var cls=0u;cls<5u;cls+=1u){if(cursor[cls]!=counts[cls]){return 0x202u+cls;}}
+ return 0u;}
 fn dispatchWord(word:u32)->u32{return arena[H_DISPATCH+word];}
 fn count(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS);}
 fn transferCount(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS+1u);}
@@ -298,6 +415,8 @@ fn brickDims(l:u32)->vec3u{return(dims(l)+vec3u(3u))/4u;}
 fn brickRecord(l:u32,q:vec3u)->u32{let d=brickDims(l);let b=q/4u;let dense=b.x+d.x*(b.y+d.y*b.z);
  return directoryBase()+16u+(brickLevelOffset(l)+dense)*4u;}
 fn rankedSlotsBase()->u32{return directoryBase()+16u+totalBrickCount()*4u;}
+fn neighbourBase()->u32{return rankedSlotsBase()+totalLevelSlots();}
+fn neighbourAt(k:u32,l:u32,s:u32)->u32{return neighbourBase()+k*totalLevelSlots()+levelBase(l)+s;}
 fn localBit(q:vec3u)->u32{let local=q&vec3u(3u);return local.x+4u*local.y+16u*local.z;}
 fn decode(key:u32,l:u32)->vec3u{let d=dims(l);let v=key-1u;return vec3u(v%d.x,(v/d.x)%d.y,v/(d.x*d.y));}
 fn coordKey(q:vec3u,l:u32)->u32{let d=dims(l);return q.x+d.x*(q.y+d.y*q.z)+1u;}
@@ -326,6 +445,41 @@ fn coefficientForDirection(row:u32,direction:vec3i)->f32{
  return coefficients[coefficientBase(row)+1u+channel];}
 fn diagonalAt(row:u32)->f32{return coefficients[coefficientBase(row)];}
 fn validDiagonal(row:u32)->bool{let d=diagonalAt(row);return finite(d)&&d>0.0;}
+fn sorted3Sum(values:array<f32,3>)->f32{var sorted=values;
+ for(var i=1u;i<3u;i+=1u){let value=sorted[i];var j=i;
+  loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}
+ return sorted[0]+sorted[1]+sorted[2];}
+fn sorted4Sum(values:array<f32,4>)->f32{var sorted=values;
+ for(var i=1u;i<4u;i+=1u){let value=sorted[i];var j=i;
+  loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}
+ return (sorted[0]+sorted[1])+(sorted[2]+sorted[3]);}
+fn sorted6Sum(values:array<f32,6>)->f32{var sorted=values;
+ for(var i=1u;i<6u;i+=1u){let value=sorted[i];var j=i;
+  loop{if(j==0u||sorted[j-1u]<=value){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}
+ return ((sorted[0]+sorted[1])+(sorted[2]+sorted[3]))+(sorted[4]+sorted[5]);}
+// Signed axis permutations preserve opposite-direction pairs. Canonicalizing
+// three axial pair sums and six diagonal pair sums is therefore invariant to
+// every transform code, while doing 18 comparisons instead of sorting all
+// eighteen values (153 comparisons). The arithmetic remains grouped by the
+// two stencil orbits, so the symmetry fix does not turn each sparse spoke into
+// a quadratic amount of work.
+fn canonical18Sum(v:array<f32,18>)->f32{
+ let axes=array<f32,3>(v[0]+v[1],v[2]+v[3],v[4]+v[5]);
+ let diagonals=array<f32,6>(v[6]+v[9],v[7]+v[8],v[10]+v[13],
+  v[11]+v[12],v[14]+v[17],v[15]+v[16]);
+ return sorted3Sum(axes)+sorted6Sum(diagonals);}
+// The eight interpolation corners similarly form four opposite pairs under
+// signed axis permutations. Six comparisons replace the full 28-comparison
+// corner sort without weakening transform invariance.
+fn canonical8Sum(v:array<f32,8>)->f32{
+ return sorted4Sum(array<f32,4>(v[0]+v[7],v[1]+v[6],v[2]+v[5],v[3]+v[4]));}
+fn sorted64PrefixSum(values:array<f32,64>,n:u32)->f32{
+ var sorted=values;for(var i=n;i<64u;i+=1u){sorted[i]=3.402823e38;}
+ for(var width=2u;width<=64u;width*=2u){for(var stride=width/2u;stride>0u;stride/=2u){
+  for(var i=0u;i<64u;i+=1u){let other=i^stride;if(other<=i){continue;}
+   let ascending=(i&width)==0u;let a=sorted[i];let b=sorted[other];
+   if((a>b)==ascending){sorted[i]=b;sorted[other]=a;}}}}
+ var sum=0.0;for(var i=0u;i<n;i+=1u){sum+=sorted[i];}return sum;}
 
 // --- three pageSlot variants, one per producer, so failureStage stays exact ---
 fn opPageSlot(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32)->u32{
@@ -354,22 +508,23 @@ fn bandPageSlot(l:u32,page:u32,origin:vec3u,q:vec3u)->u32{
  let slot=topology[rankedSlotsBase()+levelBase(l)+topology[record+3u]+rank];
  if(slot>=levelCapacity(l)){reportAt(ERR_ROW,10u,INVALID);return INVALID;}return slot;}
 
-fn mgPageSlot(l:u32,page:u32,origin:vec3u,q:vec3u)->u32{
- let shape=vec3u(PAGE_X,PAGE_Y,PAGE_Z);let ownPage=origin/shape;let qPage=q/shape;
- let delta=vec3i(qPage)-vec3i(ownPage);
- if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportAt(OVERFLOW,65u,page);return INVALID;}
- let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));let physical=pageNeighbour(l,page,ordinal);
- if(physical==INVALID){return INVALID;}
- if(physical>=pageCount(l)){reportAt(OVERFLOW,66u,physical);return INVALID;}
- let physicalOrigin=decode(pageKey(l,physical),l);
- if(any(physicalOrigin/shape!=qPage)){reportAt(OVERFLOW,67u,physical);return INVALID;}
- let record=brickRecord(l,q);let bit=localBit(q);let word=topology[record+1u+(bit>>5u)];
- if((word&(1u<<(bit&31u)))==0u){return INVALID;}let low=topology[record+1u];let high=topology[record+2u];
+// Dynamically proven class 0 has exactly the six same-level Cartesian faces.
+// The accepted SPGrid publication already proved page adjacency and brick
+// ranks, so this path omits the general page-origin/catalog chase while
+// retaining every slot, flag, owner, and coefficient guard used by A2.
+fn regularPageSlot(l:u32,page:u32,q:vec3u,targetCell:vec3u,row:u32)->u32{
+ let shape=vec3u(8u,8u,4u);let delta=vec3i(targetCell/shape)-vec3i(q/shape);
+ if(any(delta<vec3i(-1))||any(delta>vec3i(1))){reportAt(ERR_ROW,21u,row);return INVALID;}
+ let ordinal=u32(delta.x+1)+3u*(u32(delta.y+1)+3u*u32(delta.z+1));
+ let physical=pageNeighbour(l,page,ordinal);if(physical==INVALID){return INVALID;}
+ if(physical>=pageCount(l)){reportAt(ERR_ROW,22u,row);return INVALID;}
+ let record=brickRecord(l,targetCell);let bit=localBit(targetCell);let low=topology[record+1u];let high=topology[record+2u];
+ if(((select(low,high,bit>=32u)>>(bit&31u))&1u)==0u){return INVALID;}
  let lower=select((1u<<(bit&31u))-1u,0xffffffffu,bit>=32u);var rank=countOneBits(low&lower);
- if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}let ranked=topology[record+3u]+rank;
- if(ranked>=count(l)||ranked>=levelCapacity(l)){reportAt(OVERFLOW,68u,ranked);return INVALID;}
+ if(bit>=32u){rank+=countOneBits(high&((1u<<(bit-32u))-1u));}
+ let ranked=topology[record+3u]+rank;if(ranked>=count(l)){reportAt(ERR_ROW,23u,row);return INVALID;}
  let slot=topology[rankedSlotsBase()+levelBase(l)+ranked];
- if(slot>=levelCapacity(l)||state[at(S_KEY,l,slot)]!=coordKey(q,l)){reportAt(OVERFLOW,69u,slot);return INVALID;}
+ if(slot>=levelCapacity(l)||state[at(S_KEY,l,slot)]!=coordKey(targetCell,l)){reportAt(ERR_ROW,23u,row);return INVALID;}
  return slot;}
 
 fn directoryLookup(l:u32,q:vec3u)->u32{
@@ -390,25 +545,25 @@ fn directoryLookup(l:u32,q:vec3u)->u32{
 // Section 6.3 accurate A2 apply (octreeSPGridAccurateOperatorShader::applyRow)
 // ---------------------------------------------------------------------------
 fn finerAdjoint(row:u32,q:vec3u,l:u32,x:f32,inCh:u32)->f32{
- if(l==0u){return 0.0;}let fine=l-1u;var result=0.0;
- for(var child=0u;child<8u;child+=1u){
-  let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
-  let ghostPage=pageFor(fine,ghostQ);if(ghostPage==INVALID){continue;}
-  if(ghostPage>=levelCapacity(fine)){reportAt(ERR_ROW,31u,row);continue;}
-  let ghost=opPageSlot(fine,ghostPage,ghostQ,ghostQ,row);
-  if(ghost==INVALID||(state[at(S_FLAGS,fine,ghost)]&GHOST)==0u
-   ||state[at(S_OWNER,fine,ghost)]!=row+1u){continue;}
-  for(var candidateDirection=0u;candidateDirection<18u;candidateDirection+=1u){
-   let delta=canonicalDirection(candidateDirection);let activeQ=vec3i(ghostQ)-delta;
-   if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}
-   let activeSlot=opPageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
-   if(activeSlot==INVALID||(state[at(S_FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}
-   let encoded=state[at(S_OWNER,fine,activeSlot)];
-   if(encoded==0u||encoded>capacity()){reportAt(ERR_ROW,24u,row);continue;}
-   let other=encoded-1u;
-   let c=coefficientForDirection(other,delta);
-   if(c>0.0){result+=c*(x-vload(inCh,other));}}}
- return result;}
+ if(l==0u){return 0.0;}var children:array<f32,8>;
+ for(var child=0u;child<8u;child+=1u){var terms:array<f32,18>;
+  let fine=l-1u;let ghostQ=2u*q+vec3u(child&1u,(child>>1u)&1u,(child>>2u)&1u);
+  let ghostPage=pageFor(fine,ghostQ);
+  if(ghostPage!=INVALID&&ghostPage<levelCapacity(fine)){
+   let ghost=opPageSlot(fine,ghostPage,ghostQ,ghostQ,row);
+   if(ghost!=INVALID&&(state[at(S_FLAGS,fine,ghost)]&GHOST)!=0u
+    &&state[at(S_OWNER,fine,ghost)]==row+1u){
+    for(var direction=0u;direction<18u;direction+=1u){let delta=canonicalDirection(direction);
+     let activeQ=vec3i(ghostQ)-delta;
+     if(any(activeQ<vec3i(0))||any(activeQ>=vec3i(dims(fine)))){continue;}
+     let activeSlot=opPageSlot(fine,ghostPage,ghostQ,vec3u(activeQ),row);
+     if(activeSlot==INVALID||(state[at(S_FLAGS,fine,activeSlot)]&ACTIVE)==0u){continue;}
+     let encoded=state[at(S_OWNER,fine,activeSlot)];
+     if(encoded==0u||encoded>capacity()){reportAt(ERR_ROW,24u,row);continue;}
+     let other=encoded-1u;let c=coefficientForDirection(other,delta);
+     terms[direction]=select(0.0,c*(x-vload(inCh,other)),c>0.0);}}}
+  children[child]=canonical18Sum(terms);}
+ return canonical8Sum(children);}
 
 fn applyRow(row:u32,inCh:u32,outCh:u32){
  if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)
@@ -418,10 +573,9 @@ fn applyRow(row:u32,inCh:u32,outCh:u32){
   ||base+19u>arrayLength(&coefficients)){reportAt(ERR_AUTHORITY,26u,row);return;}
  let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
  if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
- let x=vload(inCh,row);var sum=0.0;
- for(var channel=0u;channel<18u;channel+=1u){sum+=coefficients[base+1u+channel];}
- var value=max(0.0,coefficients[base]-sum)*x;
+ let x=vload(inCh,row);var coefficientTerms:array<f32,18>;var directTerms:array<f32,18>;
  for(var channel=0u;channel<18u;channel+=1u){let c=coefficients[base+1u+channel];if(c==0.0){continue;}
+  coefficientTerms[channel]=c;
   let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
   if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
   let slot=opPageSlot(l,page,q,vec3u(targetQ),row);
@@ -430,18 +584,64 @@ fn applyRow(row:u32,inCh:u32,outCh:u32){
   if((flags&MG_ONLY)!=0u){continue;}
   let encoded=state[at(S_OWNER,l,slot)];
   if(encoded==0u||encoded>capacity()){reportAt(ERR_ROW,29u,row);continue;}
-  value+=c*(x-vload(inCh,encoded-1u));}
+  directTerms[channel]=c*(x-vload(inCh,encoded-1u));}
+ var value=max(0.0,coefficients[base]-canonical18Sum(coefficientTerms))*x+canonical18Sum(directTerms);
  value+=finerAdjoint(row,q,l,x,inCh);
  if(!finite(value)){reportAt(ERR_NONFINITE,30u,row);}else{vstore(outCh,row,value);}}
 
-// TRANSCRIPTION NOTE: the hierarchical exact apply dispatches the four
+fn regularCoefficientTailValid(row:u32)->bool{
+ let base=coefficientBase(row);
+ if(base+19u>arrayLength(&coefficients)){reportAt(ERR_AUTHORITY,26u,row);return false;}
+ for(var channel=6u;channel<18u;channel+=1u){
+  if(coefficients[base+1u+channel]!=0.0){reportAt(ERR_AUTHORITY,32u,row);return false;}}
+ return true;}
+
+fn applyRegularRow(row:u32,inCh:u32,outCh:u32){
+ if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)
+  ||ch(inCh,row)>=arrayLength(&arena)){reportAt(ERR_ROW,25u,row);return;}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
+ if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||m.caseId!=0u
+  ||(m.transformAndFlags&0x3f00u)!=0u||base+19u>arrayLength(&coefficients)){
+  reportAt(ERR_AUTHORITY,26u,row);return;}
+ let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
+ if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
+ let x=vload(inCh,row);var coefficientTerms:array<f32,18>;var directTerms:array<f32,18>;
+ for(var channel=0u;channel<${regularChannelCount}u;channel+=1u){
+  let c=coefficients[base+1u+channel];if(c==0.0){continue;}coefficientTerms[channel]=c;
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
+  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
+  let slot=${regularSlotLookup};
+  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}
+  let flags=state[at(S_FLAGS,l,slot)];if((flags&MG_ONLY)!=0u){continue;}
+  let encoded=state[at(S_OWNER,l,slot)];if(encoded==0u||encoded>capacity()){
+   reportAt(ERR_ROW,29u,row);continue;}
+  directTerms[channel]=c*(x-vload(inCh,encoded-1u));}
+ let value=max(0.0,coefficients[base]-canonical18Sum(coefficientTerms))*x
+  +canonical18Sum(directTerms)${regularAdjoint};
+ if(!finite(value)){reportAt(ERR_NONFINITE,30u,row);}else{vstore(outCh,row,value);}}
+
+// Class 4 is outside the liquid pressure system. The boundary publisher
+// admits it only for the exact identity row; re-prove that invariant here,
+// including the dynamics-authored zero RHS, so stale or corrupt membership
+// rejects instead of silently dropping pressure coupling.
+fn applyIdentityRow(row:u32,inCh:u32,outCh:u32){
+ if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)
+  ||ch(inCh,row)>=arrayLength(&arena)){reportAt(ERR_ROW,25u,row);return;}
+ let base=coefficientBase(row);if(base+19u>arrayLength(&coefficients)
+  ||coefficients[base]!=1.0||vload(CH_RHS,row)!=0.0){reportAt(ERR_AUTHORITY,32u,row);return;}
+ for(var channel=0u;channel<18u;channel+=1u){if(coefficients[base+1u+channel]!=0.0){
+  reportAt(ERR_AUTHORITY,32u,row);return;}}
+ let value=vload(inCh,row);if(!finite(value)){reportAt(ERR_NONFINITE,32u,row);}
+ else{vstore(outCh,row,value);}}
+
+// TRANSCRIPTION NOTE: the hierarchical exact apply dispatches the five
 // disjoint accepted row classes, whose lists partition [0, rows()) exactly
 // (finalizeStructuredPublication scatters every row into exactly one class).
 // applyRow is a pure gather into its own output slot, so iterating the rows
 // directly is set-identical and order-independent. P0 verifies the partition
 // against the staged class headers and fails closed if it does not hold.
 fn applyAllRows(lane:u32,liveRows:u32,inCh:u32,outCh:u32){
- for(var row=lane;row<liveRows;row+=LANES){if(!stopped()){applyRow(row,inCh,outCh);}}}
+ ${allRowsApply}}
 
 fn applyBandRows(lane:u32,bandCount:u32,inCh:u32,outCh:u32){
  for(var item=lane;item<bandCount;item+=LANES){
@@ -459,8 +659,9 @@ fn validSection63Row(row:u32)->bool{
   if(!finite(c)||c<0.0){return false;}}
  return coefficients[base]>0.0;}
 fn section63Class(row:u32)->u32{
- let base=coefficientBase(row);var off=0.0;
- for(var channel=1u;channel<19u;channel+=1u){off+=coefficients[base+channel];}
+ let base=coefficientBase(row);var terms:array<f32,18>;
+ for(var channel=0u;channel<18u;channel+=1u){terms[channel]=coefficients[base+1u+channel];}
+ let off=canonical18Sum(terms);
  let physicalBoundary=(metrics[row].transformAndFlags&0x3f00u)!=0u;
  let boundary=physicalBoundary||coefficients[base]>off+max(1e-6,1e-5*abs(off));
  let transition=metrics[row].caseId!=0u;
@@ -517,109 +718,32 @@ fn smoothZeroValue(row:u32,rhsCh:u32)->f32{
 // ---------------------------------------------------------------------------
 fn smoothable(l:u32,s:u32)->bool{return(state[at(S_FLAGS,l,s)]&GHOST)==0u;}
 fn applied(l:u32,slot:u32,source:u32)->f32{
- var value=loadf(S_DIAG,l,slot)*loadf(source,l,slot);
- let q=decode(state[at(S_KEY,l,slot)],l);
+ let base=levelBase(l);let span=totalLevelSlots();let columnBase=neighbourBase()+base+slot;
+ var terms:array<f32,18>;
  for(var k=0u;k<18u;k+=1u){let c=loadf(S_XP+k,l,slot);if(c==0.0){continue;}
-  let neighborCoord=vec3i(q)+canonicalDirection(k);
-  if(any(neighborCoord<vec3i(0))||any(neighborCoord>=vec3i(dims(l)))){reportAt(OVERFLOW,74u,slot);continue;}
-  let other=directoryLookup(l,vec3u(neighborCoord));
-  if(other==INVALID){reportAt(OVERFLOW,75u,slot);continue;}
-  value-=c*loadf(source,l,other);}
- return value;}
+  let other=topology[columnBase+k*span];
+  if(other==INVALID||other>=levelCapacity(l)){reportAt(OVERFLOW,75u,slot);continue;}
+  terms[k]=c*loadf(source,l,other);}
+ return loadf(S_DIAG,l,slot)*loadf(source,l,slot)-canonical18Sum(terms);}
 fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
  let upper=loadf(S_SPECTRAL,l,0u);let lower=upper/30.0;
  if(!(lower>0.0)||!(upper>lower)||!finite(upper)){reportAt(NONPOSITIVE,76u,l);return 0.0;}
  let centre=0.5*(upper+lower);let radius=0.5*(upper-lower);
  return 1.0/(centre-radius*cos(3.141592653589793*(2.0*f32(phase)+1.0)/(2.0*f32(degree))));}
-fn pageInteriorHaloIndex(local:u32)->u32{let x=local%PAGE_X;let yz=local/PAGE_X;
- return x+1u+HALO_X*((yz%PAGE_Y)+1u+HALO_Y*((yz/PAGE_Y)+1u));}
-// TRANSCRIPTION NOTE: the shipped kernel stages pageDiagonal[] alongside
-// pageA/pageB/pageRhs but only ever reads it at the cell's OWN halo index, so
-// the staged copy is replaced by loadf(S_DIAG, l, slot). Identical value,
-// 2.4 KB of the 16 KB workgroup budget returned to the reduction tree.
-fn pageAppliedA(l:u32,slot:u32,origin:vec3u,halo:u32)->f32{
- var value=loadf(S_DIAG,l,slot)*pageA[halo];
- for(var k=0u;k<18u;k+=1u){let c=loadf(S_XP+k,l,slot);if(c==0.0){continue;}
-  let relative=vec3i(decode(state[at(S_KEY,l,slot)],l))+canonicalDirection(k)-vec3i(origin)+vec3i(1);
-  if(any(relative<vec3i(0))||any(relative>=vec3i(i32(HALO_X),i32(HALO_Y),i32(HALO_Z)))){
-   reportAt(OVERFLOW,77u,slot);continue;}
-  let neighbourHalo=u32(relative.x)+HALO_X*(u32(relative.y)+HALO_Y*u32(relative.z));
-  if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}
-  value-=c*pageA[neighbourHalo];}
- return value;}
-fn pageAppliedB(l:u32,slot:u32,origin:vec3u,halo:u32)->f32{
- var value=loadf(S_DIAG,l,slot)*pageBw[halo];
- for(var k=0u;k<18u;k+=1u){let c=loadf(S_XP+k,l,slot);if(c==0.0){continue;}
-  let relative=vec3i(decode(state[at(S_KEY,l,slot)],l))+canonicalDirection(k)-vec3i(origin)+vec3i(1);
-  if(any(relative<vec3i(0))||any(relative>=vec3i(i32(HALO_X),i32(HALO_Y),i32(HALO_Z)))){
-   reportAt(OVERFLOW,77u,slot);continue;}
-  let neighbourHalo=u32(relative.x)+HALO_X*(u32(relative.y)+HALO_Y*u32(relative.z));
-  if(pageSlots[neighbourHalo]==INVALID){reportAt(OVERFLOW,78u,slot);continue;}
-  value-=c*pageBw[neighbourHalo];}
- return value;}
-// TRANSCRIPTION NOTE: the shipped sweeps stride by 128 (their workgroup width);
-// these stride by 256. Each lane owns a distinct output cell and reads only the
-// opposite ping-pong buffer, so the wider stride is a pure work redistribution.
-fn pageSweepAtoB(l:u32,origin:vec3u,lane:u32,phase:u32,degree:u32){
- let weight=chebyshevWeight(l,phase,degree);
- for(var local=lane;local<PAGE_ELEMENTS;local+=LANES){let halo=pageInteriorHaloIndex(local);
-  let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageA[halo];
-  if(!smoothable(l,slot)){pageBw[halo]=source;continue;}
-  let d=loadf(S_DIAG,l,slot);if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageBw[halo]=source;continue;}
-  let next=source+weight*(pageRhs[halo]-pageAppliedA(l,slot,origin,halo))/d;
-  if(!finite(next)){reportAt(NONFINITE,80u,slot);pageBw[halo]=source;}else{pageBw[halo]=next;}}}
-fn pageSweepBtoA(l:u32,origin:vec3u,lane:u32,phase:u32,degree:u32){
- let weight=chebyshevWeight(l,phase,degree);
- for(var local=lane;local<PAGE_ELEMENTS;local+=LANES){let halo=pageInteriorHaloIndex(local);
-  let slot=pageSlots[halo];if(slot==INVALID){continue;}let source=pageBw[halo];
-  if(!smoothable(l,slot)){pageA[halo]=source;continue;}
-  let d=loadf(S_DIAG,l,slot);if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);pageA[halo]=source;continue;}
-  let next=source+weight*(pageRhs[halo]-pageAppliedB(l,slot,origin,halo))/d;
-  if(!finite(next)){reportAt(NONFINITE,80u,slot);pageA[halo]=source;}else{pageA[halo]=next;}}}
-fn pagePhase(step:u32,degree:u32,reverse:bool)->u32{return select(step,degree-1u-step,reverse);}
-
-// TRANSCRIPTION NOTE: the shipped smoother launches one workgroup per page and
-// stages each page's halo straight out of channel A while other workgroups are
-// already writing their interiors back into A — an unsynchronised cross-page
-// read/write whose only deterministic reading is "every page stages the
-// pre-sweep field". This kernel makes that reading explicit: channel B (unused
-// during smoothing, zeroed by zeroVectors) holds the pre-sweep snapshot, pages
-// stage from B and write interiors to A. Values are those of the race-free
-// interpretation; see the report's verification plan.
-fn smoothOnePage(l:u32,page:u32,reverse:bool,lane:u32){
- let pageLive=page<pageCount(l)&&!stopped();
- var origin=vec3u(0u);
- if(pageLive){origin=decode(pageKey(l,page),l);}
- let d=dims(l);
- for(var halo=lane;halo<HALO_ELEMENTS;halo+=LANES){
-  let x=halo%HALO_X;let yz=halo/HALO_X;
-  let relative=vec3i(i32(x)-1,i32(yz%HALO_Y)-1,i32(yz/HALO_Y)-1);
-  let q=vec3i(origin)+relative;var slot=INVALID;
-  if(pageLive&&all(q>=vec3i(0))&&all(q<vec3i(d))){slot=mgPageSlot(l,page,origin,vec3u(q));}
-  pageSlots[halo]=slot;
-  var value=0.0;var rhs=0.0;
-  if(slot!=INVALID){value=loadf(S_B,l,slot);rhs=loadf(S_RHS,l,slot);}
-  pageA[halo]=value;pageBw[halo]=value;pageRhs[halo]=rhs;}
- workgroupBarrier();
- let degree=p.shape.y;
- pageSweepAtoB(l,origin,lane,pagePhase(0u,degree,reverse),degree);workgroupBarrier();
- pageSweepBtoA(l,origin,lane,pagePhase(1u,degree,reverse),degree);workgroupBarrier();
- if(degree==4u){pageSweepAtoB(l,origin,lane,pagePhase(2u,degree,reverse),degree);}workgroupBarrier();
- if(degree==4u){pageSweepBtoA(l,origin,lane,pagePhase(3u,degree,reverse),degree);}workgroupBarrier();
- if(pageLive){for(var local=lane;local<PAGE_ELEMENTS;local+=LANES){
-   let halo=pageInteriorHaloIndex(local);let slot=pageSlots[halo];
-   if(slot!=INVALID){storef(S_A,l,slot,pageA[halo]);}}}}
-
+fn sparseSmoothPhase(l:u32,source:u32,destination:u32,phase:u32,degree:u32,lane:u32){
+ let weight=chebyshevWeight(l,phase,degree);let n=count(l);
+ for(var i=lane;i<n;i+=LANES){let slot=workSlot(l,i);let value=loadf(source,l,slot);
+  if(!smoothable(l,slot)){storef(destination,l,slot,value);continue;}
+  let d=loadf(S_DIAG,l,slot);if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);continue;}
+  let next=value+weight*(loadf(S_RHS,l,slot)-applied(l,slot,source))/d;
+  if(!finite(next)){reportAt(NONFINITE,80u,slot);}else{storef(destination,l,slot,next);}}}
 fn smoothLevel(l:u32,reverse:bool,lane:u32){
- let n=count(l);
- for(var i=lane;i<n;i+=LANES){let s=workSlot(l,i);storef(S_B,l,s,loadf(S_A,l,s));}
- storageBarrier();workgroupBarrier();
- if(lane==0u){wPages=select(0u,pageCount(l),!stopped());}
- storageBarrier();workgroupBarrier();
- let pages=workgroupUniformLoad(&wPages);
- for(var page=0u;page<pages;page+=1u){
-  smoothOnePage(l,page,reverse,lane);
-  storageBarrier();workgroupBarrier();}}
+ let degree=p.shape.y;
+ for(var step=0u;step<degree;step+=1u){let phase=select(step,degree-1u-step,reverse);
+  if((step&1u)==0u){sparseSmoothPhase(l,S_A,S_B,phase,degree,lane);}
+  else{sparseSmoothPhase(l,S_B,S_A,phase,degree,lane);}
+  storageBarrier();workgroupBarrier();
+  if(!reverse&&step==0u){${captureVcyclePhase0}}}}
 
 fn correctionTransfer(l:u32,fine:u32,corner:u32)->TransferTarget{
  if(l+1u>=levels()||fine>=levelCapacity(l)){reportAt(OVERFLOW,81u,fine);return TransferTarget(INVALID,0.0);}
@@ -638,7 +762,8 @@ fn restrictLevel(l:u32,lane:u32){
  let n=count(l+1u);
  for(var i=lane;i<n;i+=LANES){
   if(stopped()){continue;}
-  let coarse=workSlot(l+1u,i);var sum=0.0;var record=topology[parentHeadBase(l)+coarse];var bad=false;
+  let coarse=workSlot(l+1u,i);var terms:array<f32,64>;var termCount=0u;
+  var record=topology[parentHeadBase(l)+coarse];var bad=false;
   for(var visited=0u;record!=INVALID&&visited<transferCount(l);visited+=1u){
    if(record>=transferCount(l)){reportAt(OVERFLOW,85u,coarse);bad=true;break;}
    let fine=topology[transferWord(l,record,0u)];let parent=topology[transferWord(l,record,1u)];
@@ -646,11 +771,13 @@ fn restrictLevel(l:u32,lane:u32){
    let ghost=(state[at(S_FLAGS,l,fine)]&GHOST)!=0u;
    let product=applied(l,fine,S_A);
    let residual=select(-product,loadf(S_RHS,l,fine)-product,!ghost);
-   sum+=bitcast<f32>(topology[transferWord(l,record,2u)])*residual;
+   if(termCount>=64u){reportAt(OVERFLOW,87u,coarse);bad=true;break;}
+   terms[termCount]=bitcast<f32>(topology[transferWord(l,record,2u)])*residual;termCount+=1u;
    record=topology[transferWord(l,record,3u)];}
   if(bad){continue;}
+  let sum=sorted64PrefixSum(terms,termCount);
   if(record!=INVALID||!finite(sum)){reportAt(OVERFLOW,87u,coarse);continue;}
-  storef(S_RHS,l+1u,coarse,sum);}}
+  storef(S_RHS,l+1u,coarse,loadf(S_RHS,l+1u,coarse)+sum);}}
 
 fn exactBottom(l:u32,lane:u32){
  if(lane!=0u||stopped()){return;}
@@ -665,12 +792,14 @@ fn prolongLevel(l:u32,lane:u32){
  for(var i=lane;i<n;i+=LANES){
   if(stopped()){continue;}
   let fine=workSlot(l,i);let ghost=(state[at(S_FLAGS,l,fine)]&GHOST)!=0u;
-  let targetCount=select(8u,1u,ghost);var value=select(loadf(S_A,l,fine),0.0,ghost);var bad=false;
+  let targetCount=select(8u,1u,ghost);var value=select(loadf(S_A,l,fine),0.0,ghost);
+  var terms:array<f32,8>;var bad=false;
   for(var corner=0u;corner<targetCount;corner+=1u){
    let transfer=correctionTransfer(l,fine,corner);
    if(transfer.coarse==INVALID){bad=true;break;}
-   value+=transfer.weight*loadf(S_A,l+1u,transfer.coarse);}
+   terms[corner]=transfer.weight*loadf(S_A,l+1u,transfer.coarse);}
   if(bad){continue;}
+  value+=canonical8Sum(terms);
   if(!finite(value)){reportAt(NONFINITE,91u,fine);}else{storef(S_A,l,fine,value);}}}
 
 fn vcycleCorrection(lane:u32,liveRows:u32,rhsCh:u32,corrCh:u32){
@@ -693,15 +822,19 @@ fn vcycleCorrection(lane:u32,liveRows:u32,rhsCh:u32,corrCh:u32){
  storageBarrier();workgroupBarrier();
  for(var l=0u;l+1u<levelCount;l+=1u){
   smoothLevel(l,false,lane);
+  ${captureVcyclePresmooth}
   restrictLevel(l,lane);
-  storageBarrier();workgroupBarrier();}
+  storageBarrier();workgroupBarrier();
+  ${captureVcycleRestrict}}
  exactBottom(levelCount-1u,lane);
  storageBarrier();workgroupBarrier();
  for(var back=0u;back+1u<levelCount;back+=1u){
   let l=levelCount-2u-back;
   prolongLevel(l,lane);
   storageBarrier();workgroupBarrier();
-  smoothLevel(l,true,lane);}
+  ${captureVcycleProlong}
+  smoothLevel(l,true,lane);
+  ${captureVcyclePostsmooth}}
  storageBarrier();workgroupBarrier();
  for(var r=lane;r<liveRows;r+=LANES){
   if(stopped()){continue;}
@@ -715,10 +848,12 @@ fn vcycleCorrection(lane:u32,liveRows:u32,rhsCh:u32,corrCh:u32){
 // ---------------------------------------------------------------------------
 fn section43Correction(lane:u32,liveRows:u32,bandCount:u32,rhsCh:u32,corrCh:u32){
  let sweeps=p.shape.z;
+ ${captureSection43Inputs}
  for(var r=lane;r<liveRows;r+=LANES){
   if(stopped()){continue;}
   vstore(CH_HA,r,0.0);vstore(CH_HB,r,smoothZeroValue(r,rhsCh));}
  storageBarrier();workgroupBarrier();
+ ${captureSection43Initial}
  for(var iteration=1u;iteration<sweeps;iteration+=1u){
   let fromB=(iteration&1u)==1u;
   applyBandRows(lane,bandCount,select(CH_HA,CH_HB,fromB),CH_OPIMG);
@@ -728,7 +863,9 @@ fn section43Correction(lane:u32,liveRows:u32,bandCount:u32,rhsCh:u32,corrCh:u32)
    if(!stopped()&&row!=INVALID&&row<liveRows){
     if(fromB){vstore(CH_HA,row,smoothValue(row,true,rhsCh));}
     else{vstore(CH_HB,row,smoothValue(row,false,rhsCh));}}}
-  storageBarrier();workgroupBarrier();}
+  storageBarrier();workgroupBarrier();
+  ${captureSection43First}}
+ ${captureSection43Presmooth}
  applyAllRows(lane,liveRows,CH_HA,CH_OPIMG);
  storageBarrier();workgroupBarrier();
  for(var r=lane;r<liveRows;r+=LANES){
@@ -736,6 +873,7 @@ fn section43Correction(lane:u32,liveRows:u32,bandCount:u32,rhsCh:u32,corrCh:u32)
   let value=vload(rhsCh,r)-vload(CH_OPIMG,r);
   if(!finite(value)){reportAt(ERR_NONFINITE,12u,r);}else{vstore(CH_INNER_RHS,r,value);}}
  storageBarrier();workgroupBarrier();
+ ${captureSection43InnerRhs}
  vcycleCorrection(lane,liveRows,CH_INNER_RHS,CH_INNER_CORR);
  for(var r=lane;r<liveRows;r+=LANES){
   if(stopped()){continue;}
@@ -946,10 +1084,6 @@ fn compactBand(lane:u32,liveRows:u32){
  let total=scan[LANES-1u];
  for(var r=first;r<last;r+=1u){
   if(uload(CH_BANDB,r)==0u){continue;}
-  // section63Class is a three-way select over {0,1,2,3}; the shipped kernel's
-  // cls>=4 rejection is unreachable. Report but still consume the rank so the
-  // counted prefix and the written list can never disagree.
-  if(section63Class(r)>=4u){reportAt(ERR_ROW,10u,r);}
   if(rank<capacity()){ustore(CH_BANDLIST,rank,r);}else{reportAt(ERR_ROW,10u,r);}
   rank+=1u;}
  if(lane==0u){wBand=min(total,capacity());}
@@ -962,31 +1096,37 @@ fn compactBand(lane:u32,liveRows:u32){
 fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters}){${activityEnter}
  // --- P0: authority validation, uniform bootstrap -------------------------
  if(lane==0u){
-  atomicStore(&control[7],INVALID);
+ atomicStore(&control[7],INVALID);
   // Persistent-executor marker so a control readback can tell the two paths
   // apart without changing any word the snapshot ring or tripwires read.
   atomicStore(&control[21],0x50455253u);
+  // On rejection these reserved census words retain an exact authority
+  // snapshot and validation code. A successful solve overwrites them with
+  // the live hybrid work census below.
+  atomicStore(&control[22],acc(0u));atomicStore(&control[23],acc(1u));
+  atomicStore(&control[24],acc(2u));atomicStore(&control[25],acc(3u));
+  atomicStore(&control[26],acc(4u));atomicStore(&control[27],acc(5u));
+  atomicStore(&control[28],acc(6u));atomicStore(&control[29],p.worksets.x);
+  atomicStore(&control[30],p.worksets.y);atomicStore(&control[31],0u);
   if(acc(2u)==0u||acc(2u)>capacity()){reportAt(ERR_AUTHORITY,1u,INVALID);}
   else if(acc(2u)>MAX_LIVE_ROWS){reportAt(ERR_ROW,1u,acc(2u));}
-  else if(acc(0u)!=0u||acc(1u)!=INVALID||acc(3u)==0u||acc(4u)>1u||acc(5u)==0u){
-   reportAt(ERR_AUTHORITY,1u,INVALID);}
+  else {let authorityError=validateAcceptedRowPartition();
+   if(authorityError!=0u){atomicStore(&control[31],authorityError);reportAt(ERR_AUTHORITY,1u,INVALID);}}
   atomicStore(&control[4],rows());
-  // The accepted four-class workset headers must carry the accepted
-  // generation and must partition exactly rows() entries; that is what makes
-  // iterating [0, rows()) equal to the hierarchical four-class apply.
-  let bank=acceptedBank();
-  var classTotal=0u;var headerOk=true;
-  for(var cls=0u;cls<4u;cls+=1u){
-   let base=H_WORKSET+(bank*4u+cls)*2u;
-   if(arena[base]!=acc(3u)){headerOk=false;}
-   classTotal+=arena[base+1u];}
-  if(!headerOk||classTotal!=rows()){reportAt(ERR_AUTHORITY,1u,INVALID);}
+  if(!failed()){
+   let regular=worksetCount(0u);let identity=worksetCount(4u);let power=rows()-regular-identity;
+   atomicStore(&control[22],regular);atomicStore(&control[23],identity);
+   let liquid=regular+power;
+   atomicStore(&control[24],power);atomicStore(&control[25],liquid);
+   atomicStore(&control[26],power);atomicStore(&control[27],18u*liquid);
+   atomicStore(&control[28],18u*power);
+   atomicStore(&control[29],acceptedEpoch());
+   atomicStore(&control[30],5u);atomicStore(&control[31],0x48344234u);}
   wRows=rows();
   wLevels=levels();
   wPartials=(rows()+REDUCTION_LANES-1u)/REDUCTION_LANES;
   wBand=0u;
   wInitial=0u;
-  wPages=0u;
   wHalt=select(0u,1u,failed());}
  storageBarrier();workgroupBarrier();
  let liveRows=workgroupUniformLoad(&wRows);
@@ -1018,17 +1158,11 @@ fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters
   for(var row=lane;row<liveRows;row+=LANES){
    if(failed()){continue;}
    let value=-vload(CH_RHS,row)-vload(CH_DIRIMG,row);
-   if(!finite(value)){reportAt(ERR_NONFINITE,3u,row);}else{vstore(CH_RESIDUAL,row,value);}}
+   if(!finite(value)){reportAt(ERR_NONFINITE,3u,row);}else{vstore(CH_RESIDUAL,row,value);${captureInitialResidual}}}
   storageBarrier();workgroupBarrier();
 
   // --- P4: Section 4.3 band publication (encodeSetup) ----------------------
-  for(var row=lane;row<liveRows;row+=LANES){
-   if(stopped()){continue;}
-   if(!validDiagonal(row)||!validSection63Row(row)){reportAt(ERR_ROW,10u,row);continue;}
-   let rowClass=section63Class(row);
-   let transition=rowClass==1u||rowClass==3u;
-   let boundary=rowClass==2u||rowClass==3u;
-   ustore(CH_BANDA,row,select(0u,1u,boundary||transition));}
+  ${bandInitialization}
   storageBarrier();workgroupBarrier();
   for(var row=lane;row<liveRows;row+=LANES){
    if(!stopped()){ustore(CH_BANDB,row,dilatedBand(row,false));}}
@@ -1049,6 +1183,7 @@ fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters
  if(halt==0u){
   // --- P5: M(residual) -> preconditioned ----------------------------------
   section43Correction(lane,liveRows,bandCount,CH_RESIDUAL,CH_PRE);
+  ${captureInitialPreconditioned}
   // --- P6: A2(preconditioned) -> preconditionedImage ----------------------
   applyAllRows(lane,liveRows,CH_PRE,CH_PREIMG);
   storageBarrier();workgroupBarrier();
@@ -1118,7 +1253,7 @@ fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters
  for(var row=lane;row<liveRows;row+=LANES){
   let rawSeed=vload(CH_SEED,row);
   let seed=select(0.0,rawSeed,finite(rawSeed));
-  let candidate=vload(CH_PRESSURE,row);
+  let candidate=vload(${diagnosticOutputChannel}u,row);
   pressureOut[row]=select(seed,candidate,success&&finite(candidate));}
  if(lane==0u&&success){atomicStore(&control[20],1u);}
  ${activityExit}

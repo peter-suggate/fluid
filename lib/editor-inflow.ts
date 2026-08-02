@@ -1,5 +1,20 @@
-import { add, length, normalize, scale, sub } from "./math";
-import type { FluidInflow, SceneDescription, Vec3 } from "./model";
+import { add, cross, dot, length, normalize, scale, sub } from "./math";
+import {
+  boxHandles,
+  boxSize,
+  frameRayToLocal,
+  moveHandles,
+  pickSolidBox,
+  positionFields,
+  resizeBox,
+  type BoxExtent,
+  type EditorEntity,
+  type EditorEntityContext,
+  type EditorEntityDefinition,
+  type EditorFrame,
+  type EditorHandle,
+} from "./editor-entity";
+import type { FluidInflow, Quaternion, SceneDescription, Vec3 } from "./model";
 
 /**
  * Placing and aiming the hose.
@@ -12,17 +27,11 @@ import type { FluidInflow, SceneDescription, Vec3 } from "./model";
  * author several.
  */
 
-export type InflowHandleKind = "center" | "nozzle";
-
-export interface InflowHandle {
-  readonly kind: InflowHandleKind;
-  readonly position_m: Vec3;
-}
-
 export const INFLOW_SELECTION_ID = "inflow";
 export const INFLOW_MINIMUM_SPEED_M_S = 0.05;
 export const INFLOW_MAXIMUM_SPEED_M_S = 12;
 export const INFLOW_MINIMUM_RADIUS_M = 0.01;
+export const INFLOW_MINIMUM_LENGTH_M = 0.02;
 
 /** Metres of arrow per m/s, so the arrow length reads as the jet speed. */
 export const INFLOW_ARROW_SECONDS = 0.12;
@@ -34,15 +43,6 @@ export function inflowSpeed_m_s(inflow: FluidInflow): number {
 export function inflowDirection(inflow: FluidInflow): Vec3 {
   const speed = inflowSpeed_m_s(inflow);
   return speed > 1e-9 ? scale(inflow.velocity_m_s, 1 / speed) : { x: 0, y: -1, z: 0 };
-}
-
-/** Centre plus the arrow tip whose offset encodes direction and speed. */
-export function inflowHandles(inflow: FluidInflow): InflowHandle[] {
-  const tip = add(inflow.center_m, scale(inflowDirection(inflow), INFLOW_ARROW_SECONDS * inflowSpeed_m_s(inflow)));
-  return [
-    { kind: "center", position_m: { ...inflow.center_m } },
-    { kind: "nozzle", position_m: tip },
-  ];
 }
 
 function clampToContainer(point: Vec3, container: SceneDescription["container"]): Vec3 {
@@ -102,3 +102,148 @@ export function setInflowRadius(inflow: FluidInflow, radius_m: number, container
   const ceiling = 0.5 * Math.min(container.width_m, container.depth_m);
   return { ...inflow, radius_m: Math.min(ceiling, Math.max(INFLOW_MINIMUM_RADIUS_M, radius_m)) };
 }
+
+/**
+ * The channel's length, floored so the nozzle never becomes a disc.
+ *
+ * The floor is absolute rather than a multiple of the bore: `validateScene` asks
+ * only that both are positive, and tying them would mean widening a hose
+ * silently lengthened it.
+ */
+export function setInflowLength(inflow: FluidInflow, length_m: number): FluidInflow {
+  return { ...inflow, length_m: Math.max(INFLOW_MINIMUM_LENGTH_M, length_m) };
+}
+
+// ---- entity ---------------------------------------------------------------
+
+/**
+ * The rotation that carries the entity's +y onto the jet direction.
+ *
+ * The hose is a cylinder about the axis it sprays along, so aiming it *is*
+ * orienting it — and once the frame carries the aim, the nozzle is an ordinary
+ * box entity: local x and z are its radius, local y its length. Its two bespoke
+ * handles stop being bespoke.
+ */
+function inflowOrientation(direction: Vec3): Quaternion {
+  const up = { x: 0, y: 1, z: 0 };
+  const aim = normalize(direction);
+  const alignment = dot(up, aim);
+  // Anti-parallel is the singular case: any axis perpendicular to y will do, and
+  // x is as good as another.
+  if (alignment < -1 + 1e-9) return { w: 0, x: 1, y: 0, z: 0 };
+  const axis = cross(up, aim);
+  return normalize4({ w: 1 + alignment, x: axis.x, y: axis.y, z: axis.z });
+}
+
+function normalize4(q: Quaternion): Quaternion {
+  const magnitude = Math.hypot(q.w, q.x, q.y, q.z);
+  return magnitude > 1e-12
+    ? { w: q.w / magnitude, x: q.x / magnitude, y: q.y / magnitude, z: q.z / magnitude }
+    : { w: 1, x: 0, y: 0, z: 0 };
+}
+
+export function inflowBox(inflow: FluidInflow): BoxExtent {
+  const half = 0.5 * inflow.length_m;
+  return {
+    min: { x: -inflow.radius_m, y: -half, z: -inflow.radius_m },
+    max: { x: inflow.radius_m, y: half, z: inflow.radius_m },
+  };
+}
+
+function inflowEntityFor(context: EditorEntityContext): EditorEntity | undefined {
+  const scene = context.scene;
+  const inflow = scene.fluid.inflow;
+  if (!inflow) return undefined;
+  const direction = inflowDirection(inflow);
+  const frame: EditorFrame = { origin_m: inflow.center_m, orientation: inflowOrientation(direction) };
+  const box = inflowBox(inflow);
+  const patch = (next: FluidInflow) => ({ fluid: { ...scene.fluid, inflow: next } });
+  const speed = inflowSpeed_m_s(inflow);
+  const tip: EditorHandle = {
+    id: "aim",
+    kind: "tip",
+    space: "world",
+    label: "aim · direction and speed",
+    position_m: add(inflow.center_m, scale(direction, INFLOW_ARROW_SECONDS * speed)),
+    // The arrow points anywhere, so it owns all three axes and the lock narrows
+    // it exactly as it narrows a corner.
+    axes: ["x", "y", "z"],
+    drag: (point_m) => patch(aimInflow(inflow, point_m)),
+  };
+  return {
+    selection: { kind: "inflow", id: INFLOW_SELECTION_ID },
+    label: "HOSE",
+    tone: "inflow",
+    frame,
+    box,
+    sizeLabel: `⌀${(2 * inflow.radius_m).toFixed(3)} m · ${speed.toFixed(2)} m/s`,
+    handles: [
+      ...boxHandles(box, {
+        drag: (sides, point_m) => {
+          const next = resizeBox(box, sides, point_m, {
+            minimum_m: [2 * INFLOW_MINIMUM_RADIUS_M, INFLOW_MINIMUM_LENGTH_M, 2 * INFLOW_MINIMUM_RADIUS_M],
+            links: [["x", "z"]],
+          });
+          const size = boxSize(next);
+          return patch(setInflowLength(
+            setInflowRadius(inflow, 0.5 * size.x, scene.container), size.y));
+        },
+      }),
+      ...moveHandles(inflow.center_m,
+        (center_m) => patch(moveInflow(inflow, center_m, scene.container))),
+      tip,
+    ],
+    draftSubject: "inflow",
+    editLabel: (handle) => handle.kind === "tip" ? "Aimed the hose"
+      : handle.space === "world" ? "Moved the hose" : "Resized the hose",
+    fields: [
+      ...positionFields(inflow.center_m,
+        (center_m) => patch(moveInflow(inflow, center_m, scene.container))),
+      {
+        id: "radius",
+        label: "⌀",
+        unit: "m",
+        value: 2 * inflow.radius_m,
+        step: 0.005,
+        min: 2 * INFLOW_MINIMUM_RADIUS_M,
+        apply: (value) => patch(setInflowRadius(inflow, 0.5 * value, scene.container)),
+      },
+      {
+        id: "speed",
+        label: "Speed",
+        unit: "m/s",
+        value: speed,
+        step: 0.1,
+        min: INFLOW_MINIMUM_SPEED_M_S,
+        max: INFLOW_MAXIMUM_SPEED_M_S,
+        apply: (value) => patch({ ...inflow, velocity_m_s: scale(direction, value) }),
+      },
+    ],
+    remove: () => {
+      const { inflow: _dropped, ...fluid } = scene.fluid;
+      void _dropped;
+      return { ...scene, fluid };
+    },
+  };
+}
+
+/** The nozzle is clicked on its own channel, like any other solid. */
+export const inflowEntity: EditorEntityDefinition = {
+  kind: "inflow",
+  surfacedBy: (tool) => tool === "select" || tool === "inflow",
+  instances: (context) => {
+    const entity = inflowEntityFor(context);
+    return entity ? [entity] : [];
+  },
+  find: (context, id) => id === INFLOW_SELECTION_ID ? inflowEntityFor(context) : undefined,
+  pick: (context, ray) => {
+    const entity = inflowEntityFor(context);
+    if (!entity?.box) return undefined;
+    // Against the channel's own bounds, in its own frame — the same transform
+    // the handles use, so what is clickable is exactly what is drawn.
+    const distance_m = pickSolidBox(frameRayToLocal(entity.frame, ray), entity.box);
+    return distance_m === undefined
+      ? undefined
+      : { selection: { kind: "inflow", id: INFLOW_SELECTION_ID }, distance_m };
+  },
+};

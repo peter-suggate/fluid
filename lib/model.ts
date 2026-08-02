@@ -1,6 +1,7 @@
 import sharedDefaultScene from "./default-scene.json";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { EnvironmentId } from "./environments";
+import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
 
 export type RunState = "paused" | "running";
 
@@ -83,11 +84,12 @@ export interface SceneDescription {
   /** Optional ground heightfield inside the container; absent means a flat floor at y = 0. */
   terrain?: TerrainDescription;
   /**
-   * Authored decorative geometry. Props are render-only — they never enter the
-   * solve — and are additive to the procedural environment catalog rather than
-   * a replacement for it, so presets keep their hand-built scenery.
+   * Everything visible that is not water, terrain or a rigid body, as a
+   * declarative graph the document owns outright. An environment preset seeds
+   * it when the scene is created and is never consulted again; editing scenery
+   * is an ordinary edit to these nodes. See lib/scenery-graph.ts.
    */
-  props?: ScenePropDescription[];
+  scenery?: SceneryGraph;
   fluid: {
     density_kg_m3: number;
     dynamicViscosity_Pa_s: number;
@@ -129,25 +131,6 @@ export interface SceneDescription {
     pressureMaxIterations: number;
   };
   rigidBodies: RigidBodyDescription[];
-}
-
-export type ScenePropShape = "box" | "cylinder" | "ellipsoid";
-
-/**
- * A render-only authored solid, mirroring `EnvironmentProxyPrimitive` in the
- * scene document. `halfSize_m` is the box half-extent or the ellipsoid radii;
- * a cylinder uses `x` as its radius and `y` as its half-height, matching
- * `EnvironmentCylinderProxy`.
- */
-export interface ScenePropDescription {
-  id: string;
-  name: string;
-  shape: ScenePropShape;
-  position_m: Vec3;
-  halfSize_m: Vec3;
-  /** Scene-linear base colour. */
-  colorLinear: [number, number, number];
-  emission?: number;
 }
 
 export interface FluidInflow {
@@ -298,24 +281,7 @@ export function validateScene(scene: SceneDescription): string[] {
       || inflow.center_m.z < -c.depth_m / 2 || inflow.center_m.z > c.depth_m / 2) errors.push("Inflow center must be inside the container");
   }
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
-  if (scene.props !== undefined) {
-    if (!Array.isArray(scene.props)) errors.push("Scene props must be an array");
-    else {
-      const propIds = new Set<string>();
-      for (const prop of scene.props) {
-        if (!prop?.id?.trim() || propIds.has(prop.id)) errors.push("Scene prop IDs must be unique and non-empty");
-        propIds.add(prop?.id);
-        if (!(["box", "cylinder", "ellipsoid"] as string[]).includes(prop?.shape)) errors.push(`Unsupported prop shape ${String(prop?.shape)}`);
-        if (![prop?.position_m?.x, prop?.position_m?.y, prop?.position_m?.z].every(Number.isFinite)) errors.push(`Prop ${prop?.id} position must be finite`);
-        if (!(prop?.halfSize_m?.x > 0) || !(prop?.halfSize_m?.y > 0) || !(prop?.halfSize_m?.z > 0)) errors.push(`Prop ${prop?.id} half size must be positive`);
-        if (!Array.isArray(prop?.colorLinear) || prop.colorLinear.length !== 3
-          || !prop.colorLinear.every((channel) => Number.isFinite(channel) && channel >= 0)) {
-          errors.push(`Prop ${prop?.id} colour must be three non-negative finite channels`);
-        }
-        if (prop?.emission !== undefined && (!Number.isFinite(prop.emission) || prop.emission < 0)) errors.push(`Prop ${prop.id} emission cannot be negative`);
-      }
-    }
-  }
+  if (scene.scenery) errors.push(...validateSceneryGraph(scene.scenery));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");
   if (!scene.numerics || !(scene.numerics.fixedDt_s > 0) || !(scene.numerics.maxDt_s > 0)) errors.push("Time steps must be positive");
   if (scene.numerics && scene.numerics.fixedDt_s > scene.numerics.maxDt_s) errors.push("Fixed time step exceeds maximum time step");

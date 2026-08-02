@@ -86,6 +86,12 @@ test("power topology WGSL resolves affected rows and compacts exact publication 
   assert.match(octreePowerTopologyShader, /transformBoundaryMask/);
   assert.match(octreePowerTopologyShader, /fn deltaAccepted/);
   assert.match(octreePowerTopologyShader, /fn stagePowerTopologyDelta/);
+  assert.match(octreePowerTopologyShader,
+    /fn exactTopologyIdentity[\s\S]*base\+3u\]==0u[\s\S]*base\+4u\]==0u[\s\S]*base\+5u\]==0u[\s\S]*base\+6u\]==0u[\s\S]*base\+15u\]==1u/,
+    "zero-work topology carry requires the complete exact row transaction");
+  assert.match(octreePowerTopologyShader,
+    /reusableScratch=topologyCandidateScratchReusable\(\)[\s\S]*exactTopologyIdentity\(requested,reusableScratch\)[\s\S]*candidate=controlArena\.authority[\s\S]*publicationCount=INVALID/,
+    "an exact topology identity must retain its immutable payload and zero row-shaped schedules");
   assert.match(octreePowerTopologyShader, /fn prefixPowerTopologyDelta/);
   assert.match(octreePowerTopologyShader, /fn scatterPowerTopologyDelta/);
   assert.match(octreePowerTopologyShader,

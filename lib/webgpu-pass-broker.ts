@@ -52,6 +52,18 @@ export function xctraceSafeComputeLabel(label: string): string {
 /** The name a report must use for a pass whose `compute()` carried no label. */
 export const UNLABELLED_PASS = "(unlabelled)";
 
+export interface PassBrokerBoundaryAuditBucket {
+  /** Calls which requested this boundary, including idempotent fences. */
+  readonly requests: number;
+  /** Requests which actually closed an open compute pass. */
+  readonly passClosures: number;
+  /** Copy/clear commands emitted immediately after the boundary. */
+  readonly copyCommands: number;
+  readonly clearCommands: number;
+  /** Exact command bytes when the caller supplied a numeric size. */
+  readonly commandBytes: number;
+}
+
 /**
  * Lazily owns the compute pass for one GPU command encoder.
  *
@@ -79,6 +91,13 @@ export class PassBroker {
    * distinct label count of one command encoder, which is a few hundred.
    */
   private readonly absorbed = new Map<string, Set<string>>();
+  /** Structural census of every requested pass boundary. This deliberately
+   * records idempotent requests as well as real closures: the former identify
+   * callers which can be batched, while the latter are the serial spine. */
+  private readonly boundaries = new Map<string, {
+    requests: number; passClosures: number; copyCommands: number;
+    clearCommands: number; commandBytes: number;
+  }>();
   /** Sampled per broker so a test can drive it; production reads the env once
    * per command encoder, which is not on any hot path. */
   private readonly isolateLabels: boolean;
@@ -131,8 +150,12 @@ export class PassBroker {
 
   /** End the current pass. `reason` documents semantic boundaries at callers. */
   fence(reason?: string): void {
+    const name = reason ?? "explicit fence";
+    const bucket = this.boundaryBucket(name);
+    bucket.requests += 1;
     const pass = this.openComputePass;
     if (!pass) return;
+    bucket.passClosures += 1;
     this.openComputePass = undefined;
     this.openComputePassLabel = undefined;
     this.latestFence = reason;
@@ -141,6 +164,10 @@ export class PassBroker {
 
   clearBuffer(buffer: GPUBuffer, offset?: GPUSize64, size?: GPUSize64): void {
     this.fence("clear buffer");
+    const bucket = this.boundaryBucket("clear buffer");
+    bucket.clearCommands += 1;
+    if (typeof size === "number") bucket.commandBytes += size;
+    else if (typeof buffer.size === "number") bucket.commandBytes += buffer.size - Number(offset ?? 0);
     this.encoder.clearBuffer(buffer, offset, size);
   }
 
@@ -152,6 +179,9 @@ export class PassBroker {
     size: GPUSize64,
   ): void {
     this.fence("copy buffer");
+    const bucket = this.boundaryBucket("copy buffer");
+    bucket.copyCommands += 1;
+    if (typeof size === "number") bucket.commandBytes += size;
     this.encoder.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
   }
 
@@ -163,7 +193,22 @@ export class PassBroker {
     destinationOffset: GPUSize64,
     size: GPUSize64,
   ): void {
-    this.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
+    // Keep indirect publication distinct in the audit. It is the dominant
+    // recurring copy family and therefore the first Bet-3 staging target.
+    this.fence("stage indirect args");
+    const bucket = this.boundaryBucket("stage indirect args");
+    bucket.copyCommands += 1;
+    if (typeof size === "number") bucket.commandBytes += size;
+    this.encoder.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
+  }
+
+  private boundaryBucket(reason: string) {
+    let bucket = this.boundaries.get(reason);
+    if (!bucket) {
+      bucket = { requests: 0, passClosures: 0, copyCommands: 0, clearCommands: 0, commandBytes: 0 };
+      this.boundaries.set(reason, bucket);
+    }
+    return bucket;
   }
 
   /** Escape to commands not represented here only after closing compute. */
@@ -214,6 +259,11 @@ export class PassBroker {
     for (const swallowed of this.absorbed.values()) total += swallowed.size;
     return total;
   }
+
+  /** Exact per-command-encoder census of boundary causes. */
+  get boundaryAudit(): ReadonlyMap<string, PassBrokerBoundaryAuditBucket> {
+    return this.boundaries;
+  }
 }
 
 /**
@@ -232,6 +282,27 @@ export function formatPassBrokerLabelAudit(
     + " each also carries the stages listed after it:"];
   for (const [owner, swallowed] of ranked.slice(0, limit)) {
     lines.push(`  ${owner} + ${swallowed.size}: ${[...swallowed].join(", ")}`);
+  }
+  if (ranked.length > limit) lines.push(`  ... and ${ranked.length - limit} more`);
+  return lines;
+}
+
+/** Rank the serial-spine causes by real pass closures, then command traffic. */
+export function formatPassBrokerBoundaryAudit(
+  audit: ReadonlyMap<string, PassBrokerBoundaryAuditBucket>,
+  limit = 12,
+): readonly string[] {
+  const ranked = [...audit.entries()].sort((left, right) =>
+    right[1].passClosures - left[1].passClosures
+    || (right[1].copyCommands + right[1].clearCommands)
+      - (left[1].copyCommands + left[1].clearCommands)
+    || right[1].commandBytes - left[1].commandBytes
+    || left[0].localeCompare(right[0]));
+  if (ranked.length === 0) return [];
+  const lines = [`${ranked.reduce((sum, [, bucket]) => sum + bucket.passClosures, 0)} compute-pass boundaries by cause:`];
+  for (const [reason, bucket] of ranked.slice(0, limit)) {
+    lines.push(`  ${reason}: ${bucket.passClosures} closures / ${bucket.requests} requests, `
+      + `${bucket.copyCommands} copies, ${bucket.clearCommands} clears, ${bucket.commandBytes} bytes`);
   }
   if (ranked.length > limit) lines.push(`  ... and ${ranked.length - limit} more`);
   return lines;

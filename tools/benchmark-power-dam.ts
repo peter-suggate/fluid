@@ -166,7 +166,10 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
         const record = JSON.parse(line) as { record?: string; phase?: string };
         if (record.record === "progress"
           || record.phase === "octree-row-delta-census-sample"
-          || record.phase === "frame-redundancy-census") {
+          || record.phase === "frame-redundancy-census"
+          || record.phase === "fine-transport-workset-census"
+          || record.phase === "structured-workset-census"
+          || record.phase === "settled-maintenance-census") {
           console.log(line);
         }
       } catch { /* forward only machine-readable experiment records */ }
@@ -199,6 +202,8 @@ const targetOverride = process.argv.find((argument) => argument.startsWith("--ta
   ?.slice("--target-s=".length);
 const bandLevelOverride = process.argv.find((argument) => argument.startsWith("--band-level="))
   ?.slice("--band-level=".length);
+const fineFactorOverride = process.argv.find((argument) => argument.startsWith("--fine-factor="))
+  ?.slice("--fine-factor=".length);
 if (stepsOverride !== undefined && dtOverride !== undefined) {
   throw new Error("--steps and --dt are mutually exclusive; --dt derives steps at fixed simulated time");
 }
@@ -222,6 +227,15 @@ if (bandLevelOverride !== undefined) {
   // Applied after the authored lane so an A/B cannot silently fall back to
   // the mini lane's recorded level-3 default.
   bandEnvironmentOverride.FLUID_OCTREE_INTERFACE_BAND = String(bandLevel);
+}
+if (fineFactorOverride !== undefined) {
+  const fineFactor = Number(fineFactorOverride);
+  if (![1, 4, 8].includes(fineFactor)) {
+    throw new Error(`--fine-factor must be one of 1, 4, or 8; received ${fineFactorOverride}`);
+  }
+  // Applied after the authored lane for differential Bet-4 measurements.
+  // This changes the discretization and therefore always requires Gate B.
+  bandEnvironmentOverride.FLUID_OCTREE_GLOBAL_FINE_FACTOR = String(fineFactor);
 }
 
 const movingResult = await runBenchmark({ ...laneOverride, ...bandEnvironmentOverride });

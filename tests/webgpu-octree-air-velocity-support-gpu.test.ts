@@ -17,6 +17,7 @@ import {
   octreeAirSupportIndirectFrontierGateEnabled,
   octreeAirSupportReconstructionCompactPassEnabled,
   octreeAirSupportTopologyReuseEnabled,
+  OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS,
   OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE,
   OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS,
   OCTREE_AIR_SUPPORT_GPU_ERROR,
@@ -27,14 +28,16 @@ import {
   OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS,
   OCTREE_AIR_SUPPORT_GPU_TOPOLOGY_STAGE,
   OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES,
+  OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE,
   WebGPUOctreeAirVelocitySupportProducer,
   octreeAirVelocitySupportPublicationWGSL,
+  planOctreeAirSupportCompactCellAuthority,
   planOctreeAirVelocitySupportGPU,
 } from "../lib/webgpu-octree-air-velocity-support-gpu";
 import {
+  OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS,
   OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE,
   OCTREE_AIR_SUPPORT_SELECTOR_STRIDE,
-  
 } from "../lib/webgpu-octree-air-velocity-support";
 
 const compact = (source: string) => source.replace(/\s+/g, "");
@@ -61,8 +64,8 @@ test("Section 5 changed-frontier defaults on and retains a construction-stable d
   assert.equal(octreeAirSupportChangedFrontierEnabled({ FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER: "0" }), false);
 });
 
-test("factor-1 frontier indirect convergence gate stays opt-in after a losing wall-clock A/B", () => {
-  assert.equal(octreeAirSupportIndirectFrontierGateEnabled({}), false);
+test("factor-1 frontier indirect convergence gate defaults on for work minimization", () => {
+  assert.equal(octreeAirSupportIndirectFrontierGateEnabled({}), true);
   assert.equal(octreeAirSupportIndirectFrontierGateEnabled({
     FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE: "1",
   }), true);
@@ -142,11 +145,8 @@ test("fine demand defaults to a GPU-authored live-page launch and retains the ca
   }), false);
 });
 
-test("reuse-only compact fine-cell listing stays opt-in after a neutral A/B", () => {
-  assert.equal(octreeAirSupportCompactFineCellsEnabled({}), false);
-  assert.equal(octreeAirSupportCompactFineCellsEnabled({
-    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS: "1",
-  }), true);
+test("factor-4/8 compact fine-cell listing defaults on with a dense A/B", () => {
+  assert.equal(octreeAirSupportCompactFineCellsEnabled({}), true);
   assert.equal(octreeAirSupportCompactFineCellsEnabled({
     FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS: "0",
   }), false);
@@ -154,7 +154,7 @@ test("reuse-only compact fine-cell listing stays opt-in after a neutral A/B", ()
 
 test("GPU plan composes both support layouts and bounded candidate schedules", () => {
   const plan = planOctreeAirVelocitySupportGPU(4_096, 4_096 * 30, [16, 16, 16]);
-  assert.equal(OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS, 3 * 68);
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS, OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS);
   assert.equal(OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE,
     OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE + OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS);
   assert.equal(plan.fineCandidateOffset, 4_096 * OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE);
@@ -163,14 +163,20 @@ test("GPU plan composes both support layouts and bounded candidate schedules", (
   assert.equal(plan.records.capacity, plan.support.supportCapacity);
   assert.equal(plan.support.selectorStride, OCTREE_AIR_SUPPORT_SELECTOR_STRIDE);
   assert.equal(plan.support.ownerDirectoryCellCapacity, plan.domainVolume);
-  assert.equal(plan.support.ownerDirectoryBytes, plan.domainVolume * 16);
+  assert.equal(plan.support.ownerDirectorySlotCapacity,
+    2 * (plan.rowCapacity + plan.support.supportCapacity));
+  assert.equal(plan.support.ownerDirectoryBytes,
+    plan.support.ownerDirectorySlotCapacity * 16);
   assert.ok(plan.offsets.candidates < plan.offsets.ranks);
-  assert.ok(plan.offsets.ranks < plan.offsets.directoryWinners);
-  assert.ok(plan.offsets.directoryWinners < plan.offsets.directoryFlags);
-  assert.ok(plan.offsets.directoryFlags < plan.offsets.blockCounts);
+  assert.ok(plan.offsets.ranks < plan.offsets.hashRecords);
+  assert.ok(plan.offsets.hashRecords < plan.offsets.touchedSlots);
+  assert.ok(plan.offsets.touchedSlots < plan.offsets.ownerTouchedSlots);
+  assert.ok(plan.offsets.ownerTouchedSlots < plan.offsets.radixScratch);
+  assert.ok(plan.offsets.radixScratch < plan.offsets.radixHistograms);
+  assert.ok(plan.offsets.radixHistograms < plan.offsets.blockCounts);
   assert.ok(plan.offsets.blockCounts < plan.offsets.blockOffsets);
   assert.equal(plan.scratchBytes, plan.scratchWords * 4);
-  assert.equal(plan.indirectBytes, 6 * 12);
+  assert.equal(plan.indirectBytes, 9 * 12);
   assert.equal(plan.faceCellCapacity, plan.rowCapacity + plan.support.supportCapacity);
   assert.equal(plan.faceCapacity, plan.faceCellCapacity * 12);
   assert.equal(plan.faceBytes, plan.faceCapacity * 16);
@@ -184,15 +190,78 @@ test("GPU plan composes both support layouts and bounded candidate schedules", (
   assert.equal(plan.faceFrontierBytes, (16 + 3 * plan.faceCapacity) * 4,
     "two compact queues and generation marks must cover every face exactly");
   assert.equal(plan.directAirVectorBytes, plan.rowCapacity * 16);
-  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 60,
-    "reuse controls and the durable stage-6 failure latch must remain outside the candidate arena");
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 73,
+    "reuse controls, sparse schedules, and durable latches must remain outside the candidate arena");
+});
+
+test("ocean candidate scratch is more than halved by deterministic catalog-incidence ranks", () => {
+  const rowCapacity = 65_536;
+  const ocean = planOctreeAirVelocitySupportGPU(rowCapacity, rowCapacity * 30, [320, 96, 80]);
+  const occurrenceStride = OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE + 3 * 68;
+  const occurrenceCapacity = rowCapacity * occurrenceStride + ocean.domainVolume;
+  const occurrenceBlocks = Math.ceil(occurrenceCapacity / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE);
+  const occurrenceScratchWords = OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS
+    + (OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS + 1) * occurrenceCapacity
+    + 5 * ocean.domainVolume + 2 * occurrenceBlocks;
+  const occurrenceScratchBytes = occurrenceScratchWords * 4;
+
+  assert.equal(ocean.candidateStride, 27 + 36,
+    "the row arena must contain real distinct-selector incidences, not tetra-vertex occurrences");
+  assert.equal(occurrenceCapacity, 17_596_416);
+  assert.equal(ocean.candidateCapacity, 4_227_072);
+  assert.equal(occurrenceScratchBytes, 331_244_836);
+  assert.equal(ocean.scratchBytes, 76_940_580);
+  assert.ok(occurrenceCapacity > 2 * ocean.candidateCapacity,
+    `candidate slots reduced only ${(occurrenceCapacity / ocean.candidateCapacity).toFixed(3)}x`);
+  assert.ok(occurrenceScratchBytes > 2 * ocean.scratchBytes,
+    `candidate/scratch bytes reduced only ${(occurrenceScratchBytes / ocean.scratchBytes).toFixed(3)}x`);
+});
+
+test("compact cell-authority prototype removes every domain-volume scratch term", () => {
+  // Production footprint headroom for 65,536 rows is 98,304 support owners.
+  // Deliberately no dimensions/domain argument: every allocation is proved by
+  // the row + support footprint and every recurring scan is driven by the
+  // first-claim/touched live count.
+  const compact = planOctreeAirSupportCompactCellAuthority(65_536, 98_304);
+  assert.equal(compact.identityCapacity, 163_840);
+  assert.equal(compact.hashCapacity, 327_680);
+  assert.equal(compact.hashRecordWords, 5);
+  assert.equal(compact.rowCandidateCapacity, 65_536 * 63);
+  assert.equal(compact.fineCandidateCapacity, 98_304);
+  assert.equal(compact.candidateCapacity, 4_227_072);
+  assert.equal(compact.scratchBytes, 76_940_580);
+  assert.ok(154_739_996 > 2 * compact.scratchBytes,
+    "the compact authority must more than halve the remaining ocean scratch, not merely remove one mask");
+  assert.ok(compact.offsets.hashRecords < compact.offsets.touchedSlots);
+  assert.ok(compact.offsets.touchedSlots < compact.offsets.ownerTouchedSlots);
+  assert.ok(compact.offsets.ownerTouchedSlots < compact.offsets.radixScratch);
+  assert.ok(compact.offsets.radixScratch < compact.offsets.radixHistograms);
+  assert.ok(compact.offsets.radixHistograms < compact.offsets.blockCounts);
 });
 
 test("WGSL performs deterministic mark, parallel scan, scatter, and tag resolution", () => {
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
   assert.match(shader, /letresolvedCell=cellOf\(owner\.origin\);letresolvedSize=owner\.size/);
-  assert.match(shader, /atomicMin\(&scratch\[p\.directoryWinnerOffset\+resolvedCell\],item\)/);
-  assert.match(shader, /atomicOr\(&scratch\[p\.directoryFlagOffset\+resolvedCell\],flags\)/);
+  assert.match(shader, /atomicCompareExchangeWeak\(&scratch\[at\],0u,wanted\)/,
+    "a first claim must publish its final key without a cross-lane reservation spin");
+  assert.match(shader, /atomicMax\(&scratch\[at\+3u\],INVALID-winner\)/,
+    "cold-zero inverted winners must preserve authored atomic-min ordering");
+  assert.match(shader, /fncountCompactAuthorityRadix0.*fnscatterCompactAuthorityRadix3/s,
+    "fine-only identities must be stably ordered independently of hash claim order");
+  assert.doesNotMatch(shader, /directoryWinnerOffset|directoryFlagOffset|waitHashKey/);
+  assert.match(shader,
+    /writeDispatch\(66u,select\(vec3u\(0u,1u,1u\),dispatchFor\(s\(72u\),256u\),clean&&!reuseTopology\)\)/,
+    "a cold owner hash must publish zero clear work and recurring clears must use its prior live list");
+  assert.match(shader, /if\(!reuseTopology\)\{sw\(72u,s\(71u\)\);sw\(71u,0u\);\}/,
+    "topology reuse must retain the owner hash's touched-slot ledger for the next fresh clear");
+  assert.match(shader,
+    /fnclearAdaptiveAirSupportOwnerDirectory.*slot=s\(ownerTouchedSlotOffset\(\)\+item\).*fninsertAdaptiveOwner.*atomicCompareExchangeWeak\(&supportArena\[at\],0u,wanted\).*atomicAdd\(&scratch\[71u\],1u\)/s,
+    "the consumer hash must publish and consume an exact owner-slot worklist");
+  assert.match(shader,
+    /claimed\.old_value==wanted\).*atomicLoad\(&supportArena\[at\+1u\]\)!=size\)\{fail\(item,ERROR_TOPOLOGY\);return;\}/s,
+    "one owner key may never admit two different dyadic sizes");
+  assert.doesNotMatch(shader, /dispatchFor\(ownerHashCapacity\(\),256u\)/,
+    "no owner-directory dispatch may be shaped by allocation capacity");
   assert.match(shader, /fnmarkAndScanAirSupportCandidates[\s\S]*marks\[lane\]=mark[\s\S]*marks\[lane\]\+=add/);
   assert.match(shader, /fnprefixAirSupportBlocks[\s\S]*blockScan\[lane\]\+=add[\s\S]*p\.blockOffsetOffset/);
   assert.match(shader, /fnscatterAirSupportRecords[\s\S]*p\.recordOffset\+output\*8u/);
@@ -226,8 +295,11 @@ test("producer proves generations and exact owner identities before admitting ai
     /fnmarkFineBandAirSupportDemand.*fineWorklist\[0\]==p\.expectedFineGeneration.*fineMetadata\[id\*10u\+2u\]!=p\.expectedFineGeneration/s,
     "fine-band demand must be generated only from the exact selected fine publication");
   assert.match(shader,
-    /letreuseTopology=p\.reuseTopology!=0u&&existingReady&&precedingSupportRows<=p\.supportCapacity;sw\(47u,select\(0u,1u,reuseTopology\)\)/,
-    "same-epoch reuse must be GPU-gated by a valid receipt, never host optimism");
+    /letidentityReady=receiptReady&&accepted\.identity!=0u&&boundaryIdentity/,
+    "cross-epoch reuse must prove exact structured and liquid-mask identity on the GPU");
+  assert.match(shader,
+    /letreuseTopology=p\.reuseTopology!=0u&&\(existingReady\|\|identityReady\)&&precedingSupportRows<=p\.supportCapacity;sw\(47u,select\(0u,1u,reuseTopology\)\)/,
+    "topology reuse must be GPU-gated by either the same-epoch or exact-identity receipt");
 });
 
 test("the second same-epoch Section 5 publication reuses immutable topology and refreshes fine demand", () => {
@@ -235,21 +307,35 @@ test("the second same-epoch Section 5 publication reuses immutable topology and 
   const begin = shader.slice(shader.indexOf("fnbeginAirSupportPublication"),
     shader.indexOf("fnclearAirSupportDirectory"));
   assert.match(begin,
-    /existingReady=.*airControlOffset\+2u.*accepted\.epoch.*airControlOffset\+3u.*accepted\.bank.*airControlOffset\+4u.*boundaryNow/s,
+    /receiptReady=.*airControlOffset\+3u.*accepted\.bank.*airControlOffset\+15u.*expectedFineGeneration.*existingReady=receiptReady.*airControlOffset\+2u.*accepted\.epoch.*airControlOffset\+4u.*boundaryNow/s,
     "a topology, bank, or liquid-mask/boundary epoch change must force a fresh solution");
   assert.match(begin,
-    /letretainedGraph=reuseTopology&&\(p\.capturePreceding&2u\)!=0u&&atomicLoad\(&faceFrontier\[11u\]\)==RETAINED_GRAPH_VALID&&precedingSeeds<=3u\*p\.candidateCapacity&&precedingSeeds<=p\.faceCapacity/s,
-    "retained values require the preceding sparse graph marker and a bounded exact seed list");
+    /boundaryIdentity=.*boundaryEpochOffset\+3u.*boundaryEpoch.*!=0u.*identityReady=receiptReady&&accepted\.identity!=0u&&boundaryIdentity/s,
+    "cross-epoch reuse must require exact structured and boundary-liquid identities");
+  for (const record of [13, 16, 43, 66]) {
+    assert.match(begin, new RegExp(
+      `writeDispatch\\(${record}u,select\\(vec3u\\(0u,1u,1u\\),dispatchFor\\([^;]+\\),clean&&!reuseTopology\\)\\)`),
+    `immutable air graph record ${record} must publish zero work under exact identity reuse`);
+  }
+  assert.match(begin,
+    /writeDispatch\(19u,select\(vec3u\(0u,1u,1u\),dispatchFor\(initializeItems,256u\),clean\)\)/,
+    "reuse must rehydrate exactly the retained row/support footprint after clearing its live hash slots");
+  const prefix = shader.slice(shader.indexOf("fnprefixAirSupportBlocks"),
+    shader.indexOf("fnscatterAirSupportRecords"));
+  assert.match(prefix, /if\(lane==255u&&!reuse\).*writeDispatch\(43u.*writeDispatch\(66u/s,
+    "the prefix must not revive topology or owner-hash work after identity reuse zeroed it");
+  assert.match(begin,
+    /letretainedGraph=existingReady&&\(p\.capturePreceding&2u\)!=0u&&atomicLoad\(&faceFrontier\[11u\]\)==RETAINED_GRAPH_VALID&&precedingSeeds<=3u\*p\.candidateCapacity&&precedingSeeds<=p\.faceCapacity/s,
+    "retained values require the same settled receipt because live seed magnitude participates in winner ordering");
   const clear = shader.slice(shader.indexOf("fnclearAirSupportDirectory"),
     shader.indexOf("fnclearAirSupportCandidates"));
   assert.match(clear, /s\(47u\)!=0u.*~\(QUERY_FINE\|RECORD_FINE\)/s,
     "reuse keeps stable row demand, winners and dense row indices while clearing dynamic fine demand");
   const fineCandidates = shader.slice(shader.indexOf("fnemitFineBandAirSupportCandidates"),
     shader.indexOf("var<workgroup>emitRowActive"));
-  assert.match(fineCandidates, /if\(reuse&&demanded==0u\)\{return;\}/,
-    "a reused publication must not walk undemanded domain cells merely to rebuild identical identities");
-  assert.match(fineCandidates, /if\(reuse\)\{return;\}letdirect=publishedRow/,
-    "dynamic fine flags must be forwarded before candidate production retires");
+  assert.match(fineCandidates,
+    /letdirect=publishedRow\(resolvedCell,owner\.size\);if\(direct!=INVALID\)\{return;\}if\(demanded==0u\)\{return;\}/,
+    "the compact live-identity walk must retire direct and undemanded owners before support claims");
   const topology = shader.slice(shader.indexOf("fnresolveAirSupportTopology"),
     shader.indexOf("fnpublishAirSupportOwnerDirectory"));
   const descriptor = shader.slice(shader.indexOf("fndescriptorForIdentity"),
@@ -260,7 +346,7 @@ test("the second same-epoch Section 5 publication reuses immutable topology and 
   assert.doesNotMatch(descriptor, /boundary\|=/,
     "air-only transition identities must not request liquid-only clipped catalog cases");
   assert.match(topology,
-    /s\(47u\)!=0u.*stable=r\(at\+5u\)&~\(RECORD_FINE<<6u\).*dynamic=s\(p\.directoryFlagOffset\+recordCell\(item\)\)&RECORD_FINE/s,
+    /s\(47u\)!=0u.*stable=r\(at\+5u\)&~\(RECORD_FINE<<6u\).*dynamic=authorityFlags\(recordCell\(item\)\)&RECORD_FINE/s,
     "reused records must refresh generation-dependent fine flags without re-resolving catalog topology");
   assert.match(shader, /fnpublishAirSupportOwnerDirectory.*s\(47u\)!=0u.*return/s,
     "the identity-keyed owner directory is immutable within the accepted epoch");
@@ -328,6 +414,13 @@ test("factor-1 separable demand dilation equals the brute-force cubic neighbourh
   for (const radius of [0, 1, 3]) {
     assert.deepEqual(dilateFactorOneAirSupportDemand(dimensions, source, radius), brute(radius));
   }
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  assert.match(shader, /fncompactFineDemandActive\(\)->bool\{return\(p\.capturePreceding&4u\)!=0u;\}/);
+  assert.match(shader,
+    /if\(p\.fineFactor==1u\)\{if\(inBand\)\{markFineBandDemandNeighborhood\(base\);\}return;\}/,
+    "factor one must expand only live in-band samples, not sweep the air arena");
+  assert.doesNotMatch(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString(),
+    /dilateFineBandAirSupportDemand/);
 });
 
 // The candidate arena is provisioned for rowCapacity rows; only the accepted
@@ -336,29 +429,35 @@ test("factor-1 separable demand dilation equals the brute-force cubic neighbourh
 test("candidate sweeps are bounded by the live row extent, not the provisioned capacity", () => {
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
   assert.match(shader,
-    /fncandidateBoundFor\(rows:u32\)->u32\{returnmin\(rows\*p\.candidateStride\+p\.domainVolume,p\.candidateCapacity\)/,
+    /fncandidateBoundFor\(rows:u32\)->u32\{returnmin\(rows\*p\.candidateStride\+s\(30u\),p\.candidateCapacity\)/,
     "the swept extent must be the live rows plus the fine block, clamped to capacity");
   // Relocating the fine block to follow the LAST ACCEPTED row keeps the live
   // index space contiguous. It cannot reorder anything: every row candidate
   // index stays below rows*candidateStride and so still precedes every fine
   // candidate, preserving ranks, directory winners and support-record slots.
   assert.match(shader, /fnfineCandidateBase\(\)->u32\{returnmin\(s\(2u\)\*p\.candidateStride,p\.fineCandidateOffset\)/);
-  assert.match(shader, /fnemitFineBandAirSupportCandidates[\s\S]*letoutput=fineCandidateBase\(\)\+item/);
+  assert.match(shader,
+    /fnscatterCompactFineCandidates[\s\S]*letoutput=fineCandidateBase\(\)\+s\(p\.blockOffsetOffset\+block\)\+localRank/,
+    "fine-only candidates must follow live rows in stable compact cell order");
   assert.match(shader, /fnclearAirSupportCandidates[\s\S]*if\(item<s\(6u\)\)\{setCandidate/,
     "the clear must cover exactly the swept extent");
   assert.doesNotMatch(shader, /if\(item<p\.candidateCapacity\)/,
     "no sweep may still be bounded by the provisioned candidate capacity");
 });
 
-test("analytic owner halo remains lookup-only outside accepted frontier leaves", () => {
+test("air-support membership is limited to the proven consumer reach corridor", () => {
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
   const emit = shader.slice(shader.indexOf("fnemitFineBandAirSupportCandidates"),
     shader.indexOf("var<workgroup>emitRowActive"));
-  assert.match(emit,
-    /lettopologyMember=\(owner\.status&OWNER_PAGE_LOOKUP_TOPOLOGY\)!=0u;/);
-  assert.match(emit,
-    /if\(demanded!=0u\|\|\(topologyMember&&resolvedCell==item\)\).*if\(demanded==0u&&!topologyMember\)\{return;\}/s,
-    "probe-only halo owners must not become Section 5 march destinations");
+  assert.doesNotMatch(emit, /OWNER_PAGE_LOOKUP_TOPOLOGY/);
+  assert.match(emit, /letdemanded=s\(at\+2u\).*if\(demanded==0u\)\{return;\}/s,
+    "only identities in the transport/interpolation demand cone may become march destinations");
+  assert.match(shader,
+    /fnfinalizeAirSupportMetadata\(\).*if\(s\(41u\)!=0u\)\{fail\(s\(42u\),ERROR_TOPOLOGY\);\}/s,
+    "a demanded corridor component with no marched liquid carrier must reject, not publish provisional air");
+  assert.match(shader,
+    /receiptReady=.*airControlOffset\+15u.*expectedFineGeneration/s,
+    "topology reuse must prove the exact fine dependency generation that defines corridor membership");
 });
 
 test("fine-band support closes over the exact regular or transition interpolation dependencies", () => {
@@ -419,10 +518,20 @@ test("transition and regular demand slots are fixed and physical exterior stays 
     "one row-owned workgroup must cooperatively prove the 27-site cube exactly once");
   assert.match(shader, /letneedsSelectors=!regular\|\|g\.z!=0u;/,
     "a regular wall row publishes both closures so transition sampling keeps its selectors");
+  assert.match(shader, /if\(!valid&&needsSelectors\)\{fail\(itemBase,ERROR_CATALOG\);\}/,
+    "a regular row whose transition fan is corrupt must reject instead of publishing only half its closure");
   assert.match(shader, /if\(regular&&lane<27u\)\{letlocal=lane/);
-  assert.match(shader, /letoccurrence=lane.*letitem=itemBase\+27u\+occurrence/s);
-  assert.match(shader, /occurrence>=3u\*count/);
-  assert.match(shader, /letselector=\(packed>>\(8u\*\(occurrence%3u\)\)\)&255u/);
+  assert.match(shader, /var<workgroup>emitRowSelectorFirst:array<atomic<u32>,256>/);
+  assert.match(shader, /letoccurrenceActive=.*occurrence<3u\*count/);
+  assert.match(shader, /selector=\(packed>>\(8u\*\(occurrence%3u\)\)\)&255u/);
+  assert.match(shader,
+    /atomicMin\(&emitRowSelectorFirst\[selector\],occurrence\).*atomicLoad\(&emitRowSelectorFirst\[selector\]\)==occurrence/s,
+    "only the deterministic first occurrence of a selector may acquire an incidence rank");
+  assert.match(shader,
+    /for\(varoffset=1u;offset<256u;offset<<=1u\).*letselectorCount=marks\[255u\];if\(selectorCount>36u\).*letselectorRank=marks\[lane\]-1u;letitem=itemBase\+27u\+selectorRank/s,
+    "first occurrences must prefix into the proven 36-slot catalog incidence cap");
+  assert.doesNotMatch(shader, /letitem=itemBase\+27u\+occurrence/,
+    "tetra-vertex occurrences must not provision candidate slots");
   // No early return: a regular wall row's lane may still owe a selector
   // occurrence for the dual-closure publication after stamping its
   // out-of-domain cube tag INVALID.
@@ -527,8 +636,8 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
     /fncompactAirSupportSeedFrontier.*faceA\[item\]\.w!=0u.*appendSeedFrontier/s,
     "the first frontier must contain only actual projected-face seeds");
   assert.match(shader,
-    /fnseedRetainedAirSupportFaces.*s\(50u\)!=0u.*item=s\(p\.candidateOffset\+invocation\).*faceB\[item\]=carrier/s,
-    "a retained publication must recompute only the exact preceding seed list into the staging bank");
+    /fnseedRetainedAirSupportFaces.*invocation<s\(29u\).*s\(50u\)!=0u.*letcarrier=airSupportSeedCarrier\(invocation\).*faceB\[invocation\]=carrier/s,
+    "a retained publication must recompute seeds over only the exact GPU-published live-face schedule");
   assert.match(shader,
     /fnrefreshRetainedAirSupportFaceValues.*letseedItem=carrier\.z.*letseed=faceB\[seedItem\].*carrier\.x!=seed\.x.*faceA\[item\]=carrier/s,
     "retained closest-source identities and distances must update only from their exact winning seed value");
@@ -596,11 +705,11 @@ test("closed-wall air reconstruction is exactly reflection odd after marched car
   assert.equal(positiveWallCell, Math.fround(-negativeWallCell));
 });
 
-test("host defaults to the exact changed frontier and retains the preceding fixed dense oracle", () => {
+test("host uses only GPU-published live schedules for fine demand and changed frontiers", () => {
   const encode = compact(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
   assert.match(encode, /dispatchWorkgroups\(1\).*updateIndirectBuffer/);
-  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 6,
-    "identity, face, retained-march, and factor-1 convergence schedules must remain GPU authored");
+  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 13,
+    "identity, radix, sparse-cell, face, retained-march, and factor-1 convergence schedules must remain GPU authored");
   for (const [name, offset] of [["clearAirSupportDirectory", 0], ["clearAirSupportTags", 12],
     ["emitAirSupportCandidates", 24], ["markAndScanAirSupportCandidates", 36]] as const) {
     assert.match(encode, new RegExp(`run\\("${name}",${offset}\\)`));
@@ -610,8 +719,10 @@ test("host defaults to the exact changed frontier and retains the preceding fixe
   assert.match(encode,
     /prepareFineBandAirSupportDemand.*updateIndirectBuffer[\s\S]*markFineBandAirSupportDemand.*dispatchWorkgroupsIndirect\(this\.indirect,48\)/s,
     "fine demand must launch one workgroup per live page from a GPU-authored schedule");
-  assert.match(encode, /if\(compactFineDemand\)pass\.dispatchWorkgroupsIndirect\(this\.indirect,48\);else\{/,
-    "the provisioned-capacity launch must remain available only as the explicit A/B oracle");
+  assert.match(encode, /markFineBandAirSupportDemand.*dispatchWorkgroupsIndirect\(this\.indirect,48\)/s,
+    "fine demand must have no provisioned-capacity launch branch");
+  assert.doesNotMatch(encode, /maximumResidentBricks|domainVolume\/OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE|dilateFineBandAirSupportDemand/,
+    "production air support must not encode capacity/domain-shaped fine work");
   assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,60\)/);
   assert.match(encode,
     /updateIndirectBuffer\(this\.scratch,43\*4,this\.indirect,60,12\)[\s\S]*resolveAirSupportTopology.*dispatchWorkgroupsIndirect\(this\.indirect,60\)/s,

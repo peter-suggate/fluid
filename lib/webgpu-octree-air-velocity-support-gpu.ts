@@ -28,10 +28,13 @@ import {
   OCTREE_AIR_SUPPORT_CONTROL_WORDS,
   OCTREE_AIR_SUPPORT_INVALID,
   OCTREE_AIR_SUPPORT_LAYOUT_VERSION,
+  OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS,
+  OCTREE_AIR_SUPPORT_OWNER_HASH,
   OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE,
   OCTREE_AIR_SUPPORT_SELECTOR_STRIDE,
   OCTREE_AIR_SUPPORT_TAG,
   OCTREE_AIR_SUPPORT_VALID,
+  octreeAirSupportOwnerHashStartWGSL,
   planOctreeAirVelocitySupport,
   type OctreeAirVelocitySupportLayout,
 } from "./webgpu-octree-air-velocity-support";
@@ -50,7 +53,7 @@ import type { PassBroker } from "./webgpu-pass-broker";
 export const OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE = 256;
 export const OCTREE_AIR_SUPPORT_GPU_PARALLEL_MARCH_PREFIX = 12;
 export const OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS =
-  3 * OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra;
+  OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS;
 export const OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE =
   OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE + OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS;
 /** `{cell, size, tagWord}`. The demand flags a candidate used to carry were
@@ -112,10 +115,32 @@ const octreeAirSupportMarchFastPath = octreeAirSupportMarchFastPathEnabled();
  * retained-solution refresh only when that list and the reciprocal graph were
  * published by the preceding sparse transaction. Words 51-59 durably latch
  * the first stage-6 rejected identity/reason before later transactions may
- * reuse its record slot. */
-export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 60;
-export const OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS = 6;
+ * reuse its record slot. Words 60-68 hold three GPU-authored sparse dispatch
+ * records. Words 69/70 retain the current/preceding fine-demand touched-list
+ * counts after the face stages reuse words 28-30. Words 71/72 retain the
+ * current/preceding consumer-owner touched-list counts. */
+export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 73;
+export const OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS = 9;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_WORDS = 4;
+/** Adaptive support-leaf headroom for the proven-reach corridor. Overflow is
+ * a rejected publication, so this bounds allocation without weakening the
+ * producer's fail-closed contract. */
+export const OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_NUMERATOR = 3;
+export const OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_DENOMINATOR = 2;
+export const OCTREE_AIR_SUPPORT_GPU_DENSE_HEADROOM = 4;
+
+/** Preserve the historical dense arena byte-for-byte unless the adaptive
+ * identity hash actually eliminates at least one finest-cell record. This is
+ * both a no-regression rule for the bitwise symmetry oracle and a refusal to
+ * pay hash complexity where it saves no storage. */
+export function octreeAirSupportFootprintCapacity(rowCapacity: number, domainVolume: number): number {
+  const compact = Math.min(domainVolume, Math.ceil(rowCapacity
+    * OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_NUMERATOR
+    / OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_DENOMINATOR));
+  const adaptiveSlots = Math.min(domainVolume, 2 * (rowCapacity + compact));
+  return adaptiveSlots < domainVolume
+    ? compact : Math.min(domainVolume, rowCapacity * OCTREE_AIR_SUPPORT_GPU_DENSE_HEADROOM);
+}
 /**
  * Origin coordinate (3 words) and extent (1 word) of a face row's cell,
  * resolved once by `resolveAirSupportFaceAdjacency` and appended to that row's
@@ -238,6 +263,27 @@ export function octreeAirSupportTopologyReuseEnabled(
 /** Sparse changed-frontier marching is the production path. Explicit zero
  * restores the preceding fixed 12+12+exact-tail schedule as a construction-
  * stable A/B oracle: both pipeline families and all arenas are still built. */
+/**
+ * Exact A/B for the retained Section-5 solution refresh, which is the one part
+ * of the sparse changed-frontier path that does not re-march at all: on a
+ * same-receipt publication it refreshes each settled face's value from its
+ * previously winning seed instead of rediscovering the winner.
+ *
+ * That is sound only while the winner is immutable, and `betterFace` breaks
+ * equal-distance ties on the live seed magnitude -- which is exactly the tie
+ * a D4-symmetric configuration produces everywhere. Separating this from
+ * `FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER` is what lets the symmetry lane
+ * tell "the sparse march is asymmetric" apart from "the retained refresh is
+ * stale"; the two used to share one flag and could not be distinguished.
+ */
+export function octreeAirSupportRetainedGraphEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_RETAINED_GRAPH !== "0";
+}
+
 export function octreeAirSupportChangedFrontierEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
@@ -246,16 +292,14 @@ export function octreeAirSupportChangedFrontierEnabled(
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER !== "0";
 }
 
-/** Factor-1 wave convergence can be copied into indirect records for profiling.
- * It is opt-in because the 24 extra pass boundaries cost more than the empty
- * post-convergence dispatches on the coarse mini lane. Factor 4/8 never select
- * this specialization. */
+/** Work-minimal factor-1 convergence gate.  Wall-clock batching is a later
+ * bet; existence-is-free requires converged waves to publish zero work now. */
 export function octreeAirSupportIndirectFrontierGateEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE === "1";
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE !== "0";
 }
 
 /** GPU-authored live-page demand dispatch is the production path. Explicit
@@ -268,14 +312,14 @@ export function octreeAirSupportCompactFineDemandEnabled(
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND !== "0";
 }
 
-/** Compact reuse-only demand-cell listing is retained as an exact experiment.
- * It is not the default: broad closures make its append atomics wall-neutral. */
+/** Compact factor-4/8 demand-cell listing is the work-minimal production path.
+ * Explicit zero retains the dense cell sweep as a differential QA oracle. */
 export function octreeAirSupportCompactFineCellsEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS === "1";
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS !== "0";
 }
 
 /** The march and reconstruction exchange only face/storage payloads while
@@ -304,7 +348,8 @@ export function encodeOctreeAirSupportReconstructionHandoff(
 export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   beginAirSupportPublication: Object.freeze([0,1,3,7,8,9,10,29]),
   clearAirSupportDirectory: Object.freeze([0,7]),
-  clearAirSupportCandidates: Object.freeze([0,2,7]),
+  clearAdaptiveAirSupportOwnerDirectory: Object.freeze([0,7,9]),
+  clearAirSupportCandidates: Object.freeze([0,2,7,8]),
   clearAirSupportTags: Object.freeze([0,7,9]),
   emitAirSupportCandidates: Object.freeze([0,2,3,4,5,6,7,9,11,18]),
   markAndScanAirSupportCandidates: Object.freeze([0,7]),
@@ -313,13 +358,25 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   resolveAirSupportTags: Object.freeze([0,7,8,9]),
   resolveAirSupportTopology: Object.freeze([0,3,7,8,11,12,13,14]),
   prepareFineBandAirSupportDemand: Object.freeze([0,7,26]),
+  prepareFineBandAirSupportClosureSchedule: Object.freeze([7]),
+  prepareFineBandAirSupportEmissionSchedule: Object.freeze([7]),
   markFineBandAirSupportDemand: Object.freeze([0,7,25,26,27,28]),
-  dilateFineBandAirSupportDemandX: Object.freeze([0,7]),
-  dilateFineBandAirSupportDemandY: Object.freeze([0,7]),
-  dilateFineBandAirSupportDemandZ: Object.freeze([0,7]),
   closeFineBandAirSupportInterpolationDemand: Object.freeze([0,2,3,4,5,6,7,11,12,13,14]),
   emitFineBandAirSupportCandidates: Object.freeze([0,2,3,7,11]),
-  publishAirSupportOwnerDirectory: Object.freeze([0,2,3,7,8,9,11]),
+  prepareCompactAuthorityRadixSchedule: Object.freeze([7]),
+  countCompactAuthorityRadix0: Object.freeze([0,7]),
+  countCompactAuthorityRadix1: Object.freeze([0,7]),
+  countCompactAuthorityRadix2: Object.freeze([0,7]),
+  countCompactAuthorityRadix3: Object.freeze([0,7]),
+  prefixCompactAuthorityRadix: Object.freeze([0,7]),
+  scatterCompactAuthorityRadix0: Object.freeze([0,7]),
+  scatterCompactAuthorityRadix1: Object.freeze([0,7]),
+  scatterCompactAuthorityRadix2: Object.freeze([0,7]),
+  scatterCompactAuthorityRadix3: Object.freeze([0,7]),
+  markCompactFineCandidates: Object.freeze([0,7]),
+  prefixCompactFineCandidateBlocks: Object.freeze([0,7]),
+  scatterCompactFineCandidates: Object.freeze([0,7]),
+  publishAirSupportOwnerDirectory: Object.freeze([0,2,7,8,9]),
   prepareAirSupportFaces: Object.freeze([0,7,29]),
   resolveAirSupportFaceAdjacency: Object.freeze([0,2,3,7,8,11,15,16,23]),
   validateAirSupportFrontierReciprocity: Object.freeze([0,7,23]),
@@ -361,8 +418,12 @@ export interface OctreeAirVelocitySupportGPUPlan {
   readonly domainVolume: number;
   readonly candidateStride: number;
   readonly fineCandidateOffset: number;
+  readonly rowCandidateCapacity: number;
+  readonly fineCandidateCapacity: number;
   readonly candidateCapacity: number;
   readonly candidateBlockCapacity: number;
+  readonly identityCapacity: number;
+  readonly hashCapacity: number;
   readonly faceCellCapacity: number;
   readonly faceCapacity: number;
   readonly faceBytes: number;
@@ -379,15 +440,117 @@ export interface OctreeAirVelocitySupportGPUPlan {
     control: 0;
     candidates: number;
     ranks: number;
-    directoryWinners: number;
-    directoryFlags: number;
-    /** Dense cell -> published-row slot. Derived in WGSL as
-     * `directoryFlags + domainVolume`, so it costs no uniform word. */
-    rowIndex: number;
+    hashRecords: number;
+    touchedSlots: number;
+    ownerTouchedSlots: number;
+    radixScratch: number;
+    radixHistograms: number;
     blockCounts: number;
     blockOffsets: number;
   }>;
   readonly allocatedBytes: number;
+}
+
+/** Capacity proof for the next sparse-cell authority cutover.
+ *
+ * Unlike `OctreeAirVelocitySupportGPUPlan`, every term here is bounded by the
+ * fluid-footprint row/support capacities. The five hash words are
+ * `{cellPlusOne, size, flags, invertedWinner, directRowPlusOne}`. Every field's
+ * merge identity is zero, so a cold WebGPU buffer is immediately valid: key
+ * claims publish the final cell, size claims use CAS, flags use OR, winners use
+ * `atomicMax(0xffffffff-winner)`, and direct rows use a zero-based atomicMax
+ * conflict check. A mismatched size/row, a list overflow, or bounded-probe
+ * exhaustion rejects the transaction.
+ *
+ * First claims append their hash slot to `touchedSlots`. That list is both the
+ * next generation's live clear list and one side of a stable four-pass byte
+ * radix ordering by cell. Its order may be overwritten because clearing is
+ * set-valued. The sorted live identities are scanned in key order, direct rows
+ * are removed, and at most `supportCapacity` fine candidates follow the fixed
+ * row candidates. Thus neither allocation nor a cold/recurring launch needs a
+ * `domainVolume` term, while candidate/support record order remains canonical.
+ */
+export interface OctreeAirSupportCompactCellAuthorityPlan {
+  readonly rowCapacity: number;
+  readonly supportCapacity: number;
+  readonly identityCapacity: number;
+  readonly hashCapacity: number;
+  readonly hashRecordWords: 5;
+  readonly rowCandidateCapacity: number;
+  readonly fineCandidateCapacity: number;
+  readonly candidateCapacity: number;
+  readonly candidateBlockCapacity: number;
+  readonly radixHistogramWords: number;
+  readonly scratchWords: number;
+  readonly scratchBytes: number;
+  readonly offsets: Readonly<{
+    control: 0;
+    candidates: number;
+    ranks: number;
+    hashRecords: number;
+    touchedSlots: number;
+    ownerTouchedSlots: number;
+    radixScratch: number;
+    radixHistograms: number;
+    blockCounts: number;
+    blockOffsets: number;
+  }>;
+}
+
+export function planOctreeAirSupportCompactCellAuthority(
+  rowCapacityValue: number,
+  supportCapacityValue: number,
+): OctreeAirSupportCompactCellAuthorityPlan {
+  const rowCapacity = positiveInteger(rowCapacityValue, "Compact air-support row capacity");
+  const supportCapacity = positiveInteger(supportCapacityValue, "Compact air-support capacity");
+  const identityCapacity = rowCapacity + supportCapacity;
+  if (!Number.isSafeInteger(identityCapacity)) {
+    throw new RangeError("Compact air-support identity capacity exceeds exact host addressing");
+  }
+  // <= 0.5 load factor. Bounded probing still fails closed rather than
+  // claiming mathematical completeness for adversarial colliding keys.
+  const hashCapacity = checkedProduct("Compact air-support hash capacity", 2, identityCapacity);
+  const rowCandidateCapacity = checkedProduct("Compact air-support row candidates",
+    rowCapacity, OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE);
+  const fineCandidateCapacity = supportCapacity;
+  const candidateCapacity = rowCandidateCapacity + fineCandidateCapacity;
+  if (!Number.isSafeInteger(candidateCapacity)) {
+    throw new RangeError("Compact air-support candidate capacity exceeds exact host addressing");
+  }
+  const candidateBlockCapacity = Math.ceil(candidateCapacity / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE);
+  const radixHistogramWords = Math.ceil(identityCapacity / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE)
+    * OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE;
+  const offsets = {
+    control: 0 as const,
+    candidates: OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS,
+    ranks: 0,
+    hashRecords: 0,
+    touchedSlots: 0,
+    ownerTouchedSlots: 0,
+    radixScratch: 0,
+    radixHistograms: 0,
+    blockCounts: 0,
+    blockOffsets: 0,
+  };
+  offsets.ranks = offsets.candidates + OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS * candidateCapacity;
+  offsets.hashRecords = offsets.ranks + candidateCapacity;
+  offsets.touchedSlots = offsets.hashRecords + 5 * hashCapacity;
+  offsets.ownerTouchedSlots = offsets.touchedSlots + identityCapacity;
+  offsets.radixScratch = offsets.ownerTouchedSlots + identityCapacity;
+  offsets.radixHistograms = offsets.radixScratch + identityCapacity;
+  offsets.blockCounts = offsets.radixHistograms + radixHistogramWords;
+  offsets.blockOffsets = offsets.blockCounts + candidateBlockCapacity;
+  const scratchWords = offsets.blockOffsets + candidateBlockCapacity;
+  if (!Number.isSafeInteger(scratchWords)) {
+    throw new RangeError("Compact air-support scratch exceeds exact host addressing");
+  }
+  const scratchBytes = checkedProduct("Compact air-support scratch bytes", scratchWords, 4);
+  return Object.freeze({
+    rowCapacity, supportCapacity, identityCapacity, hashCapacity, hashRecordWords: 5 as const,
+    rowCandidateCapacity, fineCandidateCapacity, candidateCapacity, candidateBlockCapacity,
+    radixHistogramWords, scratchWords, scratchBytes,
+    offsets: Object.freeze(offsets),
+  });
 }
 
 function positiveInteger(value: number, label: string): number {
@@ -406,15 +569,29 @@ export function planOctreeAirVelocitySupportGPU(
   slotCapacityValue: number,
   dimensionsValue: readonly [number, number, number],
   alignment = 256,
+  maximumSupportCapacity = 0,
 ): OctreeAirVelocitySupportGPUPlan {
   const rowCapacity = positiveInteger(rowCapacityValue, "Air-support GPU row capacity");
   const slotCapacity = positiveInteger(slotCapacityValue, "Air-support GPU slot capacity");
   const dimensions = dimensionsValue.map((value, axis) =>
     positiveInteger(value, `Air-support GPU dimension ${axis}`)) as [number, number, number];
   const domainVolume = checkedProduct("Air-support GPU domain volume", ...dimensions);
+  if (domainVolume >= 0xffff_fffe) throw new RangeError("Air-support GPU domain exceeds compact cell-key addressing");
   const candidateStride = OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE;
-  const fineCandidateOffset = checkedProduct("Air-support GPU row candidate capacity", rowCapacity, candidateStride);
-  const candidateCapacity = fineCandidateOffset + domainVolume;
+  // Footprint sizing is the production default, not an optional caller
+  // convention.  A supplied cap may tighten the budget for an authored lane,
+  // but omitting it must never silently restore a domain-volume arena.
+  const footprintSupportCapacity = octreeAirSupportFootprintCapacity(rowCapacity, domainVolume);
+  const configuredSupportCapacity = maximumSupportCapacity > 0
+    ? Math.min(maximumSupportCapacity, footprintSupportCapacity)
+    : footprintSupportCapacity;
+  const support = planOctreeAirVelocitySupport(rowCapacity, slotCapacity, alignment, domainVolume,
+    configuredSupportCapacity);
+  const compact = planOctreeAirSupportCompactCellAuthority(rowCapacity, support.supportCapacity);
+  const fineCandidateOffset = compact.rowCandidateCapacity;
+  const rowCandidateCapacity = compact.rowCandidateCapacity;
+  const fineCandidateCapacity = compact.fineCandidateCapacity;
+  const candidateCapacity = compact.candidateCapacity;
   const candidateBlockCapacity = Math.ceil(candidateCapacity / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE);
   // The encoded schedule uses bounded 2-D dispatch records. The shader's
   // linearItem helper preserves canonical row-major candidate order.
@@ -424,7 +601,6 @@ export function planOctreeAirVelocitySupportGPU(
         > 65_535 ** 2) {
     throw new RangeError("Air-support GPU schedule exceeds the 2-D indirect dispatch limit");
   }
-  const support = planOctreeAirVelocitySupport(rowCapacity, slotCapacity, alignment, domainVolume);
   const records = planStructuredAirSupportArena(support.supportCapacity);
   const faceCellCapacity = rowCapacity + support.supportCapacity;
   const faceCapacity = checkedProduct("Air-support ordinary face capacity",
@@ -443,29 +619,29 @@ export function planOctreeAirVelocitySupportGPU(
     control: 0 as const,
     candidates: OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS,
     ranks: 0,
-    directoryWinners: 0,
-    directoryFlags: 0,
-    rowIndex: 0,
+    hashRecords: 0,
+    touchedSlots: 0,
+    ownerTouchedSlots: 0,
+    radixScratch: 0,
+    radixHistograms: 0,
     blockCounts: 0,
     blockOffsets: 0,
   };
   offsets.ranks = offsets.candidates + OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS * candidateCapacity;
-  offsets.directoryWinners = offsets.ranks + candidateCapacity;
-  offsets.directoryFlags = offsets.directoryWinners + domainVolume;
-  // Kept adjacent to directoryFlags on purpose: the shader addresses it as
-  // `directoryFlagOffset + domainVolume` instead of spending a uniform word,
-  // and the uniform block's vec3u members stay 16-byte aligned.
-  offsets.rowIndex = offsets.directoryFlags + domainVolume;
-  offsets.blockCounts = offsets.rowIndex + domainVolume;
+  offsets.hashRecords = offsets.ranks + candidateCapacity;
+  offsets.touchedSlots = offsets.hashRecords + 5 * compact.hashCapacity;
+  offsets.ownerTouchedSlots = offsets.touchedSlots + compact.identityCapacity;
+  offsets.radixScratch = offsets.ownerTouchedSlots + compact.identityCapacity;
+  offsets.radixHistograms = offsets.radixScratch + compact.identityCapacity;
+  offsets.blockCounts = offsets.radixHistograms + compact.radixHistogramWords;
   offsets.blockOffsets = offsets.blockCounts + candidateBlockCapacity;
-  // A dense one-bit (stored as u32) source mask backs the factor-1 demand
-  // dilation. Keeping it as a separate terminal arena lets the closure read a
-  // stable mask while it publishes the final directory flags.
-  const scratchWords = offsets.blockOffsets + candidateBlockCapacity + 2 * domainVolume;
+  const scratchWords = offsets.blockOffsets + candidateBlockCapacity;
   const scratchBytes = scratchWords * 4;
   const indirectBytes = OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS * 12;
   return Object.freeze({ rowCapacity, slotCapacity, domainVolume, candidateStride, fineCandidateOffset,
-    candidateCapacity, candidateBlockCapacity, faceCellCapacity, faceCapacity, faceBytes,
+    rowCandidateCapacity, fineCandidateCapacity, candidateCapacity, candidateBlockCapacity,
+    identityCapacity: compact.identityCapacity, hashCapacity: compact.hashCapacity,
+    faceCellCapacity, faceCapacity, faceBytes,
     faceAdjacencyStride, faceAdjacencyBytes, faceFrontierBytes, directAirVectorBytes,
     support, records, scratchWords,
     scratchBytes, indirectBytes, offsets: Object.freeze(offsets),
@@ -569,8 +745,11 @@ export class WebGPUOctreeAirVelocitySupportProducer {
         && a.sampleDimensions.every((value, axis) => value === b.sampleDimensions[axis])
         && a.domainOrigin.every((value, axis) => value === b.domainOrigin[axis]);
     })();
+    const footprintSupportCapacity = octreeAirSupportFootprintCapacity(
+      structured.plan.rowCapacity, checkedProduct("Air-support domain", ...inputs.dimensions));
     this.plan = planOctreeAirVelocitySupportGPU(structured.plan.rowCapacity,
-      structured.plan.slotCapacity, inputs.dimensions, device.limits.minStorageBufferOffsetAlignment);
+      structured.plan.slotCapacity, inputs.dimensions, device.limits.minStorageBufferOffsetAlignment,
+      footprintSupportCapacity);
     if (!topology.catalogTetrahedronHeaders || !topology.catalogTetrahedra
       || !topology.catalogTetrahedronVertices || !topology.catalogTetrahedronVertexCount
       || !Number.isSafeInteger(inputs.maximumLeafSize) || inputs.maximumLeafSize < 1
@@ -681,8 +860,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     };
     const fineOnlyEntries = new Set<OctreeAirSupportGPUEntryPoint>([
       "prepareFineBandAirSupportDemand", "markFineBandAirSupportDemand",
-      "dilateFineBandAirSupportDemandX", "dilateFineBandAirSupportDemandY",
-      "dilateFineBandAirSupportDemandZ", "closeFineBandAirSupportInterpolationDemand",
+      "prepareFineBandAirSupportClosureSchedule", "prepareFineBandAirSupportEmissionSchedule",
+      "closeFineBandAirSupportInterpolationDemand",
       "emitFineBandAirSupportCandidates",
     ]);
     const configuredEntries = entries.filter((entry) => this.inputs.fineSources
@@ -786,7 +965,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     changedFrontier = octreeAirSupportChangedFrontierEnabled(),
     compactFineDemand = octreeAirSupportCompactFineDemandEnabled(),
     compactFineCells = octreeAirSupportCompactFineCellsEnabled(),
-    indirectFrontierGate = octreeAirSupportIndirectFrontierGateEnabled()): ArrayBuffer {
+    indirectFrontierGate = octreeAirSupportIndirectFrontierGateEnabled(),
+    retainedGraph = octreeAirSupportRetainedGraphEnabled()): ArrayBuffer {
     if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 1 || expectedEpoch > 0xffff_ffff) {
       throw new RangeError("Air-support expected epoch must be a published uint32 generation");
     }
@@ -800,10 +980,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       this.plan.support.controlOffsetWords, this.plan.support.supportVectorOffsetWords,
       this.plan.records.recordOffsetWords, this.plan.records.vectorOffsetWords,
       this.inputs.boundaryEpoch.offsetWords, this.inputs.topology.catalogTetrahedronVertexCount!,
-      // Explicit, not `Object.values(offsets)`: `rowIndex` is derived in WGSL
-      // and adding a word here would break the uniform block's vec3u alignment.
       this.plan.offsets.control, this.plan.offsets.candidates, this.plan.offsets.ranks,
-      this.plan.offsets.directoryWinners, this.plan.offsets.directoryFlags,
+      this.plan.offsets.hashRecords, this.plan.offsets.touchedSlots,
       this.plan.offsets.blockCounts, this.plan.offsets.blockOffsets,
       this.plan.records.allocatedWords, this.plan.support.totalBytes / 4,
       this.plan.faceCellCapacity, this.plan.faceCapacity,
@@ -817,7 +995,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       this.inputs.structured.plan.offsets.rowSlotSigns,
       this.inputs.structured.plan.offsets.rowCatalogSlots,
       (this.publicationCount > 0 ? 1 : 0) | (changedFrontier ? 2 : 0)
-        | (compactFineCells ? 4 : 0) | (indirectFrontierGate ? 8 : 0),
+        | (compactFineCells ? 4 : 0) | (indirectFrontierGate ? 8 : 0)
+        | (changedFrontier && retainedGraph ? 16 : 0),
       this.plan.faceAdjacencyStride,
       this.plan.support.ownerDirectoryOffsetWords,
       this.plan.fineCandidateOffset,
@@ -852,15 +1031,19 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     const parameterSlot = this.parameterSlot;
     this.parameterSlot = parameterSlot === 0 ? 1 : 0;
     const changedFrontier = octreeAirSupportChangedFrontierEnabled();
-    const compactFineDemand = octreeAirSupportCompactFineDemandEnabled();
+    // Production has one scheduling contract: fine demand is shaped by the
+    // GPU-published resident-page count. Capacity launch oracles belong in
+    // differential harnesses, never in the recurring encoder.
+    const compactFineDemand = true;
     const indirectFrontierGate = changedFrontier
       && octreeAirSupportIndirectFrontierGateEnabled()
       && fineSlot !== undefined
       && this.inputs.fineSources![fineSlot].plan.fineFactor === 1;
+    const compactFineCells = fineSlot !== undefined;
     const params = this.params[parameterSlot], groups = this.groups[parameterSlot];
     this.device.queue.writeBuffer(params, 0,
       this.parameterData(expectedEpoch, fineSlot, gravityDt ?? [0, 0, 0], changedFrontier,
-        compactFineDemand, octreeAirSupportCompactFineCellsEnabled(), indirectFrontierGate));
+        compactFineDemand, compactFineCells, indirectFrontierGate));
     this.publicationCount += 1;
     const siteLabel = (label: string) => `${label} · ${site}`;
     let pass = broker.compute({ label: siteLabel("Initialize structured air-support publication") });
@@ -877,6 +1060,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0,
       (fineSlot === undefined || !compactFineDemand ? 4 : 5) * 12);
     broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
+    broker.updateIndirectBuffer(this.scratch, 66 * 4, this.indirect, 96, 12);
     pass = broker.compute({ label: siteLabel("Publish structured air-support identities") });
     const run = (name: keyof typeof this.pipelines, indirectOffset?: number) => {
       pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, groups[name]!);
@@ -884,36 +1068,62 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       else pass.dispatchWorkgroupsIndirect(this.indirect, indirectOffset);
     };
     run("clearAirSupportDirectory", 0);
+    run("clearAdaptiveAirSupportOwnerDirectory", 96);
     run("clearAirSupportCandidates", 36);
     run("clearAirSupportTags", 12);
     run("emitAirSupportCandidates", 24);
     if (fineSlot !== undefined && this.fineDemandGroups) {
       pass.setPipeline(this.pipelines.markFineBandAirSupportDemand!);
       pass.setBindGroup(0, this.fineDemandGroups[parameterSlot][fineSlot]);
-      if (compactFineDemand) pass.dispatchWorkgroupsIndirect(this.indirect, 48);
-      else {
-        const capacity = this.inputs.fineSources![fineSlot].plan.maximumResidentBricks;
-        const x = Math.min(capacity, this.device.limits.maxComputeWorkgroupsPerDimension);
-        pass.dispatchWorkgroups(x, Math.ceil(capacity / x));
+      pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+      if (compactFineCells) {
+        pass.setPipeline(this.pipelines.prepareFineBandAirSupportClosureSchedule!);
+        pass.setBindGroup(0, groups.prepareFineBandAirSupportClosureSchedule!);
+        pass.dispatchWorkgroups(1);
+        broker.updateIndirectBuffer(this.scratch, 60 * 4, this.indirect, 72, 12);
+        pass = broker.compute({ label: siteLabel("Close sparse fine air-support demand") });
+        pass.setPipeline(this.pipelines.closeFineBandAirSupportInterpolationDemand!);
+        pass.setBindGroup(0, groups.closeFineBandAirSupportInterpolationDemand!);
+        pass.dispatchWorkgroupsIndirect(this.indirect, 72);
+        pass.setPipeline(this.pipelines.prepareFineBandAirSupportEmissionSchedule!);
+        pass.setBindGroup(0, groups.prepareFineBandAirSupportEmissionSchedule!);
+        pass.dispatchWorkgroups(1);
+        broker.updateIndirectBuffer(this.scratch, 63 * 4, this.indirect, 84, 12);
+        pass = broker.compute({ label: siteLabel("Emit sparse fine air-support demand") });
+        pass.setPipeline(this.pipelines.emitFineBandAirSupportCandidates!);
+        pass.setBindGroup(0, groups.emitFineBandAirSupportCandidates!);
+        pass.dispatchWorkgroupsIndirect(this.indirect, 84);
       }
-      if (this.inputs.fineSources![fineSlot].plan.fineFactor === 1) {
-        const dilationGroups = Math.ceil(this.plan.domainVolume / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE);
-        for (const name of ["dilateFineBandAirSupportDemandX",
-          "dilateFineBandAirSupportDemandY", "dilateFineBandAirSupportDemandZ"] as const) {
-          pass.setPipeline(this.pipelines[name]!);
-          pass.setBindGroup(0, groups[name]!);
-          pass.dispatchWorkgroups(dilationGroups);
-        }
+    }
+    if (fineSlot !== undefined) {
+      run("prepareCompactAuthorityRadixSchedule");
+      broker.updateIndirectBuffer(this.scratch, 60 * 4, this.indirect, 72, 12);
+      pass = broker.compute({ label: siteLabel("Canonicalize footprint air-support identities") });
+      const radixCounts = ["countCompactAuthorityRadix0", "countCompactAuthorityRadix1",
+        "countCompactAuthorityRadix2", "countCompactAuthorityRadix3"] as const;
+      const radixScatters = ["scatterCompactAuthorityRadix0", "scatterCompactAuthorityRadix1",
+        "scatterCompactAuthorityRadix2", "scatterCompactAuthorityRadix3"] as const;
+      for (let radix = 0; radix < 4; radix += 1) {
+        run(radixCounts[radix]!, 72);
+        run("prefixCompactAuthorityRadix");
+        run(radixScatters[radix]!, 72);
       }
-      pass.setPipeline(this.pipelines.closeFineBandAirSupportInterpolationDemand!);
-      pass.setBindGroup(0, groups.closeFineBandAirSupportInterpolationDemand!);
-      pass.dispatchWorkgroups(Math.ceil(this.plan.domainVolume / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE));
-      pass.setPipeline(this.pipelines.emitFineBandAirSupportCandidates!);
-      pass.setBindGroup(0, groups.emitFineBandAirSupportCandidates!);
-      pass.dispatchWorkgroups(Math.ceil(this.plan.domainVolume / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE));
+      run("markCompactFineCandidates", 72);
+      run("prefixCompactFineCandidateBlocks");
+      run("scatterCompactFineCandidates", 72);
+      // Fine compaction replaces the initialization schedule with the exact
+      // authored-row + canonical-fine candidate extent.
+      broker.updateIndirectBuffer(this.scratch, 19 * 4, this.indirect, 36, 12);
+      pass = broker.compute({ label: siteLabel("Publish canonical air-support candidates") });
     }
     run("markAndScanAirSupportCandidates", 36);
     run("prefixAirSupportBlocks");
+    // The prefix owns the exact fresh support count. Move its two live-count
+    // schedules into INDIRECT only after publication; neither topology nor
+    // owner hashing may launch over a provisioned capacity.
+    broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
+    broker.updateIndirectBuffer(this.scratch, 66 * 4, this.indirect, 96, 12);
+    pass = broker.compute({ label: siteLabel("Resolve and hash live adaptive air owners") });
     run("scatterAirSupportRecords", 36);
     // Topology resolution is exact support-row work. The GPU reuse decision
     // and live count authored this record alongside the other identity
@@ -924,7 +1134,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     run("resolveAirSupportTags", 24);
     pass.setPipeline(this.pipelines.publishAirSupportOwnerDirectory!);
     pass.setBindGroup(0, groups.publishAirSupportOwnerDirectory!);
-    pass.dispatchWorkgroups(Math.ceil(this.plan.domainVolume / OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE));
+    pass.dispatchWorkgroupsIndirect(this.indirect, 96);
     run("prepareAirSupportFaces");
     broker.updateIndirectBuffer(this.scratch, 32 * 4, this.indirect, 4 * 12, 2 * 12);
     // These indirect-publication words have completed their schedule lifetime.
@@ -1090,8 +1300,8 @@ struct P {
   dimensions:vec3u,maxLeaf:u32,
   selectorTagOffset:u32,regularTagOffset:u32,airControlOffset:u32,supportVectorOffset:u32,
   recordOffset:u32,recordVectorOffset:u32,boundaryEpochOffset:u32,tetraVertexCount:u32,
-  scratchControl:u32,candidateOffset:u32,rankOffset:u32,directoryWinnerOffset:u32,
-  directoryFlagOffset:u32,blockCountOffset:u32,blockOffsetOffset:u32,
+  scratchControl:u32,candidateOffset:u32,rankOffset:u32,hashRecordOffset:u32,
+  touchedSlotOffset:u32,blockCountOffset:u32,blockOffsetOffset:u32,
   recordArenaWords:u32,supportArenaWords:u32,
   faceCellCapacity:u32,faceCapacity:u32,lookupCount:u32,catalogEntryCount:u32,
   reconstructionOffset:u32,templateHeaderOffset:u32,
@@ -1104,7 +1314,7 @@ struct P {
   maxDisplacementFineCells:u32,expectedFineGeneration:u32,fineWidth:f32,closedBoundaryMask:u32,
   airGravityDt:vec3f,reuseTopology:u32,
 }
-struct Accepted {flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,epoch:u32,bank:u32,slotCount:u32}
+struct Accepted {flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,epoch:u32,bank:u32,slotCount:u32,identity:u32}
 // No demand-flags word: every consumer reads the deduplicated per-cell
 // directoryFlags entry instead, so a per-candidate copy was write-only.
 struct Candidate {cell:u32,size:u32,tagWord:u32}
@@ -1197,57 +1407,77 @@ fn powerTransformVector(value:vec3i,code:u32)->vec3i{let signs=vec3i(select(1,-1
   if(permutation==1u){q=value.xzy;}else if(permutation==2u){q=value.yxz;}else if(permutation==3u){q=value.yzx;}
   else if(permutation==4u){q=value.zxy;}else if(permutation==5u){q=value.zyx;}return q*signs;}
 fn level(size:u32)->u32{return 31u-countLeadingZeros(size);}
-// Dense cell -> published-row slot, authored once per publication immediately
-// after the directory clear. It replaces a 12-iteration ordered binary search
-// over rowGeometry that this producer performed ~1.5M times per encode (every
-// demand, every fine-band closure, every face-adjacency identity). Because it
-// still verifies the complete (cell,size) identity against rowGeometry it
-// returns exactly the row the search returned; the only way the two could
-// disagree is two rows claiming one origin cell, which is not an octree and is
-// failed closed where the slot is authored.
-fn rowIndexAt(cell:u32)->u32{return p.directoryFlagOffset+p.domainVolume+cell;}
-fn fineDemandSourceAt(cell:u32)->u32{return arrayLength(&scratch)-2u*p.domainVolume+cell;}
-fn fineDemandTemporaryAt(cell:u32)->u32{return arrayLength(&scratch)-p.domainVolume+cell;}
-fn publishedRow(cell:u32,size:u32)->u32{if(cell>=p.domainVolume){return INVALID;}
-  let row=s(rowIndexAt(cell));if(row>=s(2u)){return INVALID;}
-  let g=rowGeometry[s(4u)*p.rowCapacity+row];
-  return select(INVALID,row,g.x==cell&&g.y==size);}
-// Base of the domain-sized fine-band candidate block. It follows the LAST
-// accepted row's candidates rather than the last provisionable row's, so the
-// live candidate index space [0, rows*stride + domainVolume) is contiguous and
-// the sweeps below never walk the dead tail. Relocating the block cannot
-// reorder anything: every row candidate index stays < rows*candidateStride and
-// therefore still precedes every fine candidate, exactly as when the block sat
-// at rowCapacity*candidateStride.
-// p.fineCandidateOffset (rowCapacity*candidateStride) remains the fail-closed
-// ceiling: rows never exceeds rowCapacity, so the min only ever fires on a
-// corrupt accepted row count.
+// Footprint-sized authority:
+// {cellPlusOne,size,flags,0xffffffff-winner,directRowPlusOne}. All merge
+// identities are zero, including on a cold allocation. Every collision, list
+// and probe bound rejects the transaction; no identity silently falls out.
+fn hashCapacity()->u32{return (p.touchedSlotOffset-p.hashRecordOffset)/5u;}
+fn identityCapacity()->u32{return hashCapacity()/2u;}
+fn ownerTouchedSlotOffset()->u32{return p.touchedSlotOffset+identityCapacity();}
+fn radixScratchOffset()->u32{return ownerTouchedSlotOffset()+identityCapacity();}
+fn radixHistogramOffset()->u32{return radixScratchOffset()+identityCapacity();}
+fn hashAt(slot:u32)->u32{return p.hashRecordOffset+5u*slot;}
+fn hashStart(cell:u32)->u32{return ((cell*0x9e3779b1u)^((cell>>16u)*0x85ebca6bu))%hashCapacity();}
+fn findAuthority(cell:u32,item:u32)->u32{let capacity=hashCapacity();if(capacity==0u){fail(item,ERROR_CAPACITY);return INVALID;}
+  let wanted=cell+1u;let start=hashStart(cell);for(var probe=0u;probe<min(capacity,64u);probe+=1u){let slot=(start+probe)%capacity;
+    let key=s(hashAt(slot));if(key==wanted){return slot;}if(key==0u){return INVALID;}}
+  fail(item,ERROR_CAPACITY);return INVALID;}
+fn mergeAuthority(slot:u32,size:u32,flags:u32,winner:u32,direct:u32,item:u32)->bool{let at=hashAt(slot);
+  if(size!=0u&&s(at+1u)==0u){var sized=atomicCompareExchangeWeak(&scratch[at+1u],0u,size);
+    for(var retry=0u;retry<8u&&!sized.exchanged&&sized.old_value==0u;retry+=1u){sized=atomicCompareExchangeWeak(&scratch[at+1u],0u,size);}}
+  let publishedSize=s(at+1u);if(size!=0u&&publishedSize!=size){failTopology(1u,item);return false;}
+  if(flags!=0u){atomicOr(&scratch[at+2u],flags);}if(winner!=INVALID){atomicMax(&scratch[at+3u],INVALID-winner);}
+  if(direct!=INVALID){let encoded=direct+1u;let old=atomicMax(&scratch[at+4u],encoded);
+    if(old!=0u&&old!=encoded){fail(item,ERROR_TOPOLOGY);return false;}}
+  return true;}
+fn claimAuthority(cell:u32,size:u32,flags:u32,winner:u32,direct:u32,item:u32)->u32{
+  let capacity=hashCapacity();if(cell>=p.domainVolume||capacity==0u){fail(item,ERROR_CAPACITY);return INVALID;}
+  let wanted=cell+1u;let start=hashStart(cell);for(var probe=0u;probe<min(capacity,64u);probe+=1u){let slot=(start+probe)%capacity;let at=hashAt(slot);
+    var key=s(at);if(key==wanted){return select(INVALID,slot,mergeAuthority(slot,size,flags,winner,direct,item));}
+    if(key==0u){
+      // Publish the final key directly.  The former INVALID initialization
+      // lock could deadlock lanes in the same SIMD group: one lane spun on the
+      // lock while the owning lane was unable to advance to the unlock store.
+      // All payload fields start at atomic merge identities (0,0,0,0), so
+      // concurrent claimants can safely merge immediately after
+      // the key CAS and no partially initialized payload is observable.
+      var claimed=atomicCompareExchangeWeak(&scratch[at],0u,wanted);
+      for(var retry=0u;retry<8u&&!claimed.exchanged&&claimed.old_value==0u;retry+=1u){claimed=atomicCompareExchangeWeak(&scratch[at],0u,wanted);}
+      if(claimed.exchanged){
+        let rank=atomicAdd(&scratch[69u],1u);if(rank>=identityCapacity()){fail(item,ERROR_CAPACITY);return INVALID;}
+        sw(p.touchedSlotOffset+rank,slot);
+        return select(INVALID,slot,mergeAuthority(slot,size,flags,winner,direct,item));}
+      key=s(at);if(key==wanted){return select(INVALID,slot,mergeAuthority(slot,size,flags,winner,direct,item));}}
+  }fail(item,ERROR_CAPACITY);return INVALID;}
+fn authorityFlags(cell:u32)->u32{let slot=findAuthority(cell,cell);if(slot==INVALID){return 0u;}return s(hashAt(slot)+2u);}
+fn authorityWinner(cell:u32)->u32{let slot=findAuthority(cell,cell);if(slot==INVALID){return INVALID;}
+  let encoded=s(hashAt(slot)+3u);return select(INVALID,INVALID-encoded,encoded!=0u);}
+fn publishAuthorityWinner(cell:u32,expected:u32,value:u32,item:u32){let slot=findAuthority(cell,item);
+  if(slot==INVALID){fail(item,ERROR_TAG);return;}let at=hashAt(slot)+3u;
+  let encoded=s(at);let current=select(INVALID,INVALID-encoded,encoded!=0u);
+  if(current!=expected){failTopology(5u,item);return;}sw(at,select(0u,INVALID-value,value!=INVALID));}
+fn publishedRow(cell:u32,size:u32)->u32{if(cell>=p.domainVolume){return INVALID;}let slot=findAuthority(cell,cell);
+  if(slot==INVALID){return INVALID;}let at=hashAt(slot);if(s(at+1u)!=size){return INVALID;}let encoded=s(at+4u);
+  if(encoded==0u){return INVALID;}let row=encoded-1u;if(row>=s(2u)){return INVALID;}
+  let g=rowGeometry[s(4u)*p.rowCapacity+row];return select(INVALID,row,g.x==cell&&g.y==size);}
+// Fixed row occurrences retain authored item order. Stable-radix fine-only
+// identities are compacted immediately after the last live row occurrence.
 fn fineCandidateBase()->u32{return min(s(2u)*p.candidateStride,p.fineCandidateOffset);}
-fn candidateBoundFor(rows:u32)->u32{return min(rows*p.candidateStride+p.domainVolume,p.candidateCapacity);}
+fn candidateBoundFor(rows:u32)->u32{return min(rows*p.candidateStride+s(30u),p.candidateCapacity);}
 fn candidateAt(item:u32)->Candidate{let at=p.candidateOffset+${OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS}u*item;
   return Candidate(s(at),s(at+1u),s(at+2u));}
 fn setCandidate(item:u32,value:Candidate){let at=p.candidateOffset+${OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS}u*item;
   sw(at,value.cell);sw(at+1u,value.size);sw(at+2u,value.tagWord);}
-fn compactFineDemandActive()->bool{return s(47u)!=0u&&(p.capturePreceding&4u)!=0u;}
-// On a reused topology the fine candidate block is dead. Reuse it as an exact
-// list of cells carrying this generation's dynamic RECORD_FINE bit. Query
-// cells are appended by the mark dispatch first; value-only closure cells are
-// appended by the following closure dispatch. atomicOr is the uniqueness
-// authority, so every cell appears exactly once despite overlapping bricks.
+fn compactFineDemandActive()->bool{return (p.capturePreceding&4u)!=0u;}
 fn publishFineDemand(cell:u32,bits:u32){
-  let old=atomicOr(&scratch[p.directoryFlagOffset+cell],bits);
-  if(compactFineDemandActive()&&(old&RECORD_FINE)==0u){
-    let rank=atomicAdd(&scratch[30u],1u);
-    if(rank>=p.domainVolume){fail(cell,ERROR_CAPACITY);return;}
-    setCandidate(fineCandidateBase()+rank,Candidate(cell,0u,INVALID));
-    if((bits&QUERY_FINE)!=0u){atomicAdd(&scratch[28u],1u);}
-  }
+  let slot=claimAuthority(cell,0u,bits,INVALID,INVALID,cell);
+  if(slot!=INVALID&&(bits&QUERY_FINE)!=0u){atomicAdd(&scratch[28u],1u);}
 }
 fn recordAt(index:u32)->vec4u{let at=p.recordOffset+index*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
   return vec4u(r(at),r(at+1u),r(at+2u),r(at+3u));}
 fn recordCell(index:u32)->u32{return cellOf(recordAt(index).xyz);}
 fn tagForIdentity(cell:u32,size:u32)->u32{let direct=publishedRow(cell,size);if(direct!=INVALID){return direct;}
-  let tag=s(p.directoryWinnerOffset+cell);if((tag&SUPPORT_TAG)==0u){return INVALID;}let index=tag&0x7fffffffu;
+  let tag=authorityWinner(cell);if((tag&SUPPORT_TAG)==0u){return INVALID;}let index=tag&0x7fffffffu;
   if(index>=s(8u)){return INVALID;}let identity=recordAt(index);return select(INVALID,tag,cellOf(identity.xyz)==cell&&identity.w==size);}
 fn faceRowForTag(tag:u32)->u32{if(tag==INVALID){return INVALID;}return select(tag,s(2u)+(tag&0x7fffffffu),(tag&SUPPORT_TAG)!=0u);}
 fn faceRowForIdentity(identity:vec2u)->u32{if(identity.x==INVALID||identity.y==INVALID){return INVALID;}
@@ -1264,13 +1494,12 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   if(resolvedCell!=u32(cell)||resolvedSize!=size){
     failTopology(1u,item);atomicStore(&supportArena[tagWord],INVALID);return;}
   // Mark demanded identities even when the accepted direct-row table already
-  // owns them. Demand flags gate the interpolation closures; the march
-  // destination itself is the whole accepted air partition, enrolled by
-  // emitFineBandAirSupportCandidates so the extension domain stays contiguous.
-  atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],flags);
+  // owns them. Demand flags gate both interpolation closure and corridor
+  // membership; missing connectivity is rejected by the terminal ledger.
+  let slot=claimAuthority(resolvedCell,resolvedSize,flags,item,INVALID,item);
+  if(slot==INVALID){atomicStore(&supportArena[tagWord],INVALID);return;}
   let direct=publishedRow(resolvedCell,resolvedSize);if(direct!=INVALID){atomicStore(&supportArena[tagWord],direct);return;}
   setCandidate(item,Candidate(resolvedCell,resolvedSize,tagWord));
-  atomicMin(&scratch[p.directoryWinnerOffset+resolvedCell],item);
 }
 
 @compute @workgroup_size(1)fn beginAirSupportPublication(){
@@ -1297,23 +1526,35 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
     atomicStore(&recordArena[15u],atomicLoad(&supportArena[p.airControlOffset+14u]));
   }
   var boundaryNow=0u;if(p.boundaryEpochOffset<arrayLength(&boundaryEpoch)){boundaryNow=boundaryEpoch[p.boundaryEpochOffset];}
-  let existingReady=atomicLoad(&supportArena[p.airControlOffset+13u])==${OCTREE_AIR_SUPPORT_VALID}u
+  let receiptReady=atomicLoad(&supportArena[p.airControlOffset+13u])==${OCTREE_AIR_SUPPORT_VALID}u
     &&atomicLoad(&supportArena[p.airControlOffset+14u])==${OCTREE_AIR_SUPPORT_LAYOUT_VERSION}u
-    &&atomicLoad(&supportArena[p.airControlOffset+2u])==accepted.epoch
+    &&atomicLoad(&supportArena[p.airControlOffset+2u])!=0u
+    &&atomicLoad(&supportArena[p.airControlOffset+4u])!=0u
     &&atomicLoad(&supportArena[p.airControlOffset+3u])==accepted.bank
+    &&atomicLoad(&supportArena[p.airControlOffset+15u])==p.expectedFineGeneration;
+  let existingReady=receiptReady
+    &&atomicLoad(&supportArena[p.airControlOffset+2u])==accepted.epoch
     &&atomicLoad(&supportArena[p.airControlOffset+4u])==boundaryNow;
+  let boundaryIdentity=p.boundaryEpochOffset+3u<arrayLength(&boundaryEpoch)
+    &&boundaryEpoch[p.boundaryEpochOffset+3u]!=0u;
+  let identityReady=receiptReady&&accepted.identity!=0u&&boundaryIdentity;
   let precedingSupportRows=atomicLoad(&supportArena[p.airControlOffset+6u]);
-  // The complete support identity domain is a function of accepted topology,
-  // bank and liquid-mask epoch. Fine demand changes RECORD_FINE flags but not
-  // membership: emitFineBandAirSupportCandidates enrolls every accepted air
-  // leaf. A VALID receipt for the exact accepted authority therefore proves
-  // that record order, tags, owner directory and face adjacency are reusable.
+  // The sparse support identity domain is a function of accepted topology,
+  // bank, liquid-mask epoch, and the exact fine dependency publication. A
+  // VALID receipt for all four authorities therefore proves that record order,
+  // tags, owner directory and face adjacency are reusable. A new fine
+  // generation must rebuild membership; reusing the preceding corridor could
+  // omit a newly reachable characteristic even when the coarse topology held.
   // Keep the decision on the GPU so a rejected/partial publication can never
   // make the host reuse stale topology.
-  let reuseTopology=p.reuseTopology!=0u&&existingReady&&precedingSupportRows<=p.supportCapacity;
+  let reuseTopology=p.reuseTopology!=0u&&(existingReady||identityReady)&&precedingSupportRows<=p.supportCapacity;
   sw(47u,select(0u,1u,reuseTopology));sw(48u,select(0u,precedingSupportRows,reuseTopology));
   let precedingSeeds=atomicLoad(&supportArena[p.airControlOffset+11u]);
-  let retainedGraph=reuseTopology&&(p.capturePreceding&2u)!=0u
+  // Hashes, tags, and adjacency are structural and may cross an exact-identity
+  // epoch. The settled Section 5 solution may not: betterFace uses the live
+  // seed magnitude to break equal-distance ties, so refreshing only the old
+  // winner is equivalent to a fresh march only within the same receipt.
+  let retainedGraph=existingReady&&(p.capturePreceding&16u)!=0u
     &&atomicLoad(&faceFrontier[11u])==RETAINED_GRAPH_VALID
     &&precedingSeeds<=3u*p.candidateCapacity&&precedingSeeds<=p.faceCapacity;
   sw(49u,select(0u,precedingSeeds,retainedGraph));sw(50u,select(0u,1u,retainedGraph));
@@ -1326,7 +1567,7 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
     sw(0u,ERROR_SOURCE|ERROR_GENERATION);sw(1u,0u);sw(31u,2u);
     writeDispatch(10u,vec3u(0u,1u,1u));writeDispatch(13u,vec3u(0u,1u,1u));
     writeDispatch(16u,vec3u(0u,1u,1u));writeDispatch(19u,vec3u(0u,1u,1u));
-    writeDispatch(43u,vec3u(0u,1u,1u));return;
+    writeDispatch(43u,vec3u(0u,1u,1u));writeDispatch(66u,vec3u(0u,1u,1u));return;
   }
   sw(0u,0u);sw(1u,INVALID);sw(31u,0u);let rows=min(accepted.rowCount,p.rowCapacity);sw(2u,rows);sw(3u,accepted.epoch);
   sw(4u,accepted.bank);var boundary=0u;if(p.boundaryEpochOffset<arrayLength(&boundaryEpoch)){boundary=boundaryEpoch[p.boundaryEpochOffset];}sw(5u,boundary);
@@ -1348,7 +1589,15 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   sw(25u,0u);
   sw(26u,select(0u,atomicLoad(&supportArena[p.airControlOffset+8u]),reuseTopology));
   sw(27u,select(0u,atomicLoad(&supportArena[p.airControlOffset+9u]),reuseTopology));
-  sw(28u,0u);sw(30u,0u);sw(40u,p.expectedFineGeneration);
+  // Preserve the preceding footprint hash's live-slot count until the clear
+  // consumes exactly that list. A cold zero-filled arena therefore publishes
+  // a zero dispatch; no domain-shaped initialization exists.
+  sw(70u,s(69u));sw(69u,0u);
+  // Reuse does not rebuild the adaptive owner hash, so it must also retain
+  // the exact touched-slot ledger that owns that hash. Rotating the ledger on
+  // reuse would leave the next fresh publication with no slots to clear.
+  if(!reuseTopology){sw(72u,s(71u));sw(71u,0u);}
+  sw(29u,0u);sw(28u,0u);sw(30u,0u);sw(40u,p.expectedFineGeneration);
   sw(41u,0u);sw(42u,INVALID);
   if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.bank>1u
       ||accepted.rowCount==0u||accepted.rowCount>p.rowCapacity||accepted.slotCount>p.slotCapacity){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
@@ -1363,36 +1612,60 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   atomicStore(&supportArena[p.airControlOffset],ERROR_SOURCE);atomicStore(&supportArena[p.airControlOffset+1u],0u);
   atomicStore(&supportArena[p.airControlOffset+13u],0u);
   let clean=s(0u)==0u;
-  writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(select(3u*p.domainVolume,p.domainVolume,reuseTopology),256u),clean));
+  writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(s(70u),256u),clean));
   writeDispatch(13u,select(vec3u(0u,1u,1u),dispatchFor(rows*(${OCTREE_AIR_SUPPORT_SELECTOR_STRIDE}u+${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u),256u),clean&&!reuseTopology));
   // One workgroup owns one structured row. Its lanes cooperatively prove the
   // 27-site cube closure once before emitting either cube or tetra candidates.
   writeDispatch(16u,select(vec3u(0u,1u,1u),dispatchFor(rows,1u),clean&&!reuseTopology));
-  writeDispatch(19u,select(vec3u(0u,1u,1u),dispatchFor(candidates,256u),clean&&!reuseTopology));
-  // Words 43-45 are identity-phase scratch until prepareAirSupportFaces
-  // resets them. Publish the exact support-row schedule there so topology
-  // refresh never launches over provisioned support capacity.
+  let initializeItems=select(rows*p.candidateStride,rows+precedingSupportRows,reuseTopology);
+  writeDispatch(19u,select(vec3u(0u,1u,1u),dispatchFor(initializeItems,256u),clean));
+  // Prefix publication replaces these provisional schedules with exact live
+  // counts before either consumer launches. Fresh topology no longer walks
+  // provisioned support capacity.
   let topologyWork=select(p.supportCapacity,s(8u),reuseTopology);
-  writeDispatch(43u,select(vec3u(0u,1u,1u),dispatchFor(topologyWork,256u),clean));
+  writeDispatch(43u,select(vec3u(0u,1u,1u),dispatchFor(topologyWork,256u),clean&&!reuseTopology));
+  // The adaptive owner hash is immutable under admitted same-topology reuse.
+  // A cold zero owner list launches no clear; fresh recurring publication
+  // clears only the exact slots published by the preceding owner transaction.
+  writeDispatch(66u,select(vec3u(0u,1u,1u),dispatchFor(s(72u),256u),clean&&!reuseTopology));
+}
+
+fn ownerHashCapacity()->u32{
+  if(p.ownerDirectoryOffset>=arrayLength(&supportArena)){return 0u;}
+  return (arrayLength(&supportArena)-p.ownerDirectoryOffset)/4u;
+}
+
+@compute @workgroup_size(256)fn clearAdaptiveAirSupportOwnerDirectory(
+  @builtin(global_invocation_id)g:vec3u){
+  let item=g.x;if(item>=s(72u)||s(0u)!=0u||s(47u)!=0u){return;}
+  let slot=s(ownerTouchedSlotOffset()+item);if(slot>=ownerHashCapacity()){fail(item,ERROR_CAPACITY);return;}
+  let at=p.ownerDirectoryOffset+4u*slot;
+  if(atomicLoad(&supportArena[at])==0u){fail(item,ERROR_CAPACITY);return;}
+  atomicStore(&supportArena[at],0u);atomicStore(&supportArena[at+1u],0u);
+  atomicStore(&supportArena[at+2u],0u);atomicStore(&supportArena[at+3u],0u);
 }
 
 @compute @workgroup_size(256)fn clearAirSupportDirectory(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(s(47u)!=0u){if(item<p.domainVolume){let at=p.directoryFlagOffset+item;
-      sw(at,s(at)&~(QUERY_FINE|RECORD_FINE));sw(fineDemandSourceAt(item),0u);
-      sw(fineDemandTemporaryAt(item),0u);}return;}
-  if(item<p.domainVolume){sw(p.directoryWinnerOffset+item,INVALID);sw(fineDemandSourceAt(item),0u);
-    sw(fineDemandTemporaryAt(item),0u);}else if(item<2u*p.domainVolume){sw(p.directoryFlagOffset+item-p.domainVolume,0u);}
-  else if(item<3u*p.domainVolume){sw(rowIndexAt(item-2u*p.domainVolume),INVALID);}}
-// The dense row index is authored here, in the dispatch after the clear above,
-// so the atomicMin below never races that clear. One accepted row owns one
-// origin cell; a second claimant is a topology fault, not a tie to resolve.
+  if(item>=s(70u)){return;}let slot=s(p.touchedSlotOffset+item);if(slot>=hashCapacity()){fail(item,ERROR_CAPACITY);return;}
+  let at=hashAt(slot);let key=s(at);if(key==0u||key==INVALID){fail(item,ERROR_CAPACITY);return;}
+  // Same-topology reuse rehydrates after the clear. Preserve direct-row static
+  // flags in that row's otherwise-dead candidate tag word; support flags live
+  // in the retained record itself.
+  let direct=s(at+4u);if(s(47u)!=0u&&direct>0u){let row=direct-1u;
+    if(row>=s(2u)){fail(item,ERROR_TOPOLOGY);}else{sw(p.candidateOffset+3u*row+2u,s(at+2u)&~(QUERY_FINE|RECORD_FINE));}}
+  sw(at,0u);sw(at+1u,0u);sw(at+2u,0u);sw(at+3u,0u);sw(at+4u,0u);}
+
 @compute @workgroup_size(256)fn clearAirSupportCandidates(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
+  let rows=s(2u);if(s(47u)!=0u){let supports=s(8u);if(item>=rows+supports){return;}
+    if(item<rows){let g=rowGeometry[s(4u)*p.rowCapacity+item];let flags=s(p.candidateOffset+3u*item+2u);
+      claimAuthority(g.x,g.y,flags,INVALID,item,item);return;}
+    let support=item-rows;let identity=recordAt(support);let at=p.recordOffset+support*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
+    let flags=(r(at+5u)>>6u)&~RECORD_FINE;claimAuthority(cellOf(identity.xyz),identity.w,flags,SUPPORT_TAG|support,INVALID,item);return;}
   if(item<s(6u)){setCandidate(item,Candidate(INVALID,0u,INVALID));}
-  if(item<s(2u)){let g=rowGeometry[s(4u)*p.rowCapacity+item];
-    if(g.x>=p.domainVolume){fail(item,ERROR_SOURCE);}
-    else if(atomicMin(&scratch[rowIndexAt(g.x)],item)!=INVALID){fail(item,ERROR_TOPOLOGY);}}}
+  if(item<rows){let g=rowGeometry[s(4u)*p.rowCapacity+item];if(g.x>=p.domainVolume||g.y==0u){fail(item,ERROR_SOURCE);}
+    else{claimAuthority(g.x,g.y,0u,INVALID,item,item);}}}
 
 @compute @workgroup_size(256)fn clearAirSupportTags(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
@@ -1418,6 +1691,12 @@ fn fineLocal(local:u32)->vec3u{let z=local/(p.fineR*p.fineR);let rem=local-z*p.f
     &&fineWorklist[1]<=p.finePageCapacity;
   if(!valid){fail(0u,ERROR_SOURCE|ERROR_GENERATION);writeDispatch(22u,vec3u(0u,1u,1u));return;}
   writeDispatch(22u,select(vec3u(0u,1u,1u),dispatchFor(fineWorklist[1],1u),s(0u)==0u));
+}
+@compute @workgroup_size(1)fn prepareFineBandAirSupportClosureSchedule(){
+  let clean=s(0u)==0u;writeDispatch(60u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));
+}
+@compute @workgroup_size(1)fn prepareFineBandAirSupportEmissionSchedule(){
+  let clean=s(0u)==0u;writeDispatch(63u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));
 }
 fn markFineBandDemandNeighborhood(base:vec3u){
   let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
@@ -1475,16 +1754,16 @@ var<workgroup> markFineBaseSplit:atomic<u32>;
     let sampleBase=q/p.fineFactor;
     if(inBand&&any(sampleBase!=base)){atomicStore(&markFineBaseSplit,1u);}
     base=sampleBase;inBand=true;
-    // At factor one every sample is already a distinct base cell. Publish a
-    // stable source mask now; the dense closure below performs one
-    // neighbourhood read per destination and only one final flag atomic.
-    if(p.fineFactor==1u){atomicStore(&scratch[fineDemandSourceAt(cellOf(base))],1u);}}
+  }
   if(inBand){atomicMin(&markFineBaseCell,cellOf(base));}
   workgroupBarrier();
   let sharedCell=atomicLoad(&markFineBaseCell);
   if(inBand&&cellOf(base)!=sharedCell){atomicStore(&markFineBaseSplit,1u);}
   workgroupBarrier();
-  if(p.fineFactor==1u){return;}
+  // At factor one every live sample is already a base-grid cell.  Expanding
+  // only those samples is O(fluid band * reach), while the former separable
+  // dilation swept the entire air arena three times.
+  if(p.fineFactor==1u){if(inBand){markFineBandDemandNeighborhood(base);}return;}
   if(atomicLoad(&markFineBaseSplit)!=0u){if(inBand){markFineBandDemandNeighborhood(base);}return;}
   if(sharedCell==INVALID){return;}
   // Uniform brick: spread its one neighbourhood across the workgroup's lanes.
@@ -1533,49 +1812,14 @@ fn markExactRegularNeighborhood(origin:vec3u,size:u32,item:u32)->bool{
   return exact;
 }
 
-fn fineDemandAxisTap(q:vec3i,axis:u32,delta:i32)->vec3i{
- if(axis==0u){return q+vec3i(delta,0,0);}
- if(axis==1u){return q+vec3i(0,delta,0);}
- return q+vec3i(0,0,delta);
-}
-fn dilateFineDemandAxis(item:u32,axis:u32,sourceTemporary:bool){
- if(item>=p.domainVolume||p.fineFactor!=1u||s(0u)!=0u){return;}
- let q=vec3i(coord(item));
- let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
- var demanded=false;
- for(var delta=-i32(radius);delta<=i32(radius)&&!demanded;delta+=1){
-  let source=fineDemandAxisTap(q,axis,delta);
-  if(all(source>=vec3i(0))&&all(source<vec3i(p.dimensions))){
-   let cell=cellOf(vec3u(source));
-   demanded=select(s(fineDemandSourceAt(cell)),s(fineDemandTemporaryAt(cell)),
-     sourceTemporary)!=0u;
-  }
- }
- let value=select(0u,1u,demanded);
- if(sourceTemporary){sw(fineDemandSourceAt(item),value);}
- else{sw(fineDemandTemporaryAt(item),value);}
-}
-@compute @workgroup_size(256)fn dilateFineBandAirSupportDemandX(
- @builtin(global_invocation_id)g:vec3u){dilateFineDemandAxis(g.x,0u,false);}
-@compute @workgroup_size(256)fn dilateFineBandAirSupportDemandY(
- @builtin(global_invocation_id)g:vec3u){dilateFineDemandAxis(g.x,1u,true);}
-@compute @workgroup_size(256)fn dilateFineBandAirSupportDemandZ(
- @builtin(global_invocation_id)g:vec3u){dilateFineDemandAxis(g.x,2u,false);}
-
 // Section 5 samples the dual mesh: trilinear interpolation needs the 27-cell
 // logical stencil, while transition interpolation needs every tetra selector
 // of the locally resolved power case. Publish that exact one-hop closure once;
 // recurring transport then performs only dense owner/tag gathers.
 @compute @workgroup_size(256)fn closeFineBandAirSupportInterpolationDemand(@builtin(global_invocation_id)g:vec3u){
-  let invocation=g.x;var item=invocation;
-  if(p.fineFactor==1u){
-    if(item>=p.domainVolume||s(0u)!=0u){return;}
-    let demanded=s(fineDemandTemporaryAt(item))!=0u;
-    if(demanded){publishFineDemand(item,QUERY_FINE|RECORD_FINE|RECORD_EXTENSION);}
-  }else if(compactFineDemandActive()){
-    if(invocation>=s(28u)){return;}item=candidateAt(fineCandidateBase()+invocation).cell;
-  }
-  if(item>=p.domainVolume||s(0u)!=0u||(s(p.directoryFlagOffset+item)&QUERY_FINE)==0u){return;}
+  let invocation=g.x;if(invocation>=s(69u)||s(0u)!=0u){return;}let slot=s(p.touchedSlotOffset+invocation);
+  if(slot>=hashCapacity()){fail(invocation,ERROR_CAPACITY);return;}let at=hashAt(slot);let key=s(at);
+  if(key==0u||key==INVALID||(s(at+2u)&QUERY_FINE)==0u){return;}let item=key-1u;
   let owner=octreeOwnerPageLookup(vec3i(coord(item)));if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){failTopology(3u,item);return;}
   let originCell=cellOf(owner.origin);let direct=publishedRow(originCell,owner.size);var caseId=INVALID;var transform=0u;
   if(direct!=INVALID){let geometry=rowGeometry[s(4u)*p.rowCapacity+direct];caseId=geometry.z;transform=geometry.w&63u;
@@ -1621,43 +1865,41 @@ fn dilateFineDemandAxis(item:u32,axis:u32,sourceTemporary:bool){
     markFineResolvedOwner(selectorCenter,selectorSize,item);}}}
 
 @compute @workgroup_size(256)fn emitFineBandAirSupportCandidates(@builtin(global_invocation_id)g:vec3u){
-  let invocation=g.x;var item=invocation;let reuse=s(47u)!=0u;
-  if(compactFineDemandActive()){
-    if(invocation>=s(30u)){return;}item=candidateAt(fineCandidateBase()+invocation).cell;
-  }
-  if(item>=p.domainVolume||s(0u)!=0u){return;}let output=fineCandidateBase()+item;
-  let demanded=s(p.directoryFlagOffset+item);
-  if(reuse&&demanded==0u){return;}
-  if(!reuse){setCandidate(output,Candidate(INVALID,0u,INVALID));}
-  // Paper Section 5 marches the closest-face extension over the octree's whole
-  // air region, so its domain is contiguous by construction and every fine-band
-  // face has a path to a seeded liquid face. A demanded-cells-only destination
-  // broke that invariant: a thin splash film whose coarse rows have all gone
-  // air demands only a 1-ring around its own fine band, which islands away
-  // from the liquid and freezes at stationary air — the stuck ceiling/corner
-  // fluid artifact. Every accepted air leaf therefore joins the march graph:
-  // the leaf's origin cell emits its one candidate, while non-origin cells
-  // only forward their demand flags to the owning leaf as before.
+  let invocation=g.x;if(invocation>=s(69u)||s(0u)!=0u){return;}let slot=s(p.touchedSlotOffset+invocation);
+  if(slot>=hashCapacity()){fail(invocation,ERROR_CAPACITY);return;}let at=hashAt(slot);let key=s(at);
+  if(key==0u||key==INVALID){fail(invocation,ERROR_CAPACITY);return;}let item=key-1u;let demanded=s(at+2u);
+  // Section 5 is needed only on identities reachable by a consumer this step.
+  // markFineBandAirSupportDemand already expands by the complete backtrace
+  // reach and the closure above adds every interpolation selector; structured
+  // GFM/candidate reads publish their identities through demand. Their union
+  // is therefore the proven-reach corridor. Do not enroll unrelated accepted
+  // air leaves merely because they exist in a large empty scene. The terminal
+  // unreached-face ledger remains the fail-closed connectivity proof: an
+  // under-covered island rejects the publication instead of sampling stale air.
   let owner=octreeOwnerPageLookup(vec3i(coord(item)));
   if((owner.status&OWNER_PAGE_LOOKUP_INVALID)!=0u){
-    if((demanded&RECORD_FINE)!=0u){failTopology(4u,output);}return;}
+    if((demanded&RECORD_FINE)!=0u){failTopology(4u,item);}return;}
   let resolvedCell=cellOf(owner.origin);
-  let topologyMember=(owner.status&OWNER_PAGE_LOOKUP_TOPOLOGY)!=0u;
-  if(demanded!=0u||(topologyMember&&resolvedCell==item)){
-    atomicOr(&scratch[p.directoryFlagOffset+resolvedCell],demanded|RECORD_EXTENSION);}
-  if(reuse){return;}
   let direct=publishedRow(resolvedCell,owner.size);
   if(direct!=INVALID){return;}
-  if(demanded==0u&&!topologyMember){return;}
+  if(demanded==0u){return;}
   if((demanded&RECORD_FINE)==0u&&resolvedCell!=item){return;}
-  setCandidate(output,Candidate(resolvedCell,owner.size,INVALID));
-  atomicMin(&scratch[p.directoryWinnerOffset+resolvedCell],output);}
+  claimAuthority(resolvedCell,owner.size,demanded|RECORD_EXTENSION,INVALID,INVALID,item);}
 
 var<workgroup> emitRowActive:atomic<u32>;
 var<workgroup> emitRowRegular:atomic<u32>;
 var<workgroup> emitRowDemand:atomic<u32>;
 var<workgroup> emitRowGeometry:array<u32,4>;
 var<workgroup> emitRowTetraHeader:array<u32,2>;
+// A row owns one workgroup, so its catalog fan can compact in-place without a
+// global catalog-incidence pass. Each occurrence atomically publishes the
+// lowest occurrence of its selector, then the ordinary workgroup prefix gives
+// those first occurrences their deterministic first-tetra rank. The generated
+// catalog proves that at most OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS ranks
+// exist; exceeding that real incidence cap is catalog corruption and fails the
+// transaction closed.
+var<workgroup> emitRowSelectorFirst:array<atomic<u32>,256>;
+var<workgroup> marks:array<u32,256>;
 @compute @workgroup_size(256)fn emitAirSupportCandidates(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
   let row=wid.x+wid.y*groups.x;let itemBase=row*p.candidateStride;
@@ -1709,19 +1951,30 @@ var<workgroup> emitRowTetraHeader:array<u32,2>;
     valid=valid&&headerAt<=arrayLength(&tetraHeaders)&&arrayLength(&tetraHeaders)-headerAt>=3u;
     var first=0u;var count=0u;if(valid){first=tetraHeaders[headerAt];count=tetraHeaders[headerAt+1u];
       valid=first<=arrayLength(&tetrahedra)&&count<=arrayLength(&tetrahedra)-first
-        &&count<=${OCTREE_AIR_SUPPORT_GPU_SELECTOR_SLOTS / 3}u;}
-    if(!valid&&!regular){fail(itemBase,ERROR_CATALOG);}emitRowTetraHeader[0]=first;emitRowTetraHeader[1]=count;
+        &&count<=${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra}u;}
+    if(!valid&&needsSelectors){fail(itemBase,ERROR_CATALOG);}emitRowTetraHeader[0]=first;emitRowTetraHeader[1]=count;
     atomicStore(&emitRowActive,select(0u,1u,valid));}
   workgroupBarrier();let transitionActive=workgroupUniformLoad(&emitRowActive)!=0u;
+  atomicStore(&emitRowSelectorFirst[lane],INVALID);marks[lane]=0u;workgroupBarrier();
   if(regular&&lane<${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u){let local=lane;let dx=i32(local%3u)-1;let dy=i32((local/3u)%3u)-1;let dz=i32(local/9u)-1;
     let requestedOrigin=q+vec3i(dx,dy,dz)*i32(g.y);let inDomain=all(requestedOrigin>=vec3i(0))&&all(requestedOrigin+vec3i(i32(g.y))<=vec3i(p.dimensions));
     let tag=p.regularTagOffset+row*${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u+local;
     if(!inDomain){atomicStore(&supportArena[tag],INVALID);}else{let cell=cellOf(vec3u(requestedOrigin));atomicAdd(&scratch[27u],1u);
     demand(row,i32(cell),g.y,RECORD_REGULAR|RECORD_EXTENSION,tag,itemBase+local);}}
-  if(!needsSelectors||!transitionActive){return;}
-  let occurrence=lane;let first=emitRowTetraHeader[0];let count=emitRowTetraHeader[1];if(occurrence>=3u*count){return;}
-  let item=itemBase+${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u+occurrence;
-  let packed=tetrahedra[first+occurrence/3u];let selector=(packed>>(8u*(occurrence%3u)))&255u;
+  let occurrence=lane;let first=emitRowTetraHeader[0];let count=emitRowTetraHeader[1];
+  let occurrenceActive=needsSelectors&&transitionActive&&occurrence<3u*count;var selector=INVALID;
+  if(occurrenceActive){let packed=tetrahedra[first+occurrence/3u];selector=(packed>>(8u*(occurrence%3u)))&255u;
+    atomicMin(&emitRowSelectorFirst[selector],occurrence);}
+  workgroupBarrier();
+  let selectorFirst=occurrenceActive&&atomicLoad(&emitRowSelectorFirst[selector])==occurrence;
+  marks[lane]=select(0u,1u,selectorFirst);workgroupBarrier();
+  for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=marks[lane-offset];}
+    workgroupBarrier();marks[lane]+=add;workgroupBarrier();}
+  let selectorCount=marks[255u];if(selectorCount>${OCTREE_AIR_SUPPORT_MAXIMUM_CASE_SELECTORS}u){
+    if(lane==0u){fail(itemBase,ERROR_CATALOG);}return;}
+  if(!selectorFirst){return;}
+  let selectorRank=marks[lane]-1u;
+  let item=itemBase+${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u+selectorRank;
     if(selector>=p.tetraVertexCount||selector>=arrayLength(&tetraVertices)){fail(item,ERROR_CATALOG);return;}let v=tetraVertices[selector];
     if(!finiteValue(v.x)||!finiteValue(v.y)||!finiteValue(v.z)||!finiteValue(v.w)||v.w<=0.){fail(item,ERROR_CATALOG);return;}
     if(length(v.xyz)<1e-7&&!(all(v.xyz==vec3f(0.))&&v.w==1.)){fail(item,ERROR_CATALOG);return;}
@@ -1732,10 +1985,68 @@ var<workgroup> emitRowTetraHeader:array<u32,2>;
     if(any(origin<vec3i(0))||any(origin+vec3i(i32(size))>vec3i(p.dimensions))){atomicStore(&supportArena[tag],INVALID);return;}
     demand(row,i32(cellOf(vec3u(origin))),size,RECORD_SELECTOR|RECORD_EXTENSION,tag,item);}
 
-var<workgroup> marks:array<u32,256>;
+var<workgroup> compactHistogram:array<atomic<u32>,256>;
+var<workgroup> compactTotals:array<u32,256>;
+var<workgroup> compactDigits:array<u32,256>;
+fn compactSourceSlot(item:u32,sourceRadix:bool)->u32{return select(s(p.touchedSlotOffset+item),s(radixScratchOffset()+item),sourceRadix);}
+fn countCompactRadix(lane:u32,block:u32,shift:u32,sourceRadix:bool){
+  atomicStore(&compactHistogram[lane],0u);workgroupBarrier();let item=block*256u+lane;let live=s(69u);
+  if(item<live){let slot=compactSourceSlot(item,sourceRadix);if(slot>=hashCapacity()){fail(item,ERROR_CAPACITY);}else{
+    let key=s(hashAt(slot));if(key==0u||key==INVALID){fail(item,ERROR_TOPOLOGY);}else{
+      atomicAdd(&compactHistogram[((key-1u)>>shift)&255u],1u);}}}
+  workgroupBarrier();sw(radixHistogramOffset()+block*256u+lane,atomicLoad(&compactHistogram[lane]));}
+fn scatterCompactRadix(lane:u32,block:u32,shift:u32,sourceRadix:bool){let item=block*256u+lane;let live=s(69u);
+  var slot=INVALID;var digit=INVALID;if(item<live){slot=compactSourceSlot(item,sourceRadix);if(slot<hashCapacity()){
+    let key=s(hashAt(slot));if(key!=0u&&key!=INVALID){digit=((key-1u)>>shift)&255u;}}}
+  compactDigits[lane]=digit;workgroupBarrier();if(item>=live||digit==INVALID){if(item<live){fail(item,ERROR_TOPOLOGY);}return;}
+  var localRank=0u;for(var prior=0u;prior<lane;prior+=1u){localRank+=select(0u,1u,compactDigits[prior]==digit);}
+  let output=s(radixHistogramOffset()+block*256u+digit)+localRank;if(output>=live){fail(item,ERROR_CAPACITY);return;}
+  if(sourceRadix){sw(p.touchedSlotOffset+output,slot);}else{sw(radixScratchOffset()+output,slot);}}
+@compute @workgroup_size(1)fn prepareCompactAuthorityRadixSchedule(){let clean=s(0u)==0u;
+  writeDispatch(60u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));}
+@compute @workgroup_size(256)fn countCompactAuthorityRadix0(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){countCompactRadix(lane,wid.x,0u,false);}
+@compute @workgroup_size(256)fn countCompactAuthorityRadix1(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){countCompactRadix(lane,wid.x,8u,true);}
+@compute @workgroup_size(256)fn countCompactAuthorityRadix2(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){countCompactRadix(lane,wid.x,16u,false);}
+@compute @workgroup_size(256)fn countCompactAuthorityRadix3(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){countCompactRadix(lane,wid.x,24u,true);}
+@compute @workgroup_size(256)fn prefixCompactAuthorityRadix(@builtin(local_invocation_index)lane:u32){
+  let blocks=(s(69u)+255u)/256u;var total=0u;for(var block=0u;block<blocks;block+=1u){total+=s(radixHistogramOffset()+block*256u+lane);}
+  compactTotals[lane]=total;workgroupBarrier();for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=compactTotals[lane-offset];}
+    workgroupBarrier();compactTotals[lane]+=add;workgroupBarrier();}
+  var cursor=select(0u,compactTotals[lane-1u],lane>0u);for(var block=0u;block<blocks;block+=1u){let at=radixHistogramOffset()+block*256u+lane;
+    let count=s(at);sw(at,cursor);cursor+=count;}}
+@compute @workgroup_size(256)fn scatterCompactAuthorityRadix0(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){scatterCompactRadix(lane,wid.x,0u,false);}
+@compute @workgroup_size(256)fn scatterCompactAuthorityRadix1(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){scatterCompactRadix(lane,wid.x,8u,true);}
+@compute @workgroup_size(256)fn scatterCompactAuthorityRadix2(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){scatterCompactRadix(lane,wid.x,16u,false);}
+@compute @workgroup_size(256)fn scatterCompactAuthorityRadix3(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){scatterCompactRadix(lane,wid.x,24u,true);}
+
+var<workgroup> compactCandidateScan:array<u32,256>;
+fn compactFineEligible(slot:u32)->bool{if(slot>=hashCapacity()){return false;}let at=hashAt(slot);let key=s(at);
+  return key!=0u&&key!=INVALID&&s(at+1u)>0u&&s(at+2u)!=0u&&s(at+3u)==0u&&s(at+4u)==0u;}
+@compute @workgroup_size(256)fn markCompactFineCandidates(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
+  let block=wid.x;let item=block*256u+lane;let live=s(69u);var mark=0u;if(item<live){mark=select(0u,1u,compactFineEligible(s(p.touchedSlotOffset+item)));}
+  compactCandidateScan[lane]=mark;workgroupBarrier();for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=compactCandidateScan[lane-offset];}
+    workgroupBarrier();compactCandidateScan[lane]+=add;workgroupBarrier();}
+  if(item<live){sw(radixScratchOffset()+item,select(INVALID,compactCandidateScan[lane]-1u,mark!=0u));}
+  if(lane==255u){sw(p.blockCountOffset+block,compactCandidateScan[255u]);}}
+var<workgroup> compactBlockScan:array<u32,256>;
+@compute @workgroup_size(256)fn prefixCompactFineCandidateBlocks(@builtin(local_invocation_index)lane:u32){
+  let blocks=(s(69u)+255u)/256u;let chunk=(blocks+255u)/256u;let first=min(blocks,lane*chunk);let last=min(blocks,first+chunk);
+  var total=0u;for(var block=first;block<last;block+=1u){total+=s(p.blockCountOffset+block);}compactBlockScan[lane]=total;workgroupBarrier();
+  for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=compactBlockScan[lane-offset];}
+    workgroupBarrier();compactBlockScan[lane]+=add;workgroupBarrier();}
+  var cursor=select(0u,compactBlockScan[lane-1u],lane>0u);for(var block=first;block<last;block+=1u){sw(p.blockOffsetOffset+block,cursor);cursor+=s(p.blockCountOffset+block);}
+  if(lane==255u){let fine=compactBlockScan[255u];sw(30u,fine);if(fine>p.supportCapacity){fail(fine,ERROR_CAPACITY);}
+    let candidates=candidateBoundFor(s(2u));sw(6u,candidates);sw(7u,(candidates+255u)/256u);
+    writeDispatch(19u,select(vec3u(0u,1u,1u),dispatchFor(candidates,256u),s(0u)==0u&&s(47u)==0u));}}
+@compute @workgroup_size(256)fn scatterCompactFineCandidates(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
+  let block=wid.x;let item=block*256u+lane;if(item>=s(69u)||s(0u)!=0u){return;}let localRank=s(radixScratchOffset()+item);
+  if(localRank==INVALID){return;}let slot=s(p.touchedSlotOffset+item);if(!compactFineEligible(slot)){fail(item,ERROR_TOPOLOGY);return;}
+  let output=fineCandidateBase()+s(p.blockOffsetOffset+block)+localRank;if(output>=p.candidateCapacity){fail(item,ERROR_CAPACITY);return;}
+  let at=hashAt(slot);let cell=s(at)-1u;setCandidate(output,Candidate(cell,s(at+1u),INVALID));sw(at+3u,INVALID-output);}
+
 @compute @workgroup_size(256)fn markAndScanAirSupportCandidates(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let block=wid.x+wid.y*groups.x;let item=block*256u+lane;
-  var mark=0u;if(item<s(6u)){let c=candidateAt(item);mark=select(0u,1u,c.cell!=INVALID&&s(p.directoryWinnerOffset+c.cell)==item);}
+  var mark=0u;if(item<s(6u)){let c=candidateAt(item);mark=select(0u,1u,c.cell!=INVALID&&authorityWinner(c.cell)==item);}
   marks[lane]=mark;workgroupBarrier();for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=marks[lane-offset];}
     workgroupBarrier();marks[lane]+=add;workgroupBarrier();}if(item<s(6u)){sw(p.rankOffset+item,select(INVALID,marks[lane]-1u,mark!=0u));}
   if(lane==255u&&block<p.blockCapacity){sw(p.blockCountOffset+block,marks[255u]);}}
@@ -1748,18 +2059,21 @@ var<workgroup> blockScan:array<u32,256>;
   let first=min(blocks,lane*chunk);let last=min(blocks,first+chunk);var total=0u;for(var block=first;block<last;block+=1u){total+=s(p.blockCountOffset+block);}blockScan[lane]=total;workgroupBarrier();
   for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=blockScan[lane-offset];}workgroupBarrier();blockScan[lane]+=add;workgroupBarrier();}
   var cursor=select(0u,blockScan[lane-1u],lane>0u);for(var block=first;block<last;block+=1u){sw(p.blockOffsetOffset+block,cursor);cursor+=s(p.blockCountOffset+block);}
-  if(lane==255u&&!reuse){let count=blockScan[255u];sw(8u,count);if(count>p.supportCapacity){fail(count,ERROR_CAPACITY);}}}
+  if(lane==255u&&!reuse){let count=blockScan[255u];sw(8u,count);if(count>p.supportCapacity){fail(count,ERROR_CAPACITY);}
+    let clean=s(0u)==0u;writeDispatch(43u,select(vec3u(0u,1u,1u),dispatchFor(count,256u),clean));
+    writeDispatch(66u,select(vec3u(0u,1u,1u),dispatchFor(s(2u)+count,256u),clean));}}
 
 @compute @workgroup_size(256)fn scatterAirSupportRecords(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let block=wid.x+wid.y*groups.x;let item=block*256u+lane;
   if(item>=s(6u)||s(0u)!=0u){return;}let localRank=s(p.rankOffset+item);if(localRank==INVALID){return;}let output=s(p.blockOffsetOffset+block)+localRank;
-  if(output>=p.supportCapacity){fail(item,ERROR_CAPACITY);return;}let c=candidateAt(item);let flags=s(p.directoryFlagOffset+c.cell)&0x3fffffffu;let q=coord(c.cell);let at=p.recordOffset+output*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
+  if(output>=p.supportCapacity){fail(item,ERROR_CAPACITY);return;}let c=candidateAt(item);let flags=authorityFlags(c.cell)&0x3fffffffu;let q=coord(c.cell);let at=p.recordOffset+output*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
   atomicStore(&recordArena[at],q.x);atomicStore(&recordArena[at+1u],q.y);atomicStore(&recordArena[at+2u],q.z);atomicStore(&recordArena[at+3u],c.size);
   // Air topology is not inferred from the wet demand source. INVALID remains
   // explicit until a topology descriptor for this exact identity is proven.
   atomicStore(&recordArena[at+4u],INVALID);atomicStore(&recordArena[at+5u],flags<<6u);
   atomicStore(&recordArena[at+6u],INVALID);atomicStore(&recordArena[at+7u],s(3u));
-  sw(p.directoryWinnerOffset+c.cell,SUPPORT_TAG|output);}
+  let slot=findAuthority(c.cell,item);if(slot==INVALID){fail(item,ERROR_TOPOLOGY);return;}
+  sw(hashAt(slot)+3u,INVALID-(SUPPORT_TAG|output));}
 
 @compute @workgroup_size(256)fn resolveAirSupportTags(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
@@ -1768,7 +2082,7 @@ var<workgroup> blockScan:array<u32,256>;
   // store below already skipped them, so retiring them here keeps the integrity
   // gates below applying to exactly the tagged row candidates they always did.
   if(item>=s(6u)||s(0u)!=0u){return;}let c=candidateAt(item);
-  if(c.cell==INVALID||c.tagWord==INVALID){return;}let tag=s(p.directoryWinnerOffset+c.cell);
+  if(c.cell==INVALID||c.tagWord==INVALID){return;}let tag=authorityWinner(c.cell);
   if((tag&SUPPORT_TAG)==0u){fail(item,ERROR_TAG);return;}let support=tag&0x7fffffffu;if(support>=s(8u)){fail(item,ERROR_TAG);return;}
   let at=p.recordOffset+support*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;if(r(at)!=coord(c.cell).x||r(at+1u)!=coord(c.cell).y||r(at+2u)!=coord(c.cell).z||r(at+3u)!=c.size){failTopology(5u,item);return;}
   if(c.tagWord!=INVALID){atomicStore(&supportArena[c.tagWord],tag);}}
@@ -1814,7 +2128,7 @@ fn descriptorForIdentity(origin:vec3u,size:u32)->vec3u{var sizes:array<u32,18>;v
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
   if(item>=s(8u)||s(0u)!=0u){return;}let identity=recordAt(item);
   if(s(47u)!=0u){let at=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
-    let stable=r(at+5u)&~(RECORD_FINE<<6u);let dynamic=s(p.directoryFlagOffset+recordCell(item))&RECORD_FINE;
+    let stable=r(at+5u)&~(RECORD_FINE<<6u);let dynamic=authorityFlags(recordCell(item))&RECORD_FINE;
     atomicStore(&recordArena[at+5u],stable|(dynamic<<6u));return;}
   let descriptor=descriptorForIdentity(identity.xyz,identity.w);
   if(descriptor.x==INVALID){let at=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
@@ -1823,22 +2137,47 @@ fn descriptorForIdentity(origin:vec3u,size:u32)->vec3u{var sizes:array<u32,18>;v
   let at=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;atomicStore(&recordArena[at+4u],resolved.x);
   let old=r(at+5u);atomicStore(&recordArena[at+5u],resolved.y|(old&0xffffffc0u));}
 
-// Fine transport consumes this identity-keyed view through the already-bound
-// support arena. Each finest cell names its complete accepted octree owner;
-// positive-air owners retain their support tag instead of acquiring a compact
-// momentum row or falling back to a neighbouring wet row.
+${octreeAirSupportOwnerHashStartWGSL("ownerHashStart")}
+fn insertAdaptiveOwner(originCell:u32,size:u32,tag:u32,packed:u32,item:u32){
+  let capacity=ownerHashCapacity();if(capacity==0u){fail(item,ERROR_CAPACITY);return;}
+  let wanted=originCell+1u;let start=ownerHashStart(originCell,size,capacity);
+  for(var probe=0u;probe<min(capacity,${OCTREE_AIR_SUPPORT_OWNER_HASH.maximumProbes}u);probe+=1u){let slot=(start+probe)%capacity;
+    let at=p.ownerDirectoryOffset+4u*slot;
+    var claimed=atomicCompareExchangeWeak(&supportArena[at],0u,wanted);
+    // WGSL exposes only the weak CAS. A spurious failure on an empty slot must
+    // retry that same slot: advancing would leave a hole that lookup correctly
+    // treats as the end of this probe chain.
+    for(var retry=0u;retry<8u&&!claimed.exchanged&&claimed.old_value==0u;retry+=1u){
+      claimed=atomicCompareExchangeWeak(&supportArena[at],0u,wanted);}
+    if(!claimed.exchanged&&claimed.old_value==0u){fail(item,ERROR_CAPACITY);return;}
+    if(claimed.exchanged||claimed.old_value==wanted){
+      if(claimed.exchanged){let rank=atomicAdd(&scratch[71u],1u);
+        if(rank>=identityCapacity()){fail(item,ERROR_CAPACITY);return;}
+        sw(ownerTouchedSlotOffset()+rank,slot);
+      }else if(atomicLoad(&supportArena[at+1u])!=size){fail(item,ERROR_TOPOLOGY);return;}
+      atomicStore(&supportArena[at+1u],size);atomicStore(&supportArena[at+2u],tag);
+      atomicStore(&supportArena[at+3u],packed);return;}}
+  fail(item,ERROR_CAPACITY);
+}
+
+// Fine transport consumes this adaptive identity hash through the already-
+// bound support arena. One record represents an entire dyadic octree leaf;
+// no finest-cell replication remains.
 @compute @workgroup_size(256)fn publishAirSupportOwnerDirectory(@builtin(global_invocation_id)g:vec3u){
-  let item=g.x;if(item>=p.domainVolume||s(0u)!=0u||s(47u)!=0u){return;}let output=p.ownerDirectoryOffset+4u*item;
-  if(output+3u>=arrayLength(&supportArena)){fail(item,ERROR_CAPACITY);return;}
-  let owner=octreeOwnerPageLookup(vec3i(coord(item)));var tag=INVALID;var originCell=INVALID;var size=0u;var packed=INVALID;
-  if((owner.status&OWNER_PAGE_LOOKUP_INVALID)==0u){originCell=cellOf(owner.origin);size=owner.size;let direct=publishedRow(originCell,size);
-    if(direct!=INVALID){let geometry=rowGeometry[s(4u)*p.rowCapacity+direct];tag=direct;packed=(geometry.z&0xffffu)|((geometry.w&63u)<<16u);
-    }else{let candidate=s(p.directoryWinnerOffset+originCell);if((candidate&SUPPORT_TAG)!=0u){let support=candidate&0x7fffffffu;
-      if(support<s(8u)){let identity=recordAt(support);let at=p.recordOffset+support*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
-        if(cellOf(identity.xyz)==originCell&&identity.w==size){let caseId=r(at+4u);let transform=r(at+5u)&63u;
-          if(caseId!=INVALID){tag=candidate;packed=(caseId&0xffffu)|(transform<<16u);}}}}}}
-  atomicStore(&supportArena[output],tag);atomicStore(&supportArena[output+1u],originCell);
-  atomicStore(&supportArena[output+2u],size);atomicStore(&supportArena[output+3u],packed);}
+  let item=g.x;let rows=s(2u);let supports=s(8u);
+  if(s(0u)!=0u||s(47u)!=0u){return;}
+  if(item>=rows+supports){return;}
+  if(item<rows){let geometry=rowGeometry[s(4u)*p.rowCapacity+item];
+    if(geometry.x>=p.domainVolume||geometry.y==0u){fail(item,ERROR_SOURCE);return;}
+    insertAdaptiveOwner(geometry.x,geometry.y,item,
+      (geometry.z&0xffffu)|((geometry.w&63u)<<16u),item);return;}
+  let support=item-rows;let identity=recordAt(support);
+  let at=p.recordOffset+support*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
+  let caseId=r(at+4u);let transform=r(at+5u)&63u;
+  if(caseId==INVALID||identity.w==0u){fail(item,ERROR_SOURCE);return;}
+  insertAdaptiveOwner(cellOf(identity.xyz),identity.w,SUPPORT_TAG|support,
+    (caseId&0xffffu)|(transform<<16u),item);
+}
 
 // directRows/bank/supportRows are the dispatch-uniform scratch control words
 // s(2u)/s(4u)/s(8u). They are authored before the face passes and never
@@ -1857,13 +2196,13 @@ fn liquidRow(row:u32)->bool{if(row>=s(2u)){return false;}let at=s(4u)*p.rowCapac
 // evaluated by 18 lanes of the emitting row's own workgroup; see the comment in
 // emitAirSupportCandidates for why the disjunction is order-free.
 fn publishedLiquidRow(row:u32)->bool{if(row>=s(2u)){return false;}let cell=faceCell(row).x;
-  return (s(p.directoryFlagOffset+cell)&0x80000000u)!=0u;}
+  return (authorityFlags(cell)&0x80000000u)!=0u;}
 fn publishedDirectLiquidRow(row:u32)->bool{if(row>=s(2u)){return false;}let geometry=s(4u)*p.rowCapacity+row;
   if(geometry>=arrayLength(&rowGeometry)){return false;}let cell=rowGeometry[geometry].x;
-  return (s(p.directoryFlagOffset+cell)&0x80000000u)!=0u;}
+  return (authorityFlags(cell)&0x80000000u)!=0u;}
 fn publishedDirectDemandedRow(row:u32)->bool{if(row>=s(2u)){return false;}let geometry=s(4u)*p.rowCapacity+row;
   if(geometry>=arrayLength(&rowGeometry)){return false;}let cell=rowGeometry[geometry].x;
-  return (s(p.directoryFlagOffset+cell)&RECORD_EXTENSION)!=0u;}
+  return (authorityFlags(cell)&RECORD_EXTENSION)!=0u;}
 fn finiteValue(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn validVector(value:vec4f)->bool{return value.w>0.&&finiteValue(value.x)&&finiteValue(value.y)&&finiteValue(value.z);}
 fn bitsf(index:u32)->f32{return bitcast<f32>(denseCatalog[index]);}
@@ -2049,7 +2388,8 @@ var<workgroup> seedCounts:array<u32,256>;
 fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
   let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let cell=faceCell(faceRow);
   if(cell.x==INVALID){failTopology(7u,item);return vec4u(0u,INVALID,INVALID,0u);}
-  if(faceRow<s(2u)&&liquidRow(faceRow)){atomicOr(&scratch[p.directoryFlagOffset+cell.x],0x80000000u);}
+  if(faceRow<s(2u)&&liquidRow(faceRow)){let slot=findAuthority(cell.x,item);if(slot==INVALID){fail(item,ERROR_TOPOLOGY);}
+    else{atomicOr(&scratch[hashAt(slot)+2u],0x80000000u);}}
   // Paper Section 5: seed each patch by COPYING the exact projected
   // power-face value on its plane — the owning liquid row's face first,
   // else the positive liquid neighbour's coincident face. The distance
@@ -2070,9 +2410,14 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn seedRetainedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let invocation=linearItem(wid,lane,groups,256u);var seeded=0u;
-  if(invocation<s(49u)&&s(0u)==0u&&s(50u)!=0u){let item=s(p.candidateOffset+invocation);
-    if(item>=s(29u)){failTopology(10u,invocation);}else{let carrier=airSupportSeedCarrier(item);
-      if(carrier.w==0u){failTopology(10u,item);}else{faceB[item]=carrier;seeded=1u;}}}
+  // The candidate arena is reused by the next publication before retained
+  // refresh runs (direct-row hash rehydration writes its tag words there), so
+  // it cannot also be persistent storage for the prior seed list.  Recount
+  // seeds over the exact live-face schedule instead.  This remains
+  // footprint-shaped, preserves the immutable seed identity test below, and
+  // removes the cross-epoch alias that corrupted the third retained seed.
+  if(invocation<s(29u)&&s(0u)==0u&&s(50u)!=0u){let carrier=airSupportSeedCarrier(invocation);
+    if(carrier.w!=0u){faceB[invocation]=carrier;seeded=1u;}}
   seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn compactAirSupportSeedFrontier(@builtin(local_invocation_index)lane:u32,
@@ -2080,7 +2425,7 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   if(item>=s(29u)||s(0u)!=0u||s(50u)!=0u){return;}atomicStore(&faceFrontier[frontierMarkBase()+item],0u);
   if(faceA[item].w!=0u){let at=atomicAdd(&scratch[49u],1u);
     if(at>=3u*p.candidateCapacity){fail(item,ERROR_CAPACITY);return;}
-    sw(p.candidateOffset+at,item);appendSeedFrontier((item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)/4u,item);}}
+    appendSeedFrontier((item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)/4u,item);}}
 
 // Same topology and liquid-mask authority imply the closest-source ordering
 // tuple (squared distance, seed identity) is immutable. Only the projected
@@ -2434,14 +2779,12 @@ fn regularVectorAt(faceRow:u32,point:vec3f)->vec4f{let cell=faceCell(faceRow);le
       else{negative=incidentFaces[faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant];
         if(negative.w==0u&&u32(origin[axis])==0u&&(p.closedBoundaryMask&(1u<<(2u*axis)))!=0u){negative=vec4u(bitcast<u32>(0.),0u,INVALID,1u);}}
       if(positive.w==0u&&negative.w==0u){
-      // No marched value on either side: this cell's face-graph component
-      // holds no seeded liquid face. Since emitFineBandAirSupportCandidates
-      // now enrolls every accepted air leaf, the march domain is the paper's
-      // contiguous air partition and this can only be air sealed away from
-      // all liquid by solids or closed walls (a fine film that has never had
-      // liquid rows still reaches the bulk's seeds through the far-air
-      // leaves). Stationary air is the correct content for a sealed pocket;
-      // failing closed instead froze the whole epoch on the first island.
+      // No marched value on either side. In a sparse proven-reach corridor we
+      // cannot distinguish a physically sealed stationary pocket from an
+      // under-published path to the nearest liquid carrier here. Record the
+      // identity and stage a finite zero only so this invocation completes;
+      // finalize rejects the entire publication whenever this ledger is
+      // non-empty, so no consumer can observe the provisional fallback.
       atomicAdd(&scratch[41u],1u);
       atomicMin(&scratch[42u],(((cell.w>>6u)&0xffu)<<16u)|(cell.x<<3u)|axis);
         terms[termCount]=0.;termCount+=1u;continue;}
@@ -2536,6 +2879,7 @@ var<workgroup> reconstructCompleted:array<u32,256>;
     if(reconstructCompleted[0]!=0u){atomicAdd(&scratch[28u],reconstructCompleted[0]);}}}
 
 @compute @workgroup_size(1)fn finalizeAirSupportMetadata(){if(s(31u)==2u){return;}
+  if(s(41u)!=0u){fail(s(42u),ERROR_TOPOLOGY);}
   let first=s(1u);if((first>>24u)==6u&&s(59u)==0u){let item=first&0x00ffffffu;
     if(item<s(8u)){let failedAt=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
       sw(51u,r(failedAt));sw(52u,r(failedAt+1u));sw(53u,r(failedAt+2u));sw(54u,r(failedAt+3u));

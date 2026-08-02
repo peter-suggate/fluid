@@ -175,7 +175,12 @@ export function planFineLevelSetGPUSummaries(plan: FineLevelSetBrickPlan,
   const keyStateBytes = Math.max(1, entryCapacity) * 8;
   const rankStateBytes = Math.max(1, entryCapacity) * 8;
   const pageStateBytes = Math.max(1, directoryPageCapacity) * 8;
-  const workStateBytes = 256; const indirectBytes = 48;
+  const workStateBytes = 256;
+  // Three phase groups publish independently so a producer can bind the next
+  // dispatch arena as STORAGE while the current arena remains INDIRECT in the
+  // same compute pass. Sharing one buffer would violate WebGPU's pass-wide
+  // storage/indirect usage scope; staging copies used to hide that conflict.
+  const indirectBytes = 36 + 12 + 12;
   const parameterBytes = levelOffsets.length * 112;
   return { maximumResidentBricks: plan.maximumResidentBricks, maximumLevel: levelOffsets.length - 1,
     fineEntryCapacity, coarseEntryCapacity, entryCapacity, hierarchyKeyCapacity, directoryPageSize,
@@ -191,7 +196,10 @@ export class WebGPUFineLevelSetSummaries {
   private readonly coarseRows: GPUBuffer;
   private readonly rankKeys: GPUBuffer; private readonly freeRanks: GPUBuffer;
   private readonly directoryPageReferences: GPUBuffer; private readonly freeDirectoryPages: GPUBuffer;
-  private readonly workState: GPUBuffer; private readonly indirect: GPUBuffer;
+  private readonly workState: GPUBuffer;
+  private readonly mutationDispatch: GPUBuffer;
+  private readonly reclamationDispatch: GPUBuffer;
+  private readonly recomputeDispatch: GPUBuffer;
   private readonly params: readonly GPUBuffer[];
   private readonly pipelines: Record<string, GPUComputePipeline> = {};
   private shaderModule?: GPUShaderModule;
@@ -244,8 +252,11 @@ export class WebGPUFineLevelSetSummaries {
     this.freeDirectoryPages = make("global fine sparse directory-page free ranks",
       this.plan.directoryPageCapacity * 4);
     this.workState = make("global fine direct publication state", this.plan.workStateBytes);
-    this.indirect = device.createBuffer({ label: "global fine direct publication dispatches",
-      size: this.plan.indirectBytes, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+    const directIndirect = (label: string, size: number) => device.createBuffer({ label, size,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC });
+    this.mutationDispatch = directIndirect("global fine direct mutation dispatches", 36);
+    this.reclamationDispatch = directIndirect("global fine direct reclamation dispatch", 12);
+    this.recomputeDispatch = directIndirect("global fine direct recompute dispatch", 12);
     this.params = this.plan.levelOffsets.map((_, level) => device.createBuffer({
       label: `global fine direct summary parameters level ${level}`, size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -326,7 +337,8 @@ export class WebGPUFineLevelSetSummaries {
         sourceParams: source.params, metadata: source.metadata, worklist: source.worklist,
         flags: source.flags, phi: source.phi, delta, coarseDirectory, coarseControl, coarseDelta,
         prepare: bind("prepareFineSummaryDirect", this.params[0], [[2, source.worklist], [5, this.directory],
-          [6, coarseDirectory], [12, this.workState], [14, coarseDelta], [16, coarseControl], [17, delta]]),
+          [6, coarseDirectory], [12, this.workState], [14, coarseDelta], [16, coarseControl], [17, delta],
+          [18, this.mutationDispatch]]),
         validateFine: bind("validateFineSummaryDelta", this.params[0],
           [[1, source.metadata], [2, source.worklist], [12, this.workState], [17, delta]]),
         validateCoarse: bind("validateFineSummaryCoarse", this.params[0],
@@ -338,7 +350,7 @@ export class WebGPUFineLevelSetSummaries {
         removeFine: bind("removeFineSummaryPages", this.params[0], [...fineInput, [8, this.fineReferences],
           [9, this.coarseRows], [10, this.directoryPageReferences], [13, this.freeRanks]]),
         preparePageReclamation: bind("prepareFineSummaryPageReclamation", this.params[0],
-          [[12, this.workState]]),
+          [[12, this.workState], [18, this.reclamationDispatch]]),
         reclaimPages: bind("reclaimFineSummaryDirectoryPages", this.params[0],
           [[5, this.directory], [10, this.directoryPageReferences], [11, this.rankKeys],
             [12, this.workState], [13, this.freeRanks], [15, this.freeDirectoryPages]]),
@@ -357,7 +369,8 @@ export class WebGPUFineLevelSetSummaries {
         addFine: bind("addFineSummaryPages", this.params[0], [...fineInput, [8, this.fineReferences]]),
         publishCoarse: bind("publishFineSummaryCoarseRows", this.params[0],
           [[5, this.directory], [6, coarseDirectory], [9, this.coarseRows], [12, this.workState]]),
-        prepareRecompute: bind("prepareFineSummaryRecompute", this.params[0], [[12, this.workState]]),
+        prepareRecompute: bind("prepareFineSummaryRecompute", this.params[0],
+          [[12, this.workState], [18, this.recomputeDispatch]]),
         base: bind("recomputeFineSummaryBase", this.params[0], baseSamples),
         parents: Object.freeze(Array.from({ length: this.plan.maximumLevel }, (_, index) =>
           bind("recomputeFineSummaryParents", this.params[index + 1], parentSamples))),
@@ -371,36 +384,44 @@ export class WebGPUFineLevelSetSummaries {
       const pass = broker.compute({ label }); pass.setPipeline(this.pipelines[name]); pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(1);
     };
-    const indirect = (name: string, group: GPUBindGroup, offset: number, label: string) => {
+    const indirect = (name: string, group: GPUBindGroup, dispatch: GPUBuffer,
+      offset: number, label: string) => {
       const pass = broker.compute({ label }); pass.setPipeline(this.pipelines[name]); pass.setBindGroup(0, group);
-      pass.dispatchWorkgroupsIndirect(this.indirect, offset);
+      pass.dispatchWorkgroupsIndirect(dispatch, offset);
     };
     run("prepareFineSummaryDirect", boundGroups.prepare, "Prepare direct fine-summary publication");
-    broker.updateIndirectBuffer(this.workState, 16 * 4, this.indirect, 0, 36);
-    indirect("validateFineSummaryDelta", boundGroups.validateFine, 0, "Validate exact fine-summary delta");
-    indirect("validateFineSummaryCoarse", boundGroups.validateCoarse, 12, "Validate fine-summary coarse rows");
-    indirect("retireFineSummaryCoarse", boundGroups.retireCoarse, 24, "Retire direct coarse summary ranks");
-    indirect("removeFineSummaryPages", boundGroups.removeFine, 0, "Remove direct fine-summary page references");
+    broker.fence("fine-summary mutation dispatch publication");
+    indirect("validateFineSummaryDelta", boundGroups.validateFine, this.mutationDispatch, 0,
+      "Validate exact fine-summary delta");
+    indirect("validateFineSummaryCoarse", boundGroups.validateCoarse, this.mutationDispatch, 12,
+      "Validate fine-summary coarse rows");
+    indirect("retireFineSummaryCoarse", boundGroups.retireCoarse, this.mutationDispatch, 24,
+      "Retire direct coarse summary ranks");
+    indirect("removeFineSummaryPages", boundGroups.removeFine, this.mutationDispatch, 0,
+      "Remove direct fine-summary page references");
     run("prepareFineSummaryPageReclamation", boundGroups.preparePageReclamation,
       "Prepare sparse fine-summary directory-page reclamation");
-    broker.updateIndirectBuffer(this.workState, 31 * 4, this.indirect, 36, 12);
-    indirect("reclaimFineSummaryDirectoryPages", boundGroups.reclaimPages, 36,
+    broker.fence("fine-summary reclamation dispatch publication");
+    indirect("reclaimFineSummaryDirectoryPages", boundGroups.reclaimPages, this.reclamationDispatch, 0,
       "Reclaim empty fine-summary directory pages");
-    indirect("ensureFineSummaryDirectoryPages", boundGroups.ensureFinePages, 0,
+    indirect("ensureFineSummaryDirectoryPages", boundGroups.ensureFinePages, this.mutationDispatch, 0,
       "Ensure sparse fine-summary directory pages");
-    indirect("ensureFineSummaryCoarseDirectoryPages", boundGroups.ensureCoarsePages, 12,
+    indirect("ensureFineSummaryCoarseDirectoryPages", boundGroups.ensureCoarsePages, this.mutationDispatch, 12,
       "Ensure sparse coarse-summary directory pages");
-    indirect("ensureFineSummaryRanks", boundGroups.ensureFineRanks, 0,
+    indirect("ensureFineSummaryRanks", boundGroups.ensureFineRanks, this.mutationDispatch, 0,
       "Ensure compact fine-summary ranks");
-    indirect("ensureFineSummaryCoarseRanks", boundGroups.ensureCoarseRanks, 12,
+    indirect("ensureFineSummaryCoarseRanks", boundGroups.ensureCoarseRanks, this.mutationDispatch, 12,
       "Ensure compact coarse-summary ranks");
-    indirect("addFineSummaryPages", boundGroups.addFine, 0, "Add direct fine-summary page references");
-    indirect("publishFineSummaryCoarseRows", boundGroups.publishCoarse, 12, "Publish direct coarse summary ranks");
+    indirect("addFineSummaryPages", boundGroups.addFine, this.mutationDispatch, 0,
+      "Add direct fine-summary page references");
+    indirect("publishFineSummaryCoarseRows", boundGroups.publishCoarse, this.mutationDispatch, 12,
+      "Publish direct coarse summary ranks");
     run("prepareFineSummaryRecompute", boundGroups.prepareRecompute, "Prepare active fine-summary mip dispatch");
-    broker.updateIndirectBuffer(this.workState, 28 * 4, this.indirect, 36, 12);
-    indirect("recomputeFineSummaryBase", boundGroups.base, 36, "Recompute direct fine-summary bases");
+    broker.fence("fine-summary recompute dispatch publication");
+    indirect("recomputeFineSummaryBase", boundGroups.base, this.recomputeDispatch, 0,
+      "Recompute direct fine-summary bases");
     for (let level = 1; level <= this.plan.maximumLevel; level += 1) {
-      indirect("recomputeFineSummaryParents", boundGroups.parents[level - 1]!, 36,
+      indirect("recomputeFineSummaryParents", boundGroups.parents[level - 1]!, this.recomputeDispatch, 0,
         `Recompute direct fine-summary parents level ${level}`);
     }
     run("publishFineSummaryDirect", boundGroups.publish, "Publish direct fine-summary directory and active mip");
@@ -411,7 +432,8 @@ export class WebGPUFineLevelSetSummaries {
     this.directory.destroy(); this.fineEntries.destroy(); this.fineReferences.destroy();
     this.coarseRows.destroy(); this.rankKeys.destroy(); this.freeRanks.destroy();
     this.directoryPageReferences.destroy(); this.freeDirectoryPages.destroy();
-    this.workState.destroy(); this.indirect.destroy(); this.params.forEach((buffer) => buffer.destroy());
+    this.workState.destroy(); this.mutationDispatch.destroy(); this.reclamationDispatch.destroy();
+    this.recomputeDispatch.destroy(); this.params.forEach((buffer) => buffer.destroy());
   }
 }
 
@@ -442,6 +464,7 @@ struct CoarseDelta{count:u32,generation:u32,flags:u32,valid:u32,pad:array<u32,12
 @group(0)@binding(13)var<storage,read_write>freeRanks:array<u32>;@group(0)@binding(14)var<storage,read>coarseDelta:CoarseDelta;
 @group(0)@binding(15)var<storage,read_write>freeDirectoryPages:array<u32>;
 @group(0)@binding(16)var<storage,read>coarseControl:array<u32>;@group(0)@binding(17)var<storage,read>pageDelta:array<u32>;
+@group(0)@binding(18)var<storage,read_write>publishedDispatch:array<u32>;
 var<workgroup>minimumPhi:array<f32,64>;var<workgroup>maximumPhi:array<f32,64>;
 var<workgroup>minimumAbsolutePhi:array<f32,64>;var<workgroup>validSamples:array<u32,64>;
 var<workgroup>errors:array<u32,64>;var<workgroup>children:array<Entry,8>;
@@ -493,6 +516,9 @@ fn finePage(key:u32)->u32{if(!validWorklist()){return INVALID;}let count=p.baseD
 fn writeDispatch(base:u32,count:u32,itemsPerGroup:u32){let groups=(count+itemsPerGroup-1u)/itemsPerGroup;
  let width=min(groups,p.maxWorkgroups);let safe=max(1u,width);atomicStore(&state[base],width);
  atomicStore(&state[base+1u],select(1u,(groups+safe-1u)/safe,width!=0u));atomicStore(&state[base+2u],1u);}
+fn publishDispatch(base:u32,count:u32,itemsPerGroup:u32){let groups=(count+itemsPerGroup-1u)/itemsPerGroup;
+ let width=min(groups,p.maxWorkgroups);let safe=max(1u,width);publishedDispatch[base]=width;
+ publishedDispatch[base+1u]=select(1u,(groups+safe-1u)/safe,width!=0u);publishedDispatch[base+2u]=1u;}
 fn hierarchyKey(baseKey:u32,targetLevel:u32)->u32{let xy=p.baseDims.x*p.baseDims.y;let z=baseKey/xy;
  let rem=baseKey-z*xy;let y=rem/p.baseDims.x;var q=vec3u(rem-y*p.baseDims.x,y,z);var dims=p.baseDims;var offset=0u;
  for(var level=0u;level<targetLevel;level+=1u){offset+=dims.x*dims.y*dims.z;dims=(dims+vec3u(1u))/2u;q/=2u;}
@@ -544,7 +570,8 @@ fn coarseAuthoritative()->bool{let generation=p.generation&0x3fffffffu;return p.
  atomicStore(&state[4],select(0u,coarseDelta.count,valid&&!cold&&p.coarseEntryCapacity!=0u&&p.fineFactor!=1u));
  atomicStore(&state[5],p.generation);atomicStore(&state[9],INVALID);atomicStore(&state[12],atomicLoad(&state[8]));dirStore(9u,0u);
  writeDispatch(16u,atomicLoad(&state[2]),256u);writeDispatch(19u,atomicLoad(&state[3]),256u);
- writeDispatch(22u,atomicLoad(&state[4]),256u);}
+ writeDispatch(22u,atomicLoad(&state[4]),256u);publishDispatch(0u,atomicLoad(&state[2]),256u);
+ publishDispatch(3u,atomicLoad(&state[3]),256u);publishDispatch(6u,atomicLoad(&state[4]),256u);}
 @compute @workgroup_size(256)fn validateFineSummaryDelta(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let index=fineLinearWorkgroup(wid,n)*256u+lid;
  if(index>=atomicLoad(&state[2])||atomicLoad(&state[0])!=0u){return;}let key=changedKey(index);
@@ -598,7 +625,8 @@ fn addFineBase(key:u32){let baseRank=rankForKey(key);if(baseRank==INVALID){setEr
  if(index>=atomicLoad(&state[2])||atomicLoad(&state[0])!=0u||atomicLoad(&state[1])==1u){return;}
  let key=changedKey(index);if(finePage(key)==INVALID){removeFineBase(key);}}
 @compute @workgroup_size(1)fn prepareFineSummaryPageReclamation(){let first=atomicLoad(&state[12]);let last=atomicLoad(&state[8]);
- let count=select(0u,last-first,atomicLoad(&state[0])==0u&&last>=first);writeDispatch(31u,count,256u);}
+ let count=select(0u,last-first,atomicLoad(&state[0])==0u&&last>=first);writeDispatch(31u,count,256u);
+ publishDispatch(0u,count,256u);}
 @compute @workgroup_size(256)fn reclaimFineSummaryDirectoryPages(@builtin(workgroup_id)wid:vec3u,
  @builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let index=fineLinearWorkgroup(wid,n)*256u+lid;
  let first=atomicLoad(&state[12]);let last=atomicLoad(&state[8]);if(atomicLoad(&state[0])!=0u||first>last||index>=last-first){return;}
@@ -639,7 +667,8 @@ fn addFineBase(key:u32){let baseRank=rankForKey(key);if(baseRank==INVALID){setEr
  let key=coarseHierarchyKey(e.cellPlusOne,e.size);let rank=rankForKey(key);if(rank==INVALID){setError(CAPACITY,key);return;}
  atomicStore(&coarseRows[rank],row+1u);}
 @compute @workgroup_size(1)fn prepareFineSummaryRecompute(){if(atomicLoad(&state[0])==0u){atomicStore(&state[15],STATE_READY);}
- writeDispatch(28u,select(0u,atomicLoad(&state[7]),atomicLoad(&state[0])==0u),1u);}
+ let count=select(0u,atomicLoad(&state[7]),atomicLoad(&state[0])==0u);writeDispatch(28u,count,1u);
+ publishDispatch(0u,count,1u);}
 fn centerSampleAt(key:u32,corner:u32)->vec2u{if(key<p.levelOffset||key>=p.levelOffset+p.levelKeyCount){return vec2u(0u);}
  let local=key-p.levelOffset;let xy=p.levelDims.x*p.levelDims.y;let z=local/xy;let rem=local-z*xy;let y=rem/p.levelDims.x;
  let coord=vec3u(rem-y*p.levelDims.x,y,z);let resolution=select(4u,8u,p.samplesPerBrick==512u);

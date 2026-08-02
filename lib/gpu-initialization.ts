@@ -31,10 +31,14 @@ export interface GPUInitializationTask {
   phase: GPUInitializationPhase;
   label: string;
   dependencies?: readonly string[];
+  /** Number of independently reportable units owned by this task. The task
+   * remains the dependency boundary; this only exposes honest milestones
+   * inside constructors or browser GPU calls that cannot be split safely. */
+  workUnits?: number;
   /** Force a paint immediately before this task. Phase changes and long
    * same-phase batches already paint automatically. */
   paintBeforeRun?: boolean;
-  run(signal: AbortSignal, report?: (label: string) => void): void | Promise<void>;
+  run(signal: AbortSignal, report?: (label: string, completedWorkUnits?: number) => void): void | Promise<void>;
 }
 
 export type GPUInitializationSnapshotReporter = (snapshot: GPUInitializationSnapshot) => void;
@@ -59,6 +63,7 @@ const TASKS_PER_PAINT = 8;
 export class GPUInitializationTaskRunner {
   private readonly registered = new Set<string>();
   private readonly completed = new Set<string>();
+  private completedWorkUnits = 0;
   private total = 0;
   private lastPaintedPhase?: GPUInitializationPhase;
   private tasksSincePaint = TASKS_PER_PAINT;
@@ -77,7 +82,7 @@ export class GPUInitializationTaskRunner {
       if (this.registered.has(task.id)) throw new Error(`Duplicate GPU initialization task: ${task.id}`);
       this.registered.add(task.id);
     }
-    this.total += tasks.length;
+    this.total += tasks.reduce((sum, task) => sum + Math.max(1, Math.floor(task.workUnits ?? 1)), 0);
   }
 
   async run(tasks: readonly GPUInitializationTask[]) {
@@ -100,9 +105,10 @@ export class GPUInitializationTaskRunner {
         this.tasksSincePaint = 0;
       }
       if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
-      await task.run(this.signal, (label) => this.reportTask(task, label));
+      await task.run(this.signal, (label, completedWorkUnits) => this.reportTask(task, label, completedWorkUnits));
       this.tasksSincePaint += 1;
       this.completed.add(task.id);
+      this.completedWorkUnits += Math.max(1, Math.floor(task.workUnits ?? 1));
       this.reportTask(task, task.label);
     }
   }
@@ -115,9 +121,11 @@ export class GPUInitializationTaskRunner {
     }
   }
 
-  private reportTask(task: GPUInitializationTask, label: string) {
+  private reportTask(task: GPUInitializationTask, label: string, completedWithinTask = 0) {
+    const workUnits = Math.max(1, Math.floor(task.workUnits ?? 1));
     this.report({ phase: task.phase, taskId: task.id, label,
-      completed: this.completed.size, total: this.total });
+      completed: this.completedWorkUnits + Math.max(0, Math.min(workUnits - 1, Math.floor(completedWithinTask))),
+      total: this.total });
   }
 
 }

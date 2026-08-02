@@ -2,12 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   closestPointOnAxis,
-  gizmoAxisDragPosition,
-  gizmoHandleAtPointer,
   gizmoHandleLength_m,
-  projectGizmo,
   GIZMO_AXIS_DIRECTIONS,
 } from "../lib/editor-gizmo";
+import { moveHandles, handleWorldEnds, WORLD_FRAME, type EditorEntity } from "../lib/editor-entity";
 import { add, cameraBasis, normalize, scale, sub } from "../lib/math";
 import { defaultCamera, type Vec3 } from "../lib/model";
 import { projectToViewport, viewportRay, viewportRayForPointer } from "../lib/webgpu-camera";
@@ -57,23 +55,24 @@ test("a ray parallel to the axis is rejected instead of shooting the body away",
   const axisOrigin = { x: 0, y: 0.4, z: 0 };
   const parallel = { origin: { x: -4, y: 0.4, z: 0 }, direction: { x: 1, y: 0, z: 0 } };
   assert.equal(closestPointOnAxis(parallel.origin, parallel.direction, axisOrigin, GIZMO_AXIS_DIRECTIONS.x), undefined);
-  assert.equal(gizmoAxisDragPosition(parallel.origin, parallel.direction, "x", axisOrigin, { x: 0, y: 0, z: 0 }), undefined);
 });
 
 test("the grab offset keeps an axis drag from jumping on the first move", () => {
+  // The viewport keeps the offset between the grab and the origin for the length
+  // of the drag; this is the maths underneath it.
   const start = { x: 0, y: 0.4, z: 0 };
   const grabbed = add(start, { x: 0.25, y: 0, z: 0 });
   const downRay = rayThrough(grabbed);
   const grabPoint = closestPointOnAxis(downRay.origin, downRay.direction, start, GIZMO_AXIS_DIRECTIONS.x);
   assert.ok(grabPoint);
   const grabOffset = sub(start, grabPoint);
-  const held = gizmoAxisDragPosition(downRay.origin, downRay.direction, "x", start, grabOffset);
-  assert.ok(held);
+  const held = add(grabPoint, grabOffset);
   assert.ok(Math.hypot(held.x - start.x, held.y - start.y, held.z - start.z) < 1e-9, "no motion without pointer motion");
 
   const moveRay = rayThrough(add(grabbed, { x: 0.5, y: 0, z: 0 }));
-  const moved = gizmoAxisDragPosition(moveRay.origin, moveRay.direction, "x", start, grabOffset);
-  assert.ok(moved);
+  const movePoint = closestPointOnAxis(moveRay.origin, moveRay.direction, start, GIZMO_AXIS_DIRECTIONS.x);
+  assert.ok(movePoint);
+  const moved = add(movePoint, grabOffset);
   assert.ok(Math.abs(moved.x - (start.x + 0.5)) < 1e-9, "motion tracks the pointer along the axis");
   assert.ok(Math.abs(moved.y - start.y) < 1e-12 && Math.abs(moved.z - start.z) < 1e-12, "off-axis components are pinned");
 });
@@ -82,31 +81,24 @@ test("handle length holds a constant on-screen size across camera distance", () 
   const near = gizmoHandleLength_m(1);
   const far = gizmoHandleLength_m(4);
   assert.ok(Math.abs(far / near - 4) < 1e-12, "world length must scale with eye depth");
-  const position = { x: 0, y: 0.4, z: 0 };
-  const gizmo = projectGizmo(position, defaultCamera, WIDTH, HEIGHT);
-  const spans = gizmo.handles.map((handle) => Math.hypot(
-    (handle.tip.leftFraction - gizmo.origin.leftFraction) * WIDTH,
-    (handle.tip.topFraction - gizmo.origin.topFraction) * HEIGHT,
-  ));
-  for (const span of spans) assert.ok(span > 12 && span < 0.5 * HEIGHT, `handle span ${span}px must be grabbable but not huge`);
-});
 
-test("pointer hit test prefers the centre and picks the nearest axis", () => {
+  // And through the handle the viewport actually draws: the arm is a direction,
+  // resolved to a tip only once the camera says how deep the entity is.
   const position = { x: 0, y: 0.4, z: 0 };
-  const gizmo = projectGizmo(position, defaultCamera, WIDTH, HEIGHT);
-  const origin = { x: gizmo.origin.leftFraction * WIDTH, y: gizmo.origin.topFraction * HEIGHT };
-  assert.equal(gizmoHandleAtPointer(gizmo, origin, WIDTH, HEIGHT), "free");
-  for (const handle of gizmo.handles) {
-    const tip = { x: handle.tip.leftFraction * WIDTH, y: handle.tip.topFraction * HEIGHT };
-    assert.equal(gizmoHandleAtPointer(gizmo, tip, WIDTH, HEIGHT), handle.axis);
+  const entity = {
+    selection: { kind: "body", id: "test" }, label: "TEST", tone: "body",
+    frame: WORLD_FRAME, handles: moveHandles(position, () => ({})),
+    draftSubject: "body", editLabel: () => "Test",
+  } as EditorEntity;
+  const origin = projectToViewport(position, defaultCamera, WIDTH, HEIGHT);
+  for (const handle of entity.handles.filter((candidate) => candidate.kind === "axis")) {
+    const ends = handleWorldEnds(entity, handle, origin.depth_m);
+    assert.ok(ends);
+    const tip = projectToViewport(ends.to, defaultCamera, WIDTH, HEIGHT);
+    const span = Math.hypot(
+      (tip.leftFraction - origin.leftFraction) * WIDTH,
+      (tip.topFraction - origin.topFraction) * HEIGHT,
+    );
+    assert.ok(span > 12 && span < 0.5 * HEIGHT, `arm span ${span}px must be grabbable but not huge`);
   }
-  assert.equal(gizmoHandleAtPointer(gizmo, { x: origin.x + 400, y: origin.y + 260 }, WIDTH, HEIGHT), undefined);
-});
-
-test("a gizmo behind the camera cannot be grabbed", () => {
-  const basis = cameraBasis(defaultCamera);
-  const behind = add(basis.position, scale(basis.forward, -1.5));
-  const gizmo = projectGizmo(behind, defaultCamera, WIDTH, HEIGHT);
-  assert.ok(gizmo.origin.depth_m < 0);
-  assert.equal(gizmoHandleAtPointer(gizmo, { x: 0.5 * WIDTH, y: 0.5 * HEIGHT }, WIDTH, HEIGHT), undefined);
 });

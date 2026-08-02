@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { DirectStructuredVelocitySource } from "../lib/webgpu-octree-structured-velocity-gpu";
 import {
   OCTREE_FINE_SEED_ADAPTER_PUBLICATION,
+  OCTREE_FINE_SEED_PERSISTENT_ROW_CAPACITY,
   WebGPUOctreeFineSeedAdapter,
   octreeFineSeedCandidateShader,
   octreeFineSeedAdapterShader,
@@ -48,8 +49,8 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
     /candidateControl\[7\]=params\.dimsCapacity\.w/g) ?? []).length, 2,
     "the residency consumer's capacity handshake must not receive the changing live-row count");
   assert.match(octreeFineSeedCandidateShader,
-    /structuredControl\[0\]==0u&&structuredControl\[2\]>0u&&structuredControl\[3\]!=0u/,
-    "a missing or rejected structured authority must reject the candidate generation");
+    /structuredControl\[0\]==0u[\s\S]*structuredControl\[3\]!=0u[\s\S]*rawSourceRows==structuredControl\[2\]/,
+    "a missing, mismatched, or rejected structured authority must reject the candidate generation");
   assert.match(octreeFineSeedAdapterShader, /let flags=LIVE\|candidateFlags/,
     "all live leaves must remain directory-addressable even when they have no fine page");
   assert.match(octreeFineSeedAdapterShader,
@@ -84,13 +85,19 @@ test("adapter shader publishes the FineSeedLeaf and indirect candidate ABIs", ()
   assert.doesNotMatch(encode, /copyBufferToBuffer/,
     "recurring fine-seed adaptation must not copy the full leaf-capacity arena");
   assert.equal((encode.match(/dispatchWorkgroupsIndirect/g) ?? []).length, 2,
-    "leaf rebuild and candidate publication consume separate immutable indirect records");
-  assert.equal((encode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 1,
-    "only the exact-work planner is a direct singleton dispatch");
-  assert.match(encode, /updateIndirectBuffer/,
-    "writable dispatch metadata must cross a copy boundary before INDIRECT consumption");
-  assert.doesNotMatch(encode, /this\.workgroups|rowCapacity/,
-    "no capacity-derived recurring launch survives behind an alias");
+    "the hierarchical fallback retains exact GPU-authored dispatches");
+  assert.equal((encode.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 3,
+    "the compact path has two singleton kernels and the fallback has one exact-work planner");
+  assert.match(encode,
+    /rowCapacity\s*<=\s*OCTREE_FINE_SEED_PERSISTENT_ROW_CAPACITY[\s\S]*dispatchWorkgroups\(1\)[\s\S]*dispatchWorkgroups\(1\)[\s\S]*return/,
+    "small compact systems keep both maintenance kernels in one pass");
+  assert.doesNotMatch(encode, /updateIndirectBuffer|copyBufferToBuffer/,
+    "the planner must author the indirect records directly without staging copies");
+  assert.match(encode,
+    /fine-seed direct dispatch publication[\s\S]*dispatchWorkgroupsIndirect\(this\.dispatch,\s*0\)[\s\S]*dispatchWorkgroupsIndirect\(this\.dispatch,\s*12\)/,
+    "direct STORAGE output crosses one legality boundary before both INDIRECT consumers");
+  assert.doesNotMatch(encode, /this\.workgroups|dispatchWorkgroups\([^1]/,
+    "no recurring launch dimension is shaped by allocated row capacity");
   assert.match(octreeFineSeedCandidateShader,
     /dispatchMetadata\[0\]=\(rows\+63u\)\/64u[\s\S]*dispatchMetadata\[3\]=select\(0u,1u,rows>0u\)/,
     "empty live-row and candidate work must publish zero x dimensions");
@@ -122,7 +129,7 @@ test("cold bootstrap samples the geometric centre of even-sized leaves symmetric
 
 test("fine-seed candidates cut over from analytic t=0 to compact coarse phi", () => {
   assert.match(octreeFineSeedAdapterShader, /let coarse=coarseRowValid\(row\)/);
-  assert.match(octreeFineSeedAdapterShader, /if\(!coarse&&params\.selection\.z==0u\)\{return;\}/,
+  assert.match(octreeFineSeedAdapterShader, /if\(!coarse&&params\.selection\.z==0u\)\{continue;\}/,
     "a missing recurring coarse publication preserves the prior compact leaf generation");
   assert.match(octreeFineSeedAdapterShader,
     /if\(coarse\)\{let sample=coarsePhi\[row\];centrePhi=sample\.phi;minimumPhi=sample\.minimumPhi;maximumPhi=sample\.maximumPhi;\}else\{centrePhi=bootstrapPhi\(centre\);gradient=[\s\S]*bootstrapPhi/,
@@ -143,6 +150,36 @@ test("fine-seed candidates cut over from analytic t=0 to compact coarse phi", ()
   assert.match(octreeFineSeedAdapterShader,
     /fn bootstrapTexturePhi\(point:vec3f\)->f32\{[\s\S]*value\+=weight\*textureLoad\(/,
     "the only textureLoad belongs to the mode-gated cold-start helper");
+});
+
+test("small fine-seed maintenance halves the exact compute-pass spine", () => {
+  const encode = (rowCapacity: number) => {
+    const dispatches: string[] = [];
+    const pass = {
+      setPipeline() {}, setBindGroup() {}, end() {},
+      dispatchWorkgroups() { dispatches.push("direct"); },
+      dispatchWorkgroupsIndirect() { dispatches.push("indirect"); },
+    } as unknown as GPUComputePassEncoder;
+    const encoder = {
+      beginComputePass() { return pass; },
+    } as unknown as GPUCommandEncoder;
+    const broker = new PassBroker(encoder, { isolateLabels: false });
+    const adapter = Object.assign(Object.create(WebGPUOctreeFineSeedAdapter.prototype), {
+      destroyed: false,
+      plan: { rowCapacity },
+      buildPipeline: {}, publishCandidatesPipeline: {}, planDispatchPipeline: {},
+      bindGroup: {}, selectBindGroup: {}, plannerBindGroup: {}, dispatch: {},
+    }) as WebGPUOctreeFineSeedAdapter;
+    adapter.encode(broker);
+    return { passes: broker.computePassCount, dispatches };
+  };
+
+  assert.deepEqual(encode(OCTREE_FINE_SEED_PERSISTENT_ROW_CAPACITY), {
+    passes: 1, dispatches: ["direct", "direct"],
+  }, "the compact path fuses the former planner and consumer boundary");
+  assert.deepEqual(encode(OCTREE_FINE_SEED_PERSISTENT_ROW_CAPACITY + 1), {
+    passes: 2, dispatches: ["direct", "indirect", "indirect"],
+  }, "the hierarchical path retains one required storage-to-indirect boundary");
 });
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -218,6 +255,10 @@ test("Dawn adapts live compact rows into global-fine seed candidates without den
     const encoder = device.createCommandEncoder();
     const broker = new PassBroker(encoder);
     surfaceAdapter.encode(broker);
+    assert.equal(broker.computePassCount, 1,
+      "the real compact Dawn command graph must encode one compute pass");
+    assert.equal(broker.boundaryAudit.get("stage indirect args"), undefined,
+      "the compact Dawn graph must issue no indirect-argument staging copy");
     broker.fence("fine-seed adapter test readback");
     const leafReadback = device.createBuffer({ size: 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const candidateReadback = device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

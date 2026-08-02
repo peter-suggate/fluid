@@ -5,7 +5,10 @@
  */
 
 import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "./generated/octree-power-catalog";
-import type { OctreePowerRowDeltaSource } from "./webgpu-octree-power-descriptor";
+import {
+  OCTREE_POWER_ROW_DELTA_VALID,
+  type OctreePowerRowDeltaSource,
+} from "./webgpu-octree-power-descriptor";
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { PassBroker } from "./webgpu-pass-broker";
 import {
@@ -23,12 +26,15 @@ export const OCTREE_STRUCTURED_GPU_TRANSFER_LIST_OFFSET_WORDS =
 export const OCTREE_STRUCTURED_GPU_WORKSET_HEADER_WORDS = 7;
 /** Candidate-only indirect record for the compact changed-face transfer set. */
 export const OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES = 72;
+/** Live-row record kept independent of topology publication so exact identity
+ * can zero topology work while velocity/volume consumers remain live. */
+export const OCTREE_STRUCTURED_RECONSTRUCTION_DISPATCH_OFFSET_BYTES = 108;
 /** One minimum-portable WebGPU workgroup cooperatively finalizes all nine classes. */
 export const OCTREE_STRUCTURED_FINALIZE_LANES = 256;
 export const OCTREE_STRUCTURED_FINALIZE_WORKGROUP_BYTES =
   9 * OCTREE_STRUCTURED_FINALIZE_LANES * Uint32Array.BYTES_PER_ELEMENT;
 const OCTREE_STRUCTURED_GPU_DISPATCH_BYTES =
-  OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES + 36;
+  OCTREE_STRUCTURED_RECONSTRUCTION_DISPATCH_OFFSET_BYTES + 12;
 
 interface StructuredVelocityPipelineBundle {
   readonly beginPipeline: GPUComputePipeline;
@@ -116,6 +122,17 @@ export function structuredPublicationRepeatCount(
   return Number.isInteger(value) && value >= 2 && value <= 8 ? value : 1;
 }
 
+/** Exact topology identity can retain the compiled SPGrid address image only
+ * when the apply reads the same physical image bank. The diagnostic two-bank
+ * remap arm changes banks with the accepted epoch and therefore rebuilds. */
+export function structuredImageIdentityCarryEnabled(
+  environment: Readonly<Record<string, string | undefined>> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_STRUCTURED_IMAGE_IDENTITY_CARRY !== "0"
+    && environment?.FLUID_SPGRID_PERSISTENT_IMAGES !== "1";
+}
+
 export function planStructuredVelocityGPU(rowCapacityValue: number,
   maximumCaseSlotsValue: number = OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence,
   storageAlignment = 256): StructuredVelocityGPUPlan {
@@ -200,6 +217,8 @@ export interface DirectStructuredVelocitySource {
     coefficientBankStrideWords: number;
     worksetStrideWords: number;
     worksetBankStrideWords: number;
+    liveRowDispatch: GPUBuffer;
+    liveRowDispatchOffsetBytes: number;
     classDispatch: GPUBuffer;
     classDispatchOffsetBytes: number;
     topologyMetrics: GPUBuffer;
@@ -375,6 +394,9 @@ export class WebGPUDirectStructuredVelocityAuthority {
     ], 36);
     floats[40] = this.inputs.physicalCellSize;
     words[41] = injectedFailure >>> 0;
+    words[42] = typeof process === "undefined"
+      || process.env.FLUID_STRUCTURED_IDENTITY_CARRY !== "0" ? 1 : 0;
+    words[43] = structuredImageIdentityCarryEnabled() ? 1 : 0;
     return bytes;
   }
 
@@ -517,6 +539,7 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 8, resource: resource(authority) },
       { binding: 9, resource: resource(this.candidateControl) },
       { binding: 12, resource: resource(this.worksets) },
+      { binding: 15, resource: resource(this.control) },
       { binding: 25, resource: resource(this.liveRowDispatch) },
     ]));
     pass.dispatchWorkgroups(1);
@@ -549,7 +572,8 @@ export class WebGPUDirectStructuredVelocityAuthority {
       { binding: 20, resource: resource(this.rowGeometry) },
       { binding: 1, resource: resource(leafHeaders) },
     ]));
-    pass.dispatchWorkgroupsIndirect(this.liveRowDispatch, 0);
+    pass.dispatchWorkgroupsIndirect(this.liveRowDispatch,
+      OCTREE_STRUCTURED_RECONSTRUCTION_DISPATCH_OFFSET_BYTES);
     const compactReconstructionPass = typeof process !== "undefined"
       && process.env.FLUID_STRUCTURED_RECONSTRUCTION_COMPACT_PASS === "1";
     if (!compactReconstructionPass) broker.fence("structured candidate reconstruction complete");
@@ -590,6 +614,8 @@ export class WebGPUDirectStructuredVelocityAuthority {
         coefficientBankStrideWords: this.plan.rowCapacity * OCTREE_SECTION63_CHANNELS,
         worksetStrideWords: this.plan.worksetStrideWords,
         worksetBankStrideWords: this.plan.worksetBytes / 4,
+        liveRowDispatch: this.liveRowDispatch,
+        liveRowDispatchOffsetBytes: OCTREE_STRUCTURED_RECONSTRUCTION_DISPATCH_OFFSET_BYTES,
         classDispatch: this.liveRowDispatch,
         classDispatchOffsetBytes: 24,
         topologyMetrics: this.inputs.topology.metrics,
@@ -661,7 +687,7 @@ struct Params {
   rowHandleOffset:u32,rowSignOffset:u32,rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,
   rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,
   deltaControlOffset:u32,newToOldOffset:u32,oldToNewOffset:u32,affectedRowsOffset:u32,
-  cellSize:f32,injectedFailure:u32,pad1:u32,pad2:u32,
+  cellSize:f32,injectedFailure:u32,identityCarryEnabled:u32,imageIdentityCarryEnabled:u32,
 }
 struct LeafHeader {cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,flags:u32,reserved:u32,gradient:vec4f}
 struct Metric {caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
@@ -683,6 +709,7 @@ struct Control {flags:atomic<u32>,firstError:atomic<u32>,rowCount:u32,slotCount:
 @group(0)@binding(24)var<storage,read>sourceRowDelta:array<u32>;
 @group(0)@binding(25)var<storage,read_write>publicationDispatch:array<u32>;
 const INVALID:u32=0xffffffffu;const VALID:u32=0x80000000u;const ERROR_SOURCE:u32=${OCTREE_STRUCTURED_GPU_ERROR.source}u;
+const ROW_DELTA_VALID:u32=${OCTREE_POWER_ROW_DELTA_VALID}u;
 const ERROR_CAPACITY:u32=${OCTREE_STRUCTURED_GPU_ERROR.capacity}u;const ERROR_CATALOG:u32=${OCTREE_STRUCTURED_GPU_ERROR.catalog}u;
 const ERROR_NEIGHBOR:u32=${OCTREE_STRUCTURED_GPU_ERROR.neighbor}u;const ERROR_RECIPROCITY:u32=${OCTREE_STRUCTURED_GPU_ERROR.reciprocity}u;
 const ERROR_GEOMETRY:u32=${OCTREE_STRUCTURED_GPU_ERROR.geometry}u;const ERROR_CARRY:u32=${OCTREE_STRUCTURED_GPU_ERROR.carry}u;
@@ -727,7 +754,17 @@ fn publishBlockDispatch(at:u32,blocks:u32){let x=max(1u,min(65535u,blocks));
 fn publishExactRowDispatch(at:u32,rows:u32){if(rows==0u){publicationDispatch[at]=0u;
  publicationDispatch[at+1u]=1u;publicationDispatch[at+2u]=1u;return;}publishBlockDispatch(at,rows);}
 fn foldedItem(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
-@compute @workgroup_size(1)fn beginStructuredPublication(){let rows=min(sourceRowDelta[p.deltaControlOffset],p.rowCapacity);let hasAccepted=arrayLength(&acceptedControl)>=6u&&atomicLoad(&acceptedControl[0])==0u&&atomicLoad(&acceptedControl[3])!=0u;atomicStore(&control.flags,p.injectedFailure);atomicStore(&control.firstError,select(INVALID,0u,p.injectedFailure!=0u));control.rowCount=rows;control.slotCount=0u;control.epoch=0u;control.activeBank=select(0u,1u-(atomicLoad(&acceptedControl[4])&1u),hasAccepted);control.projected=select(0u,1u,hasAccepted);atomicStore(&control.entryCount,0u);for(var family=0u;family<7u;family+=1u){control.familyOffsets[family]=0u;}publishBlockDispatch(0u,(rows+63u)/64u);publishBlockDispatch(3u,(rows*p.maxSlots+63u)/64u);}
+fn exactIdentityCarry(rows:u32,hasAccepted:bool)->bool{
+  if(!hasAccepted||p.deltaControlOffset+15u>=arrayLength(&sourceRowDelta)){return false;}
+  let base=p.deltaControlOffset;let previous=sourceRowDelta[base+1u];let carried=sourceRowDelta[base+2u];
+  return sourceRowDelta[base]==rows&&previous==rows&&carried==rows
+    &&sourceRowDelta[base+3u]==0u&&sourceRowDelta[base+4u]==0u
+    &&sourceRowDelta[base+5u]==0u&&sourceRowDelta[base+6u]==0u
+    &&sourceRowDelta[base+7u]!=0u&&sourceRowDelta[base+8u]==ROW_DELTA_VALID
+    &&sourceRowDelta[base+15u]==1u&&atomicLoad(&acceptedControl[2])==rows
+    &&atomicLoad(&acceptedControl[5])<=p.slotCapacity;
+}
+@compute @workgroup_size(1)fn beginStructuredPublication(){let rows=min(sourceRowDelta[p.deltaControlOffset],p.rowCapacity);let hasAccepted=arrayLength(&acceptedControl)>=6u&&atomicLoad(&acceptedControl[0])==0u&&atomicLoad(&acceptedControl[3])!=0u;let identity=exactIdentityCarry(rows,hasAccepted)&&p.injectedFailure==0u&&p.identityCarryEnabled!=0u;atomicStore(&control.flags,p.injectedFailure);atomicStore(&control.firstError,select(INVALID,0u,p.injectedFailure!=0u));control.rowCount=rows;control.slotCount=select(0u,atomicLoad(&acceptedControl[5]),identity);control.epoch=0u;control.activeBank=select(select(0u,1u-(atomicLoad(&acceptedControl[4])&1u),hasAccepted),atomicLoad(&acceptedControl[4])&1u,identity);control.projected=select(0u,1u,hasAccepted);atomicStore(&control.entryCount,0u);for(var family=0u;family<7u;family+=1u){control.familyOffsets[family]=0u;}for(var word=0u;word<17u;word+=1u){control.reserved[word]=0u;}control.reserved[0]=select(0u,1u,identity);publishBlockDispatch(27u,(rows+63u)/64u);if(identity){publishExactRowDispatch(0u,0u);publishExactRowDispatch(3u,0u);if(p.imageIdentityCarryEnabled!=0u){publishExactRowDispatch(21u,0u);publishExactRowDispatch(24u,0u);}}else{publishBlockDispatch(0u,(rows+63u)/64u);publishBlockDispatch(3u,(rows*p.maxSlots+63u)/64u);}}
 
 // One invocation per (row, catalog slot). The row-level guards are re-evaluated
 // per slot rather than hoisted: \`fail\` is an atomicOr plus an atomicMin on the
@@ -749,6 +786,7 @@ fn foldedItem(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
 // owns each row's six family counters, so the accumulation order is the slot
 // order it always was -- no atomics, and therefore no atomics-as-ordering.
 @compute @workgroup_size(64)fn countStructuredRowFamilies(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity){return;}
+  if(control.reserved[0]!=0u){return;}
   if(row>=arrayLength(&headers)||row>=arrayLength(&metrics)){return;}let m=metrics[row];if((m.transformAndFlags&VALID)==0u||m.error!=0u||m.caseId>=p.catalogEntryCount){return;}
   let h=caseHeader(m.caseId);if(h.y==0u||h.y>p.maxSlots||h.x>p.catalogFaceCount||h.y>p.catalogFaceCount-h.x){return;}
   let base=candidateAuthorityBase();var counts:array<u32,6>;
@@ -756,10 +794,10 @@ fn foldedItem(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
   for(var family=0u;family<6u;family+=1u){authority[base+p.rowFamilyPrefixOffset+familyIndex(row,family)]=counts[family];authority[base+p.rowFamilyHandleOffset+familyIndex(row,family)]=(familyIndex(row,family)*8u);for(var o=0u;o<8u;o+=1u){authority[base+p.rowFamilySlotOffset+(familyIndex(row,family)*8u+o)]=INVALID;}}}
 
 var<workgroup> familyLane:array<u32,384>;
-@compute @workgroup_size(64)fn prefixStructuredFamilies(@builtin(local_invocation_index)lane:u32){let rows=min(control.rowCount,p.rowCapacity);let chunk=(rows+63u)/64u;let first=lane*chunk;let last=min(first+chunk,rows);
+@compute @workgroup_size(64)fn prefixStructuredFamilies(@builtin(local_invocation_index)lane:u32){let identity=control.reserved[0]!=0u;let rows=select(min(control.rowCount,p.rowCapacity),0u,identity);let chunk=(rows+63u)/64u;let first=lane*chunk;let last=min(first+chunk,rows);
   for(var family=0u;family<6u;family+=1u){var total=0u;for(var row=first;row<last;row+=1u){total+=authority[candidateAuthorityBase()+p.rowFamilyPrefixOffset+familyIndex(row,family)];}familyLane[family*64u+lane]=total;}workgroupBarrier();
   for(var width=1u;width<64u;width<<=1u){for(var family=0u;family<6u;family+=1u){var add=0u;if(lane>=width){add=familyLane[family*64u+lane-width];}workgroupBarrier();familyLane[family*64u+lane]+=add;}workgroupBarrier();}
-  if(lane==0u){control.familyOffsets[0]=0u;for(var family=0u;family<6u;family+=1u){control.familyOffsets[family+1u]=control.familyOffsets[family]+familyLane[family*64u+63u];}control.slotCount=control.familyOffsets[6];if(control.slotCount>p.slotCapacity){fail(0u,ERROR_CAPACITY);}}
+  if(lane==0u&&!identity){control.familyOffsets[0]=0u;for(var family=0u;family<6u;family+=1u){control.familyOffsets[family+1u]=control.familyOffsets[family]+familyLane[family*64u+63u];}control.slotCount=control.familyOffsets[6];if(control.slotCount>p.slotCapacity){fail(0u,ERROR_CAPACITY);}}
   workgroupBarrier();for(var family=0u;family<6u;family+=1u){var prefix=select(0u,familyLane[family*64u+lane-1u],lane>0u);for(var row=first;row<last;row+=1u){let index=p.rowFamilyPrefixOffset+familyIndex(row,family);let count=authority[candidateAuthorityBase()+index];authority[candidateAuthorityBase()+index]=prefix;prefix+=count;}}}
 
 fn oldRow(newRow:u32)->u32{if(p.newToOldOffset+newRow>=arrayLength(&rowDelta)){return INVALID;}let encoded=rowDelta[p.newToOldOffset+newRow]&0x3fffffffu;return select(INVALID,encoded-1u,encoded!=0u);}fn candidateEpoch()->u32{return select(0u,rowDelta[p.deltaControlOffset+7u],p.deltaControlOffset+7u<arrayLength(&rowDelta));}
@@ -786,19 +824,19 @@ fn carryValue(row:u32,neighbor:u32,geo:ResolvedSlotGeometry)->vec2f{if(control.p
   let handle=control.familyOffsets[family]+authority[base+p.rowFamilyPrefixOffset+familyIndex(row,family)]+rank;if(handle>=control.slotCount){fail(row,ERROR_CAPACITY);return;}let neighbor=authority[base+p.rowNeighborOffset+at];let geo=geometry(row,local);let global=authority[base+p.rowCatalogOffset+at];
   let carried=carryValue(row,neighbor,geo);authority[base+p.rowHandleOffset+at]=handle;authority[base+p.valuesOffset+handle]=bitcast<u32>(carried.x);authority[base+p.ownerOffset+handle]=row;authority[base+p.neighborOffset+handle]=neighbor;authority[base+p.metadataOffset+handle]=family|(orientation<<3u)|(global<<6u)|(((ownerMeta>>7u)&1u)<<30u);authority[base+p.areaOffset+handle]=bitcast<u32>(geo.area);authority[base+p.inverseOffset+handle]=bitcast<u32>(geo.inverseDistance);authority[base+p.fractionOffset+handle]=bitcast<u32>(1.0);authority[base+p.pressureScaleOffset+handle]=bitcast<u32>(1.0);authority[base+p.normalOffset+4u*handle]=bitcast<u32>(geo.normal.x);authority[base+p.normalOffset+4u*handle+1u]=bitcast<u32>(geo.normal.y);authority[base+p.normalOffset+4u*handle+2u]=bitcast<u32>(geo.normal.z);authority[base+p.normalOffset+4u*handle+3u]=0u;authority[base+p.centroidOffset+4u*handle]=bitcast<u32>(geo.centroid.x);authority[base+p.centroidOffset+4u*handle+1u]=bitcast<u32>(geo.centroid.y);authority[base+p.centroidOffset+4u*handle+2u]=bitcast<u32>(geo.centroid.z);authority[base+p.centroidOffset+4u*handle+3u]=bitcast<u32>(carried.y);}
 
-@compute @workgroup_size(64)fn publishSection63Rows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);
+@compute @workgroup_size(64)fn publishSection63Rows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(control.reserved[0]!=0u||row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=0u){return;}let m=metrics[row];let h=caseHeader(m.caseId);
   for(var axisSlot=0u;axisSlot<6u;axisSlot+=1u){authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+axisSlot]=INVALID;}for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let neighbor=authority[candidateAuthorityBase()+p.rowNeighborOffset+at];let ownerMeta=authority[candidateAuthorityBase()+p.rowOwnerMetadataOffset+at];var handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];var sign=1;if(((ownerMeta>>6u)&1u)==0u){let reverse=authority[candidateAuthorityBase()+p.rowReciprocalOffset+at];if(neighbor==INVALID||reverse==INVALID){atomicOr(&control.flags,ERROR_RECIPROCITY);continue;}handle=authority[candidateAuthorityBase()+p.rowHandleOffset+rowBase(neighbor)+reverse];sign=-1;}if(handle==INVALID||handle>=control.slotCount){atomicOr(&control.flags,ERROR_CAPACITY);continue;}authority[candidateAuthorityBase()+p.rowHandleOffset+at]=handle;authority[candidateAuthorityBase()+p.rowSignOffset+at]=bitcast<u32>(sign);let family=ownerMeta&7u;let orientation=(ownerMeta>>3u)&7u;authority[candidateAuthorityBase()+p.rowFamilySlotOffset+authority[candidateAuthorityBase()+p.rowFamilyHandleOffset+familyIndex(row,family)]+orientation]=handle;let localGeometry=geometry(row,local);let worldNormal=localGeometry.normal;if(neighbor!=INVALID&&headers[neighbor].size==headers[row].size){let absoluteNormal=abs(worldNormal);let axis=select(select(2u,1u,absoluteNormal.y>absoluteNormal.z),0u,absoluteNormal.x>max(absoluteNormal.y,absoluteNormal.z));let transverse=dot(absoluteNormal,vec3f(1.0))-absoluteNormal[axis];if(absoluteNormal[axis]>.9999&&transverse<1e-4){let direction=2u*axis+select(0u,1u,worldNormal[axis]>0.0);authority[candidateAuthorityBase()+p.rowAxisOffset+6u*row+direction]=neighbor;}}}
   let source=m.caseId*${OCTREE_SECTION63_CHANNELS}u;let destination=section63BankBase()+row*${OCTREE_SECTION63_CHANNELS}u;let scale=size(row);if(source+${OCTREE_SECTION63_CHANNELS}u>arrayLength(&catalogCoefficients)||destination+${OCTREE_SECTION63_CHANNELS}u>arrayLength(&section63Coefficients)){fail(row,ERROR_CAPACITY);return;}for(var channel=0u;channel<${OCTREE_SECTION63_CHANNELS}u;channel+=1u){section63Coefficients[destination+channel]=catalogCoefficients[source+channel]*scale;}
 }
 
 fn familyClass(handle:u32)->u32{let owner=authority[candidateAuthorityBase()+p.ownerOffset+handle];let neighbor=authority[candidateAuthorityBase()+p.neighborOffset+handle];var transition=metrics[owner].caseId!=0u;var boundary=neighbor==INVALID||rowClass(owner)>=2u;if(neighbor!=INVALID){transition=transition||metrics[neighbor].caseId!=0u;boundary=boundary||rowClass(neighbor)>=2u;}return select(select(5u,7u,boundary),select(6u,8u,boundary),transition);}
 var<workgroup> finalCounts:array<u32,${9 * OCTREE_STRUCTURED_FINALIZE_LANES}>;
-@compute @workgroup_size(${OCTREE_STRUCTURED_FINALIZE_LANES})fn finalizeStructuredPublication(@builtin(local_invocation_index)lane:u32){let rows=min(control.rowCount,p.rowCapacity);let slots=min(control.slotCount,p.slotCapacity);let rowChunk=(rows+${OCTREE_STRUCTURED_FINALIZE_LANES - 1}u)/${OCTREE_STRUCTURED_FINALIZE_LANES}u;let rowFirst=lane*rowChunk;let rowLast=min(rowFirst+rowChunk,rows);let slotChunk=(slots+${OCTREE_STRUCTURED_FINALIZE_LANES - 1}u)/${OCTREE_STRUCTURED_FINALIZE_LANES}u;let slotFirst=lane*slotChunk;let slotLast=min(slotFirst+slotChunk,slots);
+@compute @workgroup_size(${OCTREE_STRUCTURED_FINALIZE_LANES})fn finalizeStructuredPublication(@builtin(local_invocation_index)lane:u32){let identity=control.reserved[0]!=0u;let rows=select(min(control.rowCount,p.rowCapacity),0u,identity);let slots=select(min(control.slotCount,p.slotCapacity),0u,identity);let rowChunk=(rows+${OCTREE_STRUCTURED_FINALIZE_LANES - 1}u)/${OCTREE_STRUCTURED_FINALIZE_LANES}u;let rowFirst=lane*rowChunk;let rowLast=min(rowFirst+rowChunk,rows);let slotChunk=(slots+${OCTREE_STRUCTURED_FINALIZE_LANES - 1}u)/${OCTREE_STRUCTURED_FINALIZE_LANES}u;let slotFirst=lane*slotChunk;let slotLast=min(slotFirst+slotChunk,slots);
   var local:array<u32,9>;for(var row=rowFirst;row<rowLast;row+=1u){local[rowClass(row)]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){local[familyClass(handle)]+=1u;let marker=bitcast<f32>(authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]);if(marker<=.5){local[4u]+=1u;}}for(var cls=0u;cls<9u;cls+=1u){finalCounts[cls*${OCTREE_STRUCTURED_FINALIZE_LANES}u+lane]=local[cls];}workgroupBarrier();
   for(var width=1u;width<${OCTREE_STRUCTURED_FINALIZE_LANES}u;width<<=1u){for(var cls=0u;cls<9u;cls+=1u){var add=0u;if(lane>=width){add=finalCounts[cls*${OCTREE_STRUCTURED_FINALIZE_LANES}u+lane-width];}workgroupBarrier();finalCounts[cls*${OCTREE_STRUCTURED_FINALIZE_LANES}u+lane]+=add;}workgroupBarrier();}
   var prefix:array<u32,9>;if(lane>0u){for(var cls=0u;cls<9u;cls+=1u){prefix[cls]=finalCounts[cls*${OCTREE_STRUCTURED_FINALIZE_LANES}u+lane-1u];}}
   for(var row=rowFirst;row<rowLast;row+=1u){let cls=rowClass(row);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=row;prefix[cls]+=1u;}for(var handle=slotFirst;handle<slotLast;handle+=1u){let cls=familyClass(handle);worksets[worksetBankBase()+worksetBase(cls)+7u+prefix[cls]]=handle;prefix[cls]+=1u;let marker=bitcast<f32>(authority[candidateAuthorityBase()+p.centroidOffset+4u*handle+3u]);if(marker<=.5){let transferRank=prefix[4u];worksets[worksetBankBase()+worksetBase(4u)+7u+transferRank]=handle;control.transferHandles[transferRank]=handle;prefix[4u]+=1u;}}workgroupBarrier();
-  if(lane==0u){let clean=atomicLoad(&control.flags)==0u&&control.slotCount<=p.slotCapacity;let epoch=candidateEpoch();publicationDispatch[18u]=0u;publicationDispatch[19u]=1u;publicationDispatch[20u]=1u;publicationDispatch[21u]=0u;publicationDispatch[22u]=1u;publicationDispatch[23u]=1u;publicationDispatch[24u]=0u;publicationDispatch[25u]=1u;publicationDispatch[26u]=1u;for(var cls=0u;cls<9u;cls+=1u){let count=finalCounts[cls*${OCTREE_STRUCTURED_FINALIZE_LANES}u+${OCTREE_STRUCTURED_FINALIZE_LANES - 1}u];let groups=select((count+63u)/64u,count,cls==4u);let groupsX=max(1u,min(65535u,groups));let groupsY=(groups+groupsX-1u)/groupsX;let base=worksetBase(cls);worksets[worksetBankBase()+base]=epoch;worksets[worksetBankBase()+base+1u]=count;worksets[worksetBankBase()+base+2u]=select(p.rowCapacity,p.slotCapacity,cls>=4u);worksets[worksetBankBase()+base+3u]=3u;worksets[worksetBankBase()+base+4u]=groupsX;worksets[worksetBankBase()+base+5u]=groupsY;worksets[worksetBankBase()+base+6u]=1u;if(clean&&cls<=4u){let dispatch=6u+3u*cls;publicationDispatch[dispatch]=groupsX;publicationDispatch[dispatch+1u]=groupsY;publicationDispatch[dispatch+2u]=1u;}}if(clean){publishExactRowDispatch(21u,finalCounts[255u]+finalCounts[511u]+finalCounts[767u]+finalCounts[1023u]);publishExactRowDispatch(24u,finalCounts[511u]+finalCounts[1023u]);}if(clean&&epoch!=0u){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}}}
+  if(lane==0u){let epoch=candidateEpoch();if(identity){let acceptedEpoch=atomicLoad(&acceptedControl[3]);var valid=epoch!=0u&&acceptedEpoch!=0u;for(var cls=0u;cls<9u;cls+=1u){let base=worksetBankBase()+worksetBase(cls);valid=valid&&worksets[base]==acceptedEpoch&&worksets[base+1u]<=worksets[base+2u]&&(worksets[base+3u]&3u)==3u;worksets[base]=epoch;if(cls==4u){worksets[base+1u]=0u;worksets[base+4u]=0u;worksets[base+5u]=1u;worksets[base+6u]=1u;}}publicationDispatch[18u]=0u;publicationDispatch[19u]=1u;publicationDispatch[20u]=1u;if(valid){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}else{fail(0u,ERROR_CARRY);}}else{let clean=atomicLoad(&control.flags)==0u&&control.slotCount<=p.slotCapacity;publicationDispatch[18u]=0u;publicationDispatch[19u]=1u;publicationDispatch[20u]=1u;publicationDispatch[21u]=0u;publicationDispatch[22u]=1u;publicationDispatch[23u]=1u;publicationDispatch[24u]=0u;publicationDispatch[25u]=1u;publicationDispatch[26u]=1u;for(var cls=0u;cls<9u;cls+=1u){let count=finalCounts[cls*${OCTREE_STRUCTURED_FINALIZE_LANES}u+${OCTREE_STRUCTURED_FINALIZE_LANES - 1}u];let groups=select((count+63u)/64u,count,cls==4u);let groupsX=max(1u,min(65535u,groups));let groupsY=(groups+groupsX-1u)/groupsX;let base=worksetBase(cls);worksets[worksetBankBase()+base]=epoch;worksets[worksetBankBase()+base+1u]=count;worksets[worksetBankBase()+base+2u]=select(p.rowCapacity,p.slotCapacity,cls>=4u);worksets[worksetBankBase()+base+3u]=3u;worksets[worksetBankBase()+base+4u]=groupsX;worksets[worksetBankBase()+base+5u]=groupsY;worksets[worksetBankBase()+base+6u]=1u;if(clean&&cls<=4u){let dispatch=6u+3u*cls;publicationDispatch[dispatch]=groupsX;publicationDispatch[dispatch+1u]=groupsY;publicationDispatch[dispatch+2u]=1u;}}if(clean){publishExactRowDispatch(21u,finalCounts[255u]+finalCounts[511u]+finalCounts[767u]+finalCounts[1023u]);publishExactRowDispatch(24u,finalCounts[511u]+finalCounts[1023u]);}if(clean&&epoch!=0u){control.epoch=epoch;atomicStore(&control.flags,${OCTREE_STRUCTURED_GPU_VALID}u);}}}}
 
 fn canonicalPublicationSum(values:array<f32,31>,count:u32)->f32{
   var sorted=values;
@@ -816,9 +854,9 @@ fn canonicalPublicationSum(values:array<f32,31>,count:u32)->f32{
   }
   return sum;
 }
-@compute @workgroup_size(64)fn reconstructStructuredCellVelocity(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var termsX:array<f32,31>;var termsY:array<f32,31>;var termsZ:array<f32,31>;for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];if(handle==INVALID||handle>=control.slotCount){rowVelocities[rowBankBase()+row]=vec4f(0.0);return;}let sample=f32(bitcast<i32>(authority[candidateAuthorityBase()+p.rowSignOffset+at]))*bitcast<f32>(authority[candidateAuthorityBase()+p.valuesOffset+handle]);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];let r=p.reconstructionOffset+3u*global;let term=vec3f(bitcast<f32>(dense[r]),bitcast<f32>(dense[r+1u]),bitcast<f32>(dense[r+2u]))*sample;termsX[local]=term.x;termsY[local]=term.y;termsZ[local]=term.z;}let canonical=vec3f(canonicalPublicationSum(termsX,h.y),canonicalPublicationSum(termsY,h.y),canonicalPublicationSum(termsZ,h.y));let hrow=headers[row];rowVelocities[rowBankBase()+row]=vec4f(inverseStructuredTransform(canonical,m.transformAndFlags&63u),1.0);rowGeometry[rowBankBase()+row]=vec4u(hrow.cell,hrow.size,m.caseId,m.transformAndFlags);}
+@compute @workgroup_size(64)fn reconstructStructuredCellVelocity(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(control.reserved[0]!=0u||row>=control.rowCount||row>=p.rowCapacity||atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}let m=metrics[row];let h=caseHeader(m.caseId);var termsX:array<f32,31>;var termsY:array<f32,31>;var termsZ:array<f32,31>;for(var local=0u;local<h.y;local+=1u){let at=rowBase(row)+local;let handle=authority[candidateAuthorityBase()+p.rowHandleOffset+at];if(handle==INVALID||handle>=control.slotCount){rowVelocities[rowBankBase()+row]=vec4f(0.0);return;}let sample=f32(bitcast<i32>(authority[candidateAuthorityBase()+p.rowSignOffset+at]))*bitcast<f32>(authority[candidateAuthorityBase()+p.valuesOffset+handle]);let global=authority[candidateAuthorityBase()+p.rowCatalogOffset+at];let r=p.reconstructionOffset+3u*global;let term=vec3f(bitcast<f32>(dense[r]),bitcast<f32>(dense[r+1u]),bitcast<f32>(dense[r+2u]))*sample;termsX[local]=term.x;termsY[local]=term.y;termsZ[local]=term.z;}let canonical=vec3f(canonicalPublicationSum(termsX,h.y),canonicalPublicationSum(termsY,h.y),canonicalPublicationSum(termsZ,h.y));let hrow=headers[row];rowVelocities[rowBankBase()+row]=vec4f(inverseStructuredTransform(canonical,m.transformAndFlags&63u),1.0);rowGeometry[rowBankBase()+row]=vec4u(hrow.cell,hrow.size,m.caseId,m.transformAndFlags);}
 
-@compute @workgroup_size(1)fn acceptStructuredPublication(){if(atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}atomicStore(&acceptedControl[1],INVALID);atomicStore(&acceptedControl[2],control.rowCount);atomicStore(&acceptedControl[3],control.epoch);atomicStore(&acceptedControl[4],control.activeBank);atomicStore(&acceptedControl[5],control.slotCount);atomicStore(&acceptedControl[0],0u);}
+@compute @workgroup_size(1)fn acceptStructuredPublication(){if(atomicLoad(&control.flags)!=${OCTREE_STRUCTURED_GPU_VALID}u){return;}atomicStore(&acceptedControl[1],INVALID);atomicStore(&acceptedControl[2],control.rowCount);atomicStore(&acceptedControl[3],control.epoch);atomicStore(&acceptedControl[4],control.activeBank);atomicStore(&acceptedControl[5],control.slotCount);atomicStore(&acceptedControl[6],control.reserved[0]);atomicStore(&acceptedControl[13],control.reserved[0]);atomicStore(&acceptedControl[0],0u);}
 `;
 
 /** Activity-only classification variant; disabled mode returns the exact production bytes. */

@@ -43,10 +43,12 @@ export const sceneWebGPUSmokeIds = [
   "minimal-power-dam-break-32",
   "minimal-power-dam-break-64",
   "large-power-dam-break",
+  "large-power-hydrostatic",
   "ceiling-slab-drop",
   "corner-brick-drop",
   "midair-brick-drop",
   "midair-corner-drop",
+  "power-hybrid-deep-ocean",
   "ocean-seiche",
 ] as const;
 
@@ -344,7 +346,13 @@ const largePowerDamOverrides = {
   ...octreePowerOverrides,
   maximumLeafSize: "32",
   interfaceRefinementBandCells: 1,
+  pressureRowCapacity: 8_192,
   globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
+} as const;
+const largePowerHydrostaticOverrides = {
+  ...octreePowerOverrides,
+  maximumLeafSize: "32",
+  interfaceRefinementBandCells: 1,
 } as const;
 
 const powerDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [
@@ -457,6 +465,31 @@ function oceanScene(): SceneDescription {
   scene.environment = "default";
   scene.sceneId = "smoke-ocean-seiche";
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
+  return scene;
+}
+
+/**
+ * Bet-4 work-verdict scene: a genuinely volumetric pool, but bounded enough to
+ * run as a one-step shipping-path gate.  The topology-aligned 64x64x48 lattice
+ * has 56 wet layers, so
+ * the regular deep interior dominates the free-surface and tank-wall bands.
+ * It deliberately has no wave seed: D4 correctness remains the separate
+ * symmetric-expansion gate, while this scene measures only avoided machinery.
+ */
+function powerHybridDeepOceanScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "smoke-power-hybrid-deep-ocean";
+  scene.environment = "default";
+  scene.rigidBodies = [];
+  scene.container = { ...scene.container, width_m: 3.2, height_m: 3.2, depth_m: 2.4,
+    fillFraction: 0.875, top: "closed", fluidWallMode: "no-slip" };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "tank-fill";
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;
 }
 
@@ -1075,6 +1108,29 @@ const suiteList = [
         diagnostics: [powerDiagnostics[0], powerDiagnostics[2]],
         acceptance: [...powerAcceptance,
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 20, 64] }] }),
+      "runtime-150": lane({ id: "runtime-150", target_s: 0.6, exactSteps: 150,
+        maxDt_s: 0.004, oracleSteps: 150, cpuOracle: false,
+        methods: methods(["octree"], { octree: largePowerDamOverrides }), timeout_ms: 240_000,
+        collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.1, spatialField: true,
+          stabilityEnvelope: true, structuredValidation: true, globalFineGeneration: true,
+          powerGenerationAudit: { everySteps: 1, log: false } },
+        diagnostics: exhaustivePowerDiagnostics(0.01),
+        acceptance: [...powerAcceptance,
+          { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 20, 64] },
+          { id: "large-power-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift", operator: "at-most", expected: 0.01 }] }),
+    }),
+  suite("large-power-hydrostatic", "20x-volume scene with a quarter-volume 1,024-cell sparse pool",
+    () => getScenePreset("large-power-hydrostatic").create(), {
+      default: lane({ target_s: 0.96, exactSteps: 240, maxDt_s: 0.004, oracleSteps: 240,
+        cpuOracle: false, methods: methods(["octree"], { octree: largePowerHydrostaticOverrides }),
+        timeout_ms: 240_000,
+        collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.12, spatialField: true,
+          stabilityEnvelope: true, structuredValidation: true, globalFineGeneration: true,
+          powerGenerationAudit: { everySteps: 1, log: false } },
+        diagnostics: exhaustivePowerDiagnostics(1e-4),
+        acceptance: [...powerAcceptance,
+          { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 20, 64] },
+          { id: "large-hydrostatic-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift", operator: "at-most", expected: 1e-4 }] }),
     }),
   ...(["ceiling-slab-drop", "corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const).map((id) => suite(id,
     id === "ceiling-slab-drop" ? "Seeded brick flush under the lid free-fall oracle"
@@ -1125,6 +1181,14 @@ const suiteList = [
           diagnostics: [powerDiagnostics[2]], timeout_ms: 240_000 }),
       } : {}),
     })),
+  suite("power-hybrid-deep-ocean", "Deep-interior Bet-4 shipping work gate", powerHybridDeepOceanScene, {
+    default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
+      methods: methods(["octree"], { octree: {
+        maximumLeafSize: "32", interfaceRefinementBandCells: 1, globalFineLevelSetFactor: "1",
+      } }),
+      collect: { fieldStats: "none" },
+      timeout_ms: 240_000 }),
+  }),
   suite("ocean-seiche", "Long gravity wave crossing a wide deep tank", oceanScene, {
     default: lane({ target_s: 6, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: { maximumLeafSize: "32" } }),

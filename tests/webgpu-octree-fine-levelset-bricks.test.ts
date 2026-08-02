@@ -544,10 +544,10 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     "topology requests compute work from the caller's shared broker");
   assert.doesNotMatch(encode, /createBindGroup/,
     "recurring topology encoding must reuse immutable resource-tuple bindings");
-  assert.doesNotMatch(encode, /updateIndirectBuffer\(this\.pageDelta|copyBufferToBuffer/,
-    "page-delta dispatches are authored directly without copy-induced pass breaks");
+  assert.doesNotMatch(encode, /updateIndirectBuffer|copyBufferToBuffer/,
+    "every topology dispatch family is authored directly without copy staging");
   assert.match(encode,
-    /broker\.fence\("finechanged-keydispatchpublication"\)[\s\S]*runIndirect\(this\.classifyAffectedPagesPipeline[\s\S]*?,3,\[0,3,4,7,14,15,16,21,23\]\)/,
+    /broker\.fence\("finechanged-keydispatchpublication"\)[\s\S]*runIndirect\(this\.classifyAffectedPagesPipeline[\s\S]*this\.affectedDispatch,36,\[0,3,4,7,14,15,16,21,23\]\)/,
     "one storage-to-indirect boundary publishes the exact dirty/support classifier");
   assert.doesNotMatch(encode,
     /clearAffectedCandidatesPipeline|markRetiredRollbackPipeline|dilateDirty|dilateSupport|scanAffectedRecordsPipeline/,
@@ -568,7 +568,7 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
   assert.doesNotMatch(finalize, /beginComputePass|GPUCommandEncoder/,
     "publication finalization cannot retain standalone pass ownership");
   assert.match(finalize,
-    /constpass=broker\.compute[\s\S]*broker\.fence\("finedeferredsettlementdispatchpublication"\)[\s\S]*dispatchWorkgroupsIndirect\(this\.indirectDispatch,0\)[\s\S]*broker\.fence\("globalfinetopologypublicationcomplete"\)/,
+    /constpass=broker\.compute[\s\S]*broker\.fence\("finedeferredsettlementdispatchpublication"\)[\s\S]*dispatchWorkgroupsIndirect\(this\.settlementDispatch,0\)[\s\S]*broker\.fence\("globalfinetopologypublicationcomplete"\)/,
     "publication validation authors one exact settlement dispatch before the semantic publication fence");
   const transportWGSL = structuredFineLevelSetTransportWGSL.replace(/\s+/g, "");
   assert.match(transportWGSL,
@@ -919,7 +919,7 @@ test("fine redistance construction requires the topology-authored delta ABI", ()
     },
   };
   assert.throws(() => new WebGPUFineLevelSetRedistance(
-    {} as GPUDevice, source, malformed,
+    {} as GPUDevice, source, malformed as never,
   ), /exact topology page-delta ABI/);
 });
 

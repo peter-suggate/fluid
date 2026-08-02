@@ -25,7 +25,7 @@ import { containerDecorationSpace } from "./visualization-decorations";
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds } from "./webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, canConsumeSparseVoxelPbrMaterials, canEncodeSparseVoxelDryScene, resolveSparseVoxelThickGlassBinderStatus, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds } from "./webgpu-svo-dry-scene";
 import {
   buildSvoScenePrimitives,
   packSvoScenePrimitiveAnimation,
@@ -615,6 +615,15 @@ export class FluidLabRenderer {
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
   private svoCameraStabilityKey = "";
+  /**
+   * Owner range of the object under the editor cursor, for the hover rim.
+   *
+   * A side channel rather than a `draw` argument for the same reason the
+   * selected body is one: hover changes on every pointer move, at a rate that
+   * has nothing to do with the frame loop, and it is not part of what the frame
+   * is *of*. See dryHoverRim in lib/webgpu-svo-dry-scene.ts.
+   */
+  private hoverHighlight?: { readonly first: number; readonly last: number };
   private svoRenderDiagnosticsKey = "";
   private gpuPendingBatches = 0;
   private presentationsInFlight = 0;
@@ -634,7 +643,7 @@ export class FluidLabRenderer {
   private pendingInitialRasterPresentation?: PendingInitialRasterPresentation;
   /** Static worlds become ready only after their first dry-SVO frame completes. */
   private pendingStaticSvoPresentation?: PendingStaticSvoPresentation;
-  private svoPipelineProgress?: { label: string; completed: number };
+  private svoPipelineProgress?: { label: string; completed: number; total: number };
   private svoPipelineStartedAt_ms?: number;
   /** Debug compaction owns capacity-sized instance buffers only in inspection modes. */
   private voxelDebugSourceGeneration = -1;
@@ -747,12 +756,12 @@ export class FluidLabRenderer {
     return undefined;
   }
 
-  private reportSvoPipelineProgress(label: string, completed: number) {
+  private reportSvoPipelineProgress(label: string, completed: number, total: number) {
     this.svoPipelineStartedAt_ms ??= performance.now();
-    this.svoPipelineProgress = { label, completed };
+    this.svoPipelineProgress = { label, completed, total };
     const pending = this.pendingStaticSvoPresentation;
     this.onStatus({
-      state: "initializing", label, phase: "presentation", completed, total: 4,
+      state: "initializing", label, phase: "presentation", completed, total,
       startedAt_ms: pending?.startedAt_ms ?? this.svoPipelineStartedAt_ms, kind: "startup", retainingPrevious: false,
       resource: svoPresentationResourcePlugin,
     });
@@ -763,8 +772,8 @@ export class FluidLabRenderer {
     if (!pending || pending.attached || !this.svoDryScenePipeline || !this.svoSourceAvailable) return;
     pending.attached = true;
     this.onStatus({
-      state: "initializing", label: "Sparse garden renderer attached", phase: "presentation",
-      completed: 3, total: 4, startedAt_ms: pending.startedAt_ms, kind: "startup", retainingPrevious: false,
+      state: "initializing", label: SVO_PRESENTATION_STARTUP_STAGES[8], phase: "presentation",
+      completed: 8, total: SVO_PRESENTATION_STARTUP_STAGES.length, startedAt_ms: pending.startedAt_ms, kind: "startup", retainingPrevious: false,
       resource: svoPresentationResourcePlugin,
     });
   }
@@ -861,7 +870,7 @@ export class FluidLabRenderer {
         return new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float",
           traversal, "off", "split", 0, coherence, true, true, true);
       },
-      (pipeline) => pipeline.initialize((label, completed) => this.reportSvoPipelineProgress(label, completed)),
+      (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
         this.svoDryScenePipeline = pipeline;
         this.svoPipelineAvailable = true;
@@ -1216,7 +1225,7 @@ export class FluidLabRenderer {
     if (this.disposed || this.device !== device || this.deviceLost) return;
     this.upscalePipeline=upscalePipeline;
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
-    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 416, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.columnBaseTexture = device.createTexture({ label: "Uniform-grid tall-cell fallback", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -1570,7 +1579,7 @@ export class FluidLabRenderer {
       if(staticRenderScene){
         if(this.failedOptionalPipelines.has("svo-dry-scene"))this.failPendingStaticSvoPresentation();
         else if(this.svoDryScenePipeline)this.reportStaticSvoAttachment();
-        else{const pipelineProgress=this.svoPipelineProgress??{label:"Compiling sparse dry-scene pipeline",completed:0};this.onStatus({state:"initializing",...pipelineProgress,phase:"presentation",total:4,startedAt_ms,kind:"startup",retainingPrevious:false,resource:svoPresentationResourcePlugin});}
+        else{const pipelineProgress=this.svoPipelineProgress??{label:SVO_PRESENTATION_STARTUP_STAGES[0],completed:0,total:SVO_PRESENTATION_STARTUP_STAGES.length};this.onStatus({state:"initializing",...pipelineProgress,phase:"presentation",startedAt_ms,kind:"startup",retainingPrevious:false,resource:svoPresentationResourcePlugin});}
       }
       this.pausedPresentationRevision+=1;
       if(previous&&previous!==solver&&!previousDestroyedForReset)this.retireGPUFluid(previous);
@@ -1600,7 +1609,7 @@ export class FluidLabRenderer {
   }
   private simulationScene?: SceneDescription;
 
-  private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, time_s: number) {
+  private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig) {
     if (!this.device || this.disposed || this.deviceLost) return undefined;
     if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
     const key=this.solverKey(scene,config);
@@ -1614,8 +1623,9 @@ export class FluidLabRenderer {
       return undefined;
     }
     // A timeline reset is represented by simulationEpoch in the key above.
-    // Never turn a timestamp anomaly into an unplanned second solver build.
-    if (time_s < (this.gpuFluid.info.submittedTime_s ?? 0)) return undefined;
+    // Presentation time can briefly trail submitted GPU time while a worker
+    // control acknowledgement crosses realms. That is not source invalidity:
+    // retain the attached solver and let advanceTo() reject backward work.
     // Scene scalars are absent from the rebuild key, so they are adopted here
     // instead. A method without applySceneUniforms would otherwise ignore the
     // edit outright, so it falls back to the rebuild it used to take.
@@ -1788,6 +1798,12 @@ export class FluidLabRenderer {
   /** Frames whose presentation submission has actually finished on the GPU. */
   get completedPresentationCount(): number { return this.completedPresentations; }
 
+  /** The described object the cursor is over, or undefined to clear the rim. */
+  setHoverHighlight(range: { readonly first: number; readonly last: number } | undefined): void {
+    if (range?.first === this.hoverHighlight?.first && range?.last === this.hoverHighlight?.last) return;
+    this.hoverHighlight = range && range.last >= range.first ? range : undefined;
+  }
+
   draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, fluid: EulerianRenderState | undefined, backend: SimulationBackend, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, voxelRenderMode: VoxelRenderMode = "smooth", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig, fluidCellTrace?: FluidCellTraceConfig): RendererFrameMetrics {
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
     const cpuTrace = measurementInstrumentationEnabled
@@ -1836,7 +1852,7 @@ export class FluidLabRenderer {
       },
     };
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
-      ? this.currentGPUFluid(this.simulationScene ?? scene, svoSceneConfig, time_s)
+      ? this.currentGPUFluid(this.simulationScene ?? scene, svoSceneConfig)
       : undefined;
     const pixelTraceRequested = Boolean(pixelTrace) && voxelRenderMode === "smooth";
     // Ahead of the sweep, so a toggled traversal retires the old pipeline and is
@@ -1961,6 +1977,9 @@ export class FluidLabRenderer {
     this.svoCameraStabilityKey = cameraStabilityKey;
     const presentationCoherenceKey = [
       this.gpuFluidGeneration, scene.sceneId, scene.randomSeed, environmentId, diagnosticsKey, selectedBodyId ?? "",
+      // The rim is part of what a presented frame looks like, so moving the
+      // cursor onto an object has to invalidate a reused one.
+      this.hoverHighlight ? `${this.hoverHighlight.first}:${this.hoverHighlight.last}` : "",
       cameraStabilityKey,
       ...bodies.flatMap((body) => [
         body.description.id, body.description.shape,
@@ -1997,8 +2016,12 @@ export class FluidLabRenderer {
     ]);
     // Terrain heightfield mirror for the environment shaders: meta lane plus
     // two vec4 lanes per feature, matching lib/terrain.ts semantics exactly.
-    const packed = new Float32Array(100);
+    const packed = new Float32Array(104);
     packed.set(uniform, 0);
+    // Lanes 100..103 are the hover rim: the owner range under the cursor, its
+    // strength, and the falloff exponent. Appended past the terrain mirror so
+    // every other shader's view of this buffer is byte-identical.
+    if (this.hoverHighlight) packed.set([this.hoverHighlight.first, this.hoverHighlight.last, .45, 2.6], 100);
     if (sceneHasTerrain(scene) && scene.terrain) {
       const terrain = scene.terrain;
       const features = terrain.features.slice(0, MAX_TERRAIN_FEATURES);
@@ -2150,8 +2173,8 @@ export class FluidLabRenderer {
     if (initialStaticSvoSubmission) {
       initialStaticSvoSubmission.submitted = true;
       this.onStatus({
-        state: "initializing", label: "Submitting first sparse garden frame", phase: "presentation",
-        completed: 3, total: 4, startedAt_ms: initialStaticSvoSubmission.startedAt_ms, kind: "startup", retainingPrevious: false,
+        state: "initializing", label: SVO_PRESENTATION_STARTUP_STAGES[9], phase: "presentation",
+        completed: 9, total: SVO_PRESENTATION_STARTUP_STAGES.length, startedAt_ms: initialStaticSvoSubmission.startedAt_ms, kind: "startup", retainingPrevious: false,
         resource: svoPresentationResourcePlugin,
       });
     }

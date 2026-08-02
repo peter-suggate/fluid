@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   PassBroker,
+  formatPassBrokerBoundaryAudit,
   formatPassBrokerLabelAudit,
   passBrokerLabelIsolationPrefixes,
   passBrokerLabelIsolationRequested,
@@ -221,6 +222,31 @@ test("PassBroker copy, clear, and indirect update close compute first", () => {
     "begin:2", "end:2", "copy",
     "begin:3", "end:3", "copy",
   ]);
+  assert.deepEqual(broker.boundaryAudit.get("clear buffer"), {
+    requests: 1, passClosures: 1, copyCommands: 0, clearCommands: 1, commandBytes: 0,
+  });
+  assert.deepEqual(broker.boundaryAudit.get("copy buffer"), {
+    requests: 1, passClosures: 1, copyCommands: 1, clearCommands: 0, commandBytes: 4,
+  });
+  assert.deepEqual(broker.boundaryAudit.get("stage indirect args"), {
+    requests: 1, passClosures: 1, copyCommands: 1, clearCommands: 0, commandBytes: 12,
+  });
+  assert.deepEqual(formatPassBrokerBoundaryAudit(broker.boundaryAudit), [
+    "3 compute-pass boundaries by cause:",
+    "  stage indirect args: 1 closures / 1 requests, 1 copies, 0 clears, 12 bytes",
+    "  copy buffer: 1 closures / 1 requests, 1 copies, 0 clears, 4 bytes",
+    "  clear buffer: 1 closures / 1 requests, 0 copies, 1 clears, 0 bytes",
+  ]);
+});
+
+test("boundary audit distinguishes idempotent requests from serial-spine closures", () => {
+  const events: string[] = [];
+  const broker = new PassBroker(fakeEncoder(events));
+  broker.fence("publication");
+  broker.compute(); broker.fence("publication"); broker.fence("publication");
+  assert.deepEqual(broker.boundaryAudit.get("publication"), {
+    requests: 3, passClosures: 1, copyCommands: 0, clearCommands: 0, commandBytes: 0,
+  });
 });
 
 test("raw command encoder access is an explicit pass boundary", () => {
@@ -309,4 +335,3 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
   assert.doesNotMatch(advanceSource, /commandEncoderFacade|new PassBroker\(commandEncoder\)/,
     "the production advance must not route raw helpers through a compatibility proxy");
 });
-

@@ -5,6 +5,8 @@ import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./methods";
 import { sceneDamBreakFractions } from "./initial-fluid";
+import { sceneWithEnvironment } from "./scenery-presets";
+import { withSceneryNodes } from "./scenery-edit";
 
 export interface ScenePreset {
   id: string;
@@ -60,7 +62,24 @@ export const LARGE_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 1,
+    // The authored 1,472-cell reservoir publishes 1,185 rows at t=0. An
+    // 8,192-row footprint pool leaves >6.9x growth headroom while the existing
+    // overflow receipt rejects an over-budget generation.
+    pressureRowCapacity: 8_192,
     globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
+  }),
+});
+
+/** Footprint-budgeted allocation for the quarter-volume large still-water
+ * lane. Cold publication uses 1,028 pressure rows and recurring fine residency
+ * is 6,405 bricks; these reserves retain explicit growth headroom while the
+ * existing GPU overflow sentinels reject any generation that exceeds it. */
+export const LARGE_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...POWER_VALIDATION_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+    maximumLeafSize: "32",
+    interfaceRefinementBandCells: 1,
   }),
 });
 
@@ -265,6 +284,36 @@ export function createLargePowerDamBreakScene(): SceneDescription {
     fillFraction: scene.container.fillFraction / 20,
   };
   scene.fluid.initialDamBreakDimensions_m = initialDamBreakDimensions_m;
+  return scene;
+}
+
+/**
+ * The still-water partner of the room-sized dam-break scene. The tank and
+ * lattice are identical to `large-power-dam-break`, while the initial liquid
+ * is a full-footprint hydrostatic slab with exactly the same represented
+ * order of volume as the mini/large dam reservoir. The mathematically exact
+ * equal-volume slab is thinner than half a finest cell and therefore has no
+ * liquid cell centre for the sparse bootstrap to seed. Use the smallest
+ * representable slab instead. It is one 0.05 m cell deep with a 32x32-cell
+ * footprint: 1,024 of 81,920 cells. This is one quarter of the earlier
+ * full-footprint one-cell slab and keeps the benchmark genuinely sparse.
+ */
+export function createLargePowerHydrostaticScene(): SceneDescription {
+  const mini = createMinimalPowerDamBreakScene();
+  const scene = createLargePowerDamBreakScene();
+  scene.sceneId = "large-power-hydrostatic";
+  scene.duration_s = 1;
+  scene.container = {
+    ...scene.container,
+    fillFraction: 1 / 80,
+  };
+  // Tank-fill always spans the whole 64x64 floor. A one-cell-deep 32x32
+  // footprint quarters volume without dropping below the first cell centre.
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialDamBreakDimensions_m = { x: 1.6, y: 0.05, z: 1.6 };
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
   return scene;
 }
 
@@ -537,7 +586,23 @@ export function createGardenSvoLightingScene(): SceneDescription {
   // Remove the floating cork. Static stepping stones provide crisp contact
   // and penumbra references without relying on rigid/fluid coupling.
   scene.rigidBodies = scene.rigidBodies.filter(({ id }) => id !== "garden-cork-ball");
-  return scene;
+  // The study needs an actual fixture: the garden has trees, mushrooms and
+  // pebbles but no lamp. It is added to *this scene's* scenery rather than to
+  // the garden every scene shares, which is what a document-owned description
+  // buys — the shared set used to carry the lamppost behind a check on this
+  // scene's own id. Just inside the right bank, so the inverse-square pool
+  // reaches the pond while the pole and cap read as a silhouette.
+  return withSceneryNodes(sceneWithEnvironment(scene, "garden"), [{
+    kind: "group", id: "lamppost", place: { position: { x: .32, y: 0, z: .24 }, anchor: "floor" },
+    children: [
+      { kind: "cylinder", id: "lamppost/base", group: "lamp-fixture", tags: ["lamppost", "fixture"], place: { position: { x: 0, y: .02, z: 0 } }, radius: .05, halfHeight: .02, material: { palette: "stone", value: .708 } },
+      { kind: "cylinder", id: "lamppost/pole", group: "lamp-fixture", tags: ["lamppost", "fixture"], place: { position: { x: 0, y: .17, z: 0 } }, radius: .014, halfHeight: .13, material: { palette: "stone", value: .6 } },
+      // The only saturated surface anywhere in the garden, and it is the light
+      // itself rather than a painted one.
+      { kind: "ellipsoid", id: "lamppost/lantern", group: "emissive-fixture", tags: ["lamppost", "lantern", "fixture", "light", "point-light"], place: { position: { x: 0, y: .35, z: 0 } }, radius: { x: .05, y: .06, z: .05 }, material: { colorLinear: [1, .48, .19], emission: 11 } },
+      { kind: "cylinder", id: "lamppost/cap", group: "lamp-fixture", tags: ["lamppost", "fixture"], place: { position: { x: 0, y: .43, z: 0 } }, radius: .06, halfHeight: .012, material: { palette: "stone", value: .828 } },
+    ],
+  }]);
 }
 
 const authoredScenePresets: ReadonlyArray<ScenePreset> = [
@@ -728,6 +793,16 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
     camera: { distance_m: 6.4, target_m: { x: 0, y: 0.45, z: 0 } }
   },
   {
+    id: "large-power-hydrostatic",
+    name: "Octree · 20× hydrostatic",
+    group: "Comparisons",
+    description: "The 20× dam tank with a representable one-cell-deep 32×32 sparse pool (1,024 finest-cell volumes), completing the large-scene/minimal-liquid benchmark cell.",
+    background: "default",
+    methodProfile: LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
+    create: createLargePowerHydrostaticScene,
+    camera: { distance_m: 6.4, target_m: { x: 0, y: 0.2, z: 0 } }
+  },
+  {
     id: "ceiling-slab-drop",
     name: "Octree · ceiling drop oracle",
     group: "Comparisons",
@@ -800,14 +875,22 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
   }
 ];
 
-/** Attach the art-directed environment to the scene consumed by GPU solvers. */
+/**
+ * Attach the art-directed environment to the scene consumed by GPU solvers.
+ *
+ * The environment's scenery is copied into the document here and is never
+ * consulted again: from this point the scene owns what it looks like, and
+ * editing scenery is an ordinary edit to `scene.scenery`.
+ */
 export const scenePresets: ReadonlyArray<ScenePreset> = authoredScenePresets.map((preset) => ({
   ...preset,
   create: () => {
     const scene = preset.create();
-    scene.environment = preset.background;
-    return scene;
-  }
+    // A preset that already staged its own scenery keeps it. Re-seeding here
+    // would throw away exactly the edits that make a study scene a study.
+    return scene.scenery ? { ...scene, environment: preset.background }
+      : sceneWithEnvironment(scene, preset.background);
+  },
 }));
 
 export const defaultScenePresetId = scenePresets[0].id;

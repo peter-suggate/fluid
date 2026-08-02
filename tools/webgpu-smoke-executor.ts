@@ -19,6 +19,8 @@ import { unpackOctreePowerCoarseLevelSetControl }
   from "../lib/webgpu-octree-power-coarse-levelset";
 import { auditSection5FineRestriction }
   from "../lib/power-liquids-restriction-audit";
+import { octreePowerHybridWorkVerdict }
+  from "../lib/octree-power-hybrid";
 import { readFineLevelSetWorksetHeader } from "../lib/octree-fine-levelset-bricks";
 import { decodeStructuredProjectionEnergy }
   from "../lib/webgpu-octree-structured-dynamics";
@@ -120,6 +122,27 @@ Object.assign(globalThis, globals);
 // must still select its worker_threads transport here: Dawn's worker wrapper
 // does not preserve typed-array inputs used by the topology packer.
 Reflect.deleteProperty(globalThis, "Worker");
+
+function exactFieldFingerprint(field: ArrayLike<number>): Readonly<{
+  length: number; hashA: string; hashB: string;
+}> {
+  const scratch = new ArrayBuffer(4), scratchFloat = new Float32Array(scratch);
+  const scratchWord = new Uint32Array(scratch);
+  const floatWords = field instanceof Float32Array
+    ? new Uint32Array(field.buffer, field.byteOffset, field.length) : undefined;
+  const integerWords = field instanceof Uint32Array ? field : undefined;
+  let a = 0x811c9dc5, b = 0x9e3779b9;
+  for (let index = 0; index < field.length; index += 1) {
+    let word: number;
+    if (floatWords) word = floatWords[index]!;
+    else if (integerWords) word = integerWords[index]!;
+    else { scratchFloat[0] = Number(field[index]); word = scratchWord[0]!; }
+    a = Math.imul(a ^ word, 0x01000193) >>> 0;
+    b = (Math.imul(b ^ (word + index), 0x85ebca6b) + 0xc2b2ae35) >>> 0;
+  }
+  return Object.freeze({ length: field.length,
+    hashA: a.toString(16).padStart(8, "0"), hashB: b.toString(16).padStart(8, "0") });
+}
 // Dawn quantizes timestamp-query results to 65536 ns unless told not to, so
 // every pass reads as an integer number of 65.536 us quanta and anything
 // cheaper than that reads as exactly zero. That is a browser fingerprinting
@@ -777,6 +800,12 @@ function reportResult(scenario: SmokeScenario, result: GPUSmokeResult) {
     structuredPostProjectionKineticEnergyProxy: info.structuredPostProjectionKineticEnergyProxy,
     structuredProjectionEnergyRatio: info.structuredProjectionEnergyRatio,
     structuredProjectionEnergySampleCount: info.structuredProjectionEnergySampleCount,
+    structuredAirSupportRows: info.structuredAirSupportRows,
+    structuredAirSupportCells: info.structuredAirSupportCells,
+    structuredAirSupportCapacity: info.structuredAirSupportCapacity,
+    structuredAirSupportFaceItems: info.structuredAirSupportFaceItems,
+    structuredAirSupportSeedFaces: info.structuredAirSupportSeedFaces,
+    structuredAirSupportMarchDepth: info.structuredAirSupportMarchDepth,
     globalFineLevelSetAllocatedBytes: info.globalFineLevelSetAllocatedBytes,
     globalFineLevelSetResidentBrickCapacity: info.globalFineLevelSetResidentBrickCapacity,
     globalFineLevelSetLogicalBrickCount: info.globalFineLevelSetLogicalBrickCount,
@@ -1431,8 +1460,11 @@ async function runGPU(
       globalFineSummaryDebug?: { coarseControl: GPUBuffer };
     };
     const topologyControl = authority.globalFineLevelSetSource?.topologyControl;
+    const topology: GPUBufferBinding | undefined = topologyControl
+      ? { buffer: topologyControl, offset: 0, size: topologyControl.size }
+      : undefined;
     return {
-      topology: topologyControl ? { buffer: topologyControl } : undefined,
+      topology,
       restriction: authority.globalFineRestrictionControl,
       mgpcg: authority.mgpcgControl,
       coarse: authority.globalFineSummaryDebug?.coarseControl,
@@ -2053,6 +2085,36 @@ async function runGPU(
         ? await readCompactOctreePressureState3D(device, solver,
           [solver.info.nx, solver.info.ny, solver.info.nz])
         : undefined;
+      if (process.env.FLUID_HEAD_DIFFERENTIAL === "1") {
+        const fields: Record<string, ArrayLike<number>> = { volume: cubic.field };
+        if (compactVelocityField) fields.velocity = compactVelocityField;
+        if (compactPressureState) {
+          fields.pressure = compactPressureState.pressure;
+          fields.rhs = compactPressureState.rhs;
+          fields.diagonal = compactPressureState.diagonal;
+          fields.topology = compactPressureState.topology;
+          if (compactPressureState.section63Diagonal) {
+            fields.section63Diagonal = compactPressureState.section63Diagonal;
+          }
+          if (compactPressureState.section63CaseId) {
+            fields.section63CaseId = compactPressureState.section63CaseId;
+          }
+          if (compactPressureState.section63CoefficientRows) {
+            fields.section63Coefficients = compactPressureState.section63CoefficientRows;
+            const coefficientRows = compactPressureState.section63CoefficientRows;
+            for (let channel = 0; channel < 19; channel += 1) {
+              fields[`section63Coefficient${channel}`] = Float32Array.from(
+                { length: coefficientRows.length / 19 },
+                (_unused, row) => coefficientRows[19 * row + channel]!);
+            }
+          }
+        }
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "head-differential-fingerprints", step: steps,
+          time_s: solver.info.submittedTime_s ?? 0,
+          fields: Object.fromEntries(Object.entries(fields)
+            .map(([name, field]) => [name, exactFieldFingerprint(field)])) }));
+      }
       const raster = rasterCheckpointRequested && method.id === "octree"
         ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
           verifyGlobalFineGenerationTransition)
@@ -2100,6 +2162,12 @@ async function runGPU(
         } : {}),
       });
       for (const capability of collected.available) collectedEvidence.add(capability);
+      if (process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+        && collected.values["fluid-symmetry"]) {
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "fluid-symmetry-checkpoint-stages",
+          observation: collected.values["fluid-symmetry"] }));
+      }
       checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary,
         raster, globalFineGeneration, preProjectionVelocity, postProjectionVelocity, compactMechanicalEnergy,
         ...(Object.keys(collected.values).length > 0 ? { evidence: collected.values } : {}) });
@@ -2585,6 +2653,14 @@ async function runGPU(
     const projection = (solver as unknown as {
       octreeProjection?: {
         readSolveDiagnostics(): Promise<void>;
+        readPowerFrontierFailure(): Promise<{
+          rowDelta: number[]; finePageDelta: number[]; structuredDispatch: number[];
+          descriptorCandidate: number[]; topologyCandidate: number[];
+          structuredCandidate: number[]; boundaryCandidate: number[];
+          spgridCandidate: number[]; coarseDelta: number[];
+          fineSummaryWorkState: number[]; descriptorStatuses: number[];
+          candidateSchedules: number[];
+        }>;
         readTopologyLeafCensus(): Promise<{
           generation: number;
           residentOwnerPages: number;
@@ -2596,6 +2672,22 @@ async function runGPU(
     }).octreeProjection;
     if (projection) {
       await projection.readSolveDiagnostics();
+      if (process.env.FLUID_WORKSET_CENSUS === "1") {
+        const snapshot = await projection.readPowerFrontierFailure();
+        console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
+          phase: "settled-maintenance-census", rowDelta: snapshot.rowDelta,
+          finePageDelta: snapshot.finePageDelta,
+          structuredDispatch: snapshot.structuredDispatch,
+          descriptorCandidate: snapshot.descriptorCandidate,
+          topologyCandidate: snapshot.topologyCandidate,
+          structuredCandidate: snapshot.structuredCandidate,
+          boundaryCandidate: snapshot.boundaryCandidate,
+          spgridCandidate: snapshot.spgridCandidate,
+          coarseDelta: snapshot.coarseDelta,
+          fineSummaryWorkState: snapshot.fineSummaryWorkState,
+          descriptorStatuses: snapshot.descriptorStatuses,
+          candidateSchedules: snapshot.candidateSchedules }));
+      }
       if (octreeTopologyCensusRequested) {
         const census = await projection.readTopologyLeafCensus();
         console.log(JSON.stringify({
@@ -2936,6 +3028,15 @@ async function runGPU(
       readSPGridHierarchyCensus(): Promise<{
         levels: readonly Readonly<Record<string, number>>[];
       } | undefined>;
+      readPowerHybridCensus(): Promise<{
+        regularRows: number; identityRows: number; powerRows: number;
+        liquidRows: number; liveRows: number;
+        fullDescriptorRows: number; hybridDescriptorRows: number;
+        fullCatalogRows: number; hybridCatalogRows: number;
+        fullPageSlotChains: number; hybridPageSlotChains: number;
+        epoch: number; machineryReduction: number;
+      } | null>;
+      readPowerHybridClassSymmetry(): Promise<Record<string, unknown> | undefined>;
     };
     workAccountingPlan?: Record<string, unknown>;
     globalFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
@@ -2946,8 +3047,26 @@ async function runGPU(
   const spgridHierarchy = (gpuPassTimestampRequested || spgridHierarchyCensusRequested)
     ? await diagnosticProjection.octreeProjection?.readSPGridHierarchyCensus()
     : undefined;
+  const powerHybridCensus = process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+    || process.env.FLUID_POWER_HYBRID_CENSUS === "1"
+    || process.env.FLUID_POWER_HYBRID_MIN_REDUCTION !== undefined
+    ? await diagnosticProjection.octreeProjection?.readPowerHybridCensus()
+    : undefined;
+  const powerHybridClassSymmetry = process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+    ? await diagnosticProjection.octreeProjection?.readPowerHybridClassSymmetry()
+    : undefined;
+  if (powerHybridCensus) console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+    phase: "power-hybrid-census", metrics: powerHybridCensus }));
+  const minimumPowerHybridReductionText = process.env.FLUID_POWER_HYBRID_MIN_REDUCTION;
+  if (minimumPowerHybridReductionText !== undefined) {
+    const minimumPowerHybridReduction = Number(minimumPowerHybridReductionText);
+    const verdict = octreePowerHybridWorkVerdict(powerHybridCensus, minimumPowerHybridReduction);
+    if (!verdict.accepted) throw new Error(`Power-hybrid work gate failed: ${verdict.reason}`);
+  }
+  if (powerHybridClassSymmetry) console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+    phase: "power-hybrid-class-symmetry", metrics: powerHybridClassSymmetry }));
   const finePlan = diagnosticProjection.globalFineLevelSetSource?.plan;
-  const algorithmDiagnostics = terminalAlgorithmState || spgridHierarchy ? {
+  const algorithmDiagnostics = terminalAlgorithmState || spgridHierarchy || powerHybridCensus ? {
     topologyControl: terminalAlgorithmState?.topologyControl,
     structuredVelocityControl: terminalAlgorithmState?.structuredVelocityControl,
     structuredBoundaryControl: terminalAlgorithmState?.structuredBoundaryControl,
@@ -2963,6 +3082,7 @@ async function runGPU(
     } : undefined,
     pressurePlan: diagnosticProjection.workAccountingPlan,
     spgridHierarchy,
+    powerHybridCensus,
   } : undefined;
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,

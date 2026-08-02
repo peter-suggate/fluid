@@ -553,3 +553,110 @@ plane (garden has none) because the camera sits inside the room shell. Those are
 drawn correctly — `SVO_BRICK_RASTER_CONTRACT.cullMode` keeps the far faces for
 exactly this case — but they are near-full-screen fragment work, and they are
 the first thing to look at if hose-tank needs to get faster still.
+
+## 13. Conservative coverage before payload shading
+
+The production raster-primary arm now separates cheap conservative coverage
+from expensive payload shading. The original direct brick fragment remains
+available under `FLUID_SVO_DRY_FRAME_DIRECT_BRICK=1`, and the no-fragment-depth
+and HSR probes still select that direct arm, so all three earlier experiments
+remain controls rather than being silently redefined.
+
+The new graph is:
+
+1. Rasterize the same tight occupied brick proxies. Each ordinary fragment
+   atomically appends its instance index to a 24-entry per-pixel arena and then
+   discards only its throwaway colour output. It does no payload DDA, material
+   work, normal packing, or fragment-depth write.
+2. Run one full-screen resolver fragment per pixel. It orders the conservative
+   candidates by exact ray/box entry and calls the production
+   `traceLeafPayload` until it reaches the nearest nonempty leaf. Tight proxies
+   are subsets of disjoint SVO leaf cells, so after that hit every later proxy
+   starts at or beyond the current proxy's exit. The resolver writes the four
+   production G-buffer planes and depth without discard.
+3. If more than 24 proxies cover a pixel, rerun the historical direct proxy
+   fragment on that pixel. Its count check and discard happen before DDA on all
+   normal pixels. The fixed capacity therefore changes cost and storage, never
+   which geometry is eligible to win.
+
+This moves discard ahead of the expensive work rather than attempting to make a
+discarding, depth-writing shader eligible for early HSR:
+
+| stage | expensive leaf trace | discard placement |
+| --- | --- | --- |
+| conservative proxy coverage | no | after one atomic append |
+| full-screen candidate resolve | yes, bounded by ordered candidates | none |
+| overflow direct fallback | only on pixels with >24 candidates | count rejection before trace; historical miss rejection after trace |
+| retained direct control | once per proxy fragment | historical miss rejection after trace |
+
+The arena costs 225 MB at 1500x1500 (9 MB counts plus 216 MB candidates) and
+400 MB at 2000x2000 (16 MB plus 384 MB). This is intentionally conservative;
+garden measured p90=9 and max=18 proxy crossings at 1500 square, while the
+overflow path makes those measurements an optimization fact rather than a
+correctness assumption.
+
+### Parity result
+
+Raw G-buffer comparison against the retained direct-brick control at 1500x1500:
+
+| plane or property | result over 2,250,000 pixels |
+| --- | --- |
+| hit / material / owner / media identity | **0 differing pixels** |
+| hardware depth | 560 differing pixels (0.0249%), maximum absolute delta 2.95e-7 |
+| packed normal word | 130 differing pixels (0.0058%) |
+| producer tag | 3,533 differing pixels at analytic-static / voxel boundaries |
+| final image 16x16 sample grid | 0 differing components |
+
+The design is geometrically exact: it uses conservative candidates, the
+production leaf tracer, exact analytic static-primitive intersection, and an
+exact direct overflow fallback. Hit and owner parity are bit-exact. Strict
+bitwise depth and normal parity is **not** achieved on the M1 Max: a tiny set of
+same-owner analytic-static/voxel boundary samples choose opposite producers
+after entry-point-specific floating-point rounding. Factoring the proxy trace
+through one shared WGSL function did not change those counts, confirming that
+the residual is the cross-pass boundary winner rather than approximate
+coverage. The deltas pass the earlier Phase A image tolerances, but they should
+not be described as bit-identical.
+
+### Garden timings at the recorded resolutions
+
+Quiet Apple M1 Max / Metal 3, five-second continuously submitted samples,
+eight frames per encoder, cones on at 0.5 scale with full-resolution relight and
+the voxel light cache disabled:
+
+| arm | 1500x1500 median | 2000x2000 median |
+| --- | ---: | ---: |
+| canonical-parametric | 47.75 ms | 75.97 ms |
+| retained direct brick control | 29.75 ms | 47.97 ms |
+| **conservative coverage + resolve** | **28.60 ms** | **46.81 ms** |
+| direct, no fragment depth | 29.23 ms | — |
+| HSR upper bound, incorrect image | 20.58 ms | — |
+
+Coverage/resolve improves the direct arm by 1.15 ms (3.85%) at 1500 square and
+1.16 ms (2.42%) at 2000 square. It is 1.67x and 1.62x faster than the current
+canonical-parametric arm. The 2000/1500 growth ratio is still 1.637, worse than
+direct brick's 1.613, so the large candidate arena and per-pixel ordering do not
+solve the resolution slope identified earlier. They do establish that moving
+discard before DDA is sound and modestly useful, while quantifying its storage
+and selection cost.
+
+Reproduction adds only the selected arm to the command in section 9:
+
+```sh
+# Production conservative coverage/resolve
+FLUID_SVO_DRY_FRAME_TRAVERSAL=raster-primary \
+  WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
+  node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
+
+# Historical direct control
+FLUID_SVO_DRY_FRAME_TRAVERSAL=raster-primary \
+  FLUID_SVO_DRY_FRAME_DIRECT_BRICK=1 \
+  WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
+  node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
+```
+
+Machine-readable timing and parity counts are in
+`artifacts/render-raster-primary/coverage-resolve-results.json`; the captured
+full benchmark records are `coverage-parity-1500.json`,
+`direct-parity-1500.json`, and `canonical-parity-1500.json` in the same ignored
+artifact directory.

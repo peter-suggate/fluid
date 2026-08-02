@@ -28,28 +28,18 @@ import { getMethod } from "@/lib/methods";
 import { canonicalScene, type CameraState } from "@/lib/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
 import { boundingRadius, createBodyDescription, type RigidBodyState } from "@/lib/rigid-body";
-import type { SceneDescription } from "@/lib/model";
+import type { RigidBodyDescription } from "@/lib/model";
 import { simulation } from "@/lib/simulation/controller";
 import { simulationRecording } from "@/lib/simulation/recording";
 import { projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
 import {
   closestPointOnAxis,
-  gizmoAxisDragPosition,
-  gizmoHandleAtPointer,
-  projectGizmo,
   GIZMO_AXIS_DIRECTIONS,
-  type GizmoAxis,
 } from "@/lib/editor-gizmo";
-import { CLICK_SLOP_PX, emptySpaceClickDeselects } from "@/lib/editor-tools";
+import { CLICK_SLOP_PX, emptySpaceClickDeselects, type EditorSelection } from "@/lib/editor-tools";
 import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
-import {
-  aimInflow,
-  createInflowAt,
-  inflowHandles,
-  moveInflow,
-  INFLOW_SELECTION_ID,
-  type InflowHandleKind,
-} from "@/lib/editor-inflow";
+import { buildEnvironmentProxyCatalog, sceneryOwnerRange } from "@/lib/voxel-environments";
+import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
 import {
   editorFluidLattice,
   eraseFluidBrick,
@@ -62,34 +52,26 @@ import {
   paintFluidBrick,
 } from "@/lib/editor-fluid";
 import {
-  dragFluidBodyBox,
-  fluidBodyBox,
-  fluidBodyBoxCorners,
-  fluidBodyBoxPatch,
-  fluidBodyEdgeSegment,
-  fluidBodyHandleById,
-  fluidBodyHandleLabel,
-  fluidBodyHandles,
-  shapeHandleAtPointer,
-  FLUID_BODY_BOX_EDGES,
-  FLUID_BODY_HANDLE_TOLERANCE_PX,
-  type FluidBodyBox,
-  type FluidBodyHandle,
-} from "@/lib/editor-fluid-body";
+  axisConstraintLabel,
+  axisDragDirection,
+  constrainedAxes,
+  type AxisConstraint,
+} from "@/lib/editor-axis-constraint";
 import {
-  boundsAxisConstraintLabel,
-  boundsDragAxes,
-  boundsDragAxisDirection,
-  constrainBoundsHandle,
-  type BoundsAxisConstraint,
-} from "@/lib/editor-bounds-axis";
-import {
-  dragTankExtents,
-  tankBox,
-  tankHandleIsGrabbable,
-  tankLatticeForExtents,
-  tankResizePatch,
-} from "@/lib/editor-tank";
+  entityCentre,
+  entityHandleAtPointer,
+  entityOutline,
+  frameDirectionToLocal,
+  frameRayToLocal,
+  handleIsInert,
+  handleWorldEnds,
+  handleWorldPosition,
+  BOX_EDGES,
+  type EditorEntity,
+  type EditorEntityContext,
+  type EditorHandle,
+} from "@/lib/editor-entity";
+import { editorEntityContext, entityAtRay, findEntity, surfacedEntities } from "@/lib/editor-entity-catalog";
 import {
   applyTerrainFeatureDrag,
   terrainFeatureAt,
@@ -100,7 +82,7 @@ import {
 } from "@/lib/editor-terrain";
 import { SelectionFlyout } from "./SelectionFlyout";
 import { useSceneStore } from "@/lib/stores/scene-store";
-import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore } from "@/lib/stores/scene-draft-store";
+import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "@/lib/stores/scene-draft-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useUIStore } from "@/lib/stores/ui-store";
@@ -161,6 +143,22 @@ const PIXEL_TRACE_REVEAL_MS = 1100;
 /** The HUD's readout cadence; the 3D overlay itself stays per-frame. */
 const PIXEL_TRACE_HUD_INTERVAL_MS = 110;
 
+/**
+ * Which open gestures the renderer is allowed to draw.
+ *
+ * A terrain proposal redraws the ground immediately; it cannot move the lattice,
+ * so presenting it against the committed solver is safe. A prop is safer still —
+ * it is render-only and outside the solver's keys entirely. Every other draft is
+ * overlay-only: reshaping the tank or the water does change the geometry the
+ * solver owns, and drawing the fluid at a size it was not allocated for would
+ * tear. Those wait for the release, and preview as the wireframe box instead.
+ *
+ * Declared as a list rather than a condition because the answer is a property of
+ * each subject, and the next entity has to state its own rather than being
+ * folded into somebody else's boolean.
+ */
+const PRESENTED_DRAFT_SUBJECTS: ReadonlySet<SceneDraftSubject> = new Set<SceneDraftSubject>(["terrain", "scenery"]);
+
 export function WebGPUViewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fpsRef = useRef<HTMLOutputElement>(null);
@@ -184,24 +182,25 @@ export function WebGPUViewport() {
   const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
   const activeTool = useUIStore((state) => state.activeTool);
-  const boundsAxisConstraint = useUIStore((state) => state.boundsAxisConstraint);
+  const axisConstraint = useUIStore((state) => state.axisConstraint);
   const selection = useUIStore((state) => state.selection);
   const bodies = useDiagnosticsStore((state) => state.bodies);
   const [hover, setHover] = useState<EditorHover | null>(null);
-  /** Handle under the pointer in shape mode, so it can announce what it does. */
-  const [shapeHover, setShapeHover] = useState<{
-    target: "fluid" | "tank";
+  /** Handle under the pointer, so it can announce what it does before the press. */
+  const [handleHover, setHandleHover] = useState<{
     handleId: string;
     label: string;
+    tone: string;
+    entityLabel: string;
     leftFraction: number;
     topFraction: number;
   } | null>(null);
   /**
-   * The handle a bounds drag is holding. `pointerRef` already carries it, but a
-   * ref cannot redraw the axis-lock readout, and the readout has to name the
-   * handle to explain a lock that leaves it nothing to move.
+   * The handle a drag is holding. `pointerRef` already carries it, but a ref
+   * cannot redraw the axis-lock readout, and the readout has to name the handle
+   * to explain a lock that leaves it nothing to move.
    */
-  const [shapeDrag, setShapeDrag] = useState<{ target: "fluid" | "tank"; handleId: string } | null>(null);
+  const [handleDrag, setHandleDrag] = useState<{ handleId: string } | null>(null);
 
   const pixelTraceEnabled = useUIStore((state) => state.pixelTraceEnabled);
   const pixelTracePinned = useUIStore((state) => state.pixelTracePinned);
@@ -577,96 +576,81 @@ export function WebGPUViewport() {
     // `x`/`y` track the last move; `downX`/`downY` stay at the press origin.
     // The distance between them is what separates a background click, which
     // deselects, from a camera drag, which keeps the selection.
-    | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan" }
+    // `selectOnClick` is what a press on empty space resolved to before it became
+    // an orbit. A press has to stay available as a camera drag, so the selection
+    // it would make is carried here and spent only if the pointer never moved.
+    | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan"; selectOnClick?: EditorSelection }
     // `released` records a pointerup that arrived while the GPU pick readback
     // was still in flight, so a fast click still resolves instead of being
     // dropped along with the gesture.
     | { id: number; x: number; y: number; downX: number; downY: number; action: "pick"; released?: boolean }
     | { id: number; action: "body"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
-    // Editor gizmo drags preview on runtime state only and commit on release.
-    | { id: number; action: "gizmo-axis"; bodyId: string; axis: GizmoAxis; axisOrigin: Vec3; grabOffset: Vec3; lastPosition: Vec3 }
-    | { id: number; action: "gizmo-free"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3 }
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
     | { id: number; action: "fill-level" }
+    // One arm for every editable thing. `entity` is the entity as it stood when
+    // the gesture opened, resolved against the committed scene: re-resolving it
+    // against its own output would let the handle walk away from the pointer.
     // `lastRay` is what lets an axis lock pressed mid-drag re-resolve the drag
     // where the pointer already is, rather than waiting for the next move.
-    | { id: number; action: "shape-handle"; target: "fluid" | "tank"; handleId: string; box: FluidBodyBox; lastRay?: { origin: Vec3; direction: Vec3 } }
-    | { id: number; action: "inflow-handle"; kind: InflowHandleKind; anchor: Vec3 }
+    // `pose` and `described` are what a simulated entity proposes: the live
+    // position the renderer is already showing, and the description that lands
+    // on release. Both are absent for everything authored, which commits its
+    // draft instead.
+    | { id: number; action: "entity-handle"; entity: EditorEntity; handle: EditorHandle; grabOffset: Vec3; lastRay?: { origin: Vec3; direction: Vec3 }; pose?: Vec3; described?: Partial<RigidBodyDescription> }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
-  const selectedBody = selection?.kind === "body"
-    ? bodies.find((body) => body.description.id === selection.id)
-    : undefined;
-  const gizmo = selectedBody && activeTool === "select"
-    ? projectGizmo(selectedBody.position_m, camera, viewportSize.width, viewportSize.height)
-    : undefined;
   const fluidToolArmed = activeTool === "fluid-paint" || activeTool === "fluid-erase";
-  // World-editor mode: the tank and the water body both carry box handles.
+
+  // The selection's handles.
   //
-  // A live drag is drawn from `shapePreview` rather than from the document. The
-  // document is written once, on release, because every scene write invalidates
-  // the solver's seed key — writing per pointer-move asked the renderer to
-  // re-seed dozens of times a second, which is exactly the hitch that made the
-  // gesture unusable. Preview here, simulate on release.
-  const shapeMode = activeTool === "bounds";
-  /** Both boxes, in the order the pick resolves ties: water first. */
-  const shapeHandleCandidates = (source: SceneDescription) => [
-    { target: "fluid" as const, box: fluidBodyBox(source) },
-    { target: "tank" as const, box: tankBox(source), grabbable: tankHandleIsGrabbable },
-  ];
-  // `scene` is already the proposed scene, so the handles need no separate
-  // preview path: they are simply the handles of the box the scene describes.
-  const shapeTargetBox = (target: "fluid" | "tank") =>
-    target === "tank" ? tankBox(scene) : fluidBodyBox(scene);
-  const projectHandles = (box: FluidBodyBox | undefined, keep: (handle: ReturnType<typeof fluidBodyHandles>[number]) => boolean) =>
-    box && fluidBodyHandles(box).filter(keep).map((handle) => {
-      // An edge is drawn as the edge itself, so it carries its two endpoints
-      // rather than only the midpoint a square would have sat on.
-      const segment = fluidBodyEdgeSegment(box, handle);
+  // `scene` is already the proposed scene, so a live drag needs no separate
+  // preview path: the handles are simply the handles of the entity the scene now
+  // describes. The document itself is written once, on release, because every
+  // scene write invalidates the solver's seed key — writing per pointer-move
+  // asked the renderer to re-seed dozens of times a second, which is exactly the
+  // hitch that made the gesture unusable. Preview here, simulate on release.
+  const entityContext: EditorEntityContext = { scene, bodies: bodies.map((body) => ({
+    id: body.description.id, position_m: body.position_m, orientation: body.orientation })) };
+  const entities = surfacedEntities(entityContext, activeTool, selection);
+  const heldEntity = entities[0];
+  const entityGizmos = entities.map((entity) => ({
+    entity,
+    handles: entity.handles.map((handle) => {
+      const projection = projectToViewport(
+        handleWorldPosition(entity, handle), camera, viewportSize.width, viewportSize.height);
+      // A segment or an arm is drawn as the line it is, not as a square at one
+      // end: that is what makes the handle look like the thing it moves, and it
+      // is far easier to hit.
+      const world = handleWorldEnds(entity, handle, projection.depth_m);
       return {
-        ...handle,
-        projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
-        ends: segment && [segment.from, segment.to]
+        handle,
+        projection,
+        ends: world && [world.from, world.to]
           .map((point) => projectToViewport(point, camera, viewportSize.width, viewportSize.height)),
       };
-    });
-  const fluidBodyGizmo = shapeMode ? projectHandles(shapeTargetBox("fluid"), () => true) : undefined;
-  const tankGizmo = shapeMode ? projectHandles(shapeTargetBox("tank"), tankHandleIsGrabbable) : undefined;
-  // Only the box actually being dragged is outlined: an outline on both would
-  // be two wireframes fighting for the same silhouette.
-  const shapeSubject = sceneDraft?.subject === "tank" ? "tank"
-    : sceneDraft?.subject === "fluid-body" ? "fluid" : undefined;
-  const shapeOutlineBox = shapeSubject ? shapeTargetBox(shapeSubject) : undefined;
-  const shapeSizeLabel = (subject: "fluid" | "tank", box: FluidBodyBox) => {
-    const size = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
-    const metres = size.map((value) => value.toFixed(2)).join(" × ");
-    if (subject !== "tank") return `${metres} m`;
-    return `${metres} m · ${tankLatticeForExtents(scene, { width_m: size[0]!, height_m: size[1]!, depth_m: size[2]! }).join("×")}`;
-  };
-  const shapeOutline = shapeOutlineBox
-    ? fluidBodyBoxCorners(shapeOutlineBox)
-      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
+    }),
+  }));
+  // The flyout rides the selection's own origin, which is the one point on it
+  // that means the same thing for every entity.
+  const entityAnchor = heldEntity && projectToViewport(
+    entityCentre(heldEntity), camera, viewportSize.width, viewportSize.height);
+  // The wireframe is drawn only while a gesture is open: at rest the handles
+  // already say what is selected, and a permanent box around everything would
+  // fight the object's own silhouette.
+  const entityOutlineCorners = sceneDraft && heldEntity
+    ? entityOutline(heldEntity)?.map((corner) =>
+      projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
     : undefined;
   // Which of the held handle's axes survive the lock. None means the lock names
   // an axis this handle does not own — a face pushed against a constraint
   // perpendicular to it — and the drag is inert. Saying so is the difference
   // between a constraint and a gesture that looks broken.
-  const shapeDragAxes = (() => {
-    if (!shapeDrag) return undefined;
-    const box = shapeTargetBox(shapeDrag.target);
-    const handle = box && fluidBodyHandleById(box, shapeDrag.handleId);
-    return handle && boundsDragAxes(handle, boundsAxisConstraint);
-  })();
+  const heldHandle = handleDrag && heldEntity?.handles.find((handle) => handle.id === handleDrag.handleId);
+  const heldAxes = heldHandle && constrainedAxes(heldHandle.axes, axisConstraint);
   const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
     ? projectToViewport(fillLevelHandlePosition(scene), camera, viewportSize.width, viewportSize.height)
-    : undefined;
-  const inflowGizmo = scene.fluid.inflow && selection?.kind === "inflow" && (activeTool === "select" || activeTool === "inflow")
-    ? inflowHandles(scene.fluid.inflow).map((handle) => ({
-      ...handle,
-      projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
-    }))
     : undefined;
   const selectedTerrainFeature = selection?.kind === "terrain-feature" && activeTool === "select"
     ? terrainFeatureIndex(selection.id, scene.terrain)
@@ -787,9 +771,17 @@ export function WebGPUViewport() {
       onEffectiveRendererStatus: (effectiveRendererStatus) => useDiagnosticsStore.getState().set({ effectiveRendererStatus }),
     });
     let safeSimulationEpoch: number | undefined;
+    let runStateSyncRevision = 0;
     const syncRunState = (runState: ReturnType<typeof useRuntimeStore.getState>["runState"]) => {
-      const submittedTime_s = renderer.setSimulationRunning(runState === "running");
-      if (runState === "paused") simulation.gpuSchedulingPaused(submittedTime_s);
+      const revision = ++runStateSyncRevision;
+      void renderer.setSimulationRunning(runState === "running").then((submittedTime_s) => {
+        if (revision !== runStateSyncRevision
+          || runState !== "paused"
+          || useRuntimeStore.getState().runState !== "paused") return;
+        simulation.gpuSchedulingPaused(submittedTime_s);
+      }).catch(() => {
+        // Worker failure is published through the renderer status callback.
+      });
     };
     syncRunState(useRuntimeStore.getState().runState);
     const unsubscribeRunState = useRuntimeStore.subscribe((state, previous) => {
@@ -892,13 +884,8 @@ export function WebGPUViewport() {
         frame = requestAnimationFrame(render);
         const sceneState = useSceneStore.getState();
         const scene = sceneState.scene;
-        // A terrain proposal redraws the ground immediately; it cannot move the
-        // lattice, so presenting it against the committed solver is safe. Every
-        // other draft is overlay-only — reshaping the tank or the water does
-        // change the geometry the solver owns, and drawing the fluid at a size
-        // it was not allocated for would tear. Those wait for the release.
         const draft = useSceneDraftStore.getState().draft;
-        const presentationScene = draft?.subject === "terrain"
+        const presentationScene = PRESENTED_DRAFT_SUBJECTS.has(draft?.subject as SceneDraftSubject)
           ? applySceneDraft(scene, draft)
           : scene;
         renderer.setSimulationScene(presentationScene === scene ? undefined : scene);
@@ -1024,6 +1011,25 @@ export function WebGPUViewport() {
 
   const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) =>
     viewportRayForPointer(useUIStore.getState().camera, event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
+
+  /**
+   * Light the hovered object's rim in the renderer.
+   *
+   * The renderer is told an owner *range* rather than a node id: it knows
+   * primitives, not the document, and a described object is a contiguous run of
+   * them. Resolving that here keeps the shader from having to learn what a
+   * scenery node is. See dryHoverRim in lib/webgpu-svo-dry-scene.ts.
+   */
+  const publishHoverHighlight = (hovered: EditorHover | null) => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    const scene = useSceneStore.getState().scene;
+    const range = hovered?.kind === "scenery" && hovered.sceneryNodeId
+      ? sceneryOwnerRange(
+        buildEnvironmentProxyCatalog(scene, scene.environment ?? "default"), hovered.sceneryNodeId)
+      : undefined;
+    renderer.setHoverHighlight(range && { first: range.first, last: range.last });
+  };
   const planeHit = (origin: Vec3, direction: Vec3, point: Vec3, normal: Vec3) => {
     const denominator = dot(direction, normal); if (Math.abs(denominator) < 1e-6) return point;
     return add(origin, scale(direction, dot(sub(point, origin), normal) / denominator));
@@ -1059,70 +1065,8 @@ export function WebGPUViewport() {
     simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation);
   };
 
-  /**
-   * Gizmo handles own the click before anything else so that dragging an axis
-   * next to the body cannot be misread as a throw. Returns true when the
-   * gesture was claimed.
-   */
-  const beginGizmoDrag = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
-    const ui = useUIStore.getState();
-    if (ui.activeTool !== "select" || ui.selection?.kind !== "body") return false;
-    const body = useDiagnosticsStore.getState().bodies.find((candidate) => candidate.description.id === ui.selection?.id);
-    if (!body) return false;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const projected = projectGizmo(body.position_m, ui.camera, rect.width, rect.height);
-    const handle = gizmoHandleAtPointer(projected, { x: event.clientX - rect.left, y: event.clientY - rect.top }, rect.width, rect.height);
-    if (!handle) return false;
-    if (handle === "free") {
-      const basis = cameraBasis(ui.camera);
-      const dragPoint = planeHit(ray.origin, ray.direction, body.position_m, basis.forward);
-      pointerRef.current = {
-        id: event.pointerId, action: "gizmo-free", bodyId: body.description.id,
-        planePoint: body.position_m, planeNormal: basis.forward,
-        grabOffset: sub(body.position_m, dragPoint), lastPosition: body.position_m,
-      };
-    } else {
-      const grabPoint = closestPointOnAxis(ray.origin, ray.direction, body.position_m, GIZMO_AXIS_DIRECTIONS[handle]);
-      if (!grabPoint) return false;
-      pointerRef.current = {
-        id: event.pointerId, action: "gizmo-axis", bodyId: body.description.id, axis: handle,
-        axisOrigin: body.position_m, grabOffset: sub(body.position_m, grabPoint), lastPosition: body.position_m,
-      };
-    }
-    simulation.beginEdit(`Moved ${body.description.name}`);
-    simulation.manipulateBody(body.description.id, body.position_m, "start", body.orientation);
-    return true;
-  };
-
   const TERRAIN_HANDLE_TOLERANCE_PX = 12;
   const FILL_HANDLE_TOLERANCE_PX = 12;
-  const INFLOW_HANDLE_TOLERANCE_PX = 12;
-
-  /** Grab the hose body or its aim arrow. */
-  const beginInflowHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const ui = useUIStore.getState();
-    const inflow = useSceneStore.getState().scene.fluid.inflow;
-    if (!inflow || ui.selection?.kind !== "inflow") return false;
-    if (ui.activeTool !== "select" && ui.activeTool !== "inflow") return false;
-    const rect = event.currentTarget.getBoundingClientRect();
-    let best: { kind: InflowHandleKind; anchor: Vec3; distance_px: number } | undefined;
-    for (const handle of inflowHandles(inflow)) {
-      const projection = projectToViewport(handle.position_m, ui.camera, rect.width, rect.height);
-      if (!(projection.depth_m > 1e-6)) continue;
-      const distance_px = Math.hypot(
-        event.clientX - rect.left - projection.leftFraction * rect.width,
-        event.clientY - rect.top - projection.topFraction * rect.height,
-      );
-      if (distance_px <= INFLOW_HANDLE_TOLERANCE_PX && (!best || distance_px < best.distance_px)) {
-        best = { kind: handle.kind, anchor: handle.position_m, distance_px };
-      }
-    }
-    if (!best) return false;
-    pointerRef.current = { id: event.pointerId, action: "inflow-handle", kind: best.kind, anchor: best.anchor };
-    simulation.beginDraft("inflow", best.kind === "center" ? "Moved the hose" : "Aimed the hose");
-    simulation.beginEdit(best.kind === "center" ? "Moved the hose" : "Aimed the hose");
-    return true;
-  };
 
   /** Place (or re-place) the single nozzle on the surface under the cursor. */
   const placeInflowAt = (ray: { origin: Vec3; direction: Vec3 }) => {
@@ -1156,76 +1100,111 @@ export function WebGPUViewport() {
   };
 
   /**
-   * Grab a box handle in shape mode.
+   * Grab a handle on the selection.
    *
-   * The water body is offered before the tank, and corners before edges before
-   * faces: the more constrained handle is the one that could not have been
-   * reached any other way, and the three meet within a few pixels of each
-   * other. The tank's floor is not grabbable, so it never competes.
+   * Corners come before edges before faces: the more constrained handle is the
+   * one that could not have been reached any other way, and the three meet
+   * within a few pixels of each other. Handles the entity does not offer — the
+   * tank's floor — are never built, so they never compete.
    */
-  const beginShapeDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
+  /**
+   * Where a handle follows the pointer. One degree of freedom — a face, or an
+   * edge or corner an axis lock has narrowed to one axis — rides that axis line;
+   * anything freer drags in the camera plane.
+   *
+   * The ray is resolved in the handle's own space, which is what lets a rotated
+   * entity resize along its own axes without any of the maths below knowing that
+   * entities can be rotated at all.
+   */
+  const entityHandlePoint = (
+    entity: EditorEntity,
+    handle: EditorHandle,
+    constraint: AxisConstraint,
+    worldRay: { origin: Vec3; direction: Vec3 },
+  ) => {
+    const local = handle.space === "entity";
+    const ray = local ? frameRayToLocal(entity.frame, worldRay) : worldRay;
+    const forward = cameraBasis(useUIStore.getState().camera).forward;
+    const axis = axisDragDirection(handle.axes, constraint);
+    return axis
+      ? closestPointOnAxis(ray.origin, ray.direction, handle.position_m, axis)
+      : planeHit(ray.origin, ray.direction, handle.position_m,
+        local ? frameDirectionToLocal(entity.frame, forward) : forward);
+  };
+
+  const beginEntityHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const ui = useUIStore.getState();
-    if (ui.activeTool !== "bounds") return false;
+    const context = editorEntityContext();
+    const surfaced = surfacedEntities(context, ui.activeTool, ui.selection);
+    if (surfaced.length === 0) return false;
     const rect = event.currentTarget.getBoundingClientRect();
-    const pick = shapeHandleAtPointer(
-      shapeHandleCandidates(displaySceneSnapshot()), ui.camera, rect.width, rect.height,
+    const pick = entityHandleAtPointer(surfaced, ui.camera, rect.width, rect.height,
       { x: event.clientX - rect.left, y: event.clientY - rect.top });
     if (!pick) return false;
+    // The gesture is resolved against the committed scene from here on, so the
+    // entity it holds must be the committed one too.
+    const committed = findEntity(
+      { ...context, scene: useSceneStore.getState().scene }, pick.entity.selection);
+    const entity = committed ?? pick.entity;
+    const handle = entity.handles.find((candidate) => candidate.id === pick.handle.id) ?? pick.handle;
+    // A move must not teleport the entity to the pointer, so the offset between
+    // the grab and the origin is kept for the length of the drag. A resize wants
+    // the opposite: the side goes where you point, and the lattice snap absorbs
+    // the few millimetres by which the grab missed the handle's centre.
+    const grabPoint = handle.space === "world"
+      ? entityHandlePoint(entity, handle, ui.axisConstraint, pointerRay(event))
+      : undefined;
     pointerRef.current = {
-      id: event.pointerId, action: "shape-handle",
-      target: pick.target, handleId: pick.handleId, box: pick.box,
+      id: event.pointerId, action: "entity-handle", entity, handle,
+      grabOffset: grabPoint ? sub(handle.position_m, grabPoint) : { x: 0, y: 0, z: 0 },
     };
-    setShapeHover(null);
-    setShapeDrag({ target: pick.target, handleId: pick.handleId });
-    simulation.beginDraft(pick.target === "tank" ? "tank" : "fluid-body",
-      pick.target === "tank" ? "Resized the tank" : "Reshaped the water body");
+    setHandleHover(null);
+    setHandleDrag({ handleId: handle.id });
+    const label = entity.editLabel(handle);
+    if (entity.simulatedBodyId) {
+      // The renderer is already drawing this from the solver, so the gesture
+      // opens a runtime manipulation and the document waits for the release.
+      simulation.beginEdit(label);
+      simulation.manipulateBody(entity.simulatedBodyId, entity.frame.origin_m, "start", entity.frame.orientation);
+    } else {
+      simulation.beginDraft(entity.draftSubject, label);
+    }
     return true;
   };
 
   /**
-   * Where a box handle follows the pointer. One degree of freedom — a face, or
-   * an edge or corner an axis lock has narrowed to one axis — rides that axis
-   * line; anything freer drags in the camera plane and keeps only the
-   * components of the sides it owns.
-   */
-  const shapeHandlePoint = (
-    handle: FluidBodyHandle,
-    constraint: BoundsAxisConstraint,
-    ray: { origin: Vec3; direction: Vec3 },
-  ) => {
-    const axis = boundsDragAxisDirection(handle, constraint);
-    return axis
-      ? closestPointOnAxis(ray.origin, ray.direction, handle.position_m, axis)
-      : planeHit(ray.origin, ray.direction, handle.position_m, cameraBasis(useUIStore.getState().camera).forward);
-  };
-
-  /**
-   * Resolve a bounds drag against the pointer ray and preview it.
+   * Resolve a handle drag against the pointer ray and preview it.
    *
-   * Against the committed scene, and from the box the gesture opened on:
+   * Against the committed scene, and from the entity the gesture opened on:
    * resolving the drag against its own output would let the handle walk away
    * from the pointer, and against the draft it would drift. The write goes to
    * the draft rather than the document — the solver is neither re-seeded nor
    * rebuilt until the pointer comes up.
    *
-   * The axis lock enters here and nowhere else: a constrained handle is simply
-   * the handle with its locked-out sides dropped, so the drag maths below never
-   * learns that constraints exist.
+   * Everything specific to what is being dragged is behind `handle.drag`, so
+   * this is the whole of the viewport's knowledge of editing. The one branch is
+   * not about *what* the entity is but about *where it is drawn from*: a
+   * simulated body is on screen because the solver owns it, so its proposal is
+   * previewed as a pose and its description is held for the release.
    */
-  const applyShapeDrag = (
-    active: { target: "fluid" | "tank"; handleId: string; box: FluidBodyBox },
+  const applyEntityDrag = (
+    active: { entity: EditorEntity; handle: EditorHandle; grabOffset: Vec3 },
     ray: { origin: Vec3; direction: Vec3 },
   ) => {
-    const handle = fluidBodyHandleById(active.box, active.handleId);
-    if (!handle) return;
-    const constraint = useUIStore.getState().boundsAxisConstraint;
-    const point = shapeHandlePoint(handle, constraint, ray);
+    const constraint = useUIStore.getState().axisConstraint;
+    const point = entityHandlePoint(active.entity, active.handle, constraint, ray);
     if (!point) return;
-    const constrained = constrainBoundsHandle(handle, constraint);
-    const committed = useSceneStore.getState().scene;
-    useSceneDraftStore.getState().updateDraft(active.target === "tank"
-      ? tankResizePatch(committed, dragTankExtents(committed, constrained, point))
-      : fluidBodyBoxPatch(committed, dragFluidBodyBox(active.box, constrained, point, committed)));
+    const patch = active.handle.drag(add(point, active.grabOffset), constraint);
+    if (!patch) return;
+    const bodyId = active.entity.simulatedBodyId;
+    if (!bodyId) { useSceneDraftStore.getState().updateDraft(patch); return; }
+    const described = patch.rigidBodies?.find((body) => body.id === bodyId);
+    if (!described) return;
+    const current = pointerRef.current;
+    if (current?.action === "entity-handle") {
+      pointerRef.current = { ...current, pose: described.position_m, described };
+    }
+    simulation.manipulateBody(bodyId, described.position_m, "move");
   };
 
   // An axis pressed mid-drag re-resolves the drag where the pointer already is,
@@ -1233,12 +1212,12 @@ export function WebGPUViewport() {
   // leave the preview showing the unconstrained box the user just rejected.
   useEffect(() => {
     // The lock is the whole trigger: everything else this reads comes from a
-    // store or a ref at call time, so re-running it on a fresh `applyShapeDrag`
+    // store or a ref at call time, so re-running it on a fresh `applyEntityDrag`
     // identity would only repeat what the next pointer-move does anyway.
     const active = pointerRef.current;
-    if (active?.action === "shape-handle" && active.lastRay) applyShapeDrag(active, active.lastRay);
+    if (active?.action === "entity-handle" && active.lastRay) applyEntityDrag(active, active.lastRay);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boundsAxisConstraint]);
+  }, [axisConstraint]);
 
   /** Terrain feature handles are grabbed in screen space, like the body gizmo. */
   const beginTerrainHandleDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1329,19 +1308,18 @@ export function WebGPUViewport() {
     // pointerRef is a ref, so clearing hover here is what actually re-renders
     // the chip away for the duration of the gesture.
     setHover(null);
+    publishHoverHighlight(null);
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
-      if (beginShapeDrag(event)) return;
+      if (beginEntityHandleDrag(event)) return;
       if (beginTerrainHandleDrag(event)) return;
-      if (beginInflowHandleDrag(event)) return;
-      if (beginGizmoDrag(event, ray)) return;
       if (useUIStore.getState().activeTool === "inflow") { placeInflowAt(ray); return; }
       // Armed tools claim the click before the slice/pick/orbit fallback so a
       // placement never orbits the camera instead.
       if (useUIStore.getState().activeTool === "body-place") { placeBodyAt(ray); return; }
       if (useUIStore.getState().activeTool === "prop-place") {
         const target = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray);
-        if (target) simulation.addProp(useUIStore.getState().propShape, target.position_m, target.normal);
+        if (target) simulation.addScenery(useUIStore.getState().propShape, target.position_m, target.normal);
         return;
       }
       if (beginFillLevelDrag(event)) return;
@@ -1352,16 +1330,30 @@ export function WebGPUViewport() {
         pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase, lastBrickKey: paintFluidAt(ray, erase) };
         return;
       }
-      // Clicking the ground selects the terrain feature under the cursor, so
-      // basins and mounds are addressable without a roster.
+      // What a click on the scene itself would select. Resolved now, acted on at
+      // the release: the press has to stay available as an orbit, and only the
+      // release knows whether the pointer travelled. This is the same rule the
+      // background click has always followed, with something to select rather
+      // than nothing.
+      let selectOnClick: EditorSelection | undefined;
       if (useUIStore.getState().activeTool === "select") {
-        const ground = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray);
-        if (ground?.kind === "terrain") {
-          const feature = terrainFeatureAt(useSceneStore.getState().scene.terrain, ground.position_m.x, ground.position_m.z);
+        const context = editorEntityContext();
+        const surface = hoverSceneAt(context.scene, useDiagnosticsStore.getState().bodies, ray);
+        // Clicking the ground selects the terrain feature under the cursor, so
+        // basins and mounds are addressable without a roster.
+        if (surface?.kind === "terrain") {
+          const feature = terrainFeatureAt(context.scene.terrain, surface.position_m.x, surface.position_m.z);
           if (feature !== undefined) {
             useUIStore.getState().select({ kind: "terrain-feature", id: terrainFeatureSelectionId(feature) });
             return;
           }
+        }
+        // Everything else clickable answers here. A rigid body in front of it is
+        // left to the GPU pick below, which is exact where this is a bounding
+        // sphere and which also opens the throw gesture.
+        const hit = entityAtRay(context, ray);
+        if (hit && !(surface?.kind === "body" && surface.distance_m <= hit.distance_m)) {
+          selectOnClick = hit.selection;
         }
       }
       const grab = sliceGrabHit(ray.origin, ray.direction);
@@ -1383,10 +1375,12 @@ export function WebGPUViewport() {
           if(active.released){pointerRef.current=null;useUIStore.getState().selectBody(body.description.id);return;}
           beginBodyDrag(pointerId,timeStamp,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;
         }
-        // Nothing under the cursor: a released pointer was a background click,
-        // a held one becomes the orbit fallback.
-        if(active.released){pointerRef.current=null;useUIStore.getState().select(undefined);return;}
-        pointerRef.current={...active,action:"orbit"};
+        // No body under the cursor: a released pointer was a click on whatever
+        // the analytic pick found there — an entity, or the background — and a
+        // held one becomes the orbit fallback that decides the same thing when
+        // it comes up.
+        if(active.released){pointerRef.current=null;useUIStore.getState().select(selectOnClick);return;}
+        pointerRef.current={...active,action:"orbit",selectOnClick};
         return;
       }
       let nearest: { body: RigidBodyState; t: number } | undefined;
@@ -1399,6 +1393,8 @@ export function WebGPUViewport() {
         beginBodyDrag(event.pointerId,event.timeStamp,ray,nearest.body,nearest.body.position_m,nearest.body.orientation);
         return;
       }
+      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: "orbit", selectOnClick };
+      return;
     }
     pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
   };
@@ -1412,55 +1408,47 @@ export function WebGPUViewport() {
       normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
     };
     if (!active) {
-      // In shape mode the handles are the interface, so the hover that matters
-      // is which one is under the pointer — not what is behind it.
-      if (useUIStore.getState().activeTool === "bounds") {
-        const pick = shapeHandleAtPointer(
-          shapeHandleCandidates(displaySceneSnapshot()), useUIStore.getState().camera,
-          rect.width, rect.height,
-          { x: event.clientX - rect.left, y: event.clientY - rect.top });
-        const projection = pick && projectToViewport(
-          pick.handle.position_m, useUIStore.getState().camera, rect.width, rect.height);
-        setShapeHover(pick && projection
-          ? {
-            target: pick.target, handleId: pick.handleId,
-            label: fluidBodyHandleLabel(pick.handle),
-            leftFraction: projection.leftFraction, topFraction: projection.topFraction,
-          }
-          : null);
+      // A handle under the pointer outranks whatever is behind it: while
+      // something is selected its handles are the interface, and a hover chip
+      // describing the wall behind a corner would be answering a question nobody
+      // asked.
+      const ui = useUIStore.getState();
+      const surfaced = surfacedEntities(editorEntityContext(), ui.activeTool, ui.selection);
+      const pick = surfaced.length > 0 ? entityHandleAtPointer(
+        surfaced, ui.camera, rect.width, rect.height,
+        { x: event.clientX - rect.left, y: event.clientY - rect.top }) : undefined;
+      if (pick) {
+        const projection = projectToViewport(
+          handleWorldPosition(pick.entity, pick.handle), ui.camera, rect.width, rect.height);
+        setHandleHover({
+          handleId: pick.handle.id,
+          label: pick.handle.label,
+          tone: pick.entity.tone,
+          entityLabel: pick.entity.label,
+          leftFraction: projection.leftFraction, topFraction: projection.topFraction,
+        });
         setHover(null);
+        publishHoverHighlight(null);
         return;
       }
+      setHandleHover(null);
       // Analytic hover: no GPU readback, so it is safe at pointer-move rate.
       const ray = pointerRay(event);
-      setHover(hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray) ?? null);
+      const hovered = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray) ?? null;
+      setHover(hovered);
+      publishHoverHighlight(hovered);
       return;
     }
     if (active.id !== event.pointerId) return;
     if (active.action === "pick") return;
-    if (active.action === "inflow-handle") {
-      const ray = pointerRay(event);
-      const committed = useSceneStore.getState().scene;
-      const inflow = committed.fluid.inflow;
-      if (!inflow) return;
-      // Both handles drag in the camera plane through their own anchor, so a
-      // hose can be aimed in any direction rather than only along an axis.
-      const point = planeHit(ray.origin, ray.direction, active.anchor, cameraBasis(useUIStore.getState().camera).forward);
-      useSceneDraftStore.getState().updateDraft({
-        fluid: { ...committed.fluid, inflow: active.kind === "center"
-          ? moveInflow(inflow, point, committed.container)
-          : aimInflow(inflow, point) },
-      });
-      return;
-    }
     if (active.action === "fluid-paint") {
       pointerRef.current = { ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) };
       return;
     }
-    if (active.action === "shape-handle") {
+    if (active.action === "entity-handle") {
       const ray = pointerRay(event);
       pointerRef.current = { ...active, lastRay: ray };
-      applyShapeDrag(active, ray);
+      applyEntityDrag(active, ray);
       return;
     }
     if (active.action === "fill-level") {
@@ -1488,18 +1476,6 @@ export function WebGPUViewport() {
       useSceneDraftStore.getState().updateDraft({
         terrain: applyTerrainFeatureDrag(terrain, active.index, active.kind, point, committed.container),
       });
-      return;
-    }
-    if (active.action === "gizmo-axis" || active.action === "gizmo-free") {
-      const ray = pointerRay(event);
-      const position = active.action === "gizmo-axis"
-        ? gizmoAxisDragPosition(ray.origin, ray.direction, active.axis, active.axisOrigin, active.grabOffset)
-        : add(planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal), active.grabOffset);
-      // A ray nearly parallel to the constrained axis has no stable solution;
-      // holding the last pose beats letting the body shoot to infinity.
-      if (!position) return;
-      pointerRef.current = { ...active, lastPosition: position };
-      simulation.manipulateBody(active.bodyId, position, "move");
       return;
     }
     if (active.action === "slice") {
@@ -1559,15 +1535,28 @@ export function WebGPUViewport() {
     // Brick seeds and fill fraction are already in the solver key, so the
     // document write alone invalidates it; the reseed makes the edit start
     // from a defined t=0 instead of mid-flight.
-    if (active.action === "shape-handle") {
-      setShapeDrag(null);
+    if (active.action === "entity-handle") {
+      setHandleDrag(null);
+      const bodyId = active.entity.simulatedBodyId;
+      if (bodyId) {
+        // Commit-on-release: one document write and one undo entry per gesture.
+        // The runtime manipulation ends either way, or the body would stay
+        // pinned to a gesture that is over.
+        const landed = active.pose ?? active.entity.frame.origin_m;
+        simulation.manipulateBody(bodyId, landed, "end");
+        if (cancelled || !active.described) { simulation.cancelEdit(); return; }
+        simulation.updateBody(bodyId, { ...active.described, linearVelocity_m_s: { x: 0, y: 0, z: 0 } });
+        simulation.commitEdit();
+        return;
+      }
       // A cancelled gesture keeps the scene it started with; only a real
       // release is allowed to spend a re-seed.
       if (cancelled) { simulation.cancelDraft(); return; }
-      simulation.commitDraft(active.target === "tank" ? { announceRebuild: "Resize the tank" } : {});
+      simulation.commitDraft(active.entity.announceRebuild
+        ? { announceRebuild: active.entity.announceRebuild } : {});
       return;
     }
-    if (active.action === "fill-level" || active.action === "inflow-handle") {
+    if (active.action === "fill-level") {
       if (cancelled) { simulation.cancelDraft(); return; }
       simulation.commitDraft();
       return;
@@ -1578,18 +1567,13 @@ export function WebGPUViewport() {
       simulation.commitEdit(undefined, { reseed: true });
       return;
     }
-    if (active.action === "gizmo-axis" || active.action === "gizmo-free") {
-      // Commit-on-release: one document write and one undo entry per gesture.
-      simulation.manipulateBody(active.bodyId, active.lastPosition, "end");
-      simulation.updateBody(active.bodyId, { position_m: active.lastPosition, linearVelocity_m_s: { x: 0, y: 0, z: 0 } });
-      simulation.commitEdit();
-      return;
-    }
-    // Nothing claimed the press, so a click that never became a drag is the
-    // user clicking through to the background. Deselect, whatever was selected.
+    // Nothing claimed the press, so a click that never became a drag is the user
+    // clicking through to whatever the scene has there — an entity, or, when the
+    // ray left the tank entirely, the background. Either way the selection
+    // becomes what was clicked, which is how a click deselects.
     if (!cancelled && (active.action === "orbit" || active.action === "pan")
       && emptySpaceClickDeselects(active.action, event.clientX - active.downX, event.clientY - active.downY)) {
-      useUIStore.getState().select(undefined);
+      useUIStore.getState().select(active.selectOnClick);
     }
   };
 
@@ -1602,12 +1586,12 @@ export function WebGPUViewport() {
       data-camera-azimuth={camera.azimuth_rad.toFixed(6)}
       data-camera-elevation={camera.elevation_rad.toFixed(6)}
       data-pixel-trace={pixelTraceEnabled && activeTool === "select" && !pixelTracePinned ? "live" : undefined}
-      data-shape-grab={shapeHover ? "true" : undefined}
+      data-shape-grab={handleHover ? "true" : undefined}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
-      onPointerLeave={() => { setHover(null); setShapeHover(null); }}
+      onPointerLeave={() => { setHover(null); publishHoverHighlight(null); setHandleHover(null); }}
       onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
       onContextMenu={(event) => event.preventDefault()}
     />
@@ -1640,31 +1624,6 @@ export function WebGPUViewport() {
       aria-label="Presentation frame rate"
       title="WebGPU presentations per second · rolling mean of the latest 5 frame intervals"
     >— FPS</output>
-    {gizmo && gizmo.origin.depth_m > 1e-6 && <svg
-      className="editor-gizmo"
-      data-testid="editor-gizmo"
-      width={viewportSize.width}
-      height={viewportSize.height}
-      aria-hidden="true"
-    >
-      {gizmo.handles.filter((handle) => handle.tip.depth_m > 1e-6).map((handle) => (
-        <g key={handle.axis} className={`gizmo-axis axis-${handle.axis}`}>
-          <line
-            x1={gizmo.origin.leftFraction * viewportSize.width}
-            y1={gizmo.origin.topFraction * viewportSize.height}
-            x2={handle.tip.leftFraction * viewportSize.width}
-            y2={handle.tip.topFraction * viewportSize.height}
-          />
-          <circle cx={handle.tip.leftFraction * viewportSize.width} cy={handle.tip.topFraction * viewportSize.height} r={4} />
-        </g>
-      ))}
-      <circle
-        className="gizmo-center"
-        cx={gizmo.origin.leftFraction * viewportSize.width}
-        cy={gizmo.origin.topFraction * viewportSize.height}
-        r={5}
-      />
-    </svg>}
     {fillHandle?.visible && <div
       className="editor-fill-handle"
       data-testid="editor-fill-handle"
@@ -1673,113 +1632,92 @@ export function WebGPUViewport() {
     >
       <i /><span>FILL {(scene.container.fillFraction * 100).toFixed(0)}%</span>
     </div>}
-    {(fluidBodyGizmo || tankGizmo) && <svg
-      className="editor-gizmo editor-shape-gizmo"
-      data-testid="editor-shape-gizmo"
+    {entityGizmos.length > 0 && <svg
+      className="editor-gizmo editor-entity-gizmo"
+      data-testid="editor-entity-gizmo"
       width={viewportSize.width}
       height={viewportSize.height}
       aria-hidden="true"
     >
-      {shapeOutline && FLUID_BODY_BOX_EDGES
-        .filter(([from, to]) => shapeOutline[from]!.depth_m > 1e-6 && shapeOutline[to]!.depth_m > 1e-6)
+      {entityOutlineCorners && heldEntity && BOX_EDGES
+        .filter(([from, to]) => entityOutlineCorners[from]!.depth_m > 1e-6 && entityOutlineCorners[to]!.depth_m > 1e-6)
         .map(([from, to]) => (
           <line
             key={`${from}-${to}`}
-            className={`shape-outline target-${shapeSubject}`}
-            x1={shapeOutline[from]!.leftFraction * viewportSize.width}
-            y1={shapeOutline[from]!.topFraction * viewportSize.height}
-            x2={shapeOutline[to]!.leftFraction * viewportSize.width}
-            y2={shapeOutline[to]!.topFraction * viewportSize.height}
+            className={`entity-outline tone-${heldEntity.tone}`}
+            x1={entityOutlineCorners[from]!.leftFraction * viewportSize.width}
+            y1={entityOutlineCorners[from]!.topFraction * viewportSize.height}
+            x2={entityOutlineCorners[to]!.leftFraction * viewportSize.width}
+            y2={entityOutlineCorners[to]!.topFraction * viewportSize.height}
           />
         ))}
-      {[{ target: "tank", handles: tankGizmo }, { target: "fluid", handles: fluidBodyGizmo }].flatMap(({ target, handles }) =>
-        (handles ?? []).filter((handle) => handle.projection.depth_m > 1e-6).map((handle) => {
+      {entityGizmos.flatMap(({ entity, handles }) =>
+        handles.filter(({ projection }) => projection.depth_m > 1e-6).map(({ handle, projection, ends }) => {
           // A lock greys out every handle it leaves nothing to move, so the
           // ones that still do something are visible before the press.
-          const className = `shape-handle target-${target} handle-${handle.kind}${
-            shapeHover?.target === target && shapeHover.handleId === handle.id ? " hovered" : ""}${
-            boundsDragAxes(handle, boundsAxisConstraint).length === 0 ? " inert" : ""}`;
-          const ends = handle.ends?.every((end) => end.depth_m > 1e-6) ? handle.ends : undefined;
-          return ends
+          const className = `entity-handle tone-${entity.tone} handle-${handle.kind}${
+            handleHover?.handleId === handle.id ? " hovered" : ""}${
+            handleIsInert(handle, axisConstraint) ? " inert" : ""}`;
+          const drawn = ends?.every((end) => end.depth_m > 1e-6) ? ends : undefined;
+          const key = `${entity.selection.kind}:${entity.selection.id}:${handle.id}`;
+          const size = handle.kind === "face" ? 8 : handle.kind === "center" ? 10 : 6;
+          return drawn
             ? <line
-              key={`${target}-${handle.id}`}
+              key={key}
               className={className}
-              data-handle={`${target}:${handle.id}`}
-              x1={ends[0]!.leftFraction * viewportSize.width}
-              y1={ends[0]!.topFraction * viewportSize.height}
-              x2={ends[1]!.leftFraction * viewportSize.width}
-              y2={ends[1]!.topFraction * viewportSize.height}
+              data-handle={handle.id}
+              x1={drawn[0]!.leftFraction * viewportSize.width}
+              y1={drawn[0]!.topFraction * viewportSize.height}
+              x2={drawn[1]!.leftFraction * viewportSize.width}
+              y2={drawn[1]!.topFraction * viewportSize.height}
             />
             : <rect
-              key={`${target}-${handle.id}`}
+              key={key}
               className={className}
-              data-handle={`${target}:${handle.id}`}
-              x={handle.projection.leftFraction * viewportSize.width - (handle.kind === "face" ? 4 : 3)}
-              y={handle.projection.topFraction * viewportSize.height - (handle.kind === "face" ? 4 : 3)}
-              width={handle.kind === "face" ? 8 : 6}
-              height={handle.kind === "face" ? 8 : 6}
+              data-handle={handle.id}
+              x={projection.leftFraction * viewportSize.width - size / 2}
+              y={projection.topFraction * viewportSize.height - size / 2}
+              width={size}
+              height={size}
             />;
         }))}
     </svg>}
-    {shapeMode && shapeHover && !pointerRef.current && <div
-      className={`shape-hover-chip target-${shapeHover.target}`}
-      data-testid="shape-hover-chip"
-      style={{ left: `${shapeHover.leftFraction * 100}%`, top: `${shapeHover.topFraction * 100}%` }}
+    {handleHover && !pointerRef.current && <div
+      className={`entity-hover-chip tone-${handleHover.tone}`}
+      data-testid="entity-hover-chip"
+      style={{ left: `${handleHover.leftFraction * 100}%`, top: `${handleHover.topFraction * 100}%` }}
       aria-hidden="true"
     >
-      <strong>{shapeHover.target === "tank" ? "TANK" : "WATER"}</strong>
-      <span>{shapeHover.label}</span>
-    </div>}
-    {shapeMode && !sceneDraft && <div className="shape-legend" data-testid="shape-legend" aria-hidden="true">
-      <span><i className="swatch-fluid" />WATER</span>
-      <span><i className="swatch-tank" />TANK</span>
-      <small>drag a face, edge or corner · simulates on release</small>
-      <small>X Y Z lock one axis · ⇧ locks a plane</small>
+      <strong>{handleHover.entityLabel}</strong>
+      <span>{handleHover.label}</span>
     </div>}
     {/* The lock is a mode, so it is stated for as long as it is held — before
         the press, during the drag, and after the release — rather than only
-        while something is moving. It sits under the legend it replaces during a
-        drag, and it says outright when the held handle owns none of the locked
-        axes, which is the one case where a correct constraint looks like a
-        frozen gesture. */}
-    {shapeMode && boundsAxisConstraint && <div
+        while something is moving. It says outright when the held handle owns
+        none of the locked axes, which is the one case where a correct
+        constraint looks like a frozen gesture. */}
+    {axisConstraint && <div
       className="shape-axis-lock"
       data-testid="shape-axis-lock"
-      data-blocked={shapeDragAxes?.length === 0 ? "true" : undefined}
+      data-blocked={heldAxes?.length === 0 ? "true" : undefined}
       aria-hidden="true"
     >
-      <strong>{boundsAxisConstraintLabel(boundsAxisConstraint)}</strong>
-      <span>{shapeDragAxes?.length === 0
+      <strong>{axisConstraintLabel(axisConstraint)}</strong>
+      <span>{heldAxes?.length === 0
         ? "this handle moves none of it — press Esc, or grab another handle"
-        : boundsAxisConstraint.length === 1
+        : axisConstraint.length === 1
           ? "only this axis moves"
           : "these two axes move"}</span>
     </div>}
-    {shapeMode && shapeSubject && shapeOutlineBox && shapeOutline?.[7]?.visible && <div
-      className={`shape-readout target-${shapeSubject}`}
+    {heldEntity?.sizeLabel && entityOutlineCorners?.[7]?.visible && <div
+      className={`shape-readout tone-${heldEntity.tone}`}
       data-testid="shape-readout"
-      style={{ left: `${shapeOutline[7]!.leftFraction * 100}%`, top: `${shapeOutline[7]!.topFraction * 100}%` }}
+      style={{ left: `${entityOutlineCorners[7]!.leftFraction * 100}%`, top: `${entityOutlineCorners[7]!.topFraction * 100}%` }}
       aria-hidden="true"
     >
-      <strong>{shapeSubject === "tank" ? "TANK" : "WATER"}</strong>
-      <span>{shapeSizeLabel(shapeSubject, shapeOutlineBox)}</span>
+      <strong>{heldEntity.label}</strong>
+      <span>{heldEntity.sizeLabel}</span>
     </div>}
-    {inflowGizmo && inflowGizmo.every((handle) => handle.projection.depth_m > 1e-6) && <svg
-      className="editor-gizmo editor-inflow-gizmo"
-      data-testid="editor-inflow-gizmo"
-      width={viewportSize.width}
-      height={viewportSize.height}
-      aria-hidden="true"
-    >
-      <line
-        x1={inflowGizmo[0]!.projection.leftFraction * viewportSize.width}
-        y1={inflowGizmo[0]!.projection.topFraction * viewportSize.height}
-        x2={inflowGizmo[1]!.projection.leftFraction * viewportSize.width}
-        y2={inflowGizmo[1]!.projection.topFraction * viewportSize.height}
-      />
-      <circle className="inflow-center" cx={inflowGizmo[0]!.projection.leftFraction * viewportSize.width} cy={inflowGizmo[0]!.projection.topFraction * viewportSize.height} r={6} />
-      <circle className="inflow-nozzle" cx={inflowGizmo[1]!.projection.leftFraction * viewportSize.width} cy={inflowGizmo[1]!.projection.topFraction * viewportSize.height} r={5} />
-    </svg>}
     {terrainHandles && <svg
       className="editor-gizmo editor-terrain-gizmo"
       data-testid="editor-terrain-gizmo"
@@ -1797,10 +1735,10 @@ export function WebGPUViewport() {
         />
       ))}
     </svg>}
-    {selectedBody && gizmo?.origin.visible && <SelectionFlyout
-      body={selectedBody}
-      leftFraction={gizmo.origin.leftFraction}
-      topFraction={gizmo.origin.topFraction}
+    {heldEntity && !sceneDraft && entityAnchor?.visible && <SelectionFlyout
+      entity={heldEntity}
+      leftFraction={entityAnchor.leftFraction}
+      topFraction={entityAnchor.topFraction}
     />}
     {hover && hoverProjection?.visible && !pointerRef.current && <div
       className={`editor-hover-chip kind-${hover.kind}`}

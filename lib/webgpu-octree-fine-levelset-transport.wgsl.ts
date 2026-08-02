@@ -1,8 +1,10 @@
 /** Class-specialized direct structured-velocity transport for sparse fine phi. */
 import {
   OCTREE_AIR_SUPPORT_LAYOUT_VERSION,
+  OCTREE_AIR_SUPPORT_OWNER_HASH,
   OCTREE_AIR_SUPPORT_TAG,
   OCTREE_AIR_SUPPORT_VALID,
+  octreeAirSupportOwnerHashStartWGSL,
 } from "./webgpu-octree-air-velocity-support";
 
 export const structuredFineLevelSetTransportWGSL = /* wgsl */ `
@@ -41,6 +43,7 @@ struct AirOwner {tag:u32,cell:u32,size:u32,caseTransform:u32}
 @group(0)@binding(13)var<storage,read_write>state:array<u32>;
 @group(0)@binding(6)var<storage,read_write>catalog:array<u32>;
 @group(0)@binding(14)var<storage,read>metrics:array<vec4u>;
+@group(0)@binding(16)var<storage,read_write>activitySnapshot:array<u32>;
 @group(0)@binding(20)var<storage,read>airSupport:array<vec4f>;
 @group(0)@binding(21)var<storage,read>boundary:array<u32>;
 
@@ -67,12 +70,10 @@ fn activeBank()->u32{return accepted[4]&1u;} fn rbase()->u32{return state[33u]*p
 fn airWord(word:u32)->u32{if(word>=4u*arrayLength(&airSupport)){return INVALID;}return bitcast<vec4u>(airSupport[word/4u])[word&3u];}
 fn cellCoord(cell:u32)->vec3u{return vec3u(cell%p.dimensions.x,(cell/p.dimensions.x)%p.dimensions.y,
   cell/(p.dimensions.x*p.dimensions.y));}
-// One owner record is four consecutive words, and airSupport is bound as
-// array<vec4f>, so when the record is vec4-aligned the four words ARE one
-// element. The alignment test is dispatch-uniform -- at = airOwnerOffset +
-// 4*cell, so (at & 3) is airOwnerOffset & 3 for every lane and every call --
-// which means the branch costs nothing and the unaligned arm is retained only
-// so no host layout assumption is smuggled into the shader.
+// One adaptive hash record is four consecutive words, and airSupport is bound
+// as array<vec4f>, so a vec4-aligned record is one load. Its storage order is
+// {originCellPlusOne,size,tag,caseTransform}; zero is a cold/cleared slot.
+// Return the decoded consumer-facing AirOwner.
 //
 // This is the hottest addressing function in the fine transport kernel:
 // transitionSample resolves an owner once per substep and regularSampleExact
@@ -87,13 +88,28 @@ fn cellCoord(cell:u32)->vec3u{return vec3u(cell%p.dimensions.x,(cell/p.dimension
 // compared as integers, so there is no reassociation and no rounding step of
 // the kind the storage round-trip refutation describes. Gate A.
 fn airOwnerRecord(at:u32)->AirOwner{
-  if((at&3u)==0u){let v=bitcast<vec4u>(airSupport[at>>2u]);return AirOwner(v.x,v.y,v.z,v.w);}
-  return AirOwner(airWord(at),airWord(at+1u),airWord(at+2u),airWord(at+3u));}
-fn airOwner(cell:u32)->AirOwner{if(cell>=p.dimensions.x*p.dimensions.y*p.dimensions.z){return AirOwner(INVALID,INVALID,0u,INVALID);}
-  let at=p.airOwnerOffset+4u*cell;if(at+3u>=4u*arrayLength(&airSupport)){return AirOwner(INVALID,INVALID,0u,INVALID);}
-  let result=airOwnerRecord(at);let supportCount=airWord(p.airControlOffset+6u);
-  let tagValid=result.tag!=INVALID&&select(result.tag<state[32],(result.tag&0x7fffffffu)<supportCount,(result.tag&SUPPORT_TAG)!=0u);
-  if(tagValid&&result.cell<p.dimensions.x*p.dimensions.y*p.dimensions.z&&result.size>0u&&result.caseTransform!=INVALID){return result;}
+  if((at&3u)==0u){let v=bitcast<vec4u>(airSupport[at>>2u]);return AirOwner(v.z,select(INVALID,v.x-1u,v.x!=0u),v.y,v.w);}
+  let key=airWord(at);return AirOwner(airWord(at+2u),select(INVALID,key-1u,key!=0u),airWord(at+1u),airWord(at+3u));}
+fn airOwnerHashCapacity()->u32{
+  let words=4u*arrayLength(&airSupport);if(p.airOwnerOffset>=words){return 0u;}
+  return (words-p.airOwnerOffset)/4u;
+}
+${octreeAirSupportOwnerHashStartWGSL("airOwnerHashStart")}
+fn airOwner(cell:u32)->AirOwner{
+  let volume=p.dimensions.x*p.dimensions.y*p.dimensions.z;
+  let capacity=airOwnerHashCapacity();if(cell>=volume||capacity==0u){return AirOwner(INVALID,INVALID,0u,INVALID);}
+  let q=cellCoord(cell);var size=p.maxLeaf;
+  loop{let origin=(q/vec3u(size))*vec3u(size);
+    let originCell=origin.x+p.dimensions.x*(origin.y+p.dimensions.y*origin.z);
+    let start=airOwnerHashStart(originCell,size,capacity);
+    for(var probe=0u;probe<min(capacity,${OCTREE_AIR_SUPPORT_OWNER_HASH.maximumProbes}u);probe+=1u){
+      let at=p.airOwnerOffset+${OCTREE_AIR_SUPPORT_OWNER_HASH.recordWords}u*((start+probe)%capacity);
+      let result=airOwnerRecord(at);if(result.cell==INVALID){break;}
+      if(result.cell==originCell&&result.size==size){let supportCount=airWord(p.airControlOffset+6u);
+        let tagValid=result.tag!=INVALID&&select(result.tag<state[32],
+          (result.tag&0x7fffffffu)<supportCount,(result.tag&SUPPORT_TAG)!=0u);
+        if(tagValid&&result.caseTransform!=INVALID){return result;}return AirOwner(INVALID,INVALID,0u,INVALID);}}
+    if(size==1u){break;}size>>=1u;}
   return AirOwner(INVALID,INVALID,0u,INVALID);}
 fn ownerCellAtPosition(x:vec3f)->u32{let q=vec3u(clamp(floor(x/p.physical),vec3f(0),vec3f(p.dimensions)-vec3f(1)));
   return q.x+p.dimensions.x*(q.y+p.dimensions.y*q.z);}
@@ -106,7 +122,7 @@ fn stagedAirOwner(cell:u32)->AirOwner{
 }
 fn airOwnerAtPosition(x:vec3f)->AirOwner{return stagedAirOwner(ownerCellAtPosition(x));}
 fn airPublicationValid()->bool{let at=p.airControlOffset;if(p.airSupportEnabled!=1u||at+16u>4u*arrayLength(&airSupport)
-  ||p.airOwnerOffset+4u*p.dimensions.x*p.dimensions.y*p.dimensions.z>4u*arrayLength(&airSupport)
+  ||airOwnerHashCapacity()<2u*(p.rowCapacity+p.supportCapacity)
   ||arrayLength(&boundary)<7u||boundary[0]!=0u||boundary[1]!=INVALID||boundary[2]!=accepted[2]
   ||boundary[4]!=accepted[3]||boundary[5]!=activeBank()||boundary[6]!=boundary[4]){return false;}
   let count=airWord(at+6u);let capacity=airWord(at+7u);let faces=airWord(at+10u);let seeds=airWord(at+11u);
@@ -141,8 +157,13 @@ fn headerBase(cls:u32)->u32{return HEADER_BASE+HEADER_WORDS*cls;}
 const SCAN_BLOCK_WORDS:u32=16u;
 const SCAN_SLOT_OUTSIDE:u32=4u; const SCAN_SLOT_NONFINITE:u32=5u; const SCAN_SLOT_PROCESSED:u32=6u;
 const SCAN_SLOT_EXTENDED:u32=7u; const SCAN_SLOT_INVALID:u32=8u; const SCAN_SLOT_DISPLACEMENT:u32=9u;
-const SCAN_SLOT_FIRST:u32=10u; const SCAN_SLOT_DELTA:u32=11u;
+const SCAN_SLOT_FIRST:u32=10u; const SCAN_SLOT_DELTA:u32=11u; const SCAN_SLOT_REPAIR:u32=12u;
 const SCAN_TOTAL_CLASS_BASE:u32=0u; const SCAN_TOTAL_CLASS_COUNT:u32=4u;
+// Scratch is capacity-sized, but recurring work is not. Every scan below is
+// over the compact live-page stream, so its block count is authored from the
+// same generation-tagged worklist that publishes the page dispatch. A larger
+// arena may absorb future topology growth without making a quiet generation
+// pay for empty blocks.
 fn scanBlockCount()->u32{return (p.pageCapacity+255u)/256u;}
 fn scanBase()->u32{return payloadBase()+p.pageCapacity;}
 fn scanBlockWord(block:u32,slot:u32)->u32{return scanBase()+SCAN_BLOCK_WORDS*block+slot;}
@@ -162,26 +183,37 @@ fn scanIdentityBlock(local:u32,value:u32)->u32{
 }
 
 var<workgroup> governorSpeed:array<f32,128>; var<workgroup> governorInvalid:array<u32,128>;
+var<workgroup> governorChanged:array<u32,128>;
 @compute @workgroup_size(128)
 fn planStructuredFineTransportSubsteps(@builtin(local_invocation_index)lid:u32) {
-  var maximum=0.; var invalid=0u; let valid=structuredValid()&&airPublicationValid();
+  var maximum=0.; var invalid=0u;var changed=0u;let valid=structuredValid()&&airPublicationValid();
   let rows=select(0u,min(accepted[2],p.rowCapacity),valid);
   let mapNeeded=valid&&(state[36]!=accepted[3]||state[37]!=activeBank()||state[38]!=p.generation);
   for(var row=lid;row<rows;row+=128u){
     let velocity=rowVelocity[activeBank()*p.rowStride+row];
     if(!finite3(velocity.xyz)||velocity.w<=0.){invalid=1u;}else{maximum=max(maximum,length(velocity.xyz));}
     if(mapNeeded){if(4u*row+3u<arrayLength(&catalog)&&row<arrayLength(&metrics)){
-      let at=4u*row;let m=metrics[row];catalog[at]=m.x;catalog[at+1u]=m.y;catalog[at+2u]=m.z;catalog[at+3u]=m.w;
+      let at=4u*row;let m=metrics[row];let old=vec4u(catalog[at],catalog[at+1u],catalog[at+2u],catalog[at+3u]);
+      changed|=select(0u,1u,state[46]!=0u&&any(old!=m));
+      catalog[at]=m.x;catalog[at+1u]=m.y;catalog[at+2u]=m.z;catalog[at+3u]=m.w;
     }else{invalid=1u;}}
   }
   let supportCount=select(0u,airWord(p.airControlOffset+6u),valid);
   for(var support=lid;support<supportCount;support+=128u){let at=p.supportVectorOffset/4u+support;
     if(at>=arrayLength(&airSupport)){invalid=1u;continue;}let velocity=airSupport[at];
     if(!finite3(velocity.xyz)||velocity.w<=0.){invalid=1u;}else{maximum=max(maximum,length(velocity.xyz));}}
-  governorSpeed[lid]=maximum; governorInvalid[lid]=invalid; workgroupBarrier();
+  let pages=select(0u,min(worklist[1],p.pageCapacity),valid);
+  for(var work=lid;work<pages;work+=128u){let id=worklist[7u+work];
+    if(id>=p.pageCapacity||id*10u+3u>=arrayLength(&metadata)||work>=arrayLength(&activitySnapshot)
+      ||metadata[id*10u+2u]!=p.generation){invalid=1u;continue;}
+    let key=metadata[id*10u+1u];changed|=select(0u,1u,state[46]!=0u&&activitySnapshot[work]!=key);
+    changed|=select(0u,1u,(metadata[id*10u+3u]&PAGE_DIRTY)!=0u);activitySnapshot[work]=key;
+  }
+  changed|=select(0u,1u,state[46]!=0u&&(state[48]!=rows||state[49]!=supportCount));
+  governorSpeed[lid]=maximum; governorInvalid[lid]=invalid;governorChanged[lid]=changed;workgroupBarrier();
   for(var width=64u;width>0u;width>>=1u){if(lid<width){
     governorSpeed[lid]=max(governorSpeed[lid],governorSpeed[lid+width]);
-    governorInvalid[lid]|=governorInvalid[lid+width];}workgroupBarrier();}
+    governorInvalid[lid]|=governorInvalid[lid+width];governorChanged[lid]|=governorChanged[lid+width];}workgroupBarrier();}
   if(lid==0u){
     let displacement=max(1u,u32(ceil(governorSpeed[0]*p.dt/max(p.h,1e-20))));
     // Factor 1 retains midpoint RK2, but curves spanning multiple cells need
@@ -191,17 +223,28 @@ fn planStructuredFineTransportSubsteps(@builtin(local_invocation_index)lid:u32) 
     var required=max(max(1u,p.segments),displacement);
     if(p.segments==1u){required=clamp(displacement,1u,4u);}
     let scheduleValid=valid&&governorInvalid[0]==0u&&required<=64u&&displacement<=p.maxBacktrace;
-    let activeSteps=select(0u,required,scheduleValid);
+    let displacementCells=governorSpeed[0]*p.dt/max(p.h,1e-20);
+    state[52]=select(0u,1u,state[46]==0u)|select(0u,2u,state[47]!=0u)
+      |select(0u,4u,governorChanged[0]!=0u)|select(0u,8u,displacementCells>p.inflowTiming.y)
+      |select(0u,16u,inflowStrength()!=0.)|select(0u,32u,p.inflowTiming.z!=0.)
+      |select(0u,64u,!scheduleValid);
+    state[53]=bitcast<u32>(displacementCells);state[54]=rows;state[55]=supportCount;state[56]=pages;
+    let sleeping=scheduleValid&&state[46]!=0u&&state[47]==0u&&governorChanged[0]==0u
+      &&displacementCells<=p.inflowTiming.y&&inflowStrength()==0.&&p.inflowTiming.z==0.;
+    let activeSteps=select(select(0u,required,scheduleValid),0u,sleeping);
     state[0]=select(1u,0u,scheduleValid); state[1]=activeSteps;
     state[2]=bitcast<u32>(select(0.,p.dt/f32(activeSteps),activeSteps>0u)); state[3]=displacement;
     state[32]=select(0u,accepted[2],scheduleValid); state[33]=select(0u,activeBank(),scheduleValid);
     state[34]=select(0u,accepted[3],scheduleValid); state[35]=select(0u,accepted[5],scheduleValid);
     state[39]=select(0u,airWord(p.airControlOffset+6u),scheduleValid);
-    let pages=min(worklist[1],p.pageCapacity);
     state[36]=select(state[36],accepted[3],scheduleValid&&mapNeeded);
     state[37]=select(state[37],activeBank(),scheduleValid&&mapNeeded);
     state[38]=select(state[38],p.generation,scheduleValid&&mapNeeded);
-    state[40]=select(0u,pages,scheduleValid);state[41]=1u;state[42]=1u;
+    let activePages=select(select(0u,pages,scheduleValid),0u,sleeping);
+    state[40]=activePages;state[41]=1u;state[42]=1u;
+    state[43]=(activePages+255u)/256u;state[44]=1u;state[45]=1u;
+    state[46]=select(state[46],1u,scheduleValid);state[48]=rows;state[49]=supportCount;
+    state[50]=select(0u,1u,sleeping);state[3]=select(state[3],0u,sleeping);
   }
 }
 
@@ -259,7 +302,7 @@ fn scanStructuredFineTransportWorksetGroups(@builtin(local_invocation_index)lid:
   for(var cls=0u;cls<4u;cls+=1u){
     var carry=0u;
     for(var chunk=0u;chunk<blocks;chunk+=256u){
-      let block=chunk+lid;var value=0u;if(block<blocks){value=state[scanBlockWord(block,cls)];}
+      let block=chunk+lid;var value=0u;if(block<blocks&&block<state[43]){value=state[scanBlockWord(block,cls)];}
       let prefix=scanIdentityBlock(lid,value);
       if(block<blocks){state[scanBlockWord(block,cls)]=carry+prefix;}
       carry+=identityScanTotal;workgroupBarrier();
@@ -654,7 +697,7 @@ fn reduceStructuredFineTransportStatus(@builtin(workgroup_id)wg:vec3u,@builtin(l
   // Chunked on a uniform trip count so the reduction's barriers stay in
   // uniform control flow; one workgroup then covers any block count.
   let blocks=scanBlockCount();var value=StatusSummary(0u,0u,0u,0u,0u,0u,INVALID);
-  for(var chunk=0u;chunk<blocks;chunk+=64u){let block=chunk+lid;if(block<blocks){
+  for(var chunk=0u;chunk<blocks;chunk+=64u){let block=chunk+lid;if(block<blocks&&block<state[43]){
     value=mergeStatusSummary(value,StatusSummary(
       state[scanBlockWord(block,SCAN_SLOT_OUTSIDE)],state[scanBlockWord(block,SCAN_SLOT_NONFINITE)],
       state[scanBlockWord(block,SCAN_SLOT_PROCESSED)],state[scanBlockWord(block,SCAN_SLOT_EXTENDED)],
@@ -663,7 +706,13 @@ fn reduceStructuredFineTransportStatus(@builtin(workgroup_id)wg:vec3u,@builtin(l
   reduceStatusBlock(lid,value);
   if(lid!=0u){return;}
   control=Control(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,INVALID,INVALID,0u,0u,0u);
-  if(state[0]!=0u||state[1]==0u){control.authorityUnavailable=1u;control.maxDisplacement=state[3];return;}
+  if(state[0]!=0u){control.authorityUnavailable=1u;control.maxDisplacement=state[3];return;}
+  // A sleeping generation is an accepted identity transport. Its page
+  // membership is carried by the topology transaction, so the producer must
+  // publish a valid zero-change delta rather than relabel the prior interface
+  // census as fresh dirtiness. No phi/CPT payload is read or written.
+  if(state[50]!=0u){control.committed=1u;control.maxDisplacement=0u;return;}
+  if(state[1]==0u){control.authorityUnavailable=1u;control.maxDisplacement=state[3];return;}
   control.outside=summaryOutside[0];control.nonfinite=summaryNonfinite[0];
   control.processed=summaryProcessed[0];control.extended=summaryExtended[0];
   control.invalidStatus=summaryInvalid[0];control.maxDisplacement=summaryDisplacement[0];
@@ -700,34 +749,46 @@ fn deltaChangedKey(work:u32)->u32{
   let id=worklist[7u+work];if(id>=p.pageCapacity){return INVALID;}
   return delta[8u+id];
 }
+fn deltaRepairKey(work:u32)->u32{
+  if(work>=min(worklist[1],p.pageCapacity)){return INVALID;}
+  let id=worklist[7u+work];if(id>=p.pageCapacity){return INVALID;}
+  return delta[8u+2u*p.pageCapacity+id];
+}
 // Header and compacted stream only: the per-page key range written by
 // commitStructuredFineTransport stays untouched, as before.
-@compute @workgroup_size(256)fn clearStructuredFineDelta(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){
-  let i=wg.x*256u+lid;if(i>=8u+3u*p.pageCapacity){return;}
-  // Preserve both dense per-physical-page classifications authored by commit:
-  // broad old/new interface membership and exact closest-point repair. Only
-  // the header and the middle compact stream are rebuilt by this scan.
-  if(i<8u||(i>=8u+p.pageCapacity&&i<8u+2u*p.pageCapacity)){delta[i]=0u;}
+@compute @workgroup_size(256)fn clearStructuredFineDelta(@builtin(local_invocation_index)lid:u32){
+  // The compact middle stream is count-delimited and overwritten from rank
+  // zero, so stale words beyond this generation's published count are
+  // unreachable. Clear only the eight-word transaction header. Preserve both
+  // dense per-physical-page classifications authored by commit: broad old/new
+  // interface membership and exact closest-point repair.
+  if(lid<8u){delta[lid]=0u;}
 }
 @compute @workgroup_size(256)fn reduceStructuredFineDeltaBlocks(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){
   let work=wg.x*256u+lid;
   state[scanItemWord(work)]=scanIdentityBlock(lid,select(0u,1u,deltaChangedKey(work)!=INVALID));
   if(lid==0u){state[scanBlockWord(wg.x,SCAN_SLOT_DELTA)]=identityScanTotal;}
+  workgroupBarrier();scanIdentityBlock(lid,select(0u,1u,deltaRepairKey(work)!=INVALID));
+  if(lid==0u){state[scanBlockWord(wg.x,SCAN_SLOT_REPAIR)]=identityScanTotal;}
 }
 @compute @workgroup_size(256)fn publishStructuredFineDelta(@builtin(local_invocation_index)lid:u32){
   let blocks=scanBlockCount();var carry=0u;
   for(var chunk=0u;chunk<blocks;chunk+=256u){
-    let block=chunk+lid;var value=0u;if(block<blocks){value=state[scanBlockWord(block,SCAN_SLOT_DELTA)];}
+    let block=chunk+lid;var value=0u;if(block<blocks&&block<state[43]){value=state[scanBlockWord(block,SCAN_SLOT_DELTA)];}
     let prefix=scanIdentityBlock(lid,value);
     if(block<blocks){state[scanBlockWord(block,SCAN_SLOT_DELTA)]=carry+prefix;}
     carry+=identityScanTotal;workgroupBarrier();}
+  var repairs=0u;for(var chunk=0u;chunk<blocks;chunk+=256u){
+    let block=chunk+lid;var value=0u;if(block<blocks&&block<state[43]){value=state[scanBlockWord(block,SCAN_SLOT_REPAIR)];}
+    scanIdentityBlock(lid,value);repairs+=identityScanTotal;workgroupBarrier();}
   if(lid!=0u){return;}
-  let count=carry;let liveCount=min(worklist[1],p.pageCapacity);
+  let count=select(carry,0u,state[50]!=0u);let liveCount=min(worklist[1],p.pageCapacity);
   // Word seven carries the measured complete-characteristic displacement to
   // recurring topology. It is already bounded by p.maxBacktrace before any
   // transport dispatch is published, so topology can shrink active residency
   // generation-by-generation without a host readback or optimistic guess.
   delta[0]=count;delta[1]=p.generation;delta[2]=control.committed;delta[3]=liveCount;delta[4]=select(0u,u32(ceil(f32(count)/64.)),count>0u);delta[5]=1u;delta[6]=1u;delta[7]=control.maxDisplacement;
+  if(state[50]==0u){state[47]=repairs;state[51]=count;}
 }
 @compute @workgroup_size(256)fn compactStructuredFineDelta(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){
   let work=wg.x*256u+lid;

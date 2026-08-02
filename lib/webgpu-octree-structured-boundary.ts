@@ -40,6 +40,15 @@ interface StructuredBoundaryPipelineBundle {
 const structuredBoundaryPipelineCache = new WeakMap<GPUDevice,
   StructuredBoundaryPipelineBundle>();
 
+/** Diagnostic A/B only. Production admits proved dry identity rows by default. */
+export function octreePowerHybridDryIdentityEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_POWER_HYBRID_DRY_IDENTITY !== "0";
+}
+
 export interface StructuredBoundaryResources {
   readonly structured: DirectStructuredVelocitySource;
   /** Identity-keyed coarse phi from the accepted pre-adaptation topology.
@@ -228,7 +237,6 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.prepareCandidate = pipelines.prepareCandidate;
     this.prepareAccepted = pipelines.prepareAccepted;
     this.classify = pipelines.classify;
-    this.resolve = pipelines.resolve;
     this.resolveSolid = pipelines.resolveSolid;
     this.commit = pipelines.commit;
     this.rebuild = pipelines.rebuild;
@@ -238,6 +246,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.scatterRowWorksets = pipelines.scatterRowWorksets;
     this.scatterFamilyWorksets = pipelines.scatterFamilyWorksets;
     this.accept = pipelines.accept;
+    this.resolve = pipelines.resolve;
     this.acceptGroup = device.createBindGroup({ layout: this.accept.getBindGroupLayout(0), entries: [
       { binding: 16, resource: { buffer: this.candidateControl } },
       { binding: 22, resource: { buffer: this.control } },
@@ -296,13 +305,13 @@ export class WebGPUStructuredBoundaryCoefficients {
     });
     const prepare = authority === "candidate-ready" ? this.prepareCandidate : this.prepareAccepted;
     const groups = Object.freeze([
-      group(prepare, [0, 1, 16, 17]),
+      group(prepare, authority === "candidate-ready" ? [0, 1, 16, 17, 22] : [0, 1, 16, 17]),
       group(this.classify, [0, 3, 4, 5, 6, 7, 8, 9, 12, 16, 26]),
       group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 25, 26]),
       group(this.resolveSolid, [0, 2, 3, 10, 11, 16, 19, 21]),
       group(this.commit, [0, 2, 11, 16, 20, 21]),
-      group(this.rebuild, [0, 2, 12, 13, 14, 16, 24]),
-      group(this.countRowClasses, [0, 3, 14, 16, 27, 28]),
+      group(this.rebuild, [0, 1, 2, 12, 13, 14, 16, 22, 24, 27]),
+      group(this.countRowClasses, [0, 3, 13, 14, 16, 27, 28]),
       group(this.countFamilyClasses, [0, 2, 3, 13, 14, 16, 27, 28]),
       group(this.scanWorksetBlocks, [0, 16, 18, 28]),
       group(this.scatterRowWorksets, [0, 16, 18, 27, 28]),
@@ -439,7 +448,7 @@ struct FineP{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,sa
 // face coefficient by 1/theta, so a surface pinned at the 1e-2 floor raises the
 // pressure system's condition number by two orders of magnitude and can exhaust
 // the encoded solve budget. Diagnostic only; no kernel reads it back.
-struct C{flags:atomic<u32>,firstError:atomic<u32>,rows:u32,slots:u32,epoch:u32,bank:u32,published:u32,pad:u32,
+struct C{flags:atomic<u32>,firstError:atomic<u32>,rows:u32,slots:u32,epoch:u32,bank:u32,published:u32,pad:atomic<u32>,
  theta:array<atomic<u32>,8>}
 struct VertexArena{header:array<u32,16>,values:array<u32>}
 struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
@@ -469,7 +478,27 @@ fn finePage(key:u32)->u32{if(fp.worklistHeaderWords!=7u||arrayLength(&fineWork)<
 fn loadFine(q:vec3i)->vec2f{if(any(q<vec3i(0))||any(q>=vec3i(fp.sampleDimensions))){return vec2f(0.);}let u=vec3u(q);let brick=u/fp.brickResolution;let local=u-brick*fp.brickResolution;let key=brick.x+fp.brickDimensions.x*(brick.y+fp.brickDimensions.y*brick.z);let id=finePage(key);if(id==INVALID){return vec2f(0.);}let li=local.x+fp.brickResolution*(local.y+fp.brickResolution*local.z);let at=id*fp.samplesPerBrick+li;if(at>=arrayLength(&finePhi)||at>=arrayLength(&fineFlags)||(fineFlags[at]&1u)==0u||!finite(finePhi[at])){return vec2f(0.);}return vec2f(finePhi[at],1.);}
 fn fineSample(x:vec3f,coarsePhi:f32)->vec2f{if(!(fp.width>0.)||fp.brickResolution==0u){return vec2f(coarsePhi,0.);}var lattice=(x-fp.origin)/fp.width-vec3f(.5);let maximum=vec3f(fp.sampleDimensions)-vec3f(1.);let endpointTolerance=1e-4;if(any(lattice<vec3f(-endpointTolerance))||any(lattice>maximum+vec3f(endpointTolerance))){return vec2f(coarsePhi,0.);}lattice=clamp(lattice,vec3f(0.),maximum);let base=vec3i(floor(lattice));let fraction=fract(lattice);var value=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let weight=select(1.-fraction.x,fraction.x,o.x==1)*select(1.-fraction.y,fraction.y,o.y==1)*select(1.-fraction.z,fraction.z,o.z==1);if(weight==0.){continue;}let sample=loadFine(base+o);if(sample.y==0.){return vec2f(coarsePhi,0.);}value+=weight*sample.x;}return vec2f(value,1.);}
 fn authoredAnalyticPhiAvailable()->bool{return p.damDimensions.w==1.||p.damDimensions.w==2.;}
-fn analyticInitialPhi(point:vec3f)->f32{let extent=vec3f(p.dimensions.xyz)*p.physical.x;let world=point-vec3f(.5*extent.x,0.,.5*extent.z);let fill=bitcast<f32>(p.pad.w);if(p.pad.z==1u||p.damDimensions.w==1.){return world.y-fill*extent.y;}let heightFraction=max(.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);let authored=any(p.damDimensions.xyz>vec3f(0.));let damDimensions=select(fallback,p.damDimensions.xyz,authored);let exposedMaximum=vec3f(-.5*extent.x+damDimensions.x,damDimensions.y,-.5*extent.z+damDimensions.z);let q=world-exposedMaximum;return length(max(q,vec3f(0.)))+min(max(q.x,max(q.y,q.z)),0.);}
+// Evaluate the authored t=0 geometry in finest-cell units. Power row centres
+// and their one-cell ghost endpoints are half-lattice points by construction;
+// doing the large world-space subtraction first gives reflected points the
+// same two magnitudes with their final bits swapped. That changes ghost-fluid
+// theta even though the geometry is identical. Snap only topology-sized
+// roundoff, perform the SDF in the canonical grid frame, and scale to metres
+// once at the end. This path retires after bootstrap.
+fn analyticInitialPhi(point:vec3f)->f32{
+ let rawGrid=point/p.physical.x;let halfGrid=.5*round(2.*rawGrid);
+ let grid=select(rawGrid,halfGrid,abs(rawGrid-halfGrid)<=vec3f(1e-4));
+ let dimensions=vec3f(p.dimensions.xyz);
+ let world=grid-vec3f(.5*dimensions.x,0.,.5*dimensions.z);
+ let fill=bitcast<f32>(p.pad.w);
+ if(p.pad.z==1u||p.damDimensions.w==1.){return(world.y-fill*dimensions.y)*p.physical.x;}
+ let heightFraction=max(.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));
+ let fallback=vec3f(footprintFraction*dimensions.x,heightFraction*dimensions.y,footprintFraction*dimensions.z);
+ let authored=any(p.damDimensions.xyz>vec3f(0.));let damDimensions=select(fallback,p.damDimensions.xyz/p.physical.x,authored);
+ let exposedMaximum=vec3f(-.5*dimensions.x+damDimensions.x,damDimensions.y,-.5*dimensions.z+damDimensions.z);
+ let q=world-exposedMaximum;let cells=length(max(q,vec3f(0.)))+min(max(q.x,max(q.y,q.z)),0.);
+ return cells*p.physical.x;
+}
 // Texture values live at cell centres. Structured face centres lie on the
 // half-cell boundary between those samples, so flooring the world coordinate
 // shifts both opposite faces in the same lattice direction and destroys
@@ -479,10 +508,14 @@ fn analyticInitialPhi(point:vec3f)->f32{let extent=vec3f(p.dimensions.xyz)*p.phy
 fn bootstrapTexturePhi(point:vec3f)->f32{
  let raw=point/p.physical.x-vec3f(.5);let half=.5*round(2.*raw);
  let lattice=select(raw,half,abs(raw-half)<=vec3f(1e-4));let base=vec3i(floor(lattice));let t=fract(lattice);
- var value=0.;for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let high=vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u);let weight=select(1.-t.x,t.x,high.x)*select(1.-t.y,t.y,high.y)*select(1.-t.z,t.z,high.z);value+=weight*textureLoad(bootstrapLevelSetIn,clamp(base+offset,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)),0).x;}return value;}
+ var terms:array<f32,8>;for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let high=vec3<bool>((corner&1u)!=0u,(corner&2u)!=0u,(corner&4u)!=0u);let weight=select(1.-t.x,t.x,high.x)*select(1.-t.y,t.y,high.y)*select(1.-t.z,t.z,high.z);terms[corner]=weight*textureLoad(bootstrapLevelSetIn,clamp(base+offset,vec3i(0),vec3i(p.dimensions.xyz)-vec3i(1)),0).x;}
+ // Reflections permute the eight corners. Fold the identical weighted multiset
+ // in numeric order so interpolation is bitwise permutation-invariant.
+ for(var i=1u;i<8u;i+=1u){let value=terms[i];var j=i;loop{if(j==0u||terms[j-1u]<=value){break;}terms[j]=terms[j-1u];j-=1u;}terms[j]=value;}
+ var sum=0.;for(var i=0u;i<8u;i+=1u){sum+=terms[i];}return sum;}
 fn coarseValue(point:vec3f)->vec2f{if(p.pad.z==3u){return vec2f(bootstrapTexturePhi(point),1.);}
  if(p.pad.z!=0u){return vec2f(analyticInitialPhi(point),1.);}let generation=powerCoarseSamples.generation&0x3fffffffu;let expected=control.epoch&0x3fffffffu;if(powerCoarseSamples.state!=0x80000000u||generation!=expected||any(powerCoarseSamples.dimensions!=p.dimensions.xyz)||abs(powerCoarseSamples.physicalCellSize-p.physical.x)>1e-5*max(powerCoarseSamples.physicalCellSize,p.physical.x)){return select(vec2f(1.,0.),vec2f(analyticInitialPhi(point),1.),authoredAnalyticPhiAvailable());}let value=sampleCoarseOctreePhi(point);let valid=finite(value)&&value<3.402823e38;return vec2f(value,select(0.,1.,valid));}
-fn publishStructuredBoundarySetup(rowCount:u32,slotCount:u32,generation:u32,bank:u32,valid:bool){atomicStore(&control.flags,select(1u,0u,valid));atomicStore(&control.firstError,select(0u,INVALID,valid));control.rows=select(0u,rowCount,valid);control.slots=select(0u,slotCount,valid);control.epoch=select(0u,generation,valid);control.bank=select(0u,bank,valid);control.published=0u;for(var b=0u;b<8u;b+=1u){atomicStore(&control.theta[b],0u);}let rowBlocks=(control.rows+63u)/64u;dispatch[0]=rowBlocks;dispatch[1]=1u;dispatch[2]=1u;let slotBlocks=(control.slots+63u)/64u;let slotX=max(1u,min(65535u,slotBlocks));dispatch[3]=slotX;dispatch[4]=(slotBlocks+slotX-1u)/slotX;dispatch[5]=1u;}
+fn publishStructuredBoundarySetup(rowCount:u32,slotCount:u32,generation:u32,bank:u32,valid:bool){atomicStore(&control.flags,select(1u,0u,valid));atomicStore(&control.firstError,select(0u,INVALID,valid));control.rows=select(0u,rowCount,valid);control.slots=select(0u,slotCount,valid);control.epoch=select(0u,generation,valid);control.bank=select(0u,bank,valid);control.published=0u;atomicStore(&control.pad,0u);for(var b=0u;b<8u;b+=1u){atomicStore(&control.theta[b],0u);}let rowBlocks=(control.rows+63u)/64u;dispatch[0]=rowBlocks;dispatch[1]=1u;dispatch[2]=1u;let slotBlocks=(control.slots+63u)/64u;let slotX=max(1u,min(65535u,slotBlocks));dispatch[3]=slotX;dispatch[4]=(slotBlocks+slotX-1u)/slotX;dispatch[5]=1u;}
 // Bucket boundaries are chosen around the 1e-2 floor and the values at which a
 // 1/theta face coefficient starts to dominate the row: [floor, .05, .1, .25,
 // .5, <1, ==1] with bucket 0 reserved for a decoupled face.
@@ -497,10 +530,15 @@ fn recordTheta(scale:f32){
  else if(theta<=5e-1){bucket=5u;}
  else if(theta<0.999){bucket=6u;}
  atomicAdd(&control.theta[bucket],1u);}
-@compute @workgroup_size(1)fn prepareStructuredBoundaryCandidate(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let slotCount=accepted[3];let generation=accepted[4];let bank=accepted[5];let valid=accepted[0]==${OCTREE_STRUCTURED_GPU_VALID}u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);}
-@compute @workgroup_size(1)fn prepareStructuredBoundaryAccepted(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let generation=accepted[3];let bank=accepted[4];let slotCount=accepted[5];let valid=accepted[0]==0u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);}
+fn boundaryLiquidIdentityEligible()->bool{return atomicLoad(&control.pad)==0u
+  &&arrayLength(&accepted)>15u&&accepted[15u]!=0u
+  &&atomicLoad(&acceptedBoundary.flags)==0u&&acceptedBoundary.rows==control.rows
+  &&acceptedBoundary.slots==control.slots&&acceptedBoundary.epoch!=0u
+  &&acceptedBoundary.published==acceptedBoundary.epoch&&acceptedBoundary.bank==control.bank;}
+@compute @workgroup_size(1)fn prepareStructuredBoundaryCandidate(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let slotCount=accepted[3];let generation=accepted[4];let bank=accepted[5];let valid=accepted[0]==${OCTREE_STRUCTURED_GPU_VALID}u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);atomicStore(&control.pad,select(1u,0u,valid&&boundaryLiquidIdentityEligible()));}
+@compute @workgroup_size(1)fn prepareStructuredBoundaryAccepted(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let generation=accepted[3];let bank=accepted[4];let slotCount=accepted[5];let valid=accepted[0]==0u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);atomicStore(&control.pad,1u);}
 fn solidAt(row:u32,x:vec3f)->f32{if(p.resolved.w==0u||solid.header[5]!=SOLID_VALID||row>=solid.header[2]){return 1e20;}let rg=geometry[rbase()+row];let q=vec3u(rg.x%p.dimensions.x,(rg.x/p.dimensions.x)%p.dimensions.y,rg.x/(p.dimensions.x*p.dimensions.y));let t=clamp((x/p.physical.x-vec3f(q))/f32(rg.y),vec3f(0),vec3f(1));var v=0.;for(var corner=0u;corner<8u;corner+=1u){let w=select(1.-t.x,t.x,(corner&1u)!=0u)*select(1.-t.y,t.y,(corner&2u)!=0u)*select(1.-t.z,t.z,(corner&4u)!=0u);v+=w*bitcast<f32>(solid.values[row*8u+corner]);}return v;}
-@compute @workgroup_size(64)fn classifyStructuredLiquidRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows){return;}let point=rowCenter(row);let coarseSample=coarseValue(point);let sample=fineSample(point,coarseSample.x);if(coarseSample.y==0.&&sample.y==0.){candidateLiquid[row]=0u;fail(row,2u);return;}candidateLiquid[row]=select(0u,1u,sample.x<0.);}
+@compute @workgroup_size(64)fn classifyStructuredLiquidRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows){return;}let point=rowCenter(row);let coarseSample=coarseValue(point);let sample=fineSample(point,coarseSample.x);if(coarseSample.y==0.&&sample.y==0.){candidateLiquid[row]=0u;atomicOr(&control.pad,1u);fail(row,2u);return;}candidateLiquid[row]=select(0u,1u,sample.x<0.);}
 fn handleOwner(h:u32)->u32{return a[abase()+p.offset0.x+h];}fn handleNeighbor(h:u32)->u32{return a[abase()+p.offset0.y+h];}fn handleNormal(h:u32)->vec3f{let at=abase()+p.offset1.z+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn handleCenter(h:u32)->vec3f{let at=abase()+p.offset1.w+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn sbase()->u32{return control.bank*p.counts.y;}fn lbase()->u32{return control.bank*p.counts.x;}fn liquidAt(row:u32)->u32{return liquid[lbase()+row];}
 // Lattice-origin face centroids to the centred world frame authored rigid
 // poses live in. handleCenter shares the structured centroids region,
@@ -567,9 +605,13 @@ recordTheta(scale);candidates[h]=vec2f(aperture,scale);}
 @compute @workgroup_size(64)fn commitStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=foldedItem(g);if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}a[abase()+p.offset1.x+h]=bitcast<u32>(candidates[h].x);a[abase()+p.offset1.y+h]=bitcast<u32>(candidates[h].y);solidVelocity[sbase()+h]=candidateSolidVelocity[h];}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}
 fn channelForCatalogSlot(global:u32)->u32{if(global>=arrayLength(&catalogSlots)){return INVALID;}let slot=catalogSlots[global];let direction=vec3i(round(slot.areaCentroid.yzw+.5*slot.normalInverseDistance.xyz));for(var channel=0u;channel<18u;channel+=1u){if(all(direction==canonicalDirection(channel))){return channel+1u;}}return INVALID;}
-@compute @workgroup_size(64)fn rebuildStructuredBoundaryRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows||atomicLoad(&control.flags)!=0u){return;}liquid[lbase()+row]=candidateLiquid[row];let base=section63Base()+row*19u;if(base+19u>arrayLength(&rows)){fail(row,64u);return;}for(var channel=0u;channel<19u;channel+=1u){rows[base+channel]=0u;}var diagonalTerms:array<f32,31>;for(var local=0u;local<31u;local+=1u){diagonalTerms[local]=0.;}for(var local=0u;local<p.counts.z;local+=1u){let at=row*p.counts.z+local;let h=a[abase()+p.offset2.y+at];if(h==INVALID||h>=control.slots){continue;}let lo=handleOwner(h);let hi=handleNeighbor(h);let other=select(lo,hi,lo==row);let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);let coefficient=bitcast<f32>(a[abase()+p.offset0.z+h])*bitcast<f32>(a[abase()+p.offset0.w+h])*aperture*scale;if(candidateLiquid[row]==0u||coefficient<=0.){continue;}diagonalTerms[local]=coefficient;let global=a[abase()+p.offset2.w+at];let channel=channelForCatalogSlot(global);if(channel==INVALID){fail(row,64u);continue;}if(other!=INVALID&&other<control.rows&&other!=row&&candidateLiquid[other]!=0u){rows[base+channel]=bitcast<u32>(bitcast<f32>(rows[base+channel])+coefficient);}}for(var i=1u;i<31u;i+=1u){let value=diagonalTerms[i];var j=i;loop{if(j==0u||diagonalTerms[j-1u]<=value){break;}diagonalTerms[j]=diagonalTerms[j-1u];j-=1u;}diagonalTerms[j]=value;}var sum=0.;for(var i=0u;i<31u;i+=1u){sum+=diagonalTerms[i];}let d=select(1.,sum,candidateLiquid[row]!=0u);rows[base]=bitcast<u32>(d);if(row+1u==control.rows){control.published=control.epoch;}}
+const HYBRID_POWER_BAND:u32=0x80000000u;
+@compute @workgroup_size(64)fn rebuildStructuredBoundaryRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows||atomicLoad(&control.flags)!=0u){return;}let value=candidateLiquid[row];if(!boundaryLiquidIdentityEligible()||value!=liquid[acceptedBoundary.bank*p.counts.x+row]){atomicOr(&control.pad,1u);}liquid[lbase()+row]=value;let base=section63Base()+row*19u;if(base+19u>arrayLength(&rows)){fail(row,64u);return;}for(var channel=0u;channel<19u;channel+=1u){rows[base+channel]=0u;}var powerBand=candidateLiquid[row]==0u;var diagonalTerms:array<f32,31>;for(var local=0u;local<31u;local+=1u){diagonalTerms[local]=0.;}for(var local=0u;local<p.counts.z;local+=1u){let at=row*p.counts.z+local;let h=a[abase()+p.offset2.y+at];if(h==INVALID||h>=control.slots){continue;}let lo=handleOwner(h);let hi=handleNeighbor(h);let other=select(lo,hi,lo==row);let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);powerBand=powerBand||hi==INVALID||aperture!=1.||scale!=1.||(other<control.rows&&candidateLiquid[other]!=candidateLiquid[row]);let coefficient=bitcast<f32>(a[abase()+p.offset0.z+h])*bitcast<f32>(a[abase()+p.offset0.w+h])*aperture*scale;if(candidateLiquid[row]==0u||coefficient<=0.){continue;}diagonalTerms[local]=coefficient;let global=a[abase()+p.offset2.w+at];let channel=channelForCatalogSlot(global);if(channel==INVALID){fail(row,64u);continue;}if(other!=INVALID&&other<control.rows&&other!=row&&candidateLiquid[other]!=0u){rows[base+channel]=bitcast<u32>(bitcast<f32>(rows[base+channel])+coefficient);}}for(var i=1u;i<31u;i+=1u){let value=diagonalTerms[i];var j=i;loop{if(j==0u||diagonalTerms[j-1u]<=value){break;}diagonalTerms[j]=diagonalTerms[j-1u];j-=1u;}diagonalTerms[j]=value;}var sum=0.;for(var i=0u;i<31u;i+=1u){sum+=diagonalTerms[i];}let d=select(1.,sum,candidateLiquid[row]!=0u);rows[base]=bitcast<u32>(d);worksetClasses[row]=select(0u,HYBRID_POWER_BAND,powerBand);if(row+1u==control.rows){control.published=control.epoch;}}
 fn rowTransition(row:u32)->bool{let at=rbase()+row;return row<control.rows&&at<arrayLength(&geometry)&&geometry[at].z!=0u;}
-fn dynamicRowClass(row:u32)->u32{let base=section63Base()+row*19u;var off=0.;for(var channel=1u;channel<19u;channel+=1u){off+=bitcast<f32>(rows[base+channel]);}let boundary=bitcast<f32>(rows[base])>off+max(1e-6,1e-5*abs(off));return select(select(0u,2u,boundary),select(1u,3u,boundary),rowTransition(row));}
+// Class 4 is a separate dry-identity proof, not regular liquid interior. A
+// failed proof falls through to the pre-authored power-band bit, so corrupt or
+// non-identity dry rows keep the general operator instead of being optimized.
+fn dynamicRowClass(row:u32)->u32{let base=section63Base()+row*19u;var off=0.;var dryIdentity=liquidAt(row)==0u&&rows[base]==bitcast<u32>(1.);for(var channel=1u;channel<19u;channel+=1u){let value=bitcast<f32>(rows[base+channel]);off+=value;dryIdentity=dryIdentity&&rows[base+channel]==0u;}if(${octreePowerHybridDryIdentityEnabled() ? "dryIdentity" : "false"}){return 4u;}let boundary=bitcast<f32>(rows[base])>off+max(1e-6,1e-5*abs(off))||(worksetClasses[row]&HYBRID_POWER_BAND)!=0u;return select(select(0u,2u,boundary),select(1u,3u,boundary),rowTransition(row));}
 // A row's class is read once per row and up to twice per incident slot. The
 // serial publication recomputed it every time, so the 19-channel offdiagonal
 // sum ran up to four times per slot; caching it is the bulk of the win.
@@ -682,5 +724,5 @@ fn worksetBlockOffset(lane:u32)->u32{let cls=worksetBlockClass[lane];var n=0u;fo
  if(cls>=9u){return;}
  dynamicWorksets[worksetBase(cls)+7u+worksetBlocks[cls*worksetBlockStride()+foldedBlock(wg)]+worksetBlockOffset(lane)]=h;
 }
-@compute @workgroup_size(1)fn acceptStructuredBoundary(){if(atomicLoad(&control.flags)!=0u||control.epoch==0u||control.published!=control.epoch){return;}atomicStore(&acceptedBoundary.flags,0u);atomicStore(&acceptedBoundary.firstError,INVALID);acceptedBoundary.rows=control.rows;acceptedBoundary.slots=control.slots;acceptedBoundary.epoch=control.epoch;acceptedBoundary.bank=control.bank;acceptedBoundary.published=control.published;acceptedBoundary.pad=0u;for(var b=0u;b<8u;b+=1u){atomicStore(&acceptedBoundary.theta[b],atomicLoad(&control.theta[b]));}}
+@compute @workgroup_size(1)fn acceptStructuredBoundary(){if(atomicLoad(&control.flags)!=0u||control.epoch==0u||control.published!=control.epoch){return;}let liquidIdentity=select(0u,1u,atomicLoad(&control.pad)==0u);atomicStore(&acceptedBoundary.flags,0u);atomicStore(&acceptedBoundary.firstError,INVALID);acceptedBoundary.rows=control.rows;acceptedBoundary.slots=control.slots;acceptedBoundary.epoch=control.epoch;acceptedBoundary.bank=control.bank;acceptedBoundary.published=control.published;atomicStore(&acceptedBoundary.pad,liquidIdentity);for(var b=0u;b<8u;b+=1u){atomicStore(&acceptedBoundary.theta[b],atomicLoad(&control.theta[b]));}}
 `;

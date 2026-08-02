@@ -397,6 +397,7 @@ const FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT = 9;
 const FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS = 10;
 const FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES =
   FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES;
+const FINE_LEVELSET_TOPOLOGY_DIRECT_DISPATCH_BYTES = 120 + 108 + 48 + 96 + 12;
 const FINE_LEVELSET_TOPOLOGY_PARAMETER_BYTES = 160;
 export const FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES =
   64 + FINE_LEVELSET_TOPOLOGY_PARAMETER_BYTES + 8 + 64 + 32
@@ -835,8 +836,13 @@ export class WebGPUFineLevelSetTopology {
   readonly control: GPUBuffer;
   /** Exact changed keys, dirty output pages, and the required JFA support halo. */
   readonly pageDelta: GPUBuffer;
-  /** GPU-authored dispatch records published at explicit storage/indirect boundaries. */
-  private readonly indirectDispatch: GPUBuffer;
+  /** Distinct direct-write arenas preserve WebGPU's pass-wide
+   * STORAGE/INDIRECT exclusivity while removing every staging copy. */
+  private readonly haloDispatch: GPUBuffer;
+  private readonly identityDispatch: GPUBuffer;
+  private readonly affectedDispatch: GPUBuffer;
+  private readonly lifecycleDispatch: GPUBuffer;
+  private readonly settlementDispatch: GPUBuffer;
   private readonly dispatchMeta: GPUBuffer;
   /** Exact one-workgroup-per-page commands consumed directly by redistance. */
   readonly redistanceDispatches: {
@@ -960,13 +966,15 @@ export class WebGPUFineLevelSetTopology {
     this.dispatchMeta = device.createBuffer({ label: "fine-levelset dispatch metadata",
       size: FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    this.indirectDispatch = device.createBuffer({
-      label: "fine-levelset immutable indirect dispatch",
-      size: FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
-    });
+    const directDispatch = (label: string, size: number) => device.createBuffer({ label, size,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC });
+    this.haloDispatch = directDispatch("fine-levelset direct recurring-halo dispatch", 120);
+    this.identityDispatch = directDispatch("fine-levelset direct identity dispatches", 108);
+    this.affectedDispatch = directDispatch("fine-levelset direct affected-page dispatch", 48);
+    this.lifecycleDispatch = directDispatch("fine-levelset direct lifecycle dispatches", 96);
+    this.settlementDispatch = directDispatch("fine-levelset direct settlement dispatch", 12);
     this.redistanceDispatches = {
-      buffer: this.indirectDispatch,
+      buffer: this.lifecycleDispatch,
       dirtyOffsetBytes: 84,
       supportOffsetBytes: 60,
     };
@@ -1005,7 +1013,7 @@ export class WebGPUFineLevelSetTopology {
     this.transportedPhiSnapshot = device.createBuffer({ label: "fine-levelset transported phi transaction",
       size: sampleBytes, usage: GPUBufferUsage.STORAGE });
     this.allocatedBytes = FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES
-      + this.pageDeltaLayout.totalBytes + FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES + sampleBytes
+      + this.pageDeltaLayout.totalBytes + FINE_LEVELSET_TOPOLOGY_DIRECT_DISPATCH_BYTES + sampleBytes
       + (desiredCandidateWords + desiredScanWords + this.sparseCandidateCapacity
         + current.plan.maximumResidentBricks + topologyScratchWords) * 4;
     this.params = device.createBuffer({ label: "fine-levelset topology params",
@@ -1354,6 +1362,10 @@ export class WebGPUFineLevelSetTopology {
     this.device.queue.writeBuffer(this.params, 0, bytes);
     this.device.queue.writeBuffer(this.control, 0, new Uint32Array(8));
     const resource = (buffer: GPUBuffer) => ({ buffer });
+    const withDirectDispatch = (entries: readonly GPUBindGroupEntry[], dispatch: GPUBuffer) => [
+      ...entries.filter((entry) => entry.binding !== 33),
+      { binding: 33, resource: resource(dispatch) },
+    ];
     const discoverEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: resource(this.params) }, { binding: 1, resource: resource(this.current.metadata) },
       { binding: 2, resource: resource(this.current.worklist) }, { binding: 3, resource: resource(this.current.flags) },
@@ -1370,6 +1382,7 @@ export class WebGPUFineLevelSetTopology {
       { binding: 22, resource: resource(this.dispatchMeta) },
       { binding: 23, resource: resource(publication.kind === "delta"
         ? publication.producer.buffer : this.emptySeeds) },
+      { binding: 33, resource: resource(this.haloDispatch) },
       ...extraPublishEntries,
     ];
     const publishEntries: GPUBindGroupEntry[] = [
@@ -1386,6 +1399,7 @@ export class WebGPUFineLevelSetTopology {
       { binding: 22, resource: resource(this.dispatchMeta) },
       { binding: 23, resource: resource(publication.kind === "delta"
         ? publication.producer.buffer : this.emptySeeds) },
+      { binding: 33, resource: resource(this.settlementDispatch) },
       ...extraPublishEntries,
     ];
     const deltaEntries: GPUBindGroupEntry[] = [
@@ -1405,6 +1419,7 @@ export class WebGPUFineLevelSetTopology {
       { binding: 22, resource: resource(this.dispatchMeta) },
       { binding: 23, resource: resource(publication.kind === "delta"
         ? publication.producer.buffer : this.emptySeeds) },
+      { binding: 33, resource: resource(this.identityDispatch) },
     ];
     // Dispatch boundaries provide the storage-buffer ordering required by
     // deterministic seed classification, closure publication, and assignment. Keeping this
@@ -1422,11 +1437,10 @@ export class WebGPUFineLevelSetTopology {
       }
     };
     const runIndirect = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[], _label: string,
-      dispatchWord: number, used?: readonly number[]) => {
+      dispatch: GPUBuffer, dispatchOffsetBytes: number, used?: readonly number[]) => {
       const pass = broker.compute({ label: _label });
       pass.setPipeline(pipeline); pass.setBindGroup(0, this.cachedBindGroup(pipeline, entries, used));
-      pass.dispatchWorkgroupsIndirect(this.indirectDispatch,
-        dispatchWord * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES);
+      pass.dispatchWorkgroupsIndirect(dispatch, dispatchOffsetBytes);
     };
     const runIdentity = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[],
       x: number, y: number, used: readonly number[], label?: string) => {
@@ -1506,20 +1520,16 @@ export class WebGPUFineLevelSetTopology {
       const algorithmDiagnostics = octreeAlgorithmDiagnosticsEnabled();
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic before recurring fine-band scatter");
       runIdentity(this.publishRecurringSparseBandPipeline, discoverEntries,
-        1, 1, [0, 6, 7, 14, 15, 16, 19, 21, 22, 23],
+        1, 1, [0, 6, 7, 14, 15, 16, 19, 21, 22, 23, 33],
         "Publish recurring sparse fine band (compact seed classification and rank)");
       // The cubic halo is a pair grid, not a per-seed loop: one invocation per
       // (compact seed, halo offset) issuing one idempotent OR. Sizing it needs
       // the seed count the previous dispatch just authored, which is the one
       // storage-to-indirect boundary this publication pays for.
-      broker.updateIndirectBuffer(this.dispatchMeta,
-        FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES,
-        this.indirectDispatch,
-        FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES,
-        FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES);
+      broker.fence("fine recurring halo dispatch publication");
       runIndirect(this.scatterRecurringSeedHaloPipeline, discoverEntries,
         "Scatter recurring fine-band seed halos",
-        FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT, [0, 7, 15, 19, 21, 23]);
+        this.haloDispatch, 108, [0, 7, 15, 19, 21, 23]);
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scatter");
       const recurringBlocks = Math.ceil(plan.logicalBrickCount / 256);
       const recurringSuperBlocks = Math.ceil(recurringBlocks / 256);
@@ -1562,13 +1572,11 @@ export class WebGPUFineLevelSetTopology {
       Math.ceil(plan.maximumResidentBricks / 64), 1, [0, 7, 15, 16, 18]);
     runIdentity(this.assignIdentityPipeline, deltaEntries,
       Math.ceil(plan.maximumResidentBricks / 64), 1, [0, 3, 4, 7, 14, 15, 16, 18]);
-    runIdentity(this.finalizeIdentityPipeline, deltaEntries, 1, 1, [0, 4, 7, 15, 22]);
+    runIdentity(this.finalizeIdentityPipeline, deltaEntries, 1, 1, [0, 4, 7, 15, 22, 33]);
     broker.fence("fine identity dispatch publication");
-    broker.updateIndirectBuffer(this.dispatchMeta, 0, this.indirectDispatch, 0,
-      FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES);
     if (publication.kind === "delta") {
       runIndirect(this.classifyPageDeltaPipeline, deltaEntries, "Classify exact global fine page delta",
-        0, [0, 3, 4, 7, 14, 15, 16, 21, 23]);
+        this.identityDispatch, 0, [0, 3, 4, 7, 14, 15, 16, 21, 23]);
     }
     runIdentity(this.scanIdentityRecordsPipeline, deltaEntries, identityBlocks, 1, [0, 7, 15, 18]);
     runIdentity(this.scanIdentityGroupsPipeline, deltaEntries, identitySuperBlocks, 1, [0, 15]);
@@ -1578,16 +1586,13 @@ export class WebGPUFineLevelSetTopology {
       runIdentity(this.offsetIdentityRecordsPipeline, deltaEntries, identityBlocks, 1, [0, 15, 18]);
     }
     runIndirect(this.compactChangedKeysPipeline, deltaEntries,
-      "Compact sorted global fine changed keys", 1, [0, 7, 15, 16, 18]);
-    run(this.preparePageDeltaExpansionPipeline, deltaEntries, "Prepare global fine page delta expansion",
-      1, [0, 7, 15, 18, 22]);
+      "Compact sorted global fine changed keys", this.identityDispatch, 12, [0, 7, 15, 16, 18]);
+    run(this.preparePageDeltaExpansionPipeline, withDirectDispatch(deltaEntries, this.affectedDispatch),
+      "Prepare global fine page delta expansion", 1, [0, 7, 15, 18, 22, 33]);
     broker.fence("fine changed-key dispatch publication");
-    broker.updateIndirectBuffer(this.dispatchMeta,
-      3 * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES,
-      this.indirectDispatch, 3 * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES, 12);
     runIndirect(this.classifyAffectedPagesPipeline, deltaEntries,
       "Classify exact changed-key dirty and support pages",
-      3, [0, 3, 4, 7, 14, 15, 16, 21, 23]);
+      this.affectedDispatch, 36, [0, 3, 4, 7, 14, 15, 16, 21, 23]);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after changed-key affected-page classification");
     }
@@ -1597,16 +1602,13 @@ export class WebGPUFineLevelSetTopology {
     runIdentity(this.offsetIdentityGroupsPipeline, deltaEntries, identitySuperBlocks, 4, [0, 15]);
     runIdentity(this.offsetIdentityRecordsPipeline, deltaEntries, identityBlocks, 4, [0, 15, 18]);
     runIndirect(this.compactAffectedPagesPipeline, deltaEntries, "Compact exact dirty and support pages",
-      3, [0, 7, 15, 18]);
-    run(this.finalizePageDeltaPipeline, deltaEntries, "Finalize global fine page delta",
-      1, [0, 7, 15, 18, 22, 23]);
+      this.affectedDispatch, 36, [0, 7, 15, 18]);
+    run(this.finalizePageDeltaPipeline, withDirectDispatch(deltaEntries, this.lifecycleDispatch),
+      "Finalize global fine page delta", 1, [0, 7, 15, 18, 22, 23, 33]);
     runIndirect(this.publishSummaryChangedKeysPipeline, deltaEntries,
       "Publish exact post-redistance fine summary keys",
-      3, [0, 3, 7, 15, 16]);
+      this.affectedDispatch, 36, [0, 3, 7, 15, 16]);
     broker.fence("fine exact page-delta dispatch publication");
-    broker.updateIndirectBuffer(this.dispatchMeta,
-      4 * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES,
-      this.indirectDispatch, 4 * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES, 48);
     const lifecycleEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: resource(this.params) },
       { binding: 3, resource: resource(this.next.metadata) },
@@ -1635,29 +1637,29 @@ export class WebGPUFineLevelSetTopology {
       ...extraPublishEntries,
     ];
     runIndirect(this.carryPipeline, lifecycleEntries, "Gather compact global fine flags/phi payloads",
-      8, [0, 3, 4, 7, 14, 16, 24, 25, 28, 29]);
+      this.identityDispatch, 96, [0, 3, 4, 7, 14, 16, 24, 25, 28, 29]);
     runIndirect(this.carryWorkPipeline, lifecycleEntries, "Gather compact global fine work A/B payloads",
-      8, [0, 3, 4, 7, 14, 16, 24, 25, 26, 30, 31]);
+      this.identityDispatch, 96, [0, 3, 4, 7, 14, 16, 24, 25, 26, 30, 31]);
     runIndirect(this.snapshotPipeline, lifecycleEntries, "Snapshot exact global fine rollback pages",
-      4, [0, 7, 10, 15, 16, 21, 24, 25]);
+      this.lifecycleDispatch, 48, [0, 7, 10, 15, 16, 21, 24, 25]);
     runIndirect(this.initializePipeline, lifecycleEntries, "Initialize added global fine samples",
-      2, [0, 3, 5, 6, 7, 8, 14, 15, 21,
+      this.identityDispatch, 24, [0, 3, 5, 6, 7, 8, 14, 15, 21,
         ...extraPublishEntries.map((entry) => entry.binding)]);
     runIndirect(this.initializeWorkPipeline, lifecycleEntries,
       "Initialize added global fine work A/B samples",
-      2, [0, 7, 15, 30, 31]);
+      this.identityDispatch, 24, [0, 7, 15, 30, 31]);
     runIndirect(this.linkPipeline, publishEntries,
-      "Gather all compact global fine adjacency", 6, [0, 3, 4, 7, 21]);
+      "Gather all compact global fine adjacency", this.lifecycleDispatch, 72, [0, 3, 4, 7, 21]);
     runIdentity(this.reduceTopologyErrorRecordsPipeline, lifecycleEntries,
       topologyErrorBlocks, 1, [0, 20, 21]);
     runIdentity(this.reduceTopologyErrorGroupsPipeline, lifecycleEntries,
       topologyErrorSuperBlocks, 1, [0, 20]);
     runIdentity(this.reduceTopologyErrorSuperGroupsPipeline, lifecycleEntries,
       1, 1, [0, 20]);
-    run(this.finalizePipeline, publishEntries, "Finalize global fine publication", 1, [0, 4, 7, 14, 15, 20, 22]);
+    run(this.finalizePipeline, publishEntries, "Finalize global fine publication", 1,
+      [0, 4, 7, 14, 15, 20, 22, 33]);
     if (!deferPublication) {
       broker.fence("fine immediate settlement dispatch publication");
-      broker.updateIndirectBuffer(this.dispatchMeta, 0, this.indirectDispatch, 0, 12);
       runIndirect(this.settlePublicationPipeline, [
         { binding: 0, resource: resource(this.params) },
         { binding: 3, resource: resource(this.next.metadata) },
@@ -1670,8 +1672,8 @@ export class WebGPUFineLevelSetTopology {
         { binding: 16, resource: resource(this.current.metadata) },
         { binding: 17, resource: resource(this.next.rollbackPhi) },
         { binding: 32, resource: resource(this.current.rollbackPhi) },
-      ], "Settle immediate global fine publication", 0,
-      [0, 3, 4, 5, 6, 7, 14, 15, 16, 17, 32]);
+      ], "Settle immediate global fine publication",
+      this.settlementDispatch, 0, [0, 3, 4, 5, 6, 7, 14, 15, 16, 17, 32]);
       runIndirect(this.settleWorkPayloadPipeline, [
         { binding: 0, resource: resource(this.params) },
         { binding: 3, resource: resource(this.next.metadata) },
@@ -1683,8 +1685,8 @@ export class WebGPUFineLevelSetTopology {
         { binding: 26, resource: resource(this.current.workA) },
         { binding: 28, resource: resource(this.next.flags) },
         { binding: 30, resource: resource(this.next.workA) },
-      ], "Settle immediate rejected fine work payload", 0,
-      [0, 3, 4, 7, 14, 16, 24, 26, 28, 30]);
+      ], "Settle immediate rejected fine work payload",
+      this.settlementDispatch, 0, [0, 3, 4, 7, 14, 16, 24, 26, 28, 30]);
     }
     broker.fence("global fine topology publication complete");
   }
@@ -1708,10 +1710,10 @@ export class WebGPUFineLevelSetTopology {
       { binding: 14, resource: resource(this.current.worklist) },
       { binding: 15, resource: resource(this.pageDelta) },
       { binding: 22, resource: resource(this.dispatchMeta) },
+      { binding: 33, resource: resource(this.settlementDispatch) },
     ]));
     pass.dispatchWorkgroups(1);
     broker.fence("fine deferred settlement dispatch publication");
-    broker.updateIndirectBuffer(this.dispatchMeta, 0, this.indirectDispatch, 0, 12);
     const settlePass = broker.compute({ label: "Settle deferred global fine publication" });
     settlePass.setPipeline(this.settlePublicationPipeline);
     settlePass.setBindGroup(0, this.cachedBindGroup(this.settlePublicationPipeline, [
@@ -1727,7 +1729,7 @@ export class WebGPUFineLevelSetTopology {
         { binding: 17, resource: resource(this.next.rollbackPhi) },
         { binding: 32, resource: resource(this.current.rollbackPhi) },
       ]));
-    settlePass.dispatchWorkgroupsIndirect(this.indirectDispatch, 0);
+    settlePass.dispatchWorkgroupsIndirect(this.settlementDispatch, 0);
     const settleWorkPass = broker.compute({ label: "Settle deferred rejected fine work payload" });
     settleWorkPass.setPipeline(this.settleWorkPayloadPipeline);
     settleWorkPass.setBindGroup(0, this.cachedBindGroup(this.settleWorkPayloadPipeline, [
@@ -1742,13 +1744,15 @@ export class WebGPUFineLevelSetTopology {
         { binding: 28, resource: resource(this.next.flags) },
         { binding: 30, resource: resource(this.next.workA) },
       ]));
-    settleWorkPass.dispatchWorkgroupsIndirect(this.indirectDispatch, 0);
+    settleWorkPass.dispatchWorkgroupsIndirect(this.settlementDispatch, 0);
     broker.fence("global fine topology publication complete");
   }
 
   destroy(): void { this.control.destroy(); this.params.destroy(); this.emptySeeds.destroy();
     this.bindGroupCache.length = 0;
-    this.pageDelta.destroy(); this.dispatchMeta.destroy(); this.indirectDispatch.destroy();
+    this.pageDelta.destroy(); this.dispatchMeta.destroy(); this.haloDispatch.destroy();
+    this.identityDispatch.destroy(); this.affectedDispatch.destroy(); this.lifecycleDispatch.destroy();
+    this.settlementDispatch.destroy();
     this.transportedPhiSnapshot.destroy();
     this.desiredCandidates.destroy(); this.sparseCandidates.destroy(); this.desiredScan.destroy();
     this.topologyErrors.destroy();
@@ -1804,6 +1808,7 @@ struct Params { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u
 @group(0) @binding(30) var<storage,read_write> nextWorkA:array<u32>;
 @group(0) @binding(31) var<storage,read_write> nextWorkB:array<u32>;
 @group(0) @binding(32) var<storage,read> currentCommittedPhi:array<u32>;
+@group(0) @binding(33) var<storage,read_write> publishedDispatch:array<u32>;
 ${coarsePhiWGSL}
 ${fineLevelSetLinearWorkgroupWGSL}
 // The compact coarse sampler uses max-finite as an explicit invalid sentinel;
@@ -1901,6 +1906,7 @@ fn producerInterfaceContains(key:u32)->bool{if(params.recurringDelta==0u||arrayL
 	fn dispatchRecord(count:u32)->vec3u{let x=min(count,params.maxWorkgroups);var y=1u;if(x>0u){y=(count+x-1u)/x;}return vec3u(x,y,1u);}
 	fn writeDeltaDispatch(offset:u32,count:u32){let record=dispatchRecord(count);pageDelta[offset]=record.x;pageDelta[offset+1u]=record.y;pageDelta[offset+2u]=record.z;}
 	fn writeIndirectDispatch(slot:u32,count:u32){let record=dispatchRecord(count);let base=3u*slot;indirectDispatch[base]=record.x;indirectDispatch[base+1u]=record.y;indirectDispatch[base+2u]=record.z;}
+	fn writePublishedDispatch(slot:u32,count:u32){let record=dispatchRecord(count);let base=3u*slot;publishedDispatch[base]=record.x;publishedDispatch[base+1u]=record.y;publishedDispatch[base+2u]=record.z;}
 	@compute @workgroup_size(64) fn clearFinePageDelta(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let item=linearInvocation(wid,nwg,local);if(item<16u){pageDelta[item]=0u;}if(item<21u){pageDelta[lifecycleDispatchOffset()+item]=0u;}if(item<6u){pageDelta[promotionCountsOffset()+item]=0u;}if(item<${3 * FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS}u){indirectDispatch[item]=0u;}if(item==1u){pageDelta[1]=params.nextGeneration;}}
 @compute @workgroup_size(64) fn clearDesiredGeneration(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let item=linearInvocation(wid,nwg,local);if(item<7u+params.pageCapacity){targetB[item]=INVALID;}if(item<9u&&item!=6u){control[item]=0u;}if(item==6u){control[6]=params.dilationBrickRings;}}
 @compute @workgroup_size(64) fn clearTopologyErrors(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work<params.pageCapacity){atomicStore(&topologyErrors[work],0u);}}
@@ -2142,7 +2148,9 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
    }else{deltaPairs=producers*deltaVolume;}}
   control[0]=recurringFlags;
   let seeds=min(ranked,params.pageCapacity);control[1]=seeds;control[8]=seeds;
-  writeIndirectDispatch(${FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT}u,(bandPairs+deltaPairs+255u)/256u);
+  let haloGroups=(bandPairs+deltaPairs+255u)/256u;
+  writeIndirectDispatch(${FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT}u,haloGroups);
+  writePublishedDispatch(${FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT}u,haloGroups);
  }
 }
 // One invocation per (compact seed, halo offset) pair. The grid is authored on
@@ -2381,6 +2389,8 @@ fn identityTotal(stream:u32,count:u32)->u32{
  desiredCandidates[work]=0u;
 }
 @compute @workgroup_size(1) fn finalizeDesiredPageIdentityAssignment(){
+ writePublishedDispatch(0u,0u);writePublishedDispatch(1u,0u);
+ writePublishedDispatch(2u,0u);writePublishedDispatch(8u,0u);
  if(control[0]!=0u||pageDelta[15]!=VALID){return;}let desiredCount=control[2];
  let desiredGroups=(desiredCount+63u)/64u;let changedGroups=(pageDelta[13]+63u)/64u;
  sourceD[0]=params.nextGeneration;sourceD[1]=desiredCount;sourceD[2]=params.pageCapacity;sourceD[3]=0u;
@@ -2389,6 +2399,8 @@ fn identityTotal(stream:u32,count:u32)->u32{
  writeDeltaDispatch(lifecycleDispatchOffset()+3u,changedGroups);writeIndirectDispatch(1u,changedGroups);
  writeDeltaDispatch(lifecycleDispatchOffset()+6u,pageDelta[11]);writeIndirectDispatch(2u,pageDelta[11]);
  writeIndirectDispatch(8u,desiredCount);
+ writePublishedDispatch(0u,desiredGroups);writePublishedDispatch(1u,changedGroups);
+ writePublishedDispatch(2u,pageDelta[11]);writePublishedDispatch(8u,desiredCount);
 }
 @compute @workgroup_size(64) fn carryDesiredSamples(@builtin(workgroup_id)wid:vec3u,
  @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
@@ -2433,13 +2445,15 @@ fn identityTotal(stream:u32,count:u32)->u32{
   pageDelta[changedKeysOffset()+changedDesired+item]=currentMetadata[id*10u+1u];}}
  if(item<desired){pageDelta[changedCandidatesOffset()+item]=INVALID;}
 }
-@compute @workgroup_size(1) fn prepareFinePageDeltaExpansion(){if(control[0]!=0u){return;}let desired=min(control[2],params.pageCapacity);
+@compute @workgroup_size(1) fn prepareFinePageDeltaExpansion(){writePublishedDispatch(3u,0u);
+ if(control[0]!=0u){return;}let desired=min(control[2],params.pageCapacity);
  let changedDesired=identityTotal(0u,desired);let changed=changedDesired+min(pageDelta[12],params.pageCapacity);
  let broadIsExact=pageDelta[10]==2u;
  pageDelta[0]=changed;pageDelta[10]=1u|select(0u,2u,broadIsExact);pageDelta[13]=changedDesired;
  writeDeltaDispatch(lifecycleDispatchOffset()+9u,(changed+63u)/64u);
  let affectedGroups=(max(desired,min(pageDelta[12],params.pageCapacity))+63u)/64u;
- writeDeltaDispatch(lifecycleDispatchOffset()+12u,affectedGroups);writeIndirectDispatch(3u,affectedGroups);}
+ writeDeltaDispatch(lifecycleDispatchOffset()+12u,affectedGroups);writeIndirectDispatch(3u,affectedGroups);
+ writePublishedDispatch(3u,affectedGroups);}
 fn sortedChangedStreamContains(key:u32,first:u32,count:u32)->bool{var low=0u;var high=count;
  while(low<high){let middle=low+(high-low)/2u;let stored=pageDelta[changedKeysOffset()+first+middle];
   if(stored<key){low=middle+1u;}else{high=middle;}}
@@ -2543,7 +2557,9 @@ fn repairNeighbor(key:u32)->bool{
  if(item<retired){let id=pageDelta[retiredPagesOffset()+item];
   if(id<params.pageCapacity){pageDelta[rollbackPagesOffset()+carriedDirty+item]=id;}}
 }
-@compute @workgroup_size(1) fn finalizeFinePageDelta(){if(control[0]!=0u||pageDelta[15]!=VALID){return;}
+@compute @workgroup_size(1) fn finalizeFinePageDelta(){writePublishedDispatch(4u,0u);writePublishedDispatch(5u,0u);
+ writePublishedDispatch(6u,0u);writePublishedDispatch(7u,0u);
+ if(control[0]!=0u||pageDelta[15]!=VALID){return;}
  // Reassert the target epoch at the publication point. The clear pass writes
  // it initially, but redistance consumes this finalized record, not scratch
  // initialization; keeping the epoch write beside the finalized counts makes
@@ -2575,6 +2591,8 @@ fn repairNeighbor(key:u32)->bool{
  pageDelta[13]=dirty;pageDelta[14]=rollback;
  writeDeltaDispatch(lifecycleDispatchOffset()+15u,rollback);writeDeltaDispatch(lifecycleDispatchOffset()+18u,dirty);
  writeIndirectDispatch(4u,rollback);writeIndirectDispatch(5u,support);writeIndirectDispatch(6u,desired);writeIndirectDispatch(7u,dirty);
+ writePublishedDispatch(4u,rollback);writePublishedDispatch(5u,support);
+ writePublishedDispatch(6u,desired);writePublishedDispatch(7u,dirty);
 }
 @compute @workgroup_size(64) fn publishFineSummaryChangedKeys(
  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
@@ -2615,7 +2633,8 @@ fn fineSettlementWorkgroups()->u32{
  let currentCount=min(currentWorklist[1],params.pageCapacity);
  return max(currentCount,max(min(pageDelta[11],params.pageCapacity),min(pageDelta[14],params.pageCapacity)));
 }
-fn publishFineSettlementDispatch(){writeIndirectDispatch(0u,fineSettlementWorkgroups());}
+fn publishFineSettlementDispatch(){let workgroups=fineSettlementWorkgroups();writeIndirectDispatch(0u,workgroups);
+ writePublishedDispatch(0u,workgroups);}
 @compute @workgroup_size(1) fn finalizeDesiredGeneration(){
  if(control[0]==0u){let errors=desiredScan[0];if(errors!=0u){control[0]|=errors;control[7]=desiredScan[1];}}
  if(control[0]==0u){let count=control[2];sourceD[0]=params.nextGeneration;sourceD[1]=count;sourceD[2]=params.pageCapacity;

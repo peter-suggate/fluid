@@ -73,6 +73,19 @@ export function coarsePhiBFECCEnabled(
 export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_TRANSPORT_SUMMARY_ITEMS_PER_WORKGROUP = 4_096;
 export const FINE_LEVELSET_TRANSPORT_MAXIMUM_ENCODED_SUBSTEPS = 64;
+/** A sleeping region may move by at most this fraction of one fine cell per
+ * step. Topology/row identity and the preceding exact repair set must also be
+ * unchanged; this scalar is never sufficient on its own. */
+export const FINE_LEVELSET_QUIESCENCE_DISPLACEMENT_EPSILON_CELLS = 1e-5;
+export const FLUID_FINE_TRANSPORT_QUIESCENCE_ENV = "FLUID_FINE_TRANSPORT_QUIESCENCE";
+/** Default-on exact A/B switch. Zero supplies an impossible negative sleep
+ * tolerance while preserving the identical shader and publication graph. */
+export function fineTransportQuiescenceEnabled(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.[FLUID_FINE_TRANSPORT_QUIESCENCE_ENV] !== "0";
+}
 /** Binding zero is uniform; every remaining entry is storage. The dense owner
  * directory coalesces the former row-geometry lookup into air support, leaving
  * transition classes one buffer below Dawn's portable ten-buffer ceiling. */
@@ -137,6 +150,9 @@ export interface FineLevelSetGPUTransportOptions {
   maximumBacktraceFineCells?: number;
   boundaryPolicy?: FineLevelSetGPUBoundaryPolicy;
   openTopBoundary?: boolean;
+  /** Conservatively disables sleeping when an authored moving solid can wake
+   * a dependency cone without first producing liquid velocity. */
+  dynamicBoundary?: boolean;
 }
 
 export interface FineLevelSetGPUTransportPlan {
@@ -146,6 +162,7 @@ export interface FineLevelSetGPUTransportPlan {
   readonly topologyDeltaBytes: number;
   readonly pageStatusBytes: number;
   readonly worksetBytes: number;
+  readonly activitySnapshotBytes: number;
   readonly controlBytes: typeof FINE_LEVELSET_TRANSPORT_CONTROL_BYTES;
   readonly allocatedBytes: number;
 }
@@ -170,10 +187,11 @@ export function planFineLevelSetGPUTransport(queryCapacity: number,
   // reuses them as two packed u16 counter pairs plus exact displacement.
   const pageStatusBytes = pages * 12;
   const worksetBytes = 128 + pages * 4;
+  const activitySnapshotBytes = pages * 4;
   return { queryCapacity, velocityChunkCapacity: queryCapacity, chunkCount: 1,
-    topologyDeltaBytes, pageStatusBytes, worksetBytes,
+    topologyDeltaBytes, pageStatusBytes, worksetBytes, activitySnapshotBytes,
     controlBytes: FINE_LEVELSET_TRANSPORT_CONTROL_BYTES,
-    allocatedBytes: 320 + pageStatusBytes + worksetBytes + topologyDeltaBytes
+    allocatedBytes: 320 + pageStatusBytes + worksetBytes + activitySnapshotBytes + topologyDeltaBytes
       + FINE_LEVELSET_TRANSPORT_CONTROL_BYTES + 2 * 512 };
 }
 
@@ -254,6 +272,9 @@ export class WebGPUFineLevelSetTransport {
   private deltaPipeline!: GPUComputePipeline;
   private compactDeltaPipeline!: GPUComputePipeline;
   private readonly samplingCatalog: GPUBuffer;
+  /** Exact logical fine-page identities from the preceding use of this A/B
+   * transport instance. This is a wake oracle, never a phi cache. */
+  private readonly activitySnapshot: GPUBuffer;
   private readonly samplingOffsets: readonly number[];
   private planGroup!: GPUBindGroup;
   private classifyGroup!: GPUBindGroup;
@@ -276,8 +297,6 @@ export class WebGPUFineLevelSetTransport {
   private pipelineInitialization?: Promise<void>;
   /** 256-page blocks the widened publication trio classifies and scatters. */
   private readonly scanBlocks: number;
-  /** 256-word blocks covering the interface delta's cleared header and stream. */
-  private readonly deltaClearBlocks: number;
   /** Diagnostic-only per-class page-count census; see `censusTick`. */
   private readonly censusEnabled = fineTransportWorksetCensusEnabled();
   private censusStaging?: GPUBuffer;
@@ -303,6 +322,8 @@ export class WebGPUFineLevelSetTransport {
       || air.layout.selectorStride !== OCTREE_AIR_SUPPORT_SELECTOR_STRIDE
       || air.layout.ownerDirectoryCellCapacity < resources.dimensions[0]
         * resources.dimensions[1] * resources.dimensions[2]
+      || air.layout.ownerDirectorySlotCapacity
+        < 2 * (structured.plan.rowCapacity + air.layout.supportCapacity)
       || air.layout.supportVectorOffsetWords % 4 !== 0
       || air.arena.size < air.layout.totalBytes
       || air.boundaryControl.size < 7 * 4)) {
@@ -327,6 +348,8 @@ export class WebGPUFineLevelSetTransport {
     this.samplingOffsets = Object.freeze(samplingOffsets);
     this.samplingCatalog = device.createBuffer({ label: "Fine transport row metrics and immutable interpolation catalog",
       size: samplingBytes, usage: storage });
+    this.activitySnapshot = device.createBuffer({ label: "Fine transport exact page-activity snapshot",
+      size: this.plan.activitySnapshotBytes, usage: storage });
     const catalogCopy = device.createCommandEncoder({ label: "Install fine transport interpolation catalog" });
     pieces.forEach((piece, index) => catalogCopy.copyBufferToBuffer(
       piece, 0, this.samplingCatalog, samplingOffsets[index + 1]!, piece.size));
@@ -337,7 +360,6 @@ export class WebGPUFineLevelSetTransport {
     this.control = device.createBuffer({ label: "Structured fine transport control",
       size: FINE_LEVELSET_TRANSPORT_CONTROL_BYTES, usage: storage });
     this.scanBlocks = Math.ceil(source.plan.maximumResidentBricks / 256);
-    this.deltaClearBlocks = Math.ceil((8 + 3 * source.plan.maximumResidentBricks) / 256);
     // Block-scan scratch for the widened workset, status, and delta
     // publications: SCAN_BLOCK_WORDS (16) per 256-page block, one global
     // record, then one prefix word per scanned item so the scatters carry the
@@ -436,7 +458,7 @@ export class WebGPUFineLevelSetTransport {
       [12, structured.rowVelocities], [13, this.governor], [14, topology.metrics],
       // Missing support remains constructible for isolated tests, but the
       // shader's enabled bit makes that state publish zero work.
-      [20, air?.arena ?? structured.rowVelocities],
+      [16, this.activitySnapshot], [20, air?.arena ?? structured.rowVelocities],
       [21, air?.boundaryControl ?? structured.control],
       ...(this.reversePhi ? [[10, this.reversePhi] as const] : []),
     ]);
@@ -445,7 +467,7 @@ export class WebGPUFineLevelSetTransport {
         layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding) => ({
         binding, resource: { buffer: all.get(binding)! },
       })) });
-    this.planGroup = group(this.planPipeline, [0,2,6,9,12,13,14,20,21]);
+    this.planGroup = group(this.planPipeline, [0,1,2,6,9,12,13,14,16,20,21]);
     this.classifyGroup = group(this.classifyPipeline, [0,1,2,3,4,13]);
     // Bindings must match what the entry point statically uses: these
     // pipelines are created with `layout: "auto"`, so the derived layout omits
@@ -467,7 +489,7 @@ export class WebGPUFineLevelSetTransport {
     this.reduceStatusGroup = group(this.reduceStatusPipeline, [0,1,2,13]);
     this.summarizeGroup = group(this.summarizePipeline, [0,1,2,7,13]);
     this.commitGroup = group(this.commitPipeline, [0,1,2,3,4,5,7,8]);
-    this.clearDeltaGroup = group(this.clearDeltaPipeline, [0,8]);
+    this.clearDeltaGroup = group(this.clearDeltaPipeline, [8]);
     this.reduceDeltaGroup = group(this.reduceDeltaPipeline, [0,2,8,13]);
     this.deltaGroup = group(this.deltaPipeline, [0,2,7,8,13]);
     this.compactDeltaGroup = group(this.compactDeltaPipeline, [0,2,8,13]);
@@ -600,11 +622,20 @@ export class WebGPUFineLevelSetTransport {
       f.set([inflow.velocity_m_s.x, inflow.velocity_m_s.y,
         inflow.velocity_m_s.z, inflow.apertureScale], 68);
     }
-    f.set([inflow?.strength ?? 0, 0, 0, 0], 72);
+    f.set([inflow?.strength ?? 0,
+      fineTransportQuiescenceEnabled()
+        ? FINE_LEVELSET_QUIESCENCE_DISPLACEMENT_EPSILON_CELLS : -1,
+      options.dynamicBoundary ? 1 : 0, 0], 72);
     this.device.queue.writeBuffer(this.params, 0, bytes);
     const run = (pipeline: GPUComputePipeline, group: GPUBindGroup, label: string, groups: number) => {
       const pass = broker.compute({ label }); pass.setPipeline(pipeline); pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(groups);
+    };
+    const runLiveBlocks = (pipeline: GPUComputePipeline, group: GPUBindGroup, label: string) => {
+      const pass = broker.compute({ label }); pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+      // Governor words 43..45 are the GPU-authored ceil(livePages / 256)
+      // dispatch. The allocation-time scanBlocks value sizes scratch only.
+      pass.dispatchWorkgroupsIndirect(this.indirectDispatch, 43 * 4);
     };
     run(this.planPipeline, this.planGroup, "Plan GPU-resident fine transport substeps", 1);
     broker.fence("structured fine substep governor published");
@@ -617,14 +648,14 @@ export class WebGPUFineLevelSetTransport {
     }
     // Classify -> block prefix -> scatter, keyed by page index so the class
     // streams keep the ascending order the retired serial loops produced.
-    run(this.reduceWorksetsPipeline, this.reduceWorksetsGroup,
-      "Reduce direct structured fine transport workset blocks", this.scanBlocks);
+    runLiveBlocks(this.reduceWorksetsPipeline, this.reduceWorksetsGroup,
+      "Reduce direct structured fine transport workset blocks");
     run(this.scanWorksetsPipeline, this.scanWorksetsGroup,
       "Scan direct structured fine transport workset groups", 1);
     run(this.publishWorksetsPipeline, this.publishWorksetsGroup,
       "Publish direct structured fine transport worksets", 1);
-    run(this.compactWorksetsPipeline, this.compactWorksetsGroup,
-      "Compact direct structured fine transport worksets", this.scanBlocks);
+    runLiveBlocks(this.compactWorksetsPipeline, this.compactWorksetsGroup,
+      "Compact direct structured fine transport worksets");
     // Storage dependencies are ordered between dispatches in one compute pass.
     // End the pass only for the storage-write -> INDIRECT-only copy below.
     broker.fence("structured fine transport worksets published");
@@ -654,8 +685,8 @@ export class WebGPUFineLevelSetTransport {
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after fine characteristic transport");
     }
-    run(this.reduceStatusPipeline, this.reduceStatusGroup,
-      "Reduce structured fine transport status blocks", this.scanBlocks);
+    runLiveBlocks(this.reduceStatusPipeline, this.reduceStatusGroup,
+      "Reduce structured fine transport status blocks");
     run(this.summarizePipeline, this.summarizeGroup, "Publish structured fine transport status", 1);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after fine transport summary");
@@ -667,12 +698,12 @@ export class WebGPUFineLevelSetTransport {
       broker.fence("algorithm diagnostic after fine transport commit");
     }
     run(this.clearDeltaPipeline, this.clearDeltaGroup,
-      "Clear structured fine transport delta", this.deltaClearBlocks);
-    run(this.reduceDeltaPipeline, this.reduceDeltaGroup,
-      "Reduce structured fine transport delta blocks", this.scanBlocks);
+      "Clear structured fine transport delta header", 1);
+    runLiveBlocks(this.reduceDeltaPipeline, this.reduceDeltaGroup,
+      "Reduce structured fine transport delta blocks");
     run(this.deltaPipeline, this.deltaGroup, "Publish structured fine transport delta", 1);
-    run(this.compactDeltaPipeline, this.compactDeltaGroup,
-      "Compact structured fine topology delta", this.scanBlocks);
+    runLiveBlocks(this.compactDeltaPipeline, this.compactDeltaGroup,
+      "Compact structured fine topology delta");
     return broker;
   }
 
@@ -685,7 +716,7 @@ export class WebGPUFineLevelSetTransport {
     this.censusStep += 1;
     const staging = this.censusStaging ??= this.device.createBuffer({
       label: "Structured fine transport workset census staging",
-      size: 128, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      size: 57 * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     if (this.censusPhase === "copied") {
       this.censusPhase = "mapping";
       const step = this.censusStep;
@@ -702,12 +733,16 @@ export class WebGPUFineLevelSetTransport {
           pagesByClass: [0, 1, 2, 3].map((cls) => words[4 + 7 * cls + 1] ?? 0),
           validByClass: [0, 1, 2, 3].map((cls) => words[4 + 7 * cls + 3] ?? 0),
           samplesPerBrick: this.source.plan.samplesPerBrick,
+          sleep: { priorSnapshot: words[46] ?? 0, priorExactRepairs: words[47] ?? 0,
+            active: words[50] ?? 0, blockers: words[52] ?? 0,
+            displacementFineCells: new Float32Array(new Uint32Array([words[53] ?? 0]).buffer)[0],
+            rows: words[54] ?? 0, supports: words[55] ?? 0, pages: words[56] ?? 0 },
         }));
       }).catch(() => { this.censusPhase = "idle"; });
       return;
     }
     if (this.censusPhase !== "idle") return;
-    broker.copyBufferToBuffer(this.governor, 0, staging, 0, 128);
+    broker.copyBufferToBuffer(this.governor, 0, staging, 0, 57 * 4);
     this.censusPhase = "copied";
   }
 
@@ -715,6 +750,7 @@ export class WebGPUFineLevelSetTransport {
     if (this.destroyed) return; this.destroyed = true;
     this.params.destroy(); this.control.destroy(); this.governor.destroy(); this.indirectDispatch.destroy();
     this.samplingCatalog.destroy();
+    this.activitySnapshot.destroy();
     this.reversePhi?.destroy();
     this.topologyDelta.buffer.destroy();
   }

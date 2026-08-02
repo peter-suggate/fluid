@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { BROWSER_GPU_THROUGHPUT_DEPTH, canQueuePreparedGPUAdvance , submitNextPreparedGPUAdvance, type GPUStatus } from "../lib/webgpu-renderer";
+import { BROWSER_GPU_THROUGHPUT_DEPTH, canQueuePreparedGPUAdvance , submitNextPreparedGPUAdvance } from "../lib/webgpu-renderer";
 import { MAXIMUM_PENDING_PHYSICS_ADVANCES } from "../lib/structured-step-snapshot";
 import { presentationStateChanged } from "../lib/frame-pacing";
 
@@ -103,8 +103,8 @@ test("timeline reset invalidates old completions and cannot trigger a timestamp 
   assert.match(reset, /this\.resetGPUQueueTracking\(\)/);
   assert.match(renderer, /gpuSceneSolverKey\([^]*config\.simulationEpoch \?\? 0/,
     "each reset epoch must identify exactly one replacement solver");
-  assert.doesNotMatch(renderer, /time_s < \(this\.gpuFluid\.info\.submittedTime_s \?\? 0\)\) \{this\.beginGPUFluidInitialization/,
-    "timestamp rollback must never create an unexpected second build");
+  assert.doesNotMatch(renderer, /time_s < \(this\.gpuFluid\.info\.submittedTime_s \?\? 0\)\)[^}]*return undefined/,
+    "a lagging cross-realm presentation clock must retain the valid solver and its raster sources");
   assert.match(viewport, /state\.simulationEpoch !== previous\.simulationEpoch\) \{[\s\S]*safeBrowserSimulationEpochChanged[\s\S]*renderer\.resetSimulationTimeline\(\)/,
     "the renderer must be invalidated by the synchronous runtime-store reset edge");
 });

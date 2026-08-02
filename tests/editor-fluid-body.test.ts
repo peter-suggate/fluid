@@ -3,54 +3,38 @@ import test from "node:test";
 import { validateScene, type SceneDescription, type Vec3 } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { sceneCellSizes_m } from "../lib/scene-lattice";
-import { projectToViewport } from "../lib/webgpu-camera";
 import {
   dragFluidBodyBox,
-  fluidBodyEdgeSegment,
-  shapeHandleAtPointer,
   fluidBodyBox,
   fluidBodyBoxPatch,
   fluidBodyBoxVolume_m3,
-  fluidBodyHandleById,
-  fluidBodyHandles,
+  fluidBodyEntity,
   fluidBodyLimits,
+  moveFluidBodyBox,
   scaleFluidBodyBox,
   scaleFluidBodyVolume,
+  FLUID_BODY_SELECTION_ID,
 } from "../lib/editor-fluid-body";
 import { damBreakBoxContains, sceneDamBreakBox } from "../lib/initial-fluid";
+import { context, entityFor, sides } from "./helpers/editor-entities";
 
 function preset(id: string): SceneDescription {
   return getScenePreset(id).create();
 }
+
+const WATER = { kind: "fluid-body", id: FLUID_BODY_SELECTION_ID } as const;
 
 function applied(scene: SceneDescription, box: ReturnType<typeof fluidBodyBox>): SceneDescription {
   assert.ok(box);
   return { ...scene, ...fluidBodyBoxPatch(scene, box) };
 }
 
-test("the body box carries a handle for every face, edge, and corner", () => {
-  const box = { min: { x: -1, y: 0, z: -1 }, max: { x: 1, y: 2, z: 1 } };
-  const handles = fluidBodyHandles(box);
-  assert.equal(handles.length, 26);
-  assert.equal(handles.filter((handle) => handle.kind === "face").length, 6);
-  assert.equal(handles.filter((handle) => handle.kind === "edge").length, 12);
-  assert.equal(handles.filter((handle) => handle.kind === "corner").length, 8);
-  assert.equal(new Set(handles.map((handle) => handle.id)).size, 26, "handle ids must be unique");
-  const maxX = fluidBodyHandleById(box, "+00");
-  assert.deepEqual(maxX?.position_m, { x: 1, y: 1, z: 0 });
-  assert.deepEqual(maxX?.sides, { x: "max" });
-  const corner = fluidBodyHandleById(box, "-+-");
-  assert.deepEqual(corner?.position_m, { x: -1, y: 2, z: -1 });
-  assert.deepEqual(corner?.sides, { x: "min", y: "max", z: "min" });
-});
-
 test("a face drag moves only the side it owns", () => {
   const scene = preset("water-box-dam-break");
   const box = fluidBodyBox(scene);
   assert.ok(box);
-  const handle = fluidBodyHandleById(box, "+00")!;
   const target = { x: box.min.x + 0.5 * (scene.container.width_m), y: 99, z: 99 };
-  const dragged = dragFluidBodyBox(box, handle, target, scene);
+  const dragged = dragFluidBodyBox(box, sides("+00"), target, scene);
   assert.equal(dragged.min.x, box.min.x);
   assert.deepEqual([dragged.min.y, dragged.max.y], [box.min.y, box.max.y]);
   assert.deepEqual([dragged.min.z, dragged.max.z], [box.min.z, box.max.z]);
@@ -62,9 +46,8 @@ test("a corner drag moves all three of its sides", () => {
   const box = fluidBodyBox(scene);
   assert.ok(box);
   const limits = fluidBodyLimits(scene);
-  const handle = fluidBodyHandleById(box, "+++")!;
   const target = { x: limits.max.x, y: limits.max.y, z: limits.max.z };
-  const dragged = dragFluidBodyBox(box, handle, target, scene);
+  const dragged = dragFluidBodyBox(box, sides("+++"), target, scene);
   assert.deepEqual(dragged.min, box.min, "the opposite corner is an anchor");
   assert.ok(dragged.max.x > box.max.x && dragged.max.y > box.max.y && dragged.max.z > box.max.z);
 });
@@ -75,8 +58,7 @@ test("drags snap to the finest lattice, so a moved handle always moves the water
   assert.ok(box);
   const [cellX] = sceneCellSizes_m(scene);
   const limits = fluidBodyLimits(scene);
-  const handle = fluidBodyHandleById(box, "+00")!;
-  const dragged = dragFluidBodyBox(box, handle, { x: box.max.x + cellX * 1.4, y: 0, z: 0 }, scene);
+  const dragged = dragFluidBodyBox(box, sides("+00"), { x: box.max.x + cellX * 1.4, y: 0, z: 0 }, scene);
   const offset = (dragged.max.x - limits.min.x) / cellX;
   assert.ok(Math.abs(offset - Math.round(offset)) < 1e-9, `${offset} should be a whole number of cells`);
 });
@@ -86,8 +68,7 @@ test("a side pushed through the body stops at one cell rather than inverting it"
   const box = fluidBodyBox(scene);
   assert.ok(box);
   const [cellX] = sceneCellSizes_m(scene);
-  const handle = fluidBodyHandleById(box, "+00")!;
-  const dragged = dragFluidBodyBox(box, handle, { x: box.min.x - 10, y: 0, z: 0 }, scene);
+  const dragged = dragFluidBodyBox(box, sides("+00"), { x: box.min.x - 10, y: 0, z: 0 }, scene);
   assert.ok(dragged.max.x > dragged.min.x);
   assert.ok(Math.abs((dragged.max.x - dragged.min.x) - cellX) < 1e-9);
 });
@@ -97,8 +78,8 @@ test("handles never push the body outside the container", () => {
   const box = fluidBodyBox(scene);
   assert.ok(box);
   const limits = fluidBodyLimits(scene);
-  const dragged = dragFluidBodyBox(box, fluidBodyHandleById(box, "+++")!, { x: 99, y: 99, z: 99 }, scene);
-  const pulled = dragFluidBodyBox(dragged, fluidBodyHandleById(dragged, "---")!, { x: -99, y: -99, z: -99 }, scene);
+  const dragged = dragFluidBodyBox(box, sides("+++"), { x: 99, y: 99, z: 99 }, scene);
+  const pulled = dragFluidBodyBox(dragged, sides("---"), { x: -99, y: -99, z: -99 }, scene);
   for (const axis of ["x", "y", "z"] as const) {
     assert.ok(pulled.min[axis] >= limits.min[axis] - 1e-9, `min ${axis}`);
     assert.ok(pulled.max[axis] <= limits.max[axis] + 1e-9, `max ${axis}`);
@@ -110,7 +91,7 @@ test("a box still in the corner stays anchored, keeping the closed-form GPU seed
   const scene = preset("water-box-dam-break");
   const box = fluidBodyBox(scene);
   assert.ok(box);
-  const grown = dragFluidBodyBox(box, fluidBodyHandleById(box, "0+0")!, { x: 0, y: scene.container.height_m, z: 0 }, scene);
+  const grown = dragFluidBodyBox(box, sides("0+0"), { x: 0, y: scene.container.height_m, z: 0 }, scene);
   const patch = fluidBodyBoxPatch(scene, grown);
   assert.equal(patch.fluid.initialDamBreakOrigin_m, undefined,
     "an anchored reservoir must not author an origin — that would cost the analytic bootstrap");
@@ -122,7 +103,7 @@ test("a box dragged off the corner authors an origin the seeding honours", () =>
   const box = fluidBodyBox(scene);
   assert.ok(box);
   const [cellX] = sceneCellSizes_m(scene);
-  const moved = dragFluidBodyBox(box, fluidBodyHandleById(box, "-00")!, { x: box.min.x + 2 * cellX, y: 0, z: 0 }, scene);
+  const moved = dragFluidBodyBox(box, sides("-00"), { x: box.min.x + 2 * cellX, y: 0, z: 0 }, scene);
   const next = applied(scene, moved);
   const origin = next.fluid.initialDamBreakOrigin_m;
   assert.ok(origin);
@@ -212,9 +193,30 @@ test("repeated growth saturates at the container instead of failing", () => {
   assert.deepEqual(validateScene(applied(scene, box)), []);
 });
 
+test("a move slides the body without resizing it, and stops at the wall", () => {
+  const scene = preset("water-box-dam-break");
+  const box = fluidBodyBox(scene);
+  assert.ok(box);
+  const limits = fluidBodyLimits(scene);
+  const size = fluidBodyBoxVolume_m3(box);
+
+  const moved = moveFluidBodyBox(box, { x: 0.05, y: 0.12, z: -0.03 }, scene);
+  assert.ok(Math.abs(fluidBodyBoxVolume_m3(moved) - size) < 1e-9, "a move must not change the volume");
+
+  // Pushed hard against a wall it stops there rather than being squashed into it.
+  const pinned = moveFluidBodyBox(box, { x: 99, y: 99, z: 99 }, scene);
+  assert.ok(Math.abs(fluidBodyBoxVolume_m3(pinned) - size) < 1e-9);
+  for (const axis of ["x", "y", "z"] as const) {
+    assert.ok(pinned.max[axis] <= limits.max[axis] + 1e-9, `max ${axis}`);
+    assert.ok(pinned.min[axis] >= limits.min[axis] - 1e-9, `min ${axis}`);
+  }
+});
+
 test("a render-only scene has no shapeable body", () => {
   const scene = preset("water-box-dam-break");
   assert.equal(fluidBodyBox({ ...scene, systems: { fluid: false } }), undefined);
+  assert.equal(fluidBodyEntity.instances(context({ ...scene, systems: { fluid: false } })).length, 0,
+    "and therefore offers no entity to select");
 });
 
 test("the box round-trips: authoring it and reading it back returns the same box", () => {
@@ -223,9 +225,9 @@ test("the box round-trips: authoring it and reading it back returns the same box
   assert.ok(box);
   const [cellX, , cellZ] = sceneCellSizes_m(scene);
   const moved = dragFluidBodyBox(
-    dragFluidBodyBox(box, fluidBodyHandleById(box, "-0-")!,
+    dragFluidBodyBox(box, sides("-0-"),
       { x: box.min.x + cellX, y: 0, z: box.min.z + cellZ } as Vec3, scene),
-    fluidBodyHandleById(box, "+0+")!,
+    sides("+0+"),
     { x: box.max.x + cellX, y: 0, z: box.max.z + cellZ } as Vec3, scene);
   const next = applied(scene, moved);
   const reread = fluidBodyBox(next);
@@ -236,65 +238,23 @@ test("the box round-trips: authoring it and reading it back returns the same box
   }
 });
 
-test("an edge handle spans the whole edge it grabs", () => {
-  const box = { min: { x: -1, y: 0, z: -2 }, max: { x: 1, y: 3, z: 2 } };
-  // "+0-" fixes max x and min z, leaving y free: the edge runs the box's height.
-  const handle = fluidBodyHandleById(box, "+0-")!;
-  const segment = fluidBodyEdgeSegment(box, handle);
-  assert.ok(segment);
-  assert.deepEqual(segment.from, { x: 1, y: 0, z: -2 });
-  assert.deepEqual(segment.to, { x: 1, y: 3, z: -2 });
-});
-
-test("only edges have a segment; faces and corners are points", () => {
-  const box = { min: { x: -1, y: 0, z: -1 }, max: { x: 1, y: 2, z: 1 } };
-  assert.equal(fluidBodyEdgeSegment(box, fluidBodyHandleById(box, "+00")!), undefined);
-  assert.equal(fluidBodyEdgeSegment(box, fluidBodyHandleById(box, "+++")!), undefined);
-  for (const handle of fluidBodyHandles(box).filter((entry) => entry.kind === "edge")) {
-    const segment = fluidBodyEdgeSegment(box, handle);
-    assert.ok(segment, `${handle.id} must span an edge`);
-    // Exactly one axis varies along an edge — the one the handle leaves free.
-    const varying = (["x", "y", "z"] as const).filter((axis) => segment.from[axis] !== segment.to[axis]);
-    assert.equal(varying.length, 1);
-    assert.equal(handle.sides[varying[0]!], undefined);
-  }
-});
-
-test("every edge segment lies on the box it came from", () => {
-  const box = { min: { x: -1, y: 0, z: -2 }, max: { x: 1, y: 3, z: 2 } };
-  for (const handle of fluidBodyHandles(box).filter((entry) => entry.kind === "edge")) {
-    const segment = fluidBodyEdgeSegment(box, handle)!;
-    for (const end of [segment.from, segment.to]) {
-      for (const axis of ["x", "y", "z"] as const) {
-        assert.ok(end[axis] === box.min[axis] || end[axis] === box.max[axis],
-          `${handle.id} endpoint is off the box on ${axis}`);
-      }
-    }
-  }
-});
-
-test("an edge is grabbable along its length, not just at its midpoint", () => {
+test("the water body is clicked on its seed box, and the box is what the handles hold", () => {
   const scene = preset("water-box-dam-break");
-  const box = fluidBodyBox(scene);
-  assert.ok(box);
-  const camera = { azimuth_rad: 0.72, elevation_rad: 0.42, distance_m: 2.65, target_m: { x: 0, y: 0.38, z: 0 } };
-  const [width, height] = [1200, 800];
-  const candidates = [{ target: "fluid" as const, box }];
+  const box = fluidBodyBox(scene)!;
+  const centre = {
+    x: 0.5 * (box.min.x + box.max.x),
+    y: 0.5 * (box.min.y + box.max.y),
+    z: 0.5 * (box.min.z + box.max.z),
+  };
+  const hit = fluidBodyEntity.pick!(context(scene),
+    { origin: { x: centre.x, y: centre.y, z: box.min.z - 5 }, direction: { x: 0, y: 0, z: 1 } });
+  assert.ok(hit, "a ray through the reservoir must reach it");
+  assert.equal(hit.selection.id, FLUID_BODY_SELECTION_ID);
+  assert.ok(Math.abs(hit.distance_m - 5) < 1e-6, "and the hit is where the ray enters the box");
 
-  // Find an edge whose whole span projects in front of the camera, then aim a
-  // quarter of the way along it — nowhere near the midpoint a square would use.
-  const edge = fluidBodyHandles(box).filter((handle) => handle.kind === "edge")
-    .map((handle) => ({ handle, segment: fluidBodyEdgeSegment(box, handle)! }))
-    .map(({ handle, segment }) => ({
-      handle,
-      ends: [segment.from, segment.to].map((point) => projectToViewport(point, camera, width, height)),
-    }))
-    .find(({ ends }) => ends.every((end) => end.visible && end.depth_m > 1e-6));
-  assert.ok(edge, "fixture must present at least one fully visible edge");
+  const missed = fluidBodyEntity.pick!(context(scene),
+    { origin: { x: centre.x, y: box.max.y + 10, z: box.min.z - 5 }, direction: { x: 0, y: 0, z: 1 } });
+  assert.equal(missed, undefined, "a ray passing over the reservoir must not select it");
 
-  const [from, to] = edge.ends.map((end) => ({ x: end.leftFraction * width, y: end.topFraction * height }));
-  const quarter = { x: from!.x + 0.25 * (to!.x - from!.x), y: from!.y + 0.25 * (to!.y - from!.y) };
-  const pick = shapeHandleAtPointer(candidates, camera, width, height, quarter);
-  assert.ok(pick, "a point on the drawn edge must grab something");
-  assert.equal(pick.handleId, edge.handle.id, "and it must be the edge under the pointer");
+  assert.deepEqual(entityFor(scene, WATER).box, box);
 });

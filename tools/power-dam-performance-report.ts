@@ -113,6 +113,12 @@ export interface PowerDamResultRecord {
   readonly globalFineLevelSetResidentBrickCapacity?: number;
   readonly globalFineLevelSetLogicalBrickCount?: number;
   readonly globalFineTransportSegmentCount?: number;
+  readonly structuredAirSupportRows?: number;
+  readonly structuredAirSupportCells?: number;
+  readonly structuredAirSupportCapacity?: number;
+  readonly structuredAirSupportFaceItems?: number;
+  readonly structuredAirSupportSeedFaces?: number;
+  readonly structuredAirSupportMarchDepth?: number;
   readonly quadtreePressureIterationsUsed?: number;
   readonly quadtreePressureIterationBudget?: number;
   readonly quadtreePressureIterationHardBudget?: number;
@@ -142,6 +148,12 @@ export interface PowerDamPerformanceSummary {
     /** activeFineBricks / logicalFineBricks. See docs/FINE_BAND_DENSITY_PLAN.md. */
     readonly fineBandOccupancy?: number;
     readonly transportSegments?: number;
+    readonly airSupportRows?: number;
+    readonly airSupportCells?: number;
+    readonly airSupportCapacity?: number;
+    readonly airSupportFaceItems?: number;
+    readonly airSupportSeedFaces?: number;
+    readonly airSupportMarchDepth?: number;
     readonly pressureIterationsExecuted?: number;
     readonly pressureIterationsScheduled?: number;
     readonly pressureIterationsHardLimit?: number;
@@ -348,6 +360,12 @@ export function powerDamResultWindow(
     globalFineLevelSetResidentBrickCapacity: complete.globalFineLevelSetResidentBrickCapacity,
     globalFineLevelSetLogicalBrickCount: complete.globalFineLevelSetLogicalBrickCount,
     globalFineTransportSegmentCount: complete.globalFineTransportSegmentCount,
+    structuredAirSupportRows: complete.structuredAirSupportRows,
+    structuredAirSupportCells: complete.structuredAirSupportCells,
+    structuredAirSupportCapacity: complete.structuredAirSupportCapacity,
+    structuredAirSupportFaceItems: complete.structuredAirSupportFaceItems,
+    structuredAirSupportSeedFaces: complete.structuredAirSupportSeedFaces,
+    structuredAirSupportMarchDepth: complete.structuredAirSupportMarchDepth,
     quadtreePressureIterationsUsed: complete.quadtreePressureIterationsUsed,
     quadtreePressureIterationBudget: complete.quadtreePressureIterationBudget,
     quadtreePressureIterationHardBudget: complete.quadtreePressureIterationHardBudget,
@@ -542,6 +560,12 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
       result.globalFineLevelSetResidentBrickCapacity,
       result.globalFineLevelSetLogicalBrickCount,
       result.globalFineTransportSegmentCount,
+      result.structuredAirSupportRows,
+      result.structuredAirSupportCells,
+      result.structuredAirSupportCapacity,
+      result.structuredAirSupportFaceItems,
+      result.structuredAirSupportSeedFaces,
+      result.structuredAirSupportMarchDepth,
       result.quadtreePressureIterationsUsed,
       result.quadtreePressureIterationBudget,
       result.quadtreePressureIterationHardBudget,
@@ -554,6 +578,18 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
       fineBandOccupancy: fineBandOccupancy(
         result.globalFineActiveBricks, result.globalFineLevelSetLogicalBrickCount),
       transportSegments: finiteCounter(result.globalFineTransportSegmentCount),
+      ...(finiteCounter(result.structuredAirSupportRows) === undefined ? {}
+        : { airSupportRows: finiteCounter(result.structuredAirSupportRows) }),
+      ...(finiteCounter(result.structuredAirSupportCells) === undefined ? {}
+        : { airSupportCells: finiteCounter(result.structuredAirSupportCells) }),
+      ...(finiteCounter(result.structuredAirSupportCapacity) === undefined ? {}
+        : { airSupportCapacity: finiteCounter(result.structuredAirSupportCapacity) }),
+      ...(finiteCounter(result.structuredAirSupportFaceItems) === undefined ? {}
+        : { airSupportFaceItems: finiteCounter(result.structuredAirSupportFaceItems) }),
+      ...(finiteCounter(result.structuredAirSupportSeedFaces) === undefined ? {}
+        : { airSupportSeedFaces: finiteCounter(result.structuredAirSupportSeedFaces) }),
+      ...(finiteCounter(result.structuredAirSupportMarchDepth) === undefined ? {}
+        : { airSupportMarchDepth: finiteCounter(result.structuredAirSupportMarchDepth) }),
       pressureIterationsExecuted: finiteCounter(result.quadtreePressureIterationsUsed),
       pressureIterationsScheduled: finiteCounter(result.quadtreePressureIterationBudget),
       pressureIterationsHardLimit: finiteCounter(result.quadtreePressureIterationHardBudget),

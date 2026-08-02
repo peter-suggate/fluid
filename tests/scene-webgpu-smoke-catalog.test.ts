@@ -164,6 +164,29 @@ test("inflow, migration, brick coverage, hose, and ocean policies are scene-auth
   assert.equal(ocean.minimumFarHalfDisturbanceWidthRatio, 3.6);
 });
 
+test("Bet-4 deep-ocean lane is a bounded volumetric shipping fixture", () => {
+  const suite = getSceneWebGPUSmokeSuite("power-hybrid-deep-ocean");
+  const scene = suite.createScene();
+  assert.deepEqual(scene.container, {
+    width_m: 3.2, height_m: 3.2, depth_m: 2.4, fillFraction: 0.875,
+    top: "closed", fluidWallMode: "no-slip",
+  });
+  assert.deepEqual(scene.voxelDomain, { finestCellSize_m: 0.05, brickSize_cells: 8 });
+  const lane = getSceneWebGPUSmokeLane("power-hybrid-deep-ocean");
+  assert.deepEqual(lane.stop, { simulatedTime_s: 0.004, exactSteps: 1, maxDt_s: 0.004 });
+  assert.deepEqual(lane.methods[0]?.overrides, {
+    maximumLeafSize: "32", interfaceRefinementBandCells: 1, globalFineLevelSetFactor: "1",
+  });
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const command = packageJson.scripts["test:webgpu:power-hybrid-deep-ocean"];
+  assert.match(command, /FLUID_SCENE=power-hybrid-deep-ocean/);
+  assert.match(command, /FLUID_POWER_HYBRID_CENSUS=1/);
+  assert.match(command, /FLUID_POWER_HYBRID_MIN_REDUCTION=2/);
+  assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
+});
+
 test("structured power lanes own exhaustive thresholds and raster policy", () => {
   const hydrostatic = getSceneWebGPUSmokeLane("hydrostatic-power-two-level");
   assert.deepEqual(hydrostatic.stop, { simulatedTime_s: 0.2, exactSteps: 50, maxDt_s: 0.004 });

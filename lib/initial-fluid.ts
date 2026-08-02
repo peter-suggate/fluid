@@ -203,6 +203,43 @@ export function initialFluidBrickSignedDistance(
   return result;
 }
 
+/** Signed distance to seeded bricks at a finest-cell centre, evaluated from
+ * integer brick bounds. This is the canonical bootstrap form: reflected cell
+ * centres reach identical half-cell distances before the single conversion
+ * to metres, avoiding world-origin cancellation in exact symmetry gates. */
+export function initialFluidBrickSignedDistanceAtCell(
+  scene: SceneDescription,
+  x: number,
+  y: number,
+  z: number,
+  dimensions: readonly [number, number, number],
+  brickSize = INITIAL_FLUID_BRICK_SIZE,
+): number | undefined {
+  const seeds = scene.fluid.initialBrickSeeds_m;
+  if (!seeds) return undefined;
+  const c = scene.container;
+  const h = [c.width_m / dimensions[0], c.height_m / dimensions[1],
+    c.depth_m / dimensions[2]] as const;
+  const point = [x + 0.5, y + 0.5, z + 0.5] as const;
+  let result = Number.POSITIVE_INFINITY;
+  for (const seed of seeds) {
+    const cell = seedCell(scene, seed, dimensions);
+    const origin = [Math.floor(cell.x / brickSize) * brickSize,
+      Math.floor(cell.y / brickSize) * brickSize,
+      Math.floor(cell.z / brickSize) * brickSize] as const;
+    const end = [Math.min(dimensions[0], origin[0] + brickSize),
+      Math.min(dimensions[1], origin[1] + brickSize),
+      Math.min(dimensions[2], origin[2] + brickSize)] as const;
+    const qx = Math.max(origin[0] - point[0], point[0] - end[0]) * h[0];
+    const qy = Math.max(origin[1] - point[1], point[1] - end[1]) * h[1];
+    const qz = Math.max(origin[2] - point[2], point[2] - end[2]) * h[2];
+    result = Math.min(result,
+      Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0))
+        + Math.min(Math.max(qx, qy, qz), 0));
+  }
+  return result;
+}
+
 export function inflowStrength(time_s: number, start_s: number, end_s: number, ramp_s: number): number {
   if (time_s < start_s || time_s >= end_s) return 0;
   if (ramp_s <= 0) return 1;

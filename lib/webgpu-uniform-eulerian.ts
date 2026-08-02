@@ -47,7 +47,7 @@ import { createTallCellLayout } from "./tall-cell-grid";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { planGPUAdvance } from "./tall-cell-diagnostics";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "./inflow-boundary";
-import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection,
+import { OCTREE_ALLOCATION_STAGES, OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES, WebGPUOctreeProjection,
   type OctreeSemanticPhase, type OctreeProjectionOptions } from "./webgpu-octree";
 import {
   OCTREE_POWER_COARSE_LEVELSET_ERROR,
@@ -113,7 +113,10 @@ interface PendingStepSnapshotSources {
 }
 
 export type UniformVelocityTransport = GPUVelocityTransport;
-export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; deferPipelineCompilation?: boolean }
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; deferPipelineCompilation?: boolean; /** Internal lifecycle channel for the worker-owned allocation graph. */ allocationProgress?: (label: string, completed: number, total: number) => void }
+
+/** One shared-host unit followed by the octree-owned allocation stages. */
+export const OCTREE_SOLVER_ALLOCATION_WORK_UNITS = 1 + OCTREE_ALLOCATION_STAGES.length;
 
 // Pipeline objects are immutable and device-scoped. Rebuilding buffers or
 // textures for a settings change must not ask the browser/driver to compile
@@ -791,6 +794,9 @@ export class WebGPUUniformEulerianSolver {
     private onRigidLoads?: (loads: GPURigidLoad[]) => void,
     options: WebGPUUniformEulerianOptions = {}
   ) {
+    options.allocationProgress?.(
+      "Allocate shared solver and rigid-body resources", 0, OCTREE_SOLVER_ALLOCATION_WORK_UNITS,
+    );
     // The octree has one measured executable profile. Reject it before the
     // first texture or buffer allocation so unsupported adapters cannot leave
     // a partially constructed graph or trigger compilation of another lane.
@@ -937,7 +943,9 @@ export class WebGPUUniformEulerianSolver {
         globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor ?? 4,
         globalFineLevelSetMaximumBricks: options.octree.globalFineLevelSetMaximumBricks,
         pressureRowCapacity: options.octree.pressureRowCapacity,
-      }, options.deferPipelineCompilation);
+      }, options.deferPipelineCompilation, (label, completed) => options.allocationProgress?.(
+        label, completed + 1, OCTREE_SOLVER_ALLOCATION_WORK_UNITS,
+      ));
       this.applyOctreeInfo(this.octreeProjection);
     }
     // The octree's resident level set is the complete liquid state. Keep VOF
@@ -1125,7 +1133,10 @@ fn recordPhysicsPhaseBoundary(
       });
       await runner.run([
         {id:"solver.capabilities",phase:"planning",label:`Resolve ${capabilityPlan.values.size} scene-required GPU capabilities`,run:()=>{}},
-        {id:"solver.allocate",phase:"allocation",label:"Allocate octree solver resources",dependencies:["solver.capabilities"],run:()=>{solver=new WebGPUUniformEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true});}},
+        {id:"solver.allocate",phase:"allocation",label:"Allocate octree solver resources",dependencies:["solver.capabilities"],
+          workUnits:OCTREE_SOLVER_ALLOCATION_WORK_UNITS,
+          run:(_signal,report)=>{solver=new WebGPUUniformEulerianSolver(device,scene,quality,onRigidLoads,{...options,deferPipelineCompilation:true,
+            allocationProgress:(label,completed)=>report?.(label,completed)});}},
       ]);
       await runner.run(solver!.initializationTasks());
       return solver!;
@@ -1265,6 +1276,12 @@ fn recordPhysicsPhaseBoundary(
     // next step (supportPublicationValid gate) and freezes the epoch; name
     // the producer's own error record once per distinct failure word.
     const support = value.airSupportControl;
+    this.info.structuredAirSupportRows = support?.[5] ?? 0;
+    this.info.structuredAirSupportCells = support?.[6] ?? 0;
+    this.info.structuredAirSupportCapacity = support?.[7] ?? 0;
+    this.info.structuredAirSupportFaceItems = support?.[10] ?? 0;
+    this.info.structuredAirSupportSeedFaces = support?.[11] ?? 0;
+    this.info.structuredAirSupportMarchDepth = support?.[12] ?? 0;
     const latched = value.firstAirSupportFailure ?? [];
     const liveFailure = !!support && support.length >= 16
       && (support[0] !== 0 || (support[1] ?? 0xffff_ffff) !== 0xffff_ffff);

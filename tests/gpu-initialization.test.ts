@@ -43,17 +43,23 @@ test("GPU initialization tasks can report progress inside one pipeline family", 
 
   await runner.run([{
     id: "dynamics", phase: "solver-pipelines", label: "Compile dynamics",
+    workUnits: 3,
     run: async (_signal, report) => {
-      report?.("Compile dynamics: prepare (0/2)");
+      report?.("Compile dynamics: prepare", 0);
       await Promise.resolve();
-      report?.("Compile dynamics: project (1/2)");
+      report?.("Compile dynamics: project", 1);
     },
   }]);
 
   assert.ok(snapshots.some(({ label, completed, total }) =>
-    label === "Compile dynamics: prepare (0/2)" && completed === 0 && total === 1));
+    label === "Compile dynamics: prepare" && completed === 0 && total === 3));
   assert.ok(snapshots.some(({ label, completed, total }) =>
-    label === "Compile dynamics: project (1/2)" && completed === 0 && total === 1));
+    label === "Compile dynamics: project" && completed === 1 && total === 3));
+  assert.equal(runner.completedCount, 1, "subtasks must not become dependency boundaries");
+  assert.equal(runner.totalCount, 3);
+  assert.deepEqual(snapshots.at(-1), {
+    taskId: "dynamics", phase: "solver-pipelines", label: "Compile dynamics", completed: 3, total: 3,
+  });
 });
 
 test("GPU initialization paints phase changes and batches same-phase work", async () => {
@@ -131,6 +137,11 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
   assert.match(runner, /requestAnimationFrame\(\(\) => setTimeout\(resolve, 0\)\)/, "batched work must begin after the reported stage can paint");
   assert.match(runner, /task\.phase !== this\.lastPaintedPhase[\s\S]*this\.tasksSincePaint >= TASKS_PER_PAINT/,
     "phase transitions and bounded same-phase batches must remain visible");
+  assert.match(runner, /workUnits\?: number/,
+    "resource owners must be able to expose milestones without weakening their dependency boundary");
+  assert.match(uniform, /workUnits:OCTREE_SOLVER_ALLOCATION_WORK_UNITS/);
+  assert.match(octree, /OCTREE_ALLOCATION_STAGES[\s\S]*Plan octree domain and capacity[\s\S]*Finalize octree resource graph/,
+    "octree allocation progress must be colocated with its resource constructor");
   assert.match(uniform, /initializationTasks\(\)/);
   assert.match(uniform, /uniformPipelineCache/, "structural rebuilds must reuse immutable programs");
   assert.match(octree, /initializationTasks\(\): GPUInitializationTask\[\]/);

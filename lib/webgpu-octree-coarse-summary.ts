@@ -1,10 +1,33 @@
 import type { GPUInitializationTask } from "./gpu-initialization";
 import type { OctreePowerCoarseLevelSetSampleSource } from "./webgpu-octree-power-coarse-levelset";
-import type { OctreeAirVelocitySupportLayout } from "./webgpu-octree-air-velocity-support";
+import { OCTREE_AIR_SUPPORT_LAYOUT_VERSION, OCTREE_AIR_SUPPORT_OWNER_HASH,
+  OCTREE_AIR_SUPPORT_TAG, OCTREE_AIR_SUPPORT_VALID, octreeAirSupportOwnerHashStartWGSL,
+  type OctreeAirVelocitySupportLayout } from "./webgpu-octree-air-velocity-support";
 import { PassBroker } from "./webgpu-pass-broker";
 
 const PAGE_SIZE = 32;
 const ENTRY_WORDS = 12;
+
+/**
+ * Fraction of the coarse tracker's trilinear velocity stencil that must
+ * resolve to a published air-support owner before the sample is usable.
+ *
+ * One means all eight corners, which is the historical rule and the only
+ * value that is bit-identical to it. Anything lower renormalizes by the
+ * covered weight, which lets the tracker keep advecting where the
+ * proven-reach corridor is thinner than the stencil. Construction-stable and
+ * authored, never inferred from the corridor.
+ */
+export function coarseSummaryVelocityStencilCoverage(
+  environment: Readonly<Record<string, string | undefined>> | undefined =
+    typeof process !== "undefined" ? process.env : undefined,
+): number {
+  const authored = Number(environment?.FLUID_COARSE_VELOCITY_STENCIL_COVERAGE ?? 1);
+  if (!Number.isFinite(authored) || authored <= 0 || authored > 1) return 0.999;
+  // The historical literal, kept exactly: eight canonical weights summing to
+  // one do not reproduce 1.0 bitwise.
+  return authored >= 1 ? 0.999 : authored;
+}
 
 export interface OctreeCoarseSummaryPlan {
   readonly baseDimensions: readonly [number, number, number];
@@ -70,8 +93,16 @@ export class WebGPUOctreeCoarseSummary {
     private readonly coarse: OctreePowerCoarseLevelSetSampleSource,
     dimensions: readonly [number, number, number],
     private readonly air: Readonly<{ arena: GPUBuffer; layout: OctreeAirVelocitySupportLayout;
-      rowVelocities: GPUBuffer; initialPhi: Float32Array; physicalCellSize: number; timestep_s: number }>,
+      rowVelocities: GPUBuffer; initialPhi: Float32Array; physicalCellSize: number; timestep_s: number;
+      /** Largest authored octree leaf. The owner lookup probes dyadic
+       * identities from here down to one, so a value below the real maximum
+       * silently misses every coarser leaf. */
+      maximumLeafSize: number }>,
     deferPipelineCompilation = false) {
+    if (!Number.isSafeInteger(air.maximumLeafSize) || air.maximumLeafSize < 1
+      || (air.maximumLeafSize & (air.maximumLeafSize - 1)) !== 0) {
+      throw new RangeError("Coarse-only tracker requires a power-of-two maximum leaf size");
+    }
     this.plan = planOctreeCoarseSummary(dimensions, coarse.rowCapacity);
     const maximumBinding = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
     if (this.plan.directoryWords * 4 > maximumBinding) {
@@ -86,20 +117,31 @@ export class WebGPUOctreeCoarseSummary {
     const words = new Uint32Array(16);
     words.set(this.plan.baseDimensions, 0);
     words.set(dimensions, 4);
+    words[7] = air.maximumLeafSize;
     words.set([this.plan.hierarchyKeyCapacity, this.plan.topLevelPageCount,
       this.plan.directoryPageCapacity, this.plan.entryCapacity,
       this.plan.entryOffsetWords, this.plan.levelDimensions.length - 1,
       coarse.rowCapacity, this.plan.directoryWords], 8);
     const data = new ArrayBuffer(96); new Uint32Array(data).set(words);
     const tail = new Uint32Array(data, 64, 4);
+    // The last word is the dense coarse lattice's own cardinality. It used to
+    // be spelled `ownerDirectoryCellCapacity` because the owner directory was
+    // dense and the two were the same number; they are not related now.
     tail.set([air.layout.controlOffsetWords, air.layout.supportVectorOffsetWords,
-      air.layout.ownerDirectoryOffsetWords, air.layout.ownerDirectoryCellCapacity]);
-    new Float32Array(data, 80, 4)[0] = air.timestep_s;
+      air.layout.ownerDirectoryOffsetWords, dimensions[0] * dimensions[1] * dimensions[2]]);
+    const time = new Float32Array(data, 80, 4);
+    time[0] = air.timestep_s;
+    time[1] = coarseSummaryVelocityStencilCoverage();
     device.queue.writeBuffer(this.params, 0, data);
     if (air.initialPhi.length !== dimensions[0] * dimensions[1] * dimensions[2]) {
       throw new RangeError("Coarse-only tracker bootstrap must cover the complete coarse lattice");
     }
-    device.queue.writeBuffer(this.directory, this.plan.phiOffsetWords * 4, air.initialPhi);
+    // `Float32Array` inputs may be typed over `ArrayBufferLike` (and therefore
+    // potentially shared), while WebGPU uploads require an `ArrayBuffer`
+    // backed view.  Take an owned snapshot here; bootstrap is construction-only
+    // and the directory must not observe a concurrently mutable source anyway.
+    const initialPhi = new Float32Array(air.initialPhi);
+    device.queue.writeBuffer(this.directory, this.plan.phiOffsetWords * 4, initialPhi);
     const initialState = new Uint32Array(20);
     const referenceCells = air.initialPhi.reduce((sum, phi) =>
       sum + Math.max(0, Math.min(1, 0.5 - phi / air.physicalCellSize)), 0);
@@ -193,11 +235,11 @@ export class WebGPUOctreeCoarseSummary {
   }
 }
 
-const coarseSummaryWGSL = /* wgsl */ `
+export const coarseSummaryWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;const PUBLISHED:u32=0x80000000u;
 const COARSE_AUTHORITY:u32=0x80000000u;const PHI_INTERFACE:u32=4u;
 const PAGE_SIZE:u32=${PAGE_SIZE}u;const ENTRY_WORDS:u32=${ENTRY_WORDS}u;
-struct P{baseDims:vec3u,pad0:u32,dims:vec3u,pad1:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
+struct P{baseDims:vec3u,pad0:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
  entryCapacity:u32,entryOffset:u32,maximumLevel:u32,rowCapacity:u32,directoryWords:u32,
  airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f}
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,volume:f32}
@@ -262,14 +304,44 @@ fn densePhiAtCentered(bank:u32,point:vec3f)->vec2f{let ax=centeredAxisSample(poi
   if(!finite(sample)){return vec2f(0.0);}let weight=canonicalWeight(select(ax.lowWeight,ax.highWeight,(corner&1u)!=0u),select(ay.lowWeight,ay.highWeight,(corner&2u)!=0u),select(az.lowWeight,az.highWeight,(corner&4u)!=0u));terms[corner]=weight*sample;}
  return vec2f(canonicalSum8(terms),1.0);}
 fn densePhiAt(bank:u32,point:vec3f)->vec2f{return densePhiAtCentered(bank,point-0.5*vec3f(p.dims));}
+// The version word is interpolated, never spelled. It was frozen at a literal
+// 2 while the air-support layout moved to 3, so this predicate answered false
+// on every step: predictSummaryCells returned before writing a single cell,
+// state[18] never reached the domain cardinality, and the redistance sweeps,
+// volume correction, and publication all bailed on that same counter. The
+// coarse-only tracker -- the whole surface authority at fine factor one --
+// silently stopped advecting.
 fn airPublished()->bool{return p.airControl+15u<arrayLength(&air)&&air[p.airControl]==0u
- &&air[p.airControl+13u]==0x41565350u&&air[p.airControl+14u]==2u;}
+ &&air[p.airControl+13u]==${OCTREE_AIR_SUPPORT_VALID}u
+ &&air[p.airControl+14u]==${OCTREE_AIR_SUPPORT_LAYOUT_VERSION}u;}
+fn ownerHashCapacity()->u32{if(p.airOwners>=arrayLength(&air)){return 0u;}
+ return (arrayLength(&air)-p.airOwners)/${OCTREE_AIR_SUPPORT_OWNER_HASH.recordWords}u;}
+${octreeAirSupportOwnerHashStartWGSL("ownerHashStart")}
+// The owner directory is the adaptive (origin,size) identity hash, NOT the
+// retired dense finest-cell map: word zero is a key, not a tag. Reading
+// \`owners[4 * cell]\` here resolved almost every coarse cell to an empty slot
+// and then interpreted the zero as row zero, so the whole dense phi advected
+// on one row's velocity. Probe the containing dyadic leaf exactly as fine
+// transport does, largest authored leaf first, and stop the chain at the
+// first zero key.
 fn supportIdentity(item:u32)->vec4u{if(!airPublished()||item>=p.domainVolume){return vec4u(INVALID);}
- let at=p.airOwners+4u*item;if(at+3u>=arrayLength(&air)){return vec4u(INVALID);}return vec4u(air[at],air[at+1u],air[at+2u],air[at+3u]);}
+ let capacity=ownerHashCapacity();if(capacity==0u){return vec4u(INVALID);}
+ let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));
+ var size=p.maximumLeafSize;
+ loop{let origin=(q/vec3u(size))*vec3u(size);
+  let originCell=origin.x+p.dims.x*(origin.y+p.dims.y*origin.z);
+  let start=ownerHashStart(originCell,size,capacity);
+  for(var probe=0u;probe<min(capacity,${OCTREE_AIR_SUPPORT_OWNER_HASH.maximumProbes}u);probe+=1u){
+   let at=p.airOwners+${OCTREE_AIR_SUPPORT_OWNER_HASH.recordWords}u*((start+probe)%capacity);
+   if(at+3u>=arrayLength(&air)){return vec4u(INVALID);}
+   let key=air[at];if(key==0u){break;}
+   if(key-1u==originCell&&air[at+1u]==size){return vec4u(air[at+2u],originCell,size,air[at+3u]);}}
+  if(size<=1u){break;}size>>=1u;}
+ return vec4u(INVALID);}
 fn supportVelocity(tag:u32)->vec4f{if(tag==INVALID){return vec4f(0.0);}var v=vec4f(0.0);
- if((tag&0x80000000u)==0u){let bank=air[p.airControl+3u]&1u;let at=bank*p.rowCapacity+tag;
+ if((tag&${OCTREE_AIR_SUPPORT_TAG}u)==0u){let bank=air[p.airControl+3u]&1u;let at=bank*p.rowCapacity+tag;
   if(tag>=p.rowCapacity||at>=arrayLength(&rowVelocities)){return vec4f(0.0);}v=rowVelocities[at];}
- else{let support=tag&0x7fffffffu;if(support>=air[p.airControl+6u]){return vec4f(0.0);}let at=p.airVectors+4u*support;
+ else{let support=tag&${(~OCTREE_AIR_SUPPORT_TAG) >>> 0}u;if(support>=air[p.airControl+6u]){return vec4f(0.0);}let at=p.airVectors+4u*support;
   if(at+3u>=arrayLength(&air)){return vec4f(0.0);}v=vec4f(bitcast<f32>(air[at]),bitcast<f32>(air[at+1u]),bitcast<f32>(air[at+2u]),bitcast<f32>(air[at+3u]));}
  return select(vec4f(0.0),v,finite(v.x)&&finite(v.y)&&finite(v.z)&&v.w>0.0);}
 fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.dims.x);let ay=centeredAxisSample(point.y,p.dims.y);let az=centeredAxisSample(point.z,p.dims.z);
@@ -279,7 +351,19 @@ fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.di
   let v=supportVelocity(supportIdentity(item).x);let weight=canonicalWeight(select(ax.lowWeight,ax.highWeight,(corner&1u)!=0u),select(ay.lowWeight,ay.highWeight,(corner&2u)!=0u),select(az.lowWeight,az.highWeight,(corner&4u)!=0u));
   if(weight>0.0&&v.w>0.0){termsX[corner]=weight*v.x;termsY[corner]=weight*v.y;termsZ[corner]=weight*v.z;weights[corner]=weight;}}
  let result=vec3f(canonicalSum8(termsX),canonicalSum8(termsY),canonicalSum8(termsZ));let total=canonicalSum8(weights);
- return select(vec4f(0.0),vec4f(result/max(total,1e-12),1.0),total>0.999);}
+ // Coverage rule for the trilinear stencil, authored in p.time.y.
+ //
+ // At 1.0 every one of the eight corners must resolve to a published
+ // air-support owner, and a single uncovered corner makes the whole sample
+ // invalid -- which makes predictSummaryCells leave that cell's phi exactly
+ // where it was. That was harmless while the corridor was approximately the
+ // entire air partition. Against Bet 1.3's proven-reach corridor the leading
+ // edge of a spreading front is routinely half-covered, so the front advances
+ // at the speed the corridor grows rather than the speed of the fluid.
+ //
+ // Lowering the rule renormalizes by the covered weight instead. That is a
+ // physics change, not a launch shape, so it stays an authored A/B.
+ return select(vec4f(0.0),vec4f(result/max(total,1e-12),1.0),total>=p.time.y);}
 fn velocityAtPoint(point:vec3f)->vec4f{return velocityAtCentered(point-0.5*vec3f(p.dims));}
 fn supportBase(item:u32)->u32{if(item>=p.domainVolume){return INVALID;}
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));

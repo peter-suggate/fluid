@@ -41,7 +41,14 @@ export interface SceneDraft {
   readonly subject: SceneDraftSubject;
 }
 
-export type SceneDraftSubject = "tank" | "fluid-body" | "fill-level" | "inflow" | "terrain";
+export type SceneDraftSubject =
+  | "tank"
+  | "fluid-body"
+  | "body"
+  | "scenery"
+  | "fill-level"
+  | "inflow"
+  | "terrain";
 
 interface SceneDraftStore {
   draft?: SceneDraft;

@@ -102,6 +102,14 @@ export interface GPUEulerianInfo {
   structuredVelocityRows?: number;
   structuredVelocitySlots?: number;
   structuredVelocityValid?: boolean;
+  /** Exact terminal Section-5 sparse-air publication workload. These are
+   * successful GPU-owned counts, not capacities or host estimates. */
+  structuredAirSupportRows?: number;
+  structuredAirSupportCells?: number;
+  structuredAirSupportCapacity?: number;
+  structuredAirSupportFaceItems?: number;
+  structuredAirSupportSeedFaces?: number;
+  structuredAirSupportMarchDepth?: number;
   /** Decoded structured-dynamics reject carry. A rejection zeroes every class
    * dispatch, so the step silently freezes; these name the responsible stage
    * instead of leaving it to surface as a step-count or volume-drift failure. */

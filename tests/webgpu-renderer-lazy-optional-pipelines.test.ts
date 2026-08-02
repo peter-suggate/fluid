@@ -59,13 +59,27 @@ test("first-use compilation is single-flight and fails closed per device", () =>
 
 test("dry SVO startup compiles only the GLOBAL presentation pipeline", () => {
   assert.match(drySceneSource, /initialize\(progress\?: \(label: string, completed: number, total: number\) => void\)/);
-  assert.match(drySceneSource, /progress\?\.\("Compiling sparse dry-scene pipeline", 0, 1\)/);
-  assert.match(drySceneSource, /progress\?\.\("Sparse presentation pipeline compiled", 1, 1\)/);
+  for (const stage of [
+    "Build sparse presentation shader sources",
+    "Validate sparse presentation shader modules",
+    "Compile sparse primary visibility pipeline",
+    "Compile sparse brick culling programs",
+    "Compile split visibility and lighting programs",
+    "Compile raster glass and rigid discovery programs",
+    "Compile sparse cone fan-out programs",
+    "Finalize sparse presentation resources",
+    "Attach sparse renderer",
+    "Submit first sparse frame",
+  ]) assert.match(drySceneSource, new RegExp(stage));
+  assert.match(drySceneSource, /report\(0\)[\s\S]*report\(1\)[\s\S]*report\(2\)[\s\S]*report\(3\)[\s\S]*report\(4\)[\s\S]*trackFamily\(SVO_PRESENTATION_STARTUP_STAGES\[4\][\s\S]*trackFamily\(SVO_PRESENTATION_STARTUP_STAGES\[5\][\s\S]*trackFamily\(SVO_PRESENTATION_STARTUP_STAGES\[6\][\s\S]*report\(7\)/,
+    "each opaque browser compile family must have a truthful boundary in the owning plugin");
+  assert.match(drySceneSource, /await Promise\.all\(\[[\s\S]*trackFamily\(SVO_PRESENTATION_STARTUP_STAGES\[4\][\s\S]*trackFamily\(SVO_PRESENTATION_STARTUP_STAGES\[5\][\s\S]*trackFamily\(SVO_PRESENTATION_STARTUP_STAGES\[6\]/,
+    "independent sparse compile families must stay concurrent while reporting individual completion");
   assert.doesNotMatch(drySceneSource, /SparseVoxelTemporalAccumulator|Compiling sparse temporal accumulation|svo-temporal/);
-  assert.match(rendererSource, /pipeline\.initialize\(\(label, completed\) => this\.reportSvoPipelineProgress\(label, completed\)\)/,
+  assert.match(rendererSource, /pipeline\.initialize\(\(label, completed, total\) => this\.reportSvoPipelineProgress\(label, completed, total\)\)/,
     "the lazy optional pipeline must forward compilation stages to the viewport status flow");
-  assert.match(rendererSource, /label: "Sparse garden renderer attached"[^]*completed: 3, total: 4/);
-  assert.match(rendererSource, /label: "Submitting first sparse garden frame"[^]*completed: 3, total: 4/);
+  assert.match(rendererSource, /label: SVO_PRESENTATION_STARTUP_STAGES\[8\][^]*completed: 8, total: SVO_PRESENTATION_STARTUP_STAGES\.length/);
+  assert.match(rendererSource, /label: SVO_PRESENTATION_STARTUP_STAGES\[9\][^]*completed: 9, total: SVO_PRESENTATION_STARTUP_STAGES\.length/);
 });
 
 test("production rasterizes primary visibility and derives coherence from the traversal it got", () => {

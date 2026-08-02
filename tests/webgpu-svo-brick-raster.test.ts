@@ -160,6 +160,8 @@ test("conservative coverage moves expensive leaf tracing into one exact per-pixe
     "the normal exact resolve is one fragment per pixel and carries no canonical traversal stack");
   assert.match(shader, /let payload=traceLeafPayload\(ro,rd,leaf\)/,
     "candidate resolution must reuse the production exact leaf tracer");
+  assert.match(resolve, /if\(payload\.t<DRY_MISS\).*break;/s,
+    "a hit can stop because every tight proxy is contained by a disjoint SVO leaf cell");
   assert.match(overflow, /atomicLoad\(&svoBrickCoverageCounts\[pixel\]\)<=[0-9]+u\)\{discard;\}/);
   assert.match(overflow, /let payload=traceLeafPayload\(ro,rd,leaf\)/,
     "overflow reuses the direct brick arithmetic, so capacity changes cost but never parity");

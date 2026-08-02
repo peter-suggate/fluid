@@ -8,12 +8,14 @@
  * plan phase that implements them: the toolbar shows them disabled instead of
  * silently accepting clicks that do nothing.
  *
- * See docs/WYSIWYG_EDITOR_PLAN.md.
+ * Selecting and adjusting things is not a tool: SELECT is the one editing mode,
+ * and every editable thing carries the same handles there. The tools that remain
+ * are the ones that change what a *click* means — placing, painting, aiming. See
+ * docs/EDITOR_ENTITY_ARCHITECTURE.md.
  */
 
 export type EditorTool =
   | "select"
-  | "bounds"
   | "body-place"
   | "prop-place"
   | "terrain-raise"
@@ -40,22 +42,15 @@ export interface EditorToolSpec {
 export const DEFAULT_EDITOR_TOOL: EditorTool = "select";
 
 export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
+  // The one editing mode. Everything editable — the tank, the water body, rigid
+  // bodies, props, the hose — is selected by clicking it and adjusted with the
+  // same handles, so there is no second mode for the things that happen to be
+  // large. See lib/editor-entity.ts.
   {
     id: "select",
     label: "SELECT",
     shortcut: "q",
-    hint: "click to select · click empty space or press Esc to deselect · drag a gizmo axis to move · drag the body to throw it",
-    status: "active",
-  },
-  // The world-editor mode: the tank and the water body carry box handles, and
-  // nothing else in the scene claims the pointer. Separate from SELECT because
-  // its handles cover the whole scene rather than one picked object, and a mode
-  // that showed them permanently would swallow every click meant for a body.
-  {
-    id: "bounds",
-    label: "BOUNDS",
-    shortcut: "b",
-    hint: "drag a face, edge, or corner to resize the tank or the water · press X, Y or Z to move that axis alone, or shift with it to lock that axis out · the new bounds preview while you drag and are simulated on release",
+    hint: "click anything to select it · drag a face, edge or corner to resize · drag the centre to move · press X, Y or Z to constrain to that axis, or shift with it to lock that axis out · click empty space or press Esc to deselect",
     status: "active",
   },
   {
@@ -141,7 +136,21 @@ export function editorToolForShortcut(key: string): EditorTool | undefined {
   return EDITOR_TOOLS.find((tool) => tool.shortcut === normalized)?.id;
 }
 
-export type EditorSelectionKind = "body" | "terrain-feature" | "inflow" | "prop";
+/**
+ * What a selection can be about.
+ *
+ * The tank and the water body are selection kinds like any other even though no
+ * click can reach them — BOUNDS surfaces them instead. Giving them a kind is
+ * what lets one handle layer, one axis lock and one commit path serve every
+ * editable thing; see lib/editor-entity.ts.
+ */
+export type EditorSelectionKind =
+  | "body"
+  | "terrain-feature"
+  | "inflow"
+  | "scenery"
+  | "tank"
+  | "fluid-body";
 
 /**
  * Generalization of the original `selectedBodyId`. Later phases add terrain

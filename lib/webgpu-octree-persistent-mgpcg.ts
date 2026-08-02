@@ -67,6 +67,18 @@ function persistentMGPCGRowThreshold(
   return OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD;
 }
 
+function persistentMGPCGDiagnosticOutputChannel(): number | undefined {
+  if (typeof process === "undefined") return undefined;
+  const name = process.env?.FLUID_PERSISTENT_MGPCG_DIAGNOSTIC_OUTPUT;
+  if (!name) return undefined;
+  const channels = OCTREE_PERSISTENT_MGPCG_CHANNEL as Readonly<Record<string, number>>;
+  const channel = channels[name];
+  if (channel === undefined) {
+    throw new RangeError(`Unknown persistent MGPCG diagnostic output channel ${name}`);
+  }
+  return channel;
+}
+
 /** One 256-lane workgroup, one dispatch. */
 export const OCTREE_PERSISTENT_MGPCG_LANES = 256;
 
@@ -76,7 +88,56 @@ export const OCTREE_PERSISTENT_MGPCG_CONTROL_MARKER = 0x5045_5253;
 /** Extra solve-control word the persistent executor authors. */
 export const OCTREE_PERSISTENT_MGPCG_CONTROL = Object.freeze({
   executorMarker: 21,
+  hybridRegularRows: 22,
+  hybridIdentityRows: 23,
+  hybridPowerRows: 24,
+  hybridLiquidRows: 25,
+  hybridPowerMachineryRows: 26,
+  hybridFullPageSlotChains: 27,
+  hybridPageSlotChains: 28,
+  hybridEpoch: 29,
+  hybridRowClassCount: 30,
+  hybridCensusMarker: 31,
 } as const);
+
+export const OCTREE_PERSISTENT_MGPCG_HYBRID_CENSUS_MARKER = 0x4834_4234;
+
+export interface OctreePersistentMGPCGHybridCensus {
+  readonly regularRows: number;
+  /** Exact dry diag=1/offdiag=0/RHS=0 rows; excluded from the Bet-4 score. */
+  readonly identityRows: number;
+  readonly powerRows: number;
+  readonly liquidRows: number;
+  readonly liveRows: number;
+  readonly fullDescriptorRows: number;
+  readonly hybridDescriptorRows: number;
+  readonly fullCatalogRows: number;
+  readonly hybridCatalogRows: number;
+  readonly fullPageSlotChains: number;
+  readonly hybridPageSlotChains: number;
+  readonly epoch: number;
+  readonly machineryReduction: number;
+}
+
+/** Decode only the census written after exact GPU partition validation. */
+export function decodeOctreePersistentMGPCGHybridCensus(
+  words: Uint32Array,
+): OctreePersistentMGPCGHybridCensus | null {
+  if (words.length < 10 || words[9] !== OCTREE_PERSISTENT_MGPCG_HYBRID_CENSUS_MARKER) return null;
+  const regularRows = words[0]!, identityRows = words[1]!, powerRows = words[2]!;
+  const liquidRows = regularRows + powerRows, liveRows = liquidRows + identityRows;
+  if (liveRows < 1 || words[3] !== liquidRows || words[4] !== powerRows
+    || words[5] !== 18 * liquidRows || words[6] !== 18 * powerRows
+    || words[7] === 0 || words[8] !== 5) return null;
+  return Object.freeze({
+    regularRows, identityRows, powerRows, liquidRows, liveRows,
+    fullDescriptorRows: liquidRows, hybridDescriptorRows: powerRows,
+    fullCatalogRows: liquidRows, hybridCatalogRows: powerRows,
+    fullPageSlotChains: words[5]!, hybridPageSlotChains: words[6]!,
+    epoch: words[7]!,
+    machineryReduction: powerRows === 0 ? Number.POSITIVE_INFINITY : liquidRows / powerRows,
+  });
+}
 
 /** Shared solve-control ABI consumed by the persistent kernel and snapshots. */
 export const OCTREE_PERSISTENT_MGPCG_CONTROL_BYTES = 128;
@@ -97,17 +158,15 @@ export function octreePersistentMGPCGCompactLiveRowsEnabled(
 export const OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID = "octree/persistent-mgpcg";
 const OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK = "whole-solve";
 
-const STORAGE_BINDINGS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8] as const);
-/** Explicit, asserted: eight storage bindings plus one uniform. */
+const STORAGE_BINDINGS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const);
+/** Explicit, asserted: ten storage bindings plus one uniform. */
 export const OCTREE_PERSISTENT_MGPCG_STORAGE_BINDING_COUNT = STORAGE_BINDINGS.length;
 
 const PARAMS_LEVEL_TABLE_SLOTS = 16;
-const PARAMS_BYTES = 80 + 5 * PARAMS_LEVEL_TABLE_SLOTS * 4;
+const PARAMS_BYTES = 96 + 5 * PARAMS_LEVEL_TABLE_SLOTS * 4;
 const DISPATCH_RECORD_WORDS_PER_LEVEL = 12;
 const DISPATCH_LIFECYCLE_WORDS = 2;
-const ACCEPTED_CONTROL_BYTES = 24;
-const WORKSET_ROW_CLASS_COUNT = 4;
-const WORKSET_HEADER_STAGE_BYTES = 8;
+const WORKSET_ROW_CLASS_COUNT = 5;
 
 /**
  * Everything the persistent kernel binds or stages. Buffers are supplied by
@@ -129,9 +188,10 @@ export interface OctreePersistentMGPCGSource {
   readonly coefficientBankStrideWords: number;
   /** Structured power topology metrics, one `Metric` per row. */
   readonly metrics: GPUBuffer;
-  /** Accepted structured control `[flags, firstError, rows, generation, bank, slots]`. */
+  /** Accepted dynamic-boundary `C` publication. The solver consumes the
+   * `[flags, firstError, rows, slots, epoch, bank, published]` prefix live. */
   readonly acceptedAuthority: GPUBuffer;
-  /** Packed A/B structured row and family worksets. */
+  /** Packed A/B dynamic-boundary row and family worksets. */
   readonly worksets: GPUBuffer;
   readonly worksetStrideWords: number;
   readonly worksetBankStrideWords: number;
@@ -245,11 +305,22 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   private readonly pipeline: GPUComputePipeline;
   private readonly groups: Array<{ pressureOut: GPUBuffer; group: GPUBindGroup }> = [];
   private readonly dispatchMetaBytes: number;
+  private readonly compactLiveRows: boolean;
   private destroyed = false;
 
   /** GPU-authored records suitable for the existing diagnostics readback. */
   get workAccountingBuffers(): Readonly<{ control: GPUBuffer; arena: GPUBuffer }> {
     return Object.freeze({ control: this.source.control, arena: this.arena });
+  }
+
+  diagnosticRowStride(liveRows: number): number {
+    return this.compactLiveRows ? liveRows : this.source.rowCapacity;
+  }
+
+  diagnosticStageByteOffset(stage: "initialResidual" | "initialPreconditioned"): number {
+    return this.channelByteOffset(stage === "initialResidual"
+      ? OCTREE_PERSISTENT_MGPCG_CHANNEL.rhs
+      : OCTREE_PERSISTENT_MGPCG_CHANNEL.pressureSeed);
   }
 
   get workAccountingPlan(): Readonly<{
@@ -263,6 +334,29 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       storageBindings: this.storageBindingCount,
       workgroupStorageBytes: this.workgroupStorageBytes,
     });
+  }
+
+  /** Post-submit Bet-4 work census. It is observational and never schedules. */
+  async readHybridCensus(): Promise<OctreePersistentMGPCGHybridCensus | null> {
+    this.assertLive();
+    const readback = this.device.createBuffer({
+      label: "Persistent MGPCG hybrid work census readback",
+      size: 40,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({ label: "Read persistent hybrid work census" });
+    encoder.copyBufferToBuffer(this.source.control,
+      OCTREE_PERSISTENT_MGPCG_CONTROL.hybridRegularRows * 4, readback, 0, 40);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      return decodeOctreePersistentMGPCGHybridCensus(
+        Uint32Array.from(new Uint32Array(readback.getMappedRange())),
+      );
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
   }
 
   constructor(
@@ -330,21 +424,21 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     }
     const copySource = GPUBufferUsage.COPY_SRC;
     for (const [label, buffer] of [
-      ["accepted authority", source.acceptedAuthority],
       ["dispatch metadata", source.dispatchMeta],
-      ["structured worksets", source.worksets],
       ["divergence RHS", source.rhs],
     ] as const) {
       if ((buffer.usage & copySource) === 0) {
         throw new RangeError(`Persistent MGPCG requires COPY_SRC on the ${label} buffer`);
       }
     }
-    if (source.acceptedAuthority.size < ACCEPTED_CONTROL_BYTES
+    if (source.acceptedAuthority.size < 7 * 4
       || source.dispatchMeta.size < this.dispatchMetaBytes
       || source.rhs.size < rowCapacity * 4
       || source.coefficients.size < 2 * rowCapacity * 19 * 4
       || source.geometry.size < rowCapacity * 16
-      || source.coefficientBankStrideWords < rowCapacity * 19) {
+      || source.coefficientBankStrideWords < rowCapacity * 19
+      || source.worksetStrideWords < 7 + rowCapacity
+      || source.worksetBankStrideWords < WORKSET_ROW_CLASS_COUNT * source.worksetStrideWords) {
       throw new RangeError("Persistent MGPCG source capacity is too small");
     }
     const worksetSpan =
@@ -381,16 +475,18 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       options.boundarySmoothingIterations, options.boundaryBandLayers,
       this.plan.transferStride, this.plan.brickCount, this.plan.pageDirectoryBytes / 4,
       stagedInputBaseWords,
+      0, 0, 0, 0,
+      source.worksetStrideWords, source.worksetBankStrideWords, 0, 0,
     ]);
     floats[16] = options.relativeTolerance;
     floats[17] = absoluteTolerance;
     floats[18] = 1e-30;
     floats[19] = damping;
-    words.set(tables.levelCaps, 20);
-    words.set(tables.levelBases, 20 + PARAMS_LEVEL_TABLE_SLOTS);
-    words.set(tables.brickOffsets, 20 + 2 * PARAMS_LEVEL_TABLE_SLOTS);
-    words.set(tables.pageOffsets, 20 + 3 * PARAMS_LEVEL_TABLE_SLOTS);
-    words.set(tables.transferOffsets, 20 + 4 * PARAMS_LEVEL_TABLE_SLOTS);
+    words.set(tables.levelCaps, 24);
+    words.set(tables.levelBases, 24 + PARAMS_LEVEL_TABLE_SLOTS);
+    words.set(tables.brickOffsets, 24 + 2 * PARAMS_LEVEL_TABLE_SLOTS);
+    words.set(tables.pageOffsets, 24 + 3 * PARAMS_LEVEL_TABLE_SLOTS);
+    words.set(tables.transferOffsets, 24 + 4 * PARAMS_LEVEL_TABLE_SLOTS);
     device.queue.writeBuffer(this.params, 0, words);
 
     const activityProfile = performanceShaderVariant();
@@ -425,9 +521,44 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       "@builtin(subgroup_size) activitySubgroupSize:u32",
     ].join(",\n ");
     const compactLiveRows = octreePersistentMGPCGCompactLiveRowsEnabled();
+    this.compactLiveRows = compactLiveRows;
+    const diagnosticOutputChannel = persistentMGPCGDiagnosticOutputChannel();
+    const regularAddressOracle = typeof process !== "undefined"
+      && process.env.FLUID_POWER_HYBRID_FULL_ADDRESS_ORACLE === "1";
+    const regularAdjointOracle = typeof process !== "undefined"
+      && process.env.FLUID_POWER_HYBRID_FULL_ADJOINT_ORACLE === "1";
+    const regularAllChannelsOracle = typeof process !== "undefined"
+      && process.env.FLUID_POWER_HYBRID_ALL_CHANNELS_ORACLE === "1";
+    const section63BandOracle = typeof process !== "undefined"
+      && process.env.FLUID_POWER_HYBRID_SECTION63_BAND_ORACLE === "1";
+    const fullApplyOracle = typeof process !== "undefined"
+      && process.env.FLUID_POWER_HYBRID_FULL_APPLY_ORACLE === "1";
+    const linearApplyOracle = typeof process !== "undefined"
+      && process.env.FLUID_POWER_HYBRID_LINEAR_APPLY_ORACLE === "1";
+    const stageCaptureNames = ["initialPreconditioned", "vcyclePhase0", "vcyclePresmooth",
+      "vcycleRestrict", "vcycleProlong", "vcyclePostsmooth", "section43Boundary",
+      "section43First", "section43Inputs"] as const;
+    const requestedStageCapture = typeof process !== "undefined"
+      ? process.env.FLUID_PERSISTENT_MGPCG_STAGE_CAPTURE : undefined;
+    if (requestedStageCapture !== undefined
+      && !stageCaptureNames.includes(requestedStageCapture as typeof stageCaptureNames[number])) {
+      throw new RangeError(`Unknown persistent MGPCG stage capture ${requestedStageCapture}`);
+    }
+    const diagnosticStageCapture = typeof process !== "undefined"
+      && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+      ? (requestedStageCapture ?? "initialPreconditioned") as typeof stageCaptureNames[number]
+      : undefined;
     const shaderSource = octreePersistentMGPCGWGSL({
       maximumIterations: options.maximumIterations,
       compactLiveRows,
+      regularAddressOracle,
+      regularAdjointOracle,
+      regularAllChannelsOracle,
+      section63BandOracle,
+      fullApplyOracle,
+      linearApplyOracle,
+      diagnosticStageCapture,
+      ...(diagnosticOutputChannel === undefined ? {} : { diagnosticOutputChannel }),
       ...(activity.enabled ? { activity: {
         parameters: activityParameters,
         enter: activity.subgroup(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "enter", activitySite),
@@ -445,7 +576,14 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     const shaderVariant = activity.module(
       shaderSource,
       `${OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`
-        + `/${compactLiveRows ? "compact-live" : "capacity-strided"}`,
+        + `/${compactLiveRows ? "compact-live" : "capacity-strided"}`
+        + `/${regularAddressOracle ? "full-address" : "regular-address"}`
+        + `/${regularAdjointOracle ? "full-adjoint" : "no-adjoint"}`
+        + `/${regularAllChannelsOracle ? "all-channels" : "axis-channels"}`
+        + `/${section63BandOracle ? "section63-band" : "dynamic-band"}`
+        + `/${fullApplyOracle ? "full-apply" : "hybrid-apply"}`
+        + `/${linearApplyOracle ? "linear-apply" : "class-apply"}`
+        + `/diagnostic-output-${diagnosticOutputChannel ?? "pressure"}`,
     );
     const shaderModule = device.createShaderModule({
       label: `Octree persistent MGPCG · single-dispatch 256-lane solve · ${
@@ -511,27 +649,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     }
     broker.clearBuffer(this.source.control);
     encodeInnerSetup?.(broker);
-    broker.copyBufferToBuffer(this.source.acceptedAuthority, 0, this.arena,
-      OCTREE_PERSISTENT_MGPCG_HEADER.accepted * 4, ACCEPTED_CONTROL_BYTES);
     broker.copyBufferToBuffer(this.source.dispatchMeta, 0, this.arena,
       OCTREE_PERSISTENT_MGPCG_HEADER.dispatch * 4, this.dispatchMetaBytes);
-    // Both banks' four accepted row-class headers. The kernel selects the
-    // accepted bank GPU-side and fails closed unless every header carries the
-    // accepted generation and the four counts sum to rows() — the proof that
-    // iterating [0, rows()) equals the hierarchical four-class apply.
-    for (let bank = 0; bank < 2; bank += 1) {
-      for (let rowClass = 0; rowClass < WORKSET_ROW_CLASS_COUNT; rowClass += 1) {
-        broker.copyBufferToBuffer(
-          this.source.worksets,
-          (bank * this.source.worksetBankStrideWords
-            + rowClass * this.source.worksetStrideWords) * 4,
-          this.arena,
-          (OCTREE_PERSISTENT_MGPCG_HEADER.worksetHeaders
-            + (bank * WORKSET_ROW_CLASS_COUNT + rowClass) * 2) * 4,
-          WORKSET_HEADER_STAGE_BYTES,
-        );
-      }
-    }
     broker.copyBufferToBuffer(this.source.rhs, 0, this.arena,
       this.channelByteOffset(OCTREE_PERSISTENT_MGPCG_CHANNEL.rhs), rowBytes);
     broker.copyBufferToBuffer(solve.pressureSeed, 0, this.arena,
@@ -559,6 +678,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       6: this.source.metrics,
       7: this.source.control,
       8: pressureOut,
+      9: this.source.worksets,
+      10: this.source.acceptedAuthority,
     };
     const group = this.device.createBindGroup({
       label: "Persistent MGPCG bindings",

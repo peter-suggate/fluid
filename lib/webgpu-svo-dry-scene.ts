@@ -14,6 +14,22 @@ export const svoPresentationResourcePlugin: ResourcePluginDefinition = Object.fr
     warmup: "Publishing the first sparse frame behind a GPU completion fence.",
   },
 });
+
+/** Startup milestones for the sparse presentation plugin. Compilation,
+ * attachment, and first presentation share one colocated task vocabulary so
+ * the UI never has to invent a denominator. */
+export const SVO_PRESENTATION_STARTUP_STAGES = Object.freeze([
+  "Build sparse presentation shader sources",
+  "Validate sparse presentation shader modules",
+  "Compile sparse primary visibility pipeline",
+  "Compile sparse brick culling programs",
+  "Compile split visibility and lighting programs",
+  "Compile raster glass and rigid discovery programs",
+  "Compile sparse cone fan-out programs",
+  "Finalize sparse presentation resources",
+  "Attach sparse renderer",
+  "Submit first sparse frame",
+] as const);
 import {
   SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
   packSvoPrimitiveCandidateArena,
@@ -1628,8 +1644,12 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
 }
 ` : "";
   const prepassLightSlotWGSL = reduced || voxelLightCache ? /* wgsl */ `dryCurrentLightSlot=lightIndex;` : "";
+  // The rim is re-applied on the cached path too: reduced-rate radiance is a
+  // cache of how the room lights this surface, and the cursor is not part of
+  // how the room is lit. Skipping it here would make the outline flicker at
+  // whatever rate the prepass refreshes.
   const prepassRadianceShortcutWGSL = reduced
-    ? /* wgsl */ `if(dryPrepassRadianceState==1u&&hit.motionKind==DRY_GBUFFER_MOTION_STATIC){return max(dryPrepassRadiance.rgb,vec3f(0.0));}`
+    ? /* wgsl */ `if(dryPrepassRadianceState==1u&&hit.motionKind==DRY_GBUFFER_MOTION_STATIC){return dryHoverRim(max(dryPrepassRadiance.rgb,vec3f(0.0)),hit,normalize(-rd));}`
     : "";
   const prepassGiShortcutWGSL = reduced
     ? /* wgsl */ `if(dryPrepassGiState==1u){return DryGlobalIllumination(max(dryPrepassGi.rgb,vec3f(0.0)),clamp(dryPrepassGi.a,0.0,1.0));}`
@@ -1835,7 +1855,10 @@ fn dryBrickCoverageResolve(position:vec2f)->DryRasterPrimaryOut{
       let instanceIndex=svoBrickCoverageCandidates[base+bestSlot];let record=svoBrickInstances[instanceIndex];
       let leaf=SvoTraversalHit(SVO_STATUS_HIT,0u,record.nodeIndexKey&SVO_BRICK_NODE_INDEX_MASK,0u,record.voxelOffset,0u,bestEntry,bestExit);
       let payload=traceLeafPayload(ro,rd,leaf);
-      if(payload.t<opaque.t){opaque=payload;producer=SVO_GBUFFER_PRODUCER_BRICK;}
+      // Proxy boxes are subsets of disjoint SVO leaf cells. Once the
+      // nearest-entry proxy hits, every remaining proxy starts at or beyond
+      // this proxy's exit, so none can contain a nearer payload.
+      if(payload.t<DRY_MISS){if(payload.t<opaque.t){opaque=payload;producer=SVO_GBUFFER_PRODUCER_BRICK;}break;}
       iteration+=1u;
     }
   }
@@ -2234,7 +2257,12 @@ ${svoNodeMipSamplingWGSL}
 ${svoTetrahedralRadianceWGSL}
 ${svoTetrahedralRadianceConeCoreWGSL}
 ${svoFluidCoverageWGSL}
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
+// highlight is (firstOwner, lastOwner, strength, falloff) for the object under
+// the editor cursor, appended after the terrain mirror so no other shader's view
+// of this buffer moves. A range rather than one id because a described object is
+// several primitives — a lantern is three, a grown tree is thirty — and they are
+// contiguous in owner order by construction. See lib/scenery-expand.ts.
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16>, highlight:vec4f }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 struct DryParams {
   mapping:SvoMapping,
@@ -2890,6 +2918,30 @@ fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   else{let procedural=svoProceduralMaterial(material.identity.z,base,roughness,position);base=procedural.baseColorLinear;roughness=procedural.roughness;variationFlags=procedural.variationFlags;}
   return DrySurfaceMaterial(base,roughness,material.emissiveRoughness.xyz+selectedEmission,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,regionId,variationFlags,1u,0u);
 }
+/**
+ * The hover outline.
+ *
+ * A rim rather than a tint or a wireframe: it reads on a white porcelain
+ * mushroom and on a near-black lab bench alike, it does not lie about the
+ * object's colour, and — unlike a screen-space outline — it is occluded by
+ * whatever is genuinely in front, so a half-hidden object looks half hidden.
+ *
+ * Additive, so an object already at white does not saturate into a silhouette,
+ * and applied after shading so nothing feeding global illumination sees it: a
+ * cursor must not change how the room is lit.
+ */
+fn dryHoverRim(color:vec3f,hit:DryHit,viewDirection:vec3f)->vec3f {
+  let first=uniforms.highlight.x;let last=uniforms.highlight.y;let strength=uniforms.highlight.z;
+  // An empty range is the resting state; nothing is hovered far more often
+  // than something is.
+  if(!(strength>0.0)||!(last>=first)){return color;}
+  if(hit.ownerId==DRY_OWNER_NONE){return color;}
+  let owner=f32(hit.ownerId);
+  if(owner<first-0.5||owner>last+0.5){return color;}
+  let facing=1.0-clamp(abs(dot(hit.normal,viewDirection)),0.0,1.0);
+  return color+pow(facing,max(uniforms.highlight.w,1.0))*strength*vec3f(.32,.86,.72);
+}
+
 fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   if(hit.t>=DRY_MISS){return dryEnvironment(rd,0.0);}${screenSpaceProxyShadeWGSL}${prepassRadianceShortcutWGSL}${voxelLightCache ? "dryVoxelLightConsumerEligible=select(0u,1u,hit.motionKind==DRY_GBUFFER_MOTION_STATIC);" : ""}let position=ro+rd*hit.t;let surface=dryEvaluateSurfaceMaterial(hit,position);
   if(surface.valid==0u){return vec3f(0.0);}
@@ -2906,7 +2958,8 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let fresnel=unifiedSchlick(max(dot(hit.normal,viewDirection),0.0),f0);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(position,hit.normal,ignoredBodyOwner);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=select(1.0,dry.giLighting.w,globalIllumination);let diffuseEnvironment=diffuseColor*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*gi.visibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*fresnel;let indirectDiffuse=diffuseColor*gi.radiance;
-  return max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
+  let shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
+  return dryHoverRim(shaded,hit,viewDirection);
 }
 
 struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}
@@ -3497,15 +3550,21 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   async initialize(progress?: (label: string, completed: number, total: number) => void): Promise<void> {
-    progress?.("Compiling sparse dry-scene pipeline", 0, 1);
+    const report = (completed: number) => progress?.(
+      SVO_PRESENTATION_STARTUP_STAGES[completed]!, completed, SVO_PRESENTATION_STARTUP_STAGES.length,
+    );
+    report(0);
+    const fragmentShader = this.traversalMode === "hybrid" && this.brickOccupancyMode === "off" && this.screenSpaceTerminationPixels === 0
+      ? drySceneShader : createSvoDrySceneFragmentWGSL(1, this.traversalMode, this.brickOccupancyMode, this.shadingPath, this.screenSpaceTerminationPixels,
+        false, this.rasterPrimary && this.rasterGlassDiscovery, this.rasterPrimary && this.rasterRigidDiscovery, false,
+        { ...this.experiments, voxelLightCache: false });
+    report(1);
     const [vertexModule, fragmentModule] = await Promise.all([
       checkedModule(this.device, "Sparse voxel dry scene vertex", drySceneVertexShader),
       checkedModule(this.device, `Sparse voxel dry scene fragment (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
-        this.traversalMode === "hybrid" && this.brickOccupancyMode === "off" && this.screenSpaceTerminationPixels === 0
-          ? drySceneShader : createSvoDrySceneFragmentWGSL(1, this.traversalMode, this.brickOccupancyMode, this.shadingPath, this.screenSpaceTerminationPixels,
-            false, this.rasterPrimary && this.rasterGlassDiscovery, this.rasterPrimary && this.rasterRigidDiscovery, false,
-            { ...this.experiments, voxelLightCache: false })),
+        fragmentShader),
     ]);
+    report(2);
     this.layout = this.device.createBindGroupLayout({ label: "Sparse voxel dry scene bindings", entries: sparseVoxelDrySceneBindGroupLayoutEntries() });
     this.pipeline = await this.device.createRenderPipelineAsync({
       label: `Sparse voxel dry scene (${this.traversalMode}, brick-${this.brickOccupancyMode})`, layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
@@ -3524,16 +3583,29 @@ export class SparseVoxelDrySceneRenderer {
     this.vertexModule = vertexModule;
     // The brick draw layout is a pipeline-layout input of the split bundle, so
     // instance emission compiles first.
+    report(3);
     await this.ensureBrickCullPipelines();
-    if (this.shadingPath === "split") {
-      await Promise.all([
-        this.ensureSplitPipelines(1),
+    report(4);
+    // These bundles are independent. Track each completion while retaining the
+    // parallel compile that keeps overall startup bounded by the slowest
+    // browser/driver job rather than the sum of all three.
+    let completedFamilies = 4;
+    const trackFamily = async (label: string, work: Promise<void>) => {
+      await work;
+      completedFamilies += 1;
+      progress?.(`${label} ready`, completedFamilies, SVO_PRESENTATION_STARTUP_STAGES.length);
+    };
+    await Promise.all([
+      trackFamily(SVO_PRESENTATION_STARTUP_STAGES[4],
+        this.shadingPath === "split" ? this.ensureSplitPipelines(1) : Promise.resolve()),
+      trackFamily(SVO_PRESENTATION_STARTUP_STAGES[5], Promise.all([
         this.rasterGlassDiscovery ? this.ensureRasterGlassPipeline() : Promise.resolve(),
         this.rasterRigidDiscovery ? this.ensureRasterRigidPipeline() : Promise.resolve(),
-        this.coneFanout ? this.ensureConeFanoutPipelines() : Promise.resolve(),
-      ]);
-    }
-    progress?.("Sparse presentation pipeline compiled", 1, 1);
+      ]).then(() => {})),
+      trackFamily(SVO_PRESENTATION_STARTUP_STAGES[6],
+        this.coneFanout ? this.ensureConeFanoutPipelines() : Promise.resolve()),
+    ]);
+    report(7);
     this.rebuild();
   }
 

@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect } from "react";
-import { boundsAxisForKey, toggleBoundsAxisConstraint } from "./editor-bounds-axis";
+import { editorAxisForKey, toggleAxisConstraint } from "./editor-axis-constraint";
 import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
 import { DEFAULT_EDITOR_TOOL, editorToolForShortcut, editorToolIsActive } from "./editor-tools";
 import { stepFluidCellTraceHit } from "./fluid-cell-trace";
-import { propIdFromSelection } from "./editor-props";
+import { editorEntityContext, findEntity } from "./editor-entity-catalog";
 import { simulation } from "./simulation/controller";
 import { useDiagnosticsStore } from "./stores/diagnostics-store";
 import { useUIStore } from "./stores/ui-store";
@@ -41,18 +41,19 @@ export function useEditorShortcuts(): void {
       }
       if (accelerator || event.altKey) return;
 
-      // Axis constraints, on the letters every 3D editor uses for them. BOUNDS
-      // claims x/y/z outright rather than only while a handle is held: a
-      // constraint you can only reach mid-drag cannot be seen before you commit
-      // to the gesture, and arming one first is how a run of single-axis
-      // adjustments is actually made. The one casualty is `y` for ERASE from
-      // inside BOUNDS, which the toolbar and every other tool key still reach.
-      if (ui.activeTool === "bounds") {
-        const axis = boundsAxisForKey(event.key);
+      // Axis constraints, on the letters every 3D editor uses for them. A
+      // selection claims x/y/z outright rather than only while a handle is held:
+      // a constraint you can only reach mid-drag cannot be seen before you
+      // commit to the gesture, and arming one first is how a run of single-axis
+      // adjustments is actually made. The one casualty is `y` for ERASE while
+      // something is selected, which the toolbar and every other tool key still
+      // reach.
+      if (ui.selection) {
+        const axis = editorAxisForKey(event.key);
         if (axis) {
           event.preventDefault();
-          ui.setBoundsAxisConstraint(toggleBoundsAxisConstraint(
-            ui.boundsAxisConstraint, axis, event.shiftKey ? "plane" : "axis"));
+          ui.setAxisConstraint(toggleAxisConstraint(
+            ui.axisConstraint, axis, event.shiftKey ? "plane" : "axis"));
           return;
         }
       }
@@ -60,15 +61,21 @@ export function useEditorShortcuts(): void {
         event.preventDefault();
         // A mode inside a mode is left from the inside out, so the first Escape
         // drops the axis lock and the second leaves the tool.
-        if (ui.boundsAxisConstraint) { ui.setBoundsAxisConstraint(undefined); return; }
+        if (ui.axisConstraint) { ui.setAxisConstraint(undefined); return; }
         ui.setActiveTool("select");
         ui.select(undefined);
         return;
       }
+      // Delete asks the selected entity for the scene without it. Entities that
+      // cannot be removed — the tank, the water body — simply do not offer one,
+      // so the key falls through rather than being denied by a list here.
       if (event.key === "Delete" || event.key === "Backspace") {
-        if (ui.selection?.kind === "body") { event.preventDefault(); simulation.removeBody(ui.selection.id); return; }
-        const propId = ui.selection?.kind === "prop" ? propIdFromSelection(ui.selection.id) : undefined;
-        if (propId) { event.preventDefault(); simulation.removeProp(propId); return; }
+        const entity = findEntity(editorEntityContext(), ui.selection);
+        if (entity?.remove) {
+          event.preventDefault();
+          simulation.removeEntity(`Removed ${entity.label}`, entity.remove());
+          return;
+        }
       }
       if (event.key.toLowerCase() === "f" && ui.selection?.kind === "body") {
         const body = useDiagnosticsStore.getState().bodies.find((candidate) => candidate.description.id === ui.selection?.id);

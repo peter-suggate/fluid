@@ -4,7 +4,8 @@ import {
   aimInflow,
   createInflowAt,
   inflowDirection,
-  inflowHandles,
+  inflowEntity,
+  INFLOW_SELECTION_ID,
   inflowSpeed_m_s,
   moveInflow,
   setInflowRadius,
@@ -43,12 +44,15 @@ test("placement clamps the nozzle inside the container", () => {
 test("the arrow tip encodes direction and speed and survives a round trip", () => {
   const base = scene();
   const inflow = createInflowAt({ x: 0, y: 0.2, z: 0 }, { x: 0, y: 1, z: 0 }, base);
-  const [centre, nozzle] = inflowHandles(inflow);
-  assert.ok(centre && nozzle);
+  // The arrow is an ordinary handle now, so this reads it where the pointer
+  // would find it rather than through a bespoke accessor.
+  const entity = inflowEntity.find(
+    { scene: { ...base, fluid: { ...base.fluid, inflow } }, bodies: [] }, INFLOW_SELECTION_ID)!;
+  const nozzle = entity.handles.find((handle) => handle.id === "aim")!;
   const offset = Math.hypot(
-    nozzle.position_m.x - centre.position_m.x,
-    nozzle.position_m.y - centre.position_m.y,
-    nozzle.position_m.z - centre.position_m.z,
+    nozzle.position_m.x - inflow.center_m.x,
+    nozzle.position_m.y - inflow.center_m.y,
+    nozzle.position_m.z - inflow.center_m.z,
   );
   assert.ok(Math.abs(offset - INFLOW_ARROW_SECONDS * inflowSpeed_m_s(inflow)) < 1e-9);
 

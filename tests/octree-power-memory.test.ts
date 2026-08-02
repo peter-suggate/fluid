@@ -73,8 +73,10 @@ test("factor-8 transport keeps direct structured scratch page-bounded", () => {
   assert.equal(plan.pageStatusBytes, pages * 12,
     "classification storage is reused as two packed u16 telemetry pairs plus exact displacement");
   assert.equal(plan.topologyDeltaBytes, (8 + 3 * pages) * 4);
-  assert.ok(plan.allocatedBytes < 7_500_000,
-    "direct structured transport must allocate only page reductions (including exact displacement) and the topology delta");
+  assert.equal(plan.activitySnapshotBytes, pages * 4,
+    "quiescence keeps one exact logical-page identity per resident slot, never a phi fingerprint");
+  assert.ok(plan.allocatedBytes < 9_000_000,
+    "direct structured transport must remain page-bounded after adding the exact wake snapshot");
 });
 
 test("global fine capacity uses 2D dispatch and never silently shrinks the physical band estimate", () => {
@@ -154,8 +156,8 @@ test("fine summary budgets a bounded sparse paged directory and compact active m
     "fine references and corrected-coarse rows exist only for compact active ranks");
   assert.equal(summary.rankStateBytes, summary.entryCapacity * 8);
   assert.equal(summary.pageStateBytes, summary.directoryPageCapacity * 8);
-  assert.equal(summary.indirectBytes, 4 * 12,
-    "fine-summary work has fixed validation, coarse, mutation, and active-rank dispatch records");
+  assert.equal(summary.indirectBytes, 5 * 12,
+    "three disjoint direct-write arenas avoid same-pass STORAGE/INDIRECT aliasing without copy staging");
   assert.equal(summary.workStateBytes, 256);
   assert.equal(summary.allocatedBytes,
     summary.directoryBytes + summary.fineEntriesBytes + summary.keyStateBytes

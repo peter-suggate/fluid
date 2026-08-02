@@ -34,13 +34,14 @@ import { commitGPUCompletion, gpuCanAcceptNextStep } from "./gpu-clock";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
 import { planSceneRuntime } from "../scene-runtime";
 import { resourceInteractionGates } from "../resource-readiness";
-import { addProp, createPropAt, findProp, propSelectionId, removeProp, updateProp } from "../editor-props";
+import { addSceneryNode, createSceneryNodeAt, scenerySelectionId } from "../editor-scenery";
+import { findSceneryNode, withoutSceneryNode } from "../scenery-edit";
 import { scaleScene as scaleSceneBy, sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../scene-scale";
 import { sceneLatticeDimensions } from "../scene-lattice";
 import { fluidBodyBox, fluidBodyBoxPatch, scaleFluidBodyVolume, type FluidBodyBox } from "../editor-fluid-body";
 import { tankResizeIsStructural, tankResizePatch } from "../editor-tank";
 import { useSceneDraftStore, type SceneDraftSubject } from "../stores/scene-draft-store";
-import type { ScenePropDescription, ScenePropShape } from "../model";
+import type { SceneryPropKind } from "../stores/ui-store";
 import {
   browserSceneLibraryStorage,
   loadSceneFromLibrary,
@@ -955,38 +956,47 @@ class SimulationController {
 
   // ---- persistence -------------------------------------------------------
 
-  // ---- render-only props ---------------------------------------------------
+  // ---- render-only scenery -------------------------------------------------
 
   /**
-   * Props extend the sparse render domain but never enter the solve, so they
-   * are the one authoring action that does not need a re-seed.
+   * Scenery extends the sparse render domain but never enters the solve, so it
+   * is the one authoring action that does not need a re-seed.
    */
-  addProp(shape: ScenePropShape, point_m: RigidBodyState["position_m"], normal: RigidBodyState["position_m"]) {
+  addScenery(kind: SceneryPropKind, point_m: RigidBodyState["position_m"], normal: RigidBodyState["position_m"]) {
     const sceneStore = useSceneStore.getState();
-    const prop = createPropAt(sceneStore.scene, shape, point_m, normal);
-    this.recordHistory(`place ${shape} prop`);
-    sceneStore.patchScene({ props: addProp(sceneStore.scene, prop) });
-    useUIStore.getState().select({ kind: "prop", id: propSelectionId(prop.id) });
-    useRuntimeStore.getState().setNotice(`${prop.name} placed`);
-    return prop;
+    const node = createSceneryNodeAt(sceneStore.scene, kind, point_m, normal);
+    this.recordHistory(`place ${kind}`);
+    // A whole scene rather than a patch: the node joins the same list the
+    // preset's own scenery lives in, and a merge patch cannot append.
+    sceneStore.setScene(addSceneryNode(sceneStore.scene, node), sceneStore.presetId);
+    useUIStore.getState().select({ kind: "scenery", id: scenerySelectionId(node.id) });
+    useRuntimeStore.getState().setNotice(`${node.id} placed`);
+    return node;
   }
 
-  removeProp(id: string) {
+  /**
+   * Remove whatever is selected, from the scene the entity handed back.
+   *
+   * A whole scene rather than a patch because removing the last prop drops the
+   * `props` key, and a merge patch cannot express an absence — so the entity
+   * composes the document it wants and this only lands it.
+   */
+  removeEntity(label: string, next: SceneDescription) {
     const sceneStore = useSceneStore.getState();
-    if (!findProp(sceneStore.scene, id)) return;
-    this.recordHistory("remove prop");
-    const remaining = removeProp(sceneStore.scene, id);
-    const { props: _dropped, ...rest } = sceneStore.scene;
-    void _dropped;
-    sceneStore.setScene(remaining ? { ...rest, props: remaining } : rest, sceneStore.presetId);
+    this.beginEdit(label);
+    sceneStore.setScene(next, sceneStore.presetId);
     useUIStore.getState().select(undefined);
-    useRuntimeStore.getState().setNotice("Prop removed");
+    this.commitEdit(undefined, { reseed: true });
+    useRuntimeStore.getState().setNotice(label);
   }
 
-  updateProp(id: string, patch: Partial<ScenePropDescription>, coalesceKey = `prop:${id}:${Object.keys(patch).sort().join(",")}`) {
+  removeScenery(id: string) {
     const sceneStore = useSceneStore.getState();
-    this.recordHistory("prop edit", coalesceKey);
-    sceneStore.patchScene({ props: updateProp(sceneStore.scene, id, patch) });
+    if (!findSceneryNode(sceneStore.scene, id)) return;
+    this.recordHistory("remove scenery");
+    sceneStore.setScene(withoutSceneryNode(sceneStore.scene, id), sceneStore.presetId);
+    useUIStore.getState().select(undefined);
+    useRuntimeStore.getState().setNotice(`${id} removed`);
   }
 
   // ---- named scene library ------------------------------------------------

@@ -11,6 +11,7 @@ import {
   resourceActivities,
 } from "../lib/resource-readiness";
 import { RESOURCE_PLUGIN_CATALOG, resourcePluginsProviding } from "../lib/resource-plugin-catalog";
+import { WebGPURenderWorkerClient, type WebGPURenderWorkerResponse } from "../lib/webgpu-render-worker-client";
 
 test("resource plugins compose statically and claim unique identities", () => {
   assert.deepEqual(duplicateResourcePluginIds(RESOURCE_PLUGIN_CATALOG), []);
@@ -125,8 +126,19 @@ test("WebGPU resource work is worker-owned and frame traffic is bounded", () => 
     "React must never construct the WebGPU runtime in the UI realm");
   assert.match(client, /transferControlToOffscreen\(\)/);
   assert.match(client, /new Worker\(new URL\("\.\/webgpu-render-worker\.ts", import\.meta\.url\)/);
-  assert.match(client, /if \(this\.frameInFlight\) this\.queuedFrame = message/,
+  assert.match(client, /if \(this\.frameInFlight \|\| this\.frameDispatchSuspended\) this\.queuedFrame = message/,
     "busy initialization must retain only the latest UI snapshot");
+  assert.match(client,
+    /setSimulationRunning\(running: boolean\): Promise<number \| undefined>[\s\S]*type: "set-simulation-running"/,
+    "pause must return the worker's authoritative submitted time instead of a cached diagnostics snapshot");
+  assert.match(client, /if \(queued && !this\.frameDispatchSuspended\) this\.sendFrame\(queued\)/,
+    "a pause/play edge must fence old-intent frame snapshots until the worker observes it");
+  assert.match(worker,
+    /runtime\.setSimulationRunning\(message\.running\)[\s\S]*type: "simulation-running-set"/,
+    "the worker must acknowledge the control edge from the renderer-owned solver clock");
+  assert.match(viewport,
+    /renderer\.setSimulationRunning\(runState === "running"\)\.then\([\s\S]*simulation\.gpuSchedulingPaused\(submittedTime_s\)/,
+    "the controller may discard host debt only after the authoritative pause acknowledgement");
   assert.match(client, /performance\.now\(\) - Math\.max\(0, message\.workerNow_ms - message\.status\.startedAt_ms\)/,
     "worker-relative task clocks must be translated before the UI renders elapsed time");
   assert.match(worker, /renderer = new FluidLabRenderer\(/);
@@ -134,4 +146,66 @@ test("WebGPU resource work is worker-owned and frame traffic is bounded", () => 
   assert.match(renderer, /HTMLCanvasElement \| OffscreenCanvas/);
   assert.match(initialization, /typeof document !== "undefined" && typeof requestAnimationFrame === "function"/,
     "worker startup must not wait on a presentation rAF that cannot fire yet");
+});
+
+test("pause drops queued running frames and returns the worker-owned submitted clock", async () => {
+  class FakeWorker {
+    static instance: FakeWorker;
+    readonly messages: unknown[] = [];
+    private readonly listeners = new Map<string, (event: MessageEvent<WebGPURenderWorkerResponse>) => void>();
+    constructor() { FakeWorker.instance = this; }
+    addEventListener(type: string, listener: (event: MessageEvent<WebGPURenderWorkerResponse>) => void) {
+      this.listeners.set(type, listener);
+    }
+    postMessage(message: unknown) { this.messages.push(message); }
+    terminate() {}
+    emit(message: WebGPURenderWorkerResponse) {
+      this.listeners.get("message")?.({ data: message } as MessageEvent<WebGPURenderWorkerResponse>);
+    }
+  }
+  const previousWorker = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+  Object.defineProperty(globalThis, "Worker", { configurable: true, value: FakeWorker });
+  try {
+    const canvas = {
+      transferControlToOffscreen: () => ({}),
+      getBoundingClientRect: () => ({ width: 640, height: 360 }),
+    } as unknown as HTMLCanvasElement;
+    const client = new WebGPURenderWorkerClient(canvas, { onStatus() {} });
+    const drawArgs = Array(16).fill(undefined);
+    drawArgs[7] = { methodId: "octree" };
+    const draw = () => (client.draw as unknown as (...args: unknown[]) => unknown)(...drawArgs);
+
+    draw();
+    draw();
+    const pause = client.setSimulationRunning(false);
+    const worker = FakeWorker.instance;
+    const pauseRequest = worker.messages.find((message) =>
+      (message as { type?: string }).type === "set-simulation-running") as { requestId: number };
+    assert.ok(pauseRequest);
+    assert.equal(worker.messages.filter((message) => (message as { type?: string }).type === "draw").length, 1,
+      "only the already-dispatched frame may remain ahead of the pause edge");
+
+    worker.emit({
+      type: "frame", frameId: 1,
+      metrics: { context: "running", methodId: "octree", presentationSubmitted: true },
+      snapshot: {
+        presentationRevision: 0, presentationResolution: "640 × 360", completedPresentationCount: 1,
+        latestPixelTrace: undefined, pixelTraceRevision: 0, pixelTraceAvailable: false,
+        pixelTraceStatus: "path-inactive", pixelTraceAnswersRequest: false, pixelTraceStale: false,
+        latestFluidCellTrace: undefined, fluidCellTraceRevision: 0, fluidCellTraceReady: false,
+        fluidCellTraceFineBand: undefined,
+      },
+    });
+    worker.emit({ type: "simulation-running-set", requestId: pauseRequest.requestId, submittedTime_s: 0.125 });
+    assert.equal(await pause, 0.125);
+    assert.equal(worker.messages.filter((message) => (message as { type?: string }).type === "draw").length, 1,
+      "the queued running-intent frame must be discarded, not replayed after pause");
+
+    draw();
+    assert.equal(worker.messages.filter((message) => (message as { type?: string }).type === "draw").length, 2,
+      "the next fresh paused snapshot may resume presentation after acknowledgement");
+  } finally {
+    if (previousWorker) Object.defineProperty(globalThis, "Worker", previousWorker);
+    else Reflect.deleteProperty(globalThis, "Worker");
+  }
 });

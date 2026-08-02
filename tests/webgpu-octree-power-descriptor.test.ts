@@ -319,6 +319,12 @@ test("descriptor WGSL has bounded direct-owner queries and exact delta publicati
   assert.doesNotMatch(octreePowerDescriptorShader, /while\(low<high\)/);
   assert.doesNotMatch(octreePowerDescriptorShader, /fn structuralChange\(\)->bool/);
   assert.match(octreePowerDescriptorShader, /fn stagePowerDescriptorDelta/);
+  assert.match(octreePowerDescriptorShader,
+    /fn exactDescriptorIdentity[\s\S]*base\+3u\]==0u[\s\S]*base\+4u\]==0u[\s\S]*base\+5u\]==0u[\s\S]*base\+6u\]==0u[\s\S]*base\+15u\]==1u[\s\S]*pagedOwnerPublicationValid\(\)/,
+    "zero-work descriptor carry requires the complete row transaction and the new owner receipt");
+  assert.match(octreePowerDescriptorShader,
+    /reusableScratch=descriptorCandidateScratchReusable\(\)[\s\S]*exactDescriptorIdentity\(requested,reusableScratch\)[\s\S]*candidate=controlArena\.authority[\s\S]*candidate\.generation=generation\(\)[\s\S]*publicationCount=INVALID/,
+    "an exact identity must advance only control while every row-shaped dispatch stays zero");
   assert.match(octreePowerDescriptorShader, /fn prefixPowerDescriptorDelta/);
   assert.match(octreePowerDescriptorShader, /fn scatterPowerDescriptorDelta/);
   assert.match(octreePowerDescriptorShader,

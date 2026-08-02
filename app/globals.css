@@ -709,59 +709,72 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-fill-handle i { width: 9px; height: 9px; flex: none; border: 1px solid #7cb6ff; background: rgba(124,182,255,.28); }
 .editor-fill-handle span { color: #9dc6ff; font: 700 7px/1 var(--mono); letter-spacing: .06em; }
 
-/* Shape mode: two boxes at once, so colour carries which one a handle belongs
-   to — water blue, tank amber — and size carries the degree of freedom. */
-.editor-shape-gizmo .shape-handle { stroke-width: 1.3; }
-/* Edges are drawn as the edge, so they need a stroke and no fill — and a wide
-   transparent halo would be wrong here: the pick already measures against the
-   whole segment, so the visible line is exactly what is grabbable. */
-.editor-shape-gizmo line.shape-handle { fill: none; stroke-width: 2.4; }
-.editor-shape-gizmo line.shape-handle.hovered { stroke-width: 3.6; }
-.editor-shape-gizmo .target-fluid { fill: rgba(124,182,255,.42); stroke: #7cb6ff; }
-.editor-shape-gizmo .target-fluid.handle-corner { fill: #9dc6ff; stroke: #dceaff; }
-.editor-shape-gizmo .target-tank { fill: rgba(240,186,110,.28); stroke: rgba(240,186,110,.85); }
-.editor-shape-gizmo .target-tank.handle-corner { fill: #f0ba6e; stroke: #ffe3bb; }
-.editor-shape-gizmo .shape-outline { fill: none; stroke-width: 1.2; stroke-dasharray: 4 3; }
-.editor-shape-gizmo .shape-outline.target-fluid { stroke: rgba(124,182,255,.9); }
-.editor-shape-gizmo .shape-outline.target-tank { stroke: rgba(240,186,110,.9); }
+/* One handle vocabulary for every editable thing. Colour carries which kind of
+   thing a handle belongs to, and size carries the degree of freedom: a corner
+   moving three axes reads as a smaller, brighter target than a face moving one.
+   The tones are declared once and applied by `tone-*` so nothing has to know
+   which entity it is drawing. */
+.editor-entity-gizmo .entity-handle { stroke-width: 1.3; }
+/* Edges and arms are drawn as the line they are, so they need a stroke and no
+   fill — and a wide transparent halo would be wrong here: the pick already
+   measures against the whole segment, so the visible line is exactly what is
+   grabbable. */
+.editor-entity-gizmo line.entity-handle { fill: none; stroke-width: 2.4; }
+.editor-entity-gizmo line.entity-handle.hovered { stroke-width: 3.6; }
+.editor-entity-gizmo .tone-fluid { fill: rgba(124,182,255,.42); stroke: #7cb6ff; }
+.editor-entity-gizmo .tone-fluid.handle-corner { fill: #9dc6ff; stroke: #dceaff; }
+.editor-entity-gizmo .tone-tank { fill: rgba(240,186,110,.28); stroke: rgba(240,186,110,.85); }
+.editor-entity-gizmo .tone-tank.handle-corner { fill: #f0ba6e; stroke: #ffe3bb; }
+.editor-entity-gizmo .tone-body { fill: rgba(126,231,196,.34); stroke: #7ee7c4; }
+.editor-entity-gizmo .tone-body.handle-corner { fill: #7ee7c4; stroke: #d8fff2; }
+.editor-entity-gizmo .tone-prop { fill: rgba(198,168,240,.32); stroke: #c6a8f0; }
+.editor-entity-gizmo .tone-prop.handle-corner { fill: #c6a8f0; stroke: #ece0ff; }
+.editor-entity-gizmo .tone-inflow { fill: rgba(240,150,110,.32); stroke: #f0966e; }
+.editor-entity-gizmo .tone-inflow.handle-corner { fill: #f0966e; stroke: #ffdfd0; }
+/* The centre is the one handle that is not part of the box, so it is drawn as
+   the odd one out: filled solid and a size larger than any corner. */
+.editor-entity-gizmo .entity-handle.handle-center { stroke-width: 2; fill-opacity: .9; }
+.editor-entity-gizmo .entity-outline { fill: none; stroke-width: 1.2; stroke-dasharray: 4 3; }
+.editor-entity-gizmo .entity-outline.tone-fluid { stroke: rgba(124,182,255,.9); }
+.editor-entity-gizmo .entity-outline.tone-tank { stroke: rgba(240,186,110,.9); }
+.editor-entity-gizmo .entity-outline.tone-body { stroke: rgba(126,231,196,.9); }
+.editor-entity-gizmo .entity-outline.tone-prop { stroke: rgba(198,168,240,.9); }
+.editor-entity-gizmo .entity-outline.tone-inflow { stroke: rgba(240,150,110,.9); }
 
-.editor-shape-gizmo .shape-handle.hovered { stroke-width: 2; }
-.editor-shape-gizmo .target-fluid.hovered { fill: #9dc6ff; stroke: #eaf3ff; }
-.editor-shape-gizmo .target-tank.hovered { fill: #f0ba6e; stroke: #fff1da; }
+.editor-entity-gizmo .entity-handle.hovered { stroke-width: 2; }
+.editor-entity-gizmo .tone-fluid.hovered { fill: #9dc6ff; stroke: #eaf3ff; }
+.editor-entity-gizmo .tone-tank.hovered { fill: #f0ba6e; stroke: #fff1da; }
+.editor-entity-gizmo .tone-body.hovered { fill: #7ee7c4; stroke: #eafff8; }
+.editor-entity-gizmo .tone-prop.hovered { fill: #c6a8f0; stroke: #f5eeff; }
+.editor-entity-gizmo .tone-inflow.hovered { fill: #f0966e; stroke: #ffeee6; }
 /* Under an axis lock, a handle owning none of the locked axes can do nothing.
    Fading it says which handles are still live without removing them: the lock
    is a keystroke away from being released, and the box would jump if they went. */
-.editor-shape-gizmo .shape-handle.inert { opacity: .2; }
+.editor-entity-gizmo .entity-handle.inert { opacity: .2; }
 .gpu-canvas[data-shape-grab="true"] { cursor: grab; }
 
-/* The mode has to say what it is: two colours and one sentence, sitting in the
-   dead centre of the top row rather than claiming a new corner. */
-.shape-legend { position: absolute; left: 50%; top: 16px; z-index: 11; transform: translateX(-50%); display: flex; align-items: center; gap: 9px; padding: 4px 10px; border: 1px solid var(--line); background: rgba(5,18,16,.82); white-space: nowrap; pointer-events: none; backdrop-filter: blur(16px); }
-.shape-legend span { display: flex; align-items: center; gap: 4px; color: var(--ink); font: 700 8px/1 var(--mono); letter-spacing: .06em; }
-.shape-legend i { width: 8px; height: 8px; border: 1px solid; }
-.shape-legend .swatch-fluid { border-color: #7cb6ff; background: rgba(124,182,255,.5); }
-.shape-legend .swatch-tank { border-color: rgba(240,186,110,.85); background: rgba(240,186,110,.32); }
-.shape-legend small { color: var(--muted); font: 8px/1 var(--mono); }
-
-/* The axis lock, directly under the legend it outlives: it is held state, so it
-   stays on screen between drags rather than only while one is running. */
-.shape-axis-lock { position: absolute; left: 50%; top: 42px; z-index: 12; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid rgba(124,182,255,.55); background: rgba(5,18,16,.9); white-space: nowrap; pointer-events: none; backdrop-filter: blur(16px); }
+/* The axis lock: it is held state, so it stays on screen between drags rather
+   than only while one is running. */
+.shape-axis-lock { position: absolute; left: 50%; top: 16px; z-index: 12; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid rgba(124,182,255,.55); background: rgba(5,18,16,.9); white-space: nowrap; pointer-events: none; backdrop-filter: blur(16px); }
 .shape-axis-lock strong { color: #9dc6ff; font: 700 9px/1 var(--mono); letter-spacing: .1em; }
 .shape-axis-lock span { color: var(--muted); font: 8px/1 var(--mono); }
 .shape-axis-lock[data-blocked="true"] { border-color: rgba(240,150,110,.65); }
 .shape-axis-lock[data-blocked="true"] strong { color: #f09b6e; }
 
-.shape-hover-chip { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(10px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: rgba(5,18,16,.9); white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
-.shape-hover-chip strong { font: 700 7px/1 var(--mono); letter-spacing: .08em; }
-.shape-hover-chip span { color: var(--muted); font: 8px/1 var(--mono); }
-.shape-hover-chip.target-fluid strong { color: #9dc6ff; }
-.shape-hover-chip.target-tank strong { color: #f0ba6e; }
+.entity-hover-chip { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(10px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: rgba(5,18,16,.9); white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
+.entity-hover-chip strong { font: 700 7px/1 var(--mono); letter-spacing: .08em; }
+.entity-hover-chip span { color: var(--muted); font: 8px/1 var(--mono); }
 
 .shape-readout { position: absolute; z-index: 12; display: flex; align-items: center; gap: 6px; transform: translate(8px, -50%); padding: 3px 7px; border: 1px solid var(--line); background: rgba(6,18,30,.88); white-space: nowrap; pointer-events: none; backdrop-filter: blur(8px); }
 .shape-readout strong { font: 700 7px/1 var(--mono); letter-spacing: .08em; }
 .shape-readout span { color: var(--ink); font: 600 9px/1 var(--mono); }
-.shape-readout.target-fluid strong { color: #9dc6ff; }
-.shape-readout.target-tank strong { color: #f0ba6e; }
+
+/* One palette, shared by every overlay that names an entity. */
+.tone-fluid strong, strong.tone-fluid { color: #9dc6ff; }
+.tone-tank strong, strong.tone-tank { color: #f0ba6e; }
+.tone-body strong, strong.tone-body { color: #7ee7c4; }
+.tone-prop strong, strong.tone-prop { color: #c6a8f0; }
+.tone-inflow strong, strong.tone-inflow { color: #f0966e; }
 
 .scene-scale-overlay { position: absolute; right: 17px; bottom: 17px; z-index: 11; display: grid; gap: 3px; padding: 5px; border: 1px solid var(--line); background: rgba(5,18,16,.78); backdrop-filter: blur(16px); }
 .scene-scale-row { display: grid; grid-template-columns: 44px 22px 1fr 22px; align-items: center; gap: 3px; }

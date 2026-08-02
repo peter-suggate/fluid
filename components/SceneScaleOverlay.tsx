@@ -12,11 +12,11 @@ import { fluidBodyBox, fluidBodyBoxVolume_m3 } from "@/lib/editor-fluid-body";
  * while watching the result, and a popover you have to open first is the wrong
  * home for them.
  *
- * Shown only while the shape tool is armed. The viewport is already ringed with
- * chrome on all four edges, and a permanent fourth cluster is how a workbench
- * stops being readable — so these ride the one mode they belong to. Arming it
- * is a single keypress, and it is also what puts the handles on the scene, so
- * "edit the geometry" is one decision rather than several scattered ones.
+ * Shown only while the tank or the water body is selected. The viewport is
+ * already ringed with chrome on all four edges, and a permanent fourth cluster
+ * is how a workbench stops being readable — so these ride the selection they
+ * belong to. Selecting the tank is what puts its handles on the scene, so "edit
+ * the world" is one decision rather than several scattered ones.
  *
  * The two scale rows are deliberately separate because they cost different
  * things, and the row says which: a world step keeps the lattice and re-seeds
@@ -43,7 +43,8 @@ const AXES: ReadonlyArray<{
 ];
 
 export function SceneScaleOverlay() {
-  const shapeMode = useUIStore((state) => state.activeTool === "bounds");
+  const shapeMode = useUIStore((state) =>
+    state.selection?.kind === "tank" || state.selection?.kind === "fluid-body");
   // The display scene, so the litres and the extents count up as a shape drag
   // is happening rather than jumping when it lands.
   const scene = useDisplayScene();

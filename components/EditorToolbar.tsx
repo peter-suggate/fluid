@@ -1,7 +1,8 @@
 "use client";
 
 import { DEFAULT_EDITOR_TOOL, EDITOR_TOOLS } from "@/lib/editor-tools";
-import type { RigidShape, ScenePropShape } from "@/lib/model";
+import type { RigidShape } from "@/lib/model";
+import type { SceneryPropKind } from "@/lib/stores/ui-store";
 import { simulation } from "@/lib/simulation/controller";
 import { useEditorHistoryStore } from "@/lib/stores/history-store";
 import { useUIStore } from "@/lib/stores/ui-store";
@@ -13,7 +14,7 @@ const PLACEMENT_SHAPES: ReadonlyArray<{ shape: RigidShape; label: string }> = [
   { shape: "cylinder", label: "Cylinder" },
 ];
 
-const PROP_SHAPES: ReadonlyArray<{ shape: ScenePropShape; label: string }> = [
+const PROP_SHAPES: ReadonlyArray<{ shape: SceneryPropKind; label: string }> = [
   { shape: "box", label: "Box" },
   { shape: "cylinder", label: "Post" },
   { shape: "ellipsoid", label: "Blob" },

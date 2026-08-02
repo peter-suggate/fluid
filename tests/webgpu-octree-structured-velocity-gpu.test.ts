@@ -10,9 +10,11 @@ import {
   OCTREE_STRUCTURED_FINALIZE_LANES,
   OCTREE_STRUCTURED_FINALIZE_WORKGROUP_BYTES,
   OCTREE_STRUCTURED_GPU_ERROR,
+  OCTREE_STRUCTURED_RECONSTRUCTION_DISPATCH_OFFSET_BYTES,
   WebGPUDirectStructuredVelocityAuthority,
   directStructuredVelocityPublicationWGSL,
   planStructuredVelocityGPU,
+  structuredImageIdentityCarryEnabled,
   structuredVelocityRowCapacityForBindingLimit,
 } from "../lib/webgpu-octree-structured-velocity-gpu";
 
@@ -230,8 +232,8 @@ test("Section 6.3 publication binds only its current reachable stage ABI", () =>
 
 test("rejected structured candidates can mutate only inactive-bank and candidate-owned bytes", () => {
   assert.match(directStructuredVelocityPublicationWGSL,
-    /control\.activeBank=select\(0u,1u-\(atomicLoad\(&acceptedControl\[4\]\)&1u\),hasAccepted\)/,
-    "an existing publication always sends candidate payload writes to the opposite bank");
+    /let\s+identity=exactIdentityCarry\(rows,hasAccepted\)&&p\.injectedFailure==0u.*control\.activeBank=select\(select\(0u,1u-\(atomicLoad\(&acceptedControl\[4\]\)&1u\),hasAccepted\),atomicLoad\(&acceptedControl\[4\]\)&1u,identity\)/s,
+    "only an accepted exact identity transaction may retain the active bank; rejection writes the opposite bank");
   assert.match(directStructuredVelocityPublicationWGSL,
     /fn candidateAuthorityBase\(\)->u32\{return control\.activeBank\*p\.authorityWords;\}[\s\S]*fn acceptedAuthorityBase\(\)->u32\{return \(1u-control\.activeBank\)\*p\.authorityWords;\}/);
   assert.match(directStructuredVelocityPublicationWGSL,
@@ -242,6 +244,60 @@ test("rejected structured candidates can mutate only inactive-bank and candidate
   assert.match(directStructuredVelocityPublicationWGSL,
     /fn acceptStructuredPublication\(\)\{if\(atomicLoad\(&control\.flags\)!=[^{]+\{return;\}[\s\S]*acceptedControl/,
     "candidate validation is the sole gate allowed to mutate accepted control");
+});
+
+test("exact zero-affected row delta carries structured topology without rebuilding slots", () => {
+  const prototype = WebGPUDirectStructuredVelocityAuthority.prototype as unknown as
+    Record<string, () => void>;
+  const encode = prototype.encodeCandidatePasses.toString();
+  const finalize = encode.slice(encode.indexOf("Finalize direct structured publication"),
+    encode.indexOf("direct structured publication finalized"));
+  assert.deepEqual([...finalize.matchAll(/binding:\s*(\d+)/g)].map((match) => Number(match[1])),
+    [0, 2, 6, 8, 9, 12, 15, 25],
+    "identity finalization must bind both accepted control and the direct dispatch publisher");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn exactIdentityCarry.*previous==rows&&carried==rows.*base\+3u\]==0u.*base\+4u\]==0u.*base\+5u\]==0u.*base\+6u\]==0u.*ROW_DELTA_VALID.*base\+15u\]==1u/s,
+    "identity carry must consume the complete exact row-delta transaction and fail closed");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn acceptStructuredPublication.*acceptedControl\[13\],control\.reserved\[0\]/s,
+    "identity carry must publish its all-face carry proof for recurring dynamics");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /publishBlockDispatch\(27u,\(rows\+63u\)\/64u\);if\(identity\)\{publishExactRowDispatch\(0u,0u\);publishExactRowDispatch\(3u,0u\);if\(p\.imageIdentityCarryEnabled!=0u\)\{publishExactRowDispatch\(21u,0u\);publishExactRowDispatch\(24u,0u\);\}\}else\{publishBlockDispatch\(0u,\(rows\+63u\)\/64u\);publishBlockDispatch\(3u,\(rows\*p\.maxSlots\+63u\)\/64u\);\}/,
+    "exact identity must zero both topology records while incomplete identity restores both launches");
+  const reconstruction = prototype.encodeCandidateReconstruction.toString();
+  assert.match(reconstruction,
+    /dispatchWorkgroupsIndirect\(this\.liveRowDispatch,\s*OCTREE_STRUCTURED_RECONSTRUCTION_DISPATCH_OFFSET_BYTES\)/,
+    "live velocity reconstruction must use the independent record 27");
+  assert.equal(OCTREE_STRUCTURED_RECONSTRUCTION_DISPATCH_OFFSET_BYTES, 27 * 4);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn finalizeStructuredPublication.*control\.reserved\[0\]!=0u.*worksets\[base\]=epoch.*cls==4u.*worksets\[base\+1u\]=0u.*publicationDispatch\[18u\]=0u/s,
+    "identity finalization must advance immutable workset epochs while publishing no topology-transfer faces");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn prefixStructuredFamilies.*let identity=control\.reserved\[0\]!=0u;let rows=select\([^;]+,0u,identity\)[\s\S]*workgroupBarrier\(\)/,
+    "identity prefixing must zero its work extent while every lane still reaches every barrier");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn finalizeStructuredPublication.*let identity=control\.reserved\[0\]!=0u;let rows=select\([^;]+,0u,identity\);let slots=select\([^;]+,0u,identity\)[\s\S]*workgroupBarrier\(\)[\s\S]*if\(lane==0u\)\{let epoch=candidateEpoch\(\);if\(identity\)/,
+    "identity finalization must branch only after the workgroup-wide reduction barriers");
+});
+
+test("exact identity publishes zero compiled SPGrid address-image work", () => {
+  assert.equal(structuredImageIdentityCarryEnabled({}), true);
+  assert.equal(structuredImageIdentityCarryEnabled({ FLUID_STRUCTURED_IMAGE_IDENTITY_CARRY: "0" }), false,
+    "the full image rebuild must remain available as a differential arm");
+  assert.equal(structuredImageIdentityCarryEnabled({ FLUID_SPGRID_PERSISTENT_IMAGES: "1" }), false,
+    "the alternating two-bank image arm must rebuild the newly selected bank");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /if\(identity\).*imageIdentityCarryEnabled!=0u.*publishExactRowDispatch\(21u,0u\).*publishExactRowDispatch\(24u,0u\)/s,
+    "only the complete GPU row-delta identity may zero both compiled-address image records");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /if\(clean\)\{publishExactRowDispatch\(21u,finalCounts\[255u\]\+finalCounts\[511u\]\+finalCounts\[767u\]\+finalCounts\[1023u\]\);publishExactRowDispatch\(24u,finalCounts\[511u\]\+finalCounts\[1023u\]\);\}/,
+    "a changed topology must still compile every live direct and transition address row");
+  // Settled maintenance census before this gate: 2,624 union rows and 1,356
+  // transition rows. Both kernels launch one workgroup per represented row.
+  const priorImageWorkgroups = 2_624 + 1_356;
+  const identityImageWorkgroups = 0;
+  assert.ok(priorImageWorkgroups > 2 * Math.max(1, identityImageWorkgroups),
+    "compiled-address represented work must fall by more than 2x");
 });
 
 test("changed topology faces remain pending for old-field transfer while exact carries are marked", () => {

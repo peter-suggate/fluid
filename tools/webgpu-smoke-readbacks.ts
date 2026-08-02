@@ -55,6 +55,22 @@ import {
 import { rasterMeshSymmetryMetrics, sharpPatchRasterMetrics,
   type RasterMeshSymmetryMetrics, type SharpPatchRasterMetrics } from "./raster-mesh-symmetry";
 
+function exactWordFingerprint(values: ArrayLike<number>, integer = false): Readonly<{
+  length: number; hashA: string; hashB: string;
+}> {
+  const scratch = new ArrayBuffer(4), f32 = new Float32Array(scratch), u32 = new Uint32Array(scratch);
+  let a = 0x811c9dc5, b = 0x9e3779b9;
+  for (let index = 0; index < values.length; index += 1) {
+    if (integer) u32[0] = Number(values[index]) >>> 0;
+    else f32[0] = Number(values[index]);
+    const word = u32[0]!;
+    a = Math.imul(a ^ word, 0x01000193) >>> 0;
+    b = (Math.imul(b ^ (word + index), 0x85ebca6b) + 0xc2b2ae35) >>> 0;
+  }
+  return Object.freeze({ length: values.length,
+    hashA: a.toString(16).padStart(8, "0"), hashB: b.toString(16).padStart(8, "0") });
+}
+
 export async function readFloatTexture3D(device: GPUDevice, texture: GPUTexture, width: number, height: number, depth: number) {
   const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
   const buffer = device.createBuffer({ size: bytesPerRow * height * depth, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -1507,6 +1523,8 @@ export interface CompactOctreePressureStateRaster {
   readonly diagonal: Float32Array;
   readonly section63Diagonal?: Float32Array;
   readonly section63CaseId?: Uint32Array;
+  /** Diagnostic-only accepted row-major diagonal + eighteen coefficients. */
+  readonly section63CoefficientRows?: Float32Array;
   readonly initialResidual?: Float32Array;
   readonly initialPreconditioned?: Float32Array;
   readonly initialPreconditionedImage?: Float32Array;
@@ -1613,7 +1631,10 @@ export async function readCompactOctreePressureState3D(
   const topologyMetricWords = topologyMetricBytes
     ? new Uint32Array(topologyMetricBytes.buffer, topologyMetricBytes.byteOffset, rowCount * 4) : undefined;
   const boundaryDebug = (solver as GPUSolverInstance & { structuredBoundarySymmetryDebug?: {
-    control: GPUBuffer; candidates: GPUBuffer; authority: GPUBuffer; rowGeometry: GPUBuffer;
+    control: GPUBuffer; candidateControl: GPUBuffer; epochState: GPUBuffer;
+    structuredControl: GPUBuffer; readyEpochAudit?: GPUBuffer; readyFrontierAudit?: GPUBuffer;
+    readyCompactionAudit?: GPUBuffer; candidates: GPUBuffer;
+    authority: GPUBuffer; rowGeometry: GPUBuffer;
     rowVelocities: GPUBuffer;
     selectorRows: GPUBuffer; selectorOffsetWords: number; selectorStride: number;
     supportVectorOffsetWords: number; ownerDirectoryOffsetWords: number; supportCapacity: number;
@@ -1623,14 +1644,15 @@ export async function readCompactOctreePressureState3D(
     topologyTransferAudit?: GPUBuffer;
     advectionSymmetryAudit?: GPUBuffer;
     plan: { authorityWords: number; maximumCaseSlots: number; slotCapacity: number; rowCapacity: number; offsets: {
-      rowSlotHandles: number; ownerRows: number; neighborRows: number;
-      areas: number; inverseDistances: number; normals: number; centroids: number;
+      values: number; ownerRows: number; neighborRows: number; metadata: number;
+      areas: number; inverseDistances: number; fractions: number; pressureScales: number;
+      normals: number; centroids: number; rowSlotHandles: number; rowSlotSigns: number;
     } };
   } }).structuredBoundarySymmetryDebug;
   const boundaryDebugBytes = typeof process !== "undefined"
     && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1" && boundaryDebug
     ? await Promise.all([
-      readBufferBinding(device, { buffer: boundaryDebug.control }, 24),
+      readBufferBinding(device, { buffer: boundaryDebug.control }, 64),
       readBufferBinding(device, { buffer: boundaryDebug.authority }, boundaryDebug.authority.size),
       readBufferBinding(device, { buffer: boundaryDebug.candidates }, boundaryDebug.candidates.size),
       readBufferBinding(device, { buffer: boundaryDebug.selectorRows,
@@ -1656,7 +1678,56 @@ export async function readCompactOctreePressureState3D(
       boundaryDebug.advectionSymmetryAudit
         ? readBufferBinding(device, { buffer: boundaryDebug.advectionSymmetryAudit },
           boundaryDebug.advectionSymmetryAudit.size) : undefined,
+      readBufferBinding(device, { buffer: boundaryDebug.candidateControl }, 64),
+      readBufferBinding(device, { buffer: boundaryDebug.epochState }, 64),
+      readBufferBinding(device, { buffer: boundaryDebug.structuredControl }, 64),
+      boundaryDebug.readyEpochAudit
+        ? readBufferBinding(device, { buffer: boundaryDebug.readyEpochAudit }, 64) : undefined,
+      boundaryDebug.readyFrontierAudit
+        ? readBufferBinding(device, { buffer: boundaryDebug.readyFrontierAudit }, 64) : undefined,
+      boundaryDebug.readyCompactionAudit
+        ? readBufferBinding(device, { buffer: boundaryDebug.readyCompactionAudit }, 64) : undefined,
     ]) : undefined;
+  if (typeof process !== "undefined" && process.env.FLUID_HEAD_DIFFERENTIAL === "1"
+    && boundaryDebug && boundaryDebugBytes) {
+    const controlWords = new Uint32Array(boundaryDebugBytes[0].buffer,
+      boundaryDebugBytes[0].byteOffset, boundaryDebugBytes[0].byteLength / 4);
+    const candidateControlWords = new Uint32Array(boundaryDebugBytes[15].buffer,
+      boundaryDebugBytes[15].byteOffset, boundaryDebugBytes[15].byteLength / 4);
+    const epochWords = new Uint32Array(boundaryDebugBytes[16].buffer,
+      boundaryDebugBytes[16].byteOffset, boundaryDebugBytes[16].byteLength / 4);
+    const structuredWords = new Uint32Array(boundaryDebugBytes[17].buffer,
+      boundaryDebugBytes[17].byteOffset, boundaryDebugBytes[17].byteLength / 4);
+    const readyEpochWords = boundaryDebugBytes[18]
+      ? new Uint32Array(boundaryDebugBytes[18].buffer, boundaryDebugBytes[18].byteOffset,
+        boundaryDebugBytes[18].byteLength / 4) : undefined;
+    const readyFrontierWords = boundaryDebugBytes[19]
+      ? new Uint32Array(boundaryDebugBytes[19].buffer, boundaryDebugBytes[19].byteOffset,
+        boundaryDebugBytes[19].byteLength / 4) : undefined;
+    const readyCompactionWords = boundaryDebugBytes[20]
+      ? new Uint32Array(boundaryDebugBytes[20].buffer, boundaryDebugBytes[20].byteOffset,
+        boundaryDebugBytes[20].byteLength / 4) : undefined;
+    const authorityFloats = new Float32Array(boundaryDebugBytes[1].buffer,
+      boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+    const candidateFloats = new Float32Array(boundaryDebugBytes[2].buffer,
+      boundaryDebugBytes[2].byteOffset, boundaryDebugBytes[2].byteLength / 4);
+    const { plan } = boundaryDebug, slotCount = Math.min(controlWords[3] ?? 0, plan.slotCapacity);
+    const base = (controlWords[5] ?? 0) * plan.authorityWords;
+    console.log(JSON.stringify({ phase: "head-differential-structured-boundary",
+      control: Array.from(controlWords), candidateControl: Array.from(candidateControlWords),
+      epochState: Array.from(epochWords), structuredControl: Array.from(structuredWords),
+      readyEpochState: readyEpochWords ? Array.from(readyEpochWords) : undefined,
+      readyFrontierState: readyFrontierWords ? Array.from(readyFrontierWords) : undefined,
+      readyCompactionState: readyCompactionWords ? Array.from(readyCompactionWords) : undefined,
+      acceptedApertures: exactWordFingerprint(authorityFloats.subarray(
+        base + plan.offsets.fractions, base + plan.offsets.fractions + slotCount)),
+      acceptedPressureScales: exactWordFingerprint(authorityFloats.subarray(
+        base + plan.offsets.pressureScales, base + plan.offsets.pressureScales + slotCount)),
+      candidateApertures: exactWordFingerprint(Array.from({ length: slotCount },
+        (_unused, handle) => candidateFloats[2 * handle]!)),
+      candidatePressureScales: exactWordFingerprint(Array.from({ length: slotCount },
+        (_unused, handle) => candidateFloats[2 * handle + 1]!)) }));
+  }
   const [nx, ny, nz] = dimensions;
   const cellCount = nx * ny * nz;
   const pressure = new Float32Array(cellCount);
@@ -1720,6 +1791,8 @@ export async function readCompactOctreePressureState3D(
       boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
     const floats = new Float32Array(boundaryDebugBytes[1].buffer,
       boundaryDebugBytes[1].byteOffset, boundaryDebugBytes[1].byteLength / 4);
+    const boundaryCandidates = new Float32Array(boundaryDebugBytes[2].buffer,
+      boundaryDebugBytes[2].byteOffset, boundaryDebugBytes[2].byteLength / 4);
     const { plan } = boundaryDebug;
     const base = control.activeBank * plan.authorityWords;
     const handles = new Set<number>();
@@ -1753,6 +1826,24 @@ export async function readCompactOctreePressureState3D(
     ] as const;
     let comparedValues = 0, exactMismatchCount = 0, missingMatches = 0, maximumAbsoluteError = 0;
     let first: Record<string, unknown> | undefined, worst: Record<string, unknown> | undefined;
+    const projectionInputs = (handle: number) => {
+      const owner = words[base + plan.offsets.ownerRows + handle] ?? 0xffff_ffff;
+      const neighbor = words[base + plan.offsets.neighborRows + handle] ?? 0xffff_ffff;
+      return {
+        owner, neighbor,
+        ownerPressure: owner < rowCount ? rows[owner] : undefined,
+        neighborPressure: neighbor < rowCount ? rows[neighbor] : 0,
+        inverseDistance: floats[base + plan.offsets.inverseDistances + handle],
+        pressureScale: floats[base + plan.offsets.pressureScales + handle],
+        aperture: floats[base + plan.offsets.fractions + handle],
+        // The boundary resolver publishes {aperture, pressureScale} here
+        // before commit copies the pair into structured authority. Keeping
+        // both values in the symmetry failure identifies whether a mismatch
+        // was authored by boundary sampling or introduced by commit/project.
+        candidateAperture: boundaryCandidates[2 * handle],
+        candidatePressureScale: boundaryCandidates[2 * handle + 1],
+      };
+    };
     for (const handle of handles) {
       const point = Array.from(floats.subarray(base + plan.offsets.centroids + 4 * handle,
         base + plan.offsets.centroids + 4 * handle + 3));
@@ -1777,15 +1868,22 @@ export async function readCompactOctreePressureState3D(
         const absoluteError = Math.abs(expectedValue - target.value);
         const detail = { transform: transform.name, sourceHandle: handle, targetHandle: target.handle,
           point, targetPoint, normal, targetNormal, sourceValue, expectedValue,
-          targetValue: target.value, absoluteError };
+          targetValue: target.value, absoluteError,
+          sourceProjectionInputs: projectionInputs(handle),
+          targetProjectionInputs: projectionInputs(target.handle) };
         first ??= detail;
         if (!worst || absoluteError > Number(worst.absoluteError)) worst = detail;
         maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
       }
     }
+    const sortedHandles = [...handles].sort((left, right) => left - right);
     console.log(JSON.stringify({ phase: "fluid-symmetry-face-values",
       metrics: { activeFaces: handles.size, comparedValues, exactMismatchCount,
-        missingMatches, maximumAbsoluteError, first, worst } }));
+        missingMatches, maximumAbsoluteError, first, worst,
+        ...(process.env.FLUID_HEAD_DIFFERENTIAL === "1" ? {
+          valueFingerprint: exactWordFingerprint(sortedHandles.map((handle) =>
+            floats[base + plan.offsets.values + handle]!)),
+        } : {}) } }));
     const advectionAuditBytes = boundaryDebugBytes[14];
     if (advectionAuditBytes) {
       const auditWords = new Uint32Array(advectionAuditBytes.buffer,
@@ -1903,7 +2001,11 @@ export async function readCompactOctreePressureState3D(
         generation: auditWords[3], activeBank: auditBank,
         metrics: { activeFaces: auditFaces.size, comparedValues: auditCompared,
           exactMismatchCount: auditMismatches, missingMatches: auditMissing,
-          maximumAbsoluteError: auditMaximum, first: auditFirst, worst: auditWorst } }));
+          maximumAbsoluteError: auditMaximum, first: auditFirst, worst: auditWorst,
+          ...(process.env.FLUID_HEAD_DIFFERENTIAL === "1" ? {
+            valueFingerprint: exactWordFingerprint(Array.from({ length: auditHandleCount },
+              (_unused, handle) => auditFloats[activeRecord + handle]!)),
+          } : {}) } }));
     }
     const supportScratchBytes = boundaryDebugBytes[11];
     if (supportScratchBytes) {
@@ -1986,7 +2088,12 @@ export async function readCompactOctreePressureState3D(
       console.log(JSON.stringify({ phase: "fluid-symmetry-air-support-faces",
         control: { directRows: supportScratch[2], supportRows: supportScratch[8],
           faceCount: supportScratch[29], retained: supportScratch[50] },
-        seeds: auditOrdinary(true), marched: auditOrdinary(false) }));
+        seeds: auditOrdinary(true), marched: auditOrdinary(false),
+        ...(process.env.FLUID_HEAD_DIFFERENTIAL === "1" ? { fingerprints: {
+          values: exactWordFingerprint(ordinaryFaces.map((face) => face.value)),
+          distances: exactWordFingerprint(ordinaryFaces.map((face) => face.distanceSquared)),
+          seeds: exactWordFingerprint(ordinaryFaces.map((face) => face.seed), true),
+        } } : {}) }));
       const supportRecords = new Uint32Array(boundaryDebugBytes[5].buffer,
         boundaryDebugBytes[5].byteOffset, boundaryDebugBytes[5].byteLength / 4);
       const supportVectors = new Float32Array(boundaryDebugBytes[4].buffer,
@@ -2395,6 +2502,7 @@ export async function readCompactOctreePressureState3D(
     pressure, rhs, diagonal,
     ...(section63Diagonal ? { section63Diagonal } : {}),
     ...(section63CaseId ? { section63CaseId } : {}),
+    ...(section63Rows ? { section63CoefficientRows: Float32Array.from(section63Rows) } : {}),
     ...(stageFields[0] ? { initialResidual: stageFields[0] } : {}),
     ...(stageFields[1] ? { initialPreconditioned: stageFields[1] } : {}),
     ...(stageFields[2] ? { initialPreconditionedImage: stageFields[2] } : {}),
@@ -2595,6 +2703,23 @@ export async function readCubicVolumeField(
     ]);
     const directoryWords = new Uint32Array(directoryBytes.buffer,
       directoryBytes.byteOffset, directoryBytes.byteLength / 4);
+    if (typeof process !== "undefined" && process.env.FLUID_HEAD_DIFFERENTIAL === "1") {
+      const rows = Math.min(directoryWords[2] ?? 0, coarseOnly.rowCapacity);
+      const entries = directoryWords.subarray(8, 8 + 8 * rows);
+      const identityWords = Array.from({ length: rows }, (_unused, row) => [
+        entries[8 * row]!, entries[8 * row + 1]!, entries[8 * row + 5]!,
+        entries[8 * row + 6]!,
+      ]).flat();
+      const phiWords = Array.from({ length: rows }, (_unused, row) => [
+        entries[8 * row + 2]!, entries[8 * row + 3]!, entries[8 * row + 4]!,
+        entries[8 * row + 7]!,
+      ]).flat();
+      console.log(JSON.stringify({ phase: "head-differential-power-coarse-phi",
+        header: Array.from(directoryWords.slice(0, 8)), rows,
+        identities: exactWordFingerprint(identityWords, true),
+        phi: exactWordFingerprint(phiWords, true),
+        records: exactWordFingerprint(entries, true) }));
+    }
     if (directoryWords[0] !== 0x8000_0000) {
       const controlWords = new Uint32Array(controlBytes.buffer,
         controlBytes.byteOffset, controlBytes.byteLength / 4);

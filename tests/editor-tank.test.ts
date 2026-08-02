@@ -4,7 +4,9 @@ import { readFileSync } from "node:fs";
 import { validateScene, type SceneDescription } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { sceneLatticeDimensions } from "../lib/scene-lattice";
-import { fluidBodyHandleById, fluidBodyHandles, fluidBodyBox } from "../lib/editor-fluid-body";
+import { fluidBodyBox } from "../lib/editor-fluid-body";
+import { boxHandles } from "../lib/editor-entity";
+import { sides } from "./helpers/editor-entities";
 import {
   dragTankExtents,
   tankBox,
@@ -15,21 +17,21 @@ import {
   tankResizePatch,
   TANK_MINIMUM_CELLS,
 } from "../lib/editor-tank";
-import { getEditorTool } from "../lib/editor-tools";
+import { EDITOR_TOOLS, getEditorTool } from "../lib/editor-tools";
 
 function preset(id: string): SceneDescription {
   return getScenePreset(id).create();
 }
 
-test("the bounds tool is named after what it edits", () => {
-  // It was called SHAPE, which is ambiguous — shape what? A user hunting for
-  // "how do I edit the fluid / tank bounds" has to be able to find it by name
-  // in a strip of seven near-identical rows.
-  const tool = getEditorTool("bounds");
-  assert.equal(tool.status, "active");
-  assert.equal(tool.shortcut, "b");
-  assert.equal(tool.label, "BOUNDS");
-  assert.match(tool.hint, /tank or the water/);
+test("there is no separate mode for editing the tank", () => {
+  // BOUNDS was a mode that showed the tank and the water permanently, because
+  // neither could be clicked. Both are ordinary selectable entities now, so the
+  // mode has nothing left to do and SELECT is the only editing tool.
+  assert.equal(EDITOR_TOOLS.some((tool) => tool.id === "select" && tool.status === "active"), true);
+  assert.equal(EDITOR_TOOLS.some((tool) => (tool.id as string) === "bounds"), false);
+  assert.equal(EDITOR_TOOLS.some((tool) => tool.shortcut === "b"), false,
+    "and its key is free again");
+  assert.match(getEditorTool("select").hint, /click anything to select/);
 });
 
 test("the tank box is the container interior, resting on the floor", () => {
@@ -44,17 +46,16 @@ test("the tank box is the container interior, resting on the floor", () => {
 
 test("the floor has no handle, because nothing in the schema can move it", () => {
   const box = tankBox(preset("water-box-dam-break"));
-  const grabbable = fluidBodyHandles(box).filter(tankHandleIsGrabbable);
+  const grabbable = boxHandles(box, { grabbable: tankHandleIsGrabbable, drag: () => ({}) });
   assert.equal(grabbable.length, 26 - 9, "the nine handles on the -y face are not offered");
-  assert.ok(grabbable.every((handle) => handle.sides.y !== "min"));
+  assert.ok(grabbable.every((handle) => handle.position_m.y > box.min.y));
 });
 
 test("a horizontal drag resizes the tank about its centre, moving both walls", () => {
   const scene = preset("water-box-dam-break");
   const box = tankBox(scene);
   const cell = scene.voxelDomain.finestCellSize_m;
-  const handle = fluidBodyHandleById(box, "+00")!;
-  const extents = dragTankExtents(scene, handle, { x: box.max.x + 4 * cell, y: 0, z: 0 });
+  const extents = dragTankExtents(scene, sides("+00"), { x: box.max.x + 4 * cell, y: 0, z: 0 });
   assert.ok(extents.width_m > scene.container.width_m);
   assert.equal(extents.height_m, scene.container.height_m, "an x handle must not change the height");
   assert.equal(extents.depth_m, scene.container.depth_m);
@@ -64,9 +65,7 @@ test("a horizontal drag resizes the tank about its centre, moving both walls", (
 
 test("the ceiling handle sets the height from the floor", () => {
   const scene = preset("water-box-dam-break");
-  const box = tankBox(scene);
-  const handle = fluidBodyHandleById(box, "0+0")!;
-  const extents = dragTankExtents(scene, handle, { x: 0, y: scene.container.height_m * 1.5, z: 0 });
+  const extents = dragTankExtents(scene, sides("0+0"), { x: 0, y: scene.container.height_m * 1.5, z: 0 });
   assert.ok(extents.height_m > scene.container.height_m);
   assert.equal(extents.width_m, scene.container.width_m);
   assert.equal(tankBoxForExtents(extents).min.y, 0);
@@ -74,10 +73,9 @@ test("the ceiling handle sets the height from the floor", () => {
 
 test("tank extents snap to whole cells, so a drag lands on an exact lattice", () => {
   const scene = preset("water-box-dam-break");
-  const box = tankBox(scene);
   const cell = scene.voxelDomain.finestCellSize_m;
   for (const target of [0.37, 1.02, 2.61]) {
-    const extents = dragTankExtents(scene, fluidBodyHandleById(box, "+00")!, { x: target, y: 0, z: 0 });
+    const extents = dragTankExtents(scene, sides("+00"), { x: target, y: 0, z: 0 });
     const cells = extents.width_m / cell;
     assert.ok(Math.abs(cells - Math.round(cells)) < 1e-9, `${extents.width_m} m is not a whole number of cells`);
     assert.deepEqual(tankLatticeForExtents(scene, extents)[0], Math.round(cells));
@@ -86,16 +84,14 @@ test("tank extents snap to whole cells, so a drag lands on an exact lattice", ()
 
 test("a tank cannot be dragged below the lattice floor", () => {
   const scene = preset("water-box-dam-break");
-  const box = tankBox(scene);
   const cell = scene.voxelDomain.finestCellSize_m;
-  const extents = dragTankExtents(scene, fluidBodyHandleById(box, "+00")!, { x: 0, y: 0, z: 0 });
+  const extents = dragTankExtents(scene, sides("+00"), { x: 0, y: 0, z: 0 });
   assert.ok(Math.abs(extents.width_m - TANK_MINIMUM_CELLS * cell) < 1e-9);
 });
 
 test("resizing the tank repairs what the moved walls invalidated", () => {
   const scene = preset("water-box-dam-break");
-  const box = tankBox(scene);
-  const shrunk = dragTankExtents(scene, fluidBodyHandleById(box, "+++")!,
+  const shrunk = dragTankExtents(scene, sides("+++"),
     { x: 0.2, y: scene.container.height_m * 0.3, z: 0.2 });
   const next = { ...scene, ...tankResizePatch(scene, shrunk) };
   assert.deepEqual(validateScene(next), [], "a resized tank must still be a valid scene");
@@ -124,15 +120,16 @@ test("every direct-manipulation drag previews without touching the document", ()
   // water body, the tank, the fill level, the hose, and the terrain all live in
   // the solver's rebuild key, so a per-move write asks the renderer to re-seed
   // at pointer rate. Each drag writes the draft store and spends one document
-  // write on release.
+  // write on release. Every handle on every entity now runs through the one
+  // `entity-handle` branch, which is why the list is as short as it is.
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
-  const branches = ["shape-handle", "fill-level", "inflow-handle", "terrain-handle"];
+  const branches = ["entity-handle", "fill-level", "terrain-handle"];
   const move = viewport.slice(viewport.indexOf("const pointerMove ="), viewport.indexOf("const pointerUp ="));
   for (const branch of branches) {
     const start = move.indexOf(`if (active.action === "${branch}") {`);
     assert.ok(start >= 0, `${branch} must have a pointer-move branch`);
     let body = move.slice(start, move.indexOf("\n    }", start));
-    // A branch may delegate: the bounds drag is resolved by a helper the axis
+    // A branch may delegate: the handle drag is resolved by a helper the axis
     // lock also calls, so it can re-resolve without a pointer move. Follow one
     // hop and hold the helper to the same contract.
     const delegate = /\n\s+(\w+)\(active, ray\);/.exec(body)?.[1];
@@ -158,12 +155,18 @@ test("only geometry-preserving drafts are presented to the renderer", () => {
   // pins the solver to the committed scene and presents a draft only for
   // terrain, which cannot move the lattice.
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
-  assert.match(viewport, /draft\?\.subject === "terrain"\s*\n?\s*\? applySceneDraft\(scene, draft\)\s*\n?\s*: scene/,
-    "only a terrain draft may reach the renderer");
+  assert.match(viewport, /PRESENTED_DRAFT_SUBJECTS\.has\(draft\?\.subject/,
+    "the presented subjects must be a declared list, not an ad-hoc condition");
+  const declared = /const PRESENTED_DRAFT_SUBJECTS[\s\S]*?new Set(?:<[^>]*>)?\(\[([^\]]*)\]/.exec(viewport)?.[1] ?? "";
+  // Terrain cannot move the lattice, and scenery is render-only and outside the
+  // solver's keys entirely. Anything else — the tank, the water, a body — owns
+  // geometry the solver allocated for, and presenting it early would tear.
+  assert.deepEqual(declared.match(/"[a-z-]+"/g)?.sort(), ['"scenery"', '"terrain"'],
+    "only a draft that cannot outrun the solver may reach the renderer");
   assert.match(viewport, /renderer\.setSimulationScene\(presentationScene === scene \? undefined : scene\)/,
     "presenting a draft must pin the solver to the committed scene");
 
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  assert.match(renderer, /this\.currentGPUFluid\(this\.simulationScene \?\? scene, svoSceneConfig, time_s\)/,
+  assert.match(renderer, /this\.currentGPUFluid\(this\.simulationScene \?\? scene, svoSceneConfig/,
     "the rebuild key must read the pinned scene, never the presented one");
 });

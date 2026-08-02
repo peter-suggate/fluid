@@ -31,7 +31,8 @@ export type WebGPURenderWorkerRequest =
   | { type: "initialize"; requestId: number }
   | { type: "draw"; frameId: number; args: DrawArguments; viewport: { width: number; height: number; devicePixelRatio: number } }
   | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
-  | { type: "set-simulation-running"; running: boolean }
+  | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
+  | { type: "set-simulation-running"; requestId: number; running: boolean }
   | { type: "reset-simulation-timeline" }
   | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
   | { type: "shutdown"; requestId: number };
@@ -44,6 +45,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "advance-completed"; time_s: number }
   | { type: "effective-renderer-status"; status: EffectiveRendererStatus }
   | { type: "initialized"; requestId: number }
+  | { type: "simulation-running-set"; requestId: number; submittedTime_s: number | undefined }
   | { type: "frame"; frameId: number; metrics: RendererFrameMetrics; snapshot: WebGPURenderWorkerSnapshot }
   | { type: "pick-result"; requestId: number; result: PickResult }
   | { type: "shutdown-complete"; requestId: number }
@@ -85,10 +87,12 @@ export class WebGPURenderWorkerClient {
   private requestId = 0;
   private frameId = 0;
   private frameInFlight = false;
+  /** Control edges fence frame dispatch until the worker has observed them. */
+  private simulationControlRevision = 0;
+  private frameDispatchSuspended = false;
   private queuedFrame?: Extract<WebGPURenderWorkerRequest, { type: "draw" }>;
   private completedMetrics?: RendererFrameMetrics;
   private snapshot: WebGPURenderWorkerSnapshot = EMPTY_SNAPSHOT;
-  private latestGPUInfo?: GPUEulerianInfo;
   private stopped = false;
   private failed = false;
   private readonly requests = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
@@ -157,7 +161,7 @@ export class WebGPURenderWorkerClient {
         devicePixelRatio: Math.min(globalThis.devicePixelRatio || 1, 2),
       },
     };
-    if (this.frameInFlight) this.queuedFrame = message;
+    if (this.frameInFlight || this.frameDispatchSuspended) this.queuedFrame = message;
     else this.sendFrame(message);
     return metrics;
   }
@@ -166,9 +170,34 @@ export class WebGPURenderWorkerClient {
     this.post({ type: "set-simulation-scene", scene });
   }
 
-  setSimulationRunning(running: boolean): number | undefined {
-    this.post({ type: "set-simulation-running", running });
-    return this.latestGPUInfo?.submittedTime_s;
+  /**
+   * The described object the cursor is over, for the hover rim.
+   *
+   * Posted rather than carried on the frame because hover changes at pointer
+   * rate, which has nothing to do with the frame loop, and because a rim is not
+   * part of what the frame is *of* — it is an annotation on it.
+   */
+  setHoverHighlight(range: { first: number; last: number } | undefined): void {
+    this.post({ type: "set-hover-highlight", range });
+  }
+
+  setSimulationRunning(running: boolean): Promise<number | undefined> {
+    const revision = ++this.simulationControlRevision;
+    // A frame captured before this edge still carries the old admission
+    // intent. Do not send it after pause/play; wait for the worker's exact
+    // submitted-time acknowledgement and let the next rAF provide a fresh
+    // clock snapshot.
+    this.frameDispatchSuspended = true;
+    this.queuedFrame = undefined;
+    return this.request<number | undefined>({
+      type: "set-simulation-running",
+      requestId: this.nextRequestId(),
+      running,
+    }).finally(() => {
+      if (revision !== this.simulationControlRevision) return;
+      this.queuedFrame = undefined;
+      this.frameDispatchSuspended = false;
+    });
   }
 
   resetSimulationTimeline(): void {
@@ -227,13 +256,12 @@ export class WebGPURenderWorkerClient {
         : message.status;
       this.callbacks.onStatus(status);
     }
-    else if (message.type === "gpu-info") {
-      this.latestGPUInfo = message.info;
-      this.callbacks.onGPUInfo?.(message.info);
-    } else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
+    else if (message.type === "gpu-info") this.callbacks.onGPUInfo?.(message.info);
+    else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
     else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);
     else if (message.type === "effective-renderer-status") this.callbacks.onEffectiveRendererStatus?.(message.status);
     else if (message.type === "initialized" || message.type === "shutdown-complete") this.settle(message.requestId);
+    else if (message.type === "simulation-running-set") this.settle(message.requestId, message.submittedTime_s);
     else if (message.type === "pick-result") this.settle(message.requestId, message.result);
     else if (message.type === "request-failed") this.settle(message.requestId, undefined, message.message);
     else if (message.type === "frame") {
@@ -242,7 +270,7 @@ export class WebGPURenderWorkerClient {
       this.frameInFlight = false;
       const queued = this.queuedFrame;
       this.queuedFrame = undefined;
-      if (queued) this.sendFrame(queued);
+      if (queued && !this.frameDispatchSuspended) this.sendFrame(queued);
     }
   }
 

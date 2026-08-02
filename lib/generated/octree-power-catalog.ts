@@ -13,8 +13,9 @@ export const OCTREE_GENERATED_POWER_CATALOG_MANIFEST = Object.freeze({
   "regularCaseId": 0,
   "maximumDynamicBoundarySlots": 30,
   "worstReconstructionResidual": 3.9601817158896324e-8,
+  "tetrahedronVertexCount": 75,
   "generatorVersion": 9,
-  "generatorHash": "d586c4bca4ddc43038f32218b3a2b749914582bdeb507ea35ce34809774362ab",
+  "generatorHash": "6942eeb226badc1c1db9ed8cf9a44ba32a4c115a08dd41c7e83c4279a9a42c34",
   "binarySha256": "59be7d29f25f8712ef1dca1a23c89d766a8e2d2a827835f7394b195893763ca6"
 } as const);
 
@@ -58,7 +59,8 @@ export function decodeGeneratedOctreePowerCatalog(data: ArrayBuffer): GeneratedO
     || h[3] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount || h[7] !== data.byteLength
     || h[13] !== 262144 || h[15] !== 512
     || h[19] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumTetrahedra || h[20] !== 40
-    || h[22] > 256 || h[23] !== 4 || h[25] !== 19
+    || h[22] !== OCTREE_GENERATED_POWER_CATALOG_MANIFEST.tetrahedronVertexCount
+    || h[23] !== 4 || h[25] !== 19
     || h[26] !== 1 || h[28] !== 4
     || h[30] !== h[4] || h[32] !== 3
     || h[35] !== 3

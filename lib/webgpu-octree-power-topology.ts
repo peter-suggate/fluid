@@ -582,6 +582,22 @@ fn requestedRows()->u32{return rowDelta[params.delta.x];}
 fn deltaAccepted(requested:u32)->bool{if(params.delta.x+15u>=arrayLength(&rowDelta)){return false;}let base=params.delta.x;let previous=rowDelta[base+1u];let carried=rowDelta[base+2u];let added=rowDelta[base+3u];let retired=rowDelta[base+4u];let affected=rowDelta[base+6u];return rowDelta[base]==requested&&rowDelta[base+8u]==ROW_DELTA_VALID&&carried<=previous&&affected<=requested&&params.delta.y<=arrayLength(&rowDelta)&&requested<=arrayLength(&rowDelta)-params.delta.y&&params.delta.z<=arrayLength(&rowDelta)&&affected<=arrayLength(&rowDelta)-params.delta.z&&requested==carried+added&&requested==previous+added-retired;}
 fn affectedRow(item:u32)->u32{return rowDelta[params.delta.z+item];}
 fn affectedCount()->u32{return rowDelta[params.delta.x+6u];}
+fn topologyCandidateScratchReusable()->bool{
+  let candidate=controlArena.candidate;let authority=controlArena.authority;
+  return candidate.invalidCount==0u&&candidate.firstInvalid==INVALID&&candidate.flags==0u
+    &&candidate.resolvedCount==authority.resolvedCount&&candidate.version==authority.version;
+}
+fn exactTopologyIdentity(requested:u32,reusableScratch:bool)->bool{
+  if(!deltaAccepted(requested)||params.delta.x+15u>=arrayLength(&rowDelta)){return false;}
+  let base=params.delta.x;
+  return rowDelta[base+1u]==requested&&rowDelta[base+2u]==requested
+    &&rowDelta[base+3u]==0u&&rowDelta[base+4u]==0u
+    &&rowDelta[base+5u]==0u&&rowDelta[base+6u]==0u
+    &&rowDelta[base+15u]==1u
+    &&controlArena.authority.invalidCount==0u&&controlArena.authority.flags==0u
+    &&controlArena.authority.resolvedCount==requested
+    &&controlArena.authority.version==params.catalogVersion&&reusableScratch;
+}
 fn linearItem(wid:vec3u,lid:u32,workgroups:vec3u)->u32{return (wid.x+wid.y*workgroups.x)*64u+lid;}
 fn fail(row:u32,flag:u32){if(row<arrayLength(&metrics)){metrics[row]=PowerRowMetric(INVALID,0u,0.0,flag);}}
 fn metricValid(metric:PowerRowMetric)->bool{return metric.reserved==0u&&(metric.transformAndFlags&VALID)!=0u;}
@@ -600,6 +616,7 @@ var<workgroup> publicationCounts:array<vec4u,256>;
 var<workgroup> publicationAux:array<vec2u,256>;
 @compute @workgroup_size(1) fn preparePowerTopology(){
   let requested=requestedRows();
+  let reusableScratch=topologyCandidateScratchReusable();
   let available=min(requested,min(arrayLength(&descriptors),min(arrayLength(&metrics),arrayLength(&committedMetrics))));
   let anisotropic=params.anisotropic!=0u;
   controlArena.candidate=Control(select(0u,requested,anisotropic),
@@ -611,6 +628,10 @@ var<workgroup> publicationAux:array<vec2u,256>;
       ||params.rowTemplateVersion!=EXPECTED_ROW_TEMPLATE_VERSION){
     rejectCandidate(0u,CATALOG_VERSION);return;
   }
+  // Case zero is the immutable regular-grid contract. Validate it once per
+  // transaction; exact regular rows below can then publish their metric
+  // without repeating six template-slot/catalog walks per row.
+  if(!rowTemplateValid(0u)){rejectCandidate(0u,CATALOG_VERSION);return;}
   if(!deltaAccepted(requested)){rejectCandidate(0u,CAPACITY);return;}
   let previous=rowDelta[params.delta.x+1u];
   if(previous>arrayLength(&committedMetrics)
@@ -619,6 +640,13 @@ var<workgroup> publicationAux:array<vec2u,256>;
     rejectCandidate(0u,CAPACITY);return;
   }
   if(available<requested){controlArena.candidate.invalidCount=requested-available;controlArena.candidate.firstInvalid=available;controlArena.candidate.flags|=CAPACITY;}
+  if(controlArena.candidate.invalidCount==0u&&exactTopologyIdentity(requested,reusableScratch)){
+    controlArena.candidate=controlArena.authority;
+    // See the descriptor transaction: INVALID is candidate-private and marks
+    // a complete identity carry whose row-shaped schedules stay zero.
+    controlArena.publicationCount=INVALID;
+    return;
+  }
   let blocks=(requested+255u)/256u;controlArena.blockCount=blocks;
   if(blockSummaryBase()+6u*blocks>arrayLength(&lookupArena)){rejectCandidate(0u,CAPACITY);return;}
   controlArena.blockDispatch=blockDispatchFor(requested);
@@ -629,12 +657,15 @@ var<workgroup> publicationAux:array<vec2u,256>;
   if(row>=available){return;}lookupArena[statusBase()+row]=STATUS_LISTED;
   if(params.anisotropic!=0u){fail(row,ANISOTROPIC);return;}
   if((item>0u&&affectedRow(item-1u)>=row)||(rowDelta[params.delta.y+row]&ROW_DELTA_AFFECTED)==0u){fail(row,CAPACITY);return;}
-  let descriptor=descriptors[row];let found=resolveDescriptor(descriptor);
+  let descriptor=descriptors[row];let boundary=(descriptor>>16u)&0x3f00u;let geometry=descriptor&0xc0ffffffu;
+  if(geometry==REGULAR_DESCRIPTOR&&boundary==0u){
+    metrics[row]=PowerRowMetric(params.regularPacked&0xffffu,
+      (params.regularPacked>>16u)|VALID,params.regularVolume,0u);return;
+  }
+  let found=resolveDescriptor(descriptor);
   if(found.x==INVALID||found.x>=params.template1.y||found.x>=arrayLength(&denseCatalog)){fail(row,LOOKUP_MISS);return;}
   if(!rowTemplateValid(found.x)){fail(row,CATALOG_VERSION);return;}
-  let boundary=(descriptor>>16u)&0x3f00u;let geometry=descriptor&0xc0ffffffu;
   var volume=bitcast<f32>(denseCatalog[found.x]);
-  if(geometry==REGULAR_DESCRIPTOR&&boundary==0u){volume=params.regularVolume;}
   metrics[row]=PowerRowMetric(found.x,found.y|boundary|VALID,volume,0u);
 }
 @compute @workgroup_size(256) fn stagePowerTopologyDelta(
@@ -692,7 +723,7 @@ var<workgroup> publicationAux:array<vec2u,256>;
       publicationCounts[lane].y+=publicationCounts[lane+stride].y;publicationCounts[lane].z|=publicationCounts[lane+stride].z;
       publicationAux[lane].x=min(publicationAux[lane].x,publicationAux[lane+stride].x);
       publicationAux[lane].y+=publicationAux[lane+stride].y;}workgroupBarrier();}
-  if(lane==0u&&controlArena.candidate.invalidCount==0u&&controlArena.candidate.flags==0u){
+  if(lane==0u&&controlArena.candidate.invalidCount==0u&&controlArena.candidate.flags==0u&&controlArena.publicationCount!=INVALID){
     let totals=publicationCounts[0];let aux=publicationAux[0];let published=publicationScan[255];lookupArena[blockOffsetBase()+blocks]=published;
     controlArena.publicationCount=published;controlArena.candidate.resolvedCount=totals.x;
     controlArena.candidate.invalidCount+=totals.y;controlArena.candidate.flags|=totals.z;

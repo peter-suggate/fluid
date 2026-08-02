@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
@@ -119,7 +120,7 @@ test("dynamic workset publication is wide and its destinations stay index-ordere
     "the intra-block offset must count lower lanes of the same class, never bump a shared cursor");
   assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /publishStructuredBoundaryWorksets/,
     "the single-workgroup workset publication must not survive alongside the wide one");
-  // Row classes are 0..3 and family classes 5..8, so the two phases can share
+  // Row classes are 0..4 and family classes 5..8, so the two phases can share
   // one block table only while each writes its own disjoint class range.
   assert.match(structuredBoundaryCoefficientWGSL,
     /countStructuredRowClasses[\s\S]*?if\(lane<5u\)\{worksetBlocks\[lane\*worksetBlockStride\(\)\+wg\.x\]/,
@@ -188,6 +189,12 @@ test("every structured boundary entry point fits the hard ten-storage-buffer con
     [2, 3, 4, 6, 7, 8, 9, 11, 16, 25]);
   assert.deepEqual(reachableStorageBindings("resolveStructuredSolidSlots"),
     [2, 3, 10, 11, 16, 19, 21]);
+  assert.deepEqual(reachableStorageBindings("countStructuredRowClasses"),
+    [3, 13, 14, 16, 27, 28],
+    "class-4 dry proof reaches the accepted liquid mask at binding 13");
+  const host = readFileSync(new URL("../lib/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
+  assert.match(host, /group\(this\.countRowClasses, \[0, 3, 13, 14, 16, 27, 28\]\)/,
+    "the host bind group must include every storage binding reachable from class-4 proof");
 });
 
 test("Dawn Metal compiles transactional structured boundary update", {

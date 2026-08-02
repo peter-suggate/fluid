@@ -11,6 +11,7 @@ import {
   STRUCTURED_PROJECTION_ENERGY_WORDS,
   
   structuredBoundaryAdvectionFlatteningEnabled,
+  structuredDeepIdentityCarryEnabled,
   
   structuredRowTouchesDryProbeOracle,
   structuredVelocityDynamicsWGSL,
@@ -133,7 +134,8 @@ test("advection interpolation folds reflected corners canonically", () => {
     structuredVelocityDynamicsWGSL.indexOf("fn interpolationElementSample("));
   assert.match(structuredVelocityDynamicsWGSL, /fn transitionFanSample[\s\S]*canonicalInterpolation4\(termsX\)/);
   assert.match(transition,
-    /let local=snapInterpolationCoordinates\(\s*powerTransform\(\(x-center\)\/extent/);
+    /let local=snapInterpolationCoordinates\(powerTransform\(\s*\(centeredGridPoint\(x\)-rowCenteredGridOffset\(rg\)\)\/f32\(rg\.y\)/,
+    "transition coordinates must stay in the reflected centered-grid frame");
   assert.match(structuredVelocityDynamicsWGSL,
     /fn canonicalDeterminant\(a:vec3f,b:vec3f,c:vec3f\)->f32[\s\S]*canonicalProduct3[\s\S]*canonicalInterpolation8\(terms,6u\)/,
     "tetrahedral determinants must be invariant to permutation of world axes");
@@ -148,6 +150,39 @@ test("advection interpolation folds reflected corners canonically", () => {
     "a symmetric co-spherical link must average the D4 fan conjugated through the row transform");
   assert.doesNotMatch(structuredVelocityDynamicsWGSL, /tetraFanClosedUnderD4Transform|tetraFanUsesSelector/,
     "immutable fan closure must be generated once, never reproved inside every sample");
+});
+
+test("reflected midpoint and cube-fallback coordinates are bit-exact; zero displacement preserves a face", () => {
+  const f32 = Math.fround;
+  const h = f32(0.05);
+  const domainCenter = f32(f32(16) * h);
+  const snap = (value: number) => f32(Math.round(f32(value * 65_536)) / 65_536);
+  const centeredGrid = (point: number) => snap(f32(f32(point - domainCenter) / h));
+  const world = (grid: number) => f32(domainCenter + f32(grid * h));
+  const sourceFace = f32(0.4000000059604645);
+  const targetFace = f32(1.2000000476837158);
+  assert.equal(centeredGrid(sourceFace), -centeredGrid(targetFace));
+  assert.equal(world(centeredGrid(sourceFace)), sourceFace,
+    "the zero-length characteristic must retain the source face bit pattern");
+  assert.equal(world(centeredGrid(targetFace)), targetFace,
+    "the zero-length characteristic must retain the reflected face bit pattern");
+  const dt = f32(0.002);
+  const sourceVelocity = f32(-0.025210632011294365);
+  const targetVelocity = f32(-sourceVelocity);
+  const sourceMidpoint = snap(f32(centeredGrid(sourceFace)
+    - f32(f32(0.5 * dt) * f32(sourceVelocity / h))));
+  const targetMidpoint = snap(f32(centeredGrid(targetFace)
+    - f32(f32(0.5 * dt) * f32(targetVelocity / h))));
+  assert.equal(sourceMidpoint, -targetMidpoint,
+    "the snapped midpoint must remain exactly odd under reflection");
+  assert.match(structuredVelocityDynamicsWGSL,
+    /fn centeredGridPoint\(point:vec3f\)[\s\S]*snapInterpolationCoordinates\(\(point-domainWorldCenter\(\)\)\/p\.physical\.x\)/);
+  const cell = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn cellSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn regularSample("));
+  assert.match(cell,
+    /sampleGrid=clamp\(centeredGridPoint\(x\)[\s\S]*requestedGrid=centerGrid\+vec3f\(offset\)\*rowSize/,
+    "the midpoint must not make a second asymmetric world-space round trip in the cube fallback");
 });
 
 test("transition barycentric sampling requires non-face selector adjacency", () => {
@@ -305,10 +340,10 @@ test("newly wet topology faces inherit the accepted Section 5 air extension", ()
     /dispatchWorkgroupsIndirect\(this\.resources\.structured\.liveRowDispatch,[\s\S]*OCTREE_STRUCTURED_TOPOLOGY_TRANSFER_DISPATCH_OFFSET_BYTES\)/,
     "topology transfer must launch from the producer's compact changed-face record");
   assert.match(dynamicsHost,
-    /words\[54\] = resources\.airSupportLayout\.ownerDirectoryOffsetWords;[\s\S]*words\[55\] = resources\.airSupportLayout\.ownerDirectoryCellCapacity;/,
-    "topology transfer must receive the same dense owner directory as fine transport");
+    /words\[54\] = resources\.airSupportLayout\.ownerDirectoryOffsetWords;[\s\S]*words\[55\] = resources\.airSupportLayout\.ownerDirectorySlotCapacity;/,
+    "topology transfer must receive the same adaptive owner hash as fine transport");
   assert.match(structuredVelocityDynamicsWGSL,
-    /fn extendedOwnerTag\(q:vec3u\)[\s\S]*ownerDirectoryOffsetWords\+4u\*cell[\s\S]*fn extendedOwnerVelocity\(point:vec3f\)[\s\S]*supportPublicationValid\(\)[\s\S]*taggedVelocity\(tag\)/,
+    /fn extendedOwnerTag\(q:vec3u\)[\s\S]*ownerHashStart[\s\S]*storedOrigin==originCell&&storedSize==size[\s\S]*fn extendedOwnerVelocity\(point:vec3f\)[\s\S]*supportPublicationValid\(\)[\s\S]*taggedVelocity\(tag\)/,
     "a new liquid face must resolve its old value from the accepted extrapolated owner vector");
   const transfer = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn transferStructuredTopologyCandidate("),
@@ -403,6 +438,20 @@ test("characteristics resolve the paper's dual element rather than equating it w
   assert.match(characteristic,
     /adjacentInterpolationElementSample\(row,point\)[\s\S]*extendedOwnerVelocity\(point\)[\s\S]*return pinned;/,
     "a directory seam retains the closest-face extension as its final fail-closed fallback");
+});
+
+test("sparse air-support corridor misses trip and reject the accepted generation", () => {
+  const shader = structuredVelocityDynamicsWGSL.replace(/\s+/g, "");
+  assert.match(shader,
+    /fnrejectOutOfCorridorRead\(q:vec3u\).*atomicAdd\(&accepted\[11\],1u\).*atomicMin\(&accepted\[12\],cell\).*atomicOr\(&accepted\[0\],ERROR_SAMPLE\)/s,
+    "an in-domain corridor miss must count, identify, and fail the generation closed");
+  assert.match(shader,
+    /fnprepareStructuredDynamics\(\)\{if\(p\.physical\.w<\.5.*atomicStore\(&accepted\[11\],0u\).*atomicStore\(&accepted\[12\],INVALID\)/s,
+    "the existing stage-0 singleton must reset the ledger without another pass");
+  const ownerLookup = shader.slice(shader.indexOf("fnextendedOwnerTag"),
+    shader.indexOf("fnextendedOwnerVelocity"));
+  assert.match(ownerLookup, /rejectOutOfCorridorRead\(q\);returnINVALID;/,
+    "terminal dense and adaptive owner misses must invoke the tripwire");
 });
 
 /** CPU transcription of `staggeredComponent`'s weight/topology enumeration
@@ -505,6 +554,10 @@ test("class-7/8 carry probes flatten the exact order-free Boolean reduction", ()
   assert.equal(structuredBoundaryAdvectionFlatteningEnabled({
     FLUID_STRUCTURED_BOUNDARY_ADVECT_FLAT: "1",
   }), true);
+  assert.equal(structuredDeepIdentityCarryEnabled({}), true);
+  assert.equal(structuredDeepIdentityCarryEnabled({
+    FLUID_STRUCTURED_DEEP_IDENTITY_CARRY: "0",
+  }), false, "the trace-all diagnostic must not change the production default");
   assert.equal(STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES, 48,
     "the flattened schedule owns the otherwise-unused class-4 record");
 
@@ -536,6 +589,9 @@ test("class-7/8 carry probes flatten the exact order-free Boolean reduction", ()
     structuredVelocityDynamicsWGSL.indexOf("fn rowTouchesDryDirection("),
     structuredVelocityDynamicsWGSL.indexOf("fn advect("));
   assert.match(flattened,
+    /let dimension=direction\/2u;let positive=\(direction&1u\)!=0u;var probe=q;[\s\S]*acceptedRowContainingFinestCell\(probe\)/,
+    "dry-neighbour classification must use exact integer topology identity, not reflected world floats");
+  assert.match(flattened,
     /lid<16u[\s\S]*local=lid&7u[\s\S]*rowTouchesDryDirection\(row,local\)/,
     "owner and neighbour directions must occupy separate lanes");
   assert.match(flattened,
@@ -544,6 +600,18 @@ test("class-7/8 carry probes flatten the exact order-free Boolean reduction", ()
   assert.match(flattened,
     /\(1u-bank\(\)\)\*p\.authorityWords\+p\.ownerOffset\+handle[\s\S]*\(1u-bank\(\)\)\*p\.authorityWords\+p\.neighborOffset\+handle/,
     "cache words must live in inactive-bank channels that the next candidate rewrites");
+  assert.match(flattened,
+    /fn faceIdentityCarried\(handle:u32\)->bool\{return acc\(13u\)!=0u[\s\S]*centroidOffset\+4u\*handle\+3u/,
+    "an exact-topology receipt must provide the per-face carry proof skipped with scatter");
+  assert.match(flattened,
+    /dryProbeEligible=select\(0u,1u,faceIdentityCarried\(handle\)&&hi!=INVALID\)/,
+    "the flattened carry probe must consume the unified identity proof");
+  const advection = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn advect("),
+    structuredVelocityDynamicsWGSL.indexOf("fn commitAdvected("));
+  assert.match(advection,
+    /if\(deepIdentityCarryEnabled&&faceIdentityCarried\(handle\)&&hiRow!=INVALID\)/,
+    "the scalar carry path must consume the same unified identity proof");
 
   const host = dynamicsHost.slice(dynamicsHost.indexOf("encodeAdvection("),
     dynamicsHost.indexOf("encodeForcesAndDivergence("));

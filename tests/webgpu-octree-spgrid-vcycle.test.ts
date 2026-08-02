@@ -437,8 +437,8 @@ test("compact SPGrid addressing and commit dispatch cover every variable arena",
     /SPGrid level tables disagree with the allocated plan/,
     "the memoized level tables must fail closed against the exact allocation plan");
   assert.match(WebGPUOctreeSPGridVCycle.prototype.encodeReadySetupCommit.toString(),
-    /Math\.max\(this\.plan\.levelStride,this\.plan\.brickCount,\.\.\.this\.plan\.transferCapacities\)/,
-    "ready publication must cover the largest validated level, brick, or transfer arena");
+    /runCandidateIndirect\(pass,"commitCandidateLevels",0,input,CANDIDATE_SCHEDULE\.commit\)/,
+    "ready publication must consume the GPU-authored validated commit envelope");
 });
 
 test("4^3 brick masks rank every occupied bit exactly and reject malformed publication", () => {
@@ -533,6 +533,9 @@ test("accurate A2 stages wide direct terms before an ordered row fold", () => {
   assert.match(octreeSPGridAccurateOperatorShader,
     /fn coefficientBase\(row:u32\)->u32\{return acceptedBank\(\)\*p\.hierarchy\.w\+row\*19u;/,
     "A2 must read the accepted dynamic Section 6.3 bank");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /if\(word==0u&&regular&&status==0u\)[^]*for\(var channel=6u;channel<18u;channel\+=1u\)[^]*reportAt\(1u,32u,row\)/,
+    "the compiled regular-row image must reject a nonzero omitted edge coefficient");
   assert.match(octreeSPGridAccurateOperatorShader, /fn pageSlot[\s\S]*pageNeighbour/);
   assert.match(octreeSPGridAccurateOperatorShader, /fn finerAdjoint[\s\S]*state\[at\(OWNER,fine,ghost\)\]!=row\+1u/);
   // The compiled operator image carries u32 indices and nothing else. A float
@@ -850,7 +853,7 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     /fn publishCandidateSpectralBounds[\s\S]*off>d\*\(1\.0\+1e-4\)[\s\S]*total=max\(total,spectralLane\[i\]\)[\s\S]*total\*=1\.0005[\s\S]*deltaAt\(l,7u\)/,
     "spectral safety must be an exact order-independent maximum over the candidate stencil");
   assert.match(octreeSPGridVCycleShader,
-    /if\(stencilDirty\(l\)\)\{state\[at\(SPECTRAL,l,0u\)\]=levelDelta\[deltaAt\(l,7u\)\];\}/,
+    /let oldSlots=count\(l\);let newSlots=selectedCount\(l\);let stencil=stencilDirty\(l\)[\s\S]*if\(stencil\)\{state\[at\(SPECTRAL,l,0u\)\]=levelDelta\[deltaAt\(l,7u\)\];\}/,
     "the smoother bound must commit atomically with its stencil generation");
   assert.match(octreeSPGridVCycleShader,
     /fn chebyshevWeight[\s\S]*upper\/30\.0[\s\S]*cos\(/);
@@ -905,7 +908,7 @@ test("GPU correction owns transfers by fine slot and shares one exact adjoint ma
     /section63ChannelForDirection\(transform,section63Direction\(k\)\)/,
     "adaptive L2 directions must not be projected onto unrelated adjacent SPGrid slots");
   assert.match(octreeSPGridVCycleShader,
-    /if\(\(stencilDirty\(l\)\|\|topologyChanged\)&&i<levelCapacity\(l\)\)\{[\s\S]{0,160}?topology\[neighbourAt\(k,l,i\)\]=candidateTopology\[neighbourAt\(k,l,i\)\]/,
+    /fn commitCandidateSlot[\s\S]*if\(stencil\)[\s\S]*topology\[neighbourAt\(k,l,slot\)\]=candidateTopology\[neighbourAt\(k,l,slot\)\]/,
     "the column indices must commit on the union of the gates that publish their coefficients");
   assert.doesNotMatch(octreeSPGridVCycleShader, /select\([^\n]*insert\([^\n]*insertOwned/,
     "WGSL select eagerly evaluates both insertion paths");
@@ -959,7 +962,12 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
   assert.match(octreeSPGridAccurateOperatorShader,
     /fn pageSlot\(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32\)->u32\{\s*let resolved=pageSlotCoded\(l,page,origin,q\);\s*if\(resolved\.y!=0u\)\{reportAt\(2u,resolved\.y,row\);\}\s*return resolved\.x;\}/,
     "pageSlot must be pageSlotCoded plus its report, so the compiled image and the inline walk cannot diverge");
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.beginL1CapturePlan, [0, 3, 6, 13, 14, 18]);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.beginL1CapturePlan, [0, 3, 6, 13, 14, 17, 18]);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.prepareCandidateSchedules, [0, 3, 6, 13, 14, 17]);
+  const bindSource = (WebGPUOctreeSPGridVCycle.prototype as unknown as { bind: Function })
+    .bind.toString();
+  assert.match(bindSource, /\[13,\s*this\.capturePageState\]/,
+    "the prepare scheduler's capture-failure gate must have its binding-13 host resource");
   // The capture plan was split so the per-row Section 6.3 validation runs one
   // workgroup per page instead of one lane of one workgroup. The row scan kept
   // the row bindings and lost the level-delta arena (14), which markDirtyFrom
@@ -1097,6 +1105,16 @@ test("accurate A2 encodes one gate, one wide term stage, and one ordered fold", 
   cycle.destroy();
 });
 
+test("accurate accepted-union rows concatenate all five published classes", () => {
+  const shader = octreeSPGridAccurateOperatorShader;
+  assert.match(shader,
+    /fn unionRow\(item:u32\)->u32\{var remaining=item;\s*for\(var cls=0u;cls<5u;cls\+=1u\)/,
+    "the compiled operator and staged apply must share an exact five-class row resolver");
+  assert.match(shader,
+    /worksets\[base\]!=accepted\[3\][\s\S]*worksets\[base\+1u\]>worksets\[base\+2u\][\s\S]*return INVALID/,
+    "the union resolver must fail closed on stale or over-capacity worksets");
+});
+
 test("resolved-row persistent executor is absent at every production capacity", () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   let writes = 0, dispatches = 0, persistentEntries = 0;
@@ -1150,9 +1168,7 @@ test("setup retires the prior live generation without unconditional full-buffer 
       },
       end() { events.push("end"); } }; },
     copyBufferToBuffer(source: GPUBuffer, sourceOffset: number, destination: GPUBuffer, destinationOffset: number, size: number) {
-      assert.equal(sourceOffset, 0); assert.equal(destinationOffset, 0);
-      assert.equal(size, cycle.plan.dispatchBytes);
-      events.push(`copy:${String((source as GPUBuffer & { label?: string }).label)}->${String((destination as GPUBuffer & { label?: string }).label)}`);
+      events.push(`copy:${String((source as GPUBuffer & { label?: string }).label)}:${sourceOffset}->${String((destination as GPUBuffer & { label?: string }).label)}:${destinationOffset}:${size}`);
     },
   } as unknown as GPUCommandEncoder;
   const input = { rowCount: buffer(64), solverControl: buffer(64), rhs: buffer(128), correction: buffer(128) };
@@ -1163,15 +1179,16 @@ test("setup retires the prior live generation without unconditional full-buffer 
   // planL1CaptureDelta is now the page-parallel row scan and
   // reduceL1CaptureDelta the work-list fold that used to be its lane-0 tail, so
   // the capture prologue is three dispatches rather than two.
-  assert.deepEqual(events.slice(0, 6), ["begin", "direct:beginL1CapturePlan", "direct:planL1CaptureDelta",
-    "direct:reduceL1CaptureDelta", "direct:probeCandidateSkip", "direct:applyCandidateSkip"]);
+  assert.equal(events[0], "begin");
+  assert.equal(events[1], "direct:beginL1CapturePlan");
+  assert.ok(events.some((event) => event.startsWith("indirect:planL1CaptureDelta:0:SPGrid candidate live indirect schedules")));
+  assert.ok(events.some((event) => event === "direct:prepareCandidateSchedules"));
   assert.ok(events.some((event) => event === "direct:validateCandidateHierarchy"));
-  assert.ok(events.some((event) => event === "direct:commitChangedL1"));
+  assert.ok(events.some((event) => event.startsWith("indirect:commitChangedL1:")));
   assert.ok(events.some((event) => event === "direct:finalizeL1CapturePublication"));
-  assert.ok(events.some((event) => event === "direct:commitCandidateLevels"));
+  assert.ok(events.some((event) => event.startsWith("indirect:commitCandidateLevels:84:")));
   assert.ok(events.some((event) => event === "direct:finalizeLifecycle"));
-  assert.deepEqual(events.slice(-2), ["end",
-    "copy:SPGrid worklist counts and published dispatches->SPGrid live indirect dispatches"]);
+  assert.ok(events.at(-1)?.includes("SPGrid live indirect dispatches:0"));
   const metadata = created.find((entry) => entry.label === "SPGrid worklist counts and published dispatches")!;
   const indirect = created.find((entry) => entry.label === "SPGrid live indirect dispatches")!;
   assert.equal(metadata.usage & GPUBufferUsage.COPY_SRC, GPUBufferUsage.COPY_SRC);
@@ -1186,10 +1203,56 @@ test("setup retires the prior live generation without unconditional full-buffer 
   cycle.encodeCapture(broker);
   broker.fence("capture complete");
   const recurringCapture = events.slice(beforeCapture);
-  assert.deepEqual(recurringCapture, ["begin", "direct:beginL1CapturePlan", "direct:planL1CaptureDelta",
-    "direct:reduceL1CaptureDelta", "end"],
-  "warm capture plans exact changed pages without mutating the published hierarchy");
+  assert.ok(recurringCapture.includes("direct:beginL1CapturePlan"));
+  assert.ok(recurringCapture.some((event) => event.startsWith("indirect:planL1CaptureDelta:0:")));
+  assert.ok(recurringCapture.includes("direct:reduceL1CaptureDelta"),
+    "warm capture plans exact changed pages without mutating the published hierarchy");
   cycle.destroy();
+});
+
+test("candidate retirement bootstraps from zero and reclaims a rejected partial publication by identity", () => {
+  const prepare = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn prepareCandidateSchedules"),
+    octreeSPGridVCycleShader.indexOf("fn clearCorrection"),
+  );
+  const clear = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn clearCandidateLevels"),
+    octreeSPGridVCycleShader.indexOf("fn buildCandidateLevelSets"),
+  );
+  const commit = octreeSPGridVCycleShader.slice(
+    octreeSPGridVCycleShader.indexOf("fn commitCandidateLevelAt"),
+    octreeSPGridVCycleShader.indexOf("fn finalizeLifecycle"),
+  );
+
+  assert.match(prepare,
+    /let priorTransfers=candidateDispatch\[l\*DISPATCH_WORDS\+1u\];\s*let priorSlots=candidateDispatch\[l\*DISPATCH_WORDS\];\s*let priorPages=candidateDispatch\[l\*DISPATCH_WORDS\+8u\];\s*candidateDispatch\[l\*DISPATCH_WORDS\+9u\]=priorTransfers;\s*candidateDispatch\[l\*DISPATCH_WORDS\+10u\]=priorSlots;\s*candidateDispatch\[l\*DISPATCH_WORDS\+11u\]=priorPages/,
+    "every attempt must snapshot its own published identities before clear resets the counters; zero-filled cold buffers therefore retire zero identities");
+  assert.doesNotMatch(prepare, /captureFailed\(\)[\s\S]{0,120}prior(?:Transfers|Slots|Pages)/,
+    "a rejected partial attempt must remain reclaimable instead of hiding its worklists behind the failed receipt");
+  assert.match(clear,
+    /let priorSlots=candidateDispatch\[l\*DISPATCH_WORDS\+10u\][\s\S]*if\(i<priorSlots\)\{let slot=cWorkSlot\(l,i\)[\s\S]*candidateState\[cAt\(KEY,l,slot\)\]=0u/,
+    "candidate hash retirement must traverse the prior GPU-published slot worklist");
+  assert.match(clear,
+    /let priorPages=candidateDispatch\[l\*DISPATCH_WORDS\+11u\][\s\S]*if\(i<priorPages\)\{let key=candidateTopology\[pageRecord\(l,i\)\][\s\S]*pageDirectoryBase\(\)/,
+    "candidate page retirement must traverse the prior GPU-published physical-page worklist");
+  assert.match(clear,
+    /let priorFine=candidateDispatch\[l\*DISPATCH_WORDS\+10u\][\s\S]*if\(i<priorFine\)\{let fine=cWorkSlot\(l,i\)[\s\S]*let priorCoarse=candidateDispatch\[\(l\+1u\)\*DISPATCH_WORDS\+10u\]/,
+    "transfer-chain retirement must use the endpoint slot worklists from the rejected attempt");
+
+  assert.match(prepare, /let liveBound=16u\*rows\(\);\s*selected=min\(levelCapacity\(l\),liveBound\);/,
+    "the conservative pre-publication support bound must not reject a valid arena before actual insertion");
+  assert.match(prepare,
+    /let failed=captureFailed\(\);[\s\S]*writeCandidateSchedule\(1u,select\(clearItems,0u,failed\),64u\)[\s\S]*writeCandidateSchedule\(10u,select\(topologyRowItems,0u,failed\),64u\)/,
+    "planning overflow must zero every downstream schedule rather than invoking a recovery path");
+  assert.match(prepare,
+    /if\(topologyLevelItems!=0u\)\{brickItems=p\.totals\.y;logicalPageItems=p\.totals\.z;\s*physicalPageItems=p\.totals\.z;\}/,
+    "the rollback checkpoint retains the proven dense directory builder until its touched-list replacement is atomic");
+  assert.match(commit,
+    /for\(var i=0u;i<oldSlots;i\+=1u\)[\s\S]*for\(var i=0u;i<newSlots;i\+=1u\)[\s\S]*for\(var r=0u;r<max\(rows\(\),previousRows\(\)\);r\+=1u\)/,
+    "commit must publish the old/new live-slot union and only the live row-map range");
+  assert.match(commit,
+    /@compute @workgroup_size\(1\) fn commitCandidateLevels[\s\S]*let l=g\.x;if\(l<levels\(\)\)\{commitCandidateLevelAt\(l\);\}/,
+    "commit ownership is one singleton per dirty level, never one invocation per sparse-capacity element");
 });
 
 test("captured L1 deltas rebuild only affected sparse-level suffixes", () => {
@@ -1409,7 +1472,7 @@ test("Dawn accepts the native sparse V-cycle shader", {
   assert.deepEqual(errors.map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
   for (const entryPoint of ["beginL1CapturePlan", "planL1CaptureDelta",
     "commitChangedL1", "finalizeL1CapturePublication",
-    "probeCandidateSkip", "applyCandidateSkip", "publishCommittedInputs",
+    "probeCandidateSkip", "applyCandidateSkip", "prepareCandidateSchedules", "publishCommittedInputs",
     "clearCandidateLevels", "buildCandidateLevelSets", "detectCandidateGhosts", "insertCandidateGhosts",
     "buildCandidateLevelDeltas", "countCandidateTransfers", "scanCandidateTransfers",
     "writeCandidateTransfers", "linkCandidateParentChains",

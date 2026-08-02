@@ -1,3 +1,4 @@
+import { sceneryEntity, sceneryIdFromSelection } from "./editor-scenery";
 import { add, dot, scale, sub } from "./math";
 import type { SceneDescription, Vec3 } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
@@ -18,7 +19,7 @@ import { intersectSvoTerrainHeightfield } from "./webgpu-svo-dry-scene";
  * the terrain brush.
  */
 
-export type EditorHoverKind = "body" | "terrain" | "floor";
+export type EditorHoverKind = "body" | "scenery" | "terrain" | "floor";
 
 export interface EditorHover {
   readonly kind: EditorHoverKind;
@@ -27,7 +28,31 @@ export interface EditorHover {
   readonly distance_m: number;
   /** Present only for body hits. */
   readonly bodyId?: string;
+  /** Present only for scenery hits: the described object, not the primitive. */
+  readonly sceneryNodeId?: string;
   readonly label: string;
+}
+
+/**
+ * Scenery, against the exact geometry the SVO traces.
+ *
+ * The same pick the click path uses, so the rim the cursor lights up and the
+ * object a click selects can never be two different things.
+ */
+function hoverScenery(scene: SceneDescription, ray: { origin: Vec3; direction: Vec3 }): EditorHover | undefined {
+  const hit = sceneryEntity.pick?.({ scene, bodies: [] }, ray);
+  const nodeId = hit && sceneryIdFromSelection(hit.selection.id);
+  if (!hit || !nodeId) return undefined;
+  return {
+    kind: "scenery",
+    position_m: add(ray.origin, scale(ray.direction, hit.distance_m)),
+    // Scenery is not a drag target for placement, so the surface normal is not
+    // wanted; up is the one answer that cannot mislead a caller that reads it.
+    normal: { x: 0, y: 1, z: 0 },
+    distance_m: hit.distance_m,
+    sceneryNodeId: nodeId,
+    label: nodeId,
+  };
 }
 
 /** Bodies use their bounding sphere — exact for spheres, close enough for a cursor. */
@@ -81,7 +106,7 @@ export function hoverSceneAt(
   bodies: readonly RigidBodyState[],
   ray: { origin: Vec3; direction: Vec3 },
 ): EditorHover | undefined {
-  const candidates = [hoverBody(bodies, ray), hoverTerrain(scene, ray), hoverFloor(scene, ray)];
+  const candidates = [hoverBody(bodies, ray), hoverScenery(scene, ray), hoverTerrain(scene, ray), hoverFloor(scene, ray)];
   let nearest: EditorHover | undefined;
   for (const candidate of candidates) {
     if (candidate && (!nearest || candidate.distance_m < nearest.distance_m)) nearest = candidate;
