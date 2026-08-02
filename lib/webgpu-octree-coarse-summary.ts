@@ -489,11 +489,25 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
   atomicStore(&directory[base+6u],COARSE_AUTHORITY);}}
 @compute @workgroup_size(1)fn publishSummary(){let count=min(atomicLoad(&state[1]),p.entryCapacity);
  let initialized=atomicLoad(&state[16])!=0u;let readBank=atomicLoad(&state[17])&1u;let writeBank=select(0u,1u-readBank,initialized);
- if(atomicLoad(&state[18])==p.domainVolume){atomicStore(&state[16],1u);atomicStore(&state[17],writeBank);}
+ // state[18] counts the cells predictSummaryCells actually wrote. Anything
+ // short of the whole lattice means the prediction bailed -- almost always
+ // because the air-support publication this advance consumes was not VALID --
+ // and every stage after it (the redistance sweeps, the volume correction,
+ // the dense complement) already declined to run on that same counter.
+ //
+ // The bank flip was already conditioned on it. The publication receipt was
+ // NOT, so a stalled advance kept advertising PUBLISHED over the previous
+ // advance's phi and consumers could not tell a fresh surface from a held
+ // one. Make completeness part of the receipt: a tracker that did not run
+ // says so, and the consumer retains its own last good surface instead of
+ // being handed stale bytes labelled fresh.
+ let complete=atomicLoad(&state[18])==p.domainVolume;
+ atomicAdd(&state[19],1u);
+ if(complete){atomicStore(&state[16],1u);atomicStore(&state[17],writeBank);atomicAdd(&state[20],1u);}
  let error=atomicLoad(&state[2]);atomicStore(&directory[0],error);atomicStore(&directory[1],coarse.generation);
   atomicStore(&directory[2],count);atomicStore(&directory[3],p.entryCapacity);atomicStore(&directory[4],p.baseDims.x);
   atomicStore(&directory[5],p.baseDims.y);atomicStore(&directory[6],p.baseDims.z);atomicStore(&directory[7],p.maximumLevel);
-  atomicStore(&directory[8],p.entryOffset);atomicStore(&directory[9],select(0u,PUBLISHED,error==0u));
+  atomicStore(&directory[8],p.entryOffset);atomicStore(&directory[9],select(0u,PUBLISHED,error==0u&&complete));
   atomicStore(&directory[10],p.keyCapacity);atomicStore(&directory[11],0u);atomicStore(&directory[12],16u);
   atomicStore(&directory[13],count);atomicStore(&directory[14],PAGE_SIZE);atomicStore(&directory[15],p.topPages);}
 @compute @workgroup_size(256)fn publishDenseComplement(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,

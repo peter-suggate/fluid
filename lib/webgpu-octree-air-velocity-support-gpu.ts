@@ -264,24 +264,34 @@ export function octreeAirSupportTopologyReuseEnabled(
  * restores the preceding fixed 12+12+exact-tail schedule as a construction-
  * stable A/B oracle: both pipeline families and all arenas are still built. */
 /**
- * Exact A/B for the retained Section-5 solution refresh, which is the one part
- * of the sparse changed-frontier path that does not re-march at all: on a
- * same-receipt publication it refreshes each settled face's value from its
- * previously winning seed instead of rediscovering the winner.
+ * Retained Section-5 solution refresh: the one part of the sparse
+ * changed-frontier path that does not re-march at all. On a same-receipt
+ * publication it refreshes each settled face's value from its previously
+ * winning seed instead of rediscovering the winner.
  *
- * That is sound only while the winner is immutable, and `betterFace` breaks
- * equal-distance ties on the live seed magnitude -- which is exactly the tie
- * a D4-symmetric configuration produces everywhere. Separating this from
- * `FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER` is what lets the symmetry lane
- * tell "the sparse march is asymmetric" apart from "the retained refresh is
- * stale"; the two used to share one flag and could not be distinguished.
+ * Default OFF, because the premise does not hold. `betterFace` orders
+ * equidistant candidates by normal-velocity magnitude -- deliberately, since
+ * magnitude is the one quantity invariant under every axis reflection and
+ * permutation, and a purely spatial order cannot resolve a seed orbit without
+ * breaking one of its reflection stabilizers. But magnitude is a LIVE value:
+ * two equidistant seeds can exchange winners between advances while the
+ * receipt (topology, bank, liquid epoch, fine generation) is unchanged. The
+ * refresh never re-evaluates the winner, so it carries the previous one's
+ * value. Same-receipt does not imply same-winner.
+ *
+ * Measured on `symmetric-expansion` at 110 steps, with the sparse march itself
+ * left on: bitwise D4 for velocity/pressure/rhs moves 18 -> 99 and for
+ * diagonal/topology 41 -> 105, i.e. exact until the first wall contact, and
+ * identical to disabling the whole changed-frontier path. It costs ~18% of the
+ * advance to give that up; earn it back by re-running only the magnitude
+ * tie-break over the retained equidistant set, not by carrying the winner.
  */
 export function octreeAirSupportRetainedGraphEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_AIR_SUPPORT_RETAINED_GRAPH !== "0";
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_RETAINED_GRAPH === "1";
 }
 
 export function octreeAirSupportChangedFrontierEnabled(
