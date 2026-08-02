@@ -66,6 +66,7 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
   assert.deepEqual(SVO_DRY_VISIBILITY_FLAGS, {
     exactContact: 1, exactShadow: 2, coneLightingRequested: 4, ambientOcclusion: 8,
     globalIllumination: 16, globalIlluminationOcclusion: 32, globalIlluminationRequested: 64,
+    silhouetteRefinement: 128,
   });
   assert.match(drySource, /const requestedDerivedSourceUnavailable = coneTracingEnabled && !giReady/);
   assert.doesNotMatch(drySource, /lightingMode|setLightingMode/);
@@ -277,7 +278,7 @@ test("derived-page failures expose a bounded renderer readback ABI", () => {
   assert.match(shader, /atomicAdd\(&dryPrepassBoundaryQueue\.invalidDirectPages,1u\)/);
   assert.match(shader, /invalidGiPages:atomic<u32>/);
   assert.match(shader, /atomicAdd\(&dryWorldGiFrame\.invalidGiPages,1u\)/);
-  assert.match(drySource, /copyDerivedPageFailureCounters\([^]*copyBufferToBuffer\(this\.conePrepassBoundaryQueue, 4[^]*copyBufferToBuffer\(this\.worldGiFrameBuffer, 16/);
+  assert.match(drySource, /copyDerivedPageFailureCounters\([^]*copyBufferToBuffer\(this\.coneDerivedFailureSnapshot, 0[^]*copyBufferToBuffer\(this\.worldGiFrameBuffer, 16/);
 });
 
 test("analytic transform publications retain derived caches by exact dependency", () => {

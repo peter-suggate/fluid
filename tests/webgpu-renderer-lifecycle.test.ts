@@ -70,7 +70,7 @@ test("paused solver attachment publications cannot suppress the continuous prese
   const attachStart = rendererSource.indexOf("this.gpuFluidPending=create.then");
   const attachEnd = rendererSource.indexOf("}).catch((error:unknown)", attachStart);
   const attach = rendererSource.slice(attachStart, attachEnd);
-  const sourceAttach = attach.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource)");
+  const sourceAttach = attach.indexOf("this.attachSparsePresentationSource(solver,generation,startedAt_ms)");
   const repaint = attach.indexOf("this.pausedPresentationRevision+=1", sourceAttach);
   assert.ok(sourceAttach >= 0 && repaint > sourceAttach,
     "the repaint revision must publish only after the warmed SVO renderer source attaches");

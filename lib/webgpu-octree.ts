@@ -1576,6 +1576,7 @@ export class WebGPUOctreeProjection {
   private powerVolumeParams?: GPUBuffer;
   private powerVolumePipeline?: GPUComputePipeline;
   private powerVolumeGroup?: GPUBindGroup;
+  private initializePowerVolumePipeline?: () => Promise<void>;
   /** Host-side encode serial used only for API validation/diagnostics. The
    * physics generation is stamped in command-buffer order by the GPU. */
   private powerAttemptGeneration = 0;
@@ -1595,6 +1596,7 @@ export class WebGPUOctreeProjection {
     private readonly deferPipelineCompilation = false,
     allocationProgress?: OctreeAllocationProgress,
   ) {
+    this.deferPipelineCompilation = true;
     const reportAllocation = (stage: number) => allocationProgress?.(
       OCTREE_ALLOCATION_STAGES[stage]!, stage, OCTREE_ALLOCATION_STAGES.length,
     );
@@ -2271,7 +2273,6 @@ export class WebGPUOctreeProjection {
         }
     this.sparseBrickWorldAccountedBytes = this.sparseBrickWorld?.allocatedBytes ?? 0;
     reportAllocation(8);
-    if (!deferPipelineCompilation) this.createPipelinesSync();
     this.writeParams();
   }
 
@@ -2464,62 +2465,17 @@ export class WebGPUOctreeProjection {
     });
   }
 
-  private createPipelinesSync() {
-    this.createProjectionShaderModule();
-    const compiled: GPUComputePipeline[] = [];
-    WebGPUOctreeProjection.pipelineEntryPoints.forEach((entryPoint, index) => {
-      if (this.basePipelineRequired(entryPoint)) {
-        compiled[index] = this.registerProjectionPipeline(
-          this.device.createComputePipeline(this.descriptor(entryPoint)),
-        );
-      }
-    });
-    // Unreachable tuple slots stay unpublished. Accidentally selecting one
-    // therefore fails construction/encoding instead of running an unrelated
-    // successfully compiled program as a substitute authority.
-    this.assignPipelines(compiled);
-    if (!this.useLocalFrontierCandidateSort) {
-      this.frontierCandidateSortPipelines = [this.registerProjectionPipeline(
-        this.device.createComputePipeline(this.frontierSortDescriptor()),
-      )];
-    }
-    // Sizes 16 and 32 use the coarse worklist kernels below. The immutable
-    // maximum participates in the cache key, so variants above it cannot be
-    // reused by the replacement solver created for a settings change.
-    for (let size = Math.min(8, this.maxLeafSize); size >= 2; size >>= 1) this.refineLevelPipelines.set(size, {
-      full: this.registerProjectionPipeline(this.device.createComputePipeline(
-        this.refinementDescriptor("refineTopology", size))),
-      delta: this.registerProjectionPipeline(this.device.createComputePipeline(
-        this.refinementDescriptor("refineTopologyDelta", size))),
-    });
-    for (let size = this.maxLeafSize; size >= 16; size >>= 1) {
-      this.refineCoarsePipelines.set(size, {
-        full: this.registerProjectionPipeline(this.device.createComputePipeline(
-          this.refinementDescriptor("refineTopologyCoarse", size))),
-        delta: this.registerProjectionPipeline(this.device.createComputePipeline(
-          this.refinementDescriptor("refineTopologyCoarseDelta", size))),
-      });
-      this.balanceCoarsePipelines.set(size, {
-        full: this.registerProjectionPipeline(this.device.createComputePipeline(
-          this.refinementDescriptor("balanceTopologyCoarse", size))),
-        delta: this.registerProjectionPipeline(this.device.createComputePipeline(
-          this.refinementDescriptor("balanceTopologyCoarseDelta", size))),
-      });
-    }
-    this.publishPipelineCache();
-  }
-
   get topologyTexture() { return this.topologyDiagnosticTexture; }
   get pressureSamplesTexture() { return this.pressureSamplesDiagnosticTexture; }
   get pressureTexture() { return this.pressureDiagnosticTexture; }
   get hasDiagnosticTextures() { return this.diagnosticGroups !== undefined; }
 
   /** Allocate the dense scientific-overlay fields only after inspection asks for them. */
-  ensureDiagnosticTextures(): boolean {
+  async ensureDiagnosticTextures(): Promise<boolean> {
     if (this.diagnosticGroups) return false;
     this.materializePipeline = octreeDiagnosticPipelineCache.get(this.device);
     if (!this.materializePipeline) {
-      this.materializePipeline = this.device.createComputePipeline(this.diagnosticDescriptor());
+      this.materializePipeline = await this.device.createComputePipelineAsync(this.diagnosticDescriptor());
       octreeDiagnosticPipelineCache.set(this.device, this.materializePipeline);
     }
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
@@ -2559,6 +2515,14 @@ export class WebGPUOctreeProjection {
           label: "Reuse compiled adaptive programs", run: () => this.applyPipelineCache(cached) }]
         : []),
     ];
+    if (this.sparseBrickWorld) {
+      tasks.push({
+        id: "octree.sparse-world.pipelines",
+        phase: "solver-pipelines",
+        label: "Compile sparse voxel publication programs",
+        run: () => this.sparseBrickWorld!.initializePipelines(),
+      });
+    }
     const compiled = new Array<GPUComputePipeline>(entries.length);
     const capabilities = this.shaderCapabilities();
     const shaderDefinitions: GPUShaderTaskDefinition[] = [];
@@ -2694,6 +2658,32 @@ export class WebGPUOctreeProjection {
           if (!catalog) throw new Error("Octree power catalog was not loaded");
           try { this.initializeNativePowerAuthority(catalog); }
           catch (error) { this.info.powerDiagramReady = false; throw error; }
+        },
+      });
+      tasks.push({
+        id: "octree.power-pipelines.publication",
+        phase: "solver-pipelines",
+        label: "Compile power descriptor and topology publication programs",
+        dependencies: ["octree.power-authority.allocate"],
+        run: async (signal, report) => {
+          await this.powerDescriptor!.initializePipelines();
+          await this.powerTopology!.initializePipelines();
+          await this.structuredVelocity!.initializePipelines();
+          await this.powerCoarseLevelSet!.initializePipeline();
+          await this.powerCoarseLevelSetSchedule!.initializePipelines();
+          await this.fineToPowerCoarseLevelSet?.initializePipelines();
+          await this.persistentMGPCG!.initializePipeline();
+          await this.powerSolidVertices?.initializePipelines();
+          await this.structuredBoundary!.initializePipelines();
+          await this.topologyEpoch!.initializePipelines();
+          await this.initializePowerVolumePipeline?.();
+          const coarseSummaryTasks = this.coarseOnlySummary?.initializationTasks() ?? [];
+          for (let index = 0; index < coarseSummaryTasks.length; index += 1) {
+            if (signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
+            const task = coarseSummaryTasks[index]!;
+            report?.(`Compile coarse summary: ${task.label} (${index}/${coarseSummaryTasks.length})`);
+            await task.run(signal);
+          }
         },
       });
       if (this.deferPipelineCompilation) {
@@ -3135,15 +3125,24 @@ export class WebGPUOctreeProjection {
       label: "Publish physical octree power volumes",
       code: powerVolumeVariant.code,
     });
-    this.powerVolumePipeline = powerVolumeActivity.registerPipeline(this.device.createComputePipeline({
-      label: "Publish physical octree power volumes", layout: "auto",
-      compute: { module: shaderModule, entryPoint: "publishPowerVolumes" },
-    }));
-    this.powerVolumeGroup = this.device.createBindGroup({ layout: this.powerVolumePipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: this.powerVolumeParams } }, { binding: 1, resource: { buffer: this.powerTopology.metrics } },
-      { binding: 2, resource: { buffer: this.leafHeaders } }, { binding: 3, resource: { buffer: this.compaction } },
-      { binding: 4, resource: { buffer: this.powerVolumes } },
-    ] });
+    this.initializePowerVolumePipeline = async () => {
+      if (this.powerVolumePipeline) return;
+      this.powerVolumePipeline = powerVolumeActivity.registerPipeline(
+        await this.device.createComputePipelineAsync({
+          label: "Publish physical octree power volumes", layout: "auto",
+          compute: { module: shaderModule, entryPoint: "publishPowerVolumes" },
+        }),
+      );
+      this.powerVolumeGroup = this.device.createBindGroup({
+        layout: this.powerVolumePipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: this.powerVolumeParams! } },
+          { binding: 1, resource: { buffer: this.powerTopology!.metrics } },
+          { binding: 2, resource: { buffer: this.leafHeaders } },
+          { binding: 3, resource: { buffer: this.compaction } },
+          { binding: 4, resource: { buffer: this.powerVolumes! } },
+        ],
+      });
+    };
     const powerAllocated = sumOctreePowerAllocationBreakdown({
       descriptors: this.powerDescriptor.plan.allocatedBytes,
       topology: this.powerTopology.plan.allocatedBytes,
@@ -4554,7 +4553,8 @@ export class WebGPUOctreeProjection {
   }
   get sparseVoxelRenderSource() {
     if (this.sparseBrickWorld) {
-      const source = this.sparseBrickWorld.ensureInspectionSource();
+      const source = this.sparseBrickWorld.inspectionSource;
+      if (!source) void this.sparseBrickWorld.ensureInspectionSource();
       const currentBytes = this.sparseBrickWorld.allocatedBytes;
       this.info.allocatedBytes += currentBytes - this.sparseBrickWorldAccountedBytes;
       this.sparseBrickWorldAccountedBytes = currentBytes;

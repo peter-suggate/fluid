@@ -408,3 +408,19 @@ test("query state carries the primary traversal so a comparison survives reload"
     serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, raster.ui),
   ).get("svoPrimary"), null);
 });
+
+test("query state carries the opt-in primary-seam-closure choice", () => {
+  const scene = getScenePreset("garden-svo-lighting").create();
+  const method = { methodId: "octree" as const, quality: "balanced" as const, overrides: {} };
+  const enabled = parseQueryState("?svoPrimarySeamClosure=1");
+  assert.equal(enabled.ui.silhouetteRefinementEnabled, true);
+  assert.equal(new URLSearchParams(
+    serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, enabled.ui),
+  ).get("svoPrimarySeamClosure"), "1");
+
+  const defaults = parseQueryState("?svoPrimarySeamClosure=nonsense");
+  assert.equal(defaults.ui.silhouetteRefinementEnabled, false);
+  assert.equal(new URLSearchParams(
+    serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, defaults.ui),
+  ).get("svoPrimarySeamClosure"), null);
+});

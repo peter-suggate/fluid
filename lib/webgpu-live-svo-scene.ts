@@ -146,7 +146,8 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
    * solver for a renderer-only scene.
    */
   get sparseVoxelRenderSource() {
-    const source = this.world.ensureInspectionSource();
+    const source = this.world.inspectionSource;
+    if (!source) void this.world.ensureInspectionSource();
     const worldBytes = this.world.allocatedBytes;
     this.info.allocatedBytes += worldBytes - this.accountedWorldBytes;
     this.accountedWorldBytes = worldBytes;
@@ -164,6 +165,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
     progress({ phase: "allocation", taskId: "live-svo.allocate", label: "Allocate live sparse scene", completed: 0, total: 1 });
     if (signal?.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
     const source = new WebGPULiveSvoScene(device, scene, quality, options);
+    await source.world.initializePipelines();
     progress({ phase: "allocation", taskId: "live-svo.allocate", label: "Live sparse scene arenas ready", completed: 1, total: 1 });
     return source;
   }

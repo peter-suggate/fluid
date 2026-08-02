@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   defineGPUCompilationManifest,
+  gpuCompilationManagerFor,
   GPUCompilationInvalidatedError,
   GPUCompilationManager,
+  managedGPUDevice,
   type GPUCompilationManifest,
 } from "../lib/gpu-compilation-manager";
 
@@ -275,4 +277,42 @@ test("manifest definition rejects references to missing modules", () => {
     },
     render: {},
   } as never), /references missing module missing/);
+});
+
+test("managed devices disable immediate compilation and route async work through one authority", async () => {
+  const gpu = fakeGPU();
+  const device = managedGPUDevice(gpu.device, { requireWorkerRealm: false });
+
+  assert.throws(() => device.createComputePipeline({} as GPUComputePipelineDescriptor),
+    /createComputePipeline is disabled/);
+  assert.throws(() => device.createRenderPipeline({} as GPURenderPipelineDescriptor),
+    /createRenderPipeline is disabled/);
+
+  const shaderModule = device.createShaderModule({ code: "@compute @workgroup_size(1) fn main() {}" });
+  const pipeline = await device.createComputePipelineAsync({
+    label: "managed direct compute", layout: "auto", compute: { module: shaderModule, entryPoint: "main" },
+  });
+  assert.equal(pipeline.label, "managed direct compute");
+  assert.equal(gpu.calls.syncCompute, 0);
+  assert.equal(gpu.calls.asyncCompute, 1);
+  assert.equal(gpuCompilationManagerFor(device), gpuCompilationManagerFor(gpu.device));
+});
+
+test("managed direct compilations share the bounded priority scheduler", async () => {
+  const gpu = fakeGPU();
+  const manager = new GPUCompilationManager(gpu.device, {
+    requireWorkerRealm: false,
+    maximumConcurrentBundles: 1,
+  });
+  const shaderModule = manager.createShaderModule({ code: "@compute @workgroup_size(1) fn main() {}" });
+  const background = manager.compileComputePipeline({
+    label: "direct background", layout: "auto", compute: { module: shaderModule, entryPoint: "main" },
+  }, { priority: "background" });
+  const critical = manager.compileComputePipeline({
+    label: "direct critical", layout: "auto", compute: { module: shaderModule, entryPoint: "main" },
+  }, { priority: "critical" });
+
+  await Promise.all([background, critical]);
+  assert.deepEqual(gpu.calls.labels, ["direct critical", "direct background"]);
+  assert.equal(gpu.calls.maximumConcurrent, 1);
 });

@@ -75,6 +75,8 @@ interface UIStore {
   voxelRenderMode: VoxelRenderMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
+  /** Full-rate visibility refinement at reduced-cone geometry silhouettes. */
+  silhouetteRefinementEnabled: boolean;
   /** Lighting visibility source: cone marches, exact SVO rays, or none at all. */
   svoConeTracingMode: SvoConeTracingMode;
   /** How primary visibility is resolved: rasterized brick proxies, or the traversal megakernel. */
@@ -155,6 +157,7 @@ interface UIStore {
   setVoxelRenderMode: (mode: VoxelRenderMode) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
+  setSilhouetteRefinementEnabled: (enabled: boolean) => void;
   setSvoConeTracingMode: (mode: SvoConeTracingMode) => void;
   setSvoPrimaryTraversal: (mode: SvoPrimaryTraversalMode) => void;
   setSvoStageView: (view: SvoRenderStageView) => void;
@@ -203,6 +206,7 @@ export const useUIStore = create<UIStore>((set) => ({
   voxelRenderMode: "smooth",
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
+  silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
   svoConeTracingMode: DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode ?? "cones",
   svoPrimaryTraversal: DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster",
   svoStageView: DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
@@ -245,6 +249,7 @@ export const useUIStore = create<UIStore>((set) => ({
   setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
+  setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),
   setSvoConeTracingMode: (svoConeTracingMode) => set({ svoConeTracingMode }),
   setSvoPrimaryTraversal: (svoPrimaryTraversal) => set({ svoPrimaryTraversal }),
   setSvoStageView: (svoStageView) => set({ svoStageView }),

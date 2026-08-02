@@ -63,18 +63,18 @@ export interface OctreeTopologyEpochGPUOptions {
 export class WebGPUOctreeTopologyEpoch {
   readonly state: GPUBuffer;
   private readonly params: GPUBuffer;
-  private readonly validatePipeline: GPUComputePipeline;
-  private readonly commitGatePipeline: GPUComputePipeline;
-  private readonly prepareCommitRowsPipeline: GPUComputePipeline;
-  private readonly commitRowsPipeline: GPUComputePipeline;
-  private readonly validateGroup: GPUBindGroup;
-  private readonly commitGateGroup: GPUBindGroup;
-  private readonly prepareCommitRowsGroup: GPUBindGroup;
-  private readonly commitRowsGroup: GPUBindGroup;
+  private validatePipeline!: GPUComputePipeline;
+  private commitGatePipeline!: GPUComputePipeline;
+  private prepareCommitRowsPipeline!: GPUComputePipeline;
+  private commitRowsPipeline!: GPUComputePipeline;
+  private validateGroup!: GPUBindGroup;
+  private commitGateGroup!: GPUBindGroup;
+  private prepareCommitRowsGroup!: GPUBindGroup;
+  private commitRowsGroup!: GPUBindGroup;
   private readonly commitRowsDispatch: GPUBuffer;
   private destroyed = false;
 
-  constructor(private readonly device: GPUDevice, resources: OctreeTopologyEpochGPUResources,
+  constructor(private readonly device: GPUDevice, private readonly resources: OctreeTopologyEpochGPUResources,
     private readonly options: OctreeTopologyEpochGPUOptions) {
     for (const [label, value] of [["row capacity", options.rowCapacity],
       ["slot capacity", options.slotCapacity], ["catalog version", options.catalogVersion]] as const) {
@@ -96,14 +96,25 @@ export class WebGPUOctreeTopologyEpoch {
       && (!resources.candidatePressureHistory || !resources.acceptedPressureHistory)) {
       throw new Error("Topology epoch pressure-history carry requires both history buffers");
     }
-    const module = device.createShaderModule({ label: "Coupled octree topology epoch reduction",
-      code: octreeTopologyEpochHistoryShader(options.carryPressureHistory === true) });
-    const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-      layout: "auto", compute: { module, entryPoint } });
-    this.validatePipeline = make("validateInactiveTopologyEpoch");
-    this.commitGatePipeline = make("beginReadyTopologyCommit");
-    this.prepareCommitRowsPipeline = make("prepareCandidateRowCommitDispatch");
-    this.commitRowsPipeline = make("commitCandidateRows");
+    this.commitRowsDispatch = device.createBuffer({
+      label: "Accepted topology row commit dispatch",
+      size: 12,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.commitRowsDispatch, 0, new Uint32Array([0, 1, 1]));
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.validateGroup) return;
+    const { resources, device } = this;
+    const shaderModule = device.createShaderModule({ label: "Coupled octree topology epoch reduction",
+      code: octreeTopologyEpochHistoryShader(this.options.carryPressureHistory === true) });
+    const make = (entryPoint: string) => device.createComputePipelineAsync({ label: entryPoint,
+      layout: "auto", compute: { module: shaderModule, entryPoint } });
+    this.validatePipeline = await make("validateInactiveTopologyEpoch");
+    this.commitGatePipeline = await make("beginReadyTopologyCommit");
+    this.prepareCommitRowsPipeline = await make("prepareCandidateRowCommitDispatch");
+    this.commitRowsPipeline = await make("commitCandidateRows");
     const buffers = [this.params, this.state, resources.ownerArena, resources.ownerCandidate,
       resources.frontier, resources.descriptorCandidateControl, resources.topologyCandidateControl,
       resources.structuredCandidateControl, resources.boundaryCandidateControl,
@@ -123,12 +134,6 @@ export class WebGPUOctreeTopologyEpoch {
         { binding: 9, resource: { buffer: resources.spgridCandidateControl } },
       ],
     });
-    this.commitRowsDispatch = device.createBuffer({
-      label: "Accepted topology row commit dispatch",
-      size: 12,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(this.commitRowsDispatch, 0, new Uint32Array([0, 1, 1]));
     this.prepareCommitRowsGroup = device.createBindGroup({
       layout: this.prepareCommitRowsPipeline.getBindGroupLayout(0),
       entries: [
@@ -146,7 +151,7 @@ export class WebGPUOctreeTopologyEpoch {
         { binding: 14, resource: { buffer: resources.pressureB } },
         { binding: 15, resource: { buffer: resources.rowCountControl } },
         { binding: 17, resource: { buffer: resources.structuredAcceptedControl } },
-        ...(options.carryPressureHistory ? [
+        ...(this.options.carryPressureHistory ? [
           { binding: 18, resource: { buffer: resources.candidatePressureHistory! } },
           { binding: 19, resource: { buffer: resources.acceptedPressureHistory! } },
         ] : []),

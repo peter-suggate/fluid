@@ -23,9 +23,23 @@ export type SvoConeTracingMode = "cones" | "exact" | "off";
  */
 export type SvoPrimaryTraversalMode = "raster" | "traced";
 
+/** Observable lifecycle of the requested primary seam-closure pass. */
+export type SvoSilhouetteRefinementStatus = Readonly<{
+  state: "enabled" | "disabled" | "not-applicable" | "compiling" | "failed";
+  /** Exact compile/capability reason; never authorizes another render path. */
+  detail?: string;
+}>;
+
 export type SvoLightingOptions = Readonly<{
   shadowsEnabled: boolean;
   ambientOcclusionEnabled: boolean;
+  /**
+   * Experimental full-rate seam treatment for reduced SVO presentation.
+   * This is an explicit render choice: disabling it never happens as a
+   * substitute for a compiling or failed refinement pipeline. Omitted means
+   * disabled.
+   */
+  silhouetteRefinementEnabled?: boolean;
   /** Omitted means `cones`. */
   coneTracingMode?: SvoConeTracingMode;
   /** Omitted means `raster`. Switching it rebuilds the dry-scene pipeline. */
@@ -36,6 +50,7 @@ export type SvoLightingOptions = Readonly<{
 export const DEFAULT_SVO_LIGHTING_OPTIONS: SvoLightingOptions = Object.freeze({
   shadowsEnabled: true,
   ambientOcclusionEnabled: true,
+  silhouetteRefinementEnabled: false,
   coneTracingMode: "cones",
   primaryTraversal: "raster",
 });

@@ -7,6 +7,7 @@ test("GLOBAL SVO exposes effects without retaining alternate render or lighting 
   assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS, {
     shadowsEnabled: true,
     ambientOcclusionEnabled: true,
+    silhouetteRefinementEnabled: false,
     coneTracingMode: "cones",
     primaryTraversal: "raster",
   });
@@ -25,6 +26,10 @@ test("visual controls expose one GLOBAL path with structural SVO overlays", () =
   assert.match(panel, /selectRepresentation\("surface-voxels"\)[^]*>SURFACE<\/button>/);
   assert.match(panel, /selectRepresentation\("occupied-bricks"\)[^]*>CONTENT<\/button>/);
   assert.match(panel, /aria-label="SVO lighting effects"[^]*<Toggle label="Shadows"[^]*onChange=\{setSvoShadowsEnabled\}[^]*<Toggle label="AO"[^]*onChange=\{setSvoAmbientOcclusionEnabled\}/);
+  assert.match(panel, /<Toggle label="Close primary seams"[^]*checked=\{silhouetteRefinementEnabled\}[^]*onChange=\{setSilhouetteRefinementEnabled\}/,
+    "primary seam closure must be an explicit render control");
+  assert.match(panel, /data-testid="silhouette-refinement-status"[^]*silhouetteRefinementStatus\.state\.toUpperCase\(\)/,
+    "the requested pass lifecycle must be visible rather than silently substituted");
   assert.match(panel, /aria-label="SVO primary tracing optimizations"[^]*<Toggle label="Reuse stationary visibility"[^]*stationaryPrimaryReuseEnabled/,
     "the default-off primary coherence optimization must be exposed in the SVO controls");
 
@@ -48,6 +53,8 @@ test("primary visibility is switchable between the raster and traced paths from 
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
   assert.match(viewport, /primaryTraversal: ui\.svoPrimaryTraversal/,
     "the selection must reach the renderer with the rest of the lighting options");
+  assert.match(viewport, /silhouetteRefinementEnabled: ui\.silhouetteRefinementEnabled/,
+    "the silhouette-refinement request must reach the renderer with the shared lighting options");
 
   // The mode is compiled into the dry-scene shader variants and render-pass
   // shape, so it can only change by retiring the pipeline that baked it in.

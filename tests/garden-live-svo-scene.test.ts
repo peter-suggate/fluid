@@ -205,8 +205,14 @@ test("live SVO startup bypasses the simulation solver and t=0 raster gate", () =
     "fluid-enabled scenes without a GPU solver factory must remain fail-closed");
   assert.doesNotMatch(renderer, /if\(rendererOnlyScene\)this\.onStatus\(\{state:"ready",label:"Live SVO renderer ready"/,
     "sparse-world attachment must not declare the garden visible before the dry renderer presents");
-  assert.match(renderer, /this\.pendingLiveSvoPresentation=\{solver,solverGeneration:this\.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false\}/,
-    "renderer-only startup must open a separate presentation gate");
+  assert.match(renderer, /new PendingLiveSvoPresentation\([\s\S]*solver, source, this\.gpuFluidGeneration, requestGeneration, startedAt_ms\)/,
+    "a published sparse source must open a separate presentation gate");
+  assert.match(renderer, /private attachSparsePresentationSource\([^]*const source = solver\.sparseVoxelSceneSource;[^]*this\.svoDryScenePipeline\?\.setSource\(source\);[^]*new PendingLiveSvoPresentation/,
+    "fluid-backed and renderer-only sparse sources must share the attach/frame completion lifecycle");
+  assert.match(renderer, /class PendingLiveSvoPresentation[^]*attach\(\): boolean[^]*submit\(\): boolean/,
+    "fenced presentation phases must be represented by monotonic transitions instead of writable booleans");
+  assert.doesNotMatch(renderer, /pendingLiveSvoPresentation\s*=\s*\{[^}]*attached:/,
+    "the sparse presentation gate must not be restricted to renderer-only scenes");
   assert.match(renderer, /state:"ready",label:"Live sparse scene source ready",adapter:this\.adapterName,resource:liveSvoSceneResourcePlugin/,
     "renderer-only source attachment must explicitly close its own resource activity");
   assert.match(renderer, /pendingLiveSvo\.attached[^]*pendingLiveSvo\.solver === readyGPUFluid[^]*svoEncoded/,

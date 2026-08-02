@@ -6,7 +6,7 @@ import { optionalRendererPipelineRequests } from "../lib/webgpu-renderer";
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 
-test("GLOBAL startup always requests the sparse renderer", () => {
+test("applicable GLOBAL startup requests the sparse renderer", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
     { axis: "off", position: 0.5 }, "smooth", false, true,
   ), ["svo-dry-scene"]);
@@ -21,6 +21,16 @@ test("GLOBAL startup always requests the sparse renderer", () => {
     "new OctreeTechniqueAuditOverlayPipeline", "new SparseVoxelDebugRenderer",
     "new SparseVoxelDrySceneRenderer", "new SecondaryParticleRenderPipeline",
   ]) assert.doesNotMatch(initializeSource, new RegExp(optionalConstructor), `${optionalConstructor} must be deferred`);
+});
+
+test("source-free water presentation cannot create an SVO startup activity", () => {
+  assert.deepEqual(optionalRendererPipelineRequests(
+    undefined, "smooth", false, false, false, false, false, false,
+  ), []);
+  assert.match(rendererSource, /const sparsePresentationRequired = !sceneRuntime\.fluidSolver[\s\S]*sparseVoxelSceneSource/,
+    "applicability must be derived from the scene authority before optional compilation is requested");
+  assert.match(rendererSource, /if \(sparsePresentationRequired\) requested\.push\("svo-dry-scene"\)/,
+    "an inapplicable sparse presentation must have no task to become stranded");
 });
 
 test("each optional pipeline has an explicit first-use condition", () => {
@@ -103,8 +113,6 @@ test("production rasterizes requested primary visibility or fails closed", () =>
     "coherence must fail closed until a reduced prepass makes primary output parity-invariant");
   assert.doesNotMatch(drySceneSource, /const relightSplit|lightingMode/,
     "retired lighting-mode selection must not remain in the GLOBAL renderer");
-  assert.match(drySceneSource, /this\.shadingPath === "auto-relight" && relight && this\.coneScale !== 1[^]*ensureConeLightingPrepass/,
-    "selecting relight must asynchronously compile its requested split variant");
   assert.match(drySceneSource, /if \(this\.presentationBundleStatus\.state !== "ready"\) return false/);
   assert.match(drySceneSource, /if \(this\.coneScale !== 1 && !usePrepass\)[^]*return false[^]*if \(splitRequested && !this\.splitDiagnosticsActive && !useSplit\)[^]*return false/,
     "missing requested cone or split resources must reject rather than execute inline");

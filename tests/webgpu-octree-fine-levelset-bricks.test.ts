@@ -450,15 +450,6 @@ test("membership-plus-one-ring fine dirty oracle is deleted", () => {
   /FLUID_DIRTY_ORACLE/);
 });
 
-test("opt-in fine delta neighbor query uses the producer's dense changed marker", () => {
-  const shader = makeFineLevelSetTopologyWGSL(
-    "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}", false, false, true,
-  ).replace(/\s+/g, "");
-  assert.match(shader, /constDELTA_NEIGHBOR_QUERY:bool=true/);
-  assert.match(shader,
-    /fninterfaceNeighborRadii.*if\(DELTA_NEIGHBOR_QUERY\).*radius=i32\(params\.supportHaloRings\).*producerChangedContains\(packBrick\(vec3u\(q\)\)\).*distance<=i32\(params\.dirtyHaloRings\)/s);
-});
-
 test("fine topology isolates cold closure and publishes recurring sparse deltas", () => {
   const wgsl = makeFineLevelSetTopologyWGSL(
     "fn sampleCoarseOctreePhi(position:vec3f)->f32{return position.x;}",

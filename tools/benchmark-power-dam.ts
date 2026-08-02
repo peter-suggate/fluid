@@ -145,7 +145,14 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
     // unaccepted, overflowing the fine band, or publishing the seed pressure
     // is not a speedup. `FLUID_TRIPWIRES=1` also makes an *unevaluable*
     // counter a failure. See docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3.
-    FLUID_TRIPWIRES: "1",
+    //
+    // The caller may only *escalate*, to `failfast`, which terminates at the
+    // step that tripped instead of after the measured window. That is the mode
+    // to diagnose a red lane in; it is not the mode to measure in, because its
+    // per-step queue fence removes host/GPU overlap and cost +26.8% on the
+    // large lane. Any `FLUID_TRIPWIRES=0` from the environment is ignored here
+    // by construction -- this assignment follows `...overrides`.
+    FLUID_TRIPWIRES: process.env.FLUID_TRIPWIRES === "failfast" ? "failfast" : "1",
     ...(qualityInvalidProbe ? { FLUID_TRIPWIRE_ALLOW:
       "topology-rollback,restriction-unaccepted,mgpcg-nonconvergence,fine-band-sentinel",
       FLUID_TRIPWIRE_ALLOW_SUMMARY: "1", FLUID_QUALITY_INVALID_PROBE: "1" } : {}),
@@ -158,22 +165,37 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
     stdio: ["ignore", "pipe", "inherit"],
   });
   let result: PowerDamResultRecord | undefined;
+  /** Correctness verdicts are forwarded unconditionally; census/progress records
+   * stay behind `--forward-ndjson`.
+   *
+   * The child's stdout is consumed by this reader, so anything not re-printed is
+   * discarded. That silently ate the touched-directory differential: a run with
+   * `FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE=1` emitted its verdict, this harness
+   * swallowed it, and the run reported "performance gates PASS" with the
+   * correctness question never answered on screen. A verdict that only exists
+   * inside a pipe is not evidence. */
+  const CORRECTNESS_PHASES = new Set([
+    "spgrid-touched-directory-tripwire", "tripwires",
+  ]);
   const lines = createInterface({ input: child.stdout! });
   lines.on("line", (line) => {
     result = powerDamResultFromLine(line) ?? result;
-    if (forwardNDJSON) {
-      try {
-        const record = JSON.parse(line) as { record?: string; phase?: string };
-        if (record.record === "progress"
+    try {
+      const record = JSON.parse(line) as { record?: string; phase?: string };
+      if (record.phase !== undefined && CORRECTNESS_PHASES.has(record.phase)) {
+        console.log(line);
+        return;
+      }
+      if (forwardNDJSON
+        && (record.record === "progress"
           || record.phase === "octree-row-delta-census-sample"
           || record.phase === "frame-redundancy-census"
           || record.phase === "fine-transport-workset-census"
           || record.phase === "structured-workset-census"
-          || record.phase === "settled-maintenance-census") {
-          console.log(line);
-        }
-      } catch { /* forward only machine-readable experiment records */ }
-    }
+          || record.phase === "settled-maintenance-census")) {
+        console.log(line);
+      }
+    } catch { /* forward only machine-readable experiment records */ }
   });
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);

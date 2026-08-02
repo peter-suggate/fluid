@@ -398,7 +398,7 @@ export class GPUPerformanceTraceRecorder {
   private readonly readBuffer: GPUBuffer;
   private readonly encoderBreakSource: GPUBuffer;
   private readonly encoderBreakTarget: GPUBuffer;
-  private readonly markerPipeline: GPUComputePipeline;
+  private markerPipeline?: GPUComputePipeline;
   private boundaryCount = 0;
   private disposed = false;
 
@@ -435,7 +435,7 @@ export class GPUPerformanceTraceRecorder {
       size: 4,
       usage: GPUBufferUsage.COPY_DST,
     });
-    this.markerPipeline = dynamicTraceMarkerPipeline(device);
+    void dynamicTraceMarkerPipeline(device).then((pipeline) => { this.markerPipeline = pipeline; });
   }
 
   boundary(encoder: GPUCommandEncoder, label: string): void {
@@ -451,8 +451,10 @@ export class GPUPerformanceTraceRecorder {
         beginningOfPassWriteIndex: this.boundaryCount,
       },
     });
-    marker.setPipeline(this.markerPipeline);
-    marker.dispatchWorkgroups(1);
+    if (this.markerPipeline) {
+      marker.setPipeline(this.markerPipeline);
+      marker.dispatchWorkgroups(1);
+    }
     marker.end();
     this.boundaryCount += 1;
   }
@@ -495,18 +497,21 @@ export class GPUPerformanceTraceRecorder {
   }
 }
 
-const dynamicTraceMarkerPipelines = new WeakMap<GPUDevice, GPUComputePipeline>();
-function dynamicTraceMarkerPipeline(device: GPUDevice): GPUComputePipeline {
+const dynamicTraceMarkerPipelines = new WeakMap<GPUDevice, Promise<GPUComputePipeline>>();
+async function dynamicTraceMarkerPipeline(device: GPUDevice): Promise<GPUComputePipeline> {
   const cached = dynamicTraceMarkerPipelines.get(device);
   if (cached) return cached;
-  const module = device.createShaderModule({
+  // Callers may request instrumentation while constructing a frame recorder;
+  // never let that constructor execute WGSL work on its own stack.
+  await Promise.resolve();
+  const shaderModule = device.createShaderModule({
     label: "dynamic trace marker",
     code: "@compute @workgroup_size(1) fn mark() {}",
   });
-  const pipeline = device.createComputePipeline({
+  const pipeline = device.createComputePipelineAsync({
     label: "dynamic trace marker",
     layout: "auto",
-    compute: { module, entryPoint: "mark" },
+    compute: { module: shaderModule, entryPoint: "mark" },
   });
   dynamicTraceMarkerPipelines.set(device, pipeline);
   return pipeline;
@@ -536,12 +541,13 @@ export class DynamicGPUPerformanceTraceRecorder {
   private boundaryCount = 0;
   private disposed = false;
 
-  constructor(
+  private constructor(
     private readonly device: GPUDevice,
     private readonly sampleId: number,
     private readonly lane: "physics" | "presentation",
     private readonly context: string,
     private readonly capacity = 128,
+    markerPipeline: GPUComputePipeline,
   ) {
     this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
     this.resolveBuffer = device.createBuffer({
@@ -564,7 +570,18 @@ export class DynamicGPUPerformanceTraceRecorder {
       size: 4,
       usage: GPUBufferUsage.COPY_DST,
     });
-    this.markerPipeline = dynamicTraceMarkerPipeline(device);
+    this.markerPipeline = markerPipeline;
+  }
+
+  static async create(
+    device: GPUDevice,
+    sampleId: number,
+    lane: "physics" | "presentation",
+    context: string,
+    capacity = 128,
+  ): Promise<DynamicGPUPerformanceTraceRecorder> {
+    return new DynamicGPUPerformanceTraceRecorder(
+      device, sampleId, lane, context, capacity, await dynamicTraceMarkerPipeline(device));
   }
 
   begin(encoder: GPUCommandEncoder): void {
@@ -669,7 +686,7 @@ export class GPUStageTimestampRecorder {
    * sample observable. It is the only command this recorder adds per stage. */
   private readonly encoderBreakSource: GPUBuffer;
   private readonly encoderBreakTarget: GPUBuffer;
-  private readonly markerPipeline: GPUComputePipeline;
+  private markerPipeline?: GPUComputePipeline;
   private readonly phases: GPUTimestampPhase[] = [];
   /** Query slot each boundary landed on; repeats mark an empty stage. */
   private readonly boundarySlots: number[] = [];
@@ -712,7 +729,7 @@ export class GPUStageTimestampRecorder {
       size: 4,
       usage: GPUBufferUsage.COPY_DST,
     });
-    this.markerPipeline = dynamicTraceMarkerPipeline(device);
+    void dynamicTraceMarkerPipeline(device).then((pipeline) => { this.markerPipeline = pipeline; });
   }
 
   /**
@@ -795,8 +812,10 @@ export class GPUStageTimestampRecorder {
       const closing = this.claimBoundary(encoder, false);
       if (!closing) { this.overflowed = true; return; }
       const marker = encoder.beginComputePass({ label: "GPU stage trace close", timestampWrites: closing });
-      marker.setPipeline(this.markerPipeline);
-      marker.dispatchWorkgroups(1);
+      if (this.markerPipeline) {
+        marker.setPipeline(this.markerPipeline);
+        marker.dispatchWorkgroups(1);
+      }
       marker.end();
     }
     if (this.boundarySlots.length !== this.phases.length + 1) { this.overflowed = true; return; }

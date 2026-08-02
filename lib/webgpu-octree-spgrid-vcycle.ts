@@ -1187,19 +1187,19 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     return planOctreeVCycleParallelLevels(this.plan.levelDomainCells);
   }
   private readonly accurateWorksetLayout: GPUBuffer;
-  private readonly accurateGatePipeline!: GPUComputePipeline;
+  private accurateGatePipeline!: GPUComputePipeline;
   private readonly accurateClassDispatch!: GPUBuffer;
-  private readonly accurateMergedTermPipeline!: GPUComputePipeline;
-  private readonly accurateMergedAdjointPipeline!: GPUComputePipeline;
-  private readonly accurateTermPipeline!: GPUComputePipeline;
-  private readonly accurateAdjointPipeline!: GPUComputePipeline;
-  private readonly accurateFinalizePipeline!: GPUComputePipeline;
-  private readonly accurateResidualFinalizePipeline!: GPUComputePipeline;
+  private accurateMergedTermPipeline!: GPUComputePipeline;
+  private accurateMergedAdjointPipeline!: GPUComputePipeline;
+  private accurateTermPipeline!: GPUComputePipeline;
+  private accurateAdjointPipeline!: GPUComputePipeline;
+  private accurateFinalizePipeline!: GPUComputePipeline;
+  private accurateResidualFinalizePipeline!: GPUComputePipeline;
   private readonly accurateTerms!: GPUBuffer;
   /** Per-epoch compiled operator image: 19 u32 per row, indices only. */
   private readonly accurateOperatorRows!: GPUBuffer;
-  private readonly accurateOperatorRowsPipeline!: GPUComputePipeline;
-  private readonly accurateOperatorRowsGroup!: GPUBindGroup;
+  private accurateOperatorRowsPipeline!: GPUComputePipeline;
+  private accurateOperatorRowsGroup!: GPUBindGroup;
   private readonly accurateImageDeltaParams!: GPUBuffer;
   private readonly accurateImageEpochs!: GPUBuffer;
   /**
@@ -1220,12 +1220,16 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     && process.env?.FLUID_SPGRID_ADJOINT_BY_CHASE === "1";
   /** Per-epoch compiled fine-adjoint image: 144 u32 per row, indices only. */
   private readonly accurateAdjointRows!: GPUBuffer;
-  private readonly accurateAdjointRowsPipeline!: GPUComputePipeline;
-  private readonly accurateAdjointRowsGroup!: GPUBindGroup;
+  private accurateAdjointRowsPipeline!: GPUComputePipeline;
+  private accurateAdjointRowsGroup!: GPUBindGroup;
+  private accurateModule?: GPUShaderModule;
+  private accurateGateModule?: GPUShaderModule;
+  private readonly persistentImageCarry = typeof process !== "undefined"
+    && process.env?.FLUID_SPGRID_PERSISTENT_IMAGES === "1";
   private readonly accurateBindings: CachedAccurateApply[] = [];
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
-  private readonly setupShaderModule: GPUShaderModule;
+  private setupShaderModule!: GPUShaderModule;
   private pipelines: Readonly<Partial<Record<
     OctreeSPGridVCyclePipelineName, GPUComputePipeline
   >>> = Object.freeze({});
@@ -1425,9 +1429,6 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     options: OctreeSPGridVCycleOptions) {
     this.plan = planOctreeSPGridVCycle(options);
     this.hierarchicalExecutorCompiled = options.compileHierarchicalExecutor !== false;
-    if (options.deferPipelineCompilation && this.hierarchicalExecutorCompiled) {
-      throw new Error("Deferred SPGrid compilation currently requires the persistent executor");
-    }
     if (!(options.finestCellWidth > 0) || !Number.isFinite(options.finestCellWidth)) throw new RangeError("SPGrid finest cell width must be positive");
     if (source.rowGeometry.size < this.plan.rowCapacity * 32
       || source.control.size < 24
@@ -1608,24 +1609,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       { length: this.plan.levelCount }, (_, level) => makeParams(level, "accepted")));
     this.candidateParams = Object.freeze(Array.from(
       { length: this.plan.levelCount }, (_, level) => makeParams(level, "candidate")));
-    this.setupShaderModule = device.createShaderModule({
-      label: "Paper native sparse SPGrid V-cycle", code: octreeSPGridVCycleShader,
-    });
-    if (!options.deferPipelineCompilation) {
-      this.pipelines = this.createPipelinesSync();
-    }
     if (this.hierarchicalExecutorCompiled) {
-    const accurateModule = device.createShaderModule({
-      label: "SPGrid accurate A2 class-specialized row apply", code: octreeSPGridAccurateOperatorShader,
-    });
-    const accurateGateModule = device.createShaderModule({
-      label: "SPGrid accurate A2 convergence-tail publisher",
-      code: octreeSPGridAccurateDispatchGateShader,
-    });
-    this.accurateGatePipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · convergence-tail publisher", layout: "auto",
-      compute: { module: accurateGateModule, entryPoint: "prepareAccurateDispatches" },
-    });
     this.accurateClassDispatch = device.createBuffer({
       label: "SPGrid accurate A2 convergence-gated class records",
       // Four per-class records, then the union record the single accepted-row
@@ -1648,9 +1632,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // old->new destination remap was slower than rebuilding compact live rows
     // on the large lane, so production keeps one bank and pays no dormant
     // double-image memory/cache cost.
-    const persistentImageCarry = typeof process !== "undefined"
-      && process.env.FLUID_SPGRID_PERSISTENT_IMAGES === "1";
-    const imageBanks = persistentImageCarry ? 2 : 1;
+    const imageBanks = this.persistentImageCarry ? 2 : 1;
     this.accurateOperatorRows = device.createBuffer({
       label: "SPGrid accurate A2 compiled operator rows",
       // One page-status word plus eighteen resolved destination rows per row.
@@ -1682,86 +1664,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: 16,
       usage: GPUBufferUsage.STORAGE,
     });
-    this.accurateMergedTermPipeline = device.createComputePipeline({
-      label: "SPGrid Section 6.3 · parallel merged-band direct terms", layout: "auto",
-      compute: { module: accurateModule, entryPoint: this.directByChase
-        ? "stageMergedBandTermsByChase" : "stageMergedBandTerms" },
-    });
     // Interleaved A/B arm for the compiled fine-adjoint image. Both entry
     // points stage the same words from the same expression; they differ only in
     // where the destination row comes from, so selecting between them in ONE
     // build is the only way to price the image without rebuilding the tree
     // between samples. Production is the image; the chase is the control.
-    this.accurateMergedAdjointPipeline = device.createComputePipeline({
-      label: "SPGrid Section 6.3 · parallel merged-band adjoint children", layout: "auto",
-      compute: { module: accurateModule, entryPoint: this.adjointByChase
-        ? "stageMergedBandAdjointsByChase" : "stageMergedBandAdjoints" },
-    });
-    this.accurateTermPipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · parallel direct terms", layout: "auto",
-      compute: { module: accurateModule, entryPoint: this.directByChase
-        ? "stageAcceptedUnionTermsByChase" : "stageAcceptedUnionTerms" },
-    });
-    this.accurateAdjointPipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · parallel fine-adjoint children", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "stageAcceptedUnionAdjoints" },
-    });
-    this.accurateFinalizePipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · ordered row fold", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "finalizeStagedUnionRows" },
-    });
-    this.accurateResidualFinalizePipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · ordered row fold to residual", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "finalizeStagedUnionResidualRows" },
-    });
-    this.accurateOperatorRowsPipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · compile operator rows", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "buildAccurateOperatorRows",
-        constants: { persistentImageCarry: persistentImageCarry ? 1 : 0 } },
-    });
-    this.accurateOperatorRowsGroup = device.createBindGroup({
-      label: "SPGrid accurate A2 · operator image bindings",
-      layout: this.accurateOperatorRowsPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 6, resource: { buffer: this.topology } },
-        { binding: 3, resource: { buffer: source.control } },
-        { binding: 4, resource: { buffer: "buffer" in source.worksets.regularInterior
-          ? source.worksets.regularInterior.buffer : source.worksets.regularInterior } },
-        { binding: 5, resource: { buffer: this.accurateWorksetLayout } },
-        { binding: 7, resource: { buffer: this.state } },
-        { binding: 8, resource: { buffer: this.capturedGeometry } },
-        { binding: 9, resource: { buffer: source.topologyMetrics } },
-        { binding: 11, resource: { buffer: this.accurateWorksetLayout } },
-        { binding: 13, resource: { buffer: this.accurateOperatorRows } },
-        { binding: 15, resource: { buffer: this.accurateImageDeltaParams } },
-        { binding: 16, resource: { buffer: this.source.rowDelta.rows } },
-        { binding: 17, resource: { buffer: this.accurateImageEpochs } },
-      ],
-    });
-    this.accurateAdjointRowsPipeline = device.createComputePipeline({
-      label: "SPGrid accurate A2 · compile fine-adjoint rows", layout: "auto",
-      compute: { module: accurateModule, entryPoint: "buildAccurateAdjointRows",
-        constants: { persistentImageCarry: persistentImageCarry ? 1 : 0 } },
-    });
-    this.accurateAdjointRowsGroup = device.createBindGroup({
-      label: "SPGrid accurate A2 · fine-adjoint image bindings",
-      layout: this.accurateAdjointRowsPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 6, resource: { buffer: this.topology } },
-        { binding: 3, resource: { buffer: source.control } },
-        { binding: 4, resource: { buffer: "buffer" in source.worksets.regularInterior
-          ? source.worksets.regularInterior.buffer : source.worksets.regularInterior } },
-        { binding: 5, resource: { buffer: this.accurateWorksetLayout } },
-        { binding: 7, resource: { buffer: this.state } },
-        { binding: 8, resource: { buffer: this.capturedGeometry } },
-        { binding: 9, resource: { buffer: source.topologyMetrics } },
-        { binding: 11, resource: { buffer: this.accurateWorksetLayout } },
-        { binding: 14, resource: { buffer: this.accurateAdjointRows } },
-        { binding: 15, resource: { buffer: this.accurateImageDeltaParams } },
-        { binding: 16, resource: { buffer: this.source.rowDelta.rows } },
-        { binding: 17, resource: { buffer: this.accurateImageEpochs } },
-      ],
-    });
     this.accurateOperatorInstance = Object.freeze({
       convergenceTail: "gpu-zero-indirect" as const,
       encodedDispatchCount: 4,
@@ -1871,16 +1778,69 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     };
   }
 
-  private createPipelinesSync(): Readonly<Partial<Record<
-    OctreeSPGridVCyclePipelineName, GPUComputePipeline
-  >>> {
-    return Object.freeze(Object.fromEntries(
-      octreeSPGridPipelineNamesForExecutor(this.hierarchicalExecutorCompiled)
-        .map((entryPoint) => [
-          entryPoint,
-          this.device.createComputePipeline(this.pipelineDescriptor(entryPoint)),
-        ]),
-    ));
+  private async initializeAccuratePipelines(): Promise<void> {
+    if (!this.hierarchicalExecutorCompiled || this.accurateGatePipeline) return;
+    this.accurateModule = this.device.createShaderModule({
+      label: "SPGrid accurate A2 class-specialized row apply", code: octreeSPGridAccurateOperatorShader,
+    });
+    this.accurateGateModule = this.device.createShaderModule({
+      label: "SPGrid accurate A2 convergence-tail publisher",
+      code: octreeSPGridAccurateDispatchGateShader,
+    });
+    const shaderModule = this.accurateModule!;
+    const make = (label: string, entryPoint: string, constants?: Record<string, number>) =>
+      this.device.createComputePipelineAsync({
+        label, layout: "auto", compute: { module: shaderModule, entryPoint, constants },
+      });
+    this.accurateGatePipeline = await this.device.createComputePipelineAsync({
+      label: "SPGrid accurate A2 · convergence-tail publisher", layout: "auto",
+      compute: { module: this.accurateGateModule!, entryPoint: "prepareAccurateDispatches" },
+    });
+    this.accurateMergedTermPipeline = await make(
+      "SPGrid Section 6.3 · parallel merged-band direct terms",
+      this.directByChase ? "stageMergedBandTermsByChase" : "stageMergedBandTerms");
+    this.accurateMergedAdjointPipeline = await make(
+      "SPGrid Section 6.3 · parallel merged-band adjoint children",
+      this.adjointByChase ? "stageMergedBandAdjointsByChase" : "stageMergedBandAdjoints");
+    this.accurateTermPipeline = await make("SPGrid accurate A2 · parallel direct terms",
+      this.directByChase ? "stageAcceptedUnionTermsByChase" : "stageAcceptedUnionTerms");
+    this.accurateAdjointPipeline = await make(
+      "SPGrid accurate A2 · parallel fine-adjoint children", "stageAcceptedUnionAdjoints");
+    this.accurateFinalizePipeline = await make(
+      "SPGrid accurate A2 · ordered row fold", "finalizeStagedUnionRows");
+    this.accurateResidualFinalizePipeline = await make(
+      "SPGrid accurate A2 · ordered row fold to residual", "finalizeStagedUnionResidualRows");
+    const constants = { persistentImageCarry: this.persistentImageCarry ? 1 : 0 };
+    this.accurateOperatorRowsPipeline = await make(
+      "SPGrid accurate A2 · compile operator rows", "buildAccurateOperatorRows", constants);
+    this.accurateAdjointRowsPipeline = await make(
+      "SPGrid accurate A2 · compile fine-adjoint rows", "buildAccurateAdjointRows", constants);
+    const common = [
+      { binding: 6, resource: { buffer: this.topology } },
+      { binding: 3, resource: { buffer: this.source.control } },
+      { binding: 4, resource: { buffer: "buffer" in this.source.worksets.regularInterior
+        ? this.source.worksets.regularInterior.buffer : this.source.worksets.regularInterior } },
+      { binding: 5, resource: { buffer: this.accurateWorksetLayout } },
+      { binding: 7, resource: { buffer: this.state } },
+      { binding: 8, resource: { buffer: this.capturedGeometry } },
+      { binding: 9, resource: { buffer: this.source.topologyMetrics } },
+      { binding: 11, resource: { buffer: this.accurateWorksetLayout } },
+    ];
+    const tail = [
+      { binding: 15, resource: { buffer: this.accurateImageDeltaParams } },
+      { binding: 16, resource: { buffer: this.source.rowDelta.rows } },
+      { binding: 17, resource: { buffer: this.accurateImageEpochs } },
+    ];
+    this.accurateOperatorRowsGroup = this.device.createBindGroup({
+      label: "SPGrid accurate A2 · operator image bindings",
+      layout: this.accurateOperatorRowsPipeline.getBindGroupLayout(0),
+      entries: [...common, { binding: 13, resource: { buffer: this.accurateOperatorRows } }, ...tail],
+    });
+    this.accurateAdjointRowsGroup = this.device.createBindGroup({
+      label: "SPGrid accurate A2 · fine-adjoint image bindings",
+      layout: this.accurateAdjointRowsPipeline.getBindGroupLayout(0),
+      entries: [...common, { binding: 14, resource: { buffer: this.accurateAdjointRows } }, ...tail],
+    });
   }
 
   /** Sequential compilation keeps driver pressure bounded during startup. */
@@ -1888,10 +1848,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     onProgress: (label: string, completed: number, total: number) => void = () => {},
   ): Promise<void> {
     this.assertLive();
+    await this.touchedBrickSort?.initializePipelines();
+    await this.touchedPageSort?.initializePipelines();
     const names = octreeSPGridPipelineNamesForExecutor(this.hierarchicalExecutorCompiled);
     if (names.every((name) => this.pipelines[name] !== undefined)) return;
     if (!this.pipelineInitialization) {
       this.pipelineInitialization = (async () => {
+        this.setupShaderModule = this.device.createShaderModule({
+          label: "Paper native sparse SPGrid V-cycle", code: octreeSPGridVCycleShader,
+        });
         const compiled: Partial<Record<OctreeSPGridVCyclePipelineName, GPUComputePipeline>> = {};
         for (let index = 0; index < names.length; index += 1) {
           const entryPoint = names[index];
@@ -1912,6 +1877,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       })();
     }
     await this.pipelineInitialization;
+    await this.initializeAccuratePipelines();
   }
 
   encodeCapture(broker: PassBroker): void {
@@ -2099,7 +2065,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   encodeCorrection(broker: PassBroker, input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
     this.assertHierarchicalExecutorCompiled();
-    let pass = broker.compute({ label: "SPGrid V-cycle · publish convergence-gated level records" });
+    const pass = broker.compute({ label: "SPGrid V-cycle · publish convergence-gated level records" });
     this.encodeCorrectionGate(pass, input);
     broker.fence("SPGrid V-cycle convergence-gated indirect publication");
     this.encodeCorrectionBody(broker, input);
@@ -2116,7 +2082,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     input: { rhs: GPUBuffer; correction: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer }): void {
     this.assertLive();
     this.assertHierarchicalExecutorCompiled();
-    let pass = broker.compute({ label: "SPGrid V-cycle · one-pass symmetric correction" });
+    const pass = broker.compute({ label: "SPGrid V-cycle · one-pass symmetric correction" });
     // Every stage below re-asks the broker for a pass under its own label. With
     // label isolation OFF -- production, and every wall-clock lane -- `compute()`
     // returns the pass already open and DISCARDS the label, so the encoded

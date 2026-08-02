@@ -21,13 +21,15 @@
  *      _ENCODES_PER_SAMPLE / _CONE_SCALE (1 | 0.5 | 0.25 | 0.125, default 0.5),
  *      _RADIANCE_RECONSTRUCTION (nearest | gated-linear | joint-bilateral | wide-relight | full-res-relight),
  *      FLUID_SVO_DRY_FRAME_SHADOWS / _AO, WEBGPU_NODE_MODULE,
+ *      FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE (0 | 1, default 0;
+ *      enables the explicit full-rate visibility refinement queue),
  *      FLUID_SVO_DRY_FRAME_CONE_TRACING (cones | exact | off; default cones;
  *      matches the UI visibility switch and requires the profiler lane),
  *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide |
  *      raster-primary; default canonical-parametric; raster-primary implies both raster arms),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
  *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only scene override),
- *      FLUID_SVO_DRY_FRAME_SHADING (inline | split | auto-relight; default auto-relight),
+ *      FLUID_SVO_DRY_FRAME_SHADING (inline | split; default split production path),
  *      FLUID_SVO_DRY_FRAME_RASTER_GLASS (1 enables coverage-scaled pane discovery),
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID (1 enables current-frame rigid impostor discovery),
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE (1 forces the raster arm below its adaptive body-count crossover),
@@ -52,9 +54,9 @@
  *      so the localized persistent-GI invalidation path can be timed.
  *      FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_TRANSITION=1 pre-warms static GI,
  *      then marks that body moving and reports its first six frames.
- *      FLUID_SVO_DRY_FRAME_TIMING=wall bypasses timestamp queries and measures
- *      serialized submit-to-fence wall time (useful on Dawn builds where a
- *      timestamp-query feature is exposed but query resolution is unreliable).
+ *      FLUID_SVO_DRY_FRAME_TIMING selects wall (default) for serialized
+ *      submit-to-fence timing or gpu for strict hardware timestamps. A gpu
+ *      request fails closed when the adapter cannot provide timestamp queries.
  *      FLUID_SVO_DRY_FRAME_PHASE_TRACE=1 captures one configured frame as
  *      individually timestamped production render stages before timing.
  *      FLUID_SVO_DRY_FRAME_PROFILE_SECONDS runs a clean, continuously submitted
@@ -161,17 +163,20 @@ const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECON
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const globalIlluminationEnabled = process.env.FLUID_SVO_DRY_FRAME_GI !== "0";
+const silhouetteRefinementRaw = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE ?? "0";
+const silhouetteRefinementEnabled = silhouetteRefinementRaw === "1";
 const coneTracingModeRaw = process.env.FLUID_SVO_DRY_FRAME_CONE_TRACING ?? "cones";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
 const profileBatch = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_BATCH ?? 1);
 const isolateProfilePassEncoders = process.env.FLUID_SVO_DRY_FRAME_ISOLATE_PASS_ENCODERS === "1";
 const readConeBoundaryCount = process.env.FLUID_SVO_DRY_FRAME_BOUNDARY_COUNT === "1";
-const forceWallTiming = process.env.FLUID_SVO_DRY_FRAME_TIMING === "wall";
+const timingMode = process.env.FLUID_SVO_DRY_FRAME_TIMING ?? "wall";
+const forceWallTiming = timingMode === "wall";
 const phaseTraceEnabled = process.env.FLUID_SVO_DRY_FRAME_PHASE_TRACE === "1";
 const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "canonical-parametric";
 const brickOccupancyModeRaw = process.env.FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY ?? "off";
-const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "auto-relight";
+const shadingPathRaw = process.env.FLUID_SVO_DRY_FRAME_SHADING ?? "split";
 // Raster-assisted primary visibility unfuses panes and bodies out of the
 // primary fragment shader by construction, so it implies both raster arms.
 const rasterPrimary = (process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "") === "raster-primary";
@@ -234,6 +239,10 @@ assert.ok(Number.isSafeInteger(maximumShadedLights) && maximumShadedLights >= 1
   && maximumShadedLights <= DEFAULT_SVO_RENDER_TUNING.maximumShadedLights,
 "FLUID_SVO_DRY_FRAME_MAX_LIGHTS must be between 1 and the production maximum");
 assert.ok([1, 0.5, 0.25, 0.125].includes(coneScaleRaw), "FLUID_SVO_DRY_FRAME_CONE_SCALE must be 1, 0.5, 0.25, or 0.125");
+assert.ok(silhouetteRefinementRaw === "0" || silhouetteRefinementRaw === "1",
+  "FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE must be 0 or 1");
+assert.ok(timingMode === "wall" || timingMode === "gpu",
+  "FLUID_SVO_DRY_FRAME_TIMING must be wall or gpu");
 assert.ok(["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstructionRaw),
   "FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
@@ -246,8 +255,8 @@ assert.ok(SVO_DRY_TRAVERSAL_MODES.includes(traversalModeRaw as SvoDryTraversalMo
   `FLUID_SVO_DRY_FRAME_TRAVERSAL must be one of ${SVO_DRY_TRAVERSAL_MODES.join(", ")}`);
 assert.ok(["off", "bounds", "macro", "macro-hdda"].includes(brickOccupancyModeRaw),
   "FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY must be off, bounds, macro, or macro-hdda");
-assert.ok(["inline", "split", "auto-relight"].includes(shadingPathRaw),
-  "FLUID_SVO_DRY_FRAME_SHADING must be inline, split, or auto-relight");
+assert.ok(["inline", "split"].includes(shadingPathRaw),
+  "FLUID_SVO_DRY_FRAME_SHADING must be inline or split");
 assert.ok(["off", "static-primary"].includes(rayCoherenceModeRaw),
   "FLUID_SVO_DRY_FRAME_COHERENCE must be off or static-primary");
 assert.ok(rayCoherenceModeRaw === "off" || shadingPathRaw === "split",
@@ -348,7 +357,9 @@ function toneByte(linear: number): number {
   return Math.max(0, Math.min(255, Math.round(255 * Math.min(1, Math.max(0, linear)) ** (1 / 2.2))));
 }
 
-/** Mirror of the FluidLabRenderer 400-byte view-uniform packing (webgpu-renderer.ts). */
+const SVO_VIEW_UNIFORM_FLOATS = 104;
+
+/** Mirror of the FluidLabRenderer 416-byte view-uniform packing (webgpu-renderer.ts). */
 function packViewUniforms(
   scene: SceneDescription,
   camera: CameraState,
@@ -375,7 +386,7 @@ function packViewUniforms(
     0, 0.5, 1, 0,
     environmentIndex(environmentId), 0, 0, 0,
   ]);
-  const packed = new Float32Array(100);
+  const packed = new Float32Array(SVO_VIEW_UNIFORM_FLOATS);
   packed.set(uniform, 0);
   if (sceneHasTerrain(scene) && scene.terrain) {
     const terrain = scene.terrain;
@@ -428,6 +439,8 @@ const adapterInfo = {
 assert.ok(adapterInfo.vendor || adapterInfo.architecture || adapterInfo.description,
   "adapter info is empty — refusing to report a benchmark that may not have run on real hardware");
 const timestampsSupported = adapter.features.has("timestamp-query");
+assert.ok(timingMode !== "gpu" || timestampsSupported,
+  "FLUID_SVO_DRY_FRAME_TIMING=gpu requires timestamp-query support; no wall-time fallback was selected");
 const f16Requested = optimizationExperiments.halfPrecisionLighting === true;
 assert.ok(!f16Requested || adapter.features.has("shader-f16"),
   "FLUID_SVO_DRY_FRAME_F16=1 requires Dawn shader-f16 support");
@@ -460,6 +473,14 @@ const solver = await WebGPULiveSvoScene.create(
   undefined,
   renderBrickSize === undefined ? {} : { renderBrickSize },
 );
+// Production encodes staged live-scene maintenance before any presentation
+// consumer in the frame. The benchmark must publish that initial generation
+// too; constructing arenas alone deliberately leaves completeGeneration at 0.
+const initialScenePublication = device.createCommandEncoder({ label: "Bench initial live scene publication" });
+solver.encodeSceneMaintenance(initialScenePublication);
+device.queue.submit([initialScenePublication.finish()]);
+await device.queue.onSubmittedWorkDone();
+assert.deepEqual(validationErrors, [], "GPU validation errors during initial live scene publication");
 const publishedSource = solver.sparseVoxelSceneSource;
 const source = globalIlluminationEnabled || !publishedSource
   ? publishedSource
@@ -511,7 +532,11 @@ assert.ok(coneMipReady, "node-mip pyramid unavailable — cone lighting would si
 // ---------------------------------------------------------------------------
 // Production renderer, camera uniforms, offscreen targets.
 // ---------------------------------------------------------------------------
-const uniformBuffer = device.createBuffer({ label: "Bench view uniforms", size: 400, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+const uniformBuffer = device.createBuffer({
+  label: "Bench view uniforms",
+  size: SVO_VIEW_UNIFORM_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+  usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+});
 const bodyBuffer = device.createBuffer({ label: "Bench rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 const bodies = packBodies(scene);
 device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count));
@@ -531,8 +556,19 @@ const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale
   }),
 };
 renderer.setRenderTuning(configuredRenderTuning);
-function applyLighting(scale: SvoConeLightingScale, shadows = shadowsEnabled, ambientOcclusion = ambientOcclusionEnabled): void {
-  renderer.setLightingOptions({ shadowsEnabled: shadows, ambientOcclusionEnabled: ambientOcclusion, coneLightingScale: scale, coneTracingMode });
+function applyLighting(
+  scale: SvoConeLightingScale,
+  shadows = shadowsEnabled,
+  ambientOcclusion = ambientOcclusionEnabled,
+  silhouetteRefinement = silhouetteRefinementEnabled,
+): void {
+  renderer.setLightingOptions({
+    shadowsEnabled: shadows,
+    ambientOcclusionEnabled: ambientOcclusion,
+    silhouetteRefinementEnabled: silhouetteRefinement,
+    coneLightingScale: scale,
+    coneTracingMode,
+  });
 }
 applyLighting(coneScale);
 if (coneTracingMode === "cones" && coneScale !== 1) {
@@ -626,7 +662,7 @@ let configuredPhaseTrace: PerformanceTrace | undefined;
 if (phaseTraceEnabled && profileSeconds <= 0 && GPUPerformanceTraceRecorder.supported(device)) {
   for (let attempt = 0; attempt < 3 && !configuredPhaseTrace; attempt += 1) {
     const encoder = device.createCommandEncoder({ label: `SVO configured phase trace ${attempt}` });
-    const recorder = new DynamicGPUPerformanceTraceRecorder(device, ++traceSampleId, "presentation", "svo-dry-frame:configured");
+    const recorder = await DynamicGPUPerformanceTraceRecorder.create(device, ++traceSampleId, "presentation", "svo-dry-frame:configured");
     recorder.begin(encoder);
     encodeFrame(encoder, primaryCoherenceKey === undefined ? undefined : `${primaryCoherenceKey}|phase-trace-${attempt}`,
       (phase) => recorder.completePhase(encoder, phase));
@@ -771,6 +807,33 @@ if (syntheticRigidTransition) {
 const samples = await timeFrames(cycles, "Bench");
 assert.equal(samples.length, cycles);
 assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
+
+// Primary seam-closure cost is measured in one process with the exact same
+// scene, camera, caches, and pipeline bundle. Alternating order each cycle
+// cancels first/second-submit and thermal bias; neither arm changes cone rate.
+let silhouetteRefinementTiming: { disabled_ms: number[]; enabled_ms: number[] } | undefined;
+if (coneScale !== 1) {
+  for (const enabled of [false, true] as const) {
+    applyLighting(coneScale, shadowsEnabled, ambientOcclusionEnabled, enabled);
+    const encoder = device.createCommandEncoder({ label: `Primary seam closure ${enabled ? "enabled" : "disabled"} warmup` });
+    encodeFrame(encoder);
+    device.queue.submit([encoder.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  const disabled_ms: number[] = [];
+  const enabled_ms: number[] = [];
+  for (let cycle = 0; cycle < cycles; cycle += 1) {
+    const order = cycle % 2 === 0 ? [false, true] as const : [true, false] as const;
+    for (const enabled of order) {
+      applyLighting(coneScale, shadowsEnabled, ambientOcclusionEnabled, enabled);
+      const measured = (await timeFrames(1, `Primary seam closure ${enabled ? "enabled" : "disabled"} ${cycle}`))[0];
+      (enabled ? enabled_ms : disabled_ms).push(measured);
+    }
+  }
+  silhouetteRefinementTiming = { disabled_ms, enabled_ms };
+  applyLighting(coneScale);
+  assert.deepEqual(validationErrors, [], "GPU validation errors during primary-seam-closure A/B");
+}
 
 let warmConeVisibilityProbe: { method: string; median_ms: number; p95_ms: number; samples_ms: number[] } | undefined;
 if (coneScale !== 1) {
@@ -1007,6 +1070,8 @@ if (gBufferRawPrefix) {
   writeFileSync(`${gBufferRawPrefix}-hardware-depth.bin`, hardwareDepthBytes);
 }
 let reducedRows: Uint32Array | undefined;
+let silhouetteRefinementDisabledRows: Uint32Array | undefined;
+let silhouetteRefinementEnabledRows: Uint32Array | undefined;
 let overlayRows: Uint32Array | undefined;
 let orbitReturnRows: Uint32Array | undefined;
 // Settle-pop capture: the same scale and lighting, differing only in the
@@ -1061,8 +1126,14 @@ if (coneScale !== 1) {
       await device.queue.onSubmittedWorkDone();
     }
   }
-  log("Capturing reduced frame for quality statistics");
-  reducedRows = await captureFrame("Bench reduced frame");
+  log("Capturing reduced frames with primary seam closure disabled and enabled");
+  applyLighting(coneScale, shadowsEnabled, ambientOcclusionEnabled, false);
+  silhouetteRefinementDisabledRows = await captureFrame("Bench reduced frame — silhouette refinement disabled");
+  applyLighting(coneScale, shadowsEnabled, ambientOcclusionEnabled, true);
+  silhouetteRefinementEnabledRows = await captureFrame("Bench reduced frame — silhouette refinement enabled");
+  reducedRows = silhouetteRefinementEnabled
+    ? silhouetteRefinementEnabledRows : silhouetteRefinementDisabledRows;
+  applyLighting(coneScale);
   log("Capturing fallback-band diagnostic frame");
   writeViewUniforms(false, { mode: 10, opacity: 1 });
   overlayRows = await captureFrame("Bench fallback diagnostic frame");
@@ -1173,12 +1244,80 @@ function luminanceErrorStats(baseline: Float32Array, candidate: Float32Array): E
   };
 }
 let errorStats: ErrorStats | undefined;
+let silhouetteRefinementQuality: {
+  disabledVsFull: ErrorStats;
+  enabledVsFull: ErrorStats;
+  enabledVsDisabled: ErrorStats;
+  changedPixels: {
+    count: number;
+    fraction: number;
+    enabledCloserToFull: number;
+    disabledCloserToFull: number;
+    ties: number;
+    darkenedByRefinement: number;
+    brightenedByRefinement: number;
+    meanLuminanceDelta: number;
+    disabledMeanAbsoluteLuminanceError: number;
+    enabledMeanAbsoluteLuminanceError: number;
+  };
+} | undefined;
 let orbitStability: { differingPackedWords: number; maxRelativeLuminanceError: number; stable: boolean } | undefined;
 let fallback: { percentOfHitPixels: number; hitPixels: number; fallbackPixels: number } | undefined;
 let images: Record<string, string> | undefined;
+let silhouetteDisabledPixels: Float32Array | undefined;
+let silhouetteEnabledPixels: Float32Array | undefined;
 if (coneScale !== 1 && reducedRows && overlayRows) {
   const reducedPixels = decodePixels(reducedRows);
   errorStats = luminanceErrorStats(referencePixels, reducedPixels);
+  if (silhouetteRefinementDisabledRows && silhouetteRefinementEnabledRows) {
+    const disabledPixels = decodePixels(silhouetteRefinementDisabledRows);
+    const enabledPixels = decodePixels(silhouetteRefinementEnabledRows);
+    silhouetteDisabledPixels = disabledPixels;
+    silhouetteEnabledPixels = enabledPixels;
+    let changedCount = 0;
+    let enabledCloserToFull = 0;
+    let disabledCloserToFull = 0;
+    let ties = 0;
+    let darkenedByRefinement = 0;
+    let brightenedByRefinement = 0;
+    let luminanceDelta = 0;
+    let disabledAbsoluteError = 0;
+    let enabledAbsoluteError = 0;
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+      const disabledY = relativeLuminance(disabledPixels, pixel);
+      const enabledY = relativeLuminance(enabledPixels, pixel);
+      if (Math.abs(enabledY - disabledY) <= 1e-6) continue;
+      const referenceY = relativeLuminance(referencePixels, pixel);
+      const disabledError = Math.abs(disabledY - referenceY);
+      const enabledError = Math.abs(enabledY - referenceY);
+      changedCount += 1;
+      luminanceDelta += enabledY - disabledY;
+      if (enabledY < disabledY) darkenedByRefinement += 1;
+      else brightenedByRefinement += 1;
+      disabledAbsoluteError += disabledError;
+      enabledAbsoluteError += enabledError;
+      if (enabledError < disabledError) enabledCloserToFull += 1;
+      else if (disabledError < enabledError) disabledCloserToFull += 1;
+      else ties += 1;
+    }
+    silhouetteRefinementQuality = {
+      disabledVsFull: luminanceErrorStats(referencePixels, disabledPixels),
+      enabledVsFull: luminanceErrorStats(referencePixels, enabledPixels),
+      enabledVsDisabled: luminanceErrorStats(disabledPixels, enabledPixels),
+      changedPixels: {
+        count: changedCount,
+        fraction: changedCount / (width * height),
+        enabledCloserToFull,
+        disabledCloserToFull,
+        ties,
+        darkenedByRefinement,
+        brightenedByRefinement,
+        meanLuminanceDelta: luminanceDelta / Math.max(1, changedCount),
+        disabledMeanAbsoluteLuminanceError: disabledAbsoluteError / Math.max(1, changedCount),
+        enabledMeanAbsoluteLuminanceError: enabledAbsoluteError / Math.max(1, changedCount),
+      },
+    };
+  }
 
   // PNGs: reference, reduced, and an 8x-amplified luminance-difference image.
   const outDirectory = path.dirname(outPath);
@@ -1203,10 +1342,25 @@ if (coneScale !== 1 && reducedRows && overlayRows) {
     reference: path.join(outDirectory, "reference.png"),
     reduced: path.join(outDirectory, `reduced-x${coneScale}.png`),
     difference: path.join(outDirectory, `difference-x8-${coneScale}.png`),
+    silhouetteDisabled: path.join(outDirectory, `silhouette-off-x${coneScale}.png`),
+    silhouetteEnabled: path.join(outDirectory, `silhouette-on-x${coneScale}.png`),
+    silhouetteSignedDifference: path.join(outDirectory, `silhouette-signed-difference-x16-${coneScale}.png`),
   };
   writeFileSync(images.reference, encodePng(width, height, toRgb(referencePixels)));
   writeFileSync(images.reduced, encodePng(width, height, toRgb(reducedPixels)));
   writeFileSync(images.difference, encodePng(width, height, diffRgb));
+  if (silhouetteDisabledPixels && silhouetteEnabledPixels) {
+    const signedDifference = new Uint8Array(width * height * 3);
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+      const delta = relativeLuminance(silhouetteEnabledPixels, pixel) - relativeLuminance(silhouetteDisabledPixels, pixel);
+      const amplitude = Math.max(0, Math.min(255, Math.round(255 * 16 * Math.abs(delta))));
+      // Red is brightened by the exact tier; blue is darkened.
+      signedDifference[pixel * 3 + (delta >= 0 ? 0 : 2)] = amplitude;
+    }
+    writeFileSync(images.silhouetteDisabled, encodePng(width, height, toRgb(silhouetteDisabledPixels)));
+    writeFileSync(images.silhouetteEnabled, encodePng(width, height, toRgb(silhouetteEnabledPixels)));
+    writeFileSync(images.silhouetteSignedDifference, encodePng(width, height, signedDifference));
+  }
 
   // Fallback band: overlay mode 10 paints red where the guided upsample fell
   // back to inline cones; hit pixels keep their linear depth in alpha.
@@ -1299,7 +1453,7 @@ const result = {
     representativeMaterial: false,
     representativeNormal: false,
   },
-  splitShading: shadingPath !== "inline" ? {
+  splitShading: shadingPath === "split" ? {
     extraBytesPerPixel: SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
     extraMiBPerFrame: width * height * SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL / (1024 * 1024),
     extraGiBPerSecondAt60Fps: width * height * SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL * 60 / (1024 ** 3),
@@ -1328,6 +1482,28 @@ const result = {
   coneLighting: {
     scale: coneScale,
     radianceReconstruction,
+    primarySeamClosure: {
+      requested: silhouetteRefinementEnabled,
+      applicable: coneTracingMode === "cones" && coneScale !== 1,
+      timing: silhouetteRefinementTiming === undefined ? undefined : {
+        method: "same-process-interleaved-off-on",
+        pairedMedianOverhead_ms: median(silhouetteRefinementTiming.enabled_ms.map(
+          (value, index) => value - silhouetteRefinementTiming!.disabled_ms[index])),
+        pairedOverheadPercent: 100 * median(silhouetteRefinementTiming.enabled_ms.map(
+          (value, index) => value - silhouetteRefinementTiming!.disabled_ms[index]))
+          / Math.max(Number.EPSILON, median(silhouetteRefinementTiming.disabled_ms)),
+        disabledMedian_ms: median(silhouetteRefinementTiming.disabled_ms),
+        enabledMedian_ms: median(silhouetteRefinementTiming.enabled_ms),
+        overheadMedian_ms: median(silhouetteRefinementTiming.enabled_ms) - median(silhouetteRefinementTiming.disabled_ms),
+        overheadPercent: 100 * (median(silhouetteRefinementTiming.enabled_ms)
+          / Math.max(Number.EPSILON, median(silhouetteRefinementTiming.disabled_ms)) - 1),
+        disabledP95_ms: percentile95(silhouetteRefinementTiming.disabled_ms),
+        enabledP95_ms: percentile95(silhouetteRefinementTiming.enabled_ms),
+        disabled_ms: silhouetteRefinementTiming.disabled_ms,
+        enabled_ms: silhouetteRefinementTiming.enabled_ms,
+      },
+      quality: silhouetteRefinementQuality,
+    },
     prepassResolution: coneScale !== 1 ? svoConePrepassSize(width, height, coneScale) : undefined,
     boundaryQueue: coneBoundaryCount === undefined ? undefined : {
       receivers: coneBoundaryCount,

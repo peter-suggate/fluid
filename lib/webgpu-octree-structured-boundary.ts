@@ -38,7 +38,7 @@ interface StructuredBoundaryPipelineBundle {
 }
 
 const structuredBoundaryPipelineCache = new WeakMap<GPUDevice,
-  StructuredBoundaryPipelineBundle>();
+  Promise<StructuredBoundaryPipelineBundle>>();
 
 /** Diagnostic A/B only. Production admits proved dry identity rows by default. */
 export function octreePowerHybridDryIdentityEnabled(
@@ -109,20 +109,20 @@ export class WebGPUStructuredBoundaryCoefficients {
    * remaining bindings; these buffers are not a resident surface band. */
   private readonly inertFineParams: GPUBuffer;
   private readonly inertFineStorage: GPUBuffer;
-  private readonly prepareCandidate: GPUComputePipeline;
-  private readonly prepareAccepted: GPUComputePipeline;
-  private readonly classify: GPUComputePipeline;
-  private readonly resolve: GPUComputePipeline;
-  private readonly resolveSolid: GPUComputePipeline;
-  private readonly commit: GPUComputePipeline;
-  private readonly rebuild: GPUComputePipeline;
-  private readonly countRowClasses: GPUComputePipeline;
-  private readonly countFamilyClasses: GPUComputePipeline;
-  private readonly scanWorksetBlocks: GPUComputePipeline;
-  private readonly scatterRowWorksets: GPUComputePipeline;
-  private readonly scatterFamilyWorksets: GPUComputePipeline;
-  private readonly accept: GPUComputePipeline;
-  private readonly acceptGroup: GPUBindGroup;
+  private prepareCandidate!: GPUComputePipeline;
+  private prepareAccepted!: GPUComputePipeline;
+  private classify!: GPUComputePipeline;
+  private resolve!: GPUComputePipeline;
+  private resolveSolid!: GPUComputePipeline;
+  private commit!: GPUComputePipeline;
+  private rebuild!: GPUComputePipeline;
+  private countRowClasses!: GPUComputePipeline;
+  private countFamilyClasses!: GPUComputePipeline;
+  private scanWorksetBlocks!: GPUComputePipeline;
+  private scatterRowWorksets!: GPUComputePipeline;
+  private scatterFamilyWorksets!: GPUComputePipeline;
+  private accept!: GPUComputePipeline;
+  private acceptGroup!: GPUBindGroup;
   private readonly groupsByFineParams = new WeakMap<GPUBuffer,
     WeakMap<GPUBuffer, StructuredBoundaryGroupCache>>();
   private destroyed = false;
@@ -211,52 +211,51 @@ export class WebGPUStructuredBoundaryCoefficients {
       resources.analyticBootstrap?.initialCondition === "tank-fill" ? 1
         : resources.analyticBootstrap?.initialCondition === "dam-break" ? 2 : 0], 32);
     device.queue.writeBuffer(this.params, 0, words.buffer);
-    let pipelines = structuredBoundaryPipelineCache.get(device);
-    if (!pipelines) {
-      const shaderModule = device.createShaderModule({ label: "Structured boundary coefficients",
-        code: structuredBoundaryCoefficientWGSL });
-      const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-        layout: "auto", compute: { module: shaderModule, entryPoint } });
-      pipelines = {
-        prepareCandidate: make("prepareStructuredBoundaryCandidate"),
-        prepareAccepted: make("prepareStructuredBoundaryAccepted"),
-        classify: make("classifyStructuredLiquidRows"),
-        resolve: make("resolveStructuredBoundarySlots"),
-        resolveSolid: make("resolveStructuredSolidSlots"),
-        commit: make("commitStructuredBoundarySlots"),
-        rebuild: make("rebuildStructuredBoundaryRows"),
-        countRowClasses: make("countStructuredRowClasses"),
-        countFamilyClasses: make("countStructuredFamilyClasses"),
-        scanWorksetBlocks: make("scanStructuredWorksetBlocks"),
-        scatterRowWorksets: make("scatterStructuredRowWorksets"),
-        scatterFamilyWorksets: make("scatterStructuredFamilyWorksets"),
-        accept: make("acceptStructuredBoundary"),
-      };
-      structuredBoundaryPipelineCache.set(device, pipelines);
-    }
-    this.prepareCandidate = pipelines.prepareCandidate;
-    this.prepareAccepted = pipelines.prepareAccepted;
-    this.classify = pipelines.classify;
-    this.resolveSolid = pipelines.resolveSolid;
-    this.commit = pipelines.commit;
-    this.rebuild = pipelines.rebuild;
-    this.countRowClasses = pipelines.countRowClasses;
-    this.countFamilyClasses = pipelines.countFamilyClasses;
-    this.scanWorksetBlocks = pipelines.scanWorksetBlocks;
-    this.scatterRowWorksets = pipelines.scatterRowWorksets;
-    this.scatterFamilyWorksets = pipelines.scatterFamilyWorksets;
-    this.accept = pipelines.accept;
-    this.resolve = pipelines.resolve;
-    this.acceptGroup = device.createBindGroup({ layout: this.accept.getBindGroupLayout(0), entries: [
-      { binding: 16, resource: { buffer: this.candidateControl } },
-      { binding: 22, resource: { buffer: this.control } },
-    ] });
     this.allocatedBytes = this.liquidMask.size + this.solidNormalVelocities.size
       + this.candidateMask.size + this.candidates.size + this.candidateSolidNormalVelocities.size
       + this.control.size + this.candidateControl.size + this.dispatch.size + this.params.size + this.worksets.size
       + this.worksetClasses.size + this.worksetBlocks.size
       + this.inertFineParams.size + this.inertFineStorage.size
       + (this.inertSolidStorage?.size ?? 0);
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.acceptGroup) return;
+    let compilation = structuredBoundaryPipelineCache.get(this.device);
+    if (!compilation) {
+      compilation = (async () => {
+        const shaderModule = this.device.createShaderModule({
+          label: "Structured boundary coefficients", code: structuredBoundaryCoefficientWGSL,
+        });
+        const make = (entryPoint: string) => this.device.createComputePipelineAsync({
+          label: entryPoint, layout: "auto", compute: { module: shaderModule, entryPoint },
+        });
+        return {
+          prepareCandidate: await make("prepareStructuredBoundaryCandidate"),
+          prepareAccepted: await make("prepareStructuredBoundaryAccepted"),
+          classify: await make("classifyStructuredLiquidRows"),
+          resolve: await make("resolveStructuredBoundarySlots"),
+          resolveSolid: await make("resolveStructuredSolidSlots"),
+          commit: await make("commitStructuredBoundarySlots"),
+          rebuild: await make("rebuildStructuredBoundaryRows"),
+          countRowClasses: await make("countStructuredRowClasses"),
+          countFamilyClasses: await make("countStructuredFamilyClasses"),
+          scanWorksetBlocks: await make("scanStructuredWorksetBlocks"),
+          scatterRowWorksets: await make("scatterStructuredRowWorksets"),
+          scatterFamilyWorksets: await make("scatterStructuredFamilyWorksets"),
+          accept: await make("acceptStructuredBoundary"),
+        };
+      })();
+      structuredBoundaryPipelineCache.set(this.device, compilation);
+    }
+    const pipelines = await compilation;
+    Object.assign(this, pipelines);
+    this.acceptGroup = this.device.createBindGroup({
+      layout: this.accept.getBindGroupLayout(0), entries: [
+        { binding: 16, resource: { buffer: this.candidateControl } },
+        { binding: 22, resource: { buffer: this.control } },
+      ],
+    });
   }
 
   private groups(fine: StructuredBoundaryFineSource | undefined,

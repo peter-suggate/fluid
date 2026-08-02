@@ -927,8 +927,10 @@ test("zero-body structured dynamics omits body-impulse pipelines", () => {
 
 test("structured dynamics can defer and sequentially initialize its pipelines", () => {
   assert.match(dynamicsHost,
-    /constructor\([\s\S]*deferPipelineCompilation = false\)[\s\S]*if \(!deferPipelineCompilation\) this\.createPipelinesSync\(\)/,
-    "existing direct construction must retain synchronous pipeline creation by default");
+    /constructor\([\s\S]*_deferPipelineCompilation = true\)/,
+    "direct construction must remain compilation-free while legacy callers migrate");
+  assert.doesNotMatch(dynamicsHost, /createPipelinesSync|createComputePipeline\s*\(/,
+    "structured dynamics must expose no synchronous pipeline fallback");
   const initialize = dynamicsHost.slice(dynamicsHost.indexOf("async initializePipelines("),
     dynamicsHost.indexOf("private requirePipelines()"));
   assert.match(initialize,

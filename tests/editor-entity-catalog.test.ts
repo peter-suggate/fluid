@@ -78,6 +78,16 @@ test("a selection resolves whether or not the tool surfaces it", () => {
   assert.equal(findEntity(context(scene), { kind: "tank", id: "not-the-tank" }), undefined);
 });
 
+test("an unavailable scene presentation exposes no entities", () => {
+  const scene = preset("water-box-dam-break");
+  const unavailable = { ...context(scene), scenePresentationAvailable: false };
+  assert.deepEqual(surfacedEntities(unavailable, "select", WATER), []);
+  assert.equal(findEntity(unavailable, WATER), undefined);
+  assert.equal(entityAtRay(unavailable, {
+    origin: { x: 0, y: 0.4, z: -1 }, direction: { x: 0, y: 0, z: 1 },
+  }), undefined, "CPU picking must not reveal objects absent from the presented frame");
+});
+
 test("a click resolves to whatever is nearest, so the tank is what is left", () => {
   const scene = preset("water-box-dam-break");
   const box = tankBox(scene);

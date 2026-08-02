@@ -118,7 +118,7 @@ export class WebGPUOctreeCoarseSummary {
        * identities from here down to one, so a value below the real maximum
        * silently misses every coarser leaf. */
       maximumLeafSize: number }>,
-    deferPipelineCompilation = false) {
+    _deferPipelineCompilation = true) {
     if (!Number.isSafeInteger(air.maximumLeafSize) || air.maximumLeafSize < 1
       || (air.maximumLeafSize & (air.maximumLeafSize - 1)) !== 0) {
       throw new RangeError("Coarse-only tracker requires a power-of-two maximum leaf size");
@@ -177,7 +177,6 @@ export class WebGPUOctreeCoarseSummary {
     initialState[14] = Math.round(4096 * referenceCells);
     initialState[16] = 1;
     device.queue.writeBuffer(this.state, 0, initialState);
-    if (!deferPipelineCompilation) this.createPipelinesSync();
   }
 
   private descriptor(entryPoint: string): GPUComputePipelineDescriptor {
@@ -185,10 +184,6 @@ export class WebGPUOctreeCoarseSummary {
       code: coarseSummaryWGSL });
     return { label: `coarse-only ${entryPoint}`, layout: "auto",
       compute: { module: this.module, entryPoint } };
-  }
-  private createPipelinesSync(): void {
-    for (const entry of this.entries) this.pipelines[entry] =
-      this.device.createComputePipeline(this.descriptor(entry));
   }
   initializationTasks(): GPUInitializationTask[] {
     if (Object.keys(this.pipelines).length !== 0) return [];

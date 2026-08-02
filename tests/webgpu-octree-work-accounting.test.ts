@@ -489,6 +489,63 @@ test("capacity dispatch guard follows local and field aliases", () => {
   ]);
 });
 
+/**
+ * Both holes below let this gate report the octree sources clean while ~68
+ * capacity-shaped launches were present -- including the whole
+ * `ceil(domainVolume/256)` family that Bet 1 names as its headline violation.
+ * A gate that is green and blind is worse than no gate, because it is quoted as
+ * evidence: a Bet-1 scaffolding commit raised `pressureRowCapacity` to 8,192 and
+ * added launches while this reported zero.
+ */
+test("capacity dispatch guard recognises capacities by shape, not by enumeration", () => {
+  const violations = auditOctreeProductionSource("vocabulary.ts", [
+    // Every capacity added after the original five-name list was exempt.
+    "pass.dispatchWorkgroups(Math.ceil(candidateCapacity / 64));",
+    "pass.dispatchWorkgroups(Math.ceil(hierarchyKeyCapacity / 64));",
+    // The old pattern's trailing \b matched `logicalBrick` but not the spelling
+    // the code actually uses.
+    "pass.dispatchWorkgroups(Math.ceil(logicalBrickCount / 64));",
+    // Absent from the vocabulary entirely.
+    "pass.dispatchWorkgroups(Math.ceil(plan.domainVolume / 256));",
+  ].join("\n"), "host");
+  assert.deepEqual(violations.map(({ line }) => line), [1, 2, 3, 4]);
+
+  // An indirect launch is shaped by whatever the GPU published, which is the
+  // compliant form -- naming a capacity while sizing the *buffer* is fine.
+  assert.deepEqual(auditOctreeProductionSource("indirect.ts", [
+    "const args = device.createBuffer({ size: rowCapacity * 16 });",
+    "pass.dispatchWorkgroupsIndirect(args, 0);",
+  ].join("\n"), "host"), [],
+  "indirect dispatch is the compliant shape and must never be flagged");
+});
+
+test("capacity dispatch guard follows capacity into local dispatching helpers", () => {
+  // The spelling the octree encoders actually use. Scanning only literal
+  // `dispatchWorkgroups(` argument text saw `run(...)` as an ordinary call.
+  const violations = auditOctreeProductionSource("helper.ts", [
+    "const run = (pipeline: GPUComputePipeline, workgroups: number) => {",
+    "  pass.setPipeline(pipeline);",
+    "  pass.dispatchWorkgroups(workgroups);",
+    "};",
+    "run(clearPipeline, Math.ceil(this.sparseCandidateCapacity / 64));",
+    "run(compactPipeline, liveRowCount);",
+  ].join("\n"), "host");
+  assert.deepEqual(violations.map(({ line, rule }) => ({ line, rule })), [
+    { line: 5, rule: "capacity-dispatch" },
+  ], "the capacity-shaped call is flagged; the live-count call through the same helper is not");
+
+  // Multi-line argument lists are the common case, and a line-bounded scan
+  // clipped the workgroup count off exactly those calls.
+  assert.equal(auditOctreeProductionSource("multiline.ts", [
+    "function encode(pipeline, entries, label, workgroups) {",
+    "  pass.dispatchWorkgroups(workgroups);",
+    "}",
+    "encode(pipeline, entries, \"Clear cold fine seed expansion\",",
+    "  Math.ceil(maximumResidentBricks / 64));",
+  ].join("\n"), "host").length, 1,
+  "a capacity on a continuation line must still be seen");
+});
+
 test("shader deletion gate rejects retired identifiers and general timestep authorities", () => {
   const source = [
     "// fallbackLegacyCompatibility is commentary, not executable WGSL",

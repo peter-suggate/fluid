@@ -242,21 +242,31 @@ fn mutateTopology(){
 
 export class WebGpuSparseBrickTopologyMutator {
   readonly allocatedBytes = 32;
-  private readonly pipeline: GPUComputePipeline;
+  private pipeline!: GPUComputePipeline;
   private readonly params: GPUBuffer;
+  private module!: GPUShaderModule;
+  private readonly label: string;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, label = "Sparse brick topology mutation") {
+    this.label = label;
     this.params = device.createBuffer({
       label: `${label} parameters`,
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this.pipeline = device.createComputePipeline({
-      label: `${label} pipeline`,
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.pipeline) return;
+    this.module = this.device.createShaderModule({
+      label: `${this.label} shader`, code: webgpuSparseBrickTopologyMutationWGSL,
+    });
+    this.pipeline = await this.device.createComputePipelineAsync({
+      label: `${this.label} pipeline`,
       layout: "auto",
       compute: {
-        module: device.createShaderModule({ label: `${label} shader`, code: webgpuSparseBrickTopologyMutationWGSL }),
+        module: this.module,
         entryPoint: "mutateTopology",
       },
     });

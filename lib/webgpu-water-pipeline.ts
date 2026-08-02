@@ -27,9 +27,9 @@ import type { GPUTimestampPhase } from "./performance-trace";
  *
  * The solver already owns the liquid volume.  This pipeline keeps that data on
  * the GPU and turns its 0.5 isosurface into triangles every frame.  The result
- * is then rendered twice (front and back interfaces), which gives the optical
- * composite enough information for two-interface refraction without scanning
- * the volume once per screen pixel.
+ * is rendered as a nearest front/back interval plus one depth-peeled interval,
+ * which preserves transmission through folded sheets without scanning the
+ * volume once per screen pixel.
  */
 
 export function shouldUpdateWaterSurface(extractedRevision: number, latestRevision: number, lastExtractionAt_ms: number, now_ms: number) {
@@ -794,8 +794,10 @@ export const surfaceRasterShader = /* wgsl */ `
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
 struct SurfaceVertex { position:vec4f, normal:vec4f }
 override interfaceCoverageExpansionPixels:f32=0.0;
+override peelBehindFirstExit:f32=0.0;
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage,read> vertices: array<SurfaceVertex>;
+@group(1) @binding(0) var firstBackPosition:texture_2d<f32>;
 struct Out { @builtin(position) clip:vec4f, @location(0) world:vec3f, @location(1) normal:vec3f }
 fn project(world:vec3f)->vec4f {
   let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
@@ -824,6 +826,15 @@ fn project(world:vec3f)->vec4f {
 }
 struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
 @fragment fn surfaceFragment(input:Out)->SurfaceOut {
+  if(peelBehindFirstExit>.5){
+    let firstBack=textureLoad(firstBackPosition,vec2i(input.clip.xy),0);
+    if(firstBack.a<.5){discard;}
+    let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
+    let firstExitDepth=dot(firstBack.xyz-u.cameraPosition.xyz,forward);
+    let candidateDepth=dot(input.world-u.cameraPosition.xyz,forward);
+    let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
+    if(candidateDepth<=firstExitDepth+max(.0005,.04*cellSize)){discard;}
+  }
   var o:SurfaceOut;o.position=vec4f(input.world,1.0);o.normal=vec4f(normalize(input.normal),1.0);return o;
 }
 `;
@@ -861,10 +872,15 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(7) var<storage,read> bodies:array<BodyGPU,12>;
 @group(0) @binding(8) var liquidField:texture_3d<f32>;
 @group(0) @binding(9) var tallCellBases:texture_2d<f32>;
+@group(0) @binding(10) var rearFrontPosition:texture_2d<f32>;
+@group(0) @binding(11) var rearFrontNormal:texture_2d<f32>;
+@group(0) @binding(12) var rearBackPosition:texture_2d<f32>;
+@group(0) @binding(13) var rearBackNormal:texture_2d<f32>;
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*.72),dot(q,up)/(d*.72));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
+fn cameraRay(textureUV:vec2f)->vec3f{let ndc=vec2f(textureUV.x*2.0-1.0,1.0-textureUV.y*2.0);let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));return normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*.72+up*ndc.y*.72);}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
 ${environmentShaderLibrary}
 ${unifiedLightingShaderLibrary}
@@ -953,6 +969,31 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   result+=environmentLightColor()*(glint*(.18+.82*outerEdge)+fresnel*outerEdge*.16);
   return result;
 }
+// The first depth-tested pair describes only the nearest connected water
+// interval. A breaking sheet can leave another interval behind it, so the
+// interface raster peels one more front/back pair after the first exit. Shade
+// that pair before the foreground interval consumes the transmitted radiance.
+fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
+  let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let rd=cameraRay(textureUV);
+  let front=safeSample(rearFrontPosition,textureUV);if(front.a<.5){return dryColor;}
+  let scene=safeSample(sceneTexture,textureUV);let frontDepth=dot(front.xyz-ro,rd);
+  let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
+  if(resolvedDrySceneDepth(scene.a)+max(.0015,.18*cellSize)<frontDepth){return dryColor;}
+  var n=normalize(safeSample(rearFrontNormal,textureUV).xyz);if(dot(n,rd)>0.0){n=-n;}
+  var inside=refract(rd,n,1.0/${WATER_OPTICS.indexOfRefraction.toFixed(3)});if(length(inside)<1e-5){inside=reflect(rd,n);}
+  var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
+  for(var iteration=0;iteration<3;iteration+=1){back=safeSample(rearBackPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(rearBackNormal,exitUV).xyz);}
+  let refinedBack=safeSample(rearBackPosition,exitUV);if(refinedBack.a<.5){return dryColor;}back=refinedBack;exitN=normalize(safeSample(rearBackNormal,exitUV).xyz);
+  let thickness=length(back.xyz-front.xyz);if(thickness<1e-4){return dryColor;}
+  if(dot(exitN,inside)<0.0){exitN=-exitN;}var outgoing=refract(inside,-exitN,${WATER_OPTICS.indexOfRefraction.toFixed(3)});let tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
+  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));let transmitted=safeSample(sceneTexture,backgroundUV).rgb;
+  let refracted=unifiedAbsorbingTransmission(transmitted,vec3f(${WATER_OPTICS.absorption.join(",")}),vec3f(${WATER_OPTICS.scatter.join(",")}),thickness);
+  let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);let ssr=safeSample(sceneTexture,project(front.xyz+reflectedDir*.8));reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
+  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,${WATER_OPTICS.fresnelF0});var water=mix(refracted,reflected,fresnel);if(tir){water=mix(water,environmentLight(outgoing),.88);}
+  water+=environmentLightColor()*unifiedSpecularLobe(n,-rd,environmentLightDirection(),180.0)*1.4;
+  water+=vec3f(.018,.10,.085)*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*pow(1.0-cosine,3.0)*.15;
+  return water;
+}
 // Scenery is geometry, not a screen-space overlay: every frond, batten and
 // blade that used to be painted here in NDC is now an analytic primitive in
 // the scene's own scenery graph, so it parallaxes, occludes and takes light like the rest
@@ -984,7 +1025,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   }
   var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);
   if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,${WATER_OPTICS.indexOfRefraction.toFixed(3)});tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
-  let transmittedScene=safeSample(sceneTexture,backgroundUV).rgb;
+  let transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb);
   // Clean water: red is attenuated first.  A small in-scattering term keeps
   // thick regions luminous instead of turning into opaque ink.
   let refracted=unifiedAbsorbingTransmission(transmittedScene,vec3f(${WATER_OPTICS.absorption.join(",")}),vec3f(${WATER_OPTICS.scatter.join(",")}),thickness);let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
@@ -1023,6 +1064,8 @@ export class RasterWaterPipeline {
   private globalFineEmitWorkgroups = 1;
   private surfaceFrontPipeline?: GPURenderPipeline;
   private surfaceBackPipeline?: GPURenderPipeline;
+  private surfaceRearFrontPipeline?: GPURenderPipeline;
+  private surfaceRearBackPipeline?: GPURenderPipeline;
   private causticPipeline?: GPURenderPipeline;
   private compositePipeline?: GPURenderPipeline;
   private extractLayout?: GPUBindGroupLayout;
@@ -1030,6 +1073,7 @@ export class RasterWaterPipeline {
   private globalPolygoniseLayout?: GPUBindGroupLayout;
   private prepareLayout?: GPUBindGroupLayout;
   private surfaceLayout?: GPUBindGroupLayout;
+  private surfacePeelLayout?: GPUBindGroupLayout;
   private compositeLayout?: GPUBindGroupLayout;
   private sampler?: GPUSampler;
   private vertexBuffer?: GPUBuffer;
@@ -1043,6 +1087,8 @@ export class RasterWaterPipeline {
   private globalPolygoniseBindGroup?: GPUBindGroup;
   private prepareBindGroup?: GPUBindGroup;
   private surfaceBindGroup?: GPUBindGroup;
+  private surfaceUnpeeledBindGroup?: GPUBindGroup;
+  private surfacePeelBindGroup?: GPUBindGroup;
   private compositeBindGroup?: GPUBindGroup;
   private compositeBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
   private sceneTexture?: GPUTexture;
@@ -1053,6 +1099,12 @@ export class RasterWaterPipeline {
   private backPosition?: GPUTexture;
   private backNormal?: GPUTexture;
   private backDepth?: GPUTexture;
+  private rearFrontPosition?: GPUTexture;
+  private rearFrontNormal?: GPUTexture;
+  private rearFrontDepth?: GPUTexture;
+  private rearBackPosition?: GPUTexture;
+  private rearBackNormal?: GPUTexture;
+  private rearBackDepth?: GPUTexture;
   private causticTexture?: GPUTexture;
   private geometryKey = "";
   private targetKey = "";
@@ -1146,12 +1198,15 @@ export class RasterWaterPipeline {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
     ] });
     this.surfaceLayout = this.device.createBindGroupLayout({ label: "Water surface bindings", entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } }
+    ] });
+    this.surfacePeelLayout = this.device.createBindGroupLayout({ label: "Water rear-interface peel binding", entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
     ] });
     this.compositeLayout = this.device.createBindGroupLayout({ label: "Water composite bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      ...[1,2,3,4,5].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
+      ...[1,2,3,4,5,10,11,12,13].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
       { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
@@ -1159,7 +1214,7 @@ export class RasterWaterPipeline {
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
     const globalExtractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.globalExtractLayout] });
-    const total=14;let completed=0;
+    const total=16;let completed=0;
     const compute=async(label:string,descriptor:GPUComputePipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createComputePipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     const render=async(label:string,descriptor:GPURenderPipelineDescriptor)=>{onProgress(label,completed,total);const result=await this.device.createRenderPipelineAsync(descriptor);completed+=1;onProgress(label,completed,total);return result;};
     this.extractPipeline = await compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } });
@@ -1174,22 +1229,25 @@ export class RasterWaterPipeline {
     this.polygoniseGlobalFineEmitPipeline=await compute("Emitting six global fine tetrahedra",{label:"Emit classified global fine tetrahedra",layout:globalPolygonLayout,compute:{module:globalEmitAll,entryPoint:"emitGlobalFineTetrahedra"}});
     this.preparePipeline = await compute("Preparing surface dispatch",{ label: "Prepare polygonise dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.prepareLayout] }), compute: { module: prepare, entryPoint: "prepareMain" } });
     this.polygoniseDispatchBuffer = this.device.createBuffer({ label: "Water polygonise dispatch arguments", size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
-    const surfacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout] });
-    const surfaceDescriptor = (label: string, cullMode: GPUCullMode, coverageExpansionPixels = 0): GPURenderPipelineDescriptor => ({
+    const surfacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout, this.surfacePeelLayout] });
+    const causticPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout] });
+    const surfaceDescriptor = (label: string, cullMode: GPUCullMode, coverageExpansionPixels = 0, peel = false): GPURenderPipelineDescriptor => ({
       label, layout: surfacePipelineLayout, vertex: { module: surface, entryPoint: "surfaceVertex", constants: { interfaceCoverageExpansionPixels: coverageExpansionPixels } },
-      fragment: { module: surface, entryPoint: "surfaceFragment", targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
+      fragment: { module: surface, entryPoint: "surfaceFragment", constants: { peelBehindFirstExit: peel ? 1 : 0 }, targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
       primitive: { topology: "triangle-list", frontFace: "ccw", cullMode },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
     this.surfaceFrontPipeline = await render("Rendering front water interfaces",surfaceDescriptor("Raster water front interfaces", WATER_INTERFACE_CULL_MODES.front,1.0));
     this.surfaceBackPipeline = await render("Rendering back water interfaces",surfaceDescriptor("Raster water back interfaces", WATER_INTERFACE_CULL_MODES.back));
+    this.surfaceRearFrontPipeline = await render("Peeling rear front water interfaces",surfaceDescriptor("Raster water rear front interfaces", WATER_INTERFACE_CULL_MODES.front,0,true));
+    this.surfaceRearBackPipeline = await render("Peeling rear back water interfaces",surfaceDescriptor("Raster water rear back interfaces", WATER_INTERFACE_CULL_MODES.back,0,true));
     this.causticPipeline = await render("Projecting water caustics",{
-      label: "Project refracted caustics", layout: surfacePipelineLayout, vertex: { module: caustic, entryPoint: "causticVertex" },
+      label: "Project refracted caustics", layout: causticPipelineLayout, vertex: { module: caustic, entryPoint: "causticVertex" },
       fragment: { module: caustic, entryPoint: "causticFragment", targets: [{ format: "rgba16float", blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one" } } }] },
       primitive: { topology: "triangle-list", cullMode: "none" }
     });
     const compositePipelineLayout=this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] });
-    const compositeDescriptor:GPURenderPipelineDescriptor={ label:"Composite two-interface water optics", layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } };
+    const compositeDescriptor:GPURenderPipelineDescriptor={ label:"Composite layered water optics", layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } };
     this.compositePipeline = await render("Compositing water optics",compositeDescriptor);
     this.sampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.fallbackSparsePageTable = this.device.createBuffer({ label: "Water sparse-page fallback", size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -1389,11 +1447,11 @@ export class RasterWaterPipeline {
   ensureSize(width: number, height: number) {
     const key = `${width}x${height}`;
     if (key === this.targetKey) return;
-    for (const texture of [this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth]) texture?.destroy();
+    for (const texture of [this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth]) texture?.destroy();
     const sampledTarget = (label: string) => this.device.createTexture({ label, size: [width,height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
-    this.sceneTexture = this.device.createTexture({ label: "Dry scene HDR", size: [width,height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }); this.sceneTextureView = this.sceneTexture.createView(); this.frontPosition = sampledTarget("Water front positions"); this.frontNormal = sampledTarget("Water front normals"); this.backPosition = sampledTarget("Water back positions"); this.backNormal = sampledTarget("Water back normals");
+    this.sceneTexture = this.device.createTexture({ label: "Dry scene HDR", size: [width,height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }); this.sceneTextureView = this.sceneTexture.createView(); this.frontPosition = sampledTarget("Water front positions"); this.frontNormal = sampledTarget("Water front normals"); this.backPosition = sampledTarget("Water back positions"); this.backNormal = sampledTarget("Water back normals"); this.rearFrontPosition = sampledTarget("Water rear front positions"); this.rearFrontNormal = sampledTarget("Water rear front normals"); this.rearBackPosition = sampledTarget("Water rear back positions"); this.rearBackNormal = sampledTarget("Water rear back normals");
     const depth = (label: string) => this.device.createTexture({ label, size: [width,height], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
-    this.frontDepth = depth("Water front depth"); this.backDepth = depth("Water back depth");
+    this.frontDepth = depth("Water front depth"); this.backDepth = depth("Water back depth"); this.rearFrontDepth = depth("Water rear front depth"); this.rearBackDepth = depth("Water rear back depth");
     this.causticTexture?.destroy(); this.causticTexture = this.device.createTexture({ label: "Refracted floor caustics", size: [384,384], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.causticsValid = false;
     this.dryInterfaceClearsEncoded = false;
@@ -1452,15 +1510,17 @@ export class RasterWaterPipeline {
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
     ] });
     if (this.surfaceLayout && this.vertexBuffer) this.surfaceBindGroup = this.device.createBindGroup({ layout: this.surfaceLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } }] });
+    if (this.surfacePeelLayout && this.sceneTextureView) this.surfaceUnpeeledBindGroup = this.device.createBindGroup({ label: "Water unpeeled placeholder binding", layout: this.surfacePeelLayout, entries: [{ binding: 0, resource: this.sceneTextureView }] });
+    if (this.surfacePeelLayout && this.backPosition) this.surfacePeelBindGroup = this.device.createBindGroup({ layout: this.surfacePeelLayout, entries: [{ binding: 0, resource: this.backPosition.createView() }] });
     this.compositeBindGroup = this.sceneTextureView ? this.compositeBindGroupFor(this.sceneTextureView) : undefined;
   }
 
   private compositeBindGroupFor(sceneView: GPUTextureView): GPUBindGroup | undefined {
     const cached = this.compositeBindGroups.get(sceneView);
     if (cached) return cached;
-    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.sampler || !this.volume || !this.columnBases) return undefined;
+    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.columnBases) return undefined;
     const bindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }
     ] });
     this.compositeBindGroups.set(sceneView, bindGroup);
     return bindGroup;
@@ -1470,7 +1530,7 @@ export class RasterWaterPipeline {
     const compactSurface = this.globalFineLevelSet ?? this.coarseLevelSet;
     const geometryDimensions = compactSurface?.sampleDimensions ?? [nx, ny, nz] as const;
     this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.causticTexture) return false;
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture) return false;
     const now_ms = performance.now();
     // Rendering follows the newest available solver revision, but extraction
     // follows the fixed presentation cadence. Unchanged solver revisions
@@ -1541,7 +1601,8 @@ export class RasterWaterPipeline {
     if (!sparseSceneResult) {
       // The live sparse scene is the only dry-scene authority. Its absence is
       // intentionally visible and contains no scene-like substitute. Alpha is
-      // far depth so actual water interfaces can still be diagnosed.
+      // far depth so the independently authoritative water interfaces remain
+      // visible while the missing dry scene still fails closed unmistakably.
       encoder.beginRenderPass({label:"SVO dry-scene unavailable",colorAttachments:[{
         view:this.sceneTextureView!,clearValue:{r:.18,g:0,b:.045,a:65504},loadOp:"clear",storeOp:"store"
       }]}).end();
@@ -1551,30 +1612,33 @@ export class RasterWaterPipeline {
     // Water and spray target the same interface attachments and depth state.
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back")=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.secondaryParticles?.encodeOpticalInterface(pass,side);pass.end();};
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);}pass.end();};
     if (this.sceneHasFluid) {
       interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front");
       tracePhase?.({ id: "water-front-interface", label: "Water + spray front interface" });
       interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back");
       tracePhase?.({ id: "water-back-interface", label: "Water + spray back interface" });
+      interfacePass("Water rear front interfaces",this.surfaceRearFrontPipeline,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,"front",false,true);
+      interfacePass("Water rear back interfaces",this.surfaceRearBackPipeline,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,"back",false,true);
     } else if (!this.dryInterfaceClearsEncoded) {
-      // A fluid-less scene draws no interface geometry, so the passes reduce to
-      // their clears. Encoding those once leaves the composite's "no interface"
-      // inputs bit-identical to the per-frame cleared state.
+      // A fluid-less scene draws no interface geometry. Clear once so the
+      // compositor's no-interface input cannot retain a preceding fluid scene.
       const clearPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture)=>{encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}}).end();};
-      clearPass("Dry-scene front interface clear",this.frontPosition,this.frontNormal,this.frontDepth);
-      tracePhase?.({ id: "water-front-interface", label: "Dry-scene front interface clear" });
-      clearPass("Dry-scene back interface clear",this.backPosition,this.backNormal,this.backDepth);
-      tracePhase?.({ id: "water-back-interface", label: "Dry-scene back interface clear" });
+      clearPass("Fluid-less scene front interface clear",this.frontPosition,this.frontNormal,this.frontDepth);
+      tracePhase?.({ id: "water-front-interface", label: "Fluid-less scene front interface clear" });
+      clearPass("Fluid-less scene back interface clear",this.backPosition,this.backNormal,this.backDepth);
+      tracePhase?.({ id: "water-back-interface", label: "Fluid-less scene back interface clear" });
+      clearPass("Fluid-less scene rear front interface clear",this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth);
+      clearPass("Fluid-less scene rear back interface clear",this.rearBackPosition,this.rearBackNormal,this.rearBackDepth);
       this.dryInterfaceClearsEncoded = true;
     }
     traceBoundary?.();
     const compositeBindGroup = sparseSceneResult ? this.compositeBindGroupFor(sparseSceneResult.sampledTargetView) : this.compositeBindGroup;
     if (!compositeBindGroup) return false;
-    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Two-interface water composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();tracePhase?.({ id: "optical-composite", label: "Optical composite" });traceBoundary?.();return { surfaceUpdated: updateSurface };
+    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();tracePhase?.({ id: "optical-composite", label: "Layered optical composite" });traceBoundary?.();return { surfaceUpdated: updateSurface };
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.causticTexture,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

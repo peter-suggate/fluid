@@ -819,7 +819,6 @@ export class WebGPUUniformEulerianSolver {
       profile: performanceShaderVariant(),
       identity: "workgroup",
     });
-    if (this.logicalActivity.enabled) this.createLogicalActivityMarker();
     const c = scene.container, matched = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, options.tallCellSettings);
     const nx = matched.nx, ny = matched.fineNy, nz = matched.nz;
     this.velocityTransport = options.velocityTransport ?? "maccormack";
@@ -889,7 +888,6 @@ export class WebGPUUniformEulerianSolver {
     this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
     let prepLayout: GPUBindGroupLayout | undefined;
     if (this.hostAllocation) {
-    this.shaderModule = device.createShaderModule({ label: "Fluid Lab uniform reference kernels", code: legacyUniformComputeShader });
     this.bindGroupLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
@@ -924,7 +922,6 @@ export class WebGPUUniformEulerianSolver {
     ] });
     this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout] });
     this.prepPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [prepLayout] });
-    if(!options.deferPipelineCompilation)this.createPipelinesSync();
     }
     const pressureIterations = options.octree
       ? 0
@@ -999,7 +996,7 @@ export class WebGPUUniformEulerianSolver {
     if (this.octreeProjection && !options.deferPipelineCompilation) this.publishInitialSparseScene();
   }
 
-  private createLogicalActivityMarker(): void {
+  private async createLogicalActivityMarker(): Promise<void> {
     if (this.logicalActivityMarkerPipeline) return;
     const frameBeginHeartbeat = this.logicalActivity.workgroup("physics-frame", "frame-begin", {
       workgroupLaneCount: 1,
@@ -1034,7 +1031,7 @@ fn recordPhysicsPhaseBoundary(
       code: markerShader.code,
     });
     this.logicalActivityMarkerPipeline = this.logicalActivity.registerPipeline(
-      this.device.createComputePipeline({
+      await this.device.createComputePipelineAsync({
         label: "Physics logical activity phase marker",
         layout: "auto",
         compute: { module: activityModule, entryPoint: "recordPhysicsPhaseBoundary" },
@@ -1129,9 +1126,11 @@ fn recordPhysicsPhaseBoundary(
     return this.logicalActivityCaptureId;
   }
 
-  private pipelineDescriptor(entryPoint:string,prep=false):GPUComputePipelineDescriptor{return{layout:prep?this.prepPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};}
+  private pipelineDescriptor(entryPoint:string,prep=false):GPUComputePipelineDescriptor{
+    this.shaderModule??=this.device.createShaderModule({label:"Fluid Lab uniform reference kernels",code:legacyUniformComputeShader});
+    return{layout:prep?this.prepPipelineLayout:this.pipelineLayout,compute:{module:this.shaderModule,entryPoint}};
+  }
   private assignPipelines(compiled:GPUComputePipeline[]){this.advectPipeline=compiled[0];this.reversePipeline=compiled[1];this.correctPipeline=compiled[2];this.jacobiPipeline=compiled[3];this.projectPipeline=compiled[4];this.rigidPipeline=compiled[5];this.relaxSolidPhiPipeline=compiled[6];this.reductionPipeline=compiled[7];this.buildOccupancyPipeline=compiled[8];this.buildTransportPipeline=compiled[9];this.buildFluxScalesPipeline=compiled[10];this.sharpenComputePipeline=compiled[11];this.sharpenScatterPipeline=compiled[12];this.sharpenResolvePipeline=compiled[13];}
-  private createPipelinesSync(){const pipeline=(entryPoint:string,prep=false)=>this.device.createComputePipeline(this.pipelineDescriptor(entryPoint,prep));const compiled=[pipeline(this.velocityTransport==="maccormack"?"advect":"semiLagrangianAdvection"),pipeline("reverseAdvection"),pipeline("correctAdvection"),pipeline("jacobi"),pipeline("project"),pipeline("coupleRigid"),pipeline("relaxSolidPhi"),pipeline("reduceDiagnostics"),pipeline("buildOccupancy"),pipeline("buildTransport",true),pipeline("buildFluxScales",true),pipeline("sharpenCompute"),pipeline("sharpenScatter"),pipeline("sharpenResolve")];this.assignPipelines(compiled);let cache=uniformPipelineCache.get(this.device);if(!cache){cache=new Map();uniformPipelineCache.set(this.device,cache);}cache.set(this.velocityTransport,compiled);}
   static async createAsync(device:GPUDevice,scene:SceneDescription,quality:GPUQuality,onRigidLoads:((loads:GPURigidLoad[])=>void)|undefined,options:WebGPUUniformEulerianOptions,onProgress:(label:string,completed:number,total:number,phase?:string,taskId?:string)=>void,signal:AbortSignal=new AbortController().signal){
     const runner=new GPUInitializationTaskRunner((snapshot)=>onProgress(snapshot.label,snapshot.completed,snapshot.total,snapshot.phase,snapshot.taskId),signal);
     let solver:WebGPUUniformEulerianSolver|undefined;
@@ -1154,6 +1153,11 @@ fn recordPhysicsPhaseBoundary(
   }
   private initializationTasks():GPUInitializationTask[]{
     const tasks:GPUInitializationTask[]=[...this.rigidSystem.initializationTasks()];
+    if (this.logicalActivity.enabled) tasks.push({
+      id: "uniform.pipeline.logical-activity-marker", phase: "solver-pipelines",
+      label: "Compile physics logical-activity marker",
+      run: () => this.createLogicalActivityMarker(),
+    });
     if (this.hostAllocation) {
       const cached=uniformPipelineCache.get(this.device)?.get(this.velocityTransport);
       if(cached)tasks.push({id:"uniform.pipeline-cache",phase:"solver-pipelines",label:"Reuse compiled simulation programs",run:()=>this.assignPipelines(cached)});
@@ -1324,17 +1328,19 @@ fn recordPhysicsPhaseBoundary(
     if (fallbacks && (fallbacks[0] ?? 0) > 0
       && this.airSupportFallbackLoggedCount !== fallbacks[0]) {
       this.airSupportFallbackLoggedCount = fallbacks[0];
-      const packed = fallbacks[1] ?? 0xffff_ffff;
-      const cell = packed === 0xffff_ffff ? undefined : (packed >>> 3) & 0x1fff;
+      // Word 42 is the lowest carrier-free owned-face ITEM index. It used to
+      // be a (flags<<16)|(cell<<3)|axis packing whose flags byte aliased the
+      // cell index on every domain wider than 8192 cells, so neither the cell
+      // nor the demand flags decoded here were trustworthy. The producer now
+      // expands the item into its own forensic block; the item's row/patch
+      // split is the only thing derivable without that block.
+      const item = fallbacks[1] ?? 0xffff_ffff;
+      const local = item === 0xffff_ffff ? undefined : item % 12;
       console.error("[air-support-fallback]", JSON.stringify({
-        patches: fallbacks[0], firstAxis: packed === 0xffff_ffff ? undefined : packed & 7,
-        firstCell: cell, firstCoordinate: cell === undefined ? undefined
-          : [cell % this.info.nx, Math.floor(cell / this.info.nx) % this.info.ny,
-            Math.floor(cell / (this.info.nx * this.info.ny))],
-        // STRUCTURED_AIR_SUPPORT_RECORD_FLAGS bits: 4=interfaceSource,
-        // 8=transitionSelector, 16=fineBandDemand, 64=interpolationStencil,
-        // 128=extensionClosure — the demand provenance of the first patch.
-        firstDemandFlags: packed === 0xffff_ffff ? undefined : (packed >>> 16) & 0xff }));
+        patches: fallbacks[0], firstItem: item === 0xffff_ffff ? undefined : item,
+        firstFaceRow: item === 0xffff_ffff ? undefined : Math.floor(item / 12),
+        firstAxis: local === undefined ? undefined : Math.floor(local / 4),
+        firstQuadrant: local === undefined ? undefined : local % 4 }));
     }
     this.info.structuredBoundaryGeneration = boundary[4] ?? 0;
     this.info.structuredBoundaryValid = boundary.length >= 7 && boundary[0] === 0
@@ -1618,8 +1624,9 @@ fn recordPhysicsPhaseBoundary(
   get gridPressureSamplesTexture() { return this.octreeProjection?.pressureSamplesTexture; }
   get gridPressureTexture() { return this.octreeProjection?.pressureTexture; }
   get gridDivergenceTexture() { return undefined; }
-  ensureGridDiagnosticTextures() {
-    if (!this.octreeProjection?.ensureDiagnosticTextures()) return;
+  async ensureGridDiagnosticTextures() {
+    const octreeProjection = this.octreeProjection;
+    if (!octreeProjection || !await octreeProjection.ensureDiagnosticTextures()) return;
     const rawEncoder = this.device.createCommandEncoder({ label: "Initialize lazy octree diagnostic fields" });
     const discardActivity = this.logicalActivity.enabled
       ? this.logicalActivity.bindingSession(this.device, rawEncoder, {
@@ -1629,11 +1636,11 @@ fn recordPhysicsPhaseBoundary(
       })
       : undefined;
     const encoder = discardActivity?.encoder ?? rawEncoder;
-    this.octreeProjection.encodeOverlayMaterialization(encoder);
+    octreeProjection.encodeOverlayMaterialization(encoder);
     discardActivity?.finish();
     this.device.queue.submit([encoder.finish()]);
     if (discardActivity) void discardActivity.read().finally(() => discardActivity.destroy());
-    this.applyOctreeInfo(this.octreeProjection);
+    this.applyOctreeInfo(octreeProjection);
   }
   /** Instrumentation view: velocity after advection/forces and before quadtree projection. */
   get preProjectionVelocityTexture() { return this.octreeProjection ? undefined : this.velocityB; }

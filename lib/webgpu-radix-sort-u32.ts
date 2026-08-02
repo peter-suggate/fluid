@@ -47,7 +47,7 @@ interface RadixSortPipelineBundle {
   readonly publish: GPUComputePipeline;
 }
 
-const radixSortPipelineCache = new WeakMap<GPUDevice, RadixSortPipelineBundle>();
+const radixSortPipelineCache = new WeakMap<GPUDevice, Promise<RadixSortPipelineBundle>>();
 
 export class WebGPURadixSortU32 {
   /** Two identity banks of `capacity` words each. The producer stages bank 0
@@ -64,21 +64,23 @@ export class WebGPURadixSortU32 {
   private readonly histograms: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly passParams: readonly GPUBuffer[];
-  private readonly prepare: GPUComputePipeline;
-  private readonly count: GPUComputePipeline;
-  private readonly scan: GPUComputePipeline;
-  private readonly scatter: GPUComputePipeline;
-  private readonly compactRuns: GPUComputePipeline;
-  private readonly publish: GPUComputePipeline;
-  private readonly prepareGroup: GPUBindGroup;
-  private readonly countGroups: readonly GPUBindGroup[];
-  private readonly scanGroup: GPUBindGroup;
-  private readonly scatterGroups: readonly GPUBindGroup[];
-  private readonly runsGroup: GPUBindGroup;
-  private readonly publishGroup: GPUBindGroup;
+  private prepare!: GPUComputePipeline;
+  private count!: GPUComputePipeline;
+  private scan!: GPUComputePipeline;
+  private scatter!: GPUComputePipeline;
+  private compactRuns!: GPUComputePipeline;
+  private publish!: GPUComputePipeline;
+  private prepareGroup!: GPUBindGroup;
+  private countGroups!: readonly GPUBindGroup[];
+  private scanGroup!: GPUBindGroup;
+  private scatterGroups!: readonly GPUBindGroup[];
+  private runsGroup!: GPUBindGroup;
+  private publishGroup!: GPUBindGroup;
+  private readonly header: GPUBuffer;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly capacity: number, header: GPUBuffer) {
+    this.header = header;
     if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 0x0400_0000) {
       throw new RangeError("Radix sort capacity must be a positive integer within 2^26");
     }
@@ -105,32 +107,39 @@ export class WebGPURadixSortU32 {
       device.queue.writeBuffer(buffer, 0, new Uint32Array([pass * 8, pass & 1, 1 - (pass & 1), 0]));
       return buffer;
     });
-    let pipelines = radixSortPipelineCache.get(device);
+    this.allocatedBytes = this.keys.size + this.runs.size + this.control.size
+      + this.histograms.size + this.dispatch.size + this.params.size
+      + this.passParams.reduce((total, buffer) => total + buffer.size, 0);
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.prepareGroup) return;
+    let pipelines = radixSortPipelineCache.get(this.device);
     if (!pipelines) {
-      const shaderModule = device.createShaderModule({ label: "Stable radix sort",
-        code: radixSortU32WGSL });
-      const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-        layout: "auto", compute: { module: shaderModule, entryPoint } });
-      pipelines = {
-        prepare: make("prepareRadixSort"),
-        count: make("countRadixDigits"),
-        scan: make("scanRadixDigits"),
-        scatter: make("scatterRadixDigits"),
-        runs: make("compactSortedRuns"),
-        publish: make("publishRadixSort"),
-      };
-      radixSortPipelineCache.set(device, pipelines);
+      pipelines = (async () => {
+        const shaderModule = this.device.createShaderModule({ label: "Stable radix sort",
+          code: radixSortU32WGSL });
+        const make = (entryPoint: string) => this.device.createComputePipelineAsync({ label: entryPoint,
+          layout: "auto", compute: { module: shaderModule, entryPoint } });
+        return {
+          prepare: await make("prepareRadixSort"), count: await make("countRadixDigits"),
+          scan: await make("scanRadixDigits"), scatter: await make("scatterRadixDigits"),
+          runs: await make("compactSortedRuns"), publish: await make("publishRadixSort"),
+        };
+      })();
+      radixSortPipelineCache.set(this.device, pipelines);
     }
-    this.prepare = pipelines.prepare;
-    this.count = pipelines.count;
-    this.scan = pipelines.scan;
-    this.scatter = pipelines.scatter;
-    this.compactRuns = pipelines.runs;
-    this.publish = pipelines.publish;
-    const buffers: Record<number, GPUBuffer> = { 0: this.params, 1: header, 2: this.control,
+    const compiled = await pipelines;
+    this.prepare = compiled.prepare;
+    this.count = compiled.count;
+    this.scan = compiled.scan;
+    this.scatter = compiled.scatter;
+    this.compactRuns = compiled.runs;
+    this.publish = compiled.publish;
+    const buffers: Record<number, GPUBuffer> = { 0: this.params, 1: this.header, 2: this.control,
       3: this.dispatch, 4: this.keys, 5: this.histograms, 7: this.runs };
     const group = (pipeline: GPUComputePipeline, bindings: readonly number[], pass?: number) =>
-      device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
+      this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
         entries: bindings.map((binding) => ({ binding,
           resource: { buffer: binding === 6 ? this.passParams[pass!]! : buffers[binding]! } })) });
     this.prepareGroup = group(this.prepare, [0, 1, 2, 3]);
@@ -139,9 +148,6 @@ export class WebGPURadixSortU32 {
     this.scatterGroups = Array.from({ length: 4 }, (_, pass) => group(this.scatter, [0, 2, 4, 5, 6], pass));
     this.runsGroup = group(this.compactRuns, [2, 4, 7]);
     this.publishGroup = group(this.publish, [2]);
-    this.allocatedBytes = this.keys.size + this.runs.size + this.control.size
-      + this.histograms.size + this.dispatch.size + this.params.size
-      + this.passParams.reduce((total, buffer) => total + buffer.size, 0);
   }
 
   encode(broker: PassBroker, options?: { compactRuns?: boolean }): void {

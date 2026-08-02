@@ -9,6 +9,7 @@
  */
 
 import { inflowBoundaryWGSL } from "./inflow-boundary";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
 import { FLUID_BRICK_ACTIVE_SURFACE_DISPATCH_OFFSET_BYTES } from "./webgpu-fluid-brick-residency";
 
 function largestPowerOfTwoAtMost(value: number) {
@@ -471,8 +472,36 @@ function uploadLevelSetTexture(device: GPUDevice, texture: GPUTexture, phi: Floa
   device.queue.writeTexture({ texture }, upload, { bytesPerRow: pitch, rowsPerImage: ny }, { width: nx, height: ny, depthOrArrayLayers: nz });
 }
 
-function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCache) {
-  if (cache) return cache;
+const quadtreeSurfaceCacheByDevice = new WeakMap<GPUDevice, WebGPUQuadtreeSurfaceCache>();
+const quadtreeSurfaceCacheCompilationByDevice = new WeakMap<GPUDevice, Promise<WebGPUQuadtreeSurfaceCache>>();
+
+/**
+ * Compile the transported-surface pipeline family without blocking the
+ * constructor. Concurrent callers share one manager-owned compilation and
+ * all later callers reuse the published cache for the device generation.
+ */
+export function createWebGPUQuadtreeSurfaceCache(
+  device: GPUDevice,
+  cache?: WebGPUQuadtreeSurfaceCache,
+): Promise<WebGPUQuadtreeSurfaceCache> {
+  if (cache) return Promise.resolve(cache);
+  const published = quadtreeSurfaceCacheByDevice.get(device);
+  if (published) return Promise.resolve(published);
+  const pending = quadtreeSurfaceCacheCompilationByDevice.get(device);
+  if (pending) return pending;
+
+  const compilation = compileWebGPUQuadtreeSurfaceCache(device).then((compiled) => {
+    const result = quadtreeSurfaceCacheByDevice.get(device) ?? compiled;
+    quadtreeSurfaceCacheByDevice.set(device, result);
+    return result;
+  }).finally(() => {
+    quadtreeSurfaceCacheCompilationByDevice.delete(device);
+  });
+  quadtreeSurfaceCacheCompilationByDevice.set(device, compilation);
+  return compilation;
+}
+
+async function compileWebGPUQuadtreeSurfaceCache(device: GPUDevice): Promise<WebGPUQuadtreeSurfaceCache> {
   const layout = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
     { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
@@ -489,17 +518,26 @@ function ensureSurfaceCache(device: GPUDevice, cache?: WebGPUQuadtreeSurfaceCach
     { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
   ] });
-  const shaderModule = device.createShaderModule({ label: "Resident quadtree level set", code: quadtreeSurfaceShader });
+  const compiler = gpuCompilationManagerFor(device);
+  const shaderModule = compiler.createShaderModule({ label: "Resident quadtree level set", code: quadtreeSurfaceShader });
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-  const pipeline = (entryPoint: string) => device.createComputePipeline({ label: `Quadtree surface ${entryPoint}`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint } });
+  const pipeline = (entryPoint: string) => compiler.compileComputePipeline({
+    label: `Quadtree surface ${entryPoint}`,
+    layout: pipelineLayout,
+    compute: { module: shaderModule, entryPoint },
+  });
+  const [advectLevelSet, advectPredict, advectReverse, advectCorrect, reduceVolume,
+    seedDistance, jumpFlood, finalizeDistance, correctLevelSetVolume,
+    commitLevelSetVolumeCorrection, copyLevelSet, cullDebris] = await Promise.all([
+    pipeline("advectLevelSet"), pipeline("advectPredict"), pipeline("advectReverse"),
+    pipeline("advectCorrect"), pipeline("reduceVolume"), pipeline("seedDistance"),
+    pipeline("jumpFlood"), pipeline("finalizeDistance"), pipeline("correctLevelSetVolume"),
+    pipeline("commitLevelSetVolumeCorrection"), pipeline("copyLevelSet"), pipeline("cullDebris"),
+  ]);
   return { layout, pipelineLayout, shaderModule, pipelines: {
-    advectLevelSet: pipeline("advectLevelSet"), advectPredict: pipeline("advectPredict"),
-    advectReverse: pipeline("advectReverse"), advectCorrect: pipeline("advectCorrect"),
-    reduceVolume: pipeline("reduceVolume"),
-    seedDistance: pipeline("seedDistance"), jumpFlood: pipeline("jumpFlood"), finalizeDistance: pipeline("finalizeDistance"),
-    correctLevelSetVolume: pipeline("correctLevelSetVolume"),
-    commitLevelSetVolumeCorrection: pipeline("commitLevelSetVolumeCorrection"),
-    copyLevelSet: pipeline("copyLevelSet"), cullDebris: pipeline("cullDebris")
+    advectLevelSet, advectPredict, advectReverse, advectCorrect, reduceVolume,
+    seedDistance, jumpFlood, finalizeDistance, correctLevelSetVolume,
+    commitLevelSetVolumeCorrection, copyLevelSet, cullDebris,
   } };
 }
 
@@ -556,7 +594,10 @@ export class WebGPUQuadtreeSurfaceState {
   private readonly ownedSparseFallback?: GPUBuffer;
 
   constructor(private readonly device: GPUDevice, private readonly dims: { nx: number; ny: number; nz: number }, private readonly cell: { x: number; y: number; z: number }, velocity: GPUTexture | undefined, initialPhi: Float32Array, cache?: WebGPUQuadtreeSurfaceCache, reconcileVolume?: GPUTexture, private readonly debrisCulling = false, reconcileEnabled = reconcileVolume !== undefined, private readonly gpuVolumeCorrection = false, private readonly monotoneLevelSetTransport = false, private readonly solidFractions?: GPUBuffer, private readonly sparseExecution?: SparseSurfaceExecutionSource, private readonly presentationOnly = false, private readonly placeholderOnly = false) {
-    this.cache = presentationOnly ? cache : ensureSurfaceCache(device, cache);
+    this.cache = cache;
+    if (!presentationOnly && !cache) {
+      throw new Error("A transported quadtree surface requires an initialized pipeline cache; await createWebGPUQuadtreeSurfaceCache(device) before construction");
+    }
     this.hasReconcileVolume = reconcileVolume !== undefined;
     this.reconcileEnabled = reconcileEnabled && reconcileVolume !== undefined;
     const textureUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC;

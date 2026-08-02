@@ -46,8 +46,8 @@ test("independent resource lanes do not overwrite one another", () => {
   assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), false);
   assert.deepEqual(resourceInteractionGates(readiness, true), {
     shellInteractive: true,
-    viewportInteractive: true,
-    transportInteractive: true,
+    viewportInteractive: false,
+    transportInteractive: false,
   });
 });
 
@@ -118,12 +118,45 @@ test("renderer-only live source and first sparse frame close independent activit
   assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), true);
 });
 
+test("a rejected frame revokes the previously usable scene generation", () => {
+  let readiness = reduceGPUResourceStatus(initialResourceReadiness(), {
+    state: "ready", label: "WebGPU renderer ready", adapter: "test",
+  });
+  readiness = reduceGPUResourceStatus(readiness, {
+    state: "ready", label: "Live SVO renderer ready", adapter: "test",
+    resource: svoPresentationResourcePlugin,
+  });
+  assert.equal(resourceInteractionGates(readiness, false).viewportInteractive, true);
+
+  readiness = reduceGPUResourceEvidence(readiness, undefined, {
+    state: "pending", failureReason: "missing-source",
+  });
+  assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), false);
+  assert.deepEqual(resourceInteractionGates(readiness, false), {
+    shellInteractive: true,
+    viewportInteractive: false,
+    transportInteractive: false,
+  });
+});
+
+test("an inapplicable sparse renderer satisfies presentation without an activity", () => {
+  const readiness = reduceGPUResourceEvidence(initialResourceReadiness(), undefined, {
+    state: "not-required",
+  });
+  assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), true);
+  assert.deepEqual(resourceActivities(readiness), []);
+});
+
 test("replacement work retains interaction when a previous generation is attached", () => {
   let readiness = reduceGPUResourceStatus(initialResourceReadiness(), {
     state: "ready", label: "WebGPU renderer ready", adapter: "test",
   });
   readiness = reduceGPUResourceStatus(readiness, {
     state: "ready", label: "WebGPU direct-field solver ready", adapter: "test",
+  });
+  readiness = reduceGPUResourceStatus(readiness, {
+    state: "ready", label: "Live SVO renderer ready", adapter: "test",
+    resource: svoPresentationResourcePlugin,
   });
   readiness = reduceGPUResourceStatus(readiness, {
     state: "initializing", label: "Allocating replacement solver", phase: "allocation",

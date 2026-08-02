@@ -47,6 +47,9 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
 export function editorEntityContext(): EditorEntityContext {
   return {
     scene: displaySceneSnapshot(),
+    scenePresentationAvailable:
+      useDiagnosticsStore.getState().effectiveRendererStatus.state === "active"
+      || useDiagnosticsStore.getState().effectiveRendererStatus.state === "not-required",
     bodies: useDiagnosticsStore.getState().bodies.map((body) => ({
       id: body.description.id,
       position_m: body.position_m,
@@ -67,6 +70,7 @@ export function surfacedEntities(
   tool: EditorTool,
   selection: EditorSelection | undefined,
 ): EditorEntity[] {
+  if (context.scenePresentationAvailable === false) return [];
   const entity = findEntity(context, selection);
   if (!entity) return [];
   const definition = EDITOR_ENTITIES.find((candidate) => candidate.kind === selection?.kind);
@@ -85,6 +89,7 @@ export function entityAtRay(
   context: EditorEntityContext,
   ray: EditorRay,
 ): EntityRayHit | undefined {
+  if (context.scenePresentationAvailable === false) return undefined;
   let nearest: EntityRayHit | undefined;
   for (const definition of EDITOR_ENTITIES) {
     const hit = definition.pick?.(context, ray);
@@ -104,6 +109,7 @@ export function findEntity(
   context: EditorEntityContext,
   selection: EditorSelection | undefined,
 ): EditorEntity | undefined {
+  if (context.scenePresentationAvailable === false) return undefined;
   if (!selection) return undefined;
   return EDITOR_ENTITIES
     .find((definition) => definition.kind === selection.kind)

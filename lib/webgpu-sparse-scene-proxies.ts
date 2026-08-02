@@ -803,11 +803,14 @@ export class SparseSceneProxyVoxelizer {
   private readonly maintenanceArena: GPUBuffer;
   private readonly maintenanceDispatch: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
-  private readonly invalidatePipeline: GPUComputePipeline;
-  private readonly preparePipeline: GPUComputePipeline;
-  private readonly binPipeline: GPUComputePipeline;
-  private readonly rebuildPipeline: GPUComputePipeline;
-  private readonly finalizePipeline: GPUComputePipeline;
+  private invalidatePipeline!: GPUComputePipeline;
+  private preparePipeline!: GPUComputePipeline;
+  private binPipeline!: GPUComputePipeline;
+  private rebuildPipeline!: GPUComputePipeline;
+  private finalizePipeline!: GPUComputePipeline;
+  private shaderModule!: GPUShaderModule;
+  private readonly pipelineLayout: GPUPipelineLayout;
+  private readonly label: string;
   private readonly bindGroup: GPUBindGroup;
   private readonly options: Readonly<SparseSceneProxyVoxelizerOptions>;
   private readonly primitiveBoundsOffsetWords = 0;
@@ -845,6 +848,7 @@ export class SparseSceneProxyVoxelizer {
     const maintenanceDispatchBytes = 3 * 3 * 4;
     this.allocatedBytes = primitiveBytes + arenaWords * 4 + maintenanceDispatchBytes + 96;
     const label = options.label ?? "Sparse scene proxies";
+    this.label = label;
     this.primitiveBuffer = device.createBuffer({
       label: `${label} primitives`, size: primitiveBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -861,7 +865,6 @@ export class SparseSceneProxyVoxelizer {
       label: `${label} parameters`, size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    const shaderModule = device.createShaderModule({ label: `${label} live maintenance shader`, code: sparseSceneProxyVoxelizationShader });
     const layout = device.createBindGroupLayout({
       label: `${label} live maintenance layout`,
       entries: [
@@ -872,15 +875,7 @@ export class SparseSceneProxyVoxelizer {
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ],
     });
-    const pipelineLayout = device.createPipelineLayout({ label: `${label} live maintenance pipeline layout`, bindGroupLayouts: [layout] });
-    const pipeline = (entryPoint: string, stage: string) => device.createComputePipeline({
-      label: `${label} ${stage} pipeline`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint },
-    });
-    this.invalidatePipeline = pipeline("invalidateDirtyBricks", "invalidation");
-    this.preparePipeline = pipeline("prepareMaintenanceDispatch", "bounded dispatch preparation");
-    this.binPipeline = pipeline("binDirtyBrickCandidates", "candidate binning");
-    this.rebuildPipeline = pipeline("rebuildDirtyBrickPayload", "payload rebuild");
-    this.finalizePipeline = pipeline("finalizeDirtyBricks", "finalization");
+    this.pipelineLayout = device.createPipelineLayout({ label: `${label} live maintenance pipeline layout`, bindGroupLayouts: [layout] });
     this.bindGroup = device.createBindGroup({
       label: `${label} live maintenance bind group`, layout,
       entries: [
@@ -897,6 +892,22 @@ export class SparseSceneProxyVoxelizer {
       dirtyBrickOffsetBytes: this.dirtyBrickOffsetWords * 4,
       dirtyBrickCapacity,
     });
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.invalidatePipeline) return;
+    this.shaderModule = this.device.createShaderModule({
+      label: `${this.label} live maintenance shader`, code: sparseSceneProxyVoxelizationShader,
+    });
+    const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
+      label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
+      compute: { module: this.shaderModule, entryPoint },
+    });
+    this.invalidatePipeline = await pipeline("invalidateDirtyBricks", "invalidation");
+    this.preparePipeline = await pipeline("prepareMaintenanceDispatch", "bounded dispatch preparation");
+    this.binPipeline = await pipeline("binDirtyBrickCandidates", "candidate binning");
+    this.rebuildPipeline = await pipeline("rebuildDirtyBrickPayload", "payload rebuild");
+    this.finalizePipeline = await pipeline("finalizeDirtyBricks", "finalization");
   }
 
   /** Hot-publish one authoritative render-scene revision without reallocating GPU resources. */

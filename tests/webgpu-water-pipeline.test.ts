@@ -56,6 +56,40 @@ test("front interface rasterization conservatively covers shared liquid-wall sil
     "back coverage remains exact so the back-without-front smoke gate still detects holes");
 });
 
+test("interface rasterization depth-peels fluid hidden behind a foreground sheet", () => {
+  assert.match(surfaceRasterShader, /override peelBehindFirstExit:f32=0\.0/);
+  assert.match(surfaceRasterShader, /firstBack=textureLoad\(firstBackPosition/);
+  assert.match(surfaceRasterShader, /candidateDepth<=firstExitDepth/);
+  assert.match(compositeShader, /fn compositeRearWater/);
+  assert.match(compositeShader,
+    /transmittedScene=compositeRearWater\(backgroundUV/,
+    "the foreground interval must consume radiance after the rear interval is shaded");
+
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8")
+    .replace(/\s+/g, "");
+  assert.match(source, /surfaceRearFrontPipeline=.*surfaceDescriptor\("Rasterwaterrearfrontinterfaces",WATER_INTERFACE_CULL_MODES\.front,0,true\)/);
+  assert.match(source, /surfaceRearBackPipeline=.*surfaceDescriptor\("Rasterwaterrearbackinterfaces",WATER_INTERFACE_CULL_MODES\.back,0,true\)/);
+  assert.match(source, /interfacePass\("Waterrearfrontinterfaces"[^;]+false,true\)[\s\S]*interfacePass\("Waterrearbackinterfaces"[^;]+false,true\)/,
+    "the rear pair must be rasterized after the first back interface establishes the peel depth");
+  assert.match(source, /surfaceUnpeeledBindGroup=.*resource:this\.sceneTextureView/,
+    "ordinary interface passes need a harmless binding because Dawn requires every pipeline-layout group");
+  assert.match(source, /pass\.setBindGroup\(1,peel\?this\.surfacePeelBindGroup!:this\.surfaceUnpeeledBindGroup!\)/,
+    "only rear passes may bind the first back texture; binding it while rendering the first back interface is a WebGPU usage conflict");
+});
+
+test("missing dry-scene publication does not suppress authoritative water", () => {
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8")
+    .replace(/\s+/g, "");
+  assert.match(source,
+    /if\(this\.sceneHasFluid\)\{interfacePass\("Water\+sprayfrontinterfaces"/,
+    "fluid interface passes must depend on fluid authority, not dry-scene publication");
+  assert.doesNotMatch(source, /if\(sparseSceneResult&&this\.sceneHasFluid\)/,
+    "the visible fail-closed background must not clear otherwise valid water geometry");
+  assert.match(source,
+    /clearValue:\{r:\.18,g:0,b:\.045,a:65504\}/,
+    "the missing dry scene remains unmistakably failed closed behind the water");
+});
+
 test("surface extraction follows the fixed presentation cadence", () => {
   assert.equal(shouldUpdateWaterSurface(-1, 0, -Infinity, 0), true, "the first mesh is immediate");
   assert.equal(shouldUpdateWaterSurface(4, 5, 100, 115), false);
@@ -148,8 +182,8 @@ test("global-fine presentation compiles and encodes only the combined mesh path"
     .replace(/\s+/g, "");
   assert.doesNotMatch(source, /globalFineClassifiedEmitShaders|polygoniseGlobalFineEmitPipelines/,
     "the six unused per-tetrahedron modules and pipelines must stay deleted");
-  assert.match(source, /consttotal=15/,
-    "pipeline progress must count only the fifteen pipelines that are actually constructed");
+  assert.match(source, /consttotal=16/,
+    "pipeline progress must count only the sixteen pipelines that are actually constructed");
 
   const globalStart = source.indexOf("if(globalFine){");
   const volumeStart = source.indexOf("}else{", globalStart);

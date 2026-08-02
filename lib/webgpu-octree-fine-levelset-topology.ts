@@ -585,8 +585,8 @@ export class WebGPUFineLevelSetLeafSeeds {
       | { initialCondition: "box"; minimum: readonly [number, number, number];
         maximum: readonly [number, number, number] },
     sourceCapacity?: FineLevelSetLeafSeedSourceCapacity,
-    deferPipelineCompilation = false) {
-    this.pipelinesDeferred = deferPipelineCompilation;
+    _deferPipelineCompilation = true) {
+    this.pipelinesDeferred = true;
     const rawRecordCapacity = maximumFineLevelSetLeafSeedRawRecords(
       target.plan, sourceCapacity,
     );
@@ -643,7 +643,6 @@ export class WebGPUFineLevelSetLeafSeeds {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.scratch = device.createBuffer({ label: "global fine deterministic seed transaction",
       size: (5 * this.sortCapacity + 8) * 4, usage: GPUBufferUsage.STORAGE });
-    if (!deferPipelineCompilation) this.createPipelinesSync();
   }
 
   private createShaderModule(): GPUShaderModule {
@@ -655,12 +654,6 @@ export class WebGPUFineLevelSetLeafSeeds {
   private descriptor(entryPoint: string): GPUComputePipelineDescriptor {
     return { label: `Global fine seed ${entryPoint}`, layout: "auto",
       compute: { module: this.createShaderModule(), entryPoint } };
-  }
-
-  private createPipelinesSync(): void {
-    for (const entryPoint of WebGPUFineLevelSetLeafSeeds.entryPoints) {
-      this.pipelines[entryPoint] = this.device.createComputePipeline(this.descriptor(entryPoint));
-    }
   }
 
   initializationTasks(): GPUInitializationTask[] {
@@ -964,7 +957,7 @@ export class WebGPUFineLevelSetTopology {
     readonly current: WebGPUFineLevelSetBrickSource,
     readonly next: WebGPUFineLevelSetBrickSource,
     coarsePhiWGSL: string,
-    deferPipelineCompilation = false,
+    _deferPipelineCompilation = true,
   ) {
     if (current.plan !== next.plan && JSON.stringify(current.plan) !== JSON.stringify(next.plan)) {
       throw new RangeError("Fine topology generations must use the same configured lattice");
@@ -1058,137 +1051,6 @@ export class WebGPUFineLevelSetTopology {
     device.queue.writeBuffer(this.disabledTransportControl, 12, new Uint32Array([1]));
     const shaderCode = makeFineLevelSetTopologyWGSL(coarsePhiWGSL);
     this.pipelineShaderCode = shaderCode;
-    if (deferPipelineCompilation) return;
-    let deviceCache = fineLevelSetTopologyPipelineCache.get(device);
-    if (!deviceCache) {
-      deviceCache = new Map();
-      fineLevelSetTopologyPipelineCache.set(device, deviceCache);
-    }
-    let pipelines = deviceCache.get(shaderCode);
-    if (!pipelines) {
-      const shaderModule = device.createShaderModule({ label: "fine-levelset GPU topology",
-        code: shaderCode });
-      const pipeline = (label: string, entryPoint: string) => device.createComputePipeline({ label,
-        layout: "auto", compute: { module: shaderModule, entryPoint } });
-      pipelines = {
-        clearPipeline: pipeline("Clear fine topology candidate generation", "clearDesiredGeneration"),
-        discoverPipeline: pipeline("Discover fine interface bricks", "discoverInterfaceBricks"),
-        externalSeedPipeline: pipeline("Insert external fine topology seeds", "insertExternalSeeds"),
-        clearTopologyErrorsPipeline: pipeline("Clear fixed fine topology error records", "clearTopologyErrors"),
-        reduceTopologyErrorRecordsPipeline: pipeline("Reduce fixed fine topology error records", "reduceTopologyErrorRecords"),
-        reduceTopologyErrorGroupsPipeline: pipeline("Reduce fixed fine topology error groups", "reduceTopologyErrorGroups"),
-        reduceTopologyErrorSuperGroupsPipeline: pipeline("Reduce fixed fine topology error super-groups", "reduceTopologyErrorSuperGroups"),
-        validateDesiredSeedsPipeline: pipeline("Validate deterministic fine topology seeds", "validateDesiredSeeds"),
-        scanSparseSeedRecordsPipeline: pipeline("Scan compact fine seed records", "scanSparseSeedRecords"),
-        scanSparseCandidateRecordsPipeline: pipeline("Scan sparse fine topology candidates", "scanSparseCandidateRecords"),
-        scanSparseGroupsPipeline: pipeline("Scan sparse fine topology groups", "scanSparseGroups"),
-        scanSparseSuperGroupsPipeline: pipeline("Scan sparse fine topology super-groups", "scanSparseSuperGroups"),
-        offsetSparseGroupsPipeline: pipeline("Offset sparse fine topology groups", "offsetSparseGroups"),
-        offsetSparseRecordsPipeline: pipeline("Offset sparse fine topology records", "offsetSparseRecords"),
-        finalizeDesiredSeedCountPipeline: pipeline("Finalize deterministic fine seed count", "finalizeDesiredSeedCount"),
-        compactSparseSeedsPipeline: pipeline("Compact deterministic fine seeds", "compactSparseSeeds"),
-        clearSparseCandidatesPipeline: pipeline("Clear sorted fine topology expansion", "clearSparseCandidates"),
-        sortSparseCandidatesPipeline: pipeline("Sort sparse fine topology expansion", "sortSparseCandidates"),
-        expandSparseDesiredPipelines: ["X", "Y", "Z"].map((axis) =>
-          pipeline(`Expand sparse fine topology ${axis}`, `expandSparseDesired${axis}`)),
-        compactSparseDesiredPipeline: pipeline("Compact sparse fine topology candidates", "compactSparseDesiredBricks"),
-        publishDesiredBricksPipeline: pipeline("Publish sorted sparse fine topology", "publishDesiredBricks"),
-        publishRecurringSparseBandPipeline: pipeline(
-          "Mark compact recurring fine topology band", "publishRecurringSparseBand"),
-        scatterRecurringSeedHaloPipeline: pipeline(
-          "Scatter recurring fine topology seed halos", "scatterRecurringSeedHalo"),
-        scanRecurringDesiredPipeline: pipeline(
-          "Rank recurring fine topology identity marks", "scanRecurringDesiredRecords"),
-        finalizeRecurringSparseBandPipeline: pipeline(
-          "Finalize recurring fine topology rank", "finalizeRecurringSparseBand"),
-        scatterRecurringSparseBandPipeline: pipeline(
-          "Scatter recurring fine topology rank", "scatterRecurringSparseBand"),
-        snapshotPipeline: pipeline("Snapshot exact fine topology rollback pages", "snapshotDeltaPayload"),
-        classifyIdentityPipeline: pipeline("Classify exact fine identity records", "classifyDesiredPageIdentities"),
-        scanIdentityRecordsPipeline: pipeline("Scan exact fine identity records", "scanIdentityRecords"),
-        scanIdentityGroupsPipeline: pipeline("Scan exact fine identity groups", "scanIdentityGroups"),
-        scanIdentitySuperGroupsPipeline: pipeline("Scan exact fine identity super-groups", "scanIdentitySuperGroups"),
-        offsetIdentityGroupsPipeline: pipeline("Offset exact fine identity groups", "offsetIdentityGroups"),
-        offsetIdentityRecordsPipeline: pipeline("Offset exact fine identity records", "offsetIdentityRecords"),
-        prepareIdentityPipeline: pipeline("Prepare exact fine identity assignment", "prepareDesiredPageIdentityAssignment"),
-        compactIdentityPipeline: pipeline("Compact exact fine identity records", "compactDesiredPageIdentities"),
-        assignIdentityPipeline: pipeline("Assign exact fine page identities", "assignDesiredPageIdentities"),
-        finalizeIdentityPipeline: pipeline("Finalize exact fine identity assignment", "finalizeDesiredPageIdentityAssignment"),
-        carryPipeline: pipeline("Gather compact fine flags/phi page payloads", "carryDesiredSamples"),
-        carryWorkPipeline: pipeline("Gather compact fine work A/B page payloads", "carryDesiredWorkSamples"),
-        initializePipeline: pipeline("Initialize next fine topology samples", "initializeDesiredSamples"),
-        initializeWorkPipeline: pipeline("Initialize next fine work A/B samples", "initializeDesiredWorkSamples"),
-        linkPipeline: pipeline("Link next fine topology neighbors", "linkDesiredNeighbors"),
-        finalizePipeline: pipeline("Finalize next fine topology generation", "finalizeDesiredGeneration"),
-        clearPageDeltaPipeline: pipeline("Clear exact fine page delta", "clearFinePageDelta"),
-        classifyPageDeltaPipeline: pipeline("Classify exact fine page delta", "classifyFinePageDelta"),
-        compactChangedKeysPipeline: pipeline("Compact sorted fine changed keys", "compactFineChangedKeys"),
-        preparePageDeltaExpansionPipeline: pipeline("Prepare exact fine page expansion", "prepareFinePageDeltaExpansion"),
-        classifyAffectedPagesPipeline: pipeline("Classify exact fine changed-key support", "classifyFineAffectedPages"),
-        compactAffectedPagesPipeline: pipeline("Compact exact fine affected pages", "compactFineAffectedPages"),
-        finalizePageDeltaPipeline: pipeline("Finalize exact fine page delta", "finalizeFinePageDelta"),
-        publishSummaryChangedKeysPipeline: pipeline(
-          "Publish post-redistance fine summary keys", "publishFineSummaryChangedKeys"),
-        publicationPipeline: pipeline("Gate complete fine generation publication", "finalizeFinePublication"),
-        settlePublicationPipeline: pipeline("Settle accepted or rejected fine topology", "settleFinePublication"),
-        settleWorkPayloadPipeline: pipeline("Settle rejected fine work payload", "settleFineWorkPayload"),
-      };
-      deviceCache.set(shaderCode, pipelines);
-    }
-    this.clearPipeline = pipelines.clearPipeline;
-    this.discoverPipeline = pipelines.discoverPipeline;
-    this.externalSeedPipeline = pipelines.externalSeedPipeline;
-    this.clearTopologyErrorsPipeline = pipelines.clearTopologyErrorsPipeline;
-    this.reduceTopologyErrorRecordsPipeline = pipelines.reduceTopologyErrorRecordsPipeline;
-    this.reduceTopologyErrorGroupsPipeline = pipelines.reduceTopologyErrorGroupsPipeline;
-    this.reduceTopologyErrorSuperGroupsPipeline = pipelines.reduceTopologyErrorSuperGroupsPipeline;
-    this.validateDesiredSeedsPipeline = pipelines.validateDesiredSeedsPipeline;
-    this.scanSparseSeedRecordsPipeline = pipelines.scanSparseSeedRecordsPipeline;
-    this.scanSparseCandidateRecordsPipeline = pipelines.scanSparseCandidateRecordsPipeline;
-    this.scanSparseGroupsPipeline = pipelines.scanSparseGroupsPipeline;
-    this.scanSparseSuperGroupsPipeline = pipelines.scanSparseSuperGroupsPipeline;
-    this.offsetSparseGroupsPipeline = pipelines.offsetSparseGroupsPipeline;
-    this.offsetSparseRecordsPipeline = pipelines.offsetSparseRecordsPipeline;
-    this.finalizeDesiredSeedCountPipeline = pipelines.finalizeDesiredSeedCountPipeline;
-    this.compactSparseSeedsPipeline = pipelines.compactSparseSeedsPipeline;
-    this.clearSparseCandidatesPipeline = pipelines.clearSparseCandidatesPipeline;
-    this.sortSparseCandidatesPipeline = pipelines.sortSparseCandidatesPipeline;
-    this.expandSparseDesiredPipelines = pipelines.expandSparseDesiredPipelines;
-    this.compactSparseDesiredPipeline = pipelines.compactSparseDesiredPipeline;
-    this.publishDesiredBricksPipeline = pipelines.publishDesiredBricksPipeline;
-    this.publishRecurringSparseBandPipeline = pipelines.publishRecurringSparseBandPipeline;
-    this.scatterRecurringSeedHaloPipeline = pipelines.scatterRecurringSeedHaloPipeline;
-    this.scanRecurringDesiredPipeline = pipelines.scanRecurringDesiredPipeline;
-    this.finalizeRecurringSparseBandPipeline = pipelines.finalizeRecurringSparseBandPipeline;
-    this.scatterRecurringSparseBandPipeline = pipelines.scatterRecurringSparseBandPipeline;
-    this.snapshotPipeline = pipelines.snapshotPipeline;
-    this.classifyIdentityPipeline = pipelines.classifyIdentityPipeline;
-    this.scanIdentityRecordsPipeline = pipelines.scanIdentityRecordsPipeline;
-    this.scanIdentityGroupsPipeline = pipelines.scanIdentityGroupsPipeline;
-    this.scanIdentitySuperGroupsPipeline = pipelines.scanIdentitySuperGroupsPipeline;
-    this.offsetIdentityGroupsPipeline = pipelines.offsetIdentityGroupsPipeline;
-    this.offsetIdentityRecordsPipeline = pipelines.offsetIdentityRecordsPipeline;
-    this.prepareIdentityPipeline = pipelines.prepareIdentityPipeline;
-    this.compactIdentityPipeline = pipelines.compactIdentityPipeline;
-    this.assignIdentityPipeline = pipelines.assignIdentityPipeline;
-    this.finalizeIdentityPipeline = pipelines.finalizeIdentityPipeline;
-    this.carryPipeline = pipelines.carryPipeline;
-    this.carryWorkPipeline = pipelines.carryWorkPipeline;
-    this.initializePipeline = pipelines.initializePipeline;
-    this.initializeWorkPipeline = pipelines.initializeWorkPipeline;
-    this.linkPipeline = pipelines.linkPipeline;
-    this.finalizePipeline = pipelines.finalizePipeline;
-    this.clearPageDeltaPipeline = pipelines.clearPageDeltaPipeline;
-    this.classifyPageDeltaPipeline = pipelines.classifyPageDeltaPipeline;
-    this.compactChangedKeysPipeline = pipelines.compactChangedKeysPipeline;
-    this.preparePageDeltaExpansionPipeline = pipelines.preparePageDeltaExpansionPipeline;
-    this.classifyAffectedPagesPipeline = pipelines.classifyAffectedPagesPipeline;
-    this.compactAffectedPagesPipeline = pipelines.compactAffectedPagesPipeline;
-    this.finalizePageDeltaPipeline = pipelines.finalizePageDeltaPipeline;
-    this.publishSummaryChangedKeysPipeline = pipelines.publishSummaryChangedKeysPipeline;
-    this.publicationPipeline = pipelines.publicationPipeline;
-    this.settlePublicationPipeline = pipelines.settlePublicationPipeline;
-    this.settleWorkPayloadPipeline = pipelines.settleWorkPayloadPipeline;
   }
 
   private installPipelineBundle(pipelines: FineLevelSetTopologyPipelineBundle): void {
@@ -1832,14 +1694,11 @@ export function makeFineLevelSetTopologyWGSL(
   reasonCones = fineLevelSetReasonConesRequested(),
   deltaRadiusMask = typeof process === "undefined"
     || process.env.FLUID_FINE_DELTA_RADIUS_MASK !== "0",
-  deltaNeighborQuery = typeof process !== "undefined"
-    && process.env.FLUID_FINE_DELTA_NEIGHBOR_QUERY === "1",
 ): string {
   return /* wgsl */ `
 	const INVALID:u32=0xffffffffu;const VALID:u32=1u;const CAPACITY:u32=1u;const NONFINITE:u32=4u;const MALFORMED:u32=8u;
 const REASON_CONES:bool=${reasonCones ? "true" : "false"};
 const DELTA_RADIUS_MASK:bool=${deltaRadiusMask ? "true" : "false"};
-const DELTA_NEIGHBOR_QUERY:bool=${deltaNeighborQuery ? "true" : "false"};
 const DELTA_DIRTY:u32=0x100u;const DELTA_SUPPORT:u32=0x200u;
 struct Params { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,sparseCandidateCapacity:u32,pageCapacity:u32,currentGeneration:u32,nextGeneration:u32,fineFactor:u32,affineSeeds:u32,dilationBrickRings:u32,deferPublication:u32,dirtyHaloRings:u32,supportHaloRings:u32,maxWorkgroups:u32,recurringDelta:u32,scanRecordCapacity:u32,redistanceBandFineCells:u32,interpolationSupportFineCells:u32,safetyBrickRings:u32,
@@ -2569,14 +2428,6 @@ fn interfaceNeighborRadii(key:u32)->vec2u{
   return vec2u(select(0u,1u,(membership&DELTA_DIRTY)!=0u),
     select(0u,1u,(membership&DELTA_SUPPORT)!=0u));}
  if(key>=desiredLogicalCount()){return vec2u(0u);}let origin=vec3i(unpackBrick(key));
- if(DELTA_NEIGHBOR_QUERY){var dirty=0u;var support=0u;let radius=i32(params.supportHaloRings);
-  for(var z=-radius;z<=radius&&(dirty==0u||support==0u);z+=1){
-   for(var y=-radius;y<=radius&&(dirty==0u||support==0u);y+=1){
-    for(var x=-radius;x<=radius&&(dirty==0u||support==0u);x+=1){let q=origin+vec3i(x,y,z);
-     if(any(q<vec3i(0))||any(q>=vec3i(params.brickDimensions))){continue;}
-     if(producerChangedContains(packBrick(vec3u(q)))){let distance=max(abs(x),max(abs(y),abs(z)));
-      support=1u;dirty|=select(0u,1u,distance<=i32(params.dirtyHaloRings));}}}}
-  return vec2u(dirty,support);}
  let total=recurringProducerCount();var dirty=0u;var support=0u;
  for(var item=0u;item<total&&(dirty==0u||support==0u);item+=1u){let changedKey=recurringProducerChanged(item);
   if(changedKey>=desiredLogicalCount()){continue;}let delta=abs(origin-vec3i(unpackBrick(changedKey)));

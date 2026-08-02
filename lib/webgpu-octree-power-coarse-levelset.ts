@@ -8,6 +8,7 @@ import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { DirectStructuredVelocitySource } from "./webgpu-octree-structured-velocity-gpu";
 import type { OctreeAirVelocitySupportLayout } from "./webgpu-octree-air-velocity-support";
 import { PassBroker } from "./webgpu-pass-broker";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
 
 export const OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES = 64;
 export const OCTREE_POWER_COARSE_LEVELSET_VALID = 0x8000_0000;
@@ -205,14 +206,15 @@ export class WebGPUOctreePowerCoarseLevelSet {
   private readonly dispatchMetadata: GPUBuffer;
   private readonly indirectDispatch: GPUBuffer;
   private readonly phaseLayouts: readonly GPUBindGroupLayout[];
-  private readonly preparePipeline: GPUComputePipeline;
-  private readonly buildSelectorRowsPipeline: GPUComputePipeline;
-  private readonly advectPipeline: GPUComputePipeline;
-  private readonly correctPipeline: GPUComputePipeline;
-  private readonly redistanceAtoBPipeline: GPUComputePipeline;
-  private readonly redistanceBtoAPipeline: GPUComputePipeline;
-  private readonly publishPipeline: GPUComputePipeline;
-  private readonly commitPipeline: GPUComputePipeline;
+  private preparePipeline!: GPUComputePipeline;
+  private buildSelectorRowsPipeline!: GPUComputePipeline;
+  private advectPipeline!: GPUComputePipeline;
+  private correctPipeline!: GPUComputePipeline;
+  private redistanceAtoBPipeline!: GPUComputePipeline;
+  private redistanceBtoAPipeline!: GPUComputePipeline;
+  private publishPipeline!: GPUComputePipeline;
+  private commitPipeline!: GPUComputePipeline;
+  private readonly pipelineLayouts: readonly GPUPipelineLayout[];
   private readonly encoderArenas = new WeakMap<GPUCommandEncoder, {
     readonly params: GPUBuffer; invocationCount: number;
   }>();
@@ -285,7 +287,6 @@ export class WebGPUOctreePowerCoarseLevelSet {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
     });
     device.queue.writeBuffer(this.validFineControl, 20, new Uint32Array([OCTREE_POWER_COARSE_LEVELSET_VALID]));
-    const shaderModule = device.createShaderModule({ label: "Power coarse phi schedule", code: octreePowerCoarseLevelSetShader });
     this.phaseLayouts = POWER_COARSE_PHASE_BINDINGS.map((bindings, phase) =>
       device.createBindGroupLayout({
         label: "Power coarse phi phase " + phase + " bindings",
@@ -298,20 +299,31 @@ export class WebGPUOctreePowerCoarseLevelSet {
               ? "storage" as const : "read-only-storage" as const },
         })),
       }));
+    this.pipelineLayouts = this.phaseLayouts.map((layout) =>
+      device.createPipelineLayout({ bindGroupLayouts: [layout] }));
+  }
+
+  async initializePipelines(): Promise<void> {
+    const compiler = gpuCompilationManagerFor(this.device);
+    const shaderModule = compiler.createShaderModule({
+      label: "Power coarse phi schedule", code: octreePowerCoarseLevelSetShader });
     const pipeline = (phase: number, label: string, entryPoint = label) =>
-      device.createComputePipeline({
-      label,
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.phaseLayouts[phase]!] }),
-      compute: { module: shaderModule, entryPoint },
-    });
-    this.preparePipeline = pipeline(0, "preparePowerCoarsePhiSchedule");
-    this.buildSelectorRowsPipeline = pipeline(1, "buildPowerCoarseSelectorRows");
-    this.advectPipeline = pipeline(2, "advectPowerCoarsePhiSchedule");
-    this.correctPipeline = pipeline(3, "correctPowerCoarsePhiSchedule");
-    this.redistanceAtoBPipeline = pipeline(4, "redistancePowerCoarsePhiAtoB");
-    this.redistanceBtoAPipeline = pipeline(4, "redistancePowerCoarsePhiBtoA");
-    this.publishPipeline = pipeline(5, "publishPowerCoarsePhiSchedule");
-    this.commitPipeline = pipeline(6, "commitPowerCoarsePhiSchedule");
+      compiler.compileComputePipeline({
+        label, layout: this.pipelineLayouts[phase]!,
+        compute: { module: shaderModule, entryPoint },
+      });
+    [this.preparePipeline, this.buildSelectorRowsPipeline, this.advectPipeline,
+      this.correctPipeline, this.redistanceAtoBPipeline, this.redistanceBtoAPipeline,
+      this.publishPipeline, this.commitPipeline] = await Promise.all([
+      pipeline(0, "preparePowerCoarsePhiSchedule"),
+      pipeline(1, "buildPowerCoarseSelectorRows"),
+      pipeline(2, "advectPowerCoarsePhiSchedule"),
+      pipeline(3, "correctPowerCoarsePhiSchedule"),
+      pipeline(4, "redistancePowerCoarsePhiAtoB"),
+      pipeline(4, "redistancePowerCoarsePhiBtoA"),
+      pipeline(5, "publishPowerCoarsePhiSchedule"),
+      pipeline(6, "commitPowerCoarsePhiSchedule"),
+    ]);
   }
 
   private cachedBindGroups(params: GPUBuffer, common: ReadonlyMap<number, GPUBufferBinding>):

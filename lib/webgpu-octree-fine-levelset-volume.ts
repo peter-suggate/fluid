@@ -144,7 +144,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
     private readonly coarse: FineLevelSetVolumeCoarseSource, sharedControl?: GPUBuffer,
-    deferPipelineCompilation = false) {
+    _deferPipelineCompilation = true) {
     if (!Number.isSafeInteger(coarse.sampleRowCapacity) || coarse.sampleRowCapacity < 1) {
       throw new RangeError("Fine volume coarse row-directory capacity must be positive");
     }
@@ -184,36 +184,6 @@ export class WebGPUFineLevelSetVolumeCorrection {
     this.pipelineActivity = volumeActivity;
     this.pipelineCacheKey = volumeVariant.cacheKey;
     this.pipelineShaderCode = volumeVariant.code;
-    if (deferPipelineCompilation) return;
-    let deviceCache = fineLevelSetVolumePipelineCache.get(device);
-    if (!deviceCache) {
-      deviceCache = new Map();
-      fineLevelSetVolumePipelineCache.set(device, deviceCache);
-    }
-    let pipelines = deviceCache.get(volumeVariant.cacheKey);
-    if (!pipelines) {
-      const shaderModule = device.createShaderModule({
-        label: "global fine total-volume correction",
-        code: volumeVariant.code,
-      });
-      const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
-        compute: { module: shaderModule, entryPoint } });
-      pipelines = {
-        resetPipeline: pipeline("resetVolumeControl"),
-        addReferencePipeline: pipeline("addReferenceVolume"),
-        prepareCoarseDispatchPipeline: pipeline("prepareCoarseVolumeDispatch"),
-        coarsePartialPipeline: pipeline("reduceCoarseVolumePartials"),
-        coarseFinalizePipeline: pipeline("finalizeCoarseVolume"),
-        prepareFineDispatchPipeline: pipeline("prepareFineVolumeDispatch"),
-        finePartialPipeline: pipeline("reduceFineOverlapPartials"),
-        fineFinalizePipeline: pipeline("finalizeFineVolume"),
-        applyPipeline: volumeActivity.registerPipeline(pipeline("applyFineVolumeCorrection")),
-        correctedFinalizePipeline: pipeline("finalizeCorrectedFineVolume"),
-        measuredFinalizePipeline: pipeline("finalizeMeasuredFineVolume"),
-      };
-      deviceCache.set(volumeVariant.cacheKey, pipelines);
-    }
-    this.installPipelineBundle(pipelines);
   }
 
   private installPipelineBundle(pipelines: FineLevelSetVolumePipelineBundle): void {

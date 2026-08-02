@@ -17,6 +17,7 @@ import {
   unpackOctreeOwnerPageControl,
 } from "./webgpu-octree-owner-pages";
 import { PassBroker } from "./webgpu-pass-broker";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
 
 export const OCTREE_POWER_LEAF_HEADER_BYTES = 48;
 export const OCTREE_POWER_DESCRIPTOR_CONTROL_BYTES = 32;
@@ -309,7 +310,6 @@ export function describeOctreePowerRow(
 }
 
 interface OctreePowerDescriptorPipelineBundle {
-  readonly layout: GPUBindGroupLayout;
   readonly preparePipeline: GPUComputePipeline;
   readonly generatePipeline: GPUComputePipeline;
   readonly stagePipeline: GPUComputePipeline;
@@ -320,7 +320,11 @@ interface OctreePowerDescriptorPipelineBundle {
 }
 
 const octreePowerDescriptorPipelineCache = new WeakMap<GPUDevice,
-  OctreePowerDescriptorPipelineBundle>();
+  Promise<OctreePowerDescriptorPipelineBundle>>();
+const octreePowerDescriptorLayoutCache = new WeakMap<GPUDevice, {
+  readonly layout: GPUBindGroupLayout;
+  readonly pipelineLayout: GPUPipelineLayout;
+}>();
 
 export class WebGPUOctreePowerDescriptor {
   readonly plan: OctreePowerDescriptorPlan;
@@ -331,14 +335,15 @@ export class WebGPUOctreePowerDescriptor {
   readonly dispatch: GPUBuffer;
   private readonly workDispatch: GPUBuffer;
   private readonly params: GPUBuffer;
-  private readonly preparePipeline: GPUComputePipeline;
-  private readonly generatePipeline: GPUComputePipeline;
-  private readonly stagePipeline: GPUComputePipeline;
-  private readonly prefixPipeline: GPUComputePipeline;
-  private readonly scatterPipeline: GPUComputePipeline;
-  private readonly commitPipeline: GPUComputePipeline;
-  private readonly finalizePipeline: GPUComputePipeline;
+  private preparePipeline!: GPUComputePipeline;
+  private generatePipeline!: GPUComputePipeline;
+  private stagePipeline!: GPUComputePipeline;
+  private prefixPipeline!: GPUComputePipeline;
+  private scatterPipeline!: GPUComputePipeline;
+  private commitPipeline!: GPUComputePipeline;
+  private finalizePipeline!: GPUComputePipeline;
   private readonly layout: GPUBindGroupLayout;
+  private readonly pipelineLayout: GPUPipelineLayout;
   private cachedGroup?: {
     leafHeaders: GPUBuffer;
     owners: GPUBuffer;
@@ -363,8 +368,8 @@ export class WebGPUOctreePowerDescriptor {
     this.workDispatch = device.createBuffer({ label: "Octree power descriptor work dispatch", size: this.plan.dispatchBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.params = device.createBuffer({ label: "Octree power descriptor parameters", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    let pipelines = octreePowerDescriptorPipelineCache.get(device);
-    if (!pipelines) {
+    let layouts = octreePowerDescriptorLayoutCache.get(device);
+    if (!layouts) {
       const layout = device.createBindGroupLayout({ label: "Octree power descriptor layout", entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -376,34 +381,45 @@ export class WebGPUOctreePowerDescriptor {
         { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       ] });
-      const shaderModule = device.createShaderModule({
-        label: "Octree power descriptor generation", code: octreePowerDescriptorShader });
-      const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-      pipelines = {
-        layout,
-        preparePipeline: device.createComputePipeline({ label: "Prepare octree power descriptors", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "preparePowerDescriptors" } }),
-        generatePipeline: device.createComputePipeline({ label: "Generate octree power descriptors", layout: pipelineLayout, compute: { module: shaderModule, entryPoint: "generatePowerDescriptors" } }),
-        stagePipeline: device.createComputePipeline({ label: "Stage exact octree power descriptor delta", layout: pipelineLayout,
-          compute: { module: shaderModule, entryPoint: "stagePowerDescriptorDelta" } }),
-        prefixPipeline: device.createComputePipeline({ label: "Prefix exact octree power descriptor blocks", layout: pipelineLayout,
-          compute: { module: shaderModule, entryPoint: "prefixPowerDescriptorDelta" } }),
-        scatterPipeline: device.createComputePipeline({ label: "Scatter exact octree power descriptor publication rows", layout: pipelineLayout,
-          compute: { module: shaderModule, entryPoint: "scatterPowerDescriptorDelta" } }),
-        commitPipeline: device.createComputePipeline({ label: "Commit changed octree power descriptors", layout: pipelineLayout,
-          compute: { module: shaderModule, entryPoint: "commitPowerDescriptors" } }),
-        finalizePipeline: device.createComputePipeline({ label: "Finalize octree power descriptors", layout: pipelineLayout,
-          compute: { module: shaderModule, entryPoint: "finalizePowerDescriptors" } }),
-      };
-      octreePowerDescriptorPipelineCache.set(device, pipelines);
+      layouts = { layout, pipelineLayout: device.createPipelineLayout({ bindGroupLayouts: [layout] }) };
+      octreePowerDescriptorLayoutCache.set(device, layouts);
     }
-    this.layout = pipelines.layout;
-    this.preparePipeline = pipelines.preparePipeline;
-    this.generatePipeline = pipelines.generatePipeline;
-    this.stagePipeline = pipelines.stagePipeline;
-    this.prefixPipeline = pipelines.prefixPipeline;
-    this.scatterPipeline = pipelines.scatterPipeline;
-    this.commitPipeline = pipelines.commitPipeline;
-    this.finalizePipeline = pipelines.finalizePipeline;
+    this.layout = layouts.layout;
+    this.pipelineLayout = layouts.pipelineLayout;
+  }
+
+  async initializePipelines(): Promise<void> {
+    let pipelines = octreePowerDescriptorPipelineCache.get(this.device);
+    if (!pipelines) {
+      const compiler = gpuCompilationManagerFor(this.device);
+      const shaderModule = compiler.createShaderModule({
+        label: "Octree power descriptor generation", code: octreePowerDescriptorShader });
+      const compile = (label: string, entryPoint: string) => compiler.compileComputePipeline({
+        label, layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint },
+      });
+      pipelines = Promise.all([
+        compile("Prepare octree power descriptors", "preparePowerDescriptors"),
+        compile("Generate octree power descriptors", "generatePowerDescriptors"),
+        compile("Stage exact octree power descriptor delta", "stagePowerDescriptorDelta"),
+        compile("Prefix exact octree power descriptor blocks", "prefixPowerDescriptorDelta"),
+        compile("Scatter exact octree power descriptor publication rows", "scatterPowerDescriptorDelta"),
+        compile("Commit changed octree power descriptors", "commitPowerDescriptors"),
+        compile("Finalize octree power descriptors", "finalizePowerDescriptors"),
+      ]).then(([preparePipeline, generatePipeline, stagePipeline, prefixPipeline,
+        scatterPipeline, commitPipeline, finalizePipeline]) => ({
+        preparePipeline, generatePipeline, stagePipeline, prefixPipeline,
+        scatterPipeline, commitPipeline, finalizePipeline,
+      }));
+      octreePowerDescriptorPipelineCache.set(this.device, pipelines);
+    }
+    const compiled = await pipelines;
+    this.preparePipeline = compiled.preparePipeline;
+    this.generatePipeline = compiled.generatePipeline;
+    this.stagePipeline = compiled.stagePipeline;
+    this.prefixPipeline = compiled.prefixPipeline;
+    this.scatterPipeline = compiled.scatterPipeline;
+    this.commitPipeline = compiled.commitPipeline;
+    this.finalizePipeline = compiled.finalizePipeline;
   }
 
   encodeCandidate(broker: PassBroker, leafHeaders: GPUBuffer, owners: GPUBuffer,

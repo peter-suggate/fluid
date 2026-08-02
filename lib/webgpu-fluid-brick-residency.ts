@@ -1149,7 +1149,7 @@ export class GPUFluidBrickResidency {
     options: FluidBrickResidencyOptions = {},
   ) {
     this.device = device;
-    this.pipelinesDeferred = options.deferPipelineCompilation === true;
+    this.pipelinesDeferred = true;
     this.brickSize = options.brickSize ?? 8;
     if (this.brickSize !== 4 && this.brickSize !== 8) throw new RangeError("Fluid brick size must be 4 or 8");
     for (const [axis, value] of dimensions.entries()) if (!Number.isInteger(value) || value < 1) throw new RangeError(`Fluid dimension ${axis} must be positive`);
@@ -1287,7 +1287,6 @@ export class GPUFluidBrickResidency {
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
     ]});
     this.commitPipelineLayout=device.createPipelineLayout({bindGroupLayouts:[this.fineSeedCandidateCommitLayout]});
-    if (!options.deferPipelineCompilation) this.createPipelinesSync();
     // The texture binding changes with the projection's ping-pong surface and
     // is therefore created in encode(). Keep the common resources resident.
   }
@@ -1334,14 +1333,6 @@ export class GPUFluidBrickResidency {
     else if (index === 4) this.emitTopologyTilesPipeline = pipeline;
     else if (index === 5) this.finalizePipeline = pipeline;
     else throw new RangeError(`Unknown fluid-residency pipeline index ${index}`);
-  }
-
-  private createPipelinesSync(): void {
-    this.mainPipelineDefinitions.forEach(([entryPoint, label], index) =>
-      this.assignMainPipeline(index, this.device.createComputePipeline(this.mainDescriptor(entryPoint, label))));
-    this.fineSeedCandidatePipelines = this.fineSeedCandidateEntryPoints.map((entryPoint, index) =>
-      this.device.createComputePipeline(this.surfaceDescriptor(entryPoint, index)));
-    this.commitFineSeedCandidatesPipeline = this.device.createComputePipeline(this.commitDescriptor());
   }
 
   initializationTasks(): GPUInitializationTask[] {

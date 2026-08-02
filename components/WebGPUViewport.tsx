@@ -174,6 +174,9 @@ export function WebGPUViewport() {
   const sceneDraft = useSceneDraftStore((state) => state.draft);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
+  const scenePresentationAvailable = useDiagnosticsStore(
+    (state) => state.effectiveRendererStatus.state === "active"
+      || state.effectiveRendererStatus.state === "not-required");
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const svoStageView = useUIStore((state) => state.svoStageView);
   const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
@@ -601,7 +604,8 @@ export function WebGPUViewport() {
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
-  const fluidToolArmed = activeTool === "fluid-paint" || activeTool === "fluid-erase";
+  const fluidToolArmed = scenePresentationAvailable
+    && (activeTool === "fluid-paint" || activeTool === "fluid-erase");
 
   // The selection's handles.
   //
@@ -611,7 +615,7 @@ export function WebGPUViewport() {
   // scene write invalidates the solver's seed key — writing per pointer-move
   // asked the renderer to re-seed dozens of times a second, which is exactly the
   // hitch that made the gesture unusable. Preview here, simulate on release.
-  const entityContext: EditorEntityContext = { scene, bodies: bodies.map((body) => ({
+  const entityContext: EditorEntityContext = { scene, scenePresentationAvailable, bodies: bodies.map((body) => ({
     id: body.description.id, position_m: body.position_m, orientation: body.orientation })) };
   const entities = surfacedEntities(entityContext, activeTool, selection);
   const heldEntity = entities[0];
@@ -649,10 +653,11 @@ export function WebGPUViewport() {
   // between a constraint and a gesture that looks broken.
   const heldHandle = handleDrag && heldEntity?.handles.find((handle) => handle.id === handleDrag.handleId);
   const heldAxes = heldHandle && constrainedAxes(heldHandle.axes, axisConstraint);
-  const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
+  const fillHandle = scenePresentationAvailable && fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
     ? projectToViewport(fillLevelHandlePosition(scene), camera, viewportSize.width, viewportSize.height)
     : undefined;
-  const selectedTerrainFeature = selection?.kind === "terrain-feature" && activeTool === "select"
+  const selectedTerrainFeature = scenePresentationAvailable
+    && selection?.kind === "terrain-feature" && activeTool === "select"
     ? terrainFeatureIndex(selection.id, scene.terrain)
     : undefined;
   const terrainHandles = selectedTerrainFeature !== undefined && scene.terrain
@@ -908,6 +913,7 @@ export function WebGPUViewport() {
             {
               shadowsEnabled: ui.svoShadowsEnabled,
               ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
+              silhouetteRefinementEnabled: ui.silhouetteRefinementEnabled,
               coneTracingMode: ui.svoConeTracingMode,
               primaryTraversal: ui.svoPrimaryTraversal,
             },
@@ -1435,7 +1441,7 @@ export function WebGPUViewport() {
       const ray = pointerRay(event);
       const hovered = hoverSceneAt(
         useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray,
-        { scenery: ui.activeTool === "select" }) ?? null;
+        { scenery: scenePresentationAvailable && ui.activeTool === "select" }) ?? null;
       setHover(hovered);
       publishHoverHighlight(hovered);
       return;
@@ -1586,14 +1592,16 @@ export function WebGPUViewport() {
       data-testid="gpu-viewport"
       data-camera-azimuth={camera.azimuth_rad.toFixed(6)}
       data-camera-elevation={camera.elevation_rad.toFixed(6)}
+      data-scene-presentation={scenePresentationAvailable ? "active" : "unavailable"}
+      aria-disabled={!scenePresentationAvailable}
       data-pixel-trace={pixelTraceEnabled && activeTool === "select" && !pixelTracePinned ? "live" : undefined}
       data-shape-grab={handleHover ? "true" : undefined}
-      onPointerDown={pointerDown}
-      onPointerMove={pointerMove}
-      onPointerUp={pointerUp}
-      onPointerCancel={pointerUp}
+      onPointerDown={scenePresentationAvailable ? pointerDown : undefined}
+      onPointerMove={scenePresentationAvailable ? pointerMove : undefined}
+      onPointerUp={scenePresentationAvailable ? pointerUp : undefined}
+      onPointerCancel={scenePresentationAvailable ? pointerUp : undefined}
       onPointerLeave={() => { setHover(null); publishHoverHighlight(null); setHandleHover(null); }}
-      onWheel={(event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); }}
+      onWheel={scenePresentationAvailable ? (event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); } : undefined}
       onContextMenu={(event) => event.preventDefault()}
     />
     {/* Pick mode, beside the frame rate rather than four scrolls into a
@@ -1606,6 +1614,7 @@ export function WebGPUViewport() {
       className="scene-pick-toggle"
       data-testid="cell-pick-toggle"
       aria-pressed={fluidCellTraceEnabled}
+      disabled={!scenePresentationAvailable}
       data-pinned={fluidCellTracePinned ? "true" : "false"}
       onClick={() => setFluidCellTraceEnabled(!fluidCellTraceEnabled)}
       title={fluidCellTraceEnabled

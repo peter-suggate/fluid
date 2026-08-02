@@ -12,8 +12,6 @@ import {
   factorOneAirSupportFrontierIndirectRecords,
   encodeOctreeAirSupportReconstructionHandoff,
   octreeAirSupportChangedFrontierEnabled,
-  octreeAirSupportCompactFineCellsEnabled,
-  octreeAirSupportCompactFineDemandEnabled,
   octreeAirSupportIndirectFrontierGateEnabled,
   octreeAirSupportReconstructionCompactPassEnabled,
   octreeAirSupportTopologyReuseEnabled,
@@ -135,21 +133,19 @@ test("factor-1 frontier schedules zero every post-convergence dispatch", () => {
     "the singleton must publish zero records on convergence or failure");
 });
 
-test("fine demand defaults to a GPU-authored live-page launch and retains the capacity A/B", () => {
-  assert.equal(octreeAirSupportCompactFineDemandEnabled({}), true);
-  assert.equal(octreeAirSupportCompactFineDemandEnabled({
-    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND: "1",
-  }), true);
-  assert.equal(octreeAirSupportCompactFineDemandEnabled({
-    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND: "0",
-  }), false);
-});
-
-test("factor-4/8 compact fine-cell listing defaults on with a dense A/B", () => {
-  assert.equal(octreeAirSupportCompactFineCellsEnabled({}), true);
-  assert.equal(octreeAirSupportCompactFineCellsEnabled({
-    FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS: "0",
-  }), false);
+test("fine demand and compact fine-cell listing are unconditional in the encoder", () => {
+  const encodeSource = compact(
+    WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
+  // Fine demand is always GPU-page shaped; there is no capacity-launch arm and
+  // no toggle for one, so nothing but the fine slot gates the schedule.
+  // (`undefined` reads as `void0` once the test runner transpiles the source.)
+  const defined = String.raw`!==(?:void0|undefined)`;
+  assert.doesNotMatch(encodeSource, /compactFineDemand/);
+  assert.match(encodeSource,
+    new RegExp(`fineSlot${defined}&&this\\.fineDemandScheduleGroups`));
+  // Compact fine cells follow the fine slot, never an environment read.
+  assert.match(encodeSource, new RegExp(`constcompactFineCells=fineSlot${defined};`));
+  assert.doesNotMatch(encodeSource, /COMPACT_FINE_DEMAND|COMPACT_FINE_CELLS/);
 });
 
 test("GPU plan composes both support layouts and bounded candidate schedules", () => {
@@ -192,7 +188,7 @@ test("GPU plan composes both support layouts and bounded candidate schedules", (
   assert.equal(plan.directAirVectorBytes, plan.rowCapacity * 16);
   assert.equal(plan.faceArenaBytes, plan.faceAdjacencyBytes + plan.directAirVectorBytes,
     "one face arena must carry the adjacency records and the direct-air staging suffix");
-  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 74,
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 96,
     "reuse controls, sparse schedules, and durable latches must remain outside the candidate arena");
 });
 
@@ -211,8 +207,8 @@ test("ocean candidate scratch is more than halved by deterministic catalog-incid
     "the row arena must contain real distinct-selector incidences, not tetra-vertex occurrences");
   assert.equal(occurrenceCapacity, 17_596_416);
   assert.equal(ocean.candidateCapacity, 4_227_072);
-  assert.equal(occurrenceScratchBytes, 331_244_840);
-  assert.equal(ocean.scratchBytes, 76_940_584);
+  assert.equal(occurrenceScratchBytes, 331_244_928);
+  assert.equal(ocean.scratchBytes, 76_940_672);
   assert.ok(occurrenceCapacity > 2 * ocean.candidateCapacity,
     `candidate slots reduced only ${(occurrenceCapacity / ocean.candidateCapacity).toFixed(3)}x`);
   assert.ok(occurrenceScratchBytes > 2 * ocean.scratchBytes,
@@ -231,7 +227,7 @@ test("compact cell-authority prototype removes every domain-volume scratch term"
   assert.equal(compact.rowCandidateCapacity, 65_536 * 63);
   assert.equal(compact.fineCandidateCapacity, 98_304);
   assert.equal(compact.candidateCapacity, 4_227_072);
-  assert.equal(compact.scratchBytes, 76_940_584);
+  assert.equal(compact.scratchBytes, 76_940_672);
   assert.ok(154_739_996 > 2 * compact.scratchBytes,
     "the compact authority must more than halve the remaining ocean scratch, not merely remove one mask");
   assert.ok(compact.offsets.hashRecords < compact.offsets.touchedSlots);
@@ -455,8 +451,29 @@ test("air-support membership is limited to the proven consumer reach corridor", 
   assert.match(emit, /letdemanded=s\(at\+2u\).*if\(demanded==0u\)\{return;\}/s,
     "only identities in the transport/interpolation demand cone may become march destinations");
   assert.match(shader,
-    /fnfinalizeAirSupportMetadata\(\).*if\(s\(41u\)!=0u\)\{fail\(s\(42u\),ERROR_TOPOLOGY\);\}/s,
-    "a demanded corridor component with no marched liquid carrier must reject, not publish provisional air");
+    /fnfinalizeAirSupportMetadata\(\).*if\(s\(41u\)!=0u\)\{publishCarrierFreeForensic\(s\(42u\)\);fail\(s\(42u\),ERROR_TOPOLOGY\);\}/s,
+    "an air face with no carrier ANYWHERE on its axis must reject, not publish provisional air");
+  // The ledger word must name the failing face without aliasing. Packing
+  // (flags<<16)|(cell<<3)|axis overlapped the flags byte with the cell index on
+  // any domain above 8192 cells, so a decoded identity was not trustworthy; the
+  // owned-face item index is unique and the producer expands it in finalize.
+  assert.match(shader,
+    /atomicMin\(&scratch\[42u\],faceRow\*12u\+4u\*axis\+quadrant\)/,
+    "the carrier-free ledger must record a lossless owned-face item index");
+  assert.doesNotMatch(shader, /atomicMin\(&scratch\[42u\],\(\(\(cell\.w>>6u\)&0xffu\)<<16u\)/,
+    "the aliasing (flags<<16)|(cell<<3)|axis ledger packing must not return");
+  // Section 5's extension is a GLOBAL closest-point transform. The march is an
+  // acceleration of it that is exact only inside one connected component of the
+  // demand corridor, and the corridor is not connected in general: an
+  // unresolved sub-grid film owns no liquid row, so its band demands a corridor
+  // island with no seed in it. Patches the march cannot reach must therefore be
+  // resolved by the same transform evaluated exhaustively -- never by a
+  // substituted value, and never by relaxing the terminal ledger.
+  const completion = shader.slice(shader.indexOf("fncompleteAirSupportIncidentFaces"),
+    shader.indexOf("fnextendFace"));
+  assert.match(completion,
+    /letmarched=faceA\[item\];if\(marched\.w==0u\)\{atomicAdd\(&scratch\[86u\+axis\],1u\);letrecovered=closestSeedFaceAt\(faceRow,axis,quadrant,true\);if\(recovered\.w==0u\)\{atomicAdd\(&scratch\[89u\+axis\],1u\);\}else\{faceA\[item\]=recovered;\}\}/,
+    "a march-unreachable patch must take the exact global closest seed face, and must still be counted when no seed exists at all");
   assert.match(shader,
     /receiptReady=.*airControlOffset\+15u.*expectedFineGeneration/s,
     "topology reuse must prove the exact fine dependency generation that defines corridor membership");
@@ -790,8 +807,10 @@ test("air-support pipelines can be deferred without parallel driver pressure", (
   const hostClass = host.slice(host.indexOf("export class WebGPUOctreeAirVelocitySupportProducer"),
     host.indexOf("export const octreeAirVelocitySupportPublicationWGSL"));
   assert.match(hostClass,
-    /constructor\([\s\S]*deferPipelineCompilation = false\)[\s\S]*if \(!deferPipelineCompilation\) this\.createPipelinesSync\(\)/,
-    "existing direct construction must retain synchronous pipeline creation by default");
+    /constructor\([\s\S]*_deferPipelineCompilation = true\)/,
+    "direct construction must remain compilation-free while legacy callers migrate");
+  assert.doesNotMatch(hostClass, /createPipelinesSync|createComputePipeline\s*\(/,
+    "air-support must expose no synchronous pipeline fallback");
   const initialize = hostClass.slice(hostClass.indexOf("async initializePipelines()"),
     hostClass.indexOf("private parameterData("));
   assert.match(initialize,

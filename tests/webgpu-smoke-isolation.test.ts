@@ -185,8 +185,12 @@ test("minimal dam acceptance and capture pin the exact 500-step, 2-second contra
     "every regression capture subprocess must acquire the exclusive GPU lock");
   assert.match(benchmark, /FLUID_POWER_GENERATION_AUDIT: "0"/,
     "throughput profiles must not inherit the scene's full generation/energy audit");
-  assert.match(benchmark, /FLUID_TRIPWIRES: "1"/,
-    "disabling the full audit must retain the per-step silent-failure gates");
+  // The caller may escalate to `failfast`, never de-escalate: the ternary's
+  // fallback is "1", and the assignment sits after `...overrides`, so a
+  // `FLUID_TRIPWIRES=0` in the environment cannot reach the child.
+  assert.match(benchmark,
+    /FLUID_TRIPWIRES: process\.env\.FLUID_TRIPWIRES === "failfast" \? "failfast" : "1"/,
+    "disabling the full audit must retain the silent-failure gates, and the only caller override is escalation");
   assert.match(profiler, /FLUID_POWER_GENERATION_AUDIT: "0"/,
     "the xctrace graph must match the benchmark's generation-audit setting");
   assert.match(profiler, /FLUID_TRIPWIRES: "1"/,
@@ -210,13 +214,16 @@ test("the ocean first-frame lane runs two exact advances under the browser stora
 });
 
 /**
- * Fail-fast is the contract, not a nicety: a tripped counter means the physics
+ * Fail-fast is the contract for diagnosis: a tripped counter means the physics
  * being measured is already gone. The end-of-run walk once absorbed that --
  * `large-power-dam-break` lost its fine band at step 248 and kept stepping a
- * frozen solver to step 430 before reporting "tripped over 430 captured steps".
- * These pin the structure that makes the run die at the step that tripped. The
- * decoded verdicts themselves are covered by the control-ABI unit tests; only a
- * Dawn lane can exercise the map/unmap cycle end to end.
+ * frozen solver to step 430 before reporting "tripped over 430 captured steps",
+ * 732 trips across four ids. Under fail-fast the same run reports one
+ * `air-support-failure` at step 247 and the other 731 stand revealed as
+ * downstream absorption. These pin the structure that makes the run die at the
+ * step that tripped. The decoded verdicts themselves are covered by the
+ * control-ABI unit tests; only a Dawn lane can exercise the map/unmap cycle end
+ * to end.
  */
 test("silent-failure tripwires are evaluated at their own step and terminate there", async () => {
   const smoke = normalizeWhitespace(await readFile(
@@ -256,17 +263,18 @@ test("silent-failure tripwires are evaluated at their own step and terminate the
   assert.doesNotMatch(live, /console\.error\(`\[tripwire/,
     "a fatal trip must throw, never warn: FLUID_TRIPWIRE_ALLOW is the only downgrade");
 
-  // The trace is emitted from the live walk alone. Emitting it end-of-run would
-  // lose every record on the run that dies; emitting it from both would double
-  // every record on the run that does not.
+  // The trace has exactly one emitter per run, selected by mode: the live walk
+  // under fail-fast (so it survives the fatal step), the ring walk otherwise
+  // (so turning fail-fast off does not silently drop the trace). Emitting from
+  // both would double every record on a run that reaches the end.
   assert.equal(smoke.split('record: "fine-topology-trace"').length - 1, 1,
     "exactly one FLUID_FINE_TOPOLOGY_TRACE emitter may exist");
   assert.match(smoke, /emitTopologyTrace && process\.env\.FLUID_FINE_TOPOLOGY_TRACE === "1"/);
   assert.match(smoke, /steps, fineGeneration, true\);/,
     "the live walk emits the topology trace");
   assert.match(smoke,
-    /tripwireSteps\[record\]!, tripwireFineGenerations\[record\]!, false\)\);/,
-    "the end-of-run ring walk must not re-emit the topology trace");
+    /tripwireFineGenerations\[record\]!,\s*!tripwiresFailFast\)\);/,
+    "the ring walk emits the trace exactly when the live walk did not run");
 
   // Whole-run reporting for allow-listed trips is unchanged, and the ring walk
   // remains a hard failure if it ever disagrees with the live one.
@@ -280,6 +288,49 @@ test("silent-failure tripwires are evaluated at their own step and terminate the
   ], "the end-of-run walk must keep reporting the whole run");
   assert.match(smoke, /silent-failure tripwire\(s\) tripped \$\{where\}/,
     "both termination paths must report the same forensics payload");
+});
+
+/**
+ * Detection and termination-timing are separate axes, and conflating them cost
+ * every benchmark number ~27%.
+ *
+ * The per-step verdict needs a queue fence, which removes host/GPU overlap:
+ * measured 420.57 vs 331.80 ms/advance on `large-power-dam-break`. That price is
+ * worth paying to find a first domino and worth nothing on a green run, where
+ * there is no first trip to stop at. So `1` keeps detection unconditional and
+ * pays nothing, `failfast` adds the fence, and only `0` stops gating -- which
+ * the benchmark harness refuses.
+ */
+test("tripwire detection is unconditional; only the per-step fence is a mode", async () => {
+  const smoke = normalizeWhitespace(await readFile(
+    new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8"));
+
+  assert.match(smoke,
+    /tripwireMode !== "0" && tripwireMode !== "1"\s*&& tripwireMode !== "failfast"/,
+    "the three modes are 0, 1 and failfast");
+  assert.match(smoke, /const tripwiresFailFast = tripwireMode === "failfast";/);
+  assert.match(smoke,
+    /const tripwiresForcedRequired = tripwireMode === "1" \|\| tripwiresFailFast;/,
+    "requiring every counter to be readable must not be weakened by escalating to failfast");
+
+  // Off-mode must cost nothing: no second buffer, no second copy, no fence.
+  assert.match(smoke, /const tripwireLiveReadback = tripwireSnapshot && tripwiresFailFast/,
+    "the live readback buffer may only exist in failfast mode");
+  assert.match(smoke,
+    /if \(tripwiresFailFast\) \{\s*encodeTripwireRecordCopies\(encoder, sources, tripwireLiveReadback!, 0\);/,
+    "the second per-step copy is failfast-only");
+  assert.match(smoke, /if \(capturedThisStep && tripwiresFailFast\) \{/,
+    "the per-step fence, decode and verdict are failfast-only");
+
+  // ...but the ring capture and the end-of-run verdict are NOT gated on the
+  // mode. A run that gets faster while rolling back topology still fails.
+  const ringWalk = smoke.slice(smoke.indexOf("const allowed = tripped.filter("));
+  assert.doesNotMatch(
+    ringWalk.slice(0, ringWalk.indexOf('phase: "tripwires"')),
+    /tripwiresFailFast/,
+    "the end-of-run walk must fail the run in every mode; detection is not a mode");
+  assert.match(smoke, /mode: tripwiresFailFast \? "failfast" : "end-of-run",/,
+    "every run must record which mode produced its wall, so numbers are not compared across modes");
 });
 
 test("the ceiling profiler uses the authored band-1 fast formulation", async () => {

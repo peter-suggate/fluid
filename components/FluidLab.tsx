@@ -93,7 +93,13 @@ function GPUInitializationPanel({ activity, plugin }: {
     {elapsed_s >= 10 && <p className="gpu-task-wait">Still working on this task. Elapsed time remains live when the GPU driver exposes no intermediate counters.</p>}
     <small>{activity.retainingPrevious
       ? "The attached generation remains usable. "
-      : "The editor, camera, panels, and file actions remain available. "}{plugin.blocks === "transport" ? "Simulation transport unlocks when authoritative fluid is fenced." : "This work does not block product interaction."}</small>
+      : plugin.blocks === "viewport"
+        ? "Panels and file actions remain available. "
+        : "The editor, camera, panels, and file actions remain available. "}{plugin.blocks === "viewport"
+          ? "Scene interaction unlocks when a complete SVO frame is fenced."
+          : plugin.blocks === "transport"
+            ? "Simulation transport unlocks when authoritative fluid is fenced."
+            : "This work does not block product interaction."}</small>
   </div>;
 }
 

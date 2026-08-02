@@ -236,8 +236,8 @@ export class WebGPUFineLevelSetSummaries {
   }
 
   constructor(private readonly device: GPUDevice, readonly finePlan: FineLevelSetBrickPlan,
-    coarseEntryCapacity = 0, deferPipelineCompilation = false) {
-    this.pipelinesDeferred = deferPipelineCompilation;
+    coarseEntryCapacity = 0, _deferPipelineCompilation = true) {
+    this.pipelinesDeferred = true;
     this.plan = planFineLevelSetGPUSummaries(finePlan, coarseEntryCapacity);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     const make = (label: string, size: number) => device.createBuffer({ label, size: Math.max(4, size), usage: storage });
@@ -261,7 +261,6 @@ export class WebGPUFineLevelSetSummaries {
       label: `global fine direct summary parameters level ${level}`, size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     }));
-    if (!deferPipelineCompilation) this.createPipelinesSync();
   }
 
   private descriptor(entryPoint: string): GPUComputePipelineDescriptor {
@@ -270,12 +269,6 @@ export class WebGPUFineLevelSetSummaries {
     });
     return { label: entryPoint, layout: "auto",
       compute: { module: this.shaderModule, entryPoint } };
-  }
-
-  private createPipelinesSync(): void {
-    for (const entryPoint of WebGPUFineLevelSetSummaries.entryPoints) {
-      this.pipelines[entryPoint] = this.device.createComputePipeline(this.descriptor(entryPoint));
-    }
   }
 
   initializationTasks(): GPUInitializationTask[] {

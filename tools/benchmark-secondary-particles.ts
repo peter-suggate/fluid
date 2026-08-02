@@ -133,7 +133,7 @@ for (let warmup = 0; warmup < 12; warmup += 1) {
 await device.queue.onSubmittedWorkDone();
 
 const encoder = device.createCommandEncoder();
-const recorder = new DynamicGPUPerformanceTraceRecorder(
+const recorder = await DynamicGPUPerformanceTraceRecorder.create(
   device,
   1,
   "presentation",

@@ -16,7 +16,7 @@ test("SVO dry-frame benchmark uses the generic one-shot GPU trace", () => {
 
 test("SVO dry-frame benchmark can capture the configured production phase partition", () => {
   assert.match(source, /FLUID_SVO_DRY_FRAME_PHASE_TRACE=1/);
-  assert.match(source, /new DynamicGPUPerformanceTraceRecorder\(/);
+  assert.match(source, /await DynamicGPUPerformanceTraceRecorder\.create\(/);
   assert.match(source, /attempt < 3 && !configuredPhaseTrace/);
   assert.match(source, /recorder\.completePhase\(encoder, phase\)/);
   assert.match(source, /configuredPhaseTrace,/);
@@ -32,15 +32,36 @@ test("SVO dry-frame benchmark exposes a clean render-only xctrace lane", () => {
 });
 
 test("SVO dry-frame benchmark can force serialized wall timing without changing the rendered frame", () => {
-  assert.match(source, /FLUID_SVO_DRY_FRAME_TIMING=wall/);
-  assert.match(source, /const forceWallTiming = process\.env\.FLUID_SVO_DRY_FRAME_TIMING === "wall"/);
+  assert.match(source, /FLUID_SVO_DRY_FRAME_TIMING selects wall \(default\)/);
+  assert.match(source, /const timingMode = process\.env\.FLUID_SVO_DRY_FRAME_TIMING \?\? "wall"/);
+  assert.match(source, /const forceWallTiming = timingMode === "wall"/);
   assert.match(source, /GPUPerformanceTraceRecorder\.supported\(device\) && !forceWallTiming/);
   assert.match(source, /device\.queue\.onSubmittedWorkDone\(\)/);
 });
 
 test("SVO dry-frame benchmark measures only the production GLOBAL path", () => {
   assert.doesNotMatch(source, /FLUID_SVO_DRY_FRAME_LIGHTING|SVO_LIGHTING_MODES|setLightingMode|lightingMode/);
+  assert.match(source, /const shadingPathRaw = process\.env\.FLUID_SVO_DRY_FRAME_SHADING \?\? "split"/);
   assert.match(source, /renderer\.setLightingOptions/);
+  assert.match(source, /solver\.encodeSceneMaintenance\(initialScenePublication\)/,
+    "the benchmark must publish the staged live scene before timing render consumers");
+});
+
+test("SVO dry-frame benchmark isolates primary-seam-closure cost and quality", () => {
+  assert.match(source, /const SVO_VIEW_UNIFORM_FLOATS = 104/);
+  assert.match(source, /size: SVO_VIEW_UNIFORM_FLOATS \* Float32Array\.BYTES_PER_ELEMENT/);
+  assert.match(source, /FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE/);
+  assert.match(source, /same-process-interleaved-off-on/);
+  assert.match(source, /cycle % 2 === 0 \? \[false, true\][^]*: \[true, false\]/);
+  assert.match(source, /disabledMedian_ms:/);
+  assert.match(source, /enabledMedian_ms:/);
+  assert.match(source, /overheadPercent:/);
+  assert.match(source, /pairedMedianOverhead_ms:/);
+  assert.match(source, /disabledVsFull:/);
+  assert.match(source, /enabledVsFull:/);
+  assert.match(source, /enabledCloserToFull/);
+  assert.match(source, /darkenedByRefinement/);
+  assert.match(source, /silhouetteSignedDifference/);
 });
 
 test("SVO dry-frame benchmark exposes a render-only brick-size override and topology accounting", () => {

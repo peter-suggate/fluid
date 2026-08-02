@@ -105,9 +105,9 @@ export class WebGPUOctreeAnalyticBootstrapWorklist {
     tileWorklist: GPUBuffer,
     tileStates: GPUBuffer,
     readonly plan: OctreeAnalyticBootstrapWorklistPlan,
-    deferPipelineCompilation = false,
+    _deferPipelineCompilation = true,
   ) {
-    this.pipelinesDeferred = deferPipelineCompilation;
+    this.pipelinesDeferred = true;
     this.tileWorklist = tileWorklist;
     this.tileStates = tileStates;
     const [tx, ty, tz] = plan.tileDimensions;
@@ -148,7 +148,6 @@ export class WebGPUOctreeAnalyticBootstrapWorklist {
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
     ] });
     this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-    if (!deferPipelineCompilation) this.emit = device.createComputePipeline(this.descriptor());
     this.group = device.createBindGroup({ layout, entries: [
       { binding: 0, resource: { buffer: tileWorklist } },
       { binding: 1, resource: { buffer: tileStates } },

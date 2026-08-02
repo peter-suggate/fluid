@@ -259,7 +259,7 @@ export class WebGPUOctreeFineSeedAdapter {
     options: OctreeFineSeedAdapterOptions,
   ) {
     this.device=device;this.topology=topology;
-    this.pipelinesDeferred = options.deferPipelineCompilation === true;
+    this.pipelinesDeferred = true;
     this.bootstrapLevelSet=options.bootstrapLevelSet;
     this.plan=planOctreeFineSeedAdapter(rowCapacity);
     const dimensions = topology.dimensions;
@@ -356,7 +356,6 @@ export class WebGPUOctreeFineSeedAdapter {
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     this.candidatePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.selectLayout] });
-    if (!options.deferPipelineCompilation) this.createPipelinesSync();
     this.plannerBindGroup = this.createSelectBindGroup(this.dispatch);
     this.selectBindGroup = this.createSelectBindGroup(this.dispatchBindingSentinel);
     this.bindGroup = this.createBindGroup();
@@ -377,14 +376,6 @@ export class WebGPUOctreeFineSeedAdapter {
     return { label: entryPoint === "publishFineSeedAdapterDispatch"
       ? "Publish exact octree fine-seed dispatch" : "Publish exact octree fine-seed candidates",
       layout: this.candidatePipelineLayout, compute: { module: this.candidateModule, entryPoint } };
-  }
-
-  private createPipelinesSync(): void {
-    this.buildPipeline = this.device.createComputePipeline(this.buildDescriptor());
-    this.planDispatchPipeline = this.device.createComputePipeline(
-      this.candidateDescriptor("publishFineSeedAdapterDispatch"));
-    this.publishCandidatesPipeline = this.device.createComputePipeline(
-      this.candidateDescriptor("publishFineSeedCandidates"));
   }
 
   initializationTasks(): GPUInitializationTask[] {

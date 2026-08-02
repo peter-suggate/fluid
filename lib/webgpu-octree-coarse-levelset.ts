@@ -13,6 +13,7 @@ import {
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 import { PassBroker } from "./webgpu-pass-broker";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
 
 /** Fine-to-coarse aggregate record ABI consumed by the production power schedule. */
 export const OCTREE_FINE_PHI_CONTRIBUTION_BYTES = 16;
@@ -44,7 +45,9 @@ export function planOctreeCoarsePhi(rowCapacityValue: number): OctreeCoarsePhiGP
 export class WebGPUOctreeCoarseLevelSet {
   readonly plan: OctreeCoarsePhiGPUPlan;
   readonly records: GPUBuffer;
-  private readonly bootstrapPipeline: GPUComputePipeline;
+  private bootstrapPipeline!: GPUComputePipeline;
+  private readonly activity: GPULogicalActivityAdoptionContext;
+  private readonly shaderCode: string;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, rowCapacity: number) {
@@ -55,24 +58,29 @@ export class WebGPUOctreeCoarseLevelSet {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     const activityProfile = performanceShaderVariant();
-    const activity = createGPULogicalActivityAdoptionContext({
+    this.activity = createGPULogicalActivityAdoptionContext({
       moduleId: "octree/coarse-levelset",
       profile: activityProfile,
     });
-    activity.describeTask("bootstrap-coarse-phi", {
+    this.activity.describeTask("bootstrap-coarse-phi", {
       id: "gpu.physics.coarse-phi.bootstrap",
       label: "Coarse phi · bootstrap surface rows",
       phaseId: "fine-sdf-advection",
     });
-    const variant = activity.module(
-      octreeCoarsePhiBootstrapActivityShader(activity),
+    const variant = this.activity.module(
+      octreeCoarsePhiBootstrapActivityShader(this.activity),
       `octree/coarse-levelset/${activityProfile.cacheKey}`,
     );
-    const shaderModule = device.createShaderModule({
+    this.shaderCode = variant.code;
+  }
+
+  async initializePipeline(): Promise<void> {
+    const compiler = gpuCompilationManagerFor(this.device);
+    const shaderModule = compiler.createShaderModule({
       label: "Octree coarse phi bootstrap",
-      code: variant.code,
+      code: this.shaderCode,
     });
-    this.bootstrapPipeline = activity.registerPipeline(device.createComputePipeline({
+    this.bootstrapPipeline = this.activity.registerPipeline(await compiler.compileComputePipeline({
       label: "Bootstrap compact coarse phi",
       layout: "auto",
       compute: { module: shaderModule, entryPoint: "bootstrapCoarsePhiFromSurfaceLeaves" },

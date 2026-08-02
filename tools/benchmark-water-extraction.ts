@@ -229,7 +229,7 @@ try {
 
     const samples: Sample[] = [];
     const timedEncoder = device.createCommandEncoder({ label: `${sceneId} alternating extraction samples` });
-    const traceRecorder = new DynamicGPUPerformanceTraceRecorder(
+    const traceRecorder = await DynamicGPUPerformanceTraceRecorder.create(
       device,
       1,
       "presentation",

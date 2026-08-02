@@ -48,11 +48,14 @@ test("presentation defaults to global-illuminated sparse voxels", () => {
   assert.equal("svoLightingMode" in useUIStore.getState(), false);
   assert.equal(useUIStore.getState().svoShadowsEnabled, true);
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, true);
+  assert.equal(useUIStore.getState().silhouetteRefinementEnabled, false);
   assert.equal(useUIStore.getState().svoRenderTuning.stationaryPrimaryReuseEnabled, false);
   useUIStore.getState().setSvoShadowsEnabled(false);
   useUIStore.getState().setSvoAmbientOcclusionEnabled(false);
+  useUIStore.getState().setSilhouetteRefinementEnabled(true);
   assert.equal(useUIStore.getState().svoShadowsEnabled, false);
   assert.equal(useUIStore.getState().svoAmbientOcclusionEnabled, false);
+  assert.equal(useUIStore.getState().silhouetteRefinementEnabled, true);
   useUIStore.setState(initial, true);
 });
 

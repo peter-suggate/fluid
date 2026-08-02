@@ -29,7 +29,8 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
 
 test("GLOBAL SVO is the sole production presentation", () => {
   assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS,
-    { shadowsEnabled: true, ambientOcclusionEnabled: true, coneTracingMode: "cones", primaryTraversal: "raster" });
+    { shadowsEnabled: true, ambientOcclusionEnabled: true, silhouetteRefinementEnabled: false,
+      coneTracingMode: "cones", primaryTraversal: "raster" });
   assert.doesNotMatch(rendererSource, /svoRenderMode|svoLightingMode|SvoRenderMode|SvoLightingMode/);
   expectSource(rendererSource, /type SvoLightingOptions[^]*from "\.\/svo-render-options"/,
     "renderer must retain only GLOBAL visibility effects");
@@ -50,7 +51,7 @@ test("the water pipeline replacement callback owns the dry scene without a subst
   assert.doesNotMatch(waterSource, /scenePipeline|sceneBindGroup|sceneShader|Render dry scene for water refraction/);
 });
 
-test("missing live SVO publication fails closed and retains only real fluid interfaces", () => {
+test("missing live SVO publication fails closed behind authoritative fluid interfaces", () => {
   const failure = waterSource.slice(
     waterSource.indexOf("if (!sparseSceneResult)"),
     waterSource.indexOf("traceBoundary?.();", waterSource.indexOf("if (!sparseSceneResult)")),
@@ -62,6 +63,8 @@ test("missing live SVO publication fails closed and retains only real fluid inte
   assert.doesNotMatch(rendererSource, /setPendingSvoBackground|svoPresentationExpected/);
   expectSource(waterSource, /if \(this\.sceneHasFluid\) \{[^]*interfacePass\("Water \+ spray front interfaces"/,
     "actual fluid interfaces remain available after the dry scene fails closed");
+  assert.doesNotMatch(waterSource, /if \(sparseSceneResult && this\.sceneHasFluid\)/,
+    "dry-scene publication does not own the independently generated fluid surface");
 });
 
 test("the direct renderer exposes a source-aware replacement texture contract", () => {

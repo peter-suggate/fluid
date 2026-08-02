@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { octreeMethod, octreeSolverOptions } from "../lib/methods/octree";
 import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { managedGPUDevice } from "../lib/gpu-compilation-manager";
 import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
 import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES } from "../lib/webgpu-octree";
 import { WEBGPU_EXCLUSIVE_LOCK } from "../tools/webgpu-smoke-isolation";
@@ -77,7 +78,8 @@ test("Dawn constructs the exact production power UI graph at the portable storag
   let constructorShaderModules = 0;
   let constructorPipelines = 0;
   let constructingSolver = false;
-  const solverDevice = new Proxy(device, {
+  const managedDevice = managedGPUDevice(device, { requireWorkerRealm: false });
+  const solverDevice = new Proxy(managedDevice, {
     get(target, property) {
       if (property === "createShaderModule") {
         return (descriptor: GPUShaderModuleDescriptor) => {
@@ -89,6 +91,24 @@ test("Dawn constructs the exact production power UI graph at the portable storag
         return (descriptor: GPUComputePipelineDescriptor) => {
           if (constructingSolver) constructorPipelines += 1;
           return target.createComputePipeline(descriptor);
+        };
+      }
+      if (property === "createComputePipelineAsync") {
+        return (descriptor: GPUComputePipelineDescriptor) => {
+          if (constructingSolver) constructorPipelines += 1;
+          return target.createComputePipelineAsync(descriptor);
+        };
+      }
+      if (property === "createRenderPipeline") {
+        return (descriptor: GPURenderPipelineDescriptor) => {
+          if (constructingSolver) constructorPipelines += 1;
+          return target.createRenderPipeline(descriptor);
+        };
+      }
+      if (property === "createRenderPipelineAsync") {
+        return (descriptor: GPURenderPipelineDescriptor) => {
+          if (constructingSolver) constructorPipelines += 1;
+          return target.createRenderPipelineAsync(descriptor);
         };
       }
       if (property === "createBindGroup") {
@@ -128,7 +148,7 @@ test("Dawn constructs the exact production power UI graph at the portable storag
     assert.equal(constructorShaderModules, 0,
       "capability allocation must not create shader modules before staged initialization");
     assert.equal(constructorPipelines, 0,
-      "capability allocation must not synchronously compile pipelines");
+      "capability allocation must not start pipeline compilation");
 
     // Exercise the exact production task list through its construction
     // boundary. Warmup is deliberately excluded: this gate catches shader,

@@ -292,6 +292,16 @@ struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOf
 
 interface LevelBindings { worklist: LiveSvoDerivedGpuWorklist; invalidate: GPUBindGroup; build: GPUBindGroup; opacityCopy: GPUBindGroup; radianceCopy: readonly GPUBindGroup[] }
 
+interface LiveSvoDerivedBuilderPipelineState {
+  emptyInitializationPipeline: GPUComputePipeline;
+  emptyInitializationBindGroup: GPUBindGroup;
+  buildPipeline: GPUComputePipeline;
+  invalidatePipeline: GPUComputePipeline;
+  opacityCopyPipeline: GPUComputePipeline;
+  radianceCopyPipelines: readonly GPUComputePipeline[];
+  levels: readonly LevelBindings[];
+}
+
 function compactScratchAtlasPages(capacity: number, maximumTextureDimension3D: number): readonly [number, number, number] {
   const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
   const maximumXyPages = Math.floor(maximumTextureDimension3D / physical);
@@ -313,16 +323,11 @@ export class WebGpuLiveSvoDerivedBuilder {
   private readonly radianceScratch: GPUTexture;
   private readonly scratchValidity: GPUBuffer;
   private readonly params: GPUBuffer;
-  private readonly emptyInitializationPipeline: GPUComputePipeline;
-  private readonly emptyInitializationBindGroup: GPUBindGroup;
-  private readonly buildPipeline: GPUComputePipeline;
-  private readonly invalidatePipeline: GPUComputePipeline;
-  private readonly opacityCopyPipeline: GPUComputePipeline;
-  private readonly radianceCopyPipelines: readonly GPUComputePipeline[];
-  private readonly levels: readonly LevelBindings[];
+  private pipelineState?: LiveSvoDerivedBuilderPipelineState;
+  private pipelineInitialization?: Promise<void>;
   private destroyed = false;
 
-  constructor(private readonly device: GPUDevice, options: WebGpuLiveSvoDerivedBuilderOptions) {
+  constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoDerivedBuilderOptions) {
     if (options.nodeMips.pageCapacity !== options.radiance.pageCapacity) throw new Error("Live opacity and radiance page capacities must match");
     if (options.nodeMips.atlasPages.some((value, axis) => value !== options.radiance.atlasPages[axis])) throw new Error("Live opacity and radiance atlas shapes must match");
     if (options.nodeMips.atlasPages.reduce((product, value) => product * value, 1) < options.nodeMips.pageCapacity) {
@@ -371,22 +376,47 @@ export class WebGpuLiveSvoDerivedBuilder {
       options.tree.velocityOffsetBytes / 4, options.tree.materialOwnerOffsetBytes / 4,
       options.tree.sceneGeometryOffsetBytes / 4, options.tree.sceneMaterialOwnerOffsetBytes / 4,
     ]));
+    const texelCount = scratchTexels[0] * scratchTexels[1] * scratchTexels[2];
+    this.allocatedBytes = texelCount * (4 + 4 * 8) + scratchCapacity * 4 + 64;
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.pipelineState) return;
+    if (this.destroyed) throw new Error("Cannot initialize destroyed live SVO derived builder");
+    if (!this.pipelineInitialization) {
+      this.pipelineInitialization = this.compilePipelineState().then((state) => {
+        if (this.destroyed) throw new Error("Live SVO derived builder was destroyed during pipeline initialization");
+        this.pipelineState = state;
+      });
+    }
+    try {
+      await this.pipelineInitialization;
+    } catch (error) {
+      this.pipelineInitialization = undefined;
+      throw error;
+    }
+  }
+
+  private async compilePipelineState(): Promise<LiveSvoDerivedBuilderPipelineState> {
+    const { device, options } = this;
+    const label = options.label ?? "Live SVO derived content";
     const buildModule = device.createShaderModule({ label: `${label} build shader`, code: liveSvoDerivedBuildWGSL });
     const copyModule = device.createShaderModule({ label: `${label} copy shader`, code: liveSvoDerivedCopyWGSL });
     const emptyInitializationModule = device.createShaderModule({
       label: `${label} valid-empty initialization shader`, code: liveSvoDerivedEmptyInitializationWGSL,
     });
-    this.emptyInitializationPipeline = device.createComputePipeline({
-      label: `${label} valid-empty initialization pipeline`, layout: "auto",
-      compute: { module: emptyInitializationModule, entryPoint: "initializeValidEmptyPages" },
-    });
-    this.buildPipeline = device.createComputePipeline({ label: `${label} build pipeline`, layout: "auto", compute: { module: buildModule, entryPoint: "buildPages" } });
-    this.invalidatePipeline = device.createComputePipeline({ label: `${label} invalidate pipeline`, layout: "auto", compute: { module: copyModule, entryPoint: "invalidatePages" } });
-    this.opacityCopyPipeline = device.createComputePipeline({ label: `${label} opacity copy pipeline`, layout: "auto", compute: { module: copyModule, entryPoint: "copyOpacity" } });
-    this.radianceCopyPipelines = [0, 1, 2, 3].map((lobe) => device.createComputePipeline({ label: `${label} radiance copy ${lobe} pipeline`,
-      layout: "auto", compute: { module: copyModule, entryPoint: `copyRadiance${lobe}` } }));
-    this.emptyInitializationBindGroup = device.createBindGroup({
-      layout: this.emptyInitializationPipeline.getBindGroupLayout(0), entries: [
+    const [emptyInitializationPipeline, buildPipeline, invalidatePipeline, opacityCopyPipeline, radianceCopyPipelines] = await Promise.all([
+      device.createComputePipelineAsync({ label: `${label} valid-empty initialization pipeline`, layout: "auto",
+        compute: { module: emptyInitializationModule, entryPoint: "initializeValidEmptyPages" } }),
+      device.createComputePipelineAsync({ label: `${label} build pipeline`, layout: "auto", compute: { module: buildModule, entryPoint: "buildPages" } }),
+      device.createComputePipelineAsync({ label: `${label} invalidate pipeline`, layout: "auto", compute: { module: copyModule, entryPoint: "invalidatePages" } }),
+      device.createComputePipelineAsync({ label: `${label} opacity copy pipeline`, layout: "auto", compute: { module: copyModule, entryPoint: "copyOpacity" } }),
+      Promise.all([0, 1, 2, 3].map((lobe) => device.createComputePipelineAsync({ label: `${label} radiance copy ${lobe} pipeline`,
+        layout: "auto", compute: { module: copyModule, entryPoint: `copyRadiance${lobe}` } }))),
+    ]);
+    if (this.destroyed) throw new Error("Live SVO derived builder was destroyed during pipeline initialization");
+    const emptyInitializationBindGroup = device.createBindGroup({
+      layout: emptyInitializationPipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: options.nodeMips.pageValidity.view },
         { binding: 1, resource: options.radiance.pageValidity.view },
         { binding: 2, resource: { buffer: options.generationSource.buffer } },
@@ -395,13 +425,13 @@ export class WebGpuLiveSvoDerivedBuilder {
     });
     const radianceScratchView = this.radianceScratch.createView({ dimension: "3d" });
     const targetRadianceViews = options.radiance.textures.map((texture) => texture.createView({ dimension: "3d" }));
-    this.levels = options.worklists.map((worklist) => ({ worklist,
-      invalidate: device.createBindGroup({ layout: this.invalidatePipeline.getBindGroupLayout(0), entries: [
+    const levels = options.worklists.map((worklist) => ({ worklist,
+      invalidate: device.createBindGroup({ layout: invalidatePipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
         { binding: 5, resource: options.nodeMips.pageValidity.view }, { binding: 6, resource: options.radiance.pageValidity.view },
         { binding: 7, resource: { buffer: this.params } },
       ] }),
-      build: device.createBindGroup({ layout: this.buildPipeline.getBindGroupLayout(0), entries: [
+      build: device.createBindGroup({ layout: buildPipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } }, { binding: 1, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
         { binding: 2, resource: { buffer: options.tree.payload } }, { binding: 3, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } },
         { binding: 4, resource: { buffer: options.materialEmission } }, { binding: 5, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
@@ -411,44 +441,46 @@ export class WebGpuLiveSvoDerivedBuilder {
         { binding: 13, resource: options.nodeMips.pageValidity.view }, { binding: 14, resource: options.radiance.pageValidity.view },
         { binding: 15, resource: { buffer: this.scratchValidity } },
       ] }),
-      opacityCopy: device.createBindGroup({ layout: this.opacityCopyPipeline.getBindGroupLayout(0), entries: [
+      opacityCopy: device.createBindGroup({ layout: opacityCopyPipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } }, { binding: 1, resource: this.opacityScratch.createView({ dimension: "3d" }) },
         { binding: 2, resource: options.nodeMips.texture.createView({ dimension: "3d" }) },
         { binding: 5, resource: options.nodeMips.pageValidity.view }, { binding: 7, resource: { buffer: this.params } },
         { binding: 8, resource: { buffer: this.scratchValidity } },
       ] }),
-      radianceCopy: this.radianceCopyPipelines.map((pipeline, lobe) => device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+      radianceCopy: radianceCopyPipelines.map((pipeline, lobe) => device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: worklist.buffer, offset: worklist.bindingOffsetBytes ?? 0, size: worklist.bindingSizeBytes } }, { binding: 3, resource: radianceScratchView },
         { binding: 4, resource: targetRadianceViews[lobe] }, { binding: 6, resource: options.radiance.pageValidity.view },
         { binding: 7, resource: { buffer: this.params } }, { binding: 8, resource: { buffer: this.scratchValidity } },
       ] })),
     }));
-    const texelCount = scratchTexels[0] * scratchTexels[1] * scratchTexels[2];
-    this.allocatedBytes = texelCount * (4 + 4 * 8) + scratchCapacity * 4 + 64;
+    return { emptyInitializationPipeline, emptyInitializationBindGroup, buildPipeline, invalidatePipeline,
+      opacityCopyPipeline, radianceCopyPipelines, levels };
   }
 
   encode(encoder: GPUCommandEncoder, initializeEmpty = false): void {
     if (this.destroyed) return;
+    const state = this.pipelineState;
+    if (!state) throw new Error("Live SVO derived builder pipelines are not initialized");
     if (initializeEmpty) {
       const pass = encoder.beginComputePass({ label: "Certify live SVO address pages as empty" });
-      pass.setPipeline(this.emptyInitializationPipeline); pass.setBindGroup(0, this.emptyInitializationBindGroup);
+      pass.setPipeline(state.emptyInitializationPipeline); pass.setBindGroup(0, state.emptyInitializationBindGroup);
       pass.dispatchWorkgroups(Math.ceil(this.plannedPageCount / 256)); pass.end();
     }
     // All affected pages fail closed before any level is rebuilt.
-    for (const level of this.levels) {
+    for (const level of state.levels) {
       const pass = encoder.beginComputePass({ label: "Invalidate live SVO derived pages" });
-      pass.setPipeline(this.invalidatePipeline); pass.setBindGroup(0, level.invalidate);
+      pass.setPipeline(state.invalidatePipeline); pass.setBindGroup(0, level.invalidate);
       pass.dispatchWorkgroups(Math.ceil(level.worklist.capacity / 256)); pass.end();
     }
     // Finest-to-coarsest order is the caller's worklist order. Each copy pass
     // makes complete children visible before the next parent build begins.
-    for (const level of this.levels) {
+    for (const level of state.levels) {
       const indirect = level.worklist.indirectOffsetBytes ?? (level.worklist.bindingOffsetBytes ?? 0) + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes;
       const build = encoder.beginComputePass({ label: "Build live SVO derived pages" });
-      build.setPipeline(this.buildPipeline); build.setBindGroup(0, level.build); build.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); build.end();
+      build.setPipeline(state.buildPipeline); build.setBindGroup(0, level.build); build.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); build.end();
       const opacity = encoder.beginComputePass({ label: "Publish live SVO opacity pages" });
-      opacity.setPipeline(this.opacityCopyPipeline); opacity.setBindGroup(0, level.opacityCopy); opacity.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); opacity.end();
-      this.radianceCopyPipelines.forEach((pipeline, lobe) => {
+      opacity.setPipeline(state.opacityCopyPipeline); opacity.setBindGroup(0, level.opacityCopy); opacity.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); opacity.end();
+      state.radianceCopyPipelines.forEach((pipeline, lobe) => {
         const radiance = encoder.beginComputePass({ label: `Publish live SVO radiance lobe ${lobe}` });
         radiance.setPipeline(pipeline); radiance.setBindGroup(0, level.radianceCopy[lobe]);
         radiance.dispatchWorkgroupsIndirect(level.worklist.buffer, indirect); radiance.end();
@@ -464,18 +496,31 @@ export class WebGpuLiveSvoDerivedBuilder {
 
 function align256(value: number): number { return Math.ceil(value / 256) * 256; }
 
+interface LiveSvoDerivedPlannerSourceAllocation {
+  source: LiveSvoDirtyLeafSource;
+  capacity: number;
+  params: GPUBuffer;
+}
+
+interface LiveSvoDerivedPlannerPipelineState {
+  populatePipeline: GPUComputePipeline;
+  finalizePipeline: GPUComputePipeline;
+  sources: readonly { capacity: number; bindGroup: GPUBindGroup }[];
+  initial: { capacity: number; bindGroup: GPUBindGroup };
+  finalizeBindGroup: GPUBindGroup;
+}
+
 /** GPU compaction/deduplication from a unified dirty-leaf stream into level worklists. */
 export class WebGpuLiveSvoDerivedWorklistPlanner {
   readonly worklists: readonly LiveSvoDerivedGpuWorklist[];
   readonly allocatedBytes: number;
   private readonly arena: GPUBuffer;
   private readonly claims: GPUBuffer;
-  private readonly populatePipeline: GPUComputePipeline;
-  private readonly finalizePipeline: GPUComputePipeline;
-  private readonly sources: readonly { capacity: number; params: GPUBuffer; bindGroup: GPUBindGroup }[];
-  private readonly initial: { capacity: number; params: GPUBuffer; bindGroup: GPUBindGroup };
-  private readonly finalizeBindGroup: GPUBindGroup;
+  private readonly sources: readonly LiveSvoDerivedPlannerSourceAllocation[];
+  private readonly initial: LiveSvoDerivedPlannerSourceAllocation;
   private readonly sectionOffsetsBytes: readonly number[];
+  private pipelineState?: LiveSvoDerivedPlannerPipelineState;
+  private pipelineInitialization?: Promise<void>;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoDerivedWorklistPlannerOptions) {
@@ -501,28 +546,63 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.worklists = this.sectionOffsetsBytes.map((offset) => ({ buffer: this.arena, capacity: options.pageCapacityPerLevel,
       bindingOffsetBytes: offset, bindingSizeBytes: sectionBytes, indirectOffsetBytes: offset + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes }));
-    const plannerModule = device.createShaderModule({ label: `${label} shader`, code: liveSvoDerivedWorklistWGSL });
-    this.populatePipeline = device.createComputePipeline({ label: `${label} populate pipeline`, layout: "auto", compute: { module: plannerModule, entryPoint: "populate" } });
-    this.finalizePipeline = device.createComputePipeline({ label: `${label} finalize pipeline`, layout: "auto", compute: { module: plannerModule, entryPoint: "finalize" } });
     const createSource = (source: LiveSvoDirtyLeafSource, suffix: string) => {
       const params = device.createBuffer({ label: `${label} ${suffix} parameters`, size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      return { capacity: source.capacity, params, bindGroup: device.createBindGroup({ layout: this.populatePipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: source.buffer } }, { binding: 1, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
-        { binding: 2, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } }, { binding: 3, resource: options.nodeMips.directPageTableTexture.createView({ dimension: "3d" }) },
-        { binding: 4, resource: { buffer: this.claims } }, { binding: 5, resource: { buffer: this.arena } }, { binding: 6, resource: { buffer: params } },
-        { binding: 7, resource: { buffer: options.generationSource.buffer } },
-      ] }) };
+      return { source, capacity: source.capacity, params };
     };
     this.sources = options.dirtyLeafSources.map((source, index) => createSource(source, `source ${index}`));
     const initialSource: LiveSvoDirtyLeafSource = { buffer: options.tree.control, countOffsetBytes: 0, recordOffsetBytes: 0,
       capacity: options.tree.leafCapacity, recordStrideWords: 1 };
     this.initial = createSource(initialSource, "initial all-leaves");
-    this.finalizeBindGroup = device.createBindGroup({ layout: this.finalizePipeline.getBindGroupLayout(0), entries: [
+    this.configurePlan(options.nodeMips, options.finestLevel, options.levelCount);
+    this.allocatedBytes = sectionBytes * options.levelCount + options.nodeMips.pageCapacity * 4 + 144 * (this.sources.length + 1);
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.pipelineState) return;
+    if (this.destroyed) throw new Error("Cannot initialize destroyed live SVO derived worklist planner");
+    if (!this.pipelineInitialization) {
+      this.pipelineInitialization = this.compilePipelineState().then((state) => {
+        if (this.destroyed) throw new Error("Live SVO derived worklist planner was destroyed during pipeline initialization");
+        this.pipelineState = state;
+      });
+    }
+    try {
+      await this.pipelineInitialization;
+    } catch (error) {
+      this.pipelineInitialization = undefined;
+      throw error;
+    }
+  }
+
+  private async compilePipelineState(): Promise<LiveSvoDerivedPlannerPipelineState> {
+    const { device, options } = this;
+    const label = options.label ?? "Live SVO derived worklists";
+    const plannerModule = device.createShaderModule({ label: `${label} shader`, code: liveSvoDerivedWorklistWGSL });
+    const [populatePipeline, finalizePipeline] = await Promise.all([
+      device.createComputePipelineAsync({ label: `${label} populate pipeline`, layout: "auto",
+        compute: { module: plannerModule, entryPoint: "populate" } }),
+      device.createComputePipelineAsync({ label: `${label} finalize pipeline`, layout: "auto",
+        compute: { module: plannerModule, entryPoint: "finalize" } }),
+    ]);
+    if (this.destroyed) throw new Error("Live SVO derived worklist planner was destroyed during pipeline initialization");
+    const bindSource = ({ source, capacity, params }: LiveSvoDerivedPlannerSourceAllocation) => ({ capacity,
+      bindGroup: device.createBindGroup({ layout: populatePipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: source.buffer } },
+        { binding: 1, resource: { buffer: options.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
+        { binding: 2, resource: { buffer: options.tree.topology, offset: options.tree.topologyOffsetBytes } },
+        { binding: 3, resource: options.nodeMips.directPageTableTexture.createView({ dimension: "3d" }) },
+        { binding: 4, resource: { buffer: this.claims } }, { binding: 5, resource: { buffer: this.arena } },
+        { binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: options.generationSource.buffer } },
+      ] }),
+    });
+    const sources = this.sources.map(bindSource);
+    const initial = bindSource(this.initial);
+    const finalizeBindGroup = device.createBindGroup({ layout: finalizePipeline.getBindGroupLayout(0), entries: [
       { binding: 5, resource: { buffer: this.arena } }, { binding: 6, resource: { buffer: this.sources[0].params } },
       { binding: 7, resource: { buffer: options.generationSource.buffer } },
     ] });
-    this.configurePlan(options.nodeMips, options.finestLevel, options.levelCount);
-    this.allocatedBytes = sectionBytes * options.levelCount + options.nodeMips.pageCapacity * 4 + 144 * (this.sources.length + 1);
+    return { populatePipeline, finalizePipeline, sources, initial, finalizeBindGroup };
   }
 
   configurePlan(target: WebGpuLiveSvoNodeMipGpuTarget, finestLevel = this.options.finestLevel, levelCount = this.options.levelCount): void {
@@ -557,18 +637,20 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
 
   private encodeSources(encoder: GPUCommandEncoder, includeAllLeaves: boolean): void {
     if (this.destroyed) return;
+    const state = this.pipelineState;
+    if (!state) throw new Error("Live SVO derived worklist planner pipelines are not initialized");
     for (const offset of this.sectionOffsetsBytes) encoder.clearBuffer(this.arena, offset, LIVE_SVO_DERIVED_WORKLIST.headerWords * 4);
     const populate = encoder.beginComputePass({ label: "Populate live SVO derived worklists" });
-    populate.setPipeline(this.populatePipeline);
+    populate.setPipeline(state.populatePipeline);
     if (includeAllLeaves) {
-      populate.setBindGroup(0, this.initial.bindGroup); populate.dispatchWorkgroups(Math.ceil(this.initial.capacity / 64));
+      populate.setBindGroup(0, state.initial.bindGroup); populate.dispatchWorkgroups(Math.ceil(state.initial.capacity / 64));
     }
-    for (const source of this.sources) {
+    for (const source of state.sources) {
       populate.setBindGroup(0, source.bindGroup); populate.dispatchWorkgroups(Math.ceil(source.capacity / 64));
     }
     populate.end();
     const finalize = encoder.beginComputePass({ label: "Finalize live SVO derived worklists" });
-    finalize.setPipeline(this.finalizePipeline); finalize.setBindGroup(0, this.finalizeBindGroup); finalize.dispatchWorkgroups(this.options.levelCount); finalize.end();
+    finalize.setPipeline(state.finalizePipeline); finalize.setBindGroup(0, state.finalizeBindGroup); finalize.dispatchWorkgroups(this.options.levelCount); finalize.end();
   }
 
   destroy(): void {

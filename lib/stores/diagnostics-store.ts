@@ -74,6 +74,10 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   effectiveRendererStatus: {
     state: "pending",
     failureReason: "missing-source",
+    silhouetteRefinement: {
+      state: "compiling",
+      detail: "Waiting for the sparse presentation pipeline",
+    },
   },
   waterSurfacePresentation: null,
   frameMs: 0,

@@ -76,6 +76,8 @@ export function VisualPanel() {
   const setSvoShadowsEnabled = useUIStore((state) => state.setSvoShadowsEnabled);
   const svoAmbientOcclusionEnabled = useUIStore((state) => state.svoAmbientOcclusionEnabled);
   const setSvoAmbientOcclusionEnabled = useUIStore((state) => state.setSvoAmbientOcclusionEnabled);
+  const silhouetteRefinementEnabled = useUIStore((state) => state.silhouetteRefinementEnabled);
+  const setSilhouetteRefinementEnabled = useUIStore((state) => state.setSilhouetteRefinementEnabled);
   const svoConeTracingMode = useUIStore((state) => state.svoConeTracingMode);
   const setSvoConeTracingMode = useUIStore((state) => state.setSvoConeTracingMode);
   const svoPrimaryTraversal = useUIStore((state) => state.svoPrimaryTraversal);
@@ -107,6 +109,12 @@ export function VisualPanel() {
   const tuningKey = svoRenderTuningKey(tuning);
   const activePreset = (Object.keys(SVO_RENDER_TUNING_PRESETS) as SvoRenderTuningPreset[])
     .find((preset) => svoRenderTuningKey(SVO_RENDER_TUNING_PRESETS[preset]) === tuningKey);
+  const silhouetteRefinementStatus = effectiveRendererStatus.silhouetteRefinement ?? {
+    state: effectiveRendererStatus.state === "pending" ? "compiling" as const
+      : effectiveRendererStatus.state === "failed" ? "failed" as const
+      : silhouetteRefinementEnabled ? "enabled" as const : "disabled" as const,
+    detail: effectiveRendererStatus.detail,
+  };
   const updateTuning = <K extends keyof SvoRenderTuning>(key: K, value: SvoRenderTuning[K]) =>
     setTuning((current) => ({ ...current, [key]: value }));
   const modified = <K extends keyof SvoRenderTuning>(key: K) => tuning[key] !== SVO_RENDER_TUNING_PRESETS.balanced[key];
@@ -139,6 +147,7 @@ export function VisualPanel() {
         <span className={effectiveRendererStatus.state === "active" ? "online" : ""} />
         <strong data-testid="effective-renderer-status">{effectiveRendererStatus.state === "active"
           ? "SVO GI ACTIVE"
+          : effectiveRendererStatus.state === "not-required" ? "SVO NOT REQUIRED"
           : effectiveRendererStatus.state === "pending" ? "SVO PENDING" : "SVO FAILED CLOSED"}</strong>
         <code>{Math.round(tuning.resolutionScale * 100)}% · cone {svoConeTracingMode !== "cones" ? svoConeTracingMode : tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`}</code>
       </div>
@@ -165,7 +174,15 @@ export function VisualPanel() {
         <div className="render-toggle-row" role="group" aria-label="SVO lighting effects">
           <Toggle label="Shadows" checked={svoShadowsEnabled} disabled={svoConeTracingMode === "off"} onChange={setSvoShadowsEnabled} />
           <Toggle label="AO" checked={svoAmbientOcclusionEnabled} disabled={svoConeTracingMode === "off"} onChange={setSvoAmbientOcclusionEnabled} />
+          <Toggle label="Close primary seams" checked={silhouetteRefinementEnabled}
+            hint="Close one-pixel background seams only when opposing foreground surfaces bracket the pixel. This opt-in pass runs before sky and deferred lighting."
+            onChange={setSilhouetteRefinementEnabled} />
         </div>
+        <p data-testid="silhouette-refinement-status" aria-live="polite"
+          className={silhouetteRefinementStatus.state === "failed" ? "render-inline-warning" : "render-inline-status"}>
+          Primary seam closure: {silhouetteRefinementStatus.state.toUpperCase()}
+          {silhouetteRefinementStatus.detail ? ` · ${silhouetteRefinementStatus.detail}` : ""}
+        </p>
         <div className="svo-control-grid">
           <RangeControl label="Render resolution" unit="%" value={tuning.resolutionScale * 100} min={35} max={100} step={1} displayDigits={0}
             onChange={(value) => updateTuning("resolutionScale", value / 100)} modified={modified("resolutionScale")} onReset={resetTuning("resolutionScale")} />

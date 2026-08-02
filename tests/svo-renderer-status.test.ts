@@ -21,6 +21,50 @@ test("effective renderer status reports the GLOBAL SVO lifecycle", () => {
   assert.deepEqual(useDiagnosticsStore.getInitialState().effectiveRendererStatus, {
     state: "pending",
     failureReason: "missing-source",
+    silhouetteRefinement: {
+      state: "compiling",
+      detail: "Waiting for the sparse presentation pipeline",
+    },
+  });
+});
+
+test("an authoritative source-free presentation is terminal, not pending", () => {
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready,
+    required: false,
+    pipelineAvailable: false,
+    sourceAvailable: false,
+    svoEncoded: false,
+  }), { state: "not-required" });
+});
+
+test("silhouette refinement lifecycle is preserved verbatim in renderer diagnostics", () => {
+  for (const state of ["enabled", "disabled", "not-applicable"] as const) {
+    assert.deepEqual(resolveEffectiveRendererStatus({
+      ...ready,
+      silhouetteRefinement: { state },
+    }), { state: "active", silhouetteRefinement: { state } });
+  }
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready,
+    pipelineCompiling: true,
+    svoEncoded: false,
+    silhouetteRefinement: { state: "compiling", detail: "Compiling requested silhouette refinement" },
+  }), {
+    state: "pending",
+    failureReason: "pipeline-compiling",
+    silhouetteRefinement: { state: "compiling", detail: "Compiling requested silhouette refinement" },
+  });
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready,
+    pipelineFailure: "Silhouette refinement compiler rejected WGSL",
+    svoEncoded: false,
+    silhouetteRefinement: { state: "failed", detail: "Silhouette refinement compiler rejected WGSL" },
+  }), {
+    state: "failed",
+    failureReason: "pipeline-compile-failure",
+    detail: "Silhouette refinement compiler rejected WGSL",
+    silhouetteRefinement: { state: "failed", detail: "Silhouette refinement compiler rejected WGSL" },
   });
 });
 
@@ -74,6 +118,11 @@ test("renderer publishes effective status through the viewport diagnostics bridg
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   assert.match(renderer, /publishEffectiveRendererStatus\(resolveEffectiveRendererStatus\(\{/);
+  assert.match(renderer, /const silhouetteRefinementStatus = this\.svoDryScenePipeline\?\.silhouetteRefinementStatus/);
+  assert.match(renderer, /silhouetteRefinementStatus\?\.state === "compiling"/,
+    "a requested refinement compile must remain visible in the fail-closed renderer lifecycle");
+  assert.match(renderer, /pipelineFailure: silhouetteRefinementStatus\?\.state === "failed"/,
+    "an exact refinement failure must be surfaced instead of selecting an unrefined pass");
   assert.match(renderer, /const replacementResult = this\.svoDryScenePipeline\?\.encode/);
   assert.match(renderer, /svoEncoded = Boolean\(replacementResult\)/);
   assert.match(renderer, /sparseVoxelDrySceneContractFailure\(source, publication\)/);

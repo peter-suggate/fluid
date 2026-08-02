@@ -46,6 +46,7 @@ import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoLightingOptions,
   type SvoPrimaryTraversalMode,
+  type SvoSilhouetteRefinementStatus,
 } from "./svo-render-options";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "./webgpu-svo-stage-overlay";
@@ -72,6 +73,10 @@ import {
 } from "./performance-trace";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 import type { ResourcePluginDefinition } from "./resource-readiness";
+import {
+  invalidateGPUCompilationManager,
+  managedGPUDevice,
+} from "./gpu-compilation-manager";
 
 /** Device/canvas resources owned by FluidLabRenderer, declared beside their initializer. */
 export const webGPUPlatformResourcePlugin: ResourcePluginDefinition = Object.freeze({
@@ -299,6 +304,7 @@ export function optionalRendererPipelineRequests(
   pixelTraceActive = false,
   fluidCellTraceActive = false,
   stageViewActive = false,
+  sparsePresentationRequired = true,
 ): OptionalRendererPipeline[] {
   const requested: OptionalRendererPipeline[] = [];
   if (gridOverlay && gridOverlay.axis !== "off") {
@@ -309,7 +315,7 @@ export function optionalRendererPipelineRequests(
     }
   }
   if (voxelRenderMode !== "smooth") requested.push("voxel-debug");
-  requested.push("svo-dry-scene");
+  if (sparsePresentationRequired) requested.push("svo-dry-scene");
   if (simulationRunning && secondaryParticlesAvailable) requested.push("secondary-particles");
   // The trace overlay is only meaningful over the sparse path it explains.
   if (pixelTraceActive && voxelRenderMode === "smooth") requested.push("decoration-overlay");
@@ -448,13 +454,17 @@ export type SvoRendererFailureReason =
   | "frame-rejected";
 
 export interface EffectiveRendererStatus {
-  state: "active" | "pending" | "failed";
+  state: "active" | "not-required" | "pending" | "failed";
   failureReason?: SvoRendererFailureReason;
   /** Exact publication-contract cause; never used to select another renderer. */
   detail?: string;
+  /** The requested refinement lifecycle is independent and never a fallback selector. */
+  silhouetteRefinement?: SvoSilhouetteRefinementStatus;
 }
 
 export interface EffectiveRendererConditions {
+  /** False when the authoritative water renderer completely owns this scene. */
+  required?: boolean;
   pipelineAvailable: boolean;
   /** A compile is in flight, so an absent pipeline is a rebuild rather than a failure. */
   pipelineCompiling?: boolean;
@@ -469,6 +479,7 @@ export interface EffectiveRendererConditions {
   lightingSupported?: boolean;
   svoEncoded: boolean;
   contractFailure?: string;
+  silhouetteRefinement?: SvoSilhouetteRefinementStatus;
 }
 
 /** Resolve one frame's production renderer without changing simulation state. */
@@ -507,43 +518,48 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigi
 export function resolveEffectiveRendererStatus(
   conditions: EffectiveRendererConditions,
 ): EffectiveRendererStatus {
+  const status = (renderer: Omit<EffectiveRendererStatus, "silhouetteRefinement">): EffectiveRendererStatus => ({
+    ...renderer,
+    ...(conditions.silhouetteRefinement ? { silhouetteRefinement: conditions.silhouetteRefinement } : {}),
+  });
+  if (conditions.required === false) return status({ state: "not-required" });
   // An absent pipeline means two very different things. Startup and a primary
   // traversal swap both retire it while the replacement compiles, and reporting
   // that as a compile failure tells the user their renderer broke when it is
   // merely busy.
   if (!conditions.pipelineAvailable) {
-    return conditions.pipelineCompiling
+    return status(conditions.pipelineCompiling
       ? { state: "pending", failureReason: "pipeline-compiling" }
       : {
           state: "failed",
           failureReason: "pipeline-compile-failure",
           ...(conditions.pipelineFailure ? { detail: conditions.pipelineFailure } : {}),
-        };
+        });
   }
-  if (!conditions.terrainSupported) return { state: "failed", failureReason: "unsupported-terrain" };
-  if (conditions.glassSupported === false) return { state: "failed", failureReason: "unsupported-glass-cutout" };
-  if (conditions.materialsSupported === false) return { state: "failed", failureReason: "missing-pbr-materials" };
-  if (conditions.lightingSupported === false) return { state: "failed", failureReason: "missing-lighting-publications" };
+  if (!conditions.terrainSupported) return status({ state: "failed", failureReason: "unsupported-terrain" });
+  if (conditions.glassSupported === false) return status({ state: "failed", failureReason: "unsupported-glass-cutout" });
+  if (conditions.materialsSupported === false) return status({ state: "failed", failureReason: "missing-pbr-materials" });
+  if (conditions.lightingSupported === false) return status({ state: "failed", failureReason: "missing-lighting-publications" });
   if (!conditions.sourceAvailable) {
     const sourceMissing = !conditions.contractFailure
       || conditions.contractFailure === "live sparse source is not attached";
-    if (sourceMissing) return conditions.contractFailure
+    if (sourceMissing) return status(conditions.contractFailure
       ? { state: "pending", failureReason: "missing-source", detail: conditions.contractFailure }
-      : { state: "pending", failureReason: "missing-source" };
-    return { state: "failed", failureReason: "frame-rejected", detail: conditions.contractFailure };
+      : { state: "pending", failureReason: "missing-source" });
+    return status({ state: "failed", failureReason: "frame-rejected", detail: conditions.contractFailure });
   }
-  if (!conditions.svoEncoded && conditions.pipelineCompiling) return {
+  if (!conditions.svoEncoded && conditions.pipelineCompiling) return status({
     state: "pending", failureReason: "pipeline-compiling",
     ...(conditions.pipelinePending ? { detail: conditions.pipelinePending } : {}),
-  };
-  if (!conditions.svoEncoded && conditions.pipelineFailure) return {
+  });
+  if (!conditions.svoEncoded && conditions.pipelineFailure) return status({
     state: "failed", failureReason: "pipeline-compile-failure", detail: conditions.pipelineFailure,
-  };
-  if (!conditions.svoEncoded) return {
+  });
+  if (!conditions.svoEncoded) return status({
     state: "failed", failureReason: "frame-rejected",
     detail: conditions.contractFailure ?? "live SVO renderer declined the frame",
-  };
-  return { state: "active" };
+  });
+  return status({ state: "active" });
 }
 
 export interface RendererFrameMetrics {
@@ -574,13 +590,31 @@ interface PendingInitialRasterPresentation {
   submitted: boolean;
 }
 
-interface PendingLiveSvoPresentation {
-  readonly solver: GPUSolverInstance;
-  readonly solverGeneration: number;
-  readonly requestGeneration: number;
-  readonly startedAt_ms: number;
-  attached: boolean;
-  submitted: boolean;
+class PendingLiveSvoPresentation {
+  private phase: "awaiting-attachment" | "attached" | "submitted" = "awaiting-attachment";
+
+  constructor(
+    readonly solver: GPUSolverInstance,
+    readonly source: NonNullable<GPUSolverInstance["sparseVoxelSceneSource"]>,
+    readonly solverGeneration: number,
+    readonly requestGeneration: number,
+    readonly startedAt_ms: number,
+  ) {}
+
+  attach(): boolean {
+    if (this.phase !== "awaiting-attachment") return false;
+    this.phase = "attached";
+    return true;
+  }
+
+  submit(): boolean {
+    if (this.phase !== "attached") return false;
+    this.phase = "submitted";
+    return true;
+  }
+
+  get attached(): boolean { return this.phase !== "awaiting-attachment"; }
+  get submitted(): boolean { return this.phase === "submitted"; }
 }
 
 const upscaleShader = /* wgsl */ `
@@ -724,7 +758,7 @@ export class FluidLabRenderer {
   private svoFluidCoverage?: WebGpuSvoFluidCoverage;
   private svoFluidCoverageKey?: string;
   private pendingInitialRasterPresentation?: PendingInitialRasterPresentation;
-  /** Renderer-only worlds become ready only after their first live-SVO frame completes. */
+  /** A sparse presentation becomes ready only after its first source-matched frame completes. */
   private pendingLiveSvoPresentation?: PendingLiveSvoPresentation;
   private svoPipelineProgress?: { label: string; completed: number; total: number };
   private svoPipelineStartedAt_ms?: number;
@@ -775,7 +809,9 @@ export class FluidLabRenderer {
   private publishEffectiveRendererStatus(status: EffectiveRendererStatus) {
     const previous = this.lastEffectiveRendererStatus;
     if (previous?.state === status.state && previous.failureReason === status.failureReason
-      && previous.detail === status.detail) return;
+      && previous.detail === status.detail
+      && previous.silhouetteRefinement?.state === status.silhouetteRefinement?.state
+      && previous.silhouetteRefinement?.detail === status.silhouetteRefinement?.detail) return;
     this.lastEffectiveRendererStatus = status;
     this.effectiveRendererStatusCallback?.(status);
   }
@@ -857,13 +893,47 @@ export class FluidLabRenderer {
 
   private reportLiveSvoAttachment() {
     const pending = this.pendingLiveSvoPresentation;
-    if (!pending || pending.attached || !this.svoDryScenePipeline || !this.svoSourceAvailable) return;
-    pending.attached = true;
+    if (!pending || !this.svoDryScenePipeline || !this.svoSourceAvailable || !pending.attach()) return;
     this.onStatus({
       state: "initializing", label: SVO_PRESENTATION_STARTUP_STAGES[8], phase: "presentation",
       completed: 8, total: SVO_PRESENTATION_STARTUP_STAGES.length, startedAt_ms: pending.startedAt_ms, kind: "startup", retainingPrevious: false,
       resource: svoPresentationResourcePlugin,
     });
+  }
+
+  /**
+   * The sole solver-to-presentation attachment seam. Publishing a sparse
+   * source necessarily opens its source-matched fenced generation; callers
+   * cannot attach the source while forgetting the completion lifecycle.
+   */
+  private attachSparsePresentationSource(
+    solver: GPUSolverInstance,
+    requestGeneration: number,
+    startedAt_ms: number,
+  ): void {
+    const source = solver.sparseVoxelSceneSource;
+    this.svoDrySceneSource = source;
+    this.svoDrySceneData = undefined;
+    this.renderSceneKey = "";
+    this.svoDryScenePipeline?.setSource(source);
+    this.pendingLiveSvoPresentation = source
+      ? new PendingLiveSvoPresentation(
+        solver, source, this.gpuFluidGeneration, requestGeneration, startedAt_ms)
+      : undefined;
+    if (!source) return;
+    if (this.failedOptionalPipelines.has("svo-dry-scene")) this.failPendingLiveSvoPresentation();
+    else if (this.svoDryScenePipeline) this.reportLiveSvoAttachment();
+    else {
+      const pipelineProgress = this.svoPipelineProgress ?? {
+        label: SVO_PRESENTATION_STARTUP_STAGES[0],
+        completed: 0,
+        total: SVO_PRESENTATION_STARTUP_STAGES.length,
+      };
+      this.onStatus({
+        state: "initializing", ...pipelineProgress, phase: "presentation", startedAt_ms,
+        kind: "startup", retainingPrevious: false, resource: svoPresentationResourcePlugin,
+      });
+    }
   }
 
   private failPendingLiveSvoPresentation(error?: unknown) {
@@ -1271,20 +1341,22 @@ export class FluidLabRenderer {
     progress("Requesting GPU device",1);
     const requiredFeatures = fluidExecutionDeviceFeatures(adapter.features);
     const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
-    const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
-    if (this.disposed) { device.destroy(); return; }
+    const rawDevice = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+    if (this.disposed) { rawDevice.destroy(); return; }
     const context = this.canvas.getContext("webgpu") as GPUCanvasContext | null;
     if (!context) {
-      device.destroy();
+      rawDevice.destroy();
       this.onStatus({ state: "unavailable", label: "WebGPU canvas context could not be created", resource: webGPUPlatformResourcePlugin });
       return;
     }
+    const device = managedGPUDevice(rawDevice);
     this.device = device;
     this.context = context;
     this.format = navigator.gpu.getPreferredCanvasFormat();
     device.addEventListener("uncapturederror", (event) => console.error(`WebGPU validation: ${event.error.message}`));
     void device.lost.then((info) => {
       if (this.disposed || this.device !== device || this.deviceLost) return;
+      invalidateGPUCompilationManager(device, info.message || info.reason);
       this.deviceLost = true;
       const fluid = this.gpuFluid;
       this.gpuFluid = undefined;
@@ -1311,7 +1383,11 @@ export class FluidLabRenderer {
     }).catch((error: unknown) => {
       if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);
     });
-    context.configure({ device, format: this.format, alphaMode: "opaque" });
+    // GPUCanvasContext performs an implementation-level GPUDevice brand check;
+    // the managed capability is intentionally a Proxy and cannot cross this
+    // native boundary. Only the raw device is exposed here. Resource owners
+    // continue to receive the compilation-gated device above.
+    context.configure({ device: rawDevice, format: this.format, alphaMode: "opaque" });
 
     progress("Compiling presentation upscale",2);
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
@@ -1430,6 +1506,7 @@ export class FluidLabRenderer {
         worldOrigin_m: [-container.width_m / 2, 0, -container.depth_m / 2],
         cellSize_m: [container.width_m / info.nx, container.height_m / info.ny, container.depth_m / info.nz],
       }, { coarsePhi: field.createView({ dimension: "3d" }) });
+      void this.svoFluidCoverage.initializePipelines();
     } catch {
       this.svoFluidCoverage = undefined;
       this.svoFluidCoverageKey = undefined;
@@ -1637,19 +1714,13 @@ export class FluidLabRenderer {
       solver.applyRuntimeValues?.(config.values);
       this.gpuFluid=solver;this.gpuFluidKey=key;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
-      if(rendererOnlyScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Live scene source ready; fluid authority intentionally absent";this.pendingInitialRasterPresentation=undefined;this.pendingLiveSvoPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false};}
+      if(rendererOnlyScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Live scene source ready; fluid authority intentionally absent";this.pendingInitialRasterPresentation=undefined;}
       else if(fencedInitialRaster){solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false,resource:method.resource};}
       else{solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Direct solver field attached; sparse raster fence not required";this.pendingInitialRasterPresentation=undefined;}
       this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;
-      const sparseSceneSource=solver.sparseVoxelSceneSource;
-      this.svoDrySceneSource=sparseSceneSource;this.svoDrySceneData=undefined;this.renderSceneKey="";
-      this.svoDryScenePipeline?.setSource(sparseSceneSource);
-      if(rendererOnlyScene){
+      this.attachSparsePresentationSource(solver,generation,startedAt_ms);
+      if(rendererOnlyScene)
         this.onStatus({state:"ready",label:"Live sparse scene source ready",adapter:this.adapterName,resource:liveSvoSceneResourcePlugin});
-        if(this.failedOptionalPipelines.has("svo-dry-scene"))this.failPendingLiveSvoPresentation();
-        else if(this.svoDryScenePipeline)this.reportLiveSvoAttachment();
-        else{const pipelineProgress=this.svoPipelineProgress??{label:SVO_PRESENTATION_STARTUP_STAGES[0],completed:0,total:SVO_PRESENTATION_STARTUP_STAGES.length};this.onStatus({state:"initializing",...pipelineProgress,phase:"presentation",startedAt_ms,kind:"startup",retainingPrevious:false,resource:svoPresentationResourcePlugin});}
-      }
       this.pausedPresentationRevision+=1;
       if(previous&&previous!==solver&&!previousDestroyedForReset)this.retireGPUFluid(previous);
       this.gpuInfoCallback?.(solver.info);
@@ -2086,6 +2157,8 @@ export class FluidLabRenderer {
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
       ? this.currentGPUFluid(this.simulationScene ?? scene, svoSceneConfig)
       : undefined;
+    const sparsePresentationRequired = !sceneRuntime.fluidSolver
+      || Boolean((readyGPUFluid ?? this.gpuFluid)?.sparseVoxelSceneSource);
     this.publishRenderScene(scene, readyGPUFluid ?? this.gpuFluid);
     const pixelTraceRequested = Boolean(pixelTrace) && voxelRenderMode === "smooth";
     // Ahead of the sweep, so a toggled traversal retires the old pipeline and is
@@ -2096,6 +2169,7 @@ export class FluidLabRenderer {
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
       pixelTraceRequested, Boolean(fluidCellTrace),
       activeSvoDiagnostics.stageView !== "off",
+      sparsePresentationRequired,
     ));
     // The probe's answer depends on the scene epoch, the presentation, and the
     // traversal tuning as much as on the pixel. Tracking them as one revision is
@@ -2396,11 +2470,11 @@ export class FluidLabRenderer {
       && !pendingLiveSvo.submitted
       && pendingLiveSvo.attached
       && pendingLiveSvo.solver === readyGPUFluid
+      && pendingLiveSvo.source === this.svoDrySceneSource
       && svoEncoded
       ? pendingLiveSvo
       : undefined;
-    if (initialLiveSvoSubmission) {
-      initialLiveSvoSubmission.submitted = true;
+    if (initialLiveSvoSubmission?.submit()) {
       this.onStatus({
         state: "initializing", label: SVO_PRESENTATION_STARTUP_STAGES[9], phase: "presentation",
         completed: 9, total: SVO_PRESENTATION_STARTUP_STAGES.length, startedAt_ms: initialLiveSvoSubmission.startedAt_ms, kind: "startup", retainingPrevious: false,
@@ -2409,12 +2483,19 @@ export class FluidLabRenderer {
     }
     this.svoPickingAvailable = svoEncoded;
     this.lastSvoPickingBodies = this.svoPickingAvailable ? bodies.slice(0, 12) : [];
+    const silhouetteRefinementStatus = this.svoDryScenePipeline?.silhouetteRefinementStatus;
     this.publishEffectiveRendererStatus(resolveEffectiveRendererStatus({
+      required: sparsePresentationRequired,
       pipelineAvailable: this.svoPipelineAvailable,
       pipelineCompiling: this.optionalPipelineTasks.has("svo-dry-scene")
-        || requestedBundleStatus?.state === "compiling",
-      pipelineFailure: this.optionalPipelineFailures.get("svo-dry-scene"),
-      pipelinePending: requestedBundleStatus?.state === "compiling" ? requestedBundleStatus.detail : undefined,
+        || requestedBundleStatus?.state === "compiling"
+        || silhouetteRefinementStatus?.state === "compiling",
+      pipelineFailure: silhouetteRefinementStatus?.state === "failed"
+        ? silhouetteRefinementStatus.detail
+        : this.optionalPipelineFailures.get("svo-dry-scene"),
+      pipelinePending: requestedBundleStatus?.state === "compiling"
+        ? requestedBundleStatus.detail
+        : silhouetteRefinementStatus?.state === "compiling" ? silhouetteRefinementStatus.detail : undefined,
       sourceAvailable: this.svoSourceAvailable,
       terrainSupported: this.svoTerrainSupported,
       glassSupported: this.svoGlassSupported,
@@ -2422,6 +2503,7 @@ export class FluidLabRenderer {
       lightingSupported: this.svoLightingSupported,
       svoEncoded,
       contractFailure: this.svoPublicationFailure,
+      silhouetteRefinement: silhouetteRefinementStatus,
     }));
     let inspectionOverlayEncoded = false;
     // Render stage views replace the composited image with a decode of a plane
@@ -2609,6 +2691,7 @@ export class FluidLabRenderer {
     for (const resource of [this.presentationTexture, this.voxelDebugDepth, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
     }
+    if (this.device) invalidateGPUCompilationManager(this.device, "renderer destroyed");
     try { this.device?.destroy(); } catch { /* The device may already be lost. */ }
   }
 

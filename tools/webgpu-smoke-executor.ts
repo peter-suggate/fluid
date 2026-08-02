@@ -488,16 +488,37 @@ if (!Number.isSafeInteger(powerAuditEverySteps) || powerAuditEverySteps < 1) {
  * a counter that cannot be evaluated fails the run rather than passing
  * silently. That is the failure mode this work item exists to kill.
  * `FLUID_TRIPWIRE_ALLOW=topology-rollback,restriction-unaccepted,...`
- * downgrades named tripwires to loud warnings for triage only. */
+ * downgrades named tripwires to loud warnings for triage only.
+ *
+ * `FLUID_TRIPWIRES=failfast` adds a per-step queue fence, decode and verdict so
+ * the run dies at the step that tripped instead of at end-of-run. Detection is
+ * identical either way -- the same bytes, the same predicates, the same fatal
+ * outcome -- so this is a *diagnostic* mode, not a stricter one:
+ *
+ *  - On a red run it is decisive. The large dam reported 732 trips across four
+ *    ids at end-of-run; under fail-fast it reports one `air-support-failure` at
+ *    step 247 and the other 731 are revealed as downstream absorption.
+ *  - On a green run it buys nothing at all -- there is no first trip to stop at
+ *    -- and costs +26.8% wall on the large lane, because fencing every step
+ *    removes host/GPU overlap. A throughput number taken under it is not
+ *    comparable to one taken without it.
+ *
+ * So: diagnosis and correctness lanes want `failfast`; throughput lanes want
+ * `1`, which still fails the run on any trip, just at the end of it. `0`
+ * remains the only mode that stops gating, and benchmark lanes refuse it. */
 const TRIPWIRE_IDS = ["topology-rollback", "restriction-unaccepted",
   "mgpcg-nonconvergence", "fine-band-sentinel", "air-support-failure"] as const;
 type TripwireId = (typeof TRIPWIRE_IDS)[number];
 const tripwireMode = process.env.FLUID_TRIPWIRES;
-if (tripwireMode !== undefined && tripwireMode !== "0" && tripwireMode !== "1") {
-  throw new Error("FLUID_TRIPWIRES must be 0 or 1");
+if (tripwireMode !== undefined && tripwireMode !== "0" && tripwireMode !== "1"
+  && tripwireMode !== "failfast") {
+  throw new Error("FLUID_TRIPWIRES must be 0, 1, or failfast");
 }
 const tripwiresDisabled = tripwireMode === "0";
-const tripwiresForcedRequired = tripwireMode === "1";
+/** Terminate at the first trip rather than after the measured window. Carries a
+ * per-step queue fence, so it is never on by default: see the mode note above. */
+const tripwiresFailFast = tripwireMode === "failfast";
+const tripwiresForcedRequired = tripwireMode === "1" || tripwiresFailFast;
 const tripwireAllowList = new Set((process.env.FLUID_TRIPWIRE_ALLOW ?? "")
   .split(",").map((entry) => entry.trim()).filter(Boolean));
 for (const entry of tripwireAllowList) {
@@ -1428,7 +1449,14 @@ async function runGPU(
     airSupportOffsetBytes: 252, airSupportBytes: 16,
     transportScheduleOffsetBytes: 268, transportScheduleBytes: 32,
     transportSleepOffsetBytes: 300, transportSleepBytes: 44,
-    strideBytes: 344,
+    // The air-support carrier-free ledger (scratch 41/42) and the forensic
+    // record the producer expands it into (scratch 74..95): the failing
+    // owned-face item with its resolved cell geometry, and the per-axis
+    // counts of patches the march could not reach. Without these an
+    // `air-support-failure` trip names no face at all.
+    airSupportLedgerOffsetBytes: 344, airSupportLedgerBytes: 8,
+    airSupportForensicOffsetBytes: 352, airSupportForensicBytes: 88,
+    strideBytes: 440,
   });
   /** The benchmark and acceptance lanes must evaluate every tripwire. Any
    * other octree run captures them opportunistically: a trip still fails, but
@@ -1467,7 +1495,7 @@ async function runGPU(
    *  - the host copies the record out and `unmap()`s in a `finally` before the
    *    loop can reach the next capture, so no encoder ever references a mapped
    *    buffer and no second `mapAsync` overlaps a pending one. */
-  const tripwireLiveReadback = tripwireSnapshot
+  const tripwireLiveReadback = tripwireSnapshot && tripwiresFailFast
     ? device.createBuffer({
       label: "Live silent-failure tripwire record",
       size: TRIPWIRE_RECORD.strideBytes,
@@ -1549,6 +1577,12 @@ async function runGPU(
       base + TRIPWIRE_RECORD.airSupportOffsetBytes, 8);
     encoder.copyBufferToBuffer(sources.airSupport!, 38 * 4, destination,
       base + TRIPWIRE_RECORD.airSupportOffsetBytes + 8, 8);
+    encoder.copyBufferToBuffer(sources.airSupport!, 41 * 4, destination,
+      base + TRIPWIRE_RECORD.airSupportLedgerOffsetBytes,
+      TRIPWIRE_RECORD.airSupportLedgerBytes);
+    encoder.copyBufferToBuffer(sources.airSupport!, 74 * 4, destination,
+      base + TRIPWIRE_RECORD.airSupportForensicOffsetBytes,
+      TRIPWIRE_RECORD.airSupportForensicBytes);
     encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
       sources.transportGovernor!.offset ?? 0, destination,
       base + TRIPWIRE_RECORD.transportScheduleOffsetBytes,
@@ -1604,10 +1638,39 @@ async function runGPU(
     const topologyControl = words(TRIPWIRE_RECORD.topologyOffsetBytes,
       TRIPWIRE_RECORD.topologyBytes);
     const topology = unpackFineLevelSetGPUTopologyControl(topologyControl);
+    /** The producer's carrier-free record, decoded. `carrierFree` is absent
+     * unless the no-carrier ledger actually fired; `marchUnreachedPatchesByAxis`
+     * is published every step and is non-zero whenever the demand corridor was
+     * disconnected and the exhaustive closest-face transform had to resolve it,
+     * which is a corridor-coverage signal even on a step that does not fail. */
+    const airSupportCarrierForensics = () => {
+      const ledger = words(TRIPWIRE_RECORD.airSupportLedgerOffsetBytes,
+        TRIPWIRE_RECORD.airSupportLedgerBytes);
+      const forensic = words(TRIPWIRE_RECORD.airSupportForensicOffsetBytes,
+        TRIPWIRE_RECORD.airSupportForensicBytes);
+      return {
+        marchUnreachedPatchesByAxis: [forensic[12], forensic[13], forensic[14]],
+        uncarriedPatchesByAxis: [forensic[15], forensic[16], forensic[17]],
+        supportRows: forensic[21],
+        ...((ledger[0] ?? 0) === 0 ? {} : {
+          carrierFree: {
+            occurrences: ledger[0], item: ledger[1], faceRow: forensic[0],
+            origin: [forensic[1], forensic[2], forensic[3]],
+            size: forensic[4], caseId: forensic[5],
+            transform: (forensic[6] ?? 0) & 63,
+            recordFlags: ((forensic[6] ?? 0) >>> 6) & 0xff,
+            axis: Math.floor((forensic[7] ?? 0) / 4), quadrant: (forensic[7] ?? 0) % 4,
+            negativeRow: forensic[8], directRows: forensic[9],
+            incidentRows: forensic[10], positiveRow: forensic[11],
+          },
+        }),
+      };
+    };
     if (emitTopologyTrace && process.env.FLUID_FINE_TOPOLOGY_TRACE === "1") {
       // stderr: the benchmark harness pipes child stdout through an
       // NDJSON filter that would drop this record type.
       console.error(JSON.stringify({ record: "fine-topology-trace", step,
+        airSupport: airSupportCarrierForensics(),
         fineGeneration, interfaceBricks: topology.interfaceBricks,
         interfaceSeedBricks: topology.interfaceSeedBricks,
         desiredBricks: topology.desiredBricks,
@@ -1696,9 +1759,7 @@ async function runGPU(
     const liveAirSupportFailure = (airSupport[0] ?? 0) !== 0;
     const latchedAirSupportFailure = (airSupport[2] ?? 0) !== 0;
     if (liveAirSupportFailure || latchedAirSupportFailure) {
-      trip("air-support-failure", {
-        fatalChainForensics,
-      });
+      trip("air-support-failure", { ...airSupportCarrierForensics(), fatalChainForensics });
     }
     return trips;
   };
@@ -1914,8 +1975,11 @@ async function runGPU(
         encodeTripwireRecordCopies(encoder, sources, tripwireSnapshot, base);
         // The same record, into the buffer the host maps at this step. One
         // writer, one encoder, one submission: the live verdict and the ring's
-        // whole-run forensics are the same bytes by construction.
-        encodeTripwireRecordCopies(encoder, sources, tripwireLiveReadback!, 0);
+        // whole-run forensics are the same bytes by construction. Only fail-fast
+        // maps per step, so only fail-fast pays for the second copy.
+        if (tripwiresFailFast) {
+          encodeTripwireRecordCopies(encoder, sources, tripwireLiveReadback!, 0);
+        }
         device.queue.submit([encoder.finish()]);
         tripwireSteps.push(steps);
         tripwireFineGenerations.push(
@@ -1924,12 +1988,16 @@ async function runGPU(
       }
       samplingWall_ms += performance.now() - tripwireCaptureStartedAt_ms;
     }
-    if (capturedThisStep) {
+    if (capturedThisStep && tripwiresFailFast) {
       // ---- Fail fast: evaluate step N's tripwires AT step N -----------------
       // We never self-heal. A tripped counter means the physics this harness is
       // measuring is already gone, so the run ends here rather than stepping a
       // frozen solver for another two hundred advances and reporting the trip
       // as an end-of-run footnote.
+      //
+      // Under `FLUID_TRIPWIRES=1` the ring above still captures this step and
+      // the end-of-run walk still fails the run on the same bytes; what is
+      // skipped is only the fence that makes the verdict available *now*.
       //
       // `mapAsync` is a queue fence. It is charged like the periodic fence at
       // `completionFenceEverySteps` -- i.e. NOT to samplingWall_ms -- because
@@ -2739,12 +2807,16 @@ async function runGPU(
           byteLength / 4,
         );
         for (let record = 0; record < tripwireSteps.length; record += 1) {
-          // The live path already emitted this record's FLUID_FINE_TOPOLOGY_TRACE
-          // line at its own step, which is why it survives a fatal step; the
-          // ring walk must not emit it a second time.
+          // Exactly one walk emits FLUID_FINE_TOPOLOGY_TRACE, and it is whichever
+          // one runs. Under fail-fast the live path already emitted this record
+          // at its own step -- which is why the trace survives a fatal step --
+          // so the ring must stay silent or it would duplicate every line. With
+          // fail-fast off the live path never ran, and the ring is the only
+          // walk there is; emitting nothing would silently drop the trace.
           tripped.push(...evaluateTripwireRecord(
             (offsetBytes, byteLength) => words(record, offsetBytes, byteLength),
-            tripwireSteps[record]!, tripwireFineGenerations[record]!, false));
+            tripwireSteps[record]!, tripwireFineGenerations[record]!,
+            !tripwiresFailFast));
         }
       } finally {
         if (tripwireSnapshot.mapState === "mapped") tripwireSnapshot.unmap();
@@ -2765,18 +2837,24 @@ async function runGPU(
       }
     }
     if (failing.length !== 0) {
-      // Defence in depth. The live path fails at the step that tripped, so a
-      // trip reaching here means the two walks disagreed about identical bytes;
-      // that is still a failed run, never a warning.
+      // Under `FLUID_TRIPWIRES=1` this is the gate: the run completed, and the
+      // ring says it should not have. Under `failfast` it is defence in depth --
+      // the live path already failed at the step that tripped, so a trip
+      // reaching here means the two walks disagreed about identical bytes.
+      // Either way it is a failed run, never a warning.
       throw tripwireFailure(failing, `over ${tripwireSteps.length} captured steps`);
     }
     console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
       phase: "tripwires", capturedSteps: tripwireSteps.length,
       required: tripwiresRequired, allowed: Array.from(tripwireAllowList),
       tripped: tripped.length,
+      // Which mode produced this run's wall. A throughput number is only
+      // comparable to another taken in the same mode: fail-fast fences every
+      // step and measured +26.8% on the large lane.
+      mode: tripwiresFailFast ? "failfast" : "end-of-run",
       // The measured price of fail-fast: the per-step queue fence (solver work
       // waited for early, left in simulationWall_ms) and the host decode
-      // (diagnostics, subtracted from it).
+      // (diagnostics, subtracted from it). Both are zero in end-of-run mode.
       liveFence_ms: Math.round(tripwireLiveFence_ms),
       liveDecode_ms: Math.round(tripwireLiveDecode_ms) }));
   }
@@ -3282,11 +3360,28 @@ async function runGPU(
   const spgridHierarchy = (gpuPassTimestampRequested || spgridHierarchyCensusRequested)
     ? await diagnosticProjection.octreeProjection?.readSPGridHierarchyCensus()
     : undefined;
+  // Asking for this tripwire and getting silence is the failure mode the whole
+  // tripwire doctrine exists to kill: the differential builder ran, the run
+  // passed every other gate, and nothing compared the two directories. Both
+  // links in the chain are optional (`octreeProjection?`, and inside it
+  // `firstOrderVCycle?`), so an unevaluable read has to be loud. `=1` is an
+  // explicit request for evidence; produce it or fail.
   const touchedDirectoryTripwire = process.env.FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE === "1"
     ? await diagnosticProjection.octreeProjection?.readSPGridTouchedDirectoryTripwire()
     : undefined;
-  if (touchedDirectoryTripwire) console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
-    phase: "spgrid-touched-directory-tripwire", metrics: touchedDirectoryTripwire }));
+  if (process.env.FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE === "1") {
+    if (touchedDirectoryTripwire === undefined) {
+      throw new Error("FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE=1 could not be evaluated:"
+        + " no octree projection or no first-order V-cycle on this lane."
+        + " The touched-directory differential was NOT checked; do not read this run as correctness evidence.");
+    }
+    if (!touchedDirectoryTripwire.enabled) {
+      throw new Error("FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE=1 but the touched-directory path is disabled;"
+        + " set FLUID_SPGRID_TOUCHED_RADIX_SORT=1 so there are two builders to compare.");
+    }
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "spgrid-touched-directory-tripwire", metrics: touchedDirectoryTripwire }));
+  }
   const powerHybridCensus = process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
     || process.env.FLUID_POWER_HYBRID_CENSUS === "1"
     || process.env.FLUID_POWER_HYBRID_MIN_REDUCTION !== undefined

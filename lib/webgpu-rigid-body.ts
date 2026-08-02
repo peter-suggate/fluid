@@ -233,9 +233,9 @@ export class WebGPURigidBodySystem {
 
   constructor(private readonly device: GPUDevice, private readonly scene: SceneDescription,
     readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture: GPUTexture,
-    deferPipelineCompilation = false) {
+    _deferPipelineCompilation = true) {
     this.pipelinesRequired = scene.rigidBodies.length > 0;
-    this.pipelinesDeferred = deferPipelineCompilation;
+    this.pipelinesDeferred = true;
     this.stateBuffer = device.createBuffer({ label: "GPU authoritative rigid-body state", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderBuffer = device.createBuffer({ label: "GPU rigid-body render records", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionBuffer = device.createBuffer({ label: "GPU rigid primitive motion sidecar", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -245,7 +245,6 @@ export class WebGPURigidBodySystem {
     this.paramsBuffer = device.createBuffer({ label: "GPU rigid-body step parameters", size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickParamsBuffer = device.createBuffer({ label: "GPU rigid-body pick ray", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickResultBuffer = device.createBuffer({ label: "GPU rigid-body pick result", size: GPU_RIGID_PICK_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    if (this.pipelinesRequired && !deferPipelineCompilation) this.createPipelinesSync();
   }
 
   private descriptor(entryPoint: "integrate" | "pickRigidBody"): GPUComputePipelineDescriptor {
@@ -274,13 +273,6 @@ export class WebGPURigidBodySystem {
       { binding: 5, resource: { buffer: this.pickParamsBuffer } },
       { binding: 6, resource: { buffer: this.pickResultBuffer } },
     ] });
-  }
-
-  private createPipelinesSync(): void {
-    this.pipeline = this.device.createComputePipeline(this.descriptor("integrate"));
-    this.createIntegrationBindings();
-    this.pickPipeline = this.device.createComputePipeline(this.descriptor("pickRigidBody"));
-    this.createPickBindings();
   }
 
   initializationTasks(): GPUInitializationTask[] {

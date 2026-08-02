@@ -530,7 +530,7 @@ export class WebGPUSecondaryParticleSystem {
   private readonly state: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly bindGroup: GPUBindGroup;
-  private readonly shaderModule: GPUShaderModule;
+  private shaderModule!: GPUShaderModule;
   private readonly pipelineLayout: GPUPipelineLayout;
   private updatePipeline?: GPUComputePipeline;
   private spawnPipeline?: GPUComputePipeline;
@@ -542,7 +542,7 @@ export class WebGPUSecondaryParticleSystem {
     private readonly domain: SecondaryParticleDomain,
     source: SecondaryParticleSamplingSource,
     capacityValue = DEFAULT_SECONDARY_PARTICLE_CAPACITY,
-    deferPipelineCompilation = false
+    _deferPipelineCompilation = true
   ) {
     const capacity = secondaryParticleCapacity(capacityValue);
     this.particles = device.createBuffer({
@@ -556,7 +556,6 @@ export class WebGPUSecondaryParticleSystem {
     this.renderSource = { buffer: this.particles, capacity, strideBytes: SECONDARY_PARTICLE_STRIDE_BYTES, indirectBuffer: this.state, indirectOffset: 0 };
     this.allocatedBytes = capacity * SECONDARY_PARTICLE_STRIDE_BYTES + 144;
 
-    this.shaderModule = device.createShaderModule({ label: "Secondary liquid particle kernels", code: secondaryParticleComputeShader });
     const layout = device.createBindGroupLayout({ label: "Secondary particle simulation bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
@@ -575,19 +574,13 @@ export class WebGPUSecondaryParticleSystem {
       { binding: 5, resource: { buffer: this.params } }
     ] });
     this.writeParameters(1 / 60, source);
-    if (!deferPipelineCompilation) this.createPipelinesSync();
   }
 
   private descriptor(entryPoint: "updateParticles" | "spawnParticles"): GPUComputePipelineDescriptor {
+    this.shaderModule ??= this.device.createShaderModule({
+      label: "Secondary liquid particle kernels", code: secondaryParticleComputeShader,
+    });
     return { layout: this.pipelineLayout, compute: { module: this.shaderModule, entryPoint } };
-  }
-
-  private createPipelinesSync() {
-    this.updatePipeline = this.device.createComputePipeline(this.descriptor("updateParticles"));
-    this.spawnPipeline = this.device.createComputePipeline(this.descriptor("spawnParticles"));
-    let cache = secondaryParticlePipelineCache.get(this.device);
-    if (!cache) { cache = new Map(); secondaryParticlePipelineCache.set(this.device, cache); }
-    cache.set("one-way", [this.updatePipeline, this.spawnPipeline]);
   }
 
   get pipelineCount() { return 2; }

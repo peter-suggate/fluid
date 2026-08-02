@@ -9,7 +9,7 @@
  *   node --import tsx tools/profile-svo-render-xctrace.ts
  *     [--scene=hose-tank] [--resolution=660x662]
  *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide|raster-primary]
- *     [--shading=inline|split|auto-relight]
+ *     [--shading=inline|split]
  *     [--cone-scale=0.5|0.25|0.125] [--cone-tracing=cones|exact|off] [--warmups=4]
  *     [--radiance-reconstruction=nearest|gated-linear|joint-bilateral|wide-relight|full-res-relight]
  *     [--counter-seconds=3] [--counter-reduction=100] [--out=DIR]
@@ -54,7 +54,7 @@ if (!SVO_DRY_TRAVERSAL_MODES.includes(traversal as SvoDryTraversalMode)) {
   throw new Error(`--traversal must be one of ${SVO_DRY_TRAVERSAL_MODES.join(", ")}`);
 }
 const shading = flag("shading") ?? "inline";
-if (!["inline", "split", "auto-relight"].includes(shading)) throw new Error("--shading must be inline, split, or auto-relight");
+if (!["inline", "split"].includes(shading)) throw new Error("--shading must be inline or split");
 const resolutionMatch = /^(\d+)x(\d+)$/.exec(flag("resolution") ?? "660x662");
 if (!resolutionMatch) throw new Error("--resolution must be WIDTHxHEIGHT");
 const width = Number(resolutionMatch[1]), height = Number(resolutionMatch[2]);
@@ -267,7 +267,7 @@ const assertRenderReport = (report: FrameReport): void => {
   // Withholding the cone stages collapses the effective scale to 1: split
   // shading keeps its two full-rate passes and the inline path keeps its single
   // pass, but no cone prepass or compact cone visibility is encoded at all.
-  const split = shading === "split" || shading === "auto-relight";
+  const split = shading === "split";
   const splitRelight = split
     && (radianceReconstruction === "wide-relight" || radianceReconstruction === "full-res-relight");
   const expectedLabels = split

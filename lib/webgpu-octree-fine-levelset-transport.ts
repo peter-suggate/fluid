@@ -308,7 +308,7 @@ export class WebGPUFineLevelSetTransport {
 
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
     private readonly resources: StructuredFineTransportResources,
-    deferPipelineCompilation = false) {
+    _deferPipelineCompilation = true) {
     const { structured, topology } = resources;
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || !Number.isSafeInteger(resources.maximumLeafSize) || resources.maximumLeafSize < 1
@@ -385,47 +385,6 @@ export class WebGPUFineLevelSetTransport {
     this.pipelineCacheKey = JSON.stringify({ stagedFineAddressing, b4FineAddressing,
       bfeccEnabled: this.bfeccEnabled });
     this.pipelineConstants = Object.freeze({ stagedFineAddressing, b4FineAddressing });
-    if (deferPipelineCompilation) return;
-    let deviceCache = fineLevelSetTransportPipelineCache.get(device);
-    if (!deviceCache) {
-      deviceCache = new Map();
-      fineLevelSetTransportPipelineCache.set(device, deviceCache);
-    }
-    let pipelines = deviceCache.get(this.pipelineCacheKey);
-    if (!pipelines) {
-      const shaderModule = device.createShaderModule({ label: "Direct structured fine level-set transport",
-        code: structuredFineLevelSetTransportWGSL });
-      const make = (entryPoint: string) => device.createComputePipeline({ label: entryPoint, layout: "auto",
-        compute: { module: shaderModule, entryPoint, constants: {
-          stagedFineAddressing: fineTransportStagedAddressingRequested() ? 1 : 0,
-          b4FineAddressing: fineTransportB4AddressingEnabled(source.plan) ? 1 : 0,
-        } } });
-      pipelines = {
-        planPipeline: make("planStructuredFineTransportSubsteps"),
-        classifyPipeline: make("classifyStructuredFineTransportBlocks"),
-        reduceWorksetsPipeline: make("reduceStructuredFineTransportWorksetBlocks"),
-        scanWorksetsPipeline: make("scanStructuredFineTransportWorksetGroups"),
-        publishWorksetsPipeline: make("publishStructuredFineTransportWorksets"),
-        compactWorksetsPipeline: make("compactStructuredFineTransportWorksets"),
-        // transitionSample dynamically selects trilinear or tetrahedral sampling
-        // at every trajectory point. Only validity-aware common/rare variants are
-        // required; page-anchor transition specialization would be unsound.
-        transportPipelines: ["transportRegularCommonPhi", "transportRegularRarePhi"].map(make),
-        reversePipelines: this.bfeccEnabled
-          ? ["reverseRegularCommonPhi", "reverseRegularRarePhi"].map(make) : [],
-        correctionPipelines: this.bfeccEnabled
-          ? ["correctRegularCommonPhi", "correctRegularRarePhi"].map(make) : [],
-        reduceStatusPipeline: make("reduceStructuredFineTransportStatus"),
-        summarizePipeline: make("summarizeStructuredFineTransport"),
-        commitPipeline: make("commitStructuredFineTransport"),
-        clearDeltaPipeline: make("clearStructuredFineDelta"),
-        reduceDeltaPipeline: make("reduceStructuredFineDeltaBlocks"),
-        deltaPipeline: make("publishStructuredFineDelta"),
-        compactDeltaPipeline: make("compactStructuredFineDelta"),
-      };
-      deviceCache.set(this.pipelineCacheKey, pipelines);
-    }
-    this.installPipelineBundle(pipelines);
   }
 
   private installPipelineBundle(pipelines: FineLevelSetTransportPipelineBundle): void {

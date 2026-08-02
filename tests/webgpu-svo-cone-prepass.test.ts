@@ -10,6 +10,7 @@ import {
   SparseVoxelDrySceneRenderer,
   SVO_DRY_CONE_PREPASS_CONTRACT,
   SVO_DRY_DERIVED_FAILURE,
+  SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT,
   SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT,
   svoConePrepassSize,
   svoDrySceneShader,
@@ -158,20 +159,64 @@ test("reduced scales fail closed explicitly and never escape into exact cone fal
     "split GLOBAL must evaluate environmental GI after current-frame compact visibility and before deferred lighting");
 });
 
-test("automatic relight composition contains the isolated primary and lighting entries", () => {
-  const automatic = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "auto-relight");
-  assert.match(automatic, /@fragment fn dryVisibilityMain/);
-  assert.match(automatic, /@fragment fn dryLightingMain/);
-  assert.match(automatic, /@group\(2\) @binding\(0\) var drySplitGeometryWrite/);
-  assert.match(automatic, /@group\(2\) @binding\(1\) var drySplitGeometryRead/);
-  assert.match(automatic, /@compute @workgroup_size\(8,8\) fn dryPrepassCoherentMain/,
-    "2x2 relighting must consume coherent current-frame primary hits without tracing them again");
-  assert.match(automatic, /atomicAdd\(&dryPrepassBoundaryQueue\.count,1u\)/,
-    "ambiguous 2x2 texels must compact into a boundary queue instead of diverging through primary traversal");
-  assert.match(automatic, /@compute @workgroup_size\(64\) fn dryPrepassBoundaryMain[^]*traceOpaqueScene/,
-    "only compacted boundary texels may retrace the exact 2x2 centre ray");
-  assert.match(rendererSource, /if \(usePrepass && !useSplit\)[^]*if \(useSplit\)[^]*Sparse voxel compact cone visibility[^]*conePrepassCoherentPipeline[^]*conePrepassBoundaryPipeline/,
-    "the relight path must run full-resolution primary visibility before the two compact cone kernels");
+test("primary seam closure brackets background with opposing foreground surfaces", () => {
+  const reduced = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "split");
+  assert.match(reduced, /fn dryPublicationWord\(index:u32\)->u32\{return svoStructure\[dry\.structureOffsets\.y\+index\];\}/,
+    "exact refinement addresses publication through the unified structural arena");
+  const classifierStart = reduced.indexOf("fn drySilhouetteAmbiguous");
+  const refinerStart = reduced.indexOf("fn drySilhouetteRefineMain");
+  const exactStart = reduced.indexOf("fn drySilhouetteTraceVisibilityExact");
+  const exactEnd = reduced.indexOf("@fragment fn dryPrepassVisibilityMain", exactStart);
+  const refinerEnd = reduced.indexOf("\n}", refinerStart) + 2;
+  assert.ok(classifierStart >= 0 && refinerStart > classifierStart && refinerEnd > refinerStart);
+  const classifier = reduced.slice(classifierStart, refinerStart);
+  const refiner = reduced.slice(refinerStart, refinerEnd);
+
+  assert.match(classifier, /drySplitGeometryAt\(coordinate\)[^]*drySplitIdentityAt\(coordinate\)[^]*array<vec2i,4>/,
+    "ambiguity is classified from the current full-rate primary publication, independent of scene topology");
+  assert.match(classifier, /!sameSurface\|\|!depthClose/,
+    "hit\/miss, owner\/material identity, and meaningful depth discontinuities enter the worklist");
+  assert.doesNotMatch(classifier, /normalClose|\.9999/,
+    "smoothly varying normals must not classify an entire curved surface as a silhouette");
+  assert.match(classifier, /if\(!drySilhouetteAmbiguous\(coordinate,dimensions\)\)\{return;\}let queueIndex=atomicAdd/,
+    "only classified pixels may consume expensive full-resolution visibility work");
+  assert.match(refiner, /dryPrepassBoundaryQueue\.coordinates\[queueIndex\][^]*drySplitGeometryAt[^]*drySilhouetteTraceVisibilityExact/,
+    "the refiner consumes the compacted current-frame hit and invokes its explicit authoritative visibility tier");
+  assert.doesNotMatch(refiner, /traceOpaqueScene/,
+    "the primary current-frame hit must not be retraced");
+  const exact = reduced.slice(exactStart, exactEnd);
+  assert.match(exact, /svoTraceVisibility/,
+    "queued pixels deliberately run the existing bounded exact visibility traversal");
+  assert.doesNotMatch(exact, /dryConeVisibility/,
+    "live-derived cone page availability cannot invalidate the authoritative silhouette tier");
+  assert.match(refiner, /exact\.status==DRY_SILHOUETTE_EXACT_EXHAUSTED[^]*invalidAoPages[^]*failedRefinements[^]*exact\.status==DRY_SILHOUETTE_EXACT_INVALID[^]*invalidDirectPages[^]*failedRefinements/,
+    "bounded exhaustion and invalid exact traversal are counted separately and both remain explicit failures");
+  assert.match(reduced, /fn dryPrimarySeamSample\(coordinate:vec2i\)[^]*array<vec4i,4>[^]*dryPrimarySeamForeground\(first\.w,centreDepth\)[^]*dryPrimarySeamForeground\(second\.w,centreDepth\)/,
+    "closure requires foreground hits on both opposing sides of the candidate pixel");
+  assert.match(reduced, /differentSurface[^]*if\(!differentSurface\)\{continue;\}[^]*candidateDepth=max\(first\.w,second\.w\)/,
+    "closure is restricted to seams between distinct surfaces and extends the rear surface");
+  assert.match(reduced, new RegExp(`materialPublication\\.w&${128}u[^]*dryPrimarySeamSample\\(coordinate\\)[^]*geometry=seam\\.geometry`),
+    "the deferred surface pass consumes the same seam decision that patched primary depth");
+
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.silhouetteRefinementFormat, "rg32uint");
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.silhouetteRefinementStateFormat, "r32uint");
+  assert.equal(SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT.workgroupSize, 64);
+  assert.equal(SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT.counterSizeBytes, 8);
+  assert.equal(SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT.diagnosticCounterSizeBytes, 16);
+});
+
+test("primary seam closure patches the G-buffer before sky and deferred lighting", () => {
+  const primary = rendererSource.indexOf('label: "Sparse voxel exact live-scene primitive visibility"');
+  const seam = rendererSource.indexOf('label: "Sparse voxel primary seam closure"', primary);
+  const lighting = rendererSource.indexOf('label: "Sparse voxel deferred dry lighting"', seam);
+  assert.ok(primary >= 0 && seam > primary && lighting > seam,
+    "the optional coverage patch must run after all primary producers and before the sky/surface partition");
+  assert.match(rendererSource, /label: `Sparse voxel primary seam closure x\$\{scale\}`[^]*entryPoint: "dryPrimarySeamMain"[^]*depthWriteEnabled: true[^]*depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT\.depthCompare/,
+    "the pass updates authoritative reversed-Z depth rather than painting over the final color");
+  assert.match(rendererSource, /if \(this\.silhouetteRefinementEnabled\)[^]*gBufferViews\.packedSurface[^]*gBufferViews\.identityMedia[^]*gBufferViews\.hardwareDepth[^]*seam\.draw\(3\)/,
+    "the explicit toggle controls one full-screen G-buffer seam pass");
+  assert.doesNotMatch(rendererSource, /beginComputePass\(\{ label: "Sparse voxel silhouette refinement/,
+    "the retired lighting-visibility worklist must not execute");
 });
 
 test("occupancy experiments alter only their intended reduced-shader mechanisms", () => {
@@ -223,6 +268,8 @@ test("prepass target contract and sizing", () => {
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.geometryFormat, "rgba16float");
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.identityFormat, "r32uint");
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.radianceFormat, "rgba16float");
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.silhouetteRefinementFormat, "rg32uint");
+  assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.silhouetteRefinementStateFormat, "r32uint");
   assert.equal(SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights, 8);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.5), [640, 360]);
   assert.deepEqual(svoConePrepassSize(1280, 720, 0.25), [320, 180]);
@@ -302,6 +349,43 @@ test("the cone-lighting scale is an optional lighting option that defaults to th
   }
 });
 
+test("primary seam closure is opt-in for every split lighting rate", () => {
+  const previousBufferUsage = globalThis.GPUBufferUsage, previousTextureUsage = globalThis.GPUTextureUsage;
+  Object.assign(globalThis, {
+    GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, MAP_READ: 8 },
+    GPUTextureUsage: { TEXTURE_BINDING: 1, RENDER_ATTACHMENT: 2 },
+  });
+  const device = {
+    createBuffer(descriptor: { label?: string; size?: number }) {
+      return { label: descriptor.label, size: descriptor.size ?? 0, destroy() {} };
+    },
+    createTexture() { return { createView() { return {}; }, destroy() {} }; },
+    createSampler() { return {}; },
+    queue: { writeBuffer() {} },
+  } as unknown as GPUDevice;
+  try {
+    const renderer = new SparseVoxelDrySceneRenderer(
+      device, {} as GPUBuffer, {} as GPUBuffer, "rgba16float", "hybrid", "off", "split",
+    );
+    assert.deepEqual(renderer.silhouetteRefinementStatus, { state: "disabled" },
+      "scale 1 also keeps primary seam closure opt-in");
+    renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.5 });
+    assert.deepEqual(renderer.silhouetteRefinementStatus, { state: "disabled" },
+      "the reduced split path keeps experimental seam treatment opt-in");
+    renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.5,
+      silhouetteRefinementEnabled: true });
+    assert.equal(renderer.silhouetteRefinementStatus.state, "compiling",
+      "an explicit request reports resource readiness rather than silently substituting another path");
+    renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.5,
+      coneTracingMode: "exact", silhouetteRefinementEnabled: true });
+    assert.equal(renderer.silhouetteRefinementStatus.state, "compiling",
+      "primary coverage does not depend on the selected secondary visibility algorithm");
+    renderer.destroy();
+  } finally {
+    Object.assign(globalThis, { GPUBufferUsage: previousBufferUsage, GPUTextureUsage: previousTextureUsage });
+  }
+});
+
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 test("reduced shader variants compile with both entry points on the GPU backend", {
   skip: !modulePath && "set WEBGPU_NODE_MODULE for GPU cone-prepass checks",
@@ -312,10 +396,99 @@ test("reduced shader variants compile with both entry points on the GPU backend"
   const device = await adapter.requestDevice();
   try {
     for (const scale of [0.5, 0.25, 0.125] as const) {
-      const code = createSvoDrySceneFragmentWGSL(scale);
+      const code = createSvoDrySceneFragmentWGSL(scale, "hybrid", "off", "split");
       const module = device.createShaderModule({ label: `Cone-prepass dry shader validation x${scale}`, code });
       const info = await module.getCompilationInfo();
       assert.deepEqual(info.messages.filter(({ type }) => type === "error"), []);
+      for (const entryPoint of [
+        "drySilhouetteResetMain",
+        "drySilhouetteClassifyMain",
+        "drySilhouetteFinalizeMain",
+        "drySilhouetteRefineMain",
+      ]) {
+        try {
+          await device.createComputePipelineAsync({
+            label: `Silhouette refinement ${entryPoint} x${scale}`,
+            layout: "auto",
+            compute: { module, entryPoint },
+          });
+        } catch (error) {
+          throw new Error(`Metal rejected ${entryPoint} at scale ${scale}: ${String(error)}`, { cause: error });
+        }
+      }
     }
+
+    const width = 4, height = 4, bytesPerRow = 256;
+    const code = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "split");
+    const module = device.createShaderModule({ label: "Executable silhouette classifier", code });
+    const classifier = await device.createComputePipelineAsync({
+      label: "Executable production silhouette classifier", layout: "auto",
+      compute: { module, entryPoint: "drySilhouetteClassifyMain" },
+    });
+    const geometry = device.createTexture({
+      label: "Synthetic primary geometry", size: [width, height], format: "rgba32float",
+      usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const identity = device.createTexture({
+      label: "Synthetic primary identity", size: [width, height], format: "rg32uint",
+      usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const refinement = device.createTexture({
+      label: "Synthetic refinement publication", size: [width, height], format: "rg32uint",
+      usage: GPUTextureUsage.STORAGE_BINDING,
+    });
+    const refinementState = device.createTexture({
+      label: "Synthetic refinement state", size: [width, height], format: "r32uint",
+      usage: GPUTextureUsage.STORAGE_BINDING,
+    });
+    const queue = device.createBuffer({
+      label: "Synthetic silhouette worklist",
+      size: Uint32Array.BYTES_PER_ELEMENT * (SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT.queueHeaderWords + width * height),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    const readback = device.createBuffer({
+      label: "Synthetic silhouette count readback", size: Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const geometryRows = new Float32Array(bytesPerRow / Float32Array.BYTES_PER_ELEMENT * height);
+    const identityRows = new Uint32Array(bytesPerRow / Uint32Array.BYTES_PER_ELEMENT * height);
+    for (const [x, y] of [[1, 1], [2, 1], [1, 2], [2, 2]] as const) {
+      const geometryIndex = y * (bytesPerRow / 4) + x * 4;
+      geometryRows.set([0, 0, 1, 1], geometryIndex);
+      const identityIndex = y * (bytesPerRow / 4) + x * 2;
+      identityRows.set([1, 7], identityIndex);
+    }
+    device.queue.writeTexture({ texture: geometry }, geometryRows,
+      { bytesPerRow, rowsPerImage: height }, { width, height });
+    device.queue.writeTexture({ texture: identity }, identityRows,
+      { bytesPerRow, rowsPerImage: height }, { width, height });
+    device.queue.writeBuffer(queue, 0, new Uint32Array(SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT.queueHeaderWords));
+    const classifyResources = device.createBindGroup({
+      layout: classifier.getBindGroupLayout(1), entries: [
+        { binding: 7, resource: { buffer: queue } },
+        { binding: 9, resource: refinement.createView() },
+        { binding: 12, resource: refinementState.createView() },
+      ],
+    });
+    const primaryResources = device.createBindGroup({
+      layout: classifier.getBindGroupLayout(2), entries: [
+        { binding: 1, resource: geometry.createView() },
+        { binding: 5, resource: identity.createView() },
+      ],
+    });
+    const encoder = device.createCommandEncoder({ label: "Execute production silhouette classifier" });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(classifier);
+    pass.setBindGroup(1, classifyResources);
+    pass.setBindGroup(2, primaryResources);
+    pass.dispatchWorkgroups(1, 1);
+    pass.end();
+    encoder.copyBufferToBuffer(queue, 0, readback, 0, Uint32Array.BYTES_PER_ELEMENT);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    assert.equal(new Uint32Array(readback.getMappedRange())[0], 4,
+      "four current-frame hit\/miss silhouette pixels must execute into the production worklist");
+    readback.unmap();
+    readback.destroy(); queue.destroy(); refinementState.destroy(); refinement.destroy(); identity.destroy(); geometry.destroy();
   } finally { device.destroy(); }
 });

@@ -1042,11 +1042,64 @@ const SHADER_SOURCE_CHECKS: readonly SourceCheck[] = Object.freeze([
   },
 ]);
 
+/** Identifiers whose value is fixed at allocation time or by domain extent. A
+ * launch shaped by one of these costs O(capacity) or O(domain) forever, however
+ * little fluid exists -- the violation Bet 1 ("existence is free") exists to
+ * prevent. Capacities may size *buffers*; they may never size *launches*.
+ *
+ * Two spelling holes made this gate report clean while the violations it names
+ * were present, so both are now closed by shape rather than by enumeration:
+ *
+ *  - `\w*Capacity` replaces a hard-coded five-name list. Every capacity
+ *    introduced after that list was written was exempt by default --
+ *    `candidateCapacity`, `identityCapacity`, `hierarchyKeyCapacity`,
+ *    `sourceCapacity`, `scanRecordCapacity`, `sparseCandidateCapacity` among
+ *    them, 26 sites in the octree sources alone.
+ *  - `logical(?:Cell|Brick|Page|Domain)\w*` replaces a trailing `\b`, which
+ *    matched the bare `logicalBrick` but not `logicalBrickCount` -- and
+ *    `logicalBrickCount` is the spelling the code actually uses.
+ *
+ * `domainVolume` was absent entirely, so the `ceil(domainVolume/256)` family
+ * that Bet 1 names as its headline violation could never have been flagged. */
 const CAPACITY_AUTHORITY =
-  /\b(?:rowCapacity|pageCapacity|faceCapacity|leafCapacity|voxelCapacity|maximumResidentBricks|logical(?:Cell|Brick|Page|Domain)|dims\.n[xyz])\b/;
+  /\b(?:\w*Capacity|maximumResidentBricks|logical(?:Cell|Brick|Page|Domain)\w*|total\w*Count|brickCount|pageDirectoryWords|domainVolume|levelStride|dims\.n[xyz])\b/;
 
 function escapedIdentifier(value: string): string {
   return value.replace(/[\^$.*+?()[\]{}|\\]/g, "\\$&");
+}
+
+/** Reads a balanced argument list starting just after an opening parenthesis.
+ * Argument lists here routinely span lines, so a line-bounded scan would clip
+ * the workgroup count off exactly the multi-line calls that carry it. */
+function balancedArguments(source: string, openIndex: number): { text: string; end: number } {
+  let cursor = openIndex, depth = 1;
+  while (cursor < source.length && depth > 0) {
+    const character = source[cursor];
+    if (character === "(" || character === "[" || character === "{") depth += 1;
+    else if (character === ")" || character === "]" || character === "}") depth -= 1;
+    cursor += 1;
+  }
+  return { text: source.slice(openIndex, depth === 0 ? cursor - 1 : cursor), end: cursor };
+}
+
+/** Locally-bound functions that dispatch. A capacity that reaches one of these
+ * as an argument is a capacity-shaped launch just as surely as one written into
+ * `dispatchWorkgroups` directly -- and this is the spelling the octree encoders
+ * actually use: `run(pipeline, entries, label, Math.ceil(capacity / 64), …)`,
+ * where `run` closes over the pass and calls `pass.dispatchWorkgroups(x, y)`.
+ * Scanning only literal `dispatchWorkgroups(` argument text reported this file
+ * clean while every one of those launches was capacity-shaped. */
+function dispatchingHelpers(source: string): Set<string> {
+  const helpers = new Set<string>();
+  const definition = /(?:\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)(?:\s*:[^=]+)?\s*=>\s*\{|\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{]+)?\{)/g;
+  for (let match = definition.exec(source); match; match = definition.exec(source)) {
+    const name = match[1] ?? match[2]!;
+    const open = source.indexOf("{", match.index + match[0].length - 1);
+    if (open < 0) continue;
+    const body = source.slice(open, matchingBrace(source, open));
+    if (/\bdispatchWorkgroups\s*\(/.test(body)) helpers.add(name);
+  }
+  return helpers;
 }
 
 /** Follow simple host aliases before inspecting direct-dispatch arguments.
@@ -1071,27 +1124,32 @@ function capacityDispatchViolations(sourceName: string, source: string): OctreeS
       }
     }
   }
-  const violations: OctreeSourceViolation[] = [];
-  const call = /\bdispatchWorkgroups\s*\(/g;
-  for (let match = call.exec(source); match; match = call.exec(source)) {
-    let cursor = call.lastIndex, depth = 1;
-    while (cursor < source.length && depth > 0 && source[cursor] !== "\n") {
-      if (source[cursor] === "(") depth += 1;
-      else if (source[cursor] === ")") depth -= 1;
-      cursor += 1;
-    }
-    const expression = source.slice(call.lastIndex, depth === 0 ? cursor - 1 : cursor);
-    const capacityDerived = CAPACITY_AUTHORITY.test(expression)
+  const derivesFromCapacity = (expression: string): boolean =>
+    CAPACITY_AUTHORITY.test(expression)
       || [...aliases].some((alias) => new RegExp(
         "(?:^|[^A-Za-z0-9_$])" + escapedIdentifier(alias) + "(?:$|[^A-Za-z0-9_$])",
       ).test(expression));
-    if (capacityDerived) violations.push({
+
+  const violations: OctreeSourceViolation[] = [];
+  // `dispatchWorkgroupsIndirect` is deliberately not matched: an indirect launch
+  // is shaped by whatever the GPU published into the args buffer, which is the
+  // compliant form. Only the direct call and the local helpers that wrap it
+  // carry a host-authored workgroup count.
+  const helpers = dispatchingHelpers(source);
+  const call = new RegExp(
+    "\\b(?:dispatchWorkgroups|dispatchFor|workgroupPerItemDispatch"
+      + [...helpers].map((name) => "|" + escapedIdentifier(name)).join("")
+      + ")\\s*\\(", "g");
+  for (let match = call.exec(source); match; match = call.exec(source)) {
+    const { text, end } = balancedArguments(source, call.lastIndex);
+    if (derivesFromCapacity(text)) violations.push({
       source: sourceName,
       line: sourceLine(source, match.index),
       rule: "capacity-dispatch",
-      excerpt: source.slice(match.index, cursor).trim(),
+      excerpt: source.slice(match.index, Math.min(end, match.index + 160))
+        .replace(/\s+/g, " ").trim(),
     });
-    call.lastIndex = cursor;
+    call.lastIndex = end;
   }
   return violations;
 }

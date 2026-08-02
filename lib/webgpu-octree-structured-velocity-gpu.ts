@@ -16,6 +16,7 @@ import {
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
 
 export const OCTREE_SECTION63_CHANNELS = 19 as const;
 
@@ -49,7 +50,7 @@ interface StructuredVelocityPipelineBundle {
 }
 
 const structuredVelocityPipelineCache = new WeakMap<GPUDevice,
-  Map<string, StructuredVelocityPipelineBundle>>();
+  Map<string, Promise<StructuredVelocityPipelineBundle>>>();
 
 export const OCTREE_STRUCTURED_GPU_ERROR = Object.freeze({
   source: 1 << 0,
@@ -264,15 +265,18 @@ export class WebGPUDirectStructuredVelocityAuthority {
   private readonly authorityA: GPUBuffer;
   /** Inactive publication report consumed by the coupled epoch validator. */
   readonly candidateControl: GPUBuffer;
-  private readonly beginPipeline: GPUComputePipeline;
-  private readonly classifyPipeline: GPUComputePipeline;
-  private readonly countFamiliesPipeline: GPUComputePipeline;
-  private readonly prefixPipeline: GPUComputePipeline;
-  private readonly scatterPipeline: GPUComputePipeline;
-  private readonly section63Pipeline: GPUComputePipeline;
-  private readonly finalizePipeline: GPUComputePipeline;
-  private readonly reconstructPipeline: GPUComputePipeline;
-  private readonly acceptPipeline: GPUComputePipeline;
+  private beginPipeline!: GPUComputePipeline;
+  private classifyPipeline!: GPUComputePipeline;
+  private countFamiliesPipeline!: GPUComputePipeline;
+  private prefixPipeline!: GPUComputePipeline;
+  private scatterPipeline!: GPUComputePipeline;
+  private section63Pipeline!: GPUComputePipeline;
+  private finalizePipeline!: GPUComputePipeline;
+  private reconstructPipeline!: GPUComputePipeline;
+  private acceptPipeline!: GPUComputePipeline;
+  private readonly publicationActivity: GPULogicalActivityAdoptionContext;
+  private readonly publicationVariantCode: string;
+  private readonly publicationVariantKey: string;
   private readonly groupCache = new Map<GPUComputePipeline,
     Array<{ readonly bindings: readonly number[]; readonly buffers: readonly GPUBuffer[]; readonly group: GPUBindGroup }>>();
   private destroyed = false;
@@ -319,56 +323,65 @@ export class WebGPUDirectStructuredVelocityAuthority {
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE
         | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const publicationProfile = performanceShaderVariant();
-    const publicationActivity = createGPULogicalActivityAdoptionContext({
+    this.publicationActivity = createGPULogicalActivityAdoptionContext({
       moduleId: "octree/structured-publication",
       profile: publicationProfile,
     });
-    const publicationVariant = publicationActivity.module(
-      directStructuredVelocityPublicationActivityShader(publicationActivity),
+    const publicationVariant = this.publicationActivity.module(
+      directStructuredVelocityPublicationActivityShader(this.publicationActivity),
       `octree/structured-publication/${publicationProfile.cacheKey}`,
     );
-    let deviceCache = structuredVelocityPipelineCache.get(device);
-    if (!deviceCache) {
-      deviceCache = new Map();
-      structuredVelocityPipelineCache.set(device, deviceCache);
-    }
-    let pipelines = deviceCache.get(publicationVariant.cacheKey);
-    if (!pipelines) {
-      const activityModule = device.createShaderModule({
-        label: "Direct six-family structured velocity publication",
-        code: publicationVariant.code,
-      });
-      const pipeline = (entryPoint: string) => device.createComputePipeline({ label: entryPoint,
-        layout: "auto", compute: { module: activityModule, entryPoint } });
-      pipelines = {
-        beginPipeline: pipeline("beginStructuredPublication"),
-        classifyPipeline: publicationActivity.registerPipeline(
-          pipeline("classifyStructuredCatalogSlots")),
-        countFamiliesPipeline: pipeline("countStructuredRowFamilies"),
-        prefixPipeline: pipeline("prefixStructuredFamilies"),
-        scatterPipeline: pipeline("scatterStructuredFamilySlots"),
-        section63Pipeline: pipeline("publishSection63Rows"),
-        finalizePipeline: pipeline("finalizeStructuredPublication"),
-        reconstructPipeline: pipeline("reconstructStructuredCellVelocity"),
-        acceptPipeline: pipeline("acceptStructuredPublication"),
-      };
-      deviceCache.set(publicationVariant.cacheKey, pipelines);
-    }
-    this.beginPipeline = pipelines.beginPipeline;
-    this.classifyPipeline = pipelines.classifyPipeline;
-    this.countFamiliesPipeline = pipelines.countFamiliesPipeline;
-    this.prefixPipeline = pipelines.prefixPipeline;
-    this.scatterPipeline = pipelines.scatterPipeline;
-    this.section63Pipeline = pipelines.section63Pipeline;
-    this.finalizePipeline = pipelines.finalizePipeline;
-    this.reconstructPipeline = pipelines.reconstructPipeline;
-    this.acceptPipeline = pipelines.acceptPipeline;
+    this.publicationVariantCode = publicationVariant.code;
+    this.publicationVariantKey = publicationVariant.cacheKey;
     const unpublishedBytes = new ArrayBuffer(OCTREE_STRUCTURED_GPU_CONTROL_BYTES);
     const unpublished = new Uint32Array(unpublishedBytes);
     unpublished[0] = OCTREE_STRUCTURED_GPU_ERROR.source;
     unpublished[1] = 0xffff_ffff;
     this.device.queue.writeBuffer(this.control, 0, unpublishedBytes);
     this.allocatedBytes = this.plan.allocatedBytes;
+  }
+
+  async initializePipelines(): Promise<void> {
+    let deviceCache = structuredVelocityPipelineCache.get(this.device);
+    if (!deviceCache) {
+      deviceCache = new Map();
+      structuredVelocityPipelineCache.set(this.device, deviceCache);
+    }
+    let pipelines = deviceCache.get(this.publicationVariantKey);
+    if (!pipelines) {
+      const compiler = gpuCompilationManagerFor(this.device);
+      const activityModule = compiler.createShaderModule({
+        label: "Direct six-family structured velocity publication",
+        code: this.publicationVariantCode,
+      });
+      const pipeline = (entryPoint: string) => compiler.compileComputePipeline({ label: entryPoint,
+        layout: "auto", compute: { module: activityModule, entryPoint } });
+      pipelines = Promise.all([
+        pipeline("beginStructuredPublication"), pipeline("classifyStructuredCatalogSlots"),
+        pipeline("countStructuredRowFamilies"), pipeline("prefixStructuredFamilies"),
+        pipeline("scatterStructuredFamilySlots"), pipeline("publishSection63Rows"),
+        pipeline("finalizeStructuredPublication"), pipeline("reconstructStructuredCellVelocity"),
+        pipeline("acceptStructuredPublication"),
+      ]).then(([beginPipeline, classifyPipeline, countFamiliesPipeline, prefixPipeline,
+        scatterPipeline, section63Pipeline, finalizePipeline, reconstructPipeline,
+        acceptPipeline]) => ({
+        beginPipeline,
+        classifyPipeline: this.publicationActivity.registerPipeline(classifyPipeline),
+        countFamiliesPipeline, prefixPipeline, scatterPipeline, section63Pipeline,
+        finalizePipeline, reconstructPipeline, acceptPipeline,
+      }));
+      deviceCache.set(this.publicationVariantKey, pipelines);
+    }
+    const compiled = await pipelines;
+    this.beginPipeline = compiled.beginPipeline;
+    this.classifyPipeline = compiled.classifyPipeline;
+    this.countFamiliesPipeline = compiled.countFamiliesPipeline;
+    this.prefixPipeline = compiled.prefixPipeline;
+    this.scatterPipeline = compiled.scatterPipeline;
+    this.section63Pipeline = compiled.section63Pipeline;
+    this.finalizePipeline = compiled.finalizePipeline;
+    this.reconstructPipeline = compiled.reconstructPipeline;
+    this.acceptPipeline = compiled.acceptPipeline;
   }
 
   private parameterData(epoch: number, injectedFailure: number): ArrayBuffer {

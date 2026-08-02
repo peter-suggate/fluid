@@ -8,6 +8,7 @@ import {
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
 
 export const FINE_TO_COARSE_LEVELSET_ERROR = Object.freeze({
   capacity: 1, unowned: 2, nonfinite: 4, unpublishedSource: 8,
@@ -71,7 +72,9 @@ export class WebGPUFineToCoarseLevelSet {
   private readonly aggregates: GPUBuffer;
   private readonly dispatch: GPUBuffer;
   readonly control: GPUBuffer;
-  private readonly pipelines: Record<string, GPUComputePipeline>;
+  private pipelines!: Record<string, GPUComputePipeline>;
+  private readonly activity: GPULogicalActivityAdoptionContext;
+  private readonly shaderCode: string;
   private cachedBindings?: {
     readonly fineParams: GPUBuffer; readonly headers: GPUBuffer; readonly rowCount: GPUBuffer;
     readonly rowCountOffsetWords: number;
@@ -95,39 +98,45 @@ export class WebGPUFineToCoarseLevelSet {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.result = { rowOffsets, contributions, counts: this.control, aggregated: true };
     const activityProfile = performanceShaderVariant();
-    const activity = createGPULogicalActivityAdoptionContext({
+    this.activity = createGPULogicalActivityAdoptionContext({
       moduleId: "octree/fine-to-coarse-levelset",
       profile: activityProfile,
     });
-    activity.describeTask("prepare-restriction", {
+    this.activity.describeTask("prepare-restriction", {
       id: "gpu.physics.fine-restriction.prepare",
       label: "Fine restriction · prepare rows",
       phaseId: "adaptive-publication",
     });
-    activity.describeTask("restrict-coarse-rows", {
+    this.activity.describeTask("restrict-coarse-rows", {
       id: "gpu.physics.fine-restriction.rows",
       label: "Fine restriction · restrict coarse rows",
       phaseId: "adaptive-publication",
     });
-    activity.describeTask("publish-restriction", {
+    this.activity.describeTask("publish-restriction", {
       id: "gpu.physics.fine-restriction.publish",
       label: "Fine restriction · publish",
       phaseId: "adaptive-publication",
     });
-    const variant = activity.module(
-      fineToCoarseLevelSetActivityShader(activity),
+    const variant = this.activity.module(
+      fineToCoarseLevelSetActivityShader(this.activity),
       `octree/fine-to-coarse-levelset/${activityProfile.cacheKey}`,
     );
-    const shaderModule = device.createShaderModule({ label: "Fine-to-coarse row restriction",
-      code: variant.code });
-    const pipeline = (entryPoint: string) => activity.registerPipeline(device.createComputePipeline({
-      label: entryPoint, layout: "auto", compute: { module: shaderModule, entryPoint },
-    }));
+    this.shaderCode = variant.code;
+  }
+
+  async initializePipelines(): Promise<void> {
+    const compiler = gpuCompilationManagerFor(this.device);
+    const shaderModule = compiler.createShaderModule({ label: "Fine-to-coarse row restriction",
+      code: this.shaderCode });
+    const pipeline = async (entryPoint: string) => this.activity.registerPipeline(
+      await compiler.compileComputePipeline({
+        label: entryPoint, layout: "auto", compute: { module: shaderModule, entryPoint },
+      }));
     this.pipelines = {
-      prepare: pipeline("prepareRestriction"),
-      restrict: pipeline("restrictCoarseRows"),
-      reconstructFactorOne: pipeline("reconstructFactorOneRows"),
-      publish: pipeline("publishRestriction"),
+      prepare: await pipeline("prepareRestriction"),
+      restrict: await pipeline("restrictCoarseRows"),
+      reconstructFactorOne: await pipeline("reconstructFactorOneRows"),
+      publish: await pipeline("publishRestriction"),
     };
   }
 

@@ -134,6 +134,7 @@ export class WebGpuSvoFluidCoverage {
   private sampledView?: GPUTextureView;
   private fillPipeline?: GPUComputePipeline;
   private reducePipeline?: GPUComputePipeline;
+  private fillLayout?: GPUBindGroupLayout;
   private fillBindGroup?: GPUBindGroup;
   private reduceBindGroups: GPUBindGroup[] = [];
   private uniforms?: GPUBuffer;
@@ -169,6 +170,34 @@ export class WebGpuSvoFluidCoverage {
   visibleGeneration(): WebGpuSvoFluidCoverageGeneration | undefined {
     if (this.destroyed || !this.sampledView || this.generation === 0) return undefined;
     return { view: this.sampledView, sampler: this.sampler, plan: this.plan, generation: this.generation };
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.fillPipeline || this.destroyed) return;
+    const fillModule = this.device.createShaderModule({
+      label: "SVO fluid coverage fill",
+      code: svoFluidCoverageFillShader(this.plan.cellsPerTexel),
+    });
+    this.fillLayout = this.device.createBindGroupLayout({
+      label: "SVO fluid coverage fill layout",
+      entries: [
+        { binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+        { binding: SVO_FLUID_COVERAGE_BINDINGS.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: SVO_FLUID_COVERAGE_BINDINGS.destination, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_FLUID_COVERAGE_LAYOUT.format, viewDimension: "3d" } },
+      ],
+    });
+    this.fillPipeline = await this.device.createComputePipelineAsync({
+      label: "Fill SVO fluid coverage",
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.fillLayout] }),
+      compute: { module: fillModule, entryPoint: "fillFluidCoverage" },
+    });
+    const reduceModule = this.device.createShaderModule({
+      label: "SVO fluid coverage reduce", code: svoFluidCoverageReduceShader,
+    });
+    this.reducePipeline = await this.device.createComputePipelineAsync({
+      label: "Reduce SVO fluid coverage", layout: "auto",
+      compute: { module: reduceModule, entryPoint: "reduceFluidCoverage" },
+    });
   }
 
   frame(): ArrayBuffer {
@@ -221,8 +250,8 @@ export class WebGpuSvoFluidCoverage {
   }
 
   private allocate(): void {
-    if (this.texture) return;
-    const { dimensions, levelCount, cellsPerTexel } = this.plan;
+    if (this.texture || !this.fillPipeline || !this.reducePipeline || !this.fillLayout) return;
+    const { dimensions, levelCount } = this.plan;
     this.texture = this.device.createTexture({
       label: "SVO fluid coverage volume",
       size: [...dimensions],
@@ -234,32 +263,6 @@ export class WebGpuSvoFluidCoverage {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
     });
     this.sampledView = this.texture.createView({ dimension: "3d" });
-
-    const fillModule = this.device.createShaderModule({
-      label: "SVO fluid coverage fill",
-      code: svoFluidCoverageFillShader(cellsPerTexel),
-    });
-    const fillLayout = this.device.createBindGroupLayout({
-      label: "SVO fluid coverage fill layout",
-      entries: [
-        // The solver's level set is r32float, which is not filterable. Declaring
-        // the binding explicitly keeps `layout: "auto"` from inferring a
-        // filterable float texture and rejecting the view.
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        { binding: SVO_FLUID_COVERAGE_BINDINGS.destination, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_FLUID_COVERAGE_LAYOUT.format, viewDimension: "3d" } },
-      ],
-    });
-    this.fillPipeline = this.device.createComputePipeline({
-      label: "Fill SVO fluid coverage",
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [fillLayout] }),
-      compute: { module: fillModule, entryPoint: "fillFluidCoverage" },
-    });
-    const reduceModule = this.device.createShaderModule({ label: "SVO fluid coverage reduce", code: svoFluidCoverageReduceShader });
-    this.reducePipeline = this.device.createComputePipeline({
-      label: "Reduce SVO fluid coverage", layout: "auto",
-      compute: { module: reduceModule, entryPoint: "reduceFluidCoverage" },
-    });
 
     const stride = Math.max(UNIFORM_ALIGNMENT, REDUCE_PARAM_WORDS * 4);
     this.uniforms = this.device.createBuffer({
@@ -277,7 +280,7 @@ export class WebGpuSvoFluidCoverage {
 
     this.fillBindGroup = this.device.createBindGroup({
       label: "SVO fluid coverage fill bindings",
-      layout: fillLayout,
+      layout: this.fillLayout!,
       entries: [
         { binding: SVO_FLUID_COVERAGE_BINDINGS.coarsePhi, resource: this.sources.coarsePhi },
         { binding: SVO_FLUID_COVERAGE_BINDINGS.params, resource: { buffer: this.uniforms, offset: 0, size: FILL_PARAM_WORDS * 4 } },

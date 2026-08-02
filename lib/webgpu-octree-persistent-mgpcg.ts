@@ -23,8 +23,10 @@
 import { PassBroker } from "./webgpu-pass-broker";
 import {
   createGPULogicalActivityAdoptionContext,
+  type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
 import {
   OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY,
   type OctreePersistentMGPCGExecutor,
@@ -302,7 +304,10 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
 
   private readonly params: GPUBuffer;
   private readonly arena: GPUBuffer;
-  private readonly pipeline: GPUComputePipeline;
+  private pipeline!: GPUComputePipeline;
+  private readonly activity: GPULogicalActivityAdoptionContext;
+  private readonly shaderCode: string;
+  private readonly shaderLabel: string;
   private readonly groups: Array<{ pressureOut: GPUBuffer; group: GPUBindGroup }> = [];
   private readonly dispatchMetaBytes: number;
   private readonly compactLiveRows: boolean;
@@ -490,18 +495,18 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     device.queue.writeBuffer(this.params, 0, words);
 
     const activityProfile = performanceShaderVariant();
-    const activity = createGPULogicalActivityAdoptionContext({
+    this.activity = createGPULogicalActivityAdoptionContext({
       moduleId: OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID,
       profile: activityProfile,
       identity: "subgroup",
     });
-    activity.describeTask(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, {
+    this.activity.describeTask(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, {
       id: "gpu.physics.persistent-mgpcg.whole-solve",
       label: "Persistent MGPCG · whole solve",
       phaseId: "pressure-solve",
       checkpoints: {
-        enter: activity.checkpointId(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "enter"),
-        exit: activity.checkpointId(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "exit"),
+        enter: this.activity.checkpointId(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "enter"),
+        exit: this.activity.checkpointId(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "exit"),
       },
     });
     const activitySite = {
@@ -559,12 +564,12 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       linearApplyOracle,
       diagnosticStageCapture,
       ...(diagnosticOutputChannel === undefined ? {} : { diagnosticOutputChannel }),
-      ...(activity.enabled ? { activity: {
+      ...(this.activity.enabled ? { activity: {
         parameters: activityParameters,
-        enter: activity.subgroup(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "enter", activitySite),
+        enter: this.activity.subgroup(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "enter", activitySite),
         // Scalar exit markers preserve interval accounting without adding a
         // second ballot to the sampled-lane utilization denominator.
-        exit: activity.workgroup(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "exit", {
+        exit: this.activity.workgroup(OCTREE_PERSISTENT_MGPCG_ACTIVITY_TASK, "exit", {
           tick: "atomicLoad(&control[2])",
           workgroupId: "activityWorkgroupId",
           numWorkgroups: "activityNumWorkgroups",
@@ -573,7 +578,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
         }),
       } } : {}),
     });
-    const shaderVariant = activity.module(
+    const shaderVariant = this.activity.module(
       shaderSource,
       `${OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID}/${activityProfile.cacheKey}`
         + `/${compactLiveRows ? "compact-live" : "capacity-strided"}`
@@ -585,17 +590,23 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
         + `/${linearApplyOracle ? "linear-apply" : "class-apply"}`
         + `/diagnostic-output-${diagnosticOutputChannel ?? "pressure"}`,
     );
-    const shaderModule = device.createShaderModule({
-      label: `Octree persistent MGPCG · single-dispatch 256-lane solve · ${
-        compactLiveRows ? "compact live rows" : "capacity-strided oracle"}`,
-      code: shaderVariant.code,
+    this.shaderCode = shaderVariant.code;
+    this.shaderLabel = `Octree persistent MGPCG · single-dispatch 256-lane solve · ${
+      compactLiveRows ? "compact live rows" : "capacity-strided oracle"}`;
+    this.allocatedBytes = this.arena.size + this.params.size;
+  }
+
+  async initializePipeline(): Promise<void> {
+    const compiler = gpuCompilationManagerFor(this.device);
+    const shaderModule = compiler.createShaderModule({
+      label: this.shaderLabel,
+      code: this.shaderCode,
     });
-    this.pipeline = activity.registerPipeline(device.createComputePipeline({
+    this.pipeline = this.activity.registerPipeline(await compiler.compileComputePipeline({
       label: "Persistent MGPCG · persistentMGPCG",
       layout: "auto",
       compute: { module: shaderModule, entryPoint: "persistentMGPCG" },
     }));
-    this.allocatedBytes = this.arena.size + this.params.size;
   }
 
   /** Byte offset of an immutable capacity-strided solve input. */

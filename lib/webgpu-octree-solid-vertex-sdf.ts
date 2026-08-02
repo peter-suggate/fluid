@@ -116,9 +116,12 @@ export class WebGPUOctreeSolidVertexSdf {
   readonly arena: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly activeDispatch: GPUBuffer;
-  private readonly preparePipeline: GPUComputePipeline;
-  private readonly publishPipeline: GPUComputePipeline;
-  private readonly finishPipeline: GPUComputePipeline;
+  private preparePipeline!: GPUComputePipeline;
+  private publishPipeline!: GPUComputePipeline;
+  private finishPipeline!: GPUComputePipeline;
+  private shaderModule!: GPUShaderModule;
+  private readonly pipelineLayout: GPUPipelineLayout;
+  private readonly preparePipelineLayout: GPUPipelineLayout;
   private readonly prepareGroup: GPUBindGroup;
   private readonly group: GPUBindGroup;
   private destroyed = false;
@@ -149,7 +152,6 @@ export class WebGPUOctreeSolidVertexSdf {
     });
     this.params = device.createBuffer({ label: "Sparse octree solid vertex SDF parameters", size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const module = device.createShaderModule({ label: "Sparse octree solid vertex SDF", code: octreeSolidVertexSdfShader });
     const layout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -158,7 +160,7 @@ export class WebGPUOctreeSolidVertexSdf {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
     // The prepare entry point is the only one that touches the indirect
     // dispatch (binding 6) and the only one that omits the headers, terrain and
     // body bindings, so it needs a layout of its own. Declare that layout
@@ -174,13 +176,7 @@ export class WebGPUOctreeSolidVertexSdf {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
-    this.preparePipeline = device.createComputePipeline({ label: "Prepare sparse solid vertex SDF workset",
-      layout: device.createPipelineLayout({ bindGroupLayouts: [prepareLayout] }),
-      compute: { module, entryPoint: "prepareSolidVertexSdf" } });
-    this.publishPipeline = device.createComputePipeline({ label: "Materialize sparse solid vertex SDF", layout: pipelineLayout,
-      compute: { module, entryPoint: "publishSolidVertexSdf" } });
-    this.finishPipeline = device.createComputePipeline({ label: "Validate sparse solid vertex SDF", layout: pipelineLayout,
-      compute: { module, entryPoint: "finishSolidVertexSdf" } });
+    this.preparePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [prepareLayout] });
     this.prepareGroup = device.createBindGroup({
       label: "Sparse octree solid vertex SDF prepare",
       layout: prepareLayout,
@@ -197,6 +193,25 @@ export class WebGPUOctreeSolidVertexSdf {
       { binding: 4, resource: { buffer: this.arena } },
       { binding: 7, resource: { buffer: rigidBodies } },
     ] });
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.preparePipeline) return;
+    this.shaderModule = this.device.createShaderModule({
+      label: "Sparse octree solid vertex SDF", code: octreeSolidVertexSdfShader,
+    });
+    this.preparePipeline = await this.device.createComputePipelineAsync({
+      label: "Prepare sparse solid vertex SDF workset", layout: this.preparePipelineLayout,
+      compute: { module: this.shaderModule, entryPoint: "prepareSolidVertexSdf" },
+    });
+    this.publishPipeline = await this.device.createComputePipelineAsync({
+      label: "Materialize sparse solid vertex SDF", layout: this.pipelineLayout,
+      compute: { module: this.shaderModule, entryPoint: "publishSolidVertexSdf" },
+    });
+    this.finishPipeline = await this.device.createComputePipelineAsync({
+      label: "Validate sparse solid vertex SDF", layout: this.pipelineLayout,
+      compute: { module: this.shaderModule, entryPoint: "finishSolidVertexSdf" },
+    });
   }
 
   encode(broker: PassBroker, options: OctreeSolidVertexSdfEncodeOptions): void {

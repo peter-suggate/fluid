@@ -654,8 +654,10 @@ export class OctreeSparseBrickWorld {
   };
   private readonly baseAllocatedBytes: number;
   private readonly structuralPublicationState: GPUBuffer;
-  private readonly structuralPhysicsPipeline: GPUComputePipeline;
-  private readonly structuralScenePipeline: GPUComputePipeline;
+  private structuralPhysicsPipeline!: GPUComputePipeline;
+  private structuralScenePipeline!: GPUComputePipeline;
+  private structuralModule!: GPUShaderModule;
+  private readonly structuralPipelineLayout: GPUPipelineLayout;
   private readonly structuralFinalizeBindGroup: GPUBindGroup;
   private readonly proxyVoxelizer: SparseSceneProxyVoxelizer;
   private readonly topologyMutator: WebGpuSparseBrickTopologyMutator;
@@ -680,6 +682,8 @@ export class OctreeSparseBrickWorld {
   private pendingTopologyMutation = false;
   private sceneRevision = 0;
   private topologyPublished = false;
+  private pipelineInitialization?: Promise<void>;
+  private inspectionInitialization?: Promise<SparseVoxelRenderSource>;
   private destroyed = false;
 
   constructor(device: GPUDevice, scene: SceneDescription, dimensions: readonly [number, number, number], options: OctreeSparseBrickWorldOptions = {}) {
@@ -890,10 +894,6 @@ export class OctreeSparseBrickWorld {
       throw new Error("Sparse voxel publication ABI does not match the structural arena");
     }
     this.structuralPublicationState = this.tree.structuralPublication;
-    const structuralModule = device.createShaderModule({
-      label: "Sparse voxel structural publication finalizer",
-      code: structuralPublicationFinalizeShader(this.proxyVoxelizer.maintenanceBinding.stateOffsetBytes / 4),
-    });
     const structuralLayout = device.createBindGroupLayout({
       label: "Sparse voxel structural publication finalizer layout",
       entries: [
@@ -902,17 +902,7 @@ export class OctreeSparseBrickWorld {
         { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       ],
     });
-    const structuralPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [structuralLayout] });
-    this.structuralPhysicsPipeline = device.createComputePipeline({
-      label: "Finalize live sparse voxel physics publication",
-      layout: structuralPipelineLayout,
-      compute: { module: structuralModule, entryPoint: "finalizePhysics" },
-    });
-    this.structuralScenePipeline = device.createComputePipeline({
-      label: "Finalize live sparse voxel scene publication",
-      layout: structuralPipelineLayout,
-      compute: { module: structuralModule, entryPoint: "finalizeScene" },
-    });
+    this.structuralPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [structuralLayout] });
     this.structuralFinalizeBindGroup = device.createBindGroup({
       label: "Sparse voxel structural publication finalizer bindings",
       layout: structuralLayout,
@@ -1193,12 +1183,63 @@ export class OctreeSparseBrickWorld {
       + (this.liveDerivedBuilder?.allocatedBytes ?? 0);
   }
 
+  /** Compile this world's structural programs and every owned maintenance pipeline. */
+  initializePipelines(): Promise<void> {
+    if (this.destroyed) return Promise.reject(new Error("Cannot initialize a destroyed sparse-brick world"));
+    this.pipelineInitialization ??= (async () => {
+      this.structuralModule = this.device.createShaderModule({
+        label: "Sparse voxel structural publication finalizer",
+        code: structuralPublicationFinalizeShader(
+          this.proxyVoxelizer.maintenanceBinding.stateOffsetBytes / 4),
+      });
+      const structuralPipelines = Promise.all([
+        this.device.createComputePipelineAsync({
+          label: "Finalize live sparse voxel physics publication",
+          layout: this.structuralPipelineLayout,
+          compute: { module: this.structuralModule, entryPoint: "finalizePhysics" },
+        }),
+        this.device.createComputePipelineAsync({
+          label: "Finalize live sparse voxel scene publication",
+          layout: this.structuralPipelineLayout,
+          compute: { module: this.structuralModule, entryPoint: "finalizeScene" },
+        }),
+      ] as const);
+      const [, compiledStructuralPipelines] = await Promise.all([
+        Promise.all([
+          this.tree.initializePipelines(),
+          this.brickOccupancyBuilder.initializePipelines(),
+          this.proxyVoxelizer.initializePipelines(),
+          this.topologyMutator.initializePipelines(),
+          this.liveDerivedPlanner?.initializePipelines(),
+          this.liveDerivedBuilder?.initializePipelines(),
+        ]),
+        structuralPipelines,
+      ]);
+      [this.structuralPhysicsPipeline, this.structuralScenePipeline] = compiledStructuralPipelines;
+    })().catch((error) => {
+      this.pipelineInitialization = undefined;
+      throw error;
+    });
+    return this.pipelineInitialization;
+  }
+
   get allocatedBytes(): number { return this.baseAllocatedBytes + (this.inspection?.allocatedBytes ?? 0); }
 
+  /** The already-compiled inspection source, without starting lazy compilation. */
+  get inspectionSource(): SparseVoxelRenderSource | undefined { return this.inspection?.source; }
+
   /** Allocate expanded diagnostic records only when raw/grid inspection asks for them. */
-  ensureInspectionSource(): SparseVoxelRenderSource {
+  ensureInspectionSource(): Promise<SparseVoxelRenderSource> {
     if (this.destroyed) throw new Error("Cannot inspect a destroyed sparse-brick world");
-    if (this.inspection) return this.inspection.source;
+    if (this.inspection) return Promise.resolve(this.inspection.source);
+    this.inspectionInitialization ??= this.initializeInspectionSource().catch((error) => {
+      this.inspectionInitialization = undefined;
+      throw error;
+    });
+    return this.inspectionInitialization;
+  }
+
+  private async initializeInspectionSource(): Promise<SparseVoxelRenderSource> {
     const voxelRecords = storageBuffer(this.device, "Sparse voxel debug records", this.tree.voxelCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
     const brickRecords = storageBuffer(this.device, "Sparse brick debug records", this.tree.leafCapacity * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
     const voxelCount = storageBuffer(this.device, "Sparse voxel render count", 4);
@@ -1220,8 +1261,22 @@ export class OctreeSparseBrickWorld {
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
     ] });
     const debugPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [debugLayout] });
-    const voxelPipeline = this.device.createComputePipeline({ label: "Materialize sparse voxel records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeVoxels" } });
-    const brickPipeline = this.device.createComputePipeline({ label: "Materialize sparse brick records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeBricks" } });
+    const buffers = [voxelRecords, brickRecords, voxelCount, brickCount, materialBuffer, bodyMaterialBuffer, params];
+    let voxelPipeline: GPUComputePipeline;
+    let brickPipeline: GPUComputePipeline;
+    try {
+      [voxelPipeline, brickPipeline] = await Promise.all([
+        this.device.createComputePipelineAsync({ label: "Materialize sparse voxel records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeVoxels" } }),
+        this.device.createComputePipelineAsync({ label: "Materialize sparse brick records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeBricks" } }),
+      ]);
+    } catch (error) {
+      for (const buffer of buffers) buffer.destroy();
+      throw error;
+    }
+    if (this.destroyed) {
+      for (const buffer of buffers) buffer.destroy();
+      throw new Error("Sparse-brick world was destroyed while inspection pipelines compiled");
+    }
     const bindGroup = this.device.createBindGroup({ layout: debugLayout, entries: [
       { binding: 0, resource: { buffer: this.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
       { binding: 1, resource: { buffer: this.tree.nodes, offset: this.tree.nodeOffsetBytes, size: this.tree.nodeCapacity * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes } },
@@ -1240,7 +1295,6 @@ export class OctreeSparseBrickWorld {
       voxelCapacity: this.tree.voxelCapacity, brickCapacity: this.tree.leafCapacity,
       inspectionPublication: publication,
     };
-    const buffers = [voxelRecords, brickRecords, voxelCount, brickCount, materialBuffer, bodyMaterialBuffer, params];
     this.inspection = {
       source, publication, buffers, voxelRecords, brickRecords, voxelCount, brickCount,
       voxelPipeline, brickPipeline, bindGroup,

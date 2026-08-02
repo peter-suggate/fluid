@@ -19,8 +19,8 @@ test("compact authority census has no domain-shaped allocation or cold launch", 
   assert.equal(plan.candidateCapacity, 4_227_072);
   assert.equal(plan.radixBlockCapacity, 640);
   assert.equal(plan.radixHistogramWords, 163_840);
-  assert.equal(plan.scratchWords, 19_235_146);
-  assert.equal(plan.scratchBytes, 76_940_584);
+  assert.equal(plan.scratchWords, 19_235_168);
+  assert.equal(plan.scratchBytes, 76_940_672);
   assert.equal(plan.coldClearItems, 0);
   assert.equal(plan.maximumLiveClearItems, 163_840);
   assert.equal(plan.domainShapedRecords, 0);

@@ -235,21 +235,27 @@ export function reduceGPUResourceEvidence(
       state.plugin.provides.includes("fluid-authority") ? { ...fluid, plugin: state.plugin } : state]));
     next = { ...next, fluid, plugins };
   }
-  if (renderer?.state === "active") {
-    const svo = { state: "ready", label: "Sparse voxel presentation ready", usable: true } as const;
+  if (renderer?.state === "active" || renderer?.state === "not-required") {
+    const svo = { state: "ready", label: renderer.state === "active"
+      ? "Sparse voxel presentation ready" : "Sparse voxel presentation not required", usable: true } as const;
     const plugins = Object.fromEntries(Object.entries(next.plugins).map(([id, state]) => [id,
       state.plugin.provides.includes("sparse-voxel-presentation") ? { ...svo, plugin: state.plugin } : state]));
     next = { ...next, svo, plugins };
   } else if (renderer?.state === "pending") {
     const previous = next.svo;
-    next = { ...next, svo: {
+    const svo = {
       state: "preparing",
       label: renderer.detail ?? (renderer.failureReason === "pipeline-compiling"
         ? "Sparse presentation is compiling; presentation is held fail-closed"
         : "Waiting for the live sparse scene publication"),
       usable: false,
       activity: previous.activity,
-    } };
+    } as const;
+    const plugins = Object.fromEntries(Object.entries(next.plugins).map(([id, state]) => [id,
+      state.plugin.provides.includes("sparse-voxel-presentation")
+        ? { ...svo, activity: state.activity ?? svo.activity, plugin: state.plugin }
+        : state]));
+    next = { ...next, svo, plugins };
   } else if (renderer?.state === "failed") {
     const plugins = Object.fromEntries(Object.entries(next.plugins).map(([id, state]) => [id,
       state.plugin.provides.includes("sparse-voxel-presentation")
@@ -300,15 +306,16 @@ export function resourceCapabilityUsable(
 
 export function resourceInteractionGates(snapshot: ResourceReadinessSnapshot, fluidRequired: boolean) {
   const rendererUsable = resourceCapabilityUsable(snapshot, "renderer");
+  const scenePresentationUsable = resourceCapabilityUsable(snapshot, "sparse-voxel-presentation");
   const fluidUsable = resourceCapabilityUsable(snapshot, "fluid-authority")
     && resourceCapabilityUsable(snapshot, "water-presentation");
   return {
     /** React editing, camera controls, panels, import/export: never GPU-gated. */
     shellInteractive: true,
-    /** Only device acquisition has no image to present. Solver/SVO work is progressive. */
-    viewportInteractive: rendererUsable,
-    /** Transport depends on authoritative fluid, not unrelated renderer work. */
-    transportInteractive: rendererUsable && (!fluidRequired || fluidUsable),
+    /** A scene is interactive only when one complete GLOBAL SVO generation owns it. */
+    viewportInteractive: rendererUsable && scenePresentationUsable,
+    /** Advancing an invisible/partial scene would break simulation/presentation lockstep. */
+    transportInteractive: rendererUsable && scenePresentationUsable && (!fluidRequired || fluidUsable),
   };
 }
 

@@ -122,8 +122,20 @@ const octreeAirSupportMarchFastPath = octreeAirSupportMarchFastPathEnabled();
  * accepted structured slot count at publication start, exactly as words 2-4
  * latch the accepted row count, epoch and bank: the face seed stage needs it
  * only to reject a stale authority handle, and reading it here keeps the
- * structured control buffer off that stage's ten-binding budget. */
-export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 74;
+ * structured control buffer off that stage's ten-binding budget.
+ *
+ * Words 74-95 are the carrier-free-face forensic record. Word 42's ledger is
+ * the failing owned-face ITEM index (`faceRow*12 + 4*axis + quadrant`), which
+ * is unique and lossless; the earlier `(flags<<16)|(cell<<3)|axis` packing
+ * aliased its own flags byte against the cell index on every domain wider
+ * than 8192 cells, so nothing decoded from it was trustworthy.
+ * `finalizeAirSupportMetadata` expands that item into words 74-85. Words
+ * 86-88 count the patches per axis the changed-frontier march could not
+ * reach (and `completeAirSupportIncidentFaces` therefore resolved by exact
+ * exhaustive closest-face transform), and words 89-91 count the patches per
+ * axis that transform could not carry either, which is the only remaining
+ * way to reach the terminal rejection. */
+export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 96;
 export const OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS = 9;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_WORDS = 4;
 /** Adaptive support-leaf headroom for the proven-reach corridor. Overflow is
@@ -332,26 +344,6 @@ export function octreeAirSupportIndirectFrontierGateEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE !== "0";
-}
-
-/** GPU-authored live-page demand dispatch is the production path. Explicit
- * zero preserves the former provisioned-capacity launch as an exact A/B oracle. */
-export function octreeAirSupportCompactFineDemandEnabled(
-  environment?: Readonly<Record<string, string | undefined>>,
-): boolean {
-  const resolved = environment
-    ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND !== "0";
-}
-
-/** Compact factor-4/8 demand-cell listing is the work-minimal production path.
- * Explicit zero retains the dense cell sweep as a differential QA oracle. */
-export function octreeAirSupportCompactFineCellsEnabled(
-  environment?: Readonly<Record<string, string | undefined>>,
-): boolean {
-  const resolved = environment
-    ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_CELLS !== "0";
 }
 
 /** The march and reconstruction exchange only face/storage payloads while
@@ -760,7 +752,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   readonly allocatedBytes: number;
   private readonly params: readonly [GPUBuffer, GPUBuffer];
   private readonly ownerParams: GPUBuffer;
-  private readonly shaderModule: GPUShaderModule;
+  private shaderModule!: GPUShaderModule;
   private readonly pipelineCacheKey: string;
   private pipelines!: Readonly<Record<string, GPUComputePipeline>>;
   private groups!: readonly [Readonly<Record<string, GPUBindGroup>>,
@@ -777,7 +769,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   private parameterSlot: 0 | 1 = 0;
 
   constructor(private readonly device: GPUDevice, private readonly inputs: OctreeAirVelocitySupportGPUInputs,
-    deferPipelineCompilation = false) {
+    _deferPipelineCompilation = true) {
     const { structured, topology, owners } = inputs;
     const finePlansMatch = !inputs.fineSources || (() => {
       const [a, b] = inputs.fineSources.map((source) => source.plan);
@@ -855,10 +847,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       ownerPlan.ownerDirectoryOffsetWords, ownerPlan.ownerPagesOffsetWords,
       ownerPlan.capacity, ownerPlan.pageVoxels,
     ]));
-    this.shaderModule = device.createShaderModule({ label: "Structured positive-air identity publication",
-      code: octreeAirVelocitySupportPublicationWGSL });
     this.pipelineCacheKey = this.pipelineEntryPoints().join("\0");
-    if (!deferPipelineCompilation) this.createPipelinesSync();
     this.allocatedBytes = this.plan.allocatedBytes + 256
       - (inputs.sharedArena ? this.plan.support.totalBytes : 0);
   }
@@ -944,24 +933,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     this.pipelinesInitialized = true;
   }
 
-  private createPipelinesSync(): void {
-    let deviceCache = octreeAirSupportPipelineCache.get(this.device);
-    if (!deviceCache) {
-      deviceCache = new Map();
-      octreeAirSupportPipelineCache.set(this.device, deviceCache);
-    }
-    let pipelines = deviceCache.get(this.pipelineCacheKey);
-    if (!pipelines) {
-      const compiled: Record<string, GPUComputePipeline> = {};
-      for (const entryPoint of this.pipelineEntryPoints()) {
-        compiled[entryPoint] = this.device.createComputePipeline(this.pipelineDescriptor(entryPoint));
-      }
-      pipelines = Object.freeze(compiled);
-      deviceCache.set(this.pipelineCacheKey, pipelines);
-    }
-    this.assignPipelineState(pipelines);
-  }
-
   async initializePipelines(): Promise<void> {
     if (this.destroyed) throw new Error("Air-support GPU producer is destroyed");
     if (this.pipelinesInitialized) return;
@@ -974,6 +945,10 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       }
       let pipelines = deviceCache.get(this.pipelineCacheKey);
       if (!pipelines) {
+        this.shaderModule = this.device.createShaderModule({
+          label: "Structured positive-air identity publication",
+          code: octreeAirVelocitySupportPublicationWGSL,
+        });
         let compilations = octreeAirSupportPipelineCompilations.get(this.device);
         if (!compilations) {
           compilations = new Map();
@@ -1005,8 +980,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   private parameterData(expectedEpoch: number, fineSlot?: 0 | 1,
     gravityDt: readonly [number, number, number] = [0, 0, 0],
     changedFrontier = octreeAirSupportChangedFrontierEnabled(),
-    compactFineDemand = octreeAirSupportCompactFineDemandEnabled(),
-    compactFineCells = octreeAirSupportCompactFineCellsEnabled(),
+    compactFineCells = fineSlot !== undefined,
     indirectFrontierGate = octreeAirSupportIndirectFrontierGateEnabled(),
     retainedGraph = octreeAirSupportRetainedGraphEnabled()): ArrayBuffer {
     if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 1 || expectedEpoch > 0xffff_ffff) {
@@ -1073,10 +1047,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     const parameterSlot = this.parameterSlot;
     this.parameterSlot = parameterSlot === 0 ? 1 : 0;
     const changedFrontier = octreeAirSupportChangedFrontierEnabled();
-    // Production has one scheduling contract: fine demand is shaped by the
-    // GPU-published resident-page count. Capacity launch oracles belong in
-    // differential harnesses, never in the recurring encoder.
-    const compactFineDemand = true;
     const indirectFrontierGate = changedFrontier
       && octreeAirSupportIndirectFrontierGateEnabled()
       && fineSlot !== undefined
@@ -1085,14 +1055,17 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     const params = this.params[parameterSlot], groups = this.groups[parameterSlot];
     this.device.queue.writeBuffer(params, 0,
       this.parameterData(expectedEpoch, fineSlot, gravityDt ?? [0, 0, 0], changedFrontier,
-        compactFineDemand, compactFineCells, indirectFrontierGate));
+        compactFineCells, indirectFrontierGate));
     this.publicationCount += 1;
     const siteLabel = (label: string) => `${label} · ${site}`;
     let pass = broker.compute({ label: siteLabel("Initialize structured air-support publication") });
     pass.setPipeline(this.pipelines.beginAirSupportPublication!);
     pass.setBindGroup(0, groups.beginAirSupportPublication!);
     pass.dispatchWorkgroups(1);
-    if (fineSlot !== undefined && compactFineDemand && this.fineDemandScheduleGroups) {
+    // Production has one scheduling contract: fine demand is shaped by the
+    // GPU-published resident-page count. Capacity launch oracles belong in
+    // differential harnesses, never in the recurring encoder.
+    if (fineSlot !== undefined && this.fineDemandScheduleGroups) {
       pass.setPipeline(this.pipelines.prepareFineBandAirSupportDemand!);
       pass.setBindGroup(0, this.fineDemandScheduleGroups[parameterSlot][fineSlot]);
       pass.dispatchWorkgroups(1);
@@ -1100,7 +1073,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     // Storage-authored schedules are copied into an INDIRECT-only buffer. The
     // second copy below is the only other required pass boundary.
     broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0,
-      (fineSlot === undefined || !compactFineDemand ? 4 : 5) * 12);
+      (fineSlot === undefined ? 4 : 5) * 12);
     broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
     broker.updateIndirectBuffer(this.scratch, 66 * 4, this.indirect, 96, 12);
     pass = broker.compute({ label: siteLabel("Publish structured air-support identities") });
@@ -1664,6 +1637,7 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   sw(29u,0u);sw(28u,0u);sw(40u,p.expectedFineGeneration);
   ${octreeAirSupportCandidateBoundResetEnabled() ? "" : "sw(30u,0u);"}
   sw(41u,0u);sw(42u,INVALID);
+  for(var forensic=74u;forensic<96u;forensic+=1u){sw(forensic,0u);}
   if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.bank>1u
       ||accepted.rowCount==0u||accepted.rowCount>p.rowCapacity||accepted.slotCount>p.slotCapacity){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
   let ownerStatus=ownerPageArena[${OCTREE_OWNER_PAGE_CONTROL_WORDS.status}u];
@@ -2635,6 +2609,34 @@ fn closestSeedFaceAt(faceRow:u32,axis:u32,quadrant:u32,positive:bool)->vec4u{
     }else{completion=closestSeedFaceAt(faceRow,axis,quadrant,false);}
   }
   incidentFaces[item]=completion;
+  // Section 5 defines the air-face value as a copy of the face CLOSEST to
+  // the free surface -- a global closest-point transform over the seed set.
+  // The changed-frontier march is an acceleration of exactly that transform:
+  // every carrier keeps its ORIGINAL seed patch verbatim, and betterFace
+  // orders candidates by the same (squared distance, |v|, canonical offset,
+  // seed index) tuple closestSeedFaceAt uses, so on one CONNECTED component
+  // of the published corridor its fixed point already IS the global answer.
+  //
+  // The corridor is not connected in general. It is the demand cone of this
+  // step's consumers (see emitFineBandAirSupportCandidates), so a liquid
+  // feature the fine level set resolves but the power topology does not --
+  // a sub-grid floor or ceiling film -- owns no liquid row at all, and its
+  // fine band demands a corridor ISLAND with no seed anywhere inside it and
+  // no catalog incidence leaving it. On the large dam that island appears in
+  // one step: 1316 of 6209 support rows, all size 1 and 2, in y <= 5 along
+  // the floor, with zero incident or signed neighbours carrying a value.
+  // The march is correct and converged; it simply has no path.
+  //
+  // So evaluate the SAME transform exhaustively for exactly those patches.
+  // This is the paper's definition rather than a substituted value, and it
+  // is bit-identical to what a connected corridor would have marched. When
+  // an axis truly carries no seed at all it still resolves nothing, and the
+  // terminal carrier-free ledger still rejects the whole publication.
+  let marched=faceA[item];
+  if(marched.w==0u){atomicAdd(&scratch[86u+axis],1u);
+    let recovered=closestSeedFaceAt(faceRow,axis,quadrant,true);
+    if(recovered.w==0u){atomicAdd(&scratch[89u+axis],1u);}
+    else{faceA[item]=recovered;}}
 }
 // Everything the 30x4 candidate scan needs about the marching patch itself is
 // loop-invariant: the published face count and this patch's own centre. They
@@ -2868,8 +2870,13 @@ fn regularVectorAt(faceRow:u32,point:vec3f)->vec4f{let cell=faceCell(faceRow);le
       // identity and stage a finite zero only so this invocation completes;
       // finalize rejects the entire publication whenever this ledger is
       // non-empty, so no consumer can observe the provisional fallback.
+      // The ledger is the owned-face ITEM index: unique across the whole
+      // face table and lossless. The previous (flags<<16)|(cell<<3)|axis
+      // packing aliased the flags byte against the cell index on any domain
+      // wider than 8192 cells, so the recorded identity could not be decoded
+      // at all. finalizeAirSupportMetadata expands this into scratch[74..85].
       atomicAdd(&scratch[41u],1u);
-      atomicMin(&scratch[42u],(((cell.w>>6u)&0xffu)<<16u)|(cell.x<<3u)|axis);
+      atomicMin(&scratch[42u],faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant);
         terms[termCount]=0.;termCount+=1u;continue;}
       let positiveValue=bitcast<f32>(select(negative.x,positive.x,positive.w!=0u));let negativeValue=bitcast<f32>(select(positive.x,negative.x,negative.w!=0u));
       let t=round(clamp((point[axis]-origin[axis])/f32(cell.y),0.,1.)*65536.)/65536.;
@@ -2961,8 +2968,22 @@ var<workgroup> reconstructCompleted:array<u32,256>;
   if(lane==0u){if(reconstructExpected[0]!=0u){atomicAdd(&scratch[30u],reconstructExpected[0]);}
     if(reconstructCompleted[0]!=0u){atomicAdd(&scratch[28u],reconstructCompleted[0]);}}}
 
+// Expand a carrier-free owned-face item into the forensic record. Only the
+// producer can resolve a face row's cell, so a rejection must name the
+// geometry here instead of leaving the host to decode a packed word.
+fn publishCarrierFreeForensic(item:u32){
+  let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;let quadrant=local%4u;
+  let cell=faceCell(faceRow);let origin=coord(cell.x);
+  sw(74u,faceRow);sw(75u,origin.x);sw(76u,origin.y);sw(77u,origin.z);
+  sw(78u,cell.y);sw(79u,cell.z);sw(80u,cell.w);sw(81u,local);
+  sw(82u,adjacencyNegative(faceRow,axis,quadrant));sw(83u,s(2u));
+  sw(84u,adjacencyIncidentCount(faceRow));
+  sw(85u,adjacencyPositive(faceRow,axis,quadrant));}
+
 @compute @workgroup_size(1)fn finalizeAirSupportMetadata(){if(s(31u)==2u){return;}
-  if(s(41u)!=0u){fail(s(42u),ERROR_TOPOLOGY);}
+  sw(95u,s(8u));
+  if(s(41u)!=0u){publishCarrierFreeForensic(s(42u));fail(s(42u),ERROR_TOPOLOGY);}
   let first=s(1u);if((first>>24u)==6u&&s(59u)==0u){let item=first&0x00ffffffu;
     if(item<s(8u)){let failedAt=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
       sw(51u,r(failedAt));sw(52u,r(failedAt+1u));sw(53u,r(failedAt+2u));sw(54u,r(failedAt+3u));

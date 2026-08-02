@@ -426,6 +426,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .svo-control-grid .reset-chip { margin-left: 4px; padding: 0; border: 0; background: none; color: var(--amber); cursor: pointer; }
 .render-discrete-control { display: block; }
 .render-inline-warning { margin: 6px 0 0; padding: 7px 8px; border: 1px solid rgba(207,141,117,.2); color: #bf9584; background: rgba(207,141,117,.045); font: 7px/1.4 var(--mono); }
+.render-inline-status { margin: 6px 0 0; color: var(--dim); font: 7px/1.4 var(--mono); text-transform: uppercase; letter-spacing: .04em; }
 .compact-view-grid { grid-template-columns: repeat(4,minmax(0,1fr)); gap: 4px; }
 .visual-panel .compact-view-grid button { min-height: 52px; padding: 7px 7px 12px; }
 .compact-view-grid button strong { margin: 0; overflow: hidden; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }

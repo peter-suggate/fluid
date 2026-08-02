@@ -340,7 +340,7 @@ export class WebGPUStructuredVelocityDynamics {
    * records captured immediately after advection commit. */
   readonly advectionSymmetryAudit?: GPUBuffer;
   private readonly params: readonly [GPUBuffer, GPUBuffer, GPUBuffer];
-  private readonly shaderModule: GPUShaderModule;
+  private shaderModule!: GPUShaderModule;
   private readonly pipelineCacheKey: string;
   private prepare!: GPUComputePipeline;
   private topologyTransfer!: GPUComputePipeline;
@@ -379,7 +379,7 @@ export class WebGPUStructuredVelocityDynamics {
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly resources: StructuredDynamicsResources,
-    deferPipelineCompilation = false) {
+    _deferPipelineCompilation = true) {
     const { structured, topology } = resources;
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || resources.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
@@ -480,16 +480,12 @@ export class WebGPUStructuredVelocityDynamics {
     words[54] = resources.airSupportLayout.ownerDirectoryOffsetWords;
     words[55] = resources.airSupportLayout.ownerDirectorySlotCapacity;
     for (const buffer of this.params) device.queue.writeBuffer(buffer, 0, words.buffer);
-    this.shaderModule = device.createShaderModule({
-      label: "Structured velocity dynamics", code: structuredVelocityDynamicsWGSL,
-    });
     // The roster captures every construction-stable reachability decision
     // (flattening, body exchange, and energy diagnostics). The audit bit names
     // the only source variant that can retain the same entry-point roster.
     this.pipelineCacheKey = `${this.advectionSymmetryAudit ? "advection-audit" : "production"}\0${
       this.deepIdentityCarry ? "deep-carry" : "trace-all"}\0${
       this.pipelineEntryPoints().join("\0")}`;
-    if (!deferPipelineCompilation) this.createPipelinesSync();
     this.encodedAdvectionDispatchCount = this.flattenedBoundaryAdvection ? 4 : 3;
     this.allocatedBytes = catalogBytes + this.dispatch.size
       + this.projectionEnergyStats.size
@@ -547,24 +543,6 @@ export class WebGPUStructuredVelocityDynamics {
     this.pipelinesInitialized = true;
   }
 
-  private createPipelinesSync(): void {
-    let deviceCache = structuredDynamicsPipelineCache.get(this.device);
-    if (!deviceCache) {
-      deviceCache = new Map();
-      structuredDynamicsPipelineCache.set(this.device, deviceCache);
-    }
-    let pipelines = deviceCache.get(this.pipelineCacheKey);
-    if (!pipelines) {
-      const compiled: Record<string, GPUComputePipeline> = {};
-      for (const entryPoint of this.pipelineEntryPoints()) {
-        compiled[entryPoint] = this.device.createComputePipeline(this.pipelineDescriptor(entryPoint));
-      }
-      pipelines = Object.freeze(compiled);
-      deviceCache.set(this.pipelineCacheKey, pipelines);
-    }
-    this.assignPipelines(pipelines);
-  }
-
   async initializePipelines(
     onProgress: StructuredDynamicsPipelineProgress = () => {},
   ): Promise<void> {
@@ -580,6 +558,9 @@ export class WebGPUStructuredVelocityDynamics {
       }
       let pipelines = deviceCache.get(this.pipelineCacheKey);
       if (!pipelines) {
+        this.shaderModule = this.device.createShaderModule({
+          label: "Structured velocity dynamics", code: structuredVelocityDynamicsWGSL,
+        });
         let compilations = structuredDynamicsPipelineCompilations.get(this.device);
         if (!compilations) {
           compilations = new Map();

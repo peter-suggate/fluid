@@ -133,29 +133,34 @@ export type SvoBrickOccupancyBuildStatus = "encoded" | "unsupported-brick-size";
 
 export class WebGpuSvoBrickOccupancyBuilder {
   readonly incrementalAllocatedBytes = 0;
-  private readonly allLeavesPipeline: GPUComputePipeline;
-  private readonly worklistPipeline: GPUComputePipeline;
-  private readonly fluidResidencyPipeline: GPUComputePipeline;
+  private allLeavesPipeline!: GPUComputePipeline;
+  private worklistPipeline!: GPUComputePipeline;
+  private fluidResidencyPipeline!: GPUComputePipeline;
+  private module!: GPUShaderModule;
 
   constructor(private readonly device: GPUDevice) {
-    const module = device.createShaderModule({
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.allLeavesPipeline) return;
+    this.module = this.device.createShaderModule({
       label: "SVO brick occupancy build shader",
       code: webgpuSvoBrickOccupancyBuildWGSL,
     });
-    this.allLeavesPipeline = device.createComputePipeline({
+    this.allLeavesPipeline = await this.device.createComputePipelineAsync({
       label: "SVO brick occupancy initialization pipeline",
       layout: "auto",
-      compute: { module, entryPoint: "buildAllBrickOccupancy" },
+      compute: { module: this.module, entryPoint: "buildAllBrickOccupancy" },
     });
-    this.worklistPipeline = device.createComputePipeline({
+    this.worklistPipeline = await this.device.createComputePipelineAsync({
       label: "SVO brick occupancy worklist pipeline",
       layout: "auto",
-      compute: { module, entryPoint: "buildWorklistBrickOccupancy" },
+      compute: { module: this.module, entryPoint: "buildWorklistBrickOccupancy" },
     });
-    this.fluidResidencyPipeline = device.createComputePipeline({
+    this.fluidResidencyPipeline = await this.device.createComputePipelineAsync({
       label: "SVO brick occupancy fluid-residency pipeline",
       layout: "auto",
-      compute: { module, entryPoint: "buildFluidResidencyBrickOccupancy" },
+      compute: { module: this.module, entryPoint: "buildFluidResidencyBrickOccupancy" },
     });
   }
 

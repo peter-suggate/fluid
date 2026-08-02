@@ -282,6 +282,12 @@ export function pickRoomInterior(ray: EditorRay, box: BoxExtent): number | undef
 export interface EditorEntityContext {
   readonly scene: SceneDescription;
   readonly bodies: readonly EditorBodyPose[];
+  /**
+   * True only when the complete scene generation is the image being presented.
+   * An absent value keeps pure entity/unit-test contexts independent from GPU
+   * lifecycle state; the viewport always supplies it explicitly.
+   */
+  readonly scenePresentationAvailable?: boolean;
 }
 
 /** The runtime pose an entity definition needs, without importing the solver. */

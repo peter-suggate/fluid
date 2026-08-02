@@ -636,9 +636,12 @@ export class SparseBrickOctreeGPU {
   readonly drawIndirectOffsetBytes = SPARSE_BRICK_GPU_LAYOUT.drawIndirectOffsetBytes;
 
   private readonly device: GPUDevice;
-  private readonly publicationPipelines: readonly GPUComputePipeline[];
-  private readonly denseFieldPipeline: GPUComputePipeline;
-  private readonly denseFieldCleanupPipeline: GPUComputePipeline;
+  private publicationPipelines: readonly GPUComputePipeline[] = [];
+  private denseFieldPipeline!: GPUComputePipeline;
+  private denseFieldCleanupPipeline!: GPUComputePipeline;
+  private publicationModule!: GPUShaderModule;
+  private denseFieldModule!: GPUShaderModule;
+  private readonly label: string;
   private readonly denseFieldParams: GPUBuffer;
   private destroyed = false;
 
@@ -650,6 +653,7 @@ export class SparseBrickOctreeGPU {
     this.leafCapacity = positiveCapacity(options.leafCapacity, "Leaf capacity");
     this.voxelCapacity = this.leafCapacity * this.brickSize ** 3;
     const label = options.label ?? "Sparse brick octree";
+    this.label = label;
     const storageUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const indirectUsage = storageUsage | GPUBufferUsage.INDIRECT;
     const nodeBytes = checkedBytes(this.nodeCapacity, SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes, "Node");
@@ -686,25 +690,36 @@ export class SparseBrickOctreeGPU {
       this.leafTopologyOffsetBytes / 4, this.velocityOffsetBytes / 4, this.materialOwnerOffsetBytes / 4,
     ]));
     this.denseFieldParams = device.createBuffer({ label: `${label} dense publication parameters`, size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const publicationModule = device.createShaderModule({ label: `${label} publication shader`, code: publicationShader });
-    this.publicationPipelines = [
+  }
+
+  async initializePipelines(): Promise<void> {
+    if (this.publicationPipelines.length > 0) return;
+    this.publicationModule = this.device.createShaderModule({
+      label: `${this.label} publication shader`, code: publicationShader,
+    });
+    this.denseFieldModule = this.device.createShaderModule({
+      label: `${this.label} dense-field shader`, code: denseFieldShader,
+    });
+    this.publicationPipelines = [];
+    for (const [stage, entryPoint] of [
       ["structure", "publishStructure"],
       ["geometry", "publishGeometry"],
       ["velocity", "publishVelocity"],
       ["material-owner", "publishMaterialOwners"],
-    ].map(([stage, entryPoint]) => device.createComputePipeline({
-      label: `${label} ${stage} publication pipeline`,
-      layout: "auto",
-      compute: { module: publicationModule, entryPoint },
-    }));
-    const denseFieldModule = device.createShaderModule({ label: `${label} dense-field shader`, code: denseFieldShader });
-    this.denseFieldPipeline = device.createComputePipeline({
-      label: `${label} dense-field pipeline`, layout: "auto",
-      compute: { module: denseFieldModule, entryPoint: "materializeDenseFields" },
+    ] as const) {
+      this.publicationPipelines = [...this.publicationPipelines,
+        await this.device.createComputePipelineAsync({
+          label: `${this.label} ${stage} publication pipeline`, layout: "auto",
+          compute: { module: this.publicationModule, entryPoint },
+        })];
+    }
+    this.denseFieldPipeline = await this.device.createComputePipelineAsync({
+      label: `${this.label} dense-field pipeline`, layout: "auto",
+      compute: { module: this.denseFieldModule, entryPoint: "materializeDenseFields" },
     });
-    this.denseFieldCleanupPipeline = device.createComputePipeline({
-      label: `${label} retired dense-field cleanup pipeline`, layout: "auto",
-      compute: { module: denseFieldModule, entryPoint: "clearRetiredDenseFields" },
+    this.denseFieldCleanupPipeline = await this.device.createComputePipelineAsync({
+      label: `${this.label} retired dense-field cleanup pipeline`, layout: "auto",
+      compute: { module: this.denseFieldModule, entryPoint: "clearRetiredDenseFields" },
     });
   }
 

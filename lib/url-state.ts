@@ -69,6 +69,7 @@ type UIQueryState = {
   voxelRenderMode: VoxelRenderMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
+  silhouetteRefinementEnabled: boolean;
   svoConeTracingMode: SvoConeTracingMode;
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
 };
@@ -221,6 +222,7 @@ export function parseQueryState(search: string): QueryState {
       voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "surface-voxels" || voxels === "brick-grid" || voxels === "occupied-bricks" ? voxels : initialUI.voxelRenderMode,
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
+      silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
       svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off" ? query.get("svoCones") as SvoConeTracingMode : "cones",
       svoPrimaryTraversal: query.get("svoPrimary") === "traced" ? "traced" : "raster",
     }
@@ -230,7 +232,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoCones" || key === "svoPrimary" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -248,6 +250,9 @@ export function serializeQueryState(
   query.set("quality", methodState.quality);
   if (uiState.svoShadowsEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled) query.set("svoShadows", uiState.svoShadowsEnabled ? "1" : "0");
   if (uiState.svoAmbientOcclusionEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled) query.set("svoAO", uiState.svoAmbientOcclusionEnabled ? "1" : "0");
+  if (uiState.silhouetteRefinementEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled) {
+    query.set("svoPrimarySeamClosure", uiState.silhouetteRefinementEnabled ? "1" : "0");
+  }
   if (uiState.svoConeTracingMode !== "cones") query.set("svoCones", uiState.svoConeTracingMode);
   if (uiState.svoPrimaryTraversal !== "raster") query.set("svoPrimary", uiState.svoPrimaryTraversal);
   if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
