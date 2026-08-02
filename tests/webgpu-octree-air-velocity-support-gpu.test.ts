@@ -705,6 +705,25 @@ test("closed-wall air reconstruction is exactly reflection odd after marched car
   assert.equal(positiveWallCell, Math.fround(-negativeWallCell));
 });
 
+test("caseless liquid film seeds require an empty projected carrier and a fine sign change", () => {
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  assert.match(shader,
+    /fnseedAirSupportFilmFaces.*faceA\[item\]\.w==0u.*airSupportFilmSeedCarrier\(item\).*faceA\[item\]=carrier/s,
+    "the fallback must run only after both existing projection attempts left the face unseeded");
+  assert.match(shader,
+    /fnfilmSeedForLiquidRow.*row>=s\(2u\)\|\|!liquidRow\(row\)\|\|!fineInterfaceInCell\(adjacencyGeometry\(row\)\).*returnvec4u\(0u,INVALID,INVALID,0u\)/s,
+    "only a direct liquid row whose own cell contains the fine interface can become a film seed");
+  assert.match(shader,
+    /fnfineInterfaceInCell.*centerIndex=fineSeedSample\(q\).*otherIndex=fineSeedSample\(vec3u\(neighborQ\)\).*\(other<0\.\)!=\(center<0\.\)/s,
+    "the guard must mirror fine topology's valid-sample sign-change predicate");
+  assert.match(shader,
+    /letat=s\(4u\)\*p\.rowCapacity\+row.*normalComponent=rowVelocities\[at\]\[axis\]\*aligned.*select\(normalComponent,-normalComponent,aligned<0\.\)/s,
+    "film velocity must come from the accepted banked row vector and preserve projected-face orientation");
+  assert.doesNotMatch(shader.slice(shader.indexOf("fnfilmSeedForLiquidRow"),
+    shader.indexOf("fnseedAirSupportFaces")), /directAirVectors/,
+    "the later reconstruction staging buffer is not an input authority for liquid rows");
+});
+
 test("host uses only GPU-published live schedules for fine demand and changed frontiers", () => {
   const encode = compact(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
   assert.match(encode, /dispatchWorkgroups\(1\).*updateIndirectBuffer/);

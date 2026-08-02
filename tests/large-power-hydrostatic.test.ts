@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { validateScene } from "../lib/model";
+import { getSceneWebGPUSmokeLane } from "../lib/scene-webgpu-smoke-catalog";
 import {
   LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
+  LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   createLargePowerDamBreakScene,
   createLargePowerHydrostaticScene,
   getScenePreset,
@@ -18,7 +20,9 @@ import { planOctreeAirVelocitySupport } from "../lib/webgpu-octree-air-velocity-
 import {
   OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_DENOMINATOR,
   OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_NUMERATOR,
+  planOctreeAirVelocitySupportGPU,
 } from "../lib/webgpu-octree-air-velocity-support-gpu";
+import { planFineLevelSetBandFineCells } from "../lib/webgpu-octree-fine-levelset-topology";
 
 test("large hydrostatic uses a quarter-volume sparse representable slab", () => {
   const dam = createLargePowerDamBreakScene();
@@ -41,9 +45,53 @@ test("large hydrostatic is an authored comparison preset", () => {
   const preset = getScenePreset("large-power-hydrostatic");
   assert.equal(preset.id, "large-power-hydrostatic");
   assert.equal(preset.methodProfile, LARGE_POWER_HYDROSTATIC_METHOD_PROFILE);
-  assert.equal(preset.methodProfile.overrides.pressureRowCapacity, undefined);
+  assert.equal(preset.methodProfile.overrides.pressureRowCapacity,
+    LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY);
   assert.equal(preset.methodProfile.overrides.globalFineLevelSetMaximumBricks, undefined);
   assert.equal(preset.create().sceneId, "large-power-hydrostatic");
+  assert.equal(getSceneWebGPUSmokeLane("large-power-hydrostatic").methods[0]?.overrides.pressureRowCapacity,
+    LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY);
+});
+
+test("large hydrostatic authors enough air-support capacity for its full footprint", () => {
+  const dimensions = [64, 20, 64] as const;
+  const domain = dimensions.reduce((product, value) => product * value, 1);
+  const liquid = 32 * 1 * 32;
+  const fineFactor = 4;
+  const bands = planFineLevelSetBandFineCells(1, fineFactor);
+  const transportLayers = bands.transportBandFineCells / fineFactor;
+  const extensionLayers = 1;
+  const interpolationHalo = 1;
+  const reach = transportLayers + extensionLayers + interpolationHalo;
+  const identityDemand = (32 + reach) * (1 + reach) * (32 + reach);
+  const supportDemand = identityDemand - liquid;
+  assert.equal(reach, 4);
+  assert.equal(identityDemand, 6_480);
+  assert.equal(supportDemand, 5_456);
+
+  const oldRows = 2_048;
+  const oldSupport = planOctreeAirVelocitySupport(oldRows, oldRows * 30, 256, domain,
+    Math.ceil(oldRows * OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_NUMERATOR
+      / OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_DENOMINATOR));
+  const newRows = LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY;
+  const newSupport = planOctreeAirVelocitySupport(newRows, newRows * 30, 256, domain,
+    Math.ceil(newRows * OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_NUMERATOR
+      / OCTREE_AIR_SUPPORT_GPU_FOOTPRINT_HEADROOM_DENOMINATOR));
+  assert.equal(oldSupport.supportCapacity, 3_072);
+  assert.ok(oldSupport.supportCapacity < supportDemand);
+  assert.equal(newSupport.supportCapacity, 6_144);
+  assert.ok(newSupport.supportCapacity >= supportDemand);
+  assert.ok(newSupport.supportCapacity <= 2 * supportDemand);
+
+  const oldArena = planOctreeAirVelocitySupportGPU(oldRows, oldRows * 30, dimensions);
+  const newArena = planOctreeAirVelocitySupportGPU(newRows, newRows * 30, dimensions);
+  assert.equal(oldArena.identityCapacity, 5_120);
+  assert.ok(oldArena.identityCapacity < identityDemand);
+  assert.equal(newArena.identityCapacity, 10_240);
+  assert.ok(newArena.identityCapacity >= identityDemand);
+  assert.ok(newArena.identityCapacity <= 2 * identityDemand);
+  assert.equal(oldArena.allocatedBytes, 9_512_432);
+  assert.equal(newArena.allocatedBytes, 19_023_376);
 });
 
 test("large hydrostatic derives every sparse capacity from its authored fluid footprint", () => {

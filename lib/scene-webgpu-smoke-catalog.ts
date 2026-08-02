@@ -6,6 +6,7 @@ import {
   CEILING_DROP_METHOD_PROFILE,
   COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
   LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
+  LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   createBrickQuadDamBreakScene,
   createOceanSeicheScene,
   createTwinDamCollisionScene,
@@ -353,6 +354,7 @@ const largePowerHydrostaticOverrides = {
   ...octreePowerOverrides,
   maximumLeafSize: "32",
   interfaceRefinementBandCells: 1,
+  pressureRowCapacity: LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
 } as const;
 
 const powerDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [

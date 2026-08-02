@@ -39,6 +39,7 @@ import {
 
 import { PassBroker } from "../lib/webgpu-pass-broker";
 import {
+  decodeFineLevelSetRecurringRejectionClauses,
   FINE_LEVELSET_TOPOLOGY_FINALIZE_REASON,
   fineLevelSetLeafSeedWGSL,
   makeFineLevelSetTopologyWGSL,
@@ -53,6 +54,13 @@ import {
   WebGPUFineLevelSetTopology,
   unpackFineLevelSetGPUTopologyControl,
 } from "../lib/webgpu-octree-fine-levelset-topology";
+
+test("recurring topology rejection clauses retain stable forensic names", () => {
+  assert.deepEqual(decodeFineLevelSetRecurringRejectionClauses(1 | 512 | 4096), [
+    "recurring-off", "transport-delta-uncommitted", "ring-bound",
+  ]);
+  assert.deepEqual(decodeFineLevelSetRecurringRejectionClauses(0), []);
+});
 
 type DawnModule = { create(options: string[]): GPU; globals: Record<string, unknown> };
 // Dawn's native event pump can outlive the final device callback. Keep the
@@ -487,6 +495,9 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
   assert.match(wgsl,
     /fnpublishRecurringSparseBand[\s\S]*transportDelta\[1\]!=params\.currentGeneration[\s\S]*transportDelta\[3\]!=currentWorklist\[1\]/,
     "recurring topology fail-closes on an invalid compact producer authority");
+  assert.match(wgsl,
+    /params\.recurringDelta&0x80000000u[\s\S]*badDelta\|=512u/,
+    "the test-only recurring rejection reaches the real uncommitted-delta clause");
   assert.match(wgsl,
     /fnpublishRecurringSparseBand[\s\S]*recurringProducerChanged\(item\)[\s\S]*currentMetadata\[id\*10u\+3u\]&2u[\s\S]*interfaceKey=key/,
     "recurring seeds are the compact producer-changed current-interface set");

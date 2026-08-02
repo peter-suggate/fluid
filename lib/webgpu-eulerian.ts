@@ -110,6 +110,9 @@ export interface GPUEulerianInfo {
   structuredAirSupportFaceItems?: number;
   structuredAirSupportSeedFaces?: number;
   structuredAirSupportMarchDepth?: number;
+  /** First live or latched Section-5 air-support publication rejection. */
+  structuredAirSupportFailureFlags?: number;
+  structuredAirSupportFailureItem?: number;
   /** Decoded structured-dynamics reject carry. A rejection zeroes every class
    * dispatch, so the step silently freezes; these name the responsible stage
    * instead of leaving it to surface as a step-count or volume-drift failure. */

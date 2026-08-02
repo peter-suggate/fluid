@@ -72,14 +72,17 @@ export const LARGE_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
 
 /** Footprint-budgeted allocation for the quarter-volume large still-water
  * lane. Cold publication uses 1,028 pressure rows and recurring fine residency
- * is 6,405 bricks; these reserves retain explicit growth headroom while the
- * existing GPU overflow sentinels reject any generation that exceeds it. */
+ * is 6,405 bricks. Its fine-band reach needs 5,456 non-liquid support records;
+ * 4,096 rows author 6,144 while the existing GPU overflow sentinels reject any
+ * generation that exceeds either reserve. */
+export const LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY = 4_096;
 export const LARGE_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...POWER_VALIDATION_METHOD_PROFILE,
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 1,
+    pressureRowCapacity: LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   }),
 });
 

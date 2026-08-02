@@ -8,7 +8,8 @@ test("factor one skips the separate-band restriction receipt", () => {
   assert.match(executor,
     /const hasSeparateFineLevelSetBand = method\.id === "octree"\s*&& Number\(values\.globalFineLevelSetFactor\) !== 1;/);
   assert.match(executor,
-    /if \(restrictionAudit\.failure && hasSeparateFineLevelSetBand\s*&& !retainedBackgroundOctree\)/);
+    /if \(restrictionAudit\.failure && hasSeparateFineLevelSetBand\)/);
+  assert.doesNotMatch(executor, /retainedBackgroundOctree|fineTopologyRetainsBackgroundOctree/);
 });
 
 const restriction = (unacceptedRows: number, rowCount = 363_336) => ({

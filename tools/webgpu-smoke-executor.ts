@@ -7,11 +7,11 @@ import type { SceneDescription } from "../lib/model";
 import { createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, type SingleTallCellProbeOptions } from "../lib/tall-cell-grid";
 import type { GPUEulerianInfo, GPUQuality } from "../lib/webgpu-eulerian";
 import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
-import { fineTopologyRetainsBackgroundOctree } from "../lib/octree-consumer-sampling";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/webgpu-octree-fine-levelset-bricks";
 import { FINE_LEVELSET_VOLUME_VALID, unpackFineLevelSetGPUVolumeControl }
   from "../lib/webgpu-octree-fine-levelset-volume";
-import { FINE_LEVELSET_TOPOLOGY_ERROR, unpackFineLevelSetGPUTopologyControl }
+import { decodeFineLevelSetRecurringRejectionClauses, FINE_LEVELSET_TOPOLOGY_ERROR,
+  unpackFineLevelSetGPUTopologyControl }
   from "../lib/webgpu-octree-fine-levelset-topology";
 import { unpackFineToCoarseGPUControl }
   from "../lib/webgpu-octree-fine-to-coarse-levelset";
@@ -490,7 +490,7 @@ if (!Number.isSafeInteger(powerAuditEverySteps) || powerAuditEverySteps < 1) {
  * `FLUID_TRIPWIRE_ALLOW=topology-rollback,restriction-unaccepted,...`
  * downgrades named tripwires to loud warnings for triage only. */
 const TRIPWIRE_IDS = ["topology-rollback", "restriction-unaccepted",
-  "mgpcg-nonconvergence", "fine-band-sentinel"] as const;
+  "mgpcg-nonconvergence", "fine-band-sentinel", "air-support-failure"] as const;
 type TripwireId = (typeof TRIPWIRE_IDS)[number];
 const tripwireMode = process.env.FLUID_TRIPWIRES;
 if (tripwireMode !== undefined && tripwireMode !== "0" && tripwireMode !== "1") {
@@ -806,6 +806,8 @@ function reportResult(scenario: SmokeScenario, result: GPUSmokeResult) {
     structuredAirSupportFaceItems: info.structuredAirSupportFaceItems,
     structuredAirSupportSeedFaces: info.structuredAirSupportSeedFaces,
     structuredAirSupportMarchDepth: info.structuredAirSupportMarchDepth,
+    structuredAirSupportFailureFlags: info.structuredAirSupportFailureFlags,
+    structuredAirSupportFailureItem: info.structuredAirSupportFailureItem,
     globalFineLevelSetAllocatedBytes: info.globalFineLevelSetAllocatedBytes,
     globalFineLevelSetResidentBrickCapacity: info.globalFineLevelSetResidentBrickCapacity,
     globalFineLevelSetLogicalBrickCount: info.globalFineLevelSetLogicalBrickCount,
@@ -1405,17 +1407,28 @@ async function runGPU(
   const powerGenerationAuditDts: number[] = [];
   // ---- Silent-failure tripwires (docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3) --
   // Per accepted step: the fine topology rollback word, the restriction
-  // transaction's unaccepted-row count, the MGPCG converged word, and the
-  // fine worklist header. All four are copied GPU-side by a tiny encoder that
+  // transaction's unaccepted-row count, the MGPCG converged word, the fine
+  // worklist header, and the air-support first-failure receipt. They are
+  // copied GPU-side by a tiny encoder that
   // rides after the advance's own submission and is mapped exactly once,
   // after the measured window closes; nothing here drains the pipeline.
   const TRIPWIRE_RECORD = Object.freeze({
-    topologyOffsetBytes: 0, topologyBytes: 48,
-    restrictionOffsetBytes: 48, restrictionBytes: 32,
-    mgpcgOffsetBytes: 80, mgpcgBytes: 64,
-    coarseOffsetBytes: 144, coarseBytes: 64,
-    fineHeaderOffsetBytes: 208, fineHeaderBytes: 28,
-    strideBytes: 240,
+    // The full 64-byte topology control: words 10..15 are the sticky
+    // first-rejection latch (reason bits, first rejected generation, and the
+    // producer's own pre-finalize flags/item) that per-generation clears
+    // never touch.
+    topologyOffsetBytes: 0, topologyBytes: 64,
+    restrictionOffsetBytes: 64, restrictionBytes: 32,
+    mgpcgOffsetBytes: 96, mgpcgBytes: 64,
+    coarseOffsetBytes: 160, coarseBytes: 64,
+    fineHeaderOffsetBytes: 224, fineHeaderBytes: 28,
+    // Air-support scratch[0..1] is the live verdict and [38..39] is the first
+    // rejected preceding transaction. Fine-transport governor words 0..7 and
+    // 46..56 carry the schedule and sleep/repair cause for the same step.
+    airSupportOffsetBytes: 252, airSupportBytes: 16,
+    transportScheduleOffsetBytes: 268, transportScheduleBytes: 32,
+    transportSleepOffsetBytes: 300, transportSleepBytes: 44,
+    strideBytes: 344,
   });
   /** The benchmark and acceptance lanes must evaluate every tripwire. Any
    * other octree run captures them opportunistically: a trip still fails, but
@@ -1439,7 +1452,7 @@ async function runGPU(
   if (tripwiresDisabled) {
     console.error("[tripwires] DISABLED by FLUID_TRIPWIRES=0: topology rollback,"
       + " unaccepted restriction rows, MGPCG non-convergence and the fine-band"
-      + " capacity sentinel are NOT gated in this run");
+      + " capacity sentinel, and air-support publication failure are NOT gated in this run");
   }
   if (tripwireAllowList.size !== 0) {
     console.error(`[tripwires] downgraded to warnings by FLUID_TRIPWIRE_ALLOW: ${
@@ -1458,6 +1471,8 @@ async function runGPU(
       mgpcgControl?: GPUBuffer;
       globalFineRestrictionControl?: GPUBuffer;
       globalFineSummaryDebug?: { coarseControl: GPUBuffer };
+      airSupportScratch?: GPUBuffer;
+      workAccountingBuffers?: { fineTransportGovernor?: GPUBufferBinding };
     };
     const topologyControl = authority.globalFineLevelSetSource?.topologyControl;
     const topology: GPUBufferBinding | undefined = topologyControl
@@ -1469,6 +1484,8 @@ async function runGPU(
       mgpcg: authority.mgpcgControl,
       coarse: authority.globalFineSummaryDebug?.coarseControl,
       fineWorklist: authority.globalFineLevelSetSource?.worklist,
+      airSupport: authority.airSupportScratch,
+      transportGovernor: authority.workAccountingBuffers?.fineTransportGovernor,
     };
   };
   let lastLoggedPhysicsTraceSampleId = 0;
@@ -1629,6 +1646,16 @@ async function runGPU(
         missing.push(`topology (binding exposes ${sources.topology.size} bytes,`
           + ` the control ABI needs ${TRIPWIRE_RECORD.topologyBytes})`);
       }
+      if (sources.airSupport && sources.airSupport.size < 40 * 4) {
+        missing.push(`airSupport (buffer exposes ${sources.airSupport.size} bytes,`
+          + " the first-failure latch ends at byte 160)");
+      }
+      const governorBytes = sources.transportGovernor?.size
+        ?? ((sources.transportGovernor?.buffer.size ?? 0) - (sources.transportGovernor?.offset ?? 0));
+      if (sources.transportGovernor && governorBytes < 57 * 4) {
+        missing.push(`transportGovernor (binding exposes ${governorBytes} bytes,`
+          + " the sleep forensics end at byte 228)");
+      }
       if (missing.length !== 0) {
         // An unevaluable tripwire is the exact failure mode A3 exists to kill:
         // fail loudly instead of quietly capturing nothing.
@@ -1657,6 +1684,18 @@ async function runGPU(
           base + TRIPWIRE_RECORD.coarseOffsetBytes, TRIPWIRE_RECORD.coarseBytes);
         encoder.copyBufferToBuffer(sources.fineWorklist!, 0, tripwireSnapshot,
           base + TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes);
+        encoder.copyBufferToBuffer(sources.airSupport!, 0, tripwireSnapshot,
+          base + TRIPWIRE_RECORD.airSupportOffsetBytes, 8);
+        encoder.copyBufferToBuffer(sources.airSupport!, 38 * 4, tripwireSnapshot,
+          base + TRIPWIRE_RECORD.airSupportOffsetBytes + 8, 8);
+        encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
+          sources.transportGovernor!.offset ?? 0, tripwireSnapshot,
+          base + TRIPWIRE_RECORD.transportScheduleOffsetBytes,
+          TRIPWIRE_RECORD.transportScheduleBytes);
+        encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
+          (sources.transportGovernor!.offset ?? 0) + 46 * 4, tripwireSnapshot,
+          base + TRIPWIRE_RECORD.transportSleepOffsetBytes,
+          TRIPWIRE_RECORD.transportSleepBytes);
         device.queue.submit([encoder.finish()]);
         tripwireSteps.push(steps);
         tripwireFineGenerations.push(
@@ -2434,6 +2473,30 @@ async function runGPU(
           const fineGeneration = tripwireFineGenerations[record]!;
           const trip = (id: TripwireId, detail: Record<string, unknown>) =>
             tripped.push({ id, step, fineGeneration, detail });
+          const header = readFineLevelSetWorksetHeader(words(record,
+            TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes));
+          const recurringRejection = header?.generation === 0xffff_ffff
+            && header.activeCount === 0xffff_ffff ? {
+              clauseMask: header.capacity,
+              clauses: decodeFineLevelSetRecurringRejectionClauses(header.capacity),
+              unknownClauseMask: (header.capacity & ~0x1fff) >>> 0,
+              landingDisplacementBits: header.flags,
+            } : undefined;
+          const airSupport = words(record, TRIPWIRE_RECORD.airSupportOffsetBytes,
+            TRIPWIRE_RECORD.airSupportBytes);
+          const transportSchedule = Array.from(words(record,
+            TRIPWIRE_RECORD.transportScheduleOffsetBytes,
+            TRIPWIRE_RECORD.transportScheduleBytes));
+          const transportSleep = Array.from(words(record,
+            TRIPWIRE_RECORD.transportSleepOffsetBytes,
+            TRIPWIRE_RECORD.transportSleepBytes));
+          const fatalChainForensics = {
+            airSupportLive: { flags: airSupport[0], firstError: airSupport[1] },
+            airSupportLatched: { flags: airSupport[2], firstError: airSupport[3] },
+            recurringRejection,
+            transportSchedule,
+            transportSleep,
+          };
           // 1. Topology rollback. `settleFinePublication` returns early on the
           //    clean path and writes control[5]=1 only on the rollback branch;
           //    the host re-zeroes control words 0..7 at the start of every
@@ -2442,21 +2505,28 @@ async function runGPU(
           const topologyControl = words(record, TRIPWIRE_RECORD.topologyOffsetBytes,
             TRIPWIRE_RECORD.topologyBytes);
           const topology = unpackFineLevelSetGPUTopologyControl(topologyControl);
-          // Aanjaneya et al. 2017 Section 5
-          // (`docs/papers/aanjaneya-2017-power-liquids.txt`) gives the fine
-          // SPGrid and background octree independent lifecycles. A known,
-          // explicit rollback is the provenance for retaining the latter; it
-          // is not a silent failure. Unknown or incomplete rollback controls
-          // still trip immediately.
-          const retainedBackgroundOctree = fineTopologyRetainsBackgroundOctree(topologyControl);
-          if (topology.rolledBack && !retainedBackgroundOctree) {
+          if (process.env.FLUID_FINE_TOPOLOGY_TRACE === "1") {
+            // stderr: the benchmark harness pipes child stdout through an
+            // NDJSON filter that would drop this record type.
+            console.error(JSON.stringify({ record: "fine-topology-trace", step,
+              fineGeneration, interfaceBricks: topology.interfaceBricks,
+              interfaceSeedBricks: topology.interfaceSeedBricks,
+              desiredBricks: topology.desiredBricks,
+              activatedBricks: topology.activatedBricks,
+              rolledBack: topology.rolledBack, flags: topology.flags,
+              reason: topology.downstreamFinalizeReason,
+              requiredDesiredBricks: topology.requiredDesiredBricks,
+              requiredExact: topology.requiredDesiredBricksExact,
+              control: Array.from(topologyControl) }));
+          }
+          if (topology.rolledBack) {
             trip("topology-rollback", { rolledBack: true,
               flags: topology.flags, published: topology.published,
               downstreamFinalizeReason: topology.downstreamFinalizeReason,
               interfaceBricks: topology.interfaceBricks,
               desiredBricks: topology.desiredBricks,
               activatedBricks: topology.activatedBricks,
-              control: Array.from(topologyControl) });
+              control: Array.from(topologyControl), fatalChainForensics });
           }
           // 2. Section 5 restriction authority. Aanjaneya et al. deliberately
           //    keep the fine SPGrid only around the surface; the background
@@ -2473,11 +2543,10 @@ async function runGPU(
             TRIPWIRE_RECORD.coarseBytes);
           const coarse = unpackOctreePowerCoarseLevelSetControl(coarseWords);
           const restrictionAudit = auditSection5FineRestriction(restriction, coarse);
-          if (restrictionAudit.failure && hasSeparateFineLevelSetBand
-            && !retainedBackgroundOctree) {
+          if (restrictionAudit.failure && hasSeparateFineLevelSetBand) {
             trip("restriction-unaccepted", { reason: restrictionAudit.failure,
               ...restrictionAudit, restrictionControl: Array.from(restrictionWords),
-              coarseControl: Array.from(coarseWords) });
+              coarseControl: Array.from(coarseWords), fatalChainForensics });
           }
           // 3. Solver convergence. Non-convergence at the encoded budget
           //    publishes the SEED pressure and fails nothing today; this is the
@@ -2504,15 +2573,14 @@ async function runGPU(
           //    required count in topology control, so both receipts must be
           //    checked. The count is worklist header word ONE; a prior consumer
           //    read word zero (the generation) and printed nonsense.
-          const header = readFineLevelSetWorksetHeader(words(record,
-            TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes));
           if (header === undefined) {
             trip("fine-band-sentinel", { unevaluable: true,
-              reason: "fine worklist header could not be decoded" });
+              reason: "fine worklist header could not be decoded", fatalChainForensics });
           } else if (header.activeCount === 0xffff_ffff) {
             trip("fine-band-sentinel", { activeCount: header.activeCount,
               sentinel: "0xFFFFFFFF", capacity: header.capacity,
-              generation: header.generation, flags: header.flags });
+              generation: header.generation, flags: header.flags,
+              recurringRejection, fatalChainForensics });
           } else if ((topology.flags & FINE_LEVELSET_TOPOLOGY_ERROR.capacity) !== 0
             || topology.requiredDesiredBricks > header.capacity) {
             trip("fine-band-sentinel", { activeCount: header.activeCount,
@@ -2520,7 +2588,18 @@ async function runGPU(
               requiredDesiredBricks: topology.requiredDesiredBricks,
               requiredDesiredBricksExact: topology.requiredDesiredBricksExact,
               capacity: header.capacity, generation: header.generation,
-              topologyFlags: topology.flags });
+              topologyFlags: topology.flags, fatalChainForensics });
+          }
+          // 5. Air-support publication. The live scratch verdict and the
+          // first preceding failure latch are both copied at this step's queue
+          // boundary, so a later transaction cannot erase the originating
+          // rejection before the harness sees it.
+          const liveAirSupportFailure = (airSupport[0] ?? 0) !== 0;
+          const latchedAirSupportFailure = (airSupport[2] ?? 0) !== 0;
+          if (liveAirSupportFailure || latchedAirSupportFailure) {
+            trip("air-support-failure", {
+              fatalChainForensics,
+            });
           }
         }
       } finally {
@@ -2569,7 +2648,6 @@ async function runGPU(
   // Finalized after the pass-local timestamp audit drains. Semantic phase
   // labels ("fine-sdf-redistance: ...") do not match compute-pass labels and
   // would silently assign zero duration to every DAG node.
-  let gpuDataFlowManifest: ReturnType<GPUDataFlowAudit["report"]> | undefined;
   let finalPerformanceAuthority: Readonly<Record<string, unknown>> | undefined;
   if (performanceProfileRequested && method.id === "octree") {
     const authority = solver as GPUSolverInstance & {
@@ -3011,7 +3089,7 @@ async function runGPU(
   const gpuPassTimestamps = passTimestampAudit
     ? await passTimestampAudit.report()
     : undefined;
-  gpuDataFlowManifest = dataFlowAudit?.report(
+  const gpuDataFlowManifest = dataFlowAudit?.report(
     Math.min(Math.max(0, steps - dataFlowSkipAdvances), genericPhaseTraceAdvances),
     gpuPassTimestamps?.byLabel ?? gpuFineTimestamps?.byLabel,
   );
@@ -3031,6 +3109,10 @@ async function runGPU(
       } | undefined>;
       readSPGridHierarchyCensus(): Promise<{
         levels: readonly Readonly<Record<string, number>>[];
+      } | undefined>;
+      readSPGridTouchedDirectoryTripwire(): Promise<{
+        enabled: boolean; active: boolean; brickHeader: readonly number[]; pageHeader: readonly number[];
+        brickControl: readonly number[]; pageControl: readonly number[];
       } | undefined>;
       readPowerHybridCensus(): Promise<{
         regularRows: number; identityRows: number; powerRows: number;
@@ -3052,6 +3134,11 @@ async function runGPU(
   const spgridHierarchy = (gpuPassTimestampRequested || spgridHierarchyCensusRequested)
     ? await diagnosticProjection.octreeProjection?.readSPGridHierarchyCensus()
     : undefined;
+  const touchedDirectoryTripwire = process.env.FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE === "1"
+    ? await diagnosticProjection.octreeProjection?.readSPGridTouchedDirectoryTripwire()
+    : undefined;
+  if (touchedDirectoryTripwire) console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+    phase: "spgrid-touched-directory-tripwire", metrics: touchedDirectoryTripwire }));
   const powerHybridCensus = process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
     || process.env.FLUID_POWER_HYBRID_CENSUS === "1"
     || process.env.FLUID_POWER_HYBRID_MIN_REDUCTION !== undefined

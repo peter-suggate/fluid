@@ -23,6 +23,34 @@ export const FINE_LEVELSET_TOPOLOGY_FINALIZE_REASON = Object.freeze({
   transport: 1 << 3,
 } as const);
 
+export const FINE_LEVELSET_RECURRING_REJECTION_CLAUSES = Object.freeze([
+  [1, "recurring-off"],
+  [2, "transport-delta-length"],
+  [4, "worklist-header-length"],
+  [8, "worklist-active-count-bound"],
+  [16, "worklist-generation"],
+  [32, "worklist-capacity"],
+  [64, "worklist-flags"],
+  [128, "worklist-dispatch"],
+  [256, "transport-delta-generation"],
+  [512, "transport-delta-uncommitted"],
+  [1024, "transport-delta-active-count"],
+  [2048, "transport-delta-count-bound"],
+  [4096, "ring-bound"],
+] as const);
+
+/** Decode the poisoned recurring-worklist capacity word without treating an
+ * unknown future bit as a known failure clause. */
+export function decodeFineLevelSetRecurringRejectionClauses(mask: number): readonly string[] {
+  const word = mask >>> 0;
+  return FINE_LEVELSET_RECURRING_REJECTION_CLAUSES
+    .filter(([bit]) => (word & bit) !== 0)
+    .map(([, name]) => name);
+}
+
+export const FINE_LEVELSET_RECURRING_REJECTION_INJECTION_GENERATION_ENV =
+  "FLUID_TEST_INJECT_RECURRING_BAND_REJECTION_GENERATION";
+
 export interface FineLevelSetGPUTopologyControl {
   flags: number;
   interfaceBricks: number;
@@ -913,6 +941,7 @@ export class WebGPUFineLevelSetTopology {
   private settlePublicationPipeline!: GPUComputePipeline;
   private settleWorkPayloadPipeline!: GPUComputePipeline;
   private readonly pipelineShaderCode: string;
+  private readonly indirectAssign = fineTopologyIndirectAssignEnabled();
   private pipelineInitialization?: Promise<void>;
   private readonly emptySeeds: GPUBuffer;
   private readonly disabledVolumeControl: GPUBuffer;
@@ -1344,6 +1373,18 @@ export class WebGPUFineLevelSetTopology {
     const compactDirtyTerminal = typeof process === "undefined"
       || process.env.FLUID_FINE_JFA_DIRTY_FRONTIER !== "0";
     u32[23] = publication.kind === "delta" ? (compactDirtyTerminal ? 2 : 1) : 0;
+    const injectedGenerationText = typeof process === "undefined" ? undefined
+      : process.env[FINE_LEVELSET_RECURRING_REJECTION_INJECTION_GENERATION_ENV];
+    if (injectedGenerationText !== undefined) {
+      const injectedGeneration = Number(injectedGenerationText);
+      if (!Number.isSafeInteger(injectedGeneration) || injectedGeneration < 2) {
+        throw new RangeError(`${FINE_LEVELSET_RECURRING_REJECTION_INJECTION_GENERATION_ENV}`
+          + " must be an integer generation of at least 2");
+      }
+      if (publication.kind === "delta" && this.next.generation === injectedGeneration) {
+        u32[23] |= 0x8000_0000;
+      }
+    }
     u32[24] = Math.max(this.sparseCandidateCapacity, plan.logicalBrickCount);
     // Recurring publication consumes the transport producer's measured
     // characteristic displacement. These three fields let the GPU shrink the
@@ -1570,10 +1611,22 @@ export class WebGPUFineLevelSetTopology {
     runIdentity(this.prepareIdentityPipeline, deltaEntries, 1, 1, [0, 7, 14, 15, 18]);
     runIdentity(this.compactIdentityPipeline, deltaEntries,
       Math.ceil(plan.maximumResidentBricks / 64), 1, [0, 7, 15, 16, 18]);
-    runIdentity(this.assignIdentityPipeline, deltaEntries,
-      Math.ceil(plan.maximumResidentBricks / 64), 1, [0, 3, 4, 7, 14, 15, 16, 18]);
+    if (!this.indirectAssign) {
+      runIdentity(this.assignIdentityPipeline, deltaEntries,
+        Math.ceil(plan.maximumResidentBricks / 64), 1, [0, 3, 4, 7, 14, 15, 16, 18]);
+    }
     runIdentity(this.finalizeIdentityPipeline, deltaEntries, 1, 1, [0, 4, 7, 15, 22, 33]);
     broker.fence("fine identity dispatch publication");
+    if (this.indirectAssign) {
+      // Identity record 0 is the ceil(desiredCount/64) launch finalize just
+      // zeroed-then-authored for classifyFinePageDelta; the assignment writes
+      // nothing finalize reads (sourceD header versus body), so consuming the
+      // same record here is the live-count launch with zero new machinery.
+      // In-pass dispatch order still lands the assigned identities before the
+      // classifier reads them.
+      runIndirect(this.assignIdentityPipeline, deltaEntries, "Assign exact fine page identities",
+        this.identityDispatch, 0, [0, 3, 4, 7, 14, 15, 16, 18]);
+    }
     if (publication.kind === "delta") {
       runIndirect(this.classifyPageDeltaPipeline, deltaEntries, "Classify exact global fine page delta",
         this.identityDispatch, 0, [0, 3, 4, 7, 14, 15, 16, 21, 23]);
@@ -1757,6 +1810,21 @@ export class WebGPUFineLevelSetTopology {
     this.desiredCandidates.destroy(); this.sparseCandidates.destroy(); this.desiredScan.destroy();
     this.topologyErrors.destroy();
     this.disabledVolumeControl.destroy(); this.disabledTransportControl.destroy(); }
+}
+
+/** Shape the exact identity assignment by the GPU-published desired count
+ * instead of `maximumResidentBricks`: launch it from identity record 0 — the
+ * `ceil(desiredCount/64)` record `finalizeDesiredPageIdentityAssignment`
+ * already zeroes and authors for `classifyFinePageDelta` — after the existing
+ * identity publication fence. Pure launch relocation: no shader, layout, or
+ * record change, and the kernel writes nothing at or beyond the live count.
+ * Default OFF until the Gate A A/B lands. */
+export function fineTopologyIndirectAssignEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_FINE_TOPOLOGY_INDIRECT_ASSIGN === "1";
 }
 
 export function makeFineLevelSetTopologyWGSL(
@@ -2058,17 +2126,34 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
   recurringFlags=0u;
   for(var word=0u;word<10u;word+=1u){control[word]=0u;}
   for(var word=0u;word<7u;word+=1u){targetB[word]=INVALID;}
-  if(params.recurringDelta==0u||arrayLength(&transportDelta)<8u+3u*params.pageCapacity
-    ||arrayLength(&currentWorklist)<7u||currentWorklist[1]>params.pageCapacity
-    ||currentWorklist[0]!=params.currentGeneration||currentWorklist[2]!=params.pageCapacity
-    ||(currentWorklist[3]&3u)!=3u||currentWorklist[5]!=1u||currentWorklist[6]!=1u
-    ||transportDelta[1]!=params.currentGeneration||transportDelta[2]!=1u
-    ||transportDelta[3]!=currentWorklist[1]||transportDelta[0]>params.pageCapacity){
-   recurringFlags=MALFORMED;
+  var badDelta=0u;
+  if(params.recurringDelta==0u){badDelta|=1u;}
+  if(arrayLength(&transportDelta)<8u+3u*params.pageCapacity){badDelta|=2u;}
+  if(arrayLength(&currentWorklist)<7u){badDelta|=4u;}
+  else{
+   if(currentWorklist[1]>params.pageCapacity){badDelta|=8u;}
+   if(currentWorklist[0]!=params.currentGeneration){badDelta|=16u;}
+   if(currentWorklist[2]!=params.pageCapacity){badDelta|=32u;}
+   if((currentWorklist[3]&3u)!=3u){badDelta|=64u;}
+   if(currentWorklist[5]!=1u||currentWorklist[6]!=1u){badDelta|=128u;}
   }
+  if(arrayLength(&transportDelta)>=8u){
+   if(transportDelta[1]!=params.currentGeneration){badDelta|=256u;}
+   if(transportDelta[2]!=1u){badDelta|=512u;}
+   if(arrayLength(&currentWorklist)>=7u&&transportDelta[3]!=currentWorklist[1]){badDelta|=1024u;}
+   if(transportDelta[0]>params.pageCapacity){badDelta|=2048u;}
+  }
+  if((params.recurringDelta&0x80000000u)!=0u){badDelta|=512u;}
+  if(badDelta!=0u){recurringFlags=MALFORMED;}
   var rings=0u;if(recurringFlags==0u){rings=recurringDilationBrickRings();}
-  if(rings<params.safetyBrickRings||rings>params.dilationBrickRings){recurringFlags|=MALFORMED;rings=0u;}
+  if(rings<params.safetyBrickRings||rings>params.dilationBrickRings){recurringFlags|=MALFORMED;rings=0u;badDelta|=4096u;}
   control[6]=rings;
+  // Failure forensics ride the already-poisoned next-worklist header: word 2
+  // (capacity) carries the clause bitmask and word 3 (flags) the producer's
+  // landing displacement, both surfaced verbatim by the fine-band-sentinel
+  // tripwire. Words 0/1 stay INVALID so every consumer still rejects.
+  if(badDelta!=0u){targetB[2]=badDelta;
+   if(arrayLength(&transportDelta)>=8u){targetB[3]=transportDelta[7];}}
  }
  workgroupBarrier();
  var localError=0u;

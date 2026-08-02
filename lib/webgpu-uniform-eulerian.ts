@@ -505,6 +505,15 @@ export interface InitialGlobalFineAuthorityDiagnostics extends GlobalFineVolumeP
   /** scratch[41..42]: stationary-air fallback patch count and first
    * (cell<<3)|axis identity from the most recent march. */
   readonly airSupportFallbacks?: readonly number[];
+  /** Fine transport governor state[0..7] per bank: schedule-invalid word,
+   * active substeps, substep dt bits, measured displacement. */
+  readonly fineTransportScheduleA?: readonly number[];
+  readonly fineTransportScheduleB?: readonly number[];
+  /** Fine transport governor state[46..56] per bank: first-schedule latch,
+   * repairs, rows, support, sleeping bit, delta count, why-not-sleeping
+   * bitmask, displacement-cells bits, rows/support/pages census. */
+  readonly fineTransportSleepA?: readonly number[];
+  readonly fineTransportSleepB?: readonly number[];
   readonly configuredFineGeneration: number;
   readonly fineGenerationSlot: 0 | 1;
   readonly scheduledFineGeneration: number;
@@ -1287,6 +1296,9 @@ fn recordPhysicsPhaseBoundary(
       && (support[0] !== 0 || (support[1] ?? 0xffff_ffff) !== 0xffff_ffff);
     const latchedFailure = (latched[0] ?? 0) !== 0;
     const failureWord = liveFailure ? support![1] : latchedFailure ? latched[1] : undefined;
+    this.info.structuredAirSupportFailureFlags = liveFailure
+      ? support![0] : latchedFailure ? latched[0] : undefined;
+    this.info.structuredAirSupportFailureItem = failureWord;
     if ((liveFailure || latchedFailure)
       && this.airSupportFailureLoggedWord !== failureWord) {
       this.airSupportFailureLoggedWord = failureWord;
@@ -1296,7 +1308,16 @@ fn recordPhysicsPhaseBoundary(
         faceItems: support?.[10], seeds: support?.[11], maxWaves: support?.[12],
         latchedFlags: latched[0], latchedFirstError: latched[1],
         precedingTerminal: value.precedingAirSupportTerminal,
-        topologyFailure: value.airSupportFailureTopology }));
+        topologyFailure: value.airSupportFailureTopology,
+        // The transport governor's schedule + sleep forensics per bank: an
+        // uncommitted transport delta is the recurring-band clause-512 root,
+        // and sleep word 6 is the why-not-sleeping bitmask that names the
+        // blocking term (1 never-scheduled, 2 repairs, 4 governor-changed,
+        // 8 displacement, 64 schedule-invalid).
+        transportScheduleA: value.fineTransportScheduleA,
+        transportSleepA: value.fineTransportSleepA,
+        transportScheduleB: value.fineTransportScheduleB,
+        transportSleepB: value.fineTransportSleepB }));
     }
     const fallbacks = value.airSupportFallbacks;
     if (fallbacks && (fallbacks[0] ?? 0) > 0
@@ -1512,6 +1533,7 @@ fn recordPhysicsPhaseBoundary(
   get globalFineCoarseLevelSetControl() { return this.octreeProjection?.globalFineCoarseLevelSetControl; }
   readPowerCoarseFailureRow(row: number) { return this.octreeProjection?.readPowerCoarseFailureRow(row); }
   get globalFineRestrictionControl() { return this.octreeProjection?.globalFineRestrictionControl; }
+  get airSupportScratch() { return this.octreeProjection?.airSupportScratch; }
   get columnBaseTexture() { return this.hostAllocation ? this.heightA : undefined; }
   get gridCellTexture() { return this.octreeProjection?.topologyTexture; }
   get velocityTexture() { return this.octreeProjection ? undefined : this.velocityA; }
@@ -2402,6 +2424,9 @@ fn recordPhysicsPhaseBoundary(
         // the run. A skip may only ever delete work the GPU reports as zero.
         if (this.info.stepPredictionFailures?.length) flags.push("step-prediction-mismatch");
         if (stepHealth?.fineBandCapacityOverflow) flags.push("fine-band-capacity-overflow");
+        if ((this.info.structuredAirSupportFailureFlags ?? 0) !== 0) {
+          flags.push("air-support-publication-failure");
+        }
         this.info.stabilityFlags = flags;
       }
     }

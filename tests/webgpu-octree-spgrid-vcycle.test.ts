@@ -963,7 +963,7 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
     /fn pageSlot\(l:u32,page:u32,origin:vec3u,q:vec3u,row:u32\)->u32\{\s*let resolved=pageSlotCoded\(l,page,origin,q\);\s*if\(resolved\.y!=0u\)\{reportAt\(2u,resolved\.y,row\);\}\s*return resolved\.x;\}/,
     "pageSlot must be pageSlotCoded plus its report, so the compiled image and the inline walk cannot diverge");
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.beginL1CapturePlan, [0, 3, 6, 13, 14, 17, 18]);
-  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.prepareCandidateSchedules, [0, 3, 6, 13, 14, 17]);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.prepareCandidateSchedules, [0, 3, 6, 13, 14, 17, 26]);
   const bindSource = (WebGPUOctreeSPGridVCycle.prototype as unknown as { bind: Function })
     .bind.toString();
   assert.match(bindSource, /\[13,\s*this\.capturePageState\]/,

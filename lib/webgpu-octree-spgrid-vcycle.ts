@@ -8,6 +8,11 @@ import { planOctreeVCycleParallelLevels } from "./octree-solve-tail-policy";
 import type { OctreeWorksetLinearOperator } from "./octree-linear-operator";
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 import {
+  RADIX_SORT_INPUT_VALID,
+  WebGPURadixSortU32,
+  spgridTouchedRadixSortEnabled,
+} from "./webgpu-radix-sort-u32";
+import {
   OCTREE_CUBE_TRANSFORMS,
   inverseCubeTransform,
   transformPowerVector,
@@ -992,8 +997,12 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "writeCandidateTransfers" | "linkCandidateParentChains"
   | "markCandidateBrickOccupancy" | "rankCandidateBricks" | "scatterCandidateRankedSlots"
   | "markCandidatePageOccupancy" | "compactCandidatePages" | "linkCandidatePageNeighbours"
+  | "appendCandidateDirectoryIdentities" | "markCompactCandidateBrickOccupancy"
+  | "rankCompactCandidateBricks" | "buildCompactCandidatePages"
+  | "linkCompactCandidatePageNeighbours"
   | "buildCandidateStencils" | "publishCandidateSpectralBounds"
   | "validateCandidateHierarchy" | "commitCandidateLevels"
+  | "commitCandidateTouchedBricks"
   | "finalizeLifecycle" | "prepareCorrectionDispatches" | "clearCorrection"
   | "zeroVectors" | "seedRhs" | "seedRhsAndClearCorrection"
   | "smoothChebyshevAtoB0" | "smoothChebyshevBtoA0"
@@ -1035,7 +1044,7 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   finalizeL1CapturePublication: [0, 3, 13, 18],
   probeCandidateSkip: [0, 3, 11, 13, 20, 23],
   applyCandidateSkip: [0, 13, 14, 23],
-  prepareCandidateSchedules: [0, 3, 6, 13, 14, 17],
+  prepareCandidateSchedules: [0, 3, 6, 13, 14, 17, 26],
   publishCommittedInputs: [0, 1, 3, 7, 13, 20, 23],
   clearCandidateLevels: [0, 3, 6, 14, 15, 16, 17],
   buildCandidateLevelSets: [0, 1, 3, 14, 15, 16, 17],
@@ -1052,9 +1061,15 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   markCandidatePageOccupancy: [0, 14, 15],
   compactCandidatePages: [0, 14, 15, 17],
   linkCandidatePageNeighbours: [0, 14, 15, 17],
+  appendCandidateDirectoryIdentities: [0, 14, 15, 16, 17, 25, 26],
+  markCompactCandidateBrickOccupancy: [0, 13, 14, 15, 16, 27, 28],
+  rankCompactCandidateBricks: [0, 13, 14, 15, 16, 17, 26, 27, 28, 29, 30],
+  buildCompactCandidatePages: [0, 13, 14, 15, 17, 30, 31, 32],
+  linkCompactCandidatePageNeighbours: [0, 13, 14, 15, 31, 32],
   buildCandidateStencils: [0, 3, 4, 5, 6, 7, 14, 15, 16, 17, 24],
   publishCandidateSpectralBounds: [0, 4, 6, 14, 15, 16, 17],
   validateCandidateHierarchy: [0, 6, 13, 14, 17],
+  commitCandidateTouchedBricks: [0, 4, 13, 14, 15, 27, 28],
   commitCandidateLevels: [0, 3, 4, 5, 6, 13, 14, 15, 16, 17],
   finalizeLifecycle: [0, 3, 6, 7, 13],
   prepareCorrectionDispatches: [0, 3, 6, 7, 19],
@@ -1154,6 +1169,15 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly candidateGhosts: GPUBuffer;
   /** Exact fingerprint of the inputs the last committed hierarchy consumed. */
   private readonly committedInputs: GPUBuffer;
+  private readonly touchedDirectoryEnabled = spgridTouchedRadixSortEnabled();
+  private readonly touchedDirectoryTripwire = this.touchedDirectoryEnabled
+    && typeof process !== "undefined"
+    && process.env?.FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE === "1";
+  private readonly touchedBrickHeader: GPUBuffer;
+  private readonly touchedPageHeader: GPUBuffer;
+  private readonly touchedDirectoryDummy: GPUBuffer;
+  private readonly touchedBrickSort?: WebGPURadixSortU32;
+  private readonly touchedPageSort?: WebGPURadixSortU32;
   /**
    * Leading levels the correction runs as wide per-level dispatches; the rest
    * join the one-workgroup tail. Authored from immutable level geometry, so
@@ -1306,6 +1330,36 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     }
   }
 
+  async readTouchedDirectoryTripwireDiagnostics(): Promise<Readonly<{
+    enabled: boolean; active: boolean; brickHeader: readonly number[]; pageHeader: readonly number[];
+    brickControl: readonly number[]; pageControl: readonly number[];
+  }>> {
+    this.assertLive();
+    if (!this.touchedDirectoryEnabled) return Object.freeze({ enabled: false, active: false,
+      brickHeader: Object.freeze([]), pageHeader: Object.freeze([]),
+      brickControl: Object.freeze([]), pageControl: Object.freeze([]) });
+    const readback = this.device.createBuffer({ label: "SPGrid touched-directory tripwire readback",
+      size: 96, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder({ label: "Read SPGrid touched-directory tripwire" });
+    encoder.copyBufferToBuffer(this.touchedBrickHeader, 0, readback, 0, 16);
+    encoder.copyBufferToBuffer(this.touchedPageHeader, 0, readback, 16, 16);
+    encoder.copyBufferToBuffer(this.touchedBrickSort!.control, 0, readback, 32, 32);
+    encoder.copyBufferToBuffer(this.touchedPageSort!.control, 0, readback, 64, 32);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      return Object.freeze({ enabled: true, active: this.touchedDirectoryTripwire,
+        brickHeader: Object.freeze(Array.from(words.slice(0, 4))),
+        pageHeader: Object.freeze(Array.from(words.slice(4, 8))),
+        brickControl: Object.freeze(Array.from(words.slice(8, 16))),
+        pageControl: Object.freeze(Array.from(words.slice(16, 24))) });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
   /** Accepted physical pages and ghost ownership shared with the Section 4.3 shell. */
   get section63Topology(): Readonly<{
     topology: GPUBuffer; state: GPUBuffer; geometry: GPUBuffer; layout: GPUBuffer;
@@ -1452,6 +1506,19 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.committedInputs = device.createBuffer({ label: "SPGrid committed hierarchy input fingerprint",
       size: (COMMITTED_INPUT_HEADER_WORDS
         + this.plan.rowCapacity * COMMITTED_INPUT_WORDS_PER_ROW) * 4, usage: storage });
+    const touchedHeaderUsage = storage;
+    this.touchedBrickHeader = device.createBuffer({ label: "SPGrid touched-brick sort header",
+      size: 16, usage: touchedHeaderUsage });
+    this.touchedPageHeader = device.createBuffer({ label: "SPGrid touched-page sort header",
+      size: 16, usage: touchedHeaderUsage });
+    this.touchedDirectoryDummy = device.createBuffer({ label: "SPGrid disabled touched-directory binding",
+      size: 32, usage: storage });
+    if (this.touchedDirectoryEnabled) {
+      this.touchedBrickSort = new WebGPURadixSortU32(device, 7 * this.plan.totalLevelSlots,
+        this.touchedBrickHeader);
+      this.touchedPageSort = new WebGPURadixSortU32(device, this.plan.totalLevelSlots,
+        this.touchedPageHeader);
+    }
     // Memoized level tables. Entries below levelCount are the exact allocation
     // authority (plan.levelCapacities/levelOffsets); the padding entries repeat
     // the same closed form so an out-of-range probe cannot read stale storage.
@@ -1516,6 +1583,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       words[12] = this.post;
       // Low bit selects the accepted or candidate source authority.
       words[13] = sourceMode === "candidate" ? 1 : 0;
+      if (this.touchedDirectoryEnabled) words[13] |= 2;
+      if (this.touchedDirectoryTripwire) words[13] |= 4;
       floats[14] = 1;
       floats[15] = options.finestCellWidth;
       // The high bit is internal parameter metadata, not a buffer offset. It
@@ -1752,7 +1821,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     // and the two once-per-epoch image compiles (direct, fine-adjoint) that
     // ride the same pass.
     // Keep this exact for command and active/scheduled accounting.
-    this.encodedSetupDispatchCount = 3 + 2 + 2 + 17 + 1 + 5
+    this.encodedSetupDispatchCount = 3 + 2 + 2
+      + 17 - (this.touchedDirectoryEnabled && !this.touchedDirectoryTripwire ? 6 : 0) + 1 + 5
+      + (this.touchedDirectoryEnabled ? 36 : 0)
       + (this.hierarchicalExecutorCompiled ? 2 : 0);
     // The widest levels retain fully parallel, globally synchronized Jacobi
     // dispatches. Only the levels that fit in one workgroup join the tail,
@@ -1782,6 +1853,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       + this.candidateTopology.size + this.candidateState.size + this.candidateDispatch.size
       + this.candidateIndirect.size
       + this.candidateGhosts.size + this.committedInputs.size
+      + this.touchedBrickHeader.size + this.touchedPageHeader.size + this.touchedDirectoryDummy.size
+      + (this.touchedBrickSort?.allocatedBytes ?? 0) + (this.touchedPageSort?.allocatedBytes ?? 0)
       + this.accurateWorksetLayout.size + (this.accurateClassDispatch?.size ?? 0)
       + (this.accurateOperatorRows?.size ?? 0) + (this.accurateAdjointRows?.size ?? 0)
       + (this.accurateImageDeltaParams?.size ?? 0) + (this.accurateImageEpochs?.size ?? 0)
@@ -1926,18 +1999,35 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       CANDIDATE_SCHEDULE.transferSlots, geometry);
     this.runCandidateIndirect(staged("link parent chains"), "linkCandidateParentChains", 0, input,
       CANDIDATE_SCHEDULE.topologyLevels, geometry);
-    this.runCandidateIndirect(staged("mark brick occupancy"), "markCandidateBrickOccupancy", 0, input,
-      CANDIDATE_SCHEDULE.bricks, geometry);
-    this.runCandidateIndirect(staged("rank bricks"), "rankCandidateBricks", 0, input,
-      CANDIDATE_SCHEDULE.topologyLevels, geometry);
-    this.runCandidateIndirect(staged("scatter ranked slots"), "scatterCandidateRankedSlots", 0, input,
-      CANDIDATE_SCHEDULE.bricks, geometry);
-    this.runCandidateIndirect(staged("mark page occupancy"), "markCandidatePageOccupancy", 0, input,
-      CANDIDATE_SCHEDULE.logicalPages, geometry);
-    this.runCandidateIndirect(staged("compact pages"), "compactCandidatePages", 0, input,
-      CANDIDATE_SCHEDULE.topologyLevels, geometry);
-    this.runCandidateIndirect(staged("link page neighbours"), "linkCandidatePageNeighbours", 0, input,
-      CANDIDATE_SCHEDULE.physicalPages, geometry);
+    if (this.touchedDirectoryEnabled) this.run(staged("append directory identities"),
+      "appendCandidateDirectoryIdentities", 0, input, [1, 1, 1], geometry);
+    if (!this.touchedDirectoryEnabled || this.touchedDirectoryTripwire) {
+      this.runCandidateIndirect(staged("mark brick occupancy"), "markCandidateBrickOccupancy", 0, input,
+        CANDIDATE_SCHEDULE.bricks, geometry);
+      this.runCandidateIndirect(staged("rank bricks"), "rankCandidateBricks", 0, input,
+        CANDIDATE_SCHEDULE.topologyLevels, geometry);
+      this.runCandidateIndirect(staged("scatter ranked slots"), "scatterCandidateRankedSlots", 0, input,
+        CANDIDATE_SCHEDULE.bricks, geometry);
+      this.runCandidateIndirect(staged("mark page occupancy"), "markCandidatePageOccupancy", 0, input,
+        CANDIDATE_SCHEDULE.logicalPages, geometry);
+      this.runCandidateIndirect(staged("compact pages"), "compactCandidatePages", 0, input,
+        CANDIDATE_SCHEDULE.topologyLevels, geometry);
+      this.runCandidateIndirect(staged("link page neighbours"), "linkCandidatePageNeighbours", 0, input,
+        CANDIDATE_SCHEDULE.physicalPages, geometry);
+    }
+    if (this.touchedDirectoryEnabled) {
+      const brickSort = this.touchedBrickSort!, pageSort = this.touchedPageSort!;
+      brickSort.encode(broker);
+      this.runExternalIndirect(staged("compact brick masks"), "markCompactCandidateBrickOccupancy",
+        input, brickSort.liveDispatch, geometry);
+      this.run(staged("compact brick ranks"), "rankCompactCandidateBricks", 0, input,
+        [1, 1, 1], geometry);
+      pageSort.encode(broker);
+      this.run(staged("compact pages"), "buildCompactCandidatePages", 0, input,
+        [1, 1, 1], geometry);
+      this.runExternalIndirect(staged("link compact page neighbours"),
+        "linkCompactCandidatePageNeighbours", input, pageSort.liveDispatch, geometry);
+    }
     this.runCandidateIndirect(staged("build stencils"), "buildCandidateStencils", 0, input,
       CANDIDATE_SCHEDULE.stencilSlots, geometry);
     this.runCandidateIndirect(staged("publish spectral bounds"), "publishCandidateSpectralBounds", 0, input,
@@ -1961,6 +2051,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.runCandidateIndirect(pass, "commitChangedL1", 0, input,
       CANDIDATE_SCHEDULE.capture, this.capturedGeometry);
     this.run(pass, "finalizeL1CapturePublication", 0, input, [1, 1, 1]);
+    if (this.touchedDirectoryEnabled) this.run(pass, "commitCandidateTouchedBricks", 0, input,
+      [1, 1, 1]);
     this.runCandidateIndirect(pass, "commitCandidateLevels", 0, input,
       CANDIDATE_SCHEDULE.commit);
     this.run(pass, "finalizeLifecycle", 0, input, [1, 1, 1]);
@@ -2115,6 +2207,12 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.bind(pass, name, level, input, geometry);
     pass.dispatchWorkgroupsIndirect(this.candidateIndirect, offset);
   }
+  private runExternalIndirect(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName,
+    input: { solverControl: GPUBuffer; rowCount: GPUBuffer; sourceControl?: GPUBuffer;
+      topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode }, dispatch: GPUBuffer,
+    geometry = this.capturedGeometry): void {
+    this.bind(pass, name, 0, input, geometry); pass.dispatchWorkgroupsIndirect(dispatch, 0);
+  }
   private bind(pass: GPUComputePassEncoder, name: OctreeSPGridVCyclePipelineName, level: number,
     input: { rhs?: GPUBuffer; correction?: GPUBuffer; solverControl: GPUBuffer; rowCount: GPUBuffer;
       sourceControl?: GPUBuffer; topologyMetrics?: GPUBuffer; sourceMode?: OctreeSPGridSourceMode },
@@ -2142,6 +2240,14 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
         [19, this.indirectDispatch],
         [20, input.topologyMetrics ?? this.source.topologyMetrics], [21, this.source.catalogCoefficients],
         [22, this.candidateGhosts], [23, this.committedInputs], [24, this.source.coefficients],
+        [25, this.touchedBrickSort?.keys ?? this.touchedDirectoryDummy],
+        [26, this.touchedBrickHeader],
+        [27, this.touchedBrickSort?.runs ?? this.touchedDirectoryDummy],
+        [28, this.touchedBrickSort?.control ?? this.touchedDirectoryDummy],
+        [29, this.touchedPageSort?.keys ?? this.touchedDirectoryDummy],
+        [30, this.touchedPageHeader],
+        [31, this.touchedPageSort?.runs ?? this.touchedDirectoryDummy],
+        [32, this.touchedPageSort?.control ?? this.touchedDirectoryDummy],
       ]);
       group = this.device.createBindGroup({ label: `SPGrid V-cycle · ${name} · level ${level}`,
         layout: pipeline.getBindGroupLayout(0), entries: OCTREE_SPGRID_VCYCLE_BINDINGS[name].map((binding) => ({
@@ -2433,6 +2539,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.indirectDispatch.destroy(); this.candidateIndirect.destroy();
     this.capturePageState.destroy(); this.levelDelta.destroy();
     this.candidateTopology.destroy(); this.candidateState.destroy(); this.candidateDispatch.destroy();
+    this.touchedBrickSort?.destroy(); this.touchedPageSort?.destroy();
+    this.touchedBrickHeader.destroy(); this.touchedPageHeader.destroy(); this.touchedDirectoryDummy.destroy();
     this.candidateGhosts.destroy(); this.committedInputs.destroy();
     this.accurateWorksetLayout.destroy(); this.accurateClassDispatch?.destroy();
     this.accurateTerms?.destroy();
@@ -3389,6 +3497,14 @@ struct CapturePageState{generation:u32,expectedPages:u32,validatedPages:u32,chan
 @group(0) @binding(22) var<storage,read_write> ghostScratch:array<u32>;
 @group(0) @binding(23) var<storage,read_write> committedInputs:array<u32>;
 @group(0) @binding(24) var<storage,read> acceptedCoefficients:array<f32>;
+@group(0) @binding(25) var<storage,read_write> touchedBrickKeys:array<u32>;
+@group(0) @binding(26) var<storage,read_write> touchedBrickHeader:array<u32>;
+@group(0) @binding(27) var<storage,read> touchedBrickRuns:array<u32>;
+@group(0) @binding(28) var<storage,read> touchedBrickControl:array<u32>;
+@group(0) @binding(29) var<storage,read_write> touchedPageKeys:array<u32>;
+@group(0) @binding(30) var<storage,read_write> touchedPageHeader:array<u32>;
+@group(0) @binding(31) var<storage,read_write> touchedPageRuns:array<u32>;
+@group(0) @binding(32) var<storage,read> touchedPageControl:array<u32>;
 const ACTIVE=1u;const GHOST=2u;const MG_ONLY=4u;const INVALID=0xffffffffu;
 const OVERFLOW=2u;const NONFINITE=4u;const NONPOSITIVE=8u;
 const KEY=0u;const FLAGS=1u;const DIAG=2u;const XP=3u;const XM=4u;const YP=5u;const YM=6u;const ZP=7u;const ZM=8u;
@@ -3400,6 +3516,8 @@ const PAGE_X=8u;const PAGE_Y=8u;const PAGE_Z=4u;
 const STRUCTURED_CANDIDATE_READY=0x5356454cu;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn stopped()->bool{return atomicLoad(&control[0])!=0u||atomicLoad(&control[1])!=0u;}
 fn candidateSource()->bool{return (p.solve.y&1u)!=0u;}
+fn touchedDirectory()->bool{return (p.solve.y&2u)!=0u;}
+fn touchedTripwire()->bool{return (p.solve.y&4u)!=0u;}
 fn sourceControlReady()->bool{if(arrayLength(&acceptedRows)<6u){return false;}if(!candidateSource()){return acceptedRows[0]==0u&&acceptedRows[3]!=0u;}return acceptedRows[0]==STRUCTURED_CANDIDATE_READY&&acceptedRows[4]!=0u;}
 fn sourceGeneration()->u32{return select(0u,select(acceptedRows[3],acceptedRows[4],candidateSource()),sourceControlReady());}
 fn reportAt(flag:u32,stage:u32,index:u32){atomicOr(&control[0],flag);for(var retry=0u;retry<16u;retry+=1u){
@@ -3760,6 +3878,8 @@ fn writeCandidateSchedule(record:u32,items:u32,lanes:u32){
  var topologyLevelItems=0u;var stencilLevelItems=0u;var transferSlotItems=0u;
  var stencilSlotItems=0u;var topologyRowItems=0u;var clearItems=0u;var brickItems=0u;
  var logicalPageItems=0u;var physicalPageItems=0u;var commitItems=0u;
+ if(touchedDirectory()){touchedBrickHeader[0]=${RADIX_SORT_INPUT_VALID}u;
+  touchedBrickHeader[1]=0u;touchedBrickHeader[2]=captureGeneration();touchedBrickHeader[3]=0u;}
  for(var l=0u;l<levels();l+=1u){
   let priorTransfers=candidateDispatch[l*DISPATCH_WORDS+1u];
   let priorSlots=candidateDispatch[l*DISPATCH_WORDS];
@@ -4303,6 +4423,16 @@ fn rebuildCandidateTransferFor(l:u32,lane:u32){
   storageBarrier();workgroupBarrier();
  }
 }
+@compute @workgroup_size(1) fn appendCandidateDirectoryIdentities(){
+ let capacity=arrayLength(&touchedBrickKeys)/2u;var count=0u;
+ for(var l=0u;l<levels();l+=1u){if(!topologyDirty(l)){continue;}let n=cCount(l);
+  for(var i=0u;i<n;i+=1u){let slot=cWorkSlot(l,i);if(slot>=levelCapacity(l)){candidateReport(l);continue;}
+   let q=decode(candidateState[cAt(KEY,l,slot)],l);for(var ordinal=0u;ordinal<7u;ordinal+=1u){
+    var query=vec3i(q);if(ordinal>0u){query+=section63Direction(ordinal-1u);}
+    if(any(query<vec3i(0))||any(query>=vec3i(dims(l)))){continue;}let tq=vec3u(query);let b=tq/4u;let d=brickDims(l);
+    let identity=brickLevelOffset(l)+b.x+d.x*(b.y+d.y*b.z);if(count<capacity){touchedBrickKeys[count]=identity;}count+=1u;}}}
+ touchedBrickHeader[1]=count;if(count>capacity){touchedBrickHeader[3]=INVALID;}
+}
 fn brickOfIndex(index:u32)->vec2u{
  var l=levels();var local=0u;
  for(var k=0u;k<levels();k+=1u){let begin=brickLevelOffset(k);
@@ -4399,6 +4529,69 @@ fn pageOfIndex(index:u32)->vec2u{var l=levels();var local=0u;
    physical=candidateTopology[directory+q.x+pageDims.x*(q.y+pageDims.y*q.z)];}
   candidateTopology[record+1u+ordinal]=physical;}
 }
+@compute @workgroup_size(64) fn markCompactCandidateBrickOccupancy(@builtin(global_invocation_id) g:vec3u){
+ let run=boundedLinearIndex(g);let generation=captureGeneration();
+ if(touchedBrickControl[0]!=0u||touchedBrickControl[3]!=generation||run>=touchedBrickControl[4]){return;}
+ let identity=touchedBrickRuns[2u*run];if(identity>=totalBrickCount()){captureReport(OVERFLOW);return;}
+ let located=brickOfIndex(identity);let l=located.x;if(l>=levels()||!topologyDirty(l)){captureReport(OVERFLOW);return;}
+ let origin=brickOrigin(l,located.y);let extent=dims(l);var low=0u;var high=0u;
+ for(var bit=0u;bit<64u;bit+=1u){let q=brickCell(origin,bit);
+  if(any(q>=extent)||cLookup(l,q)==INVALID){continue;}
+  if(bit<32u){low|=1u<<bit;}else{high|=1u<<(bit-32u);}}
+ let record=directoryBase()+16u+identity*4u;
+ if(touchedTripwire()&&(candidateTopology[record]!=generation||candidateTopology[record+1u]!=low
+  ||candidateTopology[record+2u]!=high)){candidateReportCode(l,0x2000u);}
+ candidateTopology[record]=generation;candidateTopology[record+1u]=low;candidateTopology[record+2u]=high;
+}
+@compute @workgroup_size(1) fn rankCompactCandidateBricks(){
+ let generation=captureGeneration();if(touchedBrickControl[0]!=0u||touchedBrickControl[3]!=generation){captureReport(OVERFLOW);return;}
+ let runs=touchedBrickControl[4];let pageCapacity=arrayLength(&touchedPageKeys)/2u;var pageCount=0u;
+ touchedPageHeader[0]=${RADIX_SORT_INPUT_VALID}u;touchedPageHeader[1]=0u;touchedPageHeader[2]=generation;touchedPageHeader[3]=0u;
+ for(var l=0u;l<levels();l+=1u){if(!topologyDirty(l)){continue;}candidateDispatch[l*DISPATCH_WORDS+8u]=0u;
+  let begin=brickLevelOffset(l);let end=begin+brickCount(l);var ranked=0u;
+  for(var run=0u;run<runs;run+=1u){let identity=touchedBrickRuns[2u*run];if(identity<begin||identity>=end){continue;}
+   let record=directoryBase()+16u+identity*4u;let low=candidateTopology[record+1u];let high=candidateTopology[record+2u];
+   if(touchedTripwire()&&candidateTopology[record+3u]!=ranked){candidateReportCode(l,0x4000u);}
+   candidateTopology[record+3u]=ranked;let origin=brickOrigin(l,identity-begin);var local=0u;
+   for(var bit=0u;bit<64u;bit+=1u){let word=select(low,high,bit>=32u);
+    if(((word>>(bit&31u))&1u)==0u){continue;}let slot=cLookup(l,brickCell(origin,bit));
+    if(slot==INVALID){candidateReportCode(l,0x8000u);}else{
+     candidateTopology[rankedSlotsBase()+levelBase(l)+ranked+local]=slot;}local+=1u;}
+   ranked+=local;if(low!=0u||high!=0u){let d=brickDims(l);let brick=identity-begin;let bx=brick%d.x;let by=(brick/d.x)%d.y;
+    let bz=brick/(d.x*d.y);let pd=logicalPageDims(l);let page=(bx/2u)+pd.x*((by/2u)+pd.y*bz);
+    if(pageCount<pageCapacity){touchedPageKeys[pageCount]=pageLevelOffset(l)+page;}pageCount+=1u;}}
+  if(ranked!=cCount(l)){candidateReport(l);}else{levelDelta[deltaAt(l,6u)]=generation;
+   candidateTopology[directoryBase()+2u+l]=generation;}}
+ touchedBrickHeader[3]=select(0u,4u*runs,touchedTripwire());touchedPageHeader[1]=pageCount;
+ if(pageCount>pageCapacity){touchedPageHeader[3]=INVALID;}
+}
+@compute @workgroup_size(1) fn buildCompactCandidatePages(){
+ let generation=captureGeneration();if(touchedPageControl[0]!=0u||touchedPageControl[3]!=generation){captureReport(OVERFLOW);return;}
+ let runs=touchedPageControl[4];for(var l=0u;l<levels();l+=1u){if(!topologyDirty(l)){continue;}
+  let begin=pageLevelOffset(l);let end=begin+logicalPageCount(l);var physical=0u;
+  for(var run=0u;run<runs;run+=1u){let identity=touchedPageRuns[2u*run];if(identity<begin||identity>=end){continue;}
+   let dense=identity-begin;let directory=pageDirectoryBase()+identity;let key=coordKey(logicalPageOrigin(l,dense),l);
+   if(touchedTripwire()&&(candidateTopology[directory]!=physical
+    ||candidateTopology[pageRecord(l,physical)]!=key)){candidateReportCode(l,0x10000u);}
+   candidateTopology[directory]=physical;candidateTopology[pageRecord(l,physical)]=key;
+   touchedPageRuns[2u*run+1u]=physical;physical+=1u;}
+  if(physical>levelCapacity(l)){candidateReport(l);candidateDispatch[l*DISPATCH_WORDS+8u]=0u;}
+  else{candidateDispatch[l*DISPATCH_WORDS+8u]=physical;}}
+ touchedPageHeader[3]=select(0u,29u*runs,touchedTripwire());
+}
+@compute @workgroup_size(64) fn linkCompactCandidatePageNeighbours(@builtin(global_invocation_id) g:vec3u){
+ let run=boundedLinearIndex(g);let generation=captureGeneration();
+ if(touchedPageControl[0]!=0u||touchedPageControl[3]!=generation||run>=touchedPageControl[4]){return;}
+ let identity=touchedPageRuns[2u*run];let located=pageOfIndex(identity);let l=located.x;
+ if(l>=levels()||!topologyDirty(l)){captureReport(OVERFLOW);return;}let page=touchedPageRuns[2u*run+1u];
+ let pageDims=logicalPageDims(l);let record=pageRecord(l,page);let origin=decode(candidateTopology[record],l)/vec3u(8u,8u,4u);
+ let directory=pageDirectoryBase()+pageLevelOffset(l);for(var ordinal=0u;ordinal<27u;ordinal+=1u){
+  let dx=i32(ordinal%3u)-1;let yz=ordinal/3u;let neighbour=vec3i(origin)+vec3i(dx,i32(yz%3u)-1,i32(yz/3u)-1);var physical=INVALID;
+  if(all(neighbour>=vec3i(0))&&all(neighbour<vec3i(pageDims))){let q=vec3u(neighbour);
+   physical=candidateTopology[directory+q.x+pageDims.x*(q.y+pageDims.y*q.z)];}
+  if(touchedTripwire()&&candidateTopology[record+1u+ordinal]!=physical){candidateReportCode(l,0x20000u);}
+  candidateTopology[record+1u+ordinal]=physical;}
+}
 // Phase 12 (slot parallel). Every workset entry is a distinct slot, so the
 // former reset sweep and the rediscretization fuse into one owner per slot and
 // resolve neighbours through the published mask/rank directory, never a probe.
@@ -4482,6 +4675,15 @@ fn commitCandidateBrickForKey(l:u32,key:u32){
  if(key==0u){return;}let q=decode(key,l);let source=brickRecord(l,q);
  for(var w=0u;w<4u;w+=1u){topology[source+w]=candidateTopology[source+w];}
 }
+@compute @workgroup_size(1) fn commitCandidateTouchedBricks(){
+ let generation=captureGeneration();if(captureFailed()||touchedBrickControl[0]!=0u
+  ||touchedBrickControl[3]!=generation){return;}let runs=touchedBrickControl[4];
+ for(var run=0u;run<runs;run+=1u){let identity=touchedBrickRuns[2u*run];
+  if(identity>=totalBrickCount()){return;}let located=brickOfIndex(identity);let l=located.x;
+  if(l>=levels()||!topologyDirty(l)||levelDelta[deltaAt(l,4u)]!=0u){continue;}
+  let record=directoryBase()+16u+identity*4u;for(var word=0u;word<4u;word+=1u){
+   topology[record+word]=candidateTopology[record+word];}}
+}
 fn commitCandidateSlot(l:u32,slot:u32,whole:bool,stencil:bool){
  if(slot>=levelCapacity(l)){captureReport(OVERFLOW);return;}
  if(stencil){for(var c=DIAG;c<=YZMM;c+=1u){state[at(c,l,slot)]=candidateState[cAt(c,l,slot)];}
@@ -4502,9 +4704,9 @@ fn commitCandidateLevelAt(l:u32){
   // generation and makes directoryLookup fail closed. The touched-directory
   // cutover may narrow this loop only after it publishes both occupied and
   // queried-empty brick identities.
-  for(var brick=0u;brick<brickCount(l);brick+=1u){let record=directoryBase()+16u+
+  if(!touchedDirectory()){for(var brick=0u;brick<brickCount(l);brick+=1u){let record=directoryBase()+16u+
     (brickLevelOffset(l)+brick)*4u;
-   for(var word=0u;word<4u;word+=1u){topology[record+word]=candidateTopology[record+word];}}
+   for(var word=0u;word<4u;word+=1u){topology[record+word]=candidateTopology[record+word];}}}
   // Retired accepted identities must publish the candidate's cleared words;
   // new identities publish their claimed words. Their union is the complete
   // sparse replacement for the old level-capacity channel sweep.

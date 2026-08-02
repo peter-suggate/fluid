@@ -99,6 +99,19 @@ Factor cost as `wall = f(scene size, fluid size, change rate)`. The lanes:
 
 Phase 0 fills the matrix:
 
+> **Status 2026-08-02:** P0.1 (`hydrostatic-tiny` lane) and P0.2
+> (`large-power-hydrostatic`) exist in `tools/power-dam-lane-environment.ts`.
+> P0.4 is half-captured: mini + tiny-hydro fresh baselines live in
+> `artifacts/scene-size-overhead/fresh-20260802-*`; the two large cells are
+> blocked on red lanes — the large-dam class-4 stage-34 trip from step 249 and
+> the large-hydrostatic restriction bootstrap loop from step 3 (see the
+> dry-identity RHS contract note in `webgpu-octree-persistent-mgpcg.wgsl.ts`).
+> P0.5 landed (oracle doc now says 68/spread-0). P0.3 landed as the
+> `runtime-150` lane on `large-power-dam-break` in
+> `lib/scene-webgpu-smoke-catalog.ts` (150 steps, exhaustive power
+> diagnostics, volume-drift ≤ 0.01) — it inherits the same step-249 red as the
+> benchmark lane until the class-4 stall is fixed.
+
 - **P0.1 — tiny-hydrostatic benchmark lane.** Add a `hydrostatic-tiny` entry to
   `tools/power-dam-lane-environment.ts` running `hydrostatic-power-two-level`
   for 240 steps at dt 0.004, band/factor matched to the mini lane. The existing
@@ -162,6 +175,25 @@ no host readback scheduling** (`hostSchedulingUsesReadback: false` stays true).
 The rule: every recurring dispatch must be shaped by a **GPU-published live
 count** (compacted worklist + indirect args), or be a `(1,1,1)` control
 singleton. Allocation-time capacities may size *buffers*, never *launches*.
+
+> **Status 2026-08-02:** items 1–3 below mostly landed in `a0a2247` and read
+> stale as written. The candidate chain runs off the GPU-authored
+> `CANDIDATE_SCHEDULE`/`runCandidateIndirect` indirect schedule; the four
+> `domainVolume` air-support dispatches are gone (test-locked); the indirect
+> frontier gate is default-on; the proven-reach corridor exists with the
+> out-of-corridor census/reject split (the "~94k faces" figure is retracted by
+> the in-tree censuses). The honest residue, all shaped by one missing
+> primitive (a multi-workgroup **stable LSD radix sort** over touched u32
+> identities — `sortSparseCandidates` is a single-workgroup bitonic, not it):
+> (a) the SPGrid dense brick/page **directory sweep** (4 kernels over
+> `totalBrickCount`/page words per dirty epoch; CPU oracle
+> `octree-spgrid-touched-directory.ts` is written, test-only), (b) the
+> fine-topology `maximumResidentBricks`/`logicalBrickCount` recurring scans,
+> (c) the 12 `domainVolume` dispatches in `webgpu-octree-coarse-summary.ts`
+> (coarse-only lane), (d) grow-on-reject capacity reallocation (item 4's
+> remainder — note the large-dam capacity override in `lib/scenes.ts` is the
+> *authored budget* precedent, not a wart to retire: the floor-spanning
+> collapse needs more bricks than any initial-footprint estimate).
 
 1. **Indirect-ify the SPGrid candidate chain.** `encodeSetupCandidate`'s ~21
    phases move from `dispatchFor(rowCapacity/levelStride/brickCount/pageWords)`

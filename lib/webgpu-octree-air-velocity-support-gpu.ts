@@ -409,7 +409,9 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   resolveAirSupportFaceAdjacency: Object.freeze([0,2,3,7,8,11,15,16,23]),
   validateAirSupportFrontierReciprocity: Object.freeze([0,7,23]),
   seedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,19,21,23]),
+  seedAirSupportFilmFaces: Object.freeze([0,7,17,18,19,23,25,26,27,28]),
   seedRetainedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,20,21,23]),
+  seedRetainedAirSupportFilmFaces: Object.freeze([0,7,17,18,20,23,25,26,27,28]),
   compactAirSupportSeedFrontier: Object.freeze([0,7,19,29]),
   refreshRetainedAirSupportFaceValues: Object.freeze([7,19,20]),
   finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29]),
@@ -753,6 +755,10 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     readonly [GPUBindGroup, GPUBindGroup]];
   private fineDemandScheduleGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
     readonly [GPUBindGroup, GPUBindGroup]];
+  private fineFilmSeedGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
+    readonly [GPUBindGroup, GPUBindGroup]];
+  private fineRetainedFilmSeedGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
+    readonly [GPUBindGroup, GPUBindGroup]];
   private readonly ownsArena: boolean;
   private pipelinesInitialized = false;
   private pipelineInitialization?: Promise<void>;
@@ -891,6 +897,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       "prepareFineBandAirSupportClosureSchedule", "prepareFineBandAirSupportEmissionSchedule",
       "closeFineBandAirSupportInterpolationDemand",
       "emitFineBandAirSupportCandidates",
+      "seedAirSupportFilmFaces", "seedRetainedAirSupportFilmFaces",
     ]);
     const configuredEntries = entries.filter((entry) => this.inputs.fineSources
       || !fineOnlyEntries.has(entry));
@@ -904,8 +911,11 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       readonly [Readonly<Record<string, GPUBindGroup>>, Readonly<Record<string, GPUBindGroup>>];
     let fineDemandGroups: typeof this.fineDemandGroups;
     let fineDemandScheduleGroups: typeof this.fineDemandScheduleGroups;
+    let fineFilmSeedGroups: typeof this.fineFilmSeedGroups;
+    let fineRetainedFilmSeedGroups: typeof this.fineRetainedFilmSeedGroups;
     if (this.inputs.fineSources) {
-      const makeFineGroup = (entry: "prepareFineBandAirSupportDemand" | "markFineBandAirSupportDemand",
+      const makeFineGroup = (entry: "prepareFineBandAirSupportDemand" | "markFineBandAirSupportDemand"
+        | "seedAirSupportFilmFaces" | "seedRetainedAirSupportFilmFaces",
         params: GPUBuffer, fine: WebGPUFineLevelSetBrickSource) => this.device.createBindGroup({
         layout: pipelines[entry]!.getBindGroupLayout(0),
         entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS[entry].map((binding) => ({
@@ -920,6 +930,12 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       fineDemandScheduleGroups = Object.freeze(this.params.map((params) => Object.freeze(
         this.inputs.fineSources!.map((fine) => makeFineGroup("prepareFineBandAirSupportDemand", params, fine))))) as unknown as
           NonNullable<typeof this.fineDemandScheduleGroups>;
+      fineFilmSeedGroups = Object.freeze(this.params.map((params) => Object.freeze(
+        this.inputs.fineSources!.map((fine) => makeFineGroup("seedAirSupportFilmFaces", params, fine))))) as unknown as
+          NonNullable<typeof this.fineFilmSeedGroups>;
+      fineRetainedFilmSeedGroups = Object.freeze(this.params.map((params) => Object.freeze(
+        this.inputs.fineSources!.map((fine) => makeFineGroup("seedRetainedAirSupportFilmFaces", params, fine))))) as unknown as
+          NonNullable<typeof this.fineRetainedFilmSeedGroups>;
     }
     // Publish the pipeline-dependent state only after every pipeline and bind
     // group has been created, so encode can never observe a partial set.
@@ -927,6 +943,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     this.groups = groups;
     this.fineDemandGroups = fineDemandGroups;
     this.fineDemandScheduleGroups = fineDemandScheduleGroups;
+    this.fineFilmSeedGroups = fineFilmSeedGroups;
+    this.fineRetainedFilmSeedGroups = fineRetainedFilmSeedGroups;
     this.pipelinesInitialized = true;
   }
 
@@ -1179,10 +1197,20 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     }
     pass.setPipeline(this.pipelines.seedAirSupportFaces!); pass.setBindGroup(0, groups.seedAirSupportFaces!);
     pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+    if (fineSlot !== undefined && this.fineFilmSeedGroups) {
+      pass.setPipeline(this.pipelines.seedAirSupportFilmFaces!);
+      pass.setBindGroup(0, this.fineFilmSeedGroups[parameterSlot][fineSlot]);
+      pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+    }
     if (changedFrontier) {
       pass.setPipeline(this.pipelines.seedRetainedAirSupportFaces!);
       pass.setBindGroup(0, groups.seedRetainedAirSupportFaces!);
       pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+      if (fineSlot !== undefined && this.fineRetainedFilmSeedGroups) {
+        pass.setPipeline(this.pipelines.seedRetainedAirSupportFilmFaces!);
+        pass.setBindGroup(0, this.fineRetainedFilmSeedGroups[parameterSlot][fineSlot]);
+        pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+      }
       pass.setPipeline(this.pipelines.compactAirSupportSeedFrontier!);
       pass.setBindGroup(0, groups.compactAirSupportSeedFrontier!);
       pass.dispatchWorkgroupsIndirect(this.indirect, 48);
@@ -2441,10 +2469,73 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   if(seed.y<0.){fail(item,ERROR_SOURCE);return vec4u(0u,INVALID,INVALID,0u);}
   if(seed.y>0.){return vec4u(bitcast<u32>(seed.x),0u,item,1u);}
   return vec4u(0u,INVALID,INVALID,0u);}
+
+fn fineBandSeedSourceValid()->bool{
+  if(p.fineFactor==0u||p.fineR==0u||p.fineSamplesPerBrick!=p.fineR*p.fineR*p.fineR
+      ||p.expectedFineGeneration==0u||any(p.fineBrickDims==vec3u(0u))){return false;}
+  let logical=p.fineBrickDims.x*p.fineBrickDims.y*p.fineBrickDims.z;
+  return arrayLength(&fineWorklist)>=7u+p.finePageCapacity+logical
+    &&arrayLength(&fineMetadata)>=10u*p.finePageCapacity
+    &&fineWorklist[0]==p.expectedFineGeneration&&fineWorklist[2]==p.finePageCapacity
+    &&(fineWorklist[3]&3u)==3u&&fineWorklist[5]==1u&&fineWorklist[6]==1u
+    &&fineWorklist[1]<=p.finePageCapacity;}
+fn fineSeedSample(q:vec3u)->u32{
+  if(any(q>=p.fineSampleDims)){return INVALID;}let brick=q/p.fineR;
+  if(any(brick>=p.fineBrickDims)){return INVALID;}
+  let key=brick.x+p.fineBrickDims.x*(brick.y+p.fineBrickDims.y*brick.z);
+  let directory=7u+p.finePageCapacity+key;if(directory>=arrayLength(&fineWorklist)){return INVALID;}
+  let id=fineWorklist[directory];if(id>=p.finePageCapacity){return INVALID;}let metadata=id*10u;
+  if(metadata+2u>=arrayLength(&fineMetadata)||fineMetadata[metadata]!=id
+      ||fineMetadata[metadata+1u]!=key||fineMetadata[metadata+2u]!=p.expectedFineGeneration){return INVALID;}
+  let local=q-brick*p.fineR;let index=id*p.fineSamplesPerBrick
+    +local.x+p.fineR*(local.y+p.fineR*local.z);
+  if(index>=arrayLength(&fineFlags)||index>=arrayLength(&finePhi)
+      ||(fineFlags[index]&1u)==0u||!finiteValue(finePhi[index])){return INVALID;}
+  return index;}
+fn fineInterfaceInCell(cell:vec4u)->bool{
+  if(!fineBandSeedSourceValid()||cell.w==0u||any(cell.xyz>=p.dimensions)){return false;}
+  let minimum=cell.xyz*p.fineFactor;
+  let maximum=min((cell.xyz+vec3u(cell.w))*p.fineFactor,p.fineSampleDims);
+  for(var z=minimum.z;z<maximum.z;z+=1u){for(var y=minimum.y;y<maximum.y;y+=1u){for(var x=minimum.x;x<maximum.x;x+=1u){
+    let q=vec3u(x,y,z);let centerIndex=fineSeedSample(q);if(centerIndex==INVALID){continue;}
+    let center=finePhi[centerIndex];for(var direction=0u;direction<6u;direction+=1u){
+      let neighborQ=vec3i(q)+DIRECTIONS[direction];if(any(neighborQ<vec3i(0))){continue;}
+      let otherIndex=fineSeedSample(vec3u(neighborQ));if(otherIndex==INVALID){continue;}
+      let other=finePhi[otherIndex];if((other<0.)!=(center<0.)){return true;}
+    }
+  }}}
+  return false;}
+fn filmSeedForLiquidRow(item:u32,row:u32,axis:u32,aligned:f32)->vec4u{
+  if(row>=s(2u)||!liquidRow(row)||!fineInterfaceInCell(adjacencyGeometry(row))){return vec4u(0u,INVALID,INVALID,0u);}
+  let at=s(4u)*p.rowCapacity+row;if(at>=arrayLength(&rowVelocities)){fail(item,ERROR_CAPACITY);return vec4u(0u,INVALID,INVALID,0u);}
+  // rowVelocities is a global vector. Projecting it onto the selected row's
+  // coincident oriented face and applying the existing aligned<0 correction
+  // preserves the same global axis-component convention as power-face seeds.
+  let normalComponent=rowVelocities[at][axis]*aligned;
+  let value=select(normalComponent,-normalComponent,aligned<0.);
+  if(!finiteValue(value)){fail(item,ERROR_SOURCE);return vec4u(0u,INVALID,INVALID,0u);}
+  return vec4u(bitcast<u32>(value),0u,item,1u);}
+fn airSupportFilmSeedCarrier(item:u32)->vec4u{
+  let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;
+  var carrier=filmSeedForLiquidRow(item,faceRow,axis,1.);
+  if(carrier.w==0u){let otherRow=adjacencyPositive(faceRow,axis,local%4u);
+    if(otherRow!=INVALID){carrier=filmSeedForLiquidRow(item,otherRow,axis,-1.);}}
+  return carrier;}
 @compute @workgroup_size(256)fn seedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
   if(item<s(29u)&&s(0u)==0u&&s(50u)==0u){faceA[item]=vec4u(0u,INVALID,INVALID,0u);
     let carrier=airSupportSeedCarrier(item);if(carrier.w!=0u){faceA[item]=carrier;seeded=1u;}}
+  seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
+  if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
+// The M1 storage-buffer ceiling cannot bind the fine SPGrid to the existing
+// projection kernel. This second dispatch stays in the same compute pass and
+// exact live-face schedule; its empty-carrier guard proves both projection
+// attempts returned no seed before the fine-interface fallback is reachable.
+@compute @workgroup_size(256)fn seedAirSupportFilmFaces(@builtin(local_invocation_index)lane:u32,
+  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
+  if(item<s(29u)&&s(0u)==0u&&s(50u)==0u&&faceA[item].w==0u){
+    let carrier=airSupportFilmSeedCarrier(item);if(carrier.w!=0u){faceA[item]=carrier;seeded=1u;}}
   seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn seedRetainedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
@@ -2455,8 +2546,14 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   // seeds over the exact live-face schedule instead.  This remains
   // footprint-shaped, preserves the immutable seed identity test below, and
   // removes the cross-epoch alias that corrupted the third retained seed.
-  if(invocation<s(29u)&&s(0u)==0u&&s(50u)!=0u){let carrier=airSupportSeedCarrier(invocation);
+  if(invocation<s(29u)&&s(0u)==0u&&s(50u)!=0u){faceB[invocation]=vec4u(0u,INVALID,INVALID,0u);let carrier=airSupportSeedCarrier(invocation);
     if(carrier.w!=0u){faceB[invocation]=carrier;seeded=1u;}}
+  seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
+  if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
+@compute @workgroup_size(256)fn seedRetainedAirSupportFilmFaces(@builtin(local_invocation_index)lane:u32,
+  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
+  if(item<s(29u)&&s(0u)==0u&&s(50u)!=0u&&faceB[item].w==0u){
+    let carrier=airSupportFilmSeedCarrier(item);if(carrier.w!=0u){faceB[item]=carrier;seeded=1u;}}
   seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn compactAirSupportSeedFrontier(@builtin(local_invocation_index)lane:u32,

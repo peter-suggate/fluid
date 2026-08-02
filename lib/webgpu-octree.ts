@@ -1246,6 +1246,9 @@ type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
     WebGPUOctreeSPGridVCycle["readPublishedHierarchyForDiagnostics"]
   >;
   readHierarchyCensus(): Promise<Readonly<{ levels: readonly Readonly<Record<string, number>>[] }>>;
+  readTouchedDirectoryTripwireDiagnostics(): ReturnType<
+    WebGPUOctreeSPGridVCycle["readTouchedDirectoryTripwireDiagnostics"]
+  >;
   readCandidateFailureDiagnostics(): Promise<Readonly<{
     levelDelta: readonly number[]; candidateDispatch: readonly number[];
   }>>;
@@ -5469,7 +5472,7 @@ export class WebGPUOctreeProjection {
     if ((!fine || !topology || !this.globalFineSeeds) && !this.coarseOnlySurfaceTracking) {
       return undefined;
     }
-    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 792,
+    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 952,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine structured QA diagnostics" });
     if (this.globalFineSeeds) {
@@ -5553,6 +5556,19 @@ export class WebGPUOctreeProjection {
       encoder.copyBufferToBuffer(topology.pageDelta, 0, readback, 608, 64);
       encoder.copyBufferToBuffer(topology.control, 48, readback, 764, 16);
     }
+    // Transport governor schedule (state[0..7]) and sleep forensics
+    // (state[46..56]: first-schedule latch, repairs, sleeping bit, and the
+    // why-not-sleeping bitmask + measured displacement the prepare kernel
+    // writes unconditionally) for both banks — the uncommitted-delta root of
+    // a recurring-band rejection names its blocking term here.
+    if (this.globalFineTransportA) {
+      encoder.copyBufferToBuffer(this.globalFineTransportA.governor, 0, readback, 792, 32);
+      encoder.copyBufferToBuffer(this.globalFineTransportA.governor, 46 * 4, readback, 824, 44);
+    }
+    if (this.globalFineTransportB) {
+      encoder.copyBufferToBuffer(this.globalFineTransportB.governor, 0, readback, 868, 32);
+      encoder.copyBufferToBuffer(this.globalFineTransportB.governor, 46 * 4, readback, 900, 44);
+    }
     this.device.queue.submit([encoder.finish()]);
     let copiedWords: number[];
     try {
@@ -5589,6 +5605,10 @@ export class WebGPUOctreeProjection {
         airSupportTopologyFailureLatch: Array.from(words.slice(182, 191)),
         airSupportFailureCounts: Array.from(words.slice(195, 198)),
         fineTopologyFailureLatch: Array.from(words.slice(191, 195)),
+        fineTransportScheduleA: Array.from(words.slice(198, 206)),
+        fineTransportSleepA: Array.from(words.slice(206, 217)),
+        fineTransportScheduleB: Array.from(words.slice(217, 225)),
+        fineTransportSleepB: Array.from(words.slice(225, 236)),
         configuredFineGeneration: fine?.generation ?? 0, fineGenerationSlot: fine?.generationSlot ?? 0,
         scheduledFineGeneration: this.globalFineGeneration, currentFineIsA: this.globalFinePublishedIsA };
     const liveFirstError = diagnostics.airSupportControl[1] ?? 0xffff_ffff;
@@ -5607,6 +5627,10 @@ export class WebGPUOctreeProjection {
   /** Post-submit diagnostic census; never participates in pressure scheduling. */
   readSPGridHierarchyCensus() {
     return this.firstOrderVCycle?.readHierarchyCensus();
+  }
+  /** Terminal-only proof that the compact directory differential executed. */
+  readSPGridTouchedDirectoryTripwire() {
+    return this.firstOrderVCycle?.readTouchedDirectoryTripwireDiagnostics();
   }
   /** Post-submit Bet-4 machinery census from the shipping persistent solve. */
   readPowerHybridCensus() {

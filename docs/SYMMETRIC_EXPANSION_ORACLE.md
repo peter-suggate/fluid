@@ -80,12 +80,20 @@ Four construction defects were responsible:
 
 ## Current first dynamic divergences
 
-On the Dawn Metal path used during implementation:
+On the Dawn Metal path used during implementation (as of `perf/structured-cutover`
+2026-08-02, after the air-support Section-5 retirement in `f853dd2`):
 
 | Lane | First volume | First velocity | First pressure | First topology | Wall-contact steps (-x, +x, -z, +z) |
 | --- | --- | --- | --- | --- | --- |
-| factor 1 | step 13, `0.052 s` | step 1 | step 1 | step 16, `0.064 s` | `67, 63, 67, 64` |
+| factor 1 | step 68, `0.272 s` | step 68 | step 68 | bitwise D4 through step 67 | `68, 68, 68, 68` — spread **0** |
 | factor 4 | step 1 | step 1 | step 1 | exact through step 1 | not evaluated in the one-step lane |
+
+The factor-1 lane is now bitwise D4-symmetric all the way to simultaneous wall
+contact; the first loss at step 68 is the wall interaction itself, not a
+directional bias in the interior operators. Per-family numbers and the
+measurement lanes live in `SYMMETRIC_EXPANSION_FRAME_PROFILE.md`. The historical
+`13/16/67-63-67-64` figures below this point describe the pre-`f853dd2` tree and
+are retained only as the record of what each fix bought.
 
 After the frame-zero fixes, the factor-4 first-step maximum discrepancies are
 about `8.57e-5` in volume, `3.80e-7 m/s` in velocity, and `0.0103` in pressure;

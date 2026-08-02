@@ -146,15 +146,9 @@ export function validateCoarseLevelSetConsumerSource(source: CoarseLevelSetConsu
 }
 
 /** CPU mirror of the renderer's fail-closed Section-5 publication gate.
- *
- * Aanjaneya et al. (2017), Section 5 (local source:
- * `docs/papers/aanjaneya-2017-power-liquids.txt`) defines two separate meshes:
- * a background simulation octree and a high-resolution interface SPGrid.  The
- * SPGrid topology is rebuilt after every advection, while an octree adaptation
- * may be rejected and retain the last valid octree.  Their generation numbers
- * are therefore comparable only for a clean joint publication.  An explicit,
- * well-formed rollback is the proof that an independently numbered coarse
- * publication is intentionally retained, rather than accidentally stale. */
+ * Aanjaneya et al. (2017), Section 5 rebuilds the fine SPGrid after every
+ * advection and then uses it to correct the background-octree level set. A
+ * rejected rebuild cannot authorize that correction with stale fine data. */
 export function globalFineCoarseGenerationPairIsValid(
   fineGeneration: number,
   coarseGeneration: number,
@@ -168,21 +162,7 @@ export function globalFineCoarseGenerationPairIsValid(
   const reason = Number(topologyControl[7]) >>> 0;
   const cleanCurrent = flags === 0 && published && !rolledBack && reason === 0
     && coarse === fine;
-  return cleanCurrent || fineTopologyRetainsBackgroundOctree(topologyControl);
-}
-
-/** Recognize the exact fail-closed provenance for retaining the independently
- * numbered Section-5 background octree after a fine-topology transaction is
- * rejected. Unknown flag or reason bits never authorize retention. */
-export function fineTopologyRetainsBackgroundOctree(
-  topologyControl: ArrayLike<number> | undefined,
-): boolean {
-  if (!topologyControl || topologyControl.length < 8) return false;
-  const flags = Number(topologyControl[0]) >>> 0;
-  const reason = Number(topologyControl[7]) >>> 0;
-  return topologyControl[4] === 1 && topologyControl[5] === 1
-    && flags !== 0 && reason !== 0
-    && (flags & ~0x1f) === 0 && (reason & ~0x0f) === 0;
+  return cleanCurrent;
 }
 
 /** Validates the indexable Section-5 fine-SPGrid ABI without reading GPU data. */

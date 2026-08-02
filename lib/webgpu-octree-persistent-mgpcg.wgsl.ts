@@ -633,7 +633,29 @@ fn applyIdentityRow(row:u32,inCh:u32,outCh:u32){
  // time but never the RHS, so the split names which input went stale.
  let base=coefficientBase(row);if(base+19u>arrayLength(&coefficients)){reportAt(ERR_AUTHORITY,32u,row);return;}
  if(coefficients[base]!=1.0){reportAt(ERR_AUTHORITY,33u,row);return;}
- if(vload(CH_RHS,row)!=0.0){reportAt(ERR_AUTHORITY,34u,row);return;}
+ if(vload(CH_RHS,row)!=0.0){
+  // Stage-34 forensics: the offending staged RHS and the published diagonal,
+  // plus the class-4 workset header generation against the accepted
+  // generation and bank — a header/generation mismatch means the producers'
+  // generation-guarded worklist readers no-oped while this unguarded
+  // iteration consumed the stale list.
+  atomicStore(&control[8],bitcast<u32>(vload(CH_RHS,row)));
+  atomicStore(&control[9],bitcast<u32>(coefficients[base]));
+  atomicStore(&control[10],dynamicWorksets[worksetBase(4u)]);
+  atomicStore(&control[11],acceptedEpoch());
+  atomicStore(&control[12],acceptedBank());
+  atomicStore(&control[13],worksetCount(4u));
+  // Words 14/15 split the two surviving theories: sweep the whole class-4
+  // list and count rows with nonzero staged RHS. Wholesale (≈count) means the
+  // producer's zero dispatch never landed on this row space; isolated (1–2)
+  // means a per-row wet/dry disagreement between divergence and classifier.
+  var dirty=0u;var firstOther=0xFFFFFFFFu;let n4=worksetCount(4u);
+  for(var item=0u;item<n4;item+=1u){let r=worksetRow(4u,item);
+   if(r<capacity()&&ch(CH_RHS,r)<arrayLength(&arena)&&vload(CH_RHS,r)!=0.0){
+    dirty+=1u;if(r!=row&&firstOther==0xFFFFFFFFu){firstOther=r;}}}
+  atomicStore(&control[14],dirty);
+  atomicStore(&control[15],firstOther);
+  reportAt(ERR_AUTHORITY,34u,row);return;}
  for(var channel=0u;channel<18u;channel+=1u){if(coefficients[base+1u+channel]!=0.0){
   reportAt(ERR_AUTHORITY,35u,row);return;}}
  let value=vload(inCh,row);if(!finite(value)){reportAt(ERR_NONFINITE,32u,row);}

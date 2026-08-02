@@ -29,6 +29,22 @@ export function coarseSummaryVelocityStencilCoverage(
   return authored >= 1 ? 0.999 : authored;
 }
 
+/** GPU-authored launch shapes for the recurring coarse-only summary build.
+ *
+ * A control singleton publishes the dense-lattice, live-row, and live-entry
+ * dispatch records before the build runs, so an unpublished air support zeroes
+ * the twelve dense sweeps on-GPU and the row/entry stages launch from
+ * `coarse.rowCount`/`state[1]` instead of allocation capacities. Launch shape
+ * only: an executed invocation computes exactly what the direct launch did.
+ * Default OFF until the Gate A A/B lands. */
+export function octreeCoarseSummaryIndirectDispatchEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_COARSE_SUMMARY_INDIRECT_DISPATCH === "1";
+}
+
 export interface OctreeCoarseSummaryPlan {
   readonly baseDimensions: readonly [number, number, number];
   readonly levelDimensions: readonly (readonly [number, number, number])[];
@@ -67,7 +83,7 @@ export function planOctreeCoarseSummary(
   return {
     baseDimensions, levelDimensions, levelOffsets, hierarchyKeyCapacity,
     topLevelPageCount, directoryPageCapacity, entryCapacity, entryOffsetWords,
-    phiOffsetWords, directoryWords, allocatedBytes: directoryWords * 4 + 80 + 96,
+    phiOffsetWords, directoryWords, allocatedBytes: directoryWords * 4 + 80 + 112,
   };
 }
 
@@ -80,6 +96,8 @@ export class WebGPUOctreeCoarseSummary {
   private readonly domainVolume: number;
   private readonly state: GPUBuffer;
   private readonly params: GPUBuffer;
+  private readonly dispatchArgs: GPUBuffer;
+  private readonly indirectDispatch = octreeCoarseSummaryIndirectDispatchEnabled();
   private readonly pipelines: Record<string, GPUComputePipeline> = {};
   private module?: GPUShaderModule;
   private destroyed = false;
@@ -88,7 +106,8 @@ export class WebGPUOctreeCoarseSummary {
     "seedDenseRedistance", "redistanceScratchToOutput", "redistanceOutputToScratch",
     "summarizeDenseVolume", "prepareVolumeCorrection", "correctAndAggregateSummaryCells",
     "finalizeSummaryEntries", "publishSummary",
-    "publishDenseComplement", "correctCoarseDirectory"] as const;
+    "publishDenseComplement", "correctCoarseDirectory",
+    "prepareSummaryDispatch", "prepareSummaryFinalizeDispatch"] as const;
 
   constructor(private readonly device: GPUDevice,
     private readonly coarse: OctreePowerCoarseLevelSetSampleSource,
@@ -117,8 +136,11 @@ export class WebGPUOctreeCoarseSummary {
     // `array<atomic<u32>>` silently drops out-of-bounds atomics rather than
     // faulting, so an 80-byte buffer made `state[20]` a write into nowhere.
     this.state = device.createBuffer({ label: "coarse-only summary build state", size: 128, usage: storage });
-    this.params = device.createBuffer({ label: "coarse-only summary parameters", size: 96,
+    this.params = device.createBuffer({ label: "coarse-only summary parameters", size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // Records: 0 dense lattice, 1 live coarse rows, 2 live summary entries.
+    this.dispatchArgs = device.createBuffer({ label: "coarse-only summary dispatch arguments",
+      size: 36, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const words = new Uint32Array(16);
     words.set(this.plan.baseDimensions, 0);
     words.set(dimensions, 4);
@@ -127,7 +149,7 @@ export class WebGPUOctreeCoarseSummary {
       this.plan.directoryPageCapacity, this.plan.entryCapacity,
       this.plan.entryOffsetWords, this.plan.levelDimensions.length - 1,
       coarse.rowCapacity, this.plan.directoryWords], 8);
-    const data = new ArrayBuffer(96); new Uint32Array(data).set(words);
+    const data = new ArrayBuffer(112); new Uint32Array(data, 0, 16).set(words);
     const tail = new Uint32Array(data, 64, 4);
     // The last word is the dense coarse lattice's own cardinality. It used to
     // be spelled `ownerDirectoryCellCapacity` because the owner directory was
@@ -137,6 +159,8 @@ export class WebGPUOctreeCoarseSummary {
     const time = new Float32Array(data, 80, 4);
     time[0] = air.timestep_s;
     time[1] = coarseSummaryVelocityStencilCoverage();
+    // The prepare singleton reproduces the host's 2D dispatch split exactly.
+    new Uint32Array(data, 96, 1)[0] = device.limits.maxComputeWorkgroupsPerDimension;
     device.queue.writeBuffer(this.params, 0, data);
     if (air.initialPhi.length !== dimensions[0] * dimensions[1] * dimensions[2]) {
       throw new RangeError("Coarse-only tracker bootstrap must cover the complete coarse lattice");
@@ -179,23 +203,25 @@ export class WebGPUOctreeCoarseSummary {
 
   encode(broker: PassBroker): void {
     if (this.destroyed) throw new Error("Coarse-only summary hierarchy is destroyed");
-    const dispatch = (entry: typeof this.entries[number], items: number) => {
+    const dispatch = (entry: typeof this.entries[number], items: number, record?: 0 | 1 | 2) => {
       const groups = Math.ceil(Math.max(1, items) / 256);
       const width = Math.min(groups, this.device.limits.maxComputeWorkgroupsPerDimension);
+      const prepare = entry === "prepareSummaryDispatch" || entry === "prepareSummaryFinalizeDispatch";
       const usesCoarse = entry === "ensureSummaryPages" || entry === "ensureSummaryRanks"
         || entry === "predictSummaryCells" || entry === "prepareVolumeCorrection"
         || entry === "seedDenseRedistance" || entry === "redistanceScratchToOutput"
         || entry === "redistanceOutputToScratch" || entry === "summarizeDenseVolume"
         || entry === "publishSummary"
         || entry === "publishDenseComplement"
-        || entry === "correctCoarseDirectory";
-      const usesAir = entry === "predictSummaryCells";
+        || entry === "correctCoarseDirectory"
+        || entry === "prepareSummaryDispatch";
+      const usesAir = entry === "predictSummaryCells" || entry === "prepareSummaryDispatch";
       const usesVelocity = entry === "predictSummaryCells";
       const usesState = true;
       const group = this.device.createBindGroup({
         layout: this.pipelines[entry]!.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: { buffer: this.directory } },
+          ...(prepare ? [] : [{ binding: 0, resource: { buffer: this.directory } }]),
           ...(usesCoarse ? [
             { binding: 1, resource: { buffer: this.coarse.directory } },
           ] : []),
@@ -207,31 +233,50 @@ export class WebGPUOctreeCoarseSummary {
           ...(usesVelocity ? [
             { binding: 5, resource: { buffer: this.air.rowVelocities } },
           ] : []),
+          ...(prepare ? [{ binding: 6, resource: { buffer: this.dispatchArgs } }] : []),
         ],
       });
       const pass = broker.compute({ label: `Build coarse-only summary · ${entry}` });
       pass.setPipeline(this.pipelines[entry]!); pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(width, Math.ceil(groups / width));
+      if (this.indirectDispatch && record !== undefined) {
+        pass.dispatchWorkgroupsIndirect(this.dispatchArgs, record * 12);
+      } else {
+        pass.dispatchWorkgroups(width, Math.ceil(groups / width));
+      }
     };
+    if (this.indirectDispatch) {
+      dispatch("prepareSummaryDispatch", 1);
+      broker.fence("coarse-only summary indirect arguments published");
+    }
+    // resetSummary stays capacity-shaped: the dense top-word page table must
+    // be cleared wholesale until a touched-key worklist exists (Bet 1 residue).
     dispatch("resetSummary", Math.max(this.plan.phiOffsetWords, this.plan.entryCapacity));
-    dispatch("ensureSummaryPages", this.coarse.rowCapacity);
-    dispatch("ensureSupportSummaryPages", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("ensureSummaryRanks", this.coarse.rowCapacity);
-    dispatch("ensureSupportSummaryRanks", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("predictSummaryCells", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("seedDenseRedistance", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("redistanceOutputToScratch", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("redistanceOutputToScratch", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("summarizeDenseVolume", this.air.layout.ownerDirectoryCellCapacity);
+    dispatch("ensureSummaryPages", this.coarse.rowCapacity, 1);
+    dispatch("ensureSupportSummaryPages", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("ensureSummaryRanks", this.coarse.rowCapacity, 1);
+    dispatch("ensureSupportSummaryRanks", this.air.layout.ownerDirectoryCellCapacity, 0);
+    if (this.indirectDispatch) {
+      // state[1] is final only after both rank stages; the entry record cannot
+      // be authored by the head singleton. Both fences keep the argument
+      // buffer's storage writes out of the passes that consume it as INDIRECT.
+      broker.fence("coarse-only summary rank stages retired");
+      dispatch("prepareSummaryFinalizeDispatch", 1);
+      broker.fence("coarse-only summary entry arguments published");
+    }
+    dispatch("predictSummaryCells", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("seedDenseRedistance", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("redistanceOutputToScratch", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("redistanceOutputToScratch", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("summarizeDenseVolume", this.air.layout.ownerDirectoryCellCapacity, 0);
     dispatch("prepareVolumeCorrection", 1);
-    dispatch("correctAndAggregateSummaryCells", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("finalizeSummaryEntries", this.plan.entryCapacity);
+    dispatch("correctAndAggregateSummaryCells", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("finalizeSummaryEntries", this.plan.entryCapacity, 2);
     dispatch("publishSummary", 1);
-    dispatch("publishDenseComplement", this.air.layout.ownerDirectoryCellCapacity);
-    dispatch("correctCoarseDirectory", this.coarse.rowCapacity);
+    dispatch("publishDenseComplement", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("correctCoarseDirectory", this.coarse.rowCapacity, 1);
   }
 
   /** Diagnostic-only receipt. `completions` counts advances whose prediction
@@ -273,6 +318,7 @@ export class WebGPUOctreeCoarseSummary {
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
     this.directory.destroy(); this.state.destroy(); this.params.destroy();
+    this.dispatchArgs.destroy();
   }
 }
 
@@ -282,7 +328,7 @@ const COARSE_AUTHORITY:u32=0x80000000u;const PHI_INTERFACE:u32=4u;
 const PAGE_SIZE:u32=${PAGE_SIZE}u;const ENTRY_WORDS:u32=${ENTRY_WORDS}u;
 struct P{baseDims:vec3u,pad0:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
  entryCapacity:u32,entryOffset:u32,maximumLevel:u32,rowCapacity:u32,directoryWords:u32,
- airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f}
+ airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f,maxWorkgroups:u32}
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,volume:f32}
 struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,
  physicalCellSize:f32,entries:array<CoarseEntry>}
@@ -292,6 +338,7 @@ struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32
 @group(0)@binding(3)var<uniform>p:P;
 @group(0)@binding(4)var<storage,read>air:array<u32>;
 @group(0)@binding(5)var<storage,read>rowVelocities:array<vec4f>;
+@group(0)@binding(6)var<storage,read_write>dispatchArgs:array<u32>;
 fn linear(w:vec3u,n:vec3u,l:u32)->u32{return (w.x+w.y*n.x)*256u+l;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn canonicalSum8(values:array<f32,8>)->f32{var sorted=values;for(var i=1u;i<8u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.;var i=0u;loop{if(i>=8u){break;}let magnitude=abs(sorted[i]);var balance=0;var j=i;loop{if(j>=8u||abs(sorted[j])!=magnitude){break;}if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}sum+=f32(balance)*magnitude;i=j;}return sum;}
@@ -579,4 +626,24 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  let point=vec3f(origin)+vec3f(0.5*f32(e.size));let sample=densePhiAt(atomicLoad(&state[17])&1u,point);if(sample.y==0.0){return;}
  coarse.entries[row].phi=sample.x;coarse.entries[row].minimumPhi=sample.x;coarse.entries[row].maximumPhi=sample.x;
  coarse.entries[row].flags&=~PHI_INTERFACE;}
+// Same 2D split as the host launch: width=min(groups,limit), height=ceil.
+// Kernels index through num_workgroups, so equal triples mean equal items.
+fn publishDispatchRecord(slot:u32,groups:u32){let width=min(groups,p.maxWorkgroups);
+ var height=1u;if(width!=0u){height=(groups+width-1u)/width;}
+ dispatchArgs[3u*slot]=width;dispatchArgs[3u*slot+1u]=height;dispatchArgs[3u*slot+2u]=1u;}
+@compute @workgroup_size(1)fn prepareSummaryDispatch(){
+ // The dense chain launches zero workgroups on an unpublished air support, so
+ // this singleton carries predictSummaryCells's lane-zero receipt diagnostics:
+ // one record per declined advance, naming the failing control words.
+ if(!airPublished()){atomicAdd(&state[21],1u);
+  if(p.airControl+15u<arrayLength(&air)){atomicStore(&state[22],air[p.airControl]);
+   atomicStore(&state[23],air[p.airControl+13u]);atomicStore(&state[24],air[p.airControl+14u]);
+   atomicStore(&state[26],air[p.airControl+1u]);}
+  else{atomicStore(&state[25],1u);}}
+ publishDispatchRecord(0u,select(0u,(p.domainVolume+255u)/256u,airPublished()));
+ let rows=min(coarse.rowCount,p.rowCapacity);
+ publishDispatchRecord(1u,select(0u,(rows+255u)/256u,coarse.state==PUBLISHED));
+ publishDispatchRecord(2u,0u);}
+@compute @workgroup_size(1)fn prepareSummaryFinalizeDispatch(){
+ publishDispatchRecord(2u,(min(atomicLoad(&state[1]),p.entryCapacity)+255u)/256u);}
 `;
