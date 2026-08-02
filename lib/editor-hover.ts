@@ -100,13 +100,32 @@ function hoverFloor(scene: SceneDescription, ray: { origin: Vec3; direction: Vec
   return { kind: "floor", position_m, normal: { x: 0, y: 1, z: 0 }, distance_m, label: "container floor" };
 }
 
+export interface EditorHoverOptions {
+  /**
+   * Whether the ray is tested against scenery.
+   *
+   * On by default, because a tool that places something needs to know it is
+   * resting it on a bench rather than through one. The viewport's own cursor
+   * turns it off outside the select tool: there, scenery is not a click target,
+   * and answering with it would cost every pointer-move a pick against the whole
+   * set — and light a rim promising a selection the armed tool will not make.
+   */
+  readonly scenery?: boolean;
+}
+
 /** Nearest analytic hit under the pointer across bodies, terrain, and the floor. */
 export function hoverSceneAt(
   scene: SceneDescription,
   bodies: readonly RigidBodyState[],
   ray: { origin: Vec3; direction: Vec3 },
+  options: EditorHoverOptions = {},
 ): EditorHover | undefined {
-  const candidates = [hoverBody(bodies, ray), hoverScenery(scene, ray), hoverTerrain(scene, ray), hoverFloor(scene, ray)];
+  const candidates = [
+    hoverBody(bodies, ray),
+    options.scenery === false ? undefined : hoverScenery(scene, ray),
+    hoverTerrain(scene, ray),
+    hoverFloor(scene, ray),
+  ];
   let nearest: EditorHover | undefined;
   for (const candidate of candidates) {
     if (candidate && (!nearest || candidate.distance_m < nearest.distance_m)) nearest = candidate;

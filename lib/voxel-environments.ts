@@ -79,32 +79,50 @@ export function environmentSceneryContext(
  * hand-built scene fixture still renders, not as a second authority.
  */
 export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions = {}): EnvironmentProxyCatalog {
+  const cached = cachedCatalog(scene, environmentId, options);
+  if (cached) return cached;
   const context = environmentSceneryContext(scene, environmentId, options);
   const graph = scene.scenery ?? sceneryGraphForEnvironment(scene, environmentId);
   const b = new ProxyBuilder(environmentId);
   const { shell, spans, panes } = expandSceneryGraph(b, graph, context);
-  return {
+  return retainCatalog(scene, environmentId, options, {
     environmentId, environmentIndex: environmentIndex(environmentId),
     scale_m: context.s, floorY_m: context.floorY_m, shell, primitives: b.props, spans,
     panes: panes.map((p) => ({ ...p, id: `${environmentId}/${p.id}` })),
-  };
+  });
 }
 
 /**
- * The owner-index range one described object occupies, or undefined if the node
- * published nothing. Inclusive of both ends, which is the form the shader's
- * highlight comparison takes.
+ * One expansion per document.
+ *
+ * Expansion is not free — a garden grows its trees bead by bead — and the same
+ * catalog is asked for several times over: the cursor's pick, the rim's owner
+ * range, the gizmo around the selected object, and every publication the
+ * renderer assembles when it attaches a scene. Uncached, a pointer-move paid for
+ * three full expansions of a set that had not changed between them.
+ *
+ * Scene documents are replaced rather than edited, so identity is a sound key.
+ * The fingerprint beside it covers the one thing identity misses — a fixture
+ * that resizes a container in place — because a stale catalog would put the
+ * cursor's idea of the room somewhere the render does not agree with.
  */
-export function sceneryOwnerRange(
-  catalog: EnvironmentProxyCatalog,
-  nodeId: string,
-): { readonly first: number; readonly last: number } | undefined {
-  const span = catalog.spans.find((candidate) => candidate.nodeId === nodeId);
-  if (!span || span.to <= span.from) return undefined;
-  return {
-    first: catalog.primitives[span.from]!.ownerIndex,
-    last: catalog.primitives[span.to - 1]!.ownerIndex,
-  };
+const catalogCache = new WeakMap<SceneDescription, Map<string, EnvironmentProxyCatalog>>();
+
+function catalogFingerprint(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions): string {
+  const c = scene.container;
+  return `${environmentId}|${options.shellThickness_m ?? "scene"}|${c.width_m}:${c.height_m}:${c.depth_m}`
+    + `|${scene.voxelDomain.finestCellSize_m}|${JSON.stringify(scene.terrain ?? null)}`;
+}
+
+function cachedCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions): EnvironmentProxyCatalog | undefined {
+  return catalogCache.get(scene)?.get(catalogFingerprint(scene, environmentId, options));
+}
+
+function retainCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions, catalog: EnvironmentProxyCatalog): EnvironmentProxyCatalog {
+  let entries = catalogCache.get(scene);
+  if (!entries) { entries = new Map(); catalogCache.set(scene, entries); }
+  entries.set(catalogFingerprint(scene, environmentId, options), catalog);
+  return catalog;
 }
 
 export function environmentProxyPrimitives(catalog: EnvironmentProxyCatalog, includeShell = true): readonly EnvironmentProxyPrimitive[] {

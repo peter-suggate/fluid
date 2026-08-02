@@ -627,10 +627,15 @@ fn applyRegularRow(row:u32,inCh:u32,outCh:u32){
 fn applyIdentityRow(row:u32,inCh:u32,outCh:u32){
  if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)
   ||ch(inCh,row)>=arrayLength(&arena)){reportAt(ERR_ROW,25u,row);return;}
- let base=coefficientBase(row);if(base+19u>arrayLength(&coefficients)
-  ||coefficients[base]!=1.0||vload(CH_RHS,row)!=0.0){reportAt(ERR_AUTHORITY,32u,row);return;}
+ // Distinct stages per violated term: 32 arena bounds, 33 non-identity
+ // diagonal, 34 nonzero dynamics RHS, 35 nonzero tail coefficient. The class-4
+ // proof in dynamicRowClass reads the diagonal and tails at classification
+ // time but never the RHS, so the split names which input went stale.
+ let base=coefficientBase(row);if(base+19u>arrayLength(&coefficients)){reportAt(ERR_AUTHORITY,32u,row);return;}
+ if(coefficients[base]!=1.0){reportAt(ERR_AUTHORITY,33u,row);return;}
+ if(vload(CH_RHS,row)!=0.0){reportAt(ERR_AUTHORITY,34u,row);return;}
  for(var channel=0u;channel<18u;channel+=1u){if(coefficients[base+1u+channel]!=0.0){
-  reportAt(ERR_AUTHORITY,32u,row);return;}}
+  reportAt(ERR_AUTHORITY,35u,row);return;}}
  let value=vload(inCh,row);if(!finite(value)){reportAt(ERR_NONFINITE,32u,row);}
  else{vstore(outCh,row,value);}}
 

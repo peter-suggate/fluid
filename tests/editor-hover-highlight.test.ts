@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { hoverSceneAt } from "../lib/editor-hover";
+import { sceneryHighlightRange } from "../lib/editor-scenery";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
-import { buildEnvironmentProxyCatalog, sceneryOwnerRange } from "../lib/voxel-environments";
+import { svoOwnerIdForEnvironmentProxy } from "../lib/svo-scene-primitives";
+import { buildEnvironmentProxyCatalog } from "../lib/voxel-environments";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 
 /**
@@ -45,23 +47,44 @@ test("hovering scenery names the described object, not the primitive under the r
 test("a hovered object resolves to the contiguous owner range the shader compares against", () => {
   const scene = getScenePreset("garden-svo-lighting").create();
   const catalog = buildEnvironmentProxyCatalog(scene, "garden");
-  const range = sceneryOwnerRange(catalog, "lamppost");
+  const range = sceneryHighlightRange(scene, "lamppost");
   assert.ok(range);
   assert.equal(range!.last - range!.first, 3, "the lamppost is four primitives");
 
+  // The published range is in the numbering the *shader* reads back off a hit,
+  // not the catalog's dense index. Those differ by the rigid-body count, and a
+  // range in the wrong one still looks plausible — it is contiguous, it is the
+  // right length — while lighting the object next door.
+  assert.ok(scene.rigidBodies.length > 0, "the garden has bodies, so the two numberings differ here");
+  const owners = catalog.primitives
+    .filter((primitive) => {
+      const ownerId = svoOwnerIdForEnvironmentProxy(scene, primitive);
+      return ownerId >= range!.first && ownerId <= range!.last;
+    })
+    .map(({ key }) => key);
   // Contiguity is what lets the shader answer with two comparisons instead of a
   // per-primitive lookup, and it holds because expansion is depth-first in
   // document order.
-  const owners = catalog.primitives
-    .filter(({ ownerIndex }) => ownerIndex >= range!.first && ownerIndex <= range!.last)
-    .map(({ key }) => key);
   assert.deepEqual(owners, [
     "garden/lamppost/base", "garden/lamppost/pole", "garden/lamppost/lantern", "garden/lamppost/cap",
   ]);
 
-  const tree = sceneryOwnerRange(catalog, "tree-hero")!;
+  const tree = sceneryHighlightRange(scene, "tree-hero")!;
   assert.ok(tree.last - tree.first > 20, "a grown tree is one range too, however many parts it grew");
-  assert.equal(sceneryOwnerRange(catalog, "no-such-node"), undefined);
+  assert.equal(sceneryHighlightRange(scene, "no-such-node"), undefined);
+});
+
+test("scenery answers the cursor only where a click would select it", () => {
+  const scene = getScenePreset("garden-svo-lighting").create();
+  const bounds = boundsOf(scene, "lamppost");
+  const ray = {
+    origin: { x: .5 * (bounds.min.x + bounds.max.x), y: bounds.max.y + .2, z: .5 * (bounds.min.z + bounds.max.z) },
+    direction: { x: 0, y: -1, z: 0 },
+  };
+  assert.equal(hoverSceneAt(scene, [], ray)?.kind, "scenery");
+  // Withheld, the ray falls through to the ground the lamppost stands on rather
+  // than reporting a hit no armed tool would act on.
+  assert.equal(hoverSceneAt(scene, [], ray, { scenery: false })?.kind, "terrain");
 });
 
 test("nothing hovered costs the shader two comparisons and changes no pixel", () => {

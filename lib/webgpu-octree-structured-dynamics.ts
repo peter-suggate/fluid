@@ -21,6 +21,9 @@ import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 
 const STRUCTURED_ROW_UNION_DISPATCH_OFFSET_BYTES = 9 * 12;
 const STRUCTURED_FAMILY_UNION_DISPATCH_OFFSET_BYTES = 10 * 12;
+// Record 4 is repurposed for the flattened class-7/8 face grid, so the
+// dry-identity RHS zero dispatches from this dedicated tail record.
+const STRUCTURED_IDENTITY_RHS_DISPATCH_OFFSET_BYTES = 11 * 12;
 type StructuredDynamicsPipelineBundle = Readonly<Record<string, GPUComputePipeline>>;
 type StructuredDynamicsPipelineProgress =
   (entryPoint: string, completed: number, total: number) => void;
@@ -346,6 +349,7 @@ export class WebGPUStructuredVelocityDynamics {
   private advectionCommit!: GPUComputePipeline;
   private force!: GPUComputePipeline;
   private divergence!: GPUComputePipeline;
+  private zeroIdentityRhs!: GPUComputePipeline;
   private separation!: GPUComputePipeline;
   private bodyImpulse?: GPUComputePipeline;
   private projection!: GPUComputePipeline;
@@ -419,7 +423,7 @@ export class WebGPUStructuredVelocityDynamics {
     pieces.forEach((piece, index) => copy.copyBufferToBuffer(piece, 0, this.catalog, offsets[index]!, piece.size));
     device.queue.submit([copy.finish()]);
     this.dispatch = device.createBuffer({ label: "Structured dynamics accepted indirect arguments",
-      size: 11 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT
+      size: 12 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT
         | GPUBufferUsage.COPY_SRC });
     this.transportMetrics = resources.selectorRows;
     this.projectionEnergyStats = device.createBuffer({
@@ -501,7 +505,7 @@ export class WebGPUStructuredVelocityDynamics {
       this.flattenedBoundaryAdvection
         ? "advectStructuredFamiliesFlattenedBoundary" : "advectStructuredFamilies",
       "commitAdvectedStructuredFamilies", "forceStructuredFamilies",
-      "divergenceStructuredRows", "separateStructuredRows",
+      "divergenceStructuredRows", "zeroStructuredIdentityRhsRows", "separateStructuredRows",
       ...(this.resources.bodyCount === 0 ? [] : ["exchangeStructuredBodyImpulseRows"]),
       "projectStructuredFamilies", "reconstructStructuredRows",
       ...(this.projectionEnergyProbe ? [
@@ -528,6 +532,7 @@ export class WebGPUStructuredVelocityDynamics {
     this.advectionCommit = pipelines.commitAdvectedStructuredFamilies!;
     this.force = pipelines.forceStructuredFamilies!;
     this.divergence = pipelines.divergenceStructuredRows!;
+    this.zeroIdentityRhs = pipelines.zeroStructuredIdentityRhsRows!;
     this.separation = pipelines.separateStructuredRows!;
     this.bodyImpulse = this.resources.bodyCount === 0
       ? undefined : pipelines.exchangeStructuredBodyImpulseRows!;
@@ -896,6 +901,12 @@ export class WebGPUStructuredVelocityDynamics {
     }
     this.encodeUnion(broker, this.divergence, "rows",
       [0, 1, 2, 5, 6, 11, 14, 16, 17, 22], params, "Fuse structured divergence RHS rows");
+    // Disjoint row set from the union above, so pass order cannot matter.
+    const zeroIdentity = broker.compute({ label: "Zero dry-identity divergence RHS rows" });
+    zeroIdentity.setPipeline(this.zeroIdentityRhs);
+    zeroIdentity.setBindGroup(0, this.group(this.zeroIdentityRhs, [0, 1, 11, 14, 17], params));
+    zeroIdentity.dispatchWorkgroupsIndirect(this.dispatch,
+      STRUCTURED_IDENTITY_RHS_DISPATCH_OFFSET_BYTES);
   }
 
   encodeProjection(broker: PassBroker, dt: number, density: number,
@@ -1159,6 +1170,13 @@ fn prepareStructuredDynamics(){
   indirect[14u]=1u;
   publishUnionDispatch(27u,0u);
   publishUnionDispatch(30u,5u);
+  // Class 4's own record was repurposed above, so the dry-identity RHS zero
+  // dispatches from a dedicated tail record instead.
+  let base4=wbase(4u);
+  let valid4=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid()&&worksets[base4]==acc(3u);
+  indirect[33u]=select(0u,worksets[base4+4u],valid4);
+  indirect[34u]=select(1u,worksets[base4+5u],valid4);
+  indirect[35u]=select(1u,worksets[base4+6u],valid4);
 }
 
 fn value(handle:u32)->f32{return bitcast<f32>(a[abase()+p.valuesOffset+handle]);}
@@ -2458,6 +2476,12 @@ fn divergenceRow(cls:u32,index:u32){
   rhs[row]=p.physical.z*flux/p.physical.y;
 }
 @compute @workgroup_size(64)fn divergenceStructuredRows(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(0u,classItem(g));if(item.x!=INVALID){divergenceRow(item.x,item.y);}}
+// Class 4 sits outside the liquid pressure system, so the row union above
+// never visits it and nothing else defines its divergence RHS: a reused row
+// index would otherwise carry the previous generation's flux into the solve.
+// The identity row's RHS is definitionally zero (applyIdentityRow re-proves
+// that fail-closed), so author it from the class's own accepted worklist.
+@compute @workgroup_size(64)fn zeroStructuredIdentityRhsRows(@builtin(global_invocation_id)g:vec3u){let row=workItem(4u,classItem(g));if(row!=INVALID&&row<acc(2u)){rhs[row]=0.;}}
 
 // The paper's cut-cell solid coupling (Batty-style apertures) constrains
 // u.n on solid faces bilaterally, so the solve balances a liquid sheet on

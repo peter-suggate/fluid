@@ -121,6 +121,23 @@ function environmentIdentity(scene: Pick<SceneDescription, "rigidBodies">, primi
 }
 
 /**
+ * The scene-global owner id the SVO publishes for one catalog proxy.
+ *
+ * This is the number a shader reads back off a hit, and it is *not* the
+ * catalog's own dense index: the rigid bodies are numbered first and the
+ * environment's owners follow them. Exported so that anything addressing a
+ * traced surface — the editor's hover rim, for one — asks for the numbering
+ * rather than reproducing the offset, which reads as correct until a scene
+ * gains its first body.
+ */
+export function svoOwnerIdForEnvironmentProxy(
+  scene: Pick<SceneDescription, "rigidBodies">,
+  primitive: EnvironmentProxyPrimitive,
+): number {
+  return environmentIdentity(scene, primitive).ownerId;
+}
+
+/**
  * The SVO record one catalog proxy publishes.
  *
  * Exported because the editor's scenery picking has to intersect *exactly* the

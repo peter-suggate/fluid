@@ -38,7 +38,7 @@ import {
 } from "@/lib/editor-gizmo";
 import { CLICK_SLOP_PX, emptySpaceClickDeselects, type EditorSelection } from "@/lib/editor-tools";
 import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
-import { buildEnvironmentProxyCatalog, sceneryOwnerRange } from "@/lib/voxel-environments";
+import { sceneryHighlightRange } from "@/lib/editor-scenery";
 import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
 import {
   editorFluidLattice,
@@ -1023,10 +1023,8 @@ export function WebGPUViewport() {
   const publishHoverHighlight = (hovered: EditorHover | null) => {
     const renderer = rendererRef.current;
     if (!renderer) return;
-    const scene = useSceneStore.getState().scene;
     const range = hovered?.kind === "scenery" && hovered.sceneryNodeId
-      ? sceneryOwnerRange(
-        buildEnvironmentProxyCatalog(scene, scene.environment ?? "default"), hovered.sceneryNodeId)
+      ? sceneryHighlightRange(useSceneStore.getState().scene, hovered.sceneryNodeId)
       : undefined;
     renderer.setHoverHighlight(range && { first: range.first, last: range.last });
   };
@@ -1433,8 +1431,11 @@ export function WebGPUViewport() {
       }
       setHandleHover(null);
       // Analytic hover: no GPU readback, so it is safe at pointer-move rate.
+      // Scenery is asked for only under the select tool — see EditorHoverOptions.
       const ray = pointerRay(event);
-      const hovered = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray) ?? null;
+      const hovered = hoverSceneAt(
+        useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray,
+        { scenery: ui.activeTool === "select" }) ?? null;
       setHover(hovered);
       publishHoverHighlight(hovered);
       return;

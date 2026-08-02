@@ -440,18 +440,26 @@ test("characteristics resolve the paper's dual element rather than equating it w
     "a directory seam retains the closest-face extension as its final fail-closed fallback");
 });
 
-test("sparse air-support corridor misses trip and reject the accepted generation", () => {
+test("sparse air-support corridor misses count and identify without rejecting; directory faults fail closed", () => {
   const shader = structuredVelocityDynamicsWGSL.replace(/\s+/g, "");
+  const census = shader.slice(shader.indexOf("fncountOutOfCorridorRead"),
+    shader.indexOf("fnrejectOwnerDirectoryBounds"));
+  assert.match(census, /atomicAdd\(&accepted\[11\],1u\).*atomicMin\(&accepted\[12\],cell\)/s,
+    "an in-domain corridor miss must count and identify itself in the ledger");
+  assert.doesNotMatch(census, /ERROR_SAMPLE/,
+    "a corridor miss is an ordinary no-extension answer at every extendedOwnerVelocity call site; poisoning accepted[0] here invalidates every later workset in the advance");
   assert.match(shader,
-    /fnrejectOutOfCorridorRead\(q:vec3u\).*atomicAdd\(&accepted\[11\],1u\).*atomicMin\(&accepted\[12\],cell\).*atomicOr\(&accepted\[0\],ERROR_SAMPLE\)/s,
-    "an in-domain corridor miss must count, identify, and fail the generation closed");
+    /fnrejectOwnerDirectoryBounds\(q:vec3u\).*countOutOfCorridorRead\(q\);atomicOr\(&accepted\[0\],ERROR_SAMPLE\)/s,
+    "a directory that cannot address its own arena has no correct fallback and must fail the generation closed");
   assert.match(shader,
     /fnprepareStructuredDynamics\(\)\{if\(p\.physical\.w<\.5.*atomicStore\(&accepted\[11\],0u\).*atomicStore\(&accepted\[12\],INVALID\)/s,
     "the existing stage-0 singleton must reset the ledger without another pass");
   const ownerLookup = shader.slice(shader.indexOf("fnextendedOwnerTag"),
     shader.indexOf("fnextendedOwnerVelocity"));
-  assert.match(ownerLookup, /rejectOutOfCorridorRead\(q\);returnINVALID;/,
-    "terminal dense and adaptive owner misses must invoke the tripwire");
+  assert.match(ownerLookup, /rejectOwnerDirectoryBounds\(q\);returnINVALID;/,
+    "an out-of-arena directory probe must reject before answering from it");
+  assert.match(ownerLookup, /countOutOfCorridorRead\(q\);returnINVALID;/,
+    "terminal owner misses must land in the census");
 });
 
 /** CPU transcription of `staggeredComponent`'s weight/topology enumeration

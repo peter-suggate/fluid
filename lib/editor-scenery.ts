@@ -24,8 +24,8 @@ import {
   withoutSceneryNode,
 } from "./scenery-edit";
 import type { SceneryNode, SceneryPlacement } from "./scenery-graph";
-import { intersectSvoPrimitive } from "./svo-primitive-abi";
-import { svoDescriptorForEnvironmentProxy } from "./svo-scene-primitives";
+import { intersectSvoPrimitive, type SvoFinitePrimitiveDescriptor } from "./svo-primitive-abi";
+import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "./svo-scene-primitives";
 import {
   buildEnvironmentProxyCatalog,
   type EnvironmentProxyPrimitive,
@@ -261,6 +261,69 @@ function selectableNodes(scene: SceneDescription): readonly SceneryNode[] {
     && node.kind !== "floor-shell" && node.kind !== "glazing");
 }
 
+/**
+ * What a ray may hit, resolved once per document.
+ *
+ * The cursor tests this on every pointer-move, and building a descriptor per
+ * primitive per move rebuilt the whole set a hundred times a second to answer a
+ * question whose geometry had not moved. Held against the catalog, which is
+ * itself held against the scene, so an edit produces a new one and a stale
+ * document can never answer for a current one.
+ */
+interface SceneryPickTarget {
+  readonly nodeId: string;
+  readonly descriptor: SvoFinitePrimitiveDescriptor;
+  /** Bounds the descriptor exactly, so a ray that misses it cannot hit the shape. */
+  readonly aabb_m: EnvironmentProxyPrimitive["aabb_m"];
+}
+
+const pickTargetCache = new WeakMap<object, readonly SceneryPickTarget[]>();
+
+/** Slab test, so the exact intersection is only asked of the few shapes near the ray. */
+function raySpansAabb(aabb: EnvironmentProxyPrimitive["aabb_m"], ray: EditorRay): boolean {
+  let near = 0;
+  let far = Infinity;
+  for (const axis of ["x", "y", "z"] as const) {
+    const direction = ray.direction[axis];
+    if (Math.abs(direction) < 1e-12) {
+      if (ray.origin[axis] < aabb.min[axis] || ray.origin[axis] > aabb.max[axis]) return false;
+      continue;
+    }
+    const first = (aabb.min[axis] - ray.origin[axis]) / direction;
+    const second = (aabb.max[axis] - ray.origin[axis]) / direction;
+    near = Math.max(near, Math.min(first, second));
+    far = Math.min(far, Math.max(first, second));
+    if (near > far) return false;
+  }
+  return true;
+}
+
+function pickTargets(scene: SceneDescription) {
+  const catalog = buildEnvironmentProxyCatalog(scene, environmentOf(scene));
+  const cached = pickTargetCache.get(catalog);
+  if (cached) return cached;
+  const ownedBy = new Map<number, string>();
+  for (const span of catalog.spans) {
+    for (let index = span.from; index < span.to; index += 1) ownedBy.set(index, span.nodeId);
+  }
+  const targets: SceneryPickTarget[] = [];
+  catalog.primitives.forEach((primitive, index) => {
+    const nodeId = ownedBy.get(index);
+    if (nodeId === undefined) return;
+    // Shell faces are the room, not an object in it: picking them would put
+    // a gizmo on the floor every time a click missed everything else.
+    if (primitive.tags.includes("shell")) return;
+    const descriptor = svoDescriptorForEnvironmentProxy(scene, primitive);
+    // A proxy is never terrain — the heightfield is the shell's, not a
+    // prop's — but the descriptor union carries the case, and the tracer for
+    // it is a different one.
+    if (descriptor.kind === "terrain-heightfield") return;
+    targets.push({ nodeId, descriptor, aabb_m: primitive.aabb_m });
+  });
+  pickTargetCache.set(catalog, targets);
+  return targets;
+}
+
 export const sceneryEntity: EditorEntityDefinition = {
   kind: "scenery",
   surfacedBy: (tool) => tool === "select",
@@ -273,27 +336,12 @@ export const sceneryEntity: EditorEntityDefinition = {
     return node && entityForNode(context, node);
   },
   pick: (context, ray) => {
-    const { scene } = context;
-    const catalog = buildEnvironmentProxyCatalog(scene, environmentOf(scene));
-    const ownedBy = new Map<number, string>();
-    for (const span of catalog.spans) {
-      for (let index = span.from; index < span.to; index += 1) ownedBy.set(index, span.nodeId);
-    }
     let nearest: { nodeId: string; distance_m: number } | undefined;
-    catalog.primitives.forEach((primitive, index) => {
-      const nodeId = ownedBy.get(index);
-      if (nodeId === undefined) return;
-      // Shell faces are the room, not an object in it: picking them would put
-      // a gizmo on the floor every time a click missed everything else.
-      if (primitive.tags.includes("shell")) return;
-      const descriptor = svoDescriptorForEnvironmentProxy(scene, primitive);
-      // A proxy is never terrain — the heightfield is the shell's, not a
-      // prop's — but the descriptor union carries the case, and the tracer for
-      // it is a different one.
-      if (descriptor.kind === "terrain-heightfield") return;
-      const hit = intersectSvoPrimitive(descriptor, { origin_m: ray.origin, direction: ray.direction });
-      if (hit && (!nearest || hit.t_m < nearest.distance_m)) nearest = { nodeId, distance_m: hit.t_m };
-    });
+    for (const target of pickTargets(context.scene)) {
+      if (!raySpansAabb(target.aabb_m, ray)) continue;
+      const hit = intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction });
+      if (hit && (!nearest || hit.t_m < nearest.distance_m)) nearest = { nodeId: target.nodeId, distance_m: hit.t_m };
+    }
     return nearest && {
       selection: { kind: "scenery", id: scenerySelectionId(nearest.nodeId) },
       distance_m: nearest.distance_m,
@@ -305,4 +353,27 @@ export const sceneryEntity: EditorEntityDefinition = {
 export function sceneryPickAt(scene: SceneDescription, ray: EditorRay): string | undefined {
   const hit = sceneryEntity.pick?.({ scene, bodies: [] }, ray);
   return hit && sceneryIdFromSelection(hit.selection.id);
+}
+
+/**
+ * The traced owner-id range one described object occupies, for the hover rim.
+ *
+ * The shader compares against `hit.ownerId`, which is the *scene-global* id the
+ * SVO publishes — the rigid bodies are numbered first, and the environment's
+ * owners follow them — not the catalog's own dense index. Both ends are read
+ * back off the descriptor the tracer is handed, so the offset has exactly one
+ * definition (lib/svo-scene-primitives.ts) instead of being reproduced here,
+ * where getting it wrong lights up a neighbouring object and nothing says why.
+ */
+export function sceneryHighlightRange(
+  scene: SceneDescription,
+  nodeId: string,
+): { readonly first: number; readonly last: number } | undefined {
+  const catalog = buildEnvironmentProxyCatalog(scene, environmentOf(scene));
+  const span = catalog.spans.find((candidate) => candidate.nodeId === nodeId);
+  if (!span || span.to <= span.from) return undefined;
+  return {
+    first: svoOwnerIdForEnvironmentProxy(scene, catalog.primitives[span.from]!),
+    last: svoOwnerIdForEnvironmentProxy(scene, catalog.primitives[span.to - 1]!),
+  };
 }

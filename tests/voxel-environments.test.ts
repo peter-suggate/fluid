@@ -22,7 +22,10 @@ test("every authored environment gets a stable full-scene proxy catalog", () => 
   ]);
   for (const id of environmentIds) {
     const first = buildEnvironmentProxyCatalog(scene, id);
-    const second = buildEnvironmentProxyCatalog(scene, id);
+    // From a fresh document, so this stays a determinism check: a catalog is
+    // memoized per scene, and asking the same one twice would only prove that
+    // the cache returned what it stored.
+    const second = buildEnvironmentProxyCatalog(cloneScene(defaultScene), id);
     assert.deepEqual(first, second, `${id} must be deterministic`);
     assert.equal(first.environmentIndex, environmentIds.indexOf(id));
     assert.ok(first.shell.bounds_m.max.x > first.shell.bounds_m.min.x, `${id} shell x extent`);
