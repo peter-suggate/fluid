@@ -52,13 +52,10 @@ export const SVO_BRICK_RASTER_PROBE_CONTRACT = Object.freeze({
     uniforms: 0,
     params: 1,
     request: 2,
-    control: 3,
-    nodes: 4,
-    leaves: 5,
-    materialOwners: 6,
-    primitives: 7,
-    instances: 8,
-    sortState: 9,
+    structure: 3,
+    materialOwners: 4,
+    scene: 5,
+    rasterPublication: 6,
     records: 10,
   }),
 });
@@ -84,13 +81,10 @@ export function svoBrickRasterProbeBindGroupLayoutEntries(): GPUBindGroupLayoutE
     { binding: bindings.uniforms, visibility, buffer: { type: "uniform" } },
     { binding: bindings.params, visibility, buffer: { type: "uniform" } },
     { binding: bindings.request, visibility, buffer: { type: "uniform" } },
-    { binding: bindings.control, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.nodes, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.leaves, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.structure, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.materialOwners, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.primitives, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.instances, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.sortState, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.scene, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.rasterPublication, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.records, visibility, storageTexture: { access: "write-only", format: "r32uint" } },
   ];
 }
@@ -110,6 +104,9 @@ export interface SvoBrickRasterProbeOptions {
   readonly fragmentDepthWritten: boolean;
   /** Mirrors the vertical half-extent the dry-scene camera basis uses. */
   readonly tanHalfFov: number;
+  readonly primitiveWordOffset?: number;
+  readonly sortStateWordOffset?: number;
+  readonly instanceWordOffset?: number;
 }
 
 /**
@@ -129,6 +126,9 @@ fn svoProbeOccupancyDecode(packed:u32)->SvoProbeOccupancy{
 
 export function createSvoBrickRasterProbeWGSL(options: SvoBrickRasterProbeOptions): string {
   if (!(options.tanHalfFov > 0)) throw new RangeError("Brick raster probe needs a positive tan(fov/2)");
+  const primitiveWordOffset = options.primitiveWordOffset ?? 0;
+  const sortStateWordOffset = options.sortStateWordOffset ?? 0;
+  const instanceWordOffset = options.instanceWordOffset ?? 0;
   const { bindings, recordCapacity, workgroupSize, entryPoint } = SVO_BRICK_RASTER_PROBE_CONTRACT;
   const header = SVO_PIXEL_TRACE_HEADER;
   const kinds = SVO_PIXEL_TRACE_KINDS;
@@ -147,7 +147,6 @@ struct SvoBrickSortStateRead{
   drawVertexCount:u32,
   drawInstanceCount:u32,
   drawFirstVertex:u32,
-  drawFirstInstance:u32,
   candidateCount:u32,
   culled:u32,
   empty:u32,
@@ -161,14 +160,20 @@ ${svoPrimitiveWGSL}
 @group(0) @binding(${bindings.params}) var<uniform> params:SvoProbeParams;
 // x,y requested pixel; z request token; w non-zero arms the probe.
 @group(0) @binding(${bindings.request}) var<uniform> probeRequest:vec4u;
-@group(0) @binding(${bindings.control}) var<storage,read> svoControl:array<u32>;
-@group(0) @binding(${bindings.nodes}) var<storage,read> svoNodes:array<SvoNode>;
-@group(0) @binding(${bindings.leaves}) var<storage,read> svoLeaves:array<SvoLeaf>;
+@group(0) @binding(${bindings.structure}) var<storage,read> svoProbeStructure:array<u32>;
 @group(0) @binding(${bindings.materialOwners}) var<storage,read> materialOwners:array<u32>;
-@group(0) @binding(${bindings.primitives}) var<storage,read> primitives:array<SvoPrimitiveRecord>;
-@group(0) @binding(${bindings.instances}) var<storage,read> svoBrickInstances:array<SvoBrickInstance>;
-@group(0) @binding(${bindings.sortState}) var<storage,read> svoBrickSort:SvoBrickSortStateRead;
+@group(0) @binding(${bindings.scene}) var<storage,read> svoProbeScene:array<u32>;
+@group(0) @binding(${bindings.rasterPublication}) var<storage,read> svoProbeRaster:array<u32>;
 @group(0) @binding(${bindings.records}) var probeRecords:texture_storage_2d<r32uint,write>;
+
+fn svoProbeWords4(source:ptr<storage,array<u32>,read>,offset:u32)->vec4u{return vec4u((*source)[offset],(*source)[offset+1u],(*source)[offset+2u],(*source)[offset+3u]);}
+fn svoProbeControl(index:u32)->u32{return svoProbeStructure[index];}
+fn svoProbeNode(index:u32)->SvoNode{let base=128u+index*8u;return SvoNode(svoProbeWords4(&svoProbeStructure,base),svoProbeWords4(&svoProbeStructure,base+4u));}
+fn svoProbePrimitive(index:u32)->SvoPrimitiveRecord{let base=${primitiveWordOffset}u+index*16u;return SvoPrimitiveRecord(svoProbeWords4(&svoProbeScene,base),svoProbeWords4(&svoProbeScene,base+4u),bitcast<vec4f>(svoProbeWords4(&svoProbeScene,base+8u)),svoProbeWords4(&svoProbeScene,base+12u));}
+fn svoProbeInstance(index:u32)->SvoBrickInstance{let base=${instanceWordOffset}u+index*8u;return SvoBrickInstance(bitcast<vec3f>(vec3u(svoProbeRaster[base],svoProbeRaster[base+1u],svoProbeRaster[base+2u])),svoProbeRaster[base+3u],bitcast<vec3f>(vec3u(svoProbeRaster[base+4u],svoProbeRaster[base+5u],svoProbeRaster[base+6u])),svoProbeRaster[base+7u]);}
+fn svoProbeSortInstanceCount()->u32{return svoProbeRaster[${sortStateWordOffset + 1}u];}
+fn svoProbeSortWord(index:u32)->u32{return svoProbeRaster[${sortStateWordOffset}u+index];}
+fn svoProbeInstanceCapacity()->u32{return (arrayLength(&svoProbeRaster)-${instanceWordOffset}u)/8u;}
 
 const PROBE_HEADER_WORDS:u32=${SVO_PIXEL_TRACE_HEADER_WORDS}u;
 const PROBE_RECORD_WORDS:u32=${SVO_PIXEL_TRACE_RECORD_WORDS}u;
@@ -331,9 +336,9 @@ fn svoProbeTraceBrick(ro:vec3f,rd:vec3f,bounds:mat2x3f,voxelOffset:u32,tEnter:f3
       // shipping suppression predicate reduces to the suppressed-owner slot.
       if(owner>=params.metadata.y&&owner!=params.metadata.z){
         let primitiveIndex=owner-params.metadata.y;
-        if(primitiveIndex<params.metadata.x&&primitiveIndex<arrayLength(&primitives)){
+        if(primitiveIndex<params.metadata.x){
           tagged=true;
-          let exact=svoIntersectPrimitiveExact(primitives[primitiveIndex],ro,rd,
+          let exact=svoIntersectPrimitiveExact(svoProbePrimitive(primitiveIndex),ro,rd,
             max(max(0.0,entry-tolerance),1e-4),cellExit+tolerance);
           found=exact.status==SVO_PRIMITIVE_RAY_HIT;
           surface=select(PROBE_MISS,exact.t_m,found);
@@ -378,18 +383,18 @@ fn ${entryPoint}(@builtin(local_invocation_id) localId:vec3u){
   let armed=probeRequest.w!=0u;
   // The draw count is the frame's own published indirect instance count, so the
   // set scanned here is exactly the set the rasterizer consumed.
-  let drawn=min(svoBrickSort.drawInstanceCount,u32(arrayLength(&svoBrickInstances)));
+  let drawn=min(svoProbeSortInstanceCount(),svoProbeInstanceCapacity());
   if(armed){
     for(var index=lane;index<drawn;index+=${workgroupSize}u){
-      let record=svoBrickInstances[index];
+      let record=svoProbeInstance(index);
       let proxy=mat2x3f(record.proxyMinimum,record.proxyMaximum);
       let interval=svoProbeRayAabb(ro,inverseDirection,proxy);
       // Not covering: the box's screen projection does not contain this pixel,
       // so the rasterizer produced no fragment here for it.
       if(interval.x==0.0||interval.z<0.0){continue;}
       let nodeIndex=record.nodeIndexKey&SVO_BRICK_NODE_INDEX_MASK;
-      if(nodeIndex>=params.mapping.nodeCount||nodeIndex>=arrayLength(&svoNodes)){continue;}
-      let leafBounds=svoProbeNodeBounds(svoNodes[nodeIndex]);
+      if(nodeIndex>=params.mapping.nodeCount){continue;}
+      let leafBounds=svoProbeNodeBounds(svoProbeNode(nodeIndex));
       var unusedCursor=0u;
       let dda=svoProbeTraceBrick(ro,rd,leafBounds,record.voxelOffset,max(interval.y,0.0),interval.z,
         false,&unusedCursor);
@@ -467,8 +472,8 @@ fn ${entryPoint}(@builtin(local_invocation_id) localId:vec3u){
     cursor+=1u;
     // The winner's full leaf box, so the occupied sub-box actually drawn is
     // legible against the brick it was carved from.
-    if(isWinner&&cursor<PROBE_CAPACITY&&proxy.nodeIndex<arrayLength(&svoNodes)){
-      let leafBounds=svoProbeNodeBounds(svoNodes[proxy.nodeIndex]);
+    if(isWinner&&cursor<PROBE_CAPACITY&&proxy.nodeIndex<params.mapping.nodeCount){
+      let leafBounds=svoProbeNodeBounds(svoProbeNode(proxy.nodeIndex));
       let leafBase=PROBE_HEADER_WORDS+cursor*PROBE_RECORD_WORDS;
       probeWriteWord(leafBase,${kinds.leafBounds}u);
       probeWriteWord(leafBase+1u,proxy.sortBucket&0xffffu);
@@ -518,10 +523,10 @@ fn ${entryPoint}(@builtin(local_invocation_id) localId:vec3u){
   probeWriteWord(${header.stagesPresent}u,${SVO_PIXEL_TRACE_STAGES.brickCull | SVO_PIXEL_TRACE_STAGES.brickRaster}u);
   // Cull counters come straight off the frame's own sort state: measured, not
   // mirrored. They are frame-wide and the host is careful to badge them so.
-  probeWriteWord(${header.residentLeaves}u,svoBrickSort.resident);
-  probeWriteWord(${header.emptyBricks}u,svoBrickSort.empty);
-  probeWriteWord(${header.frustumCulled}u,svoBrickSort.culled);
-  probeWriteWord(${header.candidatesEmitted}u,svoBrickSort.candidateCount);
+  probeWriteWord(${header.residentLeaves}u,svoProbeSortWord(7u));
+  probeWriteWord(${header.emptyBricks}u,svoProbeSortWord(6u));
+  probeWriteWord(${header.frustumCulled}u,svoProbeSortWord(5u));
+  probeWriteWord(${header.candidatesEmitted}u,svoProbeSortWord(4u));
   probeWriteWord(${header.instancesDrawn}u,drawn);
   probeWriteWord(${header.coveringProxies}u,stored+atomicLoad(&probeOverflow));
   probeWriteWord(${header.proxiesWithSurface}u,withSurface);

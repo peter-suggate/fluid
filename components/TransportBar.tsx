@@ -23,7 +23,7 @@ export function TransportBar() {
   const simRate = useRuntimeStore((state) => state.simRate);
   const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
-  const staticRenderScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
+  const rendererOnlyScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
   const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
@@ -41,10 +41,10 @@ export function TransportBar() {
   const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * maxDt;
   const applyingGPUSettings = resourceReadiness.fluid.state === "preparing"
     && Boolean(resourceReadiness.fluid.activity?.operation);
-  const interaction = resourceInteractionGates(resourceReadiness, !staticRenderScene);
+  const interaction = resourceInteractionGates(resourceReadiness, !rendererOnlyScene);
   const initialSceneReady = methodId !== "octree" || (gpuInfo?.initialSparseAuthorityReady === true
     && gpuInfo?.initialRasterSurfaceReady === true);
-  const transportLocked = staticRenderScene || (webgpu && (!interaction.transportInteractive || !initialSceneReady));
+  const transportLocked = rendererOnlyScene || (webgpu && (!interaction.transportInteractive || !initialSceneReady));
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const importScene = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -62,7 +62,7 @@ export function TransportBar() {
   return (
     <footer className="transport-bar">
       <div className="transport-controls">
-        <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : staticRenderScene ? "Fluid simulation is disabled for this renderer validation scene" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
+        <button disabled={transportLocked || browserSafetyLocked} className="transport-main" onClick={() => setRunState(runState === "running" ? "paused" : "running")} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : rendererOnlyScene ? "Fluid simulation is disabled for this renderer validation scene" : safeBringup ? "Continuous play is disabled during bounded GPU bring-up" : transportLocked ? "Simulation controls unlock after the initial GPU scene is ready" : runState === "running" ? "Pause simulation" : "Play simulation"}>{transportLocked || browserPolicyPending ? "…" : runState === "running" ? "Ⅱ" : "▶"}</button>
         <button disabled={browserPolicyPending || transportLocked || safeStepLocked} onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }} aria-label={browserPolicyPending ? "Browser GPU safety policy is loading" : transportLocked ? "Single step unavailable until the initial GPU scene is ready" : safeStepLocked ? "The bounded browser GPU step has already been requested" : "Single fluid clock step"}>STEP</button>
         <button disabled={browserSafetyLocked} onClick={() => {
           if (recordingStatus === "recording") simulationRecording.stop(simulationTime);
@@ -82,8 +82,8 @@ export function TransportBar() {
         {simRate !== null && <small className="sim-rate" title={webgpu ? "Queue-confirmed simulated seconds completed per wall-clock second" : "Simulated seconds completed per wall-clock second"}>ACTUAL ×{simRate.toFixed(2)}</small>}
         {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
-        {staticRenderScene
-          ? <span className="continuous-run" title="This preset initializes the static sparse scene and renderer only.">STATIC SVO · FLUID SOLVER DISABLED</span>
+        {rendererOnlyScene
+          ? <span className="continuous-run" title="This preset runs the live sparse scene renderer without fluid physics.">LIVE SVO · FLUID SOLVER DISABLED</span>
           : webgpu
           ? <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>
           : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}

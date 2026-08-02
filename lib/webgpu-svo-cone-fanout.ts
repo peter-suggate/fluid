@@ -30,6 +30,8 @@ export const SVO_CONE_FANOUT_SENTINELS = Object.freeze({
   geometryMiss: -3,
   /** This deterministic lane is inactive in the current GPU-owned quality tier. */
   inactive: -2,
+  /** A dirty derived page requires full-resolution exact traversal. */
+  invalid: -1,
 } as const);
 
 export interface SvoConeFanoutFrame {
@@ -86,6 +88,7 @@ export function svoConeFanoutSceneBindGroupLayoutEntries(): GPUBindGroupLayoutEn
     { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
     { binding: 7, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "float", viewDimension: "3d" } },
     { binding: 8, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "3d" } },
+    { binding: 9, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint", viewDimension: "2d" } },
   ];
 }
 
@@ -150,6 +153,7 @@ const FANOUT_SHADOW_FLAG:u32=${visibilityFlag("exactShadow")}u;
 const FANOUT_GI_FLAG:u32=${visibilityFlag("globalIllumination")}u;
 const FANOUT_GEOMETRY_MISS:f32=${SVO_CONE_FANOUT_SENTINELS.geometryMiss}.0;
 const FANOUT_INACTIVE:f32=${SVO_CONE_FANOUT_SENTINELS.inactive}.0;
+const FANOUT_INVALID:f32=${SVO_CONE_FANOUT_SENTINELS.invalid}.0;
 const FANOUT_AO_LAYERS:u32=${SVO_CONE_FANOUT_CONTRACT.maximumAoSamples}u;
 const FANOUT_LIGHT_BASE:u32=${SVO_CONE_FANOUT_CONTRACT.lightLayerBase}u;
 const FANOUT_LIGHT_SAMPLES:u32=${SVO_CONE_FANOUT_CONTRACT.maximumLightSamples}u;
@@ -206,11 +210,17 @@ struct FanoutFrame {
 @group(0) @binding(6) var nodeMipDirectory:texture_2d<u32>;
 @group(0) @binding(7) var fluidCoverageVolume:texture_3d<f32>;
 @group(0) @binding(8) var nodeMipPageTable:texture_3d<u32>;
+@group(0) @binding(9) var nodeMipPageValidity:texture_2d<u32>;
 @group(1) @binding(0) var<uniform> fanout:FanoutFrame;
 @group(1) @binding(1) var fanoutReceiver:texture_2d<f32>;
 @group(1) @binding(2) var fanoutTemporary:texture_storage_2d_array<r32float,write>;
 @group(1) @binding(3) var fanoutGeometry:texture_2d<f32>;
 var<private> dryMipSteps:u32;
+// The dedicated fan-out layout binds the publication-state slice directly,
+// unlike the primary shader which reads it through the structural arena.
+// Keep the marcher's publication helper identical at the call site while
+// mapping its indices onto that direct binding here.
+fn dryPublicationWord(index:u32)->u32{return publicationState[index];}
 ${options.coneMarcherWGSL}
 fn fanoutDecodeNormal(octIn:vec2f)->vec3f{
   var normal=vec3f(octIn,1.0-abs(octIn.x)-abs(octIn.y));
@@ -306,7 +316,7 @@ fn svoConeFanoutWorker(@builtin(global_invocation_id) gid:vec3u){
     let direction=fanoutContactDirection(normal,featureId,sampleIndex&1u);
     let rotated=select(direction,normalize(direction+cross(normal,direction)*.7),sampleIndex>=2u);
     let cone=dryConeVisibility(origin,rotated,dry.tuningRays1.x,radius,vec3f(0.0),false);
-    fanoutStore(coordinate,i32(gid.z),cone.transmittance);return;
+    fanoutStore(coordinate,i32(gid.z),select(FANOUT_INVALID,cone.transmittance,cone.valid!=0u));return;
   }
   let secondary=gid.z>=${SVO_CONE_FANOUT_CONTRACT.secondaryLightLayerBase}u;
   let lightIndex=gid.z-select(FANOUT_LIGHT_BASE,${SVO_CONE_FANOUT_CONTRACT.secondaryLightLayerBase}u,secondary);let sampleIndex=select(0u,1u,secondary);
@@ -332,7 +342,7 @@ fn svoConeFanoutWorker(@builtin(global_invocation_id) gid:vec3u){
   let coneMaxRaw=max(0.0,rayMaximum-coneEscape*dot(normal,sample.towardLight));
   let coneMax=coneMaxRaw-select(0.0,dry.tuningRays1.w*coneCell,sample.finiteDistance_m>0.0);
   let cone=dryConeVisibility(biased.xyz+normal*coneEscape,sample.towardLight,dry.tuningRays1.y,coneMax,normal,sample.finiteDistance_m>0.0);
-  fanoutStore(coordinate,i32(gid.z),mix(1.0,cone.transmittance,dry.tuningRays0.y));
+  fanoutStore(coordinate,i32(gid.z),select(FANOUT_INVALID,mix(1.0,cone.transmittance,dry.tuningRays0.y),cone.valid!=0u));
 }
 `;
 }
@@ -341,6 +351,8 @@ fn svoConeFanoutWorker(@builtin(global_invocation_id) gid:vec3u){
 export const svoConeFanoutReducerWGSL = /* wgsl */ `
 const FANOUT_GEOMETRY_MISS:f32=${SVO_CONE_FANOUT_SENTINELS.geometryMiss}.0;
 const FANOUT_INACTIVE:f32=${SVO_CONE_FANOUT_SENTINELS.inactive}.0;
+const FANOUT_INVALID:f32=${SVO_CONE_FANOUT_SENTINELS.invalid}.0;
+const FANOUT_INVALID_PACKED:vec2u=vec2u(0xffffffffu,0xfffffffeu);
 const FANOUT_AO_LAYERS:u32=${SVO_CONE_FANOUT_CONTRACT.maximumAoSamples}u;
 const FANOUT_LIGHT_BASE:u32=${SVO_CONE_FANOUT_CONTRACT.lightLayerBase}u;
 struct FanoutFrame {
@@ -368,14 +380,14 @@ fn svoConeFanoutReduce(@builtin(global_invocation_id) gid:vec3u){
   if(fanoutLoad(coordinate,0u)!=FANOUT_INACTIVE){
     var ao=0.0;var aoSampleCount=0u;
     for(var sample=0u;sample<FANOUT_AO_LAYERS;sample+=1u){
-      let value=fanoutLoad(coordinate,sample);if(value==FANOUT_INACTIVE){break;}ao+=value;aoSampleCount+=1u;
+      let value=fanoutLoad(coordinate,sample);if(value==FANOUT_INACTIVE){break;}if(value==FANOUT_INVALID){textureStore(fanoutVisibility,coordinate,vec4u(FANOUT_INVALID_PACKED,0u,0u));return;}ao+=value;aoSampleCount+=1u;
     }
     if(aoSampleCount>0u){visibility0.x=clamp(ao/f32(aoSampleCount),0.0,1.0);}
   }
   for(var light=0u;light<${SVO_CONE_FANOUT_CONTRACT.maximumLights}u;light+=1u){
     if(light>=fanout.activity.x){break;}let base=FANOUT_LIGHT_BASE+light;var value=fanoutLoad(coordinate,base);
-    if(value==FANOUT_INACTIVE){continue;}var sampleCount=1u;
-    if(fanout.activity.y!=0u){let second=fanoutLoad(coordinate,${SVO_CONE_FANOUT_CONTRACT.secondaryLightLayerBase}u+light);if(second!=FANOUT_INACTIVE){value+=second;sampleCount=2u;}}
+    if(value==FANOUT_INACTIVE){continue;}if(value==FANOUT_INVALID){textureStore(fanoutVisibility,coordinate,vec4u(FANOUT_INVALID_PACKED,0u,0u));return;}var sampleCount=1u;
+    if(fanout.activity.y!=0u){let second=fanoutLoad(coordinate,${SVO_CONE_FANOUT_CONTRACT.secondaryLightLayerBase}u+light);if(second==FANOUT_INVALID){textureStore(fanoutVisibility,coordinate,vec4u(FANOUT_INVALID_PACKED,0u,0u));return;}if(second!=FANOUT_INACTIVE){value+=second;sampleCount=2u;}}
     let packed=clamp(value/f32(sampleCount),0.0,1.0);
     if(light<3u){visibility0[1u+light]=packed;}else if(light<7u){visibility1[light-3u]=packed;}else{visibility2.x=packed;}
   }

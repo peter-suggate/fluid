@@ -200,10 +200,10 @@ fn probeTraceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f)->
       let owner=identity>>16u;
       if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){
         let primitiveIndex=owner-dry.metadata.y;
-        if(primitiveIndex<dry.metadata.x&&primitiveIndex<arrayLength(&primitives)){
+        if(primitiveIndex<dry.metadata.x){
           cellFlags|=${flags.tagged}u;
           probeExactTests+=1u;
-          candidate=primitiveHit(primitives[primitiveIndex],ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);
+          candidate=primitiveHit(dryPrimitive(primitiveIndex),ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);
         }
       }
     }
@@ -226,8 +226,8 @@ fn probeTraceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f)->
 // persistent near-to-far stack, leaves yielded nearest-first, tMin advanced
 // past a brick that held no surface.
 fn probeTraceStatic(ro:vec3f,rd:vec3f)->DryHit{
-  if(publicationState[0]==0u||(publicationState[1]&REQUIRED_FIELDS)!=REQUIRED_FIELDS){probeFailure=max(probeFailure,2u);return missHit();}
-  if(svoControl[12]!=0u){probeFailure=max(probeFailure,2u);return missHit();}
+  if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){probeFailure=max(probeFailure,2u);return missHit();}
+  if(svoControlLoad(12u)!=0u){probeFailure=max(probeFailure,2u);return missHit();}
   let mapping=dryConfiguredMapping();
   if(mapping.nodeCount==0u){return missHit();}
   let maximumDepth=dryDiagnosticMaximumDepth();
@@ -254,7 +254,7 @@ fn probeTraceStatic(ro:vec3f,rd:vec3f)->DryHit{
       continue;
     }
     if(current.nodeIndex>=mapping.nodeCount){probeFailure=2u;break;}
-    let node=svoNodes[current.nodeIndex];
+    let node=svoNodeLoad(current.nodeIndex);
     probeNodeVisits+=1u;
     if(node.address.z>mapping.maximumDepth){probeFailure=2u;break;}
     if(node.address.z>maximumDepth){probeFailure=max(probeFailure,1u);break;}
@@ -262,7 +262,7 @@ fn probeTraceStatic(ro:vec3f,rd:vec3f)->DryHit{
     if(!currentBoundsValid){bounds=svoNodeBounds(node,mapping);currentBounds=bounds;currentBoundsValid=true;}
     if(node.links.z!=SVO_INVALID){
       if(node.links.z>=mapping.leafCount){probeFailure=2u;break;}
-      let leaf=svoLeaves[node.links.z];
+      let leaf=svoLeafLoad(node.links.z);
       if(leaf.topology.x!=current.nodeIndex){probeFailure=2u;break;}
       probeLeafVisits+=1u;
       probeMaximumDepth=max(probeMaximumDepth,node.address.z);
@@ -306,7 +306,7 @@ fn probeTraceStatic(ro:vec3f,rd:vec3f)->DryHit{
       if((mask&(1u<<octant))==0u){continue;}
       let childIndex=node.links.x+svoPopcountBefore(mask,octant);
       if(childIndex>=mapping.nodeCount){invalid=true;break;}
-      let child=svoNodes[childIndex];
+      let child=svoNodeLoad(childIndex);
       if(child.address.z!=node.address.z+1u){invalid=true;break;}
       let childBounds=svoChildBounds(bounds,octant);
       let interval=svoRayAabbWithInverse(SvoRay(ro,minimum,rd,DRY_MISS),inverseDirection,childBounds);
@@ -603,9 +603,6 @@ fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
   probeMipSteps=0u;probeFailure=0u;probeShadedLights=0u;
   probeGiState=0u;probeGiConeTaps=0u;probeGiConeCount=0u;probeGiVisibility=1.0;probeGiRadiance=vec3f(0.0);
   dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;
-  dryPrimaryNodeVisits=0u;dryPrimaryLeafVisits=0u;dryPrimaryEmptyBrickSkips=0u;dryPrimaryVoxelWorkItems=0u;
-  dryPrimaryExactTests=0u;dryPrimaryMaximumDepth=0u;dryShadowNodeVisits=0u;dryShadowLeafVisits=0u;
-  dryShadowWorkItems=0u;dryMipSteps=0u;dryTraversalFailure=0u;
 
   // The record texture is write-only, so the request arrives in the uniform.
   if(probeRequest.w==0u){return vec4f(0.0);}
@@ -630,7 +627,7 @@ fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
     : `let staticHit=probeTraceStatic(ro,rd);`}
   // Compose the authoritative hit from the static result plus the same terrain
   // and rigid intersectors as traceDrySolidScene. Calling traceOpaqueScene here
-  // would traverse the complete static SVO a second time and makes Dawn
+  // would traverse the complete live SVO a second time and makes Dawn
   // specialize two independent primary traversers into this one pipeline.
   var opaque=staticHit;
   let terrain=traceTerrain(ro,rd);if(terrain.t<opaque.t){opaque=terrain;}

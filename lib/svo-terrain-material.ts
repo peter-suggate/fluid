@@ -63,7 +63,7 @@ export interface SvoTerrainMaterialSample {
 export interface SvoTerrainMaterialBuild {
   metadata: SvoTerrainMaterialMetadata;
   packedMetadata: Uint32Array<ArrayBuffer>;
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -243,7 +243,7 @@ function fnvStep(hash: number, value: number): number {
   return Math.imul((hash ^ value) >>> 0, 0x01000193) >>> 0;
 }
 
-function staticRevision(words: Uint32Array): string {
+function contentRevision(words: Uint32Array): string {
   let hash = 0x811c9dc5;
   for (const word of words) for (const shift of [0, 8, 16, 24]) hash = fnvStep(hash, (word >>> shift) & 0xff);
   return hash.toString(16).padStart(8, "0");
@@ -259,11 +259,11 @@ export function buildSvoTerrainMaterial(scene: Pick<SceneDescription, "terrain" 
     policyVersion: SVO_TERRAIN_MATERIAL_VERSION,
   });
   const packedMetadata = packSvoTerrainMaterialMetadata(metadata);
-  const revision = staticRevision(packedMetadata);
+  const revision = contentRevision(packedMetadata);
   return {
     metadata,
     packedMetadata,
-    staticRevision: revision,
+    contentRevision: revision,
     cacheKey: `svo-terrain-material-v${SVO_TERRAIN_MATERIAL_VERSION}:${revision}`,
   };
 }

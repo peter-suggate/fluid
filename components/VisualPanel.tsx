@@ -22,7 +22,7 @@ import {
 } from "@/lib/svo-render-tuning";
 import { RangeControl } from "./controls";
 
-const rendererFallbackLabels = {
+const rendererFailureLabels = {
   "missing-source": "waiting for structural SVO data",
   "unsupported-terrain": "terrain source could not be represented",
   "unsupported-glass-cutout": "authored glazing needs an opaque shell cutout",
@@ -30,6 +30,7 @@ const rendererFallbackLabels = {
   "missing-lighting-publications": "production light/environment publications are unavailable",
   "pipeline-compile-failure": "SVO pipeline failed to compile",
   "pipeline-compiling": "SVO pipeline is compiling",
+  "frame-rejected": "live SVO frame publication was rejected",
 } as const;
 
 /**
@@ -135,8 +136,10 @@ export function VisualPanel() {
         <button className="panel-close" type="button" onClick={() => setRightPanel(null)} aria-label="Close render panel">×</button>
       </div>
       <div className="render-status-line">
-        <span className={effectiveRendererStatus.effectiveMode === "svo" ? "online" : ""} />
-        <strong data-testid="effective-renderer-status">{effectiveRendererStatus.effectiveMode === "svo" ? "SVO GI ACTIVE" : "RASTER FALLBACK"}</strong>
+        <span className={effectiveRendererStatus.state === "active" ? "online" : ""} />
+        <strong data-testid="effective-renderer-status">{effectiveRendererStatus.state === "active"
+          ? "SVO GI ACTIVE"
+          : effectiveRendererStatus.state === "pending" ? "SVO PENDING" : "SVO FAILED CLOSED"}</strong>
         <code>{Math.round(tuning.resolutionScale * 100)}% · cone {svoConeTracingMode !== "cones" ? svoConeTracingMode : tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`}</code>
       </div>
     </header>
@@ -192,14 +195,15 @@ export function VisualPanel() {
                 disabled={tuning.coneLightingScale === 1 || svoConeTracingMode !== "cones"} onClick={() => updateTuning("coneRadianceReconstruction", mode)}>{label}</button>)}
           </div></label>
         </div>
-        {effectiveRendererStatus.fallbackReason && <p className="render-inline-warning">SVO fallback: {rendererFallbackLabels[effectiveRendererStatus.fallbackReason]}.</p>}
+        {effectiveRendererStatus.failureReason && <p className="render-inline-warning">SVO unavailable: {effectiveRendererStatus.detail
+          ?? rendererFailureLabels[effectiveRendererStatus.failureReason]}.</p>}
       </ControlGroup>
 
       <ControlGroup title="Primary tracing" note="camera ray work caps" open>
         <div className="render-toggle-row" role="group" aria-label="SVO primary tracing optimizations">
           <Toggle label="Reuse stationary visibility" checked={tuning.stationaryPrimaryReuseEnabled}
             disabled={svoPrimaryTraversal === "raster"}
-            hint="Reuse the exact primary G-buffer for an unchanged camera in static scenes or while simulation is paused. The raster primary is cheap enough not to cache, and its impostor pass blocks the reuse anyway."
+            hint="Reuse the exact primary G-buffer while its camera and geometry dependencies are unchanged. The raster primary is cheap enough not to cache, and its impostor pass blocks the reuse anyway."
             onChange={(value) => updateTuning("stationaryPrimaryReuseEnabled", value)} />
         </div>
         <div className="svo-control-grid">

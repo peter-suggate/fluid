@@ -72,7 +72,7 @@ test("prefiltered specular broadens with roughness while preserving HDR sun resp
 test("revision and cache identity are deterministic and content-sensitive", () => {
   const first = buildSvoEnvironmentLighting("night-lab", 3);
   const second = buildSvoEnvironmentLighting("night-lab", 3);
-  assert.equal(second.staticRevision, first.staticRevision);
+  assert.equal(second.contentRevision, first.contentRevision);
   assert.equal(second.cacheKey, first.cacheKey);
   assert.deepEqual(second.packedRecord, first.packedRecord);
   assert.notEqual(buildSvoEnvironmentLighting("night-lab", 4).cacheKey, first.cacheKey);

@@ -106,7 +106,10 @@ export function planOctreeAirSupportCompactAuthority(
   rowCapacityValue: number,
   supportCapacityValue: number,
   candidateStrideValue = 63,
-  controlWordsValue = 73,
+  // Mirrors OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS; the production
+  // cross-check in tests/octree-air-support-compact-authority.test.ts proves
+  // this census still matches the producer plan word for word.
+  controlWordsValue = 74,
   workgroupSizeValue = 256,
 ): OctreeAirSupportCompactAuthorityPlan {
   const rowCapacity = positiveInteger(rowCapacityValue, "Compact authority row capacity");

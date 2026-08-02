@@ -1,21 +1,21 @@
-# Factored direct-light visibility (static cached × dynamic traced)
+# Factored direct-light visibility CPU-oracle experiment
 
 **Status: Phase 0 complete — the measurement refutes Phase 1. Not wired.**
 
 **Original goal:** shadow rays dominate per-pixel ray work (~85%, ~39 node visits/ray, cost
-linear in light count). Replace per-pixel exact traces against the *static* world with a
+linear in light count). Replace per-pixel exact traces against the *captured snapshot* world with a
 persistent world-space cache; keep dynamic occluders exact but cheap.
 
-**Core factorization:** `visibility(pixel, light) = staticCache[page, channel] × dynamicTrace × fluidCone`.
-Nothing that moves is ever cached; the cached term never invalidates while static topology holds.
+**Core factorization:** `visibility(pixel, light) = snapshotOracle[page, channel] × liveTrace × fluidCone`.
+Nothing that moves is ever cached; the cached term never invalidates while snapshot topology holds.
 
 Phase 0 was specified as a gate: *"if partials dominate, stop and rethink."* It does. The
 numbers are below, the producer fixes found on the way are kept, and the consumer is not wired.
 
 ## Phase 0 — measured
 
-`tools/report-svo-static-shadow-coverage.ts` bakes the certificates through the production
-producer (`buildSvoStaticShadowVisibleProofs`) and reports the share of receiver-page/light
+`tools/report-svo-shadow-cpu-oracle-coverage.ts` bakes the certificates through the production
+producer (`buildSvoShadowVisibleCpuOracleProofs`) and reports the share of receiver-page/light
 channels that are provably clear of remote static occlusion.
 
 A certificate does not remove the receiver's exact trace, it *shortens* it: every blocker
@@ -69,14 +69,14 @@ Two real defects in the (already-existing, never-wired) producer, found by measu
   neighbourhood, since a corner neighbour's farthest point is exactly two diagonals away.
 
 `svoStaticShadowLocalTraceReach_m` and its WGSL twin `svoStaticShadowLocalTraceWGSL` are
-compared on-device in `tests/webgpu-svo-static-shadow-field.test.ts` — a disagreement in either
+compared on-device in `tests/webgpu-svo-shadow-field-cpu-oracle.test.ts` — a disagreement in either
 direction is a light leak.
 
 ## Separate finding, now fixed: hose-tank overflowed the node-mip directory
 
 While measuring: **hose-tank requests 10,361 node-mip pages against a production cap of 8,192**
 (`maximumDirectoryPages = min(8192, maxTextureDimension2D)` in `webgpu-octree-sparse-bricks.ts`),
-so ~1,600 base pages of static geometry were dropped. `dryNodeMipAt` returns `valid = 1u` with a
+so ~1,600 base pages of snapshot geometry were dropped. `dryNodeMipAt` returns `valid = 1u` with a
 **zero sample** for a non-resident page, so the cone marcher read dropped geometry as empty air
 rather than falling back — a silent light/GI leak over ~20% of the scene's static pages, in the
 scene the ray-work HUD was captured from.

@@ -108,8 +108,8 @@ test("shader populates stable identity/media/generation and consumes exact rigid
   assert.match(svoDrySceneShader, /svoPrimitiveOwnerId\(record\),exact\.featureId,DRY_GBUFFER_FIELD_ANALYTIC/,
     "static G-buffer feature identity must come from the shared exact ray hit without a second distance evaluation");
   assert.match(svoDrySceneShader, /dry\.terrain\.x,DRY_OWNER_NONE,SVO_FEATURE_TERRAIN,DRY_GBUFFER_FIELD_TERRAIN/);
-  assert.match(svoDrySceneShader, /dryPublicationGeneration\(\)->u32[^]*publicationState\[3\]/,
-    "static and analytic history must use the stable static-geometry revision");
+  assert.match(svoDrySceneShader, /dryPublicationGeneration\(\)->u32\{return dry\.primitiveCandidates\.w;\}/,
+    "scene history follows the complete live exact-scene publication revision");
   assert.match(svoDrySceneShader, /DRY_REVERSED_Z_NEAR_M\/viewDepth_m/);
   assert.match(svoDrySceneShader,
     /svoGBufferMiss\(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags\(SVO_GBUFFER_PRODUCER_TRACED\)\),0\.0/,

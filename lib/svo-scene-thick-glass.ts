@@ -1,10 +1,10 @@
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription } from "./model";
 import {
-  cachedSvoStaticPublication,
-  hashSvoStaticPublication,
-  internSvoStaticPublication,
-} from "./svo-static-publication-cache";
+  cachedSvoPublication,
+  hashSvoPublication,
+  internSvoPublication,
+} from "./svo-publication-cache";
 import {
   packSvoThickGlassVolumes,
   svoThickGlassBounds,
@@ -43,7 +43,7 @@ export interface SvoSceneThickGlassBuild {
   descriptors: readonly SvoThickGlassVolume[];
   packedRecords: Uint32Array<ArrayBuffer>;
   metadata: readonly SvoSceneThickGlassMetadata[];
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -132,9 +132,9 @@ export function buildSvoSceneThickGlass(
   if (authored.length > maximumVolumes) {
     throw new RangeError(`Environment ${environmentId} needs ${authored.length} thick-glass volumes, exceeding the ${maximumVolumes} record limit`);
   }
-  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({ environmentId, revision, authored }));
-  const cacheKey = `svo-scene-thick-glass-v${SVO_SCENE_THICK_GLASS_VERSION}:${environmentId}:${staticRevision}`;
-  const cached = cachedSvoStaticPublication(sceneThickGlassCache, cacheKey);
+  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({ environmentId, revision, authored }));
+  const cacheKey = `svo-scene-thick-glass-v${SVO_SCENE_THICK_GLASS_VERSION}:${environmentId}:${contentRevision}`;
+  const cached = cachedSvoPublication(sceneThickGlassCache, cacheKey);
   if (cached) return cached;
   const descriptors = authored.map(({ descriptor }) => descriptor);
   const metadata = authored.map((entry, recordIndex): SvoSceneThickGlassMetadata => ({
@@ -151,13 +151,13 @@ export function buildSvoSceneThickGlass(
     ...(entry.replacesThinPaneKey ? { replacesThinPaneKey: entry.replacesThinPaneKey } : {}),
     ...(entry.replacesUnsupportedKey ? { replacesUnsupportedKey: entry.replacesUnsupportedKey } : {}),
   }));
-  return internSvoStaticPublication(sceneThickGlassCache, cacheKey, {
+  return internSvoPublication(sceneThickGlassCache, cacheKey, {
     environmentId,
     revision,
     descriptors,
     packedRecords: packSvoThickGlassVolumes(descriptors),
     metadata,
-    staticRevision,
+    contentRevision,
     cacheKey,
   });
 }

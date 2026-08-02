@@ -83,7 +83,7 @@ test("solver option switches atomically rebind the overlay before retiring GPU t
     "candidate presentation bind groups must replace old solver textures before retirement");
   const debugDetach = replacement.indexOf("this.voxelDebugPipeline?.setSource(undefined)");
   assert.ok(debugDetach >= 0 && debugDetach < retire);
-  const svoAttach = replacement.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData)");
+  const svoAttach = replacement.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource)");
   assert.ok(svoAttach >= 0 && svoAttach < retire);
 });
 

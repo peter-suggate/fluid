@@ -4,6 +4,11 @@ import { pathToFileURL } from "node:url";
 
 import { createSvoDrySceneFragmentWGSL, sparseVoxelDrySceneBindGroupLayoutEntries } from "../lib/webgpu-svo-dry-scene";
 import { decorationOverlayShader } from "../lib/webgpu-decoration-overlay";
+import {
+  assertWGSLStorageBufferBudget,
+  auditExplicitStageBufferBindings,
+  auditWGSLBindingReachability,
+} from "../lib/wgsl-binding-reachability";
 
 /**
  * Real-device validation for the two shaders the live pixel-trace diagnostic
@@ -69,6 +74,19 @@ after(async () => {
 
 const skip = !modulePath && "set WEBGPU_NODE_MODULE for WGSL validation";
 
+const TRACE_TRAVERSALS = [
+  "hybrid", "canonical", "canonical-parametric", "compact", "wide", "raster-primary",
+] as const;
+
+test("every pixel-trace composition stays within the four-storage-buffer design budget", () => {
+  for (const traversal of TRACE_TRAVERSALS) {
+    const code = createSvoDrySceneFragmentWGSL(1, traversal, "off", "inline", 0, true);
+    const audit = auditWGSLBindingReachability(code, "dryProbeMain", "fragment");
+    assert.doesNotThrow(() => assertWGSLStorageBufferBudget(audit),
+      `${traversal} dryProbeMain reaches bindings ${audit.storage.map(({ group, binding, name }) => `${group}:${binding} ${name}`).join(", ")}`);
+  }
+});
+
 test("the trace overlay shader compiles and builds its instanced pipeline", { skip }, async () => {
   const gpuDevice = await device();
   const module = await compile(gpuDevice, "pixel-trace overlay", decorationOverlayShader);
@@ -105,19 +123,24 @@ test("the pixel-trace probe compiles inside every dry-scene traversal compositio
   // `raster-primary` included: the probe runs beside a rasterized frame too, and
   // there it takes a different branch — no instrumented hierarchy walk, plus the
   // terrain bracket and rigid proxy records.
-  for (const traversal of ["hybrid", "canonical", "canonical-parametric", "compact", "wide", "raster-primary"] as const) {
+  for (const traversal of TRACE_TRAVERSALS) {
     await compile(gpuDevice, `pixel-trace probe (${traversal})`,
       createSvoDrySceneFragmentWGSL(1, traversal, "off", "inline", 0, true));
   }
 });
 
-test("the probe pipeline is valid against the production bindings plus one record buffer", { skip }, async () => {
+test("the probe pipeline is valid against the compact production layout plus trace output", { skip }, async () => {
   const gpuDevice = await device();
-  // The dry pass spends the whole storage-buffer budget, which is why records go
-  // to a storage texture; assert that the production group really is at the cap.
-  const storageBuffers = sparseVoxelDrySceneBindGroupLayoutEntries()
-    .filter((entry) => entry.buffer?.type === "read-only-storage").length;
-  assert.ok(storageBuffers <= gpuDevice.limits.maxStorageBuffersPerShaderStage);
+  // Trace records remain a storage texture: they do not erode the compact
+  // production buffer budget when another diagnostic field is added.
+  const production = auditExplicitStageBufferBindings(
+    sparseVoxelDrySceneBindGroupLayoutEntries(),
+    GPUShaderStage.FRAGMENT,
+  );
+  assert.doesNotThrow(() => assertWGSLStorageBufferBudget({
+    entryPoint: "pixel-trace production layout",
+    storageCount: production.storageCount,
+  }), `production layout reaches bindings ${production.storageBindings.join(", ")}`);
   if (gpuDevice.limits.maxStorageTexturesPerShaderStage < 1) return;
   const [fragment, vertex] = await Promise.all([
     compile(gpuDevice, "pixel-trace probe (hybrid)", createSvoDrySceneFragmentWGSL(1, "hybrid", "off", "inline", 0, true)),

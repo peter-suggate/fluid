@@ -10,6 +10,10 @@ import {
   type SvoNodeMipPyramidPlan,
 } from "./svo-node-mip-pyramid";
 import { svoNodeMipSamplingWGSL } from "./svo-node-mip-sampling";
+import {
+  WebGpuLiveSvoDerivedPageState,
+  type LiveSvoDerivedPageValidityBinding,
+} from "./webgpu-svo-live-derived-cache";
 
 export const WEBGPU_SVO_NODE_MIP_LAYOUT = Object.freeze({
   format: "rgba8unorm" as GPUTextureFormat,
@@ -30,7 +34,7 @@ export const WEBGPU_SVO_NODE_MIP_LAYOUT = Object.freeze({
  * The sampled directory is a two-texel-wide texture with one *row* per page, so
  * the binding constraint is the 2D height limit and nothing else. Capping below
  * it does not save memory — an atlas is only allocated for the pages that are
- * actually resident — it just silently discards static geometry, which the
+ * actually resident — it just silently discards scene geometry, which the
  * marcher then reads as empty air because a non-resident page samples as zero.
  *
  * The floor keeps a device that reports no limits usable rather than empty.
@@ -351,4 +355,160 @@ export class WebGpuSvoNodeMipPyramid {
     generation.directoryTexture.destroy();
     generation.directPageTableTexture.destroy();
   }
+}
+
+export interface WebGpuLiveSvoNodeMipOptions {
+  pageCapacity: number;
+  atlasTexels: readonly [number, number, number];
+  /** Fixed direct-table extent. Omit to use only the compact sampled directory. */
+  directPageTableDimensions?: readonly [number, number, number];
+  label?: string;
+}
+
+export interface WebGpuLiveSvoNodeMipVisibleGeneration extends WebGpuSvoNodeMipVisibleGeneration {
+  pageValidity: LiveSvoDerivedPageValidityBinding;
+}
+
+export interface WebGpuLiveSvoNodeMipGpuTarget {
+  texture: GPUTexture;
+  pageValidity: LiveSvoDerivedPageValidityBinding;
+  atlasPages: readonly [number, number, number];
+  pageCapacity: number;
+  directPageTableTexture: GPUTexture;
+  directPageTableDimensions: readonly [number, number, number];
+  directPageTableLevelZOffsets: Uint32Array<ArrayBuffer>;
+}
+
+/**
+ * Live fixed-capacity node-mip atlas. Construction allocates empty capacity,
+ * while every scene revision invalidates and repairs only its dirty slot
+ * worklist. Unlike whole-atlas candidate generations, no update allocates or
+ * exposes old opacity inside a dirty region.
+ */
+export class WebGpuLiveSvoNodeMipPyramid {
+  readonly allocatedBytes: number;
+  readonly pageState: WebGpuLiveSvoDerivedPageState;
+
+  private readonly texture: GPUTexture;
+  private readonly view: GPUTextureView;
+  private readonly sampler: GPUSampler;
+  private readonly directory: GPUBuffer;
+  private readonly directoryTexture: GPUTexture;
+  private readonly directoryView: GPUTextureView;
+  private readonly directPageTableTexture: GPUTexture;
+  private readonly directPageTableView: GPUTextureView;
+  private readonly directPageTableDimensions: readonly [number, number, number];
+  private readonly directPageTableLevelZOffsets = new Uint32Array(WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableMaximumLevels);
+  private readonly directPageTableWords: Uint32Array<ArrayBuffer>;
+  private directoryLayoutKey = "";
+  private directPageTableReady = false;
+  private plan?: SvoNodeMipPyramidPlan;
+  private pendingPlan?: SvoNodeMipPyramidPlan;
+  private destroyed = false;
+
+  constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoNodeMipOptions) {
+    const { pageCapacity, atlasTexels } = options;
+    if (!Number.isSafeInteger(pageCapacity) || pageCapacity <= 0) throw new RangeError("Live node-mip page capacity must be positive");
+    if (atlasTexels.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new RangeError("Live node-mip atlas dimensions must be positive integers");
+    if (atlasTexels.some((value) => value % SVO_NODE_MIP_LAYOUT.physicalSize !== 0)
+      || atlasTexels.reduce((product, value) => product * (value / SVO_NODE_MIP_LAYOUT.physicalSize), 1) < pageCapacity) {
+      throw new RangeError("Live node-mip atlas must be page-aligned and contain its declared capacity");
+    }
+    const direct = options.directPageTableDimensions ?? [1, 1, 1];
+    if (direct.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new RangeError("Live node-mip direct-table dimensions must be positive integers");
+    const label = options.label ?? "Live SVO node mips";
+    this.texture = device.createTexture({ label: `${label} atlas`, size: atlasTexels, dimension: "3d", format: WEBGPU_SVO_NODE_MIP_LAYOUT.format,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST });
+    this.view = this.texture.createView({ dimension: "3d" });
+    this.sampler = device.createSampler({ label: `${label} sampler`, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge",
+      addressModeW: "clamp-to-edge", ...WEBGPU_SVO_NODE_MIP_LAYOUT.sampler });
+    this.directory = device.createBuffer({ label: `${label} directory`, size: pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.directoryTexture = device.createTexture({ label: `${label} sampled directory`,
+      size: [WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, pageCapacity], format: WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTextureFormat,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.directoryView = this.directoryTexture.createView();
+    this.directPageTableDimensions = direct;
+    this.directPageTableWords = new Uint32Array(direct[0] * direct[1] * direct[2]);
+    this.directPageTableTexture = device.createTexture({ label: `${label} direct page table`, size: direct, dimension: "3d",
+      format: WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableTextureFormat, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.directPageTableView = this.directPageTableTexture.createView({ dimension: "3d" });
+    this.pageState = new WebGpuLiveSvoDerivedPageState(device, pageCapacity, label);
+    this.allocatedBytes = atlasTexels[0] * atlasTexels[1] * atlasTexels[2] * SVO_NODE_MIP_LAYOUT.bytesPerTexel
+      + pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage * 2
+      + direct[0] * direct[1] * direct[2] * 4 + this.pageState.allocatedBytes;
+  }
+
+  private uploadPlanLayout(plan: SvoNodeMipPyramidPlan): void {
+    const layoutKey = plan.pages.map((page) => `${page.key.level}:${page.key.coordinate.join(",")}:${page.slot}:${page.atlasTexelOrigin.join(",")}`).join(";");
+    if (layoutKey === this.directoryLayoutKey) return;
+    const directoryWords = new Uint32Array(this.options.pageCapacity * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
+    // Directory generation is intentionally stable. Page-local validity is the
+    // live generation authority, so transform/material edits never rewrite the
+    // complete directory or direct table.
+    for (const page of plan.pages) directoryWords.set(packDirectoryEntry({ ...page, key: { ...page.key, generation: 1 } }), page.slot * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
+    this.device.queue.writeBuffer(this.directory, 0, directoryWords);
+    this.device.queue.writeTexture({ texture: this.directoryTexture }, directoryWords,
+      { bytesPerRow: SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, rowsPerImage: this.options.pageCapacity },
+      [WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, this.options.pageCapacity]);
+    const direct = createWebGpuSvoNodeMipDirectPageTable(plan, Math.max(...this.directPageTableDimensions));
+    this.directPageTableLevelZOffsets.fill(0);
+    this.directPageTableLevelZOffsets.set(direct.levelZOffsets);
+    this.directPageTableReady = direct.ready && direct.dimensions.every((value, axis) => value <= this.directPageTableDimensions[axis]);
+    if (this.directPageTableReady) {
+      this.directPageTableWords.fill(0);
+      const [sourceWidth, sourceHeight, sourceDepth] = direct.dimensions;
+      const [targetWidth, targetHeight] = this.directPageTableDimensions;
+      for (let z = 0; z < sourceDepth; z += 1) for (let y = 0; y < sourceHeight; y += 1) {
+        const source = (z * sourceHeight + y) * sourceWidth;
+        const target = (z * targetHeight + y) * targetWidth;
+        this.directPageTableWords.set(direct.words.subarray(source, source + sourceWidth), target);
+      }
+      this.device.queue.writeTexture({ texture: this.directPageTableTexture }, this.directPageTableWords,
+        { bytesPerRow: targetWidth * 4, rowsPerImage: targetHeight }, this.directPageTableDimensions);
+    }
+    this.directoryLayoutKey = layoutKey;
+  }
+
+  /** Stage only page topology; a GPU builder owns payload and validity publication. */
+  prepareGpuUpdate(plan: SvoNodeMipPyramidPlan): WebGpuLiveSvoNodeMipGpuTarget {
+    this.assertAlive();
+    if (plan.pages.length > this.options.pageCapacity) throw new RangeError("Live node-mip page capacity exceeded");
+    if (plan.atlas.texels.some((value, axis) => value > this.options.atlasTexels[axis])) throw new RangeError("Live node-mip atlas capacity exceeded");
+    this.pendingPlan = plan;
+    this.uploadPlanLayout(plan);
+    return this.gpuTarget();
+  }
+
+  /** Called after GPU build commands are encoded; page-validity writes remain the publication authority. */
+  acceptGpuUpdate(generation: number): void {
+    if (!this.pendingPlan || this.pendingPlan.generation !== generation) throw new Error("GPU node-mip completion does not match the staged plan");
+    this.plan = this.pendingPlan; this.pendingPlan = undefined;
+  }
+
+  gpuTarget(): WebGpuLiveSvoNodeMipGpuTarget {
+    const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
+    return { texture: this.texture, pageValidity: this.pageState.validity,
+      atlasPages: this.options.atlasTexels.map((value) => Math.floor(value / physical)) as [number, number, number],
+      pageCapacity: this.options.pageCapacity, directPageTableTexture: this.directPageTableTexture,
+      directPageTableDimensions: this.directPageTableDimensions, directPageTableLevelZOffsets: this.directPageTableLevelZOffsets };
+  }
+
+  visibleGeneration(): WebGpuLiveSvoNodeMipVisibleGeneration | undefined {
+    if (!this.plan) return undefined;
+    return { generation: this.plan.generation, plan: this.plan, texture: this.texture, view: this.view, sampler: this.sampler,
+      directory: this.directory, directoryTexture: this.directoryTexture, directoryView: this.directoryView,
+      directPageTableTexture: this.directPageTableTexture, directPageTableView: this.directPageTableView,
+      directPageTableDimensions: this.directPageTableDimensions, directPageTableLevelZOffsets: this.directPageTableLevelZOffsets,
+      directPageTableReady: this.directPageTableReady, directPageTableBytes: this.directPageTableReady ? this.directPageTableDimensions.reduce((a, b) => a * b, 4) : 0,
+      pageValidity: this.pageState.validity };
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.texture.destroy(); this.directory.destroy(); this.directoryTexture.destroy(); this.directPageTableTexture.destroy(); this.pageState.destroy();
+    this.destroyed = true;
+  }
+
+  private assertAlive(): void { if (this.destroyed) throw new Error("Live SVO node-mip pyramid is destroyed"); }
 }

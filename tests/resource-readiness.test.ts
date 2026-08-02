@@ -12,6 +12,8 @@ import {
 } from "../lib/resource-readiness";
 import { RESOURCE_PLUGIN_CATALOG, resourcePluginsProviding } from "../lib/resource-plugin-catalog";
 import { WebGPURenderWorkerClient, type WebGPURenderWorkerResponse } from "../lib/webgpu-render-worker-client";
+import { liveSvoSceneResourcePlugin } from "../lib/webgpu-live-svo-scene";
+import { svoPresentationResourcePlugin } from "../lib/webgpu-svo-dry-scene";
 
 test("resource plugins compose statically and claim unique identities", () => {
   assert.deepEqual(duplicateResourcePluginIds(RESOURCE_PLUGIN_CATALOG), []);
@@ -78,6 +80,44 @@ test("renderer completion closes 4/4 before solver planning opens", () => {
   ]);
 });
 
+test("renderer-only live source and first sparse frame close independent activities", () => {
+  let readiness = reduceGPUResourceStatus(initialResourceReadiness(), {
+    state: "initializing", label: "Attach warmed solver", phase: "attach",
+    completed: 1, total: 2, startedAt_ms: 1, resource: liveSvoSceneResourcePlugin,
+  });
+  assert.deepEqual(resourceActivities(readiness).map(({ pluginId, label }) => ({ pluginId, label })), [{
+    pluginId: liveSvoSceneResourcePlugin.id,
+    label: "Attach warmed solver",
+  }]);
+
+  readiness = reduceGPUResourceStatus(readiness, {
+    state: "ready", label: "Live sparse scene source ready", adapter: "test",
+    resource: liveSvoSceneResourcePlugin,
+  });
+  assert.deepEqual(resourceActivities(readiness), [],
+    "source attachment must retire the solver-handoff activity");
+  assert.equal(resourceCapabilityUsable(readiness, "live-scene"), true);
+  assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), false);
+
+  readiness = reduceGPUResourceStatus(readiness, {
+    state: "initializing", label: "Submit first sparse frame", phase: "presentation",
+    completed: 9, total: 10, startedAt_ms: 2, resource: svoPresentationResourcePlugin,
+  });
+  assert.deepEqual(resourceActivities(readiness).map(({ pluginId, label }) => ({ pluginId, label })), [{
+    pluginId: svoPresentationResourcePlugin.id,
+    label: "Submit first sparse frame",
+  }]);
+
+  readiness = reduceGPUResourceStatus(readiness, {
+    state: "ready", label: "Live SVO renderer ready", adapter: "test",
+    resource: svoPresentationResourcePlugin,
+  });
+  assert.deepEqual(resourceActivities(readiness), [],
+    "the first-frame completion fence must retire sparse presentation activity");
+  assert.equal(resourceCapabilityUsable(readiness, "live-scene"), true);
+  assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), true);
+});
+
 test("replacement work retains interaction when a previous generation is attached", () => {
   let readiness = reduceGPUResourceStatus(initialResourceReadiness(), {
     state: "ready", label: "WebGPU renderer ready", adapter: "test",
@@ -111,7 +151,7 @@ test("the UI presents concurrent plugin work without treating all progress as a 
     "the completed platform plugin must close before fluid planning begins");
   assert.match(viewport, /phase: "planning", completed: 0, total: 0/,
     "the solver handoff must not reuse the renderer's completed task count");
-  assert.match(transport, /resourceInteractionGates\(resourceReadiness, !staticRenderScene\)/);
+  assert.match(transport, /resourceInteractionGates\(resourceReadiness, !rendererOnlyScene\)/);
 });
 
 test("WebGPU resource work is worker-owned and frame traffic is bounded", () => {

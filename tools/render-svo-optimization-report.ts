@@ -297,7 +297,7 @@ const lines = [
   "## Measurement contract",
   "",
   "- Scene: `hose-tank`, fixed authored camera, 660×662 pixels, Apple M1 Max / Metal.",
-  "- Simulation: absent/frozen; the worker builds the static SVO and submits only rendering frames.",
+  "- Simulation: absent/frozen; the worker builds the live SVO and submits only rendering frames.",
   "- Timing: serialized submit-to-fence samples for benchmark A/Bs; Metal intervals and hardware counters for xctrace.",
   "- Quality policy: exact output is preferred, but a candidate may pass with at least 5% median savings and at most 0.05% changed pixels when differences are localized and do not alter broad scene structure. The hashes remain evidence, not the sole gate.",
   "- Exactness: compare hashes only within the same resolution and source/config epoch. Isolated wins must be rerun in the cumulative selected stack before acceptance.",

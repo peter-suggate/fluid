@@ -8,13 +8,13 @@
  */
 import { octreeMethod } from "./methods/octree";
 import type { ResourcePluginDefinition, RuntimeResourceCapability } from "./resource-readiness";
-import { staticSvoSceneResourcePlugin } from "./webgpu-static-svo-scene";
+import { liveSvoSceneResourcePlugin } from "./webgpu-live-svo-scene";
 import { svoPresentationResourcePlugin } from "./webgpu-svo-dry-scene";
 import { webGPUPlatformResourcePlugin } from "./webgpu-renderer";
 
 export const RESOURCE_PLUGIN_CATALOG: readonly ResourcePluginDefinition[] = Object.freeze([
   webGPUPlatformResourcePlugin,
-  staticSvoSceneResourcePlugin,
+  liveSvoSceneResourcePlugin,
   ...(octreeMethod.resource ? [octreeMethod.resource] : []),
   svoPresentationResourcePlugin,
 ]);

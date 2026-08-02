@@ -74,9 +74,9 @@ test("packed metadata is minimal, stable, and sourced from garden scene uniforms
   assert.equal(unpacked.policyVersion, metadata.policyVersion);
   assert.equal(build.metadata.materialId, VOXEL_MATERIAL_IDS.terrain);
   assert.match(build.cacheKey, /^svo-terrain-material-v1:[0-9a-f]{8}$/);
-  assert.equal(build.staticRevision, buildSvoTerrainMaterial(cloneScene(scene)).staticRevision);
+  assert.equal(build.contentRevision, buildSvoTerrainMaterial(cloneScene(scene)).contentRevision);
   scene.container.fillFraction += 0.01;
-  assert.notEqual(buildSvoTerrainMaterial(scene).staticRevision, build.staticRevision);
+  assert.notEqual(buildSvoTerrainMaterial(scene).contentRevision, build.contentRevision);
   assert.throws(() => buildSvoTerrainMaterial({ ...scene, terrain: undefined }), /authored terrain/);
   assert.throws(() => packSvoTerrainMaterialMetadata({ ...metadata, materialId: 0 }), /nonzero uint16/);
 });

@@ -33,7 +33,7 @@ test("visual controls expose one GLOBAL path with structural SVO overlays", () =
     "GLOBAL remains active for every structural view");
   assert.match(renderer, /Structural views diagnose the same GLOBAL frame[^]*colorLoadOp: "load"/,
     "structural views blend over GLOBAL instead of clearing it");
-  assert.doesNotMatch(renderer, /fallbackReason: "inspection-mode"/);
+  assert.doesNotMatch(renderer, /failureReason: "inspection-mode"/);
 });
 
 test("primary visibility is switchable between the raster and traced paths from the render panel", () => {

@@ -190,7 +190,9 @@ test("GPU plan composes both support layouts and bounded candidate schedules", (
   assert.equal(plan.faceFrontierBytes, (16 + 3 * plan.faceCapacity) * 4,
     "two compact queues and generation marks must cover every face exactly");
   assert.equal(plan.directAirVectorBytes, plan.rowCapacity * 16);
-  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 73,
+  assert.equal(plan.faceArenaBytes, plan.faceAdjacencyBytes + plan.directAirVectorBytes,
+    "one face arena must carry the adjacency records and the direct-air staging suffix");
+  assert.equal(OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS, 74,
     "reuse controls, sparse schedules, and durable latches must remain outside the candidate arena");
 });
 
@@ -209,8 +211,8 @@ test("ocean candidate scratch is more than halved by deterministic catalog-incid
     "the row arena must contain real distinct-selector incidences, not tetra-vertex occurrences");
   assert.equal(occurrenceCapacity, 17_596_416);
   assert.equal(ocean.candidateCapacity, 4_227_072);
-  assert.equal(occurrenceScratchBytes, 331_244_836);
-  assert.equal(ocean.scratchBytes, 76_940_580);
+  assert.equal(occurrenceScratchBytes, 331_244_840);
+  assert.equal(ocean.scratchBytes, 76_940_584);
   assert.ok(occurrenceCapacity > 2 * ocean.candidateCapacity,
     `candidate slots reduced only ${(occurrenceCapacity / ocean.candidateCapacity).toFixed(3)}x`);
   assert.ok(occurrenceScratchBytes > 2 * ocean.scratchBytes,
@@ -229,7 +231,7 @@ test("compact cell-authority prototype removes every domain-volume scratch term"
   assert.equal(compact.rowCandidateCapacity, 65_536 * 63);
   assert.equal(compact.fineCandidateCapacity, 98_304);
   assert.equal(compact.candidateCapacity, 4_227_072);
-  assert.equal(compact.scratchBytes, 76_940_580);
+  assert.equal(compact.scratchBytes, 76_940_584);
   assert.ok(154_739_996 > 2 * compact.scratchBytes,
     "the compact authority must more than halve the remaining ocean scratch, not merely remove one mask");
   assert.ok(compact.offsets.hashRecords < compact.offsets.touchedSlots);
@@ -705,23 +707,24 @@ test("closed-wall air reconstruction is exactly reflection odd after marched car
   assert.equal(positiveWallCell, Math.fround(-negativeWallCell));
 });
 
-test("caseless liquid film seeds require an empty projected carrier and a fine sign change", () => {
+test("no liquid film fallback seeds a carrier-free face", () => {
+  // A face with no carrier on either side is a genuine air-support rejection
+  // and must surface as one. The former film fallback substituted the row's
+  // cell-centre velocity there, which masked the rejection instead of
+  // resolving it -- on the large dam it carried a dead fine band for 165
+  // further steps before anything failed loudly. Rejections are fatal, so the
+  // fallback is deleted rather than gated.
   const shader = compact(octreeAirVelocitySupportPublicationWGSL);
-  assert.match(shader,
-    /fnseedAirSupportFilmFaces.*faceA\[item\]\.w==0u.*airSupportFilmSeedCarrier\(item\).*faceA\[item\]=carrier/s,
-    "the fallback must run only after both existing projection attempts left the face unseeded");
-  assert.match(shader,
-    /fnfilmSeedForLiquidRow.*row>=s\(2u\)\|\|!liquidRow\(row\)\|\|!fineInterfaceInCell\(adjacencyGeometry\(row\)\).*returnvec4u\(0u,INVALID,INVALID,0u\)/s,
-    "only a direct liquid row whose own cell contains the fine interface can become a film seed");
-  assert.match(shader,
-    /fnfineInterfaceInCell.*centerIndex=fineSeedSample\(q\).*otherIndex=fineSeedSample\(vec3u\(neighborQ\)\).*\(other<0\.\)!=\(center<0\.\)/s,
-    "the guard must mirror fine topology's valid-sample sign-change predicate");
-  assert.match(shader,
-    /letat=s\(4u\)\*p\.rowCapacity\+row.*normalComponent=rowVelocities\[at\]\[axis\]\*aligned.*select\(normalComponent,-normalComponent,aligned<0\.\)/s,
-    "film velocity must come from the accepted banked row vector and preserve projected-face orientation");
-  assert.doesNotMatch(shader.slice(shader.indexOf("fnfilmSeedForLiquidRow"),
-    shader.indexOf("fnseedAirSupportFaces")), /directAirVectors/,
-    "the later reconstruction staging buffer is not an input authority for liquid rows");
+  for (const symbol of ["seedAirSupportFilmFaces", "seedRetainedAirSupportFilmFaces",
+    "airSupportFilmSeedCarrier", "filmSeedForLiquidRow", "fineInterfaceInCell",
+    "fineSeedSample", "fineBandSeedSourceValid"]) {
+    assert.doesNotMatch(shader, new RegExp(symbol),
+      `${symbol} is part of the deleted film fallback and must not return`);
+  }
+  assert.doesNotMatch(shader, /scratch\[63u\]/,
+    "the film seed tally is gone; the retained membership identity compares scratch[25] alone");
+  assert.match(shader, /if\(retained&&s\(25u\)!=s\(49u\)\)\{failTopology\(10u,s\(25u\)\)/,
+    "retained membership must reconcile against the projection seed count alone");
 });
 
 test("host uses only GPU-published live schedules for fine demand and changed frontiers", () => {
@@ -843,6 +846,42 @@ test("producer exposes canonical banked row vectors and avoids double-counting a
   assert.doesNotMatch(implementation,
     /maximumDisplacementFineCells\s*>\s*STRUCTURED_VELOCITY_EXTENSION_LAYERS/,
     "fine-cell backtrace distance and adaptive face-graph hops are unlike units");
+});
+
+// The portable per-compute-stage storage-buffer floor every WebGPU adapter must
+// support, and the limit this producer's device is created with.
+const M1_STORAGE_BUFFERS_PER_STAGE = 10;
+
+// The Dawn check below is the authority, but it only runs when WEBGPU_NODE_MODULE
+// is set -- which is precisely how an eleven-buffer entry point once shipped and
+// only surfaced as a GPUPipelineError in the browser. `layout: "auto"` derives
+// each pipeline's layout from static reachability, so the CPU auditor computes
+// the same set the device would, and this assertion fails in the default suite
+// before any GPU is involved. It deliberately budgets ONE spare buffer as well,
+// so the next binding added to a nine-buffer entry point is a visible decision
+// rather than a silent move onto the ceiling.
+test("no Section 5 producer entry point reaches the portable storage-buffer ceiling", () => {
+  const over: string[] = [];
+  const atCeiling: string[] = [];
+  for (const [entryPoint, declared] of Object.entries(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS)) {
+    const audit = auditWGSLComputeBindingReachability(
+      octreeAirVelocitySupportPublicationWGSL, entryPoint);
+    // The declared table is what createBindGroup is handed; prove it agrees on
+    // the storage count too, not just on the binding numbers.
+    const declaredStorage = declared.filter((binding) =>
+      audit.storage.some((entry) => entry.binding === binding));
+    assert.equal(declaredStorage.length, audit.storageCount,
+      `${entryPoint} declares ${declaredStorage.length} storage buffers but reaches ${audit.storageCount}`);
+    if (audit.storageCount > M1_STORAGE_BUFFERS_PER_STAGE) {
+      over.push(`${entryPoint}=${audit.storageCount}`);
+    } else if (audit.storageCount === M1_STORAGE_BUFFERS_PER_STAGE) {
+      atCeiling.push(entryPoint);
+    }
+  }
+  assert.deepEqual(over, [],
+    `entry points exceed maxStorageBuffersPerShaderStage=${M1_STORAGE_BUFFERS_PER_STAGE}`);
+  assert.deepEqual(atCeiling, [],
+    "these entry points have no storage-buffer headroom left; consolidate before adding another binding");
 });
 
 test("Dawn compiles every Section 5 producer entry point at the M1 storage-buffer ceiling", {

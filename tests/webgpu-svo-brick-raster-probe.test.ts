@@ -147,6 +147,7 @@ test("the probe's storage budget fits a compute stage", { skip }, async () => {
   const gpuDevice = await device();
   const entries = svoBrickRasterProbeBindGroupLayoutEntries();
   const storage = entries.filter((entry) => entry.buffer?.type === "read-only-storage").length;
+  assert.equal(storage, 4, "the raster trace contract must never grow past four storage buffers");
   assert.ok(storage <= gpuDevice.limits.maxStorageBuffersPerShaderStage,
     `the probe binds ${storage} storage buffers; the device allows ${gpuDevice.limits.maxStorageBuffersPerShaderStage}`);
   assert.ok(gpuDevice.limits.maxStorageTexturesPerShaderStage >= 1);

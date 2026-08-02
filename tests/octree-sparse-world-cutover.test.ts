@@ -11,7 +11,7 @@ const sparseWorldSource = readFileSync(
   "utf8",
 );
 const staticSvoSource = readFileSync(
-  fileURLToPath(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url)),
+  fileURLToPath(new URL("../lib/webgpu-live-svo-scene.ts", import.meta.url)),
   "utf8",
 );
 
@@ -35,5 +35,5 @@ test("deep-liquid residency is explicit and the retired dense atlas cannot be se
   assert.doesNotMatch(source + sparseWorldSource + staticSvoSource,
     /brickAtlas|bulkResidencyOnly|WebGPUFluidBrickAtlas|atlasSamplingSource|readAtlasStats/);
   assert.match(staticSvoSource, /brickPreActivation: false/,
-    "static SVO publication retains its non-advecting residency behavior");
+    "live SVO publication retains its non-advecting residency behavior");
 });

@@ -456,7 +456,7 @@ class SimulationController {
     // commitEdit({ reseed: true }) restores the user's selection afterwards.
     useUIStore.getState().select(undefined);
     runtime.setNotice(!runtimePlan.fluidSolver
-      ? "Static renderer scene reset · fluid solver disabled"
+      ? "Live renderer scene reset · fluid solver disabled"
       : `${scene.fluid.inflow ? "Inflow scene" : scene.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
   }
 

@@ -123,7 +123,7 @@ function dispatchCounts(dimensions: readonly number[], workgroup: number): [numb
 /**
  * GPU owner for the dynamic fluid coverage volume.
  *
- * Allocation is deferred to the first `encode`, so a dry static scene — which
+ * Allocation is deferred to the first `encode`, so a dry fluid-free scene — which
  * shares this octree implementation but never runs a solver step — pays nothing.
  */
 export class WebGpuSvoFluidCoverage {

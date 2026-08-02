@@ -33,10 +33,12 @@ test("octree world exposes, accounts, and destroys its optional derived capabili
   assert.match(sourceAbi, /derivedRenderAllocationBytes\?: Readonly<\{[^]*wideFanout: number;[^]*compactHierarchy\?: number;[^]*nodeMipPyramid\?: number;[^]*tetrahedralRadiance\?: number;/);
   assert.match(producer, /wideFanout: this\.wideFanout\?\.capability\(\)/);
   assert.match(producer, /compactHierarchy: this\.compactHierarchy\?\.capability\(\)/);
-  assert.match(producer, /derivedRenderAllocationBytes: \{[^]*wideFanout: this\.wideFanout\?\.allocatedBytes \?\? 0,[^]*compactHierarchy: this\.compactHierarchy\?\.allocatedBytes \?\? 0,[^]*nodeMipPyramid: this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0,[^]*tetrahedralRadiance: this\.tetrahedralRadiance\?\.telemetry\(\)\.allocatedBytes \?\? 0/);
-  assert.match(producer, /this\.proxyVoxelizer\.allocatedBytes \+ \(this\.wideFanout\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.compactHierarchy\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0\)[^]*\+ \(this\.tetrahedralRadiance\?\.telemetry\(\)\.allocatedBytes \?\? 0\)/);
+  assert.match(producer, /derivedRenderAllocationBytes: \{[^]*wideFanout: this\.wideFanout\?\.allocatedBytes \?\? 0,[^]*compactHierarchy: this\.compactHierarchy\?\.allocatedBytes \?\? 0,[^]*nodeMipPyramid: \(this\.nodeMipPyramid\?\.allocatedBytes \?\? 0\)[^]*liveDerivedPlanner\?\.allocatedBytes[^]*tetrahedralRadiance: \(this\.tetrahedralRadiance\?\.allocatedBytes \?\? 0\)[^]*liveDerivedBuilder\?\.allocatedBytes/);
+  assert.match(producer, /this\.proxyVoxelizer\.allocatedBytes \+ \(this\.wideFanout\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.compactHierarchy\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.nodeMipPyramid\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.tetrahedralRadiance\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.liveDerivedPlanner\?\.allocatedBytes \?\? 0\)[^]*\+ \(this\.liveDerivedBuilder\?\.allocatedBytes \?\? 0\)/);
   assert.match(producer, /this\.wideFanout\?\.destroy\(\)/);
   assert.match(producer, /this\.compactHierarchy\?\.destroy\(\)/);
   assert.match(producer, /this\.nodeMipPyramid\?\.destroy\(\)/);
   assert.match(producer, /this\.tetrahedralRadiance\?\.destroy\(\)/);
+  assert.match(producer, /this\.liveDerivedPlanner\?\.destroy\(\)/);
+  assert.match(producer, /this\.liveDerivedBuilder\?\.destroy\(\)/);
 });

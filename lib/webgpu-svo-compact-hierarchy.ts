@@ -110,7 +110,7 @@ fn svoCompactContinuationAdvance(cursor:ptr<function,SvoCompactTraversalContinua
 }
 fn svoCompactContinuationBegin(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,SvoCompactTraversalContinuation>){
   (*cursor).stackSize=0u;(*cursor).currentBoundsValid=0u;(*cursor).status=SVO_STATUS_CONTINUE;
-  if(svoControl[12]!=0u){(*cursor).status=SVO_STATUS_SOURCE_OVERFLOW;return;}
+  if(svoControlLoad(12u)!=0u){(*cursor).status=SVO_STATUS_SOURCE_OVERFLOW;return;}
   if(mapping.nodeCount==0u||arrayLength(&svoCompactNodes)<mapping.nodeCount){(*cursor).status=SVO_STATUS_INVALID_TOPOLOGY;return;}
   let root=svoCompactNodes[0];
   if(root.mortonLow!=0u||root.mortonHigh!=0u||svoCompactLevel(root)!=0u){(*cursor).status=SVO_STATUS_INVALID_TOPOLOGY;return;}
@@ -133,7 +133,7 @@ fn svoCompactContinuationNext(ray:SvoRay,mapping:SvoMapping,maximumTraversalDept
     if(svoCompactTerminal(node)){
       let leafIndex=node.linkOrLeaf;
       if(leafIndex>=mapping.leafCount){(*cursor).status=SVO_STATUS_INVALID_TOPOLOGY;return svoMiss(SVO_STATUS_INVALID_TOPOLOGY,visits);}
-      let leaf=svoLeaves[leafIndex];if(leaf.topology.x!=current.nodeIndex){(*cursor).status=SVO_STATUS_INVALID_TOPOLOGY;return svoMiss(SVO_STATUS_INVALID_TOPOLOGY,visits);}
+      let leaf=svoLeafLoad(leafIndex);if(leaf.topology.x!=current.nodeIndex){(*cursor).status=SVO_STATUS_INVALID_TOPOLOGY;return svoMiss(SVO_STATUS_INVALID_TOPOLOGY,visits);}
       let hit=SvoTraversalHit(SVO_STATUS_HIT,visits,current.nodeIndex,leafIndex,leaf.topology.y,level,max(current.tEnter,ray.tMin),min(current.tExit,ray.tMax));
       svoCompactContinuationAdvance(cursor);return hit;
     }

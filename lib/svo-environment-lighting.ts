@@ -25,7 +25,7 @@ export interface SvoEnvironmentLightingRecord {
 export interface SvoEnvironmentLightingBuild {
   record: SvoEnvironmentLightingRecord;
   packedRecord: Uint32Array<ArrayBuffer>;
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -240,8 +240,8 @@ export function buildSvoEnvironmentLighting(
   const packedRecord = packSvoEnvironmentLightingRecords([record]);
   let hash = 0x811c9dc5;
   for (const word of packedRecord) for (const shift of [0, 8, 16, 24]) hash = fnvStep(hash, (word >>> shift) & 0xff);
-  const staticRevision = hash.toString(16).padStart(8, "0");
-  return { record, packedRecord, staticRevision, cacheKey: `svo-environment-lighting-v${SVO_ENVIRONMENT_LIGHTING_VERSION}:${environmentId}:${staticRevision}` };
+  const contentRevision = hash.toString(16).padStart(8, "0");
+  return { record, packedRecord, contentRevision, cacheKey: `svo-environment-lighting-v${SVO_ENVIRONMENT_LIGHTING_VERSION}:${environmentId}:${contentRevision}` };
 }
 
 /**

@@ -30,7 +30,7 @@ test("structural publication words and field flags are stable and non-overlappin
     SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration,
     SPARSE_VOXEL_PUBLICATION_STATE.validFields,
     SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision,
-    SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision,
+    SPARSE_VOXEL_PUBLICATION_STATE.sceneGeometryRevision,
     SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision,
     SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision,
     SPARSE_VOXEL_PUBLICATION_STATE.fineFluidRevision,
@@ -45,6 +45,8 @@ test("structural publication words and field flags are stable and non-overlappin
 
 test("production source publishes native sparse arenas with explicit offsets and strides", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
+  assert.match(source, /structure: \{ buffer: this\.tree\.structure/);
+  assert.match(source, /structureOffsetsWords:/);
   for (const member of ["control", "nodes", "leaves", "geometry", "velocity", "materialOwners", "fluidLeafStates"]) {
     assert.match(source, new RegExp(`${member}: \\{ buffer:`));
   }
@@ -60,38 +62,36 @@ test("production source publishes native sparse arenas with explicit offsets and
   assert.equal(SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes, 16);
   assert.equal(SPARSE_BRICK_GPU_LAYOUT.velocityStrideBytes, 16);
   assert.equal(SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes, 4);
+  assert.equal(SPARSE_BRICK_GPU_LAYOUT.publicationOffsetBytes % 256, 0);
+  assert.equal(SPARSE_BRICK_GPU_LAYOUT.topologyOffsetBytes % 256, 0);
+  assert.ok(SPARSE_BRICK_GPU_LAYOUT.topologyOffsetBytes > SPARSE_BRICK_GPU_LAYOUT.publicationOffsetBytes);
 });
 
-test("completion generation advances only after scoped revisions and validity", () => {
+test("completion generation advances only after a completed live-scene maintenance revision", () => {
   const shader = octreeSparseBrickStructuralFinalizeShader;
-  assert.match(shader, /fn finalizeInitial\(\) \{ finishFrame\(true\); \}/);
-  assert.match(shader, /fn finalizeFrame\(\) \{ finishFrame\(false\); \}/);
-  // Both finalize entry points are single-invocation, so the publication state
-  // is written with plain stores rather than atomics: there is no second writer
-  // to order against, and the ordering that does matter (validity before the
-  // complete generation) is the program order asserted below.
-  assert.match(shader, /@compute @workgroup_size\(1\)\s*fn finalizeInitial/);
-  assert.match(shader, /@compute @workgroup_size\(1\)\s*fn finalizeFrame/);
-  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}\\] = 1u;`));
-  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}\\] = 1u;`));
-  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}\\] \\+= 1u;`));
-  assert.match(shader, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}\\] \\+= 1u;`));
-  assert.doesNotMatch(shader,
+  const sceneFinalize = shader.slice(shader.indexOf("fn finalizeScene()"));
+  assert.match(shader, /@compute @workgroup_size\(1\)\s*fn finalizeScene/);
+  assert.match(sceneFinalize, /requested == 0u \|\| completed != requested \|\| overflow != 0u/);
+  assert.match(sceneFinalize, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}\\] \\+= 1u;`));
+  assert.match(sceneFinalize, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.sceneGeometryRevision}\\] \\+= 1u;`));
+  assert.doesNotMatch(sceneFinalize, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}\\]\\s*(?:\\+)?=`));
+  assert.doesNotMatch(sceneFinalize, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}\\]\\s*(?:\\+)?=`));
+  assert.doesNotMatch(sceneFinalize,
     new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.fineFluidRevision}\\]\\s*(?:\\+)?=`),
-    "fine fluid must stay explicitly unavailable; the water renderer owns that publication");
+    "scene maintenance must not claim or mutate fluid publications");
   assert.ok(
-    shader.indexOf(`state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}]`) <
-      shader.indexOf(`state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}]`),
+    sceneFinalize.indexOf(`state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}]`) <
+      sceneFinalize.indexOf(`state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}]`),
     "complete generation must be the final publication-state write",
   );
 });
 
-test("dry static proxies are encoded before the structural completion fence", () => {
+test("live scene proxies are maintained before the structural completion fence", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
-  const encodeStart = source.indexOf("  encode(encoder: GPUCommandEncoder");
-  const encodeBody = source.slice(encodeStart, source.indexOf("  readResidencyStats", encodeStart));
-  assert.ok(encodeBody.indexOf("this.proxyVoxelizer.encode(encoder)") >= 0);
-  assert.ok(encodeBody.indexOf("this.proxyVoxelizer.encode(encoder)") < encodeBody.indexOf("Finalize sparse voxel structural publication"));
-  assert.ok(encodeBody.indexOf("this.atlas?.encode") < encodeBody.indexOf("Finalize sparse voxel structural publication"));
+  const encodeStart = source.indexOf("  encodeSceneMaintenance(encoder: GPUCommandEncoder");
+  const encodeBody = source.slice(encodeStart, source.indexOf("\n  encode(encoder: GPUCommandEncoder", encodeStart));
+  assert.ok(encodeBody.indexOf("this.proxyVoxelizer.encodeMaintenance(encoder)") >= 0);
+  assert.ok(encodeBody.indexOf("this.proxyVoxelizer.encodeMaintenance(encoder)")
+    < encodeBody.indexOf("Finalize live sparse voxel scene publication"));
   assert.doesNotMatch(encodeBody, /mapAsync|getMappedRange/);
 });

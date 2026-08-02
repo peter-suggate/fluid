@@ -52,7 +52,7 @@ test("fixed GPU ABI packs level-major pages, compact descriptors, and 73-word mi
   });
 });
 
-test("GPU owner allocation accounts exactly for all four immutable bindings", () => {
+test("GPU owner allocation accounts exactly for the merged traversal arena", () => {
   assert.deepEqual(planWebgpuSvoWideFanoutAllocation({ maximumPages: 3, maximumDescriptors: 70 }), {
     maximumPages: 3,
     maximumDescriptors: 70,
@@ -60,7 +60,9 @@ test("GPU owner allocation accounts exactly for all four immutable bindings", ()
     pageBytes: 96,
     descriptorBytes: 1_120,
     microMipBytes: 876,
-    allocatedBytes: 2_156,
+    descriptorOffsetBytes: 256,
+    traversalBytes: 1_376,
+    allocatedBytes: 2_316,
   });
   assert.throws(() => planWebgpuSvoWideFanoutAllocation({ maximumPages: 0, maximumDescriptors: 1 }), /positive safe integers/);
 });
@@ -198,6 +200,8 @@ test("WGSL hierarchy helpers are binding-free and mirror the packed ABI", () => 
 function fakeWideSource(overrides: Partial<WebGPUSvoWideFanoutSource> = {}): WebGPUSvoWideFanoutSource {
   const binding = (size: number): GPUBufferBinding => ({ buffer: { size } as GPUBuffer, size });
   return {
+    traversal: binding(256),
+    traversalOffsetsWords: { pages: 0, descriptors: 32 },
     control: binding(64),
     pages: binding(64),
     descriptors: binding(48),
@@ -241,7 +245,7 @@ test("wide WGSL uses resumable page-local DDA with a self-contained boundary sca
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /svoWideCanonicalSlotTieKey/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /callVisits >= visitLimit/);
   assert.doesNotMatch(webgpuSvoWideFanoutTraversalWGSL, /pageVisits >= visitLimit/);
-  assert.match(webgpuSvoWideFanoutTraversalWGSL, /if \(svoControl\[12\] != 0u\) \{ return false; \}/);
+  assert.match(webgpuSvoWideFanoutTraversalWGSL, /if \(svoControlLoad\(12u\) != 0u\) \{ return false; \}/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /if \(publication\.pageCount == 0u\) \{ return false; \}/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /frame\.cellSteps != 0u && frame\.nextT == frame\.exitT/);
   assert.match(webgpuSvoWideFanoutTraversalWGSL, /fn svoWideCursorInitialize/);

@@ -82,9 +82,12 @@ test("dry SVO startup compiles only the GLOBAL presentation pipeline", () => {
   assert.match(rendererSource, /label: SVO_PRESENTATION_STARTUP_STAGES\[9\][^]*completed: 9, total: SVO_PRESENTATION_STARTUP_STAGES\.length/);
 });
 
-test("production rasterizes primary visibility and derives coherence from the traversal it got", () => {
-  assert.match(rendererSource, /const traversal = this\.requestedPrimaryTraversal === "raster"\s*&& device\.limits\.maxColorAttachmentBytesPerSample >= FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE\s*\?\s*"raster-primary" as const : "canonical-parametric" as const/,
-    "production must rasterize the primary wherever the device grants the wider per-sample budget, and fall back rather than fail to construct");
+test("production rasterizes requested primary visibility or fails closed", () => {
+  assert.match(rendererSource, /this\.requestedPrimaryTraversal === "raster"[^]*maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE[^]*throw new RangeError\([^]*Requested SVO raster primary needs/,
+    "an unsupported requested raster primary must enter the retained optional-pipeline failure channel");
+  assert.match(rendererSource, /const traversal = this\.requestedPrimaryTraversal === "raster"\s*\?\s*"raster-primary" as const : "canonical-parametric" as const/);
+  assert.doesNotMatch(rendererSource, /maxColorAttachmentBytesPerSample >= FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE\s*\?\s*"raster-primary"/,
+    "device limits must never silently select a different primary traversal");
   // Reuse is worth 28.5 ms of a 49.6 ms traced frame and 7.9 ms of a 29.0 ms
   // rastered one, where the impostor pass blocks it outright. Deriving the mode
   // keeps the raster path from advertising a cache that can never fill.
@@ -93,7 +96,7 @@ test("production rasterizes primary visibility and derives coherence from the tr
   assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*traversal, "off", "split", 0, coherence, true, true, true\)/,
     "the production renderer must retain the measured split/coherence and analytic-raster capability");
   assert.match(rendererSource, /const primaryCoherenceKey = activeSvoTuning\.stationaryPrimaryReuseEnabled[^]*!sceneRuntime\.fluidSolver \|\| !this\.simulationRunning[^]*presentationCoherenceKey[^]*sceneEpoch/,
-    "the opt-in must still restrict complete caller-owned keys to static worlds and paused solvers");
+    "the opt-in must still restrict complete caller-owned keys to live scenes and paused solvers");
   assert.match(rendererSource, /encode\(replacementEncoder, target, primaryCoherenceKey, tracePhase\)/,
     "the safe key must reach the renderer cache; running fluid scenes pass undefined");
   assert.match(drySceneSource, /this\.rayCoherenceMode, useSplit && usePrepass, primaryFrameKey/,
@@ -101,5 +104,8 @@ test("production rasterizes primary visibility and derives coherence from the tr
   assert.doesNotMatch(drySceneSource, /const relightSplit|lightingMode/,
     "retired lighting-mode selection must not remain in the GLOBAL renderer");
   assert.match(drySceneSource, /this\.shadingPath === "auto-relight" && relight && this\.coneScale !== 1[^]*ensureConeLightingPrepass/,
-    "selecting relight must asynchronously compile its split variant while the inline path remains available");
+    "selecting relight must asynchronously compile its requested split variant");
+  assert.match(drySceneSource, /if \(this\.presentationBundleStatus\.state !== "ready"\) return false/);
+  assert.match(drySceneSource, /if \(this\.coneScale !== 1 && !usePrepass\)[^]*return false[^]*if \(splitRequested && !this\.splitDiagnosticsActive && !useSplit\)[^]*return false/,
+    "missing requested cone or split resources must reject rather than execute inline");
 });

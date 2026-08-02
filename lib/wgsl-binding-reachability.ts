@@ -9,7 +9,7 @@ export interface WGSLBindingDeclaration {
   readonly access?: string;
 }
 
-export interface WGSLComputeBindingReachabilityAudit {
+export interface WGSLBindingReachabilityAudit {
   readonly entryPoint: string;
   readonly reachableFunctions: readonly string[];
   readonly bindings: readonly WGSLBindingDeclaration[];
@@ -18,6 +18,45 @@ export interface WGSLComputeBindingReachabilityAudit {
   readonly other: readonly WGSLBindingDeclaration[];
   readonly storageCount: number;
   readonly uniformCount: number;
+}
+
+/** @deprecated Prefer WGSLBindingReachabilityAudit for stage-independent code. */
+export type WGSLComputeBindingReachabilityAudit = WGSLBindingReachabilityAudit;
+
+export type WGSLEntryPointStage = "compute" | "fragment" | "vertex";
+
+/** The deliberately small design ceiling used by newly consolidated GPU interfaces. */
+export const WGSL_STORAGE_BUFFER_DESIGN_LIMIT = 4;
+
+export interface WGSLStorageBufferBudgetAudit {
+  readonly entryPoint: string;
+  readonly storageCount: number;
+  readonly maximumStorageCount: number;
+}
+
+/**
+ * Enforce the project design budget, independently of a device's much looser
+ * validation limit. Keeping this assertion separate from adapter limits makes
+ * a fifth binding fail in tests before it becomes an initialization failure on
+ * a constrained GPU.
+ */
+export function assertWGSLStorageBufferBudget(
+  audit: Pick<WGSLBindingReachabilityAudit, "entryPoint" | "storageCount">,
+  maximumStorageCount = WGSL_STORAGE_BUFFER_DESIGN_LIMIT,
+): WGSLStorageBufferBudgetAudit {
+  if (!Number.isSafeInteger(maximumStorageCount) || maximumStorageCount < 1) {
+    throw new RangeError("WGSL storage-buffer budget must be a positive integer");
+  }
+  if (audit.storageCount > maximumStorageCount) {
+    throw new Error(
+      `${audit.entryPoint} reaches ${audit.storageCount} storage buffers; design budget is ${maximumStorageCount}`,
+    );
+  }
+  return Object.freeze({
+    entryPoint: audit.entryPoint,
+    storageCount: audit.storageCount,
+    maximumStorageCount,
+  });
 }
 
 export interface WGSLActivityBindingEligibility {
@@ -31,7 +70,7 @@ export interface WGSLActivityBindingEligibility {
 /** Enforce the portable activity contract before a shader variant acquires
  * the dedicated recorder binding. */
 export function assertWGSLActivityBindingEligibility(
-  audit: Pick<WGSLComputeBindingReachabilityAudit, "entryPoint" | "storageCount">,
+  audit: Pick<WGSLBindingReachabilityAudit, "entryPoint" | "storageCount">,
   maximumStorageCount = 10,
   activityStorageCount = 1,
 ): WGSLActivityBindingEligibility {
@@ -58,7 +97,7 @@ export function assertWGSLActivityBindingEligibility(
 interface WGSLFunctionDeclaration {
   readonly name: string;
   readonly body: string;
-  readonly compute: boolean;
+  readonly stage?: WGSLEntryPointStage;
 }
 
 /** Remove comments without changing offsets or accidentally joining tokens. */
@@ -148,10 +187,11 @@ function parseFunctions(source: string): ReadonlyMap<string, WGSLFunctionDeclara
     const previousBrace = source.lastIndexOf("}", start);
     const previousSemicolon = source.lastIndexOf(";", start);
     const attributes = source.slice(Math.max(previousBrace, previousSemicolon) + 1, start);
+    const stage = (/@(compute|fragment|vertex)\b/.exec(attributes)?.[1]) as WGSLEntryPointStage | undefined;
     functions.set(name, {
       name,
       body: source.slice(bodyStart + 1, bodyEnd),
-      compute: /@compute\b/.test(attributes),
+      ...(stage ? { stage } : {}),
     });
   }
   return functions;
@@ -172,17 +212,25 @@ function identifierUsed(code: string, name: string, followedByCall = false): boo
  * checker; callers should still rely on WebGPU validation for authoritative
  * pipeline-layout reflection.
  */
-export function auditWGSLComputeBindingReachability(
+export function auditWGSLBindingReachability(
   wgsl: string,
   entryPoint: string,
-): WGSLComputeBindingReachabilityAudit {
-  if (!/^[A-Za-z_]\w*$/.test(entryPoint)) throw new RangeError("WGSL compute entry point is invalid");
+  expectedStage?: WGSLEntryPointStage,
+): WGSLBindingReachabilityAudit {
+  if (!/^[A-Za-z_]\w*$/.test(entryPoint)) throw new RangeError("WGSL entry point is invalid");
   const source = codeOnlyWGSL(wgsl);
   const declarations = parseBindings(source);
   const functions = parseFunctions(source);
   const entry = functions.get(entryPoint);
-  if (!entry) throw new Error(`WGSL compute entry point ${entryPoint} is missing`);
-  if (!entry.compute) throw new Error(`WGSL function ${entryPoint} is not a compute entry point`);
+  if (!entry) throw new Error(`WGSL entry point ${entryPoint} is missing`);
+  if (!entry.stage) {
+    throw new Error(expectedStage
+      ? `WGSL function ${entryPoint} is not a ${expectedStage} entry point`
+      : `WGSL function ${entryPoint} is not an entry point`);
+  }
+  if (expectedStage && entry.stage !== expectedStage) {
+    throw new Error(`WGSL function ${entryPoint} is not a ${expectedStage} entry point`);
+  }
 
   const reachable = new Set<string>();
   const pending = [entryPoint];
@@ -213,29 +261,48 @@ export function auditWGSLComputeBindingReachability(
   };
 }
 
+/** Backwards-compatible compute-only facade for the original audit API. */
+export function auditWGSLComputeBindingReachability(
+  wgsl: string,
+  entryPoint: string,
+): WGSLComputeBindingReachabilityAudit {
+  if (!/^[A-Za-z_]\w*$/.test(entryPoint)) throw new RangeError("WGSL compute entry point is invalid");
+  try {
+    return auditWGSLBindingReachability(wgsl, entryPoint, "compute");
+  } catch (error) {
+    if (error instanceof Error && error.message === `WGSL entry point ${entryPoint} is missing`) {
+      throw new Error(`WGSL compute entry point ${entryPoint} is missing`);
+    }
+    throw error;
+  }
+}
+
 export interface ExplicitBindGroupLayoutEntryLike {
   readonly binding: number;
   readonly visibility: number;
   readonly buffer?: { readonly type?: "uniform" | "storage" | "read-only-storage" };
 }
 
-export interface ExplicitComputeBufferBindingAudit {
+export interface ExplicitStageBufferBindingAudit {
   readonly storageBindings: readonly number[];
   readonly uniformBindings: readonly number[];
   readonly storageCount: number;
   readonly uniformCount: number;
 }
 
+/** @deprecated Prefer ExplicitStageBufferBindingAudit for stage-independent code. */
+export type ExplicitComputeBufferBindingAudit = ExplicitStageBufferBindingAudit;
+
 /** WebGPU's GPUShaderStage.COMPUTE bit, kept literal so this helper is runtime-pure. */
 export const GPU_COMPUTE_STAGE_BIT = 0x4;
 
-/** Count compute-visible explicit-layout buffer entries without requiring a GPU device. */
-export function auditExplicitComputeBufferBindings(
+/** Count buffer entries visible to one shader stage in an explicit layout. */
+export function auditExplicitStageBufferBindings(
   entries: readonly ExplicitBindGroupLayoutEntryLike[],
-  computeStageBit = GPU_COMPUTE_STAGE_BIT,
-): ExplicitComputeBufferBindingAudit {
-  if (!Number.isSafeInteger(computeStageBit) || computeStageBit <= 0) {
-    throw new RangeError("Compute shader-stage bit must be positive");
+  stageBit: number,
+): ExplicitStageBufferBindingAudit {
+  if (!Number.isSafeInteger(stageBit) || stageBit <= 0) {
+    throw new RangeError("Shader-stage bit must be positive");
   }
   const seen = new Set<number>();
   const storageBindings: number[] = [];
@@ -246,7 +313,7 @@ export function auditExplicitComputeBufferBindings(
     }
     if (seen.has(entry.binding)) throw new Error(`Explicit bind-group-layout binding ${entry.binding} is duplicated`);
     seen.add(entry.binding);
-    if ((entry.visibility & computeStageBit) === 0 || !entry.buffer) continue;
+    if ((entry.visibility & stageBit) === 0 || !entry.buffer) continue;
     const type = entry.buffer.type ?? "uniform";
     if (type === "storage" || type === "read-only-storage") storageBindings.push(entry.binding);
     else uniformBindings.push(entry.binding);
@@ -259,4 +326,15 @@ export function auditExplicitComputeBufferBindings(
     storageCount: storageBindings.length,
     uniformCount: uniformBindings.length,
   };
+}
+
+/** Count compute-visible explicit-layout buffer entries without requiring a GPU device. */
+export function auditExplicitComputeBufferBindings(
+  entries: readonly ExplicitBindGroupLayoutEntryLike[],
+  computeStageBit = GPU_COMPUTE_STAGE_BIT,
+): ExplicitComputeBufferBindingAudit {
+  if (!Number.isSafeInteger(computeStageBit) || computeStageBit <= 0) {
+    throw new RangeError("Compute shader-stage bit must be positive");
+  }
+  return auditExplicitStageBufferBindings(entries, computeStageBit);
 }

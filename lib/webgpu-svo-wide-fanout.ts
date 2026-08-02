@@ -51,6 +51,9 @@ export interface WebGPUSvoWideFanoutCapacity {
 }
 
 export interface WebGPUSvoWideFanoutSource {
+  /** One raw traversal arena containing pages followed by descriptors. */
+  readonly traversal: GPUBufferBinding;
+  readonly traversalOffsetsWords: Readonly<{ pages: number; descriptors: number }>;
   readonly control: GPUBufferBinding;
   readonly pages: GPUBufferBinding;
   readonly descriptors: GPUBufferBinding;
@@ -78,6 +81,8 @@ export interface WebGPUSvoWideFanoutAllocation extends WebGPUSvoWideFanoutCapaci
   pageBytes: number;
   descriptorBytes: number;
   microMipBytes: number;
+  descriptorOffsetBytes: number;
+  traversalBytes: number;
   allocatedBytes: number;
 }
 
@@ -95,8 +100,10 @@ export function planWebgpuSvoWideFanoutAllocation(capacity: WebGPUSvoWideFanoutC
   const descriptorBytes = capacity.maximumDescriptors * SVO_WIDE_GPU_LAYOUT.descriptorStrideBytes;
   const microMipBytes = capacity.maximumPages * SVO_WIDE_GPU_LAYOUT.microMipStrideBytes;
   if (![pageBytes, descriptorBytes, microMipBytes].every(Number.isSafeInteger)) throw new RangeError("Wide-fanout allocation exceeds safe byte accounting");
-  return { ...capacity, controlBytes, pageBytes, descriptorBytes, microMipBytes,
-    allocatedBytes: controlBytes + pageBytes + descriptorBytes + microMipBytes };
+  const descriptorOffsetBytes = Math.ceil(pageBytes / 256) * 256;
+  const traversalBytes = descriptorOffsetBytes + descriptorBytes;
+  return { ...capacity, controlBytes, pageBytes, descriptorBytes, microMipBytes, descriptorOffsetBytes, traversalBytes,
+    allocatedBytes: controlBytes + traversalBytes + microMipBytes };
 }
 
 export type WebGPUSvoWideFanoutEncodeStatus = "encoded" | "unchanged" | "capacity-exhausted" | "invalid" | "destroyed";
@@ -161,8 +168,7 @@ export class WebGPUSvoWideFanout {
   readonly allocation: WebGPUSvoWideFanoutAllocation;
   readonly allocatedBytes: number;
   private readonly controlBuffer: GPUBuffer;
-  private readonly pageBuffer: GPUBuffer;
-  private readonly descriptorBuffer: GPUBuffer;
+  private readonly traversalBuffer: GPUBuffer;
   private readonly microMipBuffer: GPUBuffer;
   private published?: WebGPUSvoWideFanoutSource;
   private destroyed = false;
@@ -172,8 +178,7 @@ export class WebGPUSvoWideFanout {
     this.allocatedBytes = this.allocation.allocatedBytes;
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
     this.controlBuffer = device.createBuffer({ label: "SVO wide-fanout control", size: this.allocation.controlBytes, usage: storage });
-    this.pageBuffer = device.createBuffer({ label: "SVO wide-fanout pages", size: this.allocation.pageBytes, usage: storage });
-    this.descriptorBuffer = device.createBuffer({ label: "SVO wide-fanout descriptors", size: this.allocation.descriptorBytes, usage: storage });
+    this.traversalBuffer = device.createBuffer({ label: "SVO wide-fanout traversal arena", size: this.allocation.traversalBytes, usage: storage });
     this.microMipBuffer = device.createBuffer({ label: "SVO wide-fanout opacity micro-mips", size: this.allocation.microMipBytes, usage: storage });
   }
 
@@ -202,15 +207,17 @@ export class WebGPUSvoWideFanout {
     // relies on is proven exactly once here. Failure publishes nothing: the
     // renderer sees no capability and stays on canonical traversal.
     if (validateSvoWidePackedPlan(packed, plan, canonical).status !== "ready") return "invalid";
-    if (packed.pages.byteLength > 0) this.device.queue.writeBuffer(this.pageBuffer, 0, packed.pages);
-    if (packed.descriptors.byteLength > 0) this.device.queue.writeBuffer(this.descriptorBuffer, 0, packed.descriptors);
+    if (packed.pages.byteLength > 0) this.device.queue.writeBuffer(this.traversalBuffer, 0, packed.pages);
+    if (packed.descriptors.byteLength > 0) this.device.queue.writeBuffer(this.traversalBuffer, this.allocation.descriptorOffsetBytes, packed.descriptors);
     if (packed.microMips.byteLength > 0) this.device.queue.writeBuffer(this.microMipBuffer, 0, packed.microMips);
     // Queue order is the publication fence: payloads become visible before this complete control record.
     this.device.queue.writeBuffer(this.controlBuffer, 0, packed.control);
     this.published = {
       control: { buffer: this.controlBuffer, offset: 0, size: this.allocation.controlBytes },
-      pages: { buffer: this.pageBuffer, offset: 0, size: this.allocation.pageBytes },
-      descriptors: { buffer: this.descriptorBuffer, offset: 0, size: this.allocation.descriptorBytes },
+      traversal: { buffer: this.traversalBuffer, offset: 0, size: this.allocation.traversalBytes },
+      traversalOffsetsWords: { pages: 0, descriptors: this.allocation.descriptorOffsetBytes / 4 },
+      pages: { buffer: this.traversalBuffer, offset: 0, size: this.allocation.pageBytes },
+      descriptors: { buffer: this.traversalBuffer, offset: this.allocation.descriptorOffsetBytes, size: this.allocation.descriptorBytes },
       microMips: { buffer: this.microMipBuffer, offset: 0, size: this.allocation.microMipBytes },
       generation: plan.generation, sourceGeneration: plan.sourceGeneration,
       pageCount: plan.pages.length, descriptorCount: plan.descriptorCount, maximumDepth: plan.maximumDepth,
@@ -227,8 +234,7 @@ export class WebGPUSvoWideFanout {
     this.destroyed = true;
     this.published = undefined;
     this.controlBuffer.destroy();
-    this.pageBuffer.destroy();
-    this.descriptorBuffer.destroy();
+    this.traversalBuffer.destroy();
     this.microMipBuffer.destroy();
   }
 }
@@ -269,7 +275,14 @@ export function resolveSvoWideTraversalCapability(
   const pagesBytes = source.pageCount * SVO_WIDE_GPU_LAYOUT.pageStrideBytes;
   const descriptorBytes = source.descriptorCount * SVO_WIDE_GPU_LAYOUT.descriptorStrideBytes;
   const microMipBytes = source.pageCount * SVO_WIDE_GPU_LAYOUT.microMipStrideBytes;
+  const traversalWords = bindingByteLength(source.traversal) / 4;
+  const pageOffsetWords = source.traversalOffsetsWords.pages;
+  const descriptorOffsetWords = source.traversalOffsetsWords.descriptors;
   if (source.pageCount === 0 && source.descriptorCount !== 0
+      || !Number.isSafeInteger(pageOffsetWords) || pageOffsetWords < 0
+      || !Number.isSafeInteger(descriptorOffsetWords) || descriptorOffsetWords < pageOffsetWords
+      || pageOffsetWords + pagesBytes / 4 > descriptorOffsetWords
+      || descriptorOffsetWords + descriptorBytes / 4 > traversalWords
       || bindingByteLength(source.control) < SVO_WIDE_GPU_LAYOUT.controlStrideBytes
       || bindingByteLength(source.pages) < pagesBytes
       || bindingByteLength(source.descriptors) < descriptorBytes
@@ -557,6 +570,10 @@ export const webgpuSvoWideFanoutTraversalWGSL = /* wgsl */`
 ${webgpuSvoWideFanoutHelpersWGSL}
 @group(0) @binding(0) var<storage, read> svoWidePages: array<SvoWidePage>;
 @group(0) @binding(1) var<storage, read> svoWideDescriptors: array<SvoWideDescriptor>;
+fn svoWidePageCapacity()->u32{return arrayLength(&svoWidePages);}
+fn svoWideDescriptorCapacity()->u32{return arrayLength(&svoWideDescriptors);}
+fn svoWidePageLoad(index:u32)->SvoWidePage{return svoWidePages[index];}
+fn svoWideDescriptorLoad(index:u32)->SvoWideDescriptor{return svoWideDescriptors[index];}
 
 struct SvoWidePublication {
   generation: u32,
@@ -599,8 +616,8 @@ fn svoWidePublicationReady(publication: SvoWidePublication, canonicalSourceGener
   return publication.generation != 0u
     && publication.sourceGeneration != 0u
     && publication.sourceGeneration == canonicalSourceGeneration
-    && publication.pageCount <= arrayLength(&svoWidePages)
-    && publication.descriptorCount <= arrayLength(&svoWideDescriptors)
+    && publication.pageCount <= svoWidePageCapacity()
+    && publication.descriptorCount <= svoWideDescriptorCapacity()
     && (publication.pageCount != 0u || publication.descriptorCount == 0u);
 }
 
@@ -651,7 +668,7 @@ fn svoWideCursorInitialize(
   (*cursor).mode = SVO_WIDE_MODE_DDA;
   (*cursor).state = SVO_WIDE_CURSOR_UNAVAILABLE;
   if (!svoWidePublicationReady(publication, canonicalSourceGeneration)) { return false; }
-  if (svoControl[12] != 0u) { return false; }
+  if (svoControlLoad(12u) != 0u) { return false; }
   // Ordinary rays use page-local DDA. A ray parallel to a shared face must
   // visit both closed cells, so it starts in the wide hierarchy's own bounded
   // descriptor scan instead of requiring a canonical cursor.
@@ -661,7 +678,7 @@ fn svoWideCursorInitialize(
     return true;
   }
   if (publication.pageCount == 0u) { return false; }
-  let root = svoWidePages[0];
+  let root = svoWidePageLoad(0u);
   if (!svoWidePageHeaderValid(root, 0u, publication, mapping)
       || root.level != 0u || root.mortonLow != 0u || root.mortonHigh != 0u) {
     (*cursor).state = SVO_WIDE_CURSOR_INVALID;
@@ -736,7 +753,7 @@ fn svoWideCursorNextBoundaryScan(
       (*cursor).state = SVO_WIDE_CURSOR_INVALID;
       return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
     }
-    let page = svoWidePages[frame.pageIndex];
+    let page = svoWidePageLoad(frame.pageIndex);
     let pageCoordinate = svoWidePageCoordinate(page);
     let pageBounds = svoWideCanonicalBounds(page.level, pageCoordinate, mapping);
     if (frame.entered == 0u) {
@@ -782,7 +799,7 @@ fn svoWideCursorNextBoundaryScan(
         (*cursor).state = SVO_WIDE_CURSOR_INVALID;
         return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
       }
-      let descriptor = svoWideDescriptors[descriptorIndex];
+      let descriptor = svoWideDescriptorLoad(descriptorIndex);
       if (svoWideDescriptorSlot(descriptor) != slot) {
         (*cursor).state = SVO_WIDE_CURSOR_INVALID;
         return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
@@ -844,7 +861,7 @@ fn svoWideCursorNextBoundaryScan(
     if (bestSlot < 32u) { (*cursor).frames[frameIndex].remainingLow &= ~(1u << bestSlot); }
     else { (*cursor).frames[frameIndex].remainingHigh &= ~(1u << (bestSlot - 32u)); }
     (*cursor).frames[frameIndex].cellSteps += 1u;
-    let bestDescriptor = svoWideDescriptors[bestDescriptorIndex];
+    let bestDescriptor = svoWideDescriptorLoad(bestDescriptorIndex);
     let bestKind = svoWideDescriptorKind(bestDescriptor);
     if (bestKind == SVO_WIDE_KIND_PAGE) {
       if ((*cursor).depth >= SVO_WIDE_CURSOR_STACK_CAPACITY) {
@@ -861,7 +878,7 @@ fn svoWideCursorNextBoundaryScan(
       (*cursor).state = SVO_WIDE_CURSOR_EXHAUSTED;
       return svoWideCursorMiss(SVO_STATUS_WORK_EXHAUSTED, callVisits);
     }
-    let leaf = svoLeaves[bestDescriptor.sourceLeaf];
+    let leaf = svoLeafLoad(bestDescriptor.sourceLeaf);
     if (leaf.topology.x != bestDescriptor.reference) {
       (*cursor).state = SVO_WIDE_CURSOR_INVALID;
       return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
@@ -939,7 +956,7 @@ fn svoWideCursorNext(
     }
     if (frame.pageIndex != cachedPageIndex) {
       cachedPageIndex = frame.pageIndex;
-      page = svoWidePages[frame.pageIndex];
+      page = svoWidePageLoad(frame.pageIndex);
       pageCoordinate = svoWidePageCoordinate(page);
       pageBounds = svoWideCanonicalBounds(page.level, pageCoordinate, mapping);
     }
@@ -1022,7 +1039,7 @@ fn svoWideCursorNext(
       (*cursor).state = SVO_WIDE_CURSOR_INVALID;
       return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
     }
-    let descriptor = svoWideDescriptors[descriptorIndex];
+    let descriptor = svoWideDescriptorLoad(descriptorIndex);
     let kind = svoWideDescriptorKind(descriptor);
     let sourceLevel = svoWideDescriptorSourceLevel(descriptor);
     if (svoWideDescriptorSlot(descriptor) != slot) {
@@ -1061,7 +1078,7 @@ fn svoWideCursorNext(
     // publish time (level, leaf back-pointer, Morton coordinate). The leaf is
     // still loaded because the hit needs its voxel offset; its back-pointer is
     // a free consistency compare on already-loaded data.
-    let leaf = svoLeaves[descriptor.sourceLeaf];
+    let leaf = svoLeafLoad(descriptor.sourceLeaf);
     if (leaf.topology.x != descriptor.reference) {
       (*cursor).state = SVO_WIDE_CURSOR_INVALID;
       return svoWideCursorMiss(SVO_STATUS_INVALID_TOPOLOGY, callVisits);
@@ -1085,6 +1102,7 @@ export interface WebgpuSvoWideFanoutTraversalBindings {
   group?: number;
   pages?: number;
   descriptors?: number;
+  arena?: Readonly<{ binding: number; pageOffset: string; descriptorOffset: string }>;
 }
 
 /** Bind the resumable wide traversal without consuming control or micro-mip slots. */
@@ -1092,10 +1110,28 @@ export function createWebgpuSvoWideFanoutTraversalWGSL(bindings: WebgpuSvoWideFa
   const group = bindings.group ?? 0;
   const pages = bindings.pages ?? 0;
   const descriptors = bindings.descriptors ?? 1;
+  const arena = bindings.arena;
   for (const [label, value] of Object.entries({ group, pages, descriptors })) {
     if (!Number.isInteger(value) || value < 0) throw new RangeError(`Wide SVO WGSL ${label} must be a non-negative integer`);
   }
-  if (pages === descriptors) throw new RangeError("Wide SVO WGSL bindings must be distinct");
+  if (!arena && pages === descriptors) throw new RangeError("Wide SVO WGSL bindings must be distinct");
+  if (arena && (!Number.isInteger(arena.binding) || arena.binding < 0 || !arena.pageOffset || !arena.descriptorOffset)) {
+    throw new RangeError("Wide SVO traversal arena requires a binding and word offsets");
+  }
+  if (arena) {
+    const declarations = `@group(0) @binding(0) var<storage, read> svoWidePages: array<SvoWidePage>;
+@group(0) @binding(1) var<storage, read> svoWideDescriptors: array<SvoWideDescriptor>;
+fn svoWidePageCapacity()->u32{return arrayLength(&svoWidePages);}
+fn svoWideDescriptorCapacity()->u32{return arrayLength(&svoWideDescriptors);}
+fn svoWidePageLoad(index:u32)->SvoWidePage{return svoWidePages[index];}
+fn svoWideDescriptorLoad(index:u32)->SvoWideDescriptor{return svoWideDescriptors[index];}`;
+    const raw = `@group(${group}) @binding(${arena.binding}) var<storage,read> svoWideTraversalArena:array<u32>;
+fn svoWidePageCapacity()->u32{return (${arena.descriptorOffset}-${arena.pageOffset})/8u;}
+fn svoWideDescriptorCapacity()->u32{return (arrayLength(&svoWideTraversalArena)-${arena.descriptorOffset})/4u;}
+fn svoWidePageLoad(index:u32)->SvoWidePage{let base=${arena.pageOffset}+index*8u;return SvoWidePage(svoWideTraversalArena[base],svoWideTraversalArena[base+1u],svoWideTraversalArena[base+2u],svoWideTraversalArena[base+3u],svoWideTraversalArena[base+4u],svoWideTraversalArena[base+5u],svoWideTraversalArena[base+6u],svoWideTraversalArena[base+7u]);}
+fn svoWideDescriptorLoad(index:u32)->SvoWideDescriptor{let base=${arena.descriptorOffset}+index*4u;return SvoWideDescriptor(svoWideTraversalArena[base],svoWideTraversalArena[base+1u],svoWideTraversalArena[base+2u],svoWideTraversalArena[base+3u]);}`;
+    return webgpuSvoWideFanoutTraversalWGSL.replace(declarations, raw);
+  }
   return webgpuSvoWideFanoutTraversalWGSL
     .replace("@group(0) @binding(0) var<storage, read> svoWidePages", `@group(${group}) @binding(${pages}) var<storage, read> svoWidePages`)
     .replace("@group(0) @binding(1) var<storage, read> svoWideDescriptors", `@group(${group}) @binding(${descriptors}) var<storage, read> svoWideDescriptors`);

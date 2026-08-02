@@ -456,6 +456,8 @@ test("the probe mirrors the production cone step law and calls production helper
   }
   assert.doesNotMatch(probe, /let opaque=traceOpaqueScene\(ro,rd\)/,
     "the probe must not run the complete static primary traversal a second time");
+  assert.doesNotMatch(probe, /dryPrimaryNodeVisits|dryPrimaryLeafVisits|dryPrimaryEmptyBrickSkips|dryPrimaryVoxelWorkItems|dryPrimaryExactTests|dryPrimaryMaximumDepth|dryShadowNodeVisits|dryShadowLeafVisits|dryShadowWorkItems|dryMipSteps|dryTraversalFailure/,
+    "the probe must own its counters instead of referencing removed production instrumentation");
 });
 
 test("records go to a storage texture, and the request arrives in a uniform", () => {

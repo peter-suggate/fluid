@@ -90,7 +90,7 @@ test("global illumination exposes image-shaping controls with cinematic balanced
     direct: DEFAULT_SVO_RENDER_TUNING.giDirectStrength,
     aperture: DEFAULT_SVO_RENDER_TUNING.giConeAperture,
     cones: DEFAULT_SVO_RENDER_TUNING.giConeCount,
-  }, { bounce: 1.5, occlusion: 0.82, environment: 0.65, direct: 0.9, aperture: 1.05, cones: 4 });
+  }, { bounce: 1.5, occlusion: 0.82, environment: 0.65, direct: 1, aperture: 1.05, cones: 4 });
   const normalized = normalizeSvoRenderTuning({
     ...DEFAULT_SVO_RENDER_TUNING,
     giBounceStrength: 99, giOcclusionStrength: -1, giEnvironmentStrength: 99,
@@ -116,6 +116,10 @@ test("global illumination exposes image-shaping controls with cinematic balanced
   assert.match(svoDrySceneShader, /indirect\+=select\(vec3f\(0\.0\),result\.radiance,finiteRadiance\)\*weight;[^]*let visibleThroughStatic=select\(1\.0,result\.transmittance,finiteVisibility\);[^]*visibility\+=select\(visibleThroughStatic,0\.0,rigidBlocked\)\*weight/,
     "one fail-soft GI gather must supply both bounced light and broad occlusion");
   assert.match(svoDrySceneShader, /direct\*directScale\+indirectDiffuse/);
+  assert.match(svoDrySceneShader, /let directScale=dry\.giLighting\.w/,
+    "live analytic direct lighting must not change when derived GI pages become ready");
+  assert.doesNotMatch(svoDrySceneShader, /directScale=select\(1\.0,dry\.giLighting\.w,globalIllumination\)/,
+    "derived radiance readiness cannot stand in for a baked direct-light contribution");
 });
 
 test("retired temporal and interlaced-shadow tuning cannot re-enter a preset", () => {

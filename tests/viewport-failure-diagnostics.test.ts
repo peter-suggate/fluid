@@ -139,3 +139,22 @@ test("non-octree and healthy current surfaces do not obscure the viewport", () =
   };
   assert.equal(viewportFailureIndicator(healthyInfo(), current, scene), undefined);
 });
+
+test("renderer-only sparse scenes never report water publication failures", () => {
+  const rendererOnlyScene: SceneDescription = {
+    ...scene,
+    sceneId: "renderer-only-live-sparse-scene",
+    systems: { ...scene.systems, fluid: false },
+  };
+  const rejected = healthyInfo({
+    globalFineGeneration: 6,
+    pressureCapacityOverflow: true,
+  });
+  const emptyWater: WaterSurfacePresentationDiagnostics = {
+    surfaceGeometrySource: "empty",
+    globalFineAttached: false,
+    globalFineCrossingPublished: false,
+    presentationFallbackActive: false,
+  };
+  assert.equal(viewportFailureIndicator(rejected, emptyWater, rendererOnlyScene), undefined);
+});

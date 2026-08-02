@@ -113,7 +113,7 @@ test("each primary pass tags itself so the claimant view is exact", () => {
   assert.match(raster, /svoGBufferProducerFlags\(producer\)/);
   assert.match(raster, /traceTerrain[^]*dryRasterPrimarySurface\(terrain,camera\[0\],rd,camera\[1\],SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND\)/);
   assert.match(raster, /dryRasterPrimarySurface\(payload,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_BRICK\)/);
-  assert.match(raster, /dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_STATIC_PRIMITIVE\)/);
+  assert.match(raster, /dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE\)/);
   assert.match(raster, /svoGBufferProducerFlags\(SVO_GBUFFER_PRODUCER_TRACED\)/);
   // A pixel no pass claimed is a miss, and the background pass owns that too.
   assert.match(raster, /fn dryRasterPrimaryMiss\(\)[^]*svoGBufferProducerFlags\(SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND\)/);
@@ -121,7 +121,7 @@ test("each primary pass tags itself so the claimant view is exact", () => {
   assert.match(svoDrySceneShader, /svoGBufferProducerFlags\(SVO_GBUFFER_PRODUCER_GLASS\)/);
   // The claimant legend is indexed positionally by the overlay shader.
   assert.deepEqual(SVO_RENDER_STAGE_CLAIMANT_LEGEND.map(({ label }) => label), [
-    "Sky / miss", "Terrain", "Brick raster", "Static primitive",
+    "Sky / miss", "Terrain", "Brick raster", "Scene primitive",
     "Rigid impostor", "Glass discovery", "Traced primary", "Untagged",
   ]);
 });

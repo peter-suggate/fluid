@@ -109,7 +109,7 @@ export const SVO_RENDER_STAGE_CLAIMANT_LEGEND = Object.freeze([
   { at: 0 / 7, color: "#0b1020", label: "Sky / miss" },
   { at: 1 / 7, color: "#8bd450", label: "Terrain" },
   { at: 2 / 7, color: "#00d9ff", label: "Brick raster" },
-  { at: 3 / 7, color: "#ffb000", label: "Static primitive" },
+  { at: 3 / 7, color: "#ffb000", label: "Scene primitive" },
   { at: 4 / 7, color: "#ff2fd0", label: "Rigid impostor" },
   { at: 5 / 7, color: "#7dfff0", label: "Glass discovery" },
   { at: 6 / 7, color: "#9a6bff", label: "Traced primary" },

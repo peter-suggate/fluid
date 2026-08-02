@@ -15,9 +15,9 @@ import { terrainHeightAt } from "./terrain";
 import type { EnvironmentProxyPrimitive } from "./voxel-environments";
 
 /** WebGPU guarantees at least 8192 texels on a 2D axis; directory height is one row per page. */
-export const SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY = 8_192;
+export const SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY = 8_192;
 
-export interface SvoStaticNodeMipOptions {
+export interface SvoNodeMipCpuOracleOptions {
   generation: number;
   capacity?: number;
   /** Defaults to the number of levels needed to cover the complete scene domain. */
@@ -28,16 +28,16 @@ export interface SvoStaticNodeMipOptions {
   includeProxy?: (proxy: EnvironmentProxyPrimitive) => boolean;
 }
 
-export interface SvoStaticNodeMipInterior {
+export interface SvoNodeMipCpuOracleInterior {
   key: SvoNodeMipPageKey;
   /** 8^3 RGBA8: solid mean/max followed by zeroed fluid mean/max. */
   interior: Uint8Array;
 }
 
-export interface SvoStaticNodeMipPublication {
+export interface SvoNodeMipCpuOraclePublication {
   generation: number;
   plan: SvoNodeMipPyramidPlan;
-  interiors: readonly SvoStaticNodeMipInterior[];
+  interiors: readonly SvoNodeMipCpuOracleInterior[];
   worldOrigin_m: readonly [number, number, number];
   baseVoxelSize_m: readonly [number, number, number];
   basePageSize_m: readonly [number, number, number];
@@ -225,24 +225,24 @@ function texel(interior: Uint8Array | undefined, coordinate: Triple): SvoNodeMip
 }
 
 /**
- * Builds an immutable static-opacity view derived from the same world lattice
- * as the unified octree. It owns no simulation state and never populates fluid lanes.
+ * CPU reference construction of an opacity view over a supplied scene snapshot.
+ * It owns no runtime state and never populates fluid lanes.
  */
-export function buildSvoStaticNodeMipPublication(
+export function buildSvoNodeMipCpuOraclePublication(
   scene: SceneDescription,
   domain: SparseSceneDomainPlan,
   environmentPrimitives: readonly EnvironmentProxyPrimitive[],
-  options: SvoStaticNodeMipOptions,
-): SvoStaticNodeMipPublication {
-  const capacity = options.capacity ?? SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY;
-  if (!Number.isSafeInteger(capacity) || capacity < 0) throw new RangeError("Static SVO node-mip capacity must be a non-negative safe integer");
+  options: SvoNodeMipCpuOracleOptions,
+): SvoNodeMipCpuOraclePublication {
+  const capacity = options.capacity ?? SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY;
+  if (!Number.isSafeInteger(capacity) || capacity < 0) throw new RangeError("Node-mip CPU oracle capacity must be a non-negative safe integer");
   const samplesPerAxis = options.samplesPerAxis ?? 2;
-  if (![1, 2, 4].includes(samplesPerAxis)) throw new RangeError("Static SVO node-mip samples per axis must be 1, 2, or 4");
+  if (![1, 2, 4].includes(samplesPerAxis)) throw new RangeError("Node-mip CPU oracle samples per axis must be 1, 2, or 4");
   const n = SVO_NODE_MIP_LAYOUT.interiorSize;
   const basePageDimensions = domain.sceneDimensionsCells.map((value) => Math.ceil(value / n)) as Triple;
   const defaultLevelCount = Math.max(1, Math.ceil(Math.log2(Math.max(...basePageDimensions))) + 1);
   const levelCount = options.levelCount ?? defaultLevelCount;
-  if (!Number.isSafeInteger(levelCount) || levelCount < 1 || levelCount > 32) throw new RangeError("Static SVO node-mip level count must be in [1, 32]");
+  if (!Number.isSafeInteger(levelCount) || levelCount < 1 || levelCount > 32) throw new RangeError("Node-mip CPU oracle level count must be in [1, 32]");
   const includeProxy = options.includeProxy ?? defaultProxyOpacity;
   const proxies = environmentPrimitives.filter(includeProxy);
   const proxyPages = new Map<string, SvoNodeMipCoordinate>();
@@ -264,7 +264,7 @@ export function buildSvoStaticNodeMipPublication(
       capacity: Number.MAX_SAFE_INTEGER,
     }).requestedPageCount;
   const plan = planSvoNodeMipPyramid({ generation: options.generation, occupiedPages: selected, levelCount, capacity });
-  if (!plan.complete) throw new Error("Static SVO node-mip capacity selection produced an incomplete plan");
+  if (!plan.complete) throw new Error("Node-mip CPU oracle capacity selection produced an incomplete plan");
 
   const values = new Map<string, Uint8Array>();
   const selectedSet = new Set(selected.map(coordinateKey));
@@ -289,7 +289,7 @@ export function buildSvoStaticNodeMipPublication(
   }
   const interiors = plan.pages.map(({ key }) => {
     const interior = values.get(interiorKey(key.level, key.coordinate));
-    if (!interior) throw new Error(`Missing static SVO node-mip interior ${svoNodeMipPageKey(key)}`);
+    if (!interior) throw new Error(`Missing node-mip CPU oracle interior ${svoNodeMipPageKey(key)}`);
     return { key, interior };
   });
   return {

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * Render-only 4^3 versus 8^3 SVO brick experiment on one fixed production
- * scene. Each arm is a fresh Dawn process because the static world owns its
+ * scene. Each arm is a fresh Dawn process because the live scene owns its
  * topology for life. The authored scene is never mutated: the override enters
- * only WebGPUStaticSvoScene construction.
+ * only WebGPULiveSvoScene construction.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

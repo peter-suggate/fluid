@@ -88,9 +88,9 @@ test("octree world owns, publishes, accounts, and destroys its light buffer once
   assert.match(source, /count: lights\.count/);
   assert.match(source, /strideBytes: lights\.strideBytes/);
   assert.match(source, /revision: lights\.revision/);
-  assert.match(source, /\+ this\.pbrMaterialBuffer\.size \+ this\.lightBuffer\.size/);
+  assert.match(source, /\+ this\.pbrMaterialBuffer\.size \+ this\.materialEmissionBuffer\.size \+ this\.lightBuffer\.size/);
   const destroy = source.slice(source.indexOf("  destroy(): void {"));
-  assert.match(destroy, /this\.pbrMaterialBuffer, this\.lightBuffer, this\.environmentLightingBuffer/);
+  assert.match(destroy, /this\.pbrMaterialBuffer, this\.materialEmissionBuffer, this\.lightBuffer, this\.environmentLightingBuffer/);
   assert.match(destroy, /\.\.\.\(this\.inspection\?\.buffers \?\? \[\]\)/);
   assert.equal((destroy.match(/this\.lightBuffer/g) ?? []).length, 1);
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   SPARSE_BRICK_GPU_LAYOUT,
   SPARSE_BRICK_INVALID_INDEX,
@@ -16,6 +17,11 @@ import {
   sparseBrickPublicationShader,
   unpackMaterialOwner,
 } from "../lib/sparse-brick-octree";
+import { SVO_BRICK_LIFECYCLE, decodeSvoBrickLifecycle } from "../lib/svo-brick-occupancy";
+import {
+  assertWGSLStorageBufferBudget,
+  auditWGSLComputeBindingReachability,
+} from "../lib/wgsl-binding-reachability";
 
 test("Morton addressing is exact, reversible, and uses xyz octant order", () => {
   assert.equal(mortonEncode3D(1, 0, 0), 1n);
@@ -97,6 +103,11 @@ test("packed topology matches the documented pointerless GPU ABI", () => {
   assert.deepEqual([...packed.counts], [plan.nodes.length, 2, 2 * 8 ** 3, 17, 0, plan.nodes.length * 8]);
   assert.equal(packed.topology.length, packed.nodes.length + packed.leaves.length);
   assert.deepEqual([...packed.nodes.slice(0, 8)], [0, 0, 0, 3, 1, 2, SPARSE_BRICK_INVALID_INDEX, 0]);
+  assert.deepEqual(decodeSvoBrickLifecycle(packed.nodes[15]), {
+    active: true, dirty: false, queued: false, relocating: false,
+  });
+  assert.equal(packed.nodes[23], SVO_BRICK_LIFECYCLE.activeBit,
+    "every published terminal starts active in the live fixed arena");
   assert.deepEqual([...packed.leaves.slice(0, 8)], [1, 0, 0, 0, 2, 512, 1, 0]);
   assert.deepEqual(SPARSE_BRICK_GPU_LAYOUT.geometryChannels, ["fluidSignedDistance", "solidSignedDistance", "solidFraction", "pressure"]);
 });
@@ -111,27 +122,39 @@ test("portable stream dispatch crosses the one-dimensional WebGPU boundary", () 
 test("GPU publication is fail-closed on overflow and writes downstream indirect arguments", () => {
   assert.match(sparseBrickPublicationShader, /let overflow = requested > capacities/);
   assert.match(sparseBrickPublicationShader, /let valid = !any\(overflow\)/);
-  assert.match(sparseBrickPublicationShader, /atomicStore\(&control\[0\], select\(0u, requested\.x, valid\)\)/);
-  assert.match(sparseBrickPublicationShader, /atomicStore\(&control\[12\], flags\)/);
-  assert.match(sparseBrickPublicationShader, /atomicStore\(&control\[20\], dispatchX\)/);
-  assert.match(sparseBrickPublicationShader, /atomicStore\(&control\[25\], select\(0u, requested\.y, valid\)\)/);
-  assert.equal((sparseBrickPublicationShader.match(/var<storage,/g) ?? []).length, 8,
-    "publication must fit WebGPU's portable per-stage storage-buffer limit");
+  assert.match(sparseBrickPublicationShader, /atomicStore\(&structure\.control\[0\], select\(0u, requested\.x, valid\)\)/);
+  assert.match(sparseBrickPublicationShader, /atomicStore\(&structure\.control\[12\], flags\)/);
+  assert.match(sparseBrickPublicationShader, /atomicStore\(&structure\.control\[20\], dispatchX\)/);
+  assert.match(sparseBrickPublicationShader, /atomicStore\(&structure\.control\[25\], select\(0u, requested\.y, valid\)\)/);
+  assert.match(sparseBrickPublicationShader, /atomicStore\(&structure\.control\[19\], select\(0u, requested\.x, valid\)\)/);
+  assert.match(sparseBrickPublicationShader, /atomicStore\(&structure\.control\[23\], select\(0u, requested\.y, valid\)\)/);
+  assert.match(sparseBrickPublicationShader, /atomicStore\(&structure\.control\[28\], select\(0u, requested\.y, valid\)\)/);
+  assert.equal(SPARSE_BRICK_GPU_LAYOUT.controlWords.dirtyLeaves, 29);
+  assert.equal(SPARSE_BRICK_GPU_LAYOUT.controlWords.queuedLeaves, 30);
+  assert.equal(SPARSE_BRICK_GPU_LAYOUT.controlWords.mutationGeneration, 31);
+  for (const entryPoint of ["publishStructure", "publishGeometry", "publishVelocity", "publishMaterialOwners"]) {
+    const audit = auditWGSLComputeBindingReachability(sparseBrickPublicationShader, entryPoint);
+    assertWGSLStorageBufferBudget(audit);
+    assert.ok(audit.storageCount <= 3, `${entryPoint} must stay comfortably below the four-buffer design ceiling`);
+  }
+  assert.equal((sparseBrickPublicationShader.match(/@binding\(5\).*var<storage, read_write> structure/g) ?? []).length, 1,
+    "the physical structural arena must be bound exactly once");
   assert.doesNotMatch(sparseBrickPublicationShader, /mapAsync|getMappedRange/);
   assert.doesNotMatch(`${SparseBrickOctreeGPU.prototype.encodePublish}\n${SparseBrickOctreeGPU.prototype.encodeFromDenseFields}`, /mapAsync|getMappedRange/);
 });
 
-test("dense publication preserves f32 physics fields and compact scene identity", () => {
+test("dense publication overwrites its live field region without preserving baked payload", () => {
   assert.match(sparseBrickDenseFieldShader, /payload\[geometryBase\] = bitcast<u32>\(phi\)/);
   assert.match(sparseBrickDenseFieldShader, /payload\[velocityBase \+ 3u\] = bitcast<u32>\(liquidFraction\)/);
-  assert.match(sparseBrickDenseFieldShader, /payload\[materialOffset\] = select\(\(owner << 16u\) \| \(material & 0xffffu\), previousIdentity, preserveStatic && material == 0u\)/);
-  assert.match(sparseBrickDenseFieldShader, /params\.origin\.w > 0 && previousMaterial >= u32\(params\.origin\.w\)/);
+  assert.match(sparseBrickDenseFieldShader, /payload\[materialOffset\] = \(owner << 16u\) \| \(material & 0xffffu\)/);
+  assert.doesNotMatch(sparseBrickDenseFieldShader, /preserveStatic|previousIdentity|preservedMaterial/);
+  assert.match(sparseBrickDenseFieldShader, /payload\[geometryBase \+ 1u\] = bitcast<u32>\(3\.402823e38\)/);
   assert.match(sparseBrickDenseFieldShader, /solid\.fraction > 0\.0 && solid\.owner >= 0/);
   assert.match(sparseBrickDenseFieldShader, /let brick = decodeMorton/);
   assert.match(sparseBrickDenseFieldShader, /let output = voxelOffset \+ localIndex/);
 });
 
-test("GPU resource class allocates explicit capacities, encodes both passes, and destroys cleanly", () => {
+test("GPU resource class allocates explicit capacities, encodes staged publication, and destroys cleanly", () => {
   const previousUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
   Object.defineProperty(globalThis, "GPUBufferUsage", {
     configurable: true,
@@ -169,13 +192,20 @@ test("GPU resource class allocates explicit capacities, encodes both passes, and
   try {
     const tree = new SparseBrickOctreeGPU(device, { brickSize: 4, nodeCapacity: 9, leafCapacity: 3 });
     assert.equal(tree.voxelCapacity, 192);
-    assert.equal(tree.leafOffsetBytes, 512);
-    assert.equal((tree.nodes as unknown as BufferMock).descriptor.size, 512 + 3 * 16);
-    assert.equal((tree.leaves as unknown as BufferMock).descriptor.size, 512 + 3 * 16);
+    assert.equal(tree.structuralPublicationOffsetBytes, 256);
+    assert.equal(tree.topologyOffsetBytes, 512);
+    assert.equal(tree.leafTopologyOffsetBytes, 512);
+    assert.equal(tree.leafOffsetBytes, 512 + 512);
+    assert.equal((tree.nodes as unknown as BufferMock).descriptor.size, 512 + 512 + 3 * 16);
+    assert.equal((tree.leaves as unknown as BufferMock).descriptor.size, 512 + 512 + 3 * 16);
+    assert.equal(tree.control, tree.nodes, "control and topology are slices of one structural arena");
+    assert.equal(tree.structuralPublication, tree.nodes, "publication state shares the structural arena");
     assert.equal(tree.velocityOffsetBytes, 192 * 16);
     assert.equal(tree.materialOwnerOffsetBytes, 192 * 32);
-    assert.equal((tree.geometry as unknown as BufferMock).descriptor.size, 192 * (16 + 16 + 4));
-    assert.equal(tree.allocatedBytes, 512 + 3 * 16 + 192 * (16 + 16 + 4) + 128 + 64);
+    assert.equal(tree.sceneGeometryOffsetBytes, 192 * (16 + 16 + 4));
+    assert.equal(tree.sceneMaterialOwnerOffsetBytes, 192 * (16 + 16 + 4 + 16));
+    assert.equal((tree.geometry as unknown as BufferMock).descriptor.size, 192 * (16 + 16 + 4 + 16 + 4));
+    assert.equal(tree.allocatedBytes, 512 + 512 + 3 * 16 + 192 * (16 + 16 + 4 + 16 + 4) + 64);
     assert.ok(((tree.dispatchIndirect as unknown as BufferMock).descriptor.usage & 8) !== 0);
     const sourceBuffer = buffers[0] as unknown as GPUBuffer;
     tree.encodePublish(encoder, {
@@ -183,8 +213,9 @@ test("GPU resource class allocates explicit capacities, encodes both passes, and
       geometry: sourceBuffer, velocity: sourceBuffer, materialOwners: sourceBuffer,
       capacities: { nodes: 9, leaves: 3, voxels: 192 },
     });
-    assert.equal(clears.length, 4);
-    assert.deepEqual(dispatches[0], [1, 1, 1]);
+    assert.equal(clears.length, 3);
+    assert.deepEqual(dispatches.slice(0, 4), Array.from({ length: 4 }, () => [1, 1, 1]),
+      "structural, geometry, velocity, and owner publication are separate bounded stages");
     assert.equal(writes[0].offset, 32, "capacity words are initialized without a readback");
     assert.equal(writes[1].offset, 64, "arena offsets are resident alongside capacity counters");
     tree.encodeFromDenseFields(encoder, {
@@ -194,11 +225,47 @@ test("GPU resource class allocates explicit capacities, encodes both passes, and
       dimensions: [12, 8, 4], cellSize: [0.1, 0.1, 0.1],
       fluidMaterialId: 4, solidMaterialId: 9,
     });
-    assert.deepEqual(dispatches[1], [1, 1, 1]);
+    assert.deepEqual(dispatches[4], [1, 1, 1]);
     tree.destroy(); tree.destroy();
     assert.ok(buffers.every((buffer) => buffer.destroyCount === 1));
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else delete (globalThis as { GPUBufferUsage?: unknown }).GPUBufferUsage;
   }
+});
+
+test("Dawn finishes sparse publication without writable structural-arena aliasing", {
+  skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for Dawn validation",
+}, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
+    create(options: string[]): GPU;
+    globals: Record<string, unknown>;
+  };
+  Object.assign(globalThis, dawn.globals);
+  const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
+  const adapter = await gpu.requestAdapter();
+  assert.ok(adapter);
+  const device = await adapter.requestDevice();
+  const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const source = {
+    counts: device.createBuffer({ size: 24, usage }),
+    topology: device.createBuffer({ size: 48, usage }),
+    geometry: device.createBuffer({ size: 512 * 16, usage }),
+    velocity: device.createBuffer({ size: 512 * 16, usage }),
+    materialOwners: device.createBuffer({ size: 512 * 4, usage }),
+    capacities: { nodes: 1, leaves: 1, voxels: 512 },
+  };
+  device.queue.writeBuffer(source.counts, 0, new Uint32Array([1, 1, 512, 1, 0, 8]));
+  device.pushErrorScope("validation");
+  const tree = new SparseBrickOctreeGPU(device, { brickSize: 8, nodeCapacity: 1, leafCapacity: 1 });
+  const encoder = device.createCommandEncoder({ label: "Sparse publication structural-alias regression" });
+  tree.encodePublish(encoder, source);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  const error = await device.popErrorScope();
+  assert.equal(error, null, error?.message);
+  tree.destroy();
+  source.counts.destroy(); source.topology.destroy(); source.geometry.destroy();
+  source.velocity.destroy(); source.materialOwners.destroy();
+  device.destroy();
 });

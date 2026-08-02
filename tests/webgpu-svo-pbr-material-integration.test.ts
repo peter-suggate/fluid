@@ -4,7 +4,6 @@ import test from "node:test";
 
 import { SVO_MATERIAL_RECORD_STRIDE_BYTES } from "../lib/svo-material-abi";
 import {
-  canConsumeSparseVoxelPbrMaterials,
   canEncodeSparseVoxelDryScene,
   SparseVoxelDrySceneRenderer,
   SVO_DRY_SCENE_PARAMS_LAYOUT,
@@ -27,15 +26,17 @@ function structuralSource(
     materials: resource,
     pbrMaterials: { binding: pbrBinding, count: 8, strideBytes: SVO_MATERIAL_RECORD_STRIDE_BYTES, revision: 3 },
     structural: {
+      structure: resource,
+      structureOffsetsWords: { control: 0, publication: 64, nodes: 128, leaves: 640 },
       control: resource, nodes: resource, leaves: resource, geometry: resource,
-      velocity: resource, materialOwners: resource, fluidLeafStates: resource,
+      sceneGeometry: resource, velocity: resource, materialOwners: resource, sceneMaterialOwners: resource, fluidLeafStates: resource,
       publication: { state: resource, byteLength: 32 },
       domain: { worldOrigin_m: [-2, 0, -2], cellSize_m: [0.04, 0.04, 0.04], dimensionsCells: [64, 64, 64], brickSize: 16, maximumDepth: 4 },
       capacities: { nodes: 64, leaves: 32, geometryVoxels: 1024, velocityVoxels: 1024, materialOwnerVoxels: 1024, fluidLeafStates: 32 },
       strides: { control: 4, node: 32, leaf: 16, geometry: 16, velocity: 16, materialOwner: 4, fluidLeafState: 4 },
       fields: {
         topology: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
-        staticGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
+        sceneGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         materialOwner: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         dynamicSolid: { residency: "unavailable", validity: "unavailable", revision: 0 },
         coarseFluid: { residency: "unavailable", validity: "unavailable", revision: 0 },
@@ -48,26 +49,19 @@ function structuralSource(
 
 const scene: SparseVoxelDrySceneData = svoDrySceneFixture;
 
-test("production PBR publication validation is exact and malformed sources fail over before encoding", () => {
+test("live material publication is independent of producer material bindings", () => {
   const valid = structuralSource();
-  assert.equal(canConsumeSparseVoxelPbrMaterials(valid), true);
   assert.equal(canEncodeSparseVoxelDryScene(valid, scene), true);
-  assert.equal(canConsumeSparseVoxelPbrMaterials({ ...valid, pbrMaterials: undefined }), false);
-  assert.equal(canConsumeSparseVoxelPbrMaterials({ ...valid, pbrMaterials: { ...valid.pbrMaterials!, strideBytes: 32 } }), false);
-  assert.equal(canConsumeSparseVoxelPbrMaterials({ ...valid, pbrMaterials: { ...valid.pbrMaterials!, count: 1 } }), false);
-  assert.equal(canConsumeSparseVoxelPbrMaterials({ ...valid, pbrMaterials: { ...valid.pbrMaterials!, count: 2.5 } }), false);
-  assert.equal(canConsumeSparseVoxelPbrMaterials({ ...valid, pbrMaterials: { ...valid.pbrMaterials!, count: 0x1_0000_0000 } }), false);
-  assert.equal(canConsumeSparseVoxelPbrMaterials({ ...valid, pbrMaterials: { ...valid.pbrMaterials!, revision: 0 } }), false);
-  assert.equal(canConsumeSparseVoxelPbrMaterials({ ...valid, pbrMaterials: { ...valid.pbrMaterials!, revision: 0x1_0000_0000 } }), false);
-  assert.equal(canConsumeSparseVoxelPbrMaterials(structuralSource({ buffer: {} as GPUBuffer, size: 767 })), false);
-  assert.equal(canEncodeSparseVoxelDryScene({ ...valid, pbrMaterials: undefined }, scene), false);
+  assert.equal(canEncodeSparseVoxelDryScene({ ...valid, pbrMaterials: undefined }, scene), true);
+  assert.equal(canEncodeSparseVoxelDryScene(valid, { ...scene, materialRecords: new Uint32Array(1) }), false);
+  assert.equal(canEncodeSparseVoxelDryScene(valid, { ...scene, materialRevision: 0 }), false);
 });
 
-test("binding 6 consumes the 96-byte producer table while the legacy debug ABI remains available", () => {
-  assert.match(svoDrySceneShader, /@group\(0\) @binding\(6\) var<storage,read> materials:array<SvoMaterialRecord>/);
-  assert.match(dryRendererSource, /\{ binding: 6, resource: source\.pbrMaterials!\.binding \}/);
-  assert.doesNotMatch(dryRendererSource, /binding: 6, resource: source\.materials/);
-  assert.match(dryRendererSource, /@group\(0\) @binding\(10\)/);
+test("binding 4 consumes the fixed renderer-owned authored scene arena", () => {
+  assert.match(svoDrySceneShader, /@group\(0\) @binding\(4\) var<storage,read> drySceneArena:array<u32>/);
+  assert.match(dryRendererSource, /\{ binding: 4, resource: \{ buffer: this\.sceneArenaBuffer \} \}/);
+  assert.doesNotMatch(dryRendererSource, /resource: source\.materials/);
+  assert.doesNotMatch(dryRendererSource, /@group\(0\) @binding\(10\)/);
   assert.doesNotMatch(dryRendererSource, /svoStructuralGeometry|svoStructuralLeafStates/,
     "the dry pass must not retain structural fluid-march payload bindings");
   assert.match(readFileSync(new URL("../lib/webgpu-voxel-debug.ts", import.meta.url), "utf8"), /materials: GPUBufferBinding/,
@@ -76,16 +70,17 @@ test("binding 6 consumes the 96-byte producer table while the legacy debug ABI r
 
 test("published count, revision, direct identity, flags, and material functions are enforced in WGSL", () => {
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 528, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 576, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
     nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
     nodeMipDirectWordOffset: 96, nodeMipDirectLevelZWordOffset: 100, tetrahedralRadianceWordOffset: 112, nodeMipExtentWordOffset: 116,
-    giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128,
+    giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128, primitiveCandidatesWordOffset: 132,
+    structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140,
   });
   assert.match(dryRendererSource, /const visibilityFlags = \(!giReady && ambientOcclusionEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact \| SVO_DRY_VISIBILITY_FLAGS\.ambientOcclusion : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested[^]*SVO_DRY_VISIBILITY_FLAGS\.globalIllumination/,
     "the visibility lane keeps ambient occlusion, shadows, and requested cone lighting independently switchable");
-  assert.match(dryRendererSource, /words\.set\(\[pbrMaterials\.count, pbrMaterials\.revision, pbrMaterials\.strideBytes, visibilityFlags\], SVO_DRY_SCENE_PARAMS_LAYOUT\.materialPublicationWordOffset\)/);
+  assert.match(dryRendererSource, /words\.set\(\[materialCount, scene\.materialRevision, SVO_MATERIAL_RECORD_STRIDE_BYTES, visibilityFlags\]/);
   assert.match(svoDrySceneShader, /fn dryPublishedMaterialValid\(material:SvoMaterialRecord,index:u32\)->bool/);
   assert.match(svoDrySceneShader, /svoMaterialValid\(material,index\)&&material\.identity\.y==dry\.materialPublication\.y&&\(material\.identity\.w&SVO_MATERIAL_FLAG_OPAQUE\)!=0u/);
   assert.match(svoDrySceneShader, /material\.identity\.z==SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN/);
@@ -101,7 +96,7 @@ test("shared PBR consumes all opaque surface fields from the producer record", (
   assert.match(svoDrySceneShader, /surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct/);
 });
 
-test("renderer binds producer PBR identity, never the legacy inspection buffer", () => {
+test("renderer binds its live material arena, never producer or inspection buffers", () => {
   const previousUsage = globalThis.GPUBufferUsage;
   const previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, { GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4 } });
@@ -110,7 +105,7 @@ test("renderer binds producer PBR identity, never the legacy inspection buffer",
   const pbrBuffer = {} as GPUBuffer;
   let entries: readonly GPUBindGroupEntry[] = [];
   const device = {
-    createBuffer() { return { destroy() {} }; },
+    createBuffer(descriptor: { label?: string }) { return { label: descriptor.label, destroy() {} }; },
     createTexture() { return { createView() { return {}; }, destroy() {} }; },
     createSampler() { return {}; },
     createBindGroup(descriptor: { entries: readonly GPUBindGroupEntry[] }) { entries = descriptor.entries; return {}; },
@@ -119,13 +114,15 @@ test("renderer binds producer PBR identity, never the legacy inspection buffer",
   try {
     const source = structuralSource({ buffer: pbrBuffer, size: 8 * SVO_MATERIAL_RECORD_STRIDE_BYTES });
     source.materials = { buffer: legacyBuffer };
-    const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
+    const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer, "rgba16float", "canonical");
     const internals = renderer as unknown as { layout: GPUBindGroupLayout; pipeline: GPURenderPipeline };
     internals.layout = {} as GPUBindGroupLayout;
     internals.pipeline = {} as GPURenderPipeline;
-    renderer.setSource(source, scene);
-    assert.equal((entries.find(({ binding }) => binding === 6)?.resource as GPUBufferBinding).buffer, pbrBuffer);
-    assert.notEqual((entries.find(({ binding }) => binding === 6)?.resource as GPUBufferBinding).buffer, legacyBuffer);
+    renderer.setSource(source);
+    renderer.publishScene(scene);
+    assert.equal(((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer as unknown as { label?: string }).label, "Live authored scene arena (materials, primitives/BVH, thin glass)");
+    assert.notEqual((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer, pbrBuffer);
+    assert.notEqual((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer, legacyBuffer);
     renderer.destroy();
   } finally {
     Object.assign(globalThis, { GPUBufferUsage: previousUsage });
@@ -133,9 +130,10 @@ test("renderer binds producer PBR identity, never the legacy inspection buffer",
   }
 });
 
-test("missing PBR publication has an explicit raster fallback reason", () => {
-  assert.match(rendererSource, /svoMaterialsSupported=canConsumeSparseVoxelPbrMaterials\(sparseSceneSource\)/);
+test("renderer assembles materials on each changed presentation scene", () => {
+  assert.match(rendererSource, /const materialRecords = packSvoMaterialTable/);
+  assert.match(rendererSource, /this\.svoMaterialsSupported = materialRecords\.byteLength > 0/);
   assert.match(rendererSource, /terrainSupported: this\.svoTerrainSupported,[^]*glassSupported: this\.svoGlassSupported,[^]*materialsSupported: this\.svoMaterialsSupported/);
-  assert.match(rendererSource, /fallbackReason: "missing-pbr-materials"/);
+  assert.match(rendererSource, /failureReason: "missing-pbr-materials"/);
   assert.match(panelSource, /"missing-pbr-materials": "production PBR material table is unavailable"/);
 });

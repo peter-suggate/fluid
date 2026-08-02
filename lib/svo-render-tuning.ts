@@ -50,7 +50,7 @@ export interface SvoRenderTuning {
   readonly giOcclusionStrength: number;
   /** Analytic diffuse-environment contribution while GI is active. */
   readonly giEnvironmentStrength: number;
-  /** Exact direct-light contribution while GI is active. */
+  /** Live analytic direct-light contribution, independent of derived-GI readiness. */
   readonly giDirectStrength: number;
   readonly giConeAperture: number;
   readonly giConeCount: number;
@@ -89,7 +89,10 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   giBounceStrength: 1.5,
   giOcclusionStrength: 0.82,
   giEnvironmentStrength: 0.65,
-  giDirectStrength: 0.9,
+  // Direct light is evaluated from the current scene-light arena every frame.
+  // Derived radiance contains emitted energy, not a baked replacement for the
+  // authored lights, so enabling GI must not silently remove ten percent of it.
+  giDirectStrength: 1,
   giConeAperture: 1.05,
   giConeCount: 4,
   coneNormalEscapeCells: 0.5,

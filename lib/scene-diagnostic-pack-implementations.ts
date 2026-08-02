@@ -419,8 +419,18 @@ const globalFinePublication = defineDiagnosticPackImplementation({
 });
 
 function raster(diagnostics: UnknownRecord, which: "initial" | "final"): UnknownRecord | undefined {
-  return recordPath(diagnostics, "raster", which)
+  const explicit = recordPath(diagnostics, "raster", which)
     ?? recordPath(diagnostics, `${which}GlobalFineRaster`);
+  if (explicit !== undefined) return explicit;
+  // Checkpoint-authored lanes deliberately avoid redundant t=0/final raster
+  // captures, so their first and last checkpoint are the corresponding closure
+  // evidence. `scene-water-raster-integrity-diagnostic` already reads them that
+  // way; without the same fallback here every metric in this pack resolves to
+  // `undefined` on those lanes and reports as a physics failure.
+  const checkpoints = (arrayPath(diagnostics, "raster", "checkpoints")
+    ?? arrayPath(diagnostics, "globalFineGenerationCheckpoints") ?? [])
+    .map(recordValue).filter((value) => value !== undefined);
+  return recordPath(which === "initial" ? checkpoints[0] : checkpoints.at(-1), "raster");
 }
 
 const authoritativeWaterRaster = defineDiagnosticPackImplementation({

@@ -72,7 +72,7 @@ const SVO_CONE_PRESENTATION_PHASE_LAYOUT: readonly [PaperPhaseId, string][] = [
   ["svo-primary", "SVO primary visibility"],
   ["svo-rigid", "SVO rigid discovery"],
   ["svo-glass", "SVO thin-glass discovery"],
-  ["dry-scene", "Raster dry-scene fallback"],
+  ["dry-scene", "Live SVO dry scene"],
   ["water-front-interface", "Water + spray front interface"],
   ["water-back-interface", "Water + spray back interface"],
   ["optical-composite", "Optical composite"],

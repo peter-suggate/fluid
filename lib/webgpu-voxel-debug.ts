@@ -69,7 +69,7 @@ export const SPARSE_VOXEL_PUBLICATION_STATE = Object.freeze({
   completeGeneration: 0,
   validFields: 1,
   topologyRevision: 2,
-  staticGeometryRevision: 3,
+  sceneGeometryRevision: 3,
   dynamicSolidRevision: 4,
   coarseFluidRevision: 5,
   fineFluidRevision: 6,
@@ -78,7 +78,7 @@ export const SPARSE_VOXEL_PUBLICATION_STATE = Object.freeze({
 /** Bit values stored in SPARSE_VOXEL_PUBLICATION_STATE.validFields. */
 export const SPARSE_VOXEL_VALID_FIELDS = Object.freeze({
   topology: 1 << 0,
-  staticGeometry: 1 << 1,
+  sceneGeometry: 1 << 1,
   dynamicSolid: 1 << 2,
   coarseFluid: 1 << 3,
   fineFluid: 1 << 4,
@@ -210,18 +210,34 @@ fn svoResidencyEntryWord(entryOffsetBytes:u32,entryIndex:u32)->u32{return entryO
 `;
 
 export interface SparseVoxelStructuralRenderSource {
+  /**
+   * Single physical structural arena. Consumers should bind this once and use
+   * `structureOffsetsWords` instead of rebinding its semantic slices.
+   */
+  structure: GPUBufferBinding;
+  /** Word offsets of the structural records within `structure`. */
+  structureOffsetsWords: Readonly<{
+    control: number;
+    publication: number;
+    nodes: number;
+    leaves: number;
+  }>;
   /** Counts, capacities, indirect arguments, and topology publication state. */
   control: GPUBufferBinding;
   /** Eight-u32 node records: Morton key, level, child links, leaf, flags. */
   nodes: GPUBufferBinding;
   /** Four-u32 leaf records: node, voxel offset, Morton key. */
   leaves: GPUBufferBinding;
-  /** vec4f: fluid SDF, solid SDF, solid fraction, pressure. */
+  /** vec4f: fluid SDF, dynamic-solid SDF/fraction, pressure. */
   geometry: GPUBufferBinding;
+  /** vec4f: authored/live scene SDF, coverage, and reserved derived channels. */
+  sceneGeometry: GPUBufferBinding;
   /** vec4f: world velocity xyz and reconstructed liquid fraction. */
   velocity: GPUBufferBinding;
   /** u32 packed as owner:u16 | material:u16. */
   materialOwners: GPUBufferBinding;
+  /** u32 scene owner/material identity, updated independently from physics. */
+  sceneMaterialOwners: GPUBufferBinding;
   /** Per-leaf residency flags; required when reading evolving fluid payload. */
   fluidLeafStates: GPUBufferBinding;
   /** Authoritative producer-owned brick residency; never inferred from payload values. */
@@ -250,7 +266,7 @@ export interface SparseVoxelStructuralRenderSource {
     validFields: SparseVoxelPublicationWord;
     revisions: Readonly<{
       topology: SparseVoxelPublicationWord;
-      staticGeometry: SparseVoxelPublicationWord;
+      sceneGeometry: SparseVoxelPublicationWord;
       dynamicSolid: SparseVoxelPublicationWord;
       coarseFluid: SparseVoxelPublicationWord;
       /** Zero until a fine sparse fluid field is attached to this ABI. */
@@ -259,7 +275,7 @@ export interface SparseVoxelStructuralRenderSource {
   }>;
   fields: Readonly<{
     topology: SparseVoxelStructuralFieldValidity;
-    staticGeometry: SparseVoxelStructuralFieldValidity;
+    sceneGeometry: SparseVoxelStructuralFieldValidity;
     dynamicSolid: SparseVoxelStructuralFieldValidity;
     coarseFluid: SparseVoxelStructuralFieldValidity;
     fineFluid: SparseVoxelStructuralFieldValidity;
@@ -286,11 +302,11 @@ export interface SparseVoxelSceneRenderSource {
   fluidBrickCapacity?: number;
   /** Direct production source. Optional keeps non-structural producers valid. */
   structural?: SparseVoxelStructuralRenderSource;
-  /** Optional immutable 4^3 acceleration view derived from the canonical structural topology. */
+  /** Optional generation-matched 4^3 acceleration view derived from the live structural topology. */
   wideFanout?: import("./webgpu-svo-wide-fanout").WebGPUSvoWideFanoutSource;
   /** Optional 16-byte aligned traversal nodes derived from the canonical 32-byte records. */
   compactHierarchy?: import("./webgpu-svo-compact-hierarchy").WebGpuSvoCompactHierarchySource;
-  /** Optional complete sparse opacity generation derived from static canonical-world geometry. */
+  /** Optional page-valid sparse opacity cache derived incrementally from the unified live tree. */
   nodeMipPyramid?: import("./webgpu-svo-node-mip-pyramid").WebGpuSvoNodeMipVisibleGeneration;
   /** Optional directional exitant-radiance generation sharing the opacity page plan and slots. */
   tetrahedralRadiance?: import("./webgpu-svo-tetrahedral-radiance").WebGpuSvoTetrahedralRadianceVisibleGeneration;

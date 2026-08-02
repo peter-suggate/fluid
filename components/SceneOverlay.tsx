@@ -20,7 +20,7 @@ export function SceneOverlay() {
   const sceneModalOpen = useUIStore((state) => state.sceneModalOpen);
   const setSceneModalOpen = useUIStore((state) => state.setSceneModalOpen);
   const active = scenePresets.find((preset) => preset.id === presetId);
-  const runtime = planSceneRuntime(scene).fluidSolver ? `seed ${scene.randomSeed}` : "static SVO · no fluid";
+  const runtime = planSceneRuntime(scene).fluidSolver ? `seed ${scene.randomSeed}` : "live SVO · no fluid";
   return (
     <div className="scene-overlay" data-testid="scene-panel">
       <span className="brand-mark" title="Fluid Lab · WebGPU CFD workbench">FL</span>

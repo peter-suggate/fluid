@@ -540,7 +540,7 @@ every shadow and GI ray: a 15x frame cost, reported only as a `console.warn`.
 The fix is one line in `requiredFluidDeviceLimits`: request the adapter's
 advertised `maxTextureDimension2D` (16384 on this adapter), exactly as that
 function already does for the storage-buffer and 3D-texture limits. Every scene
-preset that builds a static SVO world now publishes a pyramid; `ocean-seiche`
+preset that builds a live SVO scene now publishes a pyramid; `ocean-seiche`
 and `deep-water-ab` still fail their world build on the unrelated 4 GB geometry
 allocation guard in `lib/sparse-brick-octree.ts`.
 

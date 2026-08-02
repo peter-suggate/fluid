@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { SceneDescription } from "../lib/model";
 import type { SparseSceneDomainPlan } from "../lib/sparse-scene-domain";
-import { SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY, buildSvoStaticNodeMipPublication } from "../lib/svo-static-node-mips";
+import { SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY, buildSvoNodeMipCpuOraclePublication } from "../lib/svo-node-mip-cpu-oracle";
 import { webGpuSvoNodeMipMaximumPages } from "../lib/webgpu-svo-node-mip-pyramid";
 import type { EnvironmentProxyPrimitive } from "../lib/voxel-environments";
 
 function scene(terrain = false): SceneDescription {
   return {
-    schemaVersion: "1.0.0", sceneId: "static-node-mip-test", environment: "garden", randomSeed: 1, duration_s: 1,
+    schemaVersion: "1.0.0", sceneId: "node-mip-cpu-oracle-test", environment: "garden", randomSeed: 1, duration_s: 1,
     container: { width_m: 16, height_m: 8, depth_m: 16, fillFraction: 0, top: "open", fluidWallMode: "free-slip" },
     voxelDomain: { finestCellSize_m: 1, brickSize_cells: 8 },
     terrain: terrain ? { baseHeight_m: .5, features: [] } : undefined,
@@ -61,8 +60,8 @@ function texel(interior: Uint8Array, x: number, y: number, z: number): readonly 
   return [...interior.slice(offset, offset + 4)];
 }
 
-test("static proxy publication builds base interiors and recursively reduced parents", () => {
-  const publication = buildSvoStaticNodeMipPublication(scene(), domain(), [box("solid", [4, 4, 4], [4, 4, 4])], {
+test("CPU oracle builds base interiors and recursively reduced parents", () => {
+  const publication = buildSvoNodeMipCpuOraclePublication(scene(), domain(), [box("solid", [4, 4, 4], [4, 4, 4])], {
     generation: 12, levelCount: 2, samplesPerAxis: 2,
   });
   assert.equal(publication.plan.complete, true);
@@ -77,7 +76,7 @@ test("static proxy publication builds base interiors and recursively reduced par
 });
 
 test("terrain selects surface pages without allocating deep solid volume", () => {
-  const publication = buildSvoStaticNodeMipPublication(scene(true), domain({ origin: [0, -16, 0], dimensions: [16, 24, 16] }), [], {
+  const publication = buildSvoNodeMipCpuOraclePublication(scene(true), domain({ origin: [0, -16, 0], dimensions: [16, 24, 16] }), [], {
     generation: 2, levelCount: 1,
   });
   assert.ok(publication.terrainCandidatePageCount > 0);
@@ -94,7 +93,7 @@ test("capacity selection omits base pages before planning so the returned plan s
     box("a", [1, 1, 1], [.4, .4, .4]), box("b", [9, 1, 1], [.4, .4, .4]),
     box("c", [1, 1, 9], [.4, .4, .4]), box("d", [9, 1, 9], [.4, .4, .4]),
   ];
-  const publication = buildSvoStaticNodeMipPublication(scene(), domain(), proxies, { generation: 3, levelCount: 2, capacity: 2 });
+  const publication = buildSvoNodeMipCpuOraclePublication(scene(), domain(), proxies, { generation: 3, levelCount: 2, capacity: 2 });
   assert.equal(publication.plan.complete, true);
   assert.ok(publication.plan.pages.length <= 2);
   assert.equal(publication.selectedBasePageCount, 1);
@@ -105,47 +104,34 @@ test("capacity selection omits base pages before planning so the returned plan s
   // pages as empty air.
   // Four base pages sharing one level-one parent.
   assert.equal(publication.requiredPageCount, 5);
-  const whole = buildSvoStaticNodeMipPublication(scene(), domain(), proxies, { generation: 3, levelCount: 2, capacity: 5 });
+  const whole = buildSvoNodeMipCpuOraclePublication(scene(), domain(), proxies, { generation: 3, levelCount: 2, capacity: 5 });
   assert.equal(whole.omittedBasePageCount, 0);
   assert.equal(whole.requiredPageCount, 5);
   assert.equal(whole.plan.residentPageCount, 5);
 });
 
-test("default static policy excludes glass and the open front shell", () => {
+test("default CPU oracle opacity policy excludes glass and the open front shell", () => {
   const primitives = [
     box("room/shell/wall-front", [1, 1, 1], [.4, .4, .4], "shell-wall", ["shell", "wall"]),
     box("glass", [9, 1, 1], [.4, .4, .4], "glass-pane", ["glass"]),
     box("opaque", [1, 1, 9], [.4, .4, .4]),
   ];
-  const publication = buildSvoStaticNodeMipPublication(scene(), domain(), primitives, { generation: 4, levelCount: 1 });
+  const publication = buildSvoNodeMipCpuOraclePublication(scene(), domain(), primitives, { generation: 4, levelCount: 1 });
   assert.equal(publication.proxyCandidatePageCount, 1);
   assert.equal(publication.selectedBasePageCount, 1);
 });
 
 test("default capacity fits the guaranteed WebGPU sampled-directory height", () => {
-  assert.equal(SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY, 8_192);
+  assert.equal(SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY, 8_192);
 });
 
 test("production capacity follows the device directory height rather than a fixed floor", () => {
   // One directory row per page, so the 2D height limit is the only ceiling.
   // Apple reports 16384; the former hard-coded 8192 discarded roughly a sixth
-  // of hose-tank's static geometry, and a dropped page samples as empty air.
+  // of hose-tank's scene geometry, and a dropped page samples as empty air.
   assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 16_384 } } as GPUDevice), 16_384);
   assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 8_192 } } as GPUDevice), 8_192);
   // A device that reports nothing usable stays usable, not empty.
   assert.equal(webGpuSvoNodeMipMaximumPages({ limits: undefined } as unknown as GPUDevice), 2_048);
   assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 512 } } as GPUDevice), 2_048);
-});
-
-test("the renderer declines to publish a pyramid that dropped geometry", () => {
-  // Truncation is not a coarser pyramid, it is a wrong one, and the marcher has
-  // no way to notice: dryNodeMipAt returns valid with a zero sample for a
-  // non-resident page. Falling back to exact traversal is slower and correct.
-  const source = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
-  assert.match(source, /const maximumDirectoryPages = webGpuSvoNodeMipMaximumPages\(device\)/);
-  assert.match(source, /if \(staticMips\.omittedBasePageCount > 0\) \{[^]*nodeMipWorldOrigin_m = undefined;/,
-    "an omitted-page publication must never reach the GPU pyramid");
-  const guard = source.indexOf("if (staticMips.omittedBasePageCount > 0)");
-  const construction = source.indexOf("new WebGpuSvoNodeMipPyramid(device)", guard);
-  assert.ok(guard >= 0 && construction > guard, "the omission guard must precede pyramid construction");
 });

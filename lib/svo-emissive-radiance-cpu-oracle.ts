@@ -6,7 +6,7 @@ import {
   type SvoNodeMipPageKey,
   type SvoNodeMipPyramidPlan,
 } from "./svo-node-mip-pyramid";
-import type { SvoStaticNodeMipPublication } from "./svo-static-node-mips";
+import type { SvoNodeMipCpuOraclePublication } from "./svo-node-mip-cpu-oracle";
 import {
   SVO_TETRAHEDRAL_RADIANCE_LAYOUT,
   packSvoRadianceRgb9e5,
@@ -17,18 +17,18 @@ import type { EnvironmentProxyPrimitive } from "./voxel-environments";
 
 type Triple = [number, number, number];
 
-export interface SvoStaticEmissiveRadianceOptions {
+export interface SvoEmissiveRadianceCpuOracleOptions {
   /** Surface samples per base-voxel axis. Two is 8 samples/voxel. */
   samplesPerAxis?: 1 | 2 | 4;
   /** Defaults to every proxy with finite, positive authored emission. */
   includeProxy?: (proxy: EnvironmentProxyPrimitive) => boolean;
   /** Optional first-bounce direct illumination; omission retains the emissive-only fast path. */
-  primaryDirectionalLight?: SvoStaticPrimaryDirectionalLight;
+  primaryDirectionalLight?: SvoCpuOraclePrimaryDirectionalLight;
   /** Inject physical point/area lights derived from emissive proxies tagged `light`. */
   injectAuthoredProxyLights?: boolean;
 }
 
-export interface SvoStaticPrimaryDirectionalLight {
+export interface SvoCpuOraclePrimaryDirectionalLight {
   /** Normalized internally; points from the shaded surface toward the light. */
   towardLightDirection: readonly [number, number, number];
   /** Scene-linear incident-light colour. */
@@ -38,7 +38,7 @@ export interface SvoStaticPrimaryDirectionalLight {
   shadowDistance_m?: number;
 }
 
-export interface SvoStaticEmissiveRadianceInterior {
+export interface SvoEmissiveRadianceCpuOracleInterior {
   /** Identical virtual key (including generation) to the corresponding opacity page. */
   key: SvoNodeMipPageKey;
   /**
@@ -52,11 +52,11 @@ export interface SvoStaticEmissiveRadianceInterior {
   nonBlackTexelCount: number;
 }
 
-export interface SvoStaticEmissiveRadiancePublication {
+export interface SvoEmissiveRadianceCpuOraclePublication {
   generation: number;
   /** Shared topology, slots and directory with the opacity publication. */
   plan: SvoNodeMipPyramidPlan;
-  interiors: readonly SvoStaticEmissiveRadianceInterior[];
+  interiors: readonly SvoEmissiveRadianceCpuOracleInterior[];
   worldOrigin_m: readonly [number, number, number];
   baseVoxelSize_m: readonly [number, number, number];
   emissiveProxyCount: number;
@@ -234,25 +234,25 @@ function visibleToDirectionalLight(
 }
 
 function canonicalDirectionalLight(
-  input: SvoStaticPrimaryDirectionalLight | undefined,
+  input: SvoCpuOraclePrimaryDirectionalLight | undefined,
   domain: SparseSceneDomainPlan,
 ): CanonicalDirectionalLight | undefined {
   if (!input) return undefined;
   if (input.towardLightDirection.some((component) => !Number.isFinite(component))) {
-    throw new RangeError("Static primary-light direction must contain three finite components");
+    throw new RangeError("CPU oracle primary-light direction must contain three finite components");
   }
-  if (!(length(input.towardLightDirection) > 1e-12)) throw new RangeError("Static primary-light direction must be non-zero");
+  if (!(length(input.towardLightDirection) > 1e-12)) throw new RangeError("CPU oracle primary-light direction must be non-zero");
   if (input.colorLinear.some((channel) => channel < 0 || !Number.isFinite(channel))) {
-    throw new RangeError("Static primary-light colour must contain three non-negative finite channels");
+    throw new RangeError("CPU oracle primary-light colour must contain three non-negative finite channels");
   }
-  if (input.intensity < 0 || !Number.isFinite(input.intensity)) throw new RangeError("Static primary-light intensity must be non-negative and finite");
+  if (input.intensity < 0 || !Number.isFinite(input.intensity)) throw new RangeError("CPU oracle primary-light intensity must be non-negative and finite");
   const domainDiagonal = Math.hypot(
     domain.worldBounds_m.max.x - domain.worldBounds_m.min.x,
     domain.worldBounds_m.max.y - domain.worldBounds_m.min.y,
     domain.worldBounds_m.max.z - domain.worldBounds_m.min.z,
   );
   const shadowDistance_m = input.shadowDistance_m ?? domainDiagonal;
-  if (!(shadowDistance_m > 0) || !Number.isFinite(shadowDistance_m)) throw new RangeError("Static primary-light shadow distance must be positive and finite");
+  if (!(shadowDistance_m > 0) || !Number.isFinite(shadowDistance_m)) throw new RangeError("CPU oracle primary-light shadow distance must be positive and finite");
   return {
     towardLightDirection: normalized([...input.towardLightDirection] as Triple),
     colorLinear: [...input.colorLinear],
@@ -420,7 +420,7 @@ function reduceParent(page: SvoNodeMipCoordinate, level: number, values: Readonl
   return result;
 }
 
-function packInterior(key: SvoNodeMipPageKey, interior: Float32Array): SvoStaticEmissiveRadianceInterior {
+function packInterior(key: SvoNodeMipPageKey, interior: Float32Array): SvoEmissiveRadianceCpuOracleInterior {
   const count = SVO_NODE_MIP_LAYOUT.interiorSize ** 3;
   const packedInterleaved = new Uint32Array(count * SVO_TETRAHEDRAL_RADIANCE_LAYOUT.directionCount);
   let nonBlackTexelCount = 0;
@@ -438,20 +438,20 @@ function packInterior(key: SvoNodeMipPageKey, interior: Float32Array): SvoStatic
 }
 
 /**
- * Publishes authored emissive exitance over an already-complete static opacity
- * topology. Every opacity page receives either packed data or an explicit black
+ * CPU reference construction of authored emissive exitance over a complete
+ * opacity snapshot. Every opacity page receives packed data or an explicit black
  * certificate, so the atlas owner never has to infer missing-child semantics.
  */
-export function buildSvoStaticEmissiveRadiancePublication(
-  opacity: SvoStaticNodeMipPublication,
+export function buildSvoEmissiveRadianceCpuOraclePublication(
+  opacity: SvoNodeMipCpuOraclePublication,
   domain: SparseSceneDomainPlan,
   environmentPrimitives: readonly EnvironmentProxyPrimitive[],
-  options: SvoStaticEmissiveRadianceOptions = {},
-): SvoStaticEmissiveRadiancePublication {
-  if (!opacity.plan.complete) throw new Error("Static emissive radiance requires a complete opacity page plan");
-  if (opacity.generation !== opacity.plan.generation) throw new Error("Static opacity publication generation does not match its page plan");
+  options: SvoEmissiveRadianceCpuOracleOptions = {},
+): SvoEmissiveRadianceCpuOraclePublication {
+  if (!opacity.plan.complete) throw new Error("Emissive-radiance CPU oracle requires a complete opacity page plan");
+  if (opacity.generation !== opacity.plan.generation) throw new Error("CPU oracle opacity generation does not match its page plan");
   const samplesPerAxis = options.samplesPerAxis ?? 2;
-  if (![1, 2, 4].includes(samplesPerAxis)) throw new RangeError("Static emissive radiance samples per axis must be 1, 2, or 4");
+  if (![1, 2, 4].includes(samplesPerAxis)) throw new RangeError("Emissive-radiance CPU oracle samples per axis must be 1, 2, or 4");
   const include = options.includeProxy ?? ((proxy: EnvironmentProxyPrimitive) => proxy.material.emission > 0 && Number.isFinite(proxy.material.emission));
   const emissive = environmentPrimitives.filter(include);
   for (const proxy of emissive) {
@@ -484,7 +484,7 @@ export function buildSvoStaticEmissiveRadiancePublication(
   }
   const interiors = opacity.plan.pages.map(({ key }) => {
     const value = values.get(interiorKey(key.level, key.coordinate));
-    if (!value) throw new Error(`Missing static emissive radiance interior ${svoNodeMipPageKey(key)}`);
+    if (!value) throw new Error(`Missing emissive-radiance CPU oracle interior ${svoNodeMipPageKey(key)}`);
     return packInterior(key, value);
   });
   const base = interiors.filter(({ key }) => key.level === 0);

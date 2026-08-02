@@ -3,8 +3,12 @@ import test from "node:test";
 import { fineToCoarseLevelSetWGSL } from "../lib/webgpu-octree-fine-to-coarse-levelset";
 import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
 import {
+  WGSL_STORAGE_BUFFER_DESIGN_LIMIT,
+  assertWGSLStorageBufferBudget,
   assertWGSLActivityBindingEligibility,
   auditExplicitComputeBufferBindings,
+  auditExplicitStageBufferBindings,
+  auditWGSLBindingReachability,
   auditWGSLComputeBindingReachability,
 } from "../lib/wgsl-binding-reachability";
 
@@ -96,6 +100,55 @@ test("explicit layout audit counts only compute-visible buffer entries", () => {
   assert.equal(audit.uniformCount, 1);
 });
 
+test("entry-point audit handles fragment reachability and enforces the four-buffer design budget", () => {
+  const wgsl = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> first: array<u32>;
+@group(0) @binding(1) var<storage, read> second: array<u32>;
+@group(0) @binding(2) var<storage, read> third: array<u32>;
+@group(0) @binding(3) var<storage, read> fourth: array<u32>;
+@group(0) @binding(4) var<storage, read> fifth: array<u32>;
+fn common() -> u32 { return first[0] + second[0] + third[0] + fourth[0]; }
+@fragment fn fragmentMain() -> @location(0) vec4f { return vec4f(f32(common())); }
+@fragment fn tooWide() -> @location(0) vec4f { return vec4f(f32(common() + fifth[0])); }
+`;
+
+  const compact = auditWGSLBindingReachability(wgsl, "fragmentMain", "fragment");
+  assert.equal(WGSL_STORAGE_BUFFER_DESIGN_LIMIT, 4);
+  assert.deepEqual(compact.storage.map(({ binding }) => binding), [0, 1, 2, 3]);
+  assert.deepEqual(assertWGSLStorageBufferBudget(compact), {
+    entryPoint: "fragmentMain",
+    storageCount: 4,
+    maximumStorageCount: 4,
+  });
+
+  const wide = auditWGSLBindingReachability(wgsl, "tooWide", "fragment");
+  assert.throws(() => assertWGSLStorageBufferBudget(wide),
+    /tooWide reaches 5 storage buffers; design budget is 4/);
+  assert.throws(() => auditWGSLBindingReachability(wgsl, "fragmentMain", "compute"),
+    /not a compute entry point/);
+});
+
+test("explicit layout audit applies the same budget to any shader stage", () => {
+  const fragment = auditExplicitStageBufferBindings([
+    { binding: 0, visibility: 0x2, buffer: { type: "read-only-storage" } },
+    { binding: 1, visibility: 0x6, buffer: { type: "storage" } },
+    { binding: 2, visibility: 0x4, buffer: { type: "storage" } },
+    { binding: 3, visibility: 0x2, buffer: {} },
+  ], 0x2);
+
+  assert.deepEqual(fragment.storageBindings, [0, 1]);
+  assert.deepEqual(fragment.uniformBindings, [3]);
+  assert.deepEqual(assertWGSLStorageBufferBudget({
+    entryPoint: "explicit fragment layout",
+    storageCount: fragment.storageCount,
+  }), {
+    entryPoint: "explicit fragment layout",
+    storageCount: 2,
+    maximumStorageCount: 4,
+  });
+  assert.throws(() => auditExplicitStageBufferBindings([], 0), /stage bit must be positive/i);
+});
+
 test("WGSL binding audit rejects invalid entry points and duplicate slots", () => {
   const wgsl = /* wgsl */ `
 @group(0) @binding(0) var<storage, read> first: array<u32>;
@@ -109,6 +162,8 @@ fn helper() {}
     /not a compute entry point/);
   assert.throws(() => auditWGSLComputeBindingReachability("", "missing"), /is missing/);
   assert.throws(() => auditWGSLComputeBindingReachability("", "not-valid"), /is invalid/);
+  assert.throws(() => assertWGSLStorageBufferBudget({ entryPoint: "main", storageCount: 0 }, 0),
+    /positive integer/);
   assert.throws(() => auditExplicitComputeBufferBindings([
     { binding: 0, visibility: 0x4, buffer: {} },
     { binding: 0, visibility: 0x4, buffer: {} },

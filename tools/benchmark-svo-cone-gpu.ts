@@ -153,6 +153,7 @@ struct ProbeResult{mortonLow:u32,mortonHigh:u32,findResult:u32,pad:u32}
 @group(0) @binding(16) var nodeMipAtlas:texture_3d<f32>;
 @group(0) @binding(17) var nodeMipSampler:sampler;
 @group(0) @binding(18) var nodeMipDirectory:texture_2d<u32>;
+@group(0) @binding(26) var nodeMipPageValidity:texture_2d<u32>;
 var<private> dryMipSteps:u32;
 var<private> benchFetches:u32;
 var<private> benchSearchIterations:u32;
@@ -220,6 +221,17 @@ for (const page of plan.pages) {
 }
 assert.ok(pyramid.publish().published, "fixture pyramid publication failed");
 const visible = pyramid.visibleGeneration()!;
+const pageValidity = device.createTexture({
+  label: "Cone benchmark current page validity",
+  size: [Math.max(1, plan.pages.length), 1],
+  format: "r32uint",
+  usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+});
+const pageValidityWords = new Uint32Array(Math.max(1, plan.pages.length));
+pageValidityWords.fill(GENERATION);
+device.queue.writeTexture({ texture: pageValidity }, pageValidityWords,
+  { bytesPerRow: pageValidityWords.byteLength }, [pageValidityWords.length, 1]);
+const pageValidityView = pageValidity.createView();
 
 const levelStart = new Uint32Array(12);
 for (const page of plan.pages) if (page.key.level < 11) levelStart[page.key.level + 1] += 1;
@@ -259,6 +271,7 @@ for (const variant of VARIANTS) {
       { binding: 16, resource: visible.view },
       { binding: 17, resource: visible.sampler },
       { binding: 18, resource: visible.directoryView },
+      { binding: 26, resource: pageValidityView },
     ],
   });
   const ray = device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint: "benchmarkMain" } });
@@ -403,4 +416,4 @@ console.log(JSON.stringify({
 }, null, 2));
 
 rayResults.destroy(); probeResults.destroy(); rayReadback.destroy(); probeReadback.destroy();
-paramsBuffer.destroy(); publicationBuffer.destroy(); pyramid.destroy(); device.destroy();
+paramsBuffer.destroy(); publicationBuffer.destroy(); pyramid.destroy(); pageValidity.destroy(); device.destroy();

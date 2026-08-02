@@ -90,8 +90,8 @@ test("large hydrostatic authors enough air-support capacity for its full footpri
   assert.equal(newArena.identityCapacity, 10_240);
   assert.ok(newArena.identityCapacity >= identityDemand);
   assert.ok(newArena.identityCapacity <= 2 * identityDemand);
-  assert.equal(oldArena.allocatedBytes, 9_512_432);
-  assert.equal(newArena.allocatedBytes, 19_023_376);
+  assert.equal(oldArena.allocatedBytes, 9_512_436);
+  assert.equal(newArena.allocatedBytes, 19_023_380);
 });
 
 test("large hydrostatic derives every sparse capacity from its authored fluid footprint", () => {

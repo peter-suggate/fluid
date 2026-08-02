@@ -19,6 +19,7 @@ import { signedDistanceFromVolume } from "./volume-signed-distance";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { WebGPUQuadtreeSurfaceState, type SurfaceInflowState } from "./webgpu-quadtree-builder";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
+import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
 import {
   FLUID_TILE_ACTIVE_CANDIDATE_DISPATCH_OFFSET_BYTES,
   FLUID_TILE_ACTIVE_DISPATCH_OFFSET_BYTES,
@@ -4542,6 +4543,15 @@ export class WebGPUOctreeProjection {
     return releasedBytes;
   }
   get sparseVoxelSceneSource() { return this.sparseBrickWorld?.sceneSource; }
+  stageSceneUpdate(scene: SceneDescription) {
+    return this.sparseBrickWorld?.stageSceneUpdate(scene) ?? false;
+  }
+  stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]) {
+    return this.sparseBrickWorld?.stageLivePrimitiveUpdates(updates) ?? false;
+  }
+  encodeSceneMaintenance(encoder: GPUCommandEncoder) {
+    return this.sparseBrickWorld?.encodeSceneMaintenance(encoder) ?? false;
+  }
   get sparseVoxelRenderSource() {
     if (this.sparseBrickWorld) {
       const source = this.sparseBrickWorld.ensureInspectionSource();
@@ -6025,13 +6035,11 @@ export class WebGPUOctreeProjection {
         encoder, source.leaves, source.candidates.candidates, source.candidates.countAndDispatch,
       );
     }
-    // The dry-scene renderer reads the static world (topology, authored
-    // scenery distance, material/owner identity) from this same source, and it
-    // is gated on the structural publication fence. Encoding it here — once,
-    // on the first render-world publication — is what makes the room, its
-    // shell and its props reachable by a primary ray. Water stays on the
-    // raster extraction path, so no dense fluid payload is published.
-    this.sparseBrickWorld?.encodeStaticPublication(encoder);
+    // Scene maintenance remains live even when this physics checkpoint has no
+    // dense fluid payload to publish. The presentation loop calls the same
+    // entry point while paused; this bootstrap call merely starts convergence
+    // for the initial scene revision.
+    this.sparseBrickWorld?.encodeSceneMaintenance(encoder);
     // Publication is GPU-transactional. Failed, stale, and overflowing
     // generations retain the last good (including analytic t=0) tile stream;
     // a published zero-count generation is the distinct valid-empty case.

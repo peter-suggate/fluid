@@ -252,7 +252,7 @@ fn svoStagePrimaryClaimant(coordinate:vec2i)->vec3f{
   let producer=(flags>>${SVO_GBUFFER_PRODUCER_SHIFT}u)&${SVO_GBUFFER_PRODUCER_MASK}u;
   if(producer==${SVO_GBUFFER_PRODUCERS.rasterBackground}u){return svoStageClaimantColor(1u);}
   if(producer==${SVO_GBUFFER_PRODUCERS.brickRaster}u){return svoStageClaimantColor(2u);}
-  if(producer==${SVO_GBUFFER_PRODUCERS.staticPrimitiveRaster}u){return svoStageClaimantColor(3u);}
+  if(producer==${SVO_GBUFFER_PRODUCERS.scenePrimitiveRaster}u){return svoStageClaimantColor(3u);}
   if(producer==${SVO_GBUFFER_PRODUCERS.rigidImpostorRaster}u){return svoStageClaimantColor(4u);}
   if(producer==${SVO_GBUFFER_PRODUCERS.glassDiscovery}u){return svoStageClaimantColor(5u);}
   if(producer==${SVO_GBUFFER_PRODUCERS.tracedPrimary}u){return svoStageClaimantColor(6u);}

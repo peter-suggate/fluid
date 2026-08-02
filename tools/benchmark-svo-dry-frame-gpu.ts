@@ -2,7 +2,7 @@
 /**
  * Headless end-to-end GPU benchmark for the production SVO dry-scene render
  * pass (SparseVoxelDrySceneRenderer.encode) bound to the shipped garden
- * lighting-study world (WebGPUStaticSvoScene over OctreeSparseBrickWorld).
+ * lighting-study world (WebGPULiveSvoScene over OctreeSparseBrickWorld).
  *
  * Runs on Dawn/Metal via the `webgpu` node module. Reports per-frame GPU pass
  * time (timestamp queries when available, otherwise submit->fence wall time)
@@ -26,7 +26,7 @@
  *      FLUID_SVO_DRY_FRAME_TRAVERSAL (hybrid | canonical | canonical-parametric | compact | wide |
  *      raster-primary; default canonical-parametric; raster-primary implies both raster arms),
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
- *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only static-world override),
+ *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only scene override),
  *      FLUID_SVO_DRY_FRAME_SHADING (inline | split | auto-relight; default auto-relight),
  *      FLUID_SVO_DRY_FRAME_RASTER_GLASS (1 enables coverage-scaled pane discovery),
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID (1 enables current-frame rigid impostor discovery),
@@ -82,6 +82,7 @@ import { boundingRadius, initializeRigidBodies } from "../lib/rigid-body";
 import { getScenePreset } from "../lib/scenes";
 import { buildSvoSceneGlass } from "../lib/svo-scene-glass";
 import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
+import { buildDefaultSvoMaterialRecords, packSvoMaterialTable, svoMaterialFromEnvironmentProxyMaterial, svoMaterialFunctionIdForEnvironmentProxy } from "../lib/svo-material-abi";
 import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
 import { buildSvoTerrainMaterial } from "../lib/svo-terrain-material";
 import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } from "../lib/terrain";
@@ -89,7 +90,7 @@ import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import type { SvoConeTracingMode } from "../lib/svo-render-options";
 import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
-import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
+import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import {
   createPassEncoderIsolationScratch,
   isolateComputePassEncoders,
@@ -451,7 +452,7 @@ const camera: CameraState = { ...defaultCamera, ...preset.camera, target_m: { ..
 let activeCamera: CameraState = camera;
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
 
-const solver = await WebGPUStaticSvoScene.create(
+const solver = await WebGPULiveSvoScene.create(
   device,
   scene,
   "balanced",
@@ -463,7 +464,7 @@ const publishedSource = solver.sparseVoxelSceneSource;
 const source = globalIlluminationEnabled || !publishedSource
   ? publishedSource
   : { ...publishedSource, tetrahedralRadiance: undefined };
-assert.ok(source?.structural, "static SVO world did not publish a structural scene source");
+assert.ok(source?.structural, "live SVO scene did not publish a structural scene source");
 
 // Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly.
 const scenePrimitives = buildSvoScenePrimitives(scene);
@@ -473,9 +474,18 @@ const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKe
 const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
 const terrainMaterial = scenePrimitives.analyticTerrain ? buildSvoTerrainMaterial(scene) : undefined;
 const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "container-pane" || role === "container-top");
-const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, source);
+const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, 1);
 const drySceneData: SparseVoxelDrySceneData = {
+  renderRevision: 1,
   primitiveRecords: scenePrimitives.packedRecords,
+  primitiveCandidates: scenePrimitives.primitiveCandidates!,
+  materialRecords: packSvoMaterialTable([
+    ...buildDefaultSvoMaterialRecords(1),
+    ...scenePrimitives.metadata.map((primitive) => svoMaterialFromEnvironmentProxyMaterial(
+      primitive.materialId, primitive.material, 1, svoMaterialFunctionIdForEnvironmentProxy(primitive),
+    )),
+  ]),
+  materialRevision: 1,
   ownerBase: scene.rigidBodies.length,
   skippedOwnerId: scenePrimitives.openShellOwnerId,
   terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
@@ -518,7 +528,6 @@ const configuredRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale
     giBounceStrength: 0,
     giOcclusionStrength: 0,
     giEnvironmentStrength: 0,
-    giDirectStrength: 0,
   }),
 };
 renderer.setRenderTuning(configuredRenderTuning);
@@ -530,7 +539,8 @@ if (coneTracingMode === "cones" && coneScale !== 1) {
   await renderer.ensureConeLightingPrepass();
   log(`Cone-lighting prepass ready at scale ${coneScale} (${svoConePrepassSize(width, height, coneScale).join("x")})`);
 }
-renderer.setSource(source, drySceneData);
+renderer.setSource(source);
+renderer.publishScene(drySceneData);
 renderer.ensureSize(width, height);
 let syntheticRigidMotionBuffer: GPUBuffer | undefined;
 if (syntheticRigidMotion || syntheticRigidTransition) {
@@ -746,7 +756,7 @@ timingMethod = GPUPerformanceTraceRecorder.supported(device) && !forceWallTiming
   ? "generic-performance-trace" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
 let rigidMotionTransition_ms: number[] | undefined;
 if (syntheticRigidTransition) {
-  // Re-establish a genuinely warm reduced static-world cache after the scale-1
+  // Re-establish a genuinely warm reduced scene cache after the scale-1
   // A/B warmup switched the active pipeline bundle.
   for (let index = 0; index < Math.max(4, warmups); index += 1) {
     const encoder = device.createCommandEncoder({ label: `Rigid transition static warmup ${index}` });

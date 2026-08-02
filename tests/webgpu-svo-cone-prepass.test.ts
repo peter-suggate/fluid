@@ -9,6 +9,7 @@ import {
   createSvoDrySceneFragmentWGSL,
   SparseVoxelDrySceneRenderer,
   SVO_DRY_CONE_PREPASS_CONTRACT,
+  SVO_DRY_DERIVED_FAILURE,
   SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT,
   svoConePrepassSize,
   svoDrySceneShader,
@@ -56,7 +57,7 @@ test("scale 1 preserves the production shader byte-for-byte (fingerprint contrac
     "the reduced-only blocker specialization must not perturb the scale-1 shader");
 });
 
-test("reduced scales add the prepass entry and guided upsample while keeping every inline fallback", () => {
+test("reduced scales fail closed explicitly and never escape into exact cone fallbacks", () => {
   for (const scale of [0.5, 0.25, 0.125] as const) {
     const reduced = createSvoDrySceneFragmentWGSL(scale);
     assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityKeyTexture:texture_2d<u32>/);
@@ -73,13 +74,17 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
       "opaque shading must have a separate reduced-rate entry point so it cannot inflate cone-pass register pressure");
     assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true })),
       "the reduced variant must embed the identical optimized marcher block");
-    assert.match(reduced, /if\(weightSum<0\.05\)\{dryConeFallback=1u;return;\}/,
-      "silhouette pixels below the guidance-weight threshold must fall back to exact inline cones");
+    assert.match(reduced, new RegExp(`if\\(weightSum<0\\.05\\)\\{dryDerivedPageFailure\\|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return;\\}`),
+      "insufficient guided support must publish a visible reconstruction failure");
+    assert.match(reduced, /let cone=dryConeVisibility\(origin,rotated[^]*if\(cone\.valid==0u\)\{return DRY_PREPASS_INVALID_PACKED;\}[^]*visibility\+=cone\.transmittance/,
+      "a dirty AO page must invalidate the reduced texel instead of fabricating visibility");
+    assert.match(reduced, /let cone=dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m[^]*if\(cone\.valid==0u\)\{return DRY_PREPASS_INVALID_PACKED;\}[^]*visibility\+=mix/,
+      "a dirty shadow page must invalidate the reduced texel instead of being packed as fully visible");
     // Deliberate cone-banding fix: shadow-cone origins escape the receiver's
     // trilinear support along the geometric normal, and finite emitters clear
     // the march end by one cone-support width before marching.
     assert.match(reduced, /let cone=dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m,towardLight,dry\.tuningRays1\.y,coneMax_m,geometricNormal,finiteDistance_m>0\.0\)/,
-      "the inline shadow cone must remain the fallback for fallback-band pixels");
+      "valid cone-mode shadow queries retain the declared live cone algorithm");
     assert.match(reduced, /dryCurrentLightSlot<8u/,
       "every user-shadable light slot must reuse the reduced-rate visibility cache");
     assert.match(reduced, /if\(index<4u\)\{return dryPrepassData0\[index\];\}[^]*if\(index<8u\)\{return dryPrepassData1\[index-4u\];\}[^]*dryPrepassData2\[min\(index-8u,3u\)\]/,
@@ -110,9 +115,9 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
       "joint-bilateral mode must reuse the visibility guide weights for edge-aware radiance reconstruction");
     assert.match(reduced, /materialPublication\.w&16u\)!=0u\)\{accumulatedGi\+=textureLoad\(dryPrepassRadianceTexture,texel,0\)\*weight;giWeightSum\+=weight/,
       "GLOBAL must reconstruct current-frame environmental GI only from exact-identity neighbours");
-    assert.match(reduced, /if\(giWeightSum>=0\.05\)\{dryPrepassGi=accumulatedGi\/giWeightSum;dryPrepassGiState=1u;\}/,
-      "insufficient geometry-guided GI support must leave the full-resolution cone fallback active");
-    assert.match(reduced, /if\(dryPrepassGiState==1u\)\{return DryGlobalIllumination/,
+    assert.match(reduced, /if\(giWeightSum>=0\.05\)\{dryPrepassGi=accumulatedGi\/giWeightSum;dryPrepassGiState=1u;\}[^]*else if[^]*dryDerivedPageFailure\|=8u/,
+      "insufficient geometry-guided GI support must fail visibly without a hidden full-resolution retry");
+    assert.match(reduced, /if\(dryPrepassGiState==1u\)\{[^]*return DryGlobalIllumination/,
       "a valid reduced GI surface summary must return before any full-resolution 3D cone taps");
     assert.match(reduced, /let weight=bilinear\*select\(guidedWeight,1\.0,dry\.tuningCounts2\.w==3u\)/,
       "wide relight must aggressively reconstruct shadow factors with unmodified bilinear weights");
@@ -122,11 +127,26 @@ test("reduced scales add the prepass entry and guided upsample while keeping eve
     assert.match(reduced, /let opaque=DryHit\(geometry\.x,dryPrepassDecodeNormal\(geometry\.yz\),identity&0xffffu,identity>>16u/);
     assert.match(reduced, /return vec4f\(shadeDryOpaque\(opaque,ro,rd\),opaque\.t\)/,
       "the isolated reduced-rate pass must shade the reconstructed coarse hit without another primary trace");
-    assert.match(reduced, /materialPublication\.w&16u\)!=0u\)\{dryPrepassGiState=0u;let ignoredBodyOwner=select\(DRY_OWNER_NONE,opaque\.ownerId,opaque\.motionKind==DRY_GBUFFER_MOTION_RIGID\);let gi=dryGlobalIllumination\(ro\+rd\*opaque\.t,opaque\.normal,ignoredBodyOwner\);return vec4f\(gi\.radiance,gi\.visibility\)/,
+    assert.match(reduced, /materialPublication\.w&16u\)!=0u\)\{dryPrepassGiState=0u;let ignoredBodyOwner=select\(DRY_OWNER_NONE,opaque\.ownerId,opaque\.motionKind==DRY_GBUFFER_MOTION_RIGID\);let gi=dryGlobalIllumination\(ro\+rd\*opaque\.t,opaque\.normal,ignoredBodyOwner\);return vec4f\(gi\.radiance,select\(-1\.0,gi\.visibility,gi\.valid!=0u\)\)/,
       "GLOBAL's reduced target must store only reusable indirect radiance and occlusion, not a baked material closure");
     assert.match(reduced, /if\(hit\.t>=DRY_MISS\)[^]*dryPrepassRadianceState==1u&&hit\.motionKind==DRY_GBUFFER_MOTION_STATIC[^]*let position=ro\+rd\*hit\.t;let surface=dryEvaluateSurfaceMaterial/,
       "exact-matched static radiance must return before full-resolution procedural material evaluation");
   }
+  const productionCone = createSvoDrySceneFragmentWGSL(0.5, "canonical-parametric", "off", "split");
+  assert.doesNotMatch(productionCone, /dryConeFallback/);
+  const directStart = productionCone.indexOf("fn dryLightVisibility(");
+  const directEnd = productionCone.indexOf("fn dryContactVisibilityRadius", directStart);
+  const directVisibility = productionCone.slice(directStart, directEnd);
+  const directConeMode = directVisibility.indexOf("if((dry.materialPublication.w&4u)!=0u)");
+  const directInvalid = directVisibility.indexOf("if(cone.valid==0u)", directConeMode);
+  const directConeReturn = directVisibility.indexOf("return mix(vec3f(1.0),raw,dry.tuningRays0.y);", directInvalid);
+  const directExactMode = directVisibility.indexOf("let result=svoTraceVisibility", directConeReturn);
+  assert.ok(directConeMode >= 0 && directInvalid > directConeMode && directConeReturn > directInvalid && directExactMode > directConeReturn,
+    "cone-mode direct visibility must return before the explicitly selected exact tracer");
+  const giStart = productionCone.indexOf("fn dryGlobalIllumination(");
+  const giEnd = productionCone.indexOf("fn dryDiagnosticControl", giStart);
+  assert.doesNotMatch(productionCone.slice(giStart, giEnd), /svoTraceVisibility/,
+    "cone-mode GI must not silently invoke the exact tracer");
   assert.doesNotMatch(rendererSource, /lightingMode/,
     "GLOBAL must not retain a selectable lighting backend");
   assert.match(rendererSource, /label: "Sparse voxel persistent world GI cache"[^]*gi\.setPipeline\(this\.worldGiFramePipeline!\)[^]*gi\.setPipeline\(this\.worldGiCachePipeline!\)/,
@@ -220,6 +240,8 @@ function mockSource(): SparseVoxelRenderSource {
     materialCount: 8,
     pbrMaterials: { binding: resource, count: 8, strideBytes: SVO_MATERIAL_RECORD_STRIDE_BYTES, revision: 1 },
     structural: {
+      structure: resource,
+      structureOffsetsWords: { control: 0, publication: 0, nodes: 0, leaves: 0 },
       control: resource, nodes: resource, leaves: resource, geometry: resource,
       velocity: resource, materialOwners: resource, fluidLeafStates: resource,
       publication: { state: resource, byteLength: 32 },
@@ -228,7 +250,7 @@ function mockSource(): SparseVoxelRenderSource {
       strides: { control: 4, node: 32, leaf: 16, geometry: 16, velocity: 16, materialOwner: 4, fluidLeafState: 4 },
       fields: {
         topology: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
-        staticGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
+        sceneGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         materialOwner: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         dynamicSolid: { residency: "unavailable", validity: "unavailable", revision: 0 },
         coarseFluid: { residency: "unavailable", validity: "unavailable", revision: 0 },
@@ -256,7 +278,9 @@ test("the cone-lighting scale is an optional lighting option that defaults to th
   } as unknown as GPUDevice;
   try {
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
-    renderer.setSource(mockSource(), svoDrySceneFixture);
+    assert.deepEqual(renderer.presentationBundleStatus, { state: "ready" });
+    renderer.setSource(mockSource());
+    renderer.publishScene(svoDrySceneFixture);
     assert.equal(renderer.coneLightingScale, 1, "callers without the option keep the historical inline path");
     const paramsWrites = () => writes.filter(({ label }) => label === "Sparse voxel dry scene parameters").length;
     const beforeRepeat = paramsWrites();
@@ -264,6 +288,9 @@ test("the cone-lighting scale is an optional lighting option that defaults to th
     assert.equal(paramsWrites(), beforeRepeat, "unchanged options (including implicit scale 1) must short-circuit");
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.5 });
     assert.equal(renderer.coneLightingScale, 0.5);
+    assert.deepEqual(renderer.presentationBundleStatus, {
+      state: "compiling", detail: "Compiling requested SVO cone bundle at scale 0.5",
+    });
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.5 });
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true, coneLightingScale: 0.125 });
     assert.equal(renderer.coneLightingScale, 0.125, "the 8x8 option reaches the renderer without normalization loss");

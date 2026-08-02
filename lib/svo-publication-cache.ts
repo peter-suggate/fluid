@@ -1,11 +1,11 @@
-/** Small bounded cache shared by immutable CPU-side SVO publications. */
-export const SVO_STATIC_PUBLICATION_CACHE_MAXIMUM_ENTRIES = 64;
+/** Small bounded cache shared by CPU-authored SVO content snapshots. */
+export const SVO_PUBLICATION_CACHE_MAXIMUM_ENTRIES = 64;
 
 function fnvStep(hash: number, value: number): number {
   return Math.imul((hash ^ value) >>> 0, 0x01000193) >>> 0;
 }
 
-export function hashSvoStaticPublication(
+export function hashSvoPublication(
   words: Uint32Array,
   metadata = "",
 ): string {
@@ -30,14 +30,14 @@ export function hashSvoStaticPublication(
  * upload sources. The bounded FIFO policy prevents editor scene churn from
  * retaining an unbounded number of publications.
  */
-export function internSvoStaticPublication<T extends object>(
+export function internSvoPublication<T extends object>(
   cache: Map<string, T>,
   cacheKey: string,
   publication: T,
 ): T {
   const cached = cache.get(cacheKey);
   if (cached) return cached;
-  if (cache.size >= SVO_STATIC_PUBLICATION_CACHE_MAXIMUM_ENTRIES) {
+  if (cache.size >= SVO_PUBLICATION_CACHE_MAXIMUM_ENTRIES) {
     const oldest = cache.keys().next().value as string | undefined;
     if (oldest !== undefined) cache.delete(oldest);
   }
@@ -45,7 +45,7 @@ export function internSvoStaticPublication<T extends object>(
   return publication;
 }
 
-export function cachedSvoStaticPublication<T extends object>(
+export function cachedSvoPublication<T extends object>(
   cache: ReadonlyMap<string, T>,
   cacheKey: string,
 ): T | undefined {

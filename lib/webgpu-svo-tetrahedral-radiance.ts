@@ -12,6 +12,10 @@ import {
   SVO_TETRAHEDRAL_RADIANCE_LAYOUT,
   svoTetrahedralRadianceAtlasBytes,
 } from "./svo-tetrahedral-radiance";
+import {
+  WebGpuLiveSvoDerivedPageState,
+  type LiveSvoDerivedPageValidityBinding,
+} from "./webgpu-svo-live-derived-cache";
 
 export const WEBGPU_SVO_TETRAHEDRAL_RADIANCE_LAYOUT = Object.freeze({
   format: SVO_TETRAHEDRAL_RADIANCE_LAYOUT.textureFormat,
@@ -284,4 +288,83 @@ export class WebGpuSvoTetrahedralRadiance {
   private destroyGeneration(generation: OwnedGeneration): void {
     generation.textures.forEach((texture) => texture.destroy());
   }
+}
+
+export interface WebGpuLiveSvoTetrahedralRadianceOptions {
+  pageCapacity: number;
+  atlasTexels: readonly [number, number, number];
+  label?: string;
+}
+
+export interface WebGpuLiveSvoTetrahedralRadianceVisibleGeneration extends WebGpuSvoTetrahedralRadianceVisibleGeneration {
+  pageValidity: LiveSvoDerivedPageValidityBinding;
+}
+
+export interface WebGpuLiveSvoTetrahedralRadianceGpuTarget {
+  textures: readonly [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
+  pageValidity: LiveSvoDerivedPageValidityBinding;
+  atlasPages: readonly [number, number, number];
+  pageCapacity: number;
+}
+
+/** Fixed-capacity live radiance atlas sharing node-mip physical page slots. */
+export class WebGpuLiveSvoTetrahedralRadiance {
+  readonly pageState: WebGpuLiveSvoDerivedPageState;
+  readonly allocatedBytes: number;
+
+  private readonly textures: [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
+  private readonly views: [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
+  private readonly blackSlots = new Set<number>();
+  private plan?: SvoNodeMipPyramidPlan;
+  private pendingPlan?: SvoNodeMipPyramidPlan;
+  private destroyed = false;
+
+  constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoTetrahedralRadianceOptions) {
+    if (!Number.isSafeInteger(options.pageCapacity) || options.pageCapacity <= 0) throw new RangeError("Live radiance page capacity must be positive");
+    if (options.atlasTexels.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new RangeError("Live radiance atlas dimensions must be positive integers");
+    if (options.atlasTexels.some((value) => value % SVO_NODE_MIP_LAYOUT.physicalSize !== 0)
+      || options.atlasTexels.reduce((product, value) => product * (value / SVO_NODE_MIP_LAYOUT.physicalSize), 1) < options.pageCapacity) {
+      throw new RangeError("Live radiance atlas must be page-aligned and contain its declared capacity");
+    }
+    const label = options.label ?? "Live SVO tetrahedral radiance";
+    this.textures = [0, 1, 2, 3].map((direction) => device.createTexture({ label: `${label} lobe ${direction}`,
+      size: options.atlasTexels, dimension: "3d", format: "rgba16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST })) as [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
+    this.views = this.textures.map((texture) => texture.createView({ dimension: "3d" })) as [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
+    this.pageState = new WebGpuLiveSvoDerivedPageState(device, options.pageCapacity, label);
+    this.allocatedBytes = options.atlasTexels.reduce((a, b) => a * b, 4 * 8) + this.pageState.allocatedBytes;
+  }
+
+  prepareGpuUpdate(plan: SvoNodeMipPyramidPlan): WebGpuLiveSvoTetrahedralRadianceGpuTarget {
+    this.assertAlive();
+    if (plan.pages.length > this.options.pageCapacity) throw new RangeError("Live radiance page capacity exceeded");
+    if (plan.atlas.texels.some((value, axis) => value > this.options.atlasTexels[axis])) throw new RangeError("Live radiance atlas capacity exceeded");
+    this.pendingPlan = plan;
+    return this.gpuTarget();
+  }
+
+  acceptGpuUpdate(generation: number): void {
+    if (!this.pendingPlan || this.pendingPlan.generation !== generation) throw new Error("GPU radiance completion does not match the staged plan");
+    this.plan = this.pendingPlan; this.pendingPlan = undefined;
+  }
+
+  gpuTarget(): WebGpuLiveSvoTetrahedralRadianceGpuTarget {
+    const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
+    return { textures: this.textures, pageValidity: this.pageState.validity,
+      atlasPages: this.options.atlasTexels.map((value) => Math.floor(value / physical)) as [number, number, number],
+      pageCapacity: this.options.pageCapacity };
+  }
+
+  visibleGeneration(): WebGpuLiveSvoTetrahedralRadianceVisibleGeneration | undefined {
+    if (!this.plan) return undefined;
+    return { generation: this.plan.generation, plan: this.plan, textures: this.textures, views: this.views,
+      blackSlots: this.blackSlots, pageValidity: this.pageState.validity };
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.textures.forEach((texture) => texture.destroy()); this.pageState.destroy(); this.destroyed = true;
+  }
+
+  private assertAlive(): void { if (this.destroyed) throw new Error("Live SVO tetrahedral radiance is destroyed"); }
 }

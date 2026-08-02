@@ -1,10 +1,10 @@
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription } from "./model";
 import {
-  cachedSvoStaticPublication,
-  hashSvoStaticPublication,
-  internSvoStaticPublication,
-} from "./svo-static-publication-cache";
+  cachedSvoPublication,
+  hashSvoPublication,
+  internSvoPublication,
+} from "./svo-publication-cache";
 import {
   buildEnvironmentProxyCatalog,
   environmentProxyPrimitives,
@@ -195,7 +195,7 @@ export interface SvoSceneLights {
   packedRecords: Uint32Array<ArrayBuffer>;
   omittedFixtureKeys: readonly string[];
   revision: number;
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -228,20 +228,20 @@ export function buildSvoSceneLights(scene: SceneDescription, options: BuildSvoSc
   const selectedIds = new Set(selected.map((light) => light.lightId));
   const omittedFixtureKeys = fixtures.filter((light) => !selectedIds.has(light.lightId)).map((light) => light.sourceKey).sort();
   const records = [directional, ...selected.sort((a, b) => a.lightId - b.lightId)];
-  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     records,
     omittedFixtureKeys,
   }));
-  const cacheKey = `svo-scene-lights-v${SVO_SCENE_LIGHT_VERSION}:${catalog.environmentId}:${staticRevision}`;
-  const cached = cachedSvoStaticPublication(sceneLightCache, cacheKey);
+  const cacheKey = `svo-scene-lights-v${SVO_SCENE_LIGHT_VERSION}:${catalog.environmentId}:${contentRevision}`;
+  const cached = cachedSvoPublication(sceneLightCache, cacheKey);
   if (cached) return cached;
   const packedRecords = packSvoLightRecords(records);
-  return internSvoStaticPublication(sceneLightCache, cacheKey, {
+  return internSvoPublication(sceneLightCache, cacheKey, {
     records,
     packedRecords,
     omittedFixtureKeys,
     revision,
-    staticRevision,
+    contentRevision,
     cacheKey,
   });
 }

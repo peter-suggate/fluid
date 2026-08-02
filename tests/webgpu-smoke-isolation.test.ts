@@ -209,6 +209,79 @@ test("the ocean first-frame lane runs two exact advances under the browser stora
   });
 });
 
+/**
+ * Fail-fast is the contract, not a nicety: a tripped counter means the physics
+ * being measured is already gone. The end-of-run walk once absorbed that --
+ * `large-power-dam-break` lost its fine band at step 248 and kept stepping a
+ * frozen solver to step 430 before reporting "tripped over 430 captured steps".
+ * These pin the structure that makes the run die at the step that tripped. The
+ * decoded verdicts themselves are covered by the control-ABI unit tests; only a
+ * Dawn lane can exercise the map/unmap cycle end to end.
+ */
+test("silent-failure tripwires are evaluated at their own step and terminate there", async () => {
+  const smoke = normalizeWhitespace(await readFile(
+    new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8"));
+
+  // One writer fills both destinations inside one encoder, so the live record
+  // the verdict is taken from and the ring the whole-run report walks cannot
+  // drift apart.
+  assertContainsInOrder(smoke, [
+    "const encodeTripwireRecordCopies = (",
+    "encodeTripwireRecordCopies(encoder, sources, tripwireSnapshot, base);",
+    "encodeTripwireRecordCopies(encoder, sources, tripwireLiveReadback!, 0);",
+    "device.queue.submit([encoder.finish()]);",
+  ], "the ring record and the live record must be written by the same encoder and writer");
+  assert.match(smoke,
+    /label: "Live silent-failure tripwire record", size: TRIPWIRE_RECORD\.strideBytes, usage: GPUBufferUsage\.COPY_DST \| GPUBufferUsage\.MAP_READ/,
+    "the live verdict needs its own single-record readback; the ring is MAP_READ|COPY_DST and cannot be a copy source");
+
+  const live = smoke.slice(
+    smoke.indexOf("let capturedThisStep = false;"),
+    smoke.indexOf("if (steps === oracleSteps)", smoke.indexOf("let capturedThisStep = false;")));
+  assert.notEqual(live.length, 0, "the live tripwire evaluation must sit inside the step loop");
+  assertContainsInOrder(live, [
+    // Map, copy out, unmap before anything can encode into the buffer again.
+    "await tripwireLiveReadback!.mapAsync(GPUMapMode.READ, 0, TRIPWIRE_RECORD.strideBytes);",
+    "tripwireLiveRecord.set(new Uint8Array(",
+    "} finally {",
+    "tripwireLiveReadback!.unmap();",
+    "const liveTrips = evaluateTripwireRecord(",
+    // FLUID_TRIPWIRE_ALLOW is the only downgrade path.
+    "const liveFailing = liveTrips.filter((entry) => !tripwireAllowList.has(entry.id));",
+    "samplingWall_ms += liveDecode_ms;",
+    "if (liveFailing.length !== 0) {",
+    "throw tripwireFailure(liveFailing, `at step ${steps}`",
+    "(fine generation ${fineGeneration})",
+  ], "step N's tripwires must be decoded and enforced at step N, before the next advance");
+  assert.doesNotMatch(live, /console\.error\(`\[tripwire/,
+    "a fatal trip must throw, never warn: FLUID_TRIPWIRE_ALLOW is the only downgrade");
+
+  // The trace is emitted from the live walk alone. Emitting it end-of-run would
+  // lose every record on the run that dies; emitting it from both would double
+  // every record on the run that does not.
+  assert.equal(smoke.split('record: "fine-topology-trace"').length - 1, 1,
+    "exactly one FLUID_FINE_TOPOLOGY_TRACE emitter may exist");
+  assert.match(smoke, /emitTopologyTrace && process\.env\.FLUID_FINE_TOPOLOGY_TRACE === "1"/);
+  assert.match(smoke, /steps, fineGeneration, true\);/,
+    "the live walk emits the topology trace");
+  assert.match(smoke,
+    /tripwireSteps\[record\]!, tripwireFineGenerations\[record\]!, false\)\);/,
+    "the end-of-run ring walk must not re-emit the topology trace");
+
+  // Whole-run reporting for allow-listed trips is unchanged, and the ring walk
+  // remains a hard failure if it ever disagrees with the live one.
+  assertContainsInOrder(smoke, [
+    "const allowed = tripped.filter((entry) => tripwireAllowList.has(entry.id));",
+    "const failing = tripped.filter((entry) => !tripwireAllowList.has(entry.id));",
+    "[tripwire ${entry.id} ALLOWED]",
+    "throw tripwireFailure(failing, `over ${tripwireSteps.length} captured steps`);",
+    'phase: "tripwires", capturedSteps: tripwireSteps.length,',
+    "required: tripwiresRequired, allowed: Array.from(tripwireAllowList),",
+  ], "the end-of-run walk must keep reporting the whole run");
+  assert.match(smoke, /silent-failure tripwire\(s\) tripped \$\{where\}/,
+    "both termination paths must report the same forensics payload");
+});
+
 test("the ceiling profiler uses the authored band-1 fast formulation", async () => {
   assert.equal(POWER_DAM_LANE_ENVIRONMENT["ceiling-drop"].FLUID_SCENE,
     "ceiling-slab-drop");
@@ -297,9 +370,14 @@ test("compact and structured publication rejection reports exact authority evide
     "throw error",
   ], "publication evidence must be emitted before the acceptance error is rethrown");
 
+  // Bounded by the structured audit block alone. The silent-failure tripwires
+  // that follow it in the same step deliberately DO fence and map every step
+  // (they must terminate the run at the step that tripped), so extending this
+  // slice to the next unrelated statement would read their fence as a
+  // regression in this one.
   const generationAudit = normalizeWhitespace(smoke.slice(
     smoke.indexOf("if (captureCompactPowerStep)"),
-    smoke.indexOf("if (steps === oracleSteps)", smoke.indexOf("if (captureCompactPowerStep)")),
+    smoke.indexOf("let capturedThisStep = false;", smoke.indexOf("if (captureCompactPowerStep)")),
   ));
   // The per-buffer copies are no longer open-coded here: one shared ABI writer
   // now serves both this harness and the browser's step-coherent snapshot ring,

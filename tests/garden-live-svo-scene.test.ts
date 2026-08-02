@@ -4,14 +4,20 @@ import test from "node:test";
 import { parseScene, serializeScene, validateScene } from "../lib/model";
 import { getScenePreset, scenePresets } from "../lib/scenes";
 import { planSceneRuntime } from "../lib/scene-runtime";
+import { planSparseSceneDomain } from "../lib/sparse-scene-domain";
 import { buildSvoSceneLights } from "../lib/svo-light-abi";
+import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { buildEnvironmentProxyCatalog } from "../lib/voxel-environments";
-import { buildOctreeSvoEnvironmentLightingPublication } from "../lib/webgpu-octree-sparse-bricks";
-import { staticSvoRenderBrickSize } from "../lib/webgpu-static-svo-scene";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
+import {
+  buildOctreeSvoEnvironmentLightingPublication,
+  liveSceneBrickCoordinatesForRegions,
+  liveSvoDenseFinestPages,
+} from "../lib/webgpu-octree-sparse-bricks";
+import { liveSvoRenderBrickSize } from "../lib/webgpu-live-svo-scene";
 import { canInitializeGPUSceneSource, gpuSceneSolverKey, type SimulationRunConfig } from "../lib/webgpu-renderer";
 
-test("garden SVO lighting preset is a valid fluid-free static scene", () => {
+test("garden SVO lighting preset is a valid fluid-free fluid-free scene", () => {
   const preset = getScenePreset("garden-svo-lighting");
   const scene = preset.create();
 
@@ -19,7 +25,7 @@ test("garden SVO lighting preset is a valid fluid-free static scene", () => {
   assert.equal(scene.sceneId, "garden-svo-lighting-study");
   assert.equal(scene.systems?.fluid, false);
   const runtimePlan = planSceneRuntime(scene);
-  assert.equal(runtimePlan.staticWorld, true);
+  assert.equal(runtimePlan.liveScene, true);
   assert.equal(runtimePlan.fluidSolver, false);
   assert.equal(runtimePlan.rigidCoupling, false);
   assert.equal(runtimePlan.waterPresentation, false);
@@ -93,20 +99,62 @@ test("garden lighting scene rebuilds its complete lattice from scene voxel contr
   assert.equal(scene.voxelDomain.brickSize_cells, 4);
   assert.deepEqual(validateScene(scene), []);
 
-  const staticSource = readFileSync(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url), "utf8");
-  assert.match(staticSource, /brickSize: staticSvoRenderBrickSize\(scene, options\)/,
+  const liveSource = readFileSync(new URL("../lib/webgpu-live-svo-scene.ts", import.meta.url), "utf8");
+  assert.match(liveSource, /brickSize: liveSvoRenderBrickSize\(scene, options\)/,
     "changing the dry lighting scene leaf size must reach the allocated sparse world");
-  assert.match(staticSource, /staticLightingBrickSize: scene\.voxelDomain\.brickSize_cells/,
-    "a render-topology experiment must not move the static cone-lighting lattice");
+  assert.doesNotMatch(liveSource, /staticLightingBrickSize|buildSvoStatic/,
+    "live render topology must not retain a second baked lighting lattice");
 });
 
-test("static SVO render brick overrides do not mutate a fluid scene's solver contract", () => {
+test("garden dense live-derived plan certifies every level and keeps edits local", () => {
+  const scene = getScenePreset("garden-svo-lighting").create();
+  const fine = createTallCellLayout(scene, "balanced");
+  const solverDimensions = [fine.nx, fine.fineNy, fine.nz] as const;
+  const catalog = buildEnvironmentProxyCatalog(scene, "garden");
+  const proxies = environmentProxyPrimitives(catalog, true);
+  const domain = planSparseSceneDomain(
+    scene, solverDimensions, scene.voxelDomain.brickSize_cells,
+    proxies.map(({ aabb_m }) => ({ min: aabb_m.min, max: aabb_m.max })),
+    { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m },
+  );
+  assert.deepEqual(domain.brickDimensions, [23, 12, 14]);
+  const finestPages = liveSvoDenseFinestPages(domain.brickDimensions);
+  const plan = planSvoNodeMipPyramid({ generation: 1, occupiedPages: finestPages, levelCount: 6 });
+  assert.deepEqual(Array.from({ length: 6 }, (_, level) => plan.pages.filter((page) => page.key.level === level).length),
+    [3_864, 504, 72, 12, 2, 1]);
+  assert.equal(plan.pages.length, 4_455);
+  assert.equal(new Set(plan.pages.map(({ slot }) => slot)).size, plan.pages.length,
+    "the one-time runtime certification can cover every planned slot exactly once");
+
+  const lantern = proxies.find(({ key }) => key === "garden/lamppost/lantern"); assert.ok(lantern);
+  const asTuple = ({ x, y, z }: { x: number; y: number; z: number }) => [x, y, z] as [number, number, number];
+  const oldBounds = { minimum: asTuple(lantern.aabb_m.min), maximum: asTuple(lantern.aabb_m.max) };
+  const shift = .4;
+  const newBounds = {
+    minimum: [oldBounds.minimum[0] + shift, oldBounds.minimum[1], oldBounds.minimum[2]] as [number, number, number],
+    maximum: [oldBounds.maximum[0] + shift, oldBounds.maximum[1], oldBounds.maximum[2]] as [number, number, number],
+  };
+  const dirtyBricks = liveSceneBrickCoordinatesForRegions(
+    [oldBounds, newBounds], asTuple(domain.worldOrigin_m), domain.cellSize_m,
+    scene.voxelDomain.brickSize_cells, domain.brickDimensions,
+  );
+  assert.ok(dirtyBricks.length > 0 && dirtyBricks.length < finestPages.length / 100,
+    "a spatial edit dirties only its old/new brick neighborhood");
+  const plannedKeys = new Set(plan.pages.map(({ key }) => `${key.level}:${key.coordinate.join(",")}`));
+  for (const brick of dirtyBricks) for (let level = 0; level < 6; level += 1) {
+    const coordinate = [brick.x >> level, brick.y >> level, brick.z >> level];
+    assert.ok(plannedKeys.has(`${level}:${coordinate.join(",")}`),
+      "each dirty old/new page has an address-resident ancestor for incremental rebuild");
+  }
+});
+
+test("live SVO render brick overrides do not mutate a fluid scene's solver contract", () => {
   const scene = getScenePreset("hose-tank").create();
   assert.equal(scene.voxelDomain.brickSize_cells, 8);
   assert.ok(validateScene(scene).every((message) => !message.includes("4-cell voxel bricks")));
 
-  assert.equal(staticSvoRenderBrickSize(scene), 8);
-  assert.equal(staticSvoRenderBrickSize(scene, { renderBrickSize: 4 }), 4);
+  assert.equal(liveSvoRenderBrickSize(scene), 8);
+  assert.equal(liveSvoRenderBrickSize(scene, { renderBrickSize: 4 }), 4);
   assert.equal(scene.voxelDomain.brickSize_cells, 8,
     "the benchmark override is a renderer construction input, not an authored scene mutation");
   assert.deepEqual(validateScene(scene), []);
@@ -139,45 +187,50 @@ test("4-cubed leaves fail fast for wet scenes instead of degrading fluid ownersh
   assert.deepEqual(validateScene(dry), []);
 });
 
-test("static SVO startup bypasses the simulation solver and t=0 raster gate", () => {
+test("live SVO startup bypasses the simulation solver and t=0 raster gate", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  const staticSource = readFileSync(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url), "utf8");
+  const liveSource = readFileSync(new URL("../lib/webgpu-live-svo-scene.ts", import.meta.url), "utf8");
 
   assert.match(renderer, /planSceneRuntime\(scene\)\.fluidSolver/);
-  assert.match(renderer, /WebGPUStaticSvoScene\.create/);
+  assert.match(renderer, /WebGPULiveSvoScene\.create/);
   // The scene argument is `this.simulationScene ?? scene`: a direct-manipulation
   // draft may be presented while the solver stays pinned to the committed scene
   // (see scene-draft-store). What this asserts is unchanged — the request is
   // still made for fluid-disabled scenes under the CPU reference method.
-  assert.match(renderer, /backend === "webgpu" \|\| !sceneRuntime\.fluidSolver[^]*this\.currentGPUFluid\(this\.simulationScene \?\? scene, svoSceneConfig, time_s\)/,
+  assert.match(renderer, /backend === "webgpu" \|\| !sceneRuntime\.fluidSolver[^]*this\.currentGPUFluid\(this\.simulationScene \?\? scene, svoSceneConfig\)/,
     "fluid-disabled scenes must request their renderer-owned GPU source even under the CPU reference method");
   assert.match(renderer, /svoEnvironmentBrickRefinementLevels: activeSvoTuning\.environmentBrickRefinementLevels/,
     "render tuning must participate in sparse-world rebuild identity");
   assert.match(renderer, /if\(!canInitializeGPUSceneSource\(scene,config\.methodId\)\)return/,
     "fluid-enabled scenes without a GPU solver factory must remain fail-closed");
-  assert.doesNotMatch(renderer, /if\(staticRenderScene\)this\.onStatus\(\{state:"ready",label:"Static SVO renderer ready"/,
+  assert.doesNotMatch(renderer, /if\(rendererOnlyScene\)this\.onStatus\(\{state:"ready",label:"Live SVO renderer ready"/,
     "sparse-world attachment must not declare the garden visible before the dry renderer presents");
-  assert.match(renderer, /this\.pendingStaticSvoPresentation=\{solver,solverGeneration:this\.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false\}/,
-    "static startup must open a separate presentation gate");
-  assert.match(renderer, /pendingStaticSvo\.attached[^]*pendingStaticSvo\.solver === readyGPUFluid[^]*svoEncoded/,
-    "the first static presentation must require an attached source and successful SVO encoding");
-  assert.match(renderer, /queue\.onSubmittedWorkDone\(\)\.then\([^]*settleStaticSvoPresentation\(initialStaticSvoSubmission\)/,
+  assert.match(renderer, /this\.pendingLiveSvoPresentation=\{solver,solverGeneration:this\.gpuFluidGeneration,requestGeneration:generation,startedAt_ms,attached:false,submitted:false\}/,
+    "renderer-only startup must open a separate presentation gate");
+  assert.match(renderer, /state:"ready",label:"Live sparse scene source ready",adapter:this\.adapterName,resource:liveSvoSceneResourcePlugin/,
+    "renderer-only source attachment must explicitly close its own resource activity");
+  assert.match(renderer, /pendingLiveSvo\.attached[^]*pendingLiveSvo\.solver === readyGPUFluid[^]*svoEncoded/,
+    "the first live presentation must require an attached source and successful SVO encoding");
+  assert.match(renderer, /queue\.onSubmittedWorkDone\(\)\.then\([^]*settleLiveSvoPresentation\(initialLiveSvoSubmission\)/,
     "ready must be published only after the first sparse garden frame completes");
-  assert.doesNotMatch(staticSource, /WebGPUUniformEulerianSolver/);
-  assert.match(staticSource, /fluid authority intentionally bypassed/);
-  assert.match(staticSource, /new OctreeSparseBrickWorld/);
-  assert.match(staticSource, /emptyPhi\.fill/);
+  assert.match(renderer, /state: "ready", label: "Live SVO renderer ready", adapter: this\.adapterName, resource: svoPresentationResourcePlugin/,
+    "the first sparse frame must explicitly close the presentation resource activity");
+  assert.doesNotMatch(liveSource, /WebGPUUniformEulerianSolver/);
+  assert.match(liveSource, /fluid authority intentionally absent/);
+  assert.match(liveSource, /new OctreeSparseBrickWorld/);
+  assert.doesNotMatch(liveSource, /emptyPhi|onSubmittedWorkDone/,
+    "renderer-only startup must not bake or fence scene content");
 });
 
-test("fluid-disabled static GPU sources initialize independently of the selected solver method", () => {
-  const staticScene = getScenePreset("garden-svo-lighting").create();
+test("fluid-disabled live GPU sources initialize independently of the selected solver method", () => {
+  const liveScene = getScenePreset("garden-svo-lighting").create();
   const fluidScene = getScenePreset("garden-pond").create();
 
-  assert.equal(canInitializeGPUSceneSource(staticScene, "cpu-reference"), true,
-    "renderer-owned static SVO construction must not require a fluid solver factory");
+  assert.equal(canInitializeGPUSceneSource(liveScene, "cpu-reference"), true,
+    "renderer-owned live SVO construction must not require a fluid solver factory");
   assert.equal(canInitializeGPUSceneSource(fluidScene, "cpu-reference"), false,
     "a fluid-enabled scene must not enter GPU construction without a GPU solver factory");
-  assert.equal(canInitializeGPUSceneSource(staticScene, "octree"), true);
+  assert.equal(canInitializeGPUSceneSource(liveScene, "octree"), true);
   assert.equal(canInitializeGPUSceneSource(fluidScene, "octree"), true);
 });
 
@@ -196,22 +249,22 @@ test("GPU scene rebuild identity includes captured container and owner-layout in
 
   const changedBodies = gpuSceneSolverKey(scene, config);
   scene.lighting = { ...scene.lighting, environment: { ...scene.lighting?.environment, diffuseScale: 0.25 } };
-  assert.notEqual(gpuSceneSolverKey(scene, config), changedBodies,
-    "authored lighting changes must rebuild matching GPU publications");
+  assert.equal(gpuSceneSolverKey(scene, config), changedBodies,
+    "authored lighting is hot-published and must not rebuild the shared SVO arenas");
 });
 
-test("static SVO scenes lazily expose raw-voxel inspection records", () => {
-  const staticSource = readFileSync(new URL("../lib/webgpu-static-svo-scene.ts", import.meta.url), "utf8");
+test("live SVO scenes lazily expose raw-voxel inspection records", () => {
+  const liveSource = readFileSync(new URL("../lib/webgpu-live-svo-scene.ts", import.meta.url), "utf8");
 
-  assert.match(staticSource, /get sparseVoxelRenderSource\(\)/,
+  assert.match(liveSource, /get sparseVoxelRenderSource\(\)/,
     "the renderer's existing inspection attachment must work for fluid-free scenes");
-  assert.match(staticSource, /this\.world\.ensureInspectionSource\(\)/,
+  assert.match(liveSource, /this\.world\.ensureInspectionSource\(\)/,
     "raw records should be derived from the same authoritative static octree");
-  assert.match(staticSource, /worldBytes - this\.accountedWorldBytes/,
+  assert.match(liveSource, /worldBytes - this\.accountedWorldBytes/,
     "lazy inspection allocation must be reflected in renderer telemetry");
 
-  const constructorStart = staticSource.indexOf("private constructor(");
-  const getterStart = staticSource.indexOf("get sparseVoxelRenderSource()", constructorStart);
-  assert.doesNotMatch(staticSource.slice(constructorStart, getterStart), /ensureInspectionSource\(\)/,
+  const constructorStart = liveSource.indexOf("private constructor(");
+  const getterStart = liveSource.indexOf("get sparseVoxelRenderSource()", constructorStart);
+  assert.doesNotMatch(liveSource.slice(constructorStart, getterStart), /ensureInspectionSource\(\)/,
     "normal smooth SVO startup must not allocate capacity-sized debug records");
 });

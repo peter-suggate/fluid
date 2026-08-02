@@ -72,8 +72,8 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   resourceReadiness: initialResourceReadiness(),
   gpuInfo: null,
   effectiveRendererStatus: {
-    effectiveMode: "raster",
-    fallbackReason: "missing-source",
+    state: "pending",
+    failureReason: "missing-source",
   },
   waterSurfacePresentation: null,
   frameMs: 0,

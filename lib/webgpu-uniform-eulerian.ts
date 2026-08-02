@@ -43,6 +43,7 @@ import {
   type GPUQuality
 } from "./webgpu-eulerian";
 import type { SceneDescription } from "./model";
+import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
 import { createTallCellLayout } from "./tall-cell-grid";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { planGPUAdvance } from "./tall-cell-diagnostics";
@@ -1474,6 +1475,11 @@ fn recordPhysicsPhaseBoundary(
   /** False once global-fine publication has retired the dense bootstrap phi. */
   get hasDenseSurfaceField() { return this.octreeProjection?.hasDenseLevelSetPublication ?? true; }
   get sparseVoxelSceneSource() { return this.octreeProjection?.sparseVoxelSceneSource; }
+  stageSceneUpdate(scene: SceneDescription) { this.octreeProjection?.stageSceneUpdate(scene); }
+  stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]) {
+    return this.octreeProjection?.stageLivePrimitiveUpdates(updates) ?? false;
+  }
+  encodeSceneMaintenance(encoder: GPUCommandEncoder) { this.octreeProjection?.encodeSceneMaintenance(encoder); }
   get sparseVoxelRenderSource() {
     const source = this.octreeProjection?.sparseVoxelRenderSource;
     if (this.octreeProjection) this.applyOctreeInfo(this.octreeProjection);

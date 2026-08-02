@@ -24,15 +24,16 @@ function structuralSource(): SparseVoxelRenderSource {
     materials: resource,
     pbrMaterials: { binding: resource, count: 8, strideBytes: 96, revision: 1 },
     structural: {
+      structure: resource, structureOffsetsWords: { control: 0, publication: 64, nodes: 128, leaves: 640 },
       control: resource, nodes: resource, leaves: resource, geometry: resource,
-      velocity: resource, materialOwners: resource, fluidLeafStates: resource,
+      sceneGeometry: resource, velocity: resource, materialOwners: resource, sceneMaterialOwners: resource, fluidLeafStates: resource,
       publication: { state: resource, byteLength: 32 },
       domain: { worldOrigin_m: [-2, 0, -2], cellSize_m: [0.04, 0.04, 0.04], dimensionsCells: [64, 64, 64], brickSize: 16, maximumDepth: 4 },
       capacities: { nodes: 64, leaves: 32, geometryVoxels: 1024, velocityVoxels: 1024, materialOwnerVoxels: 1024, fluidLeafStates: 32 },
       strides: { control: 4, node: 32, leaf: 16, geometry: 16, velocity: 16, materialOwner: 4, fluidLeafState: 4 },
       fields: {
         topology: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
-        staticGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
+        sceneGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         materialOwner: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         dynamicSolid: { residency: "unavailable", validity: "unavailable", revision: 0 },
         coarseFluid: { residency: "unavailable", validity: "unavailable", revision: 0 },
@@ -52,20 +53,21 @@ function gardenMaterial() {
 }
 
 test("production garden metadata is packed into the existing dry uniform without a new binding", () => {
-  assert.match(rendererSource, /const terrainMaterial=scenePrimitives\.analyticTerrain\?buildSvoTerrainMaterial\(scene\):undefined/);
-  assert.match(rendererSource, /terrainMaterialMetadata:terrainMaterial\?\.packedMetadata,terrainMaterialCacheKey:terrainMaterial\?\.cacheKey/);
+  assert.match(rendererSource, /const terrainMaterial = scenePrimitives\.analyticTerrain \? buildSvoTerrainMaterial\(scene\) : undefined/);
+  assert.match(rendererSource, /terrainMaterialMetadata: terrainMaterial\?\.packedMetadata/);
   assert.equal(SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, 16);
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 528, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 576, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
     nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
     nodeMipDirectWordOffset: 96, nodeMipDirectLevelZWordOffset: 100, tetrahedralRadianceWordOffset: 112, nodeMipExtentWordOffset: 116,
-    giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128,
+    giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128, primitiveCandidatesWordOffset: 132,
+    structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140,
   });
   assert.match(svoDrySceneShader, /terrainMaterial:SvoTerrainMaterialMetadata/);
   assert.doesNotMatch(svoDrySceneShader, /svoStructuralGeometry|svoStructuralLeafStates/);
-  assert.match(svoDrySceneShader, /@group\(0\) @binding\(10\) var<storage,read> glassPanes/);
+  assert.match(svoDrySceneShader, /@group\(0\) @binding\(4\) var<storage,read> drySceneArena/);
 });
 
 test("analytic terrain evaluates the exact raster world-space material before PBR", () => {
@@ -119,7 +121,8 @@ test("terrain metadata validation and dry-parameter uploads are exact and conten
   } as unknown as GPUDevice;
   try {
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
-    renderer.setSource(source, base);
+    renderer.setSource(source);
+    renderer.publishScene(base);
     const parameterWrites = () => writes.filter(({ label }) => label === "Sparse voxel dry scene parameters");
     assert.equal(parameterWrites().length, 1);
     assert.deepEqual(
@@ -129,12 +132,14 @@ test("terrain metadata validation and dry-parameter uploads are exact and conten
       )],
       [...build.packedMetadata],
     );
-    renderer.setSource(source, base);
+    renderer.setSource(source);
+    renderer.publishScene(base);
     assert.equal(parameterWrites().length, 1, "unchanged packed metadata must not rewrite the uniform");
     const changed = gardenMaterial();
     const changedWords = Uint32Array.from(changed.packedMetadata);
     new Float32Array(changedWords.buffer)[1] += 0.01;
-    renderer.setSource(source, { ...base, terrainMaterialMetadata: changedWords, terrainMaterialCacheKey: `${changed.cacheKey}:changed` });
+    renderer.setSource(source);
+    renderer.publishScene({ ...base, terrainMaterialMetadata: changedWords, terrainMaterialCacheKey: `${changed.cacheKey}:changed` });
     assert.equal(parameterWrites().length, 2);
     renderer.destroy();
   } finally {

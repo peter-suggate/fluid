@@ -6,7 +6,6 @@ import {
   causticShader,
   compositeShader,
   extractionPrepareShader,
-  sceneShader,
   surfaceExtractionShader,
   surfaceRasterShader
 } from "../lib/webgpu-water-pipeline";
@@ -74,7 +73,6 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "extraction-prepare": extractionPrepareShader,
   "surface-raster": surfaceRasterShader,
   caustics: causticShader,
-  scene: sceneShader,
   composite: compositeShader,
   "grid-overlay": gridOverlayShader,
   "octree-technique-topology-overlay": octreeTechniqueTopologyShader,

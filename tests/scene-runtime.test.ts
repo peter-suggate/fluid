@@ -58,7 +58,7 @@ test("dynamic bodies in a fluid scene request dynamics and fluid coupling", () =
   ]);
 });
 
-test("dry static scenes mark fluid and transport gates not required", () => {
+test("dry fluid-free scenes mark fluid and transport gates not required", () => {
   const scene = sceneWithBodies("static");
   scene.systems = { fluid: false };
   scene.container.fillFraction = 0;
@@ -71,5 +71,5 @@ test("dry static scenes mark fluid and transport gates not required", () => {
   assert.equal(plan.readiness.transport.state, "not-required");
   assert.deepEqual(plan.readiness.transport.requires, []);
   assert.equal(plan.readiness.presentation.state, "required");
-  assert.deepEqual(plan.readiness.presentation.requires, ["static-world", "sparse-voxel-presentation"]);
+  assert.deepEqual(plan.readiness.presentation.requires, ["live-scene", "sparse-voxel-presentation"]);
 });

@@ -12,10 +12,10 @@ import {
   type SvoPrimitiveCandidatePublication,
 } from "./svo-primitive-candidates";
 import {
-  cachedSvoStaticPublication,
-  hashSvoStaticPublication,
-  internSvoStaticPublication,
-} from "./svo-static-publication-cache";
+  cachedSvoPublication,
+  hashSvoPublication,
+  internSvoPublication,
+} from "./svo-publication-cache";
 import {
   buildEnvironmentProxyCatalog,
   environmentProxyPrimitives,
@@ -101,7 +101,7 @@ export interface SvoScenePrimitiveBuild {
   /** Analytic heightfield consumed directly from the packed scene uniforms. */
   analyticTerrain?: SvoAnalyticTerrainSource;
   /** Content hash over packed records, identities, bounds policy, and terrain. */
-  staticRevision: string;
+  contentRevision: string;
   /** Versioned identity used to reuse immutable packed publication records. */
   cacheKey: string;
 }
@@ -247,15 +247,15 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     materialId: VOXEL_MATERIAL_IDS.terrain,
     normalEpsilon_m: 0.02,
   } : undefined;
-  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId: catalog.environmentId,
     rigidBodyCount: scene.rigidBodies.length,
     coverageCellSize_m,
     primitives,
     analyticTerrain,
   }));
-  const cacheKey = `svo-scene-primitives-v${SVO_SCENE_PRIMITIVE_VERSION}:${catalog.environmentId}:${staticRevision}`;
-  const cached = cachedSvoStaticPublication(scenePrimitiveCache, cacheKey);
+  const cacheKey = `svo-scene-primitives-v${SVO_SCENE_PRIMITIVE_VERSION}:${catalog.environmentId}:${contentRevision}`;
+  const cached = cachedSvoPublication(scenePrimitiveCache, cacheKey);
   if (cached) return cached;
 
   const descriptors: SvoPrimitiveDescriptor[] = [];
@@ -304,7 +304,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     : undefined;
 
   const packedRecords = packSvoPrimitiveRecords(descriptors);
-  return internSvoStaticPublication(scenePrimitiveCache, cacheKey, {
+  return internSvoPublication(scenePrimitiveCache, cacheKey, {
     environmentId: catalog.environmentId,
     descriptors,
     packedRecords,
@@ -317,7 +317,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     unsupportedSources,
     requiresRasterTerrainFallback: unsupportedSources.length > 0,
     analyticTerrain,
-    staticRevision,
+    contentRevision,
     cacheKey,
   });
 }
@@ -327,10 +327,10 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
  *
  * A span rather than a list of indices: authored motion belongs to whole
  * objects, an object's parts are emitted together, and one `writeBuffer` over
- * the span costs less than a scatter even when it carries a few static records
+ * the span costs less than a scatter even when it carries a few unchanged records
  * along with it. Nothing outside the span is touched, and nothing about the
- * span's identity, material, or dimensions ever changes — only its transform,
- * which is what keeps the published sparse world valid underneath it.
+ * span's identity, material, or dimensions ever changes — only its transform.
+ * Sparse maintenance independently consumes the keyed old/new geometry bounds.
  */
 export interface SvoScenePrimitiveAnimation {
   /** Index of the first record in the span, in `descriptors` order. */

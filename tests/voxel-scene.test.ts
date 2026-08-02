@@ -35,14 +35,14 @@ test("every preset produces a deterministic sparse-brick plan covering its autho
     assert.equal(scene.environment, preset.background, `${preset.id} must carry its visible environment into the unified scene`);
     const first = planVoxelScene(scene), second = planVoxelScene(scene);
     assert.deepEqual(first, second, `${preset.id} plan should be deterministic`);
-    assert.equal(first.staticSources.filter((source) => source.kind === "container-boundary").length, scene.container.top === "closed" ? 6 : 5);
-    assert.equal(first.staticSources.some((source) => source.kind === "terrain-heightfield"), scene.terrain !== undefined, `${preset.id} terrain coverage`);
-    const plannedBodyIds = [...first.staticSources, ...first.dynamicSources]
+    assert.equal(first.sceneSources.filter((source) => source.kind === "container-boundary").length, scene.container.top === "closed" ? 6 : 5);
+    assert.equal(first.sceneSources.some((source) => source.kind === "terrain-heightfield"), scene.terrain !== undefined, `${preset.id} terrain coverage`);
+    const plannedBodyIds = [...first.sceneSources, ...first.frameSources]
       .filter((source) => source.kind === "rigid-primitive")
       .map((source) => source.bodyId).sort();
     assert.deepEqual(plannedBodyIds, scene.rigidBodies.map((entry) => entry.id).sort(), `${preset.id} rigid coverage`);
-    assert.ok(first.staticSources.every((source) => contains(source.candidate.brickAligned_m, source.candidate.exact_m)));
-    assert.ok(first.dynamicSources.every((source) => contains(source.candidate.brickAligned_m, source.candidate.exact_m)));
+    assert.ok(first.sceneSources.every((source) => contains(source.candidate.brickAligned_m, source.candidate.exact_m)));
+    assert.ok(first.frameSources.every((source) => contains(source.candidate.brickAligned_m, source.candidate.exact_m)));
   }
 });
 
@@ -92,28 +92,28 @@ test("all primitive conventions receive conservative world and persistent local 
   scene.rigidBodies = (["sphere", "box", "capsule", "cylinder"] as const).map((shape) => body(shape));
   scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
   const plan = planVoxelScene(scene);
-  assert.equal(plan.dynamicSources.length, 4);
-  for (const source of plan.dynamicSources) {
+  assert.equal(plan.frameSources.length, 4);
+  for (const source of plan.frameSources) {
     assert.ok(contains(source.candidate.conservative_m, source.candidate.exact_m), source.bodyId);
     assert.ok(contains(source.candidate.voxelAligned_m, source.candidate.conservative_m), source.bodyId);
     assert.ok(contains(source.candidate.brickAligned_m, source.candidate.conservative_m), source.bodyId);
     assert.ok(contains(source.localAllocation.candidate.brickAligned_m, source.localAllocation.candidate.exact_m), source.bodyId);
     assert.ok(source.localAllocation.brickDimensions.x >= 1 && source.localAllocation.brickDimensions.y >= 1 && source.localAllocation.brickDimensions.z >= 1);
   }
-  const capsule = plan.dynamicSources.find((source) => source.primitive.kind === "capsule")!;
+  const capsule = plan.frameSources.find((source) => source.primitive.kind === "capsule")!;
   assert.equal(capsule.localAllocation.candidate.exact_m.min.y, -(0.27 / 2 + 0.11));
   assert.equal(capsule.localAllocation.candidate.exact_m.max.y, 0.27 / 2 + 0.11);
 });
 
-test("static bodies join immutable world sources while omitted motion remains dynamic", () => {
+test("explicitly fixed bodies use the scene-update lane while omitted motion uses the frame lane", () => {
   const scene = cloneScene(defaultScene);
   scene.rigidBodies = [body("box", "static"), body("sphere")];
   const plan = planVoxelScene(scene);
-  const staticRigid = plan.staticSources.filter((source) => source.kind === "rigid-primitive");
-  assert.deepEqual(staticRigid.map((source) => source.bodyId), ["box-static"]);
-  assert.deepEqual(plan.dynamicSources.map((source) => source.bodyId), ["sphere-default"]);
-  assert.equal(staticRigid[0].partition, "static");
-  assert.equal(plan.dynamicSources[0].partition, "dynamic");
+  const sceneRigid = plan.sceneSources.filter((source) => source.kind === "rigid-primitive");
+  assert.deepEqual(sceneRigid.map((source) => source.bodyId), ["box-static"]);
+  assert.deepEqual(plan.frameSources.map((source) => source.bodyId), ["sphere-default"]);
+  assert.equal(sceneRigid[0].updateClass, "scene");
+  assert.equal(plan.frameSources[0].updateClass, "frame");
 });
 
 test("topology and transform revisions separate local rebuilds from body motion", () => {
@@ -124,7 +124,7 @@ test("topology and transform revisions separate local rebuilds from body motion"
   const moved = planVoxelScene(scene);
   assert.equal(moved.revisions.dynamicTopologyHash, before.revisions.dynamicTopologyHash);
   assert.notEqual(moved.revisions.dynamicTransformsHash, before.revisions.dynamicTransformsHash);
-  assert.deepEqual(moved.dynamicSources[0].localAllocation, before.dynamicSources[0].localAllocation);
+  assert.deepEqual(moved.frameSources[0].localAllocation, before.frameSources[0].localAllocation);
   scene.rigidBodies[0].dimensions_m.y += 0.05;
   const resized = planVoxelScene(scene);
   assert.notEqual(resized.revisions.dynamicTopologyHash, moved.revisions.dynamicTopologyHash);
@@ -151,7 +151,7 @@ test("container shells preserve authored boundary planes and open/closed tops", 
   scene.rigidBodies = [];
   scene.container.top = "closed";
   const plan = planVoxelScene(scene);
-  const boundaries = plan.staticSources.filter((source) => source.kind === "container-boundary");
+  const boundaries = plan.sceneSources.filter((source) => source.kind === "container-boundary");
   assert.deepEqual(boundaries.map((source) => source.side), ["floor", "left", "right", "front", "back", "ceiling"]);
   assert.equal(boundaries.find((source) => source.side === "floor")?.surfaceCoordinate_m, 0);
   assert.equal(boundaries.find((source) => source.side === "ceiling")?.surfaceCoordinate_m, scene.container.height_m);

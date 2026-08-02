@@ -9,10 +9,10 @@ import {
 } from "./svo-thin-glass";
 import { SPARSE_BRICK_NO_OWNER } from "./sparse-brick-octree";
 import {
-  cachedSvoStaticPublication,
-  hashSvoStaticPublication,
-  internSvoStaticPublication,
-} from "./svo-static-publication-cache";
+  cachedSvoPublication,
+  hashSvoPublication,
+  internSvoPublication,
+} from "./svo-publication-cache";
 import { GLASS_OPTICS } from "./webgpu-lighting";
 import {
   buildEnvironmentProxyCatalog,
@@ -69,7 +69,7 @@ export interface SvoSceneGlassBuild {
   containerTopPaneIndex?: number;
   environmentPaneIndices: readonly number[];
   /** Content hash over records, bounds policy, metadata, and diagnostics. */
-  staticRevision: string;
+  contentRevision: string;
   /** Versioned key suitable for renderer upload caches. */
   cacheKey: string;
 }
@@ -223,14 +223,14 @@ export function svoSceneGlassFromEnvironmentCatalog(
     throw new RangeError(`Environment ${catalog.environmentId} needs ${authored.length} glass panes, exceeding the ${maximumPanes} record limit`);
   }
   const unsupportedEntries = unsupportedCatalogGlass(catalog);
-  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId: catalog.environmentId,
     authored,
     unsupportedEntries,
     cell,
   }));
-  const cacheKey = `svo-scene-glass-v${SVO_SCENE_GLASS_VERSION}:${catalog.environmentId}:${staticRevision}`;
-  const cached = cachedSvoStaticPublication(sceneGlassCache, cacheKey);
+  const cacheKey = `svo-scene-glass-v${SVO_SCENE_GLASS_VERSION}:${catalog.environmentId}:${contentRevision}`;
+  const cached = cachedSvoPublication(sceneGlassCache, cacheKey);
   if (cached) return cached;
   const descriptors = authored.map(({ descriptor }) => canonicalSvoThinGlassPane(descriptor));
   const packedRecords = packSvoThinGlassPanes(descriptors);
@@ -247,7 +247,7 @@ export function svoSceneGlassFromEnvironmentCatalog(
   }));
   const containerPaneIndices = metadata.filter(({ role }) => role === "container-pane" || role === "container-top").map(({ recordIndex }) => recordIndex);
   const environmentPaneIndices = metadata.filter(({ role }) => role === "environment-glazing").map(({ recordIndex }) => recordIndex);
-  return internSvoStaticPublication(sceneGlassCache, cacheKey, {
+  return internSvoPublication(sceneGlassCache, cacheKey, {
     environmentId: catalog.environmentId,
     descriptors,
     packedRecords,
@@ -257,7 +257,7 @@ export function svoSceneGlassFromEnvironmentCatalog(
     containerPaneIndices,
     containerTopPaneIndex: metadata.find(({ role }) => role === "container-top")?.recordIndex,
     environmentPaneIndices,
-    staticRevision,
+    contentRevision,
     cacheKey,
   });
 }

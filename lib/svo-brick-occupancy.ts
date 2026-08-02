@@ -3,8 +3,9 @@
  *
  * The packed word is stored in the otherwise-unused `links.w` word of the
  * brick's terminal canonical node. No extra resident buffer or render binding
- * is required. A zero word means "metadata unavailable" and consumers must
- * use the original full-brick traversal.
+ * is required. Bits 0..27 contain occupancy. Bits 28..31 contain the live
+ * brick lifecycle and are intentionally orthogonal: rebuilding occupancy must
+ * not change whether a leaf is active, dirty, queued, or being relocated.
  */
 
 export const SVO_BRICK_OCCUPANCY = Object.freeze({
@@ -17,9 +18,18 @@ export const SVO_BRICK_OCCUPANCY = Object.freeze({
   coordinateMask: 0x7,
   occupiedBit: 1 << 26,
   readyBit: 1 << 27,
+  metadataMask: 0x0fffffff,
   /** One existing node word is reused, so the incremental allocation is zero. */
   incrementalStorageBytesPerBrick: 0,
   metadataBytesPerBrick: Uint32Array.BYTES_PER_ELEMENT,
+});
+
+export const SVO_BRICK_LIFECYCLE = Object.freeze({
+  activeBit: 0x10000000,
+  dirtyBit: 0x20000000,
+  queuedBit: 0x40000000,
+  relocatingBit: 0x80000000,
+  mask: 0xf0000000,
 });
 
 export type SvoBrickLocalCoordinate = readonly [number, number, number];
@@ -36,6 +46,49 @@ export interface SvoBrickOccupancySummary {
 export interface BuiltSvoBrickOccupancySummary extends SvoBrickOccupancySummary {
   packed: number;
   occupiedCellCount: number;
+}
+
+export interface SvoBrickLifecycle {
+  active: boolean;
+  dirty: boolean;
+  queued: boolean;
+  relocating: boolean;
+}
+
+/** Encode only the lifecycle bits in a terminal-node flags word. */
+export function encodeSvoBrickLifecycle(lifecycle: SvoBrickLifecycle): number {
+  let packed = 0;
+  if (lifecycle.active) packed |= SVO_BRICK_LIFECYCLE.activeBit;
+  if (lifecycle.dirty) packed |= SVO_BRICK_LIFECYCLE.dirtyBit;
+  if (lifecycle.queued) packed |= SVO_BRICK_LIFECYCLE.queuedBit;
+  if (lifecycle.relocating) packed |= SVO_BRICK_LIFECYCLE.relocatingBit;
+  return packed >>> 0;
+}
+
+/** Decode lifecycle bits while ignoring the independently rebuilt occupancy summary. */
+export function decodeSvoBrickLifecycle(packedValue: number): SvoBrickLifecycle {
+  const packed = packedValue >>> 0;
+  return {
+    active: (packed & SVO_BRICK_LIFECYCLE.activeBit) !== 0,
+    dirty: (packed & SVO_BRICK_LIFECYCLE.dirtyBit) !== 0,
+    queued: (packed & SVO_BRICK_LIFECYCLE.queuedBit) !== 0,
+    relocating: (packed & SVO_BRICK_LIFECYCLE.relocatingBit) !== 0,
+  };
+}
+
+/** Replace lifecycle state without disturbing current occupancy metadata. */
+export function replaceSvoBrickLifecycle(packedValue: number, lifecycle: SvoBrickLifecycle): number {
+  return (((packedValue >>> 0) & SVO_BRICK_OCCUPANCY.metadataMask) | encodeSvoBrickLifecycle(lifecycle)) >>> 0;
+}
+
+/** Replace occupancy metadata without disturbing the live leaf lifecycle. */
+export function replaceSvoBrickOccupancy(packedValue: number, summary: SvoBrickOccupancySummary): number {
+  return (((packedValue >>> 0) & SVO_BRICK_LIFECYCLE.mask) | encodeSvoBrickOccupancy(summary)) >>> 0;
+}
+
+/** Only current active leaves may be consumed by traversal or derived-data passes. */
+export function isSvoBrickLifecycleCurrent(lifecycle: SvoBrickLifecycle): boolean {
+  return lifecycle.active && !lifecycle.dirty && !lifecycle.relocating;
 }
 
 function localCoordinate(value: SvoBrickLocalCoordinate, name: string): void {
@@ -76,7 +129,7 @@ export function encodeSvoBrickOccupancy(summary: SvoBrickOccupancySummary): numb
 
 /** Decode a terminal node flags word. Unknown/reserved bits are ignored. */
 export function decodeSvoBrickOccupancy(packedValue: number): SvoBrickOccupancySummary {
-  const packed = packedValue >>> 0;
+  const packed = (packedValue >>> 0) & SVO_BRICK_OCCUPANCY.metadataMask;
   const coordinate = (shifts: readonly [number, number, number]) => shifts.map(
     (shift) => (packed >>> shift) & SVO_BRICK_OCCUPANCY.coordinateMask,
   ) as unknown as [number, number, number];
@@ -97,6 +150,7 @@ export function decodeSvoBrickOccupancy(packedValue: number): SvoBrickOccupancyS
 export function buildSvoBrickOccupancy(
   materialOwners: ArrayLike<number>,
   voxelOffset = 0,
+  previousTerminalFlags = 0,
 ): BuiltSvoBrickOccupancySummary {
   if (!Number.isSafeInteger(voxelOffset) || voxelOffset < 0) throw new RangeError("Voxel offset must be a non-negative integer");
   const cellCount = SVO_BRICK_OCCUPANCY.brickSize ** 3;
@@ -123,7 +177,7 @@ export function buildSvoBrickOccupancy(
     minInclusive: occupied ? minimum as [number, number, number] : [0, 0, 0],
     maxInclusive: occupied ? maximum as [number, number, number] : [0, 0, 0],
   };
-  return { ...summary, packed: encodeSvoBrickOccupancy(summary), occupiedCellCount };
+  return { ...summary, packed: replaceSvoBrickOccupancy(previousTerminalFlags, summary), occupiedCellCount };
 }
 
 /** Conservative count of cells retained by the 4^3 macrocell mask. */
@@ -142,7 +196,12 @@ export function svoBrickOccupancyRetainedCellCount(summary: Pick<SvoBrickOccupan
 export const svoBrickOccupancyWGSL = /* wgsl */ `
 const SVO_BRICK_OCCUPANCY_READY:u32=${SVO_BRICK_OCCUPANCY.readyBit}u;
 const SVO_BRICK_OCCUPANCY_OCCUPIED:u32=${SVO_BRICK_OCCUPANCY.occupiedBit}u;
+const SVO_BRICK_LIFECYCLE_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
+const SVO_BRICK_LIFECYCLE_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
+const SVO_BRICK_LIFECYCLE_QUEUED:u32=${SVO_BRICK_LIFECYCLE.queuedBit}u;
+const SVO_BRICK_LIFECYCLE_RELOCATING:u32=${SVO_BRICK_LIFECYCLE.relocatingBit}u;
 struct SvoBrickOccupancy{ready:u32,occupied:u32,macroMask:u32,minInclusive:vec3u,maxInclusive:vec3u}
+struct SvoBrickLifecycle{activeFlag:u32,dirtyFlag:u32,queuedFlag:u32,relocatingFlag:u32}
 fn svoBrickOccupancyDecode(packed:u32)->SvoBrickOccupancy{
   return SvoBrickOccupancy(
     select(0u,1u,(packed&SVO_BRICK_OCCUPANCY_READY)!=0u),
@@ -150,6 +209,16 @@ fn svoBrickOccupancyDecode(packed:u32)->SvoBrickOccupancy{
     packed&0xffu,
     vec3u((packed>>8u)&7u,(packed>>11u)&7u,(packed>>14u)&7u),
     vec3u((packed>>17u)&7u,(packed>>20u)&7u,(packed>>23u)&7u));
+}
+fn svoBrickLifecycleDecode(packed:u32)->SvoBrickLifecycle{
+  return SvoBrickLifecycle(
+    select(0u,1u,(packed&SVO_BRICK_LIFECYCLE_ACTIVE)!=0u),
+    select(0u,1u,(packed&SVO_BRICK_LIFECYCLE_DIRTY)!=0u),
+    select(0u,1u,(packed&SVO_BRICK_LIFECYCLE_QUEUED)!=0u),
+    select(0u,1u,(packed&SVO_BRICK_LIFECYCLE_RELOCATING)!=0u));
+}
+fn svoBrickLifecycleCurrent(state:SvoBrickLifecycle)->bool{
+  return state.activeFlag!=0u&&state.dirtyFlag==0u&&state.relocatingFlag==0u;
 }
 fn svoBrickMacroOccupied(summary:SvoBrickOccupancy,local:vec3u)->bool{
   if(summary.ready==0u){return true;}

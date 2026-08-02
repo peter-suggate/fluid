@@ -23,12 +23,16 @@ function structuralSource(): SparseVoxelRenderSource {
     materials: resource,
     pbrMaterials: { binding: resource, count: 8, strideBytes: 96, revision: 1 },
     structural: {
+      structure: resource,
+      structureOffsetsWords: { control: 0, publication: 64, nodes: 128, leaves: 640 },
       control: resource,
       nodes: resource,
       leaves: resource,
       geometry: resource,
+      sceneGeometry: resource,
       velocity: resource,
       materialOwners: resource,
+      sceneMaterialOwners: resource,
       fluidLeafStates: resource,
       publication: { state: resource, byteLength: 32 },
       domain: { worldOrigin_m: [-1, 0, -1], cellSize_m: [0.02, 0.04, 0.03], dimensionsCells: [64, 64, 64], brickSize: 16, maximumDepth: 4 },
@@ -36,7 +40,7 @@ function structuralSource(): SparseVoxelRenderSource {
       strides: { control: 4, node: 32, leaf: 16, geometry: 16, velocity: 16, materialOwner: 4, fluidLeafState: 4 },
       fields: {
         topology: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
-        staticGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
+        sceneGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         materialOwner: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         dynamicSolid: { residency: "unavailable", validity: "unavailable", revision: 0 },
         coarseFluid: { residency: "unavailable", validity: "unavailable", revision: 0 },
@@ -48,17 +52,17 @@ function structuralSource(): SparseVoxelRenderSource {
 }
 
 test("production scene construction uploads pane records and exposes an explicit lab cutout fallback", () => {
-  assert.match(rendererSource, /buildSvoSceneGlass\(scene,\{cellSize_m:sparseSceneSource\?\.structural\?\.domain\.cellSize_m\}\)/);
-  assert.match(rendererSource, /glassRecords:sceneGlass\.packedRecords,glassCacheKey:sceneGlass\.cacheKey/);
-  assert.match(rendererSource, /const compositorOwnedGlass=sceneGlass\.metadata\.filter\(\(\{role\}\)=>role==="container-pane"\|\|role==="container-top"\)/);
-  assert.match(rendererSource, /primaryCompositeOwnedGlassPaneIdBase:compositorOwnedGlass\[0\]\?\.paneId,primaryCompositeOwnedGlassPaneCount:compositorOwnedGlass\.length/,
+  assert.match(rendererSource, /buildSvoSceneGlass\(scene, \{ cellSize_m: source\.structural\?\.domain\.cellSize_m \}\)/);
+  assert.match(rendererSource, /glassRecords: sceneGlass\.packedRecords/);
+  assert.match(rendererSource, /const compositorOwnedGlass = sceneGlass\.metadata\.filter/);
+  assert.match(rendererSource, /primaryCompositeOwnedGlassPaneIdBase: compositorOwnedGlass\[0\]\?\.paneId/,
     "the existing nearest-vessel-pane compositor must retain ownership under camera orbit");
   const waterSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
   assert.match(waterSource, /fn compositeFrontGlass\(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32\)->vec3f/);
   assert.match(waterSource, /return finish\(compositeFrontGlass\(scene\.rgb,ro,rd,scene\.a\),ndc\)/,
     "the post-dry-scene compositor must still render vessel glass when no water interface is present");
-  assert.match(rendererSource, /svoGlassSupported=!sceneGlass\.metadata\.some\(\(\{key,opaqueCutoutKey\}\)=>Boolean\(opaqueCutoutKey\)&&\(!thickGlassBound\|\|!thickReplacedPaneKeys\.has\(key\)\)\)/);
-  assert.match(rendererSource, /fallbackReason: "unsupported-glass-cutout"/);
+  assert.match(rendererSource, /this\.svoGlassSupported = !sceneGlass\.metadata\.some/);
+  assert.match(rendererSource, /failureReason: "unsupported-glass-cutout"/);
   assert.match(panelSource, /"unsupported-glass-cutout": "authored glazing needs an opaque shell cutout"/);
 });
 
@@ -73,7 +77,7 @@ test("pane ABI validation accepts empty gardens and rejects partial or over-capa
   }), false);
 });
 
-test("glass upload cache is reused by static revision and destroyed on detach", () => {
+test("glass uses one fixed live arena and survives source replacement", () => {
   const previousUsage = globalThis.GPUBufferUsage;
   const previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, {
@@ -94,21 +98,24 @@ test("glass upload cache is reused by static revision and destroyed on detach", 
     queue: { writeBuffer() {} },
   } as unknown as GPUDevice;
   try {
-    const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
+    const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer, "rgba16float", "canonical");
     const scene: SparseVoxelDrySceneData = {
       ...svoDrySceneFixture, ownerBase: 1,
       glassRecords: new Uint32Array(SVO_THIN_GLASS_RECORD_WORDS), glassCacheKey: "glass:v1",
     };
-    renderer.setSource(structuralSource(), scene);
-    const firstGlass = created.find(({ label }) => label === "Sparse voxel thin-glass panes");
+    renderer.setSource(structuralSource());
+    renderer.publishScene(scene);
+    const firstGlass = created.find(({ label }) => label === "Live authored scene arena (materials, primitives/BVH, thin glass)");
     assert.ok(firstGlass);
-    renderer.setSource(structuralSource(), scene);
-    assert.equal(created.filter(({ label }) => label === "Sparse voxel thin-glass panes").length, 1,
-      "unchanged static glass must retain its GPU upload");
+    renderer.setSource(structuralSource());
+    renderer.publishScene(scene);
+    assert.equal(created.filter(({ label }) => label === "Live authored scene arena (materials, primitives/BVH, thin glass)").length, 1,
+      "scene updates must retain the fixed-capacity glass arena");
     assert.equal(firstGlass.destroyed, false);
-    renderer.setSource(undefined, undefined);
-    assert.equal(firstGlass.destroyed, true, "solver detach must retire the pane buffer before source buffers");
+    renderer.setSource(undefined);
+    assert.equal(firstGlass.destroyed, false, "source replacement must not churn renderer-owned scene arenas");
     renderer.destroy();
+    assert.equal(firstGlass.destroyed, true, "renderer destruction retires the live scene arena");
   } finally {
     Object.assign(globalThis, { GPUBufferUsage: previousUsage, GPUTextureUsage: previousTextureUsage });
   }

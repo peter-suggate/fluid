@@ -121,6 +121,10 @@ test("the production shader embeds the optimized marcher; the baseline variant k
   assert.match(optimized, /dryNodeMipLevelStart\(level\)/);
   assert.match(optimized, /textureLoad\(nodeMipPageTable[^]*encoded-1u/,
     "a resident page-cache miss must resolve through one direct-table texture load");
+  assert.match(optimized, /textureLoad\(nodeMipPageValidity[^]*\.x!=0u/,
+    "a resident page must be current before the marcher samples its atlas slot");
+  assert.match(optimized, /!dryNodeMipPageValid\(\(\*pageCache\)\.pageIndex\)[^]*DryNodeMipLookup\([^]*,0u\)/,
+    "dirty pages fail closed so the caller can use exact traversal");
   assert.doesNotMatch(optimized, /nodeMipLevelStart\[clamped>>2u\]/,
     "a dynamically indexed uniform array trips a slow-path Metal transform; keep constant vector indexing");
   const elision = createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, emptySpaceElision: true });
@@ -131,6 +135,6 @@ test("the production shader embeds the optimized marcher; the baseline variant k
   assert.doesNotMatch(baseline, /dryConeZeroRegionAt/);
   for (const variant of [optimized, elision, baseline]) {
     assert.match(variant, /fn dryNodeMipAt\(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPageCache>\)->DryNodeMipLookup\{/);
-    assert.match(variant, /fn dryNodeMipReady\(\)->bool\{return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&dry\.nodeMip\.x==publicationState\[2\]&&dry\.nodeMip\.y>0u&&dry\.nodeMip\.z>0u;\}/);
+    assert.match(variant, /fn dryNodeMipReady\(\)->bool\{let generationReady=dry\.nodeMip\.w==2u\|\|dry\.nodeMip\.x==publicationState\[2\];return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&generationReady&&dry\.nodeMip\.y>0u&&dry\.nodeMip\.z>0u;\}/);
   }
 });

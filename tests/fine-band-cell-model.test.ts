@@ -42,6 +42,7 @@ import {
   type FluidCellTraceNeighbor,
 } from "../lib/fluid-cell-trace";
 import {
+  FLUID_CELL_TRACE_STAGE_STORAGE_BINDINGS,
   FLUID_CELL_TRACE_STORAGE_BINDINGS,
   fluidCellTraceGatherShader,
 } from "../lib/webgpu-fluid-cell-trace";
@@ -50,7 +51,6 @@ import {
   FINE_FLOOD_SAMPLE_FLAGS,
   FINE_FLOOD_SAMPLE_FLAG_BITS,
 } from "../lib/fine-flood-provenance";
-import { VISUALIZATION_STORAGE_BUFFERS_PER_STAGE } from "../lib/visualization-bindings";
 
 /* ------------------------------------------------------------------------- */
 /* Fixtures                                                                   */
@@ -514,14 +514,13 @@ test("the gather's WGSL reads the same flag values the redistance commit writes"
   }
 });
 
-test("the gather sits exactly on the storage ceiling, with nothing spare", () => {
-  // The framework records ten as what Apple silicon reports. An eleventh
-  // publication needs a second pass, not another binding, and this is the test
-  // that says so before a driver does.
-  assert.equal(
-    FLUID_CELL_TRACE_STORAGE_BINDINGS.length,
-    VISUALIZATION_STORAGE_BUFFERS_PER_STAGE,
-  );
+test("every gather stage stays below five storage buffers", () => {
+  assert.equal(FLUID_CELL_TRACE_STORAGE_BINDINGS.length, 4);
   assert.equal(new Set(FLUID_CELL_TRACE_STORAGE_BINDINGS).size,
     FLUID_CELL_TRACE_STORAGE_BINDINGS.length);
+  for (const [stage, bindings] of Object.entries(FLUID_CELL_TRACE_STAGE_STORAGE_BINDINGS)) {
+    assert.ok(bindings.length < 5, `${stage} binds ${bindings.length} storage buffers`);
+    assert.equal(new Set(bindings).size, bindings.length, `${stage} repeats a binding`);
+    assert.ok(fluidCellTraceGatherShader.includes(`fn ${stage}(`), `${stage} has no WGSL entry point`);
+  }
 });

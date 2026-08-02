@@ -70,13 +70,13 @@ export const SVO_GBUFFER_FLAGS = Object.freeze({
  *
  * The raster primary graph writes the same four planes from five separate
  * draws, and nothing else in the record separates them: a brick payload hit and
- * an authored primitive hit both publish `analyticPrimitive` with static
+ * an authored primitive hit both publish `analyticPrimitive` with zero
  * motion. These three bits were already allocated inside the metadata word, so
  * naming the producer costs no bandwidth and no attachment.
  */
 export const SVO_GBUFFER_PRODUCERS = Object.freeze({
   unspecified: 0, tracedPrimary: 1, rasterBackground: 2, brickRaster: 3,
-  staticPrimitiveRaster: 4, rigidImpostorRaster: 5, glassDiscovery: 6,
+  scenePrimitiveRaster: 4, rigidImpostorRaster: 5, glassDiscovery: 6,
 } as const);
 export type SvoGBufferProducer = typeof SVO_GBUFFER_PRODUCERS[keyof typeof SVO_GBUFFER_PRODUCERS];
 export const SVO_GBUFFER_PRODUCER_SHIFT = 9;
@@ -367,7 +367,7 @@ const SVO_GBUFFER_GEOMETRIC_NORMAL_VALID:u32=8u;const SVO_GBUFFER_SHADING_NORMAL
 const SVO_GBUFFER_MOTION_VALID:u32=32u;const SVO_GBUFFER_MEDIA_VALID:u32=64u;const SVO_GBUFFER_HARD_FEATURE:u32=256u;
 const SVO_GBUFFER_FIELD_NONE:u32=0u;const SVO_GBUFFER_FEATURE_SMOOTH:u32=0u;const SVO_GBUFFER_FEATURE_BOX_X:u32=1u;
 const SVO_GBUFFER_PRODUCER_TRACED:u32=${SVO_GBUFFER_PRODUCERS.tracedPrimary}u;const SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND:u32=${SVO_GBUFFER_PRODUCERS.rasterBackground}u;
-const SVO_GBUFFER_PRODUCER_BRICK:u32=${SVO_GBUFFER_PRODUCERS.brickRaster}u;const SVO_GBUFFER_PRODUCER_STATIC_PRIMITIVE:u32=${SVO_GBUFFER_PRODUCERS.staticPrimitiveRaster}u;
+const SVO_GBUFFER_PRODUCER_BRICK:u32=${SVO_GBUFFER_PRODUCERS.brickRaster}u;const SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE:u32=${SVO_GBUFFER_PRODUCERS.scenePrimitiveRaster}u;
 const SVO_GBUFFER_PRODUCER_RIGID:u32=${SVO_GBUFFER_PRODUCERS.rigidImpostorRaster}u;const SVO_GBUFFER_PRODUCER_GLASS:u32=${SVO_GBUFFER_PRODUCERS.glassDiscovery}u;
 fn svoGBufferProducerFlags(producer:u32)->u32{return (producer&${SVO_GBUFFER_PRODUCER_MASK}u)<<${SVO_GBUFFER_PRODUCER_SHIFT}u;}
 const SVO_GBUFFER_MAX_VELOCITY_M_S:f32=64.0;

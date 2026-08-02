@@ -13,13 +13,14 @@ import {
   svoBrickRasterCoverageCountBytes,
   svoBrickRasterDrawBindGroupLayoutEntries,
   svoBrickRasterInstanceBytes,
+  svoBrickRasterPublicationInstanceOffsetBytes,
   svoBrickRasterSortStateBytes,
   SVO_BRICK_RASTER_BOX_CORNERS,
   SVO_BRICK_RASTER_CONTRACT,
 } from "../lib/webgpu-svo-brick-raster";
 import { createSvoDrySceneFragmentWGSL, sparseVoxelDrySceneBindGroupLayoutEntries,
   SVO_DRY_SPLIT_GEOMETRY_FORMAT, SVO_DRY_SPLIT_IDENTITY_FORMAT,
-  SVO_DRY_TRAVERSAL_MODES, SVO_STATIC_PRIMITIVE_RASTER_CONTRACT,
+  SVO_DRY_TRAVERSAL_MODES, SVO_SCENE_PRIMITIVE_RASTER_CONTRACT,
   type SvoDryOptimizationExperiments } from "../lib/webgpu-svo-dry-scene";
 
 const cullShader = createSvoBrickRasterCullWGSL({ reversedZNear_m: 0.01, tanHalfFov: 0.72 });
@@ -39,6 +40,9 @@ test("brick instances are sized, keyed and bound so the sorted list reaches the 
   assert.equal(svoBrickRasterCoverageCandidateBytes(1500, 1500),
     1500 * 1500 * 4 * SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel);
   assert.equal(svoBrickRasterSortStateBytes(), (8 + SVO_BRICK_RASTER_CONTRACT.sortBuckets) * 4);
+  assert.equal(svoBrickRasterPublicationInstanceOffsetBytes(), 4_352);
+  assert.match(cullShader, /_instanceAlignment:array<u32,56>/,
+    "WGSL and host must agree on the aligned start of the instance runtime array");
   // Sort key and node index share one word; the key must not eat a real node.
   assert.equal(SVO_BRICK_RASTER_CONTRACT.nodeIndexMask + 1, 2 ** SVO_BRICK_RASTER_CONTRACT.sortKeyShift);
   assert.ok(SVO_BRICK_RASTER_CONTRACT.sortBuckets
@@ -49,7 +53,8 @@ test("brick instances are sized, keyed and bound so the sorted list reaches the 
   // Read-write storage is illegal in the vertex stage, so the sorted list is a
   // second, read-only binding rather than a second use of the cull group.
   const cull = svoBrickRasterCullBindGroupLayoutEntries();
-  assert.equal(cull.length, 9);
+  assert.equal(cull.length, 5);
+  assert.equal(cull.filter((entry) => entry.buffer?.type === "storage" || entry.buffer?.type === "read-only-storage").length, 3);
   assert.ok(cull.every((entry) => entry.visibility === GPUShaderStage.COMPUTE));
   const draw = svoBrickRasterDrawBindGroupLayoutEntries();
   assert.deepEqual(draw, [{
@@ -100,9 +105,9 @@ test("the box table draws outward-wound faces so back-face culling keeps the far
 });
 
 test("emission drops empty bricks, rasterizes the published occupied sub-AABB, and keys on view depth", () => {
-  assert.match(cullShader, /if\(occupancy\.ready!=0u&&occupancy\.occupied==0u\)\{atomicAdd\(&svoBrickSort\.empty,1u\);return;\}/);
+  assert.match(cullShader, /if\(occupancy\.ready!=0u&&occupancy\.occupied==0u\)\{atomicAdd\(&svoBrickRaster\.sort\.empty,1u\);return;\}/);
   assert.match(cullShader, /if\(occupancy\.ready!=0u\)\{proxy=svoBrickOccupiedBounds\(occupancy,bounds\[0\],cellSize\);\}/);
-  assert.match(cullShader, /if\(!svoBrickFrustumVisible\(camera,proxy\)\)\{atomicAdd\(&svoBrickSort\.culled,1u\);return;\}/);
+  assert.match(cullShader, /if\(!svoBrickFrustumVisible\(camera,proxy\)\)\{atomicAdd\(&svoBrickRaster\.sort\.culled,1u\);return;\}/);
   assert.match(cullShader, /nodeIndex\|\(key<<SVO_BRICK_SORT_KEY_SHIFT\)/);
   // The key is the box's exact minimum view depth, not a centre distance.
   assert.match(cullShader, /dot\(center-camera\.origin,camera\.forward\)-dot\(abs\(camera\.forward\),halfExtent\)/);
@@ -169,10 +174,10 @@ test("conservative coverage moves expensive leaf tracing into one exact per-pixe
     "canonical brick-boundary tie arithmetic must not leak into the raster control comparison");
 });
 
-test("raster-primary resolves static primitive overlap with exact per-primitive depth", () => {
+test("raster-primary resolves live scene primitive overlap with exact per-primitive depth", () => {
   const shader = createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, true, true);
-  const { entryPoints } = SVO_STATIC_PRIMITIVE_RASTER_CONTRACT;
-  assert.equal(SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, 36);
+  const { entryPoints } = SVO_SCENE_PRIMITIVE_RASTER_CONTRACT;
+  assert.equal(SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, 36);
   assert.match(shader, new RegExp(`@vertex fn ${entryPoints.vertex}`));
   assert.match(shader, new RegExp(`@fragment fn ${entryPoints.fragment}`));
 
@@ -180,7 +185,7 @@ test("raster-primary resolves static primitive overlap with exact per-primitive 
   const fragmentStart = shader.indexOf(`@fragment fn ${entryPoints.fragment}`);
   const fragment = shader.slice(fragmentStart, shader.indexOf("\n}", fragmentStart) + 2);
   assert.ok(vertexStart > 0 && fragmentStart > vertexStart);
-  assert.match(shader.slice(vertexStart, fragmentStart), /primitives\[primitiveIndex\]/,
+  assert.match(shader.slice(vertexStart, fragmentStart), /dryPrimitive\(primitiveIndex\)/,
     "each instance derives conservative coverage from its own analytic record");
   assert.match(shader, /kind==SVO_KIND_SPHERE/);
   assert.match(shader, /kind==SVO_KIND_BOX\|\|kind==SVO_KIND_ELLIPSOID/);
@@ -190,13 +195,16 @@ test("raster-primary resolves static primitive overlap with exact per-primitive 
   assert.match(shader, /kind==SVO_KIND_CONE/);
   assert.match(fragment, /let exact=primitiveHit\(record,ro,rd,0\.0,DRY_MISS\);/,
     "the voxel owner is not authoritative at a projected primitive boundary");
-  assert.match(fragment, /return dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_STATIC_PRIMITIVE\);/,
+  assert.match(fragment, /return dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE\);/,
     "the exact hit publishes all four primary planes, its producing-pass tag and analytic frag_depth together");
   assert.doesNotMatch(fragment, /materialOwners|traceLeafPayload/);
 
-  const primitiveBinding = sparseVoxelDrySceneBindGroupLayoutEntries().find((entry) => entry.binding === 7);
+  const primitiveBinding = sparseVoxelDrySceneBindGroupLayoutEntries().find((entry) => entry.binding === 4);
   assert.ok((primitiveBinding!.visibility & GPUShaderStage.VERTEX) !== 0,
     "the conservative proxy vertex can read the primitive arena");
+  const paramsBinding = sparseVoxelDrySceneBindGroupLayoutEntries().find((entry) => entry.binding === 9);
+  assert.ok((paramsBinding!.visibility & GPUShaderStage.VERTEX) !== 0,
+    "the conservative proxy vertex can reject instances beyond the live primitive count");
 });
 
 test("the direct brick arm and its depth experiments stay controls off the production path", () => {
@@ -258,7 +266,7 @@ function device(): Promise<GPUDevice> {
 }
 after(async () => { (await sharedDevice)?.destroy(); sharedGpu = undefined; });
 
-test("the raster-primary exact static primitive entries compile on WebGPU",
+test("the raster-primary exact live-scene primitive entries compile on WebGPU",
   { skip: modulePath ? false : "set WEBGPU_NODE_MODULE" }, async () => {
     const gpuDevice = await device();
     const layout = gpuDevice.createBindGroupLayout({ entries: sparseVoxelDrySceneBindGroupLayoutEntries() });
@@ -271,8 +279,8 @@ test("the raster-primary exact static primitive entries compile on WebGPU",
         .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
       await gpuDevice.createRenderPipelineAsync({
         layout: gpuDevice.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        vertex: { module: shaderModule, entryPoint: SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex },
-        fragment: { module: shaderModule, entryPoint: SVO_STATIC_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment, targets: [
+        vertex: { module: shaderModule, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex },
+        fragment: { module: shaderModule, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment, targets: [
           { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.packedSurfaceFormat },
           { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.identityMediaFormat },
           { format: SVO_DRY_SPLIT_GEOMETRY_FORMAT },
@@ -332,6 +340,7 @@ test("instance emission reconstructs brick bounds from Morton and orders them fr
     const control = new Uint32Array(32);
     control[0] = leaves.length;
     control[1] = leaves.length;
+    control[16] = nodes.length;
     const publication = Uint32Array.of(1, 0xffff_ffff, 1, 1);
 
     // 400-byte view uniform: viewport, cameraPosition, cameraTarget, ... The
@@ -356,18 +365,17 @@ test("instance emission reconstructs brick bounds from Morton and orders them fr
     const uniformBuffer = storage(uniforms, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     const mappingBuffer = gpuDevice.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     gpuDevice.queue.writeBuffer(mappingBuffer, 0, mapping);
-    const controlBuffer = storage(control, READ);
-    const nodeBuffer = storage(nodes, READ);
-    const leafBuffer = storage(leafRecords, READ);
-    const publicationBuffer = storage(publication, READ);
+    const structureWords = new Uint32Array(128 + nodes.length + leafRecords.length);
+    structureWords.set(control, 0); structureWords.set(publication, 64);
+    structureWords.set(nodes, 128); structureWords.set(leafRecords, 128 + nodes.length);
+    const structureBuffer = storage(structureWords, READ);
     const instanceBytes = svoBrickRasterInstanceBytes(leaves.length);
     const candidates = gpuDevice.createBuffer({ size: instanceBytes, usage: GPUBufferUsage.STORAGE });
-    const instances = gpuDevice.createBuffer({ size: instanceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const sortState = gpuDevice.createBuffer({
-      size: svoBrickRasterSortStateBytes(),
+    const rasterPublication = gpuDevice.createBuffer({
+      size: svoBrickRasterPublicationInstanceOffsetBytes() + instanceBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    gpuDevice.queue.writeBuffer(sortState, 0, Uint32Array.of(SVO_BRICK_RASTER_CONTRACT.verticesPerInstance));
+    gpuDevice.queue.writeBuffer(rasterPublication, 0, Uint32Array.of(SVO_BRICK_RASTER_CONTRACT.verticesPerInstance));
 
     const layout = gpuDevice.createBindGroupLayout({ entries: svoBrickRasterCullBindGroupLayoutEntries() });
     const module = gpuDevice.createShaderModule({ code: cullShader });
@@ -380,13 +388,9 @@ test("instance emission reconstructs brick bounds from Morton and orders them fr
       entries: [
         { binding: bindings.uniforms, resource: { buffer: uniformBuffer } },
         { binding: bindings.mapping, resource: { buffer: mappingBuffer } },
-        { binding: bindings.control, resource: { buffer: controlBuffer } },
-        { binding: bindings.nodes, resource: { buffer: nodeBuffer } },
-        { binding: bindings.leaves, resource: { buffer: leafBuffer } },
-        { binding: bindings.publicationState, resource: { buffer: publicationBuffer } },
+        { binding: bindings.structure, resource: { buffer: structureBuffer } },
         { binding: bindings.candidates, resource: { buffer: candidates } },
-        { binding: bindings.instances, resource: { buffer: instances } },
-        { binding: bindings.sortState, resource: { buffer: sortState } },
+        { binding: bindings.rasterPublication, resource: { buffer: rasterPublication } },
       ],
     });
     const encoder = gpuDevice.createCommandEncoder();
@@ -399,8 +403,8 @@ test("instance emission reconstructs brick bounds from Morton and orders them fr
     pass.end();
     const stateRead = gpuDevice.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const instanceRead = gpuDevice.createBuffer({ size: instanceBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    encoder.copyBufferToBuffer(sortState, 0, stateRead, 0, 32);
-    encoder.copyBufferToBuffer(instances, 0, instanceRead, 0, instanceBytes);
+    encoder.copyBufferToBuffer(rasterPublication, 0, stateRead, 0, 32);
+    encoder.copyBufferToBuffer(rasterPublication, svoBrickRasterPublicationInstanceOffsetBytes(), instanceRead, 0, instanceBytes);
     gpuDevice.queue.submit([encoder.finish()]);
 
     await stateRead.mapAsync(GPUMapMode.READ);

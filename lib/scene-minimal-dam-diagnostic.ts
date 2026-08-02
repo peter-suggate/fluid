@@ -105,10 +105,19 @@ export function evaluateMinimalDamMotionDiagnostic(input: {
     }));
 
     const raster = recordPath(diagnostics, "raster") ?? diagnostics;
+    // Checkpoint-authored lanes publish no explicit t=0/final raster; their
+    // first and last checkpoint carry that closure evidence instead. Without
+    // this fallback the spread resolves to `unknown` and reads as a physics
+    // failure. Mirrors `scene-water-raster-integrity-diagnostic`.
+    const rasterCheckpoints = (arrayPath(raster, "checkpoints")
+      ?? arrayPath(diagnostics, "globalFineGenerationCheckpoints") ?? [])
+      .map(recordValue).filter((value) => value !== undefined);
     const initialBounds = boundsValue(recordPath(raster, "initial")?.frontInterfaceBounds_m
-      ?? recordPath(diagnostics, "initialGlobalFineRaster")?.frontInterfaceBounds_m);
+      ?? recordPath(diagnostics, "initialGlobalFineRaster")?.frontInterfaceBounds_m
+      ?? recordPath(rasterCheckpoints[0], "raster")?.frontInterfaceBounds_m);
     const finalBounds = boundsValue(recordPath(raster, "final")?.frontInterfaceBounds_m
-      ?? recordPath(diagnostics, "finalGlobalFineRaster")?.frontInterfaceBounds_m);
+      ?? recordPath(diagnostics, "finalGlobalFineRaster")?.frontInterfaceBounds_m
+      ?? recordPath(rasterCheckpoints.at(-1), "raster")?.frontInterfaceBounds_m);
     const spread = initialBounds && finalBounds
       ? Math.max(finalBounds[1][0] - initialBounds[1][0], finalBounds[1][2] - initialBounds[1][2])
       : undefined;

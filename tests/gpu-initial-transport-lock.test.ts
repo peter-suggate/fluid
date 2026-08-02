@@ -13,8 +13,8 @@ const methodTypesSource = readFileSync(new URL("../lib/methods/types.ts", import
 
 test("WebGPU transport is capability-gated until the fenced structured t=0 authority is ready", () => {
   assert.match(transportSource, /initialSceneReady = methodId !== "octree" \|\| \(gpuInfo\?\.initialSparseAuthorityReady === true[\s\S]*gpuInfo\?\.initialRasterSurfaceReady === true\)/);
-  assert.match(transportSource, /resourceInteractionGates\(resourceReadiness, !staticRenderScene\)/);
-  assert.match(transportSource, /transportLocked = staticRenderScene \|\| \(webgpu && \(!interaction\.transportInteractive \|\| !initialSceneReady\)\)/);
+  assert.match(transportSource, /resourceInteractionGates\(resourceReadiness, !rendererOnlyScene\)/);
+  assert.match(transportSource, /transportLocked = rendererOnlyScene \|\| \(webgpu && \(!interaction\.transportInteractive \|\| !initialSceneReady\)\)/);
   assert.match(controllerSource, /resourceInteractionGates\(diagnostics\.resourceReadiness, true\)\.transportInteractive/);
   assert.match(controllerSource, /backend === "webgpu" && !this\.webgpuTransportReady\(\)/);
   const phaseWarmup = solverSource.slice(

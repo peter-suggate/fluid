@@ -16,12 +16,13 @@ import {
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
+import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 function fixture() {
   const sceneDescription = getScenePreset("sphere-jet").create();
   sceneDescription.environment = "night-lab";
   const lights = buildSvoSceneLights(sceneDescription, { revision: 7 });
-  const environment = buildSvoEnvironmentLighting("night-lab", 9);
+  const environment = buildSvoEnvironmentLighting("night-lab", 7);
   const buffer = {} as GPUBuffer;
   const source = {
     materialCount: 20,
@@ -30,7 +31,7 @@ function fixture() {
     environmentLighting: { binding: { buffer, size: environment.packedRecord.byteLength }, count: 1, strideBytes: SVO_ENVIRONMENT_LIGHTING_RECORD_STRIDE_BYTES, revision: 9, cacheKey: environment.cacheKey },
   } satisfies SparseVoxelSceneRenderSource;
   const scene = {
-    primitiveRecords: new Uint32Array(16), ownerBase: 0,
+    ...svoDrySceneFixture,
     lightRecords: lights.packedRecords, lightRevision: lights.revision,
     environmentLightingRecord: environment.packedRecord,
     environmentLightingCacheKey: environment.cacheKey,
@@ -39,35 +40,48 @@ function fixture() {
 }
 
 test("published light/environment metadata gates the CPU mirror and malformed identity fails closed", () => {
-  const { source, scene } = fixture();
-  assert.equal(canConsumeSparseVoxelLighting(source, scene), true);
-  assert.equal(canConsumeSparseVoxelLighting({ ...source, lights: { ...source.lights, strideBytes: 96 } }, scene), false);
-  assert.equal(canConsumeSparseVoxelLighting({ ...source, lights: { ...source.lights, count: source.lights.count + 1 } }, scene), false);
-  assert.equal(canConsumeSparseVoxelLighting({ ...source, environmentLighting: { ...source.environmentLighting, count: 2 } }, scene), false);
-  assert.equal(canConsumeSparseVoxelLighting(source, { ...scene, lightRevision: 8 }), false);
-  assert.equal(canConsumeSparseVoxelLighting(source, { ...scene, environmentLightingCacheKey: "stale" }), false);
+  const { scene } = fixture();
+  assert.equal(canConsumeSparseVoxelLighting(scene), true);
+  assert.equal(canConsumeSparseVoxelLighting({ ...scene, lightRevision: 8 }), false);
+  assert.equal(canConsumeSparseVoxelLighting({ ...scene, environmentLightingRecord: new Uint32Array(1) }), false);
   const wrongRecord = Uint32Array.from(scene.lightRecords);
   wrongRecord[27] = 99;
-  assert.equal(canConsumeSparseVoxelLighting(source, { ...scene, lightRecords: wrongRecord }), false);
+  assert.equal(canConsumeSparseVoxelLighting({ ...scene, lightRecords: wrongRecord }), false);
 });
 
 test("canonical scene mirrors follow authoritative publication revisions and malformed metadata never throws", () => {
-  const { source } = fixture();
   const sceneDescription = getScenePreset("sphere-jet").create();
   sceneDescription.environment = "night-lab";
-  const mirrors = buildSparseVoxelDrySceneLightingMirrors(sceneDescription, source);
+  const mirrors = buildSparseVoxelDrySceneLightingMirrors(sceneDescription, 7);
   assert.ok(mirrors);
-  assert.equal(mirrors.lightRevision, source.lights.revision);
-  assert.equal(mirrors.environmentLightingCacheKey, source.environmentLighting.cacheKey);
-  assert.equal(buildSparseVoxelDrySceneLightingMirrors(sceneDescription, { ...source, lights: { ...source.lights, count: 0 } }), undefined);
-  assert.equal(buildSparseVoxelDrySceneLightingMirrors(sceneDescription, { ...source, environmentLighting: { ...source.environmentLighting, cacheKey: "wrong" } }), undefined);
+  assert.equal(mirrors.lightRevision, 7);
+  assert.equal(buildSparseVoxelDrySceneLightingMirrors(sceneDescription, 0), undefined);
+});
+
+test("a light-only scene edit republishes current radiance into the fixed arena", () => {
+  const sceneDescription = getScenePreset("sphere-jet").create();
+  const first = buildSparseVoxelDrySceneLightingMirrors(sceneDescription, 7)!;
+  sceneDescription.lighting = { ...sceneDescription.lighting,
+    directional: { ...sceneDescription.lighting?.directional, intensity: 2.5 } };
+  const changed = buildSparseVoxelDrySceneLightingMirrors(sceneDescription, 8)!;
+  const arena = packSparseVoxelDrySceneLightingArena({
+    ...svoDrySceneFixture,
+    ...changed,
+  })!;
+  const floats = new Float32Array(arena.buffer, arena.byteOffset, arena.length);
+  const directional = SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.lightWordOffset;
+
+  assert.notDeepEqual(changed.lightRecords, first.lightRecords);
+  assert.equal(arena[SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.metadataWordOffset + 1], 8);
+  assert.equal(arena[directional + 27], 8, "the light record and arena publish one complete revision");
+  assert.equal(floats[directional + 11], 2.5, "the next frame consumes the edited analytic intensity");
 });
 
 test("one uniform arena preserves exact published records without adding a storage binding", () => {
   const { source, scene } = fixture();
-  const arena = packSparseVoxelDrySceneLightingArena(source, scene)!;
+  const arena = packSparseVoxelDrySceneLightingArena(scene)!;
   assert.equal(arena.byteLength, SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes);
-  assert.deepEqual([...arena.slice(0, 4)], [source.lights.count, source.lights.revision, source.environmentLighting.revision, 1]);
+  assert.deepEqual([...arena.slice(0, 4)], [source.lights.count, scene.lightRevision, scene.lightRevision, 1]);
   assert.deepEqual(
     arena.slice(SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.lightWordOffset, SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.lightWordOffset + scene.lightRecords.length),
     scene.lightRecords,
@@ -85,7 +99,7 @@ test("one uniform arena preserves exact published records without adding a stora
     SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length,
     "every dry-pass storage binding must be declared in the shader and the contract");
   assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT
-    .filter(({ type }) => type === "read-only-storage").length, 10);
+    .filter(({ type }) => type === "read-only-storage").length, 4);
 });
 
 test("directional, point, sphere, and rectangle lighting share bounded stable visibility work", () => {

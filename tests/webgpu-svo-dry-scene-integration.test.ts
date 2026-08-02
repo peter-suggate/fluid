@@ -37,49 +37,45 @@ test("GLOBAL SVO is the sole production presentation", () => {
     "viewport must pass lighting effects before the diagnostics argument in the renderer contract");
 });
 
-test("the water pipeline replacement callback is fail-safe and replaces rather than overlays raster", () => {
+test("the water pipeline replacement callback owns the dry scene without a substitute path", () => {
   const sampledTargetView = {} as GPUTextureView;
   const replacement: DrySceneReplacementEncoder = () => ({ encoded: true, sampledTargetView });
   assert.deepEqual(replacement({} as GPUCommandEncoder, {} as GPUTexture), { encoded: true, sampledTargetView });
   expectSource(waterSource, /drySceneReplacement\?\.\(encoder, this\.sceneTexture, tracePhase\) \?\? false/,
     "water pipeline must let the replacement explicitly accept or reject a frame");
-  expectSource(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"Dry scene"/,
-    "the analytic pass is encoded only when no replacement accepted the frame");
+  expectSource(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"SVO dry-scene unavailable"/,
+    "a rejected live SVO frame must enter the explicit fail-closed pass");
   assert.doesNotMatch(waterSource, /drySceneOverlay/,
     "a sparse production scene must never be composed after the analytic pass");
-  const replacementCall = waterSource.indexOf("const sparseSceneResult = drySceneReplacement");
-  const rasterFallback = waterSource.indexOf("if (!sparseSceneResult)", replacementCall);
-  assert.ok(replacementCall >= 0 && rasterFallback > replacementCall);
+  assert.doesNotMatch(waterSource, /scenePipeline|sceneBindGroup|sceneShader|Render dry scene for water refraction/);
 });
 
-test("the legacy procedural environment never appears while sparse presentation is selected", () => {
-  const fallback = waterSource.slice(
+test("missing live SVO publication fails closed and retains only real fluid interfaces", () => {
+  const failure = waterSource.slice(
     waterSource.indexOf("if (!sparseSceneResult)"),
     waterSource.indexOf("traceBoundary?.();", waterSource.indexOf("if (!sparseSceneResult)")),
   );
-  expectSource(fallback, /if \(!pending\) \{ scene\.setPipeline\(this\.scenePipeline\)/,
-    "a pending sparse presentation must clear the dry target instead of drawing the raster room");
-  expectSource(fallback, /r: pending\[0\], g: pending\[1\], b: pending\[2\], a: 65504/,
-    "the pending clear shows the environment's ambient light at far scene depth");
-  expectSource(rendererSource, /setPendingSvoBackground\(\s*svoPresentationExpected \? svoEnvironmentAmbientBackgroundLinear\(environmentId, scene\.lighting\?\.environment\) : undefined,\s*\)/,
-    "the renderer must claim the dry scene for sparse presentation before the pipeline can publish one");
-  expectSource(rendererSource, /const svoPresentationExpected = !this\.failedOptionalPipelines\.has\("svo-dry-scene"\)/,
-    "a scene that has genuinely fallen back keeps the raster room rather than a flat placeholder");
-  // The legacy scene shader remains reachable only as an automatic fail-soft
-  // path while GLOBAL resources are unavailable.
-  assert.match(waterSource, /scene\.setPipeline\(this\.scenePipeline\)/);
+  expectSource(failure, /clearValue:\{r:\.18,g:0,b:\.045,a:65504\}/,
+    "the failure plane must be conspicuous and remain at far depth for water diagnosis");
+  expectSource(failure, /SVO dry-scene unavailable · fail closed/,
+    "performance diagnostics must name the rejection rather than a fallback");
+  assert.doesNotMatch(rendererSource, /setPendingSvoBackground|svoPresentationExpected/);
+  expectSource(waterSource, /if \(this\.sceneHasFluid\) \{[^]*interfacePass\("Water \+ spray front interfaces"/,
+    "actual fluid interfaces remain available after the dry scene fails closed");
 });
 
 test("the direct renderer exposes a source-aware replacement texture contract", () => {
   assert.ok(drySceneSource, "lib/webgpu-svo-dry-scene.ts must implement the production dry-scene renderer");
   expectSource(drySceneSource, /export class SparseVoxelDrySceneRenderer/,
     "direct renderer class must be public to the presentation owner");
-  expectSource(drySceneSource, /setSource\(source: SparseVoxelSceneRenderSource \| undefined, scene: SparseVoxelDrySceneData \| undefined\)/,
-    "the renderer accepts structural arenas, their parent material table, and analytic-owner data together");
+  expectSource(drySceneSource, /setSource\(source: SparseVoxelSceneRenderSource \| undefined\)/,
+    "the renderer attaches the mutable SVO acceleration independently");
+  expectSource(drySceneSource, /publishScene\(scene: SparseVoxelDrySceneData\): boolean/,
+    "the renderer hot-publishes live analytic, material, glass, and lighting data");
   expectSource(drySceneSource, /encode\([^)]*encoder: GPUCommandEncoder[^)]*target: GPUTexture \| GPUTextureView[^)]*\): DrySceneReplacementResult \| false/,
     "encode must report both successful ownership and the texture the next stage should sample");
   expectSource(drySceneSource, /if \(!this\.pipeline \|\| !this\.bindGroup\) return false/,
-    "an absent or unpublished source must trigger the raster fallback");
+    "an absent or unpublished source must reject the frame for fail-closed presentation");
   expectSource(drySceneSource, /loadOp:\s*"clear"/,
     "a successful replacement owns the complete dry-scene target");
   assert.doesNotMatch(drySceneSource, /SparseVoxelDebugRecord|voxelRecords|brickRecords/,
@@ -105,7 +101,7 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
   assert.match(drySceneSource,
     /rootIndex=0u;rootIndex<2u[^]*candidate=\(-b\+select\(-root,root,rootIndex!=0u\)\)\/a/,
     "capsule and cylinder side intersections must retain the positive exit root for inside rays");
-  for (const binding of ["structural.control", "structural.nodes", "structural.leaves", "structural.materialOwners", "structural.publication.state", "source.pbrMaterials!.binding"]) {
+  for (const binding of ["structural.structure", "structural.sceneMaterialOwners", "this.sceneArenaBuffer"]) {
     assert.ok(drySceneSource.includes(binding), `direct rendering must bind ${binding}`);
   }
 });
@@ -145,13 +141,13 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   const resources = [...drySceneSource.slice(rebuildStart, rebuildEnd).matchAll(/\{ binding: (\d+), resource:/g)]
     .map((match) => Number(match[1])).sort((a, b) => a - b);
   assert.deepEqual(resources, SVO_DRY_SCENE_BINDING_CONTRACT.map(({ binding }) => binding),
-    "every declared/layout binding must have a resource in the sole production bind-group variant");
-  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 10,
-    "the dry pass includes the two optional wide-fanout traversal payloads");
-  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), [
-    { binding: 11, type: "read-only-storage" }, { binding: 12, type: "read-only-storage" },
-  ]);
-  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-10).map(({ binding, type }) => [binding, type]), [
+    "every declared/layout binding must have one production resource expression");
+  assert.match(drySceneSource, /\.\.\.\(derivedTraversal \? \[\{ binding: 5, resource: derivedTraversal \}\] : \[\]\)/,
+    "derived traversal is bound only for entrypoints that actually consume it");
+  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 4,
+    "the dry pass has a hard four-storage-buffer ceiling");
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), []);
+  assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-12).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
     // Evolving fluid coverage shares the node-mip sampler rather than adding a
     // second one: both want clamp-to-edge linear filtering.
@@ -160,6 +156,7 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
     [21, "texture-3d-float"], [22, "texture-3d-float"],
     [23, "texture-3d-float"], [24, "texture-3d-float"],
     [25, "texture-2d-uint"],
+    [26, "texture-2d-uint"], [27, "texture-2d-uint"],
   ], "cone lighting must consume sampled resources rather than another fragment storage buffer");
   assert.match(drySceneSource, /nodeMip\?\.view \?\? this\.nodeMipFallbackAtlasView/);
   assert.match(drySceneSource, /nodeMip\?\.sampler \?\? this\.nodeMipFallbackSampler/);
@@ -167,14 +164,14 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
   assert.match(drySceneSource, /nodeMip\?\.directPageTableView \?\? this\.nodeMipFallbackDirectPageTableView/);
 });
 
-test("unavailable structural fields fail over to raster before GPU encoding", () => {
+test("unavailable structural fields reject live SVO before GPU encoding", () => {
   const source = {
     materialCount: 2,
     pbrMaterials: { binding: { buffer: {} as GPUBuffer }, count: 8, strideBytes: 96, revision: 1 },
     structural: {
       fields: {
         topology: { residency: "all-published-leaves" },
-        staticGeometry: { residency: "all-published-leaves" },
+        sceneGeometry: { residency: "all-published-leaves" },
         materialOwner: { residency: "all-published-leaves" },
       },
     },
@@ -190,7 +187,7 @@ test("unavailable structural fields fail over to raster before GPU encoding", ()
       ...source.structural!,
       fields: {
         ...source.structural!.fields,
-        staticGeometry: { ...source.structural!.fields.staticGeometry, residency: "unavailable" as const },
+        sceneGeometry: { ...source.structural!.fields.sceneGeometry, residency: "unavailable" as const },
       },
     },
   };
@@ -200,10 +197,12 @@ test("unavailable structural fields fail over to raster before GPU encoding", ()
 test("renderer atomically replaces structural sources before retiring the previous solver", () => {
   expectSource(rendererSource, /private svoDryScenePipeline\?: SparseVoxelDrySceneRenderer/,
     "FluidLabRenderer must own the direct renderer lifecycle");
-  expectSource(rendererSource, /this\.svoDryScenePipeline\?\.setSource\(sparseSceneSource,drySceneData\)/,
-    "solver attachment must pass the complete source and its analytic-owner data");
+  expectSource(rendererSource, /this\.svoDryScenePipeline\?\.setSource\(sparseSceneSource\)/,
+    "solver attachment must replace only the mutable acceleration source");
+  expectSource(rendererSource, /this\.svoDryScenePipeline && !this\.svoDryScenePipeline\.publishScene\(publication\)/,
+    "presentation scene publication must remain independent of solver attachment");
 
-  const attach = rendererSource.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource,drySceneData)");
+  const attach = rendererSource.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource)");
   const retire = rendererSource.indexOf("this.retireGPUFluid(previous)", attach);
   assert.ok(attach >= 0, "the warmed structural source must replace the active binding");
   assert.ok(retire > attach, "the new binding must be installed before the previous solver is retired");

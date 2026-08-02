@@ -52,7 +52,7 @@ test("worker and reducer layouts stay beneath portable Metal binding ceilings", 
   const worker = svoConeFanoutWorkerBindGroupLayoutEntries();
   const reducer = svoConeFanoutReducerBindGroupLayoutEntries();
   assert.equal(scene.filter(({ buffer }) => buffer?.type === "read-only-storage").length, 1);
-  assert.equal(scene.filter(({ texture }) => texture).length, 4);
+  assert.equal(scene.filter(({ texture }) => texture).length, 5);
   assert.equal(worker.filter(({ storageTexture }) => storageTexture).length, 1);
   assert.equal(worker.filter(({ texture }) => texture).length, 2);
   assert.equal(reducer.filter(({ storageTexture }) => storageTexture).length, 1);
@@ -79,6 +79,8 @@ test("dedicated worker owns one cone lane and reducer preserves deterministic pa
   assert.match(entry, /let receiver=textureLoad\(fanoutReceiver,coordinate,0\)/);
   assert.match(entry, /let normal=receiver\.yzw/);
   assert.match(entry, /let secondary=gid\.z>=12u/);
+  assert.match(entry, /select\(FANOUT_INVALID,cone\.transmittance,cone\.valid!=0u\)/,
+    "dirty pages must survive fan-out as an explicit invalid-page sentinel");
   assert.match(entry, /let lightIndex=gid\.z-select\(FANOUT_LIGHT_BASE,12u,secondary\)/);
   assert.match(entry,
     /let sampleCount=select\(dry\.tuningCounts1\.z,dry\.tuningCounts1\.y,uniforms\.viewport\.w>=-1\.0\)/,
@@ -87,11 +89,12 @@ test("dedicated worker owns one cone lane and reducer preserves deterministic pa
     /select\(select\(1u,select\(dry\.tuningCounts1\.x,dry\.tuningCounts0\.w,settled\),area\),1u,globalIllumination\)/,
     "moving, settled, and GI area-light counts remain GPU-owned");
   assert.match(svoConeFanoutReducerWGSL,
-    /for\(var sample=0u;sample<FANOUT_AO_LAYERS;sample\+=1u\)[^]*if\(value==FANOUT_INACTIVE\)\{break;\}ao\+=value/);
+    /for\(var sample=0u;sample<FANOUT_AO_LAYERS;sample\+=1u\)[^]*if\(value==FANOUT_INACTIVE\)\{break;\}[^]*ao\+=value/);
   assert.match(svoConeFanoutReducerWGSL,
-    /if\(fanout\.activity\.y!=0u\)\{let second=fanoutLoad\(coordinate,12u\+light\);if\(second!=FANOUT_INACTIVE\)\{value\+=second;sampleCount=2u;\}\}/);
+    /if\(fanout\.activity\.y!=0u\)\{let second=fanoutLoad\(coordinate,12u\+light\);[^]*if\(second!=FANOUT_INACTIVE\)\{value\+=second;sampleCount=2u;\}\}/);
   assert.match(svoConeFanoutReducerWGSL, /round\(clamp\(value,0\.0,1\.0\)\*127\.0\)/);
   assert.match(svoConeFanoutReducerWGSL, /clamp\(data0\.x,0\.0,1\.0\)\*255\.0/);
+  assert.match(svoConeFanoutReducerWGSL, /FANOUT_INVALID_PACKED[^]*value==FANOUT_INVALID[^]*textureStore/);
   assert.doesNotMatch(worker + svoConeFanoutReducerWGSL, /atomic|textureBarrier/);
 });
 
@@ -128,4 +131,17 @@ test("cone fan-out worker and reducer compile on Dawn", {
   } finally {
     device.destroy();
   }
+});
+
+test("cone fan-out worker supplies the live publication accessor required by the shared marcher", () => {
+  const worker = createSvoConeFanoutWorkerWGSL({
+    coneMarcherWGSL: createSvoDryConeMarcherWGSL({
+      branchlessMorton: true,
+      rangedDirectorySearch: true,
+      fluidCoverage: true,
+      directPageTable: true,
+    }),
+    visibilityFlags: { ambientOcclusion: 1, exactShadow: 2, globalIllumination: 16 },
+  });
+  assert.match(worker, /fn dryPublicationWord\(index:u32\)->u32\{return publicationState\[index\];\}/);
 });

@@ -11,6 +11,7 @@ import type { GPUInitializationPhase } from "../gpu-initialization";
 import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
 import type { CoarseLevelSetConsumerSource } from "../octree-consumer-sampling";
 import type { ResourcePluginDefinition } from "../resource-readiness";
+import type { SparseScenePrimitiveUpdate } from "../webgpu-sparse-scene-proxies";
 
 /**
  * Method plugin contract.
@@ -126,12 +127,31 @@ export interface GPUSolverInstance {
   readonly powerBoundaryFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
   readonly globalFineCoarseLevelSetControl?: GPUBuffer;
   readonly globalFineRestrictionControl?: GPUBuffer;
+  /** QA-only first-failure receipt for Section-5 air-support publication. */
+  readonly airSupportScratch?: GPUBuffer;
   /** GPU-authored rigid records matching the renderer's four-vec4 body ABI. */
   readonly rigidRenderBuffer?: GPUBuffer;
   /** GPU-authored 128-byte primitive-motion sidecars, including conservative swept bounds. */
   readonly rigidMotionBuffer?: GPUBuffer;
   /** Updates selection metadata without mirroring dynamic poses through CPU memory. */
   setSelectedRigidBody?(index: number): void;
+  /**
+   * Stage the latest authoritative scene revision for GPU consumers.
+   *
+   * Scene geometry, materials, lighting, and eventually fluid-domain inputs
+   * all travel through this one live update seam. Implementations retain no
+   * separate baked/fluid-free scene identity; they may reuse generation-matched
+   * acceleration data, but the supplied scene is always the authority.
+   */
+  stageSceneUpdate?(scene: SceneDescription): void;
+  /** Stage allocation-free keyed primitive motion into the shared sparse scene. */
+  stageLivePrimitiveUpdates?(updates: readonly SparseScenePrimitiveUpdate[]): boolean;
+  /**
+   * Encode bounded maintenance for the scene revision staged above.
+   * Presentation calls this even while simulation is paused so sparse
+   * accelerators can converge without a solver step or a queue fence.
+   */
+  encodeSceneMaintenance?(encoder: GPUCommandEncoder): void;
   /** User-triggered ray query against authoritative GPU rigid poses. */
   pickRigidBody?(origin: Vec3, direction: Vec3): Promise<GPURigidBodyPick | undefined>;
   /** Adaptive pressure-DOF ownership used by the representation alarm. */

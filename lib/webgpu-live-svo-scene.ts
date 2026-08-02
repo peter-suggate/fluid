@@ -4,21 +4,21 @@ import type { GPUSolverInstance } from "./methods/types";
 import { createTallCellLayout, type GPUQuality } from "./tall-cell-grid";
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
 import type { ResourcePluginDefinition } from "./resource-readiness";
+import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
 
-/** Colocated lifecycle declaration for static-world voxel preprocessing. */
-export const staticSvoSceneResourcePlugin: ResourcePluginDefinition = Object.freeze({
-  id: "scene.static-svo-source",
+/** Colocated lifecycle declaration for the renderer-owned live scene. */
+export const liveSvoSceneResourcePlugin: ResourcePluginDefinition = Object.freeze({
+  id: "scene.live-svo-source",
   lane: "svo",
-  label: "Static sparse world source",
-  provides: ["static-world"] as const,
+  label: "Live sparse scene source",
+  provides: ["live-scene"] as const,
   blocks: "nothing",
   phaseCopy: {
-    allocation: "Building the authored sparse world source progressively.",
-    warmup: "Uploading and fencing the static sparse world publication.",
+    allocation: "Allocating fixed live-scene arenas.",
   },
 });
 
-export interface StaticSvoSceneOptions {
+export interface LiveSvoSceneOptions {
   /**
    * Renderer-only construction override used by topology experiments. It does
    * not mutate `scene.voxelDomain` and therefore cannot change the simulation
@@ -29,17 +29,17 @@ export interface StaticSvoSceneOptions {
   environmentBrickRefinementLevels?: number;
 }
 
-export function staticSvoRenderBrickSize(
+export function liveSvoRenderBrickSize(
   scene: Pick<SceneDescription, "voxelDomain">,
-  options: StaticSvoSceneOptions = {},
+  options: LiveSvoSceneOptions = {},
 ): 4 | 8 {
   const brickSize = options.renderBrickSize ?? scene.voxelDomain.brickSize_cells;
-  if (brickSize !== 4 && brickSize !== 8) throw new RangeError("Static SVO render brick size must be 4 or 8");
+  if (brickSize !== 4 && brickSize !== 8) throw new RangeError("Live SVO render brick size must be 4 or 8");
   return brickSize;
 }
 
-export type StaticSvoSceneProgress = (progress: {
-  phase: "allocation" | "warmup";
+export type LiveSvoSceneProgress = (progress: {
+  phase: "allocation";
   taskId: string;
   label: string;
   completed: number;
@@ -51,7 +51,7 @@ export type StaticSvoSceneProgress = (progress: {
  * source interface so the established SVO attachment path can be reused, but
  * it owns no transport, projection, level-set, or t=0 fluid authority.
  */
-export class WebGPUStaticSvoScene implements GPUSolverInstance {
+export class WebGPULiveSvoScene implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   readonly volumeTexture: GPUTexture;
   readonly surfaceFieldTexture: GPUTexture;
@@ -61,7 +61,6 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
   readonly initialSparseAuthorityReady = true;
 
   private readonly world: OctreeSparseBrickWorld;
-  private readonly solidCells: GPUBuffer;
   private accountedWorldBytes: number;
   private destroyed = false;
 
@@ -69,10 +68,10 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     private readonly device: GPUDevice,
     scene: SceneDescription,
     quality: GPUQuality,
-    options: StaticSvoSceneOptions,
+    options: LiveSvoSceneOptions,
   ) {
     const layout = createTallCellLayout(scene, quality, device.limits.maxTextureDimension3D, {
-      // Static presentation needs a lattice, not a stored liquid band.
+      // Renderer-only presentation needs a lattice, not a stored liquid band.
       regularLayers: 2,
       liquidHalo: 0,
       airHalo: 0,
@@ -80,7 +79,7 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     const dimensions = [layout.nx, layout.fineNy, layout.nz] as const;
     const textureUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST;
     this.volumeTexture = device.createTexture({
-      label: "Static SVO empty-fluid field",
+      label: "Live SVO empty-fluid field",
       size: dimensions,
       dimension: "3d",
       format: "r32float",
@@ -88,40 +87,21 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     });
     this.surfaceFieldTexture = this.volumeTexture;
     this.velocityTexture = device.createTexture({
-      label: "Static SVO zero-velocity field",
+      label: "Live SVO zero-velocity field",
       size: dimensions,
       dimension: "3d",
       format: "rgba32float",
       usage: textureUsage,
     });
     this.columnBaseTexture = device.createTexture({
-      label: "Static SVO column fallback",
+      label: "Live SVO column fallback",
       size: [layout.nx, layout.nz],
       format: "r32float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    this.solidCells = device.createBuffer({
-      label: "Static SVO zero-solid fallback",
-      size: Math.max(8, layout.nx * layout.fineNy * layout.nz * 8),
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    // Texture memory starts at zero, which is a liquid interface. Publish a
-    // strictly positive field so the structural source contains no fluid.
-    const floatsPerRow = Math.ceil(layout.nx * Float32Array.BYTES_PER_ELEMENT / 256) * 256 / Float32Array.BYTES_PER_ELEMENT;
-    const emptyPhi = new Float32Array(floatsPerRow * layout.fineNy * layout.nz);
-    emptyPhi.fill(8 * Math.min(layout.cellSize_m.x, layout.cellSize_m.y, layout.cellSize_m.z));
-    device.queue.writeTexture(
-      { texture: this.volumeTexture },
-      emptyPhi,
-      { bytesPerRow: floatsPerRow * Float32Array.BYTES_PER_ELEMENT, rowsPerImage: layout.fineNy },
-      dimensions,
-    );
-
     this.world = new OctreeSparseBrickWorld(device, scene, dimensions, {
-      brickSize: staticSvoRenderBrickSize(scene, options),
+      brickSize: liveSvoRenderBrickSize(scene, options),
       environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
-      staticLightingBrickSize: scene.voxelDomain.brickSize_cells,
       haloCells: 0,
       brickPreActivation: false,
     });
@@ -144,11 +124,11 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
       initialSparseAuthorityReady: true,
       initialRasterSurfaceReady: true,
       initialRasterSurfaceState: "gpu-authoritative",
-      initialRasterSurfaceDiagnostic: "Static SVO scene ready; fluid authority intentionally bypassed",
+      initialRasterSurfaceDiagnostic: "Live scene source ready; fluid authority intentionally absent",
       cellSize_m: h,
       pressureIterations: 0,
-      pressureSolver: "disabled · static renderer",
-      allocatedBytes: this.world.allocatedBytes + this.solidCells.size,
+      pressureSolver: "disabled · renderer-only scene",
+      allocatedBytes: this.world.allocatedBytes,
       quality,
       encodedSteps: 0,
       submittedTime_s: 0,
@@ -177,31 +157,22 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     device: GPUDevice,
     scene: SceneDescription,
     quality: GPUQuality,
-    progress: StaticSvoSceneProgress,
+    progress: LiveSvoSceneProgress,
     signal?: AbortSignal,
-    options: StaticSvoSceneOptions = {},
-  ): Promise<WebGPUStaticSvoScene> {
-    progress({ phase: "allocation", taskId: "static-svo.allocate", label: "Allocate static sparse garden", completed: 0, total: 2 });
+    options: LiveSvoSceneOptions = {},
+  ): Promise<WebGPULiveSvoScene> {
+    progress({ phase: "allocation", taskId: "live-svo.allocate", label: "Allocate live sparse scene", completed: 0, total: 1 });
     if (signal?.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
-    const source = new WebGPUStaticSvoScene(device, scene, quality, options);
-    try {
-      progress({ phase: "warmup", taskId: "static-svo.publish", label: "Publish static sparse garden", completed: 1, total: 2 });
-      const encoder = device.createCommandEncoder({ label: "Publish renderer-only SVO scene" });
-      source.world.encode(encoder, {
-        levelSet: source.volumeTexture,
-        velocity: source.velocityTexture,
-        solidCells: source.solidCells,
-      });
-      device.queue.submit([encoder.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      if (signal?.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
-      progress({ phase: "warmup", taskId: "static-svo.publish", label: "Static sparse garden ready", completed: 2, total: 2 });
-      return source;
-    } catch (error) {
-      source.destroy();
-      throw error;
-    }
+    const source = new WebGPULiveSvoScene(device, scene, quality, options);
+    progress({ phase: "allocation", taskId: "live-svo.allocate", label: "Live sparse scene arenas ready", completed: 1, total: 1 });
+    return source;
   }
+
+  stageSceneUpdate(scene: SceneDescription): void { this.world.stageSceneUpdate(scene); }
+  stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean {
+    return this.world.stageLivePrimitiveUpdates(updates);
+  }
+  encodeSceneMaintenance(encoder: GPUCommandEncoder): void { this.world.encodeSceneMaintenance(encoder); }
 
   advanceTo(): boolean { return false; }
   readStats(): Promise<GPUEulerianInfo> { return Promise.resolve({ ...this.info }); }
@@ -213,6 +184,5 @@ export class WebGPUStaticSvoScene implements GPUSolverInstance {
     this.volumeTexture.destroy();
     this.velocityTexture.destroy();
     this.columnBaseTexture.destroy();
-    this.solidCells.destroy();
   }
 }

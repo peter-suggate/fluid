@@ -1449,6 +1449,42 @@ async function runGPU(
     : undefined;
   const tripwireSteps: number[] = [];
   const tripwireFineGenerations: number[] = [];
+  /** Live per-step readback of the record just written into the ring.
+   *
+   * We NEVER self-heal from a tripped counter, so a trip must end the run at
+   * the step that produced it: a frozen fine band that keeps being stepped for
+   * another 180 advances is 180 advances of measured garbage. The ring stays
+   * the whole-run forensics source; this single-record buffer is what makes the
+   * verdict available *before* the next advance is submitted.
+   *
+   * Map/unmap cycle (why this is correct):
+   *  - the buffer is COPY_DST|MAP_READ and is written only by the tripwire
+   *    encoder, which is submitted while the buffer is unmapped;
+   *  - `mapAsync` resolves only after every previously submitted use of the
+   *    buffer has completed, so the mapped bytes are exactly this step's copy
+   *    (and, transitively, this step's post-advance control state, because the
+   *    copy encoder is submitted after the advance on the same queue);
+   *  - the host copies the record out and `unmap()`s in a `finally` before the
+   *    loop can reach the next capture, so no encoder ever references a mapped
+   *    buffer and no second `mapAsync` overlaps a pending one. */
+  const tripwireLiveReadback = tripwireSnapshot
+    ? device.createBuffer({
+      label: "Live silent-failure tripwire record",
+      size: TRIPWIRE_RECORD.strideBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    })
+    : undefined;
+  /** Host-owned copy of the mapped record; every offset in TRIPWIRE_RECORD is
+   * 4-byte aligned, so `Uint32Array` views over it are always legal. */
+  const tripwireLiveRecord = new Uint8Array(TRIPWIRE_RECORD.strideBytes);
+  type TripwireTrip = {
+    id: TripwireId; step: number; fineGeneration: number; detail: Record<string, unknown>;
+  };
+  /** Allow-listed trips observed live. They do not stop the run, but when a
+   * later step dies they are the chain that led to it, and the end-of-run walk
+   * that normally reports them never gets to run. */
+  const tripwireLiveAllowed: TripwireTrip[] = [];
+  let tripwireLiveFence_ms = 0, tripwireLiveDecode_ms = 0;
   if (tripwiresDisabled) {
     console.error("[tripwires] DISABLED by FLUID_TRIPWIRES=0: topology rollback,"
       + " unaccepted restriction rows, MGPCG non-convergence and the fine-band"
@@ -1487,6 +1523,204 @@ async function runGPU(
       airSupport: authority.airSupportScratch,
       transportGovernor: authority.workAccountingBuffers?.fineTransportGovernor,
     };
+  };
+  /** Encode one complete tripwire record into `destination` at `base`.
+   *
+   * The ring and the live single-record buffer are filled by two calls to this
+   * one writer inside the same encoder, so they cannot drift: a copy added for
+   * one is a copy added for both. Every source has already been proven present
+   * and wide enough by the caller. */
+  const encodeTripwireRecordCopies = (
+    encoder: GPUCommandEncoder, sources: ReturnType<typeof tripwireSources>,
+    destination: GPUBuffer, base: number,
+  ): void => {
+    encoder.copyBufferToBuffer(sources.topology!.buffer, sources.topology!.offset ?? 0,
+      destination, base + TRIPWIRE_RECORD.topologyOffsetBytes,
+      TRIPWIRE_RECORD.topologyBytes);
+    encoder.copyBufferToBuffer(sources.restriction!, 0, destination,
+      base + TRIPWIRE_RECORD.restrictionOffsetBytes, TRIPWIRE_RECORD.restrictionBytes);
+    encoder.copyBufferToBuffer(sources.mgpcg!, 0, destination,
+      base + TRIPWIRE_RECORD.mgpcgOffsetBytes, TRIPWIRE_RECORD.mgpcgBytes);
+    encoder.copyBufferToBuffer(sources.coarse!, 0, destination,
+      base + TRIPWIRE_RECORD.coarseOffsetBytes, TRIPWIRE_RECORD.coarseBytes);
+    encoder.copyBufferToBuffer(sources.fineWorklist!, 0, destination,
+      base + TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes);
+    encoder.copyBufferToBuffer(sources.airSupport!, 0, destination,
+      base + TRIPWIRE_RECORD.airSupportOffsetBytes, 8);
+    encoder.copyBufferToBuffer(sources.airSupport!, 38 * 4, destination,
+      base + TRIPWIRE_RECORD.airSupportOffsetBytes + 8, 8);
+    encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
+      sources.transportGovernor!.offset ?? 0, destination,
+      base + TRIPWIRE_RECORD.transportScheduleOffsetBytes,
+      TRIPWIRE_RECORD.transportScheduleBytes);
+    encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
+      (sources.transportGovernor!.offset ?? 0) + 46 * 4, destination,
+      base + TRIPWIRE_RECORD.transportSleepOffsetBytes,
+      TRIPWIRE_RECORD.transportSleepBytes);
+  };
+  /** Decode and evaluate ONE captured record.
+   *
+   * The live per-step path and the end-of-run ring walk both call this on
+   * byte-identical records, so a trip can never be seen by one and missed by
+   * the other. `emitTopologyTrace` belongs to the live path alone: the trace
+   * has to survive the step that dies, and emitting it from both walks would
+   * duplicate every record on a run that reaches the end. */
+  const evaluateTripwireRecord = (
+    words: (offsetBytes: number, byteLength: number) => Uint32Array,
+    step: number, fineGeneration: number, emitTopologyTrace: boolean,
+  ): TripwireTrip[] => {
+    const trips: TripwireTrip[] = [];
+    const trip = (id: TripwireId, detail: Record<string, unknown>) =>
+      trips.push({ id, step, fineGeneration, detail });
+    const header = readFineLevelSetWorksetHeader(words(
+      TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes));
+    const recurringRejection = header?.generation === 0xffff_ffff
+      && header.activeCount === 0xffff_ffff ? {
+        clauseMask: header.capacity,
+        clauses: decodeFineLevelSetRecurringRejectionClauses(header.capacity),
+        unknownClauseMask: (header.capacity & ~0x1fff) >>> 0,
+        landingDisplacementBits: header.flags,
+      } : undefined;
+    const airSupport = words(TRIPWIRE_RECORD.airSupportOffsetBytes,
+      TRIPWIRE_RECORD.airSupportBytes);
+    const transportSchedule = Array.from(words(
+      TRIPWIRE_RECORD.transportScheduleOffsetBytes,
+      TRIPWIRE_RECORD.transportScheduleBytes));
+    const transportSleep = Array.from(words(
+      TRIPWIRE_RECORD.transportSleepOffsetBytes,
+      TRIPWIRE_RECORD.transportSleepBytes));
+    const fatalChainForensics = {
+      airSupportLive: { flags: airSupport[0], firstError: airSupport[1] },
+      airSupportLatched: { flags: airSupport[2], firstError: airSupport[3] },
+      recurringRejection,
+      transportSchedule,
+      transportSleep,
+    };
+    // 1. Topology rollback. `settleFinePublication` returns early on the
+    //    clean path and writes control[5]=1 only on the rollback branch;
+    //    the host re-zeroes control words 0..7 at the start of every
+    //    topology encode, so a set word is always this generation's own
+    //    verdict, never a stale latch.
+    const topologyControl = words(TRIPWIRE_RECORD.topologyOffsetBytes,
+      TRIPWIRE_RECORD.topologyBytes);
+    const topology = unpackFineLevelSetGPUTopologyControl(topologyControl);
+    if (emitTopologyTrace && process.env.FLUID_FINE_TOPOLOGY_TRACE === "1") {
+      // stderr: the benchmark harness pipes child stdout through an
+      // NDJSON filter that would drop this record type.
+      console.error(JSON.stringify({ record: "fine-topology-trace", step,
+        fineGeneration, interfaceBricks: topology.interfaceBricks,
+        interfaceSeedBricks: topology.interfaceSeedBricks,
+        desiredBricks: topology.desiredBricks,
+        activatedBricks: topology.activatedBricks,
+        rolledBack: topology.rolledBack, flags: topology.flags,
+        reason: topology.downstreamFinalizeReason,
+        requiredDesiredBricks: topology.requiredDesiredBricks,
+        requiredExact: topology.requiredDesiredBricksExact,
+        control: Array.from(topologyControl) }));
+    }
+    if (topology.rolledBack) {
+      trip("topology-rollback", { rolledBack: true,
+        flags: topology.flags, published: topology.published,
+        downstreamFinalizeReason: topology.downstreamFinalizeReason,
+        interfaceBricks: topology.interfaceBricks,
+        desiredBricks: topology.desiredBricks,
+        activatedBricks: topology.activatedBricks,
+        control: Array.from(topologyControl), fatalChainForensics });
+    }
+    // 2. Section 5 restriction authority. Aanjaneya et al. deliberately
+    //    keep the fine SPGrid only around the surface; the background
+    //    octree owns every other row. A global uncovered-row fraction is
+    //    therefore scene-dependent and invalid (the ocean legitimately
+    //    leaves about 91% of coarse rows outside the fine band). Audit
+    //    the real two-authority receipt instead: every accepted fine row
+    //    becomes one coarse correction and those rows cover the complete
+    //    interface set.
+    const restrictionWords = words(TRIPWIRE_RECORD.restrictionOffsetBytes,
+      TRIPWIRE_RECORD.restrictionBytes);
+    const restriction = unpackFineToCoarseGPUControl(restrictionWords);
+    const coarseWords = words(TRIPWIRE_RECORD.coarseOffsetBytes,
+      TRIPWIRE_RECORD.coarseBytes);
+    const coarse = unpackOctreePowerCoarseLevelSetControl(coarseWords);
+    const restrictionAudit = auditSection5FineRestriction(restriction, coarse);
+    if (restrictionAudit.failure && hasSeparateFineLevelSetBand) {
+      trip("restriction-unaccepted", { reason: restrictionAudit.failure,
+        ...restrictionAudit, restrictionControl: Array.from(restrictionWords),
+        coarseControl: Array.from(coarseWords), fatalChainForensics });
+    }
+    // 3. Solver convergence. Non-convergence at the encoded budget
+    //    publishes the SEED pressure and fails nothing today; this is the
+    //    guard for that cliff. Steps that executed no iterations are
+    //    exempt by construction (nothing to converge); a terminal count of
+    //    zero is gated per run by tools/benchmark-power-dam.ts.
+    const mgpcgWords = words(TRIPWIRE_RECORD.mgpcgOffsetBytes,
+      TRIPWIRE_RECORD.mgpcgBytes);
+    const mgpcg = decodeOctreeMGPCGDiagnostics(mgpcgWords);
+    if (mgpcg.flags !== 0) {
+      trip("mgpcg-nonconvergence", { unevaluable: true,
+        reason: "MGPCG control reports error flags; the converged word is not meaningful",
+        flags: mgpcg.flags, converged: mgpcg.converged, iterations: mgpcg.iterations,
+        rows: mgpcg.rows, firstErrorStage: mgpcg.firstErrorStage,
+        firstErrorRow: mgpcg.firstErrorRow, control: Array.from(mgpcgWords) });
+    } else if (mgpcg.iterations > 0 && !mgpcg.converged) {
+      trip("mgpcg-nonconvergence", { converged: false, iterations: mgpcg.iterations,
+        rows: mgpcg.rows, relativeResidual: mgpcg.relativeResidual,
+        residualSquared: mgpcg.residualSquared, rhsSquared: mgpcg.rhsSquared });
+    }
+    // 4. Fine-band capacity overflow. Older publishers degraded the
+    //    active count to INVALID. The transactional publisher instead
+    //    retains the prior fine authority and reports the rejected
+    //    required count in topology control, so both receipts must be
+    //    checked. The count is worklist header word ONE; a prior consumer
+    //    read word zero (the generation) and printed nonsense.
+    if (header === undefined) {
+      trip("fine-band-sentinel", { unevaluable: true,
+        reason: "fine worklist header could not be decoded", fatalChainForensics });
+    } else if (header.activeCount === 0xffff_ffff) {
+      trip("fine-band-sentinel", { activeCount: header.activeCount,
+        sentinel: "0xFFFFFFFF", capacity: header.capacity,
+        generation: header.generation, flags: header.flags,
+        recurringRejection, fatalChainForensics });
+    } else if ((topology.flags & FINE_LEVELSET_TOPOLOGY_ERROR.capacity) !== 0
+      || topology.requiredDesiredBricks > header.capacity) {
+      trip("fine-band-sentinel", { activeCount: header.activeCount,
+        retainedPublication: topology.rolledBack,
+        requiredDesiredBricks: topology.requiredDesiredBricks,
+        requiredDesiredBricksExact: topology.requiredDesiredBricksExact,
+        capacity: header.capacity, generation: header.generation,
+        topologyFlags: topology.flags, fatalChainForensics });
+    }
+    // 5. Air-support publication. The live scratch verdict and the
+    // first preceding failure latch are both copied at this step's queue
+    // boundary, so a later transaction cannot erase the originating
+    // rejection before the harness sees it.
+    const liveAirSupportFailure = (airSupport[0] ?? 0) !== 0;
+    const latchedAirSupportFailure = (airSupport[2] ?? 0) !== 0;
+    if (liveAirSupportFailure || latchedAirSupportFailure) {
+      trip("air-support-failure", {
+        fatalChainForensics,
+      });
+    }
+    return trips;
+  };
+  /** The single failure report. `where` is the only difference between dying
+   * at the step that tripped and the end-of-run walk; every field of the
+   * payload -- counts, the first twelve trips with their complete per-tripwire
+   * detail and `fatalChainForensics`, and the last trip -- is identical. */
+  const tripwireFailure = (failing: readonly TripwireTrip[], where: string): Error => {
+    const byId: Record<string, number> = {};
+    for (const entry of failing) byId[entry.id] = (byId[entry.id] ?? 0) + 1;
+    const allowedById: Record<string, number> = {};
+    for (const entry of tripwireLiveAllowed) {
+      allowedById[entry.id] = (allowedById[entry.id] ?? 0) + 1;
+    }
+    return new Error(`silent-failure tripwire(s) tripped ${where}: ${JSON.stringify({
+      counts: byId, firstTrips: failing.slice(0, 12),
+      lastTrip: failing[failing.length - 1],
+      ...(tripwireLiveAllowed.length === 0 ? {} : {
+        allowedCounts: allowedById,
+        lastAllowedTrip: tripwireLiveAllowed[tripwireLiveAllowed.length - 1],
+      }),
+    })} (see docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3)`);
   };
   let lastLoggedPhysicsTraceSampleId = 0;
   let lastAttributedPhysicsTraceSampleId = 0;
@@ -1631,6 +1865,10 @@ async function runGPU(
       powerGenerationAuditFineGenerations.push(fine.generation);
       powerGenerationAuditDts.push(stepDt);
     }
+    // Set only when this step actually enqueued a record, so the live readback
+    // never maps stale bytes from an earlier step on a lane whose controls are
+    // temporarily absent (`tripwiresRequired === false`).
+    let capturedThisStep = false;
     if (tripwireSnapshot) {
       // These copies are QA evidence, not simulation work: charge their host
       // cost to samplingWall_ms exactly as every other QA readback is charged,
@@ -1673,35 +1911,63 @@ async function runGPU(
         // a per-step unique label would add one map entry per advance to every
         // report and regression artifact.
         const encoder = device.createCommandEncoder({ label: "Queue tripwire snapshot" });
-        encoder.copyBufferToBuffer(sources.topology!.buffer, sources.topology!.offset ?? 0,
-          tripwireSnapshot, base + TRIPWIRE_RECORD.topologyOffsetBytes,
-          TRIPWIRE_RECORD.topologyBytes);
-        encoder.copyBufferToBuffer(sources.restriction!, 0, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.restrictionOffsetBytes, TRIPWIRE_RECORD.restrictionBytes);
-        encoder.copyBufferToBuffer(sources.mgpcg!, 0, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.mgpcgOffsetBytes, TRIPWIRE_RECORD.mgpcgBytes);
-        encoder.copyBufferToBuffer(sources.coarse!, 0, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.coarseOffsetBytes, TRIPWIRE_RECORD.coarseBytes);
-        encoder.copyBufferToBuffer(sources.fineWorklist!, 0, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes);
-        encoder.copyBufferToBuffer(sources.airSupport!, 0, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.airSupportOffsetBytes, 8);
-        encoder.copyBufferToBuffer(sources.airSupport!, 38 * 4, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.airSupportOffsetBytes + 8, 8);
-        encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
-          sources.transportGovernor!.offset ?? 0, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.transportScheduleOffsetBytes,
-          TRIPWIRE_RECORD.transportScheduleBytes);
-        encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
-          (sources.transportGovernor!.offset ?? 0) + 46 * 4, tripwireSnapshot,
-          base + TRIPWIRE_RECORD.transportSleepOffsetBytes,
-          TRIPWIRE_RECORD.transportSleepBytes);
+        encodeTripwireRecordCopies(encoder, sources, tripwireSnapshot, base);
+        // The same record, into the buffer the host maps at this step. One
+        // writer, one encoder, one submission: the live verdict and the ring's
+        // whole-run forensics are the same bytes by construction.
+        encodeTripwireRecordCopies(encoder, sources, tripwireLiveReadback!, 0);
         device.queue.submit([encoder.finish()]);
         tripwireSteps.push(steps);
         tripwireFineGenerations.push(
           (solver as GPUSolverInstance).globalFineLevelSetSource?.generation ?? 0);
+        capturedThisStep = true;
       }
       samplingWall_ms += performance.now() - tripwireCaptureStartedAt_ms;
+    }
+    if (capturedThisStep) {
+      // ---- Fail fast: evaluate step N's tripwires AT step N -----------------
+      // We never self-heal. A tripped counter means the physics this harness is
+      // measuring is already gone, so the run ends here rather than stepping a
+      // frozen solver for another two hundred advances and reporting the trip
+      // as an end-of-run footnote.
+      //
+      // `mapAsync` is a queue fence. It is charged like the periodic fence at
+      // `completionFenceEverySteps` -- i.e. NOT to samplingWall_ms -- because
+      // what it waits for is the solver's own submitted work; subtracting that
+      // would make simulationWall_ms smaller than the physics that produced it,
+      // which is exactly the fake speedup these tripwires exist to catch. The
+      // host-side decode after the fence IS diagnostics and is charged, exactly
+      // as the capture above is. Both are reported per run so the cost of
+      // fail-fast is measured rather than assumed.
+      const fenceStartedAt_ms = performance.now();
+      await tripwireLiveReadback!.mapAsync(GPUMapMode.READ, 0, TRIPWIRE_RECORD.strideBytes);
+      const decodeStartedAt_ms = performance.now();
+      tripwireLiveFence_ms += decodeStartedAt_ms - fenceStartedAt_ms;
+      try {
+        tripwireLiveRecord.set(new Uint8Array(
+          tripwireLiveReadback!.getMappedRange(0, TRIPWIRE_RECORD.strideBytes)));
+      } finally {
+        // Unmap before anything can encode into this buffer again; the next
+        // capture's `copyBufferToBuffer` would be invalid against a mapped one.
+        tripwireLiveReadback!.unmap();
+      }
+      const fineGeneration = tripwireFineGenerations[tripwireFineGenerations.length - 1]!;
+      const liveTrips = evaluateTripwireRecord((offsetBytes, byteLength) => new Uint32Array(
+        tripwireLiveRecord.buffer, tripwireLiveRecord.byteOffset + offsetBytes, byteLength / 4),
+      steps, fineGeneration, true);
+      const liveFailing = liveTrips.filter((entry) => !tripwireAllowList.has(entry.id));
+      for (const entry of liveTrips) {
+        if (tripwireAllowList.has(entry.id)) tripwireLiveAllowed.push(entry);
+      }
+      const liveDecode_ms = performance.now() - decodeStartedAt_ms;
+      tripwireLiveDecode_ms += liveDecode_ms;
+      samplingWall_ms += liveDecode_ms;
+      if (liveFailing.length !== 0) {
+        // FLUID_TRIPWIRE_ALLOW is the only downgrade path, and it has already
+        // been applied above. Everything left is fatal at its own step.
+        throw tripwireFailure(liveFailing, `at step ${steps}`
+          + ` (fine generation ${fineGeneration}) over ${tripwireSteps.length} captured steps`);
+      }
     }
     if (steps === oracleSteps) {
       await awaitAdvanceCompletion();
@@ -2450,16 +2716,20 @@ async function runGPU(
   // docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3 (P0.3). Every one of these fails
   // the run. A change that gets faster while tripping one is not a speedup.
   if (tripwireSnapshot) {
-    const tripped: {
-      id: TripwireId; step: number; fineGeneration: number; detail: Record<string, unknown>;
-    }[] = [];
+    const tripped: TripwireTrip[] = [];
     if (tripwireSteps.length === 0) {
       tripwireSnapshot.destroy();
+      tripwireLiveReadback?.destroy();
       if (tripwiresRequired) {
         throw new Error("tripwires could not be evaluated: no accepted step captured a"
           + " tripwire record (see docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3)");
       }
     } else {
+      // Reaching here means every captured step already passed its own live
+      // evaluation, so nothing fatal can be found now. The ring walk remains
+      // the whole-run report: it is what enumerates allow-listed trips across
+      // the complete window, from the same records and the same decoder, and
+      // it is the forensics source if the live path is ever made conditional.
       const snapshotBytes = tripwireSteps.length * TRIPWIRE_RECORD.strideBytes;
       try {
         await tripwireSnapshot.mapAsync(GPUMapMode.READ, 0, snapshotBytes);
@@ -2469,142 +2739,17 @@ async function runGPU(
           byteLength / 4,
         );
         for (let record = 0; record < tripwireSteps.length; record += 1) {
-          const step = tripwireSteps[record]!;
-          const fineGeneration = tripwireFineGenerations[record]!;
-          const trip = (id: TripwireId, detail: Record<string, unknown>) =>
-            tripped.push({ id, step, fineGeneration, detail });
-          const header = readFineLevelSetWorksetHeader(words(record,
-            TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes));
-          const recurringRejection = header?.generation === 0xffff_ffff
-            && header.activeCount === 0xffff_ffff ? {
-              clauseMask: header.capacity,
-              clauses: decodeFineLevelSetRecurringRejectionClauses(header.capacity),
-              unknownClauseMask: (header.capacity & ~0x1fff) >>> 0,
-              landingDisplacementBits: header.flags,
-            } : undefined;
-          const airSupport = words(record, TRIPWIRE_RECORD.airSupportOffsetBytes,
-            TRIPWIRE_RECORD.airSupportBytes);
-          const transportSchedule = Array.from(words(record,
-            TRIPWIRE_RECORD.transportScheduleOffsetBytes,
-            TRIPWIRE_RECORD.transportScheduleBytes));
-          const transportSleep = Array.from(words(record,
-            TRIPWIRE_RECORD.transportSleepOffsetBytes,
-            TRIPWIRE_RECORD.transportSleepBytes));
-          const fatalChainForensics = {
-            airSupportLive: { flags: airSupport[0], firstError: airSupport[1] },
-            airSupportLatched: { flags: airSupport[2], firstError: airSupport[3] },
-            recurringRejection,
-            transportSchedule,
-            transportSleep,
-          };
-          // 1. Topology rollback. `settleFinePublication` returns early on the
-          //    clean path and writes control[5]=1 only on the rollback branch;
-          //    the host re-zeroes control words 0..7 at the start of every
-          //    topology encode, so a set word is always this generation's own
-          //    verdict, never a stale latch.
-          const topologyControl = words(record, TRIPWIRE_RECORD.topologyOffsetBytes,
-            TRIPWIRE_RECORD.topologyBytes);
-          const topology = unpackFineLevelSetGPUTopologyControl(topologyControl);
-          if (process.env.FLUID_FINE_TOPOLOGY_TRACE === "1") {
-            // stderr: the benchmark harness pipes child stdout through an
-            // NDJSON filter that would drop this record type.
-            console.error(JSON.stringify({ record: "fine-topology-trace", step,
-              fineGeneration, interfaceBricks: topology.interfaceBricks,
-              interfaceSeedBricks: topology.interfaceSeedBricks,
-              desiredBricks: topology.desiredBricks,
-              activatedBricks: topology.activatedBricks,
-              rolledBack: topology.rolledBack, flags: topology.flags,
-              reason: topology.downstreamFinalizeReason,
-              requiredDesiredBricks: topology.requiredDesiredBricks,
-              requiredExact: topology.requiredDesiredBricksExact,
-              control: Array.from(topologyControl) }));
-          }
-          if (topology.rolledBack) {
-            trip("topology-rollback", { rolledBack: true,
-              flags: topology.flags, published: topology.published,
-              downstreamFinalizeReason: topology.downstreamFinalizeReason,
-              interfaceBricks: topology.interfaceBricks,
-              desiredBricks: topology.desiredBricks,
-              activatedBricks: topology.activatedBricks,
-              control: Array.from(topologyControl), fatalChainForensics });
-          }
-          // 2. Section 5 restriction authority. Aanjaneya et al. deliberately
-          //    keep the fine SPGrid only around the surface; the background
-          //    octree owns every other row. A global uncovered-row fraction is
-          //    therefore scene-dependent and invalid (the ocean legitimately
-          //    leaves about 91% of coarse rows outside the fine band). Audit
-          //    the real two-authority receipt instead: every accepted fine row
-          //    becomes one coarse correction and those rows cover the complete
-          //    interface set.
-          const restrictionWords = words(record, TRIPWIRE_RECORD.restrictionOffsetBytes,
-            TRIPWIRE_RECORD.restrictionBytes);
-          const restriction = unpackFineToCoarseGPUControl(restrictionWords);
-          const coarseWords = words(record, TRIPWIRE_RECORD.coarseOffsetBytes,
-            TRIPWIRE_RECORD.coarseBytes);
-          const coarse = unpackOctreePowerCoarseLevelSetControl(coarseWords);
-          const restrictionAudit = auditSection5FineRestriction(restriction, coarse);
-          if (restrictionAudit.failure && hasSeparateFineLevelSetBand) {
-            trip("restriction-unaccepted", { reason: restrictionAudit.failure,
-              ...restrictionAudit, restrictionControl: Array.from(restrictionWords),
-              coarseControl: Array.from(coarseWords), fatalChainForensics });
-          }
-          // 3. Solver convergence. Non-convergence at the encoded budget
-          //    publishes the SEED pressure and fails nothing today; this is the
-          //    guard for that cliff. Steps that executed no iterations are
-          //    exempt by construction (nothing to converge); a terminal count of
-          //    zero is gated per run by tools/benchmark-power-dam.ts.
-          const mgpcgWords = words(record, TRIPWIRE_RECORD.mgpcgOffsetBytes,
-            TRIPWIRE_RECORD.mgpcgBytes);
-          const mgpcg = decodeOctreeMGPCGDiagnostics(mgpcgWords);
-          if (mgpcg.flags !== 0) {
-            trip("mgpcg-nonconvergence", { unevaluable: true,
-              reason: "MGPCG control reports error flags; the converged word is not meaningful",
-              flags: mgpcg.flags, converged: mgpcg.converged, iterations: mgpcg.iterations,
-              rows: mgpcg.rows, firstErrorStage: mgpcg.firstErrorStage,
-              firstErrorRow: mgpcg.firstErrorRow, control: Array.from(mgpcgWords) });
-          } else if (mgpcg.iterations > 0 && !mgpcg.converged) {
-            trip("mgpcg-nonconvergence", { converged: false, iterations: mgpcg.iterations,
-              rows: mgpcg.rows, relativeResidual: mgpcg.relativeResidual,
-              residualSquared: mgpcg.residualSquared, rhsSquared: mgpcg.rhsSquared });
-          }
-          // 4. Fine-band capacity overflow. Older publishers degraded the
-          //    active count to INVALID. The transactional publisher instead
-          //    retains the prior fine authority and reports the rejected
-          //    required count in topology control, so both receipts must be
-          //    checked. The count is worklist header word ONE; a prior consumer
-          //    read word zero (the generation) and printed nonsense.
-          if (header === undefined) {
-            trip("fine-band-sentinel", { unevaluable: true,
-              reason: "fine worklist header could not be decoded", fatalChainForensics });
-          } else if (header.activeCount === 0xffff_ffff) {
-            trip("fine-band-sentinel", { activeCount: header.activeCount,
-              sentinel: "0xFFFFFFFF", capacity: header.capacity,
-              generation: header.generation, flags: header.flags,
-              recurringRejection, fatalChainForensics });
-          } else if ((topology.flags & FINE_LEVELSET_TOPOLOGY_ERROR.capacity) !== 0
-            || topology.requiredDesiredBricks > header.capacity) {
-            trip("fine-band-sentinel", { activeCount: header.activeCount,
-              retainedPublication: topology.rolledBack,
-              requiredDesiredBricks: topology.requiredDesiredBricks,
-              requiredDesiredBricksExact: topology.requiredDesiredBricksExact,
-              capacity: header.capacity, generation: header.generation,
-              topologyFlags: topology.flags, fatalChainForensics });
-          }
-          // 5. Air-support publication. The live scratch verdict and the
-          // first preceding failure latch are both copied at this step's queue
-          // boundary, so a later transaction cannot erase the originating
-          // rejection before the harness sees it.
-          const liveAirSupportFailure = (airSupport[0] ?? 0) !== 0;
-          const latchedAirSupportFailure = (airSupport[2] ?? 0) !== 0;
-          if (liveAirSupportFailure || latchedAirSupportFailure) {
-            trip("air-support-failure", {
-              fatalChainForensics,
-            });
-          }
+          // The live path already emitted this record's FLUID_FINE_TOPOLOGY_TRACE
+          // line at its own step, which is why it survives a fatal step; the
+          // ring walk must not emit it a second time.
+          tripped.push(...evaluateTripwireRecord(
+            (offsetBytes, byteLength) => words(record, offsetBytes, byteLength),
+            tripwireSteps[record]!, tripwireFineGenerations[record]!, false));
         }
       } finally {
         if (tripwireSnapshot.mapState === "mapped") tripwireSnapshot.unmap();
         tripwireSnapshot.destroy();
+        tripwireLiveReadback?.destroy();
       }
     }
     const allowed = tripped.filter((entry) => tripwireAllowList.has(entry.id));
@@ -2620,17 +2765,20 @@ async function runGPU(
       }
     }
     if (failing.length !== 0) {
-      const byId: Record<string, number> = {};
-      for (const entry of failing) byId[entry.id] = (byId[entry.id] ?? 0) + 1;
-      throw new Error(`silent-failure tripwire(s) tripped over ${tripwireSteps.length}`
-        + ` captured steps: ${JSON.stringify({ counts: byId,
-          firstTrips: failing.slice(0, 12), lastTrip: failing[failing.length - 1] })}`
-        + " (see docs/POWER_LIQUIDS_ULTIMATE_M1MAX.md A3)");
+      // Defence in depth. The live path fails at the step that tripped, so a
+      // trip reaching here means the two walks disagreed about identical bytes;
+      // that is still a failed run, never a warning.
+      throw tripwireFailure(failing, `over ${tripwireSteps.length} captured steps`);
     }
     console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
       phase: "tripwires", capturedSteps: tripwireSteps.length,
       required: tripwiresRequired, allowed: Array.from(tripwireAllowList),
-      tripped: tripped.length }));
+      tripped: tripped.length,
+      // The measured price of fail-fast: the per-step queue fence (solver work
+      // waited for early, left in simulationWall_ms) and the host decode
+      // (diagnostics, subtracted from it).
+      liveFence_ms: Math.round(tripwireLiveFence_ms),
+      liveDecode_ms: Math.round(tripwireLiveDecode_ms) }));
   }
   const gpuFineTimestamps: GPUFineTimestampReport | undefined = genericPhaseTraceRequested ? {
     measuredAdvances: attributedTraceSamples,

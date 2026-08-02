@@ -6,10 +6,10 @@ import { buildSvoSceneThickGlass, type SvoSceneThickGlassMetadata } from "./svo-
 import { buildSvoSceneLights } from "./svo-light-abi";
 import { buildSvoScenePrimitives } from "./svo-scene-primitives";
 import {
-  cachedSvoStaticPublication,
-  hashSvoStaticPublication,
-  internSvoStaticPublication,
-} from "./svo-static-publication-cache";
+  cachedSvoPublication,
+  hashSvoPublication,
+  internSvoPublication,
+} from "./svo-publication-cache";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
 import { materialIdForRigidShape } from "./voxel-scene";
 
@@ -79,7 +79,7 @@ export interface SvoEnvironmentCoverageReport {
     lights: number;
   }>;
   unsupportedEntries: readonly SvoSceneCoverageEntry[];
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -97,7 +97,7 @@ export interface SvoShippedSceneCoverageReport {
   version: typeof SVO_SCENE_COVERAGE_VERSION;
   environments: readonly SvoEnvironmentCoverageReport[];
   presets: readonly SvoPresetCoverageReport[];
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -130,15 +130,15 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
   const glass = buildSvoSceneGlass(scene, { environmentId });
   const thickGlass = buildSvoSceneThickGlass(scene, { environmentId });
   const lights = buildSvoSceneLights(scene, { environmentId });
-  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId,
-    primitiveRevision: primitiveBuild.staticRevision,
-    glassRevision: glass.staticRevision,
-    thickGlassRevision: thickGlass.staticRevision,
-    lightRevision: lights.staticRevision,
+    primitiveRevision: primitiveBuild.contentRevision,
+    glassRevision: glass.contentRevision,
+    thickGlassRevision: thickGlass.contentRevision,
+    lightRevision: lights.contentRevision,
   }));
-  const cacheKey = `svo-scene-coverage-v${SVO_SCENE_COVERAGE_VERSION}:${environmentId}:${staticRevision}`;
-  const cached = cachedSvoStaticPublication(environmentCoverageCache, cacheKey);
+  const cacheKey = `svo-scene-coverage-v${SVO_SCENE_COVERAGE_VERSION}:${environmentId}:${contentRevision}`;
+  const cached = cachedSvoPublication(environmentCoverageCache, cacheKey);
   if (cached) return cached;
   const selectedLights = new Set(lights.records.map(({ sourceKey }) => sourceKey));
   const omittedLights = new Set(lights.omittedFixtureKeys);
@@ -230,12 +230,12 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
     thickGlassVolumes: thickGlass.metadata.length,
     lights: lights.records.length,
   });
-  return internSvoStaticPublication(environmentCoverageCache, cacheKey, Object.freeze({
+  return internSvoPublication(environmentCoverageCache, cacheKey, Object.freeze({
     environmentId,
     entries: Object.freeze(entries),
     summary,
     unsupportedEntries: Object.freeze(unsupportedEntries),
-    staticRevision,
+    contentRevision,
     cacheKey,
   }));
 }
@@ -272,16 +272,16 @@ export function buildSvoShippedSceneCoverage(): SvoShippedSceneCoverageReport {
       unsupportedEntries: Object.freeze(environment.unsupportedEntries),
     });
   });
-  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environments: environments.map(({ cacheKey }) => cacheKey),
     presets,
   }));
-  const cacheKey = `svo-shipped-scene-coverage-v${SVO_SCENE_COVERAGE_VERSION}:${staticRevision}`;
-  return internSvoStaticPublication(shippedCoverageCache, cacheKey, Object.freeze({
+  const cacheKey = `svo-shipped-scene-coverage-v${SVO_SCENE_COVERAGE_VERSION}:${contentRevision}`;
+  return internSvoPublication(shippedCoverageCache, cacheKey, Object.freeze({
     version: SVO_SCENE_COVERAGE_VERSION,
     environments: Object.freeze(environments),
     presets: Object.freeze(presets),
-    staticRevision,
+    contentRevision,
     cacheKey,
   }));
 }

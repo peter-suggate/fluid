@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   SCENERY_WIND,
   sceneryMaximumSwayExcursion_m,
-  sceneryOwnershipMargin_m,
+  scenerySvoLocalityRadius_m,
   scenerySwayExcursion_m,
   sceneryWindWave,
   swayedPrimitiveDescriptor,
@@ -65,11 +65,11 @@ test("a re-posed primitive keeps its identity, dimensions and rest pose", () => 
     { primitiveId: 3, materialId: 40, ownerId: 3 },
   );
   assert.deepEqual(posed.radii_m, descriptor.radii_m,
-    "motion may never change a dimension the voxelized world was built from");
+    "this transform-only animation leaves dimensions unchanged");
   assert.notDeepEqual(posed.center_m, descriptor.center_m);
 
   // A zero-amplitude sway returns the exact authored pose, which is what makes
-  // the catalog's static geometry the honest centre of the motion.
+  // the catalog's scene geometry the honest centre of the motion.
   const rest = pose(descriptor.center_m, sway({ bendAmplitude_rad: 0, twistAmplitude_rad: 0 }), 3.3);
   assert.deepEqual(rest.center_m, descriptor.center_m);
 
@@ -95,16 +95,14 @@ test("excursion is charged to the lever for travel and to anisotropy for roll", 
   assert.ok(Math.abs(pad - .05 * (.3 - .12)) < 1e-12);
 });
 
-test("the garden's specimen tree never leaves the cell ownership it was voxelized into", () => {
-  // This is the whole licence for moving scenery without re-voxelizing it: the
-  // proxy voxelizer gives a cell the nearest surface's identity out to half a
-  // cell diagonal, so a re-posed surface held inside that margin can never
-  // reach a cell that names a different primitive.
+test("the specimen-tree sway target stays subcell so live maintenance remains local", () => {
+  // This is a performance target only. The generalized updater still repairs
+  // payloads and grows topology when motion crosses this locality radius.
   const scene = getScenePreset("garden-svo-lighting").create();
   const catalog = buildEnvironmentProxyCatalog(scene, "garden");
   const build = buildSvoScenePrimitives(scene);
   const budget = sceneryMaximumSwayExcursion_m(scene.voxelDomain.finestCellSize_m);
-  assert.ok(budget < sceneryOwnershipMargin_m(scene.voxelDomain.finestCellSize_m));
+  assert.ok(budget < scenerySvoLocalityRadius_m(scene.voxelDomain.finestCellSize_m));
 
   const swaying = build.metadata.filter(({ sway: authored }) => authored);
   assert.ok(swaying.length >= 40, "the specimen tree moves as a whole object, not as one token branch");
@@ -201,19 +199,18 @@ test("a grown tree is deterministic and hangs its whole crown off one root", () 
   assert.throws(() => treeSwayFor(first, first.parts[0], { excursion_m: 0 }), /positive/);
 });
 
-test("the renderer re-poses scenery on presentation time and only touches transforms", () => {
+test("the renderer publishes scene motion through the exact live primitive arena", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const pipeline = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 
-  assert.match(renderer, /this\.advanceSceneryAnimation\(\);/,
-    "authored motion must be advanced on the ordinary presentation path");
-  assert.match(renderer, /private advanceSceneryAnimation\(\)[^]*performance\.now\(\)/,
-    "a paused garden still breathes: the gust runs on presentation time, not the simulation clock");
-  assert.doesNotMatch(renderer, /advanceSceneryAnimation[^]*?encodeStaticPublication/,
-    "motion must never trigger a re-voxelization of the published sparse world");
-  assert.match(pipeline, /updatePrimitiveRecords\(records: Uint32Array<ArrayBuffer>, firstPrimitiveIndex: number\)/);
-  assert.match(pipeline, /writeBuffer\(this\.primitiveBuffer, offset, records\)/,
-    "a re-pose is one partial write into the records the traversal already reads");
-  assert.match(pipeline, /updatePrimitiveRecords[^]*?this\.clearReusableFrame\(\);\s*this\.clearPrimaryVisibilityCache\(\);/,
+  assert.match(renderer, /this\.publishRenderScene\(scene, readyGPUFluid \?\? this\.gpuFluid\)/,
+    "ordinary presentation must publish the authoritative scene independently of solver identity");
+  assert.match(pipeline, /publishPrimitiveArena\([^]*?packSvoPrimitiveCandidateArena\(records, candidates\)/,
+    "motion must publish exact geometry and its BVH as one generation");
+  assert.match(pipeline, /writeBuffer\(this\.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT\.primitiveOffsetBytes, arena\.packedRecords\)/,
+    "the fixed live scene arena must update without allocation or binding churn");
+  assert.match(pipeline, /publishPrimitiveArena[^]*?this\.clearReusableFrame\(\);\s*this\.clearPrimaryVisibilityCache\(\);/,
     "frame and primary-visibility reuse must not survive geometry that moved");
+  assert.doesNotMatch(pipeline, /bounded motion so a re-posed surface cannot leave the cell/,
+    "the live renderer must not encode cell-local motion assumptions");
 });

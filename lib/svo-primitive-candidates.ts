@@ -12,16 +12,13 @@ import {
 /** Nodes intentionally share the 64-byte primitive-record stride and binding. */
 export const SVO_PRIMITIVE_CANDIDATE_VERSION = 1;
 /**
- * Sized to the largest shipped scenery catalog with headroom. This was 64 while
- * environments held ~20 authored props; once each scene described its own
- * geometry properly the biggest catalog reached 114 primitives, and every
- * environment but the calibration studio silently fell off the acceleration
- * structure onto brute-force intersection. Raising it restores the BVH for all
- * of them: the node arena, the shader's traversal bound and its work budget are
- * all derived from this constant, so they scale with it.
+ * The live scene contract, not a shipped-catalog observation. Render updates
+ * must never fall off the acceleration structure merely because an editor
+ * grows the scene beyond today's authored examples.
  */
-export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES = 128;
+export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES = 4_096;
 export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES = 2 * SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES - 1;
+/** Balanced median construction needs ceil(log2(4096)) + the current node. */
 export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK = 16;
 export const SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL = 0xffff_ffff;
 
@@ -54,6 +51,12 @@ export interface SvoPrimitiveCandidateArena {
   readonly packedRecords: Uint32Array<ArrayBuffer>;
   readonly cacheKey: string;
 }
+
+/** Fixed GPU arena capacity: live primitives followed by their complete BVH. */
+export const SVO_PRIMITIVE_CANDIDATE_ARENA_RECORD_CAPACITY =
+  SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES + SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES;
+export const SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES =
+  SVO_PRIMITIVE_CANDIDATE_ARENA_RECORD_CAPACITY * SVO_PRIMITIVE_RECORD_STRIDE_BYTES;
 
 function worldExtents(local: Vec3, orientation: Quaternion): Vec3 {
   const { w, x, y, z } = orientation;
@@ -187,6 +190,43 @@ export function buildSvoPrimitiveCandidates(
     nodes: Object.freeze(nodes),
     packedRecords,
     cacheKey: `svo-primitive-candidates-v${SVO_PRIMITIVE_CANDIDATE_VERSION}:${hashPacked(packedRecords)}`,
+  });
+}
+
+/** Linear-time live refit preserving the publication's balanced topology. */
+export function refitSvoPrimitiveCandidates(
+  descriptors: readonly SvoFinitePrimitiveDescriptor[],
+  publication: SvoPrimitiveCandidatePublication,
+): SvoPrimitiveCandidatePublication {
+  validateCandidatePublication(publication);
+  if (descriptors.length !== publication.primitiveCount) throw new Error("SVO primitive candidate refit count mismatch");
+  const nodes = new Array<SvoPrimitiveCandidateNode>(publication.nodes.length);
+  const refit = (nodeIndex: number): SvoPrimitiveCandidateBounds => {
+    const node = publication.nodes[nodeIndex];
+    let bounds: SvoPrimitiveCandidateBounds;
+    if (node.rightChildIndex === SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL) {
+      const descriptor = descriptors[node.leftOrPrimitiveIndex];
+      if (!descriptor) throw new Error("SVO primitive candidate refit leaf is invalid");
+      bounds = svoPrimitiveCandidateBounds(descriptor);
+    } else {
+      bounds = union([refit(node.leftOrPrimitiveIndex), refit(node.rightChildIndex)]);
+    }
+    nodes[nodeIndex] = Object.freeze({
+      ...bounds,
+      leftOrPrimitiveIndex: node.leftOrPrimitiveIndex,
+      rightChildIndex: node.rightChildIndex,
+    });
+    return bounds;
+  };
+  refit(publication.rootNodeIndex);
+  const packedRecords = packNodes(nodes);
+  return Object.freeze({
+    version: SVO_PRIMITIVE_CANDIDATE_VERSION,
+    primitiveCount: publication.primitiveCount,
+    rootNodeIndex: publication.rootNodeIndex,
+    nodes: Object.freeze(nodes),
+    packedRecords,
+    cacheKey: `svo-primitive-candidates-v${SVO_PRIMITIVE_CANDIDATE_VERSION}:refit-${hashPacked(packedRecords)}`,
   });
 }
 

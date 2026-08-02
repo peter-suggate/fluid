@@ -128,7 +128,7 @@ export type ContainerBoundarySide = "floor" | "left" | "right" | "front" | "back
 
 export interface VoxelContainerBoundarySource extends VoxelSourceBase {
   kind: "container-boundary";
-  partition: "static";
+  updateClass: "scene";
   side: ContainerBoundarySide;
   /** Unit normal pointing from the solid shell into the fluid domain. */
   inwardNormal: Vec3;
@@ -140,7 +140,7 @@ export interface VoxelContainerBoundarySource extends VoxelSourceBase {
 
 export interface VoxelTerrainSource extends VoxelSourceBase {
   kind: "terrain-heightfield";
-  partition: "static";
+  updateClass: "scene";
   terrain: TerrainDescription;
   evaluator: {
     unionExponent: number;
@@ -169,7 +169,7 @@ export interface VoxelLocalAllocation {
 
 export interface VoxelRigidSource extends VoxelSourceBase {
   kind: "rigid-primitive";
-  partition: "static" | "dynamic";
+  updateClass: "scene" | "frame";
   bodyId: string;
   name: string;
   primitive: VoxelRigidPrimitive;
@@ -180,7 +180,7 @@ export interface VoxelRigidSource extends VoxelSourceBase {
   localAllocation: VoxelLocalAllocation;
 }
 
-export type VoxelStaticSource = VoxelContainerBoundarySource | VoxelTerrainSource | VoxelRigidSource;
+export type VoxelSceneSource = VoxelContainerBoundarySource | VoxelTerrainSource | VoxelRigidSource;
 
 export interface VoxelSceneHashInputs {
   planVersion: typeof VOXEL_SCENE_PLAN_VERSION;
@@ -192,10 +192,10 @@ export interface VoxelSceneHashInputs {
 }
 
 export interface VoxelSceneRevisions {
+  sceneContentHash: string;
+  sceneContentRevision: number;
   sceneHash: string;
   sceneRevision: number;
-  staticHash: string;
-  staticRevision: number;
   dynamicTopologyHash: string;
   dynamicTopologyRevision: number;
   dynamicTransformsHash: string;
@@ -207,8 +207,8 @@ export interface VoxelScenePlan {
   sceneId: string;
   layout: SparseBrickLayoutPlan;
   materials: ReadonlyArray<VoxelMaterial>;
-  staticSources: ReadonlyArray<VoxelStaticSource>;
-  dynamicSources: ReadonlyArray<VoxelRigidSource>;
+  sceneSources: ReadonlyArray<VoxelSceneSource>;
+  frameSources: ReadonlyArray<VoxelRigidSource>;
   hashInputs: VoxelSceneHashInputs;
   revisions: VoxelSceneRevisions;
   bounds_m: VoxelAabb;
@@ -380,7 +380,7 @@ function bodyPrimitive(body: RigidBodyDescription): VoxelRigidPrimitive {
 function rigidSource(body: RigidBodyDescription, layout: SparseBrickLayoutPlan): VoxelRigidSource {
   const primitive = bodyPrimitive(body);
   const transform = { position_m: cloneVec3(body.position_m), orientation: { ...body.orientation } };
-  const partition = body.motion === "static" ? "static" : "dynamic";
+  const updateClass = body.motion === "static" ? "scene" : "frame";
   const topologyRevisionHash = hashValue({
     bodyId: body.id,
     primitive,
@@ -406,9 +406,9 @@ function rigidSource(body: RigidBodyDescription, layout: SparseBrickLayoutPlan):
   };
   return {
     ...common,
-    revisionHash: hashValue({ topologyRevisionHash, transformRevisionHash, partition }),
+    revisionHash: hashValue({ topologyRevisionHash, transformRevisionHash, updateClass }),
     kind: "rigid-primitive",
-    partition,
+    updateClass,
     bodyId: body.id,
     name: body.name,
     primitive,
@@ -439,7 +439,7 @@ function boundarySources(scene: SceneDescription, layout: SparseBrickLayoutPlan)
     const source = {
       id: `container:${entry.side}`,
       kind: "container-boundary" as const,
-      partition: "static" as const,
+      updateClass: "scene" as const,
       side: entry.side,
       materialId: VOXEL_MATERIAL_IDS.containerGlass,
       composition: "union" as const,
@@ -474,7 +474,7 @@ function terrainSource(scene: SceneDescription, layout: SparseBrickLayoutPlan): 
   const source = {
     id: "terrain:heightfield",
     kind: "terrain-heightfield" as const,
-    partition: "static" as const,
+    updateClass: "scene" as const,
     materialId: VOXEL_MATERIAL_IDS.terrain,
     composition: "union" as const,
     terrain,
@@ -516,11 +516,11 @@ export function planVoxelScene(scene: SceneDescription, options: PlanVoxelSceneO
   };
 
   const rigidSources = scene.rigidBodies.map((body) => rigidSource(body, layout));
-  const dynamicSources = rigidSources.filter((source) => source.partition === "dynamic");
-  const staticSources: VoxelStaticSource[] = [...boundarySources(scene, layout)];
+  const frameSources = rigidSources.filter((source) => source.updateClass === "frame");
+  const sceneSources: VoxelSceneSource[] = [...boundarySources(scene, layout)];
   const terrain = terrainSource(scene, layout);
-  if (terrain) staticSources.push(terrain);
-  staticSources.push(...rigidSources.filter((source) => source.partition === "static"));
+  if (terrain) sceneSources.push(terrain);
+  sceneSources.push(...rigidSources.filter((source) => source.updateClass === "scene"));
 
   const materialRevisionHash = hashValue(VOXEL_MATERIALS);
   const hashInputs: VoxelSceneHashInputs = {
@@ -532,23 +532,23 @@ export function planVoxelScene(scene: SceneDescription, options: PlanVoxelSceneO
     materialRevisionHash
   };
   const sceneHash = hashValue(hashInputs);
-  const staticHash = hashValue(staticSources);
-  const dynamicTopologyHash = hashValue(dynamicSources.map(({ topologyRevisionHash, bodyId }) => ({ bodyId, topologyRevisionHash })));
-  const dynamicTransformsHash = hashValue(dynamicSources.map(({ transformRevisionHash, bodyId }) => ({ bodyId, transformRevisionHash })));
+  const sceneContentHash = hashValue(sceneSources);
+  const dynamicTopologyHash = hashValue(frameSources.map(({ topologyRevisionHash, bodyId }) => ({ bodyId, topologyRevisionHash })));
+  const dynamicTransformsHash = hashValue(frameSources.map(({ transformRevisionHash, bodyId }) => ({ bodyId, transformRevisionHash })));
   return {
     version: VOXEL_SCENE_PLAN_VERSION,
     sceneId: scene.sceneId,
     layout,
     materials: VOXEL_MATERIALS,
-    staticSources,
-    dynamicSources,
+    sceneSources,
+    frameSources,
     hashInputs,
     revisions: {
       sceneHash, sceneRevision: numericRevision(sceneHash),
-      staticHash, staticRevision: numericRevision(staticHash),
+      sceneContentHash, sceneContentRevision: numericRevision(sceneContentHash),
       dynamicTopologyHash, dynamicTopologyRevision: numericRevision(dynamicTopologyHash),
       dynamicTransformsHash, dynamicTransformsRevision: numericRevision(dynamicTransformsHash)
     },
-    bounds_m: unionBounds([...staticSources, ...dynamicSources].map((source) => source.candidate.brickAligned_m))
+    bounds_m: unionBounds([...sceneSources, ...frameSources].map((source) => source.candidate.brickAligned_m))
   };
 }

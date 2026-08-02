@@ -16,42 +16,55 @@ const ready: EffectiveRendererConditions = {
 
 test("effective renderer status reports the GLOBAL SVO lifecycle", () => {
   assert.deepEqual(resolveEffectiveRendererStatus(ready), {
-    effectiveMode: "svo",
+    state: "active",
   });
   assert.deepEqual(useDiagnosticsStore.getInitialState().effectiveRendererStatus, {
-    effectiveMode: "raster",
-    fallbackReason: "missing-source",
+    state: "pending",
+    failureReason: "missing-source",
   });
 });
 
-test("effective renderer status distinguishes required SVO fallbacks", () => {
+test("effective renderer status distinguishes pending and failed-closed SVO states", () => {
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, sourceAvailable: false, svoEncoded: false }), {
-    effectiveMode: "raster", fallbackReason: "missing-source",
+    state: "pending", failureReason: "missing-source",
   });
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, terrainSupported: false, svoEncoded: false }), {
-    effectiveMode: "raster", fallbackReason: "unsupported-terrain",
+    state: "failed", failureReason: "unsupported-terrain",
   });
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, glassSupported: false, svoEncoded: false }), {
-    effectiveMode: "raster", fallbackReason: "unsupported-glass-cutout",
+    state: "failed", failureReason: "unsupported-glass-cutout",
   });
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, materialsSupported: false, svoEncoded: false }), {
-    effectiveMode: "raster", fallbackReason: "missing-pbr-materials",
+    state: "failed", failureReason: "missing-pbr-materials",
   });
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, lightingSupported: false, svoEncoded: false }), {
-    effectiveMode: "raster", fallbackReason: "missing-lighting-publications",
+    state: "failed", failureReason: "missing-lighting-publications",
   });
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, pipelineAvailable: false, svoEncoded: false }), {
-    effectiveMode: "raster", fallbackReason: "pipeline-compile-failure",
+    state: "failed", failureReason: "pipeline-compile-failure",
+  });
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, svoEncoded: false }), {
+    state: "failed", failureReason: "frame-rejected", detail: "live SVO renderer declined the frame",
+  });
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready,
+    sourceAvailable: false,
+    svoEncoded: false,
+    contractFailure: "material-owner payload field is unavailable",
+  }), {
+    state: "failed",
+    failureReason: "frame-rejected",
+    detail: "material-owner payload field is unavailable",
   });
 });
 
 test("supported analytic garden terrain can report effective SVO", () => {
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, terrainSupported: true, svoEncoded: true }), {
-    effectiveMode: "svo",
+    state: "active",
   });
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  assert.match(renderer, /terrainMaterialId:scenePrimitives\.analyticTerrain\?\.materialId/);
-  assert.match(renderer, /!sceneHasTerrain\(scene\)\|\|Boolean\(scenePrimitives\.analyticTerrain\)/);
+  assert.match(renderer, /terrainMaterialId: scenePrimitives\.analyticTerrain\?\.materialId/);
+  assert.match(renderer, /!sceneHasTerrain\(scene\) \|\| Boolean\(scenePrimitives\.analyticTerrain\)/);
   assert.match(renderer, /terrainSupported: this\.svoTerrainSupported/);
   assert.doesNotMatch(renderer, /terrainSupported: this\.svoTerrainSupported && !sceneHasTerrain/);
 });
@@ -63,10 +76,14 @@ test("renderer publishes effective status through the viewport diagnostics bridg
   assert.match(renderer, /publishEffectiveRendererStatus\(resolveEffectiveRendererStatus\(\{/);
   assert.match(renderer, /const replacementResult = this\.svoDryScenePipeline\?\.encode/);
   assert.match(renderer, /svoEncoded = Boolean\(replacementResult\)/);
-  assert.match(renderer, /canEncodeSparseVoxelDryScene\(sparseSceneSource,drySceneData\)/);
+  assert.match(renderer, /sparseVoxelDrySceneContractFailure\(source, publication\)/);
+  assert.match(renderer, /publishScene\(publication\)/,
+    "the fixed renderer arenas receive the new exact scene publication without a source rebuild");
   assert.match(viewport, /effectiveRendererStatus\) => useDiagnosticsStore\.getState\(\)\.set\(\{ effectiveRendererStatus \}\)/);
   assert.match(panel, /data-testid="effective-renderer-status"/);
-  for (const reason of ["missing-source", "unsupported-terrain", "unsupported-glass-cutout", "missing-pbr-materials", "missing-lighting-publications", "pipeline-compile-failure"]) assert.ok(panel.includes(`"${reason}"`));
+  assert.match(panel, /effectiveRendererStatus\.detail/);
+  for (const reason of ["missing-source", "unsupported-terrain", "unsupported-glass-cutout", "missing-pbr-materials", "missing-lighting-publications", "pipeline-compile-failure", "frame-rejected"]) assert.ok(panel.includes(`"${reason}"`));
+  assert.doesNotMatch(panel, /RASTER FALLBACK|SVO fallback/);
 });
 
 test("a pipeline that is rebuilding reports as compiling rather than as a failure", () => {
@@ -76,8 +93,20 @@ test("a pipeline that is rebuilding reports as compiling rather than as a failur
   // apart solely by whether a compile is still in flight.
   assert.deepEqual(resolveEffectiveRendererStatus({
     ...ready, pipelineAvailable: false, pipelineCompiling: true, svoEncoded: false,
-  }), { effectiveMode: "raster", fallbackReason: "pipeline-compiling" });
+  }), { state: "pending", failureReason: "pipeline-compiling" });
   assert.deepEqual(resolveEffectiveRendererStatus({
     ...ready, pipelineAvailable: false, pipelineCompiling: false, svoEncoded: false,
-  }), { effectiveMode: "raster", fallbackReason: "pipeline-compile-failure" });
+  }), { state: "failed", failureReason: "pipeline-compile-failure" });
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready, pipelineCompiling: true, pipelinePending: "Compiling requested SVO cone bundle at scale 0.5", svoEncoded: false,
+  }), {
+    state: "pending", failureReason: "pipeline-compiling",
+    detail: "Compiling requested SVO cone bundle at scale 0.5",
+  });
+  assert.deepEqual(resolveEffectiveRendererStatus({
+    ...ready, pipelineFailure: "Requested SVO split bundle failed: compiler rejected WGSL", svoEncoded: false,
+  }), {
+    state: "failed", failureReason: "pipeline-compile-failure",
+    detail: "Requested SVO split bundle failed: compiler rejected WGSL",
+  });
 });

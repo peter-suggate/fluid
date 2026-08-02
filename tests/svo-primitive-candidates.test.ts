@@ -11,6 +11,7 @@ import {
   buildSvoPrimitiveCandidates,
   packSvoPrimitiveCandidateArena,
   querySvoPrimitiveCandidates,
+  refitSvoPrimitiveCandidates,
   svoPrimitiveCandidateBounds,
   traceSvoPrimitiveCandidates,
 } from "../lib/svo-primitive-candidates";
@@ -127,6 +128,23 @@ test("overlapping equal-depth owners retain the original lowest-index tie rule",
   assert.equal(result.primitiveIndex, 0);
   assert.equal(result.hit?.ownerId, 20);
   assert.equal(result.candidateIntersections, 3);
+});
+
+test("live refit moves bounds without rebuilding BVH topology", () => {
+  const rest: SvoFinitePrimitiveDescriptor[] = [
+    { kind: "sphere", primitiveId: 1, materialId: 2, ownerId: 1, center_m: { x: 0, y: 0, z: 0 }, radius_m: .5 },
+    { kind: "box", primitiveId: 2, materialId: 3, ownerId: 2, center_m: { x: 2, y: 0, z: 0 }, halfExtents_m: { x: .5, y: .5, z: .5 }, orientation: identity },
+  ];
+  const built = buildSvoPrimitiveCandidates(rest);
+  const moved: SvoFinitePrimitiveDescriptor[] = [
+    { ...rest[0], center_m: { x: 10, y: 0, z: 0 } },
+    rest[1],
+  ];
+  const refit = refitSvoPrimitiveCandidates(moved, built);
+  assert.deepEqual(refit.nodes.map(({ leftOrPrimitiveIndex, rightChildIndex }) => [leftOrPrimitiveIndex, rightChildIndex]),
+    built.nodes.map(({ leftOrPrimitiveIndex, rightChildIndex }) => [leftOrPrimitiveIndex, rightChildIndex]));
+  assert.ok(!querySvoPrimitiveCandidates(refit, { origin_m: { x: 0, y: 0, z: 2 }, direction: { x: 0, y: 0, z: -1 } }).primitiveIndices.includes(0));
+  assert.ok(querySvoPrimitiveCandidates(refit, { origin_m: { x: 10, y: 0, z: 2 }, direction: { x: 0, y: 0, z: -1 } }).primitiveIndices.includes(0));
 });
 
 test("balanced BVH work is bounded and empty rays perform zero exact intersections", () => {

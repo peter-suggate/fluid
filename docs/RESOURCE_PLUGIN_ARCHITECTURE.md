@@ -43,7 +43,7 @@ Current plugins are declared with their owners:
 | Owner | Plugin | Capability |
 | --- | --- | --- |
 | `FluidLabRenderer` | `platform.webgpu-renderer` | minimum WebGPU presentation |
-| `WebGPUStaticSvoScene` | `scene.static-svo-source` | preprocessed static world |
+| `WebGPULiveSvoScene` | `scene.static-svo-source` | preprocessed live scene |
 | power-octree method | `fluid.power-octree` | fluid authority and water presentation |
 | `SparseVoxelDrySceneRenderer` | `presentation.svo-global` | GLOBAL sparse presentation |
 

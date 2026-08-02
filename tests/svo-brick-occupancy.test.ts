@@ -4,22 +4,28 @@ import { pathToFileURL } from "node:url";
 import type { SparseBrickOctreeGPU } from "../lib/sparse-brick-octree";
 import {
   SVO_BRICK_OCCUPANCY,
+  SVO_BRICK_LIFECYCLE,
   buildSvoBrickOccupancy,
   decodeSvoBrickOccupancy,
+  decodeSvoBrickLifecycle,
   encodeSvoBrickOccupancy,
+  encodeSvoBrickLifecycle,
+  isSvoBrickLifecycleCurrent,
+  replaceSvoBrickLifecycle,
+  replaceSvoBrickOccupancy,
   svoBrickOccupancyRetainedCellCount,
   svoBrickOccupancyWGSL,
 } from "../lib/svo-brick-occupancy";
 import {
   WebGpuSvoBrickOccupancyBuilder,
+  SVO_BRICK_OCCUPANCY_WORKLIST_LAYOUT,
   webgpuSvoBrickOccupancyBuildWGSL,
 } from "../lib/webgpu-svo-brick-occupancy";
 import { createSvoDrySceneFragmentWGSL, svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
-import { OctreeSparseBrickWorld } from "../lib/webgpu-octree-sparse-bricks";
 
 const cell = (x: number, y: number, z: number) => x + 8 * (y + 8 * z);
 
-test("8^3 occupancy metadata round-trips every bound and macrocell bit", () => {
+test("occupancy and lifecycle independently round-trip one terminal flags word", () => {
   const summary = {
     ready: true,
     occupied: true,
@@ -27,9 +33,21 @@ test("8^3 occupancy metadata round-trips every bound and macrocell bit", () => {
     minInclusive: [1, 2, 3] as const,
     maxInclusive: [7, 6, 5] as const,
   };
-  const packed = encodeSvoBrickOccupancy(summary);
+  const lifecycle = { active: true, dirty: true, queued: true, relocating: false };
+  const packed = replaceSvoBrickLifecycle(encodeSvoBrickOccupancy(summary), lifecycle);
   assert.deepEqual(decodeSvoBrickOccupancy(packed), summary);
-  assert.equal(packed >>> 28, 0, "high four node-flag bits remain reserved");
+  assert.deepEqual(decodeSvoBrickLifecycle(packed), lifecycle);
+  assert.equal(packed & SVO_BRICK_LIFECYCLE.mask, encodeSvoBrickLifecycle(lifecycle));
+  assert.equal(isSvoBrickLifecycleCurrent(lifecycle), false);
+  assert.equal(isSvoBrickLifecycleCurrent({ ...lifecycle, dirty: false, queued: false }), true);
+  const replacedOccupancy = replaceSvoBrickOccupancy(packed, {
+    ready: true, occupied: false, macroMask: 0, minInclusive: [0, 0, 0], maxInclusive: [0, 0, 0],
+  });
+  assert.deepEqual(decodeSvoBrickLifecycle(replacedOccupancy), lifecycle,
+    "occupancy rebuilds cannot implicitly finalize a dirty leaf");
+  assert.equal(replaceSvoBrickLifecycle(replacedOccupancy, {
+    active: false, dirty: false, queued: false, relocating: true,
+  }) & SVO_BRICK_OCCUPANCY.metadataMask, replacedOccupancy & SVO_BRICK_OCCUPANCY.metadataMask);
   assert.deepEqual(decodeSvoBrickOccupancy(0), {
     ready: false, occupied: false, macroMask: 0, minInclusive: [0, 0, 0], maxInclusive: [0, 0, 0],
   });
@@ -60,6 +78,13 @@ test("builder conservatively summarizes exact material occupancy and ignores own
   });
 });
 
+test("CPU occupancy rebuild preserves live lifecycle flags", () => {
+  const lifecycle = encodeSvoBrickLifecycle({ active: true, dirty: true, queued: true, relocating: true });
+  const built = buildSvoBrickOccupancy(new Uint32Array(512), 0, lifecycle | 0x05555555);
+  assert.equal((built.packed & SVO_BRICK_LIFECYCLE.mask) >>> 0, lifecycle);
+  assert.equal(built.packed & SVO_BRICK_OCCUPANCY.readyBit, SVO_BRICK_OCCUPANCY.readyBit);
+});
+
 test("macrocell retention quantifies conservative skipped payload work", () => {
   const oneCorner = new Uint32Array(512);
   oneCorner[cell(0, 0, 0)] = 1;
@@ -85,10 +110,15 @@ test("invalid summaries and incomplete payloads fail closed", () => {
 });
 
 test("WGSL build and traversal helpers preserve fallback and exact-hit semantics", () => {
-  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /if\(control\[11\]!=8u\)\{topology\[nodeIndex\*8u\+7u\]=0u;return;\}/);
-  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /let material=payload\[payloadIndex\]&0xffffu/);
-  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /topology\[nodeIndex\*8u\+7u\]=packed/);
+  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /let lifecycle=topologyRead\(flagsIndex\)&LIFECYCLE_MASK/);
+  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /topologyWrite\(flagsIndex,packed\|lifecycle\)/);
+  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /fn buildWorklistBrickOccupancy/);
+  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /rebuildLeaf\(leafWorklist\[entry\]\)/);
+  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /FLUID_RESIDENCY_ENTRIES\+workIndex\*FLUID_RESIDENCY_STRIDE\+1u/);
+  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /let fluidMaterial=payload\[payloadIndex\]&0xffffu/);
+  assert.match(webgpuSvoBrickOccupancyBuildWGSL, /let sceneMaterial=sceneMaterialOwners\[voxelOffset\+localIndex\]&0xffffu/);
   assert.match(svoBrickOccupancyWGSL, /if\(summary\.ready==0u\)\{return true;\}/);
+  assert.match(svoBrickOccupancyWGSL, /fn svoBrickLifecycleCurrent/);
   assert.match(svoBrickOccupancyWGSL, /summary\.maxInclusive\+vec3u\(1u\)/);
 });
 
@@ -109,10 +139,10 @@ test("dry-scene brick modes are compile-time A/B variants with an exact off base
   assert.throws(() => createSvoDrySceneFragmentWGSL(1, "hybrid", "bad" as never), /brick occupancy mode/);
 });
 
-test("GPU builder reuses topology flags and allocates no persistent buffer", () => {
+test("GPU builder uses a compact indirect leaf worklist and reserves full scans for initialization", () => {
   const previousUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
   Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { STORAGE: 1 } });
-  const dispatches: number[][] = [];
+  const dispatches: Array<{ kind: "direct" | "indirect"; values: unknown[] }> = [];
   const resources: unknown[] = [];
   const pipeline = { getBindGroupLayout: () => ({}) };
   const device = {
@@ -126,7 +156,8 @@ test("GPU builder reuses topology flags and allocates no persistent buffer", () 
   const pass = {
     setPipeline: () => undefined,
     setBindGroup: () => undefined,
-    dispatchWorkgroups: (...dimensions: number[]) => dispatches.push(dimensions),
+    dispatchWorkgroups: (...dimensions: number[]) => dispatches.push({ kind: "direct", values: dimensions }),
+    dispatchWorkgroupsIndirect: (...values: unknown[]) => dispatches.push({ kind: "indirect", values }),
     end: () => undefined,
   };
   const encoder = { beginComputePass: () => pass } as unknown as GPUCommandEncoder;
@@ -134,28 +165,27 @@ test("GPU builder reuses topology flags and allocates no persistent buffer", () 
   try {
     const builder = new WebGpuSvoBrickOccupancyBuilder(device);
     assert.equal(builder.incrementalAllocatedBytes, 0);
-    assert.equal(builder.encode(encoder, {
-      brickSize: 8, leafCapacity: 129, control: buffer, topology: buffer, payload: buffer,
-    } as SparseBrickOctreeGPU), "encoded");
-    assert.deepEqual(dispatches, [[3]]);
-    assert.equal(resources.length, 3);
-    assert.equal(builder.encode(encoder, {
-      brickSize: 4, leafCapacity: 129, control: buffer, topology: buffer, payload: buffer,
+    const tree = {
+      brickSize: 8, leafCapacity: 129, structure: buffer, control: buffer, topology: buffer, payload: buffer,
+      voxelCapacity: 129 * 512, sceneMaterialOwners: buffer, sceneMaterialOwnerOffsetBytes: 0,
+    } as SparseBrickOctreeGPU;
+    assert.equal(builder.encodeAllLeavesForInitialization(encoder, tree), "encoded");
+    assert.equal(builder.encodeWorklist(encoder, tree, { buffer, kind: "dirty" }), "encoded");
+    assert.equal(builder.encodeFluidResidency(encoder, tree, buffer), "encoded");
+    assert.deepEqual(dispatches, [
+      { kind: "direct", values: [3] },
+      { kind: "indirect", values: [buffer, SVO_BRICK_OCCUPANCY_WORKLIST_LAYOUT.dispatchIndirectOffsetBytes] },
+      { kind: "direct", values: [3] },
+    ]);
+    assert.equal(resources.length, 11, "each pass binds the structural arena once; recurring work also binds its worklist");
+    assert.equal(builder.encodeAllLeavesForInitialization(encoder, {
+      brickSize: 4, leafCapacity: 129, structure: buffer, control: buffer, topology: buffer, payload: buffer,
     } as SparseBrickOctreeGPU), "unsupported-brick-size");
-    assert.deepEqual(dispatches, [[3]], "unsupported bricks preserve the baseline without dispatch");
+    assert.equal(dispatches.length, 3, "unsupported bricks preserve the current generation without dispatch");
   } finally {
     if (previousUsage) Object.defineProperty(globalThis, "GPUBufferUsage", previousUsage);
     else delete (globalThis as { GPUBufferUsage?: unknown }).GPUBufferUsage;
   }
-});
-
-test("world publication rebuilds occupancy after every authoritative material-owner write", () => {
-  const initial = OctreeSparseBrickWorld.prototype.encodeStaticPublication.toString();
-  assert.ok(initial.indexOf("proxyVoxelizer.encode") < initial.indexOf("brickOccupancyBuilder.encode"));
-  assert.ok(initial.indexOf("brickOccupancyBuilder.encode") < initial.indexOf("structuralStaticPipeline"));
-  const dynamic = OctreeSparseBrickWorld.prototype.encode.toString();
-  assert.ok(dynamic.indexOf("tree.encodeFromDenseFields") < dynamic.indexOf("brickOccupancyBuilder.encode"));
-  assert.ok(dynamic.indexOf("brickOccupancyBuilder.encode") < dynamic.indexOf("structuralFramePipeline"));
 });
 
 const webgpuModulePath = process.env.WEBGPU_NODE_MODULE;

@@ -106,7 +106,8 @@ test("octree world owns, accounts, publishes, and destroys the PBR buffer once",
   assert.match(source, /this\.pbrMaterialBuffer = storageBuffer\(/);
   assert.match(source, /buildOctreeSvoPbrMaterialPublication\([\s\S]*environmentPrimitives/,
     "the production publication includes the selected environment catalog");
-  assert.match(source, /binding: \{ buffer: this\.pbrMaterialBuffer, size: pbrMaterials\.packedRecords\.byteLength \}/);
+  assert.match(source, /binding: \{ buffer: this\.pbrMaterialBuffer, size: this\.pbrMaterialBuffer\.size \}/,
+    "the live material publication retains one fixed-capacity binding");
   assert.match(source, /count: pbrMaterials\.count/);
   assert.match(source, /strideBytes: pbrMaterials\.strideBytes/);
   assert.match(source, /revision: pbrMaterials\.revision/);
@@ -115,6 +116,6 @@ test("octree world owns, accounts, publishes, and destroys the PBR buffer once",
   assert.match(source, /\+ this\.pbrMaterialBuffer\.size/,
     "the expanded production table is accounted independently");
   const destroy = source.slice(source.indexOf("  destroy(): void {"));
-  assert.match(destroy, /\.\.\.this\.sourceBuffers, this\.pbrMaterialBuffer, this\.lightBuffer, this\.environmentLightingBuffer, this\.structuralPublicationState/);
+  assert.match(destroy, /\.\.\.this\.sourceBuffers, this\.pbrMaterialBuffer, this\.materialEmissionBuffer, this\.lightBuffer, this\.environmentLightingBuffer, this\.structuralPublicationState/);
   assert.equal((destroy.match(/this\.pbrMaterialBuffer/g) ?? []).length, 1);
 });

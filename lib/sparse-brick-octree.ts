@@ -7,6 +7,8 @@
  * tree or size later compute/draw work.
  */
 
+import { SVO_BRICK_LIFECYCLE } from "./svo-brick-occupancy";
+
 export type SparseBrickSize = 4 | 8;
 
 export interface SparseBrickCoordinate {
@@ -61,6 +63,12 @@ export const SPARSE_BRICK_GPU_LAYOUT = Object.freeze({
   velocityStrideBytes: 16,
   materialOwnerStrideBytes: 4,
   controlStrideBytes: 128,
+  /** Structural publication state is colocated after control in the shared arena. */
+  publicationStrideBytes: 32,
+  /** Publication is independently bindable at the portable 256-byte alignment. */
+  publicationOffsetBytes: 256,
+  /** Control/publication prefix rounded up for storage-buffer binding alignment. */
+  topologyOffsetBytes: 512,
   /** geometry = fluid SDF, solid SDF estimate, solid fraction, pressure */
   geometryChannels: ["fluidSignedDistance", "solidSignedDistance", "solidFraction", "pressure"] as const,
   /** velocity = world velocity xyz, reconstructed liquid volume fraction */
@@ -85,6 +93,13 @@ export const SPARSE_BRICK_GPU_LAYOUT = Object.freeze({
     leafWordOffset: 16,
     velocityWordOffset: 17,
     materialOwnerWordOffset: 18,
+    /** Fixed-arena allocator high-water marks; no scene rebuild allocation is required. */
+    allocatedNodes: 19,
+    allocatedLeaves: 23,
+    activeLeaves: 28,
+    dirtyLeaves: 29,
+    queuedLeaves: 30,
+    mutationGeneration: 31,
   } as const,
   dispatchIndirectOffsetBytes: 80,
   drawIndirectOffsetBytes: 96,
@@ -267,8 +282,9 @@ export function packSparseBrickPlan(plan: SparseBrickPlan, generation = 0): Pack
   const nodeWords = new Uint32Array(plan.nodes.length * 8);
   for (const node of plan.nodes) {
     const [low, high] = splitMorton(node.morton);
+    const lifecycle = node.leafIndex === SPARSE_BRICK_INVALID_INDEX ? 0 : SVO_BRICK_LIFECYCLE.activeBit;
     nodeWords.set([
-      low, high, node.level, node.childMask, node.firstChild, node.childCount, node.leafIndex, 0,
+      low, high, node.level, node.childMask, node.firstChild, node.childCount, node.leafIndex, lifecycle,
     ], node.index * 8);
   }
   const leafWords = new Uint32Array(plan.leaves.length * 4);
@@ -305,8 +321,6 @@ export interface SparseBrickDenseFieldSource {
   gridOriginCells?: readonly [number, number, number];
   /** Maximum topology level. Omit for legacy fixed-level brick plans. */
   finestLevel?: number;
-  /** Preserve static scene-proxy payloads at or above this material ID. */
-  preservedMaterialIdMinimum?: number;
   cellSize: readonly [number, number, number];
   fluidMaterialId: number;
   solidMaterialId: number;
@@ -329,71 +343,105 @@ export interface SparseBrickOctreeGPUOptions {
 }
 
 const publicationShader = /* wgsl */ `
+struct StructuralArena {
+  control: array<atomic<u32>, 128>,
+  topology: array<u32>,
+}
 @group(0) @binding(0) var<storage, read> sourceCounts: array<u32>;
 @group(0) @binding(1) var<storage, read> sourceTopology: array<u32>;
 @group(0) @binding(2) var<storage, read> sourceGeometry: array<vec4f>;
 @group(0) @binding(3) var<storage, read> sourceVelocity: array<vec4f>;
 @group(0) @binding(4) var<storage, read> sourceMaterialOwners: array<u32>;
-@group(0) @binding(5) var<storage, read_write> control: array<atomic<u32>>;
-@group(0) @binding(6) var<storage, read_write> topology: array<u32>;
+@group(0) @binding(5) var<storage, read_write> structure: StructuralArena;
 @group(0) @binding(7) var<storage, read_write> payload: array<u32>;
 
 fn linearIndex(gid: vec3u, groups: vec3u) -> u32 {
   return gid.x + gid.y * groups.x * 256u + gid.z * groups.x * groups.y * 256u;
 }
 @compute @workgroup_size(256)
-fn publish(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
+fn publishStructure(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
   let index = linearIndex(gid, groups);
   let requested = vec3u(sourceCounts[0], sourceCounts[1], sourceCounts[2]);
-  let capacities = vec3u(atomicLoad(&control[8]), atomicLoad(&control[9]), atomicLoad(&control[10]));
+  let capacities = vec3u(
+    atomicLoad(&structure.control[8]),
+    atomicLoad(&structure.control[9]),
+    atomicLoad(&structure.control[10]),
+  );
   let overflow = requested > capacities;
   let valid = !any(overflow);
   if (index == 0u) {
-    atomicStore(&control[0], select(0u, requested.x, valid));
-    atomicStore(&control[1], select(0u, requested.y, valid));
-    atomicStore(&control[2], select(0u, requested.z, valid));
-    atomicStore(&control[3], select(0u, sourceCounts[3], valid));
-    atomicStore(&control[4], requested.x); atomicStore(&control[5], requested.y);
-    atomicStore(&control[6], requested.z); atomicStore(&control[7], sourceCounts[3]);
+    atomicStore(&structure.control[0], select(0u, requested.x, valid));
+    atomicStore(&structure.control[1], select(0u, requested.y, valid));
+    atomicStore(&structure.control[2], select(0u, requested.z, valid));
+    atomicStore(&structure.control[3], select(0u, sourceCounts[3], valid));
+    atomicStore(&structure.control[4], requested.x); atomicStore(&structure.control[5], requested.y);
+    atomicStore(&structure.control[6], requested.z); atomicStore(&structure.control[7], sourceCounts[3]);
     let flags = select(0u, 1u, overflow.x) | select(0u, 2u, overflow.y) | select(0u, 4u, overflow.z);
-    atomicStore(&control[12], flags);
-    atomicStore(&control[13], select(0u, requested.x - capacities.x, overflow.x));
-    atomicStore(&control[14], select(0u, requested.y - capacities.y, overflow.y));
-    atomicStore(&control[15], select(0u, requested.z - capacities.z, overflow.z));
+    atomicStore(&structure.control[12], flags);
+    atomicStore(&structure.control[13], select(0u, requested.x - capacities.x, overflow.x));
+    atomicStore(&structure.control[14], select(0u, requested.y - capacities.y, overflow.y));
+    atomicStore(&structure.control[15], select(0u, requested.z - capacities.z, overflow.z));
+    // Initialize the fixed arenas as high-water allocators. Later mutations
+    // advance these counters in place rather than replacing scene buffers.
+    atomicStore(&structure.control[19], select(0u, requested.x, valid));
+    atomicStore(&structure.control[23], select(0u, requested.y, valid));
+    atomicStore(&structure.control[28], select(0u, requested.y, valid));
+    atomicStore(&structure.control[29], 0u); atomicStore(&structure.control[30], 0u);
+    atomicStore(&structure.control[31], select(0u, sourceCounts[3], valid));
     let blocks = select(0u, (requested.z + 255u) / 256u, valid && requested.z > 0u);
     let dispatchX = min(blocks, 65535u);
-    atomicStore(&control[20], dispatchX);
-    if (dispatchX > 0u) { atomicStore(&control[21], (blocks + dispatchX - 1u) / dispatchX); }
-    else { atomicStore(&control[21], 0u); }
-    atomicStore(&control[22], 1u);
-    atomicStore(&control[24], select(0u, 36u, valid && requested.y > 0u));
-    atomicStore(&control[25], select(0u, requested.y, valid));
-    atomicStore(&control[26], 0u); atomicStore(&control[27], 0u);
+    atomicStore(&structure.control[20], dispatchX);
+    if (dispatchX > 0u) { atomicStore(&structure.control[21], (blocks + dispatchX - 1u) / dispatchX); }
+    else { atomicStore(&structure.control[21], 0u); }
+    atomicStore(&structure.control[22], 1u);
+    atomicStore(&structure.control[24], select(0u, 36u, valid && requested.y > 0u));
+    atomicStore(&structure.control[25], select(0u, requested.y, valid));
+    atomicStore(&structure.control[26], 0u); atomicStore(&structure.control[27], 0u);
   }
   if (!valid) { return; }
   if (index < requested.x) {
     let sourceBase = sourceCounts[4] + index * 8u;
     let destinationBase = index * 8u;
-    for (var word = 0u; word < 8u; word += 1u) { topology[destinationBase + word] = sourceTopology[sourceBase + word]; }
+    for (var word = 0u; word < 8u; word += 1u) {
+      structure.topology[destinationBase + word] = sourceTopology[sourceBase + word];
+    }
   }
   if (index < requested.y) {
     let sourceBase = sourceCounts[5] + index * 4u;
-    let destinationBase = atomicLoad(&control[16]) + index * 4u;
-    for (var word = 0u; word < 4u; word += 1u) { topology[destinationBase + word] = sourceTopology[sourceBase + word]; }
+    let destinationBase = atomicLoad(&structure.control[16]) + index * 4u;
+    for (var word = 0u; word < 4u; word += 1u) {
+      structure.topology[destinationBase + word] = sourceTopology[sourceBase + word];
+    }
   }
-  if (index < requested.z) {
-    let geometryBase = index * 4u;
-    let velocityBase = atomicLoad(&control[17]) + index * 4u;
-    payload[geometryBase] = bitcast<u32>(sourceGeometry[index].x);
-    payload[geometryBase + 1u] = bitcast<u32>(sourceGeometry[index].y);
-    payload[geometryBase + 2u] = bitcast<u32>(sourceGeometry[index].z);
-    payload[geometryBase + 3u] = bitcast<u32>(sourceGeometry[index].w);
-    payload[velocityBase] = bitcast<u32>(sourceVelocity[index].x);
-    payload[velocityBase + 1u] = bitcast<u32>(sourceVelocity[index].y);
-    payload[velocityBase + 2u] = bitcast<u32>(sourceVelocity[index].z);
-    payload[velocityBase + 3u] = bitcast<u32>(sourceVelocity[index].w);
-    payload[atomicLoad(&control[18]) + index] = sourceMaterialOwners[index];
-  }
+}
+
+@compute @workgroup_size(256)
+fn publishGeometry(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
+  let index = linearIndex(gid, groups);
+  if (index >= atomicLoad(&structure.control[2])) { return; }
+  let destinationBase = index * 4u;
+  payload[destinationBase] = bitcast<u32>(sourceGeometry[index].x);
+  payload[destinationBase + 1u] = bitcast<u32>(sourceGeometry[index].y);
+  payload[destinationBase + 2u] = bitcast<u32>(sourceGeometry[index].z);
+  payload[destinationBase + 3u] = bitcast<u32>(sourceGeometry[index].w);
+}
+
+@compute @workgroup_size(256)
+fn publishVelocity(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
+  let index = linearIndex(gid, groups);
+  if (index >= atomicLoad(&structure.control[2])) { return; }
+  let destinationBase = atomicLoad(&structure.control[17]) + index * 4u;
+  payload[destinationBase] = bitcast<u32>(sourceVelocity[index].x);
+  payload[destinationBase + 1u] = bitcast<u32>(sourceVelocity[index].y);
+  payload[destinationBase + 2u] = bitcast<u32>(sourceVelocity[index].z);
+  payload[destinationBase + 3u] = bitcast<u32>(sourceVelocity[index].w);
+}
+
+@compute @workgroup_size(256)
+fn publishMaterialOwners(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
+  let index = linearIndex(gid, groups);
+  if (index >= atomicLoad(&structure.control[2])) { return; }
+  payload[atomicLoad(&structure.control[18]) + index] = sourceMaterialOwners[index];
 }
 `;
 
@@ -464,8 +512,8 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   let geometryBase = output * 4u;
   let velocityBase = control[17] + output * 4u;
   if (scale != 1u || any(q < vec3i(0)) || any(q >= vec3i(params.dims.xyz))) {
-    // Mixed-level/static environment leaves are initialized by the proxy pass
-    // and then remain untouched by per-step dense fluid publication.
+    // Leaves outside the current dense fluid window are maintained by their
+    // own scene mutation streams and are not part of this field update.
     return;
   }
   let dense = u32(q.x) + params.dims.x * (u32(q.y) + params.dims.y * u32(q.z));
@@ -475,17 +523,8 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   let h = min(params.cell.x, min(params.cell.y, params.cell.z));
   let solidPhi = (0.5 - clamp(solid.fraction, 0.0, 1.0)) * 2.0 * h;
   let materialOffset = control[18] + output;
-  let previousIdentity = payload[materialOffset];
-  let previousMaterial = previousIdentity & 0xffffu;
-  let preserveStatic = params.origin.w > 0 && previousMaterial >= u32(params.origin.w);
-  var combinedSolidPhi = solidPhi;
-  var combinedSolidFraction = solid.fraction;
-  if (preserveStatic) {
-    combinedSolidPhi = min(combinedSolidPhi, bitcast<f32>(payload[geometryBase + 1u]));
-    combinedSolidFraction = max(combinedSolidFraction, bitcast<f32>(payload[geometryBase + 2u]));
-  }
-  payload[geometryBase] = bitcast<u32>(phi); payload[geometryBase + 1u] = bitcast<u32>(combinedSolidPhi);
-  payload[geometryBase + 2u] = bitcast<u32>(combinedSolidFraction); payload[geometryBase + 3u] = 0u;
+  payload[geometryBase] = bitcast<u32>(phi); payload[geometryBase + 1u] = bitcast<u32>(solidPhi);
+  payload[geometryBase + 2u] = bitcast<u32>(solid.fraction); payload[geometryBase + 3u] = 0u;
   let fieldVelocity = textureLoad(velocityField, q, 0).xyz;
   let liquidFraction = clamp(0.5 - phi / max(h, 1e-8), 0.0, 1.0);
   payload[velocityBase] = bitcast<u32>(fieldVelocity.x); payload[velocityBase + 1u] = bitcast<u32>(fieldVelocity.y);
@@ -498,7 +537,7 @@ fn materializeDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(nu
   // Never treat their default owner 0 as rigid body 0 unless occupancy is
   // actually present.
   let owner = select(0xffffu, min(u32(max(solid.owner, 0)), 0xfffeu), solid.fraction > 0.0 && solid.owner >= 0);
-  payload[materialOffset] = select((owner << 16u) | (material & 0xffffu), previousIdentity, preserveStatic && material == 0u);
+  payload[materialOffset] = (owner << 16u) | (material & 0xffffu);
 }
 
 @compute @workgroup_size(256)
@@ -518,18 +557,13 @@ fn clearRetiredDenseFields(@builtin(global_invocation_id) gid: vec3u, @builtin(n
   let geometryBase = output * 4u;
   let velocityBase = control[17] + output * 4u;
   let materialOffset = control[18] + output;
-  let previousIdentity = payload[materialOffset];
-  let previousMaterial = previousIdentity & 0xffffu;
-  let preserveStatic = params.origin.w > 0 && previousMaterial >= u32(params.origin.w);
   payload[geometryBase] = bitcast<u32>(3.402823e38);
+  payload[geometryBase + 1u] = bitcast<u32>(3.402823e38);
+  payload[geometryBase + 2u] = 0u;
   payload[geometryBase + 3u] = 0u;
   payload[velocityBase] = 0u; payload[velocityBase + 1u] = 0u;
   payload[velocityBase + 2u] = 0u; payload[velocityBase + 3u] = 0u;
-  if (!preserveStatic) {
-    payload[geometryBase + 1u] = bitcast<u32>(3.402823e38);
-    payload[geometryBase + 2u] = 0u;
-    payload[materialOffset] = 0xffff0000u;
-  }
+  payload[materialOffset] = 0xffff0000u;
 }
 `;
 
@@ -569,12 +603,17 @@ export class SparseBrickOctreeGPU {
   readonly voxelCapacity: number;
   /** Total bytes owned by this class, including control/indirect uniforms. */
   readonly allocatedBytes: number;
+  /** Control, publication state, nodes, and leaves share one bindable arena. */
+  readonly structure: GPUBuffer;
   readonly topology: GPUBuffer;
+  readonly topologyOffsetBytes = SPARSE_BRICK_GPU_LAYOUT.topologyOffsetBytes;
   readonly payload: GPUBuffer;
   readonly controlAndIndirect: GPUBuffer;
   readonly nodes: GPUBuffer;
-  readonly nodeOffsetBytes = 0;
+  readonly nodeOffsetBytes = SPARSE_BRICK_GPU_LAYOUT.topologyOffsetBytes;
   readonly leaves: GPUBuffer;
+  /** Leaf offset relative to the topology slice used by legacy producer shaders. */
+  readonly leafTopologyOffsetBytes: number;
   readonly leafOffsetBytes: number;
   readonly geometry: GPUBuffer;
   readonly geometryOffsetBytes = 0;
@@ -582,14 +621,22 @@ export class SparseBrickOctreeGPU {
   readonly velocityOffsetBytes: number;
   readonly materialOwners: GPUBuffer;
   readonly materialOwnerOffsetBytes: number;
+  /** Authored/live scene lanes share topology but never alias evolving fluid writes. */
+  readonly sceneGeometry: GPUBuffer;
+  readonly sceneGeometryOffsetBytes: number;
+  readonly sceneMaterialOwners: GPUBuffer;
+  readonly sceneMaterialOwnerOffsetBytes: number;
   readonly control: GPUBuffer;
+  readonly controlOffsetBytes = 0;
+  readonly structuralPublication: GPUBuffer;
+  readonly structuralPublicationOffsetBytes = SPARSE_BRICK_GPU_LAYOUT.publicationOffsetBytes;
   readonly dispatchIndirect: GPUBuffer;
   readonly dispatchIndirectOffsetBytes = SPARSE_BRICK_GPU_LAYOUT.dispatchIndirectOffsetBytes;
   readonly drawIndirect: GPUBuffer;
   readonly drawIndirectOffsetBytes = SPARSE_BRICK_GPU_LAYOUT.drawIndirectOffsetBytes;
 
   private readonly device: GPUDevice;
-  private readonly publicationPipeline: GPUComputePipeline;
+  private readonly publicationPipelines: readonly GPUComputePipeline[];
   private readonly denseFieldPipeline: GPUComputePipeline;
   private readonly denseFieldCleanupPipeline: GPUComputePipeline;
   private readonly denseFieldParams: GPUBuffer;
@@ -610,32 +657,46 @@ export class SparseBrickOctreeGPU {
     const geometryBytes = checkedBytes(this.voxelCapacity, SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes, "Geometry");
     const velocityBytes = checkedBytes(this.voxelCapacity, SPARSE_BRICK_GPU_LAYOUT.velocityStrideBytes, "Velocity");
     const materialOwnerBytes = checkedBytes(this.voxelCapacity, SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes, "Material/owner");
-    this.leafOffsetBytes = alignBytes(nodeBytes);
+    this.leafTopologyOffsetBytes = alignBytes(nodeBytes);
+    this.leafOffsetBytes = this.topologyOffsetBytes + this.leafTopologyOffsetBytes;
     this.velocityOffsetBytes = alignBytes(geometryBytes);
     this.materialOwnerOffsetBytes = this.velocityOffsetBytes + alignBytes(velocityBytes);
-    const topologyBytes = this.leafOffsetBytes + leafBytes;
-    const payloadBytes = this.materialOwnerOffsetBytes + materialOwnerBytes;
-    this.allocatedBytes = topologyBytes + payloadBytes + SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes + 64;
-    this.topology = device.createBuffer({ label: `${label} topology arena`, size: topologyBytes, usage: storageUsage });
+    this.sceneGeometryOffsetBytes = this.materialOwnerOffsetBytes + alignBytes(materialOwnerBytes);
+    this.sceneMaterialOwnerOffsetBytes = this.sceneGeometryOffsetBytes + alignBytes(geometryBytes);
+    const topologyBytes = this.leafTopologyOffsetBytes + leafBytes;
+    const payloadBytes = this.sceneMaterialOwnerOffsetBytes + materialOwnerBytes;
+    const structureBytes = this.topologyOffsetBytes + topologyBytes;
+    this.allocatedBytes = structureBytes + payloadBytes + 64;
+    this.structure = device.createBuffer({ label: `${label} structural arena`, size: structureBytes, usage: indirectUsage });
+    this.topology = this.structure;
     this.payload = device.createBuffer({ label: `${label} payload arena`, size: payloadBytes, usage: storageUsage });
-    this.controlAndIndirect = device.createBuffer({ label: `${label} control, overflow, and indirect arguments`, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes, usage: indirectUsage });
-    // Aliases plus explicit offsets keep downstream bind/draw APIs ergonomic
-    // while publication stays within WebGPU's portable eight-storage limit.
-    this.nodes = this.topology; this.leaves = this.topology;
+    this.controlAndIndirect = this.structure;
+    // Aliases plus explicit offsets keep producer APIs ergonomic while render
+    // consumers bind the complete structural arena exactly once.
+    this.nodes = this.structure; this.leaves = this.structure;
     this.geometry = this.payload; this.velocity = this.payload; this.materialOwners = this.payload;
-    this.control = this.controlAndIndirect;
+    this.sceneGeometry = this.payload; this.sceneMaterialOwners = this.payload;
+    this.control = this.structure;
+    this.structuralPublication = this.structure;
     this.dispatchIndirect = this.controlAndIndirect; this.drawIndirect = this.controlAndIndirect;
     device.queue.writeBuffer(this.control, 8 * 4, new Uint32Array([
       this.nodeCapacity, this.leafCapacity, this.voxelCapacity, this.brickSize,
     ]));
     device.queue.writeBuffer(this.control, 16 * 4, new Uint32Array([
-      this.leafOffsetBytes / 4, this.velocityOffsetBytes / 4, this.materialOwnerOffsetBytes / 4,
+      this.leafTopologyOffsetBytes / 4, this.velocityOffsetBytes / 4, this.materialOwnerOffsetBytes / 4,
     ]));
     this.denseFieldParams = device.createBuffer({ label: `${label} dense publication parameters`, size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.publicationPipeline = device.createComputePipeline({
-      label: `${label} publication pipeline`, layout: "auto",
-      compute: { module: device.createShaderModule({ label: `${label} publication shader`, code: publicationShader }), entryPoint: "publish" },
-    });
+    const publicationModule = device.createShaderModule({ label: `${label} publication shader`, code: publicationShader });
+    this.publicationPipelines = [
+      ["structure", "publishStructure"],
+      ["geometry", "publishGeometry"],
+      ["velocity", "publishVelocity"],
+      ["material-owner", "publishMaterialOwners"],
+    ].map(([stage, entryPoint]) => device.createComputePipeline({
+      label: `${label} ${stage} publication pipeline`,
+      layout: "auto",
+      compute: { module: publicationModule, entryPoint },
+    }));
     const denseFieldModule = device.createShaderModule({ label: `${label} dense-field shader`, code: denseFieldShader });
     this.denseFieldPipeline = device.createComputePipeline({
       label: `${label} dense-field pipeline`, layout: "auto",
@@ -651,34 +712,51 @@ export class SparseBrickOctreeGPU {
   encodeReset(encoder: GPUCommandEncoder): void {
     encoder.clearBuffer(this.control, 0, 8 * 4);
     encoder.clearBuffer(this.control, 12 * 4, 4 * 4);
-    encoder.clearBuffer(this.control, this.dispatchIndirectOffsetBytes, 12);
-    encoder.clearBuffer(this.control, this.drawIndirectOffsetBytes, 16);
+    // Mutable allocator, work counts, indirect arguments, and mutation
+    // generation occupy the remaining non-capacity tail of the control arena.
+    encoder.clearBuffer(this.control, 19 * 4, 13 * 4);
   }
 
   /** Publish a GPU-authored topology and payload without any CPU count readback. */
   encodePublish(encoder: GPUCommandEncoder, source: SparseBrickPublicationSource): void {
     this.encodeReset(encoder);
-    const bindGroup = this.device.createBindGroup({
-      label: "Sparse brick publication bind group",
-      layout: this.publicationPipeline.getBindGroupLayout(0),
-      entries: [
+    const [structurePipeline, geometryPipeline, velocityPipeline, materialOwnerPipeline] = this.publicationPipelines;
+    const stages: readonly [string, GPUComputePipeline, readonly GPUBindGroupEntry[]][] = [
+      ["structure", structurePipeline, [
         { binding: 0, resource: { buffer: source.counts } },
         { binding: 1, resource: { buffer: source.topology } },
+        { binding: 5, resource: { buffer: this.structure } },
+      ]],
+      ["geometry", geometryPipeline, [
         { binding: 2, resource: { buffer: source.geometry } },
-        { binding: 3, resource: { buffer: source.velocity } },
-        { binding: 4, resource: { buffer: source.materialOwners } },
-        { binding: 5, resource: { buffer: this.control } },
-        { binding: 6, resource: { buffer: this.topology } },
+        { binding: 5, resource: { buffer: this.structure } },
         { binding: 7, resource: { buffer: this.payload } },
-      ],
-    });
+      ]],
+      ["velocity", velocityPipeline, [
+        { binding: 3, resource: { buffer: source.velocity } },
+        { binding: 5, resource: { buffer: this.structure } },
+        { binding: 7, resource: { buffer: this.payload } },
+      ]],
+      ["material-owner", materialOwnerPipeline, [
+        { binding: 4, resource: { buffer: source.materialOwners } },
+        { binding: 5, resource: { buffer: this.structure } },
+        { binding: 7, resource: { buffer: this.payload } },
+      ]],
+    ];
     const maximum = Math.max(source.capacities.nodes, source.capacities.leaves, source.capacities.voxels, 1);
     const dispatch = sparseBrickDispatchDimensions(maximum);
-    const pass = encoder.beginComputePass({ label: "Publish sparse brick octree" });
-    pass.setPipeline(this.publicationPipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(...dispatch);
-    pass.end();
+    for (const [stage, pipeline, entries] of stages) {
+      const bindGroup = this.device.createBindGroup({
+        label: `Sparse brick ${stage} publication bind group`,
+        layout: pipeline.getBindGroupLayout(0),
+        entries,
+      });
+      const pass = encoder.beginComputePass({ label: `Publish sparse brick octree ${stage}` });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(...dispatch);
+      pass.end();
+    }
   }
 
   /**
@@ -701,9 +779,6 @@ export class SparseBrickOctreeGPU {
     const encodedFinestLevel = finestLevel ?? 0x7fffffff;
     uints.set([nx, ny, nz, encodedFinestLevel | (activeWorklist ? 0x80000000 : 0)], 0);
     ints.set([origin[0], origin[1], origin[2], 0], 4);
-    const preservedMaterialIdMinimum = source.preservedMaterialIdMinimum ?? 0;
-    if (!Number.isInteger(preservedMaterialIdMinimum) || preservedMaterialIdMinimum < 0 || preservedMaterialIdMinimum > 0xffff) throw new RangeError("Preserved material minimum must fit uint16");
-    ints[7] = preservedMaterialIdMinimum;
     floats.set([source.cellSize[0], source.cellSize[1], source.cellSize[2], 0], 8);
     uints.set([source.fluidMaterialId, source.solidMaterialId, source.containerMaterialId ?? 0, source.containerClosedTop ? 1 : 0], 12);
     this.device.queue.writeBuffer(this.denseFieldParams, 0, words);
@@ -711,8 +786,8 @@ export class SparseBrickOctreeGPU {
       label: "Sparse brick dense-field bind group",
       layout: this.denseFieldPipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: { buffer: this.control } },
-        { binding: 1, resource: { buffer: this.topology } },
+        { binding: 0, resource: { buffer: this.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
+        { binding: 1, resource: { buffer: this.topology, offset: this.topologyOffsetBytes } },
         { binding: 2, resource: source.levelSet },
         { binding: 3, resource: source.velocity },
         { binding: 4, resource: { buffer: source.solidCells } },
@@ -732,8 +807,8 @@ export class SparseBrickOctreeGPU {
         label: "Retired sparse brick cleanup bind group",
         layout: this.denseFieldCleanupPipeline.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: { buffer: this.control } },
-          { binding: 1, resource: { buffer: this.topology } },
+          { binding: 0, resource: { buffer: this.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
+          { binding: 1, resource: { buffer: this.topology, offset: this.topologyOffsetBytes } },
           { binding: 5, resource: { buffer: this.denseFieldParams } },
           { binding: 6, resource: { buffer: this.payload } },
           { binding: 7, resource: { buffer: activeWorklist } },
@@ -750,6 +825,6 @@ export class SparseBrickOctreeGPU {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.topology.destroy(); this.payload.destroy(); this.controlAndIndirect.destroy(); this.denseFieldParams.destroy();
+    this.structure.destroy(); this.payload.destroy(); this.denseFieldParams.destroy();
   }
 }

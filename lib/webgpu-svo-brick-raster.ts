@@ -52,13 +52,9 @@ export const SVO_BRICK_RASTER_CONTRACT = Object.freeze({
   bindings: Object.freeze({
     uniforms: 0,
     mapping: 1,
-    control: 2,
-    nodes: 3,
-    leaves: 4,
-    publicationState: 5,
-    candidates: 6,
-    instances: 7,
-    sortState: 8,
+    structure: 2,
+    candidates: 3,
+    rasterPublication: 4,
   }),
   /** The dry-scene split group carries the sorted list into the vertex stage. */
   instanceDrawBinding: 2,
@@ -83,6 +79,10 @@ export const SVO_BRICK_RASTER_CONTRACT = Object.freeze({
 export function svoBrickRasterSortStateBytes(): number {
   return (SVO_BRICK_RASTER_CONTRACT.sortStateHeaderWords + SVO_BRICK_RASTER_CONTRACT.sortBuckets)
     * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+export function svoBrickRasterPublicationInstanceOffsetBytes(): number {
+  return Math.ceil(svoBrickRasterSortStateBytes() / 256) * 256;
 }
 
 export function svoBrickRasterInstanceBytes(leafCapacity: number): number {
@@ -111,13 +111,9 @@ export function svoBrickRasterCullBindGroupLayoutEntries(): GPUBindGroupLayoutEn
   return [
     { binding: bindings.uniforms, visibility, buffer: { type: "uniform" } },
     { binding: bindings.mapping, visibility, buffer: { type: "uniform" } },
-    { binding: bindings.control, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.nodes, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.leaves, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.publicationState, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.structure, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.candidates, visibility, buffer: { type: "storage" } },
-    { binding: bindings.instances, visibility, buffer: { type: "storage" } },
-    { binding: bindings.sortState, visibility, buffer: { type: "storage" } },
+    { binding: bindings.rasterPublication, visibility, buffer: { type: "storage" } },
   ];
 }
 
@@ -205,16 +201,22 @@ struct SvoBrickSortState{
 }
 ${svoBrickRasterSharedWGSL}
 ${svoBrickOccupancyDecodeWGSL}
+struct SvoBrickRasterPublication{
+  sort:SvoBrickSortState,
+  _instanceAlignment:array<u32,${(svoBrickRasterPublicationInstanceOffsetBytes() - svoBrickRasterSortStateBytes()) / 4}>,
+  instances:array<SvoBrickInstance>,
+}
 
 @group(0) @binding(${bindings.uniforms}) var<uniform> uniforms:Uniforms;
 @group(0) @binding(${bindings.mapping}) var<uniform> mapping:SvoMapping;
-@group(0) @binding(${bindings.control}) var<storage,read> svoControl:array<u32>;
-@group(0) @binding(${bindings.nodes}) var<storage,read> svoNodes:array<SvoNode>;
-@group(0) @binding(${bindings.leaves}) var<storage,read> svoLeaves:array<SvoLeaf>;
-@group(0) @binding(${bindings.publicationState}) var<storage,read> publicationState:array<u32>;
+@group(0) @binding(${bindings.structure}) var<storage,read> svoBrickStructure:array<u32>;
 @group(0) @binding(${bindings.candidates}) var<storage,read_write> svoBrickCandidates:array<SvoBrickInstance>;
-@group(0) @binding(${bindings.instances}) var<storage,read_write> svoBrickInstances:array<SvoBrickInstance>;
-@group(0) @binding(${bindings.sortState}) var<storage,read_write> svoBrickSort:SvoBrickSortState;
+@group(0) @binding(${bindings.rasterPublication}) var<storage,read_write> svoBrickRaster:SvoBrickRasterPublication;
+
+fn svoBrickStructureWords4(offset:u32)->vec4u{return vec4u(svoBrickStructure[offset],svoBrickStructure[offset+1u],svoBrickStructure[offset+2u],svoBrickStructure[offset+3u]);}
+fn svoBrickControl(index:u32)->u32{return svoBrickStructure[index];}
+fn svoBrickNode(index:u32)->SvoNode{let base=128u+index*8u;return SvoNode(svoBrickStructureWords4(base),svoBrickStructureWords4(base+4u));}
+fn svoBrickLeaf(index:u32)->SvoLeaf{let base=128u+svoBrickControl(16u)+index*4u;return SvoLeaf(svoBrickStructureWords4(base));}
 
 const SVO_BRICK_NEAR_M:f32=${options.reversedZNear_m};
 const SVO_BRICK_TAN_HALF:f32=${options.tanHalfFov};
@@ -282,35 +284,35 @@ fn svoBrickSortKey(camera:SvoBrickCamera,bounds:mat2x3f)->u32{
   return min(u32(f32(SVO_BRICK_SORT_BUCKETS)*clamp(normalized,0.0,1.0)),SVO_BRICK_SORT_BUCKETS-1u);
 }
 fn svoBrickTopologyPublished()->bool{
-  return arrayLength(&publicationState)>=2u&&publicationState[0]!=0u;
+  return svoBrickStructure[64u]!=0u;
 }
 
 @compute @workgroup_size(${SVO_BRICK_RASTER_CONTRACT.emitWorkgroupSize})
 fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.emit}(@builtin(global_invocation_id) globalId:vec3u){
   let leafIndex=globalId.x;
   if(!svoBrickTopologyPublished()){return;}
-  if(leafIndex>=svoControl[1]||leafIndex>=arrayLength(&svoLeaves)||leafIndex>=arrayLength(&svoBrickCandidates)){return;}
-  let leaf=svoLeaves[leafIndex].topology;
+  if(leafIndex>=svoBrickControl(1u)||leafIndex>=arrayLength(&svoBrickCandidates)){return;}
+  let leaf=svoBrickLeaf(leafIndex).topology;
   let nodeIndex=leaf.x;
-  if(nodeIndex>=svoControl[0]||nodeIndex>=arrayLength(&svoNodes)||nodeIndex>SVO_BRICK_NODE_INDEX_MASK){return;}
-  atomicAdd(&svoBrickSort.resident,1u);
-  let node=svoNodes[nodeIndex];
+  if(nodeIndex>=svoBrickControl(0u)||nodeIndex>SVO_BRICK_NODE_INDEX_MASK){return;}
+  atomicAdd(&svoBrickRaster.sort.resident,1u);
+  let node=svoBrickNode(nodeIndex);
   let occupancy=svoBrickOccupancyDecode(node.links.w);
   // An empty brick can never produce a primary hit, so it is never drawn. The
   // producer publishes this word every topology change, which is why the
   // instance list can be rebuilt from scratch each frame instead of cached.
-  if(occupancy.ready!=0u&&occupancy.occupied==0u){atomicAdd(&svoBrickSort.empty,1u);return;}
+  if(occupancy.ready!=0u&&occupancy.occupied==0u){atomicAdd(&svoBrickRaster.sort.empty,1u);return;}
   let bounds=svoBrickNodeBounds(node);
   let cellSize=(bounds[1]-bounds[0])/f32(mapping.brickSize);
   var proxy=bounds;
   if(occupancy.ready!=0u){proxy=svoBrickOccupiedBounds(occupancy,bounds[0],cellSize);}
   let camera=svoBrickCamera();
-  if(!svoBrickFrustumVisible(camera,proxy)){atomicAdd(&svoBrickSort.culled,1u);return;}
+  if(!svoBrickFrustumVisible(camera,proxy)){atomicAdd(&svoBrickRaster.sort.culled,1u);return;}
   let key=svoBrickSortKey(camera,proxy);
-  let slot=atomicAdd(&svoBrickSort.candidateCount,1u);
+  let slot=atomicAdd(&svoBrickRaster.sort.candidateCount,1u);
   if(slot>=arrayLength(&svoBrickCandidates)){return;}
   svoBrickCandidates[slot]=SvoBrickInstance(proxy[0],leaf.y,proxy[1],nodeIndex|(key<<SVO_BRICK_SORT_KEY_SHIFT));
-  atomicAdd(&svoBrickSort.buckets[key],1u);
+  atomicAdd(&svoBrickRaster.sort.buckets[key],1u);
 }
 
 var<workgroup> svoBrickBucketScan:array<u32,${SVO_BRICK_RASTER_CONTRACT.sortBuckets}>;
@@ -324,7 +326,7 @@ fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.scan}(@builtin(local_invocation_id) l
   let base=lane*SVO_BRICK_BUCKETS_PER_LANE;
   var laneTotal=0u;
   for(var offset=0u;offset<SVO_BRICK_BUCKETS_PER_LANE;offset+=1u){
-    let value=atomicLoad(&svoBrickSort.buckets[base+offset]);
+    let value=atomicLoad(&svoBrickRaster.sort.buckets[base+offset]);
     svoBrickBucketScan[base+offset]=laneTotal;
     laneTotal+=value;
   }
@@ -343,22 +345,22 @@ fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.scan}(@builtin(local_invocation_id) l
   }
   let laneExclusive=svoBrickLaneTotals[lane]-laneTotal;
   for(var offset=0u;offset<SVO_BRICK_BUCKETS_PER_LANE;offset+=1u){
-    atomicStore(&svoBrickSort.buckets[base+offset],svoBrickBucketScan[base+offset]+laneExclusive);
+    atomicStore(&svoBrickRaster.sort.buckets[base+offset],svoBrickBucketScan[base+offset]+laneExclusive);
   }
   if(lane==${SVO_BRICK_RASTER_CONTRACT.scanWorkgroupSize - 1}u){
-    atomicStore(&svoBrickSort.drawInstanceCount,min(svoBrickLaneTotals[lane],arrayLength(&svoBrickInstances)));
+    atomicStore(&svoBrickRaster.sort.drawInstanceCount,min(svoBrickLaneTotals[lane],arrayLength(&svoBrickRaster.instances)));
   }
 }
 
 @compute @workgroup_size(${SVO_BRICK_RASTER_CONTRACT.scatterWorkgroupSize})
 fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.scatter}(@builtin(global_invocation_id) globalId:vec3u){
   let candidate=globalId.x;
-  if(candidate>=atomicLoad(&svoBrickSort.candidateCount)||candidate>=arrayLength(&svoBrickCandidates)){return;}
+  if(candidate>=atomicLoad(&svoBrickRaster.sort.candidateCount)||candidate>=arrayLength(&svoBrickCandidates)){return;}
   let record=svoBrickCandidates[candidate];
   let key=record.nodeIndexKey>>SVO_BRICK_SORT_KEY_SHIFT;
-  let slot=atomicAdd(&svoBrickSort.buckets[key],1u);
-  if(slot>=arrayLength(&svoBrickInstances)){return;}
-  svoBrickInstances[slot]=record;
+  let slot=atomicAdd(&svoBrickRaster.sort.buckets[key],1u);
+  if(slot>=arrayLength(&svoBrickRaster.instances)){return;}
+  svoBrickRaster.instances[slot]=record;
 }
 `;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY } from "../lib/svo-static-node-mips";
+import { SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY } from "../lib/svo-node-mip-cpu-oracle";
 import {
   FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE,
   FLUID_REDUCTION_BYTES_PER_LANE,
@@ -9,7 +9,7 @@ import {
 } from "../lib/webgpu-device-limits";
 
 /**
- * The static node-mip directory is one texture row per page, so this limit is
+ * The node-mip directory is one texture row per page, so this limit is
  * the opacity pyramid's page ceiling. A scene that needs more than the granted
  * value does not get a coarser pyramid, it gets none — and cone lighting then
  * falls back to exact traversal for every shadow and GI ray in the frame.
@@ -32,14 +32,14 @@ test("node-mip page ceiling requests the adapter value, not the WebGPU default",
   );
   assert.ok(
     Number(requiredFluidDeviceLimits({ ...base, maxTextureDimension2D: 16384 }).maxTextureDimension2D)
-      > SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY,
+      > SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY,
     "an adapter advertising more than the default page ceiling must have it requested",
   );
   // Adapters that really do cap at the default are still served their own value.
   assert.equal(
-    requiredFluidDeviceLimits({ ...base, maxTextureDimension2D: SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY })
+    requiredFluidDeviceLimits({ ...base, maxTextureDimension2D: SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY })
       .maxTextureDimension2D,
-    SVO_STATIC_NODE_MIP_DEFAULT_CAPACITY,
+    SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY,
   );
 });
 

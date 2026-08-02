@@ -12,7 +12,7 @@ export type ResourceLaneId = "platform" | "fluid" | "svo" | "optional";
 export type ResourceLaneState = "idle" | "preparing" | "ready" | "degraded" | "failed" | "unavailable";
 export type RuntimeResourceCapability =
   | "renderer"
-  | "static-world"
+  | "live-scene"
   | "fluid-authority"
   | "water-presentation"
   | "sparse-voxel-presentation"
@@ -235,28 +235,32 @@ export function reduceGPUResourceEvidence(
       state.plugin.provides.includes("fluid-authority") ? { ...fluid, plugin: state.plugin } : state]));
     next = { ...next, fluid, plugins };
   }
-  if (renderer?.effectiveMode === "svo") {
+  if (renderer?.state === "active") {
     const svo = { state: "ready", label: "Sparse voxel presentation ready", usable: true } as const;
     const plugins = Object.fromEntries(Object.entries(next.plugins).map(([id, state]) => [id,
       state.plugin.provides.includes("sparse-voxel-presentation") ? { ...svo, plugin: state.plugin } : state]));
     next = { ...next, svo, plugins };
-  } else if (renderer?.fallbackReason === "pipeline-compiling") {
+  } else if (renderer?.state === "pending") {
     const previous = next.svo;
     next = { ...next, svo: {
       state: "preparing",
-      label: "Sparse presentation is compiling; raster presentation remains active",
-      usable: previous.usable,
+      label: renderer.detail ?? (renderer.failureReason === "pipeline-compiling"
+        ? "Sparse presentation is compiling; presentation is held fail-closed"
+        : "Waiting for the live sparse scene publication"),
+      usable: false,
       activity: previous.activity,
     } };
-  } else if (renderer?.fallbackReason && renderer.fallbackReason !== "missing-source") {
+  } else if (renderer?.state === "failed") {
     const plugins = Object.fromEntries(Object.entries(next.plugins).map(([id, state]) => [id,
       state.plugin.provides.includes("sparse-voxel-presentation")
-        ? { state: "degraded" as const, label: "Sparse presentation unavailable; raster fallback active", usable: false, plugin: state.plugin }
+        ? { state: "degraded" as const, label: "Sparse presentation failed closed", usable: false, plugin: state.plugin }
         : state]));
     next = { ...next, plugins, svo: {
       state: "degraded",
-      label: "Raster presentation active while sparse presentation is unavailable",
-      usable: true,
+      label: renderer.detail
+        ? `Sparse presentation failed closed: ${renderer.detail}`
+        : "Sparse presentation failed closed; no substitute scene rendered",
+      usable: false,
     } };
   }
   return next;
@@ -280,15 +284,18 @@ export function resourceCapabilityUsable(
   snapshot: ResourceReadinessSnapshot,
   capability: RuntimeResourceCapability,
 ): boolean {
-  const providers = Object.values(snapshot.plugins)
+  const plugins = Object.values(snapshot.plugins);
+  const providers = plugins
     .filter((state) => state.plugin.provides.includes(capability));
   if (providers.length > 0) return providers.some((state) => state.usable);
   // Before the first scoped event, preserve the bootstrap state represented by
   // the lane. Once a plugin appears, only its explicit capability claim wins.
-  if (capability === "renderer") return snapshot.platform.usable;
-  if (capability === "fluid-authority" || capability === "water-presentation") return snapshot.fluid.usable;
-  if (capability === "sparse-voxel-presentation") return snapshot.svo.usable;
-  return snapshot.optional.usable;
+  const lane: ResourceLaneId = capability === "renderer" ? "platform"
+    : capability === "fluid-authority" || capability === "water-presentation" ? "fluid"
+    : capability === "live-scene" || capability === "sparse-voxel-presentation" ? "svo"
+    : "optional";
+  if (plugins.some((state) => state.plugin.lane === lane)) return false;
+  return snapshot[lane].usable;
 }
 
 export function resourceInteractionGates(snapshot: ResourceReadinessSnapshot, fluidRequired: boolean) {

@@ -118,8 +118,12 @@ const octreeAirSupportMarchFastPath = octreeAirSupportMarchFastPathEnabled();
  * reuse its record slot. Words 60-68 hold three GPU-authored sparse dispatch
  * records. Words 69/70 retain the current/preceding fine-demand touched-list
  * counts after the face stages reuse words 28-30. Words 71/72 retain the
- * current/preceding consumer-owner touched-list counts. */
-export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 73;
+ * current/preceding consumer-owner touched-list counts. Word 73 latches the
+ * accepted structured slot count at publication start, exactly as words 2-4
+ * latch the accepted row count, epoch and bank: the face seed stage needs it
+ * only to reject a stale authority handle, and reading it here keeps the
+ * structured control buffer off that stage's ten-binding budget. */
+export const OCTREE_AIR_SUPPORT_GPU_SCRATCH_CONTROL_WORDS = 74;
 export const OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS = 9;
 export const OCTREE_AIR_SUPPORT_GPU_FACE_WORDS = 4;
 /** Adaptive support-leaf headroom for the proven-reach corridor. Overflow is
@@ -408,10 +412,8 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   prepareAirSupportFaces: Object.freeze([0,7,29]),
   resolveAirSupportFaceAdjacency: Object.freeze([0,2,3,7,8,11,15,16,23]),
   validateAirSupportFrontierReciprocity: Object.freeze([0,7,23]),
-  seedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,19,21,23]),
-  seedAirSupportFilmFaces: Object.freeze([0,7,17,18,19,23,25,26,27,28]),
-  seedRetainedAirSupportFaces: Object.freeze([0,1,2,7,8,15,16,18,20,21,23]),
-  seedRetainedAirSupportFilmFaces: Object.freeze([0,7,17,18,20,23,25,26,27,28]),
+  seedAirSupportFaces: Object.freeze([0,2,7,8,15,16,18,19,21,23]),
+  seedRetainedAirSupportFaces: Object.freeze([0,2,7,8,15,16,18,20,21,23]),
   compactAirSupportSeedFrontier: Object.freeze([0,7,19,29]),
   refreshRetainedAirSupportFaceValues: Object.freeze([7,19,20]),
   finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29]),
@@ -425,9 +427,9 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   advanceAirSupportMarchWave: Object.freeze([7]),
   marchAirSupportFacesToFixedPoint: Object.freeze([0,2,7,8,19,20,23]),
   completeAirSupportIncidentFaces: Object.freeze([0,2,7,8,19,23,30]),
-  reconstructAirSupportVectors: Object.freeze([0,2,7,8,15,16,19,22,23,24,30]),
-  finalizeAirSupportMetadata: Object.freeze([0,2,7,8,9,22]),
-  commitAirSupportDirectRows: Object.freeze([0,2,7,17,22]),
+  reconstructAirSupportVectors: Object.freeze([0,2,7,8,15,16,19,23,24,30]),
+  finalizeAirSupportMetadata: Object.freeze([0,2,7,8,9,23]),
+  commitAirSupportDirectRows: Object.freeze([0,2,7,17,23]),
   commitAirSupportPublication: Object.freeze([0,7,8,9]),
 } as const);
 export type OctreeAirSupportGPUEntryPoint = keyof typeof OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS;
@@ -461,6 +463,16 @@ export interface OctreeAirVelocitySupportGPUPlan {
   readonly faceAdjacencyBytes: number;
   readonly faceFrontierBytes: number;
   readonly directAirVectorBytes: number;
+  /**
+   * One consolidated module-private face arena: `faceAdjacencyBytes` of
+   * per-face-row adjacency records followed by `directAirVectorBytes` of
+   * direct-air staging vectors. Both regions were separate storage bindings
+   * until `reconstructAirSupportVectors` reached the ten-buffer stage limit
+   * with no headroom; the staging suffix begins at
+   * `faceCellCapacity * faceAdjacencyStride` words, which the shader derives
+   * from two values it already carries in its uniform parameter block.
+   */
+  readonly faceArenaBytes: number;
   readonly support: OctreeAirVelocitySupportLayout;
   readonly records: StructuredAirSupportArenaLayout;
   readonly scratchWords: number;
@@ -673,6 +685,7 @@ export function planOctreeAirVelocitySupportGPU(
     identityCapacity: compact.identityCapacity, hashCapacity: compact.hashCapacity,
     faceCellCapacity, faceCapacity, faceBytes,
     faceAdjacencyStride, faceAdjacencyBytes, faceFrontierBytes, directAirVectorBytes,
+    faceArenaBytes: faceAdjacencyBytes + directAirVectorBytes,
     support, records, scratchWords,
     scratchBytes, indirectBytes, offsets: Object.freeze(offsets),
     allocatedBytes: support.totalBytes + records.allocatedBytes + 3 * faceBytes + faceAdjacencyBytes + faceFrontierBytes + directAirVectorBytes
@@ -740,9 +753,10 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   readonly faceA: GPUBuffer;
   readonly faceB: GPUBuffer;
   readonly incidentFaces: GPUBuffer;
+  /** Adjacency records followed by the direct-air staging vectors; see
+   * `OctreeAirVelocitySupportGPUPlan.faceArenaBytes`. */
   readonly faceAdjacency: GPUBuffer;
   readonly faceFrontier: GPUBuffer;
-  readonly directAirVectors: GPUBuffer;
   readonly allocatedBytes: number;
   private readonly params: readonly [GPUBuffer, GPUBuffer];
   private readonly ownerParams: GPUBuffer;
@@ -754,10 +768,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   private fineDemandGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
     readonly [GPUBindGroup, GPUBindGroup]];
   private fineDemandScheduleGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
-    readonly [GPUBindGroup, GPUBindGroup]];
-  private fineFilmSeedGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
-    readonly [GPUBindGroup, GPUBindGroup]];
-  private fineRetainedFilmSeedGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
     readonly [GPUBindGroup, GPUBindGroup]];
   private readonly ownsArena: boolean;
   private pipelinesInitialized = false;
@@ -806,9 +816,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     const maximumBinding = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
     for (const [label, bytes] of [["support", this.plan.support.totalBytes],
       ["record", this.plan.records.allocatedBytes], ["scratch", this.plan.scratchBytes],
-      ["face", this.plan.faceBytes], ["face-adjacency", this.plan.faceAdjacencyBytes],
-      ["face-frontier", this.plan.faceFrontierBytes],
-      ["direct-air", this.plan.directAirVectorBytes]] as const) {
+      ["face", this.plan.faceBytes], ["face-arena", this.plan.faceArenaBytes],
+      ["face-frontier", this.plan.faceFrontierBytes]] as const) {
       if (bytes > maximumBinding) throw new RangeError(`Air-support GPU ${label} arena exceeds binding limits`);
     }
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
@@ -826,12 +835,11 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       size: this.plan.faceBytes, usage: storage });
     this.incidentFaces = device.createBuffer({ label: "Retained missing incident-face closure",
       size: this.plan.faceBytes, usage: storage });
-    this.faceAdjacency = device.createBuffer({ label: "Published structured ordinary-face adjacency",
-      size: this.plan.faceAdjacencyBytes, usage: storage });
+    this.faceAdjacency = device.createBuffer({
+      label: "Published structured ordinary-face adjacency and staged direct-air vectors",
+      size: this.plan.faceArenaBytes, usage: storage });
     this.faceFrontier = device.createBuffer({ label: "Structured ordinary-face changed frontier",
       size: this.plan.faceFrontierBytes, usage: storage });
-    this.directAirVectors = device.createBuffer({ label: "Staged structured direct-air vectors",
-      size: this.plan.directAirVectorBytes, usage: storage });
     this.indirect = device.createBuffer({ label: "Structured air-support indirect schedules",
       size: this.plan.indirectBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     this.params = Object.freeze([0, 1].map((slot) => device.createBuffer({
@@ -877,7 +885,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       [14, topology.catalogLookup], [15, topology.catalogFaces],
       [16, topology.reconstructionData], [17, structured.rowVelocities],
       [18, this.inputs.liquidMask], [19, this.faceA], [20, this.faceB],
-      [21, structured.authority], [22, this.directAirVectors],
+      [21, structured.authority],
       [23, this.faceAdjacency], [24, this.arena], [29, this.faceFrontier], [30, this.incidentFaces],
       ...(this.inputs.fineSources ? [[25, this.inputs.fineSources[0].metadata],
         [26, this.inputs.fineSources[0].worklist], [27, this.inputs.fineSources[0].flags],
@@ -897,7 +905,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       "prepareFineBandAirSupportClosureSchedule", "prepareFineBandAirSupportEmissionSchedule",
       "closeFineBandAirSupportInterpolationDemand",
       "emitFineBandAirSupportCandidates",
-      "seedAirSupportFilmFaces", "seedRetainedAirSupportFilmFaces",
     ]);
     const configuredEntries = entries.filter((entry) => this.inputs.fineSources
       || !fineOnlyEntries.has(entry));
@@ -911,11 +918,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       readonly [Readonly<Record<string, GPUBindGroup>>, Readonly<Record<string, GPUBindGroup>>];
     let fineDemandGroups: typeof this.fineDemandGroups;
     let fineDemandScheduleGroups: typeof this.fineDemandScheduleGroups;
-    let fineFilmSeedGroups: typeof this.fineFilmSeedGroups;
-    let fineRetainedFilmSeedGroups: typeof this.fineRetainedFilmSeedGroups;
     if (this.inputs.fineSources) {
-      const makeFineGroup = (entry: "prepareFineBandAirSupportDemand" | "markFineBandAirSupportDemand"
-        | "seedAirSupportFilmFaces" | "seedRetainedAirSupportFilmFaces",
+      const makeFineGroup = (entry: "prepareFineBandAirSupportDemand" | "markFineBandAirSupportDemand",
         params: GPUBuffer, fine: WebGPUFineLevelSetBrickSource) => this.device.createBindGroup({
         layout: pipelines[entry]!.getBindGroupLayout(0),
         entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS[entry].map((binding) => ({
@@ -930,12 +934,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       fineDemandScheduleGroups = Object.freeze(this.params.map((params) => Object.freeze(
         this.inputs.fineSources!.map((fine) => makeFineGroup("prepareFineBandAirSupportDemand", params, fine))))) as unknown as
           NonNullable<typeof this.fineDemandScheduleGroups>;
-      fineFilmSeedGroups = Object.freeze(this.params.map((params) => Object.freeze(
-        this.inputs.fineSources!.map((fine) => makeFineGroup("seedAirSupportFilmFaces", params, fine))))) as unknown as
-          NonNullable<typeof this.fineFilmSeedGroups>;
-      fineRetainedFilmSeedGroups = Object.freeze(this.params.map((params) => Object.freeze(
-        this.inputs.fineSources!.map((fine) => makeFineGroup("seedRetainedAirSupportFilmFaces", params, fine))))) as unknown as
-          NonNullable<typeof this.fineRetainedFilmSeedGroups>;
     }
     // Publish the pipeline-dependent state only after every pipeline and bind
     // group has been created, so encode can never observe a partial set.
@@ -943,8 +941,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     this.groups = groups;
     this.fineDemandGroups = fineDemandGroups;
     this.fineDemandScheduleGroups = fineDemandScheduleGroups;
-    this.fineFilmSeedGroups = fineFilmSeedGroups;
-    this.fineRetainedFilmSeedGroups = fineRetainedFilmSeedGroups;
     this.pipelinesInitialized = true;
   }
 
@@ -1197,20 +1193,10 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     }
     pass.setPipeline(this.pipelines.seedAirSupportFaces!); pass.setBindGroup(0, groups.seedAirSupportFaces!);
     pass.dispatchWorkgroupsIndirect(this.indirect, 48);
-    if (fineSlot !== undefined && this.fineFilmSeedGroups) {
-      pass.setPipeline(this.pipelines.seedAirSupportFilmFaces!);
-      pass.setBindGroup(0, this.fineFilmSeedGroups[parameterSlot][fineSlot]);
-      pass.dispatchWorkgroupsIndirect(this.indirect, 48);
-    }
     if (changedFrontier) {
       pass.setPipeline(this.pipelines.seedRetainedAirSupportFaces!);
       pass.setBindGroup(0, groups.seedRetainedAirSupportFaces!);
       pass.dispatchWorkgroupsIndirect(this.indirect, 48);
-      if (fineSlot !== undefined && this.fineRetainedFilmSeedGroups) {
-        pass.setPipeline(this.pipelines.seedRetainedAirSupportFilmFaces!);
-        pass.setBindGroup(0, this.fineRetainedFilmSeedGroups[parameterSlot][fineSlot]);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 48);
-      }
       pass.setPipeline(this.pipelines.compactAirSupportSeedFrontier!);
       pass.setBindGroup(0, groups.compactAirSupportSeedFrontier!);
       pass.dispatchWorkgroupsIndirect(this.indirect, 48);
@@ -1345,7 +1331,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     this.destroyed = true;
     if (this.ownsArena) this.arena.destroy();
     for (const buffer of [this.recordArena, this.scratch, this.faceA, this.faceB, this.incidentFaces, this.faceAdjacency, this.faceFrontier,
-      this.directAirVectors, this.indirect, this.ownerParams, ...this.params]) buffer.destroy();
+      this.indirect, this.ownerParams, ...this.params]) buffer.destroy();
   }
 }
 
@@ -1397,7 +1383,15 @@ struct CatalogSlotGeometry {neighborOffsetSize:vec4f,areaCentroid:vec4f,normalIn
 @group(0)@binding(19)var<storage,read_write>faceA:array<vec4u>;
 @group(0)@binding(20)var<storage,read_write>faceB:array<vec4u>;
 @group(0)@binding(21)var<storage,read>structuredAuthority:array<u32>;
-@group(0)@binding(22)var<storage,read_write>directAirVectors:array<vec4f>;
+// Binding 22 is retired: the staged direct-air vectors it held now occupy the
+// suffix of the face arena below, because reconstructAirSupportVectors reached
+// the ten-storage-buffer stage limit with both bound.
+// The consolidated module-private face arena. Words
+// [0, faceCellCapacity*faceAdjacencyStride) are the per-face-row adjacency
+// records; the remaining 4*rowCapacity words are the direct-air staging
+// vectors written by reconstruction and committed by commitAirSupportDirectRows
+// (see directAirVectorBase). The two regions are disjoint by construction and
+// no dispatch reads one while writing the other.
 @group(0)@binding(23)var<storage,read_write>faceAdjacency:array<u32>;
 // This binding exposes only the aligned vector suffix of the consumer arena.
 // Each reconstruction invocation owns one element, so its production write is
@@ -1575,6 +1569,10 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
     atomicStore(&recordArena[14u],precedingDetail);
     atomicStore(&recordArena[15u],atomicLoad(&supportArena[p.airControlOffset+14u]));
   }
+  // Latch the accepted slot count before any early return. The face seed stage
+  // reads only this bound (see projectedAxisFaceValue), so the structured
+  // control buffer never has to appear in its bind group.
+  sw(73u,accepted.slotCount);
   if(atomicLoad(&accepted.flags)!=0u){
     if((precedingDetail&0x80000000u)==0u){
       atomicStore(&recordArena[13u],atomicLoad(&supportArena[p.airControlOffset]));
@@ -2293,7 +2291,7 @@ fn projectedAxisFaceValue(row:u32,axis:u32,patchCenter:vec3f)->vec2f{if(row>=s(2
     let catalogAt=bank+p.rowCatalogOffset+localAt;if(handleAt>=arrayLength(&structuredAuthority)
         ||signAt>=arrayLength(&structuredAuthority)||catalogAt>=arrayLength(&structuredAuthority)){return vec2f(0.,-1.);}
     let handle=structuredAuthority[handleAt];let global=structuredAuthority[catalogAt];
-    let valueAt=bank+p.valuesOffset+handle;if(handle>=accepted.slotCount
+    let valueAt=bank+p.valuesOffset+handle;if(handle>=s(73u)
         ||valueAt>=arrayLength(&structuredAuthority)||global>=arrayLength(&catalogFaces)){return vec2f(0.,-1.);}
     let slot=catalogFaces[global];let normal=normalize(inverseTransform(slot.normalInverseDistance.xyz,transform));
     // Positive comparisons so a NaN normal or centroid rejects the slot.
@@ -2350,6 +2348,23 @@ fn setAdjacencyGeometry(faceRow:u32,cell:vec4u){let at=adjacencyGeometryBase(fac
   faceAdjacency[at]=q.x;faceAdjacency[at+1u]=q.y;faceAdjacency[at+2u]=q.z;faceAdjacency[at+3u]=cell.y;}
 fn adjacencyGeometry(faceRow:u32)->vec4u{let at=adjacencyGeometryBase(faceRow);
   return vec4u(faceAdjacency[at],faceAdjacency[at+1u],faceAdjacency[at+2u],faceAdjacency[at+3u]);}
+
+// Direct-air staging suffix of the face arena. The base is exactly the extent
+// resolveAirSupportFaceAdjacency may address (faceCellCapacity records of
+// faceAdjacencyStride words each), so the two regions can never overlap, and it
+// is derived from parameters already in the uniform block rather than a new
+// one. The capacity below preserves the fail-closed bound the dedicated
+// binding's arrayLength gave: a short arena publishes no staging lane at all
+// rather than aliasing an adjacency record.
+fn directAirVectorBase()->u32{return p.faceCellCapacity*p.faceAdjacencyStride;}
+fn directAirVectorCapacity()->u32{let base=directAirVectorBase();let words=arrayLength(&faceAdjacency);
+  if(base>=words){return 0u;}return min(p.rowCapacity,(words-base)/4u);}
+fn storeDirectAirVector(row:u32,value:vec4f){let at=directAirVectorBase()+4u*row;
+  faceAdjacency[at]=bitcast<u32>(value.x);faceAdjacency[at+1u]=bitcast<u32>(value.y);
+  faceAdjacency[at+2u]=bitcast<u32>(value.z);faceAdjacency[at+3u]=bitcast<u32>(value.w);}
+fn loadDirectAirVector(row:u32)->vec4f{let at=directAirVectorBase()+4u*row;
+  return vec4f(bitcast<f32>(faceAdjacency[at]),bitcast<f32>(faceAdjacency[at+1u]),
+    bitcast<f32>(faceAdjacency[at+2u]),bitcast<f32>(faceAdjacency[at+3u]));}
 
 // Resolve all topology identities once. The six extrapolation waves consume
 // only this compact indexed graph; catalog and owner-page traversal is kept in
@@ -2470,72 +2485,10 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   if(seed.y>0.){return vec4u(bitcast<u32>(seed.x),0u,item,1u);}
   return vec4u(0u,INVALID,INVALID,0u);}
 
-fn fineBandSeedSourceValid()->bool{
-  if(p.fineFactor==0u||p.fineR==0u||p.fineSamplesPerBrick!=p.fineR*p.fineR*p.fineR
-      ||p.expectedFineGeneration==0u||any(p.fineBrickDims==vec3u(0u))){return false;}
-  let logical=p.fineBrickDims.x*p.fineBrickDims.y*p.fineBrickDims.z;
-  return arrayLength(&fineWorklist)>=7u+p.finePageCapacity+logical
-    &&arrayLength(&fineMetadata)>=10u*p.finePageCapacity
-    &&fineWorklist[0]==p.expectedFineGeneration&&fineWorklist[2]==p.finePageCapacity
-    &&(fineWorklist[3]&3u)==3u&&fineWorklist[5]==1u&&fineWorklist[6]==1u
-    &&fineWorklist[1]<=p.finePageCapacity;}
-fn fineSeedSample(q:vec3u)->u32{
-  if(any(q>=p.fineSampleDims)){return INVALID;}let brick=q/p.fineR;
-  if(any(brick>=p.fineBrickDims)){return INVALID;}
-  let key=brick.x+p.fineBrickDims.x*(brick.y+p.fineBrickDims.y*brick.z);
-  let directory=7u+p.finePageCapacity+key;if(directory>=arrayLength(&fineWorklist)){return INVALID;}
-  let id=fineWorklist[directory];if(id>=p.finePageCapacity){return INVALID;}let metadata=id*10u;
-  if(metadata+2u>=arrayLength(&fineMetadata)||fineMetadata[metadata]!=id
-      ||fineMetadata[metadata+1u]!=key||fineMetadata[metadata+2u]!=p.expectedFineGeneration){return INVALID;}
-  let local=q-brick*p.fineR;let index=id*p.fineSamplesPerBrick
-    +local.x+p.fineR*(local.y+p.fineR*local.z);
-  if(index>=arrayLength(&fineFlags)||index>=arrayLength(&finePhi)
-      ||(fineFlags[index]&1u)==0u||!finiteValue(finePhi[index])){return INVALID;}
-  return index;}
-fn fineInterfaceInCell(cell:vec4u)->bool{
-  if(!fineBandSeedSourceValid()||cell.w==0u||any(cell.xyz>=p.dimensions)){return false;}
-  let minimum=cell.xyz*p.fineFactor;
-  let maximum=min((cell.xyz+vec3u(cell.w))*p.fineFactor,p.fineSampleDims);
-  for(var z=minimum.z;z<maximum.z;z+=1u){for(var y=minimum.y;y<maximum.y;y+=1u){for(var x=minimum.x;x<maximum.x;x+=1u){
-    let q=vec3u(x,y,z);let centerIndex=fineSeedSample(q);if(centerIndex==INVALID){continue;}
-    let center=finePhi[centerIndex];for(var direction=0u;direction<6u;direction+=1u){
-      let neighborQ=vec3i(q)+DIRECTIONS[direction];if(any(neighborQ<vec3i(0))){continue;}
-      let otherIndex=fineSeedSample(vec3u(neighborQ));if(otherIndex==INVALID){continue;}
-      let other=finePhi[otherIndex];if((other<0.)!=(center<0.)){return true;}
-    }
-  }}}
-  return false;}
-fn filmSeedForLiquidRow(item:u32,row:u32,axis:u32,aligned:f32)->vec4u{
-  if(row>=s(2u)||!liquidRow(row)||!fineInterfaceInCell(adjacencyGeometry(row))){return vec4u(0u,INVALID,INVALID,0u);}
-  let at=s(4u)*p.rowCapacity+row;if(at>=arrayLength(&rowVelocities)){fail(item,ERROR_CAPACITY);return vec4u(0u,INVALID,INVALID,0u);}
-  // rowVelocities is a global vector. Projecting it onto the selected row's
-  // coincident oriented face and applying the existing aligned<0 correction
-  // preserves the same global axis-component convention as power-face seeds.
-  let normalComponent=rowVelocities[at][axis]*aligned;
-  let value=select(normalComponent,-normalComponent,aligned<0.);
-  if(!finiteValue(value)){fail(item,ERROR_SOURCE);return vec4u(0u,INVALID,INVALID,0u);}
-  return vec4u(bitcast<u32>(value),0u,item,1u);}
-fn airSupportFilmSeedCarrier(item:u32)->vec4u{
-  let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
-  let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;
-  var carrier=filmSeedForLiquidRow(item,faceRow,axis,1.);
-  if(carrier.w==0u){let otherRow=adjacencyPositive(faceRow,axis,local%4u);
-    if(otherRow!=INVALID){carrier=filmSeedForLiquidRow(item,otherRow,axis,-1.);}}
-  return carrier;}
 @compute @workgroup_size(256)fn seedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
   if(item<s(29u)&&s(0u)==0u&&s(50u)==0u){faceA[item]=vec4u(0u,INVALID,INVALID,0u);
     let carrier=airSupportSeedCarrier(item);if(carrier.w!=0u){faceA[item]=carrier;seeded=1u;}}
-  seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
-  if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
-// The M1 storage-buffer ceiling cannot bind the fine SPGrid to the existing
-// projection kernel. This second dispatch stays in the same compute pass and
-// exact live-face schedule; its empty-carrier guard proves both projection
-// attempts returned no seed before the fine-interface fallback is reachable.
-@compute @workgroup_size(256)fn seedAirSupportFilmFaces(@builtin(local_invocation_index)lane:u32,
-  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
-  if(item<s(29u)&&s(0u)==0u&&s(50u)==0u&&faceA[item].w==0u){
-    let carrier=airSupportFilmSeedCarrier(item);if(carrier.w!=0u){faceA[item]=carrier;seeded=1u;}}
   seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn seedRetainedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
@@ -2548,12 +2501,6 @@ fn airSupportFilmSeedCarrier(item:u32)->vec4u{
   // removes the cross-epoch alias that corrupted the third retained seed.
   if(invocation<s(29u)&&s(0u)==0u&&s(50u)!=0u){faceB[invocation]=vec4u(0u,INVALID,INVALID,0u);let carrier=airSupportSeedCarrier(invocation);
     if(carrier.w!=0u){faceB[invocation]=carrier;seeded=1u;}}
-  seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
-  if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
-@compute @workgroup_size(256)fn seedRetainedAirSupportFilmFaces(@builtin(local_invocation_index)lane:u32,
-  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
-  if(item<s(29u)&&s(0u)==0u&&s(50u)!=0u&&faceB[item].w==0u){
-    let carrier=airSupportFilmSeedCarrier(item);if(carrier.w!=0u){faceB[item]=carrier;seeded=1u;}}
   seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn compactAirSupportSeedFrontier(@builtin(local_invocation_index)lane:u32,
@@ -2997,13 +2944,13 @@ var<workgroup> reconstructCompleted:array<u32,256>;
   let faceRows=s(2u)+s(8u);var expected=0u;var completed=0u;
   if(faceRow<faceRows&&s(0u)==0u&&!publishedLiquidRow(faceRow)
       &&(faceRow>=s(2u)||publishedDirectDemandedRow(faceRow))){expected=1u;let result=reconstructedFaceVector(faceRow);
-    if(validVector(result)){if(faceRow<s(2u)){if(faceRow>=arrayLength(&directAirVectors)){fail(faceRow,ERROR_CAPACITY);}
-        else{directAirVectors[faceRow]=result;completed=1u;}}
+    if(validVector(result)){if(faceRow<s(2u)){if(faceRow>=directAirVectorCapacity()){fail(faceRow,ERROR_CAPACITY);}
+        else{storeDirectAirVector(faceRow,result);completed=1u;}}
       else{let support=faceRow-s(2u);if(support>=arrayLength(&supportVectors)){fail(faceRow,ERROR_CAPACITY);}
         else{supportVectors[support]=result;let mirror=p.recordVectorOffset+4u*support;
           atomicStore(&recordArena[mirror],bitcast<u32>(result.x));atomicStore(&recordArena[mirror+1u],bitcast<u32>(result.y));
           atomicStore(&recordArena[mirror+2u],bitcast<u32>(result.z));atomicStore(&recordArena[mirror+3u],bitcast<u32>(result.w));completed=1u;}}}
-    else if(faceRow<s(2u)){if(faceRow<arrayLength(&directAirVectors)){directAirVectors[faceRow]=result;}}
+    else if(faceRow<s(2u)){if(faceRow<directAirVectorCapacity()){storeDirectAirVector(faceRow,result);}}
     else{let support=faceRow-s(2u);if(support<arrayLength(&supportVectors)){supportVectors[support]=result;
       let mirror=p.recordVectorOffset+4u*support;if(mirror+3u<arrayLength(&recordArena)){
         atomicStore(&recordArena[mirror],bitcast<u32>(result.x));atomicStore(&recordArena[mirror+1u],bitcast<u32>(result.y));
@@ -3026,7 +2973,7 @@ var<workgroup> reconstructCompleted:array<u32,256>;
     // cardinalities distinguish from a genuine grading violation.
     sw(60u,s(6u));sw(61u,s(8u));sw(62u,s(47u));}
   if((first>>24u)==8u){let row=first&0x00ffffffu;let directRows=s(2u);var rejected=vec4f(0.);
-    if(row<directRows&&row<arrayLength(&directAirVectors)){rejected=directAirVectors[row];}
+    if(row<directRows&&row<directAirVectorCapacity()){rejected=loadDirectAirVector(row);}
     else if(row>=directRows){let support=row-directRows;let mirror=p.recordVectorOffset+4u*support;
       if(mirror+3u<arrayLength(&recordArena)){rejected=vec4f(bitcast<f32>(r(mirror)),bitcast<f32>(r(mirror+1u)),
         bitcast<f32>(r(mirror+2u)),bitcast<f32>(r(mirror+3u)));}}
@@ -3061,7 +3008,7 @@ var<workgroup> reconstructCompleted:array<u32,256>;
   if(s(31u)!=1u||row>=s(2u)||publishedDirectLiquidRow(row)||!publishedDirectDemandedRow(row)){return;}let output=s(4u)*p.rowCapacity+row;
   // Host construction proves both banked destination and staging extents, and
   // reconstruction completeness proves every direct-air staging lane exists.
-  rowVelocities[output]=directAirVectors[row];}
+  rowVelocities[output]=loadDirectAirVector(row);}
 
 @compute @workgroup_size(1)fn commitAirSupportPublication(){if(s(31u)==2u){return;}let clean=s(31u)==1u&&s(0u)==0u;
   // All non-valid metadata and every clean direct-air vector precede these

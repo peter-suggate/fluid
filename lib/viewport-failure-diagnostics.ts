@@ -1,5 +1,6 @@
 import type { CameraState, SceneDescription, Vec3 } from "./model";
 import { paperPipelineStages } from "./paper-pipeline-diagnostics";
+import { planSceneRuntime } from "./scene-runtime";
 import { projectToViewport } from "./webgpu-camera";
 import type { GPUEulerianInfo } from "./webgpu-eulerian";
 import type { WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
@@ -49,6 +50,11 @@ export function viewportFailureIndicator(
   water: WaterSurfacePresentationDiagnostics | null | undefined,
   scene: SceneDescription,
 ): ViewportFailureIndicator | undefined {
+  // Renderer-only sparse scenes may still expose structural octree telemetry,
+  // but it is not a fluid publication and must never be interpreted as one.
+  // The runtime plan is the authoritative capability boundary shared by every
+  // scene; this intentionally avoids preset- or topology-specific exceptions.
+  if (!planSceneRuntime(scene).fluidSolver) return undefined;
   if (!info || info.gridKind !== "octree") return undefined;
   const stages = paperPipelineStages(info, water);
   const rejected = stages.find((stage) => stage.tone === "rejected" && stage.id !== "raster");

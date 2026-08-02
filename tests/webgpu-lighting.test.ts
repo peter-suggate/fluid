@@ -10,7 +10,7 @@ import {
   unifiedLightingShaderLibrary,
   WATER_OPTICS
 } from "../lib/webgpu-lighting";
-import { compositeShader, sceneShader } from "../lib/webgpu-water-pipeline";
+import { compositeShader } from "../lib/webgpu-water-pipeline";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 import { voxelDebugRenderShader } from "../lib/webgpu-voxel-debug";
 
@@ -47,8 +47,6 @@ test("scene-linear lighting reaches the presentation target through exactly one 
   ]);
   assert.match(unifiedDisplayTransferShaderLibrary, /nonNegative \/ \(nonNegative \+ vec3f\(1\.0\)\)/);
   assert.equal((unifiedDisplayTransferShaderLibrary.match(/pow\(/g) ?? []).length, 1);
-  assert.doesNotMatch(sceneShader, /unifiedDisplayTransfer|1\.0\s*\/\s*2\.2/,
-    "raster dry lighting must remain scene-linear");
   assert.doesNotMatch(svoDrySceneShader, /unifiedDisplayTransfer|1\.0\s*\/\s*2\.2/,
     "SVO dry lighting must remain scene-linear");
   assert.equal((compositeShader.match(/fn unifiedDisplayTransfer\(/g) ?? []).length, 1);
@@ -56,8 +54,7 @@ test("scene-linear lighting reaches the presentation target through exactly one 
   assert.match(compositeShader, /fn finish\([^}]+return vec4f\(unifiedDisplayTransfer\(c\),1\);\}/);
 });
 
-test("raster bodies and optical water/glass consume the canonical closure", () => {
-  assert.match(sceneShader, /shadeUnifiedSurface\(material,lighting\)/);
+test("live SVO and optical water/glass consume the canonical closure", () => {
   assert.match(svoDrySceneShader, /shadeUnifiedSurface\(directClosure,lighting\)/,
     "SVO dry materials must use the same resource-independent closure as raster bodies");
   assert.match(voxelDebugRenderShader, /shadeUnifiedSurface\(closure, lighting\)/, "raw voxel materials must use the same closure");
@@ -68,7 +65,6 @@ test("raster bodies and optical water/glass consume the canonical closure", () =
 });
 
 test("analytic tank glass remains enabled for the hybrid octree smooth scene", () => {
-  assert.doesNotMatch(sceneShader, /u\.options\.w<0\.5&&environmentIndex\(\)!=7/);
   const glassFunction = compositeShader.slice(compositeShader.indexOf("fn compositeFrontGlass"), compositeShader.indexOf("fn finish"));
   assert.doesNotMatch(glassFunction, /u\.options\.w/, "voxel scene selection must not suppress the raster glass presentation");
   assert.match(glassFunction, /if\(environmentIndex\(\)==7\)\{return color;\}/, "the open garden remains vessel-free");

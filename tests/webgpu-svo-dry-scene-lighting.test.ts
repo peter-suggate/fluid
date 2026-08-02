@@ -165,36 +165,42 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
     "visibility intersection must never recurse into shading");
 });
 
-test("cone visibility is generation-checked and falls back to exact SVO visibility", () => {
-  assert.match(svoDrySceneShader, /fn dryNodeMipReady\(\)->bool\{return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&dry\.nodeMip\.x==publicationState\[2\]&&dry\.nodeMip\.y>0u&&dry\.nodeMip\.z>0u;\}/,
-    "the sampled cache must require a complete matching directory publication");
+test("cone visibility is generation-checked and fails closed before the explicit exact mode", () => {
+  assert.match(svoDrySceneShader, /fn dryNodeMipReady\(\)->bool\{let generationReady=dry\.nodeMip\.w==2u\|\|dry\.nodeMip\.x==dryPublicationWord\(2u\);return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&generationReady&&dry\.nodeMip\.y>0u&&dry\.nodeMip\.z>0u;\}/,
+    "static caches require a matching generation while live caches delegate freshness to page validity");
   const lightStart = svoDrySceneShader.indexOf("fn dryLightVisibility(");
   const lightEnd = svoDrySceneShader.indexOf("fn dryContactVisibilityRadius", lightStart);
   const lightVisibility = svoDrySceneShader.slice(lightStart, lightEnd);
-  assert.match(lightVisibility, /dry\.materialPublication\.w&4u[^]*dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*let raw=vec3f\(cone\.transmittance\)\*dryFluidTransmittance\(cone\.fluidDepth_m\);return mix\(vec3f\(1\.0\),raw,dry\.tuningRays0\.y\);\}/);
-  assert.ok(lightVisibility.indexOf("svoTraceVisibility", lightVisibility.indexOf("dryConeVisibility")) > 0,
-    "a missing or stale cone result must continue through exact bounded visibility");
+  assert.match(lightVisibility, /dry\.materialPublication\.w&4u[^]*dryConeVisibility\([^]*if\(cone\.valid==0u\)\{dryDerivedPageFailure\|=2u;return vec3f\(0\.0\);\}[^]*let raw=vec3f\(cone\.transmittance\)\*dryFluidTransmittance\(cone\.fluidDepth_m\);return mix\(vec3f\(1\.0\),raw,dry\.tuningRays0\.y\);/);
+  const coneReturn = lightVisibility.indexOf("return mix(vec3f(1.0),raw,dry.tuningRays0.y);");
+  assert.ok(coneReturn >= 0 && lightVisibility.indexOf("svoTraceVisibility", coneReturn) > coneReturn,
+    "cone mode must return on both valid and invalid data before the separately selected exact mode");
   const contactStart = svoDrySceneShader.indexOf("fn dryContactVisibility(");
   const contactEnd = svoDrySceneShader.indexOf("fn dryEnvironment(", contactStart);
   assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /dry\.materialPublication\.w&4u[^]*dryNodeMipReady\(\)[^]*for\(var sampleIndex=0u;sampleIndex<4u/,
     "cone AO uses four bounded hemisphere samples only when the cache is ready");
-  assert.match(svoDrySceneShader.slice(contactStart, contactEnd), /cone\.valid==0u\)\{coneValid=false;break;\}[^]*if\(coneValid\)\{[^]*return[^]*svoTraceVisibility/,
-    "an unavailable cone sample must fall through to exact bounded AO instead of leaking ambient light");
+  const contactVisibility = svoDrySceneShader.slice(contactStart, contactEnd);
+  assert.match(contactVisibility, /cone\.valid==0u\)\{dryDerivedPageFailure\|=1u;return vec3f\(0\.0\);\}[^]*return vec3f\(mix\(1\.0,raw,dry\.tuningRays0\.w\)\);/,
+    "an unavailable cone AO sample must fail closed and publish its typed diagnostic");
+  const coneAoReturn = contactVisibility.indexOf("return vec3f(mix(1.0,raw,dry.tuningRays0.w));");
+  assert.ok(coneAoReturn >= 0 && contactVisibility.indexOf("svoTraceVisibility", coneAoReturn) > coneAoReturn,
+    "cone AO must return before the separately selected exact AO algorithm");
   assert.match(svoDrySceneShader, /diffuseEnvironment=[^;]*\*contactVisibility\*gi\.visibility\*diffuseEnvironmentScale\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
     "contact and GI visibility must modulate diffuse environment only, leaving emission and specular environment intact");
 });
 
-test("invalid or exhausted shadow work fails closed and raster/timing fallback remains intact", () => {
+test("invalid or exhausted shadow work and a rejected dry frame fail closed", () => {
   assert.match(svoDrySceneShader, /if\(\(dry\.materialPublication\.w&2u\)==0u\)\{return vec3f\(1\.0\);\}/,
     "the shadow-disabled production path must return before traversal");
   assert.doesNotMatch(rendererSource, /checkerboard|svoTemporalAccumulation|invalidateTemporalHistory/);
-  assert.match(svoDrySceneShader, /publicationState\[0\]==0u[^]*SVO_VIS_STEP_INVALID/);
+  assert.match(svoDrySceneShader, /dryPublicationWord\(0u\)==0u[^]*SVO_VIS_STEP_INVALID/);
   assert.match(svoDrySceneShader, /SVO_STATUS_WORK_EXHAUSTED\|\|leaf\.status==SVO_STATUS_STACK_OVERFLOW\|\|leaf\.status==SVO_STATUS_SOURCE_OVERFLOW[^]*SVO_VIS_STEP_EXHAUSTED/);
   assert.match(svoDrySceneShader, /fn svoVisibilityFail\([^]*vec3f\(0\.0\)/,
     "shared invalid/exhausted/occluded results must carry zero direct visibility");
   assert.match(drySceneSource, /encode\(encoder: GPUCommandEncoder, target: GPUTexture \| GPUTextureView, reuseKey\?: string, tracePhase\?: RenderPathTracePhase\): DrySceneReplacementResult \| false/);
   assert.doesNotMatch(drySceneSource, /timestampWrites|TimestampRange/,
     "SVO presentation work must be covered by the enclosing generic trace only");
-  assert.match(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"Dry scene"/,
-    "the unchanged raster pass remains the fallback when SVO declines a frame");
+  assert.match(waterSource, /if \(!sparseSceneResult\) \{[^]*label:"SVO dry-scene unavailable"[^]*SVO dry-scene unavailable · fail closed/,
+    "a rejected SVO frame must publish only the explicit failure plane");
+  assert.doesNotMatch(waterSource, /scenePipeline|sceneBindGroup|sceneShader|Raster dry-scene fallback/);
 });

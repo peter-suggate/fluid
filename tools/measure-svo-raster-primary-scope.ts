@@ -3,7 +3,7 @@
  * Phase 0 scoping measurement for raster-assisted primary visibility
  * (docs/SVO_RASTER_PRIMARY_HANDOFF.md).
  *
- * Builds the shipped static SVO world for a scene, reads the published
+ * Builds the shipped live SVO scene for a scene, reads the published
  * topology back from the GPU, and reports what an instanced brick raster would
  * actually have to draw:
  *
@@ -33,7 +33,7 @@ import { getScenePreset } from "../lib/scenes";
 import { decodeSvoBrickOccupancy } from "../lib/svo-brick-occupancy";
 import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { WebGPUStaticSvoScene } from "../lib/webgpu-static-svo-scene";
+import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const log = (message: string) => process.stderr.write(`${message}\n`);
@@ -59,10 +59,10 @@ const device = await adapter.requestDevice({ requiredLimits: requiredFluidDevice
 const preset = getScenePreset(sceneId);
 const scene = preset.create();
 const camera: CameraState = { ...defaultCamera, ...preset.camera, target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m) } };
-const solver = await WebGPUStaticSvoScene.create(device, scene, "balanced",
+const solver = await WebGPULiveSvoScene.create(device, scene, "balanced",
   ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`));
 const source = solver.sparseVoxelSceneSource;
-assert.ok(source?.structural, "static SVO world did not publish a structural scene source");
+assert.ok(source?.structural, "live SVO scene did not publish a structural scene source");
 const structural = source.structural;
 
 async function readBuffer(binding: GPUBufferBinding): Promise<Uint32Array> {

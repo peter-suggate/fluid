@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { planSparseBrickOctree, packSparseBrickPlan, SPARSE_BRICK_INVALID_INDEX } from "../lib/sparse-brick-octree";
+import { SVO_BRICK_LIFECYCLE } from "../lib/svo-brick-occupancy";
 import {
   decodeSvoCompactNode,
   packSvoCompactHierarchy,
@@ -40,7 +41,9 @@ test("compact render hierarchy packs five words without changing canonical stora
     assert.equal(decoded.childMask, node.childMask);
     assert.equal(decoded.terminal, node.leafIndex !== SPARSE_BRICK_INVALID_INDEX);
     assert.equal(decoded.linkOrLeaf, decoded.terminal ? node.leafIndex : node.firstChild);
-    assert.equal(decoded.flags, node.index === 0 ? 0xfedcba98 : 0);
+    assert.equal(decoded.flags, node.index === 0
+      ? 0xfedcba98
+      : node.leafIndex !== SPARSE_BRICK_INVALID_INDEX ? SVO_BRICK_LIFECYCLE.activeBit : 0);
   }
 });
 

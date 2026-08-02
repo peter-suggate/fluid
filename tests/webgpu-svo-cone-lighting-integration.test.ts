@@ -8,9 +8,13 @@ import { SVO_FLUID_COVERAGE_LAYOUT } from "../lib/svo-fluid-coverage";
 import {
   createSvoDrySceneFragmentWGSL,
   SparseVoxelDrySceneRenderer,
+  SVO_DRY_DERIVED_FAILURE,
+  SVO_DRY_DERIVED_FAILURE_COUNTERS,
+  SVO_DRY_NODE_MIP_PUBLICATION_MODE,
   SVO_DRY_SCENE_PARAMS_LAYOUT,
   SVO_DRY_VISIBILITY_FLAGS,
   SVO_DRY_WORLD_GI_CACHE_CONTRACT,
+  svoDryPrimitiveArenaCacheInvalidation,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
 import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
@@ -21,12 +25,24 @@ const drySource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.
 const worldSource = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
 const sourceAbi = readFileSync(new URL("../lib/webgpu-voxel-debug.ts", import.meta.url), "utf8");
 
+test("live derived page validity uses sampled uint bindings with zero fallbacks", () => {
+  assert.match(drySource, /nodeMipPageValidityFallback = device\.createTexture\([^]*size: \[1, 1\][^]*format: "r32uint"/);
+  assert.match(drySource, /tetrahedralRadiancePageValidityFallback = device\.createTexture\([^]*size: \[1, 1\][^]*format: "r32uint"/);
+  assert.match(drySource, /binding: 26, resource: nodeMipPageValidity \?\? this\.nodeMipPageValidityFallbackView/);
+  assert.match(drySource, /binding: 27, resource: tetrahedralRadiancePageValidity \?\? this\.tetrahedralRadiancePageValidityFallbackView/);
+  const reduced = createSvoDrySceneFragmentWGSL(0.5, "canonical-parametric", "off", "split", 0, false, false, false, true);
+  assert.match(reduced, new RegExp(`all\\(packed\\.xy==DRY_PREPASS_INVALID_PACKED\\)\\)\\{dryDerivedPageFailure\\|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return;\\}`),
+    "fan-out invalidity must become an explicit reconstruction failure");
+});
+
 function source(): SparseVoxelRenderSource {
   const resource = { buffer: {} as GPUBuffer };
   return {
     materialCount: 8,
     pbrMaterials: { binding: resource, count: 8, strideBytes: SVO_MATERIAL_RECORD_STRIDE_BYTES, revision: 1 },
     structural: {
+      structure: resource,
+      structureOffsetsWords: { control: 0, publication: 0, nodes: 0, leaves: 0 },
       control: resource, nodes: resource, leaves: resource, geometry: resource,
       velocity: resource, materialOwners: resource, fluidLeafStates: resource,
       publication: { state: resource, byteLength: 32 },
@@ -35,7 +51,7 @@ function source(): SparseVoxelRenderSource {
       strides: { control: 4, node: 32, leaf: 16, geometry: 16, velocity: 16, materialOwner: 4, fluidLeafState: 4 },
       fields: {
         topology: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
-        staticGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
+        sceneGeometry: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         materialOwner: { residency: "all-published-leaves", validity: "published-generation", revision: 1 },
         dynamicSolid: { residency: "unavailable", validity: "unavailable", revision: 0 },
         coarseFluid: { residency: "unavailable", validity: "unavailable", revision: 0 },
@@ -51,7 +67,7 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
     exactContact: 1, exactShadow: 2, coneLightingRequested: 4, ambientOcclusion: 8,
     globalIllumination: 16, globalIlluminationOcclusion: 32, globalIlluminationRequested: 64,
   });
-  assert.match(drySource, /const coneFallback = !giReady/);
+  assert.match(drySource, /const requestedDerivedSourceUnavailable = coneTracingEnabled && !giReady/);
   assert.doesNotMatch(drySource, /lightingMode|setLightingMode/);
   const previousBufferUsage = globalThis.GPUBufferUsage, previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, {
@@ -72,7 +88,8 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
   } as unknown as GPUDevice;
   try {
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer);
-    renderer.setSource(source(), svoDrySceneFixture);
+    renderer.setSource(source());
+    renderer.publishScene(svoDrySceneFixture);
     const params = () => writes.filter(({ label }) => label === "Sparse voxel dry scene parameters");
     const flagWord = (write: { words: Uint32Array }) => write.words[SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset + 3];
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, SVO_DRY_VISIBILITY_FLAGS.exactShadow);
@@ -84,17 +101,18 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
     renderer.setLightingOptions({ shadowsEnabled: false, ambientOcclusionEnabled: false });
     assert.equal(flagWord(params().at(-1)!) & (SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.exactShadow | SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion), 0);
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true });
-    const fallbackFlags = flagWord(params().at(-1)!);
-    assert.equal(fallbackFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested,
+    const requestedWithoutDerivedFlags = flagWord(params().at(-1)!);
+    assert.equal(requestedWithoutDerivedFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested,
       SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested, "the probe can diagnose a requested GI atlas that is unavailable");
-    assert.equal(fallbackFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, 0);
+    assert.equal(requestedWithoutDerivedFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, 0);
     const giSource = source() as unknown as SparseVoxelRenderSource & Record<string, unknown>;
     const plan = { generation: 1, complete: true, pages: [{ key: { generation: 1, level: 0, coordinate: [0, 0, 0] }, slot: 0 }], atlas: { texels: [10, 10, 10] } };
     Object.assign(giSource, {
-      nodeMipPyramid: { generation: 1, plan, worldOrigin_m: [0, 0, 0] },
+      nodeMipPyramid: { generation: 1, plan, worldOrigin_m: [0, 0, 0], pageValidity: { view: {} } },
       tetrahedralRadiance: { generation: 1, plan, views: [{}, {}, {}, {}] },
     });
-    renderer.setSource(giSource as unknown as SparseVoxelRenderSource, svoDrySceneFixture);
+    renderer.setSource(giSource as unknown as SparseVoxelRenderSource);
+    renderer.publishScene(svoDrySceneFixture);
     const giFlags = flagWord(params().at(-1)!);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, SVO_DRY_VISIBILITY_FLAGS.globalIllumination);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested,
@@ -104,6 +122,9 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
       SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion, "AO enables broad GI-cone visibility");
     assert.equal(giFlags & (SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion), 0,
       "GI replaces the standalone AO/contact cones");
+    assert.equal(params().at(-1)!.words[SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipWordOffset + 3],
+      SVO_DRY_NODE_MIP_PUBLICATION_MODE.pageValidity,
+      "live derived pages remain globally usable across topology revisions; page validity owns freshness");
     assert.deepEqual([...params().at(-1)!.words.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset,
       SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset + 4)], [1, 1, 0, 0]);
     assert.equal(params().at(-1)!.words[SVO_DRY_SCENE_PARAMS_LAYOUT.tuningWordOffset + 11],
@@ -111,7 +132,7 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
       "GLOBAL must not reconstruct an unwritten reduced-radiance plane as black");
     const giParams = new Float32Array(params().at(-1)!.words.buffer);
     assert.deepEqual([...giParams.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset,
-      SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset + 4)], [1.5, 0.8199999928474426, 0.6499999761581421, 0.8999999761581421]);
+      SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset + 4)], [1.5, 0.8199999928474426, 0.6499999761581421, 1]);
     assert.deepEqual([...giParams.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset,
       SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset + 2)], [1.0499999523162842, 4]);
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: false });
@@ -123,20 +144,22 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
   }
 });
 
-test("missing or stale node-mip samples enter exact bounded visibility rather than returning lit", () => {
+test("missing or stale node-mip samples fail closed without an exact traversal escape", () => {
   const start = svoDrySceneShader.indexOf("fn dryLightVisibility(");
   const end = svoDrySceneShader.indexOf("fn dryContactVisibilityRadius", start);
   const visibility = svoDrySceneShader.slice(start, end);
-  // Only a valid cone short-circuits. Water attenuation multiplies that result
-  // rather than replacing it, so an invalid cone still falls through to the
-  // exact bounded traversal below instead of returning a lit surface.
-  assert.match(visibility, /let cone=dryConeVisibility\([^]*if\(cone\.valid!=0u\)\{[^]*let raw=vec3f\(cone\.transmittance\)\*dryFluidTransmittance\(cone\.fluidDepth_m\);return mix\(vec3f\(1\.0\),raw,dry\.tuningRays0\.y\);\}/);
-  assert.ok(visibility.indexOf("svoTraceVisibility", visibility.indexOf("dryConeVisibility")) > visibility.indexOf("dryConeVisibility"));
+  assert.match(visibility, /if\(cone\.valid==0u\)\{dryDerivedPageFailure\|=2u;return vec3f\(0\.0\);\}/);
+  const coneMode = visibility.indexOf("if((dry.materialPublication.w&4u)!=0u)");
+  const invalidCone = visibility.indexOf("if(cone.valid==0u)", coneMode);
+  const coneReturn = visibility.indexOf("return mix(vec3f(1.0),raw,dry.tuningRays0.y);", invalidCone);
+  const exactMode = visibility.indexOf("let result=svoTraceVisibility", coneReturn);
+  assert.ok(coneMode >= 0 && invalidCone > coneMode && coneReturn > invalidCone && exactMode > coneReturn,
+    "the exact tracer must remain reachable only after cone mode has returned");
   assert.doesNotMatch(drySource,
     /coneLightingRequested[^\n]*globalIllumination[^\n]*==0u/,
     "GLOBAL reuses hierarchical shadow visibility instead of forcing exact SVO rays for every light");
-  assert.match(svoDrySceneShader, /fn dryNodeMipReady\(\)->bool\{return dry\.nodeMip\.w!=0u&&dry\.nodeMip\.x!=0u&&dry\.nodeMip\.x==publicationState\[2\]/,
-    "cone use is fenced to the matching structural static-geometry revision");
+  assert.match(svoDrySceneShader, /let generationReady=dry\.nodeMip\.w==2u\|\|dry\.nodeMip\.x==dryPublicationWord\(2u\)/,
+    "live page-local validity survives structural revisions while generation-fenced sources remain exact");
 });
 
 test("cone steps reuse a matching mip page and search only on page, LOD, or generation changes", () => {
@@ -151,9 +174,15 @@ test("cone steps reuse a matching mip page and search only on page, LOD, or gene
   assert.match(lookup, /pageIndex!=0xffffffffu[^]*\*pageCache=DryNodeMipPageCache\(pageCoordinate,level,entry\.pageOrigin,entry\.generation,1u,pageIndex,0u\)/);
   assert.match(lookup, /if\(\(\*pageCache\)\.resident==0u\)\{return DryNodeMipLookup\(SvoNodeMipSample\(0\.0,0\.0,0\.0,0\.0\),1u\);\}/,
     "cached sparse-directory misses sample as transparent without another search");
+  assert.match(lookup, /if\(!dryNodeMipPageValid\(\(\*pageCache\)\.pageIndex\)\)\{return DryNodeMipLookup\(SvoNodeMipSample\(0\.0,0\.0,0\.0,0\.0\),0u\);\}/,
+    "a present but dirty page is invalid, never equivalent to empty space");
   assert.match(svoDrySceneShader, /var pageCache=DryNodeMipPageCache\([^]*dryNodeMipAt\([^]*&pageCache\)/);
-  assert.match(svoDrySceneShader, /let black=textureLoad\(tetraRadianceBlackPages,vec2u\(pageIndex,0u\),0\)\.x/);
-  assert.match(svoDrySceneShader, /if\(dryGiPageCache\.blackRadiance!=0u\)/);
+  assert.match(svoDrySceneShader, /var black=2u;if\(dryTetraRadiancePageValid\(pageIndex\)\)\{black=textureLoad\(tetraRadianceBlackPages,vec2u\(pageIndex,0u\),0\)\.x;\}/);
+  assert.match(svoDrySceneShader, /if\(dryGiPageCache\.blackRadiance==1u\)/);
+  assert.match(svoDrySceneShader, /if\(dryGiPageCache\.blackRadiance==2u\)[^]*,1u,0u\);\}/,
+    "dirty radiance pages retain current opacity but never sample stale radiance");
+  assert.match(svoDrySceneShader, /if\(result\.valid==0u\|\|result\.missingRadianceSamples!=0u\)\{dryDerivedPageFailure\|=4u;return DryGlobalIllumination\(vec3f\(0\.0\),1\.0,0u\);\}/,
+    "dirty opacity or radiance pages publish invalid GI without exact traversal");
   assert.match(svoDrySceneShader,
     /return SvoTetraRadianceConeSourceSample\(opacity\.solidMean,SvoTetraRadiance\(vec3f\(0\.0\),vec3f\(0\.0\),vec3f\(0\.0\),vec3f\(0\.0\)\),1u,1u\)/,
     "a certified-black page remains a valid sample while avoiding all four lobe fetches");
@@ -193,7 +222,7 @@ test("reduced split GI uses a bounded camera-independent world cache", () => {
     payloadBytes: 8,
     probeCount: 4,
     allocatedBytes: 4_194_304,
-    frameBytes: 128,
+    frameBytes: 144,
     dynamicInfluenceCells: 12,
     dynamicInfluenceBodyRadii: 3,
   });
@@ -233,7 +262,41 @@ test("reduced split GI uses a bounded camera-independent world cache", () => {
   assert.match(shader, /@compute @workgroup_size\(8,8\) fn dryWorldGiCacheMain/);
 });
 
-test("node-mip sampling publishes its own world origin inside the static uniform block", () => {
+test("derived-page failures expose a bounded renderer readback ABI", () => {
+  assert.deepEqual(SVO_DRY_DERIVED_FAILURE_COUNTERS, {
+    ambientOcclusionPageWord: 0,
+    directVisibilityPageWord: 1,
+    globalIlluminationPageWord: 2,
+    wordCount: 3,
+    sizeBytes: 12,
+  });
+  const shader = createSvoDrySceneFragmentWGSL(0.5, "canonical-parametric", "off", "split");
+  assert.match(shader, /invalidAoPages:atomic<u32>,invalidDirectPages:atomic<u32>/);
+  assert.match(shader, /atomicStore\(&dryPrepassBoundaryQueue\.invalidAoPages,0u\)/);
+  assert.match(shader, /atomicAdd\(&dryPrepassBoundaryQueue\.invalidAoPages,1u\)/);
+  assert.match(shader, /atomicAdd\(&dryPrepassBoundaryQueue\.invalidDirectPages,1u\)/);
+  assert.match(shader, /invalidGiPages:atomic<u32>/);
+  assert.match(shader, /atomicAdd\(&dryWorldGiFrame\.invalidGiPages,1u\)/);
+  assert.match(drySource, /copyDerivedPageFailureCounters\([^]*copyBufferToBuffer\(this\.conePrepassBoundaryQueue, 4[^]*copyBufferToBuffer\(this\.worldGiFrameBuffer, 16/);
+});
+
+test("analytic transform publications retain derived caches by exact dependency", () => {
+  const dirtyBounds = [{ minimum: [-1, 0, -1] as const, maximum: [1, 2, 1] as const }];
+  assert.deepEqual(svoDryPrimitiveArenaCacheInvalidation({ dirtyBounds, derivedLighting: "unchanged" }), {
+    worldGi: false,
+    directionalVisibility: false,
+  });
+  assert.deepEqual(svoDryPrimitiveArenaCacheInvalidation({ dirtyBounds, derivedLighting: "global" }), {
+    worldGi: true,
+    directionalVisibility: true,
+  });
+  assert.match(drySource, /this\.primitiveDirtyBounds = change\.dirtyBounds/,
+    "arbitrary old/new bounds remain attached for the future sparse-page publication");
+  assert.match(drySource, /if \(invalidation\.worldGi\) this\.worldGiCacheDirty = true/);
+  assert.match(drySource, /if \(invalidation\.directionalVisibility\) this\.invalidateVoxelLightCache\(\)/);
+});
+
+test("node-mip sampling publishes its own world origin inside the live uniform block", () => {
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipOriginWordOffset, 60);
   // The static-lighting block still ends exactly where it always did. Evolving
   // fluid coverage is appended past it rather than repacking anything below, so
@@ -248,13 +311,13 @@ test("node-mip sampling publishes its own world origin inside the static uniform
     SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset + 4,
     "the whole-scene rigid sphere must immediately follow the GI controls");
   assert.equal(SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes,
-    (SVO_DRY_SCENE_PARAMS_LAYOUT.rigidBoundsWordOffset + 4) * Uint32Array.BYTES_PER_ELEMENT,
-    "the uniform allocation must end after the rigid bounds");
+    (SVO_DRY_SCENE_PARAMS_LAYOUT.derivedTraversalWordOffset + 4) * Uint32Array.BYTES_PER_ELEMENT,
+    "the uniform allocation must end after the four-arena offset metadata");
   assert.match(drySource, /floats\.set\(nodeMip\?\.worldOrigin_m \?\? structural\.domain\.worldOrigin_m, SVO_DRY_SCENE_PARAMS_LAYOUT\.nodeMipOriginWordOffset\)/);
   assert.match(svoDrySceneShader, /virtualVoxel=\(position_m-dry\.nodeMipOrigin\.xyz\)/,
     "topology experiments must not reinterpret an unchanged opacity atlas in the structural tree's coordinate frame");
-  assert.match(worldSource, /worldOrigin_m: nodeMipWorldOrigin_m/);
-  assert.match(worldSource, /worldExtent_m: staticLightingDomain\.sceneDimensionsCells\.map/);
+  assert.match(worldSource, /worldOrigin_m: this\.sceneWorldOrigin/);
+  assert.match(worldSource, /worldExtent_m: sceneDomain\.sceneDimensionsCells\.map/);
   assert.match(svoDrySceneShader, /fn dryNodeMipSceneExitDistance\([^]*maximum=minimum\+dry\.nodeMipExtent\.xyz/,
     "GI cones must survey the surrounding authored scene, not stop at the solver tank");
 });
@@ -262,17 +325,13 @@ test("node-mip sampling publishes its own world origin inside the static uniform
 test("sparse-brick world exposes, accounts, and retires its optional node-mip capability", () => {
   assert.match(sourceAbi, /nodeMipPyramid\?: import\("\.\/webgpu-svo-node-mip-pyramid"\)\.WebGpuSvoNodeMipVisibleGeneration/);
   assert.match(worldSource, /nodeMipPyramid: this\.nodeMipPyramid\?\.visibleGeneration\(\)/);
-  assert.match(worldSource, /nodeMipPyramid: this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0/);
-  assert.match(worldSource, /\+ \(this\.nodeMipPyramid\?\.telemetry\(\)\.allocatedBytes \?\? 0\)/);
+  assert.match(worldSource, /nodeMipPyramid: \(this\.nodeMipPyramid\?\.allocatedBytes \?\? 0\)/);
+  assert.match(worldSource, /\+ \(this\.nodeMipPyramid\?\.allocatedBytes \?\? 0\)/);
   assert.match(worldSource, /this\.nodeMipPyramid\?\.destroy\(\)/);
   assert.match(sourceAbi, /tetrahedralRadiance\?: import\("\.\/webgpu-svo-tetrahedral-radiance"\)\.WebGpuSvoTetrahedralRadianceVisibleGeneration/);
   assert.match(worldSource, /tetrahedralRadiance: this\.tetrahedralRadiance\?\.visibleGeneration\(\)/);
-  assert.match(worldSource, /page\.certifiedBlack\) tetrahedralRadiance\.certifyBlackPage\(page\.key\)/,
-    "certified-black pages must consume no queue writes");
-  assert.match(worldSource, /primaryDirectionalLight: \{[^]*towardLightDirection: scene\.lighting\?\.directional\?\.direction[^]*colorLinear: scene\.lighting\?\.directional\?\.colorLinear[^]*intensity: scene\.lighting\?\.directional\?\.intensity/,
-    "the published atlas must contain shadowed first-bounce direct exitance as well as authored emission");
-  assert.match(worldSource, /catch \{[^]*nodeMipPyramid\?\.destroy\(\);[^]*nodeMipPyramid = undefined;/,
-    "failed derived publication must be cleaned up without disturbing canonical world construction");
+  assert.match(worldSource, /WebGpuLiveSvoNodeMipPyramid/);
+  assert.match(worldSource, /WebGpuLiveSvoTetrahedralRadiance/);
 });
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
@@ -296,5 +355,7 @@ test("production dry shader compiles sampled node-mip atlas and uint directory b
     assert.match(svoDrySceneShader, /@binding\(16\) var nodeMipAtlas:texture_3d<f32>/);
     assert.match(svoDrySceneShader, /@binding\(18\) var nodeMipDirectory:texture_2d<u32>/);
     assert.match(svoDrySceneShader, /@binding\(20\) var nodeMipPageTable:texture_3d<u32>/);
+    assert.match(svoDrySceneShader, /@binding\(26\) var nodeMipPageValidity:texture_2d<u32>/);
+    assert.match(svoDrySceneShader, /@binding\(27\) var tetraRadiancePageValidity:texture_2d<u32>/);
   } finally { device.destroy(); }
 });

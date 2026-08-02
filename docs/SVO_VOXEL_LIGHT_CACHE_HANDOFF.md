@@ -64,7 +64,7 @@ From `artifacts/xctrace-hose-tank-render-only-2026-07-31/summary.json`
 Lighting (cones + deferred + GI) = 15.65 ms of 25.42 ms GPU busy. The cone
 pass is latency-bound (dependent node-mip pyramid taps), which is exactly the
 workload a cache-lookup-plus-interpolation replaces best. Earlier measurement
-(`docs/plan-cached-static-visibility.md`): shadow rays are ~85% of per-pixel
+(`docs/plan-cached-scene-visibility.md`): shadow rays are ~85% of per-pixel
 ray work, ~39 node visits/ray, cost linear in light count.
 
 The screen-space route to cheaper lighting is exhausted: `coneLightingScale`
@@ -113,7 +113,7 @@ interpolation, Ward 1992 irradiance gradients for sparse-point interpolation.
 | Shadow shortcut + analytic rigid overlay | `prepassShadowShortcutWGSL` `lib/webgpu-svo-dry-scene.ts:1391`, `anyBodyBlockerIgnoring` `:1397`, consumed in `dryLightVisibility` `:2346` | The consumption template: cached value × live analytic body test. Rigid bodies therefore never dirty the cache |
 | Boundary re-trace queue | `dryPrepassCoherentMain` `:1568`, `dryPrepassBoundaryMain` `:1579` | Pattern for the request/overflow queue and heterogeneous-voxel exact fallback |
 | World GI hash cache (demand-populated, camera-independent, lighting-epoch invalidation) | `SVO_DRY_WORLD_GI_CACHE_CONTRACT` `:1024`, `dryWorldGiKey` `:1627` | Proven in-repo instance of the exact caching pattern; its invalidation triggers are the model for §5 |
-| Static shadow visible proofs (page × light, CPU, conservative) | `buildSvoStaticShadowVisibleProofs` `lib/svo-static-shadow-visible-proofs.ts:287`, field in `lib/svo-static-shadow-field.ts`, GPU side `lib/webgpu-svo-static-shadow-field.ts` | **Currently unwired.** Used here as a population fast path: a (page, light) pair certified `visible` seeds visibility = 1 for the whole page without marching (see caveat §5.4) |
+| Shadow-visible CPU-oracle proofs (page × light, CPU, conservative) | `buildSvoShadowVisibleCpuOracleProofs` `lib/svo-shadow-visible-cpu-oracle-proofs.ts:287`, field in `lib/svo-shadow-field-cpu-oracle.ts`, GPU side `lib/webgpu-svo-shadow-field-cpu-oracle.ts` | **Currently unwired.** Used here as a population fast path: a (page, light) pair certified `visible` seeds visibility = 1 for the whole page without marching (see caveat §5.4) |
 | Fluid coverage pyramid | `lib/svo-fluid-coverage.ts:26` | Its per-frame page deltas are the fluid dirty-set source |
 | Benchmarks / profiling | `tools/benchmark-svo-dry-frame-gpu.ts`, `tools/profile-svo-render-xctrace.ts`, `lib/svo-pixel-trace.ts` | Gates in §7 |
 
@@ -200,16 +200,16 @@ Insert a new tier *above* the current prepass shortcut in `dryLightVisibility`
 
 ### 5.4 Static-proof seeding (optional accelerant, Phase 2)
 
-`buildSvoStaticShadowVisibleProofs` certificates are hard-ray, zero-aperture
+`buildSvoShadowVisibleCpuOracleProofs` certificates are hard-ray, zero-aperture
 (`maximumCertifiedConeApertureRadians: 0`,
-`includesNodeMipSamplingSupport: false` — `lib/svo-static-shadow-visible-proofs.ts:44-48`),
+`includesNodeMipSamplingSupport: false` — `lib/svo-shadow-visible-cpu-oracle-proofs.ts:44-48`),
 so they **cannot** stand in for a cone result near occluders. They *can*
 short-circuit population for fully-visible (page, light) pairs — pages the
 beam test proves unoccluded get visibility = 1 written without marching,
 minus the local-trace obligation (`svoStaticShadowLocalTraceReach_m`), which
 the population kernel honors by still cone-marching the first page-diagonal
 of distance. This finally gives the proofs a consumer; measure hit-rate with
-`tools/report-svo-static-shadow-coverage.ts` before building it.
+`tools/report-svo-shadow-cpu-oracle-coverage.ts` before building it.
 
 ## 6. Phased plan with gates
 

@@ -1,9 +1,9 @@
-import type { SceneDescription } from "./model";
+import type { RigidBodyDescription, SceneDescription } from "./model";
 import {
-  cachedSvoStaticPublication,
-  hashSvoStaticPublication,
-  internSvoStaticPublication,
-} from "./svo-static-publication-cache";
+  cachedSvoPublication,
+  hashSvoPublication,
+  internSvoPublication,
+} from "./svo-publication-cache";
 import {
   buildSvoEnvironmentLighting,
   SVO_ENVIRONMENT_LIGHTING_RECORD_STRIDE_BYTES,
@@ -36,15 +36,36 @@ import { planSvoWideFanout } from "./svo-wide-fanout";
 import { WebGPUSvoWideFanout } from "./webgpu-svo-wide-fanout";
 import { packSvoCompactHierarchy } from "./svo-compact-hierarchy";
 import { WebGpuSvoCompactHierarchy } from "./webgpu-svo-compact-hierarchy";
-import { WebGpuSvoNodeMipPyramid, webGpuSvoNodeMipMaximumPages } from "./webgpu-svo-node-mip-pyramid";
-import { WebGpuSvoTetrahedralRadiance } from "./webgpu-svo-tetrahedral-radiance";
+import { SVO_NODE_MIP_LAYOUT, planSvoNodeMipPyramid, type SvoNodeMipCoordinate } from "./svo-node-mip-pyramid";
+import {
+  WebGpuLiveSvoNodeMipPyramid,
+  createWebGpuSvoNodeMipDirectPageTable,
+  webGpuSvoNodeMipMaximumPages,
+} from "./webgpu-svo-node-mip-pyramid";
+import { WebGpuLiveSvoTetrahedralRadiance } from "./webgpu-svo-tetrahedral-radiance";
+import {
+  WebGpuLiveSvoDerivedBuilder,
+  WebGpuLiveSvoDerivedWorklistPlanner,
+} from "./webgpu-svo-live-derived-builder";
 import { WebGpuSvoBrickOccupancyBuilder } from "./webgpu-svo-brick-occupancy";
-import { buildSvoStaticNodeMipPublication } from "./svo-static-node-mips";
-import { buildSvoStaticEmissiveRadiancePublication } from "./svo-static-emissive-radiance";
+import {
+  WebGpuSparseBrickTopologyMutator,
+  packSparseBrickTopologyMutationWorklist,
+  sparseBrickTopologyMutationNodeReserve,
+} from "./webgpu-sparse-brick-topology-mutation";
 import { planSparseSceneDomain } from "./sparse-scene-domain";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "./voxel-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
-import { SparseSceneProxyVoxelizer, sparseScenePrimitiveForProxy, type SparseScenePrimitive } from "./webgpu-sparse-scene-proxies";
+import {
+  SparseSceneProxyVoxelizer,
+  SPARSE_SCENE_MAINTENANCE_STATE_WORDS,
+  sparseScenePrimitiveBounds,
+  sparseScenePrimitiveForProxy,
+  type SparseSceneAxisAlignedBounds,
+  type SparseScenePrimitive,
+  type SparseScenePrimitiveUpdate,
+  type SparseScenePublication,
+} from "./webgpu-sparse-scene-proxies";
 import {
   SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
   SPARSE_VOXEL_DEBUG_HAS_CONTENT,
@@ -66,12 +87,6 @@ export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
   /** Additional authored-environment subdivision beyond the legacy 2x brick ceiling. */
   environmentBrickRefinementLevels?: number;
-  /**
-   * Optional brick alignment used only to derive the static opacity pyramid.
-   * Render-topology experiments can then vary `brickSize` without shifting
-   * cone-lighting samples or changing the comparison's lighting input.
-   */
-  staticLightingBrickSize?: SparseBrickSize;
   /** Air-side support retained for pressure-topology rebuilds. */
   haloCells?: number;
   /** Keep the independent deep-liquid topology worklist. */
@@ -89,6 +104,8 @@ export interface OctreeSparseBrickWorldOptions {
   includePressureBoundarySupport?: boolean;
   pressureBoundaryTopClosed?: boolean;
   includeWholeDomainPressureSupport?: boolean;
+  /** Lifetime budget of previously absent scene bricks that may be activated in-place. */
+  sceneMutationBrickCapacity?: number;
 }
 
 export interface OctreeSparseBrickDenseFields {
@@ -135,7 +152,7 @@ export function environmentMaximumCoarseningPower(
   return ENVIRONMENT_MAXIMUM_COARSENING_POWER - refinementLevels;
 }
 
-/** Derive the immutable renderer directory without taking structural authority. */
+/** Derive an optional renderer traversal snapshot without taking structural authority. */
 export function planOctreeSvoWideFanout(plan: SparseBrickPlan) {
   return planSvoWideFanout({
     sourceGeneration: 1,
@@ -185,12 +202,138 @@ export const OCTREE_SVO_PBR_MATERIAL_REVISION = 2;
 export const OCTREE_SVO_LIGHT_REVISION = 1;
 export const OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION = 1;
 
+/** Fixed live-scene arenas. Capacity changes require an explicit new world, never a hidden reallocating bake. */
+export const OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY = 4_096;
+export const OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY = OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY * 2;
+export const OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK = 64;
+export const OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY = 4_096;
+export const OCTREE_LIVE_SCENE_MATERIAL_CAPACITY = ENVIRONMENT_VOXEL_MATERIAL_BASE + OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY;
+
+interface LiveScenePrimitiveState {
+  readonly signature: string;
+  readonly bounds: SparseSceneAxisAlignedBounds;
+}
+
+interface LiveScenePrimitiveEntry {
+  readonly primitive: SparseScenePrimitive;
+  readonly materialSignature: string;
+}
+
+function brickCoordinateKey({ x, y, z }: SparseBrickCoordinate): string { return `${x},${y},${z}`; }
+
+function liveScenePrimitiveSignature(primitive: SparseScenePrimitive): string {
+  return JSON.stringify(primitive);
+}
+
+function sparseScenePrimitiveForRigidBody(body: RigidBodyDescription, ownerId: number): SparseScenePrimitive {
+  const center = [body.position_m.x, body.position_m.y, body.position_m.z] as const;
+  const orientation = [body.orientation.x, body.orientation.y, body.orientation.z, body.orientation.w] as const;
+  const materialId = materialIdForRigidShape(body.shape);
+  if (body.shape === "sphere") {
+    return { kind: "ellipsoid", center, radii: [body.dimensions_m.x, body.dimensions_m.x, body.dimensions_m.x], materialId, ownerId };
+  }
+  if (body.shape === "box") {
+    return { kind: "box", center, halfExtents: [body.dimensions_m.x / 2, body.dimensions_m.y / 2, body.dimensions_m.z / 2], orientation, materialId, ownerId };
+  }
+  if (body.shape === "capsule") {
+    return { kind: "capsule", center, radius: body.dimensions_m.x, halfLength: body.dimensions_m.y / 2, orientation, materialId, ownerId };
+  }
+  return { kind: "cylinder", center, radius: body.dimensions_m.x, halfHeight: body.dimensions_m.y / 2, orientation, materialId, ownerId };
+}
+
+function coalesceDirtyRegions(
+  regions: readonly SparseSceneAxisAlignedBounds[],
+  capacity = OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY,
+): SparseSceneAxisAlignedBounds[] {
+  if (regions.length <= capacity) return [...regions];
+  return [{
+    minimum: [
+      Math.min(...regions.map(({ minimum }) => minimum[0])),
+      Math.min(...regions.map(({ minimum }) => minimum[1])),
+      Math.min(...regions.map(({ minimum }) => minimum[2])),
+    ],
+    maximum: [
+      Math.max(...regions.map(({ maximum }) => maximum[0])),
+      Math.max(...regions.map(({ maximum }) => maximum[1])),
+      Math.max(...regions.map(({ maximum }) => maximum[2])),
+    ],
+  }];
+}
+
+export function liveSceneBrickCoordinatesForRegions(
+  regions: readonly SparseSceneAxisAlignedBounds[],
+  worldOrigin: readonly [number, number, number],
+  cellSize: readonly [number, number, number],
+  brickSize: number,
+  brickDimensions: readonly [number, number, number],
+): SparseBrickCoordinate[] {
+  const coordinates = new Map<string, SparseBrickCoordinate>();
+  for (const region of regions) {
+    const minimum = region.minimum.map((value, axis) => Math.floor(
+      (value - worldOrigin[axis]) / (cellSize[axis] * brickSize),
+    ));
+    const maximum = region.maximum.map((value, axis) => Math.floor(
+      (value - worldOrigin[axis]) / (cellSize[axis] * brickSize),
+    ));
+    for (let z = Math.max(0, minimum[2]); z <= Math.min(brickDimensions[2] - 1, maximum[2]); z += 1) {
+      for (let y = Math.max(0, minimum[1]); y <= Math.min(brickDimensions[1] - 1, maximum[1]); y += 1) {
+        for (let x = Math.max(0, minimum[0]); x <= Math.min(brickDimensions[0] - 1, maximum[0]); x += 1) {
+          coordinates.set(`${x},${y},${z}`, { x, y, z });
+        }
+      }
+    }
+  }
+  return [...coordinates.values()];
+}
+
+/** Missing finest-brick coverage only; existing coarse/fine leaves remain reusable. */
+export function liveSceneMissingBrickCoordinates(
+  regions: readonly SparseSceneAxisAlignedBounds[],
+  worldOrigin: readonly [number, number, number],
+  cellSize: readonly [number, number, number],
+  brickSize: number,
+  brickDimensions: readonly [number, number, number],
+  covered: ReadonlySet<string>,
+): SparseBrickCoordinate[] {
+  return liveSceneBrickCoordinatesForRegions(regions, worldOrigin, cellSize, brickSize, brickDimensions)
+    .filter((coordinate) => !covered.has(brickCoordinateKey(coordinate)));
+}
+
+export function liveSvoDenseFinestPages(dimensions: readonly [number, number, number]): SvoNodeMipCoordinate[] {
+  const pages: SvoNodeMipCoordinate[] = [];
+  for (let z = 0; z < dimensions[2]; z += 1) for (let y = 0; y < dimensions[1]; y += 1) for (let x = 0; x < dimensions[0]; x += 1) {
+    pages.push([x, y, z]);
+  }
+  return pages;
+}
+
+/** Finest 8-cell node-mip page grid for any supported canonical brick size. */
+export function liveSvoBasePageDimensions(
+  brickDimensions: readonly [number, number, number],
+  brickSize: SparseBrickSize,
+): readonly [number, number, number] {
+  return brickDimensions.map((bricks) => Math.ceil(
+    bricks * brickSize / SVO_NODE_MIP_LAYOUT.interiorSize,
+  )) as [number, number, number];
+}
+
+/** Compact vec4 emission table consumed by the GPU-only live radiance builder. */
+function packLiveSvoMaterialEmission(packedRecords: Uint32Array, count: number): Float32Array<ArrayBuffer> {
+  const source = new Float32Array(packedRecords.buffer, packedRecords.byteOffset, packedRecords.byteLength / 4);
+  const recordWords = SVO_MATERIAL_RECORD_STRIDE_BYTES / 4;
+  const result = new Float32Array(OCTREE_LIVE_SCENE_MATERIAL_CAPACITY * 4);
+  for (let material = 0; material < count; material += 1) {
+    result.set(source.subarray(material * recordWords + 4, material * recordWords + 7), material * 4);
+  }
+  return result;
+}
+
 export interface OctreeSvoPbrMaterialPublicationData {
   packedRecords: Uint32Array<ArrayBuffer>;
   count: number;
   strideBytes: number;
   revision: number;
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -204,12 +347,12 @@ export function buildOctreeSvoPbrMaterialPublication(
   if (!Number.isSafeInteger(revision) || revision < 1 || revision > 0xffff_ffff) {
     throw new RangeError("SVO PBR material publication revision must be a positive uint32");
   }
-  const staticRevision = hashSvoStaticPublication(new Uint32Array(), JSON.stringify({
+  const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     revision,
     environmentPrimitives: environmentPrimitives.map(({ key, ownerIndex, group, tags, material }) => ({ key, ownerIndex, group, tags, material })),
   }));
-  const cacheKey = `octree-svo-pbr-material-v1:${staticRevision}`;
-  const cached = cachedSvoStaticPublication(octreeSvoPbrMaterialCache, cacheKey);
+  const cacheKey = `octree-svo-pbr-material-v1:${contentRevision}`;
+  const cached = cachedSvoPublication(octreeSvoPbrMaterialCache, cacheKey);
   if (cached) return cached;
   const records = [
     ...buildDefaultSvoMaterialRecords(revision),
@@ -228,12 +371,12 @@ export function buildOctreeSvoPbrMaterialPublication(
     }),
   ];
   const packedRecords = packSvoMaterialTable(records);
-  return internSvoStaticPublication(octreeSvoPbrMaterialCache, cacheKey, {
+  return internSvoPublication(octreeSvoPbrMaterialCache, cacheKey, {
     packedRecords,
     count: packedRecords.byteLength / SVO_MATERIAL_RECORD_STRIDE_BYTES,
     strideBytes: SVO_MATERIAL_RECORD_STRIDE_BYTES,
     revision,
-    staticRevision,
+    contentRevision,
     cacheKey,
   });
 }
@@ -245,7 +388,7 @@ export interface OctreeSvoLightPublicationData {
   strideBytes: number;
   revision: number;
   omittedFixtureKeys: readonly string[];
-  staticRevision: string;
+  contentRevision: string;
   cacheKey: string;
 }
 
@@ -262,14 +405,14 @@ export function buildOctreeSvoLightPublication(
     maximumRecords: options.maximumRecords ?? SVO_LIGHT_MAXIMUM_RECORDS,
   });
   const cacheKey = `octree-${lights.cacheKey}`;
-  return internSvoStaticPublication(octreeSvoLightCache, cacheKey, {
+  return internSvoPublication(octreeSvoLightCache, cacheKey, {
     records: lights.records,
     packedRecords: lights.packedRecords,
     count: lights.records.length,
     strideBytes: SVO_LIGHT_RECORD_STRIDE_BYTES,
     revision: lights.revision,
     omittedFixtureKeys: lights.omittedFixtureKeys,
-    staticRevision: lights.staticRevision,
+    contentRevision: lights.contentRevision,
     cacheKey,
   });
 }
@@ -420,68 +563,52 @@ fn materializeBricks(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocatio
 }
 `;
 
-/**
- * Fields a static-world publication makes valid. Producers without a dense
- * fluid payload — the octree lane, whose water is presented by raster
- * extraction — publish exactly this set, which must remain a superset of
- * `SVO_DRY_SCENE_REQUIRED_VALID_FIELDS` for the dry renderer to trace at all.
- */
-export const OCTREE_SPARSE_BRICK_STATIC_VALID_FIELDS =
+/** Fields a live scene publication makes valid before fluid payload is attached. */
+export const OCTREE_SPARSE_BRICK_SCENE_VALID_FIELDS =
   SPARSE_VOXEL_VALID_FIELDS.topology
-  | SPARSE_VOXEL_VALID_FIELDS.staticGeometry
+  | SPARSE_VOXEL_VALID_FIELDS.sceneGeometry
   | SPARSE_VOXEL_VALID_FIELDS.materialOwner;
 
-const structuralPublicationFinalizeShader = /* wgsl */ `
+function structuralPublicationFinalizeShader(sceneMaintenanceStateOffsetWords = 0) { return /* wgsl */ `
 @group(0) @binding(0) var<storage, read_write> state: array<u32>;
+@group(0) @binding(1) var<storage, read> sceneMaintenance: array<u32>;
+@group(0) @binding(2) var<storage, read> topologyMutation: array<u32>;
 
-const VALID_FIELDS: u32 = ${
-  SPARSE_VOXEL_VALID_FIELDS.topology |
-  SPARSE_VOXEL_VALID_FIELDS.staticGeometry |
+// Scene geometry is its own live generation. Fluid coverage is intentionally
+// published through a separate renderer channel so evolving physics can never
+// overwrite authored scene voxels in-place.
+const SCENE_VALID_FIELDS: u32 = ${OCTREE_SPARSE_BRICK_SCENE_VALID_FIELDS}u;
+const PHYSICS_VALID_FIELDS: u32 = ${
   SPARSE_VOXEL_VALID_FIELDS.dynamicSolid |
   SPARSE_VOXEL_VALID_FIELDS.coarseFluid |
-  SPARSE_VOXEL_VALID_FIELDS.velocity |
-  SPARSE_VOXEL_VALID_FIELDS.materialOwner
+  SPARSE_VOXEL_VALID_FIELDS.velocity
 }u;
 
-// The static-world publication carries exactly the immutable lattice: the
-// canonical topology, the authored-scenery signed distance, and the
-// material/owner identity written by the proxy voxelizer. Fluid, velocity and
-// dynamic-solid payloads are deliberately absent, so their validity bits stay
-// clear and every consumer that needs them rejects this generation instead of
-// reading a buffer nobody filled.
-const STATIC_VALID_FIELDS: u32 = ${OCTREE_SPARSE_BRICK_STATIC_VALID_FIELDS}u;
-
-fn finishFrame(first: bool) {
-  if (first) {
-    state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}] = 1u;
-    state[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}] = 1u;
-  }
+@compute @workgroup_size(1)
+fn finalizePhysics() {
   state[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}] += 1u;
   state[${SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision}] += 1u;
-  // Fine fluid remains explicitly unavailable (validity bit and revision zero);
-  // the global-fine publication is owned directly by the water renderer.
-  state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}] = VALID_FIELDS;
-  // This is deliberately last: prior passes and the stores above define one
-  // complete structural snapshot for consumers later in the command stream.
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}] |= PHYSICS_VALID_FIELDS;
   state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}] += 1u;
 }
 
 @compute @workgroup_size(1)
-fn finalizeInitial() { finishFrame(true); }
-
-@compute @workgroup_size(1)
-fn finalizeFrame() { finishFrame(false); }
-
-@compute @workgroup_size(1)
-fn finalizeStatic() {
-  state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}] = 1u;
-  state[${SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision}] = 1u;
-  state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}] = STATIC_VALID_FIELDS;
-  // Last, for the same reason as finishFrame: the topology publication and the
-  // proxy voxelization encoded before this pass are one complete snapshot.
+fn finalizeScene() {
+  let maintenanceOffset = ${sceneMaintenanceStateOffsetWords}u;
+  let requested = sceneMaintenance[maintenanceOffset + ${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.requestedRevision}u];
+  let completed = sceneMaintenance[maintenanceOffset + ${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.completedRevision}u];
+  let overflow = sceneMaintenance[maintenanceOffset + ${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.overflowFlags}u];
+  if (requested == 0u || completed != requested || overflow != 0u || topologyMutation[3] != 0u) { return; }
+  if (topologyMutation[0] != 0u) { state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}] += 1u; }
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.sceneGeometryRevision}] += 1u;
+  // Scene publication adds its independently-owned lane; it must never clear
+  // already-current fluid/dynamic fields while physics is paused.
+  state[${SPARSE_VOXEL_PUBLICATION_STATE.validFields}] |= SCENE_VALID_FIELDS;
+  // Last: topology, payload maintenance, and the stores above become visible
+  // to every render consumer as one live scene generation.
   state[${SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration}] += 1u;
 }
-`;
+`; }
 
 /**
  * Transitional GPU bridge: the octree solver remains authoritative while its
@@ -506,6 +633,7 @@ export class OctreeSparseBrickWorld {
   private readonly source: SparseBrickPublicationSource;
   private readonly sourceBuffers: GPUBuffer[];
   private readonly pbrMaterialBuffer: GPUBuffer;
+  private readonly materialEmissionBuffer: GPUBuffer;
   private readonly lightBuffer: GPUBuffer;
   private readonly environmentLightingBuffer: GPUBuffer;
   private readonly inspectionMaterialData: Float32Array<ArrayBuffer>;
@@ -526,24 +654,39 @@ export class OctreeSparseBrickWorld {
   };
   private readonly baseAllocatedBytes: number;
   private readonly structuralPublicationState: GPUBuffer;
-  private readonly structuralInitialPipeline: GPUComputePipeline;
-  private readonly structuralFramePipeline: GPUComputePipeline;
-  private readonly structuralStaticPipeline: GPUComputePipeline;
+  private readonly structuralPhysicsPipeline: GPUComputePipeline;
+  private readonly structuralScenePipeline: GPUComputePipeline;
   private readonly structuralFinalizeBindGroup: GPUBindGroup;
   private readonly proxyVoxelizer: SparseSceneProxyVoxelizer;
+  private readonly topologyMutator: WebGpuSparseBrickTopologyMutator;
+  private readonly topologyMutationWorklist: GPUBuffer;
+  private readonly topologyMutationCapacity: number;
+  private readonly sceneBrickDimensions: readonly [number, number, number];
+  private readonly brickSize: SparseBrickSize;
+  private readonly sceneWorldOrigin: readonly [number, number, number];
   private readonly brickOccupancyBuilder: WebGpuSvoBrickOccupancyBuilder;
   private readonly wideFanout?: WebGPUSvoWideFanout;
   private readonly compactHierarchy?: WebGpuSvoCompactHierarchy;
-  private readonly nodeMipPyramid?: WebGpuSvoNodeMipPyramid;
-  private readonly tetrahedralRadiance?: WebGpuSvoTetrahedralRadiance;
-  private published = false;
-  private proxiesPublished = false;
+  private readonly nodeMipPyramid?: WebGpuLiveSvoNodeMipPyramid;
+  private readonly tetrahedralRadiance?: WebGpuLiveSvoTetrahedralRadiance;
+  private readonly liveDerivedPlanner?: WebGpuLiveSvoDerivedWorklistPlanner;
+  private readonly liveDerivedBuilder?: WebGpuLiveSvoDerivedBuilder;
+  private liveDerivedInitial = true;
+  private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
+  private liveScenePrimitives = new Map<string, LiveScenePrimitiveEntry>();
+  private readonly coveredSceneBrickCoordinates = new Set<string>();
+  private readonly pendingTopologyCoordinates = new Map<string, SparseBrickCoordinate>();
+  private pendingScenePublication?: SparseScenePublication;
+  private pendingTopologyMutation = false;
+  private sceneRevision = 0;
+  private topologyPublished = false;
   private destroyed = false;
 
   constructor(device: GPUDevice, scene: SceneDescription, dimensions: readonly [number, number, number], options: OctreeSparseBrickWorldOptions = {}) {
     this.device = device;
     this.dimensions = dimensions;
     const brickSize = options.brickSize ?? 8;
+    this.brickSize = brickSize;
     const environmentCatalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
     const environmentPrimitives = environmentProxyPrimitives(environmentCatalog, true);
     const sceneDomain = planSparseSceneDomain(
@@ -551,15 +694,9 @@ export class OctreeSparseBrickWorld {
       environmentPrimitives.map((primitive) => ({ min: primitive.aabb_m.min, max: primitive.aabb_m.max })),
       { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m }
     );
-    const staticLightingDomain = options.staticLightingBrickSize !== undefined
-      && options.staticLightingBrickSize !== brickSize
-      ? planSparseSceneDomain(
-        scene, dimensions, options.staticLightingBrickSize,
-        environmentPrimitives.map((primitive) => ({ min: primitive.aabb_m.min, max: primitive.aabb_m.max })),
-        { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m },
-      )
-      : sceneDomain;
     this.solverGridOriginCells = sceneDomain.solverGridOriginCells;
+    this.sceneBrickDimensions = sceneDomain.brickDimensions;
+    this.sceneWorldOrigin = [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z];
     const maximumDepth = sparseSceneOctreeMaximumDepth(sceneDomain.brickDimensions, sceneDomain.coordinates);
     const plan = planAdaptiveSparseBrickOctree({
       brickSize,
@@ -572,15 +709,44 @@ export class OctreeSparseBrickWorld {
       )
     });
     this.finestLevel = plan.maximumDepth;
+    for (const leaf of plan.leaves) {
+      const node = plan.nodes[leaf.nodeIndex];
+      const scale = 2 ** (plan.maximumDepth - node.level);
+      const first = [node.coordinate.x * scale, node.coordinate.y * scale, node.coordinate.z * scale];
+      for (let z = first[2]; z < Math.min(first[2] + scale, this.sceneBrickDimensions[2]); z += 1) {
+        for (let y = first[1]; y < Math.min(first[1] + scale, this.sceneBrickDimensions[1]); y += 1) {
+          for (let x = first[0]; x < Math.min(first[0] + scale, this.sceneBrickDimensions[0]); x += 1) {
+            this.coveredSceneBrickCoordinates.add(brickCoordinateKey({ x, y, z }));
+          }
+        }
+      }
+    }
     const packed = packSparseBrickPlan(plan, 1);
-    this.tree = new SparseBrickOctreeGPU(device, { brickSize, nodeCapacity: Math.max(1, plan.nodes.length), leafCapacity: Math.max(1, plan.leaves.length), label: "Octree unified sparse-brick world" });
+    const sceneBrickVolume = sceneDomain.brickDimensions.reduce((product, value) => product * value, 1);
+    const requestedMutationCapacity = options.sceneMutationBrickCapacity ?? OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY;
+    if (!Number.isSafeInteger(requestedMutationCapacity) || requestedMutationCapacity < 1) {
+      throw new RangeError("Live scene mutation brick capacity must be a positive safe integer");
+    }
+    this.topologyMutationCapacity = Math.min(sceneBrickVolume, requestedMutationCapacity);
+    const nodeCapacity = Math.max(1, plan.nodes.length
+      + sparseBrickTopologyMutationNodeReserve(maximumDepth, this.topologyMutationCapacity));
+    const leafCapacity = Math.max(1, plan.leaves.length + this.topologyMutationCapacity);
+    this.tree = new SparseBrickOctreeGPU(device, {
+      brickSize, nodeCapacity, leafCapacity, label: "Octree unified live sparse-brick world",
+    });
     this.brickOccupancyBuilder = new WebGpuSvoBrickOccupancyBuilder(device);
+    this.topologyMutator = new WebGpuSparseBrickTopologyMutator(device);
+    this.topologyMutationWorklist = device.createBuffer({
+      label: "Live sparse scene topology mutation worklist",
+      size: (8 + this.topologyMutationCapacity * 4) * Uint32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
     this.compactHierarchy = plan.nodes.length === 0 ? undefined : new WebGpuSvoCompactHierarchy(device,
       packSvoCompactHierarchy({ nodes: packed.nodes, leaves: packed.leaves,
         publishedNodeCount: plan.nodes.length, publishedLeafCount: plan.leaves.length }, 1));
-    // Renderer acceleration is a derived immutable view of the exact same
-    // canonical terminal set. Failure leaves structural authority untouched
-    // and simply omits the optional capability.
+    // Renderer traversal snapshots are optional views of the canonical terminal
+    // set. A later topology revision rejects them by generation; they never own
+    // structure and failure simply omits the capability.
     let wideFanout: WebGPUSvoWideFanout | undefined;
     try {
       const widePlan = planOctreeSvoWideFanout(plan);
@@ -598,90 +764,6 @@ export class OctreeSparseBrickWorld {
       wideFanout = undefined;
     }
     this.wideFanout = wideFanout;
-    // The opacity pyramid is a disposable static-lighting view over the same
-    // world lattice. It deliberately excludes fluid lanes: water transport
-    // and topology remain owned by the canonical simulation octree.
-    let nodeMipPyramid: WebGpuSvoNodeMipPyramid | undefined;
-    let tetrahedralRadiance: WebGpuSvoTetrahedralRadiance | undefined;
-    let nodeMipWorldOrigin_m: readonly [number, number, number] | undefined;
-    try {
-      // The directory is one texture row per page, so the 2D height limit is the
-      // only ceiling. A former hard-coded 8192 sat well below it and quietly
-      // discarded the surplus: hose-tank needs 10361 pages, so roughly a sixth
-      // of its static geometry stopped casting shadows and occluding GI, with
-      // nothing reporting it.
-      //
-      // That limit is only as high as the device was *asked* for — see
-      // `requiredFluidDeviceLimits`, which requests the adapter's advertised
-      // maxTextureDimension2D rather than accepting WebGPU's 8192 default.
-      const maximumDirectoryPages = webGpuSvoNodeMipMaximumPages(device);
-      const staticMips = buildSvoStaticNodeMipPublication(scene, staticLightingDomain, environmentPrimitives, {
-        generation: 1,
-        capacity: maximumDirectoryPages,
-        samplesPerAxis: 2,
-      });
-      nodeMipWorldOrigin_m = staticMips.worldOrigin_m;
-      if (staticMips.omittedBasePageCount > 0) {
-        // A truncated pyramid is not a coarser pyramid, it is a wrong one: the
-        // dropped pages sample as empty air, so light leaks through geometry
-        // that is still on screen. Declining to publish costs the cone
-        // accelerator and GI, and the renderer falls back to exact traversal —
-        // slower, but showing the scene that was authored.
-        //
-        // "Slower" is a cliff, not a taper, so treat this warning as a
-        // performance failure and not a note: hose-tank at 1280x720 on M1 Max
-        // runs 20 ms/frame with the pyramid and 305 ms without it, on both the
-        // raster-primary and canonical-parametric primaries.
-        console.warn(`[svo] static lighting needs ${staticMips.requiredPageCount} node-mip pages but this device`
-          + ` allows ${maximumDirectoryPages}; skipping the opacity pyramid rather than dropping`
-          + ` ${staticMips.omittedBasePageCount} pages of geometry into empty space.`);
-        nodeMipWorldOrigin_m = undefined;
-      } else {
-        nodeMipPyramid = new WebGpuSvoNodeMipPyramid(device);
-        nodeMipPyramid.beginGeneration(staticMips.plan);
-        for (const page of staticMips.interiors) nodeMipPyramid.uploadInteriorPage(page.key, page.interior);
-        if (!nodeMipPyramid.publish().published || !nodeMipPyramid.visibleGeneration()) {
-          nodeMipPyramid.destroy();
-          nodeMipPyramid = undefined;
-        } else {
-          // Radiance is a fail-soft derived view over the already-published
-          // opacity topology. A failed emitter build must never discard opacity.
-          try {
-            const radiance = buildSvoStaticEmissiveRadiancePublication(
-              staticMips, staticLightingDomain, environmentPrimitives, {
-                samplesPerAxis: 2,
-                primaryDirectionalLight: {
-                  towardLightDirection: scene.lighting?.directional?.direction ?? [-0.45, 0.86, 0.28],
-                  colorLinear: scene.lighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
-                  intensity: scene.lighting?.directional?.intensity ?? 1,
-                },
-                injectAuthoredProxyLights: true,
-              },
-            );
-            if (radiance.injectedBaseTexelCount > 0) {
-              tetrahedralRadiance = new WebGpuSvoTetrahedralRadiance(device);
-              tetrahedralRadiance.beginGeneration(radiance.plan);
-              for (const page of radiance.interiors) {
-                if (page.certifiedBlack) tetrahedralRadiance.certifyBlackPage(page.key);
-                else tetrahedralRadiance.uploadInteriorPage(page.key, page.packedInterleaved);
-              }
-              if (!tetrahedralRadiance.publish().published || !tetrahedralRadiance.visibleGeneration()) {
-                tetrahedralRadiance.destroy();
-                tetrahedralRadiance = undefined;
-              }
-            }
-          } catch {
-            tetrahedralRadiance?.destroy();
-            tetrahedralRadiance = undefined;
-          }
-        }
-      }
-    } catch {
-      nodeMipPyramid?.destroy();
-      nodeMipPyramid = undefined;
-    }
-    this.nodeMipPyramid = nodeMipPyramid;
-    this.tetrahedralRadiance = tetrahedralRadiance;
     const solverOriginBricks = this.solverGridOriginCells.map((value) => value / brickSize);
     if (solverOriginBricks.some((value) => !Number.isInteger(value))) throw new Error("Shared sparse scene origin must align to the fluid brick lattice");
     const leafByCoordinate = new Map<string, number>();
@@ -724,11 +806,14 @@ export class OctreeSparseBrickWorld {
 
     const counts = storageBuffer(device, "Sparse brick source counts", packed.counts.byteLength, packed.counts);
     const topology = storageBuffer(device, "Sparse brick source topology", packed.topology.byteLength, packed.topology);
-    const geometry = storageBuffer(device, "Sparse brick source geometry", this.tree.voxelCapacity * 16);
-    const velocity = storageBuffer(device, "Sparse brick source velocity", this.tree.voxelCapacity * 16);
-    const materialOwners = storageBuffer(device, "Sparse brick source material owners", this.tree.voxelCapacity * 4);
+    const initialVoxelCount = Math.max(1, plan.voxelCount);
+    const geometry = storageBuffer(device, "Sparse brick source geometry", initialVoxelCount * 16);
+    const velocity = storageBuffer(device, "Sparse brick source velocity", initialVoxelCount * 16);
+    const materialOwners = storageBuffer(device, "Sparse brick source material owners", initialVoxelCount * 4);
     this.sourceBuffers = [counts, topology, geometry, velocity, materialOwners];
-    this.source = { counts, topology, geometry, velocity, materialOwners, capacities: { nodes: plan.nodes.length, leaves: plan.leaves.length, voxels: this.tree.voxelCapacity } };
+    this.source = { counts, topology, geometry, velocity, materialOwners, capacities: {
+      nodes: plan.nodes.length, leaves: plan.leaves.length, voxels: plan.voxelCount,
+    } };
 
     const baseMaterials = packVoxelDebugMaterialTable();
     const materialCount = ENVIRONMENT_VOXEL_MATERIAL_BASE + environmentPrimitives.length;
@@ -756,8 +841,14 @@ export class OctreeSparseBrickWorld {
     this.pbrMaterialBuffer = storageBuffer(
       device,
       "Sparse voxel PBR material table",
-      pbrMaterials.packedRecords.byteLength,
+      OCTREE_LIVE_SCENE_MATERIAL_CAPACITY * SVO_MATERIAL_RECORD_STRIDE_BYTES,
       pbrMaterials.packedRecords,
+    );
+    this.materialEmissionBuffer = storageBuffer(
+      device,
+      "Live SVO material emission table",
+      OCTREE_LIVE_SCENE_MATERIAL_CAPACITY * 16,
+      packLiveSvoMaterialEmission(pbrMaterials.packedRecords, pbrMaterials.count),
     );
     const lights = buildOctreeSvoLightPublication(scene);
     this.lightBuffer = storageBuffer(
@@ -785,56 +876,172 @@ export class OctreeSparseBrickWorld {
     floats.set([...this.cellSize, 0], 8);
     uints.set([brickSize, scene.rigidBodies.length, plan.maximumDepth, VOXEL_MATERIAL_IDS.fluid], 12);
     this.inspectionParameterData = parameterData;
-    this.structuralPublicationState = storageBuffer(
-      device,
-      "Sparse voxel structural publication state",
-      SPARSE_VOXEL_PUBLICATION_STATE.strideBytes,
-    );
+    this.proxyVoxelizer = new SparseSceneProxyVoxelizer(device, this.tree, {
+      cellSize: this.cellSize,
+      worldOrigin: [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z],
+      finestLevel: plan.maximumDepth,
+      primitiveCapacity: OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY,
+      dirtyRegionCapacity: OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY,
+      dirtyBrickCapacity: this.tree.leafCapacity,
+      candidatesPerDirtyBrick: OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+      label: `${environmentCatalog.environmentId} live scene geometry`,
+    });
+    if (SPARSE_VOXEL_PUBLICATION_STATE.strideBytes !== SPARSE_BRICK_GPU_LAYOUT.publicationStrideBytes) {
+      throw new Error("Sparse voxel publication ABI does not match the structural arena");
+    }
+    this.structuralPublicationState = this.tree.structuralPublication;
     const structuralModule = device.createShaderModule({
       label: "Sparse voxel structural publication finalizer",
-      code: structuralPublicationFinalizeShader,
+      code: structuralPublicationFinalizeShader(this.proxyVoxelizer.maintenanceBinding.stateOffsetBytes / 4),
     });
     const structuralLayout = device.createBindGroupLayout({
       label: "Sparse voxel structural publication finalizer layout",
-      entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }],
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      ],
     });
     const structuralPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [structuralLayout] });
-    this.structuralInitialPipeline = device.createComputePipeline({
-      label: "Finalize initial sparse voxel structural publication",
+    this.structuralPhysicsPipeline = device.createComputePipeline({
+      label: "Finalize live sparse voxel physics publication",
       layout: structuralPipelineLayout,
-      compute: { module: structuralModule, entryPoint: "finalizeInitial" },
+      compute: { module: structuralModule, entryPoint: "finalizePhysics" },
     });
-    this.structuralFramePipeline = device.createComputePipeline({
-      label: "Finalize sparse voxel structural frame",
+    this.structuralScenePipeline = device.createComputePipeline({
+      label: "Finalize live sparse voxel scene publication",
       layout: structuralPipelineLayout,
-      compute: { module: structuralModule, entryPoint: "finalizeFrame" },
-    });
-    this.structuralStaticPipeline = device.createComputePipeline({
-      label: "Finalize static sparse voxel structural publication",
-      layout: structuralPipelineLayout,
-      compute: { module: structuralModule, entryPoint: "finalizeStatic" },
+      compute: { module: structuralModule, entryPoint: "finalizeScene" },
     });
     this.structuralFinalizeBindGroup = device.createBindGroup({
       label: "Sparse voxel structural publication finalizer bindings",
       layout: structuralLayout,
-      entries: [{ binding: 0, resource: { buffer: this.structuralPublicationState } }],
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: this.structuralPublicationState,
+            offset: this.tree.structuralPublicationOffsetBytes,
+            size: SPARSE_VOXEL_PUBLICATION_STATE.strideBytes,
+          },
+        },
+        { binding: 1, resource: { buffer: this.proxyVoxelizer.maintenanceBinding.buffer } },
+        { binding: 2, resource: { buffer: this.topologyMutationWorklist } },
+      ],
     });
-    const proxyPrimitives: SparseScenePrimitive[] = environmentPrimitives.map((primitive) => sparseScenePrimitiveForProxy(primitive, {
-      materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
-      ownerId: scene.rigidBodies.length + primitive.ownerIndex,
-    }));
-    this.proxyVoxelizer = new SparseSceneProxyVoxelizer(device, this.tree, proxyPrimitives, {
-      cellSize: this.cellSize,
-      worldOrigin: [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z],
-      finestLevel: plan.maximumDepth,
-      label: `${environmentCatalog.environmentId} environment proxies`
-    });
-    const publicationBinding = { buffer: this.structuralPublicationState };
+    const publicationBinding = {
+      buffer: this.structuralPublicationState,
+      offset: this.tree.structuralPublicationOffsetBytes,
+      size: SPARSE_VOXEL_PUBLICATION_STATE.strideBytes,
+    };
     const publicationWord = (word: number) => ({ binding: publicationBinding, word });
     const residencyLayout = sparseVoxelFluidResidencyLayout(this.residency.capacity);
     if (residencyLayout.worklistByteLength !== this.residency.worklistByteLength) {
       throw new Error("Sparse voxel residency ABI does not match the producer worklist allocation");
     }
+    let nodeMipPyramid: WebGpuLiveSvoNodeMipPyramid | undefined;
+    let tetrahedralRadiance: WebGpuLiveSvoTetrahedralRadiance | undefined;
+    let liveDerivedPlanner: WebGpuLiveSvoDerivedWorklistPlanner | undefined;
+    let liveDerivedBuilder: WebGpuLiveSvoDerivedBuilder | undefined;
+    const liveDerivedBasePageDimensions = liveSvoBasePageDimensions(this.sceneBrickDimensions, brickSize);
+    const liveDerivedLevelCount = sparseSceneOctreeMaximumDepth(liveDerivedBasePageDimensions, []) + 1;
+    if (liveDerivedLevelCount <= 12) {
+      try {
+        const maximumPages = webGpuSvoNodeMipMaximumPages(device);
+        const mipPlan = planSvoNodeMipPyramid({
+          generation: 1,
+          occupiedPages: liveSvoDenseFinestPages(liveDerivedBasePageDimensions),
+          levelCount: liveDerivedLevelCount,
+          capacity: maximumPages,
+        });
+        const direct = createWebGpuSvoNodeMipDirectPageTable(mipPlan, device.limits.maxTextureDimension3D);
+        const atlasFits = mipPlan.atlas.texels.every((value) => value <= device.limits.maxTextureDimension3D);
+        if (!mipPlan.complete || !direct.ready || !atlasFits || mipPlan.pages.length === 0) {
+          throw new RangeError("Live SVO derived-page capacity cannot cover the declared editable domain");
+        }
+        nodeMipPyramid = new WebGpuLiveSvoNodeMipPyramid(device, {
+          pageCapacity: mipPlan.pages.length,
+          atlasTexels: mipPlan.atlas.texels,
+          directPageTableDimensions: direct.dimensions,
+          label: "Unified live SVO node mips",
+        });
+        tetrahedralRadiance = new WebGpuLiveSvoTetrahedralRadiance(device, {
+          pageCapacity: mipPlan.pages.length,
+          atlasTexels: mipPlan.atlas.texels,
+          label: "Unified live SVO radiance",
+        });
+        const nodeTarget = nodeMipPyramid.prepareGpuUpdate(mipPlan);
+        const radianceTarget = tetrahedralRadiance.prepareGpuUpdate(mipPlan);
+        const sceneMaintenance = this.proxyVoxelizer.maintenanceBinding;
+        const liveDerivedGenerationSource = {
+          buffer: this.structuralPublicationState,
+          offsetBytes: this.tree.structuralPublicationOffsetBytes
+            + SPARSE_VOXEL_PUBLICATION_STATE.completeGeneration * 4,
+        };
+        liveDerivedPlanner = new WebGpuLiveSvoDerivedWorklistPlanner(device, {
+          tree: this.tree,
+          nodeMips: nodeTarget,
+          dirtyLeafSources: [
+            {
+              buffer: sceneMaintenance.buffer,
+              countOffsetBytes: sceneMaintenance.stateOffsetBytes
+                + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.dirtyBrickCount * 4,
+              recordOffsetBytes: sceneMaintenance.dirtyBrickOffsetBytes,
+              capacity: sceneMaintenance.dirtyBrickCapacity,
+              recordStrideWords: 4,
+            },
+            {
+              buffer: this.residency.worklist,
+              countOffsetBytes: SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.activeCount * 4,
+              recordOffsetBytes: residencyLayout.activeEntryOffsetBytes + 4,
+              capacity: this.residency.capacity,
+              recordStrideWords: residencyLayout.entryStrideBytes / 4,
+            },
+            {
+              buffer: this.residency.worklist,
+              countOffsetBytes: SPARSE_VOXEL_FLUID_RESIDENCY_WORKLIST_WORDS.retiredCount * 4,
+              recordOffsetBytes: residencyLayout.retiredEntryOffsetBytes + 4,
+              capacity: this.residency.capacity,
+              recordStrideWords: residencyLayout.entryStrideBytes / 4,
+            },
+          ],
+          generationSource: liveDerivedGenerationSource,
+          levelCount: liveDerivedLevelCount,
+          finestLevel: plan.maximumDepth,
+          // No dirty page may be omitted: zero validity is fail-closed cache
+          // authority, so this fixed budget covers the entire address plan.
+          pageCapacityPerLevel: mipPlan.pages.length,
+          label: "Unified live SVO derived-page planner",
+        });
+        liveDerivedBuilder = new WebGpuLiveSvoDerivedBuilder(device, {
+          tree: this.tree,
+          nodeMips: nodeTarget,
+          radiance: radianceTarget,
+          materialEmission: this.materialEmissionBuffer,
+          worklists: liveDerivedPlanner.worklists,
+          generationSource: liveDerivedGenerationSource,
+          plannedPageCount: mipPlan.pages.length,
+          finestLevel: plan.maximumDepth,
+          label: "Unified live SVO derived-page builder",
+        });
+        nodeMipPyramid.acceptGpuUpdate(mipPlan.generation);
+        tetrahedralRadiance.acceptGpuUpdate(mipPlan.generation);
+      } catch (error) {
+        liveDerivedBuilder?.destroy();
+        liveDerivedPlanner?.destroy();
+        nodeMipPyramid?.destroy();
+        tetrahedralRadiance?.destroy();
+        nodeMipPyramid = undefined;
+        tetrahedralRadiance = undefined;
+        liveDerivedPlanner = undefined;
+        liveDerivedBuilder = undefined;
+        console.warn("[svo] live derived lighting unavailable; cone lighting remains fail-closed", error);
+      }
+    }
+    this.nodeMipPyramid = nodeMipPyramid;
+    this.tetrahedralRadiance = tetrahedralRadiance;
+    this.liveDerivedPlanner = liveDerivedPlanner;
+    this.liveDerivedBuilder = liveDerivedBuilder;
     const residencyWorklistBinding = { buffer: this.residency.worklist, size: this.residency.worklistByteLength };
     const residencyWord = (word: number) => ({ binding: residencyWorklistBinding, word });
     const activeResidencyList = {
@@ -844,12 +1051,21 @@ export class OctreeSparseBrickWorld {
       capacity: this.residency.capacity,
     };
     const structural: SparseVoxelStructuralRenderSource = {
+      structure: { buffer: this.tree.structure, size: this.tree.structure.size },
+      structureOffsetsWords: {
+        control: this.tree.controlOffsetBytes / Uint32Array.BYTES_PER_ELEMENT,
+        publication: this.tree.structuralPublicationOffsetBytes / Uint32Array.BYTES_PER_ELEMENT,
+        nodes: this.tree.nodeOffsetBytes / Uint32Array.BYTES_PER_ELEMENT,
+        leaves: this.tree.leafOffsetBytes / Uint32Array.BYTES_PER_ELEMENT,
+      },
       control: { buffer: this.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes },
       nodes: { buffer: this.tree.nodes, offset: this.tree.nodeOffsetBytes, size: this.tree.nodeCapacity * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes },
       leaves: { buffer: this.tree.leaves, offset: this.tree.leafOffsetBytes, size: this.tree.leafCapacity * SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes },
       geometry: { buffer: this.tree.geometry, offset: this.tree.geometryOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes },
+      sceneGeometry: { buffer: this.tree.sceneGeometry, offset: this.tree.sceneGeometryOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes },
       velocity: { buffer: this.tree.velocity, offset: this.tree.velocityOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.velocityStrideBytes },
       materialOwners: { buffer: this.tree.materialOwners, offset: this.tree.materialOwnerOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes },
+      sceneMaterialOwners: { buffer: this.tree.sceneMaterialOwners, offset: this.tree.sceneMaterialOwnerOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes },
       fluidLeafStates: { buffer: this.residency.leafStates, size: this.tree.leafCapacity * Uint32Array.BYTES_PER_ELEMENT },
       fluidResidency: {
         states: { buffer: this.residency.stateBuffer, size: this.residency.capacity * residencyLayout.stateStrideBytes },
@@ -906,7 +1122,7 @@ export class OctreeSparseBrickWorld {
         validFields: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.validFields),
         revisions: {
           topology: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision),
-          staticGeometry: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.staticGeometryRevision),
+          sceneGeometry: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.sceneGeometryRevision),
           dynamicSolid: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision),
           coarseFluid: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.coarseFluidRevision),
           fineFluid: publicationWord(SPARSE_VOXEL_PUBLICATION_STATE.fineFluidRevision),
@@ -914,7 +1130,7 @@ export class OctreeSparseBrickWorld {
       },
       fields: {
         topology: { bit: SPARSE_VOXEL_VALID_FIELDS.topology, residency: "all-published-leaves" },
-        staticGeometry: { bit: SPARSE_VOXEL_VALID_FIELDS.staticGeometry, signedDistance: "negative-inside-metres", distanceQuality: "mixed-exact-approximate", residency: "all-published-leaves" },
+        sceneGeometry: { bit: SPARSE_VOXEL_VALID_FIELDS.sceneGeometry, signedDistance: "negative-inside-metres", distanceQuality: "mixed-exact-approximate", residency: "all-published-leaves" },
         dynamicSolid: { bit: SPARSE_VOXEL_VALID_FIELDS.dynamicSolid, signedDistance: "negative-inside-metres", distanceQuality: "occupancy-estimate", residency: "fluid-resident-leaves" },
         coarseFluid: { bit: SPARSE_VOXEL_VALID_FIELDS.coarseFluid, signedDistance: "negative-inside-metres", distanceQuality: "metric-near-interface", residency: "fluid-resident-leaves" },
         fineFluid: { bit: SPARSE_VOXEL_VALID_FIELDS.fineFluid, signedDistance: "negative-inside-metres", distanceQuality: "metric", residency: "unavailable" },
@@ -924,7 +1140,7 @@ export class OctreeSparseBrickWorld {
     };
     this.sceneSource = {
       pbrMaterials: {
-        binding: { buffer: this.pbrMaterialBuffer, size: pbrMaterials.packedRecords.byteLength },
+        binding: { buffer: this.pbrMaterialBuffer, size: this.pbrMaterialBuffer.size },
         count: pbrMaterials.count,
         strideBytes: pbrMaterials.strideBytes,
         revision: pbrMaterials.revision,
@@ -942,33 +1158,39 @@ export class OctreeSparseBrickWorld {
         revision: environmentLighting.revision,
         cacheKey: environmentLighting.cacheKey,
       },
-      materialCount: materialData.length / 8,
+      materialCount: pbrMaterials.count,
       fluidBrickStats: { buffer: this.residency.worklist }, fluidBrickCapacity: this.residency.capacity,
       structural,
       wideFanout: this.wideFanout?.capability(),
       compactHierarchy: this.compactHierarchy?.capability(),
       nodeMipPyramid: this.nodeMipPyramid?.visibleGeneration() && {
         ...this.nodeMipPyramid.visibleGeneration()!,
-        worldOrigin_m: nodeMipWorldOrigin_m,
-        worldExtent_m: staticLightingDomain.sceneDimensionsCells.map((cells, axis) => cells * staticLightingDomain.cellSize_m[axis]) as [number, number, number],
+        worldOrigin_m: this.sceneWorldOrigin,
+        worldExtent_m: sceneDomain.sceneDimensionsCells.map((cells, axis) => cells * sceneDomain.cellSize_m[axis]) as [number, number, number],
       },
       tetrahedralRadiance: this.tetrahedralRadiance?.visibleGeneration(),
       derivedRenderAllocationBytes: {
         wideFanout: this.wideFanout?.allocatedBytes ?? 0,
         compactHierarchy: this.compactHierarchy?.allocatedBytes ?? 0,
-        nodeMipPyramid: this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0,
-        tetrahedralRadiance: this.tetrahedralRadiance?.telemetry().allocatedBytes ?? 0,
+        nodeMipPyramid: (this.nodeMipPyramid?.allocatedBytes ?? 0)
+          + (this.liveDerivedPlanner?.allocatedBytes ?? 0),
+        tetrahedralRadiance: (this.tetrahedralRadiance?.allocatedBytes ?? 0)
+          + (this.liveDerivedBuilder?.allocatedBytes ?? 0),
       },
       revision: 1
     };
+    this.stageSceneUpdate(scene);
     this.baseAllocatedBytes = this.tree.allocatedBytes + this.residency.allocatedBytes
       + (this.bulkResidency?.allocatedBytes ?? 0)
       + this.sourceBuffers.reduce((sum, buffer) => sum + buffer.size, 0)
-      + this.pbrMaterialBuffer.size + this.lightBuffer.size + this.environmentLightingBuffer.size + this.structuralPublicationState.size
+      + this.pbrMaterialBuffer.size + this.materialEmissionBuffer.size + this.lightBuffer.size + this.environmentLightingBuffer.size
+      + this.topologyMutationWorklist.size + this.topologyMutator.allocatedBytes
       + this.proxyVoxelizer.allocatedBytes + (this.wideFanout?.allocatedBytes ?? 0)
       + (this.compactHierarchy?.allocatedBytes ?? 0)
-      + (this.nodeMipPyramid?.telemetry().allocatedBytes ?? 0)
-      + (this.tetrahedralRadiance?.telemetry().allocatedBytes ?? 0);
+      + (this.nodeMipPyramid?.allocatedBytes ?? 0)
+      + (this.tetrahedralRadiance?.allocatedBytes ?? 0)
+      + (this.liveDerivedPlanner?.allocatedBytes ?? 0)
+      + (this.liveDerivedBuilder?.allocatedBytes ?? 0);
   }
 
   get allocatedBytes(): number { return this.baseAllocatedBytes + (this.inspection?.allocatedBytes ?? 0); }
@@ -1001,9 +1223,9 @@ export class OctreeSparseBrickWorld {
     const voxelPipeline = this.device.createComputePipeline({ label: "Materialize sparse voxel records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeVoxels" } });
     const brickPipeline = this.device.createComputePipeline({ label: "Materialize sparse brick records", layout: debugPipelineLayout, compute: { module: shaderModule, entryPoint: "materializeBricks" } });
     const bindGroup = this.device.createBindGroup({ layout: debugLayout, entries: [
-      { binding: 0, resource: { buffer: this.tree.control } },
-      { binding: 1, resource: { buffer: this.tree.nodes, offset: this.tree.nodeOffsetBytes } },
-      { binding: 2, resource: { buffer: this.tree.leaves, offset: this.tree.leafOffsetBytes } },
+      { binding: 0, resource: { buffer: this.tree.control, size: SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes } },
+      { binding: 1, resource: { buffer: this.tree.nodes, offset: this.tree.nodeOffsetBytes, size: this.tree.nodeCapacity * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes } },
+      { binding: 2, resource: { buffer: this.tree.leaves, offset: this.tree.leafOffsetBytes, size: this.tree.leafCapacity * SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes } },
       { binding: 3, resource: { buffer: this.tree.materialOwners, offset: this.tree.materialOwnerOffsetBytes } },
       { binding: 4, resource: { buffer: bodyMaterialBuffer } }, { binding: 5, resource: { buffer: params } },
       { binding: 6, resource: { buffer: voxelRecords } }, { binding: 7, resource: { buffer: brickRecords } },
@@ -1028,35 +1250,212 @@ export class OctreeSparseBrickWorld {
   }
 
   /**
-   * Publish the immutable static world — canonical topology plus the authored
-   * scenery voxelization — with no dense fluid payload. Water presentation is
-   * owned by raster extraction, so a producer that never fills the dense
-   * level-set/velocity/solid textures still owes the dry-scene renderer this
-   * publication: without it `publicationState.completeGeneration` stays zero
-   * and every static primary ray misses, leaving analytic glass and rigid
-   * bodies alone on a black frame.
-   *
-   * Idempotent: the first call encodes the topology, the proxy voxelization
-   * and the finalize pass; later calls are no-ops, so a per-frame caller pays
-   * nothing after bring-up. Returns whether this call encoded the publication.
+   * Stage the newest authored scene as render truth. Multiple editor writes
+   * before the next presentation frame coalesce into one publication whose
+   * dirty coverage includes every superseded old/new bound.
    */
-  encodeStaticPublication(encoder: GPUCommandEncoder): boolean {
-    if (this.destroyed || this.published) return false;
-    this.tree.encodePublish(encoder, this.source);
-    this.published = true;
-    this.proxyVoxelizer.encode(encoder);
-    this.proxiesPublished = true;
-    // Render acceleration is derived only after the authoritative immutable
-    // material/owner payload has been voxelized. It writes terminal node flags
-    // in place and adds no publication binding or persistent allocation.
-    this.brickOccupancyBuilder.encode(encoder, this.tree);
+  stageSceneUpdate(scene: SceneDescription): boolean {
+    if (this.destroyed) throw new Error("Cannot update a destroyed sparse-brick world");
+    const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
+    const authored = environmentProxyPrimitives(catalog, true);
+    const liveEntries = [
+      ...scene.rigidBodies.map((body, ownerId) => ({
+        key: `rigid:${body.id}`,
+        primitive: sparseScenePrimitiveForRigidBody(body, ownerId),
+        materialSignature: body.shape,
+      })),
+      ...authored.map((primitive) => ({
+        key: primitive.key,
+        primitive: sparseScenePrimitiveForProxy(primitive, {
+          materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
+          ownerId: scene.rigidBodies.length + primitive.ownerIndex,
+        }),
+        materialSignature: JSON.stringify(primitive.material),
+      })),
+    ];
+    if (liveEntries.length > OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY) {
+      throw new RangeError(`Live scene needs ${liveEntries.length} primitives but the fixed arena holds ${OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY}`);
+    }
+    const initialPublication = this.liveScenePrimitiveStates.size === 0;
+    const nextPrimitives = new Map<string, LiveScenePrimitiveEntry>();
+    const nextStates = new Map<string, LiveScenePrimitiveState>();
+    const dirtyRegions: SparseSceneAxisAlignedBounds[] = [
+      ...(this.pendingScenePublication?.dirtyRegions ?? []),
+    ];
+    const newBounds: SparseSceneAxisAlignedBounds[] = [];
+    for (const entry of liveEntries) {
+      const live = entry.primitive;
+      nextPrimitives.set(entry.key, { primitive: live, materialSignature: entry.materialSignature });
+      const state = { signature: `${liveScenePrimitiveSignature(live)}:${entry.materialSignature}`, bounds: sparseScenePrimitiveBounds(live) };
+      nextStates.set(entry.key, state);
+      const previous = this.liveScenePrimitiveStates.get(entry.key);
+      if (!previous || previous.signature !== state.signature) {
+        if (previous) dirtyRegions.push(previous.bounds);
+        dirtyRegions.push(state.bounds); newBounds.push(state.bounds);
+      }
+    }
+    for (const [key, previous] of this.liveScenePrimitiveStates) {
+      if (!nextStates.has(key)) dirtyRegions.push(previous.bounds);
+    }
+    if (dirtyRegions.length === 0) return false;
+    this.liveScenePrimitiveStates = nextStates;
+    this.liveScenePrimitives = nextPrimitives;
+    const revision = this.advanceSceneRevision();
+    const pbrMaterials = buildOctreeSvoPbrMaterialPublication(
+      OCTREE_SVO_PBR_MATERIAL_REVISION + revision,
+      authored,
+    );
+    if (pbrMaterials.count > OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) {
+      throw new RangeError(`Live scene needs ${pbrMaterials.count} materials but the fixed arena holds ${OCTREE_LIVE_SCENE_MATERIAL_CAPACITY}`);
+    }
+    this.device.queue.writeBuffer(this.pbrMaterialBuffer, 0, pbrMaterials.packedRecords);
+    this.device.queue.writeBuffer(this.materialEmissionBuffer, 0,
+      packLiveSvoMaterialEmission(pbrMaterials.packedRecords, pbrMaterials.count));
+    const publishedSource = (this as unknown as { sceneSource?: SparseVoxelSceneRenderSource }).sceneSource;
+    if (publishedSource) {
+      publishedSource.pbrMaterials = {
+        binding: { buffer: this.pbrMaterialBuffer, size: this.pbrMaterialBuffer.size },
+        count: pbrMaterials.count,
+        strideBytes: pbrMaterials.strideBytes,
+        revision: pbrMaterials.revision,
+      };
+      publishedSource.materialCount = pbrMaterials.count;
+    }
+    this.stagePrimitivePublication(revision, dirtyRegions, newBounds, initialPublication);
+    return true;
+  }
+
+  /** Allocation-free keyed motion/content updates shared by renderer-only and fluid worlds. */
+  stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean {
+    if (this.destroyed) throw new Error("Cannot update a destroyed sparse-brick world");
+    if (updates.length === 0) return false;
+    const dirtyRegions: SparseSceneAxisAlignedBounds[] = [...(this.pendingScenePublication?.dirtyRegions ?? [])];
+    const newBounds: SparseSceneAxisAlignedBounds[] = [];
+    let changed = false;
+    const seen = new Set<string>();
+    for (const update of updates) {
+      if (!update.key || seen.has(update.key)) throw new RangeError("Live primitive update keys must be unique and nonempty");
+      seen.add(update.key);
+      const previousEntry = this.liveScenePrimitives.get(update.key);
+      const previousState = this.liveScenePrimitiveStates.get(update.key);
+      if (!previousEntry || !previousState) throw new RangeError(`Unknown live primitive key ${update.key}`);
+      const signature = `${liveScenePrimitiveSignature(update.primitive)}:${previousEntry.materialSignature}`;
+      if (signature === previousState.signature) continue;
+      const bounds = sparseScenePrimitiveBounds(update.primitive);
+      dirtyRegions.push(previousState.bounds, bounds); newBounds.push(bounds); changed = true;
+      this.liveScenePrimitives.set(update.key, { ...previousEntry, primitive: update.primitive });
+      this.liveScenePrimitiveStates.set(update.key, { signature, bounds });
+    }
+    if (!changed) return false;
+    const revision = this.advanceSceneRevision();
+    this.stagePrimitivePublication(revision, dirtyRegions, newBounds, false);
+    return true;
+  }
+
+  private advanceSceneRevision(): number {
+    this.sceneRevision = this.sceneRevision === 0xffff_ffff ? 1 : this.sceneRevision + 1;
+    return this.sceneRevision;
+  }
+
+  private stagePrimitivePublication(
+    revision: number,
+    dirtyRegions: readonly SparseSceneAxisAlignedBounds[],
+    newBounds: readonly SparseSceneAxisAlignedBounds[],
+    initialPublication: boolean,
+  ): void {
+    const coalescedDirty = coalesceDirtyRegions(dirtyRegions, initialPublication ? 1 : OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY);
+    this.pendingScenePublication = {
+      primitives: [...this.liveScenePrimitives.values()].map(({ primitive }) => primitive),
+      dirtyRegions: coalescedDirty,
+      revision,
+    };
+    if (!initialPublication) {
+      for (const coordinate of liveSceneMissingBrickCoordinates(
+        newBounds, this.sceneWorldOrigin, this.cellSize, this.brickSize,
+        this.sceneBrickDimensions, this.coveredSceneBrickCoordinates,
+      )) this.pendingTopologyCoordinates.set(brickCoordinateKey(coordinate), coordinate);
+    }
+    if (this.pendingTopologyCoordinates.size === 0) {
+      this.device.queue.writeBuffer(this.topologyMutationWorklist, 0, new Uint32Array(8));
+      this.pendingTopologyMutation = false;
+      return;
+    }
+    const requested = [...this.pendingTopologyCoordinates.values()];
+    const packed = packSparseBrickTopologyMutationWorklist(
+      requested.slice(0, this.topologyMutationCapacity), revision, this.topologyMutationCapacity,
+    );
+    packed[0] = requested.length;
+    this.device.queue.writeBuffer(this.topologyMutationWorklist, 0, packed);
+    this.pendingTopologyMutation = true;
+    // Only a topology-changing transaction invalidates topology-keyed wide,
+    // compact, and renderer caches. Covered primitive motion leaves it stable.
+    this.sceneSource.revision = revision;
+  }
+
+  /**
+   * Encode bounded maintenance for the latest staged scene revision.
+   *
+   * This is intentionally callable every presentation frame, including while
+   * physics is paused. The scene is always authoritative; topology and voxel
+   * payloads are reusable accelerators whose completion generation advances
+   * only after the maintenance passes finish.
+   */
+  encodeSceneMaintenance(encoder: GPUCommandEncoder, deferDerived = false): boolean {
+    if (this.destroyed) return false;
+    let encoded = false;
+    if (!this.topologyPublished) {
+      this.tree.encodePublish(encoder, this.source);
+      this.topologyPublished = true;
+      encoded = true;
+    }
+    if (this.pendingTopologyMutation) {
+      this.topologyMutator.encode(encoder, this.tree, {
+        buffer: this.topologyMutationWorklist,
+        capacity: this.topologyMutationCapacity,
+      }, {
+        maximumDepth: this.finestLevel,
+        brickDimensions: this.sceneBrickDimensions,
+        generation: this.sceneRevision,
+        maximumRequests: this.topologyMutationCapacity,
+      });
+      if (this.pendingTopologyCoordinates.size <= this.topologyMutationCapacity) {
+        for (const [key] of this.pendingTopologyCoordinates) this.coveredSceneBrickCoordinates.add(key);
+      }
+      this.pendingTopologyCoordinates.clear();
+      this.pendingTopologyMutation = false;
+      encoded = true;
+    }
+    if (this.pendingScenePublication) {
+      this.proxyVoxelizer.publish(this.pendingScenePublication);
+      this.pendingScenePublication = undefined;
+    }
+    encoded = this.proxyVoxelizer.encodeMaintenance(encoder) || encoded;
+    if (!encoded) return false;
     const broker = new PassBroker(encoder);
-    const finalizer = broker.compute({ label: "Finalize static sparse voxel structural publication" });
-    finalizer.setPipeline(this.structuralStaticPipeline);
+    const finalizer = broker.compute({ label: "Finalize live sparse voxel scene publication" });
+    finalizer.setPipeline(this.structuralScenePipeline);
     finalizer.setBindGroup(0, this.structuralFinalizeBindGroup);
     finalizer.dispatchWorkgroups(1);
-    broker.fence("static sparse structural publication finalized");
+    broker.fence("live sparse scene publication finalized");
+    if (!deferDerived) this.encodeLiveDerivedMaintenance(encoder);
     return true;
+  }
+
+  private encodeLiveDerivedMaintenance(encoder: GPUCommandEncoder): void {
+    if (!this.liveDerivedPlanner || !this.liveDerivedBuilder) return;
+    const initializeEmpty = this.liveDerivedInitial;
+    if (initializeEmpty) this.liveDerivedPlanner.encodeInitial(encoder);
+    else this.liveDerivedPlanner.encode(encoder);
+    this.liveDerivedBuilder.encode(encoder, initializeEmpty);
+    this.liveDerivedInitial = false;
+    const nodeMip = this.nodeMipPyramid?.visibleGeneration();
+    const radiance = this.tetrahedralRadiance?.visibleGeneration();
+    this.sceneSource.nodeMipPyramid = nodeMip && {
+      ...nodeMip,
+      worldOrigin_m: this.sceneWorldOrigin,
+      worldExtent_m: this.sceneBrickDimensions.map((bricks, axis) => bricks * this.brickSize * this.cellSize[axis]) as [number, number, number],
+    };
+    this.sceneSource.tetrahedralRadiance = radiance;
   }
 
   encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, dt_s = 0): void {
@@ -1065,11 +1464,7 @@ export class OctreeSparseBrickWorld {
     this.bulkResidency?.encode(encoder, fields.levelSet, fields.velocity, { dt_s, preActivation: this.preActivation });
     const inspection = this.inspection;
     const encodePlan = planOctreeSparseBrickEncode(inspection?.publication.enabled ?? false);
-    const initialPublication = !this.published;
-    if (initialPublication) {
-      this.tree.encodePublish(encoder, this.source);
-      this.published = true;
-    }
+    this.encodeSceneMaintenance(encoder, true);
     this.tree.encodeFromDenseFields(encoder, {
       levelSet: fields.levelSet.createView(), velocity: fields.velocity.createView(), solidCells: fields.solidCells,
       dimensions: this.dimensions,
@@ -1080,26 +1475,22 @@ export class OctreeSparseBrickWorld {
       containerClosedTop: this.containerClosedTop,
       gridOriginCells: this.solverGridOriginCells,
       finestLevel: this.finestLevel,
-      preservedMaterialIdMinimum: ENVIRONMENT_VOXEL_MATERIAL_BASE,
       activeBrickWorklist: this.residency.worklist,
     });
-    if (!this.proxiesPublished) {
-      this.proxyVoxelizer.encode(encoder);
-      this.proxiesPublished = true;
-    }
-    // Dense material owners may change every simulation frame. Rebuild before
-    // the generation finalizer so a renderer never observes stale skip bounds.
-    this.brickOccupancyBuilder.encode(encoder, this.tree);
+    // One conservative terminal summary covers both independently-owned
+    // payload lanes; scene and physics writes never overwrite one another.
+    this.brickOccupancyBuilder.encodeFluidResidency(encoder, this.tree, this.residency.worklist);
     if (encodePlan.inspectionPublication) {
       this.encodeInspectionPublication(encoder);
       inspection?.publication.markEncoded();
     }
     const finalizerBroker = new PassBroker(encoder);
-    const finalizer = finalizerBroker.compute({ label: "Finalize sparse voxel structural publication" });
-    finalizer.setPipeline(initialPublication ? this.structuralInitialPipeline : this.structuralFramePipeline);
+    const finalizer = finalizerBroker.compute({ label: "Finalize live sparse voxel physics publication" });
+    finalizer.setPipeline(this.structuralPhysicsPipeline);
     finalizer.setBindGroup(0, this.structuralFinalizeBindGroup);
     finalizer.dispatchWorkgroups(1);
-    finalizerBroker.fence("sparse structural publication finalized");
+    finalizerBroker.fence("live sparse physics publication finalized");
+    this.encodeLiveDerivedMaintenance(encoder);
   }
 
   private encodeInspectionPublication(encoder: GPUCommandEncoder): void {
@@ -1134,13 +1525,17 @@ export class OctreeSparseBrickWorld {
     this.residency.destroy();
     this.bulkResidency?.destroy();
     this.proxyVoxelizer.destroy();
+    this.topologyMutator.destroy();
+    this.topologyMutationWorklist.destroy();
     this.wideFanout?.destroy();
     this.compactHierarchy?.destroy();
+    this.liveDerivedBuilder?.destroy();
+    this.liveDerivedPlanner?.destroy();
     this.nodeMipPyramid?.destroy();
     this.tetrahedralRadiance?.destroy();
-    for (const buffer of [...this.sourceBuffers, this.pbrMaterialBuffer, this.lightBuffer, this.environmentLightingBuffer, this.structuralPublicationState, ...(this.inspection?.buffers ?? [])]) buffer.destroy();
+    for (const buffer of [...this.sourceBuffers, this.pbrMaterialBuffer, this.materialEmissionBuffer, this.lightBuffer, this.environmentLightingBuffer, ...(this.inspection?.buffers ?? [])]) buffer.destroy();
   }
 }
 
 export const octreeSparseBrickDebugPublicationShader = debugPublicationShader;
-export const octreeSparseBrickStructuralFinalizeShader = structuralPublicationFinalizeShader;
+export const octreeSparseBrickStructuralFinalizeShader = structuralPublicationFinalizeShader();

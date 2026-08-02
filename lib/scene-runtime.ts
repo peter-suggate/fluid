@@ -9,7 +9,7 @@ export interface SceneRuntimeContent {
 }
 
 export type SceneRuntimeCapability =
-  | "static-world"
+  | "live-scene"
   | "rigid-dynamics"
   | "fluid-authority"
   | "fluid-rigid-coupling"
@@ -24,7 +24,7 @@ export interface SceneReadinessGate {
 }
 
 export interface SceneRuntimeReadiness {
-  /** Core render resources and the authored static world. */
+  /** Core render resources and the current live scene generation. */
   renderer: SceneReadinessGate;
   /** Every presentation source selected for this scene. */
   presentation: SceneReadinessGate;
@@ -38,8 +38,7 @@ export interface SceneRuntimePlan {
   content: SceneRuntimeContent;
   capabilities: Readonly<Record<SceneRuntimeCapability, boolean>>;
   readiness: SceneRuntimeReadiness;
-  /** Compatibility aliases for the renderer/controller migration. */
-  staticWorld: true;
+  liveScene: true;
   fluidSolver: boolean;
   rigidCoupling: boolean;
   waterPresentation: boolean;
@@ -58,7 +57,7 @@ export function planSceneRuntime(
   const rigidCoupling = fluidEnabled && rigidDynamics;
   const sparseVoxelPresentation = true;
   const capabilities: Record<SceneRuntimeCapability, boolean> = {
-    "static-world": true,
+    "live-scene": true,
     "rigid-dynamics": rigidDynamics,
     "fluid-authority": fluidEnabled,
     "fluid-rigid-coupling": rigidCoupling,
@@ -69,7 +68,7 @@ export function planSceneRuntime(
     required: boolean,
     requires: readonly SceneRuntimeCapability[],
   ): SceneReadinessGate => ({ state: required ? "required" : "not-required", requires: required ? requires : [] });
-  const presentationCapabilities: SceneRuntimeCapability[] = ["static-world"];
+  const presentationCapabilities: SceneRuntimeCapability[] = ["live-scene"];
   if (capabilities["water-presentation"]) presentationCapabilities.push("water-presentation");
   if (capabilities["sparse-voxel-presentation"]) presentationCapabilities.push("sparse-voxel-presentation");
   const transportCapabilities: SceneRuntimeCapability[] = [];
@@ -86,12 +85,12 @@ export function planSceneRuntime(
     },
     capabilities,
     readiness: {
-      renderer: gate(true, ["static-world"]),
+      renderer: gate(true, ["live-scene"]),
       presentation: gate(true, presentationCapabilities),
       fluidAuthority: gate(fluidEnabled, ["fluid-authority"]),
       transport: gate(transportCapabilities.length > 0, transportCapabilities),
     },
-    staticWorld: true,
+    liveScene: true,
     fluidSolver: fluidEnabled,
     rigidCoupling,
     waterPresentation: fluidEnabled,

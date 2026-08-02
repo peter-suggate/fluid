@@ -4,7 +4,9 @@ import {
   sparseBrickDispatchDimensions,
   type SparseBrickOctreeGPU,
 } from "./sparse-brick-octree";
+import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "./svo-brick-occupancy";
 import type { EnvironmentProxyPrimitive } from "./voxel-environments";
+import type { SvoPrimitiveDescriptor } from "./svo-primitive-abi";
 
 export type SparseSceneVector3 = readonly [number, number, number];
 export type SparseSceneQuaternion = readonly [number, number, number, number];
@@ -87,6 +89,29 @@ export type SparseScenePrimitive =
   | SparseSceneTorusPrimitive
   | SparseSceneConePrimitive;
 
+/** Keyed transform/content replacement for one primitive in the live sparse scene. */
+export interface SparseScenePrimitiveUpdate {
+  readonly key: string;
+  readonly primitive: SparseScenePrimitive;
+}
+
+/** Adapt the analytic render descriptor into the shared live voxel vocabulary. */
+export function sparseScenePrimitiveForSvoDescriptor(descriptor: SvoPrimitiveDescriptor): SparseScenePrimitive {
+  if (descriptor.kind === "terrain-heightfield") throw new RangeError("Terrain heightfields are not finite live primitive updates");
+  const center: SparseSceneVector3 = [descriptor.center_m.x, descriptor.center_m.y, descriptor.center_m.z];
+  const orientation: SparseSceneQuaternion | undefined = "orientation" in descriptor && descriptor.orientation
+    ? [descriptor.orientation.x, descriptor.orientation.y, descriptor.orientation.z, descriptor.orientation.w]
+    : undefined;
+  const base = { center, orientation, materialId: descriptor.materialId, ownerId: descriptor.ownerId };
+  if (descriptor.kind === "sphere") return { ...base, kind: "ellipsoid", radii: [descriptor.radius_m, descriptor.radius_m, descriptor.radius_m] };
+  if (descriptor.kind === "box") return { ...base, kind: "box", halfExtents: [descriptor.halfExtents_m.x, descriptor.halfExtents_m.y, descriptor.halfExtents_m.z] };
+  if (descriptor.kind === "capsule") return { ...base, kind: "capsule", radius: descriptor.radius_m, halfLength: descriptor.segmentHalfLength_m };
+  if (descriptor.kind === "cylinder") return { ...base, kind: "cylinder", radius: descriptor.radius_m, halfHeight: descriptor.halfHeight_m };
+  if (descriptor.kind === "torus") return { ...base, kind: "torus", majorRadius: descriptor.majorRadius_m, minorRadius: descriptor.minorRadius_m };
+  if (descriptor.kind === "cone") return { ...base, kind: "cone", baseRadius: descriptor.baseRadius_m, topRadius: descriptor.topRadius_m, halfHeight: descriptor.halfHeight_m };
+  return { ...base, kind: "ellipsoid", radii: [descriptor.radii_m.x, descriptor.radii_m.y, descriptor.radii_m.z] };
+}
+
 /**
  * Adapt one authored scenery proxy into this pass's vocabulary. Kept beside the
  * shapes themselves so a new one cannot reach the render ABI while silently
@@ -122,10 +147,50 @@ export interface SparseSceneProxyVoxelizerOptions {
   cellSize: SparseSceneVector3;
   /** World-space position of cell-coordinate (0, 0, 0)'s minimum corner. */
   worldOrigin?: SparseSceneVector3;
-  /** Maximum topology level. Omit for legacy fixed-level brick plans. */
+  /** Maximum topology level. */
   finestLevel?: number;
+  /** Fixed live primitive arena capacity. */
+  primitiveCapacity: number;
+  /** Maximum old/new world-space regions coalesced into one scene publication. */
+  dirtyRegionCapacity: number;
+  /** Maximum bricks repaired by one maintenance publication. */
+  dirtyBrickCapacity: number;
+  /** Fixed candidate bin capacity for each dirty brick. */
+  candidatesPerDirtyBrick: number;
   label?: string;
 }
+
+export interface SparseSceneAxisAlignedBounds {
+  minimum: SparseSceneVector3;
+  maximum: SparseSceneVector3;
+}
+
+export interface SparseScenePublication {
+  primitives: readonly SparseScenePrimitive[];
+  /** Union coverage of every old and new primitive bound changed by this revision. */
+  dirtyRegions: readonly SparseSceneAxisAlignedBounds[];
+  /** Strictly increasing, nonzero render-scene revision. */
+  revision: number;
+}
+
+export const SPARSE_SCENE_MAINTENANCE_STATE_WORDS = Object.freeze({
+  dirtyBrickCount: 0,
+  overflowFlags: 1,
+  requestedRevision: 2,
+  completedRevision: 3,
+  primitiveCount: 4,
+  dirtyRegionCount: 5,
+  binDispatch: 8,
+  rebuildDispatch: 11,
+  finalizeDispatch: 14,
+  wordCount: 20,
+} as const);
+
+export const SPARSE_SCENE_MAINTENANCE_OVERFLOW = Object.freeze({
+  dirtyBricks: 1,
+  candidates: 2,
+  topology: 4,
+} as const);
 
 function finiteVector(values: readonly number[], name: string): void {
   if (values.some((value) => !Number.isFinite(value))) throw new RangeError(`${name} must contain finite values`);
@@ -193,6 +258,44 @@ function primitiveExtent(primitive: SparseScenePrimitive): SparseSceneVector3 {
 
 function primitiveType(primitive: SparseScenePrimitive): number {
   return SPARSE_SCENE_PRIMITIVE_TYPES[primitive.kind];
+}
+
+function primitiveLocalBounds(primitive: SparseScenePrimitive): SparseSceneVector3 {
+  if (primitive.kind === "torus") {
+    primitiveExtent(primitive);
+    return [primitive.majorRadius + primitive.minorRadius, primitive.minorRadius, primitive.majorRadius + primitive.minorRadius];
+  }
+  if (primitive.kind === "capsule") {
+    primitiveExtent(primitive);
+    return [primitive.radius, primitive.halfLength + primitive.radius, primitive.radius];
+  }
+  if (primitive.kind === "cone") {
+    primitiveExtent(primitive);
+    const radius = Math.max(primitive.baseRadius, primitive.topRadius);
+    return [radius, primitive.halfHeight, radius];
+  }
+  return primitiveExtent(primitive);
+}
+
+/** Conservative world-space bounds used to invalidate and bin live scene geometry. */
+export function sparseScenePrimitiveBounds(primitive: SparseScenePrimitive): SparseSceneAxisAlignedBounds {
+  finiteVector(primitive.center, "Primitive center");
+  validateIdentity(primitive.materialId, primitive.ownerId);
+  const [x, y, z, w] = normalizedQuaternion(primitive.orientation);
+  const local = primitiveLocalBounds(primitive);
+  // Absolute rotation matrix maps an oriented local AABB to its conservative world AABB.
+  const xx = x * x; const yy = y * y; const zz = z * z;
+  const xy = x * y; const xz = x * z; const yz = y * z;
+  const wx = w * x; const wy = w * y; const wz = w * z;
+  const extent: SparseSceneVector3 = [
+    Math.abs(1 - 2 * (yy + zz)) * local[0] + Math.abs(2 * (xy - wz)) * local[1] + Math.abs(2 * (xz + wy)) * local[2],
+    Math.abs(2 * (xy + wz)) * local[0] + Math.abs(1 - 2 * (xx + zz)) * local[1] + Math.abs(2 * (yz - wx)) * local[2],
+    Math.abs(2 * (xz - wy)) * local[0] + Math.abs(2 * (yz + wx)) * local[1] + Math.abs(1 - 2 * (xx + yy)) * local[2],
+  ];
+  return {
+    minimum: [primitive.center[0] - extent[0], primitive.center[1] - extent[1], primitive.center[2] - extent[2]],
+    maximum: [primitive.center[0] + extent[0], primitive.center[1] + extent[1], primitive.center[2] + extent[2]],
+  };
 }
 
 /**
@@ -335,6 +438,12 @@ export function sampleSparseScenePrimitiveCell(
   };
 }
 
+/**
+ * Live scene maintenance. The scene primitive arena is authoritative; sparse
+ * payloads are a revisioned acceleration cache rebuilt only for affected
+ * bricks. All variable-length records share one fixed arena to stay below the
+ * portable storage-binding limit.
+ */
 export const sparseSceneProxyVoxelizationShader = /* wgsl */ `
 struct ScenePrimitive {
   centerType: vec4f,
@@ -344,15 +453,48 @@ struct ScenePrimitive {
 struct Params {
   worldOrigin: vec4f,
   cell: vec4f,
-  primitiveCount: u32,
-  finestLevel: u32,
-  _padding: vec2u,
+  publication: vec4u,
+  capacities: vec4u,
+  offsets: vec4u,
+  lanes: vec4u,
 }
-@group(0) @binding(0) var<storage, read> control: array<u32>;
-@group(0) @binding(1) var<storage, read> topology: array<u32>;
-@group(0) @binding(2) var<storage, read_write> payload: array<u32>;
-@group(0) @binding(3) var<storage, read> primitives: array<ScenePrimitive>;
+@group(0) @binding(0) var<storage, read_write> structure: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read_write> payload: array<u32>;
+@group(0) @binding(2) var<storage, read> primitives: array<ScenePrimitive>;
+@group(0) @binding(3) var<storage, read_write> maintenance: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> params: Params;
+
+const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
+const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
+const BRICK_QUEUED:u32=${SVO_BRICK_LIFECYCLE.queuedBit}u;
+const BRICK_RELOCATING:u32=${SVO_BRICK_LIFECYCLE.relocatingBit}u;
+const OCCUPANCY_READY:u32=${SVO_BRICK_OCCUPANCY.readyBit}u;
+const OCCUPANCY_OCCUPIED:u32=${SVO_BRICK_OCCUPANCY.occupiedBit}u;
+const DIRTY_BRICK_OVERFLOW:u32=${SPARSE_SCENE_MAINTENANCE_OVERFLOW.dirtyBricks}u;
+const CANDIDATE_OVERFLOW:u32=${SPARSE_SCENE_MAINTENANCE_OVERFLOW.candidates}u;
+const TOPOLOGY_INCOMPLETE:u32=${SPARSE_SCENE_MAINTENANCE_OVERFLOW.topology}u;
+const NO_MATERIAL_OWNER:u32=0xffff0000u;
+
+fn primitiveCount()->u32{return params.publication.x;}
+fn dirtyRegionCount()->u32{return params.publication.y;}
+fn finestLevel()->u32{return params.publication.z;}
+fn sceneRevision()->u32{return params.publication.w;}
+fn dirtyBrickCapacity()->u32{return params.capacities.x;}
+fn candidatesPerBrick()->u32{return params.capacities.y;}
+fn primitiveBoundsOffset()->u32{return params.capacities.z;}
+fn dirtyRegionOffset()->u32{return params.capacities.w;}
+fn dirtyBrickOffset()->u32{return params.offsets.x;}
+fn candidateOffset()->u32{return params.offsets.y;}
+fn stateOffset()->u32{return params.offsets.z;}
+fn sceneGeometryOffset()->u32{return params.lanes.x;}
+fn sceneMaterialOffset()->u32{return params.lanes.y;}
+fn topologyOffset()->u32{return params.lanes.z;}
+fn controlLoad(word:u32)->u32{return atomicLoad(&structure[word]);}
+fn topologyLoad(word:u32)->u32{return atomicLoad(&structure[topologyOffset()+word]);}
+fn topologyStore(word:u32,value:u32){atomicStore(&structure[topologyOffset()+word],value);}
+fn topologyAnd(word:u32,value:u32)->u32{return atomicAnd(&structure[topologyOffset()+word],value);}
+fn topologyOr(word:u32,value:u32)->u32{return atomicOr(&structure[topologyOffset()+word],value);}
+fn loadArenaF32(word:u32)->f32{return bitcast<f32>(atomicLoad(&maintenance[word]));}
 
 fn keyBit(low: u32, high: u32, bit: u32) -> u32 {
   if (bit >= 32u) { return (high >> (bit - 32u)) & 1u; }
@@ -367,6 +509,26 @@ fn decodeMorton(low: u32, high: u32, level: u32) -> vec3u {
     result.z += keyBit(low, high, 3u * bit + 2u) * scale;
   }
   return result;
+}
+fn leafBounds(leafIndex:u32)->mat2x3f{
+  let leafBase=controlLoad(16u)+leafIndex*4u;
+  let nodeIndex=topologyLoad(leafBase);
+  let level=topologyLoad(nodeIndex*8u+2u);
+  let brick=decodeMorton(topologyLoad(leafBase+2u),topologyLoad(leafBase+3u),level);
+  var scale=1u;
+  if(finestLevel()!=0xffffffffu&&finestLevel()>level){scale=1u<<(finestLevel()-level);}
+  let brickSize=controlLoad(11u);
+  let minimum=params.worldOrigin.xyz+vec3f(brick*brickSize*scale)*params.cell.xyz;
+  let maximum=minimum+vec3f(f32(brickSize*scale))*params.cell.xyz;
+  return mat2x3f(minimum,maximum);
+}
+fn boundsOverlap(a:mat2x3f,b:mat2x3f)->bool{
+  return all(a[0]<=b[1])&&all(b[0]<=a[1]);
+}
+fn arenaBounds(word:u32)->mat2x3f{
+  return mat2x3f(
+    vec3f(loadArenaF32(word),loadArenaF32(word+1u),loadArenaF32(word+2u)),
+    vec3f(loadArenaF32(word+4u),loadArenaF32(word+5u),loadArenaF32(word+6u)));
 }
 fn inverseRotate(point: vec3f, quaternion: vec4f) -> vec3f {
   let vector = -quaternion.xyz;
@@ -416,32 +578,112 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
   if (primitiveType == 6u) { return coneDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y, primitive.extentIdentity.z); }
   return 1e20;
 }
-fn linearIndex(gid: vec3u, groups: vec3u) -> u32 {
-  return gid.x + gid.y * groups.x * 256u + gid.z * groups.x * groups.y * 256u;
+fn linearIndex64(gid:vec3u,groups:vec3u)->u32{
+  return gid.x+gid.y*groups.x*64u+gid.z*groups.x*groups.y*64u;
+}
+fn linearIndex256(gid:vec3u,groups:vec3u)->u32{
+  return gid.x+gid.y*groups.x*256u+gid.z*groups.x*groups.y*256u;
+}
+fn writeDispatch(offset:u32,workItems:u32,workgroupSize:u32){
+  let blocks=(workItems+workgroupSize-1u)/workgroupSize;
+  let x=min(blocks,65535u);
+  var y=1u;
+  if(x>0u){y=(blocks+x-1u)/x;}
+  atomicStore(&maintenance[offset],x);
+  atomicStore(&maintenance[offset+1u],y);
+  atomicStore(&maintenance[offset+2u],1u);
+}
+
+@compute @workgroup_size(64)
+fn invalidateDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+  let leafIndex=linearIndex64(gid,groups);
+  if(leafIndex>=controlLoad(1u)){return;}
+  if(leafIndex==0u){
+    atomicStore(&maintenance[stateOffset()+2u],sceneRevision());
+    atomicStore(&maintenance[stateOffset()+4u],primitiveCount());
+    atomicStore(&maintenance[stateOffset()+5u],dirtyRegionCount());
+  }
+  let brickBounds=leafBounds(leafIndex);
+  var affected=false;
+  for(var regionIndex=0u;regionIndex<dirtyRegionCount();regionIndex+=1u){
+    if(boundsOverlap(brickBounds,arenaBounds(dirtyRegionOffset()+regionIndex*8u))){affected=true;break;}
+  }
+  if(!affected){return;}
+  let leafBase=controlLoad(16u)+leafIndex*4u;
+  let nodeIndex=topologyLoad(leafBase);
+  topologyAnd(nodeIndex*8u+7u,~OCCUPANCY_READY);
+  topologyOr(nodeIndex*8u+7u,BRICK_DIRTY|BRICK_QUEUED);
+  let dirtyIndex=atomicAdd(&maintenance[stateOffset()],1u);
+  if(dirtyIndex>=dirtyBrickCapacity()){
+    atomicOr(&maintenance[stateOffset()+1u],DIRTY_BRICK_OVERFLOW);
+    return;
+  }
+  let record=dirtyBrickOffset()+dirtyIndex*4u;
+  atomicStore(&maintenance[record],leafIndex);
+  atomicStore(&maintenance[record+1u],0u);
+  atomicStore(&maintenance[record+2u],0u);
+  atomicStore(&maintenance[record+3u],0u);
+}
+
+@compute @workgroup_size(1)
+fn prepareMaintenanceDispatch(){
+  let dirtyCount=min(atomicLoad(&maintenance[stateOffset()]),dirtyBrickCapacity());
+  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch}u,dirtyCount*primitiveCount(),256u);
+  let brickSize=controlLoad(11u);
+  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch}u,dirtyCount*brickSize*brickSize*brickSize,256u);
+  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch}u,dirtyCount,64u);
+  if(dirtyCount==0u&&atomicLoad(&maintenance[stateOffset()+1u])==0u){
+    atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
+  }
 }
 
 @compute @workgroup_size(256)
-fn voxelizeSceneProxies(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) groups: vec3u) {
-  let index = linearIndex(gid, groups);
-  let brickSize = control[11];
+fn binDirtyBrickCandidates(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+  if(primitiveCount()==0u){return;}
+  let index=linearIndex256(gid,groups);
+  let dirtyIndex=index/primitiveCount();
+  let primitiveIndex=index-dirtyIndex*primitiveCount();
+  let dirtyCount=min(atomicLoad(&maintenance[stateOffset()]),dirtyBrickCapacity());
+  if(dirtyIndex>=dirtyCount){return;}
+  let record=dirtyBrickOffset()+dirtyIndex*4u;
+  let leafIndex=atomicLoad(&maintenance[record]);
+  if(!boundsOverlap(leafBounds(leafIndex),arenaBounds(primitiveBoundsOffset()+primitiveIndex*8u))){return;}
+  let localSlot=atomicAdd(&maintenance[record+1u],1u);
+  if(localSlot<candidatesPerBrick()){
+    atomicStore(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+localSlot],primitiveIndex);
+  }else{
+    atomicStore(&maintenance[record+2u],1u);
+    atomicOr(&maintenance[stateOffset()+1u],CANDIDATE_OVERFLOW);
+  }
+}
+
+@compute @workgroup_size(256)
+fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+  let index=linearIndex256(gid,groups);
+  let brickSize = controlLoad(11u);
   let voxelsPerBrick = brickSize * brickSize * brickSize;
-  let leafIndex = index / voxelsPerBrick;
-  if (leafIndex >= control[1]) { return; }
-  let localIndex = index - leafIndex * voxelsPerBrick;
+  let dirtyIndex=index/voxelsPerBrick;
+  let dirtyCount=min(atomicLoad(&maintenance[stateOffset()]),dirtyBrickCapacity());
+  if(dirtyIndex>=dirtyCount){return;}
+  let localIndex=index-dirtyIndex*voxelsPerBrick;
+  let record=dirtyBrickOffset()+dirtyIndex*4u;
+  let leafIndex=atomicLoad(&maintenance[record]);
   let local = vec3u(localIndex % brickSize, (localIndex / brickSize) % brickSize, localIndex / (brickSize * brickSize));
-  let leafBase = control[16] + leafIndex * 4u;
-  let nodeIndex = topology[leafBase];
-  let voxelOffset = topology[leafBase + 1u];
-  let level = topology[nodeIndex * 8u + 2u];
-  let brick = decodeMorton(topology[leafBase + 2u], topology[leafBase + 3u], level);
+  let leafBase = controlLoad(16u) + leafIndex * 4u;
+  let nodeIndex = topologyLoad(leafBase);
+  let voxelOffset = topologyLoad(leafBase + 1u);
+  let level = topologyLoad(nodeIndex * 8u + 2u);
+  let brick = decodeMorton(topologyLoad(leafBase + 2u),topologyLoad(leafBase + 3u),level);
   var scale = 1u;
-  if (params.finestLevel != 0xffffffffu && params.finestLevel > level) { scale = 1u << (params.finestLevel - level); }
+  if (finestLevel() != 0xffffffffu && finestLevel() > level) { scale = 1u << (finestLevel() - level); }
   let worldCell = (brick * brickSize + local) * scale;
   let world = params.worldOrigin.xyz + (vec3f(worldCell) + 0.5 * f32(scale)) * params.cell.xyz;
 
   var bestDistance = 1e20;
-  var bestIdentity = 0xffff0000u;
-  for (var primitiveIndex = 0u; primitiveIndex < params.primitiveCount; primitiveIndex += 1u) {
+  var bestIdentity = NO_MATERIAL_OWNER;
+  let candidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
+  for(var slot=0u;slot<candidateCount;slot+=1u){
+    let primitiveIndex=atomicLoad(&maintenance[candidateOffset()+dirtyIndex*candidatesPerBrick()+slot]);
     let primitive = primitives[primitiveIndex];
     let candidate = primitiveDistance(primitive, world);
     if (candidate < bestDistance) {
@@ -451,107 +693,291 @@ fn voxelizeSceneProxies(@builtin(global_invocation_id) gid: vec3u, @builtin(num_
   }
 
   let output = voxelOffset + localIndex;
-  let geometryBase = output * 4u;
-  var previousDistance = bitcast<f32>(payload[geometryBase + 1u]);
-  let previousFraction = bitcast<f32>(payload[geometryBase + 2u]);
-  let materialOffset = control[18] + output;
-  let previousIdentity = payload[materialOffset];
-  let previousMaterial = previousIdentity & 0xffffu;
-  // Freshly published non-solver leaves are zero-filled. Treat that exact
-  // state as empty space rather than a zero-distance solid.
-  if (previousMaterial == 0u && previousFraction == 0.0 && previousDistance == 0.0) { previousDistance = 1e20; }
+  let geometryBase = sceneGeometryOffset() + output * 4u;
+  let materialOffset = sceneMaterialOffset() + output;
   let cellRadius = 0.5 * length(params.cell.xyz * f32(scale));
   let primitiveFraction = clamp(0.5 - bestDistance / (2.0 * cellRadius), 0.0, 1.0);
-  payload[geometryBase + 1u] = bitcast<u32>(min(previousDistance, bestDistance));
-  payload[geometryBase + 2u] = bitcast<u32>(max(previousFraction, primitiveFraction));
+  // The scene lane is exclusively owned by this transaction. Fluid and
+  // velocity live in disjoint payload lanes, so every material ID—including
+  // terrain and rigid-body IDs below the scenery range—can update atomically.
+  payload[geometryBase+1u]=bitcast<u32>(bestDistance);
+  payload[geometryBase+2u]=bitcast<u32>(primitiveFraction);
+  payload[materialOffset]=select(NO_MATERIAL_OWNER,bestIdentity,primitiveFraction>0.0);
+}
 
-  // Fluid, container, rigid-body, terrain, and any other authored identity wins.
-  if (previousMaterial == 0u && primitiveFraction > 0.0 && bestDistance <= previousDistance) {
-    payload[materialOffset] = bestIdentity;
+@compute @workgroup_size(64)
+fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+  let dirtyIndex=linearIndex64(gid,groups);
+  let dirtyCount=min(atomicLoad(&maintenance[stateOffset()]),dirtyBrickCapacity());
+  if(dirtyIndex==0u&&dirtyCount==0u&&atomicLoad(&maintenance[stateOffset()+1u])==0u){
+    atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
+  }
+  if(dirtyIndex>=dirtyCount){return;}
+  let record=dirtyBrickOffset()+dirtyIndex*4u;
+  let leafIndex=atomicLoad(&maintenance[record]);
+  let leafBase=controlLoad(16u)+leafIndex*4u;
+  let nodeIndex=topologyLoad(leafBase);
+  if(atomicLoad(&maintenance[record+2u])!=0u){return;}
+  let lifecycle=topologyLoad(nodeIndex*8u+7u);
+  if((lifecycle&BRICK_RELOCATING)!=0u){
+    atomicOr(&maintenance[stateOffset()+1u],TOPOLOGY_INCOMPLETE);
+    return;
+  }
+  var packed=0u;
+  if(controlLoad(11u)==8u){
+    let voxelOffset=topologyLoad(leafBase+1u);
+    var macroMask=0u;
+    var minimum=vec3u(7u);
+    var maximum=vec3u(0u);
+    var occupied=false;
+    for(var localIndex=0u;localIndex<512u;localIndex+=1u){
+      let sceneMaterial=payload[sceneMaterialOffset()+voxelOffset+localIndex]&0xffffu;
+      let fluidMaterial=payload[controlLoad(18u)+voxelOffset+localIndex]&0xffffu;
+      if(sceneMaterial==0u&&fluidMaterial==0u){continue;}
+      let local=vec3u(localIndex&7u,(localIndex>>3u)&7u,localIndex>>6u);
+      minimum=min(minimum,local);maximum=max(maximum,local);
+      let macroCoordinate=local>>vec3u(2u);
+      macroMask|=1u<<(macroCoordinate.x|(macroCoordinate.y<<1u)|(macroCoordinate.z<<2u));
+      occupied=true;
+    }
+    packed=OCCUPANCY_READY|macroMask;
+    if(occupied){
+      packed|=OCCUPANCY_OCCUPIED;
+      packed|=(minimum.x<<8u)|(minimum.y<<11u)|(minimum.z<<14u);
+      packed|=(maximum.x<<17u)|(maximum.y<<20u)|(maximum.z<<23u);
+    }
+  }
+  // Occupancy and payload become current together. ACTIVE is retained while
+  // DIRTY/QUEUED are cleared only after the complete rebuild.
+  topologyStore(nodeIndex*8u+7u,packed|(lifecycle&BRICK_ACTIVE));
+  if(dirtyIndex==0u&&atomicLoad(&maintenance[stateOffset()+1u])==0u){
+    atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
   }
 }
 `;
 
-/** GPU-only static environment voxelization over the octree's currently published leaves. */
-export class SparseSceneProxyVoxelizer {
-  readonly primitiveCount: number;
-  readonly allocatedBytes: number;
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
+  return value;
+}
 
+function checkedArenaWords(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value * 4 > 0xffffffff) throw new RangeError(`${name} exceeds WebGPU buffer limits`);
+  return value;
+}
+
+function validateBounds(bounds: SparseSceneAxisAlignedBounds, name: string): void {
+  finiteVector(bounds.minimum, `${name} minimum`);
+  finiteVector(bounds.maximum, `${name} maximum`);
+  if (bounds.minimum.some((value, axis) => value > bounds.maximum[axis])) throw new RangeError(`${name} bounds must be ordered`);
+}
+
+function packBounds(bounds: readonly SparseSceneAxisAlignedBounds[]): Uint32Array<ArrayBuffer> {
+  const words = new Uint32Array(new ArrayBuffer(bounds.length * 8 * 4));
+  const floats = new Float32Array(words.buffer);
+  bounds.forEach((bound, index) => {
+    validateBounds(bound, `Bounds ${index}`);
+    floats.set(bound.minimum, index * 8);
+    floats.set(bound.maximum, index * 8 + 4);
+  });
+  return words;
+}
+
+export interface SparseSceneMaintenanceBinding {
+  buffer: GPUBuffer;
+  stateOffsetBytes: number;
+  dirtyBrickOffsetBytes: number;
+  dirtyBrickCapacity: number;
+}
+
+/** Fixed-capacity, render-revision-driven maintenance of live scene geometry. */
+export class SparseSceneProxyVoxelizer {
+  primitiveCount = 0;
+  sceneRevision = 0;
+  readonly allocatedBytes: number;
+  readonly maintenanceBinding: SparseSceneMaintenanceBinding;
+
+  private readonly device: GPUDevice;
   private readonly tree: SparseBrickOctreeGPU;
   private readonly primitiveBuffer: GPUBuffer;
+  private readonly maintenanceArena: GPUBuffer;
+  private readonly maintenanceDispatch: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
-  private readonly pipeline: GPUComputePipeline;
+  private readonly invalidatePipeline: GPUComputePipeline;
+  private readonly preparePipeline: GPUComputePipeline;
+  private readonly binPipeline: GPUComputePipeline;
+  private readonly rebuildPipeline: GPUComputePipeline;
+  private readonly finalizePipeline: GPUComputePipeline;
   private readonly bindGroup: GPUBindGroup;
+  private readonly options: Readonly<SparseSceneProxyVoxelizerOptions>;
+  private readonly primitiveBoundsOffsetWords = 0;
+  private readonly dirtyRegionOffsetWords: number;
+  private readonly dirtyBrickOffsetWords: number;
+  private readonly candidateOffsetWords: number;
+  private readonly stateOffsetWords: number;
+  private pending = false;
   private destroyed = false;
 
   constructor(
     device: GPUDevice,
     tree: SparseBrickOctreeGPU,
-    primitives: readonly SparseScenePrimitive[],
     options: SparseSceneProxyVoxelizerOptions,
   ) {
     positiveVector(options.cellSize, "Cell size");
     const worldOrigin = options.worldOrigin ?? [0, 0, 0];
     finiteVector(worldOrigin, "World origin");
-    const packed = packSparseScenePrimitives(primitives);
+    const primitiveCapacity = positiveInteger(options.primitiveCapacity, "Primitive capacity");
+    const dirtyRegionCapacity = positiveInteger(options.dirtyRegionCapacity, "Dirty region capacity");
+    const dirtyBrickCapacity = positiveInteger(options.dirtyBrickCapacity, "Dirty brick capacity");
+    const candidatesPerDirtyBrick = positiveInteger(options.candidatesPerDirtyBrick, "Candidates per dirty brick");
+    if (options.finestLevel !== undefined && (!Number.isInteger(options.finestLevel) || options.finestLevel < 0 || options.finestLevel > 21)) {
+      throw new RangeError("Finest topology level is invalid");
+    }
+    this.device = device;
     this.tree = tree;
-    this.primitiveCount = primitives.length;
-    const primitiveBytes = Math.max(SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES, packed.byteLength);
-    this.allocatedBytes = primitiveBytes + 48;
+    this.options = Object.freeze({ ...options, worldOrigin });
+    const primitiveBytes = primitiveCapacity * SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES;
+    this.dirtyRegionOffsetWords = checkedArenaWords(primitiveCapacity * 8, "Primitive bounds arena");
+    this.dirtyBrickOffsetWords = checkedArenaWords(this.dirtyRegionOffsetWords + dirtyRegionCapacity * 8, "Dirty region arena");
+    this.candidateOffsetWords = checkedArenaWords(this.dirtyBrickOffsetWords + dirtyBrickCapacity * 4, "Dirty brick arena");
+    this.stateOffsetWords = checkedArenaWords(this.candidateOffsetWords + dirtyBrickCapacity * candidatesPerDirtyBrick, "Candidate arena");
+    const arenaWords = checkedArenaWords(this.stateOffsetWords + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.wordCount, "Scene maintenance arena");
+    const maintenanceDispatchBytes = 3 * 3 * 4;
+    this.allocatedBytes = primitiveBytes + arenaWords * 4 + maintenanceDispatchBytes + 96;
     const label = options.label ?? "Sparse scene proxies";
     this.primitiveBuffer = device.createBuffer({
       label: `${label} primitives`, size: primitiveBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
+    this.maintenanceArena = device.createBuffer({
+      label: `${label} fixed maintenance arena`, size: arenaWords * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    this.maintenanceDispatch = device.createBuffer({
+      label: `${label} maintenance dispatch arguments`, size: maintenanceDispatchBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
+    });
     this.paramsBuffer = device.createBuffer({
-      label: `${label} parameters`, size: 48,
+      label: `${label} parameters`, size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    if (packed.byteLength > 0) device.queue.writeBuffer(this.primitiveBuffer, 0, packed);
-    const parameterData = new ArrayBuffer(48);
-    const parameterFloats = new Float32Array(parameterData);
-    const parameterUints = new Uint32Array(parameterData);
-    parameterFloats.set(worldOrigin, 0);
-    parameterFloats.set(options.cellSize, 4);
-    parameterUints[8] = primitives.length;
-    if (options.finestLevel !== undefined && (!Number.isInteger(options.finestLevel) || options.finestLevel < 0 || options.finestLevel > 21)) throw new RangeError("Finest topology level is invalid");
-    parameterUints[9] = options.finestLevel ?? 0xffffffff;
-    device.queue.writeBuffer(this.paramsBuffer, 0, parameterData);
-    this.pipeline = device.createComputePipeline({
-      label: `${label} voxelization pipeline`, layout: "auto",
-      compute: {
-        module: device.createShaderModule({ label: `${label} voxelization shader`, code: sparseSceneProxyVoxelizationShader }),
-        entryPoint: "voxelizeSceneProxies",
-      },
-    });
-    this.bindGroup = device.createBindGroup({
-      label: `${label} voxelization bind group`,
-      layout: this.pipeline.getBindGroupLayout(0),
+    const shaderModule = device.createShaderModule({ label: `${label} live maintenance shader`, code: sparseSceneProxyVoxelizationShader });
+    const layout = device.createBindGroupLayout({
+      label: `${label} live maintenance layout`,
       entries: [
-        { binding: 0, resource: { buffer: tree.control } },
-        // Bind whole arenas: leaf/material offsets are GPU-resident control words 16/18.
-        { binding: 1, resource: { buffer: tree.topology } },
-        { binding: 2, resource: { buffer: tree.payload } },
-        { binding: 3, resource: { buffer: this.primitiveBuffer } },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      ],
+    });
+    const pipelineLayout = device.createPipelineLayout({ label: `${label} live maintenance pipeline layout`, bindGroupLayouts: [layout] });
+    const pipeline = (entryPoint: string, stage: string) => device.createComputePipeline({
+      label: `${label} ${stage} pipeline`, layout: pipelineLayout, compute: { module: shaderModule, entryPoint },
+    });
+    this.invalidatePipeline = pipeline("invalidateDirtyBricks", "invalidation");
+    this.preparePipeline = pipeline("prepareMaintenanceDispatch", "bounded dispatch preparation");
+    this.binPipeline = pipeline("binDirtyBrickCandidates", "candidate binning");
+    this.rebuildPipeline = pipeline("rebuildDirtyBrickPayload", "payload rebuild");
+    this.finalizePipeline = pipeline("finalizeDirtyBricks", "finalization");
+    this.bindGroup = device.createBindGroup({
+      label: `${label} live maintenance bind group`, layout,
+      entries: [
+        { binding: 0, resource: { buffer: tree.structure } },
+        { binding: 1, resource: { buffer: tree.payload } },
+        { binding: 2, resource: { buffer: this.primitiveBuffer } },
+        { binding: 3, resource: { buffer: this.maintenanceArena } },
         { binding: 4, resource: { buffer: this.paramsBuffer } },
       ],
     });
+    this.maintenanceBinding = Object.freeze({
+      buffer: this.maintenanceArena,
+      stateOffsetBytes: this.stateOffsetWords * 4,
+      dirtyBrickOffsetBytes: this.dirtyBrickOffsetWords * 4,
+      dirtyBrickCapacity,
+    });
   }
 
-  /** Encode after dense-field materialization so authored materials retain precedence. */
-  encode(encoder: GPUCommandEncoder): void {
-    if (this.destroyed || this.primitiveCount === 0) return;
-    const pass = encoder.beginComputePass({ label: "Voxelize static scene proxies into sparse bricks" });
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.dispatchWorkgroups(...sparseBrickDispatchDimensions(this.tree.voxelCapacity));
-    pass.end();
+  /** Hot-publish one authoritative render-scene revision without reallocating GPU resources. */
+  publish(publication: SparseScenePublication): void {
+    if (this.destroyed) throw new Error("Cannot publish to a destroyed scene voxelizer");
+    if (this.pending) throw new Error("Encode the pending scene revision before publishing another");
+    if (!Number.isSafeInteger(publication.revision) || publication.revision <= this.sceneRevision || publication.revision > 0xffffffff) {
+      throw new RangeError("Scene revision must be a strictly increasing nonzero uint32");
+    }
+    if (publication.primitives.length > this.options.primitiveCapacity) throw new RangeError("Live scene primitive capacity exceeded");
+    if (publication.dirtyRegions.length === 0) throw new RangeError("A scene publication must cover its old/new dirty bounds");
+    if (publication.dirtyRegions.length > this.options.dirtyRegionCapacity) throw new RangeError("Live scene dirty-region capacity exceeded");
+    const packed = packSparseScenePrimitives(publication.primitives);
+    const primitiveBounds = packBounds(publication.primitives.map(sparseScenePrimitiveBounds));
+    const dirtyBounds = packBounds(publication.dirtyRegions);
+    if (packed.byteLength > 0) this.device.queue.writeBuffer(this.primitiveBuffer, 0, packed);
+    if (primitiveBounds.byteLength > 0) this.device.queue.writeBuffer(this.maintenanceArena, this.primitiveBoundsOffsetWords * 4, primitiveBounds);
+    this.device.queue.writeBuffer(this.maintenanceArena, this.dirtyRegionOffsetWords * 4, dirtyBounds);
+    const parameterData = new ArrayBuffer(96);
+    const floats = new Float32Array(parameterData);
+    const uints = new Uint32Array(parameterData);
+    floats.set(this.options.worldOrigin ?? [0, 0, 0], 0);
+    floats.set(this.options.cellSize, 4);
+    uints.set([publication.primitives.length, publication.dirtyRegions.length, this.options.finestLevel ?? 0xffffffff, publication.revision], 8);
+    uints.set([this.options.dirtyBrickCapacity, this.options.candidatesPerDirtyBrick, this.primitiveBoundsOffsetWords, this.dirtyRegionOffsetWords], 12);
+    uints.set([this.dirtyBrickOffsetWords, this.candidateOffsetWords, this.stateOffsetWords, 0], 16);
+    uints.set([
+      this.tree.sceneGeometryOffsetBytes / 4,
+      this.tree.sceneMaterialOwnerOffsetBytes / 4,
+      this.tree.topologyOffsetBytes / 4,
+      0,
+    ], 20);
+    this.device.queue.writeBuffer(this.paramsBuffer, 0, parameterData);
+    this.primitiveCount = publication.primitives.length;
+    this.sceneRevision = publication.revision;
+    this.pending = true;
+  }
+
+  /** Encode invalidation, brick-local binning, authoritative rebuild, then finalization. */
+  encodeMaintenance(encoder: GPUCommandEncoder): boolean {
+    if (this.destroyed || !this.pending) return false;
+    encoder.clearBuffer(this.maintenanceArena, this.stateOffsetWords * 4, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.wordCount * 4);
+    const run = (label: string, pipeline: GPUComputePipeline, workItems: number, workgroupSize: number) => {
+      const pass = encoder.beginComputePass({ label });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.bindGroup);
+      pass.dispatchWorkgroups(...sparseBrickDispatchDimensions(Math.ceil(workItems * 256 / workgroupSize)));
+      pass.end();
+    };
+    run("Invalidate live scene dirty bricks", this.invalidatePipeline, this.tree.leafCapacity, 64);
+    run("Prepare live scene maintenance dispatches", this.preparePipeline, 1, 1);
+    encoder.copyBufferToBuffer(
+      this.maintenanceArena,
+      (this.stateOffsetWords + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch) * 4,
+      this.maintenanceDispatch,
+      0,
+      3 * 3 * 4,
+    );
+    const runIndirect = (label: string, pipeline: GPUComputePipeline, stateWord: number) => {
+      const pass = encoder.beginComputePass({ label });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.bindGroup);
+      pass.dispatchWorkgroupsIndirect(
+        this.maintenanceDispatch,
+        (stateWord - SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch) * 4,
+      );
+      pass.end();
+    };
+    runIndirect("Bin live scene primitives into dirty bricks", this.binPipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch);
+    runIndirect("Rebuild live scene dirty brick payloads", this.rebuildPipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch);
+    runIndirect("Finalize live scene dirty bricks", this.finalizePipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch);
+    this.pending = false;
+    return true;
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.primitiveBuffer.destroy();
+    this.maintenanceArena.destroy();
+    this.maintenanceDispatch.destroy();
     this.paramsBuffer.destroy();
   }
 }

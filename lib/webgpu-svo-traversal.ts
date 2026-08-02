@@ -517,6 +517,9 @@ struct SvoTraversalHit {
 @group(0) @binding(0) var<storage, read> svoControl: array<u32>;
 @group(0) @binding(1) var<storage, read> svoNodes: array<SvoNode>;
 @group(0) @binding(2) var<storage, read> svoLeaves: array<SvoLeaf>;
+fn svoControlLoad(index:u32)->u32{return svoControl[index];}
+fn svoNodeLoad(index:u32)->SvoNode{return svoNodes[index];}
+fn svoLeafLoad(index:u32)->SvoLeaf{return svoLeaves[index];}
 
 fn svoMiss(status: u32, visits: u32) -> SvoTraversalHit {
   return SvoTraversalHit(status, visits, SVO_INVALID, SVO_INVALID, 0u, 0u, 0.0, 0.0);
@@ -609,7 +612,7 @@ fn svoTraversalContinuationBegin(
   (*continuation).stackSize = 0u;
   (*continuation).currentBoundsValid = 0u;
   (*continuation).status = SVO_STATUS_CONTINUE;
-  if (svoControl[12] != 0u) {
+  if (svoControlLoad(12u) != 0u) {
     (*continuation).status = SVO_STATUS_SOURCE_OVERFLOW;
     return;
   }
@@ -617,7 +620,7 @@ fn svoTraversalContinuationBegin(
     (*continuation).status = SVO_STATUS_MISS;
     return;
   }
-  let root = svoNodes[0];
+  let root = svoNodeLoad(0u);
   if (root.address.x != 0u || root.address.y != 0u || root.address.z != 0u) {
     (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
     return;
@@ -667,7 +670,7 @@ fn svoTraversalContinuationNext(
       (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
       return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
     }
-    let node = svoNodes[current.nodeIndex];
+    let node = svoNodeLoad(current.nodeIndex);
     visits += 1u;
     if (node.address.z > mapping.maximumDepth) {
       (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
@@ -682,7 +685,7 @@ fn svoTraversalContinuationNext(
         (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
         return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
       }
-      let leaf = svoLeaves[node.links.z];
+      let leaf = svoLeafLoad(node.links.z);
       if (leaf.topology.x != current.nodeIndex) {
         (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
         return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
@@ -725,7 +728,7 @@ fn svoTraversalContinuationNext(
         (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
         return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
       }
-      let child = svoNodes[childIndex];
+      let child = svoNodeLoad(childIndex);
       if (child.address.z != node.address.z + 1u) {
         (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
         return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
@@ -786,9 +789,9 @@ fn svoTraversalContinuationNext(
 }
 
 fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalDepth: u32) -> SvoTraversalHit {
-  if (svoControl[12] != 0u) { return svoMiss(SVO_STATUS_SOURCE_OVERFLOW, 0u); }
+  if (svoControlLoad(12u) != 0u) { return svoMiss(SVO_STATUS_SOURCE_OVERFLOW, 0u); }
   if (mapping.nodeCount == 0u) { return svoMiss(SVO_STATUS_MISS, 0u); }
-  let root = svoNodes[0];
+  let root = svoNodeLoad(0u);
   if (root.address.x != 0u || root.address.y != 0u || root.address.z != 0u) {
     return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, 0u);
   }
@@ -808,13 +811,13 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
     traversalGuard += 1u;
     if (visits >= visitLimit) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
     if (current.nodeIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
-    let node = svoNodes[current.nodeIndex];
+    let node = svoNodeLoad(current.nodeIndex);
     visits += 1u;
     if (node.address.z > mapping.maximumDepth) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
     if (node.address.z > maximumTraversalDepth) { return svoMiss(SVO_STATUS_WORK_EXHAUSTED, visits); }
     if (node.links.z != SVO_INVALID) {
       if (node.links.z >= mapping.leafCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
-      let leaf = svoLeaves[node.links.z];
+      let leaf = svoLeafLoad(node.links.z);
       if (leaf.topology.x != current.nodeIndex) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
       return SvoTraversalHit(SVO_STATUS_HIT, visits, current.nodeIndex, node.links.z,
         leaf.topology.y, node.address.z, current.tEnter, current.tExit);
@@ -844,7 +847,7 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
       if ((mask & (1u << octant)) == 0u) { continue; }
       let childIndex = node.links.x + svoPopcountBefore(mask, octant);
       if (childIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
-      let child = svoNodes[childIndex];
+      let child = svoNodeLoad(childIndex);
       if (child.address.z != node.address.z + 1u) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
       if (overflowPending) { continue; }
       let childBounds = svoChildBounds(parentBounds, octant);
@@ -995,7 +998,7 @@ ${aabbFallback}
       for (var validationOctant = 0u; validationOctant < 8u; validationOctant += 1u) {
         if ((mask & (1u << validationOctant)) == 0u) { continue; }
         let validationIndex = node.links.x + svoPopcountBefore(mask, validationOctant);
-        if (validationIndex >= mapping.nodeCount || svoNodes[validationIndex].address.z != node.address.z + 1u) {
+        if (validationIndex >= mapping.nodeCount || svoNodeLoad(validationIndex).address.z != node.address.z + 1u) {
           (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
           return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
         }
@@ -1054,7 +1057,7 @@ ${aabbFallback}
       for (var validationOctant = 0u; validationOctant < 8u; validationOctant += 1u) {
         if ((mask & (1u << validationOctant)) == 0u) { continue; }
         let validationIndex = node.links.x + svoPopcountBefore(mask, validationOctant);
-        if (validationIndex >= mapping.nodeCount || svoNodes[validationIndex].address.z != node.address.z + 1u) {
+        if (validationIndex >= mapping.nodeCount || svoNodeLoad(validationIndex).address.z != node.address.z + 1u) {
           return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
         }
       }
@@ -1111,6 +1114,13 @@ export interface WebgpuSvoTraversalBindings {
   childEnumeration?: "aabb" | "parametric";
   /** Experimental private stack capacity; omitted keeps the 32-entry production stack. */
   stackCapacity?: 8 | 16 | 32;
+  /** One raw structural arena. Offsets are WGSL u32 word-offset expressions. */
+  arena?: Readonly<{
+    binding: number;
+    controlOffset: string;
+    nodeOffset: string;
+    leafOffset: string;
+  }>;
 }
 
 /** Remap the helper's three bindings when composing it into a larger renderer shader. */
@@ -1121,10 +1131,15 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
   const leaves = bindings.leaves ?? 2;
   const childEnumeration = bindings.childEnumeration ?? "aabb";
   const stackCapacity = bindings.stackCapacity ?? 32;
+  const arena = bindings.arena;
   for (const [label, value] of Object.entries({ group, control, nodes, leaves })) {
     if (!Number.isInteger(value) || value < 0) throw new RangeError(`SVO WGSL ${label} must be a non-negative integer`);
   }
-  if (new Set([control, nodes, leaves]).size !== 3) throw new RangeError("SVO WGSL bindings must be distinct");
+  if (!arena && new Set([control, nodes, leaves]).size !== 3) throw new RangeError("SVO WGSL bindings must be distinct");
+  if (arena && (!Number.isInteger(arena.binding) || arena.binding < 0
+    || !arena.controlOffset || !arena.nodeOffset || !arena.leafOffset)) {
+    throw new RangeError("SVO WGSL structural arena requires one binding and three word-offset expressions");
+  }
   if (childEnumeration !== "aabb" && childEnumeration !== "parametric") {
     throw new RangeError("SVO WGSL child enumeration must be aabb or parametric");
   }
@@ -1147,6 +1162,20 @@ export function createWebgpuSvoTraversalWGSL(bindings: WebgpuSvoTraversalBinding
     source = source
       .replace("const SVO_STACK_CAPACITY: u32 = 32u;", `const SVO_STACK_CAPACITY: u32 = ${stackCapacity}u;`)
       .replaceAll("array<SvoStackEntry, 32>", `array<SvoStackEntry, ${stackCapacity}>`);
+  }
+  if (arena) {
+    const declarations = `@group(0) @binding(0) var<storage, read> svoControl: array<u32>;
+@group(0) @binding(1) var<storage, read> svoNodes: array<SvoNode>;
+@group(0) @binding(2) var<storage, read> svoLeaves: array<SvoLeaf>;
+fn svoControlLoad(index:u32)->u32{return svoControl[index];}
+fn svoNodeLoad(index:u32)->SvoNode{return svoNodes[index];}
+fn svoLeafLoad(index:u32)->SvoLeaf{return svoLeaves[index];}`;
+    const arenaDeclarations = `@group(${group}) @binding(${arena.binding}) var<storage,read> svoStructure:array<u32>;
+fn svoStructureWords4(offset:u32)->vec4u{return vec4u(svoStructure[offset],svoStructure[offset+1u],svoStructure[offset+2u],svoStructure[offset+3u]);}
+fn svoControlLoad(index:u32)->u32{return svoStructure[${arena.controlOffset}+index];}
+fn svoNodeLoad(index:u32)->SvoNode{let base=${arena.nodeOffset}+index*8u;return SvoNode(svoStructureWords4(base),svoStructureWords4(base+4u));}
+fn svoLeafLoad(index:u32)->SvoLeaf{let base=${arena.leafOffset}+index*4u;return SvoLeaf(svoStructureWords4(base));}`;
+    return source.replace(declarations, arenaDeclarations);
   }
   return source
     .replace("@group(0) @binding(0) var<storage, read> svoControl", `@group(${group}) @binding(${control}) var<storage, read> svoControl`)

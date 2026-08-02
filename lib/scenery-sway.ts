@@ -4,42 +4,36 @@ import type { SvoPrimitiveDescriptor } from "./svo-primitive-abi";
 /**
  * Authored scenery motion — the gust that moves a tree, not a rigid body.
  *
- * A swaying prop never enters the solve and is not re-voxelized: it stays the
- * same immutable analytic primitive the sparse world already owns, re-posed in
- * the render ABI every presented frame. That is only sound while the re-posed
- * surface stays inside the cell ownership the proxy voxelizer wrote once at
- * bring-up. That pass gives a cell the nearest primitive's identity whenever
- * the cell centre lies within half a cell diagonal of its surface, so motion
- * held inside that margin can never carry a surface into a cell that names some
- * other primitive — and no brick, occupancy mip, or static publication has to
- * be rebuilt to follow it. `sceneryOwnershipMargin_m` is that budget, and
- * The garden's specimen tree is held to it by tests/scenery-sway.test.ts.
+ * The exact analytic primitive is re-posed every presented frame and the same
+ * keyed update is sent to sparse-scene maintenance. Old/new bounds localize
+ * voxel payload and derived-page repair; motion that reaches uncovered space
+ * explicitly schedules topology growth. The amplitude below is therefore a
+ * performance-locality target, not a correctness boundary or a special case
+ * for one authored environment.
  *
- * What the sway therefore does not move is the baked cone-lighting pyramid: a
- * swaying canopy's soft shadow stays at its reference pose. Everything the
- * frame evaluates against the live surface — the silhouette, the exact shadow
- * path, normals, and every distance-dependent light term — follows the motion.
+ * Geometry, cone lighting, exact visibility, normals, and distance-dependent
+ * light terms all consume live generations. Page-local validity allows the
+ * rest of the scene to remain warm while the affected region is rebuilt.
  */
 
-/** Peak surface excursion is held to this fraction of the ownership margin. */
+/** Peak surface excursion targets this fraction of one finest-cell locality radius. */
 export const SCENERY_SWAY_MARGIN_FRACTION = 0.8;
 
 /**
- * A cell centre within half a cell diagonal of a surface takes that surface's
- * identity, which is what the proxy voxelizer's coverage fraction resolves to.
- * The finest cell is the conservative choice: coarsened environment levels only
- * ever leave a larger margin.
+ * Half a finest-cell diagonal is a useful locality scale for authored motion.
+ * It controls expected dirty-page cost only; sparse maintenance remains the
+ * correctness mechanism when a primitive moves farther or changes shape.
  */
-export function sceneryOwnershipMargin_m(finestCellSize_m: number): number {
+export function scenerySvoLocalityRadius_m(finestCellSize_m: number): number {
   if (!(finestCellSize_m > 0) || !Number.isFinite(finestCellSize_m)) {
     throw new RangeError("Scenery ownership margin needs a positive finite cell size");
   }
   return 0.5 * Math.sqrt(3) * finestCellSize_m;
 }
 
-/** The excursion an authored sway may spend, in metres, at the given lattice. */
+/** The locality-target excursion for authored sway, in metres. */
 export function sceneryMaximumSwayExcursion_m(finestCellSize_m: number): number {
-  return SCENERY_SWAY_MARGIN_FRACTION * sceneryOwnershipMargin_m(finestCellSize_m);
+  return SCENERY_SWAY_MARGIN_FRACTION * scenerySvoLocalityRadius_m(finestCellSize_m);
 }
 
 /**
@@ -59,7 +53,7 @@ export const SCENERY_WIND = Object.freeze({
 /**
  * Authored motion for one primitive. Both amplitudes are peaks: the wave below
  * spans [-1, 1], so a prop passes through its authored rest pose twice a cycle
- * and the catalog's static geometry stays the honest centre of the motion.
+ * and the catalog's scene geometry stays the honest centre of the motion.
  */
 export interface EnvironmentProxySway {
   /** World point the bend swings this primitive about — a trunk base, a stem root. */
@@ -168,7 +162,7 @@ export function scenerySwayExcursion_m(descriptor: SvoPrimitiveDescriptor, sway:
 /**
  * Re-pose one primitive for the given presentation time. Identity, material,
  * and every dimension are untouched: only the transform moves, which is what
- * keeps the published sparse world valid underneath it.
+ * lets the sparse updater compare one keyed primitive generation to the next.
  */
 export function swayedPrimitiveDescriptor(
   descriptor: SvoPrimitiveDescriptor,
