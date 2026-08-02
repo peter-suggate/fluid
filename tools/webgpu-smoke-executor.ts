@@ -3024,6 +3024,10 @@ async function runGPU(
         airSupportControl: readonly number[];
         airSupportTerminalScratch: readonly number[];
         finePageDeltaHeader: readonly number[];
+        airSupportFallbacks?: readonly number[];
+        airSupportTopologyFailureLatch?: readonly number[];
+        airSupportFailureCounts?: readonly number[];
+        airSupportFailureTopology?: Record<string, unknown>;
       } | undefined>;
       readSPGridHierarchyCensus(): Promise<{
         levels: readonly Readonly<Record<string, number>>[];
@@ -3037,6 +3041,7 @@ async function runGPU(
         epoch: number; machineryReduction: number;
       } | null>;
       readPowerHybridClassSymmetry(): Promise<Record<string, unknown> | undefined>;
+      readCoarseSurfaceTrackerReceipt(): Promise<Record<string, unknown> | undefined>;
     };
     workAccountingPlan?: Record<string, unknown>;
     globalFineLevelSetSource?: WebGPUFineLevelSetBrickSource;
@@ -3065,6 +3070,14 @@ async function runGPU(
   }
   if (powerHybridClassSymmetry) console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
     phase: "power-hybrid-class-symmetry", metrics: powerHybridClassSymmetry }));
+  // Factor-one only. `completions` below `advances` is the signature of a
+  // surface the raster held rather than refreshed, which is what an apparent
+  // two-state flicker looks like from inside the tracker.
+  const coarseTrackerReceipt = process.env.FLUID_COARSE_TRACKER_RECEIPT === "1"
+    ? await diagnosticProjection.octreeProjection?.readCoarseSurfaceTrackerReceipt()
+    : undefined;
+  if (coarseTrackerReceipt) console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+    phase: "coarse-tracker-receipt", metrics: coarseTrackerReceipt }));
   const finePlan = diagnosticProjection.globalFineLevelSetSource?.plan;
   const algorithmDiagnostics = terminalAlgorithmState || spgridHierarchy || powerHybridCensus ? {
     topologyControl: terminalAlgorithmState?.topologyControl,
@@ -3072,6 +3085,13 @@ async function runGPU(
     structuredBoundaryControl: terminalAlgorithmState?.structuredBoundaryControl,
     airSupportControl: terminalAlgorithmState?.airSupportControl,
     airSupportTerminalScratch: terminalAlgorithmState?.airSupportTerminalScratch,
+    // Both latches were authored with no consumer. They are the only record of
+    // why a Section 5 transaction declined, and the transaction declines often
+    // enough on the factor-one lane to hold the rendered surface.
+    airSupportFallbacks: terminalAlgorithmState?.airSupportFallbacks,
+    airSupportTopologyFailureLatch: terminalAlgorithmState?.airSupportTopologyFailureLatch,
+    airSupportFailureCounts: terminalAlgorithmState?.airSupportFailureCounts,
+    airSupportFailureTopology: terminalAlgorithmState?.airSupportFailureTopology,
     finePageDeltaHeader: terminalAlgorithmState?.finePageDeltaHeader,
     finePlan: finePlan ? {
       maximumResidentBricks: finePlan.maximumResidentBricks,

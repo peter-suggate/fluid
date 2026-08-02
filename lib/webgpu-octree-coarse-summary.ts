@@ -77,6 +77,7 @@ export function planOctreeCoarseSummary(
 export class WebGPUOctreeCoarseSummary {
   readonly plan: OctreeCoarseSummaryPlan;
   readonly directory: GPUBuffer;
+  private readonly domainVolume: number;
   private readonly state: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly pipelines: Record<string, GPUComputePipeline> = {};
@@ -104,6 +105,7 @@ export class WebGPUOctreeCoarseSummary {
       throw new RangeError("Coarse-only tracker requires a power-of-two maximum leaf size");
     }
     this.plan = planOctreeCoarseSummary(dimensions, coarse.rowCapacity);
+    this.domainVolume = dimensions[0] * dimensions[1] * dimensions[2];
     const maximumBinding = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
     if (this.plan.directoryWords * 4 > maximumBinding) {
       throw new RangeError("Coarse-only summary hierarchy exceeds the device storage binding limit");
@@ -111,7 +113,10 @@ export class WebGPUOctreeCoarseSummary {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.directory = device.createBuffer({ label: "coarse-only direct summary hierarchy",
       size: this.plan.directoryWords * 4, usage: storage });
-    this.state = device.createBuffer({ label: "coarse-only summary build state", size: 80, usage: storage });
+    // 32 words. The receipt tallies live at 19/20, and a runtime-sized
+    // `array<atomic<u32>>` silently drops out-of-bounds atomics rather than
+    // faulting, so an 80-byte buffer made `state[20]` a write into nowhere.
+    this.state = device.createBuffer({ label: "coarse-only summary build state", size: 128, usage: storage });
     this.params = device.createBuffer({ label: "coarse-only summary parameters", size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const words = new Uint32Array(16);
@@ -227,6 +232,42 @@ export class WebGPUOctreeCoarseSummary {
     dispatch("publishSummary", 1);
     dispatch("publishDenseComplement", this.air.layout.ownerDirectoryCellCapacity);
     dispatch("correctCoarseDirectory", this.coarse.rowCapacity);
+  }
+
+  /** Diagnostic-only receipt. `completions` counts advances whose prediction
+   * covered the whole lattice; `advances` counts every encoded publication.
+   * A ratio below one means consumers saw a held surface on the difference. */
+  async readReceipt(): Promise<Readonly<{ advances: number; completions: number;
+    predictedCells: number; domainVolume: number; published: boolean; error: number;
+    predictedVolume: number; targetVolume: number; interfaceCells: number;
+    correction: number; bank: number;
+    airUnpublishedAdvances: number; airErrorWord: number; airValidWord: number;
+    airLayoutWord: number; airArenaShort: number;
+    airFirstErrorStage: number; airFirstErrorItem: number }>> {
+    const readback = this.device.createBuffer({ label: "coarse-only tracker receipt readback",
+      size: 192, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder({ label: "Read coarse-only tracker receipt" });
+    encoder.copyBufferToBuffer(this.state, 0, readback, 0, 128);
+    encoder.copyBufferToBuffer(this.directory, 0, readback, 128, 64);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange().slice(0));
+      const header = 32;
+      return { advances: words[19], completions: words[20],
+        predictedCells: words[18], domainVolume: this.domainVolume,
+        published: words[header + 9] === 0x8000_0000, error: words[header + 0],
+        predictedVolume: words[12] / 4096, targetVolume: words[14] / 4096,
+        interfaceCells: words[13],
+        correction: new Float32Array(new Uint32Array([words[15]]).buffer)[0],
+        bank: words[17] & 1,
+        airUnpublishedAdvances: words[21], airErrorWord: words[22],
+        airValidWord: words[23], airLayoutWord: words[24], airArenaShort: words[25],
+        airFirstErrorStage: words[26] >>> 24, airFirstErrorItem: words[26] & 0x00ff_ffff };
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
   }
 
   destroy(): void {
@@ -385,7 +426,11 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
 @compute @workgroup_size(256)fn resetSummary(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let i=linear(w,n,l);if(i<phiOffset()){atomicStore(&directory[i],0u);}
  // Target volume, transport initialization and active bank survive rebuilds.
- if(i<arrayLength(&state)&&(i<14u||i==15u||i>=18u)){atomicStore(&state[i],0u);}}
+ // So do the receipt tallies at 19/20: they count advances encoded against
+ // advances that actually completed, so a single readback at the end of a run
+ // reports how intermittent the tracker was. Only 18, the per-advance
+ // prediction counter the completeness test reads, is cleared here.
+ if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u)){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn ensureSummaryPages(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let e=coarse.entries[row];let bl=rowBaseAndLevel(e);if(bl.x==INVALID||(e.flags&9u)!=9u){atomicOr(&state[2],1u);return;}
@@ -424,7 +469,16 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
   if(rank==INVALID){atomicOr(&state[2],2u);continue;}let base=entryBase(rank);atomicMin(&directory[base+1u],ordered(e.minimumPhi));
   atomicMax(&directory[base+2u],ordered(e.maximumPhi));atomicMin(&directory[base+3u],bitcast<u32>(ma));}}
 @compute @workgroup_size(256)fn predictSummaryCells(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
- @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item>=p.domainVolume||!airPublished()){return;}
+ @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);
+ // Diagnostic-only, one lane per advance. An unpublished air support is the
+ // single reason this pass can decline, and the three control words say which
+ // clause of the receipt failed, so record them rather than inferring later.
+ if(item==0u&&!airPublished()){atomicAdd(&state[21],1u);
+  if(p.airControl+15u<arrayLength(&air)){atomicStore(&state[22],air[p.airControl]);
+   atomicStore(&state[23],air[p.airControl+13u]);atomicStore(&state[24],air[p.airControl+14u]);
+   atomicStore(&state[26],air[p.airControl+1u]);}
+  else{atomicStore(&state[25],1u);}}
+ if(item>=p.domainVolume||!airPublished()){return;}
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));let point=vec3f(q)+vec3f(0.5);
  let initialized=atomicLoad(&state[16])!=0u;let readBank=atomicLoad(&state[17])&1u;let writeBank=select(0u,1u-readBank,initialized);
  var sample=select(interpolatedCoarseAt(point),densePhiAt(readBank,point),initialized);let h=coarse.physicalCellSize;

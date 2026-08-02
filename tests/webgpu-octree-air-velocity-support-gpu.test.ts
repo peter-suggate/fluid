@@ -325,7 +325,7 @@ test("the second same-epoch Section 5 publication reuses immutable topology and 
   assert.match(prefix, /if\(lane==255u&&!reuse\).*writeDispatch\(43u.*writeDispatch\(66u/s,
     "the prefix must not revive topology or owner-hash work after identity reuse zeroed it");
   assert.match(begin,
-    /letretainedGraph=existingReady&&\(p\.capturePreceding&2u\)!=0u&&atomicLoad\(&faceFrontier\[11u\]\)==RETAINED_GRAPH_VALID&&precedingSeeds<=3u\*p\.candidateCapacity&&precedingSeeds<=p\.faceCapacity/s,
+    /letretainedGraph=existingReady&&\(p\.capturePreceding&16u\)!=0u&&atomicLoad\(&faceFrontier\[11u\]\)==RETAINED_GRAPH_VALID&&precedingSeeds<=3u\*p\.candidateCapacity&&precedingSeeds<=p\.faceCapacity/s,
     "retained values require the same settled receipt because live seed magnitude participates in winner ordering");
   const clear = shader.slice(shader.indexOf("fnclearAirSupportDirectory"),
     shader.indexOf("fnclearAirSupportCandidates"));

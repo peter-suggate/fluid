@@ -294,6 +294,24 @@ export function octreeAirSupportRetainedGraphEnabled(
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_RETAINED_GRAPH === "1";
 }
 
+/**
+ * Clear the preceding advance's fine-candidate count before the begin pass
+ * takes the candidate bound from it.
+ *
+ * Default on; `0` restores the historical order for A/B only. With the reset
+ * deferred, the published candidate extent and its block count included a
+ * stale fine block that the candidate dispatch shape did not, so an advance
+ * with no compact-fine pass summed stale tail block counts into the support
+ * count and left its tail records unscattered.
+ */
+export function octreeAirSupportCandidateBoundResetEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_CANDIDATE_BOUND_RESET !== "0";
+}
+
 export function octreeAirSupportChangedFrontierEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
@@ -1593,6 +1611,16 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   // candidates keep their indices, the fine block still follows every row
   // candidate, so the surviving candidates keep their relative order and
   // therefore their ranks, directory winners and support-record slots.
+  // The fine block is counted later, by the compact-fine prefix, which
+  // republishes this bound, its block count and the candidate dispatch shape
+  // as one set. Taking the bound before clearing the preceding advance's fine
+  // count inflated the candidate extent and its block count while the shape at
+  // scratch[19] stayed row-sized. On an advance with no compact-fine pass
+  // nothing repaired that: the block prefix summed stale tail block counts, so
+  // the support count exceeded what the scatter covered and the tail records
+  // stayed zero -- rejected downstream as a size-zero identity, which declines
+  // the whole publication.
+  ${octreeAirSupportCandidateBoundResetEnabled() ? "sw(30u,0u);" : ""}
   let candidates=candidateBoundFor(rows);
   let blocks=(candidates+255u)/256u;sw(6u,candidates);sw(7u,blocks);sw(8u,0u);sw(9u,p.supportCapacity);
   if(reuseTopology){sw(8u,precedingSupportRows);}
@@ -1607,7 +1635,8 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   // the exact touched-slot ledger that owns that hash. Rotating the ledger on
   // reuse would leave the next fresh publication with no slots to clear.
   if(!reuseTopology){sw(72u,s(71u));sw(71u,0u);}
-  sw(29u,0u);sw(28u,0u);sw(30u,0u);sw(40u,p.expectedFineGeneration);
+  sw(29u,0u);sw(28u,0u);sw(40u,p.expectedFineGeneration);
+  ${octreeAirSupportCandidateBoundResetEnabled() ? "" : "sw(30u,0u);"}
   sw(41u,0u);sw(42u,INVALID);
   if(atomicLoad(&accepted.flags)!=0u||accepted.epoch==0u||accepted.bank>1u
       ||accepted.rowCount==0u||accepted.rowCount>p.rowCapacity||accepted.slotCount>p.slotCapacity){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
@@ -2894,7 +2923,11 @@ var<workgroup> reconstructCompleted:array<u32,256>;
     if(item<s(8u)){let failedAt=p.recordOffset+item*${STRUCTURED_AIR_SUPPORT_RECORD_WORDS}u;
       sw(51u,r(failedAt));sw(52u,r(failedAt+1u));sw(53u,r(failedAt+2u));sw(54u,r(failedAt+3u));
       sw(55u,r(failedAt+4u));sw(56u,r(failedAt+6u));sw(57u,r(failedAt+7u));sw(58u,r(failedAt+5u));
-      sw(59u,first);}}
+      sw(59u,first);}
+    // Counts as the rejection saw them. A zero-filled record inside the live
+    // support extent means the scatter left a hole, which these three
+    // cardinalities distinguish from a genuine grading violation.
+    sw(60u,s(6u));sw(61u,s(8u));sw(62u,s(47u));}
   if((first>>24u)==8u){let row=first&0x00ffffffu;let directRows=s(2u);var rejected=vec4f(0.);
     if(row<directRows&&row<arrayLength(&directAirVectors)){rejected=directAirVectors[row];}
     else if(row>=directRows){let support=row-directRows;let mirror=p.recordVectorOffset+4u*support;

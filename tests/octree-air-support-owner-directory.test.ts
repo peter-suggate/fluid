@@ -6,7 +6,8 @@ import {
   octreeAirSupportOwnerHashStartWGSL,
   planOctreeAirVelocitySupport,
 } from "../lib/webgpu-octree-air-velocity-support";
-import { octreeAirVelocitySupportPublicationWGSL } from "../lib/webgpu-octree-air-velocity-support-gpu";
+import { octreeAirSupportCandidateBoundResetEnabled,
+  octreeAirVelocitySupportPublicationWGSL } from "../lib/webgpu-octree-air-velocity-support-gpu";
 import { structuredVelocityDynamicsWGSL } from "../lib/webgpu-octree-structured-dynamics";
 import { structuredFineLevelSetTransportWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
 import { coarseSummaryWGSL } from "../lib/webgpu-octree-coarse-summary";
@@ -105,4 +106,45 @@ test("the directory's slot capacity is derivable identically on both sides", () 
     assert.ok(layout.ownerDirectorySlotCapacity >= 2 * (rowCapacity + layout.supportCapacity),
       "the <=0.5 load factor that bounds the probe run must hold");
   }
+});
+
+/**
+ * `candidateBoundFor` adds the fine-candidate count at `scratch[30]` to the
+ * row-candidate extent. The begin pass publishes that bound as the candidate
+ * count and block count, but the candidate *dispatch shape* it publishes
+ * alongside covers the row extent only -- the compact-fine prefix republishes
+ * bound, block count and shape together once it knows the real fine count.
+ *
+ * So the bound must be taken after the preceding advance's fine count is
+ * cleared. While the clear came later in the same function, an advance with no
+ * compact-fine pass published a bound and block count carrying a stale fine
+ * block that its dispatch never covered: the block prefix summed stale tail
+ * block counts, the support count exceeded what the scatter had written, and
+ * the unwritten tail records were rejected downstream as size-zero identities.
+ * That declined the whole Section 5 publication on 47 of 112 advances of the
+ * factor-one `symmetric-expansion` lane, and every declined advance left the
+ * rendered surface held rather than refreshed.
+ */
+test("the air-support candidate bound is taken after the preceding fine count is cleared", () => {
+  const source = octreeAirVelocitySupportPublicationWGSL;
+  const begin = source.indexOf("fn beginAirSupportPublication");
+  assert.ok(begin >= 0, "the begin publication pass must exist");
+  const body = source.slice(begin);
+  const end = body.indexOf("fn ownerHashCapacity");
+  assert.ok(end > 0, "the begin pass must be delimited by the following function");
+  const scoped = body.slice(0, end);
+  const reset = scoped.indexOf("sw(30u,0u)");
+  const bound = scoped.indexOf("candidateBoundFor(rows)");
+  assert.ok(reset >= 0, "the begin pass must clear the preceding fine-candidate count");
+  assert.ok(bound >= 0, "the begin pass must take the candidate bound");
+  assert.ok(reset < bound,
+    "the fine-candidate count must be cleared before the candidate bound reads it");
+});
+
+test("the candidate-bound reset is on unless explicitly disabled for A/B", () => {
+  assert.equal(octreeAirSupportCandidateBoundResetEnabled({}), true);
+  assert.equal(octreeAirSupportCandidateBoundResetEnabled(
+    { FLUID_OCTREE_AIR_SUPPORT_CANDIDATE_BOUND_RESET: "1" }), true);
+  assert.equal(octreeAirSupportCandidateBoundResetEnabled(
+    { FLUID_OCTREE_AIR_SUPPORT_CANDIDATE_BOUND_RESET: "0" }), false);
 });

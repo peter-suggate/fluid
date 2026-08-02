@@ -4499,6 +4499,13 @@ export class WebGPUOctreeProjection {
   async readSurfaceDiagnostics() {
     return this.surfaceState.readVolumeDiagnostics();
   }
+  /** Diagnostic-only. Undefined unless the factor-one coarse tracker is the
+   * surface authority. `completions < advances` means the raster consumed a
+   * held surface on the difference, which is what intermittent publication
+   * looks like from outside. */
+  async readCoarseSurfaceTrackerReceipt() {
+    return this.coarseOnlySummary?.readReceipt();
+  }
   /** Presentation-only texture identity. The sparse octree solver never samples it. */
   get levelSetTexture() { return this.surfaceState.texture; }
   encodeBodyImpulseReadback() { return undefined; }
@@ -5462,7 +5469,7 @@ export class WebGPUOctreeProjection {
     if ((!fine || !topology || !this.globalFineSeeds) && !this.coarseOnlySurfaceTracking) {
       return undefined;
     }
-    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 780,
+    const readback = this.device.createBuffer({ label: "Global fine structured QA diagnostics", size: 792,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read global fine structured QA diagnostics" });
     if (this.globalFineSeeds) {
@@ -5536,6 +5543,11 @@ export class WebGPUOctreeProjection {
       // finalize pass before any later support transaction can reuse its slot.
       encoder.copyBufferToBuffer(this.airVelocitySupport.scratch, 51 * 4,
         readback, 728, 36);
+      // Candidate/support cardinalities and the reuse flag as the rejection saw
+      // them. Sited past the topology control copy at 764 rather than extending
+      // the latch in place, which would have overlapped it.
+      encoder.copyBufferToBuffer(this.airVelocitySupport.scratch, 60 * 4,
+        readback, 780, 12);
     }
     if (topology) {
       encoder.copyBufferToBuffer(topology.pageDelta, 0, readback, 608, 64);
@@ -5575,6 +5587,7 @@ export class WebGPUOctreeProjection {
         structuredRejectCarry: Array.from(words.slice(168, 179)),
         airSupportFallbacks: Array.from(words.slice(180, 182)),
         airSupportTopologyFailureLatch: Array.from(words.slice(182, 191)),
+        airSupportFailureCounts: Array.from(words.slice(195, 198)),
         fineTopologyFailureLatch: Array.from(words.slice(191, 195)),
         configuredFineGeneration: fine?.generation ?? 0, fineGenerationSlot: fine?.generationSlot ?? 0,
         scheduledFineGeneration: this.globalFineGeneration, currentFineIsA: this.globalFinePublishedIsA };
