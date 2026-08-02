@@ -991,7 +991,7 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
 }
 // Scenery is geometry, not a screen-space overlay: every frond, batten and
 // blade that used to be painted here in NDC is now an analytic primitive in
-// lib/voxel-scenery, so it parallaxes, occludes and takes light like the rest
+// the scene's own scenery graph, so it parallaxes, occludes and takes light like the rest
 // of the world. Only the lens falloff remains, which belongs to the camera.
 fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayTransfer(c),1);}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{

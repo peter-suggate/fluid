@@ -13,12 +13,12 @@ import {
 
 test("every authored environment gets a stable full-scene proxy catalog", () => {
   const scene = cloneScene(defaultScene);
-  // A tripwire, not a target: these move whenever a scenery module is
-  // re-art-directed, and the number changing is the prompt to look at the
-  // render. Each environment's geometry lives in lib/voxel-scenery/<id>.ts.
+  // A tripwire, not a target: these move whenever a set is re-art-directed, and
+  // the number changing is the prompt to look at the render. Each environment's
+  // geometry is the graph it seeds in lib/scenery-presets.ts.
   const authoredPropCounts = new Map([
-    ["conservatory", 89], ["courtyard", 93], ["night-lab", 105], ["concrete-gallery", 68],
-    ["bathhouse", 90], ["research-station", 104], ["default", 17], ["garden", 122]
+    ["conservatory", 89], ["courtyard", 29], ["night-lab", 105], ["concrete-gallery", 16],
+    ["bathhouse", 23], ["research-station", 39], ["default", 17], ["garden", 122]
   ]);
   for (const id of environmentIds) {
     const first = buildEnvironmentProxyCatalog(scene, id);
@@ -99,9 +99,11 @@ test("emissive sources keep the tint and intensity their scene was lit around", 
   // Warm globes over the conservatory staging bench.
   assert.deepEqual(emitter("conservatory", "pendant-1/globe")?.colorLinear, [.85, .68, .38]);
   assert.equal(emitter("conservatory", "pendant-1/globe")?.emission, .48);
-  // Cold instrument cyan, the one cool note in the station hull.
-  assert.deepEqual(emitter("research-station", "console-left/monitor")?.colorLinear, [.06, .48, .58]);
-  assert.equal(emitter("research-station", "console-left/monitor")?.emission, .30);
+  // The station's porthole: cool, and lit from outside the hull, which is what
+  // places the room underwater rather than in a basement.
+  const porthole = emitter("research-station", "porthole/glass");
+  assert.equal(porthole?.emission, 1.6);
+  assert.ok(porthole!.colorLinear[2] > porthole!.colorLinear[0], "the sea outside stays cooler than the hull inside");
   // The night lab's single warm source, read against its cool troffers.
   const bulb = emitter("night-lab", "desk-lamp/bulb");
   assert.equal(bulb?.emission, 3.4);

@@ -4,7 +4,7 @@ import type { EnvironmentProxySway } from "../scenery-sway";
 
 export type { EnvironmentProxySway } from "../scenery-sway";
 
-/** Linear-light RGB, matching the constants authored in webgpu-environments.ts. */
+/** Linear-light RGB, as scenery materials resolve to. */
 export type EnvironmentLinearColor = readonly [number, number, number];
 
 export interface EnvironmentProxyMaterial {
@@ -103,8 +103,6 @@ export interface EnvironmentProxyShell {
 }
 
 export const V = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
-export const C = (r: number, g: number, b: number): EnvironmentLinearColor => [r, g, b];
-export const cmul = (c: EnvironmentLinearColor, n: number): EnvironmentLinearColor => [c[0] * n, c[1] * n, c[2] * n];
 
 export function aabb(center: Vec3, radius: Vec3): EnvironmentProxyAabb {
   return {
@@ -267,63 +265,3 @@ export interface EnvironmentSceneryContext {
   readonly shellThickness_m: number;
 }
 
-/**
- * One environment's complete geometry. The module owns its shell as well as its
- * props: it is the single place that describes what that world looks like.
- */
-export interface EnvironmentSceneryModule {
-  readonly id: EnvironmentId;
-  /** Builds shell faces first, then props, so owner indices stay dense and stable. */
-  readonly build: (b: ProxyBuilder, context: EnvironmentSceneryContext) => EnvironmentProxyShell;
-}
-
-export interface RoomShellColors {
-  readonly floor: EnvironmentLinearColor;
-  readonly wall: EnvironmentLinearColor;
-  readonly ceiling: EnvironmentLinearColor;
-}
-
-export interface RoomShellOptions {
-  readonly colors: RoomShellColors;
-  readonly materialModel: EnvironmentProxyShell["materialModel"];
-  /**
-   * Replaces the single back wall box. Used where the wall carries an opening
-   * that a union-only catalog cannot subtract, so the wall is authored as
-   * ordinary boxes around an exact rectangular hole.
-   */
-  readonly backWall?: (b: ProxyBuilder, spec: RoomShellBackWallSpec) => void;
-}
-
-export interface RoomShellBackWallSpec {
-  readonly colors: RoomShellColors;
-  readonly roomHalf_m: Vec3;
-  readonly floorY_m: number;
-  /** Half-thickness of the shell faces. */
-  readonly t: number;
-  readonly centerY_m: number;
-  readonly s: number;
-  readonly shellThickness_m: number;
-}
-
-/** The shared six-face finite room. Each room environment supplies its own palette. */
-export function addRoomShell(
-  b: ProxyBuilder,
-  context: EnvironmentSceneryContext,
-  options: RoomShellOptions,
-): EnvironmentProxyShell {
-  const { roomHalf_m: roomHalf, floorY_m: floorY, shellThickness_m: thickness, s } = context;
-  const center = V(0, floorY + roomHalf.y, 0);
-  const c = options.colors;
-  const t = thickness * .5;
-  b.box("shell/floor", "shell-floor", V(0, floorY - t, 0), V(roomHalf.x, t, roomHalf.z), c.floor, 0, ["shell", "floor"], true);
-  b.box("shell/ceiling", "shell-ceiling", V(0, floorY + 2 * roomHalf.y + t, 0), V(roomHalf.x, t, roomHalf.z), c.ceiling, 0, ["shell", "ceiling"], true);
-  b.box("shell/wall-left", "shell-wall", V(-roomHalf.x - t, center.y, 0), V(t, roomHalf.y, roomHalf.z), c.wall, 0, ["shell", "wall"], true);
-  b.box("shell/wall-right", "shell-wall", V(roomHalf.x + t, center.y, 0), V(t, roomHalf.y, roomHalf.z), c.wall, 0, ["shell", "wall"], true);
-  if (options.backWall) {
-    options.backWall(b, { colors: c, roomHalf_m: roomHalf, floorY_m: floorY, t, centerY_m: center.y, s, shellThickness_m: thickness });
-  } else {
-    b.box("shell/wall-back", "shell-wall", V(0, center.y, -roomHalf.z - t), V(roomHalf.x, roomHalf.y, t), c.wall, 0, ["shell", "wall"], true);
-  }
-  b.box("shell/wall-front", "shell-wall", V(0, center.y, roomHalf.z + t), V(roomHalf.x, roomHalf.y, t), c.wall, 0, ["shell", "wall"], true);
-  return { kind: "room", floorY_m: floorY, bounds_m: aabb(center, roomHalf), primitives: b.shell, materialModel: options.materialModel };
-}

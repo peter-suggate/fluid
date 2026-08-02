@@ -1,34 +1,16 @@
-import type { EnvironmentId } from "../environments";
-import type { EnvironmentSceneryModule } from "./builder";
-import { bathhouseScenery } from "./bathhouse";
-import { concreteGalleryScenery } from "./concrete-gallery";
-import { conservatoryScenery } from "./conservatory";
-import { courtyardScenery } from "./courtyard";
-import { defaultStudioScenery } from "./default-studio";
-import { gardenScenery } from "./garden";
-import { nightLabScenery } from "./night-lab";
-import { researchStationScenery } from "./research-station";
-
 export * from "./builder";
 
 /**
- * Every environment's geometry, one module each. A scene is re-art-directed by
- * editing its own file: nothing here is shared but the builder vocabulary, so
- * two environments can be worked on at once without touching the same source.
+ * The primitive vocabulary scenery is expanded into.
+ *
+ * This directory used to hold one hand-written module per environment, each
+ * calling `b.cylinder(...)` forty times. Geometry that only exists after a
+ * function runs has nothing to select and nothing to edit, so the description
+ * moved into the scene document: see lib/scenery-graph.ts for the schema,
+ * lib/scenery-presets.ts for what each environment seeds, and
+ * lib/scenery-expand.ts for the expansion that replaced the modules.
+ *
+ * What stayed behind is what a description cannot be: the builder that assigns
+ * owner indices and derives bounds, and the procedural tree, whose seed
+ * genuinely generates its ~30 primitives rather than naming them.
  */
-export const ENVIRONMENT_SCENERY: Readonly<Record<EnvironmentId, EnvironmentSceneryModule>> = Object.freeze({
-  conservatory: conservatoryScenery,
-  courtyard: courtyardScenery,
-  "night-lab": nightLabScenery,
-  "concrete-gallery": concreteGalleryScenery,
-  bathhouse: bathhouseScenery,
-  "research-station": researchStationScenery,
-  default: defaultStudioScenery,
-  garden: gardenScenery,
-});
-
-export function environmentScenery(id: EnvironmentId): EnvironmentSceneryModule {
-  const scenery = ENVIRONMENT_SCENERY[id];
-  if (!scenery) throw new Error(`No scenery module for environment ${id}`);
-  return scenery;
-}

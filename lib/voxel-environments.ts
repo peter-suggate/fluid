@@ -1,10 +1,10 @@
 import type { EnvironmentId } from "./environments";
 import { environmentIndex } from "./environments";
 import type { SceneDescription, Vec3 } from "./model";
+import { expandSceneryGraph, type SceneryPane, type ScenerySpan } from "./scenery-expand";
+import { sceneryGraphForEnvironment } from "./scenery-presets";
 import {
   aabb,
-  C,
-  environmentScenery,
   ProxyBuilder,
   V,
   type EnvironmentProxyPrimitive,
@@ -23,9 +23,7 @@ export type {
   EnvironmentProxyShell,
   EnvironmentProxySway,
   EnvironmentSceneryContext,
-  EnvironmentSceneryModule,
 } from "./voxel-scenery";
-export { ENVIRONMENT_SCENERY, environmentScenery } from "./voxel-scenery";
 
 export interface EnvironmentProxyCatalog {
   readonly environmentId: EnvironmentId;
@@ -35,6 +33,13 @@ export interface EnvironmentProxyCatalog {
   readonly shell: EnvironmentProxyShell;
   /** Authored props only; use environmentProxyPrimitives() when shell faces are also wanted. */
   readonly primitives: readonly EnvironmentProxyPrimitive[];
+  /**
+   * Which described object each primitive came from, indexed into `primitives`.
+   * Selection and the hover outline both resolve a click to one of these.
+   */
+  readonly spans: readonly ScenerySpan[];
+  /** Declared dielectric panes, keyed like primitives: `<environment>/<node id>`. */
+  readonly panes: readonly SceneryPane[];
 }
 
 export interface EnvironmentProxyCatalogOptions {
@@ -42,51 +47,64 @@ export interface EnvironmentProxyCatalogOptions {
   readonly shellThickness_m?: number;
 }
 
-/**
- * Convert authored `scene.props` into proxies on the shared builder, so they
- * receive owner indices from the same sequence as procedural scenery and are
- * indistinguishable to every downstream consumer.
- */
-function addScenePropProxies(builder: ProxyBuilder, scene: SceneDescription): void {
-  for (const prop of scene.props ?? []) {
-    const color = C(prop.colorLinear[0], prop.colorLinear[1], prop.colorLinear[2]);
-    const key = `prop/${prop.id}`;
-    const emission = prop.emission ?? 0;
-    if (prop.shape === "box") {
-      builder.box(key, "prop", prop.position_m, prop.halfSize_m, color, emission, ["prop", "authored"]);
-    } else if (prop.shape === "cylinder") {
-      builder.cylinder(key, "prop", prop.position_m, prop.halfSize_m.x, prop.halfSize_m.y, color, emission, ["prop", "authored"]);
-    } else {
-      builder.ellipsoid(key, "prop", prop.position_m, prop.halfSize_m, color, emission, ["prop", "authored"]);
-    }
-  }
+/** The world frame a scene's scenery is placed in. */
+export function environmentSceneryContext(
+  scene: SceneDescription,
+  environmentId: EnvironmentId,
+  options: EnvironmentProxyCatalogOptions = {},
+): EnvironmentSceneryContext {
+  const s = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
+  const thickness = options.shellThickness_m ?? scene.voxelDomain.finestCellSize_m;
+  if (!(thickness > 0) || !Number.isFinite(thickness)) throw new Error("Environment shell thickness must be positive and finite");
+  return {
+    scene, s,
+    floorY_m: environmentId === "night-lab" ? -.72 * s
+      : environmentId === "garden" ? (scene.terrain?.baseHeight_m ?? 0) : -.025,
+    roomHalf_m: V(
+      Math.max(scene.container.width_m * 2.8, s * 2.25),
+      Math.max(scene.container.height_m * 1.85, s * 1.8),
+      Math.max(scene.container.depth_m * 2.8, s * 2.25),
+    ),
+    shellThickness_m: thickness,
+  };
 }
 
 /**
- * Assembles one environment's scenery module into the catalog every downstream
- * consumer reads. The geometry itself lives in lib/voxel-scenery/<id>.ts; this
- * function only resolves the world frame it is placed in and appends the
- * scene's own authored props.
+ * Expand a scene's scenery into the catalog every downstream consumer reads.
+ *
+ * The geometry is the scene's own `scenery` graph — see lib/scenery-graph.ts —
+ * and this only resolves the world frame it is placed in. A scene that has not
+ * been given one yet falls back to its environment's seed graph, which is the
+ * same value `sceneWithEnvironment` would have written; the fallback exists so a
+ * hand-built scene fixture still renders, not as a second authority.
  */
 export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions = {}): EnvironmentProxyCatalog {
-  const s = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
-  const roomHalf = V(Math.max(scene.container.width_m * 2.8, s * 2.25), Math.max(scene.container.height_m * 1.85, s * 1.8), Math.max(scene.container.depth_m * 2.8, s * 2.25));
-  const floorY = environmentId === "night-lab" ? -.72 * s : environmentId === "garden" ? (scene.terrain?.baseHeight_m ?? 0) : -.025;
-  const thickness = options.shellThickness_m ?? scene.voxelDomain.finestCellSize_m;
-  if (!(thickness > 0) || !Number.isFinite(thickness)) throw new Error("Environment shell thickness must be positive and finite");
+  const context = environmentSceneryContext(scene, environmentId, options);
+  const graph = scene.scenery ?? sceneryGraphForEnvironment(scene, environmentId);
   const b = new ProxyBuilder(environmentId);
-  const context: EnvironmentSceneryContext = {
-    scene, s, floorY_m: floorY, roomHalf_m: roomHalf, shellThickness_m: thickness,
+  const { shell, spans, panes } = expandSceneryGraph(b, graph, context);
+  return {
+    environmentId, environmentIndex: environmentIndex(environmentId),
+    scale_m: context.s, floorY_m: context.floorY_m, shell, primitives: b.props, spans,
+    panes: panes.map((p) => ({ ...p, id: `${environmentId}/${p.id}` })),
   };
-  const shell = environmentScenery(environmentId).build(b, context);
+}
 
-  // Authored props append to the procedural catalog rather than replacing it,
-  // so presets keep their hand-built scenery while the editor can add to it.
-  // They enter every downstream consumer (SVO records, static mips, coverage,
-  // sparse domain) through this one list, and never enter the solve.
-  addScenePropProxies(b, scene);
-
-  return { environmentId, environmentIndex: environmentIndex(environmentId), scale_m: s, floorY_m: floorY, shell, primitives: b.props };
+/**
+ * The owner-index range one described object occupies, or undefined if the node
+ * published nothing. Inclusive of both ends, which is the form the shader's
+ * highlight comparison takes.
+ */
+export function sceneryOwnerRange(
+  catalog: EnvironmentProxyCatalog,
+  nodeId: string,
+): { readonly first: number; readonly last: number } | undefined {
+  const span = catalog.spans.find((candidate) => candidate.nodeId === nodeId);
+  if (!span || span.to <= span.from) return undefined;
+  return {
+    first: catalog.primitives[span.from]!.ownerIndex,
+    last: catalog.primitives[span.to - 1]!.ownerIndex,
+  };
 }
 
 export function environmentProxyPrimitives(catalog: EnvironmentProxyCatalog, includeShell = true): readonly EnvironmentProxyPrimitive[] {

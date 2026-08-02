@@ -108,12 +108,21 @@ test("a world scale is answered by a re-seed, never a rebuild", () => {
 
 test("render-only authoring never reaches the solver identity", () => {
   const base = cloneScene(defaultScene);
-  // Props extend the render domain only; placing scenery must not rebuild.
-  const withProps = edited((scene) => {
-    scene.props = [{ id: "p", name: "P", shape: "box", position_m: { x: 0, y: 0.1, z: 0 }, halfSize_m: { x: 0.05, y: 0.05, z: 0.05 }, colorLinear: [0.4, 0.4, 0.4] }];
+  // Scenery extends the render domain only; placing a prop must not rebuild.
+  const withProp = edited((scene) => {
+    scene.scenery = {
+      palettes: {},
+      nodes: [
+        { kind: "floor-shell", id: "shell", materialModel: "default-floor", floor: { colorLinear: [.6, .6, .6] } },
+        {
+          kind: "box", id: "box-1", place: { units: "metres", position: { x: 0, y: 0.1, z: 0 } },
+          halfSize: { x: 0.05, y: 0.05, z: 0.05 }, material: { colorLinear: [0.4, 0.4, 0.4] },
+        },
+      ],
+    };
   });
-  assert.equal(gpuSceneSeedKey(withProps), gpuSceneSeedKey(base));
-  assert.equal(gpuSceneUniformKey(withProps), gpuSceneUniformKey(base));
+  assert.equal(gpuSceneSeedKey(withProp), gpuSceneSeedKey(base));
+  assert.equal(gpuSceneUniformKey(withProp), gpuSceneUniformKey(base));
 });
 
 test("the epoch still identifies one replacement per reset", () => {

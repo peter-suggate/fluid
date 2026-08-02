@@ -52,14 +52,16 @@ test("station observation lens has stable elliptical identity and explicit repla
   const publication = buildSvoSceneThickGlass(scene, { environmentId: "research-station", revision: 5 });
   assert.equal(publication.metadata.length, 1);
   const lens = publication.metadata[0];
-  assert.equal(lens.key, "research-station/observation-port/thick-lens");
+  assert.equal(lens.key, "research-station/porthole/glass/thick-lens");
   assert.equal(lens.shape, "ellipsoid");
-  assert.equal(lens.replacesThinPaneKey, "research-station/observation-port/glazing");
-  assert.equal(lens.replacesUnsupportedKey, "research-station/shell/procedural-portholes");
+  // The lens replaces the porthole's own unsupported entry: the curved glazing
+  // and the analytic volume that stands in for it are one described object, so
+  // there is nothing for the two to disagree about.
+  assert.equal(lens.replacesUnsupportedKey, "research-station/porthole/glass");
   assert.ok(lens.bounds_m.maximum[0] > lens.bounds_m.minimum[0]);
 
   const coverage = buildSvoEnvironmentCoverage(scene, "research-station");
-  const curvedPort = coverage.entries.find(({ key }) => key === "research-station/shell/procedural-portholes");
+  const curvedPort = coverage.entries.find(({ key }) => key === "research-station/porthole/glass");
   assert.equal(curvedPort?.status, "complete", "the bound analytic volume replaces the procedural gap");
   assert.equal(curvedPort?.plannedThickGlassId, lens.glassId);
   assert.equal(curvedPort?.plannedThickGlassContract, "analytic-thick-glass-bound");

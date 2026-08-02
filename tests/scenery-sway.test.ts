@@ -11,6 +11,7 @@ import {
   type EnvironmentProxySway,
 } from "../lib/scenery-sway";
 import { getScenePreset } from "../lib/scenes";
+import { sceneWithEnvironment } from "../lib/scenery-presets";
 import {
   buildSvoScenePrimitives,
   packSvoScenePrimitiveAnimation,
@@ -155,8 +156,9 @@ test("authored motion publishes as one contiguous span of re-posed records", () 
   assert.notDeepEqual(packSvoScenePrimitiveAnimation(animation, 2.6), records);
 
   // An environment nobody animated must not pay for an animation path at all.
-  const studio = getScenePreset("garden-svo-lighting").create();
-  studio.environment = "default";
+  // Adopting one replaces the scenery as well as the name: keeping the garden's
+  // graph while calling the scene a studio would carry the swaying tree along.
+  const studio = sceneWithEnvironment(getScenePreset("garden-svo-lighting").create(), "default");
   assert.equal(svoScenePrimitiveAnimation(buildSvoScenePrimitives(studio)), undefined);
 });
 

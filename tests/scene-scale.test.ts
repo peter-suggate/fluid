@@ -54,7 +54,7 @@ test("scaling the world carries nothing with it", () => {
   const doubled = scaleScene(scene, "world", 2);
   assert.ok(doubled);
   assert.deepEqual(doubled.rigidBodies, scene.rigidBodies);
-  assert.deepEqual(doubled.props ?? null, scene.props ?? null);
+  assert.deepEqual(doubled.scenery ?? null, scene.scenery ?? null);
   assert.deepEqual(doubled.fluid.initialDamBreakDimensions_m ?? null,
     scene.fluid.initialDamBreakDimensions_m ?? null);
   assert.equal(doubled.fluid.gravity_m_s2.y, scene.fluid.gravity_m_s2.y);

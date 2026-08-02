@@ -5,7 +5,8 @@ import { environmentIds } from "../lib/environments";
 import { cloneScene, defaultScene } from "../lib/model";
 import { buildSvoEnvironmentCoverage } from "../lib/svo-scene-coverage";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
-import { ENVIRONMENT_SCENERY } from "../lib/voxel-scenery";
+import { SCENERY_GRAPHS } from "../lib/scenery-presets";
+import { validateSceneryGraph } from "../lib/scenery-graph";
 
 /**
  * Saturation of a linear-RGB triple, on the same 0..1 scale as HSV chroma.
@@ -61,23 +62,30 @@ test("scenery is bright enough that shadow reads as shadow", () => {
   }
 });
 
-test("no environment paints its foreground in screen space any more", () => {
+test("every visible surface an environment audits is geometry the tracer owns", () => {
   const scene = cloneScene(defaultScene);
+  // Environments used to paint a foreground in NDC — botanical framing, a
+  // vignette, drifting dust — which parallaxed with nothing, occluded nothing
+  // and took no light, so it read as a decal on the lens. The category for it
+  // is gone; what remains is that every audited surface names a real owner.
+  const owned = new Set(["analytic-primitive", "analytic-rigid-body", "analytic-terrain",
+    "thin-glass", "thick-glass", "opaque-proxy-fallback", "not-visible"]);
   for (const environmentId of environmentIds) {
     const report = buildSvoEnvironmentCoverage(scene, environmentId);
-    const painted = report.entries.filter((entry) =>
-      entry.category === "procedural-foreground" || entry.visibleOwnership === "raster-only-procedural");
+    const painted = report.entries.filter((entry) => !owned.has(entry.visibleOwnership));
     assert.deepEqual(painted.map(({ key }) => key), [],
       `${environmentId} must build its scenery as geometry, not as an NDC overlay`);
   }
 });
 
-test("each environment owns its geometry in its own scenery module", () => {
+test("every environment describes its geometry as a well-formed scenery graph", () => {
+  const scene = cloneScene(defaultScene);
   for (const environmentId of environmentIds) {
-    const scenery = ENVIRONMENT_SCENERY[environmentId];
-    assert.ok(scenery, `${environmentId} has a scenery module`);
-    assert.equal(scenery.id, environmentId, "scenery module id matches its registry slot");
+    const seed = SCENERY_GRAPHS[environmentId];
+    assert.ok(seed, `${environmentId} seeds a scenery graph`);
+    assert.deepEqual(validateSceneryGraph(seed(scene)), [],
+      `${environmentId} must seed a valid graph: exactly one shell, unique ids, known palettes`);
   }
-  assert.equal(Object.keys(ENVIRONMENT_SCENERY).length, environmentIds.length,
+  assert.equal(Object.keys(SCENERY_GRAPHS).length, environmentIds.length,
     "the registry covers every environment and nothing else");
 });

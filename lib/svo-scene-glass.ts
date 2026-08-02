@@ -52,9 +52,10 @@ export interface SvoSceneGlassMetadata {
 
 export interface SvoSceneGlassUnsupportedEntry {
   key: string;
-  source: "catalog" | "procedural-shell";
+  /** Always a catalog primitive: every optical gap is a described object. */
+  source: "catalog";
   reason: "curved-emissive-volume" | "emissive-display" | "procedural-circular-glazing";
-  fallback: "existing-opaque-primitive" | "existing-procedural-shell";
+  fallback: "existing-opaque-primitive";
 }
 
 export interface SvoSceneGlassBuild {
@@ -155,66 +156,53 @@ function containerPanes(scene: SceneDescription, environmentId: EnvironmentId, t
   return result;
 }
 
+/**
+ * The panes an environment declares.
+ *
+ * These used to be a per-environment branch of hand-placed constants that had to
+ * agree with a wall authored in a different file — a window and its glass held
+ * apart, so resizing the room moved one and not the other. Glazing is now a
+ * scenery node like any other and arrives already positioned; all this does is
+ * assign pane ids, which stay stable because expansion order is document order.
+ */
 function environmentPanes(catalog: EnvironmentProxyCatalog, thickness_m: number): AuthoredSceneGlassPane[] {
-  const result: AuthoredSceneGlassPane[] = [];
   const environmentBase = ENVIRONMENT_PANE_ID_BASE + environmentIds.indexOf(catalog.environmentId) * 0x100;
-  if (catalog.environmentId === "conservatory") {
-    const s = catalog.scale_m;
-    const xCenters = [-0.56 * s, 0.56 * s];
-    const yBands = [
-      { name: "low", center: 0.2975 * s, half: 0.2975 * s },
-      { name: "middle", center: 0.94 * s, half: 0.295 * s },
-      { name: "high", center: 1.5625 * s, half: 0.2775 * s },
-    ];
-    let localIndex = 0;
-    for (let column = 0; column < xCenters.length; column += 1) for (const band of yBands) {
-      result.push({
-        key: `conservatory/glazing/pane-${column === 0 ? "left" : "right"}-${band.name}`,
-        role: "environment-glazing",
-        descriptor: pane(environmentBase + localIndex, [xCenters[column], band.center, -1.48 * s], [0.53 * s, band.half], thickness_m, Q_IDENTITY),
-      });
-      localIndex += 1;
-    }
-  } else if (catalog.environmentId === "night-lab") {
-    const s = catalog.scale_m;
-    result.push({
-      key: "night-lab/window/city-glazing",
-      role: "environment-glazing",
-      descriptor: pane(environmentBase, [0, catalog.floorY_m + 1.60 * s, catalog.shell.bounds_m.min.z], [1.62 * s, 0.55 * s], thickness_m, Q_IDENTITY),
-    });
-  } else if (catalog.environmentId === "research-station") {
-    const s = catalog.scale_m;
-    result.push({
-      key: "research-station/observation-port/glazing",
-      role: "environment-glazing",
-      descriptor: pane(environmentBase, [0, catalog.floorY_m + 1.55 * s, catalog.shell.bounds_m.min.z + .018 * s], [.66 * s, .39 * s], thickness_m, Q_IDENTITY),
-    });
-  }
-  return result;
+  return catalog.panes.map((declared, index) => ({
+    key: declared.id,
+    role: "environment-glazing" as const,
+    descriptor: pane(environmentBase + index,
+      [declared.center_m.x, declared.center_m.y, declared.center_m.z],
+      [declared.half_m[0], declared.half_m[1]], thickness_m, declared.orientation ?? Q_IDENTITY),
+  }));
 }
+
+/**
+ * Glass-like surfaces that are not finite dielectric panes, named rather than
+ * quietly dropped.
+ *
+ * Keyed off the group a scenery node declares, so an environment that grows a
+ * new curved lamp or round port publishes the exception by describing itself —
+ * this used to carry a branch per environment id, which meant a set could gain
+ * one and nobody would notice it had gone unaccounted.
+ */
+const UNSUPPORTED_GLASS_GROUPS: Readonly<Record<string, SvoSceneGlassUnsupportedEntry["reason"]>> =
+  Object.freeze({
+    "emissive-glass": "curved-emissive-volume",
+    "monitor-glass": "emissive-display",
+    "porthole-glass": "procedural-circular-glazing",
+  });
 
 function unsupportedCatalogGlass(catalog: EnvironmentProxyCatalog): SvoSceneGlassUnsupportedEntry[] {
   const result: SvoSceneGlassUnsupportedEntry[] = [];
   for (const primitive of catalog.primitives) {
-    if (primitive.group === "emissive-glass") result.push({
+    const reason = UNSUPPORTED_GLASS_GROUPS[primitive.group];
+    if (reason) result.push({
       key: primitive.key,
       source: "catalog",
-      reason: "curved-emissive-volume",
-      fallback: "existing-opaque-primitive",
-    });
-    else if (primitive.group === "monitor-glass") result.push({
-      key: primitive.key,
-      source: "catalog",
-      reason: "emissive-display",
+      reason,
       fallback: "existing-opaque-primitive",
     });
   }
-  if (catalog.environmentId === "research-station") result.push({
-    key: "research-station/shell/procedural-portholes",
-    source: "procedural-shell",
-    reason: "procedural-circular-glazing",
-    fallback: "existing-procedural-shell",
-  });
   return result;
 }
 

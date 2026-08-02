@@ -71,10 +71,10 @@ test("finite panes and terrain are complete while unsupported optical/procedural
   assert.equal(lab.entries.find(({ key }) => key === "night-lab/counter/monitor-screen")?.reason, "emissive-display");
 
   const station = buildSvoEnvironmentCoverage(scene, "research-station");
-  const portholes = station.entries.find(({ key }) => key.endsWith("procedural-portholes"));
-  assert.equal(portholes?.status, "complete");
-  assert.equal(portholes?.visibleOwnership, "thick-glass");
-  assert.equal(portholes?.reason, "procedural-circular-glazing");
+  const porthole = station.entries.find(({ key }) => key === "research-station/porthole/glass");
+  assert.equal(porthole?.status, "complete");
+  assert.equal(porthole?.visibleOwnership, "thick-glass");
+  assert.equal(porthole?.reason, "procedural-circular-glazing");
 
   const garden = buildSvoEnvironmentCoverage(scene, "garden");
   const terrain = garden.entries.find(({ category }) => category === "terrain");

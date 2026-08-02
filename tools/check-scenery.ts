@@ -59,8 +59,8 @@ for (const id of targets) {
   }
 
   const coverage = buildSvoEnvironmentCoverage(scene, id);
-  const raster = coverage.entries.filter(({ visibleOwnership }) => visibleOwnership === "raster-only-procedural");
-  if (raster.length) fail(id, `${raster.length} entry(ies) still raster-only: ${raster.map(({ key }) => key).join(", ")}`);
+  const unsupported = coverage.entries.filter(({ status }) => status === "unsupported");
+  if (unsupported.length) fail(id, `${unsupported.length} entry(ies) the tracer does not own: ${unsupported.map(({ key }) => key).join(", ")}`);
   const omitted = coverage.entries.filter(({ reason }) => reason === "light-record-capacity");
   if (omitted.length) fail(id, `${omitted.length} light(s) dropped past the ${SVO_LIGHT_MAXIMUM_RECORDS}-record cap: ${omitted.map(({ key }) => key).join(", ")}`);
 

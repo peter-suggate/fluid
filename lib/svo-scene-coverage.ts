@@ -25,7 +25,6 @@ export type SvoSceneVisibleOwnership =
   | "thin-glass"
   | "thick-glass"
   | "opaque-proxy-fallback"
-  | "raster-only-procedural"
   | "not-visible";
 
 export type SvoSceneCollisionOwnership =
@@ -46,7 +45,7 @@ export type SvoSceneCoverageStatus = "complete" | "degraded" | "unsupported";
 
 export interface SvoSceneCoverageEntry {
   key: string;
-  category: "shell" | "prop" | "rigid-body" | "terrain" | "container-glass" | "environment-glazing" | "environment-light" | "procedural-foreground";
+  category: "shell" | "prop" | "rigid-body" | "terrain" | "container-glass" | "environment-glazing" | "environment-light";
   status: SvoSceneCoverageStatus;
   visibleOwnership: SvoSceneVisibleOwnership;
   collisionOwnership: SvoSceneCollisionOwnership;
@@ -102,30 +101,6 @@ export interface SvoShippedSceneCoverageReport {
   cacheKey: string;
 }
 
-interface ProceduralForegroundGap {
-  key: string;
-  reason: "screen-space-foreground" | "screen-space-vignette" | "screen-space-particles";
-}
-
-/**
- * Every environment once painted a screen-space foreground in NDC — botanical
- * framing, a vignette, drifting dust, swaying grass. None of it parallaxed,
- * occluded or took light, so it read as a decal stuck to the lens. All of it is
- * now analytic scenery in lib/voxel-scenery, which is why this table is empty:
- * an entry here means an environment has gone back to painting instead of
- * building, and the coverage audit should fail it.
- */
-const PROCEDURAL_FOREGROUND_GAPS: Readonly<Record<EnvironmentId, readonly ProceduralForegroundGap[]>> = Object.freeze({
-  conservatory: [],
-  courtyard: [],
-  "night-lab": [],
-  "concrete-gallery": [],
-  bathhouse: [],
-  "research-station": [],
-  default: [],
-  garden: [],
-});
-
 function dimensions(proxy: EnvironmentProxyPrimitive): readonly [number, number, number] {
   if (proxy.kind === "box") return [2 * proxy.halfSize_m.x, 2 * proxy.halfSize_m.y, 2 * proxy.halfSize_m.z];
   if (proxy.kind === "cylinder") return [2 * proxy.radius_m, 2 * proxy.halfHeight_m, 2 * proxy.radius_m];
@@ -149,29 +124,6 @@ function priorityProxy(scene: SceneDescription, proxy: EnvironmentProxyPrimitive
     || proxy.tags.some((tag) => ["fixture", "monitor", "instrument", "fruit", "flower", "watering-can"].includes(tag));
 }
 
-function unsupportedGlassEntry(
-  entry: SvoSceneGlassUnsupportedEntry,
-  thickGlass?: SvoSceneThickGlassMetadata,
-): SvoSceneCoverageEntry {
-  const opaqueProxy = entry.fallback === "existing-opaque-primitive";
-  return {
-    key: entry.key,
-    category: "environment-glazing",
-    status: thickGlass ? "complete" : opaqueProxy ? "degraded" : "unsupported",
-    visibleOwnership: thickGlass ? "thick-glass" : opaqueProxy ? "opaque-proxy-fallback" : "raster-only-procedural",
-    collisionOwnership: "none-presentation-only",
-    lightingOwnership: entry.reason === "curved-emissive-volume" || entry.reason === "emissive-display" ? "emissive-surface-only" : "none",
-    sourceKind: entry.source,
-    defaultCameraPriority: true,
-    reason: entry.reason,
-    fallback: entry.fallback,
-    ...(thickGlass ? {
-      plannedThickGlassId: thickGlass.glassId,
-      plannedThickGlassContract: "analytic-thick-glass-bound" as const,
-    } : {}),
-  };
-}
-
 export function buildSvoEnvironmentCoverage(scene: SceneDescription, environmentId: EnvironmentId): SvoEnvironmentCoverageReport {
   const catalog = buildEnvironmentProxyCatalog(scene, environmentId);
   const primitiveBuild = buildSvoScenePrimitives(scene, { environmentId });
@@ -184,7 +136,6 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
     glassRevision: glass.staticRevision,
     thickGlassRevision: thickGlass.staticRevision,
     lightRevision: lights.staticRevision,
-    foreground: PROCEDURAL_FOREGROUND_GAPS[environmentId],
   }));
   const cacheKey = `svo-scene-coverage-v${SVO_SCENE_COVERAGE_VERSION}:${environmentId}:${staticRevision}`;
   const cached = cachedSvoStaticPublication(environmentCoverageCache, cacheKey);
@@ -223,6 +174,10 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
       ...(plannedThickGlass ? {
         plannedThickGlassId: plannedThickGlass.glassId,
         plannedThickGlassContract: "analytic-thick-glass-bound" as const,
+        // Why this primitive is on the thick-glass path at all. A bound volume
+        // makes the gap complete rather than making it disappear: the audit
+        // still has to say that a round port is not a finite pane.
+        ...(opticalGap ? { reason: opticalGap.reason } : {}),
       } : {}),
       ...(documentedSurfaceOnly ? { reason: "documented-low-power-emissive-surface" } : {}),
       ...(degradedReason ? {
@@ -256,8 +211,6 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
     ...(replacingVolume ? { plannedThickGlassId: replacingVolume.glassId, plannedThickGlassContract: "analytic-thick-glass-bound" as const }
       : metadata.opaqueCutoutKey ? { reason: "opaque-cutout-required", fallback: metadata.opaqueCutoutKey } : {}),
   }); }
-  entries.push(...glass.unsupportedEntries.filter(({ key }) => !proxies.has(key)).map((entry) =>
-    unsupportedGlassEntry(entry, thickGlassBySource.get(entry.key))));
   entries.push({
     key: "authored/directional",
     category: "environment-light",
@@ -266,17 +219,6 @@ export function buildSvoEnvironmentCoverage(scene: SceneDescription, environment
     collisionOwnership: "none-presentation-only",
     lightingOwnership: "svo-directional-environment",
     defaultCameraPriority: false,
-  });
-  for (const gap of PROCEDURAL_FOREGROUND_GAPS[environmentId]) entries.push({
-    key: gap.key,
-    category: "procedural-foreground",
-    status: "unsupported",
-    visibleOwnership: "raster-only-procedural",
-    collisionOwnership: "none-presentation-only",
-    lightingOwnership: "none",
-    defaultCameraPriority: true,
-    reason: gap.reason,
-    fallback: "raster-environment-foreground",
   });
   const count = (status: SvoSceneCoverageStatus) => entries.filter((entry) => entry.status === status).length;
   const unsupportedEntries = entries.filter(({ status }) => status !== "complete");

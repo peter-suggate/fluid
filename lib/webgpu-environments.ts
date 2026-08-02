@@ -99,149 +99,13 @@ fn envHash31(p:vec3f)->f32{return fract(sin(dot(p,vec3f(127.1,311.7,74.7)))*4375
 fn envLine(value:f32,width:f32)->f32{let d=abs(fract(value)-.5);let halfWidth=max(.002,.5-width);return 1.0-smoothstep(halfWidth,halfWidth+.008,d);}
 fn envGrid(value:vec2f,width:f32)->f32{return max(envLine(value.x,width),envLine(value.y,width));}
 fn envBoxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let n=min(a,b);let f=max(a,b);return vec2f(max(max(n.x,n.y),n.z),min(min(f.x,f.y),f.z));}
-// Slab test with a caller-hoisted reciprocal: cluster culls and occlusion
-// sweeps issue many box tests per ray, and the divides dominate otherwise.
+// Slab test with a caller-hoisted reciprocal: the lab's occlusion sweep issues
+// many box tests per ray, and the divides dominate otherwise.
 fn envSlabHit(ro:vec3f,inv:vec3f,mn:vec3f,mx:vec3f)->vec2f{let a=(mn-ro)*inv;let b=(mx-ro)*inv;let n=min(a,b);let f=max(a,b);return vec2f(max(max(n.x,n.y),n.z),min(min(f.x,f.y),f.z));}
 fn envSlabBlocks(ro:vec3f,inv:vec3f,mn:vec3f,mx:vec3f,maxT:f32)->bool{let hit=envSlabHit(ro,inv,mn,mx);return hit.x<=hit.y&&hit.x>.001&&hit.x<maxT;}
 fn envMiss()->EnvironmentPropHit{return EnvironmentPropHit(1e20,vec3f(0,1,0),vec3f(0),0.0);}
-fn envNearest(best:EnvironmentPropHit,candidate:EnvironmentPropHit)->EnvironmentPropHit{
-  if(candidate.t<best.t){return candidate;}
-  return best;
-}
-fn envBoxPrimitive(ro:vec3f,rd:vec3f,center:vec3f,halfSize:vec3f,color:vec3f,emission:f32)->EnvironmentPropHit{
-  let h=envBoxHit(ro,rd,center-halfSize,center+halfSize);let t=select(h.x,h.y,h.x<=.001);if(h.x>h.y||t<=.001){return envMiss();}let p=ro+rd*t-center;let q=abs(p/max(halfSize,vec3f(1e-5)));var n=vec3f(0,1,0);if(q.x>=q.y&&q.x>=q.z){n=vec3f(sign(p.x),0,0);}else if(q.y>=q.z){n=vec3f(0,sign(p.y),0);}else{n=vec3f(0,0,sign(p.z));}return EnvironmentPropHit(t,n,color,emission);
-}
-fn envBoxPrimitiveInv(ro:vec3f,rd:vec3f,inv:vec3f,center:vec3f,halfSize:vec3f,color:vec3f,emission:f32)->EnvironmentPropHit{
-  let h=envSlabHit(ro,inv,center-halfSize,center+halfSize);let t=select(h.x,h.y,h.x<=.001);if(h.x>h.y||t<=.001){return envMiss();}let p=ro+rd*t-center;let q=abs(p/max(halfSize,vec3f(1e-5)));var n=vec3f(0,1,0);if(q.x>=q.y&&q.x>=q.z){n=vec3f(sign(p.x),0,0);}else if(q.y>=q.z){n=vec3f(0,sign(p.y),0);}else{n=vec3f(0,0,sign(p.z));}return EnvironmentPropHit(t,n,color,emission);
-}
 fn envEllipsoidPrimitive(ro:vec3f,rd:vec3f,center:vec3f,radius:vec3f,color:vec3f,emission:f32)->EnvironmentPropHit{
   let o=(ro-center)/radius;let d=rd/radius;let a=dot(d,d);let b=dot(o,d);let c=dot(o,o)-1.0;let disc=b*b-a*c;if(disc<0.0){return envMiss();}var t=(-b-sqrt(disc))/a;if(t<=.001){t=(-b+sqrt(disc))/a;}if(t<=.001){return envMiss();}let p=ro+rd*t-center;return EnvironmentPropHit(t,normalize(p/(radius*radius)),color,emission);
-}
-fn envCylinderPrimitive(ro:vec3f,rd:vec3f,center:vec3f,radius:f32,halfHeight:f32,color:vec3f,emission:f32)->EnvironmentPropHit{
-  let o=ro-center;let a=dot(rd.xz,rd.xz);let b=dot(o.xz,rd.xz);let c=dot(o.xz,o.xz)-radius*radius;var best=envMiss();if(a>1e-7&&b*b-a*c>=0.0){let root=sqrt(b*b-a*c);var t=(-b-root)/a;if(t<=.001){t=(-b+root)/a;}let y=o.y+rd.y*t;if(t>.001&&abs(y)<=halfHeight){let p=o+rd*t;best=EnvironmentPropHit(t,normalize(vec3f(p.x,0,p.z)),color,emission);}}
-  if(abs(rd.y)>1e-7){for(var side=-1.0;side<=1.0;side+=2.0){let t=(side*halfHeight-o.y)/rd.y;let p=o+rd*t;if(t>.001&&t<best.t&&dot(p.xz,p.xz)<=radius*radius){best=EnvironmentPropHit(t,vec3f(0,side,0),color,emission);}}}return best;
-}
-fn shadeEnvironmentProp(hit:EnvironmentPropHit,ro:vec3f,rd:vec3f)->vec3f{
-  if(environmentIndex()==2){return labPropShade(hit,ro+rd*hit.t,rd);}
-  let l=environmentLightDirection();let diffuse=.20+.80*max(dot(hit.normal,l),0.0);let rim=pow(1.0-max(dot(-rd,hit.normal),0.0),3.0);let spec=pow(max(dot(reflect(rd,hit.normal),l),0.0),72.0);return hit.color*diffuse+environmentAccent()*rim*.13+environmentLightColor()*(spec*.28+hit.emission);}
-
-fn sampleEnvironmentProps(ro:vec3f,rd:vec3f)->EnvironmentPropHit{
-  let e=environmentIndex();let s=max(max(u.container.x,u.container.y),u.container.z);var h=envMiss();
-  if(e==0){
-    // Conservatory: painted steel glazing, a slatted bench, stone planter,
-    // layered foliage, and pendant glass globes.
-    let frame=vec3f(.18,.28,.21);for(var i=-1;i<=1;i+=1){let x=f32(i)*1.12*s;h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,.92*s,-1.48*s),vec3f(.027*s,.92*s,.027*s),frame,0));}
-    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(0,.62*s,-1.48*s),vec3f(1.18*s,.025*s,.027*s),frame,0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(0,1.26*s,-1.48*s),vec3f(1.18*s,.025*s,.027*s),frame,0));
-    let wood=vec3f(.34,.23,.12);h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-1.18*s,.31*s,-.70*s),vec3f(.52*s,.055*s,.20*s),wood,0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-1.18*s,.58*s,-.87*s),vec3f(.52*s,.26*s,.045*s),wood*.82,0));for(var i=-1;i<=1;i+=2){h=envNearest(h,envBoxPrimitive(ro,rd,vec3f((-1.18+.38*f32(i))*s,.15*s,-.70*s),vec3f(.035*s,.16*s,.15*s),wood*.65,0));}
-    let stone=vec3f(.38,.35,.26);h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(1.12*s,.24*s,-.86*s),vec3f(.28*s,.24*s,.28*s),stone,0));let leaf=vec3f(.055,.30,.14);h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.12*s,.62*s,-.86*s),vec3f(.42*s,.38*s,.30*s),leaf,0));h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.90*s,.82*s,-.84*s),vec3f(.26*s,.38*s,.20*s),leaf*.82,0));h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.32*s,.88*s,-.90*s),vec3f(.24*s,.42*s,.19*s),leaf*.72,0));
-    for(var i=-1;i<=1;i+=1){h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(f32(i)*.56*s,1.50*s,-1.04*s),.012*s,.34*s,vec3f(.12),0));h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(f32(i)*.56*s,1.18*s,-1.04*s),vec3f(.095*s),vec3f(.85,.68,.38),.48));}
-  }else if(e==1){
-    // Courtyard: paired limestone columns, a tiled bench, citrus tree and
-    // hand-thrown pots create recognisable Mediterranean depth cues.
-    let limestone=vec3f(.62,.52,.38);for(var i=-1;i<=1;i+=2){let x=f32(i)*1.16*s;h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(x,.76*s,-1.34*s),.13*s,.76*s,limestone,0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,1.51*s,-1.34*s),vec3f(.19*s,.055*s,.19*s),limestone*.9,0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,.055*s,-1.34*s),vec3f(.20*s,.055*s,.20*s),limestone*.75,0));}
-    let tile=vec3f(.46,.20,.12);h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-1.12*s,.27*s,-.54*s),vec3f(.50*s,.065*s,.18*s),tile,0));for(var i=-1;i<=1;i+=2){h=envNearest(h,envBoxPrimitive(ro,rd,vec3f((-1.12+.38*f32(i))*s,.13*s,-.54*s),vec3f(.045*s,.14*s,.14*s),tile*.7,0));}
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(1.12*s,.22*s,-.68*s),.27*s,.22*s,vec3f(.56,.23,.12),0));h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(1.12*s,.70*s,-.68*s),.045*s,.40*s,vec3f(.20,.12,.055),0));let citrus=vec3f(.12,.34,.10);h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.12*s,1.12*s,-.68*s),vec3f(.48*s,.42*s,.40*s),citrus,0));h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.86*s,1.20*s,-.70*s),vec3f(.27*s),citrus*.82,0));h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.35*s,1.26*s,-.65*s),vec3f(.25*s),citrus*.9,0));for(var i=-1;i<=1;i+=2){h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f((1.12+.16*f32(i))*s,1.12*s,-.42*s),vec3f(.045*s),vec3f(.92,.46,.06),.08));}
-  }else if(e==2){
-    // Research lab at night: the tank rests on a steel-framed bench above a
-    // dropped floor. A task lamp, stool, back counter with instruments and
-    // emissive ceiling troffers are all real depth-tested geometry, so the
-    // water refracts furniture instead of a backplate. The furniture is
-    // grouped under three cluster slabs so a ray pays for a group's
-    // primitives only when it actually enters that group's bounds.
-    let floorY=environmentFloorY();let th=labTableHalf();let zb=labBenchZ();let ceilY=floorY+2.0*envRoomHalf().y;
-    let steel=vec3f(.30,.32,.34);let inv=1.0/rd;
-    let bench=envSlabHit(ro,inv,vec3f(-th.x,floorY,-th.y),vec3f(th.x+.63*s,.71*s,th.y));
-    if(bench.x<=bench.y&&bench.y>.001&&bench.x<h.t){
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(0.0,-.021*s,0.0),vec3f(th.x,.019*s,th.y),vec3f(.35,.26,.17),0));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(0.0,-.074*s,0.0),vec3f(th.x-.07*s,.034*s,th.y-.07*s),vec3f(.125,.135,.145),0));
-      for(var i=-1;i<=1;i+=2){for(var j=-1;j<=1;j+=2){h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(f32(i)*(th.x-.10*s),floorY+.34*s,f32(j)*(th.y-.10*s)),vec3f(.027*s,.34*s,.027*s),steel,0));}}
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(0.0,floorY+.16*s,0.0),vec3f(th.x-.13*s,.013*s,th.y-.13*s),vec3f(.20,.21,.22),0));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(-.35*th.x,floorY+.235*s,.15*th.y),vec3f(.15*s,.062*s,.115*s),vec3f(.10,.155,.165),0));
-      let lamp=labLampPosition();
-      h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(lamp.x,.010*s,lamp.z),.085*s,.013*s,vec3f(.095,.10,.11),0));
-      h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(lamp.x,.31*s,lamp.z),.012*s,.29*s,vec3f(.14,.15,.16),0));
-      h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(lamp.x,.63*s,lamp.z),vec3f(.098*s,.072*s,.098*s),vec3f(.055,.058,.062),0));
-      h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(lamp.x,.585*s,lamp.z),vec3f(.046*s),vec3f(1.0,.78,.45),2.8));
-      let stoolX=th.x+.45*s;
-      h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(stoolX,floorY+.47*s,.10*s),.17*s,.024*s,vec3f(.235,.155,.095),0));
-      h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(stoolX,floorY+.235*s,.10*s),.024*s,.215*s,steel*.8,0));
-      h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(stoolX,floorY+.02*s,.10*s),.145*s,.014*s,steel*.6,0));
-    }
-    let counter=envSlabHit(ro,inv,vec3f(-1.82*s,floorY,zb-.36*s),vec3f(1.82*s,floorY+1.90*s,zb+.32*s));
-    if(counter.x<=counter.y&&counter.y>.001&&counter.x<h.t){
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(0.0,floorY+.42*s,zb),vec3f(1.72*s,.42*s,.30*s),vec3f(.165,.195,.215),0));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(0.0,floorY+.862*s,zb),vec3f(1.80*s,.022*s,.34*s),vec3f(.54,.54,.52),0));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(.95*s,floorY+.93*s,zb),vec3f(.05*s,.055*s,.05*s),vec3f(.06,.065,.07),0));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(.95*s,floorY+1.17*s,zb+.05*s),vec3f(.30*s,.19*s,.014*s),vec3f(.030,.034,.040),0));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(.95*s,floorY+1.17*s,zb+.068*s),vec3f(.265*s,.155*s,.004*s),vec3f(.25,.45,.58),1.0));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(.95*s,floorY+.892*s,zb+.22*s),vec3f(.19*s,.007*s,.07*s),vec3f(.085,.09,.10),0));
-      h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.58*s,floorY+.966*s,zb),.070*s,.082*s,vec3f(.30,.36,.39),.02));
-      h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.86*s,floorY+1.014*s,zb+.04*s),.046*s,.13*s,vec3f(.27,.33,.36),.02));
-      h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-1.12*s,floorY+.980*s,zb-.02*s),vec3f(.088*s,.096*s,.088*s),vec3f(.28,.35,.34),.02));
-      h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(-.20*s,floorY+1.62*s,zb-.05*s),vec3f(1.22*s,.016*s,.17*s),vec3f(.29,.30,.31),0));
-      for(var i=0;i<3;i+=1){let bx=(-.92+.13*f32(i))*s;var bc=vec3f(.36,.14,.10);if(i==1){bc=vec3f(.10,.235,.255);}else if(i==2){bc=vec3f(.27,.27,.26);}h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(bx,floorY+1.751*s,zb-.05*s),vec3f(.050*s,.115*s,.135*s),bc,0));}
-    }
-    let fixtures=envSlabHit(ro,inv,vec3f(-1.52*s,ceilY-.05*s,-.52*s),vec3f(1.52*s,ceilY-.02*s,1.17*s));
-    if(fixtures.x<=fixtures.y&&fixtures.y>.001&&fixtures.x<h.t){
-      for(var i=-1;i<=1;i+=2){for(var j=0;j<2;j+=1){let jz=select(-.30*s,.95*s,j==1);h=envNearest(h,envBoxPrimitiveInv(ro,rd,inv,vec3f(f32(i)*.95*s,ceilY-.035*s,jz),vec3f(.55*s,.012*s,.20*s),vec3f(.92,.93,.90),2.3));}}
-    }
-  }else if(e==3){
-    // Gallery: board-formed portal, long bench, two plinths and contrasting
-    // abstract works. All silhouettes are actual depth-tested geometry.
-    let portal=vec3f(.82,.39,.17);h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-.74*s,.82*s,-1.42*s),vec3f(.045*s,.82*s,.08*s),portal,.12));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(.74*s,.82*s,-1.42*s),vec3f(.045*s,.82*s,.08*s),portal,.12));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(0,1.60*s,-1.42*s),vec3f(.78*s,.045*s,.08*s),portal,.12));
-    let bench=vec3f(.12,.14,.13);h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-1.08*s,.27*s,-.42*s),vec3f(.55*s,.065*s,.18*s),bench,0));for(var i=-1;i<=1;i+=2){h=envNearest(h,envBoxPrimitive(ro,rd,vec3f((-1.08+.40*f32(i))*s,.14*s,-.42*s),vec3f(.04*s,.14*s,.13*s),bench*.7,0));}
-    let plinth=vec3f(.43,.43,.40);h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(1.08*s,.25*s,-.86*s),vec3f(.28*s,.25*s,.28*s),plinth,0));h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(1.08*s,.72*s,-.86*s),vec3f(.30*s,.42*s,.23*s),vec3f(.08,.12,.11),0));h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.94*s,.97*s,-.84*s),vec3f(.18*s,.28*s,.16*s),vec3f(.40,.17,.10),0));
-  }else if(e==4){
-    // Bathhouse: cedar screen structure, stone stools, a soaking bucket and
-    // softly lit paper lanterns establish scale around the water vessel.
-    let cedar=vec3f(.34,.20,.105);for(var i=-2;i<=2;i+=1){h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(f32(i)*.52*s,.84*s,-1.34*s),vec3f(.025*s,.84*s,.035*s),cedar,0));}for(var i=0;i<=2;i+=1){h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(0,(.22+.53*f32(i))*s,-1.34*s),vec3f(1.18*s,.025*s,.035*s),cedar*.82,0));}
-    let stone=vec3f(.24,.25,.22);h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-1.08*s,.18*s,-.42*s),.27*s,.18*s,stone,0));h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(1.06*s,.16*s,-.70*s),.24*s,.16*s,stone*.82,0));h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.70*s,.20*s,-1.02*s),.25*s,.20*s,vec3f(.42,.25,.12),0));h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.70*s,.42*s,-1.02*s),.19*s,.035*s,cedar,0));
-    for(var i=-1;i<=1;i+=2){let x=f32(i)*.68*s;h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,1.22*s,-1.18*s),vec3f(.12*s,.19*s,.12*s),vec3f(.72,.57,.34),.22));h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(x,1.48*s,-1.18*s),.008*s,.09*s,cedar,0));}
-  }else if(e==5){
-    // Research station: pressure ribs, side consoles, exposed pipes, equipment
-    // cases and emissive monitor glass make the chamber feel occupied.
-    let metal=vec3f(.025,.09,.115);for(var i=-2;i<=2;i+=1){let x=f32(i)*.58*s;h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,1.35*s,-1.42*s),vec3f(.025*s,1.35*s,.05*s),metal,0));}
-    for(var i=-1;i<=1;i+=2){let x=f32(i)*1.16*s;h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,.37*s,-.72*s),vec3f(.34*s,.37*s,.30*s),metal*.72,0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(x,.63*s,-.40*s),vec3f(.25*s,.13*s,.018*s),vec3f(.06,.48,.58),.30));h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(x+.25*s,.88*s,-1.06*s),.055*s,.72*s,vec3f(.12,.25,.27),0));}
-    h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-.76*s,.23*s,-1.04*s),vec3f(.30*s,.23*s,.24*s),vec3f(.12,.15,.15),0));h=envNearest(h,envBoxPrimitive(ro,rd,vec3f(-.76*s,.47*s,-1.04*s),vec3f(.25*s,.018*s,.19*s),vec3f(.74,.48,.16),.12));
-    for(var i=-1;i<=1;i+=1){h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(f32(i)*.52*s,1.36*s,-1.12*s),vec3f(.055*s),vec3f(.10,.65,.72),.36));}
-  }else if(e==7){
-    // Porcelain garden: a monochrome white-clay diorama packed tight around
-    // the pond. Two cloud-canopy trees lean over the banks, oversized
-    // mushrooms ring the water and pebbles mark the beach, so the pond is the
-    // only reflective, colorful thing in frame. Heights anchor to lawn level.
-    let g=u.terrainMeta.y;
-    let trunk=vec3f(.52,.49,.45);let canopy=vec3f(.86,.85,.82);
-    let cap=vec3f(.90,.88,.85);let gill=vec3f(.55,.52,.49);let stem=vec3f(.78,.75,.71);let pebble=vec3f(.68,.67,.64);
-    // Big cloud tree on the far-left bank, canopy leaning over the deep end.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.45*s,g+.15*s,-.117*s),.055*s,.15*s,trunk,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.40*s,g+.50*s,-.08*s),vec3f(.30*s,.24*s,.28*s),canopy,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.56*s,g+.42*s,-.20*s),vec3f(.17*s,.14*s,.16*s),canopy*.92,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.33*s,g+.66*s,-.02*s),vec3f(.15*s,.12*s,.14*s),canopy*1.04,0));
-    // Round tree on the berm across the water.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.45*s,g+.12*s,-.25*s),.045*s,.12*s,trunk*.95,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.45*s,g+.40*s,-.25*s),vec3f(.22*s,.18*s,.21*s),canopy*.96,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.56*s,g+.50*s,-.19*s),vec3f(.12*s,.10*s,.11*s),canopy*.88,0));
-    // Grand mushroom on the far bank between beach and deep end, its sprout beside it.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.20*s,g+.10*s,-.33*s),.05*s,.10*s,stem,0));
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.20*s,g+.205*s,-.33*s),.115*s,.012*s,gill,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.20*s,g+.25*s,-.33*s),vec3f(.14*s,.088*s,.14*s),cap,0));
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.13*s,g+.055*s,-.36*s),.028*s,.055*s,stem*.9,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.13*s,g+.135*s,-.36*s),vec3f(.072*s,.046*s,.072*s),cap*.90,0));
-    // Tall mushroom by the rockery on the near-left bank.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.30*s,g+.075*s,.25*s),.036*s,.075*s,stem*.96,0));
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(-.30*s,g+.16*s,.25*s),.085*s,.010*s,gill,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.30*s,g+.20*s,.25*s),vec3f(.105*s,.066*s,.105*s),cap*.97,0));
-    // Button mushroom by the lobe edge and a pip by the beach shelf.
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.38*s,g+.06*s,.07*s),.032*s,.06*s,stem*.92,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.38*s,g+.15*s,.07*s),vec3f(.085*s,.054*s,.085*s),cap*.94,0));
-    h=envNearest(h,envCylinderPrimitive(ro,rd,vec3f(.24*s,g+.045*s,-.345*s),.024*s,.045*s,stem*.88,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.24*s,g+.115*s,-.345*s),vec3f(.06*s,.04*s,.06*s),cap*.86,0));
-    // White pebbles at the beach edge and by the near bank.
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.21*s,g+.02*s,-.29*s),vec3f(.05*s,.034*s,.046*s),pebble,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(.26*s,g+.015*s,-.325*s),vec3f(.036*s,.024*s,.033*s),pebble*.9,0));
-    h=envNearest(h,envEllipsoidPrimitive(ro,rd,vec3f(-.05*s,g+.02*s,.31*s),vec3f(.045*s,.03*s,.042*s),pebble*.95,0));
-  }
-  return h;
 }
 
 // Ground shading for the porcelain garden: the same structure as before —
@@ -371,17 +235,6 @@ fn labWindowMask(p:vec3f,n:vec3f)->f32{
   let s=max(max(u.container.x,u.container.y),u.container.z);
   let floorY=environmentFloorY();
   return step(abs(p.x),1.62*s)*step(floorY+1.05*s,p.y)*step(p.y,floorY+2.15*s);
-}
-fn labPropShade(hit:EnvironmentPropHit,p:vec3f,rd:vec3f)->vec3f{
-  let n=hit.normal;
-  let s=max(max(u.container.x,u.container.y),u.container.z);
-  var c=hit.color*(vec3f(.060,.065,.078)+labKeyLights(p,n,n.y>.55))*labTankShadow(p,n);
-  c+=hit.color*hit.emission*2.6;
-  let ceilY=environmentFloorY()+2.0*envRoomHalf().y;
-  let l=normalize(vec3f(select(-.95,.95,p.x>0.0)*s,ceilY-.16*s,-.30*s)-p);
-  c+=vec3f(1.0,.97,.90)*pow(max(dot(reflect(rd,n),l),0.0),60.0)*.30;
-  c+=vec3f(.05,.07,.09)*pow(1.0-max(dot(-rd,n),0.0),4.0);
-  return c;
 }
 // Room surfaces: ambient plus the shadowed key lights; the polished floor also
 // traces one reflection ray so the troffers and lamp smear across it. The
@@ -559,10 +412,9 @@ fn sampleEnvironment(ro:vec3f,rd:vec3f)->EnvironmentSample{
   if(e==7){
     // Open-air garden: no room box. The terrain heightfield IS the ground —
     // the pool cavity, banks and lawn are the same surface the solver solids
-    // were baked from — with hedges, tree and pots as depth-tested props.
+    // were baked from. The trees, mushrooms and pots that stand on it are
+    // scenery, and scenery is traced from the scene's own description.
     let terrainT=envTerrainTrace(ro,rd);
-    let prop=sampleEnvironmentProps(ro,rd);
-    if(prop.t<1e19&&(terrainT<0.0||prop.t<terrainT)){return EnvironmentSample(shadeEnvironmentProp(prop,ro,rd),prop.t);}
     if(terrainT>0.0){
       let p=ro+rd*terrainT;
       let n=envTerrainNormal(p.xz);
@@ -587,9 +439,6 @@ fn sampleEnvironment(ro:vec3f,rd:vec3f)->EnvironmentSample{
   }
   let roomHalf=envRoomHalf();let center=vec3f(0.0,environmentFloorY()+roomHalf.y,0.0);let h=envBoxHit(ro,rd,center-roomHalf,center+roomHalf);var t=h.y;
   if(t<=0.0||t>1e19){return EnvironmentSample(environmentLight(rd),65504.0);}
-  // Props resolve before the room surface: a furniture hit makes the room
-  // material and its shadow/reflection rays dead work, so skip them entirely.
-  let prop=sampleEnvironmentProps(ro,rd);if(prop.t<t){return EnvironmentSample(shadeEnvironmentProp(prop,ro,rd),prop.t);}
   let p=ro+rd*t;let q=(p-center)/roomHalf;let aq=abs(q);var n=vec3f(0.0);
   if(aq.x>=aq.y&&aq.x>=aq.z){n=vec3f(-sign(q.x),0,0);}else if(aq.y>=aq.z){n=vec3f(0,-sign(q.y),0);}else{n=vec3f(0,0,-sign(q.z));}
   var color=vec3f(0.0);if(e==0){color=conservatoryMaterial(p,n);}else if(e==1){color=courtyardMaterial(p,n);}else if(e==2){color=labMaterial(p,n);}else if(e==3){color=galleryMaterial(p,n);}else if(e==4){color=bathhouseMaterial(p,n);}else{color=stationMaterial(p,n);}

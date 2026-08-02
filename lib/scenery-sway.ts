@@ -13,7 +13,7 @@ import type { SvoPrimitiveDescriptor } from "./svo-primitive-abi";
  * held inside that margin can never carry a surface into a cell that names some
  * other primitive — and no brick, occupancy mip, or static publication has to
  * be rebuilt to follow it. `sceneryOwnershipMargin_m` is that budget, and
- * lib/voxel-scenery/garden.ts is held to it by tests/scenery-sway.test.ts.
+ * The garden's specimen tree is held to it by tests/scenery-sway.test.ts.
  *
  * What the sway therefore does not move is the baked cone-lighting pyramid: a
  * swaying canopy's soft shadow stays at its reference pose. Everything the

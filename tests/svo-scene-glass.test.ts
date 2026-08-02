@@ -73,7 +73,7 @@ test("catalog glass-like entries which are not finite dielectric panes remain ex
   const expected = {
     conservatory: ["curved-emissive-volume", "curved-emissive-volume", "curved-emissive-volume"],
     "night-lab": ["curved-emissive-volume", "emissive-display"],
-    "research-station": ["emissive-display", "emissive-display", "procedural-circular-glazing"],
+    "research-station": ["procedural-circular-glazing"],
   } as const;
   for (const environmentId of environmentIds) {
     const reasons = buildSvoSceneGlass(scene, { environmentId }).unsupportedEntries.map(({ reason }) => reason);

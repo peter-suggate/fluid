@@ -70,8 +70,9 @@ test("night-lab and station screens emit into the room while ceiling fixtures em
     ["night-lab/counter/monitor-screen", [0, 0, 1]],
     ["night-lab/fixtures/troffer-left-1", [0, -1, 0]],
     ["night-lab/fixtures/troffer-right-2", [0, -1, 0]],
-    ["research-station/console-left/monitor", [0, 0, 1]],
-    ["research-station/console-right/monitor", [0, 0, 1]],
+    // The station's light comes through the hull, not off a desk: this is the
+    // sea behind the observation port.
+    ["research-station/observation-port/backing", [0, 0, 1]],
   ] as const);
   for (const environmentId of ["night-lab", "research-station"] as const) {
     const scene = cloneScene(defaultScene);

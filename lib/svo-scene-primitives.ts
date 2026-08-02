@@ -120,6 +120,21 @@ function environmentIdentity(scene: Pick<SceneDescription, "rigidBodies">, primi
   return { materialId, ownerId };
 }
 
+/**
+ * The SVO record one catalog proxy publishes.
+ *
+ * Exported because the editor's scenery picking has to intersect *exactly* the
+ * geometry the renderer traces. Rebuilding the mapping beside the picker would
+ * be a second definition of every scenery shape, and the first cone whose
+ * radius convention drifted would make the cursor lie.
+ */
+export function svoDescriptorForEnvironmentProxy(
+  scene: Pick<SceneDescription, "rigidBodies">,
+  primitive: EnvironmentProxyPrimitive,
+): SvoPrimitiveDescriptor {
+  return descriptorForProxy(scene, primitive);
+}
+
 function descriptorForProxy(
   scene: Pick<SceneDescription, "rigidBodies">,
   primitive: EnvironmentProxyPrimitive,

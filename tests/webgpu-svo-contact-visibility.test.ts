@@ -88,7 +88,10 @@ test("contact visibility attenuates indirect diffuse only and adds no storage bi
   assert.match(shade, /let diffuseEnvironment=[^;]*\*contactVisibility\*gi\.visibility\*diffuseEnvironmentScale\/UNIFIED_PI/);
   assert.match(shade, /let specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*fresnel/);
   assert.match(shade, /let indirectDiffuse=diffuseColor\*gi\.radiance/);
-  assert.match(shade, /return max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct\*directScale\+indirectDiffuse,vec3f\(0\.0\)\)/);
+  // The hover rim is added after this sum and by nothing that feeds it, which
+  // is the claim that matters here: an editor cursor must not change how the
+  // room is lit.
+  assert.match(shade, /let shaded=max\(surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct\*directScale\+indirectDiffuse,vec3f\(0\.0\)\);\s*return dryHoverRim\(shaded,hit,viewDirection\)/);
   assert.doesNotMatch(shade, /(?:surface\.emissive|specularEnvironment|direct)\s*\*\s*contactVisibility/);
 
   // "adds no storage binding" is the claim under test: contact visibility must

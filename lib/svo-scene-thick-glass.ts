@@ -92,16 +92,32 @@ export function buildSvoSceneThickGlass(
   const glassIdBase = 0x4000 + catalog.environmentIndex * 0x100;
   const authored: AuthoredThickGlass[] = [];
 
+  // Curved glass, from the group a scenery node declares. Both roles used to be
+  // reached differently — globes by group, the station lens by a branch on the
+  // environment id pointing at a key no primitive published — which meant the
+  // lens was authored twice, here and in the wall it sits in, and only one of
+  // the two would have moved if the room were resized.
   for (const proxy of proxies) {
-    if (proxy.group !== "emissive-glass" || proxy.kind !== "ellipsoid") continue;
-    const radii = [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z] as const;
+    const globe = proxy.group === "emissive-glass" && proxy.kind === "ellipsoid";
+    const port = proxy.group === "porthole-glass";
+    if (!globe && !port) continue;
+    // A round port is authored as a disc and may be turned into a wall, so its
+    // lens takes the world extent it actually occupies rather than its local
+    // radii. A globe is a sphere either way.
+    const radii = globe
+      ? [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z] as const
+      : [
+        .5 * (proxy.aabb_m.max.x - proxy.aabb_m.min.x),
+        .5 * (proxy.aabb_m.max.y - proxy.aabb_m.min.y),
+        .5 * (proxy.aabb_m.max.z - proxy.aabb_m.min.z),
+      ] as const;
     authored.push({
-      key: `${proxy.key}/thick-glass`,
+      key: globe ? `${proxy.key}/thick-glass` : `${proxy.key}/thick-lens`,
       sourceKey: proxy.key,
-      role: "emissive-globe",
+      role: globe ? "emissive-globe" : "station-observation-lens",
       descriptor: {
         glassId: glassIdBase + authored.length,
-        materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + proxy.ownerIndex,
+        materialId: globe ? ENVIRONMENT_VOXEL_MATERIAL_BASE + proxy.ownerIndex : VOXEL_MATERIAL_IDS.containerGlass,
         ownerId: scene.rigidBodies.length + proxy.ownerIndex,
         revision,
         shape: equalRadii(radii) ? "sphere" : "ellipsoid",
@@ -110,28 +126,6 @@ export function buildSvoSceneThickGlass(
         absorption_mInv: SVO_SCENE_THICK_GLASS_DEFAULT_ABSORPTION_M_INV,
       },
       replacesUnsupportedKey: proxy.key,
-    });
-  }
-
-  if (environmentId === "research-station") {
-    const s = catalog.scale_m;
-    const nextOwner = Math.max(...proxies.map(({ ownerIndex }) => ownerIndex), -1) + 1;
-    authored.push({
-      key: "research-station/observation-port/thick-lens",
-      sourceKey: "research-station/shell/procedural-portholes",
-      role: "station-observation-lens",
-      descriptor: {
-        glassId: glassIdBase + authored.length,
-        materialId: VOXEL_MATERIAL_IDS.containerGlass,
-        ownerId: scene.rigidBodies.length + nextOwner,
-        revision,
-        shape: "ellipsoid",
-        center_m: [0, catalog.floorY_m + 1.55 * s, catalog.shell.bounds_m.min.z + .018 * s],
-        radii_m: [.66 * s, .39 * s, .018 * s],
-        absorption_mInv: SVO_SCENE_THICK_GLASS_DEFAULT_ABSORPTION_M_INV,
-      },
-      replacesThinPaneKey: "research-station/observation-port/glazing",
-      replacesUnsupportedKey: "research-station/shell/procedural-portholes",
     });
   }
 
