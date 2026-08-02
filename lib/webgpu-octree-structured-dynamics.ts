@@ -17,8 +17,8 @@ import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostic
 import { GPU_RIGID_BODY_CAPACITY } from "./webgpu-rigid-body";
 import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 
-const ROW_CLASSES = [0, 1, 2, 3] as const;
-const FAMILY_CLASSES = [5, 6, 7, 8] as const;
+const STRUCTURED_ROW_UNION_DISPATCH_OFFSET_BYTES = 9 * 12;
+const STRUCTURED_FAMILY_UNION_DISPATCH_OFFSET_BYTES = 10 * 12;
 type StructuredDynamicsPipelineBundle = Readonly<Record<string, GPUComputePipeline>>;
 type StructuredDynamicsPipelineProgress =
   (entryPoint: string, completed: number, total: number) => void;
@@ -242,7 +242,7 @@ export function decodeStructuredProjectionEnergy(
  * Diagnostic-only: read the GPU-authored per-class indirect dispatch widths back
  * to the host.
  *
- * `encodeClasses` dispatches one workgroup of 64 lanes per 64 workset entries,
+ * Union dispatches run one workgroup of 64 lanes per 64 workset entries,
  * so the recorded X dimension IS the occupancy ceiling of every family kernel:
  * a class holding 430 faces can never put more than seven workgroups on a
  * 32-core GPU no matter how expensive each face is. Nothing on the host knows
@@ -303,9 +303,9 @@ export interface StructuredDynamicsResources {
  * dedicated air-support producer after projection.
  */
 export class WebGPUStructuredVelocityDynamics {
-  readonly encodedAdvectionDispatchCount: 9 | 10;
-  readonly encodedForceDivergenceDispatchCount = 10;
-  readonly encodedProjectionDispatchCount = 13;
+  readonly encodedAdvectionDispatchCount: 3 | 4;
+  readonly encodedForceDivergenceDispatchCount = 4;
+  readonly encodedProjectionDispatchCount = 4;
   readonly allocatedBytes: number;
   /** Per-slot vec4f: transported momentum xyz and kinetic dissipation w. */
   readonly transportMetrics: GPUBuffer;
@@ -318,7 +318,7 @@ export class WebGPUStructuredVelocityDynamics {
   /** Immutable packed volume/slot/tetra catalog shared by direct consumers. */
   readonly catalog: GPUBuffer;
   readonly catalogOffsetsWords: readonly [number, number, number, number, number];
-  /** Nine accepted class dispatch records, one vec3u per workset class. */
+  /** Nine accepted class dispatch records followed by row/family union records. */
   readonly dispatch: GPUBuffer;
   /** Diagnostic-only A/B face values captured immediately after candidate
    * topology transfer, followed by accepted and candidate control headers. */
@@ -332,14 +332,14 @@ export class WebGPUStructuredVelocityDynamics {
   private prepare!: GPUComputePipeline;
   private topologyTransfer!: GPUComputePipeline;
   private boundaryDryProbe?: GPUComputePipeline;
-  private advection!: readonly GPUComputePipeline[];
-  private advectionCommit!: readonly GPUComputePipeline[];
-  private force!: readonly GPUComputePipeline[];
-  private divergence!: readonly GPUComputePipeline[];
-  private separation!: readonly GPUComputePipeline[];
-  private bodyImpulse!: readonly GPUComputePipeline[];
-  private projection!: readonly GPUComputePipeline[];
-  private reconstruct!: readonly GPUComputePipeline[];
+  private advection!: GPUComputePipeline;
+  private advectionCommit!: GPUComputePipeline;
+  private force!: GPUComputePipeline;
+  private divergence!: GPUComputePipeline;
+  private separation!: GPUComputePipeline;
+  private bodyImpulse?: GPUComputePipeline;
+  private projection!: GPUComputePipeline;
+  private reconstruct!: GPUComputePipeline;
   private summarizePreProjectionEnergy!: GPUComputePipeline;
   private summarizePostProjectionEnergy!: GPUComputePipeline;
   private summarizeStartEnergy!: GPUComputePipeline;
@@ -407,7 +407,7 @@ export class WebGPUStructuredVelocityDynamics {
     pieces.forEach((piece, index) => copy.copyBufferToBuffer(piece, 0, this.catalog, offsets[index]!, piece.size));
     device.queue.submit([copy.finish()]);
     this.dispatch = device.createBuffer({ label: "Structured dynamics accepted indirect arguments",
-      size: 9 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT
+      size: 11 * 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT
         | GPUBufferUsage.COPY_SRC });
     this.transportMetrics = resources.selectorRows;
     this.projectionEnergyStats = device.createBuffer({
@@ -466,7 +466,7 @@ export class WebGPUStructuredVelocityDynamics {
     this.pipelineCacheKey = `${this.advectionSymmetryAudit ? "advection-audit" : "production"}\0${
       this.pipelineEntryPoints().join("\0")}`;
     if (!deferPipelineCompilation) this.createPipelinesSync();
-    this.encodedAdvectionDispatchCount = this.flattenedBoundaryAdvection ? 10 : 9;
+    this.encodedAdvectionDispatchCount = this.flattenedBoundaryAdvection ? 4 : 3;
     this.allocatedBytes = catalogBytes + this.dispatch.size
       + this.projectionEnergyStats.size
       + (this.topologyTransferAudit?.size ?? 0)
@@ -478,16 +478,12 @@ export class WebGPUStructuredVelocityDynamics {
     return [
       "prepareStructuredDynamics", "transferStructuredTopologyCandidate",
       ...(this.flattenedBoundaryAdvection ? ["classifyStructuredBoundaryDryProbes"] : []),
-      ...FAMILY_CLASSES.map((value) => this.flattenedBoundaryAdvection && value >= 7
-        ? `advectStructuredFlattenedClass${value}` : `advectStructuredClass${value}`),
-      ...FAMILY_CLASSES.map((value) => `commitAdvectedStructuredClass${value}`),
-      ...FAMILY_CLASSES.map((value) => `forceStructuredClass${value}`),
-      ...ROW_CLASSES.map((value) => `divergenceStructuredClass${value}`),
-      ...ROW_CLASSES.map((value) => `separateStructuredClass${value}`),
-      ...(this.resources.bodyCount === 0 ? []
-        : ROW_CLASSES.map((value) => `exchangeStructuredBodyImpulseClass${value}`)),
-      ...FAMILY_CLASSES.map((value) => `projectStructuredClass${value}`),
-      ...ROW_CLASSES.map((value) => `reconstructStructuredClass${value}`),
+      this.flattenedBoundaryAdvection
+        ? "advectStructuredFamiliesFlattenedBoundary" : "advectStructuredFamilies",
+      "commitAdvectedStructuredFamilies", "forceStructuredFamilies",
+      "divergenceStructuredRows", "separateStructuredRows",
+      ...(this.resources.bodyCount === 0 ? [] : ["exchangeStructuredBodyImpulseRows"]),
+      "projectStructuredFamilies", "reconstructStructuredRows",
       ...(this.projectionEnergyProbe ? [
         "summarizeStructuredPreProjectionEnergy", "summarizeStructuredPostProjectionEnergy",
         "summarizeStructuredStartEnergy", "summarizeStructuredPostAdvectionEnergy",
@@ -505,17 +501,16 @@ export class WebGPUStructuredVelocityDynamics {
     this.topologyTransfer = pipelines.transferStructuredTopologyCandidate!;
     this.boundaryDryProbe = this.flattenedBoundaryAdvection
       ? pipelines.classifyStructuredBoundaryDryProbes : undefined;
-    this.advection = FAMILY_CLASSES.map((value) => pipelines[
-      this.flattenedBoundaryAdvection && value >= 7
-        ? `advectStructuredFlattenedClass${value}` : `advectStructuredClass${value}`]!);
-    this.advectionCommit = FAMILY_CLASSES.map((value) => pipelines[`commitAdvectedStructuredClass${value}`]!);
-    this.force = FAMILY_CLASSES.map((value) => pipelines[`forceStructuredClass${value}`]!);
-    this.divergence = ROW_CLASSES.map((value) => pipelines[`divergenceStructuredClass${value}`]!);
-    this.separation = ROW_CLASSES.map((value) => pipelines[`separateStructuredClass${value}`]!);
-    this.bodyImpulse = this.resources.bodyCount === 0 ? []
-      : ROW_CLASSES.map((value) => pipelines[`exchangeStructuredBodyImpulseClass${value}`]!);
-    this.projection = FAMILY_CLASSES.map((value) => pipelines[`projectStructuredClass${value}`]!);
-    this.reconstruct = ROW_CLASSES.map((value) => pipelines[`reconstructStructuredClass${value}`]!);
+    this.advection = pipelines[this.flattenedBoundaryAdvection
+      ? "advectStructuredFamiliesFlattenedBoundary" : "advectStructuredFamilies"]!;
+    this.advectionCommit = pipelines.commitAdvectedStructuredFamilies!;
+    this.force = pipelines.forceStructuredFamilies!;
+    this.divergence = pipelines.divergenceStructuredRows!;
+    this.separation = pipelines.separateStructuredRows!;
+    this.bodyImpulse = this.resources.bodyCount === 0
+      ? undefined : pipelines.exchangeStructuredBodyImpulseRows!;
+    this.projection = pipelines.projectStructuredFamilies!;
+    this.reconstruct = pipelines.reconstructStructuredRows!;
     if (this.projectionEnergyProbe) {
       this.summarizePreProjectionEnergy = pipelines.summarizeStructuredPreProjectionEnergy!;
       this.summarizePostProjectionEnergy = pipelines.summarizeStructuredPostProjectionEnergy!;
@@ -681,7 +676,7 @@ export class WebGPUStructuredVelocityDynamics {
    * stages keep running over a field already known to be invalid.
    *
    * The fence is required for the usual reason: this writes `this.dispatch` as
-   * storage and `encodeClasses` reads the same buffer as an indirect argument.
+   * storage and the union kernels read the same buffer as an indirect argument.
    */
   private encodePrepare(broker: PassBroker, params: GPUBuffer): void {
     const pass = broker.compute({ label: "Prepare accepted structured dynamics worksets" });
@@ -710,13 +705,15 @@ export class WebGPUStructuredVelocityDynamics {
     pass.dispatchWorkgroups(1);
   }
 
-  private encodeClasses(broker: PassBroker, pipelines: readonly GPUComputePipeline[], classes: readonly number[],
-    bindings: readonly number[], params: GPUBuffer, label: string, pressure?: GPUBuffer): void {
-    pipelines.forEach((pipeline, index) => {
-      const pass = broker.compute({ label: `${label} ${classes[index]}` }); pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.group(pipeline, bindings, params, pressure));
-      pass.dispatchWorkgroupsIndirect(this.dispatch, classes[index]! * 12);
-    });
+  private encodeUnion(broker: PassBroker, pipeline: GPUComputePipeline,
+    union: "rows" | "families", bindings: readonly number[], params: GPUBuffer,
+    label: string, pressure?: GPUBuffer): void {
+    const pass = broker.compute({ label });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.group(pipeline, bindings, params, pressure));
+    pass.dispatchWorkgroupsIndirect(this.dispatch, union === "rows"
+      ? STRUCTURED_ROW_UNION_DISPATCH_OFFSET_BYTES
+      : STRUCTURED_FAMILY_UNION_DISPATCH_OFFSET_BYTES);
   }
 
   /**
@@ -771,16 +768,16 @@ export class WebGPUStructuredVelocityDynamics {
       pass.dispatchWorkgroupsIndirect(this.dispatch,
         STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES);
     }
-    this.encodeClasses(broker, this.advection, FAMILY_CLASSES, [0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18], params,
-      "Advect structured family class");
+    this.encodeUnion(broker, this.advection, "families",
+      [0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18], params, "Advect structured families");
     // The sampler writes only the inactive bank; commit runs as a later
     // dispatch and reads that bank as ordinary storage. In-pass dispatch
     // ordering closes the race without a pass boundary.
     if (!this.compactPlainStoragePass) {
       broker.fence("structured advected destinations staged");
     }
-    this.encodeClasses(broker, this.advectionCommit, FAMILY_CLASSES, [0, 1, 2, 11, 17, 18], params,
-      "Commit advected structured family class");
+    this.encodeUnion(broker, this.advectionCommit, "families",
+      [0, 1, 2, 11, 17, 18], params, "Commit advected structured families");
     // Keep this boundary: the next dynamics prepare rewrites `this.dispatch`
     // as storage after advection and commit consumed it as INDIRECT.
     broker.fence("structured indirect arguments retired after advection");
@@ -862,8 +859,8 @@ export class WebGPUStructuredVelocityDynamics {
     if (this.destroyed) throw new Error("Structured dynamics is destroyed");
     this.requirePipelines();
     const params = this.update(1, dt, density, gravity, inflow); this.encodePrepare(broker, params);
-    this.encodeClasses(broker, this.force, FAMILY_CLASSES, [0, 1, 2, 11, 16, 17, 22], params,
-      "Force and constrain structured family class");
+    this.encodeUnion(broker, this.force, "families",
+      [0, 1, 2, 11, 16, 17, 22], params, "Force and constrain structured families");
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic before pre-projection energy summary");
     }
@@ -871,8 +868,8 @@ export class WebGPUStructuredVelocityDynamics {
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after pre-projection energy summary");
     }
-    this.encodeClasses(broker, this.divergence, ROW_CLASSES, [0, 1, 2, 5, 6, 11, 14, 16, 17, 22], params,
-      "Fuse structured divergence RHS class");
+    this.encodeUnion(broker, this.divergence, "rows",
+      [0, 1, 2, 5, 6, 11, 14, 16, 17, 22], params, "Fuse structured divergence RHS rows");
   }
 
   encodeProjection(broker: PassBroker, dt: number, density: number,
@@ -890,21 +887,21 @@ export class WebGPUStructuredVelocityDynamics {
     // those faces. The solved pressure itself is never mutated, so this
     // step's projection and divergence bookkeeping stay exactly the
     // variational solution.
-    this.encodeClasses(broker, this.separation, ROW_CLASSES,
+    this.encodeUnion(broker, this.separation, "rows",
       [0, 1, 2, 3, 5, 6, 11, 13, 15, 16, 17], params,
-      "Mark structured overhead separation row class", pressure);
+      "Mark structured overhead separation rows", pressure);
     // Read the solved pressure before the projection stage consumes it. Both
     // stages are read-only in `pressure`, so no fence separates them; the
     // exchange only writes the resident rigid buffer, which the integrator
     // reads once, after the whole advance.
     if (couplingBodyCount > 0) {
-      this.encodeClasses(broker, this.bodyImpulse, ROW_CLASSES,
+      this.encodeUnion(broker, this.bodyImpulse!, "rows",
         [0, 1, 2, 5, 6, 11, 13, 16, 17, 25, 26], params,
-        "Exchange structured body impulse row class", pressure);
+        "Exchange structured body impulse rows", pressure);
     }
-    this.encodeClasses(broker, this.projection, FAMILY_CLASSES,
+    this.encodeUnion(broker, this.projection, "families",
       [0, 1, 2, 11, 13, 16, 17, 22], params,
-      "Project structured family class", pressure);
+      "Project structured families", pressure);
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic before post-projection energy summary");
     }
@@ -912,7 +909,7 @@ export class WebGPUStructuredVelocityDynamics {
     if (octreeAlgorithmDiagnosticsEnabled()) {
       broker.fence("algorithm diagnostic after post-projection energy summary");
     }
-    this.encodeClasses(broker, this.reconstruct, ROW_CLASSES,
+    this.encodeUnion(broker, this.reconstruct, "rows",
       [0, 1, 2, 4, 5, 6, 11, 17], params,
       "Reconstruct projected structured rows");
   }
@@ -1033,6 +1030,31 @@ fn boundaryValid()->bool{
 // dispatches Y=1 and never reaches the second term.
 fn classItem(g:vec3u)->u32{return g.x+g.y*65535u*64u;}
 fn workItem(cls:u32,index:u32)->u32{let base=wbase(cls);if(!boundaryValid()||worksets[base]!=acc(3u)||index>=worksets[base+1u]){return INVALID;}return worksets[base+7u+index];}
+// Map one dense union invocation back to its original class-local index. The
+// four published payloads remain untouched and retain their deterministic
+// per-class ordering; only their dispatch records are collapsed.
+fn unionClassItem(first:u32,index:u32)->vec2u{
+  var local=index;
+  for(var offset=0u;offset<4u;offset+=1u){
+    let cls=first+offset;let count=worksets[wbase(cls)+1u];
+    if(local<count){return vec2u(cls,local);}
+    local-=count;
+  }
+  return vec2u(INVALID);
+}
+fn publishUnionDispatch(out:u32,first:u32){
+  var valid=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid();
+  var count=0u;
+  for(var offset=0u;offset<4u;offset+=1u){
+    let base=wbase(first+offset);
+    valid=valid&&worksets[base]==acc(3u);
+    count+=worksets[base+1u];
+  }
+  let blocks=select(0u,(count+63u)/64u,valid);
+  let x=min(65535u,blocks);
+  var y=1u;if(x!=0u){y=(blocks+x-1u)/x;}
+  indirect[out]=x;indirect[out+1u]=y;indirect[out+2u]=1u;
+}
 fn candidateTransferItem(index:u32)->u32{
  if(arrayLength(&candidate)<7u||atomicLoad(&candidate[0])!=CANDIDATE_VALID){return INVALID;}
  let at=${OCTREE_STRUCTURED_GPU_TRANSFER_LIST_OFFSET_WORDS}u+index;
@@ -1065,6 +1087,8 @@ fn prepareStructuredDynamics(){
   indirect[12u]=flatX;
   indirect[13u]=flatY;
   indirect[14u]=1u;
+  publishUnionDispatch(27u,0u);
+  publishUnionDispatch(30u,5u);
 }
 
 fn value(handle:u32)->f32{return bitcast<f32>(a[abase()+p.valuesOffset+handle]);}
@@ -2128,12 +2152,8 @@ fn advect(cls:u32,index:u32,flattenedDryRows:bool){
   setNextValue(handle,projected);
   transportMetrics[handle]=vec4f(projected*n*area,.5*area*max(0.,prior*prior-projected*projected));
 }
-@compute @workgroup_size(64)fn advectStructuredClass5(@builtin(global_invocation_id)g:vec3u){advect(5u,classItem(g),false);}
-@compute @workgroup_size(64)fn advectStructuredClass6(@builtin(global_invocation_id)g:vec3u){advect(6u,classItem(g),false);}
-@compute @workgroup_size(64)fn advectStructuredClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,classItem(g),false);}
-@compute @workgroup_size(64)fn advectStructuredClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,classItem(g),false);}
-@compute @workgroup_size(64)fn advectStructuredFlattenedClass7(@builtin(global_invocation_id)g:vec3u){advect(7u,classItem(g),true);}
-@compute @workgroup_size(64)fn advectStructuredFlattenedClass8(@builtin(global_invocation_id)g:vec3u){advect(8u,classItem(g),true);}
+@compute @workgroup_size(64)fn advectStructuredFamilies(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){advect(item.x,item.y,false);}}
+@compute @workgroup_size(64)fn advectStructuredFamiliesFlattenedBoundary(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){advect(item.x,item.y,item.x>=7u);}}
 
 fn commitAdvected(cls:u32,index:u32){
   let handle=workItem(cls,index);
@@ -2143,10 +2163,7 @@ fn commitAdvected(cls:u32,index:u32){
   if(!supportPublicationValid()){return;}
   a[abase()+p.valuesOffset+handle]=a[nextValueAt(handle)];
 }
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass5(@builtin(global_invocation_id)g:vec3u){commitAdvected(5u,classItem(g));}
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass6(@builtin(global_invocation_id)g:vec3u){commitAdvected(6u,classItem(g));}
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass7(@builtin(global_invocation_id)g:vec3u){commitAdvected(7u,classItem(g));}
-@compute @workgroup_size(64)fn commitAdvectedStructuredClass8(@builtin(global_invocation_id)g:vec3u){commitAdvected(8u,classItem(g));}
+@compute @workgroup_size(64)fn commitAdvectedStructuredFamilies(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){commitAdvected(item.x,item.y);}}
 
 var<workgroup> projectionEnergyPartial:array<f32,128>;
 var<workgroup> projectionEnergyCount:array<u32,128>;
@@ -2294,10 +2311,7 @@ fn forceFamily(cls:u32,index:u32){
   if(!finite(forced)){rejectSample(11u,handle);return;}
   setValue(handle,forced);
 }
-@compute @workgroup_size(64)fn forceStructuredClass5(@builtin(global_invocation_id)g:vec3u){forceFamily(5u,classItem(g));}
-@compute @workgroup_size(64)fn forceStructuredClass6(@builtin(global_invocation_id)g:vec3u){forceFamily(6u,classItem(g));}
-@compute @workgroup_size(64)fn forceStructuredClass7(@builtin(global_invocation_id)g:vec3u){forceFamily(7u,classItem(g));}
-@compute @workgroup_size(64)fn forceStructuredClass8(@builtin(global_invocation_id)g:vec3u){forceFamily(8u,classItem(g));}
+@compute @workgroup_size(64)fn forceStructuredFamilies(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){forceFamily(item.x,item.y);}}
 
 fn divergenceRow(cls:u32,index:u32){
   let row=workItem(cls,index);
@@ -2335,10 +2349,7 @@ fn divergenceRow(cls:u32,index:u32){
   // RHS, and projection describe different equations at different leaf sizes.
   rhs[row]=p.physical.z*flux/p.physical.y;
 }
-@compute @workgroup_size(64)fn divergenceStructuredClass0(@builtin(global_invocation_id)g:vec3u){divergenceRow(0u,classItem(g));}
-@compute @workgroup_size(64)fn divergenceStructuredClass1(@builtin(global_invocation_id)g:vec3u){divergenceRow(1u,classItem(g));}
-@compute @workgroup_size(64)fn divergenceStructuredClass2(@builtin(global_invocation_id)g:vec3u){divergenceRow(2u,classItem(g));}
-@compute @workgroup_size(64)fn divergenceStructuredClass3(@builtin(global_invocation_id)g:vec3u){divergenceRow(3u,classItem(g));}
+@compute @workgroup_size(64)fn divergenceStructuredRows(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(0u,classItem(g));if(item.x!=INVALID){divergenceRow(item.x,item.y);}}
 
 // The paper's cut-cell solid coupling (Batty-style apertures) constrains
 // u.n on solid faces bilaterally, so the solve balances a liquid sheet on
@@ -2417,10 +2428,7 @@ fn markSeparationRow(cls:u32,index:u32){
   }
   separationMask[cell]=(acc(3u)<<6u)|faceBits;
 }
-@compute @workgroup_size(64)fn separateStructuredClass0(@builtin(global_invocation_id)g:vec3u){markSeparationRow(0u,classItem(g));}
-@compute @workgroup_size(64)fn separateStructuredClass1(@builtin(global_invocation_id)g:vec3u){markSeparationRow(1u,classItem(g));}
-@compute @workgroup_size(64)fn separateStructuredClass2(@builtin(global_invocation_id)g:vec3u){markSeparationRow(2u,classItem(g));}
-@compute @workgroup_size(64)fn separateStructuredClass3(@builtin(global_invocation_id)g:vec3u){markSeparationRow(3u,classItem(g));}
+@compute @workgroup_size(64)fn separateStructuredRows(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(0u,classItem(g));if(item.x!=INVALID){markSeparationRow(item.x,item.y);}}
 
 // Fluid -> rigid, the exact adjoint of the solid term the divergence RHS
 // already integrates.
@@ -2506,10 +2514,7 @@ fn bodyImpulseRow(cls:u32,index:u32){
     accumulateBodyImpulse(chosen,impulse,torque);
   }
 }
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass0(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(0u,classItem(g));}
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass1(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(1u,classItem(g));}
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass2(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(2u,classItem(g));}
-@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseClass3(@builtin(global_invocation_id)g:vec3u){bodyImpulseRow(3u,classItem(g));}
+@compute @workgroup_size(64)fn exchangeStructuredBodyImpulseRows(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(0u,classItem(g));if(item.x!=INVALID){bodyImpulseRow(item.x,item.y);}}
 
 fn projectFamily(cls:u32,index:u32){
   let handle=workItem(cls,index);
@@ -2536,10 +2541,7 @@ fn projectFamily(cls:u32,index:u32){
   if(!finite(projected)){rejectSample(33u,handle);return;}
   setValue(handle,projected);
 }
-@compute @workgroup_size(64)fn projectStructuredClass5(@builtin(global_invocation_id)g:vec3u){projectFamily(5u,classItem(g));}
-@compute @workgroup_size(64)fn projectStructuredClass6(@builtin(global_invocation_id)g:vec3u){projectFamily(6u,classItem(g));}
-@compute @workgroup_size(64)fn projectStructuredClass7(@builtin(global_invocation_id)g:vec3u){projectFamily(7u,classItem(g));}
-@compute @workgroup_size(64)fn projectStructuredClass8(@builtin(global_invocation_id)g:vec3u){projectFamily(8u,classItem(g));}
+@compute @workgroup_size(64)fn projectStructuredFamilies(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){projectFamily(item.x,item.y);}}
 
 fn canonicalInterpolation8(values:array<f32,8>,count:u32)->f32{
   var sorted=values;
@@ -2601,8 +2603,5 @@ fn reconstructRow(cls:u32,index:u32){
   if(!finite3(projected)){rejectSample(54u,row);return;}
   rowVelocity[rbase()+row]=vec4f(projected,1.);
 }
-@compute @workgroup_size(64)fn reconstructStructuredClass0(@builtin(global_invocation_id)g:vec3u){reconstructRow(0u,classItem(g));}
-@compute @workgroup_size(64)fn reconstructStructuredClass1(@builtin(global_invocation_id)g:vec3u){reconstructRow(1u,classItem(g));}
-@compute @workgroup_size(64)fn reconstructStructuredClass2(@builtin(global_invocation_id)g:vec3u){reconstructRow(2u,classItem(g));}
-@compute @workgroup_size(64)fn reconstructStructuredClass3(@builtin(global_invocation_id)g:vec3u){reconstructRow(3u,classItem(g));}
+@compute @workgroup_size(64)fn reconstructStructuredRows(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(0u,classItem(g));if(item.x!=INVALID){reconstructRow(item.x,item.y);}}
 `;

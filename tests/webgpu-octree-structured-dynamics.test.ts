@@ -48,13 +48,11 @@ function slotBankBase(wgsl: string, bank: number, slotCapacity: number): number 
 
 const entries = ["prepareStructuredDynamics", "classifyStructuredBoundaryDryProbes",
   "summarizeStructuredPreProjectionEnergy", "summarizeStructuredPostProjectionEnergy",
-  ...[5, 6, 7, 8].flatMap((value) => [`advectStructuredClass${value}`,
-    `commitAdvectedStructuredClass${value}`, `forceStructuredClass${value}`,
-    `projectStructuredClass${value}`]),
-  "advectStructuredFlattenedClass7", "advectStructuredFlattenedClass8",
-  ...[0, 1, 2, 3].flatMap((value) => [`divergenceStructuredClass${value}`,
-    `reconstructStructuredClass${value}`,
-    `exchangeStructuredBodyImpulseClass${value}`]),
+  "advectStructuredFamilies", "advectStructuredFamiliesFlattenedBoundary",
+  "commitAdvectedStructuredFamilies", "forceStructuredFamilies",
+  "projectStructuredFamilies", "divergenceStructuredRows",
+  "reconstructStructuredRows", "separateStructuredRows",
+  "exchangeStructuredBodyImpulseRows",
 ];
 
 test("overhead contact is unilateral: tension marks separation, the next rebuild opens the face", () => {
@@ -103,7 +101,7 @@ test("velocity reconstruction is permutation invariant and exactly odd under ref
 test("divergence flux is independent of reflected incidence order", () => {
   const divergence = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn divergenceRow("),
-    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredClass0("));
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredRows("));
   assert.match(divergence, /var fluxTerms:array<f32,31>/);
   assert.match(divergence,
     /fluxTerms\[local\]=sign\*area\*boundaryVelocity[\s\S]*canonicalReconstructionSum\(fluxTerms,count\)/,
@@ -191,12 +189,12 @@ test("projection energy uses one coherent face-weighted pair around projection",
     /dualVolume=area\/inverseDistance[\s\S]*\.5\*aperture\*dualVolume\*sample\*sample/,
     "all stage reductions must use the identical open-face kinetic-energy measure");
   const startAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "start")');
-  const advectAt = dynamicsHost.indexOf("Advect structured family class");
+  const advectAt = dynamicsHost.indexOf("Advect structured families");
   const advectedAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "advected")');
-  const forceAt = dynamicsHost.indexOf("Force and constrain structured family class");
+  const forceAt = dynamicsHost.indexOf("Force and constrain structured families");
   const preAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "pre")');
-  const divergenceAt = dynamicsHost.indexOf("Fuse structured divergence RHS class");
-  const projectionAt = dynamicsHost.indexOf("Project structured family class");
+  const divergenceAt = dynamicsHost.indexOf("Fuse structured divergence RHS rows");
+  const projectionAt = dynamicsHost.indexOf("Project structured families");
   const postAt = dynamicsHost.indexOf('this.encodeProjectionEnergy(broker, params, "post")');
   const reconstructAt = dynamicsHost.indexOf("Reconstruct projected structured rows");
   assert.ok(startAt >= 0 && advectAt > startAt && advectedAt > advectAt,
@@ -367,7 +365,7 @@ test("momentum advection consumes the projected extended field on air rows", () 
   // longer reads the prescribed solid-normal field (aperture-0 faces keep
   // their staged prior; forceFamily re-imposes the solid value first).
   assert.match(dynamicsHost,
-    /this\.advection, FAMILY_CLASSES, \[0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18\]/,
+    /this\.advection, "families",\s*\[0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18\]/,
     "advection binds exactly ten storage buffers including the liquid mask");
 });
 
@@ -550,13 +548,13 @@ test("class-7/8 carry probes flatten the exact order-free Boolean reduction", ()
   const host = dynamicsHost.slice(dynamicsHost.indexOf("encodeAdvection("),
     dynamicsHost.indexOf("encodeForcesAndDivergence("));
   const flatAt = host.indexOf("Flatten structured boundary carry probes");
-  const advectAt = host.indexOf("Advect structured family class");
+  const advectAt = host.indexOf("Advect structured families");
   assert.ok(flatAt >= 0 && advectAt > flatAt,
     "the cache dispatch must precede its class-7/8 consumers");
   assert.doesNotMatch(host.slice(flatAt, advectAt), /broker\.fence/,
     "the extra dispatch remains in the existing advection pass");
   assert.match(dynamicsHost,
-    /this\.encodedAdvectionDispatchCount = this\.flattenedBoundaryAdvection \? 10 : 9/,
+    /this\.encodedAdvectionDispatchCount = this\.flattenedBoundaryAdvection \? 4 : 3/,
     "the A/B accounting is exactly one dispatch and zero implicit work");
 });
 
@@ -584,13 +582,13 @@ test("advection destinations stage into the inactive bank and commit in dispatch
     "commit mirrors the advect gate and copies the staged words back bit-exactly");
   const encodeAdvection = dynamicsHost.slice(dynamicsHost.indexOf("encodeAdvection("),
     dynamicsHost.indexOf("encodeForcesAndDivergence("));
-  const advectAt = encodeAdvection.indexOf("Advect structured family class");
-  const commitAt = encodeAdvection.indexOf("Commit advected structured family class");
+  const advectAt = encodeAdvection.indexOf("Advect structured families");
+  const commitAt = encodeAdvection.indexOf("Commit advected structured families");
   assert.ok(advectAt >= 0 && commitAt > advectAt);
   assert.match(encodeAdvection,
-    /if \(!this\.compactPlainStoragePass\) \{[\s\S]*structured advected destinations staged[\s\S]*\}[\s\S]*Commit advected structured family class/,
+    /if \(!this\.compactPlainStoragePass\) \{[\s\S]*structured advected destinations staged[\s\S]*\}[\s\S]*Commit advected structured families/,
     "only the legacy A/B splits the ordinary-storage handoff");
-  assert.match(encodeAdvection, /this\.advectionCommit, FAMILY_CLASSES, \[0, 1, 2, 11, 17, 18\]/,
+  assert.match(encodeAdvection, /this\.advectionCommit, "families",\s*\[0, 1, 2, 11, 17, 18\]/,
     "commit binds exactly the workset, authority, and support-control interface");
 });
 
@@ -609,7 +607,7 @@ test("gravity is a body force on the liquid, never on dry extension-carrier face
     < force.indexOf("let wet="),
     "prescribed solid faces keep their exact value before any wetness gate");
   assert.match(dynamicsHost,
-    /this\.force, FAMILY_CLASSES, \[0, 1, 2, 11, 16, 17, 22\], params/,
+    /this\.force, "families",\s*\[0, 1, 2, 11, 16, 17, 22\], params/,
     "the force stage must bind the accepted liquid classification it gates on");
 });
 
@@ -640,7 +638,7 @@ test("authored inflow is prescribed before divergence and restored after project
   "the authored nozzle mouth must override the visual nozzle's closed solid aperture");
   const divergence = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn divergenceRow("),
-    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredClass0("));
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredRows("));
   assert.match(divergence,
     /boundaryVelocity=select\(aperture\*sample\+\(1\.-aperture\)\*solid,prescribed\.x,prescribed\.y>0\.\)/,
   "equation (4) must integrate the prescribed source flux even through the visual solid");
@@ -718,10 +716,10 @@ test("invalid divergence inputs publish a finite neutral RHS and invalidate the 
   assert.doesNotMatch(divergence, /flux\/\(volume\*p\.physical\.y\)/,
     "cell-volume normalization would break the shared variational equation across adaptive leaf sizes");
   assert.match(dynamicsHost,
-    /this\.divergence, ROW_CLASSES, \[0, 1, 2, 5, 6, 11, 14, 16, 17, 22\], params/,
+    /this\.divergence, "rows",\s*\[0, 1, 2, 5, 6, 11, 14, 16, 17, 22\], params/,
     "the divergence bind group must exactly match its reflected Eq. (3)/(4) interface");
   assert.doesNotMatch(dynamicsHost,
-    /this\.divergence, ROW_CLASSES, \[[^\]]*\b3\b[^\]]*\], params/,
+    /this\.divergence, "rows",\s*\[[^\]]*\b3\b[^\]]*\], params/,
     "integrated divergence no longer reads rowGeometry, so its auto-layout cannot accept binding 3");
 
   // With A p = -(rho/dt) flux, the exact projection update leaves zero
@@ -768,7 +766,7 @@ test("structured sampling rejects incomplete selectors, neighbors, and tetrahedr
     "WGSL select evaluates both sampling paths and must not execute a substitute interpolant");
 });
 
-test("structured boundary advection is explicit and each class runs once", () => {
+test("structured boundary advection is explicit and the family union runs once", () => {
   assert.match(structuredVelocityDynamicsWGSL,
     /if\(aperture==0\.\)\{[\s\S]*setValue\(handle,solid\);[\s\S]*return;/,
     "fully prescribed faces must not enter a characteristic sampler");
@@ -778,9 +776,9 @@ test("structured boundary advection is explicit and each class runs once", () =>
   assert.match(dynamicsHost,
     /this\.advection[\s\S]*\[0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18\]/,
     "advection binds the liquid mask for the carry gate; the solid-normal field belongs to forcing/divergence/projection");
-  const encodeClasses = dynamicsHost.slice(dynamicsHost.indexOf("private encodeClasses"),
+  const encodeUnion = dynamicsHost.slice(dynamicsHost.indexOf("private encodeUnion"),
     dynamicsHost.indexOf("encodeAdvection"));
-  assert.equal((encodeClasses.match(/dispatchWorkgroupsIndirect/g) ?? []).length, 1,
+  assert.equal((encodeUnion.match(/dispatchWorkgroupsIndirect/g) ?? []).length, 1,
     "duplicating destination-owned dispatches would apply gravity and pressure twice");
 });
 
@@ -819,13 +817,13 @@ test("Dawn Metal compiles all structured dynamics variants", {
 test("the body-impulse exchange is the exact adjoint of the divergence solid term", () => {
   const divergence = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn divergenceRow("),
-    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredClass0"));
+    structuredVelocityDynamicsWGSL.indexOf("fn divergenceStructuredRows"));
   assert.match(divergence,
     /boundaryVelocity=select\(aperture\*sample\+\(1\.-aperture\)\*solid,prescribed\.x,prescribed\.y>0\.\)/,
     "non-source faces must retain the aperture-weighted solid flux differentiated by the adjoint");
   const exchange = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn bodyImpulseRow("),
-    structuredVelocityDynamicsWGSL.indexOf("fn exchangeStructuredBodyImpulseClass0"));
+    structuredVelocityDynamicsWGSL.indexOf("fn exchangeStructuredBodyImpulseRows"));
   // p * area * (1 - aperture) along the row's outward normal, times dt.
   assert.match(exchange, /p\.physical\.y\*solved\*area\*\(1\.-aperture\)\*sign\*n/,
     "the impulse must be the pressure over the blocked share of the same face, along the same outward normal");
@@ -842,8 +840,8 @@ test("the body-impulse exchange is the exact adjoint of the divergence solid ter
 test("zero-body structured dynamics omits body-impulse pipelines", () => {
   const dynamicsHost = readFileSync(new URL("../lib/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
   assert.match(dynamicsHost,
-    /this\.resources\.bodyCount === 0 \? \[\][\s\S]*exchangeStructuredBodyImpulseClass/,
-    "a scene without rigid bodies must not create the four impulse pipelines");
+    /this\.resources\.bodyCount === 0 \? \[\] : \["exchangeStructuredBodyImpulseRows"\]/,
+    "a scene without rigid bodies must not create the impulse pipeline");
   assert.match(dynamicsHost, /count > this\.resources\.bodyCount/,
     "runtime coupling cannot exceed the construction-time pipeline roster");
   assert.match(dynamicsHost,
@@ -868,7 +866,7 @@ test("structured dynamics can defer and sequentially initialize its pipelines", 
   assert.match(initialize, /this\.assignPipelines\(pipelines\)/,
     "the complete pipeline set must be published only after sequential compilation");
   assert.match(dynamicsHost,
-    /this\.resources\.bodyCount === 0 \? \[\][\s\S]*ROW_CLASSES\.map\(\(value\) => `exchangeStructuredBodyImpulseClass/,
+    /this\.resources\.bodyCount === 0 \? \[\] : \["exchangeStructuredBodyImpulseRows"\]/,
     "the deferred manifest must preserve zero-body pruning");
   assert.match(dynamicsHost,
     /\.\.\.\(this\.projectionEnergyProbe \? \[[\s\S]*summarizeStructuredPreProjectionEnergy[\s\S]*\] : \[\]\)/,
