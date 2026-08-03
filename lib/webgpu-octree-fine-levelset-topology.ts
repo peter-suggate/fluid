@@ -909,8 +909,6 @@ export class WebGPUFineLevelSetTopology {
   private offsetRecurringSparseRecordsPipeline!: GPUComputePipeline;
   private finalizeRecurringSparseBandPipeline!: GPUComputePipeline;
   private scatterRecurringSparseBandPipeline!: GPUComputePipeline;
-  /** Words in the identity-mask buffer, including the trailing block marks. */
-  private readonly identityMaskWords: number;
   /** One occupancy mark per 256-key recurring scan block. */
   private readonly recurringBandBlockWords: number;
   private snapshotPipeline!: GPUComputePipeline;
@@ -1049,7 +1047,6 @@ export class WebGPUFineLevelSetTopology {
       label: "fine-levelset direct identity mask and fixed topology error records",
       size: topologyErrorWords * 4, usage: GPUBufferUsage.STORAGE,
     });
-    this.identityMaskWords = topologyErrorWords;
     this.transportedPhiSnapshot = device.createBuffer({ label: "fine-levelset transported phi transaction",
       size: sampleBytes, usage: GPUBufferUsage.STORAGE });
     this.allocatedBytes = FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES
@@ -1468,9 +1465,12 @@ export class WebGPUFineLevelSetTopology {
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic before recurring fine-band scatter");
       // The mask reset used to be a 256-lane loop inside the publication below,
       // which made the one lattice-sized job in this stage run at 1/32 of the
-      // machine. It is a plain parallel clear; give it the whole machine.
+      // machine. It is now its own launch, one workgroup per scan block, and it
+      // stores only into the blocks the previous publication actually marked.
+      const recurringBlocks = Math.ceil(plan.logicalBrickCount / 256);
+      const recurringSuperBlocks = Math.ceil(recurringBlocks / 256);
       runIdentityLinear(this.clearRecurringIdentityMaskPipeline, discoverEntries,
-        Math.ceil(this.identityMaskWords / 256), [0, 21],
+        recurringBlocks, [0, 21],
         "Clear recurring fine-band identity mask");
       runIdentity(this.publishRecurringSparseBandPipeline, discoverEntries,
         1, 1, [0, 6, 7, 14, 15, 16, 19, 21, 22, 23, 33],
@@ -1484,8 +1484,6 @@ export class WebGPUFineLevelSetTopology {
         "Scatter recurring fine-band seed halos",
         this.haloDispatch, 108, [0, 7, 15, 19, 21, 23]);
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scatter");
-      const recurringBlocks = Math.ceil(plan.logicalBrickCount / 256);
-      const recurringSuperBlocks = Math.ceil(recurringBlocks / 256);
       runIdentityLinear(this.scanRecurringDesiredPipeline, discoverEntries,
         recurringBlocks, [0, 7, 20, 21],
         "Scan and compact recurring fine-band logical identity");
@@ -2069,21 +2067,32 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
 // Resetting the identity mask is the one genuinely lattice-sized job in this
 // publication, and it used to run inside publishRecurringSparseBand's single
 // workgroup: 16,777,216 atomic stores by 256 lanes, 5.5 ms/advance at 256-cubed
-// against 0.09 ms at 64-cubed — a pure 1/32-of-the-machine bandwidth term. It
-// is embarrassingly parallel, so it belongs in its own launch. The block marks
-// in the tail are cleared by the same sweep, which is what lets the passes
-// below trust an unmarked block. Ordering is by dispatch boundary: this runs
-// immediately before the publication that seeds the band, exactly where the
-// in-workgroup loop sat.
+// against 0.09 ms at 64-cubed — a pure 1/32-of-the-machine bandwidth term.
+//
+// It does not have to be lattice-sized at all. The block marks of the PREVIOUS
+// publication are still standing when this runs — this sweep is what retires
+// them — and they are a sound over-approximation of every nonzero entry:
+//   * only scatterRecurringSeedHalo ever writes a nonzero value, and it marks
+//     each block it writes;
+//   * scatterRecurringSparseBand only ever zeroes or preserves;
+//   * nothing else touches the mask between two recurring publications.
+// So an unmarked block is provably all-zero and needs no store. The physical
+// page prefix is swept unconditionally because the cold bootstrap writes
+// lifecycle error records there without going through the halo scatter, and
+// that prefix is pageCapacity words, not a lattice.
+//
+// Ordering is by dispatch boundary: this runs immediately before the
+// publication that seeds the band, exactly where the in-workgroup loop sat.
 @compute @workgroup_size(256) fn clearRecurringIdentityMask(
  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,
  @builtin(local_invocation_index)local:u32){
- let item=fineLinearWorkgroup(wid,nwg)*256u+local;
- // Derive the bound from params rather than arrayLength so the host's launch
- // count and the shader's extent are the same expression; a mismatch would
- // leave live marks behind, which is the one failure this sweep must not have.
- let count=recurringBandBlockBase()+recurringBandBlockCount();
- if(item<count&&item<arrayLength(&topologyErrors)){atomicStore(&topologyErrors[item],0u);}
+ let block=fineLinearWorkgroup(wid,nwg);
+ let marked=recurringBandBlockOccupied(block);
+ let item=block*256u+local;
+ if((marked||item<params.pageCapacity)&&item<recurringBandBlockBase()){
+  atomicStore(&topologyErrors[item],0u);
+ }
+ if(local==0u&&marked){atomicStore(&topologyErrors[recurringBandBlockBase()+block],0u);}
 }
 @compute @workgroup_size(256) fn publishRecurringSparseBand(
  @builtin(local_invocation_index)local:u32){
