@@ -403,6 +403,14 @@ run, this floor is clean (control 82.13 vs control-aa 82.18 in the same round).
 | `checkpoint-count` | 250 | PASS |
 | `validation-clean` | 0 errors | PASS |
 
+**Footprint, stated because this axis is also a memory program.** The columns
+cost `36 * rowCapacity` words: 576 KiB at the droplet lanes' authored 4,096-row
+reserve, 1.1 MiB at `large`'s 8,192, 9 MiB at the 65,536-row live ceiling and
+21 MiB at the widened ocean's container-derived 148,600, taking that lane's
+whole persistent arena to 32 MB — against 177 MiB for `spgrid-vcycle` alone and
+inside Dawn's 128 MiB storage-binding default. It is a real addition and it is
+not free; it is two orders of magnitude below the dense lattices E3 targets.
+
 The one documented deviation: a resolution report now fires once at build time
 rather than once per apply. The *set* of raised (flag, stage) pairs is unchanged
 — P1b resolves exactly the rows P2 would, off the same accepted worksets — and
@@ -442,6 +450,66 @@ Recorded by mechanism, because it re-ranks everything below:
   the A2 apply's addressing, which §2.2 does not mention at all, is worth 1.4%
   on its own, and the smoother's `applied()` was *already* memoized. The
   remaining candidates are not the ones §2.2 names.
+
+#### E2b/E2c/E2d — the three successors, specified
+
+Ranked by remaining surface, each with its equality argument done, so the next
+session can implement rather than re-derive. All three are inside the persistent
+MGPCG slice.
+
+**E2b — extend the column cache to `finerAdjoint`.** Same invariance proof,
+eight times the surface. `finerAdjoint` resolves, per row, eight child ghosts
+and then eighteen directions inside each owned one — `opPageSlot`, two `state`
+probes, a `coefficientForDirection` pair (`metrics[other]` then
+`coefficients[base+1+channel]`) and an arena gather per direction. For a
+ghost-owning row that is **~1,650 loads**, against the 54 the cached main loop
+now costs. Cache the pair `(coefficient, ownerRow)` per (child, direction): 288
+words per row.
+
+*The footprint is the design problem, and it is why this is not a copy of E2a.*
+288 words/row is 4.7 MB at the droplet lanes' 4,096-row reserve but **75 MB at
+the 65,536-row ceiling**, which is a real regression against Dawn's 128 MiB
+storage-binding limit. Only rows at level > 0 that actually own fine ghosts need
+an entry — the class-1/3 transition rows, a minority — so the payload must be
+indirected: one `adjointIndex[row]` word plus a dense payload per ghost-owning
+row, with a capacity guard that falls back to the chase (never fails the solve)
+on overflow. Build it in the same P1b pass.
+
+**E2c — stop running a 64-element bitonic sort to sort a handful of terms.**
+`sorted64PrefixSum` (`webgpu-octree-persistent-mgpcg.wgsl.ts`) runs the full
+network unconditionally: `width` over 6 values, `stride` over up to 6, and an
+inner `i < 64` — **21 stages × 64 compare-exchanges = 1,344 iterations**, each
+two dynamic loads and up to two dynamic stores against `array<f32,64>`, which
+Metal backs with thread-local scratch because the index is not a constant. It is
+called once per coarse slot per `restrictLevel` per level per V-cycle, and
+`termCount` is typically 8–27.
+
+*Bit-identical, and here is why.* Padding is `3.402823e38`, and HEAD already
+relies on every real term being below it (a term above it would put padding
+inside `sorted[0..n)` and corrupt the sum at HEAD too). Under that standing
+assumption, restricting the network to `m = next_pow2(n)` elements — padding
+positions `n..m` with the same sentinel — leaves `sorted[0..n)` holding the same
+n real values in the same ascending order, and the final `for i in 0..n` sum
+walks the identical sequence of f32 additions. For `n <= 8` that is 6 stages ×
+8 = 48 iterations against 1,344: **28× less**. The loop bound becomes
+lane-dependent, so a SIMD group pays its maximum `m`; there are no barriers
+inside, so divergence is the only cost.
+
+**E2d — the reductions run 128 lanes wide and barrier per 128 rows.**
+`reduceMerged`/`reduceCurvature` walk **one** 128-row virtual group at a time;
+each group costs a 7-level `reductionTree` (8 `workgroupBarrier`s) plus a
+`storageBarrier`, and lanes 128–255 idle throughout. At ~1,300 rows that is ~11
+groups × ~10 barriers × ~21 reduction calls per solve ≈ **2,300 barriers**, on
+half the workgroup.
+
+*The fold order is preserved if each group keeps its own tree.* `merged` is a
+128-entry workgroup array and the association order inside a group is what
+`CompensatedF32` needs; nothing requires the groups to be processed serially.
+A second 128-entry `merged` array (4 KB more workgroup storage, well inside the
+16 KiB floor) lets lanes 128–255 fold group `vg+1` while lanes 0–127 fold `vg`,
+halving the barrier count and doubling the active width, with every group's
+internal fold untouched. `storePartial` writes distinct `vg` slots, so the
+stores do not collide.
 
 ### E0 — sort the worklist (cheap, and most of the prize)
 
