@@ -289,8 +289,12 @@ test("every trajectory reselects regular or transition interpolation m times and
   assert.match(regularCommon, /letv=transitionSample\(x\)/);
   assert.match(regularRare, /letv=transitionSample\(x\).*extended\+=select\(0u,1u,air\)/s);
   assert.match(shader,
-    /fntransitionSample\(x:vec3f\)->vec4f.*letsampleX=velocityDomainPoint\(x\).*if\(caseId==0u\)\{letregular=regularSampleExact\(sampleX,owner\);if\(regular\.exact!=0u\)\{returnregular\.value;\}\}.*letweights=tetraWeights/s,
-    "each Euler step fuses its eight exact cube-owner proofs with the trilinear gather and otherwise retains case-zero tetrahedra");
+    /fntransitionSample\(x:vec3f\)->vec4f.*letsampleX=velocityDomainPoint\(x\).*if\(caseId==0u\)\{letregular=regularSampleExact\(sampleX,owner\);if\(regular\.exact!=0u\)\{returnregular\.value;\}\}.*letlocated=compiledLocateTetra/s,
+    "each Euler step fuses its eight exact cube-owner proofs with the trilinear gather and otherwise uses the compiled tetra locator");
+  assert.equal([...shader.matchAll(/location=compiledLocationStep\(/g)].length, 11,
+    "the compiled sampler must author the complete bounded walk without a runtime candidate loop");
+  assert.doesNotMatch(shader, /for\(varti=|tetraWeights\(/,
+    "fine advection must not scan tetrahedra or rebuild their inverse at runtime");
   assert.doesNotMatch(shader, /regularCubeExact|fnregularSample\(/,
     "the regular path must not repeat owner-directory lookups in a proof pass and a gather pass");
   assert.match(transitionCommon, /letv=transitionSample\(x\)/);
@@ -362,7 +366,7 @@ test("transition interpolation rejects missing positive-weight support", () => {
     /fnselectorVelocity\(owner:AirOwner,selectorIndex:u32,selector:vec4f\)->vec4f.*if\(all\(selectorCenter>=lower-vec3f\(tolerance\)\)&&all\(selectorCenter<=upper\+vec3f\(tolerance\)\)\)\{letother=airOwnerAtPosition\(selectorCenter\);if\(other\.tag==INVALID.*returnvec4f\(0,0,0,-1\).*returntaggedVelocity\(other\.tag\);\}returntaggedVelocity\(owner\.tag\)/s,
     "an absent in-domain selector must carry invalidity instead of a zero vector");
   assert.match(shader,
-    /varw=max\(weights,vec4f\(0\)\).*w\/=total.*if\(w\.x>0\.\).*if\(w\.y>0\.\).*if\(v\.w<0\.\|\|!finite3\(v\.xyz\)\)\{returninvalid;\}/s,
+    /varw=max\(located\.weights,vec4f\(0\)\).*w\/=total.*if\(w\.x>0\.\).*if\(w\.y>0\.\).*if\(v\.w<0\.\|\|!finite3\(v\.xyz\)\)\{returninvalid;\}/s,
     "only zero-weight vertices may be skipped; every positive contributor remains strict");
   assert.match(shader,
     /fnregularSampleExact.*letowner=airOwnerAtPosition\(samplePoint\).*owner\.tag==INVALID\|\|owner\.size!=anchor\.size.*returnRegularAttempt\(vec4f\(0,0,0,-1\),0u\).*if\(w==0\.\)\{continue;\}letvalue=taggedVelocity\(owner\.tag\)/s,
@@ -374,8 +378,11 @@ test("transition interpolation rejects missing positive-weight support", () => {
     "tetra header, payload, and neighbor-selector table must validate before indexed catalog reads");
   assert.doesNotMatch(shader, /anchor=vec4f\(bitsf\(p\.tetraVertexOffset\)/,
     "the current-cell anchor is implicit and must not be read from the neighbor-selector table");
-  assert.match(shader, /fntetraWeights.*!finite\(d\)\|\|abs\(d\)<1e-10/,
-    "a non-finite or degenerate tetrahedron determinant must fail closed");
+  assert.match(shader,
+    /fncompiledTetraWeights[\s\S]*barycentricOffset\+9u\*globalTetra[\s\S]*fncompiledWeightsValid/,
+    "generated inverse barycentric rows must replace per-sample determinant construction");
+  assert.doesNotMatch(shader, /cross\(|determinant|abs\(d\)<1e-10/,
+    "fine advection must not reconstruct tetrahedral inverses in the shader");
   assert.doesNotMatch(shader, /returnselect\(vec3f\(0\),rowV\(other\),other!=INVALID\)/,
     "fine transport must not retain the retired zero substitute");
 });

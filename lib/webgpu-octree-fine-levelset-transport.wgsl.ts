@@ -20,7 +20,8 @@ struct P {
   rowReciprocalOffset:u32,rowOwnerMetadataOffset:u32,rowHandleOffset:u32,rowSignOffset:u32,
   rowCatalogOffset:u32,rowAxisOffset:u32,rowFamilyPrefixOffset:u32,rowFamilyHandleOffset:u32,
   rowFamilySlotOffset:u32,tetraVertexCount:u32,maxBacktrace:u32,airOwnerOffset:u32,volumeOffset:u32,
-  slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,templateHeaderOffset:u32,
+  slotGeometryOffset:u32,tetraHeaderOffset:u32,tetraVertexOffset:u32,tetraOffset:u32,
+  compiledSamplerOffset:u32,templateHeaderOffset:u32,
   airSupportEnabled:u32,selectorTagOffset:u32,regularTagOffset:u32,airControlOffset:u32,
   supportVectorOffset:u32,supportCapacity:u32,selectorStride:u32,
   inflowPositionRadius:vec4f,inflowVelocityAperture:vec4f,inflowTiming:vec4f
@@ -381,7 +382,64 @@ fn selectorVelocity(owner:AirOwner,selectorIndex:u32,selector:vec4f)->vec4f{if(o
     let otherCenter=vec3f(cellCoord(other.cell))*p.physical+.5*f32(other.size)*p.physical;
     if(any(abs(otherCenter-selectorCenter)>vec3f(tolerance))){return vec4f(0,0,0,-1);}return taggedVelocity(other.tag);}
   return taggedVelocity(owner.tag);}
-fn tetraWeights(point:vec3f,x:vec3f,y:vec3f,z:vec3f)->vec4f{let d=dot(x,cross(y,z));if(!finite(d)||abs(d)<1e-10){return vec4f(-2);}let a0=dot(point,cross(y,z))/d;let a1=dot(x,cross(point,z))/d;let a2=dot(x,cross(y,point))/d;return vec4f(1.-a0-a1-a2,a0,a1,a2);}
+fn compiledSamplerAt(offset:u32)->u32{return catalog[p.compiledSamplerOffset+offset];}
+fn compiledTetraSeed(seedOffset:u32,caseId:u32,point:vec3f)->u32{
+  let octant=select(0u,1u,point.x>=0.)|select(0u,2u,point.y>=0.)|select(0u,4u,point.z>=0.);
+  let seed=compiledSamplerAt(seedOffset+8u*caseId+octant);
+  return select(seed,INVALID,seed==255u);
+}
+fn compiledTetraNeighbor(adjacencyOffset:u32,globalTetra:u32,face:u32)->u32{
+  let packed=compiledSamplerAt(adjacencyOffset+globalTetra);
+  let neighbor=(packed>>(8u*face))&255u;return select(neighbor,INVALID,neighbor==255u);
+}
+fn compiledTetraWeights(barycentricOffset:u32,globalTetra:u32,point:vec3f)->vec4f{
+  let at=barycentricOffset+9u*globalTetra;
+  let a0=point.x*bitcast<f32>(compiledSamplerAt(at))
+    +point.y*bitcast<f32>(compiledSamplerAt(at+1u))+point.z*bitcast<f32>(compiledSamplerAt(at+2u));
+  let a1=point.x*bitcast<f32>(compiledSamplerAt(at+3u))
+    +point.y*bitcast<f32>(compiledSamplerAt(at+4u))+point.z*bitcast<f32>(compiledSamplerAt(at+5u));
+  let a2=point.x*bitcast<f32>(compiledSamplerAt(at+6u))
+    +point.y*bitcast<f32>(compiledSamplerAt(at+7u))+point.z*bitcast<f32>(compiledSamplerAt(at+8u));
+  return vec4f(1.-a0-a1-a2,a0,a1,a2);
+}
+fn compiledWeightsValid(weights:vec4f)->bool{
+  return all(weights>=vec4f(-2e-6))&&all(weights<=vec4f(1.000002));
+}
+struct CompiledLocation {ti:u32,previous:u32,weights:vec4f,state:u32}
+fn compiledLocationStep(adjacencyOffset:u32,barycentricOffset:u32,first:u32,count:u32,point:vec3f,location:CompiledLocation)->CompiledLocation{
+  if(location.state!=0u){return location;}
+  if(location.ti>=count){return CompiledLocation(INVALID,location.previous,vec4f(-2.),2u);}
+  let weights=compiledTetraWeights(barycentricOffset,first+location.ti,point);
+  if(compiledWeightsValid(weights)){return CompiledLocation(location.ti,location.previous,weights,1u);}
+  var face=INVALID;var worst=-2e-6;
+  if(weights.y<worst){face=0u;worst=weights.y;}
+  if(weights.z<worst){face=1u;worst=weights.z;}
+  if(weights.w<worst){face=2u;worst=weights.w;}
+  if(face==INVALID||weights.x<worst){return CompiledLocation(INVALID,location.previous,weights,2u);}
+  let next=compiledTetraNeighbor(adjacencyOffset,first+location.ti,face);
+  if(next==INVALID||next>=count||next==location.previous){return CompiledLocation(INVALID,location.ti,weights,2u);}
+  return CompiledLocation(next,location.ti,weights,0u);
+}
+fn compiledLocateTetra(caseId:u32,first:u32,count:u32,point:vec3f)->CompiledLocation{
+  let adjacencyOffset=compiledSamplerAt(5u);let seedOffset=compiledSamplerAt(6u);
+  let barycentricOffset=compiledSamplerAt(8u);
+  var location=CompiledLocation(compiledTetraSeed(seedOffset,caseId,point),INVALID,vec4f(-2.),0u);
+  // The generated catalog's tetra adjacency graph has proven diameter ten.
+  // Eleven authored steps evaluate the seed plus every possible crossing;
+  // there is no data-dependent tetra loop inside the characteristic loop.
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  location=compiledLocationStep(adjacencyOffset,barycentricOffset,first,count,point,location);
+  return location;
+}
 fn transitionSample(x:vec3f)->vec4f{
   let invalid=vec4f(0,0,0,-1);if(!finite3(x)){return invalid;}let sampleX=velocityDomainPoint(x);
   let owner=airOwnerAtPosition(sampleX);if(owner.tag==INVALID){return invalid;}
@@ -394,12 +452,17 @@ fn transitionSample(x:vec3f)->vec4f{
   if(first>words-p.tetraOffset||count>words-p.tetraOffset-first){return invalid;}
   let extent=f32(owner.size)*p.physical;if(!finite(extent)||extent<=0.){return invalid;}
   let center=vec3f(cellCoord(owner.cell))*p.physical+.5*extent;let local=powerTransform((sampleX-center)/extent,transform);
-  for(var ti=0u;ti<count;ti+=1u){let packed=catalog[p.tetraOffset+first+ti];let s=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);
-    if(any(s>=vec3u(p.tetraVertexCount))){return invalid;}let va=p.tetraVertexOffset+4u*s.x;let vb=p.tetraVertexOffset+4u*s.y;let vc=p.tetraVertexOffset+4u*s.z;
-    let a=vec4f(bitsf(va),bitsf(va+1u),bitsf(va+2u),bitsf(va+3u));let b=vec4f(bitsf(vb),bitsf(vb+1u),bitsf(vb+2u),bitsf(vb+3u));let c=vec4f(bitsf(vc),bitsf(vc+1u),bitsf(vc+2u),bitsf(vc+3u));
-    if(!selectorGeometryValid(a)||!selectorGeometryValid(b)||!selectorGeometryValid(c)){return invalid;}
-    let weights=tetraWeights(local,a.xyz,b.xyz,c.xyz);if(all(weights>=vec4f(-2e-6))&&all(weights<=vec4f(1.000002))){var w=max(weights,vec4f(0));let total=dot(w,vec4f(1));if(!finite(total)||total<=0.){return invalid;}w/=total;var result=vec3f(0);if(w.x>0.){let v=taggedVelocity(owner.tag);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.x*v.xyz;}if(w.y>0.){let v=selectorVelocity(owner,s.x,a);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.y*v.xyz;}if(w.z>0.){let v=selectorVelocity(owner,s.y,b);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.z*v.xyz;}if(w.w>0.){let v=selectorVelocity(owner,s.z,c);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.w*v.xyz;}return select(invalid,vec4f(result,1),finite3(result));}}
-  return invalid;}
+  let located=compiledLocateTetra(caseId,first,count,local);if(located.state!=1u){return invalid;}
+  let packed=catalog[p.tetraOffset+first+located.ti];let s=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);
+  if(any(s>=vec3u(p.tetraVertexCount))){return invalid;}let va=p.tetraVertexOffset+4u*s.x;let vb=p.tetraVertexOffset+4u*s.y;let vc=p.tetraVertexOffset+4u*s.z;
+  let a=vec4f(bitsf(va),bitsf(va+1u),bitsf(va+2u),bitsf(va+3u));let b=vec4f(bitsf(vb),bitsf(vb+1u),bitsf(vb+2u),bitsf(vb+3u));let c=vec4f(bitsf(vc),bitsf(vc+1u),bitsf(vc+2u),bitsf(vc+3u));
+  if(!selectorGeometryValid(a)||!selectorGeometryValid(b)||!selectorGeometryValid(c)){return invalid;}
+  var w=max(located.weights,vec4f(0));let total=dot(w,vec4f(1));if(!finite(total)||total<=0.){return invalid;}w/=total;var result=vec3f(0);
+  if(w.x>0.){let v=taggedVelocity(owner.tag);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.x*v.xyz;}
+  if(w.y>0.){let v=selectorVelocity(owner,s.x,a);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.y*v.xyz;}
+  if(w.z>0.){let v=selectorVelocity(owner,s.y,b);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.z*v.xyz;}
+  if(w.w>0.){let v=selectorVelocity(owner,s.z,c);if(v.w<0.||!finite3(v.xyz)){return invalid;}result+=w.w*v.xyz;}
+  return select(invalid,vec4f(result,1),finite3(result));}
 
 fn packBrick(q:vec3u)->u32{return q.x+p.brickDims.x*(q.y+p.brickDims.y*q.z);}
 fn pageOf(key:u32)->u32{let at=7u+p.pageCapacity+key;if(key>=p.brickDims.x*p.brickDims.y*p.brickDims.z||at>=arrayLength(&worklist)){return INVALID;}let id=worklist[at];return select(INVALID,id,id<p.pageCapacity&&metadata[id*4u+1u]==key&&metadata[id*4u+2u]==p.generation);}

@@ -313,7 +313,7 @@ export class WebGPUFineLevelSetTransport {
     if (!(resources.physicalCellSize > 0) || !Number.isFinite(resources.physicalCellSize)
       || !Number.isSafeInteger(resources.maximumLeafSize) || resources.maximumLeafSize < 1
       || !topology.catalogTetrahedronHeaders || !topology.catalogTetrahedra
-      || !topology.catalogTetrahedronVertices) {
+      || !topology.catalogTetrahedronVertices || !topology.catalogCompiledSampler) {
       throw new RangeError("Structured fine transport resources are invalid or undersized");
     }
     const air = resources.airSupport;
@@ -339,7 +339,7 @@ export class WebGPUFineLevelSetTransport {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     const pieces = [topology.catalogVolumes, topology.catalogFaces,
       topology.catalogTetrahedronHeaders, topology.catalogTetrahedronVertices,
-      topology.catalogTetrahedra] as const;
+      topology.catalogTetrahedra, topology.catalogCompiledSampler] as const;
     const samplingOffsets: number[] = [0];
     let samplingBytes = structured.plan.rowCapacity * 16;
     for (const piece of pieces) { samplingOffsets.push(samplingBytes); samplingBytes += piece.size; }
@@ -567,24 +567,24 @@ export class WebGPUFineLevelSetTransport {
     u.set(Object.values(structured.plan.offsets), 28);
     u[48] = this.resources.topology.catalogTetrahedronVertexCount ?? 0;
     u[49] = maximumBacktraceFineCells;
-    u.set(this.samplingOffsets.map((offset) => offset / 4), 50);
-    u[56] = this.resources.topology.rowTemplateHeaderOffsetBytes / 4;
+    u.set(this.samplingOffsets.slice(1).map((offset) => offset / 4), 51);
+    u[57] = this.resources.topology.rowTemplateHeaderOffsetBytes / 4;
     const air = this.resources.airSupport;
     u[50] = air?.layout.ownerDirectoryOffsetWords ?? 0;
     u.set(air ? [1, air.layout.selectorTagOffsetWords, air.layout.regularTagOffsetWords,
       air.layout.controlOffsetWords, air.layout.supportVectorOffsetWords,
-      air.layout.supportCapacity, air.layout.selectorStride] : [0, 0, 0, 0, 0, 0, 0], 57);
+      air.layout.supportCapacity, air.layout.selectorStride] : [0, 0, 0, 0, 0, 0, 0], 58);
     const inflow = options.inflow;
     if (inflow) {
       f.set([inflow.outletCenter_m.x, inflow.outletCenter_m.y,
-        inflow.outletCenter_m.z, inflow.radius_m], 64);
+        inflow.outletCenter_m.z, inflow.radius_m], 65);
       f.set([inflow.velocity_m_s.x, inflow.velocity_m_s.y,
-        inflow.velocity_m_s.z, inflow.apertureScale], 68);
+        inflow.velocity_m_s.z, inflow.apertureScale], 69);
     }
     f.set([inflow?.strength ?? 0,
       fineTransportQuiescenceEnabled()
         ? FINE_LEVELSET_QUIESCENCE_DISPLACEMENT_EPSILON_CELLS : -1,
-      options.dynamicBoundary ? 1 : 0, 0], 72);
+      options.dynamicBoundary ? 1 : 0, 0], 73);
     this.device.queue.writeBuffer(this.params, 0, bytes);
     const run = (pipeline: GPUComputePipeline, group: GPUBindGroup, label: string, groups: number) => {
       const pass = broker.compute({ label }); pass.setPipeline(pipeline); pass.setBindGroup(0, group);

@@ -419,10 +419,6 @@ export function fineLevelSetLeafSeedAllocatedBytes(
 }
 
 const FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES = 12;
-/** Recurring seed-halo pair grid. Its own slot so the lifecycle slots keep
- * their single-writer contract: nothing else authors or reads slot 9, and the
- * later whole-record refreshes overwrite it harmlessly. */
-const FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT = 9;
 const FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS = 10;
 const FINE_LEVELSET_TOPOLOGY_INDIRECT_BYTES =
   FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS * FINE_LEVELSET_TOPOLOGY_INDIRECT_STRIDE_BYTES;
@@ -816,7 +812,9 @@ interface FineLevelSetTopologyPipelineBundle {
   readonly publishDesiredBricksPipeline: GPUComputePipeline;
   readonly clearRecurringIdentityMaskPipeline: GPUComputePipeline;
   readonly publishRecurringSparseBandPipeline: GPUComputePipeline;
-  readonly scatterRecurringSeedHaloPipeline: GPUComputePipeline;
+  readonly seedRecurringHaloPipeline: GPUComputePipeline;
+  readonly dilateRecurringHaloPipelines: readonly GPUComputePipeline[];
+  readonly commitRecurringHaloPipeline: GPUComputePipeline;
   readonly scanRecurringDesiredPipeline: GPUComputePipeline;
   readonly offsetRecurringSparseRecordsPipeline: GPUComputePipeline;
   readonly finalizeRecurringSparseBandPipeline: GPUComputePipeline;
@@ -905,7 +903,9 @@ export class WebGPUFineLevelSetTopology {
   private publishDesiredBricksPipeline!: GPUComputePipeline;
   private clearRecurringIdentityMaskPipeline!: GPUComputePipeline;
   private publishRecurringSparseBandPipeline!: GPUComputePipeline;
-  private scatterRecurringSeedHaloPipeline!: GPUComputePipeline;
+  private seedRecurringHaloPipeline!: GPUComputePipeline;
+  private dilateRecurringHaloPipelines!: readonly GPUComputePipeline[];
+  private commitRecurringHaloPipeline!: GPUComputePipeline;
   private scanRecurringDesiredPipeline!: GPUComputePipeline;
   private offsetRecurringSparseRecordsPipeline!: GPUComputePipeline;
   private finalizeRecurringSparseBandPipeline!: GPUComputePipeline;
@@ -1073,6 +1073,8 @@ export class WebGPUFineLevelSetTopology {
     for (const key of Object.keys(pipelines) as (keyof FineLevelSetTopologyPipelineBundle)[]) {
       if (key === "expandSparseDesiredPipelines") {
         this.expandSparseDesiredPipelines = pipelines.expandSparseDesiredPipelines;
+      } else if (key === "dilateRecurringHaloPipelines") {
+        this.dilateRecurringHaloPipelines = pipelines.dilateRecurringHaloPipelines;
       } else {
         (this as unknown as Record<string, GPUComputePipeline>)[key] = pipelines[key];
       }
@@ -1114,8 +1116,15 @@ export class WebGPUFineLevelSetTopology {
         "Clear recurring fine topology identity mask", "clearRecurringIdentityMask"),
       publishRecurringSparseBandPipeline: await pipeline(
         "Mark compact recurring fine topology band", "publishRecurringSparseBand"),
-      scatterRecurringSeedHaloPipeline: await pipeline(
-        "Scatter recurring fine topology seed halos", "scatterRecurringSeedHalo"),
+      seedRecurringHaloPipeline: await pipeline(
+        "Seed recurring fine topology halos", "seedRecurringHalo"),
+      dilateRecurringHaloPipelines: [
+        await pipeline("Dilate recurring fine topology halo X", "dilateRecurringHaloX"),
+        await pipeline("Dilate recurring fine topology halo Y", "dilateRecurringHaloY"),
+        await pipeline("Dilate recurring fine topology halo Z", "dilateRecurringHaloZ"),
+      ],
+      commitRecurringHaloPipeline: await pipeline(
+        "Commit recurring fine topology halo", "commitRecurringHalo"),
       scanRecurringDesiredPipeline: await pipeline(
         "Rank recurring fine topology identity marks", "scanRecurringDesiredRecords"),
       offsetRecurringSparseRecordsPipeline: await pipeline(
@@ -1473,16 +1482,24 @@ export class WebGPUFineLevelSetTopology {
         recurringBlocks, [0, 21],
         "Clear recurring fine-band identity mask");
       runIdentity(this.publishRecurringSparseBandPipeline, discoverEntries,
-        1, 1, [0, 6, 7, 14, 15, 16, 19, 21, 22, 23, 33],
+        1, 1, [0, 6, 7, 14, 15, 16, 19, 21, 23],
         "Publish recurring sparse fine band (compact seed classification and rank)");
-      // The cubic halo is a pair grid, not a per-seed loop: one invocation per
-      // (compact seed, halo offset) issuing one idempotent OR. Sizing it needs
-      // the seed count the previous dispatch just authored, which is the one
-      // storage-to-indirect boundary this publication pays for.
-      broker.fence("fine recurring halo dispatch publication");
-      runIndirect(this.scatterRecurringSeedHaloPipeline, discoverEntries,
-        "Scatter recurring fine-band seed halos",
-        this.haloDispatch, 108, [0, 7, 15, 19, 21, 23]);
+      // Seed the three independent mask channels once, then perform the exact
+      // Chebyshev-box dilation as separable X/Y/Z passes. Each logical key is
+      // written once per pass; overlapping seed halos no longer issue cubic
+      // atomic pair traffic. The compact seed count stays GPU-authored, but a
+      // capacity-shaped seed launch can consume it directly without a
+      // storage-to-indirect fence.
+      run(this.seedRecurringHaloPipeline, discoverEntries,
+        "Seed recurring fine-band halos",
+        Math.ceil(plan.maximumResidentBricks / 256), [0, 7, 15, 19, 21, 23]);
+      for (let axis = 0; axis < this.dilateRecurringHaloPipelines.length; axis += 1) {
+        runIdentityLinear(this.dilateRecurringHaloPipelines[axis]!, discoverEntries,
+          recurringBlocks, [0, 7, 20, 21],
+          `Dilate recurring fine-band halo axis ${axis}`);
+      }
+      runIdentityLinear(this.commitRecurringHaloPipeline, discoverEntries,
+        recurringBlocks, [0, 20, 21], "Commit recurring fine-band halo");
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scatter");
       runIdentityLinear(this.scanRecurringDesiredPipeline, discoverEntries,
         recurringBlocks, [0, 7, 20, 21],
@@ -2009,60 +2026,21 @@ fn recurringProducerChanged(index:u32)->u32{return transportDelta[8u+params.page
 var<workgroup> recurringFlags:u32;
 var<workgroup> recurringSeedLanes:array<u32,256>;
 var<workgroup> recurringRepairLanes:array<u32,256>;
-// The logical brick key is already a perfect dense address. Scatter each
-// compact seed's bounded Chebyshev halo into that address space: bit zero is
-// exact seed membership and bit one is desired-band membership. Atomic OR is
-// idempotent, so overlapping halos are deduplicated at the point of insertion
-// without a sort, hash probe, or per-output search.
-//
-// The halo is a fixed (2*rings+1)^3 volume for this generation, so one
-// invocation owns exactly one
-// (seed, halo offset) pair and issues exactly one OR. Because OR is idempotent
-// and commutative and no other value is produced here, the resulting membership
-// mask is independent of how the pairs are distributed over invocations: the
-// band is unchanged, only its dilation cost is parallel. The current
-// characteristic has already moved the interface; topology therefore needs
+// The current characteristic has already moved the interface; topology needs
 // the larger of its landing stencil and physical JFA output, plus the paper's
 // block 1-ring. The construction-time radius remains a fail-closed upper bound.
+// Recurring publication seeds three mask channels and dilates their Cartesian
+// boxes as separable X/Y/Z passes. A Chebyshev ball is exactly such a box, so
+// this removes cubic overlapping-seed atomics without changing membership.
 fn recurringDilationBrickRings()->u32{
  let landing=transportDelta[7]+params.interpolationSupportFineCells;
  let required=max(params.redistanceBandFineCells,landing);
  return (required+params.brickResolution-1u)/params.brickResolution+params.safetyBrickRings;
 }
 fn recurringHaloRadius()->u32{return control[6];}
-fn recurringHaloWidth()->u32{return 2u*recurringHaloRadius()+1u;}
-fn recurringHaloVolume()->u32{let width=recurringHaloWidth();return width*width*width;}
-fn deltaRadiusWidth()->u32{return 2u*params.supportHaloRings+1u;}
-fn deltaRadiusVolume()->u32{let width=deltaRadiusWidth();return width*width*width;}
-fn recurringScatterMembership(key:u32,offset:u32){
- if(key>=desiredLogicalCount()||offset>=recurringHaloVolume()){return;}
- let width=recurringHaloWidth();let radius=i32(recurringHaloRadius());
- let z=offset/(width*width);let plane=offset-z*width*width;let y=plane/width;let x=plane-y*width;
- let delta=vec3i(i32(x),i32(y),i32(z))-vec3i(radius);
- let point=vec3i(unpackBrick(key))+delta;
- if(any(point<vec3i(0))||any(point>=vec3i(params.brickDimensions))){return;}
- let output=packBrick(vec3u(point));
- let distance=u32(max(abs(delta.x),max(abs(delta.y),abs(delta.z))));let exact=distance==0u;
- let bits=select(0u,2u,distance<=control[6])|select(0u,1u,exact);
- atomicOr(&topologyErrors[output],bits);
- markRecurringBandBlock(output);
-}
-fn recurringScatterDeltaRadii(key:u32,offset:u32){
- if(key>=desiredLogicalCount()||offset>=deltaRadiusVolume()){return;}
- let width=deltaRadiusWidth();let radius=i32(params.supportHaloRings);
- let z=offset/(width*width);let plane=offset-z*width*width;let y=plane/width;let x=plane-y*width;
- let delta=vec3i(i32(x),i32(y),i32(z))-vec3i(radius);
- let point=vec3i(unpackBrick(key))+delta;
- if(any(point<vec3i(0))||any(point>=vec3i(params.brickDimensions))){return;}
- let distance=u32(max(abs(delta.x),max(abs(delta.y),abs(delta.z))));
- let bits=select(0u,DELTA_DIRTY,distance<=params.dirtyHaloRings)|DELTA_SUPPORT;
- let output=packBrick(vec3u(point));
- atomicOr(&topologyErrors[output],bits);
- markRecurringBandBlock(output);
-}
 // The bootstrap expansion arena is never live during recurring publication.
 // Its record region stages one classification per compact producer; its sorted
-// region holds the ranked seed list the halo pair grid indexes, exactly as the
+// region holds the ranked seed list the separable halo seeder indexes, exactly as the
 // cold path publishes its compacted result from the same region.
 fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
 // Resetting the identity mask is the one genuinely lattice-sized job in this
@@ -2073,8 +2051,8 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
 // It does not have to be lattice-sized at all. The block marks of the PREVIOUS
 // publication are still standing when this runs — this sweep is what retires
 // them — and they are a sound over-approximation of every nonzero entry:
-//   * only scatterRecurringSeedHalo ever writes a nonzero value, and it marks
-//     each block it writes;
+//   * only the recurring seed/dilation/commit chain writes a nonzero value,
+//     and its commit marks each block it writes;
 //   * scatterRecurringSparseBand only ever zeroes or preserves;
 //   * nothing else touches the mask between two recurring publications.
 // So an unmarked block is provably all-zero and needs no store. The physical
@@ -2171,7 +2149,7 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  // Rank the lane counts so every lane owns a contiguous run of the seed list.
  // Each lane rereads only the producers it classified, so the compacted order
  // is a deterministic (lane-major) function of the producer stream; the halo
- // scatter that consumes it is order-free either way.
+ // dilation that consumes it is order-free either way.
  var cursor=scanIdentityBlock(local,localSeeds);
  if(ownsInflow){if(cursor<params.pageCapacity){sparseCandidates[recurringSeedSlot(cursor)]=inflowKey;}cursor+=1u;}
  for(var item=local;item<producerCount;item+=256u){
@@ -2184,9 +2162,6 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  if(local==0u){
   recurringFlags|=errorOrLanes[0];
   var ranked=select(0u,recurringSeedLanes[0],recurringFlags==0u);
-  // The pair grid is seeds*volume invocations. Refuse to author a wrapped
-  // count: an under-sized halo dispatch would silently under-cover the band.
-  let volume=recurringHaloVolume();
   let producers=producerCount;
   // Transport authors repair as a subset of broad membership, and the
   // compact producer stream contains each live physical page at most once.
@@ -2194,42 +2169,65 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
   // a collision-free set-equality fingerprint, not a hash or count heuristic.
   let broadIsExact=REASON_CONES&&recurringRepairLanes[0]==producers;
   pageDelta[10]=select(0u,2u,broadIsExact);
-  // The clean control always scatters the sound broad cone. Product reuses it
-  // only when the exact repair fingerprint proves the two producer sets equal;
-  // otherwise the later classifier walks the compact reason stream directly.
-  let deltaVolume=select(0u,deltaRadiusVolume(),
-    DELTA_RADIUS_MASK&&(!REASON_CONES||broadIsExact));
-  var bandPairs=0u;var deltaPairs=0u;
-  if(volume==0u||ranked>(0xffffffffu-255u)/volume){recurringFlags|=CAPACITY;ranked=0u;}
-  else{bandPairs=ranked*volume;
-   if(deltaVolume!=0u&&producers>(0xffffffffu-bandPairs-255u)/deltaVolume){
-    recurringFlags|=CAPACITY;ranked=0u;bandPairs=0u;
-   }else{deltaPairs=producers*deltaVolume;}}
+  if(recurringHaloRadius()==0u||ranked>params.pageCapacity){recurringFlags|=CAPACITY;ranked=0u;}
   control[0]=recurringFlags;
   let seeds=min(ranked,params.pageCapacity);control[1]=seeds;control[8]=seeds;
-  let haloGroups=(bandPairs+deltaPairs+255u)/256u;
-  writeIndirectDispatch(${FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT}u,haloGroups);
-  writePublishedDispatch(${FINE_LEVELSET_TOPOLOGY_RECURRING_HALO_SLOT}u,haloGroups);
  }
 }
-// One invocation per (compact seed, halo offset) pair. The grid is authored on
-// the GPU from the published seed count, so dilation costs the interface, not
-// the resident capacity, and the mask reset in publishRecurringSparseBand is
-// ordered ahead of every OR by the dispatch boundary rather than a barrier.
-@compute @workgroup_size(256) fn scatterRecurringSeedHalo(
- @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- if(control[0]!=0u){return;}
- let volume=recurringHaloVolume();if(volume==0u){return;}
- let seeds=min(control[8],params.pageCapacity);
- let pair=(wid.y*params.maxWorkgroups+wid.x)*256u+local;
- let bandPairs=seeds*volume;
- if(pair<bandPairs){let seed=pair/volume;
-  recurringScatterMembership(sparseCandidates[recurringSeedSlot(seed)],pair-seed*volume);return;}
- if(DELTA_RADIUS_MASK&&(!REASON_CONES||pageDelta[10]==2u)){
-  let deltaPair=pair-bandPairs;let deltaVolume=deltaRadiusVolume();
-  let producer=deltaPair/deltaVolume;if(producer<recurringProducerCount()){
-   recurringScatterDeltaRadii(recurringProducerChanged(producer),deltaPair-producer*deltaVolume);}}
+const RECURRING_MASK:u32=2u|DELTA_DIRTY|DELTA_SUPPORT;
+@compute @workgroup_size(256) fn seedRecurringHalo(
+ @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,
+ @builtin(local_invocation_index)local:u32){
+ if(control[0]!=0u){return;}let item=linearInvocation(wid,nwg,local);
+ if(item<min(control[8],params.pageCapacity)){
+  let key=sparseCandidates[recurringSeedSlot(item)];
+  if(key<desiredLogicalCount()){atomicOr(&topologyErrors[key],2u);}
+ }
+ if(DELTA_RADIUS_MASK&&(!REASON_CONES||pageDelta[10]==2u)&&item<recurringProducerCount()){
+  let key=recurringProducerChanged(item);
+  if(key<desiredLogicalCount()){atomicOr(&topologyErrors[key],DELTA_DIRTY|DELTA_SUPPORT);}
+ }
 }
+fn recurringMaskFromErrors(key:u32)->u32{return atomicLoad(&topologyErrors[key])&RECURRING_MASK;}
+fn recurringMaskFromScan(key:u32)->u32{return desiredScan[key]&RECURRING_MASK;}
+fn dilatedRecurringMask(key:u32,axis:u32,fromErrors:bool)->u32{
+ let q=vec3i(unpackBrick(key));let maximum=max(recurringHaloRadius(),params.supportHaloRings);
+ var result=0u;
+ for(var d=-i32(maximum);d<=i32(maximum);d+=1){var point=q;point[axis]+=d;
+  if(any(point<vec3i(0))||any(point>=vec3i(params.brickDimensions))){continue;}
+  let source=packBrick(vec3u(point));var mask=0u;
+  if(fromErrors){mask=recurringMaskFromErrors(source);}else{mask=recurringMaskFromScan(source);}
+  let distance=u32(abs(d));
+  if(distance<=recurringHaloRadius()&&(mask&2u)!=0u){result|=2u;}
+  if(distance<=params.dirtyHaloRings&&(mask&DELTA_DIRTY)!=0u){result|=DELTA_DIRTY;}
+  if(distance<=params.supportHaloRings&&(mask&DELTA_SUPPORT)!=0u){result|=DELTA_SUPPORT;}
+ }
+ return result;
+}
+fn recurringDilationItem(wid:vec3u,local:u32)->u32{
+ return fineLinearWorkgroup(wid,vec3u(params.maxWorkgroups,1u,1u))*256u+local;
+}
+@compute @workgroup_size(256) fn dilateRecurringHaloX(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
+ let key=recurringDilationItem(wid,local);if(key<desiredLogicalCount()){
+  desiredScan[key]=dilatedRecurringMask(key,0u,true);}}
+@compute @workgroup_size(256) fn dilateRecurringHaloY(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
+ let key=recurringDilationItem(wid,local);if(key<desiredLogicalCount()){
+  let preserved=atomicLoad(&topologyErrors[key])&~RECURRING_MASK;
+  atomicStore(&topologyErrors[key],preserved|dilatedRecurringMask(key,1u,false));}}
+@compute @workgroup_size(256) fn dilateRecurringHaloZ(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
+ let key=recurringDilationItem(wid,local);if(key<desiredLogicalCount()){
+  desiredScan[key]=dilatedRecurringMask(key,2u,true);}}
+@compute @workgroup_size(256) fn commitRecurringHalo(
+ @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
+ let key=recurringDilationItem(wid,local);if(key<desiredLogicalCount()){
+  let mask=desiredScan[key]&RECURRING_MASK;
+  let preserved=atomicLoad(&topologyErrors[key])&~RECURRING_MASK;
+  atomicStore(&topologyErrors[key],preserved|mask);
+  if(mask!=0u){markRecurringBandBlock(key);}
+ }}
 fn recurringDesiredPresent(item:u32)->bool{
  return control[0]==0u&&item<desiredLogicalCount()&&(atomicLoad(&topologyErrors[item])&2u)!=0u;
 }

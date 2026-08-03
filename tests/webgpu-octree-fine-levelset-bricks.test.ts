@@ -419,10 +419,10 @@ test("production dirty classification uses fingerprint-gated broad or exact reas
   ).replace(/\s+/g, "");
   assert.match(shader, /constDELTA_RADIUS_MASK:bool=true/);
   assert.match(shader,
-    /fnrecurringHaloRadius\(\)->u32\{returncontrol\[6\];\}.*fnrecurringScatterDeltaRadii.*radius=i32\(params\.supportHaloRings\)/s,
-    "the exact promotion-reason stream must scatter through the complete support radius");
+    /fnseedRecurringHalo[\s\S]*DELTA_DIRTY\|DELTA_SUPPORT[\s\S]*fndilatedRecurringMask[\s\S]*distance<=params\.dirtyHaloRings[\s\S]*distance<=params\.supportHaloRings/,
+    "the exact promotion-reason stream must seed and dilate through both authored radii");
   assert.match(shader,
-    /broadIsExact=REASON_CONES&&recurringRepairLanes\[0\]==producers[\s\S]*deltaVolume=select\(0u,deltaRadiusVolume\(\),DELTA_RADIUS_MASK&&\(!REASON_CONES\|\|broadIsExact\)\)/,
+    /broadIsExact=REASON_CONES&&recurringRepairLanes\[0\]==producers[\s\S]*pageDelta\[10\]=select\(0u,2u,broadIsExact\)/,
     "the clean control and exact-fingerprint fast path retain the sound broad-interface cone");
   const transport = structuredFineLevelSetTransportWGSL.replace(/\s+/g, "");
   assert.match(transport,
@@ -503,8 +503,8 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnapplyInflowPhi[\s\S]*fninitializeDesiredSamples[\s\S]*value=applyInflowPhi\(value,position\)/,
     "new nozzle pages initialize source phi before Section 5 fast marching");
   assert.match(wgsl,
-    /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],bits\)[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*desiredScan\[item\]=prefix[\s\S]*fnscatterRecurringSparseBand[\s\S]*output=desiredScan\[key\][\s\S]*targetB\[7u\+output\]=key/,
-    "compact seeds scatter bounded halos, rank in parallel, and publish canonical keys exactly once");
+    /fnseedRecurringHalo[\s\S]*atomicOr\(&topologyErrors\[key\],2u\)[\s\S]*fndilateRecurringHaloX[\s\S]*fndilateRecurringHaloY[\s\S]*fndilateRecurringHaloZ[\s\S]*fncommitRecurringHalo[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*desiredScan\[item\]=prefix[\s\S]*fnscatterRecurringSparseBand[\s\S]*output=desiredScan\[key\][\s\S]*targetB\[7u\+output\]=key/,
+    "compact seeds undergo separable halo dilation, rank in parallel, and publish canonical keys exactly once");
   assert.match(wgsl,
     /fnscanRecurringDesiredRecords[\s\S]*fineLinearWorkgroup\(wid,nwg\)[\s\S]*block\*256u\+local[\s\S]*fnfinalizeRecurringSparseBand[\s\S]*recurringDesiredTotal\(\)[\s\S]*fnscatterRecurringSparseBand/,
     "all logical-domain sizes use the same hierarchical mark/rank/scatter publication");
@@ -527,18 +527,18 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnrecurringDilationBrickRings[\s\S]*transportDelta\[7\]\+params\.interpolationSupportFineCells[\s\S]*max\(params\.redistanceBandFineCells,landing\)[\s\S]*params\.safetyBrickRings[\s\S]*rings>params\.dilationBrickRings/,
     "recurring residency follows measured displacement but cannot escape the conservative bound");
   assert.match(wgsl,
-    /fnrecurringHaloRadius\(\)->u32\{returncontrol\[6\];\}[\s\S]*fnrecurringScatterMembership[\s\S]*radius=i32\(recurringHaloRadius\(\)\)[\s\S]*delta=vec3i[\s\S]*-vec3i\(radius\)/,
-    "the reduced recurring halo cube must remain centered on its dynamic radius");
+    /fnrecurringHaloRadius\(\)->u32\{returncontrol\[6\];\}[\s\S]*fndilatedRecurringMask[\s\S]*maximum=max\(recurringHaloRadius\(\),params\.supportHaloRings\)[\s\S]*for\(vard=-i32\(maximum\);d<=i32\(maximum\);d\+=1\)/,
+    "the separable recurring halo must remain centered on its dynamic radius");
   assert.doesNotMatch(wgsl,
-    /fnrecurringScatterMembership[\s\S]*radius=i32\(params\.dilationBrickRings\)/,
+    /fndilatedRecurringMask[\s\S]*maximum=params\.dilationBrickRings/,
     "a reduced recurring width cannot be offset by the conservative construction radius");
   assert.doesNotMatch(wgsl,
     /publishRecurringDesiredBricks|recurringCandidate|recurringKeyAffected|recurringDesiredNow|recurringShiftedKey|sparseFringe|seedWithinDilation|topologySourceLookup|recurringSeedMembership|finalizeDesiredBricks|for\(varother=0u;other<count;other\+=1u\)/,
     "the scalar resident walk, per-output membership search, old full fringe, and quadratic rank sort are deleted");
   assert.match(wgsl, /topologyErrors:array<atomic<u32>>/,
     "the direct identity mask uses a dedicated atomic word per logical brick");
-  assert.match(wgsl, /atomicStore\(&topologyErrors\[item\],0u\)[\s\S]*recurringScatterMembership/,
-    "membership storage is deterministically reset before compact seeds scatter");
+  assert.match(wgsl, /atomicStore\(&topologyErrors\[item\],0u\)[\s\S]*fnseedRecurringHalo/,
+    "membership storage is deterministically reset before compact seeds are dilated");
 
   assert.match(encode, /dilationBrickRings=bandPlan\.dilationBrickRings/,
     "topology must allocate transport, interpolation, redistance, and safety support before redistance");
@@ -546,8 +546,8 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /this\.scanSparseSeedRecordsPipeline[\s\S]*this\.sortSparseCandidatesPipeline[\s\S]*this\.compactSparseDesiredPipeline[\s\S]*this\.expandSparseDesiredPipelines[\s\S]*this\.publishDesiredBricksPipeline/,
     "cold bootstrap retains deterministic sorted seeds and bounded axis expansion");
   assert.match(encode,
-    /if\(publication\.kind==="bootstrap"\)[\s\S]*else\{[\s\S]*this\.publishRecurringSparseBandPipeline[\s\S]*this\.scanRecurringDesiredPipeline[\s\S]*this\.scanSparseGroupsPipeline[\s\S]*this\.finalizeRecurringSparseBandPipeline[\s\S]*this\.scatterRecurringSparseBandPipeline/,
-    "recurring publication has a separate parallel mark/rank/scatter schedule");
+    /if\(publication\.kind==="bootstrap"\)[\s\S]*else\{[\s\S]*this\.publishRecurringSparseBandPipeline[\s\S]*this\.seedRecurringHaloPipeline[\s\S]*this\.dilateRecurringHaloPipelines[\s\S]*this\.commitRecurringHaloPipeline[\s\S]*this\.scanRecurringDesiredPipeline[\s\S]*this\.finalizeRecurringSparseBandPipeline[\s\S]*this\.scatterRecurringSparseBandPipeline/,
+    "recurring publication has a separate seed/dilate/mark/rank/scatter schedule");
   assert.doesNotMatch(encode,
     /compactRecurringExpansion|Expandrecurringglobalfinetopology|Publishsortedrecurringglobalfinetopology/,
     "recurring sparse closure cannot expand into a dispatch-per-ring schedule");
@@ -767,7 +767,7 @@ test("fine topology keeps cold failure unpublished and confines affine seeds to 
     /letcurrentCount=select\(0u,min\(currentWorklist\[1\],params\.pageCapacity\),currentPublished\)[\s\S]*sourceD\[3\]=select\(0u,3u,currentPublished\);sourceD\[4\]=\(currentCount\+63u\)\/64u;sourceD\[5\]=1u;sourceD\[6\]=1u;control\[4\]=select\(0u,1u,currentPublished\);control\[5\]=1u/,
     "parallel rollback keeps a cold failure unpublished and only republishes a validated current generation");
   assert.match(shader,
-    /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*fnscatterRecurringSparseBand[\s\S]*atomicLoad\(&topologyErrors\[key\]\)/,
+    /fnseedRecurringHalo[\s\S]*atomicOr\(&topologyErrors\[key\],[\s\S]*fncommitRecurringHalo[\s\S]*markRecurringBandBlock[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*fnscatterRecurringSparseBand[\s\S]*atomicLoad\(&topologyErrors\[key\]\)/,
     "recurring topology uses bounded idempotent marks and hierarchical ranks instead of ordering or membership searches");
 });
 
