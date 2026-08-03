@@ -317,7 +317,6 @@ struct SparseParams {
 @group(0) @binding(12) var<storage, read> sparseStates: array<u32>;
 override countOnly = false;
 override sparseField = false;
-override globalFineField = false;
 
 const SPARSE_INVALID: u32 = 0xffffffffu;
 const SPARSE_CORE: u32 = 2u;
@@ -363,33 +362,17 @@ fn sparsePhiAt(cell: vec3i) -> f32 {
   if (payload == SPARSE_INVALID || payload >= arrayLength(&sparsePhi)) { return coarsePhiAtFine(vec3f(cell)); }
   return sparsePhi[payload];
 }
-fn globalHash(key:u32)->u32{return ((key^(key>>16u))*0x9e3779b1u)&(sparseParams.brickDims.x-1u);}
-fn globalLookup(key:u32)->u32{let start=globalHash(key);for(var probe=0u;probe<32u;probe+=1u){if(probe>=sparseParams.brickDims.y){break;}
- let slot=(start+probe)&(sparseParams.brickDims.x-1u);let stored=sparsePageTable[slot*2u];if(stored==key){let id=sparsePageTable[slot*2u+1u];
-  if(id<sparseParams.brickDims.z&&sparseStates[id*10u+1u]==key&&sparseStates[id*10u+2u]==sparseParams.brickDims.w){return id;}return SPARSE_INVALID;}
- if(stored==SPARSE_INVALID){return SPARSE_INVALID;}}return SPARSE_INVALID;}
-fn globalCoarsePhi(q:vec3i)->f32{let factor=max(1.0,sparseParams.cellAndDt.x);let p=clamp((vec3f(q)+vec3f(0.5))/factor-vec3f(0.5),vec3f(0),u.gridInfo.xyz-vec3f(1));
- let a=vec3i(floor(p));let b=min(a+vec3i(1),vec3i(u.gridInfo.xyz)-vec3i(1));let t=fract(p);
- let p000=textureLoad(volume,vec3i(a.x,a.y,a.z),0).x;let p100=textureLoad(volume,vec3i(b.x,a.y,a.z),0).x;let p010=textureLoad(volume,vec3i(a.x,b.y,a.z),0).x;let p110=textureLoad(volume,vec3i(b.x,b.y,a.z),0).x;
- let p001=textureLoad(volume,vec3i(a.x,a.y,b.z),0).x;let p101=textureLoad(volume,vec3i(b.x,a.y,b.z),0).x;let p011=textureLoad(volume,vec3i(a.x,b.y,b.z),0).x;let p111=textureLoad(volume,b,0).x;
- return mix(mix(mix(p000,p100,t.x),mix(p010,p110,t.x),t.y),mix(mix(p001,p101,t.x),mix(p011,p111,t.x),t.y),t.z);}
-fn globalPhiAt(cell:vec3i)->f32{if(any(cell<vec3i(0))||any(cell>=vec3i(sparseParams.coarseDims.xyz))){return globalCoarsePhi(cell);}
- let q=vec3u(cell);let r=sparseParams.coarseDims.w;let brick=q/r;let local=q-brick*r;let key=brick.x+sparseParams.fineDims.x*(brick.y+sparseParams.fineDims.y*brick.z);let id=globalLookup(key);
- if(id==SPARSE_INVALID){return globalCoarsePhi(cell);}let localIndex=local.x+r*(local.y+r*local.z);let index=id*sparseParams.fineDims.w+localIndex;
- if(index>=arrayLength(&sparsePhi)||(sparseControl[index]&1u)==0u){return globalCoarsePhi(cell);}return sparsePhi[index];}
-
 // Level-set fields become a smooth occupancy whose 0.5 contour is phi = 0.
 // The band spans four cells so no corner of a surface-crossing cube saturates
 // (the cube diagonal is under two cells); a saturated corner biases the linear
 // crossing estimate and extracts as cell-pitch lattice artifacts.
 fn occupancyFromPhi(phi: f32) -> f32 {
-  let samplesY = select(select(u.gridInfo.y, f32(sparseParams.fineDims.y), sparseField),f32(sparseParams.coarseDims.y),globalFineField);
+  let samplesY = select(u.gridInfo.y, f32(sparseParams.fineDims.y), sparseField);
   let band = 4.0 * u.container.y / max(samplesY, 1.0);
   return clamp(0.5 - phi / band, 0.0, 1.0);
 }
 
 fn fieldCell(cell: vec3i) -> f32 {
-  if(globalFineField){return occupancyFromPhi(globalPhiAt(cell));}
   let dims = vec3i(u.gridInfo.xyz);
   if (any(cell < vec3i(0)) || any(cell >= dims)) { return 0.0; }
   let mode = u.gridInfo.w;
@@ -414,13 +397,12 @@ fn columnBaseAt(x: i32, z: i32) -> i32 {
 // closes the liquid mesh at glass/floor contacts, so a camera ray always has a
 // usable exit interface as well as a free-surface entry interface.
 fn latticeValue(p: vec3i) -> f32 {
-  let dims = select(select(vec3i(u.gridInfo.xyz), vec3i(sparseParams.fineDims.xyz), sparseField),vec3i(sparseParams.coarseDims.xyz),globalFineField);
+  let dims = select(vec3i(u.gridInfo.xyz), vec3i(sparseParams.fineDims.xyz), sparseField);
   // Side/top boundaries are optical interfaces. The floor is a solid contact,
   // not a water-air surface: extend the bottom cell value to y=0 so extraction
   // cannot create a large horizontal sheet across the tank base.
   if (p.x <= 0 || p.z <= 0 || p.x >= dims.x + 1 || p.z >= dims.z + 1 || p.y >= dims.y + 1) { return 0.0; }
   let cell = vec3i(p.x - 1, max(p.y - 1, 0), p.z - 1);
-  if (globalFineField) { return occupancyFromPhi(globalPhiAt(cell)); }
   if (sparseField) { return occupancyFromPhi(sparsePhiAt(cell)); }
   return fieldCell(cell);
 }
@@ -541,37 +523,12 @@ fn cubeTriangleCount(value: ptr<function, array<f32, 8>>) -> u32 {
   return triangles;
 }
 
-// Global fine entry points deliberately do not reach the adaptive leaf ABI.
-// This keeps the coarse fallback texture plus global hash/payload resources
-// below Metal's storage-binding limit instead of relying on override folding
-// during bind-group reflection.
-fn globalLatticeValue(p:vec3i)->f32{
-  let dims=vec3i(sparseParams.coarseDims.xyz);
-  if(p.x<=0||p.z<=0||p.x>=dims.x+1||p.z>=dims.z+1||p.y>=dims.y+1){return 0.0;}
-  let band=4.0*u.container.y/max(f32(sparseParams.coarseDims.y),1.0);
-  return clamp(0.5-globalPhiAt(vec3i(p.x-1,max(p.y-1,0),p.z-1))/band,0.0,1.0);
-}
-fn loadGlobalCubeCorners(base:vec3i)->array<f32,8>{
-  let offsets=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
-  var value=array<f32,8>();for(var i=0;i<8;i+=1){value[i]=globalLatticeValue(base+offsets[i]);}return value;
-}
-fn classifyGlobalCube(base:vec3i){
-  let cubeDims=sparseParams.coarseDims.xyz+vec3u(1u);if(any(base<vec3i(0))||any(vec3u(base)>=cubeDims)){return;}
-  var value=loadGlobalCubeCorners(base);var minimum=1.0;var maximum=0.0;
-  for(var i=0;i<8;i+=1){minimum=min(minimum,value[i]);maximum=max(maximum,value[i]);}
-  if(minimum>=0.5||maximum<0.5){return;}let slot=atomicAdd(&drawArgs.activeCubeCount,1u);
-  if(slot<arrayLength(&activeCubes)&&slot*2u+1u<arrayLength(&globalCubeValues)){activeCubes[slot]=vec2u(u32(base.x)|(u32(base.z)<<16u),u32(base.y)|(1u<<16u));globalCubeValues[slot*2u]=vec4f(value[0],value[1],value[2],value[3]);globalCubeValues[slot*2u+1u]=vec4f(value[4],value[5],value[6],value[7]);}
-}
 // The sweep kernels stop here: eight corner loads, a min/max test, and one
 // worklist append per *surface* cube. Emission code is confined to
 // polygoniseMain so the register footprint of the full-lattice scan stays
 // small enough for the occupancy that hides the load latency.
 fn classifyCubeScaled(base: vec3i, scale: u32) {
-  let fieldDims = select(
-    select(vec3u(u.gridInfo.xyz), sparseParams.fineDims.xyz, sparseField),
-    sparseParams.coarseDims.xyz,
-    globalFineField,
-  );
+  let fieldDims = select(vec3u(u.gridInfo.xyz), sparseParams.fineDims.xyz, sparseField);
   let cubeDims = fieldDims + vec3u(1);
   if (any(base < vec3i(0)) || any(vec3u(base) >= cubeDims)) { return; }
   var value = loadCubeCornersScaled(base, i32(scale));
@@ -605,7 +562,7 @@ fn polygoniseMain(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invo
   let activeTotal = min(atomicLoad(&drawArgs.activeCubeCount), arrayLength(&activeCubes));
   // Normal reconstruction needs the selected lattice dimensions as well as
   // the cube-local samples; keep this sixth tetra argument at every LOD.
-  let fieldDimensions=select(select(u.gridInfo.xyz,vec3f(sparseParams.fineDims.xyz),sparseField),vec3f(sparseParams.coarseDims.xyz),globalFineField);
+  let fieldDimensions=select(u.gridInfo.xyz,vec3f(sparseParams.fineDims.xyz),sparseField);
   var base = vec3i(0);
   var cubeScale = 1u;
   var value = array<f32, 8>();
@@ -718,19 +675,6 @@ fn extractSparseMain(@builtin(global_invocation_id) gid: vec3u) {
       }
     }
   }
-}
-
-@compute @workgroup_size(256)
-fn extractGlobalFineMain(@builtin(global_invocation_id) gid:vec3u){
-  if(sparseActivePages[1u]!=sparseParams.brickDims.w){return;}
-  let stream=gid.x+gid.y*65535u*256u;let samples=sparseParams.fineDims.w;let activeCount=min(sparseActivePages[0],sparseParams.brickDims.z);let item=stream/samples;
-  if(item>=activeCount||5u+item>=arrayLength(&sparseActivePages)){return;}let id=sparseActivePages[5u+item];
-  if(id>=sparseParams.brickDims.z||id*10u+2u>=arrayLength(&sparseStates)||sparseStates[id*10u+2u]!=sparseParams.brickDims.w){return;}
-  let key=sparseStates[id*10u+1u];let brickDims=max(sparseParams.fineDims.xyz,vec3u(1u));let xy=max(1u,brickDims.x*brickDims.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/brickDims.x;let bx=rem-by*brickDims.x;
-  let localIndex=stream-item*samples;let r=max(1u,sparseParams.coarseDims.w);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));let q=vec3u(bx,by,bz)*r+local;
-  if(any(q>=sparseParams.coarseDims.xyz)){return;}let xBases=array<i32,2>(i32(q.x+1u),0);let yBases=array<i32,2>(i32(q.y+1u),0);let zBases=array<i32,2>(i32(q.z+1u),0);
-  let xCount=select(1u,2u,q.x==0u);let yCount=select(1u,2u,q.y==0u);let zCount=select(1u,2u,q.z==0u);
-  for(var zi=0u;zi<zCount;zi+=1u){for(var yi=0u;yi<yCount;yi+=1u){for(var xi=0u;xi<xCount;xi+=1u){classifyGlobalCube(vec3i(xBases[xi],yBases[yi],zBases[zi]));}}}
 }
 
 // Interior cubes follow the per-column cubic band instead of traversing the
@@ -1540,7 +1484,6 @@ export class RasterWaterPipeline {
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -1555,7 +1498,6 @@ export class RasterWaterPipeline {
       { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
@@ -1662,8 +1604,7 @@ export class RasterWaterPipeline {
       && previous.generation === source.generation
       && previous.metadata.buffer === source.metadata.buffer
       && previous.worklist.buffer === source.worklist.buffer
-      && previous.flags.buffer === source.flags.buffer
-      && previous.phi.buffer === source.phi.buffer
+      && previous.samples.buffer === source.samples.buffer
       && previous.coarsePhiDirectory?.buffer === source.coarsePhiDirectory?.buffer
       && previous.coarsePhiRowCapacity === source.coarsePhiRowCapacity
       && previous.topologyControl?.buffer === source.topologyControl?.buffer)) return;
@@ -1868,9 +1809,9 @@ export class RasterWaterPipeline {
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 2, resource: this.columnBases.createView() }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 7, resource: { buffer: this.fallbackSparsePageTable } },
       { binding: 8, resource: globalFine?.worklist ?? { buffer: this.fallbackSparseActivePages } },
-      { binding: 9, resource: globalFine?.phi ?? { buffer: this.fallbackSparsePhi } },
+      { binding: 9, resource: globalFine?.samples ?? { buffer: this.fallbackSparsePhi } },
       { binding: 10, resource: globalFine ? { buffer: this.globalFineRenderParams! } : { buffer: this.fallbackSparseParams } },
-      { binding: 11, resource: globalFine?.flags ?? { buffer: this.fallbackSparseControl } },
+      { binding: 11, resource: globalFine?.samples ?? { buffer: this.fallbackSparseControl } },
       { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } }
     ] });
     if (this.globalExtractLayout && this.indirectBuffer && this.activeCubeBuffer && this.globalCubeValues && this.globalFineRenderParams && this.fallbackSparsePageTable && this.fallbackSparseActivePages && this.fallbackSparsePhi && this.fallbackSparseControl) this.globalExtractBindGroup = this.device.createBindGroup({ layout: this.globalExtractLayout, entries: [
@@ -1878,9 +1819,8 @@ export class RasterWaterPipeline {
       { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 6, resource: { buffer: this.globalCubeValues } },
       { binding: 8, resource: globalFine?.worklist ?? { buffer: this.fallbackSparseActivePages } },
-      { binding: 9, resource: globalFine?.phi ?? { buffer: this.fallbackSparsePhi } },
+      { binding: 9, resource: globalFine?.samples ?? { buffer: this.fallbackSparsePhi } },
       { binding: 10, resource: { buffer: this.globalFineRenderParams } },
-      { binding: 11, resource: globalFine?.flags ?? { buffer: this.fallbackSparseControl } },
       { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } },
       { binding: 16, resource: coarseDirectory ?? { buffer: this.fallbackSparseControl } },
       { binding: 17, resource: globalFine?.topologyControl ?? { buffer: this.fallbackSparseControl } },
@@ -1890,9 +1830,8 @@ export class RasterWaterPipeline {
       { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 6, resource: { buffer: this.globalCubeValues } }, { binding: 7, resource: { buffer: this.globalCubeOffsets } },
       { binding: 8, resource: globalFine?.worklist ?? { buffer: this.fallbackSparseActivePages } },
-      { binding: 9, resource: globalFine?.phi ?? { buffer: this.fallbackSparsePhi } },
+      { binding: 9, resource: globalFine?.samples ?? { buffer: this.fallbackSparsePhi } },
       { binding: 10, resource: { buffer: this.globalFineRenderParams } },
-      { binding: 11, resource: globalFine?.flags ?? { buffer: this.fallbackSparseControl } },
       { binding: 12, resource: globalFine?.metadata ?? { buffer: this.fallbackSparseControl } },
       { binding: 16, resource: coarseDirectory ?? { buffer: this.fallbackSparseControl } },
     ] });

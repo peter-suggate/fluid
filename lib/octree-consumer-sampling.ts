@@ -97,8 +97,7 @@ export interface GlobalFineLevelSetConsumerSource {
   readonly kind: "global-fine-levelset-sampling";
   readonly metadata: GPUBufferBinding;
   readonly worklist: GPUBufferBinding;
-  readonly flags: GPUBufferBinding;
-  readonly phi: GPUBufferBinding;
+  readonly samples: GPUBufferBinding;
   readonly coarsePhiDirectory?: GPUBufferBinding;
   readonly coarsePhiRowCapacity?: number;
   /** GPU transaction that published the selected A/B fine slot. */
@@ -215,7 +214,7 @@ export function validateGlobalFineLevelSetConsumerSource(source: GlobalFineLevel
 export function createGlobalFineLevelSetConsumerSource(source: WebGPUFineLevelSetBrickSource): GlobalFineLevelSetConsumerSource {
   const plan = source.plan;
   const consumer: GlobalFineLevelSetConsumerSource = { kind: "global-fine-levelset-sampling", metadata: { buffer: source.metadata },
-    worklist: { buffer: source.worklist }, flags: { buffer: source.flags }, phi: { buffer: source.phi },
+    worklist: { buffer: source.worklist }, samples: { buffer: source.samples },
     ...(source.coarsePhiDirectory ? { coarsePhiDirectory: { buffer: source.coarsePhiDirectory } } : {}),
     ...(source.coarsePhiRowCapacity ? { coarsePhiRowCapacity: source.coarsePhiRowCapacity } : {}),
     ...(source.topologyControl ? { topologyControl: { buffer: source.topologyControl } } : {}),

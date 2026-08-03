@@ -234,7 +234,9 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.deepEqual(globalFineCoarseSurfaceDispatch(65_536), [65_535, 2, 1]);
   assert.deepEqual(compactCoarseSurfaceDispatch([32, 16, 32]), [73, 1, 1]);
   assert.throws(() => compactCoarseSurfaceDispatch([32, 0, 32]), /positive integers/);
-  assert.match(surfaceExtractionShader, /sparseActivePages\[1u\]!=sparseParams\.brickDims\.w/,
+  assert.doesNotMatch(surfaceExtractionShader, /globalFineField|globalLookup|globalHash/,
+    "the generic extractor must not retain the retired global-fine ABI");
+  assert.match(globalFineSurfaceClassificationShader, /fineWorklist\[0\]!=params\.table\.w/,
     "a stale worklist generation must fail closed");
   assert.match(globalFineSurfaceClassificationShader, /sampleCoarseOctreePhi/,
     "missing fine samples must query compact coarse-octree phi");
@@ -510,8 +512,8 @@ test("Dawn polygonises tagged global factor-4/factor-8 bricks and retains A when
       { binding: 5, resource: { buffer: cubes } },
       { binding: 6, resource: { buffer: cubeValues } },
       { binding: 8, resource: source.worklist },
-      { binding: 9, resource: source.phi },
-      { binding: 10, resource: { buffer: renderParams } }, { binding: 11, resource: source.flags },
+      { binding: 9, resource: source.samples },
+      { binding: 10, resource: { buffer: renderParams } }, { binding: 11, resource: source.samples },
       { binding: 12, resource: source.metadata },
       { binding: 16, resource: { buffer: coarseDirectory } },
       { binding: 17, resource: { buffer: topologyControl } },

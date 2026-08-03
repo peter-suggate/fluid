@@ -48,6 +48,7 @@ import {
 import type { OctreePowerTopologySource } from "./webgpu-octree-power-topology";
 import type { DirectStructuredVelocitySource } from "./webgpu-octree-structured-velocity-gpu";
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 import type { PassBroker } from "./webgpu-pass-broker";
 
 export const OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE = 256;
@@ -460,7 +461,7 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   prepareFineBandAirSupportDemand: Object.freeze([0,7,26,31]),
   prepareFineBandAirSupportClosureSchedule: Object.freeze([7,31]),
   prepareFineBandAirSupportEmissionSchedule: Object.freeze([7,31]),
-  markFineBandAirSupportDemand: Object.freeze([0,7,25,26,27,28]),
+  markFineBandAirSupportDemand: Object.freeze([0,7,25,26,27]),
   closeFineBandAirSupportInterpolationDemand: Object.freeze([0,2,3,4,5,6,7,11,12,13,14]),
   emitFineBandAirSupportCandidates: Object.freeze([0,2,3,7,11]),
   prepareCompactAuthorityRadixSchedule: Object.freeze([7,31]),
@@ -972,8 +973,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       [21, structured.authority],
       [23, this.faceAdjacency], [24, this.arena], [29, this.faceFrontier], [30, this.incidentFaces],
       ...(this.inputs.fineSources ? [[25, this.inputs.fineSources[0].metadata],
-        [26, this.inputs.fineSources[0].worklist], [27, this.inputs.fineSources[0].flags],
-        [28, this.inputs.fineSources[0].phi]] as const : []),
+        [26, this.inputs.fineSources[0].worklist], [27, this.inputs.fineSources[0].samples]] as const : []),
     ]);
     // Binding 31 is resolved from the producing entry point, never from the
     // shared `buffers` table: it is the one binding whose buffer differs per
@@ -1019,7 +1019,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
         entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS[entry].map((binding) => ({
           binding, resource: { buffer: binding === 0 ? params
           : binding === 25 ? fine.metadata
-          : binding === 26 ? fine.worklist : binding === 27 ? fine.flags : binding === 28 ? fine.phi
+          : binding === 26 ? fine.worklist : binding === 27 ? fine.samples
           : binding === OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING ? dispatchArena(entry)
             : buffers.get(binding)! } })),
       });
@@ -1547,8 +1547,8 @@ struct CatalogSlotGeometry {neighborOffsetSize:vec4f,areaCentroid:vec4f,normalIn
 @group(0)@binding(24)var<storage,read_write>supportVectors:array<vec4f>;
 @group(0)@binding(25)var<storage,read>fineMetadata:array<u32>;
 @group(0)@binding(26)var<storage,read>fineWorklist:array<u32>;
-@group(0)@binding(27)var<storage,read>fineFlags:array<u32>;
-@group(0)@binding(28)var<storage,read>finePhi:array<f32>;
+@group(0)@binding(27)var<storage,read>fineSamples:array<u32>;
+${fineLevelSetPackedSampleWGSL("fineSamples")}
 // GPU-authored sparse propagation queues. Layout: 16 control words, two
 // face-capacity queue banks, then one generation mark per face slot.
 @group(0)@binding(29)var<storage,read_write>faceFrontier:array<atomic<u32>>;
@@ -1958,8 +1958,8 @@ var<workgroup> markFineBaseSplit:atomic<u32>;
     if(!headerValid){fail(0u,ERROR_SOURCE|ERROR_GENERATION);}
     else{let work=wid.x+wid.y*groups.x;let live=fineWorklist[1];
       if(work<live){let id=fineWorklist[7u+work];
-        if(id>=p.finePageCapacity||id*10u+2u>=arrayLength(&fineMetadata)
-            ||fineMetadata[id*10u]!=id||fineMetadata[id*10u+2u]!=p.expectedFineGeneration){
+        if(id>=p.finePageCapacity||id*4u+2u>=arrayLength(&fineMetadata)
+            ||fineMetadata[id*4u]!=id||fineMetadata[id*4u+2u]!=p.expectedFineGeneration){
           fail(work,ERROR_SOURCE|ERROR_GENERATION);
         }else{atomicStore(&markFineBrickPage,id);}}}}
   workgroupBarrier();
@@ -1980,10 +1980,10 @@ var<workgroup> markFineBaseSplit:atomic<u32>;
   let sampleCount=select(0u,p.fineSamplesPerBrick,id!=INVALID);
   var base=vec3u(0u);var inBand=false;
   for(var local=lane;local<sampleCount;local+=64u){let index=id*p.fineSamplesPerBrick+local;
-    if(index>=arrayLength(&fineFlags)||index>=arrayLength(&finePhi)){fail(index,ERROR_CAPACITY);continue;}
-    if((fineFlags[index]&1u)==0u){continue;}let value=finePhi[index];if(!finiteValue(value)){fail(index,ERROR_SOURCE);continue;}
+    if(index>=arrayLength(&fineSamples)){fail(index,ERROR_CAPACITY);continue;}
+    if((finePackedFlags(index)&1u)==0u){continue;}let value=finePackedPhi(index);if(!finiteValue(value)){fail(index,ERROR_SOURCE);continue;}
     if(abs(value)>f32(p.transportBandFineCells)*p.fineWidth){continue;}
-    let q=unpackFineBrick(fineMetadata[id*10u+1u])*p.fineR+fineLocal(local);
+    let q=unpackFineBrick(fineMetadata[id*4u+1u])*p.fineR+fineLocal(local);
     if(any(q>=p.fineSampleDims)){fail(index,ERROR_SOURCE);continue;}
     let sampleBase=q/p.fineFactor;
     if(inBand&&any(sampleBase!=base)){atomicStore(&markFineBaseSplit,1u);}

@@ -1,5 +1,6 @@
 import type { FineLevelSetBrickPlan, FineLevelSetFactor } from "./octree-fine-levelset-bricks";
 import { fineLevelSetLinearWorkgroupWGSL } from "./webgpu-fine-levelset-dispatch";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
 import type { FineLevelSetPageDeltaLayout } from "./webgpu-octree-fine-levelset-topology";
 import { PassBroker } from "./webgpu-pass-broker";
@@ -215,7 +216,7 @@ export class WebGPUFineLevelSetSummaries {
   private readonly pipelinesDeferred: boolean;
   private cachedGroups?: {
     readonly sourceParams: GPUBuffer; readonly metadata: GPUBuffer; readonly worklist: GPUBuffer;
-    readonly flags: GPUBuffer; readonly phi: GPUBuffer; readonly delta: GPUBuffer;
+    readonly samples: GPUBuffer; readonly delta: GPUBuffer;
     readonly coarseDirectory: GPUBuffer; readonly coarseControl: GPUBuffer; readonly coarseDelta: GPUBuffer;
     readonly prepare: GPUBindGroup; readonly validateFine: GPUBindGroup; readonly validateCoarse: GPUBindGroup;
     readonly retireCoarse: GPUBindGroup; readonly removeFine: GPUBindGroup;
@@ -310,7 +311,7 @@ export class WebGPUFineLevelSetSummaries {
     const coarseControl = coarse.control; const coarseDelta = coarse.delta;
     let groups = this.cachedGroups;
     const matches = groups?.sourceParams === source.params && groups.metadata === source.metadata
-      && groups.worklist === source.worklist && groups.flags === source.flags && groups.phi === source.phi
+      && groups.worklist === source.worklist && groups.samples === source.samples
       && groups.delta === delta && groups.coarseDirectory === coarseDirectory
       && groups.coarseControl === coarseControl && groups.coarseDelta === coarseDelta;
     if (!matches) {
@@ -323,12 +324,12 @@ export class WebGPUFineLevelSetSummaries {
       });
       const fineInput = [[1, source.metadata], [2, source.worklist], [5, this.directory],
         [12, this.workState], [17, delta]] as const;
-      const baseSamples = [[1, source.metadata], [2, source.worklist], [3, source.flags], [4, source.phi],
+      const baseSamples = [[1, source.metadata], [2, source.worklist], [3, source.samples],
         [7, this.fineEntries], [11, this.rankKeys], [12, this.workState]] as const;
       const parentSamples = [...baseSamples, [5, this.directory]] as const;
       groups = {
         sourceParams: source.params, metadata: source.metadata, worklist: source.worklist,
-        flags: source.flags, phi: source.phi, delta, coarseDirectory, coarseControl, coarseDelta,
+        samples: source.samples, delta, coarseDirectory, coarseControl, coarseDelta,
         prepare: bind("prepareFineSummaryDirect", this.params[0], [[2, source.worklist], [5, this.directory],
           [6, coarseDirectory], [12, this.workState], [14, coarseDelta], [16, coarseControl], [17, delta],
           [18, this.mutationDispatch]]),
@@ -446,8 +447,9 @@ struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32
 struct CoarseDeltaRecord{cellPlusOne:u32,size:u32,row:u32,flags:u32}
 struct CoarseDelta{count:u32,generation:u32,flags:u32,valid:u32,pad:array<u32,12>,items:array<CoarseDeltaRecord>}
 @group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>metadata:array<u32>;
-@group(0)@binding(2)var<storage,read>worklist:array<u32>;@group(0)@binding(3)var<storage,read>sampleFlags:array<u32>;
-@group(0)@binding(4)var<storage,read>finePhi:array<u32>;@group(0)@binding(5)var<storage,read_write>directory:array<atomic<u32>>;
+@group(0)@binding(2)var<storage,read>worklist:array<u32>;@group(0)@binding(3)var<storage,read>samples:array<u32>;
+${fineLevelSetPackedSampleWGSL("samples")}
+@group(0)@binding(5)var<storage,read_write>directory:array<atomic<u32>>;
 @group(0)@binding(6)var<storage,read>coarse:CoarseDirectory;@group(0)@binding(7)var<storage,read_write>fineEntries:array<Entry>;
 @group(0)@binding(8)var<storage,read_write>fineReferences:array<atomic<u32>>;
 @group(0)@binding(9)var<storage,read_write>coarseRows:array<atomic<u32>>;
@@ -504,7 +506,7 @@ fn validWorklist()->bool{return p.worklistHeaderWords==7u&&arrayLength(&worklist
  &&worklist[1]<=p.pageCapacity&&7u+worklist[1]<=arrayLength(&worklist);}
 fn finePage(key:u32)->u32{if(!validWorklist()){return INVALID;}let count=p.baseDims.x*p.baseDims.y*p.baseDims.z;
  let base=7u+p.pageCapacity;if(key>=count||base+key>=arrayLength(&worklist)){return INVALID;}let id=worklist[base+key];
- let m=id*10u;return select(INVALID,id,id<p.pageCapacity&&m+2u<arrayLength(&metadata)&&metadata[m]==id
+ let m=id*4u;return select(INVALID,id,id<p.pageCapacity&&m+2u<arrayLength(&metadata)&&metadata[m]==id
   &&metadata[m+1u]==key&&metadata[m+2u]==p.generation);}
 fn writeDispatch(base:u32,count:u32,itemsPerGroup:u32){let groups=(count+itemsPerGroup-1u)/itemsPerGroup;
  let width=min(groups,p.maxWorkgroups);let safe=max(1u,width);atomicStore(&state[base],width);
@@ -537,7 +539,7 @@ fn coarseHierarchyKey(cellPlusOne:u32,size:u32)->u32{
  let side=size*ratio.x;if(side==0u||(side&(side-1u))!=0u){return INVALID;}let brickOrigin=origin*ratio.x;
  if(any(brickOrigin%vec3u(side)!=vec3u(0u))){return INVALID;}let level=31u-countLeadingZeros(side);
  let base=brickOrigin.x+p.baseDims.x*(brickOrigin.y+p.baseDims.y*brickOrigin.z);return hierarchyKey(base,level);}
-fn changedKey(index:u32)->u32{if(atomicLoad(&state[1])==1u){let id=worklist[7u+index];let m=id*10u;
+fn changedKey(index:u32)->u32{if(atomicLoad(&state[1])==1u){let id=worklist[7u+index];let m=id*4u;
  return select(INVALID,metadata[m+1u],id<p.pageCapacity&&m+2u<arrayLength(&metadata)&&metadata[m]==id
   &&metadata[m+2u]==p.generation);}return pageDelta[p.changedKeysOffset+index];}
 fn setError(value:u32,index:u32){atomicOr(&state[0],value);atomicMin(&state[9],index);}
@@ -669,8 +671,8 @@ fn centerSampleAt(key:u32,corner:u32)->vec2u{if(key<p.levelOffset||key>=p.levelO
  let brick=q/resolution;if(any(brick>=p.baseDims)){return vec2u(0u);}let key0=brick.x+p.baseDims.x*(brick.y+p.baseDims.y*brick.z);
  let page=finePage(key0);if(page==INVALID){return vec2u(0u);}let within=q-brick*resolution;
  let index=page*p.samplesPerBrick+within.x+resolution*(within.y+resolution*within.z);
- if(index>=arrayLength(&sampleFlags)||index>=arrayLength(&finePhi)){return vec2u(0u,NONFINITE);}
- let value=bitcast<f32>(finePhi[index]);return select(vec2u(bitcast<u32>(value),1u),vec2u(0u,NONFINITE),!finite(value));}
+ if(index>=arrayLength(&samples)){return vec2u(0u,NONFINITE);}
+ let value=finePackedPhi(index);return select(vec2u(bitcast<u32>(value),1u),vec2u(0u,NONFINITE),!finite(value));}
 fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;result.flags&=~CENTER_COMPLETE;
  for(var corner=0u;corner<8u;corner+=1u){result.flags|=centerStates[corner]&NONFINITE;if((centerStates[corner]&1u)!=0u){
   center+=0.125*bitcast<f32>(centerBits[corner]);mask|=1u<<corner;}}if(mask==0xffu){result.centerPhi=bitcast<u32>(center);result.flags|=CENTER_COMPLETE;}return result;}
@@ -682,8 +684,8 @@ fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;
  if(lid==0u&&rank<high&&!rankInRange){setError(CAPACITY,rank);}var lo=3.402823e38;var hi=-3.402823e38;
  var ma=3.402823e38;var count=0u;var failure=0u;exactValid[lid]=0u;exactNegative[lid]=0u;
  if(enabled){let page=finePage(key);if(page!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){
-  let index=page*p.samplesPerBrick+local;if(index>=arrayLength(&sampleFlags)||index>=arrayLength(&finePhi)){failure|=CAPACITY;continue;}
-  if((sampleFlags[index]&VALID)==0u){continue;}let value=bitcast<f32>(finePhi[index]);if(!finite(value)){failure|=NONFINITE;continue;}
+  let index=page*p.samplesPerBrick+local;if(index>=arrayLength(&samples)){failure|=CAPACITY;continue;}
+  if((finePackedFlags(index)&VALID)==0u){continue;}let value=finePackedPhi(index);if(!finite(value)){failure|=NONFINITE;continue;}
   lo=min(lo,value);hi=max(hi,value);ma=min(ma,abs(value));count+=1u;
   if(p.fineFactor==1u&&p.samplesPerBrick==64u){exactValid[lid]=1u;exactNegative[lid]=select(0u,1u,value<0.0);}}}}
  minimumPhi[lid]=lo;maximumPhi[lid]=hi;minimumAbsolutePhi[lid]=ma;validSamples[lid]=count;errors[lid]=failure;workgroupBarrier();

@@ -17,6 +17,10 @@ import {
 import { createGlobalFineLevelSetConsumerSource } from "../lib/octree-consumer-sampling";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/webgpu-octree-fine-levelset-bricks";
 import {
+  unpackFineLevelSetPackedFlags,
+  unpackFineLevelSetPackedPhi,
+} from "../lib/fine-levelset-packed-sample";
+import {
   FINE_LEVELSET_REDISTANCE_CONTROL_BYTES,
   unpackFineLevelSetGPURedistanceControl,
 } from "../lib/webgpu-octree-fine-levelset-redistance";
@@ -101,6 +105,15 @@ export async function readBufferBinding(device: GPUDevice, binding: GPUBufferBin
   return bytes;
 }
 
+function decodePackedFineSamples(words: Uint32Array): { flags: Uint32Array; phi: Float32Array } {
+  const flags = new Uint32Array(words.length), phi = new Float32Array(words.length);
+  for (let index = 0; index < words.length; index += 1) {
+    flags[index] = unpackFineLevelSetPackedFlags(words[index]!);
+    phi[index] = unpackFineLevelSetPackedPhi(words[index]!);
+  }
+  return { flags, phi };
+}
+
 /** Read the authoritative sparse fine phi and locate its upper zero crossing
  * in every coarse x/z column. Heights are returned in coarse-cell units. */
 export async function readFineUpperSurfaceField(
@@ -114,22 +127,21 @@ export async function readFineUpperSurfaceField(
   if (plan.finestCellDimensions.some((value, axis) => value !== coarseDimensions[axis])) return undefined;
   const pageCapacity = plan.maximumResidentBricks;
   const payloadWords = pageCapacity * plan.samplesPerBrick;
-  const [worklistBytes, metadataBytes, flagsBytes, phiBytes] = await Promise.all([
+  const [worklistBytes, metadataBytes, sampleBytes] = await Promise.all([
     readBufferBinding(device, { buffer: source.worklist }, (7 + pageCapacity) * 4),
-    readBufferBinding(device, { buffer: source.metadata }, pageCapacity * 40),
-    readBufferBinding(device, { buffer: source.flags }, payloadWords * 4),
-    readBufferBinding(device, { buffer: source.phi }, payloadWords * 4),
+    readBufferBinding(device, { buffer: source.metadata }, pageCapacity * 16),
+    readBufferBinding(device, { buffer: source.samples }, payloadWords * 4),
   ]);
   const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
   const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4);
-  const flags = new Uint32Array(flagsBytes.buffer, flagsBytes.byteOffset, flagsBytes.byteLength / 4);
-  const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+  const packed = new Uint32Array(sampleBytes.buffer, sampleBytes.byteOffset, sampleBytes.byteLength / 4);
+  const { flags, phi } = decodePackedFineSamples(packed);
   const pages = new Map<number, number>();
   const activePages = Math.min(worklist[1] ?? 0, pageCapacity);
   for (let work = 0; work < activePages; work += 1) {
     const id = worklist[7 + work] ?? 0xffff_ffff;
-    if (id >= pageCapacity || metadata[10 * id + 2] !== source.generation) continue;
-    pages.set(metadata[10 * id + 1]!, id);
+    if (id >= pageCapacity || metadata[4 * id + 2] !== source.generation) continue;
+    pages.set(metadata[4 * id + 1]!, id);
   }
   const [fineNx, fineNy] = plan.sampleDimensions;
   const brickResolution = plan.brickResolution;
@@ -454,29 +466,28 @@ export interface FinePhiSymmetryMetrics {
 
 export async function readFinePhiSymmetrySource(
   device: GPUDevice,
-  source: Pick<WebGPUFineLevelSetBrickSource, "plan" | "generation" | "worklist" | "metadata" | "flags" | "phi">,
+  source: Pick<WebGPUFineLevelSetBrickSource, "plan" | "generation" | "worklist" | "metadata" | "samples">,
 ): Promise<FinePhiSymmetryMetrics> {
   const { plan } = source, capacity = plan.maximumResidentBricks;
   const payloadWords = capacity * plan.samplesPerBrick;
-  const [worklistBytes, metadataBytes, flagsBytes, phiBytes] = await Promise.all([
+  const [worklistBytes, metadataBytes, sampleBytes] = await Promise.all([
     readBufferBinding(device, { buffer: source.worklist }, (7 + capacity) * 4),
-    readBufferBinding(device, { buffer: source.metadata }, capacity * 40),
-    readBufferBinding(device, { buffer: source.flags }, payloadWords * 4),
-    readBufferBinding(device, { buffer: source.phi }, payloadWords * 4),
+    readBufferBinding(device, { buffer: source.metadata }, capacity * 16),
+    readBufferBinding(device, { buffer: source.samples }, payloadWords * 4),
   ]);
   const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
   const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4);
-  const flags = new Uint32Array(flagsBytes.buffer, flagsBytes.byteOffset, flagsBytes.byteLength / 4);
-  const phiWords = new Uint32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+  const packed = new Uint32Array(sampleBytes.buffer, sampleBytes.byteOffset, sampleBytes.byteLength / 4);
   const [nx, ny, nz] = plan.sampleDimensions;
   if (nx !== nz) throw new Error("Horizontal fine-phi D4 audit requires equal x/z dimensions");
-  const denseWords = new Uint32Array(nx * ny * nz), valid = new Uint8Array(nx * ny * nz);
+  const denseWords = new Uint32Array(nx * ny * nz), denseValues = new Float32Array(nx * ny * nz);
+  const valid = new Uint8Array(nx * ny * nz);
   const r = plan.brickResolution, active = Math.min(worklist[1] ?? 0, capacity);
   let validSamples = 0, nonFiniteCount = 0;
   for (let work = 0; work < active; work += 1) {
     const id = worklist[7 + work] ?? 0xffff_ffff;
-    if (id >= capacity || metadata[id * 10 + 2] !== source.generation) continue;
-    const key = metadata[id * 10 + 1]!;
+    if (id >= capacity || metadata[id * 4 + 2] !== source.generation) continue;
+    const key = metadata[id * 4 + 1]!;
     const bz = Math.floor(key / (plan.brickDimensions[0] * plan.brickDimensions[1]));
     const rem = key - bz * plan.brickDimensions[0] * plan.brickDimensions[1];
     const by = Math.floor(rem / plan.brickDimensions[0]), bx = rem - by * plan.brickDimensions[0];
@@ -484,11 +495,11 @@ export async function readFinePhiSymmetrySource(
       const qx = bx * r + local % r, qy = by * r + Math.floor(local / r) % r;
       const qz = bz * r + Math.floor(local / (r * r));
       const payload = id * plan.samplesPerBrick + local;
-      if (qx >= nx || qy >= ny || qz >= nz || (flags[payload]! & 1) === 0) continue;
-      const bits = phiWords[payload]!, exponent = bits & 0x7f80_0000;
-      if (exponent === 0x7f80_0000) { nonFiniteCount += 1; continue; }
+      if (qx >= nx || qy >= ny || qz >= nz || (unpackFineLevelSetPackedFlags(packed[payload]!) & 1) === 0) continue;
+      const bits = packed[payload]! & 0xffff, value = unpackFineLevelSetPackedPhi(packed[payload]!);
+      if (!Number.isFinite(value)) { nonFiniteCount += 1; continue; }
       const at = qx + nx * (qy + ny * qz);
-      valid[at] = 1; denseWords[at] = bits; validSamples += 1;
+      valid[at] = 1; denseWords[at] = bits; denseValues[at] = value; validSamples += 1;
     }
   }
   const transforms = [
@@ -496,7 +507,6 @@ export async function readFinePhiSymmetrySource(
     (x: number, z: number) => [x, nz - 1 - z] as const,
     (x: number, z: number) => [z, x] as const,
   ];
-  const asFloat = new Float32Array(denseWords.buffer);
   let comparedSamples = 0, supportMismatchCount = 0, exactValueMismatchCount = 0, maximumAbsoluteError = 0;
   for (const transform of transforms) for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
     const at = x + nx * (y + ny * z);
@@ -504,10 +514,10 @@ export async function readFinePhiSymmetrySource(
     comparedSamples += 1;
     const [tx, tz] = transform(x, z), target = tx + nx * (y + ny * tz);
     if (!valid[target]) { supportMismatchCount += 1; continue; }
-    const sourceBits = (denseWords[at]! & 0x7fff_ffff) === 0 ? 0 : denseWords[at]!;
-    const targetBits = (denseWords[target]! & 0x7fff_ffff) === 0 ? 0 : denseWords[target]!;
+    const sourceBits = (denseWords[at]! & 0x7fff) === 0 ? 0 : denseWords[at]!;
+    const targetBits = (denseWords[target]! & 0x7fff) === 0 ? 0 : denseWords[target]!;
     if (sourceBits !== targetBits) exactValueMismatchCount += 1;
-    maximumAbsoluteError = Math.max(maximumAbsoluteError, Math.abs(asFloat[at]! - asFloat[target]!));
+    maximumAbsoluteError = Math.max(maximumAbsoluteError, Math.abs(denseValues[at]! - denseValues[target]!));
   }
   return { validSamples, comparedSamples, supportMismatchCount, exactValueMismatchCount,
     nonFiniteCount, maximumAbsoluteError };
@@ -667,12 +677,11 @@ export async function readGlobalFineGenerationDiagnostics(
   const pageDeltaDebug = solver.globalFinePageDeltaDebug;
   const pageCapacity = source.plan.maximumResidentBricks;
   const samplesPerBrick = source.plan.samplesPerBrick;
-  const [worklistBytes, metadataBytes, flagBytes, phiBytes, coarseBytes, seedBytes, topologyBytes,
+  const [worklistBytes, metadataBytes, sampleBytes, coarseBytes, seedBytes, topologyBytes,
     transportBytes, redistanceBytes, volumeBytes, promotionBytes] = await Promise.all([
     readBufferBinding(device, { buffer: source.worklist }, source.worklist.size),
-    readBufferBinding(device, { buffer: source.metadata }, pageCapacity * 40),
-    readBufferBinding(device, { buffer: source.flags }, pageCapacity * samplesPerBrick * 4),
-    readBufferBinding(device, { buffer: source.phi }, pageCapacity * samplesPerBrick * 4),
+    readBufferBinding(device, { buffer: source.metadata }, pageCapacity * 16),
+    readBufferBinding(device, { buffer: source.samples }, pageCapacity * samplesPerBrick * 4),
     source.coarsePhiDirectory
       ? readBufferBinding(device, { buffer: source.coarsePhiDirectory },
         32 + (source.coarsePhiRowCapacity ?? 0) * 32)
@@ -695,17 +704,17 @@ export async function readGlobalFineGenerationDiagnostics(
   ]);
   const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4);
   const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4);
-  const flags = new Uint32Array(flagBytes.buffer, flagBytes.byteOffset, flagBytes.byteLength / 4);
-  const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
-  const phiBits = new Uint32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+  const packed = new Uint32Array(sampleBytes.buffer, sampleBytes.byteOffset, sampleBytes.byteLength / 4);
+  const { flags, phi } = decodePackedFineSamples(packed);
+  const phiBits = packed;
   const activePages = Math.min(worklist[1], pageCapacity);
   let taggedMetadataPages = 0, malformedActivePages = 0;
   let validSamples = 0, finiteValidSamples = 0, negativeValidSamples = 0, positiveValidSamples = 0;
   let phiBitXor = 0, phiBitSum = 0, phiSum = 0, phiAbsSum = 0;
-  for (let id = 0; id < pageCapacity; id += 1) if (metadata[id * 10 + 2] === source.generation) taggedMetadataPages += 1;
+  for (let id = 0; id < pageCapacity; id += 1) if (metadata[id * 4 + 2] === source.generation) taggedMetadataPages += 1;
   for (let work = 0; work < activePages; work += 1) {
     const id = worklist[7 + work];
-    if (id >= pageCapacity || metadata[id * 10 + 2] !== source.generation || metadata[id * 10] !== id) {
+    if (id >= pageCapacity || metadata[id * 4 + 2] !== source.generation || metadata[id * 4] !== id) {
       malformedActivePages += 1; continue;
     }
     for (let local = 0; local < samplesPerBrick; local += 1) {
@@ -715,7 +724,7 @@ export async function readGlobalFineGenerationDiagnostics(
       const value = phi[index];
       if (!Number.isFinite(value)) continue;
       finiteValidSamples += 1;
-      const logicalSample = (Math.imul(metadata[id * 10 + 1], samplesPerBrick) + local) >>> 0;
+      const logicalSample = (Math.imul(metadata[id * 4 + 1], samplesPerBrick) + local) >>> 0;
       let mixed = Math.imul((phiBits[index] ^ logicalSample) >>> 0, 0x7feb_352d) >>> 0;
       mixed = Math.imul((mixed ^ (mixed >>> 15)) >>> 0, 0x846c_a68b) >>> 0;
       mixed = (mixed ^ (mixed >>> 16)) >>> 0;
@@ -734,7 +743,7 @@ export async function readGlobalFineGenerationDiagnostics(
         || worklist[5] !== 1 || worklist[6] !== 1) return undefined;
       const directoryBase = 7 + pageCapacity;
       if (key >= source.plan.logicalBrickCount || directoryBase + key >= worklist.length) return undefined;
-      const id = worklist[directoryBase + key], base = id * 10;
+      const id = worklist[directoryBase + key], base = id * 4;
       return id < pageCapacity && base + 2 < metadata.length && metadata[base] === id
         && metadata[base + 1] === key && metadata[base + 2] === source.generation ? id : undefined;
     };
@@ -755,10 +764,10 @@ export async function readGlobalFineGenerationDiagnostics(
         }) : undefined;
       probedPages.push({
         key, directoryPhysicalId: id, directoryFound: validId,
-        metadataKey: validId ? metadata[id * 10 + 1] : undefined,
-        metadataGeneration: validId ? metadata[id * 10 + 2] : undefined,
-        metadataMatchesGeneration: validId && metadata[id * 10] === id
-          && metadata[id * 10 + 1] === key && metadata[id * 10 + 2] === source.generation,
+        metadataKey: validId ? metadata[id * 4 + 1] : undefined,
+        metadataGeneration: validId ? metadata[id * 4 + 2] : undefined,
+        metadataMatchesGeneration: validId && metadata[id * 4] === id
+          && metadata[id * 4 + 1] === key && metadata[id * 4 + 2] === source.generation,
         inPublishedWorklist: validId && publishedIds.has(id),
         validSamples: pageValid, finiteValidSamples: pageFinite,
         requiredCenterSamples,
@@ -864,9 +873,9 @@ export async function readGlobalFineGenerationDiagnostics(
     residentPayloadBytes: activePages * source.plan.payloadBytesPerBrick,
     payloadCapacityBytes: source.plan.payloadCapacityBytes,
     payloadFragmentationBytes: (pageCapacity - activePages) * source.plan.payloadBytesPerBrick,
-    pageMetadataBytes: pageCapacity * 40,
+    pageMetadataBytes: pageCapacity * 16,
     pageWorklistBytes: source.worklist.size,
-    diagnosticReadbackBytes: [worklistBytes, metadataBytes, flagBytes, phiBytes, coarseBytes, seedBytes,
+    diagnosticReadbackBytes: [worklistBytes, metadataBytes, sampleBytes, coarseBytes, seedBytes,
       topologyBytes, transportBytes, redistanceBytes, volumeBytes]
       .concat(promotionBytes ? [promotionBytes] : [])
       .reduce((sum, bytes) => sum + (bytes?.byteLength ?? 0), 0),
@@ -2766,12 +2775,11 @@ export async function readCubicVolumeField(
       } };
     }
     const sampleWords = source.plan.maximumResidentBricks * source.plan.samplesPerBrick;
-    const [metadataBytes, flagBytes, phiBytes, worklistBytes, coarseBytes, coarseControlBytes,
+    const [metadataBytes, sampleBytes, worklistBytes, coarseBytes, coarseControlBytes,
       fineRestrictionBytes,
       topologyBytes, transportBytes, redistanceBytes, volumeBytes, mgpcgBytes] = await Promise.all([
-      readBufferBinding(device, { buffer: source.metadata }, source.plan.maximumResidentBricks * 40),
-      readBufferBinding(device, { buffer: source.flags }, sampleWords * 4),
-      readBufferBinding(device, { buffer: source.phi }, sampleWords * 4),
+      readBufferBinding(device, { buffer: source.metadata }, source.plan.maximumResidentBricks * 16),
+      readBufferBinding(device, { buffer: source.samples }, sampleWords * 4),
       readBufferBinding(device, { buffer: source.worklist }, source.worklist.size),
       readBufferBinding(device, { buffer: source.coarsePhiDirectory }, 32 + source.coarsePhiRowCapacity * 32),
       solver.globalFineCoarseLevelSetControl
@@ -2799,12 +2807,14 @@ export async function readCubicVolumeField(
         ? readBufferBinding(device, { buffer: (solver as GPUSolverInstance & { mgpcgControl: GPUBuffer }).mgpcgControl }, 64)
         : Promise.resolve(undefined),
     ]);
+    const decodedSamples = decodePackedFineSamples(new Uint32Array(sampleBytes.buffer,
+      sampleBytes.byteOffset, sampleBytes.byteLength / 4));
     const compactSnapshot = {
       plan: source.plan,
       generation: source.generation,
       metadata: new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset, metadataBytes.byteLength / 4),
-      flags: new Uint32Array(flagBytes.buffer, flagBytes.byteOffset, flagBytes.byteLength / 4),
-      phi: new Float32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4),
+      flags: decodedSamples.flags,
+      phi: decodedSamples.phi,
       worklist: new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset, worklistBytes.byteLength / 4),
       coarseDirectory: new Uint32Array(coarseBytes.buffer, coarseBytes.byteOffset, coarseBytes.byteLength / 4),
       ...(coarseControlBytes ? { coarseControl: new Uint32Array(coarseControlBytes.buffer,
@@ -3035,7 +3045,7 @@ export async function dumpFineRedistancePageDeltaForensics(
     }
     errorPageScratch = {
       page: errorPage,
-      generation: snapshot.metadata[errorPage * 10 + 2],
+      generation: snapshot.metadata[errorPage * 4 + 2],
       dirtyRank: Array.from(dirty).indexOf(errorPage),
       supportRank: Array.from(support).indexOf(errorPage),
       validSamples,
@@ -3053,7 +3063,7 @@ export async function dumpFineRedistancePageDeltaForensics(
     const page = Math.floor(transportFirstError / source.plan.samplesPerBrick);
     const local = transportFirstError % source.plan.samplesPerBrick;
     if (page < debug.pageCapacity) {
-      const key = snapshot.metadata[page * 10 + 1];
+      const key = snapshot.metadata[page * 4 + 1];
       const r = source.plan.brickResolution;
       const localZ = Math.floor(local / (r * r));
       const localRem = local - localZ * r * r;
@@ -3104,14 +3114,14 @@ export async function dumpFineRedistancePageDeltaForensics(
   const activeKeys: number[] = [];
   for (let rank = 0; rank < activeCount; rank += 1) {
     const id = snapshot.worklist[7 + rank];
-    if (id < debug.pageCapacity) activeKeys.push(snapshot.metadata[id * 10 + 1]);
+    if (id < debug.pageCapacity) activeKeys.push(snapshot.metadata[id * 4 + 1]);
   }
   const activeCountByChangedChebyshevRadius = Array.from({ length: 17 }, (_, radius) =>
     activeKeys.reduce((count, key) => count + (key < logicalCount && distance[key] <= radius ? 1 : 0), 0));
   const pageDistanceHistogram = (pages: Uint32Array) => {
     const histogram = new Array<number>(18).fill(0);
     for (const id of pages) {
-      const key = id < debug.pageCapacity ? snapshot.metadata[id * 10 + 1] : 0xffff_ffff;
+      const key = id < debug.pageCapacity ? snapshot.metadata[id * 4 + 1] : 0xffff_ffff;
       const d = key < logicalCount ? distance[key] : 0xff;
       histogram[Math.min(d, 17)] += 1;
     }

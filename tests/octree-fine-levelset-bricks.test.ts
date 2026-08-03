@@ -9,6 +9,11 @@ import {
   planFineLevelSetBricks,
   unpackFineLevelSetBrickKey,
 } from "../lib/octree-fine-levelset-bricks";
+import {
+  packFineLevelSetSample,
+  unpackFineLevelSetPackedFlags,
+  unpackFineLevelSetPackedPhi,
+} from "../lib/fine-levelset-packed-sample";
 
 function plan(fineFactor: 4 | 8 = 4) {
   return planFineLevelSetBricks({
@@ -17,19 +22,29 @@ function plan(fineFactor: 4 | 8 = 4) {
   });
 }
 
-test("factor-4/factor-8 plans expose exact global-lattice and four-channel memory", () => {
+test("factor-4/factor-8 plans expose exact global-lattice and packed-page memory", () => {
   const factor4 = plan(4);
   const factor8 = plan(8);
   assert.deepEqual(factor4.sampleDimensions, [32, 32, 32]);
   assert.deepEqual(factor4.brickDimensions, [8, 8, 8]);
   assert.equal(factor4.fineCellWidth, 0.5);
   assert.equal(factor4.samplesPerBrick, 64);
-  assert.equal(factor4.payloadBytesPerBrick, 64 * 16);
+  assert.equal(factor4.payloadBytesPerBrick, 64 * 4);
   assert.deepEqual(factor8.sampleDimensions, [64, 64, 64]);
   assert.equal(factor8.fineCellWidth, 0.25);
   assert.equal(factor8.payloadBytesPerBrick, factor4.payloadBytesPerBrick);
   assert.equal(factor4.allocatedBytes,
     factor4.payloadCapacityBytes + factor4.metadataCapacityBytes + factor4.worklistBytes);
+});
+
+test("packed samples preserve state and exact half-cell closest-point crossings", () => {
+  const closestPointHalfCell = (2 << 24) | 0x80_0000;
+  const flags = 1 | 2 | 16 | (closestPointHalfCell << 5);
+  const packed = packFineLevelSetSample(-0.003125, flags);
+  const decodedFlags = unpackFineLevelSetPackedFlags(packed);
+  assert.equal(decodedFlags & 19, 19);
+  assert.equal(decodedFlags >>> 5, closestPointHalfCell);
+  assert.ok(Math.abs(unpackFineLevelSetPackedPhi(packed) + 0.003125) < 2e-6);
 });
 
 test("packed brick keys are range checked, invertible, and independent of leaf rows", () => {
@@ -52,7 +67,7 @@ test("packed brick keys are range checked, invertible, and independent of leaf r
   }), /32-bit key/);
 });
 
-test("interface publication deterministically builds a six-neighbor ring and caches physical IDs", () => {
+test("interface publication deterministically builds a six-neighbor ring without cached page links", () => {
   const configured = plan();
   const oracle = new FineLevelSetBrickOracle(configured);
   const centerKey = packFineLevelSetBrickKey(configured, [3, 3, 3]);
@@ -62,20 +77,21 @@ test("interface publication deterministically builds a six-neighbor ring and cac
   assert.equal(publication.desiredKeys.length, 7);
   assert.deepEqual([...publication.desiredKeys], [...publication.desiredKeys].sort((a, b) => a - b));
   const center = oracle.pageForKey(centerKey); assert.ok(center);
-  for (let direction = 0; direction < 6; direction += 1) {
-    assert.notEqual(center.neighborIds[direction], FINE_LEVELSET_INVALID);
+  const centerCoord = unpackFineLevelSetBrickKey(configured, centerKey);
+  for (const delta of [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]] as const) {
+    const neighborKey = packFineLevelSetBrickKey(configured,
+      centerCoord.map((value, axis) => value + delta[axis]) as [number, number, number]);
+    assert.ok(oracle.pageForKey(neighborKey));
   }
   const minusX = oracle.pageForKey(packFineLevelSetBrickKey(configured, [2, 3, 3])); assert.ok(minusX);
-  assert.equal(minusX.neighborIds[1], center.physicalId);
+  assert.equal(oracle.pageForKey(centerKey)?.physicalId, center.physicalId);
   assert.equal(publication.activePhysicalIds.length, 7);
-  const gpu = oracle.exportGPUGeneration(); assert.ok(gpu.haloIds);
+  const gpu = oracle.exportGPUGeneration();
   const centerPhysical = Array.from({ length: gpu.activeCount }, (_, id) => id)
-    .find((id) => gpu.metadataWords[id * 10 + 1] === centerKey); assert.notEqual(centerPhysical, undefined);
-  const haloBase = centerPhysical! * 27;
-  assert.equal(gpu.haloIds[haloBase + 13], centerPhysical, "halo slot 13 owns the destination page");
-  for (const [haloSlot, neighborSlot] of [[12, 0], [14, 1], [10, 2], [16, 3], [4, 4], [22, 5]] as const) {
-    assert.equal(gpu.haloIds[haloBase + haloSlot], gpu.metadataWords[centerPhysical! * 10 + 4 + neighborSlot]);
-  }
+    .find((id) => gpu.metadataWords[id * 4 + 1] === centerKey); assert.notEqual(centerPhysical, undefined);
+  assert.equal(gpu.metadataWords.length, configured.maximumResidentBricks * 4);
+  assert.deepEqual([...gpu.metadataWords.slice(centerPhysical! * 4, centerPhysical! * 4 + 4)],
+    [centerPhysical, centerKey, publication.generation, 1]);
 });
 
 test("two generations reuse stable keys, retire old-only pages, and initialize new pages from coarse phi", () => {
@@ -117,7 +133,7 @@ test("missing bricks use explicit coarse phi and interface discovery scans resid
   assert.equal(oracle.sampleOrCoarse([0, 0, 0], () => -99), -99);
 });
 
-test("interface discovery detects a sign change exactly across cached brick neighbors", () => {
+test("interface discovery detects a sign change across deterministic brick-key neighbors", () => {
   const configured = plan();
   const oracle = new FineLevelSetBrickOracle(configured);
   const leftKey = packFineLevelSetBrickKey(configured, [2, 2, 2]);
@@ -132,7 +148,7 @@ test("interface discovery detects a sign change exactly across cached brick neig
   const detected = new Set(oracle.detectInterfaceKeys());
   assert.ok(detected.has(leftKey));
   assert.ok(detected.has(rightKey));
-  assert.equal(left.neighborIds[1], right.physicalId);
+  assert.equal(oracle.pageForKey(rightKey)?.physicalId, right.physicalId);
 });
 
 test("memory accounting separates active payload, sorted directories, and fragmentation", () => {
@@ -143,17 +159,17 @@ test("memory accounting separates active payload, sorted directories, and fragme
   assert.equal(memory.residentBricks, 4);
   assert.equal(memory.activePayloadBytes, 4 * configured.payloadBytesPerBrick);
   assert.equal(memory.fragmentationBytes, configured.payloadCapacityBytes - memory.activePayloadBytes);
-  assert.equal(memory.metadataBytes, 2 * memory.residentBricks * 10 * 4);
+  assert.equal(memory.metadataBytes, 2 * memory.residentBricks * 4 * 4);
   assert.equal(memory.worklistBytes, configured.worklistBytes);
   assert.equal(memory.allocatedBytes, configured.allocatedBytes);
   const gpu = oracle.exportGPUGeneration();
-  assert.equal(gpu.metadataWords.length, configured.maximumResidentBricks * 10);
+  assert.equal(gpu.metadataWords.length, configured.maximumResidentBricks * 4);
   assert.equal(gpu.worklistWords[0], gpu.generation);
   assert.equal(gpu.worklistWords[1], 4);
   assert.equal(gpu.worklistWords[2], configured.maximumResidentBricks);
   assert.deepEqual([...gpu.worklistWords.slice(3, 7)], [3, 1, 1, 1]);
   const ids = [...gpu.worklistWords.slice(7, 7 + gpu.worklistWords[1])];
-  const keys = ids.map((id) => gpu.metadataWords[id * 10 + 1]);
+  const keys = ids.map((id) => gpu.metadataWords[id * 4 + 1]);
   assert.deepEqual(ids, [0, 1, 2, 3], "Morton worklist rank is the compact physical identity");
   assert.equal(new Set(keys).size, keys.length);
 });

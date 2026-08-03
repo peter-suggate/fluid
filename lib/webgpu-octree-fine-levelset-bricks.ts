@@ -1,10 +1,11 @@
 import {
   FINE_LEVELSET_INVALID,
-  FINE_LEVELSET_HALO_COUNT,
+  FINE_LEVELSET_METADATA_WORDS,
   FINE_LEVELSET_WORKSET_HEADER_WORDS,
   type FineLevelSetBrickPlan,
   type FineLevelSetGPUGenerationData,
 } from "./octree-fine-levelset-bricks";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 /** GPU-resident authority for one domain-global fine level-set generation. */
 export interface WebGPUFineLevelSetBrickSource {
@@ -14,8 +15,8 @@ export interface WebGPUFineLevelSetBrickSource {
   params: GPUBuffer;
   metadata: GPUBuffer;
   worklist: GPUBuffer;
-  flags: GPUBuffer;
-  phi: GPUBuffer;
+  /** Authoritative 256-byte B4 pages: one packed u32 per sample. */
+  samples: GPUBuffer;
   workA: GPUBuffer;
   workB: GPUBuffer;
   /**
@@ -23,7 +24,7 @@ export interface WebGPUFineLevelSetBrickSource {
    * must not alias either work buffer: transport uses workA and the Section 5
    * JFA-CPT uses both work channels for closest-point ping-pong.
    */
-  rollbackPhi: GPUBuffer;
+  rollbackSamples: GPUBuffer;
   /** GPU-published compact coarse-octree phi directory used outside fine validity. */
   coarsePhiDirectory?: GPUBuffer;
   coarsePhiRowCapacity?: number;
@@ -68,11 +69,10 @@ export class WebGPUFineLevelSetBricks {
   readonly plan: FineLevelSetBrickPlan;
   /** Payload/directory plan plus both persistent 80-byte parameter blocks. */
   readonly allocatedBytes: number;
-  readonly flags: readonly [GPUBuffer, GPUBuffer];
-  readonly phi: readonly [GPUBuffer, GPUBuffer];
+  readonly samples: readonly [GPUBuffer, GPUBuffer];
   readonly workA: readonly [GPUBuffer, GPUBuffer];
   readonly workB: readonly [GPUBuffer, GPUBuffer];
-  readonly rollbackPhi: readonly [GPUBuffer, GPUBuffer];
+  readonly rollbackSamples: readonly [GPUBuffer, GPUBuffer];
   readonly metadata: readonly [GPUBuffer, GPUBuffer];
   readonly worklists: readonly [GPUBuffer, GPUBuffer];
   readonly params: readonly [GPUBuffer, GPUBuffer];
@@ -81,29 +81,27 @@ export class WebGPUFineLevelSetBricks {
   constructor(private readonly device: GPUDevice, plan: FineLevelSetBrickPlan) {
     this.plan = plan;
     const sampleWords = plan.maximumResidentBricks * plan.samplesPerBrick;
-    // `plan.allocatedBytes` contains the four paper-facing payload channels
-    // (flags, phi, and two closest-point work channels). Rollback is a separate
-    // publication-transaction cost, shared by both A/B page-table slots.
+    // The authoritative page is one packed word per sample. JFA A/B and the
+    // rollback snapshot are transaction scratch, not page channels.
     // Each generation carries a flat logical-key -> physical-page directory
-    // after the compact worklist. The domain is only 4,096 words in the paper
-    // path and removes a lower_bound from every fine interpolation tap.
+    // after the compact worklist, removing a lower_bound from every fine
+    // interpolation tap.
     const topologyWords = FINE_LEVELSET_WORKSET_HEADER_WORDS + plan.maximumResidentBricks
-      + plan.logicalBrickCount
-      + (plan.includeHalo27 ? plan.maximumResidentBricks * FINE_LEVELSET_HALO_COUNT : 0);
-    this.allocatedBytes = 2 * 5 * sampleWords * 4 + 2 * plan.maximumResidentBricks * 40
+      + plan.logicalBrickCount;
+    this.allocatedBytes = 2 * 4 * sampleWords * 4
+      + 2 * plan.maximumResidentBricks * FINE_LEVELSET_METADATA_WORDS * 4
       + 2 * topologyWords * 4 + 2 * 80;
     const payloadPair = (label: string): [GPUBuffer, GPUBuffer] => [
       storageBuffer(device, sampleWords * 4, `${label} arena A`),
       storageBuffer(device, sampleWords * 4, `${label} arena B`),
     ];
-    this.flags = payloadPair("fine-levelset flags");
-    this.phi = payloadPair("fine-levelset phi");
+    this.samples = payloadPair("fine-levelset packed samples");
     this.workA = payloadPair("fine-levelset work A");
     this.workB = payloadPair("fine-levelset work B");
-    this.rollbackPhi = payloadPair("fine-levelset signed-phi rollback snapshot");
+    this.rollbackSamples = payloadPair("fine-levelset packed rollback snapshot");
     this.metadata = [
-      storageBuffer(device, plan.maximumResidentBricks * 40, "fine-levelset metadata generation 0"),
-      storageBuffer(device, plan.maximumResidentBricks * 40, "fine-levelset metadata generation 1"),
+      storageBuffer(device, plan.maximumResidentBricks * FINE_LEVELSET_METADATA_WORDS * 4, "fine-levelset metadata generation 0"),
+      storageBuffer(device, plan.maximumResidentBricks * FINE_LEVELSET_METADATA_WORDS * 4, "fine-levelset metadata generation 1"),
     ];
     this.worklists = [
       worksetBuffer(device, topologyWords * 4,
@@ -129,14 +127,12 @@ export class WebGPUFineLevelSetBricks {
       throw new RangeError("Fine level-set GPU publication exceeds capacity or has a mismatched worklist");
     }
     const sampleWords = this.plan.maximumResidentBricks * this.plan.samplesPerBrick;
-    assertLength(data.metadataWords.length, this.plan.maximumResidentBricks * 10, "Fine level-set metadata");
+    assertLength(data.metadataWords.length,
+      this.plan.maximumResidentBricks * FINE_LEVELSET_METADATA_WORDS, "Fine level-set metadata");
     assertLength(data.worklistWords.length,
       FINE_LEVELSET_WORKSET_HEADER_WORDS + this.plan.maximumResidentBricks,
       "Fine level-set worklist");
-    assertLength(data.flags.length, sampleWords, "Fine level-set flags");
-    assertLength(data.phi.length, sampleWords, "Fine level-set phi");
-    assertLength(data.workA.length, sampleWords, "Fine level-set work A");
-    assertLength(data.workB.length, sampleWords, "Fine level-set work B");
+    assertLength(data.samples.length, sampleWords, "Fine level-set packed samples");
     const slot = (data.generation & 1) as 0 | 1;
     const parameterBytes = this.parameterBytes(data.generation, data.activeCount);
     this.device.queue.writeBuffer(this.params[slot], 0, parameterBytes);
@@ -145,7 +141,7 @@ export class WebGPUFineLevelSetBricks {
     const direct = new Uint32Array(this.plan.logicalBrickCount).fill(FINE_LEVELSET_INVALID);
     for (let work = 0; work < data.activeCount; work += 1) {
       const physicalId = data.worklistWords[FINE_LEVELSET_WORKSET_HEADER_WORDS + work]!;
-      const key = data.metadataWords[physicalId * 10 + 1]!;
+      const key = data.metadataWords[physicalId * FINE_LEVELSET_METADATA_WORDS + 1]!;
       if (physicalId >= this.plan.maximumResidentBricks || key >= direct.length) {
         throw new RangeError("Fine level-set publication contains an invalid direct-page identity");
       }
@@ -153,20 +149,11 @@ export class WebGPUFineLevelSetBricks {
     }
     this.device.queue.writeBuffer(this.worklists[slot],
       (FINE_LEVELSET_WORKSET_HEADER_WORDS + this.plan.maximumResidentBricks) * 4, direct);
-    if (this.plan.includeHalo27) {
-      assertLength(data.haloIds?.length ?? 0,
-        this.plan.maximumResidentBricks * FINE_LEVELSET_HALO_COUNT, "Fine level-set 27-page halo");
-      uploadArray(this.device.queue, this.worklists[slot], data.haloIds!,
-        (FINE_LEVELSET_WORKSET_HEADER_WORDS + this.plan.maximumResidentBricks
-          + this.plan.logicalBrickCount) * 4);
-    } else if (data.haloIds !== undefined) {
-      throw new RangeError("Fine level-set publication supplied an unconfigured 27-page halo");
-    }
-    uploadArray(this.device.queue, this.flags[slot], data.flags);
-    uploadArray(this.device.queue, this.phi[slot], data.phi);
-    uploadArray(this.device.queue, this.rollbackPhi[slot], data.phi);
-    uploadArray(this.device.queue, this.workA[slot], data.workA);
-    uploadArray(this.device.queue, this.workB[slot], data.workB);
+    uploadArray(this.device.queue, this.samples[slot], data.samples);
+    uploadArray(this.device.queue, this.rollbackSamples[slot], data.samples);
+    const invalidScratch = new Uint32Array(sampleWords).fill(FINE_LEVELSET_INVALID);
+    uploadArray(this.device.queue, this.workA[slot], invalidScratch);
+    uploadArray(this.device.queue, this.workB[slot], invalidScratch);
     this.generations[slot] = data.generation;
     return this.source(slot);
   }
@@ -200,9 +187,9 @@ export class WebGPUFineLevelSetBricks {
     }
     if (source.plan !== this.plan || source.params !== this.params[slot]
       || source.metadata !== this.metadata[slot]
-      || source.worklist !== this.worklists[slot] || source.flags !== this.flags[slot]
-      || source.phi !== this.phi[slot] || source.workA !== this.workA[slot]
-      || source.workB !== this.workB[slot] || source.rollbackPhi !== this.rollbackPhi[slot]) {
+      || source.worklist !== this.worklists[slot] || source.samples !== this.samples[slot]
+      || source.samples !== this.samples[slot] || source.workA !== this.workA[slot]
+      || source.workB !== this.workB[slot] || source.rollbackSamples !== this.rollbackSamples[slot]) {
       throw new RangeError("Fine level-set generation source is not owned by this page pool");
     }
     this.device.queue.writeBuffer(source.params, 0, this.parameterBytes(generation, 0));
@@ -213,7 +200,8 @@ export class WebGPUFineLevelSetBricks {
   /** Empty valid worklist bootstrap; contains no CPU-authored surface samples. */
   initializeEmptyGPUGeneration(generation: number): WebGPUFineLevelSetBrickSource {
     const source = this.prepareGPUGeneration(generation);
-    const emptyMetadata = new Uint32Array(this.plan.maximumResidentBricks * 10).fill(FINE_LEVELSET_INVALID);
+    const emptyMetadata = new Uint32Array(
+      this.plan.maximumResidentBricks * FINE_LEVELSET_METADATA_WORDS).fill(FINE_LEVELSET_INVALID);
     uploadArray(this.device.queue, source.metadata, emptyMetadata);
     const emptyWorklist = new Uint32Array(
       FINE_LEVELSET_WORKSET_HEADER_WORDS + this.plan.maximumResidentBricks,
@@ -223,13 +211,6 @@ export class WebGPUFineLevelSetBricks {
     this.device.queue.writeBuffer(source.worklist,
       (FINE_LEVELSET_WORKSET_HEADER_WORDS + this.plan.maximumResidentBricks) * 4,
       new Uint32Array(this.plan.logicalBrickCount).fill(FINE_LEVELSET_INVALID));
-    if (this.plan.includeHalo27) {
-      this.device.queue.writeBuffer(source.worklist,
-        (FINE_LEVELSET_WORKSET_HEADER_WORDS + this.plan.maximumResidentBricks
-          + this.plan.logicalBrickCount) * 4,
-        new Uint32Array(this.plan.maximumResidentBricks * FINE_LEVELSET_HALO_COUNT)
-          .fill(FINE_LEVELSET_INVALID));
-    }
     return source;
   }
 
@@ -259,9 +240,8 @@ export class WebGPUFineLevelSetBricks {
     if (generation === 0) throw new RangeError(`Fine level-set generation slot ${slot} has not been published`);
     return {
       plan: this.plan, generation, generationSlot: slot, params: this.params[slot],
-      metadata: this.metadata[slot], worklist: this.worklists[slot], flags: this.flags[slot],
-      phi: this.phi[slot], workA: this.workA[slot], workB: this.workB[slot],
-      rollbackPhi: this.rollbackPhi[slot],
+      metadata: this.metadata[slot], worklist: this.worklists[slot], samples: this.samples[slot],
+      workA: this.workA[slot], workB: this.workB[slot], rollbackSamples: this.rollbackSamples[slot],
     };
   }
 
@@ -273,8 +253,8 @@ export class WebGPUFineLevelSetBricks {
   }
 
   destroy(): void {
-    for (const buffer of [...this.flags, ...this.phi, ...this.workA, ...this.workB,
-      ...this.rollbackPhi, ...this.metadata, ...this.worklists, ...this.params]) buffer.destroy();
+    for (const buffer of [...this.samples, ...this.workA, ...this.workB,
+      ...this.rollbackSamples, ...this.metadata, ...this.worklists, ...this.params]) buffer.destroy();
   }
 }
 
@@ -299,7 +279,7 @@ fn ${functionName}(key:u32)->u32 {
   let directoryBase=7u+${params}.worklistCapacity;
   if(7u+count>arrayLength(&${worklist})||key>=logicalCount
     ||directoryBase+key>=arrayLength(&${worklist})){return INVALID;}
-  let physicalId=${worklist}[directoryBase+key];let base=physicalId*10u;
+  let physicalId=${worklist}[directoryBase+key];let base=physicalId*4u;
   return select(INVALID,physicalId,physicalId<${params}.pageCapacity&&base+2u<arrayLength(&${metadata})
     &&${metadata}[base]==physicalId&&${metadata}[base+1u]==key&&${metadata}[base+2u]==${params}.generation);
 }`;
@@ -336,12 +316,12 @@ struct Result { phi:f32, found:u32, physicalId:u32, localIndex:u32 }
 @group(0) @binding(0) var<uniform> params:Params;
 @group(0) @binding(1) var<storage,read> worklist:array<u32>;
 @group(0) @binding(2) var<storage,read> metadata:array<u32>;
-@group(0) @binding(3) var<storage,read> sampleFlags:array<u32>;
-@group(0) @binding(4) var<storage,read> phi:array<f32>;
+@group(0) @binding(3) var<storage,read> samples:array<u32>;
 @group(0) @binding(5) var<storage,read> queries:array<Query>;
 @group(0) @binding(6) var<storage,read_write> results:array<Result>;
 
 ${makeFineLevelSetSortedWorklistLookupWGSL("params", "metadata", "worklist", "lookupBrick")}
+${fineLevelSetPackedSampleWGSL("samples")}
 fn packBrick(coord:vec3u)->u32 {
   return coord.x+params.brickDimensions.x*(coord.y+params.brickDimensions.y*coord.z);
 }
@@ -356,8 +336,8 @@ fn sampleFine(position:vec3f,coarsePhi:f32)->Result {
   let physicalId=lookupBrick(packBrick(brick));
   if(physicalId==INVALID){return Result(coarsePhi,0u,INVALID,localIndex);}
   let sampleIndex=physicalId*params.samplesPerBrick+localIndex;
-  if((sampleFlags[sampleIndex]&VALID)==0u){return Result(coarsePhi,0u,physicalId,localIndex);}
-  let value=phi[sampleIndex];
+  if((finePackedFlags(sampleIndex)&VALID)==0u){return Result(coarsePhi,0u,physicalId,localIndex);}
+  let value=finePackedPhi(sampleIndex);
   if(value!=value||abs(value)>3.402823e38){return Result(coarsePhi,0u,physicalId,localIndex);}
   return Result(value,1u,physicalId,localIndex);
 }

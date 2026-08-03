@@ -26,13 +26,13 @@ function snapshot(): CompactOctreeFieldSnapshot {
   setFloat(coarseDirectory, base + 3, -0.5);
   setFloat(coarseDirectory, base + 4, -0.5);
   coarseDirectory[base + 5] = OCTREE_COARSE_PHI_FLAG.valid | OCTREE_COARSE_PHI_FLAG.finite;
+  setFloat(coarseDirectory, base + 7, 1);
   return {
     plan, generation,
-    metadata: new Uint32Array(plan.maximumResidentBricks * 10),
+    metadata: new Uint32Array(plan.maximumResidentBricks * 4),
     flags: new Uint32Array(plan.maximumResidentBricks * plan.samplesPerBrick),
     phi: new Float32Array(plan.maximumResidentBricks * plan.samplesPerBrick),
-    worklist: new Uint32Array(7 + plan.maximumResidentBricks + plan.logicalBrickCount
-      + (plan.includeHalo27 ? 27 * plan.maximumResidentBricks : 0)), coarseDirectory,
+    worklist: new Uint32Array(7 + plan.maximumResidentBricks + plan.logicalBrickCount), coarseDirectory,
     coarseControl: new Uint32Array([0, 0xffff_ffff, 1, 1, 0, 0, 8, 0, 1, 0, generation, OCTREE_POWER_COARSE_LEVELSET_VALID, 0, 0, 0, 0]),
     topologyControl: new Uint32Array([0, 1, 1, 1, 1, 0, 1, 0]),
   };
@@ -49,7 +49,7 @@ test("compact smoke reconstruction returns a real spatial field from coarse leav
 test("current valid fine page overrides compact coarse phi for its base cell", () => {
   const current = snapshot();
   const key = 0, physicalId = 0;
-  current.metadata.set([physicalId, key, generation], physicalId * 10);
+  current.metadata.set([physicalId, key, generation], physicalId * 4);
   current.worklist.set([generation, 1, plan.maximumResidentBricks, 3, 1, 1, 1, physicalId]);
   current.worklist[7 + plan.maximumResidentBricks + key] = physicalId;
   current.flags.fill(FINE_LEVELSET_SAMPLE_FLAGS.valid, 0, plan.samplesPerBrick);
@@ -86,10 +86,9 @@ test("required compact validation rejects and exposes a downstream publication r
   rejected.coarseDirectory[1] = generation - 1;
   rejected.coarseControl![10] = generation - 1;
   rejected.topologyControl!.set([16, 1, 1, 1, 1, 1, 1, 2]);
-  const reconstruction = reconstructCompactOctreeOccupancyField(rejected, [2, 1, 1]);
-  assert.equal(reconstruction.publicationValid, false);
-  assert.equal(compactOctreeFieldEvidenceIsAcceptable(reconstruction), false,
-    "a rollback still requires a complete current fine-SPGrid publication");
+  assert.throws(() => reconstructCompactOctreeOccupancyField(rejected, [2, 1, 1]),
+    /coarse\/fine generation mismatch/,
+    "a rejected fine generation cannot authorize stale coarse correction");
   assert.equal(compactOctreePublicationHeaderEvidence(rejected).downstreamFinalizeReason, 2);
   assert.deepEqual(compactOctreePublicationHeaderEvidence(rejected).transportControl,
     [0, 0, 42, 0, 7, 4, 3, 3]);
@@ -124,27 +123,21 @@ test("compact smoke reconstruction rejects a stale coarse/fine generation pair",
   });
 });
 
-test("compact smoke reconstruction accepts an explicit retained octree with a current fine SPGrid", () => {
+test("compact smoke reconstruction rejects a retained octree paired with an independently current fine SPGrid", () => {
   const rolledBack = snapshot();
   rolledBack.coarseDirectory[1] = generation - 1;
   rolledBack.coarseControl![10] = generation - 1;
   rolledBack.topologyControl!.set([16, 1, 1, 1, 1, 1, 1, 2]);
   const key = 0, physicalId = 0;
-  rolledBack.metadata.set([physicalId, key, generation], physicalId * 10);
+  rolledBack.metadata.set([physicalId, key, generation], physicalId * 4);
   rolledBack.worklist.set([generation, 1, plan.maximumResidentBricks, 3, 1, 1, 1, physicalId]);
   rolledBack.worklist[7 + plan.maximumResidentBricks + key] = physicalId;
   rolledBack.flags.fill(FINE_LEVELSET_SAMPLE_FLAGS.valid, 0, plan.samplesPerBrick);
   rolledBack.phi.fill(-0.5, 0, plan.samplesPerBrick / 2);
   rolledBack.phi.fill(0.5, plan.samplesPerBrick / 2, plan.samplesPerBrick);
-  // Aanjaneya et al. 2017 Section 5
-  // (`docs/papers/aanjaneya-2017-power-liquids.txt`) explicitly uses a
-  // background octree and a separately rebuilt fine SPGrid. The rollback is
-  // provenance for retaining the valid octree, not a reason to hide the fine
-  // interface that advanced independently.
-  const retained = reconstructCompactOctreeOccupancyField(rolledBack, [2, 1, 1]);
-  assert.equal(retained.coarseGeneration, generation - 1);
-  assert.equal(retained.retainedCoarseAuthority, true);
-  assert.equal(compactOctreeFieldEvidenceIsAcceptable(retained), true);
+  assert.throws(() => reconstructCompactOctreeOccupancyField(rolledBack, [2, 1, 1]),
+    /coarse\/fine generation mismatch/,
+    "fine pages may publish only with the matching corrected coarse epoch");
 
   for (const invalid of [
     { topology: new Uint32Array([16, 1, 1, 1, 1, 1, 1, 0]), coarse: generation - 1 },

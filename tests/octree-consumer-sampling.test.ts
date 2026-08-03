@@ -44,7 +44,7 @@ test("global fine consumer ABI indexes canonical factor-4 and factor-8 lattices"
   const buffer = {} as GPUBuffer;
   const source = (factor: 4 | 8): GlobalFineLevelSetConsumerSource => ({
     kind: "global-fine-levelset-sampling", metadata: { buffer }, worklist: { buffer },
-    flags: { buffer }, phi: { buffer }, coarsePhiDirectory: { buffer }, coarsePhiRowCapacity: 128,
+    samples: { buffer }, coarsePhiDirectory: { buffer }, coarsePhiRowCapacity: 128,
     topologyControl: { buffer },
     sampleDimensions: [60 * factor, 45 * factor, 40 * factor],
     brickDimensions: [Math.ceil(60 * factor / 4), Math.ceil(45 * factor / 4), Math.ceil(40 * factor / 4)],
@@ -63,10 +63,10 @@ test("global fine source adapter aliases the single SPGrid and compact coarse di
   const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [4, 3, 2],
     finestCellWidth: 1, fineFactor: 8, brickResolution: 4, maximumResidentBricks: 8 });
   const consumer = createGlobalFineLevelSetConsumerSource({ plan, generation: 3, generationSlot: 1,
-    params: buffer, metadata: buffer, worklist: buffer, flags: buffer, phi: buffer,
-    workA: buffer, workB: buffer, rollbackPhi: buffer,
+    params: buffer, metadata: buffer, worklist: buffer, samples: buffer,
+    workA: buffer, workB: buffer, rollbackSamples: buffer,
     coarsePhiDirectory: coarse, coarsePhiRowCapacity: 16, topologyControl: topology });
-  assert.equal(consumer.phi.buffer, buffer);
+  assert.equal(consumer.samples.buffer, buffer);
   assert.equal(consumer.worklist.buffer, buffer);
   assert.equal(consumer.coarsePhiDirectory?.buffer, coarse);
   assert.equal(consumer.topologyControl?.buffer, topology);
@@ -79,7 +79,7 @@ test("global fine consumer ABI rejects ambiguous indexing and incomplete coarse 
   const buffer = {} as GPUBuffer;
   const valid: GlobalFineLevelSetConsumerSource = {
     kind: "global-fine-levelset-sampling", metadata: { buffer }, worklist: { buffer },
-    flags: { buffer }, phi: { buffer }, coarsePhiDirectory: { buffer }, coarsePhiRowCapacity: 8,
+    samples: { buffer }, coarsePhiDirectory: { buffer }, coarsePhiRowCapacity: 8,
     topologyControl: { buffer },
     sampleDimensions: [16, 12, 8], brickDimensions: [4, 3, 2], brickResolution: 4,
     samplesPerBrick: 64, pageCapacity: 8,

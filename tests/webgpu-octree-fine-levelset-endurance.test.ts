@@ -18,7 +18,7 @@ struct Params { expectedGeneration:u32,pageCapacity:u32,logicalBricks:u32,pad0:u
 @group(0) @binding(4) var<storage,read_write> endurance:array<u32>;
 fn lookup(key:u32)->u32{
  let base=7u+params.pageCapacity;if(key>=params.logicalBricks||base+key>=arrayLength(&worklist)){return INVALID;}
- let id=worklist[base+key];let metadataBase=id*10u;
+ let id=worklist[base+key];let metadataBase=id*4u;
  return select(INVALID,id,id<params.pageCapacity&&metadataBase+2u<arrayLength(&metadata)
   &&metadata[metadataBase]==id&&metadata[metadataBase+1u]==key&&metadata[metadataBase+2u]==params.expectedGeneration);
 }
@@ -90,7 +90,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return max(slab.x-position.x,posit
     device.queue.writeBuffer(endurance, 0, new Uint32Array([0, 0, 0xffff_ffff, 0, 0, 0, 0, 0]));
     const groupAB = generationBindGroup(device, validationPipeline, validationParams, sourceB, topologyAB, endurance);
     const groupBA = generationBindGroup(device, validationPipeline, validationParams, sourceA, topologyBA, endurance);
-    const stableBuffers = [owner.flags, owner.phi, owner.workA, owner.workB, ...owner.metadata,
+    const stableBuffers = [owner.samples, owner.workA, owner.workB, ...owner.metadata,
       ...owner.worklists, ...owner.params];
 
     let currentIsA = true; let generation = 1;
@@ -165,7 +165,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return max(slab.x-position.x,posit
     assert.equal(result[1], 300); assert.equal(result[4], 301);
     assert.ok(result[2] > 0 && result[3] === result[2],
       `factor ${factor} topology-only recurring residency changed without transport (${result[2]}..${result[3]})`);
-    assert.deepEqual([owner.flags, owner.phi, owner.workA, owner.workB, ...owner.metadata,
+    assert.deepEqual([owner.samples, owner.workA, owner.workB, ...owner.metadata,
       ...owner.worklists, ...owner.params], stableBuffers, "resident pool buffers changed during churn");
     readback.destroy(); endurance.destroy(); validationParams.destroy(); transportDelta.destroy(); seeds.destroy();
     topologyBA.destroy(); topologyAB.destroy(); plane.destroy(); owner.destroy();

@@ -6,6 +6,7 @@ import {
   OCTREE_AIR_SUPPORT_VALID,
   octreeAirSupportOwnerHashStartWGSL,
 } from "./webgpu-octree-air-velocity-support";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 export const structuredFineLevelSetTransportWGSL = /* wgsl */ `
 override stagedFineAddressing:bool=false;
@@ -32,8 +33,7 @@ struct AirOwner {tag:u32,cell:u32,size:u32,caseTransform:u32}
 @group(0)@binding(0)var<uniform>p:P;
 @group(0)@binding(1)var<storage,read_write>metadata:array<u32>;
 @group(0)@binding(2)var<storage,read>worklist:array<u32>;
-@group(0)@binding(3)var<storage,read>flags:array<u32>;
-@group(0)@binding(4)var<storage,read_write>phi:array<f32>;
+@group(0)@binding(3)var<storage,read_write>samples:array<u32>;
 @group(0)@binding(5)var<storage,read_write>nextPhi:array<f32>;
 @group(0)@binding(10)var<storage,read_write>reversePhi:array<f32>;
 @group(0)@binding(7)var<storage,read_write>control:Control;
@@ -63,6 +63,7 @@ var<workgroup> airOwnerWindowEnabled:u32;
 // FLT_MAX is the fail-closed value returned by sampleFine. Keep the bound
 // strict so a missing sparse trilinear stencil cannot be committed as phi.
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
+${fineLevelSetPackedSampleWGSL("samples", true)}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
 fn inTransportBand(value:f32)->bool{return finite(value)&&abs(value)<=f32(p.bandCells)*p.h;}
 fn structuredValid()->bool{return arrayLength(&accepted)>=6u&&accepted[0]==0u&&accepted[2]>0u&&accepted[3]!=0u&&accepted[4]<=1u;}
@@ -204,10 +205,10 @@ fn planStructuredFineTransportSubsteps(@builtin(local_invocation_index)lid:u32) 
     if(!finite3(velocity.xyz)||velocity.w<=0.){invalid=1u;}else{maximum=max(maximum,length(velocity.xyz));}}
   let pages=select(0u,min(worklist[1],p.pageCapacity),valid);
   for(var work=lid;work<pages;work+=128u){let id=worklist[7u+work];
-    if(id>=p.pageCapacity||id*10u+3u>=arrayLength(&metadata)||work>=arrayLength(&activitySnapshot)
-      ||metadata[id*10u+2u]!=p.generation){invalid=1u;continue;}
-    let key=metadata[id*10u+1u];changed|=select(0u,1u,state[46]!=0u&&activitySnapshot[work]!=key);
-    changed|=select(0u,1u,(metadata[id*10u+3u]&PAGE_DIRTY)!=0u);activitySnapshot[work]=key;
+    if(id>=p.pageCapacity||id*4u+3u>=arrayLength(&metadata)||work>=arrayLength(&activitySnapshot)
+      ||metadata[id*4u+2u]!=p.generation){invalid=1u;continue;}
+    let key=metadata[id*4u+1u];changed|=select(0u,1u,state[46]!=0u&&activitySnapshot[work]!=key);
+    changed|=select(0u,1u,(metadata[id*4u+3u]&PAGE_DIRTY)!=0u);activitySnapshot[work]=key;
   }
   changed|=select(0u,1u,state[46]!=0u&&(state[48]!=rows||state[49]!=supportCount));
   governorSpeed[lid]=maximum; governorInvalid[lid]=invalid;governorChanged[lid]=changed;workgroupBarrier();
@@ -253,7 +254,7 @@ fn localCoord(i:u32)->vec3u{if(b4FineAddressing){return vec3u(i&3u,(i>>2u)&3u,i>
  let z=i/(p.r*p.r);let rem=i-z*p.r*p.r;let y=rem/p.r;return vec3u(rem-y*p.r,y,z);}
 var<workgroup> classifyRare:array<u32,64>;var<workgroup> classifyInvalid:array<u32,64>;
 @compute @workgroup_size(64)
-fn classifyStructuredFineTransportBlocks(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){let work=wg.x;var id=INVALID;var rare=0u;var invalid=0u;if(state[0]==0u&&work<min(worklist[1],p.pageCapacity)){id=worklist[7u+work];if(id>=p.pageCapacity||metadata[id*10u+2u]!=p.generation){id=INVALID;}}if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;let sampleValid=(flags[index]&VALID)!=0u;if(sampleValid){let value=phi[index];invalid|=select(1u,0u,finite(value));rare|=select(0u,1u,value>=0.);}else{rare=1u;}}}classifyRare[lid]=rare;classifyInvalid[lid]=invalid;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lid<width){classifyRare[lid]|=classifyRare[lid+width];classifyInvalid[lid]|=classifyInvalid[lid+width];}workgroupBarrier();}if(lid==0u&&work<p.pageCapacity){let base=statusBase(work);let valid=id!=INVALID&&classifyInvalid[0]==0u;let cls=select(REGULAR_COMMON,REGULAR_RARE,classifyRare[0]!=0u);state[base]=cls;state[base+1u]=select(INVALID,work,valid);state[base+2u]=0xffff0000u;}}
+fn classifyStructuredFineTransportBlocks(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){let work=wg.x;var id=INVALID;var rare=0u;var invalid=0u;if(state[0]==0u&&work<min(worklist[1],p.pageCapacity)){id=worklist[7u+work];if(id>=p.pageCapacity||metadata[id*4u+2u]!=p.generation){id=INVALID;}}if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;let sampleValid=(finePackedFlags(index)&VALID)!=0u;if(sampleValid){let value=finePackedPhi(index);invalid|=select(1u,0u,finite(value));rare|=select(0u,1u,value>=0.);}else{rare=1u;}}}classifyRare[lid]=rare;classifyInvalid[lid]=invalid;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lid<width){classifyRare[lid]|=classifyRare[lid+width];classifyInvalid[lid]|=classifyInvalid[lid+width];}workgroupBarrier();}if(lid==0u&&work<p.pageCapacity){let base=statusBase(work);let valid=id!=INVALID&&classifyInvalid[0]==0u;let cls=select(REGULAR_COMMON,REGULAR_RARE,classifyRare[0]!=0u);state[base]=cls;state[base+1u]=select(INVALID,work,valid);state[base+2u]=0xffff0000u;}}
 
 struct WorksetRecord{present:u32,cls:u32,id:u32}
 fn worksetValid()->bool{let valid=state[0]==0u&&accepted[2]==state[32]&&activeBank()==state[33]&&accepted[3]==state[34];return valid;}
@@ -401,7 +402,7 @@ fn transitionSample(x:vec3f)->vec4f{
   return invalid;}
 
 fn packBrick(q:vec3u)->u32{return q.x+p.brickDims.x*(q.y+p.brickDims.y*q.z);}
-fn pageOf(key:u32)->u32{let at=7u+p.pageCapacity+key;if(key>=p.brickDims.x*p.brickDims.y*p.brickDims.z||at>=arrayLength(&worklist)){return INVALID;}let id=worklist[at];return select(INVALID,id,id<p.pageCapacity&&metadata[id*10u+1u]==key&&metadata[id*10u+2u]==p.generation);}
+fn pageOf(key:u32)->u32{let at=7u+p.pageCapacity+key;if(key>=p.brickDims.x*p.brickDims.y*p.brickDims.z||at>=arrayLength(&worklist)){return INVALID;}let id=worklist[at];return select(INVALID,id,id<p.pageCapacity&&metadata[id*4u+1u]==key&&metadata[id*4u+2u]==p.generation);}
 // Address-only halo for the terminal phi gather. A characteristic starts in
 // the workgroup's B4 brick and moves by at most p.maxBacktrace samples; the
 // trilinear +1 corner needs one additional brick. The configured maximum of
@@ -416,7 +417,7 @@ var<workgroup> finePageWindowRadius:u32;
 var<workgroup> finePageWindowEnabled:u32;
 fn prepareFinePageWindow(id:u32,lid:u32){
   if(!stagedFineAddressing){return;}
-  if(lid==0u){finePageWindowAnchor=vec3u(0);if(id!=INVALID){finePageWindowAnchor=unpackBrick(metadata[id*10u+1u]);}
+  if(lid==0u){finePageWindowAnchor=vec3u(0);if(id!=INVALID){finePageWindowAnchor=unpackBrick(metadata[id*4u+1u]);}
     let requiredFineRadius=(p.maxBacktrace+p.r-1u)/p.r+1u;
     finePageWindowEnabled=select(0u,1u,requiredFineRadius<=FINE_PAGE_WINDOW_RADIUS);
     finePageWindowRadius=min(FINE_PAGE_WINDOW_RADIUS,requiredFineRadius);
@@ -452,8 +453,8 @@ fn sampleIndex(q:vec3u)->u32{if(b4FineAddressing){let b=q>>vec3u(2);let id=stage
   if(id==INVALID){return INVALID;}let l=q&vec3u(3);return (id<<6u)|l.x|(l.y<<2u)|(l.z<<4u);}
  let b=q/p.r;let id=stagedPageOf(b);if(id==INVALID){return INVALID;}let l=q-b*p.r;
  return id*p.samplesPerBrick+l.x+p.r*(l.y+p.r*l.z);}
-fn sampleFine(x0:vec3f)->f32{let high=vec3f(p.sampleDims)-vec3f(1.0001);let grid=clamp((x0-p.origin)/p.h-vec3f(.5),vec3f(0),high);let base=vec3u(floor(grid));let t=fract(grid);var sum=0.;var weight=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=min(base+o,p.sampleDims-vec3u(1));let at=sampleIndex(q);if(at==INVALID||at>=arrayLength(&phi)||(flags[at]&VALID)==0u){continue;}let value=phi[at];if(!finite(value)){continue;}let w=select(1.-t.x,t.x,o.x!=0u)*select(1.-t.y,t.y,o.y!=0u)*select(1.-t.z,t.z,o.z!=0u);sum+=w*value;weight+=w;}return select(3.402823e38,sum/max(weight,1e-20),weight>0.999);}
-fn samplePredicted(x0:vec3f)->f32{let high=vec3f(p.sampleDims)-vec3f(1.0001);let grid=clamp((x0-p.origin)/p.h-vec3f(.5),vec3f(0),high);let base=vec3u(floor(grid));let t=fract(grid);var sum=0.;var weight=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=min(base+o,p.sampleDims-vec3u(1));let at=sampleIndex(q);if(at==INVALID||at>=arrayLength(&nextPhi)||(flags[at]&VALID)==0u){continue;}let value=nextPhi[at];if(!finite(value)){continue;}let w=select(1.-t.x,t.x,o.x!=0u)*select(1.-t.y,t.y,o.y!=0u)*select(1.-t.z,t.z,o.z!=0u);sum+=w*value;weight+=w;}return select(3.402823e38,sum/max(weight,1e-20),weight>0.999);}
+fn sampleFine(x0:vec3f)->f32{let high=vec3f(p.sampleDims)-vec3f(1.0001);let grid=clamp((x0-p.origin)/p.h-vec3f(.5),vec3f(0),high);let base=vec3u(floor(grid));let t=fract(grid);var sum=0.;var weight=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=min(base+o,p.sampleDims-vec3u(1));let at=sampleIndex(q);if(at==INVALID||at>=arrayLength(&samples)||(finePackedFlags(at)&VALID)==0u){continue;}let value=finePackedPhi(at);if(!finite(value)){continue;}let w=select(1.-t.x,t.x,o.x!=0u)*select(1.-t.y,t.y,o.y!=0u)*select(1.-t.z,t.z,o.z!=0u);sum+=w*value;weight+=w;}return select(3.402823e38,sum/max(weight,1e-20),weight>0.999);}
+fn samplePredicted(x0:vec3f)->f32{let high=vec3f(p.sampleDims)-vec3f(1.0001);let grid=clamp((x0-p.origin)/p.h-vec3f(.5),vec3f(0),high);let base=vec3u(floor(grid));let t=fract(grid);var sum=0.;var weight=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);let q=min(base+o,p.sampleDims-vec3u(1));let at=sampleIndex(q);if(at==INVALID||at>=arrayLength(&nextPhi)||(finePackedFlags(at)&VALID)==0u){continue;}let value=nextPhi[at];if(!finite(value)){continue;}let w=select(1.-t.x,t.x,o.x!=0u)*select(1.-t.y,t.y,o.y!=0u)*select(1.-t.z,t.z,o.z!=0u);sum+=w*value;weight+=w;}return select(3.402823e38,sum/max(weight,1e-20),weight>0.999);}
 struct DonorBounds{low:f32,high:f32,good:u32}
 fn oldDonorBounds(x0:vec3f)->DonorBounds{
   let high=vec3f(p.sampleDims)-vec3f(1.0001);
@@ -462,8 +463,8 @@ fn oldDonorBounds(x0:vec3f)->DonorBounds{
   for(var corner=0u;corner<8u;corner+=1u){
     let o=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);
     let q=min(base+o,p.sampleDims-vec3u(1));let at=sampleIndex(q);
-    if(at==INVALID||at>=arrayLength(&phi)||(flags[at]&VALID)==0u){return DonorBounds(0.,0.,0u);}
-    let value=phi[at];if(!finite(value)){return DonorBounds(0.,0.,0u);}
+    if(at==INVALID||at>=arrayLength(&samples)||(finePackedFlags(at)&VALID)==0u){return DonorBounds(0.,0.,0u);}
+    let value=finePackedPhi(at);if(!finite(value)){return DonorBounds(0.,0.,0u);}
     low=min(low,value);upper=max(upper,value);
   }
   return DonorBounds(low,upper,1u);
@@ -567,16 +568,16 @@ fn transitionRareDeparture(origin:vec3f,air:bool)->Departure{if(p.segments==1u){
 // speed. Characteristics approaching a wall never exit, so impacts are
 // untouched, and the term can only move phi toward air, never create liquid.
 fn finishSample(index:u32,old:f32,origin:vec3f,d:Departure)->SampleOutcome{var x=d.x;var outside=0u;var exitDistance=0.;if(!insideDomain(x)){outside=1u;}if(p.closed!=0u){let interior=clampSampleLattice(x);exitDistance=distance(x,interior);x=interior;}let sampled=select(3.402823e38,sampleFine(x),d.good!=0u);let acceptedSample=d.good!=0u&&finite(sampled);if(acceptedSample){nextPhi[index]=applyInflowPhi(sampled+exitDistance,origin);}else{nextPhi[index]=old;}return SampleOutcome(outside,select(1u,0u,acceptedSample),select(0u,1u,acceptedSample),d.extended,u32(ceil(d.maximumSpeed*p.dt/p.h)));}
-fn pageSample(id:u32,local:u32)->vec4u{let brick=unpackBrick(metadata[id*10u+1u]);let index=id*p.samplesPerBrick+local;let q=brick*p.r+localCoord(local);return vec4u(index,q);}
-fn runRegularCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_COMMON,work);var id=INVALID;if(original!=INVALID){let candidate=worklist[7u+original];if(candidate<p.pageCapacity&&metadata[candidate*10u+2u]==p.generation){id=candidate;}}prepareFinePageWindow(id,lid);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(p.segments==1u){nextPhi[index]=old;}if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularCommonDeparture(origin)));}}finishPage(original,lid);}
-fn runRegularRare(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_RARE,work);var id=INVALID;if(original!=INVALID){let candidate=worklist[7u+original];if(candidate<p.pageCapacity&&metadata[candidate*10u+2u]==p.generation){id=candidate;}}prepareFinePageWindow(id,lid);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(p.segments==1u){nextPhi[index]=old;}if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularRareDeparture(origin,old>=0.)));}}finishPage(original,lid);}
-fn runTransitionCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionCommonDeparture(origin)));}}}finishPage(original,lid);}
-fn runTransitionRare(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((flags[index]&VALID)==0u){continue;}let old=phi[index];if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
+fn pageSample(id:u32,local:u32)->vec4u{let brick=unpackBrick(metadata[id*4u+1u]);let index=id*p.samplesPerBrick+local;let q=brick*p.r+localCoord(local);return vec4u(index,q);}
+fn runRegularCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_COMMON,work);var id=INVALID;if(original!=INVALID){let candidate=worklist[7u+original];if(candidate<p.pageCapacity&&metadata[candidate*4u+2u]==p.generation){id=candidate;}}prepareFinePageWindow(id,lid);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((finePackedFlags(index)&VALID)==0u){continue;}let old=finePackedPhi(index);if(p.segments==1u){nextPhi[index]=old;}if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularCommonDeparture(origin)));}}finishPage(original,lid);}
+fn runRegularRare(work:u32,lid:u32){beginPage(lid);let original=workItem(REGULAR_RARE,work);var id=INVALID;if(original!=INVALID){let candidate=worklist[7u+original];if(candidate<p.pageCapacity&&metadata[candidate*4u+2u]==p.generation){id=candidate;}}prepareFinePageWindow(id,lid);if(id!=INVALID){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((finePackedFlags(index)&VALID)==0u){continue;}let old=finePackedPhi(index);if(p.segments==1u){nextPhi[index]=old;}if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,regularRareDeparture(origin,old>=0.)));}}finishPage(original,lid);}
+fn runTransitionCommon(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_COMMON,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*4u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((finePackedFlags(index)&VALID)==0u){continue;}let old=finePackedPhi(index);if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionCommonDeparture(origin)));}}}finishPage(original,lid);}
+fn runTransitionRare(work:u32,lid:u32){beginPage(lid);let original=workItem(TRANSITION_RARE,work);if(original!=INVALID){let id=worklist[7u+original];if(id<p.pageCapacity&&metadata[id*4u+2u]==p.generation){for(var local=lid;local<p.samplesPerBrick;local+=64u){let iq=pageSample(id,local);let index=iq.x;if((finePackedFlags(index)&VALID)==0u){continue;}let old=finePackedPhi(index);if(any(iq.yzw>=p.sampleDims)||!finite(old)){nextPhi[index]=old;markBadSample(lid,local);continue;}let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;if(!inTransportBand(old)&&!isInflowSample(origin)){nextPhi[index]=old;continue;}accumulateSample(lid,local,finishSample(index,old,origin,transitionRareDeparture(origin,old>=0.)));}}}finishPage(original,lid);}
 fn regularWorkPage(cls:u32,work:u32)->vec2u{
   let original=workItem(cls,work);var id=INVALID;
   if(original!=INVALID){
     let candidate=worklist[7u+original];
-    if(candidate<p.pageCapacity&&metadata[candidate*10u+2u]==p.generation){id=candidate;}
+    if(candidate<p.pageCapacity&&metadata[candidate*4u+2u]==p.generation){id=candidate;}
   }
   return vec2u(original,id);
 }
@@ -588,7 +589,7 @@ fn runReverse(cls:u32,work:u32,lid:u32){
   if(id!=INVALID){
     for(var local=lid;local<p.samplesPerBrick;local+=64u){
       let iq=pageSample(id,local);let index=iq.x;
-      if((flags[index]&VALID)==0u){continue;}
+      if((finePackedFlags(index)&VALID)==0u){continue;}
       reversePhi[index]=3.402823e38;
       if(any(iq.yzw>=p.sampleDims)){continue;}
       let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;
@@ -609,8 +610,8 @@ fn runCorrection(cls:u32,work:u32,lid:u32){
   if(id!=INVALID){
     for(var local=lid;local<p.samplesPerBrick;local+=64u){
       let iq=pageSample(id,local);let index=iq.x;
-      if((flags[index]&VALID)==0u||any(iq.yzw>=p.sampleDims)){continue;}
-      let old=phi[index];let predicted=nextPhi[index];let reversed=reversePhi[index];
+      if((finePackedFlags(index)&VALID)==0u||any(iq.yzw>=p.sampleDims)){continue;}
+      let old=finePackedPhi(index);let predicted=nextPhi[index];let reversed=reversePhi[index];
       if(!finite(old)||!finite(predicted)||!finite(reversed)){continue;}
       let origin=p.origin+(vec3f(iq.yzw)+.5)*p.h;
       if(!inTransportBand(old)||isInflowSample(origin)){continue;}
@@ -659,7 +660,7 @@ fn statusSummary(i:u32,count:u32)->StatusSummary{
   if(work==INVALID){return StatusSummary(0u,1u,0u,0u,1u,0u,INVALID);}
   let packed=state[base+2u];let firstLocal=packed>>16u;var first=INVALID;
   if(firstLocal!=65535u){let id=worklist[7u+i];
-    if(id<p.pageCapacity&&metadata[id*10u+2u]==p.generation){first=i;}}
+    if(id<p.pageCapacity&&metadata[id*4u+2u]==p.generation){first=i;}}
   return StatusSummary(errors&65535u,errors>>16u,work&65535u,work>>16u,0u,packed&65535u,first);
 }
 fn reduceStatusBlock(lid:u32,value:StatusSummary){
@@ -718,7 +719,7 @@ fn reduceStructuredFineTransportStatus(@builtin(workgroup_id)wg:vec3u,@builtin(l
   control.invalidStatus=summaryInvalid[0];control.maxDisplacement=summaryDisplacement[0];
   let firstWork=summaryFirstWork[0];
   if(firstWork!=INVALID){let id=worklist[7u+firstWork];let firstLocal=state[statusBase(firstWork)+2u]>>16u;
-    let q=unpackBrick(metadata[id*10u+1u])*p.r+localCoord(firstLocal);let x=p.origin+(vec3f(q)+vec3f(.5))*p.h;
+    let q=unpackBrick(metadata[id*4u+1u])*p.r+localCoord(firstLocal);let x=p.origin+(vec3f(q)+vec3f(.5))*p.h;
     control.firstIndex=firstLocal;control.firstX=bitcast<u32>(x.x);control.firstY=bitcast<u32>(x.y);control.firstZ=bitcast<u32>(x.z);}
   control.velocityUnavailable=control.nonfinite;
   // Section 5 dynamic topology. A departure point that leaves the resident band
@@ -736,12 +737,12 @@ fn reduceStructuredFineTransportStatus(@builtin(workgroup_id)wg:vec3u,@builtin(l
   // case the CPU oracle pins.
   control.committed=select(0u,1u,control.processed>0u&&control.invalidStatus==0u);
 }
-var<workgroup> neighborPages:array<u32,6>;var<workgroup> pageChanged:array<u32,64>;var<workgroup> pageValueChanged:array<u32,64>;var<workgroup> pageOldInterface:array<u32,64>;var<workgroup> pageNewInterface:array<u32,64>;
-fn neighborIndex(id:u32,local:u32,q:vec3u,dir:u32)->u32{var n=vec3i(q);let axis=dir/2u;n[axis]+=select(-1,1,(dir&1u)!=0u);if(n[axis]>=0&&n[axis]<i32(p.r)){return id*p.samplesPerBrick+u32(n.x)+p.r*(u32(n.y)+p.r*u32(n.z));}let other=neighborPages[dir];if(other==INVALID){return INVALID;}n[axis]=select(i32(p.r)-1,0,n[axis]>=i32(p.r));return other*p.samplesPerBrick+u32(n.x)+p.r*(u32(n.y)+p.r*u32(n.z));}
+var<workgroup> pageChanged:array<u32,64>;var<workgroup> pageValueChanged:array<u32,64>;var<workgroup> pageOldInterface:array<u32,64>;var<workgroup> pageNewInterface:array<u32,64>;
+fn neighborIndex(id:u32,local:u32,q:vec3u,dir:u32)->u32{let brick=unpackBrick(metadata[id*4u+1u]);var global=vec3i(brick*p.r+q);let axis=dir/2u;global[axis]+=select(-1,1,(dir&1u)!=0u);if(any(global<vec3i(0))||any(global>=vec3i(p.sampleDims))){return INVALID;}let u=vec3u(global);let other=pageOf(packBrick(u/p.r));if(other==INVALID){return INVALID;}let n=u%p.r;return other*p.samplesPerBrick+n.x+p.r*(n.y+p.r*n.z);}
 fn transportClosedVirtualNeighbor(q:vec3u,dir:u32)->bool{return p.closed!=0u
  &&((dir==0u&&q.x==0u)||(dir==1u&&q.x+1u==p.sampleDims.x)||(dir==2u&&q.y==0u)
  ||(dir==3u&&q.y+1u==p.sampleDims.y&&p.openTop==0u)||(dir==4u&&q.z==0u)||(dir==5u&&q.z+1u==p.sampleDims.z));}
-@compute @workgroup_size(64)fn commitStructuredFineTransport(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){let work=wg.x;var live=control.committed!=0u&&work<min(worklist[1],p.pageCapacity);var id=INVALID;if(live){id=worklist[7u+work];live=id<p.pageCapacity&&metadata[id*10u+2u]==p.generation;}if(lid<6u){var n=INVALID;if(live){let q=metadata[id*10u+4u+lid];if(q<p.pageCapacity&&metadata[q*10u+2u]==p.generation){n=q;}}neighborPages[lid]=n;}workgroupBarrier();var changed=0u;var valueChanged=0u;var oldInterface=0u;var newInterface=0u;if(live){let brick=unpackBrick(metadata[id*10u+1u]);for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)==0u){continue;}let old=phi[index];let fresh=nextPhi[index];if(!finite(old)||!finite(fresh)){changed=1u;valueChanged=1u;continue;}valueChanged|=select(0u,1u,bitcast<u32>(old)!=bitcast<u32>(fresh));changed|=select(0u,1u,(old<0.)!=(fresh<0.));let q=localCoord(local);let globalQ=brick*p.r+q;for(var dir=0u;dir<6u;dir+=1u){let ni=neighborIndex(id,local,q,dir);if(ni==INVALID||(flags[ni]&VALID)==0u){if(transportClosedVirtualNeighbor(globalQ,dir)){let oldN=old+p.h;let newN=fresh+p.h;oldInterface|=select(0u,1u,(old<0.)!=(oldN<0.));newInterface|=select(0u,1u,(fresh<0.)!=(newN<0.));}continue;}let oldN=phi[ni];let newN=nextPhi[ni];oldInterface|=select(0u,1u,finite(oldN)&&(old<0.)!=(oldN<0.));newInterface|=select(0u,1u,finite(newN)&&(fresh<0.)!=(newN<0.));}}}pageChanged[lid]=changed;pageValueChanged[lid]=valueChanged;pageOldInterface[lid]=oldInterface;pageNewInterface[lid]=newInterface;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lid<width){pageChanged[lid]|=pageChanged[lid+width];pageValueChanged[lid]|=pageValueChanged[lid+width];pageOldInterface[lid]|=pageOldInterface[lid+width];pageNewInterface[lid]|=pageNewInterface[lid+width];}workgroupBarrier();}if(live&&lid==0u){let before=(metadata[id*10u+3u]&PAGE_INTERFACE)!=0u||pageOldInterface[0]!=0u;let after=pageNewInterface[0]!=0u;let membership=pageChanged[0]!=0u||before||after;let repair=pageChanged[0]!=0u||((before||after)&&pageValueChanged[0]!=0u);metadata[id*10u+3u]=VALID|select(0u,PAGE_INTERFACE,after)|select(0u,PAGE_DIRTY,repair);delta[8u+id]=select(INVALID,metadata[id*10u+1u],membership);delta[8u+2u*p.pageCapacity+id]=select(INVALID,metadata[id*10u+1u],repair);}workgroupBarrier();if(live){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if((flags[index]&VALID)!=0u){phi[index]=nextPhi[index];}}}}
+@compute @workgroup_size(64)fn commitStructuredFineTransport(@builtin(workgroup_id)wg:vec3u,@builtin(local_invocation_index)lid:u32){let work=wg.x;var live=control.committed!=0u&&work<min(worklist[1],p.pageCapacity);var id=INVALID;if(live){id=worklist[7u+work];live=id<p.pageCapacity&&metadata[id*4u+2u]==p.generation;}var changed=0u;var valueChanged=0u;var oldInterface=0u;var newInterface=0u;if(live){let brick=unpackBrick(metadata[id*4u+1u]);for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if((finePackedFlags(index)&VALID)==0u){continue;}let old=finePackedPhi(index);let fresh=nextPhi[index];if(!finite(old)||!finite(fresh)){changed=1u;valueChanged=1u;continue;}valueChanged|=select(0u,1u,bitcast<u32>(old)!=bitcast<u32>(fresh));changed|=select(0u,1u,(old<0.)!=(fresh<0.));let q=localCoord(local);let globalQ=brick*p.r+q;for(var dir=0u;dir<6u;dir+=1u){let ni=neighborIndex(id,local,q,dir);if(ni==INVALID||(finePackedFlags(ni)&VALID)==0u){if(transportClosedVirtualNeighbor(globalQ,dir)){let oldN=old+p.h;let newN=fresh+p.h;oldInterface|=select(0u,1u,(old<0.)!=(oldN<0.));newInterface|=select(0u,1u,(fresh<0.)!=(newN<0.));}continue;}let oldN=finePackedPhi(ni);let newN=nextPhi[ni];oldInterface|=select(0u,1u,finite(oldN)&&(old<0.)!=(oldN<0.));newInterface|=select(0u,1u,finite(newN)&&(fresh<0.)!=(newN<0.));}}}pageChanged[lid]=changed;pageValueChanged[lid]=valueChanged;pageOldInterface[lid]=oldInterface;pageNewInterface[lid]=newInterface;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lid<width){pageChanged[lid]|=pageChanged[lid+width];pageValueChanged[lid]|=pageValueChanged[lid+width];pageOldInterface[lid]|=pageOldInterface[lid+width];pageNewInterface[lid]|=pageNewInterface[lid+width];}workgroupBarrier();}if(live&&lid==0u){let before=(metadata[id*4u+3u]&PAGE_INTERFACE)!=0u||pageOldInterface[0]!=0u;let after=pageNewInterface[0]!=0u;let membership=pageChanged[0]!=0u||before||after;let repair=pageChanged[0]!=0u||((before||after)&&pageValueChanged[0]!=0u);metadata[id*4u+3u]=VALID|select(0u,PAGE_INTERFACE,after)|select(0u,PAGE_DIRTY,repair);delta[8u+id]=select(INVALID,metadata[id*4u+1u],membership);delta[8u+2u*p.pageCapacity+id]=select(INVALID,metadata[id*4u+1u],repair);}workgroupBarrier();if(live){for(var local=lid;local<p.samplesPerBrick;local+=64u){let index=id*p.samplesPerBrick+local;if((finePackedFlags(index)&VALID)!=0u){fineWritePackedPhi(index,nextPhi[index]);}}}}
 // The changed brick key this live slot contributes, or INVALID. Slots are read
 // in page-index order exactly as the retired compaction loop walked them.
 fn deltaChangedKey(work:u32)->u32{

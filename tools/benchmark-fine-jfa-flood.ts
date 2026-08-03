@@ -52,8 +52,8 @@ try {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(params, 0, paramsWords);
 
-  const metadataWords = new Uint32Array(pageCount * 10);
-  for (let id = 0; id < pageCount; id += 1) metadataWords.set([id, id, generation], id * 10);
+  const metadataWords = new Uint32Array(pageCount * 4);
+  for (let id = 0; id < pageCount; id += 1) metadataWords.set([id, id, generation], id * 4);
   const metadata = upload("Fine JFA flood metadata", metadataWords);
 
   const directoryBase = 7 + pageCount, haloBase = directoryBase + pageCount;

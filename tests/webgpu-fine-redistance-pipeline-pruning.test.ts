@@ -64,9 +64,9 @@ function source(buffer: (size?: number) => GPUBuffer, generation: number,
   });
   return {
     generation, generationSlot, plan,
-    params: buffer(64), metadata: buffer(320), worklist: buffer(256),
-    flags: buffer(2_048), phi: buffer(2_048), workA: buffer(2_048), workB: buffer(2_048),
-    rollbackPhi: buffer(2_048),
+    params: buffer(64), metadata: buffer(128), worklist: buffer(256),
+    samples: buffer(2_048), workA: buffer(2_048), workB: buffer(2_048),
+    rollbackSamples: buffer(2_048),
   };
 }
 
@@ -94,12 +94,12 @@ test("fine redistance derives the smallest reachable compile-time JFA stride", (
   assert.throws(() => maximumFineLevelSetJFAStride(0), /bandCells/);
 });
 
-test("fine redistance compiles only reachable specialized strides and shares the bounded bundle", () => {
+test("fine redistance compiles only reachable specialized strides and shares the bounded bundle", async () => {
   const previousUsage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
   Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true,
     value: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8, INDIRECT: 16 } });
   try {
-    const { device, buffer, syncPipelines, shaderModuleCount } = fakeGPU();
+    const { device, buffer, syncPipelines, asyncPipelines, shaderModuleCount } = fakeGPU();
     const sourceA = source(buffer, 1, 0);
     const sourceB = source(buffer, 2, 1);
     Object.defineProperty(sourceB, "plan", { value: sourceA.plan });
@@ -109,8 +109,10 @@ test("fine redistance compiles only reachable specialized strides and shares the
     const redistanceB = new WebGPUFineLevelSetRedistance(
       device, sourceB, delta(buffer(512), 8), options);
 
-    assert.deepEqual(jfaStrides(syncPipelines), [1, 2, 4, 8, 16]);
-    assert.equal(syncPipelines.length, 27,
+    await Promise.all([redistanceA.initializePipelines(), redistanceB.initializePipelines()]);
+
+    assert.deepEqual(jfaStrides(asyncPipelines), [1, 2, 4, 8, 16]);
+    assert.equal(asyncPipelines.length, 27,
       "five A/B stride pairs plus 17 unspecialized pipelines replace the old 35-pipeline bundle");
     assert.equal(shaderModuleCount(), 1);
     assert.equal(

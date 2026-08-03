@@ -20,6 +20,7 @@ import { describeFineFloodLadder } from "./fine-flood-provenance";
 import { WebGPUFluidBlastRadius } from "./webgpu-fluid-blast-radius";
 import { makeFineLevelSetSortedWorklistLookupWGSL } from "./webgpu-octree-fine-levelset-bricks";
 import { PassBroker } from "./webgpu-pass-broker";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 /** Four band widths, four ladder scalars, then four vec4u of prefix reach. */
 export const OCTREE_TECHNIQUE_BAND_PREFIX_WORD_OFFSET = 8;
@@ -193,14 +194,15 @@ struct BandConfig {
   prefixReach:array<vec4u,4>,
 }
 ${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.fine)}
+${fineLevelSetPackedSampleWGSL("sampleFlags", false, "debugFine")}
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const INTERFACE:u32=2u;
 ${makeFineLevelSetSortedWorklistLookupWGSL("fine", "metadata", "worklist", "pageOf")}
 fn fineAddress(q:vec3i)->u32 {
   if(any(q<vec3i(0))||any(q>=vec3i(fine.sampleDimensions))){return INVALID;}
   let uq=vec3u(q);let brick=uq/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);let page=pageOf(key);
-  if(page==INVALID||page>=fine.pageCapacity||page*10u+3u>=arrayLength(&metadata)||metadata[page*10u+2u]!=fine.generation){return INVALID;}
+  if(page==INVALID||page>=fine.pageCapacity||page*4u+3u>=arrayLength(&metadata)||metadata[page*4u+2u]!=fine.generation){return INVALID;}
   let local=uq-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;
-  return select(INVALID,address,address<arrayLength(&sampleFlags)&&address<arrayLength(&finePhi)&&(sampleFlags[address]&VALID)!=0u);
+  return select(INVALID,address,address<arrayLength(&sampleFlags)&&(debugFinePackedFlags(address)&VALID)!=0u);
 }
 fn renderWorldToFine(point:vec3f)->vec3f {
   // The solver's sparse fine lattice uses its local [0, extent] frame while
@@ -213,17 +215,17 @@ fn fineState(point:vec3f)->FineState {
   let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return FineState(vec3f(0.0),0.0,INVALID);}let q=vec3u(floor(relative));let brick=q/max(fine.brickResolution,1u);let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
   if(arrayLength(&topologyControl)>0u&&topologyControl[0]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}if(arrayLength(&redistanceControl)>4u&&redistanceControl[4]!=0u){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}
   let page=pageOf(key);if(page==INVALID){let desired=arrayLength(&topologyControl)>4u&&topologyControl[4]==0u;return FineState(select(vec3f(0.03,0.10,0.34),vec3f(1.0,0.34,0.04),desired),select(0.045,0.34,desired),key);}
-  let local=q-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;if(address>=arrayLength(&sampleFlags)){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}let flags=sampleFlags[address];
+  let local=q-brick*fine.brickResolution;let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);let address=page*fine.samplesPerBrick+localIndex;if(address>=arrayLength(&sampleFlags)){return FineState(vec3f(1.0,0.01,0.06),0.94,key);}let flags=debugFinePackedFlags(address);
   if((flags&VALID)==0u){return FineState(vec3f(0.26,0.08,0.48),0.20,address);}if((flags&INTERFACE)!=0u){return FineState(vec3f(1.0,0.02,0.44),0.90,address);}return FineState(vec3f(0.04,0.72,0.82),0.34,address);
 }
 fn globalFinePhi(point:vec3f)->vec4f {
   if(arrayLength(&topologyControl)==0u||topologyControl[0]!=0u||arrayLength(&redistanceControl)<=4u||redistanceControl[3]==0u||redistanceControl[4]!=0u){return vec4f(1.0,0.01,0.06,0.96);}
   let relative=renderWorldToFine(point);if(any(relative<vec3f(0.0))||any(relative>=vec3f(fine.sampleDimensions))){return vec4f(0.0);}
   let q=vec3i(floor(relative));let centerAddress=fineAddress(q);if(centerAddress==INVALID){return vec4f(0.02,0.06,0.18,0.08);}
-  let center=finePhi[centerAddress];if(center!=center||abs(center)>=3.402823e38){return vec4f(1.0,0.01,0.06,0.96);}
+  let center=debugFinePackedPhi(centerAddress);if(center!=center||abs(center)>=3.402823e38){return vec4f(1.0,0.01,0.06,0.96);}
   var gradient=vec3f(0.0);var complete=true;let h=max(fine.fineCellWidth,1e-9);
   for(var axis=0u;axis<3u;axis+=1u){var delta=vec3i(0);delta[axis]=1;let lo=fineAddress(q-delta);let hi=fineAddress(q+delta);var derivative=0.0;
-    if(lo!=INVALID&&hi!=INVALID){derivative=(finePhi[hi]-finePhi[lo])/(2.0*h);}else if(hi!=INVALID){derivative=(finePhi[hi]-center)/h;}else if(lo!=INVALID){derivative=(center-finePhi[lo])/h;}else{complete=false;}
+    if(lo!=INVALID&&hi!=INVALID){derivative=(debugFinePackedPhi(hi)-debugFinePackedPhi(lo))/(2.0*h);}else if(hi!=INVALID){derivative=(debugFinePackedPhi(hi)-center)/h;}else if(lo!=INVALID){derivative=(center-debugFinePackedPhi(lo))/h;}else{complete=false;}
     if(derivative!=derivative||abs(derivative)>=3.402823e38){complete=false;}gradient[axis]=derivative;
   }
   if(!complete){return vec4f(1.0,0.01,0.06,0.96);}
@@ -263,7 +265,7 @@ fn bandResidency(point:vec3f)->vec4f {
     // shell against the rest of the domain rather than a solid block.
     return vec4f(0.03,0.09,0.28,0.06);
   }
-  let phi=finePhi[address];
+  let phi=debugFinePackedPhi(address);
   if(phi!=phi||abs(phi)>=3.402823e38){return vec4f(1.0,0.01,0.06,0.96);}
   let h=max(fine.fineCellWidth,1e-9);
   let distance=abs(phi);
@@ -311,7 +313,7 @@ fn bandResidency(point:vec3f)->vec4f {
 fn floodSampleCell(index:u32)->vec3u {
   let perBrick=max(fine.samplesPerBrick,1u);
   let id=index/perBrick;let local=index-id*perBrick;
-  let key=metadata[id*10u+1u];
+  let key=metadata[id*4u+1u];
   let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);
   let bz=key/xy;let brickRemainder=key-bz*xy;let by=brickRemainder/max(fine.brickDimensions.x,1u);
   let brick=vec3u(brickRemainder-by*fine.brickDimensions.x,by,bz);
@@ -503,8 +505,8 @@ export class OctreeTechniqueOverlayPipeline {
     const fine = source.fineBandLifecycle;
     const fineResources: Readonly<Record<string, GPUBindingResource | undefined>> = {
       fineParams: fine?.params, fineWorklist: fine?.worklist, fineMetadata: fine?.metadata,
-      fineSampleFlags: fine?.sampleFlags, fineTopologyControl: fine?.topologyControl,
-      fineRedistanceControl: fine?.redistanceControl, finePhi: fine?.phi, fineSeeds: fine?.seeds,
+      fineSampleFlags: fine?.samples, fineTopologyControl: fine?.topologyControl,
+      fineRedistanceControl: fine?.redistanceControl, finePhi: fine?.samples, fineSeeds: fine?.seeds,
     };
     if (key in fineResources) return fineResources[key];
     const bundle = source as unknown as Record<string, GPUBindingResource | undefined>;

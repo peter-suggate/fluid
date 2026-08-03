@@ -54,9 +54,9 @@ function source(buffer: (size?: number) => GPUBuffer, generation: number,
     fineFactor: 4, brickResolution: 4, maximumResidentBricks: 8 });
   return {
     generation, generationSlot, plan,
-    params: buffer(64), metadata: buffer(320), worklist: buffer(256),
-    flags: buffer(2_048), phi: buffer(2_048), workA: buffer(2_048), workB: buffer(2_048),
-    rollbackPhi: buffer(2_048),
+    params: buffer(64), metadata: buffer(128), worklist: buffer(256),
+    samples: buffer(2_048), workA: buffer(2_048), workB: buffer(2_048),
+    rollbackSamples: buffer(2_048),
   };
 }
 
@@ -105,8 +105,8 @@ test("fine A/B helpers reuse immutable pipelines and retain per-instance binding
     const volumePipelineCount = counts.pipelines, volumeBindGroups = counts.bindGroups;
     const volumeB = new WebGPUFineLevelSetVolumeCorrection(device, sourceB, coarse, volumeA.control);
     assert.equal(counts.pipelines, volumePipelineCount);
-    assert.ok(counts.bindGroups > volumeBindGroups,
-      "the second volume helper must build bindings for its own generation buffers");
+    assert.equal(counts.bindGroups, volumeBindGroups,
+      "volume bindings remain lazy until the helper is encoded");
     assert.equal(privatePipeline(volumeB, "finePartialPipeline"),
       privatePipeline(volumeA, "finePartialPipeline"));
 
@@ -123,8 +123,8 @@ test("fine A/B helpers reuse immutable pipelines and retain per-instance binding
     const transportPipelineCount = counts.pipelines, transportBindGroups = counts.bindGroups;
     const transportB = new WebGPUFineLevelSetTransport(device, sourceB, resources as never);
     assert.equal(counts.pipelines, transportPipelineCount);
-    assert.ok(counts.bindGroups > transportBindGroups,
-      "the second transport helper must build bindings for its own generation buffers");
+    assert.equal(counts.bindGroups, transportBindGroups,
+      "transport bindings remain lazy until the helper is encoded");
     assert.equal(privatePipeline(transportB, "commitPipeline"),
       privatePipeline(transportA, "commitPipeline"));
     assert.notEqual(transportB.control, transportA.control);
@@ -149,14 +149,14 @@ test("deferred topology and redistance compile sequentially and share in-flight 
     assert.equal(counts.shaderModules, 0);
     assert.throws(() => topologyA.encode({} as never), /pipelines are not initialized/);
     await Promise.all([topologyA.initializePipelines(), topologyB.initializePipelines()]);
-    assert.equal(counts.asyncPipelines, 56);
+    assert.equal(counts.asyncPipelines, 58);
     assert.equal(counts.shaderModules, 1);
     assert.equal(counts.maximumConcurrentCompilations, 1,
       "a family must never put multiple asynchronous compilations in flight");
     assert.equal(privatePipeline(topologyB, "clearPipeline"),
       privatePipeline(topologyA, "clearPipeline"));
     await topologyA.initializePipelines();
-    assert.equal(counts.asyncPipelines, 56, "initialization must be idempotent");
+    assert.equal(counts.asyncPipelines, 58, "initialization must be idempotent");
 
     const delta = (pageDelta: GPUBuffer) => ({ pageDelta,
       pageDeltaLayout: planFineLevelSetPageDeltaLayout(sourceA.plan.maximumResidentBricks),

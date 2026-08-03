@@ -79,7 +79,7 @@ test("Dawn atomically rolls back a downstream-rejected fine generation and accep
     topology.encodeFinalizePublication(broker, { redistance: redistanceControl });
     broker.copyBufferToBuffer(topology.control, 0, readback, 0, 36);
     broker.copyBufferToBuffer(target.worklist, 0, readback, 36, 8);
-    broker.copyBufferToBuffer(target.phi, 0, readback, 44, 4);
+    broker.copyBufferToBuffer(target.samples, 0, readback, 44, 4);
     const commands = broker.finish();
     device.queue.submit([commands]);
     await device.queue.onSubmittedWorkDone();

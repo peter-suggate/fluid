@@ -6,6 +6,7 @@ import {
   type GPULogicalActivityAdoptionContext,
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 export const FINE_LEVELSET_VOLUME_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_VOLUME_VALID = 0x8000_0000;
@@ -213,12 +214,12 @@ export class WebGPUFineLevelSetVolumeCorrection {
     cache(this.prepareFineDispatchPipeline, [[0, this.source.params], [2, this.source.worklist],
       [6, this.coarseParams], [12, this.reductionScratch], [14, this.fineDispatch]]);
     cache(this.finePartialPipeline, [[0, this.source.params], [1, this.source.metadata],
-      [2, this.source.worklist], [3, this.source.flags], [4, this.source.phi], [6, this.coarseParams],
+      [2, this.source.worklist], [3, this.source.samples], [6, this.coarseParams],
       [11, this.coarse.sampleDirectory], [12, this.reductionScratch], [13, this.coarse.publicationControl]]);
     cache(this.fineFinalizePipeline, [[0, this.source.params], [5, this.control],
       [6, this.coarseParams], [12, this.reductionScratch]]);
     cache(this.applyPipeline, [[0, this.source.params], [1, this.source.metadata],
-      [2, this.source.worklist], [3, this.source.flags], [4, this.source.phi], [5, this.control]]);
+      [2, this.source.worklist], [3, this.source.samples], [5, this.control]]);
     cache(this.correctedFinalizePipeline, [[0, this.source.params], [5, this.control],
       [6, this.coarseParams], [12, this.reductionScratch]]);
     cache(this.measuredFinalizePipeline, [[0, this.source.params], [5, this.control],
@@ -357,7 +358,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
     "Prepare active global fine volume dispatch");
     broker.fence("active fine volume dispatch published");
     runFine(this.finePartialPipeline, [[0, this.source.params], [1, this.source.metadata],
-      [2, this.source.worklist], [3, this.source.flags], [4, this.source.phi], [6, this.coarseParams],
+      [2, this.source.worklist], [3, this.source.samples], [6, this.coarseParams],
       [11, this.coarse.sampleDirectory],
       [12, this.reductionScratch], [13, this.coarse.publicationControl]],
     "Reduce resident fine overlap partials");
@@ -368,13 +369,13 @@ export class WebGPUFineLevelSetVolumeCorrection {
       return;
     }
     runFine(this.applyPipeline, [[0, this.source.params], [1, this.source.metadata], [2, this.source.worklist],
-      [3, this.source.flags], [4, this.source.phi], [5, this.control]],
+      [3, this.source.samples], [5, this.control]],
     "Apply bounded global fine normal correction");
     // The correction pass mutates the published field. Re-reduce that field
     // before publication so currentVolume describes the same phi consumed by
     // restriction, rendering, and the next transport step.
     runFine(this.finePartialPipeline, [[0, this.source.params], [1, this.source.metadata],
-      [2, this.source.worklist], [3, this.source.flags], [4, this.source.phi], [6, this.coarseParams],
+      [2, this.source.worklist], [3, this.source.samples], [6, this.coarseParams],
       [11, this.coarse.sampleDirectory], [12, this.reductionScratch],
       [13, this.coarse.publicationControl]],
     "Re-reduce corrected global fine volume");
@@ -385,10 +386,10 @@ export class WebGPUFineLevelSetVolumeCorrection {
     // half-fine-cell bound. Apply one residual bounded shift, matching the
     // convergence behavior used by the standalone conservation oracle.
     runFine(this.applyPipeline, [[0, this.source.params], [1, this.source.metadata], [2, this.source.worklist],
-      [3, this.source.flags], [4, this.source.phi], [5, this.control]],
+      [3, this.source.samples], [5, this.control]],
     "Apply residual bounded global fine normal correction");
     runFine(this.finePartialPipeline, [[0, this.source.params], [1, this.source.metadata],
-      [2, this.source.worklist], [3, this.source.flags], [4, this.source.phi], [6, this.coarseParams],
+      [2, this.source.worklist], [3, this.source.samples], [6, this.coarseParams],
       [11, this.coarse.sampleDirectory], [12, this.reductionScratch],
       [13, this.coarse.publicationControl]],
     "Measure twice-corrected global fine volume");
@@ -412,7 +413,8 @@ struct ReferenceDelta{volume:f32,p0:f32,p1:f32,p2:f32}
 struct Header{cell:u32,a:u32,b:u32,size:u32,x:f32,y:f32,z:u32,w:u32,g:vec4f}struct CoarsePhi{phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32}
 struct CoarseSample{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,physicalVolume:f32}struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,physicalCellSize:f32,entries:array<CoarseSample>}
 struct Control{flags:u32,initialized:u32,samples:u32,referenceVolume:f32,currentVolume:f32,interfaceArea:f32,correction:f32,corrected:u32,coarseVolume:f32,fineVolume:f32,replacedCoarseVolume:f32,coarseRows:u32,expectedAir:u32,generation:u32,lookupFailures:u32,staleOwners:u32}
-@group(0)@binding(0)var<uniform>p:FineParams;@group(0)@binding(1)var<storage,read>metadata:array<u32>;@group(0)@binding(2)var<storage,read>worklist:array<u32>;@group(0)@binding(3)var<storage,read>sampleFlags:array<u32>;@group(0)@binding(4)var<storage,read_write>phi:array<f32>;@group(0)@binding(5)var<storage,read_write>control:Control;
+@group(0)@binding(0)var<uniform>p:FineParams;@group(0)@binding(1)var<storage,read>metadata:array<u32>;@group(0)@binding(2)var<storage,read>worklist:array<u32>;@group(0)@binding(3)var<storage,read_write>samples:array<u32>;@group(0)@binding(5)var<storage,read_write>control:Control;
+${fineLevelSetPackedSampleWGSL("samples", true)}
 @group(0)@binding(16)var<uniform>referenceDelta:ReferenceDelta;
 @group(0)@binding(6)var<uniform>c:CoarseParams;@group(0)@binding(7)var<storage,read>headers:array<Header>;@group(0)@binding(8)var<storage,read>coarsePhi:array<CoarsePhi>;@group(0)@binding(9)var<storage,read>physicalVolumes:array<f32>;@group(0)@binding(10)var<storage,read>rowCountSource:array<u32>;@group(0)@binding(11)var<storage,read>coarseDirectory:CoarseDirectory;
 @group(0)@binding(12)var<storage,read_write>partials:array<u32>;
@@ -429,7 +431,7 @@ fn mortonPart(value:u32)->u32{var x=value&1023u;x=(x|(x<<16u))&0x030000ffu;x=(x|
 fn validDirectory()->bool{if(arrayLength(&coarsePublication)<12u){return false;}let generation=coarseDirectory.generation&0x3fffffffu;let fineGeneration=p.generation&0x3fffffffu;let priorFineGeneration=(fineGeneration+0x3fffffffu)&0x3fffffffu;return coarseDirectory.state==PUBLISHED&&coarsePublication[0]==0u&&coarsePublication[2]>0u&&coarsePublication[2]==coarseDirectory.rowCount&&coarseDirectory.rowCount<=arrayLength(&coarseDirectory.entries)&&coarseDirectory.rowCount<=c.rowCapacity&&coarsePublication[10]==coarseDirectory.generation&&coarsePublication[11]==PUBLISHED&&(generation==fineGeneration||generation==priorFineGeneration)&&c.rowCapacity==arrayLength(&coarseDirectory.entries)&&coarseDirectory.maximumLeafSize==c.maximumLeafSize&&all(coarseDirectory.dimensions==c.dimensions)&&finite(coarseDirectory.physicalCellSize)&&abs(coarseDirectory.physicalCellSize-c.physicalCellSize)<=1e-5*max(coarseDirectory.physicalCellSize,c.physicalCellSize);}
 fn find(cell:u32,size:u32)->vec2u{let count=min(coarseDirectory.rowCount,arrayLength(&coarseDirectory.entries));let wantedLevel=level(size);let wantedMorton=morton(cell);var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let entry=coarseDirectory.entries[middle];let entryMorton=morton(entry.cellPlusOne-1u);if(less(level(entry.size),entryMorton,wantedLevel,wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let entry=coarseDirectory.entries[low];if(entry.cellPlusOne==cell+1u&&entry.size==size){return vec2u(low,OWNER_FOUND);}}return vec2u(INVALID,OWNER_ABSENT);}
 fn owner(x:vec3f)->vec2u{if(!validDirectory()){return vec2u(INVALID,OWNER_MALFORMED);}let grid=x/c.physicalCellSize;if(any(grid<vec3f(0))||any(grid>=vec3f(c.dimensions))){return vec2u(INVALID,OWNER_OUTSIDE);}let q=vec3u(floor(grid));var size=1u;var unresolved=OWNER_ABSENT;loop{let o=(q/size)*size;let cell=o.x+c.dimensions.x*(o.y+c.dimensions.y*o.z);let found=find(cell,size);if(found.y==OWNER_FOUND){let entry=coarseDirectory.entries[found.x];if(entry.row>=coarsePublication[2]||(entry.flags&9u)!=9u||!finite(entry.phi)||!finite(entry.minimumPhi)||!finite(entry.maximumPhi)||entry.minimumPhi>entry.phi||entry.phi>entry.maximumPhi||!finite(entry.physicalVolume)||entry.physicalVolume<=0.0){return vec2u(INVALID,OWNER_MALFORMED);}return found;}if(found.y!=OWNER_ABSENT){unresolved=found.y;}if(size>=c.maximumLeafSize){break;}size*=2u;}return vec2u(INVALID,unresolved);}
-fn activeSample(flat:u32)->vec2u{let count=min(worklist[1],p.pageCapacity);if(flat>=count*p.samplesPerBrick){return vec2u(INVALID);}let w=flat/p.samplesPerBrick;let local=flat-w*p.samplesPerBrick;let id=worklist[7u+w];if(id>=p.pageCapacity||metadata[id*10u+2u]!=p.generation){return vec2u(INVALID);}return vec2u(id,local);}fn unpackBrick(key:u32)->vec3u{let xy=p.brickDimensions.x*p.brickDimensions.y;let z=key/xy;let r=key-z*xy;let y=r/p.brickDimensions.x;return vec3u(r-y*p.brickDimensions.x,y,z);}fn localCoord(local:u32)->vec3u{let r=p.brickResolution;let z=local/(r*r);let q=local-z*r*r;let y=q/r;return vec3u(q-y*r,y,z);}
+fn activeSample(flat:u32)->vec2u{let count=min(worklist[1],p.pageCapacity);if(flat>=count*p.samplesPerBrick){return vec2u(INVALID);}let w=flat/p.samplesPerBrick;let local=flat-w*p.samplesPerBrick;let id=worklist[7u+w];if(id>=p.pageCapacity||metadata[id*4u+2u]!=p.generation){return vec2u(INVALID);}return vec2u(id,local);}fn unpackBrick(key:u32)->vec3u{let xy=p.brickDimensions.x*p.brickDimensions.y;let z=key/xy;let r=key-z*xy;let y=r/p.brickDimensions.x;return vec3u(r-y*p.brickDimensions.x,y,z);}fn localCoord(local:u32)->vec3u{let r=p.brickResolution;let z=local/(r*r);let q=local-z*r*r;let y=q/r;return vec3u(q-y*r,y,z);}
 @compute @workgroup_size(1)fn resetVolumeControl(){let initialized=control.initialized;let reference=control.referenceVolume;control=Control(0u,initialized,0u,reference,0.,0.,0.,0u,0.,0.,0.,0u,0u,0u,0u,0u);}
 @compute @workgroup_size(1)fn addReferenceVolume(){if(control.initialized!=0u&&finite(referenceDelta.volume)&&referenceDelta.volume>0.){control.referenceVolume+=referenceDelta.volume;}}
 @compute @workgroup_size(256)fn prepareCoarseVolumeDispatch(@builtin(local_invocation_index)lid:u32){
@@ -450,12 +452,12 @@ fn reduceCoarsePartialHierarchy(lid:u32)->CoarseVolumeReduction{let range=balanc
  if(lid==0u){if(groups==0u){fineDispatch[0]=0u;fineDispatch[1]=1u;fineDispatch[2]=1u;}else{let x=min(groups,c.p2);fineDispatch[0]=x;fineDispatch[1]=(groups+x-1u)/x;fineDispatch[2]=1u;}fineDispatch[3]=samples;}}
 @compute @workgroup_size(64)fn reduceFineOverlapPartials(@builtin(local_invocation_id)l:vec3u,@builtin(workgroup_id)group:vec3u,@builtin(num_workgroups)n:vec3u){
  let groupFlat=fineLinearWorkgroup(group,n);let flat=groupFlat*64u+l.x;let h=p.fineCellWidth;let cellVolume=h*h*h;var fineVolume=0.;var replaced=0.;var area=0.;var samples=0u;var errors=0u;var expectedAir=0u;var lookupFailure=0u;var staleOwner=0u;let a=activeSample(flat);
- if(flat<min(worklist[1],p.pageCapacity)*p.samplesPerBrick){if(a.x==INVALID){errors|=ERROR_FINE;}else{let index=a.x*p.samplesPerBrick+a.y;if((sampleFlags[index]&VALID)!=0u){let value=phi[index];if(!finite(value)){errors|=ERROR_FINE;}else{let brick=unpackBrick(metadata[a.x*10u+1u]);let q=brick*p.brickResolution+localCoord(a.y);if(all(q<p.sampleDimensions)){let position=p.domainOrigin+(vec3f(q)+.5)*h;let ownership=owner(position);if(ownership.y==OWNER_ABSENT){expectedAir=select(0u,1u,value>=0.0);fineVolume=occupancy(value,h)*cellVolume;area=select(0.,h*h,abs(value)<=.5*h);samples=1u;}else if(ownership.y!=OWNER_FOUND){lookupFailure=1u;errors|=ERROR_OWNER;}else if(ownership.x>=arrayLength(&coarseDirectory.entries)){staleOwner=1u;errors|=ERROR_OWNER;}else{let entry=coarseDirectory.entries[ownership.x];let width=max(c.physicalCellSize*f32(entry.size),1e-9);fineVolume=occupancy(value,h)*cellVolume;replaced=occupancy(entry.phi,width)*cellVolume;area=select(0.,h*h,abs(value)<=.5*h);samples=1u;}}}}}}
+ if(flat<min(worklist[1],p.pageCapacity)*p.samplesPerBrick){if(a.x==INVALID){errors|=ERROR_FINE;}else{let index=a.x*p.samplesPerBrick+a.y;if((finePackedFlags(index)&VALID)!=0u){let value=finePackedPhi(index);if(!finite(value)){errors|=ERROR_FINE;}else{let brick=unpackBrick(metadata[a.x*4u+1u]);let q=brick*p.brickResolution+localCoord(a.y);if(all(q<p.sampleDimensions)){let position=p.domainOrigin+(vec3f(q)+.5)*h;let ownership=owner(position);if(ownership.y==OWNER_ABSENT){expectedAir=select(0u,1u,value>=0.0);fineVolume=occupancy(value,h)*cellVolume;area=select(0.,h*h,abs(value)<=.5*h);samples=1u;}else if(ownership.y!=OWNER_FOUND){lookupFailure=1u;errors|=ERROR_OWNER;}else if(ownership.x>=arrayLength(&coarseDirectory.entries)){staleOwner=1u;errors|=ERROR_OWNER;}else{let entry=coarseDirectory.entries[ownership.x];let width=max(c.physicalCellSize*f32(entry.size),1e-9);fineVolume=occupancy(value,h)*cellVolume;replaced=occupancy(entry.phi,width)*cellVolume;area=select(0.,h*h,abs(value)<=.5*h);samples=1u;}}}}}}
  sum0[l.x]=fineVolume;sum1[l.x]=replaced;sum2[l.x]=area;words0[l.x]=samples;words1[l.x]=errors;words2[l.x]=expectedAir;words3[l.x]=lookupFailure;words4[l.x]=staleOwner;workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l.x<stride){sum0[l.x]+=sum0[l.x+stride];sum1[l.x]+=sum1[l.x+stride];sum2[l.x]+=sum2[l.x+stride];words0[l.x]+=words0[l.x+stride];words1[l.x]|=words1[l.x+stride];words2[l.x]+=words2[l.x+stride];words3[l.x]+=words3[l.x+stride];words4[l.x]+=words4[l.x+stride];}workgroupBarrier();}
  if(l.x==0u){let base=groupFlat*8u;partials[base]=bitcast<u32>(sum0[0]);partials[base+1u]=bitcast<u32>(sum1[0]);partials[base+2u]=bitcast<u32>(sum2[0]);partials[base+3u]=words0[0];partials[base+4u]=words1[0];partials[base+5u]=words2[0];partials[base+6u]=words3[0];partials[base+7u]=words4[0];}}
 fn reduceFinePartialHierarchy(lid:u32)->FineVolumeReduction{let range=balancedReductionRange(c.p1,lid);var fineVolume=0.;var replacedVolume=0.;var interfaceArea=0.;var samples=0u;var errors=0u;var expectedAir=0u;var lookupFailures=0u;var staleOwners=0u;for(var group=range.x;group<range.y;group+=1u){let base=group*8u;fineVolume+=bitcast<f32>(partials[base]);replacedVolume+=bitcast<f32>(partials[base+1u]);interfaceArea+=bitcast<f32>(partials[base+2u]);samples+=partials[base+3u];errors|=partials[base+4u];expectedAir+=partials[base+5u];lookupFailures+=partials[base+6u];staleOwners+=partials[base+7u];}sum0[lid]=fineVolume;sum1[lid]=replacedVolume;sum2[lid]=interfaceArea;words0[lid]=samples;words1[lid]=errors;words2[lid]=expectedAir;words3[lid]=lookupFailures;words4[lid]=staleOwners;workgroupBarrier();for(var stride=128u;stride>0u;stride/=2u){if(lid<stride){sum0[lid]+=sum0[lid+stride];sum1[lid]+=sum1[lid+stride];sum2[lid]+=sum2[lid+stride];words0[lid]+=words0[lid+stride];words1[lid]|=words1[lid+stride];words2[lid]+=words2[lid+stride];words3[lid]+=words3[lid+stride];words4[lid]+=words4[lid+stride];}workgroupBarrier();}return FineVolumeReduction(sum0[0],sum1[0],sum2[0],words0[0],words1[0],words2[0],words3[0],words4[0]);}
 @compute @workgroup_size(256)fn finalizeFineVolume(@builtin(local_invocation_index)lid:u32){let result=reduceFinePartialHierarchy(lid);if(lid!=0u){return;}control.fineVolume=result.fineVolume;control.replacedCoarseVolume=result.replacedVolume;control.interfaceArea=result.interfaceArea;control.samples=result.samples;control.flags|=result.errors;control.expectedAir=result.expectedAir;control.lookupFailures=result.lookupFailures;control.staleOwners=result.staleOwners;control.currentVolume=control.coarseVolume+result.fineVolume-result.replacedVolume;control.generation=p.generation;if(!finite(control.coarseVolume)||!finite(result.fineVolume)||!finite(result.replacedVolume)||!finite(control.currentVolume)||!finite(result.interfaceArea)){control.flags|=ERROR_FINE;}if(result.samples>0u&&(result.fineVolume<=0.0||result.interfaceArea<=0.0||control.currentVolume<=0.0)){control.flags|=ERROR_FINE;}if(control.initialized==0u&&control.flags==0u&&control.coarseRows>0u){control.referenceVolume=control.currentVolume;control.initialized=1u;}if(control.initialized!=0u&&control.flags==0u&&result.interfaceArea>0.){control.correction=clamp((control.currentVolume-control.referenceVolume)/result.interfaceArea,-.5*p.fineCellWidth,.5*p.fineCellWidth);}if(control.initialized!=0u&&control.flags==0u){control.flags=PUBLISHED;}}
-@compute @workgroup_size(64)fn applyFineVolumeCorrection(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){if(control.flags!=PUBLISHED){return;}let flat=fineLinearWorkgroup(w,n)*64u+lid;if(flat==0u){control.corrected=1u;}let a=activeSample(flat);if(a.x==INVALID){return;}let index=a.x*p.samplesPerBrick+a.y;if((sampleFlags[index]&VALID)==0u){return;}phi[index]+=control.correction;}
+@compute @workgroup_size(64)fn applyFineVolumeCorrection(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){if(control.flags!=PUBLISHED){return;}let flat=fineLinearWorkgroup(w,n)*64u+lid;if(flat==0u){control.corrected=1u;}let a=activeSample(flat);if(a.x==INVALID){return;}let index=a.x*p.samplesPerBrick+a.y;if((finePackedFlags(index)&VALID)==0u){return;}fineWritePackedPhi(index,finePackedPhi(index)+control.correction);}
 fn finalizeCorrectedMeasurement(updateCorrection:bool,lid:u32){let result=reduceFinePartialHierarchy(lid);if(lid!=0u||control.flags!=PUBLISHED){return;}control.fineVolume=result.fineVolume;control.replacedCoarseVolume=result.replacedVolume;control.interfaceArea=result.interfaceArea;control.samples=result.samples;control.expectedAir=result.expectedAir;control.lookupFailures=result.lookupFailures;control.staleOwners=result.staleOwners;control.currentVolume=control.coarseVolume+result.fineVolume-result.replacedVolume;control.generation=p.generation;if(result.errors!=0u||result.lookupFailures!=0u||result.staleOwners!=0u||!finite(result.fineVolume)||!finite(result.replacedVolume)||!finite(result.interfaceArea)||!finite(control.currentVolume)||control.currentVolume<=0.0){control.flags=result.errors|ERROR_FINE;}else{if(updateCorrection&&result.interfaceArea>0.){control.correction=clamp((control.currentVolume-control.referenceVolume)/result.interfaceArea,-.5*p.fineCellWidth,.5*p.fineCellWidth);}control.flags=PUBLISHED;control.corrected=1u;}}
 @compute @workgroup_size(256)fn finalizeCorrectedFineVolume(@builtin(local_invocation_index)lid:u32){finalizeCorrectedMeasurement(true,lid);}
 @compute @workgroup_size(256)fn finalizeMeasuredFineVolume(@builtin(local_invocation_index)lid:u32){finalizeCorrectedMeasurement(false,lid);}

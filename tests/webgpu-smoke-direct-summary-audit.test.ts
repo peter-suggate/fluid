@@ -37,8 +37,10 @@ test("compact field QA reads and validates the complete resident worklist ABI", 
   assert.doesNotMatch(readback, /\(5 \+ source\.plan\.maximumResidentBricks\) \* 4/,
     "QA must not truncate the worklist to the retired five-word prefix");
   assert.match(compactField,
-    /const expectedWorklistWords = 7 \+ plan\.maximumResidentBricks \+ plan\.logicalBrickCount[\s\S]*plan\.includeHalo27 \? 27 \* plan\.maximumResidentBricks : 0/,
+    /const expectedWorklistWords = 7 \+ plan\.maximumResidentBricks \+ plan\.logicalBrickCount/,
     "the decoder must continue to require the exact production worklist layout");
+  assert.doesNotMatch(compactField, /includeHalo27|27 \* plan\.maximumResidentBricks/,
+    "the direct logical directory must not retain a per-page neighbour halo");
   assert.match(compactField, /if \(worklist\.length !== expectedWorklistWords\) throw new Error/,
     "a truncated or oversized QA snapshot must continue to fail closed");
 });

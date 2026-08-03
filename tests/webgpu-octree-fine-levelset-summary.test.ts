@@ -45,7 +45,8 @@ function reachableSummaryBindings(entryPoint: string): number[] {
       if (value === "}") { scopes.pop(); declaresLocal = false; continue; }
       if (value === "let" || value === "var" || value === "const") { declaresLocal = true; continue; }
       if (declaresLocal) { scopes.at(-1)!.add(value); declaresLocal = false; continue; }
-      const binding = globals.get(value);
+      const binding = token.index !== undefined && body![token.index - 1] === "."
+        ? undefined : globals.get(value);
       if (binding !== undefined && !scopes.some((scope) => scope.has(value))) bindings.add(binding);
     }
     for (const callee of bodies.keys()) {
@@ -155,7 +156,7 @@ test("direct summary lookup is differential-exact against a key map and fails cl
   assert.equal(fineLevelSetSummaryDirectEntryBase(words, keys[0]!), undefined);
 });
 
-test("every fine-summary pipeline binds exactly its transitively reachable resources", () => {
+test("every fine-summary pipeline binds exactly its transitively reachable resources", async () => {
   const observed = new Map<string, number[]>();
   const buffer = { size: 4096, destroy() {} } as unknown as GPUBuffer;
   const device = {
@@ -164,6 +165,10 @@ test("every fine-summary pipeline binds exactly its transitively reachable resou
     createBuffer: () => buffer,
     createShaderModule: () => ({}),
     createComputePipeline: ({ compute }: GPUComputePipelineDescriptor) => ({
+      entryPoint: compute.entryPoint,
+      getBindGroupLayout() { return { entryPoint: this.entryPoint }; },
+    }),
+    createComputePipelineAsync: async ({ compute }: GPUComputePipelineDescriptor) => ({
       entryPoint: compute.entryPoint,
       getBindGroupLayout() { return { entryPoint: this.entryPoint }; },
     }),
@@ -182,7 +187,7 @@ test("every fine-summary pipeline binds exactly its transitively reachable resou
     finestCellWidth: 1, fineFactor: 4, brickResolution: 4, maximumResidentBricks: 1 });
   const source = {
     plan, generation: 1, generationSlot: 0, params: buffer, metadata: buffer, worklist: buffer,
-    flags: buffer, phi: buffer, workA: buffer, workB: buffer, rollbackPhi: buffer,
+    samples: buffer, workA: buffer, workB: buffer, rollbackSamples: buffer,
   } as WebGPUFineLevelSetBrickSource;
   const pass = {
     setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, dispatchWorkgroupsIndirect() {}, end() {},
@@ -193,6 +198,7 @@ test("every fine-summary pipeline binds exactly its transitively reachable resou
     value: { STORAGE: 1, COPY_SRC: 2, COPY_DST: 4, UNIFORM: 8, INDIRECT: 16 } });
   try {
     const summaries = new WebGPUFineLevelSetSummaries(device, plan, 1);
+    for (const task of summaries.initializationTasks()) await task.run(new AbortController().signal);
     summaries.encode(new PassBroker(encoder), source,
       { buffer, layout: { changedKeysOffsetWords: 16 } }, {
       directory: buffer, control: buffer, delta: buffer, deltaHeaderWords: 16, deltaRecordWords: 4,
@@ -240,7 +246,7 @@ test("Dawn publishes factor-4/factor-8 sparse fine summaries across moving inter
       oracle.publishInterfaceAndRing(keys, ([px]) => px - plane);
       const generation = oracle.exportGPUGeneration();
       const logicalKeys = Array.from(generation.worklistWords.slice(7, 7 + generation.activeCount),
-        (id) => generation.metadataWords[id * 10 + 1]);
+        (id) => generation.metadataWords[id * 4 + 1]);
       const source = owner.uploadGeneration(generation);
       if (iteration > 0) {
         const changed = [...new Set([...previousLogicalKeys, ...logicalKeys])].sort((a, b) => a - b);
@@ -296,7 +302,9 @@ test("Dawn publishes exact factor-4/factor-8 fine cell-centre phase outside the 
     // CPT/transport band but clears its VALID membership bit. Centre phase
     // must remain available to dynamic pressure topology even when every
     // sample in this minimal fixture is outside that band.
-    generation.flags.fill(0);
+    for (let index = 0; index < generation.samples.length; index += 1) {
+      generation.samples[index] &= 0xffff;
+    }
     const source = owner.uploadGeneration(generation);
     const authority = device.createBuffer({ size: 80,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });

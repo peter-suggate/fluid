@@ -4777,8 +4777,7 @@ export class WebGPUOctreeProjection {
       params: { buffer: fine.params },
       metadata: { buffer: fine.metadata },
       worklist: { buffer: fine.worklist },
-      sampleFlags: { buffer: fine.flags },
-      phi: { buffer: fine.phi },
+      samples: { buffer: fine.samples },
       topologyControl: { buffer: fineTopology.control },
       redistanceControl: { buffer: fineRedistance.control },
       seeds: { buffer: fine.workA },
@@ -5314,10 +5313,9 @@ export class WebGPUOctreeProjection {
       plan: fine.plan,
       metadata: fine.metadata,
       worklist: fine.worklist,
-      flags: fine.flags,
-      phi: fine.phi,
+      samples: fine.samples,
       workA: fine.workA,
-      rollbackPhi: fine.rollbackPhi,
+      rollbackSamples: fine.rollbackSamples,
       pageCapacity: fine.plan.maximumResidentBricks,
       samplesPerBrick: fine.plan.samplesPerBrick,
       brickResolution: fine.plan.brickResolution,
@@ -5980,11 +5978,9 @@ export class WebGPUOctreeProjection {
         const { plan, state, topology } = hierarchy;
         const total = plan.totalLevelSlots;
         const rowMapBase = 16;
-        const neighbourBase = topology.length - 18 * total;
+        const neighbourBase = topology.length - 6 * total;
         const directions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
-          [0, 0, 1], [0, 0, -1], [1, 1, 0], [1, -1, 0], [-1, 1, 0],
-          [-1, -1, 0], [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1],
-          [0, 1, 1], [0, 1, -1], [0, -1, 1], [0, -1, -1]] as const;
+          [0, 0, 1], [0, 0, -1]] as const;
         const directionIndex = new Map(directions.map((direction, index) =>
           [direction.join(","), index]));
         const directionTransforms = [
@@ -6028,14 +6024,6 @@ export class WebGPUOctreeProjection {
               const targetChannel = directionIndex.get(mapped.join(","));
               if (targetChannel === undefined) continue;
               m1Compared += 1;
-              const sourceBits = stateAt(3 + channel, level, slot);
-              const targetBits = stateAt(3 + targetChannel, level, otherSlot);
-              if (sourceBits !== targetBits) {
-                m1Mismatches += 1;
-                m1First ??= { kind: "coefficient", row, other, level, channel,
-                  targetChannel, sourceBits, targetBits };
-              }
-              if (sourceBits === 0) continue;
               const sourceNeighbour = topology[neighbourBase + channel * total
                 + plan.levelOffsets[level]! + slot]!;
               const targetNeighbour = topology[neighbourBase + targetChannel * total

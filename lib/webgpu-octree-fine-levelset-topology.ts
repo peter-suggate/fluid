@@ -6,6 +6,7 @@ import type { FineLevelSetTransportTopologyDelta } from "./webgpu-octree-fine-le
 import { octreeAlgorithmDiagnosticsEnabled } from "./octree-algorithm-diagnostics";
 import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 import type { GPUInitializationTask } from "./gpu-initialization";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 export const FINE_LEVELSET_TOPOLOGY_ERROR = Object.freeze({
   capacity: 1 << 0,
@@ -971,16 +972,16 @@ export class WebGPUFineLevelSetTopology {
     if (next.generation === current.generation) {
       throw new RangeError("Fine topology generations must be distinct");
     }
-    if (current.flags === next.flags || current.phi === next.phi
+    if (current.samples === next.samples
       || current.workA === next.workA || current.workB === next.workB) {
       throw new RangeError("Fine topology generations require distinct compact A/B payload arenas");
     }
-    if (current.rollbackPhi === next.rollbackPhi
-      || current.rollbackPhi === current.phi || current.rollbackPhi === current.flags
-      || current.rollbackPhi === current.workA || current.rollbackPhi === current.workB
-      || next.rollbackPhi === next.phi || next.rollbackPhi === next.flags
-      || next.rollbackPhi === next.workA || next.rollbackPhi === next.workB) {
-      throw new RangeError("Fine topology rollback phi requires dedicated per-generation A/B buffers");
+    if (current.rollbackSamples === next.rollbackSamples
+      || current.rollbackSamples === current.samples
+      || current.rollbackSamples === current.workA || current.rollbackSamples === current.workB
+      || next.rollbackSamples === next.samples
+      || next.rollbackSamples === next.workA || next.rollbackSamples === next.workB) {
+      throw new RangeError("Fine topology rollback samples require dedicated per-generation A/B buffers");
     }
     if (!/fn\s+sampleCoarseOctreePhi\s*\(/.test(coarsePhiWGSL)) {
       throw new RangeError("Fine topology requires sampleCoarseOctreePhi");
@@ -1290,8 +1291,7 @@ export class WebGPUFineLevelSetTopology {
     ];
     const discoverEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: resource(this.params) }, { binding: 1, resource: resource(this.current.metadata) },
-      { binding: 2, resource: resource(this.current.worklist) }, { binding: 3, resource: resource(this.current.flags) },
-      { binding: 4, resource: resource(this.current.phi) },
+      { binding: 2, resource: resource(this.current.worklist) }, { binding: 3, resource: resource(this.current.samples) },
       { binding: 6, resource: resource(this.next.worklist) }, { binding: 7, resource: resource(this.control) },
       { binding: 8, resource: resource(seedSource?.buffer ?? this.emptySeeds) },
       { binding: 14, resource: resource(this.current.worklist) },
@@ -1309,8 +1309,8 @@ export class WebGPUFineLevelSetTopology {
     ];
     const publishEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: resource(this.params) }, { binding: 3, resource: resource(this.next.metadata) },
-      { binding: 4, resource: resource(this.next.worklist) }, { binding: 5, resource: resource(this.next.flags) },
-      { binding: 6, resource: resource(this.next.phi) }, { binding: 7, resource: resource(this.control) },
+      { binding: 4, resource: resource(this.next.worklist) }, { binding: 5, resource: resource(this.next.samples) },
+      { binding: 7, resource: resource(this.control) },
       { binding: 8, resource: resource(seedSource?.buffer ?? this.emptySeeds) },
       { binding: 10, resource: resource(this.transportedPhiSnapshot) },
       { binding: 14, resource: resource(this.current.worklist) },
@@ -1326,14 +1326,14 @@ export class WebGPUFineLevelSetTopology {
     ];
     const deltaEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: resource(this.params) }, { binding: 3, resource: resource(this.next.metadata) },
-      { binding: 4, resource: resource(this.next.worklist) }, { binding: 6, resource: resource(this.next.phi) },
+      { binding: 4, resource: resource(this.next.worklist) },
       { binding: 7, resource: resource(this.control) },
       { binding: 10, resource: resource(this.transportedPhiSnapshot) },
       { binding: 14, resource: resource(this.current.worklist) },
       { binding: 15, resource: resource(this.pageDelta) },
       { binding: 16, resource: resource(this.current.metadata) },
-      { binding: 17, resource: resource(this.next.rollbackPhi) },
-      { binding: 32, resource: resource(this.current.rollbackPhi) },
+      { binding: 17, resource: resource(this.next.rollbackSamples) },
+      { binding: 32, resource: resource(this.current.rollbackSamples) },
       { binding: 18, resource: resource(this.desiredCandidates) },
       { binding: 19, resource: resource(this.sparseCandidates) },
       { binding: 20, resource: resource(this.desiredScan) },
@@ -1403,7 +1403,7 @@ export class WebGPUFineLevelSetTopology {
       run(this.clearTopologyErrorsPipeline, discoverEntries, "Clear cold global fine topology seed errors",
         Math.ceil(plan.maximumResidentBricks / 64), [0, 21]);
       run(this.discoverPipeline, discoverEntries, "Discover cold global fine interface bricks",
-        Math.ceil(plan.maximumResidentBricks / 64), [0, 1, 2, 3, 4, 18, 21]);
+        Math.ceil(plan.maximumResidentBricks / 64), [0, 1, 2, 3, 18, 21]);
       run(this.externalSeedPipeline, discoverEntries, "Insert cold global fine seed bricks",
         Math.ceil(plan.maximumResidentBricks / 64), [0, 8, 9, 14, 18, 21]);
       runIdentity(this.reduceTopologyErrorRecordsPipeline, discoverEntries,
@@ -1576,25 +1576,22 @@ export class WebGPUFineLevelSetTopology {
       { binding: 0, resource: resource(this.params) },
       { binding: 3, resource: resource(this.next.metadata) },
       { binding: 4, resource: resource(this.next.worklist) },
-      { binding: 5, resource: resource(this.next.flags) },
-      { binding: 6, resource: resource(this.next.phi) },
+      { binding: 5, resource: resource(this.next.samples) },
       { binding: 7, resource: resource(this.control) },
       { binding: 8, resource: resource(seedSource?.buffer ?? this.emptySeeds) },
       { binding: 10, resource: resource(this.transportedPhiSnapshot) },
       { binding: 15, resource: resource(this.pageDelta) },
       { binding: 16, resource: resource(this.current.metadata) },
-      { binding: 17, resource: resource(this.current.rollbackPhi) },
+      { binding: 17, resource: resource(this.current.rollbackSamples) },
       { binding: 14, resource: resource(this.current.worklist) },
       { binding: 18, resource: resource(this.desiredCandidates) },
       { binding: 20, resource: resource(this.desiredScan) },
       { binding: 21, resource: resource(this.topologyErrors) },
       { binding: 22, resource: resource(this.dispatchMeta) },
-      { binding: 24, resource: resource(this.current.flags) },
-      { binding: 25, resource: resource(this.current.phi) },
+      { binding: 24, resource: resource(this.current.samples) },
       { binding: 26, resource: resource(this.current.workA) },
       { binding: 27, resource: resource(this.current.workB) },
-      { binding: 28, resource: resource(this.next.flags) },
-      { binding: 29, resource: resource(this.next.phi) },
+      { binding: 28, resource: resource(this.next.samples) },
       { binding: 30, resource: resource(this.next.workA) },
       { binding: 31, resource: resource(this.next.workB) },
       ...extraPublishEntries,
@@ -1627,14 +1624,13 @@ export class WebGPUFineLevelSetTopology {
         { binding: 0, resource: resource(this.params) },
         { binding: 3, resource: resource(this.next.metadata) },
         { binding: 4, resource: resource(this.next.worklist) },
-        { binding: 5, resource: resource(this.next.flags) },
-        { binding: 6, resource: resource(this.next.phi) },
+        { binding: 5, resource: resource(this.next.samples) },
         { binding: 7, resource: resource(this.control) },
         { binding: 14, resource: resource(this.current.worklist) },
         { binding: 15, resource: resource(this.pageDelta) },
         { binding: 16, resource: resource(this.current.metadata) },
-        { binding: 17, resource: resource(this.next.rollbackPhi) },
-        { binding: 32, resource: resource(this.current.rollbackPhi) },
+        { binding: 17, resource: resource(this.next.rollbackSamples) },
+        { binding: 32, resource: resource(this.current.rollbackSamples) },
       ], "Settle immediate global fine publication",
       this.settlementDispatch, 0, [0, 3, 4, 5, 6, 7, 14, 15, 16, 17, 32]);
       runIndirect(this.settleWorkPayloadPipeline, [
@@ -1644,9 +1640,9 @@ export class WebGPUFineLevelSetTopology {
         { binding: 7, resource: resource(this.control) },
         { binding: 14, resource: resource(this.current.worklist) },
         { binding: 16, resource: resource(this.current.metadata) },
-        { binding: 24, resource: resource(this.current.flags) },
+        { binding: 24, resource: resource(this.current.samples) },
         { binding: 26, resource: resource(this.current.workA) },
-        { binding: 28, resource: resource(this.next.flags) },
+        { binding: 28, resource: resource(this.next.samples) },
         { binding: 30, resource: resource(this.next.workA) },
       ], "Settle immediate rejected fine work payload",
       this.settlementDispatch, 0, [0, 3, 4, 7, 14, 16, 24, 26, 28, 30]);
@@ -1683,14 +1679,13 @@ export class WebGPUFineLevelSetTopology {
       { binding: 0, resource: resource(this.params) },
         { binding: 3, resource: resource(this.next.metadata) },
         { binding: 4, resource: resource(this.next.worklist) },
-        { binding: 5, resource: resource(this.next.flags) },
-        { binding: 6, resource: resource(this.next.phi) },
+        { binding: 5, resource: resource(this.next.samples) },
         { binding: 7, resource: resource(this.control) },
         { binding: 14, resource: resource(this.current.worklist) },
         { binding: 15, resource: resource(this.pageDelta) },
         { binding: 16, resource: resource(this.current.metadata) },
-        { binding: 17, resource: resource(this.next.rollbackPhi) },
-        { binding: 32, resource: resource(this.current.rollbackPhi) },
+        { binding: 17, resource: resource(this.next.rollbackSamples) },
+        { binding: 32, resource: resource(this.current.rollbackSamples) },
       ]));
     settlePass.dispatchWorkgroupsIndirect(this.settlementDispatch, 0);
     const settleWorkPass = broker.compute({ label: "Settle deferred rejected fine work payload" });
@@ -1702,9 +1697,9 @@ export class WebGPUFineLevelSetTopology {
         { binding: 7, resource: resource(this.control) },
         { binding: 14, resource: resource(this.current.worklist) },
         { binding: 16, resource: resource(this.current.metadata) },
-        { binding: 24, resource: resource(this.current.flags) },
+        { binding: 24, resource: resource(this.current.samples) },
         { binding: 26, resource: resource(this.current.workA) },
-        { binding: 28, resource: resource(this.next.flags) },
+        { binding: 28, resource: resource(this.next.samples) },
         { binding: 30, resource: resource(this.next.workA) },
       ]));
     settleWorkPass.dispatchWorkgroupsIndirect(this.settlementDispatch, 0);
@@ -1774,12 +1769,10 @@ struct Params { brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u
 		@group(0) @binding(21) var<storage,read_write> topologyErrors:array<atomic<u32>>;
 		@group(0) @binding(22) var<storage,read_write> indirectDispatch:array<u32>;
 		@group(0) @binding(23) var<storage,read> transportDelta:array<u32>;
-@group(0) @binding(24) var<storage,read> currentFlags:array<u32>;
-@group(0) @binding(25) var<storage,read> currentPhi:array<u32>;
+@group(0) @binding(24) var<storage,read> currentSamples:array<u32>;
 @group(0) @binding(26) var<storage,read> currentWorkA:array<u32>;
 @group(0) @binding(27) var<storage,read> currentWorkB:array<u32>;
-@group(0) @binding(28) var<storage,read_write> nextFlags:array<u32>;
-@group(0) @binding(29) var<storage,read_write> nextPhi:array<u32>;
+@group(0) @binding(28) var<storage,read_write> nextSamples:array<u32>;
 @group(0) @binding(30) var<storage,read_write> nextWorkA:array<u32>;
 @group(0) @binding(31) var<storage,read_write> nextWorkB:array<u32>;
 @group(0) @binding(32) var<storage,read> currentCommittedPhi:array<u32>;
@@ -1789,6 +1782,12 @@ ${fineLevelSetLinearWorkgroupWGSL}
 // The compact coarse sampler uses max-finite as an explicit invalid sentinel;
 // strict comparison rejects it without asking Dawn to constant-fold a NaN.
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
+${fineLevelSetPackedSampleWGSL("sourceC", true, "source")}
+${fineLevelSetPackedSampleWGSL("targetA", true, "target")}
+${fineLevelSetPackedSampleWGSL("currentSamples", false, "current")}
+${fineLevelSetPackedSampleWGSL("nextSamples", true, "next")}
+${fineLevelSetPackedSampleWGSL("committedPhi", true, "rollback")}
+${fineLevelSetPackedSampleWGSL("currentCommittedPhi", false, "currentRollback")}
 fn packBrick(coord:vec3u)->u32{return coord.x+params.brickDimensions.x*(coord.y+params.brickDimensions.y*coord.z);}
 fn unpackBrick(key:u32)->vec3u{let xy=params.brickDimensions.x*params.brickDimensions.y;let z=key/xy;let rem=key-z*xy;let y=rem/params.brickDimensions.x;return vec3u(rem-y*params.brickDimensions.x,y,z);}
 fn inflowLatticePosition()->vec3f{let extent=vec3f(params.sampleDimensions)*params.fineCellWidth;return params.inflowPositionRadius.xyz+vec3f(.5*extent.x,0.,.5*extent.z);}
@@ -1821,19 +1820,21 @@ fn applyInflowPhi(value:f32,position:vec3f)->f32{
 }
 fn localCoord(local:u32)->vec3u{let r=params.brickResolution;let z=local/(r*r);let rem=local-z*r*r;let y=rem/r;return vec3u(rem-y*r,y,z);}
 fn localIndex(coord:vec3u)->u32{return coord.x+params.brickResolution*(coord.y+params.brickResolution*coord.z);}
-fn currentNeighbor(id:u32,local:u32,direction:u32)->u32{var coord=localCoord(local);var nextId=id;let r=params.brickResolution;
- if(direction==0u){if(coord.x>0u){coord.x-=1u;}else{nextId=sourceA[id*10u+4u];coord.x=r-1u;}}
- else if(direction==1u){if(coord.x+1u<r){coord.x+=1u;}else{nextId=sourceA[id*10u+5u];coord.x=0u;}}
- else if(direction==2u){if(coord.y>0u){coord.y-=1u;}else{nextId=sourceA[id*10u+6u];coord.y=r-1u;}}
- else if(direction==3u){if(coord.y+1u<r){coord.y+=1u;}else{nextId=sourceA[id*10u+7u];coord.y=0u;}}
- else if(direction==4u){if(coord.z>0u){coord.z-=1u;}else{nextId=sourceA[id*10u+8u];coord.z=r-1u;}}
- else{if(coord.z+1u<r){coord.z+=1u;}else{nextId=sourceA[id*10u+9u];coord.z=0u;}}
- if(nextId==INVALID||nextId>=params.pageCapacity||sourceA[nextId*10u+2u]!=params.currentGeneration){return INVALID;}
- return nextId*params.samplesPerBrick+localIndex(coord);}
+fn sourceLookup(key:u32)->u32{let logicalCount=params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;
+ if(key>=logicalCount||arrayLength(&sourceB)<7u+params.pageCapacity+logicalCount){return INVALID;}
+ let id=sourceB[7u+params.pageCapacity+key];if(id>=params.pageCapacity){return INVALID;}
+ let base=id*4u;return select(INVALID,id,sourceA[base]==id&&sourceA[base+1u]==key
+  &&sourceA[base+2u]==params.currentGeneration);}
+fn currentNeighbor(id:u32,local:u32,direction:u32)->u32{
+ let brick=unpackBrick(sourceA[id*4u+1u]);var q=vec3i(brick*params.brickResolution+localCoord(local));
+ let axis=direction/2u;q[axis]+=select(-1,1,(direction&1u)!=0u);
+ if(any(q<vec3i(0))||any(q>=vec3i(params.sampleDimensions))){return INVALID;}
+ let uq=vec3u(q);let nextId=sourceLookup(packBrick(uq/params.brickResolution));
+ if(nextId==INVALID){return INVALID;}return nextId*params.samplesPerBrick+localIndex(uq%params.brickResolution);}
 fn currentLookup(key:u32)->u32{let logicalCount=params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;
  if(key>=logicalCount||arrayLength(&currentWorklist)<7u+params.pageCapacity+logicalCount){return INVALID;}
  let id=currentWorklist[7u+params.pageCapacity+key];if(id>=params.pageCapacity){return INVALID;}
- let base=id*10u;return select(INVALID,id,currentMetadata[base]==id&&currentMetadata[base+1u]==key
+ let base=id*4u;return select(INVALID,id,currentMetadata[base]==id&&currentMetadata[base+1u]==key
   &&currentMetadata[base+2u]==params.currentGeneration);}
 fn externalSeedTaggedValue(key:u32)->u32{if(arrayLength(&externalSeeds)<4u){return INVALID;}let count=min(externalSeeds[0],params.pageCapacity);var low=0u;var high=count;while(low<high){let mid=low+(high-low)/2u;let stored=externalSeeds[4u+mid];if(stored<key){low=mid+1u;}else{high=mid;}}if(low<count&&externalSeeds[4u+low]==key){return externalSeeds[4u+params.pageCapacity+low];}return INVALID;}
 fn currentFinePublished()->bool{return arrayLength(&currentWorklist)>=7u&&currentWorklist[0]==params.currentGeneration
@@ -1890,7 +1891,7 @@ fn closedVirtualNeighbor(q:vec3u,direction:u32)->bool{
   ||(direction==2u&&q.y==0u)||(direction==3u&&q.y+1u==params.sampleDimensions.y&&params.boundary.x==0u)
   ||(direction==4u&&q.z==0u)||(direction==5u&&q.z+1u==params.sampleDimensions.z);
 }
-@compute @workgroup_size(64) fn discoverInterfaceBricks(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work>=params.pageCapacity){return;}desiredCandidates[work]=INVALID;let activeCount=min(sourceB[1],params.pageCapacity);if(work>=activeCount){return;}let id=sourceB[7u+work];if(id>=params.pageCapacity||sourceA[id*10u+2u]!=params.currentGeneration){atomicOr(&topologyErrors[work],MALFORMED);return;}let brick=unpackBrick(sourceA[id*10u+1u]);var interfaceBrick=false;var malformed=false;for(var sample=0u;sample<params.samplesPerBrick&&!interfaceBrick;sample+=1u){let index=id*params.samplesPerBrick+sample;if((sourceC[index]&VALID)==0u){continue;}let center=bitcast<f32>(sourceD[index]);if(!finite(center)){malformed=true;continue;}let q=brick*params.brickResolution+localCoord(sample);for(var direction=0u;direction<6u;direction+=1u){let neighbor=currentNeighbor(id,sample,direction);var other=3.402823e38;if(neighbor!=INVALID&&(sourceC[neighbor]&VALID)!=0u){other=bitcast<f32>(sourceD[neighbor]);}else if(closedVirtualNeighbor(q,direction)){other=center+params.fineCellWidth;}if(finite(other)&&(other<0.0)!=(center<0.0)){interfaceBrick=true;break;}}}desiredCandidates[work]=select(INVALID,sourceA[id*10u+1u],interfaceBrick);if(malformed){desiredCandidates[work]=INVALID;atomicOr(&topologyErrors[work],MALFORMED);}}
+@compute @workgroup_size(64) fn discoverInterfaceBricks(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=linearInvocation(wid,nwg,local);if(work>=params.pageCapacity){return;}desiredCandidates[work]=INVALID;let activeCount=min(sourceB[1],params.pageCapacity);if(work>=activeCount){return;}let id=sourceB[7u+work];if(id>=params.pageCapacity||sourceA[id*4u+2u]!=params.currentGeneration){atomicOr(&topologyErrors[work],MALFORMED);return;}let brick=unpackBrick(sourceA[id*4u+1u]);var interfaceBrick=false;var malformed=false;for(var sample=0u;sample<params.samplesPerBrick&&!interfaceBrick;sample+=1u){let index=id*params.samplesPerBrick+sample;if((sourcePackedFlags(index)&VALID)==0u){continue;}let center=sourcePackedPhi(index);if(!finite(center)){malformed=true;continue;}let q=brick*params.brickResolution+localCoord(sample);for(var direction=0u;direction<6u;direction+=1u){let neighbor=currentNeighbor(id,sample,direction);var other=3.402823e38;if(neighbor!=INVALID&&(sourcePackedFlags(neighbor)&VALID)!=0u){other=sourcePackedPhi(neighbor);}else if(closedVirtualNeighbor(q,direction)){other=center+params.fineCellWidth;}if(finite(other)&&(other<0.0)!=(center<0.0)){interfaceBrick=true;break;}}}desiredCandidates[work]=select(INVALID,sourceA[id*4u+1u],interfaceBrick);if(malformed){desiredCandidates[work]=INVALID;atomicOr(&topologyErrors[work],MALFORMED);}}
 @compute @workgroup_size(64) fn insertExternalSeeds(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let seed=linearInvocation(wid,nwg,local);if(seed>=params.pageCapacity){return;}let output=params.pageCapacity+seed;desiredCandidates[output]=INVALID;if(currentFinePopulated()||arrayLength(&externalSeeds)<4u){return;}let rawCount=externalSeeds[0];let available=arrayLength(&externalSeeds)-4u;if(seed>=min(rawCount,min(params.pageCapacity,available))){return;}if(externalSeeds[1]!=0u||rawCount>params.pageCapacity||rawCount>available){atomicOr(&topologyErrors[seed],MALFORMED);return;}let key=externalSeeds[4u+seed];if(!externalAffineInterfaceBrick(key)&&!externalClosedTopBrick(key)){return;}if(key<params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z){desiredCandidates[output]=key;}else{atomicOr(&topologyErrors[seed],MALFORMED);}}
 fn desiredLogicalCount()->u32{return params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;}
 fn seedRecordPresent(item:u32)->bool{
@@ -2140,8 +2141,8 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  let livePages=min(currentWorklist[1],params.pageCapacity);
  for(var work=local;work<livePages;work+=256u){
   let id=currentWorklist[7u+work];
-  if(id<params.pageCapacity&&currentMetadata[id*10u+2u]==params.currentGeneration){
-   let key=currentMetadata[id*10u+1u];if(key<arrayLength(&topologyErrors)){atomicStore(&topologyErrors[key],0u);}
+  if(id<params.pageCapacity&&currentMetadata[id*4u+2u]==params.currentGeneration){
+   let key=currentMetadata[id*4u+1u];if(key<arrayLength(&topologyErrors)){atomicStore(&topologyErrors[key],0u);}
   }
  }
  storageBarrier();workgroupBarrier();
@@ -2153,9 +2154,9 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
   let key=recurringProducerChanged(item);
   if(key>=desiredLogicalCount()){localError|=MALFORMED;}
   else{let id=currentLookup(key);
-   if(id==INVALID||currentMetadata[id*10u]!=id
-     ||currentMetadata[id*10u+2u]!=params.currentGeneration){localError|=MALFORMED;}
-   else if((currentMetadata[id*10u+3u]&2u)!=0u){interfaceKey=key;}
+   if(id==INVALID||currentMetadata[id*4u]!=id
+     ||currentMetadata[id*4u+2u]!=params.currentGeneration){localError|=MALFORMED;}
+   else if((currentMetadata[id*4u+3u]&2u)!=0u){interfaceKey=key;}
   }
   sparseCandidates[item]=interfaceKey;
   if(interfaceKey!=INVALID){localSeeds+=1u;}
@@ -2301,7 +2302,7 @@ fn desiredContains(key:u32)->bool{let count=min(control[2],params.pageCapacity);
 fn targetLookup(key:u32)->u32{let logicalCount=desiredLogicalCount();
  if(key>=logicalCount||arrayLength(&sourceD)<7u+params.pageCapacity+logicalCount){return INVALID;}
  let id=sourceD[7u+params.pageCapacity+key];if(id>=params.pageCapacity){return INVALID;}
- let base=id*10u;return select(INVALID,id,sourceC[base]==id&&sourceC[base+1u]==key
+ let base=id*4u;return select(INVALID,id,sourceC[base]==id&&sourceC[base+1u]==key
   &&sourceC[base+2u]==params.nextGeneration);}
 // A closest-point seed is a physical sample index. Carrying that integer
 // verbatim across the A/B page transaction is unsafe: the same physical page
@@ -2310,10 +2311,10 @@ fn targetLookup(key:u32)->u32{let logicalCount=desiredLogicalCount();
 // directory; any missing or stale identity retires the seed fail-closed.
 fn remapCarriedSeed(seed:u32)->u32{
  if(seed==INVALID){return INVALID;}let oldPage=seed/params.samplesPerBrick;let local=seed-oldPage*params.samplesPerBrick;
- if(oldPage>=params.pageCapacity||currentMetadata[oldPage*10u+2u]!=params.currentGeneration
-  ||(currentFlags[seed]>>5u)==0u){return INVALID;}
- let key=currentMetadata[oldPage*10u+1u];let nextPage=targetLookup(key);
- if(nextPage==INVALID||nextPage>=params.pageCapacity||sourceC[nextPage*10u+2u]!=params.nextGeneration){return INVALID;}
+ if(oldPage>=params.pageCapacity||currentMetadata[oldPage*4u+2u]!=params.currentGeneration
+  ||(currentPackedFlags(seed)>>5u)==0u){return INVALID;}
+ let key=currentMetadata[oldPage*4u+1u];let nextPage=targetLookup(key);
+ if(nextPage==INVALID||nextPage>=params.pageCapacity||sourceC[nextPage*4u+2u]!=params.nextGeneration){return INVALID;}
  return nextPage*params.samplesPerBrick+local;
 }
 fn persistentCarriedSeed(sourceIndex:u32,targetIndex:u32)->u32{
@@ -2321,7 +2322,7 @@ fn persistentCarriedSeed(sourceIndex:u32,targetIndex:u32)->u32{
  // that same invariant during topology carry so unchanged pages can skip the
  // recurring seed dispatch without changing the first flood's workA field.
  return select(remapCarriedSeed(currentWorkA[sourceIndex]),targetIndex,
-  (currentFlags[sourceIndex]>>5u)!=0u);
+  (currentPackedFlags(sourceIndex)>>5u)!=0u);
 }
 fn identityBlockCount()->u32{return (params.pageCapacity+255u)/256u;}
 fn identitySuperBlockCount()->u32{return (identityBlockCount()+255u)/256u;}
@@ -2329,7 +2330,7 @@ fn identityScanStride()->u32{return identityBlockCount()+identitySuperBlockCount
 fn identityScanScratchOffset()->u32{return supportCandidatesOffset()+params.pageCapacity;}
 fn identityScanScratch(stream:u32,index:u32)->u32{return identityScanScratchOffset()+stream*identityScanStride()+index;}
 fn carriedPage(key:u32)->u32{let old=currentLookup(key);if(old==INVALID||old>=params.pageCapacity){return INVALID;}
- let base=old*10u;return select(INVALID,old,currentMetadata[base+1u]==key&&currentMetadata[base+2u]==params.currentGeneration);}
+ let base=old*4u;return select(INVALID,old,currentMetadata[base+1u]==key&&currentMetadata[base+2u]==params.currentGeneration);}
 fn identityCandidate(stream:u32,item:u32)->bool{
  if((pageDelta[10]&1u)!=0u){
   if(item>=min(control[2],params.pageCapacity)){return false;}
@@ -2374,10 +2375,10 @@ fn writeIdentityPrefix(stream:u32,item:u32,value:u32){
  if(item<desiredCount){let key=sourceD[7u+item];pageDelta[desiredKeysOffset()+item]=key;
   if(carriedPage(key)==INVALID){pageDelta[changedCandidatesOffset()+item]=key;}}
  if(item<currentCount){let id=currentWorklist[7u+item];var malformed=id>=params.pageCapacity;
-  if(!malformed){let base=id*10u;malformed=currentMetadata[base]!=id||currentMetadata[base+2u]!=params.currentGeneration;}
+  if(!malformed){let base=id*4u;malformed=currentMetadata[base]!=id||currentMetadata[base+2u]!=params.currentGeneration;}
   pageDelta[dirtyPagesOffset()+item]=select(0u,1u,malformed);}
- let occupied=currentMetadata[item*10u+2u]==params.currentGeneration;
- var available=!occupied;if(occupied){let key=currentMetadata[item*10u+1u];let removed=!desiredContains(key);
+ let occupied=currentMetadata[item*4u+2u]==params.currentGeneration;
+ var available=!occupied;if(occupied){let key=currentMetadata[item*4u+1u];let removed=!desiredContains(key);
   available=removed;pageDelta[rollbackPagesOffset()+item]=select(INVALID,item,removed);}
  pageDelta[supportCandidatesOffset()+item]=select(INVALID,item,available);
 }
@@ -2467,7 +2468,7 @@ fn identityTotal(stream:u32,count:u32)->u32{
  let item=linearInvocation(wid,nwg,local);if(item>=params.pageCapacity||control[0]!=0u){return;}
  let retired=pageDelta[rollbackPagesOffset()+item];if(retired!=INVALID){
   let rank=desiredCandidates[params.pageCapacity+item];pageDelta[retiredPagesOffset()+rank]=retired;
-  pageDelta[changedCandidatesOffset()+control[2]+rank]=currentMetadata[retired*10u+1u];}
+  pageDelta[changedCandidatesOffset()+control[2]+rank]=currentMetadata[retired*4u+1u];}
  let available=pageDelta[supportCandidatesOffset()+item];if(available!=INVALID){
   pageDelta[supportPagesOffset()+pageDelta[dirtyCandidatesOffset()+item]]=available;}
  desiredCandidates[params.pageCapacity+item]=0u;pageDelta[changedKeysOffset()+item]=INVALID;
@@ -2477,11 +2478,10 @@ fn identityTotal(stream:u32,count:u32)->u32{
  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
  let work=linearInvocation(wid,nwg,local);let desiredCount=min(control[2],params.pageCapacity);
  if(work>=desiredCount||control[0]!=0u||pageDelta[15]!=VALID){return;}let key=pageDelta[desiredKeysOffset()+work];
- let old=carriedPage(key);let id=work;let base=id*10u;
- if(old!=INVALID){let oldBase=old*10u;for(var word=0u;word<10u;word+=1u){sourceC[base+word]=currentMetadata[oldBase+word];}
+ let old=carriedPage(key);let id=work;let base=id*4u;
+ if(old!=INVALID){let oldBase=old*4u;for(var word=0u;word<4u;word+=1u){sourceC[base+word]=currentMetadata[oldBase+word];}
  }else{let rank=desiredCandidates[work];pageDelta[addedPagesOffset()+rank]=id;sourceC[base+3u]=1u;}
  sourceC[base]=id;sourceC[base+1u]=key;sourceC[base+2u]=params.nextGeneration;
- for(var direction=0u;direction<6u;direction+=1u){sourceC[base+4u+direction]=INVALID;}
  sourceD[7u+work]=id;sourceD[7u+params.pageCapacity+key]=id;
  desiredCandidates[work]=0u;
 }
@@ -2502,33 +2502,33 @@ fn identityTotal(stream:u32,count:u32)->u32{
 @compute @workgroup_size(64) fn carryDesiredSamples(@builtin(workgroup_id)wid:vec3u,
  @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
  let work=fineLinearWorkgroup(wid,nwg);if(work>=sourceD[1]||control[0]!=0u){return;}
- let id=sourceD[7u+work];if(id>=params.pageCapacity){return;}let key=sourceC[id*10u+1u];let old=currentLookup(key);
+ let id=sourceD[7u+work];if(id>=params.pageCapacity){return;}let key=sourceC[id*4u+1u];let old=currentLookup(key);
  if(old==INVALID){return;}for(var sample=local;sample<params.samplesPerBrick;sample+=64u){
   let sourceIndex=old*params.samplesPerBrick+sample;let targetIndex=id*params.samplesPerBrick+sample;
-  nextFlags[targetIndex]=currentFlags[sourceIndex];nextPhi[targetIndex]=currentPhi[sourceIndex];
+  nextSamples[targetIndex]=currentSamples[sourceIndex];
  }
 }
 @compute @workgroup_size(64) fn carryDesiredWorkSamples(@builtin(workgroup_id)wid:vec3u,
  @builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
  let work=fineLinearWorkgroup(wid,nwg);if(work>=sourceD[1]||control[0]!=0u){return;}
- let id=sourceD[7u+work];if(id>=params.pageCapacity){return;}let key=sourceC[id*10u+1u];let old=currentLookup(key);
+ let id=sourceD[7u+work];if(id>=params.pageCapacity){return;}let key=sourceC[id*4u+1u];let old=currentLookup(key);
  if(old==INVALID){return;}for(var sample=local;sample<params.samplesPerBrick;sample+=64u){
   let sourceIndex=old*params.samplesPerBrick+sample;let targetIndex=id*params.samplesPerBrick+sample;
   nextWorkA[targetIndex]=persistentCarriedSeed(sourceIndex,targetIndex);
   // Transport uses the disposable distance lane as its output scratch. Phi is
   // now that transported value; carry its magnitude as a valid baseline while
   // preserving workA's remapped closest-point identity across generations.
-  nextWorkB[targetIndex]=bitcast<u32>(abs(bitcast<f32>(currentPhi[sourceIndex])));
+  nextWorkB[targetIndex]=bitcast<u32>(abs(currentPackedPhi(sourceIndex)));
  }
 }
 @compute @workgroup_size(64) fn classifyFinePageDelta(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) local:u32){
  let work=indirectLinearInvocation(wid,local);if(control[0]!=0u||pageDelta[15]!=VALID){return;}
  let nextCount=min(control[2],params.pageCapacity);if(work>=nextCount){return;}
  let id=sourceD[7u+work];
- if(id>=params.pageCapacity||sourceC[id*10u+2u]!=params.nextGeneration){
+ if(id>=params.pageCapacity||sourceC[id*4u+2u]!=params.nextGeneration){
   atomicOr(&topologyErrors[work],MALFORMED);return;
  }
- let key=sourceC[id*10u+1u];let old=currentLookup(key);
+ let key=sourceC[id*4u+1u];let old=currentLookup(key);
  pageDelta[changedCandidatesOffset()+params.pageCapacity+work]=INVALID;
  if(old==INVALID){pageDelta[changedCandidatesOffset()+params.pageCapacity+work]=key;}
  else if(producerChangedContains(key)){pageDelta[changedCandidatesOffset()+work]=key;
@@ -2538,8 +2538,8 @@ fn identityTotal(stream:u32,count:u32)->u32{
  let item=indirectLinearInvocation(wid,local);if(control[0]!=0u){return;}let desired=min(control[2],params.pageCapacity);
  let retired=min(pageDelta[12],params.pageCapacity);let changedDesired=identityTotal(0u,desired);
  if(item<desired){let key=pageDelta[changedCandidatesOffset()+item];if(key!=INVALID){pageDelta[changedKeysOffset()+desiredCandidates[item]]=key;}}
- if(item<retired){let id=pageDelta[retiredPagesOffset()+item];if(id<params.pageCapacity&&currentMetadata[id*10u+2u]==params.currentGeneration){
-  pageDelta[changedKeysOffset()+changedDesired+item]=currentMetadata[id*10u+1u];}}
+ if(item<retired){let id=pageDelta[retiredPagesOffset()+item];if(id<params.pageCapacity&&currentMetadata[id*4u+2u]==params.currentGeneration){
+  pageDelta[changedKeysOffset()+changedDesired+item]=currentMetadata[id*4u+1u];}}
  if(item<desired){pageDelta[changedCandidatesOffset()+item]=INVALID;}
 }
 @compute @workgroup_size(1) fn prepareFinePageDeltaExpansion(){writePublishedDispatch(3u,0u);
@@ -2605,10 +2605,10 @@ fn repairNeighbor(key:u32)->bool{
  let work=linearInvocation(wid,nwg,local);if(control[0]!=0u||pageDelta[15]!=VALID){return;}
  let desired=min(control[2],params.pageCapacity);let retired=min(pageDelta[12],params.pageCapacity);
  if(work<desired){let id=sourceD[7u+work];var error=0u;var key=INVALID;
-  if(id>=params.pageCapacity||sourceC[id*10u+2u]!=params.nextGeneration){error=MALFORMED;}
-  else{key=sourceC[id*10u+1u];if(key>=desiredLogicalCount()){error=MALFORMED;}}
+  if(id>=params.pageCapacity||sourceC[id*4u+2u]!=params.nextGeneration){error=MALFORMED;}
+  else{key=sourceC[id*4u+1u];if(key>=desiredLogicalCount()){error=MALFORMED;}}
   let affected=select(vec2u(0u),interfaceNeighborRadii(key),error==0u);
-  let carried=error==0u&&currentMetadata[id*10u+1u]==key&&currentMetadata[id*10u+2u]==params.currentGeneration;
+  let carried=error==0u&&currentMetadata[id*4u+1u]==key&&currentMetadata[id*4u+2u]==params.currentGeneration;
   // Dirty is the complete physical output halo, not merely the pages whose
   // phase mask changed. Every carried page inside this radius must receive the
   // new distance (or be invalidated at the cutoff); otherwise its old VALID
@@ -2687,35 +2687,21 @@ fn repairNeighbor(key:u32)->bool{
  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
  let item=linearInvocation(wid,nwg,local);if(control[0]!=0u||pageDelta[15]!=VALID){return;}
  let dirty=min(pageDelta[2],params.pageCapacity);let retired=min(pageDelta[12],params.pageCapacity);
- if(item<dirty){let id=pageDelta[dirtyPagesOffset()+item];if(id<params.pageCapacity&&sourceC[id*10u+2u]==params.nextGeneration){
-   pageDelta[changedKeysOffset()+item]=sourceC[id*10u+1u];}}
- if(item<retired){let id=pageDelta[retiredPagesOffset()+item];if(id<params.pageCapacity&&currentMetadata[id*10u+2u]==params.currentGeneration){
-   pageDelta[changedKeysOffset()+dirty+item]=currentMetadata[id*10u+1u];}}
+ if(item<dirty){let id=pageDelta[dirtyPagesOffset()+item];if(id<params.pageCapacity&&sourceC[id*4u+2u]==params.nextGeneration){
+   pageDelta[changedKeysOffset()+item]=sourceC[id*4u+1u];}}
+ if(item<retired){let id=pageDelta[retiredPagesOffset()+item];if(id<params.pageCapacity&&currentMetadata[id*4u+2u]==params.currentGeneration){
+   pageDelta[changedKeysOffset()+dirty+item]=currentMetadata[id*4u+1u];}}
 }
-@compute @workgroup_size(64) fn snapshotDeltaPayload(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[14]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[rollbackPagesOffset()+work];if(id>=params.pageCapacity||currentMetadata[id*10u+2u]!=params.currentGeneration){error=MALFORMED;}else if(local<params.samplesPerBrick){let index=id*params.samplesPerBrick+local;
+@compute @workgroup_size(64) fn snapshotDeltaPayload(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[14]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[rollbackPagesOffset()+work];if(id>=params.pageCapacity||currentMetadata[id*4u+2u]!=params.currentGeneration){error=MALFORMED;}else if(local<params.samplesPerBrick){let index=id*params.samplesPerBrick+local;
  // Invalid narrow-band samples intentionally carry no signed-distance
  // payload. They are not rollback corruption and must not poison an otherwise
  // valid page snapshot when factor 1 reuses a whole B4 page.
- if((currentFlags[index]&VALID)==0u){payloadSnapshot[index]=3.402823e38;}else{let value=bitcast<f32>(currentPhi[index]);if(!finite(value)){error=NONFINITE;}else{payloadSnapshot[index]=value;}}}}publishTopologyError(work,local,error,laneActive);}
-@compute @workgroup_size(64) fn initializeDesiredSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[11]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity){error=MALFORMED;}else if(local<params.samplesPerBrick){let key=sourceC[id*10u+1u];let index=id*params.samplesPerBrick+local;if(index<arrayLength(&targetA)&&index<arrayLength(&targetB)){let brick=unpackBrick(key);let coord=localCoord(local);let q=brick*params.brickResolution+coord;if(any(q>=params.sampleDimensions)){targetA[index]=0u;targetB[index]=0u;}else{let position=params.domainOrigin+(vec3f(q)+vec3f(0.5))*params.fineCellWidth;var value=sampleCoarseOctreePhi(position);let seeded=externalSeedPhi(key,(vec3f(q)+vec3f(0.5))/f32(params.fineFactor));if(finite(seeded)){value=seeded;}value=bootstrapClosedTopPhi(key,position,value);value=applyInflowPhi(value,position);if(!finite(value)){error=NONFINITE;}else{let encoded=bitcast<u32>(value);targetA[index]=VALID|select(0u,16u,value<0.0);targetB[index]=encoded;}}}}}publishTopologyError(work,local,error,laneActive);}
+ if((currentPackedFlags(index)&VALID)==0u){payloadSnapshot[index]=3.402823e38;}else{let value=currentPackedPhi(index);if(!finite(value)){error=NONFINITE;}else{payloadSnapshot[index]=value;}}}}publishTopologyError(work,local,error,laneActive);}
+@compute @workgroup_size(64) fn initializeDesiredSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);let laneActive=work<pageDelta[11]&&control[0]==0u;var error=0u;if(laneActive){let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity){error=MALFORMED;}else if(local<params.samplesPerBrick){let key=sourceC[id*4u+1u];let index=id*params.samplesPerBrick+local;if(index<arrayLength(&targetA)){let brick=unpackBrick(key);let coord=localCoord(local);let q=brick*params.brickResolution+coord;if(any(q>=params.sampleDimensions)){targetWritePacked(index,0.,0u);}else{let position=params.domainOrigin+(vec3f(q)+vec3f(0.5))*params.fineCellWidth;var value=sampleCoarseOctreePhi(position);let seeded=externalSeedPhi(key,(vec3f(q)+vec3f(0.5))/f32(params.fineFactor));if(finite(seeded)){value=seeded;}value=bootstrapClosedTopPhi(key,position,value);value=applyInflowPhi(value,position);if(!finite(value)){error=NONFINITE;}else{targetWritePacked(index,value,VALID|select(0u,16u,value<0.0));}}}}}publishTopologyError(work,local,error,laneActive);}
 @compute @workgroup_size(64) fn initializeDesiredWorkSamples(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){let work=fineLinearWorkgroup(wid,nwg);if(work>=pageDelta[11]||control[0]!=0u){return;}let id=pageDelta[addedPagesOffset()+work];if(id>=params.pageCapacity||local>=params.samplesPerBrick){return;}let index=id*params.samplesPerBrick+local;nextWorkA[index]=INVALID;nextWorkB[index]=INVALID;}
 @compute @workgroup_size(64) fn linkDesiredNeighbors(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nwg:vec3u,@builtin(local_invocation_index) local:u32){
  let work=fineLinearWorkgroup(wid,nwg);if(work>=sourceD[1]||control[0]!=0u){return;}
- let id=sourceD[7u+work];if(id>=params.pageCapacity||sourceC[id*10u+2u]!=params.nextGeneration){if(local==0u){atomicOr(&topologyErrors[work],MALFORMED);}return;}
- let coord=unpackBrick(sourceC[id*10u+1u]);if(local<6u){var neighbor=INVALID;
-  if(local==0u&&coord.x>0u){neighbor=targetLookup(packBrick(coord-vec3u(1,0,0)));}
-  else if(local==1u&&coord.x+1u<params.brickDimensions.x){neighbor=targetLookup(packBrick(coord+vec3u(1,0,0)));}
-  else if(local==2u&&coord.y>0u){neighbor=targetLookup(packBrick(coord-vec3u(0,1,0)));}
-  else if(local==3u&&coord.y+1u<params.brickDimensions.y){neighbor=targetLookup(packBrick(coord+vec3u(0,1,0)));}
-  else if(local==4u&&coord.z>0u){neighbor=targetLookup(packBrick(coord-vec3u(0,0,1)));}
-  else if(local==5u&&coord.z+1u<params.brickDimensions.z){neighbor=targetLookup(packBrick(coord+vec3u(0,0,1)));}
-  sourceC[id*10u+4u+local]=neighbor;}
- let haloBase=7u+params.pageCapacity+desiredLogicalCount();
- if(local<27u&&haloBase+params.pageCapacity*27u<=arrayLength(&sourceD)){
-  let z=i32(local/9u)-1;let rem=local-u32(z+1)*9u;let y=i32(rem/3u)-1;let x=i32(rem%3u)-1;
-  let q=vec3i(coord)+vec3i(x,y,z);var halo=INVALID;if(all(q>=vec3i(0))&&all(q<vec3i(params.brickDimensions))){halo=targetLookup(packBrick(vec3u(q)));}
-  sourceD[haloBase+id*27u+local]=halo;
- }
+ let id=sourceD[7u+work];if(id>=params.pageCapacity||sourceC[id*4u+2u]!=params.nextGeneration){if(local==0u){atomicOr(&topologyErrors[work],MALFORMED);}return;}
 }
 fn fineSettlementWorkgroups()->u32{
  if(control[0]==0u){return pageDelta[2];}
@@ -2758,15 +2744,14 @@ fn publishFineSettlementDispatch(){let workgroups=fineSettlementWorkgroups();wri
 @compute @workgroup_size(64) fn settleFinePublication(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
  let work=fineLinearWorkgroup(wid,nwg);if(control[0]==0u){
   if(work>=pageDelta[2]||local>=params.samplesPerBrick){return;}let id=pageDelta[dirtyPagesOffset()+work];
-  let index=id*params.samplesPerBrick+local;let value=bitcast<f32>(targetB[index]);if(finite(value)){committedPhi[index]=bitcast<u32>(value);}return;}
+  let index=id*params.samplesPerBrick+local;let value=targetPackedPhi(index);if(finite(value)){committedPhi[index]=targetA[index];}return;}
  let currentPublished=currentFinePublished();
  let currentCount=select(0u,min(currentWorklist[1],params.pageCapacity),currentPublished);
- if(work<currentCount){let old=currentWorklist[7u+work];let id=work;if(old<params.pageCapacity&&currentMetadata[old*10u+2u]==params.currentGeneration){
-   if(local<10u){let targetBase=id*10u;let sourceBase=old*10u;sourceC[targetBase+local]=currentMetadata[sourceBase+local];if(local==0u){sourceC[targetBase]=id;}if(local==2u){sourceC[targetBase+2u]=params.nextGeneration;}}
-   if(local<params.samplesPerBrick){let sourceIndex=old*params.samplesPerBrick+local;let targetIndex=id*params.samplesPerBrick+local;let value=bitcast<f32>(currentCommittedPhi[sourceIndex]);if(finite(value)){targetA[targetIndex]=VALID|select(0u,16u,value<0.0);targetB[targetIndex]=bitcast<u32>(value);}}
-   let haloBase=7u+params.pageCapacity+desiredLogicalCount();if(local<27u&&haloBase+params.pageCapacity*27u<=arrayLength(&sourceD)&&haloBase+params.pageCapacity*27u<=arrayLength(&currentWorklist)){sourceD[haloBase+id*27u+local]=currentWorklist[haloBase+old*27u+local];}
-   if(local==0u){let key=currentMetadata[old*10u+1u];sourceD[7u+work]=id;if(key<desiredLogicalCount()){sourceD[7u+params.pageCapacity+key]=id;}}}}
- if(work<pageDelta[11]){let id=pageDelta[addedPagesOffset()+work];if(id<params.pageCapacity&&currentMetadata[id*10u+2u]!=params.currentGeneration&&local<10u){sourceC[id*10u+local]=INVALID;}}
+ if(work<currentCount){let old=currentWorklist[7u+work];let id=work;if(old<params.pageCapacity&&currentMetadata[old*4u+2u]==params.currentGeneration){
+   if(local<4u){let targetBase=id*4u;let sourceBase=old*4u;sourceC[targetBase+local]=currentMetadata[sourceBase+local];if(local==0u){sourceC[targetBase]=id;}if(local==2u){sourceC[targetBase+2u]=params.nextGeneration;}}
+   if(local<params.samplesPerBrick){let sourceIndex=old*params.samplesPerBrick+local;let targetIndex=id*params.samplesPerBrick+local;let value=currentRollbackPackedPhi(sourceIndex);if(finite(value)){targetA[targetIndex]=currentCommittedPhi[sourceIndex];}}
+   if(local==0u){let key=currentMetadata[old*4u+1u];sourceD[7u+work]=id;if(key<desiredLogicalCount()){sourceD[7u+params.pageCapacity+key]=id;}}}}
+ if(work<pageDelta[11]){let id=pageDelta[addedPagesOffset()+work];if(id<params.pageCapacity&&currentMetadata[id*4u+2u]!=params.currentGeneration&&local<4u){sourceC[id*4u+local]=INVALID;}}
  if(work==0u&&local==0u){sourceD[0]=params.nextGeneration;sourceD[1]=currentCount;sourceD[2]=params.pageCapacity;
   sourceD[3]=select(0u,3u,currentPublished);sourceD[4]=(currentCount+63u)/64u;sourceD[5]=1u;sourceD[6]=1u;
   control[4]=select(0u,1u,currentPublished);control[5]=1u;}
@@ -2778,7 +2763,7 @@ fn publishFineSettlementDispatch(){let workgroups=fineSettlementWorkgroups();wri
  // The publication pass reconstructs the low authority bits. Restore the
  // cached closest-point payload and its recycle-safe remapped seed together;
  // the distance lane is scratch and the next JFA overwrites it before use.
- nextFlags[targetIndex]=currentFlags[sourceIndex];nextWorkA[targetIndex]=persistentCarriedSeed(sourceIndex,targetIndex);
+ nextWritePackedFlags(targetIndex,currentPackedFlags(sourceIndex));nextWorkA[targetIndex]=persistentCarriedSeed(sourceIndex,targetIndex);
 }
 `;
 }

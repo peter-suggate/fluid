@@ -47,6 +47,7 @@ import { octreeTechniqueSharedWGSL } from "./webgpu-octree-technique-shared";
 import { makeFineLevelSetSortedWorklistLookupWGSL } from "./webgpu-octree-fine-levelset-bricks";
 import type { OctreeTechniqueDebugSource } from "./octree-technique-debug";
 import { PassBroker } from "./webgpu-pass-broker";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 /** Probe lattice edge; 8³ = 512 probes spread over the leaf. */
 export const FLUID_CELL_TRACE_FINE_PROBE_EDGE = 8;
@@ -71,9 +72,9 @@ export const FLUID_CELL_TRACE_STAGE_STORAGE_BINDINGS = Object.freeze({
   gatherCore: Object.freeze(["headers", "metrics", "pressure", "trace"]),
   gatherCoarse: Object.freeze(["coarsePhi", "trace"]),
   discoverFine: Object.freeze(["fineWorklist", "fineMetadata", "scratch", "trace"]),
-  gatherFineValues: Object.freeze(["fineFlags", "finePhi", "scratch", "trace"]),
+  gatherFineValues: Object.freeze(["fineSamples", "scratch", "trace"]),
   gatherFineSeeds: Object.freeze(["fineSeeds", "scratch"]),
-  resolveFineSeeds: Object.freeze(["fineMetadata", "fineFlags", "scratch", "trace"]),
+  resolveFineSeeds: Object.freeze(["fineMetadata", "fineSamples", "scratch", "trace"]),
 } as const);
 
 export const fluidCellTraceGatherShader = /* wgsl */ `
@@ -110,11 +111,11 @@ struct CoarsePhi { phi:f32, minimumPhi:f32, maximumPhi:f32, flags:u32 }
 @group(0) @binding(7) var<uniform> fine:FineParams;
 @group(0) @binding(8) var<storage,read> fineWorklist:array<u32>;
 @group(0) @binding(9) var<storage,read> fineMetadata:array<u32>;
-@group(0) @binding(10) var<storage,read> fineFlags:array<u32>;
+@group(0) @binding(10) var<storage,read> fineSamples:array<u32>;
 @group(0) @binding(11) var<storage,read> fineSeeds:array<u32>;
-@group(0) @binding(12) var<storage,read> finePhi:array<f32>;
 @group(0) @binding(13) var<storage,read> coarsePhi:array<CoarsePhi>;
 @group(0) @binding(14) var<storage,read_write> scratch:array<u32>;
+${fineLevelSetPackedSampleWGSL("fineSamples")}
 
 const INVALID:u32=0xffffffffu;
 /** Published-row flag in \`Metric.transformAndFlags\`, as \`rowValid\` reads it. */
@@ -336,10 +337,10 @@ fn fineProbeAt(q:vec3u)->FineProbe {
   let brick=q/max(fine.brickResolution,1u);
   let key=brick.x+fine.brickDimensions.x*(brick.y+fine.brickDimensions.y*brick.z);
   let page=finePageOf(key);
-  if(page==INVALID||page>=fine.pageCapacity||page*10u+2u>=arrayLength(&fineMetadata)){
+  if(page==INVALID||page>=fine.pageCapacity||page*4u+2u>=arrayLength(&fineMetadata)){
     return FineProbe(INVALID,PAGE_MISSING);
   }
-  if(fineMetadata[page*10u+2u]!=fine.generation){return FineProbe(INVALID,PAGE_STALE);}
+  if(fineMetadata[page*4u+2u]!=fine.generation){return FineProbe(INVALID,PAGE_STALE);}
   let local=q-brick*fine.brickResolution;
   let localIndex=local.x+fine.brickResolution*(local.y+fine.brickResolution*local.z);
   let address=page*fine.samplesPerBrick+localIndex;
@@ -355,7 +356,7 @@ fn fineSampleCell(address:u32)->vec3u {
   let perBrick=max(fine.samplesPerBrick,1u);
   let id=address/perBrick;
   let local=address-id*perBrick;
-  let key=fineMetadata[id*10u+1u];
+  let key=fineMetadata[id*4u+1u];
   let xy=max(fine.brickDimensions.x*fine.brickDimensions.y,1u);
   let bz=key/xy;let rest=key-bz*xy;let by=rest/max(fine.brickDimensions.x,1u);
   let brick=vec3u(rest-by*fine.brickDimensions.x,by,bz);
@@ -535,9 +536,9 @@ fn gatherFineValues(@builtin(local_invocation_index) lid:u32) {
   if(config.hasFine!=0u&&trace[${FLUID_CELL_TRACE_HEADER.status}u]==${FLUID_CELL_TRACE_STATUS.resolved}u){
     for(var probe=lid;probe<total;probe+=${LANES}u){
       let scratchBase=probe*3u;if(scratch[scratchBase+1u]!=PAGE_RESIDENT){continue;}
-      let address=scratch[scratchBase];if(address>=arrayLength(&fineFlags)||address>=arrayLength(&finePhi)){continue;}
-      let flags=fineFlags[address];if((flags&FINE_VALID)==0u){continue;}
-      let phi=finePhi[address]*inverseWidth;
+      let address=scratch[scratchBase];if(address>=arrayLength(&fineSamples)){continue;}
+      let flags=finePackedFlags(address);if((flags&FINE_VALID)==0u){continue;}
+      let phi=finePackedPhi(address)*inverseWidth;
       atomicAdd(&probeSamples,1u);atomicMin(&probeMinimumPhi,phiKey(phi));
       atomicMax(&probeMaximumPhi,phiKey(phi));atomicMin(&probeNearestPhi,bitcast<u32>(abs(phi)));
       if((flags&FINE_INTERFACE)!=0u){atomicAdd(&probeInterface,1u);}
@@ -587,10 +588,10 @@ fn resolveFineSeeds(@builtin(local_invocation_index) lid:u32) {
   if(config.hasFine!=0u&&trace[${FLUID_CELL_TRACE_HEADER.status}u]==${FLUID_CELL_TRACE_STATUS.resolved}u){
     for(var probe=lid;probe<total;probe+=${LANES}u){
       let scratchBase=probe*3u;let address=scratch[scratchBase];let seed=scratch[scratchBase+2u];
-      if(scratch[scratchBase+1u]!=PAGE_RESIDENT||address>=arrayLength(&fineFlags)
-        ||(fineFlags[address]&FINE_VALID)==0u||seed==INVALID||seed>=arrayLength(&fineFlags)){continue;}
+      if(scratch[scratchBase+1u]!=PAGE_RESIDENT||address>=arrayLength(&fineSamples)
+        ||(finePackedFlags(address)&FINE_VALID)==0u||seed==INVALID||seed>=arrayLength(&fineSamples)){continue;}
       let seedPage=seed/max(fine.samplesPerBrick,1u);
-      if(seedPage*10u+1u>=arrayLength(&fineMetadata)){continue;}
+      if(seedPage*4u+1u>=arrayLength(&fineMetadata)){continue;}
       let seedCell=fineSampleCell(seed);let sampleCell=fineSampleCell(address);
       let delta=abs(vec3i(seedCell)-vec3i(sampleCell));let hop=u32(max(max(delta.x,delta.y),delta.z));
       atomicAdd(&probeResolved,1u);atomicMax(&probeMaximumHop,hop);
@@ -603,7 +604,7 @@ fn resolveFineSeeds(@builtin(local_invocation_index) lid:u32) {
         trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u]=seedCell.x;
         trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u+1u]=seedCell.y;
         trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCell}u+2u]=seedCell.z;
-        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCode}u]=fineFlags[seed]>>${FINE_FLOOD_SAMPLE_FLAG_BITS}u;
+        trace[base+${FLUID_CELL_TRACE_FINE_RECORD.seedCode}u]=finePackedFlags(seed)>>${FINE_FLOOD_SAMPLE_FLAG_BITS}u;
         trace[base+${FLUID_CELL_TRACE_FINE_RECORD.hop}u]=hop;
       }
     }
@@ -806,8 +807,7 @@ export class WebGPUFluidCellTrace {
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 2, resource: { buffer: this.config } },
         { binding: 6, resource: trace },
-        { binding: 10, resource: fine ? fine.sampleFlags : { buffer: this.fallback } },
-        { binding: 12, resource: fine ? fine.phi : { buffer: this.fallback } },
+        { binding: 10, resource: fine ? fine.samples : { buffer: this.fallback } },
         { binding: 14, resource: scratch },
       ]),
       create(4, [
@@ -819,7 +819,7 @@ export class WebGPUFluidCellTrace {
         { binding: 6, resource: trace },
         { binding: 7, resource: fineParams },
         { binding: 9, resource: fine ? fine.metadata : { buffer: this.fallback } },
-        { binding: 10, resource: fine ? fine.sampleFlags : { buffer: this.fallback } },
+        { binding: 10, resource: fine ? fine.samples : { buffer: this.fallback } },
         { binding: 14, resource: scratch },
       ]),
     ];

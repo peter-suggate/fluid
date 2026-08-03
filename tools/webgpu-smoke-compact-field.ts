@@ -249,11 +249,10 @@ function finiteFloat(words: Uint32Array, index: number): number {
 function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: readonly [number, number, number]): void {
   const { plan, generation, metadata, flags, phi, worklist, coarseDirectory, coarseControl, topologyControl } = snapshot;
   if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Compact octree QA field requires a positive fine generation");
-  if (metadata.length !== plan.maximumResidentBricks * 10) throw new Error("Compact octree QA fine metadata has the wrong length");
+  if (metadata.length !== plan.maximumResidentBricks * 4) throw new Error("Compact octree QA fine metadata has the wrong length");
   const sampleCapacity = plan.maximumResidentBricks * plan.samplesPerBrick;
   if (flags.length !== sampleCapacity || phi.length !== sampleCapacity) throw new Error("Compact octree QA fine payload has the wrong length");
-  const expectedWorklistWords = 7 + plan.maximumResidentBricks + plan.logicalBrickCount
-    + (plan.includeHalo27 ? 27 * plan.maximumResidentBricks : 0);
+  const expectedWorklistWords = 7 + plan.maximumResidentBricks + plan.logicalBrickCount;
   if (worklist.length !== expectedWorklistWords) throw new Error("Compact octree QA worklist has the wrong length");
   if (coarseControl !== undefined && coarseControl.length < 16) throw new Error("Compact octree QA coarse control has the wrong length");
   if (topologyControl !== undefined && topologyControl.length < 8) throw new Error("Compact octree QA topology control has the wrong length");
@@ -297,7 +296,7 @@ function validateSnapshot(snapshot: CompactOctreeFieldSnapshot, dimensions: read
   const active = Math.min(worklist[1], plan.maximumResidentBricks);
   if (7 + active > worklist.length) throw new Error("Compact octree QA fine directory exceeds its worklist");
   for (let index = 0; index < active; index += 1) {
-    const physicalId = worklist[7 + index], base = physicalId * 10;
+    const physicalId = worklist[7 + index], base = physicalId * 4;
     if (physicalId >= plan.maximumResidentBricks || base + 2 >= metadata.length
       || metadata[base] !== physicalId || metadata[base + 2] !== generation
       || physicalId !== index) {
@@ -353,7 +352,7 @@ function finePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [num
     || (worklist[3] & 3) !== 3 || worklist[5] !== 1 || worklist[6] !== 1) return undefined;
   const directoryBase = 7 + plan.maximumResidentBricks;
   if (key >= plan.logicalBrickCount || directoryBase + key >= worklist.length) return undefined;
-  const physicalId = worklist[directoryBase + key], base = physicalId * 10;
+  const physicalId = worklist[directoryBase + key], base = physicalId * 4;
   if (physicalId >= plan.maximumResidentBricks || base + 2 >= metadata.length
     || metadata[base] !== physicalId || metadata[base + 1] !== key
     || metadata[base + 2] !== generation) return undefined;
@@ -481,8 +480,8 @@ export function reconstructCompactOctreeOccupancyField(
   let negativeValidSamples = 0, positiveValidSamples = 0;
   for (let work = 0; work < activePages; work += 1) {
     const id = snapshot.worklist[7 + work];
-    if (id >= snapshot.plan.maximumResidentBricks || snapshot.metadata[id * 10] !== id
-      || snapshot.metadata[id * 10 + 2] !== snapshot.generation) {
+    if (id >= snapshot.plan.maximumResidentBricks || snapshot.metadata[id * 4] !== id
+      || snapshot.metadata[id * 4 + 2] !== snapshot.generation) {
       malformedActivePages += 1; continue;
     }
     for (let local = 0; local < snapshot.plan.samplesPerBrick; local += 1) {

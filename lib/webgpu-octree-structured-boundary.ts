@@ -1,9 +1,10 @@
 /** Transactional dynamic free-surface/solid coefficients for structured families. */
 
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 type StructuredBoundaryFineSource = Pick<WebGPUFineLevelSetBrickSource,
-"params" | "metadata" | "worklist" | "flags" | "phi">;
+"params" | "metadata" | "worklist" | "samples">;
 import {
   makeOctreePowerCoarseLevelSetSampleWGSL,
   type OctreePowerCoarseLevelSetSampleSource,
@@ -341,8 +342,7 @@ export class WebGPUStructuredBoundaryCoefficients {
       params: this.inertFineParams,
       metadata: this.inertFineStorage,
       worklist: this.inertFineStorage,
-      flags: this.inertFineStorage,
-      phi: this.inertFineStorage,
+      samples: this.inertFineStorage,
     };
     let byControl = this.groupsByFineParams.get(selectedFine.params);
     if (!byControl) {
@@ -359,7 +359,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     const buffers: Record<number, GPUBuffer> = { 0: this.params, 1: structuredControl,
       2: structured.authority, 3: structured.rowGeometry, 4: this.resources.coarse.directory,
       5: fparams, 6: selectedFine.worklist, 7: selectedFine.metadata,
-      8: selectedFine.flags, 9: selectedFine.phi, 10: solid?.arena ?? inertSolid!,
+      8: selectedFine.samples, 10: solid?.arena ?? inertSolid!,
       11: this.candidates, 12: this.candidateMask, 13: this.liquidMask,
       14: section63.coefficients, 16: this.candidateControl, 17: this.dispatch,
       18: this.worksets, 19: this.resources.rigidBodies, 20: this.solidNormalVelocities,
@@ -391,8 +391,8 @@ export class WebGPUStructuredBoundaryCoefficients {
       // bindings on a workgroup_size(1) kernel; the recurring accepted prepare
       // has no carry arm and keeps its original four.
       group(prepare, authority === "candidate-ready" ? [0, 1, 4, 5, 16, 17, 22, 29] : [0, 1, 16, 17]),
-      group(this.classify, [0, 3, 4, 5, 6, 7, 8, 9, 12, 16, 26]),
-      group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 25, 26]),
+      group(this.classify, [0, 3, 4, 5, 6, 7, 8, 12, 16, 26]),
+      group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 11, 16, 25, 26]),
       group(this.resolveSolid, [0, 2, 3, 10, 11, 16, 19, 21]),
       group(this.commit, [0, 2, 11, 16, 20, 21]),
       group(this.rebuild, [0, 1, 2, 12, 13, 14, 16, 22, 24, 27]),
@@ -544,7 +544,8 @@ struct VertexArena{header:array<u32,16>,values:array<u32>}
 struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
 struct Metric{caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
 struct CatalogSlotGeometry{neighborOffsetSize:vec4f,areaCentroid:vec4f,normalInverseDistance:vec4f}
-@group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>accepted:array<u32>;@group(0)@binding(2)var<storage,read_write>a:array<u32>;@group(0)@binding(3)var<storage,read>geometry:array<vec4u>;@group(0)@binding(5)var<uniform>fp:FineP;@group(0)@binding(6)var<storage,read>fineWork:array<u32>;@group(0)@binding(7)var<storage,read>fineMeta:array<u32>;@group(0)@binding(8)var<storage,read>fineFlags:array<u32>;@group(0)@binding(9)var<storage,read>finePhi:array<f32>;@group(0)@binding(10)var<storage,read>solid:VertexArena;@group(0)@binding(11)var<storage,read_write>candidates:array<vec2f>;@group(0)@binding(12)var<storage,read_write>candidateLiquid:array<u32>;@group(0)@binding(13)var<storage,read_write>liquid:array<u32>;@group(0)@binding(14)var<storage,read_write>rows:array<u32>;@group(0)@binding(15)var<storage,read_write>diagonal:array<f32>;@group(0)@binding(16)var<storage,read_write>control:C;@group(0)@binding(17)var<storage,read_write>dispatch:array<u32>;@group(0)@binding(18)var<storage,read_write>dynamicWorksets:array<u32>;@group(0)@binding(19)var<storage,read>rigidBodies:array<RigidBody>;@group(0)@binding(20)var<storage,read_write>solidVelocity:array<f32>;@group(0)@binding(21)var<storage,read_write>candidateSolidVelocity:array<f32>;
+@group(0)@binding(0)var<uniform>p:P;@group(0)@binding(1)var<storage,read>accepted:array<u32>;@group(0)@binding(2)var<storage,read_write>a:array<u32>;@group(0)@binding(3)var<storage,read>geometry:array<vec4u>;@group(0)@binding(5)var<uniform>fp:FineP;@group(0)@binding(6)var<storage,read>fineWork:array<u32>;@group(0)@binding(7)var<storage,read>fineMeta:array<u32>;@group(0)@binding(8)var<storage,read>fineSamples:array<u32>;@group(0)@binding(10)var<storage,read>solid:VertexArena;@group(0)@binding(11)var<storage,read_write>candidates:array<vec2f>;@group(0)@binding(12)var<storage,read_write>candidateLiquid:array<u32>;@group(0)@binding(13)var<storage,read_write>liquid:array<u32>;@group(0)@binding(14)var<storage,read_write>rows:array<u32>;@group(0)@binding(15)var<storage,read_write>diagonal:array<f32>;@group(0)@binding(16)var<storage,read_write>control:C;@group(0)@binding(17)var<storage,read_write>dispatch:array<u32>;@group(0)@binding(18)var<storage,read_write>dynamicWorksets:array<u32>;@group(0)@binding(19)var<storage,read>rigidBodies:array<RigidBody>;@group(0)@binding(20)var<storage,read_write>solidVelocity:array<f32>;@group(0)@binding(21)var<storage,read_write>candidateSolidVelocity:array<f32>;
+${fineLevelSetPackedSampleWGSL("fineSamples")}
 // The slot-shaped records published by publishStructuredBoundarySetup pin X at
 // exactly 65,535 workgroups when the block count saturates one dimension, so
 // both the per-item and per-block indices fold back with that constant stride.
@@ -580,8 +581,8 @@ const COARSE_PHI_VALID:u32=0x80000000u;const COARSE_PHI_DENSE:u32=0x40000000u;
 const ERROR_CARRY:u32=256u;
 fn abase()->u32{return control.bank*p.counts.w;}fn rbase()->u32{return control.bank*p.counts.x;}fn section63Base()->u32{return control.bank*p.resolved.y;}
 fn rowCenter(row:u32)->vec3f{let g=geometry[rbase()+row];let q=vec3u(g.x%p.dimensions.x,(g.x/p.dimensions.x)%p.dimensions.y,g.x/(p.dimensions.x*p.dimensions.y));return(vec3f(q)+.5*f32(g.y))*p.physical.x;}
-fn finePage(key:u32)->u32{if(fp.worklistHeaderWords!=7u||arrayLength(&fineWork)<7u||fineWork[0]!=fp.generation||fineWork[2]!=fp.pageCapacity||(fineWork[3]&3u)!=3u){return INVALID;}let base=7u+fp.worklistCapacity;if(base+key>=arrayLength(&fineWork)){return INVALID;}let id=fineWork[base+key];let m=id*10u;return select(INVALID,id,id<fp.pageCapacity&&m+2u<arrayLength(&fineMeta)&&fineMeta[m]==id&&fineMeta[m+1u]==key&&fineMeta[m+2u]==fp.generation);}
-fn loadFine(q:vec3i)->vec2f{if(any(q<vec3i(0))||any(q>=vec3i(fp.sampleDimensions))){return vec2f(0.);}let u=vec3u(q);let brick=u/fp.brickResolution;let local=u-brick*fp.brickResolution;let key=brick.x+fp.brickDimensions.x*(brick.y+fp.brickDimensions.y*brick.z);let id=finePage(key);if(id==INVALID){return vec2f(0.);}let li=local.x+fp.brickResolution*(local.y+fp.brickResolution*local.z);let at=id*fp.samplesPerBrick+li;if(at>=arrayLength(&finePhi)||at>=arrayLength(&fineFlags)||(fineFlags[at]&1u)==0u||!finite(finePhi[at])){return vec2f(0.);}return vec2f(finePhi[at],1.);}
+fn finePage(key:u32)->u32{if(fp.worklistHeaderWords!=7u||arrayLength(&fineWork)<7u||fineWork[0]!=fp.generation||fineWork[2]!=fp.pageCapacity||(fineWork[3]&3u)!=3u){return INVALID;}let base=7u+fp.worklistCapacity;if(base+key>=arrayLength(&fineWork)){return INVALID;}let id=fineWork[base+key];let m=id*4u;return select(INVALID,id,id<fp.pageCapacity&&m+2u<arrayLength(&fineMeta)&&fineMeta[m]==id&&fineMeta[m+1u]==key&&fineMeta[m+2u]==fp.generation);}
+fn loadFine(q:vec3i)->vec2f{if(any(q<vec3i(0))||any(q>=vec3i(fp.sampleDimensions))){return vec2f(0.);}let u=vec3u(q);let brick=u/fp.brickResolution;let local=u-brick*fp.brickResolution;let key=brick.x+fp.brickDimensions.x*(brick.y+fp.brickDimensions.y*brick.z);let id=finePage(key);if(id==INVALID){return vec2f(0.);}let li=local.x+fp.brickResolution*(local.y+fp.brickResolution*local.z);let at=id*fp.samplesPerBrick+li;if(at>=arrayLength(&fineSamples)||(finePackedFlags(at)&1u)==0u||!finite(finePackedPhi(at))){return vec2f(0.);}return vec2f(finePackedPhi(at),1.);}
 fn fineSample(x:vec3f,coarsePhi:f32)->vec2f{if(!(fp.width>0.)||fp.brickResolution==0u){return vec2f(coarsePhi,0.);}var lattice=(x-fp.origin)/fp.width-vec3f(.5);let maximum=vec3f(fp.sampleDimensions)-vec3f(1.);let endpointTolerance=1e-4;if(any(lattice<vec3f(-endpointTolerance))||any(lattice>maximum+vec3f(endpointTolerance))){return vec2f(coarsePhi,0.);}lattice=clamp(lattice,vec3f(0.),maximum);let base=vec3i(floor(lattice));let fraction=fract(lattice);var value=0.;for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let weight=select(1.-fraction.x,fraction.x,o.x==1)*select(1.-fraction.y,fraction.y,o.y==1)*select(1.-fraction.z,fraction.z,o.z==1);if(weight==0.){continue;}let sample=loadFine(base+o);if(sample.y==0.){return vec2f(coarsePhi,0.);}value+=weight*sample.x;}return vec2f(value,1.);}
 fn authoredAnalyticPhiAvailable()->bool{return p.damDimensions.w==1.||p.damDimensions.w==2.;}
 // Evaluate the authored t=0 geometry in finest-cell units. Power row centres

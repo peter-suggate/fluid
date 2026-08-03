@@ -1,4 +1,5 @@
 import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./webgpu-octree-power-coarse-levelset";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 const TETS = [
   [0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6],
@@ -33,11 +34,11 @@ const cornerPosition = [
 
 const factorOneFilteredNormalShader = /* wgsl */ `
 @group(0)@binding(8)var<storage,read>fineWorklist:array<u32>;
-@group(0)@binding(9)var<storage,read>finePhi:array<f32>;
-@group(0)@binding(11)var<storage,read>fineFlags:array<u32>;
+@group(0)@binding(9)var<storage,read>fineSamples:array<u32>;
 @group(0)@binding(12)var<storage,read>metadata:array<u32>;
 ${makeOctreePowerCoarseLevelSetSampleWGSL(16)}
 const INVALID:u32=0xffffffffu;
+${fineLevelSetPackedSampleWGSL("fineSamples", false)}
 fn finitePhi(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn finePage(key:u32)->u32{
   if(p.table.y!=7u||arrayLength(&fineWorklist)<7u||fineWorklist[0]!=p.table.w
@@ -46,7 +47,7 @@ fn finePage(key:u32)->u32{
   let logicalCount=p.bricks.x*p.bricks.y*p.bricks.z;
   let directoryBase=7u+p.table.z;
   if(key>=logicalCount||directoryBase+key>=arrayLength(&fineWorklist)){return INVALID;}
-  let id=fineWorklist[directoryBase+key];let base=id*10u;
+  let id=fineWorklist[directoryBase+key];let base=id*4u;
   return select(INVALID,id,id<p.table.z&&base+2u<arrayLength(&metadata)
     &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==p.table.w);
 }
@@ -61,8 +62,8 @@ fn signedPhi(qi:vec3i)->f32{
     let key=brick.x+p.bricks.x*(brick.y+p.bricks.y*brick.z);let id=finePage(key);
     if(id!=INVALID){
       let index=id*p.bricks.w+local.x+r*(local.y+r*local.z);
-      if(index<arrayLength(&finePhi)&&index<arrayLength(&fineFlags)
-        &&(fineFlags[index]&1u)!=0u&&finitePhi(finePhi[index])){return finePhi[index];}
+      if(index<arrayLength(&fineSamples)
+        &&(finePackedFlags(index)&1u)!=0u&&finitePhi(finePackedPhi(index))){return finePackedPhi(index);}
     }
   }
   return sampleCoarseOctreePhi(p.settings.xyz+(vec3f(q)+vec3f(.5))*p.settings.w);

@@ -1,4 +1,5 @@
 import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./webgpu-octree-power-coarse-levelset";
+import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
 // The tagged sharp-corner polygonizer clips its two cap owners at exactly half
 // a cube. Admit only scalar data whose four corresponding zero crossings agree
@@ -21,14 +22,14 @@ struct FineParams{sampleDimensions:vec3u,brickResolution:u32,brickDimensions:vec
 @group(0)@binding(5)var<storage,read_write>activeCubes:array<vec2u>;
 @group(0)@binding(6)var<storage,read_write>cubeValues:array<vec4f>;
 @group(0)@binding(8)var<storage,read>fineWorklist:array<u32>;
-@group(0)@binding(9)var<storage,read>finePhi:array<f32>;
+@group(0)@binding(9)var<storage,read>fineSamples:array<u32>;
 @group(0)@binding(10)var<uniform>params:FineParams;
-@group(0)@binding(11)var<storage,read>fineFlags:array<u32>;
 @group(0)@binding(12)var<storage,read>metadata:array<u32>;
 ${makeOctreePowerCoarseLevelSetSampleWGSL(16)}
 @group(0)@binding(17)var<storage,read>fineTopologyControl:array<u32>;
 const INVALID:u32=0xffffffffu;
 const SHARP_CORNER_HALF_CELL_EPSILON:f32=${GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON};
+${fineLevelSetPackedSampleWGSL("fineSamples", false)}
 fn validCurrentPublication()->bool{
   let rowCount=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));
   let expectedWidth=params.settings.w*max(1.0,params.cellAndDt.x);
@@ -65,7 +66,7 @@ fn pageLookup(key:u32)->u32{
   let logicalCount=params.brickDimensions.x*params.brickDimensions.y*params.brickDimensions.z;
   let directoryBase=7u+params.table.z;
   if(key>=logicalCount||directoryBase+key>=arrayLength(&fineWorklist)){return INVALID;}
-  let id=fineWorklist[directoryBase+key];let base=id*10u;
+  let id=fineWorklist[directoryBase+key];let base=id*4u;
   return select(INVALID,id,id<params.table.z&&base+2u<arrayLength(&metadata)
     &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
 }
@@ -78,10 +79,10 @@ fn phi(qi:vec3i)->f32{
   let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);
   if(id==INVALID){return coarsePhi(qi);}
   let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);
-  if(index>=arrayLength(&finePhi)||index>=arrayLength(&fineFlags)||(fineFlags[index]&1u)==0u||!finite(finePhi[index])){return coarsePhi(qi);}
-  return finePhi[index];
+  if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return coarsePhi(qi);}
+  return finePackedPhi(index);
 }
-fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let r=max(1u,params.brickResolution);let brick=q/r;if(any(brick>=params.brickDimensions)){return false;}let local=q-brick*r;let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);if(id==INVALID){return false;}let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);return index<arrayLength(&fineFlags)&&index<arrayLength(&finePhi)&&(fineFlags[index]&1u)!=0u&&finite(finePhi[index]);}
+fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let r=max(1u,params.brickResolution);let brick=q/r;if(any(brick>=params.brickDimensions)){return false;}let local=q-brick*r;let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);if(id==INVALID){return false;}let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);return index<arrayLength(&fineSamples)&&(finePackedFlags(index)&1u)!=0u&&finite(finePackedPhi(index));}
 fn fineOwnsCube(base:vec3i)->bool{let q=max(base-vec3i(1),vec3i(0));return all(q<vec3i(params.sampleDimensions))&&fineValid(vec3u(q));}
 fn occupancy(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return clamp(0.5-value/band,0.0,1.0);}
 // The ordinary halo represents one closed tank wall with an exterior air
@@ -162,11 +163,11 @@ fn classifyScaled(base:vec3i,scale:i32){
 fn extractGlobalFineMain(@builtin(global_invocation_id)gid:vec3u){
   if(!validCurrentPublication()){return;}
   let stream=gid.x+gid.y*65535u*256u;let samples=params.samplesPerBrick;let work=stream/max(1u,samples);
-  if(work>=fineWorklist[1]){return;}let id=fineWorklist[7u+work];let metadataBase=id*10u;
+  if(work>=fineWorklist[1]){return;}let id=fineWorklist[7u+work];let metadataBase=id*4u;
   if(id>=params.table.z||metadataBase+2u>=arrayLength(&metadata)||metadata[metadataBase]!=id||metadata[metadataBase+2u]!=params.table.w){return;}
-  let key=metadata[id*10u+1u];let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;let bx=rem-by*params.brickDimensions.x;
+  let key=metadata[id*4u+1u];let xy=max(1u,params.brickDimensions.x*params.brickDimensions.y);let bz=key/xy;let rem=key-bz*xy;let by=rem/params.brickDimensions.x;let bx=rem-by*params.brickDimensions.x;
   let localIndex=stream-work*samples;let r=max(1u,params.brickResolution);let local=vec3u(localIndex%r,(localIndex/r)%r,localIndex/max(1u,r*r));let q=vec3u(bx,by,bz)*r+local;
-  if(any(q>=params.sampleDimensions)){return;}let index=id*samples+localIndex;if(index>=arrayLength(&fineFlags)||index>=arrayLength(&finePhi)||(fineFlags[index]&1u)==0u||!finite(finePhi[index])){return;}let xb=array<i32,2>(i32(q.x+1u),0);let yb=array<i32,2>(i32(q.y+1u),0);let zb=array<i32,2>(i32(q.z+1u),0);
+  if(any(q>=params.sampleDimensions)){return;}let index=id*samples+localIndex;if(index>=arrayLength(&fineSamples)||(finePackedFlags(index)&1u)==0u||!finite(finePackedPhi(index))){return;}let xb=array<i32,2>(i32(q.x+1u),0);let yb=array<i32,2>(i32(q.y+1u),0);let zb=array<i32,2>(i32(q.z+1u),0);
   let xn=select(1u,2u,q.x==0u);let yn=select(1u,2u,q.y==0u);let zn=select(1u,2u,q.z==0u);
   for(var zi=0u;zi<zn;zi+=1u){for(var yi=0u;yi<yn;yi+=1u){for(var xi=0u;xi<xn;xi+=1u){classifyScaled(vec3i(xb[xi],yb[yi],zb[zi]),1);}}}
 }

@@ -58,9 +58,8 @@ export interface OctreeTechniqueDebugSource {
     readonly params: GPUBufferBinding;
     readonly metadata: GPUBufferBinding;
     readonly worklist: GPUBufferBinding;
-    readonly sampleFlags: GPUBufferBinding;
-    /** Paper Section 5 signed-distance samples on the factor-m fine lattice. */
-    readonly phi: GPUBufferBinding;
+    /** Packed persistent flags and binary16 signed-distance samples. */
+    readonly samples: GPUBufferBinding;
     readonly topologyControl: GPUBufferBinding;
     readonly redistanceControl: GPUBufferBinding;
     /**

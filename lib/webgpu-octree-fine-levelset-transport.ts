@@ -90,8 +90,8 @@ export function fineTransportQuiescenceEnabled(
  * directory coalesces the former row-geometry lookup into air support, leaving
  * transition classes one buffer below Dawn's portable ten-buffer ceiling. */
 export const FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS = Object.freeze([
-  Object.freeze([0,1,2,3,4,5,6,12,13,20]),
-  Object.freeze([0,1,2,3,4,5,6,12,13,20]),
+  Object.freeze([0,1,2,3,5,6,12,13,20]),
+  Object.freeze([0,1,2,3,5,6,12,13,20]),
 ] as const);
 const FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES = Object.freeze([0, 2] as const);
 
@@ -408,7 +408,7 @@ export class WebGPUFineLevelSetTransport {
     this.deltaPipeline = pipelines.deltaPipeline;
     this.compactDeltaPipeline = pipelines.compactDeltaPipeline;
     const all = new Map<number, GPUBuffer>([
-      [0, this.params], [1, source.metadata], [2, source.worklist], [3, source.flags], [4, source.phi],
+      [0, this.params], [1, source.metadata], [2, source.worklist], [3, source.samples],
       // workA is persistent closest-point identity. The distance lane workB is
       // the sanctioned transport scratch: topology reconstructs its carried
       // magnitude from transported phi before any JFA consumer can observe it.
@@ -427,7 +427,7 @@ export class WebGPUFineLevelSetTransport {
         binding, resource: { buffer: all.get(binding)! },
       })) });
     this.planGroup = group(this.planPipeline, [0,1,2,6,9,12,13,14,16,20,21]);
-    this.classifyGroup = group(this.classifyPipeline, [0,1,2,3,4,13]);
+    this.classifyGroup = group(this.classifyPipeline, [0,1,2,3,13]);
     // Bindings must match what the entry point statically uses: these
     // pipelines are created with `layout: "auto"`, so the derived layout omits
     // any binding the entry point does not reference, and supplying an extra
@@ -442,12 +442,12 @@ export class WebGPUFineLevelSetTransport {
     this.reverseGroups = this.reversePipelines.map((pipeline) => group(pipeline,
       [0,1,2,3,5,6,10,12,13,20]));
     this.correctionGroups = this.correctionPipelines.map((pipeline) => group(pipeline,
-      [0,1,2,3,4,5,6,10,12,13,20]));
+      [0,1,2,3,5,6,10,12,13,20]));
     // Summary uses metadata only to retain the first rejected sample's stable
     // fine-lattice position; only the final reduction publishes the control.
     this.reduceStatusGroup = group(this.reduceStatusPipeline, [0,1,2,13]);
     this.summarizeGroup = group(this.summarizePipeline, [0,1,2,7,13]);
-    this.commitGroup = group(this.commitPipeline, [0,1,2,3,4,5,7,8]);
+    this.commitGroup = group(this.commitPipeline, [0,1,2,3,5,7,8]);
     this.clearDeltaGroup = group(this.clearDeltaPipeline, [8]);
     this.reduceDeltaGroup = group(this.reduceDeltaPipeline, [0,2,8,13]);
     this.deltaGroup = group(this.deltaPipeline, [0,2,7,8,13]);

@@ -122,14 +122,14 @@ test("recurring transport publishes two validity classes before atomic commit", 
   assert.doesNotMatch(encode, /faceBand|powerFace|velocityPrepass|fallback|legacy|createBindGroup/i);
   assert.match(construction,
     /this\.transportGroups=this\.transportPipelines\.map\(\(pipeline,index\)=>group\(pipeline,FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS\[index\]\)\)/);
-  assert.match(construction, /this\.classifyGroup=group\(this\.classifyPipeline,\[0,1,2,3,4,13\]\)/,
+  assert.match(construction, /this\.classifyGroup=group\(this\.classifyPipeline,\[0,1,2,3,13\]\)/,
     "classification must remain independent of the per-trajectory air-owner authority");
   FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS.forEach((bindings, index) => {
     assert.ok(bindings.filter((binding) => binding !== 0).length <= 10,
       `class ${index} exceeds Dawn's portable storage-buffer ceiling`);
     assert.ok(bindings.includes(20), `class ${index} does not bind air support`);
   });
-  assert.equal(FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS[1].length - 1, 9);
+  assert.equal(FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS[1].length - 1, 8);
   assert.equal(FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS.length, 2,
     "per-trajectory owner selection eliminates page-anchor regular/transition dispatch multiplication");
   assert.ok(FINE_LEVELSET_TRANSPORT_CLASS_BINDINGS.every((bindings) => !bindings.includes(11)),
@@ -177,7 +177,7 @@ test("quiescent fine pages sleep only behind exact conservative wake predicates"
   const shader = compact(structuredFineLevelSetTransportWGSL);
   const octree = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
   assert.match(shader,
-    /activitySnapshot\[work\]!=key.*metadata\[id\*10u\+3u\]&PAGE_DIRTY.*activitySnapshot\[work\]=key/s,
+    /activitySnapshot\[work\]!=key.*metadata\[id\*4u\+3u\]&PAGE_DIRTY.*activitySnapshot\[work\]=key/s,
     "logical page replacement or an exact fine repair must wake transport");
   assert.match(shader,
     /letold=vec4u\(catalog\[at\],catalog\[at\+1u\],catalog\[at\+2u\],catalog\[at\+3u\]\).*any\(old!=m\)/s,
@@ -220,7 +220,7 @@ test("sparse-page classification ignores unowned sample slots but rejects corrup
   assert.doesNotMatch(classify, /ownerRequired|!ownerRequired\|\|owner\.tag!=INVALID/,
     "the actual owner at each trajectory point, not the page anchor, gates velocity support");
   assert.match(classify,
-    /letsampleValid=\(flags\[index\]&VALID\)!=0u;if\(sampleValid\)\{letvalue=phi\[index\];invalid\|=select\(1u,0u,finite\(value\)\)/,
+    /letsampleValid=\(finePackedFlags\(index\)&VALID\)!=0u;if\(sampleValid\)\{letvalue=finePackedPhi\(index\);invalid\|=select\(1u,0u,finite\(value\)\)/,
     "only owned fine samples require finite phi");
   assert.match(classify, /else\{rare=1u;\}/,
     "a sparse page with unowned slots must use the validity-aware rare kernel");
@@ -324,7 +324,7 @@ test("B4 transport can stage the exact bounded page-address halo", () => {
     /prepareFinePageWindow\(id,lid\);if\(id!=INVALID\).*finishSample/s,
     "all lanes must publish the address halo before any terminal phi gather");
   assert.match(construction,
-    /constants:\{stagedFineAddressing:fineTransportStagedAddressingRequested\(\)\?1:0/,
+    /conststagedFineAddressing=fineTransportStagedAddressingRequested\(\)\?1:0[\s\S]*this\.pipelineConstants=Object\.freeze\(\{stagedFineAddressing,b4FineAddressing\}\)/,
     "the exact direct path must remain selectable in the same shader");
 });
 
@@ -342,7 +342,7 @@ test("B4 transport defaults to exact shift-only sample addressing", () => {
   assert.match(shader,
     /fnsampleIndex\(q:vec3u\)->u32\{if\(b4FineAddressing\)\{letb=q>>vec3u\(2\).*return\(id<<6u\)\|l\.x\|\(l\.y<<2u\)\|\(l\.z<<4u\)/s);
   assert.match(construction,
-    /b4FineAddressing:fineTransportB4AddressingEnabled\(source\.plan\)\?1:0/);
+    /constb4FineAddressing=fineTransportB4AddressingEnabled\(source\.plan\)\?1:0/);
 });
 
 test("missing sparse phi support remains a fail-closed sentinel", () => {
@@ -399,7 +399,7 @@ test("open-domain characteristics sample cube and transition velocity on the sam
 test("fine phi commit separates interface membership from exact CP repair", () => {
   const shader = compact(structuredFineLevelSetTransportWGSL);
   assert.match(shader,
-    /fncommitStructuredFineTransport.*newInterface.*membership=pageChanged\[0\]!=0u\|\|before\|\|after.*repair=pageChanged\[0\]!=0u.*PAGE_INTERFACE,after.*PAGE_DIRTY,repair.*delta\[8u\+id\]=select\(INVALID,metadata\[id\*10u\+1u\],membership\).*delta\[8u\+2u\*p\.pageCapacity\+id\]=select\(INVALID,metadata\[id\*10u\+1u\],repair\).*phi\[index\]=nextPhi\[index\]/s,
+    /fncommitStructuredFineTransport.*newInterface.*membership=pageChanged\[0\]!=0u\|\|before\|\|after.*repair=pageChanged\[0\]!=0u.*PAGE_INTERFACE,after.*PAGE_DIRTY,repair.*delta\[8u\+id\]=select\(INVALID,metadata\[id\*4u\+1u\],membership\).*delta\[8u\+2u\*p\.pageCapacity\+id\]=select\(INVALID,metadata\[id\*4u\+1u\],repair\).*fineWritePackedPhi\(index,nextPhi\[index\]\)/s,
     "stable old/new interface membership must retain its closest-point identities");
   assert.match(shader,
     /fnpublishStructuredFineDelta.*delta\[0\]=count.*delta\[1\]=p\.generation.*delta\[2\]=control\.committed/s);
