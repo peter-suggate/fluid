@@ -1960,6 +1960,22 @@ fn debugAdvection3(offset:u32,handle:u32,value:vec3f){
 // makes the interpolant depend on the positive-coordinate side. Evaluate the
 // original point through every distinct incident leaf and canonically fold the
 // valid limits; off-seam points retain the ordinary single-anchor hot path.
+// MEASURED: the per-thread scratch here is NOT the cost of this pass.
+//
+// This function declares four dynamically-indexed array<*,8> locals and calls
+// canonicalInterpolation8 three times, which takes array<f32,8> BY VALUE and
+// copies it again -- roughly 80 words that Metal allocates as per-thread
+// scratch STATICALLY, for all 64 lanes, whether or not the seamMask early-out
+// is taken. That is the same shape as E5's -3.6% named-scalar rewrite, so it
+// looked like the next one.
+//
+// It is not. Compiling the whole seam fold out at source -- removing every
+// array AND all of its work -- moved the Advect structured families pass from
+// 40.34 to 37.28 ms/advance on symmetric-expansion: -3.06 ms against a floor
+// of 3.65 ms (A/A) on that lane. A bit-exact named-scalar rewrite recovers only
+// the scratch part of that, so its ceiling is well under the floor. The 40 ms
+// is the interpolation itself -- three characteristicSample calls per face --
+// not the scratch. Do not spend a delicate canonical-fold rewrite here.
 fn seamInterpolationSample(point:vec3f)->vec4f{
   let grid=point/p.physical.x;var seamMask=0u;
   for(var axis=0u;axis<3u;axis+=1u){
